@@ -912,12 +912,14 @@ class RAGClinicalContextAgent:
         cca_tokenizer=None,
         max_new_tokens: int = 512,
         temperature: float = 0.3,
+        generator=None,  # e.g. OllamaGenerator; used instead of cca_model
     ):
         self.retriever = retriever
         self.model = cca_model
         self.tokenizer = cca_tokenizer
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.generator = generator
         self._model_loaded = cca_model is not None
 
     def generate_with_rag(
@@ -958,9 +960,14 @@ class RAGClinicalContextAgent:
             )
 
         # Step 3: Generate
-        if self._model_loaded and self.model is not None:
+        if self.generator is not None:
+            response = self.generator.generate(system_prompt, augmented_query)
+            model_used = self.generator.name
+        elif self._model_loaded and self.model is not None:
             response = self._generate_with_model(system_prompt, augmented_query)
+            model_used = "qwen"
         else:
+            model_used = "rule_based"
             response = self._generate_fallback(
                 clinical_query, rag_context, triage_context
             )
@@ -981,7 +988,7 @@ class RAGClinicalContextAgent:
             ],
             "retrieval_latency_ms": rag_context.retrieval_latency_ms,
             "total_latency_ms": latency,
-            "model_used": "qwen" if self._model_loaded else "rule_based"
+            "model_used": model_used
         }
 
     def _generate_with_model(self, system: str, query: str) -> str:
