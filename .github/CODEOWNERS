@@ -1,0 +1,24 @@
+# Owners are requested automatically on PRs touching these paths. With branch
+# protection's "require review from Code Owners", a matching owner must
+# approve. The PR author can't approve their own PR, so list at least two
+# people per path.
+
+*                                   @ojies
+
+# Patient data, guardrails, feedback and identity: changes here need a
+# reviewer who understands the clinical and security impact (SKILLS.md).
+/mhai/security/                     @ojies
+/mhai/knowledge_base/               @ojies
+/mhai/guardrails/                   @ojies
+/mhai/agents/orchestrator.py        @ojies
+/mhai/agents/hga_nli.py             @ojies
+/mhai/utils/nli.py                  @ojies
+/mhai/config/settings.py            @ojies
+/tests/security/                    @ojies
+/SKILLS.md                          @ojies
+
+# Infrastructure and supply chain
+/.github/                           @ojies
+/Dockerfile                         @ojies
+/docker-compose*.yml                @ojies
+/uv.lock                            @ojies
