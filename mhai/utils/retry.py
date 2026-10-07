@@ -1,7 +1,7 @@
 """Retry decorator with exponential backoff."""
 import functools
-import time
 import logging
+import time
 
 log = logging.getLogger(__name__)
 

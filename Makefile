@@ -15,11 +15,11 @@ install-dev: ## Install with dev tools + pre-commit (TORCH=cpu|cu128)
 	uv run pre-commit install
 
 lint: ## Run ruff linter
-	uv run ruff check mhai tests
+	uv run ruff check .
 
 format: ## Auto-format
-	uv run ruff format mhai tests
-	uv run ruff check --fix mhai tests
+	uv run ruff format .
+	uv run ruff check --fix .
 
 typecheck: ## Run mypy
 	uv run mypy

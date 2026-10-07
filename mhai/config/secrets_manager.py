@@ -1,8 +1,8 @@
 """
 Secrets Manager — Local .env / AWS Secrets Manager / Azure Key Vault switch.
 """
-import os
 import logging
+import os
 
 log = logging.getLogger(__name__)
 

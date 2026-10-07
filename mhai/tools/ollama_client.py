@@ -3,6 +3,7 @@
 Lets the CCA run its LLM in the ``ollama`` service from docker-compose.yml
 instead of loading Qwen into the API process.
 """
+
 import logging
 import os
 
@@ -23,7 +24,9 @@ class OllamaGenerator:
         timeout: float | None = None,
         client: httpx.Client | None = None,
     ):
-        self.base_url = (base_url or os.environ.get("OLLAMA_URL", "http://ollama:11434")).rstrip("/")
+        self.base_url = (base_url or os.environ.get("OLLAMA_URL", "http://ollama:11434")).rstrip(
+            "/"
+        )
         self.model = model or os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
         self.temperature = temperature
         self.max_new_tokens = max_new_tokens
