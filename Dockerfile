@@ -10,12 +10,19 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git curl && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-COPY pyproject.toml README.md ./
+# PyTorch build to install: cpu or cu128.
+ARG TORCH=cpu
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \
+    PATH="/app/.venv/bin:$PATH"
+
+# Dependencies first, so code changes don't reinstall them.
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --locked --no-default-groups --group ${TORCH} --no-install-project
+
 COPY mhai ./mhai
-RUN pip install -e .
+RUN uv sync --locked --no-default-groups --group ${TORCH}
 
 RUN useradd --create-home appuser && chown -R appuser /app
 USER appuser

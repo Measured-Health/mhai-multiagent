@@ -22,19 +22,25 @@ with 5 specialized transformer-based agents and a 4-layer guardrail cascade.
 
 ## Quick Start
 
+The project is managed with [uv](https://docs.astral.sh/uv/).
+
 ```bash
-# Install
-pip install -e ".[dev]"
+# Install (CPU PyTorch by default; on a CUDA machine:
+#   uv sync --no-group cpu --group cu128)
+uv sync
 
 # Run tests
-pytest
+uv run pytest
 
-# Docker
+# Docker (build arg TORCH=cpu or cu128)
 docker compose up -d
 
 # CLI
-mhai run --query "28yo female with gestational diabetes" --urgency routine
+uv run mhai run --query "28yo female with gestational diabetes" --urgency routine
 ```
+
+Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit
+`uv.lock`.
 
 ## Project Structure
 
