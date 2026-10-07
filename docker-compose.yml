@@ -31,7 +31,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
 
   redis:
-    image: redis:7.4.11-alpine
+    image: redis:8.10.2-alpine
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
