@@ -5,8 +5,10 @@ Please report vulnerabilities privately; don't open a public issue.
 
 ## Reporting
 
-Use **GitHub private vulnerability reporting**: the repository's
-*Security* tab, then *Report a vulnerability*. Include:
+Message a maintainer privately, for example a direct message to a
+repository admin (currently @ojies), never in an issue, PR or shared
+channel. GitHub's private vulnerability reporting isn't available for
+private repositories on the organisation's current plan. Include:
 
 - what's affected (file, endpoint, configuration) and the impact;
 - steps to reproduce, using synthetic data only;

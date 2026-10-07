@@ -184,7 +184,23 @@ loop:
 
 ### Repository settings that back this up
 
-Protect `main`: require a pull request, at least one approving review
-from a human, and passing CI before merging, and block force pushes.
-Give agents tokens that can push branches and open PRs but can't
-approve, merge or change branch protection.
+Branch protection, secret scanning and private vulnerability reporting
+need a paid GitHub plan for private repositories, and the organisation is
+on the free plan. Until that changes, these rules rely on discipline:
+
+- **Merge only when CI is green and a human has reviewed the PR.** GitHub
+  won't block a red or unreviewed merge, so the reviewer has to check.
+- **Never force-push `main` or delete it.**
+- **Give agents tokens that can push branches and open PRs but can't
+  merge** (for example, a separate machine account with write access
+  only to feature branches, once rulesets are available). Today agent PRs
+  are opened under a maintainer's account.
+- **Secrets are caught by the gitleaks step in CI and the pre-commit
+  hook,** not by GitHub.
+
+With GitHub Team, turn on:
+
+- branch protection for `main` (require a PR, one approval, review from
+  code owners and passing `checks`/`secrets`; block force pushes);
+- secret scanning with push protection;
+- private vulnerability reporting.
