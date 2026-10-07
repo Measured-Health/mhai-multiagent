@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1
 
 # ── Build: resolve and install everything into /app/.venv ──
-FROM python:3.11-slim AS build
+FROM python:3.12.15-slim AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-default-groups --group ${TORCH} --no-editable
 
 # ── Runtime: just Python and the virtualenv ──
-FROM python:3.11-slim AS runtime
+FROM python:3.12.15-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

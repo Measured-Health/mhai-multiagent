@@ -16,7 +16,7 @@ x-healthcheck-defaults: &healthcheck-defaults
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-mhai}
@@ -31,7 +31,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.11-alpine
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
@@ -43,7 +43,7 @@ services:
 
   # Serves the CCA LLM (CCA_BACKEND=ollama).
   ollama:
-    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    image: ollama/ollama:${OLLAMA_VERSION:-0.40.0}
     restart: unless-stopped
     environment:
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
@@ -57,7 +57,7 @@ services:
 
   # One-shot: pull OLLAMA_MODEL into the ollama volume, then exit.
   ollama-init:
-    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    image: ollama/ollama:${OLLAMA_VERSION:-0.40.0}
     restart: "no"
     depends_on:
       ollama: { condition: service_healthy }
@@ -98,7 +98,7 @@ services:
       disable: true
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:${OTEL_VERSION:-latest}
+    image: otel/opentelemetry-collector-contrib:${OTEL_VERSION:-0.162.0}
     profiles: ["observability"]
     restart: unless-stopped
     command: ["--config=/etc/otelcol/config.yaml"]

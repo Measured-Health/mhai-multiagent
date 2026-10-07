@@ -22,3 +22,4 @@ htmlcov/
 artifacts/
 cache/
 *.log
+coverage.xml
