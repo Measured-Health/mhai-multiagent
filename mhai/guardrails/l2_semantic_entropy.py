@@ -31,6 +31,8 @@ from scipy.stats import entropy as scipy_entropy
 import re
 import logging
 
+from mhai.utils.nli import DEFAULT_NLI_MODEL, nli_label_map
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MHAI.L2L3")
 
@@ -82,7 +84,7 @@ class BidirectionalEntailmentClassifier:
 
     def __init__(
         self,
-        model_name: str = "microsoft/deberta-v3-large-mnli",
+        model_name: str = DEFAULT_NLI_MODEL,
         device: str = "cuda" if torch.cuda.is_available() else "cpu"
     ):
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -94,8 +96,10 @@ class BidirectionalEntailmentClassifier:
         ).to(device)
         self.model.eval()
 
-        # DeBERTa-MNLI label mapping: 0=contradiction, 1=neutral, 2=entailment
-        self.entailment_id = 2
+        self.label_map = nli_label_map(self.model)
+        self.entailment_id = next(
+            i for i, name in self.label_map.items() if name == "entailment"
+        )
         logger.info(f"NLI classifier loaded: {model_name}")
 
     @torch.no_grad()
@@ -116,8 +120,7 @@ class BidirectionalEntailmentClassifier:
         probs = torch.softmax(logits, dim=-1)
         pred = logits.argmax().item()
 
-        label_map = {0: "contradiction", 1: "neutral", 2: "entailment"}
-        return label_map[pred]
+        return self.label_map[pred]
 
     def share_meaning(self, response_a: str, response_b: str) -> bool:
         """
@@ -426,7 +429,7 @@ class CitationEntailmentVerifier:
 
     def __init__(
         self,
-        model_name: str = "microsoft/deberta-v3-large-mnli",
+        model_name: str = DEFAULT_NLI_MODEL,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         contradiction_threshold: float = 0.7,
         neutral_threshold: float = 0.7
@@ -439,6 +442,7 @@ class CitationEntailmentVerifier:
             model_name
         ).to(device)
         self.model.eval()
+        self.label_map = nli_label_map(self.model)
 
         self.contradiction_threshold = contradiction_threshold
         self.neutral_threshold = neutral_threshold
@@ -473,12 +477,10 @@ class CitationEntailmentVerifier:
         logits = self.model(**inputs).logits[0]
         probs = torch.softmax(logits, dim=-1)
 
-        # 0=contradiction, 1=neutral, 2=entailment
         pred_idx = logits.argmax().item()
         confidence = probs[pred_idx].item()
-        label_map = {0: "contradiction", 1: "neutral", 2: "entailment"}
 
-        return label_map[pred_idx], confidence
+        return self.label_map[pred_idx], confidence
 
     def verify_response(
         self,

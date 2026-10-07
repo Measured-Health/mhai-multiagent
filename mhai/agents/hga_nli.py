@@ -40,6 +40,7 @@ from collections import defaultdict
 import logging
 
 from mhai.knowledge_base.kb_builder import chunk_visible_to
+from mhai.utils.nli import DEFAULT_NLI_MODEL, nli_label_map
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MHAI.M3.NLI")
@@ -123,11 +124,9 @@ class NLIEntailmentVerifier:
       2 = entailment
     """
 
-    LABEL_MAP = {0: NLILabel.CONTRADICTION, 1: NLILabel.NEUTRAL, 2: NLILabel.ENTAILMENT}
-
     def __init__(
         self,
-        model_name: str = "microsoft/deberta-v3-large-mnli",
+        model_name: str = DEFAULT_NLI_MODEL,
         device: str = "auto",
         confidence_threshold: float = 0.7
     ):
@@ -136,6 +135,7 @@ class NLIEntailmentVerifier:
         self.model = None
         self.tokenizer = None
         self._loaded = False
+        self.label_map: Dict[int, str] = {}
 
         self._try_load_model(device)
 
@@ -158,6 +158,7 @@ class NLIEntailmentVerifier:
 
             self.model = self.model.to(self.device)
             self.model.eval()
+            self.label_map = nli_label_map(self.model)
             self._loaded = True
             logger.info(f"NLI model loaded on {self.device}")
 
@@ -200,7 +201,7 @@ class NLIEntailmentVerifier:
             probs = torch.softmax(logits, dim=-1)
 
         pred_idx = probs.argmax().item()
-        label = self.LABEL_MAP[pred_idx]
+        label = NLILabel(self.label_map[pred_idx])
         confidence = probs[pred_idx].item()
 
         return NLIResult(
@@ -208,11 +209,7 @@ class NLIEntailmentVerifier:
             hypothesis=hypothesis[:100],
             label=label,
             confidence=confidence,
-            logits={
-                "contradiction": probs[0].item(),
-                "neutral": probs[1].item(),
-                "entailment": probs[2].item(),
-            }
+            logits={name: probs[i].item() for i, name in self.label_map.items()},
         )
 
     def _verify_fallback(self, premise: str, hypothesis: str) -> NLIResult:
