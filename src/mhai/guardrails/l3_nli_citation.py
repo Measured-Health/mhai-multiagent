@@ -1,0 +1,11 @@
+"""
+L3: NLI Citation Entailment Verifier
+Uses cross-encoder/nli-deberta-v3-base for claim verification.
+Full implementation in agents/hga_nli.py (NLIEntailmentVerifier, CitationVerificationPipeline).
+"""
+from mhai.agents.hga_nli import (
+    NLIEntailmentVerifier, CitationVerificationPipeline,
+    SemanticEntropyVerifier, NLIBackedHGA
+)
+__all__ = ["NLIEntailmentVerifier", "CitationVerificationPipeline",
+           "SemanticEntropyVerifier", "NLIBackedHGA"]
