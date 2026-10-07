@@ -40,6 +40,10 @@ All notable changes to this project are documented here. The format follows
 - Two-stage Docker image (7.1 GB to 2.5 GB, CPU), with pinned base images.
 
 ### Fixed
+- `PIIMasker` no longer corrupts text when patterns overlap (e.g.
+  `[PHONE_REDACTED]TED]`), counts each masked span once, keeps labels such as
+  "Patient:" and "MRN:", and masks a leading "+1" or "(" in phone numbers
+  (#7).
 - `mhai.agents` could not be imported (its `__init__` exported missing
   classes).
 - Imports left over from the original notebooks.
