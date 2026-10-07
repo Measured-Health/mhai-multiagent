@@ -1,4 +1,5 @@
 """Issue #3: corrections need a second clinician before they change anything."""
+
 import numpy as np
 import pytest
 
@@ -27,13 +28,23 @@ def system(two_patient_kb, retriever, tmp_path):
     loop = DoctorFeedbackLoop(pv, tw, tm, kb=two_patient_kb)
     orch = DynamicOrchestratorAgent(
         rag_cca=RAGClinicalContextAgent(retriever=retriever),
-        hga=NLIBackedHGA(), threshold_manager=tm, feedback_loop=loop,
+        hga=NLIBackedHGA(),
+        threshold_manager=tm,
+        feedback_loop=loop,
     )
     rbac = RBACManager()
     audit = AuditLogger(log_dir=str(tmp_path / "audit"))
     wrapper = SecurePipelineWrapper(orch, rbac=rbac, audit=audit)
-    return {"kb": two_patient_kb, "loop": loop, "orch": orch, "pv": pv,
-            "tw": tw, "rbac": rbac, "audit": audit, "wrapper": wrapper}
+    return {
+        "kb": two_patient_kb,
+        "loop": loop,
+        "orch": orch,
+        "pv": pv,
+        "tw": tw,
+        "rbac": rbac,
+        "audit": audit,
+        "wrapper": wrapper,
+    }
 
 
 def _session(system, user, role=UserRole.CLINICIAN):
@@ -68,9 +79,7 @@ def test_correction_changes_nothing_until_approved(system):
 def test_submitter_cannot_approve_own_correction(system):
     _, fb = _submit(system, "dr_a")
 
-    result = system["wrapper"].approve_correction(
-        _session(system, "dr_a"), fb["correction_id"]
-    )
+    result = system["wrapper"].approve_correction(_session(system, "dr_a"), fb["correction_id"])
 
     assert "different clinician" in result["error"]
     assert _corrections(system["kb"]) == []
@@ -89,9 +98,7 @@ def test_non_clinician_cannot_submit_or_approve(system):
 def test_second_clinician_approval_applies_scoped_masked_correction(system):
     q, fb = _submit(system, "dr_a")
 
-    result = system["wrapper"].approve_correction(
-        _session(system, "dr_b"), fb["correction_id"]
-    )
+    result = system["wrapper"].approve_correction(_session(system, "dr_b"), fb["correction_id"])
 
     assert result["status"] == "approved"
     assert result["updates"]["kb_enriched"] is True
@@ -126,25 +133,30 @@ def test_correction_cannot_be_approved_twice(system):
 def test_loop_rejects_anonymous_or_unknown_approval(system):
     loop = system["loop"]
     anon = loop.process_feedback("q1", QUERY, "resp", "correct", corrected_response="fix")
-    named = loop.process_feedback("q2", QUERY, "resp", "correct",
-                                  corrected_response="fix", submitted_by="dr_a")
+    named = loop.process_feedback(
+        "q2", QUERY, "resp", "correct", corrected_response="fix", submitted_by="dr_a"
+    )
 
     assert "Anonymous" in loop.approve_correction(anon["correction_id"], "dr_b")["error"]
     assert "reviewer" in loop.approve_correction(named["correction_id"], "")["error"]
     assert "not found" in loop.approve_correction("corr_nope", "dr_b")["error"]
 
 
-@pytest.mark.parametrize("submitter,reviewer", [
-    ("dr_a", "DR_A"),          # same clinician, different case
-    ("dr_a", " dr_a "),        # same clinician, stray whitespace
-    ("unknown", "unknown"),    # placeholder ids are nobody
-    ("dr_a", "unknown"),
-    ("dr_a", "system"),
-])
+@pytest.mark.parametrize(
+    "submitter,reviewer",
+    [
+        ("dr_a", "DR_A"),  # same clinician, different case
+        ("dr_a", " dr_a "),  # same clinician, stray whitespace
+        ("unknown", "unknown"),  # placeholder ids are nobody
+        ("dr_a", "unknown"),
+        ("dr_a", "system"),
+    ],
+)
 def test_two_person_rule_cannot_be_sidestepped(system, submitter, reviewer):
     loop = system["loop"]
-    fb = loop.process_feedback("q1", QUERY, "resp", "correct",
-                               corrected_response="fix", submitted_by=submitter)
+    fb = loop.process_feedback(
+        "q1", QUERY, "resp", "correct", corrected_response="fix", submitted_by=submitter
+    )
 
     assert "error" in loop.approve_correction(fb["correction_id"], reviewer)
     assert _corrections(system["kb"]) == []
@@ -161,8 +173,13 @@ def test_session_without_a_real_user_cannot_give_feedback(system):
 def test_persona_vector_moves_only_on_approval(system):
     loop = system["loop"]
     fb = loop.process_feedback(
-        "q1", QUERY, "resp", "correct", corrected_response="fix",
-        hallucinated_activation=np.ones(8), corrected_activation=np.zeros(8),
+        "q1",
+        QUERY,
+        "resp",
+        "correct",
+        corrected_response="fix",
+        hallucinated_activation=np.ones(8),
+        corrected_activation=np.zeros(8),
         submitted_by="dr_a",
     )
     assert system["pv"].update_count == 0

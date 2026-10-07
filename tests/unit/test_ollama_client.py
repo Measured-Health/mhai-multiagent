@@ -1,4 +1,5 @@
 """OllamaGenerator talks to /api/chat and plugs into the RAG CCA."""
+
 import json
 
 import httpx
@@ -9,8 +10,11 @@ from mhai.tools.ollama_client import OllamaGenerator
 
 
 def _generator(handler):
-    return OllamaGenerator(base_url="http://ollama:11434", model="qwen2.5:7b-instruct",
-                           client=httpx.Client(transport=httpx.MockTransport(handler)))
+    return OllamaGenerator(
+        base_url="http://ollama:11434",
+        model="qwen2.5:7b-instruct",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
 
 
 def test_generate_posts_chat_request_and_returns_reply():
@@ -19,8 +23,9 @@ def test_generate_posts_chat_request_and_returns_reply():
     def handler(request):
         seen["url"] = str(request.url)
         seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"message": {"role": "assistant",
-                                                     "content": "  Malaria [KB#0001]. "}})
+        return httpx.Response(
+            200, json={"message": {"role": "assistant", "content": "  Malaria [KB#0001]. "}}
+        )
 
     reply = _generator(handler).generate("system prompt", "user query")
 
@@ -41,6 +46,7 @@ def test_http_errors_raise_so_the_orchestrator_can_escalate():
 class EmptyRetriever:
     def build_context(self, query, top_k=5, patient_id=None):
         from mhai.knowledge_base.kb_builder import RAGContext
+
         return RAGContext(query, [], "RETRIEVED CLINICAL EVIDENCE:", 0, 0.0)
 
 

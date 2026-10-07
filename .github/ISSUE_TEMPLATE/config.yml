@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Measured-Health/mhai-multiagent/blob/main/SECURITY.md
+    about: Report privately to a maintainer. Never put vulnerabilities, real patient data or secrets in an issue.

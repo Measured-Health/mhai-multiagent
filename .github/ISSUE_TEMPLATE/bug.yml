@@ -1,0 +1,31 @@
+name: Bug report
+description: Something behaves incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        **Security issue?** Don't file it here; see SECURITY.md.
+        Use synthetic data only; never paste real patient data or secrets.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal input (synthetic), commands, configuration.
+    validations: { required: true }
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Logs, test output, file:line references.
+  - type: dropdown
+    id: clinical
+    attributes:
+      label: Could this affect clinical output shown to clinicians?
+      options: ["No", "Yes", "Not sure"]
+    validations: { required: true }

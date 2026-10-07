@@ -1,4 +1,5 @@
 """Issue #2: HGA thresholds are per call, and agent failures escalate."""
+
 import threading
 import time
 
@@ -41,11 +42,13 @@ class RecordingHGA(NLIBackedHGA):
 
     def verify(self, response_text, **kwargs):
         time.sleep(self.delay)  # widen any window for cross-talk
-        self.seen.setdefault(response_text, []).append({
-            "pass": kwargs.get("pass_threshold"),
-            "escalate": kwargs.get("escalate_threshold"),
-            "instance_pass": self.pass_threshold,
-        })
+        self.seen.setdefault(response_text, []).append(
+            {
+                "pass": kwargs.get("pass_threshold"),
+                "escalate": kwargs.get("escalate_threshold"),
+                "instance_pass": self.pass_threshold,
+            }
+        )
         return super().verify(response_text, **kwargs)
 
 
@@ -79,15 +82,18 @@ def test_hga_failure_escalates_instead_of_inventing_a_score():
 
 def test_hga_failure_leaves_shared_thresholds_untouched():
     hga = FailingHGA()
-    before = (hga.pass_threshold, hga.escalate_threshold,
-              hga.critical_penalty, hga.warning_penalty)
+    before = (hga.pass_threshold, hga.escalate_threshold, hga.critical_penalty, hga.warning_penalty)
     orch = DynamicOrchestratorAgent(rag_cca=StubCCA(), hga=hga)
 
     orch.process_query(LIFESTYLE_QUERY)  # most lenient category
     orch.process_query(EMERGENCY_QUERY)  # strictest category
 
-    assert (hga.pass_threshold, hga.escalate_threshold,
-            hga.critical_penalty, hga.warning_penalty) == before
+    assert (
+        hga.pass_threshold,
+        hga.escalate_threshold,
+        hga.critical_penalty,
+        hga.warning_penalty,
+    ) == before
 
 
 def test_thresholds_are_passed_per_call():
@@ -133,10 +139,13 @@ def test_cca_failure_escalates_without_placeholder_text():
     assert result["response_available"] is False
 
 
-@pytest.mark.parametrize("cca,hga,failed", [
-    (None, None, ["CCA"]),
-    (StubCCA(), None, ["HGA"]),
-])
+@pytest.mark.parametrize(
+    "cca,hga,failed",
+    [
+        (None, None, ["CCA"]),
+        (StubCCA(), None, ["HGA"]),
+    ],
+)
 def test_missing_agents_escalate(cca, hga, failed):
     orch = DynamicOrchestratorAgent(rag_cca=cca, hga=hga)
 

@@ -1,6 +1,7 @@
 """Tests for CLI."""
 from mhai.cli import _build_parser
 
+
 def test_run_subcommand():
     args = _build_parser().parse_args(["run", "--query", "test", "--urgency", "routine"])
     assert args.command == "run"

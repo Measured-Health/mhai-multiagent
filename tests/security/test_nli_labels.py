@@ -1,4 +1,5 @@
 """NLI verifiers must read the label order from the model, not assume MNLI's."""
+
 from types import SimpleNamespace
 
 import torch
@@ -42,7 +43,10 @@ def test_label_map_follows_model_config():
 def test_label_map_falls_back_to_mnli_order_for_generic_names():
     generic = {0: "LABEL_0", 1: "LABEL_1", 2: "LABEL_2"}
     assert nli_label_map(FakeNLIModel(generic, 0)) == {
-        0: "contradiction", 1: "neutral", 2: "entailment"}
+        0: "contradiction",
+        1: "neutral",
+        2: "entailment",
+    }
 
 
 def test_entailment_index_is_read_as_entailment():

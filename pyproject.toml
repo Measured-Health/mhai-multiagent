@@ -7,7 +7,7 @@ name = "mhai"
 version = "1.0.0"
 description = "A 5-agent hallucination-resistant clinical decision-support system."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 authors = [{ name = "Promit Ghosal", email = "promit@bhai.uchicago.edu" }]
 keywords = ["medical-ai", "multi-agent", "hallucination-detection", "clinical", "transformer"]
@@ -48,6 +48,7 @@ dev = [
     "pre-commit>=3.4",
     "fakeredis>=2.0",
     "locust>=2.15",
+    "diff-cover>=9",
 ]
 # PyTorch build. CPU is the default; for a CUDA machine use
 # `uv sync --no-group cpu --group cu128`.
@@ -89,19 +90,126 @@ mhai = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -q"
+addopts = "-ra -q --strict-markers"
 pythonpath = ["."]
+markers = [
+    "models: needs real ML models (downloads weights; run scripts/e2e_models.py)",
+    "slow: takes more than a few seconds",
+]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 src = [".", "tests"]
+# Apply exclusions even when tools pass explicit paths (pre-commit does).
+force-exclude = true
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
 
+[tool.ruff.format]
+# Legacy files not yet run through the formatter. Format a file and drop it
+# from this list when you next change it substantially.
+exclude = [
+    "mhai/agents/cca.py",
+    "mhai/agents/dia.py",
+    "mhai/agents/hga_nli.py",
+    "mhai/agents/hga.py",
+    "mhai/agents/orchestrator.py",
+    "mhai/agents/qda.py",
+    "mhai/cli.py",
+    "mhai/config/agent_http.py",
+    "mhai/config/secrets_manager.py",
+    "mhai/config/settings.py",
+    "mhai/guardrails/__init__.py",
+    "mhai/guardrails/l1_persona_vector.py",
+    "mhai/guardrails/l2_semantic_entropy.py",
+    "mhai/guardrails/l3_nli_citation.py",
+    "mhai/guardrails/l4_trust_escalation.py",
+    "mhai/__init__.py",
+    "mhai/knowledge_base/kb_builder.py",
+    "mhai/knowledge_base/patient_parser.py",
+    "mhai/models/deberta_moe.py",
+    "mhai/models/ft_transformer.py",
+    "mhai/models/swin_v2.py",
+    "mhai/pipeline/cross_milestone.py",
+    "mhai/pipeline/integration.py",
+    "mhai/queue/consumer.py",
+    "mhai/queue/dlq.py",
+    "mhai/queue/producer.py",
+    "mhai/retrieval/dense_retriever.py",
+    "mhai/retrieval/hybrid.py",
+    "mhai/retrieval/sparse_retriever.py",
+    "mhai/security/hipaa.py",
+    "mhai/tools/guideline_parser.py",
+    "mhai/tools/hf_client.py",
+    "mhai/tools/pubmed_client.py",
+    "mhai/utils/device.py",
+    "mhai/utils/logging.py",
+    "mhai/utils/retry.py",
+    "mhai/utils/seeding.py",
+    "mhai/utils/tokens.py",
+    "scripts/run_pipeline.py",
+    "tests/evaluation/evaluator.py",
+    "tests/evaluation/m3_evaluator.py",
+    "tests/harness/guardrail_harness.py",
+    "tests/regression/e2e_regression.py",
+    "tests/unit/test_cli.py",
+    "tests/unit/test_config.py",
+    "tests/unit/test_security.py",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Baseline for code ported from the original notebooks: the rules each file
+# broke when linting was enforced. Don't add entries; remove them as files
+# are cleaned up. New and changed files must pass the full rule set.
+"mhai/agents/cca.py" = ["F401", "F541", "I001", "UP006", "UP035", "UP045"]
+"mhai/agents/dia.py" = ["B905", "F541", "I001", "UP006", "UP024", "UP035", "UP045"]
+"mhai/agents/hga.py" = ["F401", "F541", "I001", "UP006", "UP035"]
+"mhai/agents/hga_nli.py" = ["B007", "F401", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+"mhai/agents/orchestrator.py" = ["B007", "F401", "I001", "UP006", "UP035", "UP045"]
+"mhai/agents/qda.py" = ["F401", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+"mhai/cli.py" = ["F541", "I001"]
+"mhai/config/settings.py" = ["I001", "UP006", "UP035"]
+"mhai/guardrails/l1_persona_vector.py" = ["B006", "B905", "E741", "F401", "F541", "I001", "UP006", "UP035", "UP045"]
+"mhai/guardrails/l2_semantic_entropy.py" = ["F401", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+"mhai/guardrails/l4_trust_escalation.py" = ["B007", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+"mhai/knowledge_base/kb_builder.py" = ["B007", "F401", "F841", "I001", "UP006", "UP015", "UP035", "UP045"]
+"mhai/knowledge_base/patient_parser.py" = ["B905", "F401", "F541", "F821", "F841", "I001", "UP006", "UP015", "UP035", "UP045"]
+"mhai/pipeline/cross_milestone.py" = ["B007", "F401", "F541", "I001", "UP006", "UP035"]
+"mhai/pipeline/integration.py" = ["F401", "F541", "I001", "UP006", "UP035", "UP045"]
+"mhai/security/hipaa.py" = ["F401", "F541", "I001", "UP006", "UP035", "UP045"]
+"mhai/tools/guideline_parser.py" = ["I001", "UP006", "UP035"]
+"mhai/tools/pubmed_client.py" = ["I001", "UP006", "UP035"]
+"tests/evaluation/evaluator.py" = ["B018", "E701", "F401", "F541", "F821", "I001", "UP006", "UP015", "UP035", "UP045"]
+"tests/evaluation/m3_evaluator.py" = ["B018", "F401", "F541", "F821", "F841", "I001", "UP006", "UP015", "UP035"]
+"tests/harness/guardrail_harness.py" = ["B007", "B905", "E741", "F401", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+"tests/regression/e2e_regression.py" = ["E714", "E741", "F401", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 ignore_missing_imports = true
 files = ["mhai"]
+
+[[tool.mypy.overrides]]
+# Baseline: modules ported from the notebooks that failed type checking when
+# it was enforced. Don't add modules; remove them as they are fixed.
+module = [
+    "mhai.agents.cca",
+    "mhai.agents.dia",
+    "mhai.agents.hga_nli",
+    "mhai.agents.hga",
+    "mhai.agents.orchestrator",
+    "mhai.agents.qda",
+    "mhai.knowledge_base.kb_builder",
+    "mhai.knowledge_base.patient_parser",
+    "mhai.pipeline.cross_milestone",
+    "mhai.pipeline.integration",
+    "mhai.security.hipaa",
+    "mhai.tools.pubmed_client",
+    "mhai.guardrails.l1_persona_vector",
+    "mhai.guardrails.l2_semantic_entropy",
+    "mhai.guardrails.l4_trust_escalation",
+]
+ignore_errors = true
