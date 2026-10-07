@@ -551,7 +551,8 @@ class HybridRetriever:
         self,
         query: str,
         top_k: int = 5,
-        chunk_types: Optional[List[str]] = None
+        chunk_types: Optional[List[str]] = None,
+        patient_id: Optional[str] = None,
     ) -> List[RetrievalResult]:
         """
         Hybrid retrieval with RRF fusion.
@@ -560,14 +561,20 @@ class HybridRetriever:
             query: Clinical query text
             top_k: Number of results to return
             chunk_types: Optional filter by chunk type
+            patient_id: Patient whose records may be returned. Shared
+                reference guidelines are always eligible; other patients'
+                records never are. With no patient_id, only reference
+                guidelines are returned.
 
         Returns:
             List of RetrievalResult sorted by RRF score
         """
         t_start = time.time()
 
-        # Retrieve from both pathways (get more candidates for fusion)
-        n_candidates = top_k * 3
+        # Retrieve from both pathways (get more candidates for fusion).
+        # Patient scoping discards most of the index, so rank all of it
+        # rather than letting other patients' chunks crowd out top_k.
+        n_candidates = len(self.dense.chunk_ids) or top_k * 3
         dense_results = self.dense.retrieve(query, n_candidates)
         sparse_results = self.sparse.retrieve(query, n_candidates)
 
@@ -591,9 +598,12 @@ class HybridRetriever:
 
         # Build results with chunk objects
         results = []
-        for rank, (chunk_id, score) in enumerate(sorted_ids[:top_k * 2]):
+        for rank, (chunk_id, score) in enumerate(sorted_ids):
             chunk = self.kb.get_chunk(chunk_id) if self.kb else None
             if chunk is None:
+                continue
+
+            if not self._visible_to(chunk, patient_id):
                 continue
 
             # Apply chunk type filter
@@ -619,11 +629,19 @@ class HybridRetriever:
 
         return results
 
+    @staticmethod
+    def _visible_to(chunk: KBChunk, patient_id: Optional[str]) -> bool:
+        """Whether a chunk may be shown in a query about patient_id."""
+        if chunk.source_patient_id == "reference":
+            return True
+        return patient_id is not None and chunk.source_patient_id == patient_id
+
     def build_context(
         self,
         query: str,
         top_k: int = 5,
-        max_context_chars: int = 3000
+        max_context_chars: int = 3000,
+        patient_id: Optional[str] = None,
     ) -> RAGContext:
         """
         Build a formatted context string for CCA generation.
@@ -634,7 +652,7 @@ class HybridRetriever:
           ...
         """
         t_start = time.time()
-        results = self.retrieve(query, top_k=top_k)
+        results = self.retrieve(query, top_k=top_k, patient_id=patient_id)
 
         # Format context with citation IDs
         context_lines = ["RETRIEVED CLINICAL EVIDENCE:"]
@@ -878,7 +896,8 @@ class RAGClinicalContextAgent:
         self,
         clinical_query: str,
         top_k: int = 5,
-        triage_context: Optional[Dict] = None
+        triage_context: Optional[Dict] = None,
+        patient_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         RAG-enhanced diagnosis generation.
@@ -892,7 +911,7 @@ class RAGClinicalContextAgent:
 
         # Step 1: Retrieve
         rag_context = self.retriever.build_context(
-            clinical_query, top_k=top_k
+            clinical_query, top_k=top_k, patient_id=patient_id
         )
 
         # Step 2: Build full prompt

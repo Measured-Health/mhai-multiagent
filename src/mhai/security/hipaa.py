@@ -728,10 +728,14 @@ class SecurePipelineWrapper:
         session_id: str,
         query_text: str,
         patient_context: Optional[Dict] = None,
+        patient_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Secure query submission: PII mask -> RBAC check -> route
         -> guardrail -> audit log -> encrypt response.
+
+        Retrieval is limited to patient_id's records plus shared
+        guidelines; querying a patient requires view_patient_data.
         """
         t_start = time.time()
 
@@ -742,6 +746,15 @@ class SecurePipelineWrapper:
                 "action": "query_submit", "reason": reason
             })
             return {"error": reason, "allowed": False}
+        if patient_id is not None:
+            allowed, reason = self.rbac.check_permission(
+                session_id, "view_patient_data"
+            )
+            if not allowed:
+                self.audit.log_event("ACCESS_DENIED", {
+                    "action": "view_patient_data", "reason": reason
+                })
+                return {"error": reason, "allowed": False}
 
         # 2. PII masking
         masked_query, pii_detections = self.pii.mask(query_text)
@@ -754,7 +767,7 @@ class SecurePipelineWrapper:
 
         # 3. Route through orchestrator
         result = self.orchestrator.process_query(
-            masked_query, patient_context
+            masked_query, patient_context, patient_id=patient_id
         )
 
         # 4. Audit log
@@ -815,10 +828,33 @@ class SecurePipelineWrapper:
             corrected_response, _ = self.pii.mask(corrected_response)
 
         result = self.orchestrator.process_feedback(
-            query_id, action, corrected_response
+            query_id, action, corrected_response, submitted_by=user_id
         )
 
         self.audit.log_feedback(query_id, action, user_id)
+        return result
+
+    def approve_correction(
+        self, session_id: str, correction_id: str
+    ) -> Dict[str, Any]:
+        """
+        Second-clinician sign-off on a queued correction. Only approved
+        corrections reach the KB, persona vector or trust weights.
+        """
+        allowed, reason = self.rbac.check_permission(
+            session_id, "submit_feedback"
+        )
+        if not allowed:
+            return {"error": reason, "allowed": False}
+
+        session = self.rbac.sessions.get(session_id)
+        user_id = session.user_id if session else ""
+
+        result = self.orchestrator.approve_correction(correction_id, user_id)
+        if "error" not in result:
+            self.audit.log_event(
+                "CORRECTION_APPROVED", {"correction_id": correction_id}, user_id
+            )
         return result
 
     def get_system_status(self, session_id: str) -> Dict[str, Any]:
