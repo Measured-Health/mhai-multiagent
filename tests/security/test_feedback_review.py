@@ -125,10 +125,37 @@ def test_correction_cannot_be_approved_twice(system):
 
 def test_loop_rejects_anonymous_or_unknown_approval(system):
     loop = system["loop"]
-    fb = loop.process_feedback("q1", QUERY, "resp", "correct", corrected_response="fix")
+    anon = loop.process_feedback("q1", QUERY, "resp", "correct", corrected_response="fix")
+    named = loop.process_feedback("q2", QUERY, "resp", "correct",
+                                  corrected_response="fix", submitted_by="dr_a")
 
-    assert "reviewer" in loop.approve_correction(fb["correction_id"], "")["error"]
+    assert "Anonymous" in loop.approve_correction(anon["correction_id"], "dr_b")["error"]
+    assert "reviewer" in loop.approve_correction(named["correction_id"], "")["error"]
     assert "not found" in loop.approve_correction("corr_nope", "dr_b")["error"]
+
+
+@pytest.mark.parametrize("submitter,reviewer", [
+    ("dr_a", "DR_A"),          # same clinician, different case
+    ("dr_a", " dr_a "),        # same clinician, stray whitespace
+    ("unknown", "unknown"),    # placeholder ids are nobody
+    ("dr_a", "unknown"),
+    ("dr_a", "system"),
+])
+def test_two_person_rule_cannot_be_sidestepped(system, submitter, reviewer):
+    loop = system["loop"]
+    fb = loop.process_feedback("q1", QUERY, "resp", "correct",
+                               corrected_response="fix", submitted_by=submitter)
+
+    assert "error" in loop.approve_correction(fb["correction_id"], reviewer)
+    assert _corrections(system["kb"]) == []
+
+
+def test_session_without_a_real_user_cannot_give_feedback(system):
+    w = system["wrapper"]
+    q = w.submit_query(_session(system, "dr_a"), QUERY, patient_id=PATIENT_A)
+    ghost = _session(system, "unknown")
+
+    assert w.submit_feedback(ghost, q["query_id"], "correct", "x")["allowed"] is False
 
 
 def test_persona_vector_moves_only_on_approval(system):

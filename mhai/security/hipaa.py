@@ -747,6 +747,10 @@ class SecurePipelineWrapper:
             })
             return {"error": reason, "allowed": False}
         if patient_id is not None:
+            from mhai.knowledge_base.kb_builder import is_valid_patient_id
+
+            if not is_valid_patient_id(patient_id):
+                return {"error": "Invalid patient id", "allowed": False}
             allowed, reason = self.rbac.check_permission(
                 session_id, "view_patient_data"
             )
@@ -820,8 +824,9 @@ class SecurePipelineWrapper:
         if not allowed:
             return {"error": reason, "allowed": False}
 
-        session = self.rbac.sessions.get(session_id)
-        user_id = session.user_id if session else "unknown"
+        user_id = self._session_user(session_id)
+        if user_id is None:
+            return {"error": "Session has no identifiable user", "allowed": False}
 
         # Mask any PII in corrected response
         if corrected_response:
@@ -847,8 +852,9 @@ class SecurePipelineWrapper:
         if not allowed:
             return {"error": reason, "allowed": False}
 
-        session = self.rbac.sessions.get(session_id)
-        user_id = session.user_id if session else ""
+        user_id = self._session_user(session_id)
+        if user_id is None:
+            return {"error": "Session has no identifiable user", "allowed": False}
 
         result = self.orchestrator.approve_correction(correction_id, user_id)
         if "error" not in result:
@@ -856,6 +862,15 @@ class SecurePipelineWrapper:
                 "CORRECTION_APPROVED", {"correction_id": correction_id}, user_id
             )
         return result
+
+    def _session_user(self, session_id: str) -> Optional[str]:
+        """The session's real user id, or None (never a placeholder)."""
+        from mhai.agents.orchestrator import _normalize_user
+
+        session = self.rbac.sessions.get(session_id)
+        if session is None or not _normalize_user(session.user_id):
+            return None
+        return session.user_id
 
     def get_system_status(self, session_id: str) -> Dict[str, Any]:
         """Get comprehensive system status (requires view_metrics)."""

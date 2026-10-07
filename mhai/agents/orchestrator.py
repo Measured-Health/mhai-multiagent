@@ -608,6 +608,18 @@ class FeedbackEntry:
     patient_id: Optional[str] = None   # patient the query was about
 
 
+# User ids that mean "nobody in particular" and must never count as a person.
+_PLACEHOLDER_USERS = frozenset({"", "unknown", "anonymous", "system", "none"})
+
+
+def _normalize_user(user_id) -> str:
+    """Canonical user id for identity comparisons; "" if not a real user."""
+    if not isinstance(user_id, str):
+        return ""
+    norm = user_id.strip().casefold()
+    return "" if norm in _PLACEHOLDER_USERS else norm
+
+
 @dataclass
 class PendingCorrection:
     """A correction waiting for a second clinician's approval."""
@@ -741,9 +753,13 @@ class DoctorFeedbackLoop:
             return {"error": f"Correction {correction_id} not found"}
         if pending.status != "pending_review":
             return {"error": f"Correction {correction_id} is already {pending.status}"}
-        if not reviewer_id:
+        submitter = _normalize_user(pending.entry.submitted_by)
+        reviewer = _normalize_user(reviewer_id)
+        if not submitter:
+            return {"error": "Anonymous corrections cannot be approved"}
+        if not reviewer:
             return {"error": "A reviewer must be identified to approve a correction"}
-        if reviewer_id == pending.entry.submitted_by:
+        if reviewer == submitter:
             return {"error": "A correction must be approved by a different clinician"}
 
         entry = pending.entry
@@ -786,7 +802,11 @@ class DoctorFeedbackLoop:
 
     def _enrich_kb(self, entry: FeedbackEntry, approved_by: str):
         """Add an approved correction to the KB as a verified exemplar."""
-        from mhai.knowledge_base.kb_builder import KBChunk
+        from mhai.knowledge_base.kb_builder import (
+            UNASSIGNED_SOURCE,
+            KBChunk,
+            is_valid_patient_id,
+        )
 
         if self.kb is None:
             return
@@ -800,11 +820,15 @@ class DoctorFeedbackLoop:
 
         # Corrections carry case detail, so they belong to the patient
         # they were made for. Without one they are visible to no query.
+        if is_valid_patient_id(entry.patient_id):
+            source = entry.patient_id
+        else:
+            source = UNASSIGNED_SOURCE
         self.kb.chunks[chunk_id] = KBChunk(
             chunk_id=chunk_id,
             content=content,
             chunk_type="verified_correction",
-            source_patient_id=entry.patient_id or "unassigned",
+            source_patient_id=source,
             source_subject_id=entry.query_id,
             metadata={
                 "original_response": original,

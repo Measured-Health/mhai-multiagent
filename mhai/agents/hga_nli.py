@@ -39,6 +39,8 @@ from enum import Enum
 from collections import defaultdict
 import logging
 
+from mhai.knowledge_base.kb_builder import chunk_visible_to
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MHAI.M3.NLI")
 
@@ -308,14 +310,6 @@ class NLIEntailmentVerifier:
 # 2.3  CITATION VERIFICATION PIPELINE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _visible_to_patient(chunk, patient_id: Optional[str]) -> bool:
-    """Mirror of HybridRetriever._visible_to for cited chunks."""
-    source = getattr(chunk, "source_patient_id", None)
-    if source == "reference":
-        return True
-    return patient_id is not None and source == patient_id
-
-
 class CitationVerificationPipeline:
     """
     Extracts [KB#XXXX] citations from CCA output, looks up the
@@ -400,7 +394,7 @@ class CitationVerificationPipeline:
                     ))
                     continue
 
-                if not _visible_to_patient(chunk, patient_id):
+                if not chunk_visible_to(chunk, patient_id):
                     # Never show or reason from another patient's record.
                     results.append(CitationVerificationResult(
                         claim_text=claim_text,
@@ -993,8 +987,8 @@ def demo_m3_part2():
         cid = kb._generate_id()
         kb.chunks[cid] = KBChunk(
             chunk_id=cid, content=g["content"],
-            chunk_type="guideline", source_patient_id="ref",
-            source_subject_id="ref", metadata={"topic": g["topic"]}
+            chunk_type="guideline", source_patient_id="reference",
+            source_subject_id="reference", metadata={"topic": g["topic"]}
         )
     print(f"  KB: {len(kb.chunks)} guideline chunks")
 

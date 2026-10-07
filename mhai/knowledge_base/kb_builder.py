@@ -49,6 +49,31 @@ logger = logging.getLogger("MHAI.M3.RAG")
 # 1.1  KNOWLEDGE BASE DATA STRUCTURES
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# source_patient_id values with special meaning. No real patient may use
+# them: "reference" chunks are shown to every patient.
+REFERENCE_SOURCE = "reference"
+UNASSIGNED_SOURCE = "unassigned"
+RESERVED_PATIENT_IDS = frozenset({REFERENCE_SOURCE, UNASSIGNED_SOURCE, "unknown", "ref", ""})
+
+
+def is_valid_patient_id(patient_id) -> bool:
+    """A real patient id: a non-empty string that is not a reserved value."""
+    return (isinstance(patient_id, str)
+            and patient_id.strip().lower() not in RESERVED_PATIENT_IDS)
+
+
+def chunk_visible_to(chunk, patient_id) -> bool:
+    """Whether a chunk may be shown in a query about patient_id.
+
+    Shared reference guidelines are visible to everyone; any other chunk
+    only to the one valid patient it came from.
+    """
+    source = getattr(chunk, "source_patient_id", None)
+    if source == REFERENCE_SOURCE:
+        return getattr(chunk, "chunk_type", None) == "guideline"
+    return is_valid_patient_id(patient_id) and source == patient_id
+
+
 @dataclass
 class KBChunk:
     """A single indexed chunk in the knowledge base."""
@@ -200,7 +225,12 @@ class MedicalKnowledgeBase:
                 if isinstance(data, list):
                     data = data[0] if data else {}
 
-                patient_id = data.get("patient_id", "unknown")
+                patient_id = data.get("patient_id")
+                if not is_valid_patient_id(patient_id):
+                    # Pooling id-less records under one placeholder would let
+                    # unrelated patients see each other's data.
+                    logger.warning(f"Skipping {path}: missing or reserved patient_id")
+                    continue
                 for subject in data.get("subjects", []):
                     n = self._index_subject(subject, patient_id)
                     total_chunks += n
@@ -214,8 +244,8 @@ class MedicalKnowledgeBase:
                 chunk_id=chunk_id,
                 content=guideline["content"],
                 chunk_type="guideline",
-                source_patient_id="reference",
-                source_subject_id="reference",
+                source_patient_id=REFERENCE_SOURCE,
+                source_subject_id=REFERENCE_SOURCE,
                 metadata={"topic": guideline["topic"]}
             )
             total_chunks += 1
@@ -629,12 +659,7 @@ class HybridRetriever:
 
         return results
 
-    @staticmethod
-    def _visible_to(chunk: KBChunk, patient_id: Optional[str]) -> bool:
-        """Whether a chunk may be shown in a query about patient_id."""
-        if chunk.source_patient_id == "reference":
-            return True
-        return patient_id is not None and chunk.source_patient_id == patient_id
+    _visible_to = staticmethod(chunk_visible_to)
 
     def build_context(
         self,
@@ -735,13 +760,16 @@ class CitationForcingPairGenerator:
                 if not encounters:
                     continue
 
-                patient_id = pf.get("patient_id", "unknown")
+                patient_id = pf.get("patient_id")
                 subject_id = subject.get("subject_id", "unknown")
+                if not is_valid_patient_id(patient_id):
+                    continue
 
-                # Get this subject's KB chunks
+                # Get this subject's KB chunks (subject ids repeat across patients)
                 subject_chunks = [
                     c for c in self.kb.chunks.values()
-                    if c.source_subject_id == subject_id
+                    if c.source_patient_id == patient_id
+                    and c.source_subject_id == subject_id
                 ]
 
                 if not subject_chunks:

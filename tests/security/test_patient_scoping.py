@@ -110,3 +110,65 @@ def test_kb_chunk_type_is_what_feedback_writes():
     # Guards the import the feedback loop relies on (issue #3).
     chunk = KBChunk("KB#9999", "x", "verified_correction", PATIENT_A, "q")
     assert chunk.source_patient_id == PATIENT_A
+
+
+def _write(tmp_path, name, patient_id, diagnosis):
+    import json
+    data = {"subjects": [{"subject_id": "S1", "diagnosis": [{"name": diagnosis}]}]}
+    if patient_id is not None:
+        data["patient_id"] = patient_id
+    (tmp_path / name).write_text(json.dumps(data))
+
+
+def test_reserved_or_missing_patient_ids_are_not_ingested(tmp_path):
+    from mhai.knowledge_base.kb_builder import MedicalKnowledgeBase
+
+    _write(tmp_path, "evil.json", "reference", "HIV positive")
+    _write(tmp_path, "case.json", "Reference ", "Syphilis")
+    _write(tmp_path, "none1.json", None, "Hepatitis C")
+    _write(tmp_path, "none2.json", None, "Tuberculosis")
+    _write(tmp_path, "blank.json", "", "Gonorrhoea")
+    _write(tmp_path, "ok.json", "PAT-OK", "Asthma")
+    kb = MedicalKnowledgeBase()
+    kb.build_from_patient_files(str(tmp_path))
+
+    dx = {c.content: c.source_patient_id for c in kb.chunks.values()
+          if c.chunk_type == "diagnosis"}
+    assert dx == {"Diagnosis: Asthma.": "PAT-OK"}
+
+
+def test_reserved_patient_ids_see_guidelines_only(retriever, two_patient_kb):
+    two_patient_kb._add_chunk("Diagnosis: orphan correction.", "verified_correction",
+                              "unassigned", "q")
+    retriever.index_kb(two_patient_kb)
+
+    for pid in ("reference", "unassigned", "unknown", "", " Reference"):
+        results = retriever.retrieve("diagnosis correction diabetes malaria", top_k=10,
+                                     patient_id=pid)
+        assert {r.chunk.chunk_type for r in results} <= {"guideline"}, pid
+
+
+def test_non_guideline_chunk_tagged_reference_is_not_shared(retriever, two_patient_kb):
+    two_patient_kb._add_chunk("Diagnosis: smuggled HIV record.", "diagnosis",
+                              "reference", "S1")
+    retriever.index_kb(two_patient_kb)
+
+    results = retriever.retrieve("smuggled HIV record", top_k=10, patient_id=PATIENT_A)
+
+    assert "smuggled" not in " ".join(r.chunk.content for r in results)
+
+
+def test_wrapper_rejects_reserved_patient_id(tmp_path, retriever):
+    from mhai.agents.hga_nli import NLIBackedHGA
+    from mhai.agents.orchestrator import DynamicOrchestratorAgent
+    from mhai.security.hipaa import AuditLogger, RBACManager, SecurePipelineWrapper, UserRole
+
+    rbac = RBACManager()
+    w = SecurePipelineWrapper(
+        DynamicOrchestratorAgent(rag_cca=RAGClinicalContextAgent(retriever=retriever),
+                                 hga=NLIBackedHGA()),
+        rbac=rbac, audit=AuditLogger(log_dir=str(tmp_path)))
+    sid = rbac.create_session("dr_a", UserRole.CLINICIAN).session_id
+
+    assert w.submit_query(sid, "any", patient_id="reference")["allowed"] is False
+    assert w.submit_query(sid, "any", patient_id="unassigned")["allowed"] is False
