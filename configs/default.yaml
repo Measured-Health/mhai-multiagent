@@ -1,5 +1,5 @@
 # MHAI default configuration
-# Values mirror src/mhai/config/settings.py defaults.
+# Values mirror mhai/config/settings.py defaults.
 
 agents:
   dia:

@@ -39,7 +39,7 @@ mhai run --query "28yo female with gestational diabetes" --urgency routine
 ## Project Structure
 
 ```
-src/mhai/
+mhai/
 ├── agents/          # One module per agent (DIA, QDA, CCA, HGA, OA)
 ├── config/          # Pydantic-style settings
 ├── guardrails/      # 4-layer hallucination cascade

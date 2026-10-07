@@ -12,11 +12,11 @@ install-dev: ## Install with dev extras + pre-commit
 	pre-commit install
 
 lint: ## Run ruff linter
-	ruff check src tests
+	ruff check mhai tests
 
 format: ## Auto-format
-	ruff format src tests
-	ruff check --fix src tests
+	ruff format mhai tests
+	ruff check --fix mhai tests
 
 typecheck: ## Run mypy
 	mypy

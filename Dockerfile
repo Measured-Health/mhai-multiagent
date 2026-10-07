@@ -14,7 +14,7 @@ COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY pyproject.toml README.md ./
-COPY src ./src
+COPY mhai ./mhai
 RUN pip install -e .
 
 RUN useradd --create-home appuser && chown -R appuser /app
