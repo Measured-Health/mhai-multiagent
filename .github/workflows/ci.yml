@@ -55,6 +55,9 @@ jobs:
   # image or dependency bump fails here rather than at deploy time.
   image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read  # paths-filter lists the PR's changed files
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
