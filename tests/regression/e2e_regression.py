@@ -35,6 +35,24 @@ from dataclasses import dataclass, field
 from collections import defaultdict, Counter
 import logging
 
+from mhai.agents.orchestrator import (
+    DoctorFeedbackLoop,
+    DynamicOrchestratorAgent,
+    GuardrailThresholdManager,
+    GuardrailThresholds,
+    PersonaVectorUpdater,
+    QueryClassifier,
+    TrustWeightOptimizer,
+)
+from mhai.security.hipaa import (
+    AuditLogger,
+    EncryptionManager,
+    LatencyProfiler,
+    PIIMasker,
+    RBACManager,
+    UserRole,
+)
+
 logger = logging.getLogger("MHAI.M4.E2E")
 
 

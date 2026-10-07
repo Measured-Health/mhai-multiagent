@@ -938,7 +938,7 @@ def demo_m3_part2():
     print("\n[3/5] Building KB and citation verification pipeline...")
 
     # Minimal KB for demo
-    #from m3_part1_rag_retrieval import MedicalKnowledgeBase, KBChunk
+    from mhai.knowledge_base.kb_builder import KBChunk, MedicalKnowledgeBase
     kb = MedicalKnowledgeBase()
     for g in MedicalKnowledgeBase.REFERENCE_GUIDELINES:
         cid = kb._generate_id()

@@ -1,8 +1,19 @@
 """MHAI Agent modules — one per clinical AI agent."""
-from mhai.agents.dia import DIAAgent
-from mhai.agents.qda import QDAAgent
-from mhai.agents.cca import CCAAgent
-from mhai.agents.hga import HGAAgent
-from mhai.agents.orchestrator import OrchestratorAgent
+from mhai.agents.cca import ClinicalContextAgent
+from mhai.agents.dia import DocumentIngestionAgent
+from mhai.agents.hga_nli import NLIBackedHGA
+from mhai.agents.orchestrator import DynamicOrchestratorAgent
+from mhai.agents.qda import QuickDetectionAgent
 
-__all__ = ["DIAAgent", "QDAAgent", "CCAAgent", "HGAAgent", "OrchestratorAgent"]
+# Short aliases used in the README and integration guide.
+DIAAgent = DocumentIngestionAgent
+QDAAgent = QuickDetectionAgent
+CCAAgent = ClinicalContextAgent
+HGAAgent = NLIBackedHGA
+OrchestratorAgent = DynamicOrchestratorAgent
+
+__all__ = [
+    "DIAAgent", "QDAAgent", "CCAAgent", "HGAAgent", "OrchestratorAgent",
+    "DocumentIngestionAgent", "QuickDetectionAgent", "ClinicalContextAgent",
+    "NLIBackedHGA", "DynamicOrchestratorAgent",
+]
