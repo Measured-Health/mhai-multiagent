@@ -1,0 +1,26 @@
+# NVIDIA GPU override: `make up-gpu`, or
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# Needs the NVIDIA Container Toolkit on the host.
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  mhai:
+    build:
+      args:
+        TORCH: cu128
+    image: mhai:cu128
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

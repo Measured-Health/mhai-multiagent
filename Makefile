@@ -1,4 +1,5 @@
-.PHONY: help install install-dev lint format typecheck test cov run clean docker
+.PHONY: help install install-dev lint format typecheck test cov run clean docker \
+	up up-gpu up-observability infra down ps logs models nuke
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -36,5 +37,40 @@ clean: ## Remove build artifacts
 	rm -rf build dist *.egg-info .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage
 	find . -type d -name __pycache__ -exec rm -rf {} +
 
-docker: ## Build container image
-	docker build -t mhai:latest .
+docker: ## Build container image (TORCH=cpu|cu128)
+	docker build --build-arg TORCH=$(TORCH) -t mhai:$(TORCH) .
+
+COMPOSE ?= docker compose
+GPU := -f docker-compose.yml -f docker-compose.gpu.yml
+
+.env:
+	cp .env.example .env
+	@echo "Created .env from .env.example; set POSTGRES_PASSWORD before sharing the stack."
+
+up: .env ## Start the stack: postgres, redis, ollama (+ model pull), mhai
+	$(COMPOSE) up -d --build
+
+up-gpu: .env ## Start the stack on an NVIDIA GPU
+	$(COMPOSE) $(GPU) up -d --build
+
+up-observability: .env ## Start the stack plus the OpenTelemetry collector
+	$(COMPOSE) --profile observability up -d --build
+
+infra: .env ## Start only postgres, redis and ollama (run the app with uv)
+	$(COMPOSE) up -d postgres redis ollama ollama-init
+
+down: ## Stop the stack (keeps data volumes)
+	$(COMPOSE) --profile observability down
+
+ps: ## Show service status
+	$(COMPOSE) ps
+
+logs: ## Follow logs (SERVICE=name to filter)
+	$(COMPOSE) logs -f $(SERVICE)
+
+models: ## Pull OLLAMA_MODEL into the ollama volume again
+	$(COMPOSE) run --rm ollama-init
+
+nuke: ## Stop the stack and DELETE its volumes (database, models, caches)
+	@printf "Delete all MHAI volumes? [y/N] " && read ok && [ "$$ok" = y ]
+	$(COMPOSE) --profile observability down -v

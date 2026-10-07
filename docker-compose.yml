@@ -1,38 +1,115 @@
+# MHAI local stack.
+#
+#   cp .env.example .env
+#   make up                  # postgres, redis, ollama (+ model pull), mhai
+#   make up-gpu              # same, with Ollama and PyTorch on an NVIDIA GPU
+#   make up-observability    # also starts the OpenTelemetry collector
+#
+# Every port is bound to 127.0.0.1; nothing is reachable from other hosts.
+
+name: mhai
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 10s
+  timeout: 5s
+  retries: 10
+
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: mhai
-      POSTGRES_USER: mhai
-      POSTGRES_PASSWORD: mhai
-    ports: ["5432:5432"]
+      POSTGRES_DB: ${POSTGRES_DB:-mhai}
+      POSTGRES_USER: ${POSTGRES_USER:-mhai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mhai}
+    ports: ["127.0.0.1:${POSTGRES_PORT:-5432}:5432"]
     volumes:
-      - ./init-db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./init-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mhai"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
 
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
+    volumes:
+      - redisdata:/data
     healthcheck:
+      <<: *healthcheck-defaults
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+
+  # Serves the CCA LLM (CCA_BACKEND=ollama).
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+    ports: ["127.0.0.1:${OLLAMA_PORT:-11434}:11434"]
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "ollama", "list"]
+
+  # One-shot: pull OLLAMA_MODEL into the ollama volume, then exit.
+  ollama-init:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    restart: "no"
+    depends_on:
+      ollama: { condition: service_healthy }
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5:7b-instruct}"]
 
   mhai:
-    build: .
-    image: mhai:latest
-    env_file: .env
+    build:
+      context: .
+      args:
+        TORCH: ${TORCH:-cpu}
+    image: mhai:${TORCH:-cpu}
+    # The image's default command is a one-shot CLI until the API server
+    # exists; switch to unless-stopped once it serves on :8000.
+    restart: "no"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mhai}:${POSTGRES_PASSWORD:-mhai}@postgres:5432/${POSTGRES_DB:-mhai}
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_URL: http://ollama:11434
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      HF_HOME: /home/appuser/.cache/huggingface
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-    ports: ["8000:8000"]
+      ollama-init: { condition: service_completed_successfully }
+    ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
     volumes:
       - ./data:/app/data
       - ./artifacts:/app/artifacts
+      - hf-cache:/home/appuser/.cache/huggingface
+    # The API gateway (/healthz, /api/v1/...) is not implemented yet, so
+    # the image's healthcheck has nothing to probe.
+    healthcheck:
+      disable: true
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:${OTEL_VERSION:-latest}
+    profiles: ["observability"]
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./configs/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:${OTEL_GRPC_PORT:-4317}:4317"
+      - "127.0.0.1:${OTEL_HTTP_PORT:-4318}:4318"
 
 volumes:
   pgdata:
+  redisdata:
+  ollama:
+  hf-cache:
