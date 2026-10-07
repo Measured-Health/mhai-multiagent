@@ -1,5 +1,6 @@
 """Compute-device detection (CUDA / MPS / CPU)."""
 import logging
+
 log = logging.getLogger(__name__)
 
 def detect_device() -> str:

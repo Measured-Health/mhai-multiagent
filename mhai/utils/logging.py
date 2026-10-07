@@ -2,6 +2,7 @@
 import logging
 import os
 
+
 def setup_logging(level=None):
     if level is None:
         level = os.environ.get("LOG_LEVEL", "INFO")

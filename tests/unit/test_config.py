@@ -1,6 +1,7 @@
 """Tests for mhai.config.settings."""
 from mhai.config import MHAIConfig, get_config
 
+
 def test_get_config_returns_dataclass():
     cfg = get_config()
     assert isinstance(cfg, MHAIConfig)

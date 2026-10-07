@@ -1,4 +1,5 @@
 """Helpers shared by the NLI-based verifiers."""
+
 # Default NLI model; mirrors MHAIConfig.NLI_MODEL.
 DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-base"
 
