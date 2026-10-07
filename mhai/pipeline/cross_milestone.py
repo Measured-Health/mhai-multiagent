@@ -28,6 +28,37 @@ from dataclasses import dataclass, field
 from collections import defaultdict, Counter
 import logging
 
+# discover_components() looks these up by name, as it did when every
+# milestone lived in one notebook namespace.
+from mhai.agents.dia import SSIMGuardrail, SwinV2LayoutBackbone  # noqa: F401
+from mhai.agents.hga_nli import (  # noqa: F401
+    CitationVerificationPipeline,
+    NLIBackedHGA,
+    NLIEntailmentVerifier,
+    SemanticEntropyVerifier,
+)
+from mhai.agents.orchestrator import (  # noqa: F401
+    DoctorFeedbackLoop,
+    DynamicOrchestratorAgent,
+    GuardrailThresholdManager,
+    PersonaVectorUpdater,
+    TrustWeightOptimizer,
+)
+from mhai.agents.qda import FTTransformerBackbone, QuickDetectionAgent  # noqa: F401
+from mhai.knowledge_base.kb_builder import (  # noqa: F401
+    HybridRetriever,
+    MedicalKnowledgeBase,
+    RAGClinicalContextAgent,
+)
+from mhai.security.hipaa import (  # noqa: F401
+    AuditLogger,
+    EncryptionManager,
+    LatencyProfiler,
+    PIIMasker,
+    RBACManager,
+    SecurePipelineWrapper,
+)
+
 logger = logging.getLogger("MHAI.M4.Integration")
 
 
@@ -852,6 +883,9 @@ def demo_m4_part4():
     sensitivity = ThresholdSensitivityAnalyzer()
 
     # Generate small test set for sweep
+    # The case generator ships with the regression suite, not the package.
+    from tests.regression.e2e_regression import SyntheticCaseGenerator
+
     gen = SyntheticCaseGenerator()
     sweep_cases = gen.generate(n_total=200)
 

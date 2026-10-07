@@ -22,24 +22,53 @@ with 5 specialized transformer-based agents and a 4-layer guardrail cascade.
 
 ## Quick Start
 
+The project is managed with [uv](https://docs.astral.sh/uv/).
+
 ```bash
-# Install
-pip install -e ".[dev]"
+# Install (CPU PyTorch by default; on a CUDA machine:
+#   uv sync --no-group cpu --group cu128)
+uv sync
 
 # Run tests
-pytest
+uv run pytest
 
-# Docker
+# Docker (build arg TORCH=cpu or cu128)
 docker compose up -d
 
 # CLI
-mhai run --query "28yo female with gestational diabetes" --urgency routine
+uv run mhai run --query "28yo female with gestational diabetes" --urgency routine
 ```
+
+Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit
+`uv.lock`.
+
+## Local Stack (Docker Compose)
+
+```bash
+make up                 # postgres, redis, ollama (+ pulls OLLAMA_MODEL), mhai
+make up-gpu             # same on an NVIDIA GPU (Ollama + CUDA PyTorch)
+make up-observability   # also the OpenTelemetry collector
+make infra              # only postgres, redis, ollama; run the app with uv
+make ps | logs | down   # status, logs, stop (data kept)
+make nuke               # stop and delete all volumes (asks first)
+```
+
+`make up` creates `.env` from `.env.example` on first run. Ports bind to
+127.0.0.1 and can be moved with `POSTGRES_PORT`, `REDIS_PORT`,
+`OLLAMA_PORT`, `API_PORT`, `OTEL_GRPC_PORT` and `OTEL_HTTP_PORT`. The CCA
+generates through Ollama (`CCA_BACKEND=ollama`, model `OLLAMA_MODEL`).
+The `mhai` service currently runs the CLI and exits; it becomes a server
+once the API gateway exists.
+
+## Security
+
+Read [SKILLS.md](SKILLS.md) before changing retrieval, guardrails,
+feedback or identity handling, and run `uv run pytest tests/security`.
 
 ## Project Structure
 
 ```
-src/mhai/
+mhai/
 ├── agents/          # One module per agent (DIA, QDA, CCA, HGA, OA)
 ├── config/          # Pydantic-style settings
 ├── guardrails/      # 4-layer hallucination cascade

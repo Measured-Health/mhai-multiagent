@@ -39,6 +39,9 @@ from enum import Enum
 from collections import defaultdict
 import logging
 
+from mhai.knowledge_base.kb_builder import chunk_visible_to
+from mhai.utils.nli import DEFAULT_NLI_MODEL, nli_label_map
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MHAI.M3.NLI")
 
@@ -121,11 +124,9 @@ class NLIEntailmentVerifier:
       2 = entailment
     """
 
-    LABEL_MAP = {0: NLILabel.CONTRADICTION, 1: NLILabel.NEUTRAL, 2: NLILabel.ENTAILMENT}
-
     def __init__(
         self,
-        model_name: str = "microsoft/deberta-v3-large-mnli",
+        model_name: str = DEFAULT_NLI_MODEL,
         device: str = "auto",
         confidence_threshold: float = 0.7
     ):
@@ -134,6 +135,7 @@ class NLIEntailmentVerifier:
         self.model = None
         self.tokenizer = None
         self._loaded = False
+        self.label_map: Dict[int, str] = {}
 
         self._try_load_model(device)
 
@@ -156,6 +158,7 @@ class NLIEntailmentVerifier:
 
             self.model = self.model.to(self.device)
             self.model.eval()
+            self.label_map = nli_label_map(self.model)
             self._loaded = True
             logger.info(f"NLI model loaded on {self.device}")
 
@@ -198,7 +201,7 @@ class NLIEntailmentVerifier:
             probs = torch.softmax(logits, dim=-1)
 
         pred_idx = probs.argmax().item()
-        label = self.LABEL_MAP[pred_idx]
+        label = NLILabel(self.label_map[pred_idx])
         confidence = probs[pred_idx].item()
 
         return NLIResult(
@@ -206,11 +209,7 @@ class NLIEntailmentVerifier:
             hypothesis=hypothesis[:100],
             label=label,
             confidence=confidence,
-            logits={
-                "contradiction": probs[0].item(),
-                "neutral": probs[1].item(),
-                "entailment": probs[2].item(),
-            }
+            logits={name: probs[i].item() for i, name in self.label_map.items()},
         )
 
     def _verify_fallback(self, premise: str, hypothesis: str) -> NLIResult:
@@ -337,7 +336,8 @@ class CitationVerificationPipeline:
 
     def verify_response(
         self,
-        response_text: str
+        response_text: str,
+        patient_id: Optional[str] = None,
     ) -> FullVerificationReport:
         """
         Verify all citations in a CCA response.
@@ -388,6 +388,21 @@ class CitationVerificationPipeline:
                         ),
                         action=VerificationAction.FLAG,
                         reason=f"Citation {cid} not found in KB"
+                    ))
+                    continue
+
+                if not chunk_visible_to(chunk, patient_id):
+                    # Never show or reason from another patient's record.
+                    results.append(CitationVerificationResult(
+                        claim_text=claim_text,
+                        citation_id=cid,
+                        source_text="",
+                        nli_result=NLIResult(
+                            premise="", hypothesis=claim_text[:100],
+                            label=NLILabel.NEUTRAL, confidence=0.0
+                        ),
+                        action=VerificationAction.REDACT,
+                        reason=f"Citation {cid} is not this patient's record"
                     ))
                     continue
 
@@ -590,14 +605,17 @@ class SemanticEntropyVerifier:
         self,
         rag_cca,  # RAGClinicalContextAgent from Part 1
         query: str,
-        top_k: int = 5
+        top_k: int = 5,
+        patient_id: Optional[str] = None,
     ) -> Tuple[float, int, bool, List[str]]:
         """
         Sample K responses from the RAG CCA and compute entropy.
         """
         responses = []
         for i in range(self.n_samples):
-            result = rag_cca.generate_with_rag(query, top_k=top_k)
+            result = rag_cca.generate_with_rag(
+                query, top_k=top_k, patient_id=patient_id
+            )
             responses.append(result["response"])
 
         h_se, n_clusters, is_confab = self.compute_entropy(responses)
@@ -690,6 +708,11 @@ class NLIBackedHGA:
         diagnoses: Optional[List[Dict]] = None,
         semantic_entropy: Optional[float] = None,
         source_chunks: Optional[List] = None,
+        patient_id: Optional[str] = None,
+        pass_threshold: Optional[float] = None,
+        escalate_threshold: Optional[float] = None,
+        critical_penalty: Optional[float] = None,
+        warning_penalty: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Full four-expert verification.
@@ -699,10 +722,25 @@ class NLIBackedHGA:
             diagnoses: Parsed diagnoses (for ICD-10 validation)
             semantic_entropy: Pre-computed H_SE (if available)
             source_chunks: Retrieved KB chunks for NLI
+            patient_id: Patient the response is about; citations of any
+                other patient's records are redacted
+            pass_threshold, escalate_threshold, critical_penalty,
+            warning_penalty: Per-call overrides of the instance defaults.
+                Pass these instead of mutating the shared instance, which
+                is not safe across concurrent queries.
 
         Returns:
             Dict with trust_score, decision, per-expert scores, flags
         """
+        if pass_threshold is None:
+            pass_threshold = self.pass_threshold
+        if escalate_threshold is None:
+            escalate_threshold = self.escalate_threshold
+        if critical_penalty is None:
+            critical_penalty = self.critical_penalty
+        if warning_penalty is None:
+            warning_penalty = self.warning_penalty
+
         all_flags = []
 
         # ── Expert 1: NLI Citation Verification ──
@@ -710,7 +748,9 @@ class NLIBackedHGA:
         citation_report = None
 
         if self.citation_pipeline is not None:
-            citation_report = self.citation_pipeline.verify_response(response_text)
+            citation_report = self.citation_pipeline.verify_response(
+                response_text, patient_id=patient_id
+            )
             nli_score = citation_report.nli_pass_rate
 
             # Collect redacted claims as critical flags
@@ -769,13 +809,13 @@ class NLIBackedHGA:
         # ── Flag Penalty ──
         n_critical = sum(1 for f in all_flags if f.get("severity") == "critical")
         n_warning = sum(1 for f in all_flags if f.get("severity") == "warning")
-        penalty = n_critical * self.critical_penalty + n_warning * self.warning_penalty
+        penalty = n_critical * critical_penalty + n_warning * warning_penalty
         trust = max(0.0, base_trust - penalty)
 
         # ── Decision ──
-        if trust >= self.pass_threshold:
+        if trust >= pass_threshold:
             decision = "pass"
-        elif trust >= self.escalate_threshold:
+        elif trust >= escalate_threshold:
             decision = "regenerate"
         else:
             decision = "escalate"
@@ -938,14 +978,14 @@ def demo_m3_part2():
     print("\n[3/5] Building KB and citation verification pipeline...")
 
     # Minimal KB for demo
-    #from m3_part1_rag_retrieval import MedicalKnowledgeBase, KBChunk
+    from mhai.knowledge_base.kb_builder import KBChunk, MedicalKnowledgeBase
     kb = MedicalKnowledgeBase()
     for g in MedicalKnowledgeBase.REFERENCE_GUIDELINES:
         cid = kb._generate_id()
         kb.chunks[cid] = KBChunk(
             chunk_id=cid, content=g["content"],
-            chunk_type="guideline", source_patient_id="ref",
-            source_subject_id="ref", metadata={"topic": g["topic"]}
+            chunk_type="guideline", source_patient_id="reference",
+            source_subject_id="reference", metadata={"topic": g["topic"]}
         )
     print(f"  KB: {len(kb.chunks)} guideline chunks")
 

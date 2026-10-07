@@ -18,6 +18,14 @@ class MHAIConfig:
         "DENSE_MODEL", "all-MiniLM-L6-v2"))
     DIA_MODEL: str = field(default_factory=lambda: os.environ.get(
         "DIA_MODEL", "microsoft/swinv2-base-patch4-window8-256"))
+    # Where the CCA LLM runs: "ollama" (the compose service) or
+    # "transformers" (CCA_MODEL loaded in-process).
+    CCA_BACKEND: str = field(default_factory=lambda: os.environ.get(
+        "CCA_BACKEND", "ollama"))
+    OLLAMA_URL: str = field(default_factory=lambda: os.environ.get(
+        "OLLAMA_URL", "http://ollama:11434"))
+    OLLAMA_MODEL: str = field(default_factory=lambda: os.environ.get(
+        "OLLAMA_MODEL", "qwen2.5:7b-instruct"))
 
     # Trust weights (HGA 4-expert)
     TRUST_ALPHA: float = 0.35  # NLI

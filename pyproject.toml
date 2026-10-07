@@ -39,7 +39,7 @@ dependencies = [
     "httpx>=0.24",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
@@ -47,7 +47,32 @@ dev = [
     "mypy>=1.5",
     "pre-commit>=3.4",
     "fakeredis>=2.0",
+    "locust>=2.15",
 ]
+# PyTorch build. CPU is the default; for a CUDA machine use
+# `uv sync --no-group cpu --group cu128`.
+cpu = ["torch>=2.0"]
+cu128 = ["torch>=2.0"]
+
+[tool.uv]
+default-groups = ["dev", "cpu"]
+conflicts = [[{ group = "cpu" }, { group = "cu128" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", group = "cpu" },
+    { index = "pytorch-cu128", group = "cu128" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [project.scripts]
 mhai = "mhai.cli:main"
@@ -56,7 +81,8 @@ mhai = "mhai.cli:main"
 Homepage = "https://github.com/promit-ghosal/mhai"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["mhai*"]
 
 [tool.setuptools.package-data]
 mhai = ["py.typed"]
@@ -64,12 +90,12 @@ mhai = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
-pythonpath = ["src"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-src = ["src", "tests"]
+src = [".", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -78,4 +104,4 @@ ignore = ["E501"]
 [tool.mypy]
 python_version = "3.10"
 ignore_missing_imports = true
-files = ["src/mhai"]
+files = ["mhai"]

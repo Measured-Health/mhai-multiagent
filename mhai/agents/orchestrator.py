@@ -32,6 +32,7 @@ import json
 import os
 import re
 import hashlib
+import uuid
 import numpy as np
 from typing import List, Tuple, Dict, Optional, Any
 from dataclasses import dataclass, field
@@ -603,11 +604,38 @@ class FeedbackEntry:
     system_decision: str
     timestamp: float = 0.0
     category: str = ""
+    submitted_by: str = ""             # user_id of the clinician
+    patient_id: Optional[str] = None   # patient the query was about
+
+
+# User ids that mean "nobody in particular" and must never count as a person.
+_PLACEHOLDER_USERS = frozenset({"", "unknown", "anonymous", "system", "none"})
+
+
+def _normalize_user(user_id) -> str:
+    """Canonical user id for identity comparisons; "" if not a real user."""
+    if not isinstance(user_id, str):
+        return ""
+    norm = user_id.strip().casefold()
+    return "" if norm in _PLACEHOLDER_USERS else norm
+
+
+@dataclass
+class PendingCorrection:
+    """A correction waiting for a second clinician's approval."""
+    correction_id: str
+    entry: FeedbackEntry
+    hallucinated_activation: Optional[np.ndarray] = None
+    corrected_activation: Optional[np.ndarray] = None
+    status: str = "pending_review"     # "pending_review" or "approved"
+    approved_by: str = ""
 
 
 class DoctorFeedbackLoop:
     """
-    Processes doctor validate/correct signals and propagates
+    Processes doctor validate/correct signals. A correction changes
+    nothing on its own: it waits in a review queue until a second,
+    different clinician approves it, and only then propagates
     updates to four subsystems:
 
     1. Persona vector EMA update (v_hall) -- on each correction
@@ -624,13 +652,18 @@ class DoctorFeedbackLoop:
         trust_optimizer: TrustWeightOptimizer,
         threshold_manager: GuardrailThresholdManager,
         kb=None,  # MedicalKnowledgeBase
+        pii_masker=None,  # PIIMasker; scrubs corrections before they reach the KB
     ):
+        from mhai.security.hipaa import PIIMasker
+
         self.persona_updater = persona_updater
         self.trust_optimizer = trust_optimizer
         self.threshold_manager = threshold_manager
         self.kb = kb
+        self.pii = pii_masker or PIIMasker()
 
         self.feedback_log: List[FeedbackEntry] = []
+        self.pending_corrections: Dict[str, PendingCorrection] = {}
         self.n_validations = 0
         self.n_corrections = 0
         self.correction_rate_history = deque(maxlen=100)
@@ -647,12 +680,17 @@ class DoctorFeedbackLoop:
         hallucinated_activation: Optional[np.ndarray] = None,
         corrected_activation: Optional[np.ndarray] = None,
         category: str = "",
+        submitted_by: str = "",
+        patient_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a single doctor feedback event.
 
+        A "correct" action is queued for review and returns its
+        correction_id; call approve_correction() to apply it.
+
         Returns:
-            Dict with update results from all subsystems
+            Dict with the action taken and running totals
         """
         entry = FeedbackEntry(
             query_id=query_id,
@@ -664,6 +702,8 @@ class DoctorFeedbackLoop:
             system_decision=system_decision,
             timestamp=time.time(),
             category=category,
+            submitted_by=submitted_by,
+            patient_id=patient_id,
         )
         self.feedback_log.append(entry)
 
@@ -677,36 +717,15 @@ class DoctorFeedbackLoop:
             self.n_corrections += 1
             self.correction_rate_history.append(1)
 
-            # 1. Persona vector EMA update
-            if (hallucinated_activation is not None
-                and corrected_activation is not None):
-                pv_result = self.persona_updater.update(
-                    hallucinated_activation, corrected_activation
-                )
-                results["updates"]["persona_vector"] = pv_result
-                logger.info(
-                    f"Persona vector updated: drift={pv_result['drift']:.4f}, "
-                    f"total={pv_result['update_count']}"
-                )
-
-            # 2. CMA-ES trust weight accumulation
-            if expert_scores:
-                cma_result = self.trust_optimizer.add_correction(
-                    expert_scores, system_decision, "correct"
-                )
-                if cma_result is not None:
-                    # CMA-ES ran — update threshold manager
-                    self.threshold_manager.update_base_weights(
-                        cma_result["alpha"], cma_result["beta"],
-                        cma_result["gamma"], cma_result["delta"]
-                    )
-                    results["updates"]["cma_es"] = cma_result
-                    logger.info(f"CMA-ES updated weights: {cma_result}")
-
-            # 3. Knowledge base enrichment
-            if self.kb is not None and corrected_response:
-                self._enrich_kb(query_text, corrected_response, entry)
-                results["updates"]["kb_enriched"] = True
+            correction_id = f"corr_{uuid.uuid4().hex}"
+            self.pending_corrections[correction_id] = PendingCorrection(
+                correction_id=correction_id,
+                entry=entry,
+                hallucinated_activation=hallucinated_activation,
+                corrected_activation=corrected_activation,
+            )
+            results["correction_id"] = correction_id
+            results["status"] = "pending_review"
 
         # Compute rolling correction rate
         if self.correction_rate_history:
@@ -720,43 +739,105 @@ class DoctorFeedbackLoop:
 
         return results
 
-    def _enrich_kb(
-        self,
-        query: str,
-        corrected_response: str,
-        entry: FeedbackEntry,
-    ):
-        """Add corrected case to knowledge base as a verified exemplar."""
+    def approve_correction(
+        self, correction_id: str, reviewer_id: str
+    ) -> Dict[str, Any]:
+        """
+        Apply a queued correction once a second clinician signs off.
+
+        The reviewer must be identified and must not be the clinician
+        who submitted the correction.
+        """
+        pending = self.pending_corrections.get(correction_id)
+        if pending is None:
+            return {"error": f"Correction {correction_id} not found"}
+        if pending.status != "pending_review":
+            return {"error": f"Correction {correction_id} is already {pending.status}"}
+        submitter = _normalize_user(pending.entry.submitted_by)
+        reviewer = _normalize_user(reviewer_id)
+        if not submitter:
+            return {"error": "Anonymous corrections cannot be approved"}
+        if not reviewer:
+            return {"error": "A reviewer must be identified to approve a correction"}
+        if reviewer == submitter:
+            return {"error": "A correction must be approved by a different clinician"}
+
+        entry = pending.entry
+        results = {"correction_id": correction_id, "status": "approved", "updates": {}}
+
+        # 1. Persona vector EMA update
+        if (pending.hallucinated_activation is not None
+                and pending.corrected_activation is not None):
+            pv_result = self.persona_updater.update(
+                pending.hallucinated_activation, pending.corrected_activation
+            )
+            results["updates"]["persona_vector"] = pv_result
+            logger.info(
+                f"Persona vector updated: drift={pv_result['drift']:.4f}, "
+                f"total={pv_result['update_count']}"
+            )
+
+        # 2. CMA-ES trust weight accumulation
+        if entry.expert_scores:
+            cma_result = self.trust_optimizer.add_correction(
+                entry.expert_scores, entry.system_decision, "correct"
+            )
+            if cma_result is not None:
+                # CMA-ES ran — update threshold manager
+                self.threshold_manager.update_base_weights(
+                    cma_result["alpha"], cma_result["beta"],
+                    cma_result["gamma"], cma_result["delta"]
+                )
+                results["updates"]["cma_es"] = cma_result
+                logger.info(f"CMA-ES updated weights: {cma_result}")
+
+        # 3. Knowledge base enrichment
+        if self.kb is not None and entry.corrected_response:
+            self._enrich_kb(entry, approved_by=reviewer_id)
+            results["updates"]["kb_enriched"] = True
+
+        pending.status = "approved"
+        pending.approved_by = reviewer_id
+        return results
+
+    def _enrich_kb(self, entry: FeedbackEntry, approved_by: str):
+        """Add an approved correction to the KB as a verified exemplar."""
+        from mhai.knowledge_base.kb_builder import (
+            UNASSIGNED_SOURCE,
+            KBChunk,
+            is_valid_patient_id,
+        )
+
         if self.kb is None:
             return
 
-        chunk_id = self.kb._generate_id()
-        content = (
-            f"[VERIFIED CORRECTION] Query: {query[:100]} | "
-            f"Corrected: {corrected_response[:200]}"
-        )
+        query, _ = self.pii.mask(entry.query_text[:100])
+        corrected, _ = self.pii.mask(entry.corrected_response[:200])
+        original, _ = self.pii.mask(entry.original_response[:100])
 
-        from m3_part1_rag_retrieval import KBChunk
-        try:
-            self.kb.chunks[chunk_id] = KBChunk(
-                chunk_id=chunk_id,
-                content=content,
-                chunk_type="verified_correction",
-                source_patient_id="feedback",
-                source_subject_id=entry.query_id,
-                metadata={
-                    "original_response": entry.original_response[:100],
-                    "category": entry.category,
-                    "timestamp": entry.timestamp,
-                },
-            )
-        except Exception:
-            # KBChunk might not be importable; use dict fallback
-            self.kb.chunks[chunk_id] = {
-                "chunk_id": chunk_id,
-                "content": content,
-                "chunk_type": "verified_correction",
-            }
+        chunk_id = self.kb._generate_id()
+        content = f"[VERIFIED CORRECTION] Query: {query} | Corrected: {corrected}"
+
+        # Corrections carry case detail, so they belong to the patient
+        # they were made for. Without one they are visible to no query.
+        if is_valid_patient_id(entry.patient_id):
+            source = entry.patient_id
+        else:
+            source = UNASSIGNED_SOURCE
+        self.kb.chunks[chunk_id] = KBChunk(
+            chunk_id=chunk_id,
+            content=content,
+            chunk_type="verified_correction",
+            source_patient_id=source,
+            source_subject_id=entry.query_id,
+            metadata={
+                "original_response": original,
+                "category": entry.category,
+                "timestamp": entry.timestamp,
+                "submitted_by": entry.submitted_by,
+                "approved_by": approved_by,
+            },
+        )
 
         logger.debug(f"KB enriched with correction {chunk_id}")
 
@@ -782,6 +863,10 @@ class DoctorFeedbackLoop:
             ),
             "pending_corrections": len(
                 self.trust_optimizer.correction_buffer
+            ),
+            "corrections_awaiting_review": sum(
+                1 for c in self.pending_corrections.values()
+                if c.status == "pending_review"
             ),
         }
 
@@ -829,6 +914,7 @@ class DynamicOrchestratorAgent:
         self,
         query_text: str,
         patient_context: Optional[Dict] = None,
+        patient_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a clinical query through the full M4 pipeline.
@@ -839,6 +925,11 @@ class DynamicOrchestratorAgent:
         4. Apply HGA with dynamic thresholds
         5. Make decision (PASS/REGENERATE/ESCALATE)
         6. Return result with confidence badge
+
+        Retrieval and citation checks only see patient_id's records
+        plus shared guidelines. If CCA or HGA is missing or fails, the
+        result is escalated for clinician review and marked degraded;
+        no score is invented for it.
         """
         t_start = time.time()
         self.total_queries += 1
@@ -849,83 +940,76 @@ class DynamicOrchestratorAgent:
         # Step 2: Get dynamic thresholds
         thresholds = self.threshold_manager.get_thresholds(classified)
 
+        failed_agents = []
+
         # Step 3: Route to CCA
         cca_result = None
-        if self.rag_cca is not None:
+        if self.rag_cca is None:
+            failed_agents.append("CCA")
+        else:
             try:
                 cca_result = self.rag_cca.generate_with_rag(
                     query_text, top_k=5,
                     triage_context=patient_context,
+                    patient_id=patient_id,
                 )
                 self.agent_utilization["CCA"] += 1
             except Exception as e:
                 logger.warning(f"CCA generation failed: {e}")
+                failed_agents.append("CCA")
 
-        if cca_result is None:
-            cca_result = {
-                "response": f"[Rule-based response for: {query_text[:60]}...]",
-                "citations": [],
-                "n_citations": 0,
-                "retrieval_latency_ms": 0,
-                "total_latency_ms": 0,
-            }
-
-        # Step 4: Apply HGA with dynamic thresholds
+        # Step 4: Apply HGA with this query's thresholds. They are passed
+        # per call, never written onto the shared HGA instance.
         hga_result = None
-        if self.hga is not None:
-            try:
-                # Temporarily override HGA thresholds
-                old_pass = self.hga.pass_threshold
-                old_esc = self.hga.escalate_threshold
-                old_crit = self.hga.critical_penalty
-                old_warn = self.hga.warning_penalty
-
-                self.hga.pass_threshold = thresholds.trust_pass
-                self.hga.escalate_threshold = thresholds.trust_escalate
-                self.hga.critical_penalty = thresholds.critical_flag_penalty
-                self.hga.warning_penalty = thresholds.warning_flag_penalty
-
-                hga_result = self.hga.verify(
-                    response_text=cca_result["response"],
-                )
-                self.agent_utilization["HGA"] += 1
-
-                # Restore original thresholds
-                self.hga.pass_threshold = old_pass
-                self.hga.escalate_threshold = old_esc
-                self.hga.critical_penalty = old_crit
-                self.hga.warning_penalty = old_warn
-
-            except Exception as e:
-                logger.warning(f"HGA verification failed: {e}")
-
-        if hga_result is None:
-            hga_result = {
-                "trust_score": 0.5,
-                "decision": "review",
-                "badge": "AMBER",
-                "nli_score": 0.5,
-                "coherence_score": 1.0,
-                "numerical_score": 0.85,
-                "semantic_entropy_score": 0.7,
-                "n_critical_flags": 0,
-                "n_warning_flags": 0,
-            }
+        if cca_result is not None:
+            if self.hga is None:
+                failed_agents.append("HGA")
+            else:
+                try:
+                    hga_result = self.hga.verify(
+                        response_text=cca_result["response"],
+                        patient_id=patient_id,
+                        pass_threshold=thresholds.trust_pass,
+                        escalate_threshold=thresholds.trust_escalate,
+                        critical_penalty=thresholds.critical_flag_penalty,
+                        warning_penalty=thresholds.warning_flag_penalty,
+                    )
+                    self.agent_utilization["HGA"] += 1
+                except Exception as e:
+                    logger.warning(f"HGA verification failed: {e}")
+                    failed_agents.append("HGA")
 
         # Step 5: Decision + badge
-        decision = hga_result["decision"]
         badge_map = {
             "pass": ("GREEN", "High confidence"),
             "regenerate": ("AMBER", "Review recommended"),
             "escalate": ("RED", "Requires clinician validation"),
         }
-        badge, badge_text = badge_map.get(decision, ("AMBER", "Review"))
+        if hga_result is None:
+            # Fail closed: an unverified or missing answer goes to a human.
+            decision = "escalate"
+            trust_score = 0.0
+            expert_scores = {}
+        else:
+            decision = hga_result.get("decision")
+            if decision not in badge_map:
+                decision = "escalate"
+            trust_score = hga_result["trust_score"]
+            expert_scores = {
+                "nli": hga_result.get("nli_score", 0.5),
+                "coherence": hga_result.get("coherence_score", 1.0),
+                "numerical": hga_result.get("numerical_score", 0.85),
+                "se": hga_result.get("semantic_entropy_score", 0.7),
+            }
+        badge, badge_text = badge_map[decision]
 
         total_ms = (time.time() - t_start) * 1000
 
         result = {
-            "query_id": f"q_{self.total_queries:05d}",
+            # Random, so a query can't be addressed by guessing its id.
+            "query_id": f"q_{uuid.uuid4().hex}",
             "query_text": query_text[:200],
+            "patient_id": patient_id,
             "category": classified.category.value,
             "urgency": classified.urgency.value,
             # Thresholds applied
@@ -935,19 +1019,18 @@ class DynamicOrchestratorAgent:
                 "trust_pass": thresholds.trust_pass,
             },
             # CCA output
-            "response": cca_result["response"],
-            "n_citations": cca_result.get("n_citations", 0),
+            "response": cca_result["response"] if cca_result else "",
+            "response_available": cca_result is not None,
+            "n_citations": cca_result.get("n_citations", 0) if cca_result else 0,
             # HGA output
-            "trust_score": hga_result["trust_score"],
+            "trust_score": trust_score,
             "decision": decision,
             "badge": badge,
             "badge_text": badge_text,
-            "expert_scores": {
-                "nli": hga_result.get("nli_score", 0.5),
-                "coherence": hga_result.get("coherence_score", 1.0),
-                "numerical": hga_result.get("numerical_score", 0.85),
-                "se": hga_result.get("semantic_entropy_score", 0.7),
-            },
+            "verified": hga_result is not None,
+            "degraded": bool(failed_agents),
+            "failed_agents": failed_agents,
+            "expert_scores": expert_scores,
             # Performance
             "total_latency_ms": round(total_ms, 1),
         }
@@ -960,10 +1043,19 @@ class DynamicOrchestratorAgent:
         corrected_response: Optional[str] = None,
         hallucinated_activation: Optional[np.ndarray] = None,
         corrected_activation: Optional[np.ndarray] = None,
+        submitted_by: str = "",
     ) -> Dict[str, Any]:
-        """Route doctor feedback through the feedback loop."""
+        """
+        Route doctor feedback through the feedback loop.
+
+        This method trusts submitted_by; it does no access control of its
+        own. Clinician-facing code must go through SecurePipelineWrapper,
+        which checks the session and supplies the user id.
+        """
         if self.feedback_loop is None:
             return {"error": "Feedback loop not configured"}
+        if action not in ("validate", "correct"):
+            return {"error": f"Unknown feedback action: {action!r}"}
 
         # Find the original query in log
         original = None
@@ -986,7 +1078,17 @@ class DynamicOrchestratorAgent:
             hallucinated_activation=hallucinated_activation,
             corrected_activation=corrected_activation,
             category=original.get("category", ""),
+            submitted_by=submitted_by,
+            patient_id=original.get("patient_id"),
         )
+
+    def approve_correction(
+        self, correction_id: str, reviewer_id: str
+    ) -> Dict[str, Any]:
+        """Apply a queued correction (see DoctorFeedbackLoop)."""
+        if self.feedback_loop is None:
+            return {"error": "Feedback loop not configured"}
+        return self.feedback_loop.approve_correction(correction_id, reviewer_id)
 
     def get_load_balance(self) -> Dict[str, Any]:
         """Check agent utilization for load-balance compliance."""

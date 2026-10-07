@@ -49,6 +49,31 @@ logger = logging.getLogger("MHAI.M3.RAG")
 # 1.1  KNOWLEDGE BASE DATA STRUCTURES
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# source_patient_id values with special meaning. No real patient may use
+# them: "reference" chunks are shown to every patient.
+REFERENCE_SOURCE = "reference"
+UNASSIGNED_SOURCE = "unassigned"
+RESERVED_PATIENT_IDS = frozenset({REFERENCE_SOURCE, UNASSIGNED_SOURCE, "unknown", "ref", ""})
+
+
+def is_valid_patient_id(patient_id) -> bool:
+    """A real patient id: a non-empty string that is not a reserved value."""
+    return (isinstance(patient_id, str)
+            and patient_id.strip().lower() not in RESERVED_PATIENT_IDS)
+
+
+def chunk_visible_to(chunk, patient_id) -> bool:
+    """Whether a chunk may be shown in a query about patient_id.
+
+    Shared reference guidelines are visible to everyone; any other chunk
+    only to the one valid patient it came from.
+    """
+    source = getattr(chunk, "source_patient_id", None)
+    if source == REFERENCE_SOURCE:
+        return getattr(chunk, "chunk_type", None) == "guideline"
+    return is_valid_patient_id(patient_id) and source == patient_id
+
+
 @dataclass
 class KBChunk:
     """A single indexed chunk in the knowledge base."""
@@ -200,7 +225,12 @@ class MedicalKnowledgeBase:
                 if isinstance(data, list):
                     data = data[0] if data else {}
 
-                patient_id = data.get("patient_id", "unknown")
+                patient_id = data.get("patient_id")
+                if not is_valid_patient_id(patient_id):
+                    # Pooling id-less records under one placeholder would let
+                    # unrelated patients see each other's data.
+                    logger.warning(f"Skipping {path}: missing or reserved patient_id")
+                    continue
                 for subject in data.get("subjects", []):
                     n = self._index_subject(subject, patient_id)
                     total_chunks += n
@@ -214,8 +244,8 @@ class MedicalKnowledgeBase:
                 chunk_id=chunk_id,
                 content=guideline["content"],
                 chunk_type="guideline",
-                source_patient_id="reference",
-                source_subject_id="reference",
+                source_patient_id=REFERENCE_SOURCE,
+                source_subject_id=REFERENCE_SOURCE,
                 metadata={"topic": guideline["topic"]}
             )
             total_chunks += 1
@@ -551,7 +581,8 @@ class HybridRetriever:
         self,
         query: str,
         top_k: int = 5,
-        chunk_types: Optional[List[str]] = None
+        chunk_types: Optional[List[str]] = None,
+        patient_id: Optional[str] = None,
     ) -> List[RetrievalResult]:
         """
         Hybrid retrieval with RRF fusion.
@@ -560,14 +591,20 @@ class HybridRetriever:
             query: Clinical query text
             top_k: Number of results to return
             chunk_types: Optional filter by chunk type
+            patient_id: Patient whose records may be returned. Shared
+                reference guidelines are always eligible; other patients'
+                records never are. With no patient_id, only reference
+                guidelines are returned.
 
         Returns:
             List of RetrievalResult sorted by RRF score
         """
         t_start = time.time()
 
-        # Retrieve from both pathways (get more candidates for fusion)
-        n_candidates = top_k * 3
+        # Retrieve from both pathways (get more candidates for fusion).
+        # Patient scoping discards most of the index, so rank all of it
+        # rather than letting other patients' chunks crowd out top_k.
+        n_candidates = len(self.dense.chunk_ids) or top_k * 3
         dense_results = self.dense.retrieve(query, n_candidates)
         sparse_results = self.sparse.retrieve(query, n_candidates)
 
@@ -591,9 +628,12 @@ class HybridRetriever:
 
         # Build results with chunk objects
         results = []
-        for rank, (chunk_id, score) in enumerate(sorted_ids[:top_k * 2]):
+        for rank, (chunk_id, score) in enumerate(sorted_ids):
             chunk = self.kb.get_chunk(chunk_id) if self.kb else None
             if chunk is None:
+                continue
+
+            if not self._visible_to(chunk, patient_id):
                 continue
 
             # Apply chunk type filter
@@ -619,11 +659,14 @@ class HybridRetriever:
 
         return results
 
+    _visible_to = staticmethod(chunk_visible_to)
+
     def build_context(
         self,
         query: str,
         top_k: int = 5,
-        max_context_chars: int = 3000
+        max_context_chars: int = 3000,
+        patient_id: Optional[str] = None,
     ) -> RAGContext:
         """
         Build a formatted context string for CCA generation.
@@ -634,7 +677,7 @@ class HybridRetriever:
           ...
         """
         t_start = time.time()
-        results = self.retrieve(query, top_k=top_k)
+        results = self.retrieve(query, top_k=top_k, patient_id=patient_id)
 
         # Format context with citation IDs
         context_lines = ["RETRIEVED CLINICAL EVIDENCE:"]
@@ -717,13 +760,16 @@ class CitationForcingPairGenerator:
                 if not encounters:
                     continue
 
-                patient_id = pf.get("patient_id", "unknown")
+                patient_id = pf.get("patient_id")
                 subject_id = subject.get("subject_id", "unknown")
+                if not is_valid_patient_id(patient_id):
+                    continue
 
-                # Get this subject's KB chunks
+                # Get this subject's KB chunks (subject ids repeat across patients)
                 subject_chunks = [
                     c for c in self.kb.chunks.values()
-                    if c.source_subject_id == subject_id
+                    if c.source_patient_id == patient_id
+                    and c.source_subject_id == subject_id
                 ]
 
                 if not subject_chunks:
@@ -866,19 +912,22 @@ class RAGClinicalContextAgent:
         cca_tokenizer=None,
         max_new_tokens: int = 512,
         temperature: float = 0.3,
+        generator=None,  # e.g. OllamaGenerator; used instead of cca_model
     ):
         self.retriever = retriever
         self.model = cca_model
         self.tokenizer = cca_tokenizer
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.generator = generator
         self._model_loaded = cca_model is not None
 
     def generate_with_rag(
         self,
         clinical_query: str,
         top_k: int = 5,
-        triage_context: Optional[Dict] = None
+        triage_context: Optional[Dict] = None,
+        patient_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         RAG-enhanced diagnosis generation.
@@ -892,7 +941,7 @@ class RAGClinicalContextAgent:
 
         # Step 1: Retrieve
         rag_context = self.retriever.build_context(
-            clinical_query, top_k=top_k
+            clinical_query, top_k=top_k, patient_id=patient_id
         )
 
         # Step 2: Build full prompt
@@ -911,9 +960,14 @@ class RAGClinicalContextAgent:
             )
 
         # Step 3: Generate
-        if self._model_loaded and self.model is not None:
+        if self.generator is not None:
+            response = self.generator.generate(system_prompt, augmented_query)
+            model_used = self.generator.name
+        elif self._model_loaded and self.model is not None:
             response = self._generate_with_model(system_prompt, augmented_query)
+            model_used = "qwen"
         else:
+            model_used = "rule_based"
             response = self._generate_fallback(
                 clinical_query, rag_context, triage_context
             )
@@ -934,7 +988,7 @@ class RAGClinicalContextAgent:
             ],
             "retrieval_latency_ms": rag_context.retrieval_latency_ms,
             "total_latency_ms": latency,
-            "model_used": "qwen" if self._model_loaded else "rule_based"
+            "model_used": model_used
         }
 
     def _generate_with_model(self, system: str, query: str) -> str:

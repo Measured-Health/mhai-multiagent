@@ -1,8 +1,0 @@
--r requirements.txt
-pytest>=7.4
-pytest-cov>=4.1
-ruff>=0.1
-mypy>=1.5
-pre-commit>=3.4
-fakeredis>=2.0
-locust>=2.15

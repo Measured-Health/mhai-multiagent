@@ -13,3 +13,4 @@ models_cache/
 artifacts/
 .pytest_cache
 .mypy_cache
+!README.md
