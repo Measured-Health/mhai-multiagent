@@ -33,7 +33,7 @@ RBAC → PII Mask → Route → Audit → Encrypt
 
 > **Status: design in progress, not yet implemented.** Phase 1 API gateway
 > (#8). Approved: scope, JWT login, optional `patient_id`, Redis worker,
-> API contract, auth and identity.
+> API contract, auth and identity, data and job lifecycle.
 
 ### 1. Components
 
@@ -128,6 +128,28 @@ flowchart TD
     retry -- yes --> job
     retry -- no --> dlq["dead-letter queue<br/>query status=failed"]
 ```
+
+### 4b. Job and query states
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: POST /queries<br/>(row in Postgres, job id in Redis)
+    queued --> processing: worker claims job<br/>(moved to processing list)
+    note left of processing
+        writes current_stage and
+        progress at each stage
+    end note
+    processing --> completed: decision + status written<br/>in one transaction
+    processing --> queued: worker crashed or error,<br/>attempt < 3 (re-queued)
+    processing --> failed: 3 attempts used or<br/>300 s time limit
+    failed --> [*]: job in dead-letter list,<br/>short error for the API
+    completed --> [*]: result readable,<br/>later retries skipped
+```
+
+Redis holds only IDs (`{job_id, type, query_id or correction_id, user_id,
+role, attempt}`), never patient data. The worker writes a heartbeat every
+10 s, and `/readyz` reports it down after 30 s. Nothing is deleted
+automatically in Phase 1; a retention policy is a follow-up decision.
 
 ### 5. Login and request authentication
 
