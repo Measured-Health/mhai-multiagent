@@ -91,7 +91,8 @@ class PIIMasker:
             r'\bMR\s*#?\s*(\d{5,10})\b',
         ],
         "PHONE": [
-            r'\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b',
+            # (?<!\w) rather than \b, so a leading "+1" or "(" is masked too.
+            r'(?<!\w)(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b',
             r'\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b',
         ],
         "EMAIL": [
@@ -140,60 +141,80 @@ class PIIMasker:
         self.mask_ages_over_89 = mask_ages_over_89
         self.detection_stats = defaultdict(int)
 
+    # When matches overlap, the merged span is labelled with the most
+    # specific type (e.g. a date of birth also matches DATE).
+    TYPE_PRIORITY = [
+        "SSN", "MRN", "DOB", "EMAIL", "PHONE", "ADDRESS", "NAME",
+        "AGE_OVER_89", "DATE", "ZIP_CODE",
+    ]
+
     def mask(self, text: str) -> Tuple[str, List[PIIDetection]]:
         """
         Detect and mask all PHI in the input text.
 
+        Every pattern match becomes a span. Where a pattern captures the
+        identifier in a group (names, MRN, DOB, age), only the group is
+        masked, so labels such as "Patient:" or "MRN:" stay readable.
+        Overlapping spans are merged and each merged span is replaced
+        exactly once, so replacements never cut into each other.
+
         Returns:
             (masked_text, list_of_detections)
         """
-        detections = []
-        masked = text
+        spans = []  # (start, end, entity_type)
 
-        # Detect each PHI type
         for entity_type, patterns in self.PATTERNS.items():
             if entity_type == "DATE" and not self.mask_dates:
                 continue
             if entity_type == "AGE_OVER_89" and not self.mask_ages_over_89:
                 continue
-
-            replacement = self.REPLACEMENT_MAP[entity_type]
             for pattern in patterns:
-                for match in re.finditer(pattern, masked, re.IGNORECASE):
-                    original = match.group(0)
-                    detections.append(PIIDetection(
-                        entity_type=entity_type,
-                        original_text=original,
-                        start=match.start(),
-                        end=match.end(),
-                        replacement=replacement,
-                    ))
-                    self.detection_stats[entity_type] += 1
+                for match in re.finditer(pattern, text, re.IGNORECASE):
+                    spans.append((*self._identifier_span(match), entity_type))
 
-        # Detect names (title-based)
         for pattern in self.NAME_TITLES:
-            for match in re.finditer(pattern, masked):
-                name = match.group(1) if match.lastindex else match.group(0)
-                detections.append(PIIDetection(
-                    entity_type="NAME",
-                    original_text=name,
-                    start=match.start(),
-                    end=match.end(),
-                    replacement=self.REPLACEMENT_MAP["NAME"],
-                ))
-                self.detection_stats["NAME"] += 1
+            for match in re.finditer(pattern, text):
+                spans.append((*self._identifier_span(match), "NAME"))
 
-        # Sort detections by position (reverse) to avoid offset shifts
-        detections.sort(key=lambda d: d.start, reverse=True)
+        detections = []
+        for start, end, entity_type in self._merge_spans(spans):
+            detections.append(PIIDetection(
+                entity_type=entity_type,
+                original_text=text[start:end],
+                start=start,
+                end=end,
+                replacement=self.REPLACEMENT_MAP[entity_type],
+            ))
+            self.detection_stats[entity_type] += 1
 
-        # Apply replacements
-        for det in detections:
+        # Replace from the end so earlier offsets stay valid.
+        masked = text
+        for det in reversed(detections):
             masked = masked[:det.start] + det.replacement + masked[det.end:]
 
-        # Re-sort for output (forward order)
-        detections.sort(key=lambda d: d.start)
-
         return masked, detections
+
+    @staticmethod
+    def _identifier_span(match) -> Tuple[int, int]:
+        """The captured identifier if the pattern has a group, else the match."""
+        if match.lastindex:
+            return match.span(1)
+        return match.span()
+
+    def _merge_spans(self, spans):
+        """Merge overlapping or touching spans; keep the most specific type."""
+        rank = {t: i for i, t in enumerate(self.TYPE_PRIORITY)}
+        merged = []
+        for start, end, entity_type in sorted(spans):
+            if start >= end:
+                continue
+            if merged and start <= merged[-1][1]:
+                m_start, m_end, m_type = merged[-1]
+                best = min(m_type, entity_type, key=lambda t: rank.get(t, len(rank)))
+                merged[-1] = (m_start, max(m_end, end), best)
+            else:
+                merged.append((start, end, entity_type))
+        return merged
 
     def get_stats(self) -> Dict[str, int]:
         """Return detection counts by entity type."""

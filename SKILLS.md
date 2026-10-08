@@ -131,8 +131,6 @@ Check these before relying on the system:
 - **The trust score can pass a claim no source supports.** NLI carries
   35% of the score, so one fully unsupported claim can still score
   above 0.55 on coherence, numerical and entropy alone.
-- **The PII masker can corrupt overlapping matches**, for example
-  phone numbers become `[PHONE_REDACTED]TED]`.
 - **There is no API gateway yet.** JWT auth, route-level RBAC and rate
   limits described in the integration guide don't exist in code.
 - **The KB lives in memory.** Approved corrections reach retrieval only
