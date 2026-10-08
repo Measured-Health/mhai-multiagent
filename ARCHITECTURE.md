@@ -31,22 +31,27 @@ RBAC → PII Mask → Route → Audit → Encrypt
 
 ## Service Architecture (planned, #8)
 
-> **Status: design in progress, not yet implemented.** Phase 1 API gateway
-> (#8). Approved: scope, JWT login, optional `patient_id`, Redis worker,
-> API contract, auth and identity, data and job lifecycle.
+> **Status: design approved, not yet implemented.** API gateway (#8).
+> Full spec: `docs/specs/2026-10-08-api-gateway-phase1-design.md`.
+> Decisions: ADR 0007 (API in Python, contract-first) and ADR 0008 (models
+> behind inference services).
 
 ### 1. Components
 
 ```mermaid
 flowchart LR
     web["mhai-web<br/>(Next.js)"] -- "HTTPS + JWT" --> api
+    web -. "OIDC login" .-> keycloak
 
     subgraph stack["Compose stack"]
         api["api<br/>FastAPI :8000<br/>auth · validation · routing"]
-        worker["worker<br/>models + KB loaded once<br/>SecurePipelineWrapper"]
+        worker["worker<br/>KB + SecurePipelineWrapper<br/>(no ML frameworks)"]
+        infer["inference<br/>embeddings · NLI<br/>batching · model versions"]
         pg[("Postgres<br/>source of truth")]
         redis[("Redis<br/>job queue · rate limits<br/>token denylist")]
         ollama["Ollama<br/>CCA LLM"]
+        keycloak["Keycloak<br/>(sso profile, dev)"]
+        minio[("S3 / MinIO<br/>documents")]
         migrate["migrate<br/>(one-shot)<br/>alembic upgrade head"]
     end
 
@@ -55,12 +60,18 @@ flowchart LR
     redis -- "claim job" --> worker
     worker -- "stage, progress,<br/>results, corrections, audit" --> pg
     worker -- "generate" --> ollama
+    worker -- "embed · classify" --> infer
+    api -- "upload" --> minio
+    worker -- "read PDF" --> minio
     migrate -. "schema" .-> pg
 ```
 
 The API never loads models or calls the orchestrator. Only the worker calls
-`SecurePipelineWrapper`. **There is exactly one worker in Phase 1**,
-because learning state stays in the worker's memory until #9.
+`SecurePipelineWrapper`. **Neither imports ML frameworks**: every model is
+reached through an inference client (ADR 0008), so engines can change and
+inference can scale without touching orchestration. **There is exactly one
+worker in Phase 1**, because learning state stays in the worker's memory
+until #9.
 
 ### 2. Query lifecycle
 
@@ -218,8 +229,14 @@ flowchart LR
         deny[[token denylist]]
     end
     subgraph WM["worker memory (until #9)"]
-        kb[[KB + retrievers]]
+        kb[[KB index]]
         learn[[persona vector ·<br/>trust weights]]
+    end
+    subgraph S3["S3 / MinIO"]
+        docs[[uploaded PDFs]]
+    end
+    subgraph INF["inference service"]
+        models[[embedding + NLI models<br/>versioned]]
     end
     cq --> cd --> fb
 ```
@@ -231,3 +248,42 @@ flowchart LR
 | `mhai` service runs the CLI and exits | `api` serves on :8000 with a real health check, plus a `worker` service |
 | schema from `init-db/init.sql` | Alembic migrations, run by a one-shot `migrate` service |
 | placeholder `admin` with a fake hash | `mhai users create` (real hashes); `mhai seed-demo` for dev-only synthetic clinicians |
+
+### 8. Inference boundary
+
+```mermaid
+flowchart LR
+    subgraph app["application (Python, no ML frameworks)"]
+        retr["DenseRetriever"] --> E["Embedder"]
+        nli["NLI verifier ·<br/>entailment check"] --> N["NLIClassifier"]
+        cca["RAG CCA"] --> G["Generator"]
+        dia["OCR ingest"] --> O["OCR"]
+    end
+    E -- "POST /v1/embeddings<br/>(OpenAI-compatible)" --> inf["inference service<br/>today: MiniLM + NLI cross-encoder<br/>later: TEI / vLLM / Triton, GPU"]
+    N -- "POST /v1/classify<br/>named labels" --> inf
+    G -- "/api/chat" --> oll["Ollama<br/>later: vLLM"]
+    O -. "in-process for now" .-> tess["Tesseract"]
+```
+
+Swapping an engine or scaling inference is a configuration change.
+Responses carry `model` and `model_version`, which are stored with each
+decision.
+
+### 9. Ingest, triage and retention
+
+```mermaid
+flowchart TD
+    up["POST /documents<br/>PDF ≤20 MB, patient_id"] --> chk{"%PDF- magic,<br/>size ok?"}
+    chk -- no --> rej["422 unsupported_file / 413"]
+    chk -- yes --> put["BlobStore.put<br/>patients/{pid}/docs/{id}.pdf"] --> job["ingest_document job"]
+    job --> ocr["OCR each page<br/>(cache by hash + page + OCR version)"] --> chunks["patient-scoped kb_chunks<br/>ocr_only=true"]
+
+    tri["POST /triage"] --> gate{"TRIAGE_ENABLED and weights<br/>checksum + validation report?"}
+    gate -- no --> u503["503 triage_unavailable<br/>(never a simulated score)"]
+    gate -- yes --> tjob["run_triage job"]
+
+    cron["daily retention_purge<br/>pg_try_advisory_lock"] --> hold{"legal hold?"}
+    hold -- yes --> keep["skip"]
+    hold -- no --> del["delete rows in batches"] --> blob["pending_blob_deletes → S3"]
+    cron --> ck["audit: write checkpoint, then purge"]
+```
