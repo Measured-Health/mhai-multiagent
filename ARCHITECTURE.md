@@ -31,69 +31,181 @@ RBAC → PII Mask → Route → Audit → Encrypt
 
 ## Service Architecture (planned, #8)
 
-> **Status: design approved, not yet implemented.** This describes the
-> Phase 1 API gateway being designed in #8. The detailed spec will live in
-> `docs/superpowers/specs/`. Update this section as parts land.
+> **Status: design in progress, not yet implemented.** Phase 1 API gateway
+> (#8). Approved: scope, JWT login, optional `patient_id`, Redis worker,
+> API contract, auth and identity.
 
-Decisions so far:
+### 1. Components
 
-- **Scope:** the Phase 1 slice: login, query submit/status/result, feedback
-  and correction approval, `/healthz` and `/readyz`. Admin, document
-  ingest, triage, KB search and audit endpoints come in a follow-up project.
-- **Auth:** real JWT login with an argon2-hashed `users` table.
-- **Patient:** an optional `patient_id` per query. Without one, the
-  consultation is its own case, and retrieval uses shared guidelines plus
-  the submitted form.
-- **Processing:** the API enqueues jobs on Redis, and a separate worker
-  runs them.
+```mermaid
+flowchart LR
+    web["mhai-web<br/>(Next.js)"] -- "HTTPS + JWT" --> api
 
-### Processes
+    subgraph stack["Compose stack"]
+        api["api<br/>FastAPI :8000<br/>auth · validation · routing"]
+        worker["worker<br/>models + KB loaded once<br/>SecurePipelineWrapper"]
+        pg[("Postgres<br/>source of truth")]
+        redis[("Redis<br/>job queue · rate limits<br/>token denylist")]
+        ollama["Ollama<br/>CCA LLM"]
+        migrate["migrate<br/>(one-shot)<br/>alembic upgrade head"]
+    end
 
-Two new processes, built from the same image, each with one job:
-
-```
-mhai-web ──HTTPS/JWT──▶ api (FastAPI, :8000) ──▶ Postgres (source of truth)
-                           │ enqueue job id            ▲
-                           ▼                           │ status, results,
-                         Redis ──────▶ worker ─────────┘ corrections, audit
-                                   (models + KB loaded once;
-                                    SecurePipelineWrapper → orchestrator
-                                    → CCA via Ollama → HGA)
+    api -- "read/write status,<br/>results, users, audit" --> pg
+    api -- "enqueue job id" --> redis
+    redis -- "claim job" --> worker
+    worker -- "stage, progress,<br/>results, corrections, audit" --> pg
+    worker -- "generate" --> ollama
+    migrate -. "schema" .-> pg
 ```
 
-- **api** (`mhai/api/`):
-  - `app.py`: app factory, startup checks and error handlers;
-  - `schemas.py`: Pydantic v2 request and response models; this is the
-    contract that `openapi.json` and mhai-web's types come from;
-  - `auth.py`: argon2 password hashing, JWT issue and verify, and the
-    `current_user` dependency (`{user_id, role}`);
-  - `routes/`: `auth`, `queries`, `feedback`, `health`;
-  - `db.py` and `models.py`: SQLAlchemy 2.0 over Postgres;
-  - `queue.py`: Redis jobs (`enqueue`, `claim`, `ack`, dead-letter after N
-    attempts).
-- **worker** (`mhai/worker/`): `main.py` loads the models and KB once and
-  loops over jobs (`run_query`, `submit_feedback`, `approve_correction`);
-  `progress.py` records each pipeline stage and its progress.
+The API never loads models or calls the orchestrator. Only the worker calls
+`SecurePipelineWrapper`. **There is exactly one worker in Phase 1**,
+because learning state stays in the worker's memory until #9.
 
-### Boundaries
+### 2. Query lifecycle
 
-- The API never imports the models or the orchestrator. It only reads and
-  writes Postgres and enqueues jobs.
-- Only the worker calls `SecurePipelineWrapper`; nothing calls the
-  orchestrator directly.
-- Postgres is the source of truth for what users see and keep: query
-  status, results, pending corrections and the audit trail.
-- **Exactly one worker in Phase 1.** Learning state (pending corrections,
-  persona vector, trust weights, KB) lives in the worker's memory. Feedback
-  and approvals therefore run in that same worker until #9 moves the state
-  to Postgres; after that, workers can scale.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Clinician (mhai-web)
+    participant A as api
+    participant P as Postgres
+    participant R as Redis
+    participant W as worker
 
-### Deployment (Compose)
+    C->>A: POST /api/v1/queries (JWT, form, patient_id?)
+    A->>A: verify JWT, reload user, check query_submit
+    A->>P: insert query (status=queued)
+    A->>R: enqueue run_query(query_id, user_id, role)
+    A-->>C: 202 {query_id, status: queued}
 
-- `mhai` becomes `api`. It serves on :8000, with a real health check.
-- A sibling `worker` service runs the jobs.
-- A one-shot `migrate` service runs `alembic upgrade head` before either
-  starts. Alembic migrations replace `init-db/init.sql`.
-- The placeholder admin seed is removed. Accounts are created with
-  `mhai users create`, with real hashes; `mhai seed-demo` creates synthetic
-  test clinicians for development only.
+    W->>R: claim job
+    W->>P: status=processing
+    W->>W: SecurePipelineWrapper.submit_query(...)<br/>on_stage(stage, progress) per step
+    W->>P: update current_stage / progress (each stage)
+    W->>P: insert decision + citations, status=completed
+    W->>R: ack
+
+    loop every 2–3 s
+        C->>A: GET /api/v1/queries/{id}
+        A->>P: read status (owner or admin only)
+        A-->>C: {status, progress, current_stage}
+    end
+    C->>A: GET /api/v1/queries/{id}/result
+    A-->>C: ClinicalResultOut (409 until completed)
+```
+
+### 3. Pipeline stages (progress)
+
+```mermaid
+flowchart LR
+    q([queued]) --> s1["pii_masking<br/>SecurePipelineWrapper"]
+    s1 --> s2["retrieval<br/>patient-scoped RAG"]
+    s2 --> s3["generation<br/>CCA via Ollama"]
+    s3 --> s4["nli_verification<br/>per-citation NLI"]
+    s4 --> s5["hga_verification<br/>coherence · numbers · SE"]
+    s5 --> s6["decision<br/>PASS / REGENERATE / ESCALATE"]
+    s6 --> done([completed])
+    s1 & s2 & s3 & s4 & s5 -. "unrecoverable error /<br/>retries exhausted" .-> failed([failed])
+```
+
+Each arrow is an `on_stage(stage, progress)` callback that the worker writes
+to Postgres. The frontend's progress stepper reads it.
+
+### 4. Failure handling (fail closed)
+
+```mermaid
+flowchart TD
+    start{{"agent result"}} --> cca{"CCA produced<br/>a response?"}
+    cca -- no --> esc["ESCALATE · degraded=true<br/>failed_agents=[CCA]<br/>response_available=false"]
+    cca -- yes --> hga{"HGA verified<br/>it?"}
+    hga -- no --> esc2["ESCALATE · degraded=true<br/>failed_agents=[HGA]<br/>trust_score=null"]
+    hga -- yes --> known{"decision is<br/>pass/regenerate/escalate?"}
+    known -- no --> esc3["ESCALATE"]
+    known -- yes --> out["decision as scored<br/>verified=true"]
+
+    job{{"worker job"}} --> retry{"attempt < N?"}
+    retry -- yes --> job
+    retry -- no --> dlq["dead-letter queue<br/>query status=failed"]
+```
+
+### 5. Login and request authentication
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Clinician
+    participant A as api
+    participant R as Redis
+    participant P as Postgres
+
+    C->>A: POST /api/v1/auth/login {username, password}
+    A->>R: check failed-attempt counter (5 per 15 min)
+    A->>P: load user, verify argon2id hash, is_active
+    A->>P: audit LOGIN (success/failure)
+    A-->>C: {access_token (15 min), user: {username, role}}
+
+    C->>A: any request + Bearer token
+    A->>A: verify signature, exp
+    A->>R: token id not on denylist?
+    A->>P: reload user (deactivation applies at once)
+    A->>A: route permission check (same matrix as RBACManager)
+    Note over A: identity comes from the token only<br/>(no user or clinician ids accepted in bodies)
+```
+
+### 6. Feedback and two-person correction approval
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor A1 as Clinician A
+    actor B1 as Clinician B
+    participant API as api
+    participant P as Postgres
+    participant W as worker
+
+    A1->>API: POST /feedback {query_id, action: correct,<br/>corrected_diagnosis, reason}
+    API->>P: store feedback, correction status=pending_review
+    API->>W: enqueue submit_feedback (via Redis)
+    API-->>A1: {status: pending_review, correction_id}
+    Note over W: nothing changes in KB, persona vector<br/>or trust weights yet
+
+    B1->>API: GET /corrections?status=pending
+    API-->>B1: corrections by others (never your own)
+    B1->>API: POST /corrections/{id}/approve
+    API->>API: reviewer ≠ submitter, else 403
+    API->>W: enqueue approve_correction (via Redis)
+    W->>W: apply: PII-mask, patient-scoped KB entry,<br/>persona vector, trust weights
+    W->>P: correction status=approved, audit APPROVE
+```
+
+### 7. Data ownership
+
+```mermaid
+flowchart LR
+    subgraph PG["Postgres (durable)"]
+        users[(users)]
+        cq[(clinical_queries<br/>status · progress · stage)]
+        cd[(clinical_decisions<br/>result · citations)]
+        fb[(feedback_events<br/>corrections)]
+        audit[(audit_log<br/>hash chain)]
+    end
+    subgraph RD["Redis (ephemeral)"]
+        jobs[[job queue + DLQ]]
+        rl[[login rate limits]]
+        deny[[token denylist]]
+    end
+    subgraph WM["worker memory (until #9)"]
+        kb[[KB + retrievers]]
+        learn[[persona vector ·<br/>trust weights]]
+    end
+    cq --> cd --> fb
+```
+
+### Deployment changes
+
+| Before | After |
+|---|---|
+| `mhai` service runs the CLI and exits | `api` serves on :8000 with a real health check, plus a `worker` service |
+| schema from `init-db/init.sql` | Alembic migrations, run by a one-shot `migrate` service |
+| placeholder `admin` with a fake hash | `mhai users create` (real hashes); `mhai seed-demo` for dev-only synthetic clinicians |
