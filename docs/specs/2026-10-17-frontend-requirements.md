@@ -342,6 +342,58 @@ admitted ward and bed, outpatient clinic, emergency, or not recorded),
   hospital admin later. Shape: **New**.
 - Admin-only accounts get no alerts.
 
+### 9.1 Patient alert numbers on Usage
+
+Source: mhai-web `docs/specs/2026-10-17-usage-alert-analytics-design.md`
+(§4, §5, §13). Status: **Assumed** (Plan 5b). Shape: **New** field on an
+existing endpoint.
+
+`GET /hospital/usage?period=this_month|last_month|last_90_days` gains an
+`alerts` field, for the caller's own hospital only, **counts only** (no
+patient names, MRNs or single alerts):
+
+- `null` (or absent) when alerts aren't switched on for the hospital: the
+  group is hidden. `{ "unavailable": true }` when the numbers couldn't be
+  worked out: the page shows "Couldn't load", never zeros.
+- **Volumes:** total, by severity (Critical, Urgent, Info), still unhandled.
+- **Response:** median minutes to acknowledge (all, and Critical), and the
+  share of Critical alerts handled within `critical_target_minutes`
+  (hospital setting, 15 by default).
+- **Outcomes:** acknowledged and dismissed shares; dismissal reasons with
+  counts.
+- **Top findings and top locations:** up to 5 each. Findings use the
+  canonical display label, unmapped ones grouped as "Not standardised";
+  locations at ward or clinic level, never a bed.
+- **Series:** alerts over time, daily for the month periods and weekly
+  (from the period's first day, in 7-day steps) for the last 90 days;
+  hospital-wide totals only.
+- **Trend changes, all worked out by the backend** (the frontend computes
+  no statistics): each measure's change against the previous period of the
+  same length (`direction`, `amount`, `previous`); unusually busy days or
+  weeks (`usual_multiple`); findings and locations rising sharply; a
+  worsening flag when the Critical-within-target share drops.
+  `has_previous: false` when there is no previous period.
+
+**Small-group rule (server side, required):**
+
+- Any number from a group of fewer than 5 is sent as
+  `{ "value": null, "suppressed": true }`. Raw 1 to 4 are never sent.
+  Zero is sent as 0.
+- In a set that adds up (total and severities, dismissal reasons,
+  acknowledged and dismissed), hide enough groups that the hidden ones
+  together are at least 5. Never exactly one hidden member.
+- Shares, medians and the worsening flag over a hidden group (Critical, or
+  the total) are hidden too.
+- A change is sent only when both periods' values are shown. A hidden group
+  is never flagged as rising, and "rising" needs at least 5 in both periods.
+- The series totals are not suppressed (no split by severity, finding or
+  location).
+
+The frontend fails the whole group closed ("Couldn't load") when any of
+these rules is broken, so a backend slip blanks the numbers rather than
+leaking them. **New dismissal reasons must ship in the frontend before the
+backend sends them**, for the same reason.
+
 ## 10. Analysis, clearances and audit
 
 Source: analysis design §2–6, §9. Status: **Assumed** (Plan 6). Needs
