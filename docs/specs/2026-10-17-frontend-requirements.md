@@ -12,6 +12,8 @@
   - `docs/specs/2026-10-17-notifications-design.md` §8, §9
   - `docs/specs/2026-10-17-analysis-design.md` §2–6, §9
   - `docs/adr/0003-many-emr-systems.md`
+  - `docs/specs/2026-10-17-platform-admin-design.md` §13, §16 (platform
+    admin app, §14 below)
 
 ## 1. Purpose
 
@@ -486,3 +488,80 @@ Each needs a decision, then an update to the gateway spec or this list.
     patient names and MRNs.
 13. **EMR data:** the gateway has no hospitals, no EMR ingest and no
     alerts; ADR 0009 adds them.
+14. **Platform admin audience:** the platform admin app sends
+    `X-MHAI-Audience: platform` on every call and needs the `/platform/*`
+    endpoints in §14; the gateway has neither.
+
+## 14. Platform admin app
+
+Source: mhai-web `docs/specs/2026-10-17-platform-admin-design.md` §13
+(the contract) and §16 (what changed while building it). Status:
+**Assumed** (Plan 7b). The app is separate from the clinical app, on its
+own origin (`platforms.<domain>`) behind an IP allow list, for Measured
+Health platform admins and auditors. No endpoint returns patient data.
+
+### 14.1 Who can use it
+
+- Every call (sign-in and API) sends `X-MHAI-Audience: platform`.
+- The login `user` carries `roles` and `mfa_enabled`. The role `admin`
+  (today's name) or `platform_admin` means platform admin; `auditor` means
+  auditor. Any other account gets **403 `not_platform`** at sign-in.
+- Two-step is always required (**403 `mfa_required`**). Auditors are
+  refused every write (**403 `forbidden`**).
+- Every id (hospitals, team members, invites, events) is opaque and
+  matches `[A-Za-z0-9_-]+`. A team member's id is never an email or
+  username.
+
+### 14.2 Hospitals
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /platform/hospitals?status&q&cursor` | → `{hospitals, next_cursor}`; each has `id`, `name`, `short_code`, `status` (`active`, `setup_incomplete`, `deactivated`, `removal_pending`, `removal_scheduled`, `removed`), `staff_count`, `sso_enabled`, `created_at`, `last_activity_at` |
+| `POST /platform/hospitals {name, short_code, country, time_zone, email_domains, first_admin: {name, email}}` | → the hospital, `setup_incomplete` with a pending first-admin invite. **409 `duplicate`** for a used short code |
+| `GET /platform/hospitals/{id}` | → the hospital, plus `country`, `time_zone`, `email_domains`, `version`, `deactivation` (`by`, `at`, `reason`, `note`), `first_admin` (`invite_id`, `name`, `email`, `status`, `sent_at`, `expires_at`), `removal` (§14.3) |
+| `PATCH /platform/hospitals/{id} {version, …details}` | → the hospital; **409 `conflict`** when changed meanwhile |
+| `POST /platform/hospitals/{id}/deactivate {reason, note?, mfa_code \| backup_code}` | `reason` one of `contract_ended`, `security_concern`, `hospital_request`, `other` (note required). Signs all staff out; pending invites stop working; no data deleted |
+| `POST /platform/hospitals/{id}/reactivate {reason, mfa_code \| backup_code}` | staff can sign in again; old sessions aren't revived |
+| `POST /platform/hospitals/{id}/invites {name, email}` | invites the first hospital admin (7 days) |
+| `POST /platform/hospitals/{id}/invites/{invite_id}/resend` | 7 more days |
+
+### 14.3 Removal (two people)
+
+| Endpoint | Behaviour |
+|---|---|
+| `POST /platform/hospitals/{id}/removal {reason, mfa_code \| backup_code}` | only while `deactivated`. → the hospital with `removal`: `status`, `requested_by`, `requested_at`, `reason`, `approved_by`, `approved_at`, `checks` (`legal_holds`, `retention_until`, `export_required`, `export_done`), `blocking` (`legal_hold`, `retention`, `export_required`) and `requested_by_you` (boolean, decided by the server for the signed-in person) |
+| `POST /platform/hospitals/{id}/removal/approve {mfa_code \| backup_code}` | a different platform admin. **409 `same_person`** for the requester; **409 `blocked`** with `{blocking}` while a check blocks; then `removal_scheduled`, and `removed` once done (only the audit trail remains) |
+| `POST /platform/hospitals/{id}/removal/cancel` | back to `deactivated` |
+
+### 14.4 Single sign-on
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /platform/hospitals/{id}/sso` | `enabled`, `sign_in_url`, `client_id`, `issuer`, `allowed_domains`, `secret_saved`, `secret_ends` (last 4 characters only), `last_test` (`at`, `ok`, `message`), `version` |
+| `PUT /platform/hospitals/{id}/sso {…, client_secret?, version}` | the secret is write-only. Resets `last_test` whenever the address, issuer, client id, domains or secret change, so a changed set-up must be tested before it can be switched on |
+| `POST /platform/hospitals/{id}/sso/test` | tests the saved set-up → the SSO object |
+
+**New:** testing a draft set-up before saving it, so a live set-up can
+change without switching sign-on off for the hospital.
+
+### 14.5 Team and activity
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /platform/team` | → `{members}`: `id`, `name`, `email`, `role` (`platform_admin`, `auditor`), `status` (`active`, `invite_pending`), `mfa_enabled`, `last_sign_in_at`, `is_you`, `version` |
+| `POST /platform/team/invites {name, email, role}` | → the member |
+| `PATCH /platform/team/{id} {role, version}` | **409 `conflict`**, **409 `last_admin`**, **409 `own_role`** |
+| `DELETE /platform/team/{id}` | body `{mfa_code}` or `{backup_code}` → 204. **409 `last_admin`** |
+| `GET /platform/activity?hospital&cursor` | → `{events, next_cursor}`, newest first; each `id`, `at`, `actor`, `action`, `hospital`, `target`, `detail` |
+
+`PATCH` and `DELETE` on `/platform/team/invites` are reserved: `invites`
+is never a member id.
+
+### 14.6 On every platform endpoint
+
+- Every write honours `Idempotency-Key` and is audited (who, when, what,
+  which hospital).
+- A step-up action takes `mfa_code` or `backup_code`. A wrong code is
+  **403 `mfa_invalid`**; too many wrong codes **429 `mfa_locked`** (15
+  minutes).
+- Errors carry only `code` (plus `blocking` on **409 `blocked`**).
