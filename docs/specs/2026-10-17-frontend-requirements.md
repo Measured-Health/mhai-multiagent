@@ -398,14 +398,141 @@ backend sends them**, for the same reason.
 
 ## 10. Analysis, clearances and audit
 
-Source: analysis design §2–6, §9. Status: **Assumed** (Plan 6). Needs
+Source: analysis design §2–6, §9; the clinical app's Plan 6
+(`apps/clinical/lib/api/analysis-contract.ts`). Status: **Assumed** (Plan 6
+built on sample data; named drill-down and clearances: Plan 11). Needs
 clinical, privacy and legal sign-off before live use, because it changes
 the rule that hospital admins see no clinical content.
 
+### Analysis, as built in Plan 6
+
 | Endpoint | Behaviour |
 |---|---|
-| `GET /analysis/{view}?filters…` | aggregates; groups under 5 patients suppressed **on the server** ("Fewer than 5"), never sent raw. Views: prevalence and trends, who is affected, co-occurring conditions, findings and alerts, MHAI quality |
-| `GET /analysis/patients?filters…&level=deidentified\|named` | de-identified: pseudonymous id (stable in the hospital, not the MRN), age band, sex, location type, findings. Named adds name and MRN, only with a verified, unexpired clearance for the caller. Every call audited; named calls flagged as security events |
+| `GET /analysis/filters` | the filter options: `{updated_at, conditions: ConditionRef[], locations: {id, label, setting}[], specialties: string[], sources: {id, label}[]}`. The app shows Source only when there is more than one |
+| `GET /analysis/{view}?from&to&…` | one of `prevalence`, `affected`, `co-occurring`, `findings`, `quality`. Query: `from`, `to` (`YYYY-MM-DD`, required), and optional `condition`, `age_band` (`0-17`, `18-39`, `40-64`, `65-79`, `80+`), `sex` (`female`, `male`, `other`, `not_recorded`), `location`, `setting` (`admitted`, `outpatient`, `emergency`), `specialty`, `source`. Omitted means all. Unknown view: 404 `not_found` |
+| `GET /analysis/patients?drill=…&level=deidentified&from&to&…` | the patients behind one shown count. `drill` is the opaque key from a `Drillable`; the same filters as the view. Only `deidentified` for now; `named` is a later plan (Plan 11) |
+
+Shapes (ids are opaque, `[A-Za-z0-9_-]+`):
+
+- `GuardedOut`: `{value: number | null, suppressed: boolean}`. Hidden is
+  exactly `{value: null, suppressed: true}`. `value: null` with
+  `suppressed: false` means "nothing to measure" and is allowed only for a
+  share or a median.
+- `Drillable`: a `GuardedOut` plus `drill: string | null`.
+- `ConditionRef`: `{id, name: string | null, icd10: string | null}`. `name`
+  null reads "Not standardised": uncoded records are counted, never dropped
+  or guessed.
+- Every view starts with `Meta`: `{updated_at, from, to, bucket: "week" |
+  "month", patients: GuardedOut}`.
+- `prevalence`: `total {cases, new, existing}`; `by_condition[] {condition,
+  cases: Drillable, new, existing}`; `series[] {start, cases, new}` (`start`
+  a day inside the range).
+- `affected`: `by_age[] {band, patients}`, `by_sex[] {sex, patients}`,
+  `by_setting[] {setting | null, patients}`, `by_location[] {location:
+  {id, label, setting} | null, patients}`, `by_specialty[] {specialty |
+  null, patients}`; every `patients` is a `Drillable`.
+- `co-occurring`: top 20 `pairs[] {a, b, a_patients, patients: Drillable,
+  share_of_a}`. `patients` is "with both"; a pair appears once, whichever
+  way round.
+- `findings`: `findings[] {name | null, flag: low | high | abnormal | null,
+  patients: Drillable, results}`; `alerts {total, by_severity {critical,
+  urgent, info}, median_ack_minutes, critical_median_ack_minutes,
+  dismissed, dismiss_reasons[] {reason, count}}`. Reasons: `not_relevant`,
+  `already_known`, `wrong_patient`, `other`.
+- `quality`: `by_condition[] {condition, consultations, confidence {high,
+  caution, review, failed}, agreement_rate (0 to 1 of rated), rated,
+  corrections {total, approved, rejected, waiting}}`.
+- Patients: `{level: "deidentified", count, patients[]}`; a row is exactly
+  `{pid, age_band, sex, setting | null, conditions: ConditionRef[],
+  findings: {name | null, flag | null, source_label | null}[]}`.
+
+**Who and when**
+
+- Hospital admins, and clinicians who also hold the `analyst` role, for
+  their own hospital only. The hospital is never sent by the browser; scope
+  by session. Platform accounts never use these endpoints.
+- Two-step must be on: otherwise 403 `{code: "mfa_required"}`.
+- `analyst` is a `StaffRole` beside `clinician` and `hospital_admin`. An
+  analyst is always also a clinician. Granting and removing it are logged
+  as `analyst_granted` and `analyst_removed`.
+- The live gate: the user's `features.analysis` from `/me` must be true
+  **and** the deployment's `ANALYSIS_SIGNED_OFF` must be exactly `true`. The
+  BFF checks the second on every call and returns 404 `not_found` before it
+  reads the session.
+
+**The small-group rule (the server applies it; the app only checks)**
+
+- Every count of 1–4 is hidden, in every field. 0 is sent as 0. A count is
+  a whole number.
+- A hidden value carries no number: `{value: null, suppressed: true}`.
+- A share, rate or median over a hidden count is hidden. A share of a shown
+  count must not give away a numerator, or its complement, of 1–4. Send
+  shares at full precision, not rounded: a rounded share can stand for
+  several counts, and the app cannot tell what it hides.
+- A median is a whole number or a half (12.5).
+- Secondary suppression: in every set that adds up, hide enough that no
+  hidden count can be worked out. The app fails a set closed when exactly
+  one member is hidden, when the total is hidden beside a shown member, or
+  when the shown members leave 1–4 over (the total minus the shown members
+  is under 5 while any member is hidden). The sets, as the app checks them:
+  - `total.cases` against `new` + `existing`, and each condition row the
+    same way;
+  - each `series` point: `cases` against `new` (the rest is existing);
+  - `patients` against each of `by_age`, `by_sex`, `by_setting`,
+    `by_location`, `by_specialty` as its own set;
+  - a co-occurring pair: `a_patients` against "both" (the rest is "first
+    only"), nothing shown beside a hidden `a_patients`, and `share_of_a`
+    hidden when either count is;
+  - `alerts.total` against `critical` + `urgent` + `info`;
+  - `alerts.total` against `dismissed` (the rest is not dismissed);
+  - `dismissed` against its `dismiss_reasons`;
+  - `consultations` against the four `confidence` levels;
+  - `consultations` against `rated`, and `agreement_rate` hidden when
+    `rated` or `consultations` is;
+  - `corrections.total` against `approved` + `rejected` + `waiting`;
+  - `median_ack_minutes` hidden when `alerts.total` is;
+    `critical_median_ack_minutes` hidden when `total` or `critical` is.
+- `patients` against `cases` is not a set: one patient can have several
+  conditions.
+- `drill` is set only on a shown count of 5 or more; otherwise null.
+- No row repeats its key (condition id, band, day, pair, finding name and
+  flag). Two rows for one group would let a viewer add a hidden group twice.
+- The app fails a view closed ("Couldn't load {view}") on any violation,
+  and never shows zeros in its place. Each view fails on its own. Unknown
+  extra fields are dropped by the app, not shown.
+
+**Patients (de-identified)**
+
+- At most 200 rows; `count` is the number matched (5 or more, and not under
+  the rows sent). No `pid` repeats. Rows carry exactly the keys above, and
+  the app refuses the list if any other field appears (a name, an MRN, a
+  date of birth, an address).
+- `pid` matches `^P-[A-Z0-9]{4,12}$`: pseudonymous, stable within the
+  hospital, never the MRN.
+- Each call is audited as `analysis_patients_viewed`: type `security`,
+  unflagged, with `count` (the rows sent). It appears in the hospital's
+  activity.
+- An unknown drill, or one that is hidden or under 5: 422 `too_small`. A
+  level other than `deidentified`: 422 `level_not_supported`.
+
+**Errors**
+
+- 422 `invalid_range`: `from` or `to` is not a real day, `from` is after
+  `to`, or the range is more than 24 months.
+- 404 `not_found`: unknown view, or the gate is off. 503 `unavailable`:
+  the app shows that view as failed and offers Try again.
+- 403 `mfa_required`, as above.
+
+**Not logged.** The filters travel in the query string; the BFF does not
+log it, and neither should the gateway or the API. They are not kept in the
+page URL or in browser storage. The patient list is never cached, exported
+or printed.
+
+### Clearances, named lists and audit (later: Plan 11)
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /analysis/patients?…&level=named` | adds name and MRN, only with a verified, unexpired clearance for the caller. Every call audited; named calls flagged as security events |
 | `POST /hospital/clearances` | multipart: the letter (PDF or image), covered people, end date (capped at 12 months) |
 | `GET /hospital/clearances` | the hospital's clearances and their status |
 | `POST /hospital/clearances/{id}/revoke` | hospital admin or platform admin; takes effect at once |
