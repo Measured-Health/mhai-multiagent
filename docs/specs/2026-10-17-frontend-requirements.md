@@ -616,3 +616,179 @@ visible. Its BFF sends that read with `X-MHAI-Background: 1` and does not
 count it as activity for the 15-minute idle limit; the API should not either
 (the BFF does not forward the header, so a poll must not refresh any
 server-side idle clock the API keeps).
+
+### 14.8 Platform operations: legal holds, system health, settings
+
+Source: mhai-web `docs/specs/2026-10-22-platform-operations-design.md` §9,
+as built (`apps/platform/lib/api/holds-contract.ts`, `ops-contract.ts`) and
+as ruled while building. Status: **Assumed** (Plan 8a built on sample data;
+8b built; 8c planned). The `/platform/*` shapes below are asked for instead
+of the gateway's `/admin/*` ones; the backend may build them on the existing
+handlers. Hold notes, job subjects and users, and error messages never
+appear in a list, in Activity or in a health reading.
+
+**Who and how**
+
+- Platform admins read and write. Auditors read every `GET` below and are
+  refused every write (**403 `forbidden`**) before anything reaches the
+  upstream. Two-step is always required.
+- The named writes take `mfa_code` or `backup_code` (**403 `mfa_invalid`**,
+  **429 `mfa_locked`**): placing a hold, requesting and approving a lift,
+  undoing a lift, cancelling jobs, and the settings writes in 14.8.4.
+  Editing a hold, cancelling a lift request and retrying jobs take none.
+- **Every write sends an `Idempotency-Key`** and is audited.
+- Errors carry only `code`. Ids are opaque (`[A-Za-z0-9_-]+`).
+
+#### 14.8.1 Legal holds
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /platform/legal-holds?status&hospital&q&cursor` | → `{holds, next_cursor}`, newest first. `status` is `open` (default: active, review due, lift requested), `active`, `review_due`, `lift_requested`, `lifted` or `all`. `q` is part of the reference, any case |
+| `GET /platform/legal-holds/{id}` | → the hold plus `history` (newest first): `at`, `actor`, `action` (`placed`, `edited`, `lift_requested`, `lift_cancelled`, `lift_lapsed`, `lifted`, `lift_undone`, `released`), `detail` |
+| `POST /platform/legal-holds {hospital_id, from?, to?, reason, note?, reference, asked_by, review_on, mfa_code \| backup_code}` | → the hold. **409 `hospital_removed`**, **409 `removal_started`**, **422 `invalid_range`**; `to` without `from` is **422 `invalid`** |
+| `PATCH /platform/legal-holds/{id} {review_on?, note?, version}` | no step-up. Only these two fields; any other field is **422 `invalid`**. All or nothing: if any part is invalid, none is applied. **409 `conflict`** on a stale `version` or a lifted hold |
+
+A hold: `id`, `hospital` (`{id, name}`), `scope` (`{from, to}` calendar
+dates, inclusive; both null means all records), `reason` (`court_case`,
+`regulator`, `complaint`, `investigation`, `other`; `other` needs a note),
+`reference`, `asked_by`, `note`, `placed_by`, `placed_at`, `review_on`,
+`status` (`active`, `review_due`, `lift_requested`, `lifted`), `lift`
+(below) or null, `stopped_removal` (placing it sent a scheduled removal back
+to pending) and `version`. Scope, reason and reference never change after
+placing. `review_due` is set by the server from `review_on`; a hold never
+lifts itself and is never deleted.
+
+**Two-person lift.**
+
+| Endpoint | Behaviour |
+|---|---|
+| `POST …/{id}/lift {reason, note?, authority, mfa_code \| backup_code}` | `reason`: `case_closed`, `withdrawn`, `mistake`, `other`. → the hold, `lift_requested`. `lift`: `kind` (`hold_lift`), `requested_by`, `requested_at`, `reason`, `note`, `authority`, `requested_by_you`, `expires_at`, `records_due` (records past retention that only this hold keeps), `due_after`, `approved_by`, `approved_at`, `released_on` |
+| `POST …/{id}/lift/approve {version, mfa_code \| backup_code}` | a different platform admin → `lifted`; `released_on` is 7 days on |
+| `POST …/{id}/lift/cancel {version}` | either platform admin; back to `active` or `review_due` |
+| `POST …/{id}/lift/undo {version, mfa_code \| backup_code}` | only before `released_on`; → `active`, or `review_due` if the review date has passed |
+
+- `requested_by_you` is decided by the server for the signed-in person and
+  is the only thing that decides who may approve: **409 `same_person`** for
+  the requester.
+- A request lapses 7 days after `requested_at` (`expires_at`): the hold goes
+  back to `active` (or `review_due`), history gets `lift_lapsed`, and an
+  approval is **409 `expired`**.
+- Approve, cancel and undo send the hold's `version` as the person saw it,
+  so they act only on that request. A mismatch (for example, the request
+  was cancelled and a new one made meanwhile) is **409 `conflict`**
+  ("Changed by someone else"). Undo after `released_on` is **409 `conflict`**.
+
+**Hospitals.** `GET /platform/hospitals` items gain `legal_holds_active`;
+`GET /platform/hospitals/{id}` gains `legal_holds` (short form: `id`,
+`scope`, `reference`, `status`, `review_on`). Despite the name,
+`legal_holds_active` counts the holds that **keep records**: active, review
+due, lift requested, or lifted but before `released_on` (the 7-day grace
+period). `removal.checks.legal_holds` (§14.3) counts the same set.
+
+**Server duties** (the app can't keep these):
+
+- The daily clean-up and every other deletion path (removal, a future
+  erasure request) leave out every record covered by a hold that keeps
+  records, in the deletion query itself.
+- Removal blocking is checked at every read, not stored at request time:
+  `removal.checks` and `blocking` reflect holds as they stand, including a
+  hold placed after the removal was requested. The removal re-checks just
+  before deleting. Placing a hold on a `removal_scheduled` hospital that
+  hasn't started stops it (back to `removal_pending`, blocked).
+- Activity and history carry a hold's reference and the reason in words,
+  **never its note**.
+- Every change is audited.
+
+#### 14.8.2 System health
+
+`GET /platform/health` → `{updated_at, overall, parts, queue, failed_jobs,
+timing, errors, versions, triage, clean_up}`. No hospital, user or content
+anywhere in it.
+
+- `overall` and each part's `status`: `ok`, `slow`, `problem` (the server's
+  thresholds). `parts`: `[{key, status, since}]`, `key` one of `app`,
+  `workers`, `evidence`, `documents`, `guidelines`, `clean_up`.
+- `queue`: `{waiting, oldest_wait_s}` (null when empty). `failed_jobs`:
+  `{now, last_24h}`.
+- `timing`: `{last_hour, last_24h}`, each `{overall: {p50_ms, p95_ms},
+  steps: [{step, p50_ms, p95_ms}]}`, `step` one of `privacy`, `guidelines`,
+  `answer`, `evidence`.
+- `errors`: `[{kind, last_hour, last_24h}]`, `kind` one of `timeout`,
+  `unreachable`, `unreadable`, `invalid`, `other`.
+- `versions`: `[{part, label}]`. `triage`: `{enabled}`. `clean_up`:
+  `{last_run_at, ok, paused, paused_by, paused_at}`.
+- **503** when the reading can't be had.
+
+The app fails closed: a failed reading, or one whose `updated_at` is more
+than 2 minutes old, counts as no reading ("Couldn't check", never zeros). A
+block with the wrong shape, or an enum value the app doesn't know (a new
+status, key, step or kind), fails on its own. Send `updated_at` from the
+moment the figures were taken, not the moment of the request.
+
+The app polls every 30 s while the tab is visible. The poll sends
+`X-MHAI-Background: 1`; the BFF does not count it as activity for the
+15-minute idle limit and does not forward the header, so the API must not
+let a health poll refresh any server-side idle clock either.
+
+#### 14.8.3 Failed jobs
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /platform/jobs?status&type&hospital&kind&cursor` | → `{jobs, next_cursor}`, newest failure first. `status` is `failed` (default), `retrying`, `retried`, `cancelled` or `all` |
+| `POST /platform/jobs/retry {ids}` | 1–50 ids, no step-up. → `{retried, skipped}`, each an array of ids |
+| `POST /platform/jobs/cancel {ids, reason, note?, mfa_code \| backup_code}` | 1–50 ids. `reason`: `no_longer_needed`, `cant_succeed`, `other` (`other` needs a note; note ≤ 500 characters). → `{cancelled, skipped}` |
+
+A job: `id`, `type` (`run_query`, `submit_feedback`, `approve_correction`,
+`ingest_document`, `run_triage`, `kb_search`, `feedback_buffer_reset`,
+`retention_purge`), `hospital` (`{id, name}` or null), `created_at`,
+`failed_at`, `attempts`, `kind` (as `errors`), `status` (`failed`,
+`retrying`, `retried`, `cancelled`), `cancelled_by`, `cancelled_at`. Never
+the subject, the user or the error message.
+
+- `retried` means **attempted**, including a job that failed again (an
+  unreadable document stays `failed` with `attempts` one higher). `skipped`
+  holds ids that are unknown or no longer `failed`; neither is an error.
+  Cancel skips the same way.
+- A cancelled job's subject moves to its failed state (a question shows
+  "Couldn't complete"). Retried and cancelled jobs stay listed for 30 days.
+- The cancel `note` is optional detail (required for `other`). It is stored
+  with the cancellation but **never logged**. Activity shows the reason in
+  words (for example "No longer needed"), with the count of jobs.
+- A bad id list (empty, over 50) or a bad reason is **422 `invalid`**.
+
+#### 14.8.4 Settings (Assumed, Plan 8c)
+
+Not built yet; this is spec §9 plus the controller's ruling.
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /platform/settings` | → `{retention, triage, feedback_buffer, pending}` |
+| `GET /platform/settings/retention/{type}/preview?days` | → `{would_delete}` |
+| `PUT /platform/settings/retention/{type} {days, reason, mfa_code \| backup_code, version}` | longer applies at once; shorter returns **202** with the pending request; **422 `below_minimum`** |
+| `PUT /platform/settings/retention-pause {paused, reason, mfa_code \| backup_code}` | optional |
+| `PUT /platform/settings/triage {enabled, reason, clinical_signoff?, mfa_code \| backup_code, version}` | off applies at once; on returns **202** with the pending request; **409 `not_ready`** (re-checked at approval) |
+| `POST /platform/settings/requests/{id}/approve {version, mfa_code \| backup_code}` | a different platform admin: **409 `same_person`**, **409 `expired`** |
+| `POST /platform/settings/requests/{id}/cancel {version}` | either platform admin |
+| `POST /platform/settings/feedback-buffer/reset {reason, mfa_code \| backup_code}` | → **202** `{job_id}`; no confirm word |
+
+- `retention`: `{paused, paused_by, paused_at, confirmed, items: [{type,
+  days, minimum_days, last_run: {at, ok, deleted, kept_for_holds},
+  next_run_at, changed_by, changed_at, version}]}`, `type` one of `records`,
+  `documents`, `pending_corrections`, `audit_log`; `confirmed` is false until
+  the compliance lead has confirmed the periods.
+- `triage`: `{enabled, ready, not_ready_reason, changed_by, changed_at,
+  version}`; `not_ready_reason` one of `missing_report`, `missing_files`,
+  `checksum_mismatch` (null when ready).
+- `feedback_buffer`: `{waiting, running, failed_job_id, last_reset: {by, at,
+  reason, cleared}}`.
+- `pending`: the two-person requests, each `{id, kind (`retention_shorten`,
+  `triage_on`), requested_by, requested_at, reason, requested_by_you,
+  expires_at, from, to}`. Same rules as the lift: `requested_by_you` is
+  server-decided, requests lapse after 7 days.
+- **Two-person changes also send `version`** (approve and cancel; the
+  controller's ruling, for the same reason as the lift): a mismatch is
+  **409 `conflict`**, so they act only on the request the person saw.
+- Every other settings write answers with the whole settings object (the
+  `GET` shape), **200** if applied, **202** if a pending request.
+- Hold-kept records are excluded from every retention run (14.8.1);
+  `kept_for_holds` reports how many.
