@@ -470,6 +470,9 @@ Shapes (ids are opaque, `[A-Za-z0-9_-]+`):
   shares at full precision, not rounded: a rounded share can stand for
   several counts, and the app cannot tell what it hides.
 - A median is a whole number or a half (12.5).
+- Order never reveals a hidden size: in a list, shown rows may be sorted by
+  value, but hidden rows come after them in a fixed order (by name, with
+  "Not standardised" and "not recorded" last), never by their true count.
 - Secondary suppression: in every set that adds up, hide enough that no
   hidden count can be worked out. The app fails a set closed when exactly
   one member is hidden, when the total is hidden beside a shown member, or
