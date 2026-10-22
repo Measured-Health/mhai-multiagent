@@ -565,3 +565,49 @@ is never a member id.
   **403 `mfa_invalid`**; too many wrong codes **429 `mfa_locked`** (15
   minutes).
 - Errors carry only `code` (plus `blocking` on **409 `blocked`**).
+
+### 14.7 Analytics across hospitals
+
+Source: mhai-web `docs/specs/2026-10-22-platform-analytics-design.md` §5–§7.
+Status: **Assumed** (Plan 7c; Plan 7d for notifications). Counts only: no
+patient names, MRNs, question or answer text, nothing per person. A guarded
+value is `{value, suppressed}`: hidden is `{value: null, suppressed: true}`,
+nothing to show is `{value: null, suppressed: false}`.
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /platform/analytics?period=7d\|30d\|90d` | → `{period, from, to, changes, use, alerts, quality, hospitals}`; each area is its data with its own `updated_at`, or `{unavailable: true}`. Active hospitals only |
+| | `changes`: `{updated_at, window: {from, to}, items}`, ranked, always the last 7 days vs the 4 weeks before (whatever `period` is). Each item: `id` (stable while the change lasts), `hospital` (`{id, name}` or null for all hospitals), `area` (`use`, `alerts`, `quality`), `measure`, `direction` (`worse`, `better`, `rising`, `falling`), `serious` (Critical-type), `previous`, `current` (guarded), `summary` (plain words), `follow_up` (`{by, at, note, by_you, version}` or null), `version` |
+| | `use`, `alerts`, `quality`: `{updated_at, rows, median, trend}`; one row per active hospital, all values guarded; `median` is the all-hospitals median under the same rules; `trend` is `[{start, value}]` with `value` guarded. Alert rows add `critical_target_minutes` and `critical_overdue` (unhandled Critical alerts past target, guarded); quality rows add `reviews` |
+| | `hospitals`: one row each with `size` (`staff`, `active_clinicians`, `questions`) |
+| `GET /platform/analytics/changes/{id}/series?period` | → `{measure, hospital, points: [{start, value, median}]}`; `value` guarded; `median` of the other active hospitals, or null when there is none |
+| `GET /platform/analytics/hospitals/{id}/series?measure&period` | the same for any active hospital and one of `questions_per_clinician`, `critical_median_ack_minutes`, `critical_within_target`, `needs_review_share` |
+| `PUT /platform/analytics/changes/{id}/follow-up {note?, version}` | platform admins; marks followed up or edits the note (≤ 500 characters, author only — others get 403); stale `version` → **409 `conflict`**; audited; → the change |
+| `DELETE /platform/analytics/changes/{id}/follow-up {version}` | any platform admin undoes; stale or nothing to undo → **409 `conflict`**; audited |
+
+`GET /platform/hospitals/{id}` (§14.2) gains `admins: [{name, email}]`, the
+active hospital admins.
+
+**Server duties** (the app fails an area closed when it can tell, but only
+the server can keep these):
+
+- Every count of 1–4 is sent hidden, including staff-activity counts across
+  hospitals.
+- A share or rate is hidden when its numerator or its complement (total minus
+  numerator) is 1–4, including subsets (total − unhandled, Critical − Critical
+  overdue, answers − reviews). Shares arrive rounded, so the app's own check
+  is only a backstop, and it can't check series shares.
+- A series median of a count measure between 0 and 5 is sent as null.
+- When a change's `previous` or `current` is hidden, its `summary` says
+  "fewer than 5", has no "%", and no digits other than the shown side's
+  number (a hospital or measure name with a digit fails it closed in the app).
+- What changed always includes a serious change for any hospital with
+  `critical_overdue` above 0; otherwise the app shows "Couldn't load what
+  changed", never "Nothing unusual".
+
+**Plan 7d (notifications):** `GET /platform/notifications` → `{items, unseen}`, at most 20 newest first; each item `{id, change_id, hospital, measure, previous, current, summary, serious, direction, at, seen}` with `previous`/`current` guarded exactly as on the change (the app checks the summary with the same rules as What changed; `seen` is per person), `POST
+/platform/notifications/seen`, `GET`/`PUT /platform/me/analytics-email
+{mode, version}` (stale `version` → 409 `conflict`; auditors 403; `POST …/seen {ids?}` — omitted `ids` marks all — is the one write auditors may make) (`off`, `critical`, `critical_and_digest`; platform admins only). The
+backend sends the emails: straight away for `serious` changes, at most one per
+hospital per measure per day; a weekly digest on Monday 08:00 Lagos time;
+plain words and a link, no patient details, no count under 5.
