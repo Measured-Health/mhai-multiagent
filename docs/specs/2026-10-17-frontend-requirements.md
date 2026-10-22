@@ -473,6 +473,8 @@ Shapes (ids are opaque, `[A-Za-z0-9_-]+`):
 - Order never reveals a hidden size: in a list, shown rows may be sorted by
   value, but hidden rows come after them in a fixed order (by name, with
   "Not standardised" and "not recorded" last), never by their true count.
+  Age bands, sexes and settings always come in their fixed order (the app
+  re-sorts them anyway).
 - Secondary suppression: in every set that adds up, hide enough that no
   hidden count can be worked out. The app fails a set closed when exactly
   one member is hidden, when the total is hidden beside a shown member, or
