@@ -605,9 +605,14 @@ the server can keep these):
   `critical_overdue` above 0; otherwise the app shows "Couldn't load what
   changed", never "Nothing unusual".
 
-**Plan 7d (notifications):** `GET /platform/notifications` → `{items, unseen}`, at most 20 newest first; each item `{id, change_id, hospital, measure, previous, current, summary, serious, direction, at, seen}` with `previous`/`current` guarded exactly as on the change (the app checks the summary with the same rules as What changed; `seen` is per person), `POST
+**Plan 7d (notifications):** `GET /platform/notifications` → `{items, unseen}`, at most 20 newest first, where `unseen` counts **all** of this person's unseen notifications (it may be more than the items returned); each item `{id, change_id, hospital, measure, previous, current, summary, serious, direction, at, seen}` with `previous`/`current` guarded exactly as on the change (the app checks the summary with the same rules as What changed; `seen` is per person), `POST
 /platform/notifications/seen`, `GET`/`PUT /platform/me/analytics-email
 {mode, version}` (stale `version` → 409 `conflict`; auditors 403; `POST …/seen {ids?}` — omitted `ids` marks all — is the one write auditors may make) (`off`, `critical`, `critical_and_digest`; platform admins only). The
 backend sends the emails: straight away for `serious` changes, at most one per
 hospital per measure per day; a weekly digest on Monday 08:00 Lagos time;
 plain words and a link, no patient details, no count under 5.
+The app polls `GET /platform/notifications` every 60 s while the tab is
+visible. Its BFF sends that read with `X-MHAI-Background: 1` and does not
+count it as activity for the 15-minute idle limit; the API should not either
+(the BFF does not forward the header, so a poll must not refresh any
+server-side idle clock the API keeps).
