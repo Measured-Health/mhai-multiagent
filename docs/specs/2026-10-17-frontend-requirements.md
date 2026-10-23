@@ -743,6 +743,10 @@ the server can keep these):
 backend sends the emails: straight away for `serious` changes, at most one per
 hospital per measure per day; a weekly digest on Monday 08:00 Lagos time;
 plain words and a link, no patient details, no count under 5.
+`Notification` has a `kind`: `analytics_change` or `audit_integrity` (a
+missing `kind` is read as `analytics_change`). An `audit_integrity` item is
+`{kind, id, run_id, first_broken_seq, first_broken_id, at, seen}`; it is sent
+when an audit-log check comes back Broken (§14.9), and `seen` is per person.
 The app polls `GET /platform/notifications` every 60 s while the tab is
 visible. Its BFF sends that read with `X-MHAI-Background: 1` and does not
 count it as activity for the 15-minute idle limit; the API should not either
@@ -924,3 +928,175 @@ Not built yet; this is spec §9 plus the controller's ruling.
   `GET` shape), **200** if applied, **202** if a pending request.
 - Hold-kept records are excluded from every retention run (14.8.1);
   `kept_for_holds` reports how many.
+
+### 14.9 Audit log
+
+Source: mhai-web `docs/specs/2026-10-22-platform-audit-log-design.md` §13, as
+built (`apps/platform/lib/api/audit-contract.ts`, `live-audit.ts`) and as
+ruled while building (Plan 9). Status: **Assumed** (Plan 9 built on sample
+data). These are the platform-audience forms of the gateway's
+`GET /security/audit` and `GET /security/audit/verify`, over the same log. No
+patient data in any entry, field or file; patients appear only as pseudonyms,
+and only through the recorded reveal below. Ids are opaque
+(`[A-Za-z0-9_-]+`); errors carry only `code`.
+
+**Who and how**
+
+- Platform admins and auditors read everything below. Two-step is always
+  required.
+- Auditors may make four audit writes: report an undisplayable entry,
+  create an export, start a check, and add an outcome note to a broken
+  check. Marking notifications seen (§14.7) stays theirs too. Every other
+  write is **403 `forbidden`**. Only the outcome note is auditors alone.
+- **Every write sends an `Idempotency-Key`** and is audited. A step-up
+  action takes `mfa_code` or `backup_code` (§14.6).
+
+**Events**
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /platform/audit?hospital&person&type&outcome&flagged&from&to&q&cursor&limit` | → `{events, next_cursor, total, total_capped, oldest_kept_at, last_checkpoint}`. `hospital=platform` selects platform-only events. `type` is a comma list. `from`/`to` are instants, `[from, to)`. The app sends `limit=50` |
+| `GET /platform/audit/{id}` | → the event plus `patients: {count}` (null when there is no drill-down) and `letter` (null unless a named-access event) |
+| `GET /platform/audit/{id}/patients` | → `{pseudonyms}`. The only place a pseudonym is sent. Writes `audit_patients_viewed` |
+| `GET /platform/audit/people?q` | `q` of 2 or more characters → `{people}`, at most 20, each `{id, name, email, role, kind, hospital}`. Backs the person picker |
+| `GET /platform/audit/hospitals` | → `{hospitals: [{id, name, removed}]}`: every hospital the log names, removed ones included |
+| `POST /platform/audit/undisplayable {ids}` | 1 to 50 ids → 204, recorded as `audit_undisplayable_reported`. The app reports each entry it can't display once |
+| `GET /platform/audit/named-access?hospital&person&clearance&from&to&cursor` | → `{events, next_cursor}`: named drill-down events, each with its `letter` (`{id, status, valid_from, valid_to, verified_by}`) |
+
+An event: `id`, `seq`, `hash` (64 hex), `at`, `actor` (`{id, name, role,
+kind}`; `kind` is `staff`, `platform` or `system`), `hospital` (`{id, name,
+removed}` or null), `type`, `kind`, `target` (`{kind, id, name?}` or null),
+`outcome` (`succeeded`, `refused`, `failed`), `ip`, `device`, `flag`
+(`security`, `policy`, null), `reason`, `note` (only on kinds that allow one),
+`refs` (`clearance_id`, `export_id`, `request_id`, each or null), `facts` and
+`after_break` (boolean: the entry is after the first broken one).
+
+- **`facts`:** typed, optional, structured values that replace any free text.
+  The keys are `specialty`, `confidence`, `view`, `location_type`, `from`,
+  `to`, `patient_count`, `purpose`, `purged_count`, `before`, `checkpoint_id`,
+  `incident_ref`, `filters`, `searched`, `searched_kind`, `rows`, `capped`,
+  `checksum`, `state`, `first_broken_seq`, `list` and `job_count`. `view` and
+  `location_type` are codes matching `^[a-z][a-z_]{0,39}$`.
+  `jobs_retried` and `jobs_cancelled` (§14.8.3) carry no target; the count,
+  when sent, is `facts.job_count`.
+- **Unknown values fail closed.** An unknown `type`, `kind`, `reason`, role,
+  outcome, letter status or `facts` key, or a key the app doesn't know at any
+  level, makes the entry "can't be displayed": the app shows only its id and
+  position, reports it once through `undisplayable`, and carries on. A new
+  kind, type or `facts` key therefore needs a matching app change first.
+
+**Reads are recorded**
+
+- The first page of an applied filter set writes **one `audit_viewed`** entry
+  per person per list per page load. Load more (a request with a `cursor`)
+  writes none. Events and `named-access` dedupe separately (the key is the
+  list and the filters), and each `audit_viewed` names its list in
+  `facts.list`: `"events"` or `"named_access"`. Opening Named access is
+  recorded even when its filters equal the Events filters.
+- An exact-id search (`q`) **ignores the other filters**: the app sends none
+  with it, and the server answers on `q` alone. It writes **`audit_searched`**
+  instead, with `facts.searched` and `facts.searched_kind` (`event`,
+  `request`, `export`, `clearance`, `pseudonym`).
+- Every read, search, export and check is itself an entry. The log stays
+  append-only: no endpoint changes or removes an entry.
+
+**Pseudonyms never leave the server except through `/patients`**
+
+- A hospital's pseudonymous patient id starts `p_`, and no other id does. The
+  shape `p_…` is reserved.
+- A patient target is `{kind: "patient"}` with no id and no name.
+- Where a pseudonym was searched or filtered on, the server sends the marker
+  `{kind: "patient_id"}` in its place: as `facts.searched` (with
+  `searched_kind: "pseudonym"`) and as `filters.q`, both in an entry's
+  `facts.filters` and in an export record's `filters`.
+- A pseudonym-search entry's detail answers `patients: {count: 1}`, and its
+  `/patients` returns the pseudonym searched, so **Show patient ids** reveals
+  it, recorded.
+- The app fails closed: an entry or export record with a pseudonym anywhere
+  (any field, any depth) is "can't be displayed".
+
+**Integrity**
+
+| Endpoint | Behaviour |
+|---|---|
+| `POST /platform/audit/verify` | → `{run_id}`; returns the running one if there is one. Platform admins and auditors |
+| `GET /platform/audit/verify/runs?cursor` | → `{runs, next_cursor}` |
+| `GET /platform/audit/verify/runs/{id}` | → the run |
+| `GET /platform/audit/verify/status` | → `{latest, running, open_failure, security_contact: {name, email}, oldest_kept_at}`. One small read for the header, the footer and the home banner. The server decides `open_failure` (spec §8.3: it clears only when a check after a re-anchor is Intact and the outcome note exists) |
+| `POST /platform/audit/verify/runs/{id}/outcome {note, version}` | **auditors only**: platform admins get **403 `forbidden`**. Broken runs only. `note` up to 1000 characters. → the run. The note is a new entry; the failed check is never changed |
+
+A run: `id`, `started_at`, `finished_at`, `by` (person, or null for the daily
+schedule), `state` (`running`, `intact`, `broken`, `error`), `entries_checked`,
+`from_checkpoint`, `from_first`, `to_seq`, `to_at`, `first_broken_seq`,
+`first_broken_id`, `first_broken_at`, `error_code` (`timed_out`,
+`unreachable`, `unexpected_reply`), `outcome` (`{note, by, at}` or null) and
+`version`. A checkpoint: `{id, at, purged_count, before, kind, incident_ref,
+reason}`, `kind` one of `retention` or `re_anchor`.
+
+- **Proof fields.** `first_broken_id` is the first broken entry's opaque id,
+  set exactly when `first_broken_seq` is; a run that names one without the
+  other fails closed. **Open entry** is an exact-id search for that id.
+  `intact` needs proof or the app shows "Couldn't check", never Intact:
+  `entries_checked` above 0, `to_at` set, `finished_at` set, and either
+  `from_first: true` or a `from_checkpoint`. `intact` only when the whole
+  range was walked; anything short of that is `error`.
+- **Staleness, applied by the app.** A proven run is stale (never shown as
+  Intact) when it finished more than 26 hours ago, or when it started more
+  than 26 hours after the end of the range it covered. The backend should
+  run the check daily (the design uses 06:00 UTC) so a healthy log is never
+  stale.
+- **Broken.** The app shows its banner for **Broken only** (on every tab of
+  the audit view and on the home page), not for Error or stale. On Broken the
+  server sends the bell (`audit_integrity`, §14.7) and an email to every
+  auditor and platform admin, and sets `after_break` on every later entry
+  (the app also marks them in the list, the detail and any CSV).
+- **Background polls.** `GET .../verify/status` and `GET .../verify/runs/{id}`
+  are polled and sent with `X-MHAI-Background: 1`. The BFF does not count them
+  as activity for the 15-minute idle limit and does not forward the header, so
+  the API must not let a poll refresh any server-side idle clock either.
+
+**Exports**
+
+| Endpoint | Behaviour |
+|---|---|
+| `POST /platform/audit/exports {kind, filters, reason, note?, reference?, mfa_code \| backup_code}` | `kind`: `events` or `named_access`. `reason`: `legal_request`, `hospital_request`, `regulator_request`, `internal_review`, `security_investigation`, `other` (`other` needs a note; note up to 200 characters, reference up to 60). → `{export_id, rows, capped, checksum, expires_at, file_name}`. **422 `too_many_rows` `{rows}`** over 50,000 rows: no file, no record of a file. The export entry is written before this returns |
+| `GET /platform/audit/exports?cursor` | → `{exports, next_cursor}`: `id`, `kind`, `by`, `at`, `reason`, `note`, `reference`, `filters`, `filter_names` (`{hospital, person, clearance}`, names or null, so the filters can be put in words), `rows`, `capped`, `checksum`, `expires_at`, `downloaded_at` |
+| `GET /platform/audit/exports/{id}/file` | the file, once, within 15 minutes (before `expires_at`) |
+
+- The server builds the file, applies the patient rules once, and writes the
+  record (who, when, reason, reference, filters, row count, checksum, export
+  id) before the file is released; no record, no file. A `too_many_rows`
+  reply carries the one extra field `rows`; nothing else extra.
+- Up to 50,000 rows. A cap is never silent: `capped` is true and the file's
+  header says so.
+- `file_name` matches `^[A-Za-z0-9._-]{1,120}$`. The app names the download
+  from it, so no `Content-Disposition` is needed. Suggested form:
+  `audit-{events|named-access}-{export_id}-{YYYYMMDD-HHmm}Z.{csv|zip}`. The
+  file's first lines carry who made it, the filters and the reason (key and
+  value rows, a blank row, then the table). Every row carries the entry's
+  position and fingerprint.
+- **Owner only.** Anyone but the person who made the export gets **403
+  `forbidden`**, recorded as `export_download_refused` with reason
+  `not_owner`. The reply says nothing about whether the file is still there.
+- **Once only.** After one download, or after `expires_at`, the answer is
+  **410 `gone`**, recorded as `export_download_refused` with reason `gone`.
+  The app asks upstream with `Accept: text/csv, application/zip` and passes
+  the file through only as `text/csv` or `application/zip`, with
+  `Cache-Control: no-store`.
+- **Retry.** The app may retry a download that failed before the server
+  answered (a network error) or with a 5xx. Any other answer spends the file.
+  A body that breaks off after the server answered is not retried; the app
+  says the file is spent.
+- **Legal request, named access.** `kind: named_access` for one hospital and
+  one or more letters, or one hospital and a date range, is a ZIP: the CSV
+  of named-access entries (pseudonymous ids only) and a copy of each letter
+  cited. Other exports are CSV. Named lists themselves can't be exported.
+
+**Server duties** (the app can't keep these):
+
+- No patient data in any entry, field or file; pseudonyms only as above.
+- Platform actions show in a hospital's Activity as "Measured Health ·
+  platform admin": the server substitutes that actor name for the hospital
+  audience.
+- Daily check at 06:00 UTC (a suggestion), each run its own entry; one run at
+  a time.
