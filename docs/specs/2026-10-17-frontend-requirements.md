@@ -758,7 +758,7 @@ server-side idle clock the API keeps).
 Source: mhai-web `docs/specs/2026-10-22-platform-operations-design.md` §9,
 as built (`apps/platform/lib/api/holds-contract.ts`, `ops-contract.ts`) and
 as ruled while building. Status: **Assumed** (Plan 8a built on sample data;
-8b built; 8c planned). The `/platform/*` shapes below are asked for instead
+8b and 8c built). The `/platform/*` shapes below are asked for instead
 of the gateway's `/admin/*` ones; the backend may build them on the existing
 handlers. Hold notes, job subjects and users, and error messages never
 appear in a list, in Activity or in a health reading.
@@ -892,42 +892,84 @@ the subject, the user or the error message.
   words (for example "No longer needed"), with the count of jobs.
 - A bad id list (empty, over 50) or a bad reason is **422 `invalid`**.
 
-#### 14.8.4 Settings (Assumed, Plan 8c)
+#### 14.8.4 Settings
 
-Not built yet; this is spec §9 plus the controller's ruling.
+Built on sample data (Plan 8c): `apps/platform/lib/api/settings-contract.ts`
+and `mock-settings.ts`, as spec §9 and the rulings while building.
 
 | Endpoint | Behaviour |
 |---|---|
-| `GET /platform/settings` | → `{retention, triage, feedback_buffer, pending}` |
+| `GET /platform/settings` | → `SettingsOut`: `{retention, triage, feedback_buffer, pending}` |
 | `GET /platform/settings/retention/{type}/preview?days` | → `{would_delete}` |
-| `PUT /platform/settings/retention/{type} {days, reason, mfa_code \| backup_code, version}` | longer applies at once; shorter returns **202** with the pending request; **422 `below_minimum`** |
-| `PUT /platform/settings/retention-pause {paused, reason, mfa_code \| backup_code}` | optional |
-| `PUT /platform/settings/triage {enabled, reason, clinical_signoff?, mfa_code \| backup_code, version}` | off applies at once; on returns **202** with the pending request; **409 `not_ready`** (re-checked at approval) |
-| `POST /platform/settings/requests/{id}/approve {version, mfa_code \| backup_code}` | a different platform admin: **409 `same_person`**, **409 `expired`** |
-| `POST /platform/settings/requests/{id}/cancel {version}` | either platform admin |
+| `PUT /platform/settings/retention/{type} {days, reason, mfa_code \| backup_code, version}` | longer applies at once (**200**); shorter returns **202** with the pending request; **422 `below_minimum`**; **409 `conflict`** on a stale `version` |
+| `PUT /platform/settings/retention-pause {paused, reason, mfa_code \| backup_code, version}` | `version` is `retention.version`, the pause's own; **409 `conflict`** on a mismatch |
+| `PUT /platform/settings/triage {enabled, reason, clinical_signoff?, mfa_code \| backup_code, version}` | off applies at once; on needs `clinical_signoff` and returns **202** with the pending request; **409 `not_ready`** (re-checked at approval) |
+| `POST /platform/settings/requests/{id}/approve {version, mfa_code \| backup_code}` | a different platform admin: **409 `same_person`**, **409 `expired`**, **409 `conflict`** |
+| `POST /platform/settings/requests/{id}/cancel {version}` | either platform admin; no step-up |
 | `POST /platform/settings/feedback-buffer/reset {reason, mfa_code \| backup_code}` | → **202** `{job_id}`; no confirm word |
 
-- `retention`: `{paused, paused_by, paused_at, confirmed, items: [{type,
-  days, minimum_days, last_run: {at, ok, deleted, kept_for_holds},
+- `retention`: `{paused, paused_by, paused_at, confirmed, version, items:
+  [{type, days, minimum_days, last_run: {at, ok, deleted, kept_for_holds},
   next_run_at, changed_by, changed_at, version}]}`, `type` one of `records`,
   `documents`, `pending_corrections`, `audit_log`; `confirmed` is false until
-  the compliance lead has confirmed the periods.
+  the compliance lead has confirmed the periods. `retention.version` is the
+  pause's own; every pause and resume bumps it. Each item's `version` is that
+  period's.
 - `triage`: `{enabled, ready, not_ready_reason, changed_by, changed_at,
   version}`; `not_ready_reason` one of `missing_report`, `missing_files`,
   `checksum_mismatch` (null when ready).
-- `feedback_buffer`: `{waiting, running, failed_job_id, last_reset: {by, at,
-  reason, cleared}}`.
+- `feedback_buffer`: `{waiting, running: {job_id, started_at} | null,
+  failed_job_id, last_reset: {by, at, reason, cleared}}`.
 - `pending`: the two-person requests, each `{id, kind (`retention_shorten`,
   `triage_on`), requested_by, requested_at, reason, requested_by_you,
-  expires_at, from, to}`. Same rules as the lift: `requested_by_you` is
-  server-decided, requests lapse after 7 days.
-- **Two-person changes also send `version`** (approve and cancel; the
-  controller's ruling, for the same reason as the lift): a mismatch is
-  **409 `conflict`**, so they act only on the request the person saw.
-- Every other settings write answers with the whole settings object (the
-  `GET` shape), **200** if applied, **202** if a pending request.
+  expires_at, version, from, to}`, plus `type` on a `retention_shorten` and
+  `clinical_signoff` on a `triage_on`. `version` is the version of the
+  setting the request is about (the retention item's, or the triage's). Same
+  rules as the lift: `requested_by_you` is server-decided, requests lapse
+  after 7 days.
+
+**Versions (the controller's rulings, for the same reason as the lift)**
+
+- Approve and cancel send the request's `version`. A mismatch is **409
+  `conflict`**, and so is a request already approved, cancelled or
+  superseded, so they act only on the request the person saw. A lapsed
+  request is still **409 `expired`** on approval.
+- Pause and resume send `retention.version`; a mismatch is **409
+  `conflict`**, so a stale Resume can't lift another admin's newer pause.
+- Creating, approving, cancelling or lapsing a request bumps the setting's
+  `version`.
+
+**Responses**
+
+- Every settings write answers with the whole `SettingsOut` (the `GET`
+  shape): **200** if applied, **202** if a pending request. Only the reset
+  differs: **202** `{job_id}`.
+
+**Retention rules and refusals**
+
+- A longer period applies at once and supersedes a pending shortening of
+  the same type (that request can no longer be approved).
+- **422 `invalid`**: a period equal to the current one; a missing or
+  malformed field. A wrong code is **403 `mfa_invalid`**.
+- **409 `conflict`**: a second pending shortening for the same type; triage
+  on when already on or already requested; triage off when already off;
+  pausing when already paused, or resuming when not paused; a reset while
+  one is running.
+- **404** for an unknown retention `type` or request id.
+- The daily clean-up runs at **02:00 Lagos (01:00 UTC)**, which is when
+  `next_run_at` falls.
 - Hold-kept records are excluded from every retention run (14.8.1);
   `kept_for_holds` reports how many.
+
+**Clearing learning data**
+
+- `running` is set while a reset is under way and cleared when it ends.
+- A failed reset sets `failed_job_id` to the reset's job. That job (type
+  `feedback_buffer_reset`) appears in the failed jobs list (14.8.3).
+- The settings line follows that job's state: once it is retried or
+  cancelled in System, `failed_job_id` is null again. A started reset clears
+  a stale `failed_job_id`.
+- A successful reset sets `last_reset` and zeroes `waiting`.
 
 ### 14.9 Audit log
 
