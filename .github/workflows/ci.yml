@@ -66,15 +66,26 @@ jobs:
           filters: |
             image:
               - Dockerfile
+              - .github/workflows/ci.yml
               - pyproject.toml
               - uv.lock
               - mhai/**
       - uses: docker/setup-buildx-action@v3
         if: steps.changes.outputs.image == 'true'
-      - name: Build CPU image and run the CLI
+      # Layers are cached between runs, so only changed layers rebuild.
+      - name: Build CPU image
+        if: steps.changes.outputs.image == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: TORCH=cpu
+          load: true
+          tags: mhai:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Run the CLI
         if: steps.changes.outputs.image == 'true'
         run: |
-          docker buildx build --load --build-arg TORCH=cpu -t mhai:ci .
           docker run --rm mhai:ci --help
           docker run --rm --entrypoint python mhai:ci -c "import mhai.agents, mhai.security.hipaa"
 
