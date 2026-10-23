@@ -400,7 +400,8 @@ backend sends them**, for the same reason.
 
 Source: analysis design §2–6, §9; the clinical app's Plan 6
 (`apps/clinical/lib/api/analysis-contract.ts`). Status: **Assumed** (Plan 6
-built on sample data; named drill-down and clearances: Plan 11). Needs
+built on sample data; clearances, hospital side: Plan 11a below; platform
+verification and named drill-down: Plan 11b and 11c). Needs
 clinical, privacy and legal sign-off before live use, because it changes
 the rule that hospital admins see no clinical content.
 
@@ -533,7 +534,87 @@ log it, and neither should the gateway or the API. They are not kept in the
 page URL or in browser storage. The patient list is never cached, exported
 or printed.
 
-### Clearances, named lists and audit (later: Plan 11)
+### Clearances, named lists and audit: hospital side (Plan 11a)
+
+Source: the clinical app's Plan 11a (`apps/clinical/lib/api/clearances-contract.ts`,
+`mock-clearances.ts`, the BFF route). Status: **Assumed** (Plan 11a built on
+sample data; platform verification is Plan 11b, §14.10; named rows in
+Analysis are Plan 11c).
+
+**The gate.** Named access is live for a person only when all three hold:
+the user's `features.named_access` from the API is true, Analysis is on for
+them, and the deployment has `NAMED_ACCESS_SIGNED_OFF=true`. The key can
+only keep it off; the backend switch stays the authority.
+
+- Key off: the BFF answers **404** for every clearance path
+  (`/hospital/clearances…`, `/analysis/named-access`, `/analysis/clearance/…`)
+  and **403** `named_access_off` for a named patient list.
+- Key on, but the person lacks the gate: **403** `named_access_off`. Letters
+  are for hospital admins with the gate; the position, your clearance and
+  named lists are for anyone with it.
+- Platform accounts are refused.
+
+All writes carry an `Idempotency-Key` and the admin's two-step code
+(`mfa_code` or `backup_code`). A replay returns the first reply and records
+nothing again.
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /hospital/clearances` | `{clearances, today, max_end_date}`. `today` and `max_end_date` are the hospital's days (`YYYY-MM-DD`), sent by the server so the browser does no time-zone arithmetic. `max_end_date` is today plus 12 months |
+| `POST /hospital/clearances` | **Multipart only**: `file`, `signed_by`, `signer_title`, `letter_date`, `covered` (staff ids, repeated), `covered_platform` (emails, repeated, optional), `end_date`, `renews` (letter id, optional), `mfa_code` or `backup_code`. Body at most 10 MB + 64 KB (**413** `file_too_large`); not multipart (**415** `file_type`). Returns the letter, status `checking` |
+| `GET /hospital/clearances/{id}` | One letter |
+| `GET /hospital/clearances/{id}/pages/{n}` | One server-made page image, **PNG or JPEG only** (anything else is **502** `bad_gateway`), `Cache-Control: no-store`, `Content-Disposition: inline`. **409** `not_ready` while `pages` is 0. The original never reaches the browser. Each view is an admin audit event |
+| `POST /hospital/clearances/{id}/revoke` | `{reason, note?, version, mfa_code}`. Takes effect at once |
+| `POST /hospital/clearances/{id}/narrow` | `{remove: [ids from covered or covered_platform], reason, note?, version, mfa_code}`. Removes covered people, hospital or platform |
+
+**The letter** (`ClearanceOut`): `id`, `status` (`checking`, `refused`,
+`waiting`, `active`, `rejected`, `ended`, `revoked`), `refused_reason`,
+`signed_by`, `signer_title`, `letter_date`, `covered` (`{id, display_name}`),
+`covered_platform` (`{id, display_name}`; Measured Health staff the letter
+names, entered as emails on upload), `end_date`, `uploaded_by`, `uploaded_at`,
+`verified_by`, `verified_at`, `rejection`, `revocation`, `renews`, `pages`
+(0 until ready), `history` and `version`.
+
+- `renews` is the id of the letter this one replaces, or null.
+- `revocation` is `{by, side, at, day, reason, note}`. **`day` is required**
+  with every revocation: `at` as the hospital's `YYYY-MM-DD` day.
+- `version` rises on every change. Revoke and narrow send it; a letter
+  changed since is **409** `conflict`. Narrow requires it; revoke may omit it
+  but the clinical app always sends it.
+
+**Refusals**
+
+- **422** `would_empty` on narrow: removing everyone is a revocation. The
+  server still ends a letter's access when its last covered person loses
+  their role.
+- **422** `not_eligible` with `ids` (staff ids), and **422**
+  `not_eligible_platform` with `emails`. Each list is at most 20 entries.
+  The BFF forwards only these two lists, checked (ids match
+  `[A-Za-z0-9_-]+`, emails are well formed), and otherwise only `{code}`.
+- **422** `end_date_too_late` past `max_end_date`; **422** `invalid` for bad
+  shapes; **403** `mfa_invalid` / **429** `mfa_locked` for the code.
+- **404** `not_found` for an unknown letter or page.
+
+**Who is covered.** Only a verified, unexpired, unrevoked letter counts. An
+"active" letter whose `end_date` has passed counts as ended: the server ends
+it at the end of that day in the hospital's zone and sets `status: ended`.
+A person can be named on a letter only if they are eligible: `status` active,
+role `hospital_admin` or `analyst`, and two-step set up (`issues` has no
+`mfa_not_set_up`). The server has the last word (`not_eligible`).
+
+**Audit.**
+
+- A named view of patients is a **security** event: the count of rows opened
+  and the `purpose`; never names, MRNs or the free-text note.
+- Other clearance events are **admin** events: `clearance_uploaded`,
+  `clearance_refused`, `clearance_verified`, `clearance_rejected`,
+  `clearance_narrowed` (one per person removed), `clearance_revoked`,
+  `clearance_ended`, `clearance_viewed` (page images) and
+  `clearance_reminder_sent`. They name people only by `display_name`, with
+  no free text.
+- The frontend tolerates unknown kinds and shows them generically.
+
+### Clearances, platform side and named lists (later: Plan 11b and 11c)
 
 | Endpoint | Behaviour |
 |---|---|
