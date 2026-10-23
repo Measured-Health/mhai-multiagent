@@ -1002,8 +1002,9 @@ removed}` or null), `type`, `kind`, `target` (`{kind, id, name?}` or null),
 
 **Pseudonyms never leave the server except through `/patients`**
 
-- A hospital's pseudonymous patient id starts `p_`, and no other id does. The
-  shape `p_…` is reserved.
+- A pseudonym is the same pseudonymous patient id as Analysis (§10):
+  `^P-[A-Z0-9]{4,12}$`, stable within the hospital, never the MRN. No other
+  id may match that shape.
 - A patient target is `{kind: "patient"}` with no id and no name.
 - Where a pseudonym was searched or filtered on, the server sends the marker
   `{kind: "patient_id"}` in its place: as `facts.searched` (with
