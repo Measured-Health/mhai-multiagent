@@ -76,7 +76,7 @@ sliding refresh fits this). The backend needs nothing extra, except:
 | Work email as login name | accept an email in `username` (or rename the field) | New |
 | Login `user` | `id`, `role` (primary), **`roles`** (all), `email`, `display_name`, `full_name`, `role_title`, `specialty`, `hospital`, `mfa_enabled`, `must_change_password`, `terms_accepted_at`, `recovery_codes_left`, `idle_timeout_minutes`, `review_overdue_hours` | Assumed |
 | Login `refresh_token` | login and the two-step challenge also return `refresh_token`, for the BFF only (never sent to the browser) | **New (design 2026-10-26 §6.3)** |
-| Refresh | `POST /auth/refresh {refresh_token}` → `{access_token, expires_in, refresh_token}`; the refresh token rotates on every use, and reusing an old one revokes the session | **New (design 2026-10-26 §6.3)** |
+| Refresh | `POST /auth/refresh {refresh_token}` → `{access_token, expires_in, refresh_token}`; the refresh token rotates on every use, reusing an old one more than 10 seconds after its rotation revokes the whole refresh-token family (that device's session); within 10 seconds it returns 409 `conflict` and revokes nothing, so the BFF retries with its newer token | **New (design 2026-10-26 §6.3)** |
 | Accept terms | `POST /auth/terms {version}` → 204; records version and time | Assumed |
 | Lockout | the same `login_locked` (429) reply for an unknown login as for a locked one, so it can't reveal which accounts exist | Gateway + change |
 
