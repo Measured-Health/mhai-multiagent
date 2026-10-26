@@ -3,8 +3,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +16,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/gateway/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/logx"
 )
 
@@ -101,17 +100,7 @@ func newHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}` + "\n"))
 	})
-	return requestID(mux)
-}
-
-// requestID puts an X-Request-ID on every response.
-func requestID(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b := make([]byte, 16)
-		_, _ = rand.Read(b)
-		w.Header().Set("X-Request-ID", hex.EncodeToString(b))
-		next.ServeHTTP(w, r)
-	})
+	return httpx.RequestID(mux)
 }
 
 // openDB connects and refuses to go on unless the login user is held by

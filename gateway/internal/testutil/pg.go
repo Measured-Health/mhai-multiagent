@@ -3,9 +3,11 @@ package testutil
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -77,4 +79,21 @@ func MigratedPostgres(t testing.TB) (*PG, *pgxpool.Pool) {
 	}
 	t.Cleanup(pool.Close)
 	return pg, pool
+}
+
+// AppLogin creates a fresh login role that is only a member of mhai_app,
+// like the gateway's own login, and returns a pool connected as it. super
+// must be a superuser pool on pg.
+func AppLogin(ctx context.Context, pg *PG, super *pgxpool.Pool) (*pgxpool.Pool, error) {
+	name := "app_login_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	if _, err := super.Exec(ctx, `CREATE ROLE `+name+` LOGIN PASSWORD 'test-only-login-password' IN ROLE mhai_app`); err != nil {
+		return nil, err
+	}
+	cfg, err := pgxpool.ParseConfig(pg.URL)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ConnConfig.User = name
+	cfg.ConnConfig.Password = "test-only-login-password"
+	return pgxpool.NewWithConfig(ctx, cfg)
 }
