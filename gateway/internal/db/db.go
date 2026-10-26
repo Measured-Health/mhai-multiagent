@@ -122,26 +122,43 @@ func MigrateDownTo(ctx context.Context, url string, version int64) error {
 }
 
 // CheckLoginRole refuses a login user that row-level security can't hold:
-// a superuser, a BYPASSRLS role, a role that isn't a member of mhai_app,
-// or one that owns a table. The gateway's login must be a plain member of
-// mhai_app, so that a query outside With* fails and RESET ROLE inside one
-// falls back to a role with no privileges.
+//   - a superuser, or a role with BYPASSRLS;
+//   - a role that isn't a member of mhai_app;
+//   - a role that inherits (pg_has_role USAGE) any of the database roles
+//     directly or through another role: only SET ROLE inside db.With* may
+//     reach them;
+//   - a role that is, or can act as, the owner of the database, a schema or
+//     a table.
+//
+// The gateway's login must be a plain member of mhai_app, so that a query
+// outside With* fails and RESET ROLE inside one falls back to a role with
+// no privileges.
 func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 	var (
 		name           string
 		super, bypass  bool
 		member         bool
+		inherited      []string
+		ownsDatabase   bool
+		ownedSchemas   []string
 		ownedRelations int
 	)
 	err := pool.QueryRow(ctx, `
 		SELECT r.rolname, r.rolsuper, r.rolbypassrls,
 		       pg_has_role(session_user, 'mhai_app', 'MEMBER'),
+		       ARRAY(SELECT x FROM unnest(ARRAY['mhai_migrate', 'mhai_gateway', 'mhai_platform', 'mhai_auth', 'mhai_worker']) AS x
+		             WHERE EXISTS (SELECT 1 FROM pg_roles p WHERE p.rolname = x)
+		               AND pg_has_role(session_user, x, 'USAGE')),
+		       pg_has_role(session_user, (SELECT d.datdba FROM pg_database d WHERE d.datname = current_database()), 'MEMBER'),
+		       ARRAY(SELECT n.nspname::text FROM pg_namespace n
+		             WHERE pg_has_role(session_user, n.nspowner, 'MEMBER')
+		               AND n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'
+		             ORDER BY 1),
 		       (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-		        WHERE c.relowner = r.oid
-		          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-		          AND n.nspname NOT LIKE 'pg_toast%')
+		        WHERE pg_has_role(session_user, c.relowner, 'MEMBER')
+		          AND n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema')
 		FROM pg_roles r WHERE r.rolname = session_user`).
-		Scan(&name, &super, &bypass, &member, &ownedRelations)
+		Scan(&name, &super, &bypass, &member, &inherited, &ownsDatabase, &ownedSchemas, &ownedRelations)
 	if err != nil {
 		return fmt.Errorf("db: check login role: %w", err)
 	}
@@ -154,6 +171,15 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	if !super && !member {
 		problems = append(problems, "it is not a member of mhai_app")
+	}
+	if len(inherited) > 0 {
+		problems = append(problems, "it inherits the privileges of "+strings.Join(inherited, ", "))
+	}
+	if ownsDatabase {
+		problems = append(problems, "it owns the database")
+	}
+	if len(ownedSchemas) > 0 {
+		problems = append(problems, "it owns schema "+strings.Join(ownedSchemas, ", "))
 	}
 	if ownedRelations > 0 {
 		problems = append(problems, fmt.Sprintf("it owns %d tables or other relations", ownedRelations))

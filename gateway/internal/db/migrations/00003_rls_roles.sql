@@ -91,7 +91,10 @@ CREATE FUNCTION check_user_role_pairing() RETURNS trigger
 DECLARE
     h uuid;
 BEGIN
-    SELECT u.hospital_id INTO h FROM public.users u WHERE u.id = NEW.user_id;
+    -- FOR SHARE waits for, and then re-reads, a concurrent change to the
+    -- account's hospital, and blocks one until this transaction ends, so a
+    -- role insert and a hospital change can't both pass (write skew).
+    SELECT u.hospital_id INTO h FROM public.users u WHERE u.id = NEW.user_id FOR SHARE;
     IF NOT FOUND THEN
         RETURN NULL; -- the foreign key reports a missing user
     END IF;
@@ -311,6 +314,8 @@ CREATE POLICY platform_no_hospital ON idempotency_keys TO mhai_platform
 CREATE POLICY chain_head ON audit_log FOR SELECT TO mhai_migrate USING (true);
 -- Likewise for the role-pairing triggers.
 CREATE POLICY pairing_check ON users      FOR SELECT TO mhai_migrate USING (true);
+-- FOR SHARE in check_user_role_pairing applies UPDATE policies too.
+CREATE POLICY pairing_lock ON users FOR UPDATE TO mhai_migrate USING (true) WITH CHECK (true);
 CREATE POLICY pairing_check ON user_roles FOR SELECT TO mhai_migrate USING (true);
 
 -- +goose Down
