@@ -30,7 +30,8 @@ func TestLoadFailsOnMissingSecret(t *testing.T) {
 }
 
 func TestLoadRejectsPlaceholder(t *testing.T) {
-	for _, bad := range []string{"change-me", "changeme", "placeholder", "short-key-under-32-bytes"} {
+	for _, bad := range []string{"change-me", "changeme", "placeholder", "short-key-under-32-bytes",
+		"change-me-change-me-change-me-xx", "Prefix-ChangeMe-0123456789abcdefghij", "0123456789abcdef-PLACEHOLDER-0123456789"} {
 		setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": bad, "BFF_SERVICE_KEYS": goodKey})
 		_, err := Load()
 		if err == nil {
@@ -39,7 +40,7 @@ func TestLoadRejectsPlaceholder(t *testing.T) {
 		if !strings.Contains(err.Error(), "MFA_ENCRYPTION_KEY") {
 			t.Fatalf("error should name the variable, got %q", err)
 		}
-		if bad != "placeholder" && strings.Contains(err.Error(), bad) {
+		if !strings.Contains(strings.ToLower(bad), "placeholder") && strings.Contains(err.Error(), bad) {
 			t.Fatalf("error must not echo the value, got %q", err)
 		}
 	}

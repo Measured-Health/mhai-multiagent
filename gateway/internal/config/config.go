@@ -74,9 +74,11 @@ func secret(name string) (string, error) {
 }
 
 func checkSecret(name, v string) error {
-	switch strings.ToLower(v) {
-	case "change-me", "changeme", "placeholder":
-		return fmt.Errorf("%s is a placeholder", name)
+	lower := strings.ToLower(v)
+	for _, p := range []string{"change-me", "changeme", "placeholder"} {
+		if strings.Contains(lower, p) {
+			return fmt.Errorf("%s is a placeholder", name)
+		}
 	}
 	if len(v) < minSecretLen {
 		return fmt.Errorf("%s must be at least %d bytes", name, minSecretLen)
