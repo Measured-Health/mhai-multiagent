@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/text/unicode/norm"
 )
 
 type params struct {
@@ -41,6 +42,12 @@ const (
 	maxMemKiB  = 1 << 20 // 1 GiB
 	maxTime    = 10
 	maxThreads = 16
+	maxKeyLen  = 64
+	maxSaltLen = 64
+	// Floors, so a downgraded row can't be verified (or answered) faster
+	// than a real one. They match current's memory and time.
+	minMemKiB = 64 * 1024
+	minTime   = 2
 )
 
 // Hash returns the PHC string of pw:
@@ -50,7 +57,7 @@ func Hash(pw string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", errors.New("password: no randomness")
 	}
-	key := argon2.IDKey([]byte(pw), salt, current.time, current.memKiB, current.threads, current.keyLen)
+	key := argon2.IDKey([]byte(norm.NFC.String(pw)), salt, current.time, current.memKiB, current.threads, current.keyLen)
 	b64 := base64.RawStdEncoding
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", argon2.Version,
 		current.memKiB, current.time, current.threads, b64.EncodeToString(salt), b64.EncodeToString(key)), nil
@@ -63,7 +70,7 @@ func Verify(pw, encoded string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	got := argon2.IDKey([]byte(pw), salt, p.time, p.memKiB, p.threads, p.keyLen)
+	got := argon2.IDKey([]byte(norm.NFC.String(pw)), salt, p.time, p.memKiB, p.threads, p.keyLen)
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
@@ -73,28 +80,36 @@ func DummyVerify(pw string) {
 	_, _ = Verify(pw, dummyHash)
 }
 
+// NeedsRehash reports whether encoded was made with parameters other than the
+// current ones, so sign-in can upgrade it after a successful Verify. A
+// malformed string needs one too.
+func NeedsRehash(encoded string) bool {
+	p, _, _, err := decode(encoded)
+	return err != nil || p != current
+}
+
 func decode(enc string) (p params, salt, key []byte, err error) {
 	bad := errors.New("password: malformed hash")
 	f := strings.Split(enc, "$")
-	if len(f) != 6 || f[0] != "" || f[1] != "argon2id" {
-		return p, nil, nil, bad
-	}
-	var v int
-	if n, e := fmt.Sscanf(f[2], "v=%d", &v); n != 1 || e != nil || v != argon2.Version {
+	if len(f) != 6 || f[0] != "" || f[1] != "argon2id" || f[2] != fmt.Sprintf("v=%d", argon2.Version) {
 		return p, nil, nil, bad
 	}
 	var t, m, th uint32
 	if n, e := fmt.Sscanf(f[3], "m=%d,t=%d,p=%d", &m, &t, &th); n != 3 || e != nil {
 		return p, nil, nil, bad
 	}
-	if m < 8 || m > maxMemKiB || t < 1 || t > maxTime || th < 1 || th > maxThreads {
+	// Re-encode and compare, so signs, spaces and trailing fields don't pass.
+	if f[3] != fmt.Sprintf("m=%d,t=%d,p=%d", m, t, th) {
+		return p, nil, nil, bad
+	}
+	if m < minMemKiB || m > maxMemKiB || t < minTime || t > maxTime || th < 1 || th > maxThreads {
 		return p, nil, nil, bad
 	}
 	b64 := base64.RawStdEncoding
-	if salt, err = b64.DecodeString(f[4]); err != nil || len(salt) < 8 {
+	if salt, err = b64.DecodeString(f[4]); err != nil || len(salt) < 8 || len(salt) > maxSaltLen {
 		return p, nil, nil, bad
 	}
-	if key, err = b64.DecodeString(f[5]); err != nil || len(key) < 16 {
+	if key, err = b64.DecodeString(f[5]); err != nil || len(key) < 16 || len(key) > maxKeyLen {
 		return p, nil, nil, bad
 	}
 	return params{memKiB: m, time: t, threads: uint8(th), keyLen: uint32(len(key))}, salt, key, nil

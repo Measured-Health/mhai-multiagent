@@ -110,8 +110,8 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(st) != 3 {
-		t.Fatalf("want 3 migrations, got %d", len(st))
+	if len(st) != 4 {
+		t.Fatalf("want 4 migrations, got %d", len(st))
 	}
 	for i, s := range st {
 		if s.Source.Version != int64(i+1) || s.State != goose.StateApplied {
@@ -132,7 +132,7 @@ func TestAppRolesAreNotOwnersAndCannotBypassRLS(t *testing.T) {
 	ctx := context.Background()
 	rows, err := pool.Query(ctx,
 		`SELECT rolname, rolsuper, rolbypassrls, rolcanlogin FROM pg_roles
-		 WHERE rolname IN ('mhai_gateway','mhai_platform','mhai_auth','mhai_worker','mhai_migrate','mhai_app')`)
+		 WHERE rolname IN ('mhai_gateway','mhai_platform','mhai_auth','mhai_worker','mhai_migrate','mhai_app','mhai_provision')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestAppRolesAreNotOwnersAndCannotBypassRLS(t *testing.T) {
 			t.Errorf("%s: super=%v bypassrls=%v login=%v, want all false", name, super, bypass, login)
 		}
 	}
-	if len(seen) != 6 {
+	if len(seen) != 7 {
 		t.Fatalf("roles found: %v", seen)
 	}
 

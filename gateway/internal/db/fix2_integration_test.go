@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/gateway/internal/testutil"
 )
 
 // N1: a login that also holds a stronger role, directly or through another
@@ -19,7 +20,7 @@ import (
 func TestCheckLoginRoleRefusesInheritedRoles(t *testing.T) {
 	_, pool := shared(t)
 	ctx := context.Background()
-	for _, strong := range []string{"mhai_migrate", "mhai_platform", "mhai_auth", "mhai_gateway", "mhai_worker"} {
+	for _, strong := range []string{"mhai_migrate", "mhai_platform", "mhai_auth", "mhai_gateway", "mhai_worker", "mhai_provision"} {
 		_, direct := loginPool(t, "IN ROLE mhai_app, "+strong)
 		if err := db.CheckLoginRole(ctx, direct); err == nil || !strings.Contains(err.Error(), strong) {
 			t.Errorf("login IN ROLE mhai_app, %s: want refusal naming it, got %v", strong, err)
@@ -129,5 +130,17 @@ func TestRolePairingRace(t *testing.T) {
 	}
 	if pgCode(t2err) != "23514" {
 		t.Fatalf("racing platform_admin insert: want 23514, got %v", t2err)
+	}
+}
+
+func TestCheckLoginRoleRefusesProvisionLogin(t *testing.T) {
+	pg, super := shared(t)
+	p, _, err := testutil.ProvisionLogin(context.Background(), pg, super)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := db.CheckLoginRole(context.Background(), p); err == nil || !strings.Contains(err.Error(), "mhai_provision") {
+		t.Fatalf("want refusal naming mhai_provision, got %v", err)
 	}
 }

@@ -6,17 +6,19 @@
 -- name: GetHospitalIDByShortCode :one
 SELECT id FROM hospitals WHERE short_code = $1;
 
--- name: InsertHospital :one
-INSERT INTO hospitals (name, short_code, time_zone) VALUES ($1, $2, $3) RETURNING id;
+-- name: InsertHospital :exec
+-- The caller supplies the id: mhai_provision can read only hospitals(id, short_code).
+INSERT INTO hospitals (id, name, short_code, time_zone) VALUES ($1, $2, $3, $4);
 
 -- name: InsertHospitalSettings :exec
 INSERT INTO hospital_settings (hospital_id, require_mfa_for_clinicians, allow_trust_device)
 VALUES ($1, $2, $3);
 
--- name: InsertUser :one
--- email must already be NormaliseEmail'd; must_change_password starts true.
-INSERT INTO users (hospital_id, email, password_hash, display_name, must_change_password)
-VALUES ($1, $2, $3, $4, true) RETURNING id;
+-- name: InsertUser :exec
+-- The caller supplies the id (mhai_provision cannot read users back). email must
+-- already be NormaliseEmail'd; must_change_password starts true.
+INSERT INTO users (id, hospital_id, email, password_hash, display_name, must_change_password)
+VALUES ($1, $2, $3, $4, $5, true);
 
 -- name: InsertUserRole :exec
 INSERT INTO user_roles (user_id, role) VALUES ($1, $2);

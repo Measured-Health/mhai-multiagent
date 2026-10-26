@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"embed"
+	"errors"
 	"strings"
 	"sync"
 )
@@ -16,38 +17,58 @@ var listFS embed.FS
 var (
 	breachedOnce sync.Once
 	breachedSet  map[string]struct{}
+	breachedErr  error
 )
 
-// loadBreached reads the list once, lowercased, so a case variant of a
-// listed password is also refused. The embedded file is fixed at build time,
-// so a read failure is a build defect and panics at first use.
-func loadBreached() map[string]struct{} {
+func load() {
 	breachedOnce.Do(func() {
-		f, err := listFS.Open("breached.txt.gz")
-		if err != nil {
-			panic("password: breached list missing: " + err.Error())
-		}
-		defer f.Close()
-		zr, err := gzip.NewReader(f)
-		if err != nil {
-			panic("password: breached list corrupt: " + err.Error())
-		}
-		set := make(map[string]struct{}, 100000)
-		sc := bufio.NewScanner(zr)
-		for sc.Scan() {
-			if w := strings.TrimRight(sc.Text(), "\r"); w != "" {
-				set[strings.ToLower(w)] = struct{}{}
-			}
-		}
-		if err := sc.Err(); err != nil {
-			panic("password: breached list unreadable: " + err.Error())
-		}
-		breachedSet = set
+		breachedSet, breachedErr = readList()
 	})
-	return breachedSet
 }
 
+// Preload loads the breached list now. Call it at startup so a broken list
+// stops the process before it takes traffic, and so the first sign-in
+// doesn't pay for decompressing it.
+func Preload() error {
+	load()
+	return breachedErr
+}
+
+// readList reads the list, lowercased, so a case variant of a listed
+// password is also refused.
+func readList() (map[string]struct{}, error) {
+	f, err := listFS.Open("breached.txt.gz")
+	if err != nil {
+		return nil, errors.New("password: breached list missing")
+	}
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, errors.New("password: breached list corrupt")
+	}
+	set := make(map[string]struct{}, 520000)
+	sc := bufio.NewScanner(zr)
+	for sc.Scan() {
+		if w := strings.TrimRight(sc.Text(), "\r"); w != "" {
+			set[strings.ToLower(w)] = struct{}{}
+		}
+	}
+	if sc.Err() != nil {
+		return nil, errors.New("password: breached list unreadable")
+	}
+	if len(set) < 100000 {
+		return nil, errors.New("password: breached list too short")
+	}
+	return set, nil
+}
+
+// isBreached fails closed: if the list could not be loaded, every password
+// counts as breached.
 func isBreached(pw string) bool {
-	_, ok := loadBreached()[strings.ToLower(pw)]
+	load()
+	if breachedErr != nil || breachedSet == nil {
+		return true
+	}
+	_, ok := breachedSet[strings.ToLower(pw)]
 	return ok
 }

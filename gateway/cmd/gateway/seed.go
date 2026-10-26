@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	_ "time/tzdata" // IANA zones for --time-zone checks, even in a minimal image
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/term"
@@ -24,12 +25,17 @@ const seedUsage = `usage:
   gateway users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
 
 The password is never an argument: users create prompts for it on a terminal
-and reads one line from stdin otherwise. Both commands write through the
-owner/migrate connection in DATABASE_URL (the same variable "gateway migrate"
-uses), not the gateway's runtime login: that login cannot insert users, roles
-or hospitals. Run them in the one-shot migrate container, whose login is the
-provisioning role (a superuser or a role with BYPASSRLS, because the tables
-have forced row-level security and the owner has no insert policies).`
+and reads one line from stdin otherwise.
+
+Both commands connect with DATABASE_URL (the variable "gateway migrate" uses,
+so run them in the one-shot container, not with the gateway's own env) as a
+provisioning login: a login that is a plain member of mhai_provision, for
+example
+  CREATE ROLE provisioner LOGIN PASSWORD '...' IN ROLE mhai_provision;
+Each command runs SET LOCAL ROLE mhai_provision, which can insert hospitals,
+settings, users and roles and read only hospitals(id, short_code); it has no
+BYPASSRLS, UPDATE or DELETE. The gateway's runtime login must not be a member
+of it (the gateway refuses to start if it is).`
 
 var errArgs = errors.New("invalid arguments (run gateway hospitals|users create -h)")
 
@@ -85,6 +91,9 @@ func hospitalsCreate(ctx context.Context, args []string, url string, out io.Writ
 }
 
 func usersCreate(ctx context.Context, args []string, url string, stdin io.Reader, out io.Writer) error {
+	if err := password.Preload(); err != nil {
+		return err
+	}
 	fs := newFlags("users create")
 	var email, name, roles, hospital string
 	fs.StringVar(&email, "email", "", "")
@@ -108,14 +117,14 @@ func usersCreate(ctx context.Context, args []string, url string, stdin io.Reader
 		}
 	}
 	// Check everything we can before asking for a password or connecting.
-	if err := account.ValidateRoles(list, code); err != nil {
+	if err := account.ValidateNewUser(account.NewUser{Email: email, Name: name, Roles: list, HospitalShortCode: code}); err != nil {
 		return err
 	}
 	pw, err := obtainPassword(stdin)
 	if err != nil {
 		return err
 	}
-	if err := password.Check(pw); err != nil {
+	if err := password.Check(pw, account.NormaliseEmail(email)); err != nil {
 		return err
 	}
 	pool, err := openOwner(ctx, url)
@@ -158,21 +167,32 @@ func obtainPassword(stdin io.Reader) (string, error) {
 }
 
 // readPassword takes the first line of r as the password, minus the line
-// ending only (spaces are part of a password). At most 1 KiB is read.
+// ending only (spaces are part of a password). A line over 1024 bytes, or
+// invalid UTF-8, is refused rather than truncated.
 func readPassword(r io.Reader) (string, error) {
-	line, err := bufio.NewReader(io.LimitReader(r, 1024)).ReadString('\n')
+	line, err := bufio.NewReader(io.LimitReader(r, maxPasswordBytes+1)).ReadString('\n')
 	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
 		return "", errors.New("no password on stdin")
 	}
 	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	if len(line) > maxPasswordBytes {
+		return "", errors.New("password too long")
+	}
 	if line == "" {
 		return "", errors.New("no password on stdin")
+	}
+	if !utf8.ValidString(line) {
+		return "", errors.New("password is not valid UTF-8")
 	}
 	return line, nil
 }
 
-// openOwner connects as the owner/migrate login. It does not run
-// db.CheckLoginRole: that check exists to keep the gateway off such logins.
+const maxPasswordBytes = 1024
+
+// openOwner connects with the provisioning login in DATABASE_URL. It does not
+// run db.CheckLoginRole: that check exists to keep the gateway off such
+// logins. It does load the breached list now, so a broken build fails before
+// a password is accepted.
 func openOwner(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	if url == "" {
 		return nil, errors.New("DATABASE_URL is required")

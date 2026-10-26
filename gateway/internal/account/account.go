@@ -1,6 +1,7 @@
 // Package account creates hospitals and users. Only the seed CLI calls it,
-// on the owner/migrate connection: the gateway's own roles cannot insert
-// users, roles or hospitals.
+// on a provisioning login (a plain member of mhai_provision, see migration
+// 00004): the gateway's own roles cannot insert users, roles or hospitals,
+// and the provisioning role can do little else.
 package account
 
 import (
@@ -23,6 +24,7 @@ var (
 	ErrRoleHospital     = errors.New("platform roles (platform_admin, auditor) need an account with no hospital; clinical roles (clinician, hospital_admin, analyst) need --hospital")
 	ErrRoleMix          = errors.New("clinical roles can be combined with each other; a platform role must be the only role on its account")
 	ErrBadRole          = errors.New("unknown, duplicate or missing role; use clinician, hospital_admin, analyst, platform_admin or auditor")
+	ErrNotProvisioner   = errors.New("this database login cannot act as mhai_provision; connect as a login that is a member of it")
 	ErrBadEmail         = errors.New("invalid email address")
 	ErrBadName          = errors.New("name is required")
 	ErrBadShortCode     = errors.New("short code must be 2 to 32 letters, digits, '-' or '_'")
@@ -92,4 +94,23 @@ func validTimeZone(tz string) error {
 		return ErrBadTimeZone
 	}
 	return nil
+}
+
+// ValidateNewUser checks everything about u except the password, with no
+// database access, so the CLI can fail before it asks for one.
+func ValidateNewUser(u NewUser) error {
+	if !validEmail(NormaliseEmail(u.Email)) {
+		return ErrBadEmail
+	}
+	if strings.TrimSpace(u.Name) == "" {
+		return ErrBadName
+	}
+	code := ""
+	if strings.TrimSpace(u.HospitalShortCode) != "" {
+		var ok bool
+		if code, ok = NormaliseShortCode(u.HospitalShortCode); !ok {
+			return ErrBadShortCode
+		}
+	}
+	return ValidateRoles(u.Roles, code)
 }

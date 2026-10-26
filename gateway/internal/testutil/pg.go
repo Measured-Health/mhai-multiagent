@@ -3,6 +3,7 @@ package testutil
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -96,4 +97,34 @@ func AppLogin(ctx context.Context, pg *PG, super *pgxpool.Pool) (*pgxpool.Pool, 
 	cfg.ConnConfig.User = name
 	cfg.ConnConfig.Password = "test-only-login-password"
 	return pgxpool.NewWithConfig(ctx, cfg)
+}
+
+// ProvisionLogin creates a fresh non-superuser login that is a member only of
+// mhai_provision, like the seed CLI's provisioning login, and returns a pool
+// connected as it plus its URL. super must be a superuser pool on pg.
+func ProvisionLogin(ctx context.Context, pg *PG, super *pgxpool.Pool) (*pgxpool.Pool, string, error) {
+	name := "prov_login_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	if _, err := super.Exec(ctx, `CREATE ROLE `+name+` LOGIN PASSWORD 'test-only-login-password' IN ROLE mhai_provision`); err != nil {
+		return nil, "", err
+	}
+	cfg, err := pgxpool.ParseConfig(pg.URL)
+	if err != nil {
+		return nil, "", err
+	}
+	cfg.ConnConfig.User = name
+	cfg.ConnConfig.Password = "test-only-login-password"
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, "", err
+	}
+	return pool, replaceUser(pg.URL, name, "test-only-login-password"), nil
+}
+
+func replaceUser(raw, user, pw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	u.User = url.UserPassword(user, pw)
+	return u.String()
 }

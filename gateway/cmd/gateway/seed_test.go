@@ -42,3 +42,21 @@ func TestReadPasswordFromStdin(t *testing.T) {
 		t.Fatal("empty stdin accepted")
 	}
 }
+
+func TestReadPasswordRefusesLongAndInvalid(t *testing.T) {
+	if _, err := readPassword(strings.NewReader(strings.Repeat("a", 2000) + "\n")); err == nil {
+		t.Fatal("2000-byte password accepted")
+	}
+	if _, err := readPassword(strings.NewReader("abc\xff\xfedefghijklmnop\n")); err == nil {
+		t.Fatal("invalid UTF-8 accepted")
+	}
+}
+
+func TestSeedChecksEmailAndNameBeforePassword(t *testing.T) {
+	// No stdin: if the password were read first, the error would be about it.
+	err := seed(context.Background(), []string{"users", "create", "--email", "not-an-email", "--name", "A", "--roles", "platform_admin"},
+		"", strings.NewReader(""), &bytes.Buffer{})
+	if err == nil || strings.Contains(err.Error(), "stdin") {
+		t.Fatalf("got %v", err)
+	}
+}

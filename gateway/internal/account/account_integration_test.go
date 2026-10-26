@@ -12,17 +12,31 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/testutil"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const goodPW = "tangerine-orbit-77-quill"
 
-func TestEmailUniqueIgnoresCase(t *testing.T) {
-	_, pool := testutil.MigratedPostgres(t)
-	ctx := context.Background()
-	if _, err := CreateHospital(ctx, pool, NewHospital{Name: "Havana General", ShortCode: "HAV", TimeZone: "Africa/Lagos"}); err != nil {
+// setup returns a superuser pool (for assertions and tampering) and a pool
+// connected as a plain member of mhai_provision (what the CLI uses).
+func setup(t *testing.T) (super, prov *pgxpool.Pool) {
+	t.Helper()
+	pg, super := testutil.MigratedPostgres(t)
+	prov, _, err := testutil.ProvisionLogin(context.Background(), pg, super)
+	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := CreateUser(ctx, pool, NewUser{Email: " Grace.Nwosu@Havana.example ", Name: "Grace Nwosu",
+	t.Cleanup(prov.Close)
+	return super, prov
+}
+
+func TestEmailUniqueIgnoresCase(t *testing.T) {
+	pool, prov := setup(t)
+	ctx := context.Background()
+	if _, err := CreateHospital(ctx, prov, NewHospital{Name: "Havana General", ShortCode: "HAV", TimeZone: "Africa/Lagos"}); err != nil {
+		t.Fatal(err)
+	}
+	id, err := CreateUser(ctx, prov, NewUser{Email: " Grace.Nwosu@Havana.example ", Name: "Grace Nwosu",
 		Roles: []string{"clinician"}, HospitalShortCode: "HAV", Password: goodPW})
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +55,7 @@ func TestEmailUniqueIgnoresCase(t *testing.T) {
 	if ok, err := password.Verify(goodPW, hash); err != nil || !ok {
 		t.Fatalf("stored hash does not verify: %v %v", ok, err)
 	}
-	_, err = CreateUser(ctx, pool, NewUser{Email: "GRACE.NWOSU@HAVANA.EXAMPLE", Name: "Other",
+	_, err = CreateUser(ctx, prov, NewUser{Email: "GRACE.NWOSU@HAVANA.EXAMPLE", Name: "Other",
 		Roles: []string{"clinician"}, HospitalShortCode: "HAV", Password: goodPW})
 	if !errors.Is(err, ErrEmailTaken) {
 		t.Fatalf("want ErrEmailTaken, got %v", err)
@@ -56,8 +70,8 @@ func TestEmailUniqueIgnoresCase(t *testing.T) {
 }
 
 func TestCreateRejectsWeakPassword(t *testing.T) {
-	_, pool := testutil.MigratedPostgres(t)
-	_, err := CreateUser(context.Background(), pool, NewUser{Email: "a@b.example", Name: "A",
+	_, prov := setup(t)
+	_, err := CreateUser(context.Background(), prov, NewUser{Email: "a@b.example", Name: "A",
 		Roles: []string{"platform_admin"}, Password: "password1234"})
 	if !errors.Is(err, password.ErrBreached) {
 		t.Fatalf("got %v", err)
@@ -65,21 +79,21 @@ func TestCreateRejectsWeakPassword(t *testing.T) {
 }
 
 func TestPlatformAndClinicalCreation(t *testing.T) {
-	_, pool := testutil.MigratedPostgres(t)
+	pool, prov := setup(t)
 	ctx := context.Background()
-	if _, err := CreateUser(ctx, pool, NewUser{Email: "ops@mh.example", Name: "Ops", Roles: []string{"platform_admin"},
+	if _, err := CreateUser(ctx, prov, NewUser{Email: "ops@mh.example", Name: "Ops", Roles: []string{"platform_admin"},
 		HospitalShortCode: "HAV", Password: goodPW}); !errors.Is(err, ErrRoleHospital) {
 		t.Fatalf("platform_admin with hospital: %v", err)
 	}
-	if _, err := CreateUser(ctx, pool, NewUser{Email: "c@mh.example", Name: "C", Roles: []string{"clinician"},
+	if _, err := CreateUser(ctx, prov, NewUser{Email: "c@mh.example", Name: "C", Roles: []string{"clinician"},
 		Password: goodPW}); !errors.Is(err, ErrRoleHospital) {
 		t.Fatalf("clinician without hospital: %v", err)
 	}
-	if _, err := CreateUser(ctx, pool, NewUser{Email: "c@mh.example", Name: "C", Roles: []string{"clinician"},
+	if _, err := CreateUser(ctx, prov, NewUser{Email: "c@mh.example", Name: "C", Roles: []string{"clinician"},
 		HospitalShortCode: "NOPE", Password: goodPW}); !errors.Is(err, ErrHospitalNotFound) {
 		t.Fatalf("unknown hospital: %v", err)
 	}
-	if _, err := CreateUser(ctx, pool, NewUser{Email: "ops@mh.example", Name: "Ops", Roles: []string{"platform_admin"},
+	if _, err := CreateUser(ctx, prov, NewUser{Email: "ops@mh.example", Name: "Ops", Roles: []string{"platform_admin"},
 		Password: goodPW}); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +106,7 @@ func TestPlatformAndClinicalCreation(t *testing.T) {
 
 // The database triggers still hold if the Go check is bypassed.
 func TestTriggersBackstopRolePairing(t *testing.T) {
-	_, pool := testutil.MigratedPostgres(t)
+	pool, _ := setup(t)
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `INSERT INTO hospitals (name, short_code) VALUES ('H','HAV')`); err != nil {
 		t.Fatal(err)
@@ -107,9 +121,9 @@ func TestTriggersBackstopRolePairing(t *testing.T) {
 }
 
 func TestCreationIsAuditedWithoutEmails(t *testing.T) {
-	_, pool := testutil.MigratedPostgres(t)
+	pool, prov := setup(t)
 	ctx := context.Background()
-	hid, err := CreateHospital(ctx, pool, NewHospital{Name: "Havana General", ShortCode: "HAV", TimeZone: "UTC",
+	hid, err := CreateHospital(ctx, prov, NewHospital{Name: "Havana General", ShortCode: "HAV", TimeZone: "UTC",
 		RequireMFAForClinicians: true, AllowTrustDevice: true})
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +134,7 @@ func TestCreationIsAuditedWithoutEmails(t *testing.T) {
 	if !req || !trust || status != "setup_incomplete" {
 		t.Fatalf("settings %v %v %q", req, trust, status)
 	}
-	uid, err := CreateUser(ctx, pool, NewUser{Email: "grace@havana.example", Name: "Grace", Roles: []string{"clinician", "analyst"},
+	uid, err := CreateUser(ctx, prov, NewUser{Email: "grace@havana.example", Name: "Grace", Roles: []string{"clinician", "analyst"},
 		HospitalShortCode: "HAV", Password: goodPW})
 	if err != nil {
 		t.Fatal(err)

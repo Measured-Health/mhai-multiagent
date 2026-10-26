@@ -38,16 +38,17 @@ func CreateHospital(ctx context.Context, pool *pgxpool.Pool, h NewHospital) (uui
 	}
 	name := strings.TrimSpace(h.Name)
 	if name == "" {
-		return uuid.Nil, errors.New("name is required")
+		return uuid.Nil, ErrBadName
 	}
 	if err := validTimeZone(h.TimeZone); err != nil {
 		return uuid.Nil, err
 	}
 	var id uuid.UUID
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx,
-			`INSERT INTO hospitals (name, short_code, time_zone) VALUES ($1, $2, $3) RETURNING id`,
-			name, code, h.TimeZone).Scan(&id); err != nil {
+		id = uuid.New()
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO hospitals (id, name, short_code, time_zone) VALUES ($1, $2, $3, $4)`,
+			id, name, code, h.TimeZone); err != nil {
 			if isUnique(err) {
 				return ErrShortCodeTaken
 			}
@@ -60,7 +61,7 @@ func CreateHospital(ctx context.Context, pool *pgxpool.Pool, h NewHospital) (uui
 		}
 		// Ids only: no names, codes or emails in the audit trail.
 		return audit.Write(ctx, tx, audit.Event{HospitalID: id.String(), Action: "hospital.created",
-			Entity: "hospital", EntityID: id.String()})
+			Entity: "hospital", EntityID: id.String(), Payload: map[string]any{"via": "cli"}})
 	})
 	if err != nil {
 		return uuid.Nil, err
@@ -73,25 +74,12 @@ func CreateHospital(ctx context.Context, pool *pgxpool.Pool, h NewHospital) (uui
 // case-only duplicate is ErrEmailTaken. Errors never contain the email or
 // password.
 func CreateUser(ctx context.Context, pool *pgxpool.Pool, u NewUser) (uuid.UUID, error) {
-	email := NormaliseEmail(u.Email)
-	if !validEmail(email) {
-		return uuid.Nil, ErrBadEmail
-	}
-	name := strings.TrimSpace(u.Name)
-	if name == "" {
-		return uuid.Nil, ErrBadName
-	}
-	code := ""
-	if strings.TrimSpace(u.HospitalShortCode) != "" {
-		var ok bool
-		if code, ok = NormaliseShortCode(u.HospitalShortCode); !ok {
-			return uuid.Nil, ErrBadShortCode
-		}
-	}
-	if err := ValidateRoles(u.Roles, code); err != nil {
+	if err := ValidateNewUser(u); err != nil {
 		return uuid.Nil, err
 	}
-	if err := password.Check(u.Password); err != nil {
+	email, name := NormaliseEmail(u.Email), strings.TrimSpace(u.Name)
+	code, _ := NormaliseShortCode(u.HospitalShortCode) // "" when none
+	if err := password.Check(u.Password, email); err != nil {
 		return uuid.Nil, err
 	}
 	hash, err := password.Hash(u.Password)
@@ -111,10 +99,11 @@ func CreateUser(ctx context.Context, pool *pgxpool.Pool, u NewUser) (uuid.UUID, 
 			}
 			hospital = &hid
 		}
-		if err := tx.QueryRow(ctx,
-			`INSERT INTO users (hospital_id, email, password_hash, display_name, must_change_password)
-			 VALUES ($1, $2, $3, $4, true) RETURNING id`,
-			hospital, email, hash, name).Scan(&id); err != nil {
+		id = uuid.New() // supplied here: mhai_provision cannot read users back
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO users (id, hospital_id, email, password_hash, display_name, must_change_password)
+			 VALUES ($1, $2, $3, $4, $5, true)`,
+			id, hospital, email, hash, name); err != nil {
 			if isUnique(err) {
 				return ErrEmailTaken
 			}
@@ -129,7 +118,7 @@ func CreateUser(ctx context.Context, pool *pgxpool.Pool, u NewUser) (uuid.UUID, 
 				return errors.New("insert role failed")
 			}
 		}
-		ev := audit.Event{Action: "user.created", Entity: "user", EntityID: id.String()}
+		ev := audit.Event{Action: "user.created", Entity: "user", EntityID: id.String(), Payload: map[string]any{"via": "cli"}}
 		if hospital != nil {
 			ev.HospitalID = hospital.String()
 		}
@@ -146,6 +135,12 @@ func inTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error 
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return errors.New("begin failed")
+	}
+	// The provisioning login is a plain member of mhai_provision; every
+	// statement below runs with that role's narrow grants and RLS policies.
+	if _, err := tx.Exec(ctx, `SET LOCAL ROLE mhai_provision`); err != nil {
+		_ = tx.Rollback(ctx)
+		return ErrNotProvisioner
 	}
 	if err := fn(tx); err != nil {
 		_ = tx.Rollback(ctx)

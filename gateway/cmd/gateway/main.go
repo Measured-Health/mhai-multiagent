@@ -18,6 +18,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/logx"
+	"github.com/Measured-Health/mhai-multiagent/gateway/internal/password"
 )
 
 const usage = "usage: gateway serve | gateway migrate up|status | gateway hospitals create ... | gateway users create ..."
@@ -68,6 +69,9 @@ func migrate(ctx context.Context, args []string, url string, out io.Writer) erro
 func serve() error {
 	cfg, err := config.Load()
 	if err != nil {
+		return err
+	}
+	if err := password.Preload(); err != nil {
 		return err
 	}
 	log := logx.New(os.Stdout)
