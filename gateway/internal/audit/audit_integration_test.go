@@ -21,7 +21,8 @@ import (
 )
 
 // The chain is global, so these tests run one at a time against one server
-// (no t.Parallel) and each checks the whole chain.
+// (no t.Parallel); each resets the chain first (resetChain), so order and
+// -run filters don't matter.
 var super, app *pgxpool.Pool
 
 func TestMain(m *testing.M) {
@@ -111,6 +112,31 @@ func verify(t *testing.T) (bool, int64) {
 	return ok, broken
 }
 
+func lastIDOrZero(t *testing.T) int64 {
+	t.Helper()
+	var id *int64
+	if err := super.QueryRow(context.Background(), `SELECT max(id) FROM audit_log`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if id == nil {
+		return 0
+	}
+	return *id
+}
+
+// resetChain empties the audit log (as superuser) now and when the test
+// ends, so each test starts from a valid chain whatever ran before it.
+func resetChain(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		if _, err := super.Exec(context.Background(), `DELETE FROM audit_log`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
 func lastID(t *testing.T) int64 {
 	t.Helper()
 	var id int64
@@ -123,6 +149,7 @@ func lastID(t *testing.T) int64 {
 // Writers in different hospitals and roles extend one chain, even though
 // the gateway can see only its own hospital's rows.
 func TestAuditChainVerifies(t *testing.T) {
+	resetChain(t)
 	a, b := seedHospital(t), seedHospital(t)
 	writeAs(t, "gateway", event(a, "auth.login.succeeded"))
 	writeAs(t, "gateway", event(b, "auth.login.succeeded"))
@@ -154,6 +181,7 @@ func TestAuditChainVerifies(t *testing.T) {
 }
 
 func TestAuditConcurrentWrites(t *testing.T) {
+	resetChain(t)
 	hs := []uuid.UUID{seedHospital(t), seedHospital(t)}
 	var wg sync.WaitGroup
 	errs := make(chan error, 40)
@@ -180,9 +208,42 @@ func TestAuditConcurrentWrites(t *testing.T) {
 	}
 }
 
+// Payload keys that the log redaction list treats as sensitive are refused,
+// at any depth, and nothing is written.
+func TestAuditRejectsSensitiveKeys(t *testing.T) {
+	resetChain(t)
+	ctx := context.Background()
+	h := seedHospital(t)
+	type creds struct {
+		Token string `json:"token"`
+	}
+	for name, payload := range map[string]map[string]any{
+		"top level":    {"reason": "x", "email": "synthetic@example.test"},
+		"nested":       {"meta": map[string]any{"Refresh-Token": "synthetic"}},
+		"in an array":  {"items": []any{map[string]any{"ok": 1}, map[string]any{"backup_code": "1234"}}},
+		"struct field": {"meta": creds{Token: "synthetic"}},
+	} {
+		before := lastIDOrZero(t)
+		err := db.WithHospital(ctx, app, h, func(tx pgx.Tx) error {
+			return audit.Write(ctx, tx, audit.Event{HospitalID: h.String(), Action: "test.sensitive", Payload: payload})
+		})
+		if !errors.Is(err, audit.ErrSensitiveKey) {
+			t.Errorf("%s: err %v, want ErrSensitiveKey", name, err)
+		}
+		if strings.Contains(fmt.Sprint(err), "synthetic") || strings.Contains(fmt.Sprint(err), "1234") {
+			t.Errorf("%s: error echoes the value: %v", name, err)
+		}
+		if lastIDOrZero(t) != before {
+			t.Errorf("%s: a row was written", name)
+		}
+	}
+	writeAs(t, "gateway", audit.Event{HospitalID: h.String(), Action: "test.benign", Payload: map[string]any{"reason": "email changed"}})
+}
+
 // Postgres jsonb reorders keys and rewrites numbers; the hash must not
 // depend on that.
 func TestAuditPayloadRoundTrip(t *testing.T) {
+	resetChain(t)
 	h := seedHospital(t)
 	e := event(h, "test.payload")
 	e.Payload["huge"] = 1e300
@@ -195,6 +256,7 @@ func TestAuditPayloadRoundTrip(t *testing.T) {
 }
 
 func TestAuditTamperDetected(t *testing.T) {
+	resetChain(t)
 	h := seedHospital(t)
 	for i := 0; i < 3; i++ {
 		writeAs(t, "gateway", event(h, "test.tamper"))
@@ -220,6 +282,7 @@ func TestAuditTamperDetected(t *testing.T) {
 }
 
 func TestAuditTamperEveryColumn(t *testing.T) {
+	resetChain(t)
 	ctx := context.Background()
 	h := seedHospital(t)
 	other := seedHospital(t)
@@ -257,6 +320,7 @@ func TestAuditTamperEveryColumn(t *testing.T) {
 
 // Deleting a row breaks the link of the row after it.
 func TestAuditDeleteDetected(t *testing.T) {
+	resetChain(t)
 	ctx := context.Background()
 	h := seedHospital(t)
 	for i := 0; i < 3; i++ {
@@ -278,6 +342,7 @@ func TestAuditDeleteDetected(t *testing.T) {
 // transaction that doesn't read committed data is refused, since its head
 // could be stale.
 func TestAuditWriteGuards(t *testing.T) {
+	resetChain(t)
 	ctx := context.Background()
 	a, b := seedHospital(t), seedHospital(t)
 	err := db.WithHospital(ctx, app, a, func(tx pgx.Tx) error {

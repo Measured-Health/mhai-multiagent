@@ -9,8 +9,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -343,5 +345,67 @@ func TestIdempotentPanicReleasesKey(t *testing.T) {
 	}()
 	if c := rowCount(t, user, key); c != 0 {
 		t.Fatalf("%d rows left after panic", c)
+	}
+}
+
+// A 2xx body holding a sensitive key (a token, a secret) is never stored,
+// even on a route that forgot NoStore and the no-store header.
+func TestIdempotentNeverStoresSecrets(t *testing.T) {
+	user := uuid.NewString()
+	var n atomic.Int32
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		httpx.JSON(w, http.StatusOK, map[string]any{"data": map[string]string{"access_token": "synthetic-token-value"}})
+	})
+	srv := chain(&httpx.Principal{UserID: user, HospitalID: seedHospital(t)}, h)
+	key := uuid.NewString()
+	send(srv, key, "", `{}`)
+	send(srv, key, "", `{}`)
+	if n.Load() != 2 || rowCount(t, user, key) != 0 {
+		t.Fatalf("calls %d, rows %d", n.Load(), rowCount(t, user, key))
+	}
+}
+
+// Identical requests racing on one key: the handler runs once, one gets
+// its reply and the rest get 409 conflict (or the replay, if they arrive
+// after it is stored).
+func TestIdempotentConcurrentReserve(t *testing.T) {
+	user := uuid.NewString()
+	key := uuid.NewString()
+	var n atomic.Int32
+	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		time.Sleep(200 * time.Millisecond)
+		httpx.JSON(w, http.StatusCreated, map[string]string{"ok": "1"})
+	})
+	srv := chain(&httpx.Principal{UserID: user, HospitalID: seedHospital(t)}, slow)
+	const racers = 8
+	start := make(chan struct{})
+	codes := make(chan int, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			codes <- send(srv, key, "", `{"same":true}`).Code
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(codes)
+	created, conflicts := 0, 0
+	for c := range codes {
+		switch c {
+		case http.StatusCreated:
+			created++
+		case http.StatusConflict:
+			conflicts++
+		default:
+			t.Errorf("unexpected status %d", c)
+		}
+	}
+	if n.Load() != 1 || created < 1 || created+conflicts != racers {
+		t.Fatalf("calls %d, created %d, conflicts %d", n.Load(), created, conflicts)
 	}
 }

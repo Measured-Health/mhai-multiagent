@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/gateway/internal/logx"
 )
 
 // Event is one audit entry. ActorID and HospitalID are uuids, or "" for
@@ -44,6 +45,11 @@ var genesis = strings.Repeat("0", 64)
 // ErrIsolation is returned when Write runs in a transaction above READ
 // COMMITTED: its snapshot could predate the chain head, forking the chain.
 var ErrIsolation = errors.New("audit: Write needs a READ COMMITTED transaction")
+
+// ErrSensitiveKey is returned when the payload has a field the log
+// redaction list treats as sensitive (email, token, code, password, ...),
+// at any depth. Nothing is written.
+var ErrSensitiveKey = errors.New("audit: payload has a sensitive key")
 
 const tsLayout = "2006-01-02T15:04:05.000000Z07:00"
 
@@ -140,6 +146,11 @@ func Write(ctx context.Context, tx pgx.Tx, e Event) error {
 	if err != nil {
 		return errors.New("audit: payload is not JSON")
 	}
+	// Scan the marshalled JSON, so struct values are checked by their JSON
+	// field names too. The key name may be reported; its value never is.
+	if k, bad := logx.SensitiveKeyInJSON(raw); bad {
+		return fmt.Errorf("%w: %q", ErrSensitiveKey, k)
+	}
 	// Hash the payload as Postgres will store it, so Verify, reading it
 	// back, computes the same hash.
 	var stored []byte
@@ -147,7 +158,6 @@ func Write(ctx context.Context, tx pgx.Tx, e Event) error {
 		return fmt.Errorf("audit: payload: %w", err)
 	}
 	r := record{
-		ts:      time.Now().UTC().Truncate(time.Microsecond),
 		actorID: actor, hospitalID: hospital, requestID: e.RequestID,
 		action: e.Action, entity: e.Entity, entityID: e.EntityID,
 		payload: stored,
@@ -163,6 +173,8 @@ func Write(ctx context.Context, tx pgx.Tx, e Event) error {
 	if err := tx.QueryRow(ctx, `SELECT id, hash FROM audit_chain_head()`).Scan(&headID, &headHash); err != nil {
 		return fmt.Errorf("audit: chain head: %w", err)
 	}
+	// Taken under the lock, so ts never goes backwards in id order.
+	r.ts = time.Now().UTC().Truncate(time.Microsecond)
 	prev := genesis
 	if headHash != nil {
 		prev = *headHash

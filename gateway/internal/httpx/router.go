@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -36,6 +37,11 @@ func (rt *Router) Handle(method, pattern string, h http.Handler) {
 // An unknown route gets 404 not_found as a problem body.
 func (rt *Router) Handler(serviceKeys []string) http.Handler {
 	routes := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// An unclean path ("//", "." or "..") is refused, not redirected.
+		if !cleanPath(r.URL.Path) {
+			Error(w, r, "not_found")
+			return
+		}
 		if _, pattern := rt.mux.Handler(r); pattern == "" {
 			Error(w, r, "not_found")
 			return
@@ -52,4 +58,13 @@ func limitBody(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// cleanPath reports whether p is already clean (a trailing slash allowed).
+func cleanPath(p string) bool {
+	c := path.Clean(p)
+	if strings.HasSuffix(p, "/") && c != "/" {
+		c += "/"
+	}
+	return p == c
 }

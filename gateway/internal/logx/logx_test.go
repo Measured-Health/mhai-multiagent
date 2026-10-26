@@ -104,3 +104,38 @@ func TestRedactingHandlerKeyNormalising(t *testing.T) {
 		}
 	}
 }
+
+func TestIsSensitiveKey(t *testing.T) {
+	for _, k := range []string{"email", "Refresh-Token", "backup_code", "API_KEY", "code"} {
+		if !IsSensitiveKey(k) {
+			t.Errorf("%q not sensitive", k)
+		}
+	}
+	for _, k := range []string{"reason", "user_id", "hospital_id", "request_id"} {
+		if IsSensitiveKey(k) {
+			t.Errorf("%q sensitive", k)
+		}
+	}
+}
+
+func TestSensitiveKeyInJSON(t *testing.T) {
+	cases := map[string]string{
+		`{"email":"x"}`:                         "email",
+		`{"meta":{"Refresh-Token":"x"}}`:        "Refresh-Token",
+		`{"items":[{"ok":1},{"password":"x"}]}`: "password",
+		`[[{"otp":1}]]`:                         "otp",
+	}
+	for doc, want := range cases {
+		if got, ok := SensitiveKeyInJSON([]byte(doc)); !ok || got != want {
+			t.Errorf("%s: got %q %v, want %q", doc, got, ok, want)
+		}
+	}
+	for _, doc := range []string{`{"reason":"email token code"}`, `[1,"password"]`, `"token"`, `{}`} {
+		if got, ok := SensitiveKeyInJSON([]byte(doc)); ok {
+			t.Errorf("%s: flagged %q", doc, got)
+		}
+	}
+	if _, ok := SensitiveKeyInJSON([]byte(`{not json`)); !ok {
+		t.Error("invalid JSON must fail closed")
+	}
+}

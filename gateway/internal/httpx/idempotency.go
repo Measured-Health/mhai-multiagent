@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/gateway/internal/logx"
 )
 
 // Principal is who a request acts for. The token middleware sets it with
@@ -75,8 +76,10 @@ func NoStore(h http.Handler) http.Handler {
 // mhai_platform (platform principal) or mhai_auth (anonymous).
 //
 // Responses are not stored when the route is wrapped in NoStore, when the
-// response sends Cache-Control: no-store, when it is not 2xx, or when it is
-// larger than 1 MiB.
+// response sends Cache-Control: no-store, when its body has a sensitive
+// field (logx.IsSensitiveKey) or isn't JSON, when it is not 2xx, or when
+// it is larger than 1 MiB. Only status and body are replayed (as
+// application/json); idempotent routes must not rely on other headers.
 func Idempotent(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -210,12 +213,23 @@ func (s *store) serve(w http.ResponseWriter, r *http.Request, next http.Handler)
 		status = http.StatusOK
 	}
 	keep := !state.noStore && !rec.overflow && status >= 200 && status < 300 &&
-		!hasNoStore(w.Header().Values("Cache-Control"))
+		!hasNoStore(w.Header().Values("Cache-Control")) && !hasSecret(rec.buf.Bytes())
 	if keep {
 		s.finish(context.WithoutCancel(ctx), status, rec.buf.Bytes())
 	} else {
 		s.release(context.WithoutCancel(ctx))
 	}
+}
+
+// hasSecret is the fail-closed guard behind NoStore: a body with a field
+// the redaction list treats as sensitive (a token, a secret, a code) is
+// never stored. A non-JSON body is not stored either.
+func hasSecret(body []byte) bool {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return false
+	}
+	_, bad := logx.SensitiveKeyInJSON(body)
+	return bad
 }
 
 // reserve returns the stored reply for a completed request, or nil after
@@ -264,18 +278,16 @@ func (s *store) reserve(ctx context.Context) (*stored, error) {
 	return prior, err
 }
 
-// finish keeps the reply. If that fails the reservation is dropped, so a
-// retry runs again rather than meeting a key stuck in progress.
+// finish keeps the reply. If that fails, the reservation stays: the handler
+// has already succeeded, so a retry must not run it again; it gets 409
+// conflict until the key expires.
 func (s *store) finish(ctx context.Context, status int, body []byte) {
-	err := s.sc.run(ctx, s.pool, func(tx pgx.Tx) error {
+	_ = s.sc.run(ctx, s.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`UPDATE idempotency_keys SET status = $3, body = $4 WHERE scope = $1 AND key = $2`,
 			s.sc.name, s.key, status, body)
 		return err
 	})
-	if err != nil {
-		s.release(ctx)
-	}
 }
 
 func (s *store) release(ctx context.Context) {

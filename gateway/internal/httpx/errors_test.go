@@ -211,3 +211,18 @@ func TestJSONHelper(t *testing.T) {
 		t.Fatalf("body %s", rec.Body.String())
 	}
 }
+
+// An unclean path to a real route is not redirected: it is a 404 problem.
+func TestUncleanPathIsProblem404(t *testing.T) {
+	for _, p := range []string{"/api/v1//probe", "/api/v1/x/../probe", "/api/v1/./probe"} {
+		req := bffRequest(http.MethodGet, "/", "")
+		req.URL.Path = p
+		req.RequestURI = p
+		rec := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}), req)
+		if rec.Code != 404 || !strings.Contains(rec.Body.String(), `"not_found"`) {
+			t.Errorf("%s: %d %s", p, rec.Code, rec.Body.String())
+		}
+	}
+}
