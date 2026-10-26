@@ -20,7 +20,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/logx"
 )
 
-const usage = "usage: gateway serve | gateway migrate up|status"
+const usage = "usage: gateway serve | gateway migrate up|status | gateway hospitals create ... | gateway users create ..."
 
 func main() {
 	var err error
@@ -29,6 +29,8 @@ func main() {
 		err = serve()
 	case len(os.Args) >= 2 && os.Args[1] == "migrate":
 		err = migrate(context.Background(), os.Args[2:], os.Getenv("DATABASE_URL"), os.Stdout)
+	case len(os.Args) >= 2 && (os.Args[1] == "hospitals" || os.Args[1] == "users"):
+		err = seed(context.Background(), os.Args[1:], os.Getenv("DATABASE_URL"), os.Stdin, os.Stdout)
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
