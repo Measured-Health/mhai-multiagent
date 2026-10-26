@@ -54,6 +54,23 @@ services:
       <<: *healthcheck-defaults
       test: ["CMD", "redis-cli", "ping"]
 
+  # The only link between the Go gateway and the Python workers. Two users
+  # (gateway, worker) with their own permissions; see gateway/deploy/nats.
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    command: ["-c", "/etc/nats/nats.conf"]
+    environment:
+      NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}
+      NATS_WORKER_PASSWORD: ${NATS_WORKER_PASSWORD:?set NATS_WORKER_PASSWORD in .env}
+    ports: ["127.0.0.1:${NATS_PORT:-4222}:4222"]
+    volumes:
+      - ./gateway/deploy/nats/nats.conf:/etc/nats/nats.conf:ro
+      - natsdata:/data
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
+
   # Serves the CCA LLM (CCA_BACKEND=ollama).
   ollama:
     image: ollama/ollama:${OLLAMA_VERSION:-0.40.0}
@@ -125,5 +142,6 @@ services:
 volumes:
   pgdata:
   redisdata:
+  natsdata:
   ollama:
   hf-cache:
