@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -16,7 +17,7 @@ type Config struct {
 	HTTPAddr         string
 	DatabaseURL      string
 	NATSURL          string
-	NATSCreds        string
+	NATSNkeySeedPath string // production: the service's NKey seed file
 	AccessKeyPath    string
 	MFAKey           []byte
 	BFFServiceKeys   []string
@@ -31,11 +32,20 @@ func Load() (Config, error) {
 		HTTPAddr:         getenv("HTTP_ADDR", ":8080"),
 		DatabaseURL:      os.Getenv("DATABASE_URL"),
 		NATSURL:          os.Getenv("NATS_URL"),
-		NATSCreds:        os.Getenv("NATS_CREDS"),
+		NATSNkeySeedPath: os.Getenv("NATS_NKEY_SEED_PATH"),
 		AccessKeyPath:    os.Getenv("ACCESS_KEY_PATH"),
 		BreachedListPath: os.Getenv("BREACHED_LIST_PATH"),
 	}
 	var errs []error
+
+	if err := checkNATSURL(c.NATSURL); err != nil {
+		errs = append(errs, err)
+	}
+	for _, name := range []string{"NATS_GATEWAY_PASSWORD", "NATS_WORKER_PASSWORD"} {
+		if err := checkPlaceholder(name, os.Getenv(name)); err != nil {
+			errs = append(errs, err)
+		}
+	}
 
 	if v, err := secret("MFA_ENCRYPTION_KEY"); err != nil {
 		errs = append(errs, err)
@@ -73,12 +83,39 @@ func secret(name string) (string, error) {
 	return v, nil
 }
 
-func checkSecret(name, v string) error {
+// checkNATSURL rejects an unparsable NATS_URL and a placeholder password in
+// it. Errors never carry the URL.
+func checkNATSURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	for _, part := range strings.Split(raw, ",") {
+		u, err := url.Parse(strings.TrimSpace(part))
+		if err != nil || u.Host == "" {
+			return errors.New("NATS_URL is invalid")
+		}
+		if pw, ok := u.User.Password(); ok {
+			if err := checkPlaceholder("NATS_URL", pw); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func checkPlaceholder(name, v string) error {
 	lower := strings.ToLower(v)
 	for _, p := range []string{"change-me", "changeme", "placeholder"} {
 		if strings.Contains(lower, p) {
 			return fmt.Errorf("%s is a placeholder", name)
 		}
+	}
+	return nil
+}
+
+func checkSecret(name, v string) error {
+	if err := checkPlaceholder(name, v); err != nil {
+		return err
 	}
 	if len(v) < minSecretLen {
 		return fmt.Errorf("%s must be at least %d bytes", name, minSecretLen)

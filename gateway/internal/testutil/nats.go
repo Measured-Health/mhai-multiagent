@@ -3,10 +3,12 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"time"
 
+	"github.com/nats-io/nkeys"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -23,6 +25,7 @@ const (
 // NATS is a throwaway NATS server with JetStream and the real
 // deploy/nats/nats.conf. The URLs carry each service's test credentials.
 type NATS struct {
+	Addr       string // host:port, no credentials
 	GatewayURL string
 	WorkerURL  string
 }
@@ -32,6 +35,50 @@ type NATS struct {
 func NewNATS(ctx context.Context) (n *NATS, stop func(), err error) {
 	_, file, _, _ := runtime.Caller(0)
 	conf := filepath.Join(filepath.Dir(file), "..", "..", "deploy", "nats", "nats.conf")
+	return startNATS(ctx, conf)
+}
+
+// NATSNkey is a throwaway server with one NKey user allowed to publish
+// inference.v1.> only, for testing the production authentication path.
+type NATSNkey struct {
+	URL      string // no credentials
+	SeedPath string // the user's seed file
+}
+
+// NewNATSNkey starts a server whose only user authenticates by NKey.
+func NewNATSNkey(ctx context.Context, dir string) (n *NATSNkey, stop func(), err error) {
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		return nil, nil, err
+	}
+	pub, err := kp.PublicKey()
+	if err != nil {
+		return nil, nil, err
+	}
+	seed, err := kp.Seed()
+	if err != nil {
+		return nil, nil, err
+	}
+	conf := filepath.Join(dir, "nkey.conf")
+	body := fmt.Sprintf(`port: 4222
+jetstream { store_dir: /data }
+authorization { users = [ { nkey: %s, permissions: { publish: { allow: ["inference.v1.>"] }, subscribe: { allow: ["_INBOX_gateway.>"] } } } ] }
+`, pub)
+	if err := os.WriteFile(conf, []byte(body), 0o644); err != nil {
+		return nil, nil, err
+	}
+	seedPath := filepath.Join(dir, "user.seed")
+	if err := os.WriteFile(seedPath, seed, 0o600); err != nil {
+		return nil, nil, err
+	}
+	srv, stop, err := startNATS(ctx, conf)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &NATSNkey{URL: "nats://" + srv.Addr, SeedPath: seedPath}, stop, nil
+}
+
+func startNATS(ctx context.Context, conf string) (n *NATS, stop func(), err error) {
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		Started: true,
 		ContainerRequest: testcontainers.ContainerRequest{
@@ -69,6 +116,7 @@ func NewNATS(ctx context.Context) (n *NATS, stop func(), err error) {
 	}
 	addr := fmt.Sprintf("%s:%s", host, port.Port())
 	return &NATS{
+		Addr:       addr,
 		GatewayURL: fmt.Sprintf("nats://gateway:%s@%s", natsGatewayPassword, addr),
 		WorkerURL:  fmt.Sprintf("nats://worker:%s@%s", natsWorkerPassword, addr),
 	}, stop, nil

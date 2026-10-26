@@ -9,11 +9,19 @@ package bus
 import (
 	"context"
 	"errors"
-	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+)
+
+// Inbox prefixes. Each service may subscribe only to its own, so a worker
+// never sees replies meant for the gateway (and cannot forge them).
+const (
+	GatewayInboxPrefix = "_INBOX_gateway"
+	WorkerInboxPrefix  = "_INBOX_worker"
 )
 
 // Bucket names and lifetimes.
@@ -34,38 +42,83 @@ type Buckets struct {
 	MFAAttempts   jetstream.KeyValue // step-up code failure counters
 }
 
+// Errors from Connect are fixed messages or known sentinels; they never
+// contain the URL, a password or a file path.
+var (
+	errInvalidURL  = errors.New("bus: invalid NATS url")
+	errSeed        = errors.New("bus: cannot use nkey seed file")
+	errConnectFail = errors.New("bus: connect failed")
+)
+
 // Connect dials NATS and returns the connection and its JetStream handle.
-// url may carry user:password for the dev server; credsPath, when set, is a
-// .creds file (production). Neither is logged or put in an error.
-func Connect(ctx context.Context, url, credsPath string) (*nats.Conn, jetstream.JetStream, error) {
+//
+// url may carry user:password (the dev server); they are taken out of the
+// URL and passed as options. nkeySeedPath, when set, is the service's NKey
+// seed file (production). inboxPrefix is the service's own reply prefix, for
+// example GatewayInboxPrefix. ctx is checked on entry; the dial itself is
+// bounded by a 5 s timeout.
+func Connect(ctx context.Context, rawURL, nkeySeedPath, inboxPrefix string) (*nats.Conn, jetstream.JetStream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
+	var servers []string
+	var user, pass string
+	var haveUser bool
+	for _, part := range strings.Split(rawURL, ",") {
+		u, err := url.Parse(strings.TrimSpace(part))
+		if err != nil || u.Host == "" {
+			return nil, nil, errInvalidURL
+		}
+		if u.User != nil {
+			user = u.User.Username()
+			pass, _ = u.User.Password()
+			haveUser = true
+			u.User = nil
+		}
+		servers = append(servers, u.String())
+	}
 	opts := []nats.Option{
-		nats.Name("mhai-gateway"),
+		nats.Name("mhai-" + strings.TrimPrefix(inboxPrefix, "_INBOX_")),
 		nats.Timeout(5 * time.Second),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(time.Second),
 	}
-	if credsPath != "" {
-		opts = append(opts, nats.UserCredentials(credsPath))
+	if inboxPrefix != "" {
+		opts = append(opts, nats.CustomInboxPrefix(inboxPrefix))
 	}
-	nc, err := nats.Connect(url, opts...)
+	if haveUser {
+		opts = append(opts, nats.UserInfo(user, pass))
+	}
+	if nkeySeedPath != "" {
+		o, err := nats.NkeyOptionFromSeed(nkeySeedPath)
+		if err != nil {
+			return nil, nil, errSeed
+		}
+		opts = append(opts, o)
+	}
+	nc, err := nats.Connect(strings.Join(servers, ","), opts...)
 	if err != nil {
-		// nats errors are sentinels (no-servers, auth); wrap without the URL.
-		return nil, nil, fmt.Errorf("bus: connect: %w", err)
+		switch {
+		case errors.Is(err, nats.ErrAuthorization):
+			return nil, nil, nats.ErrAuthorization
+		case errors.Is(err, nats.ErrNoServers):
+			return nil, nil, nats.ErrNoServers
+		case errors.Is(err, nats.ErrTimeout):
+			return nil, nil, nats.ErrTimeout
+		}
+		return nil, nil, errConnectFail
 	}
 	js, err := jetstream.New(nc)
 	if err != nil {
 		nc.Close()
-		return nil, nil, fmt.Errorf("bus: jetstream: %w", err)
+		return nil, nil, errConnectFail
 	}
 	return nc, js, nil
 }
 
 // OpenBucket creates the KV bucket, or updates it to this lifetime, and
-// returns it. Entries expire ttl after they were last written; one revision
-// is kept.
+// returns it. Entries expire ttl after they were last written (NATS 2.10 has
+// no per-key TTL); one revision is kept.
 func OpenBucket(ctx context.Context, js jetstream.JetStream, name string, ttl time.Duration) (jetstream.KeyValue, error) {
 	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:  name,
@@ -74,7 +127,7 @@ func OpenBucket(ctx context.Context, js jetstream.JetStream, name string, ttl ti
 		Storage: jetstream.FileStorage,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("bus: open bucket %s: %w", name, err)
+		return nil, errors.New("bus: open bucket " + name + " failed")
 	}
 	return kv, nil
 }

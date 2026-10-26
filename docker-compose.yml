@@ -59,7 +59,14 @@ services:
   nats:
     image: nats:2.10-alpine
     restart: unless-stopped
-    command: ["-c", "/etc/nats/nats.conf"]
+    # Refuse to start with a placeholder password.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        case "$$NATS_GATEWAY_PASSWORD $$NATS_WORKER_PASSWORD" in
+          *[Cc]hange[Mm]e*|*[Cc]hange-[Mm]e*|*[Pp]laceholder*|*[Pp]LACEHOLDER*) echo "NATS passwords are placeholders" >&2; exit 1;;
+        esac
+        exec nats-server -c /etc/nats/nats.conf
     environment:
       NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}
       NATS_WORKER_PASSWORD: ${NATS_WORKER_PASSWORD:?set NATS_WORKER_PASSWORD in .env}

@@ -32,68 +32,159 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func TestWorkerCannotPublishInference(t *testing.T) {
-	ctx := context.Background()
-	violations := make(chan error, 4)
-	nc, err := nats.Connect(sharedNATS.WorkerURL,
-		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) { violations <- err }))
+// svc is a raw client for one service user whose async errors (permission
+// violations) are collected.
+type svc struct {
+	nc   *nats.Conn
+	errs chan error
+}
+
+func raw(t *testing.T, url, inboxPrefix string) *svc {
+	t.Helper()
+	s := &svc{errs: make(chan error, 16)}
+	nc, err := nats.Connect(url, nats.CustomInboxPrefix(inboxPrefix),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) { s.errs <- err }))
 	if err != nil {
-		t.Fatalf("connect as worker: %v", err)
+		t.Fatalf("connect: %v", err)
 	}
-	defer nc.Close()
-	_ = ctx
-	if err := nc.Publish("inference.v1.cca", []byte("x")); err != nil {
-		t.Fatalf("publish call itself: %v", err)
-	}
-	_ = nc.Flush()
-	select {
-	case err := <-violations:
-		if !errors.Is(err, nats.ErrPermissionViolation) && !strings.Contains(strings.ToLower(err.Error()), "permissions violation") {
-			t.Fatalf("want permissions violation, got %v", err)
+	t.Cleanup(nc.Close)
+	s.nc = nc
+	return s
+}
+
+func worker(t *testing.T) *svc  { return raw(t, sharedNATS.WorkerURL, bus.WorkerInboxPrefix) }
+func gateway(t *testing.T) *svc { return raw(t, sharedNATS.GatewayURL, bus.GatewayInboxPrefix) }
+
+// violation waits for a permissions violation that names subject.
+func (s *svc) violation(t *testing.T, subject string) {
+	t.Helper()
+	_ = s.nc.Flush()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case err := <-s.errs:
+			if strings.Contains(strings.ToLower(err.Error()), "permissions violation") && strings.Contains(err.Error(), subject) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no permissions violation naming %q", subject)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no permissions violation for worker publishing inference.v1.cca")
 	}
 }
 
-func TestWorkerCanReplyAndDead(t *testing.T) {
-	violations := make(chan error, 4)
-	nc, err := nats.Connect(sharedNATS.WorkerURL,
-		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) { violations <- err }))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer nc.Close()
-	if err := nc.Publish("dead.v1.h1.query", []byte("x")); err != nil {
-		t.Fatal(err)
-	}
-	_ = nc.Flush()
+func (s *svc) noViolation(t *testing.T) {
+	t.Helper()
+	_ = s.nc.Flush()
 	select {
-	case err := <-violations:
-		t.Fatalf("worker publishing dead.v1 was refused: %v", err)
+	case err := <-s.errs:
+		t.Fatalf("unexpected error: %v", err)
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestWorkerCannotPublishInference(t *testing.T) {
+	w := worker(t)
+	// A second worker listens: the message must never arrive.
+	listener := worker(t)
+	got := make(chan struct{}, 1)
+	if _, err := listener.nc.Subscribe("inference.v1.cca", func(*nats.Msg) { got <- struct{}{} }); err != nil {
+		t.Fatal(err)
+	}
+	_ = listener.nc.Flush()
+	if err := w.nc.Publish("inference.v1.cca", []byte("x")); err != nil {
+		t.Fatalf("publish call itself: %v", err)
+	}
+	w.violation(t, "inference.v1.cca")
+	select {
+	case <-got:
+		t.Fatal("a message the worker was not allowed to publish was delivered")
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestWorkerCannotPublishJobs(t *testing.T) {
+	w := worker(t)
+	_ = w.nc.Publish("jobs.v1.h1.query", []byte("x"))
+	w.violation(t, "jobs.v1.h1.query")
+}
+
+func TestWorkerHasNoKVAccess(t *testing.T) {
+	for _, subj := range []string{
+		"$KV.denylist.x", "$JS.API.DIRECT.GET.KV_denylist.$KV.denylist.x",
+		"$JS.API.STREAM.INFO.KV_denylist", "$JS.API.STREAM.DELETE.KV_denylist",
+	} {
+		w := worker(t)
+		_ = w.nc.Publish(subj, nil)
+		w.violation(t, subj)
+	}
+	w := worker(t)
+	_, _ = w.nc.Subscribe("$KV.>", func(*nats.Msg) {})
+	w.violation(t, "$KV.>")
+}
+
+func TestWorkerCanReplyAndDead(t *testing.T) {
+	w := worker(t)
+	if err := w.nc.Publish("dead.v1.h1.query", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	w.noViolation(t)
+}
+
+func TestInboxIsolation(t *testing.T) {
+	w := worker(t)
+	for _, subj := range []string{"_INBOX.>", bus.GatewayInboxPrefix + ".>"} {
+		_, _ = w.nc.Subscribe(subj, func(*nats.Msg) {})
+		w.violation(t, subj)
+	}
+	for _, subj := range []string{"_INBOX.abc", bus.GatewayInboxPrefix + ".abc"} {
+		_ = w.nc.Publish(subj, []byte("forged"))
+		w.violation(t, subj)
+	}
+	// The gateway cannot listen on the worker's inbox either.
+	g := gateway(t)
+	_, _ = g.nc.Subscribe(bus.WorkerInboxPrefix+".>", func(*nats.Msg) {})
+	g.violation(t, bus.WorkerInboxPrefix+".>")
+}
+
+func TestDefaultDeny(t *testing.T) {
+	w := worker(t)
+	_ = w.nc.Publish("unlisted.v1.x", nil)
+	w.violation(t, "unlisted.v1.x")
+	_, _ = w.nc.Subscribe("unlisted.>", func(*nats.Msg) {})
+	w.violation(t, "unlisted.>")
+
+	g := gateway(t)
+	_ = g.nc.Publish("unlisted.v1.x", nil)
+	g.violation(t, "unlisted.v1.x")
+	_ = g.nc.Publish("dead.v1.h1.query", nil)
+	g.violation(t, "dead.v1.h1.query")
+	_, _ = g.nc.Subscribe("inference.v1.>", func(*nats.Msg) {})
+	g.violation(t, "inference.v1.>")
+}
+
+func TestGatewayCannotDestroyStreams(t *testing.T) {
+	g := gateway(t)
+	for _, subj := range []string{"$JS.API.STREAM.DELETE.KV_denylist", "$JS.API.STREAM.PURGE.KV_denylist", "$JS.API.STREAM.DELETE.JOBS"} {
+		_ = g.nc.Publish(subj, nil)
+		g.violation(t, subj)
 	}
 }
 
 func TestGatewayCanRequest(t *testing.T) {
 	ctx := context.Background()
-	wnc, err := nats.Connect(sharedNATS.WorkerURL)
-	if err != nil {
-		t.Fatalf("worker connect: %v", err)
-	}
-	defer wnc.Close()
-	sub, err := wnc.QueueSubscribe("inference.v1.echo", "echo", func(m *nats.Msg) {
+	w := worker(t)
+	sub, err := w.nc.QueueSubscribe("inference.v1.echo", "echo", func(m *nats.Msg) {
 		_ = m.Respond(append([]byte("echo:"), m.Data...))
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sub.Unsubscribe()
-	if err := wnc.Flush(); err != nil {
+	if err := w.nc.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
-	gnc, _, err := bus.Connect(ctx, sharedNATS.GatewayURL, "")
+	gnc, _, err := bus.Connect(ctx, sharedNATS.GatewayURL, "", bus.GatewayInboxPrefix)
 	if err != nil {
 		t.Fatalf("gateway connect: %v", err)
 	}
@@ -105,21 +196,67 @@ func TestGatewayCanRequest(t *testing.T) {
 	if string(rep.Data) != "echo:hi" {
 		t.Fatalf("reply = %q", rep.Data)
 	}
+	w.noViolation(t)
 }
 
-func TestConnectFailsWithBadPassword(t *testing.T) {
+func TestConnectBadPassword(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	bad := strings.Replace(sharedNATS.GatewayURL, "test-only-gateway-pw", "wrong", 1)
-	if nc, _, err := bus.Connect(ctx, bad, ""); err == nil {
+	bad := strings.Replace(sharedNATS.GatewayURL, "test-only-gateway-pw", "wrongpwXYZ", 1)
+	nc, _, err := bus.Connect(ctx, bad, "", bus.GatewayInboxPrefix)
+	if err == nil {
 		nc.Close()
 		t.Fatal("connect with a wrong password succeeded")
+	}
+	if !errors.Is(err, nats.ErrAuthorization) {
+		t.Fatalf("want an authorization error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "wrongpwXYZ") || strings.Contains(err.Error(), "test-only-gateway-pw") {
+		t.Fatalf("error leaks the password: %v", err)
+	}
+}
+
+func TestConnectMalformedURLDoesNotLeakPassword(t *testing.T) {
+	for _, u := range []string{"nats://gateway:SECRETPW@host:abc", "nats://gateway:SECRETPW@[::1", "://gateway:SECRETPW@h"} {
+		_, _, err := bus.Connect(context.Background(), u, "", bus.GatewayInboxPrefix)
+		if err == nil {
+			t.Fatalf("%q: expected an error", u)
+		}
+		if strings.Contains(err.Error(), "SECRETPW") {
+			t.Fatalf("error leaks the password: %v", err)
+		}
+	}
+}
+
+func TestConnectWithNkeySeed(t *testing.T) {
+	ctx := context.Background()
+	srv, stop, err := testutil.NewNATSNkey(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	if nc, _, err := bus.Connect(ctx, srv.URL, "", bus.GatewayInboxPrefix); err == nil {
+		nc.Close()
+		t.Fatal("connected to an nkey-only server without a seed")
+	}
+	nc, _, err := bus.Connect(ctx, srv.URL, srv.SeedPath, bus.GatewayInboxPrefix)
+	if err != nil {
+		t.Fatalf("connect with seed: %v", err)
+	}
+	defer nc.Close()
+	// Authenticated and allowed to publish: nobody listens, so no responders.
+	if _, err := nc.Request("inference.v1.x", nil, time.Second); !errors.Is(err, nats.ErrNoResponders) {
+		t.Fatalf("want no responders, got %v", err)
+	}
+	if _, _, err := bus.Connect(ctx, srv.URL, "/nonexistent/seed", bus.GatewayInboxPrefix); err == nil {
+		t.Fatal("missing seed file should fail")
 	}
 }
 
 func TestOpenBucketsCreatesThreeAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
-	nc, js, err := bus.Connect(ctx, sharedNATS.GatewayURL, "")
+	nc, js, err := bus.Connect(ctx, sharedNATS.GatewayURL, "", bus.GatewayInboxPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,23 +271,26 @@ func TestOpenBucketsCreatesThreeAndIsIdempotent(t *testing.T) {
 			if kv == nil {
 				t.Fatalf("%s bucket is nil", name)
 			}
-		}
-		st, err := b.Denylist.Status(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if st.TTL() != 15*time.Minute {
-			t.Fatalf("denylist ttl = %v", st.TTL())
+			st, err := kv.Status(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.TTL() != 15*time.Minute {
+				t.Fatalf("%s ttl = %v", name, st.TTL())
+			}
 		}
 		if _, err := b.LoginAttempts.Put(ctx, "0123abcd", []byte("1")); err != nil {
 			t.Fatalf("put as gateway: %v", err)
+		}
+		if v, err := b.LoginAttempts.Get(ctx, "0123abcd"); err != nil || string(v.Value()) != "1" {
+			t.Fatalf("get as gateway: %v", err)
 		}
 	}
 }
 
 func TestKVTTL(t *testing.T) {
 	ctx := context.Background()
-	nc, js, err := bus.Connect(ctx, sharedNATS.GatewayURL, "")
+	nc, js, err := bus.Connect(ctx, sharedNATS.GatewayURL, "", bus.GatewayInboxPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
