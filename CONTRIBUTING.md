@@ -32,6 +32,25 @@ One Python version: **3.12** (`.python-version`; Docker uses the same).
 Container images and tools are pinned to exact versions, and Dependabot
 proposes upgrades weekly.
 
+## Where a change goes
+
+The backend is a Go gateway plus Python model services, joined by NATS
+(ADR 0010). The Go gateway, in `gateway/`, is planned and not built yet.
+
+- **Go:** the API, authentication, permissions, tenancy, audit and EMR
+  plumbing.
+- **Python (`mhai/`):** models and the pipeline: agents, retrieval,
+  guardrails, PII masking.
+- **NATS** is the only link between them. Python services are never
+  called any other way.
+
+Two rules:
+
+- **Security rules are written once, in Go.** Don't copy a permission or
+  tenancy rule into Python.
+- **Python never trusts a hospital or user from a payload,** only from the
+  verified gateway token.
+
 ## Branches and commits
 
 - **Branches:** `feat/<topic>`, `fix/<issue-number>-<topic>`, `chore/<topic>`,
