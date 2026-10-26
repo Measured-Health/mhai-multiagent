@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,18 +15,51 @@ import (
 	"time"
 
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/config"
+	"github.com/Measured-Health/mhai-multiagent/gateway/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/logx"
 )
 
+const usage = "usage: gateway serve | gateway migrate up|status"
+
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "serve" {
-		fmt.Fprintln(os.Stderr, "usage: gateway serve")
+	var err error
+	switch {
+	case len(os.Args) == 2 && os.Args[1] == "serve":
+		err = serve()
+	case len(os.Args) >= 2 && os.Args[1] == "migrate":
+		err = migrate(context.Background(), os.Args[2:], os.Getenv("DATABASE_URL"), os.Stdout)
+	default:
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
-	if err := serve(); err != nil {
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "gateway:", err)
 		os.Exit(1)
 	}
+}
+
+// migrate runs "migrate up" or "migrate status". It needs only DATABASE_URL,
+// so the one-shot migrate container carries no gateway secrets.
+func migrate(ctx context.Context, args []string, url string, out io.Writer) error {
+	if len(args) != 1 || (args[0] != "up" && args[0] != "status") {
+		return errors.New(usage)
+	}
+	if url == "" {
+		return errors.New("DATABASE_URL is required")
+	}
+	if args[0] == "up" {
+		if err := db.MigrateUp(ctx, url); err != nil {
+			return err
+		}
+	}
+	st, err := db.Status(ctx, url)
+	if err != nil {
+		return err
+	}
+	for _, s := range st {
+		fmt.Fprintf(out, "%05d %-8s %s\n", s.Source.Version, s.State, s.Source.Path)
+	}
+	return nil
 }
 
 func serve() error {

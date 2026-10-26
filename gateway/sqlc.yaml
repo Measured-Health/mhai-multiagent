@@ -1,0 +1,25 @@
+# sqlc generates typed query code from internal/db/queries/*.sql against the
+# schema the goose migrations build. Run: sqlc generate (from gateway/).
+version: "2"
+sql:
+  - engine: postgresql
+    schema: internal/db/migrations
+    queries: internal/db/queries
+    gen:
+      go:
+        package: dbq
+        out: internal/db/dbq
+        sql_package: pgx/v5
+        emit_json_tags: false
+        emit_pointers_for_null_types: true
+        overrides:
+          - db_type: uuid
+            go_type: github.com/google/uuid.UUID
+          - db_type: uuid
+            nullable: true
+            go_type:
+              import: github.com/google/uuid
+              type: UUID
+              pointer: true
+          - db_type: citext
+            go_type: string

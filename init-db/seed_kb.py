@@ -1,6 +1,11 @@
 """
-Idempotent KB seeder — loads 6 reference guidelines + patient records.
-Run at first startup of orchestrator container.
+Idempotent KB seeder — the 6 shared reference guidelines.
+
+The kb_chunks table is created by the gateway's migrations
+(gateway/internal/db/migrations/00002_ported.sql). These rows are shared
+reference content: hospital_id is None (NULL), which every hospital can
+read and none can change, and they never carry patient data
+(source_patient_id and source_subject_id stay None).
 """
 
 import logging
@@ -42,6 +47,14 @@ def seed_knowledge_base():
             "content": "T2DM: fasting glucose >= 126, 2-hr OGTT >= 200, HbA1c >= 6.5%. First-line: Metformin 500mg BID.",
         },
     ]
+    for g in guidelines:
+        g.update(
+            hospital_id=None,
+            source_patient_id=None,
+            source_subject_id=None,
+            metadata_json=None,
+            embedding_ref=None,
+        )
     log.info(f"Seeding {len(guidelines)} reference guidelines into KB")
     return guidelines
 

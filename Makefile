@@ -56,8 +56,8 @@ up-gpu: .env ## Start the stack on an NVIDIA GPU
 up-observability: .env ## Start the stack plus the OpenTelemetry collector
 	$(COMPOSE) --profile observability up -d --build
 
-infra: .env ## Start only postgres, redis and ollama (run the app with uv)
-	$(COMPOSE) up -d postgres redis ollama ollama-init
+infra: .env ## Start only postgres (+ gateway migrations), redis and ollama (run the app with uv)
+	$(COMPOSE) up -d --build postgres gateway-migrate redis ollama ollama-init
 
 down: ## Stop the stack (keeps data volumes)
 	$(COMPOSE) --profile observability down
