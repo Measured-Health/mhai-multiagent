@@ -1,5 +1,5 @@
 .PHONY: help install install-dev lint format typecheck test cov run clean docker \
-	up up-gpu up-observability infra down ps logs models nuke
+	up up-gpu up-observability infra down ps logs models nuke gateway-test gateway-lint
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -74,3 +74,9 @@ models: ## Pull OLLAMA_MODEL into the ollama volume again
 nuke: ## Stop the stack and DELETE its volumes (database, models, caches)
 	@printf "Delete all MHAI volumes? [y/N] " && read ok && [ "$$ok" = y ]
 	$(COMPOSE) --profile observability down -v
+
+gateway-test: ## Run the Go gateway tests
+	cd gateway && go test -race ./...
+
+gateway-lint: ## Vet and staticcheck the Go gateway
+	cd gateway && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
