@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/logx"
@@ -68,6 +70,11 @@ func serve() error {
 		return err
 	}
 	log := logx.New(os.Stdout)
+	pool, err := openDB(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           newHandler(),
@@ -105,4 +112,21 @@ func requestID(next http.Handler) http.Handler {
 		w.Header().Set("X-Request-ID", hex.EncodeToString(b))
 		next.ServeHTTP(w, r)
 	})
+}
+
+// openDB connects and refuses to go on unless the login user is held by
+// row-level security (see db.CheckLoginRole).
+func openDB(ctx context.Context, url string) (*pgxpool.Pool, error) {
+	if url == "" {
+		return nil, errors.New("DATABASE_URL is required")
+	}
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.CheckLoginRole(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return pool, nil
 }

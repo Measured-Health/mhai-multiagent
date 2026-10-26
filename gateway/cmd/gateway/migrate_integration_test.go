@@ -21,3 +21,19 @@ func TestMigrateUpCommand(t *testing.T) {
 		t.Fatalf("want 3 applied migrations, got output:\n%s", out.String())
 	}
 }
+
+func TestServeRefusesSuperuserLogin(t *testing.T) {
+	pg := testutil.StartPostgres(t)
+	ctx := context.Background()
+	if err := migrate(ctx, []string{"up"}, pg.URL, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := openDB(ctx, pg.URL)
+	if err == nil {
+		pool.Close()
+		t.Fatal("serve accepted a superuser login")
+	}
+	if !strings.Contains(err.Error(), "superuser") || !strings.Contains(err.Error(), "mhai_app") {
+		t.Fatalf("unclear refusal: %v", err)
+	}
+}

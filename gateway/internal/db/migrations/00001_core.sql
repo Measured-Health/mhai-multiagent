@@ -9,7 +9,8 @@ CREATE TABLE hospitals (
     name       text NOT NULL,
     short_code text NOT NULL UNIQUE,
     status     text NOT NULL DEFAULT 'setup_incomplete'
-               CHECK (status IN ('active', 'setup_incomplete', 'suspended', 'deactivated')),
+               CHECK (status IN ('active', 'setup_incomplete', 'deactivated',
+                                 'removal_pending', 'removal_scheduled', 'removed')),
     time_zone  text NOT NULL DEFAULT 'UTC',
     created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -114,10 +115,13 @@ CREATE TABLE audit_checkpoints (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Stored replies for Idempotency-Key, kept 72 hours.
+-- Stored replies for Idempotency-Key, kept 72 hours. hospital_id is the
+-- hospital of a clinical request, and null for sign-in and platform
+-- requests; RLS keeps the two apart. Stored bodies never hold tokens.
 CREATE TABLE idempotency_keys (
     scope        text NOT NULL,
     key          text NOT NULL,
+    hospital_id  uuid REFERENCES hospitals (id),
     request_hash text NOT NULL,
     status       integer,
     body         bytea,

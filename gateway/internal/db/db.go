@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -118,6 +119,50 @@ func MigrateDownTo(ctx context.Context, url string, version int64) error {
 		_, err := p.DownTo(ctx, version)
 		return err
 	})
+}
+
+// CheckLoginRole refuses a login user that row-level security can't hold:
+// a superuser, a BYPASSRLS role, a role that isn't a member of mhai_app,
+// or one that owns a table. The gateway's login must be a plain member of
+// mhai_app, so that a query outside With* fails and RESET ROLE inside one
+// falls back to a role with no privileges.
+func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
+	var (
+		name           string
+		super, bypass  bool
+		member         bool
+		ownedRelations int
+	)
+	err := pool.QueryRow(ctx, `
+		SELECT r.rolname, r.rolsuper, r.rolbypassrls,
+		       pg_has_role(session_user, 'mhai_app', 'MEMBER'),
+		       (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		        WHERE c.relowner = r.oid
+		          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+		          AND n.nspname NOT LIKE 'pg_toast%')
+		FROM pg_roles r WHERE r.rolname = session_user`).
+		Scan(&name, &super, &bypass, &member, &ownedRelations)
+	if err != nil {
+		return fmt.Errorf("db: check login role: %w", err)
+	}
+	var problems []string
+	if super {
+		problems = append(problems, "it is a superuser")
+	}
+	if bypass {
+		problems = append(problems, "it has BYPASSRLS")
+	}
+	if !super && !member {
+		problems = append(problems, "it is not a member of mhai_app")
+	}
+	if ownedRelations > 0 {
+		problems = append(problems, fmt.Sprintf("it owns %d tables or other relations", ownedRelations))
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("db: refusing database login %q: %s; connect as a login role that is only a member of mhai_app (CREATE ROLE ... LOGIN IN ROLE mhai_app)",
+			name, strings.Join(problems, ", "))
+	}
+	return nil
 }
 
 // Status reports each migration and whether it is applied.

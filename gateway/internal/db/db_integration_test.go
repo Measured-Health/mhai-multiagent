@@ -522,11 +522,11 @@ func TestAuthRoleNoClinical(t *testing.T) {
 	}
 	// Sign-in looks a user up by email before any hospital is known.
 	email := uniqueCode("Mixed") + "@Example.Test"
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO users (hospital_id, email, password_hash, display_name) VALUES ($1, $2, 'synthetic-hash', 'Synthetic User')`, b, email); err != nil {
+		t.Fatal(err)
+	}
 	err := db.WithAuth(ctx, pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO users (hospital_id, email, password_hash, display_name) VALUES ($1, $2, 'synthetic-hash', 'Synthetic User')`, b, email); err != nil {
-			return err
-		}
 		var h uuid.UUID
 		if err := tx.QueryRow(ctx, `SELECT hospital_id FROM users WHERE email = $1`, strings.ToLower(email)).Scan(&h); err != nil {
 			return err

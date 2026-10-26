@@ -5,7 +5,8 @@
 --   mhai_gateway   clinical-side requests, scoped to mhai.hospital_id by RLS.
 --   mhai_platform  platform endpoints: metadata across hospitals, no clinical
 --                  tables, no password hashes.
---   mhai_auth      sign-in before a hospital is known: account tables only.
+--   mhai_auth      sign-in, and platform accounts' own auth routes: reads
+--                  accounts, writes sign-in state only. No clinical tables.
 --   mhai_worker    Python services, scoped to mhai.hospital_id by RLS.
 --   mhai_app       the gateway's login user is granted this. It holds no
 --                  privileges and inherits none (NOINHERIT, INHERIT FALSE
@@ -72,11 +73,59 @@ FROM users;
 -- +goose StatementBegin
 CREATE FUNCTION audit_chain_head(OUT id bigint, OUT hash text)
     LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, pg_temp
     AS $$ SELECT a.id, a.hash FROM public.audit_log a ORDER BY a.id DESC LIMIT 1 $$;
 -- +goose StatementEnd
 REVOKE ALL ON FUNCTION audit_chain_head() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION audit_chain_head() TO mhai_gateway, mhai_platform, mhai_auth;
+
+-- Platform roles (platform_admin, auditor) belong only to accounts with no
+-- hospital, and clinical roles only to accounts with one. Checked for every
+-- writer, owner included. SECURITY DEFINER so the check sees the row
+-- whatever the caller's RLS; mhai_migrate has a SELECT policy for that.
+-- +goose StatementBegin
+CREATE FUNCTION check_user_role_pairing() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+DECLARE
+    h uuid;
+BEGIN
+    SELECT u.hospital_id INTO h FROM public.users u WHERE u.id = NEW.user_id;
+    IF NOT FOUND THEN
+        RETURN NULL; -- the foreign key reports a missing user
+    END IF;
+    IF (NEW.role IN ('platform_admin', 'auditor')) <> (h IS NULL) THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+            MESSAGE = 'user_roles: platform roles need an account with no hospital, clinical roles an account with one';
+    END IF;
+    RETURN NULL;
+END
+$$;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+CREATE FUNCTION check_user_hospital_pairing() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM public.user_roles r
+               WHERE r.user_id = NEW.id
+                 AND (r.role IN ('platform_admin', 'auditor')) <> (NEW.hospital_id IS NULL)) THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+            MESSAGE = 'users: hospital_id does not match the account''s roles';
+    END IF;
+    RETURN NULL;
+END
+$$;
+-- +goose StatementEnd
+REVOKE ALL ON FUNCTION check_user_role_pairing(), check_user_hospital_pairing() FROM PUBLIC;
+
+CREATE CONSTRAINT TRIGGER user_roles_pairing AFTER INSERT OR UPDATE ON user_roles
+    FOR EACH ROW EXECUTE FUNCTION check_user_role_pairing();
+CREATE CONSTRAINT TRIGGER users_role_pairing AFTER UPDATE OF hospital_id ON users
+    FOR EACH ROW EXECUTE FUNCTION check_user_hospital_pairing();
 
 -- Hand every object to mhai_migrate. Serial sequences follow their table.
 -- +goose StatementBegin
@@ -100,6 +149,8 @@ $$;
 -- +goose StatementEnd
 ALTER FUNCTION mhai_current_hospital() OWNER TO mhai_migrate;
 ALTER FUNCTION audit_chain_head() OWNER TO mhai_migrate;
+ALTER FUNCTION check_user_role_pairing() OWNER TO mhai_migrate;
+ALTER FUNCTION check_user_hospital_pairing() OWNER TO mhai_migrate;
 
 -- Row-level security on, and forced, for every table with hospital_id, and
 -- for the account tables the gateway can reach (scoped through users).
@@ -117,6 +168,7 @@ ALTER TABLE clinical_queries   ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURI
 ALTER TABLE clinical_decisions ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 ALTER TABLE hga_evaluations    ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 ALTER TABLE feedback_events    ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+ALTER TABLE idempotency_keys   ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 
 ------------------------------------------------------------------------
 -- mhai_gateway: its own hospital's rows only.
@@ -136,9 +188,11 @@ CREATE POLICY gateway_hospital ON users TO mhai_gateway
 -- Account tables without hospital_id are scoped through users, whose own
 -- policy limits the subquery to this hospital.
 GRANT SELECT, INSERT, UPDATE, DELETE ON user_roles, user_mfa, sessions, trusted_devices TO mhai_gateway;
+-- The gateway attaches clinical roles only; platform roles are CLI-only.
 CREATE POLICY gateway_hospital ON user_roles TO mhai_gateway
     USING (EXISTS (SELECT 1 FROM users u WHERE u.id = user_id))
-    WITH CHECK (EXISTS (SELECT 1 FROM users u WHERE u.id = user_id));
+    WITH CHECK (role IN ('clinician', 'hospital_admin', 'analyst')
+                AND EXISTS (SELECT 1 FROM users u WHERE u.id = user_id));
 CREATE POLICY gateway_hospital ON user_mfa TO mhai_gateway
     USING (EXISTS (SELECT 1 FROM users u WHERE u.id = user_id))
     WITH CHECK (EXISTS (SELECT 1 FROM users u WHERE u.id = user_id));
@@ -162,6 +216,8 @@ CREATE POLICY gateway_append ON audit_log FOR INSERT TO mhai_gateway
     WITH CHECK (hospital_id = mhai_current_hospital());
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON idempotency_keys TO mhai_gateway;
+CREATE POLICY gateway_hospital ON idempotency_keys TO mhai_gateway
+    USING (hospital_id = mhai_current_hospital()) WITH CHECK (hospital_id = mhai_current_hospital());
 
 GRANT SELECT, INSERT, UPDATE ON clinical_queries, clinical_decisions, feedback_events TO mhai_gateway;
 GRANT SELECT, INSERT ON hga_evaluations TO mhai_gateway;
@@ -196,25 +252,34 @@ CREATE POLICY shared_read ON kb_chunks FOR SELECT TO mhai_gateway, mhai_worker
     USING (hospital_id IS NULL);
 
 ------------------------------------------------------------------------
--- mhai_auth: account tables across hospitals, for sign-in. No clinical
--- tables.
+-- mhai_auth: account tables across hospitals, for sign-in and for the
+-- self-service routes of platform accounts (which mhai_gateway can't see).
+-- It reads accounts and writes only sign-in state. It can't create users,
+-- change roles, hospital or email, or touch hospital settings: those go
+-- through the CLI on the owner connection. No clinical tables.
 ------------------------------------------------------------------------
-GRANT SELECT ON hospitals TO mhai_auth;
-CREATE POLICY auth_all ON hospitals FOR SELECT TO mhai_auth USING (true);
-GRANT SELECT, INSERT, UPDATE ON users, hospital_settings TO mhai_auth;
-GRANT SELECT, INSERT, UPDATE, DELETE ON user_roles, user_mfa, sessions, refresh_tokens, trusted_devices TO mhai_auth;
-CREATE POLICY auth_all ON users             TO mhai_auth USING (true) WITH CHECK (true);
-CREATE POLICY auth_all ON hospital_settings TO mhai_auth USING (true) WITH CHECK (true);
-CREATE POLICY auth_all ON user_roles        TO mhai_auth USING (true) WITH CHECK (true);
-CREATE POLICY auth_all ON user_mfa          TO mhai_auth USING (true) WITH CHECK (true);
-CREATE POLICY auth_all ON sessions          TO mhai_auth USING (true) WITH CHECK (true);
-CREATE POLICY auth_all ON refresh_tokens    TO mhai_auth USING (true) WITH CHECK (true);
-CREATE POLICY auth_all ON trusted_devices   TO mhai_auth USING (true) WITH CHECK (true);
+GRANT SELECT ON hospitals, users, user_roles, user_mfa, hospital_settings TO mhai_auth;
+GRANT UPDATE (last_login_at, password_hash, must_change_password, terms_version, terms_accepted_at)
+    ON users TO mhai_auth;
+GRANT INSERT, UPDATE (last_used_step, backup_code_hashes, secret_enc, enabled) ON user_mfa TO mhai_auth;
+GRANT SELECT, INSERT, UPDATE, DELETE ON sessions, refresh_tokens, trusted_devices TO mhai_auth;
+CREATE POLICY auth_read   ON hospitals         FOR SELECT TO mhai_auth USING (true);
+CREATE POLICY auth_read   ON hospital_settings FOR SELECT TO mhai_auth USING (true);
+CREATE POLICY auth_read   ON user_roles        FOR SELECT TO mhai_auth USING (true);
+CREATE POLICY auth_read   ON users             FOR SELECT TO mhai_auth USING (true);
+CREATE POLICY auth_update ON users             FOR UPDATE TO mhai_auth USING (true) WITH CHECK (true);
+CREATE POLICY auth_all    ON user_mfa          TO mhai_auth USING (true) WITH CHECK (true);
+CREATE POLICY auth_all    ON sessions          TO mhai_auth USING (true) WITH CHECK (true);
+CREATE POLICY auth_all    ON refresh_tokens    TO mhai_auth USING (true) WITH CHECK (true);
+CREATE POLICY auth_all    ON trusted_devices   TO mhai_auth USING (true) WITH CHECK (true);
 -- Sign-in attempts are audited; append only.
 GRANT INSERT ON audit_log TO mhai_auth;
 GRANT USAGE ON SEQUENCE audit_log_id_seq TO mhai_auth;
 CREATE POLICY auth_append ON audit_log FOR INSERT TO mhai_auth WITH CHECK (true);
+-- Idempotency rows with no hospital only.
 GRANT SELECT, INSERT, UPDATE, DELETE ON idempotency_keys TO mhai_auth;
+CREATE POLICY auth_no_hospital ON idempotency_keys TO mhai_auth
+    USING (hospital_id IS NULL) WITH CHECK (hospital_id IS NULL);
 
 ------------------------------------------------------------------------
 -- mhai_platform: metadata across hospitals, no clinical content, no
@@ -236,12 +301,17 @@ GRANT INSERT ON audit_log TO mhai_platform;
 GRANT USAGE ON SEQUENCE audit_log_id_seq TO mhai_platform;
 CREATE POLICY platform_append ON audit_log FOR INSERT TO mhai_platform WITH CHECK (true);
 GRANT SELECT, INSERT, UPDATE, DELETE ON idempotency_keys TO mhai_platform;
+CREATE POLICY platform_no_hospital ON idempotency_keys TO mhai_platform
+    USING (hospital_id IS NULL) WITH CHECK (hospital_id IS NULL);
 
 ------------------------------------------------------------------------
 -- mhai_migrate owns audit_log, but FORCE applies to owners too: this lets
 -- audit_chain_head() (SECURITY DEFINER) read the newest row.
 ------------------------------------------------------------------------
 CREATE POLICY chain_head ON audit_log FOR SELECT TO mhai_migrate USING (true);
+-- Likewise for the role-pairing triggers.
+CREATE POLICY pairing_check ON users      FOR SELECT TO mhai_migrate USING (true);
+CREATE POLICY pairing_check ON user_roles FOR SELECT TO mhai_migrate USING (true);
 
 -- +goose Down
 -- +goose StatementBegin
@@ -269,6 +339,11 @@ ALTER TABLE clinical_queries   NO FORCE ROW LEVEL SECURITY, DISABLE ROW LEVEL SE
 ALTER TABLE clinical_decisions NO FORCE ROW LEVEL SECURITY, DISABLE ROW LEVEL SECURITY;
 ALTER TABLE hga_evaluations    NO FORCE ROW LEVEL SECURITY, DISABLE ROW LEVEL SECURITY;
 ALTER TABLE feedback_events    NO FORCE ROW LEVEL SECURITY, DISABLE ROW LEVEL SECURITY;
+ALTER TABLE idempotency_keys   NO FORCE ROW LEVEL SECURITY, DISABLE ROW LEVEL SECURITY;
+DROP TRIGGER users_role_pairing ON users;
+DROP TRIGGER user_roles_pairing ON user_roles;
+DROP FUNCTION check_user_hospital_pairing();
+DROP FUNCTION check_user_role_pairing();
 DROP FUNCTION audit_chain_head();
 DROP VIEW platform_users;
 DROP FUNCTION mhai_current_hospital();
