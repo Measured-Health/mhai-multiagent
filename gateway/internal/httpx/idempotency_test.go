@@ -58,3 +58,18 @@ func TestIdempotentAnonWithoutIPRunsPlain(t *testing.T) {
 		t.Fatalf("n=%d status %d", n, rec.Code)
 	}
 }
+
+func TestCredentialKeys(t *testing.T) {
+	for _, k := range []string{"password", "secret", "token", "access_token", "Refresh-Token", "mfa_token",
+		"device_token", "mfa_code", "backup_code", "backup_codes", "recovery_codes", "otp", "totp",
+		"Authorization", "cookie", "set-cookie", "API_KEY"} {
+		if !isCredentialKey(k) {
+			t.Errorf("%q not a credential", k)
+		}
+	}
+	for _, k := range []string{"email", "code", "reason", "user_id"} {
+		if isCredentialKey(k) {
+			t.Errorf("%q is a credential", k)
+		}
+	}
+}

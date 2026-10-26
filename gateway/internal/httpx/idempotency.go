@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -75,12 +76,21 @@ func NoStore(h http.Handler) http.Handler {
 // as mhai_gateway under the principal's hospital, or with no hospital as
 // mhai_platform (platform principal) or mhai_auth (anonymous).
 //
-// Responses are not stored when the route is wrapped in NoStore, when the
-// response sends Cache-Control: no-store, when its body has a sensitive
-// field (logx.IsSensitiveKey) or isn't JSON, when it is not 2xx, or when
-// it is larger than 1 MiB. Only status and body are replayed (as
-// application/json); idempotent routes must not rely on other headers.
+// What happens to the key after the handler:
+//   - NoStore route, Cache-Control: no-store, or a non-2xx reply: released,
+//     so a retry runs again (token routes are safe to repeat).
+//   - 2xx whose body has a credential field (credentialKeys), isn't JSON,
+//     or is over 1 MiB: kept as a tombstone, so a retry gets 409 conflict
+//     and the handler never runs twice. The body is not stored.
+//   - Otherwise the status and body are stored and replayed (as
+//     application/json); idempotent routes must not rely on other headers.
 func Idempotent(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+	return IdempotentLog(pool, slog.Default())
+}
+
+// IdempotentLog is Idempotent with the logger that records replies which
+// could not be stored.
+func IdempotentLog(pool *pgxpool.Pool, log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
@@ -109,7 +119,7 @@ func Idempotent(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
-			st := &store{pool: pool, sc: sc, key: keys[0], hash: requestHash(r, body)}
+			st := &store{pool: pool, log: log, sc: sc, key: keys[0], hash: requestHash(r, body)}
 			st.serve(w, r, next)
 		})
 	}
@@ -162,6 +172,7 @@ func requestHash(r *http.Request, body []byte) string {
 
 type store struct {
 	pool *pgxpool.Pool
+	log  *slog.Logger
 	sc   scope
 	key  string
 	hash string
@@ -212,24 +223,53 @@ func (s *store) serve(w http.ResponseWriter, r *http.Request, next http.Handler)
 	if status == 0 {
 		status = http.StatusOK
 	}
-	keep := !state.noStore && !rec.overflow && status >= 200 && status < 300 &&
-		!hasNoStore(w.Header().Values("Cache-Control")) && !hasSecret(rec.buf.Bytes())
-	if keep {
-		s.finish(context.WithoutCancel(ctx), status, rec.buf.Bytes())
-	} else {
-		s.release(context.WithoutCancel(ctx))
+	cctx := context.WithoutCancel(ctx)
+	switch {
+	case state.noStore || hasNoStore(w.Header().Values("Cache-Control")) || status < 200 || status >= 300:
+		// Safe to repeat (token routes) or failed: free the key for a retry.
+		s.release(cctx)
+	case rec.overflow || !storable(rec.buf.Bytes()):
+		// Succeeded, but the reply can't be kept (a credential, not JSON,
+		// too large). Leave the reservation as a tombstone: a retry gets
+		// 409 conflict and the handler never runs twice.
+	default:
+		if err := s.finish(cctx, status, rec.buf.Bytes()); err != nil {
+			// The key stays reserved (409 until it expires). Log only a
+			// hash of the scope and the request id, never the driver error.
+			sum := sha256.Sum256([]byte(s.sc.name))
+			s.log.Error("idempotency: could not store the reply; key left reserved",
+				"scope_hash", hex.EncodeToString(sum[:8]), "request_id", RequestIDFrom(ctx))
+		}
 	}
 }
 
-// hasSecret is the fail-closed guard behind NoStore: a body with a field
-// the redaction list treats as sensitive (a token, a secret, a code) is
-// never stored. A non-JSON body is not stored either.
-func hasSecret(body []byte) bool {
+// credentialKeys are the fields a stored reply must never hold, normalised
+// (lowercase, "-" and "_" removed). Narrower than the log redaction list:
+// email and code are not credentials, and stored bodies are under RLS and
+// expire.
+var credentialKeys = map[string]bool{
+	"password": true, "secret": true, "token": true, "accesstoken": true,
+	"refreshtoken": true, "mfatoken": true, "devicetoken": true, "mfacode": true,
+	"backupcode": true, "backupcodes": true, "recoverycodes": true, "otp": true,
+	"totp": true, "authorization": true, "cookie": true, "setcookie": true,
+	"apikey": true,
+}
+
+func isCredentialKey(k string) bool {
+	k = strings.ToLower(k)
+	k = strings.ReplaceAll(k, "-", "")
+	k = strings.ReplaceAll(k, "_", "")
+	return credentialKeys[k]
+}
+
+// storable reports whether a reply body may be kept: empty, or JSON with no
+// credential field at any depth.
+func storable(body []byte) bool {
 	if len(bytes.TrimSpace(body)) == 0 {
-		return false
+		return true
 	}
-	_, bad := logx.SensitiveKeyInJSON(body)
-	return bad
+	_, bad := logx.KeyInJSON(body, isCredentialKey)
+	return !bad
 }
 
 // reserve returns the stored reply for a completed request, or nil after
@@ -278,14 +318,16 @@ func (s *store) reserve(ctx context.Context) (*stored, error) {
 	return prior, err
 }
 
-// finish keeps the reply. If that fails, the reservation stays: the handler
-// has already succeeded, so a retry must not run it again; it gets 409
-// conflict until the key expires.
-func (s *store) finish(ctx context.Context, status int, body []byte) {
-	_ = s.sc.run(ctx, s.pool, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`UPDATE idempotency_keys SET status = $3, body = $4 WHERE scope = $1 AND key = $2`,
+// finish keeps the reply. On error the reservation stays: the handler has
+// already succeeded, so a retry must not run it again.
+func (s *store) finish(ctx context.Context, status int, body []byte) error {
+	return s.sc.run(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE idempotency_keys SET status = $3, body = $4 WHERE scope = $1 AND key = $2 AND status IS NULL`,
 			s.sc.name, s.key, status, body)
+		if err == nil && tag.RowsAffected() != 1 {
+			err = errors.New("idempotency: reservation missing")
+		}
 		return err
 	})
 }

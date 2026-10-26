@@ -43,27 +43,33 @@ func IsSensitiveKey(key string) bool { return isSensitive(key) }
 // objects and arrays), that IsSensitiveKey matches. Invalid JSON fails
 // closed: it reports true with an empty key.
 func SensitiveKeyInJSON(doc []byte) (string, bool) {
+	return KeyInJSON(doc, isSensitive)
+}
+
+// KeyInJSON returns the first object key, at any depth, that match accepts.
+// Invalid JSON fails closed: it reports true with an empty key.
+func KeyInJSON(doc []byte, match func(string) bool) (string, bool) {
 	var v any
 	if err := json.Unmarshal(doc, &v); err != nil {
 		return "", true
 	}
-	return sensitiveKeyIn(v)
+	return keyIn(v, match)
 }
 
-func sensitiveKeyIn(v any) (string, bool) {
+func keyIn(v any, match func(string) bool) (string, bool) {
 	switch x := v.(type) {
 	case map[string]any:
 		for k, e := range x {
-			if isSensitive(k) {
+			if match(k) {
 				return k, true
 			}
-			if k2, ok := sensitiveKeyIn(e); ok {
+			if k2, ok := keyIn(e, match); ok {
 				return k2, true
 			}
 		}
 	case []any:
 		for _, e := range x {
-			if k, ok := sensitiveKeyIn(e); ok {
+			if k, ok := keyIn(e, match); ok {
 				return k, true
 			}
 		}

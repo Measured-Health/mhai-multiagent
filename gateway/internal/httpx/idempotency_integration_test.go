@@ -3,7 +3,10 @@
 package httpx_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +22,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/gateway/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/gateway/internal/testutil"
 )
 
@@ -49,12 +53,21 @@ func TestMain(m *testing.M) {
 			return 1
 		}
 		defer app.Close()
+		if err := super.QueryRow(ctx,
+			`INSERT INTO hospitals (name, short_code) VALUES ('Synthetic Hospital', 'HSHARED') RETURNING id`).Scan(&seedHospitalID); err != nil {
+			fmt.Fprintln(os.Stderr, "seed:", err)
+			return 1
+		}
 		return m.Run()
 	}()
 	os.Exit(code)
 }
 
 const serviceKey = "test-only-bff-service-key-0123456789abcdef"
+
+// seedHospitalID is a hospital seeded once, for tests that need one before
+// a *testing.T is in scope.
+var seedHospitalID uuid.UUID
 
 func seedHospital(t *testing.T) uuid.UUID {
 	t.Helper()
@@ -348,8 +361,9 @@ func TestIdempotentPanicReleasesKey(t *testing.T) {
 	}
 }
 
-// A 2xx body holding a sensitive key (a token, a secret) is never stored,
-// even on a route that forgot NoStore and the no-store header.
+// A 2xx body holding a credential (a token, a secret) is never stored,
+// even on a route that forgot NoStore and the no-store header. The key is
+// kept as a tombstone: the retry gets 409, and the handler never runs twice.
 func TestIdempotentNeverStoresSecrets(t *testing.T) {
 	user := uuid.NewString()
 	var n atomic.Int32
@@ -359,10 +373,85 @@ func TestIdempotentNeverStoresSecrets(t *testing.T) {
 	})
 	srv := chain(&httpx.Principal{UserID: user, HospitalID: seedHospital(t)}, h)
 	key := uuid.NewString()
+	if rec := send(srv, key, "", `{}`); rec.Code != 200 {
+		t.Fatalf("first: %d", rec.Code)
+	}
+	if rec := send(srv, key, "", `{}`); rec.Code != http.StatusConflict {
+		t.Fatalf("retry: %d, want 409", rec.Code)
+	}
+	if n.Load() != 1 {
+		t.Fatalf("handler ran %d times", n.Load())
+	}
+	var leaked int
+	_ = super.QueryRow(context.Background(),
+		`SELECT count(*) FROM idempotency_keys WHERE body IS NOT NULL AND position('synthetic-token-value' in convert_from(body, 'UTF8')) > 0`).Scan(&leaked)
+	if leaked != 0 {
+		t.Fatal("token stored in idempotency_keys")
+	}
+}
+
+// A non-JSON 2xx body can't be stored either: tombstone, retry gets 409.
+func TestIdempotentNonJSONTombstone(t *testing.T) {
+	user := uuid.NewString()
+	var n atomic.Int32
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("plain text"))
+	})
+	srv := chain(&httpx.Principal{UserID: user, HospitalID: seedHospital(t)}, h)
+	key := uuid.NewString()
 	send(srv, key, "", `{}`)
-	send(srv, key, "", `{}`)
-	if n.Load() != 2 || rowCount(t, user, key) != 0 {
-		t.Fatalf("calls %d, rows %d", n.Load(), rowCount(t, user, key))
+	if rec := send(srv, key, "", `{}`); rec.Code != http.StatusConflict || n.Load() != 1 {
+		t.Fatalf("retry: %d, calls %d", rec.Code, n.Load())
+	}
+}
+
+// email and code are not credentials: such bodies are stored and replayed.
+func TestIdempotentStoresEmailAndCode(t *testing.T) {
+	user := uuid.NewString()
+	var n atomic.Int32
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		httpx.JSON(w, http.StatusCreated, map[string]any{"email": "grace@havana.example", "code": "I10", "call": n.Load()})
+	})
+	srv := chain(&httpx.Principal{UserID: user, HospitalID: seedHospital(t)}, h)
+	key := uuid.NewString()
+	first := send(srv, key, "", `{}`)
+	second := send(srv, key, "", `{}`)
+	if n.Load() != 1 || second.Code != 201 || second.Body.String() != first.Body.String() ||
+		second.Header().Get("Idempotent-Replayed") != "true" {
+		t.Fatalf("calls %d, second %d %q", n.Load(), second.Code, second.Body.String())
+	}
+}
+
+// When the reply can't be stored, the failure is logged with only a hash
+// of the scope and the request id; the key stays reserved.
+func TestIdempotentFinishFailureLogged(t *testing.T) {
+	user := uuid.NewString()
+	key := uuid.NewString()
+	var logs bytes.Buffer
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Make the store fail: the reservation vanishes under the handler.
+		_, _ = super.Exec(r.Context(), `DELETE FROM idempotency_keys WHERE scope = $1`, user)
+		httpx.JSON(w, http.StatusCreated, map[string]string{"ok": "1"})
+	})
+	inner := httpx.IdempotentLog(app, logx.New(&logs))(h)
+	srv := httpx.RequestID(httpx.BFF([]string{serviceKey})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inner.ServeHTTP(w, r.WithContext(httpx.WithPrincipal(r.Context(),
+			httpx.Principal{UserID: user, HospitalID: seedHospitalID})))
+	})))
+	rec := send(srv, key, "", `{}`)
+	if rec.Code != 201 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	out := logs.String()
+	sum := sha256.Sum256([]byte(user))
+	if !strings.Contains(out, rec.Header().Get("X-Request-ID")) || !strings.Contains(out, hex.EncodeToString(sum[:8])) {
+		t.Fatalf("log lacks request id or scope hash: %s", out)
+	}
+	if strings.Contains(out, user) || strings.Contains(out, key) {
+		t.Fatalf("log holds the scope or key: %s", out)
 	}
 }
 
@@ -405,7 +494,7 @@ func TestIdempotentConcurrentReserve(t *testing.T) {
 			t.Errorf("unexpected status %d", c)
 		}
 	}
-	if n.Load() != 1 || created < 1 || created+conflicts != racers {
+	if n.Load() != 1 || created != 1 || created+conflicts != racers {
 		t.Fatalf("calls %d, created %d, conflicts %d", n.Load(), created, conflicts)
 	}
 }
