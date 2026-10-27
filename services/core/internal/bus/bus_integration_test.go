@@ -254,7 +254,7 @@ func TestConnectWithNkeySeed(t *testing.T) {
 	}
 }
 
-func TestOpenBucketsCreatesThreeAndIsIdempotent(t *testing.T) {
+func TestOpenBucketsCreatesFourAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	nc, js, err := bus.Connect(ctx, sharedNATS.GatewayURL, "", bus.GatewayInboxPrefix)
 	if err != nil {
@@ -267,7 +267,7 @@ func TestOpenBucketsCreatesThreeAndIsIdempotent(t *testing.T) {
 			t.Fatalf("open buckets (round %d): %v", i, err)
 		}
 		for name, kv := range map[string]jetstream.KeyValue{
-			"denylist": b.Denylist, "login": b.LoginAttempts, "mfa": b.MFAAttempts} {
+			"denylist": b.Denylist, "login": b.LoginAttempts, "mfa": b.MFAAttempts, "ceiling": b.LoginCeiling} {
 			if kv == nil {
 				t.Fatalf("%s bucket is nil", name)
 			}
@@ -276,8 +276,11 @@ func TestOpenBucketsCreatesThreeAndIsIdempotent(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := 15 * time.Minute
-			if name == "denylist" {
+			switch name {
+			case "denylist":
 				want = bus.DenylistTTL // access token life plus a clock-skew margin
+			case "ceiling":
+				want = time.Hour // per-login failures across IPs
 			}
 			if st.TTL() != want {
 				t.Fatalf("%s ttl = %v, want %v", name, st.TTL(), want)

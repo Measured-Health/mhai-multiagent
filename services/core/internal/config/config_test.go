@@ -75,8 +75,7 @@ func TestLoadRejectsPlaceholderNATSCredentials(t *testing.T) {
 	cases := []struct{ name, key, val string }{
 		{"url password", "NATS_URL", "nats://gateway:changemeLettersAndDigitsOnly@nats:4222"},
 		{"url hyphen", "NATS_URL", "nats://gateway:change-me@nats:4222"},
-		{"gateway password", "NATS_GATEWAY_PASSWORD", "changemeLettersAndDigitsOnly"},
-		{"worker password", "NATS_WORKER_PASSWORD", "PLACEHOLDER"},
+		{"database password", "DATABASE_URL", "postgres://core_app:changemeLettersAndDigitsOnly@postgres:5432/mhai"},
 	}
 	for _, c := range cases {
 		env := map[string]string{}
@@ -116,5 +115,47 @@ func TestLoadAcceptsRealNATSCredentialsAndSeedPath(t *testing.T) {
 	}
 	if c.NATSNkeySeedPath != "/run/secrets/seed" {
 		t.Fatalf("seed path = %q", c.NATSNkeySeedPath)
+	}
+}
+
+// The core service reads only its own NATS credentials (in NATS_URL or the
+// NKey seed): the worker's and the standalone server passwords are not its
+// business, so it neither needs nor checks them.
+func TestLoadIgnoresOtherServicesSecrets(t *testing.T) {
+	setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey,
+		"NATS_WORKER_PASSWORD": "PLACEHOLDER", "NATS_GATEWAY_PASSWORD": "changeme"})
+	if _, err := Load(); err != nil {
+		t.Fatalf("core config read another service's secret: %v", err)
+	}
+}
+
+// serve needs the database, NATS and the signing key; the errors name the
+// variables only.
+func TestValidateServe(t *testing.T) {
+	if err := (Config{}).ValidateServe(); err == nil ||
+		!strings.Contains(err.Error(), "DATABASE_URL") || !strings.Contains(err.Error(), "NATS_URL") ||
+		!strings.Contains(err.Error(), "ACCESS_KEY_PATH") {
+		t.Fatalf("want all three named, got %v", err)
+	}
+	ok := Config{DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem"}
+	if err := ok.ValidateServe(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Login passwords for the compose init step: placeholders and short values
+// are refused, and the error names the variable, not the value.
+func TestCheckPassword(t *testing.T) {
+	for _, bad := range []string{"", "short", "changemeReplaceWithLettersAndDigits", "PLACEHOLDERxxxxxxxxxxxx"} {
+		err := CheckPassword("CORE_DB_PASSWORD", bad)
+		if err == nil || !strings.Contains(err.Error(), "CORE_DB_PASSWORD") {
+			t.Fatalf("%q: %v", bad, err)
+		}
+		if bad != "" && strings.Contains(err.Error(), bad) {
+			t.Fatalf("error echoes the value: %v", err)
+		}
+	}
+	if err := CheckPassword("CORE_DB_PASSWORD", "k7Qw93hZr2Lm8Vx4Tn6B"); err != nil {
+		t.Fatal(err)
 	}
 }

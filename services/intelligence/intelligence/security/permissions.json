@@ -102,5 +102,13 @@
     "platform": false,
     "step_up": false,
     "write": false
+  },
+  {
+    "method": "GET",
+    "pattern": "/api/v1/readyz",
+    "any_role": [],
+    "platform": false,
+    "step_up": false,
+    "write": false
   }
 ]

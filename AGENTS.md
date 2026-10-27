@@ -36,6 +36,7 @@ uv run pytest tests/security # security regression tests
 make infra                   # postgres, redis, ollama for local runs
 make up / make down          # full compose stack
 make core-test / core-lint   # the core service (Go)
+make core-up                 # the core service in compose (postgres, nats, migrations)
 ```
 
 `services/intelligence/scripts/e2e_models.py` runs the real models; it needs
@@ -44,7 +45,10 @@ a machine that can load them, and uses synthetic data only.
 ## Layout
 
 The backend is the core service (Go) plus Python model services, joined by
-NATS (ADR 0010). The core service is planned and not built yet.
+NATS (ADR 0010). The core service's auth, permissions, tenancy and audit
+are built (Plan 2; see services/core/README.md and services/core/openapi.yaml).
+The Python side still runs on its own, until the boundary plan moves it
+behind NATS.
 
 ```
 services/core/        the core service (Go): API, auth, tenancy, audit, EMR

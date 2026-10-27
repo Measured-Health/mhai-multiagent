@@ -6,23 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 )
 
-const usage = "usage: core serve | core migrate up|status | core hospitals create ... | core users create ..."
+const usage = "usage: core serve | core migrate up|status | core keys new --out PATH | core hospitals create ... | core users create ..."
 
 func main() {
 	var err error
@@ -30,7 +22,9 @@ func main() {
 	case len(os.Args) == 2 && os.Args[1] == "serve":
 		err = serve()
 	case len(os.Args) >= 2 && os.Args[1] == "migrate":
-		err = migrate(context.Background(), os.Args[2:], os.Getenv("DATABASE_URL"), os.Stdout)
+		err = migrateWithLogins(context.Background(), os.Args[2:], os.Getenv("DATABASE_URL"), os.Getenv, os.Stdout)
+	case len(os.Args) >= 2 && os.Args[1] == "keys":
+		err = keys(os.Args[2:], os.Stdout)
 	case len(os.Args) >= 2 && (os.Args[1] == "hospitals" || os.Args[1] == "users"):
 		err = seed(context.Background(), os.Args[1:], os.Getenv("DATABASE_URL"), os.Stdin, os.Stdout)
 	default:
@@ -67,46 +61,74 @@ func migrate(ctx context.Context, args []string, url string, out io.Writer) erro
 	return nil
 }
 
-func serve() error {
-	cfg, err := config.Load()
+// loginRequest is a deployment login that migrate up creates or resets.
+type loginRequest struct {
+	userVar, pwVar string
+	user, password string
+	role           string
+}
+
+// loginRequests reads the logins to ensure from the environment:
+//   - CORE_DB_USER / CORE_DB_PASSWORD: the core service's login, a member
+//     of mhai_app only;
+//   - PROVISION_DB_USER / PROVISION_DB_PASSWORD: the seed CLI's login, a
+//     member of mhai_provision only.
+//
+// Each pair is both set or both unset. Passwords must not be placeholders.
+// Errors name variables, never values.
+func loginRequests(getenv func(string) string) ([]loginRequest, error) {
+	var out []loginRequest
+	var errs []error
+	for _, l := range []loginRequest{
+		{userVar: "CORE_DB_USER", pwVar: "CORE_DB_PASSWORD", role: "mhai_app"},
+		{userVar: "PROVISION_DB_USER", pwVar: "PROVISION_DB_PASSWORD", role: "mhai_provision"},
+	} {
+		l.user, l.password = getenv(l.userVar), getenv(l.pwVar)
+		switch {
+		case l.user == "" && l.password == "":
+			continue
+		case l.user == "":
+			errs = append(errs, fmt.Errorf("%s is required with %s", l.userVar, l.pwVar))
+			continue
+		}
+		if err := config.CheckPassword(l.pwVar, l.password); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		out = append(out, l)
+	}
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// migrateWithLogins is "core migrate": the migrations, then, after "up",
+// the deployment logins named in the environment (loginRequests). The
+// passwords are checked before the database is touched.
+func migrateWithLogins(ctx context.Context, args []string, url string, getenv func(string) string, out io.Writer) error {
+	reqs, err := loginRequests(getenv)
 	if err != nil {
 		return err
 	}
-	if err := password.Preload(); err != nil {
+	if err := migrate(ctx, args, url, out); err != nil {
 		return err
 	}
-	log := logx.New(os.Stdout)
-	pool, err := openDB(context.Background(), cfg.DatabaseURL)
+	if len(reqs) == 0 || args[0] != "up" {
+		return nil
+	}
+	pool, err := db.Open(ctx, url)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           newHandler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdown)
-	}()
-	log.Info("core listening", "addr", cfg.HTTPAddr, "env", cfg.Env)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	for _, l := range reqs {
+		if err := db.EnsureLogin(ctx, pool, l.user, l.password, l.role); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "login %s ready (member of %s only)\n", l.user, l.role)
 	}
 	return nil
-}
-
-// newHandler serves the health probe. Task 9 mounts the full route set
-// (server.Register) with its dependencies.
-func newHandler() http.Handler {
-	m := authz.NewMux(nil)
-	server.RegisterHealth(m)
-	return m.Handler(nil)
 }
 
 // openDB connects and refuses to go on unless the login user is held by

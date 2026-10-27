@@ -1,4 +1,4 @@
-// Package config loads the gateway's settings from the environment.
+// Package config loads the core service's settings from the environment.
 package config
 
 import (
@@ -11,7 +11,7 @@ import (
 
 const minSecretLen = 32
 
-// Config holds the gateway's settings.
+// Config holds the core service's settings.
 type Config struct {
 	Env              string
 	HTTPAddr         string
@@ -38,13 +38,15 @@ func Load() (Config, error) {
 	}
 	var errs []error
 
+	// Only this service's own credentials are read: the NATS password is in
+	// NATS_URL (or the NKey seed), the database password in DATABASE_URL.
+	// Other services' secrets (the worker's NATS password) are not in the
+	// core service's environment at all.
 	if err := checkNATSURL(c.NATSURL); err != nil {
 		errs = append(errs, err)
 	}
-	for _, name := range []string{"NATS_GATEWAY_PASSWORD", "NATS_WORKER_PASSWORD"} {
-		if err := checkPlaceholder(name, os.Getenv(name)); err != nil {
-			errs = append(errs, err)
-		}
+	if err := checkURLPassword("DATABASE_URL", c.DatabaseURL); err != nil {
+		errs = append(errs, err)
 	}
 
 	if v, err := secret("MFA_ENCRYPTION_KEY"); err != nil {
@@ -99,6 +101,53 @@ func checkNATSURL(raw string) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// checkURLPassword rejects an unparsable URL and a placeholder password in
+// it. Errors never carry the URL.
+func checkURLPassword(name, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s is invalid", name)
+	}
+	if pw, ok := u.User.Password(); ok {
+		return checkPlaceholder(name, pw)
+	}
+	return nil
+}
+
+// ValidateServe checks what "core serve" needs beyond Load: the database,
+// NATS and the access-token signing key.
+func (c Config) ValidateServe() error {
+	var errs []error
+	for name, v := range map[string]string{"DATABASE_URL": c.DatabaseURL, "NATS_URL": c.NATSURL, "ACCESS_KEY_PATH": c.AccessKeyPath} {
+		if strings.TrimSpace(v) == "" {
+			errs = append(errs, fmt.Errorf("%s is required", name))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// MinPasswordLen is the shortest database login password accepted.
+const MinPasswordLen = 16
+
+// CheckPassword checks a database login password read from the
+// environment variable name: present, at least MinPasswordLen bytes and not
+// a placeholder. Errors name the variable, never the value.
+func CheckPassword(name, v string) error {
+	if v == "" {
+		return fmt.Errorf("%s is required", name)
+	}
+	if err := checkPlaceholder(name, v); err != nil {
+		return err
+	}
+	if len(v) < MinPasswordLen {
+		return fmt.Errorf("%s must be at least %d bytes", name, MinPasswordLen)
 	}
 	return nil
 }

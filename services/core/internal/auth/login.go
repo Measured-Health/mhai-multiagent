@@ -58,6 +58,13 @@ func LockoutKey(email, ip string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// CeilingKey is the login_ceiling key for a login across every IP:
+// hex(sha256("ceiling|" + lower(trimmed email))). The email is never a key.
+func CeilingKey(email string) string {
+	sum := sha256.Sum256([]byte("ceiling|" + account.NormaliseEmail(email)))
+	return hex.EncodeToString(sum[:])
+}
+
 func clientIP(r *http.Request) string {
 	ip := httpx.ClientIP(r.Context())
 	if !ip.IsValid() {
@@ -91,10 +98,9 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := account.NormaliseEmail(in.Username)
-	key := LockoutKey(email, ip)
 
 	// Before the account lookup, so the reply never depends on the account.
-	locked, err := s.reserveAttempt(ctx, key)
+	locked, err := s.reserveLogin(ctx, email, ip)
 	if err != nil {
 		s.fail(w, r, "not_ready", "auth: login attempts unavailable")
 		return
@@ -125,6 +131,16 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A slot for the argon2 work. Locked requests above never wait for one.
+	// A request refused for load gives its attempt back: it is not counted.
+	release, err := s.argon().Acquire(ctx)
+	if err != nil {
+		s.refundLogin(ctx, email, ip, rid, actor)
+		s.fail(w, r, "not_ready", "auth: password checks saturated")
+		return
+	}
+	defer release()
+
 	// The argon2 work is the same whether or not the account exists.
 	ok := false
 	if acct != nil && acct.PasswordHash != nil && *acct.PasswordHash != "" {
@@ -139,9 +155,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "unauthenticated")
 		return
 	}
-	if err := s.Buckets.LoginAttempts.Delete(ctx, key); err != nil && !bus.IsNotFound(err) {
-		s.log().Error("auth: login attempts reset failed", "request_id", rid, "user_id", actor)
-	}
+	s.loginSucceeded(ctx, email, ip, rid, actor)
 
 	// The audience check comes only after the password, so it reveals
 	// nothing about accounts the caller can't sign in to.
@@ -326,6 +340,45 @@ func (s *Service) auditOnly(_ http.ResponseWriter, r *http.Request, action, acto
 // or contention that outlasts the retries) means the caller must fail closed.
 func (s *Service) reserveAttempt(ctx context.Context, key string) (locked bool, err error) {
 	return reserveIn(ctx, s.Buckets.LoginAttempts, key, MaxLoginFailures)
+}
+
+// reserveLogin counts one password check for the login: first against
+// (login, client IP), then against the login across every IP. locked is
+// true when either is at its limit. Nil buckets or KV failures are errors,
+// and the caller fails closed.
+func (s *Service) reserveLogin(ctx context.Context, email, ip string) (locked bool, err error) {
+	if s.Buckets.LoginAttempts == nil || s.Buckets.LoginCeiling == nil {
+		return false, errors.New("auth: attempt buckets missing")
+	}
+	if locked, err = s.reserveAttempt(ctx, LockoutKey(email, ip)); err != nil || locked {
+		return locked, err
+	}
+	return reserveIn(ctx, s.Buckets.LoginCeiling, CeilingKey(email), MaxLoginFailuresPerLogin)
+}
+
+// loginSucceeded clears the (login, IP) counter and gives back this
+// attempt's slot in the per-login ceiling, so only failures count there.
+// Earlier failures stay: a guesser elsewhere keeps their count. Failures
+// here are logged only (the counters then expire on their own).
+func (s *Service) loginSucceeded(ctx context.Context, email, ip, rid, userID string) {
+	if err := s.Buckets.LoginAttempts.Delete(ctx, LockoutKey(email, ip)); err != nil && !bus.IsNotFound(err) {
+		s.log().Error("auth: login attempts reset failed", "request_id", rid, "user_id", userID)
+	}
+	if err := refundIn(ctx, s.Buckets.LoginCeiling, CeilingKey(email)); err != nil {
+		s.log().Error("auth: login ceiling refund failed", "request_id", rid, "user_id", userID)
+	}
+}
+
+// refundLogin gives back both counters reserved by reserveLogin for an
+// attempt that never checked the password. Failures are logged only (the
+// attempt then stays counted, which fails safe).
+func (s *Service) refundLogin(ctx context.Context, email, ip, rid, userID string) {
+	if err := refundIn(ctx, s.Buckets.LoginAttempts, LockoutKey(email, ip)); err != nil {
+		s.log().Error("auth: login attempts refund failed", "request_id", rid, "user_id", userID)
+	}
+	if err := refundIn(ctx, s.Buckets.LoginCeiling, CeilingKey(email)); err != nil {
+		s.log().Error("auth: login ceiling refund failed", "request_id", rid, "user_id", userID)
+	}
 }
 
 // isRevisionConflict reports a lost compare-and-set (another writer won).

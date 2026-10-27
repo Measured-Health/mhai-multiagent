@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Security
+- Sign-in has a per-login ceiling across every client IP (20 failures an
+  hour, keyed by hash, failing closed) on top of the (login, IP) lockout,
+  and argon2 runs behind a process-wide gate (one slot per CPU; 503 when
+  saturated).
+- `core serve` refuses a database login that is a member of any role
+  besides `mhai_app`, and refuses to start with the idempotency middleware
+  missing.
 - Retrieval and citation checks are scoped to the queried patient. Other
   patients' records are never returned, and citing one is redacted (#1).
 - Reserved ids (`reference`, `unassigned`, `unknown`) can no longer be used
@@ -21,6 +28,23 @@ All notable changes to this project are documented here. The format follows
   order was being misread, so unsupported claims passed as entailed.
 
 ### Added
+- The core service (Go, `services/core/`, Plan 2): sign-in with lockout,
+  rotating refresh tokens, two-step verification (TOTP, backup codes,
+  trusted devices, step-up), password change, device sessions, terms
+  acceptance, the permission table and principal middleware, hospital
+  separation by row-level security, a hash-chained audit log and
+  Idempotency-Key support. The contract is `services/core/openapi.yaml`,
+  checked by a test against the served routes and the error codes.
+- The core service runs in Docker Compose (`make core-up`): `core-migrate`
+  (owner connection) also creates its two logins: `core_app`, a member of
+  `mhai_app` only, for the service, and `core_provision`, a member of
+  `mhai_provision` only, for the seed CLI (`core-cli`). `core-keys` makes
+  the dev signing key. The core service's environment holds only its own
+  secrets.
+- `GET /api/v1/readyz`: 503 unless Postgres and NATS (with every KV bucket)
+  answer. `core keys new|ensure` generates the access-token key.
+- Expired Idempotency-Key rows are swept every 10 minutes
+  (`mhai_sweep_idempotency()`, migration 00006).
 - Docker Compose stack: Postgres, Redis, Ollama with model pull, the app, an
   optional OpenTelemetry collector, and a GPU override, with Make targets.
 - The CCA can generate through Ollama (`CCA_BACKEND=ollama`).

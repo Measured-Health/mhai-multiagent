@@ -29,10 +29,12 @@ const (
 	DenylistBucket      = "denylist"
 	LoginAttemptsBucket = "login_attempts"
 	MFAAttemptsBucket   = "mfa_attempts"
+	LoginCeilingBucket  = "login_ceiling"
 
 	DenylistTTL      = 17 * time.Minute // access token life (15 min) plus clock-skew margin
 	LoginAttemptsTTL = 15 * time.Minute
 	MFAAttemptsTTL   = 15 * time.Minute
+	LoginCeilingTTL  = time.Hour // per-login failures across every client IP
 )
 
 // Buckets are the gateway's KV stores.
@@ -40,6 +42,15 @@ type Buckets struct {
 	Denylist      jetstream.KeyValue // revoked token ids, until the token would have expired
 	LoginAttempts jetstream.KeyValue // sign-in failure counters
 	MFAAttempts   jetstream.KeyValue // step-up code failure counters
+	LoginCeiling  jetstream.KeyValue // sign-in failure counters per login, across IPs
+}
+
+// All returns every bucket with its name, for readiness checks.
+func (b Buckets) All() map[string]jetstream.KeyValue {
+	return map[string]jetstream.KeyValue{
+		DenylistBucket: b.Denylist, LoginAttemptsBucket: b.LoginAttempts,
+		MFAAttemptsBucket: b.MFAAttempts, LoginCeilingBucket: b.LoginCeiling,
+	}
 }
 
 // Errors from Connect are fixed messages or known sentinels; they never
@@ -132,7 +143,7 @@ func OpenBucket(ctx context.Context, js jetstream.JetStream, name string, ttl ti
 	return kv, nil
 }
 
-// OpenBuckets opens the three buckets, creating any that are missing.
+// OpenBuckets opens the four buckets, creating any that are missing.
 func OpenBuckets(ctx context.Context, js jetstream.JetStream) (Buckets, error) {
 	var b Buckets
 	var err error
@@ -143,6 +154,9 @@ func OpenBuckets(ctx context.Context, js jetstream.JetStream) (Buckets, error) {
 		return Buckets{}, err
 	}
 	if b.MFAAttempts, err = OpenBucket(ctx, js, MFAAttemptsBucket, MFAAttemptsTTL); err != nil {
+		return Buckets{}, err
+	}
+	if b.LoginCeiling, err = OpenBucket(ctx, js, LoginCeilingBucket, LoginCeilingTTL); err != nil {
 		return Buckets{}, err
 	}
 	return b, nil

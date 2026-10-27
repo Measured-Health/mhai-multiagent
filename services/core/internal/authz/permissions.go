@@ -69,8 +69,14 @@ type Mux struct {
 }
 
 // NewMux returns an empty mux whose routes are guarded by g. A nil guard
-// builds a table only (cmd/permgen): its non-public routes answer 503.
+// builds a table only (cmd/permgen): its non-public routes answer 503. A
+// guard without both idempotency middlewares (Idem, IdemAnon) panics, so a
+// wiring mistake stops the service at start-up instead of turning
+// Idempotency-Key off.
 func NewMux(g *Guard) *Mux {
+	if g != nil && (g.Idem == nil || g.IdemAnon == nil) {
+		panic("authz: guard without idempotency middleware (Idem and IdemAnon are required)")
+	}
 	return &Mux{guard: g, rt: httpx.NewRouter(), probes: http.NewServeMux()}
 }
 

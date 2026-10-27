@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,11 +18,14 @@ type Deps struct {
 	Auth *auth.Service
 	// Pool runs request transactions through authz.Tx.
 	Pool *pgxpool.Pool
+	// Ready is the /readyz check (Readiness); nil answers 503.
+	Ready func(context.Context) error
 }
 
 // Register adds every route to m.
 func Register(m *authz.Mux, d Deps) {
 	RegisterHealth(m)
+	registerReady(m, d.Ready)
 	a := d.Auth
 	if a == nil {
 		a = &auth.Service{}

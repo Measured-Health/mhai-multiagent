@@ -26,3 +26,4 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | DELETE | `/api/v1/auth/sessions/{id}` | signed in | any | both | no | no | no |
 | POST | `/api/v1/auth/terms` | signed in | any | both | no | no | no |
 | GET | `/api/v1/healthz` | public | - | - | no | no | no |
+| GET | `/api/v1/readyz` | public | - | - | no | no | no |

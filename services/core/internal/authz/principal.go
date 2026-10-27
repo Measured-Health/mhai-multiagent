@@ -416,15 +416,11 @@ func safeMethod(method string) bool {
 // idempotency store; every other route is authenticated, checked against
 // the rule, and then idempotent per principal.
 func (g *Guard) wrap(rule Rule, h http.Handler) http.Handler {
+	// NewMux refuses a guard without both middlewares.
 	if rule.Public {
-		if g.IdemAnon != nil {
-			h = g.IdemAnon(h)
-		}
-		return h
+		return g.IdemAnon(h)
 	}
-	if g.Idem != nil {
-		h = g.Idem(h)
-	}
+	h = g.Idem(h)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, code := g.authenticate(r, rule.MFAEnrol)
 		if code != "" {

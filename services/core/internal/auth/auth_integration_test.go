@@ -143,6 +143,10 @@ func newEnv(t *testing.T) *env {
 		Log:     logx.New(e.logs),
 		Now:     e.clock.Now,
 		MFAKey:  []byte(testMFAKey),
+		// A roomy argon2 gate: these tests are about sign-in logic, and -race
+		// on a shared runner makes argon2 slow. TestArgonGateBusy and the
+		// gate's unit tests cover the limit itself.
+		Argon: password.NewGate(64, time.Minute),
 	}
 	log := logx.New(e.logs)
 	e.guard = &authz.Guard{

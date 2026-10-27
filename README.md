@@ -5,12 +5,15 @@ with 5 specialized transformer-based agents and a 4-layer guardrail cascade.
 
 The backend has two parts:
 
-- **Python (today):** the models, pipeline and guardrails in
+- **Python:** the models, pipeline and guardrails in
   `services/intelligence/intelligence/`.
-- **The core service (Go, planned, in `services/core/`):** the API, sign-in, permissions,
+- **The core service (Go, in `services/core/`):** the API, sign-in, permissions,
   tenancy, audit and EMR plumbing. It reaches the Python services only
-  through NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md)
-  and [ARCHITECTURE.md](ARCHITECTURE.md). No Go code exists yet.
+  through NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md),
+  [ARCHITECTURE.md](ARCHITECTURE.md) and
+  [services/core/README.md](services/core/README.md). Built so far (Plan 2):
+  sign-in, sessions, two-step verification, permissions, tenancy and audit;
+  the contract is [services/core/openapi.yaml](services/core/openapi.yaml).
 
 ## Agents
 
@@ -49,7 +52,8 @@ uv run intelligence run --query "28yo female with gestational diabetes" --urgenc
 ```
 
 These commands are for the Python side. The core service's commands are
-run from `services/core/` (`go test ./...`, or `make core-test` from the root).
+run from `services/core/` (`go test ./...`, or `make core-test` from the root);
+see [services/core/README.md](services/core/README.md).
 The whole stack runs with Docker Compose from the repository root (below).
 
 Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit
@@ -58,7 +62,8 @@ Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit
 ## Local Stack (Docker Compose)
 
 ```bash
-make up                 # postgres, redis, ollama (+ pulls OLLAMA_MODEL), intelligence
+make up                 # postgres, nats, core, redis, ollama (+ pulls OLLAMA_MODEL), intelligence
+make core-up            # only the core service and what it needs (postgres, nats, migrations)
 make up-gpu             # same on an NVIDIA GPU (Ollama + CUDA PyTorch)
 make up-observability   # also the OpenTelemetry collector
 make infra              # only postgres, redis, ollama; run the app with uv
@@ -66,9 +71,11 @@ make ps | logs | down   # status, logs, stop (data kept)
 make nuke               # stop and delete all volumes (asks first)
 ```
 
-`make up` creates `.env` from `.env.example` on first run. Ports bind to
-127.0.0.1 and can be moved with `POSTGRES_PORT`, `REDIS_PORT`,
-`OLLAMA_PORT`, `API_PORT`, `OTEL_GRPC_PORT` and `OTEL_HTTP_PORT`. The CCA
+`make up` creates `.env` from `.env.example` on first run; replace every
+`changeme` value first, because the core service and NATS refuse
+placeholders. Ports bind to 127.0.0.1 and can be moved with `POSTGRES_PORT`,
+`NATS_PORT`, `CORE_PORT`, `REDIS_PORT`, `OLLAMA_PORT`, `API_PORT`,
+`OTEL_GRPC_PORT` and `OTEL_HTTP_PORT`. The CCA
 generates through Ollama (`CCA_BACKEND=ollama`, model `OLLAMA_MODEL`).
 The `intelligence` service currently runs the CLI and exits; it becomes a
 server once the API exists.

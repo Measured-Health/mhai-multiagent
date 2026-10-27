@@ -36,8 +36,10 @@ proposes upgrades weekly.
 ## Where a change goes
 
 The backend is the core service (Go) plus Python model services, joined by
-NATS (ADR 0010). The core service, in `services/core/`, is planned and not
-built yet.
+NATS (ADR 0010). The core service, in `services/core/`, serves sign-in,
+sessions, two-step verification, permissions, tenancy and audit (Plan 2).
+Its contract is `services/core/openapi.yaml`; a contract test keeps it in
+step with the routes. See `services/core/README.md`.
 
 - **Go:** the API, authentication, permissions, tenancy, audit and EMR
   plumbing.

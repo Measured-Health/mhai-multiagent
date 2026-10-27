@@ -177,7 +177,7 @@ func TestTxWithoutPrincipal(t *testing.T) {
 // Every guarded route without a token is 401, and the principal is never
 // taken from a header.
 func TestGuardNeedsToken(t *testing.T) {
-	m := NewMux(&Guard{})
+	m := NewMux(&Guard{Idem: passIdem, IdemAnon: passIdem})
 	ran := false
 	Route(m, http.MethodGet, "/x", Rule{}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { ran = true }))
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/x", nil)
@@ -247,7 +247,7 @@ func TestGuardFailsClosedWithoutDenylist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewMux(&Guard{Keys: map[string]ed25519.PublicKey{"k": pub}})
+	m := NewMux(&Guard{Keys: map[string]ed25519.PublicKey{"k": pub}, Idem: passIdem, IdemAnon: passIdem})
 	ran := false
 	Route(m, http.MethodGet, "/x", Rule{}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { ran = true }))
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/x", nil)
@@ -258,4 +258,28 @@ func TestGuardFailsClosedWithoutDenylist(t *testing.T) {
 	if ran || rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("ran=%v status %d", ran, rec.Code)
 	}
+}
+
+// passIdem stands in for the idempotency middleware in unit tests.
+func passIdem(h http.Handler) http.Handler { return h }
+
+// M9: a guard without its idempotency middleware fails at start-up, rather
+// than serving with idempotency silently off.
+func TestNewMuxRefusesGuardWithoutIdempotency(t *testing.T) {
+	for name, g := range map[string]*Guard{
+		"both nil":      {},
+		"idem nil":      {IdemAnon: passIdem},
+		"idem anon nil": {Idem: passIdem},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: NewMux did not panic", name)
+				}
+			}()
+			NewMux(g)
+		}()
+	}
+	NewMux(&Guard{Idem: passIdem, IdemAnon: passIdem})
+	NewMux(nil) // table only
 }

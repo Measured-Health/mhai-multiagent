@@ -1,7 +1,7 @@
 # MHAI local stack.
 #
 #   cp .env.example .env
-#   make up                  # postgres, core migrations, redis, ollama (+ model pull), intelligence
+#   make up                  # postgres, nats, core (+ migrations), redis, ollama (+ model pull), intelligence
 #   make up-gpu              # same, with Ollama and PyTorch on an NVIDIA GPU
 #   make up-observability    # also starts the OpenTelemetry collector
 #
@@ -30,8 +30,11 @@ services:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
 
   # One-shot: apply the core service's goose migrations (the whole schema, roles
-  # and row-level security), then exit. Needs only DATABASE_URL, as a user
-  # that can create roles; the local POSTGRES_USER is a superuser.
+  # and row-level security), then create or reset the two deployment logins:
+  #   CORE_DB_USER       the core service's login, a member of mhai_app only
+  #   PROVISION_DB_USER  the seed CLI's login, a member of mhai_provision only
+  # It connects as the owner (the local POSTGRES_USER is a superuser), and
+  # carries no core service secrets. Placeholder passwords are refused.
   core-migrate:
     build:
       context: ./services/core
@@ -40,8 +43,63 @@ services:
     command: ["migrate", "up"]
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-mhai}:${POSTGRES_PASSWORD:-mhai}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
+      CORE_DB_USER: ${CORE_DB_USER:-core_app}
+      CORE_DB_PASSWORD: ${CORE_DB_PASSWORD:?set CORE_DB_PASSWORD in .env}
+      PROVISION_DB_USER: ${PROVISION_DB_USER:-core_provision}
+      PROVISION_DB_PASSWORD: ${PROVISION_DB_PASSWORD:?set PROVISION_DB_PASSWORD in .env}
     depends_on:
       postgres: { condition: service_healthy }
+
+  # One-shot: make the access-token signing key in the corekeys volume if
+  # it isn't there yet (core keys ensure). Production mounts its own key.
+  core-keys:
+    image: mhai-core:local
+    restart: "no"
+    command: ["keys", "ensure", "--out", "/keys/access.pem"]
+    volumes:
+      - corekeys:/keys
+    depends_on:
+      core-migrate: { condition: service_completed_successfully }
+
+  # The core service (Go): the API the BFFs call. Its environment is only
+  # its own settings (no env_file): the core login, the gateway NATS user,
+  # its key and its secrets. The config rejects placeholder values.
+  core:
+    image: mhai-core:local
+    restart: unless-stopped
+    command: ["serve"]
+    environment:
+      CORE_ENV: ${CORE_ENV:-development}
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: postgres://${CORE_DB_USER:-core_app}:${CORE_DB_PASSWORD:?set CORE_DB_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
+      NATS_URL: nats://gateway:${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}@nats:4222
+      ACCESS_KEY_PATH: /keys/access.pem
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set MFA_ENCRYPTION_KEY in .env}
+      BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set BFF_SERVICE_KEYS in .env}
+    ports: ["127.0.0.1:${CORE_PORT:-8080}:8080"]
+    volumes:
+      - corekeys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-keys: { condition: service_completed_successfully }
+    # The image is distroless (no shell or curl): probe from outside with
+    # GET /api/v1/readyz (200 ready, 503 not ready).
+    healthcheck:
+      disable: true
+
+  # The seed CLI, as the provisioning login (never the owner, never the
+  # core login). Not started by `up`; run it with
+  #   docker compose run --rm -T core-cli hospitals create ...
+  core-cli:
+    image: mhai-core:local
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://${PROVISION_DB_USER:-core_provision}:${PROVISION_DB_PASSWORD:?set PROVISION_DB_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
+    depends_on:
+      core-migrate: { condition: service_completed_successfully }
 
   redis:
     image: redis:7.4.11-alpine
@@ -150,5 +208,6 @@ volumes:
   pgdata:
   redisdata:
   natsdata:
+  corekeys:
   ollama:
   hf-cache:

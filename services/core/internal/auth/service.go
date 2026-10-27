@@ -25,17 +25,22 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
 
 // Fixed values from the global constraints and Review Focus 2.
 const (
-	MaxLoginFailures   = 5                // per (login, client IP) in the bucket's 15 minutes
-	DefaultReuseGrace  = 10 * time.Second // refresh reuse within this of a rotation is a race, not theft
-	MFATokenTTL        = 5 * time.Minute
-	MFATokenAttempts   = 5
-	defaultIdleMinutes = 15 // platform accounts, and the contract's fallback
-	defaultReviewHours = 4
+	MaxLoginFailures = 5 // per (login, client IP) in the bucket's 15 minutes
+	// MaxLoginFailuresPerLogin is the ceiling per login across every client
+	// IP, in the login_ceiling bucket's hour. It stops a guesser who spreads
+	// over many addresses, and the owner's own sign-in doesn't reset it.
+	MaxLoginFailuresPerLogin = 20
+	DefaultReuseGrace        = 10 * time.Second // refresh reuse within this of a rotation is a race, not theft
+	MFATokenTTL              = 5 * time.Minute
+	MFATokenAttempts         = 5
+	defaultIdleMinutes       = 15 // platform accounts, and the contract's fallback
+	defaultReviewHours       = 4
 )
 
 // Service holds the dependencies of the auth routes.
@@ -54,6 +59,17 @@ type Service struct {
 	// with AES-256-GCM and backup codes hashed with HMAC-SHA256, under keys
 	// derived from it. Without it every two-step route fails closed (503).
 	MFAKey []byte
+	// Argon bounds concurrent argon2 work (sign-in, password change);
+	// defaults to password.DefaultGate, one slot per CPU. A request that
+	// can't get a slot in time gets 503 not_ready.
+	Argon *password.Gate
+}
+
+func (s *Service) argon() *password.Gate {
+	if s.Argon != nil {
+		return s.Argon
+	}
+	return password.DefaultGate
 }
 
 func (s *Service) now() time.Time {

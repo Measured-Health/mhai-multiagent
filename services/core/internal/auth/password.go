@@ -7,7 +7,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 )
@@ -71,8 +70,7 @@ func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "unauthenticated")
 		return
 	}
-	key := LockoutKey(acct.Email, ip)
-	locked, err := s.reserveAttempt(ctx, key)
+	locked, err := s.reserveLogin(ctx, acct.Email, ip)
 	if err != nil {
 		s.fail(w, r, "not_ready", "auth: login attempts unavailable", "user_id", c.Sub)
 		return
@@ -82,6 +80,13 @@ func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "login_locked")
 		return
 	}
+	release, err := s.argon().Acquire(ctx)
+	if err != nil {
+		s.refundLogin(ctx, acct.Email, ip, rid, c.Sub)
+		s.fail(w, r, "not_ready", "auth: password checks saturated", "user_id", c.Sub)
+		return
+	}
+	defer release()
 	ok := false
 	if acct.PasswordHash != nil && *acct.PasswordHash != "" {
 		ok, _ = password.Verify(in.CurrentPassword, *acct.PasswordHash)
@@ -94,9 +99,7 @@ func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "forbidden")
 		return
 	}
-	if err := s.Buckets.LoginAttempts.Delete(ctx, key); err != nil && !bus.IsNotFound(err) {
-		s.log().Error("auth: login attempts reset failed", "request_id", rid, "user_id", c.Sub)
-	}
+	s.loginSucceeded(ctx, acct.Email, ip, rid, c.Sub)
 	if in.NewPassword == in.CurrentPassword || password.Check(in.NewPassword, acct.Email) != nil {
 		s.auditOnly(w, r, "auth.password.failed", c.Sub, c.Hid, map[string]any{"reason": "weak"})
 		httpx.Error(w, r, "weak_password")

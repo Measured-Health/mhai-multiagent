@@ -67,6 +67,36 @@ func reserveIn(ctx context.Context, kv jetstream.KeyValue, key string, max int) 
 	return false, errors.New("auth: attempt counter contention")
 }
 
+// refundIn takes one back from the counter at key, by compare-and-set; at
+// one it deletes the key. A missing key is fine.
+func refundIn(ctx context.Context, kv jetstream.KeyValue, key string) error {
+	for i := 0; i < 16; i++ {
+		e, err := kv.Get(ctx, key)
+		if bus.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		n, err := strconv.Atoi(string(e.Value()))
+		if err != nil {
+			return err
+		}
+		if n <= 1 {
+			err = kv.Delete(ctx, key, jetstream.LastRevision(e.Revision()))
+		} else {
+			_, err = kv.Update(ctx, key, []byte(strconv.Itoa(n-1)), e.Revision())
+		}
+		if err == nil {
+			return nil
+		}
+		if !isRevisionConflict(err) {
+			return err
+		}
+	}
+	return errors.New("auth: attempt counter contention")
+}
+
 // reserveMFA counts a code check for the account.
 func (s *Service) reserveMFA(ctx context.Context, userID string) (bool, error) {
 	return reserveIn(ctx, s.Buckets.MFAAttempts, mfaFailKey(userID), MaxMFAFailures)

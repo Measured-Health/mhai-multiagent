@@ -123,7 +123,8 @@ func MigrateDownTo(ctx context.Context, url string, version int64) error {
 
 // CheckLoginRole refuses a login user that row-level security can't hold:
 //   - a superuser, or a role with BYPASSRLS;
-//   - a role that isn't a member of mhai_app;
+//   - a role that isn't a member of mhai_app, or is a direct member of any
+//     other role (with or without inheritance);
 //   - a role that inherits (pg_has_role USAGE) any of the database roles
 //     directly or through another role: only SET ROLE inside db.With* may
 //     reach them;
@@ -142,6 +143,7 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 		ownsDatabase   bool
 		ownedSchemas   []string
 		ownedRelations int
+		otherRoles     []string
 	)
 	err := pool.QueryRow(ctx, `
 		SELECT r.rolname, r.rolsuper, r.rolbypassrls,
@@ -156,9 +158,11 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 		             ORDER BY 1),
 		       (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		        WHERE pg_has_role(session_user, c.relowner, 'MEMBER')
-		          AND n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema')
+		          AND n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'),
+		       ARRAY(SELECT g.rolname::text FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
+		             WHERE m.member = r.oid AND g.rolname <> 'mhai_app' ORDER BY 1)
 		FROM pg_roles r WHERE r.rolname = session_user`).
-		Scan(&name, &super, &bypass, &member, &inherited, &ownsDatabase, &ownedSchemas, &ownedRelations)
+		Scan(&name, &super, &bypass, &member, &inherited, &ownsDatabase, &ownedSchemas, &ownedRelations, &otherRoles)
 	if err != nil {
 		return fmt.Errorf("db: check login role: %w", err)
 	}
@@ -171,6 +175,9 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	if !super && !member {
 		problems = append(problems, "it is not a member of mhai_app")
+	}
+	if len(otherRoles) > 0 {
+		problems = append(problems, "it is also a member of "+strings.Join(otherRoles, ", "))
 	}
 	if len(inherited) > 0 {
 		problems = append(problems, "it inherits the privileges of "+strings.Join(inherited, ", "))
