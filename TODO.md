@@ -29,6 +29,10 @@ From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.
 - **One NKey per worker service**, not one shared `worker` user.
 - **Idempotency panic after commit** re-runs the handler on retry (fails safe); store the tombstone first.
 
+## Under consideration
+
+- **Fast intelligence service (parked 27 Oct, product owner).** Serve the models on a rented cloud GPU, aiming for millisecond steps and a checked answer in about 3 s instead of 8–30 s. The approach: vLLM, compiled small models, streaming, FP8 and speculative decoding. The draft design, with the questions to answer first, is in `docs/specs/2026-10-27-intelligence-performance-design.md`. It needs the Python-over-NATS boundary in place, plus a GPU budget (about $1,400 a month for one L40S) and clinical sign-off for FP8 and streaming.
+
 ## Backend contracts the frontend uses on sample data
 
 mhai-web has built these screens against contracts that are marked **Assumed** or proposed. Each needs building here, or confirming as built:

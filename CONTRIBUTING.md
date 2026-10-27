@@ -140,6 +140,10 @@ Python paths here are relative to `services/intelligence/`.
   matching `mhai-web` PR. When #8 lands, add a CI step that fails if the
   committed schema and the app's schema diverge.
 
+## Security by design
+
+Security starts in the design. Every design, spec or ADR that changes behaviour carries a **Security and threat model** section: assets, trust boundaries, STRIDE threats with their controls, abuse-case tests, and residual risk. Approval waits until the section is complete. The project skills in `.claude/skills/` (`secure-design`, `secure-build`, `security-review` and `bug-hunt`) hold the checklists. Humans can use them as a review guide too.
+
 ## Architecture decisions
 
 Record decisions that are hard to reverse, or that others will ask "why?"
