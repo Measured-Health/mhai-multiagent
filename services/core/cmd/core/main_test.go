@@ -92,15 +92,15 @@ func TestLoginRequests(t *testing.T) {
 		t.Fatalf("none: %v %v", reqs, err)
 	}
 	reqs, err = loginRequests(env(map[string]string{
-		"CORE_DB_USER": "core_app", "CORE_DB_PASSWORD": "k7Qw93hZr2Lm8Vx4Tn6B",
-		"PROVISION_DB_USER": "core_provision", "PROVISION_DB_PASSWORD": "Zq81mWv3Ls0Pk4Rt7Yb2",
+		"CORE_DB_USER": "core_app", "CORE_DB_PASSWORD": "test-only-core-db-password",
+		"PROVISION_DB_USER": "core_provision", "PROVISION_DB_PASSWORD": "test-only-provision-db-password",
 	}))
 	if err != nil || len(reqs) != 2 || reqs[0].role != "mhai_app" || reqs[1].role != "mhai_provision" {
 		t.Fatalf("both: %+v %v", reqs, err)
 	}
 	for _, bad := range []map[string]string{
 		{"CORE_DB_USER": "core_app"},
-		{"CORE_DB_PASSWORD": "k7Qw93hZr2Lm8Vx4Tn6B"},
+		{"CORE_DB_PASSWORD": "test-only-core-db-password"},
 		{"CORE_DB_USER": "core_app", "CORE_DB_PASSWORD": "changemeReplaceWithLettersAndDigits"},
 		{"PROVISION_DB_USER": "core_provision", "PROVISION_DB_PASSWORD": "short"},
 	} {

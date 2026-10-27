@@ -155,7 +155,7 @@ func TestCheckPassword(t *testing.T) {
 			t.Fatalf("error echoes the value: %v", err)
 		}
 	}
-	if err := CheckPassword("CORE_DB_PASSWORD", "k7Qw93hZr2Lm8Vx4Tn6B"); err != nil {
+	if err := CheckPassword("CORE_DB_PASSWORD", "test-only-core-db-password"); err != nil {
 		t.Fatal(err)
 	}
 }
