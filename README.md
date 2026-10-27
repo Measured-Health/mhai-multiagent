@@ -3,6 +3,14 @@
 **Medical Healthcare AI** — A hallucination-resistant clinical decision-support system
 with 5 specialized transformer-based agents and a 4-layer guardrail cascade.
 
+The backend has two parts:
+
+- **Python (today):** the models, pipeline and guardrails in `mhai/`.
+- **Go gateway (planned, in `gateway/`):** the API, sign-in, permissions,
+  tenancy, audit and EMR plumbing. It reaches the Python services only
+  through NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md)
+  and [ARCHITECTURE.md](ARCHITECTURE.md). No Go code exists yet.
+
 ## Agents
 
 | Agent | Architecture | Role |
@@ -39,6 +47,9 @@ docker compose up -d
 uv run mhai run --query "28yo female with gestational diabetes" --urgency routine
 ```
 
+These commands are for the Python side. The Go gateway's commands will be
+added with its first build plan.
+
 Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit
 `uv.lock`.
 
@@ -68,7 +79,8 @@ feedback or identity handling, and run `uv run pytest tests/security`.
 ## Project Structure
 
 ```
-mhai/
+gateway/             # Go gateway (planned): API, auth, tenancy, audit, EMR
+mhai/                # Python models and pipeline (reached through NATS)
 ├── agents/          # One module per agent (DIA, QDA, CCA, HGA, OA)
 ├── config/          # Pydantic-style settings
 ├── guardrails/      # 4-layer hallucination cascade
