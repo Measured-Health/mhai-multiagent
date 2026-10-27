@@ -4,10 +4,13 @@ package db_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
@@ -153,6 +156,76 @@ func TestEnsureLoginAndMembershipCheck(t *testing.T) {
 		if err := db.EnsureLogin(ctx, super, bad.name, pw, bad.role); err == nil {
 			t.Errorf("EnsureLogin(%q, %q) accepted", bad.name, bad.role)
 		}
+	}
+}
+
+// sqlLog records every SQL text and argument a pool sends.
+type sqlLog struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (l *sqlLog) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sent = append(l.sent, d.SQL)
+	for _, a := range d.Args {
+		l.sent = append(l.sent, fmt.Sprint(a))
+	}
+	return ctx
+}
+
+func (l *sqlLog) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// I2: EnsureLogin sends Postgres a SCRAM verifier, never the password: no
+// SQL text or parameter holds it, yet the password signs in.
+func TestEnsureLoginSendsNoPlaintext(t *testing.T) {
+	pg, _ := shared(t)
+	ctx := context.Background()
+	cfg, err := pgxpool.ParseConfig(pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := &sqlLog{}
+	cfg.ConnConfig.Tracer = log
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	name := "scram_login_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:8]
+	pw := "synthetic-scram-password-" + uuid.NewString()
+	for i := 0; i < 2; i++ { // CREATE, then ALTER
+		if err := db.EnsureLogin(ctx, traced, name, pw, "mhai_app"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log.mu.Lock()
+	for _, s := range log.sent {
+		if strings.Contains(s, pw) || strings.Contains(s, "synthetic-scram-password") {
+			t.Fatalf("plaintext password sent to Postgres: %q", s)
+		}
+	}
+	log.mu.Unlock()
+	var stored string
+	if err := traced.QueryRow(ctx, `SELECT rolpassword FROM pg_authid WHERE rolname = $1`, name).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(stored, "SCRAM-SHA-256$4096:") {
+		t.Fatalf("stored %q", stored)
+	}
+	p := connectAs(t, pg, name, pw)
+	defer p.Close()
+	if err := p.Ping(ctx); err != nil {
+		t.Fatalf("sign in with the password: %v", err)
+	}
+	bad := connectAs(t, pg, name, pw+"x")
+	defer bad.Close()
+	if err := bad.Ping(ctx); err == nil {
+		t.Fatal("a wrong password signed in")
+	}
+	if err := db.EnsureLogin(ctx, traced, name, "synthetic-non-ascii-pässword", "mhai_app"); err == nil {
+		t.Fatal("non-ASCII password accepted")
 	}
 }
 

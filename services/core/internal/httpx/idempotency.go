@@ -278,23 +278,29 @@ func (s *store) serve(w http.ResponseWriter, r *http.Request, next http.Handler)
 	}
 }
 
-// credentialKeys are the fields a stored reply must never hold, normalised
-// (lowercase, "-" and "_" removed). Narrower than the log redaction list:
-// email and code are not credentials, and stored bodies are under RLS and
-// expire.
-var credentialKeys = map[string]bool{
-	"password": true, "secret": true, "token": true, "accesstoken": true,
-	"refreshtoken": true, "mfatoken": true, "devicetoken": true, "mfacode": true,
-	"backupcode": true, "backupcodes": true, "recoverycodes": true, "otp": true,
-	"totp": true, "authorization": true, "cookie": true, "setcookie": true,
-	"apikey": true,
+// credentialWords mark a field a stored reply must never hold. A key is a
+// credential when its normalised form (lowercase, "-" and "_" removed)
+// contains any of them, so session_token, inviteToken, reset-token,
+// new_password and client_secret are all caught without being listed.
+// Narrower than the log redaction list: plain email and code are not
+// credentials, and stored bodies are under RLS and expire. A harmless
+// field that matches (token_count) only costs a tombstone: the reply is not
+// kept and a retry gets 409.
+var credentialWords = []string{
+	"token", "secret", "password", "passwd", "passcode", "otp", "cookie",
+	"authorization", "apikey", "backup", "recovery", "mfacode",
 }
 
 func isCredentialKey(k string) bool {
 	k = strings.ToLower(k)
 	k = strings.ReplaceAll(k, "-", "")
 	k = strings.ReplaceAll(k, "_", "")
-	return credentialKeys[k]
+	for _, w := range credentialWords {
+		if strings.Contains(k, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // storable reports whether a reply body may be kept: empty, or JSON with no

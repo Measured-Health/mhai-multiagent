@@ -104,3 +104,30 @@ func TestIdempotentAnonWithoutIP(t *testing.T) {
 		t.Fatalf("n=%d status %d", n, rec.Code)
 	}
 }
+
+// I4: a credential key is caught by the words it contains, in any case and
+// separator, at any depth of the body. Plain email and code stay storable;
+// a harmless match such as token_count is tombstoned, never stored.
+func TestCredentialKeySubstring(t *testing.T) {
+	for _, c := range []struct {
+		key      string
+		storable bool
+	}{
+		{"session_token", false}, {"inviteToken", false}, {"reset-token", false},
+		{"new_password", false}, {"newPassword", false}, {"client_secret", false},
+		{"api_key_secret", false}, {"db_passwd", false}, {"Passcode", false},
+		{"one_time_otp", false}, {"X-Auth-Cookie", false}, {"proxy_authorization", false},
+		{"apiKey", false}, {"backup_codes_new", false}, {"recoveryCodes", false},
+		{"MFA-Code", false}, {"token_count", false},
+		{"email", true}, {"code", true}, {"hospital_code", true}, {"reason", true},
+		{"user_id", true}, {"status", true},
+	} {
+		if got := !isCredentialKey(c.key); got != c.storable {
+			t.Errorf("isCredentialKey(%q) storable=%v, want %v", c.key, got, c.storable)
+		}
+		body := `{"outer":{"list":[{"` + c.key + `":"x"}]}}`
+		if got := storable([]byte(body)); got != c.storable {
+			t.Errorf("storable(%s) = %v, want %v", body, got, c.storable)
+		}
+	}
+}

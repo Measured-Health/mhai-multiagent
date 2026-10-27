@@ -122,7 +122,9 @@ func MigrateDownTo(ctx context.Context, url string, version int64) error {
 }
 
 // CheckLoginRole refuses a login user that row-level security can't hold:
-//   - a superuser, or a role with BYPASSRLS;
+//   - a superuser, or a role with BYPASSRLS, CREATEROLE, CREATEDB or
+//     REPLICATION (CREATEROLE on PG 15 and older can grant itself the
+//     owner role);
 //   - a role that isn't a member of mhai_app, or is a direct member of any
 //     other role (with or without inheritance);
 //   - a role that inherits (pg_has_role USAGE) any of the database roles
@@ -138,6 +140,9 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 	var (
 		name           string
 		super, bypass  bool
+		createRole     bool
+		createDB       bool
+		replication    bool
 		member         bool
 		inherited      []string
 		ownsDatabase   bool
@@ -146,7 +151,7 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 		otherRoles     []string
 	)
 	err := pool.QueryRow(ctx, `
-		SELECT r.rolname, r.rolsuper, r.rolbypassrls,
+		SELECT r.rolname, r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb, r.rolreplication,
 		       pg_has_role(session_user, 'mhai_app', 'MEMBER'),
 		       ARRAY(SELECT x FROM unnest(ARRAY['mhai_migrate', 'mhai_gateway', 'mhai_platform', 'mhai_auth', 'mhai_worker', 'mhai_provision']) AS x
 		             WHERE EXISTS (SELECT 1 FROM pg_roles p WHERE p.rolname = x)
@@ -162,7 +167,7 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 		       ARRAY(SELECT g.rolname::text FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
 		             WHERE m.member = r.oid AND g.rolname <> 'mhai_app' ORDER BY 1)
 		FROM pg_roles r WHERE r.rolname = session_user`).
-		Scan(&name, &super, &bypass, &member, &inherited, &ownsDatabase, &ownedSchemas, &ownedRelations, &otherRoles)
+		Scan(&name, &super, &bypass, &createRole, &createDB, &replication, &member, &inherited, &ownsDatabase, &ownedSchemas, &ownedRelations, &otherRoles)
 	if err != nil {
 		return fmt.Errorf("db: check login role: %w", err)
 	}
@@ -172,6 +177,15 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	if bypass {
 		problems = append(problems, "it has BYPASSRLS")
+	}
+	if createRole {
+		problems = append(problems, "it has CREATEROLE")
+	}
+	if createDB {
+		problems = append(problems, "it has CREATEDB")
+	}
+	if replication {
+		problems = append(problems, "it has REPLICATION")
 	}
 	if !super && !member {
 		problems = append(problems, "it is not a member of mhai_app")

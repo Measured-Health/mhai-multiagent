@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
@@ -60,7 +61,7 @@ func TestLockoutBurst(t *testing.T) {
 	}
 	wg.Wait()
 	t.Logf("burst of %d: %d password checks (401), %d locked, %d other", n, unauth.Load(), locked.Load(), other.Load())
-	if unauth.Load() > 5 || other.Load() != 0 || unauth.Load()+locked.Load() != n {
+	if unauth.Load() != auth.MaxLoginFailures || other.Load() != 0 || unauth.Load()+locked.Load() != n {
 		t.Fatalf("burst: %d checked, %d locked, %d other", unauth.Load(), locked.Load(), other.Load())
 	}
 	if r := e.login(t, u.email, testPassword, ip); r.code != 429 {

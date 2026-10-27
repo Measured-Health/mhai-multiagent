@@ -260,6 +260,14 @@ func TestCheckLoginRole(t *testing.T) {
 		t.Fatalf("bypassrls login: got %v", err)
 	}
 
+	// m2: role-making, database-making and replication logins are refused.
+	for _, attr := range []string{"CREATEROLE", "CREATEDB", "REPLICATION"} {
+		_, strong := loginPool(t, attr+" IN ROLE mhai_app")
+		if err := db.CheckLoginRole(ctx, strong); err == nil || !strings.Contains(err.Error(), attr) {
+			t.Fatalf("%s login: got %v", attr, err)
+		}
+	}
+
 	_, outsider := loginPool(t, "")
 	if err := db.CheckLoginRole(ctx, outsider); err == nil || !strings.Contains(err.Error(), "mhai_app") {
 		t.Fatalf("non-member login: got %v", err)

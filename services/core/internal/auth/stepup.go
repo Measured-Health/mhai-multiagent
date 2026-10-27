@@ -27,10 +27,6 @@ var (
 	ErrMFARequired = errors.New("auth: two-step verification not set up") // 403 mfa_required
 )
 
-// mfaFailKey is the per-account failure counter in the MFA bucket. The key
-// holds the user id (a server-made uuid), never an email.
-func mfaFailKey(userID string) string { return "mfafail." + userID }
-
 // reserveIn counts one attempt against key in kv by compare-and-set before
 // the caller checks anything, so a concurrent burst gets at most max checks.
 // locked is true when the counter was already at max; then nothing is
@@ -99,13 +95,22 @@ func refundIn(ctx context.Context, kv jetstream.KeyValue, key string) error {
 
 // reserveMFA counts a code check for the account.
 func (s *Service) reserveMFA(ctx context.Context, userID string) (bool, error) {
-	return reserveIn(ctx, s.Buckets.MFAAttempts, mfaFailKey(userID), MaxMFAFailures)
+	k, err := s.mfaFailKey(userID)
+	if err != nil {
+		return false, err
+	}
+	return reserveIn(ctx, s.Buckets.MFAAttempts, k, MaxMFAFailures)
 }
 
 // clearMFA resets the account's counter after a correct code. A failure is
 // logged only: the counter then expires on its own.
 func (s *Service) clearMFA(ctx context.Context, userID string) {
-	if err := s.Buckets.MFAAttempts.Delete(ctx, mfaFailKey(userID)); err != nil && !bus.IsNotFound(err) {
+	k, err := s.mfaFailKey(userID)
+	if err != nil {
+		s.log().Error("auth: mfa counter reset failed", "user_id", userID)
+		return
+	}
+	if err := s.Buckets.MFAAttempts.Delete(ctx, k); err != nil && !bus.IsNotFound(err) {
 		s.log().Error("auth: mfa counter reset failed", "user_id", userID)
 	}
 }

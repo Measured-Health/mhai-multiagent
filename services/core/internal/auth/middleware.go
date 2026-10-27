@@ -57,8 +57,9 @@ func (s *Service) Denylisted(ctx context.Context, c token.Claims) bool {
 }
 
 // denySession puts the session and the given access-token ids on the
-// denylist. The bucket's 15-minute lifetime is at least the remaining life
-// of any access token the session issued before it was revoked.
+// denylist. The bucket's lifetime, bus.DenylistTTL (17 minutes: the
+// 15-minute access life plus clock-skew margin), is at least the remaining
+// life of any access token the session issued before it was revoked.
 func (s *Service) denySession(ctx context.Context, sid string, jtis ...string) error {
 	keys := []string{authz.SIDKey(sid)}
 	for _, j := range jtis {

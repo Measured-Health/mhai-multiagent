@@ -50,7 +50,10 @@ const MinLoginPasswordLen = 16
 // exactly role (mhai_app or mhai_provision), or brings an existing one back
 // to that: LOGIN, no superuser, BYPASSRLS, CREATEDB or CREATEROLE, the new
 // password, and every other membership revoked. pool must be able to
-// create roles (the migrate connection). Errors never carry the password.
+// create roles (the migrate connection). Errors never carry the password,
+// and neither does any SQL text or parameter sent to Postgres: the password
+// goes as a SCRAM-SHA-256 verifier built here (see scramVerifier), which
+// Postgres stores as it is.
 func EnsureLogin(ctx context.Context, pool *pgxpool.Pool, name, password, role string) error {
 	if !loginRoles[role] {
 		return fmt.Errorf("db: a login may only be a member of mhai_app or mhai_provision, not %q", role)
@@ -60,6 +63,11 @@ func EnsureLogin(ctx context.Context, pool *pgxpool.Pool, name, password, role s
 	}
 	if len(password) < MinLoginPasswordLen {
 		return fmt.Errorf("db: login password must be at least %d characters", MinLoginPasswordLen)
+	}
+	if !printableASCII(password) {
+		// Postgres runs SASLprep on non-ASCII passwords at sign-in; a
+		// verifier built here without it would not match.
+		return errors.New("db: login password must be printable ASCII")
 	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -74,13 +82,21 @@ func EnsureLogin(ctx context.Context, pool *pgxpool.Pool, name, password, role s
 	if exists {
 		verb = "ALTER"
 	}
-	// format() quotes the name and the password; the statement is built by
-	// Postgres, never by string concatenation of the inputs.
-	var stmt string
-	if err := tx.QueryRow(ctx,
-		`SELECT format('%s ROLE %I LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %L', $1::text, $2::text, $3::text)`,
-		verb, name, password).Scan(&stmt); err != nil {
-		return errors.New("db: ensure login: format failed")
+	// Where this connection may (a superuser), keep the statement out of the
+	// server log; it carries only a verifier, but that is still no business
+	// of the log. Others skip this quietly.
+	var super bool
+	if err := tx.QueryRow(ctx, `SELECT rolsuper FROM pg_roles WHERE rolname = current_user`).Scan(&super); err != nil {
+		return errors.New("db: ensure login: lookup failed")
+	}
+	if super {
+		if _, err := tx.Exec(ctx, `SET LOCAL log_statement = 'none'`); err != nil {
+			return errors.New("db: ensure login: set log_statement failed")
+		}
+	}
+	stmt, err := loginStatement(verb, name, password)
+	if err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, stmt); err != nil {
 		return fmt.Errorf("db: ensure login %s: %s ROLE failed", name, verb)

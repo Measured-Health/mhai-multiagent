@@ -79,7 +79,7 @@ one job:
 | `NATS_URL` | yes | `nats://gateway:PASSWORD@host:4222` in dev; a placeholder password is refused |
 | `NATS_NKEY_SEED_PATH` | production | the `gateway` user's NKey seed file (see `services/nats/nats.conf`) |
 | `ACCESS_KEY_PATH` | yes | PKCS#8 Ed25519 PEM from `core keys new` |
-| `MFA_ENCRYPTION_KEY` | yes | at least 32 bytes; seals TOTP secrets and keys backup-code hashes |
+| `MFA_ENCRYPTION_KEY` | yes | at least 32 bytes; seals TOTP secrets, keys backup-code hashes, and derives the counter key (HKDF-SHA256, label `mhai lockout key v1`) that names the lockout and MFA counters. Changing it forgets live lockouts. |
 | `BFF_SERVICE_KEYS` | yes | comma-separated, each at least 32 bytes; one per BFF |
 | `HTTP_ADDR` | no | default `:8080` |
 | `CORE_ENV` | no | default `development` |
@@ -123,9 +123,19 @@ Neither needs the BFF key, and neither says what failed.
 
 - Sign-in lockout: 5 failures per (login, client IP) in 15 minutes, and 20
   per login across every IP in an hour (`login_ceiling` bucket). Both give
-  429 `login_locked`, the same reply as for an unknown login. Counters are
-  keyed by SHA-256, never by the email. If they can't be read, sign-in
-  fails closed (503).
+  429 `login_locked`, the same reply as for an unknown login. If the
+  counters can't be read, sign-in fails closed (503).
+- At the per-login ceiling, the one way through is the right password
+  together with a live trusted-device token of that user: holding the
+  device is the proof, so a stranger can't lock that owner out. Everything
+  else (right or wrong password, two-step or not, unknown login) gets the
+  same 429 `login_locked`, with the same argon2 and device-lookup work, so
+  the reply says nothing about the password. The (login, IP) slot stays
+  counted. Each such request writes `auth.login.ceiling` to the audit log
+  (ids only) for admin alerting.
+- Counter names are HMAC-SHA256 under the counter key (derived from
+  `MFA_ENCRYPTION_KEY`, label `mhai lockout key v1`), never the email or a
+  bare hash of it, so a copy of the NATS KV store can't confirm an email.
 - argon2 runs behind a process-wide gate with one slot per CPU. A request
   that can't get a slot within 2 seconds gets 503 `not_ready` and isn't
   counted as an attempt.
@@ -133,6 +143,34 @@ Neither needs the BFF key, and neither says what failed.
   `mhai_auth` through `mhai_sweep_idempotency()`. That function can see
   only expired rows.
 - Step-up: 5 wrong codes in 15 minutes give 429 `mfa_locked`.
+- `migrate` creates the database logins (`EnsureLogin`) with a SCRAM-SHA-256
+  verifier built in Go; the plaintext password never reaches Postgres, its
+  logs or `pg_stat_statements`. Login passwords must be printable ASCII.
+- At startup, `serve` refuses a database login that is a superuser, has
+  BYPASSRLS, CREATEROLE, CREATEDB or REPLICATION, holds any membership but
+  `mhai_app`, or owns the database, a schema or a table.
+
+## Known limits
+
+- **Third-party lockout.** Someone who knows an email can hold any account
+  without a trusted device (two-step accounts included) at the per-login
+  ceiling for an hour at a time, for about 20 requests an hour. There is
+  no admin unlock until the staff endpoints exist; `auth.login.ceiling`
+  audit rows are the signal to alert on.
+- **Revocation lag.** A deactivated account or hospital, or a revoked
+  session, can keep working for up to 30 s (the state cache), and up to
+  the 15-minute access-token life if the NATS KV denylist is down when the
+  password changes.
+- **No TLS inside compose.** Postgres (`sslmode=disable`) and NATS run
+  without TLS on the compose network. Production needs TLS on both.
+- **The argon2 gate is per process** and sized by CPU count; the BFF must
+  rate-limit sign-in in front of it.
+- **`setup_incomplete` hospitals are served**, so their first admin can
+  finish setup.
+- **Self-enrolment of two-step** stays open on first sign-in until the
+  invite flow exists: whoever has the first password owns the second factor.
+- **The `intelligence` service connects to Postgres as the superuser**
+  (T2 M6) until the boundary plan; it no longer gets the core secrets.
 
 ## Layout
 

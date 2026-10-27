@@ -490,7 +490,10 @@ func TestLockedRequestsDoNotExtendCounter(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		e.login(t, u.email, "not-the-password-at-all", ip)
 	}
-	k := auth.LockoutKey(u.email, ip)
+	k, err := e.svc.LockoutKey(u.email, ip)
+	if err != nil {
+		t.Fatal(err)
+	}
 	before, err := buckets.LoginAttempts.Get(context.Background(), k)
 	if err != nil {
 		t.Fatal(err)
@@ -506,7 +509,7 @@ func TestLockedRequestsDoNotExtendCounter(t *testing.T) {
 		t.Fatal("a locked request wrote the counter")
 	}
 	if strings.Contains(k, "@") || len(k) != 64 {
-		t.Fatalf("lockout key is not a sha256 hex digest")
+		t.Fatalf("lockout key is not a hex HMAC-SHA256 digest")
 	}
 }
 

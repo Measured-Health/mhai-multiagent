@@ -169,15 +169,43 @@ services:
     # The image's default command is a one-shot CLI until the API server
     # exists; switch to unless-stopped once it serves on :8000.
     restart: "no"
-    env_file:
-      - path: .env
-        required: false
+    # No env_file: .env also holds the core service's secrets (MFA key, BFF
+    # keys, database logins, gateway NATS password), and this container,
+    # with its model downloads and many dependencies, must not see them.
+    # Only the settings the Python service reads are listed; the defaults
+    # match .env.example. TestComposeSplitsSecretsPerService checks this.
     environment:
+      # Superuser URL until the boundary plan (known limit, T2 M6).
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mhai}:${POSTGRES_PASSWORD:-mhai}@postgres:5432/${POSTGRES_DB:-mhai}
       REDIS_URL: redis://redis:6379/0
       OLLAMA_URL: http://ollama:11434
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       HF_HOME: /home/appuser/.cache/huggingface
+      HF_TOKEN: ${HF_TOKEN:-}
+      APP_ENV: ${APP_ENV:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      QUEUE_BACKEND: ${QUEUE_BACKEND:-redis}
+      QUEUE_URL: ${QUEUE_URL:-mhai.queries}
+      QUEUE_DLQ_URL: ${QUEUE_DLQ_URL:-mhai.queries.dlq}
+      QUEUE_WORKERS: ${QUEUE_WORKERS:-3}
+      NLI_MODEL: ${NLI_MODEL:-cross-encoder/nli-deberta-v3-base}
+      CCA_BACKEND: ${CCA_BACKEND:-ollama}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      CCA_MODEL: ${CCA_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      DENSE_MODEL: ${DENSE_MODEL:-all-MiniLM-L6-v2}
+      DIA_MODEL: ${DIA_MODEL:-microsoft/swinv2-base-patch4-window8-256}
+      QWEN_RPM: ${QWEN_RPM:-15}
+      QWEN_TPM: ${QWEN_TPM:-30000}
+      DEBERTA_RPM: ${DEBERTA_RPM:-120}
+      TRUST_PASS_DEFAULT: ${TRUST_PASS_DEFAULT:-0.55}
+      TRUST_REGEN_FLOOR: ${TRUST_REGEN_FLOOR:-0.30}
+      SE_THRESHOLD_RAG: ${SE_THRESHOLD_RAG:-0.8}
+      SE_K_SAMPLES: ${SE_K_SAMPLES:-5}
+      PERSONA_ETA: ${PERSONA_ETA:-0.05}
+      CMA_ES_MIN_CORRECTIONS: ${CMA_ES_MIN_CORRECTIONS:-50}
+      AGENT_HTTP_TIMEOUT: ${AGENT_HTTP_TIMEOUT:-300}
+      AGENT_HTTP_RETRIES: ${AGENT_HTTP_RETRIES:-2}
+      S3_BUCKET: ${S3_BUCKET:-mhai-artifacts-dev}
     depends_on:
       postgres: { condition: service_healthy }
       core-migrate: { condition: service_completed_successfully }

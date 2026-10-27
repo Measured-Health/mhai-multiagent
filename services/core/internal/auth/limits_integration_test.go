@@ -39,9 +39,11 @@ func TestLoginCeilingAcrossIPs(t *testing.T) {
 			t.Fatalf("unknown failure %d: %d", i+1, r.code)
 		}
 	}
-	if r := e.login(t, unknown, "wrong-password", newIP()); r.code != 429 || r.body["code"] != "login_locked" {
-		t.Fatalf("unknown over the ceiling: %d %s", r.code, r.raw)
+	g := e.login(t, unknown, "wrong-password", newIP())
+	if g.code != 429 || g.body["code"] != "login_locked" {
+		t.Fatalf("unknown over the ceiling: %d %s", g.code, g.raw)
 	}
+	sameReply(t, r, g)
 }
 
 // Successful sign-ins are not failures: many in an hour never lock.

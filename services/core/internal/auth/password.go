@@ -70,19 +70,19 @@ func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "unauthenticated")
 		return
 	}
-	locked, err := s.reserveLogin(ctx, acct.Email, ip)
+	res, err := s.reserveLogin(ctx, acct.Email, ip)
 	if err != nil {
 		s.fail(w, r, "not_ready", "auth: login attempts unavailable", "user_id", c.Sub)
 		return
 	}
-	if locked {
+	if res.ipLocked || res.ceilingLocked {
 		s.auditOnly(w, r, "auth.password.failed", c.Sub, c.Hid, map[string]any{"reason": "locked"})
 		httpx.Error(w, r, "login_locked")
 		return
 	}
 	release, err := s.argon().Acquire(ctx)
 	if err != nil {
-		s.refundLogin(ctx, acct.Email, ip, rid, c.Sub)
+		s.refundLogin(ctx, res, rid, c.Sub)
 		s.fail(w, r, "not_ready", "auth: password checks saturated", "user_id", c.Sub)
 		return
 	}
@@ -99,7 +99,7 @@ func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "forbidden")
 		return
 	}
-	s.loginSucceeded(ctx, acct.Email, ip, rid, c.Sub)
+	s.loginSucceeded(ctx, res, rid, c.Sub)
 	if in.NewPassword == in.CurrentPassword || password.Check(in.NewPassword, acct.Email) != nil {
 		s.auditOnly(w, r, "auth.password.failed", c.Sub, c.Hid, map[string]any{"reason": "weak"})
 		httpx.Error(w, r, "weak_password")

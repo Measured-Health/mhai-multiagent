@@ -18,16 +18,46 @@ From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.
 
 - **Invite flow.** It must close first-sign-in self-enrolment: today a CLI-created account enrols its own two-step at first sign-in, so whoever has the first password owns the second factor. Invites bind enrolment to the invited person. Needs the mail provider.
 - **Forgot / reset password** (contract §2.5). Needs the mail provider.
-- **The Python boundary plan.** Workers verify the core-signed request token, `RBACManager` and `AuditLogger` move to Go, Redis leaves compose, and the worker NATS client uses the `_INBOX_worker` prefix. Until then the `intelligence` service still reads the whole `.env` (`env_file`), core secrets included; split its environment then.
-- **Hospital setup flow.** `setup_incomplete` hospitals can sign in so the first admin can finish setup; revisit when the flow exists.
+- **The Python boundary plan.** Workers verify the core-signed request token, `RBACManager` and `AuditLogger` move to Go, Redis leaves compose, and the worker NATS client uses the `_INBOX_worker` prefix. Until then the `intelligence` service connects to Postgres as the superuser (T2 M6); give it its own login then.
+- **Hospital setup flow.** `setup_incomplete` hospitals can sign in so the first admin can finish setup; revisit when the flow exists (T8 M8).
+- **Admin unlock** for the per-login ceiling, with the staff endpoints (only a trusted device gets past it today); alert on `auth.login.ceiling` audit rows.
 
 ### Deferred minors to follow up
 
-- **Audit tail deletion.** The hash chain can't show rows deleted from the end. Add signed checkpoints (`audit_checkpoints`) on a timer.
-- **Direct `audit_log` inserts.** The app roles can INSERT into `audit_log` without the chain lock. Route every append through a SECURITY DEFINER `audit_append()` and revoke INSERT.
-- **NATS wildcards.** The `gateway` user's `$JS.API.CONSUMER.>` and stream wildcards are wider than needed. Narrow them to the KV streams and `JOBS`.
-- **One NKey per worker service**, not one shared `worker` user.
-- **Idempotency panic after commit** re-runs the handler on retry (fails safe); store the tombstone first.
+From the Plan 2 reviews (task ids in brackets). None blocks merge.
+
+**Database and audit**
+- **Audit tail deletion.** The hash chain can't show rows deleted from the end. Add signed checkpoints (`audit_checkpoints`) on a timer. [T4 M6]
+- **Direct `audit_log` inserts.** The app roles can INSERT into `audit_log` without the chain lock. Route every append through a SECURITY DEFINER `audit_append()` and revoke INSERT. [T4 M8]
+- **Lateral `SET ROLE` / `set_config`** inside a request transaction can reach `mhai_auth` or another hospital; it needs injected SQL first (RLS guards a forgotten filter, not injection). [T2 M1]
+- **RLS tests:** seed every table in `TestRLSWithoutHospitalSeesNothing`; add WITH CHECK tests for UPDATE and the account tables. [T2 M3, M4]
+- **Old dev volumes** (from `init.sql`) break `migrate`; document `docker compose down -v` once, or detect and hint. [T2 M5]
+- **Uppercase email CHECK** in the DB: moot while `email` is `citext UNIQUE`. [T5 M8]
+- **Provisioning can add roles to existing accounts.** Limit it to users made in the same transaction, or a `provision_user()` function; a DB check that a platform account has at most one role. [T5 N1]
+
+**NATS**
+- **TLS option** for the NATS connection. [T3 M3]
+- **Reconnect and disconnect handlers** that log and flip readiness. [T3 M6]
+- **NATS wildcards.** The `gateway` user's `$JS.API.CONSUMER.>` and stream wildcards are wider than needed. Narrow them to the KV streams and `JOBS`. [T3 N1]
+- **Compose placeholder guard** is case-sensitive. [T3 N2]
+- **One NKey per worker service**, not one shared `worker` user. [T3 N4]
+- **More `allow_responses` tests.** [T3 N5]
+
+**Auth**
+- **Idempotency panic after commit** re-runs the handler on retry (fails safe); store the tombstone first. [T4 N4]
+- **Password pattern checks:** more pass-cases (passphrases containing 1234/qwerty/aaaa, non-ASCII). Optional sorted-blob breached list. [T5 N2, N3]
+- **`MFATokens.Consume` retry** on a revision conflict (a double-submitted challenge is refused; fails safe). [T6 N1]
+- **Audit `auth.login.failed`** when issuing the mfa_token fails. [T7 N1]
+- **Concurrent rehash** cancels an outstanding mfa_token (fails safe). [T7 N2]
+- **SelfService** is guarded by path prefix only; explicit HEAD/OPTIONS routes; the auth package is exempt from the direct-tx test. [T8 N1, N2, N3]
+- **`TestNoOtherMux`** matches by identifier only (misses aliases, `new(http.ServeMux)`, `http.Handle`). On refresh, run the audience check after the usable check. [T8 M5, M10]
+- **argon2 gate sizing.** `runtime.NumCPU()` counts host CPUs in a container; use `GOMAXPROCS` with the cgroup quota (Go 1.25) or a `CORE_ARGON_SLOTS` setting. [final m4]
+- **`Cache-Control: no-store` on guard errors** (401/403/503 from authenticate or check on `/auth/*`); set it before `authz.Route`. [final m5]
+- **`/readyz` cost.** Unauthenticated, a DB ping plus N KV calls per hit; cache the result for 1–2 s. [final m8]
+
+**Repo and CI**
+- **CODEOWNERS** entries without a space (`orchestrator.py@ojies` and two more) match nothing; fix them and add `/services/core/internal/{auth,authz,db,httpx}/` and `/services/nats/`. [final m6]
+- **Restructure leftovers:** a dependabot `gomod` entry for `/services/core`; CI building `services/core/Dockerfile` and a compose smoke test; a `gofmt -l` step; `docs/specs/2026-10-27-intelligence-performance-design.md` still says `mhai/models/`. [final m7]
 
 ## Under consideration
 

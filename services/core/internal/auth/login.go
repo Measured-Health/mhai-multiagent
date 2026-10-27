@@ -2,8 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/netip"
@@ -51,20 +49,6 @@ type mfaResponse struct {
 	MFAToken    string `json:"mfa_token"`
 }
 
-// LockoutKey is the login_attempts key for (login, client IP):
-// hex(sha256(lower(trimmed email) | ip)) (Ruling 3). The email is never a key.
-func LockoutKey(email, ip string) string {
-	sum := sha256.Sum256([]byte(account.NormaliseEmail(email) + "|" + ip))
-	return hex.EncodeToString(sum[:])
-}
-
-// CeilingKey is the login_ceiling key for a login across every IP:
-// hex(sha256("ceiling|" + lower(trimmed email))). The email is never a key.
-func CeilingKey(email string) string {
-	sum := sha256.Sum256([]byte("ceiling|" + account.NormaliseEmail(email)))
-	return hex.EncodeToString(sum[:])
-}
-
 func clientIP(r *http.Request) string {
 	ip := httpx.ClientIP(r.Context())
 	if !ip.IsValid() {
@@ -78,6 +62,20 @@ func clientIP(r *http.Request) string {
 // slot in the (login, IP) counter atomically; one that finds the counter
 // already at 5 gets 429 login_locked without verifying and without writing.
 // If the counter can't be read or written, sign-in fails closed (503).
+//
+// The per-login ceiling (20 failures an hour across every IP) must not let
+// a stranger lock the owner out for good (I1), and must not become a
+// password oracle. So a request that finds the ceiling at its limit runs
+// the same work on every path (argon2 for every login, and the device
+// lookup whenever a device token is sent), and then:
+//   - the right password with a live trusted-device token of that user
+//     goes on as usual: holding the device is the proof;
+//   - everything else (right or wrong password, two-step or not, unknown
+//     account) gets the same 429 login_locked, and its (login, IP) slot
+//     stays counted.
+//
+// Each such request writes auth.login.ceiling (ids only) so admins can be
+// alerted.
 func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	var in loginRequest
 	if !httpx.Decode(w, r, &in) {
@@ -100,7 +98,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	email := account.NormaliseEmail(in.Username)
 
 	// Before the account lookup, so the reply never depends on the account.
-	locked, err := s.reserveLogin(ctx, email, ip)
+	res, err := s.reserveLogin(ctx, email, ip)
 	if err != nil {
 		s.fail(w, r, "not_ready", "auth: login attempts unavailable")
 		return
@@ -124,7 +122,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		actor, hospital = acct.ID.String(), acct.hospitalID()
 	}
 
-	if locked {
+	if res.ipLocked {
 		s.auditOnly(w, r, "auth.login.locked", actor, hospital, map[string]any{"reason": "locked"})
 		s.log().Info("auth: login locked", "request_id", rid, "user_id", actor)
 		httpx.Error(w, r, "login_locked")
@@ -135,7 +133,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	// A request refused for load gives its attempt back: it is not counted.
 	release, err := s.argon().Acquire(ctx)
 	if err != nil {
-		s.refundLogin(ctx, email, ip, rid, actor)
+		s.refundLogin(ctx, res, rid, actor)
 		s.fail(w, r, "not_ready", "auth: password checks saturated")
 		return
 	}
@@ -148,14 +146,37 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	} else {
 		password.DummyVerify(in.Password)
 	}
-	if !ok || !acct.usable() {
-		// The attempt was already counted by reserveAttempt.
+	if res.ceilingLocked {
+		// The device lookup runs whenever a token is sent, whatever the
+		// password, so right and wrong guesses take the same time.
+		trusted := false
+		if in.DeviceToken != "" {
+			id := uuid.Nil
+			if acct != nil {
+				id = acct.ID
+			}
+			t, err := s.trustedDevice(ctx, id, in.DeviceToken)
+			if err != nil {
+				s.fail(w, r, "internal_error", "auth: trusted device lookup failed", "user_id", actor)
+				return
+			}
+			trusted = t
+		}
+		if !ok || !acct.usable() || !trusted {
+			// The (login, IP) slot stays counted, whatever the password.
+			s.ceilingLocked(w, r, actor, hospital)
+			return
+		}
+		s.auditOnly(w, r, "auth.login.ceiling", actor, hospital, map[string]any{"outcome": "device"})
+		s.log().Info("auth: login ceiling passed with a trusted device", "request_id", rid, "user_id", actor)
+	} else if !ok || !acct.usable() {
+		// The attempt was already counted by reserveLogin.
 		s.auditOnly(w, r, "auth.login.failed", actor, hospital, map[string]any{"reason": "bad_credentials"})
 		s.log().Info("auth: login failed", "request_id", rid, "user_id", actor)
 		httpx.Error(w, r, "unauthenticated")
 		return
 	}
-	s.loginSucceeded(ctx, email, ip, rid, actor)
+	s.loginSucceeded(ctx, res, rid, actor)
 
 	// The audience check comes only after the password, so it reveals
 	// nothing about accounts the caller can't sign in to.
@@ -332,52 +353,76 @@ func (s *Service) auditOnly(_ http.ResponseWriter, r *http.Request, action, acto
 	}
 }
 
-// reserveAttempt counts this attempt against key before the password is
-// checked, by compare-and-set, so a concurrent burst gets at most
-// MaxLoginFailures checks. locked is true when the counter was already at
-// the limit; then nothing is written (the bucket's lifetime runs from the
-// last write, so locked requests must not extend it). An error (KV failure,
-// or contention that outlasts the retries) means the caller must fail closed.
-func (s *Service) reserveAttempt(ctx context.Context, key string) (locked bool, err error) {
-	return reserveIn(ctx, s.Buckets.LoginAttempts, key, MaxLoginFailures)
+// loginReservation is what reserveLogin counted for one attempt.
+type loginReservation struct {
+	ipKey, ceilingKey string
+	// ipLocked: the (login, IP) counter was at its limit; nothing was
+	// written.
+	ipLocked bool
+	// ceilingLocked: the (login, IP) slot was taken but the per-login
+	// ceiling was at its limit, so nothing was written there.
+	ceilingLocked bool
 }
 
-// reserveLogin counts one password check for the login: first against
-// (login, client IP), then against the login across every IP. locked is
-// true when either is at its limit. Nil buckets or KV failures are errors,
+// reserveLogin counts one password check for the login, by compare-and-set
+// before the password is checked, so a concurrent burst gets at most
+// MaxLoginFailures checks per (login, client IP) and MaxLoginFailuresPerLogin
+// across every IP. A counter already at its limit is not written (the
+// bucket's lifetime runs from the last write, so locked requests must not
+// extend it). Nil buckets, a missing counter key or KV failures are errors,
 // and the caller fails closed.
-func (s *Service) reserveLogin(ctx context.Context, email, ip string) (locked bool, err error) {
+func (s *Service) reserveLogin(ctx context.Context, email, ip string) (res loginReservation, err error) {
 	if s.Buckets.LoginAttempts == nil || s.Buckets.LoginCeiling == nil {
-		return false, errors.New("auth: attempt buckets missing")
+		return res, errors.New("auth: attempt buckets missing")
 	}
-	if locked, err = s.reserveAttempt(ctx, LockoutKey(email, ip)); err != nil || locked {
-		return locked, err
+	if res.ipKey, err = s.LockoutKey(email, ip); err != nil {
+		return res, err
 	}
-	return reserveIn(ctx, s.Buckets.LoginCeiling, CeilingKey(email), MaxLoginFailuresPerLogin)
+	if res.ceilingKey, err = s.CeilingKey(email); err != nil {
+		return res, err
+	}
+	if res.ipLocked, err = reserveIn(ctx, s.Buckets.LoginAttempts, res.ipKey, MaxLoginFailures); err != nil || res.ipLocked {
+		return res, err
+	}
+	res.ceilingLocked, err = reserveIn(ctx, s.Buckets.LoginCeiling, res.ceilingKey, MaxLoginFailuresPerLogin)
+	return res, err
+}
+
+// ceilingLocked answers a request held by the per-login ceiling: an audit
+// row for admins (ids only), then the same 429 as any locked login.
+func (s *Service) ceilingLocked(w http.ResponseWriter, r *http.Request, actor, hospital string) {
+	s.auditOnly(w, r, "auth.login.ceiling", actor, hospital, map[string]any{"outcome": "locked"})
+	s.log().Info("auth: login ceiling", "request_id", httpx.RequestIDFrom(r.Context()), "user_id", actor)
+	httpx.Error(w, r, "login_locked")
 }
 
 // loginSucceeded clears the (login, IP) counter and gives back this
-// attempt's slot in the per-login ceiling, so only failures count there.
-// Earlier failures stay: a guesser elsewhere keeps their count. Failures
-// here are logged only (the counters then expire on their own).
-func (s *Service) loginSucceeded(ctx context.Context, email, ip, rid, userID string) {
-	if err := s.Buckets.LoginAttempts.Delete(ctx, LockoutKey(email, ip)); err != nil && !bus.IsNotFound(err) {
+// attempt's slot in the per-login ceiling (when it took one), so only
+// failures count there. Earlier failures stay: a guesser elsewhere keeps
+// their count. Failures here are logged only (the counters then expire on
+// their own).
+func (s *Service) loginSucceeded(ctx context.Context, res loginReservation, rid, userID string) {
+	if err := s.Buckets.LoginAttempts.Delete(ctx, res.ipKey); err != nil && !bus.IsNotFound(err) {
 		s.log().Error("auth: login attempts reset failed", "request_id", rid, "user_id", userID)
 	}
-	if err := refundIn(ctx, s.Buckets.LoginCeiling, CeilingKey(email)); err != nil {
-		s.log().Error("auth: login ceiling refund failed", "request_id", rid, "user_id", userID)
+	if !res.ceilingLocked {
+		if err := refundIn(ctx, s.Buckets.LoginCeiling, res.ceilingKey); err != nil {
+			s.log().Error("auth: login ceiling refund failed", "request_id", rid, "user_id", userID)
+		}
 	}
 }
 
-// refundLogin gives back both counters reserved by reserveLogin for an
-// attempt that never checked the password. Failures are logged only (the
-// attempt then stays counted, which fails safe).
-func (s *Service) refundLogin(ctx context.Context, email, ip, rid, userID string) {
-	if err := refundIn(ctx, s.Buckets.LoginAttempts, LockoutKey(email, ip)); err != nil {
+// refundLogin gives back what reserveLogin took for an attempt that never
+// checked the password. Failures are logged only (the attempt then stays
+// counted, which fails safe).
+func (s *Service) refundLogin(ctx context.Context, res loginReservation, rid, userID string) {
+	if err := refundIn(ctx, s.Buckets.LoginAttempts, res.ipKey); err != nil {
 		s.log().Error("auth: login attempts refund failed", "request_id", rid, "user_id", userID)
 	}
-	if err := refundIn(ctx, s.Buckets.LoginCeiling, CeilingKey(email)); err != nil {
-		s.log().Error("auth: login ceiling refund failed", "request_id", rid, "user_id", userID)
+	if !res.ceilingLocked {
+		if err := refundIn(ctx, s.Buckets.LoginCeiling, res.ceilingKey); err != nil {
+			s.log().Error("auth: login ceiling refund failed", "request_id", rid, "user_id", userID)
+		}
 	}
 }
 

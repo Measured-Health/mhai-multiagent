@@ -74,4 +74,31 @@ func TestComposeSplitsSecretsPerService(t *testing.T) {
 	if !ok || !strings.Contains(cli.Environment["DATABASE_URL"], "PROVISION_DB_USER") {
 		t.Errorf("core-cli must connect as the provisioning login")
 	}
+
+	// I3: no service outside core gets a core secret, by name or inside a
+	// value, and none uses env_file (which would bring in all of .env).
+	// nats needs the gateway NATS password for its own config.
+	coreSecrets := []string{"MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "CORE_DB_PASSWORD",
+		"PROVISION_DB_PASSWORD", "NATS_GATEWAY_PASSWORD", "NATS_URL"}
+	if _, ok := svcs["intelligence"]; !ok {
+		t.Fatal("no intelligence service in docker-compose.yml")
+	}
+	for name, svc := range svcs {
+		if strings.HasPrefix(name, "core") {
+			continue
+		}
+		if svc.EnvFile != nil {
+			t.Errorf("%s must not use env_file", name)
+		}
+		for k, v := range svc.Environment {
+			for _, bad := range coreSecrets {
+				if name == "nats" && bad == "NATS_GATEWAY_PASSWORD" {
+					continue
+				}
+				if k == bad || strings.Contains(v, bad) {
+					t.Errorf("%s env %s carries %s", name, k, bad)
+				}
+			}
+		}
+	}
 }

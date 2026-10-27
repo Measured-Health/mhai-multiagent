@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -61,12 +63,42 @@ func TestIPPrefix(t *testing.T) {
 	}
 }
 
+// m3: counter keys are HMAC-SHA256 under a key derived from the MFA key
+// with its own label: stable for one server key, different under another,
+// never the bare SHA-256 of the input, and never holding the email.
 func TestLockoutKey(t *testing.T) {
-	a := LockoutKey(" Grace.Nwosu@Havana.example ", "198.51.100.1")
-	b := LockoutKey("grace.nwosu@havana.example", "198.51.100.1")
-	c := LockoutKey("grace.nwosu@havana.example", "198.51.100.2")
-	if a != b || a == c || len(a) != 64 || strings.Contains(a, "havana") {
-		t.Fatalf("keys %s %s %s", a, b, c)
+	s := &Service{MFAKey: []byte("test-only-mfa-key-0123456789abcdef0123456789")}
+	other := &Service{MFAKey: []byte("another-test-mfa-key-0123456789abcdef0123")}
+	key := func(s *Service, email, ip string) string {
+		t.Helper()
+		k, err := s.LockoutKey(email, ip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	a := key(s, " Grace.Nwosu@Havana.example ", "198.51.100.1")
+	b := key(s, "grace.nwosu@havana.example", "198.51.100.1")
+	c := key(s, "grace.nwosu@havana.example", "198.51.100.2")
+	d := key(other, "grace.nwosu@havana.example", "198.51.100.1")
+	if a != b || a == c || a == d || len(a) != 64 || strings.Contains(a, "havana") {
+		t.Fatalf("keys %s %s %s %s", a, b, c, d)
+	}
+	bare := sha256.Sum256([]byte("grace.nwosu@havana.example|198.51.100.1"))
+	if a == hex.EncodeToString(bare[:]) {
+		t.Fatal("lockout key is a bare sha256")
+	}
+	ceil, err := s.CeilingKey("Grace.Nwosu@Havana.example")
+	if err != nil || ceil == a || len(ceil) != 64 {
+		t.Fatalf("ceiling key %s %v", ceil, err)
+	}
+	mfa, err := s.mfaFailKey("6f1c2c1e-0000-4000-8000-000000000001")
+	if err != nil || strings.Contains(mfa, "6f1c2c1e") || len(mfa) != len("mfafail.")+64 {
+		t.Fatalf("mfa key %s %v", mfa, err)
+	}
+	// Without a usable server key, there are no counter keys (fail closed).
+	if _, err := (&Service{MFAKey: []byte("short")}).LockoutKey("a@b.example", "198.51.100.1"); err == nil {
+		t.Fatal("short key accepted")
 	}
 }
 
