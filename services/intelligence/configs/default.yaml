@@ -1,0 +1,47 @@
+# MHAI default configuration
+# Values mirror intelligence/config/settings.py defaults.
+
+agents:
+  dia:
+    model: microsoft/swinv2-base-patch4-window8-256
+    ssim_threshold: 0.85
+  qda:
+    confidence_low: 0.35
+    confidence_high: 0.65
+  cca:
+    model: Qwen/Qwen2.5-7B-Instruct
+    max_new_tokens: 512
+    temperature: 0.3
+  hga:
+    nli_model: cross-encoder/nli-deberta-v3-base
+    trust_alpha: 0.35
+    trust_beta: 0.25
+    trust_gamma: 0.20
+    trust_delta: 0.20
+    pass_threshold: 0.55
+    regen_threshold: 0.30
+  orchestrator:
+    cma_es_min_corrections: 50
+    persona_eta: 0.05
+
+guardrails:
+  semantic_entropy:
+    k_samples: 5
+    threshold_rag: 0.8
+    threshold_ungrounded: 1.2
+  cascade:
+    flag_penalty_critical: 0.20
+    flag_penalty_warning: 0.05
+
+retrieval:
+  dense_model: all-MiniLM-L6-v2
+  dense_weight: 0.6
+  sparse_weight: 0.4
+  rrf_k: 60
+  top_k: 5
+
+security:
+  pii_types: 9
+  encryption: fernet
+  rbac_roles: [clinician, researcher, auditor, admin, readonly]
+  audit_hash_algo: sha256

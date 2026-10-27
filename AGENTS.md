@@ -25,6 +25,7 @@ see CONTRIBUTING.md.
 ## Commands
 
 ```bash
+# Python: uv commands run in services/intelligence/; make targets from the root.
 uv sync                      # install (CPU PyTorch); never pip install
 uv add <pkg> / uv add --dev  # add dependencies; commit uv.lock
 make lint                    # ruff check
@@ -34,33 +35,35 @@ make test                    # pytest (no model downloads)
 uv run pytest tests/security # security regression tests
 make infra                   # postgres, redis, ollama for local runs
 make up / make down          # full compose stack
+make core-test / core-lint   # the core service (Go)
 ```
 
-`scripts/e2e_models.py` runs the real models; it needs a machine that can
-load them, and uses synthetic data only.
+`services/intelligence/scripts/e2e_models.py` runs the real models; it needs
+a machine that can load them, and uses synthetic data only.
 
 ## Layout
 
-The backend is a Go gateway plus Python model services, joined by NATS
-(ADR 0010). The Go gateway is planned and not built yet.
+The backend is the core service (Go) plus Python model services, joined by
+NATS (ADR 0010). The core service is planned and not built yet.
 
 ```
-gateway/              Go gateway (planned): API, auth, tenancy, audit, EMR
-NATS                  the only link from Go to Python (planned)
-mhai/agents/          DIA, QDA, CCA, HGA (hga_nli.py), orchestrator
-mhai/knowledge_base/  KB builder, retrievers, RAG CCA (patient scoping lives here)
-mhai/guardrails/      L1-L4 cascade
-mhai/security/        PII masking, RBAC, audit, SecurePipelineWrapper
-mhai/tools/           Ollama client, PubMed, HF helpers
-tests/security/       regression tests for the security fixes
+services/core/        the core service (Go): API, auth, tenancy, audit, EMR
+services/nats/        NATS config: the only link from Go to Python
+services/intelligence/  the Python project (uv)
+  intelligence/agents/          DIA, QDA, CCA, HGA (hga_nli.py), orchestrator
+  intelligence/knowledge_base/  KB builder, retrievers, RAG CCA (patient scoping lives here)
+  intelligence/guardrails/      L1-L4 cascade
+  intelligence/security/        PII masking, RBAC, audit, SecurePipelineWrapper
+  intelligence/tools/           Ollama client, PubMed, HF helpers
+  tests/security/               regression tests for the security fixes
 ```
 
 ## Where a change goes
 
-- **Go (`gateway/`):** the API, authentication, permissions, tenancy,
+- **Go (`services/core/`):** the API, authentication, permissions, tenancy,
   audit and EMR plumbing.
-- **Python (`mhai/`):** models and the pipeline: agents, retrieval,
-  guardrails, PII masking.
+- **Python (`services/intelligence/intelligence/`):** models and the
+  pipeline: agents, retrieval, guardrails, PII masking.
 
 ## Rules of thumb
 
@@ -72,6 +75,7 @@ tests/security/       regression tests for the security fixes
 - Security rules are written once, in Go. Don't copy a permission or
   tenancy rule into Python.
 - Python never trusts a hospital or user from a payload, only from the
-  verified gateway token.
-- Don't add entries to the lint, format or mypy baselines in `pyproject.toml`.
+  verified core service token.
+- Don't add entries to the lint, format or mypy baselines in
+  `services/intelligence/pyproject.toml`.
 - Use synthetic data only. No secrets or PHI in code, tests, logs or PRs.

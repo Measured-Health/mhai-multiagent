@@ -1,7 +1,7 @@
 # MHAI local stack.
 #
 #   cp .env.example .env
-#   make up                  # postgres, gateway migrations, redis, ollama (+ model pull), mhai
+#   make up                  # postgres, core migrations, redis, ollama (+ model pull), intelligence
 #   make up-gpu              # same, with Ollama and PyTorch on an NVIDIA GPU
 #   make up-observability    # also starts the OpenTelemetry collector
 #
@@ -29,13 +29,13 @@ services:
       <<: *healthcheck-defaults
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
 
-  # One-shot: apply the gateway's goose migrations (the whole schema, roles
+  # One-shot: apply the core service's goose migrations (the whole schema, roles
   # and row-level security), then exit. Needs only DATABASE_URL, as a user
   # that can create roles; the local POSTGRES_USER is a superuser.
-  gateway-migrate:
+  core-migrate:
     build:
-      context: ./gateway
-    image: mhai-gateway:local
+      context: ./services/core
+    image: mhai-core:local
     restart: "no"
     command: ["migrate", "up"]
     environment:
@@ -54,8 +54,8 @@ services:
       <<: *healthcheck-defaults
       test: ["CMD", "redis-cli", "ping"]
 
-  # The only link between the Go gateway and the Python workers. Two users
-  # (gateway, worker) with their own permissions; see gateway/deploy/nats.
+  # The only link between the core service and the Python workers. Two NATS
+  # users (gateway, worker) with their own permissions; see services/nats.
   nats:
     image: nats:2.10-alpine
     restart: unless-stopped
@@ -72,7 +72,7 @@ services:
       NATS_WORKER_PASSWORD: ${NATS_WORKER_PASSWORD:?set NATS_WORKER_PASSWORD in .env}
     ports: ["127.0.0.1:${NATS_PORT:-4222}:4222"]
     volumes:
-      - ./gateway/deploy/nats/nats.conf:/etc/nats/nats.conf:ro
+      - ./services/nats/nats.conf:/etc/nats/nats.conf:ro
       - natsdata:/data
     healthcheck:
       <<: *healthcheck-defaults
@@ -102,12 +102,12 @@ services:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5:7b-instruct}"]
 
-  mhai:
+  intelligence:
     build:
-      context: .
+      context: ./services/intelligence
       args:
         TORCH: ${TORCH:-cpu}
-    image: mhai:${TORCH:-cpu}
+    image: mhai-intelligence:${TORCH:-cpu}
     # The image's default command is a one-shot CLI until the API server
     # exists; switch to unless-stopped once it serves on :8000.
     restart: "no"
@@ -122,7 +122,7 @@ services:
       HF_HOME: /home/appuser/.cache/huggingface
     depends_on:
       postgres: { condition: service_healthy }
-      gateway-migrate: { condition: service_completed_successfully }
+      core-migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
       ollama-init: { condition: service_completed_successfully }
     ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
@@ -141,7 +141,7 @@ services:
     restart: unless-stopped
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
-      - ./configs/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+      - ./services/intelligence/configs/otel-collector.yaml:/etc/otelcol/config.yaml:ro
     ports:
       - "127.0.0.1:${OTEL_GRPC_PORT:-4317}:4317"
       - "127.0.0.1:${OTEL_HTTP_PORT:-4318}:4318"

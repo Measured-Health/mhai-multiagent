@@ -18,8 +18,8 @@ the [review checklist](#review-checklist).
   through every new code path. With no `patient_id`, only shared
   guidelines come back. Keep it that way.
 - Visibility is decided in one place: `chunk_visible_to()` in
-  `mhai/knowledge_base/kb_builder.py`. Don't write a second copy of that
-  logic. Call it.
+  `services/intelligence/intelligence/knowledge_base/kb_builder.py`. Don't
+  write a second copy of that logic. Call it.
 - Filter before anything else sees candidates. A cache, re-ranker, or
   LLM call that sees other patients' chunks "before filtering" is a
   leak.
@@ -79,7 +79,7 @@ the [review checklist](#review-checklist).
 ## 6. Don't assume model contracts, read them
 
 - NLI label order comes from the model's `id2label` via
-  `mhai.utils.nli.nli_label_map()`. Never hard-code an index-to-label
+  `intelligence.utils.nli.nli_label_map()`. Never hard-code an index-to-label
   map. A wrong map turns "unsupported" into "entailed", which disables
   the main hallucination check without any error.
 - Check that a model id exists before using it as a default.

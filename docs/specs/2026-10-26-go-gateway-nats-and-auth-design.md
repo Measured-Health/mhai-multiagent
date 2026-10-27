@@ -1,4 +1,4 @@
-# Backend architecture (Go gateway, Python models, NATS) and authentication: design
+# Backend architecture (core service in Go, Python models, NATS) and authentication: design
 
 - **Status:** Approved (product owner, 2026-10-26)
 - **Date:** 2026-10-26
@@ -11,7 +11,7 @@
 
 MHAI is about to go from one hospital to several. The product owner is in talks with more hospitals now. Each hospital brings its own staff, its own EMR connections, and its own alerts and audit trail. The backend has to stay reliable, cheap to run and easy to reason about as hospitals are added.
 
-The team is three people, and two of them already write Go. The model code (agents, retrieval, guardrails, PII masking) is Python and depends on the Python ML stack. The API is not built yet: the gateway design and Plan 1 exist, but no gateway code does.
+The team is three people, and two of them already write Go. The model code (agents, retrieval, guardrails, PII masking) is Python and depends on the Python ML stack. The API is not built yet: the gateway design and Plan 1 exist, but no Go API code does.
 
 So the API and everything around it is written in Go, the models stay in Python, and NATS connects them.
 
@@ -19,7 +19,7 @@ So the API and everything around it is written in Go, the models stay in Python,
 
 **Goals**
 - One shared deployment for every hospital, with each hospital's data kept separate. The database enforces the separation, not just the code.
-- A Go gateway that implements the frontend contract exactly, starting with sign-in, sessions, roles and tenancy.
+- The core service (Go) that implements the frontend contract exactly, starting with sign-in, sessions, roles and tenancy.
 - Python model services that can be reached only through NATS, and that check every request themselves before answering.
 - Security rules (permissions, patient isolation, audit) written once, in Go.
 
@@ -31,14 +31,14 @@ So the API and everything around it is written in Go, the models stay in Python,
 
 **Anti-goals: these would make it a failure even if it worked**
 - Two copies of a security rule, one in Go and one in Python, that can drift apart.
-- A Python service that anything other than the gateway can call.
+- A Python service that anything other than the core service can call.
 - Any route that takes the hospital from the request instead of the session.
 - One hospital's data visible to another through a query bug.
 
 ## 3. Constraints
 
-- **The frontend contract is fixed.** mhai-web already calls the §2, §3 and §14 shapes, on sample data. The gateway must match them field for field, error code for error code.
-- **The browser never holds the API token.** Each Next.js app (the BFF) keeps it server-side. Every request reaches the gateway from a BFF, never from a browser (§2.1).
+- **The frontend contract is fixed.** mhai-web already calls the §2, §3 and §14 shapes, on sample data. The core service must match them field for field, error code for error code.
+- **The browser never holds the API token.** Each Next.js app (the BFF) keeps it server-side. Every request reaches the core service from a BFF, never from a browser (§2.1).
 - **No rule on where the data must be stored** (product owner, 26 Oct). Nigeria's Data Protection Act treats health data as sensitive wherever it is stored. Someone qualified should check compliance before go-live.
 - **Synthetic data only** until go-live. No PHI in code, tests, logs or PRs (SKILLS.md).
 - **Small team:** standard libraries over frameworks, and as few moving parts as possible.
@@ -50,7 +50,7 @@ browser ──> BFF (Next.js, clinical / platform)
               │  HTTPS + service credential, client IP header
               v
         ┌──────────────┐        ┌──────────────┐
-        │  Go gateway  │──SQL──>│  PostgreSQL  │  (row-level security per hospital)
+        │ core service │──SQL──>│  PostgreSQL  │  (row-level security per hospital)
         │  (API, auth, │        └──────────────┘
         │  tenancy,    │        ┌──────────────┐
         │  audit, EMR) │──S3───>│ object store │  (documents, letters, exports)
@@ -65,7 +65,7 @@ browser ──> BFF (Next.js, clinical / platform)
         └───────────────────────────────┘  the LLM through Ollama (ADR 0003)
 ```
 
-### 4.1 The Go gateway
+### 4.1 The core service
 
 One Go service. It is the only thing the BFFs talk to and the only thing that publishes to the Python services. It owns:
 
@@ -88,7 +88,7 @@ They:
 
 ### 4.3 NATS
 
-NATS is the only link between Go and Python. It replaces Redis as the job queue: `mhai/queue` was a stub, so nothing is lost. Redis is kept only if a cache is needed later.
+NATS is the only link between Go and Python. It replaces Redis as the job queue: `services/intelligence/intelligence/queue` was a stub, so nothing is lost. Redis is kept only if a cache is needed later.
 
 **A clinical question is a job, not a held-open call.** Keeping the contract (gateway design §4 and §7):
 - `POST /queries` returns 202 with the query id.
@@ -100,7 +100,7 @@ A full run takes tens of seconds, which is too long to hold a request open. The 
 
 **The pipeline stays in one Python service.** The existing orchestrator runs inside a single `pipeline` service: PII masking, retrieval, generation, NLI and HGA, in the order it already uses. Inside that service, the model clients from ADR 0008 call the models (Ollama and the inference service) as they do today. Go never runs the chain, so nothing is rewritten. Python services don't call each other over NATS.
 
-**Request/reply** is for short calls that someone is waiting on and that end in seconds, for example a document's page images or a health check. Subjects are `inference.v1.<service>`. Workers subscribe in a queue group named after the service. The gateway sets a timeout per subject. A timeout is a failure the user sees as "Couldn't get an answer, try again"; it is never retried silently.
+**Request/reply** is for short calls that someone is waiting on and that end in seconds, for example a document's page images or a health check. Subjects are `inference.v1.<service>`. Workers subscribe in a queue group named after the service. The core service sets a timeout per subject. A timeout is a failure the user sees as "Couldn't get an answer, try again"; it is never retried silently.
 
 **JetStream** is for work nobody is waiting on: EMR events to check, feedback to learn from, knowledge-base rebuilds. The details:
 - One stream, `JOBS`, on the subjects `jobs.v1.<hospital_id>.<type>`.
@@ -118,13 +118,13 @@ There is one database. Every hospital-owned table has a `hospital_id` column, an
 ### 4.5 Deployment (my call)
 
 - **Hosting:** AWS, in one region, where the demo already runs. Nothing in the code is tied to a region, so the deployment can move if a hospital or regulator asks.
-- **First build:** `docker compose` with gateway, Python services, NATS, Postgres and object storage. Production later is three NATS servers, managed Postgres and S3.
+- **First build:** `docker compose` with the core service, Python services, NATS, Postgres and object storage. Production later is three NATS servers, managed Postgres and S3.
 - **Configuration:** from the environment. Startup fails if a required secret is missing or is a placeholder.
 - **Encryption:** TLS on every hop, and encryption at rest for Postgres, S3 and NATS JetStream storage.
 
 ### 4.6 Repository layout (my call)
 
-The Go service lives in this repository under `gateway/`, with its own `go.mod`. It stays next to the Python code and to the contract docs it implements, so one PR can change the contract and both sides.
+The Go service lives in this repository under `services/core/`, with its own `go.mod`. It stays next to the Python code and to the contract docs it implements, so one PR can change the contract and both sides. The Python project is in `services/intelligence/` (package `intelligence`) and the NATS config in `services/nats/` (naming decided by the product owner, 27 Oct).
 
 CI gains a Go job: `go vet`, `staticcheck`, `go test -race`, and an integration test against real Postgres and NATS in containers.
 
@@ -141,8 +141,8 @@ There are two layers, and both must pass.
 
 ### 5.2 Request layer: a signed request token
 
-The gateway attaches a token to every request and job, in the NATS header `Mhai-Request-Token`:
-- signed with EdDSA (Ed25519), using the gateway's private key;
+The core service attaches a token to every request and job, in the NATS header `Mhai-Request-Token`:
+- signed with EdDSA (Ed25519), using the core service's private key;
 - `iss`: `mhai-gateway`;
 - `aud`: the service, for example `cca`;
 - `sub`: the user id;
@@ -154,11 +154,11 @@ The gateway attaches a token to every request and job, in the NATS header `Mhai-
 
 ### 5.3 What every Python service checks, before anything else
 
-1. The signature verifies against the gateway's public key. The key is configured, and two keys are accepted during rotation.
+1. The signature verifies against the core service's public key. The key is configured, and two keys are accepted during rotation.
 2. `iss` is right, `aud` is this service, and the token hasn't expired, allowing 5 seconds of clock skew.
 3. The `jti` hasn't been seen in the last 2 minutes (an in-memory replay cache per worker).
 4. Every hospital id and patient id in the payload belongs to `hid`. A payload's hospital is never trusted on its own.
-5. The roles allow the action: one small table per service, generated from the gateway's permission table (§7.2) so the two can't drift.
+5. The roles allow the action: one small table per service, generated from the core service's permission table (§7.2) so the two can't drift.
 
 Any failure means no work is done. The service replies `{"error": "unauthorized"}` and logs the reason, without PHI. This is the "fail closed" rule of ADR 0005, applied at the boundary.
 
@@ -195,7 +195,7 @@ The behaviour is the frontend contract §2, built in Go. These are the changes f
 
 - **Access token:** a JWT signed with EdDSA, valid 15 minutes.
   - Claims: `sub`, `hid`, `roles`, `mfa`, `amr`, `sid` (session id), `jti`, `iat`, `exp`.
-  - Asymmetric signing replaces HS256 from the gateway design, so the signing key never has to leave the gateway.
+  - Asymmetric signing replaces HS256 from the gateway design, so the signing key never has to leave the core service.
 - **Sessions:** one row per device in `sessions`, with `id`, `user_id`, `created_at`, `last_seen_at`, a user-agent summary and `ip_prefix`.
   - Each session has a refresh-token family. Refresh tokens rotate on every use.
   - Reusing an old refresh token revokes the whole family. This catches a stolen token.
@@ -266,9 +266,9 @@ The rules come from frontend §3:
 
 ### 7.3 Hospital separation, enforced twice
 
-1. **In the gateway:** every clinical-side query is scoped by `principal.hospital_id`. Another hospital's resource returns **404**, never 403, so ids can't be probed.
+1. **In the core service:** every clinical-side query is scoped by `principal.hospital_id`. Another hospital's resource returns **404**, never 403, so ids can't be probed.
 2. **In the database:** every hospital-owned table has RLS enabled with a policy `hospital_id = current_setting('mhai.hospital_id')::uuid`.
-   - The gateway runs each request in a transaction that first runs `SET LOCAL mhai.hospital_id = …` from the principal.
+   - The core service runs each request in a transaction that first runs `SET LOCAL mhai.hospital_id = …` from the principal.
    - A query that forgets the filter returns nothing, never another hospital's rows.
    - The app's database role is not the table owner and has no `BYPASSRLS`, so the policy always applies.
 
@@ -276,8 +276,8 @@ The rules come from frontend §3:
 
 | Role | Used by | Can |
 |---|---|---|
-| `mhai_gateway` | gateway, clinical-side requests | hospital tables under RLS; audit insert-only |
-| `mhai_platform` | gateway, platform endpoints | hospital, user, session and audit metadata across hospitals, through views that carry **no clinical content** |
+| `mhai_gateway` | core service, clinical-side requests | hospital tables under RLS; audit insert-only |
+| `mhai_platform` | core service, platform endpoints | hospital, user, session and audit metadata across hospitals, through views that carry **no clinical content** |
 | `mhai_worker` | Python services | only the tables they use (KB chunks, decisions they write), under RLS with the hospital from the verified token |
 | `mhai_migrate` | migrations only | owns the schema |
 | `mhai_retention` | retention job | deletes after a checkpoint (gateway design §12) |
@@ -289,13 +289,13 @@ The rules come from frontend §3:
   - the permission check generated from Go's table.
 
   This happens in step 4.
-- `mhai/security`'s PII masking stays, because it is part of the model pipeline.
+- `services/intelligence/intelligence/security`'s PII masking stays, because it is part of the model pipeline.
 - **Only Go writes the audit hash chain.** A Python service puts its audit facts (what it did, for which request id) in its reply or job result, and Go appends them. Python's `AuditLogger` is removed in step 4.
 - **Go's migrations own the whole schema**, including the knowledge-base tables (pgvector) that Alembic or `init-db` create today. Those are ported in step 1, and the Python schema tooling is removed.
 
 ### 7.6 Patients and shared content
 
-- **Patient scope.** Before publishing, the gateway checks that a patient id belongs to the principal's hospital. The patient id goes in the token. The worker then reads only through `mhai_worker` under RLS, with `mhai.hospital_id` set from the verified token. A patient row from another hospital is simply invisible to it.
+- **Patient scope.** Before publishing, the core service checks that a patient id belongs to the principal's hospital. The patient id goes in the token. The worker then reads only through `mhai_worker` under RLS, with `mhai.hospital_id` set from the verified token. A patient row from another hospital is simply invisible to it.
 - **Shared reference content.** Clinical guidelines and reference text that every hospital may read sit in rows with `hospital_id IS NULL`, and the RLS policy allows them read-only. A hospital's own documents and every patient chunk carry that hospital's id. The product owner decided this on 26 Oct: shared content is allowed, read-only, and never holds patient data.
 
 ### 7.7 Audit
@@ -307,7 +307,7 @@ Every sign-in, sign-out, failed attempt, lockout, two-step event, role change, s
 - Each BFF has a service credential: a client certificate (mTLS), or failing that a long random key in `X-MHAI-Service`.
 - **Trusted headers:** `X-MHAI-Client-IP` and `X-MHAI-Audience` are honoured only on requests that carry the credential.
 - **Rate limits** are per user, as frontend §2.1 asks, because every request comes from a BFF.
-- **CORS** stays closed, since browsers never call the gateway.
+- **CORS** stays closed, since browsers never call the core service.
 
 ## 8a. Where the two contracts disagree
 
@@ -319,7 +319,7 @@ The frontend contract wins, because mhai-web is already built against it (fronte
 
 ## 8b. Hospitals before the platform endpoints exist
 
-In the first build, hospitals and their settings are created with the gateway CLI, using synthetic data only:
+In the first build, hospitals and their settings are created with the core service CLI, using synthetic data only:
 - `idle_timeout_minutes`;
 - `review_overdue_hours`;
 - `require_mfa_for_clinicians`;
@@ -343,7 +343,7 @@ The first accounts are created the same way. Invites wait for the staff and plat
   - an expired token;
   - a replayed `jti`;
   - a payload whose hospital doesn't match `hid`.
-- **Contract:** the gateway's OpenAPI document is generated and committed. CI fails if it changes without the frontend requirements doc changing too. mhai-web then runs its live-mode BFF tests against the gateway.
+- **Contract:** the core service's OpenAPI document is generated and committed. CI fails if it changes without the frontend requirements doc changing too. mhai-web then runs its live-mode BFF tests against the core service.
 
 ## 10. Order of work
 
@@ -352,9 +352,9 @@ The first accounts are created the same way. Invites wait for the staff and plat
    - Postgres migrations;
    - NATS with credentials;
    - `docker compose`.
-2. **Authentication (§6):** accounts, sign-in, lockout, tokens, sessions, two-step verification, terms, password and devices. End: mhai-web's clinical and platform apps sign in for real against the gateway, using synthetic accounts.
+2. **Authentication (§6):** accounts, sign-in, lockout, tokens, sessions, two-step verification, terms, password and devices. End: mhai-web's clinical and platform apps sign in for real against the core service, using synthetic accounts.
 3. **Authorization and tenancy (§7):** the principal, the permission table, RLS, database roles and audit. End: the hospital separation and role tests pass.
-4. **The Python boundary (§5):** wrap the inference services as NATS workers with token verification. This is Plan 1, rewritten for NATS. End: a clinical question goes browser → BFF → gateway → NATS → Python and back.
+4. **The Python boundary (§5):** wrap the inference services as NATS workers with token verification. This is Plan 1, rewritten for NATS. End: a clinical question goes browser → BFF → core service → NATS → Python and back.
 5. **Then the contracts,** in the order the product owner picks: staff and settings, corrections, alerts and EMR, analysis, clearances, platform operations.
 
 Each step gets its own build plan. This design covers steps 1 to 4. Steps 1 to 3 are the first plan.
@@ -369,7 +369,7 @@ Each step gets its own build plan. This design covers steps 1 to 4. Steps 1 to 3
 ## 12. Calls I made (check these)
 
 - AWS, one region, movable (§4.5).
-- Go code in this repository under `gateway/` (§4.6).
+- Go code in this repository under `services/core/` (§4.6).
 - NATS replaces Redis for jobs; Redis is kept only as an optional cache (§4.3).
 - EdDSA for access and request tokens instead of HS256 (§5.2, §6.3).
 - A bundled breached-password list, not an online lookup (§6.1).

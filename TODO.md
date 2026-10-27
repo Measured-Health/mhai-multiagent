@@ -4,9 +4,9 @@ Open work and decisions for mhai-multiagent. Remove an entry once it's done or d
 
 ## Decided
 
-- **Go alongside Python.** A Go gateway owns the API, auth, tenancy, audit and EMR plumbing. The Python services keep the models and are reached only over NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md).
+- **Go alongside Python.** The core service (Go, `services/core/`) owns the API, auth, tenancy, audit and EMR plumbing. The Python services (`services/intelligence/`) keep the models and are reached only over NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md).
 
-## Open items for the Go gateway
+## Open items for the core service
 
 From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md):
 

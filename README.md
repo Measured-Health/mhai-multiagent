@@ -5,8 +5,9 @@ with 5 specialized transformer-based agents and a 4-layer guardrail cascade.
 
 The backend has two parts:
 
-- **Python (today):** the models, pipeline and guardrails in `mhai/`.
-- **Go gateway (planned, in `gateway/`):** the API, sign-in, permissions,
+- **Python (today):** the models, pipeline and guardrails in
+  `services/intelligence/intelligence/`.
+- **The core service (Go, planned, in `services/core/`):** the API, sign-in, permissions,
   tenancy, audit and EMR plumbing. It reaches the Python services only
   through NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md)
   and [ARCHITECTURE.md](ARCHITECTURE.md). No Go code exists yet.
@@ -30,9 +31,12 @@ The backend has two parts:
 
 ## Quick Start
 
-The project is managed with [uv](https://docs.astral.sh/uv/).
+The Python service is a [uv](https://docs.astral.sh/uv/) project in
+`services/intelligence/`; run its commands from there.
 
 ```bash
+cd services/intelligence
+
 # Install (CPU PyTorch by default; on a CUDA machine:
 #   uv sync --no-group cpu --group cu128)
 uv sync
@@ -40,15 +44,13 @@ uv sync
 # Run tests
 uv run pytest
 
-# Docker (build arg TORCH=cpu or cu128)
-docker compose up -d
-
 # CLI
-uv run mhai run --query "28yo female with gestational diabetes" --urgency routine
+uv run intelligence run --query "28yo female with gestational diabetes" --urgency routine
 ```
 
-These commands are for the Python side. The Go gateway's commands will be
-added with its first build plan.
+These commands are for the Python side. The core service's commands are
+run from `services/core/` (`go test ./...`, or `make core-test` from the root).
+The whole stack runs with Docker Compose from the repository root (below).
 
 Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit
 `uv.lock`.
@@ -56,7 +58,7 @@ Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit
 ## Local Stack (Docker Compose)
 
 ```bash
-make up                 # postgres, redis, ollama (+ pulls OLLAMA_MODEL), mhai
+make up                 # postgres, redis, ollama (+ pulls OLLAMA_MODEL), intelligence
 make up-gpu             # same on an NVIDIA GPU (Ollama + CUDA PyTorch)
 make up-observability   # also the OpenTelemetry collector
 make infra              # only postgres, redis, ollama; run the app with uv
@@ -68,19 +70,26 @@ make nuke               # stop and delete all volumes (asks first)
 127.0.0.1 and can be moved with `POSTGRES_PORT`, `REDIS_PORT`,
 `OLLAMA_PORT`, `API_PORT`, `OTEL_GRPC_PORT` and `OTEL_HTTP_PORT`. The CCA
 generates through Ollama (`CCA_BACKEND=ollama`, model `OLLAMA_MODEL`).
-The `mhai` service currently runs the CLI and exits; it becomes a server
-once the API gateway exists.
+The `intelligence` service currently runs the CLI and exits; it becomes a
+server once the API exists.
 
 ## Security
 
 Read [SKILLS.md](SKILLS.md) before changing retrieval, guardrails,
-feedback or identity handling, and run `uv run pytest tests/security`.
+feedback or identity handling, and run `uv run pytest tests/security` in
+`services/intelligence/`.
 
 ## Project Structure
 
 ```
-gateway/             # Go gateway (planned): API, auth, tenancy, audit, EMR
-mhai/                # Python models and pipeline (reached through NATS)
+services/
+├── core/            # The core service (Go): API, auth, tenancy, audit, EMR
+├── nats/            # NATS server config: per-service users and permissions
+└── intelligence/    # Python models and pipeline (reached through NATS)
+    ├── pyproject.toml, uv.lock, Dockerfile, tests/, scripts/, configs/
+    └── intelligence/  # the package
+
+services/intelligence/intelligence/
 ├── agents/          # One module per agent (DIA, QDA, CCA, HGA, OA)
 ├── config/          # Pydantic-style settings
 ├── guardrails/      # 4-layer hallucination cascade

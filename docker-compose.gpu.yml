@@ -12,11 +12,11 @@ services:
               count: all
               capabilities: [gpu]
 
-  mhai:
+  intelligence:
     build:
       args:
         TORCH: cu128
-    image: mhai:cu128
+    image: mhai-intelligence:cu128
     deploy:
       resources:
         reservations:

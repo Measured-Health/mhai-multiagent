@@ -4,7 +4,7 @@
 version: 2
 updates:
   - package-ecosystem: uv
-    directory: /
+    directory: /services/intelligence
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     groups:
@@ -21,7 +21,7 @@ updates:
   # on 3.12 (requires-python), and a major Postgres or Redis upgrade needs a
   # data migration, so those are deliberate PRs, not weekly bumps.
   - package-ecosystem: docker
-    directory: /
+    directory: /services/intelligence
     schedule: { interval: weekly }
     ignore:
       - dependency-name: "python"

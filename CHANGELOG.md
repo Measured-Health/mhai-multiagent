@@ -32,6 +32,13 @@ All notable changes to this project are documented here. The format follows
   a secret scan. Tagged releases build and push the container image.
 
 ### Changed
+- **Breaking:** the services moved under `services/`. The Go service is
+  `services/core/` (module `.../mhai-multiagent/services/core`, binary
+  `core`, compose services `core-migrate`; `GATEWAY_ENV` is now `CORE_ENV`).
+  The Python package `mhai` is now `intelligence`, in
+  `services/intelligence/` with its own `pyproject.toml` and `uv.lock`; the
+  CLI is `intelligence` and the compose service `intelligence`. The NATS
+  config is in `services/nats/`.
 - **Breaking:** the package moved from `src/mhai` to `mhai`.
 - **Breaking:** a `correct` feedback returns `{correction_id, status:
   "pending_review"}`; it is applied by `approve_correction`.

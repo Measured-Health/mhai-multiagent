@@ -4,6 +4,7 @@
 - **Date:** 2026-10-26
 - **Supersedes:** 0007 (API in Python, contract-first), which was proposed on `feat/8-api-gateway` and never merged
 - **Amends:** 0008 (models behind inference services): the services are reached over NATS instead of HTTP
+- **Naming (product owner, 2026-10-27):** the Go service this ADR calls for is named the core service and lives in `services/core/`; the Python side is `services/intelligence/` (package `intelligence`), and the NATS config is in `services/nats/`. The NATS user stays `gateway`.
 
 ## Context
 
@@ -15,11 +16,11 @@ Since then, three things have changed:
 - **The frontend contract is defined.** mhai-web's two apps call a fixed contract (`docs/specs/2026-10-17-frontend-requirements.md`). Most of it is sign-in, tenancy, platform operations and EMR plumbing, not model work.
 - **The team knows Go.** Two of the three engineers already write Go.
 
-No gateway code has been written yet, so changing language now costs nothing.
+No Go API code has been written yet, so changing language now costs nothing.
 
 ## Decision
 
-- **A Go gateway** owns the API and the rules around it:
+- **The core service (Go)** owns the API and the rules around it:
   - the API, authentication, sessions, authorization and tenancy;
   - audit, and the EMR connectors and event pipeline;
   - every endpoint in the frontend contract.
@@ -29,8 +30,8 @@ No gateway code has been written yet, so changing language now costs nothing.
 - **NATS connects them, and nothing else does.**
   - Request/reply carries calls someone is waiting on.
   - JetStream carries background jobs.
-  - Each service has its own NATS credentials, and only the gateway may publish requests to the Python services.
-- **Python verifies every request before answering.** Each request carries a short-lived token signed by the gateway (EdDSA). Each Python service checks:
+  - Each service has its own NATS credentials, and only the core service (NATS user `gateway`) may publish requests to the Python services.
+- **Python verifies every request before answering.** Each request carries a short-lived token signed by the core service (EdDSA). Each Python service checks:
   - the signature;
   - the audience;
   - expiry;
@@ -46,9 +47,9 @@ The design is in `docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md`.
 ## Consequences
 
 - The team works in the language it knows for most of the backend. Python stays where the ML ecosystem is.
-- There are two languages to build, test and deploy. CI gains a Go job, and the repository holds both, with the Go code in `gateway/`.
+- There are two languages to build, test and deploy. CI gains a Go job, and the repository holds both, with the Go code in `services/core/` and the Python code in `services/intelligence/`.
 - The risk ADR 0007 avoided, two copies of the security rules, is contained differently:
   - Go is the only place rules are written;
   - Python only verifies a signed decision and checks hospital scope.
-- NATS is a new piece to run. It replaces the Redis job queue, which was a stub (`mhai/queue`). Redis stays only if a cache is needed.
+- NATS is a new piece to run. It replaces the Redis job queue, which was a stub (`services/intelligence/intelligence/queue`). Redis stays only if a cache is needed.
 - Plan 1 (inference boundary) is rewritten for NATS before it is built.

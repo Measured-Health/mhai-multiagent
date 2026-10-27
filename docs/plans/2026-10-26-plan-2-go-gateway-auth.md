@@ -1,10 +1,10 @@
-# Go gateway: foundation, sign-in, roles and tenancy (Plan 2): implementation plan
+# Core service: foundation, sign-in, roles and tenancy (Plan 2): implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Go gateway's foundation and its authentication and authorization, so mhai-web's two apps can sign in for real against it. Hospitals stay separate in the code and in the database.
+**Goal:** Build the core service's foundation and its authentication and authorization, so mhai-web's two apps can sign in for real against it. Hospitals stay separate in the code and in the database.
 
-**Architecture:** The Go service lives in `gateway/`. It owns the Postgres schema through goose migrations, talks to NATS for shared short-lived state, and serves the frontend contract's §2 and §3 auth routes under `/api/v1`. Each request runs in a transaction that sets the hospital for row-level security. The Python side is not touched, except for removing the old `init-db` schema.
+**Architecture:** The Go service lives in `services/core/`. It owns the Postgres schema through goose migrations, talks to NATS for shared short-lived state, and serves the frontend contract's §2 and §3 auth routes under `/api/v1`. Each request runs in a transaction that sets the hospital for row-level security. The Python side is not touched, except for removing the old `init-db` schema.
 
 **Tech stack:**
 - Go 1.24 and `net/http` (Go 1.22+ routing patterns)
@@ -59,7 +59,7 @@
   - `mfa_token` lasts 5 minutes with 5 attempts;
   - backup codes: 10, single use, stored hashed.
 - **Step-up:** **403 `mfa_invalid`** for a wrong code. 5 wrong codes in 15 minutes gives **429 `mfa_locked`**.
-- **Passwords:** at least 12 characters, and not on the bundled breached list (`gateway/internal/password/breached.txt.gz`, at least the top 100,000).
+- **Passwords:** at least 12 characters, and not on the bundled breached list (`services/core/internal/password/breached.txt.gz`, at least the top 100,000).
 - **Trusted device:** never skips the code for `hospital_admin`, `analyst`, `platform_admin` or `auditor`.
 - **Roles:**
   - clinical accounts: `clinician`, `hospital_admin`, `analyst` (combinable);
@@ -80,9 +80,9 @@
 ## File structure
 
 ```
-gateway/
+services/core/
   go.mod, go.sum
-  cmd/gateway/main.go           serve | migrate | hospitals create | users create
+  cmd/core/main.go              serve | migrate | hospitals create | users create
   internal/config/              env config; fails on missing or placeholder secrets
   internal/logx/                slog JSON logger with a redacting handler
   internal/db/                  pool, WithHospital / WithPlatform transactions, sqlc output
@@ -96,8 +96,9 @@ gateway/
   internal/auth/                login, lockout, sessions, MFA, terms, password change handlers
   internal/authz/               principal middleware, permission table, generators
   internal/testutil/            containers for Postgres and NATS, fixtures
-  deploy/nats/nats.conf         accounts and permissions (dev)
   openapi.yaml                  the committed contract for the routes built here
+services/nats/
+  nats.conf                     accounts and permissions (dev)
 ```
 
 ---
@@ -105,9 +106,9 @@ gateway/
 ### Task 1: The Go module, config, logging, health and CI
 
 **Files:**
-- Create: `gateway/go.mod` (module `github.com/Measured-Health/mhai-multiagent/gateway`, go 1.24)
-- Create: `gateway/cmd/gateway/main.go`, `gateway/internal/config/config.go`, `gateway/internal/logx/logx.go`, with tests beside them
-- Modify: `.github/workflows/ci.yml` (add a `gateway` job), `Makefile` (`gateway-test`, `gateway-lint`)
+- Create: `services/core/go.mod` (module `github.com/Measured-Health/mhai-multiagent/services/core`, go 1.24)
+- Create: `services/core/cmd/core/main.go`, `services/core/internal/config/config.go`, `services/core/internal/logx/logx.go`, with tests beside them
+- Modify: `.github/workflows/ci.yml` (add a `core` job), `Makefile` (`core-test`, `core-lint`)
 
 **Interfaces:**
 - Produces:
@@ -120,22 +121,22 @@ gateway/
   - `TestLoadRejectsPlaceholder`: the values `change-me`, `changeme`, `placeholder`, and any key shorter than 32 bytes, all error.
   - `TestRedactingHandler`: logging attrs named `password`, `token`, `code`, `email`, `access_token`, `refresh_token`, `mfa_token`, `backup_code` writes `"[redacted]"`. Nested group attrs are redacted too.
   - `TestHealthz`: `GET /api/v1/healthz` → 200 `{"status":"ok"}`.
-- [ ] **Step 2:** Run `cd gateway && go test ./...`. It should fail to compile.
+- [ ] **Step 2:** Run `cd services/core && go test ./...`. It should fail to compile.
 - [ ] **Step 3:** Implement `config`, `logx` (wrapping `slog.JSONHandler`) and a `serve` command with `/api/v1/healthz`.
-- [ ] **Step 4:** Add the CI `gateway` job: setup-go 1.24, `go vet ./...`, `staticcheck ./...`, `go test -race ./...`. Integration tests use the `integration` build tag, run in the same job, and the runner provides Docker.
+- [ ] **Step 4:** Add the CI `core` job: setup-go 1.24, `go vet ./...`, `staticcheck ./...`, `go test -race ./...`. Integration tests use the `integration` build tag, run in the same job, and the runner provides Docker.
 - [ ] **Step 5:** Run `go test -race ./...`. It should pass.
-- [ ] **Step 6:** Commit: "Add the Go gateway module with config, logging and health".
+- [ ] **Step 6:** Commit: "Add the Go gateway module with config, logging and health" (made before the rename).
 
 ### Task 2: The schema, database roles and row-level security
 
 **Files:**
 - Create:
-  - `gateway/internal/db/migrations/00001_core.sql`, `00002_ported.sql`, `00003_rls_roles.sql`
-  - `gateway/internal/db/db.go`
-  - `gateway/internal/testutil/pg.go`
-  - `gateway/sqlc.yaml`
+  - `services/core/internal/db/migrations/00001_core.sql`, `00002_ported.sql`, `00003_rls_roles.sql`
+  - `services/core/internal/db/db.go`
+  - `services/core/internal/testutil/pg.go`
+  - `services/core/sqlc.yaml`
 - Modify:
-  - `docker-compose.yml`: remove the `init-db/init.sql` mount, and add a `gateway-migrate` one-shot service.
+  - `docker-compose.yml`: remove the `init-db/init.sql` mount, and add a `core-migrate` one-shot service.
   - Delete `init-db/init.sql`, including its placeholder admin. Keep `init-db/seed_kb.py`, adapted to the new `kb_chunks` columns.
 
 **Interfaces:**
@@ -181,7 +182,7 @@ gateway/
   - `TestAuditAppendOnly`: `UPDATE audit_log` and `DELETE FROM audit_log` as `mhai_gateway` fail with permission denied.
   - `TestPlatformRoleNoClinical`: `SELECT` from `clinical_queries` as `mhai_platform` fails with permission denied.
 - [ ] **Step 2:** Run `go test -tags integration ./internal/db/...`. It should fail.
-- [ ] **Step 3:** Write the migrations and `db.go`. Embed the migrations with `//go:embed`, and add a `gateway migrate up` command.
+- [ ] **Step 3:** Write the migrations and `db.go`. Embed the migrations with `//go:embed`, and add a `core migrate up` command.
 - [ ] **Step 4:** Run the tests. They should pass. Run `docker compose config` to check the compose file is valid.
 - [ ] **Step 5:** Commit: "Own the schema in Go migrations with row-level security per hospital".
 
@@ -189,9 +190,9 @@ gateway/
 
 **Files:**
 - Create:
-  - `gateway/deploy/nats/nats.conf`
-  - `gateway/internal/bus/bus.go`
-  - `gateway/internal/testutil/nats.go`
+  - `services/nats/nats.conf`
+  - `services/core/internal/bus/bus.go`
+  - `services/core/internal/testutil/nats.go`
 - Modify: `docker-compose.yml` (add `nats:2.10-alpine` with JetStream, a volume and the config). Keep `redis` for now; its removal waits for the Python boundary plan.
 
 **Interfaces:**
@@ -219,8 +220,8 @@ The dev passwords come from env. Production NKeys are documented in the file's c
 
 **Files:**
 - Create:
-  - `gateway/internal/httpx/{router.go,errors.go,requestid.go,bff.go,idempotency.go}`
-  - `gateway/internal/audit/audit.go`
+  - `services/core/internal/httpx/{router.go,errors.go,requestid.go,bff.go,idempotency.go}`
+  - `services/core/internal/audit/audit.go`
   - tests beside them
 
 **Interfaces:**
@@ -252,9 +253,9 @@ The dev passwords come from env. Production NKeys are documented in the file's c
 
 **Files:**
 - Create:
-  - `gateway/internal/password/{argon.go,policy.go,breached.go,breached.txt.gz}`
-  - `gateway/internal/db/queries/users.sql`
-  - `gateway/cmd/gateway/seed.go`
+  - `services/core/internal/password/{argon.go,policy.go,breached.go,breached.txt.gz}`
+  - `services/core/internal/db/queries/users.sql`
+  - `services/core/cmd/core/seed.go`
   - tests beside them
 
 **Interfaces:**
@@ -265,8 +266,8 @@ The dev passwords come from env. Production NKeys are documented in the file's c
   - `password.Check(pw string) error`: returns `ErrTooShort` or `ErrBreached`, which map to 422 `weak_password`.
   - `NormaliseEmail(s string) string`: trim, then lowercase.
   - CLI:
-    - `gateway hospitals create --name --short-code --time-zone [--require-mfa-for-clinicians] [--allow-trust-device]`
-    - `gateway users create --email --name --roles clinician,hospital_admin [--hospital SHORTCODE]`. It prompts for the password and never takes it as an argument. It sets `must_change_password=true`.
+    - `core hospitals create --name --short-code --time-zone [--require-mfa-for-clinicians] [--allow-trust-device]`
+    - `core users create --email --name --roles clinician,hospital_admin [--hospital SHORTCODE]`. It prompts for the password and never takes it as an argument. It sets `must_change_password=true`.
 
 - [ ] **Step 1: Write the failing tests.**
   - `TestHashVerifyRoundTrip`.
@@ -286,9 +287,9 @@ The dev passwords come from env. Production NKeys are documented in the file's c
 
 **Files:**
 - Create:
-  - `gateway/internal/token/{access.go,refresh.go}`
-  - `gateway/internal/auth/{login.go,refresh.go,logout.go,sessions.go,terms.go,user.go}`
-  - `gateway/internal/db/queries/auth.sql`
+  - `services/core/internal/token/{access.go,refresh.go}`
+  - `services/core/internal/auth/{login.go,refresh.go,logout.go,sessions.go,terms.go,user.go}`
+  - `services/core/internal/db/queries/auth.sql`
   - tests beside them
 
 **Interfaces:**
@@ -339,8 +340,8 @@ The dev passwords come from env. Production NKeys are documented in the file's c
 
 **Files:**
 - Create:
-  - `gateway/internal/auth/{mfa.go,stepup.go,password.go}`
-  - `gateway/internal/db/queries/mfa.sql`
+  - `services/core/internal/auth/{mfa.go,stepup.go,password.go}`
+  - `services/core/internal/db/queries/mfa.sql`
   - tests beside them
 
 **Interfaces:**
@@ -385,11 +386,11 @@ The dev passwords come from env. Production NKeys are documented in the file's c
 
 **Files:**
 - Create:
-  - `gateway/internal/authz/{principal.go,permissions.go,generate.go}`
-  - `gateway/cmd/permgen/main.go`
-  - generated: `docs/specs/generated/permissions.md` and `mhai/security/permissions.json`
+  - `services/core/internal/authz/{principal.go,permissions.go,generate.go}`
+  - `services/core/cmd/permgen/main.go`
+  - generated: `docs/specs/generated/permissions.md` and `services/intelligence/intelligence/security/permissions.json`
   - tests beside them
-- Modify: `gateway/internal/httpx/router.go`. Every route registers through `authz.Route`.
+- Modify: `services/core/internal/httpx/router.go`. Every route registers through `authz.Route`.
 
 **Interfaces:**
 - Consumes: `token.Verify`, the denylist, `db.With*`.
@@ -429,21 +430,21 @@ The dev passwords come from env. Production NKeys are documented in the file's c
 
 **Files:**
 - Create:
-  - `gateway/openapi.yaml`, covering every route built in Tasks 6–7, with the exact shapes and error codes;
-  - `gateway/README.md`, with commands, env, the seed CLI and a key-generation helper (`gateway keys new`);
-  - a contract test `gateway/internal/auth/contract_test.go`.
+  - `services/core/openapi.yaml`, covering every route built in Tasks 6–7, with the exact shapes and error codes;
+  - `services/core/README.md`, with commands, env, the seed CLI and a key-generation helper (`core keys new`);
+  - a contract test `services/core/internal/auth/contract_test.go`.
 - Modify:
-  - `docker-compose.yml`: add a `gateway` service, using the `gateway-migrate` dependency, NATS, Postgres and the config from `.env`;
-  - `.env.example`: the gateway variables, with placeholders that `config` rejects;
+  - `docker-compose.yml`: add a `core` service, using the `core-migrate` dependency, NATS, Postgres and the config from `.env`;
+  - `.env.example`: the core service variables, with placeholders that `config` rejects;
   - `CHANGELOG.md`;
   - `docs/specs/2026-10-17-frontend-requirements.md` §2: mark the routes built here as **Built (Plan 2)**.
 
 - [ ] **Step 1: Write the failing test** `TestOpenAPIMatchesHandlers`. For every route in `authz.Table()` there's a path and method in `openapi.yaml`, and the reverse. Each documented error code is in `httpx.Codes`.
 - [ ] **Step 2:** Run the test. It should fail.
 - [ ] **Step 3:** Write the spec, the README and the compose service.
-- [ ] **Step 4:** Run `docker compose up -d postgres nats gateway-migrate gateway`. Then use the CLI to seed a synthetic hospital `HAV` and a clinician, and run `curl` against `/api/v1/auth/login` with the BFF key. Expected: 200 with `access_token`. Record the transcript in the PR, with no secrets.
+- [ ] **Step 4:** Run `docker compose up -d postgres nats core-migrate core`. Then use the CLI to seed a synthetic hospital `HAV` and a clinician, and run `curl` against `/api/v1/auth/login` with the BFF key. Expected: 200 with `access_token`. Record the transcript in the PR, with no secrets.
 - [ ] **Step 5:** Run the full suite: `go test -race -tags integration ./...`, plus `uv run pytest -q`, to check the Python side still passes after `init.sql` was removed.
-- [ ] **Step 6:** Commit: "Commit the auth contract, run the gateway in compose and document it".
+- [ ] **Step 6:** Commit: "Commit the auth contract, run the core service in compose and document it".
 
 ---
 
@@ -453,7 +454,7 @@ The dev passwords come from env. Production NKeys are documented in the file's c
 - **The Python boundary over NATS:** token verification in workers, replacing `RBACManager` and `AuditLogger`, and removing Redis (design §5, §7.5; step 4).
 - **SSO:** design §6.6.
 - **The contract endpoints:** staff, settings, queries, and everything after them.
-- **mhai-web's BFF:** switching it to live mode against this gateway. This is a mhai-web plan. It needs `refresh_token` handling and the `X-MHAI-Service` key.
+- **mhai-web's BFF:** switching it to live mode against this core service. This is a mhai-web plan. It needs `refresh_token` handling and the `X-MHAI-Service` key.
 
 ## Self-review notes
 

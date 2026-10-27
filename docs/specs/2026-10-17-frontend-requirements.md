@@ -17,7 +17,7 @@
 
 ## 1. Purpose
 
-The backend is now a Go gateway plus Python model services (ADR 0010).
+The backend is now the core service (Go) plus Python model services (ADR 0010).
 
 The clinical app (`mhai-web`) is being built ahead of the API. Where an
 endpoint doesn't exist yet, the frontend calls an assumed shape. This
