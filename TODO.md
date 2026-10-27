@@ -2,11 +2,21 @@
 
 Open work and decisions for mhai-multiagent. Remove an entry once it's done or decided.
 
+## Decided
+
+- **Go alongside Python.** A Go gateway owns the API, auth, tenancy, audit and EMR plumbing. The Python services keep the models and are reached only over NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md).
+
+## Open items for the Go gateway
+
+From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md):
+
+- **Mail provider** for invites and password resets. Needed in step 2 (authentication). AWS SES is the suggestion.
+- **Scale assumption.** Sizing assumes up to about 50 hospitals and 5,000 staff accounts in the first year. Correct it if talks suggest more.
+- **Data Protection Act check** before go-live: data processing agreements with each hospital, and where data is stored. Needs someone qualified.
+
 ## Under consideration
 
 - **Fast intelligence service (parked 27 Oct, product owner).** Serve the models on a rented cloud GPU, aiming for millisecond steps and a checked answer in about 3 s instead of 8–30 s. The approach: vLLM, compiled small models, streaming, FP8 and speculative decoding. The draft design, with the questions to answer first, is in `docs/specs/2026-10-27-intelligence-performance-design.md`. It needs the Python-over-NATS boundary in place, plus a GPU budget (about $1,400 a month for one L40S) and clinical sign-off for FP8 and streaming.
-
-- **Go alongside Python.** We are considering using Go together with Python in this service. Nothing is decided yet, including which parts would move to Go. Any change needs an ADR in `docs/adr/` first.
 
 ## Backend contracts the frontend uses on sample data
 

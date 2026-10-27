@@ -17,6 +17,8 @@
 
 ## 1. Purpose
 
+The backend is now a Go gateway plus Python model services (ADR 0010).
+
 The clinical app (`mhai-web`) is being built ahead of the API. Where an
 endpoint doesn't exist yet, the frontend calls an assumed shape. This
 document lists everything it needs, grouped by area, so the backend can
@@ -61,6 +63,10 @@ sliding refresh fits this). The backend needs nothing extra, except:
   the BFF's address. Login lockout keys on (login name, client IP), so the
   BFF must pass the client IP, and the API must trust that header only
   from the BFF.
+- Login and the two-step challenge also return a `refresh_token`, for the
+  BFF only; it is never sent on to the browser. The BFF refreshes with
+  `POST /auth/refresh {refresh_token}` (§2.2). **New (design 2026-10-26
+  §6.3).**
 
 ### 2.2 Sign-in
 
@@ -69,6 +75,8 @@ sliding refresh fits this). The backend needs nothing extra, except:
 | Login | `POST /auth/login {username, password, device_token?}` → `{access_token, expires_in, user}` or `{mfa_required: true, mfa_token}` | Gateway + change |
 | Work email as login name | accept an email in `username` (or rename the field) | New |
 | Login `user` | `id`, `role` (primary), **`roles`** (all), `email`, `display_name`, `full_name`, `role_title`, `specialty`, `hospital`, `mfa_enabled`, `must_change_password`, `terms_accepted_at`, `recovery_codes_left`, `idle_timeout_minutes`, `review_overdue_hours` | Assumed |
+| Login `refresh_token` | login and the two-step challenge also return `refresh_token`, for the BFF only (never sent to the browser) | **New (design 2026-10-26 §6.3)** |
+| Refresh | `POST /auth/refresh {refresh_token}` → `{access_token, expires_in, refresh_token}`; the refresh token rotates on every use, reusing an old one more than 10 seconds after its rotation revokes the whole refresh-token family (that device's session); within 10 seconds it returns 409 `conflict` and revokes nothing, so the BFF retries with its newer token | **New (design 2026-10-26 §6.3)** |
 | Accept terms | `POST /auth/terms {version}` → 204; records version and time | Assumed |
 | Lockout | the same `login_locked` (429) reply for an unknown login as for a locked one, so it can't reveal which accounts exist | Gateway + change |
 
@@ -86,9 +94,8 @@ Until `idle_timeout_minutes` and `review_overdue_hours` exist, the app uses
 | Per-hospital policy | `require_mfa_for_clinicians` (hospital setting); hospital admins, platform admins and auditors always need it | New |
 | Trust this device | `device_token` bound to the user it was issued to, refused for anyone else; allowed only when the hospital setting `allow_trust_device` is on | Assumed |
 
-Open question for the backend: whether a trusted device may skip the code
-for a user who holds `hospital_admin`. The frontend docs don't say. We
-suggest it may not.
+Answered (design 2026-10-26 §6.4): a trusted device never skips the code
+for `hospital_admin`, `analyst`, `platform_admin` or `auditor`.
 
 ### 2.4 Single sign-on (OIDC)
 
@@ -665,6 +672,10 @@ frontend:
 ## 13. Conflicts with the gateway design
 
 Each needs a decision, then an update to the gateway spec or this list.
+
+Decided (design 2026-10-26 §8a): where the two contracts disagree, the
+frontend contract wins. For example, `mfa_required` and `mfa_invalid`
+return 403 (item 3).
 
 1. **One role or many:** the gateway has one `role` per user and JWT; the
    frontend needs `roles` and combinable `clinician`, `hospital_admin`
