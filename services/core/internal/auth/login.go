@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -42,6 +41,9 @@ type loginResponse struct {
 	ExpiresIn    int      `json:"expires_in"`
 	RefreshToken string   `json:"refresh_token"`
 	User         userView `json:"user"`
+	// DeviceToken is set only by the two-step challenge, when the caller
+	// asked to trust the device and the account may (see trustDevice).
+	DeviceToken string `json:"device_token,omitempty"`
 }
 
 type mfaResponse struct {
@@ -208,6 +210,13 @@ func (s *Service) mfaPending(w http.ResponseWriter, r *http.Request, acct *acctR
 // runs in the same transaction. Task 7's challenge finishes through here.
 func (s *Service) startSession(w http.ResponseWriter, r *http.Request, acct *acctRec, mfa bool, amr []string,
 	extra func(context.Context, pgx.Tx) error) {
+	s.startSessionDevice(w, r, acct, mfa, amr, extra, "")
+}
+
+// startSessionDevice is startSession that also returns deviceToken (stored
+// by extra) in the reply.
+func (s *Service) startSessionDevice(w http.ResponseWriter, r *http.Request, acct *acctRec, mfa bool, amr []string,
+	extra func(context.Context, pgx.Tx) error, deviceToken string) {
 	ctx := r.Context()
 	now := s.now()
 	sid, jti := uuid.New(), uuid.New()
@@ -245,7 +254,7 @@ func (s *Service) startSession(w http.ResponseWriter, r *http.Request, acct *acc
 		return
 	}
 	httpx.JSON(w, http.StatusOK, loginResponse{AccessToken: access, ExpiresIn: int(token.AccessTTL / time.Second),
-		RefreshToken: refresh, User: acct.view()})
+		RefreshToken: refresh, User: acct.view(), DeviceToken: deviceToken})
 }
 
 func (s *Service) maybeRehash(ctx context.Context, tx pgx.Tx, id uuid.UUID, pw string, rehash bool) error {
@@ -296,35 +305,7 @@ func (s *Service) auditOnly(_ http.ResponseWriter, r *http.Request, action, acto
 // last write, so locked requests must not extend it). An error (KV failure,
 // or contention that outlasts the retries) means the caller must fail closed.
 func (s *Service) reserveAttempt(ctx context.Context, key string) (locked bool, err error) {
-	kv := s.Buckets.LoginAttempts
-	for i := 0; i < 16; i++ {
-		e, err := kv.Get(ctx, key)
-		if bus.IsNotFound(err) {
-			_, err := kv.Create(ctx, key, []byte("1"))
-			if err == nil {
-				return false, nil
-			}
-			if !errors.Is(err, jetstream.ErrKeyExists) && !isRevisionConflict(err) {
-				return false, err
-			}
-			continue
-		}
-		if err != nil {
-			return false, err
-		}
-		n, err := strconv.Atoi(string(e.Value()))
-		if err != nil || n >= MaxLoginFailures {
-			return true, nil // an unreadable counter counts as locked
-		}
-		_, err = kv.Update(ctx, key, []byte(strconv.Itoa(n+1)), e.Revision())
-		if err == nil {
-			return false, nil
-		}
-		if !isRevisionConflict(err) {
-			return false, err
-		}
-	}
-	return false, errors.New("auth: login attempts contention")
+	return reserveIn(ctx, s.Buckets.LoginAttempts, key, MaxLoginFailures)
 }
 
 // isRevisionConflict reports a lost compare-and-set (another writer won).

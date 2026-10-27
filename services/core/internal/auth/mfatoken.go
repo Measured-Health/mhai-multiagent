@@ -125,3 +125,14 @@ func (m *MFATokens) Consume(ctx context.Context, tok string) (MFAToken, error) {
 	}
 	return rec, nil
 }
+
+// Exhausted reports whether tok is a live token with no attempts left (its
+// holder gets mfa_locked rather than mfa_invalid), with its record. Any
+// error reads as no.
+func (m *MFATokens) Exhausted(ctx context.Context, tok string) (MFAToken, bool) {
+	rec, _, err := m.get(ctx, tok, 0)
+	if err != nil || rec.AttemptsLeft != 0 {
+		return MFAToken{}, false
+	}
+	return rec, true
+}

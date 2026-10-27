@@ -9,7 +9,7 @@ SELECT u.id, u.hospital_id, u.email, u.password_hash, u.display_name, u.full_nam
        h.name, h.status,
        COALESCE(hs.idle_timeout_minutes, 15), COALESCE(hs.review_overdue_hours, 4),
        COALESCE(hs.require_mfa_for_clinicians, true), COALESCE(hs.allow_trust_device, false),
-       COALESCE(m.enabled, false), COALESCE(cardinality(m.backup_code_hashes), 0),
+       COALESCE(m.enabled, false), CASE WHEN m.enabled THEN cardinality(m.backup_code_hashes) ELSE 0 END,
        ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id)
 FROM users u
 LEFT JOIN hospitals h          ON h.id = u.hospital_id

@@ -34,6 +34,8 @@ import (
 
 const serviceKey = "test-only-bff-service-key-0123456789abcdef"
 
+const testMFAKey = "test-only-mfa-key-0123456789abcdef0123456789"
+
 // testPassword is synthetic; it is inserted as a hash directly, not
 // through the policy.
 const testPassword = "violet-harbour-lantern-0731"
@@ -137,6 +139,7 @@ func newEnv(t *testing.T) *env {
 		Keys:    issuer.PublicKeys(),
 		Log:     logx.New(e.logs),
 		Now:     e.clock.Now,
+		MFAKey:  []byte(testMFAKey),
 	}
 	rt := httpx.NewRouter()
 	e.svc.Register(rt)
