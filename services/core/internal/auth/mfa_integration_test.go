@@ -75,11 +75,16 @@ func secretFromURI(t *testing.T, uri string) []byte {
 
 func (e *env) challenge(t *testing.T, mfaToken, code string, trust bool) resp {
 	t.Helper()
+	return e.challengeAt(t, mfaToken, code, trust, false)
+}
+
+func (e *env) challengeAt(t *testing.T, mfaToken, code string, trust, platform bool) resp {
+	t.Helper()
 	body := map[string]any{"mfa_token": mfaToken, "code": code}
 	if trust {
 		body["trust_device"] = true
 	}
-	return e.do(t, req{method: "POST", path: "/auth/mfa/challenge", body: body, ip: newIP()})
+	return e.do(t, req{method: "POST", path: "/auth/mfa/challenge", body: body, ip: newIP(), platform: platform})
 }
 
 // mfaToken signs in and expects the two-step branch.
@@ -513,20 +518,22 @@ func TestTrustedDeviceSkipsForClinician(t *testing.T) {
 func TestTrustedDeviceNeverSkipsForAdmin(t *testing.T) {
 	e := newEnv(t)
 	hid := seedHospital(t, hospitalOpts{requireMFAClinicians: true, allowTrust: true})
-	u, dev := e.trustedClinician(t, hid)
-	// The clinician becomes a hospital admin: the device no longer counts.
-	if _, err := super.Exec(context.Background(), `INSERT INTO user_roles (user_id, role) VALUES ($1, 'hospital_admin')`, u.id); err != nil {
-		t.Fatal(err)
-	}
-	r := e.loginDevice(t, u.email, dev)
-	if r.code != 200 || r.body["mfa_required"] != true || r.body["access_token"] != nil {
-		t.Fatalf("hospital_admin with a device: %d %s", r.code, r.raw)
-	}
-	// And a device row seeded for an admin directly doesn't count either.
-	adm := seedUser(t, hid, true, "hospital_admin")
-	r = e.loginDevice(t, adm.email, seedDevice(t, adm.id, time.Now().Add(time.Hour)))
-	if r.body["mfa_required"] != true {
-		t.Fatalf("seeded admin device: %d %s", r.code, r.raw)
+	for _, role := range []string{"hospital_admin", "analyst"} {
+		u, dev := e.trustedClinician(t, hid)
+		// The clinician gains the role: the device no longer counts.
+		if _, err := super.Exec(context.Background(), `INSERT INTO user_roles (user_id, role) VALUES ($1, $2)`, u.id, role); err != nil {
+			t.Fatal(err)
+		}
+		r := e.loginDevice(t, u.email, dev)
+		if r.code != 200 || r.body["mfa_required"] != true || r.body["access_token"] != nil {
+			t.Fatalf("%s with a device: %d %s", role, r.code, r.raw)
+		}
+		// And a device row seeded for such an account directly doesn't count either.
+		adm := seedUser(t, hid, true, role)
+		r = e.loginDevice(t, adm.email, seedDevice(t, adm.id, time.Now().Add(time.Hour)))
+		if r.body["mfa_required"] != true {
+			t.Fatalf("seeded %s device: %d %s", role, r.code, r.raw)
+		}
 	}
 }
 
@@ -836,4 +843,139 @@ func TestMFANoCredentialsInLogs(t *testing.T) {
 			t.Fatalf("lockout logs contain a credential:\n%s", out)
 		}
 	}
+}
+
+// --- fix round 1 ----------------------------------------------------------------
+
+// A clinician who turned two-step on is always challenged, even where the
+// hospital doesn't require it, and a trusted device skips the code only
+// where the hospital allows trusted devices.
+func TestMFAEnabledAlwaysChallenged(t *testing.T) {
+	e := newEnv(t)
+	for _, allowTrust := range []bool{false, true} {
+		hid := seedHospital(t, hospitalOpts{requireMFAClinicians: false, allowTrust: allowTrust})
+		u := seedUser(t, hid, false, "clinician")
+		l := e.login(t, u.email, testPassword, newIP())
+		other := e.login(t, u.email, testPassword, newIP())
+		if l.code != 200 || l.body["access_token"] == nil || other.code != 200 {
+			t.Fatalf("voluntary clinician before enrolment: %d %s", l.code, l.raw)
+		}
+		at := l.body["access_token"].(string)
+		en := e.do(t, req{method: "POST", path: "/auth/mfa/enroll", bearer: at})
+		if en.code != 200 {
+			t.Fatalf("enroll %d %s", en.code, en.raw)
+		}
+		secret := secretFromURI(t, en.body["otpauth_uri"].(string))
+		if v := e.do(t, req{method: "POST", path: "/auth/mfa/verify", bearer: at,
+			body: map[string]any{"code": totpAt(secret, e.clock.Now())}}); v.code != 204 {
+			t.Fatalf("verify %d %s", v.code, v.raw)
+		}
+		e.clock.Add(30 * time.Second)
+
+		// The password alone no longer opens a session.
+		tok := e.mfaToken(t, u)
+		r := e.challenge(t, tok, totpAt(secret, e.clock.Now()), false)
+		c, _ := token.VerifyAt(fmt.Sprint(r.body["access_token"]), issuer.PublicKeys(), e.clock.Now())
+		if r.code != 200 || !c.MFA || strings.Join(c.AMR, ",") != "pwd,otp" {
+			t.Fatalf("challenge: %d %s", r.code, r.raw)
+		}
+		e.clock.Add(30 * time.Second)
+		// A session opened before two-step was on can't be refreshed into a
+		// full token, and its access token is refused.
+		if rf := e.refresh(t, other.body["refresh_token"].(string)); rf.code != 401 {
+			t.Fatalf("pre-enrolment session refresh: %d %s", rf.code, rf.raw)
+		}
+		// A trusted device skips the code only where the hospital allows it.
+		dr := e.loginDevice(t, u.email, seedDevice(t, u.id, time.Now().Add(time.Hour)))
+		if allowTrust {
+			if dr.code != 200 || dr.body["access_token"] == nil {
+				t.Fatalf("device, trust on: %d %s", dr.code, dr.raw)
+			}
+		} else if dr.code != 200 || dr.body["mfa_required"] != true || dr.body["access_token"] != nil {
+			t.Fatalf("device, trust off: %d %s", dr.code, dr.raw)
+		}
+	}
+	// An old mfa=false access token of an account now enrolled is refused.
+	hid := seedHospital(t, hospitalOpts{})
+	u := seedUser(t, hid, false, "clinician")
+	l := e.login(t, u.email, testPassword, newIP())
+	_, _ = super.Exec(context.Background(), `INSERT INTO user_mfa (user_id, secret_enc, enabled) VALUES ($1, '\x00', true)`, u.id)
+	mustCode(t, "mfa=false token after enabling", e.do(t, req{method: "GET", path: "/probe", bearer: l.body["access_token"].(string)}),
+		403, "mfa_required")
+}
+
+// A password change voids mfa_tokens issued before it, enrolled or not.
+func TestPasswordChangeVoidsPendingMFAToken(t *testing.T) {
+	e := newEnv(t)
+	const newPW = "tangerine-orbit-77-quill"
+
+	// Enrolled account.
+	u := admin(t)
+	en := e.enrol(t, u)
+	pending := e.mfaToken(t, u)
+	at := e.fullSession(t, u, en).body["access_token"].(string)
+	if r := e.do(t, req{method: "POST", path: "/auth/password", bearer: at,
+		body: map[string]any{"current_password": testPassword, "new_password": newPW}}); r.code != 204 {
+		t.Fatalf("change: %d %s", r.code, r.raw)
+	}
+	mustCode(t, "enrolled, token from before the change", e.challenge(t, pending, totpAt(en.secret, e.clock.Now()), false),
+		403, "mfa_invalid")
+
+	// Unenrolled account: no limited session for the old token.
+	v := admin(t)
+	stale := e.mfaToken(t, v)
+	lim := e.limitedSession(t, v).body["access_token"].(string)
+	if r := e.do(t, req{method: "POST", path: "/auth/password", bearer: lim,
+		body: map[string]any{"current_password": testPassword, "new_password": newPW}}); r.code != 204 {
+		t.Fatalf("change from limited session: %d %s", r.code, r.raw)
+	}
+	mustCode(t, "unenrolled, token from before the change", e.challenge(t, stale, "", false), 403, "mfa_invalid")
+	// A token issued after the change works.
+	r := e.login(t, v.email, newPW, newIP())
+	if c := e.challenge(t, fmt.Sprint(r.body["mfa_token"]), "", false); c.code != 200 {
+		t.Fatalf("fresh token: %d %s", c.code, c.raw)
+	}
+}
+
+// An mfa_token is redeemable only through the audience it was issued on.
+func TestChallengeChecksAudience(t *testing.T) {
+	e := newEnv(t)
+	p := seedUser(t, uuid.Nil, false, "platform_admin")
+	l := e.do(t, req{method: "POST", path: "/auth/login", platform: true, ip: newIP(),
+		body: map[string]any{"username": p.email, "password": testPassword}})
+	ptok, _ := l.body["mfa_token"].(string)
+	if l.code != 200 || ptok == "" {
+		t.Fatalf("platform login: %d %s", l.code, l.raw)
+	}
+	mustCode(t, "platform token, clinical audience", e.challengeAt(t, ptok, "", false, false), 403, "mfa_invalid")
+
+	ctok := e.mfaToken(t, admin(t))
+	mustCode(t, "clinical token, platform audience", e.challengeAt(t, ctok, "", false, true), 403, "mfa_invalid")
+
+	// Not consumed by the refused tries: the right audience still works.
+	if r := e.challengeAt(t, ptok, "", false, true); r.code != 200 {
+		t.Fatalf("platform token, platform audience: %d %s", r.code, r.raw)
+	}
+	if r := e.challengeAt(t, ctok, "", false, false); r.code != 200 {
+		t.Fatalf("clinical token, clinical audience: %d %s", r.code, r.raw)
+	}
+	// (A role change across the platform/clinical line between login and
+	// challenge can't happen: the user_roles check constraint refuses
+	// platform roles on an account with a hospital and the reverse.)
+}
+
+// Wrong codes at verify count toward the same per-account lock as the
+// challenge.
+func TestMFALockSpansVerifyAndChallenge(t *testing.T) {
+	e := newEnv(t)
+	u := admin(t)
+	en := e.enrol(t, u)
+	at := e.fullSession(t, u, en).body["access_token"].(string)
+	bad := wrongCode(en.secret, e.clock.Now())
+	for i := 0; i < 5; i++ {
+		mustCode(t, "verify wrong", e.do(t, req{method: "POST", path: "/auth/mfa/verify", bearer: at, body: map[string]any{"code": bad}}),
+			403, "mfa_invalid")
+	}
+	mustCode(t, "challenge after five wrong verifies", e.challenge(t, e.mfaToken(t, u), totpAt(en.secret, e.clock.Now()), false),
+		429, "mfa_locked")
 }

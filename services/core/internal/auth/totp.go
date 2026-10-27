@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1" //nolint:gosec // RFC 6238 TOTP uses HMAC-SHA1; authenticator apps expect it
@@ -83,29 +84,31 @@ func matchTOTP(secret []byte, code string, now int64, lastUsed *int64) (int64, b
 var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // mfaKeys holds the keys derived from Config.MFAKey: one for sealing TOTP
-// secrets (AES-256-GCM) and one for hashing backup codes (HMAC-SHA256).
+// secrets (AES-256-GCM), one for hashing backup codes (HMAC-SHA256) and one
+// for password-hash fingerprints in mfa_tokens (HMAC-SHA256).
 type mfaKeys struct {
 	aead    cipher.AEAD
 	backupK []byte
+	pwK     []byte
 }
 
 // errMFAKey means the service has no usable MFA key; callers fail closed.
 var errMFAKey = errors.New("auth: mfa key not configured")
 
-// newMFAKeys derives the two keys from the configured secret (at least 32
-// bytes). Separate SHA-256 derivations with fixed labels keep the keys
-// independent of each other.
+// newMFAKeys derives the keys from the configured secret (at least 32
+// bytes) with HKDF-SHA256, one info label per key.
 func newMFAKeys(master []byte) (*mfaKeys, error) {
 	if len(master) < minMFAKeyLen {
 		return nil, errMFAKey
 	}
-	derive := func(label string) []byte {
-		h := sha256.New()
-		h.Write([]byte(label))
-		h.Write(master)
-		return h.Sum(nil)
+	derive := func(label string) ([]byte, error) { return hkdf.Key(sha256.New, master, nil, label, 32) }
+	sealK, err1 := derive("mhai-mfa-secret-seal-v1")
+	backupK, err2 := derive("mhai-mfa-backup-hmac-v1")
+	pwK, err3 := derive("mhai-mfa-pwgen-hmac-v1")
+	if err1 != nil || err2 != nil || err3 != nil {
+		return nil, errMFAKey
 	}
-	block, err := aes.NewCipher(derive("mhai-mfa-secret-seal-v1\x00"))
+	block, err := aes.NewCipher(sealK)
 	if err != nil {
 		return nil, errMFAKey
 	}
@@ -113,29 +116,48 @@ func newMFAKeys(master []byte) (*mfaKeys, error) {
 	if err != nil {
 		return nil, errMFAKey
 	}
-	return &mfaKeys{aead: aead, backupK: derive("mhai-mfa-backup-hmac-v1\x00")}, nil
+	return &mfaKeys{aead: aead, backupK: backupK, pwK: pwK}, nil
 }
 
-// seal encrypts a TOTP secret: nonce (12 bytes) || ciphertext || tag.
-func (k *mfaKeys) seal(secret []byte) ([]byte, error) {
+// sealAAD binds a sealed secret to its row: a secret_enc copied into
+// another user's row doesn't open.
+func sealAAD(userID string) []byte { return []byte("user_mfa.secret_enc|" + userID) }
+
+// seal encrypts userID's TOTP secret: nonce (12 bytes) || ciphertext || tag.
+func (k *mfaKeys) seal(userID string, secret []byte) ([]byte, error) {
 	nonce := make([]byte, k.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, errors.New("auth: no randomness")
 	}
-	return k.aead.Seal(nonce, nonce, secret, []byte("user_mfa.secret_enc")), nil
+	return k.aead.Seal(nonce, nonce, secret, sealAAD(userID)), nil
 }
 
-// open decrypts what seal produced. A wrong key or tampered value fails.
-func (k *mfaKeys) open(sealed []byte) ([]byte, error) {
+// open decrypts what seal produced for userID. A wrong key, another user's
+// row or a tampered value fails.
+func (k *mfaKeys) open(userID string, sealed []byte) ([]byte, error) {
 	n := k.aead.NonceSize()
 	if len(sealed) < n+k.aead.Overhead() {
 		return nil, errors.New("auth: sealed secret too short")
 	}
-	out, err := k.aead.Open(nil, sealed[:n], sealed[n:], []byte("user_mfa.secret_enc"))
+	out, err := k.aead.Open(nil, sealed[:n], sealed[n:], sealAAD(userID))
 	if err != nil {
 		return nil, errors.New("auth: sealed secret does not open")
 	}
 	return out, nil
+}
+
+// pwFingerprint is hex(HMAC-SHA256(key, password hash)), kept in an
+// mfa_token so a password change in between voids it, without the token
+// store holding the hash itself. A missing hash has its own fingerprint.
+func (k *mfaKeys) pwFingerprint(hash *string) string {
+	m := hmac.New(sha256.New, k.pwK)
+	if hash == nil {
+		m.Write([]byte{0})
+	} else {
+		m.Write([]byte{1})
+		m.Write([]byte(*hash))
+	}
+	return hex.EncodeToString(m.Sum(nil))
 }
 
 // backupAlphabet has no 0/o, 1/l/i, so codes read back cleanly.

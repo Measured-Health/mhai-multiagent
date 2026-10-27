@@ -158,10 +158,10 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 
 	rehash := password.NeedsRehash(*acct.PasswordHash)
 	mfa, amr := false, []string{"pwd"}
-	if !sessionSatisfiesMFA(acct.Roles, acct.policy(), mfa, amr) {
-		// A trusted device may stand in for the code only where the shared
-		// check accepts it (clinician-only account, hospital allows it).
-		if in.DeviceToken != "" && sessionSatisfiesMFA(acct.Roles, acct.policy(), true, []string{"pwd", "device"}) {
+	if needsCode(acct.Roles, acct.policy(), acct.MFAEnabled) {
+		// A trusted device may stand in for the code only where the hospital
+		// allows trusted devices and no role forbids them.
+		if in.DeviceToken != "" && deviceMayStandIn(acct.Roles, acct.policy()) {
 			trusted, err := s.trustedDevice(ctx, acct.ID, in.DeviceToken)
 			if err != nil {
 				s.fail(w, r, "internal_error", "auth: trusted device lookup failed", "user_id", actor)
@@ -171,8 +171,8 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 				mfa, amr = true, []string{"pwd", "device"}
 			}
 		}
-		if !sessionSatisfiesMFA(acct.Roles, acct.policy(), mfa, amr) {
-			s.mfaPending(w, r, acct, in.Password, rehash)
+		if !mfa {
+			s.mfaPending(w, r, acct, in.Password, rehash, platform)
 			return
 		}
 	}
@@ -183,23 +183,37 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 
 // mfaPending answers the two-step branch: a short-lived single-use
 // mfa_token and no access token. No session exists until the challenge.
-func (s *Service) mfaPending(w http.ResponseWriter, r *http.Request, acct *acctRec, pw string, rehash bool) {
+// The token records the audience and a fingerprint of the password hash
+// (after any rehash), so the challenge refuses it on the other audience or
+// after a password change.
+func (s *Service) mfaPending(w http.ResponseWriter, r *http.Request, acct *acctRec, pw string, rehash, platform bool) {
 	ctx := r.Context()
-	tok, err := s.MFATokens().Issue(ctx, MFAToken{UserID: acct.ID.String(), Enrolled: acct.MFAEnabled,
-		DeviceAllowed: acct.AllowTrustDevice && deviceMaySkip(acct.Roles)})
+	keys, err := s.mfaKeys()
 	if err != nil {
-		s.fail(w, r, "not_ready", "auth: mfa token store failed", "user_id", acct.ID.String())
+		s.fail(w, r, "not_ready", "auth: mfa key not configured", "user_id", acct.ID.String())
 		return
 	}
+	hash := acct.PasswordHash
 	err = s.withAuth(ctx, func(tx pgx.Tx) error {
-		if err := s.maybeRehash(ctx, tx, acct.ID, pw, rehash); err != nil {
+		h, err := s.rehash(ctx, tx, acct.ID, pw, rehash)
+		if err != nil {
 			return err
+		}
+		if h != "" {
+			hash = &h
 		}
 		return writeAudit(ctx, tx, r, "auth.login.succeeded", acct.ID.String(), acct.hospitalID(), "user", acct.ID.String(),
 			map[string]any{"mfa_required": true})
 	})
 	if err != nil {
 		s.fail(w, r, "internal_error", "auth: login audit failed", "user_id", acct.ID.String())
+		return
+	}
+	tok, err := s.MFATokens().Issue(ctx, MFAToken{UserID: acct.ID.String(), Enrolled: acct.MFAEnabled,
+		DeviceAllowed: deviceMayStandIn(acct.Roles, acct.policy()), Platform: platform,
+		PwGen: keys.pwFingerprint(hash)})
+	if err != nil {
+		s.fail(w, r, "not_ready", "auth: mfa token store failed", "user_id", acct.ID.String())
 		return
 	}
 	httpx.JSON(w, http.StatusOK, mfaResponse{MFARequired: true, MFAToken: tok})
@@ -258,17 +272,23 @@ func (s *Service) startSessionDevice(w http.ResponseWriter, r *http.Request, acc
 }
 
 func (s *Service) maybeRehash(ctx context.Context, tx pgx.Tx, id uuid.UUID, pw string, rehash bool) error {
+	_, err := s.rehash(ctx, tx, id, pw, rehash)
+	return err
+}
+
+// rehash stores a fresh hash of pw when asked, and returns it ("" when not).
+func (s *Service) rehash(ctx context.Context, tx pgx.Tx, id uuid.UUID, pw string, rehash bool) (string, error) {
 	if !rehash {
-		return nil
+		return "", nil
 	}
 	h, err := password.Hash(pw)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET password_hash = $2 WHERE id = $1`, id, h); err != nil {
-		return errors.New("rehash failed")
+		return "", errors.New("rehash failed")
 	}
-	return nil
+	return h, nil
 }
 
 // trustedDevice reports whether deviceToken is a live trusted device of

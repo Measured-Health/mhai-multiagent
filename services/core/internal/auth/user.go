@@ -108,12 +108,15 @@ type mfaPolicy struct {
 // sessionSatisfiesMFA reports whether a session's proof (mfa, amr) meets
 // the account's current roles and policy. Sign-in and every refresh use it,
 // so a role gained or a policy tightened mid-session ends the session.
-//   - No two-step needed: any session will do.
+//   - A code is needed when the roles and policy require two-step, or the
+//     account has turned it on (enrolled): an enrolled account is always
+//     challenged, whatever the policy.
+//   - No code needed: any session will do.
 //   - Otherwise mfa must be set, and amr must show the proof: "otp" or
 //     "backup" (a code), or "device", which counts only while the hospital
 //     allows trusted devices and no role forbids them.
-func sessionSatisfiesMFA(roles []string, p mfaPolicy, mfa bool, amr []string) bool {
-	if !needsMFA(roles, p.RequireForClinicians) {
+func sessionSatisfiesMFA(roles []string, p mfaPolicy, enrolled, mfa bool, amr []string) bool {
+	if !needsCode(roles, p, enrolled) {
 		return true
 	}
 	if !mfa {
@@ -123,9 +126,23 @@ func sessionSatisfiesMFA(roles []string, p mfaPolicy, mfa bool, amr []string) bo
 		return true
 	}
 	if slices.Contains(amr, "device") {
-		return p.AllowTrustDevice && deviceMaySkip(roles)
+		return deviceMayStandIn(roles, p)
 	}
 	return false
+}
+
+// needsCode reports whether sign-in must prove a second factor: the roles
+// and policy require two-step, or the account has turned it on.
+func needsCode(roles []string, p mfaPolicy, enrolled bool) bool {
+	return enrolled || needsMFA(roles, p.RequireForClinicians)
+}
+
+// deviceMayStandIn reports whether a trusted device may replace the code:
+// the hospital allows trusted devices and no role forbids them. Checked
+// directly, never through sessionSatisfiesMFA (which is true whenever no
+// code is needed).
+func deviceMayStandIn(roles []string, p mfaPolicy) bool {
+	return p.AllowTrustDevice && deviceMaySkip(roles)
 }
 
 func (a *acctRec) policy() mfaPolicy {

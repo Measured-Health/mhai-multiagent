@@ -116,7 +116,7 @@ func (s *Service) refresh(w http.ResponseWriter, r *http.Request) {
 			idle = acct.IdleMinutes
 		}
 		if acct == nil || !acct.usable() || now.Sub(lastSeen) > time.Duration(idle)*time.Minute ||
-			!sessionSatisfiesMFA(acct.Roles, acct.policy(), mfa, amr) {
+			!sessionSatisfiesMFA(acct.Roles, acct.policy(), acct.MFAEnabled, mfa, amr) {
 			outcome = refreshEndedNow
 			return revokeSession(ctx, tx, sid, now)
 		}

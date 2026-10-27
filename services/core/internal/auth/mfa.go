@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"errors"
 	"io"
 	"net/http"
@@ -105,6 +106,17 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "unauthenticated")
 		return
 	}
+	// The token is good only on the audience it was issued on, for an
+	// account still on that side, and only until the password changes.
+	// Checked before anything is consumed and before either branch.
+	platform := httpx.Audience(ctx) == httpx.AudiencePlatform
+	if platform != rec.Platform || hasPlatformRole(acct.Roles) != rec.Platform ||
+		!hmac.Equal([]byte(keys.pwFingerprint(acct.PasswordHash)), []byte(rec.PwGen)) {
+		s.auditOnly(w, r, "auth.mfa.failed", rec.UserID, acct.hospitalID(), map[string]any{"method": "token_mismatch"})
+		s.log().Info("auth: mfa token refused for this audience or password", "request_id", rid, "user_id", rec.UserID)
+		httpx.Error(w, r, "mfa_invalid")
+		return
+	}
 
 	if !acct.MFAEnabled {
 		// Nothing to check: the password was checked at sign-in. The session
@@ -164,7 +176,7 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) {
 		acct.RecoveryCodesLeft--
 	}
 
-	trust := in.TrustDevice && rec.DeviceAllowed && s.mayTrustDevice(acct)
+	trust := in.TrustDevice && rec.DeviceAllowed && deviceMayStandIn(acct.Roles, acct.policy())
 	deviceToken, deviceHash := "", ""
 	if trust {
 		deviceToken, deviceHash = token.NewRefresh()
@@ -188,12 +200,6 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) {
 		return writeAudit(ctx, tx, r, "auth.device.trusted", acct.ID.String(), acct.hospitalID(), "trusted_device", devID.String(),
 			map[string]any{"days": int(TrustedDeviceTTL / (24 * time.Hour))})
 	}, deviceToken)
-}
-
-// mayTrustDevice: the hospital allows trusted devices and no role of the
-// account forbids them (hospital_admin, analyst, platform_admin, auditor).
-func (s *Service) mayTrustDevice(a *acctRec) bool {
-	return a.AllowTrustDevice && deviceMaySkip(a.Roles)
 }
 
 func methodWord(k codeKind) string {
@@ -244,7 +250,7 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret := newSecret()
-	sealed, err := keys.seal(secret)
+	sealed, err := keys.seal(uid.String(), secret)
 	if err != nil {
 		s.fail(w, r, "internal_error", "auth: seal mfa secret failed", "user_id", c.Sub)
 		return

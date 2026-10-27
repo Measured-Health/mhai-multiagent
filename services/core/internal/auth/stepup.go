@@ -123,7 +123,7 @@ func (s *Service) checkCode(ctx context.Context, tx pgx.Tx, keys *mfaKeys, userI
 	totp, backup string) (kind codeKind, ok bool, err error) {
 	switch {
 	case totp != "":
-		secret, err := keys.open(row.secretEnc)
+		secret, err := keys.open(userID.String(), row.secretEnc)
 		if err != nil {
 			return "", false, errBadSecret
 		}

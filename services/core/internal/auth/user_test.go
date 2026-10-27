@@ -94,7 +94,7 @@ func TestSessionSatisfiesMFA(t *testing.T) {
 		{"mfa flag without proof", "hospital_admin", open, true, "pwd", false},
 		{"auditor, backup", "auditor", open, true, "pwd,backup", true},
 	} {
-		if got := sessionSatisfiesMFA(strings.Split(c.roles, ","), c.p, c.mfa, strings.Split(c.amr, ",")); got != c.want {
+		if got := sessionSatisfiesMFA(strings.Split(c.roles, ","), c.p, false, c.mfa, strings.Split(c.amr, ",")); got != c.want {
 			t.Errorf("%s: got %v want %v", c.name, got, c.want)
 		}
 	}

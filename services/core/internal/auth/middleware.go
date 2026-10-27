@@ -74,7 +74,7 @@ func (s *Service) tokenMeetsMFA(ctx context.Context, c token.Claims) (ok, found 
 	if acct == nil || !acct.usable() {
 		return false, false, nil
 	}
-	return sessionSatisfiesMFA(acct.Roles, acct.policy(), c.MFA, c.AMR), true, nil
+	return sessionSatisfiesMFA(acct.Roles, acct.policy(), acct.MFAEnabled, c.MFA, c.AMR), true, nil
 }
 
 func (s *Service) requireToken(next http.Handler, allowEnrol bool) http.Handler {

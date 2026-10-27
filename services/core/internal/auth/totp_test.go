@@ -67,11 +67,12 @@ func TestSecretSealRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := []byte("12345678901234567890")
-	a, err := k.seal(secret)
+	uid := "8a6e0f8e-58f4-4c44-9d1e-0f0c6f3b2a11"
+	a, err := k.seal(uid, secret)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := k.seal(secret)
+	b, _ := k.seal(uid, secret)
 	if bytes.Equal(a, b) {
 		t.Fatal("two seals of one secret are equal (nonce reused)")
 	}
@@ -81,22 +82,25 @@ func TestSecretSealRoundTrip(t *testing.T) {
 	if bytes.Contains(a, secret) || strings.Contains(string(a), base32.StdEncoding.EncodeToString(secret)) {
 		t.Fatal("sealed form contains the secret")
 	}
-	got, err := k.open(a)
+	if _, err := k.open("5b0b3a52-1f7e-4d2a-8f43-6c1d2b9e7a00", a); err == nil {
+		t.Fatal("a secret opened for another user (copied row)")
+	}
+	got, err := k.open(uid, a)
 	if err != nil || !bytes.Equal(got, secret) {
 		t.Fatalf("open: %v", err)
 	}
 	a[len(a)-1] ^= 1
-	if _, err := k.open(a); err == nil {
+	if _, err := k.open(uid, a); err == nil {
 		t.Fatal("a tampered secret opened")
 	}
 	other, _ := newMFAKeys([]byte("another-test-mfa-key-0123456789abcdef0123"))
-	if _, err := other.open(b); err == nil {
+	if _, err := other.open(uid, b); err == nil {
 		t.Fatal("opened under another key")
 	}
 	if _, err := newMFAKeys([]byte("short")); err == nil {
 		t.Fatal("short key accepted")
 	}
-	if _, err := k.open([]byte{1, 2, 3}); err == nil {
+	if _, err := k.open(uid, []byte{1, 2, 3}); err == nil {
 		t.Fatal("short ciphertext opened")
 	}
 }
@@ -128,5 +132,50 @@ func TestBackupCodes(t *testing.T) {
 	}
 	if looksLikeTOTP(codes[0]) || !looksLikeTOTP("123456") {
 		t.Fatal("TOTP / backup classification")
+	}
+}
+
+func TestDeviceNeverSkipsForPlatformRoles(t *testing.T) {
+	for _, roles := range [][]string{{"platform_admin"}, {"auditor"}, {"admin"}, {"hospital_admin"}, {"analyst"}, {"clinician", "analyst"}} {
+		if deviceMaySkip(roles) {
+			t.Errorf("deviceMaySkip(%v) = true", roles)
+		}
+	}
+	if !deviceMaySkip([]string{"clinician"}) {
+		t.Error("clinician-only account refused")
+	}
+}
+
+// An enrolled account needs a code (or an allowed device) whatever the policy.
+func TestSessionSatisfiesMFAEnrolled(t *testing.T) {
+	clin := []string{"clinician"}
+	off := mfaPolicy{}
+	if !sessionSatisfiesMFA(clin, off, false, false, []string{"pwd"}) {
+		t.Error("no policy, not enrolled: refused")
+	}
+	if sessionSatisfiesMFA(clin, off, true, false, []string{"pwd"}) {
+		t.Error("enrolled, password only: accepted")
+	}
+	if sessionSatisfiesMFA(clin, off, true, true, []string{"pwd", "device"}) {
+		t.Error("enrolled, device while trust is off: accepted")
+	}
+	if !sessionSatisfiesMFA(clin, mfaPolicy{AllowTrustDevice: true}, true, true, []string{"pwd", "device"}) {
+		t.Error("enrolled, device while trust is on: refused")
+	}
+	if !sessionSatisfiesMFA(clin, off, true, true, []string{"pwd", "otp"}) {
+		t.Error("enrolled, otp: refused")
+	}
+}
+
+func TestPasswordFingerprint(t *testing.T) {
+	k, _ := newMFAKeys([]byte("test-only-mfa-key-0123456789abcdef0123456789"))
+	h := "$argon2id$v=19$m=65536,t=2,p=1$c2FsdA$aGFzaA"
+	f := k.pwFingerprint(&h)
+	if f == "" || strings.Contains(f, "argon2") || f != k.pwFingerprint(&h) {
+		t.Fatalf("fingerprint %q", f)
+	}
+	h2 := h + "x"
+	if k.pwFingerprint(&h2) == f || k.pwFingerprint(nil) == f {
+		t.Fatal("fingerprint doesn't follow the hash")
 	}
 }

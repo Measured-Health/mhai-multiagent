@@ -29,7 +29,8 @@ type passwordRequest struct {
 //   - On success: the new hash, must_change_password cleared, every other
 //     session of the user revoked and denylisted (sid and access jti), and
 //     the user's trusted devices removed, all in one transaction. The
-//     caller's own session stays.
+//     caller's own session stays. Outstanding mfa_tokens die too: each
+//     holds a fingerprint of the old hash, which the challenge re-checks.
 func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 	c, _ := ClaimsFrom(r.Context())
 	var in passwordRequest
@@ -147,9 +148,14 @@ func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, "internal_error", "auth: password change failed", "user_id", c.Sub)
 		return
 	}
+	// The password has changed and the other sessions are revoked in the
+	// database (their refresh already fails), so the reply is 204 even if
+	// the denylist can't be written after one retry; their access tokens
+	// then live out their remaining minutes, and the failure is logged.
 	if err := s.denyAll(ctx, jtis); err != nil {
-		s.fail(w, r, "not_ready", "auth: denylist write failed", "user_id", c.Sub)
-		return
+		if err := s.denyAll(ctx, jtis); err != nil {
+			s.log().Error("auth: denylist write failed after password change", "request_id", rid, "user_id", c.Sub)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

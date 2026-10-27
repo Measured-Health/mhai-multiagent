@@ -23,6 +23,12 @@ type MFAToken struct {
 	Enrolled bool `json:"enrolled"`
 	// DeviceAllowed is whether the hospital lets this account trust a device.
 	DeviceAllowed bool `json:"device_allowed"`
+	// Platform is whether sign-in came through the platform audience; the
+	// challenge must come through the same one.
+	Platform bool `json:"platform"`
+	// PwGen is a keyed fingerprint of the password hash at sign-in
+	// (pwFingerprint); a password change in between voids the token.
+	PwGen string `json:"pwgen"`
 }
 
 // ErrMFAToken is every reason an mfa_token is unusable: unknown, expired,
