@@ -11,6 +11,19 @@ see CONTRIBUTING.md.
    control and the agent contribution workflow.
 3. `docs/adr/`: why things are the way they are.
 
+## Security is part of every step
+
+We build securely, and security starts in the design. The project skills are in `.claude/skills/`, and every agent uses them:
+
+| When | Skill | What it requires |
+|---|---|---|
+| Writing a design, spec, ADR or plan | `secure-design` | A **Security and threat model** section (assets, boundaries, STRIDE threats, controls, abuse-case tests, residual risk). A design without it isn't approved. |
+| Writing code | `secure-build` | Identity from the token only, RLS and least privilege, hashed secrets, no PII in logs, reserve-then-check, fail closed. |
+| Reviewing a change | `security-review` | An attacker's walk through the vulnerability classes this codebase has actually had, with proof and severity. |
+| Finding and fixing bugs | `bug-hunt` | A failing test first, edge cases (concurrency, time, pooled connections, policy changes), and fixing the whole class. |
+
+Run `security-review` on your own diff before you open a PR. When a review finds a new kind of issue, add it to that skill's list.
+
 ## Workflow
 
 - Work on your own branch (`agent/<topic>` or `fix/<issue>-<topic>`); open
