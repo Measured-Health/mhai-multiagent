@@ -32,10 +32,11 @@ type jsonRule struct {
 	AnyRole  []string `json:"any_role"`
 	Platform bool     `json:"platform"`
 	StepUp   bool     `json:"step_up"`
+	Write    bool     `json:"write"`
 }
 
 // JSON renders the table as permissions.json: a list of {method, pattern,
-// any_role, platform, step_up}, sorted by pattern then method.
+// any_role, platform, step_up, write}, sorted by pattern then method.
 func JSON(table []RouteRule) ([]byte, error) {
 	rows := []jsonRule{}
 	for _, rr := range published(table) {
@@ -44,7 +45,7 @@ func JSON(table []RouteRule) ([]byte, error) {
 			roles = []string{}
 		}
 		rows = append(rows, jsonRule{Method: rr.Method, Pattern: rr.Pattern, AnyRole: roles,
-			Platform: rr.Rule.Platform, StepUp: rr.Rule.StepUp})
+			Platform: rr.Rule.Platform, StepUp: rr.Rule.StepUp, Write: rr.Rule.Write})
 	}
 	b, err := json.MarshalIndent(rows, "", "  ")
 	if err != nil {
@@ -63,8 +64,8 @@ func Markdown(table []RouteRule) []byte {
 	b.WriteString("  `enrolment` also accepts a session limited to setting up two-step.\n")
 	b.WriteString("- **Roles:** any one of them. Roles combine on clinical accounts.\n")
 	b.WriteString("- **Audience:** `platform` needs `X-MHAI-Audience: platform` and a platform account (else 403 `not_platform`);\n")
-	b.WriteString("  `clinical` refuses platform accounts (403 `forbidden`); `any` is either account on its own audience.\n")
-	b.WriteString("- **Write:** auditors get 403 `forbidden`.\n")
+	b.WriteString("  `clinical` refuses platform accounts (403 `forbidden`); `both` (the account's own routes) is either account on its own audience.\n")
+	b.WriteString("- **Write:** auditors get 403 `forbidden`; they are also refused every method but GET, HEAD and OPTIONS outside the `both` routes.\n")
 	b.WriteString("- Another hospital's resource is 404 `not_found`, never 403.\n\n")
 	b.WriteString("| Method | Path | Access | Roles | Audience | Two-step session | Step-up | Write |\n")
 	b.WriteString("|---|---|---|---|---|---|---|---|\n")
@@ -81,14 +82,14 @@ func Markdown(table []RouteRule) []byte {
 		if len(r.AnyRole) > 0 {
 			roles = "`" + strings.Join(r.AnyRole, "`, `") + "`"
 		}
-		aud := "any"
+		aud := "clinical"
 		switch {
 		case r.Public:
 			aud = "-"
 		case r.Platform:
 			aud = "platform"
-		case len(r.AnyRole) > 0:
-			aud = "clinical"
+		case r.SelfService:
+			aud = "both"
 		}
 		if r.Public {
 			roles = "-"

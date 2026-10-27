@@ -327,7 +327,9 @@ func (g *Guard) authenticate(r *http.Request, allowEnrol bool) (Principal, strin
 		st.HospitalID != nil && *st.HospitalID != hid:
 		return Principal{}, "unauthenticated"
 	}
-	if !allowEnrol && !SessionSatisfiesMFA(st.Roles, st.Policy, st.MFAEnabled, c.MFA, c.AMR) {
+	// The enrolment-limited path is only for an account that hasn't turned
+	// two-step on: an enrolled account always needs its code.
+	if !SessionSatisfiesMFA(st.Roles, st.Policy, st.MFAEnabled, c.MFA, c.AMR) && (!allowEnrol || st.MFAEnabled) {
 		return Principal{}, "mfa_required"
 	}
 	// Roles: those in the token that the account still holds. A role taken
@@ -338,6 +340,11 @@ func (g *Guard) authenticate(r *http.Request, allowEnrol bool) (Principal, strin
 		if slices.Contains(st.Roles, rl) {
 			roles = append(roles, rl)
 		}
+	}
+	if len(roles) == 0 {
+		// None of the token's roles is held any more: refuse, so the client
+		// refreshes and gets a token with the current roles.
+		return Principal{}, "unauthenticated"
 	}
 	return Principal{
 		UserID: uid, HospitalID: hid, Roles: roles, MFA: c.MFA, AMR: slices.Clone(c.AMR),
@@ -358,33 +365,51 @@ func bearer(vals []string) (string, bool) {
 
 // check applies the route's rule to an authenticated principal and returns
 // the error code to send, or "".
+//
+// Audience and account kind:
+//   - Platform routes need the platform audience and a platform account
+//     (else not_platform).
+//   - SelfService routes take either kind of account on its own audience.
+//   - Every other route is clinical: a platform account is forbidden on
+//     either audience, so a clinical handler never runs as mhai_platform.
+//
+// Then AnyRole, then auditors: refused on every Write and on every unsafe
+// method (anything but GET, HEAD, OPTIONS) outside SelfService routes, so a
+// forgotten Write mark can't open a write to them.
 func check(r *http.Request, rule Rule, p Principal) string {
 	platformAud := httpx.Audience(r.Context()) == httpx.AudiencePlatform
-	if rule.Platform {
+	switch {
+	case rule.Platform:
 		if !platformAud || !p.Platform {
 			return "not_platform"
 		}
-	} else {
-		// The audience must match the account: a clinical account on the
-		// platform side is not_platform, a platform account on the
-		// clinical side forbidden (as at sign-in).
+	default:
 		if platformAud && !p.Platform {
 			return "not_platform"
 		}
-		if !platformAud && p.Platform {
+		if p.Platform && (!rule.SelfService || !platformAud) {
 			return "forbidden"
 		}
 	}
 	if len(rule.AnyRole) > 0 && !slices.ContainsFunc(rule.AnyRole, p.HasRole) {
 		return "forbidden"
 	}
-	if rule.Write && p.HasRole(RoleAuditor) {
+	if p.HasRole(RoleAuditor) && (rule.Write || (!rule.SelfService && !safeMethod(r.Method))) {
 		return "forbidden"
 	}
 	if rule.NeedsMFA && !p.MFA {
 		return "mfa_required"
 	}
 	return ""
+}
+
+// safeMethod reports whether method only reads.
+func safeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	return false
 }
 
 // wrap puts h behind the rule: public routes get only the anonymous

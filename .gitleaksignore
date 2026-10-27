@@ -1,0 +1,2 @@
+# Synthetic 32-byte test key in a config test (not a secret).
+fce9d36a7ed1fae43109ce583194c6ca64b787db:gateway/internal/config/config_test.go:generic-api-key:8

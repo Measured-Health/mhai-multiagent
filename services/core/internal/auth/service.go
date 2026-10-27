@@ -89,9 +89,9 @@ func (s *Service) issuer() token.Issuer {
 // Idempotency itself comes from the mux: per principal on authenticated
 // routes, per client IP on the public ones.
 //
-// None of these routes is a Write in the authz sense: they are the
-// account's own sign-in, two-step and session housekeeping, which auditors
-// need too.
+// The signed-in routes are SelfService: the account's own two-step,
+// password and session housekeeping, open to clinical and platform
+// accounts (auditors included) on their own audience. None is a Write.
 func (s *Service) Register(m *authz.Mux) {
 	h := func(method, pattern string, rule authz.Rule, next http.Handler) {
 		authz.Route(m, method, pattern, rule, noCache(next))
@@ -99,14 +99,14 @@ func (s *Service) Register(m *authz.Mux) {
 	public := authz.Rule{Public: true}
 	// Enrol, verify, password change and logout also accept a session
 	// limited to enrolment; every other route refuses it (mfa_required).
-	enrol := authz.Rule{MFAEnrol: true}
-	signedIn := authz.Rule{}
+	enrol := authz.Rule{SelfService: true, MFAEnrol: true}
+	signedIn := authz.Rule{SelfService: true}
 	h(http.MethodPost, "/auth/login", public, httpx.NoStore(http.HandlerFunc(s.login)))
 	h(http.MethodPost, "/auth/refresh", public, httpx.NoStore(http.HandlerFunc(s.refresh)))
 	h(http.MethodPost, "/auth/mfa/challenge", public, httpx.NoStore(http.HandlerFunc(s.challenge)))
 	h(http.MethodPost, "/auth/mfa/enroll", enrol, httpx.NoStore(http.HandlerFunc(s.enroll)))
 	h(http.MethodPost, "/auth/mfa/verify", enrol, http.HandlerFunc(s.verify))
-	h(http.MethodPost, "/auth/mfa/recovery-codes", authz.Rule{StepUp: true}, httpx.NoStore(http.HandlerFunc(s.recoveryCodes)))
+	h(http.MethodPost, "/auth/mfa/recovery-codes", authz.Rule{SelfService: true, StepUp: true}, httpx.NoStore(http.HandlerFunc(s.recoveryCodes)))
 	h(http.MethodPost, "/auth/password", enrol, http.HandlerFunc(s.changePassword))
 	h(http.MethodPost, "/auth/logout", enrol, http.HandlerFunc(s.logout))
 	h(http.MethodPost, "/auth/terms", signedIn, http.HandlerFunc(s.terms))

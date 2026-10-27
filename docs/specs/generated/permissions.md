@@ -7,22 +7,22 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
   `enrolment` also accepts a session limited to setting up two-step.
 - **Roles:** any one of them. Roles combine on clinical accounts.
 - **Audience:** `platform` needs `X-MHAI-Audience: platform` and a platform account (else 403 `not_platform`);
-  `clinical` refuses platform accounts (403 `forbidden`); `any` is either account on its own audience.
-- **Write:** auditors get 403 `forbidden`.
+  `clinical` refuses platform accounts (403 `forbidden`); `both` (the account's own routes) is either account on its own audience.
+- **Write:** auditors get 403 `forbidden`; they are also refused every method but GET, HEAD and OPTIONS outside the `both` routes.
 - Another hospital's resource is 404 `not_found`, never 403.
 
 | Method | Path | Access | Roles | Audience | Two-step session | Step-up | Write |
 |---|---|---|---|---|---|---|---|
 | POST | `/api/v1/auth/login` | public | - | - | no | no | no |
-| POST | `/api/v1/auth/logout` | enrolment | any | any | no | no | no |
+| POST | `/api/v1/auth/logout` | enrolment | any | both | no | no | no |
 | POST | `/api/v1/auth/mfa/challenge` | public | - | - | no | no | no |
-| POST | `/api/v1/auth/mfa/enroll` | enrolment | any | any | no | no | no |
-| POST | `/api/v1/auth/mfa/recovery-codes` | signed in | any | any | no | yes | no |
-| POST | `/api/v1/auth/mfa/verify` | enrolment | any | any | no | no | no |
-| POST | `/api/v1/auth/password` | enrolment | any | any | no | no | no |
+| POST | `/api/v1/auth/mfa/enroll` | enrolment | any | both | no | no | no |
+| POST | `/api/v1/auth/mfa/recovery-codes` | signed in | any | both | no | yes | no |
+| POST | `/api/v1/auth/mfa/verify` | enrolment | any | both | no | no | no |
+| POST | `/api/v1/auth/password` | enrolment | any | both | no | no | no |
 | POST | `/api/v1/auth/refresh` | public | - | - | no | no | no |
-| GET | `/api/v1/auth/sessions` | signed in | any | any | no | no | no |
-| POST | `/api/v1/auth/sessions/revoke-all` | signed in | any | any | no | no | no |
-| DELETE | `/api/v1/auth/sessions/{id}` | signed in | any | any | no | no | no |
-| POST | `/api/v1/auth/terms` | signed in | any | any | no | no | no |
+| GET | `/api/v1/auth/sessions` | signed in | any | both | no | no | no |
+| POST | `/api/v1/auth/sessions/revoke-all` | signed in | any | both | no | no | no |
+| DELETE | `/api/v1/auth/sessions/{id}` | signed in | any | both | no | no | no |
+| POST | `/api/v1/auth/terms` | signed in | any | both | no | no | no |
 | GET | `/api/v1/healthz` | public | - | - | no | no | no |

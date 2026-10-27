@@ -2,6 +2,8 @@ package authz
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
 
 const testKey = "test-only-bff-service-key-0123456789abcdef"
@@ -19,8 +22,13 @@ const testKey = "test-only-bff-service-key-0123456789abcdef"
 // audience or not.
 func requestOn(t *testing.T, platform bool) *http.Request {
 	t.Helper()
+	return requestWith(t, http.MethodGet, platform)
+}
+
+func requestWith(t *testing.T, method string, platform bool) *http.Request {
+	t.Helper()
 	var got *http.Request
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(method, "/", nil)
 	r.Header.Set("X-MHAI-Service", testKey)
 	if platform {
 		r.Header.Set("X-MHAI-Audience", "platform")
@@ -39,6 +47,7 @@ func platform(role string) Principal {
 }
 
 var (
+	selfService   = Rule{SelfService: true}
 	clinicalOnly  = Rule{AnyRole: []string{RoleClinician}}
 	adminOnly     = Rule{AnyRole: []string{RoleHospitalAdmin}}
 	platformRead  = Rule{Platform: true, AnyRole: []string{RolePlatformAdmin, RoleAuditor}}
@@ -87,9 +96,10 @@ func TestPlatformAudienceRequired(t *testing.T) {
 		{"clinical account, platform audience", clinical(RoleClinician), true, platformRead, "not_platform"},
 		{"clinical account, clinical audience", clinical(RoleClinician), false, platformRead, "not_platform"},
 		{"platform account on a clinical route", platform(RolePlatformAdmin), true, clinicalOnly, "forbidden"},
-		{"platform account, self-service, clinical audience", platform(RoleAuditor), false, Rule{}, "forbidden"},
-		{"clinical account, self-service, platform audience", clinical(RoleClinician), true, Rule{}, "not_platform"},
-		{"platform account, self-service, platform audience", platform(RoleAuditor), true, Rule{}, ""},
+		{"platform account, self-service, clinical audience", platform(RoleAuditor), false, selfService, "forbidden"},
+		{"clinical account, self-service, platform audience", clinical(RoleClinician), true, selfService, "not_platform"},
+		{"platform account, self-service, platform audience", platform(RoleAuditor), true, selfService, ""},
+		{"clinical account, self-service, clinical audience", clinical(RoleClinician), false, selfService, ""},
 	} {
 		if got := check(requestOn(t, c.platform), c.rule, c.p); got != c.want {
 			t.Errorf("%s: got %q want %q", c.name, got, c.want)
@@ -127,17 +137,24 @@ func TestRuleValidation(t *testing.T) {
 		method, pattern string
 		rule            Rule
 	}{
-		"public with roles":     {"GET", "/x", Rule{Public: true, AnyRole: []string{RoleClinician}}},
-		"public write":          {"POST", "/x", Rule{Public: true, Write: true}},
-		"probe not public":      {"GET", "/x", Rule{Probe: true}},
-		"probe post":            {"POST", "/x", Rule{Public: true, Probe: true}},
-		"get write":             {"GET", "/x", Rule{Write: true}},
-		"unknown role":          {"GET", "/x", Rule{AnyRole: []string{"superuser"}}},
-		"platform role off":     {"GET", "/x", Rule{AnyRole: []string{RoleAuditor}}},
-		"clinical role on plat": {"GET", "/x", Rule{Platform: true, AnyRole: []string{RoleClinician}}},
-		"enrol with roles":      {"POST", "/x", Rule{MFAEnrol: true, AnyRole: []string{RoleClinician}}},
-		"no method":             {"", "/x", Rule{}},
-		"relative pattern":      {"GET", "x", Rule{}},
+		"public with roles":        {"GET", "/x", Rule{Public: true, AnyRole: []string{RoleClinician}}},
+		"public write":             {"POST", "/x", Rule{Public: true, Write: true}},
+		"probe not public":         {"GET", "/x", Rule{Probe: true}},
+		"probe post":               {"POST", "/x", Rule{Public: true, Probe: true}},
+		"get write":                {"GET", "/x", Rule{Write: true}},
+		"unknown role":             {"GET", "/x", Rule{AnyRole: []string{"superuser"}}},
+		"platform role off":        {"GET", "/x", Rule{AnyRole: []string{RoleAuditor}}},
+		"clinical role on plat":    {"GET", "/x", Rule{Platform: true, AnyRole: []string{RoleClinician}}},
+		"enrol with roles":         {"POST", "/x", Rule{MFAEnrol: true, AnyRole: []string{RoleClinician}}},
+		"no method":                {"", "/x", Rule{}},
+		"platform post unmarked":   {"POST", "/x", Rule{Platform: true, AnyRole: []string{RoleAuditor}}},
+		"platform delete unmarked": {"DELETE", "/x", Rule{Platform: true}},
+		"self-service off /auth":   {"GET", "/x", Rule{SelfService: true}},
+		"self-service with roles":  {"GET", "/auth/x", Rule{SelfService: true, AnyRole: []string{RoleClinician}}},
+		"self-service platform":    {"GET", "/auth/x", Rule{SelfService: true, Platform: true}},
+		"self-service write":       {"POST", "/auth/x", Rule{SelfService: true, Write: true}},
+		"enrol not self-service":   {"POST", "/auth/x", Rule{MFAEnrol: true}},
+		"relative pattern":         {"GET", "x", Rule{}},
 	}
 	for name, c := range bad {
 		func() {
@@ -179,5 +196,66 @@ func TestCacheTTLCapped(t *testing.T) {
 	}
 	if (&Guard{CacheTTL: 5 * time.Second}).ttl() != 5*time.Second {
 		t.Fatal("shorter TTL ignored")
+	}
+}
+
+// I1: a route that is neither Platform nor SelfService is clinical. A
+// platform account is refused there on either audience, even with no
+// AnyRole, so a clinical "any signed-in" route never runs as mhai_platform.
+func TestPlatformRefusedOnClinicalAnyRoute(t *testing.T) {
+	for _, aud := range []bool{true, false} {
+		for _, role := range []string{RolePlatformAdmin, RoleAuditor} {
+			if got := check(requestOn(t, aud), Rule{}, platform(role)); got != "forbidden" {
+				t.Errorf("%s on Rule{} (platform audience %v): %q", role, aud, got)
+			}
+		}
+	}
+	if got := check(requestOn(t, false), Rule{}, clinical(RoleAnalyst)); got != "" {
+		t.Errorf("clinical on Rule{}: %q", got)
+	}
+}
+
+// I2: auditors are refused every unsafe method unless the route is self-
+// service, whether or not the route remembered Write.
+func TestAuditorUnsafeMethodDenied(t *testing.T) {
+	unmarked := Rule{Platform: true, AnyRole: []string{RolePlatformAdmin, RoleAuditor}}
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		if got := check(requestWith(t, m, true), unmarked, platform(RoleAuditor)); got != "forbidden" {
+			t.Errorf("auditor %s unmarked: %q", m, got)
+		}
+		if got := check(requestWith(t, m, true), unmarked, platform(RolePlatformAdmin)); got != "" {
+			t.Errorf("platform admin %s unmarked: %q", m, got)
+		}
+		if got := check(requestWith(t, m, true), selfService, platform(RoleAuditor)); got != "" {
+			t.Errorf("auditor %s self-service: %q", m, got)
+		}
+	}
+	for _, m := range []string{http.MethodGet, http.MethodHead, http.MethodOptions} {
+		if got := check(requestWith(t, m, true), unmarked, platform(RoleAuditor)); got != "" {
+			t.Errorf("auditor %s: %q", m, got)
+		}
+	}
+}
+
+// M2: with a valid token, a denylist that can't be read fails closed with
+// 503 and the handler never runs.
+func TestGuardFailsClosedWithoutDenylist(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	iss := token.Issuer{Key: priv, KeyID: "k"}
+	at, _, err := iss.Access(token.Claims{Sub: uuid.NewString(), Hid: uuid.NewString(), Roles: []string{RoleClinician},
+		Sid: uuid.NewString(), Jti: uuid.NewString(), AMR: []string{"pwd"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewMux(&Guard{Keys: map[string]ed25519.PublicKey{"k": pub}})
+	ran := false
+	Route(m, http.MethodGet, "/x", Rule{}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { ran = true }))
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/x", nil)
+	r.Header.Set("X-MHAI-Service", testKey)
+	r.Header.Set("Authorization", "Bearer "+at)
+	rec := httptest.NewRecorder()
+	m.Handler([]string{testKey}).ServeHTTP(rec, r)
+	if ran || rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ran=%v status %d", ran, rec.Code)
 	}
 }

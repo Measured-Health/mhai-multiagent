@@ -47,7 +47,7 @@ func main() {
 // so the one-shot migrate container carries no core service secrets.
 func migrate(ctx context.Context, args []string, url string, out io.Writer) error {
 	if len(args) != 1 || (args[0] != "up" && args[0] != "status") {
-		return errors.New(usage)
+		return fmt.Errorf("%s", usage)
 	}
 	if url == "" {
 		return errors.New("DATABASE_URL is required")

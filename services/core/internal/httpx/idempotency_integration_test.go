@@ -474,31 +474,40 @@ func TestIdempotentConcurrentReserve(t *testing.T) {
 	srv := chain(&httpx.Principal{UserID: user, HospitalID: seedHospital(t)}, slow)
 	const racers = 8
 	start := make(chan struct{})
-	codes := make(chan int, racers)
+	type reply struct {
+		code     int
+		replayed bool
+	}
+	replies := make(chan reply, racers)
 	var wg sync.WaitGroup
 	for i := 0; i < racers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
-			codes <- send(srv, key, "", `{"same":true}`).Code
+			rec := send(srv, key, "", `{"same":true}`)
+			replies <- reply{rec.Code, rec.Header().Get("Idempotent-Replayed") == "true"}
 		}()
 	}
 	close(start)
 	wg.Wait()
-	close(codes)
-	created, conflicts := 0, 0
-	for c := range codes {
-		switch c {
-		case http.StatusCreated:
+	close(replies)
+	// A racer scheduled after the first reply was stored gets the replay
+	// (201, Idempotent-Replayed) instead of 409: both are correct.
+	created, replayed, conflicts := 0, 0, 0
+	for r := range replies {
+		switch {
+		case r.code == http.StatusCreated && r.replayed:
+			replayed++
+		case r.code == http.StatusCreated:
 			created++
-		case http.StatusConflict:
+		case r.code == http.StatusConflict:
 			conflicts++
 		default:
-			t.Errorf("unexpected status %d", c)
+			t.Errorf("unexpected status %d", r.code)
 		}
 	}
-	if n.Load() != 1 || created != 1 || created+conflicts != racers {
-		t.Fatalf("calls %d, created %d, conflicts %d", n.Load(), created, conflicts)
+	if n.Load() != 1 || created != 1 || created+replayed+conflicts != racers {
+		t.Fatalf("calls %d, created %d, replayed %d, conflicts %d", n.Load(), created, replayed, conflicts)
 	}
 }

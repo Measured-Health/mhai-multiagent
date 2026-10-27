@@ -43,7 +43,7 @@ var errArgs = errors.New("invalid arguments (run core hospitals|users create -h)
 // connection. Errors and output never contain the email, name or password.
 func seed(ctx context.Context, args []string, url string, stdin io.Reader, out io.Writer) error {
 	if len(args) < 2 || args[1] != "create" {
-		return errors.New(seedUsage)
+		return fmt.Errorf("%s", seedUsage)
 	}
 	switch args[0] {
 	case "hospitals":
@@ -51,7 +51,7 @@ func seed(ctx context.Context, args []string, url string, stdin io.Reader, out i
 	case "users":
 		return usersCreate(ctx, args[2:], url, stdin, out)
 	}
-	return errors.New(seedUsage)
+	return fmt.Errorf("%s", seedUsage)
 }
 
 func newFlags(name string) *flag.FlagSet {

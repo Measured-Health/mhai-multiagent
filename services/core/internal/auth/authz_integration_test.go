@@ -212,3 +212,59 @@ func (e *env) guardRoles(t *testing.T, at string) []string {
 	}
 	return out
 }
+
+// I1: a platform account can't call a clinical route that any signed-in
+// clinical account may use (the probe route, Rule{}), on either audience.
+func TestPlatformRefusedOnClinicalAnyRoute(t *testing.T) {
+	e := newEnv(t)
+	p := seedUser(t, uuid.Nil, true, "platform_admin")
+	at, _ := e.mint(t, p, "", []string{"platform_admin"}, true, "pwd", "otp")
+	for _, aud := range []bool{true, false} {
+		r := e.do(t, req{method: "GET", path: "/probe", bearer: at, platform: aud})
+		if r.code != 403 || r.body["code"] != "forbidden" {
+			t.Fatalf("platform audience %v: %d %s", aud, r.code, r.raw)
+		}
+	}
+}
+
+// M1: a token whose roles the account no longer holds at all (demoted from
+// platform_admin to auditor) is refused, so it can't slip past role checks
+// until it expires.
+func TestNoRemainingRoles401(t *testing.T) {
+	e := newEnv(t)
+	p := seedUser(t, uuid.Nil, true, "auditor")
+	at, _ := e.mint(t, p, "", []string{"platform_admin"}, true, "pwd", "otp")
+	r := e.do(t, req{method: "GET", path: "/auth/sessions", bearer: at, platform: true})
+	if r.code != 401 {
+		t.Fatalf("demoted token: %d %s", r.code, r.raw)
+	}
+}
+
+// M7: the enrolment-limited path is only for accounts that haven't turned
+// two-step on. An enrolled account's password-only session is refused even
+// on the enrolment routes.
+func TestEnrolRoutesRefuseEnrolledWithoutCode(t *testing.T) {
+	e := newEnv(t)
+	hid := seedHospital(t, hospitalOpts{})
+	u := seedUser(t, hid, true, "clinician")
+	at, _ := e.mint(t, u, hid.String(), []string{"clinician"}, false)
+	mustCode(t, "password", e.do(t, req{method: "POST", path: "/auth/password", bearer: at,
+		body: map[string]any{"current_password": testPassword, "new_password": "tangerine-orbit-77-quill"}}), 403, "mfa_required")
+	mustCode(t, "logout", e.do(t, req{method: "POST", path: "/auth/logout", bearer: at}), 403, "mfa_required")
+}
+
+// M3: a policy tightened mid-session ends a password-only session at the
+// middleware once the cache expires (not only at the next refresh).
+func TestPolicyTightenedMidSession(t *testing.T) {
+	e := newEnv(t)
+	hid := seedHospital(t, hospitalOpts{})
+	u := seedUser(t, hid, false, "clinician")
+	at, _ := e.mint(t, u, hid.String(), []string{"clinician"}, false)
+	mustOK(t, "before", e.sessions(t, at))
+	if _, err := super.Exec(context.Background(), `UPDATE hospital_settings SET require_mfa_for_clinicians = true WHERE hospital_id = $1`, hid); err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, "cached", e.sessions(t, at))
+	e.clock.Add(authz.MaxCacheTTL)
+	mustCode(t, "after", e.sessions(t, at), 403, "mfa_required")
+}
