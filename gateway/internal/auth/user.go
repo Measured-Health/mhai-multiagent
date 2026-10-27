@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 
@@ -98,6 +99,39 @@ func deviceMaySkip(roles []string) bool {
 	return len(roles) > 0
 }
 
+// mfaPolicy is the hospital's two-step policy as it applies to an account.
+type mfaPolicy struct {
+	RequireForClinicians bool
+	AllowTrustDevice     bool
+}
+
+// sessionSatisfiesMFA reports whether a session's proof (mfa, amr) meets
+// the account's current roles and policy. Sign-in and every refresh use it,
+// so a role gained or a policy tightened mid-session ends the session.
+//   - No two-step needed: any session will do.
+//   - Otherwise mfa must be set, and amr must show the proof: "otp" or
+//     "backup" (a code), or "device", which counts only while the hospital
+//     allows trusted devices and no role forbids them.
+func sessionSatisfiesMFA(roles []string, p mfaPolicy, mfa bool, amr []string) bool {
+	if !needsMFA(roles, p.RequireForClinicians) {
+		return true
+	}
+	if !mfa {
+		return false
+	}
+	if slices.Contains(amr, "otp") || slices.Contains(amr, "backup") {
+		return true
+	}
+	if slices.Contains(amr, "device") {
+		return p.AllowTrustDevice && deviceMaySkip(roles)
+	}
+	return false
+}
+
+func (a *acctRec) policy() mfaPolicy {
+	return mfaPolicy{RequireForClinicians: a.RequireMFAClinicians, AllowTrustDevice: a.AllowTrustDevice}
+}
+
 // acctRec is a user as sign-in and refresh see it.
 type acctRec struct {
 	ID                   uuid.UUID
@@ -154,7 +188,7 @@ SELECT u.id, u.hospital_id, u.email, u.password_hash, u.display_name, u.full_nam
        u.is_active, u.must_change_password, u.terms_accepted_at,
        h.name, h.status,
        COALESCE(hs.idle_timeout_minutes, $2), COALESCE(hs.review_overdue_hours, $3),
-       COALESCE(hs.require_mfa_for_clinicians, false), COALESCE(hs.allow_trust_device, false),
+       COALESCE(hs.require_mfa_for_clinicians, true), COALESCE(hs.allow_trust_device, false),
        COALESCE(m.enabled, false), COALESCE(cardinality(m.backup_code_hashes), 0),
        ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id)
 FROM users u

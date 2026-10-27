@@ -275,8 +275,12 @@ func TestOpenBucketsCreatesThreeAndIsIdempotent(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if st.TTL() != 15*time.Minute {
-				t.Fatalf("%s ttl = %v", name, st.TTL())
+			want := 15 * time.Minute
+			if name == "denylist" {
+				want = bus.DenylistTTL // access token life plus a clock-skew margin
+			}
+			if st.TTL() != want {
+				t.Fatalf("%s ttl = %v, want %v", name, st.TTL(), want)
 			}
 		}
 		if _, err := b.LoginAttempts.Put(ctx, "0123abcd", []byte("1")); err != nil {

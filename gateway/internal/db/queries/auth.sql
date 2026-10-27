@@ -8,7 +8,7 @@ SELECT u.id, u.hospital_id, u.email, u.password_hash, u.display_name, u.full_nam
        u.is_active, u.must_change_password, u.terms_accepted_at,
        h.name, h.status,
        COALESCE(hs.idle_timeout_minutes, 15), COALESCE(hs.review_overdue_hours, 4),
-       COALESCE(hs.require_mfa_for_clinicians, false), COALESCE(hs.allow_trust_device, false),
+       COALESCE(hs.require_mfa_for_clinicians, true), COALESCE(hs.allow_trust_device, false),
        COALESCE(m.enabled, false), COALESCE(cardinality(m.backup_code_hashes), 0),
        ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id)
 FROM users u

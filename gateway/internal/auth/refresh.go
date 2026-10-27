@@ -28,10 +28,11 @@ type refreshOutcome int
 
 const (
 	refreshOK       refreshOutcome = iota
-	refreshInvalid                 // unknown token, revoked/idle session, unusable account: 401
+	refreshInvalid                 // unknown token: 401
+	refreshRevoked                 // session already revoked: 401, denylist written again
 	refreshRace                    // already rotated within the grace window: 409, nothing revoked
 	refreshReuse                   // already rotated longer ago: family revoked, 401
-	refreshEndedNow                // idle or unusable account: session revoked now, 401
+	refreshEndedNow                // idle, unusable account or MFA no longer met: session revoked now, 401
 )
 
 // refresh: POST /auth/refresh. The token row is locked FOR UPDATE, so two
@@ -86,7 +87,9 @@ func (s *Service) refresh(w http.ResponseWriter, r *http.Request) {
 		}
 		userID, oldJTI = uid.String(), accessJTI
 		if revokedAt != nil {
-			outcome = refreshInvalid
+			// Write the denylist again: a retry after a lost denylist write
+			// (for example on the reuse path) must still cut the session off.
+			outcome = refreshRevoked
 			return nil
 		}
 		acct, err := accountByID(ctx, tx, uid)
@@ -112,7 +115,8 @@ func (s *Service) refresh(w http.ResponseWriter, r *http.Request) {
 		if acct != nil {
 			idle = acct.IdleMinutes
 		}
-		if acct == nil || !acct.usable() || now.Sub(lastSeen) > time.Duration(idle)*time.Minute {
+		if acct == nil || !acct.usable() || now.Sub(lastSeen) > time.Duration(idle)*time.Minute ||
+			!sessionSatisfiesMFA(acct.Roles, acct.policy(), mfa, amr) {
 			outcome = refreshEndedNow
 			return revokeSession(ctx, tx, sid, now)
 		}
@@ -153,7 +157,7 @@ func (s *Service) refresh(w http.ResponseWriter, r *http.Request) {
 	case refreshRace:
 		s.log().Info("auth: refresh race", "request_id", rid, "user_id", userID)
 		httpx.Error(w, r, "conflict")
-	case refreshReuse, refreshEndedNow:
+	case refreshReuse, refreshEndedNow, refreshRevoked:
 		if outcome == refreshReuse {
 			s.log().Warn("auth: refresh token reused; session revoked", "request_id", rid, "user_id", userID, "session_id", sid.String())
 		}

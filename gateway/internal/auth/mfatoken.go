@@ -57,7 +57,10 @@ func (m *MFATokens) Issue(ctx context.Context, rec MFAToken) (string, error) {
 	return tok, nil
 }
 
-func (m *MFATokens) get(ctx context.Context, tok string) (MFAToken, uint64, error) {
+// get reads a live record. minLeft is the fewest attempts left it accepts:
+// 1 to make an attempt or look one up, 0 to consume (a correct code on the
+// last attempt).
+func (m *MFATokens) get(ctx context.Context, tok string, minLeft int) (MFAToken, uint64, error) {
 	if tok == "" || len(tok) > 128 {
 		return MFAToken{}, 0, ErrMFAToken
 	}
@@ -69,22 +72,51 @@ func (m *MFATokens) get(ctx context.Context, tok string) (MFAToken, uint64, erro
 		return MFAToken{}, 0, errors.New("auth: mfa token read failed")
 	}
 	var rec MFAToken
-	if json.Unmarshal(e.Value(), &rec) != nil || rec.AttemptsLeft <= 0 || !m.now().Before(rec.ExpiresAt) {
+	if json.Unmarshal(e.Value(), &rec) != nil || rec.AttemptsLeft < minLeft || rec.AttemptsLeft > MFATokenAttempts ||
+		!m.now().Before(rec.ExpiresAt) {
 		return MFAToken{}, 0, ErrMFAToken
 	}
 	return rec, e.Revision(), nil
 }
 
-// Lookup returns a usable token's record without spending it.
+// Lookup returns a usable token's record (at least one attempt left)
+// without spending anything.
 func (m *MFATokens) Lookup(ctx context.Context, tok string) (MFAToken, error) {
-	rec, _, err := m.get(ctx, tok)
+	rec, _, err := m.get(ctx, tok, 1)
 	return rec, err
 }
 
-// Consume spends the token: the first caller gets the record, any other
-// (or a concurrent one) gets ErrMFAToken.
+// Attempt spends one attempt by compare-and-set before the caller checks a
+// code, so a concurrent burst gets at most MFATokenAttempts checks. It
+// returns the record with AttemptsLeft after this attempt. Any error,
+// including a KV failure or lost races past the retries, means no check may
+// run (fail closed). On a correct code the caller then calls Consume.
+func (m *MFATokens) Attempt(ctx context.Context, tok string) (MFAToken, error) {
+	for i := 0; i < 16; i++ {
+		rec, rev, err := m.get(ctx, tok, 1)
+		if err != nil {
+			return MFAToken{}, err
+		}
+		rec.AttemptsLeft--
+		raw, err := json.Marshal(rec)
+		if err != nil {
+			return MFAToken{}, err
+		}
+		_, err = m.kv.Update(ctx, mfaKey(tok), raw, rev)
+		if err == nil {
+			return rec, nil
+		}
+		if !isRevisionConflict(err) {
+			return MFAToken{}, errors.New("auth: mfa token write failed")
+		}
+	}
+	return MFAToken{}, ErrMFAToken
+}
+
+// Consume spends the token after a correct code: the first caller gets the
+// record, any other (or a concurrent one) gets ErrMFAToken.
 func (m *MFATokens) Consume(ctx context.Context, tok string) (MFAToken, error) {
-	rec, rev, err := m.get(ctx, tok)
+	rec, rev, err := m.get(ctx, tok, 0)
 	if err != nil {
 		return MFAToken{}, err
 	}
@@ -92,27 +124,4 @@ func (m *MFATokens) Consume(ctx context.Context, tok string) (MFAToken, error) {
 		return MFAToken{}, ErrMFAToken
 	}
 	return rec, nil
-}
-
-// Fail records a wrong code and returns the attempts left. At zero the
-// token is deleted.
-func (m *MFATokens) Fail(ctx context.Context, tok string) (int, error) {
-	for i := 0; i < 5; i++ {
-		rec, rev, err := m.get(ctx, tok)
-		if err != nil {
-			return 0, err
-		}
-		rec.AttemptsLeft--
-		if rec.AttemptsLeft <= 0 {
-			if err := m.kv.Delete(ctx, mfaKey(tok), jetstream.LastRevision(rev)); err == nil {
-				return 0, nil
-			}
-			continue
-		}
-		raw, _ := json.Marshal(rec)
-		if _, err := m.kv.Update(ctx, mfaKey(tok), raw, rev); err == nil {
-			return rec.AttemptsLeft, nil
-		}
-	}
-	return 0, ErrMFAToken
 }

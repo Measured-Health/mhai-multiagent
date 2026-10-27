@@ -30,7 +30,7 @@ const (
 	LoginAttemptsBucket = "login_attempts"
 	MFAAttemptsBucket   = "mfa_attempts"
 
-	DenylistTTL      = 15 * time.Minute
+	DenylistTTL      = 17 * time.Minute // access token life (15 min) plus clock-skew margin
 	LoginAttemptsTTL = 15 * time.Minute
 	MFAAttemptsTTL   = 15 * time.Minute
 )

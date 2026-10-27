@@ -3,6 +3,9 @@ package auth
 import (
 	"strings"
 	"testing"
+
+	"github.com/Measured-Health/mhai-multiagent/gateway/internal/bus"
+	"github.com/Measured-Health/mhai-multiagent/gateway/internal/token"
 )
 
 func TestPrimaryRole(t *testing.T) {
@@ -64,5 +67,41 @@ func TestLockoutKey(t *testing.T) {
 	c := LockoutKey("grace.nwosu@havana.example", "198.51.100.2")
 	if a != b || a == c || len(a) != 64 || strings.Contains(a, "havana") {
 		t.Fatalf("keys %s %s %s", a, b, c)
+	}
+}
+
+func TestSessionSatisfiesMFA(t *testing.T) {
+	open := mfaPolicy{}
+	strictClin := mfaPolicy{RequireForClinicians: true}
+	trust := mfaPolicy{RequireForClinicians: true, AllowTrustDevice: true}
+	for _, c := range []struct {
+		name  string
+		roles string
+		p     mfaPolicy
+		mfa   bool
+		amr   string
+		want  bool
+	}{
+		{"clinician, no policy, pwd", "clinician", open, false, "pwd", true},
+		{"clinician, policy, pwd", "clinician", strictClin, false, "pwd", false},
+		{"clinician, policy, otp", "clinician", strictClin, true, "pwd,otp", true},
+		{"clinician, device, trust on", "clinician", trust, true, "pwd,device", true},
+		{"clinician, device, trust off", "clinician", strictClin, true, "pwd,device", false},
+		{"admin, device", "clinician,hospital_admin", trust, true, "pwd,device", false},
+		{"analyst, device", "analyst", trust, true, "pwd,device", false},
+		{"admin, otp", "hospital_admin", open, true, "pwd,otp", true},
+		{"admin, pwd only", "hospital_admin", open, false, "pwd", false},
+		{"mfa flag without proof", "hospital_admin", open, true, "pwd", false},
+		{"auditor, backup", "auditor", open, true, "pwd,backup", true},
+	} {
+		if got := sessionSatisfiesMFA(strings.Split(c.roles, ","), c.p, c.mfa, strings.Split(c.amr, ",")); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestDenylistOutlivesAccessToken(t *testing.T) {
+	if bus.DenylistTTL <= token.AccessTTL {
+		t.Fatalf("denylist TTL %v must exceed the access token life %v", bus.DenylistTTL, token.AccessTTL)
 	}
 }

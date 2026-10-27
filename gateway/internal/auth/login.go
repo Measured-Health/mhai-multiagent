@@ -65,8 +65,10 @@ func clientIP(r *http.Request) string {
 }
 
 // login: POST /auth/login. Unknown, inactive and wrong-password logins get
-// the same 401 after the same argon2 work; a locked (login, IP) gets 429
-// login_locked, without verifying and without touching the counter.
+// the same 401 after the same argon2 work. Each attempt first reserves a
+// slot in the (login, IP) counter atomically; one that finds the counter
+// already at 5 gets 429 login_locked without verifying and without writing.
+// If the counter can't be read or written, sign-in fails closed (503).
 func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	var in loginRequest
 	if !httpx.Decode(w, r, &in) {
@@ -79,10 +81,18 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	rid := httpx.RequestIDFrom(ctx)
+	ip := clientIP(r)
+	if ip == "" {
+		// The BFF must send X-MHAI-Client-IP (contract §2.1); without it every
+		// request would share one counter per login, which anyone could trip.
+		s.fail(w, r, "not_ready", "auth: login without a client IP; check the BFF configuration")
+		return
+	}
 	email := account.NormaliseEmail(in.Username)
-	key := LockoutKey(email, clientIP(r))
+	key := LockoutKey(email, ip)
 
-	failures, err := s.failures(ctx, key)
+	// Before the account lookup, so the reply never depends on the account.
+	locked, err := s.reserveAttempt(ctx, key)
 	if err != nil {
 		s.fail(w, r, "not_ready", "auth: login attempts unavailable")
 		return
@@ -106,7 +116,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		actor, hospital = acct.ID.String(), acct.hospitalID()
 	}
 
-	if failures >= MaxLoginFailures {
+	if locked {
 		s.auditOnly(w, r, "auth.login.locked", actor, hospital, map[string]any{"reason": "locked"})
 		s.log().Info("auth: login locked", "request_id", rid, "user_id", actor)
 		httpx.Error(w, r, "login_locked")
@@ -121,9 +131,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		password.DummyVerify(in.Password)
 	}
 	if !ok || !acct.usable() {
-		if err := s.addFailure(ctx, key); err != nil {
-			s.log().Error("auth: login attempts write failed", "request_id", rid)
-		}
+		// The attempt was already counted by reserveAttempt.
 		s.auditOnly(w, r, "auth.login.failed", actor, hospital, map[string]any{"reason": "bad_credentials"})
 		s.log().Info("auth: login failed", "request_id", rid, "user_id", actor)
 		httpx.Error(w, r, "unauthenticated")
@@ -148,8 +156,10 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 
 	rehash := password.NeedsRehash(*acct.PasswordHash)
 	mfa, amr := false, []string{"pwd"}
-	if needsMFA(acct.Roles, acct.RequireMFAClinicians) {
-		if acct.AllowTrustDevice && deviceMaySkip(acct.Roles) && in.DeviceToken != "" {
+	if !sessionSatisfiesMFA(acct.Roles, acct.policy(), mfa, amr) {
+		// A trusted device may stand in for the code only where the shared
+		// check accepts it (clinician-only account, hospital allows it).
+		if in.DeviceToken != "" && sessionSatisfiesMFA(acct.Roles, acct.policy(), true, []string{"pwd", "device"}) {
 			trusted, err := s.trustedDevice(ctx, acct.ID, in.DeviceToken)
 			if err != nil {
 				s.fail(w, r, "internal_error", "auth: trusted device lookup failed", "user_id", actor)
@@ -159,7 +169,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 				mfa, amr = true, []string{"pwd", "device"}
 			}
 		}
-		if !mfa {
+		if !sessionSatisfiesMFA(acct.Roles, acct.policy(), mfa, amr) {
 			s.mfaPending(w, r, acct, in.Password, rehash)
 			return
 		}
@@ -279,45 +289,48 @@ func (s *Service) auditOnly(_ http.ResponseWriter, r *http.Request, action, acto
 	}
 }
 
-// failures is the current failure count for key (0 when none).
-func (s *Service) failures(ctx context.Context, key string) (int, error) {
-	e, err := s.Buckets.LoginAttempts.Get(ctx, key)
-	if bus.IsNotFound(err) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	n, err := strconv.Atoi(string(e.Value()))
-	if err != nil {
-		return MaxLoginFailures, nil // unreadable counter: treat as locked
-	}
-	return n, nil
-}
-
-// addFailure increments key's counter with compare-and-set, so concurrent
-// failures all count.
-func (s *Service) addFailure(ctx context.Context, key string) error {
+// reserveAttempt counts this attempt against key before the password is
+// checked, by compare-and-set, so a concurrent burst gets at most
+// MaxLoginFailures checks. locked is true when the counter was already at
+// the limit; then nothing is written (the bucket's lifetime runs from the
+// last write, so locked requests must not extend it). An error (KV failure,
+// or contention that outlasts the retries) means the caller must fail closed.
+func (s *Service) reserveAttempt(ctx context.Context, key string) (locked bool, err error) {
 	kv := s.Buckets.LoginAttempts
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 16; i++ {
 		e, err := kv.Get(ctx, key)
 		if bus.IsNotFound(err) {
-			if _, err := kv.Create(ctx, key, []byte("1")); err == nil {
-				return nil
-			} else if !errors.Is(err, jetstream.ErrKeyExists) {
-				return err
+			_, err := kv.Create(ctx, key, []byte("1"))
+			if err == nil {
+				return false, nil
+			}
+			if !errors.Is(err, jetstream.ErrKeyExists) && !isRevisionConflict(err) {
+				return false, err
 			}
 			continue
 		}
 		if err != nil {
-			return err
+			return false, err
 		}
-		n, _ := strconv.Atoi(string(e.Value()))
-		if _, err := kv.Update(ctx, key, []byte(strconv.Itoa(n+1)), e.Revision()); err == nil {
-			return nil
+		n, err := strconv.Atoi(string(e.Value()))
+		if err != nil || n >= MaxLoginFailures {
+			return true, nil // an unreadable counter counts as locked
+		}
+		_, err = kv.Update(ctx, key, []byte(strconv.Itoa(n+1)), e.Revision())
+		if err == nil {
+			return false, nil
+		}
+		if !isRevisionConflict(err) {
+			return false, err
 		}
 	}
-	return errors.New("auth: login attempts contention")
+	return false, errors.New("auth: login attempts contention")
+}
+
+// isRevisionConflict reports a lost compare-and-set (another writer won).
+func isRevisionConflict(err error) bool {
+	var apiErr *jetstream.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence
 }
 
 // ipPrefix is the client's /24 (IPv4) or /48 (IPv6), for the device list.

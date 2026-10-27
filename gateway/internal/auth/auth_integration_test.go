@@ -286,10 +286,8 @@ var userKeys = []string{"id", "role", "roles", "email", "display_name", "full_na
 func TestLoginSuccessShape(t *testing.T) {
 	e := newEnv(t)
 	hid := seedHospital(t, hospitalOpts{})
-	u := seedUser(t, hid, false, "clinician", "analyst")
-	// analyst needs MFA; use a clinician-only account for the token branch.
+	// A clinician-only account takes the token branch (analyst needs MFA).
 	u2 := seedUser(t, hid, false, "clinician")
-	_ = u
 
 	r := e.login(t, "  "+strings.ToUpper(u2.email)+" ", testPassword, newIP())
 	if r.code != 200 {
@@ -354,20 +352,6 @@ func TestLoginSuccessShape(t *testing.T) {
 		t.Fatalf("probe %d %s", pr.code, pr.raw)
 	}
 	assertAudit(t, r, "auth.login.succeeded", u2.email)
-}
-
-func TestLoginPrimaryRoleOrder(t *testing.T) {
-	e := newEnv(t)
-	hid := seedHospital(t, hospitalOpts{})
-	_ = hid
-	// Primary role with MFA is checked through the platform account below;
-	// clinical primary order is unit-tested (TestPrimaryRole).
-	u := seedUser(t, uuid.Nil, false, "auditor")
-	r := e.do(t, req{method: "POST", path: "/auth/login", platform: true,
-		body: map[string]any{"username": u.email, "password": testPassword}, ip: newIP()})
-	if r.code != 200 || r.body["mfa_required"] != true {
-		t.Fatalf("auditor: %d %s", r.code, r.raw)
-	}
 }
 
 func TestLoginWrongPasswordGeneric(t *testing.T) {
@@ -560,12 +544,16 @@ func TestMFATokenSingleUseAndExpiry(t *testing.T) {
 	r = e.login(t, u.email, testPassword, newIP())
 	tok = r.body["mfa_token"].(string)
 	for i := 0; i < 5; i++ {
-		if _, err := store.Fail(ctx, tok); err != nil && i < 4 {
-			t.Fatalf("fail %d: %v", i, err)
+		rec, err := store.Attempt(ctx, tok)
+		if err != nil || rec.AttemptsLeft != 4-i {
+			t.Fatalf("attempt %d: left %d, %v", i+1, rec.AttemptsLeft, err)
 		}
 	}
+	if _, err := store.Attempt(ctx, tok); err == nil {
+		t.Fatal("a 6th attempt was allowed")
+	}
 	if _, err := store.Lookup(ctx, tok); err == nil {
-		t.Fatal("usable after 5 failed attempts")
+		t.Fatal("usable after 5 attempts")
 	}
 	r = e.login(t, u.email, testPassword, newIP())
 	tok = r.body["mfa_token"].(string)
