@@ -32,7 +32,7 @@ type passwordRequest struct {
 //     caller's own session stays. Outstanding mfa_tokens die too: each
 //     holds a fingerprint of the old hash, which the challenge re-checks.
 func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
-	c, _ := ClaimsFrom(r.Context())
+	c := callerOf(r)
 	var in passwordRequest
 	if !httpx.Decode(w, r, &in) {
 		return

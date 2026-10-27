@@ -33,6 +33,7 @@ const (
 	refreshRace                    // already rotated within the grace window: 409, nothing revoked
 	refreshReuse                   // already rotated longer ago: family revoked, 401
 	refreshEndedNow                // idle, unusable account or MFA no longer met: session revoked now, 401
+	refreshAudience                // the account is not of the request's audience: 403, nothing changed
 )
 
 // refresh: POST /auth/refresh. The token row is locked FOR UPDATE, so two
@@ -111,6 +112,13 @@ func (s *Service) refresh(w http.ResponseWriter, r *http.Request) {
 			return writeAudit(ctx, tx, r, "auth.refresh.reuse", userID, hospitalID, "session", sid.String(),
 				map[string]any{"revoked": true})
 		}
+		// The token is renewed only on its account's audience, as at sign-in:
+		// a clinical account on the platform side is not_platform, a
+		// platform account on the clinical side forbidden.
+		if acct != nil && (httpx.Audience(ctx) == httpx.AudiencePlatform) != hasPlatformRole(acct.Roles) {
+			outcome = refreshAudience
+			return nil
+		}
 		idle := defaultIdleMinutes
 		if acct != nil {
 			idle = acct.IdleMinutes
@@ -154,6 +162,13 @@ func (s *Service) refresh(w http.ResponseWriter, r *http.Request) {
 	case refreshOK:
 		httpx.JSON(w, http.StatusOK, refreshResponse{AccessToken: access, ExpiresIn: int(token.AccessTTL / time.Second),
 			RefreshToken: newRefresh})
+	case refreshAudience:
+		s.log().Info("auth: refresh refused for this audience", "request_id", rid, "user_id", userID)
+		if httpx.Audience(ctx) == httpx.AudiencePlatform {
+			httpx.Error(w, r, "not_platform")
+		} else {
+			httpx.Error(w, r, "forbidden")
+		}
 	case refreshRace:
 		s.log().Info("auth: refresh race", "request_id", rid, "user_id", userID)
 		httpx.Error(w, r, "conflict")

@@ -70,11 +70,13 @@ func NoStore(h http.Handler) http.Handler {
 // same key with a different request, or while the first is still running,
 // gets 409 conflict.
 //
-// The scope is the principal's user id (WithPrincipal), or anon:<client ip>
-// before sign-in; never anything the client sends. An anonymous request
-// without a trusted client IP runs without idempotency. Rows are written
-// as mhai_gateway under the principal's hospital, or with no hospital as
-// mhai_platform (platform principal) or mhai_auth (anonymous).
+// The scope is the principal's user id (WithPrincipal); never anything the
+// client sends. Idempotent sits inside the principal middleware: a request
+// that reaches it without a principal is a wiring fault and gets 500
+// internal_error without running. Public routes (sign-in) use
+// IdempotentAnon instead. Rows are written as mhai_gateway under the
+// principal's hospital, or with no hospital as mhai_platform (platform
+// principal).
 //
 // What happens to the key after the handler:
 //   - NoStore route, Cache-Control: no-store, or a non-2xx reply: released,
@@ -91,6 +93,29 @@ func Idempotent(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 // IdempotentLog is Idempotent with the logger that records replies which
 // could not be stored.
 func IdempotentLog(pool *pgxpool.Pool, log *slog.Logger) func(http.Handler) http.Handler {
+	return idempotent(pool, log, principalScope)
+}
+
+// IdempotentAnon is Idempotent for public routes (sign-in, refresh, the
+// two-step challenge): the scope is anon:<client ip> from the BFF, whatever
+// else is in the context. A request without a trusted client IP runs
+// without idempotency. Rows are written as mhai_auth with no hospital.
+func IdempotentAnon(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+	return IdempotentAnonLog(pool, slog.Default())
+}
+
+// IdempotentAnonLog is IdempotentAnon with a logger.
+func IdempotentAnonLog(pool *pgxpool.Pool, log *slog.Logger) func(http.Handler) http.Handler {
+	return idempotent(pool, log, anonScope)
+}
+
+// scopeFunc picks the scope; ok false runs without idempotency, err
+// refuses the request.
+type scopeFunc func(context.Context) (sc scope, ok bool, err error)
+
+var errNoPrincipal = errors.New("idempotency: no principal")
+
+func idempotent(pool *pgxpool.Pool, log *slog.Logger, scopeOf scopeFunc) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
@@ -108,7 +133,12 @@ func IdempotentLog(pool *pgxpool.Pool, log *slog.Logger) func(http.Handler) http
 				Error(w, r, "validation_failed")
 				return
 			}
-			sc, ok := scopeOf(r.Context())
+			sc, ok, err := scopeOf(r.Context())
+			if err != nil {
+				log.Error("httpx: idempotent route reached without a principal", "request_id", RequestIDFrom(r.Context()))
+				Error(w, r, "internal_error")
+				return
+			}
 			if !ok {
 				next.ServeHTTP(w, r)
 				return
@@ -143,21 +173,26 @@ type scope struct {
 	run      func(context.Context, *pgxpool.Pool, func(pgx.Tx) error) error
 }
 
-func scopeOf(ctx context.Context) (scope, bool) {
-	if p, ok := PrincipalFrom(ctx); ok {
-		if p.HospitalID != uuid.Nil {
-			h := p.HospitalID
-			return scope{name: p.UserID, hospital: h, run: func(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
-				return db.WithHospital(ctx, pool, h, fn)
-			}}, true
-		}
-		return scope{name: p.UserID, run: db.WithPlatform}, true
+func principalScope(ctx context.Context) (scope, bool, error) {
+	p, ok := PrincipalFrom(ctx)
+	if !ok {
+		return scope{}, false, errNoPrincipal
 	}
+	if p.HospitalID != uuid.Nil {
+		h := p.HospitalID
+		return scope{name: p.UserID, hospital: h, run: func(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+			return db.WithHospital(ctx, pool, h, fn)
+		}}, true, nil
+	}
+	return scope{name: p.UserID, run: db.WithPlatform}, true, nil
+}
+
+func anonScope(ctx context.Context) (scope, bool, error) {
 	ip := ClientIP(ctx)
 	if !ip.IsValid() {
-		return scope{}, false
+		return scope{}, false, nil
 	}
-	return scope{name: "anon:" + ip.String(), run: db.WithAuth}, true
+	return scope{name: "anon:" + ip.String(), run: db.WithAuth}, true, nil
 }
 
 // requestHash binds a key to one request: method, path, query and body.

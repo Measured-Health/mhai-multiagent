@@ -24,7 +24,7 @@ type sessionView struct {
 // listSessions: GET /auth/sessions → {"sessions": [...]}, the caller's
 // sessions that are not revoked, most recently seen first.
 func (s *Service) listSessions(w http.ResponseWriter, r *http.Request) {
-	c, _ := ClaimsFrom(r.Context())
+	c := callerOf(r)
 	ctx := r.Context()
 	list := []sessionView{}
 	err := s.withAuth(ctx, func(tx pgx.Tx) error {
@@ -55,7 +55,7 @@ func (s *Service) listSessions(w http.ResponseWriter, r *http.Request) {
 // deleteSession: DELETE /auth/sessions/{id} → 204. Another user's session,
 // an unknown id or a malformed one is 404.
 func (s *Service) deleteSession(w http.ResponseWriter, r *http.Request) {
-	c, _ := ClaimsFrom(r.Context())
+	c := callerOf(r)
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.Error(w, r, "not_found")
@@ -95,7 +95,7 @@ func (s *Service) deleteSession(w http.ResponseWriter, r *http.Request) {
 // revokeAll: POST /auth/sessions/revoke-all → 204. Revokes every session of
 // the caller, the current one included.
 func (s *Service) revokeAll(w http.ResponseWriter, r *http.Request) {
-	c, _ := ClaimsFrom(r.Context())
+	c := callerOf(r)
 	ctx := r.Context()
 	jtis, err := s.revokeSessions(ctx, r, c.Sub, c.Hid, "auth.session.revoked", func(ctx context.Context, tx pgx.Tx) (pgx.Rows, error) {
 		return tx.Query(ctx, `UPDATE sessions SET revoked_at = $2

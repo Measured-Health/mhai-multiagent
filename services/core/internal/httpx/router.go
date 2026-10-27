@@ -15,8 +15,14 @@ const MaxBody = 64 << 10
 // Router collects the /api/v1 routes. Handler wraps them in the request
 // id, BFF credential and body limit; there is no way to serve a route
 // without them.
+//
+// Application routes register through authz.Route, never Handle directly:
+// authz.Route puts the route behind the principal middleware and in the
+// permission table, and TestEveryRouteInTable fails on any pattern here
+// that the table lacks.
 type Router struct {
-	mux *http.ServeMux
+	mux      *http.ServeMux
+	patterns []string
 }
 
 // NewRouter returns an empty router.
@@ -31,6 +37,12 @@ func (rt *Router) Handle(method, pattern string, h http.Handler) {
 		panic("httpx: Handle needs a method and a pattern starting with /")
 	}
 	rt.mux.Handle(method+" "+BasePath+pattern, h)
+	rt.patterns = append(rt.patterns, method+" "+BasePath+pattern)
+}
+
+// Patterns returns every "METHOD /api/v1/path" registered, in order.
+func (rt *Router) Patterns() []string {
+	return append([]string(nil), rt.patterns...)
 }
 
 // Handler is the router behind RequestID → BFF(serviceKeys) → body limit.

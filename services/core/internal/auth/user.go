@@ -3,51 +3,22 @@ package auth
 import (
 	"context"
 	"errors"
-	"slices"
-	"sort"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 )
 
-// Role ranks: the primary role is the first present in this order
-// (clinical: clinician > hospital_admin > analyst; platform:
-// platform_admin > auditor).
-var roleRank = map[string]int{
-	"clinician": 0, "hospital_admin": 1, "analyst": 2,
-	"platform_admin": 3, "auditor": 4,
-}
+// The role and two-step policy rules live in authz, shared with the
+// principal middleware; these names keep the auth code readable.
+type mfaPolicy = authz.MFAPolicy
 
-var platformRoles = map[string]bool{"platform_admin": true, "auditor": true}
-
-// mfaAlways are the roles that always need two-step verification, and that
-// a trusted device never excuses.
-var mfaAlways = map[string]bool{"hospital_admin": true, "analyst": true, "platform_admin": true, "auditor": true}
-
-// normaliseRole maps the read alias admin to platform_admin.
-func normaliseRole(r string) string {
-	if r == "admin" {
-		return "platform_admin"
-	}
-	return r
-}
-
-// sortRoles returns the known roles in rank order, deduplicated, with the
-// alias mapped. Unknown roles are dropped.
-func sortRoles(in []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(in))
-	for _, r := range in {
-		r = normaliseRole(r)
-		if _, ok := roleRank[r]; ok && !seen[r] {
-			seen[r] = true
-			out = append(out, r)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return roleRank[out[i]] < roleRank[out[j]] })
-	return out
-}
+func sortRoles(in []string) []string     { return authz.SortRoles(in) }
+func hasPlatformRole(r []string) bool    { return authz.HasPlatformRole(r) }
+func needsMFA(r []string, req bool) bool { return authz.NeedsMFA(r, req) }
+func deviceMaySkip(r []string) bool      { return authz.DeviceMaySkip(r) }
 
 func primaryRole(roles []string) string {
 	s := sortRoles(roles)
@@ -57,93 +28,15 @@ func primaryRole(roles []string) string {
 	return s[0]
 }
 
-func hasPlatformRole(roles []string) bool {
-	for _, r := range roles {
-		if platformRoles[normaliseRole(r)] {
-			return true
-		}
-	}
-	return false
-}
-
-func hasClinicalRole(roles []string) bool {
-	for _, r := range roles {
-		r = normaliseRole(r)
-		if _, ok := roleRank[r]; ok && !platformRoles[r] {
-			return true
-		}
-	}
-	return false
-}
-
-// needsMFA: hospital admins, analysts, platform admins and auditors
-// always; clinicians when their hospital requires it.
-func needsMFA(roles []string, requireForClinicians bool) bool {
-	for _, r := range roles {
-		r = normaliseRole(r)
-		if mfaAlways[r] || (r == "clinician" && requireForClinicians) {
-			return true
-		}
-	}
-	return false
-}
-
-// deviceMaySkip reports whether a trusted device may stand in for the code:
-// only for an account none of whose roles is in mfaAlways.
-func deviceMaySkip(roles []string) bool {
-	for _, r := range roles {
-		if mfaAlways[normaliseRole(r)] {
-			return false
-		}
-	}
-	return len(roles) > 0
-}
-
-// mfaPolicy is the hospital's two-step policy as it applies to an account.
-type mfaPolicy struct {
-	RequireForClinicians bool
-	AllowTrustDevice     bool
-}
-
-// sessionSatisfiesMFA reports whether a session's proof (mfa, amr) meets
-// the account's current roles and policy. Sign-in and every refresh use it,
-// so a role gained or a policy tightened mid-session ends the session.
-//   - A code is needed when the roles and policy require two-step, or the
-//     account has turned it on (enrolled): an enrolled account is always
-//     challenged, whatever the policy.
-//   - No code needed: any session will do.
-//   - Otherwise mfa must be set, and amr must show the proof: "otp" or
-//     "backup" (a code), or "device", which counts only while the hospital
-//     allows trusted devices and no role forbids them.
 func sessionSatisfiesMFA(roles []string, p mfaPolicy, enrolled, mfa bool, amr []string) bool {
-	if !needsCode(roles, p, enrolled) {
-		return true
-	}
-	if !mfa {
-		return false
-	}
-	if slices.Contains(amr, "otp") || slices.Contains(amr, "backup") {
-		return true
-	}
-	if slices.Contains(amr, "device") {
-		return deviceMayStandIn(roles, p)
-	}
-	return false
+	return authz.SessionSatisfiesMFA(roles, p, enrolled, mfa, amr)
 }
 
-// needsCode reports whether sign-in must prove a second factor: the roles
-// and policy require two-step, or the account has turned it on.
 func needsCode(roles []string, p mfaPolicy, enrolled bool) bool {
-	return enrolled || needsMFA(roles, p.RequireForClinicians)
+	return authz.NeedsCode(roles, p, enrolled)
 }
 
-// deviceMayStandIn reports whether a trusted device may replace the code:
-// the hospital allows trusted devices and no role forbids them. Checked
-// directly, never through sessionSatisfiesMFA (which is true whenever no
-// code is needed).
-func deviceMayStandIn(roles []string, p mfaPolicy) bool {
-	return p.AllowTrustDevice && deviceMaySkip(roles)
-}
+func deviceMayStandIn(roles []string, p mfaPolicy) bool { return authz.DeviceMayStandIn(roles, p) }
 
 func (a *acctRec) policy() mfaPolicy {
 	return mfaPolicy{RequireForClinicians: a.RequireMFAClinicians, AllowTrustDevice: a.AllowTrustDevice}
@@ -178,24 +71,9 @@ func (a *acctRec) hospitalID() string {
 	return a.HospitalID.String()
 }
 
-// usable reports whether the account may hold a session: active, with a
-// consistent role set, and (for clinical accounts) a hospital that is
-// running. Deactivated or removed hospitals are refused.
+// usable reports whether the account may hold a session (authz.AccountUsable).
 func (a *acctRec) usable() bool {
-	if !a.Active || len(a.Roles) == 0 {
-		return false
-	}
-	if a.HospitalID == nil {
-		return hasPlatformRole(a.Roles) && !hasClinicalRole(a.Roles)
-	}
-	if hasPlatformRole(a.Roles) || a.HospitalStatus == nil {
-		return false
-	}
-	switch *a.HospitalStatus {
-	case "active", "setup_incomplete":
-		return true
-	}
-	return false
+	return authz.AccountUsable(a.Active, a.HospitalID, a.HospitalStatus, a.Roles)
 }
 
 // accountSelect reads everything sign-in needs in one statement (mhai_auth).

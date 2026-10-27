@@ -23,11 +23,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
@@ -112,6 +114,7 @@ func (c *clock) Add(d time.Duration) {
 
 type env struct {
 	svc   *auth.Service
+	guard *authz.Guard
 	h     http.Handler
 	clock *clock
 	logs  *syncBuffer
@@ -141,18 +144,31 @@ func newEnv(t *testing.T) *env {
 		Now:     e.clock.Now,
 		MFAKey:  []byte(testMFAKey),
 	}
-	rt := httpx.NewRouter()
-	e.svc.Register(rt)
-	// A probe route behind the token check, standing in for later tasks.
-	rt.Handle(http.MethodGet, "/probe", e.svc.RequireToken(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p, ok := httpx.PrincipalFrom(r.Context())
-		if !ok {
+	log := logx.New(e.logs)
+	e.guard = &authz.Guard{
+		Keys:     issuer.PublicKeys(),
+		Denylist: buckets.Denylist,
+		Pool:     app,
+		Log:      log,
+		Now:      e.clock.Now,
+		CacheNow: e.clock.Now,
+		Idem:     httpx.IdempotentLog(app, log),
+		IdemAnon: httpx.IdempotentAnonLog(app, log),
+	}
+	m := authz.NewMux(e.guard)
+	server.Register(m, server.Deps{Auth: e.svc, Pool: app})
+	// A probe route behind the principal middleware, standing in for later
+	// tasks.
+	authz.Route(m, http.MethodGet, "/probe", authz.Rule{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, ok := authz.FromContext(r.Context())
+		hp, hok := httpx.PrincipalFrom(r.Context())
+		if !ok || !hok || hp.UserID != p.UserID.String() || hp.HospitalID != p.HospitalID {
 			httpx.Error(w, r, "internal_error")
 			return
 		}
-		httpx.JSON(w, 200, map[string]string{"user_id": p.UserID})
-	})))
-	e.h = rt.Handler([]string{serviceKey})
+		httpx.JSON(w, 200, map[string]any{"user_id": p.UserID.String(), "roles": p.Roles})
+	}))
+	e.h = m.Handler([]string{serviceKey})
 	return e
 }
 
@@ -747,7 +763,7 @@ func TestRefreshInactiveUser(t *testing.T) {
 
 // --- Token check, logout, sessions, terms -------------------------------------
 
-func TestRequireToken(t *testing.T) {
+func TestPrincipalNeedsValidToken(t *testing.T) {
 	e := newEnv(t)
 	_, l := loggedIn(t, e)
 	at := l.body["access_token"].(string)

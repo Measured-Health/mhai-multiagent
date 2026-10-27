@@ -81,9 +81,13 @@ func seedHospital(t *testing.T) uuid.UUID {
 }
 
 // chain is what a route looks like: BFF, then (optionally) the token
-// middleware setting the principal, then Idempotent, then the handler.
+// middleware setting the principal, then Idempotent (IdempotentAnon for a
+// public route), then the handler.
 func chain(p *httpx.Principal, h http.Handler) http.Handler {
 	inner := httpx.Idempotent(app)(h)
+	if p == nil {
+		inner = httpx.IdempotentAnon(app)(h)
+	}
 	withPrincipal := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p != nil {
 			r = r.WithContext(httpx.WithPrincipal(r.Context(), *p))

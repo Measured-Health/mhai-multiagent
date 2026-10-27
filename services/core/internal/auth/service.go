@@ -1,8 +1,8 @@
 // Package auth serves sign-in, two-step verification (challenge, enrol,
 // verify, backup codes, trusted devices, step-up), password change,
-// refresh, logout, the device (session) list and terms acceptance, and
-// holds the interim access-token check (RequireToken, Ruling 2; Task 8
-// replaces it with the principal middleware).
+// refresh, logout, the device (session) list and terms acceptance. Its
+// routes register through authz.Route, so the principal middleware (authz)
+// checks every access token.
 //
 // Nothing here logs or audits an email, password or token: logs carry the
 // request id and, once known, the user id; audit payloads carry ids and
@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
@@ -53,9 +54,6 @@ type Service struct {
 	// with AES-256-GCM and backup codes hashed with HMAC-SHA256, under keys
 	// derived from it. Without it every two-step route fails closed (503).
 	MFAKey []byte
-	// Idem, when set, is the Idempotency-Key middleware (httpx.Idempotent).
-	// It wraps each write inside the token check, so keys scope by user.
-	Idem func(http.Handler) http.Handler
 }
 
 func (s *Service) now() time.Time {
@@ -85,32 +83,36 @@ func (s *Service) issuer() token.Issuer {
 	return i
 }
 
-func (s *Service) idem(h http.Handler) http.Handler {
-	if s.Idem != nil {
-		return s.Idem(h)
-	}
-	return h
-}
-
-// Register adds the auth routes to rt. Every auth response carries
+// Register adds the auth routes to m. Every auth response carries
 // Cache-Control: no-store, and every route that returns a token is wrapped
 // in httpx.NoStore, so an Idempotency-Key replay never re-sends it.
-func (s *Service) Register(rt *httpx.Router) {
-	h := func(method, pattern string, next http.Handler) { rt.Handle(method, pattern, noCache(next)) }
-	h(http.MethodPost, "/auth/login", s.idem(httpx.NoStore(http.HandlerFunc(s.login))))
-	h(http.MethodPost, "/auth/refresh", s.idem(httpx.NoStore(http.HandlerFunc(s.refresh))))
-	h(http.MethodPost, "/auth/mfa/challenge", s.idem(httpx.NoStore(http.HandlerFunc(s.challenge))))
+// Idempotency itself comes from the mux: per principal on authenticated
+// routes, per client IP on the public ones.
+//
+// None of these routes is a Write in the authz sense: they are the
+// account's own sign-in, two-step and session housekeeping, which auditors
+// need too.
+func (s *Service) Register(m *authz.Mux) {
+	h := func(method, pattern string, rule authz.Rule, next http.Handler) {
+		authz.Route(m, method, pattern, rule, noCache(next))
+	}
+	public := authz.Rule{Public: true}
 	// Enrol, verify, password change and logout also accept a session
 	// limited to enrolment; every other route refuses it (mfa_required).
-	h(http.MethodPost, "/auth/mfa/enroll", s.requireTokenEnrol(s.idem(httpx.NoStore(http.HandlerFunc(s.enroll)))))
-	h(http.MethodPost, "/auth/mfa/verify", s.requireTokenEnrol(s.idem(http.HandlerFunc(s.verify))))
-	h(http.MethodPost, "/auth/mfa/recovery-codes", s.RequireToken(s.idem(httpx.NoStore(http.HandlerFunc(s.recoveryCodes)))))
-	h(http.MethodPost, "/auth/password", s.requireTokenEnrol(s.idem(http.HandlerFunc(s.changePassword))))
-	h(http.MethodPost, "/auth/logout", s.requireTokenEnrol(s.idem(http.HandlerFunc(s.logout))))
-	h(http.MethodPost, "/auth/terms", s.RequireToken(s.idem(http.HandlerFunc(s.terms))))
-	h(http.MethodGet, "/auth/sessions", s.RequireToken(http.HandlerFunc(s.listSessions)))
-	h(http.MethodDelete, "/auth/sessions/{id}", s.RequireToken(s.idem(http.HandlerFunc(s.deleteSession))))
-	h(http.MethodPost, "/auth/sessions/revoke-all", s.RequireToken(s.idem(http.HandlerFunc(s.revokeAll))))
+	enrol := authz.Rule{MFAEnrol: true}
+	signedIn := authz.Rule{}
+	h(http.MethodPost, "/auth/login", public, httpx.NoStore(http.HandlerFunc(s.login)))
+	h(http.MethodPost, "/auth/refresh", public, httpx.NoStore(http.HandlerFunc(s.refresh)))
+	h(http.MethodPost, "/auth/mfa/challenge", public, httpx.NoStore(http.HandlerFunc(s.challenge)))
+	h(http.MethodPost, "/auth/mfa/enroll", enrol, httpx.NoStore(http.HandlerFunc(s.enroll)))
+	h(http.MethodPost, "/auth/mfa/verify", enrol, http.HandlerFunc(s.verify))
+	h(http.MethodPost, "/auth/mfa/recovery-codes", authz.Rule{StepUp: true}, httpx.NoStore(http.HandlerFunc(s.recoveryCodes)))
+	h(http.MethodPost, "/auth/password", enrol, http.HandlerFunc(s.changePassword))
+	h(http.MethodPost, "/auth/logout", enrol, http.HandlerFunc(s.logout))
+	h(http.MethodPost, "/auth/terms", signedIn, http.HandlerFunc(s.terms))
+	h(http.MethodGet, "/auth/sessions", signedIn, http.HandlerFunc(s.listSessions))
+	h(http.MethodDelete, "/auth/sessions/{id}", signedIn, http.HandlerFunc(s.deleteSession))
+	h(http.MethodPost, "/auth/sessions/revoke-all", signedIn, http.HandlerFunc(s.revokeAll))
 }
 
 // noCache sets Cache-Control: no-store before the handler runs.

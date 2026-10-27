@@ -121,7 +121,7 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) {
 	if !acct.MFAEnabled {
 		// Nothing to check: the password was checked at sign-in. The session
 		// meets the policy only if the account doesn't need two-step;
-		// otherwise RequireToken limits it to enrolment.
+		// otherwise the principal middleware (authz) limits it to enrolment.
 		if _, err := store.Consume(ctx, in.MFAToken); err != nil {
 			httpx.Error(w, r, "mfa_invalid")
 			return
@@ -234,7 +234,7 @@ func decodeEmpty(w http.ResponseWriter, r *http.Request) bool {
 // off until POST /auth/mfa/verify. An account with two-step already on gets
 // 409 conflict: replacing it takes an admin reset.
 func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
-	c, _ := ClaimsFrom(r.Context())
+	c := callerOf(r)
 	if !decodeEmpty(w, r) {
 		return
 	}
@@ -328,7 +328,7 @@ type verifyRequest struct {
 // (sessions.mfa, amr + otp), so its next refresh mints a full token. No
 // enrolment is 409 conflict.
 func (s *Service) verify(w http.ResponseWriter, r *http.Request) {
-	c, _ := ClaimsFrom(r.Context())
+	c := callerOf(r)
 	var in verifyRequest
 	if !httpx.Decode(w, r, &in) {
 		return
@@ -423,7 +423,7 @@ var errStepUpRefused = errors.New("auth: step-up refused")
 // recoveryCodes: POST /auth/mfa/recovery-codes {mfa_code | backup_code} →
 // {recovery_codes[10]}. Needs a step-up code; the old codes stop working.
 func (s *Service) recoveryCodes(w http.ResponseWriter, r *http.Request) {
-	c, _ := ClaimsFrom(r.Context())
+	c := callerOf(r)
 	var in recoveryCodesRequest
 	if !httpx.Decode(w, r, &in) {
 		return

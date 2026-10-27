@@ -14,11 +14,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 )
 
 const usage = "usage: core serve | core migrate up|status | core hospitals create ... | core users create ..."
@@ -100,13 +101,12 @@ func serve() error {
 	return nil
 }
 
+// newHandler serves the health probe. Task 9 mounts the full route set
+// (server.Register) with its dependencies.
 func newHandler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}` + "\n"))
-	})
-	return httpx.RequestID(mux)
+	m := authz.NewMux(nil)
+	server.RegisterHealth(m)
+	return m.Handler(nil)
 }
 
 // openDB connects and refuses to go on unless the login user is held by

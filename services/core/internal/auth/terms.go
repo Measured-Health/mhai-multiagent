@@ -18,7 +18,7 @@ type termsRequest struct {
 
 // terms: POST /auth/terms {version} → 204. Records the version and time.
 func (s *Service) terms(w http.ResponseWriter, r *http.Request) {
-	c, _ := ClaimsFrom(r.Context())
+	c := callerOf(r)
 	var in termsRequest
 	if !httpx.Decode(w, r, &in) {
 		return

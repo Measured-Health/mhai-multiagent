@@ -50,7 +50,7 @@ func TestIdempotentAnonWithoutIPRunsPlain(t *testing.T) {
 	req.Header.Set("Idempotency-Key", "k1")
 	n := 0
 	rec := httptest.NewRecorder()
-	Idempotent(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	IdempotentAnon(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.WriteHeader(http.StatusNoContent)
 	})).ServeHTTP(rec, req)
@@ -71,5 +71,36 @@ func TestCredentialKeys(t *testing.T) {
 		if isCredentialKey(k) {
 			t.Errorf("%q is a credential", k)
 		}
+	}
+}
+
+// Idempotent sits inside the principal middleware. A keyed write that
+// reaches it without a principal is a wiring fault: refused, never run, and
+// never scoped by client IP (M3).
+func TestIdempotentRequiresPrincipal(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+	req.Header.Set("Idempotency-Key", "k1")
+	ran := false
+	rec := httptest.NewRecorder()
+	Idempotent(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { ran = true })).ServeHTTP(rec, req)
+	if ran || rec.Code != http.StatusInternalServerError {
+		t.Fatalf("ran=%v status %d", ran, rec.Code)
+	}
+}
+
+// IdempotentAnon without a trusted client IP runs without idempotency (no
+// database touched: the pool is nil).
+func TestIdempotentAnonWithoutIP(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+	req.Header.Set("Idempotency-Key", "k1")
+	req = req.WithContext(WithPrincipal(req.Context(), Principal{UserID: "u"}))
+	n := 0
+	rec := httptest.NewRecorder()
+	IdempotentAnon(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(rec, req)
+	if n != 1 || rec.Code != http.StatusNoContent {
+		t.Fatalf("n=%d status %d", n, rec.Code)
 	}
 }

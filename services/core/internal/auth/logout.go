@@ -14,7 +14,7 @@ import (
 // logout: POST /auth/logout. Revokes the caller's session and denylists the
 // session, the presented access token and the session's latest one.
 func (s *Service) logout(w http.ResponseWriter, r *http.Request) {
-	c, _ := ClaimsFrom(r.Context())
+	c := callerOf(r)
 	sid, err := uuid.Parse(c.Sid)
 	if err != nil {
 		httpx.Error(w, r, "unauthenticated")
