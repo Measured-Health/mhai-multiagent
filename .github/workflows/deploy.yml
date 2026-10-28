@@ -77,6 +77,8 @@ jobs:
     environment: preview
     permissions:
       contents: read
+      # The instance pulls the core image with this job's token.
+      packages: read
     # Set the repository variable DEPLOY_ENABLED=true once the instance is
     # set up (deploy/README.md). Until then this workflow only publishes the
     # image.
