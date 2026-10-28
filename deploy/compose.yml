@@ -1,0 +1,236 @@
+# The backend demo (core service, Postgres, NATS) on the shared preview
+# instance, next to the EMR stack and the mhai-web demo. Lives at
+# /srv/mhai-backend on the instance. deploy/setup-host.sh prepares it once;
+# .github/workflows/deploy.yml then copies this file in, pulls the core image
+# and restarts. Nothing here touches the EMR containers, their ports or nginx.
+#
+# Secrets are only in /srv/mhai-backend/.env (mode 600) and
+# /srv/mhai-backend/secrets/ (the NATS seed), written by setup-host.sh.
+# Compose refuses to start without them (${VAR:?}).
+#
+# Network: core (HTTP) and NATS (client port) publish on 127.0.0.1 only.
+# Postgres is on `backend` only, an internal network with no route out and
+# no published port. NATS is also on `mhai-bff`, an internal network shared
+# with the frontend's containers. Docker's iptables rules sit in front of
+# the security group, so a 0.0.0.0 binding would be on the internet: never
+# add one.
+#
+# Memory: the instance has 3.7 GiB shared with MongoDB, the EMR and the
+# web demo. Every container is capped.
+
+name: mhai-backend
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+x-core-image: &core-image
+  image: ${CORE_IMAGE:-ghcr.io/measured-health/mhai-multiagent-core:latest}
+  # The workflow pulls before every `up`, so a plain restart needs no GHCR login.
+  pull_policy: missing
+
+services:
+  postgres:
+    <<: *hardening
+    image: ${POSTGRES_IMAGE:-postgres:16.15-alpine}
+    restart: unless-stopped
+    # The image's postgres user, so the entrypoint needs no root and no
+    # capabilities. The data volume is owned by it (setup-host.sh).
+    user: "70:70"
+    environment:
+      POSTGRES_DB: mhai
+      # The owner, a superuser inside this Postgres. Only core-migrate
+      # connects as it (see there); the services never do.
+      POSTGRES_USER: pgadmin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in /srv/mhai-backend/.env}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=48MB
+      - -c
+      - max_connections=40
+      - -c
+      - password_encryption=scram-sha-256
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    tmpfs:
+      - /var/run/postgresql
+      - /tmp
+    shm_size: 64m
+    mem_limit: 256m
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgadmin -d mhai"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  nats:
+    <<: *hardening
+    image: ${NATS_IMAGE:-nats:2.10.29-alpine}
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["-c", "/etc/nats/nats.conf"]
+    environment:
+      # Public keys, not secrets. The core seed is only in the core
+      # container; the BFF seed is in .env for the frontend, later.
+      NATS_GATEWAY_NKEY: ${NATS_GATEWAY_NKEY:?set in /srv/mhai-backend/.env}
+      NATS_BFF_NKEY: ${NATS_BFF_NKEY:?set in /srv/mhai-backend/.env}
+      GOMEMLIMIT: 96MiB
+    volumes:
+      - ./nats/nats.conf:/etc/nats/nats.conf:ro
+      - natsdata:/data
+    tmpfs:
+      - /tmp
+    # The client port, for the frontend's BFF (Plan 3). Loopback only, for
+    # processes on the host; the frontend's containers use the shared
+    # network mhai-bff instead (a container's 127.0.0.1 is its own).
+    ports:
+      - "127.0.0.1:${NATS_HOST_PORT:-4222}:4222"
+    mem_limit: 128m
+    networks:
+      backend: {}
+      # Publishing a port needs a network that is not internal.
+      edge: {}
+      bff:
+        aliases: [mhai-nats]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # One-shot, on every deploy: apply the goose migrations, then create or
+  # reset the two logins: core_app (a member of mhai_app only, for core) and
+  # core_provision (a member of mhai_provision only, for core-cli).
+  # It connects as the owner, as services/core/README.md says: migration
+  # 00003 makes the owner a member of mhai_migrate, and every table, view
+  # and function is handed to mhai_migrate, never to a login the services
+  # use. This one-shot container is the only place the owner password goes,
+  # and it carries no core service secrets. (A CREATEROLE, non-superuser
+  # owner is not used yet: on Postgres 16 it can't re-run EnsureLogin;
+  # see deploy/README.md, known limits.)
+  core-migrate:
+    <<: [*hardening, *core-image]
+    restart: "no"
+    command: ["migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://pgadmin:${POSTGRES_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=disable
+      CORE_DB_USER: core_app
+      CORE_DB_PASSWORD: ${CORE_DB_PASSWORD:?set in /srv/mhai-backend/.env}
+      PROVISION_DB_USER: core_provision
+      PROVISION_DB_PASSWORD: ${PROVISION_DB_PASSWORD:?set in /srv/mhai-backend/.env}
+    mem_limit: 128m
+    networks: [backend]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # One-shot: make the access-token signing key in the corekeys volume if it
+  # isn't there yet, keep it otherwise (core keys ensure).
+  core-keys:
+    <<: [*hardening, *core-image]
+    restart: "no"
+    command: ["keys", "ensure", "--out", "/keys/access.pem"]
+    network_mode: none
+    volumes:
+      - corekeys:/keys
+    mem_limit: 64m
+
+  # The core service: the API the BFFs call. Its environment holds only its
+  # own settings and secrets: the core_app login, its NATS NKey seed (a
+  # file), the signing key (a file), the MFA key and the BFF keys.
+  core:
+    <<: [*hardening, *core-image]
+    restart: unless-stopped
+    command: ["serve"]
+    environment:
+      CORE_ENV: preview
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: postgres://core_app:${CORE_DB_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=disable
+      NATS_URL: nats://nats:4222
+      NATS_NKEY_SEED_PATH: /run/secrets/nats-gateway.nk
+      ACCESS_KEY_PATH: /keys/access.pem
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set in /srv/mhai-backend/.env}
+      BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set in /srv/mhai-backend/.env}
+      GOMEMLIMIT: 256MiB
+    # Loopback only. Nothing is in front of it yet; see deploy/nginx/ for the
+    # disabled site to enable once the frontend's BFF calls it.
+    ports:
+      - "127.0.0.1:${CORE_HOST_PORT:-8092}:8080"
+    volumes:
+      - corekeys:/keys:ro
+      # Owned by the container's user (65532), mode 400 (setup-host.sh).
+      - ./secrets/nats-gateway.nk:/run/secrets/nats-gateway.nk:ro
+    tmpfs:
+      - /tmp
+    # argon2 takes 64 MiB per sign-in, with one slot per CPU the process
+    # sees. Two CPUs bound that to 128 MiB, inside the cap.
+    cpuset: ${CORE_CPUSET:-0-1}
+    mem_limit: 320m
+    networks: [backend, edge]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-keys: { condition: service_completed_successfully }
+    # The image is distroless (no shell or curl): the deploy workflow probes
+    # GET /api/v1/readyz from the host.
+    healthcheck:
+      disable: true
+
+  # The seed CLI, as the provisioning login (never the owner, never core_app).
+  # Not started by `up`; see deploy/README.md for its commands.
+  core-cli:
+    <<: [*hardening, *core-image]
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://core_provision:${PROVISION_DB_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=disable
+    mem_limit: 128m
+    networks: [backend]
+    depends_on:
+      core-migrate: { condition: service_completed_successfully }
+
+  # The intelligence service (Python workers) is not deployed yet: it is not
+  # wired to NATS until the boundary plan lands. When it is:
+  #   - its own NATS NKey (a `worker` user in nats/nats.conf) and its own
+  #     database login (not the superuser, not core_app);
+  #   - no env_file: it must not see the core service's secrets;
+  #   - on `backend` only, no published port, and a mem_limit that fits
+  #     next to the EMR (the models may need a bigger host).
+  # intelligence:
+  #   image: ghcr.io/measured-health/mhai-multiagent:<version>
+  #   networks: [backend]
+  #   mem_limit: ...
+
+networks:
+  # No route out: Postgres and NATS can't reach anything but each other and
+  # core, and nothing reaches them from the host.
+  backend:
+    internal: true
+  # Only for the loopback ports of core and NATS.
+  edge: {}
+  # Shared with the frontend's compose project (mhai-web), made by
+  # setup-host.sh with --internal. Only NATS is on it here: the BFF reaches
+  # it as mhai-nats:4222 and nothing else in this stack.
+  bff:
+    external: true
+    name: mhai-bff
+
+# Made once by setup-host.sh. External, so `docker compose down -v` can never
+# delete the database, the JetStream store or the signing key.
+volumes:
+  pgdata:
+    external: true
+    name: mhai-backend-pgdata
+  natsdata:
+    external: true
+    name: mhai-backend-natsdata
+  corekeys:
+    external: true
+    name: mhai-backend-corekeys
