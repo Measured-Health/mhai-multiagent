@@ -15,6 +15,7 @@ const (
 	audienceKey
 	principalKey
 	idemStateKey
+	viaNATSKey
 )
 
 // RequestID gives every request a fresh random id, sent back in

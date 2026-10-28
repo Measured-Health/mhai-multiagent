@@ -4,6 +4,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -37,7 +39,9 @@ type Config struct {
 	// past it a submit is 429 rate_limited (intel.ReserveInFlight).
 	IntelligenceQueryCap int
 	// APIDocs serves the Redoc page and openapi.yaml (CORE_API_DOCS).
-	APIDocs bool
+	APIDocs            bool
+	HTTPAPI            bool
+	NATSAPIConcurrency int
 }
 
 // NATSTLS names the PEM files for TLS to NATS with a client certificate.
@@ -52,7 +56,7 @@ type NATSTLS struct {
 func Load() (Config, error) {
 	c := Config{
 		Env:              getenv("CORE_ENV", "development"),
-		HTTPAddr:         getenv("HTTP_ADDR", ":8080"),
+		HTTPAddr:         os.Getenv("HTTP_ADDR"),
 		DatabaseURL:      os.Getenv("DATABASE_URL"),
 		NATSURL:          os.Getenv("NATS_URL"),
 		NATSNkeySeedPath: os.Getenv("NATS_NKEY_SEED_PATH"),
@@ -76,6 +80,29 @@ func Load() (Config, error) {
 	}
 	if c.IntelligenceQueryCap, err = intEnv("INTELLIGENCE_QUERY_CAP", 10, func(n int) bool { return n >= 1 && n <= 1000 }); err != nil {
 		errs = append(errs, errors.New("INTELLIGENCE_QUERY_CAP must be 1 to 1000"))
+	}
+
+	if c.NATSAPIConcurrency, err = intEnv("CORE_NATS_API_CONCURRENCY", 256, func(n int) bool { return n >= 1 && n <= 100000 }); err != nil {
+		errs = append(errs, errors.New("CORE_NATS_API_CONCURRENCY must be 1 to 100000"))
+	}
+
+	// CORE_HTTP_API: on until mhai-web's BFF uses NATS. Off, HTTP serves
+	// the probes only, and only on a loopback address.
+	c.HTTPAPI = true
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_HTTP_API"))) {
+	case "", "on", "true":
+	case "off", "false":
+		c.HTTPAPI = false
+	default:
+		errs = append(errs, errors.New("CORE_HTTP_API must be on or off"))
+	}
+	switch {
+	case c.HTTPAddr == "" && c.HTTPAPI:
+		c.HTTPAddr = ":8080"
+	case c.HTTPAddr == "":
+		c.HTTPAddr = "127.0.0.1:8080"
+	case !c.HTTPAPI && !loopback(c.HTTPAddr):
+		errs = append(errs, errors.New("HTTP_ADDR must be a loopback address (127.0.0.1 or [::1]) when CORE_HTTP_API is off"))
 	}
 
 	// CORE_API_DOCS: on by default only in development, so an unset or
@@ -106,8 +133,12 @@ func Load() (Config, error) {
 		c.MFAKey = []byte(v)
 	}
 
+	// The BFF key guards the HTTP API only; over NATS the BFF's NATS user
+	// is the credential (spec §17.1).
 	if raw := os.Getenv("BFF_SERVICE_KEYS"); strings.TrimSpace(raw) == "" {
-		errs = append(errs, errors.New("BFF_SERVICE_KEYS is required"))
+		if c.HTTPAPI {
+			errs = append(errs, errors.New("BFF_SERVICE_KEYS is required while CORE_HTTP_API is on"))
+		}
 	} else {
 		for _, k := range strings.Split(raw, ",") {
 			k = strings.TrimSpace(k)
@@ -253,6 +284,17 @@ func intEnv(name string, def int, ok func(int) bool) (int, error) {
 		return def, fmt.Errorf("%s is invalid", name)
 	}
 	return n, nil
+}
+
+// loopback reports whether addr is host:port with a loopback IP literal
+// for host. A name (localhost) is refused: it resolves at listen time.
+func loopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
 
 func getenv(name, def string) string {

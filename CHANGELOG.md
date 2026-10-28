@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Core serves the frontend contract over NATS (spec §17.1, `internal/natsapi`):
+  one HTTP request per message on `api.v1.clinical` and `api.v1.platform`, in
+  queue group `core`, run through the same handler chain as HTTP (request id,
+  body limit, principal, route rule, idempotency, RLS and audit). The BFF's
+  NATS user replaces the `X-MHAI-Service` key there and the subject fixes the
+  audience. A reply subject other than the sending app's own inbox gets no
+  reply at all. New settings: `CORE_HTTP_API` (`on` by default until
+  mhai-web's BFF switches; `off` serves only the probes, on loopback) and
+  `CORE_NATS_API_CONCURRENCY` (default 256; past it 503 `unavailable`). New
+  error codes, over NATS only: 405 `method_not_allowed`, 413
+  `payload_too_large`. Contract version 1.1.0.
 - The API docs are now one site for core and intelligence. `/api/docs` gains a
   second tab, `/api/docs/intelligence`: the NATS operations (subject, kind,
   request and response messages, who may call, `bff_direct`, timeout, hospital),

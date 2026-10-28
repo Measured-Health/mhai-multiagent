@@ -23,6 +23,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/natsapi"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
@@ -39,9 +40,14 @@ type app struct {
 	nc      *nats.Conn
 	intel   *intel.Client
 	log     *slog.Logger
+	// stopAPI ends core's NATS API (natsapi.Serve) before NATS closes.
+	stopAPI func()
 }
 
 func (a *app) close() {
+	if a.stopAPI != nil {
+		a.stopAPI()
+	}
 	if a.nc != nil {
 		a.nc.Close()
 	}
@@ -59,7 +65,10 @@ func (a *app) close() {
 //   - the access-token key, the auth service and the principal middleware
 //     with both idempotency stores (authz.NewMux refuses a guard without);
 //   - the request-token key (a different key from the access-token key)
-//     and the intelligence client on core's own connection.
+//     and the intelligence client on core's own connection;
+//   - the frontend contract over NATS (natsapi.Serve on api.v1.clinical and
+//     api.v1.platform, queue group core) always, and over HTTP with the BFF
+//     key only while CORE_HTTP_API is on. Off, HTTP serves the probes only.
 func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, error) {
 	if err := cfg.ValidateServe(); err != nil {
 		return nil, err
@@ -110,6 +119,16 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	m := authz.NewMux(guard)
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.Readiness(a.pool, nc, buckets.All()),
 		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap})
+	// The same chain over NATS, without the BFF key (the bff_<app> NATS
+	// user is the credential) and without the probes or the docs.
+	if a.stopAPI, err = natsapi.Serve(ctx, nc, m.NATSHandler(), log, natsapi.WithConcurrency(cfg.NATSAPIConcurrency)); err != nil {
+		a.close()
+		return nil, err
+	}
+	if !cfg.HTTPAPI {
+		a.handler = m.ProbesHandler()
+		return a, nil
+	}
 	// The docs routes sit outside the API chain and are never served over
 	// NATS (see internal/apidocs): only this HTTP handler carries them.
 	a.handler = apidocs.Wrap(cfg.APIDocs, core.OpenAPI, m.Handler(cfg.BFFServiceKeys))
@@ -180,7 +199,8 @@ func serve() error {
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()
-	log.Info("core listening", "addr", cfg.HTTPAddr, "env", cfg.Env, "api_docs", cfg.APIDocs)
+	log.Info("core listening", "addr", cfg.HTTPAddr, "env", cfg.Env, "http_api", cfg.HTTPAPI,
+		"api_docs", cfg.APIDocs && cfg.HTTPAPI, "nats_api", natsapi.SubjectClinical+","+natsapi.SubjectPlatform)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

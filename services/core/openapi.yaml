@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.0.3"
+  version: "1.1.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -29,6 +29,15 @@ info:
     (`Idempotent-Replayed: true`) for 72 hours; the same key with another
     body, or one still in flight, is 409 `conflict`. Replies that carry a
     credential are never stored, so their retry is 409 too.
+
+    Over NATS (spec §17.1; `services/core/README.md`, "The API over NATS"):
+    the same routes, one request per message on `api.v1.clinical` or
+    `api.v1.platform`, with `Mhai-Method`, `Mhai-Path` and the reply status
+    in `Mhai-Status-Code`. There the BFF's NATS user replaces
+    `X-MHAI-Service`, the subject replaces `X-MHAI-Audience`, and the probes
+    and docs are not served. Two codes occur only there: 405
+    `method_not_allowed` (a method outside GET, HEAD, POST, PUT, PATCH,
+    DELETE) and 413 `payload_too_large` (a body over 64 KB).
 
     Versioning (ADR 0012): the major version is in the path, `/api/v1`.
     Within it, changes are additive only, so clients must ignore unknown
@@ -499,6 +508,8 @@ components:
             - not_ready
             - unavailable
             - internal_error
+            - method_not_allowed
+            - payload_too_large
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:

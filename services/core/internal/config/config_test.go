@@ -12,7 +12,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 	for _, k := range []string{"CORE_ENV", "HTTP_ADDR", "DATABASE_URL", "NATS_URL", "NATS_NKEY_SEED_PATH", "NATS_GATEWAY_PASSWORD", "NATS_WORKER_PASSWORD",
 		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS",
 		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING",
-		"INTELLIGENCE_QUERY_CAP"} {
+		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -307,6 +307,77 @@ func TestLoadQueryCap(t *testing.T) {
 		e["INTELLIGENCE_QUERY_CAP"] = bad
 		setEnv(t, e)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "INTELLIGENCE_QUERY_CAP") {
+			t.Fatalf("%q: %v", bad, err)
+		}
+	}
+}
+
+// CORE_HTTP_API (spec §17.1): on by default until mhai-web's BFF switches to
+// NATS. Off, the HTTP listener serves only the probes, on loopback: the
+// default address is 127.0.0.1:8080, any other host is refused, and the
+// BFF key is no longer needed.
+func TestHTTPAPISwitch(t *testing.T) {
+	setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey})
+	c, err := Load()
+	if err != nil || !c.HTTPAPI || c.HTTPAddr != ":8080" {
+		t.Fatalf("default: %+v %v", c, err)
+	}
+	for _, on := range []string{"on", "true", "ON"} {
+		setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey, "CORE_HTTP_API": on})
+		if c, err := Load(); err != nil || !c.HTTPAPI {
+			t.Fatalf("%q: %+v %v", on, c, err)
+		}
+	}
+	// On, the BFF key is still required.
+	setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "CORE_HTTP_API": "on"})
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "BFF_SERVICE_KEYS") {
+		t.Fatalf("on without a BFF key: %v", err)
+	}
+	for _, off := range []string{"off", "false", "Off"} {
+		setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "CORE_HTTP_API": off})
+		c, err := Load()
+		if err != nil || c.HTTPAPI || c.HTTPAddr != "127.0.0.1:8080" || len(c.BFFServiceKeys) != 0 {
+			t.Fatalf("%q: %+v %v", off, c, err)
+		}
+	}
+	for _, addr := range []string{"127.0.0.1:9090", "[::1]:8080", "127.0.0.2:8080"} {
+		setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "CORE_HTTP_API": "off", "HTTP_ADDR": addr})
+		if c, err := Load(); err != nil || c.HTTPAddr != addr {
+			t.Fatalf("%q: %+v %v", addr, c, err)
+		}
+	}
+	for _, addr := range []string{":8080", "0.0.0.0:8080", "10.0.0.5:8080", "[::]:8080", "core:8080", "localhost:8080", "nonsense"} {
+		setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "CORE_HTTP_API": "off", "HTTP_ADDR": addr})
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "HTTP_ADDR") {
+			t.Fatalf("off with %q: %v", addr, err)
+		}
+	}
+	setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey, "CORE_HTTP_API": "maybe"})
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_HTTP_API") {
+		t.Fatalf("bad value: %v", err)
+	}
+}
+
+// CORE_NATS_API_CONCURRENCY bounds the api.v1 messages handled at once.
+func TestLoadNATSAPIConcurrency(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	c, err := Load()
+	if err != nil || c.NATSAPIConcurrency != 256 {
+		t.Fatalf("default: %d %v", c.NATSAPIConcurrency, err)
+	}
+	e := map[string]string{"CORE_NATS_API_CONCURRENCY": "32"}
+	for k, v := range base {
+		e[k] = v
+	}
+	setEnv(t, e)
+	if c, err = Load(); err != nil || c.NATSAPIConcurrency != 32 {
+		t.Fatalf("32: %d %v", c.NATSAPIConcurrency, err)
+	}
+	for _, bad := range []string{"0", "-1", "100001", "many"} {
+		e["CORE_NATS_API_CONCURRENCY"] = bad
+		setEnv(t, e)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_NATS_API_CONCURRENCY") {
 			t.Fatalf("%q: %v", bad, err)
 		}
 	}

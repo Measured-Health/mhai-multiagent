@@ -87,8 +87,10 @@ one job:
 | `REQUEST_KEY_PATH` | yes | the request-token key (spec §7.2), from `core keys new --kind request`: another file and another key than `ACCESS_KEY_PATH` (start-up refuses the same key id) |
 | `INTELLIGENCE_QUERY_CAP` | no | clinical questions one hospital may have queued or running at once; past it a submit is 429 `rate_limited`. Default `10`, 1 to 1000 |
 | `MFA_ENCRYPTION_KEY` | yes | at least 32 bytes; seals TOTP secrets, keys backup-code hashes, and derives the counter key (HKDF-SHA256, label `mhai lockout key v1`) that names the lockout and MFA counters. Changing it forgets live lockouts. |
-| `BFF_SERVICE_KEYS` | yes | comma-separated, each at least 32 bytes; one per BFF |
-| `HTTP_ADDR` | no | default `:8080` |
+| `BFF_SERVICE_KEYS` | while `CORE_HTTP_API` is on | comma-separated, each at least 32 bytes; one per BFF |
+| `HTTP_ADDR` | no | default `:8080`, or `127.0.0.1:8080` when `CORE_HTTP_API` is off. With the API off it must be a loopback IP (`127.0.0.1`, `[::1]`); anything else is refused at start-up |
+| `CORE_HTTP_API` | no | `on` (default) or `off`. On: the frontend contract over HTTP with the BFF key, for the switch-over while mhai-web still uses `fetch`. Off: HTTP serves only the probes, on loopback, and `BFF_SERVICE_KEYS` is no longer required. The NATS API is served either way (below) |
+| `CORE_NATS_API_CONCURRENCY` | no | `api.v1` messages handled at once per core copy; past it a message gets 503 `unavailable` at once. Default `256`, 1 to 100000 |
 | `CORE_ENV` | no | default `development` |
 | `CORE_API_DOCS` | no | `true` or `false`: serve the API docs page. Default: on when `CORE_ENV` is `development`, off for every other value (production included). Anything else is refused at start-up. |
 
@@ -133,9 +135,10 @@ with a plain nav (`aria-current`); neither needs a script of its own.
   elements at run time; scripts are `'self'` only. Redoc's search is off,
   since it needs a `blob:` worker.
 - **Never over NATS:** `apidocs.Wrap` is applied only around the HTTP
-  listener in `cmd/core/serve.go`. `internal/natsapi` (Plan 3) must wrap the
-  `authz.Mux` handler, as the probes' HTTP path does, and must not include
-  these routes. They are for people with a browser, not for the BFFs.
+  listener in `cmd/core/serve.go`, and only while `CORE_HTTP_API` is on.
+  `internal/natsapi` serves `authz.Mux.NATSHandler`, which doesn't include
+  these routes (`TestDocsAndProbesNotOverNATS`). They are for people with
+  a browser, not for the BFFs.
 
 **On the demo host,** core listens on loopback only. Open a tunnel and
 browse locally:
@@ -182,13 +185,71 @@ for the workers to mount read-only). In production, mount keys made with
 `core keys new` (and `--kind request`) and point `ACCESS_KEY_PATH` and
 `REQUEST_KEY_PATH` at them.
 
+## The API over NATS (`internal/natsapi`)
+
+Spec §17.1. The BFFs call core over NATS: one HTTP request per message on
+`api.v1.clinical` (user `bff_clinical`) or `api.v1.platform` (user
+`bff_platform`). Every core copy subscribes both in queue group `core`, so
+each message is handled by one copy, and a copy that dies loses only the
+calls it held: the BFF times out and retries (writes with the same
+`Idempotency-Key`), and another copy answers.
+
+| Message | |
+|---|---|
+| `Mhai-Method` | `GET`, `HEAD`, `POST`, `PUT`, `PATCH` or `DELETE`; else 405 `method_not_allowed` |
+| `Mhai-Path` | path and query under `/api/v1/`, at most 2 KB of printable ASCII, no fragment; else 404 `not_found` |
+| `Mhai-Timeout-Ms` | optional; the handler's deadline is 30 s or this, whichever is sooner |
+| other headers | only `Authorization`, `Content-Type`, `Idempotency-Key`, `If-None-Match`, `X-MHAI-Client-IP` and `traceparent` pass; everything else is dropped (`X-MHAI-Service`, `X-MHAI-Audience`, `X-Request-ID`, `Mhai-Request-Id`, `Cookie`, `X-Forwarded-For`, hop-by-hop headers ...) |
+| body | the HTTP body, at most 64 KB (`httpx.MaxBody`); over it, 413 `payload_too_large` |
+| reply | `Mhai-Status-Code`, the allow-listed response headers (`Content-Type`, `Cache-Control`, `ETag`, `Retry-After`, `X-Request-ID`, `Idempotent-Replayed`, `Deprecation`, `Sunset`, `Link`, `X-Content-Type-Options`) and the response body |
+
+- **The same chain.** The adapter builds an `*http.Request` and calls
+  `authz.Mux.NATSHandler()`: request id, body limit, principal and access
+  token, route rule, idempotency, the RLS transaction and audit, exactly
+  the handlers HTTP runs. `TestAPIParityOverNATS` sends every route of
+  `server.Table()` both ways, for the auth fixture matrix, and compares
+  status, body and headers.
+- **How the BFF key is bypassed, for NATS only.** `Mux.Handler` (HTTP) is
+  `RequestID → httpx.BFF(keys) → body limit → routes`, unchanged.
+  `Mux.NATSHandler` is `RequestID → requireNATS → body limit → routes`:
+  instead of the key, it requires the mark `httpx.ViaNATS` puts on the
+  request's context, which only `internal/natsapi` sets, on requests it
+  builds from NATS messages. A context value can't be set from HTTP, so the
+  HTTP path still needs the key, and the NATS handler answers 401 to any
+  request that reaches it unmarked. What the key proved ("this came from
+  our BFF") the NATS user proves: only `bff_<app>` may publish
+  `api.v1.<app>` (`services/nats/nats.conf`, tested in
+  `internal/bus`). `X-MHAI-Client-IP` is trusted for the same reason.
+- **The audience is the subject's.** `api.v1.platform` is the platform
+  audience, `api.v1.clinical` the clinical one; an `X-MHAI-Audience`
+  header in the message is dropped.
+- **The request id is core's.** `httpx.RequestID` makes it, as over HTTP; a
+  BFF's `X-Request-ID` or `Mhai-Request-Id` never reaches the audit chain.
+- **The reply subject is checked first.** NATS lets the requester choose
+  the reply subject, and `allow_responses` lets core publish there once
+  with core's permissions (a job on `jobs.v1.…`, a `$KV` write, a
+  `$JS.API` call; `services/nats/README.md`). So a message is answered
+  only when its reply subject is `_INBOX_bff.<app>.` (the app of the
+  subject it came on) followed by literal tokens (non-empty, printable
+  ASCII, no `*`, `>` or space). Otherwise nothing is sent and no handler
+  runs; the refusal is logged at error level with the app only (never the
+  subject) and counted.
+- **Bounded.** At most `CORE_NATS_API_CONCURRENCY` messages at once per
+  copy; past it, 503 `unavailable` at once. A reply larger than the NATS
+  payload limit becomes 500 `internal_error`.
+- **Not over NATS:** the probes (HTTP only, for the container's health
+  check) and the API docs (`internal/apidocs` wraps only the HTTP
+  handler). Both are 404 over NATS.
+
 ## Probes
 
 - `GET /api/v1/healthz`: the process is up.
 - `GET /api/v1/readyz`: 200 when Postgres answers and NATS is connected
   with every KV bucket reachable; otherwise 503 `not_ready`.
 
-Neither needs the BFF key, and neither says what failed.
+Neither needs the BFF key, and neither says what failed. They are served
+over HTTP only; with `CORE_HTTP_API` off they are all the HTTP listener
+serves.
 
 ## Limits the service applies
 
@@ -279,6 +340,7 @@ internal/db     pool, migrations (goose), role checks, sweep, logins
 internal/httpx  errors, BFF key, request id, idempotency, router
 internal/bus    NATS connection (TLS option), KV buckets, the JOBS and DEAD streams
 internal/intel  the intelligence client, job publisher, publish sweeper, in-flight cap
+internal/natsapi  the frontend contract over NATS (api.v1.<app>), on the same handler chain
 internal/audit  the hash-chained audit log
 internal/token  access tokens (EdDSA) and refresh tokens
 internal/password  argon2id, the breached list, the concurrency gate

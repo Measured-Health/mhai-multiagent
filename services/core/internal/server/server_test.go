@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
 const testKey = "test-only-bff-service-key-0123456789abcdef"
@@ -115,4 +116,60 @@ func hasFixtures() bool {
 		}
 	}
 	return false
+}
+
+// Over NATS (Mux.NATSHandler) the probes don't exist: they are HTTP only,
+// for the container's health check. Every other route is there, with no
+// BFF key, once the request is marked by httpx.ViaNATS.
+func TestNATSHandlerHasNoProbes(t *testing.T) {
+	m := authz.NewMux(nil)
+	Register(m, Deps{})
+	h := m.NATSHandler()
+	for _, p := range []string{"/api/v1/healthz", "/api/v1/readyz"} {
+		r, _ := httpx.ViaNATS(httptest.NewRequest(http.MethodGet, p, nil), httpx.AudienceClinical)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != 404 || !strings.Contains(rec.Body.String(), `"not_found"`) {
+			t.Fatalf("%s over NATS: %d %s", p, rec.Code, rec.Body.String())
+		}
+	}
+	// A route behind the guard is reached (the table-only mux answers 503
+	// not_ready for it) without X-MHAI-Service.
+	r, _ := httpx.ViaNATS(httptest.NewRequest(http.MethodGet, "/api/v1/auth/sessions", nil), httpx.AudienceClinical)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != 503 {
+		t.Fatalf("sessions over NATS: %d %s", rec.Code, rec.Body.String())
+	}
+	// Unmarked (not from natsapi): refused.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/auth/sessions", nil))
+	if rec.Code != 401 {
+		t.Fatalf("unmarked: %d", rec.Code)
+	}
+}
+
+// CORE_HTTP_API=off: the HTTP listener's handler serves the probes and
+// nothing else, whatever key is sent.
+func TestProbesHandlerServesOnlyProbes(t *testing.T) {
+	m := authz.NewMux(nil)
+	Register(m, Deps{})
+	h := m.ProbesHandler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/healthz", nil))
+	if rec.Code != 200 || rec.Header().Get("X-Request-ID") == "" {
+		t.Fatalf("healthz %d", rec.Code)
+	}
+	for _, p := range []string{"/api/v1/auth/login", "/api/v1/auth/sessions", "/api/v1//healthz", "/api/docs"} {
+		r := httptest.NewRequest(http.MethodPost, p, nil)
+		if strings.HasSuffix(p, "healthz") || p == "/api/docs" {
+			r = httptest.NewRequest(http.MethodGet, p, nil)
+		}
+		r.Header.Set("X-MHAI-Service", testKey)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != 404 || !strings.Contains(rec.Body.String(), `"not_found"`) {
+			t.Fatalf("%s: %d %s", p, rec.Code, rec.Body.String())
+		}
+	}
 }

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
@@ -72,7 +73,7 @@ func newStack(t *testing.T) *stack {
 	}
 	return &stack{pg: pg, nats: n, stopNATS: stop, provURL: withUser(pg.URL, "core_provision", provPW), cfg: config.Config{Env: "development",
 		DatabaseURL: withUser(pg.URL, "core_app", corePW), NATSURL: n.GatewayURL, AccessKeyPath: key, RequestKeyPath: reqKey,
-		MFAKey: []byte(testMFAKey), BFFServiceKeys: []string{testBFFKey},
+		MFAKey: []byte(testMFAKey), BFFServiceKeys: []string{testBFFKey}, HTTPAPI: true,
 	}}
 }
 
@@ -255,5 +256,71 @@ func TestMigrateRefusesPlaceholderLoginPassword(t *testing.T) {
 	err := migrateWithLogins(context.Background(), []string{"up"}, pg.URL, func(k string) string { return env[k] }, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "CORE_DB_PASSWORD") || strings.Contains(err.Error(), "changeme") {
 		t.Fatalf("want a refusal naming CORE_DB_PASSWORD, got %v", err)
+	}
+}
+
+// CORE_HTTP_API=off (spec §17.1): the HTTP listener serves the probes and
+// nothing else, with or without the BFF key, and the API is on NATS: a
+// clinician signs in as the clinical BFF on api.v1.clinical.
+func TestHTTPAPIOffServesProbesOnly(t *testing.T) {
+	s := newStack(t)
+	ctx := context.Background()
+	cfg := s.cfg
+	cfg.HTTPAPI = false
+	cfg.HTTPAddr = "127.0.0.1:8080"
+	cfg.BFFServiceKeys = nil
+	a, err := newApp(ctx, cfg, logx.New(&bytes.Buffer{}))
+	if err != nil {
+		t.Fatalf("newApp: %v", err)
+	}
+	defer a.close()
+	waitReadyz(t, a.handler, 200)
+	if rec := get(a.handler, "/api/v1/healthz"); rec.Code != 200 {
+		t.Fatalf("healthz %d", rec.Code)
+	}
+	var out bytes.Buffer
+	if err := seed(ctx, []string{"hospitals", "create", "--name", "Havana General", "--short-code", "HAV", "--time-zone", "Africa/Lagos"},
+		s.provURL, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	pw := "tangerine-orbit-77-quill"
+	if err := seed(ctx, []string{"users", "create", "--email", "synthetic.clinician@havana.example", "--name", "Synthetic Clinician",
+		"--roles", "clinician", "--hospital", "HAV"}, s.provURL, strings.NewReader(pw+"\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]string{"username": "synthetic.clinician@havana.example", "password": pw})
+	for _, p := range []string{"/api/v1/auth/login", "/api/docs", "/api/openapi.yaml"} {
+		r := httptest.NewRequest(http.MethodPost, p, bytes.NewReader(body))
+		if p != "/api/v1/auth/login" {
+			r = httptest.NewRequest(http.MethodGet, p, nil)
+		}
+		r.Header.Set("X-MHAI-Service", testBFFKey)
+		r.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		a.handler.ServeHTTP(rec, r)
+		if rec.Code != 404 {
+			t.Fatalf("%s over HTTP with the API off: %d %s", p, rec.Code, rec.Body.String())
+		}
+	}
+
+	bff, err := nats.Connect(s.nats.BFFClinicalURL, nats.CustomInboxPrefix(bus.BFFInbox("clinical")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bff.Close()
+	m := nats.NewMsg("api.v1.clinical")
+	m.Header.Set("Mhai-Method", "POST")
+	m.Header.Set("Mhai-Path", "/api/v1/auth/login")
+	m.Header.Set("Content-Type", "application/json")
+	m.Header.Set("X-MHAI-Client-IP", "198.51.100.21")
+	m.Data = body
+	reply, err := bff.RequestMsg(m, 10*time.Second)
+	if err != nil {
+		t.Fatalf("sign-in over NATS: %v", err)
+	}
+	var got map[string]any
+	_ = json.Unmarshal(reply.Data, &got)
+	if reply.Header.Get("Mhai-Status-Code") != "200" || got["access_token"] == nil || reply.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("sign-in over NATS: %s %s", reply.Header.Get("Mhai-Status-Code"), reply.Data)
 	}
 }
