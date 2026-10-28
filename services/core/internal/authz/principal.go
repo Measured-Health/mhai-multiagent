@@ -268,6 +268,89 @@ func (g *Guard) denied(ctx context.Context, c token.Claims) (bool, error) {
 	return false, nil
 }
 
+// AccessToken is an access token whose signature, issuer, audience, expiry
+// and claim shapes checked out (VerifyAccessToken). No I/O has run yet:
+// the denylist and the account are checked by Principal. Its fields are
+// unexported, so only VerifyAccessToken makes one; the zero value is
+// refused everywhere.
+type AccessToken struct {
+	c             token.Claims
+	uid, sid, hid uuid.UUID
+}
+
+// UserID is the verified token's subject.
+func (a AccessToken) UserID() uuid.UUID { return a.uid }
+
+// SessionID is the verified token's session id.
+func (a AccessToken) SessionID() uuid.UUID { return a.sid }
+
+// HospitalID is the verified token's hospital, uuid.Nil for a platform
+// account.
+func (a AccessToken) HospitalID() uuid.UUID { return a.hid }
+
+// VerifyAccessToken checks raw's signature (by kid), iss, aud mhai-bff and
+// expiry, and the shape of its ids, with no I/O. It returns the error
+// code to send: token_expired for an expired token, unauthenticated for
+// anything else wrong. Callers that rate-limit by session or hospital key
+// on the returned token, never on unverified claims (F8).
+func (g *Guard) VerifyAccessToken(raw string) (AccessToken, string) {
+	if raw == "" {
+		return AccessToken{}, "unauthenticated"
+	}
+	c, err := token.VerifyAt(raw, g.Keys, g.now())
+	if errors.Is(err, token.ErrExpired) {
+		return AccessToken{}, "token_expired"
+	}
+	if err != nil {
+		return AccessToken{}, "unauthenticated"
+	}
+	uid, err1 := uuid.Parse(c.Sub)
+	sid, err2 := uuid.Parse(c.Sid)
+	if err1 != nil || err2 != nil || uid == uuid.Nil || sid == uuid.Nil || c.Jti == "" {
+		return AccessToken{}, "unauthenticated"
+	}
+	var hid uuid.UUID
+	if c.Hid != "" {
+		if hid, err = uuid.Parse(c.Hid); err != nil || hid == uuid.Nil {
+			return AccessToken{}, "unauthenticated"
+		}
+	}
+	return AccessToken{c: c, uid: uid, sid: sid, hid: hid}, ""
+}
+
+// PrincipalFromToken runs every check the principal middleware runs on a
+// bearer token (VerifyAccessToken, then Principal), for a caller that
+// holds the token outside an HTTP request: the grant endpoint (spec
+// §17.2). It is the same code path as HTTP and api.v1, not a copy.
+func (g *Guard) PrincipalFromToken(ctx context.Context, tok string, audience string) (Principal, string) {
+	a, code := g.VerifyAccessToken(tok)
+	if code != "" {
+		return Principal{}, code
+	}
+	return g.Principal(ctx, a, audience, "")
+}
+
+// Principal checks a verified access token's denylist entries and account
+// (as authenticate does, with no enrolment-limited sessions) and that the
+// account kind fits audience: a platform account is forbidden on the
+// clinical audience and a clinical account is not_platform on the platform
+// audience, as check refuses them on every route. rid is only logged.
+func (g *Guard) Principal(ctx context.Context, a AccessToken, audience, rid string) (Principal, string) {
+	p, code := g.principal(ctx, a, false, rid)
+	if code != "" {
+		return Principal{}, code
+	}
+	switch {
+	case audience == httpx.AudienceClinical && !p.Platform:
+	case audience == httpx.AudiencePlatform && p.Platform:
+	case audience == httpx.AudiencePlatform:
+		return Principal{}, "not_platform"
+	default:
+		return Principal{}, "forbidden"
+	}
+	return p, ""
+}
+
 // authenticate checks the request's access token and the account behind it
 // and returns the principal, or the error code to send:
 //   - no, malformed, forged or wrong-audience token: unauthenticated;
@@ -285,26 +368,20 @@ func (g *Guard) authenticate(r *http.Request, allowEnrol bool) (Principal, strin
 	if !ok {
 		return Principal{}, "unauthenticated"
 	}
-	c, err := token.VerifyAt(raw, g.Keys, g.now())
-	if errors.Is(err, token.ErrExpired) {
-		return Principal{}, "token_expired"
+	a, code := g.VerifyAccessToken(raw)
+	if code != "" {
+		return Principal{}, code
 	}
-	if err != nil {
-		return Principal{}, "unauthenticated"
+	return g.principal(r.Context(), a, allowEnrol, httpx.RequestIDFrom(r.Context()))
+}
+
+// principal is the I/O half of authenticate: the denylist, the account
+// state and the two-step policy, for a token VerifyAccessToken passed.
+func (g *Guard) principal(ctx context.Context, a AccessToken, allowEnrol bool, rid string) (Principal, string) {
+	c, uid, sid, hid := a.c, a.uid, a.sid, a.hid
+	if uid == uuid.Nil || sid == uuid.Nil || c.Jti == "" {
+		return Principal{}, "unauthenticated" // the zero AccessToken
 	}
-	uid, err1 := uuid.Parse(c.Sub)
-	sid, err2 := uuid.Parse(c.Sid)
-	if err1 != nil || err2 != nil || uid == uuid.Nil || c.Jti == "" {
-		return Principal{}, "unauthenticated"
-	}
-	var hid uuid.UUID
-	if c.Hid != "" {
-		if hid, err = uuid.Parse(c.Hid); err != nil || hid == uuid.Nil {
-			return Principal{}, "unauthenticated"
-		}
-	}
-	ctx := r.Context()
-	rid := httpx.RequestIDFrom(ctx)
 	denied, err := g.denied(ctx, c)
 	if err != nil {
 		g.log().Error("authz: denylist unavailable", "request_id", rid)

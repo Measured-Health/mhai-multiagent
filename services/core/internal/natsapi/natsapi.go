@@ -218,21 +218,7 @@ func validReply(app, reply string) bool {
 	if app != AppClinical && app != AppPlatform {
 		return false
 	}
-	prefix := bus.BFFInbox(app) + "."
-	if len(reply) > MaxReply || !strings.HasPrefix(reply, prefix) {
-		return false
-	}
-	for _, tok := range strings.Split(reply[len(prefix):], ".") {
-		if tok == "" {
-			return false
-		}
-		for i := 0; i < len(tok); i++ {
-			if c := tok[i]; c <= ' ' || c >= 0x7f || c == '*' || c == '>' {
-				return false
-			}
-		}
-	}
-	return true
+	return bus.ReplyUnder(bus.BFFInbox(app)+".", reply, MaxReply)
 }
 
 func (s *server) respond(app string, m *nats.Msg, reply *nats.Msg) {

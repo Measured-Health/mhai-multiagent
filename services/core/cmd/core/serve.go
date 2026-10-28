@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/grant"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
@@ -40,11 +42,15 @@ type app struct {
 	nc      *nats.Conn
 	intel   *intel.Client
 	log     *slog.Logger
-	// stopAPI ends core's NATS API (natsapi.Serve) before NATS closes.
-	stopAPI func()
+	// stopAPI ends core's NATS API (natsapi.Serve) and stopGrant its grant
+	// endpoint (grant.Server) before NATS closes.
+	stopAPI, stopGrant func()
 }
 
 func (a *app) close() {
+	if a.stopGrant != nil {
+		a.stopGrant()
+	}
 	if a.stopAPI != nil {
 		a.stopAPI()
 	}
@@ -68,7 +74,11 @@ func (a *app) close() {
 //     and the intelligence client on core's own connection;
 //   - the frontend contract over NATS (natsapi.Serve on api.v1.clinical and
 //     api.v1.platform, queue group core) always, and over HTTP with the BFF
-//     key only while CORE_HTTP_API is on. Off, HTTP serves the probes only.
+//     key only while CORE_HTTP_API is on. Off, HTTP serves the probes only;
+//   - the grant endpoint (grant.Server on authz.v1.grant.>, queue group
+//     core) with the same guard, so a BFF-direct call is checked by the
+//     principal middleware's own code. Test-only operations are granted
+//     only in development.
 func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, error) {
 	if err := cfg.ValidateServe(); err != nil {
 		return nil, err
@@ -122,6 +132,12 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	if a.stopAPI, err = natsapi.Serve(ctx, nc, m.NATSHandler(), log, natsapi.WithConcurrency(cfg.NATSAPIConcurrency)); err != nil {
+		a.close()
+		return nil, err
+	}
+	grants := &grant.Server{Guard: guard, Signer: signer, Pool: a.pool, Log: log,
+		AllowTestOnly: strings.EqualFold(strings.TrimSpace(cfg.Env), "development")}
+	if a.stopGrant, err = grants.Serve(ctx, nc); err != nil {
 		a.close()
 		return nil, err
 	}
@@ -200,7 +216,7 @@ func serve() error {
 		_ = srv.Shutdown(shutdown)
 	}()
 	log.Info("core listening", "addr", cfg.HTTPAddr, "env", cfg.Env, "http_api", cfg.HTTPAPI,
-		"api_docs", cfg.APIDocs && cfg.HTTPAPI, "nats_api", natsapi.SubjectClinical+","+natsapi.SubjectPlatform)
+		"api_docs", cfg.APIDocs && cfg.HTTPAPI, "nats_api", natsapi.SubjectClinical+","+natsapi.SubjectPlatform, "grants", grant.Subject)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

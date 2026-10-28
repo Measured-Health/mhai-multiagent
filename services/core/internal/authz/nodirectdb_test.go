@@ -36,6 +36,10 @@ var dbTxAllowedFiles = map[string]string{
 	// before re-minting. Request paths reserve in-flight slots and append
 	// facts inside the caller's authz.Tx instead.
 	"internal/intel/sweeper.go": "the publish sweeper (db.WithJobs) and Republish's creator re-check (db.WithAuth)",
+	// The grant endpoint audits token and session refusals before a
+	// principal exists, as mhai_auth, as sign-in failures are (F7).
+	// Everything after the principal goes through authz.Tx.
+	"internal/grant/grant.go": "grant refusals before a principal exists (db.WithAuth, mhai_auth)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on

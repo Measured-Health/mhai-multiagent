@@ -281,6 +281,46 @@ func bodyHash(body []byte) string {
 // least 1 s, at most the cap for c.Kind). It returns the token and the
 // claims as signed.
 func (s Signer) Mint(c Claims, body []byte, ttl time.Duration) (string, Claims, error) {
+	tok, out, err := s.mint(c, bodyHash(body), ttl)
+	if err != nil {
+		return "", Claims{}, err
+	}
+	if err := checkSizes(tok, body, c.Kind); err != nil {
+		return "", Claims{}, err
+	}
+	return tok, out, nil
+}
+
+// MintHash is Mint for a body core never sees, by its hash: the grant
+// endpoint (spec §17.2) signs for the body the worker holds, given as
+// base64url(sha256(body)). bh must be exactly that shape (43 unpadded
+// base64url characters, 32 bytes); the worker's check 4 compares it with
+// the body it holds, and its check 1 bounds the body's size.
+func (s Signer) MintHash(c Claims, bh string, ttl time.Duration) (string, Claims, error) {
+	if !IsBodyHash(bh) {
+		return "", Claims{}, ErrMintClaims
+	}
+	tok, out, err := s.mint(c, bh, ttl)
+	if err != nil {
+		return "", Claims{}, err
+	}
+	if len(tok) > MaxTokenLen {
+		return "", Claims{}, ErrSize
+	}
+	return tok, out, nil
+}
+
+// IsBodyHash reports whether bh is a body hash as the bh claim holds it:
+// unpadded, canonical base64url of 32 bytes.
+func IsBodyHash(bh string) bool {
+	if len(bh) != 43 {
+		return false
+	}
+	raw, err := decodeB64(bh)
+	return err == nil && len(raw) == sha256.Size
+}
+
+func (s Signer) mint(c Claims, bh string, ttl time.Duration) (string, Claims, error) {
 	if len(s.Key) != ed25519.PrivateKeySize || s.KeyID == "" {
 		return "", Claims{}, errNoKey
 	}
@@ -307,7 +347,7 @@ func (s Signer) Mint(c Claims, body []byte, ttl time.Duration) (string, Claims, 
 		roles = []string{}
 	}
 	out := c
-	out.Roles, out.Jti, out.BodyHash, out.KeyID = roles, b64.EncodeToString(nonce[:]), bodyHash(body), s.KeyID
+	out.Roles, out.Jti, out.BodyHash, out.KeyID = roles, b64.EncodeToString(nonce[:]), bh, s.KeyID
 	out.IssuedAt, out.ExpiresAt = iat, exp
 	var pids []string
 	if len(c.PatientIDs) > 0 {
@@ -325,9 +365,6 @@ func (s Signer) Mint(c Claims, body []byte, ttl time.Duration) (string, Claims, 
 	}
 	in := b64.EncodeToString(h) + "." + b64.EncodeToString(p)
 	tok := in + "." + b64.EncodeToString(ed25519.Sign(s.Key, []byte(in)))
-	if err := checkSizes(tok, body, c.Kind); err != nil {
-		return "", Claims{}, err
-	}
 	return tok, out, nil
 }
 

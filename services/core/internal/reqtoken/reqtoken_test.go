@@ -631,3 +631,38 @@ func TestLoadSigner(t *testing.T) {
 		}
 	}
 }
+
+// TestMintHash: a grant token signed by the body's hash verifies for that
+// body only, with the grant's reply prefix, and a malformed hash is never
+// signed.
+func TestMintHash(t *testing.T) {
+	s := newSigner(t)
+	body := []byte("synthetic grant body")
+	c := reqClaims()
+	c.Via, c.ReplyPrefix, c.PatientIDs = ViaGrant, "_INBOX_bff.clinical.", nil
+	tok, out, err := s.MintHash(c, bodyHash(body), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.BodyHash != bodyHash(body) || out.ExpiresAt.Sub(out.IssuedAt) != 3*time.Second {
+		t.Fatalf("claims: %+v", out)
+	}
+	got, err := VerifyAt(tok, s.PublicKeys(), reqExpect(), body, testNow)
+	if err != nil || got.Via != ViaGrant || CheckReply(got, "_INBOX_bff.clinical.x", true) != nil {
+		t.Fatalf("verify: %v %+v", err, got)
+	}
+	if _, err := VerifyAt(tok, s.PublicKeys(), reqExpect(), []byte("other"), testNow); !errors.Is(err, ErrBinding) {
+		t.Fatalf("other body: %v", err)
+	}
+	good := bodyHash(body)
+	for _, bh := range []string{"", good[:42], good + "A", good[:42] + "=", good[:42] + "\n", strings.Repeat("!", 43),
+		good[:42] + "B"} { // the last: non-canonical trailing bits
+		if _, _, err := s.MintHash(c, bh, 3*time.Second); err == nil {
+			t.Errorf("signed body hash %q", bh)
+		}
+	}
+	c.ReplyPrefix = "_INBOX_gateway."
+	if _, _, err := s.MintHash(c, good, 3*time.Second); !errors.Is(err, ErrMintClaims) {
+		t.Errorf("grant with core's reply prefix: %v", err)
+	}
+}

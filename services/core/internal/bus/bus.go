@@ -38,6 +38,33 @@ func WorkerInbox(service string) string { return WorkerInboxPrefix + "." + servi
 // "platform").
 func BFFInbox(app string) string { return BFFInboxPrefix + "." + app }
 
+// ReplyUnder reports whether reply, a requester-chosen reply subject, is
+// prefix (which ends in ".") followed by one or more literal tokens:
+// non-empty, printable ASCII, no '*', '>' or space; and at most max bytes.
+//
+// Every responder checks this before answering (services/nats/README.md,
+// "Responders must check the reply subject"): NATS lets the requester set
+// the reply subject, and allow_responses lets the responder publish there
+// once with its own permissions. Core may publish to JOBS, $KV and $JS,
+// so an unchecked reply would let a requester steer core's one publish
+// anywhere.
+func ReplyUnder(prefix, reply string, max int) bool {
+	if !strings.HasSuffix(prefix, ".") || len(reply) > max || !strings.HasPrefix(reply, prefix) {
+		return false
+	}
+	for _, tok := range strings.Split(reply[len(prefix):], ".") {
+		if tok == "" {
+			return false
+		}
+		for i := 0; i < len(tok); i++ {
+			if c := tok[i]; c <= ' ' || c >= 0x7f || c == '*' || c == '>' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Bucket names and lifetimes.
 const (
 	DenylistBucket      = "denylist"
