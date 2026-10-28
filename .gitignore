@@ -12,6 +12,7 @@ venv/
 *.pth
 *.pt
 *.bin
+!testdata/proto-golden/*.bin
 models_cache/
 patient_data/
 .pytest_cache/

@@ -1,5 +1,5 @@
 .PHONY: help install install-dev lint format typecheck test cov run clean docker \
-	up up-gpu up-observability infra down ps logs models nuke core-up core-test core-lint
+	up up-gpu up-observability infra down ps logs models nuke core-up core-test core-lint proto proto-check
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -86,3 +86,29 @@ core-test: ## Run the core service (Go) tests
 
 core-lint: ## Vet and staticcheck the core service (Go)
 	cd services/core && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+
+# The contract between core and intelligence (spec 6.3). Generated code is
+# committed; `make proto-check` fails if it is stale.
+PB := intelligence/boundary/pb
+GO_PB := services/core/internal/intelpb
+
+proto: ## Generate the Go and Python code from proto/ (needs buf, protoc-gen-go, uv)
+	cd proto && buf generate
+	$(PY) rm -rf .pbgen && mkdir .pbgen && \
+	  uv run --locked python -m grpc_tools.protoc -I ../../proto \
+	    --python_out=.pbgen --mypy_out=.pbgen ../../proto/mhai/intelligence/v1/*.proto && \
+	  rm -f $(PB)/*_pb2.py $(PB)/*_pb2.pyi && \
+	  mv .pbgen/mhai/intelligence/v1/*_pb2.py .pbgen/mhai/intelligence/v1/*_pb2.pyi $(PB)/ && \
+	  rm -rf .pbgen && \
+	  sed -i -E 's/^from mhai\.intelligence\.v1 import/from . import/; s/^import mhai\.intelligence\.v1\.([a-z_]+_pb2)/from . import \1/' $(PB)/*_pb2.py $(PB)/*_pb2.pyi
+
+proto-check: ## Lint the schema, check it is backward compatible, and check generated code is current
+	cd proto && buf lint
+	@base=$$(git rev-parse --verify -q origin/main || echo main); \
+	if git ls-tree -r --name-only $$base -- proto | grep -q .; then \
+	  cd proto && buf breaking --against "../.git#ref=$$base,subdir=proto"; \
+	else echo "buf breaking skipped: $$base has no proto/ yet"; fi
+	$(MAKE) proto
+	git diff --exit-code -- $(GO_PB) services/intelligence/$(PB)
+	@test -z "$$(git status --porcelain -- $(GO_PB) services/intelligence/$(PB))" || \
+	  { echo "generated code has untracked or changed files; commit them"; exit 1; }

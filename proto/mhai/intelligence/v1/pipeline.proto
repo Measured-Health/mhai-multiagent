@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package mhai.intelligence.v1;
+
+import "mhai/intelligence/v1/envelope.proto";
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb;intelpb";
+
+// RunQueryJob carries the query id only. The worker reads the rest from the
+// database under the hospital in the verified job token.
+message RunQueryJob {
+  string query_id = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  ResponseMeta meta = 1;
+  bool models_ready = 2;
+  bool database_ready = 3;
+}

@@ -1,0 +1,24 @@
+{
+  "meta": {
+    "auditFacts": [
+      {
+        "action": "query.run",
+        "entity": "clinical_query",
+        "entityId": "00000000-0000-4000-8000-000000000001",
+        "payload": {
+          "agents": 5,
+          "mode": "synthetic"
+        }
+      }
+    ],
+    "modelVersions": {
+      "embedder": "synthetic-2",
+      "nli": "synthetic-1"
+    },
+    "timingsMs": {
+      "generate": 250.25,
+      "mask": 1.5
+    }
+  },
+  "modelsReady": true
+}

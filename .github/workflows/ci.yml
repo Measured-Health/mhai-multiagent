@@ -37,6 +37,23 @@ jobs:
       - name: Lockfile is current
         run: uv lock --check
 
+      # The contract in proto/ (spec 6.3): buf lint, buf breaking against main
+      # (skipped until main has proto/), and the committed generated code
+      # matches a fresh `make proto`. Runs from the repository root.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Install buf and protoc-gen-go
+        working-directory: .
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@v1.50.0
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Protobuf lint, breaking and generated code
+        working-directory: .
+        run: make proto-check
+
       - name: Lint
         run: uv run ruff check .
 

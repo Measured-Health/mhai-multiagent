@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package mhai.intelligence.v1;
+
+import "mhai/intelligence/v1/envelope.proto";
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb;intelpb";
+
+// Echo is for tests and the smoke run only.
+
+// PingRequest.hospital_id is not trusted. It exists so the scope check has a
+// body hospital to compare with the hospital in the verified token.
+message PingRequest {
+  string text = 1;
+  string hospital_id = 2;
+}
+
+message PingResponse {
+  ResponseMeta meta = 1;
+  string text = 2;
+}
