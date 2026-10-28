@@ -40,12 +40,9 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 - **Provisioning can add roles to existing accounts.** Limit it to users made in the same transaction, or a `provision_user()` function; a DB check that a platform account has at most one role. [T5 N1]
 
 **NATS**
-- **TLS option** for the NATS connection. [T3 M3] (Plan 3, Task 4)
 - **Reconnect and disconnect handlers** that log and flip readiness. [T3 M6]
-- **NATS wildcards.** The `gateway` user's `$JS.API.CONSUMER.>` and stream wildcards are wider than needed. Narrow them to the KV streams and `JOBS`. [T3 N1] (Plan 3, Task 4)
-- **Compose placeholder guard** is case-sensitive. [T3 N2]
-- **One NKey per worker service**, not one shared `worker` user. [T3 N4] (Plan 3, Task 4)
-- **More `allow_responses` tests.** [T3 N5] (Plan 3, Task 4)
+- **Every NATS responder checks the reply subject** before answering: NATS lets an `allow_responses` reply go to any subject the requester named, past the allow and deny lists (`TestReplySubjectIsTheResponderToCheck`). Core on `api.v1.<app>` answers only `_INBOX_bff.<app>.`, on `authz.v1.grant.<service>` only `_INBOX_worker.<service>.`; workers as spec §17.2. (Plan 3, Tasks 6, 7, 9)
+- **Demo NATS (`deploy/nats/nats.conf`)** still lacks JetStream encryption at rest (`NATS_JS_KEY` from `setup-host.sh`), TLS, and the per-service worker and BFF users; it has Task 4's narrowed `gateway` permissions. (Plan 3, Task 15, or a deploy follow-up)
 
 **Auth**
 - **Idempotency panic after commit** re-runs the handler on retry (fails safe); store the tombstone first. [T4 N4]

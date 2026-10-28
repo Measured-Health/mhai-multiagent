@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
@@ -66,7 +69,7 @@ func newStack(t *testing.T) *stack {
 		"--trusted-out", filepath.Join(t.TempDir(), "request-keys.json")}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	return &stack{pg: pg, nats: n, stopNATS: stop, provURL: withUser(pg.URL, "core_provision", provPW), cfg: config.Config{
+	return &stack{pg: pg, nats: n, stopNATS: stop, provURL: withUser(pg.URL, "core_provision", provPW), cfg: config.Config{Env: "development",
 		DatabaseURL: withUser(pg.URL, "core_app", corePW), NATSURL: n.GatewayURL, AccessKeyPath: key, RequestKeyPath: reqKey,
 		MFAKey: []byte(testMFAKey), BFFServiceKeys: []string{testBFFKey},
 	}}
@@ -105,6 +108,17 @@ func TestServeEndToEnd(t *testing.T) {
 		t.Fatalf("newApp: %v", err)
 	}
 	waitReadyz(t, a.handler, 200)
+
+	// serve made the JOBS and DEAD streams and their consumers.
+	js, err := jetstream.New(a.nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for stream, consumer := range map[string]string{bus.JobsStream: bus.PipelineConsumer, bus.DeadStream: bus.CoreDeadConsumer} {
+		if _, err := js.Consumer(ctx, stream, consumer); err != nil {
+			t.Fatalf("serve did not create %s/%s: %v", stream, consumer, err)
+		}
+	}
 
 	var out bytes.Buffer
 	if err := seed(ctx, []string{"hospitals", "create", "--name", "Havana General", "--short-code", "HAV", "--time-zone", "Africa/Lagos"},

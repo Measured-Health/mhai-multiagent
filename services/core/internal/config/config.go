@@ -25,8 +25,22 @@ type Config struct {
 	MFAKey           []byte
 	BFFServiceKeys   []string
 	BreachedListPath string
+	NATSTLS          NATSTLS // required outside development (ValidateServe)
+	// NATSJSReplicas is the replica count for JOBS, DEAD and the KV
+	// buckets: 1 in dev compose, 3 on the production cluster.
+	NATSJSReplicas int
+	// JobsPipelineMaxAckPending bounds the pipeline consumer's jobs in
+	// flight: the worker count times its concurrency.
+	JobsPipelineMaxAckPending int
 	// APIDocs serves the Redoc page and openapi.yaml (CORE_API_DOCS).
 	APIDocs bool
+}
+
+// NATSTLS names the PEM files for TLS to NATS with a client certificate.
+type NATSTLS struct {
+	CAPath   string // NATS_TLS_CA_PATH
+	CertPath string // NATS_TLS_CERT_PATH
+	KeyPath  string // NATS_TLS_KEY_PATH
 }
 
 // Load reads the environment. Secrets are required, at least 32 bytes and
@@ -41,8 +55,21 @@ func Load() (Config, error) {
 		AccessKeyPath:    os.Getenv("ACCESS_KEY_PATH"),
 		RequestKeyPath:   os.Getenv("REQUEST_KEY_PATH"),
 		BreachedListPath: os.Getenv("BREACHED_LIST_PATH"),
+		NATSTLS: NATSTLS{
+			CAPath:   os.Getenv("NATS_TLS_CA_PATH"),
+			CertPath: os.Getenv("NATS_TLS_CERT_PATH"),
+			KeyPath:  os.Getenv("NATS_TLS_KEY_PATH"),
+		},
 	}
 	var errs []error
+
+	var err error
+	if c.NATSJSReplicas, err = intEnv("NATS_JS_REPLICAS", 1, func(n int) bool { return n == 1 || n == 3 || n == 5 }); err != nil {
+		errs = append(errs, errors.New("NATS_JS_REPLICAS must be 1, 3 or 5"))
+	}
+	if c.JobsPipelineMaxAckPending, err = intEnv("JOBS_PIPELINE_MAX_ACK_PENDING", 8, func(n int) bool { return n >= 1 && n <= 100000 }); err != nil {
+		errs = append(errs, errors.New("JOBS_PIPELINE_MAX_ACK_PENDING must be 1 to 100000"))
+	}
 
 	// CORE_API_DOCS: on by default only in development, so an unset or
 	// unrecognised environment (production included) fails closed.
@@ -153,6 +180,18 @@ func (c Config) ValidateServe() error {
 	if c.RequestKeyPath != "" && filepath.Clean(c.RequestKeyPath) == filepath.Clean(c.AccessKeyPath) {
 		errs = append(errs, errors.New("REQUEST_KEY_PATH must be a different file from ACCESS_KEY_PATH"))
 	}
+	// NATS carries the frontend's API traffic and access tokens since
+	// spec §17, so TLS with a client certificate is required everywhere
+	// but development; an empty or unknown environment fails closed.
+	t := c.NATSTLS
+	anyTLS := t.CAPath != "" || t.CertPath != "" || t.KeyPath != ""
+	allTLS := t.CAPath != "" && t.CertPath != "" && t.KeyPath != ""
+	switch {
+	case anyTLS && !allTLS:
+		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH must be set together"))
+	case !allTLS && !strings.EqualFold(strings.TrimSpace(c.Env), "development"):
+		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH are required outside development"))
+	}
 	return errors.Join(errs...)
 }
 
@@ -193,6 +232,20 @@ func checkSecret(name, v string) error {
 		return fmt.Errorf("%s must be at least %d bytes", name, minSecretLen)
 	}
 	return nil
+}
+
+// intEnv reads an integer variable, def when unset, refused when it isn't
+// a number or ok says no.
+func intEnv(name string, def int, ok func(int) bool) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || !ok(n) {
+		return def, fmt.Errorf("%s is invalid", name)
+	}
+	return n, nil
 }
 
 func getenv(name, def string) string {

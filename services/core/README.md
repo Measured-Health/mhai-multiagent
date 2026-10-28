@@ -79,7 +79,10 @@ one job:
 |---|---|---|
 | `DATABASE_URL` | yes | the `mhai_app` login; a placeholder password is refused |
 | `NATS_URL` | yes | `nats://gateway:PASSWORD@host:4222` in dev; a placeholder password is refused |
-| `NATS_NKEY_SEED_PATH` | production | the `gateway` user's NKey seed file (see `services/nats/nats.conf`) |
+| `NATS_NKEY_SEED_PATH` | production | the `gateway` user's NKey seed file (see `services/nats/README.md`) |
+| `NATS_TLS_CA_PATH`, `NATS_TLS_CERT_PATH`, `NATS_TLS_KEY_PATH` | outside development | PEM files: the CA for the NATS server's certificate, and core's client certificate and key. All three or none; required unless `CORE_ENV` is `development` |
+| `NATS_JS_REPLICAS` | no | replicas for `JOBS`, `DEAD` and the KV buckets: `1` (default, dev compose), `3` on the production cluster (R3), or `5` |
+| `JOBS_PIPELINE_MAX_ACK_PENDING` | no | jobs the pipeline workers hold at once: worker count × concurrency; default `8` |
 | `ACCESS_KEY_PATH` | yes | PKCS#8 Ed25519 PEM from `core keys new` |
 | `MFA_ENCRYPTION_KEY` | yes | at least 32 bytes; seals TOTP secrets, keys backup-code hashes, and derives the counter key (HKDF-SHA256, label `mhai lockout key v1`) that names the lockout and MFA counters. Changing it forgets live lockouts. |
 | `BFF_SERVICE_KEYS` | yes | comma-separated, each at least 32 bytes; one per BFF |
@@ -89,8 +92,8 @@ one job:
 
 Secrets must not contain `changeme`, `change-me` or `placeholder`. Errors
 name the variable, never the value. The core service reads only its own
-secrets: the NATS worker password and the database owner password are not
-in its environment.
+secrets: the other NATS users' passwords, the JetStream key and the
+database owner password are not in its environment.
 
 ## API docs
 
@@ -225,7 +228,8 @@ Neither needs the BFF key, and neither says what failed.
   the 15-minute access-token life if the NATS KV denylist is down when the
   password changes.
 - **No TLS inside compose.** Postgres (`sslmode=disable`) and NATS run
-  without TLS on the compose network. Production needs TLS on both.
+  without TLS on the compose network. Production needs TLS on both; core
+  refuses to start outside development without the NATS TLS files.
 - **The argon2 gate is per process** and sized by CPU count; the BFF must
   rate-limit sign-in in front of it.
 - **`setup_incomplete` hospitals are served**, so their first admin can
@@ -244,7 +248,7 @@ internal/auth   sign-in, refresh, two-step, password, sessions, terms
 internal/authz  principal middleware, permission table, authz.Tx
 internal/db     pool, migrations (goose), role checks, sweep, logins
 internal/httpx  errors, BFF key, request id, idempotency, router
-internal/bus    NATS connection and KV buckets
+internal/bus    NATS connection (TLS option), KV buckets, the JOBS and DEAD streams
 internal/audit  the hash-chained audit log
 internal/token  access tokens (EdDSA) and refresh tokens
 internal/password  argon2id, the breached list, the concurrency gate

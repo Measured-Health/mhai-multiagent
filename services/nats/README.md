@@ -1,52 +1,132 @@
 # nats
 
 Configuration for the NATS server, the only link between the core service
-(`services/core/`, Go) and the Python workers (`services/intelligence/`).
-Compose mounts `nats.conf` read-only at `/etc/nats/nats.conf`, and the core
-service's integration tests copy the same file into their NATS container
-(`services/core/internal/testutil/nats.go`), so the tests exercise the real
-permissions.
+(`services/core/`, Go), the frontend's BFFs and the Python workers
+(`services/intelligence/`). Design: `docs/specs/2026-10-28-intelligence-boundary-design.md`
+§5, §7.6, §9.2 and §17.4.
+
+| File | Used by |
+|---|---|
+| `nats.conf` | dev compose (mounted read-only at `/etc/nats/nats.conf`) and every integration test (`services/core/internal/testutil/nats.go` copies it into the test container), so the tests exercise the real permissions |
+| `bff-clinical.test.conf` | included by `nats.conf`: the whole `bff_clinical` user, with the test-only `bff_direct` subject `inference.v1.echo.ping` |
+
+The production-shaped config is [`deploy/nats/nats.conf`](../../deploy/nats/nats.conf)
+(the demo server): NKeys only, and it never includes a `*.test.conf` file.
+A production cluster config starts from it. `services/core/internal/bus/conf_test.go`
+checks that the test-only subject is only in the include, and that the
+`gateway` permissions are the same in both files.
 
 ## Users
 
 Each service has its own NATS user and may do only what its job needs.
+Everything not listed is refused (no `no_auth_user`, so an anonymous
+connection is refused too).
 
-| User | Service | May |
-|---|---|---|
-| `gateway` | the core service | publish `inference.v1.>` and `jobs.v1.>`, use the KV subjects and the JetStream management it needs (no stream delete or purge); subscribe to its own inbox and `dead.v1.>` |
-| `worker` | the Python workers | subscribe to `inference.v1.>` and its own inbox; publish only replies (`allow_responses`, one per request), `dead.v1.>` and pull-consumer calls on the `JOBS` stream; no KV access |
+| User | Service | Publish | Subscribe | Replies |
+|---|---|---|---|---|
+| `gateway` | the core service | `inference.v1.>`, `jobs.v1.>`, `$KV.>`, and JetStream management on the four KV streams, `JOBS` and `DEAD` only (create, update, info; KV reads; consumer create and info); fetch and ack on its `core_dead` consumer. No stream delete or purge, no message delete, no other stream | `_INBOX_gateway.>`; `api.v1.>` and `authz.v1.grant.>` in queue group `core` only | `allow_responses` |
+| `pipeline` | the pipeline worker | `dead.v1.>`, `authz.v1.grant.pipeline`, and its own consumer: `$JS.API.CONSUMER.INFO.JOBS.pipeline`, `$JS.API.CONSUMER.MSG.NEXT.JOBS.pipeline`, `$JS.ACK.JOBS.pipeline.>` | `inference.v1.pipeline.>` in queue group `pipeline` only; `_INBOX_worker.pipeline.>` | `allow_responses` |
+| `echo` | the echo worker (dev and test) | `authz.v1.grant.echo` | `inference.v1.echo.>` in queue group `echo` only; `_INBOX_worker.echo.>` | `allow_responses` |
+| `bff_clinical` | the clinical app's BFF | `api.v1.clinical`; the `bff_direct` operations one by one (`inference.v1.echo.ping` in dev and test only) | `_INBOX_bff.clinical.>` | none |
+| `bff_platform` | the platform app's BFF | `api.v1.platform` | `_INBOX_bff.platform.>` | none |
+
+So: only `gateway` publishes `inference.v1.>` (the clinical BFF aside, for
+its `bff_direct` subjects) and `jobs.v1.>`. No worker has KV access, any
+`$JS` subject beyond its own consumer, `api.v1.>` or another service's
+grant subject. No BFF user has `jobs.v1.>`, `$KV.>`, `$JS.>`, `dead.v1.>`
+or `authz.v1.>`. Every rule has a refusal test in
+`services/core/internal/bus/bus_integration_test.go`.
+
+`allow_responses: {max: 1, expires: "1m"}` lets a responder answer a
+request it received once, within a minute, without a general publish right
+on the requester's inbox.
 
 The core service's user is still named `gateway`. The name predates the
 rename to `core` and is kept on purpose, so the security config, the
 credentials and the tests stay as they are.
 
+### Responders must check the reply subject
+
+NATS does not check the reply subject a requester sets. A response
+permission lets the responder publish once to *whatever* subject the
+request named, past its allow list and its deny list (the test
+`TestReplySubjectIsTheResponderToCheck` shows it). So a BFF could ask core
+to "reply" on `jobs.v1.<hospital>.run_query` or a `$JS.API` subject. Every
+responder therefore refuses, with no reply, a reply subject outside the
+prefix it expects:
+
+- core on `api.v1.<app>`: `_INBOX_bff.<app>.`
+- core on `authz.v1.grant.<service>`: `_INBOX_worker.<service>.`
+- a worker on a BFF-direct call: `_INBOX_bff.clinical.` (spec §17.2); on a
+  call from core: `_INBOX_gateway.`
+
 ## Inbox prefixes
 
-Each service receives replies on its own prefix instead of the shared
-`_INBOX.>`: `_INBOX_gateway` for the core service and `_INBOX_worker` for
-the workers (set with `CustomInboxPrefix`). A user may subscribe only to its
-own prefix, so no service can read or forge another's replies.
+Each user receives replies on its own prefix instead of the shared
+`_INBOX.>`: `_INBOX_gateway`, `_INBOX_worker.<service>` and
+`_INBOX_bff.<app>` (set with `CustomInboxPrefix`; `bus.WorkerInbox` and
+`bus.BFFInbox` in Go). A user may subscribe only to its own prefix, so no
+service can read another's replies, and nobody but a responder can write
+to them.
+
+## Queue groups
+
+Core subscribes `api.v1.>` and `authz.v1.grant.>` in queue group `core`;
+each worker subscribes `inference.v1.<service>.>` in a queue group named
+after the service. The permissions allow those subscriptions only in that
+queue group, so a stray plain subscriber can't take a copy of every
+request. Jobs go to one durable pull consumer per service, shared by its
+copies.
+
+## Streams
+
+Core creates them at start-up (`bus.EnsureStreams`, run by `core serve`),
+with `NATS_JS_REPLICAS` replicas (1 in dev, 3 on the production cluster).
+
+| Stream | Subjects | Settings | Consumers |
+|---|---|---|---|
+| `JOBS` | `jobs.v1.>` | file storage; work-queue retention (an acked job is removed); `max_age` 7 days; duplicate window 2 minutes (`Nats-Msg-Id` = the query id); `discard: new` per subject with at most 10,000 waiting jobs per subject, so a flood is refused at publish and nothing queued is dropped | `pipeline` on `jobs.v1.*.run_query`: explicit ack, `ack_wait` 60 s, `max_deliver` 5, no `BackOff` (the worker picks each retry's delay with `Nak(delay)`), `max_ack_pending` from `JOBS_PIPELINE_MAX_ACK_PENDING` (default 8) |
+| `DEAD` | `dead.v1.>` | file storage; `max_age` 30 days | `core_dead`: explicit ack, `ack_wait` 30 s |
+
+A work-queue stream allows only one consumer per subject, so each job type
+has exactly one durable consumer.
+
+## Limits and storage
+
+- `max_payload: 1MB`, the outer bound (the services check their own,
+  smaller limits).
+- JetStream storage is encrypted at rest (`cipher: chachapoly`), with the
+  key from `NATS_JS_KEY`. Losing the key loses the store.
 
 ## Development credentials
 
-In development both users have passwords, read from the environment and
+In development every user has a password, read from the environment and
 never from this directory or the repository:
 
-- `NATS_GATEWAY_PASSWORD`
-- `NATS_WORKER_PASSWORD`
+- `NATS_GATEWAY_PASSWORD`, `NATS_PIPELINE_PASSWORD`, `NATS_ECHO_PASSWORD`,
+  `NATS_BFF_CLINICAL_PASSWORD`, `NATS_BFF_PLATFORM_PASSWORD`
+- `NATS_JS_KEY`, the JetStream encryption key (at least 32 characters)
 
-Use letters and digits only, because the config parser treats other
-characters as syntax. Compose refuses to start NATS with the placeholder
-values from `.env.example`, and the core service refuses them too.
+Use letters and digits only, starting with a letter: the config parser
+reads other characters as syntax and a leading digit as a number. An
+undefined variable stops the server. Compose refuses to start NATS with a
+missing or placeholder value from `.env.example`, and the core service
+refuses a placeholder in its own `NATS_URL`. Each service gets only its own
+password; only the `nats` service sees them all.
 
-## Production: NKeys
+## Production
 
-In production, replace each user's `password:` with `nkey: <public key>`:
-
-1. Generate a key pair per service with `nk -gen user -pubout`.
-2. Put the public key in `nats.conf`.
-3. Give the service only its seed file, through a secret mount. The core
-   service reads it from `NATS_NKEY_SEED_PATH`.
-
-Also enable the `tls {}` block in `nats.conf`, and keep the monitoring port
-(8222) off the network.
+- **NKeys, not passwords:** replace each user's `password:` with
+  `nkey: <public key>`. Generate a pair per service with
+  `nk -gen user -pubout`, put the public key in the config, and give the
+  service only its seed file, through a secret mount (core:
+  `NATS_NKEY_SEED_PATH`).
+- **TLS with `verify`** on every connection: enable the `tls {}` block,
+  with the CA that signs every service's client certificate. Core reads
+  `NATS_TLS_CA_PATH`, `NATS_TLS_CERT_PATH` and `NATS_TLS_KEY_PATH` and
+  refuses to start outside development without them.
+- **R3:** a three-server cluster, and `NATS_JS_REPLICAS=3` for core.
+- **No test include:** define `bff_clinical` in the production config
+  itself, with only the production `bff_direct` subjects (none in this
+  build), and never include `bff-clinical.test.conf`.
+- Keep the monitoring port (8222) off the network.

@@ -50,8 +50,9 @@ func (a *app) close() {
 // newApp connects everything serve needs and assembles the routes:
 //   - Postgres as a login that is only a member of mhai_app (anything else,
 //     the owner or the provisioning login included, is refused);
-//   - NATS with the core service's own credentials and inbox prefix, and
-//     the KV buckets;
+//   - NATS with the core service's own credentials, inbox prefix and TLS
+//     files, the KV buckets, and the JOBS and DEAD streams with their
+//     consumers;
 //   - the access-token key, the auth service and the principal middleware
 //     with both idempotency stores (authz.NewMux refuses a guard without).
 func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, error) {
@@ -66,14 +67,20 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if a.pool, err = openDB(ctx, cfg.DatabaseURL); err != nil {
 		return nil, err
 	}
-	nc, js, err := bus.Connect(ctx, cfg.NATSURL, cfg.NATSNkeySeedPath, bus.GatewayInboxPrefix)
+	nc, js, err := bus.Connect(ctx, cfg.NATSURL, cfg.NATSNkeySeedPath, bus.GatewayInboxPrefix, bus.TLS(cfg.NATSTLS))
 	if err != nil {
 		a.close()
 		return nil, err
 	}
 	a.nc = nc
-	buckets, err := bus.OpenBuckets(ctx, js)
+	buckets, err := bus.OpenBuckets(ctx, js, cfg.NATSJSReplicas)
 	if err != nil {
+		a.close()
+		return nil, err
+	}
+	if err := bus.EnsureStreams(ctx, js, bus.StreamConfig{
+		Replicas: cfg.NATSJSReplicas, PipelineMaxAckPending: cfg.JobsPipelineMaxAckPending,
+	}); err != nil {
 		a.close()
 		return nil, err
 	}

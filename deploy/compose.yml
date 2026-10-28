@@ -151,7 +151,8 @@ services:
     environment:
       # The demo server runs as development (product owner, 28 Oct), which
       # turns on Redoc at /api/docs on the loopback port (view it through an
-      # SSH tunnel). CORE_ENV changes nothing else in core today; production
+      # SSH tunnel), and lets core reach NATS without TLS (outside
+      # development core refuses to start without NATS_TLS_*). Production
       # must not be development.
       CORE_ENV: development
       HTTP_ADDR: ":8080"

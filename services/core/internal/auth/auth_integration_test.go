@@ -78,13 +78,13 @@ func TestMain(m *testing.M) {
 			return 1
 		}
 		defer app.Close()
-		nc, js, err := bus.Connect(ctx, n.GatewayURL, "", bus.GatewayInboxPrefix)
+		nc, js, err := bus.Connect(ctx, n.GatewayURL, "", bus.GatewayInboxPrefix, bus.TLS{})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "nats connect:", err)
 			return 1
 		}
 		defer nc.Close()
-		if buckets, err = bus.OpenBuckets(ctx, js); err != nil {
+		if buckets, err = bus.OpenBuckets(ctx, js, 1); err != nil {
 			fmt.Fprintln(os.Stderr, "buckets:", err)
 			return 1
 		}

@@ -74,6 +74,8 @@ services:
       HTTP_ADDR: ":8080"
       DATABASE_URL: postgres://${CORE_DB_USER:-core_app}:${CORE_DB_PASSWORD:?set CORE_DB_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
       NATS_URL: nats://gateway:${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}@nats:4222
+      NATS_JS_REPLICAS: ${NATS_JS_REPLICAS:-1}   # one server in dev; 3 (R3) on the production cluster
+      JOBS_PIPELINE_MAX_ACK_PENDING: ${JOBS_PIPELINE_MAX_ACK_PENDING:-8}
       ACCESS_KEY_PATH: /keys/access.pem
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set MFA_ENCRYPTION_KEY in .env}
       BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set BFF_SERVICE_KEYS in .env}
@@ -113,25 +115,38 @@ services:
       <<: *healthcheck-defaults
       test: ["CMD", "redis-cli", "ping"]
 
-  # The only link between the core service and the Python workers. Two NATS
-  # users (gateway, worker) with their own permissions; see services/nats.
+  # The only link between the core service, the BFFs and the Python
+  # workers. One NATS user per service (gateway, pipeline, echo,
+  # bff_clinical, bff_platform), each with its own password, and JetStream
+  # encrypted at rest with NATS_JS_KEY; see services/nats. Worker services
+  # get only their own password when they are added (Plan 3, Task 15).
   nats:
     image: nats:2.10-alpine
     restart: unless-stopped
-    # Refuse to start with a placeholder password.
+    # Refuse to start with a missing or placeholder secret, or a JetStream
+    # key shorter than 32 characters or starting with a digit.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        case "$$NATS_GATEWAY_PASSWORD $$NATS_WORKER_PASSWORD" in
-          *[Cc]hange[Mm]e*|*[Cc]hange-[Mm]e*|*[Pp]laceholder*|*[Pp]LACEHOLDER*) echo "NATS passwords are placeholders" >&2; exit 1;;
-        esac
+        for v in "$$NATS_GATEWAY_PASSWORD" "$$NATS_PIPELINE_PASSWORD" "$$NATS_ECHO_PASSWORD" "$$NATS_BFF_CLINICAL_PASSWORD" "$$NATS_BFF_PLATFORM_PASSWORD" "$$NATS_JS_KEY"; do
+          case "$$v" in
+            ""|*[Cc][Hh][Aa][Nn][Gg][Ee][Mm][Ee]*|*[Cc][Hh][Aa][Nn][Gg][Ee]-[Mm][Ee]*|*[Pp][Ll][Aa][Cc][Ee][Hh][Oo][Ll][Dd][Ee][Rr]*) echo "NATS secrets are missing or placeholders" >&2; exit 1;;
+          esac
+        done
+        case "$$NATS_JS_KEY" in [0-9]*) echo "NATS_JS_KEY must start with a letter" >&2; exit 1;; esac
+        [ "$${#NATS_JS_KEY}" -ge 32 ] || { echo "NATS_JS_KEY must be at least 32 characters" >&2; exit 1; }
         exec nats-server -c /etc/nats/nats.conf
     environment:
       NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}
-      NATS_WORKER_PASSWORD: ${NATS_WORKER_PASSWORD:?set NATS_WORKER_PASSWORD in .env}
+      NATS_PIPELINE_PASSWORD: ${NATS_PIPELINE_PASSWORD:?set NATS_PIPELINE_PASSWORD in .env}
+      NATS_ECHO_PASSWORD: ${NATS_ECHO_PASSWORD:?set NATS_ECHO_PASSWORD in .env}
+      NATS_BFF_CLINICAL_PASSWORD: ${NATS_BFF_CLINICAL_PASSWORD:?set NATS_BFF_CLINICAL_PASSWORD in .env}
+      NATS_BFF_PLATFORM_PASSWORD: ${NATS_BFF_PLATFORM_PASSWORD:?set NATS_BFF_PLATFORM_PASSWORD in .env}
+      NATS_JS_KEY: ${NATS_JS_KEY:?set NATS_JS_KEY in .env}
     ports: ["127.0.0.1:${NATS_PORT:-4222}:4222"]
     volumes:
       - ./services/nats/nats.conf:/etc/nats/nats.conf:ro
+      - ./services/nats/bff-clinical.test.conf:/etc/nats/bff-clinical.test.conf:ro
       - natsdata:/data
     healthcheck:
       <<: *healthcheck-defaults

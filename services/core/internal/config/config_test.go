@@ -10,7 +10,8 @@ const goodKey = "0123456789abcdef0123456789abcdef" // 32 bytes, synthetic
 func setEnv(t *testing.T, kv map[string]string) {
 	t.Helper()
 	for _, k := range []string{"CORE_ENV", "HTTP_ADDR", "DATABASE_URL", "NATS_URL", "NATS_NKEY_SEED_PATH", "NATS_GATEWAY_PASSWORD", "NATS_WORKER_PASSWORD",
-		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS"} {
+		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS",
+		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -137,7 +138,7 @@ func TestValidateServe(t *testing.T) {
 		!strings.Contains(err.Error(), "ACCESS_KEY_PATH") {
 		t.Fatalf("want all three named, got %v", err)
 	}
-	ok := Config{DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem"}
+	ok := Config{Env: "development", DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem"}
 	if err := ok.ValidateServe(); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func TestValidateServe(t *testing.T) {
 // serve needs the request-token key too (spec §7.2), in its own file: one
 // key must never sign both token kinds.
 func TestServeNeedsRequestKey(t *testing.T) {
-	c := Config{DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/keys/access.pem"}
+	c := Config{Env: "development", DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/keys/access.pem"}
 	if err := c.ValidateServe(); err == nil || !strings.Contains(err.Error(), "REQUEST_KEY_PATH") {
 		t.Fatalf("want REQUEST_KEY_PATH named, got %v", err)
 	}
@@ -210,6 +211,76 @@ func TestAPIDocsSwitch(t *testing.T) {
 		}
 		if err != nil || got.APIDocs != c.want {
 			t.Errorf("env %q flag %q: docs %v err %v, want %v", c.env, c.flag, got.APIDocs, err, c.want)
+		}
+	}
+}
+
+// The NATS TLS files, the stream replica count and the pipeline consumer's
+// ack window come from the environment; bad values are refused by name.
+func TestLoadNATSTLSAndStreams(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NATSJSReplicas != 1 || c.JobsPipelineMaxAckPending != 8 || c.NATSTLS != (NATSTLS{}) {
+		t.Fatalf("defaults: %d %d %+v", c.NATSJSReplicas, c.JobsPipelineMaxAckPending, c.NATSTLS)
+	}
+	env := map[string]string{"NATS_TLS_CA_PATH": "/tls/ca.pem", "NATS_TLS_CERT_PATH": "/tls/core.pem",
+		"NATS_TLS_KEY_PATH": "/tls/core-key.pem", "NATS_JS_REPLICAS": "3", "JOBS_PIPELINE_MAX_ACK_PENDING": "16"}
+	for k, v := range base {
+		env[k] = v
+	}
+	setEnv(t, env)
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if c.NATSTLS != (NATSTLS{CAPath: "/tls/ca.pem", CertPath: "/tls/core.pem", KeyPath: "/tls/core-key.pem"}) ||
+		c.NATSJSReplicas != 3 || c.JobsPipelineMaxAckPending != 16 {
+		t.Fatalf("got %+v %d %d", c.NATSTLS, c.NATSJSReplicas, c.JobsPipelineMaxAckPending)
+	}
+	for name, bad := range map[string][]string{"NATS_JS_REPLICAS": {"0", "2", "4", "-1", "x", "7"},
+		"JOBS_PIPELINE_MAX_ACK_PENDING": {"0", "-3", "abc", "100001"}} {
+		for _, v := range bad {
+			e := map[string]string{name: v}
+			for k, v := range base {
+				e[k] = v
+			}
+			setEnv(t, e)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("%s=%q: %v", name, v, err)
+			}
+		}
+	}
+}
+
+// TLS (with a client certificate: verify is on in production) is required
+// on the NATS connection everywhere but development; an unknown or empty
+// environment fails closed. A partial TLS setting is refused everywhere.
+func TestValidateServeRequiresNATSTLSOutsideDevelopment(t *testing.T) {
+	full := NATSTLS{CAPath: "/tls/ca.pem", CertPath: "/tls/core.pem", KeyPath: "/tls/core-key.pem"}
+	base := Config{DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem"}
+	for _, env := range []string{"production", "Production", "staging", ""} {
+		c := base
+		c.Env = env
+		if err := c.ValidateServe(); err == nil || !strings.Contains(err.Error(), "NATS_TLS") {
+			t.Fatalf("%q without TLS: %v", env, err)
+		}
+		c.NATSTLS = full
+		if err := c.ValidateServe(); err != nil {
+			t.Fatalf("%q with TLS: %v", env, err)
+		}
+	}
+	c := base
+	c.Env = "development"
+	if err := c.ValidateServe(); err != nil {
+		t.Fatalf("development without TLS: %v", err)
+	}
+	for _, partial := range []NATSTLS{{CAPath: "/tls/ca.pem"}, {CertPath: "/c", KeyPath: "/k"}, {CAPath: "/a", CertPath: "/c"}} {
+		c.NATSTLS = partial
+		if err := c.ValidateServe(); err == nil || !strings.Contains(err.Error(), "NATS_TLS") || strings.Contains(err.Error(), "/tls/") {
+			t.Fatalf("partial %+v: %v", partial, err)
 		}
 	}
 }
