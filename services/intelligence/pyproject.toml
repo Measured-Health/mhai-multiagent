@@ -1,0 +1,215 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "intelligence"
+version = "1.0.0"
+description = "A 5-agent hallucination-resistant clinical decision-support system."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "Promit Ghosal", email = "promit@bhai.uchicago.edu" }]
+keywords = ["medical-ai", "multi-agent", "hallucination-detection", "clinical", "transformer"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "torch>=2.0",
+    "transformers>=4.30",
+    "accelerate>=0.20",
+    "peft>=0.5",
+    "bitsandbytes>=0.41",
+    "sentence-transformers>=2.2",
+    "rank-bm25>=0.2",
+    "scikit-learn>=1.3",
+    "scipy>=1.10",
+    "scikit-image>=0.21",
+    "requests>=2.28",
+    "cryptography>=41.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+    "sqlalchemy>=2.0",
+    "httpx>=0.24",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+    "mypy>=1.5",
+    "pre-commit>=3.4",
+    "fakeredis>=2.0",
+    "locust>=2.15",
+    "diff-cover>=9",
+]
+# PyTorch build. CPU is the default; for a CUDA machine use
+# `uv sync --no-group cpu --group cu128`.
+cpu = ["torch>=2.0"]
+cu128 = ["torch>=2.0"]
+
+[tool.uv]
+default-groups = ["dev", "cpu"]
+conflicts = [[{ group = "cpu" }, { group = "cu128" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", group = "cpu" },
+    { index = "pytorch-cu128", group = "cu128" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[project.scripts]
+intelligence = "intelligence.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/promit-ghosal/mhai"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["intelligence*"]
+
+[tool.setuptools.package-data]
+intelligence = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers"
+pythonpath = ["."]
+markers = [
+    "models: needs real ML models (downloads weights; run scripts/e2e_models.py)",
+    "slow: takes more than a few seconds",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = [".", "tests"]
+# Apply exclusions even when tools pass explicit paths (pre-commit does).
+force-exclude = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+# Legacy files not yet run through the formatter. Format a file and drop it
+# from this list when you next change it substantially.
+exclude = [
+    "intelligence/agents/cca.py",
+    "intelligence/agents/dia.py",
+    "intelligence/agents/hga_nli.py",
+    "intelligence/agents/hga.py",
+    "intelligence/agents/orchestrator.py",
+    "intelligence/agents/qda.py",
+    "intelligence/cli.py",
+    "intelligence/config/agent_http.py",
+    "intelligence/config/secrets_manager.py",
+    "intelligence/config/settings.py",
+    "intelligence/guardrails/__init__.py",
+    "intelligence/guardrails/l1_persona_vector.py",
+    "intelligence/guardrails/l2_semantic_entropy.py",
+    "intelligence/guardrails/l3_nli_citation.py",
+    "intelligence/guardrails/l4_trust_escalation.py",
+    "intelligence/__init__.py",
+    "intelligence/knowledge_base/kb_builder.py",
+    "intelligence/knowledge_base/patient_parser.py",
+    "intelligence/models/deberta_moe.py",
+    "intelligence/models/ft_transformer.py",
+    "intelligence/models/swin_v2.py",
+    "intelligence/pipeline/cross_milestone.py",
+    "intelligence/pipeline/integration.py",
+    "intelligence/queue/consumer.py",
+    "intelligence/queue/dlq.py",
+    "intelligence/queue/producer.py",
+    "intelligence/retrieval/dense_retriever.py",
+    "intelligence/retrieval/hybrid.py",
+    "intelligence/retrieval/sparse_retriever.py",
+    "intelligence/security/hipaa.py",
+    "intelligence/tools/guideline_parser.py",
+    "intelligence/tools/hf_client.py",
+    "intelligence/tools/pubmed_client.py",
+    "intelligence/utils/device.py",
+    "intelligence/utils/logging.py",
+    "intelligence/utils/retry.py",
+    "intelligence/utils/seeding.py",
+    "intelligence/utils/tokens.py",
+    "scripts/run_pipeline.py",
+    "tests/evaluation/evaluator.py",
+    "tests/evaluation/m3_evaluator.py",
+    "tests/harness/guardrail_harness.py",
+    "tests/regression/e2e_regression.py",
+    "tests/unit/test_cli.py",
+    "tests/unit/test_config.py",
+    "tests/unit/test_security.py",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Baseline for code ported from the original notebooks: the rules each file
+# broke when linting was enforced. Don't add entries; remove them as files
+# are cleaned up. New and changed files must pass the full rule set.
+"intelligence/agents/cca.py" = ["F401", "F541", "I001", "UP006", "UP035", "UP045"]
+"intelligence/agents/dia.py" = ["B905", "F541", "I001", "UP006", "UP024", "UP035", "UP045"]
+"intelligence/agents/hga.py" = ["F401", "F541", "I001", "UP006", "UP035"]
+"intelligence/agents/hga_nli.py" = ["B007", "F401", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+"intelligence/agents/orchestrator.py" = ["B007", "F401", "I001", "UP006", "UP035", "UP045"]
+"intelligence/agents/qda.py" = ["F401", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+"intelligence/cli.py" = ["F541", "I001"]
+"intelligence/config/settings.py" = ["I001", "UP006", "UP035"]
+"intelligence/guardrails/l1_persona_vector.py" = ["B006", "B905", "E741", "F401", "F541", "I001", "UP006", "UP035", "UP045"]
+"intelligence/guardrails/l2_semantic_entropy.py" = ["F401", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+"intelligence/guardrails/l4_trust_escalation.py" = ["B007", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+"intelligence/knowledge_base/kb_builder.py" = ["B007", "F401", "F841", "I001", "UP006", "UP015", "UP035", "UP045"]
+"intelligence/knowledge_base/patient_parser.py" = ["B905", "F401", "F541", "F821", "F841", "I001", "UP006", "UP015", "UP035", "UP045"]
+"intelligence/pipeline/cross_milestone.py" = ["B007", "F401", "F541", "I001", "UP006", "UP035"]
+"intelligence/pipeline/integration.py" = ["F401", "F541", "I001", "UP006", "UP035", "UP045"]
+"intelligence/security/hipaa.py" = ["F401", "F541", "I001", "UP006", "UP035", "UP045"]
+"intelligence/tools/guideline_parser.py" = ["I001", "UP006", "UP035"]
+"intelligence/tools/pubmed_client.py" = ["I001", "UP006", "UP035"]
+"tests/evaluation/evaluator.py" = ["B018", "E701", "F401", "F541", "F821", "I001", "UP006", "UP015", "UP035", "UP045"]
+"tests/evaluation/m3_evaluator.py" = ["B018", "F401", "F541", "F821", "F841", "I001", "UP006", "UP015", "UP035"]
+"tests/harness/guardrail_harness.py" = ["B007", "B905", "E741", "F401", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+"tests/regression/e2e_regression.py" = ["E714", "E741", "F401", "F541", "F841", "I001", "UP006", "UP035", "UP045"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+files = ["intelligence"]
+
+[[tool.mypy.overrides]]
+# Baseline: modules ported from the notebooks that failed type checking when
+# it was enforced. Don't add modules; remove them as they are fixed.
+module = [
+    "intelligence.agents.cca",
+    "intelligence.agents.dia",
+    "intelligence.agents.hga_nli",
+    "intelligence.agents.hga",
+    "intelligence.agents.orchestrator",
+    "intelligence.agents.qda",
+    "intelligence.knowledge_base.kb_builder",
+    "intelligence.knowledge_base.patient_parser",
+    "intelligence.pipeline.cross_milestone",
+    "intelligence.pipeline.integration",
+    "intelligence.security.hipaa",
+    "intelligence.tools.pubmed_client",
+    "intelligence.guardrails.l1_persona_vector",
+    "intelligence.guardrails.l2_semantic_entropy",
+    "intelligence.guardrails.l4_trust_escalation",
+]
+ignore_errors = true

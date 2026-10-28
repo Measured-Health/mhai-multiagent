@@ -3,22 +3,22 @@
 # approve. The PR author can't approve their own PR, so list at least two
 # people per path.
 
-*                                   @ojies
+*                                                   @ojies
 
 # Patient data, guardrails, feedback and identity: changes here need a
 # reviewer who understands the clinical and security impact (SKILLS.md).
-/mhai/security/                     @ojies
-/mhai/knowledge_base/               @ojies
-/mhai/guardrails/                   @ojies
-/mhai/agents/orchestrator.py        @ojies
-/mhai/agents/hga_nli.py             @ojies
-/mhai/utils/nli.py                  @ojies
-/mhai/config/settings.py            @ojies
-/tests/security/                    @ojies
-/SKILLS.md                          @ojies
+/services/intelligence/intelligence/security/       @ojies
+/services/intelligence/intelligence/knowledge_base/ @ojies
+/services/intelligence/intelligence/guardrails/     @ojies
+/services/intelligence/intelligence/agents/orchestrator.py@ojies
+/services/intelligence/intelligence/agents/hga_nli.py@ojies
+/services/intelligence/intelligence/utils/nli.py    @ojies
+/services/intelligence/intelligence/config/settings.py@ojies
+/services/intelligence/tests/security/              @ojies
+/SKILLS.md                                          @ojies
 
 # Infrastructure and supply chain
-/.github/                           @ojies
-/Dockerfile                         @ojies
-/docker-compose*.yml                @ojies
-/uv.lock                            @ojies
+/.github/                                           @ojies
+/services/*/Dockerfile                              @ojies
+/docker-compose*.yml                                @ojies
+/services/intelligence/uv.lock                      @ojies

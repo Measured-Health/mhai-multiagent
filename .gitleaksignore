@@ -1,0 +1,8 @@
+# Synthetic 32-byte test key in a config test (not a secret).
+fce9d36a7ed1fae43109ce583194c6ca64b787db:gateway/internal/config/config_test.go:generic-api-key:8
+# Synthetic database login passwords in tests (e91e64e), since replaced by
+# test-only values. Not secrets.
+e91e64e7d8cefbb67f683b4c8b29322d5a0f01a8:services/core/cmd/core/main_test.go:generic-api-key:95
+e91e64e7d8cefbb67f683b4c8b29322d5a0f01a8:services/core/cmd/core/main_test.go:generic-api-key:96
+e91e64e7d8cefbb67f683b4c8b29322d5a0f01a8:services/core/cmd/core/main_test.go:generic-api-key:103
+e91e64e7d8cefbb67f683b4c8b29322d5a0f01a8:services/core/internal/config/config_test.go:generic-api-key:158

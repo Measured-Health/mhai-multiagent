@@ -17,7 +17,7 @@
 
 ## 1. Purpose
 
-The backend is now a Go gateway plus Python model services (ADR 0010).
+The backend is now the core service (Go) plus Python model services (ADR 0010).
 
 The clinical app (`mhai-web`) is being built ahead of the API. Where an
 endpoint doesn't exist yet, the frontend calls an assumed shape. This
@@ -30,6 +30,9 @@ gateway spec or an ADR says so.
 
 ### Status labels
 
+- **Built (Plan 2):** served by the core service today, with the shape in
+  `services/core/openapi.yaml` (the committed contract; a test keeps it in
+  step with the routes).
 - **Gateway:** in the gateway design. Designed, not built yet.
 - **Gateway + change:** in the gateway design, but the frontend needs a
   different or larger shape.
@@ -55,8 +58,8 @@ The browser never sees the API token. The clinical app's Next.js server
 calls the API, keeps the access token server-side, and gives the browser
 an httpOnly session cookie. It refreshes the token while the user is
 active. The browser only reaches the API through a same-origin proxy that
-forwards exact, known shapes. Status: **Gateway** (15-minute JWT with
-sliding refresh fits this). The backend needs nothing extra, except:
+forwards exact, known shapes. Status: **Built (Plan 2)** (15-minute JWT,
+rotating refresh token, `X-MHAI-Service` BFF key, `X-MHAI-Client-IP`). The backend needs nothing extra, except:
 
 - CORS stays strict; the BFF calls the API server-to-server.
 - Rate limits are per user, not per IP, because every request comes from
@@ -65,20 +68,19 @@ sliding refresh fits this). The backend needs nothing extra, except:
   from the BFF.
 - Login and the two-step challenge also return a `refresh_token`, for the
   BFF only; it is never sent on to the browser. The BFF refreshes with
-  `POST /auth/refresh {refresh_token}` (§2.2). **New (design 2026-10-26
-  §6.3).**
+  `POST /auth/refresh {refresh_token}` (§2.2). **Built (Plan 2).**
 
 ### 2.2 Sign-in
 
 | Item | Shape | Status |
 |---|---|---|
-| Login | `POST /auth/login {username, password, device_token?}` → `{access_token, expires_in, user}` or `{mfa_required: true, mfa_token}` | Gateway + change |
-| Work email as login name | accept an email in `username` (or rename the field) | New |
-| Login `user` | `id`, `role` (primary), **`roles`** (all), `email`, `display_name`, `full_name`, `role_title`, `specialty`, `hospital`, `mfa_enabled`, `must_change_password`, `terms_accepted_at`, `recovery_codes_left`, `idle_timeout_minutes`, `review_overdue_hours` | Assumed |
-| Login `refresh_token` | login and the two-step challenge also return `refresh_token`, for the BFF only (never sent to the browser) | **New (design 2026-10-26 §6.3)** |
-| Refresh | `POST /auth/refresh {refresh_token}` → `{access_token, expires_in, refresh_token}`; the refresh token rotates on every use, reusing an old one more than 10 seconds after its rotation revokes the whole refresh-token family (that device's session); within 10 seconds it returns 409 `conflict` and revokes nothing, so the BFF retries with its newer token | **New (design 2026-10-26 §6.3)** |
-| Accept terms | `POST /auth/terms {version}` → 204; records version and time | Assumed |
-| Lockout | the same `login_locked` (429) reply for an unknown login as for a locked one, so it can't reveal which accounts exist | Gateway + change |
+| Login | `POST /auth/login {username, password, device_token?}` → `{access_token, expires_in, user}` or `{mfa_required: true, mfa_token}` | **Built (Plan 2)** |
+| Work email as login name | accept an email in `username` (or rename the field) | **Built (Plan 2)** |
+| Login `user` | `id`, `role` (primary), **`roles`** (all), `email`, `display_name`, `full_name`, `role_title`, `specialty`, `hospital`, `mfa_enabled`, `must_change_password`, `terms_accepted_at`, `recovery_codes_left`, `idle_timeout_minutes`, `review_overdue_hours` | **Built (Plan 2)** |
+| Login `refresh_token` | login and the two-step challenge also return `refresh_token`, for the BFF only (never sent to the browser) | **Built (Plan 2)** |
+| Refresh | `POST /auth/refresh {refresh_token}` → `{access_token, expires_in, refresh_token}`; the refresh token rotates on every use, reusing an old one more than 10 seconds after its rotation revokes the whole refresh-token family (that device's session); within 10 seconds it returns 409 `conflict` and revokes nothing, so the BFF retries with its newer token | **Built (Plan 2)** |
+| Accept terms | `POST /auth/terms {version}` → 204; records version and time | **Built (Plan 2)** |
+| Lockout | the same `login_locked` (429) reply for an unknown login as for a locked one, so it can't reveal which accounts exist | **Built (Plan 2)** |
 
 Until `idle_timeout_minutes` and `review_overdue_hours` exist, the app uses
 15 minutes and 4 hours.
@@ -87,12 +89,12 @@ Until `idle_timeout_minutes` and `review_overdue_hours` exist, the app uses
 
 | Item | Shape | Status |
 |---|---|---|
-| Challenge | `POST /auth/mfa/challenge {mfa_token, code, trust_device?}` → token, plus `device_token` when `trust_device` was set and the hospital allows it | Gateway + change |
-| Enrol, verify | `POST /auth/mfa/enroll`, `POST /auth/mfa/verify` | Gateway |
-| Backup codes | 10 codes at enrolment (the gateway's recovery codes; the UI calls them backup codes); each works once | Gateway |
-| Regenerate backup codes | `POST /auth/mfa/recovery-codes` → 10 new codes; the old ones stop working | Assumed |
-| Per-hospital policy | `require_mfa_for_clinicians` (hospital setting); hospital admins, platform admins and auditors always need it | New |
-| Trust this device | `device_token` bound to the user it was issued to, refused for anyone else; allowed only when the hospital setting `allow_trust_device` is on | Assumed |
+| Challenge | `POST /auth/mfa/challenge {mfa_token, code, trust_device?}` → token, plus `device_token` when `trust_device` was set and the hospital allows it | **Built (Plan 2)** |
+| Enrol, verify | `POST /auth/mfa/enroll`, `POST /auth/mfa/verify` | **Built (Plan 2)** |
+| Backup codes | 10 codes at enrolment (the gateway's recovery codes; the UI calls them backup codes); each works once | **Built (Plan 2)** |
+| Regenerate backup codes | `POST /auth/mfa/recovery-codes` → 10 new codes; the old ones stop working | **Built (Plan 2)** |
+| Per-hospital policy | `require_mfa_for_clinicians` (hospital setting); hospital admins, platform admins and auditors always need it | **Built (Plan 2)**: enforced; set with the CLI until the settings endpoint (§5.2) exists |
+| Trust this device | `device_token` bound to the user it was issued to, refused for anyone else; allowed only when the hospital setting `allow_trust_device` is on | **Built (Plan 2)** |
 
 Answered (design 2026-10-26 §6.4): a trusted device never skips the code
 for `hospital_admin`, `analyst`, `platform_admin` or `auditor`.
@@ -107,7 +109,7 @@ against an allowlist, so it can never send the browser to another site.
 
 | Item | Shape | Status |
 |---|---|---|
-| Change | `POST /auth/password` | Gateway |
+| Change | `POST /auth/password` | **Built (Plan 2)** |
 | Forgot | `POST /auth/password/forgot {email}` → 202 for any email | Assumed |
 | Reset | `POST /auth/password/reset {token, new_password}`; link valid 30 minutes; checked against leaked passwords; signs out every device | Assumed |
 
@@ -117,12 +119,13 @@ The `users` table needs an `email` column for this.
 
 | Item | Shape | Status |
 |---|---|---|
-| List | `GET /auth/sessions` → active devices | Assumed |
-| Sign out one | `DELETE /auth/sessions/{id}` → 204 | Assumed |
-| Sign out everywhere | `POST /auth/sessions/revoke-all` → 204 | Assumed |
+| List | `GET /auth/sessions` → active devices | **Built (Plan 2)** |
+| Sign out one | `DELETE /auth/sessions/{id}` → 204 | **Built (Plan 2)** |
+| Sign out everywhere | `POST /auth/sessions/revoke-all` → 204 | **Built (Plan 2)** |
 
-The gateway denylists single token ids. Listing and revoking devices needs
-a session (refresh family) record per device.
+Built (Plan 2) with a session (refresh family) record per device; sign-out
+denylists the session and its access tokens. `POST /auth/logout` signs out
+the current session.
 
 ## 3. Roles and tenancy
 

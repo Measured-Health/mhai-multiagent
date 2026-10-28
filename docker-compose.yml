@@ -1,7 +1,7 @@
 # MHAI local stack.
 #
 #   cp .env.example .env
-#   make up                  # postgres, redis, ollama (+ model pull), mhai
+#   make up                  # postgres, nats, core (+ migrations), redis, ollama (+ model pull), intelligence
 #   make up-gpu              # same, with Ollama and PyTorch on an NVIDIA GPU
 #   make up-observability    # also starts the OpenTelemetry collector
 #
@@ -24,11 +24,82 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mhai}
     ports: ["127.0.0.1:${POSTGRES_PORT:-5432}:5432"]
     volumes:
-      - ./init-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       <<: *healthcheck-defaults
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+
+  # One-shot: apply the core service's goose migrations (the whole schema, roles
+  # and row-level security), then create or reset the two deployment logins:
+  #   CORE_DB_USER       the core service's login, a member of mhai_app only
+  #   PROVISION_DB_USER  the seed CLI's login, a member of mhai_provision only
+  # It connects as the owner (the local POSTGRES_USER is a superuser), and
+  # carries no core service secrets. Placeholder passwords are refused.
+  core-migrate:
+    build:
+      context: ./services/core
+    image: mhai-core:local
+    restart: "no"
+    command: ["migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-mhai}:${POSTGRES_PASSWORD:-mhai}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
+      CORE_DB_USER: ${CORE_DB_USER:-core_app}
+      CORE_DB_PASSWORD: ${CORE_DB_PASSWORD:?set CORE_DB_PASSWORD in .env}
+      PROVISION_DB_USER: ${PROVISION_DB_USER:-core_provision}
+      PROVISION_DB_PASSWORD: ${PROVISION_DB_PASSWORD:?set PROVISION_DB_PASSWORD in .env}
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # One-shot: make the access-token signing key in the corekeys volume if
+  # it isn't there yet (core keys ensure). Production mounts its own key.
+  core-keys:
+    image: mhai-core:local
+    restart: "no"
+    command: ["keys", "ensure", "--out", "/keys/access.pem"]
+    volumes:
+      - corekeys:/keys
+    depends_on:
+      core-migrate: { condition: service_completed_successfully }
+
+  # The core service (Go): the API the BFFs call. Its environment is only
+  # its own settings (no env_file): the core login, the gateway NATS user,
+  # its key and its secrets. The config rejects placeholder values.
+  core:
+    image: mhai-core:local
+    restart: unless-stopped
+    command: ["serve"]
+    environment:
+      CORE_ENV: ${CORE_ENV:-development}
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: postgres://${CORE_DB_USER:-core_app}:${CORE_DB_PASSWORD:?set CORE_DB_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
+      NATS_URL: nats://gateway:${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}@nats:4222
+      ACCESS_KEY_PATH: /keys/access.pem
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set MFA_ENCRYPTION_KEY in .env}
+      BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set BFF_SERVICE_KEYS in .env}
+    ports: ["127.0.0.1:${CORE_PORT:-8080}:8080"]
+    volumes:
+      - corekeys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-keys: { condition: service_completed_successfully }
+    # The image is distroless (no shell or curl): probe from outside with
+    # GET /api/v1/readyz (200 ready, 503 not ready).
+    healthcheck:
+      disable: true
+
+  # The seed CLI, as the provisioning login (never the owner, never the
+  # core login). Not started by `up`; run it with
+  #   docker compose run --rm -T core-cli hospitals create ...
+  core-cli:
+    image: mhai-core:local
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://${PROVISION_DB_USER:-core_provision}:${PROVISION_DB_PASSWORD:?set PROVISION_DB_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
+    depends_on:
+      core-migrate: { condition: service_completed_successfully }
 
   redis:
     image: redis:7.4.11-alpine
@@ -40,6 +111,30 @@ services:
     healthcheck:
       <<: *healthcheck-defaults
       test: ["CMD", "redis-cli", "ping"]
+
+  # The only link between the core service and the Python workers. Two NATS
+  # users (gateway, worker) with their own permissions; see services/nats.
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    # Refuse to start with a placeholder password.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        case "$$NATS_GATEWAY_PASSWORD $$NATS_WORKER_PASSWORD" in
+          *[Cc]hange[Mm]e*|*[Cc]hange-[Mm]e*|*[Pp]laceholder*|*[Pp]LACEHOLDER*) echo "NATS passwords are placeholders" >&2; exit 1;;
+        esac
+        exec nats-server -c /etc/nats/nats.conf
+    environment:
+      NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}
+      NATS_WORKER_PASSWORD: ${NATS_WORKER_PASSWORD:?set NATS_WORKER_PASSWORD in .env}
+    ports: ["127.0.0.1:${NATS_PORT:-4222}:4222"]
+    volumes:
+      - ./services/nats/nats.conf:/etc/nats/nats.conf:ro
+      - natsdata:/data
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
 
   # Serves the CCA LLM (CCA_BACKEND=ollama).
   ollama:
@@ -65,26 +160,55 @@ services:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5:7b-instruct}"]
 
-  mhai:
+  intelligence:
     build:
-      context: .
+      context: ./services/intelligence
       args:
         TORCH: ${TORCH:-cpu}
-    image: mhai:${TORCH:-cpu}
+    image: mhai-intelligence:${TORCH:-cpu}
     # The image's default command is a one-shot CLI until the API server
     # exists; switch to unless-stopped once it serves on :8000.
     restart: "no"
-    env_file:
-      - path: .env
-        required: false
+    # No env_file: .env also holds the core service's secrets (MFA key, BFF
+    # keys, database logins, gateway NATS password), and this container,
+    # with its model downloads and many dependencies, must not see them.
+    # Only the settings the Python service reads are listed; the defaults
+    # match .env.example. TestComposeSplitsSecretsPerService checks this.
     environment:
+      # Superuser URL until the boundary plan (known limit, T2 M6).
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mhai}:${POSTGRES_PASSWORD:-mhai}@postgres:5432/${POSTGRES_DB:-mhai}
       REDIS_URL: redis://redis:6379/0
       OLLAMA_URL: http://ollama:11434
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       HF_HOME: /home/appuser/.cache/huggingface
+      HF_TOKEN: ${HF_TOKEN:-}
+      APP_ENV: ${APP_ENV:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      QUEUE_BACKEND: ${QUEUE_BACKEND:-redis}
+      QUEUE_URL: ${QUEUE_URL:-mhai.queries}
+      QUEUE_DLQ_URL: ${QUEUE_DLQ_URL:-mhai.queries.dlq}
+      QUEUE_WORKERS: ${QUEUE_WORKERS:-3}
+      NLI_MODEL: ${NLI_MODEL:-cross-encoder/nli-deberta-v3-base}
+      CCA_BACKEND: ${CCA_BACKEND:-ollama}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      CCA_MODEL: ${CCA_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      DENSE_MODEL: ${DENSE_MODEL:-all-MiniLM-L6-v2}
+      DIA_MODEL: ${DIA_MODEL:-microsoft/swinv2-base-patch4-window8-256}
+      QWEN_RPM: ${QWEN_RPM:-15}
+      QWEN_TPM: ${QWEN_TPM:-30000}
+      DEBERTA_RPM: ${DEBERTA_RPM:-120}
+      TRUST_PASS_DEFAULT: ${TRUST_PASS_DEFAULT:-0.55}
+      TRUST_REGEN_FLOOR: ${TRUST_REGEN_FLOOR:-0.30}
+      SE_THRESHOLD_RAG: ${SE_THRESHOLD_RAG:-0.8}
+      SE_K_SAMPLES: ${SE_K_SAMPLES:-5}
+      PERSONA_ETA: ${PERSONA_ETA:-0.05}
+      CMA_ES_MIN_CORRECTIONS: ${CMA_ES_MIN_CORRECTIONS:-50}
+      AGENT_HTTP_TIMEOUT: ${AGENT_HTTP_TIMEOUT:-300}
+      AGENT_HTTP_RETRIES: ${AGENT_HTTP_RETRIES:-2}
+      S3_BUCKET: ${S3_BUCKET:-mhai-artifacts-dev}
     depends_on:
       postgres: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
       ollama-init: { condition: service_completed_successfully }
     ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
@@ -103,7 +227,7 @@ services:
     restart: unless-stopped
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
-      - ./configs/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+      - ./services/intelligence/configs/otel-collector.yaml:/etc/otelcol/config.yaml:ro
     ports:
       - "127.0.0.1:${OTEL_GRPC_PORT:-4317}:4317"
       - "127.0.0.1:${OTEL_HTTP_PORT:-4318}:4318"
@@ -111,5 +235,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  natsdata:
+  corekeys:
   ollama:
   hf-cache:

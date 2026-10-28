@@ -15,14 +15,19 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.10
     hooks:
+      # Ruff reads services/intelligence/pyproject.toml for these files.
       - id: ruff-check
         args: [--fix]
+        files: ^services/intelligence/
       - id: ruff-format
+        files: ^services/intelligence/
 
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: 0.12.23
     hooks:
       - id: uv-lock
+        args: [--project, services/intelligence]
+        files: ^services/intelligence/(uv\.lock|pyproject\.toml)$
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1

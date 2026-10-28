@@ -3,7 +3,8 @@
 1. Create a branch off `main` (see [Branches and commits](#branches-and-commits))
 2. `make install-dev` once (uv environment + pre-commit hooks)
 3. Run `make lint`, `make typecheck` and `make test` before pushing
-4. Write tests; security fixes need a failing-first test in `tests/security`
+4. Write tests; security fixes need a failing-first test in
+   `services/intelligence/tests/security`
    (see [SKILLS.md](SKILLS.md))
 5. Open a PR and fill in the template
 
@@ -11,7 +12,7 @@
 
 Every PR must pass these before merge:
 
-- the lockfile is current (`uv lock --check`);
+- the lockfile is current (`uv lock --check` in `services/intelligence/`);
 - ruff lint and format;
 - mypy;
 - tests;
@@ -19,7 +20,7 @@ Every PR must pass these before merge:
 - a gitleaks scan of history.
 
 Code ported from the original notebooks is grandfathered by explicit
-baselines in `pyproject.toml`:
+baselines in `services/intelligence/pyproject.toml`:
 
 - `[tool.ruff.lint.per-file-ignores]`
 - `[tool.ruff.format] exclude`
@@ -28,18 +29,21 @@ baselines in `pyproject.toml`:
 **Never add to these lists.** Remove a file from them when you clean it up.
 Everything new must pass the full rule set.
 
-One Python version: **3.12** (`.python-version`; Docker uses the same).
+One Python version: **3.12** (`services/intelligence/.python-version`; Docker uses the same).
 Container images and tools are pinned to exact versions, and Dependabot
 proposes upgrades weekly.
 
 ## Where a change goes
 
-The backend is a Go gateway plus Python model services, joined by NATS
-(ADR 0010). The Go gateway, in `gateway/`, is planned and not built yet.
+The backend is the core service (Go) plus Python model services, joined by
+NATS (ADR 0010). The core service, in `services/core/`, serves sign-in,
+sessions, two-step verification, permissions, tenancy and audit (Plan 2).
+Its contract is `services/core/openapi.yaml`; a contract test keeps it in
+step with the routes. See `services/core/README.md`.
 
 - **Go:** the API, authentication, permissions, tenancy, audit and EMR
   plumbing.
-- **Python (`mhai/`):** models and the pipeline: agents, retrieval,
+- **Python (`services/intelligence/intelligence/`):** models and the pipeline: agents, retrieval,
   guardrails, PII masking.
 - **NATS** is the only link between them. Python services are never
   called any other way.
@@ -49,7 +53,7 @@ Two rules:
 - **Security rules are written once, in Go.** Don't copy a permission or
   tenancy rule into Python.
 - **Python never trusts a hospital or user from a payload,** only from the
-  verified gateway token.
+  verified core service token.
 
 ## Branches and commits
 
@@ -79,13 +83,15 @@ code review:
 The process:
 
 1. Label the PR `clinical-review`.
-2. Attach the `scripts/e2e_models.py` report from before **and** after the
+2. Attach the `services/intelligence/scripts/e2e_models.py` report from before **and** after the
    change, and say which numbers moved and why that's acceptable.
 3. A clinically qualified reviewer approves it in addition to the code
    review.
 4. Record significant changes as an ADR (see below).
 
 ## Testing
+
+Python paths here are relative to `services/intelligence/`.
 
 - Every bug fix comes with a test that fails without the fix. Security fixes
   go in `tests/security/`. Check that the test fails for the right reason, not
@@ -116,7 +122,7 @@ The process:
   *Unreleased* in the same PR.
 - To release:
   1. Move *Unreleased* to a new version heading, set `version` in
-     `pyproject.toml`, and merge.
+     `services/intelligence/pyproject.toml`, and merge.
   2. A maintainer tags `vX.Y.Z` on `main`.
   3. The release workflow builds and pushes
      `ghcr.io/measured-health/mhai-multiagent:X.Y.Z` (CPU image) and creates

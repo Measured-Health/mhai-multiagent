@@ -1,0 +1,494 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/netip"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/account"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+)
+
+// Input bounds. A longer value is a validation failure, not a sign-in
+// attempt.
+const (
+	maxUsernameLen = 320
+	maxPasswordLen = 1024
+	maxUALen       = 120
+)
+
+type loginRequest struct {
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	DeviceToken string `json:"device_token,omitempty"`
+}
+
+type loginResponse struct {
+	AccessToken  string   `json:"access_token"`
+	ExpiresIn    int      `json:"expires_in"`
+	RefreshToken string   `json:"refresh_token"`
+	User         userView `json:"user"`
+	// DeviceToken is set only by the two-step challenge, when the caller
+	// asked to trust the device and the account may (see trustDevice).
+	DeviceToken string `json:"device_token,omitempty"`
+}
+
+type mfaResponse struct {
+	MFARequired bool   `json:"mfa_required"`
+	MFAToken    string `json:"mfa_token"`
+}
+
+func clientIP(r *http.Request) string {
+	ip := httpx.ClientIP(r.Context())
+	if !ip.IsValid() {
+		return ""
+	}
+	return ip.String()
+}
+
+// login: POST /auth/login. Unknown, inactive and wrong-password logins get
+// the same 401 after the same argon2 work. Each attempt first reserves a
+// slot in the (login, IP) counter atomically; one that finds the counter
+// already at 5 gets 429 login_locked without verifying and without writing.
+// If the counter can't be read or written, sign-in fails closed (503).
+//
+// The per-login ceiling (20 failures an hour across every IP) must not let
+// a stranger lock the owner out for good (I1), and must not become a
+// password oracle. So a request that finds the ceiling at its limit runs
+// the same work on every path (argon2 for every login, and the device
+// lookup whenever a device token is sent), and then:
+//   - the right password with a live trusted-device token of that user
+//     goes on as usual, when that device may stand in for the code (roles
+//     and hospital policy) and the account is on its own audience: holding
+//     the device is the proof (see ceilingEscape);
+//   - everything else (right or wrong password, two-step or not, unknown
+//     account) gets the same 429 login_locked, and its (login, IP) slot
+//     stays counted.
+//
+// Each such request writes auth.login.ceiling (ids only) so admins can be
+// alerted.
+func (s *Service) login(w http.ResponseWriter, r *http.Request) {
+	var in loginRequest
+	if !httpx.Decode(w, r, &in) {
+		return
+	}
+	if strings.TrimSpace(in.Username) == "" || in.Password == "" ||
+		len(in.Username) > maxUsernameLen || len(in.Password) > maxPasswordLen || len(in.DeviceToken) > 256 {
+		httpx.Error(w, r, "validation_failed")
+		return
+	}
+	ctx := r.Context()
+	rid := httpx.RequestIDFrom(ctx)
+	ip := clientIP(r)
+	if ip == "" {
+		// The BFF must send X-MHAI-Client-IP (contract §2.1); without it every
+		// request would share one counter per login, which anyone could trip.
+		s.fail(w, r, "not_ready", "auth: login without a client IP; check the BFF configuration")
+		return
+	}
+	email := account.NormaliseEmail(in.Username)
+
+	// Before the account lookup, so the reply never depends on the account.
+	res, err := s.reserveLogin(ctx, email, ip)
+	if err != nil {
+		s.fail(w, r, "not_ready", "auth: login attempts unavailable")
+		return
+	}
+
+	var acct *acctRec
+	err = s.withAuth(ctx, func(tx pgx.Tx) error {
+		a, err := accountByEmail(ctx, tx, email)
+		if err != nil && !errors.Is(err, errNoAccount) {
+			return err
+		}
+		acct = a
+		return nil
+	})
+	if err != nil {
+		s.fail(w, r, "internal_error", "auth: login lookup failed")
+		return
+	}
+	actor, hospital := "", ""
+	if acct != nil {
+		actor, hospital = acct.ID.String(), acct.hospitalID()
+	}
+
+	if res.ipLocked {
+		s.auditOnly(w, r, "auth.login.locked", actor, hospital, map[string]any{"reason": "locked"})
+		s.log().Info("auth: login locked", "request_id", rid, "user_id", actor)
+		httpx.Error(w, r, "login_locked")
+		return
+	}
+
+	// A slot for the argon2 work. Locked requests above never wait for one.
+	// A request refused for load gives its attempt back: it is not counted.
+	release, err := s.argon().Acquire(ctx)
+	if err != nil {
+		s.refundLogin(ctx, res, rid, actor)
+		s.fail(w, r, "not_ready", "auth: password checks saturated")
+		return
+	}
+	defer release()
+
+	// The argon2 work is the same whether or not the account exists.
+	ok := false
+	if acct != nil && acct.PasswordHash != nil && *acct.PasswordHash != "" {
+		ok, _ = password.Verify(in.Password, *acct.PasswordHash)
+	} else {
+		password.DummyVerify(in.Password)
+	}
+	if res.ceilingLocked {
+		// The device lookup runs whenever a token is sent, whatever the
+		// password, so right and wrong guesses take the same time.
+		trusted := false
+		if in.DeviceToken != "" {
+			id := uuid.Nil
+			if acct != nil {
+				id = acct.ID
+			}
+			t, err := s.trustedDevice(ctx, id, in.DeviceToken)
+			if err != nil {
+				s.fail(w, r, "internal_error", "auth: trusted device lookup failed", "user_id", actor)
+				return
+			}
+			trusted = t
+		}
+		if !ok || !acct.usable() || !ceilingEscape(acct, trusted, httpx.Audience(ctx) == httpx.AudiencePlatform) {
+			// The (login, IP) slot stays counted, whatever the password.
+			s.ceilingLocked(w, r, actor, hospital)
+			return
+		}
+		s.auditOnly(w, r, "auth.login.ceiling", actor, hospital, map[string]any{"outcome": "device"})
+		s.log().Info("auth: login ceiling passed with a trusted device", "request_id", rid, "user_id", actor)
+	} else if !ok || !acct.usable() {
+		// The attempt was already counted by reserveLogin.
+		s.auditOnly(w, r, "auth.login.failed", actor, hospital, map[string]any{"reason": "bad_credentials"})
+		s.log().Info("auth: login failed", "request_id", rid, "user_id", actor)
+		httpx.Error(w, r, "unauthenticated")
+		return
+	}
+	s.loginSucceeded(ctx, res, rid, actor)
+
+	// The audience check comes only after the password, so it reveals
+	// nothing about accounts the caller can't sign in to.
+	platform := httpx.Audience(ctx) == httpx.AudiencePlatform
+	if platform != hasPlatformRole(acct.Roles) {
+		reason, code := "not_platform", "not_platform"
+		if !platform {
+			reason, code = "platform_account", "forbidden"
+		}
+		s.auditOnly(w, r, "auth.login.failed", actor, hospital, map[string]any{"reason": reason})
+		httpx.Error(w, r, code)
+		return
+	}
+
+	rehash := password.NeedsRehash(*acct.PasswordHash)
+	mfa, amr := false, []string{"pwd"}
+	if needsCode(acct.Roles, acct.policy(), acct.MFAEnabled) {
+		// A trusted device may stand in for the code only where the hospital
+		// allows trusted devices and no role forbids them.
+		if in.DeviceToken != "" && deviceMayStandIn(acct.Roles, acct.policy()) {
+			trusted, err := s.trustedDevice(ctx, acct.ID, in.DeviceToken)
+			if err != nil {
+				s.fail(w, r, "internal_error", "auth: trusted device lookup failed", "user_id", actor)
+				return
+			}
+			if trusted {
+				mfa, amr = true, []string{"pwd", "device"}
+			}
+		}
+		if !mfa {
+			s.mfaPending(w, r, acct, in.Password, rehash, platform)
+			return
+		}
+	}
+	s.startSession(w, r, acct, mfa, amr, func(ctx context.Context, tx pgx.Tx) error {
+		return s.maybeRehash(ctx, tx, acct.ID, in.Password, rehash)
+	})
+}
+
+// mfaPending answers the two-step branch: a short-lived single-use
+// mfa_token and no access token. No session exists until the challenge.
+// The token records the audience and a fingerprint of the password hash
+// (after any rehash), so the challenge refuses it on the other audience or
+// after a password change.
+func (s *Service) mfaPending(w http.ResponseWriter, r *http.Request, acct *acctRec, pw string, rehash, platform bool) {
+	ctx := r.Context()
+	keys, err := s.mfaKeys()
+	if err != nil {
+		s.fail(w, r, "not_ready", "auth: mfa key not configured", "user_id", acct.ID.String())
+		return
+	}
+	hash := acct.PasswordHash
+	err = s.withAuth(ctx, func(tx pgx.Tx) error {
+		h, err := s.rehash(ctx, tx, acct.ID, pw, rehash)
+		if err != nil {
+			return err
+		}
+		if h != "" {
+			hash = &h
+		}
+		return writeAudit(ctx, tx, r, "auth.login.succeeded", acct.ID.String(), acct.hospitalID(), "user", acct.ID.String(),
+			map[string]any{"mfa_required": true})
+	})
+	if err != nil {
+		s.fail(w, r, "internal_error", "auth: login audit failed", "user_id", acct.ID.String())
+		return
+	}
+	tok, err := s.MFATokens().Issue(ctx, MFAToken{UserID: acct.ID.String(), Enrolled: acct.MFAEnabled,
+		DeviceAllowed: deviceMayStandIn(acct.Roles, acct.policy()), Platform: platform,
+		PwGen: keys.pwFingerprint(hash)})
+	if err != nil {
+		s.fail(w, r, "not_ready", "auth: mfa token store failed", "user_id", acct.ID.String())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, mfaResponse{MFARequired: true, MFAToken: tok})
+}
+
+// startSession opens a session with its first refresh token, mints the
+// access token, records the sign-in and replies with the login body. extra
+// runs in the same transaction. Task 7's challenge finishes through here.
+func (s *Service) startSession(w http.ResponseWriter, r *http.Request, acct *acctRec, mfa bool, amr []string,
+	extra func(context.Context, pgx.Tx) error) {
+	s.startSessionDevice(w, r, acct, mfa, amr, extra, "")
+}
+
+// startSessionDevice is startSession that also returns deviceToken (stored
+// by extra) in the reply.
+func (s *Service) startSessionDevice(w http.ResponseWriter, r *http.Request, acct *acctRec, mfa bool, amr []string,
+	extra func(context.Context, pgx.Tx) error, deviceToken string) {
+	ctx := r.Context()
+	now := s.now()
+	sid, jti := uuid.New(), uuid.New()
+	access, exp, err := s.issuer().Access(token.Claims{Sub: acct.ID.String(), Hid: acct.hospitalID(), Roles: acct.Roles,
+		MFA: mfa, AMR: amr, Sid: sid.String(), Jti: jti.String()})
+	if err != nil {
+		s.fail(w, r, "internal_error", "auth: sign access token failed", "user_id", acct.ID.String())
+		return
+	}
+	refresh, refreshHash := token.NewRefresh()
+	err = s.withAuth(ctx, func(tx pgx.Tx) error {
+		if extra != nil {
+			if err := extra(ctx, tx); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO sessions (id, user_id, created_at, last_seen_at, ua_summary, ip_prefix, access_jti, access_expires_at, mfa, amr)
+			VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8, $9)`,
+			sid, acct.ID, now, uaSummary(r.UserAgent()), nullIfEmpty(ipPrefix(clientIP(r))), jti, exp, mfa, amr); err != nil {
+			return errors.New("insert session failed")
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO refresh_tokens (session_id, token_hash, issued_at) VALUES ($1, $2, $3)`,
+			sid, refreshHash, now); err != nil {
+			return errors.New("insert refresh token failed")
+		}
+		if _, err := tx.Exec(ctx, `UPDATE users SET last_login_at = $2 WHERE id = $1`, acct.ID, now); err != nil {
+			return errors.New("update last login failed")
+		}
+		return writeAudit(ctx, tx, r, "auth.login.succeeded", acct.ID.String(), acct.hospitalID(), "session", sid.String(),
+			map[string]any{"mfa": mfa, "amr": amr})
+	})
+	if err != nil {
+		s.fail(w, r, "internal_error", "auth: open session failed", "user_id", acct.ID.String())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, loginResponse{AccessToken: access, ExpiresIn: int(token.AccessTTL / time.Second),
+		RefreshToken: refresh, User: acct.view(), DeviceToken: deviceToken})
+}
+
+func (s *Service) maybeRehash(ctx context.Context, tx pgx.Tx, id uuid.UUID, pw string, rehash bool) error {
+	_, err := s.rehash(ctx, tx, id, pw, rehash)
+	return err
+}
+
+// rehash stores a fresh hash of pw when asked, and returns it ("" when not).
+func (s *Service) rehash(ctx context.Context, tx pgx.Tx, id uuid.UUID, pw string, rehash bool) (string, error) {
+	if !rehash {
+		return "", nil
+	}
+	h, err := password.Hash(pw)
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET password_hash = $2 WHERE id = $1`, id, h); err != nil {
+		return "", errors.New("rehash failed")
+	}
+	return h, nil
+}
+
+// trustedDevice reports whether deviceToken is a live trusted device of
+// user id (bound to that user; anyone else's token doesn't match).
+func (s *Service) trustedDevice(ctx context.Context, id uuid.UUID, deviceToken string) (bool, error) {
+	var ok bool
+	err := s.withAuth(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM trusted_devices
+			WHERE user_id = $1 AND token_hash = $2 AND expires_at > $3)`,
+			id, token.HashRefresh(deviceToken), s.now()).Scan(&ok)
+	})
+	return ok, err
+}
+
+// auditOnly writes one audit row in its own transaction. A failure is
+// logged; the reply to the client doesn't change.
+func (s *Service) auditOnly(_ http.ResponseWriter, r *http.Request, action, actor, hospital string, payload map[string]any) {
+	ctx := r.Context()
+	entity, entityID := "", ""
+	if actor != "" {
+		entity, entityID = "user", actor
+	}
+	if err := s.withAuth(ctx, func(tx pgx.Tx) error {
+		return writeAudit(ctx, tx, r, action, actor, hospital, entity, entityID, payload)
+	}); err != nil {
+		s.log().Error("auth: audit write failed", "request_id", httpx.RequestIDFrom(ctx), "action", action)
+	}
+}
+
+// loginReservation is what reserveLogin counted for one attempt.
+type loginReservation struct {
+	ipKey, ceilingKey string
+	// ipLocked: the (login, IP) counter was at its limit; nothing was
+	// written.
+	ipLocked bool
+	// ceilingLocked: the (login, IP) slot was taken but the per-login
+	// ceiling was at its limit, so nothing was written there.
+	ceilingLocked bool
+}
+
+// reserveLogin counts one password check for the login, by compare-and-set
+// before the password is checked, so a concurrent burst gets at most
+// MaxLoginFailures checks per (login, client IP) and MaxLoginFailuresPerLogin
+// across every IP. A counter already at its limit is not written (the
+// bucket's lifetime runs from the last write, so locked requests must not
+// extend it). Nil buckets, a missing counter key or KV failures are errors,
+// and the caller fails closed.
+func (s *Service) reserveLogin(ctx context.Context, email, ip string) (res loginReservation, err error) {
+	if s.Buckets.LoginAttempts == nil || s.Buckets.LoginCeiling == nil {
+		return res, errors.New("auth: attempt buckets missing")
+	}
+	if res.ipKey, err = s.LockoutKey(email, ip); err != nil {
+		return res, err
+	}
+	if res.ceilingKey, err = s.CeilingKey(email); err != nil {
+		return res, err
+	}
+	if res.ipLocked, err = reserveIn(ctx, s.Buckets.LoginAttempts, res.ipKey, MaxLoginFailures); err != nil || res.ipLocked {
+		return res, err
+	}
+	res.ceilingLocked, err = reserveIn(ctx, s.Buckets.LoginCeiling, res.ceilingKey, MaxLoginFailuresPerLogin)
+	if err != nil {
+		// Nothing will be checked, so the (login, IP) slot goes back: a
+		// request refused for a counter fault never costs the owner a try.
+		// If the refund fails too, the slot stays counted, which fails safe.
+		_ = refundIn(context.WithoutCancel(ctx), s.Buckets.LoginAttempts, res.ipKey)
+	}
+	return res, err
+}
+
+// ceilingEscape reports whether a right password on a usable account may
+// pass the per-login ceiling: only with a live trusted device of the user
+// that may stand in for the code under the account's current roles and
+// hospital policy, on the account's own audience, so that the session that
+// follows satisfies two-step without a code. Anything that would end in
+// the code step (mfaPending) or a different refusal would tell a guesser
+// the password was right, so it stays locked.
+func ceilingEscape(acct *acctRec, trusted, platform bool) bool {
+	return trusted &&
+		deviceMayStandIn(acct.Roles, acct.policy()) &&
+		platform == hasPlatformRole(acct.Roles) &&
+		sessionSatisfiesMFA(acct.Roles, acct.policy(), acct.MFAEnabled, true, []string{"pwd", "device"})
+}
+
+// ceilingLocked answers a request held by the per-login ceiling: an audit
+// row for admins (ids only), then the same 429 as any locked login.
+func (s *Service) ceilingLocked(w http.ResponseWriter, r *http.Request, actor, hospital string) {
+	s.auditOnly(w, r, "auth.login.ceiling", actor, hospital, map[string]any{"outcome": "locked"})
+	s.log().Info("auth: login ceiling", "request_id", httpx.RequestIDFrom(r.Context()), "user_id", actor)
+	httpx.Error(w, r, "login_locked")
+}
+
+// loginSucceeded clears the (login, IP) counter and gives back this
+// attempt's slot in the per-login ceiling (when it took one), so only
+// failures count there. Earlier failures stay: a guesser elsewhere keeps
+// their count. Failures here are logged only (the counters then expire on
+// their own).
+func (s *Service) loginSucceeded(ctx context.Context, res loginReservation, rid, userID string) {
+	if err := s.Buckets.LoginAttempts.Delete(ctx, res.ipKey); err != nil && !bus.IsNotFound(err) {
+		s.log().Error("auth: login attempts reset failed", "request_id", rid, "user_id", userID)
+	}
+	if !res.ceilingLocked {
+		if err := refundIn(ctx, s.Buckets.LoginCeiling, res.ceilingKey); err != nil {
+			s.log().Error("auth: login ceiling refund failed", "request_id", rid, "user_id", userID)
+		}
+	}
+}
+
+// refundLogin gives back what reserveLogin took for an attempt that never
+// checked the password. Failures are logged only (the attempt then stays
+// counted, which fails safe).
+func (s *Service) refundLogin(ctx context.Context, res loginReservation, rid, userID string) {
+	if err := refundIn(ctx, s.Buckets.LoginAttempts, res.ipKey); err != nil {
+		s.log().Error("auth: login attempts refund failed", "request_id", rid, "user_id", userID)
+	}
+	if !res.ceilingLocked {
+		if err := refundIn(ctx, s.Buckets.LoginCeiling, res.ceilingKey); err != nil {
+			s.log().Error("auth: login ceiling refund failed", "request_id", rid, "user_id", userID)
+		}
+	}
+}
+
+// isRevisionConflict reports a lost compare-and-set (another writer won).
+func isRevisionConflict(err error) bool {
+	var apiErr *jetstream.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence
+}
+
+// ipPrefix is the client's /24 (IPv4) or /48 (IPv6), for the device list.
+func ipPrefix(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ""
+	}
+	a = a.Unmap()
+	bits := 48
+	if a.Is4() {
+		bits = 24
+	}
+	p, err := a.Prefix(bits)
+	if err != nil {
+		return ""
+	}
+	return p.String()
+}
+
+// uaSummary keeps a short printable prefix of the user agent.
+func uaSummary(ua string) any {
+	ua = strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, ua)
+	if rs := []rune(ua); len(rs) > maxUALen {
+		ua = string(rs[:maxUALen])
+	}
+	return nullIfEmpty(strings.TrimSpace(ua))
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}

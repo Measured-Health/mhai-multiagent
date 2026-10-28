@@ -1,0 +1,642 @@
+openapi: 3.0.3
+info:
+  title: MHAI core service
+  version: "1.0.0"
+  description: |
+    The core service's committed contract: every route it serves, with the
+    exact request and response shapes and the error codes each can return.
+    `internal/auth/contract_test.go` checks it against the permission table
+    the service serves (both ways) and the error catalogue (`httpx.Codes`).
+
+    Callers are the BFFs, server to server. Every route except the probes
+    needs `X-MHAI-Service` (the BFF key). The BFF passes the end user's
+    address in `X-MHAI-Client-IP` and the app in `X-MHAI-Audience`
+    (`clinical` by default, or `platform`). Identity comes only from the
+    bearer token, never from a body, query or header.
+
+    Request bodies are JSON, at most 64 KB; an unknown field is
+    422 `validation_failed`. Errors are `application/problem+json`
+    (`Problem`); on the platform audience the body is `{code}` only. Every
+    response has `X-Request-ID`; auth responses also send
+    `Cache-Control: no-store`.
+
+    Unsafe methods accept an optional `Idempotency-Key` (1–255 printable
+    characters). A retry with the same key and body replays the stored reply
+    (`Idempotent-Replayed: true`) for 72 hours; the same key with another
+    body, or one still in flight, is 409 `conflict`. Replies that carry a
+    credential are never stored, so their retry is 409 too.
+servers:
+  - url: /api/v1
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness probe. No BFF key.
+      tags: [probes]
+      security: []
+      responses:
+        "200":
+          description: The process is up.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Readiness probe. No BFF key.
+      description: |
+        200 when Postgres answers and NATS is connected with every KV
+        bucket reachable; otherwise 503 `not_ready`, never saying which
+        dependency failed.
+      tags: [probes]
+      security: []
+      x-error-codes: [not_ready]
+      responses:
+        "200":
+          description: Ready to serve.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ready" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/login:
+    post:
+      operationId: login
+      summary: Sign in with a work email and password.
+      description: |
+        Unknown, inactive and wrong-password logins get the same 401 after
+        the same argon2 work. 5 failures per (login, client IP) in 15
+        minutes, or 20 per login across every IP in an hour, give 429
+        `login_locked`, the same for an unknown login. Without
+        `X-MHAI-Client-IP`, or when the attempt counters or the password
+        checker are unavailable, 503 `not_ready`. A clinical account on the
+        platform audience is 403 `not_platform`; a platform account on the
+        clinical audience is 403 `forbidden`. When two-step applies the reply
+        is `MFARequired` instead of tokens.
+      tags: [auth]
+      security: [{ ServiceKey: [] }]
+      x-error-codes: [unauthenticated, forbidden, not_platform, conflict, validation_failed, login_locked, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Signed in, or a second factor is needed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Tokens"
+                  - $ref: "#/components/schemas/MFARequired"
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/refresh:
+    post:
+      operationId: refresh
+      summary: Rotate the refresh token and mint a new access token.
+      description: |
+        Reusing a refresh token within 10 seconds of its rotation is 409
+        `conflict` and revokes nothing (the BFF retries with its newer
+        token). Reuse later revokes the whole family (401). Roles, two-step
+        and account and hospital status are checked again on every refresh.
+      tags: [auth]
+      security: [{ ServiceKey: [] }]
+      x-error-codes: [unauthenticated, forbidden, not_platform, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "200":
+          description: New tokens.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RefreshResponse" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/mfa/challenge:
+    post:
+      operationId: mfaChallenge
+      summary: Finish sign-in with a TOTP or backup code.
+      description: |
+        The `mfa_token` lasts 5 minutes, allows 5 attempts and is single
+        use; it works only on the audience it was issued on and only until
+        the password changes. 5 wrong codes in 15 minutes give 429
+        `mfa_locked`. With `trust_device`, and only where the hospital allows
+        it and no role forbids it, the reply also carries `device_token`.
+      tags: [auth]
+      security: [{ ServiceKey: [] }]
+      x-error-codes: [unauthenticated, mfa_invalid, mfa_locked, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChallengeRequest" }
+      responses:
+        "200":
+          description: Signed in.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tokens" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/mfa/enroll:
+    post:
+      operationId: mfaEnroll
+      summary: Start two-step enrolment.
+      description: |
+        A new TOTP secret and 10 backup codes, replacing any enrolment not
+        yet verified. Two-step stays off until `/auth/mfa/verify`. 409
+        `conflict` when two-step is already on. Accepts a session limited to
+        enrolment. The body is empty or `{}`.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: &signedInErrors [unauthenticated, token_expired, mfa_required, forbidden, not_platform, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Empty" }
+      responses:
+        "200":
+          description: The secret (as an otpauth URI) and backup codes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnrollResponse" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/mfa/verify:
+    post:
+      operationId: mfaVerify
+      summary: Confirm enrolment with a TOTP code; turns two-step on.
+      description: |
+        Marks the caller's session as proven by a code, so its next refresh
+        mints a full token. No enrolment is 409 `conflict`. A wrong code is
+        403 `mfa_invalid`; 5 in 15 minutes are 429 `mfa_locked`.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CodeRequest" }
+      responses:
+        "204": { description: Two-step is on. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/mfa/recovery-codes:
+    post:
+      operationId: mfaRecoveryCodes
+      summary: Regenerate the 10 backup codes (step-up required).
+      description: |
+        Needs a fresh TOTP code (`mfa_code`) or an unused backup code
+        (`backup_code`). The old codes stop working. A wrong code is 403
+        `mfa_invalid`; none given is 403 `mfa_required`.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepUpRequest" }
+      responses:
+        "200":
+          description: The new backup codes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryCodes" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/password:
+    post:
+      operationId: changePassword
+      summary: Change the password.
+      description: |
+        A wrong current password is 403 `forbidden` and counts against the
+        sign-in lockout (429 `login_locked`). The new password must be at
+        least 12 characters, not on the breached list and not the current
+        one, else 422 `weak_password`. On success every other session is
+        revoked and trusted devices are removed.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, conflict, validation_failed, weak_password, login_locked, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordRequest" }
+      responses:
+        "204": { description: Changed. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Sign out this session.
+      description: Revokes the session and denylists it and its access tokens. The body is empty.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *signedInErrors
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204": { description: Signed out. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/terms:
+    post:
+      operationId: acceptTerms
+      summary: Record acceptance of a terms version.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *signedInErrors
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TermsRequest" }
+      responses:
+        "204": { description: Recorded. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/sessions:
+    get:
+      operationId: listSessions
+      summary: The caller's active sessions (devices), most recently seen first.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The sessions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionList" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/sessions/{id}:
+    delete:
+      operationId: deleteSession
+      summary: Sign out one of the caller's sessions.
+      description: Another account's session, or an unknown id, is 404 `not_found`.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204": { description: Signed out. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/sessions/revoke-all:
+    post:
+      operationId: revokeAllSessions
+      summary: Sign out every session of the caller, this one included.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *signedInErrors
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204": { description: Signed out everywhere. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+components:
+  securitySchemes:
+    ServiceKey:
+      type: apiKey
+      in: header
+      name: X-MHAI-Service
+      description: The BFF's service key (BFF_SERVICE_KEYS). Never sent by a browser.
+    Bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        The access token: EdDSA (Ed25519), 15 minutes, iss `mhai-gateway`,
+        aud `mhai-bff`, claims sub, hid, roles, mfa, amr, sid, jti, iat, exp.
+
+  parameters:
+    ClientIP:
+      name: X-MHAI-Client-IP
+      in: header
+      required: false
+      description: The end user's IP address, as the BFF saw it. Sign-in and password change need it.
+      schema: { type: string }
+    Audience:
+      name: X-MHAI-Audience
+      in: header
+      required: false
+      schema: { type: string, enum: [clinical, platform], default: clinical }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, minLength: 1, maxLength: 255 }
+
+  responses:
+    Problem:
+      description: An error. The `code` is one of the operation's `x-error-codes`.
+      headers:
+        X-Request-ID: { schema: { type: string } }
+      content:
+        application/problem+json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/Problem"
+              - $ref: "#/components/schemas/PlatformProblem"
+
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status, code, detail, request_id]
+      properties:
+        type: { type: string, example: "urn:mhai:problem:unauthenticated" }
+        title: { type: string }
+        status: { type: integer }
+        code:
+          type: string
+          enum:
+            - unauthenticated
+            - token_expired
+            - mfa_required
+            - mfa_invalid
+            - mfa_locked
+            - forbidden
+            - not_platform
+            - not_found
+            - conflict
+            - validation_failed
+            - weak_password
+            - rate_limited
+            - login_locked
+            - not_ready
+            - internal_error
+        detail: { type: string, description: Fixed per code; never echoes input. }
+        request_id: { type: string }
+    PlatformProblem:
+      description: The error body on the platform audience.
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code: { type: string }
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+    Ready:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ready] }
+    Empty:
+      type: object
+      additionalProperties: false
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username: { type: string, maxLength: 320, description: The work email; case and surrounding spaces are ignored. }
+        password: { type: string, maxLength: 1024 }
+        device_token: { type: string, maxLength: 256 }
+    Tokens:
+      type: object
+      required: [access_token, expires_in, refresh_token, user]
+      properties:
+        access_token: { type: string }
+        expires_in: { type: integer, example: 900 }
+        refresh_token: { type: string, description: For the BFF only; never sent to the browser. }
+        user: { $ref: "#/components/schemas/User" }
+        device_token: { type: string, description: Only from the challenge, when trust_device was set and allowed. }
+    MFARequired:
+      type: object
+      required: [mfa_required, mfa_token]
+      properties:
+        mfa_required: { type: boolean, enum: [true] }
+        mfa_token: { type: string }
+    User:
+      type: object
+      required: [id, role, roles, email, display_name, full_name, role_title, specialty, hospital, mfa_enabled,
+        must_change_password, terms_accepted_at, recovery_codes_left, idle_timeout_minutes, review_overdue_hours]
+      properties:
+        id: { type: string, format: uuid }
+        role: { type: string, description: The primary role. }
+        roles:
+          type: array
+          items: { type: string, enum: [clinician, hospital_admin, analyst, platform_admin, auditor] }
+        email: { type: string }
+        display_name: { type: string }
+        full_name: { type: string, nullable: true }
+        role_title: { type: string, nullable: true }
+        specialty: { type: string, nullable: true }
+        hospital:
+          nullable: true
+          type: object
+          required: [id, name]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+        mfa_enabled: { type: boolean }
+        must_change_password: { type: boolean }
+        terms_accepted_at: { type: string, format: date-time, nullable: true }
+        recovery_codes_left: { type: integer }
+        idle_timeout_minutes: { type: integer }
+        review_overdue_hours: { type: integer }
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      additionalProperties: false
+      properties:
+        refresh_token: { type: string }
+    RefreshResponse:
+      type: object
+      required: [access_token, expires_in, refresh_token]
+      properties:
+        access_token: { type: string }
+        expires_in: { type: integer, example: 900 }
+        refresh_token: { type: string }
+
+    ChallengeRequest:
+      type: object
+      required: [mfa_token, code]
+      additionalProperties: false
+      properties:
+        mfa_token: { type: string }
+        code: { type: string, description: A six-digit TOTP code or a backup code. }
+        trust_device: { type: boolean }
+    EnrollResponse:
+      type: object
+      required: [otpauth_uri, recovery_codes]
+      properties:
+        otpauth_uri: { type: string }
+        recovery_codes: { type: array, minItems: 10, maxItems: 10, items: { type: string } }
+    CodeRequest:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code: { type: string }
+    StepUpRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        mfa_code: { type: string }
+        backup_code: { type: string }
+    RecoveryCodes:
+      type: object
+      required: [recovery_codes]
+      properties:
+        recovery_codes: { type: array, minItems: 10, maxItems: 10, items: { type: string } }
+
+    PasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      additionalProperties: false
+      properties:
+        current_password: { type: string, maxLength: 1024 }
+        new_password: { type: string, minLength: 12, maxLength: 1024 }
+    TermsRequest:
+      type: object
+      required: [version]
+      additionalProperties: false
+      properties:
+        version: { type: string, maxLength: 64 }
+
+    Session:
+      type: object
+      required: [id, created_at, last_seen_at, ua_summary, ip_prefix, current]
+      properties:
+        id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        ua_summary: { type: string, nullable: true }
+        ip_prefix: { type: string, nullable: true, description: The client's /24 (IPv4) or /48 (IPv6). }
+        current: { type: boolean }
+    SessionList:
+      type: object
+      required: [sessions]
+      properties:
+        sessions: { type: array, items: { $ref: "#/components/schemas/Session" } }

@@ -17,7 +17,7 @@ jobs:
       - name: Tag matches pyproject version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          version=$(grep -m1 '^version' services/intelligence/pyproject.toml | cut -d'"' -f2)
           test "$tag" = "$version" || { echo "Tag $tag != pyproject $version"; exit 1; }
 
       - uses: docker/setup-buildx-action@v3
@@ -31,7 +31,7 @@ jobs:
       - name: Build and push CPU image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: services/intelligence
           build-args: TORCH=cpu
           push: true
           tags: |
