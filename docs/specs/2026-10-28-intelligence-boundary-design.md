@@ -1,7 +1,8 @@
 # The intelligence boundary: how core calls the Python services over NATS: design
 
-- **Status:** Draft, for product owner approval
+- **Status:** Approved (product owner, 2026-10-28). The ten questions in §16 are decided as recommended, and the five refinements in §14 are accepted.
 - **Date:** 2026-10-28
+- **Plan:** `docs/plans/2026-10-28-plan-3-intelligence-boundary.md`
 - **Builds on (and must stay consistent with):**
   - [ADR 0010](../adr/0010-api-in-go-models-in-python-over-nats.md): API in Go, models in Python, NATS between them.
   - The core design, `docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md` (approved). This document details its §4.3, §5, §7.4–§7.7 and step 4 of its §10. Where this design refines a rule there, it says so and why (§14).
@@ -191,7 +192,7 @@ A JWT signed with EdDSA (Ed25519), in the header `Mhai-Request-Token`. This exte
 | `bh` | base64url(sha256(body bytes)) |
 | `pids` | optional: the patient ids core checked belong to `hid` (core design §7.6) |
 
-**Lifetimes:** `req` tokens: `exp − iat` is the call's timeout, at most 60 s. `job` tokens: the job's deadline, at most 24 h (core design §5.2). For `run_query` the deadline is 10 minutes (open question 2).
+**Lifetimes:** `req` tokens: `exp − iat` is the call's timeout, at most 60 s. `job` tokens: the job's deadline, at most 24 h (core design §5.2). For `run_query` the deadline is 10 minutes (decision 2, §16).
 
 **Signing key:** a dedicated Ed25519 key for request tokens, `REQUEST_KEY_PATH`, separate from the access-token key (`ACCESS_KEY_PATH`). Both stay inside core. `core keys new|ensure` gains a `--kind request` flag. My call: separating them means a leak or a bug in one verifier can't turn one token kind into the other, and the two keys can rotate on their own schedules.
 
@@ -223,7 +224,7 @@ Any failure: no work is done. The worker logs the reason code and the ids (`rid`
     - the token binds the subject and the body, and expires within the call's timeout;
     - the answer can only go to `_INBOX_gateway.>`, which only core can read;
     - request/reply operations are read-only (they write no rows), so a replay costs compute and nothing else.
-  - A shared check (an atomic `Create` in a NATS KV bucket keyed by `jti`) closes the gap for about one extra NATS round trip per message. Not in the first build (open question 3).
+  - A shared check (an atomic `Create` in a NATS KV bucket keyed by `jti`) closes the gap for about one extra NATS round trip per message. Not in the first build (decision 3, §16).
 - **Jobs.** JetStream redelivers the *same* message after a crash or a missed ack, so a `jti` cache would wrongly refuse legitimate redeliveries. For jobs the replay rule is in the database instead: a job is **claimed** before it runs and **completed at most once** (§9.2). A duplicate publish is also dropped by JetStream, because `Nats-Msg-Id` is the job id.
 - **After a dead letter**, a retry from the platform app's Failed jobs view (frontend §14.8) never reuses the old message. Core checks the job's user and hospital are still active, mints a new token and publishes a new message.
 
@@ -376,7 +377,7 @@ Only core writes the chain (core design §7.5). Intelligence gives core its fact
 | `intelligence.refused` | core gets `unauthorized`, `forbidden` or `invalid_request` | operation, reason code, `kid` |
 | `intelligence.key_rotated` | a request-signing key is added or removed | `kid`, planned or emergency |
 
-Each model call inside the pipeline is **not** audited one by one. That would flood the chain and say nothing a clinician or auditor needs. The per-step detail lives in traces (§10.3). Open question 4.
+Each model call inside the pipeline is **not** audited one by one. That would flood the chain and say nothing a clinician or auditor needs. The per-step detail lives in traces (§10.3). Decided this way (decision 4, §16).
 
 Refusals that a worker sees but core never hears about (a forged message with a foreign reply subject gets no reply) go to the worker's logs and the `boundary_refusals_total` metric, which alerts.
 
@@ -518,17 +519,17 @@ Actors: clinicians (through the BFF), core, the Python services, NATS, Postgres,
 
 ## 14. Refinements of the approved core design
 
-These keep the core design's intent and tighten its letter. Each needs a nod from the product owner.
+These keep the core design's intent and tighten its letter. **All five were accepted by the product owner on 2026-10-28.** The core design and ADR 0010 carry a note at each place they change ("amended by the 2026-10-28 intelligence boundary design").
 
-1. **Subjects** gain an operation level: `inference.v1.<service>.<op>` (§5.1). Job types use the contract's names (`run_query`).
-2. **The request token** gains `knd`, `nsub`, `bh` and `pids`, a distinct `typ`, and its own signing key (§7.2).
-3. **Replay for jobs** is the database claim, not the `jti` cache, because JetStream redelivers the same message (§7.4). The 2-minute `jti` window for request/reply becomes "until `exp` plus 5 s", which is never shorter than the token's life.
-4. **One NATS user per Python service** instead of one shared `worker` user (§7.6).
-5. **Audit facts from jobs** go through a transactional outbox that core drains (§10.2), rather than a separate result message.
+1. *Accepted.* **Subjects** gain an operation level: `inference.v1.<service>.<op>` (§5.1). Job types use the contract's names (`run_query`).
+2. *Accepted.* **The request token** gains `knd`, `nsub`, `bh` and `pids`, a distinct `typ`, and its own signing key (§7.2).
+3. *Accepted.* **Replay for jobs** is the database claim, not the `jti` cache, because JetStream redelivers the same message (§7.4). The 2-minute `jti` window for request/reply becomes "until `exp` plus 5 s", which is never shorter than the token's life.
+4. *Accepted.* **One NATS user per Python service** instead of one shared `worker` user (§7.6).
+5. *Accepted.* **Audit facts from jobs** go through a transactional outbox that core drains (§10.2), rather than a separate result message.
 
 ## 15. Task breakdown for the boundary plan
 
-Each task starts with its abuse-case tests (§13.5). The plan document will expand these with files, interfaces and steps.
+Each task starts with its abuse-case tests (§13.5). The plan, `docs/plans/2026-10-28-plan-3-intelligence-boundary.md`, expands these with files, interfaces and steps.
 
 | # | Task | Main tests |
 |---|---|---|
@@ -548,25 +549,27 @@ Each task starts with its abuse-case tests (§13.5). The plan document will expa
 
 Order: 1 → 2 → 3 → 4 can run partly in parallel (1 and 2 are independent). 5 needs 1–4. 6 needs 1 and 2. 7 needs 6. 8 is independent of 5–7. 9 needs 7 and 8. 10 needs 5 and 9. 11–13 last.
 
-## 16. Open questions for the product owner
+## 16. Decisions
+
+The product owner approved the design on 2026-10-28 ("approve the design, go ahead") and accepted every recommendation below. Each was an open question in the draft; the answer is now the decision.
 
 1. **Protobuf or JSON Schema for the shared messages?**
-   *Recommendation: Protobuf with `buf`.* CI then blocks incompatible changes mechanically, both languages get generated types, and float-heavy model calls stay cheap. The cost is one small toolchain (§6.1).
+   *Decided: Protobuf with `buf`.* CI blocks incompatible changes mechanically, both languages get generated types, and float-heavy model calls stay cheap. The cost is one small toolchain (§6.1).
 2. **How long may a clinical question wait before it counts as failed?**
-   *Recommendation: 10 minutes.* After that the clinician has moved on, and a late answer is more confusing than "Couldn't complete, try again". Other job types keep up to 24 hours.
+   *Decided: 10 minutes.* After that the clinician has moved on, and a late answer is more confusing than "Couldn't complete, try again". Other job types keep up to 24 hours.
 3. **Shared replay check now, or per-worker only?**
-   *Recommendation: per-worker for now.* The subject, body and reply-inbox binding already make a replay worthless. Add the NATS KV check when a request/reply operation first writes data (§7.4).
+   *Decided: per-worker for now.* The subject, body and reply-inbox binding already make a replay worthless. Add the NATS KV check when a request/reply operation first writes data (§7.4).
 4. **Audit every model call, or only the user-level events in §10.2?**
-   *Recommendation: user-level events plus every refusal.* Per-call detail goes to traces. Auditing each call would flood the chain without telling an auditor anything more.
+   *Decided: user-level events plus every refusal.* Per-call detail goes to traces. Auditing each call would flood the chain without telling an auditor anything more.
 5. **Should intelligence write its results to the database itself, or send everything back to core to write?**
-   *Recommendation: intelligence writes results under RLS* (the core design §7.4 already grants this), with audit facts in the outbox. Sending results back would need a new result channel and doubles the data on NATS.
+   *Decided: intelligence writes results under RLS* (the core design §7.4 already grants this), with audit facts in the outbox. Sending results back would need a new result channel and doubles the data on NATS.
 6. **Is `POST /queries` (with status and result) in this plan?**
-   *Recommendation: yes,* with shapes copied from the frontend contract. The core design's end-of-step goal is a question going all the way through, and the endpoint is the only honest test of that.
+   *Decided: yes,* with shapes copied from the frontend contract. The core design's end-of-step goal is a question going all the way through, and the endpoint is the only honest test of that.
 7. **A separate signing key for request tokens?**
-   *Recommendation: yes* (§7.2). It costs one more key file and keeps the two token kinds from ever standing in for each other.
+   *Decided: yes* (§7.2). It costs one more key file and keeps the two token kinds from ever standing in for each other.
 8. **Per-hospital cap on questions in flight?**
-   *Recommendation: 10 per hospital to start,* tuned from measurements; over it gets 429 `rate_limited`. It stops one hospital starving the others on a shared deployment.
+   *Decided: 10 per hospital to start,* tuned from measurements; over it gets 429 `rate_limited`. It stops one hospital starving the others on a shared deployment.
 9. **Streaming:** decide with the performance plan, not here?
-   *Recommendation: yes.* Reserve `stream.v1.>` and the `strm` claim now, build nothing, and keep clinical sign-off as the gate (§11).
+   *Decided: yes.* Reserve `stream.v1.>` and the `strm` claim now, build nothing, and keep clinical sign-off as the gate (§11).
 10. **Its own NATS account for intelligence?**
-    *Recommendation: not yet.* Per-service users and subject permissions are enough for three people to run. Revisit before production if NATS is shared with anything else.
+    *Decided: not yet.* Per-service users and subject permissions are enough for three people to run. Revisit before production if NATS is shared with anything else.

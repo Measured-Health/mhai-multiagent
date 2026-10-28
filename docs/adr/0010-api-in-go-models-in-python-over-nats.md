@@ -39,6 +39,8 @@ No Go API code has been written yet, so changing language now costs nothing.
   - that the hospital in the token matches the data asked for.
 
   If any check fails, the service refuses and does no work.
+
+  > *Amended by the 2026-10-28 intelligence boundary design (§14):* request tokens are signed with their own key, separate from the access-token key, and bind the exact subject and the body's hash. For background jobs, replay is stopped by a database claim rather than a `jti` cache, because JetStream redelivers the same message. Each Python service has its own NATS user, and job audit facts reach Go through a transactional outbox.
 - **Security rules have one owner.** The permission table lives in Go. The Python side's checks are generated from it, so the two can't drift.
 - **One shared deployment.** Every hospital's data is kept separate in one database, enforced by row-level security as well as by the code.
 

@@ -93,6 +93,7 @@ NATS is the only link between Go and Python. It replaces Redis as the job queue:
 **A clinical question is a job, not a held-open call.** Keeping the contract (gateway design §4 and §7):
 - `POST /queries` returns 202 with the query id.
 - The question goes on JetStream as `jobs.v1.<hospital_id>.query`.
+  > *Amended by the 2026-10-28 intelligence boundary design (§5.1, §14.1):* the job type uses the contract's name, so the subject is `jobs.v1.<hospital_id>.run_query`.
 - Query state and progress live in Postgres.
 - The app polls the status and stages, as mhai-web already does.
 
@@ -101,6 +102,8 @@ A full run takes tens of seconds, which is too long to hold a request open. The 
 **The pipeline stays in one Python service.** The existing orchestrator runs inside a single `pipeline` service: PII masking, retrieval, generation, NLI and HGA, in the order it already uses. Inside that service, the model clients from ADR 0008 call the models (Ollama and the inference service) as they do today. Go never runs the chain, so nothing is rewritten. Python services don't call each other over NATS.
 
 **Request/reply** is for short calls that someone is waiting on and that end in seconds, for example a document's page images or a health check. Subjects are `inference.v1.<service>`. Workers subscribe in a queue group named after the service. The core service sets a timeout per subject. A timeout is a failure the user sees as "Couldn't get an answer, try again"; it is never retried silently.
+
+> *Amended by the 2026-10-28 intelligence boundary design (§5.1, §14.1):* request/reply subjects gain an operation level, `inference.v1.<service>.<op>`, and the timeout is set per operation.
 
 **JetStream** is for work nobody is waiting on: EMR events to check, feedback to learn from, knowledge-base rebuilds. The details:
 - One stream, `JOBS`, on the subjects `jobs.v1.<hospital_id>.<type>`.
@@ -139,6 +142,8 @@ There are two layers, and both must pass.
 - **Python workers:** may subscribe on their own `inference.v1.<service>` and on their JetStream consumers, and may publish only replies and `dead.v1.>`.
 - Nothing else can publish on `inference.v1.>`.
 
+> *Amended by the 2026-10-28 intelligence boundary design (§7.6, §14.4):* Plan 2 built one shared `worker` user; it is replaced by one NATS user per Python service (`pipeline`, `echo`, later the model services), each with its own inbox prefix `_INBOX_worker.<service>`.
+
 ### 5.2 Request layer: a signed request token
 
 The core service attaches a token to every request and job, in the NATS header `Mhai-Request-Token`:
@@ -152,11 +157,14 @@ The core service attaches a token to every request and job, in the NATS header `
 - `jti`;
 - `iat`, and `exp` 60 seconds later. Jobs get `exp` equal to the job's deadline, up to 24 hours.
 
+> *Amended by the 2026-10-28 intelligence boundary design (§7.2, §14.2):* every claim above is kept, and the token gains `knd` (`req` or `job`), `nsub` (the exact subject), `bh` (the body's sha256) and optional `pids`. Its header `typ` is `mhai-req+jwt`, and it is signed with its own key (`REQUEST_KEY_PATH`), separate from the access-token key. `sub` is `svc:core` for work no user started.
+
 ### 5.3 What every Python service checks, before anything else
 
 1. The signature verifies against the core service's public key. The key is configured, and two keys are accepted during rotation.
 2. `iss` is right, `aud` is this service, and the token hasn't expired, allowing 5 seconds of clock skew.
 3. The `jti` hasn't been seen in the last 2 minutes (an in-memory replay cache per worker).
+   > *Amended by the 2026-10-28 intelligence boundary design (§7.3, §7.4, §14.3):* for request/reply, a `jti` is kept until its `exp` plus 5 s. For jobs, replay is stopped by the database claim (claimed before it runs, completed at most once), because JetStream redelivers the same message. The full ordered check list is in that design's §7.3.
 4. Every hospital id and patient id in the payload belongs to `hid`. A payload's hospital is never trusted on its own.
 5. The roles allow the action: one small table per service, generated from the core service's permission table (§7.2) so the two can't drift.
 
@@ -291,6 +299,7 @@ The rules come from frontend §3:
   This happens in step 4.
 - `services/intelligence/intelligence/security`'s PII masking stays, because it is part of the model pipeline.
 - **Only Go writes the audit hash chain.** A Python service puts its audit facts (what it did, for which request id) in its reply or job result, and Go appends them. Python's `AuditLogger` is removed in step 4.
+  > *Amended by the 2026-10-28 intelligence boundary design (§10.2, §14.5):* facts from jobs go into a transactional outbox (`intelligence_audit_outbox`), written in the same transaction as the result, which core drains onto the chain. There is no separate result message. Request/reply facts still come in the reply.
 - **Go's migrations own the whole schema**, including the knowledge-base tables (pgvector) that Alembic or `init-db` create today. Those are ported in step 1, and the Python schema tooling is removed.
 
 ### 7.6 Patients and shared content
