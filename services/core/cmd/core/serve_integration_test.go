@@ -61,8 +61,13 @@ func newStack(t *testing.T) *stack {
 	if err := keys([]string{"new", "--out", key}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
+	reqKey := filepath.Join(t.TempDir(), "request.pem")
+	if err := keys([]string{"new", "--kind", "request", "--out", reqKey,
+		"--trusted-out", filepath.Join(t.TempDir(), "request-keys.json")}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
 	return &stack{pg: pg, nats: n, stopNATS: stop, provURL: withUser(pg.URL, "core_provision", provPW), cfg: config.Config{
-		DatabaseURL: withUser(pg.URL, "core_app", corePW), NATSURL: n.GatewayURL, AccessKeyPath: key,
+		DatabaseURL: withUser(pg.URL, "core_app", corePW), NATSURL: n.GatewayURL, AccessKeyPath: key, RequestKeyPath: reqKey,
 		MFAKey: []byte(testMFAKey), BFFServiceKeys: []string{testBFFKey},
 	}}
 }

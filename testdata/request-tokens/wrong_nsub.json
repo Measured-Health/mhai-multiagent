@@ -1,0 +1,18 @@
+{
+  "name": "wrong_nsub",
+  "note": "the token is for echo.ping, the message came on echo.other",
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6Im1oYWktcmVxK2p3dCIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEifQ.eyJpc3MiOiJtaGFpLWdhdGV3YXkiLCJhdWQiOiJlY2hvIiwic3ViIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiaGlkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwicm9sZXMiOlsiY2xpbmljaWFuIl0sInJpZCI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsImp0aSI6IlBwalo5dTI2VWduellrSDFWaWpXX0EiLCJpYXQiOjE3OTMxODg4MDAsImV4cCI6MTc5MzE4ODgwNSwia25kIjoicmVxIiwibnN1YiI6ImluZmVyZW5jZS52MS5lY2hvLnBpbmciLCJiaCI6IjhMRWF0ckVvLVNDZllmUnpTYU1TYkxSazBHU0w3Qk1CeXhGcTlxOGlNVUEiLCJycGwiOiJfSU5CT1hfZ2F0ZXdheS4iLCJ2aWEiOiJjb3JlIn0.QXT__IyX1s0O0bQSBx6487ir-MgxBlOP5ZOcSUaJ42NoMFDc1akif2JZRqQowIoSYdP6M6TC3BnidcIT7M-nBg",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "Cg5zeW50aGV0aWMgcGluZxIkMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIy",
+  "subject": "inference.v1.echo.other",
+  "reply": "_INBOX_gateway.vectors.1",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.intelligence.v1.PingRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "echo",
+  "now": 1793188801,
+  "verdict": "binding"
+}

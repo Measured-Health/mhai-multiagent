@@ -1,0 +1,18 @@
+{
+  "name": "valid_global_job",
+  "note": "a job with no hospital; schema and body empty (no such operation yet)",
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6Im1oYWktcmVxK2p3dCIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEifQ.eyJpc3MiOiJtaGFpLWdhdGV3YXkiLCJhdWQiOiJwaXBlbGluZSIsInN1YiI6InN2Yzpjb3JlIiwiaGlkIjoiIiwicm9sZXMiOltdLCJyaWQiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJqdGkiOiJuaVZGNWhpZDFQOTJ1dWVrNzdNaWZBIiwiaWF0IjoxNzkzMTg4ODAwLCJleHAiOjE3OTMxOTI0MDAsImtuZCI6ImpvYiIsIm5zdWIiOiJqb2JzLnYxLmdsb2JhbC5yZXRlbnRpb25fcHVyZ2UiLCJiaCI6IjQ3REVRcGo4SEJTYS1fVEltVy01SkNldVFlUmttNU5NcEpXWkczaFN1RlUiLCJ2aWEiOiJjb3JlIn0.rK8vsZqExTWjKacDjhWbfslO1EYBX0t9Z-Wq6h-Yo6IHDltxlSHjJnhI5tQ6fgU12lngx-OHIvVDDzdndrwhDA",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "",
+  "subject": "jobs.v1.global.retention_purge",
+  "reply": "",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "",
+  "knd": "job",
+  "granted": false,
+  "service": "pipeline",
+  "now": 1793188801,
+  "verdict": "ok"
+}

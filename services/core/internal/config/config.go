@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -19,6 +20,7 @@ type Config struct {
 	NATSURL          string
 	NATSNkeySeedPath string // production: the service's NKey seed file
 	AccessKeyPath    string
+	RequestKeyPath   string // the request-token signing key (spec §7.2), never the access key
 	MFAKey           []byte
 	BFFServiceKeys   []string
 	BreachedListPath string
@@ -34,6 +36,7 @@ func Load() (Config, error) {
 		NATSURL:          os.Getenv("NATS_URL"),
 		NATSNkeySeedPath: os.Getenv("NATS_NKEY_SEED_PATH"),
 		AccessKeyPath:    os.Getenv("ACCESS_KEY_PATH"),
+		RequestKeyPath:   os.Getenv("REQUEST_KEY_PATH"),
 		BreachedListPath: os.Getenv("BREACHED_LIST_PATH"),
 	}
 	var errs []error
@@ -122,13 +125,19 @@ func checkURLPassword(name, raw string) error {
 }
 
 // ValidateServe checks what "core serve" needs beyond Load: the database,
-// NATS and the access-token signing key.
+// NATS, the access-token signing key and the request-token signing key, in
+// separate files (spec §7.2: a leak or bug in one can't mint the other
+// kind).
 func (c Config) ValidateServe() error {
 	var errs []error
-	for name, v := range map[string]string{"DATABASE_URL": c.DatabaseURL, "NATS_URL": c.NATSURL, "ACCESS_KEY_PATH": c.AccessKeyPath} {
+	for name, v := range map[string]string{"DATABASE_URL": c.DatabaseURL, "NATS_URL": c.NATSURL,
+		"ACCESS_KEY_PATH": c.AccessKeyPath, "REQUEST_KEY_PATH": c.RequestKeyPath} {
 		if strings.TrimSpace(v) == "" {
 			errs = append(errs, fmt.Errorf("%s is required", name))
 		}
+	}
+	if c.RequestKeyPath != "" && filepath.Clean(c.RequestKeyPath) == filepath.Clean(c.AccessKeyPath) {
+		errs = append(errs, errors.New("REQUEST_KEY_PATH must be a different file from ACCESS_KEY_PATH"))
 	}
 	return errors.Join(errs...)
 }

@@ -1,0 +1,18 @@
+{
+  "name": "grant_in_message",
+  "note": "a via=grant token presented in Mhai-Request-Token: a BFF can't bring its own",
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6Im1oYWktcmVxK2p3dCIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEifQ.eyJpc3MiOiJtaGFpLWdhdGV3YXkiLCJhdWQiOiJlY2hvIiwic3ViIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiaGlkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwicm9sZXMiOlsiY2xpbmljaWFuIl0sInJpZCI6Ijc3Nzc3Nzc3LTc3NzctNDc3Ny04Nzc3LTc3Nzc3Nzc3Nzc3NyIsImp0aSI6Ilc4SXFPMmRpYU9JbDhiTkFoVmRXZ3ciLCJpYXQiOjE3OTMxODg4MDAsImV4cCI6MTc5MzE4ODgwMiwia25kIjoicmVxIiwibnN1YiI6ImluZmVyZW5jZS52MS5lY2hvLnBpbmciLCJiaCI6IjhMRWF0ckVvLVNDZllmUnpTYU1TYkxSazBHU0w3Qk1CeXhGcTlxOGlNVUEiLCJycGwiOiJfSU5CT1hfYmZmLmNsaW5pY2FsLiIsInZpYSI6ImdyYW50In0.q_HemSKBwrXGwHNfgGCaw0M6g6m5FNPUgMxkWTbtjeYCKZn80m85r_fthrKIypOKjiLOJoM66Nq9waise8GrCQ",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "Cg5zeW50aGV0aWMgcGluZxIkMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIy",
+  "subject": "inference.v1.echo.ping",
+  "reply": "_INBOX_bff.clinical.vectors.1",
+  "request_id": "77777777-7777-4777-8777-777777777777",
+  "schema": "mhai.intelligence.v1.PingRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "echo",
+  "now": 1793188801,
+  "verdict": "reply_subject"
+}

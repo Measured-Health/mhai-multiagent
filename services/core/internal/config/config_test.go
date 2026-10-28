@@ -10,7 +10,7 @@ const goodKey = "0123456789abcdef0123456789abcdef" // 32 bytes, synthetic
 func setEnv(t *testing.T, kv map[string]string) {
 	t.Helper()
 	for _, k := range []string{"CORE_ENV", "HTTP_ADDR", "DATABASE_URL", "NATS_URL", "NATS_NKEY_SEED_PATH", "NATS_GATEWAY_PASSWORD", "NATS_WORKER_PASSWORD",
-		"ACCESS_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH"} {
+		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -137,9 +137,28 @@ func TestValidateServe(t *testing.T) {
 		!strings.Contains(err.Error(), "ACCESS_KEY_PATH") {
 		t.Fatalf("want all three named, got %v", err)
 	}
-	ok := Config{DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem"}
+	ok := Config{DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem"}
 	if err := ok.ValidateServe(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// serve needs the request-token key too (spec §7.2), in its own file: one
+// key must never sign both token kinds.
+func TestServeNeedsRequestKey(t *testing.T) {
+	c := Config{DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/keys/access.pem"}
+	if err := c.ValidateServe(); err == nil || !strings.Contains(err.Error(), "REQUEST_KEY_PATH") {
+		t.Fatalf("want REQUEST_KEY_PATH named, got %v", err)
+	}
+	c.RequestKeyPath = c.AccessKeyPath
+	err := c.ValidateServe()
+	if err == nil || !strings.Contains(err.Error(), "REQUEST_KEY_PATH") || strings.Contains(err.Error(), "/keys/") {
+		t.Fatalf("same file for both keys: %v", err)
+	}
+	setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey, "REQUEST_KEY_PATH": "/keys/request.pem"})
+	got, err := Load()
+	if err != nil || got.RequestKeyPath != "/keys/request.pem" {
+		t.Fatalf("Load: %q %v", got.RequestKeyPath, err)
 	}
 }
 

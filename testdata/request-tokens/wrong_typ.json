@@ -1,0 +1,18 @@
+{
+  "name": "wrong_typ",
+  "note": "typ JWT (an access token's), validly signed",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEiLCJ0eXAiOiJKV1QifQ.eyJhdWQiOiJlY2hvIiwiYmgiOiI4TEVhdHJFby1TQ2ZZZlJ6U2FNU2JMUmswR1NMN0JNQnl4RnE5cThpTVVBIiwiZXhwIjoxNzkzMTg4ODA1LCJoaWQiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJpYXQiOjE3OTMxODg4MDAsImlzcyI6Im1oYWktZ2F0ZXdheSIsImp0aSI6Imx6YkpVbUdycERqRkdkeUhYWXRxUVEiLCJrbmQiOiJyZXEiLCJuc3ViIjoiaW5mZXJlbmNlLnYxLmVjaG8ucGluZyIsInJpZCI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsInJvbGVzIjpbImNsaW5pY2lhbiJdLCJycGwiOiJfSU5CT1hfZ2F0ZXdheS4iLCJzdWIiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJ2aWEiOiJjb3JlIn0.OwuL8g6BSvBT17ULnEsJJotVXIl6HSmbIqBUnvzJK1NQP5TlQteThOaoWuCCclhe2qAaQ-Ew47oWs03DDYThCQ",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "Cg5zeW50aGV0aWMgcGluZxIkMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIy",
+  "subject": "inference.v1.echo.ping",
+  "reply": "_INBOX_gateway.vectors.1",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.intelligence.v1.PingRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "echo",
+  "now": 1793188801,
+  "verdict": "signature"
+}
