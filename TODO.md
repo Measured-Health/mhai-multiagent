@@ -18,6 +18,7 @@ From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.
 
 ## Next for the core service (after Plan 2)
 
+- **Plan: operations baseline** — backups and tested restore, monitoring and alerts, failover — before any real patient data. Status of each area: ARCHITECTURE.md, "Operations".
 - **Invite flow.** It must close first-sign-in self-enrolment: today a CLI-created account enrols its own two-step at first sign-in, so whoever has the first password owns the second factor. Invites bind enrolment to the invited person. Needs the mail provider.
 - **Forgot / reset password** (contract §2.5). Needs the mail provider.
 - **Build the intelligence boundary (Plan 3).** The design is approved and the plan is written: [docs/plans/2026-10-28-plan-3-intelligence-boundary.md](docs/plans/2026-10-28-plan-3-intelligence-boundary.md). Workers verify the core-signed request token, `RBACManager` and `AuditLogger` are retired in favour of Go, Redis leaves compose, and each worker gets its own NATS user and `_INBOX_worker.<service>` prefix. Until it lands, the `intelligence` service connects to Postgres as the superuser (T2 M6); Plan 3 Task 8 gives it its own login.
