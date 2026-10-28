@@ -1,0 +1,48 @@
+[
+  {
+    "name": "echo.ping",
+    "service": "echo",
+    "op": "ping",
+    "kind": "req",
+    "any_role": [
+      "clinician"
+    ],
+    "svc_core": true,
+    "needs_hospital": true,
+    "bff_direct": true,
+    "timeout_ms": 5000,
+    "request_schema": "mhai.intelligence.v1.PingRequest",
+    "response_schema": "mhai.intelligence.v1.PingResponse",
+    "test_only": true
+  },
+  {
+    "name": "pipeline.health",
+    "service": "pipeline",
+    "op": "health",
+    "kind": "req",
+    "any_role": [],
+    "svc_core": true,
+    "needs_hospital": false,
+    "bff_direct": false,
+    "timeout_ms": 2000,
+    "request_schema": "mhai.intelligence.v1.HealthRequest",
+    "response_schema": "mhai.intelligence.v1.HealthResponse",
+    "test_only": false
+  },
+  {
+    "name": "pipeline.run_query",
+    "service": "pipeline",
+    "op": "run_query",
+    "kind": "job",
+    "any_role": [
+      "clinician"
+    ],
+    "svc_core": false,
+    "needs_hospital": true,
+    "bff_direct": false,
+    "timeout_ms": 600000,
+    "request_schema": "mhai.intelligence.v1.RunQueryJob",
+    "response_schema": "",
+    "test_only": false
+  }
+]

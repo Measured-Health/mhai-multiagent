@@ -89,7 +89,7 @@ where = ["."]
 include = ["intelligence*"]
 
 [tool.setuptools.package-data]
-intelligence = ["py.typed"]
+intelligence = ["py.typed", "boundary/operations.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

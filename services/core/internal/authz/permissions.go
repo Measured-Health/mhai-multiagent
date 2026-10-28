@@ -31,7 +31,7 @@ type Rule struct {
 	// factor (mfa = true), whatever the account's policy.
 	NeedsMFA bool
 	// StepUp: the handler asks for a fresh code (auth.StepUp). Recorded in
-	// the table for the generated docs and the Python checks.
+	// the table for the generated docs.
 	StepUp bool
 	// Write: the route changes data; auditors get 403 forbidden. Auditors
 	// are refused every unsafe method outside SelfService routes anyway;
@@ -49,6 +49,11 @@ type Rule struct {
 	// Probe: a public GET served before the BFF credential check (health
 	// probes only).
 	Probe bool
+	// Calls names the intelligence operations the route publishes to (the
+	// operations table, operations.go). The route's roles, or every
+	// clinical role when AnyRole is empty, must all be allowed by each
+	// operation, or the route panics at registration.
+	Calls []string
 }
 
 // RouteRule is one row of the permission table. Pattern is the full path,
@@ -133,7 +138,7 @@ func validate(method, pattern string, rule Rule) error {
 			return fmt.Errorf("authz: route %s %s mixes platform and clinical rules (%q)", method, pattern, r)
 		}
 	}
-	return nil
+	return validateCalls(method, pattern, rule)
 }
 
 // Table returns the permission table, sorted by pattern then method.

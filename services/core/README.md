@@ -10,8 +10,10 @@ Design: `docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md`.
   served routes differ, or if it names an error code the service doesn't
   have.
 - **Permissions:** every route registers through `authz.Route`. The table
-  is published as `docs/specs/generated/permissions.md` and
-  `services/intelligence/intelligence/security/permissions.json`
+  is published as `docs/specs/generated/permissions.md`, which also lists
+  the operations table (`internal/authz/operations.go`: the calls to the
+  intelligence workers). The operations table is also published as
+  `services/intelligence/intelligence/boundary/operations.json`
   (`go run ./cmd/permgen`; a test fails when they are stale).
 
 Module `github.com/Measured-Health/mhai-multiagent/services/core`, binary
