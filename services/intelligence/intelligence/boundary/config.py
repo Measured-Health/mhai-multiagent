@@ -20,6 +20,9 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 log = logging.getLogger("intelligence.boundary.config")
 
 SERVICES = frozenset({"pipeline", "echo"})
+# INTELLIGENCE_MODEL_CLIENT (F14): the real models, or the synthetic stub
+# (tests and the CI smoke test; development only).
+MODEL_CLIENTS = frozenset({"orchestrator", "stub"})
 MAX_CONCURRENCY = 1024
 _PLACEHOLDERS = ("change-me", "changeme", "placeholder")
 DEFAULT_DB_USER = "intelligence_app"
@@ -141,6 +144,8 @@ class WorkerSettings:
     # False (production) unless from_env read APP_ENV=development: TLS with
     # a handshake first is the default.
     development: bool = False
+    # The pipeline's models: orchestrator (default) or stub (development only).
+    model_client: str = "orchestrator"
 
     @classmethod
     def from_env(
@@ -210,6 +215,13 @@ class WorkerSettings:
             errs.append(
                 "INTELLIGENCE_DB_USER and INTELLIGENCE_DB_PASSWORD need INTELLIGENCE_DB_URL"
             )
+        model_client = get("INTELLIGENCE_MODEL_CLIENT") or "orchestrator"
+        if model_client not in MODEL_CLIENTS:
+            errs.append("INTELLIGENCE_MODEL_CLIENT must be orchestrator or stub")
+        elif model_client == "stub" and not development:
+            # The stub serves invented answers (ADR 0005): never in production,
+            # and an unset APP_ENV counts as production.
+            errs.append("INTELLIGENCE_MODEL_CLIENT=stub runs only with APP_ENV=development")
         if errs:
             raise ConfigError("; ".join(errs))
         assert svc is not None and url is not None and keys is not None
@@ -227,6 +239,7 @@ class WorkerSettings:
             db_user=db_user,
             db_password=db_password,
             development=development,
+            model_client=model_client,
         )
 
 

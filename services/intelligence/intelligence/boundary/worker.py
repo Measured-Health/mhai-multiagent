@@ -20,9 +20,18 @@ message, in order:
 Replies: only to the message's own reply subject, and only once the
 verifier passed it (check 5); a refusal before check 5 goes only to a
 literal inbox under _INBOX_gateway. (or _INBOX_bff.clinical. on the grant
-path). Jobs never reply (T11). Nothing here sizes a message: the verifier
-owns check 1 (F25). Logs carry reason codes and verified ids only, never a
-token, a header value or a body.
+path). Nothing here sizes a message: the verifier owns check 1 (F25). Logs
+carry reason codes and verified ids only, never a token, a header value or
+a body.
+
+Jobs (spec §9.2, T11): a service with job handlers also pulls from its own
+durable consumer on JOBS (named after the service, shared by every copy),
+one message at a time and only while it has a free job slot and its
+readiness check passes (no database: no job is taken). Jobs never reply.
+A job that fails verification is Termed with a dead letter (ids, type,
+attempts, code and reason only) and touches nothing else: without a
+verified hospital there is no database access (departure 5). A verified job
+goes to its handler, which owns the message's outcome.
 
 The reply is published directly to msg.reply rather than with
 Msg.respond: nats-py's respond() sends the request's own headers back,
@@ -33,6 +42,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
+import json
 import logging
 import re
 import signal
@@ -40,18 +51,20 @@ import ssl
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nats.aio.client as nats_client
+import nats.errors as nats_errors
 from google.protobuf import descriptor_pool, message_factory
 from google.protobuf.message import Message
 from nats.aio.client import Client
 from nats.aio.msg import Msg
 from nats.aio.subscription import Subscription
 
-from intelligence.boundary import envelope
+from intelligence.boundary import _b64, envelope
 from intelligence.boundary.config import ConfigError, WorkerSettings
 from intelligence.boundary.grant import GrantClient, GrantRefused, Unavailable
+from intelligence.boundary.jobs import JobContext, JobHandler, Slot
 from intelligence.boundary.keys import TrustedKeys, install_sighup_reload
 from intelligence.boundary.operations import Operation, Operations
 
@@ -75,6 +88,11 @@ if TYPE_CHECKING:
 log = logging.getLogger("intelligence.boundary.worker")
 
 Handler = Callable[[Verified, Message], Awaitable[tuple[envelope_pb2.ResponseMeta, Message]]]
+Readiness = Callable[[], bool | Awaitable[bool]]
+
+JOBS_STREAM = "JOBS"  # core's bus.JobsStream; the durable is the service's name
+DEAD_STREAM = "DEAD"
+NATS_MSG_ID = "Nats-Msg-Id"
 
 MAX_REPLY = 256
 TIMEOUT_HEADER = envelope.TIMEOUT
@@ -91,6 +109,9 @@ _GUARDED_LOWER = {g.lower().encode(): g for g in GUARDED}
 _RETRYABLE = frozenset({"overloaded", "unavailable", "deadline_exceeded"})
 _BFF_RID = re.compile(r"[A-Za-z0-9_-]{8,64}")
 _SAFE = re.compile(r"[A-Za-z0-9_.:\-]{1,128}")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_KID = re.compile(r"[0-9a-f]{16}")
+_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def literal_reply(reply: str) -> bool:
@@ -203,7 +224,13 @@ class Worker:
     """One copy of one service."""
 
     def __init__(
-        self, settings: WorkerSettings, handlers: Mapping[str, Handler], verifier: Verifier
+        self,
+        settings: WorkerSettings,
+        handlers: Mapping[str, Handler],
+        verifier: Verifier,
+        *,
+        jobs: Mapping[str, JobHandler] | None = None,
+        jobs_ready: Readiness | None = None,
     ) -> None:
         service = settings.service
         if verifier.service != service:
@@ -222,7 +249,26 @@ class Worker:
             if op.kind != "req":
                 raise ValueError(f"handler {op.name} is not request/reply")
             self._handlers[op.name] = (op, h, _decoder_for(op))
+        self._jobs: dict[str, tuple[Operation, JobHandler, Decoder]] = {}
+        if jobs:
+            ops.require(service, jobs)
+            if jobs_ready is None:
+                raise ValueError("job handlers need a readiness check")
+            for name, jh in jobs.items():
+                op = ops.by_name(f"{service}.{name}")
+                assert op is not None  # require() checked
+                if op.kind != "job":
+                    raise ValueError(f"handler {op.name} is not a job")
+                self._jobs[op.op] = (op, jh, _decoder_for(op))
+        self._jobs_ready = jobs_ready
         self._sem = asyncio.Semaphore(settings.max_concurrency)
+        # Job slots, apart from request/reply's, so a long job never makes
+        # health answer overloaded. A slot is held until its model threads end.
+        self._job_sem = asyncio.Semaphore(settings.max_concurrency)
+        self._job_loop: asyncio.Task[None] | None = None
+        self._psub: Any = None
+        self._js: Any = None
+        self.fetch_timeout = 5.0
         self._tasks: set[asyncio.Task[None]] = set()
         self._nc: Client | None = None
         self._sub: Subscription | None = None
@@ -307,10 +353,13 @@ class Worker:
             f"inference.v1.{self.service}.>", queue=self.service, cb=self.dispatch
         )
         await self._nc.flush()
+        if self._jobs:
+            await self._start_jobs()
         log.info(
-            "worker started service=%s max_concurrency=%d",
+            "worker started service=%s max_concurrency=%d jobs=%s",
             self.service,
             self.settings.max_concurrency,
+            ",".join(sorted(self._jobs)) or "-",
         )
 
     async def run(self, trusted: TrustedKeys | None = None) -> None:
@@ -336,6 +385,7 @@ class Worker:
         """Take no new message, finish the ones in hand (each bounded by its
         exp), then close."""
         self.draining = True
+        await self._stop_jobs()
         if self._sub is not None:
             with contextlib.suppress(Exception):
                 await self._sub.drain()
@@ -353,6 +403,7 @@ class Worker:
     async def abort(self) -> None:
         """Stop at once: no drain, work in hand abandoned (and not answered)."""
         self.draining = True
+        await self._stop_jobs()
         for t in list(self._tasks):
             t.cancel()
         if self._nc is not None and not self._nc.is_closed:
@@ -631,6 +682,191 @@ class Worker:
         h, b = envelope.reply_ok(meta, out, request_id=v.rid)
         await self._send(msg, h, b)
 
+    # --- jobs (JetStream) -----------------------------------------------------------
+
+    async def _start_jobs(self) -> None:
+        """Bind the service's durable pull consumer (core made it) and start
+        the loop that feeds the job handlers."""
+        self._js = self.connection.jetstream()
+        self._psub = await self._js.pull_subscribe_bind(durable=self.service, stream=JOBS_STREAM)
+        self._job_loop = asyncio.get_running_loop().create_task(self._consume())
+
+    async def _stop_jobs(self) -> None:
+        loop, self._job_loop = self._job_loop, None
+        if loop is not None:
+            loop.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await loop
+        psub, self._psub = self._psub, None
+        if psub is not None:
+            with contextlib.suppress(Exception):
+                await psub.unsubscribe()
+
+    async def _ready_for_jobs(self) -> bool:
+        check = self._jobs_ready
+        if check is None:
+            return False
+        try:
+            r = check()
+            if inspect.isawaitable(r):
+                r = await r
+        except Exception as e:
+            log.warning("job readiness failed service=%s error=%s", self.service, type(e).__name__)
+            return False
+        return r is True
+
+    async def _consume(self) -> None:
+        """One job at a time per free slot, only while ready. A message is
+        fetched only with a slot in hand, so JetStream (not this process)
+        holds the queue, and max_ack_pending bounds what every copy has."""
+        not_ready = False
+        while not self.draining:
+            if not await self._ready_for_jobs():
+                if not not_ready:
+                    self.refusals["jobs_not_ready"] += 1
+                    log.warning("jobs paused service=%s: not ready", self.service)
+                not_ready = True
+                await asyncio.sleep(1.0)
+                continue
+            if not_ready:
+                log.info("jobs resumed service=%s", self.service)
+                not_ready = False
+            await self._job_sem.acquire()
+            try:
+                msgs = await self._psub.fetch(1, timeout=self.fetch_timeout)
+            except asyncio.CancelledError:
+                self._job_sem.release()
+                raise
+            except nats_errors.TimeoutError:
+                self._job_sem.release()
+                continue
+            except Exception as e:
+                self._job_sem.release()
+                log.warning("job fetch failed service=%s error=%s", self.service, type(e).__name__)
+                await asyncio.sleep(1.0)
+                continue
+            if not msgs:
+                self._job_sem.release()
+                continue
+            for i, m in enumerate(msgs):
+                if i:  # fetch(1) gives one; any extra needs its own slot
+                    await self._job_sem.acquire()
+                self.received += 1
+                self._spawn(self._job(m, Slot(self._job_sem)))
+
+    async def _job(self, msg: Msg, slot: Slot) -> None:
+        try:
+            await self._run_job(msg, slot)
+        finally:
+            slot.release()
+
+    def _job_route(self, subject: str) -> tuple[Operation, JobHandler, Decoder] | None:
+        op = self._ops.for_subject(subject)
+        if op is None or op.service != self.service or op.kind != "job":
+            return None
+        return self._jobs.get(op.op)
+
+    async def _run_job(self, msg: Msg, slot: Slot) -> None:
+        raw = msg.headers
+        if raw is not None and not isinstance(raw, Headers):
+            await self._refuse_job(msg, "headers", "unauthorized")  # not parsed by WorkerClient
+            return
+        headers: Mapping[str, str] = raw if raw is not None else {}
+        if raw is not None and raw.ambiguous:
+            await self._refuse_job(msg, "ambiguous_headers", "unauthorized")
+            return
+        if headers.get(envelope.AUTHORIZATION) is not None:
+            await self._refuse_job(msg, "authorization", "unauthorized")  # jobs come from core only
+            return
+        route = self._job_route(msg.subject)
+        decoder = route[2] if route is not None else _never
+        r = self.verifier.verify_job(msg.subject, headers, msg.data, decoder)
+        if isinstance(r, Refusal):
+            await self._refuse_job(msg, r.reason, r.code, alert=r.alert)
+            return
+        if route is None or route[0].name != r.operation.name:  # verify passed a known op
+            await self._refuse_job(msg, "schema", "internal")
+            return
+        await route[1](r, msg, JobContext(slot=slot, dead_letter=self.publish_dead_letter))
+
+    async def _refuse_job(self, msg: Msg, reason: str, code: str, *, alert: bool = True) -> None:
+        """A job that never verified: count, log (no alert for one that only
+        expired in the queue, F6), a dead letter for core to mark the row,
+        and Term. No database: there is no verified hospital."""
+        self.refusals[reason] += 1
+        log.log(
+            logging.WARNING if alert else logging.INFO,
+            "worker refused job service=%s subject=%s reason=%s code=%s",
+            self.service,
+            _safe(msg.subject),
+            reason,
+            code,
+        )
+        seg = msg.subject.split(".")
+        hid = seg[2] if len(seg) == 4 and (seg[2] == "global" or _UUID.fullmatch(seg[2])) else ""
+        kind = seg[3] if len(seg) == 4 and seg[3] in self._jobs else "unknown"
+        headers = msg.headers if isinstance(msg.headers, Mapping) else {}
+        job_id = headers.get(NATS_MSG_ID, "")
+        try:
+            attempts = int(msg.metadata.num_delivered)
+        except Exception:
+            attempts = 0
+        await self.publish_dead_letter(
+            envelope_pb2.DeadLetter(
+                job_id=job_id if _UUID.fullmatch(job_id or "") else "",
+                type=kind,
+                subject_hospital=hid,
+                attempts=max(0, attempts),
+                code=code,
+                reason=reason,
+                kid=_token_kid(headers.get(envelope.TOKEN)),
+            )
+        )
+        try:
+            await msg.term()
+        except Exception as e:
+            log.warning("job term failed service=%s error=%s", self.service, type(e).__name__)
+
+    async def publish_dead_letter(self, d: envelope_pb2.DeadLetter) -> None:
+        """One dead letter on dead.v1.<hospital>.<type> (the DEAD stream).
+        It holds ids, the type, attempts, a code and a reason only. Never
+        raises: a lost letter leaves the row to core's deadline sweeper."""
+        hid = d.subject_hospital if _TOKEN.fullmatch(d.subject_hospital) else "unknown"
+        kind = d.type if _TOKEN.fullmatch(d.type) else "unknown"
+        try:
+            js = self._js if self._js is not None else self.connection.jetstream()
+            await js.publish(
+                f"dead.v1.{hid}.{kind}",
+                d.SerializeToString(deterministic=True),
+                timeout=2.0,
+                stream=DEAD_STREAM,
+            )
+        except Exception as e:
+            log.error("dead letter failed service=%s error=%s", self.service, type(e).__name__)
+            return
+        log.info(
+            "dead letter service=%s type=%s job_id=%s code=%s attempts=%d",
+            self.service,
+            kind,
+            d.job_id or "-",
+            d.code,
+            d.attempts,
+        )
+
+
+def _token_kid(token: str | None) -> str:
+    """The kid in a refused token's header, for the dead letter, if it is a
+    well-formed key id; else empty. Read after the refusal: it decides
+    nothing."""
+    if not token or len(token) > 4096:
+        return ""
+    try:
+        h = json.loads(_b64.decode(token.split(".", 1)[0]))
+    except Exception:
+        return ""
+    kid = h.get("kid") if isinstance(h, dict) else None
+    return kid if isinstance(kid, str) and _KID.fullmatch(kid) else ""
+
 
 def build_verifier(settings: WorkerSettings) -> tuple[Verifier, TrustedKeys]:
     """The verifier from the settings' files; refuses to start on a bad one."""
@@ -640,15 +876,21 @@ def build_verifier(settings: WorkerSettings) -> tuple[Verifier, TrustedKeys]:
     return Verifier(trusted, settings.service, ops, JtiSet(clock), clock), trusted
 
 
-def service_handlers(service: str, database: Database | None = None) -> dict[str, Handler]:
+def service_handlers(
+    service: str, database: Database | None = None, *, models_ready: bool = False
+) -> dict[str, Handler]:
     from intelligence.boundary.services import echo, pipeline
 
     if service == "echo":
         return dict(echo.HANDLERS)
     if service == "pipeline":
+
+        def models() -> bool:
+            return models_ready
+
         if database is None:
-            return pipeline.handlers()
-        return pipeline.handlers(database_ready=database.ready)
+            return pipeline.handlers(models_ready=models)
+        return pipeline.handlers(database_ready=database.ready, models_ready=models)
     raise ValueError("unknown service")
 
 
@@ -671,14 +913,32 @@ async def open_database(settings: WorkerSettings) -> Database | None:
 
 
 async def run_service(settings: WorkerSettings) -> None:
-    """`intelligence worker`: serve settings.service until SIGTERM."""
+    """`intelligence worker`: serve settings.service until SIGTERM. The
+    pipeline also runs run_query jobs, but only with a database (T10 note):
+    without one it takes no job and health says database_ready false."""
     verifier, trusted = build_verifier(settings)
     database = await open_database(settings)
+    runner = None
     try:
-        w = Worker(settings, service_handlers(settings.service, database), verifier)
+        jobs: dict[str, JobHandler] | None = None
+        if settings.service == "pipeline":
+            from intelligence.boundary.services import pipeline
+
+            jobs, runner = pipeline.job_handlers(settings, database, clock=verifier.clock)
+            if database is None:
+                log.warning("no INTELLIGENCE_DB_URL: run_query jobs are not taken")
+        w = Worker(
+            settings,
+            service_handlers(settings.service, database, models_ready=runner is not None),
+            verifier,
+            jobs=jobs,
+            jobs_ready=runner.ready if runner is not None else None,
+        )
         await w.start()
         await w.run(trusted)
     finally:
+        if runner is not None:
+            runner.close()
         if database is not None:
             await database.close()
     if w.insecure:

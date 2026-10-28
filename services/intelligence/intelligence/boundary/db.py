@@ -32,7 +32,7 @@ from typing import Any
 
 import psycopg
 from psycopg import AsyncConnection, AsyncCursor, sql
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from intelligence.boundary.config import DEFAULT_DB_USER, parse_db_url
 from intelligence.boundary.verify import Verified
@@ -43,7 +43,16 @@ log = logging.getLogger("intelligence.boundary.db")
 Cursor = AsyncCursor[Any]
 # psycopg's safe SQL composition, for a repository that needs an identifier
 # in its SQL (test_no_direct_db accepts sql.SQL("literal").format(...)).
-__all__ = ["Cursor", "Database", "DatabaseError", "LoginRefused", "NoHospital", "sql"]
+__all__ = [
+    "Cursor",
+    "Database",
+    "DatabaseError",
+    "LoginRefused",
+    "NoHospital",
+    "is_database_error",
+    "is_unique_violation",
+    "sql",
+]
 
 WORKER_ROLE = "mhai_worker"
 LOGIN_ROLE = "mhai_worker_app"
@@ -88,6 +97,18 @@ class LoginRefused(DatabaseError):
     """check_login found a login that row-level security can't hold."""
 
 
+def is_database_error(e: BaseException) -> bool:
+    """e came from the database or the pool (not from the caller's code):
+    the driver's errors, a pool timeout, or this module's own. Lets the job
+    code classify a failure as `unavailable` without importing the driver."""
+    return isinstance(e, psycopg.Error | PoolTimeout | DatabaseError)
+
+
+def is_unique_violation(e: BaseException) -> bool:
+    """e is a unique-constraint violation (another delivery got there first)."""
+    return isinstance(e, psycopg.errors.UniqueViolation)
+
+
 def connect_kwargs(
     url: str, *, user: str | None = None, password: str | None = None
 ) -> dict[str, Any]:
@@ -130,6 +151,10 @@ class Database:
         # and a statement outside it runs as the bare login, which holds
         # nothing.
         kwargs["autocommit"] = True
+        # No server-side prepared statements: the reset's DISCARD ALL
+        # deallocates them, and psycopg (which prepares a statement after a
+        # few runs) would then name one the server no longer has.
+        kwargs["prepare_threshold"] = None
         self._timeout = timeout
         self._pool: AsyncConnectionPool[AsyncConnection[Any]] = AsyncConnectionPool(
             kwargs=kwargs,

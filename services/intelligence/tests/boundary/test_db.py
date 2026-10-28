@@ -449,6 +449,21 @@ async def test_nothing_outlives_the_transaction(postgres: Postgres, database: Da
 
 
 @pytest.mark.boundary
+async def test_repeated_statements_survive_the_reset(
+    postgres: Postgres, database: Database
+) -> None:
+    """psycopg prepares a statement after it has run a few times on a
+    connection; the reset's DISCARD ALL deallocates it on the server, so a
+    pooled connection that prepared one would fail the next run (found by
+    the T11 poison test). One connection, many runs: none fails."""
+    qa, _ = await _seed(postgres)
+    for _ in range(15):
+        async with database.with_hospital(verified_for(HOSPITAL_A)) as cur:
+            assert await jobs_repo.read_status(cur, qa) == "queued"
+    assert await database.ready()
+
+
+@pytest.mark.boundary
 async def test_check_login_refuses_superuser(postgres: Postgres) -> None:
     db = Database(postgres.url, max_size=1)
     e = await _refused(db)

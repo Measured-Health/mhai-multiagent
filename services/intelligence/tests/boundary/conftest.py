@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -59,8 +60,9 @@ class NatsServer:
         return f"nats://{user}:{NATS_ENV[_USERS[user]]}@{self.addr}"
 
 
-@pytest.fixture(scope="session")
-def nats_server() -> Iterator[NatsServer]:
+@contextmanager
+def start_nats() -> Iterator[NatsServer]:
+    """A NATS 2.10 container running the real nats.conf, stopped on exit."""
     from testcontainers.core.container import DockerContainer
     from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
@@ -82,6 +84,20 @@ def nats_server() -> Iterator[NatsServer]:
         yield NatsServer(c.get_container_host_ip(), int(c.get_exposed_port(4222)))
     finally:
         c.stop()
+
+
+@pytest.fixture(scope="session")
+def nats_server() -> Iterator[NatsServer]:
+    with start_nats() as server:
+        yield server
+
+
+@pytest.fixture
+def fresh_nats() -> Iterator[NatsServer]:
+    """A NATS server of the test's own, so its JetStream streams start
+    empty (no role may delete a stream, so a shared server can't be reset)."""
+    with start_nats() as server:
+        yield server
 
 
 # The pipeline's login, provisioned by `core migrate up` (spec §8.2).
