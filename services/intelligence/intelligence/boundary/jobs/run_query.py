@@ -73,6 +73,15 @@ log = logging.getLogger("intelligence.boundary.run_query")
 TYPE = "run_query"
 RETRYABLE = frozenset({"unavailable", "internal", "overloaded"})
 MAX_DEPTH = 16
+# The pipeline consumer's MaxDeliver: core's bus.PipelineMaxDeliver.
+MAX_DELIVER = 5
+# Consecutive failed heartbeats (+WIP or the lease) before the job gives up.
+# 3 × 20 s is the consumer's 60 s ack_wait: by then JetStream has had no
+# +WIP for a whole ack_wait and will redeliver, and the lease (not renewed
+# since the first failure) runs out soon after, so another copy re-claims.
+# Fewer would give up on one dropped publish; more would keep model threads
+# busy on a job that is already being redone elsewhere.
+HEARTBEAT_FAILURES = 3
 
 
 @dataclass(frozen=True)
@@ -84,17 +93,19 @@ class JobSettings:
     wip_every: float = 20.0  # +WIP at least this often while a job runs
     tick: float = 1.0  # how often a running stage looks at the clock
     nak_delays: tuple[float, ...] = (10.0, 30.0, 120.0, 300.0)  # by delivery
-    max_deliver: int = 5  # the pipeline consumer's MaxDeliver
+    max_deliver: int = MAX_DELIVER  # the pipeline consumer's MaxDeliver
     max_attempts: int = 5  # claims of one row, across messages
 
 
 class _Stop(Exception):
-    """Stop the job: ack (the row is terminal) or leave the message alone
-    (another delivery owns the row)."""
+    """Stop the job: ack (the row is terminal), leave the message alone
+    (another delivery owns the row), or, with dead set, a dead letter with
+    that code and Term (the last delivery, when nothing else may settle it)."""
 
-    def __init__(self, ack: bool) -> None:
+    def __init__(self, ack: bool, dead: str = "") -> None:
         super().__init__("stop")
         self.ack = ack
+        self.dead = dead
 
 
 class _Deadline(Exception):
@@ -117,6 +128,7 @@ class _Job:
     committed: bool = False
     abandoned: bool = False
     settled: bool = False
+    heartbeat_failures: int = 0
 
 
 def _delivered(msg: Msg) -> int:
@@ -237,7 +249,9 @@ class RunQuery:
         try:
             await self._pipeline(job, claim)
         except _Stop as s:
-            if s.ack:
+            if s.dead:
+                await self._give_up(job, s.dead)  # failed if still ours, dead letter, Term
+            elif s.ack:
                 await self._settle(job, "ack")
         except _Deadline:
             await self._deadline(job)
@@ -250,17 +264,27 @@ class RunQuery:
             )
             await self._failure(job, e.code)
 
-    async def _claim(self, job: _Job) -> jobs_repo.Claim | None:
+    def _last(self, job: _Job) -> bool:
+        """This is the consumer's last delivery: a Nak would never come back."""
+        return job.delivered >= self._s.max_deliver
+
+    async def _claim_once(self, job: _Job) -> tuple[jobs_repo.Claim | None, jobs_repo.State | None]:
         assert self._db is not None
+        async with self._db.with_hospital(job.v) as cur:
+            claim = await jobs_repo.claim(cur, job.qid, self._s.lease_s)
+            state = None if claim is not None else await jobs_repo.state(cur, job.qid)
+        return claim, state
+
+    async def _claim(self, job: _Job) -> jobs_repo.Claim | None:
         try:
-            async with self._db.with_hospital(job.v) as cur:
-                claim = await jobs_repo.claim(cur, job.qid, self._s.lease_s)
-                state = None if claim is not None else await jobs_repo.state(cur, job.qid)
+            claim, state = await self._claim_once(job)
+            if claim is None and state is not None and self._last(job):
+                claim, state = await self._last_chance(job, state)
         except Exception as e:
             if not is_database_error(e):
                 raise
             log.warning("run_query claim failed query_id=%s error=%s", job.qid, type(e).__name__)
-            await self._failure(job, "unavailable")
+            await self._failure(job, "unavailable")  # Term + dead letter if last
             return None
         if claim is not None:
             job.attempts = claim.attempts
@@ -277,6 +301,11 @@ class RunQuery:
             await self._permanent(job, "not_found")
         elif state.status in jobs_repo.TERMINAL:
             await self._settle(job, "ack")  # done, failed or cancelled already
+        elif self._last(job):
+            # Still held or queued after the last chance: nothing will
+            # redeliver it, so tell core now rather than at its deadline sweep.
+            log.warning("run_query last delivery unclaimed query_id=%s", job.qid)
+            await self._permanent(job, "unavailable")
         elif state.status == "running":
             # Another copy holds a live lease (F1): come back when it ends,
             # so a copy killed mid-job is re-claimed rather than lost.
@@ -284,6 +313,43 @@ class RunQuery:
         else:
             await self._settle(job, "nak", 1.0)  # queued: raced a claim
         return None
+
+    async def _last_chance(
+        self, job: _Job, state: jobs_repo.State
+    ) -> tuple[jobs_repo.Claim | None, jobs_repo.State | None]:
+        """The last delivery found the row unclaimable. A Nak would never be
+        redelivered, so: queued (a raced claim) → claim again now; running
+        with a live lease → wait it out here, with +WIP, if it ends before
+        the token's exp, then claim once more. Anything else is the
+        caller's (terminal: ack; still unclaimable: dead letter)."""
+        if state.status == "running":
+            if not await self._wait_out_lease(job, state.lease_left):
+                return None, state
+        elif state.status != "queued":
+            return None, state
+        return await self._claim_once(job)
+
+    async def _wait_out_lease(self, job: _Job, lease_left: float) -> bool:
+        """Wait lease_left + 1 s, sending +WIP so this delivery stays ours.
+        False (without waiting) when the lease outlives the token's exp."""
+        loop = asyncio.get_running_loop()
+        wait = lease_left + 1.0
+        if self._clock() + wait >= job.v.exp:
+            return False
+        end = loop.time() + wait
+        last = self._wip_clock()
+        while (left := end - loop.time()) > 0:
+            await asyncio.sleep(min(self._s.tick, left))
+            now = self._wip_clock()
+            if now - last >= self._s.wip_every:
+                last = now
+                try:
+                    await job.msg.in_progress()
+                except Exception as e:
+                    log.warning(
+                        "run_query +WIP failed query_id=%s error=%s", job.qid, type(e).__name__
+                    )
+        return True
 
     async def _pipeline(self, job: _Job, claim: jobs_repo.Claim) -> None:
         patient = claim.patient_data if isinstance(claim.patient_data, dict) else {}
@@ -342,7 +408,11 @@ class RunQuery:
         try:
             await job.msg.in_progress()
         except Exception as e:
+            # JetStream didn't hear us, so it may redeliver: don't renew the
+            # lease, so that redelivery can re-claim once it runs out.
             log.warning("run_query +WIP failed query_id=%s error=%s", job.qid, type(e).__name__)
+            self._heartbeat_failed(job)
+            return
         assert self._db is not None
         try:
             async with self._db.with_hospital(job.v) as cur:
@@ -351,9 +421,25 @@ class RunQuery:
             if not is_database_error(e):
                 raise
             log.warning("run_query lease failed query_id=%s error=%s", job.qid, type(e).__name__)
+            self._heartbeat_failed(job)
             return  # the next checkpoint decides
+        job.heartbeat_failures = 0
         if not ours:
             await self._lost(job)
+
+    def _heartbeat_failed(self, job: _Job) -> None:
+        job.heartbeat_failures += 1
+        if job.heartbeat_failures >= HEARTBEAT_FAILURES:
+            log.error(
+                "run_query heartbeat lost query_id=%s attempts=%d failures=%d; giving up",
+                job.qid,
+                job.attempts,
+                job.heartbeat_failures,
+            )
+            job.abandoned = True
+            # A redelivery re-claims after the lease; on the last delivery
+            # there is none, so fail it and tell core instead.
+            raise _Stop(ack=False, dead="unavailable" if self._last(job) else "")
 
     async def _checkpoint(self, job: _Job, progress: float, stage: str) -> None:
         """Between stages (spec §9.4): still ours, not cancelled? Progress,
@@ -380,7 +466,9 @@ class RunQuery:
         except Exception as e:
             if not is_database_error(e):
                 raise
-            raise _Stop(ack=False) from None
+            # Not known whose the row is. On the last delivery nothing would
+            # redeliver it: tell core now (dead letter, Term).
+            raise _Stop(ack=False, dead="unavailable" if self._last(job) else "") from None
         status = state.status if state is not None else "gone"
         log.info(
             "run_query stopped query_id=%s attempts=%d status=%s", job.qid, job.attempts, status
@@ -531,6 +619,12 @@ class RunQuery:
         message then comes back after ack_wait, and the claim sorts it out."""
         if job.settled:
             return
+        if how == "nak" and self._last(job):
+            # Never Nak the last delivery: JetStream wouldn't redeliver it
+            # and the row would wait for core's deadline sweep.
+            log.error("run_query refused to Nak the last delivery query_id=%s", job.qid or "-")
+            await self._dead_letter(job, "unavailable")
+            how = "term"
         job.settled = True
         try:
             if how == "ack":

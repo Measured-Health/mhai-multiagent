@@ -189,6 +189,20 @@ def test_orchestrator_failure_escalates() -> None:
     assert v.failed_agents == ("CCA",)
 
 
+def test_orchestrator_build_failure_escalates() -> None:
+    """A model that fails to load (the per-job build) escalates like any
+    other model failure, never raises out of generate or passes."""
+
+    def build(chunks: Any) -> Any:
+        raise OSError("synthetic: model weights missing")
+
+    client = OrchestratorModelClient(build)
+    gen = client.generate(QUESTION, {}, None, [_chunk()])
+    assert not gen.available and gen.failed_agents == ("CCA",)
+    v = client.verify(gen)
+    assert v.decision == "ESCALATE" and v.degraded and v.trust_score is None
+
+
 def test_orchestrator_hga_failure_escalates() -> None:
     client = _orchestrator_client(StubCCA(), FailingHGA())
     v = client.verify(client.generate(QUESTION, {}, None, [_chunk()]))

@@ -194,7 +194,13 @@ class OrchestratorModelClient:
         patient_id: str | None,
         chunks: Sequence[KBChunk],
     ) -> Generation:
-        orch = self._build(list(chunks))
+        try:
+            # Building loads the models: a failure here escalates like any
+            # other model failure (ADR 0005).
+            orch = self._build(list(chunks))
+        except Exception as e:
+            log.warning("model stage failed agent=build error=%s", type(e).__name__)
+            return Generation(question=question, failed_agents=("CCA",))
         cca = getattr(orch, "rag_cca", None)
         if cca is None:
             return Generation(question=question, failed_agents=("CCA",), handle=orch)

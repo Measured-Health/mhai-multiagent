@@ -29,9 +29,9 @@ import pytest
 from nats.aio.client import Client
 from nats.js import api
 
-from intelligence.boundary import envelope
+from intelligence.boundary import envelope, jobs_repo
 from intelligence.boundary.config import WorkerSettings
-from intelligence.boundary.db import Database
+from intelligence.boundary.db import Database, DatabaseError
 from intelligence.boundary.jobs.run_query import JobSettings, RunQuery
 from intelligence.boundary.keys import TrustedKeys
 from intelligence.boundary.models import ModelClient, StubModelClient
@@ -66,7 +66,7 @@ async def _connect(server: NatsServer, user: str, inbox: str) -> Client:
     )
 
 
-async def ensure_streams(js: Any, ack_wait: float) -> None:
+async def ensure_streams(js: Any, ack_wait: float, max_deliver: int = 5) -> None:
     """bus.EnsureStreams' JOBS, DEAD, pipeline and core_dead (values from
     streams.go), with ack_wait as the test needs."""
     await js.add_stream(
@@ -101,7 +101,7 @@ async def ensure_streams(js: Any, ack_wait: float) -> None:
             filter_subject="jobs.v1.*.run_query",
             ack_policy=api.AckPolicy.EXPLICIT,
             ack_wait=ack_wait,
-            max_deliver=5,
+            max_deliver=max_deliver,
             max_ack_pending=8,
         ),
     )
@@ -281,10 +281,10 @@ async def make_env(
 ) -> AsyncIterator[MakeEnv]:
     envs: list[Env] = []
 
-    async def make(ack_wait: float = 30.0) -> Env:
+    async def make(ack_wait: float = 30.0, max_deliver: int = 5) -> Env:
         core = await _connect(fresh_nats, "gateway", "_INBOX_gateway")
         js = core.jetstream()
-        await ensure_streams(js, ack_wait)
+        await ensure_streams(js, ack_wait, max_deliver)
         e = Env(fresh_nats, postgres, core, js, keys_file, signer, database)
         envs.append(e)
         return e
@@ -927,3 +927,173 @@ def _statements(lines: list[str]) -> list[Stmt]:
                 hospital[pid] = hm.group(1) if hm else ""
                 s.hospital = hospital[pid]
     return out
+
+
+# --- fix round 1: the last delivery is never Nak'd; heartbeats -----------------------
+
+
+def spy_publishes(w: Worker, fail: bytes | None = None) -> list[tuple[str, bytes]]:
+    """Every (subject, payload) the worker publishes; payloads starting with
+    fail raise instead of going out (a lost +WIP, say)."""
+    sent: list[tuple[str, bytes]] = []
+    nc = w.connection
+    real = nc.publish
+
+    async def rec(subject: str, payload: bytes = b"", reply: str = "", headers: Any = None) -> None:
+        sent.append((subject, payload))
+        if fail is not None and payload.startswith(fail):
+            raise ConnectionError("synthetic publish failure")
+        await real(subject, payload, reply=reply, headers=headers)
+
+    nc.publish = rec  # type: ignore[method-assign]
+    return sent
+
+
+def naks(sent: list[tuple[str, bytes]]) -> list[bytes]:
+    return [p for _, p in sent if p.startswith(b"-NAK")]
+
+
+LAST = JobSettings(max_deliver=1, tick=0.05, wip_every=1.0, nak_delays=FAST_NAKS)
+
+
+async def hold_lease(pg: Postgres, qid: str, seconds: int) -> None:
+    """A dead copy's claim: running, attempts 1, a lease still live."""
+    async with await su(pg) as conn:
+        await conn.execute(
+            "UPDATE clinical_queries SET status = 'running', attempts = 1, started_at = now(), "
+            "lease_until = now() + make_interval(secs => %s) WHERE id = %s",
+            (seconds, qid),
+        )
+
+
+async def test_last_delivery_waits_out_a_live_lease_then_claims(
+    make_env: MakeEnv, postgres: Postgres
+) -> None:
+    """On the last delivery a live lease is waited out here (with +WIP),
+    never Nak'd: then the claim is retried and the job completes."""
+    env = await make_env(max_deliver=1)
+    qid = await seed_query(postgres)
+    await hold_lease(postgres, qid, 3)
+    stub = StubModelClient()
+    w, _ = await env.start(stub, settings=LAST)
+    sent = spy_publishes(w)
+    await env.publish(qid)
+    assert await until(lambda: status_is(postgres, qid, "completed"), timeout=20)
+    assert (await row(postgres, qid))["attempts"] == 2
+    assert naks(sent) == []
+    assert [p for _, p in sent if p == b"+WPI"], "the wait sent no +WIP"
+    assert await count(postgres, "decisions", qid) == 1
+    assert await env.settled()
+
+
+async def test_last_delivery_lease_past_exp_dead_letters(
+    make_env: MakeEnv, postgres: Postgres
+) -> None:
+    """A live lease that outlasts the token on the last delivery: a dead
+    letter unavailable and Term at once, never a Nak; the holder's row is
+    left alone."""
+    env = await make_env(max_deliver=1)
+    qid = await seed_query(postgres)
+    await hold_lease(postgres, qid, 120)
+    stub = StubModelClient()
+    w, _ = await env.start(stub, settings=LAST)
+    sent = spy_publishes(w)
+    await env.publish(qid, ttl=10)
+    dead = await env.dead_letters(1)
+    assert [(d.job_id, d.code) for _, d in dead] == [(qid, "unavailable")]
+    assert naks(sent) == []
+    assert await env.settled()
+    r = await row(postgres, qid)
+    assert (r["status"], r["attempts"]) == ("running", 1)
+    assert stub.calls == {}
+    assert await count(postgres, "outbox", qid) == 0
+
+
+async def test_last_delivery_queued_race_is_claimed(
+    make_env: MakeEnv, postgres: Postgres, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last delivery's claim loses a race on a queued row: it claims
+    again at once instead of Nak'ing."""
+    env = await make_env(max_deliver=1)
+    qid = await seed_query(postgres)
+    real = jobs_repo.claim
+    calls: list[int] = []
+
+    async def racing(cur: Any, query_id: str, lease_s: float) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            return None  # as if another claim had the row for a moment
+        return await real(cur, query_id, lease_s)
+
+    monkeypatch.setattr(jobs_repo, "claim", racing)
+    stub = StubModelClient()
+    w, _ = await env.start(stub, settings=LAST)
+    sent = spy_publishes(w)
+    await env.publish(qid)
+    assert await until(lambda: status_is(postgres, qid, "completed"))
+    assert len(calls) == 2 and naks(sent) == []
+    assert await env.settled()
+
+
+async def test_last_delivery_database_error_dead_letters(
+    make_env: MakeEnv, postgres: Postgres, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claim is lost and the database can't say whose the row is, on
+    the last delivery: a dead letter unavailable and Term, not silence."""
+    env = await make_env(max_deliver=1)
+    qid = await seed_query(postgres)
+
+    async def not_ours(*_args: Any, **_kw: Any) -> bool:
+        return False
+
+    async def down(*_args: Any, **_kw: Any) -> Any:
+        raise DatabaseError("synthetic: database unavailable")
+
+    monkeypatch.setattr(jobs_repo, "checkpoint", not_ours)
+    monkeypatch.setattr(jobs_repo, "state", down)
+    stub = StubModelClient()
+    w, _ = await env.start(stub, settings=LAST)
+    sent = spy_publishes(w)
+    await env.publish(qid)
+    dead = await env.dead_letters(1)
+    assert [(d.job_id, d.code) for _, d in dead] == [(qid, "unavailable")]
+    assert naks(sent) == []
+    assert await env.settled()
+    assert stub.calls["generate"] == 0
+    assert await count(postgres, "decisions", qid) == 0
+
+
+async def test_failed_heartbeats_stop_the_job(make_env: MakeEnv, postgres: Postgres) -> None:
+    """A +WIP that can't be sent doesn't renew the lease (so a redelivery
+    can re-claim), and three in a row end the job, writing nothing."""
+    env = await make_env()
+    qid = await seed_query(postgres)
+    gate = env.gate()
+    stub = StubModelClient(block={"generate": gate})
+    clock = FakeClock()
+    w, _ = await env.start(stub, wip_clock=clock)
+    sent = spy_publishes(w, fail=b"+WPI")
+    await env.publish(qid)
+    assert await until(started(stub, "generate"))
+    lease = (await row(postgres, qid))["lease_until"]
+
+    def wips() -> int:
+        return len([p for _, p in sent if p == b"+WPI"])
+
+    for i in range(3):
+        clock.t += 25
+        end = time.monotonic() + 5
+        while wips() < i + 1 and time.monotonic() < end:
+            await asyncio.sleep(0.05)
+        assert wips() == i + 1
+        await asyncio.sleep(0.2)
+        assert (await row(postgres, qid))["lease_until"] == lease  # never renewed
+    gate.set()
+    await asyncio.sleep(1.0)
+    assert stub.calls["verify"] == 0
+    r = await row(postgres, qid)
+    assert (r["status"], r["attempts"]) == ("running", 1)  # left to a re-claim
+    assert await count(postgres, "decisions", qid) == 0
+    ci = await env.consumer()
+    assert ci.num_ack_pending == 1  # not acked, Nak'd or Termed: redelivered later
+    assert naks(sent) == []
