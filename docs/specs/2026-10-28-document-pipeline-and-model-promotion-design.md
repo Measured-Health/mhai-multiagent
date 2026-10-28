@@ -1,6 +1,6 @@
 # Document structuring pipeline and model promotion: design
 
-- **Status:** Proposed, for product owner approval. Design only; no code.
+- **Status:** Approved by the product owner, 2026-10-28: every open question in §11 decided as recommended. Design only; no code yet.
 - **Date:** 2026-10-28
 - **Context:** [intelligence meeting notes, 28 Oct](../meetings/2026-10-28-intelligence-meeting.md). The product owner approved writing this design and adding the TODO and tracker entries.
 - **Builds on:**
@@ -557,7 +557,9 @@ Actors: clinicians and hospital staff (upload, review), hospital admins, platfor
 
 Dependencies: Plan 3 (the boundary and `ModelClient`), the documents service, object storage, the canonical tables and patient index (the EMR integration work), and a GPU host.
 
-## 11. Open questions for the product owner
+## 11. Decisions (approved 2026-10-28, all as recommended)
+
+The product owner approved every recommendation below on 28 Oct, including the single GPU host (about $1,400 a month at 24/7) for model serving. Each "Recommendation" is now the decision.
 
 1. **Who reviews documents?** *Recommendation:* a new `documents.review` permission that hospital admins can give to clinicians and to a new non-clinical "records clerk" role; new diagnoses and medication changes still need a clinician.
 2. **Which languages do hospitals' documents use?** *Recommendation:* English only in phases 1–3; ask the first hospitals, and add a language only with its own 150-page evaluation slice.
