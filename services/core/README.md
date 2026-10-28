@@ -83,11 +83,62 @@ one job:
 | `BFF_SERVICE_KEYS` | yes | comma-separated, each at least 32 bytes; one per BFF |
 | `HTTP_ADDR` | no | default `:8080` |
 | `CORE_ENV` | no | default `development` |
+| `CORE_API_DOCS` | no | `true` or `false`: serve the API docs page. Default: on when `CORE_ENV` is `development`, off for every other value (production included). Anything else is refused at start-up. |
 
 Secrets must not contain `changeme`, `change-me` or `placeholder`. Errors
 name the variable, never the value. The core service reads only its own
 secrets: the NATS worker password and the database owner password are not
 in its environment.
+
+## API docs
+
+`GET /api/docs` is a Redoc page for [`openapi.yaml`](openapi.yaml);
+`GET /api/openapi.yaml` is the file itself. Both are embedded in the binary
+(`go:embed`), so the page and the served spec are the committed file.
+Redoc 2.5.4 is vendored in `internal/apidocs/assets/` with its licence and
+SHA-256 (see the README there); the page loads nothing from a CDN.
+
+- **Switch:** `CORE_API_DOCS` (above). When off, these paths answer the
+  normal 404 `not_found` problem. The demo (`deploy/compose.yml`) and the
+  dev compose turn it on.
+- **No credentials:** the routes sit outside the authenticated API chain,
+  like `/api/v1/healthz`, so they need no BFF key or token. They are not in
+  the permission table or the contract; `contract_test.go` compares
+  `openapi.yaml` with `server.Table()`, which only holds `authz.Route`
+  routes, so they are excluded by construction. Redoc has no "try it out"
+  console, so the page can send no request of its own.
+- **Headers:** `Content-Security-Policy: default-src 'none'; script-src
+  'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src
+  'self'; connect-src 'self'; base-uri 'none'; form-action 'none';
+  frame-ancestors 'none'`, plus `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. Inline
+  styles are allowed because Redoc (styled-components) writes `<style>`
+  elements at run time; scripts are `'self'` only. Redoc's search is off,
+  since it needs a `blob:` worker.
+- **Never over NATS:** `apidocs.Wrap` is applied only around the HTTP
+  listener in `cmd/core/serve.go`. `internal/natsapi` (Plan 3) must wrap the
+  `authz.Mux` handler, as the probes' HTTP path does, and must not include
+  these routes. They are for people with a browser, not for the BFFs.
+
+**On the demo host,** core listens on loopback only. Open a tunnel and
+browse locally:
+
+```bash
+ssh -N -L 8092:127.0.0.1:8092 <user>@<demo-host>
+# then open http://127.0.0.1:8092/api/docs
+```
+
+## Versioning
+
+The API version policy is [ADR 0012](../../docs/adr/0012-api-versioning.md):
+the major version is in the path (`/api/v1`) and the NATS subject, changes
+inside a version only add, and breaking changes go to `v2` served alongside.
+`info.version` in `openapi.yaml` is semver: minor for an additive change,
+patch for a documentation-only one. CI runs `oasdiff breaking` (pinned,
+`.github/scripts/openapi-breaking.sh`) against the target branch and fails
+on a breaking change. `httpx.Deprecated(deprecated, sunset, link)` is the
+middleware that sets `Deprecation`, `Sunset` and `Link` on a route being
+retired; nothing uses it yet, and the retirement policy will.
 
 ## Running it in compose
 

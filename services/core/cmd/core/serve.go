@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	core "github.com/Measured-Health/mhai-multiagent/services/core"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/apidocs"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
@@ -87,7 +89,9 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	}
 	m := authz.NewMux(guard)
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.Readiness(a.pool, nc, buckets.All())})
-	a.handler = m.Handler(cfg.BFFServiceKeys)
+	// The docs routes sit outside the API chain and are never served over
+	// NATS (see internal/apidocs): only this HTTP handler carries them.
+	a.handler = apidocs.Wrap(cfg.APIDocs, core.OpenAPI, m.Handler(cfg.BFFServiceKeys))
 	return a, nil
 }
 
@@ -142,7 +146,7 @@ func serve() error {
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()
-	log.Info("core listening", "addr", cfg.HTTPAddr, "env", cfg.Env)
+	log.Info("core listening", "addr", cfg.HTTPAddr, "env", cfg.Env, "api_docs", cfg.APIDocs)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
