@@ -29,6 +29,7 @@ def _worker(args):
 
     from intelligence.boundary import worker
     from intelligence.boundary.config import ConfigError, WorkerSettings
+    from intelligence.boundary.db import DatabaseError
     from intelligence.boundary.keys import TrustedKeysError
     from intelligence.boundary.operations import OperationsError
 
@@ -40,7 +41,8 @@ def _worker(args):
         return 2
     try:
         asyncio.run(worker.run_service(settings))
-    except (TrustedKeysError, OperationsError) as e:
+    except (TrustedKeysError, OperationsError, DatabaseError) as e:
+        # These messages name files, variables and roles, never credentials.
         print(f"intelligence worker: {e}", file=sys.stderr)
         return 2
     except Exception as e:

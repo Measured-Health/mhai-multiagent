@@ -1,9 +1,9 @@
 """The pipeline service's request/reply side: health (spec §4).
 
 Its run_query jobs arrive with Task 11. database_ready comes from an
-injected readiness check (F28): the database layer arrives in Task 10, so
-until it is wired in the default is "not ready", and a check that raises
-is "not ready" too. No models load here, so models_ready is False until
+injected readiness check (F28): worker.run_service passes
+boundary.db.Database.ready when INTELLIGENCE_DB_URL is set. Without one the
+default is "not ready", and a check that raises is "not ready" too. No models load here, so models_ready is False until
 the model client does.
 """
 

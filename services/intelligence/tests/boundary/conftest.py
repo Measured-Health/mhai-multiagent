@@ -84,14 +84,27 @@ def nats_server() -> Iterator[NatsServer]:
         c.stop()
 
 
+# The pipeline's login, provisioned by `core migrate up` (spec §8.2).
+INTELLIGENCE_DB_USER = "intelligence_app"
+INTELLIGENCE_DB_PASSWORD = "test-only-intelligence-db-pw"
+
+
 @dataclass(frozen=True)
 class Postgres:
     url: str  # superuser, test-only
     container: Any
+    host: str = ""
+    port: int = 0
+
+    @property
+    def intelligence_url(self) -> str:
+        """Where the pipeline connects, without credentials (those go to
+        Database separately)."""
+        return f"postgres://{self.host}:{self.port}/mhai?sslmode=disable"
 
     def psql(self, sql: str) -> str:
         """One statement as the superuser, through psql in the container
-        (the tests carry no Postgres driver until T10)."""
+        (no driver needed)."""
         code, out = self.container.exec(
             ["psql", "-U", "mhai_test", "-d", "mhai", "-tAX", "-v", "ON_ERROR_STOP=1", "-c", sql]
         )
@@ -110,22 +123,23 @@ def postgres() -> Iterator[Postgres]:
     )
     c.start()
     try:
-        url = (
-            f"postgres://mhai_test:test-only-pg-pw@{c.get_container_host_ip()}:"
-            f"{c.get_exposed_port(5432)}/mhai?sslmode=disable"
-        )
+        host, port = c.get_container_host_ip(), int(c.get_exposed_port(5432))
+        url = f"postgres://mhai_test:test-only-pg-pw@{host}:{port}/mhai?sslmode=disable"
         client = docker.from_env()
         try:
             client.containers.run(
                 CORE_IMAGE,
                 ["migrate", "up"],
-                environment={"DATABASE_URL": url},
+                environment={
+                    "DATABASE_URL": url,
+                    "INTELLIGENCE_DB_PASSWORD": INTELLIGENCE_DB_PASSWORD,
+                },
                 network_mode="host",
                 remove=True,
             )
         finally:
             client.close()
-        yield Postgres(url, c)
+        yield Postgres(url, c, host, port)
     finally:
         c.stop()
 

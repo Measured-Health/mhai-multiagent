@@ -65,9 +65,12 @@ one job:
 - `mhai_app` holds nothing itself. Each transaction runs
   `SET LOCAL ROLE mhai_gateway`, `mhai_platform` or `mhai_auth`, so a
   query outside `db.With*` or `authz.Tx` fails.
-- `core migrate up` creates or resets the two logins when `CORE_DB_USER` /
-  `CORE_DB_PASSWORD` and `PROVISION_DB_USER` / `PROVISION_DB_PASSWORD` are
-  set. It sets the password and revokes any other membership. Placeholder
+- `core migrate up` creates or resets the logins when `CORE_DB_USER` /
+  `CORE_DB_PASSWORD`, `PROVISION_DB_USER` / `PROVISION_DB_PASSWORD` and
+  `INTELLIGENCE_DB_USER` (default `intelligence_app`) /
+  `INTELLIGENCE_DB_PASSWORD` are set. The pipeline's login is a member of
+  `mhai_worker_app` only, which holds `mhai_worker` without inheriting it
+  (00008), so it holds nothing until `SET LOCAL ROLE mhai_worker`. It sets the password and revokes any other membership. Placeholder
   or short passwords (under 16 characters) are refused before the database
   is touched.
 - On managed Postgres, run `migrate` as a `CREATEROLE` admin instead of a

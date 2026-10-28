@@ -40,6 +40,7 @@ import ssl
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
+from typing import TYPE_CHECKING
 
 import nats.aio.client as nats_client
 from google.protobuf import descriptor_pool, message_factory
@@ -67,6 +68,9 @@ from intelligence.boundary.verify import (
     Verifier,
     strict_decoder,
 )
+
+if TYPE_CHECKING:
+    from intelligence.boundary.db import Database
 
 log = logging.getLogger("intelligence.boundary.worker")
 
@@ -636,21 +640,46 @@ def build_verifier(settings: WorkerSettings) -> tuple[Verifier, TrustedKeys]:
     return Verifier(trusted, settings.service, ops, JtiSet(clock), clock), trusted
 
 
-def service_handlers(service: str) -> dict[str, Handler]:
+def service_handlers(service: str, database: Database | None = None) -> dict[str, Handler]:
     from intelligence.boundary.services import echo, pipeline
 
     if service == "echo":
         return dict(echo.HANDLERS)
     if service == "pipeline":
-        return pipeline.handlers()
+        if database is None:
+            return pipeline.handlers()
+        return pipeline.handlers(database_ready=database.ready)
     raise ValueError("unknown service")
+
+
+async def open_database(settings: WorkerSettings) -> Database | None:
+    """The pipeline's database, connected and its login checked (spec
+    §8.2), or None without INTELLIGENCE_DB_URL (health then reports
+    database_ready false). Refuses to start on a login RLS can't hold."""
+    if settings.service != "pipeline" or settings.db_url is None:
+        return None
+    from intelligence.boundary.db import Database
+
+    database = Database(
+        settings.db_url,
+        user=settings.db_user,
+        password=settings.db_password,
+        max_size=max(2, settings.max_concurrency),
+    )
+    await database.open()
+    return database
 
 
 async def run_service(settings: WorkerSettings) -> None:
     """`intelligence worker`: serve settings.service until SIGTERM."""
     verifier, trusted = build_verifier(settings)
-    w = Worker(settings, service_handlers(settings.service), verifier)
-    await w.start()
-    await w.run(trusted)
+    database = await open_database(settings)
+    try:
+        w = Worker(settings, service_handlers(settings.service, database), verifier)
+        await w.start()
+        await w.run(trusted)
+    finally:
+        if database is not None:
+            await database.close()
     if w.insecure:
         raise ConnectionError("the NATS connection lost TLS")

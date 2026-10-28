@@ -42,6 +42,10 @@ dependencies = [
     # boundary/worker.py hooks its private header parser to refuse repeated
     # headers, and relies on tls_handshake_first; review both on a bump.
     "nats-py[nkeys]>=2.16,<2.17",
+    # The pipeline's database access (spec section 8.2): psycopg 3 and its
+    # pool, parameterised queries only, through boundary/db.py.
+    "psycopg[binary]>=3.2,<4",
+    "psycopg-pool>=3.2,<4",
 ]
 
 [dependency-groups]
