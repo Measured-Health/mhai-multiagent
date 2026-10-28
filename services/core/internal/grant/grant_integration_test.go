@@ -637,15 +637,45 @@ func TestGrantRateLimited(t *testing.T) {
 		t.Errorf("granted %d + limited %d != %d", granted, limited, len(results))
 	}
 	t.Logf("granted %d, rate_limited %d, slowest rate_limited reply %v; api.v1 %d in %v", granted, limited, slowest, apiCode, apiTook)
-	if slowest > 50*time.Millisecond {
-		t.Errorf("slowest rate_limited reply took %v, want within 50 ms", slowest)
+	// Wall-clock bounds are only a generous backstop (shared CI runners are
+	// slow); "answers at once" is asserted structurally below.
+	if granted != grant.DefaultPerSession || limited != len(results)-grant.DefaultPerSession {
+		t.Errorf("granted %d, rate_limited %d, want %d and %d", granted, limited,
+			grant.DefaultPerSession, len(results)-grant.DefaultPerSession)
 	}
-	if apiCode != 200 || apiTook > 200*time.Millisecond {
-		t.Errorf("api.v1 for another hospital: %d in %v, want 200 within 200 ms", apiCode, apiTook)
+	if slowest > time.Second {
+		t.Errorf("slowest rate_limited reply took %v, want within 1 s", slowest)
+	}
+	if apiCode != 200 || apiTook > time.Second {
+		t.Errorf("api.v1 for another hospital: %d in %v, want 200 within 1 s", apiCode, apiTook)
 	}
 	// Rate-limit refusals are metrics only, never on the chain.
 	if n := countAction(t, "intelligence.grant_refused", "rate_limited"); n != 0 {
 		t.Errorf("%d rate_limited refusals audited", n)
+	}
+	// A31, structurally: with the session's bucket empty (the clock is
+	// frozen), a rate_limited refusal makes no database call (no connection
+	// acquired from the pool the guard and the grant server share) and
+	// writes no audit row.
+	auditRows := func() int {
+		var n int
+		if err := super.QueryRow(context.Background(), `SELECT count(*) FROM audit_log`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	acquiresBefore, rowsBefore := app.Stat().AcquireCount(), auditRows()
+	const burst = 50
+	for range burst {
+		if a := mustAsk(t, ec, "echo", pingRequest(s.tok, body)); a.code != "rate_limited" {
+			t.Fatalf("exhausted session: %+v, want rate_limited", a)
+		}
+	}
+	if d := app.Stat().AcquireCount() - acquiresBefore; d != 0 {
+		t.Errorf("%d rate_limited refusals made %d database acquisitions, want 0", burst, d)
+	}
+	if d := auditRows() - rowsBefore; d != 0 {
+		t.Errorf("%d rate_limited refusals wrote %d audit rows, want 0", burst, d)
 	}
 	// A second later, the session may ask again.
 	frozen.Add(int64(time.Second))
