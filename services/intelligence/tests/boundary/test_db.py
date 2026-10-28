@@ -144,6 +144,57 @@ PIPELINE = {
 }
 
 
+PRODUCTION = {
+    **{k: v for k, v in PIPELINE.items() if k != "APP_ENV"},
+    "APP_ENV": "production",
+    "NATS_URL": "tls://127.0.0.1:4222",
+    "NATS_TLS_CA_PATH": "/run/nats/ca.pem",
+    "NATS_TLS_CERT_PATH": "/run/nats/pipeline.pem",
+    "NATS_TLS_KEY_PATH": "/run/nats/pipeline-key.pem",
+    "NATS_NKEY_SEED_PATH": "/run/nats/pipeline.nk",
+}
+
+
+def _pw_file(tmp_path: Path, mode: int) -> Path:
+    f = tmp_path / f"pw-{mode:o}"
+    f.write_text("test-only-file-password-0002\n")
+    f.chmod(mode)
+    return f
+
+
+@pytest.mark.parametrize("mode", [0o620, 0o602, 0o666, 0o460])
+def test_settings_refuse_a_password_file_others_can_write(tmp_path: Path, mode: int) -> None:
+    f = _pw_file(tmp_path, mode)
+    with pytest.raises(ConfigError) as e:
+        WorkerSettings.from_env({**PRODUCTION, "INTELLIGENCE_DB_PASSWORD_FILE": str(f)})
+    assert "INTELLIGENCE_DB_PASSWORD_FILE is writable" in str(e.value)
+    assert "test-only-file-password" not in str(e.value)
+    # Development reads it as it is.
+    s = WorkerSettings.from_env({**PIPELINE, "INTELLIGENCE_DB_PASSWORD_FILE": str(f)})
+    assert s.db_password == "test-only-file-password-0002"
+
+
+@pytest.mark.parametrize(
+    ("mode", "warned"), [(0o400, False), (0o440, False), (0o444, True), (0o644, True)]
+)
+def test_settings_warn_on_a_password_file_others_can_read(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, mode: int, warned: bool
+) -> None:
+    """A secret mount is often root-owned 0444: allowed, with a warning.
+    (The remote runner runs the tests as root, so these files are root's.)"""
+    f = _pw_file(tmp_path, mode)
+    caplog.set_level(logging.WARNING, logger="intelligence.boundary.config")
+    s = WorkerSettings.from_env({**PRODUCTION, "INTELLIGENCE_DB_PASSWORD_FILE": str(f)})
+    assert s.db_password == "test-only-file-password-0002"
+    assert ("readable by others" in caplog.text) is warned
+    assert "test-only-file-password" not in caplog.text
+
+
+def test_settings_refuse_a_password_path_that_is_not_a_file(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="INTELLIGENCE_DB_PASSWORD_FILE is not a regular file"):
+        WorkerSettings.from_env({**PRODUCTION, "INTELLIGENCE_DB_PASSWORD_FILE": str(tmp_path)})
+
+
 def test_settings_read_the_password_from_a_file(tmp_path: Path) -> None:
     f = tmp_path / "pw"
     f.write_text("test-only-file-password-0001\n")

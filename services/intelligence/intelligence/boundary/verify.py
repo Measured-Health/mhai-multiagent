@@ -142,6 +142,15 @@ class Verified:
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
         raise TypeError("only the Verifier makes a Verified")
 
+    # pickle (and copy) would rebuild one from bytes without the verifier:
+    # a pickled Verified carried across a queue, cache or process would be a
+    # hospital nobody checked.
+    def __reduce__(self) -> Any:
+        raise TypeError("a Verified can't be pickled or copied")
+
+    def __reduce_ex__(self, protocol: Any) -> Any:
+        raise TypeError("a Verified can't be pickled or copied")
+
     @classmethod
     def _issue(cls, key: object, **values: Any) -> Verified:
         if key is not _ISSUE:

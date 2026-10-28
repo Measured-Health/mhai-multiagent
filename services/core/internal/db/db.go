@@ -141,7 +141,9 @@ func MigrateDownTo(ctx context.Context, url string, version int64) error {
 //     directly or through another role: only SET ROLE inside db.With* may
 //     reach them;
 //   - a role that is, or can act as, the owner of the database, a schema or
-//     a table.
+//     a table;
+//   - a connection that starts in another role or with a hospital set (a
+//     role default or PGOPTIONS).
 //
 // The gateway's login must be a plain member of mhai_app, so that a query
 // outside With* fails and RESET ROLE inside one falls back to a role with
@@ -159,6 +161,8 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 		ownedSchemas   []string
 		ownedRelations int
 		otherRoles     []string
+		current        string
+		atHospital     string
 	)
 	err := pool.QueryRow(ctx, `
 		SELECT r.rolname, r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb, r.rolreplication,
@@ -175,9 +179,12 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 		        WHERE pg_has_role(session_user, c.relowner, 'MEMBER')
 		          AND n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'),
 		       ARRAY(SELECT g.rolname::text FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
-		             WHERE m.member = r.oid AND g.rolname <> 'mhai_app' ORDER BY 1)
+		             WHERE m.member = r.oid AND g.rolname <> 'mhai_app' ORDER BY 1),
+		       current_user::text,
+		       COALESCE(current_setting('mhai.hospital_id', true), '')
 		FROM pg_roles r WHERE r.rolname = session_user`).
-		Scan(&name, &super, &bypass, &createRole, &createDB, &replication, &member, &inherited, &ownsDatabase, &ownedSchemas, &ownedRelations, &otherRoles)
+		Scan(&name, &super, &bypass, &createRole, &createDB, &replication, &member, &inherited, &ownsDatabase, &ownedSchemas, &ownedRelations, &otherRoles,
+			&current, &atHospital)
 	if err != nil {
 		return fmt.Errorf("db: check login role: %w", err)
 	}
@@ -205,6 +212,15 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	if len(inherited) > 0 {
 		problems = append(problems, "it inherits the privileges of "+strings.Join(inherited, ", "))
+	}
+	if current != name {
+		// A default role (ALTER ROLE ... SET role, or PGOPTIONS): every
+		// connection starts in it, outside db.With*, and RESET ROLE inside
+		// one falls back to it.
+		problems = append(problems, "it starts as "+current+", not as itself")
+	}
+	if atHospital != "" {
+		problems = append(problems, "it starts with a hospital set")
 	}
 	if ownsDatabase {
 		problems = append(problems, "it owns the database")

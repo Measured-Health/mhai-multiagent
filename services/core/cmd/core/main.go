@@ -105,6 +105,16 @@ func loginRequests(getenv func(string) string) ([]loginRequest, error) {
 		}
 		out = append(out, l)
 	}
+	// One login per role: two variables naming the same user would make
+	// the second EnsureLogin take the first one's membership away.
+	byUser := map[string]string{}
+	for _, l := range out {
+		if prev, ok := byUser[l.user]; ok {
+			errs = append(errs, fmt.Errorf("%s and %s name the same database login", prev, l.userVar))
+			continue
+		}
+		byUser[l.user] = l.userVar
+	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}

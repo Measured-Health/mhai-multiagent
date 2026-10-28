@@ -640,6 +640,27 @@ def test_verified_cannot_be_built_outside(make: Callable[..., Verifier], signer:
         v.hid = OTHER_HOSPITAL  # type: ignore[misc]
 
 
+def test_verified_cannot_be_pickled_or_copied(
+    make: Callable[..., Verifier], signer: Signer
+) -> None:
+    """A pickled Verified would come back to life without the verifier."""
+    import copy
+    import pickle
+
+    body = ping_body()
+    v = make().verify_request(
+        PING_SUBJECT, CORE_REPLY, headers(signer.mint(body=body)), body, ping_decoder
+    )
+    assert isinstance(v, Verified)
+    for proto in range(pickle.HIGHEST_PROTOCOL + 1):
+        with pytest.raises(TypeError):
+            pickle.dumps(v, protocol=proto)
+    with pytest.raises(TypeError):
+        copy.copy(v)
+    with pytest.raises(TypeError):
+        copy.deepcopy(v)
+
+
 def test_refusal_reasons_map_to_codes(make: Callable[..., Verifier]) -> None:
     from intelligence.boundary.verify import REASON_CODES
 

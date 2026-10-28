@@ -10,11 +10,14 @@ development.
 
 from __future__ import annotations
 
+import logging
 import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
+
+log = logging.getLogger("intelligence.boundary.config")
 
 SERVICES = frozenset({"pipeline", "echo"})
 MAX_CONCURRENCY = 1024
@@ -262,11 +265,10 @@ def _db_credentials(
         return None, None
     if pw_file:
         name = "INTELLIGENCE_DB_PASSWORD_FILE"
-        try:
-            password = Path(pw_file).read_text(encoding="utf-8").rstrip("\r\n")
-        except (OSError, UnicodeDecodeError):
-            errs.append("INTELLIGENCE_DB_PASSWORD_FILE can't be read")
+        read = _read_secret_file(pw_file, name, development, errs)
+        if read is None:
             return None, None
+        password = read
     elif raw_pw:
         password = raw_pw
     elif url.password is not None:
@@ -279,3 +281,44 @@ def _db_credentials(
         errs.append(problem)
         return None, None
     return user, password
+
+
+def _read_secret_file(path: str, name: str, development: bool, errs: list[str]) -> str | None:
+    """A password file's contents, without its trailing newline. It must be
+    a regular file; outside development, one that neither group nor others
+    can write; one others can read (a root-owned 0444 secret mount, say) is
+    allowed with a warning. The mode is checked on the open file, so it is
+    the file that was read."""
+    try:
+        # O_NONBLOCK: a FIFO in place of the file can't hang start-up.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        errs.append(f"{name} can't be read")
+        return None
+    try:
+        st = os.fstat(fd)
+        regular = stat.S_ISREG(st.st_mode)
+    except OSError:
+        os.close(fd)
+        errs.append(f"{name} can't be read")
+        return None
+    if not regular:
+        os.close(fd)
+        errs.append(f"{name} is not a regular file")
+        return None
+    with os.fdopen(fd, "rb") as f:
+        if not development:
+            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                errs.append(f"{name} is writable by group or others (use mode 0400 or 0440)")
+                return None
+            if st.st_mode & stat.S_IROTH:
+                log.warning(
+                    "%s is readable by others (mode %o); prefer 0400 or 0440",
+                    name,
+                    stat.S_IMODE(st.st_mode),
+                )
+        try:
+            return f.read().decode("utf-8").rstrip("\r\n")
+        except (OSError, UnicodeDecodeError):
+            errs.append(f"{name} can't be read")
+            return None

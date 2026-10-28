@@ -31,7 +31,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import psycopg
-from psycopg import AsyncConnection, AsyncCursor
+from psycopg import AsyncConnection, AsyncCursor, sql
 from psycopg_pool import AsyncConnectionPool
 
 from intelligence.boundary.config import DEFAULT_DB_USER, parse_db_url
@@ -41,6 +41,9 @@ log = logging.getLogger("intelligence.boundary.db")
 
 # The cursor with_hospital yields: the type the repositories take.
 Cursor = AsyncCursor[Any]
+# psycopg's safe SQL composition, for a repository that needs an identifier
+# in its SQL (test_no_direct_db accepts sql.SQL("literal").format(...)).
+__all__ = ["Cursor", "Database", "DatabaseError", "LoginRefused", "NoHospital", "sql"]
 
 WORKER_ROLE = "mhai_worker"
 LOGIN_ROLE = "mhai_worker_app"

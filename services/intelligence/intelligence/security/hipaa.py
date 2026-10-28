@@ -656,14 +656,18 @@ class LatencyProfiler:
         if not self.measurements:
             return {}
 
-        stages = [
-            "pii_masking_ms", "retrieval_ms", "generation_ms",
-            "nli_verification_ms", "hga_ms", "total_ms"
-        ]
+        stages = {
+            "pii_masking_ms": lambda m: m.pii_masking_ms,
+            "retrieval_ms": lambda m: m.retrieval_ms,
+            "generation_ms": lambda m: m.generation_ms,
+            "nli_verification_ms": lambda m: m.nli_verification_ms,
+            "hga_ms": lambda m: m.hga_ms,
+            "total_ms": lambda m: m.total_ms,
+        }
 
         results = {}
-        for stage in stages:
-            values = [getattr(m, stage) for m in self.measurements]
+        for stage, field_of in stages.items():
+            values = [field_of(m) for m in self.measurements]
             if not values:
                 continue
             results[stage] = {

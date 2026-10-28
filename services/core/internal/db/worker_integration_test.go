@@ -4,6 +4,7 @@ package db_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -179,6 +180,91 @@ func TestWorkerGrantsNarrowed(t *testing.T) {
 	}
 	deny("insert query", `INSERT INTO clinical_queries (id, hospital_id, clinical_question, urgency) VALUES ($1, $2, 'x', 'routine')`, uuid.New(), a)
 	deny("delete query", `DELETE FROM clinical_queries WHERE id = $1`, qa)
+
+	// The status moves (worker_status, RESTRICTIVE): rows in flight only,
+	// to running, completed (with a decision) or failed.
+	freshQuery := func(set string) uuid.UUID {
+		t.Helper()
+		id := uuid.New()
+		if _, err := super.Exec(ctx, `INSERT INTO clinical_queries (id, hospital_id, clinical_question, urgency) VALUES ($1, $2, 'synthetic question', 'routine')`, id, a); err != nil {
+			t.Fatal(err)
+		}
+		if set != "" {
+			if _, err := super.Exec(ctx, `UPDATE clinical_queries SET `+set+` WHERE id = $1`, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return id
+	}
+	for _, final := range []string{"cancelled", "failed", "completed"} {
+		q := freshQuery(`status = '` + final + `'`)
+		for _, to := range []string{"running", "failed", "completed", "queued"} {
+			allow("move a "+final+" row to "+to, 0, `UPDATE clinical_queries SET status = '`+to+`' WHERE id = $1`, q)
+		}
+		allow("touch a "+final+" row's progress", 0, `UPDATE clinical_queries SET progress = 0.9 WHERE id = $1`, q)
+	}
+	refusedByPolicy := func(what, q string, args ...any) {
+		t.Helper()
+		_, err := asWorker(ctx, super, a, q, args...)
+		if pgCode(err) != rlsViolation || !strings.Contains(err.Error(), "row-level security") {
+			t.Fatalf("worker %s: want an RLS WITH CHECK refusal, got %v", what, err)
+		}
+	}
+	queued := freshQuery("")
+	refusedByPolicy("complete without a decision", `UPDATE clinical_queries SET status = 'completed' WHERE id = $1`, queued)
+	refusedByPolicy("cancel", `UPDATE clinical_queries SET status = 'cancelled' WHERE id = $1`, queued)
+	refusedByPolicy("re-queue a running row", `UPDATE clinical_queries SET status = 'queued' WHERE id = $1`,
+		freshQuery(`status = 'running'`))
+	tried := freshQuery(`attempts = 3`)
+	if _, err := asWorker(ctx, super, a, `UPDATE clinical_queries SET attempts = 1 WHERE id = $1`, tried); pgCode(err) != "23514" {
+		t.Fatalf("worker decreasing attempts: want check violation, got %v", err)
+	}
+	// Raising attempts is part of a claim, which moves the row to running;
+	// a row can't be touched and left queued.
+	allow("claim, raising attempts", 1, `UPDATE clinical_queries SET status = 'running', attempts = attempts + 1 WHERE id = $1`, tried)
+	refusedByPolicy("leave a row queued", `UPDATE clinical_queries SET attempts = attempts + 1 WHERE id = $1`, tried)
+	// The allowed paths: queued -> running -> completed (decision first),
+	// and running -> failed, each in the worker's own transaction.
+	steps := func(what string, q uuid.UUID, stmts ...string) {
+		t.Helper()
+		err := func() error {
+			tx, err := super.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+			if _, err := tx.Exec(ctx, `SET LOCAL ROLE mhai_worker`); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT set_config('mhai.hospital_id', $1, true)`, a.String()); err != nil {
+				return err
+			}
+			for _, st := range stmts {
+				tag, err := tx.Exec(ctx, st, q)
+				if err != nil {
+					return fmt.Errorf("%s: %w", st, err)
+				}
+				if tag.RowsAffected() != 1 {
+					return fmt.Errorf("%s: %d rows", st, tag.RowsAffected())
+				}
+			}
+			return tx.Commit(ctx)
+		}()
+		if err != nil {
+			t.Fatalf("worker %s: %v", what, err)
+		}
+	}
+	done := freshQuery("")
+	steps("queued -> running -> completed", done,
+		`UPDATE clinical_queries SET status = 'running', attempts = attempts + 1, started_at = now(), lease_until = now() + interval '1 minute' WHERE id = $1`,
+		`UPDATE clinical_queries SET progress = 0.5, current_stage = 'retrieval' WHERE id = $1`,
+		`INSERT INTO clinical_decisions (id, hospital_id, query_id) SELECT gen_random_uuid(), hospital_id, id FROM clinical_queries WHERE id = $1`,
+		`UPDATE clinical_queries SET status = 'completed', progress = 1, completed_at = now() WHERE id = $1`)
+	steps("running -> failed", freshQuery(`status = 'running', attempts = 1`),
+		`UPDATE clinical_queries SET status = 'failed', error = 'internal', completed_at = now() WHERE id = $1`)
+	// A running row whose lease ran out is re-claimed while running.
+	steps("re-claim a running row", freshQuery(`status = 'running', attempts = 1, lease_until = now() - interval '1 minute'`),
+		`UPDATE clinical_queries SET attempts = attempts + 1, lease_until = now() + interval '1 minute' WHERE id = $1`)
 
 	// clinical_decisions and hga_evaluations: SELECT, INSERT.
 	dec := uuid.New()
@@ -561,5 +647,74 @@ func TestMigration00008RoundTrip(t *testing.T) {
 	}
 	if err := db.MigrateDownTo(ctx, pg.URL, 0); err != nil {
 		t.Fatalf("down to 0: %v", err)
+	}
+}
+
+// A login with a session default (ALTER ROLE ... SET role, or a hospital)
+// starts every connection outside db.With*: core's check refuses it.
+func TestCheckLoginRoleRefusesRoleDefaults(t *testing.T) {
+	pg, super := shared(t)
+	ctx := context.Background()
+	name, _ := loginPool(t, "IN ROLE mhai_app")
+	if _, err := super.Exec(ctx, `ALTER ROLE `+name+` SET role = 'mhai_gateway'`); err != nil {
+		t.Fatal(err)
+	}
+	p := connectAs(t, pg, name, "test-only-login-password")
+	err := db.CheckLoginRole(ctx, p)
+	p.Close()
+	if err == nil || !strings.Contains(err.Error(), "starts as mhai_gateway") {
+		t.Fatalf("login with a default role: %v", err)
+	}
+	if _, err := super.Exec(ctx, `ALTER ROLE `+name+` RESET role`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := super.Exec(ctx, `ALTER ROLE `+name+` SET mhai.hospital_id = '`+uuid.NewString()+`'`); err != nil {
+		t.Fatal(err)
+	}
+	p = connectAs(t, pg, name, "test-only-login-password")
+	err = db.CheckLoginRole(ctx, p)
+	p.Close()
+	if err == nil || !strings.Contains(err.Error(), "starts with a hospital set") {
+		t.Fatalf("login with a default hospital: %v", err)
+	}
+}
+
+// EnsureLogin clears a login's session defaults, role-wide and for this
+// database, so a re-run of core migrate up cleans a tampered login.
+func TestEnsureLoginResetsRoleDefaults(t *testing.T) {
+	pg, super := shared(t)
+	ctx := context.Background()
+	for _, role := range []string{"mhai_app", "mhai_worker_app"} {
+		name := "dflt_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:8]
+		pw := "synthetic-login-password-" + uuid.NewString()
+		if err := db.EnsureLogin(ctx, super, name, pw, role); err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range []string{
+			`ALTER ROLE ` + name + ` SET role = 'mhai_worker'`,
+			`ALTER ROLE ` + name + ` IN DATABASE mhai SET mhai.hospital_id = '` + uuid.NewString() + `'`,
+		} {
+			if _, err := super.Exec(ctx, q); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := db.EnsureLogin(ctx, super, name, pw, role); err != nil {
+			t.Fatalf("%s: re-run: %v", role, err)
+		}
+		var left int
+		if err := super.QueryRow(ctx, `SELECT count(*) FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole
+			WHERE r.rolname = $1`, name).Scan(&left); err != nil || left != 0 {
+			t.Fatalf("%s: %d session defaults left (%v)", role, left, err)
+		}
+		p := connectAs(t, pg, name, pw)
+		var who, hid string
+		err := p.QueryRow(ctx, `SELECT current_user, COALESCE(current_setting('mhai.hospital_id', true), '')`).Scan(&who, &hid)
+		if err == nil && role == "mhai_app" {
+			err = db.CheckLoginRole(ctx, p)
+		}
+		p.Close()
+		if err != nil || who != name || hid != "" {
+			t.Fatalf("%s: connects as %q hospital %q (%v)", role, who, hid, err)
+		}
 	}
 }

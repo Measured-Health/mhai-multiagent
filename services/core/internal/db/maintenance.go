@@ -75,8 +75,9 @@ const MinLoginPasswordLen = 16
 
 // EnsureLogin creates the login role name with password, a member of
 // exactly role (mhai_app, mhai_provision or mhai_worker_app), or brings an existing one back
-// to that: LOGIN, no superuser, BYPASSRLS, CREATEDB or CREATEROLE, the new
-// password, and every other membership revoked. pool must be able to
+// to that: LOGIN, no superuser, BYPASSRLS, CREATEDB or CREATEROLE, no
+// session defaults (ALTER ROLE ... RESET ALL, role-wide and for this
+// database), the new password, and every other membership revoked. pool must be able to
 // create roles (the migrate connection). Errors never carry the password,
 // and neither does any SQL text or parameter sent to Postgres: the password
 // goes as a SCRAM-SHA-256 verifier built here (see scramVerifier), which
@@ -129,6 +130,22 @@ func EnsureLogin(ctx context.Context, pool *pgxpool.Pool, name, password, role s
 		if _, err := tx.Exec(ctx, "ALTER ROLE "+ident+" "+strings.Join(fix, " ")); err != nil {
 			return fmt.Errorf("db: ensure login %s: ALTER ROLE failed", name)
 		}
+	}
+
+	// 1b. No session defaults on the role, here or for this database: a
+	// default role (ALTER ROLE ... SET role) would start every connection
+	// in that role, outside db.With* and with_hospital, and RESET ROLE
+	// would fall back to it; a default mhai.hospital_id would scope a
+	// connection before any transaction asked for it.
+	var dbName string
+	if err := tx.QueryRow(ctx, `SELECT current_database()`).Scan(&dbName); err != nil {
+		return errors.New("db: ensure login: lookup failed")
+	}
+	if _, err := tx.Exec(ctx, "ALTER ROLE "+ident+" RESET ALL"); err != nil {
+		return fmt.Errorf("db: ensure login %s: RESET ALL failed", name)
+	}
+	if _, err := tx.Exec(ctx, "ALTER ROLE "+ident+" IN DATABASE "+pgx.Identifier{dbName}.Sanitize()+" RESET ALL"); err != nil {
+		return fmt.Errorf("db: ensure login %s: RESET ALL in database failed", name)
 	}
 
 	// 2. Probe, with no secret in it, that this connection may set the

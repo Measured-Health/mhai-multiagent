@@ -9,7 +9,9 @@
 -- superuser connection (Plan 2 review T2 M6).
 --
 -- mhai_worker is narrowed to what the pipeline uses: clinical_queries
--- SELECT and UPDATE of the status columns only; clinical_decisions and
+-- SELECT and UPDATE of the status columns only, of rows in flight, to
+-- running, completed (with a decision) or failed, attempts never going
+-- down; clinical_decisions and
 -- hga_evaluations SELECT, INSERT; kb_chunks and guardrail_weights SELECT
 -- (no enrichment in this plan, so no kb_chunks writes); the outbox INSERT.
 --
@@ -62,6 +64,40 @@ GRANT UPDATE (status, progress, current_stage, started_at, completed_at, error, 
 GRANT SELECT, INSERT ON clinical_decisions, hga_evaluations TO mhai_worker;
 GRANT USAGE ON SEQUENCE hga_evaluations_id_seq TO mhai_worker;
 GRANT SELECT ON kb_chunks, guardrail_weights TO mhai_worker;
+
+-- The worker's status moves, as 00007 does for mhai_jobs. RESTRICTIVE, so it
+-- holds on top of hospital_rows: the worker touches only rows still in
+-- flight (queued or running), and leaves them running, completed or failed.
+-- It can't re-open a cancelled, failed or completed question, cancel one
+-- (core does), or put one back in the queue (a crashed worker's job is
+-- redelivered by JetStream and re-claimed while running: no 'queued' is
+-- needed). completed needs the decision row first, so a question is never
+-- complete without an answer.
+CREATE POLICY worker_status ON clinical_queries AS RESTRICTIVE FOR UPDATE TO mhai_worker
+    USING (status IN ('queued', 'running'))
+    WITH CHECK (status IN ('running', 'completed', 'failed')
+                AND (status <> 'completed'
+                     OR EXISTS (SELECT 1 FROM clinical_decisions d
+                                WHERE d.query_id = clinical_queries.id
+                                  AND d.hospital_id = clinical_queries.hospital_id)));
+
+-- attempts only grows, whoever writes it: it is the delivery count the
+-- audit (query.failed) and the retry limit read.
+-- +goose StatementBegin
+CREATE FUNCTION mhai_attempts_never_decrease() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+BEGIN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+        MESSAGE = 'clinical_queries: attempts never decreases';
+END
+$$;
+-- +goose StatementEnd
+ALTER FUNCTION mhai_attempts_never_decrease() OWNER TO mhai_migrate;
+REVOKE ALL ON FUNCTION mhai_attempts_never_decrease() FROM PUBLIC;
+CREATE TRIGGER clinical_queries_attempts BEFORE UPDATE OF attempts ON clinical_queries
+    FOR EACH ROW WHEN (NEW.attempts < OLD.attempts) EXECUTE FUNCTION mhai_attempts_never_decrease();
 
 ------------------------------------------------------------------------
 -- The outbox.
@@ -122,6 +158,10 @@ REVOKE ALL ON FUNCTION audit_chain_head() FROM mhai_audit_drain;
 -- Its policies and grants go with it.
 DROP TABLE intelligence_audit_outbox;
 REVOKE ALL ON SCHEMA public FROM mhai_audit_drain;
+
+DROP TRIGGER clinical_queries_attempts ON clinical_queries;
+DROP FUNCTION mhai_attempts_never_decrease();
+DROP POLICY worker_status ON clinical_queries;
 
 -- mhai_worker back to 00003's grants.
 REVOKE ALL ON clinical_queries, clinical_decisions, hga_evaluations, kb_chunks, guardrail_weights FROM mhai_worker;
