@@ -1,0 +1,18 @@
+{
+  "error_codes": [
+    "unauthorized",
+    "forbidden",
+    "invalid_request",
+    "not_found",
+    "deadline_exceeded",
+    "overloaded",
+    "unavailable",
+    "cancelled",
+    "internal"
+  ],
+  "clinical_roles": [
+    "clinician",
+    "hospital_admin",
+    "analyst"
+  ]
+}

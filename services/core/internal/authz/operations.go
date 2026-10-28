@@ -132,8 +132,13 @@ func OperationByName(name string) (Operation, bool) {
 	return Operation{}, false
 }
 
-// clinicalRoles are the roles a route with no AnyRole admits.
+// clinicalRoles are the roles a route with no AnyRole admits, and the only
+// roles an operation may name (every known role that isn't a platform role;
+// TestClinicalRolesAreTheNonPlatformRoles holds it to policy.go).
 var clinicalRoles = []string{RoleClinician, RoleHospitalAdmin, RoleAnalyst}
+
+// ClinicalRoles returns the clinical roles. The caller gets a copy.
+func ClinicalRoles() []string { return slices.Clone(clinicalRoles) }
 
 // validateCalls checks the operations a route publishes to: each exists, and
 // every role the route admits is a role the operation allows.
@@ -195,6 +200,26 @@ func OperationsJSON(ops []Operation) ([]byte, error) {
 		})
 	}
 	b, err := json.MarshalIndent(rows, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// CatalogueJSON renders boundary/catalogue.json for the Python workers: the
+// closed set of worker error codes (ErrorCodes, in order) and the clinical
+// roles an operation may name. Python asserts its envelope.CODES equals the
+// codes and its operations loader refuses any other role, so neither is a
+// second hand-kept copy.
+func CatalogueJSON() ([]byte, error) {
+	codes := make([]string, 0, len(errorCodes))
+	for _, c := range errorCodes {
+		codes = append(codes, c.Code)
+	}
+	b, err := json.MarshalIndent(struct {
+		ErrorCodes    []string `json:"error_codes"`
+		ClinicalRoles []string `json:"clinical_roles"`
+	}{codes, ClinicalRoles()}, "", "  ")
 	if err != nil {
 		return nil, err
 	}

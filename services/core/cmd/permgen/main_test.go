@@ -72,6 +72,12 @@ func TestGeneratedFilesIncludeOperations(t *testing.T) {
 	if !strings.HasSuffix(filepath.ToSlash(operationsPath), "intelligence/boundary/operations.json") {
 		t.Errorf("operations.json path %s", operationsPath)
 	}
+	if _, ok := files[cataloguePath]; !ok {
+		t.Fatalf("render has no %s", cataloguePath)
+	}
+	if !strings.HasSuffix(filepath.ToSlash(cataloguePath), "intelligence/boundary/catalogue.json") {
+		t.Errorf("catalogue.json path %s", cataloguePath)
+	}
 	md := string(files[markdownPath])
 	for _, want := range []string{"## Operations", "`pipeline.run_query`", "`echo.ping`"} {
 		if !strings.Contains(md, want) {

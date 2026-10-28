@@ -194,3 +194,48 @@ func TestErrorCodesAreTheClosedSet(t *testing.T) {
 		t.Errorf("error codes %v, want %v (spec 10.1)", got, want)
 	}
 }
+
+// clinicalRoles is every known role that isn't a platform role, so the
+// Python loader's role check (catalogue.json) can't drift from policy.go.
+func TestClinicalRolesAreTheNonPlatformRoles(t *testing.T) {
+	var want []string
+	for r := range roleRank {
+		if !IsPlatformRole(r) {
+			want = append(want, r)
+		}
+	}
+	slices.Sort(want)
+	got := ClinicalRoles()
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("ClinicalRoles() = %v, want %v", got, want)
+	}
+}
+
+// catalogue.json carries exactly ErrorCodes() and ClinicalRoles(): the
+// Python envelope.CODES and the operations loader are asserted equal to it.
+func TestCatalogueJSON(t *testing.T) {
+	raw, err := CatalogueJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		ErrorCodes    []string `json:"error_codes"`
+		ClinicalRoles []string `json:"clinical_roles"`
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	var codes []string
+	for _, c := range ErrorCodes() {
+		codes = append(codes, c.Code)
+	}
+	if !slices.Equal(got.ErrorCodes, codes) {
+		t.Errorf("error_codes = %v, want %v", got.ErrorCodes, codes)
+	}
+	if !slices.Equal(got.ClinicalRoles, ClinicalRoles()) {
+		t.Errorf("clinical_roles = %v, want %v", got.ClinicalRoles, ClinicalRoles())
+	}
+}

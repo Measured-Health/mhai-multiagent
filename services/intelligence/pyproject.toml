@@ -89,7 +89,7 @@ where = ["."]
 include = ["intelligence*"]
 
 [tool.setuptools.package-data]
-intelligence = ["py.typed", "boundary/operations.json"]
+intelligence = ["py.typed", "boundary/operations.json", "boundary/catalogue.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -98,6 +98,7 @@ pythonpath = ["."]
 markers = [
     "models: needs real ML models (downloads weights; run scripts/e2e_models.py)",
     "slow: takes more than a few seconds",
+    "boundary: needs Docker (testcontainers), never loads models",
 ]
 
 [tool.coverage.run]
