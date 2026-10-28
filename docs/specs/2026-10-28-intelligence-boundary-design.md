@@ -3,6 +3,7 @@
 - **Status:** Approved (product owner, 2026-10-28). The ten questions in §16 are decided as recommended, and the five refinements in §14 are accepted.
 - **Date:** 2026-10-28
 - **Plan:** `docs/plans/2026-10-28-plan-3-intelligence-boundary.md`
+- **Amended 2026-10-28 (product owner):** the frontend's servers reach core and intelligence over NATS, and intelligence asks core for a grant before serving a BFF call. See §17 and [ADR 0011](../adr/0011-frontend-ingress-over-nats.md). Where §17 and an earlier section differ, §17 wins; the sections below are updated to match.
 - **Builds on (and must stay consistent with):**
   - [ADR 0010](../adr/0010-api-in-go-models-in-python-over-nats.md): API in Go, models in Python, NATS between them.
   - The core design, `docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md` (approved). This document details its §4.3, §5, §7.4–§7.7 and step 4 of its §10. Where this design refines a rule there, it says so and why (§14).
@@ -42,15 +43,17 @@ The next backend plan joins the two. Core sends work to Python over NATS. Python
 
 - One shared deployment. Hospital data is kept apart by Postgres RLS through `mhai_current_hospital()`.
 - No data-residency rule (product owner, 26 Oct).
-- Go and Python both sit behind NATS. Core is the only service that routes calls to intelligence.
+- Go and Python both sit behind NATS. Core is the only service that publishes jobs and the only one that authorises a call to intelligence; since §17 the BFF may also send a `bff_direct` request, which intelligence serves only after core grants it.
 - Python verifies every request before answering (ADR 0010).
 - Shared reference content (`kb_chunks` with `hospital_id IS NULL`) is read-only for every app role.
 - Synthetic data only until go-live.
 
 ## 4. Architecture at the boundary
 
+Since §17, the BFF reaches core over NATS too (`api.v1.<audience>`), and may call an intelligence operation directly, in which case the worker first asks core for a grant (`authz.v1.grant.<service>`). The picture below is the core-initiated path, which is unchanged; §17.2 has the BFF-initiated one.
+
 ```
-BFF ──HTTPS──> core ──────────────── NATS (TLS, per-service NKeys) ─────────────> intelligence workers
+BFF ──NATS api.v1──> core ──────────── NATS (TLS, per-service NKeys) ─────────────> intelligence workers
                │  mints a request token per call                                   │ 1. verify token
                │  request/reply: inference.v1.<service>.<op>   (someone waits)    │ 2. check scope + role
                │  JetStream:     jobs.v1.<hospital>.<type>     (nobody waits)     │ 3. do the work
@@ -60,6 +63,8 @@ BFF ──HTTPS──> core ──────────────── NAT
                                                ^                                   (model services: no DB)
                      audit drainer (Go) ───────┘  appends intelligence's audit facts to the chain
 ```
+
+**Load balancing.** Every copy of a service subscribes in the same NATS queue group, so NATS gives each request to exactly one member: core's copies share queue group `core` (for `api.v1.*` and `authz.v1.grant.>`, §17), and each intelligence service's copies share a group named after the service (for `inference.v1.<service>.>`). Jobs go to one durable pull consumer per service, which all its copies fetch from. A new copy starts receiving as soon as it subscribes, and a dead one stops; there is no address list. NATS spreads requests evenly, not by GPU load; load-aware routing in front of the model servers belongs to the performance design.
 
 **Services on the Python side** (each its own queue group and its own NATS user):
 
@@ -77,11 +82,14 @@ The model services hold no database credentials at all. They get text or ids in 
 
 | Pattern | Used for | Publisher | Subscriber |
 |---|---|---|---|
-| `inference.v1.<service>.<op>` | request/reply calls someone is waiting on, seconds at most | core | the service's queue group (`<service>`) |
+| `inference.v1.<service>.<op>` | request/reply calls someone is waiting on, seconds at most | core; and the clinical BFF for operations marked `bff_direct` (§17.2) | the service's queue group (`<service>`) |
 | `jobs.v1.<hospital_id>.<type>` | background work on the `JOBS` stream | core | the service's durable pull consumer |
 | `jobs.v1.global.<type>` | jobs with no hospital (for example `retention_purge`) | core | as above |
 | `dead.v1.<hospital_id\|global>.<type>` | a job that has run out of deliveries or was refused | the worker | core's dead-letter consumer |
-| `_INBOX_gateway.>` | replies to core | workers, through `allow_responses` only | core |
+| `_INBOX_gateway.>` | replies to core | workers and the BFF's callees, through `allow_responses` only | core |
+| `api.v1.clinical`, `api.v1.platform` | the frontend contract over NATS: one HTTP request per message (§17.1) | the BFF of that app only (`bff_clinical`, `bff_platform`) | core (queue group `core`) |
+| `authz.v1.grant.<service>` | a worker asking core to approve a BFF call (§17.2) | that service's NATS user only | core (queue group `core`) |
+| `_INBOX_bff.<app>.>` | replies to the BFF | core and workers, through `allow_responses` only | that app's BFF |
 | `stream.v1.<hospital_id>.<request_id>` | **reserved** for streamed tokens (§11). Not permitted in this build | — | — |
 
 - `<service>` and `<op>` are lower-case `[a-z0-9_]+`. `<hospital_id>` is the canonical lower-case uuid.
@@ -191,6 +199,8 @@ A JWT signed with EdDSA (Ed25519), in the header `Mhai-Request-Token`. This exte
 | `nsub` | the exact NATS subject the message was published on |
 | `bh` | base64url(sha256(body bytes)) |
 | `pids` | optional: the patient ids core checked belong to `hid` (core design §7.6) |
+| `rpl` | the reply prefix the answer must go to: `_INBOX_gateway.` when core calls, `_INBOX_bff.<app>.` for a grant (§17.2). Added by §17 |
+| `via` | `core` (core called) or `grant` (core approved a BFF call). Added by §17 |
 
 **Lifetimes:** `req` tokens: `exp − iat` is the call's timeout, at most 60 s. `job` tokens: the job's deadline, at most 24 h (core design §5.2). For `run_query` the deadline is 10 minutes (decision 2, §16).
 
@@ -204,11 +214,13 @@ The order is chosen so that cheap checks run first and no body parsing happens b
 2. **Token shape and signature.** Exactly three parts, strict JSON with no unknown fields, `alg` `EdDSA`, `typ` `mhai-req+jwt`, `kid` in the trusted set, and the Ed25519 signature verifies.
 3. **Claims.** `iss` is `mhai-gateway`, `aud` is this service, every required claim is present, `iat ≤ now + 5 s`, `now < exp`, and `exp − iat` is within the cap for `knd`.
 4. **Binding.** `nsub` equals the subject the message arrived on, `knd` matches how it arrived (core subject versus JetStream), and `bh` equals sha256 of the body bytes, compared in constant time. For `jobs.v1.<hid>.*`, the hospital in the subject equals `hid`.
-5. **Reply subject (request/reply).** The reply subject starts with `_INBOX_gateway.`. A request whose reply goes anywhere else is refused with no reply at all. This keeps an attacker from steering an answer to an inbox it can read.
+5. **Reply subject (request/reply).** The reply subject starts with the token's `rpl` (`_INBOX_gateway.` for core's own calls; `_INBOX_bff.<app>.` for a grant, §17.2). A request whose reply goes anywhere else is refused with no reply at all. This keeps an attacker from steering an answer to an inbox it can read.
 6. **Replay** (§7.4).
 7. **Schema.** `Mhai-Schema` is the operation's request type, `Mhai-Request-Id` equals `rid`; then decode the body strictly.
 8. **Scope.** Every hospital id in the body equals `hid`, and every patient id in the body is in `pids`. A body's hospital is never trusted on its own (core design §5.3 step 4). Operations that need a hospital refuse an empty `hid`.
 9. **Permission.** The operation's entry in the generated operations table (§8.1) allows at least one of `roles`, or allows `svc:core` when `sub` is `svc:core`.
+
+For a message that arrives **without** a request token but with a user access token (a BFF call, §17.2), the worker runs check 1, then asks core for a grant, and runs checks 2–9 on the token core returns. It never runs checks 2–9 on anything core didn't sign for this call.
 
 Any failure: no work is done. The worker logs the reason code and the ids (`rid`, `jti`, `hid`, `kid`), never the token or the body, increments `boundary_refusals_total{service,reason}`, and answers `unauthorized` (checks 1–6, 9) or `invalid_request` (7–8) if the reply subject passed check 5. A refused job is terminated (`Term`) and sent to `dead.v1` with the reason code.
 
@@ -252,7 +264,9 @@ The token is the main check. NATS permissions make sure only core can even put a
   - for a job consumer, may publish only `$JS.API.CONSUMER.INFO.JOBS.<service>`, `$JS.API.CONSUMER.MSG.NEXT.JOBS.<service>` and `$JS.ACK.JOBS.<service>.>`, for its own durable consumer and nothing else in the `$JS` API;
   - publishes `dead.v1.>` and replies through `allow_responses: {max: 1, expires: "1m"}`;
   - has no KV access and cannot publish on `inference.v1.>`, `jobs.v1.>` or `_INBOX_gateway.>`.
-- **The `gateway` user** keeps its permissions, with the JetStream wildcards narrowed to the KV streams and `JOBS` (TODO "NATS wildcards").
+- **Each service user** also publishes `authz.v1.grant.<service>` (its own grant subject only) and subscribes nothing new: the grant answer comes to its own `_INBOX_worker.<service>.>` (§17.4).
+- **The `gateway` user** keeps its permissions, with the JetStream wildcards narrowed to the KV streams and `JOBS` (TODO "NATS wildcards"). Since §17 it also subscribes `api.v1.>` and `authz.v1.grant.>`, and answers them through `allow_responses`.
+- **The BFF users** (`bff_clinical`, `bff_platform`, §17.4) publish only their app's `api.v1.<audience>` subject and, for the clinical app, the `bff_direct` operations' `inference.v1` subjects; they subscribe only their own `_INBOX_bff.<app>.>`.
 - **TLS** on every connection, with `verify` on in production (TODO "TLS option").
 - **Later, optional:** move intelligence into its own NATS account with explicit imports and exports. That's stronger isolation, but more configuration than three people need right now.
 
@@ -260,7 +274,7 @@ The token is the main check. NATS permissions make sure only core can even put a
 
 ### 8.1 One permission source: the operations table
 
-- Core gains an **operations table** next to its route table in `internal/authz`: one row per NATS operation (`pipeline.run_query`, `pipeline.health`, `echo.ping`), with the roles allowed, whether `svc:core` may call it, and whether it needs a hospital.
+- Core gains an **operations table** next to its route table in `internal/authz`: one row per NATS operation (`pipeline.run_query`, `pipeline.health`, `echo.ping`), with the roles allowed, whether `svc:core` may call it, whether it needs a hospital, and (since §17) whether the BFF may call it directly (`bff_direct`).
 - Every HTTP route that publishes to intelligence names the operation it calls. A test fails if:
   - a route calls an operation that isn't in the table;
   - a route's roles are not a subset of the operation's roles.
@@ -351,9 +365,12 @@ Intelligence answers with a closed set of codes. Core maps each to one of its pr
 | `internal` | anything else | 500 `internal_error` | `Nak`, then `failed` | `other` | rate alert |
 | (NATS timeout) | no reply in time | 503 `unavailable` | — | `timeout` | rate alert |
 | (NATS no responders) | no worker running | 503 `unavailable` | — | `unreachable` | **yes** |
+| `grant_refused:<code>` | core refused a BFF call's grant (§17.2); `<code>` is core's own problem code (`unauthenticated`, `token_expired`, `mfa_required`, `forbidden`, `not_found`, `rate_limited`) | the BFF answers with core's code and status, unchanged | — | — | rate alert on `forbidden` |
+| (grant timeout, core unreachable) | no grant in the budget (§17.3) | 503 `unavailable` | — | `unreachable` | **yes** |
 
 - **503 `unavailable` is added to core's code catalogue** (`httpx.Codes`). The frontend contract already uses it (§10, "the app shows that view as failed and offers Try again"), so this is not a new contract code. `not_ready` stays for readiness.
 - `unauthorized`, `forbidden` and `invalid_request` become 500 for the user, not 401 or 403: the user was already authorised by core, so a refusal at the boundary is our fault or an attack, and the response must not tell an attacker which check failed.
+- **On a BFF call (§17.2),** a grant refusal is passed through as core's own code, because it is core's decision about the user and the user needs it (sign in again, two-step required). Every other worker refusal is still 500 `internal_error`.
 - A failed job's `clinical_queries.error` holds only the code. The app shows "Couldn't complete" (frontend §14.8).
 
 ### 10.2 Audit: what goes on the hash chain
@@ -376,6 +393,8 @@ Only core writes the chain (core design §7.5). Intelligence gives core its fact
 | `job.retried` | a platform retry | job id, new message id |
 | `intelligence.refused` | core gets `unauthorized`, `forbidden` or `invalid_request` | operation, reason code, `kid` |
 | `intelligence.key_rotated` | a request-signing key is added or removed | `kid`, planned or emergency |
+| `intelligence.granted` | core approves a BFF call (§17.2) | operation, `jti`, `bh`, patient ids checked |
+| `intelligence.grant_refused` | core refuses one | operation, problem code |
 
 Each model call inside the pipeline is **not** audited one by one. That would flood the chain and say nothing a clinician or auditor needs. The per-step detail lives in traces (§10.3). Decided this way (decision 4, §16).
 
@@ -415,6 +434,7 @@ The parked performance design wants millisecond steps, GPU batching and streamin
 - **Python integration tests** use `testcontainers` (Python) to start Postgres 16 and NATS 2.10 with the real `services/nats/nats.conf` and core's migrations. Core's `migrate up` runs from the `mhai-core` image, so the schema is the same one production uses. Tests run under a `boundary` pytest marker and **never load models**: the pipeline runs with a stub model client that returns fixed synthetic answers.
 - **Go integration tests** extend `internal/testutil` (NATS and Postgres containers) with a Go fake worker for core's own tests: timeouts, no responders, error mapping, publishing and the sweeper.
 - **Cross-language checks** without running both languages in one test: the shared token vectors (§7.3), the golden protobuf messages (§6.3) and the generated `operations.json` (§8.1).
+- **Queue groups are tested with two copies** of core and of each worker: every request is answered once, each copy answers some, and a copy killed mid-run loses nothing once the caller retries (request/reply) or JetStream redelivers (jobs).
 - **One end-to-end smoke test in CI:** compose up with `core`, `nats`, `postgres`, `pipeline` (stub models) and `echo`; sign in as a synthetic clinician; `POST /queries`; poll to `completed`; check that the chain verifies and holds `query.completed`. CI only. Nobody runs it on a laptop that isn't up to it, and heavy builds go to the remote hosts as usual.
 - **CI jobs:** `checks` gains `buf lint`, `buf breaking` and the generate-diff check. A new `intelligence-boundary` job runs `uv run pytest -m boundary` with Docker. The smoke test runs after the image builds.
 
@@ -433,7 +453,9 @@ The parked performance design wants millisecond steps, GPU batching and streamin
 
 | Crossing | What is checked there |
 |---|---|
-| BFF → core | the BFF credential, the access token, denylist, account and hospital state, the route's permission (Plan 2) |
+| BFF → NATS → core (`api.v1`) | the BFF's NATS identity (only `bff_<app>` may publish its subject), the access token, denylist, account and hospital state, the route's permission (Plan 2, run unchanged by the adapter, §17.1) |
+| BFF → NATS → worker (`bff_direct` operations) | the BFF's NATS identity; then the worker asks core (`authz.v1.grant.<service>`), and core checks everything it checks for an `api.v1` call plus the operation, subject, body hash and reply prefix (§17.2) |
+| worker → core (grant) | only that service's user publishes its grant subject; core takes `aud` from the subject; any failure or delay refuses (§17.3) |
 | core → NATS | core's NKey and TLS; NATS publish permissions (only `gateway` publishes `inference.v1.>` and `jobs.v1.>`) |
 | NATS → worker | the worker's own NKey and subscribe permissions; then **every check in §7.3** |
 | worker → Postgres | the `intelligence_app` login (no privileges until `SET LOCAL ROLE mhai_worker`); RLS with the hospital from the verified token; column grants |
@@ -470,6 +492,17 @@ Actors: clinicians (through the BFF), core, the Python services, NATS, Postgres,
 | T21 | Elevation of privilege | The worker's DB login reaches more than `mhai_worker` | `INHERIT FALSE`; the login can only `SET ROLE mhai_worker`; no connection outside `with_hospital` | A22 |
 | T22 | Elevation of privilege | The Go and Python permission rules drift | Python reads the generated `operations.json`; CI fails on a difference; a refusal for `forbidden` alerts | A23 |
 | T23 | Spoofing | The request-signing key leaks | it is only on core; separate from the access key; emergency rotation (§7.5) | A24 |
+| T24 | Spoofing | **The BFF's NATS credential leaks** | it publishes only its app's `api.v1` subject and the `bff_direct` subjects; every call still needs a user's access token; per-app users; NKeys over TLS; rotation like any NKey; the per-login lockout ceiling holds even with a spoofed client IP | A26, A27 |
+| T25 | Spoofing | A worker or other service publishes `api.v1` calls with a harvested access token | only the BFF users may publish `api.v1.>` | A28 |
+| T26 | Tampering | **Confused deputy:** a grant obtained for one subject, body or reply inbox is used for another, or a worker asks for another service's operation | the grant is a request token bound to `nsub`, `bh`, `aud` and `rpl`; core takes the service from the grant subject, which only that service's user can publish; `jti` single use | A29, A30 |
+| T27 | Denial of service | **Grant flood:** BFF calls (or a compromised worker) flood core with grants and starve the API | per-session and per-hospital grant rate limits in core; a bounded grant handler that answers `rate_limited`/`overloaded` at once; per-worker concurrency limits | A31 |
+| T28 | Denial of service | **Core down or unreachable** | every BFF-direct call is refused with 503 `unavailable` and no work; core-initiated calls are unaffected while core is up by definition | A32 |
+| T29 | Denial of service | **A slow grant** eats the caller's deadline, or a late grant is used after the worker gave up | the grant budget is the smaller of 250 ms and a quarter of the call's remaining time; a late reply is discarded; the granted token's `exp` is never past the BFF's deadline | A33 |
+| T30 | Information disclosure | User access tokens now reach the workers (BFF-direct calls only) | tokens are redacted in worker logs and spans; a worker can only spend one on its own service's grant subject, never on `api.v1`; only operations marked `bff_direct` accept them | A28, A30, A34 |
+| T31 | Elevation of privilege | A revoked, expired or not-yet-two-step session gets a grant | core runs the same principal checks as for `api.v1` (denylist, account and hospital state, `SessionSatisfiesMFA`) | A35 |
+| T32 | Spoofing | A captured BFF message is replayed to intelligence, getting a fresh grant each time | the BFF's `Mhai-Request-Id` is kept per core copy for 2 minutes and a repeat is refused; only BFF users can publish there; `bff_direct` operations are read-only | A36 |
+| T33 | Information disclosure | A grant's answer is steered to another inbox | the grant binds `rpl` to the calling BFF's inbox prefix; check 5 compares it | A37 |
+| T34 | Elevation of privilege | The NATS adapter skips a step of core's HTTP chain (request id, body limit, principal, route rule, idempotency, RLS, audit) | the adapter calls the same `http.Handler`; the audience comes from the subject, never a header; contract tests run every route both ways | A38 |
 
 ### 13.4 Controls (decided)
 
@@ -508,13 +541,28 @@ Actors: clinicians (through the BFF), core, the Python services, NATS, Postgres,
 - **A23** Removing a role from an operation in Go without regenerating fails CI.
 - **A24** After an emergency rotation, a job signed with the removed key is refused and re-minted by core.
 - **A25** Every token vector in `testdata/request-tokens/` gets the same verdict in Go and Python.
+- **A26** Connected as `bff_clinical`, publishing on `jobs.v1.>`, `$KV.>`, `$JS.API.>`, `dead.v1.>`, `authz.v1.grant.pipeline`, `api.v1.platform` or `inference.v1.pipeline.health` (not `bff_direct`) is a permissions violation.
+- **A27** `bff_clinical` subscribing to `_INBOX_gateway.>`, `_INBOX_worker.>`, `_INBOX_bff.platform.>` or `api.v1.>`: permissions violation.
+- **A28** The `pipeline` user publishing on `api.v1.clinical`: permissions violation.
+- **A29** A grant for `echo.ping` with body X, presented with body Y, or on another subject, or with a reply to another inbox: refused by the worker.
+- **A30** `pipeline` publishing on `authz.v1.grant.echo`: permissions violation; a grant request on `authz.v1.grant.pipeline` for `echo.ping`: refused by core.
+- **A31** 200 parallel grant requests for one session: at most the session's limit are granted, the rest get `rate_limited` within 50 ms each, and an `api.v1` call from another hospital still answers within its normal time.
+- **A32** With core stopped, a BFF call to `echo.ping` gets `unavailable` and the handler never runs.
+- **A33** A grant delayed past the budget: the worker answers `unavailable`, does no work, and ignores the late reply.
+- **A34** A synthetic access token in a BFF call appears in no worker log line or span.
+- **A35** A grant asked with a logged-out (denylisted) session's access token, a deactivated user's, or a hospital admin without two-step: refused with core's code, and audited as `intelligence.grant_refused`.
+- **A36** The same BFF message (same `Mhai-Request-Id`) sent twice within 2 minutes: the second grant is refused.
+- **A37** A granted token whose `rpl` is `_INBOX_bff.clinical.` on a message whose reply is `_INBOX_bff.platform.x`: no reply, refusal logged.
+- **A38** Every route in the permission table gives the same status, headers and body over `api.v1` as over HTTP for the auth fixture matrix; an `X-MHAI-Audience` header that contradicts the subject is ignored.
 
 ### 13.6 Residual risk and sign-off
 
 - **Replay across worker copies within 60 s** of a request/reply message (§7.4). Accepted: it needs core's NATS credential, gets no data out, and changes no rows. Revisit with a shared KV check if a request/reply operation ever writes data.
 - **Job tokens can live 24 h.** Accepted, because they are bound to one subject and one body, jobs are claimed once, and results are read only through core. Query jobs live 10 minutes.
 - **A compromised worker** sees the data it is sent, and the pipeline sees its hospital's rows for the jobs it's given. That's inherent; containment is per-service credentials, no database for model services, and RLS.
-- **A compromised NATS server** can drop or delay messages, but it can't forge tokens or read the database.
+- **A compromised NATS server** can drop or delay messages, but it can't forge tokens or read the database. Since §17 it also sees access tokens on BFF-direct calls and the frontend's API traffic in the clear unless TLS is on; TLS with `verify` is required in production.
+- **Access tokens at the workers** (§17, T30). Accepted while only `bff_direct` operations receive them and none of those is in production yet (§17.6).
+- **Replay of a BFF message across core copies** within 2 minutes (T32). Accepted for the same reasons as §7.4: it needs the BFF's NATS credential, and `bff_direct` operations are read-only.
 - **Sign-off:** none clinical in this design (no change to what clinicians see). Streaming (§11) will need clinical sign-off. The legal check of the Data Protection Act stays in TODO.md.
 
 ## 14. Refinements of the approved core design
@@ -549,6 +597,8 @@ Each task starts with its abuse-case tests (§13.5). The plan, `docs/plans/2026-
 
 Order: 1 → 2 → 3 → 4 can run partly in parallel (1 and 2 are independent). 5 needs 1–4. 6 needs 1 and 2. 7 needs 6. 8 is independent of 5–7. 9 needs 7 and 8. 10 needs 5 and 9. 11–13 last.
 
+**Since §17** the plan adds two tasks and widens three: **core's API over NATS** (the adapter, `api.v1`), **the grant endpoint** (`authz.v1.grant.<service>`, rate limits, audit), the `bff` NATS users in task 4, the `rpl`/`via` claims in tasks 2 and 6, and the worker's grant client in task 7. The plan numbers its tasks 1–15 accordingly. The mhai-web BFF's switch from `fetch` to a NATS client is mhai-web work (§17.7).
+
 ## 16. Decisions
 
 The product owner approved the design on 2026-10-28 ("approve the design, go ahead") and accepted every recommendation below. Each was an open question in the draft; the answer is now the decision.
@@ -573,3 +623,74 @@ The product owner approved the design on 2026-10-28 ("approve the design, go ahe
    *Decided: yes.* Reserve `stream.v1.>` and the `strm` claim now, build nothing, and keep clinical sign-off as the gate (§11).
 10. **Its own NATS account for intelligence?**
     *Decided: not yet.* Per-service users and subject permissions are enough for three people to run. Revisit before production if NATS is shared with anything else.
+
+## 17. Decision 28 Oct: frontend ingress over NATS
+
+The product owner decided on 2026-10-28: "frontend talks to nats which can either talk to core or intelligence, when it want to talk to intelligence, intelligence ask core if permission has been given before it go ahead with it". [ADR 0011](../adr/0011-frontend-ingress-over-nats.md) records it and amends ADR 0010. This section is the design.
+
+### 17.1 The BFF talks to core over NATS
+
+- **The BFF is a NATS client** on the Node server side only (nats.js over TCP), never in the browser. Each app has its own NATS user: `bff_clinical` and `bff_platform`, with inbox prefixes `_INBOX_bff.clinical` and `_INBOX_bff.platform`. *My call:* one user per app rather than one shared `bff` user, so a leak of the clinical app's credential can't reach platform routes, and the subject alone fixes the audience. Both are "the `bff` user" in the product owner's sense.
+- **Core serves the frontend contract on `api.v1.clinical` and `api.v1.platform`,** in queue group `core`. One message is one HTTP request:
+  - headers `Mhai-Method`, `Mhai-Path` (path and query, under `/api/v1`), and an allow-list of HTTP headers (`Authorization`, `Content-Type`, `Idempotency-Key`, `If-None-Match`, `X-MHAI-Client-IP`, `traceparent`); everything else is dropped, `X-Request-ID` included, because core makes its own request id so none can be forged into the audit chain (as over HTTP today);
+  - body: the HTTP body, at most 64 KB as today;
+  - reply headers `Mhai-Status-Code` plus the response headers core sets (`Content-Type`, `Cache-Control`, `ETag`, `Retry-After`, `X-Request-ID`); reply body: the response body.
+- **A thin adapter** (`internal/natsapi`) turns each message into an `*http.Request` and runs it through **the same `http.Handler`** as HTTP: request id, body limit, principal and access token, route rule, idempotency, the RLS transaction and audit. Nothing in Plan 2's chain is rewritten.
+  - The audience comes from the subject (`api.v1.platform` → `platform`). An `X-MHAI-Audience` header in the message is dropped.
+  - Each message gets a deadline (30 s, or less if the BFF sends `Mhai-Timeout-Ms`); the handler's context ends with it.
+  - Core answers through `allow_responses`, so it can reply to the BFF's inbox without a general publish right there.
+- **The `X-MHAI-Service` BFF key is replaced, not doubled,** on the NATS path. *Decision and why:*
+  - The key and the NATS seed would live in the same place (the BFF's server environment), so a leak of one is a leak of both: doubling adds a second secret to rotate without adding a second barrier.
+  - What the key proved ("this request came from our BFF") is now proved by NATS: only `bff_<app>` may publish `api.v1.<audience>`, which the server enforces per connection over NKeys and TLS, and a test proves no other user can (A26–A28).
+  - `X-MHAI-Client-IP` is trusted for the same reason the key made it trusted before: only the BFF can put a message on the subject.
+  - The key and the HTTP API stay **only during the switch-over**, behind `CORE_HTTP_API=on`, while mhai-web still uses `fetch`. After it, core's HTTP listener serves only `/healthz` and `/readyz`, bound to `127.0.0.1` (the container's own health check).
+
+### 17.2 The BFF calls intelligence directly, and intelligence asks core
+
+For operations marked `bff_direct` in the operations table (§8.1), the clinical BFF may publish on `inference.v1.<service>.<op>` itself, with the user's access token in `Authorization`. Before any work:
+
+1. The worker runs check 1 (sizes), then publishes `GrantRequest{access_token, operation, subject, body_hash, patient_ids, reply_prefix, request_id, deadline_ms}` on `authz.v1.grant.<service>`, its own grant subject. `reply_prefix` is the BFF inbox prefix the message's reply subject starts with (`_INBOX_bff.clinical.`); a reply subject with any other prefix is refused at once, with no reply.
+2. Core verifies the access token (signature, `aud mhai-bff`, expiry, denylist), the session, account and hospital state, and `SessionSatisfiesMFA`, exactly as the principal middleware does; then that the operation exists, is `bff_direct`, belongs to the service named in the subject, and allows one of the user's roles; that every patient id belongs to the user's hospital; and that `request_id` hasn't been seen in the last 2 minutes (T32). It audits `intelligence.granted` or `intelligence.grant_refused` under a request id it makes itself; the BFF's `request_id` is only the replay key and the token's `rid`.
+3. Core answers with `GrantResponse{request_token}`, a request token (§7.2) with `aud` the service, `nsub` the subject, `bh` the body hash, `rpl` the BFF inbox prefix, `via` `grant`, `knd` `req`, and `exp` the smaller of the operation's timeout and the BFF's deadline. Or with `GrantRefused{code}`.
+4. The worker runs checks 2–9 (§7.3) on that token against the message it holds. Any failure: refuse, no work.
+
+The worker never decides a permission, never trusts a hospital, user or role from the message, and never runs checks 2–9 on the access token. A request token that arrives in the message itself is accepted only from core (`rpl` `_INBOX_gateway.`, `via` `core`), so a BFF can't present a token of its own.
+
+**Jobs are unchanged:** only core publishes `jobs.v1.>`. A BFF request that starts a long job (`POST /queries`) goes to core over `api.v1`.
+
+**What is `bff_direct` in this plan:** only `echo.ping`, which never runs in production. No production operation is opened to the BFF until one needs it (for example DIA page images) and its review says so.
+
+### 17.3 Timeouts, limits and core being down
+
+- **Grant budget:** the smaller of 250 ms and a quarter of the call's remaining time. A late grant reply is discarded; the worker answers `unavailable`.
+- **Core unreachable** (no responders, timeout, disconnect): `unavailable`, no work. There is no cache of earlier grants: each call is granted on its own.
+- **Limits in core:** a grant handler bounded to N in flight that answers `overloaded` at once past that; per-session (20 per second) and per-hospital (200 per second) grant rates, in memory per core copy, answering `rate_limited`. The per-worker concurrency limit (§9.1) bounds how many grants a worker can ask for at once.
+- **Latency:** one extra NATS round trip, about 1 ms on one network, plus an Ed25519 verify of the access token, one sign of the request token and a cached account-state lookup (30 s cache, as the principal middleware). Well under the budget, and only on BFF-direct calls.
+
+### 17.4 NATS users and permissions after §17
+
+| User | Publish | Subscribe | Replies |
+|---|---|---|---|
+| `bff_clinical` | `api.v1.clinical`; the `bff_direct` operations' `inference.v1.<service>.<op>` subjects, listed one by one | `_INBOX_bff.clinical.>` | — |
+| `bff_platform` | `api.v1.platform` | `_INBOX_bff.platform.>` | — |
+| `gateway` (core) | `inference.v1.>`, `jobs.v1.>`, the KV and narrowed `$JS` subjects (§7.6) | `_INBOX_gateway.>`, `api.v1.>` (queue `core`), `authz.v1.grant.>` (queue `core`), the `DEAD` consumer | `allow_responses` (to the BFF and the workers) |
+| each service (`pipeline`, `echo`, ...) | its consumer's `$JS` subjects, `dead.v1.>`, `authz.v1.grant.<service>` | `inference.v1.<service>.>`, `_INBOX_worker.<service>.>` | `allow_responses` |
+
+No BFF user has `jobs.v1.>`, `$KV.>`, `$JS.>`, `dead.v1.>` or `authz.v1.>`. No worker has `api.v1.>` or another service's grant subject.
+
+### 17.5 Error mapping for the BFF
+
+- Over `api.v1`, the BFF gets exactly what HTTP gave: `Mhai-Status-Code`, the problem body and headers. No responders or a timeout on `api.v1` is the BFF's own 503 `unavailable`.
+- On a BFF-direct call, the worker answers with `Mhai-Status`: `ok`; a grant refusal as `grant_refused:<code>` (core's code, which the BFF shows as that code and status); `unavailable` for no grant in time; and every other refusal or failure as in §10.1 (the BFF shows 500 `internal_error` for `unauthorized`, `forbidden` and `invalid_request`).
+
+### 17.6 Security notes
+
+- The threats are T24–T34 (§13.3) and the abuse cases A26–A38 (§13.5).
+- **Access tokens reach workers** only on BFF-direct calls. Worker logs and spans redact them (§10.3 allow-list), and a worker can spend one only on its own grant subject.
+- **TLS with `verify`** is required in production on every NATS connection, because the frontend's API traffic now crosses NATS.
+- **Clinical sign-off:** none; what clinicians see doesn't change.
+
+### 17.7 What changes outside this repository
+
+The mhai-web BFF swaps `fetch` for a NATS client (nats.js over TCP, on the Node server only), with its app's NKey seed in the server environment and the same request and reply shape as §17.1. That is mhai-web work, listed in mhai-web's TODO.md; this plan builds core's side and keeps HTTP on until the switch.
+

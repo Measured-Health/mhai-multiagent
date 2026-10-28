@@ -4,6 +4,7 @@
 - **Date:** 2026-10-26
 - **Supersedes:** 0007 (API in Python, contract-first), which was proposed on `feat/8-api-gateway` and never merged
 - **Amends:** 0008 (models behind inference services): the services are reached over NATS instead of HTTP
+- **Amended by:** 0011 (frontend ingress over NATS): the BFF reaches core over NATS too, and may call intelligence directly after intelligence asks core for a grant
 - **Naming (product owner, 2026-10-27):** the Go service this ADR calls for is named the core service and lives in `services/core/`; the Python side is `services/intelligence/` (package `intelligence`), and the NATS config is in `services/nats/`. The NATS user stays `gateway`.
 
 ## Context

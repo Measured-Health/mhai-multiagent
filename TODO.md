@@ -6,6 +6,7 @@ Open work and decisions for mhai-multiagent. Remove an entry once it's done or d
 
 - **Go alongside Python.** The core service (Go, `services/core/`) owns the API, auth, tenancy, audit and EMR plumbing. The Python services (`services/intelligence/`) keep the models and are reached only over NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md).
 - **The intelligence boundary (product owner, 28 Oct).** Core calls the Python services over NATS with a per-call Ed25519 request token; Protobuf with `buf` for the messages; a 10-minute limit on clinical questions; per-worker replay check; user-level audit plus refusals; intelligence writes results under RLS with audit facts in an outbox; `POST /queries` in the plan; a separate request-signing key; 10 questions in flight per hospital; streaming left to the performance plan; no separate NATS account yet. See the [design](docs/specs/2026-10-28-intelligence-boundary-design.md) §16 and [Plan 3](docs/plans/2026-10-28-plan-3-intelligence-boundary.md).
+- **Frontend ingress over NATS (product owner, 28 Oct).** The BFF talks to core over NATS (`api.v1.<audience>`), its NATS identity replaces the `X-MHAI-Service` key, and the BFF may call intelligence operations marked `bff_direct`, which intelligence serves only after core grants them (`authz.v1.grant.<service>`). See [ADR 0011](docs/adr/0011-frontend-ingress-over-nats.md) and the design §17; built in Plan 3.
 
 ## Open items for the core service
 
@@ -20,6 +21,7 @@ From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.
 - **Invite flow.** It must close first-sign-in self-enrolment: today a CLI-created account enrols its own two-step at first sign-in, so whoever has the first password owns the second factor. Invites bind enrolment to the invited person. Needs the mail provider.
 - **Forgot / reset password** (contract §2.5). Needs the mail provider.
 - **Build the intelligence boundary (Plan 3).** The design is approved and the plan is written: [docs/plans/2026-10-28-plan-3-intelligence-boundary.md](docs/plans/2026-10-28-plan-3-intelligence-boundary.md). Workers verify the core-signed request token, `RBACManager` and `AuditLogger` are retired in favour of Go, Redis leaves compose, and each worker gets its own NATS user and `_INBOX_worker.<service>` prefix. Until it lands, the `intelligence` service connects to Postgres as the superuser (T2 M6); Plan 3 Task 8 gives it its own login.
+- **Turn core's HTTP API off** (`CORE_HTTP_API=off`, probes only on localhost) once mhai-web's BFF talks to core over NATS. That switch is mhai-web work (its TODO.md, "BFF over NATS").
 - **Hospital setup flow.** `setup_incomplete` hospitals can sign in so the first admin can finish setup; revisit when the flow exists (T8 M8).
 - **Admin unlock** for the per-login ceiling, with the staff endpoints (only a trusted device gets past it today); alert on `auth.login.ceiling` audit rows.
 

@@ -4,7 +4,10 @@
 
 The backend has two parts: the core service (Go) and the Python model
 services, joined by NATS (ADR 0010,
-`docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md`).
+`docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md`). Since 28 Oct
+the frontends' servers reach the backend over NATS as well (ADR 0011,
+`docs/specs/2026-10-28-intelligence-boundary-design.md` §17); HTTP stays
+until mhai-web's BFF has switched.
 
 **Built (Plan 2):** the core service in `services/core/`: sign-in and
 sessions, two-step verification, password change, the permission table
@@ -16,8 +19,8 @@ behind NATS (the boundary plan), then the hospital and platform endpoints.
 
 | Service | Job |
 |---|---|
-| **Core service** (Go, `services/core/`) | The API, sign-in and sessions, permissions, tenancy, audit, and the EMR connectors. The only service the frontends call. |
-| **NATS** (`services/nats/`) | The only link between Go and Python. Request/reply for calls someone waits on; JetStream for background jobs; KV for the core service's denylist and attempt counters. Replaces the Redis queue stub once the Python side moves over. |
+| **Core service** (Go, `services/core/`) | The API, sign-in and sessions, permissions, tenancy, audit, and the EMR connectors. Every frontend call is decided here: either core serves it, or it grants intelligence a per-call token for it. |
+| **NATS** (`services/nats/`) | The only link between the BFF, Go and Python (ADR 0011). Request/reply for calls someone waits on; JetStream for background jobs; KV for the core service's denylist and attempt counters. Replaces the Redis queue stub once the Python side moves over. |
 | **Python services** (`services/intelligence/`) | The models: agents, retrieval and the knowledge base, guardrails, PII masking, inference. Reached only through NATS. Each request carries a token signed by the core service, and the service checks it before doing any work. |
 | **PostgreSQL** | One database for all hospitals. Row-level security (RLS) keeps each hospital's rows apart. |
 | **Object storage** (planned) | Documents, letters and exports. |
@@ -34,16 +37,20 @@ user from a payload; it takes them only from the verified token.
 
 ## Services and systems flow
 
-### An ordinary API call
+The BFF (mhai-web's Next.js servers) talks to the backend over NATS (ADR
+0011). It is a NATS client on the server side only, never in the browser,
+with one NATS user per app: `bff_clinical` and `bff_platform`. Until
+mhai-web switches, the BFF still calls core over HTTP with its service key;
+the steps below are the same either way.
 
-Every request from a browser goes through the BFF, which adds its service
-key. The core service then runs the same steps for every route:
+### An ordinary API call
 
 ```
 browser
-  → BFF (Next.js, clinical or platform app)        adds X-MHAI-Service key
-  → core service
-      1. request id, body size limit, BFF key check  (unknown caller → 401)
+  → BFF (Next.js, clinical or platform app)
+  → NATS  api.v1.clinical | api.v1.platform     only that app's BFF user may publish
+  → core service (NATS adapter → the same http.Handler as HTTP)
+      1. request id, body size limit; audience from the subject
       2. route lookup (unknown or unclean path → 404)
       3. principal: access token checked (EdDSA, aud mhai-bff, iss mhai-gateway)
       4. permission rule for the route (deny by default)
@@ -52,26 +59,30 @@ browser
          (row-level security: mhai_current_hospital())
       7. handler
       8. audit record on the hash chain, in the same transaction
+  → reply over NATS to the BFF's own inbox (_INBOX_bff.<app>)
   → problem response on any error (no detail that helps an attacker)
 ```
 
 Sign-in, refresh and two-step verification take the same path. Attempt
 counters and the token denylist live in NATS KV, and they fail closed: if
-NATS is down, sign-in is refused, not waved through.
+NATS is down, sign-in is refused, not waved through. After the switch,
+core's HTTP listener serves only health probes, on localhost.
 
-### A call to the intelligence service
+### A call to the intelligence service that core makes
 
 Approved design, being built (Plan 3,
-`docs/specs/2026-10-28-intelligence-boundary-design.md`):
+`docs/specs/2026-10-28-intelligence-boundary-design.md`). This is how a
+clinical question runs: the BFF asks core (`POST /queries` over
+`api.v1`), and core sends the job.
 
 ```
 core service
   │ checks the user and their permission (steps 1–6 above)
   │ mints a request token for this one call: service, NATS subject,
-  │ body hash, hospital, user, roles, patients, deadline, nonce
+  │ body hash, reply inbox, hospital, user, roles, patients, deadline, nonce
   ▼
 NATS  inference.v1.<service>.<op>        (request/reply, someone is waiting)
-      jobs.v1.<hospital>.<type>          (JetStream, long jobs)
+      jobs.v1.<hospital>.<type>          (JetStream, long jobs; only core publishes)
   ▼
 intelligence service
   │ checks the token: signature, subject, body hash, reply inbox,
@@ -85,10 +96,62 @@ models and pipeline  (see "Intelligence service" below)
 reply over NATS → core service → audit → BFF → browser
 ```
 
+### A call the BFF makes to intelligence directly
+
+Only for operations marked `bff_direct` in core's operations table (none
+in production yet). Intelligence asks core before doing anything:
+
+```
+BFF ── inference.v1.<service>.<op> + the user's access token ──▶ intelligence
+                                                                   │ 1. size check
+                                                                   │ 2. asks core: authz.v1.grant.<service>
+core ◀─────── access token, operation, subject, body hash, ────────┘    (only that service may publish it)
+  │           patient ids, reply inbox, request id
+  │ checks the token, session, two-step, the operation's rule,
+  │ hospital and patient scope, replay; audits the decision
+  └── a request token bound to this subject, body, service and the BFF's inbox ──▶ intelligence
+                                                                   │ 3. every check above, on that token
+                                                                   │ core refused, unreachable or late → refused, no work
+                                                                   ▼
+                                                   reply over NATS to the BFF's inbox
+```
+
+It costs one extra NATS round trip, about 1 ms. Long jobs never take this
+path: they are always published by core.
+
 Long jobs are claimed with a lease and finished at most once. Their audit
 facts go into an outbox table in the same transaction as the result, and
 the core service copies them onto the hash chain, so only Go writes the
 audit chain.
+
+### Load balancing and scaling
+
+```
+browser ──HTTPS──▶ nginx ──▶ frontend (n copies)
+                               │
+                               ▼
+                             NATS ──▶ core (n copies)
+                                  └─▶ intelligence (n copies)
+```
+
+- **nginx** spreads browser traffic across the frontend copies. It also
+  ends TLS and holds the IP allow list.
+- **NATS** spreads requests across the core and intelligence copies with
+  queue groups.
+  - Each service subscribes with a queue group per subject (core in
+    `core`, each intelligence service in a group named after it), so one
+    member gets each request. Jobs go to one durable consumer per service
+    that all its copies share.
+  - A new copy joins automatically, and a dead copy stops getting
+    messages. A request a dead copy was holding times out and the caller
+    retries; a job it was running is redelivered to another copy.
+  - There's no address list to maintain.
+- **NATS itself** runs as a 3-node cluster in production, so it isn't a
+  single point of failure. JetStream (jobs, dead letters, KV) is replicated
+  three ways (R3).
+- **The limit:** NATS spreads requests evenly, not by GPU load. Smarter,
+  GPU-aware routing in front of the model servers is deferred to the
+  parked [performance design](docs/specs/2026-10-27-intelligence-performance-design.md).
 
 ## Intelligence service
 
