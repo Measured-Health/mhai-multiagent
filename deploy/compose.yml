@@ -141,6 +141,23 @@ services:
       - corekeys:/keys
     mem_limit: 64m
 
+  # One-shot: the request-token signing key (a different key from the
+  # access-token key, spec §7.2) in corekeys, and its public half in the
+  # trusted-keys file on its own volume, for the workers to mount read-only.
+  # Kept when already there (core keys ensure).
+  core-request-key:
+    <<: [*hardening, *core-image]
+    restart: "no"
+    command: ["keys", "ensure", "--kind", "request", "--out", "/keys/request.pem",
+              "--trusted-out", "/trusted/request-keys.json"]
+    network_mode: none
+    volumes:
+      - corekeys:/keys
+      - trustedkeys:/trusted
+    mem_limit: 64m
+    depends_on:
+      core-keys: { condition: service_completed_successfully }
+
   # The core service: the API the BFFs call. Its environment holds only its
   # own settings and secrets: the core_app login, its NATS NKey seed (a
   # file), the signing key (a file), the MFA key and the BFF keys.
@@ -160,6 +177,8 @@ services:
       NATS_URL: nats://nats:4222
       NATS_NKEY_SEED_PATH: /run/secrets/nats-gateway.nk
       ACCESS_KEY_PATH: /keys/access.pem
+      REQUEST_KEY_PATH: /keys/request.pem
+      INTELLIGENCE_QUERY_CAP: "10"   # questions in flight per hospital (decision 8)
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set in /srv/mhai-backend/.env}
       BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set in /srv/mhai-backend/.env}
       GOMEMLIMIT: 256MiB
@@ -183,6 +202,7 @@ services:
       nats: { condition: service_healthy }
       core-migrate: { condition: service_completed_successfully }
       core-keys: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
     # The image is distroless (no shell or curl): the deploy workflow probes
     # GET /api/v1/readyz from the host.
     healthcheck:
@@ -227,8 +247,9 @@ networks:
     external: true
     name: mhai-bff
 
-# Made once by setup-host.sh. External, so `docker compose down -v` can never
-# delete the database, the JetStream store or the signing key.
+# Made once by setup-host.sh (trustedkeys also by the deploy workflow, if
+# missing). External, so `docker compose down -v` can never delete the
+# database, the JetStream store or the signing keys.
 volumes:
   pgdata:
     external: true
@@ -239,3 +260,7 @@ volumes:
   corekeys:
     external: true
     name: mhai-backend-corekeys
+  # Public keys only (the request-token trusted-keys file).
+  trustedkeys:
+    external: true
+    name: mhai-backend-trustedkeys

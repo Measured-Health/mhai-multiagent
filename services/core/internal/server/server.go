@@ -11,6 +11,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 )
 
 // Deps are what the routes need. Zero Deps build the table only.
@@ -20,6 +21,11 @@ type Deps struct {
 	Pool *pgxpool.Pool
 	// Ready is the /readyz check (Readiness); nil answers 503.
 	Ready func(context.Context) error
+	// Intel calls the intelligence workers (request/reply and jobs).
+	Intel *intel.Client
+	// QueryCap is the questions in flight per hospital
+	// (INTELLIGENCE_QUERY_CAP), for intel.ReserveInFlight.
+	QueryCap int
 }
 
 // Register adds every route to m.

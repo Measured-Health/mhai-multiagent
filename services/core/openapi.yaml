@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.0.2"
+  version: "1.0.3"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -497,6 +497,7 @@ components:
             - rate_limited
             - login_locked
             - not_ready
+            - unavailable
             - internal_error
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }

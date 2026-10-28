@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -233,5 +234,85 @@ func TestEnvExampleListsNATSSecrets(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "NATS_WORKER_PASSWORD") {
 		t.Error(".env.example still has NATS_WORKER_PASSWORD")
+	}
+}
+
+type composeFile struct {
+	Services map[string]struct {
+		Environment map[string]string `yaml:"environment"`
+		Command     []string          `yaml:"command"`
+		Volumes     []string          `yaml:"volumes"`
+		DependsOn   map[string]any    `yaml:"depends_on"`
+	} `yaml:"services"`
+	Volumes map[string]any `yaml:"volumes"`
+}
+
+// core serve needs REQUEST_KEY_PATH (spec §7.2): both compose files set it
+// to a file apart from the access key, a one-shot makes it with
+// `keys ensure --kind request` before core starts, and the public
+// trusted-keys file goes to its own volume (workers will mount it; it holds
+// no private key). INTELLIGENCE_QUERY_CAP is set (decision 8).
+func TestComposeMakesTheRequestKey(t *testing.T) {
+	for _, file := range []string{"docker-compose.yml", filepath.Join("deploy", "compose.yml")} {
+		t.Run(file, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var c composeFile
+			if err := yaml.Unmarshal(raw, &c); err != nil {
+				t.Fatal(err)
+			}
+			core, ok := c.Services["core"]
+			if !ok {
+				t.Fatal("no core service")
+			}
+			req, acc := core.Environment["REQUEST_KEY_PATH"], core.Environment["ACCESS_KEY_PATH"]
+			if req == "" || req == acc || !strings.HasPrefix(req, "/keys/") {
+				t.Fatalf("REQUEST_KEY_PATH %q, ACCESS_KEY_PATH %q", req, acc)
+			}
+			if core.Environment["INTELLIGENCE_QUERY_CAP"] == "" {
+				t.Error("core lacks INTELLIGENCE_QUERY_CAP")
+			}
+			var maker string
+			var trusted string
+			for name, s := range c.Services {
+				cmd := s.Command
+				if len(cmd) >= 2 && cmd[0] == "keys" && cmd[1] == "ensure" && slices.Contains(cmd, "request") {
+					maker = name
+					for i, a := range cmd {
+						if a == "--out" && i+1 < len(cmd) && cmd[i+1] != req {
+							t.Errorf("%s writes %s, core reads %s", name, cmd[i+1], req)
+						}
+						if a == "--trusted-out" && i+1 < len(cmd) {
+							trusted = cmd[i+1]
+						}
+					}
+					if !slices.Contains(s.Volumes, "corekeys:/keys") {
+						t.Errorf("%s doesn't write to the corekeys volume: %v", name, s.Volumes)
+					}
+					if trusted == "" || strings.HasPrefix(trusted, "/keys/") {
+						t.Errorf("%s: trusted-keys file %q must be outside the private key volume", name, trusted)
+					}
+					var vol string
+					for _, v := range s.Volumes {
+						if parts := strings.Split(v, ":"); len(parts) >= 2 && strings.HasPrefix(trusted, parts[1]+"/") {
+							vol = parts[0]
+						}
+					}
+					if vol == "" || vol == "corekeys" {
+						t.Errorf("%s: the trusted-keys file is on volume %q", name, vol)
+					} else if _, ok := c.Volumes[vol]; !ok {
+						t.Errorf("volume %s isn't declared", vol)
+					}
+				}
+			}
+			if maker == "" {
+				t.Fatal("no one-shot runs keys ensure --kind request")
+			}
+			if _, ok := core.DependsOn[maker]; !ok {
+				t.Errorf("core doesn't wait for %s", maker)
+			}
+		})
 	}
 }

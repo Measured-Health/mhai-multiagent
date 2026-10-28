@@ -21,8 +21,10 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
@@ -35,6 +37,7 @@ type app struct {
 	handler http.Handler
 	pool    *pgxpool.Pool
 	nc      *nats.Conn
+	intel   *intel.Client
 	log     *slog.Logger
 }
 
@@ -54,13 +57,22 @@ func (a *app) close() {
 //     files, the KV buckets, and the JOBS and DEAD streams with their
 //     consumers;
 //   - the access-token key, the auth service and the principal middleware
-//     with both idempotency stores (authz.NewMux refuses a guard without).
+//     with both idempotency stores (authz.NewMux refuses a guard without);
+//   - the request-token key (a different key from the access-token key)
+//     and the intelligence client on core's own connection.
 func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, error) {
 	if err := cfg.ValidateServe(); err != nil {
 		return nil, err
 	}
 	issuer, err := token.LoadIssuer(cfg.AccessKeyPath)
 	if err != nil {
+		return nil, err
+	}
+	signer, err := reqtoken.LoadSigner(cfg.RequestKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSigningKeys(issuer, signer); err != nil {
 		return nil, err
 	}
 	a := &app{log: log}
@@ -84,6 +96,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
+	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log}
 	keys := issuer.PublicKeys()
 	svc := &auth.Service{
 		Pool: a.pool, Buckets: buckets, Issuer: issuer, Keys: keys, Log: log,
@@ -95,11 +108,23 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		IdemAnon: httpx.IdempotentAnonLog(a.pool, log),
 	}
 	m := authz.NewMux(guard)
-	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.Readiness(a.pool, nc, buckets.All())})
+	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.Readiness(a.pool, nc, buckets.All()),
+		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap})
 	// The docs routes sit outside the API chain and are never served over
 	// NATS (see internal/apidocs): only this HTTP handler carries them.
 	a.handler = apidocs.Wrap(cfg.APIDocs, core.OpenAPI, m.Handler(cfg.BFFServiceKeys))
 	return a, nil
+}
+
+// checkSigningKeys refuses one key for both token kinds (spec §7.2): the
+// files must differ (config.ValidateServe) and so must the keys, so a
+// copied key can't turn one token kind into the other. Key ids are the
+// key's hash, so equal kids mean the same key.
+func checkSigningKeys(access token.Issuer, request reqtoken.Signer) error {
+	if access.KeyID == request.KeyID || access.Key.Equal(request.Key) {
+		return errors.New("REQUEST_KEY_PATH holds the same key as ACCESS_KEY_PATH; make a separate request-token key (core keys new --kind request)")
+	}
+	return nil
 }
 
 // runSweeper deletes expired Idempotency-Key rows now and then every
@@ -139,6 +164,8 @@ func serve() error {
 	}
 	defer a.close()
 	go runSweeper(ctx, a.pool, log, SweepEvery)
+	// Republishes queued questions whose publish after commit was lost.
+	go intel.RunPublishSweeper(ctx, a.pool, a.intel, intel.SweepEvery)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           a.handler,

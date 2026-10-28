@@ -84,6 +84,8 @@ one job:
 | `NATS_JS_REPLICAS` | no | replicas for `JOBS`, `DEAD` and the KV buckets: `1` (default, dev compose), `3` on the production cluster (R3), or `5` |
 | `JOBS_PIPELINE_MAX_ACK_PENDING` | no | jobs the pipeline workers hold at once: worker count × concurrency; default `8` |
 | `ACCESS_KEY_PATH` | yes | PKCS#8 Ed25519 PEM from `core keys new` |
+| `REQUEST_KEY_PATH` | yes | the request-token key (spec §7.2), from `core keys new --kind request`: another file and another key than `ACCESS_KEY_PATH` (start-up refuses the same key id) |
+| `INTELLIGENCE_QUERY_CAP` | no | clinical questions one hospital may have queued or running at once; past it a submit is 429 `rate_limited`. Default `10`, 1 to 1000 |
 | `MFA_ENCRYPTION_KEY` | yes | at least 32 bytes; seals TOTP secrets, keys backup-code hashes, and derives the counter key (HKDF-SHA256, label `mhai lockout key v1`) that names the lockout and MFA counters. Changing it forgets live lockouts. |
 | `BFF_SERVICE_KEYS` | yes | comma-separated, each at least 32 bytes; one per BFF |
 | `HTTP_ADDR` | no | default `:8080` |
@@ -160,7 +162,7 @@ retired; nothing uses it yet, and the retirement policy will.
 From the repository root, with every `changeme` in `.env` replaced:
 
 ```bash
-make core-up      # postgres, nats, core-migrate, core-keys, core on 127.0.0.1:${CORE_PORT:-8080}
+make core-up      # postgres, nats, core-migrate, core-keys, core-request-key, core on 127.0.0.1:${CORE_PORT:-8080}
 curl -s localhost:8080/api/v1/readyz           # {"status":"ready"}
 
 # Seed a synthetic hospital and clinician as the provisioning login:
@@ -173,9 +175,12 @@ curl -s localhost:8080/api/v1/auth/login \
   -d '{"username":"synthetic.clinician@havana.example","password":"..."}'
 ```
 
-`core-keys` writes the dev signing key into the `corekeys` volume once. In
-production, mount a key made with `core keys new` and point
-`ACCESS_KEY_PATH` at it.
+`core-keys` writes the dev access-token key into the `corekeys` volume once;
+`core-request-key` writes the request-token key there too, and its public
+half to `request-keys.json` in the `trustedkeys` volume (public keys only,
+for the workers to mount read-only). In production, mount keys made with
+`core keys new` (and `--kind request`) and point `ACCESS_KEY_PATH` and
+`REQUEST_KEY_PATH` at them.
 
 ## Probes
 
@@ -223,7 +228,21 @@ Neither needs the BFF key, and neither says what failed.
   logs the verifier there.
 - At startup, `serve` refuses a database login that is a superuser, has
   BYPASSRLS, CREATEROLE, CREATEDB or REPLICATION, holds any membership but
-  `mhai_app`, or owns the database, a schema or a table.
+  `mhai_app`, inherits an app role (`mhai_jobs` included), or owns the
+  database, a schema or a table.
+- Calls to intelligence (`internal/intel`): core checks the operation's
+  roles before minting, a request/reply call is never retried, and no
+  answer in time or no worker running is 503 `unavailable` (`overloaded`
+  adds `Retry-After: 5`). A worker's `unauthorized`, `forbidden` and
+  `invalid_request` all become one fixed 500 `internal_error`, audited as
+  `intelligence.refused`. Jobs go only on `jobs.v1.<the caller's
+  hospital>.<type>`; a full JOBS subject is 503 `unavailable`.
+- The publish sweeper runs every 10 seconds as `mhai_jobs` (job columns
+  only, never the question): a queued question with no `published_at`
+  after 10 seconds is re-minted as its creator, with the creator's current
+  roles, and published again under the same `Nats-Msg-Id`; a creator who
+  can no longer use the service gets it cancelled, and one past its
+  deadline fails with `deadline_exceeded`.
 
 ## Known limits
 
@@ -259,6 +278,7 @@ internal/authz  principal middleware, permission table, authz.Tx
 internal/db     pool, migrations (goose), role checks, sweep, logins
 internal/httpx  errors, BFF key, request id, idempotency, router
 internal/bus    NATS connection (TLS option), KV buckets, the JOBS and DEAD streams
+internal/intel  the intelligence client, job publisher, publish sweeper, in-flight cap
 internal/audit  the hash-chained audit log
 internal/token  access tokens (EdDSA) and refresh tokens
 internal/password  argon2id, the breached list, the concurrency gate

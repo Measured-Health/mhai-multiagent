@@ -142,15 +142,24 @@ jobs:
               docker compose restart nats
             fi
 
+            # Volumes added since setup-host.sh first ran (it makes them too):
+            # created empty, so the image fills them on first mount.
+            for v in mhai-backend-trustedkeys; do
+              if ! docker volume inspect "$v" >/dev/null 2>&1; then
+                docker volume create --label org.measured-health.stack=mhai-backend "$v" >/dev/null
+                echo "created volume $v"
+              fi
+            done
+
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
             docker compose pull core
 
-            # Migrations and the key run first (depends_on); a failed
+            # Migrations and the keys run first (depends_on); a failed
             # migration stops here and leaves the running core alone.
             if ! docker compose up -d --remove-orphans core; then
               echo "Start failed. Recent logs:"
-              docker compose logs --tail=80 postgres nats core-migrate core-keys core
+              docker compose logs --tail=80 postgres nats core-migrate core-keys core-request-key core
               exit 1
             fi
             docker compose logs --no-log-prefix core-migrate | tail -n 20

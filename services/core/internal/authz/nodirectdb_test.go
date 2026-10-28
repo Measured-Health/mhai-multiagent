@@ -30,6 +30,12 @@ var dbTxAllowedFiles = map[string]string{
 	// Provisioning CLI on the owner/migrate connection (SET LOCAL ROLE
 	// mhai_provision), never on a request path.
 	"internal/account/create.go": "the users/hospitals create CLI",
+	// Core's background job loop, never on a request path: it runs with no
+	// principal, reads and updates job rows of every hospital (job columns
+	// only, as mhai_jobs) and re-checks a job's creator (as mhai_auth)
+	// before re-minting. Request paths reserve in-flight slots and append
+	// facts inside the caller's authz.Tx instead.
+	"internal/intel/sweeper.go": "the publish sweeper (db.WithJobs) and Republish's creator re-check (db.WithAuth)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on

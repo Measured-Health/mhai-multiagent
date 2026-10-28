@@ -32,6 +32,10 @@ type Config struct {
 	// JobsPipelineMaxAckPending bounds the pipeline consumer's jobs in
 	// flight: the worker count times its concurrency.
 	JobsPipelineMaxAckPending int
+	// IntelligenceQueryCap is how many clinical questions one hospital may
+	// have queued or running at once (INTELLIGENCE_QUERY_CAP, decision 8);
+	// past it a submit is 429 rate_limited (intel.ReserveInFlight).
+	IntelligenceQueryCap int
 	// APIDocs serves the Redoc page and openapi.yaml (CORE_API_DOCS).
 	APIDocs bool
 }
@@ -69,6 +73,9 @@ func Load() (Config, error) {
 	}
 	if c.JobsPipelineMaxAckPending, err = intEnv("JOBS_PIPELINE_MAX_ACK_PENDING", 8, func(n int) bool { return n >= 1 && n <= 100000 }); err != nil {
 		errs = append(errs, errors.New("JOBS_PIPELINE_MAX_ACK_PENDING must be 1 to 100000"))
+	}
+	if c.IntelligenceQueryCap, err = intEnv("INTELLIGENCE_QUERY_CAP", 10, func(n int) bool { return n >= 1 && n <= 1000 }); err != nil {
+		errs = append(errs, errors.New("INTELLIGENCE_QUERY_CAP must be 1 to 1000"))
 	}
 
 	// CORE_API_DOCS: on by default only in development, so an unset or

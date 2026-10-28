@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 )
 
 // Codes maps every error code the gateway returns to its HTTP status
@@ -27,6 +28,7 @@ var Codes = map[string]int{
 	"rate_limited":      http.StatusTooManyRequests,
 	"login_locked":      http.StatusTooManyRequests,
 	"not_ready":         http.StatusServiceUnavailable,
+	"unavailable":       http.StatusServiceUnavailable, // intelligence didn't answer (spec §10.1)
 	"internal_error":    http.StatusInternalServerError,
 }
 
@@ -48,6 +50,7 @@ var titles = map[string]string{
 	"rate_limited":      "Too many requests",
 	"login_locked":      "Sign-in locked",
 	"not_ready":         "Not ready",
+	"unavailable":       "Unavailable",
 	"internal_error":    "Internal error",
 }
 
@@ -66,6 +69,7 @@ var details = map[string]string{
 	"rate_limited":      "Too many requests. Try again later.",
 	"login_locked":      "Too many sign-in attempts. Try again later.",
 	"not_ready":         "The service is not ready.",
+	"unavailable":       "Couldn't get an answer. Try again.",
 	"internal_error":    "Something went wrong.",
 }
 
@@ -111,6 +115,15 @@ func Error(w http.ResponseWriter, r *http.Request, code string) {
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+}
+
+// ErrorRetryAfter is Error with a Retry-After header of seconds (whole
+// seconds, only when positive), for a refusal the client may retry later.
+func ErrorRetryAfter(w http.ResponseWriter, r *http.Request, code string, seconds int) {
+	if seconds > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	}
+	Error(w, r, code)
 }
 
 // JSON writes v as an application/json response.

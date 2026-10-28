@@ -1,7 +1,8 @@
 // Package db opens the gateway's Postgres pool, applies the embedded goose
 // migrations and runs transactions under the right database role.
 //
-// Every query runs inside one of WithHospital, WithPlatform or WithAuth.
+// Every query runs inside one of WithHospital, WithPlatform, WithAuth or
+// WithJobs.
 // The gateway's login user holds no table privileges of its own (it is a
 // member of mhai_app, see 00003_rls_roles.sql), so a query outside them
 // fails instead of reading anything.
@@ -31,6 +32,7 @@ const (
 	roleGateway  = "mhai_gateway"
 	rolePlatform = "mhai_platform"
 	roleAuth     = "mhai_auth"
+	roleJobs     = "mhai_jobs"
 )
 
 // ErrNoHospital is returned by WithHospital for the nil hospital id.
@@ -73,6 +75,14 @@ func WithPlatform(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error
 // before a hospital is known.
 func WithAuth(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
 	return inRole(ctx, pool, roleAuth, "", fn)
+}
+
+// WithJobs runs fn in a transaction as mhai_jobs: the job columns of
+// clinical_queries across hospitals (never the question or patient data)
+// and the job audit actions, for core's background loops only (the publish
+// sweeper; later the dead-letter consumer). See 00007_jobs.sql.
+func WithJobs(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	return inRole(ctx, pool, roleJobs, "", fn)
 }
 
 func inRole(ctx context.Context, pool *pgxpool.Pool, role, hospital string, fn func(pgx.Tx) error) (err error) {
@@ -153,7 +163,7 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 	err := pool.QueryRow(ctx, `
 		SELECT r.rolname, r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb, r.rolreplication,
 		       pg_has_role(session_user, 'mhai_app', 'MEMBER'),
-		       ARRAY(SELECT x FROM unnest(ARRAY['mhai_migrate', 'mhai_gateway', 'mhai_platform', 'mhai_auth', 'mhai_worker', 'mhai_provision']) AS x
+		       ARRAY(SELECT x FROM unnest(ARRAY['mhai_migrate', 'mhai_gateway', 'mhai_platform', 'mhai_auth', 'mhai_worker', 'mhai_provision', 'mhai_jobs']) AS x
 		             WHERE EXISTS (SELECT 1 FROM pg_roles p WHERE p.rolname = x)
 		               AND pg_has_role(session_user, x, 'USAGE')),
 		       pg_has_role(session_user, (SELECT d.datdba FROM pg_database d WHERE d.datname = current_database()), 'MEMBER'),

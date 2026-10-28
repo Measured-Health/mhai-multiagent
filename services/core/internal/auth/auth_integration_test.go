@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,8 +28,10 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
@@ -47,6 +50,10 @@ var (
 	buckets    bus.Buckets
 	issuer     token.Issuer
 	pwHash     string
+	// intelClient is core's intelligence client on the gateway connection;
+	// echoURL is the echo worker's NATS user, for fake workers.
+	intelClient *intel.Client
+	echoURL     string
 )
 
 func TestMain(m *testing.M) {
@@ -88,6 +95,10 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, "buckets:", err)
 			return 1
 		}
+		_, reqPriv, _ := ed25519.GenerateKey(rand.Reader)
+		intelClient = &intel.Client{NC: nc, JS: js, Log: logx.New(io.Discard),
+			Signer: reqtoken.Signer{Key: reqPriv, KeyID: reqtoken.KeyID(reqPriv.Public().(ed25519.PublicKey))}}
+		echoURL = n.EchoURL
 		_, priv, _ := ed25519.GenerateKey(rand.Reader)
 		issuer = token.Issuer{Key: priv, KeyID: "test-kid"}
 		if pwHash, err = password.Hash(testPassword); err != nil {
@@ -160,7 +171,7 @@ func newEnv(t *testing.T) *env {
 		IdemAnon: httpx.IdempotentAnonLog(app, log),
 	}
 	m := authz.NewMux(e.guard)
-	server.Register(m, server.Deps{Auth: e.svc, Pool: app})
+	server.Register(m, server.Deps{Auth: e.svc, Pool: app, Intel: intelClient})
 	// A probe route behind the principal middleware, standing in for later
 	// tasks.
 	authz.Route(m, http.MethodGet, "/probe", authz.Rule{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -160,6 +161,29 @@ func TestServeEndToEnd(t *testing.T) {
 	waitReadyz(t, b.handler, 200)
 	s.stopNATS()
 	waitReadyz(t, b.handler, 503)
+}
+
+// serve refuses to start when the request key is the access key copied to
+// another file.
+func TestServeRefusesSharedSigningKey(t *testing.T) {
+	s := newStack(t)
+	raw, err := os.ReadFile(s.cfg.AccessKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := s.cfg
+	cfg.RequestKeyPath = filepath.Join(t.TempDir(), "copy.pem")
+	if err := os.WriteFile(cfg.RequestKeyPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := newApp(context.Background(), cfg, logx.New(&bytes.Buffer{}))
+	if err == nil {
+		a.close()
+		t.Fatal("started with one key for both token kinds")
+	}
+	if !strings.Contains(err.Error(), "REQUEST_KEY_PATH") {
+		t.Fatalf("unclear refusal: %v", err)
+	}
 }
 
 // serve refuses the owner/superuser connection and the provisioning login.

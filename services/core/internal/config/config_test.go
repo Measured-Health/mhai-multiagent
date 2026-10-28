@@ -11,7 +11,8 @@ func setEnv(t *testing.T, kv map[string]string) {
 	t.Helper()
 	for _, k := range []string{"CORE_ENV", "HTTP_ADDR", "DATABASE_URL", "NATS_URL", "NATS_NKEY_SEED_PATH", "NATS_GATEWAY_PASSWORD", "NATS_WORKER_PASSWORD",
 		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS",
-		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING"} {
+		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING",
+		"INTELLIGENCE_QUERY_CAP"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -281,6 +282,32 @@ func TestValidateServeRequiresNATSTLSOutsideDevelopment(t *testing.T) {
 		c.NATSTLS = partial
 		if err := c.ValidateServe(); err == nil || !strings.Contains(err.Error(), "NATS_TLS") || strings.Contains(err.Error(), "/tls/") {
 			t.Fatalf("partial %+v: %v", partial, err)
+		}
+	}
+}
+
+// INTELLIGENCE_QUERY_CAP is the questions in flight per hospital (decision
+// 8): 10 by default, 1 to 1000.
+func TestLoadQueryCap(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	c, err := Load()
+	if err != nil || c.IntelligenceQueryCap != 10 {
+		t.Fatalf("default: %d %v", c.IntelligenceQueryCap, err)
+	}
+	e := map[string]string{"INTELLIGENCE_QUERY_CAP": "25"}
+	for k, v := range base {
+		e[k] = v
+	}
+	setEnv(t, e)
+	if c, err = Load(); err != nil || c.IntelligenceQueryCap != 25 {
+		t.Fatalf("25: %d %v", c.IntelligenceQueryCap, err)
+	}
+	for _, bad := range []string{"0", "-1", "1001", "ten"} {
+		e["INTELLIGENCE_QUERY_CAP"] = bad
+		setEnv(t, e)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "INTELLIGENCE_QUERY_CAP") {
+			t.Fatalf("%q: %v", bad, err)
 		}
 	}
 }

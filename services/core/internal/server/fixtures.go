@@ -11,6 +11,8 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
+	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
 )
 
 // FixturesBuilt reports whether the /_test/ fixture routes are compiled in.
@@ -58,5 +60,33 @@ func registerFixtures(m *authz.Mux, d Deps) {
 			return
 		}
 		httpx.JSON(w, http.StatusOK, map[string]string{"id": got.String()})
+	}))
+	// Calls echo.ping as the principal, the way a real route calls
+	// intelligence: a refusal is audited (intelligence.refused) and answered
+	// with intel.Code's one fixed body; an answer's audit facts are appended
+	// in the request's own transaction.
+	echo := authz.Rule{AnyRole: []string{authz.RoleClinician}, Calls: []string{"echo.ping"}}
+	authz.Route(m, http.MethodGet, "/_test/echo", echo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, ok := authz.FromContext(r.Context())
+		if !ok || d.Intel == nil {
+			httpx.Error(w, r, "internal_error")
+			return
+		}
+		ctx := r.Context()
+		caller := intel.FromPrincipal(p, httpx.RequestIDFrom(ctx))
+		var resp intelpb.PingResponse
+		meta, err := d.Intel.Request(ctx, caller, "echo.ping",
+			&intelpb.PingRequest{Text: "synthetic ping", HospitalId: p.HospitalID.String()}, &resp)
+		if err != nil {
+			_ = authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error { return d.Intel.AuditRefusal(ctx, tx, caller, "echo.ping", err) })
+			code, retryAfter := intel.Code(err)
+			httpx.ErrorRetryAfter(w, r, code, retryAfter)
+			return
+		}
+		if err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error { return intel.AppendFacts(ctx, tx, caller, meta) }); err != nil {
+			httpx.Error(w, r, "internal_error")
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]string{"text": resp.Text})
 	}))
 }
