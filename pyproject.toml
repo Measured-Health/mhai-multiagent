@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=84.2.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -43,11 +43,11 @@ dependencies = [
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
-    "ruff>=0.1",
+    "ruff>=0.17.2",
     "mypy>=1.5",
-    "pre-commit>=3.4",
-    "fakeredis>=2.0",
-    "locust>=2.15",
+    "pre-commit>=4.7.0",
+    "fakeredis>=2.40.0",
+    "locust>=2.47.0",
     "diff-cover>=9",
 ]
 # PyTorch build. CPU is the default; for a CUDA machine use
