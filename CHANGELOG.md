@@ -39,7 +39,9 @@ All notable changes to this project are documented here. The format follows
   read-only and without capabilities. `deploy/setup-host.sh` prepares the
   host once: secrets in `.env` (mode 600), the NATS NKeys, the volumes and
   the internal network `mhai-bff` for the frontend's BFF, which has a
-  placeholder NATS user with no publish rights until Plan 3.
+  placeholder NATS user with no publish rights until Plan 3. The deploy
+  checks the instance's SSH host key (`DEPLOY_HOST_FINGERPRINT`) and
+  refuses to run without it.
 - The core service (Go, `services/core/`, Plan 2): sign-in with lockout,
   rotating refresh tokens, two-step verification (TOTP, backup codes,
   trusted devices, step-up), password change, device sessions, terms

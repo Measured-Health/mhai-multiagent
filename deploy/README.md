@@ -22,7 +22,8 @@ Every merge to `main` that passes CI runs `.github/workflows/deploy.yml`:
    migrations, restart core, and check `GET /api/v1/healthz` and
    `GET /api/v1/readyz` on 127.0.0.1 (Postgres, NATS and every KV bucket).
 
-It runs only for a push to this repository's `main` (never a fork), logs in
+It runs only for a push to this repository's `main` (never a fork), checks
+the instance's SSH host key against `DEPLOY_HOST_FINGERPRINT`, logs in
 to GHCR with the job's own `GITHUB_TOKEN` (logged out at the end), and never
 touches the EMR containers, the web demo or nginx.
 
@@ -84,6 +85,7 @@ In Measured-Health/mhai-multiagent, Settings, Environments, New environment
 | `DEPLOY_HOST` | the instance's address, as in mhai-web (3.239.87.6) |
 | `DEPLOY_USER` | `ubuntu` |
 | `DEPLOY_SSH_KEY` | the private key (`mh.pem`), as in mhai-web |
+| `DEPLOY_HOST_FINGERPRINT` | the instance's SSH host key fingerprint, `SHA256:...` (below) |
 
 Secret values can't be read back from mhai-web; paste them again. Or, with
 the GitHub CLI:
@@ -94,6 +96,29 @@ gh secret set DEPLOY_HOST    --env preview --repo Measured-Health/mhai-multiagen
 gh secret set DEPLOY_USER    --env preview --repo Measured-Health/mhai-multiagent --body ubuntu
 gh secret set DEPLOY_SSH_KEY --env preview --repo Measured-Health/mhai-multiagent < mh.pem
 ```
+
+**Host key fingerprint.** The deploy checks the instance's SSH host key, so
+nobody in between can pose as the instance and receive the GHCR token; it
+refuses to run while the secret is missing. `appleboy/ssh-action` v1.2.5
+compares the full `SHA256:...` string, and the key it is offered is the
+host's **ECDSA** key (its SSH library asks for ECDSA before Ed25519), so
+take that one. On the instance:
+
+```bash
+ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub | awk '{print $2}'   # SHA256:...
+```
+
+Check it against what your own machine sees (the two must match, or stop):
+`ssh-keyscan -t ecdsa 3.239.87.6 2>/dev/null | ssh-keygen -lf -`. Then:
+
+```bash
+gh secret set DEPLOY_HOST_FINGERPRINT --env preview --repo Measured-Health/mhai-multiagent --body 'SHA256:...'
+```
+
+If the instance has no ECDSA key, use the RSA one
+(`/etc/ssh/ssh_host_rsa_key.pub`). If the instance is rebuilt, its host
+keys change: update the secret, or the deploy fails with
+`ssh: host key fingerprint mismatch`.
 
 Optionally, limit the environment's deployment branches to `main`.
 

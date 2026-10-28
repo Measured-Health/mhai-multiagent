@@ -97,6 +97,17 @@ jobs:
           b=$(tar -C deploy -czf - compose.yml nats/nats.conf | base64 -w0)
           echo "value=$b" >> "$GITHUB_OUTPUT"
 
+      # Without a host-key check the SSH step would trust whatever answers at
+      # DEPLOY_HOST, and hand it the GHCR token. Refuse to deploy without one.
+      - name: Require the host key fingerprint
+        env:
+          FINGERPRINT: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
+        run: |
+          case "$FINGERPRINT" in
+            SHA256:?*) echo "Host key fingerprint set." ;;
+            *) echo "::error::Secret DEPLOY_HOST_FINGERPRINT is missing or not SHA256:... (deploy/README.md)"; exit 1 ;;
+          esac
+
       - name: Pull and restart on the instance
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
@@ -109,6 +120,8 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          # The host's ECDSA key, as "SHA256:..." (deploy/README.md).
+          fingerprint: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
           command_timeout: 10m
           script: |
             set -euo pipefail
