@@ -23,3 +23,6 @@ artifacts/
 cache/
 *.log
 coverage.xml
+
+# Local agent workspace (plans, ledgers, review notes)
+.superpowers/
