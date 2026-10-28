@@ -3,6 +3,8 @@ package testutil
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/url"
 	"strings"
 	"testing"
@@ -25,6 +27,22 @@ const PostgresImage = "postgres:16-alpine"
 // app roles.
 type PG struct {
 	URL string
+	c   testcontainers.Container
+}
+
+// Logs returns everything the server has written to its log (the
+// container's stdout and stderr) so far.
+func (pg *PG) Logs(ctx context.Context) (string, error) {
+	if pg.c == nil {
+		return "", errors.New("testutil: no container")
+	}
+	r, err := pg.c.Logs(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	b, err := io.ReadAll(r)
+	return string(b), err
 }
 
 // NewPostgres starts an empty Postgres 16 container (no migrations). Call
@@ -50,7 +68,7 @@ func NewPostgres(ctx context.Context) (pg *PG, stop func(), err error) {
 		stop()
 		return nil, nil, err
 	}
-	return &PG{URL: url}, stop, nil
+	return &PG{URL: url, c: c}, stop, nil
 }
 
 // StartPostgres starts an empty Postgres 16 container and stops it when the

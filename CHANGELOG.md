@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Security
+- `core migrate up` no longer lets a login's SCRAM verifier reach the
+  Postgres server log when setting the password fails. Postgres logs a
+  failed statement in full (`log_min_error_statement`). `EnsureLogin` now
+  sends the attributes and the password in separate statements, probes
+  with a secret-free statement that it may set the password before sending
+  it, and, as a superuser, turns `log_min_error_statement` off for that
+  transaction.
 - Sign-in has a per-login ceiling across every client IP (20 failures an
   hour, keyed by hash, failing closed) on top of the (login, IP) lockout,
   and argon2 runs behind a process-wide gate (one slot per CPU; 503 when
@@ -85,6 +92,10 @@ All notable changes to this project are documented here. The format follows
 - Two-stage Docker image (7.1 GB to 2.5 GB, CPU), with pinned base images.
 
 ### Fixed
+- `core migrate up` can run more than once as a non-superuser CREATEROLE
+  owner (the managed-Postgres path): resetting a login names only the
+  attributes that are wrong, so Postgres 16 no longer refuses it for naming
+  `NOBYPASSRLS` and `NOREPLICATION`.
 - `PIIMasker` no longer corrupts text when patterns overlap (e.g.
   `[PHONE_REDACTED]TED]`), counts each masked span once, keeps labels such as
   "Patient:" and "MRN:", and masks a leading "+1" or "(" in phone numbers

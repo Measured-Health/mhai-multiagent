@@ -37,6 +37,31 @@ func SweepIdempotency(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 	return total, nil
 }
 
+// loginAttributes are the attributes every deployment login has.
+var loginAttributes = []string{"LOGIN", "INHERIT", "NOSUPERUSER", "NOBYPASSRLS", "NOCREATEDB", "NOCREATEROLE", "NOREPLICATION"}
+
+// wrongAttributes lists the ALTER ROLE options that bring an existing role
+// back to loginAttributes, naming only the ones that differ.
+func wrongAttributes(canLogin, inherit, super, bypass, createDB, createRole, replication bool) []string {
+	var fix []string
+	for _, a := range []struct {
+		ok  bool
+		opt string
+	}{
+		{canLogin, "LOGIN"}, {inherit, "INHERIT"}, {!super, "NOSUPERUSER"}, {!bypass, "NOBYPASSRLS"},
+		{!createDB, "NOCREATEDB"}, {!createRole, "NOCREATEROLE"}, {!replication, "NOREPLICATION"},
+	} {
+		if !a.ok {
+			fix = append(fix, a.opt)
+		}
+	}
+	return fix
+}
+
+// testPasswordSQL, when set by a test, rewrites the password statement
+// before it is sent (to make it fail on the server). Always nil otherwise.
+var testPasswordSQL func(string) string
+
 // loginRoles are the roles a deployment login may be made a member of:
 // mhai_app (the core service) and mhai_provision (the seed CLI).
 var loginRoles = map[string]bool{"mhai_app": true, "mhai_provision": true}
@@ -74,32 +99,72 @@ func EnsureLogin(ctx context.Context, pool *pgxpool.Pool, name, password, role s
 		return errors.New("db: ensure login: begin failed")
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, name).Scan(&exists); err != nil {
+	// 1. The role and its attributes, in a statement without the password.
+	// For an existing role only the attributes that are wrong are named:
+	// on Postgres 16 a non-superuser may not even name BYPASSRLS or
+	// REPLICATION (as NO...), so the CREATEROLE owner of managed Postgres
+	// could otherwise never run this twice.
+	var (
+		exists                                     bool
+		canLogin, inherit, super, bypass, createDB bool
+		createRole, replication                    bool
+	)
+	err = tx.QueryRow(ctx, `SELECT rolcanlogin, rolinherit, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole, rolreplication
+		FROM pg_roles WHERE rolname = $1`, name).Scan(&canLogin, &inherit, &super, &bypass, &createDB, &createRole, &replication)
+	switch {
+	case err == nil:
+		exists = true
+	case errors.Is(err, pgx.ErrNoRows):
+	default:
 		return errors.New("db: ensure login: lookup failed")
 	}
-	verb := "CREATE"
-	if exists {
-		verb = "ALTER"
+	ident := pgx.Identifier{name}.Sanitize()
+	if !exists {
+		if _, err := tx.Exec(ctx, "CREATE ROLE "+ident+" "+strings.Join(loginAttributes, " ")); err != nil {
+			return fmt.Errorf("db: ensure login %s: CREATE ROLE failed", name)
+		}
+	} else if fix := wrongAttributes(canLogin, inherit, super, bypass, createDB, createRole, replication); len(fix) > 0 {
+		if _, err := tx.Exec(ctx, "ALTER ROLE "+ident+" "+strings.Join(fix, " ")); err != nil {
+			return fmt.Errorf("db: ensure login %s: ALTER ROLE failed", name)
+		}
 	}
-	// Where this connection may (a superuser), keep the statement out of the
-	// server log; it carries only a verifier, but that is still no business
-	// of the log. Others skip this quietly.
-	var super bool
-	if err := tx.QueryRow(ctx, `SELECT rolsuper FROM pg_roles WHERE rolname = current_user`).Scan(&super); err != nil {
+
+	// 2. Probe, with no secret in it, that this connection may set the
+	// role's password. It needs the same privilege as the statement in
+	// step 4 and takes the same row lock, so after it step 4 can't fail for
+	// want of either. That matters because Postgres logs a failed statement
+	// in full (log_min_error_statement), and only a superuser can turn that
+	// off for the transaction.
+	if _, err := tx.Exec(ctx, "ALTER ROLE "+ident+" PASSWORD NULL"); err != nil {
+		return fmt.Errorf("db: ensure login %s: may not set its password", name)
+	}
+
+	// 3. Where this connection may (a superuser), keep the password
+	// statement out of the server log, whether it succeeds or fails. It
+	// carries only a verifier, but that is still no business of the log.
+	var amSuper bool
+	if err := tx.QueryRow(ctx, `SELECT rolsuper FROM pg_roles WHERE rolname = current_user`).Scan(&amSuper); err != nil {
 		return errors.New("db: ensure login: lookup failed")
 	}
-	if super {
+	if amSuper {
 		if _, err := tx.Exec(ctx, `SET LOCAL log_statement = 'none'`); err != nil {
 			return errors.New("db: ensure login: set log_statement failed")
 		}
+		if _, err := tx.Exec(ctx, `SET LOCAL log_min_error_statement = 'panic'`); err != nil {
+			return errors.New("db: ensure login: set log_min_error_statement failed")
+		}
 	}
-	stmt, err := loginStatement(verb, name, password)
+
+	// 4. The password, as a SCRAM verifier, in a statement of its own.
+	stmt, err := passwordStatement(name, password)
 	if err != nil {
 		return err
 	}
+	if testPasswordSQL != nil {
+		stmt = testPasswordSQL(stmt)
+	}
 	if _, err := tx.Exec(ctx, stmt); err != nil {
-		return fmt.Errorf("db: ensure login %s: %s ROLE failed", name, verb)
+		return fmt.Errorf("db: ensure login %s: setting the password failed", name)
 	}
 	rows, err := tx.Query(ctx, `SELECT g.rolname FROM pg_auth_members m
 		JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles u ON u.oid = m.member
