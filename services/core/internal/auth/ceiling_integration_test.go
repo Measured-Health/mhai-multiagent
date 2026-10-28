@@ -15,8 +15,15 @@ import (
 // each from a fresh client IP.
 func (e *env) fillCeiling(t *testing.T, email string) {
 	t.Helper()
+	e.fillCeilingAud(t, email, false)
+}
+
+func (e *env) fillCeilingAud(t *testing.T, email string, platform bool) {
+	t.Helper()
 	for i := 0; i < auth.MaxLoginFailuresPerLogin; i++ {
-		if r := e.login(t, email, "wrong-password-"+uniq(), newIP()); r.code != 401 {
+		r := e.do(t, req{method: "POST", path: "/auth/login", ip: newIP(), platform: platform,
+			body: map[string]any{"username": email, "password": "wrong-password-" + uniq()}})
+		if r.code != 401 {
 			t.Fatalf("failure %d: %d %s", i+1, r.code, r.raw)
 		}
 	}
@@ -50,15 +57,15 @@ func mustLocked(t *testing.T, name string, r resp) {
 }
 
 // I1: at the ceiling, a right password with the user's own trusted-device
-// token still signs in. Another user's device, or a wrong password with the
-// right device, stays locked. The escape doesn't hand the ceiling a slot
-// back, and the request is audited as auth.login.ceiling.
+// token still signs in, where the hospital allows trusted devices for a
+// clinician. Another user's device, or a wrong password with the right
+// device, stays locked. The escape doesn't hand the ceiling a slot back,
+// and the request is audited as auth.login.ceiling.
 func TestLoginCeilingTrustedDeviceSignsIn(t *testing.T) {
 	e := newEnv(t)
-	u := clinician(t)
-	other := clinician(t)
-	dev := seedDevice(t, u.id, e.clock.Now().Add(24*time.Hour))
-	otherDev := seedDevice(t, other.id, e.clock.Now().Add(24*time.Hour))
+	trusting := seedHospital(t, hospitalOpts{requireMFAClinicians: true, allowTrust: true})
+	u, dev := e.trustedClinician(t, trusting)
+	_, otherDev := e.trustedClinician(t, trusting)
 	e.fillCeiling(t, u.email)
 
 	mustLocked(t, "no device", e.login(t, u.email, testPassword, newIP()))
@@ -67,7 +74,7 @@ func TestLoginCeilingTrustedDeviceSignsIn(t *testing.T) {
 		body: map[string]any{"username": u.email, "password": "wrong-password-" + uniq(), "device_token": dev}}))
 
 	r := e.loginDevice(t, u.email, dev)
-	if r.code != 200 || r.body["access_token"] == nil {
+	if r.code != 200 || r.body["access_token"] == nil || r.body["mfa_token"] != nil {
 		t.Fatalf("own device at the ceiling: %d %s", r.code, r.raw)
 	}
 	hasAction(t, r, "auth.login.ceiling")
@@ -75,6 +82,47 @@ func TestLoginCeilingTrustedDeviceSignsIn(t *testing.T) {
 	ck, err := e.svc.CeilingKey(u.email)
 	if got := counter(t, "ceiling", ck, err); got != "20" {
 		t.Fatalf("ceiling after the escape: %q, want 20", got)
+	}
+}
+
+// I1: a device token that may not stand in for the code never passes the
+// ceiling, even with the right password: an admin's old device, a
+// clinician's device where the hospital has trusted devices off, and a
+// clinician's device on the platform audience. Each gets exactly the wrong
+// password's reply, and no mfa_token.
+func TestLoginCeilingDeviceThatMayNotStandIn(t *testing.T) {
+	e := newEnv(t)
+	trusting := seedHospital(t, hospitalOpts{requireMFAClinicians: true, allowTrust: true})
+	strict := seedHospital(t, hospitalOpts{requireMFAClinicians: true, allowTrust: false})
+	exp := e.clock.Now().Add(24 * time.Hour)
+
+	adm := seedUser(t, trusting, true, "clinician", "hospital_admin")
+	admDev := seedDevice(t, adm.id, exp)
+	clin := seedUser(t, strict, true, "clinician")
+	clinDev := seedDevice(t, clin.id, exp)
+	plat, platDev := e.trustedClinician(t, trusting)
+
+	for _, c := range []struct {
+		name     string
+		u        user
+		dev      string
+		platform bool
+	}{
+		{"admin's old device", adm, admDev, false},
+		{"trusted devices off", clin, clinDev, false},
+		{"platform audience", plat, platDev, true},
+	} {
+		e.fillCeilingAud(t, c.u.email, c.platform)
+		right := e.do(t, req{method: "POST", path: "/auth/login", ip: newIP(), platform: c.platform,
+			body: map[string]any{"username": c.u.email, "password": testPassword, "device_token": c.dev}})
+		wrong := e.do(t, req{method: "POST", path: "/auth/login", ip: newIP(), platform: c.platform,
+			body: map[string]any{"username": c.u.email, "password": "wrong-password-" + uniq(), "device_token": c.dev}})
+		mustLocked(t, c.name, right)
+		if right.body["mfa_token"] != nil {
+			t.Fatalf("%s: mfa_token at the ceiling", c.name)
+		}
+		sameReply(t, right, wrong)
+		assertAudit(t, right, "auth.login.ceiling", c.u.email)
 	}
 }
 

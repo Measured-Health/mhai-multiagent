@@ -126,8 +126,11 @@ Neither needs the BFF key, and neither says what failed.
   429 `login_locked`, the same reply as for an unknown login. If the
   counters can't be read, sign-in fails closed (503).
 - At the per-login ceiling, the one way through is the right password
-  together with a live trusted-device token of that user: holding the
-  device is the proof, so a stranger can't lock that owner out. Everything
+  together with a live trusted-device token of that user, where that device
+  may stand in for the code (not for `hospital_admin`, `analyst`,
+  `platform_admin` or `auditor`, and only where the hospital allows trusted
+  devices) and the account is on its own audience: holding the device is
+  the proof, so a stranger can't lock that owner out. Everything
   else (right or wrong password, two-step or not, unknown login) gets the
   same 429 `login_locked`, with the same argon2 and device-lookup work, so
   the reply says nothing about the password. The (login, IP) slot stays
@@ -153,7 +156,8 @@ Neither needs the BFF key, and neither says what failed.
 ## Known limits
 
 - **Third-party lockout.** Someone who knows an email can hold any account
-  without a trusted device (two-step accounts included) at the per-login
+  without a trusted device that may stand in for the code (two-step
+  accounts, admins, analysts and platform accounts included) at the per-login
   ceiling for an hour at a time, for about 20 requests an hour. There is
   no admin unlock until the staff endpoints exist; `auth.login.ceiling`
   audit rows are the signal to alert on.

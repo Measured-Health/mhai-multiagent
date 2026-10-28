@@ -69,7 +69,9 @@ func clientIP(r *http.Request) string {
 // the same work on every path (argon2 for every login, and the device
 // lookup whenever a device token is sent), and then:
 //   - the right password with a live trusted-device token of that user
-//     goes on as usual: holding the device is the proof;
+//     goes on as usual, when that device may stand in for the code (roles
+//     and hospital policy) and the account is on its own audience: holding
+//     the device is the proof (see ceilingEscape);
 //   - everything else (right or wrong password, two-step or not, unknown
 //     account) gets the same 429 login_locked, and its (login, IP) slot
 //     stays counted.
@@ -162,7 +164,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 			}
 			trusted = t
 		}
-		if !ok || !acct.usable() || !trusted {
+		if !ok || !acct.usable() || !ceilingEscape(acct, trusted, httpx.Audience(ctx) == httpx.AudiencePlatform) {
 			// The (login, IP) slot stays counted, whatever the password.
 			s.ceilingLocked(w, r, actor, hospital)
 			return
@@ -386,6 +388,20 @@ func (s *Service) reserveLogin(ctx context.Context, email, ip string) (res login
 	}
 	res.ceilingLocked, err = reserveIn(ctx, s.Buckets.LoginCeiling, res.ceilingKey, MaxLoginFailuresPerLogin)
 	return res, err
+}
+
+// ceilingEscape reports whether a right password on a usable account may
+// pass the per-login ceiling: only with a live trusted device of the user
+// that may stand in for the code under the account's current roles and
+// hospital policy, on the account's own audience, so that the session that
+// follows satisfies two-step without a code. Anything that would end in
+// the code step (mfaPending) or a different refusal would tell a guesser
+// the password was right, so it stays locked.
+func ceilingEscape(acct *acctRec, trusted, platform bool) bool {
+	return trusted &&
+		deviceMayStandIn(acct.Roles, acct.policy()) &&
+		platform == hasPlatformRole(acct.Roles) &&
+		sessionSatisfiesMFA(acct.Roles, acct.policy(), acct.MFAEnabled, true, []string{"pwd", "device"})
 }
 
 // ceilingLocked answers a request held by the per-login ceiling: an audit

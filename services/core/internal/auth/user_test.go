@@ -137,3 +137,31 @@ func TestDenylistOutlivesAccessToken(t *testing.T) {
 		t.Fatalf("denylist TTL %v must exceed the access token life %v", bus.DenylistTTL, token.AccessTTL)
 	}
 }
+
+// I1: the ceiling lets a right password through only with a trusted
+// device that may stand in for the code, on the account's own audience.
+func TestCeilingEscape(t *testing.T) {
+	trust := func(roles ...string) *acctRec {
+		return &acctRec{Roles: roles, AllowTrustDevice: true, RequireMFAClinicians: true, MFAEnabled: true}
+	}
+	strict := &acctRec{Roles: []string{"clinician"}, RequireMFAClinicians: true, MFAEnabled: true}
+	for _, c := range []struct {
+		name              string
+		a                 *acctRec
+		trusted, platform bool
+		want              bool
+	}{
+		{"clinician, device", trust("clinician"), true, false, true},
+		{"clinician, no device", trust("clinician"), false, false, false},
+		{"clinician, platform audience", trust("clinician"), true, true, false},
+		{"hospital admin", trust("clinician", "hospital_admin"), true, false, false},
+		{"analyst", trust("analyst"), true, false, false},
+		{"platform admin", trust("platform_admin"), true, true, false},
+		{"auditor", trust("auditor"), true, true, false},
+		{"trusted devices off", strict, true, false, false},
+	} {
+		if got := ceilingEscape(c.a, c.trusted, c.platform); got != c.want {
+			t.Errorf("%s: ceilingEscape = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
