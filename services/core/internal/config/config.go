@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -24,6 +25,8 @@ type Config struct {
 	MFAKey           []byte
 	BFFServiceKeys   []string
 	BreachedListPath string
+	// APIDocs serves the Redoc page and openapi.yaml (CORE_API_DOCS).
+	APIDocs bool
 }
 
 // Load reads the environment. Secrets are required, at least 32 bytes and
@@ -40,6 +43,17 @@ func Load() (Config, error) {
 		BreachedListPath: os.Getenv("BREACHED_LIST_PATH"),
 	}
 	var errs []error
+
+	// CORE_API_DOCS: on by default only in development, so an unset or
+	// unrecognised environment (production included) fails closed.
+	c.APIDocs = strings.EqualFold(strings.TrimSpace(c.Env), "development")
+	if raw := strings.TrimSpace(os.Getenv("CORE_API_DOCS")); raw != "" {
+		b, err := strconv.ParseBool(raw)
+		if err != nil {
+			errs = append(errs, errors.New("CORE_API_DOCS must be true or false"))
+		}
+		c.APIDocs = b
+	}
 
 	// Only this service's own credentials are read: the NATS password is in
 	// NATS_URL (or the NKey seed), the database password in DATABASE_URL.

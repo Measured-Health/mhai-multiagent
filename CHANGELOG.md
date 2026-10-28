@@ -6,7 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Public API docs on the demo server at `https://api-dev.measured-health.org/api/docs`
+  (`deploy/nginx/mhai-api-dev.conf`): only the docs page, its script and the
+  spec, GET only, behind its own allow list; the API itself stays private.
+- API docs on the core service: `GET /api/docs` (Redoc 2.5.4, vendored, no
+  CDN) and `GET /api/openapi.yaml`, both embedded in the binary, outside the
+  authenticated API chain and never served over NATS. Switch:
+  `CORE_API_DOCS` (default on in development, off otherwise); strict CSP and
+  other headers; on in the demo and dev compose.
+- API versioning policy (ADR 0012): major version in the path and subject,
+  additive-only changes within it, `Deprecation`/`Sunset` for retirement
+  (90 days' notice at the demo stage), `info.version` as semver (now 1.0.1).
+  CI fails a pull request with a breaking change to `openapi.yaml`
+  (oasdiff 1.34.1). `httpx.Deprecated` sets the retirement headers.
+
 ### Security
+- `core migrate up` no longer lets a login's SCRAM verifier reach the
+  Postgres server log when setting the password fails. Postgres logs a
+  failed statement in full (`log_min_error_statement`). `EnsureLogin` now
+  sends the attributes and the password in separate statements, probes
+  with a secret-free statement that it may set the password before sending
+  it, and, as a superuser, turns `log_min_error_statement` off for that
+  transaction.
 - Sign-in has a per-login ceiling across every client IP (20 failures an
   hour, keyed by hash, failing closed) on top of the (login, IP) lockout,
   and argon2 runs behind a process-wide gate (one slot per CPU; 503 when
@@ -28,6 +51,20 @@ All notable changes to this project are documented here. The format follows
   order was being misread, so unsupported claims passed as entailed.
 
 ### Added
+- Backend demo deployment on the shared preview instance (`deploy/`,
+  `.github/workflows/deploy.yml`). After green CI on `main`, the core
+  image is built for arm64, pushed to `ghcr.io/measured-health/mhai-multiagent-core`
+  and deployed over SSH to `/srv/mhai-backend` (Postgres, NATS with
+  JetStream, migrations, core), then checked with `/api/v1/healthz` and
+  `/api/v1/readyz`. Off until the repository variable `DEPLOY_ENABLED` is
+  `true`. Only core (127.0.0.1:8092) and NATS (127.0.0.1:4222, NKey users
+  only) are published, on loopback; every container is memory-capped,
+  read-only and without capabilities. `deploy/setup-host.sh` prepares the
+  host once: secrets in `.env` (mode 600), the NATS NKeys, the volumes and
+  the internal network `mhai-bff` for the frontend's BFF, which has a
+  placeholder NATS user with no publish rights until Plan 3. The deploy
+  checks the instance's SSH host key (`DEPLOY_HOST_FINGERPRINT`) and
+  refuses to run without it.
 - The core service (Go, `services/core/`, Plan 2): sign-in with lockout,
   rotating refresh tokens, two-step verification (TOTP, backup codes,
   trusted devices, step-up), password change, device sessions, terms
@@ -71,6 +108,10 @@ All notable changes to this project are documented here. The format follows
 - Two-stage Docker image (7.1 GB to 2.5 GB, CPU), with pinned base images.
 
 ### Fixed
+- `core migrate up` can run more than once as a non-superuser CREATEROLE
+  owner (the managed-Postgres path): resetting a login names only the
+  attributes that are wrong, so Postgres 16 no longer refuses it for naming
+  `NOBYPASSRLS` and `NOREPLICATION`.
 - `PIIMasker` no longer corrupts text when patterns overlap (e.g.
   `[PHONE_REDACTED]TED]`), counts each masked span once, keeps labels such as
   "Patient:" and "MRN:", and masks a leading "+1" or "(" in phone numbers

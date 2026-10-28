@@ -10,7 +10,7 @@ const goodKey = "0123456789abcdef0123456789abcdef" // 32 bytes, synthetic
 func setEnv(t *testing.T, kv map[string]string) {
 	t.Helper()
 	for _, k := range []string{"CORE_ENV", "HTTP_ADDR", "DATABASE_URL", "NATS_URL", "NATS_NKEY_SEED_PATH", "NATS_GATEWAY_PASSWORD", "NATS_WORKER_PASSWORD",
-		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH"} {
+		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -176,5 +176,40 @@ func TestCheckPassword(t *testing.T) {
 	}
 	if err := CheckPassword("CORE_DB_PASSWORD", "test-only-core-db-password"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAPIDocsSwitch(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	for _, c := range []struct {
+		env, flag string
+		want      bool
+		bad       bool
+	}{
+		{"", "", true, false}, // unset env is development
+		{"development", "", true, false},
+		{"production", "", false, false},
+		{"preview", "", false, false},
+		{"Production", "", false, false},
+		{"production", "true", true, false},
+		{"development", "false", false, false},
+		{"preview", "1", true, false},
+		{"development", "yes please", false, true},
+	} {
+		kv := map[string]string{"CORE_ENV": c.env, "CORE_API_DOCS": c.flag}
+		for k, v := range base {
+			kv[k] = v
+		}
+		setEnv(t, kv)
+		got, err := Load()
+		if c.bad {
+			if err == nil || !strings.Contains(err.Error(), "CORE_API_DOCS") || strings.Contains(err.Error(), c.flag) {
+				t.Errorf("flag %q: error %v", c.flag, err)
+			}
+			continue
+		}
+		if err != nil || got.APIDocs != c.want {
+			t.Errorf("env %q flag %q: docs %v err %v, want %v", c.env, c.flag, got.APIDocs, err, c.want)
+		}
 	}
 }

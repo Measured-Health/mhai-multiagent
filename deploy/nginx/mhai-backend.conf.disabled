@@ -1,0 +1,47 @@
+# DISABLED. Optional host nginx site for the core service's HTTP API.
+#
+# Not installed by setup-host.sh or the deploy workflow, and not needed
+# today: the core service listens on 127.0.0.1:8092 only, and the frontend's
+# BFF is to reach the backend over NATS (Plan 3), not over the internet.
+# Enable it only if something outside the instance must call core over
+# HTTPS, after a security review. See deploy/README.md, "Optional: nginx".
+#
+# Every request still needs a BFF key (X-MHAI-Service), but the API is not
+# meant for browsers: keep the allow list and `deny all;`.
+
+server {
+    listen 443 ssl;
+    server_name api.measured-health.org;   # replace; DNS and TLS first
+    server_tokens off;
+
+    ssl_certificate     /etc/letsencrypt/live/api.measured-health.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.measured-health.org/privkey.pem;
+
+    access_log /var/log/nginx/mhai-backend.access.log;
+    error_log  /var/log/nginx/mhai-backend.error.log;
+
+    # One `allow <ip>;` per caller (the frontend host, for example).
+    include /etc/nginx/mhai-backend-allow.conf;
+    deny all;
+
+    # The probes stay on loopback; nothing outside needs them.
+    location /api/v1/healthz { return 404; }
+    location /api/v1/readyz  { return 404; }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8092;
+        proxy_http_version 1.1;
+        proxy_set_header Host            $host;
+        proxy_set_header X-Real-IP       $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 1m;
+        proxy_read_timeout 30s;
+    }
+
+    location / { return 404; }
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    add_header X-Content-Type-Options "nosniff" always;
+}

@@ -36,27 +36,39 @@ func TestScramVerifierRFC7677(t *testing.T) {
 	}
 }
 
-// The statement carries the verifier, never the password, and each call
-// uses a fresh salt.
-func TestLoginStatementHasNoPassword(t *testing.T) {
+// The password statement carries the verifier, never the password, names
+// no attribute, and each call uses a fresh salt.
+func TestPasswordStatementHasNoPassword(t *testing.T) {
 	pw := "synthetic-login-password-0123456789"
-	a, err := loginStatement("CREATE", "core_login", pw)
+	a, err := passwordStatement("core_login", pw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := loginStatement("ALTER", "core_login", pw)
+	b, _ := passwordStatement("core_login", pw)
 	for _, s := range []string{a, b} {
 		if strings.Contains(s, pw) || strings.Contains(s, "synthetic-login") {
 			t.Fatalf("statement holds the password: %s", s)
 		}
-		if !strings.Contains(s, "PASSWORD 'SCRAM-SHA-256$4096:") || !strings.Contains(s, `ROLE "core_login" LOGIN`) {
+		if !strings.HasPrefix(s, `ALTER ROLE "core_login" PASSWORD 'SCRAM-SHA-256$4096:`) {
 			t.Fatalf("statement %s", s)
 		}
 	}
-	if a[strings.Index(a, "PASSWORD"):] == b[strings.Index(b, "PASSWORD"):] {
+	if a == b {
 		t.Fatal("same salt twice")
 	}
-	if _, err := loginStatement("DROP", "core_login", pw); err == nil {
-		t.Fatal("bad verb accepted")
+}
+
+// Only the attributes that differ are named, so a non-superuser never has
+// to name BYPASSRLS or REPLICATION for a login that already lacks them.
+func TestWrongAttributesNamesOnlyDifferences(t *testing.T) {
+	if got := wrongAttributes(true, true, false, false, false, false, false); len(got) != 0 {
+		t.Fatalf("a correct login needs %v", got)
+	}
+	got := strings.Join(wrongAttributes(false, false, true, true, true, true, true), " ")
+	if got != strings.Join(loginAttributes, " ") {
+		t.Fatalf("everything wrong gives %q", got)
+	}
+	if got := wrongAttributes(true, true, false, true, false, false, false); len(got) != 1 || got[0] != "NOBYPASSRLS" {
+		t.Fatalf("bypassrls only gives %v", got)
 	}
 }

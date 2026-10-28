@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.0.0"
+  version: "1.0.1"
   description: |
     The core service's committed contract: every route it serves, with the
     exact request and response shapes and the error codes each can return.
@@ -25,6 +25,11 @@ info:
     (`Idempotent-Replayed: true`) for 72 hours; the same key with another
     body, or one still in flight, is 409 `conflict`. Replies that carry a
     credential are never stored, so their retry is 409 too.
+
+    Versioning (ADR 0012): the major version is in the path, `/api/v1`.
+    Within it, changes are additive only, so clients must ignore unknown
+    response fields. `info.version` is semver: minor for an additive
+    change, patch for a documentation-only one.
 servers:
   - url: /api/v1
 
