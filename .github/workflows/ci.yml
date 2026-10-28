@@ -78,6 +78,20 @@ jobs:
       - name: Integration tests with the test-only fixture routes
         run: go test -race -tags "integration test" ./...
 
+  # ADR 0012: a breaking change to the HTTP contract needs a new major
+  # version (/api/v2), so it may not change /api/v1 in place.
+  openapi-breaking:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: No breaking change against the base branch
+        run: |
+          git show "origin/${{ github.base_ref }}:services/core/openapi.yaml" > "$RUNNER_TEMP/base-openapi.yaml" || : > "$RUNNER_TEMP/base-openapi.yaml"
+          .github/scripts/openapi-breaking.sh "$RUNNER_TEMP/base-openapi.yaml" services/core/openapi.yaml
+
   # Build the image when anything that goes into it changes, so a bad base
   # image or dependency bump fails here rather than at deploy time.
   image:

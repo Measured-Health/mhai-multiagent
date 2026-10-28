@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- API docs on the core service: `GET /api/docs` (Redoc 2.5.4, vendored, no
+  CDN) and `GET /api/openapi.yaml`, both embedded in the binary, outside the
+  authenticated API chain and never served over NATS. Switch:
+  `CORE_API_DOCS` (default on in development, off otherwise); strict CSP and
+  other headers; on in the demo and dev compose.
+- API versioning policy (ADR 0012): major version in the path and subject,
+  additive-only changes within it, `Deprecation`/`Sunset` for retirement
+  (90 days' notice at the demo stage), `info.version` as semver (now 1.0.1).
+  CI fails a pull request with a breaking change to `openapi.yaml`
+  (oasdiff 1.34.1). `httpx.Deprecated` sets the retirement headers.
+
 ### Security
 - `core migrate up` no longer lets a login's SCRAM verifier reach the
   Postgres server log when setting the password fails. Postgres logs a

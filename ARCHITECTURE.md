@@ -43,6 +43,8 @@ with one NATS user per app: `bff_clinical` and `bff_platform`. Until
 mhai-web switches, the BFF still calls core over HTTP with its service key;
 the steps below are the same either way.
 
+API versioning (the major version in the path and subject, additive-only changes, a Sunset policy) is ADR 0012.
+
 ### An ordinary API call
 
 ```
