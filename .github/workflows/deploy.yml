@@ -1,0 +1,175 @@
+name: Deploy backend demo
+
+# After CI passes on main: build the core service's arm64 image in GitHub,
+# push it to GHCR, then have the preview instance pull it and restart the
+# backend stack (/srv/mhai-backend: Postgres, NATS, migrations, core).
+# Building on the instance is avoided on purpose: it is small and also runs
+# the EMR stack. See deploy/README.md.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend-demo
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-core:
+    # Only a green CI run for a push to this repository's main. The branch
+    # filter above matches by name alone, so a fork's PR from a branch called
+    # "main" would otherwise build (and deploy) untrusted code.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    # The instance is Graviton (aarch64), so build natively on arm64.
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/${{ github.repository }}-core
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: services/core
+          file: services/core/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=core
+
+  deploy:
+    needs: build-core
+    runs-on: ubuntu-latest
+    environment: preview
+    permissions:
+      contents: read
+    # Set the repository variable DEPLOY_ENABLED=true once the instance is
+    # set up (deploy/README.md). Until then this workflow only publishes the
+    # image.
+    if: vars.DEPLOY_ENABLED == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      # The compose file and the NATS config of this commit go to the
+      # instance with the deploy, so the host never runs a stale config.
+      # Neither holds a secret.
+      - name: Bundle the deploy config
+        id: bundle
+        run: |
+          set -euo pipefail
+          b=$(tar -C deploy -czf - compose.yml nats/nats.conf | base64 -w0)
+          echo "value=$b" >> "$GITHUB_OUTPUT"
+
+      # Without a host-key check the SSH step would trust whatever answers at
+      # DEPLOY_HOST, and hand it the GHCR token. Refuse to deploy without one.
+      - name: Require the host key fingerprint
+        env:
+          FINGERPRINT: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
+        run: |
+          case "$FINGERPRINT" in
+            SHA256:?*) echo "Host key fingerprint set." ;;
+            *) echo "::error::Secret DEPLOY_HOST_FINGERPRINT is missing or not SHA256:... (deploy/README.md)"; exit 1 ;;
+          esac
+
+      - name: Pull and restart on the instance
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          # Short-lived and scoped to this repo's packages; expires with the job.
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          DEPLOY_BUNDLE: ${{ steps.bundle.outputs.value }}
+        with:
+          envs: GHCR_TOKEN,GHCR_USER,DEPLOY_BUNDLE
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          # The host's ECDSA key, as "SHA256:..." (deploy/README.md).
+          fingerprint: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+            cd /srv/mhai-backend
+            if [ ! -f .env ] || [ ! -f secrets/nats-gateway.nk ]; then
+              echo "The instance is not set up: run deploy/setup-host.sh first (deploy/README.md)."
+              exit 1
+            fi
+
+            before=$(sha256sum nats/nats.conf 2>/dev/null || true)
+            printf '%s' "$DEPLOY_BUNDLE" | base64 -d | tar -xzf - -C /srv/mhai-backend
+            docker compose config --quiet
+            # NATS reads its config at start: restart it when the file changed.
+            if [ "$before" != "$(sha256sum nats/nats.conf)" ] && [ -n "$(docker compose ps -q nats)" ]; then
+              echo "nats.conf changed; restarting nats"
+              docker compose restart nats
+            fi
+
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+            docker compose pull core
+
+            # Migrations and the key run first (depends_on); a failed
+            # migration stops here and leaves the running core alone.
+            if ! docker compose up -d --remove-orphans core; then
+              echo "Start failed. Recent logs:"
+              docker compose logs --tail=80 postgres nats core-migrate core-keys core
+              exit 1
+            fi
+            docker compose logs --no-log-prefix core-migrate | tail -n 20
+
+            # Straight to the container on loopback: the service is up, and
+            # Postgres, NATS and every KV bucket answer.
+            port=$(sed -n 's/^CORE_HOST_PORT=\([0-9][0-9]*\)$/\1/p' .env | tail -n1)
+            port=${port:-8092}
+            ok=0
+            for _ in $(seq 1 24); do
+              live=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/v1/healthz" || echo 000)
+              ready=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/v1/readyz" || echo 000)
+              if [ "$live" = 200 ] && [ "$ready" = 200 ]; then ok=1; break; fi
+              sleep 5
+            done
+            if [ "$ok" != 1 ]; then
+              echo "Backend unhealthy (healthz=$live, readyz=$ready). Recent logs:"
+              docker compose logs --tail=120 core
+              exit 1
+            fi
+            echo "Backend healthy."
+
+            # Only this repository's dangling images; other stacks' are left alone.
+            docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/Measured-Health/mhai-multiagent" >/dev/null || true
