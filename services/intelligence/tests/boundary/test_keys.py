@@ -146,8 +146,10 @@ def test_reload_during_reload_does_not_hang_and_is_not_lost(tmp_path: Path) -> N
     t = TrustedKeys.load(path)
     started, release = threading.Event(), threading.Event()
     real = t._reload_once
+    calls: list[str | Path] = []
 
     def slow(p: str | Path) -> bool:
+        calls.append(p)
         started.set()
         assert release.wait(5)
         return real(p)
@@ -164,7 +166,61 @@ def test_reload_during_reload_does_not_hang_and_is_not_lost(tmp_path: Path) -> N
     release.set()
     first.join(5)
     assert not first.is_alive()
-    assert t.kids() == {B.real_kid}  # the queued reload ran
+    assert t.kids() == {B.real_kid}
+    # The queued reload ran, in the first call's loop: exactly two reads.
+    assert len(calls) == 2
+
+
+def test_reload_queued_reload_reads_the_newer_file(tmp_path: Path) -> None:
+    """The first read sees A; a reload queued during it must read again and
+    install B, not stop after one read."""
+    path = write(tmp_path / "k.json", {"keys": keys_of(A)})
+    t = TrustedKeys.load(path)
+    real = t._reload_once
+    calls: list[frozenset[str]] = []
+
+    def queue_once(p: str | Path) -> bool:
+        if not calls:
+            write(path, {"keys": keys_of(A, C)})
+            r = real(p)
+            calls.append(t.kids())
+            write(path, {"keys": keys_of(B)})
+            assert t.reload(p) is False  # queued for the running reload
+            return r
+        r = real(p)
+        calls.append(t.kids())
+        return r
+
+    t._reload_once = queue_once  # type: ignore[method-assign]
+    assert t.reload(path) is True
+    assert calls == [frozenset({A.real_kid, C.real_kid}), frozenset({B.real_kid})]
+
+
+@pytest.mark.parametrize("make", ["missing", "directory", "unreadable"])
+def test_read_maps_oserror_to_trusted_keys_error(
+    tmp_path: Path, make: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T8 deferred: every OSError opening or reading the file is
+    TrustedKeysError, with no path in the message."""
+    path = tmp_path / "k.json"
+    if make == "directory":
+        path.mkdir()
+    elif make == "unreadable":
+        write(path, {"keys": keys_of(A)})
+        import builtins
+
+        real_open = builtins.open
+
+        def no_read(file: object, *a: object, **k: object) -> object:
+            if str(file) == str(path):
+                raise PermissionError(13, "synthetic", str(path))
+            return real_open(file, *a, **k)  # type: ignore[call-overload]
+
+        monkeypatch.setattr(builtins, "open", no_read)
+    with pytest.raises(TrustedKeysError) as e:
+        TrustedKeys.load(path)
+    assert str(tmp_path) not in str(e.value)
+    assert e.value.__cause__ is None and e.value.__suppress_context__
 
 
 def test_reload_reentrant_from_the_same_thread(tmp_path: Path) -> None:

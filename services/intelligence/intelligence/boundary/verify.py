@@ -336,6 +336,15 @@ class Verifier:
         self.refusals: Counter[tuple[str, str]] = Counter()
         self._count_lock = threading.Lock()
 
+    @property
+    def operations(self) -> Operations:
+        return self._ops
+
+    @property
+    def clock(self) -> Callable[[], float]:
+        """The one clock for exp, the replay window and the worker's deadlines."""
+        return self._clock
+
     # --- check 1 ------------------------------------------------------------------
 
     def check_sizes(self, token: str, body: bytes, kind: str) -> Refusal | None:

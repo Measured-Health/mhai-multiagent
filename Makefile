@@ -1,4 +1,4 @@
-.PHONY: help install install-dev lint format typecheck test cov run clean docker \
+.PHONY: help install install-dev lint format typecheck test test-boundary cov run clean docker \
 	up up-gpu up-observability infra down ps logs models nuke core-up core-test core-lint proto proto-check
 
 help:
@@ -27,8 +27,12 @@ format: ## Auto-format
 typecheck: ## Run mypy
 	$(PY) uv run mypy
 
-test: ## Run test suite
-	$(PY) uv run pytest
+test: ## Run test suite (no models, no Docker)
+	$(PY) uv run pytest -m "not models and not boundary"
+
+test-boundary: ## Boundary tests: Postgres 16 + NATS 2.10 in Docker (build host only)
+	docker build -t mhai-core:test services/core
+	$(PY) uv run pytest -m boundary tests/boundary
 
 cov: ## Tests with coverage
 	$(PY) uv run pytest --cov=intelligence --cov-report=term-missing

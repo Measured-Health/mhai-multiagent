@@ -63,11 +63,83 @@ jobs:
       - name: Type-check
         run: uv run mypy
 
+      # Tests marked boundary need Docker and run in intelligence-boundary;
+      # the coverage job combines both runs before diff-cover (F17).
       - name: Test
-        run: uv run pytest -m "not models" --cov=intelligence --cov-report=xml
+        env:
+          COVERAGE_FILE: coverage.checks
+        run: uv run pytest -m "not models and not boundary" --cov=intelligence --cov-report=
 
+      - name: Keep the coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-checks
+          path: services/intelligence/coverage.checks
+          retention-days: 1
+
+  # Spec section 12: the Python tests marked boundary, against Postgres 16
+  # and NATS 2.10 (testcontainers) with the real services/nats/nats.conf,
+  # and core's migrations from the mhai-core image.
+  intelligence-boundary:
+    runs-on: ubuntu-latest  # ships Docker
+    defaults:
+      run:
+        working-directory: services/intelligence
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.23"
+          enable-cache: true
+          cache-dependency-glob: services/intelligence/uv.lock
+      - name: Install
+        run: uv sync --locked
+      - name: Build the core image (migrations)
+        working-directory: .
+        run: docker build -t mhai-core:test services/core
+      - name: Boundary tests
+        env:
+          COVERAGE_FILE: coverage.boundary
+        run: uv run pytest -m boundary tests/boundary --cov=intelligence --cov-report=
+      - name: Keep the coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-boundary
+          path: services/intelligence/coverage.boundary
+          retention-days: 1
+
+  # diff-cover on both runs together: boundary code is covered mostly by
+  # the Docker tests, the rest by checks. pb/ is omitted (pyproject.toml).
+  coverage:
+    if: github.event_name == 'pull_request'
+    needs: [checks, intelligence-boundary]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/intelligence
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # diff-cover compares against the base branch
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.23"
+          enable-cache: true
+          cache-dependency-glob: services/intelligence/uv.lock
+      - name: Install
+        run: uv sync --locked --no-default-groups --group dev
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+          path: services/intelligence
+      - name: Combine
+        run: |
+          uv run coverage combine coverage.checks coverage.boundary
+          uv run coverage xml
       - name: Coverage of changed lines
-        if: github.event_name == 'pull_request'
         run: >
           uv run diff-cover coverage.xml
           --compare-branch=origin/${{ github.base_ref }}

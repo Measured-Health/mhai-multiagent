@@ -19,6 +19,8 @@ SCHEMA = "Mhai-Schema"
 REQUEST_ID = "Mhai-Request-Id"
 STATUS = "Mhai-Status"
 AUTHORIZATION = "Authorization"
+# A BFF-direct call's own deadline, which can only shorten the operation's.
+TIMEOUT = "Mhai-Timeout-Ms"
 
 OK = "ok"
 ERROR_SCHEMA = envelope_pb2.Error.DESCRIPTOR.full_name
