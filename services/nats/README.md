@@ -24,7 +24,7 @@ connection is refused too).
 
 | User | Service | Publish | Subscribe | Replies |
 |---|---|---|---|---|
-| `gateway` | the core service | `inference.v1.>`, `jobs.v1.>`, `$KV.>`, and JetStream management on the four KV streams, `JOBS` and `DEAD` only (create, update, info; KV reads; consumer create and info); fetch and ack on its `core_dead` consumer. No stream delete or purge, no message delete, no other stream | `_INBOX_gateway.>`; `api.v1.>` and `authz.v1.grant.>` in queue group `core` only | `allow_responses` |
+| `gateway` | the core service | `inference.v1.>`, `jobs.v1.>`, `$KV.<bucket>.>` for the four buckets, and JetStream management on the four KV streams, `JOBS` and `DEAD` only (create, update, info; KV reads; consumer create and info); fetch and ack on its `core_dead` consumer. No stream delete or purge, no message delete, no other stream | `_INBOX_gateway.>`; `api.v1.*` and `authz.v1.grant.>` in queue group `core` only | `allow_responses` |
 | `pipeline` | the pipeline worker | `dead.v1.>`, `authz.v1.grant.pipeline`, and its own consumer: `$JS.API.CONSUMER.INFO.JOBS.pipeline`, `$JS.API.CONSUMER.MSG.NEXT.JOBS.pipeline`, `$JS.ACK.JOBS.pipeline.>` | `inference.v1.pipeline.>` in queue group `pipeline` only; `_INBOX_worker.pipeline.>` | `allow_responses` |
 | `echo` | the echo worker (dev and test) | `authz.v1.grant.echo` | `inference.v1.echo.>` in queue group `echo` only; `_INBOX_worker.echo.>` | `allow_responses` |
 | `bff_clinical` | the clinical app's BFF | `api.v1.clinical`; the `bff_direct` operations one by one (`inference.v1.echo.ping` in dev and test only) | `_INBOX_bff.clinical.>` | none |
@@ -37,9 +37,11 @@ grant subject. No BFF user has `jobs.v1.>`, `$KV.>`, `$JS.>`, `dead.v1.>`
 or `authz.v1.>`. Every rule has a refusal test in
 `services/core/internal/bus/bus_integration_test.go`.
 
-`allow_responses: {max: 1, expires: "1m"}` lets a responder answer a
-request it received once, within a minute, without a general publish right
-on the requester's inbox.
+`allow_responses: {max: 1, expires: "1m"}` gives a responder one publish,
+within a minute, for each request it receives. That publish goes to the
+request's reply subject, which **the requester chooses**. It is not
+limited to an inbox (see below), so it is a capability handed to whoever
+can send the responder a request, not a safety property.
 
 The core service's user is still named `gateway`. The name predates the
 rename to `core` and is kept on purpose, so the security config, the
@@ -47,18 +49,45 @@ credentials and the tests stay as they are.
 
 ### Responders must check the reply subject
 
-NATS does not check the reply subject a requester sets. A response
-permission lets the responder publish once to *whatever* subject the
-request named, past its allow list and its deny list (the test
-`TestReplySubjectIsTheResponderToCheck` shows it). So a BFF could ask core
-to "reply" on `jobs.v1.<hospital>.run_query` or a `$JS.API` subject. Every
-responder therefore refuses, with no reply, a reply subject outside the
-prefix it expects:
+NATS does not check the reply subject a requester sets. A responder's one
+reply is **one arbitrary publish** with the responder's identity, past its
+allow list and its deny list (`TestReplySubjectIsTheResponderToCheck`
+shows the reply reaching another app's inbox, landing on `JOBS` and
+writing a KV entry; a throwaway probe showed a deny list doesn't stop it).
+For core that includes a JetStream API call made with core's account.
+For example:
 
-- core on `api.v1.<app>`: `_INBOX_bff.<app>.`
-- core on `authz.v1.grant.<service>`: `_INBOX_worker.<service>.`
-- a worker on a BFF-direct call: `_INBOX_bff.clinical.` (spec §17.2); on a
-  call from core: `_INBOX_gateway.`
+- `$JS.API.STREAM.DELETE.KV_denylist` deletes the denylist, so revoked
+  tokens work again until they expire;
+- `$JS.API.STREAM.PURGE.JOBS` drops every queued job;
+- `jobs.v1.<hospital>.run_query` queues a job the requester may not
+  publish;
+- `$KV.denylist.<key>` writes a KV entry;
+- `_INBOX_bff.platform.<x>` sends core's answer to the other app.
+
+It is reachable by anyone who can send a responder a request:
+
+- a stolen BFF credential, through `api.v1.<app>` to core;
+- a compromised worker, through `authz.v1.grant.<service>` to core;
+- a stolen clinical BFF credential, through a `bff_direct` subject to a
+  worker.
+
+So every responder refuses, with no reply, a reply subject that doesn't
+start with exactly the prefix it expects, and whose remaining tokens aren't
+literal. A literal token has no `*`, `>`, whitespace or empty token.
+
+| Responder | Expected prefix |
+|---|---|
+| core on `api.v1.<app>` | `_INBOX_bff.<app>.` (app taken from the subject) |
+| core on `authz.v1.grant.<service>` | `_INBOX_worker.<service>.` (service from the subject) |
+| a worker on a BFF-direct call | `_INBOX_bff.clinical.` (spec §17.2) |
+| a worker on a call from core | `_INBOX_gateway.` |
+
+The only server-side defence is to split NATS accounts: the BFFs and the
+workers each in their own account, reaching core's subjects through
+service exports and imports, so a reply can't leave the exported service's
+response path. Spec §7.6 lists it as "later, optional". `TODO.md` asks for
+it before production.
 
 ## Inbox prefixes
 
@@ -71,11 +100,13 @@ to them.
 
 ## Queue groups
 
-Core subscribes `api.v1.>` and `authz.v1.grant.>` in queue group `core`;
+Core subscribes `api.v1.*` and `authz.v1.grant.>` in queue group `core`;
 each worker subscribes `inference.v1.<service>.>` in a queue group named
 after the service. The permissions allow those subscriptions only in that
 queue group, so a stray plain subscriber can't take a copy of every
-request. Jobs go to one durable pull consumer per service, shared by its
+request. (Core's `api.v1.*` doesn't stop it subscribing `api.v1.>`, because
+NATS 2.10 matches a `>` subscription against a `*` permission. What bounds
+the subjects core sees is that the BFFs can publish only `api.v1.<app>`.) Jobs go to one durable pull consumer per service, shared by its
 copies.
 
 ## Streams
@@ -85,8 +116,8 @@ with `NATS_JS_REPLICAS` replicas (1 in dev, 3 on the production cluster).
 
 | Stream | Subjects | Settings | Consumers |
 |---|---|---|---|
-| `JOBS` | `jobs.v1.>` | file storage; work-queue retention (an acked job is removed); `max_age` 7 days; duplicate window 2 minutes (`Nats-Msg-Id` = the query id); `discard: new` per subject with at most 10,000 waiting jobs per subject, so a flood is refused at publish and nothing queued is dropped | `pipeline` on `jobs.v1.*.run_query`: explicit ack, `ack_wait` 60 s, `max_deliver` 5, no `BackOff` (the worker picks each retry's delay with `Nak(delay)`), `max_ack_pending` from `JOBS_PIPELINE_MAX_ACK_PENDING` (default 8) |
-| `DEAD` | `dead.v1.>` | file storage; `max_age` 30 days | `core_dead`: explicit ack, `ack_wait` 30 s |
+| `JOBS` | `jobs.v1.>` | file storage; work-queue retention (an acked job is removed); `max_age` 7 days; duplicate window 2 minutes (`Nats-Msg-Id` = the query id); `discard: new` per subject with at most 10,000 waiting jobs per subject, so a flood is refused at publish and nothing queued is dropped; messages at most 72 KiB (64 KiB body plus headers, the request token among them); at most 256 MiB in all | `pipeline` on `jobs.v1.*.run_query`: explicit ack, `ack_wait` 60 s, `max_deliver` 5, no `BackOff` (the worker picks each retry's delay with `Nak(delay)`), `max_ack_pending` from `JOBS_PIPELINE_MAX_ACK_PENDING` (default 8) |
+| `DEAD` | `dead.v1.>` | file storage; `max_age` 30 days; messages at most 4 KiB (ids, type, attempts, code); `discard: new` per subject with at most 10,000 per subject, so one hospital's failures can't crowd out another's; at most 64 MiB in all | `core_dead`: explicit ack, `ack_wait` 30 s |
 
 A work-queue stream allows only one consumer per subject, so each job type
 has exactly one durable consumer.
@@ -95,6 +126,9 @@ has exactly one durable consumer.
 
 - `max_payload: 1MB`, the outer bound (the services check their own,
   smaller limits).
+- `max_file_store: 1GB` (the demo: 512 MB). `JOBS` and `DEAD` reserve
+  their 320 MiB in it, so no flood of jobs or dead letters can fill the
+  store the KV buckets (the denylist among them) need.
 - JetStream storage is encrypted at rest (`cipher: chachapoly`), with the
   key from `NATS_JS_KEY`. Losing the key loses the store.
 

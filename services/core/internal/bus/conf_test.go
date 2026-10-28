@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 )
 
 // repo is the repository root, from services/core/internal/bus.
@@ -99,7 +101,7 @@ func TestDeployGatewayPermissionsMatchDev(t *testing.T) {
 // the environment, and no shared worker user left.
 func TestDevConfLimitsAndEncryption(t *testing.T) {
 	dev := stripComments(readConf(t, "services/nats/nats.conf"))
-	for _, want := range []string{"max_payload:1MB", "cipher:chachapoly", "key:$NATS_JS_KEY"} {
+	for _, want := range []string{"max_payload:1MB", "max_file_store:1GB", "cipher:chachapoly", "key:$NATS_JS_KEY"} {
 		if !strings.Contains(dev, want) {
 			t.Errorf("services/nats/nats.conf lacks %s", want)
 		}
@@ -108,5 +110,17 @@ func TestDevConfLimitsAndEncryption(t *testing.T) {
 		if strings.Contains(dev, gone) {
 			t.Errorf("services/nats/nats.conf still has %s", gone)
 		}
+	}
+}
+
+// JOBS and DEAD reserve their MaxBytes in max_file_store. The demo's store
+// is 512 MB (deploy/nats/nats.conf); the streams must fit with room left
+// for the KV buckets (at least 128 MiB), or core serve can't start there.
+func TestStreamReservationsFitTheDemoStore(t *testing.T) {
+	if !strings.Contains(stripComments(readConf(t, "deploy/nats/nats.conf")), "max_file_store:512MB") {
+		t.Fatal("deploy/nats/nats.conf max_file_store changed: recheck this budget")
+	}
+	if bus.StreamsMaxBytes > 512<<20-128<<20 {
+		t.Fatalf("JOBS+DEAD reserve %d bytes, too much for the demo's 512 MB store", bus.StreamsMaxBytes)
 	}
 }

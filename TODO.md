@@ -41,7 +41,8 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 
 **NATS**
 - **Reconnect and disconnect handlers** that log and flip readiness. [T3 M6]
-- **Every NATS responder checks the reply subject** before answering: NATS lets an `allow_responses` reply go to any subject the requester named, past the allow and deny lists (`TestReplySubjectIsTheResponderToCheck`). Core on `api.v1.<app>` answers only `_INBOX_bff.<app>.`, on `authz.v1.grant.<service>` only `_INBOX_worker.<service>.`; workers as spec §17.2. (Plan 3, Tasks 6, 7, 9)
+- **Every NATS responder checks the reply subject** before answering. NATS lets an `allow_responses` reply go to any subject the requester named, past the allow and deny lists, JetStream API calls with core's account included (`TestReplySubjectIsTheResponderToCheck`; services/nats/README.md). Core on `api.v1.<app>` answers only `_INBOX_bff.<app>.`, and on `authz.v1.grant.<service>` only `_INBOX_worker.<service>.`; workers follow spec §17.2. The rest of the subject must be literal tokens. (Plan 3, Tasks 6, 7, 9)
+- **Split NATS accounts before production.** This is the only server-side defence against reply-subject abuse: the BFFs and the workers each go in their own account and reach core's subjects through service exports and imports, so a responder's reply can't reach core's JetStream API or KV. Spec §7.6 lists it as "later, optional"; it must be done before production.
 - **Demo NATS (`deploy/nats/nats.conf`)** still lacks JetStream encryption at rest (`NATS_JS_KEY` from `setup-host.sh`), TLS, and the per-service worker and BFF users; it has Task 4's narrowed `gateway` permissions. (Plan 3, Task 15, or a deploy follow-up)
 
 **Auth**

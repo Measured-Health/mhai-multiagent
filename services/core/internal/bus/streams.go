@@ -28,7 +28,30 @@ const (
 	JobsMaxPerSubject = 10000
 	JobsMaxAge        = 7 * 24 * time.Hour
 	JobsDuplicates    = 2 * time.Minute // Nats-Msg-Id window (the query id)
-	DeadMaxAge        = 30 * 24 * time.Hour
+	// JobsMaxMsgSize bounds one job message, headers included: the 64 KiB
+	// job-body limit, plus 8 KiB for the headers (the request token is at
+	// most 4 KiB; Nats-Msg-Id, Mhai-Schema and traceparent are small).
+	JobsMaxMsgSize = 72 << 10
+	// JobsMaxBytes caps the whole stream. Jobs carry ids (well under 8 KiB
+	// with the token), so 256 MiB holds tens of thousands of waiting jobs.
+	JobsMaxBytes = 256 << 20
+
+	DeadMaxAge = 30 * 24 * time.Hour
+	// DeadMaxMsgSize: a dead letter is ids, the type, attempts and a code
+	// (a few hundred bytes).
+	DeadMaxMsgSize = 4 << 10
+	// DeadMaxPerSubject bounds one hospital's dead letters of one type
+	// over the 30 days; past it a new one is refused, so a failing hospital
+	// can't crowd out another's (the job row still records the failure).
+	DeadMaxPerSubject = 10000
+	// DeadMaxBytes caps the whole stream, so a flood from a compromised
+	// worker credential (every worker may publish dead.v1.>) can't fill the
+	// store that JOBS and the KV buckets (the denylist) need.
+	DeadMaxBytes = 64 << 20
+
+	// StreamsMaxBytes is what JOBS and DEAD reserve in the server's
+	// max_file_store (services/nats/nats.conf: 1 GB; the demo: 512 MB).
+	StreamsMaxBytes = JobsMaxBytes + DeadMaxBytes
 
 	PipelineAckWait    = 60 * time.Second
 	PipelineMaxDeliver = 5
@@ -76,6 +99,9 @@ func replicaCount(n int) (int, error) {
 //   - The pipeline consumer has no BackOff (plan departure 4): the worker
 //     chooses each retry's delay with Nak(delay).
 //   - DEAD keeps dead letters 30 days, for core's consumer and for review.
+//   - Both are bounded in message size, per subject and in bytes, with
+//     discard new: a flood is refused at publish and never fills the store
+//     the KV buckets share.
 func EnsureStreams(ctx context.Context, js jetstream.JetStream, sc StreamConfig) error {
 	var err error
 	if sc.Replicas, err = replicaCount(sc.Replicas); err != nil {
@@ -98,6 +124,8 @@ func EnsureStreams(ctx context.Context, js jetstream.JetStream, sc StreamConfig)
 		Discard:              jetstream.DiscardNew,
 		DiscardNewPerSubject: true,
 		MaxMsgsPerSubject:    JobsMaxPerSubject,
+		MaxMsgSize:           JobsMaxMsgSize,
+		MaxBytes:             JobsMaxBytes,
 		MaxAge:               JobsMaxAge,
 		Duplicates:           JobsDuplicates,
 		Replicas:             sc.Replicas,
@@ -105,12 +133,17 @@ func EnsureStreams(ctx context.Context, js jetstream.JetStream, sc StreamConfig)
 		return fmt.Errorf("bus: ensure stream JOBS: %w", err)
 	}
 	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      DeadStream,
-		Subjects:  []string{"dead.v1.>"},
-		Storage:   jetstream.FileStorage,
-		Retention: jetstream.LimitsPolicy,
-		MaxAge:    DeadMaxAge,
-		Replicas:  sc.Replicas,
+		Name:                 DeadStream,
+		Subjects:             []string{"dead.v1.>"},
+		Storage:              jetstream.FileStorage,
+		Retention:            jetstream.LimitsPolicy,
+		Discard:              jetstream.DiscardNew,
+		DiscardNewPerSubject: true,
+		MaxMsgsPerSubject:    DeadMaxPerSubject,
+		MaxMsgSize:           DeadMaxMsgSize,
+		MaxBytes:             DeadMaxBytes,
+		MaxAge:               DeadMaxAge,
+		Replicas:             sc.Replicas,
 	}); err != nil {
 		return fmt.Errorf("bus: ensure stream DEAD: %w", err)
 	}

@@ -200,6 +200,12 @@ func TestServiceSubscribesOnlyInItsQueueGroup(t *testing.T) {
 	g = gateway(t)
 	_, _ = g.nc.QueueSubscribe("authz.v1.grant.>", "notcore", func(*nats.Msg) {})
 	g.violation(t, "authz.v1.grant.>")
+	// Core's permission is "api.v1.* core", but NATS 2.10 accepts a
+	// subscription to api.v1.> under it (its subscribe check matches the
+	// '>' token against '*'). What bounds core's API traffic is the
+	// publish side: nobody can publish below api.v1.<app>.
+	cannotPublish(t, bffClinical, "api.v1.clinical.x", "api.v1.clinical.>")
+	cannotPublish(t, bffPlatform, "api.v1.platform.x")
 }
 
 func TestServiceUserHasNoKVAccess(t *testing.T) {
@@ -331,7 +337,7 @@ func TestWorkerGrantSubjectIsItsOwn(t *testing.T) {
 func TestCoreAnswersBFFThroughAllowResponses(t *testing.T) {
 	g := gateway(t)
 	second := make(chan string, 1)
-	if _, err := g.nc.QueueSubscribe("api.v1.>", "core", func(m *nats.Msg) {
+	if _, err := g.nc.QueueSubscribe("api.v1.*", "core", func(m *nats.Msg) {
 		_ = m.Respond([]byte("ok"))
 		second <- m.Reply
 	}); err != nil {
@@ -411,26 +417,79 @@ func TestAllowResponsesExpire(t *testing.T) {
 	w.violation(t, reply)
 }
 
-// NATS does not check the reply subject a publisher sets: a responder with
-// allow_responses can be made to publish once to any subject the requester
-// names, past its allow list and its deny list. So every responder (core's
-// api.v1 and grant handlers, every worker) must refuse a reply subject
-// outside the expected inbox prefix before it answers (spec §17.2 step 1).
-// This test is a tripwire: if a NATS upgrade starts checking reply
-// subjects, it fails and the note above can be relaxed.
+// NATS does not check the reply subject a requester sets: a responder with
+// allow_responses publishes its one reply to whatever subject the request
+// named, past its allow list and its deny list. This proves the reply is
+// delivered (or acted on) for three kinds of target, so every responder
+// (core's api.v1 and grant handlers, every worker) must refuse a reply
+// subject outside its expected inbox prefix before it answers (README,
+// "Responders must check the reply subject"). It is a tripwire: if a NATS
+// upgrade starts checking reply subjects, it fails and the note can go.
 func TestReplySubjectIsTheResponderToCheck(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
 	g := gateway(t)
-	if _, err := g.nc.QueueSubscribe("api.v1.>", "core", func(m *nats.Msg) { _ = m.Respond([]byte("x")) }); err != nil {
+	if _, err := g.nc.QueueSubscribe("api.v1.*", "core", func(m *nats.Msg) { _ = m.Respond([]byte("core-answer")) }); err != nil {
 		t.Fatal(err)
 	}
 	_ = g.nc.Flush()
 	b := bffClinical(t)
-	for _, reply := range []string{"unlisted.v1.probe", "$JS.API.STREAM.DELETE.NO_SUCH_STREAM"} {
-		if err := b.nc.PublishRequest("api.v1.clinical", reply, nil); err != nil {
-			t.Fatal(err)
+
+	// (a) Another app's inbox: the platform BFF receives core's answer to a
+	// clinical request.
+	p := bffPlatform(t)
+	probe := bus.BFFInbox("platform") + ".probe"
+	sub, err := p.nc.SubscribeSync(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = p.nc.Flush()
+	if err := b.nc.PublishRequest("api.v1.clinical", probe, nil); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := sub.NextMsg(3 * time.Second); err != nil || string(m.Data) != "core-answer" {
+		t.Fatalf("reply to another app's inbox not delivered: %v", err)
+	}
+
+	// (b) A job: the BFF, which may not publish jobs.v1, gets one stored on
+	// JOBS through core's reply.
+	js, _ := jetstream.New(g.nc)
+	job := jobSubject("run_query")
+	if err := b.nc.PublishRequest("api.v1.clinical", job, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool { return subjectCount(ctx, t, js, bus.JobsStream, job) == 1 },
+		"reply to a jobs.v1 subject not stored on JOBS")
+
+	// (c) A KV write with core's account: a denylist entry appears.
+	buckets, err := bus.OpenBuckets(ctx, js, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "probe" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if err := b.nc.PublishRequest("api.v1.clinical", "$KV."+bus.DenylistBucket+"."+key, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool { _, err := buckets.Denylist.Get(ctx, key); return err == nil },
+		"reply to a $KV subject not written")
+
+	// (d) A JetStream API call as core: not refused by NATS (a delete or
+	// purge of a real stream would go the same way; this one names none).
+	if err := b.nc.PublishRequest("api.v1.clinical", "$JS.API.STREAM.DELETE.NO_SUCH_STREAM", nil); err != nil {
+		t.Fatal(err)
+	}
+	b.noViolation(t)
+	g.noViolation(t)
+}
+
+func waitFor(t *testing.T, d time.Duration, ok func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for !ok() {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
 		}
-		b.noViolation(t)
-		g.noViolation(t) // the answer went out: NATS let it through
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -479,8 +538,8 @@ func TestTwoWorkerCopiesShareRequests(t *testing.T) {
 }
 
 func TestTwoCoreCopiesShareAPI(t *testing.T) {
-	share(t, [2]*svc{gateway(t), gateway(t)}, "api.v1.>", "core", bffClinical(t), "api.v1.clinical")
-	share(t, [2]*svc{gateway(t), gateway(t)}, "api.v1.>", "core", bffPlatform(t), "api.v1.platform")
+	share(t, [2]*svc{gateway(t), gateway(t)}, "api.v1.*", "core", bffClinical(t), "api.v1.clinical")
+	share(t, [2]*svc{gateway(t), gateway(t)}, "api.v1.*", "core", bffPlatform(t), "api.v1.platform")
 }
 
 func TestTwoCoreCopiesShareGrants(t *testing.T) {
@@ -598,7 +657,9 @@ func TestGatewayCannotReadOtherStreams(t *testing.T) {
 		"$JS.API.STREAM.CREATE.KV_other", "$JS.API.STREAM.NAMES", "$JS.API.STREAM.LIST",
 		// Jobs are the workers' to read; dead letters only through core_dead.
 		"$JS.API.STREAM.MSG.GET.JOBS", "$JS.API.CONSUMER.MSG.NEXT.JOBS.pipeline", "$JS.ACK.JOBS.pipeline.x",
-		"$JS.API.CONSUMER.MSG.NEXT.DEAD.other", "$JS.API.STREAM.MSG.GET.DEAD")
+		"$JS.API.CONSUMER.MSG.NEXT.DEAD.other", "$JS.API.STREAM.MSG.GET.DEAD",
+		// KV subjects of the four buckets only.
+		"$KV.other.x", "$KV.KV_denylist.x")
 	cannotSubscribe(t, gateway, "jobs.v1.>", "dead.v1.>", "inference.v1.>", bus.WorkerInbox("pipeline")+".>", "_INBOX_bff.>")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -662,7 +723,8 @@ func TestEnsureStreamsIdempotent(t *testing.T) {
 	jc := jobs.CachedInfo().Config
 	if len(jc.Subjects) != 1 || jc.Subjects[0] != "jobs.v1.>" || jc.Storage != jetstream.FileStorage ||
 		jc.Retention != jetstream.WorkQueuePolicy || jc.Discard != jetstream.DiscardNew || !jc.DiscardNewPerSubject ||
-		jc.MaxMsgsPerSubject != 10000 || jc.MaxAge != 7*24*time.Hour || jc.Duplicates != 2*time.Minute || jc.Replicas != 1 {
+		jc.MaxMsgsPerSubject != 10000 || jc.MaxAge != 7*24*time.Hour || jc.Duplicates != 2*time.Minute || jc.Replicas != 1 ||
+		jc.MaxMsgSize != 72<<10 || jc.MaxBytes != 256<<20 {
 		t.Fatalf("JOBS config = %+v", jc)
 	}
 	dead, err := js.Stream(ctx, bus.DeadStream)
@@ -671,7 +733,8 @@ func TestEnsureStreamsIdempotent(t *testing.T) {
 	}
 	dc := dead.CachedInfo().Config
 	if len(dc.Subjects) != 1 || dc.Subjects[0] != "dead.v1.>" || dc.Storage != jetstream.FileStorage ||
-		dc.MaxAge != 30*24*time.Hour || dc.Replicas != 1 {
+		dc.MaxAge != 30*24*time.Hour || dc.Replicas != 1 || dc.Discard != jetstream.DiscardNew || !dc.DiscardNewPerSubject ||
+		dc.MaxMsgsPerSubject != 10000 || dc.MaxMsgSize != 4<<10 || dc.MaxBytes != 64<<20 {
 		t.Fatalf("DEAD config = %+v", dc)
 	}
 	pc, err := js.Consumer(ctx, bus.JobsStream, bus.PipelineConsumer)
@@ -718,14 +781,14 @@ func TestDuplicateMsgIDDropped(t *testing.T) {
 			t.Fatalf("publish %d: duplicate = %v", i, ack.Duplicate)
 		}
 	}
-	if n := subjectCount(ctx, t, js, subj); n != 1 {
+	if n := subjectCount(ctx, t, js, bus.JobsStream, subj); n != 1 {
 		t.Fatalf("stored %d messages, want 1", n)
 	}
 }
 
-func subjectCount(ctx context.Context, t *testing.T, js jetstream.JetStream, subj string) uint64 {
+func subjectCount(ctx context.Context, t *testing.T, js jetstream.JetStream, stream, subj string) uint64 {
 	t.Helper()
-	s, err := js.Stream(ctx, bus.JobsStream)
+	s, err := js.Stream(ctx, stream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -736,16 +799,32 @@ func subjectCount(ctx context.Context, t *testing.T, js jetstream.JetStream, sub
 	return info.State.Subjects[subj]
 }
 
-// F3: a flood on one hospital's subject is refused at publish; what is
-// already queued is kept (DiscardNewPerSubject), and other subjects are
-// unaffected.
-func TestJobsPerSubjectLimitRefusesNew(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	js, _ := jetstream.New(gateway(t).nc, jetstream.WithPublishAsyncMaxPending(512))
-	subj := jobSubject("flood_test")
-	for i := 0; i < 10000; i++ {
-		if _, err := js.PublishAsync(subj, []byte("j")); err != nil {
+// freshNATS starts a server of its own, with the streams, for a test that
+// fills a stream: nothing it leaves reaches the shared server's consumers.
+func freshNATS(t *testing.T) *testutil.NATS {
+	t.Helper()
+	ctx := context.Background()
+	n, stop, err := testutil.NewNATS(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	nc, js, err := bus.Connect(ctx, n.GatewayURL, "", bus.GatewayInboxPrefix, bus.TLS{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	if err := bus.EnsureStreams(ctx, js, devStreams); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// floodSubject publishes n small messages on subj and waits for every ack.
+func floodSubject(ctx context.Context, t *testing.T, js jetstream.JetStream, subj string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if _, err := js.PublishAsync(subj, []byte("x")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -754,17 +833,73 @@ func TestJobsPerSubjectLimitRefusesNew(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("async publishes did not complete")
 	}
-	if n := subjectCount(ctx, t, js, subj); n != 10000 {
-		t.Fatalf("stored %d, want 10000", n)
+}
+
+// F3: a flood on one hospital's subject is refused at publish; what is
+// already queued is kept (DiscardNewPerSubject), and other subjects are
+// unaffected.
+func TestJobsPerSubjectLimitRefusesNew(t *testing.T) {
+	n := freshNATS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	js, _ := jetstream.New(raw(t, n.GatewayURL, bus.GatewayInboxPrefix).nc, jetstream.WithPublishAsyncMaxPending(512))
+	subj := jobSubject("flood_test")
+	floodSubject(ctx, t, js, subj, bus.JobsMaxPerSubject)
+	if got := subjectCount(ctx, t, js, bus.JobsStream, subj); got != bus.JobsMaxPerSubject {
+		t.Fatalf("stored %d, want %d", got, bus.JobsMaxPerSubject)
 	}
 	if _, err := js.Publish(ctx, subj, []byte("one too many")); err == nil {
 		t.Fatal("publish past the per-subject limit succeeded")
 	}
-	if n := subjectCount(ctx, t, js, subj); n != 10000 {
-		t.Fatalf("after the refused publish stored %d, want 10000", n)
+	if got := subjectCount(ctx, t, js, bus.JobsStream, subj); got != bus.JobsMaxPerSubject {
+		t.Fatalf("after the refused publish stored %d", got)
 	}
 	if _, err := js.Publish(ctx, jobSubject("flood_test"), []byte("another hospital")); err != nil {
 		t.Fatalf("another subject refused: %v", err)
+	}
+}
+
+// A flood of one hospital's dead letters (any worker may publish dead.v1.>)
+// is refused past the per-subject limit, and another hospital's dead
+// letter still gets in.
+func TestDeadPerSubjectLimitKeepsOtherHospitals(t *testing.T) {
+	n := freshNATS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	js, _ := jetstream.New(raw(t, n.PipelineURL, bus.WorkerInbox("pipeline")).nc, jetstream.WithPublishAsyncMaxPending(512))
+	subj := "dead.v1." + uuid.NewString() + ".run_query"
+	floodSubject(ctx, t, js, subj, bus.DeadMaxPerSubject)
+	if _, err := js.Publish(ctx, subj, []byte("one too many")); err == nil {
+		t.Fatal("dead letter past the per-subject limit stored")
+	}
+	if _, err := js.Publish(ctx, "dead.v1."+uuid.NewString()+".run_query", []byte("another hospital")); err != nil {
+		t.Fatalf("another hospital's dead letter refused: %v", err)
+	}
+	gjs, _ := jetstream.New(raw(t, n.GatewayURL, bus.GatewayInboxPrefix).nc)
+	if got := subjectCount(ctx, t, gjs, bus.DeadStream, subj); got != bus.DeadMaxPerSubject {
+		t.Fatalf("stored %d, want %d", got, bus.DeadMaxPerSubject)
+	}
+}
+
+// Message size caps: a dead letter is ids and a code, a job is at most a
+// 64 KiB body plus headers.
+func TestStreamsRefuseOversizedMessages(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pjs, _ := jetstream.New(pipeline(t).nc)
+	dead := "dead.v1." + uuid.NewString() + ".run_query"
+	if _, err := pjs.Publish(ctx, dead, make([]byte, 5<<10)); err == nil {
+		t.Fatal("a 5 KB dead letter was stored")
+	}
+	if _, err := pjs.Publish(ctx, dead, make([]byte, 512)); err != nil {
+		t.Fatalf("a small dead letter was refused: %v", err)
+	}
+	gjs, _ := jetstream.New(gateway(t).nc)
+	if _, err := gjs.Publish(ctx, jobSubject("size_test"), make([]byte, bus.JobsMaxMsgSize+1)); err == nil {
+		t.Fatal("a job over the size cap was stored")
+	}
+	if _, err := gjs.Publish(ctx, jobSubject("size_test"), make([]byte, 64<<10)); err != nil {
+		t.Fatalf("a 64 KiB job was refused: %v", err)
 	}
 }
 
