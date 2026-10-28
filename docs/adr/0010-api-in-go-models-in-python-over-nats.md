@@ -4,6 +4,7 @@
 - **Date:** 2026-10-26
 - **Supersedes:** 0007 (API in Python, contract-first), which was proposed on `feat/8-api-gateway` and never merged
 - **Amends:** 0008 (models behind inference services): the services are reached over NATS instead of HTTP
+- **Amended by:** 0011 (frontend ingress over NATS): the BFF reaches core over NATS too, and may call intelligence directly after intelligence asks core for a grant
 - **Naming (product owner, 2026-10-27):** the Go service this ADR calls for is named the core service and lives in `services/core/`; the Python side is `services/intelligence/` (package `intelligence`), and the NATS config is in `services/nats/`. The NATS user stays `gateway`.
 
 ## Context
@@ -39,6 +40,8 @@ No Go API code has been written yet, so changing language now costs nothing.
   - that the hospital in the token matches the data asked for.
 
   If any check fails, the service refuses and does no work.
+
+  > *Amended by the 2026-10-28 intelligence boundary design (§14):* request tokens are signed with their own key, separate from the access-token key, and bind the exact subject and the body's hash. For background jobs, replay is stopped by a database claim rather than a `jti` cache, because JetStream redelivers the same message. Each Python service has its own NATS user, and job audit facts reach Go through a transactional outbox.
 - **Security rules have one owner.** The permission table lives in Go. The Python side's checks are generated from it, so the two can't drift.
 - **One shared deployment.** Every hospital's data is kept separate in one database, enforced by row-level security as well as by the code.
 
