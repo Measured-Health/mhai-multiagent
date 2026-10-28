@@ -149,6 +149,12 @@ Neither needs the BFF key, and neither says what failed.
 - `migrate` creates the database logins (`EnsureLogin`) with a SCRAM-SHA-256
   verifier built in Go; the plaintext password never reaches Postgres, its
   logs or `pg_stat_statements`. Login passwords must be printable ASCII.
+  The verifier goes in a statement of its own, after a secret-free probe
+  that the password may be set, so a failure (a missing privilege, a bad
+  attribute) is logged without it. As a superuser, `migrate` also turns
+  `log_statement` and `log_min_error_statement` off for that transaction; a
+  CREATEROLE owner can't, so a server with `log_statement = ddl` or `all`
+  logs the verifier there.
 - At startup, `serve` refuses a database login that is a superuser, has
   BYPASSRLS, CREATEROLE, CREATEDB or REPLICATION, holds any membership but
   `mhai_app`, or owns the database, a schema or a table.

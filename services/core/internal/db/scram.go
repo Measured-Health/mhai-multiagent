@@ -48,20 +48,17 @@ func scramVerifierSalt(password string, salt []byte, iterations int) (string, er
 	return "SCRAM-SHA-256$" + strconv.Itoa(iterations) + ":" + b64(salt) + "$" + b64(stored[:]) + ":" + b64(serverKey), nil
 }
 
-// loginStatement is the CREATE or ALTER ROLE statement EnsureLogin runs.
-// The name is quoted as an identifier; the password goes only as its
-// verifier, whose characters (base64, digits, '$', ':', '-') need no
-// escaping inside a literal.
-func loginStatement(verb, name, password string) (string, error) {
-	if verb != "CREATE" && verb != "ALTER" {
-		return "", errors.New("db: ensure login: bad verb")
-	}
+// passwordStatement is the ALTER ROLE statement that sets the login's
+// password. The name is quoted as an identifier; the password goes only as
+// its verifier, whose characters (base64, digits, '$', ':', '-') need no
+// escaping inside a literal. It names no attribute, so the only thing in it
+// that can fail is the privilege EnsureLogin has already probed.
+func passwordStatement(name, password string) (string, error) {
 	v, err := scramVerifier(password)
 	if err != nil {
 		return "", err
 	}
-	return verb + " ROLE " + pgx.Identifier{name}.Sanitize() +
-		" LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '" + v + "'", nil
+	return "ALTER ROLE " + pgx.Identifier{name}.Sanitize() + " PASSWORD '" + v + "'", nil
 }
 
 func printableASCII(s string) bool {
