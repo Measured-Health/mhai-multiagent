@@ -19,19 +19,27 @@ behind NATS (the boundary plan), then the hospital and platform endpoints.
 
 | Service | Job |
 |---|---|
-| **Core service** (Go, `services/core/`) | The API, sign-in and sessions, permissions, tenancy, audit, and the EMR connectors. Every frontend call is decided here: either core serves it, or it grants intelligence a per-call token for it. |
+| **Core service** (Go, `services/core/`) | The API, sign-in and sessions, permissions, tenancy and audit. Every frontend call is decided here: either core serves it, or it grants intelligence a per-call token for it. |
 | **NATS** (`services/nats/`) | The only link between the BFF, Go and Python (ADR 0011). Request/reply for calls someone waits on; JetStream for background jobs; KV for the core service's denylist and attempt counters. Replaces the Redis queue stub once the Python side moves over. |
 | **Python services** (`services/intelligence/`) | The models: agents, retrieval and the knowledge base, guardrails, PII masking, inference. Reached only through NATS. Each request carries a token signed by the core service, and the service checks it before doing any work. |
+| **EMR integration service** (planned, `services/emr/`) | Connects to each hospital's EMR/EHR (one connector per EMR type, ADR 0009): receives or fetches records, maps them to the FHIR-based model, normalises codes and units, keeps the per-hospital patient index, and tells core when new data arrives. Its own service because it holds outside credentials and talks to hospital networks; a fault or breach there must not reach sign-in and permissions. Connections are configured in the platform app. |
+| **Documents service** (planned, `services/documents/`) | Uploads, letters and exports: virus scanning, storing files in object storage, signed download links, and handing new documents to intelligence's document reading (DIA) as jobs. Core still decides who may upload or download. |
+| **Model serving** (planned, performance plan) | Runs the models on GPUs (vLLM or similar), separate from the pipeline logic, so model hosts stay stateless with no database access. See `docs/specs/2026-10-27-intelligence-performance-design.md`. |
 | **PostgreSQL** | One database for all hospitals. Row-level security (RLS) keeps each hospital's rows apart. |
 | **Notifications service** (planned, `services/notifications/`) | Handles every alert and notification: EMR abnormality alerts, decisions on clinicians' corrections, job and system updates. Delivers them in the app (the bell and pop-ups) and by opt-in email. Core decides who is told and publishes the event over NATS; the notifications service only delivers it, and never reads patient records itself. Intelligence never notifies anyone directly. |
 | **Object storage** (planned) | Documents, letters and exports. |
 
 ```
-browser → BFF (Next.js) → NATS ─┬→ core service ─┬→ PostgreSQL (RLS per hospital)
-                                │                 └→ object storage
-                                ├→ Python services (intelligence)
-                                └→ notifications service (planned) → bell, pop-ups, email
+browser → BFF (Next.js) → NATS ─┬→ core service ──→ PostgreSQL (RLS per hospital)
+                                ├→ Python services (intelligence) ─→ model serving (planned, GPUs)
+                                ├→ notifications service (planned) → bell, pop-ups, email
+                                ├→ documents service (planned) ────→ object storage
+                                └→ EMR integration (planned) ←────→ hospital EMR/EHR systems
 ```
+
+Every service sits behind NATS with its own login and permissions. Only
+core decides who may do what; the other services act on core's
+decisions (a signed request token, or an event core published).
 
 Security rules are written once, in Go. Python never takes a hospital or
 user from a payload; it takes them only from the verified token.
