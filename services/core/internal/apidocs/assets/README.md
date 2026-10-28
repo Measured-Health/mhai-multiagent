@@ -15,3 +15,7 @@ bundle's release notes. The page loads nothing from a CDN.
 Redoc has no "try it out" console. Search is off (`disable-search`) because
 it runs in a `blob:` web worker, which the page's Content-Security-Policy
 does not allow.
+
+`logo.png` is the Measured Health logo (204 x 75 PNG), copied from
+`design/brand/measured-health-logo-transparent.png` in mhai-web. It is shown
+by `info.x-logo` in `openapi.yaml`, served at `/api/docs/logo.png`.

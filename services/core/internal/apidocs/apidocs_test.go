@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -38,6 +39,7 @@ func TestOnServesPageBundleAndSpec(t *testing.T) {
 	for path, ct := range map[string]string{
 		PagePath:   "text/html; charset=utf-8",
 		BundlePath: "text/javascript; charset=utf-8",
+		LogoPath:   "image/png",
 		ShimPath:   "text/javascript; charset=utf-8",
 		SpecPath:   "text/plain; charset=utf-8",
 	} {
@@ -62,7 +64,7 @@ func TestHeaders(t *testing.T) {
 		"Referrer-Policy":         "no-referrer",
 		"Cache-Control":           "no-store",
 	}
-	for _, path := range []string{PagePath, BundlePath, ShimPath, SpecPath} {
+	for _, path := range []string{PagePath, BundlePath, LogoPath, ShimPath, SpecPath} {
 		rec := get(h, http.MethodGet, path)
 		for k, v := range want {
 			if got := rec.Header().Get(k); got != v {
@@ -108,6 +110,33 @@ func TestPageLoadsShimBeforeBundleAndHidesLogo(t *testing.T) {
 	}
 	if !strings.Contains(get(handler(true), http.MethodGet, ShimPath).Body.String(), "cdn.redoc.ly") {
 		t.Error("shim does not block the Redocly CDN logo")
+	}
+}
+
+func TestLogoIsAPNG(t *testing.T) {
+	b := get(handler(true), http.MethodGet, LogoPath).Body.Bytes()
+	if len(b) < 8 || string(b[:8]) != "\x89PNG\r\n\x1a\n" {
+		t.Fatal("logo is not a PNG")
+	}
+}
+
+// Everything the page and the spec make the browser fetch must be same-origin
+// (img-src 'self'): the page's own references, and the spec's x-logo.
+func TestPageAndSpecReferenceOnlySameOrigin(t *testing.T) {
+	h := handler(true)
+	page := get(h, http.MethodGet, PagePath).Body.String()
+	for _, ref := range regexp.MustCompile(`(?:src|href)="([^"]*)"`).FindAllStringSubmatch(page, -1) {
+		if !strings.HasPrefix(ref[1], "/api/") {
+			t.Errorf("page references %q", ref[1])
+		}
+	}
+	spec := get(h, http.MethodGet, SpecPath).Body.String()
+	m := regexp.MustCompile(`(?m)^  x-logo:\n    url: (\S+)\n`).FindStringSubmatch(spec)
+	if m == nil || m[1] != LogoPath {
+		t.Fatalf("spec info.x-logo.url = %v, want %s", m, LogoPath)
+	}
+	if rec := get(h, http.MethodGet, m[1]); rec.Code != 200 {
+		t.Errorf("x-logo url status %d", rec.Code)
 	}
 }
 

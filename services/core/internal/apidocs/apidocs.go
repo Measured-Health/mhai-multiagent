@@ -20,12 +20,19 @@ import (
 const (
 	PagePath   = "/api/docs"
 	BundlePath = "/api/docs/redoc.standalone.js"
+	LogoPath   = "/api/docs/logo.png"
 	ShimPath   = "/api/docs/redoc-shim.js"
 	SpecPath   = "/api/openapi.yaml"
 )
 
 //go:embed assets/redoc.standalone.js
 var bundle []byte
+
+// logo is the Measured Health logo, shown at the top of Redoc's sidebar via
+// the spec's info.x-logo (see assets/README.md).
+//
+//go:embed assets/logo.png
+var logo []byte
 
 // shim stops Redoc's "API docs by Redocly" footer from requesting its logo
 // from cdn.redoc.ly. The bundle hard-codes that URL, which the CSP rightly
@@ -82,6 +89,7 @@ func Wrap(enabled bool, spec []byte, next http.Handler) http.Handler {
 	assets := map[string]asset{
 		PagePath:   {"text/html; charset=utf-8", []byte(page)},
 		BundlePath: {"text/javascript; charset=utf-8", bundle},
+		LogoPath:   {"image/png", logo},
 		ShimPath:   {"text/javascript; charset=utf-8", []byte(shim)},
 		SpecPath:   {"text/plain; charset=utf-8", spec},
 	}

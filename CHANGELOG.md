@@ -22,6 +22,12 @@ All notable changes to this project are documented here. The format follows
   CI fails a pull request with a breaking change to `openapi.yaml`
   (oasdiff 1.34.1). `httpx.Deprecated` sets the retirement headers.
 
+### Changed
+
+- The API docs show the Measured Health logo at the top of Redoc's sidebar
+  (`info.x-logo`, served from `/api/docs/logo.png`, same origin). `info.version`
+  1.0.2 (doc-only).
+
 ### Fixed
 
 - `GET /api/openapi.yaml` is now `text/plain` with `Content-Disposition: inline`,
@@ -29,8 +35,8 @@ All notable changes to this project are documented here. The format follows
   downloaded). Redoc's Download link still saves a file.
 - The docs page no longer logs a CSP violation for Redoc's footer logo from
   `cdn.redoc.ly`: a small same-origin script (`/api/docs/redoc-shim.js`)
-  drops that one image request. The CSP is unchanged and the Redoc bundle is
-  not modified. The nginx allow list for api-dev gains that path.
+  drops that one image request (the footer link text stays). The CSP is unchanged and the Redoc bundle is
+  not modified. The nginx allow list for api-dev gains the shim and logo paths.
 
 ### Security
 - `core migrate up` no longer lets a login's SCRAM verifier reach the
