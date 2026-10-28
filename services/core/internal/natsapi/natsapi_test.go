@@ -31,7 +31,6 @@ type seenReq struct {
 	ip       string
 	rid      string
 	deadline time.Time
-	ctxErr   error
 }
 
 func (s *seenReq) handler(status int, out func(w http.ResponseWriter)) http.Handler {

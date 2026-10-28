@@ -6,3 +6,5 @@ e91e64e7d8cefbb67f683b4c8b29322d5a0f01a8:services/core/cmd/core/main_test.go:gen
 e91e64e7d8cefbb67f683b4c8b29322d5a0f01a8:services/core/cmd/core/main_test.go:generic-api-key:96
 e91e64e7d8cefbb67f683b4c8b29322d5a0f01a8:services/core/cmd/core/main_test.go:generic-api-key:103
 e91e64e7d8cefbb67f683b4c8b29322d5a0f01a8:services/core/internal/config/config_test.go:generic-api-key:158
+# Synthetic test password in an integration test (e7349aa). Not a secret.
+e7349aa8cb6934f97c66bb31caaaf212277e5002:services/core/internal/grant/grant_integration_test.go:generic-api-key:48
