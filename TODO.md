@@ -76,3 +76,9 @@ mhai-web has built these screens against contracts that are marked **Assumed** o
 - Named access in Analysis (Plan 11c): `POST /analysis/patients/named` and `clearance/me` with `reason`.
 - §14.11 record connections (platform admin) and §12 EMR alert settings, routing and evidence (hospital side) (Plan 13).
 - §14.8 platform analysis across hospitals (Plan 12, designed only).
+
+- **Notifications service** (planned, `services/notifications/`): one service for every alert and notification (EMR abnormality alerts, correction decisions, job and system updates), delivered in the app (bell, pop-ups) and by opt-in email. Needs a design: event subjects from core, delivery and read state, email provider (open), per-user settings (`/me/notification-settings`, frontend contract §9), and rate limits. Core decides recipients; the service only delivers.
+
+- **EMR integration service** (planned, `services/emr/`): connectors per EMR type, mapping, normalisation, patient index (ADR 0009). Its own service, isolated from core because it holds outside credentials. Needs a design (the EMR design work).
+- **Documents service** (planned, `services/documents/`): uploads, letters, exports, virus scanning, object storage, signed links, DIA jobs. Needs a design.
+- **Model serving** (planned): GPU model hosts, from the parked performance plan.
