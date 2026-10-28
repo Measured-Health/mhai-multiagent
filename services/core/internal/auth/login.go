@@ -387,6 +387,12 @@ func (s *Service) reserveLogin(ctx context.Context, email, ip string) (res login
 		return res, err
 	}
 	res.ceilingLocked, err = reserveIn(ctx, s.Buckets.LoginCeiling, res.ceilingKey, MaxLoginFailuresPerLogin)
+	if err != nil {
+		// Nothing will be checked, so the (login, IP) slot goes back: a
+		// request refused for a counter fault never costs the owner a try.
+		// If the refund fails too, the slot stays counted, which fails safe.
+		_ = refundIn(context.WithoutCancel(ctx), s.Buckets.LoginAttempts, res.ipKey)
+	}
 	return res, err
 }
 

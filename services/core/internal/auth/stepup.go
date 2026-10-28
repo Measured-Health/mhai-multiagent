@@ -3,8 +3,10 @@ package auth
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -27,13 +29,40 @@ var (
 	ErrMFARequired = errors.New("auth: two-step verification not set up") // 403 mfa_required
 )
 
+// casAttempts bounds the compare-and-set retries on one counter. With
+// casBackoff between them, a burst of a few dozen writers on one key (the
+// per-login ceiling under a spread-out attack) all get through instead of
+// failing closed for contention.
+const casAttempts = 64
+
+// casBackoff waits before retry i (none before the first): a random delay
+// up to min(2^i, 32) ms, so writers that lost a compare-and-set spread out
+// instead of colliding again. It returns ctx's error if ctx ends first.
+func casBackoff(ctx context.Context, i int) error {
+	if i == 0 {
+		return nil
+	}
+	ceil := time.Millisecond << min(i, 5)
+	t := time.NewTimer(time.Duration(rand.Int64N(int64(ceil))) + 1)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
 // reserveIn counts one attempt against key in kv by compare-and-set before
 // the caller checks anything, so a concurrent burst gets at most max checks.
 // locked is true when the counter was already at max; then nothing is
 // written (the bucket's lifetime runs from the last write). An error means
 // the caller must fail closed.
 func reserveIn(ctx context.Context, kv jetstream.KeyValue, key string, max int) (locked bool, err error) {
-	for i := 0; i < 16; i++ {
+	for i := 0; i < casAttempts; i++ {
+		if err := casBackoff(ctx, i); err != nil {
+			return false, err
+		}
 		e, err := kv.Get(ctx, key)
 		if bus.IsNotFound(err) {
 			_, err := kv.Create(ctx, key, []byte("1"))
@@ -66,7 +95,10 @@ func reserveIn(ctx context.Context, kv jetstream.KeyValue, key string, max int) 
 // refundIn takes one back from the counter at key, by compare-and-set; at
 // one it deletes the key. A missing key is fine.
 func refundIn(ctx context.Context, kv jetstream.KeyValue, key string) error {
-	for i := 0; i < 16; i++ {
+	for i := 0; i < casAttempts; i++ {
+		if err := casBackoff(ctx, i); err != nil {
+			return err
+		}
 		e, err := kv.Get(ctx, key)
 		if bus.IsNotFound(err) {
 			return nil

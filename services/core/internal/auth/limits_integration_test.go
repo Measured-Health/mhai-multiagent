@@ -4,11 +4,16 @@ package auth_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
+
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 )
 
@@ -77,8 +82,57 @@ func TestLoginCeilingBurst(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if counts[401] > auth.MaxLoginFailuresPerLogin || counts[401]+counts[429] != 30 {
-		t.Fatalf("burst: %v", counts)
+	// Exactly the ceiling's worth of password checks, the rest locked, and
+	// nothing refused for contention.
+	if counts[401] != auth.MaxLoginFailuresPerLogin || counts[429] != 30-auth.MaxLoginFailuresPerLogin {
+		t.Fatalf("burst: %v\n%s", counts, authErrors(e))
+	}
+}
+
+// authErrors returns the service's error log lines (no secrets are logged).
+func authErrors(e *env) string {
+	var out []string
+	for _, l := range strings.Split(e.logs.String(), "\n") {
+		if strings.Contains(l, "ERROR") {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// faultyKV fails every read, standing in for a KV fault or contention that
+// outlasts the retries.
+type faultyKV struct{ jetstream.KeyValue }
+
+func (faultyKV) Get(context.Context, string) (jetstream.KeyValueEntry, error) {
+	return nil, errors.New("synthetic kv fault")
+}
+
+// When the ceiling counter can't be written, sign-in fails closed (503)
+// without checking the password, and gives the (login, IP) slot back: a
+// counter fault never costs the owner a try, and never buys a guess.
+func TestLoginCeilingFaultRefundsIPSlot(t *testing.T) {
+	e := newEnv(t)
+	u := clinician(t)
+	ip := newIP()
+	ceil := e.svc.Buckets.LoginCeiling
+	e.svc.Buckets.LoginCeiling = faultyKV{ceil}
+	for i := 0; i < auth.MaxLoginFailures+2; i++ {
+		r := e.login(t, u.email, "wrong-password-"+uniq(), ip)
+		if r.code != 503 || r.body["code"] != "not_ready" {
+			t.Fatalf("ceiling fault %d: %d %s", i+1, r.code, r.raw)
+		}
+	}
+	k, err := e.svc.LockoutKey(u.email, ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buckets.LoginAttempts.Get(context.Background(), k); !bus.IsNotFound(err) {
+		t.Fatalf("(login, IP) counter after ceiling faults: %v", err)
+	}
+	e.svc.Buckets.LoginCeiling = ceil
+	if r := e.login(t, u.email, testPassword, ip); r.code != 200 {
+		t.Fatalf("after the fault: %d %s", r.code, r.raw)
 	}
 }
 
