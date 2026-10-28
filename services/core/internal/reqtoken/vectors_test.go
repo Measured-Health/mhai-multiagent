@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -125,6 +126,19 @@ func buildVectors(t *testing.T) []vector {
 			Service: "pipeline", Now: after, Verdict: verdict}
 	}
 	reqTok := func(name string) string { return mintV(name, reqC, ping, 5*time.Second) }
+	// rawV re-signs tok with its payload JSON edited as text (for JSON that
+	// a map can't express: repeats, case, null, floats).
+	rawV := func(tok string, edit func(p string) string) string {
+		parts := strings.Split(tok, ".")
+		h, _ := b64.DecodeString(parts[0])
+		pl, _ := b64.DecodeString(parts[1])
+		return signRawBytes(priv, string(h), edit(string(pl)))
+	}
+	iatJSON := fmt.Sprintf(`"iat":%d`, vectorMint.Unix())
+	edited := func(name, note, old, repl string) vector {
+		return req(name, note, rawV(reqTok(name), func(p string) string { return strings.Replace(p, old, repl, 1) }), "malformed")
+	}
+	split := func(name string) []string { return strings.Split(reqTok(name), ".") }
 
 	var vs []vector
 	vs = append(vs,
@@ -248,6 +262,53 @@ func buildVectors(t *testing.T) []vector {
 			return req("oversize", "a validly signed token over 4096 bytes",
 				resignV("oversize", reqC, ping, 5*time.Second, func(_, p map[string]any) { p["pids"] = pids }), "size")
 		}(),
+		// Strict parsing: what encoding/json alone would let through.
+		req("dup_payload_key", "hid repeated with another hospital's id",
+			rawV(reqTok("dup_payload_key"), func(p string) string {
+				return strings.TrimSuffix(p, "}") + `,"hid":"` + otherHosp + `"}`
+			}), "malformed"),
+		edited("case_folded_claim", "HID instead of hid", `"hid"`, `"HID"`),
+		edited("null_claim", "rid is null", `"rid":"`+testRid+`"`, `"rid":null`),
+		edited("float_iat", "iat written as a float", iatJSON, iatJSON+".0"),
+		edited("bool_iat", "iat is true", iatJSON, `"iat":true`),
+		edited("null_in_roles", "roles holds a null", `"roles":["clinician"]`, `"roles":[null]`),
+		func() vector {
+			p := split("padded_segment")
+			return req("padded_segment", "the header segment carries base64 padding", p[0]+"=."+p[1]+"."+p[2], "malformed")
+		}(),
+		func() vector {
+			p := split("four_parts")
+			return req("four_parts", "a fourth segment", strings.Join(p, ".")+"."+p[2], "malformed")
+		}(),
+		func() vector {
+			p := split("newline_in_segment")
+			return req("newline_in_segment", "LF inside the signature segment (base64 decoders skip it)",
+				p[0]+"."+p[1]+"."+p[2][:20]+"\n"+p[2][20:], "malformed")
+		}(),
+		req("iat_overflow", "iat -9e18 and exp 9e18: exp - iat overflows int64",
+			resignV("iat_overflow", reqC, ping, 5*time.Second, func(_, p map[string]any) {
+				p["iat"], p["exp"] = int64(-9e18), int64(9e18)
+			}), "claims"),
+		// Boundaries.
+		func() vector {
+			v := req("iat_at_skew", "iat exactly 5 s after now: within the skew",
+				resignV("iat_at_skew", reqC, ping, 5*time.Second, func(_, p map[string]any) {
+					p["iat"] = vectorMint.Add(Skew).Unix()
+					p["exp"] = vectorMint.Add(Skew + 5*time.Second).Unix()
+				}), "ok")
+			v.Now = vectorMint.Unix()
+			return v
+		}(),
+		req("exp_iat_60s", "exp - iat exactly 60 s, the req cap", mintV("exp_iat_60s", reqC, ping, MaxReqTTL), "ok"),
+		req("empty_hid_hospital_subject", "hid empty on an inference subject",
+			resignV("empty_hid_hospital_subject", reqC, ping, 5*time.Second, func(_, p map[string]any) { p["hid"] = "" }), "claims"),
+		job("rpl_on_job", "a job token carrying rpl",
+			resignV("rpl_on_job", jobC, jobBody, time.Minute, func(_, p map[string]any) { p["rpl"] = ReplyCore }), "claims"),
+		func() vector {
+			v := job("oversize_body", "a job body one byte over 64 KB", mintV("oversize_body", jobC, jobBody, time.Minute), "size")
+			v.Body = base64.StdEncoding.EncodeToString(make([]byte, MaxJobBody+1))
+			return v
+		}(),
 	)
 	sort.Slice(vs, func(i, j int) bool { return vs[i].Name < vs[j].Name })
 	return vs
@@ -323,7 +384,9 @@ func TestRequestTokenVectorsUpToDate(t *testing.T) {
 	for _, name := range []string{"valid_req", "valid_job", "valid_global_job", "tampered_payload", "wrong_typ",
 		"unknown_kid", "wrong_aud", "expired", "exp_too_far_req", "exp_too_far_job", "wrong_nsub", "wrong_bh",
 		"reply_outside_rpl", "grant_in_message", "alg_none", "alg_hs256", "wrong_iss", "missing_rid",
-		"unknown_claim", "oversize"} {
+		"unknown_claim", "oversize", "dup_payload_key", "case_folded_claim", "null_claim", "float_iat", "bool_iat",
+		"null_in_roles", "padded_segment", "four_parts", "newline_in_segment", "iat_overflow", "iat_at_skew",
+		"exp_iat_60s", "empty_hid_hospital_subject", "rpl_on_job", "oversize_body"} {
 		if _, ok := want[name+".json"]; !ok {
 			t.Errorf("no %s vector", name)
 		}

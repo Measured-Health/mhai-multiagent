@@ -1,0 +1,18 @@
+{
+  "name": "padded_segment",
+  "note": "the header segment carries base64 padding",
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6Im1oYWktcmVxK2p3dCIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEifQ=.eyJpc3MiOiJtaGFpLWdhdGV3YXkiLCJhdWQiOiJlY2hvIiwic3ViIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiaGlkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwicm9sZXMiOlsiY2xpbmljaWFuIl0sInJpZCI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsImp0aSI6Ikhqa1o4MFdBb1JrdTY2bk1QODNXUkEiLCJpYXQiOjE3OTMxODg4MDAsImV4cCI6MTc5MzE4ODgwNSwia25kIjoicmVxIiwibnN1YiI6ImluZmVyZW5jZS52MS5lY2hvLnBpbmciLCJiaCI6IjhMRWF0ckVvLVNDZllmUnpTYU1TYkxSazBHU0w3Qk1CeXhGcTlxOGlNVUEiLCJycGwiOiJfSU5CT1hfZ2F0ZXdheS4iLCJ2aWEiOiJjb3JlIn0.nM6vj2XAhKzTJONJ3m6vH8HTrCMB-tAfxdtC1IJrOjt0I7Hw3MjwoODhbiCz70bg5gmeFAtoHoc22VKZpADvBw",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "Cg5zeW50aGV0aWMgcGluZxIkMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIy",
+  "subject": "inference.v1.echo.ping",
+  "reply": "_INBOX_gateway.vectors.1",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.intelligence.v1.PingRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "echo",
+  "now": 1793188801,
+  "verdict": "malformed"
+}

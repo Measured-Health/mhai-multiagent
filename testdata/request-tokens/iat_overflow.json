@@ -1,0 +1,18 @@
+{
+  "name": "iat_overflow",
+  "note": "iat -9e18 and exp 9e18: exp - iat overflows int64",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEiLCJ0eXAiOiJtaGFpLXJlcStqd3QifQ.eyJhdWQiOiJlY2hvIiwiYmgiOiI4TEVhdHJFby1TQ2ZZZlJ6U2FNU2JMUmswR1NMN0JNQnl4RnE5cThpTVVBIiwiZXhwIjo5MDAwMDAwMDAwMDAwMDAwMDAwLCJoaWQiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJpYXQiOi05MDAwMDAwMDAwMDAwMDAwMDAwLCJpc3MiOiJtaGFpLWdhdGV3YXkiLCJqdGkiOiJWOXgxMTNCQ1R3c0JnVThGT3FzT3pnIiwia25kIjoicmVxIiwibnN1YiI6ImluZmVyZW5jZS52MS5lY2hvLnBpbmciLCJyaWQiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJyb2xlcyI6WyJjbGluaWNpYW4iXSwicnBsIjoiX0lOQk9YX2dhdGV3YXkuIiwic3ViIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwidmlhIjoiY29yZSJ9.eRz__XtzR1kviV9LswgGHlFGQjYCyFgmKPe_aDcIeXh2ZzvLy1o29tjWHczlBzlDoLPwG1NWzuNryLxRPyeIAQ",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "Cg5zeW50aGV0aWMgcGluZxIkMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIy",
+  "subject": "inference.v1.echo.ping",
+  "reply": "_INBOX_gateway.vectors.1",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.intelligence.v1.PingRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "echo",
+  "now": 1793188801,
+  "verdict": "claims"
+}

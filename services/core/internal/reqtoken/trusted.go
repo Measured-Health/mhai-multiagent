@@ -51,7 +51,7 @@ func ReadTrusted(path string) (map[string]ed25519.PublicKey, error) {
 	}
 	keys := make(map[string]ed25519.PublicKey, len(enc))
 	for kid, k := range enc {
-		pub, err := b64.DecodeString(k)
+		pub, err := decodeB64(k)
 		if err != nil {
 			return nil, errTrusted
 		}

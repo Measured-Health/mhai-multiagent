@@ -177,7 +177,35 @@ var (
 )
 
 // b64 is unpadded base64url, strict: non-canonical trailing bits are refused.
+// Decode with decodeB64: the decoder alone skips CR and LF.
 var b64 = base64.RawURLEncoding.Strict()
+
+// maxTime bounds iat and exp (2^53, also the largest integer a JSON reader
+// with doubles holds exactly).
+const maxTime = 1 << 53
+
+// decodeB64 decodes s, refusing any byte outside [A-Za-z0-9_-] first:
+// encoding/base64 ignores CR and LF, so "\n" inside a signature segment
+// would otherwise verify.
+func decodeB64(s string) ([]byte, error) {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '_' {
+			return nil, errors.New("not base64url")
+		}
+	}
+	return b64.DecodeString(s)
+}
+
+// nonEmpty reports whether no element of ss is empty.
+func nonEmpty(ss []string) bool {
+	for _, s := range ss {
+		if s == "" {
+			return false
+		}
+	}
+	return true
+}
 
 // KeyID is the key id rule shared with token.LoadIssuer: the first 16 hex
 // characters of sha256(public key).
@@ -319,6 +347,9 @@ func validateMint(c Claims) error {
 	if c.Hid != "" && !isUUID(c.Hid) {
 		return ErrMintClaims
 	}
+	if !nonEmpty(c.Roles) || !nonEmpty(c.PatientIDs) {
+		return ErrMintClaims
+	}
 	if c.Sub == SvcCore && len(c.Roles) > 0 {
 		return ErrMintClaims // spec §7.2: roles are empty for svc:core
 	}
@@ -367,9 +398,9 @@ func VerifyAt(tok string, keys map[string]ed25519.PublicKey, want Expect, body [
 	if len(parts) != 3 {
 		return Claims{}, ErrMalformed
 	}
-	hraw, err1 := b64.DecodeString(parts[0])
-	praw, err2 := b64.DecodeString(parts[1])
-	sig, err3 := b64.DecodeString(parts[2])
+	hraw, err1 := decodeB64(parts[0])
+	praw, err2 := decodeB64(parts[1])
+	sig, err3 := decodeB64(parts[2])
 	if err1 != nil || err2 != nil || err3 != nil {
 		return Claims{}, ErrMalformed
 	}
@@ -389,8 +420,8 @@ func VerifyAt(tok string, keys map[string]ed25519.PublicKey, want Expect, body [
 	}
 	var p payload
 	present, err := strictObject(praw, payloadKeys, &p)
-	if err != nil {
-		return Claims{}, ErrMalformed
+	if err != nil || !nonEmpty(p.Roles) || !nonEmpty(p.Pids) {
+		return Claims{}, ErrMalformed // [null] would decode as ""
 	}
 	// 3. Claims.
 	for k, required := range payloadKeys {
@@ -409,6 +440,7 @@ func VerifyAt(tok string, keys map[string]ed25519.PublicKey, want Expect, body [
 		knd == KindReq && p.Rpl == "",
 		knd == KindJob && (present["rpl"] || via != ViaCore),
 		p.Hid == "" && !strings.HasPrefix(p.Nsub, "jobs.v1.global."),
+		p.Iat <= 0 || p.Exp <= 0 || p.Iat > maxTime || p.Exp > maxTime, // so exp-iat can't overflow
 		p.Exp <= p.Iat,
 		p.Exp-p.Iat > int64(limit/time.Second),
 		p.Iat > now.Unix()+int64(Skew/time.Second):

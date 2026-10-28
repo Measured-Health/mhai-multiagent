@@ -288,6 +288,15 @@ func TestRequestTokenRejectsAlgAndKidAndLifetime(t *testing.T) {
 			p["iat"] = testNow.Add(6 * time.Second).Unix()
 			p["exp"] = testNow.Add(11 * time.Second).Unix()
 		}), reqExpect(), testNow, ErrClaims},
+		{"iat and exp overflow", resign(t, s, good, func(_, p map[string]any) {
+			p["iat"] = int64(-9e18)
+			p["exp"] = int64(9e18)
+		}), reqExpect(), testNow, ErrClaims},
+		{"iat zero", resign(t, s, good, func(_, p map[string]any) { p["iat"], p["exp"] = 0, 1 }), reqExpect(), time.Unix(0, 0), ErrClaims},
+		{"exp over 2^53", resign(t, s, good, func(_, p map[string]any) {
+			p["iat"] = int64(1<<53) - 1
+			p["exp"] = int64(1<<53) + 1
+		}), reqExpect(), testNow, ErrClaims},
 		{"exp before iat", resign(t, s, good, func(_, p map[string]any) {
 			p["exp"] = testNow.Add(-time.Second).Unix()
 		}), reqExpect(), testNow.Add(-2 * time.Second), ErrClaims},
@@ -410,6 +419,8 @@ func TestMintRefusesBadClaims(t *testing.T) {
 		"hid not a uuid":         func(c *Claims) { c.Hid = "hospital-a" },
 		"hid upper case":         func(c *Claims) { c.Hid = "AAAAAAAA-2222-4222-8222-222222222222" },
 		"svc:core with roles":    func(c *Claims) { c.Sub = SvcCore },
+		"empty role":             func(c *Claims) { c.Roles = []string{"clinician", ""} },
+		"empty patient id":       func(c *Claims) { c.PatientIDs = []string{""} },
 	} {
 		c := reqClaims()
 		edit(&c)
@@ -469,6 +480,14 @@ func TestStrictHeaderAndPayload(t *testing.T) {
 		"null roles":            signRawBytes(s.Key, hdr, strings.Replace(p, `"roles":["clinician"]`, `"roles":null`, 1)),
 		"null header field":     signRawBytes(s.Key, strings.Replace(hdr, `"kid":"`+s.KeyID+`"`, `"kid":null`, 1), p),
 		"payload invalid utf-8": signRawBytes(s.Key, hdr, strings.Replace(p, `"clinician"`, "\"clin\xffician\"", 1)),
+		"iat bool":              signRawBytes(s.Key, hdr, strings.Replace(p, fmt.Sprintf(`"iat":%d`, testNow.Unix()), `"iat":true`, 1)),
+		"null in roles":         signRawBytes(s.Key, hdr, strings.Replace(p, `"roles":["clinician"]`, `"roles":[null]`, 1)),
+		"empty role":            signRawBytes(s.Key, hdr, strings.Replace(p, `"roles":["clinician"]`, `"roles":["clinician",""]`, 1)),
+		"null in pids":          signRawBytes(s.Key, hdr, strings.Replace(p, `"pids":["`+testPatient+`"]`, `"pids":[null]`, 1)),
+		"LF in signature":       parts[0] + "." + parts[1] + "." + parts[2][:10] + "\n" + parts[2][10:],
+		"CRLF in signature":     parts[0] + "." + parts[1] + "." + parts[2][:10] + "\r\n" + parts[2][10:],
+		"LF at end":             good + "\n",
+		"space in payload":      parts[0] + "." + parts[1][:5] + " " + parts[1][5:] + "." + parts[2],
 		"four parts":            good + "." + parts[2],
 		"two parts":             parts[0] + "." + parts[1],
 		"one part":              parts[0],
