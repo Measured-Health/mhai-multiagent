@@ -23,13 +23,14 @@ behind NATS (the boundary plan), then the hospital and platform endpoints.
 | **NATS** (`services/nats/`) | The only link between the BFF, Go and Python (ADR 0011). Request/reply for calls someone waits on; JetStream for background jobs; KV for the core service's denylist and attempt counters. Replaces the Redis queue stub once the Python side moves over. |
 | **Python services** (`services/intelligence/`) | The models: agents, retrieval and the knowledge base, guardrails, PII masking, inference. Reached only through NATS. Each request carries a token signed by the core service, and the service checks it before doing any work. |
 | **PostgreSQL** | One database for all hospitals. Row-level security (RLS) keeps each hospital's rows apart. |
+| **Notifications service** (planned, `services/notifications/`) | Handles every alert and notification: EMR abnormality alerts, decisions on clinicians' corrections, job and system updates. Delivers them in the app (the bell and pop-ups) and by opt-in email. Core decides who is told and publishes the event over NATS; the notifications service only delivers it, and never reads patient records itself. Intelligence never notifies anyone directly. |
 | **Object storage** (planned) | Documents, letters and exports. |
 
 ```
-browser → BFF (Next.js) → core service → NATS → Python services
-                              │
-                              ├→ PostgreSQL (RLS per hospital)
-                              └→ object storage
+browser → BFF (Next.js) → NATS ─┬→ core service ─┬→ PostgreSQL (RLS per hospital)
+                                │                 └→ object storage
+                                ├→ Python services (intelligence)
+                                └→ notifications service (planned) → bell, pop-ups, email
 ```
 
 Security rules are written once, in Go. Python never takes a hospital or
