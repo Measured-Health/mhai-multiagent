@@ -55,15 +55,20 @@ allow list and its deny list (`TestReplySubjectIsTheResponderToCheck`
 shows the reply reaching another app's inbox, landing on `JOBS` and
 writing a KV entry; a throwaway probe showed a deny list doesn't stop it).
 For core that includes a JetStream API call made with core's account.
-For example:
 
-- `$JS.API.STREAM.DELETE.KV_denylist` deletes the denylist, so revoked
-  tokens work again until they expire;
-- `$JS.API.STREAM.PURGE.JOBS` drops every queued job;
+The test demonstrates these:
+
 - `jobs.v1.<hospital>.run_query` queues a job the requester may not
   publish;
 - `$KV.denylist.<key>` writes a KV entry;
 - `_INBOX_bff.platform.<x>` sends core's answer to the other app.
+
+The same mechanism, not exercised by a test because it would destroy the
+shared streams, also reaches the JetStream API. For example:
+
+- `$JS.API.STREAM.DELETE.KV_denylist` would delete the denylist, so
+  revoked tokens would work again until they expired;
+- `$JS.API.STREAM.PURGE.JOBS` would drop every queued job.
 
 It is reachable by anyone who can send a responder a request:
 
@@ -116,8 +121,8 @@ with `NATS_JS_REPLICAS` replicas (1 in dev, 3 on the production cluster).
 
 | Stream | Subjects | Settings | Consumers |
 |---|---|---|---|
-| `JOBS` | `jobs.v1.>` | file storage; work-queue retention (an acked job is removed); `max_age` 7 days; duplicate window 2 minutes (`Nats-Msg-Id` = the query id); `discard: new` per subject with at most 10,000 waiting jobs per subject, so a flood is refused at publish and nothing queued is dropped; messages at most 72 KiB (64 KiB body plus headers, the request token among them); at most 256 MiB in all | `pipeline` on `jobs.v1.*.run_query`: explicit ack, `ack_wait` 60 s, `max_deliver` 5, no `BackOff` (the worker picks each retry's delay with `Nak(delay)`), `max_ack_pending` from `JOBS_PIPELINE_MAX_ACK_PENDING` (default 8) |
-| `DEAD` | `dead.v1.>` | file storage; `max_age` 30 days; messages at most 4 KiB (ids, type, attempts, code); `discard: new` per subject with at most 10,000 per subject, so one hospital's failures can't crowd out another's; at most 64 MiB in all | `core_dead`: explicit ack, `ack_wait` 30 s |
+| `JOBS` | `jobs.v1.>` | file storage; work-queue retention (an acked job is removed); `max_age` 7 days; duplicate window 2 minutes (`Nats-Msg-Id` = the query id); `discard: new` per subject with at most 200 waiting jobs per subject (hospital and type), so a flood is refused at publish and nothing queued is dropped; messages at most 72 KiB (64 KiB body plus headers, the request token among them); at most 256 MiB in all. One subject's worst case (200 × 72 KiB ≈ 14 MiB) is at most a sixteenth of the stream, so one hospital can't fill it for the others. The main fairness control is core's cap of 10 questions in flight per hospital (Plan 3 Task 5); this cap is the backstop | `pipeline` on `jobs.v1.*.run_query`: explicit ack, `ack_wait` 60 s, `max_deliver` 5, no `BackOff` (the worker picks each retry's delay with `Nak(delay)`), `max_ack_pending` from `JOBS_PIPELINE_MAX_ACK_PENDING` (default 8) |
+| `DEAD` | `dead.v1.>` | file storage; `max_age` 30 days; messages at most 4 KiB (ids, type, attempts, code); at most 10,000 per subject and 64 MiB in all, **discarding old**. Past either limit the oldest letters are dropped and new ones are kept, so a flood (a compromised worker may publish `dead.v1.>` for any hospital id) can push real letters out early but can't lock them out. DEAD is a notice: the job row in Postgres keeps the failure either way | `core_dead`: explicit ack, `ack_wait` 30 s |
 
 A work-queue stream allows only one consumer per subject, so each job type
 has exactly one durable consumer.
@@ -127,8 +132,11 @@ has exactly one durable consumer.
 - `max_payload: 1MB`, the outer bound (the services check their own,
   smaller limits).
 - `max_file_store: 1GB` (the demo: 512 MB). `JOBS` and `DEAD` reserve
-  their 320 MiB in it, so no flood of jobs or dead letters can fill the
-  store the KV buckets (the denylist among them) need.
+  their 320 MiB in it. Their byte caps keep a flood of jobs or dead letters
+  inside those streams, so it can't fill the store the KV buckets (the
+  denylist among them) need. Within its stream a flood still costs other
+  hospitals: a JOBS flood across many hospital subjects can fill JOBS, and
+  a DEAD flood evicts old letters.
 - JetStream storage is encrypted at rest (`cipher: chachapoly`), with the
   key from `NATS_JS_KEY`. Losing the key loses the store.
 

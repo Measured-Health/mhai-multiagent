@@ -426,18 +426,20 @@ func TestAllowResponsesExpire(t *testing.T) {
 // "Responders must check the reply subject"). It is a tripwire: if a NATS
 // upgrade starts checking reply subjects, it fails and the note can go.
 func TestReplySubjectIsTheResponderToCheck(t *testing.T) {
+	// Its own server: the stray job and denylist key stay off the shared one.
+	n := freshNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	g := gateway(t)
+	g := raw(t, n.GatewayURL, bus.GatewayInboxPrefix)
 	if _, err := g.nc.QueueSubscribe("api.v1.*", "core", func(m *nats.Msg) { _ = m.Respond([]byte("core-answer")) }); err != nil {
 		t.Fatal(err)
 	}
 	_ = g.nc.Flush()
-	b := bffClinical(t)
+	b := raw(t, n.BFFClinicalURL, bus.BFFInbox("clinical"))
 
 	// (a) Another app's inbox: the platform BFF receives core's answer to a
 	// clinical request.
-	p := bffPlatform(t)
+	p := raw(t, n.BFFPlatformURL, bus.BFFInbox("platform"))
 	probe := bus.BFFInbox("platform") + ".probe"
 	sub, err := p.nc.SubscribeSync(probe)
 	if err != nil {
@@ -723,7 +725,7 @@ func TestEnsureStreamsIdempotent(t *testing.T) {
 	jc := jobs.CachedInfo().Config
 	if len(jc.Subjects) != 1 || jc.Subjects[0] != "jobs.v1.>" || jc.Storage != jetstream.FileStorage ||
 		jc.Retention != jetstream.WorkQueuePolicy || jc.Discard != jetstream.DiscardNew || !jc.DiscardNewPerSubject ||
-		jc.MaxMsgsPerSubject != 10000 || jc.MaxAge != 7*24*time.Hour || jc.Duplicates != 2*time.Minute || jc.Replicas != 1 ||
+		jc.MaxMsgsPerSubject != 200 || jc.MaxAge != 7*24*time.Hour || jc.Duplicates != 2*time.Minute || jc.Replicas != 1 ||
 		jc.MaxMsgSize != 72<<10 || jc.MaxBytes != 256<<20 {
 		t.Fatalf("JOBS config = %+v", jc)
 	}
@@ -733,7 +735,7 @@ func TestEnsureStreamsIdempotent(t *testing.T) {
 	}
 	dc := dead.CachedInfo().Config
 	if len(dc.Subjects) != 1 || dc.Subjects[0] != "dead.v1.>" || dc.Storage != jetstream.FileStorage ||
-		dc.MaxAge != 30*24*time.Hour || dc.Replicas != 1 || dc.Discard != jetstream.DiscardNew || !dc.DiscardNewPerSubject ||
+		dc.MaxAge != 30*24*time.Hour || dc.Replicas != 1 || dc.Discard != jetstream.DiscardOld || dc.DiscardNewPerSubject ||
 		dc.MaxMsgsPerSubject != 10000 || dc.MaxMsgSize != 4<<10 || dc.MaxBytes != 64<<20 {
 		t.Fatalf("DEAD config = %+v", dc)
 	}
@@ -859,9 +861,9 @@ func TestJobsPerSubjectLimitRefusesNew(t *testing.T) {
 	}
 }
 
-// A flood of one hospital's dead letters (any worker may publish dead.v1.>)
-// is refused past the per-subject limit, and another hospital's dead
-// letter still gets in.
+// A flood of one hospital's dead letters stays within the per-subject
+// limit by dropping that subject's oldest (DEAD discards old): the newest
+// letter is stored, and another hospital's dead letter gets in.
 func TestDeadPerSubjectLimitKeepsOtherHospitals(t *testing.T) {
 	n := freshNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -869,8 +871,8 @@ func TestDeadPerSubjectLimitKeepsOtherHospitals(t *testing.T) {
 	js, _ := jetstream.New(raw(t, n.PipelineURL, bus.WorkerInbox("pipeline")).nc, jetstream.WithPublishAsyncMaxPending(512))
 	subj := "dead.v1." + uuid.NewString() + ".run_query"
 	floodSubject(ctx, t, js, subj, bus.DeadMaxPerSubject)
-	if _, err := js.Publish(ctx, subj, []byte("one too many")); err == nil {
-		t.Fatal("dead letter past the per-subject limit stored")
+	if _, err := js.Publish(ctx, subj, []byte("newest")); err != nil {
+		t.Fatalf("the newest dead letter was refused: %v", err)
 	}
 	if _, err := js.Publish(ctx, "dead.v1."+uuid.NewString()+".run_query", []byte("another hospital")); err != nil {
 		t.Fatalf("another hospital's dead letter refused: %v", err)
@@ -878,6 +880,84 @@ func TestDeadPerSubjectLimitKeepsOtherHospitals(t *testing.T) {
 	gjs, _ := jetstream.New(raw(t, n.GatewayURL, bus.GatewayInboxPrefix).nc)
 	if got := subjectCount(ctx, t, gjs, bus.DeadStream, subj); got != bus.DeadMaxPerSubject {
 		t.Fatalf("stored %d, want %d", got, bus.DeadMaxPerSubject)
+	}
+	st, err := gjs.Stream(ctx, bus.DeadStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.CachedInfo().State.FirstSeq != 2 {
+		t.Fatalf("first seq %d: the oldest letter wasn't the one dropped", st.CachedInfo().State.FirstSeq)
+	}
+}
+
+// Review round 2 (B): a compromised worker spreads full-size letters over
+// made-up hospital subjects until DEAD passes MaxBytes. The oldest are
+// dropped, and a genuine dead letter published afterwards is stored.
+func TestDeadFloodCannotLockOutRealLetters(t *testing.T) {
+	n := freshNATS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	js, _ := jetstream.New(raw(t, n.PipelineURL, bus.WorkerInbox("pipeline")).nc, jetstream.WithPublishAsyncMaxPending(512))
+	const body = 4000                  // under DeadMaxMsgSize with the subject and record overhead
+	count := bus.DeadMaxBytes/body + 1 // each stored message is more than body bytes, so this crosses the cap
+	letter := make([]byte, body)
+	for i := 0; i < count; i++ {
+		if _, err := js.PublishAsync("dead.v1."+uuid.NewString()+".run_query", letter); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-js.PublishAsyncComplete():
+	case <-ctx.Done():
+		t.Fatal("async publishes did not complete")
+	}
+	genuine := "dead.v1." + uuid.NewString() + ".run_query"
+	if _, err := js.Publish(ctx, genuine, []byte("genuine")); err != nil {
+		t.Fatalf("a genuine dead letter was refused after the flood: %v", err)
+	}
+	gjs, _ := jetstream.New(raw(t, n.GatewayURL, bus.GatewayInboxPrefix).nc)
+	if got := subjectCount(ctx, t, gjs, bus.DeadStream, genuine); got != 1 {
+		t.Fatalf("genuine letter stored %d times, want 1", got)
+	}
+	st, err := gjs.Stream(ctx, bus.DeadStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := st.CachedInfo().State
+	if state.Bytes > bus.DeadMaxBytes || state.FirstSeq <= 1 {
+		t.Fatalf("bytes %d (cap %d), first seq %d: the flood didn't cross the cap or nothing old was dropped",
+			state.Bytes, bus.DeadMaxBytes, state.FirstSeq)
+	}
+}
+
+// Review round 2 (A): one hospital filling its job subject to the
+// per-subject limit with near-maximum jobs can't fill the stream: another
+// hospital's job is still accepted.
+func TestJobsOneHospitalCannotFillStream(t *testing.T) {
+	n := freshNATS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	js, _ := jetstream.New(raw(t, n.GatewayURL, bus.GatewayInboxPrefix).nc, jetstream.WithPublishAsyncMaxPending(64))
+	big := make([]byte, bus.JobsMaxMsgSize-1024) // near the cap, room for the subject and ack headers
+	h1 := jobSubject("run_query")
+	for i := 0; i < bus.JobsMaxPerSubject; i++ {
+		if _, err := js.PublishAsync(h1, big); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-js.PublishAsyncComplete():
+	case <-ctx.Done():
+		t.Fatal("async publishes did not complete")
+	}
+	if got := subjectCount(ctx, t, js, bus.JobsStream, h1); got != bus.JobsMaxPerSubject {
+		t.Fatalf("H1 stored %d, want %d", got, bus.JobsMaxPerSubject)
+	}
+	if _, err := js.Publish(ctx, h1, big); err == nil {
+		t.Fatal("H1 queued past its per-subject limit")
+	}
+	if _, err := js.Publish(ctx, jobSubject("run_query"), big); err != nil {
+		t.Fatalf("H2's job refused after H1 filled its subject: %v", err)
 	}
 }
 

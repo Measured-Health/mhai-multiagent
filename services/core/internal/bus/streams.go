@@ -25,7 +25,15 @@ const (
 	// JobsMaxPerSubject bounds what one hospital can queue per job type.
 	// Past it a publish is refused (DiscardNewPerSubject) and core answers
 	// 503; queued jobs are never dropped to make room.
-	JobsMaxPerSubject = 10000
+	//
+	// It is sized so one subject can't fill the stream for everyone:
+	// JobsMaxPerSubject × JobsMaxMsgSize = 200 × 72 KiB ≈ 14 MiB, at most
+	// JobsMaxBytes/16 (a test holds it). 200 waiting jobs is far more than
+	// a hospital needs: core lets each hospital have only 10 questions in
+	// flight (Task 5, decision 8), and that is the main fairness control;
+	// this cap is the backstop at the stream. Each further job type adds
+	// one subject per hospital, so recheck the sum when types are added.
+	JobsMaxPerSubject = 200
 	JobsMaxAge        = 7 * 24 * time.Hour
 	JobsDuplicates    = 2 * time.Minute // Nats-Msg-Id window (the query id)
 	// JobsMaxMsgSize bounds one job message, headers included: the 64 KiB
@@ -40,13 +48,16 @@ const (
 	// DeadMaxMsgSize: a dead letter is ids, the type, attempts and a code
 	// (a few hundred bytes).
 	DeadMaxMsgSize = 4 << 10
-	// DeadMaxPerSubject bounds one hospital's dead letters of one type
-	// over the 30 days; past it a new one is refused, so a failing hospital
-	// can't crowd out another's (the job row still records the failure).
+	// DeadMaxPerSubject bounds one hospital's dead letters of one type;
+	// past it the oldest of that subject is dropped (DEAD discards old).
 	DeadMaxPerSubject = 10000
 	// DeadMaxBytes caps the whole stream, so a flood from a compromised
 	// worker credential (every worker may publish dead.v1.>) can't fill the
-	// store that JOBS and the KV buckets (the denylist) need.
+	// store that JOBS and the KV buckets (the denylist) need. Past it the
+	// oldest letters are dropped, never the new ones: a flood can push real
+	// dead letters out early, but can't lock them out. The job row in
+	// Postgres keeps the failure either way; DEAD is the notice, not the
+	// record.
 	DeadMaxBytes = 64 << 20
 
 	// StreamsMaxBytes is what JOBS and DEAD reserve in the server's
@@ -99,9 +110,11 @@ func replicaCount(n int) (int, error) {
 //   - The pipeline consumer has no BackOff (plan departure 4): the worker
 //     chooses each retry's delay with Nak(delay).
 //   - DEAD keeps dead letters 30 days, for core's consumer and for review.
-//   - Both are bounded in message size, per subject and in bytes, with
-//     discard new: a flood is refused at publish and never fills the store
-//     the KV buckets share.
+//   - Both are bounded in message size, per subject and in bytes, so
+//     neither can fill the store the KV buckets share. JOBS discards new
+//     (a flood is refused at publish; one hospital's subject holds at most
+//     1/16 of the stream); DEAD discards old (a flood evicts old letters
+//     instead of refusing new ones).
 func EnsureStreams(ctx context.Context, js jetstream.JetStream, sc StreamConfig) error {
 	var err error
 	if sc.Replicas, err = replicaCount(sc.Replicas); err != nil {
@@ -133,17 +146,16 @@ func EnsureStreams(ctx context.Context, js jetstream.JetStream, sc StreamConfig)
 		return fmt.Errorf("bus: ensure stream JOBS: %w", err)
 	}
 	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:                 DeadStream,
-		Subjects:             []string{"dead.v1.>"},
-		Storage:              jetstream.FileStorage,
-		Retention:            jetstream.LimitsPolicy,
-		Discard:              jetstream.DiscardNew,
-		DiscardNewPerSubject: true,
-		MaxMsgsPerSubject:    DeadMaxPerSubject,
-		MaxMsgSize:           DeadMaxMsgSize,
-		MaxBytes:             DeadMaxBytes,
-		MaxAge:               DeadMaxAge,
-		Replicas:             sc.Replicas,
+		Name:              DeadStream,
+		Subjects:          []string{"dead.v1.>"},
+		Storage:           jetstream.FileStorage,
+		Retention:         jetstream.LimitsPolicy,
+		Discard:           jetstream.DiscardOld,
+		MaxMsgsPerSubject: DeadMaxPerSubject,
+		MaxMsgSize:        DeadMaxMsgSize,
+		MaxBytes:          DeadMaxBytes,
+		MaxAge:            DeadMaxAge,
+		Replicas:          sc.Replicas,
 	}); err != nil {
 		return fmt.Errorf("bus: ensure stream DEAD: %w", err)
 	}

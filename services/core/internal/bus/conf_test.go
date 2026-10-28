@@ -124,3 +124,12 @@ func TestStreamReservationsFitTheDemoStore(t *testing.T) {
 		t.Fatalf("JOBS+DEAD reserve %d bytes, too much for the demo's 512 MB store", bus.StreamsMaxBytes)
 	}
 }
+
+// Review round 2 (A): one subject's worst case (its message limit times the
+// largest job) is at most a sixteenth of JOBS, so one hospital can't fill
+// the stream for the others.
+func TestJobsPerSubjectWorstCaseIsASixteenth(t *testing.T) {
+	if worst := bus.JobsMaxPerSubject * bus.JobsMaxMsgSize; worst > bus.JobsMaxBytes/16 {
+		t.Fatalf("one subject can hold %d bytes, more than JobsMaxBytes/16 = %d", worst, bus.JobsMaxBytes/16)
+	}
+}
