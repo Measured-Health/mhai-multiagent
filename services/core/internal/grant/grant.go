@@ -144,11 +144,17 @@ type Server struct {
 	// AllowTestOnly grants test-only operations (echo.ping). Only a
 	// development core sets it; the default refuses them.
 	AllowTestOnly bool
+	// SummaryEvery is how often non-zero counts are logged as one
+	// summary line, and the interval of the sampled per-request drop and
+	// overload logs (default DefaultSummaryEvery). Task 14 exports the
+	// metrics properly.
+	SummaryEvery time.Duration
 
 	lim                          Limits
 	sem                          chan struct{}
 	session, hospital, refusalsA *rateLimiter
 	seen                         *replaySet
+	dropLog, busyLog             *sampler
 
 	mu     sync.Mutex
 	closed bool
@@ -178,6 +184,10 @@ func (s *Server) Serve(ctx context.Context, nc *nats.Conn) (stop func(), err err
 	s.hospital = newRateLimiter(s.lim.PerHospital, maxLimiterKeys)
 	s.refusalsA = newRateLimiter(refusalAuditRate, maxLimiterKeys)
 	s.seen = newReplaySet(ReplayWindow, maxReplayIDs)
+	if s.SummaryEvery <= 0 {
+		s.SummaryEvery = DefaultSummaryEvery
+	}
+	s.dropLog, s.busyLog = newSampler(s.SummaryEvery), newSampler(s.SummaryEvery)
 	sub, err := nc.QueueSubscribe(Subject, Queue, s.onMsg)
 	if err != nil {
 		return nil, err
@@ -187,6 +197,7 @@ func (s *Server) Serve(ctx context.Context, nc *nats.Conn) (stop func(), err err
 		return nil, err
 	}
 	var once sync.Once
+	done := make(chan struct{})
 	stop = func() {
 		once.Do(func() {
 			_ = sub.Unsubscribe()
@@ -195,8 +206,10 @@ func (s *Server) Serve(ctx context.Context, nc *nats.Conn) (stop func(), err err
 			s.closed = true
 			s.mu.Unlock()
 			s.wg.Wait()
+			close(done)
 		})
 	}
+	go s.summarise(done)
 	context.AfterFunc(ctx, stop)
 	return stop, nil
 }
@@ -271,14 +284,18 @@ func (s *Server) onMsg(m *nats.Msg) {
 	if !ok || !replyOK(service, m.Reply) {
 		s.Metrics.DroppedReply.Add(1)
 		// The reply subject is attacker-chosen: never logged.
-		s.log().Error("grant: reply subject refused", "service", service)
+		if n, ok := s.dropLog.take(); ok {
+			s.log().Error("grant: reply subject refused", "service", service, "count", n)
+		}
 		return
 	}
 	select {
 	case s.sem <- struct{}{}:
 	default:
 		s.Metrics.Overloaded.Add(1)
-		s.log().Warn("grant: busy, refused", "service", service, "reason", CodeOverloaded)
+		if n, ok := s.busyLog.take(); ok {
+			s.log().Warn("grant: busy, refused", "service", service, "reason", CodeOverloaded, "count", n)
+		}
 		s.respond(m, service, refusedMsg(CodeOverloaded))
 		return
 	}
@@ -292,9 +309,13 @@ func (s *Server) onMsg(m *nats.Msg) {
 	s.mu.Unlock()
 	s.Metrics.InFlight.Add(1)
 	go func() {
+		replied := false
 		defer func() {
 			if p := recover(); p != nil {
 				s.log().Error("grant: handler panicked", "service", service)
+				if !replied { // the reply subject passed onMsg's check
+					s.respond(m, service, refusedMsg("not_ready"))
+				}
 			}
 			s.Metrics.InFlight.Add(-1)
 			<-s.sem
@@ -302,7 +323,9 @@ func (s *Server) onMsg(m *nats.Msg) {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
 		defer cancel()
-		s.respond(m, service, s.handle(ctx, service, m.Data))
+		out := s.handle(ctx, service, m.Data)
+		replied = true
+		s.respond(m, service, out)
 	}()
 }
 
@@ -404,6 +427,7 @@ func (s *Server) handle(ctx context.Context, service string, data []byte) *nats.
 	}, req.BodyHash, ttl)
 	if err != nil {
 		// Mint's errors are fixed values with no claim in them.
+		s.seen.remove(req.RequestId) // nothing was granted under it
 		s.log().Error("grant: refused to mint", "service", service, "operation", op.Name, "request_id", c.rid, "error", err)
 		return s.refuse(ctx, c, p, "forbidden")
 	}
@@ -416,7 +440,9 @@ func (s *Server) handle(ctx context.Context, service string, data []byte) *nats.
 		})
 	})
 	if err != nil {
-		// No grant without its audit row.
+		// No grant without its audit row. Nothing was granted under the
+		// request id, so the worker's retry may use it again.
+		s.seen.remove(req.RequestId)
 		s.Metrics.AuditFailed.Add(1)
 		s.Metrics.Refused.Add(1)
 		s.log().Error("grant: audit failed, refused", "service", service, "operation", op.Name, "request_id", c.rid)
@@ -439,8 +465,9 @@ func refusalPayload(c call, code string) map[string]any {
 
 // refuseEarly refuses before a principal exists (a bad request, token or
 // session): audited as mhai_auth, as sign-in failures are, with the user
-// and hospital of a verified token if there is one; at most
-// refusalAuditRate a second per service, the rest counted only.
+// and hospital of a verified token if there is one. Refusals of tokens
+// that didn't verify are audited at most refusalAuditRate a second per
+// service, the rest counted only.
 func (s *Server) refuseEarly(ctx context.Context, c call, code string) *nats.Msg {
 	code = refusalCode(code)
 	s.Metrics.Refused.Add(1)
@@ -453,7 +480,12 @@ func (s *Server) refuseEarly(ctx context.Context, c call, code string) *nats.Msg
 	}
 	s.log().Warn("grant: refused", "service", c.service, "operation", c.op, "reason", code, "request_id", c.rid,
 		"user_id", actor)
-	if !s.refusalsA.allow(c.service, s.lim.Now()) {
+	// Unverified tokens cost nothing to send, so their refusals are
+	// audited at most refusalAuditRate a second per service. A verified
+	// token's refusal is always audited: its session and hospital rates
+	// already bound it, and a junk flood must not hide it.
+	verified := c.tok.UserID() != uuid.Nil
+	if !verified && !s.refusalsA.allow(c.service, s.lim.Now()) {
 		s.Metrics.AuditSkipped.Add(1)
 		return refusedMsg(code)
 	}
@@ -490,4 +522,57 @@ func (s *Server) refuse(ctx context.Context, c call, p authz.Principal, code str
 		s.log().Error("grant: refusal audit failed", "service", c.service, "request_id", c.rid)
 	}
 	return refusedMsg(code)
+}
+
+// DefaultSummaryEvery is how often the grant counts are logged.
+const DefaultSummaryEvery = time.Minute
+
+// sampler lets one log line through per interval and counts the rest, so
+// a flood of dropped or overloaded requests is one line and a count.
+type sampler struct {
+	mu         sync.Mutex
+	every      time.Duration
+	last       time.Time
+	suppressed int64
+}
+
+func newSampler(every time.Duration) *sampler { return &sampler{every: every} }
+
+// take reports whether to log now, with the events since the last line
+// (this one included).
+func (l *sampler) take() (int64, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	l.suppressed++
+	if !l.last.IsZero() && now.Sub(l.last) < l.every && !now.Before(l.last) {
+		return 0, false
+	}
+	n := l.suppressed
+	l.last, l.suppressed = now, 0
+	return n, true
+}
+
+// summarise logs the counts that changed, every SummaryEvery, until done.
+func (s *Server) summarise(done <-chan struct{}) {
+	t := time.NewTicker(s.SummaryEvery)
+	defer t.Stop()
+	var prev [7]int64
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+		}
+		m := s.Metrics
+		cur := [7]int64{m.Granted.Load(), m.Refused.Load(), m.RateLimited.Load(), m.Overloaded.Load(),
+			m.DroppedReply.Load(), m.AuditSkipped.Load(), m.AuditFailed.Load()}
+		if cur == prev {
+			continue
+		}
+		prev = cur
+		s.log().Info("grant: summary", "granted", cur[0], "refused", cur[1], "rate_limited", cur[2],
+			"overloaded", cur[3], "dropped_reply", cur[4], "audit_skipped", cur[5], "audit_failed", cur[6],
+			"in_flight", m.InFlight.Load())
+	}
 }

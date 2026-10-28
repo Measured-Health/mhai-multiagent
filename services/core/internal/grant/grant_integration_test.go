@@ -160,6 +160,8 @@ type copyOpts struct {
 	limits     grant.Limits
 	noTestOnly bool
 	logs       *syncBuffer
+	pool       *pgxpool.Pool // the server's audit pool; default app
+	summary    time.Duration
 }
 
 func startCore(t *testing.T, o copyOpts) *coreCopy {
@@ -171,8 +173,11 @@ func startCore(t *testing.T, o copyOpts) *coreCopy {
 		o.guard = newGuard(o.logs)
 	}
 	c := &coreCopy{nc: connect(t, natsSrv.GatewayURL, bus.GatewayInboxPrefix), metrics: &grant.Metrics{}, logs: o.logs}
-	s := &grant.Server{Guard: o.guard, Signer: signer, Pool: app, Log: logx.New(o.logs), Limits: o.limits,
-		Metrics: c.metrics, AllowTestOnly: !o.noTestOnly}
+	if o.pool == nil {
+		o.pool = app
+	}
+	s := &grant.Server{Guard: o.guard, Signer: signer, Pool: o.pool, Log: logx.New(o.logs), Limits: o.limits,
+		Metrics: c.metrics, AllowTestOnly: !o.noTestOnly, SummaryEvery: o.summary}
 	stop, err := s.Serve(context.Background(), c.nc)
 	if err != nil {
 		t.Fatal(err)
@@ -911,7 +916,7 @@ func TestGrantRefusesForeignReplyPrefix(t *testing.T) {
 // inbox, a job on JOBS, a denylist write, a JetStream API call, wildcards.
 // The service's own inbox works.
 func TestGrantDropsForeignReplySubject(t *testing.T) {
-	c := startCore(t, copyOpts{})
+	c := startCore(t, copyOpts{summary: 300 * time.Millisecond})
 	u, s := clinician(t)
 	ec, pc := echoConn(t), pipelineConn(t)
 	bff := connect(t, natsSrv.BFFClinicalURL, bus.BFFInbox("clinical"))
@@ -1001,8 +1006,12 @@ func TestGrantDropsForeignReplySubject(t *testing.T) {
 		t.Errorf("dropped requests audited: %d", len(rows))
 	}
 	logs := c.logs.String()
-	if strings.Count(logs, "grant: reply subject refused") != len(replies) {
-		t.Errorf("drops not logged: %s", logs)
+	// One sampled line per interval, and the count in the summary.
+	if n := strings.Count(logs, "grant: reply subject refused"); n < 1 || n > 6 {
+		t.Errorf("drops logged %d times: %s", n, logs)
+	}
+	if !strings.Contains(logs, `"msg":"grant: summary"`) || !strings.Contains(logs, fmt.Sprintf(`"dropped_reply":%d`, len(replies))) {
+		t.Errorf("no summary with the drops: %s", logs)
 	}
 	for _, leak := range []string{"jobs.v1", "$KV", "$JS", kvKey, "_INBOX_"} {
 		if strings.Contains(logs, leak) {
@@ -1130,5 +1139,104 @@ func TestGrantTokenNeverLogged(t *testing.T) {
 	}
 	if text := allAuditText(t); strings.Contains(text, marker) || strings.Contains(text, s.tok) || strings.Contains(text, a.token) {
 		t.Fatal("a token on the audit chain")
+	}
+}
+
+// TestGrantVerifiedRefusalAuditedPastJunkFlood (review, Important 1): a
+// flood of tokens that don't verify fills the per-service audit cap, and a
+// denylisted session's refusal right after is still audited.
+func TestGrantVerifiedRefusalAuditedPastJunkFlood(t *testing.T) {
+	var frozen atomic.Int64
+	frozen.Store(time.Now().UnixNano())
+	c := startCore(t, copyOpts{limits: grant.Limits{Now: func() time.Time { return time.Unix(0, frozen.Load()) }}})
+	ec := echoConn(t)
+	for i := 0; i < 60; i++ {
+		if a := mustAsk(t, ec, "echo", pingRequest("junk.token."+strconv.Itoa(i), []byte("x"))); a.code != "unauthenticated" {
+			t.Fatalf("junk token: %+v", a)
+		}
+	}
+	if got := c.metrics.AuditSkipped.Load(); got != 40 {
+		t.Fatalf("audit skipped %d, want 40 past the cap of 20", got)
+	}
+	u, s := clinician(t)
+	if _, err := buckets.Denylist.Put(context.Background(), authz.SIDKey(s.sid.String()), []byte("1")); err != nil {
+		t.Fatal(err)
+	}
+	if a := mustAsk(t, ec, "echo", pingRequest(s.tok, []byte("x"))); a.code != "unauthenticated" {
+		t.Fatalf("denylisted session: %+v", a)
+	}
+	if rows := auditRows(t, "intelligence.grant_refused", u.id); len(rows) != 1 || rows[0].payload["reason"] != "unauthenticated" {
+		t.Fatalf("verified-token refusal not audited past the junk flood: %+v", rows)
+	}
+	if got := c.metrics.AuditSkipped.Load(); got != 40 {
+		t.Fatalf("audit skipped %d after the verified refusal", got)
+	}
+}
+
+// TestGrantAuditFailureFreesRequestID (review, Minor 2): when the granted
+// row can't be written, the grant is refused not_ready (retryable) and the
+// BFF's request id is not used up: the retry is granted.
+func TestGrantAuditFailureFreesRequestID(t *testing.T) {
+	cfg := app.Config()
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	startCore(t, copyOpts{pool: pool})
+	u, s := clinician(t)
+	ec := echoConn(t)
+	held, err := pool.Acquire(context.Background()) // the audit write can't get a connection
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := pingRequest(s.tok, []byte("x"))
+	data, _ := proto.Marshal(req)
+	m, err := ec.Request(grant.SubjectPrefix+"echo", data, 15*time.Second)
+	if err != nil {
+		held.Release()
+		t.Fatal(err)
+	}
+	held.Release()
+	if a := decode(t, m); a.code != "not_ready" {
+		t.Fatalf("audit down: %+v", a)
+	}
+	if rows := auditRows(t, "intelligence.granted", u.id); len(rows) != 0 {
+		t.Fatalf("granted rows: %d", len(rows))
+	}
+	if a := mustAsk(t, ec, "echo", req); a.code != "" {
+		t.Fatalf("retry with the same request id: %+v", a)
+	}
+	if a := mustAsk(t, ec, "echo", req); a.code != "forbidden" {
+		t.Fatalf("a third use after the grant: %+v", a)
+	}
+}
+
+// panicKV panics on every read.
+type panicKV struct{ jetstream.KeyValue }
+
+func (panicKV) Get(context.Context, string) (jetstream.KeyValueEntry, error) { panic("synthetic") }
+
+// TestGrantPanicAnswersNotReady (review, Minor 4): a panic in the handler
+// answers not_ready at once, and the server keeps serving.
+func TestGrantPanicAnswersNotReady(t *testing.T) {
+	logs := &syncBuffer{}
+	g := newGuard(logs)
+	g.Denylist = panicKV{buckets.Denylist}
+	c := startCore(t, copyOpts{guard: g, logs: logs})
+	_, s := clinician(t)
+	ec := echoConn(t)
+	for i := 0; i < 2; i++ {
+		start := time.Now()
+		if a := mustAsk(t, ec, "echo", pingRequest(s.tok, []byte("x"))); a.code != "not_ready" || time.Since(start) > 2*time.Second {
+			t.Fatalf("after a panic: %+v in %v", a, time.Since(start))
+		}
+	}
+	if c.metrics.InFlight.Load() != 0 {
+		t.Fatalf("in flight %d after panics", c.metrics.InFlight.Load())
+	}
+	if !strings.Contains(logs.String(), "grant: handler panicked") {
+		t.Fatal("panic not logged")
 	}
 }

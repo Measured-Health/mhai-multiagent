@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -136,7 +135,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		return nil, err
 	}
 	grants := &grant.Server{Guard: guard, Signer: signer, Pool: a.pool, Log: log,
-		AllowTestOnly: strings.EqualFold(strings.TrimSpace(cfg.Env), "development")}
+		AllowTestOnly: cfg.Development()}
 	if a.stopGrant, err = grants.Serve(ctx, nc); err != nil {
 		a.close()
 		return nil, err

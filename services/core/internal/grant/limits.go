@@ -146,3 +146,11 @@ func (s *replaySet) add(id string, now time.Time) replayResult {
 	s.m[id] = now.Add(s.window)
 	return replayNew
 }
+
+// remove forgets id, for a request that was refused after its id was
+// recorded and was granted nothing.
+func (s *replaySet) remove(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.m, id)
+}

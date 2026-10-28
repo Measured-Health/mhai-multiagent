@@ -189,3 +189,31 @@ func TestReplaySet(t *testing.T) {
 		t.Fatal("a after the window")
 	}
 }
+
+func TestReplaySetRemove(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	s := newReplaySet(2*time.Minute, 10)
+	s.add("a", now)
+	s.remove("a")
+	if s.add("a", now) != replayNew {
+		t.Fatal("removed id still seen")
+	}
+}
+
+// TestSampler: the first event logs, the rest of the interval are counted
+// into the next line.
+func TestSampler(t *testing.T) {
+	l := newSampler(time.Hour)
+	if n, ok := l.take(); !ok || n != 1 {
+		t.Fatalf("first: %d %v", n, ok)
+	}
+	for i := 0; i < 5; i++ {
+		if _, ok := l.take(); ok {
+			t.Fatal("logged inside the interval")
+		}
+	}
+	l.last = l.last.Add(-2 * time.Hour)
+	if n, ok := l.take(); !ok || n != 6 {
+		t.Fatalf("next interval: %d %v", n, ok)
+	}
+}
