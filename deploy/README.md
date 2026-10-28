@@ -219,6 +219,34 @@ the subjects, its NATS user `bff` may sign in but publish nothing.
 - **From the host:** `nats://127.0.0.1:4222`. A container's 127.0.0.1 is its
   own, so the frontend's containers can't use this.
 
+## Public API docs (api-dev)
+
+The docs page is public at `https://api-dev.measured-health.org/api/docs`
+(product owner, 28 Oct). `nginx/mhai-api-dev.conf` serves only `/api/docs`,
+its script and `/api/openapi.yaml`, GET only; every other path, the API
+included, is 404. One-time setup on the instance, after the DNS A record
+`api-dev.measured-health.org` → the instance exists:
+
+```bash
+# 1. Proxy settings and the allow list (`allow all;` for the demo, or
+#    `allow <ip>;` lines then `deny all;`).
+sudo cp deploy/nginx/mhai-api-dev-proxy.conf /etc/nginx/mhai-api-dev-proxy.conf
+echo 'allow all;' | sudo tee /etc/nginx/mhai-api-dev-allow.conf
+# 2. Serve the :80 block alone, so certbot can answer the challenge.
+awk '/^server \{/{n++} n==1' deploy/nginx/mhai-api-dev.conf \
+  | sudo tee /etc/nginx/sites-available/mhai-api-dev >/dev/null
+sudo ln -sf /etc/nginx/sites-available/mhai-api-dev /etc/nginx/sites-enabled/mhai-api-dev
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot certonly --webroot -w /var/www/html -d api-dev.measured-health.org
+# 3. The full site, then test before reloading: a bad file must never take
+#    the EMR site down.
+sudo cp deploy/nginx/mhai-api-dev.conf /etc/nginx/sites-available/mhai-api-dev
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+The core service must run with the docs on (`CORE_ENV: development` in
+`compose.yml`); without them the page is core's 404.
+
 ## Optional: nginx
 
 There is no public site for the backend, and none is needed while the BFF

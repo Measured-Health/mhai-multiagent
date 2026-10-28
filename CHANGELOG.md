@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+
+- Public API docs on the demo server at `https://api-dev.measured-health.org/api/docs`
+  (`deploy/nginx/mhai-api-dev.conf`): only the docs page, its script and the
+  spec, GET only, behind its own allow list; the API itself stays private.
 - API docs on the core service: `GET /api/docs` (Redoc 2.5.4, vendored, no
   CDN) and `GET /api/openapi.yaml`, both embedded in the binary, outside the
   authenticated API chain and never served over NATS. Switch:
