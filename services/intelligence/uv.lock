@@ -931,7 +931,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=41.0" },
     { name = "fastapi", specifier = ">=0.100" },
     { name = "httpx", specifier = ">=0.24" },
-    { name = "nats-py", extras = ["nkeys"], specifier = ">=2.16,<3" },
+    { name = "nats-py", extras = ["nkeys"], specifier = ">=2.16,<2.17" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "peft", specifier = ">=0.5" },

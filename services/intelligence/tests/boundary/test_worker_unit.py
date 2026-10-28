@@ -106,7 +106,10 @@ def make_worker(
     ops = Operations.load(development=True)
     v = Verifier(TrustedKeys.from_encoded(signer.encoded_keys()), service, ops, JtiSet(clk), clk)
     settings = WorkerSettings(
-        service=service, nats_url="nats://127.0.0.1:4222", trusted_keys_path="/nonexistent"
+        service=service,
+        nats_url="nats://127.0.0.1:4222",
+        trusted_keys_path="/nonexistent",
+        development=True,
     )
     w = Worker(settings, handlers if handlers is not None else dict(echo.HANDLERS), v)
     return w, FakeNC(), signer
@@ -703,5 +706,194 @@ def test_bff_timeout_header_only_shortens(value: str, ok: bool) -> None:
             assert 0 < seen[0] <= min(int(value), 5000)
         else:
             assert h[envelope.STATUS] == "invalid_request" and seen == []
+
+    run(go())
+
+
+# --- hardening round: TLS, the header parser, the BFF request id ----------------
+
+
+def tls_files(tmp: Any) -> tuple[str, str, str]:
+    """A throwaway self-signed certificate (CA and client at once), test-only."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    k = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test-only")])
+    now = datetime.datetime.now(datetime.UTC)
+    c = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(k.public_key())
+        .serial_number(1)
+        .not_valid_before(now - datetime.timedelta(minutes=1))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(k, hashes.SHA256())
+    )
+    cert = tmp / "test-only.pem"
+    key = tmp / "test-only-key.pem"
+    cert.write_bytes(c.public_bytes(serialization.Encoding.PEM))
+    key.write_bytes(
+        k.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return str(cert), str(cert), str(key)
+
+
+def _prod_worker(url: str, tmp: Any, *, with_tls: bool = True) -> Worker:
+    signer = Signer()
+    ops = Operations.load(development=False)
+    v = Verifier(
+        TrustedKeys.from_encoded(signer.encoded_keys()),
+        "pipeline",
+        ops,
+        JtiSet(time.time),
+        time.time,
+    )
+    ca = cert = key = None
+    if with_tls:
+        ca, cert, key = tls_files(tmp)
+    s = WorkerSettings(
+        service="pipeline",
+        nats_url=url,
+        trusted_keys_path="/x",
+        tls_ca_path=ca,
+        tls_cert_path=cert,
+        tls_key_path=key,
+        development=False,
+    )
+    return Worker(s, pipeline.handlers(), v)
+
+
+def test_production_worker_never_sends_connect_to_a_plaintext_server(tmp_path: Any) -> None:
+    """A fake server that never asks for TLS (tls_required false), as a
+    downgrading server would: the worker's first bytes are a TLS
+    ClientHello, the handshake fails, and no CONNECT (with its
+    credentials) is ever written in the clear."""
+
+    async def go() -> None:
+        got: list[bytes] = []
+
+        async def serve(r: asyncio.StreamReader, wr: asyncio.StreamWriter) -> None:
+            wr.write(
+                b'INFO {"server_id":"fake","version":"2.10.0","tls_required":false,"headers":true,"max_payload":1048576}\r\n'
+            )
+            await wr.drain()
+            try:
+                while data := await r.read(4096):
+                    got.append(data)
+            finally:
+                wr.close()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        w = _prod_worker(f"nats://pipeline:test-only-pw@127.0.0.1:{port}", tmp_path)
+        try:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(w.start(), 2)
+        finally:
+            server.close()
+        raw = b"".join(got)
+        assert got and got[0][:1] == b"\x16"  # a TLS handshake record first
+        assert b"CONNECT" not in raw and b"test-only-pw" not in raw
+
+    run(go())
+
+
+def test_production_worker_needs_tls_settings() -> None:
+    async def go() -> None:
+        w = _prod_worker("nats://127.0.0.1:1", None, with_tls=False)
+        with pytest.raises(ConfigError, match="NATS_TLS_CA_PATH"):
+            await w.start()
+
+    run(go())
+
+
+def test_plaintext_after_reconnect_stops_the_worker() -> None:
+    """Belt and braces: if a reconnect ever lands without TLS, the worker
+    stops serving (and the CLI exits non-zero)."""
+
+    async def go() -> None:
+        w, nc, _ = make_worker()
+        await started(w, nc)
+        w._require_tls = True
+        w._stop = asyncio.Event()
+        await w._on_reconnected()  # FakeNC has no TLS transport
+        assert w.insecure and w._stop.is_set() and nc.is_closed
+
+    run(go())
+
+
+def test_worker_refuses_to_start_with_fast_mail_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    import nats.aio.client as nats_client
+
+    monkeypatch.setattr(nats_client, "parse_email", object())
+
+    async def go() -> None:
+        w, nc, _ = make_worker()
+        with pytest.raises(RuntimeError, match="fast_mail_parser"):
+            await w.start(nc=nc)  # type: ignore[arg-type]
+
+    run(go())
+
+
+def test_parse_email_is_off() -> None:
+    import nats.aio.client as nats_client
+
+    assert nats_client.parse_email is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"NATS/1.0\r\nMhai-Request-Token: A\nMhai-Request-Token: B\r\n\r\n",
+        b"NATS/1.0\nMhai-Request-Token: A\nMhai-Request-Token: B\n\n",
+        b"NATS/1.0\r\nMhai-Request-Token: A\r\n B\r\n\r\n",
+        b"NATS/1.0\r\nMhai-Request-Token: A\rB\r\n\r\n",
+    ],
+)
+def test_bare_lf_folded_or_cr_credential_headers_refused(raw: bytes) -> None:
+    async def go() -> None:
+        h = await WorkerClient()._process_headers(raw)
+        assert h is not None and h.ambiguous
+        w, nc, _ = make_worker()
+        await started(w, nc)
+        await w.dispatch(msg(PING, "_INBOX_gateway.t.1", ping_body(), h))
+        await w.close()
+        [(_, _, hd)] = nc.published
+        assert hd is not None and hd[envelope.STATUS] == "unauthorized"
+        assert w.refusals["ambiguous_headers"] == 1
+
+    run(go())
+
+
+@pytest.mark.parametrize(
+    "rid", [None, "", "short", "has space 1234", "x" * 65, "bad/char/123", "é" * 10]
+)
+def test_bad_bff_request_id_refused_before_any_grant(rid: str | None) -> None:
+    async def go() -> None:
+        w, nc, _ = make_worker()
+        await started(w, nc)
+        pairs = [(envelope.AUTHORIZATION, f"Bearer {ACCESS}"), (envelope.SCHEMA, PING_SCHEMA)]
+        if rid is not None:
+            pairs.append((envelope.REQUEST_ID, rid))
+        for reply in ["_INBOX_bff.clinical.t.1", "_INBOX_gateway.t.1"]:
+            await w.dispatch(msg(PING, reply, ping_body(), await headers_of(pairs)))
+        await w.close()
+        assert nc.requests == []  # core never asked
+        # Answered only on the checked clinical BFF inbox.
+        [(subject, _, hd)] = nc.published
+        assert subject == "_INBOX_bff.clinical.t.1"
+        assert hd is not None and hd[envelope.STATUS] == "invalid_request"
+        assert envelope.REQUEST_ID not in hd
 
     run(go())

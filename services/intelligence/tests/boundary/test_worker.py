@@ -168,6 +168,7 @@ async def start_worker(
             nats_url=nats_server.url(service),
             trusted_keys_path=str(keys_file),
             max_concurrency=max_concurrency,
+            development=True,  # the test server is plaintext
         )
         if handlers is None:
             handlers = dict(echo.HANDLERS if service == "echo" else pipeline.handlers())
@@ -859,3 +860,36 @@ def test_postgres_fixture_is_migrated_by_core(postgres: Postgres) -> None:
     one production uses (T10's tests build on it)."""
     assert postgres.psql("SELECT to_regclass('public.hospitals') IS NOT NULL") == "t"
     assert postgres.psql("SELECT count(*) FROM pg_roles WHERE rolname = 'mhai_jobs'") == "1"
+
+
+async def test_production_worker_refuses_a_server_without_tls(
+    nats_server: NatsServer, signer: Signer, keys_file: Path, tmp_path: Path
+) -> None:
+    """Hardening: outside development the worker does the TLS handshake
+    first, so the real (plaintext) server never gets a CONNECT and the
+    worker never joins the queue group."""
+    from tests.boundary.test_worker_unit import tls_files
+
+    ca, cert, key = tls_files(tmp_path)
+    settings = WorkerSettings(
+        service="pipeline",
+        # The real password: a worker that let the server's INFO decide
+        # would connect in plaintext and pass auth, so this must time out.
+        nats_url=nats_server.url("pipeline"),
+        trusted_keys_path=str(keys_file),
+        tls_ca_path=ca,
+        tls_cert_path=cert,
+        tls_key_path=key,
+        development=False,
+    )
+    v = Verifier(
+        TrustedKeys.from_encoded(signer.encoded_keys()),
+        "pipeline",
+        Operations.load(development=False),
+        JtiSet(time.time),
+        time.time,
+    )
+    w = Worker(settings, pipeline.handlers(), v)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(w.start(), 3)
+    assert w._sub is None  # never joined the queue group

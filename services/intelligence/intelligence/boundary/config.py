@@ -65,6 +65,9 @@ class WorkerSettings:
     operations_path: str | None = None  # None: the packaged operations.json
     max_concurrency: int = 4
     db_url: str | None = None  # pipeline only (T10)
+    # False (production) unless from_env read APP_ENV=development: TLS with
+    # a handshake first is the default.
+    development: bool = False
 
     @classmethod
     def from_env(
@@ -141,4 +144,5 @@ class WorkerSettings:
             operations_path=ops_path,
             max_concurrency=max_concurrency,
             db_url=db,
+            development=development,
         )

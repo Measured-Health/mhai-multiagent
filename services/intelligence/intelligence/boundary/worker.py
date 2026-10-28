@@ -41,6 +41,7 @@ import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 
+import nats.aio.client as nats_client
 from google.protobuf import descriptor_pool, message_factory
 from google.protobuf.message import Message
 from nats.aio.client import Client
@@ -48,7 +49,7 @@ from nats.aio.msg import Msg
 from nats.aio.subscription import Subscription
 
 from intelligence.boundary import envelope
-from intelligence.boundary.config import WorkerSettings
+from intelligence.boundary.config import ConfigError, WorkerSettings
 from intelligence.boundary.grant import GrantClient, GrantRefused, Unavailable
 from intelligence.boundary.keys import TrustedKeys, install_sighup_reload
 from intelligence.boundary.operations import Operation, Operations
@@ -118,21 +119,47 @@ class Headers(dict[str, str]):
 
 
 def _ambiguous(raw: bytes, parsed: Mapping[str, str]) -> bool:
-    nl = raw.find(b"\r\n")
+    """True when a guarded header could be read two ways. Lines are split on
+    LF as well as CRLF (as Go's textproto does, though nats-py splits on CRLF
+    only), so "A\\nMhai-Request-Token: B" is a repeat, not one odd value; a
+    continuation line after a guarded header, or a stray CR in one, is
+    ambiguous too."""
+    nl = raw.find(b"\n")
     if nl < 0:
         return False
     seen: Counter[str] = Counter()
-    for line in raw[nl + 2 :].split(b"\r\n"):
+    after_guarded = False
+    for line in raw[nl + 1 :].split(b"\n"):
+        line = line.removesuffix(b"\r")
+        if after_guarded and line[:1] in (b" ", b"\t"):
+            return True  # a folded value: readers disagree on it
         name, sep, _ = line.partition(b":")
-        if not sep:
-            continue
-        g = _GUARDED_LOWER.get(name.strip().lower())
+        g = _GUARDED_LOWER.get(name.strip().lower()) if sep else None
+        after_guarded = g is not None
         if g is None:
             continue
-        if name.strip() != g.encode():
-            return True  # another spelling (or surrounding space)
+        if name.strip() != g.encode() or b"\r" in line:
+            return True  # another spelling, surrounding space or a stray CR
         seen[g] += 1
     return any(n > 1 or g not in parsed for g, n in seen.items())
+
+
+def _check_header_parser() -> None:
+    """The repeat check assumes nats-py's own header parser. With the
+    optional fast_mail_parser installed nats-py uses that instead, whose
+    repeat and folding rules differ: refuse to start (not an assert, which
+    -O would strip)."""
+    if nats_client.parse_email is not None:
+        raise RuntimeError("nats-py is using fast_mail_parser; the worker needs its own parser")
+
+
+def _is_tls(nc: Client) -> bool:
+    """The connection's transport is TLS. Anything unexpected is False."""
+    try:
+        writer = nc._transport._io_writer  # type: ignore[union-attr]
+        return writer is not None and writer.get_extra_info("ssl_object") is not None
+    except Exception:
+        return False
 
 
 class WorkerClient(Client):
@@ -198,6 +225,8 @@ class Worker:
         self._grant: GrantClient | None = None
         self._stop: asyncio.Event | None = None
         self.draining = False
+        self.insecure = False
+        self._require_tls = False
         self.received = 0
         # Worker-side refusals and drops by reason (the verifier counts its own).
         self.refusals: Counter[str] = Counter()
@@ -214,13 +243,27 @@ class Worker:
         return self._handlers[f"{self.service}.{name}"][2]
 
     async def _connect(self) -> Client:
+        """Connect. Outside development TLS is the client's rule, not the
+        server's: nats-py only upgrades when the server's INFO says
+        tls_required, so a fake or downgraded server could keep the session
+        (and the CONNECT credentials) in plaintext. tls_handshake_first does
+        the TLS handshake before reading a single protocol byte, on every
+        connect and reconnect, so a plaintext server fails the handshake and
+        nothing is ever sent in the clear. The transport is checked for TLS
+        after connecting and after every reconnect as well."""
         s = self.settings
+        if not s.development and not (s.tls_ca_path and s.tls_cert_path and s.tls_key_path):
+            raise ConfigError(
+                "NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH are required "
+                "outside development"
+            )
         nc = WorkerClient()
         tls = None
         if s.tls_ca_path:
             tls = ssl.create_default_context(cafile=s.tls_ca_path)
             if s.tls_cert_path and s.tls_key_path:
                 tls.load_cert_chain(s.tls_cert_path, s.tls_key_path)
+        self._require_tls = tls is not None
 
         async def on_error(e: Exception) -> None:
             log.warning("nats error service=%s error=%s", self.service, type(e).__name__)
@@ -233,11 +276,27 @@ class Worker:
             nkeys_seed=s.nkey_seed_path,
             error_cb=on_error,
             max_reconnect_attempts=-1,
+            tls_handshake_first=not s.development,
+            reconnected_cb=self._on_reconnected,
         )
+        if self._require_tls and not _is_tls(nc):
+            await nc.close()
+            raise ConnectionError("the NATS connection is not TLS")
         return nc
+
+    async def _on_reconnected(self) -> None:
+        if self._require_tls and self._nc is not None and not _is_tls(self._nc):
+            # Never reached with handshake-first, but if it is: stop, don't serve.
+            self.insecure = True
+            self.refusals["plaintext"] += 1
+            log.error("nats reconnected without TLS service=%s; stopping", self.service)
+            await self.abort()
+            if self._stop is not None:
+                self._stop.set()
 
     async def start(self, nc: Client | None = None) -> None:
         """Connect (or use nc) and join the service's queue group."""
+        _check_header_parser()
         self._nc = nc if nc is not None else await self._connect()
         self._grant = GrantClient(self._nc, self.service, clock=self._clock)
         self._sub = await self._nc.subscribe(
@@ -410,7 +469,11 @@ class Worker:
             self._drop("reply_subject", msg.subject)
             return
         bff_rid = headers.get(envelope.REQUEST_ID, "")
-        echo_rid = bff_rid if _BFF_RID.fullmatch(bff_rid) else ""
+        if not _BFF_RID.fullmatch(bff_rid):
+            # Core's validRequestID: refused here, before any grant is asked.
+            await self._refuse_unchecked(msg, "request_id", "invalid_request", REPLY_GRANT)
+            return
+        echo_rid = bff_rid
         route = self._route(msg.subject)
         if route is None or not route[0].bff_direct:
             await self._refuse_unchecked(
@@ -589,3 +652,5 @@ async def run_service(settings: WorkerSettings) -> None:
     w = Worker(settings, service_handlers(settings.service), verifier)
     await w.start()
     await w.run(trusted)
+    if w.insecure:
+        raise ConnectionError("the NATS connection lost TLS")
