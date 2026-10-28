@@ -22,6 +22,16 @@ All notable changes to this project are documented here. The format follows
   CI fails a pull request with a breaking change to `openapi.yaml`
   (oasdiff 1.34.1). `httpx.Deprecated` sets the retirement headers.
 
+### Fixed
+
+- `GET /api/openapi.yaml` is now `text/plain` with `Content-Disposition: inline`,
+  so a browser shows the spec instead of saving it (`application/yaml` was
+  downloaded). Redoc's Download link still saves a file.
+- The docs page no longer logs a CSP violation for Redoc's footer logo from
+  `cdn.redoc.ly`: a small same-origin script (`/api/docs/redoc-shim.js`)
+  drops that one image request. The CSP is unchanged and the Redoc bundle is
+  not modified. The nginx allow list for api-dev gains that path.
+
 ### Security
 - `core migrate up` no longer lets a login's SCRAM verifier reach the
   Postgres server log when setting the password fails. Postgres logs a

@@ -38,7 +38,8 @@ func TestOnServesPageBundleAndSpec(t *testing.T) {
 	for path, ct := range map[string]string{
 		PagePath:   "text/html; charset=utf-8",
 		BundlePath: "text/javascript; charset=utf-8",
-		SpecPath:   "application/yaml; charset=utf-8",
+		ShimPath:   "text/javascript; charset=utf-8",
+		SpecPath:   "text/plain; charset=utf-8",
 	} {
 		rec := get(h, http.MethodGet, path)
 		if rec.Code != 200 {
@@ -61,7 +62,7 @@ func TestHeaders(t *testing.T) {
 		"Referrer-Policy":         "no-referrer",
 		"Cache-Control":           "no-store",
 	}
-	for _, path := range []string{PagePath, BundlePath, SpecPath} {
+	for _, path := range []string{PagePath, BundlePath, ShimPath, SpecPath} {
 		rec := get(h, http.MethodGet, path)
 		for k, v := range want {
 			if got := rec.Header().Get(k); got != v {
@@ -83,6 +84,30 @@ func TestHeaders(t *testing.T) {
 		if strings.Contains(body, bad) {
 			t.Errorf("page contains %q", bad)
 		}
+	}
+}
+
+func TestSpecIsInlineText(t *testing.T) {
+	rec := get(handler(true), http.MethodGet, SpecPath)
+	if got, want := rec.Header().Get("Content-Disposition"), `inline; filename="openapi.yaml"`; got != want {
+		t.Errorf("Content-Disposition %q, want %q", got, want)
+	}
+	if got := get(handler(true), http.MethodGet, PagePath).Header().Get("Content-Disposition"); got != "" {
+		t.Errorf("page has Content-Disposition %q", got)
+	}
+}
+
+func TestPageLoadsShimBeforeBundleAndHidesLogo(t *testing.T) {
+	body := get(handler(true), http.MethodGet, PagePath).Body.String()
+	si, bi := strings.Index(body, ShimPath), strings.Index(body, BundlePath)
+	if si < 0 || bi < 0 || si > bi {
+		t.Errorf("shim must load before the bundle (shim at %d, bundle at %d)", si, bi)
+	}
+	if !strings.Contains(body, `img[alt="redocly logo"]{display:none}`) {
+		t.Error("page does not hide the Redocly logo")
+	}
+	if !strings.Contains(get(handler(true), http.MethodGet, ShimPath).Body.String(), "cdn.redoc.ly") {
+		t.Error("shim does not block the Redocly CDN logo")
 	}
 }
 

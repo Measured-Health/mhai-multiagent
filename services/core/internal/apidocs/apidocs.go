@@ -20,11 +20,27 @@ import (
 const (
 	PagePath   = "/api/docs"
 	BundlePath = "/api/docs/redoc.standalone.js"
+	ShimPath   = "/api/docs/redoc-shim.js"
 	SpecPath   = "/api/openapi.yaml"
 )
 
 //go:embed assets/redoc.standalone.js
 var bundle []byte
+
+// shim stops Redoc's "API docs by Redocly" footer from requesting its logo
+// from cdn.redoc.ly. The bundle hard-codes that URL, which the CSP rightly
+// blocks (a console violation on every load); hiding the element with CSS
+// would not stop the request. The shim drops only that one src, before the
+// bundle runs, and the page's style rule hides the then-empty image.
+const shim = `(function () {
+  var set = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function (name, value) {
+    if (name === "src" && this instanceof HTMLImageElement &&
+        String(value).indexOf("https://cdn.redoc.ly/") === 0) { return; }
+    return set.call(this, name, value);
+  };
+})();
+`
 
 // page is static; the spec is loaded from SpecPath by the bundle.
 // disable-search: Redoc's search needs a blob: web worker.
@@ -35,9 +51,11 @@ const page = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>MHAI core API</title>
+<style>img[alt="redocly logo"]{display:none}</style>
 </head>
 <body>
 <redoc spec-url="` + SpecPath + `" disable-search></redoc>
+<script src="` + ShimPath + `"></script>
 <script src="` + BundlePath + `"></script>
 </body>
 </html>
@@ -64,7 +82,8 @@ func Wrap(enabled bool, spec []byte, next http.Handler) http.Handler {
 	assets := map[string]asset{
 		PagePath:   {"text/html; charset=utf-8", []byte(page)},
 		BundlePath: {"text/javascript; charset=utf-8", bundle},
-		SpecPath:   {"application/yaml; charset=utf-8", spec},
+		ShimPath:   {"text/javascript; charset=utf-8", []byte(shim)},
+		SpecPath:   {"text/plain; charset=utf-8", spec},
 	}
 	notFound := httpx.RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "not_found")
@@ -84,6 +103,11 @@ func Wrap(enabled bool, spec []byte, next http.Handler) http.Handler {
 		}
 		h := w.Header()
 		h.Set("Content-Type", a.contentType)
+		if p == SpecPath {
+			// Shown in the browser (application/yaml would be saved as a file).
+			// Redoc's Download link has the download attribute, so it still saves.
+			h.Set("Content-Disposition", `inline; filename="openapi.yaml"`)
+		}
 		h.Set("Content-Length", strconv.Itoa(len(a.body)))
 		h.Set("Cache-Control", "no-store")
 		h.Set("X-Content-Type-Options", "nosniff")

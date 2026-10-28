@@ -223,7 +223,7 @@ the subjects, its NATS user `bff` may sign in but publish nothing.
 
 The docs page is public at `https://api-dev.measured-health.org/api/docs`
 (product owner, 28 Oct). `nginx/mhai-api-dev.conf` serves only `/api/docs`,
-its script and `/api/openapi.yaml`, GET only; every other path, the API
+its two scripts and `/api/openapi.yaml`, GET only; every other path, the API
 included, is 404. One-time setup on the instance, after the DNS A record
 `api-dev.measured-health.org` → the instance exists:
 
