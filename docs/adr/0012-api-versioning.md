@@ -1,6 +1,6 @@
 # 0012. Version the API by major number in the path and subject, and change a version only by adding
 
-- **Status:** Proposed (product owner asked on 2026-10-28 to "version the backend api")
+- **Status:** Accepted 2026-10-28 by the product owner
 - **Date:** 2026-10-28
 - **Deciders:** product owner
 

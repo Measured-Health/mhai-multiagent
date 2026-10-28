@@ -149,11 +149,11 @@ services:
     restart: unless-stopped
     command: ["serve"]
     environment:
-      CORE_ENV: preview
-      # Demo only: Redoc at /api/docs on the loopback port (view it through an
-      # SSH tunnel). Off by default everywhere but development; leave it unset
-      # in production.
-      CORE_API_DOCS: "true"
+      # The demo server runs as development (product owner, 28 Oct), which
+      # turns on Redoc at /api/docs on the loopback port (view it through an
+      # SSH tunnel). CORE_ENV changes nothing else in core today; production
+      # must not be development.
+      CORE_ENV: development
       HTTP_ADDR: ":8080"
       DATABASE_URL: postgres://core_app:${CORE_DB_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=disable
       NATS_URL: nats://nats:4222
