@@ -10,7 +10,9 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 from collections.abc import Callable
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -656,6 +658,7 @@ def test_refusal_reasons_map_to_codes(make: Callable[..., Verifier]) -> None:
         "scope": "invalid_request",
         "no_hospital": "invalid_request",
         "forbidden": "forbidden",
+        "internal": "internal",
     }
     assert set(REASON_CODES.values()) <= envelope.CODES
 
@@ -664,3 +667,138 @@ def test_refusal_metric_counts_reason(make: Callable[..., Verifier], signer: Sig
     v = make()
     v.verify_request(PING_SUBJECT, CORE_REPLY, headers(None), ping_body(), ping_decoder)
     assert v.refusals[("echo", "malformed")] == 1
+
+
+# --- fix round 1 ------------------------------------------------------------------
+
+
+def _payload_json(signer: Signer, body: bytes) -> str:
+    return json.dumps(signer.claims(body=body), separators=(",", ":"))
+
+
+HDR = '{"alg":"EdDSA","typ":"mhai-req+jwt","kid":"%s"}'
+
+
+@pytest.mark.parametrize(
+    "label,edit,reason",
+    [
+        ("NaN iat", lambda p: p.replace(f'"iat":{NOW}', '"iat":NaN'), "malformed"),
+        ("Infinity exp", lambda p: p.replace(f'"exp":{NOW + 5}', '"exp":Infinity'), "malformed"),
+        (
+            "escaped duplicate hid",
+            lambda p: p[:-1] + f',"\\u0068id":"{OTHER_HOSPITAL}"}}',
+            "malformed",
+        ),
+        ("BOM", lambda p: "\ufeff" + p, "malformed"),
+        ("trailing data", lambda p: p + "{}", "malformed"),
+        ("trailing whitespace", lambda p: p + " \n", "ok"),
+        ("lone surrogate", lambda p: p.replace(f'"sub":"{USER}"', '"sub":"\\ud800"'), "malformed"),
+        ("minus zero iat", lambda p: p.replace(f'"iat":{NOW}', '"iat":-0'), "claims"),
+        ("exponent iat", lambda p: p.replace(f'"iat":{NOW}', '"iat":1e3'), "malformed"),
+        (
+            "iat over int64",
+            lambda p: p.replace(f'"iat":{NOW}', '"iat":9223372036854775808'),
+            "malformed",
+        ),
+        (
+            "roles a string",
+            lambda p: p.replace('"roles":["clinician"]', '"roles":"clinician"'),
+            "malformed",
+        ),
+    ],
+)
+def test_payload_parser_differentials(
+    make: Callable[..., Verifier],
+    signer: Signer,
+    label: str,
+    edit: Callable[[str], str],
+    reason: str,
+) -> None:
+    body = ping_body()
+    p = _payload_json(signer, body)
+    edited = edit(p)
+    assert edited != p, label
+    tok = signer.sign_raw(HDR % signer.kid, edited)
+    got = make().check_token(tok, PING_SUBJECT, CORE_REPLY, "req", body) or "ok"
+    assert got == reason, label
+
+
+@pytest.mark.parametrize(
+    "label,header,reason",
+    [
+        ("deep nesting", '{"alg":' + "[" * 2500, "malformed"),
+        (
+            "duplicate alg",
+            '{"alg":"none","alg":"EdDSA","typ":"mhai-req+jwt","kid":"K"}',
+            "malformed",
+        ),
+        ("kid a number", '{"alg":"EdDSA","typ":"mhai-req+jwt","kid":7}', "malformed"),
+        ("extra header", '{"alg":"EdDSA","typ":"mhai-req+jwt","kid":"K","jku":"x"}', "malformed"),
+    ],
+)
+def test_header_parser_differentials(
+    make: Callable[..., Verifier], signer: Signer, label: str, header: str, reason: str
+) -> None:
+    """Unsigned headers: refused before any key or signature is looked at."""
+    body = ping_body()
+    tok = b64u(header.replace('"K"', f'"{signer.kid}"').encode()) + "." + b64u(b"{}") + "."
+    assert len(tok) <= 4096, label
+    assert make().check_token(tok, PING_SUBJECT, CORE_REPLY, "req", body) == reason, label
+
+
+def test_unexpected_exception_is_internal(
+    make: Callable[..., Verifier],
+    signer: Signer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import intelligence.boundary.verify as verify_mod
+
+    def boom(_: object) -> object:
+        raise RuntimeError("synthetic secret detail")
+
+    monkeypatch.setattr(verify_mod, "scope_ids", boom)
+    body = ping_body()
+    with caplog.at_level(logging.INFO, logger="intelligence.boundary"):
+        r = make().verify_request(
+            PING_SUBJECT, CORE_REPLY, headers(signer.mint(body=body)), body, ping_decoder
+        )
+    r = refused(r, "internal")
+    assert (r.code, r.reply, r.alert) == ("internal", True, True)
+    line = caplog.records[-1].getMessage()
+    assert "RuntimeError" in line and "synthetic secret detail" not in line
+
+    # Before check 5 passed, no reply.
+    def bad_clock() -> float:
+        raise RuntimeError("synthetic")
+
+    v = make()
+    v._clock = bad_clock
+    r = refused(
+        v.verify_request(PING_SUBJECT, CORE_REPLY, headers(None), body, ping_decoder), "internal"
+    )
+    assert r.reply is False
+
+
+def test_verifier_and_replay_share_one_clock(signer: Signer, ops: Operations, clock: Clock) -> None:
+    trusted = TrustedKeys.from_encoded(signer.encoded_keys())
+    with pytest.raises(ValueError):
+        Verifier(trusted, "echo", ops, JtiSet(Clock(NOW)), clock)
+    Verifier(trusted, "echo", ops, JtiSet(clock), clock)
+
+
+def test_only_verify_issues_verified() -> None:
+    """Nothing outside verify.py names the issuing token or method."""
+    root = Path(__file__).resolve().parents[2] / "intelligence"
+    offenders = [
+        str(p.relative_to(root))
+        for p in root.rglob("*.py")
+        if p.name != "verify.py" and re.search(r"\b_ISSUE\b|\b_issue\b", p.read_text())
+    ]
+    assert offenders == []
+    tests = Path(__file__).resolve().parent
+    assert not [
+        p.name
+        for p in tests.rglob("*.py")
+        if p.name != Path(__file__).name and re.search(r"\b_ISSUE\b|\b_issue\b", p.read_text())
+    ]

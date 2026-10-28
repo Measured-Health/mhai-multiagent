@@ -60,9 +60,11 @@ def _load() -> list[dict[str, Any]]:
 
 def _verifier(v: dict[str, Any], ops: Operations) -> Verifier:
     now = float(v["now"])
-    return Verifier(
-        TrustedKeys.from_encoded(v["keys"]), v["service"], ops, JtiSet(lambda: now), lambda: now
-    )
+
+    def clock() -> float:
+        return now
+
+    return Verifier(TrustedKeys.from_encoded(v["keys"]), v["service"], ops, JtiSet(clock), clock)
 
 
 def _full(v: dict[str, Any], verifier: Verifier, body: bytes) -> object:

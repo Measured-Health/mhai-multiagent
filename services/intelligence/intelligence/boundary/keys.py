@@ -10,13 +10,14 @@ key.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import signal
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
-from types import FrameType
+from types import MappingProxyType
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -78,13 +79,21 @@ def _read(path: str | Path) -> dict[str, Ed25519PublicKey]:
 
 
 class TrustedKeys:
-    """The current trusted set. reload() swaps it whole, or keeps the old one."""
+    """The current trusted set.
+
+    Reads take no lock: the set is one immutable mapping, replaced whole by
+    a single reference assignment, so a verification never waits on a
+    reload. A lock only serialises reloads, and is never waited on: a
+    reload asked for while one runs is queued and picked up by the running
+    one, so nothing can deadlock (spec §7.5).
+    """
 
     def __init__(self, keys: Mapping[str, Ed25519PublicKey]) -> None:
         if not 0 < len(keys) <= MAX_TRUSTED:
             raise TrustedKeysError()
-        self._keys: dict[str, Ed25519PublicKey] = dict(keys)
-        self._lock = threading.Lock()
+        self._keys: Mapping[str, Ed25519PublicKey] = MappingProxyType(dict(keys))
+        self._reload_lock = threading.Lock()
+        self._pending = False
         self.reload_failures = 0
 
     @classmethod
@@ -98,36 +107,49 @@ class TrustedKeys:
         return cls(_parse_encoded(dict(enc)))
 
     def get(self, kid: str) -> Ed25519PublicKey | None:
-        with self._lock:
-            return self._keys.get(kid)
+        return self._keys.get(kid)
 
     def kids(self) -> frozenset[str]:
-        with self._lock:
-            return frozenset(self._keys)
+        return frozenset(self._keys)
 
     def reload(self, path: str | Path) -> bool:
-        """Re-read the file. A bad file keeps the current set (logged, counted)."""
+        """Re-read the file. A bad file keeps the current set (logged, counted).
+
+        Returns True if this call installed a new set. If a reload is already
+        running, this one is queued for it and returns False at once."""
+        self._pending = True
+        installed = False
+        while self._pending:
+            if not self._reload_lock.acquire(blocking=False):
+                return installed
+            try:
+                while self._pending:
+                    self._pending = False
+                    installed = self._reload_once(path)
+            finally:
+                self._reload_lock.release()
+        return installed
+
+    def _reload_once(self, path: str | Path) -> bool:
         try:
             keys = _read(path)
         except TrustedKeysError:
-            with self._lock:
-                self.reload_failures += 1
-                count = len(self._keys)
-            log.warning("trusted keys reload refused; keeping the current %d key(s)", count)
+            self.reload_failures += 1
+            log.warning(
+                "trusted keys reload refused; keeping the current %d key(s)", len(self._keys)
+            )
             return False
-        with self._lock:
-            self._keys = keys
+        self._keys = MappingProxyType(keys)
         log.info("trusted keys reloaded: %d key(s)", len(keys))
         return True
 
 
-SignalHandler = Callable[[int, FrameType | None], Any] | int | None
+def install_sighup_reload(
+    trusted: TrustedKeys, path: str | Path, loop: asyncio.AbstractEventLoop
+) -> None:
+    """Re-read path into trusted on SIGHUP, as a callback on loop.
 
-
-def install_sighup_reload(trusted: TrustedKeys, path: str | Path) -> SignalHandler:
-    """Re-read path into trusted on SIGHUP. Returns the previous handler."""
-
-    def _on_hup(_signum: int, _frame: FrameType | None) -> None:
-        trusted.reload(path)
-
-    return signal.signal(signal.SIGHUP, _on_hup)
+    loop.add_signal_handler runs the reload from the event loop, not inside
+    a signal handler, so it never interrupts a verification. Undo with
+    loop.remove_signal_handler(signal.SIGHUP)."""
+    loop.add_signal_handler(signal.SIGHUP, trusted.reload, path)

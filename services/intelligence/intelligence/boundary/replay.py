@@ -31,6 +31,10 @@ class JtiSet:
         self._heap: list[tuple[float, str]] = []
         self._lock = threading.Lock()
 
+    @property
+    def clock(self) -> Callable[[], float]:
+        return self._clock
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._until)

@@ -88,6 +88,7 @@ REASON_CODES: dict[str, str] = {
     "scope": "invalid_request",
     "no_hospital": "invalid_request",
     "forbidden": "forbidden",
+    "internal": "internal",
 }
 
 Decoder = Callable[[bytes], Message]
@@ -326,6 +327,10 @@ class Verifier:
         self.service = service
         self._ops = operations
         self._replay = replay
+        if replay.clock is not clock:
+            # One clock for exp and for the replay window, or a jti could be
+            # forgotten while its token is still live.
+            raise ValueError("the replay set must use the verifier's clock")
         self._clock = clock
         # boundary_refusals_total{service,reason}; exported by telemetry (T14).
         self.refusals: Counter[tuple[str, str]] = Counter()
@@ -551,6 +556,18 @@ class Verifier:
             return self._rest(claims, kind, hdrs, body, decoder, granted)
         except _Refused as r:
             reason = r.reason
+        except Exception as e:
+            # A bug, not a verdict: no work, and only the exception's type is
+            # logged (its args may hold claim or body values).
+            refusal = self._refusal("internal", kind, reply=passed_reply)
+            log.error(
+                "boundary verify failed service=%s subject=%s error=%s reply=%s",
+                self.service,
+                _safe(subject),
+                type(e).__name__,
+                refusal.reply,
+            )
+            return refusal
         # Before check 5 passed the reply subject is unchecked: answer only to
         # the one inbox this path can legitimately have (never a job).
         if passed_reply:

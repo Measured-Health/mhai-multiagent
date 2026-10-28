@@ -3,10 +3,13 @@ only, re-read on SIGHUP, the old set kept when the new file is bad."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import signal
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -105,13 +108,77 @@ def test_reload_drops_removed_kid(tmp_path: Path) -> None:
     assert t.get(A.real_kid) is None and t.get(B.real_kid) is not None
 
 
-def test_sighup_reloads(tmp_path: Path) -> None:
+def test_sighup_reloads_from_the_event_loop(tmp_path: Path) -> None:
     path = write(tmp_path / "k.json", {"keys": keys_of(A)})
     t = TrustedKeys.load(path)
-    previous = install_sighup_reload(t, path)
+    loop = asyncio.new_event_loop()
     try:
+        install_sighup_reload(t, path, loop)
         write(path, {"keys": keys_of(B)})
         os.kill(os.getpid(), signal.SIGHUP)
+        loop.run_until_complete(asyncio.sleep(0.05))
         assert t.kids() == {B.real_kid}
     finally:
-        signal.signal(signal.SIGHUP, previous)
+        loop.remove_signal_handler(signal.SIGHUP)
+        loop.close()
+
+
+def _in_thread(fn: Callable[[], object], timeout: float = 5.0) -> object:
+    out: list[object] = []
+    th = threading.Thread(target=lambda: out.append(fn()), daemon=True)
+    th.start()
+    th.join(timeout)
+    assert not th.is_alive(), "hung"
+    return out[0]
+
+
+def test_reads_never_wait_on_a_reload(tmp_path: Path) -> None:
+    """A reload in progress (its lock held) blocks neither get() nor kids()."""
+    path = write(tmp_path / "k.json", {"keys": keys_of(A)})
+    t = TrustedKeys.load(path)
+    with t._reload_lock:
+        assert _in_thread(lambda: t.get(A.real_kid)) is not None
+        assert _in_thread(t.kids) == {A.real_kid}
+
+
+def test_reload_during_reload_does_not_hang_and_is_not_lost(tmp_path: Path) -> None:
+    path = write(tmp_path / "k.json", {"keys": keys_of(A)})
+    t = TrustedKeys.load(path)
+    started, release = threading.Event(), threading.Event()
+    real = t._reload_once
+
+    def slow(p: str | Path) -> bool:
+        started.set()
+        assert release.wait(5)
+        return real(p)
+
+    t._reload_once = slow  # type: ignore[method-assign]
+    first = threading.Thread(target=t.reload, args=(path,), daemon=True)
+    first.start()
+    assert started.wait(5)
+    write(path, {"keys": keys_of(B)})
+    # A second SIGHUP while the first reload runs returns at once (same thread
+    # or not): it is queued, never waited for.
+    assert _in_thread(lambda: t.reload(path), timeout=1.0) is False
+    started.clear()
+    release.set()
+    first.join(5)
+    assert not first.is_alive()
+    assert t.kids() == {B.real_kid}  # the queued reload ran
+
+
+def test_reload_reentrant_from_the_same_thread(tmp_path: Path) -> None:
+    """Even a reload asked for inside a reload (a signal on the same thread) returns."""
+    path = write(tmp_path / "k.json", {"keys": keys_of(A)})
+    t = TrustedKeys.load(path)
+    real = t._reload_once
+    calls: list[bool] = []
+
+    def nested(p: str | Path) -> bool:
+        if not calls:
+            calls.append(t.reload(p))  # would deadlock on a held, blocking lock
+        return real(p)
+
+    t._reload_once = nested  # type: ignore[method-assign]
+    assert _in_thread(lambda: t.reload(path)) is True
+    assert calls == [False]
