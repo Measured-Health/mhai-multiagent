@@ -83,9 +83,8 @@ func TestPublishJobDeadlineIsTokenExp(t *testing.T) {
 		t.Fatalf("exp %v, want the deadline %v", cl.ExpiresAt, deadline)
 	}
 	for name, d := range map[string]time.Time{
-		"past":             time.Now().Add(-time.Second),
-		"under a second":   time.Now().Add(300 * time.Millisecond),
-		"past the op's 10": time.Now().Add(11 * time.Minute),
+		"past":           time.Now().Add(-time.Second),
+		"under a second": time.Now().Add(300 * time.Millisecond),
 	} {
 		j := uuid.New()
 		if err := c.PublishJob(context.Background(), clinician(hid), "pipeline.run_query", j, &intelpb.RunQueryJob{QueryId: j.String()}, d); err == nil {
@@ -98,6 +97,20 @@ func TestPublishJobDeadlineIsTokenExp(t *testing.T) {
 	}
 	if n := len(drainJobs(t, sharedNATS.PipelineURL)); n != 0 {
 		t.Fatalf("%d refused jobs were published", n)
+	}
+	// A deadline past the operation's 10 minutes (clock skew, a long-lived
+	// row) is cut to the limit, not refused.
+	j := uuid.New()
+	if err := c.PublishJob(context.Background(), clinician(hid), "pipeline.run_query", j, &intelpb.RunQueryJob{QueryId: j.String()},
+		time.Now().Add(11*time.Minute)); err != nil {
+		t.Fatalf("long deadline: %v", err)
+	}
+	got = jobsFor(drainJobs(t, sharedNATS.PipelineURL), "jobs.v1."+hid.String()+".run_query")
+	if len(got) != 1 {
+		t.Fatalf("%d messages", len(got))
+	}
+	if cl := verifyJob(t, got[0]); cl.ExpiresAt.Sub(cl.IssuedAt) != 10*time.Minute {
+		t.Fatalf("lifetime %v, want the operation's 10 minutes", cl.ExpiresAt.Sub(cl.IssuedAt))
 	}
 }
 

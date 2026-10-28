@@ -2,7 +2,6 @@ package intel
 
 import (
 	"context"
-	"fmt"
 	"regexp"
 
 	"github.com/jackc/pgx/v5"
@@ -67,7 +66,9 @@ func AppendFacts(ctx context.Context, tx pgx.Tx, caller Caller, meta *intelpb.Re
 			ActorID: actor(caller), HospitalID: caller.Hid, RequestID: caller.Rid,
 			Action: f.Action, Entity: f.Entity, EntityID: f.EntityId, Payload: payload,
 		}); err != nil {
-			return fmt.Errorf("%w: %w", ErrBadFact, err)
+			// audit.Write's error can name the worker's payload key or carry
+			// driver text: return the fixed value only.
+			return ErrBadFact
 		}
 	}
 	return nil

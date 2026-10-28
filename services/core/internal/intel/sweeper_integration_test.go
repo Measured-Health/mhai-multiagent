@@ -113,7 +113,7 @@ func TestSweeperRepublishesUnpublished(t *testing.T) {
 	noRole := seedQuery(t, hid, analyst, 20*time.Second, &deadline, false)
 	orphan := seedQuery(t, hid, uuid.Nil, 20*time.Second, &deadline, false)
 
-	if err := SweepOnce(ctx, app, c); err != nil {
+	if _, err := SweepOnce(ctx, app, c); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	msgs := jobsFor(drainJobs(t, sharedNATS.PipelineURL), "jobs.v1."+hid.String()+".run_query")
@@ -156,7 +156,7 @@ func TestSweeperRepublishesUnpublished(t *testing.T) {
 	}
 
 	// Once published, a second sweep sends nothing.
-	if err := SweepOnce(ctx, app, c); err != nil {
+	if _, err := SweepOnce(ctx, app, c); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(jobsFor(drainJobs(t, sharedNATS.PipelineURL), "jobs.v1."+hid.String()+".run_query")); n != 0 {
@@ -175,7 +175,7 @@ func TestSweeperCancelsForStoppedHospital(t *testing.T) {
 	if _, err := super.Exec(ctx, `UPDATE hospitals SET status = 'deactivated' WHERE id = $1`, hid); err != nil {
 		t.Fatal(err)
 	}
-	if err := SweepOnce(ctx, app, c); err != nil {
+	if _, err := SweepOnce(ctx, app, c); err != nil {
 		t.Fatal(err)
 	}
 	if s := stateOf(t, q); s.status != "cancelled" {
@@ -186,9 +186,20 @@ func TestSweeperCancelsForStoppedHospital(t *testing.T) {
 	}
 }
 
-// Past its deadline, an unpublished row fails with deadline_exceeded and
-// is audited, and nothing is published. A row with no deadline takes the
-// operation's (created_at + 10 minutes).
+// setRow moves a seeded row on, as the superuser (a worker's claim, a
+// lost publish, a finished job).
+func setRow(t *testing.T, id uuid.UUID, set string) {
+	t.Helper()
+	if _, err := super.Exec(context.Background(), `UPDATE clinical_queries SET `+set+` WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Past its deadline a queued or running row fails with deadline_exceeded,
+// whether it was published or not (a lost message, a worker that died on
+// its last delivery), and is audited, and nothing is published. A row with
+// no deadline takes the operation's (created_at + 10 minutes). Rows within
+// their deadline, and finished rows, are left alone.
 func TestSweeperFailsPastDeadline(t *testing.T) {
 	c, _ := newClient(t)
 	ctx := context.Background()
@@ -196,24 +207,89 @@ func TestSweeperFailsPastDeadline(t *testing.T) {
 	hid := seedHospital(t, "active")
 	creator := seedUser(t, hid, true, authz.RoleClinician)
 	past := time.Now().Add(-time.Minute)
+	future := time.Now().Add(5 * time.Minute)
 	late := seedQuery(t, hid, creator, 20*time.Minute, &past, false)
 	noDeadline := seedQuery(t, hid, creator, 11*time.Minute, nil, false)
-	if err := SweepOnce(ctx, app, c); err != nil {
+	lost := seedQuery(t, hid, creator, 20*time.Minute, &past, true) // published, message lost
+	dead := seedQuery(t, hid, creator, 20*time.Minute, &past, true) // worker died while running
+	setRow(t, dead, `status = 'running', attempts = 5, lease_until = now() - interval '5 minutes'`)
+	noRID := seedQuery(t, hid, creator, 20*time.Minute, &past, true)
+	setRow(t, noRID, `request_id = NULL`)
+	live := seedQuery(t, hid, creator, 20*time.Second, &future, true)
+	setRow(t, live, `status = 'running'`)
+	done := seedQuery(t, hid, creator, 20*time.Minute, &past, true)
+	setRow(t, done, `status = 'completed', completed_at = now()`)
+
+	res, err := SweepOnce(ctx, app, c)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []uuid.UUID{late, noDeadline} {
+	if res.Expired < 5 {
+		t.Fatalf("expired %d, want at least 5", res.Expired)
+	}
+	attempts := map[uuid.UUID]float64{late: 0, noDeadline: 0, lost: 0, dead: 5, noRID: 0}
+	for id, n := range attempts {
 		s := stateOf(t, id)
-		if s.status != "failed" || s.errCode == nil || *s.errCode != "deadline_exceeded" || !s.completed || s.published {
+		if s.status != "failed" || s.errCode == nil || *s.errCode != "deadline_exceeded" || !s.completed {
 			t.Fatalf("%s: %+v", id, s)
 		}
 		a := auditFor(t, "query.failed", id.String())
-		if len(a) != 1 || *a[0].hospital != hid.String() || a[0].payload["error"] != "deadline_exceeded" ||
-			a[0].payload["query_id"] != id.String() || a[0].payload["attempts"] != float64(0) {
-			t.Fatalf("audit %+v", a)
+		wantRID := "rid-" + id.String()
+		if id == noRID {
+			wantRID = JobRID(id, "") // the same fallback Republish mints with
 		}
+		if len(a) != 1 || *a[0].hospital != hid.String() || a[0].payload["error"] != "deadline_exceeded" || a[0].actor != nil ||
+			a[0].payload["query_id"] != id.String() || a[0].payload["attempts"] != n || *a[0].requestID != wantRID {
+			t.Fatalf("%s audit %+v", id, a)
+		}
+	}
+	if s := stateOf(t, live); s.status != "running" {
+		t.Fatalf("a running row within its deadline was touched: %+v", s)
+	}
+	if s := stateOf(t, done); s.status != "completed" {
+		t.Fatalf("a completed row was touched: %+v", s)
 	}
 	if n := len(jobsFor(drainJobs(t, sharedNATS.PipelineURL), "jobs.v1."+hid.String()+".run_query")); n != 0 {
 		t.Fatalf("published %d", n)
+	}
+	// A second sweep fails nothing twice.
+	if _, err := SweepOnce(ctx, app, c); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(auditFor(t, "query.failed", dead.String())); n != 1 {
+		t.Fatalf("%d query.failed rows", n)
+	}
+}
+
+// A row with no request id gets the same fallback in the token Republish
+// mints and in the audit the sweeper writes.
+func TestSweeperRequestIDFallback(t *testing.T) {
+	c, _ := newClient(t)
+	ctx := context.Background()
+	drainJobs(t, sharedNATS.PipelineURL)
+	hid := seedHospital(t, "active")
+	creator := seedUser(t, hid, true, authz.RoleClinician)
+	gone := seedUser(t, hid, false, authz.RoleClinician)
+	deadline := time.Now().Add(5 * time.Minute)
+	pub := seedQuery(t, hid, creator, 20*time.Second, &deadline, false)
+	cancelled := seedQuery(t, hid, gone, 20*time.Second, &deadline, false)
+	setRow(t, pub, `request_id = NULL`)
+	setRow(t, cancelled, `request_id = NULL`)
+	if _, err := SweepOnce(ctx, app, c); err != nil {
+		t.Fatal(err)
+	}
+	msgs := jobsFor(drainJobs(t, sharedNATS.PipelineURL), "jobs.v1."+hid.String()+".run_query")
+	if len(msgs) != 1 {
+		t.Fatalf("%d jobs", len(msgs))
+	}
+	if cl := verifyJob(t, msgs[0]); cl.Rid != JobRID(pub, "") || msgs[0].header.Get("Mhai-Request-Id") != JobRID(pub, "") {
+		t.Fatalf("token rid %q", cl.Rid)
+	}
+	if a := auditFor(t, "query.cancelled", cancelled.String()); len(a) != 1 || *a[0].requestID != JobRID(cancelled, "") {
+		t.Fatalf("audit %+v", a)
+	}
+	if JobRID(pub, "rid-kept") != "rid-kept" {
+		t.Fatal("a usable request id is replaced")
 	}
 }
 
@@ -330,5 +406,39 @@ func TestInFlightCapPerHospital(t *testing.T) {
 	// A limit under one is refused.
 	if err := db.WithHospital(ctx, app, b, func(tx pgx.Tx) error { return ReserveInFlight(ctx, tx, b, 0) }); err == nil {
 		t.Fatal("limit 0 accepted")
+	}
+}
+
+// A row past its deadline holds no slot (a worker that died running it, a
+// lost publish), so a hospital can't be locked out; a row within its
+// deadline still counts.
+func TestInFlightCapIgnoresExpired(t *testing.T) {
+	ctx := context.Background()
+	h := seedHospital(t, "active")
+	past := time.Now().Add(-time.Minute)
+	future := time.Now().Add(5 * time.Minute)
+	stuck := seedQuery(t, h, uuid.Nil, 20*time.Minute, &past, true)
+	setRow(t, stuck, `status = 'running'`)
+	seedQuery(t, h, uuid.Nil, 20*time.Minute, &past, true) // queued, published, message lost
+	seedQuery(t, h, uuid.Nil, 11*time.Minute, nil, true)   // no deadline: created_at + 10 min
+	live := seedQuery(t, h, uuid.Nil, 0, &future, true)
+	setRow(t, live, `status = 'running'`)
+	reserve := func() error {
+		return db.WithHospital(ctx, app, h, func(tx pgx.Tx) error {
+			if err := ReserveInFlight(ctx, tx, h, 2); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO clinical_queries (id, hospital_id, clinical_question, urgency) VALUES ($1, $2, 'synthetic', 'routine')`,
+				uuid.New(), h)
+			return err
+		})
+	}
+	// Only live counts: one slot is free.
+	if err := reserve(); err != nil {
+		t.Fatalf("expired rows hold slots: %v", err)
+	}
+	// live and the new row count: at the cap.
+	if err := reserve(); !errors.Is(err, ErrAtCap) {
+		t.Fatalf("rows within their deadline don't count: %v", err)
 	}
 }

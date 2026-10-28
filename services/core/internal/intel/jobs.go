@@ -30,7 +30,8 @@ const jsStoreFailed jetstream.ErrorCode = 10077
 // jobID is the Nats-Msg-Id, so JetStream drops a second publish of the same
 // id within its duplicate window: the job id on the first publish and on a
 // sweep (Republish). The job token's exp is deadline (whole seconds), at
-// least a second away and no later than the operation's limit.
+// least a second away; a deadline past the operation's limit (clock skew,
+// a long-lived row) is cut to the limit, never refused.
 //
 // Errors: ErrNotAllowed, ErrMisuse, ErrNoHospital, ErrDeadline (nothing
 // published); ErrBackpressure (JOBS refused it), ErrNoResponders,
@@ -65,8 +66,8 @@ func (c *Client) PublishJob(ctx context.Context, caller Caller, opName string, j
 		return ErrDeadline
 	}
 	ttl := deadline.Sub(time.Unix(now.Unix(), 0))
-	if ttl > op.Timeout+time.Second {
-		return ErrMisuse
+	if ttl > op.Timeout {
+		ttl = op.Timeout
 	}
 	signer := c.Signer
 	signer.Now = func() time.Time { return now }

@@ -4,6 +4,7 @@ package db_test
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -199,4 +200,117 @@ func TestCheckLoginRoleKnowsJobs(t *testing.T) {
 		Scan(&super, &bypass, &canLogin); err != nil || super || bypass || canLogin {
 		t.Fatalf("mhai_jobs: super %v bypassrls %v login %v (%v)", super, bypass, canLogin, err)
 	}
+}
+
+// The jobs role's transitions: it may move rows no worker holds between
+// queued, failed and cancelled; it can't touch a running or completed row
+// directly (0 rows), and can't set running or completed (refused). The one
+// way it ends a running row is mhai_fail_expired_queries(), only past the
+// deadline, only to failed / deadline_exceeded.
+func TestJobsRoleTransitions(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	_, app := loginPool(t, "IN ROLE mhai_app")
+	hid, _ := seedHospital(t, pool, uniqueCode("T"))
+	row := func(status, extra string) uuid.UUID {
+		t.Helper()
+		id := uuid.New()
+		if _, err := pool.Exec(ctx, `INSERT INTO clinical_queries (id, hospital_id, clinical_question, urgency, status, created_at, deadline_at)
+			VALUES ($1, $2, 'synthetic', 'routine', $3, now() - interval '20 minutes', `+extra+`)`, id, hid, status); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	update := func(id uuid.UUID, set string) (int64, error) {
+		var n int64
+		err := db.WithJobs(ctx, app, func(tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, `UPDATE clinical_queries SET `+set+` WHERE id = $1`, id)
+			n = tag.RowsAffected()
+			return err
+		})
+		return n, err
+	}
+	statusOf := func(id uuid.UUID) string {
+		var s string
+		if err := pool.QueryRow(ctx, `SELECT status FROM clinical_queries WHERE id = $1`, id).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	future := "now() + interval '5 minutes'"
+	for _, c := range []struct{ from, set, to string }{
+		{"queued", "status = 'failed', error = 'deadline_exceeded'", "failed"},
+		{"queued", "status = 'cancelled', cancel_reason = 'account_unusable'", "cancelled"},
+		{"queued", "published_at = now()", "queued"},
+		{"failed", "status = 'queued', error = NULL", "queued"},
+		{"cancelled", "status = 'queued'", "queued"},
+	} {
+		id := row(c.from, future)
+		if n, err := update(id, c.set); err != nil || n != 1 || statusOf(id) != c.to {
+			t.Errorf("%s -> %s: %d rows, %v, now %s", c.from, c.to, n, err, statusOf(id))
+		}
+	}
+	// No touching a row a worker holds, or a finished one.
+	for _, c := range []struct{ from, set string }{
+		{"running", "status = 'queued'"},
+		{"running", "status = 'failed', error = 'deadline_exceeded'"},
+		{"running", "status = 'cancelled'"},
+		{"completed", "status = 'queued'"},
+		{"completed", "status = 'failed'"},
+	} {
+		id := row(c.from, future)
+		if n, err := update(id, c.set); err != nil || n != 0 || statusOf(id) != c.from {
+			t.Errorf("%s: %s: %d rows, %v", c.from, c.set, n, err)
+		}
+	}
+	for _, set := range []string{"status = 'running'", "status = 'completed'"} {
+		_, err := update(row("queued", future), set)
+		requireDenied(t, err, "queued: "+set)
+	}
+
+	// The expiry function: expired queued and running rows (published or
+	// not, with or without a deadline) become failed / deadline_exceeded;
+	// live, finished and other rows stay.
+	expiredRunning := row("running", "now() - interval '1 minute'")
+	expiredQueued := row("queued", "now() - interval '1 minute'")
+	noDeadline := row("queued", "NULL") // created 20 minutes ago: past created_at + 10 minutes
+	liveRunning := row("running", future)
+	doneOld := row("completed", "now() - interval '1 minute'")
+	var got []uuid.UUID
+	err := db.WithJobs(ctx, app, func(tx pgx.Tx) error {
+		r, err := tx.Query(ctx, `SELECT id FROM mhai_fail_expired_queries(1000)`)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		for r.Next() {
+			var id uuid.UUID
+			if err := r.Scan(&id); err != nil {
+				return err
+			}
+			got = append(got, id)
+		}
+		return r.Err()
+	})
+	if err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	for _, id := range []uuid.UUID{expiredRunning, expiredQueued, noDeadline} {
+		var st, e string
+		if err := pool.QueryRow(ctx, `SELECT status, error FROM clinical_queries WHERE id = $1`, id).Scan(&st, &e); err != nil ||
+			st != "failed" || e != "deadline_exceeded" || !slices.Contains(got, id) {
+			t.Errorf("%s: %s %s (returned %v) %v", id, st, e, slices.Contains(got, id), err)
+		}
+	}
+	for id, want := range map[uuid.UUID]string{liveRunning: "running", doneOld: "completed"} {
+		if st := statusOf(id); st != want || slices.Contains(got, id) {
+			t.Errorf("%s: %s, want %s", id, st, want)
+		}
+	}
+	// Only mhai_jobs may run it.
+	err = db.WithHospital(ctx, app, hid, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT * FROM mhai_fail_expired_queries(1)`)
+		return err
+	})
+	requireDenied(t, err, "gateway running the expiry function")
 }

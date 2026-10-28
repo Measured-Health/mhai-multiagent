@@ -13,8 +13,10 @@
 -- sweeper; later the dead-letter consumer). They read and update job rows
 -- of every hospital, which mhai_gateway can't. It sees the job columns only
 -- (never the question or the patient data), can fail, cancel or re-queue a
--- job (never mark it running or completed: only the worker does), and can
--- append only its own audit actions. No other table. NOLOGIN, no BYPASSRLS;
+-- job no worker holds (never touch a running or completed one, or mark one
+-- running or completed: only the worker does), can fail expired rows
+-- through mhai_fail_expired_queries(), and can append only its own audit
+-- actions. No other table. NOLOGIN, no BYPASSRLS;
 -- the core login reaches it only by SET ROLE inside db.WithJobs (mhai_app
 -- holds it WITH INHERIT FALSE). The role is cluster-wide, so it is created
 -- only if missing and kept on Down.
@@ -65,11 +67,58 @@ GRANT SELECT (id, hospital_id, created_by, request_id, status, attempts, publish
 GRANT UPDATE (status, error, published_at, cancel_reason, completed_at)
     ON clinical_queries TO mhai_jobs;
 CREATE POLICY jobs_read ON clinical_queries FOR SELECT TO mhai_jobs USING (true);
--- A completed question is final: mhai_jobs can't touch it (so it can't be
--- re-queued and re-run), and can leave a row only queued, failed or
--- cancelled.
+-- mhai_jobs touches only rows no worker holds: queued, failed or cancelled,
+-- and leaves them queued, failed or cancelled. It can't touch a running row
+-- (so it can't re-queue a job a worker is running) or a completed one (so a
+-- finished question is never re-run). The one way it ends a running row is
+-- mhai_fail_expired_queries() below, and only past the row's deadline.
 CREATE POLICY jobs_update ON clinical_queries FOR UPDATE TO mhai_jobs
-    USING (status <> 'completed') WITH CHECK (status IN ('queued', 'failed', 'cancelled'));
+    USING (status IN ('queued', 'failed', 'cancelled')) WITH CHECK (status IN ('queued', 'failed', 'cancelled'));
+
+-- Past its deadline a queued or running question is failed with
+-- deadline_exceeded, whether or not it was ever published, so a worker that
+-- died on its last delivery or a published message that was lost can't hold
+-- an in-flight slot for ever. A SECURITY DEFINER function owned by
+-- mhai_migrate does it, like mhai_sweep_idempotency (00006): its policies
+-- let it see and change only expired queued or running rows, and set only
+-- failed / deadline_exceeded. Only mhai_jobs may run it. It returns the ids
+-- the caller audits (query.failed) in the same transaction. The 10 minutes
+-- is pipeline.run_query's timeout, the deadline of a row without one
+-- (authz.Operation; a Go test holds the two together).
+CREATE POLICY expire_read ON clinical_queries FOR SELECT TO mhai_migrate
+    USING ((status IN ('queued', 'running') AND COALESCE(deadline_at, created_at + interval '10 minutes') <= now())
+           OR (status = 'failed' AND error = 'deadline_exceeded'));
+CREATE POLICY expire_update ON clinical_queries FOR UPDATE TO mhai_migrate
+    USING (status IN ('queued', 'running') AND COALESCE(deadline_at, created_at + interval '10 minutes') <= now())
+    WITH CHECK (status = 'failed' AND error = 'deadline_exceeded');
+
+-- Fails at most batch expired rows (1 to 1000) and returns them.
+-- +goose StatementBegin
+CREATE FUNCTION mhai_fail_expired_queries(batch integer)
+    RETURNS TABLE (id uuid, hospital_id uuid, request_id text, attempts integer)
+    LANGUAGE sql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+    WITH doomed AS (
+        SELECT q.id, q.hospital_id, q.request_id, q.attempts FROM public.clinical_queries q
+        WHERE q.status IN ('queued', 'running')
+          AND COALESCE(q.deadline_at, q.created_at + interval '10 minutes') <= now()
+        ORDER BY q.created_at
+        LIMIT GREATEST(LEAST(batch, 1000), 1)
+        FOR UPDATE SKIP LOCKED
+    ), gone AS (
+        UPDATE public.clinical_queries q
+        SET status = 'failed', error = 'deadline_exceeded', completed_at = now()
+        FROM doomed d
+        WHERE q.id = d.id AND q.status IN ('queued', 'running')
+        RETURNING d.id, d.hospital_id, d.request_id, d.attempts
+    )
+    SELECT g.id, g.hospital_id, g.request_id, g.attempts FROM gone g
+$$;
+-- +goose StatementEnd
+ALTER FUNCTION mhai_fail_expired_queries(integer) OWNER TO mhai_migrate;
+REVOKE ALL ON FUNCTION mhai_fail_expired_queries(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION mhai_fail_expired_queries(integer) TO mhai_jobs;
 
 -- audit.Write: append its own actions, plus the chain head.
 GRANT INSERT ON audit_log TO mhai_jobs;
@@ -79,6 +128,9 @@ CREATE POLICY jobs_append ON audit_log FOR INSERT TO mhai_jobs
     WITH CHECK (action IN ('query.failed', 'query.cancelled', 'job.dead_lettered', 'job.retried', 'intelligence.refused'));
 
 -- +goose Down
+DROP FUNCTION mhai_fail_expired_queries(integer);
+DROP POLICY expire_update ON clinical_queries;
+DROP POLICY expire_read ON clinical_queries;
 DROP POLICY jobs_append ON audit_log;
 DROP POLICY jobs_update ON clinical_queries;
 DROP POLICY jobs_read ON clinical_queries;

@@ -4,7 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
@@ -119,5 +123,22 @@ func TestRefusal(t *testing.T) {
 	}
 	if _, ok := Refusal(ErrTimeout); ok {
 		t.Error("a timeout is not a refusal")
+	}
+}
+
+// The deadline of a row with no deadline_at is run_query's timeout, in Go
+// (ReserveInFlight, SweepOnce) and in 00007's mhai_fail_expired_queries and
+// its policies, which write it as interval '10 minutes'.
+func TestRunQueryTimeoutMatchesMigration(t *testing.T) {
+	op, ok := authz.OperationByName(runQuery)
+	if !ok || op.Timeout != 10*time.Minute {
+		t.Fatalf("run_query timeout %v: update 00007_jobs.sql's interval '10 minutes' with it", op.Timeout)
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "db", "migrations", "00007_jobs.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(raw), "created_at + interval '10 minutes'"); n != 3 {
+		t.Fatalf("00007 names the default deadline %d times, want 3", n)
 	}
 }
