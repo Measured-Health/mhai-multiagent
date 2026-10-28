@@ -55,7 +55,10 @@ type NATSTLS struct {
 // must not be placeholders. Errors name the variable, never its value.
 func Load() (Config, error) {
 	c := Config{
-		Env:              getenv("CORE_ENV", "development"),
+		// Unset is production: everything that development relaxes (the
+		// API docs, NATS without TLS, test-only intelligence operations)
+		// stays off unless development is named.
+		Env:              getenv("CORE_ENV", "production"),
 		HTTPAddr:         os.Getenv("HTTP_ADDR"),
 		DatabaseURL:      os.Getenv("DATABASE_URL"),
 		NATSURL:          os.Getenv("NATS_URL"),
@@ -105,9 +108,10 @@ func Load() (Config, error) {
 		errs = append(errs, errors.New("HTTP_ADDR must be a loopback address (127.0.0.1 or [::1]) when CORE_HTTP_API is off"))
 	}
 
-	// CORE_API_DOCS: on by default only in development, so an unset or
-	// unrecognised environment (production included) fails closed.
-	c.APIDocs = strings.EqualFold(strings.TrimSpace(c.Env), "development")
+	// CORE_API_DOCS: on by default only in development, so production
+	// (also the value when CORE_ENV is unset) or an unrecognised
+	// environment fails closed.
+	c.APIDocs = c.Development()
 	if raw := strings.TrimSpace(os.Getenv("CORE_API_DOCS")); raw != "" {
 		b, err := strconv.ParseBool(raw)
 		if err != nil {
@@ -227,7 +231,7 @@ func (c Config) ValidateServe() error {
 	switch {
 	case anyTLS && !allTLS:
 		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH must be set together"))
-	case !allTLS && !strings.EqualFold(strings.TrimSpace(c.Env), "development"):
+	case !allTLS && !c.Development():
 		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH are required outside development"))
 	}
 	return errors.Join(errs...)
@@ -296,6 +300,12 @@ func loopback(addr string) bool {
 	ip, err := netip.ParseAddr(host)
 	return err == nil && ip.IsLoopback()
 }
+
+// Development reports whether CORE_ENV names development. Only then are
+// the development relaxations on: API docs by default, NATS without TLS,
+// test-only intelligence operations granted. Anything else, an unset
+// CORE_ENV (production) included, fails closed.
+func (c Config) Development() bool { return strings.EqualFold(strings.TrimSpace(c.Env), "development") }
 
 func getenv(name, def string) string {
 	if v := os.Getenv(name); v != "" {

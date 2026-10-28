@@ -67,7 +67,7 @@ func TestLoadOK(t *testing.T) {
 	}
 	setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey})
 	c, _ = Load()
-	if c.HTTPAddr != ":8080" || c.Env != "development" {
+	if c.HTTPAddr != ":8080" || c.Env != "production" {
 		t.Fatalf("defaults wrong: %+v", c)
 	}
 }
@@ -188,7 +188,7 @@ func TestAPIDocsSwitch(t *testing.T) {
 		want      bool
 		bad       bool
 	}{
-		{"", "", true, false}, // unset env is development
+		{"", "", false, false}, // unset env is production: docs off
 		{"development", "", true, false},
 		{"production", "", false, false},
 		{"preview", "", false, false},
@@ -379,6 +379,30 @@ func TestLoadNATSAPIConcurrency(t *testing.T) {
 		setEnv(t, e)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_NATS_API_CONCURRENCY") {
 			t.Fatalf("%q: %v", bad, err)
+		}
+	}
+}
+
+// TestUnsetEnvIsProduction (Task 7 review): an unset CORE_ENV fails
+// closed: production, no API docs, NATS TLS required, and no development
+// relaxation (test-only intelligence operations are granted only when
+// Development is true).
+func TestUnsetEnvIsProduction(t *testing.T) {
+	setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey})
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Env != "production" || c.Development() || c.APIDocs {
+		t.Fatalf("unset CORE_ENV: env %q development %v docs %v", c.Env, c.Development(), c.APIDocs)
+	}
+	c.DatabaseURL, c.NATSURL, c.AccessKeyPath, c.RequestKeyPath = "postgres://u:p@h/db", "nats://h:4222", "/k.pem", "/r.pem"
+	if err := c.ValidateServe(); err == nil || !strings.Contains(err.Error(), "NATS_TLS") {
+		t.Fatalf("unset CORE_ENV without NATS TLS: %v", err)
+	}
+	for env, want := range map[string]bool{"development": true, " Development ": true, "production": false, "dev": false, "": false} {
+		if got := (Config{Env: env}).Development(); got != want {
+			t.Errorf("Development(%q) = %v", env, got)
 		}
 	}
 }
