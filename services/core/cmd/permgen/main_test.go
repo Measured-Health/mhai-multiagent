@@ -8,7 +8,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 )
+
+// render reads proto/ with paths from services/core, so the tests run there.
+func TestMain(m *testing.M) {
+	if err := os.Chdir(filepath.Join("..", "..")); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
+}
 
 // The committed generated files match what permgen produces now (CI runs
 // this too; A23). That covers permissions.md with its operations section
@@ -20,9 +32,8 @@ func TestGeneratedFilesUpToDate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The test runs in cmd/permgen; render's paths are from services/core.
 	for p, want := range files {
-		got, err := os.ReadFile(filepath.Join("..", "..", p))
+		got, err := os.ReadFile(p)
 		if err != nil {
 			t.Fatalf("%s: %v (run go run ./cmd/permgen)", p, err)
 		}
@@ -44,7 +55,7 @@ func TestPermissionsJSONIsGone(t *testing.T) {
 			t.Errorf("permgen still generates %s", p)
 		}
 	}
-	old := filepath.Join("..", "..", "..", "intelligence", "intelligence", "security", "permissions.json")
+	old := filepath.Join("..", "intelligence", "intelligence", "security", "permissions.json")
 	if _, err := os.Stat(old); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("%s must not exist (err %v)", old, err)
 	}
@@ -66,5 +77,36 @@ func TestGeneratedFilesIncludeOperations(t *testing.T) {
 		if !strings.Contains(md, want) {
 			t.Errorf("permissions.md lacks %q", want)
 		}
+	}
+}
+
+// The Intelligence API page is generated and committed with the rest; the
+// paths in the generator are the ones internal/apidocs serves.
+func TestIntelligencePageIsGenerated(t *testing.T) {
+	files, err := render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(files[intelligencePage])
+	for _, want := range []string{"pipeline.health", "pipeline.run_query", "echo.ping", "test only",
+		"inference.v1.pipeline.health", "jobs.v1.&lt;hospital_id&gt;.run_query", "mhai.intelligence.v1.PingRequest",
+		"Deadline", "10 minutes", "svc:core", "BFF direct", "query_id", "spec section 7.3"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("intelligence page lacks %q", want)
+		}
+	}
+	// Comments from the .proto files come through.
+	if !strings.Contains(page, "carries the query id only") {
+		t.Error("intelligence page lacks the RunQueryJob comment from pipeline.proto")
+	}
+	if corePagePath != "/api/docs" || intelligencePagePath != "/api/docs/intelligence" || logoPath != "/api/docs/logo.png" {
+		t.Error("generator paths drifted from internal/apidocs")
+	}
+}
+
+func TestOperationNamingUnknownMessageFails(t *testing.T) {
+	_, err := operations([]authz.Operation{{Name: "x.y", Service: "x", Op: "y", Kind: reqtoken.KindReq, Timeout: time.Second, RequestSchema: "mhai.intelligence.v1.Nope"}}, nil)
+	if err == nil {
+		t.Fatal("an operation naming a message no .proto declares must fail")
 	}
 }

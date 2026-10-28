@@ -180,3 +180,17 @@ func TestOperationsJSON(t *testing.T) {
 		t.Errorf("echo.ping row: %v", echo)
 	}
 }
+
+func TestErrorCodesAreTheClosedSet(t *testing.T) {
+	var got []string
+	for _, c := range ErrorCodes() {
+		if c.Meaning == "" {
+			t.Errorf("%s has no meaning", c.Code)
+		}
+		got = append(got, c.Code)
+	}
+	want := []string{"unauthorized", "forbidden", "invalid_request", "not_found", "deadline_exceeded", "overloaded", "unavailable", "cancelled", "internal"}
+	if !slices.Equal(got, want) {
+		t.Errorf("error codes %v, want %v (spec 10.1)", got, want)
+	}
+}

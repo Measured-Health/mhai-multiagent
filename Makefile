@@ -92,8 +92,11 @@ core-lint: ## Vet and staticcheck the core service (Go)
 PB := intelligence/boundary/pb
 GO_PB := services/core/internal/intelpb
 
-proto: ## Generate the Go and Python code from proto/ (needs buf, protoc-gen-go, uv)
+DOCS_PAGE := services/core/internal/apidocs/assets/intelligence.html
+
+proto: ## Generate the Go and Python code and the Intelligence API docs page from proto/ (needs buf, protoc-gen-go, uv)
 	cd proto && buf generate
+	cd services/core && go run ./cmd/permgen
 	$(PY) rm -rf .pbgen && mkdir .pbgen && \
 	  uv run --locked python -m grpc_tools.protoc -I ../../proto \
 	    --python_out=.pbgen --mypy_out=.pbgen ../../proto/mhai/intelligence/v1/*.proto && \
@@ -109,6 +112,6 @@ proto-check: ## Lint the schema, check it is backward compatible, and check gene
 	  cd proto && buf breaking --against "../.git#ref=$$base,subdir=proto"; \
 	else echo "buf breaking skipped: $$base has no proto/ yet"; fi
 	$(MAKE) proto
-	git diff --exit-code -- $(GO_PB) services/intelligence/$(PB)
-	@test -z "$$(git status --porcelain -- $(GO_PB) services/intelligence/$(PB))" || \
+	git diff --exit-code -- $(GO_PB) services/intelligence/$(PB) $(DOCS_PAGE)
+	@test -z "$$(git status --porcelain -- $(GO_PB) services/intelligence/$(PB) $(DOCS_PAGE))" || \
 	  { echo "generated code has untracked or changed files; commit them"; exit 1; }

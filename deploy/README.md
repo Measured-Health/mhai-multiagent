@@ -222,8 +222,11 @@ the subjects, its NATS user `bff` may sign in but publish nothing.
 ## Public API docs (api-dev)
 
 The docs page is public at `https://api-dev.measured-health.org/api/docs`
-(product owner, 28 Oct). `nginx/mhai-api-dev.conf` serves only `/api/docs`,
-its two scripts, the logo and `/api/openapi.yaml`, GET only; every other path, the API
+(product owner, 28 Oct). It has two tabs: the Core API (HTTP, Redoc) and the
+Intelligence API (NATS), the latter at `/api/docs/intelligence`, generated from
+`proto/` and the operations table. `nginx/mhai-api-dev.conf` serves only
+`/api/docs`, `/api/docs/intelligence`, the two scripts, the logo and
+`/api/openapi.yaml`, GET only; every other path, the API
 included, is 404. One-time setup on the instance, after the DNS A record
 `api-dev.measured-health.org` → the instance exists:
 
@@ -246,6 +249,11 @@ sudo nginx -t && sudo systemctl reload nginx
 
 The core service must run with the docs on (`CORE_ENV: development` in
 `compose.yml`); without them the page is core's 404.
+
+When a release adds a docs path (`/api/docs/intelligence` was added with the
+Intelligence tab), the instance's nginx needs the new `location =` line: copy
+the file again, `sudo nginx -t`, then `sudo systemctl reload nginx`. Until
+then the new path is 404 from nginx, even though core serves it.
 
 ## Optional: nginx
 

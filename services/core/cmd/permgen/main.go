@@ -1,7 +1,9 @@
 // Command permgen writes the permission table that the core service serves
 // and the operations table to docs/specs/generated/permissions.md (for
 // people) and services/intelligence/intelligence/boundary/operations.json
-// (read by the Python workers; Python writes no rule). Run it from
+// (read by the Python workers; Python writes no rule), and the Intelligence
+// API docs page (from proto/ and the operations table; embedded by
+// internal/apidocs). Run it from
 // services/core:
 //
 //	go run ./cmd/permgen
@@ -32,7 +34,11 @@ func render() (map[string][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string][]byte{markdownPath: authz.Markdown(table), operationsPath: js}, nil
+	page, err := intelligenceHTML()
+	if err != nil {
+		return nil, err
+	}
+	return map[string][]byte{markdownPath: authz.Markdown(table), operationsPath: js, intelligencePage: page}, nil
 }
 
 func main() {

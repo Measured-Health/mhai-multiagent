@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.4
 
 require (
+	github.com/bufbuild/protocompile v0.14.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/nats-io/nats.go v1.47.0

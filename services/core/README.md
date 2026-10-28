@@ -103,6 +103,16 @@ database owner password are not in its environment.
 Redoc 2.5.4 is vendored in `internal/apidocs/assets/` with its licence and
 SHA-256 (see the README there); the page loads nothing from a CDN.
 
+`GET /api/docs/intelligence` is the second tab: the Intelligence API, which
+is NATS operations, not HTTP. It is a static page **generated** by
+`go run ./cmd/permgen` from `proto/` (messages, fields, comments) and the
+operations table in `internal/authz/operations.go` (subjects, kind, who may
+call, `bff_direct`, timeout, hospital), plus the closed error-code set. It is
+committed as `internal/apidocs/assets/intelligence.html` and embedded.
+`TestGeneratedFilesUpToDate` fails when it is stale. Subjects and streams:
+[`services/nats/README.md`](../nats/README.md). The two pages link each other
+with a plain nav (`aria-current`); neither needs a script of its own.
+
 - **Switch:** `CORE_API_DOCS` (above). When off, these paths answer the
   normal 404 `not_found` problem. The demo (`deploy/compose.yml`) and the
   dev compose turn it on.
