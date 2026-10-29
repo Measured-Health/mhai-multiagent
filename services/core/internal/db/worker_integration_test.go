@@ -629,11 +629,17 @@ func TestMigration00008RoundTrip(t *testing.T) {
 	if o, f, p, u := state(); !o || !f || p != 5 || u {
 		t.Fatalf("after up: outbox %v fn %v 00007 policies %d worker updates question %v", o, f, p, u)
 	}
+	if g := gatewayWrites(t, pool); g != "f f f t" {
+		t.Fatalf("after up: gateway writes %q", g)
+	}
 	if err := db.MigrateDownTo(ctx, pg.URL, 7); err != nil {
 		t.Fatalf("down to 7: %v", err)
 	}
 	if o, f, p, u := state(); o || !f || p != 5 || !u {
 		t.Fatalf("after down: outbox %v fn %v 00007 policies %d worker updates question %v (00003's grant back)", o, f, p, u)
+	}
+	if g := gatewayWrites(t, pool); g != "t t t t" {
+		t.Fatalf("after down: gateway writes %q (00003's grants back)", g)
 	}
 	var drainPolicies int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_policies WHERE 'mhai_audit_drain' = ANY(roles::text[])`).Scan(&drainPolicies); err != nil || drainPolicies != 0 {
@@ -655,9 +661,28 @@ func TestMigration00008RoundTrip(t *testing.T) {
 	if o, f, p, u := state(); !o || !f || p != 5 || u {
 		t.Fatalf("after up again: outbox %v fn %v 00007 policies %d worker updates question %v", o, f, p, u)
 	}
+	if g := gatewayWrites(t, pool); g != "f f f t" {
+		t.Fatalf("after up again: gateway writes %q", g)
+	}
 	if err := db.MigrateDownTo(ctx, pg.URL, 0); err != nil {
 		t.Fatalf("down to 0: %v", err)
 	}
+}
+
+// gatewayWrites is mhai_gateway's UPDATE of clinical_queries.status,
+// INSERT on clinical_decisions and hga_evaluations, and UPDATE of
+// clinical_queries.published_at (final review I-4: only the last, after 00008).
+func gatewayWrites(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	var s string
+	if err := pool.QueryRow(context.Background(), `SELECT concat_ws(' ',
+		has_column_privilege('mhai_gateway', 'clinical_queries', 'status', 'UPDATE'),
+		has_table_privilege('mhai_gateway', 'clinical_decisions', 'INSERT'),
+		has_table_privilege('mhai_gateway', 'hga_evaluations', 'INSERT'),
+		has_column_privilege('mhai_gateway', 'clinical_queries', 'published_at', 'UPDATE'))`).Scan(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 // A login with a session default (ALTER ROLE ... SET role, or a hospital)
@@ -727,4 +752,47 @@ func TestEnsureLoginResetsRoleDefaults(t *testing.T) {
 			t.Fatalf("%s: connects as %q hospital %q (%v)", role, who, hid, err)
 		}
 	}
+}
+
+// Final review I-4: mhai_gateway on the pipeline tables is what core's
+// request path writes: clinical_queries INSERT (the submit) and UPDATE of
+// published_at only (the publish); clinical_decisions and hga_evaluations
+// read only. The worker writes results, never core's request role.
+func TestGatewayPipelineGrantsNarrowed(t *testing.T) {
+	_, super := shared(t)
+	ctx := context.Background()
+	a, qa := seedHospital(t, super, uniqueCode("G"))
+	asGateway := func(q string, args ...any) (int64, error) {
+		return inTx(ctx, super, []string{`SET LOCAL ROLE mhai_gateway`}, &a, q, args...)
+	}
+	allow := func(what string, want int64, q string, args ...any) {
+		t.Helper()
+		n, err := asGateway(q, args...)
+		if err != nil || n != want {
+			t.Fatalf("gateway %s: rows %d (want %d), err %v", what, n, want, err)
+		}
+	}
+	deny := func(what, q string, args ...any) {
+		t.Helper()
+		_, err := asGateway(q, args...)
+		requireDenied(t, err, "gateway "+what)
+	}
+	allow("select queries", 1, `SELECT * FROM clinical_queries WHERE id = $1`, qa)
+	allow("submit", 1, `INSERT INTO clinical_queries (id, hospital_id, clinical_question, urgency, status, created_by, request_id, deadline_at)
+		VALUES ($1, $2, 'synthetic question', 'routine', 'queued', NULL, 'rid', now())`, uuid.New(), a)
+	allow("publish", 1, `UPDATE clinical_queries SET published_at = now() WHERE id = $1`, qa)
+	for _, col := range []string{"status = 'completed'", "error = 'internal'", "attempts = 9", "lease_until = now()",
+		"progress = 1", "current_stage = 'x'", "completed_at = now()", "cancel_reason = 'x'", "clinical_question = 'x'",
+		"patient_data_json = '{}'", "deadline_at = now()", "request_id = 'r'", "retried_kid = 'k'", "hospital_id = hospital_id"} {
+		deny("update "+col, `UPDATE clinical_queries SET `+col+` WHERE id = $1`, qa)
+	}
+	deny("delete query", `DELETE FROM clinical_queries WHERE id = $1`, qa)
+	for _, tbl := range []string{"clinical_decisions", "hga_evaluations"} {
+		allow("select "+tbl, 0, `SELECT 1 FROM `+tbl+` WHERE query_id = $1`, qa)
+		deny("update "+tbl, `UPDATE `+tbl+` SET query_id = query_id WHERE query_id = $1`, qa)
+		deny("delete "+tbl, `DELETE FROM `+tbl+` WHERE query_id = $1`, qa)
+	}
+	deny("insert decision", `INSERT INTO clinical_decisions (id, hospital_id, query_id, response_text) VALUES ($1, $2, $3, 'synthetic')`,
+		uuid.New(), a, qa)
+	deny("insert evaluation", `INSERT INTO hga_evaluations (hospital_id, query_id, target_agent) VALUES ($1, $2, 'CCA')`, a, qa)
 }

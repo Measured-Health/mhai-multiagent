@@ -29,6 +29,10 @@
 -- three job actions to audit_log. Nothing else. The core login reaches it
 -- only by SET ROLE (mhai_app holds it WITH INHERIT FALSE).
 --
+-- mhai_gateway is narrowed on the pipeline tables too (final review I-4):
+-- clinical_queries INSERT and UPDATE of published_at only,
+-- clinical_decisions and hga_evaluations SELECT only.
+--
 -- Roles are cluster-wide, so they are created only if missing and kept on
 -- Down; Down takes back every grant and membership this file made.
 
@@ -100,6 +104,21 @@ CREATE TRIGGER clinical_queries_attempts BEFORE UPDATE OF attempts ON clinical_q
     FOR EACH ROW WHEN (NEW.attempts < OLD.attempts) EXECUTE FUNCTION mhai_attempts_never_decrease();
 
 ------------------------------------------------------------------------
+-- mhai_gateway on the pipeline tables (final review I-4): what core's
+-- request path writes, and no more. 00003 gave it SELECT, INSERT, UPDATE
+-- on clinical_queries and clinical_decisions and SELECT, INSERT on
+-- hga_evaluations; results are the worker's to write. The submit inserts
+-- the queued row (queries.create) and the publish sets published_at
+-- (queries.publish); every other job column is the worker's, mhai_jobs's
+-- or a trigger's.
+------------------------------------------------------------------------
+REVOKE UPDATE ON clinical_queries FROM mhai_gateway;
+GRANT UPDATE (published_at) ON clinical_queries TO mhai_gateway;
+REVOKE INSERT, UPDATE ON clinical_decisions FROM mhai_gateway;
+REVOKE INSERT ON hga_evaluations FROM mhai_gateway;
+REVOKE USAGE ON SEQUENCE hga_evaluations_id_seq FROM mhai_gateway;
+
+------------------------------------------------------------------------
 -- The outbox.
 ------------------------------------------------------------------------
 CREATE TABLE intelligence_audit_outbox (
@@ -162,6 +181,12 @@ REVOKE ALL ON SCHEMA public FROM mhai_audit_drain;
 DROP TRIGGER clinical_queries_attempts ON clinical_queries;
 DROP FUNCTION mhai_attempts_never_decrease();
 DROP POLICY worker_status ON clinical_queries;
+
+-- mhai_gateway back to 00003's grants.
+REVOKE UPDATE (published_at) ON clinical_queries FROM mhai_gateway;
+GRANT UPDATE ON clinical_queries, clinical_decisions TO mhai_gateway;
+GRANT INSERT ON clinical_decisions, hga_evaluations TO mhai_gateway;
+GRANT USAGE ON SEQUENCE hga_evaluations_id_seq TO mhai_gateway;
 
 -- mhai_worker back to 00003's grants.
 REVOKE ALL ON clinical_queries, clinical_decisions, hga_evaluations, kb_chunks, guardrail_weights FROM mhai_worker;

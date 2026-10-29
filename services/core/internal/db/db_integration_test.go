@@ -211,7 +211,7 @@ func TestRLSHidesOtherHospital(t *testing.T) {
 			t.Errorf("hospital A can't find its own query")
 		}
 		// An update aimed at B's row touches nothing.
-		tag, err := tx.Exec(ctx, `UPDATE clinical_queries SET status = 'done' WHERE id = $1`, qb)
+		tag, err := tx.Exec(ctx, `UPDATE clinical_queries SET published_at = now() WHERE id = $1`, qb)
 		if err != nil {
 			return err
 		}
