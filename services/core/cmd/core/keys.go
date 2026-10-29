@@ -10,7 +10,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"path/filepath"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/account"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
@@ -21,15 +23,36 @@ import (
 const keysUsage = "usage: core keys new|ensure --out PATH [--kind access|request] [--trusted-out PATH] | " +
 	"core keys untrust --kid KID --trusted-out PATH [--emergency]"
 
+// staged is a key-file change in two steps: prepare writes temp files
+// beside the real ones, commit moves them into place, abort removes them.
+type staged struct {
+	prepare, commit func() error
+	abort           func()
+}
+
+// apply runs c without an audit: prepare, then commit; abort on failure.
+func (c staged) apply() error {
+	if err := c.prepare(); err != nil {
+		c.abort()
+		return err
+	}
+	if err := c.commit(); err != nil {
+		c.abort()
+		return err
+	}
+	return nil
+}
+
 // rotationAuditor records a request-key rotation (intelligence.key_rotated,
-// mode planned or emergency, change added or removed) and runs apply, the
-// file change, only once the record can be written.
-type rotationAuditor func(kid, mode, change string, apply func() error) error
+// mode planned or emergency, change added or removed) and makes the change
+// c only once the record has committed: c.prepare runs inside the audit's
+// transaction, c.commit after it commits, c.abort if anything fails.
+type rotationAuditor func(kid, mode, change string, c staged) error
 
 // dbRotationAudit audits through the provisioning login in url
 // (DATABASE_URL, as "core users create"), as account.AuditKeyRotation.
 func dbRotationAudit(url string) rotationAuditor {
-	return func(kid, mode, change string, apply func() error) error {
+	return func(kid, mode, change string, c staged) error {
 		if url == "" {
 			return errors.New("keys: DATABASE_URL (the provisioning login) is required to audit a key rotation")
 		}
@@ -39,8 +62,28 @@ func dbRotationAudit(url string) rotationAuditor {
 			return errors.New("keys: cannot connect to the database to audit the key rotation")
 		}
 		defer pool.Close()
-		return account.AuditKeyRotation(ctx, pool, kid, mode, change, apply)
+		if err := account.AuditKeyRotation(ctx, pool, kid, mode, change, c.prepare); err != nil {
+			c.abort() // the transaction rolled back: the old files stay
+			return err
+		}
+		if err := c.commit(); err != nil {
+			c.abort()
+			return errors.New("keys: the rotation was audited but the files could not be moved into place; run it again")
+		}
+		return nil
 	}
+}
+
+// stagePath is a fresh temp file name beside path (same directory, so the
+// move into place is a rename).
+func stagePath(path, pattern string) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(path), pattern)
+	if err != nil {
+		return "", errors.New("keys: cannot write beside the key files")
+	}
+	name := f.Name()
+	_ = f.Close()
+	return name, nil
 }
 
 // keys runs:
@@ -161,33 +204,68 @@ func makeRequestKey(ensure bool, path, trustedPath string, out io.Writer, audit 
 		return errors.New("keys: the trusted-keys file already holds two kids; untrust one first")
 	}
 	rotation := !trusted && len(set) > 0
-	apply := func() error {
-		if fresh {
-			if err := writeKeyFile(path, priv); err != nil {
-				return err
-			}
-		}
-		if trusted {
-			return nil
-		}
-		set[kid] = pub
-		if err := reqtoken.WriteTrusted(trustedPath, set); err != nil {
+	var tmpKey, tmpTrusted string
+	next := maps.Clone(set)
+	next[kid] = pub
+	c := staged{
+		prepare: func() error {
 			if fresh {
-				_ = os.Remove(path)
+				var err error
+				if tmpKey, err = stagePath(path, ".request-key-*.tmp"); err != nil {
+					return err
+				}
+				if err := writeKeyTo(tmpKey, priv); err != nil {
+					return err
+				}
 			}
-			delete(set, kid)
-			return errors.New("keys: cannot write the trusted-keys file")
-		}
-		return nil
+			if !trusted {
+				var err error
+				if tmpTrusted, err = stagePath(trustedPath, ".request-keys-*.staged"); err != nil {
+					return err
+				}
+				if err := reqtoken.WriteTrusted(tmpTrusted, next); err != nil {
+					return errors.New("keys: cannot write the trusted-keys file")
+				}
+			}
+			return nil
+		},
+		commit: func() error {
+			if fresh {
+				// Link refuses to overwrite: the key file must not exist.
+				if err := os.Link(tmpKey, path); err != nil {
+					return errors.New("keys: cannot create the key file (it must not exist yet)")
+				}
+				_ = os.Remove(tmpKey)
+				tmpKey = ""
+			}
+			if !trusted {
+				if err := os.Rename(tmpTrusted, trustedPath); err != nil {
+					if fresh {
+						_ = os.Remove(path)
+					}
+					return errors.New("keys: cannot write the trusted-keys file")
+				}
+				tmpTrusted = ""
+			}
+			return nil
+		},
+		abort: func() {
+			for _, p := range []string{tmpKey, tmpTrusted} {
+				if p != "" {
+					_ = os.Remove(p)
+				}
+			}
+		},
 	}
 	if rotation {
-		err = audit(kid, "planned", "added", apply)
+		err = audit(kid, "planned", "added", c)
 	} else {
-		err = apply()
+		err = c.apply()
 	}
 	if err != nil {
 		return err
 	}
+	set = next
 	fmt.Fprintf(out, "%s request-token key, kid %s (%d trusted)\n", verb, kid, len(set))
 	return nil
 }
@@ -215,11 +293,30 @@ func keysUntrust(args []string, out io.Writer, audit rotationAuditor) error {
 		mode = "emergency"
 	}
 	delete(set, *kid)
-	if err := audit(*kid, mode, "removed", func() error {
-		if err := reqtoken.WriteTrusted(*trustedPath, set); err != nil {
-			return errors.New("keys: cannot write the trusted-keys file")
-		}
-		return nil
+	var tmp string
+	if err := audit(*kid, mode, "removed", staged{
+		prepare: func() error {
+			var err error
+			if tmp, err = stagePath(*trustedPath, ".request-keys-*.staged"); err != nil {
+				return err
+			}
+			if err := reqtoken.WriteTrusted(tmp, set); err != nil {
+				return errors.New("keys: cannot write the trusted-keys file")
+			}
+			return nil
+		},
+		commit: func() error {
+			if err := os.Rename(tmp, *trustedPath); err != nil {
+				return errors.New("keys: cannot write the trusted-keys file")
+			}
+			tmp = ""
+			return nil
+		},
+		abort: func() {
+			if tmp != "" {
+				_ = os.Remove(tmp)
+			}
+		},
 	}); err != nil {
 		return err
 	}
@@ -266,6 +363,35 @@ func newKey() (ed25519.PrivateKey, error) {
 		return nil, errors.New("keys: no randomness")
 	}
 	return priv, nil
+}
+
+// writeKeyTo writes priv as PKCS#8 PEM over the temp file at path (made by
+// stagePath, mode 0600).
+func writeKeyTo(path string, priv ed25519.PrivateKey) error {
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return errors.New("keys: encode failed")
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return errors.New("keys: write failed")
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return errors.New("keys: write failed")
+	}
+	if err := pem.Encode(f, &pem.Block{Type: "PRIVATE KEY", Bytes: der}); err != nil {
+		_ = f.Close()
+		return errors.New("keys: write failed")
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return errors.New("keys: write failed")
+	}
+	if err := f.Close(); err != nil {
+		return errors.New("keys: write failed")
+	}
+	return nil
 }
 
 // writeKeyFile writes priv as PKCS#8 PEM, mode 0600, refusing to overwrite.

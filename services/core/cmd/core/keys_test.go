@@ -197,17 +197,31 @@ func TestKeysDefaultKindIsAccess(t *testing.T) {
 
 // fakeAudit stands in for the provisioning login's audit of a rotation.
 type fakeAudit struct {
-	calls []string
-	fail  bool
+	calls      []string
+	fail       bool
+	failCommit bool
 }
 
 func (f *fakeAudit) fn() rotationAuditor {
-	return func(kid, mode, change string, apply func() error) error {
+	return func(kid, mode, change string, c staged) error {
 		f.calls = append(f.calls, kid+" "+mode+" "+change)
 		if f.fail {
 			return errors.New("keys: audit refused")
 		}
-		return apply()
+		if err := c.prepare(); err != nil {
+			c.abort()
+			return err
+		}
+		if f.failCommit {
+			// The audit transaction's commit failed after prepare.
+			c.abort()
+			return errors.New("keys: commit failed")
+		}
+		if err := c.commit(); err != nil {
+			c.abort()
+			return err
+		}
+		return nil
 	}
 }
 
@@ -262,5 +276,48 @@ func TestKeysRotationsAreAudited(t *testing.T) {
 	}
 	if got, _ := reqtoken.ReadTrusted(trusted); len(got) != 1 || got[sb.KeyID] == nil {
 		t.Fatalf("trusted after untrust: %v", got)
+	}
+}
+
+// Review fix 5: when the audit's commit fails after the files were staged,
+// the old key and trusted files stay as they were and no temp file is left.
+func TestKeysRotationCommitFailureLeavesFiles(t *testing.T) {
+	dir := t.TempDir()
+	trusted := filepath.Join(dir, "request-keys.json")
+	var out bytes.Buffer
+	fa := &fakeAudit{}
+	a, b := filepath.Join(dir, "a.pem"), filepath.Join(dir, "b.pem")
+	if err := keysWith([]string{"new", "--kind", "request", "--out", a, "--trusted-out", trusted}, &out, fa.fn()); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(trusted)
+	fa.failCommit = true
+	if err := keysWith([]string{"new", "--kind", "request", "--out", b, "--trusted-out", trusted}, &out, fa.fn()); err == nil {
+		t.Fatal("a failed commit reported success")
+	}
+	after, _ := os.ReadFile(trusted)
+	if string(before) != string(after) || exists(b) {
+		t.Fatalf("files changed after a failed commit (key written %v)", exists(b))
+	}
+	ents, _ := os.ReadDir(dir)
+	if len(ents) != 2 {
+		t.Fatalf("left behind: %v", ents)
+	}
+	// Untrust likewise (with two kids trusted first).
+	fa.failCommit = false
+	if err := keysWith([]string{"new", "--kind", "request", "--out", b, "--trusted-out", trusted}, &out, fa.fn()); err != nil {
+		t.Fatal(err)
+	}
+	sa, _ := reqtoken.LoadSigner(a)
+	before, _ = os.ReadFile(trusted)
+	fa.failCommit = true
+	if err := keysWith([]string{"untrust", "--kid", sa.KeyID, "--trusted-out", trusted, "--emergency"}, &out, fa.fn()); err == nil {
+		t.Fatal("a failed commit reported success")
+	}
+	if after, _ := os.ReadFile(trusted); string(before) != string(after) {
+		t.Fatal("trusted file changed after a failed commit")
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 3 {
+		t.Fatalf("left behind: %v", ents)
 	}
 }
