@@ -65,8 +65,8 @@ func Register(m *authz.Mux, d Deps) {
 
 // create queues a question: in one request transaction it takes an
 // in-flight slot (429 rate_limited at the cap), inserts the queued row with
-// a deadline of run_query's timeout, and audits query.submitted (ids and
-// codes only). After the commit it publishes the job; a failed publish is
+// a deadline of run_query's timeout, and audits query.submitted (query_id
+// and urgency only). After the commit it publishes the job; a failed publish is
 // logged and left to the publish sweeper. 202 {query_id, status: queued}.
 func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -125,10 +125,10 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 			Scan(&deadline); err != nil {
 			return errInsert
 		}
+		// Ids and codes only. The specialty (stored as category) is free
+		// text with no closed list in the contract (each hospital sets its
+		// own), so it stays out of the chain.
 		payload := map[string]any{"query_id": id.String(), "urgency": in.Urgency}
-		if cat != "" {
-			payload["category"] = cat
-		}
 		return audit.Write(ctx, tx, audit.Event{ActorID: p.UserID.String(), HospitalID: p.HospitalID.String(), RequestID: rid,
 			Action: "query.submitted", Entity: "query", EntityID: id.String(), Payload: payload})
 	})

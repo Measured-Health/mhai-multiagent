@@ -333,7 +333,7 @@ func TestPostQueries202AndAudited(t *testing.T) {
 	}
 	var p map[string]any
 	_ = json.Unmarshal(payload, &p)
-	if actor != u.id.String() || hosp != hid.String() || p["query_id"] != id || p["urgency"] != "urgent" || p["category"] != "cardiology" || len(p) != 3 {
+	if actor != u.id.String() || hosp != hid.String() || p["query_id"] != id || p["urgency"] != "urgent" || len(p) != 2 {
 		t.Fatalf("audit %s %s %v", actor, hosp, p)
 	}
 	if strings.Contains(string(payload), marker) || strings.Contains(e.logs.String(), marker) {

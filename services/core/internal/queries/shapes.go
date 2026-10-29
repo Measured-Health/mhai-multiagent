@@ -29,9 +29,8 @@ var (
 	decisions = map[string]bool{"PASS": true, "REGENERATE": true, "ESCALATE": true}
 	agents    = map[string]bool{"CCA": true, "HGA": true}
 	bands     = map[string]bool{"low": true, "mid": true, "high": true}
-	// A specialty is a word or two (letters, spaces, hyphens): it is stored
-	// as the category and goes into the query.submitted audit entry, so it
-	// can't carry digits (dates, record numbers) or other free text.
+	// A specialty is a word or two (letters, spaces, hyphens), stored as the
+	// category: no digits (dates, record numbers). It is never audited.
 	specialtyRe = regexp.MustCompile(`^[A-Za-z][A-Za-z -]{0,31}$`)
 )
 
