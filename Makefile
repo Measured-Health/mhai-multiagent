@@ -54,7 +54,7 @@ GPU := -f docker-compose.yml -f docker-compose.gpu.yml
 	cp .env.example .env
 	@echo "Created .env from .env.example; replace every changeme value (the core service refuses placeholders)."
 
-up: .env ## Start the stack: postgres, nats, core (+ migrations), redis, ollama (+ model pull), intelligence
+up: .env ## Start the stack: postgres, nats, core (+ migrations), ollama (+ model pull), intelligence
 	$(COMPOSE) up -d --build
 
 up-gpu: .env ## Start the stack on an NVIDIA GPU
@@ -63,8 +63,8 @@ up-gpu: .env ## Start the stack on an NVIDIA GPU
 up-observability: .env ## Start the stack plus the OpenTelemetry collector
 	$(COMPOSE) --profile observability up -d --build
 
-infra: .env ## Start only postgres (+ core migrations), redis and ollama (run the app with uv)
-	$(COMPOSE) up -d --build postgres core-migrate redis ollama ollama-init
+infra: .env ## Start only postgres (+ core migrations) and ollama (run the app with uv)
+	$(COMPOSE) up -d --build postgres core-migrate ollama ollama-init
 
 down: ## Stop the stack (keeps data volumes)
 	$(COMPOSE) --profile observability down
