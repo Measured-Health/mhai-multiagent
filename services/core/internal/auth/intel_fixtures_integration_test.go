@@ -45,7 +45,7 @@ func startEcho(t *testing.T, next func() string, factEntity string) *echoWorker 
 		if code == "ok" {
 			var in intelpb.PingRequest
 			_ = proto.Unmarshal(m.Data, &in)
-			p, _ := structpb.NewStruct(map[string]any{"n": 1})
+			p, _ := structpb.NewStruct(nil) // echo.pinged's schema: no payload keys
 			out.Header.Set("Mhai-Schema", "mhai.intelligence.v1.PingResponse")
 			out.Data, _ = proto.Marshal(&intelpb.PingResponse{Text: in.Text, Meta: &intelpb.ResponseMeta{AuditFacts: []*intelpb.AuditFact{
 				{Action: "intelligence.echo.pinged", Entity: "echo", EntityId: factEntity, Payload: p},

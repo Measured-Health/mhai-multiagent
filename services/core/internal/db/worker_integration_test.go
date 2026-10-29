@@ -383,7 +383,7 @@ func TestAuditDrainRoleNarrow(t *testing.T) {
 	deny("question", `SELECT clinical_question FROM clinical_queries`)
 	deny("patient data", `SELECT patient_data_json FROM clinical_queries`)
 	deny("every column", `SELECT * FROM clinical_queries`)
-	deny("status", `SELECT status FROM clinical_queries`)
+	deny("error", `SELECT error FROM clinical_queries`)
 	deny("update query", `UPDATE clinical_queries SET status = 'failed' WHERE id = $1`, qa)
 	deny("audit read", `SELECT id FROM audit_log`)
 	deny("audit update", `UPDATE audit_log SET action = 'x'`)
@@ -424,7 +424,7 @@ func TestAuditDrainRoleNarrow(t *testing.T) {
 		}
 		var n int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM clinical_queries q WHERE q.id = ANY($1)
-			AND q.hospital_id IS NOT NULL AND q.request_id IS NULL AND q.created_by IS NULL`, []uuid.UUID{qa, qb}).Scan(&n); err != nil {
+			AND q.hospital_id IS NOT NULL AND q.request_id IS NULL AND q.created_by IS NULL AND q.status = 'queued'`, []uuid.UUID{qa, qb}).Scan(&n); err != nil {
 			return err
 		}
 		if n != 2 {

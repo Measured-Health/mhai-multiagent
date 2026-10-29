@@ -80,6 +80,7 @@ type outboxRow struct {
 	queryID, hospital uuid.UUID
 	createdBy         *uuid.UUID
 	requestID         *string
+	status            string // the job's status now
 }
 
 // DrainOnce moves up to 100 facts from intelligence_audit_outbox onto the
@@ -96,9 +97,14 @@ type outboxRow struct {
 // entity id, if other than the job, go in as fact_entity and
 // fact_entity_id), and payload keys naming an identity (actor_id,
 // hospital_id, request_id, sub) are dropped before audit.Write's
-// sensitive-key check. A payload that fails that check is replaced by
-// {query_id, payload_refused: true}, so one bad fact can't hold the outbox
-// up; anything else rolls the batch back for the next run.
+// sensitive-key check. The payload must then fit its action's closed
+// schema (factschema.go: closed-set codes, ids of a fixed shape, bounded
+// integers; final review I-1). A payload that fails either check is
+// replaced by {query_id, payload_refused: true}, so one bad fact can't hold
+// the outbox up and no free text reaches the chain. A fact whose action
+// doesn't match the job's status now (query.completed for a job that isn't
+// completed, and so on) is deleted and not appended. Anything else rolls
+// the batch back for the next run.
 func DrainOnce(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (int, error) {
 	if log == nil {
 		log = logx.New(io.Discard)
@@ -110,14 +116,14 @@ func DrainOnce(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (int, 
 			USING clinical_queries q
 			WHERE o.id IN (SELECT id FROM intelligence_audit_outbox ORDER BY id LIMIT $1)
 			  AND q.id = o.query_id AND q.hospital_id = o.hospital_id
-			RETURNING o.id, o.action, o.entity, o.entity_id, o.payload, q.id, q.hospital_id, q.created_by, q.request_id`, drainBatch)
+			RETURNING o.id, o.action, o.entity, o.entity_id, o.payload, q.id, q.hospital_id, q.created_by, q.request_id, q.status`, drainBatch)
 		if err != nil {
 			return errDrain
 		}
 		var rows []outboxRow
 		for r.Next() {
 			var o outboxRow
-			if err := r.Scan(&o.id, &o.action, &o.entity, &o.entityID, &o.payload, &o.queryID, &o.hospital, &o.createdBy, &o.requestID); err != nil {
+			if err := r.Scan(&o.id, &o.action, &o.entity, &o.entityID, &o.payload, &o.queryID, &o.hospital, &o.createdBy, &o.requestID, &o.status); err != nil {
 				r.Close()
 				return errDrain
 			}
@@ -137,6 +143,13 @@ func DrainOnce(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (int, 
 			return 0
 		})
 		for _, o := range rows {
+			if job, ok := jobFactSchemas[o.action]; !ok || job.status != o.status {
+				// A false statement (query.completed for a job that isn't
+				// completed): taken off the outbox, never appended. Ids only.
+				log.Error("intel: outbox fact refused: action doesn't match the job's status",
+					"action", o.action, "query_id", o.queryID.String())
+				continue
+			}
 			e := drainEvent(o, log)
 			if err := audit.Write(ctx, tx, e); err != nil {
 				return errDrain
@@ -177,16 +190,20 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 	for _, k := range identityKeys {
 		delete(payload, k)
 	}
+	// The closed schema of the action (factschema.go), before the fact's
+	// own entity is added: ids and codes only, never text.
+	fits := jobFactSchemas[o.action].schema.check(payload, o.queryID)
 	// The row is always about the job (entity query, entity id the job's):
 	// a fact's own entity, if another, is detail in the payload only.
 	if o.entity != nil && *o.entity != "" && *o.entity != e.Entity {
 		payload["fact_entity"] = *o.entity
 	}
 	if o.entityID != nil && *o.entityID != "" && *o.entityID != e.EntityID {
+		fits = fits && factEntityIDPattern.MatchString(*o.entityID)
 		payload["fact_entity_id"] = *o.entityID
 	}
 	raw, err := json.Marshal(payload)
-	if _, bad := logx.SensitiveKeyInJSON(raw); err != nil || bad {
+	if _, bad := logx.SensitiveKeyInJSON(raw); err != nil || bad || !fits {
 		// Ids only in the log: the action and the job, never the key's value.
 		log.Error("intel: outbox fact payload refused", "action", o.action, "query_id", o.queryID.String())
 		payload = map[string]any{"query_id": o.queryID.String(), "payload_refused": true}

@@ -5,6 +5,8 @@ package intel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -60,6 +62,7 @@ func TestDrainerIgnoresFactIdentity(t *testing.T) {
 	intruder := seedUser(t, other, true, authz.RoleClinician)
 	deadline := time.Now().Add(5 * time.Minute)
 	q := seedQuery(t, hid, creator, 0, &deadline, true)
+	setRow(t, q, "status = 'completed'")
 	addFact(t, hid, q, "query.completed", map[string]any{
 		"query_id": q.String(), "decision": "PASS", "trust_band": "high", "attempts": 1,
 		"actor_id": intruder.String(), "hospital_id": other.String(), "request_id": "forged", "sub": intruder.String(),
@@ -96,6 +99,8 @@ func TestDrainerAppendsCompletedAfterWorkerCrash(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Minute)
 	q := seedQuery(t, hid, creator, 0, &deadline, true)
 	bad := seedQuery(t, hid, creator, 0, &deadline, true)
+	setRow(t, q, "status = 'completed'")
+	setRow(t, bad, "status = 'failed', error = 'internal'")
 	addFact(t, hid, q, "query.completed", map[string]any{"query_id": q.String(), "decision": "ESCALATE", "attempts": 2})
 	addFact(t, hid, bad, "query.failed", map[string]any{"query_id": bad.String(), "token": "synthetic-not-a-secret"})
 	drainAll(t)
@@ -121,7 +126,8 @@ func TestTwoDrainersAppendOnce(t *testing.T) {
 	var ids []uuid.UUID
 	for i := 0; i < 150; i++ {
 		q := seedQuery(t, hid, creator, 0, &deadline, true)
-		addFact(t, hid, q, "query.completed", map[string]any{"query_id": q.String(), "decision": "PASS"})
+		setRow(t, q, "status = 'completed'")
+		addFact(t, hid, q, "query.completed", map[string]any{"query_id": q.String(), "decision": "PASS", "attempts": 1})
 		ids = append(ids, q)
 	}
 	var wg sync.WaitGroup
@@ -282,9 +288,10 @@ func TestDrainerEntityIsTheJob(t *testing.T) {
 	creator := seedUser(t, hid, true, authz.RoleClinician)
 	deadline := time.Now().Add(5 * time.Minute)
 	q := seedQuery(t, hid, creator, 0, &deadline, true)
+	setRow(t, q, "status = 'completed'")
 	victim := uuid.NewString()
 	if _, err := super.Exec(context.Background(), `INSERT INTO intelligence_audit_outbox (hospital_id, query_id, action, entity, entity_id, payload)
-		VALUES ($1, $2, 'query.completed', 'user', $3, '{"decision":"PASS"}')`, hid, q, victim); err != nil {
+		VALUES ($1, $2, 'query.completed', 'user', $3, '{"decision":"PASS","attempts":1}')`, hid, q, victim); err != nil {
 		t.Fatal(err)
 	}
 	drainAll(t)
@@ -295,5 +302,151 @@ func TestDrainerEntityIsTheJob(t *testing.T) {
 	}
 	if n := len(auditFor(t, "query.completed", victim)); n != 0 {
 		t.Fatal("a fact chose the audit entity")
+	}
+}
+
+// Final review I-1: each job action has a closed payload schema. Free text
+// in any field, an unknown key, a wrong type, a list or map past its bound
+// or a query_id other than the job's is recorded as {query_id,
+// payload_refused} and nothing of the fact's own; a complete, well-formed
+// payload is recorded as it came.
+func TestDrainerClosedPayloadSchema(t *testing.T) {
+	hid := seedHospital(t, "active")
+	creator := seedUser(t, hid, true, authz.RoleClinician)
+	deadline := time.Now().Add(5 * time.Minute)
+	const freeText = "SYNTHETIC free text note"
+	many := make([]any, maxChunkIDs+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("KB#%04d", i)
+	}
+	tooManyModels := map[string]any{}
+	for i := 0; i <= maxModelVersions; i++ {
+		tooManyModels[fmt.Sprintf("m%d", i)] = "v1"
+	}
+	completed := func(over map[string]any) map[string]any {
+		p := map[string]any{"decision": "PASS", "trust_band": "high", "chunk_ids": []any{"KB#0001"},
+			"model_versions": map[string]any{"cca": "qwen2.5:7b"}, "attempts": 1}
+		for k, v := range over {
+			if v == nil {
+				delete(p, k)
+				continue
+			}
+			p[k] = v
+		}
+		return p
+	}
+	type tc struct {
+		action, status string
+		payload        map[string]any
+	}
+	cases := map[string]tc{
+		"decision text":         {"query.completed", "completed", completed(map[string]any{"decision": freeText})},
+		"trust band text":       {"query.completed", "completed", completed(map[string]any{"trust_band": freeText})},
+		"chunk id text":         {"query.completed", "completed", completed(map[string]any{"chunk_ids": []any{"KB#0001", freeText}})},
+		"chunk id not a string": {"query.completed", "completed", completed(map[string]any{"chunk_ids": []any{map[string]any{"x": freeText}}})},
+		"too many chunk ids":    {"query.completed", "completed", completed(map[string]any{"chunk_ids": many})},
+		"model version text":    {"query.completed", "completed", completed(map[string]any{"model_versions": map[string]any{"cca": freeText}})},
+		"model name text":       {"query.completed", "completed", completed(map[string]any{"model_versions": map[string]any{freeText: "v1"}})},
+		"too many models":       {"query.completed", "completed", completed(map[string]any{"model_versions": tooManyModels})},
+		"attempts text":         {"query.completed", "completed", completed(map[string]any{"attempts": freeText})},
+		"attempts fraction":     {"query.completed", "completed", completed(map[string]any{"attempts": 1.5})},
+		"no decision":           {"query.completed", "completed", completed(map[string]any{"decision": nil})},
+		"extra key":             {"query.completed", "completed", completed(map[string]any{"note": freeText})},
+		"another query id":      {"query.completed", "completed", completed(map[string]any{"query_id": uuid.NewString()})},
+		"error text":            {"query.failed", "failed", map[string]any{"error": freeText, "attempts": 1}},
+		"error unknown code":    {"query.failed", "failed", map[string]any{"error": "model_crashed", "attempts": 1}},
+		"failed extra key":      {"query.failed", "failed", map[string]any{"error": "internal", "attempts": 1, "detail": freeText}},
+		"failed no attempts":    {"query.failed", "failed", map[string]any{"error": "internal"}},
+		"reason text":           {"query.cancelled", "cancelled", map[string]any{"reason": freeText}},
+		"cancelled extra key":   {"query.cancelled", "cancelled", map[string]any{"reason": "user_deactivated", "by": freeText}},
+	}
+	ids := map[string]uuid.UUID{}
+	for name, c := range cases {
+		q := seedQuery(t, hid, creator, 0, &deadline, true)
+		setRow(t, q, "status = '"+c.status+"'")
+		addFact(t, hid, q, c.action, c.payload)
+		ids[name] = q
+	}
+	// A fact entity id is free text up to 64 bytes in the outbox: it must
+	// be an id to reach the chain.
+	qe := seedQuery(t, hid, creator, 0, &deadline, true)
+	setRow(t, qe, "status = 'completed'")
+	if _, err := super.Exec(context.Background(), `INSERT INTO intelligence_audit_outbox (hospital_id, query_id, action, entity, entity_id, payload)
+		VALUES ($1, $2, 'query.completed', 'query', $3, '{"decision":"PASS","attempts":1}')`, hid, qe, freeText); err != nil {
+		t.Fatal(err)
+	}
+	ids["entity id text"] = qe
+	cases["entity id text"] = tc{"query.completed", "completed", nil}
+
+	good := seedQuery(t, hid, creator, 0, &deadline, true)
+	setRow(t, good, "status = 'completed'")
+	addFact(t, hid, good, "query.completed", completed(map[string]any{"query_id": good.String(), "trust_band": nil}))
+	goodNull := seedQuery(t, hid, creator, 0, &deadline, true)
+	setRow(t, goodNull, "status = 'completed'")
+	nullBand := completed(nil)
+	nullBand["trust_band"] = nil // JSON null: an unverified answer has no band
+	addFact(t, hid, goodNull, "query.completed", nullBand)
+	drainAll(t)
+
+	for name, q := range ids {
+		rows := auditFor(t, cases[name].action, q.String())
+		if len(rows) != 1 {
+			t.Errorf("%s: %d rows", name, len(rows))
+			continue
+		}
+		p := rows[0].payload
+		if p["payload_refused"] != true || p["query_id"] != q.String() || len(p) != 2 {
+			t.Errorf("%s: payload %v", name, p)
+		}
+		if raw, _ := json.Marshal(p); strings.Contains(string(raw), "SYNTHETIC") {
+			t.Errorf("%s: free text on the chain: %s", name, raw)
+		}
+	}
+	rows := auditFor(t, "query.completed", good.String())
+	if len(rows) != 1 || rows[0].payload["payload_refused"] != nil || rows[0].payload["decision"] != "PASS" ||
+		rows[0].payload["attempts"] != float64(1) {
+		t.Fatalf("a good payload: %+v", rows)
+	}
+	if mv, _ := rows[0].payload["model_versions"].(map[string]any); mv["cca"] != "qwen2.5:7b" {
+		t.Fatalf("model_versions: %v", rows[0].payload)
+	}
+	if rows := auditFor(t, "query.completed", goodNull.String()); len(rows) != 1 || rows[0].payload["payload_refused"] != nil {
+		t.Fatalf("null trust band: %+v", rows)
+	}
+}
+
+// Final review I-1: a fact's action must match its job's status now. A
+// query.completed for a row that isn't completed (or a query.failed for a
+// completed one, a query.cancelled for a running one) is a false statement:
+// it is taken off the outbox and never appended.
+func TestDrainerRefusesActionStatusMismatch(t *testing.T) {
+	hid := seedHospital(t, "active")
+	creator := seedUser(t, hid, true, authz.RoleClinician)
+	deadline := time.Now().Add(5 * time.Minute)
+	for _, c := range []struct {
+		action, set string
+		payload     map[string]any
+	}{
+		{"query.completed", "status = 'queued'", map[string]any{"decision": "PASS", "attempts": 1}},
+		{"query.completed", "status = 'running', attempts = 1", map[string]any{"decision": "PASS", "attempts": 1}},
+		{"query.completed", "status = 'cancelled', cancel_reason = 'user_deactivated'", map[string]any{"decision": "PASS", "attempts": 1}},
+		{"query.failed", "status = 'completed'", map[string]any{"error": "internal", "attempts": 1}},
+		{"query.cancelled", "status = 'running', attempts = 1", map[string]any{"reason": "user_deactivated"}},
+		{"query.cancelled", "status = 'failed', error = 'internal'", map[string]any{"reason": "user_deactivated"}},
+	} {
+		q := seedQuery(t, hid, creator, 0, &deadline, true)
+		setRow(t, q, c.set)
+		addFact(t, hid, q, c.action, c.payload)
+		drainAll(t)
+		if rows := auditFor(t, c.action, q.String()); len(rows) != 0 {
+			t.Errorf("%s with %s appended: %+v", c.action, c.set, rows)
+		}
+		if outboxCount(t, q) != 0 {
+			t.Errorf("%s with %s left in the outbox", c.action, c.set)
+		}
+	}
+	ok, broken, err := audit.Verify(context.Background(), app)
+	if err != nil || !ok {
+		t.Fatalf("chain verify: ok %v at %d, %v", ok, broken, err)
 	}
 }

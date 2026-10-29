@@ -38,7 +38,7 @@ func TestAppendFacts(t *testing.T) {
 	meta := &intelpb.ResponseMeta{AuditFacts: []*intelpb.AuditFact{
 		// The payload names another actor and hospital: they are data, and
 		// the row's actor and hospital stay the caller's.
-		fact("intelligence.echo.pinged", "echo", entity, map[string]any{"actor_id": uuid.NewString(), "hospital_id": uuid.NewString(), "n": 1}),
+		fact("intelligence.echo.pinged", "echo", entity, map[string]any{"actor_id": uuid.NewString(), "hospital_id": uuid.NewString()}),
 	}}
 	if err := db.WithHospital(ctx, app, hid, func(tx pgx.Tx) error { return AppendFacts(ctx, tx, caller, meta) }); err != nil {
 		t.Fatalf("append: %v", err)
@@ -50,6 +50,11 @@ func TestAppendFacts(t *testing.T) {
 	r := rows[0]
 	if *r.actor != user.String() || *r.hospital != hid.String() || *r.requestID != caller.Rid || *r.entity != "echo" {
 		t.Fatalf("row %+v", r)
+	}
+	// The identity keys are dropped, as the drainer does: nothing of the
+	// fact's own names a person or hospital on the chain.
+	if len(r.payload) != 0 {
+		t.Fatalf("payload kept %v", r.payload)
 	}
 	// Nothing to append is fine.
 	if err := db.WithHospital(ctx, app, hid, func(tx pgx.Tx) error { return AppendFacts(ctx, tx, caller, nil) }); err != nil {
@@ -73,6 +78,11 @@ func TestAppendFacts(t *testing.T) {
 		"too many":            tooMany,
 		"one good, one wrong": {AuditFacts: []*intelpb.AuditFact{fact("intelligence.echo.pinged", "echo", "y", nil), fact("auth.x", "e", "y", nil)}},
 		"nil fact":            {AuditFacts: []*intelpb.AuditFact{nil}},
+		// Final review I-1: a closed payload schema per action.
+		"free text payload": {AuditFacts: []*intelpb.AuditFact{fact("intelligence.echo.pinged", "echo", "x", map[string]any{"note": "SYNTHETIC free text"})}},
+		"number payload":    {AuditFacts: []*intelpb.AuditFact{fact("intelligence.echo.pinged", "echo", "x", map[string]any{"n": 1})}},
+		"unknown action":    {AuditFacts: []*intelpb.AuditFact{fact("intelligence.echo.other", "echo", "x", nil)}},
+		"free text entity":  {AuditFacts: []*intelpb.AuditFact{fact("intelligence.echo.pinged", "echo", "free text id", nil)}},
 	} {
 		err := db.WithHospital(ctx, app, hid, func(tx pgx.Tx) error { return AppendFacts(ctx, tx, caller, m) })
 		if err == nil {

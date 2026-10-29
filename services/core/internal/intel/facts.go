@@ -5,6 +5,7 @@ import (
 	"errors"
 	"regexp"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
@@ -40,8 +41,9 @@ func actor(c Caller) string {
 // the chain inside tx, the caller's own request transaction (authz.Tx, as
 // spec §10.2 asks: the same transaction as core's own audit). The actor,
 // hospital and request id are the caller's, the ones core minted; a fact
-// adds only its action, entity, entity id and payload, and the payload goes
-// through audit.Write's sensitive-key check. Every fact is checked before
+// adds only its action, entity, entity id and payload. The action must be
+// one core knows (replyFactSchemas) and the payload must fit its closed
+// schema, then it goes through audit.Write's sensitive-key check. Every fact is checked before
 // any is written, and an error leaves tx to roll back: a bad fact records
 // nothing (F22). ErrBadFact means a fact core won't record; ErrAuditWrite
 // means core couldn't write it (an infrastructure error, to retry).
@@ -53,17 +55,34 @@ func AppendFacts(ctx context.Context, tx pgx.Tx, caller Caller, meta *intelpb.Re
 	if len(facts) > MaxFacts {
 		return ErrBadFact
 	}
-	for _, f := range facts {
+	payloads := make([]map[string]any, len(facts))
+	for i, f := range facts {
 		if f == nil || !factAction.MatchString(f.Action) || len(f.Action) > 64 || coreActions[f.Action] ||
 			!factEntity.MatchString(f.Entity) || !factEntityID.MatchString(f.EntityId) {
 			return ErrBadFact
 		}
-	}
-	for _, f := range facts {
-		var payload map[string]any
+		// A closed payload schema per action (factschema.go, final review
+		// I-1): an action core doesn't know, or a payload key or value
+		// outside its schema, is refused. Identity keys are dropped first,
+		// as the drainer does: the identity is the caller's.
+		schema, known := replyFactSchemas[f.Action]
+		if !known {
+			return ErrBadFact
+		}
+		payload := map[string]any{}
 		if f.Payload != nil {
 			payload = f.Payload.AsMap()
 		}
+		for _, k := range identityKeys {
+			delete(payload, k)
+		}
+		if !schema.check(payload, uuid.Nil) {
+			return ErrBadFact
+		}
+		payloads[i] = payload
+	}
+	for i, f := range facts {
+		payload := payloads[i]
 		if err := audit.Write(ctx, tx, audit.Event{
 			ActorID: actor(caller), HospitalID: caller.Hid, RequestID: caller.Rid,
 			Action: f.Action, Entity: f.Entity, EntityID: f.EntityId, Payload: payload,

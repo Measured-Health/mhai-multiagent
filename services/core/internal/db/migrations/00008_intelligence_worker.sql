@@ -25,8 +25,9 @@
 -- wrote), never from the fact.
 --
 -- mhai_audit_drain is the drainer's role: the outbox of every hospital
--- (SELECT, DELETE), four id columns of clinical_queries, and appending the
--- three job actions to audit_log. Nothing else. The core login reaches it
+-- (SELECT, DELETE), four id columns and the status of clinical_queries (a
+-- fact's action must match the job's status: final review I-1), and
+-- appending the three job actions to audit_log. Nothing else. The core login reaches it
 -- only by SET ROLE (mhai_app holds it WITH INHERIT FALSE).
 --
 -- mhai_gateway is narrowed on the pipeline tables too (final review I-4):
@@ -156,9 +157,10 @@ CREATE POLICY drain_delete ON intelligence_audit_outbox FOR DELETE TO mhai_audit
 CREATE POLICY owner_append ON intelligence_audit_outbox FOR INSERT TO mhai_migrate WITH CHECK (true);
 
 ------------------------------------------------------------------------
--- mhai_audit_drain on the rest: the ids core needs, and the chain.
+-- mhai_audit_drain on the rest: the ids core needs, the job's status (to
+-- check a fact against it), and the chain.
 ------------------------------------------------------------------------
-GRANT SELECT (id, hospital_id, created_by, request_id) ON clinical_queries TO mhai_audit_drain;
+GRANT SELECT (id, hospital_id, created_by, request_id, status) ON clinical_queries TO mhai_audit_drain;
 CREATE POLICY drain_read ON clinical_queries FOR SELECT TO mhai_audit_drain USING (true);
 
 GRANT INSERT ON audit_log TO mhai_audit_drain;
