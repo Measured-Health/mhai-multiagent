@@ -549,9 +549,13 @@ async def test_overloaded_when_full(
     assert await eventually(lambda: len(started) == 1)
     b2, h2 = core_ping(signer)
     t0 = time.monotonic()
-    r2 = await core.request(PING, b2, timeout=2, headers=h2)
+    r2 = await core.request(PING, b2, timeout=5, headers=h2)
     assert status(r2) == "overloaded"
-    assert time.monotonic() - t0 < 0.5  # at once, not queued
+    # At once, not queued: the answer came while the first call still held
+    # the only slot (structure), well inside the request timeout (a loose
+    # wall-clock bound, final review M-2).
+    assert not first.done() and len(started) == 1
+    assert time.monotonic() - t0 < 2.5
     release.set()
     assert status(await first) == "ok"
     assert len(started) == 1
@@ -764,14 +768,17 @@ async def test_slow_grant_refused_and_late_reply_ignored(
     bff: Client,
     grant_stub: Callable[..., Awaitable[GrantStub]],
 ) -> None:
-    """A33: the grant arrives after the 250 ms budget."""
+    """A33: the grant arrives (1.5 s) long after the 250 ms budget."""
     h = Counting(echo.ping)
     w = await start_worker(handlers={"ping": h})
-    stub = await grant_stub(delay=0.6)
+    stub = await grant_stub(delay=1.5)
     t0 = time.monotonic()
-    r = await bff.request(PING, ping_body(), timeout=3, headers=bff_headers())
+    r = await bff.request(PING, ping_body(), timeout=5, headers=bff_headers())
     assert status(r) == "unavailable"
-    assert time.monotonic() - t0 < 0.55
+    # The worker gave up on the grant before core answered it (structure:
+    # no token yet), well inside the request timeout (final review M-2).
+    assert stub.tokens == [] and len(stub.requests) == 1
+    assert time.monotonic() - t0 < 2.5
     assert await eventually(lambda: len(stub.tokens) == 1)  # core did answer, late
     await asyncio.sleep(0.3)
     assert h.calls == 0
