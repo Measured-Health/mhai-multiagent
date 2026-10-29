@@ -80,12 +80,18 @@ trap cleanup EXIT
 "${compose[@]}" up -d "${build[@]}" --wait --wait-timeout 300
 
 # core has no compose health check (distroless): wait for readyz.
+ready=0
 for _ in $(seq 1 60); do
   if [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$core_port/api/v1/readyz" || true)" = 200 ]; then
+    ready=1
     break
   fi
   sleep 2
 done
+if [ "$ready" != 1 ]; then
+  echo "smoke: core not ready after 120 s" >&2
+  exit 1
+fi
 echo "smoke: stack up (core ready)"
 
 export SMOKE_NATS_URL="nats://127.0.0.1:$nats_port"
