@@ -1218,3 +1218,94 @@ func TestKVTTL(t *testing.T) {
 		t.Fatalf("after 3s want ErrKeyNotFound, got %v", err)
 	}
 }
+
+// T4 (carried to T15): a server that already has the streams from an
+// earlier configuration (JOBS with 10000 per subject and no per-subject
+// discard, DEAD discarding new, a pipeline consumer with a BackOff) is
+// brought to this one by EnsureStreams in place, keeping what is stored.
+// This is what core serve does on a host that ran an earlier build.
+func TestEnsureStreamsUpdatesThePreviousConfig(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	n, stop, err := testutil.NewNATS(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	nc, js, err := bus.Connect(ctx, n.GatewayURL, "", bus.GatewayInboxPrefix, bus.TLS{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name: bus.JobsStream, Subjects: []string{"jobs.v1.>"}, Storage: jetstream.FileStorage,
+		Retention: jetstream.WorkQueuePolicy, Discard: jetstream.DiscardNew, MaxMsgsPerSubject: 10000,
+		MaxAge: 7 * 24 * time.Hour, Duplicates: 2 * time.Minute, MaxMsgSize: 72 << 10, MaxBytes: 256 << 20, Replicas: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name: bus.DeadStream, Subjects: []string{"dead.v1.>"}, Storage: jetstream.FileStorage,
+		Retention: jetstream.LimitsPolicy, Discard: jetstream.DiscardNew, MaxMsgsPerSubject: 10000,
+		MaxAge: 30 * 24 * time.Hour, MaxMsgSize: 4 << 10, MaxBytes: 64 << 20, Replicas: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.CreateOrUpdateConsumer(ctx, bus.JobsStream, jetstream.ConsumerConfig{
+		Durable: bus.PipelineConsumer, FilterSubject: bus.PipelineFilter, AckPolicy: jetstream.AckExplicitPolicy,
+		AckWait: 60 * time.Second, MaxDeliver: 5, MaxAckPending: 8,
+		BackOff: []time.Duration{10 * time.Second, 30 * time.Second, 2 * time.Minute, 5 * time.Minute},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// One waiting job and one dead letter from before the update.
+	if _, err := js.Publish(ctx, "jobs.v1.00000000-0000-4000-8000-0000000000a1.run_query", []byte("synthetic")); err != nil {
+		t.Fatal(err)
+	}
+	// Only a worker publishes dead letters.
+	pnc, err := nats.Connect(n.PipelineURL, nats.CustomInboxPrefix(bus.WorkerInbox("pipeline")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pnc.Close()
+	pjs, err := jetstream.New(pnc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pjs.Publish(ctx, "dead.v1.00000000-0000-4000-8000-0000000000a1.run_query", []byte("synthetic")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := bus.EnsureStreams(ctx, js, devStreams); err != nil {
+		t.Fatalf("update from the previous config: %v", err)
+	}
+	jobs, err := js.Stream(ctx, bus.JobsStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ji := jobs.CachedInfo()
+	if jc := ji.Config; jc.MaxMsgsPerSubject != bus.JobsMaxPerSubject || !jc.DiscardNewPerSubject || jc.Discard != jetstream.DiscardNew {
+		t.Fatalf("JOBS not updated: %+v", jc)
+	}
+	if ji.State.Msgs != 1 {
+		t.Fatalf("JOBS lost its waiting job: %d messages", ji.State.Msgs)
+	}
+	dead, err := js.Stream(ctx, bus.DeadStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	di := dead.CachedInfo()
+	if dc := di.Config; dc.Discard != jetstream.DiscardOld || dc.MaxMsgsPerSubject != bus.DeadMaxPerSubject {
+		t.Fatalf("DEAD not updated: %+v", dc)
+	}
+	if di.State.Msgs != 1 {
+		t.Fatalf("DEAD lost its letter: %d messages", di.State.Msgs)
+	}
+	pc, err := js.Consumer(ctx, bus.JobsStream, bus.PipelineConsumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := pc.CachedInfo().Config; len(c.BackOff) != 0 || c.AckWait != bus.PipelineAckWait || c.MaxDeliver != bus.PipelineMaxDeliver {
+		t.Fatalf("pipeline consumer not updated: %+v", c)
+	}
+}
