@@ -8,6 +8,7 @@
   - [ADR 0010](../adr/0010-api-in-go-models-in-python-over-nats.md): API in Go, models in Python, NATS between them.
   - The core design, `docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md` (approved). This document details its §4.3, §5, §7.4–§7.7 and step 4 of its §10. Where this design refines a rule there, it says so and why (§14).
   - Plan 2, `docs/plans/2026-10-26-plan-2-go-gateway-auth.md`, and what it built in `services/core` (`internal/bus`, `internal/token`, `internal/authz`, `internal/audit`, `internal/db`) and `services/nats/nats.conf`.
+- **Built:** Plan 3 (Tasks 1–15). Where the build departs from the letter of a section, §18 records it.
 - **Must not block:** the parked performance design, `docs/specs/2026-10-27-intelligence-performance-design.md` (GPU, millisecond steps, streaming). §11 shows how.
 
 ## 1. Why
@@ -222,7 +223,7 @@ The order is chosen so that cheap checks run first and no body parsing happens b
 
 For a message that arrives **without** a request token but with a user access token (a BFF call, §17.2), the worker runs check 1, then asks core for a grant, and runs checks 2–9 on the token core returns. It never runs checks 2–9 on anything core didn't sign for this call.
 
-Any failure: no work is done. The worker logs the reason code and the ids (`rid`, `jti`, `hid`, `kid`), never the token or the body, increments `boundary_refusals_total{service,reason}`, and answers `unauthorized` (checks 1–6, 9) or `invalid_request` (7–8) if the reply subject passed check 5. A refused job is terminated (`Term`) and sent to `dead.v1` with the reason code.
+Any failure: no work is done. The worker logs the reason code and the ids (`rid`, `jti`, `hid`, `kid`), never the token or the body, increments `boundary_refusals_total{service,reason}`, and answers `unauthorized` (checks 1–6), `invalid_request` (7–8) or `forbidden` (9, the role), as §10.1 maps them, if the reply subject passed check 5 (amended in Plan 3, F33). A refused job is terminated (`Term`) and sent to `dead.v1` with the reason code.
 
 **The verifier is written by hand in Python**, mirroring core's `token.VerifyAt`: one algorithm, one header shape, fixed claims, using `cryptography`'s Ed25519 (already a dependency). No general JWT library, so there is no algorithm negotiation to get wrong. Cost: about 0.1 ms per message on a CPU (Ed25519 verify plus sha256 of the body).
 
@@ -694,3 +695,53 @@ No BFF user has `jobs.v1.>`, `$KV.>`, `$JS.>`, `dead.v1.>` or `authz.v1.>`. No w
 
 The mhai-web BFF swaps `fetch` for a NATS client (nats.js over TCP, on the Node server only), with its app's NKey seed in the server environment and the same request and reply shape as §17.1. That is mhai-web work, listed in mhai-web's TODO.md; this plan builds core's side and keeps HTTP on until the switch.
 
+## 18. As built: departures from the letter of this design (Plan 3)
+
+Each keeps the security property of the section it departs from; the code
+and its tests are the reference. Numbers in brackets are the plan's
+departures (`docs/plans/2026-10-28-plan-3-intelligence-boundary.md`).
+
+- **The worker login is a wrapper role** [2]. `intelligence_app` is a member
+  of `mhai_worker_app` only, a NOINHERIT role granted `mhai_worker WITH
+  INHERIT FALSE`, so the login holds nothing until `SET LOCAL ROLE
+  mhai_worker` inside `with_hospital` (§8.2 says "a member of `mhai_worker`").
+- **Cross-hospital roles for core's loops** [3]. The publish sweeper and the
+  dead-letter consumer use `mhai_jobs` (column-level `SELECT`/`UPDATE` on
+  `clinical_queries`, its own audit actions only); the drainer
+  (`mhai_audit_drain`) also reads `clinical_queries (id, hospital_id,
+  created_by, request_id)` and may call `audit_chain_head()` and use the
+  `audit_log` sequence (§10.2 says "nothing else").
+- **No consumer `BackOff`** [4]. A `BackOff` would replace `ack_wait` as the
+  first redelivery timer and break the 20 s `+WIP` rule, so the consumer has
+  `ack_wait` 60 s and `max_deliver` 5 only, and the worker applies 10 s,
+  30 s, 2 min and 5 min with `Nak(delay)` (§9.2). A unit test ties the
+  worker's `MAX_DELIVER` to core's `bus.PipelineMaxDeliver`.
+- **The worker's status moves are a RESTRICTIVE policy** (`worker_status`,
+  migration 00008), on top of the hospital policy: the worker may move only
+  `queued` or `running` rows, to `running`, `completed` (with its decision
+  row) or `failed`; never cancel, re-queue or re-open (§9.2).
+- **`clinical_queries.retried_kid`** (00009): the dead-letter consumer
+  re-mints a job refused for a key an emergency rotation removed at most
+  once per row and kid (§7.5).
+- **Tracing:** `tracestate` is dropped everywhere (§10.3, amended), and
+  sampling is always on: a remote `traceparent`'s sampled flag is ignored,
+  so a caller can't switch tracing off. Plaintext OTLP only to loopback
+  unless opted in (`OTEL_EXPORTER_OTLP_INSECURE`), with a warning outside
+  development.
+- **405 and 413 on the NATS path** (§17.1): core answers a bad `Mhai-Method`
+  405 `method_not_allowed` and a body over the limit 413
+  `payload_too_large`. With `unavailable` they are additions to
+  `Problem.code`, additive under ADR 0012 (the breaking-change check allows
+  new `Problem.code` values only).
+- **`bff_request_id`** is the span attribute for the BFF's `Mhai-Request-Id`
+  on a BFF-direct call, kept apart from core's `request_id` (plan departure
+  15: the BFF's id is never written to the audit chain).
+- **`handshake_first: 300ms`** in the production NATS `tls {}` block: the
+  workers start TLS before INFO outside development; INFO-first clients get
+  INFO after 300 ms and must still upgrade to TLS (the fallback is TLS-only,
+  `verify` still applies). Not enabled on the demo yet.
+- **`prepare_threshold=None`** on the worker's Postgres connections: the pool
+  resets each connection with `DISCARD ALL`, which drops server-side
+  prepared statements, so the worker uses none.
+- **The pipeline's database needs `sslmode=verify-full`** outside
+  development (an addition to §8.2).

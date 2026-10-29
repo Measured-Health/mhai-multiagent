@@ -183,6 +183,6 @@ These run concurrently: PII masking, the question embedding, and loading the pat
 2. **What "20 clinicians at once" means.** It could mean 20 requests in flight or 20 active users. Also: prompt length (retrieved chunks plus context), and whether background work shares the GPU. 20 × 300 tokens in 2.5 s is about 2,400 tokens/s of decode, which is hard for one L40S. This may need an H100 from the start.
 3. **The quality baseline.** Today's Ollama `qwen2.5:7b-instruct` is already 4-bit (Q4_K_M). Should the gate's reference be today's output or BF16? FP8 on vLLM is *higher* precision than today.
 4. **The golden set.** Who labels it (clinicians, or today's system, which would measure drift rather than correctness), and how large is it? The 1-point tolerance needs enough cases to mean anything.
-5. **HGA.** The live trust score is NLI plus rules. `mhai/models/deberta_moe.py` is a stub. Is there a trained HGA model, or is it NLI plus CPU rules (less export work)?
+5. **HGA.** The live trust score is NLI plus rules. `services/intelligence/intelligence/models/deberta_moe.py` is a stub. Is there a trained HGA model, or is it NLI plus CPU rules (less export work)?
 6. **Swin-V2 and QDA.** They serve document uploads, not the question path. Do they share this GPU? This affects memory sizing.
 7. **Which checks are in scope.** Semantic entropy (`k_samples: 5`) and the L1 persona check exist but aren't in the live path. Adding entropy multiplies the decode cost. L1 needs per-token activations, which vLLM doesn't expose.
