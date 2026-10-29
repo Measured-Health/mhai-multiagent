@@ -34,8 +34,12 @@ const (
 	// this cap is the backstop at the stream. Each further job type adds
 	// one subject per hospital, so recheck the sum when types are added.
 	JobsMaxPerSubject = 200
-	JobsMaxAge        = 7 * 24 * time.Hour
-	JobsDuplicates    = 2 * time.Minute // Nats-Msg-Id window (the query id)
+	// JobsMaxAge: no job lives past its 10-minute deadline (run_query's
+	// timeout; the sweeper fails it then), so an hour is ample, and a job
+	// left over by a lost ack is gone within the hour rather than a week
+	// (final review M-4).
+	JobsMaxAge     = time.Hour
+	JobsDuplicates = 2 * time.Minute // Nats-Msg-Id window (the query id)
 	// JobsMaxMsgSize bounds one job message, headers included: the 64 KiB
 	// job-body limit, plus 8 KiB for the headers (the request token is at
 	// most 4 KiB; Nats-Msg-Id, Mhai-Schema and traceparent are small).

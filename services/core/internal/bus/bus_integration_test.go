@@ -725,7 +725,7 @@ func TestEnsureStreamsIdempotent(t *testing.T) {
 	jc := jobs.CachedInfo().Config
 	if len(jc.Subjects) != 1 || jc.Subjects[0] != "jobs.v1.>" || jc.Storage != jetstream.FileStorage ||
 		jc.Retention != jetstream.WorkQueuePolicy || jc.Discard != jetstream.DiscardNew || !jc.DiscardNewPerSubject ||
-		jc.MaxMsgsPerSubject != 200 || jc.MaxAge != 7*24*time.Hour || jc.Duplicates != 2*time.Minute || jc.Replicas != 1 ||
+		jc.MaxMsgsPerSubject != 200 || jc.MaxAge != time.Hour || jc.Duplicates != 2*time.Minute || jc.Replicas != 1 ||
 		jc.MaxMsgSize != 72<<10 || jc.MaxBytes != 256<<20 {
 		t.Fatalf("JOBS config = %+v", jc)
 	}
@@ -1284,7 +1284,9 @@ func TestEnsureStreamsUpdatesThePreviousConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	ji := jobs.CachedInfo()
-	if jc := ji.Config; jc.MaxMsgsPerSubject != bus.JobsMaxPerSubject || !jc.DiscardNewPerSubject || jc.Discard != jetstream.DiscardNew {
+	// MaxAge goes down from the previous 7 days to an hour in place.
+	if jc := ji.Config; jc.MaxMsgsPerSubject != bus.JobsMaxPerSubject || !jc.DiscardNewPerSubject || jc.Discard != jetstream.DiscardNew ||
+		jc.MaxAge != time.Hour {
 		t.Fatalf("JOBS not updated: %+v", jc)
 	}
 	if ji.State.Msgs != 1 {
