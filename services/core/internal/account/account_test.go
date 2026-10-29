@@ -3,6 +3,8 @@ package account
 import (
 	"errors"
 	"testing"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 )
 
 func TestNormaliseEmail(t *testing.T) {
@@ -45,6 +47,19 @@ func TestValidateRolesRejectsUnknownAndEmpty(t *testing.T) {
 	for _, r := range [][]string{nil, {}, {"root"}, {"admin"}, {"clinician", "clinician"}} {
 		if err := ValidateRoles(r, "HAV"); err == nil {
 			t.Errorf("roles %v accepted", r)
+		}
+	}
+}
+
+// Every clinical role authz knows is a clinical role here, with a hospital
+// (final review M-8: one list, authz.ClinicalRoles).
+func TestClinicalRolesAreAuthzs(t *testing.T) {
+	for _, r := range authz.ClinicalRoles() {
+		if err := ValidateRoles([]string{r}, "SYN1"); err != nil {
+			t.Errorf("%s with a hospital: %v", r, err)
+		}
+		if err := ValidateRoles([]string{r}, ""); err == nil {
+			t.Errorf("%s without a hospital accepted", r)
 		}
 	}
 }
