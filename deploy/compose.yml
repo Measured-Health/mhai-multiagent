@@ -79,6 +79,7 @@ services:
     environment:
       # Public keys, not secrets. The core seed is only in the core
       # container; the BFF seed is in .env for the frontend, later.
+      # NATS_BFF_NKEY is the clinical app's BFF (bff_clinical).
       NATS_GATEWAY_NKEY: ${NATS_GATEWAY_NKEY:?set in /srv/mhai-backend/.env}
       NATS_BFF_NKEY: ${NATS_BFF_NKEY:?set in /srv/mhai-backend/.env}
       GOMEMLIMIT: 96MiB
@@ -180,6 +181,10 @@ services:
       REQUEST_KEY_PATH: /keys/request.pem
       REQUEST_TRUSTED_KEYS_PATH: /trusted/request-keys.json   # public; dead-letter re-mint after a rotation
       INTELLIGENCE_QUERY_CAP: "10"   # questions in flight per hospital (decision 8)
+      # The API over HTTP too: the frontend still calls HTTP until mhai-web's
+      # BFF moves to NATS (spec §17.1). Core serves api.v1.<app> over NATS
+      # as well.
+      CORE_HTTP_API: "on"
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set in /srv/mhai-backend/.env}
       BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set in /srv/mhai-backend/.env}
       GOMEMLIMIT: 256MiB
@@ -223,15 +228,34 @@ services:
     depends_on:
       core-migrate: { condition: service_completed_successfully }
 
-  # The intelligence service (Python workers) is not deployed yet: it is not
-  # wired to NATS until the boundary plan lands. When it is:
-  #   - its own NATS NKey (a `worker` user in nats/nats.conf) and its own
-  #     database login (not the superuser, not core_app);
+  # The intelligence workers (pipeline, echo) are not deployed on the demo
+  # in Plan 3, on purpose: the instance is small (3.7 GiB shared with the
+  # EMR and the web demo) and the models are heavy. Without them, core
+  # still starts and serves everything else; a question (POST /queries) is
+  # queued and, with no pipeline to take it, fails at its 10-minute
+  # deadline (deadline_exceeded). echo is test-only and never comes here.
+  # When the pipeline is deployed (a bigger host, or a model service):
+  #   - its own NATS NKey (a `pipeline` user in nats/nats.conf with the
+  #     permissions from services/nats/nats.conf) and TLS (nats.conf);
+  #   - its own database login, INTELLIGENCE_DB_USER (a member of
+  #     mhai_worker_app only; core-migrate makes it when
+  #     INTELLIGENCE_DB_PASSWORD is set), the password from a file, and
+  #     sslmode=verify-full (the worker refuses anything else outside
+  #     development);
+  #   - the trusted keys read-only (trustedkeys:/trusted:ro), never corekeys;
   #   - no env_file: it must not see the core service's secrets;
-  #   - on `backend` only, no published port, and a mem_limit that fits
-  #     next to the EMR (the models may need a bigger host).
-  # intelligence:
+  #   - on `backend` only, no published port, a mem_limit.
+  # pipeline:
   #   image: ghcr.io/measured-health/mhai-multiagent:<version>
+  #   command: ["worker", "--service", "pipeline"]
+  #   environment:
+  #     APP_ENV: production
+  #     NATS_URL: tls://nats:4222
+  #     NATS_NKEY_SEED_PATH: /run/secrets/nats-pipeline.nk
+  #     INTELLIGENCE_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+  #     INTELLIGENCE_DB_URL: postgres://postgres:5432/mhai?sslmode=verify-full
+  #     INTELLIGENCE_DB_PASSWORD_FILE: /run/secrets/intelligence-db-password
+  #   volumes: ["trustedkeys:/trusted:ro"]
   #   networks: [backend]
   #   mem_limit: ...
 

@@ -133,3 +133,19 @@ func TestJobsPerSubjectWorstCaseIsASixteenth(t *testing.T) {
 		t.Fatalf("one subject can hold %d bytes, more than JobsMaxBytes/16 = %d", worst, bus.JobsMaxBytes/16)
 	}
 }
+
+// Spec §17.1, §17.4 (Plan 3 T15): the demo's clinical BFF user has the
+// dev include's permissions minus the test-only bff_direct subjects, so the
+// two can't drift; nothing else is granted.
+func TestDeployBFFClinicalMatchesDevWithoutTestOnly(t *testing.T) {
+	dev := stripComments(readConf(t, "services/nats/bff-clinical.test.conf"))
+	i := strings.Index(dev, "permissions:")
+	if i < 0 {
+		t.Fatal("no permissions in bff-clinical.test.conf")
+	}
+	dev = strings.ReplaceAll(dev[i+len("permissions:"):], `"inference.v1.echo.ping"`, "")
+	prod := stripComments(permissionsAfter(t, readConf(t, "deploy/nats/nats.conf"), "nkey: $NATS_BFF_NKEY"))
+	if dev != prod {
+		t.Fatalf("bff_clinical permissions differ:\ndev (no test-only): %s\nprod: %s", dev, prod)
+	}
+}
