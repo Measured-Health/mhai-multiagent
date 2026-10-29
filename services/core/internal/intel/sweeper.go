@@ -304,3 +304,25 @@ func cancelRow(ctx context.Context, pool *pgxpool.Pool, row JobRow) error {
 		return nil
 	})
 }
+
+// statsTimeout bounds one reading for the metrics.
+const statsTimeout = 3 * time.Second
+
+// QueueStats is how many run_query jobs wait to be picked up (status
+// queued, across hospitals) and how long the oldest has waited, for the
+// jobs_queue_depth and jobs_oldest_wait_seconds gauges. Counts and an age
+// only: no row, id or hospital leaves the query.
+func QueueStats(ctx context.Context, pool *pgxpool.Pool) (depth int64, oldest time.Duration, err error) {
+	ctx, cancel := context.WithTimeout(ctx, statsTimeout)
+	defer cancel()
+	err = db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
+		var secs float64
+		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)::float8
+			FROM clinical_queries WHERE status = 'queued'`).Scan(&depth, &secs); err != nil {
+			return err
+		}
+		oldest = time.Duration(secs * float64(time.Second))
+		return nil
+	})
+	return depth, oldest, err
+}

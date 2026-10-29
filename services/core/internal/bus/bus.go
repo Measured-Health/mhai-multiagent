@@ -144,8 +144,9 @@ func (t TLS) config() (*tls.Config, error) {
 // seed file (production). inboxPrefix is the service's own reply prefix, for
 // example GatewayInboxPrefix. tlsFiles, when set, makes the connection TLS
 // with a client certificate (production requires it; config.ValidateServe).
-// ctx is checked on entry; the dial itself is bounded by a 5 s timeout.
-func Connect(ctx context.Context, rawURL, nkeySeedPath, inboxPrefix string, tlsFiles TLS) (*nats.Conn, jetstream.JetStream, error) {
+// extra options (Link.Options) are applied last. ctx is checked on entry; the
+// dial itself is bounded by a 5 s timeout.
+func Connect(ctx context.Context, rawURL, nkeySeedPath, inboxPrefix string, tlsFiles TLS, extra ...nats.Option) (*nats.Conn, jetstream.JetStream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -191,6 +192,7 @@ func Connect(ctx context.Context, rawURL, nkeySeedPath, inboxPrefix string, tlsF
 		}
 		opts = append(opts, o)
 	}
+	opts = append(opts, extra...) // after ours: Link's handlers
 	nc, err := nats.Connect(strings.Join(servers, ","), opts...)
 	if err != nil {
 		switch {

@@ -29,6 +29,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
 
@@ -99,7 +100,10 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if a.pool, err = openDB(ctx, cfg.DatabaseURL); err != nil {
 		return nil, err
 	}
-	nc, js, err := bus.Connect(ctx, cfg.NATSURL, cfg.NATSNkeySeedPath, bus.GatewayInboxPrefix, bus.TLS(cfg.NATSTLS))
+	// The link flips /readyz while the connection is down (TODO T3 M6).
+	link := bus.NewLink(log)
+	nc, js, err := bus.Connect(ctx, cfg.NATSURL, cfg.NATSNkeySeedPath, bus.GatewayInboxPrefix, bus.TLS(cfg.NATSTLS),
+		link.Options()...)
 	if err != nil {
 		a.close()
 		return nil, err
@@ -141,20 +145,24 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		IdemAnon: httpx.IdempotentAnonLog(a.pool, log),
 	}
 	m := authz.NewMux(guard)
-	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.Readiness(a.pool, nc, buckets.All()),
+	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.WithLink(server.Readiness(a.pool, nc, buckets.All()), link),
 		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
-	if a.stopAPI, err = natsapi.Serve(ctx, nc, m.NATSHandler(), log, natsapi.WithConcurrency(cfg.NATSAPIConcurrency)); err != nil {
+	apiMetrics := &natsapi.Metrics{}
+	if a.stopAPI, err = natsapi.Serve(ctx, nc, m.NATSHandler(), log, natsapi.WithConcurrency(cfg.NATSAPIConcurrency),
+		natsapi.WithMetrics(apiMetrics)); err != nil {
 		a.close()
 		return nil, err
 	}
-	grants := &grant.Server{Guard: guard, Signer: signer, Pool: a.pool, Log: log,
+	grantMetrics := &grant.Metrics{}
+	grants := &grant.Server{Guard: guard, Signer: signer, Pool: a.pool, Log: log, Metrics: grantMetrics,
 		AllowTestOnly: cfg.Development()}
 	if a.stopGrant, err = grants.Serve(ctx, nc); err != nil {
 		a.close()
 		return nil, err
 	}
+	registerMetrics(a, apiMetrics, grantMetrics)
 	if !cfg.HTTPAPI {
 		a.handler = m.ProbesHandler()
 		return a, nil
@@ -230,6 +238,19 @@ func serve() error {
 	log := logx.New(os.Stdout)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Telemetry is off unless OTEL_EXPORTER_OTLP_ENDPOINT is set, and a bad
+	// endpoint turns it off with a warning: observability never keeps the
+	// service from starting.
+	shutdownTelemetry, terr := telemetry.Setup(ctx, cfg.OTLPEndpoint)
+	if terr != nil {
+		log.Warn("core: telemetry is off: OTEL_EXPORTER_OTLP_ENDPOINT is not usable")
+	} else {
+		defer func() {
+			c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = shutdownTelemetry(c)
+		}()
+	}
 	a, err := newApp(ctx, cfg, log)
 	if err != nil {
 		return err

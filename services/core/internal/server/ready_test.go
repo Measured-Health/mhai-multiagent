@@ -3,12 +3,16 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 )
 
 func readyz(t *testing.T, d Deps) *httptest.ResponseRecorder {
@@ -42,5 +46,46 @@ func TestReadyz(t *testing.T) {
 func TestReadinessNeedsEverything(t *testing.T) {
 	if err := Readiness(nil, nil, nil)(context.Background()); err == nil {
 		t.Fatal("nil dependencies reported ready")
+	}
+}
+
+// A NATS disconnect flips readiness to not-ready, a reconnect flips it
+// back, both through the handlers Connect is given (closes TODO T3 M6).
+func TestReconnectFlipsReadiness(t *testing.T) {
+	var logs strings.Builder
+	link := bus.NewLink(slog.New(slog.NewTextHandler(&logs, nil)))
+	var o nats.Options
+	for _, opt := range link.Options() {
+		if err := opt(&o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if o.DisconnectedErrCB == nil || o.ReconnectedCB == nil || o.ClosedCB == nil {
+		t.Fatal("link did not set all three handlers")
+	}
+	ready := WithLink(func(context.Context) error { return nil }, link)
+	if err := ready(context.Background()); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	o.DisconnectedErrCB(nil, errors.New("read tcp 10.0.0.9:4222: secret detail"))
+	if err := ready(context.Background()); err == nil {
+		t.Fatal("ready while disconnected")
+	}
+	o.ReconnectedCB(nil)
+	if err := ready(context.Background()); err != nil {
+		t.Fatalf("after reconnect: %v", err)
+	}
+	if link.Reconnects() != 1 {
+		t.Fatalf("reconnects: %d", link.Reconnects())
+	}
+	o.ClosedCB(nil)
+	if ready(context.Background()) == nil {
+		t.Fatal("ready after the connection closed")
+	}
+	if strings.Contains(logs.String(), "secret detail") || !strings.Contains(logs.String(), "disconnected") {
+		t.Fatalf("log: %q", logs.String())
+	}
+	if WithLink(nil, nil) != nil {
+		t.Fatal("nil link must return the check unchanged")
 	}
 }
