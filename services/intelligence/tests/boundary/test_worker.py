@@ -212,6 +212,7 @@ class GrantStub:
         self.refuse = refuse
         self.delay = delay
         self.requests: list[authz_pb2.GrantRequest] = []
+        self.headers: list[dict[str, str]] = []
         self.tokens: list[str] = []
         self.jtis: list[str] = []
         self.nc: Client | None = None
@@ -228,6 +229,7 @@ class GrantStub:
         req = authz_pb2.GrantRequest()
         req.ParseFromString(msg.data)
         self.requests.append(req)
+        self.headers.append(dict(msg.headers or {}))
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.refuse:

@@ -591,7 +591,7 @@ class Worker:
                 "boundary.grant",
                 kind=SpanKind.CLIENT,
                 context=parent,
-                attributes={"service": self.service, "request_id": bff_rid},
+                attributes={"service": self.service, "bff_request_id": bff_rid},
             ) as gsp:
                 got = await self._grant.ask(
                     access, msg.subject, msg.reply, body, (), bff_rid, deadline
@@ -987,7 +987,9 @@ async def run_service(settings: WorkerSettings) -> None:
     # Off unless OTEL_EXPORTER_OTLP_ENDPOINT is set; a bad endpoint turns it
     # off with a warning, never keeps the worker from starting.
     try:
-        stop_telemetry = telemetry.setup(service=settings.service)
+        stop_telemetry = telemetry.setup(
+            service=settings.service, allow_plaintext=settings.development or None
+        )
     except ValueError:
         log.warning("telemetry is off: OTEL_EXPORTER_OTLP_ENDPOINT is not usable")
         stop_telemetry = None

@@ -20,12 +20,13 @@ read-only span and can't remove an attribute. The filter keeps
   * links as span contexts only; the status code with no description.
 
 ``Authorization`` and ``Mhai-Request-Token`` are never attributes. Trace
-headers (traceparent, tracestate) are untrusted: a malformed one starts a
+headers (traceparent; tracestate is never read) are untrusted: a malformed one starts a
 new trace, and baggage is neither read nor written.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import time
@@ -47,7 +48,8 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
-from opentelemetry.trace import Link, Span, SpanKind, Status, StatusCode
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+from opentelemetry.trace import Link, Span, SpanContext, SpanKind, Status, StatusCode, TraceState
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 SCOPE = "mhai/intelligence"
@@ -55,6 +57,7 @@ SCOPE = "mhai/intelligence"
 # --- the allow-list ------------------------------------------------------------
 
 _ID = re.compile(r"[A-Za-z0-9_.:\-]{1,128}")
+_BFF_RID = re.compile(r"[A-Za-z0-9_-]{8,64}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _WORD = re.compile(r"[a-z][a-z0-9_.]{0,63}")
 _MODEL = re.compile(r"[A-Za-z0-9_.:/\-]{1,64}")
@@ -64,6 +67,7 @@ _NAME = re.compile(r"[A-Za-z0-9_.:/{}<> \-]{1,160}")
 # key -> the shape its value must have.
 ALLOWED: dict[str, str] = {
     "request_id": "id",
+    "bff_request_id": "bffid",  # the BFF's id on a grant call; never in request_id
     "hospital_id": "uuid",
     "query_id": "uuid",
     "job_id": "uuid",
@@ -98,6 +102,8 @@ def _value_ok(shape: str, v: Any) -> bool:
     if isinstance(v, str):
         if shape == "id":
             return _ID.fullmatch(v) is not None
+        if shape == "bffid":
+            return _BFF_RID.fullmatch(v) is not None
         if shape == "uuid":
             return _UUID.fullmatch(v) is not None
         if shape in ("word", "status"):
@@ -147,18 +153,23 @@ def _filter_events(events: Sequence[Event]) -> list[Event]:
     return out
 
 
+def _bare(sc: SpanContext) -> SpanContext:
+    """sc without its TraceState: tracestate is caller-controlled free text."""
+    return SpanContext(sc.trace_id, sc.span_id, sc.is_remote, sc.trace_flags, TraceState())
+
+
 def filter_span(span: ReadableSpan) -> ReadableSpan:
     """A copy of span with only what the allow-list lets out."""
     res = span.resource
     resource = Resource({k: v for k, v in res.attributes.items() if k in _RESOURCE_KEYS})
     return ReadableSpan(
         name=safe_name(span.name),
-        context=span.context,
-        parent=span.parent,
+        context=_bare(span.context),
+        parent=_bare(span.parent) if span.parent is not None else None,
         resource=resource,
         attributes=filter_attributes(span.attributes),
         events=_filter_events(span.events),
-        links=[Link(link.context) for link in span.links],
+        links=[Link(_bare(link.context)) for link in span.links],
         kind=span.kind,
         status=Status(span.status.status_code),
         start_time=span.start_time,
@@ -186,11 +197,12 @@ class FilterExporter(SpanExporter):
 # --- trace context ---------------------------------------------------------------
 
 _PROPAGATOR = TraceContextTextMapPropagator()
-_TRACE_HEADERS = ("traceparent", "tracestate")
+# traceparent only: tracestate is free text up to 8 KB, never read or sent.
+_TRACE_HEADERS = ("traceparent",)
 
 
 def _trace_carrier(headers: Mapping[str, str] | None) -> dict[str, str]:
-    """Only traceparent and tracestate, by any spelling of the name."""
+    """Only traceparent, by any spelling of the name."""
     out: dict[str, str] = {}
     for k, v in (headers or {}).items():
         lk = k.lower()
@@ -200,10 +212,11 @@ def _trace_carrier(headers: Mapping[str, str] | None) -> dict[str, str]:
 
 
 def inject(headers: MutableMapping[str, str]) -> None:
-    """Write the current span context into headers (traceparent and
-    tracestate only; never baggage)."""
+    """Write the current span context into headers (traceparent only;
+    never tracestate or baggage)."""
     carrier: dict[str, str] = {}
     _PROPAGATOR.inject(carrier)
+    carrier.pop("tracestate", None)  # free text: never sent on
     headers.update(carrier)
 
 
@@ -249,6 +262,7 @@ def setup(
     endpoint: str | None = None,
     *,
     service: str = "intelligence",
+    allow_plaintext: bool | None = None,
     span_exporter: SpanExporter | None = None,
     metric_reader: MetricReader | None = None,
 ) -> Callable[[], None]:
@@ -267,12 +281,16 @@ def setup(
     if span_exporter is None and metric_reader is None:
         if not endpoint:
             return lambda: None
-        span_exporter, metric_reader = _otlp(endpoint)
+        if allow_plaintext is None:
+            allow_plaintext = os.environ.get("OTEL_EXPORTER_OTLP_INSECURE", "").lower() == "true"
+        span_exporter, metric_reader = _otlp(endpoint, allow_plaintext)
         batch = True
     else:
         batch = False
     resource = Resource({"service.name": f"mhai-{service}"})
-    tp = TracerProvider(resource=resource)
+    # ALWAYS_ON ignores a remote parent's sampled flag, so a caller cannot
+    # switch our tracing off with a traceparent ending in 00.
+    tp = TracerProvider(resource=resource, sampler=ALWAYS_ON)
     if span_exporter is not None:
         flt = FilterExporter(span_exporter)
         tp.add_span_processor(BatchSpanProcessor(flt) if batch else SimpleSpanProcessor(flt))
@@ -298,13 +316,26 @@ def setup(
     return shutdown
 
 
-def _otlp(endpoint: str) -> tuple[SpanExporter, MetricReader]:
+def _loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _otlp(endpoint: str, allow_plaintext: bool = False) -> tuple[SpanExporter, MetricReader]:
     if "://" not in endpoint:
         endpoint = "http://" + endpoint
     u = urlparse(endpoint)
     if u.scheme not in ("http", "https") or not u.netloc:
         raise ValueError("OTEL_EXPORTER_OTLP_ENDPOINT is not a valid URL or host:port")
     insecure = u.scheme == "http"
+    if insecure and not allow_plaintext and not _loopback(u.hostname or ""):
+        raise ValueError(
+            "a plaintext OTLP endpoint must be loopback; use https:// or OTEL_EXPORTER_OTLP_INSECURE=true"
+        )
     from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
