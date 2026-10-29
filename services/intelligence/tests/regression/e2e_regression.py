@@ -8,7 +8,7 @@
 #     - SyntheticCaseGenerator: generates 1000+ test cases across
 #       8 disease categories with known hallucination injections
 #     - E2ERegressionSuite: runs all cases through the full secure
-#       pipeline (PII -> classify -> threshold -> CCA -> HGA -> audit)
+#       pipeline (PII -> classify -> threshold -> CCA -> HGA)
 #     - GuardrailRegressionTester: verifies all 4 guardrail layers
 #       pass regression (no previously-caught hallucination escapes)
 #     - M4ExitCriteriaVerifier: checks all M4 deliverables against
@@ -20,7 +20,8 @@
 #     - All guardrail layers pass regression tests
 #     - Latency: persona probe < 1ms, QDA < 3s, CCA cascade < 12s
 #     - No agent receives > 40% routing weight (load balance)
-#     - Security: PII masking, encryption, RBAC, audit chain valid
+#     - Security: PII masking, encryption (roles and the audit chain are
+#       core's, and tested there)
 #
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -45,12 +46,9 @@ from intelligence.agents.orchestrator import (
     TrustWeightOptimizer,
 )
 from intelligence.security.hipaa import (
-    AuditLogger,
     EncryptionManager,
     LatencyProfiler,
     PIIMasker,
-    RBACManager,
-    UserRole,
 )
 
 logger = logging.getLogger("MHAI.M4.E2E")
@@ -400,12 +398,11 @@ class E2ERegressionSuite:
       3. PII masking: all injected PII entities removed
       4. Query classification: categories correctly identified
       5. Latency: all cases within target
-      6. Audit integrity: hash chain valid after full run
     """
 
     def __init__(
         self,
-        secure_pipeline=None,    # SecurePipelineWrapper
+        secure_pipeline=None,    # a pipeline object with submit_query (optional)
         orchestrator=None,       # DynamicOrchestratorAgent (fallback)
         pii_masker=None,
         classifier=None,
@@ -614,7 +611,7 @@ class M4ExitCriteriaVerifier:
       3. All guardrail layers pass regression
       4. Latency: CCA + cascade < 12s (P95)
       5. Load balance: no agent > 40%
-      6. Security: PII masking, encryption, RBAC, audit chain valid
+      6. Security: PII masking, encryption (the audit chain is core's)
       7. Feedback loop: EMA + CMA-ES operational
       8. Documentation complete
     """
@@ -624,7 +621,6 @@ class M4ExitCriteriaVerifier:
         e2e_report: Dict[str, Any],
         performance_report: Dict[str, Any] = None,
         load_balance: Dict[str, Any] = None,
-        audit_summary: Dict[str, Any] = None,
         feedback_stats: Dict[str, Any] = None,
         encryption_secure: bool = False,
     ) -> Dict[str, Any]:
@@ -685,17 +681,6 @@ class M4ExitCriteriaVerifier:
             "target": 0.40,
             "achieved": "balanced" if lb_passed else "overloaded",
             "passed": lb_passed,
-        })
-
-        # 7. Audit chain valid
-        chain_valid = True
-        if audit_summary:
-            chain_valid = audit_summary.get("chain_valid", False)
-        criteria.append({
-            "criterion": "Audit hash chain valid",
-            "target": True,
-            "achieved": chain_valid,
-            "passed": chain_valid,
         })
 
         # 8. Encryption available
@@ -855,13 +840,9 @@ def demo_m4_part3():
 
     # Part 2 components
     encryption = EncryptionManager()
-    rbac = RBACManager()
-    audit = AuditLogger(log_dir="/content/mhai_m4_audit")
     profiler = LatencyProfiler()
 
-    # Create clinician session
-    session = rbac.create_session("dr_eval", UserRole.CLINICIAN)
-    print(f"  Components initialized, session: {session.session_id[:8]}...")
+    print("  Components initialized")
 
     # ── Step 3: Run E2E regression ──
     print(f"\n[3/5] Running E2E regression on {len(cases)} cases...")
@@ -899,22 +880,15 @@ def demo_m4_part3():
           f"{fb_stats['corrections']} corrections, "
           f"PV updates: {fb_stats['persona_vector_updates']}")
 
-    # Log some audit events
-    for i in range(10):
-        audit.log_query(f"q_{i}", f"Query {i}", "diagnosis", "dr_eval")
-        audit.log_guardrail_decision(f"q_{i}", "pass", 0.75, 0)
-
     # ── Step 5: Verify exit criteria ──
     print(f"\n[5/5] Verifying M4 exit criteria...")
 
-    audit_summary = audit.get_summary()
     lb = orchestrator.get_load_balance()
 
     verifier = M4ExitCriteriaVerifier()
     exit_result = verifier.verify(
         e2e_report=e2e_report,
         load_balance=lb,
-        audit_summary=audit_summary,
         feedback_stats=fb_stats,
         encryption_secure=encryption.is_secure,
     )
@@ -930,7 +904,6 @@ def demo_m4_part3():
         json.dump(e2e_report, f, indent=2, default=str)
     with open(os.path.join(output_dir, "exit_criteria.json"), "w") as f:
         json.dump(exit_result, f, indent=2, default=str)
-    audit.save()
 
     print(f"\n  Results saved to {output_dir}/")
 
@@ -950,10 +923,7 @@ def demo_m4_part3():
   Part 2: Security / HIPAA + Performance
     - PIIMasker (9 PHI types, HIPAA Safe Harbor)
     - EncryptionManager (AES / Fernet / base64 fallback)
-    - RBACManager (5 roles, 9 permissions, session management)
-    - AuditLogger (SHA-256 hash chain, tamper-evident)
     - LatencyProfiler (P50/P95/P99, per-stage, per-category)
-    - SecurePipelineWrapper (PII -> RBAC -> route -> audit -> encrypt)
 
   Part 3: E2E Regression + Exit Criteria
     - SyntheticCaseGenerator (1000 cases: 700 correct + 200 hall + 100 PII)

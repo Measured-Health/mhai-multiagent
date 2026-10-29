@@ -75,7 +75,7 @@ def test_detections_match_their_offsets():
 
 
 def test_masked_json_stays_valid():
-    # SecurePipelineWrapper masks a JSON-encoded patient context and parses it back.
+    # The worker masks a JSON-encoded patient context and parses it back.
     ctx = json.dumps({"phone": "555-123-4567", "dob": "DOB: 03/15/1956", "note": "stable"})
 
     masked, _ = PIIMasker().mask(ctx)

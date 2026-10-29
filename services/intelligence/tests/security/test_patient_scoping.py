@@ -2,11 +2,22 @@
 
 from intelligence.agents.hga_nli import (
     CitationVerificationPipeline,
+    NLIBackedHGA,
     NLILabel,
     NLIResult,
     VerificationAction,
 )
-from intelligence.knowledge_base.kb_builder import KBChunk, RAGClinicalContextAgent
+from intelligence.agents.orchestrator import DynamicOrchestratorAgent
+from intelligence.boundary.kb_repo import load_chunks
+from intelligence.boundary.models import OrchestratorModelClient
+from intelligence.knowledge_base.kb_builder import (
+    HybridRetriever,
+    KBChunk,
+    MedicalKnowledgeBase,
+    RAGClinicalContextAgent,
+    chunk_visible_to,
+    is_valid_patient_id,
+)
 
 from .conftest import PATIENT_A, PATIENT_B
 
@@ -162,25 +173,90 @@ def test_non_guideline_chunk_tagged_reference_is_not_shared(retriever, two_patie
     assert "smuggled" not in " ".join(r.chunk.content for r in results)
 
 
-def test_wrapper_rejects_reserved_patient_id(tmp_path, retriever):
-    from intelligence.agents.hga_nli import NLIBackedHGA
-    from intelligence.agents.orchestrator import DynamicOrchestratorAgent
-    from intelligence.security.hipaa import (
-        AuditLogger,
-        RBACManager,
-        SecurePipelineWrapper,
-        UserRole,
-    )
+RESERVED = ("reference", "unassigned", "unknown", "", " Reference", "REF")
 
-    rbac = RBACManager()
-    w = SecurePipelineWrapper(
-        DynamicOrchestratorAgent(
-            rag_cca=RAGClinicalContextAgent(retriever=retriever), hga=NLIBackedHGA()
-        ),
-        rbac=rbac,
-        audit=AuditLogger(log_dir=str(tmp_path)),
-    )
-    sid = rbac.create_session("dr_a", UserRole.CLINICIAN).session_id
 
-    assert w.submit_query(sid, "any", patient_id="reference")["allowed"] is False
-    assert w.submit_query(sid, "any", patient_id="unassigned")["allowed"] is False
+def test_reserved_patient_ids_are_not_valid_patients():
+    for pid in RESERVED:
+        assert is_valid_patient_id(pid) is False, pid
+    assert is_valid_patient_id(None) is False
+    assert is_valid_patient_id(PATIENT_A) is True
+
+
+def test_chunk_visible_to_is_the_one_scoping_rule(two_patient_kb):
+    # Replaces "the wrapper rejects a reserved patient id": the rule now lives
+    # in chunk_visible_to, which the boundary's chunk loader applies. A
+    # reserved or missing id sees guidelines only; a real id sees its own
+    # records and guidelines, never another patient's.
+    chunks = list(two_patient_kb.chunks.values())
+    for pid in (*RESERVED, None):
+        seen = [c for c in chunks if chunk_visible_to(c, pid)]
+        assert seen, pid
+        assert {c.chunk_type for c in seen} == {"guideline"}, pid
+    seen_a = {c.source_patient_id for c in chunks if chunk_visible_to(c, PATIENT_A)}
+    assert seen_a == {PATIENT_A, "reference"}
+
+
+class _Cursor:
+    """The with_hospital cursor: returns the rows row-level security shows."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    async def execute(self, query, params=None):
+        return self
+
+    async def fetchall(self):
+        return self.rows
+
+
+def _row(chunk_id, shared, chunk_type, source):
+    return (chunk_id, shared, f"Synthetic {chunk_id}.", chunk_type, source, None, {})
+
+
+ROWS = [
+    _row("KB#0001", True, "guideline", None),  # shared guideline
+    _row("KB#0002", False, "lab", PATIENT_A),
+    _row("KB#0003", False, "lab", PATIENT_B),
+    _row("KB#0004", False, "guideline", "reference"),  # a hospital row posing as shared
+]
+
+
+async def test_boundary_loader_never_hands_models_another_patients_chunks():
+    ids = {
+        pid: {c.chunk_id for c in await load_chunks(_Cursor(ROWS), pid)}
+        for pid in (PATIENT_A, PATIENT_B, "reference", "unassigned", None)
+    }
+
+    assert ids[PATIENT_A] == {"KB#0001", "KB#0002"}
+    assert ids[PATIENT_B] == {"KB#0001", "KB#0003"}
+    assert ids["reference"] == ids["unassigned"] == ids[None] == {"KB#0001"}
+
+
+async def test_answer_for_a_cites_only_a_and_guidelines(two_patient_kb, retriever):
+    # The loader's chunks go through the real orchestrator client: what it
+    # retrieves and cites stays within patient A and the shared guidelines.
+    # The rows are the knowledge base's own, so the chunk ids line up.
+    rows = [
+        _row(c.chunk_id, c.source_patient_id == "reference", c.chunk_type, c.source_patient_id)
+        for c in two_patient_kb.chunks.values()
+    ]
+    chunks = await load_chunks(_Cursor(rows), PATIENT_A)
+    by_id = {c.chunk_id: c for c in two_patient_kb.chunks.values()}
+
+    def build(job_chunks):
+        kb = MedicalKnowledgeBase()
+        kb.chunks = {c.chunk_id: c for c in job_chunks}
+        r = HybridRetriever(device="cpu")
+        r.index_kb(kb)
+        return DynamicOrchestratorAgent(
+            rag_cca=RAGClinicalContextAgent(retriever=r), hga=NLIBackedHGA()
+        )
+
+    client = OrchestratorModelClient(build)
+    gen = client.generate(DIABETES_QUERY, {}, PATIENT_A, chunks)
+
+    assert gen.available
+    allowed = {PATIENT_A, "reference"}
+    assert {by_id[i].source_patient_id for i in gen.retrieved_chunk_ids} <= allowed
+    assert {by_id[i].source_patient_id for i in gen.cited_chunk_ids} <= allowed

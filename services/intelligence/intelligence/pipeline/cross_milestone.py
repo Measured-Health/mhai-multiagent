@@ -51,12 +51,9 @@ from intelligence.knowledge_base.kb_builder import (  # noqa: F401
     RAGClinicalContextAgent,
 )
 from intelligence.security.hipaa import (  # noqa: F401
-    AuditLogger,
     EncryptionManager,
     LatencyProfiler,
     PIIMasker,
-    RBACManager,
-    SecurePipelineWrapper,
 )
 
 logger = logging.getLogger("MHAI.M4.Integration")
@@ -110,10 +107,7 @@ class CrossMilestoneIntegrator:
             # M4: Orchestrator + Security
             "DynamicOrchestratorAgent": "M4.Part1",
             "PIIMasker": "M4.Part2",
-            "RBACManager": "M4.Part2",
-            "AuditLogger": "M4.Part2",
             "EncryptionManager": "M4.Part2",
-            "SecurePipelineWrapper": "M4.Part2",
             "E2ERegressionSuite": "M4.Part3",
         }
 
@@ -245,30 +239,6 @@ class CrossMilestoneIntegrator:
                 pipeline["orchestrator_status"] = "SKIPPED"
         except Exception as e:
             pipeline["orchestrator_status"] = f"FAILED ({e})"
-
-        # Security wrapper
-        try:
-            wrapper_class = self.components.get("SecurePipelineWrapper")
-            pii_class = self.components.get("PIIMasker")
-            rbac_class = self.components.get("RBACManager")
-            audit_class = self.components.get("AuditLogger")
-            enc_class = self.components.get("EncryptionManager")
-
-            if wrapper_class and "orchestrator" in pipeline:
-                wrapper = wrapper_class(
-                    orchestrator=pipeline["orchestrator"],
-                    pii_masker=pii_class() if pii_class else PIIMasker(),
-                    rbac=rbac_class() if rbac_class else RBACManager(),
-                    audit=audit_class() if audit_class else AuditLogger(),
-                    encryption=enc_class() if enc_class else EncryptionManager(),
-                    profiler=LatencyProfiler(),
-                )
-                pipeline["secure_wrapper"] = wrapper
-                pipeline["security_status"] = "OK"
-            else:
-                pipeline["security_status"] = "SKIPPED"
-        except Exception as e:
-            pipeline["security_status"] = f"FAILED ({e})"
 
         self.integration_log.append({
             "timestamp": time.time(),
@@ -953,15 +923,12 @@ def demo_m4_part4():
   Part 2: Security / HIPAA + Performance
     - PIIMasker (9 PHI types, HIPAA Safe Harbor)
     - EncryptionManager (AES / Fernet / base64 fallback)
-    - RBACManager (5 roles, 9 permissions, session management)
-    - AuditLogger (SHA-256 hash chain, tamper-evident)
     - LatencyProfiler (P50/P95/P99, per-stage, per-category)
-    - SecurePipelineWrapper (PII -> RBAC -> route -> audit -> encrypt)
 
   Part 3: E2E Regression + Exit Criteria
     - SyntheticCaseGenerator (1000 cases: 700 correct + 200 hall + 100 PII)
     - E2ERegressionSuite (full pipeline with correctness checking)
-    - M4ExitCriteriaVerifier (9 criteria against blueprint targets)
+    - M4ExitCriteriaVerifier (8 criteria against blueprint targets)
 
   Part 4: Integration + Validation
     - CrossMilestoneIntegrator (discovers + wires M1-M4 components)

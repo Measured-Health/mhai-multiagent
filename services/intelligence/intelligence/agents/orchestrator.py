@@ -1049,8 +1049,9 @@ class DynamicOrchestratorAgent:
         Route doctor feedback through the feedback loop.
 
         This method trusts submitted_by; it does no access control of its
-        own. Clinician-facing code must go through SecurePipelineWrapper,
-        which checks the session and supplies the user id.
+        own. Who may submit feedback is core's decision; the user id here is
+        the one in core's verified request token, never one the caller
+        supplies.
         """
         if self.feedback_loop is None:
             return {"error": "Feedback loop not configured"}

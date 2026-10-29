@@ -55,7 +55,6 @@ dev = [
     "ruff>=0.1",
     "mypy>=1.5",
     "pre-commit>=3.4",
-    "fakeredis>=2.0",
     "locust>=2.15",
     "diff-cover>=9",
     "grpcio-tools>=1.74",
@@ -162,9 +161,6 @@ exclude = [
     "intelligence/models/swin_v2.py",
     "intelligence/pipeline/cross_milestone.py",
     "intelligence/pipeline/integration.py",
-    "intelligence/queue/consumer.py",
-    "intelligence/queue/dlq.py",
-    "intelligence/queue/producer.py",
     "intelligence/retrieval/dense_retriever.py",
     "intelligence/retrieval/hybrid.py",
     "intelligence/retrieval/sparse_retriever.py",
@@ -206,7 +202,7 @@ exclude = [
 "intelligence/knowledge_base/patient_parser.py" = ["B905", "F401", "F541", "F821", "F841", "I001", "UP006", "UP015", "UP035", "UP045"]
 "intelligence/pipeline/cross_milestone.py" = ["B007", "F401", "F541", "I001", "UP006", "UP035"]
 "intelligence/pipeline/integration.py" = ["F401", "F541", "I001", "UP006", "UP035", "UP045"]
-"intelligence/security/hipaa.py" = ["F401", "F541", "I001", "UP006", "UP035", "UP045"]
+"intelligence/security/hipaa.py" = ["F401", "I001", "UP006", "UP035", "UP045"]
 "intelligence/tools/guideline_parser.py" = ["I001", "UP006", "UP035"]
 "intelligence/tools/pubmed_client.py" = ["I001", "UP006", "UP035"]
 "tests/evaluation/evaluator.py" = ["B018", "E701", "F401", "F541", "F821", "I001", "UP006", "UP015", "UP035", "UP045"]

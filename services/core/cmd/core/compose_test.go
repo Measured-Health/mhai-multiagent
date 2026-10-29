@@ -316,3 +316,43 @@ func TestComposeMakesTheRequestKey(t *testing.T) {
 		})
 	}
 }
+
+// Redis and the Python queue stubs are gone (Plan 3 T13): NATS carries the
+// jobs. No compose file, service, volume, environment entry or
+// .env.example line names Redis or the QUEUE_* settings.
+func TestComposeHasNoRedis(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "..")
+	for _, file := range []string{"docker-compose.yml", filepath.Join("deploy", "compose.yml"), ".env.example"} {
+		t.Run(file, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(root, file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := strings.ToLower(string(raw))
+			for _, bad := range []string{"redis", "queue_backend", "queue_url", "queue_dlq_url", "queue_workers"} {
+				if strings.Contains(text, bad) {
+					t.Errorf("%s still mentions %q", file, bad)
+				}
+			}
+		})
+	}
+	var c composeFile
+	raw, err := os.ReadFile(filepath.Join(root, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Services["redis"]; ok {
+		t.Error("compose still has a redis service")
+	}
+	if _, ok := c.Volumes["redisdata"]; ok {
+		t.Error("compose still has the redisdata volume")
+	}
+	for name, s := range c.Services {
+		if _, ok := s.DependsOn["redis"]; ok {
+			t.Errorf("%s depends on redis", name)
+		}
+	}
+}
