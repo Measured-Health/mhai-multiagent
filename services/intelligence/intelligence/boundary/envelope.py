@@ -39,6 +39,26 @@ CODES: frozenset[str] = frozenset(
     }
 )
 
+# The longest reply subject answered (core's natsapi/grant MaxReply).
+MAX_REPLY = 256
+
+
+def reply_under(prefix: str, reply: str) -> bool:
+    """reply is a literal subject under prefix (which ends in "."), as
+    core's bus.ReplyUnder: at most MAX_REPLY bytes, and every token after
+    the prefix non-empty, printable ASCII, with no space and no wildcard
+    (* or >). Anything else gets no reply."""
+    if not prefix.endswith(".") or len(reply) > MAX_REPLY or not reply.startswith(prefix):
+        return False
+    for tok in reply[len(prefix) :].split("."):
+        if not tok:
+            return False
+        for ch in tok:
+            if ch <= " " or ch >= "\x7f" or ch in "*>":
+                return False
+    return True
+
+
 GRANT_REFUSED = "grant_refused:"
 _CORE_CODE = re.compile(r"[a-z][a-z_]{0,63}")
 

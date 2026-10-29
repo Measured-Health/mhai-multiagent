@@ -465,7 +465,8 @@ class Verifier:
 
     @staticmethod
     def _reply(c: _Claims, reply: str, granted: bool) -> None:
-        """Check 5, as core's CheckReply. A token found in the message is
+        """Check 5, as core's CheckReply: a literal subject under the
+        token's rpl (envelope.reply_under). A token found in the message is
         core's own (via core, rpl _INBOX_gateway.); a granted one must be via
         grant for the clinical BFF's inbox (spec §17.2)."""
         if c.knd != "req":
@@ -475,7 +476,7 @@ class Verifier:
                 _refuse("reply_subject")
         elif c.via != "core" or c.rpl != REPLY_CORE:
             _refuse("reply_subject")
-        if len(reply) <= len(c.rpl) or not reply.startswith(c.rpl):
+        if not envelope.reply_under(c.rpl, reply):
             _refuse("reply_subject")
 
     def check_token(
@@ -593,7 +594,7 @@ class Verifier:
             can_reply = True
         elif kind == "req" and reason != "reply_subject":
             prefix = REPLY_GRANT if granted else REPLY_CORE
-            can_reply = len(reply) > len(prefix) and reply.startswith(prefix)
+            can_reply = envelope.reply_under(prefix, reply)
         else:
             can_reply = False
         refusal = self._refusal(reason, kind, reply=can_reply)

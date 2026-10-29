@@ -190,6 +190,27 @@ def test_literal_reply(reply: str, ok: bool) -> None:
     assert literal_reply(reply) is ok
 
 
+@pytest.mark.parametrize(
+    "reply,ok",
+    [
+        ("_INBOX_gateway.abc.1", True),
+        ("_INBOX_gateway.*", False),
+        ("_INBOX_gateway.a.>", False),
+        ("_INBOX_gateway..x", False),
+        ("_INBOX_gateway.a b", False),
+        ("_INBOX_gateway.", False),
+        ("_INBOX_gateway." + "x" * 300, False),
+        ("_INBOX_worker.x", False),
+    ],
+)
+def test_refusal_reply_needs_literal_subject(reply: str, ok: bool) -> None:
+    """Final review M-1: the worker answers a refusal only to a literal
+    subject under the expected prefix (core's bus.ReplyUnder)."""
+    from intelligence.boundary import worker
+
+    assert worker._under("_INBOX_gateway.", reply) is ok
+
+
 # --- dispatch -------------------------------------------------------------------
 
 

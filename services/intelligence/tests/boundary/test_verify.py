@@ -290,6 +290,44 @@ def test_foreign_reply_subject_refused_silently(
         assert secret not in line
 
 
+NON_LITERAL = ("*", ">", "a.>", "a.*", ".x", "a..b", "a.", "a b", "a\tb", "\u00e9", "x" * 300)
+
+
+@pytest.mark.parametrize("tail", NON_LITERAL)
+def test_reply_subject_must_be_literal(
+    make: Callable[..., Verifier], signer: Signer, tail: str
+) -> None:
+    """Final review M-1: check 5 holds the reply to literal tokens under the
+    prefix, as core's bus.ReplyUnder: no wildcard, no empty token, no
+    whitespace or non-ASCII, at most 256 bytes. No reply is sent."""
+    body = ping_body()
+    tok = signer.mint(body=body)
+    r = make().verify_request(
+        PING_SUBJECT, "_INBOX_gateway." + tail, headers(tok), body, ping_decoder
+    )
+    assert refused(r, "reply_subject").reply is False
+    g = signer.mint_grant(body, jti="test-jti-0009")
+    h = headers(None, rid=BFF_RID)
+    r = make().verify_granted(g, PING_SUBJECT, "_INBOX_bff.clinical." + tail, h, body, ping_decoder)
+    assert refused(r, "reply_subject").reply is False
+    # A refusal before check 5 doesn't answer such a subject either.
+    bad = signer.mint(body=body, ttl=61, jti="test-jti-0010")
+    r = make().verify_request(
+        PING_SUBJECT, "_INBOX_gateway." + tail, headers(bad), body, ping_decoder
+    )
+    assert refused(r, "claims").reply is False
+
+
+def test_reply_under() -> None:
+    assert envelope.reply_under("_INBOX_gateway.", "_INBOX_gateway.abc.1")
+    assert envelope.reply_under("_INBOX_bff.clinical.", "_INBOX_bff.clinical.x")
+    assert not envelope.reply_under("_INBOX_gateway.", "_INBOX_gateway.")
+    assert not envelope.reply_under("_INBOX_gateway.", "_INBOX_bff.clinical.x")
+    assert not envelope.reply_under("_INBOX_gateway", "_INBOX_gatewayx.y")  # prefix ends in "."
+    for tail in NON_LITERAL:
+        assert not envelope.reply_under("_INBOX_gateway.", "_INBOX_gateway." + tail), tail
+
+
 def test_grant_bound_to_call(make: Callable[..., Verifier], signer: Signer) -> None:
     x, y = ping_body(text="synthetic X"), ping_body(text="synthetic Y")
     tok = signer.mint_grant(x)

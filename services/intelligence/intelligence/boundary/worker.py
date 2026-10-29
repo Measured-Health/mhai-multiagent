@@ -96,7 +96,7 @@ JOBS_STREAM = "JOBS"  # core's bus.JobsStream; the durable is the service's name
 DEAD_STREAM = "DEAD"
 NATS_MSG_ID = "Nats-Msg-Id"
 
-MAX_REPLY = 256
+MAX_REPLY = envelope.MAX_REPLY
 TIMEOUT_HEADER = envelope.TIMEOUT
 # Headers whose value decides who is asking or what: each at most once,
 # under its exact name (T8 Minor 5).
@@ -131,7 +131,7 @@ def literal_reply(reply: str) -> bool:
 
 
 def _under(prefix: str, reply: str) -> bool:
-    return len(reply) > len(prefix) and reply.startswith(prefix)
+    return envelope.reply_under(prefix, reply)
 
 
 def _safe(v: str) -> str:
