@@ -14,7 +14,12 @@ set -euo pipefail
 compose=${PREMIGRATE_COMPOSE:-docker compose}
 q() { $compose exec -T postgres psql -U "${PGUSER:-pgadmin}" -d "${PGDATABASE:-mhai}" -v ON_ERROR_STOP=1 -tAc "$1"; }
 
-$compose up -d --wait postgres >/dev/null
+# Postgres is normally running already; up -d leaves it alone then.
+$compose up -d postgres >/dev/null
+for _ in $(seq 1 30); do
+  $compose exec -T postgres pg_isready -q -U "${PGUSER:-pgadmin}" -d "${PGDATABASE:-mhai}" && break
+  sleep 2
+done
 if [ "$(q "SELECT to_regclass('public.clinical_queries') IS NOT NULL AND to_regclass('public.goose_db_version') IS NOT NULL")" != t ]; then
   echo "pre-migration check: no clinical_queries yet"
   exit 0
