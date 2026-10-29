@@ -36,6 +36,11 @@ type Config struct {
 	// NATSJSReplicas is the replica count for JOBS, DEAD and the KV
 	// buckets: 1 in dev compose, 3 on the production cluster.
 	NATSJSReplicas int
+	// AllowSingleNode (CORE_ALLOW_SINGLE_NODE=true) lets a non-development
+	// core run with fewer than 3 JetStream replicas, a single-node install
+	// on purpose; serve logs a warning (SingleNode). There is no such
+	// escape for the database's TLS.
+	AllowSingleNode bool
 	// JobsPipelineMaxAckPending bounds the pipeline consumer's jobs in
 	// flight: the worker count times its concurrency.
 	JobsPipelineMaxAckPending int
@@ -97,6 +102,14 @@ func Load() (Config, error) {
 	}
 	if c.IntelligenceQueryCap, err = intEnv("INTELLIGENCE_QUERY_CAP", 10, func(n int) bool { return n >= 1 && n <= 1000 }); err != nil {
 		errs = append(errs, errors.New("INTELLIGENCE_QUERY_CAP must be 1 to 1000"))
+	}
+
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_ALLOW_SINGLE_NODE"))) {
+	case "", "false":
+	case "true":
+		c.AllowSingleNode = true
+	default:
+		errs = append(errs, errors.New("CORE_ALLOW_SINGLE_NODE must be true or false"))
 	}
 
 	if c.NATSAPIConcurrency, err = intEnv("CORE_NATS_API_CONCURRENCY", 256, func(n int) bool { return n >= 1 && n <= 100000 }); err != nil {
@@ -248,7 +261,32 @@ func (c Config) ValidateServe() error {
 	case !allTLS && !c.Development():
 		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH are required outside development"))
 	}
+	if !c.Development() {
+		// Final review I-2: the database carries every hospital's clinical
+		// data, so outside development the connection is TLS with the
+		// server's certificate and name checked. There is no escape hatch.
+		if c.DatabaseURL != "" && !verifyFull(c.DatabaseURL) {
+			errs = append(errs, errors.New("DATABASE_URL must be a postgres:// URL with sslmode=verify-full outside development"))
+		}
+		// One replica loses every queued job and the denylist with its
+		// node; a single-node install must say so.
+		if c.NATSJSReplicas < 3 && !c.AllowSingleNode {
+			errs = append(errs, errors.New("NATS_JS_REPLICAS must be 3 or more outside development (CORE_ALLOW_SINGLE_NODE=true for a single-node install)"))
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// verifyFull reports whether raw is a postgres:// (or postgresql://) URL
+// whose one sslmode is verify-full. A key=value DSN is refused: a URL is
+// the one form checked here. Never logs or returns raw.
+func verifyFull(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+		return false
+	}
+	modes := u.Query()["sslmode"]
+	return len(modes) == 1 && modes[0] == "verify-full"
 }
 
 // MinPasswordLen is the shortest database login password accepted.
@@ -319,6 +357,13 @@ func loopback(addr string) bool {
 // the development relaxations on: API docs by default, NATS without TLS,
 // test-only intelligence operations granted. Anything else, an unset
 // CORE_ENV (production) included, fails closed.
+// SingleNode reports whether this is a non-development core running on
+// fewer than 3 JetStream replicas because CORE_ALLOW_SINGLE_NODE said so:
+// serve logs a warning at start.
+func (c Config) SingleNode() bool {
+	return !c.Development() && c.AllowSingleNode && c.NATSJSReplicas < 3
+}
+
 func (c Config) Development() bool { return strings.EqualFold(strings.TrimSpace(c.Env), "development") }
 
 func getenv(name, def string) string {

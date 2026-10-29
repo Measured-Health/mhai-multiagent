@@ -85,6 +85,10 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if err := cfg.ValidateServe(); err != nil {
 		return nil, err
 	}
+	if cfg.SingleNode() {
+		log.Warn("core: single-node install (CORE_ALLOW_SINGLE_NODE): JetStream has fewer than 3 replicas, so a node's loss loses queued jobs and the denylist",
+			"replicas", cfg.NATSJSReplicas)
+	}
 	issuer, err := token.LoadIssuer(cfg.AccessKeyPath)
 	if err != nil {
 		return nil, err

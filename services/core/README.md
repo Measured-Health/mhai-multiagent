@@ -80,11 +80,12 @@ one job:
 
 | Variable | Required | Notes |
 |---|---|---|
-| `DATABASE_URL` | yes | the `mhai_app` login; a placeholder password is refused |
+| `DATABASE_URL` | yes | the `mhai_app` login; a placeholder password is refused. Outside development, a `postgres://` URL with `sslmode=verify-full` |
 | `NATS_URL` | yes | `nats://gateway:PASSWORD@host:4222` in dev; a placeholder password is refused |
 | `NATS_NKEY_SEED_PATH` | production | the `gateway` user's NKey seed file (see `services/nats/README.md`) |
 | `NATS_TLS_CA_PATH`, `NATS_TLS_CERT_PATH`, `NATS_TLS_KEY_PATH` | outside development | PEM files: the CA for the NATS server's certificate, and core's client certificate and key. All three or none; required unless `CORE_ENV` is `development` |
-| `NATS_JS_REPLICAS` | no | replicas for `JOBS`, `DEAD` and the KV buckets: `1` (default, dev compose), `3` on the production cluster (R3), or `5` |
+| `NATS_JS_REPLICAS` | no | replicas for `JOBS`, `DEAD` and the KV buckets: `1` (default, dev compose), `3` on the production cluster (R3), or `5`. Outside development, 3 or more unless `CORE_ALLOW_SINGLE_NODE` |
+| `CORE_ALLOW_SINGLE_NODE` | no | `true` lets a non-development core run with fewer than 3 replicas (a single-node install); serve logs a warning. Default `false` |
 | `JOBS_PIPELINE_MAX_ACK_PENDING` | no | jobs the pipeline workers hold at once: worker count × concurrency; default `8` |
 | `ACCESS_KEY_PATH` | yes | PKCS#8 Ed25519 PEM from `core keys new` |
 | `REQUEST_KEY_PATH` | yes | the request-token key (spec §7.2), from `core keys new --kind request`: another file and another key than `ACCESS_KEY_PATH` (start-up refuses the same key id) |

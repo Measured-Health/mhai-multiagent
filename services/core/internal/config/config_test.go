@@ -12,7 +12,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 	for _, k := range []string{"CORE_ENV", "HTTP_ADDR", "DATABASE_URL", "NATS_URL", "NATS_NKEY_SEED_PATH", "NATS_GATEWAY_PASSWORD", "NATS_WORKER_PASSWORD",
 		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS",
 		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING",
-		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY"} {
+		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY", "CORE_ALLOW_SINGLE_NODE"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -261,7 +261,8 @@ func TestLoadNATSTLSAndStreams(t *testing.T) {
 // environment fails closed. A partial TLS setting is refused everywhere.
 func TestValidateServeRequiresNATSTLSOutsideDevelopment(t *testing.T) {
 	full := NATSTLS{CAPath: "/tls/ca.pem", CertPath: "/tls/core.pem", KeyPath: "/tls/core-key.pem"}
-	base := Config{DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem"}
+	base := Config{DatabaseURL: "postgres://u:p@h/db?sslmode=verify-full", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem",
+		NATSJSReplicas: 3}
 	for _, env := range []string{"production", "Production", "staging", ""} {
 		c := base
 		c.Env = env
@@ -404,5 +405,111 @@ func TestUnsetEnvIsProduction(t *testing.T) {
 		if got := (Config{Env: env}).Development(); got != want {
 			t.Errorf("Development(%q) = %v", env, got)
 		}
+	}
+}
+
+// productionServe is a production config ValidateServe accepts.
+func productionServe() Config {
+	return Config{Env: "production", DatabaseURL: "postgres://u:p@db.internal/mhai?sslmode=verify-full", NATSURL: "tls://h:4222",
+		AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem", NATSJSReplicas: 3,
+		NATSTLS: NATSTLS{CAPath: "/tls/ca.pem", CertPath: "/tls/core.pem", KeyPath: "/tls/core-key.pem"}}
+}
+
+// Final review I-2: outside development core's Postgres connection must be
+// sslmode=verify-full (no escape hatch), whatever else the URL says; an
+// unknown or empty environment fails closed. Errors never carry the URL.
+func TestValidateServeRequiresVerifyFullOutsideDevelopment(t *testing.T) {
+	if err := productionServe().ValidateServe(); err != nil {
+		t.Fatalf("production with verify-full: %v", err)
+	}
+	for _, env := range []string{"production", "staging", ""} {
+		for _, u := range []string{
+			"postgres://u:secret-pw@db.internal/mhai",
+			"postgres://u:secret-pw@db.internal/mhai?sslmode=disable",
+			"postgres://u:secret-pw@db.internal/mhai?sslmode=require",
+			"postgres://u:secret-pw@db.internal/mhai?sslmode=verify-ca",
+			"postgres://u:secret-pw@db.internal/mhai?sslmode=prefer",
+			"postgres://u:secret-pw@db.internal/mhai?sslmode=verify-full&sslmode=disable",
+			"host=db.internal user=u password=secret-pw sslmode=verify-full",
+		} {
+			c := productionServe()
+			c.Env, c.DatabaseURL = env, u
+			err := c.ValidateServe()
+			if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") || !strings.Contains(err.Error(), "sslmode=verify-full") {
+				t.Fatalf("%q %q: %v", env, u, err)
+			}
+			if strings.Contains(err.Error(), "secret-pw") || strings.Contains(err.Error(), "db.internal") {
+				t.Fatalf("error carries the URL: %v", err)
+			}
+		}
+	}
+	// The single-node escape hatch is for replicas only, never TLS.
+	c := productionServe()
+	c.DatabaseURL, c.AllowSingleNode = "postgres://u:p@h/db?sslmode=disable", true
+	if err := c.ValidateServe(); err == nil || !strings.Contains(err.Error(), "sslmode=verify-full") {
+		t.Fatalf("single node without TLS: %v", err)
+	}
+	// Development (the demo and every test stack) is unchanged.
+	d := Config{Env: "development", DatabaseURL: "postgres://u:p@h/db?sslmode=disable", NATSURL: "nats://h:4222",
+		AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem", NATSJSReplicas: 1}
+	if err := d.ValidateServe(); err != nil {
+		t.Fatalf("development: %v", err)
+	}
+}
+
+// Final review I-2: outside development JetStream needs 3 or more replicas,
+// unless CORE_ALLOW_SINGLE_NODE=true says this is a single-node install on
+// purpose (serve then logs a warning: SingleNode).
+func TestValidateServeRequiresReplicasOutsideDevelopment(t *testing.T) {
+	for _, n := range []int{0, 1} {
+		c := productionServe()
+		c.NATSJSReplicas = n
+		if err := c.ValidateServe(); err == nil || !strings.Contains(err.Error(), "NATS_JS_REPLICAS") ||
+			!strings.Contains(err.Error(), "CORE_ALLOW_SINGLE_NODE") {
+			t.Fatalf("%d replicas: %v", n, err)
+		}
+		c.AllowSingleNode = true
+		if err := c.ValidateServe(); err != nil {
+			t.Fatalf("%d replicas, single node allowed: %v", n, err)
+		}
+		if !c.SingleNode() {
+			t.Fatalf("%d replicas allowed: no warning", n)
+		}
+	}
+	for _, n := range []int{3, 5} {
+		c := productionServe()
+		c.NATSJSReplicas = n
+		if err := c.ValidateServe(); err != nil || c.SingleNode() {
+			t.Fatalf("%d replicas: %v %v", n, err, c.SingleNode())
+		}
+	}
+	d := Config{Env: "development", DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222",
+		AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem", NATSJSReplicas: 1}
+	if err := d.ValidateServe(); err != nil || d.SingleNode() {
+		t.Fatalf("development, 1 replica: %v %v", err, d.SingleNode())
+	}
+}
+
+// CORE_ALLOW_SINGLE_NODE is true or false; anything else is refused.
+func TestLoadAllowSingleNode(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	for v, want := range map[string]bool{"": false, "true": true, "TRUE": true, "false": false} {
+		e := map[string]string{"CORE_ALLOW_SINGLE_NODE": v}
+		for k, x := range base {
+			e[k] = x
+		}
+		setEnv(t, e)
+		c, err := Load()
+		if err != nil || c.AllowSingleNode != want {
+			t.Fatalf("%q: %v %v", v, c.AllowSingleNode, err)
+		}
+	}
+	e := map[string]string{"CORE_ALLOW_SINGLE_NODE": "yes-please"}
+	for k, x := range base {
+		e[k] = x
+	}
+	setEnv(t, e)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_ALLOW_SINGLE_NODE") {
+		t.Fatalf("bad value: %v", err)
 	}
 }
