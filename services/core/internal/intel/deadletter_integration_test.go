@@ -371,8 +371,13 @@ func TestDeadLetterReMintsAfterEmergencyRotation(t *testing.T) {
 // file (SIGHUP) after core keys untrust --emergency. It runs on Task 15's
 // compose stack and in the intelligence-boundary CI job.
 func TestEmergencyRotationReMintsDeadLetteredJob(t *testing.T) {
-	t.Skip("needs the Python pipeline worker: runs on Task 15's compose stack (intelligence-boundary CI job); " +
-		"core's side is TestDeadLetterReMintsAfterEmergencyRotation")
+	// Plan 3 T15 left this skipped: on the smoke stack it needs a key
+	// rotation with SIGHUP to core and the workers mid-run, which the smoke
+	// test doesn't do. Each half is tested: core's re-mint in
+	// TestDeadLetterReMintsAfterEmergencyRotation, the worker's refusal of a
+	// removed kid in test_reload_drops_removed_kid (Python, boundary).
+	t.Skip("the whole-stack emergency rotation is not in the smoke test; " +
+		"see TestDeadLetterReMintsAfterEmergencyRotation and test_reload_drops_removed_kid")
 }
 
 // Plan 3 T5 review, tied in 00009: mhai_jobs writes audit rows only about
