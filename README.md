@@ -62,11 +62,11 @@ Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit
 ## Local Stack (Docker Compose)
 
 ```bash
-make up                 # postgres, nats, core, redis, ollama (+ pulls OLLAMA_MODEL), intelligence
+make up                 # postgres, nats, core, ollama (+ pulls OLLAMA_MODEL), intelligence
 make core-up            # only the core service and what it needs (postgres, nats, migrations)
 make up-gpu             # same on an NVIDIA GPU (Ollama + CUDA PyTorch)
 make up-observability   # also the OpenTelemetry collector
-make infra              # only postgres, redis, ollama; run the app with uv
+make infra              # only postgres, ollama; run the app with uv
 make ps | logs | down   # status, logs, stop (data kept)
 make nuke               # stop and delete all volumes (asks first)
 ```
@@ -74,7 +74,7 @@ make nuke               # stop and delete all volumes (asks first)
 `make up` creates `.env` from `.env.example` on first run; replace every
 `changeme` value first, because the core service and NATS refuse
 placeholders. Ports bind to 127.0.0.1 and can be moved with `POSTGRES_PORT`,
-`NATS_PORT`, `CORE_PORT`, `REDIS_PORT`, `OLLAMA_PORT`, `API_PORT`,
+`NATS_PORT`, `CORE_PORT`, `OLLAMA_PORT`, `API_PORT`,
 `OTEL_GRPC_PORT` and `OTEL_HTTP_PORT`. The CCA
 generates through Ollama (`CCA_BACKEND=ollama`, model `OLLAMA_MODEL`).
 The `intelligence` service currently runs the CLI and exits; it becomes a
@@ -104,7 +104,7 @@ services/intelligence/intelligence/
 ├── models/          # Neural network architectures
 ├── pipeline/        # Orchestration runner + cross-milestone integration
 ├── retrieval/       # Hybrid dense+sparse+RRF retrieval
-├── security/        # HIPAA: PII masking, encryption, RBAC, audit
+├── security/        # PII masking, encryption, latency profiler (roles and audit are core's)
 ├── tools/           # External connectors (HuggingFace, PubMed)
 └── utils/           # Logger, retry, rate limiter, device detection
 ```

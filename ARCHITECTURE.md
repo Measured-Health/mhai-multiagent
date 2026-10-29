@@ -20,7 +20,7 @@ behind NATS (the boundary plan), then the hospital and platform endpoints.
 | Service | Job |
 |---|---|
 | **Core service** (Go, `services/core/`) | The API, sign-in and sessions, permissions, tenancy and audit. Every frontend call is decided here: either core serves it, or it grants intelligence a per-call token for it. |
-| **NATS** (`services/nats/`) | The only link between the BFF, Go and Python (ADR 0011). Request/reply for calls someone waits on; JetStream for background jobs; KV for the core service's denylist and attempt counters. Replaces the Redis queue stub once the Python side moves over. |
+| **NATS** (`services/nats/`) | The only link between the BFF, Go and Python (ADR 0011). Request/reply for calls someone waits on; JetStream for background jobs; KV for the core service's denylist and attempt counters. Replaces the old Redis queue stub, which is gone. |
 | **Python services** (`services/intelligence/`) | The models: agents, retrieval and the knowledge base, guardrails, PII masking, inference. Reached only through NATS. Each request carries a token signed by the core service, and the service checks it before doing any work. |
 | **EMR integration service** (planned, `services/emr/`) | Connects to each hospital's EMR/EHR (one connector per EMR type, ADR 0009): receives or fetches records, maps them to the FHIR-based model, normalises codes and units, keeps the per-hospital patient index, and tells core when new data arrives. Its own service because it holds outside credentials and talks to hospital networks; a fault or breach there must not reach sign-in and permissions. Connections are configured in the platform app. |
 | **Documents service** (planned, `services/documents/`) | Uploads, letters and exports: virus scanning, storing files in object storage, signed download links, and handing new documents to intelligence's document reading (DIA) as jobs. Core still decides who may upload or download. |
@@ -217,4 +217,4 @@ Each response must pass ALL layers to auto-approve. Any single failure triggers 
 
 ### Security pipeline order
 
-RBAC → PII Mask → Route → Audit → Encrypt
+Core: permission check → request token (audit written by core) → Worker: verify token → hospital-scoped read → PII mask → route → verify → result

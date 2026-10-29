@@ -73,7 +73,28 @@ All notable changes to this project are documented here. The format follows
   drops that one image request (the footer link text stays). The CSP is unchanged and the Redoc bundle is
   not modified. The nginx allow list for api-dev gains the shim and logo paths.
 
+### Removed
+
+- The Python `RBACManager`, `AuditLogger`, `SecurePipelineWrapper` (and
+  `UserRole`, `UserSession`, `demo_m4_part2`) in
+  `intelligence.security.hipaa`, and the `intelligence/queue/` stubs (Plan 3
+  T13). Core decides permissions and writes the audit chain, the worker
+  verifies core's request token, and the database helper scopes by hospital.
+  `PIIMasker`, `EncryptionManager` and the latency profiler stay.
+- Redis: the `redis` compose service and volume, `REDIS_URL`, `REDIS_PORT`,
+  the `QUEUE_*` settings in compose and `.env.example`, and the `fakeredis`
+  dev dependency (with `redis` and `sortedcontainers` in `uv.lock`). Nothing
+  in Go or Python needs it; NATS carries the jobs.
+
 ### Security
+- The patient-scoping and two-person-review regression tests moved off
+  `SecurePipelineWrapper` onto the orchestrator and the boundary
+  (`chunk_visible_to`, `load_chunks`, `OrchestratorModelClient`) with the same
+  assertions: a patient's chunks never reach another patient's answer, and a
+  correction applies only after a second, different clinician approves. The
+  role and audit checks the wrapper tested are core's and covered by core's
+  tests; a new test asserts the boundary exposes no feedback or approval
+  operation.
 - `core migrate up` no longer lets a login's SCRAM verifier reach the
   Postgres server log when setting the password fails. Postgres logs a
   failed statement in full (`log_min_error_statement`). `EnsureLogin` now

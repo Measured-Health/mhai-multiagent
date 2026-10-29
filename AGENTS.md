@@ -46,7 +46,7 @@ make format                  # ruff format + safe fixes
 make typecheck               # mypy
 make test                    # pytest (no model downloads)
 uv run pytest tests/security # security regression tests
-make infra                   # postgres, redis, ollama for local runs
+make infra                   # postgres, ollama for local runs
 make up / make down          # full compose stack
 make core-test / core-lint   # the core service (Go)
 make core-up                 # the core service in compose (postgres, nats, migrations)
@@ -70,7 +70,7 @@ services/intelligence/  the Python project (uv)
   intelligence/agents/          DIA, QDA, CCA, HGA (hga_nli.py), orchestrator
   intelligence/knowledge_base/  KB builder, retrievers, RAG CCA (patient scoping lives here)
   intelligence/guardrails/      L1-L4 cascade
-  intelligence/security/        PII masking, RBAC, audit, SecurePipelineWrapper
+  intelligence/security/        PII masking, encryption (roles and audit are core's)
   intelligence/tools/           Ollama client, PubMed, HF helpers
   tests/security/               regression tests for the security fixes
 ```
@@ -87,7 +87,7 @@ services/intelligence/  the Python project (uv)
 - Every retrieval path takes `patient_id`; use `chunk_visible_to()`.
 - Failures escalate; never invent scores or placeholder answers.
 - Pass per-request values as arguments; never mutate shared agents.
-- User identity comes from the session (`SecurePipelineWrapper`), never from
+- User identity comes from core's verified request token, never from
   request data.
 - Security rules are written once, in Go. Don't copy a permission or
   tenancy rule into Python.
