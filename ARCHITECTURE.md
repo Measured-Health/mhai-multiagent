@@ -17,7 +17,8 @@ audit chain, idempotency, and the NATS connection with its KV buckets
 and it runs in Docker Compose (`make core-up`). **Built (Plan 3):** the Python
 side behind NATS: the pipeline and echo workers, request tokens, grants for
 BFF-direct calls, `POST /queries` and the API over NATS (`api.v1.<app>`),
-with an end-to-end smoke test in CI. **Next:** the hospital and platform
+with an end-to-end smoke test, run on the build server and wired into
+CI (job `boundary-smoke`). **Next:** the hospital and platform
 endpoints.
 
 | Service | Job |
@@ -86,7 +87,8 @@ core's HTTP listener serves only health probes, on localhost.
 
 Built (Plan 3,
 `docs/specs/2026-10-28-intelligence-boundary-design.md`); the smoke test
-in `services/core/internal/smoke` runs it end to end. This is how a
+in `services/core/internal/smoke` runs it end to end (on the build
+server; wired into CI as `boundary-smoke`). This is how a
 clinical question runs: the BFF asks core (`POST /queries` over
 `api.v1`), and core sends the job.
 

@@ -20,7 +20,9 @@ All notable changes to this project are documented here. The format follows
   the audit chain verified. New CI job `boundary-smoke`; CI also checks every
   compose file parses and that the image ships `operations.json` and
   `catalogue.json`. New `.env.example` entries: `INTELLIGENCE_DB_USER`,
-  `INTELLIGENCE_DB_PASSWORD`.
+  `INTELLIGENCE_DB_PASSWORD`. **`INTELLIGENCE_DB_PASSWORD` is now required
+  in the dev `.env`**: `core-migrate` (and so `make core-up` and `make up`)
+  refuses to start without it.
 - The demo deploy stops before migrating if `clinical_queries` holds rows
   migration 00007's constraints reject (`deploy/premigrate-check.sh`).
 - Clinical questions end to end on core's side (Plan 3 T12): `POST /queries`
