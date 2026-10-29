@@ -172,9 +172,7 @@ func TestDeadLetterExpiredAndTerminal(t *testing.T) {
 	sendDead(t, js, deadSubject(hid), &intelpb.DeadLetter{JobId: failed.String(), Type: "run_query", SubjectHospital: hid.String(),
 		Code: "internal", Reason: "internal"})
 	waitFor(t, "four letters handled", func() bool {
-		return len(auditFor(t, "job.dead_lettered", failed.String())) == 1 &&
-			len(auditFor(t, "job.dead_lettered", running.String())) == 1 && len(auditFor(t, "job.dead_lettered", cancelled.String())) == 1 &&
-			stateOf(t, expired).status == "failed"
+		return c.Metrics.DeadReceived.Load() >= 4 && stateOf(t, expired).status == "failed"
 	})
 
 	if s := stateOf(t, expired); s.errCode == nil || *s.errCode != "deadline_exceeded" {
@@ -192,9 +190,10 @@ func TestDeadLetterExpiredAndTerminal(t *testing.T) {
 	if s := stateOf(t, failed); s.status != "failed" || *s.errCode != "internal" {
 		t.Fatalf("failed row %+v", s)
 	}
+	// A letter that changed nothing writes nothing to the chain.
 	for _, id := range []uuid.UUID{cancelled, running, failed} {
-		if n := len(auditFor(t, "query.failed", id.String())); n != 0 {
-			t.Fatalf("query.failed for a row the letter didn't mark (%d)", n)
+		if n := auditCount(t, id); n != 0 {
+			t.Fatalf("%d audit rows for a row the letter didn't change", n)
 		}
 	}
 	for _, id := range []uuid.UUID{expired, cancelled, running, failed} {
@@ -202,8 +201,9 @@ func TestDeadLetterExpiredAndTerminal(t *testing.T) {
 			t.Fatalf("intelligence.refused for a non-refusal")
 		}
 	}
-	if c.Metrics.DeadRefused.Load() != 0 || c.Metrics.DeadExpired.Load() != 2 {
-		t.Fatalf("metrics refused %d expired %d", c.Metrics.DeadRefused.Load(), c.Metrics.DeadExpired.Load())
+	if c.Metrics.DeadRefused.Load() != 0 || c.Metrics.DeadExpired.Load() != 1 || c.Metrics.DeadIgnored.Load() != 3 {
+		t.Fatalf("metrics refused %d expired %d ignored %d", c.Metrics.DeadRefused.Load(), c.Metrics.DeadExpired.Load(),
+			c.Metrics.DeadIgnored.Load())
 	}
 	if strings.Contains(logs.String(), `"level":"ERROR"`) {
 		t.Fatalf("an expired job raised an error-level log: %s", logs.String())
@@ -315,6 +315,24 @@ func TestDeadLetterReMintsAfterEmergencyRotation(t *testing.T) {
 		t.Fatalf("a rotation re-mint was audited as a refusal")
 	}
 
+	// Review fix 3: the same letter replayed (or forged again) doesn't
+	// re-mint the row a second time for that kid.
+	before := c.Metrics.DeadReceived.Load()
+	for i := 0; i < 2; i++ {
+		sendDead(t, workerJS(t), deadSubject(hid), &intelpb.DeadLetter{JobId: q.String(), Type: "run_query",
+			SubjectHospital: hid.String(), Attempts: 2, Code: "unauthorized", Reason: "signature", Kid: signer.KeyID})
+	}
+	waitFor(t, "two replays", lettersSeen(c.Metrics, before+2))
+	if n := len(auditFor(t, "job.retried", q.String())); n != 1 || c.Metrics.DeadRetried.Load() != 1 {
+		t.Fatalf("re-minted again: %d job.retried, %d retried", n, c.Metrics.DeadRetried.Load())
+	}
+	if n := len(jobsFor(drainJobs(t, sharedNATS.PipelineURL), "jobs.v1."+hid.String()+".run_query")); n != 0 {
+		t.Fatalf("a replay published %d jobs", n)
+	}
+	if s := stateOf(t, q); s.status != "queued" {
+		t.Fatalf("a replay changed the row: %+v", s)
+	}
+
 	// A signature refusal with a kid core still trusts is not a rotation.
 	q2 := seedQuery(t, hid, u, 0, &deadline, true)
 	sendDead(t, workerJS(t), deadSubject(hid), &intelpb.DeadLetter{JobId: q2.String(), Type: "run_query",
@@ -334,14 +352,18 @@ func TestDeadLetterReMintsAfterEmergencyRotation(t *testing.T) {
 	if _, err := super.Exec(ctx, `UPDATE users SET is_active = false WHERE id = $1`, u); err != nil {
 		t.Fatal(err)
 	}
+	seen := c.Metrics.DeadReceived.Load()
 	sendDead(t, workerJS(t), deadSubject(hid), &intelpb.DeadLetter{JobId: q3.String(), Type: "run_query",
 		SubjectHospital: hid.String(), Code: "unauthorized", Reason: "signature", Kid: signer.KeyID})
-	waitFor(t, "q3 letter", func() bool { return len(auditFor(t, "job.dead_lettered", q3.String())) == 1 })
+	waitFor(t, "q3 letter", lettersSeen(c.Metrics, seen+1))
 	if n := len(auditFor(t, "job.retried", q3.String())); n != 0 {
 		t.Fatal("re-minted for a deactivated creator")
 	}
 	if s := stateOf(t, q3); s.status != "cancelled" {
 		t.Fatalf("q3 %+v", s)
+	}
+	if n := len(auditFor(t, "job.dead_lettered", q3.String())); n != 0 {
+		t.Fatal("a letter for a cancelled row was audited")
 	}
 }
 
@@ -380,5 +402,52 @@ func TestJobsAuditTiedToRowHospital(t *testing.T) {
 		if err := write(e); err == nil {
 			t.Errorf("%s: written", name)
 		}
+	}
+}
+
+// auditCount is every audit row about job id.
+func auditCount(t *testing.T, id uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := super.QueryRow(context.Background(), `SELECT count(*) FROM audit_log WHERE entity_id = $1`, id.String()).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// Review fix 1: refusal letters replayed for a completed job, and one for
+// another hospital's completed job, write nothing to the chain and raise
+// no alert.
+func TestDeadLetterReplayOnFinishedJobWritesNothing(t *testing.T) {
+	c, _ := newClient(t)
+	c.Metrics = &Metrics{}
+	runConsumer(t, c)
+	js := workerJS(t)
+	hid := seedHospital(t, "active")
+	other := seedHospital(t, "active")
+	u := seedUser(t, hid, true, authz.RoleClinician)
+	uo := seedUser(t, other, true, authz.RoleClinician)
+	deadline := time.Now().Add(5 * time.Minute)
+	done := seedQuery(t, hid, u, 0, &deadline, true)
+	setRow(t, done, "status = 'completed', completed_at = now()")
+	theirs := seedQuery(t, other, uo, 0, &deadline, true)
+	setRow(t, theirs, "status = 'completed', completed_at = now()")
+	letter := &intelpb.DeadLetter{JobId: done.String(), Type: "run_query", SubjectHospital: hid.String(), Code: "unauthorized", Reason: "binding"}
+	sendDead(t, js, deadSubject(hid), letter)
+	sendDead(t, js, deadSubject(hid), letter)
+	sendDead(t, js, deadSubject(other), &intelpb.DeadLetter{JobId: theirs.String(), Type: "run_query", SubjectHospital: other.String(),
+		Code: "forbidden", Reason: "forbidden"})
+	waitFor(t, "three letters", lettersSeen(c.Metrics, 3))
+	time.Sleep(200 * time.Millisecond)
+	for _, id := range []uuid.UUID{done, theirs} {
+		if n := auditCount(t, id); n != 0 {
+			t.Fatalf("%d audit rows for a finished job", n)
+		}
+		if s := stateOf(t, id); s.status != "completed" {
+			t.Fatalf("finished row changed: %+v", s)
+		}
+	}
+	if c.Metrics.DeadRefused.Load() != 0 || c.Metrics.DeadIgnored.Load() != 3 {
+		t.Fatalf("refused %d ignored %d", c.Metrics.DeadRefused.Load(), c.Metrics.DeadIgnored.Load())
 	}
 }

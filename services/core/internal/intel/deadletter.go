@@ -39,6 +39,7 @@ const (
 var (
 	errDeadLetters = errors.New("intel: dead-letter consumer unavailable")
 	errDeadTx      = errors.New("intel: dead-letter update failed")
+	errRetried     = errors.New("intel: job already re-minted for this kid")
 	// safeToken is what a letter's reason or kid must look like before core
 	// logs or records it (a worker wrote it: unverified).
 	safeToken = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
@@ -57,12 +58,21 @@ type Metrics struct {
 	DeadErrors   atomic.Int64 // transient failures (letter Nak'd)
 }
 
+// unattached counts for a Client without Metrics, so log sampling still
+// works.
+var unattached Metrics
+
 func (c *Client) metrics() *Metrics {
 	if c.Metrics != nil {
 		return c.Metrics
 	}
-	return &Metrics{} // counted nowhere
+	return &unattached
 }
+
+// deadLogEvery samples the log line of an ignored letter: the first, then
+// one in this many, so a flood of replayed or forged letters can't flood
+// the log either.
+const deadLogEvery = 100
 
 // deadOutcome is what to do with a letter's message.
 type deadOutcome int
@@ -88,12 +98,14 @@ const (
 //     creator, after re-checking the account and hospital (F23), with a new
 //     message id (RetryMsgID), audited job.dead_lettered and job.retried;
 //   - otherwise the row, if still queued, is set failed with the letter's
-//     code (never a running row, which a worker holds, or a finished one),
-//     audited job.dead_lettered and, when this marked it, query.failed (a
-//     row the worker or the sweeper already failed has its own query.failed);
-//     unauthorized, forbidden and invalid_request also audit
-//     intelligence.refused and count the DeadRefused alert;
-//     deadline_exceeded (a job that expired in the queue, F6) doesn't.
+//     code, audited job.dead_lettered and query.failed; unauthorized,
+//     forbidden and invalid_request also audit intelligence.refused and
+//     count the DeadRefused alert; deadline_exceeded (a job that expired in
+//     the queue, F6) doesn't;
+//   - a letter that changes nothing (the row running, which a worker holds,
+//     or finished, or already re-minted for that kid) writes nothing to the
+//     chain and raises no alert: it is counted DeadIgnored, with a sampled
+//     log line, so a replayed letter can't flood the chain or the pager.
 //
 // A transient failure Naks the letter for a retry; one that failed
 // deadMaxDeliver times is dropped (the deadline sweep ends the row).
@@ -152,8 +164,9 @@ func HandleDeadLetter(ctx context.Context, pool *pgxpool.Pool, client *Client, s
 	met.DeadReceived.Add(1)
 	log := client.log()
 	ignore := func(why string) deadOutcome {
-		met.DeadIgnored.Add(1)
-		log.Warn("intel: dead letter ignored", "why", why)
+		if n := met.DeadIgnored.Add(1); n == 1 || n%deadLogEvery == 0 {
+			log.Warn("intel: dead letter ignored", "why", why, "ignored_total", n)
+		}
 		return deadAck
 	}
 	seg := strings.Split(subject, ".")
@@ -208,6 +221,10 @@ func HandleDeadLetter(ctx context.Context, pool *pgxpool.Pool, client *Client, s
 		case err == nil:
 			met.DeadRetried.Add(1)
 			return deadAck
+		case errors.Is(err, errRetried):
+			// This row was already re-minted for this kid: a replayed or
+			// duplicated letter changes nothing.
+			return ignore("already re-minted for this kid")
 		case errors.Is(err, ErrCreatorUnusable):
 			// Not re-minted: the account or hospital can't use the service.
 			// Marked failed below, as any refusal.
@@ -224,11 +241,14 @@ func HandleDeadLetter(ctx context.Context, pool *pgxpool.Pool, client *Client, s
 		met.DeadErrors.Add(1)
 		return deadRetry
 	}
-	if marked {
-		met.DeadMarked.Add(1)
+	if !marked {
+		// Running (a worker holds it), or already finished: the letter
+		// changes nothing, so nothing goes on the chain and no alert fires
+		// (a replayed letter can't write rows or page anyone).
+		return ignore("job not queued")
 	}
-	attrs := []any{"job_id", row.ID.String(), "hospital_id", row.HospitalID.String(), "error_code", code,
-		"marked", marked, "kid", kid}
+	met.DeadMarked.Add(1)
+	attrs := []any{"job_id", row.ID.String(), "hospital_id", row.HospitalID.String(), "error_code", code, "kid", kid}
 	switch {
 	case refusalCodes[code]:
 		met.DeadRefused.Add(1)
@@ -291,9 +311,35 @@ func jobEvent(row JobRow, action string, payload map[string]any) audit.Event {
 
 // remint re-publishes a queued job refused for a removed kid (F23: the one
 // re-mint helper, Republish), then marks it published and audits it.
+//
+// A row is re-minted at most once per kid: retried_kid is claimed first
+// (00009), so a replayed or forged letter can't make core publish the job
+// again; errRetried says it was already done. A failed publish gives the
+// claim back for the letter's retry.
 func remint(ctx context.Context, pool *pgxpool.Pool, client *Client, row deadRow, kid string) error {
+	claimed := false
+	if err := db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE clinical_queries SET retried_kid = $3
+			WHERE id = $1 AND hospital_id = $2 AND status = 'queued' AND retried_kid IS DISTINCT FROM $3`,
+			row.ID, row.HospitalID, kid)
+		if err != nil {
+			return errDeadTx
+		}
+		claimed = tag.RowsAffected() == 1
+		return nil
+	}); err != nil {
+		return errDeadTx
+	}
+	if !claimed {
+		return errRetried
+	}
 	msgID := RetryMsgID(row.ID, row.Attempts)
 	if err := Republish(ctx, pool, client, row.JobRow, msgID); err != nil {
+		_ = db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE clinical_queries SET retried_kid = NULL
+				WHERE id = $1 AND hospital_id = $2 AND status = 'queued' AND retried_kid = $3`, row.ID, row.HospitalID, kid)
+			return err
+		})
 		return err
 	}
 	return db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
@@ -315,8 +361,10 @@ func remint(ctx context.Context, pool *pgxpool.Pool, client *Client, row deadRow
 	})
 }
 
-// markDead fails row with code if it is still queued, and audits the
-// letter, in one transaction as mhai_jobs. It reports whether it marked it.
+// markDead fails row with code if it is still queued and, only then,
+// audits the letter (job.dead_lettered, query.failed and, for a refusal,
+// intelligence.refused) in the same transaction as mhai_jobs. It reports
+// whether it marked the row; a letter that changes nothing writes nothing.
 func markDead(ctx context.Context, pool *pgxpool.Pool, row deadRow, code, kid string) (bool, error) {
 	marked := false
 	err := db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
@@ -326,23 +374,20 @@ func markDead(ctx context.Context, pool *pgxpool.Pool, row deadRow, code, kid st
 			RETURNING attempts`, row.ID, row.HospitalID, code).Scan(&attempts)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
-			attempts = row.Attempts
+			return nil
 		case err != nil:
 			return errDeadTx
-		default:
-			marked = true
 		}
+		marked = true
 		if err := audit.Write(ctx, tx, jobEvent(row.JobRow, "job.dead_lettered", map[string]any{
 			"job_id": row.ID.String(), "type": jobType, "error": code, "attempts": attempts,
 		})); err != nil {
 			return errDeadTx
 		}
-		if marked {
-			if err := audit.Write(ctx, tx, jobEvent(row.JobRow, "query.failed", map[string]any{
-				"query_id": row.ID.String(), "error": code, "attempts": attempts,
-			})); err != nil {
-				return errDeadTx
-			}
+		if err := audit.Write(ctx, tx, jobEvent(row.JobRow, "query.failed", map[string]any{
+			"query_id": row.ID.String(), "error": code, "attempts": attempts,
+		})); err != nil {
+			return errDeadTx
 		}
 		if refusalCodes[code] {
 			p := map[string]any{"operation": runQuery, "reason": code}

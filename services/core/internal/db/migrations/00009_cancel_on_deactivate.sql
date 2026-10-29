@@ -23,11 +23,20 @@
 -- Also:
 --   - mhai_provision may append intelligence.key_rotated (core keys untrust
 --     and the second request key, spec §7.5, §10.2), still with no actor.
+--   - clinical_queries.retried_kid: the kid a dead-lettered job was last
+--     re-minted for after an emergency rotation (intel.RunDeadLetters), so a
+--     replayed letter can't re-mint it again. mhai_jobs reads and sets it.
 --   - mhai_jobs's audit rows are tied to a job of the row's own hospital
 --     (Plan 3 T5 review): actor none, entity query, entity_id the id of a
 --     clinical_queries row whose hospital is the audit row's hospital.
 
 -- +goose Up
+
+ALTER TABLE clinical_queries
+    ADD COLUMN retried_kid text,
+    ADD CONSTRAINT clinical_queries_retried_kid_check
+        CHECK (retried_kid IS NULL OR retried_kid ~ '^[A-Za-z0-9_.:-]{1,64}$');
+GRANT SELECT (retried_kid), UPDATE (retried_kid) ON clinical_queries TO mhai_jobs;
 
 CREATE POLICY cancel_check ON hospitals FOR SELECT TO mhai_migrate
     USING (status <> 'active');
@@ -124,3 +133,7 @@ DROP FUNCTION mhai_cancel_user_queries();
 DROP POLICY cancel_update ON clinical_queries;
 DROP POLICY cancel_read ON clinical_queries;
 DROP POLICY cancel_check ON hospitals;
+REVOKE SELECT (retried_kid), UPDATE (retried_kid) ON clinical_queries FROM mhai_jobs;
+ALTER TABLE clinical_queries
+    DROP CONSTRAINT clinical_queries_retried_kid_check,
+    DROP COLUMN retried_kid;
