@@ -12,22 +12,35 @@ import (
 )
 
 type composeService struct {
+	Image       string            `yaml:"image"`
 	Environment map[string]string `yaml:"environment"`
 	EnvFile     any               `yaml:"env_file"`
 	Command     []string          `yaml:"command"`
 	Volumes     []string          `yaml:"volumes"`
+	Profiles    []string          `yaml:"profiles"`
+	Ports       []string          `yaml:"ports"`
+	DependsOn   map[string]any    `yaml:"depends_on"`
 }
+
+// workerPasswords are the intelligence workers' NATS passwords: each
+// worker sees its own, inside its NATS_URL, and nothing else.
+var workerPasswords = map[string]string{"pipeline": "NATS_PIPELINE_PASSWORD", "echo": "NATS_ECHO_PASSWORD"}
 
 // natsUserSecrets are the NATS server's secrets: one password per user
 // and the JetStream encryption key. Only the nats service holds them all;
-// core holds its own (gateway) password, inside NATS_URL. Each worker
-// service's own password is checked in Task 15, when those services exist.
+// core holds its own (gateway) password, inside NATS_URL, and each worker
+// its own (workerPasswords).
 var natsUserSecrets = []string{"NATS_GATEWAY_PASSWORD", "NATS_PIPELINE_PASSWORD", "NATS_ECHO_PASSWORD",
 	"NATS_BFF_CLINICAL_PASSWORD", "NATS_BFF_PLATFORM_PASSWORD", "NATS_JS_KEY"}
 
 func loadCompose(t *testing.T) map[string]composeService {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "docker-compose.yml"))
+	return loadComposeFile(t, "docker-compose.yml")
+}
+
+func loadComposeFile(t *testing.T, name string) map[string]composeService {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +68,8 @@ func TestComposeSplitsSecretsPerService(t *testing.T) {
 	}
 	for k, v := range core.Environment {
 		for _, bad := range []string{"NATS_WORKER_PASSWORD", "NATS_PIPELINE_PASSWORD", "NATS_ECHO_PASSWORD",
-			"NATS_BFF_CLINICAL_PASSWORD", "NATS_BFF_PLATFORM_PASSWORD", "NATS_JS_KEY", "POSTGRES_PASSWORD", "PROVISION_DB_PASSWORD"} {
+			"NATS_BFF_CLINICAL_PASSWORD", "NATS_BFF_PLATFORM_PASSWORD", "NATS_JS_KEY", "POSTGRES_PASSWORD", "PROVISION_DB_PASSWORD",
+			"INTELLIGENCE_DB_PASSWORD"} {
 			if k == bad || strings.Contains(v, bad) {
 				t.Errorf("core env %s carries %s", k, bad)
 			}
@@ -91,8 +105,25 @@ func TestComposeSplitsSecretsPerService(t *testing.T) {
 	// nats needs the gateway NATS password for its own config.
 	coreSecrets := []string{"MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "CORE_DB_PASSWORD",
 		"PROVISION_DB_PASSWORD", "NATS_GATEWAY_PASSWORD", "NATS_URL"}
-	if _, ok := svcs["intelligence"]; !ok {
-		t.Fatal("no intelligence service in docker-compose.yml")
+	if _, ok := svcs["intelligence"]; ok {
+		t.Error("the one-shot intelligence service is back: the workers are pipeline and echo")
+	}
+	for w := range workerPasswords {
+		if _, ok := svcs[w]; !ok {
+			t.Fatalf("no %s worker in docker-compose.yml", w)
+		}
+	}
+	// The pipeline's database password goes to it and to core-migrate
+	// (which makes the login), nowhere else.
+	for name, svc := range svcs {
+		if name == "pipeline" || name == "core-migrate" {
+			continue
+		}
+		for k, v := range svc.Environment {
+			if k == "INTELLIGENCE_DB_PASSWORD" || strings.Contains(v, "INTELLIGENCE_DB_PASSWORD") {
+				t.Errorf("%s env %s carries INTELLIGENCE_DB_PASSWORD", name, k)
+			}
+		}
 	}
 	for name, svc := range svcs {
 		if strings.HasPrefix(name, "core") {
@@ -104,6 +135,12 @@ func TestComposeSplitsSecretsPerService(t *testing.T) {
 		for k, v := range svc.Environment {
 			for _, bad := range coreSecrets {
 				if name == "nats" && bad == "NATS_GATEWAY_PASSWORD" {
+					continue
+				}
+				// A worker's own NATS_URL names its own user (TestComposeWorkers),
+				// never .env's NATS_URL, which holds the gateway's password.
+				if _, worker := workerPasswords[name]; worker && bad == "NATS_URL" && k == "NATS_URL" &&
+					strings.HasPrefix(v, "nats://"+name+":") {
 					continue
 				}
 				if k == bad || strings.Contains(v, bad) {
@@ -152,6 +189,9 @@ func TestComposeNATSGetsEveryUserSecret(t *testing.T) {
 		for k, v := range svc.Environment {
 			for _, s := range natsUserSecrets {
 				if name == "core" && k == "NATS_URL" && s == "NATS_GATEWAY_PASSWORD" {
+					continue
+				}
+				if k == "NATS_URL" && workerPasswords[name] == s {
 					continue
 				}
 				if k == s || strings.Contains(v, s) {
@@ -353,6 +393,132 @@ func TestComposeHasNoRedis(t *testing.T) {
 	for name, s := range c.Services {
 		if _, ok := s.DependsOn["redis"]; ok {
 			t.Errorf("%s depends on redis", name)
+		}
+	}
+}
+
+// F18 / spec §4, §8.2, §12: each worker service runs `intelligence worker
+// --service <name>` in development, signs in to NATS as its own user with
+// its own password, mounts the trusted public keys read-only and never the
+// private-key volume, publishes no port, and gets only its own settings.
+// Only the pipeline has a database, as its own login with the password
+// outside the URL. echo is test-only (profile test).
+func TestComposeWorkers(t *testing.T) {
+	svcs := loadCompose(t)
+	for name, pw := range workerPasswords {
+		t.Run(name, func(t *testing.T) {
+			w := svcs[name]
+			if w.EnvFile != nil {
+				t.Error("env_file brings in every secret in .env")
+			}
+			if !slices.Equal(w.Command, []string{"worker", "--service", name}) {
+				t.Errorf("command = %q", w.Command)
+			}
+			if !strings.HasPrefix(w.Image, "mhai-intelligence:") {
+				t.Errorf("image = %q", w.Image)
+			}
+			e := w.Environment
+			if e["APP_ENV"] != "development" {
+				t.Errorf("APP_ENV = %q: an unset APP_ENV is production, where the worker needs NKeys and TLS", e["APP_ENV"])
+			}
+			if want := "nats://" + name + ":${" + pw + ":?"; !strings.HasPrefix(e["NATS_URL"], want) {
+				t.Errorf("NATS_URL = %q, want its own user (%s...)", e["NATS_URL"], want)
+			}
+			if e["INTELLIGENCE_TRUSTED_KEYS_PATH"] != "/trusted/request-keys.json" {
+				t.Errorf("INTELLIGENCE_TRUSTED_KEYS_PATH = %q", e["INTELLIGENCE_TRUSTED_KEYS_PATH"])
+			}
+			if _, ok := e["OTEL_EXPORTER_OTLP_ENDPOINT"]; !ok {
+				t.Error("no OTEL_EXPORTER_OTLP_ENDPOINT")
+			}
+			if !slices.Contains(w.Volumes, "trustedkeys:/trusted:ro") {
+				t.Errorf("volumes %v: the trusted keys must be mounted read-only", w.Volumes)
+			}
+			for _, v := range w.Volumes {
+				if strings.HasPrefix(v, "corekeys:") {
+					t.Errorf("%s mounts the private-key volume", name)
+				}
+			}
+			if len(w.Ports) != 0 {
+				t.Errorf("ports %v: the workers are reached over NATS only", w.Ports)
+			}
+			if _, ok := w.DependsOn["core-request-key"]; !ok {
+				t.Error("doesn't wait for the trusted-keys file (core-request-key)")
+			}
+			for k, v := range e {
+				for other, opw := range workerPasswords {
+					if other != name && (k == opw || strings.Contains(v, opw)) {
+						t.Errorf("env %s carries %s", k, opw)
+					}
+				}
+				for _, bad := range []string{"POSTGRES_PASSWORD", "POSTGRES_USER", "CORE_DB_", "PROVISION_DB_", "MFA_ENCRYPTION_KEY",
+					"BFF_SERVICE_KEYS", "NATS_BFF_", "NATS_GATEWAY_PASSWORD", "NATS_JS_KEY", "DATABASE_URL"} {
+					if strings.Contains(k, bad) || strings.Contains(v, bad) {
+						t.Errorf("env %s carries %s", k, bad)
+					}
+				}
+			}
+			_, hasDB := e["INTELLIGENCE_DB_URL"]
+			switch name {
+			case "pipeline":
+				u := e["INTELLIGENCE_DB_URL"]
+				if !strings.HasPrefix(u, "postgres://postgres:5432/") || strings.Contains(u, "@") {
+					t.Errorf("INTELLIGENCE_DB_URL = %q: no credentials in the URL", u)
+				}
+				if !strings.Contains(e["INTELLIGENCE_DB_USER"], "intelligence_app") ||
+					!strings.Contains(e["INTELLIGENCE_DB_PASSWORD"], "${INTELLIGENCE_DB_PASSWORD:?") {
+					t.Errorf("the pipeline must use its own login: user %q", e["INTELLIGENCE_DB_USER"])
+				}
+				if len(w.Profiles) != 0 {
+					t.Errorf("pipeline profiles %v", w.Profiles)
+				}
+			case "echo":
+				if hasDB || e["INTELLIGENCE_DB_PASSWORD"] != "" {
+					t.Error("echo has no database")
+				}
+				if !slices.Equal(w.Profiles, []string{"test"}) {
+					t.Errorf("echo profiles = %v, want [test]: it is test-only", w.Profiles)
+				}
+			}
+		})
+	}
+	mig := svcs["core-migrate"].Environment
+	if !strings.Contains(mig["INTELLIGENCE_DB_PASSWORD"], "INTELLIGENCE_DB_PASSWORD") || mig["INTELLIGENCE_DB_USER"] != svcs["pipeline"].Environment["INTELLIGENCE_DB_USER"] {
+		t.Error("core-migrate must make the pipeline's login")
+	}
+	core := svcs["core"].Environment
+	for _, k := range []string{"REQUEST_KEY_PATH", "REQUEST_TRUSTED_KEYS_PATH", "INTELLIGENCE_QUERY_CAP"} {
+		if core[k] == "" {
+			t.Errorf("core lacks %s", k)
+		}
+	}
+	if !strings.Contains(core["CORE_HTTP_API"], "on") {
+		t.Errorf("core CORE_HTTP_API = %q, want on until mhai-web's BFF uses NATS", core["CORE_HTTP_API"])
+	}
+}
+
+// The smoke override: stub models (never in production: the worker refuses
+// stub outside development), echo on, no Ollama.
+func TestComposeSmokeOverride(t *testing.T) {
+	svcs := loadComposeFile(t, "docker-compose.smoke.yml")
+	if svcs["pipeline"].Environment["INTELLIGENCE_MODEL_CLIENT"] != "stub" {
+		t.Error("the smoke pipeline must use the stub models")
+	}
+	if _, ok := svcs["pipeline"].DependsOn["ollama-init"]; ok {
+		t.Error("the smoke pipeline waits for a model pull")
+	}
+	if _, ok := svcs["echo"]; !ok || len(svcs["echo"].Profiles) != 0 {
+		t.Error("the smoke stack must turn echo on")
+	}
+	for _, s := range []string{"ollama", "ollama-init"} {
+		if !slices.Equal(svcs[s].Profiles, []string{"models"}) {
+			t.Errorf("%s runs in the smoke stack", s)
+		}
+	}
+	for name, s := range svcs {
+		for k := range s.Environment {
+			if strings.Contains(k, "PASSWORD") || strings.Contains(k, "KEY") {
+				t.Errorf("%s: the smoke override sets %s; secrets come from the generated env file", name, k)
+			}
 		}
 	}
 }

@@ -37,9 +37,10 @@ jobs:
       - name: Lockfile is current
         run: uv lock --check
 
-      # The contract in proto/ (spec 6.3): buf lint, buf breaking against main
-      # (skipped until main has proto/), and the committed generated code
-      # matches a fresh `make proto`. Runs from the repository root.
+      # The contract in proto/ (spec 6.3): buf lint, buf breaking against
+      # origin/main (fetch-depth 0 above; skipped only while main has no
+      # proto/), and the committed generated code matches a fresh
+      # `make proto`. Runs from the repository root.
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
@@ -166,6 +167,9 @@ jobs:
         run: go test -race -tags integration ./...
       - name: Integration tests with the test-only fixture routes
         run: go test -race -tags "integration test" ./...
+      # The smoke test runs in boundary-smoke; here it only has to build.
+      - name: Vet the smoke test
+        run: go vet -tags smoke ./internal/smoke/...
 
   # ADR 0012: a breaking change to the HTTP contract needs a new major
   # version (/api/v2), so it may not change /api/v1 in place.
@@ -220,6 +224,56 @@ jobs:
         run: |
           docker run --rm mhai-intelligence:ci --help
           docker run --rm --entrypoint python mhai-intelligence:ci -c "import intelligence.agents, intelligence.security.hipaa"
+      # F13: the generated operations table and catalogue are package data,
+      # so the installed (not editable) image loads them without a mount.
+      - name: The image ships operations.json and catalogue.json
+        if: steps.changes.outputs.image == 'true'
+        run: |
+          docker run --rm --entrypoint python mhai-intelligence:ci -c "
+          from intelligence.boundary.operations import Operations, clinical_roles
+          ops = Operations.load(development=False)
+          assert ops.for_subject('inference.v1.pipeline.health') is not None
+          assert ops.for_subject('inference.v1.echo.ping') is None  # test-only, left out in production
+          assert clinical_roles()
+          print('operations.json and catalogue.json load from the installed package')
+          "
+
+  # Spec section 12: the whole boundary end to end. The smoke stack
+  # (docker-compose.yml + docker-compose.smoke.yml: core, NATS, Postgres,
+  # the pipeline worker with the stub models, the echo worker), then
+  # services/core/internal/smoke as the clinical BFF over NATS, then down.
+  # Every secret is generated for the run (.github/scripts/boundary-smoke.sh).
+  boundary-smoke:
+    needs: [image]
+    runs-on: ubuntu-latest  # ships Docker and Compose
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: services/core/go.mod
+      # Every compose file parses with the example settings (never run
+      # before Task 15), the test profile included.
+      - name: Compose files are valid
+        run: |
+          docker compose --env-file .env.example config -q
+          docker compose --env-file .env.example --profile test --profile observability config -q
+          docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.smoke.yml config -q
+          docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.gpu.yml config -q
+      - uses: docker/setup-buildx-action@v3
+      # The same layers as the image job, from the GitHub Actions cache.
+      - name: Build the intelligence image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/intelligence
+          build-args: TORCH=cpu
+          load: true
+          tags: mhai-intelligence:cpu
+          cache-from: type=gha
+      - name: Build the core image
+        run: docker build -t mhai-core:local services/core
+      - name: Smoke test
+        run: .github/scripts/boundary-smoke.sh
 
   secrets:
     runs-on: ubuntu-latest

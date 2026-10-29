@@ -1,0 +1,34 @@
+# The end-to-end smoke stack (Plan 3 Task 15, spec §12), on top of
+# docker-compose.yml:
+#
+#   .github/scripts/boundary-smoke.sh [--build]
+#
+# which generates throwaway secrets, runs
+#   docker compose -f docker-compose.yml -f docker-compose.smoke.yml up -d --wait
+# and then `go test -tags smoke ./internal/smoke/...` from services/core.
+#
+# Differences from the dev stack: the pipeline worker uses the synthetic
+# stub models (INTELLIGENCE_MODEL_CLIENT=stub, development only; it never
+# loads a model), so Ollama is not started; and the test-only echo worker
+# is on. Synthetic data only.
+
+services:
+  # Not needed with the stub models. Under a profile nothing here enables.
+  ollama:
+    profiles: ["models"]
+  ollama-init:
+    profiles: ["models"]
+
+  pipeline:
+    environment:
+      INTELLIGENCE_MODEL_CLIENT: stub
+    # The dev stack also waits for the model pull; the stub needs none.
+    depends_on: !override
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
+
+  # The test-only echo worker (profile `test` in docker-compose.yml).
+  echo:
+    profiles: !reset []

@@ -1,5 +1,5 @@
 .PHONY: help install install-dev lint format typecheck test test-boundary cov run clean docker \
-	up up-gpu up-observability infra down ps logs models nuke core-up core-test core-lint proto proto-check
+	up up-gpu up-observability infra down ps logs models nuke core-up smoke core-test core-lint proto proto-check
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -54,7 +54,7 @@ GPU := -f docker-compose.yml -f docker-compose.gpu.yml
 	cp .env.example .env
 	@echo "Created .env from .env.example; replace every changeme value (the core service refuses placeholders)."
 
-up: .env ## Start the stack: postgres, nats, core (+ migrations), ollama (+ model pull), intelligence
+up: .env ## Start the stack: postgres, nats, core (+ migrations, keys), ollama (+ model pull), the pipeline worker
 	$(COMPOSE) up -d --build
 
 up-gpu: .env ## Start the stack on an NVIDIA GPU
@@ -83,7 +83,10 @@ nuke: ## Stop the stack and DELETE its volumes (database, models, caches)
 	$(COMPOSE) --profile observability down -v
 
 core-up: .env ## Start only the core service and what it needs (postgres, nats, migrations)
-	$(COMPOSE) up -d --build postgres nats core-migrate core-keys core
+	$(COMPOSE) up -d --build postgres nats core-migrate core-keys core-request-key core
+
+smoke: ## The end-to-end smoke test: stub models, echo on, core as the clinical BFF over NATS (needs Docker and Go)
+	.github/scripts/boundary-smoke.sh --build
 
 core-test: ## Run the core service (Go) tests
 	cd services/core && go test -race ./...
