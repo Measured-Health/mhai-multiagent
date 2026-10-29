@@ -1,6 +1,6 @@
 # The intelligence boundary: core to Python over NATS (Plan 3): implementation plan
 
-**Status:** Done (Tasks 1–15, 29 Oct 2026). The end-to-end smoke test (`services/core/internal/smoke`) runs a clinical question as the BFF over NATS on the build server, and is wired into CI as `boundary-smoke` (first green Actions run pending); departures from the spec's letter are in its §18.
+**Status:** Done (Tasks 1–15, 29 Oct 2026). The end-to-end smoke test (`services/core/internal/smoke`) runs a clinical question as the BFF over NATS on the build server, and is wired into CI as `boundary-smoke`; CI is green on PR #68, `boundary-smoke` included; departures from the spec's letter are in its §18.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
