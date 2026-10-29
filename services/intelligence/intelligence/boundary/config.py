@@ -261,6 +261,11 @@ def _db_credentials(
     except ConfigError as e:
         errs.append(str(e))
         return None, None
+    if not development and dict(url.params).get("sslmode") != "verify-full":
+        # The pipeline's queries carry questions and patient data: outside
+        # development the connection is TLS with the server's certificate
+        # and name checked, never a downgrade libpq would allow.
+        errs.append("INTELLIGENCE_DB_URL needs sslmode=verify-full outside development")
     user = env.get("INTELLIGENCE_DB_USER", "").strip() or url.user or DEFAULT_DB_USER
     if url.user is not None and url.user != user:
         errs.append("INTELLIGENCE_DB_URL names a different user than INTELLIGENCE_DB_USER")

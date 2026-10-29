@@ -252,6 +252,46 @@ def test_settings_url_password_only_in_development() -> None:
     assert "test-only-url-password-1" not in str(e.value)
 
 
+def test_settings_need_verified_tls_to_postgres_outside_development(tmp_path: Path) -> None:
+    """Carried T10/T15: outside development the pipeline's database
+    connection must be sslmode=verify-full; development keeps disable."""
+    f = tmp_path / "pw"
+    f.write_text("test-only-file-password-0002\n")
+    f.chmod(0o400)
+    prod = {
+        **PIPELINE,
+        "APP_ENV": "production",
+        "INTELLIGENCE_DB_PASSWORD_FILE": str(f),
+        "NATS_URL": "tls://nats:4222",
+        "NATS_NKEY_SEED_PATH": "/run/secrets/pipeline.nk",
+        "NATS_TLS_CA_PATH": "/run/ca.pem",
+        "NATS_TLS_CERT_PATH": "/run/cert.pem",
+        "NATS_TLS_KEY_PATH": "/run/key.pem",
+    }
+    for mode in (
+        "",
+        "?sslmode=disable",
+        "?sslmode=require",
+        "?sslmode=verify-ca",
+        "?sslmode=prefer",
+    ):
+        env = {**prod, "INTELLIGENCE_DB_URL": "postgres://db.internal:5432/mhai" + mode}
+        with pytest.raises(ConfigError, match="sslmode=verify-full"):
+            WorkerSettings.from_env(env)
+    s = WorkerSettings.from_env(
+        {**prod, "INTELLIGENCE_DB_URL": "postgres://db.internal:5432/mhai?sslmode=verify-full"}
+    )
+    assert s.db_password == "test-only-file-password-0002"
+    dev = WorkerSettings.from_env(
+        {
+            **PIPELINE,
+            "INTELLIGENCE_DB_URL": "postgres://db.internal:5432/mhai?sslmode=disable",
+            "INTELLIGENCE_DB_PASSWORD": "x" * 16,
+        }
+    )
+    assert dev.db_url is not None
+
+
 def test_settings_db_credentials_need_the_url() -> None:
     env = {k: v for k, v in PIPELINE.items() if k != "INTELLIGENCE_DB_URL"}
     with pytest.raises(ConfigError, match="INTELLIGENCE_DB_URL"):
