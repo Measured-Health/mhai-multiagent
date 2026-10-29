@@ -154,3 +154,51 @@ func (s *replaySet) remove(id string) {
 	defer s.mu.Unlock()
 	delete(s.m, id)
 }
+
+// floodCounter counts events per key in a fixed window that starts at the
+// key's first event. It holds at most max keys: expired windows are swept
+// to make room, and a table still full counts nothing (add returns 0), so
+// it can't grow with attacker-chosen keys.
+type floodCounter struct {
+	mu     sync.Mutex
+	window time.Duration
+	max    int
+	m      map[string]*flood
+}
+
+type flood struct {
+	n     int
+	until time.Time
+}
+
+func newFloodCounter(window time.Duration, max int) *floodCounter {
+	return &floodCounter{window: window, max: max, m: map[string]*flood{}}
+}
+
+// add counts one event for key at now and returns the count in its window
+// (0 when the table is full and key is new).
+func (f *floodCounter) add(key string, now time.Time) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.m[key]
+	if ok && !now.Before(e.until) {
+		delete(f.m, key)
+		ok = false
+	}
+	if !ok {
+		if len(f.m) >= f.max {
+			for k, old := range f.m {
+				if !now.Before(old.until) {
+					delete(f.m, k)
+				}
+			}
+			if len(f.m) >= f.max {
+				return 0
+			}
+		}
+		e = &flood{until: now.Add(f.window)}
+		f.m[key] = e
+	}
+	e.n++
+	return e.n
+}

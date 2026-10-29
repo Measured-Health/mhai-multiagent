@@ -56,6 +56,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
@@ -65,6 +67,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 )
 
 // Subjects, the queue group and the envelope.
@@ -130,6 +133,12 @@ type Metrics struct {
 	AuditSkipped atomic.Int64 // token refusals past the per-service audit rate
 	AuditFailed  atomic.Int64
 	InFlight     atomic.Int64
+	// VerifiedRefused counts refusals of a token that verified (its audit
+	// rows are uncapped, so the rate of this counter is how a flood of them
+	// shows). RefusalFlood counts the times one session passed a multiple of
+	// FloodEvery such refusals in a minute: a sampled, high-water signal.
+	VerifiedRefused atomic.Int64
+	RefusalFlood    atomic.Int64
 }
 
 // Server answers grant requests. Build one per copy of core.
@@ -151,6 +160,7 @@ type Server struct {
 	SummaryEvery time.Duration
 
 	lim                          Limits
+	flood                        *floodCounter
 	sem                          chan struct{}
 	session, hospital, refusalsA *rateLimiter
 	seen                         *replaySet
@@ -184,6 +194,7 @@ func (s *Server) Serve(ctx context.Context, nc *nats.Conn) (stop func(), err err
 	s.hospital = newRateLimiter(s.lim.PerHospital, maxLimiterKeys)
 	s.refusalsA = newRateLimiter(refusalAuditRate, maxLimiterKeys)
 	s.seen = newReplaySet(ReplayWindow, maxReplayIDs)
+	s.flood = newFloodCounter(time.Minute, maxLimiterKeys)
 	if s.SummaryEvery <= 0 {
 		s.SummaryEvery = DefaultSummaryEvery
 	}
@@ -321,7 +332,9 @@ func (s *Server) onMsg(m *nats.Msg) {
 			<-s.sem
 			s.wg.Done()
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
+		// The worker's trace context, if it sent a valid one (untrusted:
+		// it only parents the span).
+		ctx, cancel := context.WithTimeout(telemetry.Extract(context.Background(), m.Header), handleTimeout)
 		defer cancel()
 		out := s.handle(ctx, service, m.Data)
 		replied = true
@@ -361,15 +374,28 @@ type call struct {
 	tok     authz.AccessToken
 }
 
-// handle runs checks 3-10 and returns the reply.
-func (s *Server) handle(ctx context.Context, service string, data []byte) *nats.Msg {
+// handle runs checks 3-10 and returns the reply, inside the span
+// "grant <operation>" (the operation as the table names it, else
+// "grant unknown": the name is never built from the request).
+func (s *Server) handle(ctx context.Context, service string, data []byte) (out *nats.Msg) {
 	c := call{service: service, rid: newRequestID()}
+	ctx, span := telemetry.Start(ctx, trace.SpanKindServer, "grant unknown",
+		attribute.String("service", service), attribute.String("request_id", c.rid))
+	defer func() {
+		status := "not_ready" // out is nil only when the handler panicked
+		if out != nil {
+			status = out.Header.Get(HeaderStatus)
+		}
+		telemetry.End(span, status)
+	}()
 	var req intelpb.GrantRequest
 	if len(data) > MaxRequest || proto.Unmarshal(data, &req) != nil {
 		return s.refuseEarly(ctx, c, "forbidden")
 	}
 	if op, ok := authz.OperationByName(req.Operation); ok {
 		c.op = op.Name
+		span.SetName("grant " + op.Name)
+		span.SetAttributes(attribute.String("operation", op.Name))
 	}
 	// 3. Signature and claims, no I/O.
 	tok, code := s.Guard.VerifyAccessToken(req.AccessToken)
@@ -378,6 +404,9 @@ func (s *Server) handle(ctx context.Context, service string, data []byte) *nats.
 		return s.refuseEarly(ctx, c, code)
 	}
 	c.tok = tok
+	if hid := tok.HospitalID(); hid != uuid.Nil {
+		span.SetAttributes(attribute.String("hospital_id", hid.String()))
+	}
 	// 4. Rates, on the verified sid and hid only (F8).
 	now := s.lim.Now()
 	// The session first, so one session spends at most its own rate of
@@ -485,6 +514,9 @@ func (s *Server) refuseEarly(ctx context.Context, c call, code string) *nats.Msg
 	// token's refusal is always audited: its session and hospital rates
 	// already bound it, and a junk flood must not hide it.
 	verified := c.tok.UserID() != uuid.Nil
+	if verified {
+		s.noteVerifiedRefusal(c)
+	}
 	if !verified && !s.refusalsA.allow(c.service, s.lim.Now()) {
 		s.Metrics.AuditSkipped.Add(1)
 		return refusedMsg(code)
@@ -508,6 +540,7 @@ func (s *Server) refuseEarly(ctx context.Context, c call, code string) *nats.Msg
 func (s *Server) refuse(ctx context.Context, c call, p authz.Principal, code string) *nats.Msg {
 	code = refusalCode(code)
 	s.Metrics.Refused.Add(1)
+	s.noteVerifiedRefusal(c)
 	s.log().Warn("grant: refused", "service", c.service, "operation", c.op, "reason", code, "request_id", c.rid,
 		"user_id", p.UserID.String(), "hospital_id", p.HospitalID.String())
 	err := authz.Tx(authz.WithPrincipal(ctx, p), s.Pool, func(tx pgx.Tx) error {
@@ -522,6 +555,30 @@ func (s *Server) refuse(ctx context.Context, c call, p authz.Principal, code str
 		s.log().Error("grant: refusal audit failed", "service", c.service, "request_id", c.rid)
 	}
 	return refusedMsg(code)
+}
+
+// FloodEvery is the sampling step of the per-session refusal signal: one
+// signal (a counter and a log line) each time a session's verified-token
+// refusals in a minute reach a multiple of it. The audit rows are not
+// capped (a verified refusal is always written); this is how a flood of
+// them becomes visible without a per-session metric label.
+const FloodEvery = 100
+
+// noteVerifiedRefusal counts a refusal of a verified token, and signals
+// when its session has been refused FloodEvery times (or a multiple) within
+// a minute. The session id is a uuid and goes in the log only, never in a
+// metric label.
+func (s *Server) noteVerifiedRefusal(c call) {
+	s.Metrics.VerifiedRefused.Add(1)
+	if s.flood == nil {
+		return
+	}
+	n := s.flood.add(c.tok.SessionID().String(), s.lim.Now())
+	if n > 0 && n%FloodEvery == 0 {
+		s.Metrics.RefusalFlood.Add(1)
+		s.log().Warn("grant: session refusal flood", "service", c.service, "session_id", c.tok.SessionID().String(),
+			"hospital_id", c.tok.HospitalID().String(), "refusals_in_window", n)
+	}
 }
 
 // DefaultSummaryEvery is how often the grant counts are logged.

@@ -23,11 +23,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 )
 
 // The envelope headers (spec §6.2).
@@ -202,6 +205,38 @@ func (c *Client) Request(ctx context.Context, caller Caller, opName string, req,
 	m.Header.Set(hdrSchema, op.RequestSchema)
 	m.Header.Set(hdrRequestID, caller.Rid)
 	m.Data = body
+	// The client span: a child of the calling request's span. The worker's
+	// span is its child in turn (a request/reply call is short; only jobs
+	// are linked, not parented).
+	ctx, span := telemetry.Start(ctx, trace.SpanKindClient, "intelligence.request "+op.Service+"."+op.Op,
+		attribute.String("operation", op.Name), attribute.String("service", op.Service),
+		attribute.String("request_id", caller.Rid), attribute.String("hospital_id", caller.Hid))
+	telemetry.Inject(ctx, m.Header)
+	started := time.Now()
+	meta, err := c.exchange(ctx, op, caller, claims, m, ttl, resp)
+	telemetry.End(span, spanCode(err))
+	telemetry.ObserveRequest(op.Name, time.Since(started))
+	return meta, err
+}
+
+// spanCode is the closed-set code a span records for err: the worker's own
+// code when it sent one, else the problem code Code maps to; "ok" for nil.
+func spanCode(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	var we *Error
+	if errors.As(err, &we) {
+		if _, ok := workerCodes[we.Code]; ok {
+			return we.Code
+		}
+	}
+	code, _ := Code(err)
+	return code
+}
+
+// exchange sends m and decodes the answer.
+func (c *Client) exchange(ctx context.Context, op authz.Operation, caller Caller, claims reqtoken.Claims, m *nats.Msg, ttl time.Duration, resp proto.Message) (*intelpb.ResponseMeta, error) {
 	rctx, cancel := context.WithTimeout(ctx, ttl)
 	defer cancel()
 	rep, err := c.NC.RequestMsgWithContext(rctx, m)

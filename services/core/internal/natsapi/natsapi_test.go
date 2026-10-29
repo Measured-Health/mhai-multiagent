@@ -172,6 +172,8 @@ func TestUnlistedHeadersDropped(t *testing.T) {
 		"If-None-Match":     {`"v1"`},
 		"X-MHAI-Client-IP":  {"198.51.100.4"},
 		"traceparent":       {"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
+		"tracestate":        {"vendor=synthetic"},
+		"baggage":           {"user=synthetic"},
 		"X-MHAI-Service":    {"test-only-bff-service-key-0123456789abcdef"},
 		"X-MHAI-Audience":   {"platform"},
 		"X-Request-ID":      {"forged-request-id"},
@@ -193,6 +195,7 @@ func TestUnlistedHeadersDropped(t *testing.T) {
 	want := map[string]string{
 		"Authorization": "Bearer synthetic-token", "Content-Type": "application/json", "Idempotency-Key": "key-1",
 		"If-None-Match": `"v1"`, "X-Mhai-Client-Ip": "198.51.100.4", "Traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+		"Tracestate": "vendor=synthetic",
 	}
 	for k := range s.header {
 		if _, ok := want[k]; !ok {

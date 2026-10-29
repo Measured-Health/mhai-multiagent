@@ -16,6 +16,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 )
 
 const (
@@ -44,7 +45,15 @@ func RunDrainer(ctx context.Context, pool *pgxpool.Pool, every time.Duration, lo
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
+		started := time.Now()
 		n, err := DrainOnce(ctx, pool, log)
+		if n > 0 || (err != nil && ctx.Err() == nil) { // an idle tick leaves no span
+			code := "ok"
+			if err != nil {
+				code = "internal_error"
+			}
+			telemetry.Record(ctx, "intelligence.drain", started, code)
+		}
 		switch {
 		case err != nil && ctx.Err() == nil:
 			log.Error("intel: audit drain failed")

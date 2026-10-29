@@ -9,10 +9,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 )
 
 // jsStoreFailed is JetStream's "store failed" API error (10077): what a
@@ -110,11 +113,21 @@ func (c *Client) publishJob(ctx context.Context, caller Caller, opName, msgID st
 	m.Header.Set(hdrSchema, op.RequestSchema)
 	m.Header.Set(hdrRequestID, caller.Rid)
 	m.Data = body
+	// The producer span. The worker's job span links to it rather than
+	// hanging under it: a job outlives the request that queued it (§10.3).
+	ctx, span := telemetry.Start(ctx, trace.SpanKindProducer, "intelligence.publish "+op.Op,
+		attribute.String("operation", op.Name), attribute.String("job_type", op.Op),
+		attribute.String("job_id", msgID[:36]), attribute.String("request_id", caller.Rid),
+		attribute.String("hospital_id", caller.Hid))
+	telemetry.Inject(ctx, m.Header)
 	_, err = c.JS.PublishMsg(ctx, m, jetstream.WithMsgID(msgID), jetstream.WithExpectStream(bus.JobsStream))
 	if err == nil {
+		telemetry.End(span, "ok")
 		return nil
 	}
 	out := classifyPublish(err)
+	code, _ := Code(out)
+	telemetry.End(span, code)
 	attrs := []any{"operation", op.Name, "msg_id", msgID, "request_id", caller.Rid, "hospital_id", caller.Hid, "error", out}
 	var apiErr *jetstream.APIError
 	if errors.As(err, &apiErr) {

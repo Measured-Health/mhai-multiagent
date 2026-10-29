@@ -1,6 +1,7 @@
 package grant
 
 import (
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -215,5 +216,52 @@ func TestSampler(t *testing.T) {
 	l.last = l.last.Add(-2 * time.Hour)
 	if n, ok := l.take(); !ok || n != 6 {
 		t.Fatalf("next interval: %d %v", n, ok)
+	}
+}
+
+// A flood of refusals of verified tokens is counted, and one session's
+// refusals raise a sampled signal at each multiple of FloodEvery a minute:
+// a counter and one log line, never a label.
+func TestSessionRefusalFloodIsSampled(t *testing.T) {
+	var logs strings.Builder
+	now := time.Unix(1_000_000, 0)
+	s := &Server{Metrics: &Metrics{}, Log: slog.New(slog.NewTextHandler(&logs, nil)),
+		flood: newFloodCounter(time.Minute, 10), lim: Limits{Now: func() time.Time { return now }}.withDefaults()}
+	c := call{service: "echo"}
+	for i := 0; i < 2*FloodEvery+5; i++ {
+		s.noteVerifiedRefusal(c)
+	}
+	if got := s.Metrics.VerifiedRefused.Load(); got != 2*FloodEvery+5 {
+		t.Fatalf("verified refusals %d", got)
+	}
+	if got := s.Metrics.RefusalFlood.Load(); got != 2 {
+		t.Fatalf("flood signals %d, want 2", got)
+	}
+	if n := strings.Count(logs.String(), "session refusal flood"); n != 2 {
+		t.Fatalf("flood log lines %d: %s", n, logs.String())
+	}
+	// A new minute starts a new window.
+	now = now.Add(time.Minute)
+	for i := 0; i < FloodEvery-1; i++ {
+		s.noteVerifiedRefusal(c)
+	}
+	if got := s.Metrics.RefusalFlood.Load(); got != 2 {
+		t.Fatalf("flood signals %d after a new window", got)
+	}
+}
+
+// The flood table is bounded: a full table counts no new key, and expired
+// windows make room.
+func TestFloodCounterIsBounded(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	f := newFloodCounter(time.Minute, 2)
+	if f.add("a", now) != 1 || f.add("b", now) != 1 || f.add("a", now) != 2 {
+		t.Fatal("counts")
+	}
+	if f.add("c", now) != 0 {
+		t.Fatal("a third key must not be tracked while the table is full")
+	}
+	if f.add("c", now.Add(2*time.Minute)) != 1 {
+		t.Fatal("expired windows should make room")
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 )
 
 const (
@@ -143,10 +144,16 @@ func handleDeadMsg(ctx context.Context, pool *pgxpool.Pool, client *Client, m je
 		_ = m.Term()
 		return
 	}
-	switch HandleDeadLetter(ctx, pool, client, m.Subject(), m.Data()) {
+	// The letter's subject and body are a worker's words: no attribute
+	// carries them. The span says only whether the letter was settled.
+	started := time.Now()
+	out := HandleDeadLetter(ctx, pool, client, m.Subject(), m.Data())
+	switch out {
 	case deadRetry:
+		telemetry.Record(ctx, "intelligence.dead_letter", started, "unavailable")
 		_ = m.NakWithDelay(deadRetryDelay)
 	default:
+		telemetry.Record(ctx, "intelligence.dead_letter", started, "ok")
 		_ = m.Ack()
 	}
 }

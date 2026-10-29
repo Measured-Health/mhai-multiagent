@@ -97,6 +97,9 @@ services:
       INTELLIGENCE_QUERY_CAP: ${INTELLIGENCE_QUERY_CAP:-10}   # questions in flight per hospital
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set MFA_ENCRYPTION_KEY in .env}
       BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set BFF_SERVICE_KEYS in .env}
+      # Traces and metrics, off while empty. With the observability profile:
+      # http://otel-collector:4317. Spans carry ids, codes and numbers only.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${CORE_OTEL_ENDPOINT:-}
     ports: ["127.0.0.1:${CORE_PORT:-8080}:8080"]
     volumes:
       - corekeys:/keys:ro

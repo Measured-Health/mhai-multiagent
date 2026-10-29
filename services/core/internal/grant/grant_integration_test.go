@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
@@ -39,11 +40,13 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
 
 const (
+	marker       = "SYNTH-MARKER-7f3a"
 	testMFAKey   = "test-only-mfa-key-0123456789abcdef0123456789"
 	testPassword = "amber-quay-signal-4182" // synthetic
 	bffPrefix    = "_INBOX_bff.clinical."
@@ -1268,5 +1271,94 @@ func TestGrantPanicAnswersNotReady(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "grant: handler panicked") {
 		t.Fatal("panic not logged")
+	}
+}
+
+// TestGrantSpan: each grant is one server span named by the table's
+// operation (an unknown operation is "grant unknown", never the request's
+// words), parented on the worker's traceparent, with ids and a status only.
+func TestGrantSpan(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	shutdown, err := telemetry.SetupWith(exp, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+	logs := &syncBuffer{}
+	c := startCore(t, copyOpts{logs: logs})
+	u, s := clinician(t)
+	ec := echoConn(t)
+	_ = u
+
+	ask1 := func(req *intelpb.GrantRequest, traceparent string) answer {
+		data, _ := proto.Marshal(req)
+		m := nats.NewMsg(grant.SubjectPrefix + "echo")
+		m.Data = data
+		if traceparent != "" {
+			m.Header.Set("traceparent", traceparent)
+		}
+		m.Header.Set("baggage", "k="+marker)
+		rep, err := ec.RequestMsg(m, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return decode(t, rep)
+	}
+	tp := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	if a := ask1(pingRequest(s.tok, []byte("x")), tp); a.code != "" {
+		t.Fatalf("refused: %s", a.code)
+	}
+	bad := pingRequest(s.tok, []byte("x"))
+	bad.Operation = "Op-" + marker
+	if a := ask1(bad, ""); a.code == "" {
+		t.Fatal("unknown operation granted")
+	}
+	junk := pingRequest(marker+"-TOKEN", []byte("x"))
+	if a := ask1(junk, ""); a.code != "unauthenticated" {
+		t.Fatalf("junk: %+v", a)
+	}
+	spans := exp.GetSpans()
+	if len(spans) != 3 {
+		t.Fatalf("spans: %d", len(spans))
+	}
+	names := map[string]bool{}
+	for _, sp := range spans {
+		names[sp.Name] = true
+		if sp.SpanKind.String() != "server" {
+			t.Errorf("kind %s", sp.SpanKind)
+		}
+		for _, kv := range sp.Attributes {
+			if strings.Contains(kv.Value.Emit(), marker) {
+				t.Errorf("marker in %s", kv.Key)
+			}
+		}
+		if strings.Contains(sp.Name, marker) {
+			t.Errorf("marker in name %q", sp.Name)
+		}
+	}
+	if !names["grant echo.ping"] || !names["grant unknown"] || len(names) != 2 {
+		t.Fatalf("names: %v", names)
+	}
+	var granted bool
+	for _, sp := range spans {
+		if sp.Name == "grant echo.ping" && sp.Parent.TraceID().String() == "4bf92f3577b34da6a3ce929d0e0e4736" {
+			granted = true
+		}
+	}
+	if !granted {
+		t.Fatal("the grant span is not parented on the worker's traceparent")
+	}
+	// The denylisted session's refusal is a verified-token refusal.
+	if _, err := buckets.Denylist.Put(context.Background(), authz.SIDKey(s.sid.String()), []byte("1")); err != nil {
+		t.Fatal(err)
+	}
+	before := c.metrics.VerifiedRefused.Load()
+	mustAsk(t, ec, "echo", pingRequest(s.tok, []byte("x")))
+	mustAsk(t, ec, "echo", pingRequest(marker+"-JUNK", []byte("x")))
+	if got := c.metrics.VerifiedRefused.Load() - before; got != 1 {
+		t.Fatalf("verified refusals %d, want 1 (junk tokens are not counted)", got)
+	}
+	if out := logs.String(); strings.Contains(out, marker) || strings.Contains(out, s.tok) {
+		t.Fatal("marker or token in the logs")
 	}
 }

@@ -1,5 +1,9 @@
-# Minimal collector: receive OTLP from the mhai service and log it.
-# Swap the debug exporter for your backend (Tempo, Jaeger, an OTLP SaaS).
+# Minimal collector: receive OTLP from core and the intelligence workers
+# (OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 on each) and log it.
+# Spans have already passed each service's attribute allow-list (ids, codes
+# and numbers only), so nothing here needs to scrub PHI. Metrics are also
+# served for Prometheus on :8889 (names like boundary_refusals_total). Swap
+# the debug exporter for your backend (Tempo, Jaeger, an OTLP SaaS).
 receivers:
   otlp:
     protocols:
@@ -14,6 +18,8 @@ processors:
 exporters:
   debug:
     verbosity: basic
+  prometheus:
+    endpoint: 0.0.0.0:8889
 
 service:
   pipelines:
@@ -24,7 +30,7 @@ service:
     metrics:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [debug, prometheus]
     logs:
       receivers: [otlp]
       processors: [batch]

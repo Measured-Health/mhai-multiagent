@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 )
 
 // Rule is what a route needs (contract §3, §14.1). The zero Rule is "any
@@ -104,7 +105,9 @@ func Route(m *Mux, method, pattern string, rule Rule, h http.Handler) {
 	} else {
 		guarded = m.guard.wrap(rule, h)
 	}
-	m.rt.Handle(method, pattern, guarded)
+	// One server span per route, named by the registered pattern (never
+	// the request path), parented on a valid traceparent.
+	m.rt.Handle(method, pattern, telemetry.HTTPServer(method, httpx.BasePath+pattern, httpx.RequestIDFrom, guarded))
 }
 
 func validate(method, pattern string, rule Rule) error {
