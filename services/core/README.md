@@ -181,6 +181,25 @@ curl -s localhost:8080/api/v1/auth/login \
   -d '{"username":"synthetic.clinician@havana.example","password":"..."}'
 ```
 
+`make up` also starts the pipeline worker (and Ollama); `docker compose
+--profile test up -d` adds the echo worker. A hospital made with the CLI
+is `setup_incomplete`; set it `active` (as the owner) before asking a
+question.
+
+### The end-to-end smoke test
+
+`make smoke` (`.github/scripts/boundary-smoke.sh --build`, CI job
+`boundary-smoke`) starts `docker-compose.yml` with
+`docker-compose.smoke.yml` (the stub models, echo on, no Ollama) under
+throwaway generated secrets and runs `go test -tags smoke
+./internal/smoke/...` against it, as the clinical BFF over NATS:
+`TestQuestionEndToEnd` (sign in, `POST /queries`, poll, the result, and
+`query.completed` on a verified chain), `TestEchoNeedsToken`,
+`TestBFFDirectEchoEndToEnd` (`echo.ping` through a grant; the chain holds
+`intelligence.granted`) and `TestQuestionOverHTTPStillWorks`. Set
+`POSTGRES_PORT`, `NATS_PORT`, `CORE_PORT` and `SMOKE_PROJECT` when the
+defaults clash.
+
 `core-keys` writes the dev access-token key into the `corekeys` volume once;
 `core-request-key` writes the request-token key there too, and its public
 half to `request-keys.json` in the `trustedkeys` volume (public keys only,
@@ -326,11 +345,13 @@ serves.
 - **The argon2 gate is per process** and sized by CPU count; the BFF must
   rate-limit sign-in in front of it.
 - **`setup_incomplete` hospitals are served**, so their first admin can
-  finish setup.
+  finish setup, but `POST /queries` needs an `active` hospital (401
+  `unauthenticated` otherwise), and nothing activates a hospital yet: an
+  operator sets `hospitals.status = 'active'` by hand (TODO.md).
 - **Self-enrolment of two-step** stays open on first sign-in until the
   invite flow exists: whoever has the first password owns the second factor.
-- **The `intelligence` service connects to Postgres as the superuser**
-  (T2 M6) until the boundary plan; it no longer gets the core secrets.
+- **Postgres TLS.** The pipeline worker requires `sslmode=verify-full`
+  outside development; core does not yet (TODO.md).
 
 ## Layout
 
@@ -343,6 +364,7 @@ internal/db     pool, migrations (goose), role checks, sweep, logins
 internal/httpx  errors, BFF key, request id, idempotency, router
 internal/bus    NATS connection (TLS option), KV buckets, the JOBS and DEAD streams
 internal/intel  the intelligence client, job publisher, publish sweeper, in-flight cap
+internal/smoke  the end-to-end smoke test (build tag smoke; make smoke)
 internal/natsapi  the frontend contract over NATS (api.v1.<app>), on the same handler chain
 internal/audit  the hash-chained audit log
 internal/token  access tokens (EdDSA) and refresh tokens

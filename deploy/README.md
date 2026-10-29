@@ -32,15 +32,40 @@ touches the EMR containers, the web demo or nginx.
 | Service | Image | Role | Memory cap |
 |---|---|---|---|
 | `postgres` | `postgres:16.15-alpine`, uid 70 | the database; no published port | 256 MiB |
-| `nats` | `nats:2.10.29-alpine`, uid 1000 | JetStream (KV buckets) on a volume; NKey users `gateway` (core) and `bff` (placeholder) | 128 MiB |
+| `nats` | `nats:2.10.29-alpine`, uid 1000 | JetStream (KV buckets, the `JOBS` and `DEAD` streams) on a volume; NKey users `gateway` (core) and the clinical BFF (`NATS_BFF_NKEY`: `api.v1.clinical` only) | 128 MiB |
 | `core-migrate` | core | one-shot each deploy: goose migrations, then the `core_app` and `core_provision` logins | 128 MiB |
 | `core-keys` | core | one-shot: the access-token signing key, made once (`core keys ensure`) | 64 MiB |
+| `core-request-key` | core | one-shot: the request-token signing key, made once, and its public half in the `mhai-backend-trustedkeys` volume | 64 MiB |
 | `core` | core, uid 65532 | `core serve` on 127.0.0.1:8092 | 320 MiB, CPUs 0-1 |
 | `core-cli` | core | the seed CLI, run by hand (profile `tools`) | 128 MiB |
 
 Every container has a read-only root filesystem, no Linux capabilities and
-`no-new-privileges`. The intelligence service isn't deployed yet: it isn't
-wired to NATS until the boundary plan lands (placeholder in `compose.yml`).
+`no-new-privileges`. The intelligence workers (`pipeline`, `echo`) are not
+deployed on the demo in Plan 3, on purpose: the instance is small and the
+models are heavy. Core starts and serves everything else; a question
+(`POST /queries`) is queued and, with no pipeline to take it, fails at its
+10-minute deadline. What deploying the pipeline needs is sketched in
+`compose.yml`. `CORE_HTTP_API` stays `on` (the frontend still calls HTTP).
+
+### Before merging Plan 3 (the boundary): the demo's `clinical_queries`
+
+Plan 3 adds migrations 00007 to 00009. 00007 adds CHECK constraints that
+validate the rows already in `clinical_queries` (status one of `queued`,
+`running`, `completed`, `failed`, `cancelled`; `error` a short code). The
+deploy runs `premigrate-check.sh` first and stops, before anything
+migrates, if a row would fail; each migration is one transaction, so
+nothing half-applies either way. Check on the instance before merging,
+and expect `6|0` (migrations up to 00006, no questions stored):
+
+```bash
+cd /srv/mhai-backend
+docker compose exec -T postgres psql -U pgadmin -d mhai -tAc \
+  "SELECT (SELECT max(version_id) FROM goose_db_version WHERE is_applied), (SELECT count(*) FROM clinical_queries)"
+```
+
+If the count isn't 0, look at the rows (no PHI is expected on the demo:
+synthetic data only) before merging:
+`SELECT status, error IS NULL, count(*) FROM clinical_queries GROUP BY 1, 2`.
 
 ### Database logins
 
@@ -197,8 +222,12 @@ Deleting the database for real is `docker compose down` then
 
 ## The frontend and NATS (Plan 3)
 
-The frontend's BFF will reach the backend over NATS. Until Plan 3 builds
-the subjects, its NATS user `bff` may sign in but publish nothing.
+The frontend's BFF can reach core over NATS (spec §17.1): the NKey in
+`NATS_BFF_NKEY` is the clinical app's BFF and may publish `api.v1.clinical`
+and receive on `_INBOX_bff.clinical.>` (nats.go:
+`nats.CustomInboxPrefix("_INBOX_bff.clinical")`). No BFF-direct
+intelligence operation is open on the demo. The platform app's BFF needs
+its own NKey (`bff_platform`) before it moves to NATS (TODO.md).
 
 - **From a container** (how mhai-web runs): add the shared network to the
   service in mhai-web's `deploy/compose.yml` and connect to
@@ -274,10 +303,13 @@ sudo nginx -t && sudo systemctl reload nginx
 ## Known limits
 
 - **No TLS inside the instance.** Postgres (`sslmode=disable`) and NATS
-  run without TLS, on Docker networks and loopback only. NATS TLS needs TLS
-  settings in the core service's NATS client first (`bus.Connect` has none);
-  that is a follow-up, and the BFF's connection should get it at the same
-  time (Plan 3).
+  run without TLS, on Docker networks and loopback only. Core's NATS client
+  takes `NATS_TLS_*` (Plan 3), and `nats/nats.conf` documents the server's
+  `tls {}` block (`verify`, `handshake_first: 300ms`, the fallback still
+  TLS-only); turning it on needs certificates on the instance. Required
+  before any intelligence worker runs off this host.
+- **No JetStream encryption at rest** on the demo (dev compose has it,
+  `NATS_JS_KEY`): turning it on needs the store converted or recreated.
 - **NATS is on a non-internal network** (`edge`), because Docker publishes
   ports only from one; that gives the NATS container a route out. It needs
   none.

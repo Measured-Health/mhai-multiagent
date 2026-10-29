@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The intelligence boundary runs end to end (Plan 3 T15). Compose runs the
+  Python workers as `pipeline` (`intelligence worker --service pipeline`, its
+  own NATS user and password, its own database login `intelligence_app`, the
+  request-token trusted keys read-only) and `echo` (profile `test`), in place
+  of the one-shot `intelligence` service; core gets `CORE_HTTP_API`.
+  `docker-compose.smoke.yml` (stub models, echo on) and
+  `.github/scripts/boundary-smoke.sh` (`make smoke`) run
+  `services/core/internal/smoke` as the clinical BFF over NATS: sign in,
+  `POST /queries`, poll, the result, and `echo.ping` through the grant, with
+  the audit chain verified. New CI job `boundary-smoke`; CI also checks every
+  compose file parses and that the image ships `operations.json` and
+  `catalogue.json`. New `.env.example` entries: `INTELLIGENCE_DB_USER`,
+  `INTELLIGENCE_DB_PASSWORD`.
+- The demo deploy stops before migrating if `clinical_queries` holds rows
+  migration 00007's constraints reject (`deploy/premigrate-check.sh`).
 - Clinical questions end to end on core's side (Plan 3 T12): `POST /queries`
   (clinicians; 202 `{query_id, status}`; 429 `rate_limited` past
   `INTELLIGENCE_QUERY_CAP` per hospital; `Idempotency-Key`), `GET
@@ -59,6 +74,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The pipeline worker requires `sslmode=verify-full` for its database
+  outside development. Core and the workers warn when
+  `OTEL_EXPORTER_OTLP_INSECURE` is on outside development, and log why
+  telemetry is off when an endpoint is refused.
+- The demo's BFF NKey (`NATS_BFF_NKEY`) is now the clinical app's BFF
+  (`bff_clinical`): it may publish `api.v1.clinical` and receive on
+  `_INBOX_bff.clinical`. The intelligence workers are not deployed on the
+  demo (documented in `deploy/compose.yml`); `CORE_HTTP_API` stays on there.
 - The API docs show the Measured Health logo at the top of Redoc's sidebar
   (`info.x-logo`, served from `/api/docs/logo.png`, same origin). `info.version`
   1.0.2 (doc-only).

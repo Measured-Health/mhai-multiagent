@@ -21,9 +21,12 @@ From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.
 - **Plan: operations baseline** — backups and tested restore, monitoring and alerts, failover — before any real patient data. Status of each area: ARCHITECTURE.md, "Operations".
 - **Invite flow.** It must close first-sign-in self-enrolment: today a CLI-created account enrols its own two-step at first sign-in, so whoever has the first password owns the second factor. Invites bind enrolment to the invited person. Needs the mail provider.
 - **Forgot / reset password** (contract §2.5). Needs the mail provider.
-- **Build the intelligence boundary (Plan 3).** The design is approved and the plan is written: [docs/plans/2026-10-28-plan-3-intelligence-boundary.md](docs/plans/2026-10-28-plan-3-intelligence-boundary.md). Workers verify the core-signed request token, `RBACManager` and `AuditLogger` are retired in favour of Go (done, T13), Redis leaves compose (done, T13), and each worker gets its own NATS user and `_INBOX_worker.<service>` prefix. Until it lands, the `intelligence` service connects to Postgres as the superuser (T2 M6); Plan 3 Task 8 gives it its own login.
-- **Turn core's HTTP API off** (`CORE_HTTP_API=off`, probes only on localhost) once mhai-web's BFF talks to core over NATS. That switch is mhai-web work (its TODO.md, "BFF over NATS").
-- **Hospital setup flow.** `setup_incomplete` hospitals can sign in so the first admin can finish setup; revisit when the flow exists (T8 M8).
+- **Turn core's HTTP API off** (`CORE_HTTP_API=off`, probes only on localhost) once mhai-web's BFF talks to core over NATS. That switch is mhai-web work (its TODO.md, "BFF over NATS"). The same change brings mhai-web's `contract.ts` in line with Plan 3: `ClinicalResult` gains `trust_band` and `cited_chunk_ids`, and the problem codes gain 405 `method_not_allowed`, 413 `payload_too_large` (both on the NATS path) and 503 `unavailable`.
+- **Citations are empty** in `GET /queries/{id}/result` until the pipeline stores citation details: today it stores only `cited_chunk_ids`. Flagged to the product owner and the intelligence lead (Plan 3 T12).
+- **Patient ids in questions and tokens** (`pids`, plan departure 7): with the EMR plan. Until then retrieval returns shared guidelines only.
+- **Platform job views:** retry and cancel endpoints and the Failed jobs list (frontend §14.8). Plan 3 built the dead-letter consumer and the re-mint they will call.
+- **The shared replay check** (NATS KV) when a request/reply operation first writes data (boundary design, decision 3). Today each worker copy keeps its own `jti` set, which is enough while request/reply operations only read.
+- **Hospital setup flow.** `setup_incomplete` hospitals can sign in so the first admin can finish setup; revisit when the flow exists (T8 M8). Nothing activates a hospital yet (no CLI command or endpoint), and `POST /queries` asks for an `active` hospital, so a clinician of a CLI-made hospital gets 401 `unauthenticated` on every question until an operator sets `hospitals.status = 'active'` by hand (found by the Plan 3 smoke test, which does exactly that). Add `core hospitals activate` or the setup flow, and decide whether `setup_incomplete` should be 403 rather than 401.
 - **Admin unlock** for the per-login ceiling, with the staff endpoints (only a trusted device gets past it today); alert on `auth.login.ceiling` audit rows.
 
 ### Deferred minors to follow up
@@ -40,10 +43,15 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 - **Provisioning can add roles to existing accounts.** Limit it to users made in the same transaction, or a `provision_user()` function; a DB check that a platform account has at most one role. [T5 N1]
 
 **NATS**
-- **Reconnect and disconnect handlers** that log and flip readiness. [T3 M6]
 - **Every NATS responder checks the reply subject** before answering. NATS lets an `allow_responses` reply go to any subject the requester named, past the allow and deny lists, JetStream API calls with core's account included (`TestReplySubjectIsTheResponderToCheck`; services/nats/README.md). Core on `api.v1.<app>` answers only `_INBOX_bff.<app>.`, and on `authz.v1.grant.<service>` only `_INBOX_worker.<service>.`; workers follow spec §17.2. The rest of the subject must be literal tokens. (Plan 3, Tasks 6, 7, 9)
-- **Split NATS accounts before production.** This is the only server-side defence against reply-subject abuse: the BFFs and the workers each go in their own account and reach core's subjects through service exports and imports, so a responder's reply can't reach core's JetStream API or KV. Spec §7.6 lists it as "later, optional"; it must be done before production.
-- **Demo NATS (`deploy/nats/nats.conf`)** still lacks JetStream encryption at rest (`NATS_JS_KEY` from `setup-host.sh`), TLS, and the per-service worker and BFF users; it has Task 4's narrowed `gateway` permissions. (Plan 3, Task 15, or a deploy follow-up)
+- **Split NATS accounts before production** (boundary design, decision 10), and in any case before NATS is shared with anything else. This is the only server-side defence against reply-subject abuse: the BFFs and the workers each go in their own account and reach core's subjects through service exports and imports, so a responder's reply can't reach core's JetStream API or KV. It also closes the residual Plan 3 accepted: any worker credential can publish `dead.v1.>` for any hospital (per-hospital permissions or the split fix it).
+- **NATS TLS for production.** `deploy/nats/nats.conf` documents the block (`verify: true`, `handshake_first: 300ms`, the fallback still TLS-only); none of it is on the demo, which keeps NATS on one host. Required before any worker runs on another host.
+- **Demo NATS (`deploy/nats/nats.conf`):** no JetStream encryption at rest yet (turning `NATS_JS_KEY` on needs the store converted or recreated), and no `bff_platform` user (it needs its own NKey from `setup-host.sh` before mhai-web's platform BFF moves to NATS). The clinical BFF is `NATS_BFF_NKEY`.
+- **Intelligence workers on a deployed host.** Not on the demo in Plan 3 (small host, heavy models): questions there queue and fail at their deadline. Deploying the pipeline needs its own NKey, TLS, its database login with a password file and `sslmode=verify-full` (the worker refuses anything else outside development); see the sketch in `deploy/compose.yml`.
+
+**Database (Plan 3)**
+- **Postgres TLS.** The pipeline worker requires `sslmode=verify-full` outside development; core's own `DATABASE_URL` (and the demo's) still uses `sslmode=disable` on a private network. Require verified TLS for core too before Postgres leaves the host.
+- **Role-level defaults on the logins** (deploy note). `core serve` (`db.CheckLoginRole`) and the pipeline refuse a login that gets a role or hospital at connect time from `ALTER ROLE ... SET` or `PGOPTIONS`. Deployments must not set either for `core_app`, `core_provision` or `intelligence_app`.
 
 **Auth**
 - **Idempotency panic after commit** re-runs the handler on retry (fails safe); store the tombstone first. [T4 N4]
@@ -59,7 +67,6 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 
 **Repo and CI**
 - **CODEOWNERS** entries without a space (`orchestrator.py@ojies` and two more) match nothing; fix them and add `/services/core/internal/{auth,authz,db,httpx}/` and `/services/nats/`. [final m6]
-- **Restructure leftovers:** a dependabot `gomod` entry for `/services/core`; CI building `services/core/Dockerfile` and a compose smoke test; a `gofmt -l` step; `docs/specs/2026-10-27-intelligence-performance-design.md` still says `mhai/models/`. [final m7]
 
 ## Under consideration
 

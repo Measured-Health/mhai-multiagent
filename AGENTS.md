@@ -50,6 +50,7 @@ make infra                   # postgres, ollama for local runs
 make up / make down          # full compose stack
 make core-test / core-lint   # the core service (Go)
 make core-up                 # the core service in compose (postgres, nats, migrations)
+make smoke                   # end-to-end smoke: stub models, echo, core as the BFF over NATS (Docker, Go)
 ```
 
 `services/intelligence/scripts/e2e_models.py` runs the real models; it needs
@@ -60,17 +61,19 @@ a machine that can load them, and uses synthetic data only.
 The backend is the core service (Go) plus Python model services, joined by
 NATS (ADR 0010). The core service's auth, permissions, tenancy and audit
 are built (Plan 2; see services/core/README.md and services/core/openapi.yaml).
-The Python side still runs on its own, until the boundary plan moves it
-behind NATS.
+The Python side runs behind NATS as workers (Plan 3): core signs a request
+token for every call and job, and the workers verify it before any work
+(services/intelligence/README.md).
 
 ```
 services/core/        the core service (Go): API, auth, tenancy, audit, EMR
 services/nats/        NATS config: the only link from Go to Python
 services/intelligence/  the Python project (uv)
+  intelligence/boundary/        the NATS workers: token checks, operations.json, jobs, RLS database access
   intelligence/agents/          DIA, QDA, CCA, HGA (hga_nli.py), orchestrator
   intelligence/knowledge_base/  KB builder, retrievers, RAG CCA (patient scoping lives here)
   intelligence/guardrails/      L1-L4 cascade
-  intelligence/security/        PII masking, encryption (roles and audit are core's)
+  intelligence/security/        PII masking only (roles, permissions and audit are core's)
   intelligence/tools/           Ollama client, PubMed, HF helpers
   tests/security/               regression tests for the security fixes
 ```

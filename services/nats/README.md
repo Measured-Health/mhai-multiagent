@@ -13,8 +13,11 @@ Configuration for the NATS server, the only link between the core service
 The production-shaped config is [`deploy/nats/nats.conf`](../../deploy/nats/nats.conf)
 (the demo server): NKeys only, and it never includes a `*.test.conf` file.
 A production cluster config starts from it. `services/core/internal/bus/conf_test.go`
-checks that the test-only subject is only in the include, and that the
-`gateway` permissions are the same in both files.
+checks that the test-only subject is only in the include, that the
+`gateway` permissions are the same in both files, and that the demo's
+clinical BFF user (`NATS_BFF_NKEY`) has the include's permissions minus the
+test-only subjects. The demo has no worker users (the workers aren't
+deployed there in Plan 3) and no `bff_platform` yet.
 
 ## Users
 
@@ -154,7 +157,11 @@ reads other characters as syntax and a leading digit as a number. An
 undefined variable stops the server. Compose refuses to start NATS with a
 missing or placeholder value from `.env.example`, and the core service
 refuses a placeholder in its own `NATS_URL`. Each service gets only its own
-password; only the `nats` service sees them all.
+password; only the `nats` service sees them all. In dev compose, core's
+`NATS_URL` carries the gateway's, the `pipeline` and `echo` workers' their
+own; the BFF users' passwords go to mhai-web's BFF, never to core or a
+worker (`services/core/cmd/core/compose_test.go`). The smoke run
+(`.github/scripts/boundary-smoke.sh`) generates all of them for the run.
 
 ## Production
 
@@ -164,7 +171,11 @@ password; only the `nats` service sees them all.
   service only its seed file, through a secret mount (core:
   `NATS_NKEY_SEED_PATH`).
 - **TLS with `verify`** on every connection: enable the `tls {}` block,
-  with the CA that signs every service's client certificate. Core reads
+  with the CA that signs every service's client certificate, and
+  `handshake_first: 300ms`: the workers start TLS before INFO outside
+  development; INFO-first clients (core, the BFFs) get INFO after 300 ms and
+  then upgrade to TLS, so the fallback stays TLS-only (never plaintext, and
+  `verify` still applies). Core reads
   `NATS_TLS_CA_PATH`, `NATS_TLS_CERT_PATH` and `NATS_TLS_KEY_PATH` and
   refuses to start outside development without them.
 - **R3:** a three-server cluster, and `NATS_JS_REPLICAS=3` for core.
