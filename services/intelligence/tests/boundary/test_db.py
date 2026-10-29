@@ -152,6 +152,8 @@ PRODUCTION = {
     "NATS_TLS_CERT_PATH": "/run/nats/pipeline.pem",
     "NATS_TLS_KEY_PATH": "/run/nats/pipeline-key.pem",
     "NATS_NKEY_SEED_PATH": "/run/nats/pipeline.nk",
+    # Outside development the pipeline's database needs verified TLS.
+    "INTELLIGENCE_DB_URL": "postgres://db.internal:5432/mhai?sslmode=verify-full",
 }
 
 
@@ -258,16 +260,7 @@ def test_settings_need_verified_tls_to_postgres_outside_development(tmp_path: Pa
     f = tmp_path / "pw"
     f.write_text("test-only-file-password-0002\n")
     f.chmod(0o400)
-    prod = {
-        **PIPELINE,
-        "APP_ENV": "production",
-        "INTELLIGENCE_DB_PASSWORD_FILE": str(f),
-        "NATS_URL": "tls://nats:4222",
-        "NATS_NKEY_SEED_PATH": "/run/secrets/pipeline.nk",
-        "NATS_TLS_CA_PATH": "/run/ca.pem",
-        "NATS_TLS_CERT_PATH": "/run/cert.pem",
-        "NATS_TLS_KEY_PATH": "/run/key.pem",
-    }
+    prod = {**PRODUCTION, "INTELLIGENCE_DB_PASSWORD_FILE": str(f)}
     for mode in (
         "",
         "?sslmode=disable",
