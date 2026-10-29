@@ -683,6 +683,9 @@ class M4ExitCriteriaVerifier:
             "passed": lb_passed,
         })
 
+        # Audit-chain integrity is now core's, verified by TestAuditChainVerifies
+        # in services/core/internal/audit.
+
         # 8. Encryption available
         criteria.append({
             "criterion": "AES encryption operational",

@@ -2,12 +2,13 @@
 """End-to-end check of MHAI with real models.
 
 Builds a KB from synthetic patients, loads the real dense retriever,
-NLI verifier and a Qwen CCA, and drives everything through
-the orchestrator directly (core's permission and audit checks are not
-in this script; it checks the models). Checks the fixes for issues #1-#3 and measures
+NLI verifier and a Qwen CCA, and drives everything through the
+orchestrator directly. Core's identity and permission checks are not in this
+script; it checks the models. Checks the fixes for issues #1-#3 and measures
 how well the guardrails catch hallucinated responses.
 
-    python scripts/e2e_models.py --out results/ [--cca-model Qwen/Qwen2.5-1.5B-Instruct]
+    python scripts/e2e_models.py --synthetic --out results/ \
+        [--cca-model Qwen/Qwen2.5-1.5B-Instruct]
 
 Writes report.json to --out and exits non-zero if any check fails.
 Uses only synthetic data; never point it at real patient records.
@@ -487,7 +488,18 @@ def main():
         default="rule_based",
         help='"rule_based" (fast) or "llm" to generate every suite case',
     )
+    ap.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="required: confirms this runs on synthetic data only",
+    )
     args = ap.parse_args()
+    if not args.synthetic:
+        ap.exit(
+            2,
+            "refusing to run without --synthetic: this script runs the models without "
+            "core's identity and permission checks, on synthetic data only\n",
+        )
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

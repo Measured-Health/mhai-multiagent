@@ -724,7 +724,10 @@ async def test_refused_job_touches_no_database(
     subject, headers, body = env.job(qid)
     tok = headers[envelope.TOKEN]
     head, payload, sig = tok.split(".")
-    bad = sig[:-2] + ("AA" if not sig.endswith("AA") else "BB")
+    # A middle character: the last one carries only partial bits, and changing
+    # it can make the segment non-canonical ("malformed", not "signature").
+    mid = len(sig) // 2
+    bad = sig[:mid] + ("A" if sig[mid] != "A" else "B") + sig[mid + 1 :]
     headers[envelope.TOKEN] = ".".join((head, payload, bad))
     await env.send(subject, headers, body, msg_id=qid)
     dead = await env.dead_letters(1)
