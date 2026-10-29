@@ -274,3 +274,26 @@ func TestCancelPoliciesAreScoped(t *testing.T) {
 		t.Fatalf("owner cancelled an active user's question: %d %v", tag.RowsAffected(), err)
 	}
 }
+
+// Review fix 2: the audit row is always about the job (entity query, the
+// job's id); a fact's own entity and entity id are payload detail only.
+func TestDrainerEntityIsTheJob(t *testing.T) {
+	hid := seedHospital(t, "active")
+	creator := seedUser(t, hid, true, authz.RoleClinician)
+	deadline := time.Now().Add(5 * time.Minute)
+	q := seedQuery(t, hid, creator, 0, &deadline, true)
+	victim := uuid.NewString()
+	if _, err := super.Exec(context.Background(), `INSERT INTO intelligence_audit_outbox (hospital_id, query_id, action, entity, entity_id, payload)
+		VALUES ($1, $2, 'query.completed', 'user', $3, '{"decision":"PASS"}')`, hid, q, victim); err != nil {
+		t.Fatal(err)
+	}
+	drainAll(t)
+	rows := auditFor(t, "query.completed", q.String())
+	if len(rows) != 1 || *rows[0].entity != "query" || *rows[0].entityID != q.String() ||
+		rows[0].payload["fact_entity"] != "user" || rows[0].payload["fact_entity_id"] != victim {
+		t.Fatalf("rows %+v", rows)
+	}
+	if n := len(auditFor(t, "query.completed", victim)); n != 0 {
+		t.Fatal("a fact chose the audit entity")
+	}
+}

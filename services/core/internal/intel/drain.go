@@ -81,9 +81,11 @@ type outboxRow struct {
 // locks and then finds them gone, so each fact is appended once (F2).
 //
 // The actor, hospital and request id come from the job row core wrote
-// (created_by, hospital_id, request_id or JobRID), never from the fact: the
-// fact gives the action (one of the three the outbox allows), entity,
-// entity id and payload, and payload keys naming an identity (actor_id,
+// (created_by, hospital_id, request_id or JobRID), and the entity is always
+// the job (query, its id), never from the fact: the fact gives the action
+// (one of the three the outbox allows) and the payload (its own entity and
+// entity id, if other than the job, go in as fact_entity and
+// fact_entity_id), and payload keys naming an identity (actor_id,
 // hospital_id, request_id, sub) are dropped before audit.Write's
 // sensitive-key check. A payload that fails that check is replaced by
 // {query_id, payload_refused: true}, so one bad fact can't hold the outbox
@@ -157,12 +159,6 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 		rid = *o.requestID
 	}
 	e.RequestID = JobRID(o.queryID, rid)
-	if o.entity != nil && *o.entity != "" {
-		e.Entity = *o.entity
-	}
-	if o.entityID != nil && *o.entityID != "" {
-		e.EntityID = *o.entityID
-	}
 	payload := map[string]any{}
 	if len(o.payload) > 0 {
 		if err := json.Unmarshal(o.payload, &payload); err != nil || payload == nil {
@@ -171,6 +167,14 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 	}
 	for _, k := range identityKeys {
 		delete(payload, k)
+	}
+	// The row is always about the job (entity query, entity id the job's):
+	// a fact's own entity, if another, is detail in the payload only.
+	if o.entity != nil && *o.entity != "" && *o.entity != e.Entity {
+		payload["fact_entity"] = *o.entity
+	}
+	if o.entityID != nil && *o.entityID != "" && *o.entityID != e.EntityID {
+		payload["fact_entity_id"] = *o.entityID
 	}
 	raw, err := json.Marshal(payload)
 	if _, bad := logx.SensitiveKeyInJSON(raw); err != nil || bad {
