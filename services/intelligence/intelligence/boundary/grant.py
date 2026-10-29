@@ -104,7 +104,7 @@ class GrantClient:
         data = req.SerializeToString(deterministic=True)
         del req
         headers = {envelope.SCHEMA: REQUEST_SCHEMA}
-        telemetry.inject(headers)  # traceparent/tracestate only; core's span follows ours
+        telemetry.inject(headers)  # traceparent only (never tracestate); core's span follows ours
         try:
             msg = await self._nc.request(self.subject, data, timeout=limit, headers=headers)
         except nats.errors.NoRespondersError:

@@ -287,6 +287,48 @@ def test_plaintext_endpoint_refused_unless_loopback_or_opted_in() -> None:
         telemetry.setup(ep, allow_plaintext=opt)()
 
 
+def test_start_warns_on_insecure_outside_development_and_gives_the_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Carried from T14: OTEL_EXPORTER_OTLP_INSECURE outside development is
+    warned about, and a refused endpoint turns telemetry off with the reason
+    (never the endpoint itself); the worker still starts."""
+    caplog.set_level(logging.WARNING, logger="intelligence.boundary.telemetry")
+    ep = "http://collector.example:4317"
+    stop = telemetry.start(
+        service="echo",
+        development=False,
+        environ={"OTEL_EXPORTER_OTLP_ENDPOINT": ep, "OTEL_EXPORTER_OTLP_INSECURE": "true"},
+    )
+    assert stop is not None
+    stop()
+    assert telemetry.INSECURE_OUTSIDE_DEVELOPMENT in caplog.text
+    caplog.clear()
+
+    stop = telemetry.start(
+        service="echo", development=False, environ={"OTEL_EXPORTER_OTLP_ENDPOINT": ep}
+    )
+    assert stop is None
+    assert "telemetry is off: a plaintext OTLP endpoint must be loopback" in caplog.text
+    assert "collector.example" not in caplog.text
+    caplog.clear()
+
+    # Development allows plaintext and warns about nothing.
+    stop = telemetry.start(
+        service="echo",
+        development=True,
+        environ={"OTEL_EXPORTER_OTLP_ENDPOINT": ep, "OTEL_EXPORTER_OTLP_INSECURE": "true"},
+    )
+    assert stop is not None
+    stop()
+    assert caplog.text == ""
+    # Off without an endpoint, quietly.
+    stop = telemetry.start(service="echo", development=False, environ={})
+    assert stop is not None
+    stop()
+    assert caplog.text == ""
+
+
 def test_trace_headers_are_not_security_headers() -> None:
     for h in ("traceparent", "tracestate", "baggage"):
         assert h not in {g.lower() for g in GUARDED}

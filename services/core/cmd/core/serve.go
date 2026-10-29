@@ -227,6 +227,16 @@ func reloadTrustedOnHUP(ctx context.Context, t *intel.TrustedKeys, log *slog.Log
 	}
 }
 
+// telemetryWarnings are the start-up warnings about the telemetry
+// settings: OTEL_EXPORTER_OTLP_INSECURE outside development sends spans
+// and metrics in plaintext to a non-loopback collector.
+func telemetryWarnings(cfg config.Config) []string {
+	if cfg.OTLPEndpoint != "" && cfg.OTLPInsecure && !cfg.Development() {
+		return []string{"core: OTEL_EXPORTER_OTLP_INSECURE is on outside development: traces and metrics may leave the host in plaintext"}
+	}
+	return nil
+}
+
 func serve() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -241,9 +251,14 @@ func serve() error {
 	// Telemetry is off unless OTEL_EXPORTER_OTLP_ENDPOINT is set, and a bad
 	// endpoint turns it off with a warning: observability never keeps the
 	// service from starting.
+	for _, w := range telemetryWarnings(cfg) {
+		log.Warn(w)
+	}
 	shutdownTelemetry, terr := telemetry.Setup(ctx, cfg.OTLPEndpoint, telemetry.AllowPlaintext(cfg.OTLPInsecure || cfg.Development()))
 	if terr != nil {
-		log.Warn("core: telemetry is off: OTEL_EXPORTER_OTLP_ENDPOINT is not usable")
+		// The reason is one of telemetry's fixed messages (a plaintext
+		// endpoint refused, say); it never carries the endpoint itself.
+		log.Warn("core: telemetry is off: OTEL_EXPORTER_OTLP_ENDPOINT is not usable", "reason", terr.Error())
 	} else {
 		defer func() {
 			c, cancel := context.WithTimeout(context.Background(), 5*time.Second)

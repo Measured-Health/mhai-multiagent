@@ -27,6 +27,7 @@ new trace, and baggage is neither read nor written.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 import re
 import time
@@ -316,6 +317,43 @@ def setup(
     return shutdown
 
 
+_log = logging.getLogger("intelligence.boundary.telemetry")
+
+
+class EndpointError(ValueError):
+    """The exporter endpoint is refused. The message is fixed text that
+    names the setting, never the endpoint, so it may be logged."""
+
+
+INSECURE_OUTSIDE_DEVELOPMENT = (
+    "OTEL_EXPORTER_OTLP_INSECURE is on outside development: "
+    "traces and metrics may leave the host in plaintext"
+)
+
+
+def start(
+    *, service: str, development: bool, environ: Mapping[str, str] | None = None
+) -> Callable[[], None] | None:
+    """The worker's telemetry at start-up: ``setup`` from the environment,
+    with plaintext allowed in development. It warns when
+    OTEL_EXPORTER_OTLP_INSECURE is on outside development, and when the
+    endpoint is refused it turns telemetry off with the reason (a plaintext
+    endpoint refused, say), never keeping the worker from starting.
+    Returns the shutdown, or None when telemetry is off for that reason."""
+    env = os.environ if environ is None else environ
+    endpoint = env.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    insecure = env.get("OTEL_EXPORTER_OTLP_INSECURE", "").strip().lower() == "true"
+    if endpoint and insecure and not development:
+        _log.warning(INSECURE_OUTSIDE_DEVELOPMENT)
+    try:
+        return setup(endpoint, service=service, allow_plaintext=development or insecure)
+    except EndpointError as e:
+        _log.warning("telemetry is off: %s", e)
+    except ValueError:
+        _log.warning("telemetry is off: OTEL_EXPORTER_OTLP_ENDPOINT is not usable")
+    return None
+
+
 def _loopback(host: str) -> bool:
     if host.lower() == "localhost":
         return True
@@ -330,10 +368,10 @@ def _otlp(endpoint: str, allow_plaintext: bool = False) -> tuple[SpanExporter, M
         endpoint = "http://" + endpoint
     u = urlparse(endpoint)
     if u.scheme not in ("http", "https") or not u.netloc:
-        raise ValueError("OTEL_EXPORTER_OTLP_ENDPOINT is not a valid URL or host:port")
+        raise EndpointError("OTEL_EXPORTER_OTLP_ENDPOINT is not a valid URL or host:port")
     insecure = u.scheme == "http"
     if insecure and not allow_plaintext and not _loopback(u.hostname or ""):
-        raise ValueError(
+        raise EndpointError(
             "a plaintext OTLP endpoint must be loopback; use https:// or OTEL_EXPORTER_OTLP_INSECURE=true"
         )
     from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter

@@ -985,14 +985,8 @@ async def run_service(settings: WorkerSettings) -> None:
     without one it takes no job and health says database_ready false."""
     verifier, trusted = build_verifier(settings)
     # Off unless OTEL_EXPORTER_OTLP_ENDPOINT is set; a bad endpoint turns it
-    # off with a warning, never keeps the worker from starting.
-    try:
-        stop_telemetry = telemetry.setup(
-            service=settings.service, allow_plaintext=settings.development or None
-        )
-    except ValueError:
-        log.warning("telemetry is off: OTEL_EXPORTER_OTLP_ENDPOINT is not usable")
-        stop_telemetry = None
+    # off with a warning and the reason, never keeps the worker from starting.
+    stop_telemetry = telemetry.start(service=settings.service, development=settings.development)
     database = await open_database(settings)
     runner = None
     try:
