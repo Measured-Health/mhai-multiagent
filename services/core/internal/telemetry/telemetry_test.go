@@ -271,3 +271,90 @@ func TestHTTPServerSpanUsesPatternAndTraceparent(t *testing.T) {
 		}
 	}
 }
+
+// tracestate is caller-controlled free text: it is not read from a header,
+// not injected, and stripped from every exported span, parent and link even
+// when a context somehow carries one.
+func TestTracestateNeverExported(t *testing.T) {
+	exp, _ := setup(t)
+	h := nats.Header{}
+	h.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	h["tracestate"] = []string{"vendor=" + marker}
+	ctx := Extract(context.Background(), h)
+	if trace.SpanContextFromContext(ctx).TraceState().Len() != 0 {
+		t.Fatal("tracestate extracted")
+	}
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	req.Header.Set("tracestate", "vendor="+marker)
+	hs := HTTPServer("GET", "/api/v1/x", nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		out := nats.Header{}
+		Inject(r.Context(), out)
+		if _, ok := out["tracestate"]; ok {
+			t.Error("tracestate injected")
+		}
+	}))
+	hs.ServeHTTP(httptest.NewRecorder(), req)
+
+	// Defence in depth: a context that does carry one.
+	ts, _ := trace.ParseTraceState("vendor=" + strings.ToLower("x"))
+	tid, _ := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	sid, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
+	sc := trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: 1, Remote: true, TraceState: ts})
+	pctx := trace.ContextWithRemoteSpanContext(context.Background(), sc)
+	_, sp := Tracer().Start(pctx, "handle x", trace.WithLinks(trace.Link{SpanContext: sc}))
+	sp.End()
+	spans := exp.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("spans %d", len(spans))
+	}
+	for _, s := range spans {
+		if s.SpanContext.TraceState().Len() != 0 || s.Parent.TraceState().Len() != 0 {
+			t.Fatalf("tracestate on %s", s.Name)
+		}
+		for _, l := range s.Links {
+			if l.SpanContext.TraceState().Len() != 0 {
+				t.Fatal("tracestate on a link")
+			}
+		}
+	}
+	if len(spans[1].Links) != 1 {
+		t.Fatal("link lost")
+	}
+}
+
+// A caller can't switch tracing off with a traceparent whose flags are 00.
+func TestUnsampledTraceparentStillTraced(t *testing.T) {
+	exp, _ := setup(t)
+	h := HTTPServer("GET", "/api/v1/x", nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if len(exp.GetSpans()) != 1 {
+		t.Fatal("an unsampled traceparent suppressed the span")
+	}
+}
+
+// A plaintext endpoint is refused unless it is loopback or opted in.
+func TestPlaintextEndpointRefused(t *testing.T) {
+	for _, ep := range []string{"http://collector.example:4317", "collector.example:4317", "10.0.0.5:4317"} {
+		if _, err := Setup(context.Background(), ep); err == nil {
+			t.Fatalf("%s accepted", ep)
+		}
+	}
+	for _, c := range []struct {
+		ep   string
+		opts []Option
+	}{
+		{"127.0.0.1:4317", nil}, {"http://localhost:4317", nil}, {"http://[::1]:4317", nil},
+		{"https://collector.example:4317", nil}, {"http://collector.example:4317", []Option{AllowPlaintext(true)}},
+	} {
+		sd, err := Setup(context.Background(), c.ep, c.opts...)
+		if err != nil {
+			t.Fatalf("%s: %v", c.ep, err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = sd(ctx)
+		cancel()
+	}
+}

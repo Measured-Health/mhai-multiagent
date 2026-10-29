@@ -50,6 +50,9 @@ type Config struct {
 	// OTLPEndpoint is where traces and metrics go (OTEL_EXPORTER_OTLP_ENDPOINT,
 	// OTLP/gRPC: a URL or host:port). Empty: telemetry is off.
 	OTLPEndpoint string
+	// OTLPInsecure (OTEL_EXPORTER_OTLP_INSECURE=true) allows a plaintext
+	// non-loopback endpoint; development allows it too.
+	OTLPInsecure bool
 }
 
 // NATSTLS names the PEM files for TLS to NATS with a client certificate.
@@ -76,6 +79,7 @@ func Load() (Config, error) {
 		RequestTrustedKeysPath: os.Getenv("REQUEST_TRUSTED_KEYS_PATH"),
 		BreachedListPath:       os.Getenv("BREACHED_LIST_PATH"),
 		OTLPEndpoint:           strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
+		OTLPInsecure:           strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")), "true"),
 		NATSTLS: NATSTLS{
 			CAPath:   os.Getenv("NATS_TLS_CA_PATH"),
 			CertPath: os.Getenv("NATS_TLS_CERT_PATH"),

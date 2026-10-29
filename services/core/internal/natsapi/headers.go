@@ -22,8 +22,9 @@ const (
 //   - X-MHAI-Audience: the audience is the subject's (httpx.ViaNATS);
 //   - X-Request-ID and Mhai-Request-Id: core makes its own request id, so
 //     none can be forged into the audit chain (plan departure 15);
-//   - baggage: never propagated (spec §10.3); only traceparent and
-//     tracestate pass, and the server span treats them as untrusted;
+//   - baggage: never propagated (spec §10.3); only traceparent
+//     passes (tracestate is free text up to 8 KB and is dropped too), and
+//     the server span treats it as untrusted;
 //   - Cookie, Host, X-Forwarded-*, Forwarded, X-Real-IP, hop-by-hop
 //     (Connection, Transfer-Encoding, TE, Upgrade, ...) and Content-Length
 //     (set from the body).
@@ -34,7 +35,6 @@ var RequestHeaders = []string{
 	"If-None-Match",
 	"X-MHAI-Client-IP",
 	"traceparent",
-	"tracestate",
 }
 
 // ResponseHeaders are the only response headers sent back to the BFF,

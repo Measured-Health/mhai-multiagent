@@ -1298,6 +1298,7 @@ func TestGrantSpan(t *testing.T) {
 			m.Header.Set("traceparent", traceparent)
 		}
 		m.Header.Set("baggage", "k="+marker)
+		m.Header.Set("tracestate", "k="+marker)
 		rep, err := ec.RequestMsg(m, 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
@@ -1324,6 +1325,9 @@ func TestGrantSpan(t *testing.T) {
 	names := map[string]bool{}
 	for _, sp := range spans {
 		names[sp.Name] = true
+		if sp.SpanContext.TraceState().Len() != 0 || sp.Parent.TraceState().Len() != 0 {
+			t.Errorf("tracestate on %q", sp.Name)
+		}
 		if sp.SpanKind.String() != "server" {
 			t.Errorf("kind %s", sp.SpanKind)
 		}

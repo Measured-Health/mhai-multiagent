@@ -46,6 +46,7 @@ func TestMarkerNotInSpansOrLogs(t *testing.T) {
 	hdr := map[string]string{
 		"traceparent": "00-" + traceID + "-00f067aa0ba902b7-01",
 		"baggage":     "patient=" + marker,
+		"tracestate":  "vendor=" + marker,
 	}
 	r := e.do(t, "POST", "/queries", access, question("Synthetic question "+marker+"?"), hdr)
 	if r.code != http.StatusAccepted {
@@ -69,8 +70,8 @@ func TestMarkerNotInSpansOrLogs(t *testing.T) {
 		t.Fatalf("job headers: %v", ms[0].Headers())
 	}
 	for k := range ms[0].Headers() {
-		if strings.EqualFold(k, "baggage") {
-			t.Fatal("baggage on the job")
+		if strings.EqualFold(k, "baggage") || strings.EqualFold(k, "tracestate") {
+			t.Fatal("baggage or tracestate on the job")
 		}
 	}
 
@@ -128,6 +129,9 @@ func TestMarkerNotInSpansOrLogs(t *testing.T) {
 	}
 	secrets := []string{marker, access, reqToken, pw}
 	for _, s := range spans {
+		if s.SpanContext.TraceState().Len() != 0 || s.Parent.TraceState().Len() != 0 {
+			t.Fatalf("tracestate on span %q", s.Name)
+		}
 		texts := []string{s.Name, s.Status.Description}
 		for _, kv := range s.Attributes {
 			texts = append(texts, string(kv.Key), kv.Value.Emit())

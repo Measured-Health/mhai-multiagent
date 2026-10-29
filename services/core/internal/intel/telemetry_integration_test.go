@@ -59,7 +59,7 @@ func TestRequestSpanAndHeaders(t *testing.T) {
 	}
 	for k, vs := range rs[0].header {
 		switch strings.ToLower(k) {
-		case "mhai-request-token", "mhai-schema", "mhai-request-id", "traceparent", "tracestate":
+		case "mhai-request-token", "mhai-schema", "mhai-request-id", "traceparent":
 		default:
 			t.Errorf("unexpected header %q on the request", k)
 		}

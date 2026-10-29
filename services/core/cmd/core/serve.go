@@ -241,7 +241,7 @@ func serve() error {
 	// Telemetry is off unless OTEL_EXPORTER_OTLP_ENDPOINT is set, and a bad
 	// endpoint turns it off with a warning: observability never keeps the
 	// service from starting.
-	shutdownTelemetry, terr := telemetry.Setup(ctx, cfg.OTLPEndpoint)
+	shutdownTelemetry, terr := telemetry.Setup(ctx, cfg.OTLPEndpoint, telemetry.AllowPlaintext(cfg.OTLPInsecure || cfg.Development()))
 	if terr != nil {
 		log.Warn("core: telemetry is off: OTEL_EXPORTER_OTLP_ENDPOINT is not usable")
 	} else {

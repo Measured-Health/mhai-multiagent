@@ -14,6 +14,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,7 +27,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
-	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -39,7 +39,28 @@ const (
 	scopeName   = "mhai/core"
 )
 
-var errEndpoint = errors.New("telemetry: the exporter endpoint is not a valid URL or host:port")
+var (
+	errEndpoint  = errors.New("telemetry: the exporter endpoint is not a valid URL or host:port")
+	errPlaintext = errors.New("telemetry: a plaintext (http:// or bare host:port) exporter endpoint must be loopback; use https:// or opt in (OTEL_EXPORTER_OTLP_INSECURE)")
+)
+
+// Option configures Setup.
+type Option func(*options)
+
+type options struct{ plaintext bool }
+
+// AllowPlaintext lets Setup send to a non-loopback endpoint without TLS
+// (development, or a collector on a trusted private network).
+func AllowPlaintext(allow bool) Option { return func(o *options) { o.plaintext = allow } }
+
+// loopbackHost reports whether host (no port) is this machine.
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
 
 type providers struct {
 	tp trace.TracerProvider
@@ -71,7 +92,11 @@ func Tracer() trace.Tracer { return get().tp.Tracer(scopeName) }
 // request: exporting is in the background and drops on error.
 //
 // Spans go through the attribute allow-list before the exporter.
-func Setup(ctx context.Context, endpoint string) (shutdown func(context.Context) error, err error) {
+func Setup(ctx context.Context, endpoint string, opts ...Option) (shutdown func(context.Context) error, err error) {
+	var o options
+	for _, f := range opts {
+		f(&o)
+	}
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		return func(context.Context) error { return nil }, nil
@@ -82,6 +107,9 @@ func Setup(ctx context.Context, endpoint string) (shutdown func(context.Context)
 	u, perr := url.Parse(endpoint)
 	if perr != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, errEndpoint
+	}
+	if u.Scheme == "http" && !o.plaintext && !loopbackHost(u.Hostname()) {
+		return nil, errPlaintext
 	}
 	texp, err := otlptracegrpc.New(ctx, otlptracegrpc.WithEndpointURL(endpoint))
 	if err != nil {
@@ -104,7 +132,9 @@ func SetupWith(exp sdktrace.SpanExporter, reader sdkmetric.Reader) (shutdown fun
 
 func install(traceOpt sdktrace.TracerProviderOption, reader sdkmetric.Reader) (func(context.Context) error, error) {
 	res := resource.NewSchemaless(attribute.String("service.name", serviceName))
-	tp := sdktrace.NewTracerProvider(traceOpt, sdktrace.WithResource(res))
+	// AlwaysSample ignores a remote parent's sampled flag: a caller cannot
+	// switch our tracing off with a traceparent ending in 00.
+	tp := sdktrace.NewTracerProvider(traceOpt, sdktrace.WithResource(res), sdktrace.WithSampler(sdktrace.AlwaysSample()))
 	mopts := []sdkmetric.Option{sdkmetric.WithResource(res)}
 	if reader != nil {
 		mopts = append(mopts, sdkmetric.WithReader(reader))
@@ -219,7 +249,7 @@ func Record(ctx context.Context, name string, start time.Time, code string, attr
 func HTTPServer(method, pattern string, rid func(context.Context) string, next http.Handler) http.Handler {
 	name := "api " + method + " " + pattern
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := Propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx := Propagator.Extract(r.Context(), CarrierOf(r.Header))
 		ctx, span := Start(ctx, trace.SpanKindServer, name)
 		if rid != nil {
 			span.SetAttributes(attribute.String("request_id", rid(ctx)))

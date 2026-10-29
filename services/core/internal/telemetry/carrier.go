@@ -2,36 +2,33 @@ package telemetry
 
 import (
 	"context"
+	"net/http"
 	"strings"
 
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel/propagation"
 )
 
-// Propagator carries W3C trace context only (traceparent, tracestate).
+// Propagator carries W3C trace context only (traceparent only).
 // Baggage is never propagated: it is caller-controlled free text.
 var Propagator propagation.TextMapPropagator = propagation.TraceContext{}
 
-// The two trace headers. They are not security headers: no check reads
-// them, and the worker's duplicate-header refusal does not list them.
-const (
-	HeaderTraceparent = "traceparent"
-	HeaderTracestate  = "tracestate"
-)
+// The one trace header. It is not a security header: no check reads it, and
+// the worker's duplicate-header refusal does not list it. tracestate is
+// deliberately absent: it is caller-controlled free text (up to 8 KB) that
+// would otherwise be exported and re-injected.
+const HeaderTraceparent = "traceparent"
 
 // Header adapts a NATS header to propagation.TextMapCarrier. Only
-// traceparent and tracestate are read or written, by any spelling of the
-// name; every other key (baggage, Authorization, Mhai-*) is invisible
-// through it. A trace header given more than once reads as absent, so an
-// ambiguous message starts a new trace.
+// traceparent is read or written, by any spelling of the name; every other
+// key (tracestate, baggage, Authorization, Mhai-*) is invisible through it.
+// A traceparent given more than once reads as absent, so an ambiguous
+// message starts a new trace.
 type Header nats.Header
 
 func traceKey(k string) (string, bool) {
-	switch {
-	case strings.EqualFold(k, HeaderTraceparent):
+	if strings.EqualFold(k, HeaderTraceparent) {
 		return HeaderTraceparent, true
-	case strings.EqualFold(k, HeaderTracestate):
-		return HeaderTracestate, true
 	}
 	return "", false
 }
@@ -71,19 +68,27 @@ func (h Header) Set(key, value string) {
 // Keys lists the trace headers present.
 func (h Header) Keys() []string {
 	var out []string
-	for _, k := range []string{HeaderTraceparent, HeaderTracestate} {
-		if h.Get(k) != "" {
-			out = append(out, k)
-		}
+	if h.Get(HeaderTraceparent) != "" {
+		out = append(out, HeaderTraceparent)
 	}
 	return out
 }
 
-// Inject writes ctx's span context into h.
+// Inject writes ctx's traceparent into h.
 func Inject(ctx context.Context, h nats.Header) {
 	if h != nil {
 		Propagator.Inject(ctx, Header(h))
 	}
+}
+
+// CarrierOf returns a carrier holding only the traceparent of an HTTP
+// header, for ingress (tracestate and baggage are never read).
+func CarrierOf(h http.Header) propagation.TextMapCarrier {
+	m := propagation.MapCarrier{}
+	if vs := h.Values(HeaderTraceparent); len(vs) == 1 {
+		m.Set(HeaderTraceparent, vs[0])
+	}
+	return m
 }
 
 // Extract returns ctx with the remote span context in h, if it is valid;

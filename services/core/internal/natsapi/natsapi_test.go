@@ -195,7 +195,6 @@ func TestUnlistedHeadersDropped(t *testing.T) {
 	want := map[string]string{
 		"Authorization": "Bearer synthetic-token", "Content-Type": "application/json", "Idempotency-Key": "key-1",
 		"If-None-Match": `"v1"`, "X-Mhai-Client-Ip": "198.51.100.4", "Traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
-		"Tracestate": "vendor=synthetic",
 	}
 	for k := range s.header {
 		if _, ok := want[k]; !ok {

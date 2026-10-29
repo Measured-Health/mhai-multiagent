@@ -7,6 +7,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // The attribute allow-list (spec §10.3, preflight F15). It is a filtering
@@ -189,6 +190,12 @@ func (s filtered) Events() []sdktrace.Event {
 	return out
 }
 
+// bare removes the caller-controlled TraceState from a span context.
+func bare(sc trace.SpanContext) trace.SpanContext { return sc.WithTraceState(trace.TraceState{}) }
+
+func (s filtered) SpanContext() trace.SpanContext { return bare(s.ReadOnlySpan.SpanContext()) }
+func (s filtered) Parent() trace.SpanContext      { return bare(s.ReadOnlySpan.Parent()) }
+
 func (s filtered) DroppedAttributes() int { return 0 }
 func (s filtered) DroppedEvents() int     { return 0 }
 
@@ -196,7 +203,7 @@ func (s filtered) Links() []sdktrace.Link {
 	in := s.ReadOnlySpan.Links()
 	out := make([]sdktrace.Link, len(in))
 	for i, l := range in {
-		out[i] = sdktrace.Link{SpanContext: l.SpanContext}
+		out[i] = sdktrace.Link{SpanContext: bare(l.SpanContext)}
 	}
 	return out
 }
