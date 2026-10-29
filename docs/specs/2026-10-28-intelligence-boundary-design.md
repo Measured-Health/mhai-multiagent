@@ -709,7 +709,7 @@ departures (`docs/plans/2026-10-28-plan-3-intelligence-boundary.md`).
   dead-letter consumer use `mhai_jobs` (column-level `SELECT`/`UPDATE` on
   `clinical_queries`, its own audit actions only); the drainer
   (`mhai_audit_drain`) also reads `clinical_queries (id, hospital_id,
-  created_by, request_id)` and may call `audit_chain_head()` and use the
+  created_by, request_id, status)` and may call `audit_chain_head()` and use the
   `audit_log` sequence (§10.2 says "nothing else").
 - **No consumer `BackOff`** [4]. A `BackOff` would replace `ack_wait` as the
   first redelivery timer and break the 20 s `+WIP` rule, so the consumer has
@@ -744,4 +744,22 @@ departures (`docs/plans/2026-10-28-plan-3-intelligence-boundary.md`).
   resets each connection with `DISCARD ALL`, which drops server-side
   prepared statements, so the worker uses none.
 - **The pipeline's database needs `sslmode=verify-full`** outside
-  development (an addition to §8.2).
+  development (an addition to §8.2). So does core's (`DATABASE_URL`), and
+  core needs `NATS_JS_REPLICAS` 3 or more there unless
+  `CORE_ALLOW_SINGLE_NODE=true` (logged as a warning); there is no escape
+  for the TLS.
+- **`JOBS` `max_age` is 1 hour** (§9.2 says 7 days): no job lives past its
+  10-minute deadline.
+- **Closed audit payloads** (§10.2): each job action (`query.completed`,
+  `query.failed`, `query.cancelled`) and each request/reply fact action has
+  a closed payload schema in core (closed-set codes, ids of a fixed shape,
+  bounded lists and integers); anything else is recorded as
+  `{query_id, payload_refused}` (jobs) or refused (request/reply). A job
+  fact is appended only if its action matches the job's status.
+- **Deactivation race** (§8.3, §9.4): core re-checks the row and its
+  hospital before publishing, and the worker may move rows of an active
+  hospital only (`worker_hospital_active`, 00009), reading its own
+  hospital's `id` and `status` for it.
+- **`mhai_gateway` on the pipeline tables:** `clinical_queries` `INSERT`
+  and `UPDATE (published_at)`; `clinical_decisions` and `hga_evaluations`
+  `SELECT` only (00008).
