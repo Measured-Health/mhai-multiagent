@@ -157,6 +157,8 @@ jobs:
         with:
           go-version: "1.24"
           cache-dependency-path: services/core/go.mod
+      - name: Formatted (gofmt)
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
       - name: Vet
         run: go vet ./...
       - name: Staticcheck
@@ -247,7 +249,7 @@ jobs:
     needs: [image]
     runs-on: ubuntu-latest  # ships Docker and Compose
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
@@ -276,6 +278,10 @@ jobs:
           cache-from: type=gha
       - name: Build the core image
         run: docker build -t mhai-core:local services/core
+      # The demo deploy's pre-migration check, against a throwaway Postgres
+      # with core's migrations (fails closed on every error).
+      - name: Pre-migration check tests
+        run: .github/scripts/premigrate-check-test.sh
       - name: Smoke test
         run: .github/scripts/boundary-smoke.sh
 
