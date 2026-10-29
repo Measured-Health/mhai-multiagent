@@ -290,8 +290,9 @@ func TestWorkerGrantsNarrowed(t *testing.T) {
 	deny("update weights", `UPDATE guardrail_weights SET alpha = 1`)
 	deny("delete weights", `DELETE FROM guardrail_weights`)
 
-	// Nothing else.
-	for _, tbl := range []string{"users", "sessions", "audit_log", "hospitals", "user_roles", "idempotency_keys",
+	// Nothing else (hospitals: its own row's id and status only,
+	// TestWorkerRefusesInactiveHospital).
+	for _, tbl := range []string{"users", "sessions", "audit_log", "user_roles", "idempotency_keys",
 		"feedback_events", "refresh_tokens", "audit_checkpoints"} {
 		deny("select "+tbl, `SELECT 1 FROM `+tbl)
 	}
@@ -751,6 +752,55 @@ func TestEnsureLoginResetsRoleDefaults(t *testing.T) {
 		if err != nil || who != name || hid != "" {
 			t.Fatalf("%s: connects as %q hospital %q (%v)", role, who, hid, err)
 		}
+	}
+}
+
+// Final review I-3: the worker never moves a question of a hospital that
+// isn't active (a row that committed after the hospital's deactivation
+// trigger ran, so the trigger never cancelled it): not the claim, not a
+// checkpoint, not the completion. For that it may read its own hospital's
+// id and status, and nothing else of hospitals.
+func TestWorkerRefusesInactiveHospital(t *testing.T) {
+	_, super := shared(t)
+	ctx := context.Background()
+	a, qa := seedHospital(t, super, uniqueCode("V"))
+	b, _ := seedHospital(t, super, uniqueCode("U"))
+	// While a is active, the claim works (rolled back: inTx).
+	if n, err := asWorker(ctx, super, a, `UPDATE clinical_queries SET status = 'running', attempts = attempts + 1 WHERE id = $1 AND status = 'queued'`, qa); err != nil || n != 1 {
+		t.Fatalf("claim in an active hospital: %d %v", n, err)
+	}
+	if _, err := super.Exec(ctx, `UPDATE hospitals SET status = 'deactivated' WHERE id = $1`, a); err != nil {
+		t.Fatal(err)
+	}
+	// Rows the trigger never saw: what the race leaves behind.
+	queued, running := uuid.New(), uuid.New()
+	if _, err := super.Exec(ctx, `INSERT INTO clinical_queries (id, hospital_id, clinical_question, urgency, status, attempts)
+		VALUES ($1, $3, 'synthetic question', 'routine', 'queued', 0), ($2, $3, 'synthetic question', 'routine', 'running', 1)`,
+		queued, running, a); err != nil {
+		t.Fatal(err)
+	}
+	qa = queued
+	for what, q := range map[string]string{
+		"claim":      `UPDATE clinical_queries SET status = 'running', attempts = attempts + 1 WHERE id = $1`,
+		"checkpoint": `UPDATE clinical_queries SET progress = 0.5 WHERE id = $1`,
+		"fail":       `UPDATE clinical_queries SET status = 'failed', error = 'internal' WHERE id = $1`,
+	} {
+		for _, id := range []uuid.UUID{qa, running} {
+			if n, err := asWorker(ctx, super, a, q, id); err != nil || n != 0 {
+				t.Fatalf("worker %s in a deactivated hospital: %d rows, %v", what, n, err)
+			}
+		}
+	}
+	// Its own hospital's id and status only.
+	if n, err := asWorker(ctx, super, a, `SELECT id, status FROM hospitals`); err != nil || n != 1 {
+		t.Fatalf("worker reading its hospital's status: %d %v", n, err)
+	}
+	if n, err := asWorker(ctx, super, a, `SELECT id FROM hospitals WHERE id = $1`, b); err != nil || n != 0 {
+		t.Fatalf("worker sees another hospital: %d %v", n, err)
+	}
+	for _, q := range []string{`SELECT name FROM hospitals`, `SELECT * FROM hospitals`, `UPDATE hospitals SET status = 'active'`} {
+		_, err := asWorker(ctx, super, a, q)
+		requireDenied(t, err, "worker "+q)
 	}
 }
 

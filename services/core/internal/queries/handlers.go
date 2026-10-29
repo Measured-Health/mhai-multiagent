@@ -144,9 +144,15 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, code)
 		return
 	}
+	if afterCommit != nil {
+		afterCommit()
+	}
 	d.publish(ctx, p, rid, id, deadline)
 	httpx.JSON(w, http.StatusAccepted, QueryCreated{QueryID: id.String(), Status: "queued"})
 }
+
+// afterCommit is a test hook (export_test.go): nil in production.
+var afterCommit func()
 
 var (
 	errInsert   = errors.New("queries: insert failed")
@@ -154,12 +160,32 @@ var (
 )
 
 // publish publishes the job after the commit, as the principal (their
-// current roles), and marks the row published. Failures are logged by ids
+// current roles), and marks the row published; first it re-checks the row
+// is still queued and the hospital still active. Failures are logged by ids
 // and left to the sweeper (spec §9.2), which republishes an unpublished
 // row after 10 s; JetStream drops a duplicate within its window.
 func (d Deps) publish(ctx context.Context, p authz.Principal, rid string, id uuid.UUID, deadline time.Time) {
 	// The answer is already decided: finish even if the client went away.
 	ctx = context.WithoutCancel(ctx)
+	// Final review I-3: re-check after the commit that the row is still
+	// queued and its hospital still active. A deactivation whose trigger
+	// (00009) ran before this row committed couldn't cancel it, and the
+	// submit's FOR SHARE locks the user, not the hospital. Such a row is
+	// left unpublished for the sweeper, which re-checks the account and
+	// hospital and cancels it (account_unusable); the worker refuses to
+	// claim it if a publish slips past this check.
+	var live bool
+	if err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM clinical_queries q JOIN hospitals h ON h.id = q.hospital_id
+			WHERE q.id = $1 AND q.status = 'queued' AND h.status = 'active')`, id).Scan(&live)
+	}); err != nil {
+		d.log().Warn("queries: pre-publish check failed; the sweeper will", "query_id", id.String(), "request_id", rid)
+		return
+	}
+	if !live {
+		d.log().Info("queries: not published: cancelled or hospital deactivated", "query_id", id.String(), "request_id", rid)
+		return
+	}
 	caller := intel.FromPrincipal(p, intel.JobRID(id, rid))
 	if err := d.Intel.PublishJob(ctx, caller, RunQuery, id, &intelpb.RunQueryJob{QueryId: id.String()}, deadline); err != nil {
 		d.log().Warn("queries: job not published; the sweeper will", "query_id", id.String(), "request_id", rid)

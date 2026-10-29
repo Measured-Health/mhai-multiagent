@@ -53,6 +53,7 @@ pytestmark = pytest.mark.boundary
 
 HOSPITAL_A = "a11a11a1-0000-4000-8000-0000000000a1"
 HOSPITAL_B = "b11b11b1-0000-4000-8000-0000000000b1"
+HOSPITAL_C = "c11c11c1-0000-4000-8000-0000000000c1"  # deactivated
 MARKER = "SYNTHETIC-PHI-MARKER-7f3a"
 FAST_NAKS = (0.2, 0.2, 0.2, 0.2)
 
@@ -555,6 +556,34 @@ async def test_two_workers_race_one_decision(make_env: MakeEnv, postgres: Postgr
     assert await count(postgres, "decisions", qid) == 1
     assert await count(postgres, "outbox", qid, "query.completed") == 1
     assert (await outbox(postgres, qid))[0][2]["attempts"] == 2
+    assert await env.settled()
+
+
+async def test_deactivated_hospital_is_never_claimed(make_env: MakeEnv, postgres: Postgres) -> None:
+    """Final review I-3: a question whose row committed after its hospital's
+    deactivation trigger ran (00009 couldn't see the row, so couldn't cancel
+    it) is never claimed. The row stays queued (core's dead-letter consumer
+    or deadline sweep ends it), no model runs, nothing is written; the last
+    delivery dead-letters it."""
+    env = await make_env(max_deliver=1)
+    async with await su(postgres) as conn:
+        await conn.execute(
+            "INSERT INTO hospitals (id, name, short_code, status, time_zone) "
+            "VALUES (%s, 'Synthetic Hospital T11C', 'T11C', 'deactivated', 'UTC') "
+            "ON CONFLICT (id) DO NOTHING",
+            (HOSPITAL_C,),
+        )
+    qid = await seed_query(postgres, hid=HOSPITAL_C)
+    stub = StubModelClient()
+    await env.start(stub, settings=LAST)
+    await env.publish(qid, hid=HOSPITAL_C)
+    dead = await env.dead_letters(1)
+    assert len(dead) == 1 and dead[0][1].job_id == qid
+    r = await row(postgres, qid)
+    assert (r["status"], r["attempts"], r["started_at"]) == ("queued", 0, None)
+    assert stub.calls == {}
+    assert await count(postgres, "decisions", qid) == 0
+    assert await count(postgres, "outbox", qid) == 0
     assert await env.settled()
 
 

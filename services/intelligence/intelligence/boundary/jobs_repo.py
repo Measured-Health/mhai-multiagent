@@ -37,6 +37,8 @@ _CLAIM = """UPDATE clinical_queries SET status = 'running', attempts = attempts 
     started_at = coalesce(started_at, now()),
     lease_until = now() + make_interval(secs => %s)
 WHERE id = %s AND (status = 'queued' OR (status = 'running' AND lease_until < now()))
+    AND EXISTS (SELECT 1 FROM hospitals h
+                WHERE h.id = clinical_queries.hospital_id AND h.status = 'active')
 RETURNING clinical_question, patient_data_json, urgency, category, attempts"""
 
 _STATE = """SELECT status,
@@ -141,8 +143,10 @@ async def read_status(cur: Cursor, query_id: str) -> str | None:
 
 async def claim(cur: Cursor, query_id: str, lease_s: float) -> Claim | None:
     """Claim query_id (spec §9.2): queued → running, or re-claim a running
-    row whose lease has run out; attempts + 1, a fresh lease. None when
-    nothing was claimed (see state())."""
+    row whose lease has run out; attempts + 1, a fresh lease. Never a row
+    of a hospital that isn't active (a question that slipped past the
+    deactivation trigger; 00009's worker_hospital_active holds it too).
+    None when nothing was claimed (see state())."""
     await cur.execute(_CLAIM, (float(lease_s), _qid(query_id)))
     row = await cur.fetchone()
     if row is None:

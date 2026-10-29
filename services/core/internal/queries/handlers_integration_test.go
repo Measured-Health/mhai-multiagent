@@ -32,6 +32,7 @@ import (
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/queries"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
@@ -592,5 +593,45 @@ func TestPostQueriesRefusesDeactivatedAccount(t *testing.T) {
 	}
 	if n := countRows(t, hid); n != 0 {
 		t.Fatalf("%d rows for a deactivated account", n)
+	}
+}
+
+// Final review I-3: a hospital deactivated while a question is submitted.
+// The deactivation's trigger (00009) ran before the question's row
+// committed, so it couldn't see the row to cancel it, and committed before
+// the publish. The question must not be published: the row stays queued
+// and unpublished for the sweeper (which cancels it, account_unusable), and
+// no job reaches the pipeline.
+func TestPostQueriesHospitalDeactivatedDuringSubmit(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, 10)
+	hid := seedHospital(t)
+	u := seedUser(t, hid, authz.RoleClinician)
+	tok := mint(t, u)
+	jobs(t, hid)
+	deact, err := super.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = deact.Rollback(ctx) }()
+	if _, err := deact.Exec(ctx, `UPDATE hospitals SET status = 'deactivated' WHERE id = $1`, hid); err != nil {
+		t.Fatal(err)
+	}
+	restore := queries.SetAfterCommit(func() {
+		if err := deact.Commit(ctx); err != nil {
+			t.Errorf("deactivation commit: %v", err)
+		}
+	})
+	defer restore()
+	r := e.do(t, "POST", "/queries", tok, question("Synthetic?"), nil)
+	if r.code != http.StatusAccepted {
+		t.Fatalf("submit: %d %s", r.code, r.raw)
+	}
+	id, _ := r.body["query_id"].(string)
+	if got := rowOf(t, id); got.status != "queued" || got.published {
+		t.Fatalf("row after the race: %+v", got)
+	}
+	if js := jobs(t, hid); len(js) != 0 {
+		t.Fatalf("%d jobs published for a deactivated hospital", len(js))
 	}
 }

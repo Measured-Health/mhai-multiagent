@@ -30,6 +30,18 @@
 --     (Plan 3 T5 review): actor none, entity query, entity_id the id of a
 --     clinical_queries row whose hospital is the audit row's hospital.
 
+--   - Final review I-3: the deactivation race. A question whose row
+--     commits after the hospital's trigger ran (the submit's FOR SHARE locks
+--     the user, not the hospital) is never cancelled by it. Core re-checks
+--     before it publishes, and the worker may not move a row of a hospital
+--     that isn't active: worker_hospital_active, RESTRICTIVE on top of
+--     00008's worker_status, refuses the claim, every checkpoint and the
+--     completion. For it mhai_worker reads hospitals (id, status), its own
+--     hospital's row only. That is narrower than a SECURITY DEFINER helper
+--     (no new privileged code running as the owner, whose FORCE RLS
+--     policies on hospitals would need widening) and than FOR SHARE OF h at
+--     submit (row locks need UPDATE on hospitals for mhai_gateway).
+
 -- +goose Up
 
 ALTER TABLE clinical_queries
@@ -121,7 +133,17 @@ CREATE POLICY jobs_append_own_job ON audit_log AS RESTRICTIVE FOR INSERT TO mhai
                                               THEN audit_log.entity_id::uuid END
                               AND q.hospital_id = audit_log.hospital_id));
 
+-- The worker moves only rows of an active hospital (final review I-3).
+GRANT SELECT (id, status) ON hospitals TO mhai_worker;
+CREATE POLICY worker_own ON hospitals FOR SELECT TO mhai_worker
+    USING (id = mhai_current_hospital());
+CREATE POLICY worker_hospital_active ON clinical_queries AS RESTRICTIVE FOR UPDATE TO mhai_worker
+    USING (EXISTS (SELECT 1 FROM hospitals h WHERE h.id = clinical_queries.hospital_id AND h.status = 'active'));
+
 -- +goose Down
+DROP POLICY worker_hospital_active ON clinical_queries;
+DROP POLICY worker_own ON hospitals;
+REVOKE SELECT (id, status) ON hospitals FROM mhai_worker;
 DROP POLICY jobs_append_own_job ON audit_log;
 DROP POLICY provision_append ON audit_log;
 CREATE POLICY provision_append ON audit_log FOR INSERT TO mhai_provision
