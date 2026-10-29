@@ -1,8 +1,8 @@
 // Package db opens the gateway's Postgres pool, applies the embedded goose
 // migrations and runs transactions under the right database role.
 //
-// Every query runs inside one of WithHospital, WithPlatform, WithAuth or
-// WithJobs.
+// Every query runs inside one of WithHospital, WithPlatform, WithAuth,
+// WithJobs or WithAuditDrain.
 // The gateway's login user holds no table privileges of its own (it is a
 // member of mhai_app, see 00003_rls_roles.sql), so a query outside them
 // fails instead of reading anything.
@@ -33,6 +33,7 @@ const (
 	rolePlatform = "mhai_platform"
 	roleAuth     = "mhai_auth"
 	roleJobs     = "mhai_jobs"
+	roleDrain    = "mhai_audit_drain"
 )
 
 // ErrNoHospital is returned by WithHospital for the nil hospital id.
@@ -80,9 +81,18 @@ func WithAuth(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) er
 // WithJobs runs fn in a transaction as mhai_jobs: the job columns of
 // clinical_queries across hospitals (never the question or patient data)
 // and the job audit actions, for core's background loops only (the publish
-// sweeper; later the dead-letter consumer). See 00007_jobs.sql.
+// sweeper and the dead-letter consumer). See 00007_jobs.sql.
 func WithJobs(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
 	return inRole(ctx, pool, roleJobs, "", fn)
+}
+
+// WithAuditDrain runs fn in a transaction as mhai_audit_drain: read and
+// delete intelligence_audit_outbox rows of every hospital, the four id
+// columns of clinical_queries, and append query.completed, query.failed and
+// query.cancelled to the chain. For core's audit drainer only (intel.RunDrainer).
+// See 00008_intelligence_worker.sql.
+func WithAuditDrain(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	return inRole(ctx, pool, roleDrain, "", fn)
 }
 
 func inRole(ctx context.Context, pool *pgxpool.Pool, role, hospital string, fn func(pgx.Tx) error) (err error) {

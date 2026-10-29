@@ -326,7 +326,7 @@ func TestRepublishRefusesUnusableCreator(t *testing.T) {
 	elsewhere := seedUser(t, other, true, authz.RoleClinician)
 	for name, by := range map[string]uuid.UUID{"inactive": gone, "another hospital's user": elsewhere, "unknown": uuid.New()} {
 		row := JobRow{ID: uuid.New(), HospitalID: hid, CreatedBy: by, RequestID: "rid", Deadline: time.Now().Add(time.Minute)}
-		if err := Republish(context.Background(), app, c, row, row.ID); !errors.Is(err, ErrCreatorUnusable) {
+		if err := Republish(context.Background(), app, c, row, row.ID.String()); !errors.Is(err, ErrCreatorUnusable) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}

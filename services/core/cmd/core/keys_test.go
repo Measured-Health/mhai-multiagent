@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,11 +94,12 @@ func TestKeysEnsureRequestWritesTrusted(t *testing.T) {
 // Rotation step 1 adds a second kid; a third is refused before any key is
 // written.
 func TestKeysThirdKidRefused(t *testing.T) {
+	fa := &fakeAudit{}
 	dir := t.TempDir()
 	trusted := filepath.Join(dir, "request-keys.json")
 	var out bytes.Buffer
 	for _, name := range []string{"a.pem", "b.pem"} {
-		if err := keys([]string{"new", "--kind", "request", "--out", filepath.Join(dir, name), "--trusted-out", trusted}, &out); err != nil {
+		if err := keysWith([]string{"new", "--kind", "request", "--out", filepath.Join(dir, name), "--trusted-out", trusted}, &out, fa.fn()); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
@@ -105,7 +107,7 @@ func TestKeysThirdKidRefused(t *testing.T) {
 		t.Fatalf("want two kids, got %d", len(got))
 	}
 	third := filepath.Join(dir, "c.pem")
-	err := keys([]string{"new", "--kind", "request", "--out", third, "--trusted-out", trusted}, &out)
+	err := keysWith([]string{"new", "--kind", "request", "--out", third, "--trusted-out", trusted}, &out, fa.fn())
 	if err == nil {
 		t.Fatal("a third kid was accepted")
 	}
@@ -119,37 +121,38 @@ func TestKeysThirdKidRefused(t *testing.T) {
 		t.Fatalf("trusted set changed: %d", len(got))
 	}
 	// ensure on a new path is refused the same way.
-	if err := keys([]string{"ensure", "--kind", "request", "--out", third, "--trusted-out", trusted}, &out); err == nil {
+	if err := keysWith([]string{"ensure", "--kind", "request", "--out", third, "--trusted-out", trusted}, &out, fa.fn()); err == nil {
 		t.Fatal("ensure added a third kid")
 	}
 }
 
 // Rotation step 4: untrust removes one kid, never the last.
 func TestKeysUntrustLastRefused(t *testing.T) {
+	fa := &fakeAudit{}
 	dir := t.TempDir()
 	trusted := filepath.Join(dir, "request-keys.json")
 	var out bytes.Buffer
 	var kids []string
 	for _, name := range []string{"a.pem", "b.pem"} {
 		p := filepath.Join(dir, name)
-		if err := keys([]string{"new", "--kind", "request", "--out", p, "--trusted-out", trusted}, &out); err != nil {
+		if err := keysWith([]string{"new", "--kind", "request", "--out", p, "--trusted-out", trusted}, &out, fa.fn()); err != nil {
 			t.Fatal(err)
 		}
 		s, _ := reqtoken.LoadSigner(p)
 		kids = append(kids, s.KeyID)
 	}
-	if err := keys([]string{"untrust", "--kid", "0000000000000000", "--trusted-out", trusted}, &out); err == nil {
+	if err := keysWith([]string{"untrust", "--kid", "0000000000000000", "--trusted-out", trusted}, &out, fa.fn()); err == nil {
 		t.Fatal("untrusted an unknown kid")
 	}
 	out.Reset()
-	if err := keys([]string{"untrust", "--kid", kids[0], "--trusted-out", trusted}, &out); err != nil {
+	if err := keysWith([]string{"untrust", "--kid", kids[0], "--trusted-out", trusted}, &out, fa.fn()); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := reqtoken.ReadTrusted(trusted)
 	if len(got) != 1 || got[kids[1]] == nil || !strings.Contains(out.String(), kids[0]) {
 		t.Fatalf("after untrust: %v %q", got, out.String())
 	}
-	if err := keys([]string{"untrust", "--kid", kids[1], "--trusted-out", trusted}, &out); err == nil {
+	if err := keysWith([]string{"untrust", "--kid", kids[1], "--trusted-out", trusted}, &out, fa.fn()); err == nil {
 		t.Fatal("removed the last trusted kid")
 	}
 	if got, _ := reqtoken.ReadTrusted(trusted); len(got) != 1 {
@@ -160,7 +163,7 @@ func TestKeysUntrustLastRefused(t *testing.T) {
 		{"untrust", "--kid", "", "--trusted-out", trusted},
 		{"untrust", "--kid", kids[1], "--trusted-out", filepath.Join(dir, "missing.json")},
 	} {
-		if err := keys(bad, &out); err == nil {
+		if err := keysWith(bad, &out, fa.fn()); err == nil {
 			t.Errorf("keys %v accepted", bad)
 		}
 	}
@@ -189,5 +192,75 @@ func TestKeysDefaultKindIsAccess(t *testing.T) {
 	explicit := filepath.Join(dir, "access2.pem")
 	if err := keys([]string{"new", "--kind", "access", "--out", explicit}, &out); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// fakeAudit stands in for the provisioning login's audit of a rotation.
+type fakeAudit struct {
+	calls []string
+	fail  bool
+}
+
+func (f *fakeAudit) fn() rotationAuditor {
+	return func(kid, mode, change string, apply func() error) error {
+		f.calls = append(f.calls, kid+" "+mode+" "+change)
+		if f.fail {
+			return errors.New("keys: audit refused")
+		}
+		return apply()
+	}
+}
+
+// F29: adding a second request kid is a planned rotation and untrust is a
+// planned or (--emergency) emergency one: each is audited before the files
+// change, and when the audit can't be written nothing changes. The first
+// key isn't a rotation and needs no database.
+func TestKeysRotationsAreAudited(t *testing.T) {
+	dir := t.TempDir()
+	trusted := filepath.Join(dir, "request-keys.json")
+	var out bytes.Buffer
+	fa := &fakeAudit{}
+	a, b := filepath.Join(dir, "a.pem"), filepath.Join(dir, "b.pem")
+	if err := keysWith([]string{"ensure", "--kind", "request", "--out", a, "--trusted-out", trusted}, &out, fa.fn()); err != nil {
+		t.Fatal(err)
+	}
+	if len(fa.calls) != 0 {
+		t.Fatalf("first key audited as a rotation: %v", fa.calls)
+	}
+	// No database: the second kid is refused, and neither file changes.
+	t.Setenv("DATABASE_URL", "")
+	if err := keys([]string{"new", "--kind", "request", "--out", b, "--trusted-out", trusted}, &out); err == nil ||
+		!strings.Contains(err.Error(), "DATABASE_URL") {
+		t.Fatalf("rotation without a database: %v", err)
+	}
+	if exists(b) {
+		t.Fatal("key written without an audit")
+	}
+	// The audit refuses: same.
+	fa.fail = true
+	if err := keysWith([]string{"new", "--kind", "request", "--out", b, "--trusted-out", trusted}, &out, fa.fn()); err == nil {
+		t.Fatal("rotation went ahead without its audit")
+	}
+	if got, _ := reqtoken.ReadTrusted(trusted); len(got) != 1 || exists(b) {
+		t.Fatalf("files changed: %d trusted, key written %v", len(got), exists(b))
+	}
+	fa.fail, fa.calls = false, nil
+	if err := keysWith([]string{"new", "--kind", "request", "--out", b, "--trusted-out", trusted}, &out, fa.fn()); err != nil {
+		t.Fatal(err)
+	}
+	sb, _ := reqtoken.LoadSigner(b)
+	sa, _ := reqtoken.LoadSigner(a)
+	if len(fa.calls) != 1 || fa.calls[0] != sb.KeyID+" planned added" {
+		t.Fatalf("calls %v", fa.calls)
+	}
+	fa.calls = nil
+	if err := keysWith([]string{"untrust", "--kid", sa.KeyID, "--trusted-out", trusted, "--emergency"}, &out, fa.fn()); err != nil {
+		t.Fatal(err)
+	}
+	if len(fa.calls) != 1 || fa.calls[0] != sa.KeyID+" emergency removed" {
+		t.Fatalf("calls %v", fa.calls)
+	}
+	if got, _ := reqtoken.ReadTrusted(trusted); len(got) != 1 || got[sb.KeyID] == nil {
+		t.Fatalf("trusted after untrust: %v", got)
 	}
 }

@@ -24,10 +24,15 @@ type Config struct {
 	NATSNkeySeedPath string // production: the service's NKey seed file
 	AccessKeyPath    string
 	RequestKeyPath   string // the request-token signing key (spec §7.2), never the access key
-	MFAKey           []byte
-	BFFServiceKeys   []string
-	BreachedListPath string
-	NATSTLS          NATSTLS // required outside development (ValidateServe)
+	// RequestTrustedKeysPath is the public trusted-keys file the workers
+	// read (spec §7.5). Optional: with it, the dead-letter consumer can tell
+	// a job refused for a removed kid (an emergency rotation) and re-mint
+	// it; without it, such a job fails like any refusal.
+	RequestTrustedKeysPath string
+	MFAKey                 []byte
+	BFFServiceKeys         []string
+	BreachedListPath       string
+	NATSTLS                NATSTLS // required outside development (ValidateServe)
 	// NATSJSReplicas is the replica count for JOBS, DEAD and the KV
 	// buckets: 1 in dev compose, 3 on the production cluster.
 	NATSJSReplicas int
@@ -58,14 +63,15 @@ func Load() (Config, error) {
 		// Unset is production: everything that development relaxes (the
 		// API docs, NATS without TLS, test-only intelligence operations)
 		// stays off unless development is named.
-		Env:              getenv("CORE_ENV", "production"),
-		HTTPAddr:         os.Getenv("HTTP_ADDR"),
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
-		NATSURL:          os.Getenv("NATS_URL"),
-		NATSNkeySeedPath: os.Getenv("NATS_NKEY_SEED_PATH"),
-		AccessKeyPath:    os.Getenv("ACCESS_KEY_PATH"),
-		RequestKeyPath:   os.Getenv("REQUEST_KEY_PATH"),
-		BreachedListPath: os.Getenv("BREACHED_LIST_PATH"),
+		Env:                    getenv("CORE_ENV", "production"),
+		HTTPAddr:               os.Getenv("HTTP_ADDR"),
+		DatabaseURL:            os.Getenv("DATABASE_URL"),
+		NATSURL:                os.Getenv("NATS_URL"),
+		NATSNkeySeedPath:       os.Getenv("NATS_NKEY_SEED_PATH"),
+		AccessKeyPath:          os.Getenv("ACCESS_KEY_PATH"),
+		RequestKeyPath:         os.Getenv("REQUEST_KEY_PATH"),
+		RequestTrustedKeysPath: os.Getenv("REQUEST_TRUSTED_KEYS_PATH"),
+		BreachedListPath:       os.Getenv("BREACHED_LIST_PATH"),
 		NATSTLS: NATSTLS{
 			CAPath:   os.Getenv("NATS_TLS_CA_PATH"),
 			CertPath: os.Getenv("NATS_TLS_CERT_PATH"),

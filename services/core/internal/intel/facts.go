@@ -2,6 +2,7 @@ package intel
 
 import (
 	"context"
+	"errors"
 	"regexp"
 
 	"github.com/jackc/pgx/v5"
@@ -42,7 +43,8 @@ func actor(c Caller) string {
 // adds only its action, entity, entity id and payload, and the payload goes
 // through audit.Write's sensitive-key check. Every fact is checked before
 // any is written, and an error leaves tx to roll back: a bad fact records
-// nothing (F22).
+// nothing (F22). ErrBadFact means a fact core won't record; ErrAuditWrite
+// means core couldn't write it (an infrastructure error, to retry).
 func AppendFacts(ctx context.Context, tx pgx.Tx, caller Caller, meta *intelpb.ResponseMeta) error {
 	facts := meta.GetAuditFacts()
 	if len(facts) == 0 {
@@ -67,8 +69,13 @@ func AppendFacts(ctx context.Context, tx pgx.Tx, caller Caller, meta *intelpb.Re
 			Action: f.Action, Entity: f.Entity, EntityID: f.EntityId, Payload: payload,
 		}); err != nil {
 			// audit.Write's error can name the worker's payload key or carry
-			// driver text: return the fixed value only.
-			return ErrBadFact
+			// driver text: return a fixed value only. A sensitive key is the
+			// worker's fault (ErrBadFact); anything else (the database, the
+			// role's policy) is core's own failure, not a bad fact.
+			if errors.Is(err, audit.ErrSensitiveKey) {
+				return ErrBadFact
+			}
+			return ErrAuditWrite
 		}
 	}
 	return nil

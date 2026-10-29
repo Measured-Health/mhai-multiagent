@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	core "github.com/Measured-Health/mhai-multiagent/services/core"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/apidocs"
@@ -40,6 +41,7 @@ type app struct {
 	pool    *pgxpool.Pool
 	nc      *nats.Conn
 	intel   *intel.Client
+	js      jetstream.JetStream
 	log     *slog.Logger
 	// stopAPI ends core's NATS API (natsapi.Serve) and stopGrant its grant
 	// endpoint (grant.Server) before NATS closes.
@@ -114,7 +116,20 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
-	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log}
+	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log, Metrics: &intel.Metrics{}}
+	a.js = js
+	if cfg.RequestTrustedKeysPath != "" {
+		// The workers' public file: a kid missing from it is one an
+		// emergency rotation removed (dead-letter re-mint, spec §7.5).
+		if a.intel.Trusted, err = intel.LoadTrustedKeys(cfg.RequestTrustedKeysPath); err != nil {
+			a.close()
+			return nil, errors.New("REQUEST_TRUSTED_KEYS_PATH: the trusted request-keys file is missing or not valid")
+		}
+		if !a.intel.Trusted.Has(signer.KeyID) {
+			log.Warn("core: the request-signing kid is not in the trusted request-keys file; workers will refuse its tokens",
+				"kid", signer.KeyID)
+		}
+	}
 	keys := issuer.PublicKeys()
 	svc := &auth.Service{
 		Pool: a.pool, Buckets: buckets, Issuer: issuer, Keys: keys, Log: log,
@@ -181,6 +196,29 @@ func runSweeper(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger, every
 	}
 }
 
+// reloadTrustedOnHUP re-reads t on every SIGHUP until ctx ends; a failed
+// read keeps the last good set.
+func reloadTrustedOnHUP(ctx context.Context, t *intel.TrustedKeys, log *slog.Logger) {
+	if t == nil {
+		return
+	}
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+			if err := t.Reload(); err != nil {
+				log.Error("core: trusted request-keys reload failed; keeping the last set")
+			} else {
+				log.Info("core: trusted request-keys reloaded")
+			}
+		}
+	}
+}
+
 func serve() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -200,6 +238,17 @@ func serve() error {
 	go runSweeper(ctx, a.pool, log, SweepEvery)
 	// Republishes queued questions whose publish after commit was lost.
 	go intel.RunPublishSweeper(ctx, a.pool, a.intel, intel.SweepEvery)
+	// Moves the workers' job facts (intelligence_audit_outbox) onto the chain.
+	go intel.RunDrainer(ctx, a.pool, intel.DrainEvery, log)
+	// Marks dead-lettered jobs failed, or re-mints them after an emergency
+	// key rotation (core_dead, shared by every core copy).
+	go func() {
+		if err := intel.RunDeadLetters(ctx, a.pool, a.js, a.intel); err != nil {
+			log.Error("core: dead-letter consumer stopped", "error", err)
+		}
+	}()
+	// SIGHUP re-reads the trusted request-keys file (after keys untrust).
+	go reloadTrustedOnHUP(ctx, a.intel.Trusted, log)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           a.handler,

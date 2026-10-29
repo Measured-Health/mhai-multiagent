@@ -76,6 +76,12 @@ type Client struct {
 	JS     jetstream.JetStream
 	Signer reqtoken.Signer
 	Log    *slog.Logger
+	// Trusted is the workers' trusted-keys file as core reads it
+	// (REQUEST_TRUSTED_KEYS_PATH): the dead-letter consumer re-mints a job
+	// refused for a kid no longer in it. Nil: no re-mint.
+	Trusted *TrustedKeys
+	// Metrics counts the background loops' outcomes; nil counts nowhere.
+	Metrics *Metrics
 }
 
 func (c *Client) log() *slog.Logger {

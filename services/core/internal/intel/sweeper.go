@@ -3,6 +3,7 @@ package intel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,7 +59,7 @@ func JobRID(id uuid.UUID, rid string) string {
 }
 
 // Republish re-mints and publishes row's run_query job with message id
-// msgID: the job id for a sweep, a new id for a retry after a dead letter
+// msgID: the job id for a sweep, RetryMsgID for a retry after a dead letter
 // (spec §7.4: a retry never reuses the old message). It is the one re-mint
 // helper (F23). It first re-checks the creator (as mhai_auth): the account
 // must still be usable (authz.AccountUsable) and belong to the row's
@@ -66,7 +67,7 @@ func JobRID(id uuid.UUID, rid string) string {
 // with the creator's current roles (run_query allows no svc:core); none of
 // them allowed is ErrCreatorUnusable too. A failed lookup is an error to
 // retry later, never a cancellation. The request id is JobRID.
-func Republish(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobRow, msgID uuid.UUID) error {
+func Republish(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobRow, msgID string) error {
 	if row.CreatedBy == uuid.Nil {
 		return ErrCreatorUnusable
 	}
@@ -97,11 +98,18 @@ func Republish(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobR
 		return ErrCreatorUnusable
 	}
 	caller := Caller{Sub: row.CreatedBy.String(), Hid: row.HospitalID.String(), Rid: JobRID(row.ID, row.RequestID), Roles: roles}
-	err = client.PublishJob(ctx, caller, runQuery, msgID, &intelpb.RunQueryJob{QueryId: row.ID.String()}, row.Deadline)
+	err = client.publishJob(ctx, caller, runQuery, msgID, &intelpb.RunQueryJob{QueryId: row.ID.String()}, row.Deadline)
 	if errors.Is(err, ErrNotAllowed) {
 		return ErrCreatorUnusable
 	}
 	return err
+}
+
+// RetryMsgID is the Nats-Msg-Id of a job re-minted after a dead letter:
+// <job id>.r<attempts>, so a second copy of the same retry (a duplicated or
+// replayed dead letter) is dropped by JetStream's duplicate window.
+func RetryMsgID(id uuid.UUID, attempts int) string {
+	return fmt.Sprintf("%s.r%d", id, attempts)
 }
 
 // SweepResult counts what one sweep did.
@@ -200,7 +208,7 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
-		switch err := Republish(ctx, pool, client, r, r.ID); {
+		switch err := Republish(ctx, pool, client, r, r.ID.String()); {
 		case err == nil:
 			if markPublished(ctx, pool, r.ID) != nil {
 				res.Left++

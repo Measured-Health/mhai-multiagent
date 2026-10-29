@@ -38,6 +38,9 @@ var (
 	ErrNoHospital = errors.New("intel: no hospital for this call")
 	// ErrBadFact: an audit fact a worker sent that core won't record.
 	ErrBadFact = errors.New("intel: audit fact refused")
+	// ErrAuditWrite: core couldn't append to the audit chain (the
+	// database or a policy refused it): core's failure, not the worker's.
+	ErrAuditWrite = errors.New("intel: audit append failed")
 	// ErrCreatorUnusable: a job's creator can't use the service any more
 	// (inactive, another hospital, hospital not running, no allowed role).
 	ErrCreatorUnusable = errors.New("intel: the job's creator can no longer use the service")

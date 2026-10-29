@@ -178,6 +178,7 @@ services:
       NATS_NKEY_SEED_PATH: /run/secrets/nats-gateway.nk
       ACCESS_KEY_PATH: /keys/access.pem
       REQUEST_KEY_PATH: /keys/request.pem
+      REQUEST_TRUSTED_KEYS_PATH: /trusted/request-keys.json   # public; dead-letter re-mint after a rotation
       INTELLIGENCE_QUERY_CAP: "10"   # questions in flight per hospital (decision 8)
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set in /srv/mhai-backend/.env}
       BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set in /srv/mhai-backend/.env}
@@ -188,6 +189,7 @@ services:
       - "127.0.0.1:${CORE_HOST_PORT:-8092}:8080"
     volumes:
       - corekeys:/keys:ro
+      - trustedkeys:/trusted:ro
       # Owned by the container's user (65532), mode 400 (setup-host.sh).
       - ./secrets/nats-gateway.nk:/run/secrets/nats-gateway.nk:ro
     tmpfs:

@@ -12,6 +12,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/queries"
 )
 
 // Deps are what the routes need. Zero Deps build the table only.
@@ -37,6 +38,7 @@ func Register(m *authz.Mux, d Deps) {
 		a = &auth.Service{}
 	}
 	a.Register(m)
+	queries.Register(m, queries.Deps{Pool: d.Pool, Intel: d.Intel, Cap: d.QueryCap})
 	registerFixtures(m, d)
 }
 

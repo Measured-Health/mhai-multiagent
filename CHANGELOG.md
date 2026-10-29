@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Clinical questions end to end on core's side (Plan 3 T12): `POST /queries`
+  (clinicians; 202 `{query_id, status}`; 429 `rate_limited` past
+  `INTELLIGENCE_QUERY_CAP` per hospital; `Idempotency-Key`), `GET
+  /queries/{id}` (`running` shows as `processing`, `cancelled` as `failed` /
+  `cancelled`) and `GET /queries/{id}/result`; another clinician's or
+  hospital's id is 404. Contract version 1.2.0 (additive; the result also
+  carries `trust_band` and `cited_chunk_ids`). Core drains the workers' audit
+  outbox onto the chain (identity from the job row, never the fact), consumes
+  dead letters (`core_dead`: marks the job failed, audits `job.dead_lettered`,
+  re-mints a job refused for a key an emergency rotation removed), and
+  deactivating a user or hospital cancels their queued and running questions
+  in the database (migration 00009). New optional setting
+  `REQUEST_TRUSTED_KEYS_PATH` (re-read on SIGHUP); `core keys untrust` takes
+  `--emergency`, and request-key rotations are audited
+  (`intelligence.key_rotated`) through the provisioning login in
+  `DATABASE_URL`.
 - Core serves the frontend contract over NATS (spec §17.1, `internal/natsapi`):
   one HTTP request per message on `api.v1.clinical` and `api.v1.platform`, in
   queue group `core`, run through the same handler chain as HTTP (request id,

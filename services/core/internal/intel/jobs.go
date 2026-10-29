@@ -37,6 +37,28 @@ const jsStoreFailed jetstream.ErrorCode = 10077
 // published); ErrBackpressure (JOBS refused it), ErrNoResponders,
 // ErrTimeout, ErrPublish. Map any of them with Code.
 func (c *Client) PublishJob(ctx context.Context, caller Caller, opName string, jobID uuid.UUID, msg proto.Message, deadline time.Time) error {
+	if jobID == uuid.Nil {
+		return ErrMisuse
+	}
+	return c.publishJob(ctx, caller, opName, jobID.String(), msg, deadline)
+}
+
+// validMsgID is a Nats-Msg-Id core sets: the job id, or the job id and a
+// retry suffix (<id>.r<n>, Republish after a dead letter).
+func validMsgID(s string) bool {
+	if len(s) < 36 || len(s) > 64 || !canonicalUUID(s[:36]) {
+		return false
+	}
+	for i := 36; i < len(s); i++ {
+		if c := s[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// publishJob is PublishJob with the message id as a string (validMsgID).
+func (c *Client) publishJob(ctx context.Context, caller Caller, opName, msgID string, msg proto.Message, deadline time.Time) error {
 	op, err := operation(opName, reqtoken.KindJob, msg, nil)
 	if err != nil {
 		return err
@@ -44,7 +66,7 @@ func (c *Client) PublishJob(ctx context.Context, caller Caller, opName string, j
 	if err := checkCaller(op, caller); err != nil {
 		return err
 	}
-	if jobID == uuid.Nil || c.JS == nil {
+	if !validMsgID(msgID) || c.JS == nil {
 		return ErrMisuse
 	}
 	var subject string
@@ -88,12 +110,12 @@ func (c *Client) PublishJob(ctx context.Context, caller Caller, opName string, j
 	m.Header.Set(hdrSchema, op.RequestSchema)
 	m.Header.Set(hdrRequestID, caller.Rid)
 	m.Data = body
-	_, err = c.JS.PublishMsg(ctx, m, jetstream.WithMsgID(jobID.String()), jetstream.WithExpectStream(bus.JobsStream))
+	_, err = c.JS.PublishMsg(ctx, m, jetstream.WithMsgID(msgID), jetstream.WithExpectStream(bus.JobsStream))
 	if err == nil {
 		return nil
 	}
 	out := classifyPublish(err)
-	attrs := []any{"operation", op.Name, "job_id", jobID.String(), "request_id", caller.Rid, "hospital_id", caller.Hid, "error", out}
+	attrs := []any{"operation", op.Name, "msg_id", msgID, "request_id", caller.Rid, "hospital_id", caller.Hid, "error", out}
 	var apiErr *jetstream.APIError
 	if errors.As(err, &apiErr) {
 		attrs = append(attrs, "js_err_code", int(apiErr.ErrorCode))

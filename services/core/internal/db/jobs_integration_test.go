@@ -158,8 +158,9 @@ func TestJobsRoleIsNarrow(t *testing.T) {
 	}
 	for _, action := range []string{"query.failed", "query.cancelled", "job.dead_lettered", "job.retried", "intelligence.refused"} {
 		err := db.WithJobs(ctx, app, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO audit_log (hospital_id, action, prev_hash, hash) VALUES ($1, $2, 'p', $3)`,
-				hid, action, "h"+uuid.NewString())
+			// 00009: about a job of the row's own hospital, with no actor.
+			_, err := tx.Exec(ctx, `INSERT INTO audit_log (hospital_id, action, entity, entity_id, prev_hash, hash)
+				VALUES ($1, $2, 'query', $3, 'p', $4)`, hid, action, qid.String(), "h"+uuid.NewString())
 			return err
 		})
 		if err != nil {

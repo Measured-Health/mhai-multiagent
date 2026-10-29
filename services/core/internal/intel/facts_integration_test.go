@@ -139,3 +139,53 @@ func auditForRequest(t *testing.T, action, rid string) []auditRow {
 	t.Helper()
 	return auditQuery(t, `request_id`, action, rid)
 }
+
+// A12 (request/reply): an echo.ping answer whose audit facts name another
+// actor and hospital is appended with the caller's identity, the one core
+// minted into the token.
+func TestReplyFactsUseTokenIdentity(t *testing.T) {
+	c, _ := newClient(t)
+	ctx := context.Background()
+	hid := seedHospital(t, "active")
+	other := seedHospital(t, "active")
+	user := seedUser(t, hid, true, authz.RoleClinician)
+	intruder := seedUser(t, other, true, authz.RoleClinician)
+	entity := uuid.NewString()
+	meta := &intelpb.ResponseMeta{AuditFacts: []*intelpb.AuditFact{
+		fact("intelligence.echo.pinged", "echo", entity, map[string]any{"actor_id": intruder.String(), "hospital_id": other.String()}),
+	}}
+	startFakeWorker(t, sharedNATS.EchoURL, "echo", "ping", signer.PublicKeys(), pong(meta))
+	caller := Caller{Sub: user.String(), Hid: hid.String(), Rid: "rid-" + uuid.NewString(), Roles: []string{authz.RoleClinician}}
+	var resp intelpb.PingResponse
+	got, err := c.Request(ctx, caller, "echo.ping", &intelpb.PingRequest{Text: "synthetic ping", HospitalId: hid.String()}, &resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.WithHospital(ctx, app, hid, func(tx pgx.Tx) error { return AppendFacts(ctx, tx, caller, got) }); err != nil {
+		t.Fatal(err)
+	}
+	rows := auditFor(t, "intelligence.echo.pinged", entity)
+	if len(rows) != 1 || *rows[0].actor != user.String() || *rows[0].hospital != hid.String() || *rows[0].requestID != caller.Rid {
+		t.Fatalf("rows %+v", rows)
+	}
+}
+
+// T5 note: a database failure appending a fact is core's error
+// (ErrAuditWrite), not a bad fact (ErrBadFact): here the role's policy
+// refuses the insert.
+func TestAppendFactsInfraErrorIsNotBadFact(t *testing.T) {
+	ctx := context.Background()
+	hid := seedHospital(t, "active")
+	user := seedUser(t, hid, true, authz.RoleClinician)
+	caller := Caller{Sub: user.String(), Hid: hid.String(), Rid: "rid-" + uuid.NewString(), Roles: []string{authz.RoleClinician}}
+	meta := &intelpb.ResponseMeta{AuditFacts: []*intelpb.AuditFact{fact("intelligence.echo.pinged", "echo", "e", nil)}}
+	err := db.WithJobs(ctx, app, func(tx pgx.Tx) error { return AppendFacts(ctx, tx, caller, meta) })
+	if !errors.Is(err, ErrAuditWrite) || errors.Is(err, ErrBadFact) {
+		t.Fatalf("infra failure: %v", err)
+	}
+	bad := &intelpb.ResponseMeta{AuditFacts: []*intelpb.AuditFact{fact("intelligence.echo.pinged", "echo", "e", map[string]any{"password": "x"})}}
+	err = db.WithHospital(ctx, app, hid, func(tx pgx.Tx) error { return AppendFacts(ctx, tx, caller, bad) })
+	if !errors.Is(err, ErrBadFact) {
+		t.Fatalf("sensitive key: %v", err)
+	}
+}
