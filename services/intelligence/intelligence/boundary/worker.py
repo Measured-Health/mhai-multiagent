@@ -60,8 +60,10 @@ from google.protobuf.message import Message
 from nats.aio.client import Client
 from nats.aio.msg import Msg
 from nats.aio.subscription import Subscription
+from opentelemetry.context import Context
+from opentelemetry.trace import SpanKind
 
-from intelligence.boundary import _b64, envelope
+from intelligence.boundary import _b64, envelope, telemetry
 from intelligence.boundary.config import ConfigError, WorkerSettings
 from intelligence.boundary.grant import GrantClient, GrantRefused, Unavailable
 from intelligence.boundary.jobs import JobContext, JobHandler, Slot
@@ -279,7 +281,7 @@ class Worker:
         self._require_tls = False
         self.received = 0
         # Worker-side refusals and drops by reason (the verifier counts its own).
-        self.refusals: Counter[str] = Counter()
+        self.refusals: Counter[str] = telemetry.RefusalCounter(service)
 
     # --- lifecycle --------------------------------------------------------------
 
@@ -438,6 +440,7 @@ class Worker:
         h, b = envelope.reply_error(
             code, code in _RETRYABLE, request_id=request_id, bff_direct=bff_direct
         )
+        telemetry.current_fail(code)  # the span in hand, if any: the code only
         await self._send(msg, h, b)
 
     async def _refuse_unchecked(
@@ -505,7 +508,10 @@ class Worker:
     async def _core_path(self, msg: Msg, headers: Mapping[str, str], body: bytes) -> None:
         route = self._route(msg.subject)
         decoder = route[2] if route is not None else _never
-        r = self.verifier.verify_request(msg.subject, msg.reply, headers, body, decoder)
+        with telemetry.verifying(self.service, telemetry.extract(headers)) as sp:
+            r = self.verifier.verify_request(msg.subject, msg.reply, headers, body, decoder)
+            if isinstance(r, Refusal):
+                telemetry.fail(sp, r.code)
         if isinstance(r, Refusal):
             if r.reply:
                 await self._error(msg, r.code)
@@ -580,7 +586,20 @@ class Worker:
     ) -> None:
         try:
             assert self._grant is not None
-            got = await self._grant.ask(access, msg.subject, msg.reply, body, (), bff_rid, deadline)
+            parent = telemetry.extract(headers)
+            with telemetry.span(
+                "boundary.grant",
+                kind=SpanKind.CLIENT,
+                context=parent,
+                attributes={"service": self.service, "request_id": bff_rid},
+            ) as gsp:
+                got = await self._grant.ask(
+                    access, msg.subject, msg.reply, body, (), bff_rid, deadline
+                )
+                if isinstance(got, Unavailable | GrantRefused):
+                    telemetry.fail(
+                        gsp, "unavailable" if isinstance(got, Unavailable) else "forbidden"
+                    )
             del access  # held only for the grant call
             if isinstance(got, Unavailable):
                 self.refusals["grant_unavailable"] += 1
@@ -594,7 +613,12 @@ class Worker:
                 return
             route = self._route(msg.subject)
             decoder = route[2] if route is not None else _never
-            r = self.verifier.verify_granted(got, msg.subject, msg.reply, headers, body, decoder)
+            with telemetry.verifying(self.service, parent) as vsp:
+                r = self.verifier.verify_granted(
+                    got, msg.subject, msg.reply, headers, body, decoder
+                )
+                if isinstance(r, Refusal):
+                    telemetry.fail(vsp, r.code)
             if isinstance(r, Refusal):
                 if r.reply:
                     await self._error(msg, r.code, request_id=echo_rid, bff_direct=True)
@@ -634,7 +658,26 @@ class Worker:
 
     async def run_handler(self, msg: Msg, v: Verified, *, bff_direct: bool) -> None:
         """The handler for v, bounded by the token's exp: not started after
-        it, abandoned at it. Answers once."""
+        it, abandoned at it. Answers once, inside the span "handle <op>",
+        a child of the caller's span (a request/reply call is short; only
+        jobs are linked, not parented)."""
+        raw = msg.headers if isinstance(msg.headers, Mapping) else None
+        with telemetry.span(
+            f"handle {v.operation.name}",
+            kind=SpanKind.SERVER,
+            context=telemetry.extract(raw),
+            attributes={
+                "operation": v.operation.name,
+                "service": self.service,
+                "request_id": v.rid,
+                "hospital_id": v.hid,
+            },
+        ) as sp:
+            await self._run_handler(msg, v, bff_direct=bff_direct)
+            if not telemetry.failed(sp):
+                telemetry.ok(sp)
+
+    async def _run_handler(self, msg: Msg, v: Verified, *, bff_direct: bool) -> None:
         route = self._handlers.get(v.operation.name)
         if route is None:  # verify only passes a known operation; belt and braces
             await self._error(msg, "internal", request_id=v.rid, bff_direct=bff_direct)
@@ -767,6 +810,25 @@ class Worker:
         return self._jobs.get(op.op)
 
     async def _run_job(self, msg: Msg, slot: Slot) -> None:
+        """One delivery, inside the span "handle <op>". A job is long and
+        asynchronous, so the span starts a new trace and *links* to the
+        producer span in the message's traceparent instead of hanging under
+        it (spec §10.3)."""
+        route = self._job_route(msg.subject)
+        name = f"handle {route[0].name}" if route is not None else "handle unknown"
+        hdrs = msg.headers if isinstance(msg.headers, Mapping) else None
+        with telemetry.span(
+            name,
+            kind=SpanKind.CONSUMER,
+            context=Context(),
+            links=telemetry.links_from(hdrs),
+            attributes={"service": self.service},
+        ) as sp:
+            await self._run_job_checked(msg, slot)
+            if not telemetry.failed(sp):
+                telemetry.ok(sp)
+
+    async def _run_job_checked(self, msg: Msg, slot: Slot) -> None:
         raw = msg.headers
         if raw is not None and not isinstance(raw, Headers):
             await self._refuse_job(msg, "headers", "unauthorized")  # not parsed by WorkerClient
@@ -780,10 +842,14 @@ class Worker:
             return
         route = self._job_route(msg.subject)
         decoder = route[2] if route is not None else _never
-        r = self.verifier.verify_job(msg.subject, headers, msg.data, decoder)
+        with telemetry.verifying(self.service) as vsp:
+            r = self.verifier.verify_job(msg.subject, headers, msg.data, decoder)
+            if isinstance(r, Refusal):
+                telemetry.fail(vsp, r.code)
         if isinstance(r, Refusal):
             await self._refuse_job(msg, r.reason, r.code, alert=r.alert)
             return
+        telemetry.annotate(hospital_id=r.hid, request_id=r.rid, operation=r.operation.name)
         if route is None or route[0].name != r.operation.name:  # verify passed a known op
             await self._refuse_job(msg, "schema", "internal")
             return
@@ -794,6 +860,7 @@ class Worker:
         expired in the queue, F6), a dead letter for core to mark the row,
         and Term. No database: there is no verified hospital."""
         self.refusals[reason] += 1
+        telemetry.current_fail(code)
         log.log(
             logging.WARNING if alert else logging.INFO,
             "worker refused job service=%s subject=%s reason=%s code=%s",
@@ -917,6 +984,13 @@ async def run_service(settings: WorkerSettings) -> None:
     pipeline also runs run_query jobs, but only with a database (T10 note):
     without one it takes no job and health says database_ready false."""
     verifier, trusted = build_verifier(settings)
+    # Off unless OTEL_EXPORTER_OTLP_ENDPOINT is set; a bad endpoint turns it
+    # off with a warning, never keeps the worker from starting.
+    try:
+        stop_telemetry = telemetry.setup(service=settings.service)
+    except ValueError:
+        log.warning("telemetry is off: OTEL_EXPORTER_OTLP_ENDPOINT is not usable")
+        stop_telemetry = None
     database = await open_database(settings)
     runner = None
     try:
@@ -941,5 +1015,7 @@ async def run_service(settings: WorkerSettings) -> None:
             runner.close()
         if database is not None:
             await database.close()
+        if stop_telemetry is not None:
+            stop_telemetry()
     if w.insecure:
         raise ConnectionError("the NATS connection lost TLS")

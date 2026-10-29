@@ -46,6 +46,12 @@ dependencies = [
     # pool, parameterised queries only, through boundary/db.py.
     "psycopg[binary]>=3.2,<4",
     "psycopg-pool>=3.2,<4",
+    # Traces and metrics for the boundary (spec section 10.3), exported to the
+    # collector over OTLP/gRPC, only when an endpoint is set. Pinned: the
+    # allow-list in boundary/telemetry.py builds ReadableSpan copies, whose
+    # constructor is SDK-internal; review it on a bump.
+    "opentelemetry-sdk==1.45.2",
+    "opentelemetry-exporter-otlp==1.45.2",
 ]
 
 [dependency-groups]

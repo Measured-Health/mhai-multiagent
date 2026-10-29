@@ -49,7 +49,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from intelligence.boundary import jobs_repo, kb_repo
+from intelligence.boundary import jobs_repo, kb_repo, telemetry
 from intelligence.boundary.db import is_database_error, is_unique_violation
 from intelligence.boundary.jobs import JobContext
 from intelligence.boundary.models import (
@@ -234,6 +234,7 @@ class RunQuery:
             return
         try:
             job.qid = str(uuid.UUID(message.query_id))
+            telemetry.annotate(query_id=job.qid)
         except ValueError:
             await self._permanent(job, "invalid_request")
             return
@@ -288,6 +289,7 @@ class RunQuery:
             return None
         if claim is not None:
             job.attempts = claim.attempts
+            telemetry.annotate(attempt=claim.attempts)
             job.last_wip = self._wip_clock()
             if claim.attempts > self._s.max_attempts:
                 log.warning("run_query over the attempts cap query_id=%s", job.qid)
@@ -377,8 +379,21 @@ class RunQuery:
     # --- stages, heartbeats and checkpoints ---------------------------------------
 
     async def _stage(self, job: _Job, fn: Callable[..., Any], *args: Any) -> Any:
-        """fn(*args) on a worker thread, until the token's exp. The slot
+        """fn(*args) on a worker thread, until the token's exp, in a span
+        "stage <name>" (the function's own name: code, not input). The slot
         stays held until the thread ends, even if we stop waiting."""
+        stage = getattr(fn, "__name__", "stage").lstrip("_").lower()
+        started = time.monotonic()
+        with telemetry.span(f"stage {stage}", attributes={"stage": stage}) as sp:
+            try:
+                return await self._stage_run(job, fn, *args)
+            except _Deadline:
+                telemetry.fail(sp, "deadline_exceeded")
+                raise
+            finally:
+                sp.set_attribute("timing_ms", int((time.monotonic() - started) * 1000))
+
+    async def _stage_run(self, job: _Job, fn: Callable[..., Any], *args: Any) -> Any:
         loop = asyncio.get_running_loop()
         remaining = job.v.exp - self._clock()
         if remaining <= 0:

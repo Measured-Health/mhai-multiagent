@@ -39,7 +39,7 @@ from google.protobuf.descriptor import FieldDescriptor
 from google.protobuf.message import Message
 from google.protobuf.unknown_fields import UnknownFieldSet
 
-from intelligence.boundary import _b64, _strictjson, envelope
+from intelligence.boundary import _b64, _strictjson, envelope, telemetry
 from intelligence.boundary.keys import TrustedKeys
 from intelligence.boundary.operations import Operation, Operations
 from intelligence.boundary.replay import JtiSet, ReplaySetFull
@@ -341,8 +341,9 @@ class Verifier:
             # forgotten while its token is still live.
             raise ValueError("the replay set must use the verifier's clock")
         self._clock = clock
-        # boundary_refusals_total{service,reason}; exported by telemetry (T14).
-        self.refusals: Counter[tuple[str, str]] = Counter()
+        # boundary_refusals_total{service,reason}: every increment also feeds
+        # the metric (telemetry.RefusalCounter).
+        self.refusals: Counter[tuple[str, str]] = telemetry.RefusalCounter()
         self._count_lock = threading.Lock()
 
     @property

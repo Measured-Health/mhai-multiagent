@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import nats.errors
 from nats.aio.client import Client
 
-from intelligence.boundary import _b64, envelope
+from intelligence.boundary import _b64, envelope, telemetry
 from intelligence.boundary.pb import authz_pb2
 from intelligence.boundary.verify import MAX_TOKEN_LEN, REPLY_GRANT, strict_decoder
 
@@ -103,10 +103,10 @@ class GrantClient:
         )
         data = req.SerializeToString(deterministic=True)
         del req
+        headers = {envelope.SCHEMA: REQUEST_SCHEMA}
+        telemetry.inject(headers)  # traceparent/tracestate only; core's span follows ours
         try:
-            msg = await self._nc.request(
-                self.subject, data, timeout=limit, headers={envelope.SCHEMA: REQUEST_SCHEMA}
-            )
+            msg = await self._nc.request(self.subject, data, timeout=limit, headers=headers)
         except nats.errors.NoRespondersError:
             return self._unavailable("no_responders")
         except (nats.errors.TimeoutError, TimeoutError):
