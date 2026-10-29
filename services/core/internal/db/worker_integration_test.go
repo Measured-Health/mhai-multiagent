@@ -639,6 +639,16 @@ func TestMigration00008RoundTrip(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_policies WHERE 'mhai_audit_drain' = ANY(roles::text[])`).Scan(&drainPolicies); err != nil || drainPolicies != 0 {
 		t.Fatalf("drain policies left after down: %d %v", drainPolicies, err)
 	}
+	// Final review M-6: 00007's Down takes mhai_app's membership of
+	// mhai_jobs back, as 00008's does for mhai_audit_drain.
+	if err := db.MigrateDownTo(ctx, pg.URL, 6); err != nil {
+		t.Fatalf("down to 6: %v", err)
+	}
+	var jobsMember bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
+		JOIN pg_roles u ON u.oid = m.member WHERE r.rolname = 'mhai_jobs' AND u.rolname = 'mhai_app')`).Scan(&jobsMember); err != nil || jobsMember {
+		t.Fatalf("mhai_app still a member of mhai_jobs after down to 6: %v %v", jobsMember, err)
+	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)
 	}

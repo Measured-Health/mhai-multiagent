@@ -138,6 +138,7 @@ REVOKE ALL ON clinical_queries, audit_log FROM mhai_jobs;
 REVOKE ALL ON SEQUENCE audit_log_id_seq FROM mhai_jobs;
 REVOKE ALL ON FUNCTION audit_chain_head() FROM mhai_jobs;
 REVOKE ALL ON SCHEMA public FROM mhai_jobs;
+REVOKE mhai_jobs FROM mhai_app;
 
 ALTER TABLE clinical_decisions
     DROP CONSTRAINT clinical_decisions_trust_band_check,
