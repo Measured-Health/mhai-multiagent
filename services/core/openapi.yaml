@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.0.2"
+  version: "1.2.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -29,6 +29,15 @@ info:
     (`Idempotent-Replayed: true`) for 72 hours; the same key with another
     body, or one still in flight, is 409 `conflict`. Replies that carry a
     credential are never stored, so their retry is 409 too.
+
+    Over NATS (spec §17.1; `services/core/README.md`, "The API over NATS"):
+    the same routes, one request per message on `api.v1.clinical` or
+    `api.v1.platform`, with `Mhai-Method`, `Mhai-Path` and the reply status
+    in `Mhai-Status-Code`. There the BFF's NATS user replaces
+    `X-MHAI-Service`, the subject replaces `X-MHAI-Audience`, and the probes
+    and docs are not served. Two codes occur only there: 405
+    `method_not_allowed` (a method outside GET, HEAD, POST, PUT, PATCH,
+    DELETE) and 413 `payload_too_large` (a body over 64 KB).
 
     Versioning (ADR 0012): the major version is in the path, `/api/v1`.
     Within it, changes are additive only, so clients must ignore unknown
@@ -427,6 +436,101 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /queries:
+    post:
+      operationId: createQuery
+      summary: Ask a clinical question; it is answered in the background.
+      description: |
+        Clinicians only. Queues the question as an intelligence job
+        (pipeline.run_query) and answers at once with its id; poll
+        `GET /queries/{id}`. At most `INTELLIGENCE_QUERY_CAP` (default 10)
+        questions per hospital may be queued or running at once: past it,
+        429 `rate_limited`. The question and patient data are stored with the
+        question only, never logged or audited. Send an `Idempotency-Key`
+        so a retry doesn't ask twice.
+      tags: [queries]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, conflict, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueryCreateIn" }
+      responses:
+        "202":
+          description: Queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueryCreated" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /queries/{id}:
+    get:
+      operationId: getQueryStatus
+      summary: The status of one of the caller's questions.
+      description: |
+        Another clinician's question, another hospital's, or an unknown id
+        is 404 `not_found`. A cancelled question (its creator or hospital
+        was deactivated) is `failed` with `error_code` `cancelled`.
+      tags: [queries]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: &queryReadErrors [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, not_ready, internal_error]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueryStatus" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /queries/{id}/result:
+    get:
+      operationId: getQueryResult
+      summary: The answer to one of the caller's completed questions.
+      description: 404 `not_found` until the question is completed, and for anyone else's.
+      tags: [queries]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *queryReadErrors
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The answer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClinicalResult" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
 components:
   securitySchemes:
     ServiceKey:
@@ -497,7 +601,10 @@ components:
             - rate_limited
             - login_locked
             - not_ready
+            - unavailable
             - internal_error
+            - method_not_allowed
+            - payload_too_large
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -649,3 +756,121 @@ components:
       required: [sessions]
       properties:
         sessions: { type: array, items: { $ref: "#/components/schemas/Session" } }
+
+    QueryCreateIn:
+      type: object
+      required: [patient_data, clinical_question, urgency]
+      additionalProperties: false
+      properties:
+        patient_data:
+          type: object
+          required: [age, sex, symptoms]
+          additionalProperties: false
+          properties:
+            age: { type: integer, minimum: 0, maximum: 130 }
+            sex: { type: string, enum: [female, male, other, unknown] }
+            symptoms:
+              type: array
+              maxItems: 50
+              items: { type: string, minLength: 1, maxLength: 200 }
+            medical_history: { type: string, maxLength: 4000 }
+        clinical_question: { type: string, minLength: 1, maxLength: 4000 }
+        urgency: { type: string, enum: [routine, urgent, emergency] }
+        specialty:
+          type: string
+          maxLength: 32
+          pattern: "^[A-Za-z][A-Za-z -]{0,31}$"
+        client_created_at:
+          type: string
+          format: date-time
+          description: When the app queued the question (offline); checked, not stored.
+    QueryCreated:
+      type: object
+      required: [query_id, status]
+      properties:
+        query_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued] }
+    QueryStatus:
+      type: object
+      required: [query_id, status, progress, current_stage]
+      properties:
+        query_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, processing, completed, failed] }
+        progress: { type: number, minimum: 0, maximum: 1 }
+        current_stage:
+          type: string
+          nullable: true
+          enum: [pii_masking, retrieval, generation, nli_verification, hga_verification, decision, null]
+        error_code:
+          type: string
+          description: |
+            Only when failed: an intelligence error code (spec §10.1), or
+            `cancelled`.
+    Citation:
+      type: object
+      required: [chunk_id, source_title, excerpt, claim_text, nli_label, nli_confidence, action, reason]
+      properties:
+        chunk_id: { type: string }
+        source_title: { type: string }
+        excerpt: { type: string }
+        claim_text: { type: string }
+        nli_label: { type: string, enum: [ENTAILMENT, NEUTRAL, CONTRADICTION] }
+        nli_confidence: { type: number }
+        action: { type: string, enum: [PASS, FLAG, REDACT] }
+        reason: { type: string }
+    ClinicalResult:
+      type: object
+      required: [query_id, decision, verified, degraded, failed_agents, response_available, diagnosis, icd10_code,
+                 response_text, trust_score, trust_band, citations, cited_chunk_ids, guardrail_details, retrieval_ms, generation_ms]
+      properties:
+        query_id: { type: string, format: uuid }
+        decision: { type: string, enum: [PASS, REGENERATE, ESCALATE] }
+        verified: { type: boolean }
+        degraded: { type: boolean }
+        failed_agents:
+          type: array
+          items: { type: string, enum: [CCA, HGA] }
+        response_available: { type: boolean }
+        diagnosis: { type: string, nullable: true }
+        icd10_code: { type: string, nullable: true }
+        response_text: { type: string }
+        trust_score: { type: number, nullable: true }
+        trust_band:
+          type: string
+          nullable: true
+          enum: [low, mid, high, null]
+          description: Provisional banding of a verified answer's trust; null when unverified.
+        citations:
+          type: array
+          items: { $ref: "#/components/schemas/Citation" }
+        cited_chunk_ids:
+          type: array
+          items: { type: string }
+        guardrail_details:
+          type: object
+          required: [l1_persona, l2_entropy, l3_nli, l4_trust, cascade_pass]
+          properties:
+            l1_persona: { type: object, nullable: true }
+            l2_entropy:
+              type: object
+              nullable: true
+              properties:
+                stability: { type: number }
+            l3_nli:
+              type: object
+              required: [pass_rate, claims_checked, model_loaded]
+              properties:
+                pass_rate: { type: number }
+                claims_checked: { type: integer }
+                model_loaded: { type: boolean }
+            l4_trust:
+              type: object
+              nullable: true
+              required: [trust_score, base_trust, flag_penalty]
+              properties:
+                trust_score: { type: number }
+                base_trust: { type: number }
+                flag_penalty: { type: number }
+            cascade_pass: { type: boolean }
+        retrieval_ms: { type: number }
+        generation_ms: { type: number }

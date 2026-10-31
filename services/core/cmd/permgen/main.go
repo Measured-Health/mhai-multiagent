@@ -1,7 +1,11 @@
 // Command permgen writes the permission table that the core service serves
-// to docs/specs/generated/permissions.md (for people) and
-// services/intelligence/intelligence/security/permissions.json (for the
-// Python services' checks). Run it from services/core:
+// and the operations table to docs/specs/generated/permissions.md (for
+// people) and services/intelligence/intelligence/boundary/operations.json
+// (read by the Python workers; Python writes no rule), boundary/catalogue.json
+// (the worker error codes and clinical roles, for the Python checks), and the Intelligence
+// API docs page (from proto/ and the operations table; embedded by
+// internal/apidocs). Run it from
+// services/core:
 //
 //	go run ./cmd/permgen
 //
@@ -19,19 +23,28 @@ import (
 
 // Paths from services/core to the generated files.
 var (
-	markdownPath = filepath.Join("..", "..", "docs", "specs", "generated", "permissions.md")
-	jsonPath     = filepath.Join("..", "intelligence", "intelligence", "security", "permissions.json")
+	markdownPath   = filepath.Join("..", "..", "docs", "specs", "generated", "permissions.md")
+	operationsPath = filepath.Join("..", "intelligence", "intelligence", "boundary", "operations.json")
+	cataloguePath  = filepath.Join("..", "intelligence", "intelligence", "boundary", "catalogue.json")
 )
 
 // render returns each generated file's path (relative to services/core)
 // and content.
 func render() (map[string][]byte, error) {
 	table := server.Table()
-	js, err := authz.JSON(table)
+	js, err := authz.OperationsJSON(authz.Operations())
 	if err != nil {
 		return nil, err
 	}
-	return map[string][]byte{markdownPath: authz.Markdown(table), jsonPath: js}, nil
+	cat, err := authz.CatalogueJSON()
+	if err != nil {
+		return nil, err
+	}
+	page, err := intelligenceHTML()
+	if err != nil {
+		return nil, err
+	}
+	return map[string][]byte{markdownPath: authz.Markdown(table), operationsPath: js, cataloguePath: cat, intelligencePage: page}, nil
 }
 
 func main() {

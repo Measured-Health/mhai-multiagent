@@ -1,5 +1,5 @@
-.PHONY: help install install-dev lint format typecheck test cov run clean docker \
-	up up-gpu up-observability infra down ps logs models nuke core-up core-test core-lint
+.PHONY: help install install-dev lint format typecheck test test-boundary cov run clean docker \
+	up up-gpu up-observability infra down ps logs models nuke core-up smoke core-test core-lint proto proto-check
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -27,8 +27,12 @@ format: ## Auto-format
 typecheck: ## Run mypy
 	$(PY) uv run mypy
 
-test: ## Run test suite
-	$(PY) uv run pytest
+test: ## Run test suite (no models, no Docker)
+	$(PY) uv run pytest -m "not models and not boundary"
+
+test-boundary: ## Boundary tests: Postgres 16 + NATS 2.10 in Docker (build host only)
+	docker build -t mhai-core:test services/core
+	$(PY) uv run pytest -m boundary tests/boundary
 
 cov: ## Tests with coverage
 	$(PY) uv run pytest --cov=intelligence --cov-report=term-missing
@@ -50,7 +54,7 @@ GPU := -f docker-compose.yml -f docker-compose.gpu.yml
 	cp .env.example .env
 	@echo "Created .env from .env.example; replace every changeme value (the core service refuses placeholders)."
 
-up: .env ## Start the stack: postgres, nats, core (+ migrations), redis, ollama (+ model pull), intelligence
+up: .env ## Start the stack: postgres, nats, core (+ migrations, keys), ollama (+ model pull), the pipeline worker
 	$(COMPOSE) up -d --build
 
 up-gpu: .env ## Start the stack on an NVIDIA GPU
@@ -59,8 +63,8 @@ up-gpu: .env ## Start the stack on an NVIDIA GPU
 up-observability: .env ## Start the stack plus the OpenTelemetry collector
 	$(COMPOSE) --profile observability up -d --build
 
-infra: .env ## Start only postgres (+ core migrations), redis and ollama (run the app with uv)
-	$(COMPOSE) up -d --build postgres core-migrate redis ollama ollama-init
+infra: .env ## Start only postgres (+ core migrations) and ollama (run the app with uv)
+	$(COMPOSE) up -d --build postgres core-migrate ollama ollama-init
 
 down: ## Stop the stack (keeps data volumes)
 	$(COMPOSE) --profile observability down
@@ -79,10 +83,42 @@ nuke: ## Stop the stack and DELETE its volumes (database, models, caches)
 	$(COMPOSE) --profile observability down -v
 
 core-up: .env ## Start only the core service and what it needs (postgres, nats, migrations)
-	$(COMPOSE) up -d --build postgres nats core-migrate core-keys core
+	$(COMPOSE) up -d --build postgres nats core-migrate core-keys core-request-key core
+
+smoke: ## The end-to-end smoke test: stub models, echo on, core as the clinical BFF over NATS (needs Docker and Go)
+	.github/scripts/boundary-smoke.sh --build
 
 core-test: ## Run the core service (Go) tests
 	cd services/core && go test -race ./...
 
 core-lint: ## Vet and staticcheck the core service (Go)
 	cd services/core && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+
+# The contract between core and intelligence (spec 6.3). Generated code is
+# committed; `make proto-check` fails if it is stale.
+PB := intelligence/boundary/pb
+GO_PB := services/core/internal/intelpb
+
+DOCS_PAGE := services/core/internal/apidocs/assets/intelligence.html
+
+proto: ## Generate the Go and Python code and the Intelligence API docs page from proto/ (needs buf, protoc-gen-go, uv)
+	cd proto && buf generate
+	cd services/core && go run ./cmd/permgen
+	$(PY) rm -rf .pbgen && mkdir .pbgen && \
+	  uv run --locked python -m grpc_tools.protoc -I ../../proto \
+	    --python_out=.pbgen --mypy_out=.pbgen ../../proto/mhai/intelligence/v1/*.proto && \
+	  rm -f $(PB)/*_pb2.py $(PB)/*_pb2.pyi && \
+	  mv .pbgen/mhai/intelligence/v1/*_pb2.py .pbgen/mhai/intelligence/v1/*_pb2.pyi $(PB)/ && \
+	  rm -rf .pbgen && \
+	  sed -i -E 's/^from mhai\.intelligence\.v1 import/from . import/; s/^import mhai\.intelligence\.v1\.([a-z_]+_pb2)/from . import \1/' $(PB)/*_pb2.py $(PB)/*_pb2.pyi
+
+proto-check: ## Lint the schema, check it is backward compatible, and check generated code is current
+	cd proto && buf lint
+	@base=$$(git rev-parse --verify -q origin/main || echo main); \
+	if git ls-tree -r --name-only $$base -- proto | grep -q .; then \
+	  cd proto && buf breaking --against "../.git#ref=$$base,subdir=proto"; \
+	else echo "buf breaking skipped: $$base has no proto/ yet"; fi
+	$(MAKE) proto
+	git diff --exit-code -- $(GO_PB) services/intelligence/$(PB) $(DOCS_PAGE)
+	@test -z "$$(git status --porcelain -- $(GO_PB) services/intelligence/$(PB) $(DOCS_PAGE))" || \
+	  { echo "generated code has untracked or changed files; commit them"; exit 1; }

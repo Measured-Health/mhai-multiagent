@@ -4,8 +4,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -20,30 +23,122 @@ type Config struct {
 	NATSURL          string
 	NATSNkeySeedPath string // production: the service's NKey seed file
 	AccessKeyPath    string
-	MFAKey           []byte
-	BFFServiceKeys   []string
-	BreachedListPath string
+	RequestKeyPath   string // the request-token signing key (spec §7.2), never the access key
+	// RequestTrustedKeysPath is the public trusted-keys file the workers
+	// read (spec §7.5). Optional: with it, the dead-letter consumer can tell
+	// a job refused for a removed kid (an emergency rotation) and re-mint
+	// it; without it, such a job fails like any refusal.
+	RequestTrustedKeysPath string
+	MFAKey                 []byte
+	BFFServiceKeys         []string
+	BreachedListPath       string
+	NATSTLS                NATSTLS // required outside development (ValidateServe)
+	// NATSJSReplicas is the replica count for JOBS, DEAD and the KV
+	// buckets: 1 in dev compose, 3 on the production cluster.
+	NATSJSReplicas int
+	// AllowSingleNode (CORE_ALLOW_SINGLE_NODE=true) lets a non-development
+	// core run with fewer than 3 JetStream replicas, a single-node install
+	// on purpose; serve logs a warning (SingleNode). There is no such
+	// escape for the database's TLS.
+	AllowSingleNode bool
+	// JobsPipelineMaxAckPending bounds the pipeline consumer's jobs in
+	// flight: the worker count times its concurrency.
+	JobsPipelineMaxAckPending int
+	// IntelligenceQueryCap is how many clinical questions one hospital may
+	// have queued or running at once (INTELLIGENCE_QUERY_CAP, decision 8);
+	// past it a submit is 429 rate_limited (intel.ReserveInFlight).
+	IntelligenceQueryCap int
 	// APIDocs serves the Redoc page and openapi.yaml (CORE_API_DOCS).
-	APIDocs bool
+	APIDocs            bool
+	HTTPAPI            bool
+	NATSAPIConcurrency int
+	// OTLPEndpoint is where traces and metrics go (OTEL_EXPORTER_OTLP_ENDPOINT,
+	// OTLP/gRPC: a URL or host:port). Empty: telemetry is off.
+	OTLPEndpoint string
+	// OTLPInsecure (OTEL_EXPORTER_OTLP_INSECURE=true) allows a plaintext
+	// non-loopback endpoint; development allows it too.
+	OTLPInsecure bool
+}
+
+// NATSTLS names the PEM files for TLS to NATS with a client certificate.
+type NATSTLS struct {
+	CAPath   string // NATS_TLS_CA_PATH
+	CertPath string // NATS_TLS_CERT_PATH
+	KeyPath  string // NATS_TLS_KEY_PATH
 }
 
 // Load reads the environment. Secrets are required, at least 32 bytes and
 // must not be placeholders. Errors name the variable, never its value.
 func Load() (Config, error) {
 	c := Config{
-		Env:              getenv("CORE_ENV", "development"),
-		HTTPAddr:         getenv("HTTP_ADDR", ":8080"),
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
-		NATSURL:          os.Getenv("NATS_URL"),
-		NATSNkeySeedPath: os.Getenv("NATS_NKEY_SEED_PATH"),
-		AccessKeyPath:    os.Getenv("ACCESS_KEY_PATH"),
-		BreachedListPath: os.Getenv("BREACHED_LIST_PATH"),
+		// Unset is production: everything that development relaxes (the
+		// API docs, NATS without TLS, test-only intelligence operations)
+		// stays off unless development is named.
+		Env:                    getenv("CORE_ENV", "production"),
+		HTTPAddr:               os.Getenv("HTTP_ADDR"),
+		DatabaseURL:            os.Getenv("DATABASE_URL"),
+		NATSURL:                os.Getenv("NATS_URL"),
+		NATSNkeySeedPath:       os.Getenv("NATS_NKEY_SEED_PATH"),
+		AccessKeyPath:          os.Getenv("ACCESS_KEY_PATH"),
+		RequestKeyPath:         os.Getenv("REQUEST_KEY_PATH"),
+		RequestTrustedKeysPath: os.Getenv("REQUEST_TRUSTED_KEYS_PATH"),
+		BreachedListPath:       os.Getenv("BREACHED_LIST_PATH"),
+		OTLPEndpoint:           strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
+		OTLPInsecure:           strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")), "true"),
+		NATSTLS: NATSTLS{
+			CAPath:   os.Getenv("NATS_TLS_CA_PATH"),
+			CertPath: os.Getenv("NATS_TLS_CERT_PATH"),
+			KeyPath:  os.Getenv("NATS_TLS_KEY_PATH"),
+		},
 	}
 	var errs []error
 
-	// CORE_API_DOCS: on by default only in development, so an unset or
-	// unrecognised environment (production included) fails closed.
-	c.APIDocs = strings.EqualFold(strings.TrimSpace(c.Env), "development")
+	var err error
+	if c.NATSJSReplicas, err = intEnv("NATS_JS_REPLICAS", 1, func(n int) bool { return n == 1 || n == 3 || n == 5 }); err != nil {
+		errs = append(errs, errors.New("NATS_JS_REPLICAS must be 1, 3 or 5"))
+	}
+	if c.JobsPipelineMaxAckPending, err = intEnv("JOBS_PIPELINE_MAX_ACK_PENDING", 8, func(n int) bool { return n >= 1 && n <= 100000 }); err != nil {
+		errs = append(errs, errors.New("JOBS_PIPELINE_MAX_ACK_PENDING must be 1 to 100000"))
+	}
+	if c.IntelligenceQueryCap, err = intEnv("INTELLIGENCE_QUERY_CAP", 10, func(n int) bool { return n >= 1 && n <= 1000 }); err != nil {
+		errs = append(errs, errors.New("INTELLIGENCE_QUERY_CAP must be 1 to 1000"))
+	}
+
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_ALLOW_SINGLE_NODE"))) {
+	case "", "false":
+	case "true":
+		c.AllowSingleNode = true
+	default:
+		errs = append(errs, errors.New("CORE_ALLOW_SINGLE_NODE must be true or false"))
+	}
+
+	if c.NATSAPIConcurrency, err = intEnv("CORE_NATS_API_CONCURRENCY", 256, func(n int) bool { return n >= 1 && n <= 100000 }); err != nil {
+		errs = append(errs, errors.New("CORE_NATS_API_CONCURRENCY must be 1 to 100000"))
+	}
+
+	// CORE_HTTP_API: on until mhai-web's BFF uses NATS. Off, HTTP serves
+	// the probes only, and only on a loopback address.
+	c.HTTPAPI = true
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_HTTP_API"))) {
+	case "", "on", "true":
+	case "off", "false":
+		c.HTTPAPI = false
+	default:
+		errs = append(errs, errors.New("CORE_HTTP_API must be on or off"))
+	}
+	switch {
+	case c.HTTPAddr == "" && c.HTTPAPI:
+		c.HTTPAddr = ":8080"
+	case c.HTTPAddr == "":
+		c.HTTPAddr = "127.0.0.1:8080"
+	case !c.HTTPAPI && !loopback(c.HTTPAddr):
+		errs = append(errs, errors.New("HTTP_ADDR must be a loopback address (127.0.0.1 or [::1]) when CORE_HTTP_API is off"))
+	}
+
+	// CORE_API_DOCS: on by default only in development, so production
+	// (also the value when CORE_ENV is unset) or an unrecognised
+	// environment fails closed.
+	c.APIDocs = c.Development()
 	if raw := strings.TrimSpace(os.Getenv("CORE_API_DOCS")); raw != "" {
 		b, err := strconv.ParseBool(raw)
 		if err != nil {
@@ -69,8 +164,12 @@ func Load() (Config, error) {
 		c.MFAKey = []byte(v)
 	}
 
+	// The BFF key guards the HTTP API only; over NATS the BFF's NATS user
+	// is the credential (spec §17.1).
 	if raw := os.Getenv("BFF_SERVICE_KEYS"); strings.TrimSpace(raw) == "" {
-		errs = append(errs, errors.New("BFF_SERVICE_KEYS is required"))
+		if c.HTTPAPI {
+			errs = append(errs, errors.New("BFF_SERVICE_KEYS is required while CORE_HTTP_API is on"))
+		}
 	} else {
 		for _, k := range strings.Split(raw, ",") {
 			k = strings.TrimSpace(k)
@@ -136,15 +235,58 @@ func checkURLPassword(name, raw string) error {
 }
 
 // ValidateServe checks what "core serve" needs beyond Load: the database,
-// NATS and the access-token signing key.
+// NATS, the access-token signing key and the request-token signing key, in
+// separate files (spec §7.2: a leak or bug in one can't mint the other
+// kind).
 func (c Config) ValidateServe() error {
 	var errs []error
-	for name, v := range map[string]string{"DATABASE_URL": c.DatabaseURL, "NATS_URL": c.NATSURL, "ACCESS_KEY_PATH": c.AccessKeyPath} {
+	for name, v := range map[string]string{"DATABASE_URL": c.DatabaseURL, "NATS_URL": c.NATSURL,
+		"ACCESS_KEY_PATH": c.AccessKeyPath, "REQUEST_KEY_PATH": c.RequestKeyPath} {
 		if strings.TrimSpace(v) == "" {
 			errs = append(errs, fmt.Errorf("%s is required", name))
 		}
 	}
+	if c.RequestKeyPath != "" && filepath.Clean(c.RequestKeyPath) == filepath.Clean(c.AccessKeyPath) {
+		errs = append(errs, errors.New("REQUEST_KEY_PATH must be a different file from ACCESS_KEY_PATH"))
+	}
+	// NATS carries the frontend's API traffic and access tokens since
+	// spec §17, so TLS with a client certificate is required everywhere
+	// but development; an empty or unknown environment fails closed.
+	t := c.NATSTLS
+	anyTLS := t.CAPath != "" || t.CertPath != "" || t.KeyPath != ""
+	allTLS := t.CAPath != "" && t.CertPath != "" && t.KeyPath != ""
+	switch {
+	case anyTLS && !allTLS:
+		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH must be set together"))
+	case !allTLS && !c.Development():
+		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH are required outside development"))
+	}
+	if !c.Development() {
+		// Final review I-2: the database carries every hospital's clinical
+		// data, so outside development the connection is TLS with the
+		// server's certificate and name checked. There is no escape hatch.
+		if c.DatabaseURL != "" && !verifyFull(c.DatabaseURL) {
+			errs = append(errs, errors.New("DATABASE_URL must be a postgres:// URL with sslmode=verify-full outside development"))
+		}
+		// One replica loses every queued job and the denylist with its
+		// node; a single-node install must say so.
+		if c.NATSJSReplicas < 3 && !c.AllowSingleNode {
+			errs = append(errs, errors.New("NATS_JS_REPLICAS must be 3 or more outside development (CORE_ALLOW_SINGLE_NODE=true for a single-node install)"))
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// verifyFull reports whether raw is a postgres:// (or postgresql://) URL
+// whose one sslmode is verify-full. A key=value DSN is refused: a URL is
+// the one form checked here. Never logs or returns raw.
+func verifyFull(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+		return false
+	}
+	modes := u.Query()["sslmode"]
+	return len(modes) == 1 && modes[0] == "verify-full"
 }
 
 // MinPasswordLen is the shortest database login password accepted.
@@ -185,6 +327,44 @@ func checkSecret(name, v string) error {
 	}
 	return nil
 }
+
+// intEnv reads an integer variable, def when unset, refused when it isn't
+// a number or ok says no.
+func intEnv(name string, def int, ok func(int) bool) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || !ok(n) {
+		return def, fmt.Errorf("%s is invalid", name)
+	}
+	return n, nil
+}
+
+// loopback reports whether addr is host:port with a loopback IP literal
+// for host. A name (localhost) is refused: it resolves at listen time.
+func loopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
+}
+
+// Development reports whether CORE_ENV names development. Only then are
+// the development relaxations on: API docs by default, NATS without TLS,
+// test-only intelligence operations granted. Anything else, an unset
+// CORE_ENV (production) included, fails closed.
+// SingleNode reports whether this is a non-development core running on
+// fewer than 3 JetStream replicas because CORE_ALLOW_SINGLE_NODE said so:
+// serve logs a warning at start.
+func (c Config) SingleNode() bool {
+	return !c.Development() && c.AllowSingleNode && c.NATSJSReplicas < 3
+}
+
+func (c Config) Development() bool { return strings.EqualFold(strings.TrimSpace(c.Env), "development") }
 
 func getenv(name, def string) string {
 	if v := os.Getenv(name); v != "" {

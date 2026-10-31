@@ -1,0 +1,18 @@
+{
+  "name": "wrong_knd",
+  "note": "a req token arriving as a job",
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6Im1oYWktcmVxK2p3dCIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEifQ.eyJpc3MiOiJtaGFpLWdhdGV3YXkiLCJhdWQiOiJlY2hvIiwic3ViIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiaGlkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwicm9sZXMiOlsiY2xpbmljaWFuIl0sInJpZCI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsImp0aSI6Ijk1ZzllTjM4Qkg0S3ZHTXBDZE4wNkEiLCJpYXQiOjE3OTMxODg4MDAsImV4cCI6MTc5MzE4ODgwNSwia25kIjoicmVxIiwibnN1YiI6ImluZmVyZW5jZS52MS5lY2hvLnBpbmciLCJiaCI6IjhMRWF0ckVvLVNDZllmUnpTYU1TYkxSazBHU0w3Qk1CeXhGcTlxOGlNVUEiLCJycGwiOiJfSU5CT1hfZ2F0ZXdheS4iLCJ2aWEiOiJjb3JlIn0.3BfYEVnhHNjP_7YhjhrFQrVM0oyYwiSlQgVsBVjnAJTvmNeD6KGCH2i5zelVe5A77Nv11NHAGihscuMJJ8gSAQ",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "Cg5zeW50aGV0aWMgcGluZxIkMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIy",
+  "subject": "inference.v1.echo.ping",
+  "reply": "",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.intelligence.v1.PingRequest",
+  "knd": "job",
+  "granted": false,
+  "service": "echo",
+  "now": 1793188801,
+  "verdict": "binding"
+}

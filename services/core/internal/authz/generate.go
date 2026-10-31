@@ -2,7 +2,6 @@ package authz
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -22,36 +21,6 @@ func published(table []RouteRule) []RouteRule {
 		}
 	}
 	return out
-}
-
-// jsonRule is one entry of permissions.json, for the Python services'
-// checks.
-type jsonRule struct {
-	Method   string   `json:"method"`
-	Pattern  string   `json:"pattern"`
-	AnyRole  []string `json:"any_role"`
-	Platform bool     `json:"platform"`
-	StepUp   bool     `json:"step_up"`
-	Write    bool     `json:"write"`
-}
-
-// JSON renders the table as permissions.json: a list of {method, pattern,
-// any_role, platform, step_up, write}, sorted by pattern then method.
-func JSON(table []RouteRule) ([]byte, error) {
-	rows := []jsonRule{}
-	for _, rr := range published(table) {
-		roles := rr.Rule.AnyRole
-		if roles == nil {
-			roles = []string{}
-		}
-		rows = append(rows, jsonRule{Method: rr.Method, Pattern: rr.Pattern, AnyRole: roles,
-			Platform: rr.Rule.Platform, StepUp: rr.Rule.StepUp, Write: rr.Rule.Write})
-	}
-	b, err := json.MarshalIndent(rows, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(b, '\n'), nil
 }
 
 // Markdown renders the table for docs/specs/generated/permissions.md.
@@ -96,6 +65,29 @@ func Markdown(table []RouteRule) []byte {
 		}
 		fmt.Fprintf(&b, "| %s | `%s` | %s | %s | %s | %s | %s | %s |\n",
 			rr.Method, rr.Pattern, access, roles, aud, yes(r.NeedsMFA), yes(r.StepUp), yes(r.Write))
+	}
+	b.Write(operationsMarkdown(Operations()))
+	return b.Bytes()
+}
+
+// operationsMarkdown renders the operations table for the docs.
+func operationsMarkdown(ops []Operation) []byte {
+	var b bytes.Buffer
+	b.WriteString("\n## Operations\n\n")
+	b.WriteString("The calls core may make to an intelligence worker over NATS, from `internal/authz/operations.go`.\n")
+	b.WriteString("The same table is published as `services/intelligence/intelligence/boundary/operations.json`.\n\n")
+	b.WriteString("- **Roles:** any one of them; `-` means no user may call it.\n")
+	b.WriteString("- **svc:core:** core may call it with no user. **Hospital:** the body is scoped to the caller's hospital.\n")
+	b.WriteString("- **BFF direct:** the BFF may call it after a grant from core. **Test only:** refused in production.\n\n")
+	b.WriteString("| Operation | Kind | Roles | svc:core | Hospital | BFF direct | Timeout | Test only |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|\n")
+	for _, o := range ops {
+		roles := "-"
+		if len(o.AnyRole) > 0 {
+			roles = "`" + strings.Join(o.AnyRole, "`, `") + "`"
+		}
+		fmt.Fprintf(&b, "| `%s` | %s | %s | %s | %s | %s | %s | %s |\n",
+			o.Name, o.Kind, roles, yes(o.SvcCore), yes(o.NeedsHospital), yes(o.BFFDirect), o.Timeout, yes(o.TestOnly))
 	}
 	return b.Bytes()
 }

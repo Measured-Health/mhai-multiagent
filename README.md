@@ -13,7 +13,10 @@ The backend has two parts:
   [ARCHITECTURE.md](ARCHITECTURE.md) and
   [services/core/README.md](services/core/README.md). Built so far (Plan 2):
   sign-in, sessions, two-step verification, permissions, tenancy and audit;
-  the contract is [services/core/openapi.yaml](services/core/openapi.yaml).
+  (Plan 3) the intelligence boundary: the Python workers behind NATS with
+  core-signed request tokens, clinical questions (`POST /queries`), and the
+  API over NATS for the BFFs. The contract is
+  [services/core/openapi.yaml](services/core/openapi.yaml).
 
 ## Agents
 
@@ -62,11 +65,12 @@ Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit
 ## Local Stack (Docker Compose)
 
 ```bash
-make up                 # postgres, nats, core, redis, ollama (+ pulls OLLAMA_MODEL), intelligence
+make up                 # postgres, nats, core, ollama (+ pulls OLLAMA_MODEL), the pipeline worker
 make core-up            # only the core service and what it needs (postgres, nats, migrations)
 make up-gpu             # same on an NVIDIA GPU (Ollama + CUDA PyTorch)
 make up-observability   # also the OpenTelemetry collector
-make infra              # only postgres, redis, ollama; run the app with uv
+make infra              # only postgres, ollama; run the app with uv
+make smoke              # end to end: stub models, echo worker, core as the BFF over NATS (generated secrets)
 make ps | logs | down   # status, logs, stop (data kept)
 make nuke               # stop and delete all volumes (asks first)
 ```
@@ -74,11 +78,14 @@ make nuke               # stop and delete all volumes (asks first)
 `make up` creates `.env` from `.env.example` on first run; replace every
 `changeme` value first, because the core service and NATS refuse
 placeholders. Ports bind to 127.0.0.1 and can be moved with `POSTGRES_PORT`,
-`NATS_PORT`, `CORE_PORT`, `REDIS_PORT`, `OLLAMA_PORT`, `API_PORT`,
+`NATS_PORT`, `CORE_PORT`, `OLLAMA_PORT`,
 `OTEL_GRPC_PORT` and `OTEL_HTTP_PORT`. The CCA
 generates through Ollama (`CCA_BACKEND=ollama`, model `OLLAMA_MODEL`).
-The `intelligence` service currently runs the CLI and exits; it becomes a
-server once the API exists.
+The `pipeline` service is the Python worker (`intelligence worker --service
+pipeline`), reached only over NATS: it has no port. `docker compose
+--profile test up -d` adds the test-only `echo` worker. A hospital made with
+the CLI starts `setup_incomplete`; set it `active` before asking questions
+(services/core/README.md).
 
 ## Security
 
@@ -104,7 +111,7 @@ services/intelligence/intelligence/
 ├── models/          # Neural network architectures
 ├── pipeline/        # Orchestration runner + cross-milestone integration
 ├── retrieval/       # Hybrid dense+sparse+RRF retrieval
-├── security/        # HIPAA: PII masking, encryption, RBAC, audit
+├── security/        # PII masking, encryption, latency profiler (roles and audit are core's)
 ├── tools/           # External connectors (HuggingFace, PubMed)
 └── utils/           # Logger, retry, rate limiter, device detection
 ```

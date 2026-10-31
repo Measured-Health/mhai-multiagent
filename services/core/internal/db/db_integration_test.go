@@ -110,8 +110,8 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(st) != 6 {
-		t.Fatalf("want 6 migrations, got %d", len(st))
+	if len(st) != 9 {
+		t.Fatalf("want 9 migrations, got %d", len(st))
 	}
 	for i, s := range st {
 		if s.Source.Version != int64(i+1) || s.State != goose.StateApplied {
@@ -132,7 +132,7 @@ func TestAppRolesAreNotOwnersAndCannotBypassRLS(t *testing.T) {
 	ctx := context.Background()
 	rows, err := pool.Query(ctx,
 		`SELECT rolname, rolsuper, rolbypassrls, rolcanlogin FROM pg_roles
-		 WHERE rolname IN ('mhai_gateway','mhai_platform','mhai_auth','mhai_worker','mhai_migrate','mhai_app','mhai_provision')`)
+		 WHERE rolname IN ('mhai_gateway','mhai_platform','mhai_auth','mhai_worker','mhai_migrate','mhai_app','mhai_provision','mhai_jobs','mhai_worker_app','mhai_audit_drain')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestAppRolesAreNotOwnersAndCannotBypassRLS(t *testing.T) {
 			t.Errorf("%s: super=%v bypassrls=%v login=%v, want all false", name, super, bypass, login)
 		}
 	}
-	if len(seen) != 7 {
+	if len(seen) != 10 {
 		t.Fatalf("roles found: %v", seen)
 	}
 
@@ -211,7 +211,7 @@ func TestRLSHidesOtherHospital(t *testing.T) {
 			t.Errorf("hospital A can't find its own query")
 		}
 		// An update aimed at B's row touches nothing.
-		tag, err := tx.Exec(ctx, `UPDATE clinical_queries SET status = 'done' WHERE id = $1`, qb)
+		tag, err := tx.Exec(ctx, `UPDATE clinical_queries SET published_at = now() WHERE id = $1`, qb)
 		if err != nil {
 			return err
 		}

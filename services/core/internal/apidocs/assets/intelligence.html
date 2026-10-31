@@ -1,0 +1,242 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>MHAI intelligence API</title>
+<style>
+body{margin:0;font:16px/1.5 system-ui,sans-serif;color:#1b2430;background:#fff}
+nav.tabs{display:flex;gap:4px;align-items:center;padding:8px 16px;background:#f2f5f8;border-bottom:1px solid #d5dce4}
+nav.tabs img{height:28px;margin-right:12px}
+nav.tabs a{padding:6px 14px;border-radius:6px;color:#1b2430;text-decoration:none}
+nav.tabs a:hover{background:#e3e9ef}
+nav.tabs a[aria-current="page"]{background:#1b2430;color:#fff}
+nav.tabs a:focus-visible,a:focus-visible{outline:3px solid #1a5fb4;outline-offset:2px}
+main{max-width:60rem;margin:0 auto;padding:16px}
+h2{margin-top:2rem;border-bottom:1px solid #d5dce4}
+section.op,section.msg{margin:1rem 0;padding:12px 16px;border:1px solid #d5dce4;border-radius:8px}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0}
+dt{font-weight:600}dd{margin:0}
+code{font:14px ui-monospace,monospace;background:#f2f5f8;padding:1px 4px;border-radius:4px}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;vertical-align:top;padding:4px 8px;border-bottom:1px solid #e3e9ef}
+.tag{display:inline-block;padding:0 8px;border-radius:10px;background:#fde8c8;font-size:14px}
+a{color:#1a5fb4}
+</style>
+</head>
+<body>
+<nav class="tabs" aria-label="API documentation">
+<img src="/api/docs/logo.png" alt="Measured Health">
+<a href="/api/docs">Core API (HTTP)</a>
+<a href="/api/docs/intelligence" aria-current="page">Intelligence API (NATS)</a>
+</nav>
+<main>
+<h1>Intelligence API (NATS)</h1>
+<p>The intelligence service has no HTTP API. Its operations are reached over NATS, never over HTTP, and only core (and, for the operations marked <em>BFF direct</em>, the clinical BFF after a grant from core) may call them. Every message carries a core-signed request token; a worker checks it before it reads the body.</p>
+<p>This page is generated from the <code>.proto</code> files in <code>proto/</code> and core's operations table. Subjects, users and streams are described in <code>services/nats/README.md</code>.</p>
+
+<h2 id="operations">Operations</h2>
+<section class="op" id="op-echo.ping" aria-labelledby="h-echo.ping">
+<h3 id="h-echo.ping"><code>echo.ping</code> <span class="tag">test only</span></h3>
+<dl>
+<dt>Kind</dt><dd>request/reply</dd>
+<dt>Subject</dt><dd><code>inference.v1.echo.ping</code></dd>
+<dt>Request</dt><dd><a href="#msg-mhai.intelligence.v1.PingRequest"><code>mhai.intelligence.v1.PingRequest</code></a></dd>
+<dt>Response</dt><dd><a href="#msg-mhai.intelligence.v1.PingResponse"><code>mhai.intelligence.v1.PingResponse</code></a></dd>
+<dt>Who may call</dt><dd><code>clinician</code>, <code>svc:core</code></dd>
+<dt>BFF direct</dt><dd>yes</dd>
+<dt>Timeout</dt><dd>5 seconds</dd>
+<dt>Needs a hospital</dt><dd>yes</dd>
+</dl>
+</section>
+<section class="op" id="op-pipeline.health" aria-labelledby="h-pipeline.health">
+<h3 id="h-pipeline.health"><code>pipeline.health</code></h3>
+<dl>
+<dt>Kind</dt><dd>request/reply</dd>
+<dt>Subject</dt><dd><code>inference.v1.pipeline.health</code></dd>
+<dt>Request</dt><dd><a href="#msg-mhai.intelligence.v1.HealthRequest"><code>mhai.intelligence.v1.HealthRequest</code></a></dd>
+<dt>Response</dt><dd><a href="#msg-mhai.intelligence.v1.HealthResponse"><code>mhai.intelligence.v1.HealthResponse</code></a></dd>
+<dt>Who may call</dt><dd><code>svc:core</code></dd>
+<dt>BFF direct</dt><dd>no</dd>
+<dt>Timeout</dt><dd>2 seconds</dd>
+<dt>Needs a hospital</dt><dd>no</dd>
+</dl>
+</section>
+<section class="op" id="op-pipeline.run_query" aria-labelledby="h-pipeline.run_query">
+<h3 id="h-pipeline.run_query"><code>pipeline.run_query</code></h3>
+<dl>
+<dt>Kind</dt><dd>job</dd>
+<dt>Subject</dt><dd><code>jobs.v1.&lt;hospital_id&gt;.run_query</code></dd>
+<dt>Request</dt><dd><a href="#msg-mhai.intelligence.v1.RunQueryJob"><code>mhai.intelligence.v1.RunQueryJob</code></a></dd>
+<dt>Response</dt><dd>none (a job has no reply message; its outcome is recorded by core)</dd>
+<dt>Who may call</dt><dd><code>clinician</code></dd>
+<dt>BFF direct</dt><dd>no</dd>
+<dt>Deadline</dt><dd>10 minutes</dd>
+<dt>Needs a hospital</dt><dd>yes</dd>
+</dl>
+</section>
+
+<h2 id="how-checked">How a call is checked</h2>
+<p>Before any work, a worker checks, in order: sizes, the token's shape and signature, its claims, its binding to the subject and body, the reply subject, replay, the schema, the scope (every hospital and patient id in the body matches the token) and finally the permission: the operation's roles above must include one of the caller's roles, or <code>svc:core</code> for a service call. A failed check does no work and answers with one of the error codes below. See spec section 7.3 (<code>docs/specs/2026-10-28-intelligence-boundary-design.md</code>).</p>
+
+<h2 id="errors">Error codes</h2>
+<p>A worker's <code>Error</code> message holds one of these codes and a retry hint, and no free text.</p>
+<table>
+<thead><tr><th scope="col">Code</th><th scope="col">Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>unauthorized</code></td><td>A verification check failed (size, token, claims, binding, reply subject or replay).</td></tr>
+<tr><td><code>forbidden</code></td><td>The role check failed: the operation&#39;s entry in the operations table allows none of the caller&#39;s roles.</td></tr>
+<tr><td><code>invalid_request</code></td><td>The schema or scope check failed.</td></tr>
+<tr><td><code>not_found</code></td><td>The row is not visible under the caller&#39;s hospital.</td></tr>
+<tr><td><code>deadline_exceeded</code></td><td>The call was received after its token expired.</td></tr>
+<tr><td><code>overloaded</code></td><td>The worker is at its concurrency limit.</td></tr>
+<tr><td><code>unavailable</code></td><td>A model or the database is not ready.</td></tr>
+<tr><td><code>cancelled</code></td><td>The job was cancelled.</td></tr>
+<tr><td><code>internal</code></td><td>Anything else.</td></tr>
+</tbody>
+</table>
+
+<h2 id="messages">Messages</h2>
+<section class="msg" id="msg-mhai.intelligence.v1.GrantRequest" aria-labelledby="h-msg-mhai.intelligence.v1.GrantRequest">
+<h3 id="h-msg-mhai.intelligence.v1.GrantRequest"><code>mhai.intelligence.v1.GrantRequest</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/authz.proto</code>. GrantRequest is what a BFF-direct call sends core on authz.v1.grant.&lt;service&gt; (spec section 17.2). Core decides from the access token and its own rules; no field here is trusted on its own.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>access_token</code></td><td>1</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>operation</code></td><td>2</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>subject</code></td><td>3</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>body_hash</code></td><td>4</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>patient_ids</code></td><td>5</td><td><code>repeated string</code></td><td></td></tr>
+<tr><td><code>reply_prefix</code></td><td>6</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>request_id</code></td><td>7</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>deadline_ms</code></td><td>8</td><td><code>uint32</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.GrantResponse" aria-labelledby="h-msg-mhai.intelligence.v1.GrantResponse">
+<h3 id="h-msg-mhai.intelligence.v1.GrantResponse"><code>mhai.intelligence.v1.GrantResponse</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/authz.proto</code>.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>request_token</code></td><td>1</td><td><code>string</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.GrantRefused" aria-labelledby="h-msg-mhai.intelligence.v1.GrantRefused">
+<h3 id="h-msg-mhai.intelligence.v1.GrantRefused"><code>mhai.intelligence.v1.GrantRefused</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/authz.proto</code>.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>code</code></td><td>1</td><td><code>string</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.PingRequest" aria-labelledby="h-msg-mhai.intelligence.v1.PingRequest">
+<h3 id="h-msg-mhai.intelligence.v1.PingRequest"><code>mhai.intelligence.v1.PingRequest</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/echo.proto</code>. PingRequest.hospital_id is not trusted. It exists so the scope check has a body hospital to compare with the hospital in the verified token.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td>1</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>hospital_id</code></td><td>2</td><td><code>string</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.PingResponse" aria-labelledby="h-msg-mhai.intelligence.v1.PingResponse">
+<h3 id="h-msg-mhai.intelligence.v1.PingResponse"><code>mhai.intelligence.v1.PingResponse</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/echo.proto</code>.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>meta</code></td><td>1</td><td><a href="#msg-mhai.intelligence.v1.ResponseMeta"><code>ResponseMeta</code></a></td><td></td></tr>
+<tr><td><code>text</code></td><td>2</td><td><code>string</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.Error" aria-labelledby="h-msg-mhai.intelligence.v1.Error">
+<h3 id="h-msg-mhai.intelligence.v1.Error"><code>mhai.intelligence.v1.Error</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/envelope.proto</code>. Error is what a worker returns when it refuses or fails a call. It holds a code from a closed set and a retry hint, and nothing else: no free text, so no PHI or internals can leak through it.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>code</code></td><td>1</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>retryable</code></td><td>2</td><td><code>bool</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.AuditFact" aria-labelledby="h-msg-mhai.intelligence.v1.AuditFact">
+<h3 id="h-msg-mhai.intelligence.v1.AuditFact"><code>mhai.intelligence.v1.AuditFact</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/envelope.proto</code>. AuditFact is something a worker did that core should write to the audit chain. Core takes the actor, hospital and request id from what it minted or stored, never from a fact.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>action</code></td><td>1</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>entity</code></td><td>2</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>entity_id</code></td><td>3</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>payload</code></td><td>4</td><td><code>google.protobuf.Struct</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.ResponseMeta" aria-labelledby="h-msg-mhai.intelligence.v1.ResponseMeta">
+<h3 id="h-msg-mhai.intelligence.v1.ResponseMeta"><code>mhai.intelligence.v1.ResponseMeta</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/envelope.proto</code>.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>audit_facts</code></td><td>1</td><td><a href="#msg-mhai.intelligence.v1.AuditFact"><code>repeated AuditFact</code></a></td><td></td></tr>
+<tr><td><code>model_versions</code></td><td>2</td><td><code>map&lt;string, string&gt;</code></td><td></td></tr>
+<tr><td><code>timings_ms</code></td><td>3</td><td><code>map&lt;string, double&gt;</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.DeadLetter" aria-labelledby="h-msg-mhai.intelligence.v1.DeadLetter">
+<h3 id="h-msg-mhai.intelligence.v1.DeadLetter"><code>mhai.intelligence.v1.DeadLetter</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/envelope.proto</code>. DeadLetter is published when a job can&#39;t be processed. It holds ids, a type, a count and codes only. subject_hospital is unverified by definition: it is copied from the subject the job arrived on, not from a verified token.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>job_id</code></td><td>1</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>type</code></td><td>2</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>subject_hospital</code></td><td>3</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>attempts</code></td><td>4</td><td><code>uint32</code></td><td></td></tr>
+<tr><td><code>code</code></td><td>5</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>reason</code></td><td>6</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>kid</code></td><td>7</td><td><code>string</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.RunQueryJob" aria-labelledby="h-msg-mhai.intelligence.v1.RunQueryJob">
+<h3 id="h-msg-mhai.intelligence.v1.RunQueryJob"><code>mhai.intelligence.v1.RunQueryJob</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/pipeline.proto</code>. RunQueryJob carries the query id only. The worker reads the rest from the database under the hospital in the verified job token.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>query_id</code></td><td>1</td><td><code>string</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.HealthRequest" aria-labelledby="h-msg-mhai.intelligence.v1.HealthRequest">
+<h3 id="h-msg-mhai.intelligence.v1.HealthRequest"><code>mhai.intelligence.v1.HealthRequest</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/pipeline.proto</code>.</p>
+<p>No fields.</p>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.HealthResponse" aria-labelledby="h-msg-mhai.intelligence.v1.HealthResponse">
+<h3 id="h-msg-mhai.intelligence.v1.HealthResponse"><code>mhai.intelligence.v1.HealthResponse</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/pipeline.proto</code>.</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>meta</code></td><td>1</td><td><a href="#msg-mhai.intelligence.v1.ResponseMeta"><code>ResponseMeta</code></a></td><td></td></tr>
+<tr><td><code>models_ready</code></td><td>2</td><td><code>bool</code></td><td></td></tr>
+<tr><td><code>database_ready</code></td><td>3</td><td><code>bool</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+</main>
+</body>
+</html>

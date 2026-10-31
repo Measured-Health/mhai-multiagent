@@ -26,4 +26,22 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | DELETE | `/api/v1/auth/sessions/{id}` | signed in | any | both | no | no | no |
 | POST | `/api/v1/auth/terms` | signed in | any | both | no | no | no |
 | GET | `/api/v1/healthz` | public | - | - | no | no | no |
+| POST | `/api/v1/queries` | signed in | `clinician` | clinical | no | no | yes |
+| GET | `/api/v1/queries/{id}` | signed in | `clinician` | clinical | no | no | no |
+| GET | `/api/v1/queries/{id}/result` | signed in | `clinician` | clinical | no | no | no |
 | GET | `/api/v1/readyz` | public | - | - | no | no | no |
+
+## Operations
+
+The calls core may make to an intelligence worker over NATS, from `internal/authz/operations.go`.
+The same table is published as `services/intelligence/intelligence/boundary/operations.json`.
+
+- **Roles:** any one of them; `-` means no user may call it.
+- **svc:core:** core may call it with no user. **Hospital:** the body is scoped to the caller's hospital.
+- **BFF direct:** the BFF may call it after a grant from core. **Test only:** refused in production.
+
+| Operation | Kind | Roles | svc:core | Hospital | BFF direct | Timeout | Test only |
+|---|---|---|---|---|---|---|---|
+| `echo.ping` | req | `clinician` | yes | yes | yes | 5s | yes |
+| `pipeline.health` | req | - | yes | no | no | 2s | no |
+| `pipeline.run_query` | job | `clinician` | no | yes | no | 10m0s | no |

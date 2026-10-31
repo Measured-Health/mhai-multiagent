@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
@@ -112,6 +113,31 @@ func TestLoginRequests(t *testing.T) {
 		for _, v := range bad {
 			if strings.Contains(v, "change") && strings.Contains(err.Error(), v) {
 				t.Errorf("error echoes the password: %v", err)
+			}
+		}
+	}
+}
+
+// Plan 3 T14 (carried): plaintext OTLP outside development is allowed only
+// on request, and then warned about at start-up.
+func TestTelemetryWarnings(t *testing.T) {
+	for _, c := range []struct {
+		cfg  config.Config
+		warn bool
+	}{
+		{config.Config{Env: "production", OTLPEndpoint: "http://collector:4317", OTLPInsecure: true}, true},
+		{config.Config{Env: "", OTLPEndpoint: "http://collector:4317", OTLPInsecure: true}, true},
+		{config.Config{Env: "development", OTLPEndpoint: "http://collector:4317", OTLPInsecure: true}, false},
+		{config.Config{Env: "production", OTLPEndpoint: "https://collector:4317"}, false},
+		{config.Config{Env: "production", OTLPInsecure: true}, false}, // telemetry off
+	} {
+		got := telemetryWarnings(c.cfg)
+		if (len(got) > 0) != c.warn {
+			t.Errorf("%+v: warnings %q", c.cfg, got)
+		}
+		for _, w := range got {
+			if strings.Contains(w, "collector") {
+				t.Errorf("a warning names the endpoint: %q", w)
 			}
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -91,4 +92,40 @@ func Audience(ctx context.Context) string {
 		return a
 	}
 	return AudienceClinical
+}
+
+// ViaNATS marks r as having arrived over NATS on api.v1.<audience>, the
+// NATS path's replacement for the BFF key (spec §17.1): only the bff_<app>
+// NATS user may publish that subject, so the subject is the proof of
+// origin, and it alone fixes the audience. X-MHAI-Audience is never read
+// here. X-MHAI-Client-IP is read as BFF reads it, trusted for the same
+// reason.
+//
+// Only internal/natsapi calls it, on requests it builds from NATS
+// messages; nothing on the HTTP path can set the mark (it is a context
+// value). Router.NATSHandler refuses a request without it.
+func ViaNATS(r *http.Request, audience string) (*http.Request, error) {
+	if audience != AudienceClinical && audience != AudiencePlatform {
+		return nil, errors.New("httpx: ViaNATS needs the clinical or platform audience")
+	}
+	ctx := context.WithValue(r.Context(), viaNATSKey, true)
+	if ip, ok := parseClientIP(r.Header.Values("X-MHAI-Client-IP")); ok {
+		ctx = context.WithValue(ctx, clientIPKey, ip)
+	}
+	ctx = context.WithValue(ctx, audienceKey, audience)
+	return r.WithContext(ctx), nil
+}
+
+// requireNATS admits only requests marked by ViaNATS, with 401
+// unauthenticated otherwise: the NATS chain has no key check, so a request
+// that reaches it any other way (an HTTP listener wired to it by mistake)
+// is refused, never served.
+func requireNATS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ok, _ := r.Context().Value(viaNATSKey).(bool); !ok {
+			Error(w, r, "unauthenticated")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

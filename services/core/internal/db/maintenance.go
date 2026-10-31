@@ -63,8 +63,10 @@ func wrongAttributes(canLogin, inherit, super, bypass, createDB, createRole, rep
 var testPasswordSQL func(string) string
 
 // loginRoles are the roles a deployment login may be made a member of:
-// mhai_app (the core service) and mhai_provision (the seed CLI).
-var loginRoles = map[string]bool{"mhai_app": true, "mhai_provision": true}
+// mhai_app (the core service), mhai_provision (the seed CLI) and
+// mhai_worker_app (the pipeline, 00008_intelligence_worker.sql). Each holds
+// no privilege of its own and inherits none.
+var loginRoles = map[string]bool{"mhai_app": true, "mhai_provision": true, "mhai_worker_app": true}
 
 var loginName = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 
@@ -72,16 +74,17 @@ var loginName = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 const MinLoginPasswordLen = 16
 
 // EnsureLogin creates the login role name with password, a member of
-// exactly role (mhai_app or mhai_provision), or brings an existing one back
-// to that: LOGIN, no superuser, BYPASSRLS, CREATEDB or CREATEROLE, the new
-// password, and every other membership revoked. pool must be able to
+// exactly role (mhai_app, mhai_provision or mhai_worker_app), or brings an existing one back
+// to that: LOGIN, no superuser, BYPASSRLS, CREATEDB or CREATEROLE, no
+// session defaults (ALTER ROLE ... RESET ALL, role-wide and for this
+// database), the new password, and every other membership revoked. pool must be able to
 // create roles (the migrate connection). Errors never carry the password,
 // and neither does any SQL text or parameter sent to Postgres: the password
 // goes as a SCRAM-SHA-256 verifier built here (see scramVerifier), which
 // Postgres stores as it is.
 func EnsureLogin(ctx context.Context, pool *pgxpool.Pool, name, password, role string) error {
 	if !loginRoles[role] {
-		return fmt.Errorf("db: a login may only be a member of mhai_app or mhai_provision, not %q", role)
+		return fmt.Errorf("db: a login may only be a member of mhai_app, mhai_provision or mhai_worker_app, not %q", role)
 	}
 	if !loginName.MatchString(name) || strings.HasPrefix(name, "mhai_") || strings.HasPrefix(name, "pg_") {
 		return errors.New("db: login name must be lower-case letters, digits and _, and not start with mhai_ or pg_")
@@ -127,6 +130,22 @@ func EnsureLogin(ctx context.Context, pool *pgxpool.Pool, name, password, role s
 		if _, err := tx.Exec(ctx, "ALTER ROLE "+ident+" "+strings.Join(fix, " ")); err != nil {
 			return fmt.Errorf("db: ensure login %s: ALTER ROLE failed", name)
 		}
+	}
+
+	// 1b. No session defaults on the role, here or for this database: a
+	// default role (ALTER ROLE ... SET role) would start every connection
+	// in that role, outside db.With* and with_hospital, and RESET ROLE
+	// would fall back to it; a default mhai.hospital_id would scope a
+	// connection before any transaction asked for it.
+	var dbName string
+	if err := tx.QueryRow(ctx, `SELECT current_database()`).Scan(&dbName); err != nil {
+		return errors.New("db: ensure login: lookup failed")
+	}
+	if _, err := tx.Exec(ctx, "ALTER ROLE "+ident+" RESET ALL"); err != nil {
+		return fmt.Errorf("db: ensure login %s: RESET ALL failed", name)
+	}
+	if _, err := tx.Exec(ctx, "ALTER ROLE "+ident+" IN DATABASE "+pgx.Identifier{dbName}.Sanitize()+" RESET ALL"); err != nil {
+		return fmt.Errorf("db: ensure login %s: RESET ALL in database failed", name)
 	}
 
 	// 2. Probe, with no secret in it, that this connection may set the

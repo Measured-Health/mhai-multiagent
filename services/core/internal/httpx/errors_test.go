@@ -35,7 +35,8 @@ func TestCodesCatalogue(t *testing.T) {
 		"forbidden": 403, "not_platform": 403, "not_found": 404,
 		"conflict": 409, "validation_failed": 422, "weak_password": 422,
 		"rate_limited": 429, "login_locked": 429, "not_ready": 503,
-		"internal_error": 500,
+		"unavailable": 503, "internal_error": 500,
+		"method_not_allowed": 405, "payload_too_large": 413,
 	}
 	if len(Codes) != len(want) {
 		t.Fatalf("Codes has %d entries, want %d", len(Codes), len(want))
@@ -223,6 +224,52 @@ func TestUncleanPathIsProblem404(t *testing.T) {
 		}), req)
 		if rec.Code != 404 || !strings.Contains(rec.Body.String(), `"not_found"`) {
 			t.Errorf("%s: %d %s", p, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// Spec §10.1: 503 unavailable is in the catalogue, with fixed text, and the
+// platform audience gets the code only.
+func TestUnavailableInCatalogue(t *testing.T) {
+	if Codes["unavailable"] != http.StatusServiceUnavailable {
+		t.Fatalf("Codes[unavailable] = %d", Codes["unavailable"])
+	}
+	if titles["unavailable"] != "Unavailable" || details["unavailable"] != "Couldn't get an answer. Try again." {
+		t.Fatalf("text %q / %q", titles["unavailable"], details["unavailable"])
+	}
+	req := bffRequest(http.MethodGet, "/api/v1/probe", "")
+	req.Header.Set("X-MHAI-Audience", "platform")
+	rec := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Error(w, r, "unavailable")
+	}), req)
+	if rec.Code != 503 || rec.Body.String() != `{"code":"unavailable"}` {
+		t.Fatalf("platform: %d %q", rec.Code, rec.Body.String())
+	}
+	rec = serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Error(w, r, "unavailable")
+	}), bffRequest(http.MethodGet, "/api/v1/probe", ""))
+	var p map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil || rec.Code != 503 || p["code"] != "unavailable" ||
+		p["title"] != "Unavailable" {
+		t.Fatalf("clinical: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ErrorRetryAfter adds Retry-After (whole seconds) to the same body Error
+// writes; zero or less adds none.
+func TestErrorRetryAfter(t *testing.T) {
+	for _, c := range []struct {
+		seconds int
+		want    string
+	}{{5, "5"}, {0, ""}, {-3, ""}} {
+		rec := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ErrorRetryAfter(w, r, "unavailable", c.seconds)
+		}), bffRequest(http.MethodGet, "/api/v1/probe", ""))
+		if rec.Code != 503 || rec.Header().Get("Retry-After") != c.want {
+			t.Errorf("%d: status %d Retry-After %q", c.seconds, rec.Code, rec.Header().Get("Retry-After"))
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"unavailable"`) {
+			t.Errorf("%d: body %s", c.seconds, rec.Body.String())
 		}
 	}
 }

@@ -1,0 +1,18 @@
+{
+  "name": "null_claim",
+  "note": "rid is null",
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6Im1oYWktcmVxK2p3dCIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEifQ.eyJpc3MiOiJtaGFpLWdhdGV3YXkiLCJhdWQiOiJlY2hvIiwic3ViIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiaGlkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwicm9sZXMiOlsiY2xpbmljaWFuIl0sInJpZCI6bnVsbCwianRpIjoiYXNMMVNnQ1ZaVW44eFRGdGN6QVByZyIsImlhdCI6MTc5MzE4ODgwMCwiZXhwIjoxNzkzMTg4ODA1LCJrbmQiOiJyZXEiLCJuc3ViIjoiaW5mZXJlbmNlLnYxLmVjaG8ucGluZyIsImJoIjoiOExFYXRyRW8tU0NmWWZSelNhTVNiTFJrMEdTTDdCTUJ5eEZxOXE4aU1VQSIsInJwbCI6Il9JTkJPWF9nYXRld2F5LiIsInZpYSI6ImNvcmUifQ.qSN4W1VIyR56_ZTy0M8i5-P4uoAMr-qx__2TsDkOFuB09mto1ZFwqHbhi9R_Ns5uRM0s_Qp-tBZFqycUBsmiBg",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "Cg5zeW50aGV0aWMgcGluZxIkMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIy",
+  "subject": "inference.v1.echo.ping",
+  "reply": "_INBOX_gateway.vectors.1",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.intelligence.v1.PingRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "echo",
+  "now": 1793188801,
+  "verdict": "malformed"
+}

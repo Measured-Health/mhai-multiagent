@@ -2,11 +2,13 @@
 """End-to-end check of MHAI with real models.
 
 Builds a KB from synthetic patients, loads the real dense retriever,
-NLI verifier and a Qwen CCA, and drives everything through
-SecurePipelineWrapper. Checks the fixes for issues #1-#3 and measures
+NLI verifier and a Qwen CCA, and drives everything through the
+orchestrator directly. Core's identity and permission checks are not in this
+script; it checks the models. Checks the fixes for issues #1-#3 and measures
 how well the guardrails catch hallucinated responses.
 
-    python scripts/e2e_models.py --out results/ [--cca-model Qwen/Qwen2.5-1.5B-Instruct]
+    python scripts/e2e_models.py --synthetic --out results/ \
+        [--cca-model Qwen/Qwen2.5-1.5B-Instruct]
 
 Writes report.json to --out and exits non-zero if any check fails.
 Uses only synthetic data; never point it at real patient records.
@@ -44,12 +46,35 @@ from intelligence.knowledge_base.kb_builder import (  # noqa: E402
     MedicalKnowledgeBase,
     RAGClinicalContextAgent,
 )
-from intelligence.security.hipaa import (  # noqa: E402
-    AuditLogger,
-    RBACManager,
-    SecurePipelineWrapper,
-    UserRole,
-)
+from intelligence.security.hipaa import PIIMasker  # noqa: E402
+
+
+class Pipeline:
+    """The orchestrator behind the same PII masking the worker applies.
+
+    Who may ask, and the audit trail, are core's job (the request token and
+    the audit chain); the user ids passed here stand for the token's
+    verified user.
+    """
+
+    def __init__(self, orch):
+        self.orch = orch
+        self.pii = PIIMasker()
+
+    def submit_query(self, query, patient_id=None):
+        masked, _ = self.pii.mask(query)
+        return self.orch.process_query(masked, None, patient_id=patient_id)
+
+    def submit_feedback(self, user_id, query_id, action, corrected_response=None):
+        if corrected_response:
+            corrected_response, _ = self.pii.mask(corrected_response)
+        return self.orch.process_feedback(
+            query_id, action, corrected_response, submitted_by=user_id
+        )
+
+    def approve_correction(self, user_id, correction_id):
+        return self.orch.approve_correction(correction_id, user_id)
+
 
 PATIENTS = {
     "PAT-MAL": (
@@ -182,9 +207,7 @@ def build(args, workdir):
         PersonaVectorUpdater(d_model=64), TrustWeightOptimizer(buffer_size=1), tm, kb=kb
     )
     orch = DynamicOrchestratorAgent(rag_cca=cca, hga=hga, threshold_manager=tm, feedback_loop=loop)
-    rbac = RBACManager()
-    audit = AuditLogger(log_dir=str(Path(workdir, "audit")))
-    wrapper = SecurePipelineWrapper(orch, rbac=rbac, audit=audit)
+    wrapper = Pipeline(orch)
     return dict(
         cfg=cfg,
         kb=kb,
@@ -194,8 +217,6 @@ def build(args, workdir):
         cca=cca,
         orch=orch,
         loop=loop,
-        rbac=rbac,
-        audit=audit,
         wrapper=wrapper,
     )
 
@@ -248,11 +269,10 @@ def check_nli_labels(s, rep):
 
 def check_isolation(s, rep):
     kb, w = s["kb"], s["wrapper"]
-    sid = s["rbac"].create_session("dr_iso", UserRole.CLINICIAN).session_id
     leaks = []
     for pid, query in CROSS_QUERIES:
         t = time.time()
-        res = w.submit_query(sid, query, patient_id=pid)
+        res = w.submit_query(query, patient_id=pid)
         rep.metrics.setdefault("isolation_latency_s", []).append(round(time.time() - t, 1))
         retrieved = s["cca"].retriever.retrieve(query, top_k=5, patient_id=pid)
         bad = [
@@ -350,13 +370,11 @@ def check_concurrency(s, rep, workers):
 
 
 def check_feedback(s, rep):
-    w, kb, rbac, retriever = s["wrapper"], s["kb"], s["rbac"], s["retriever"]
-    dr_a = rbac.create_session("dr_a", UserRole.CLINICIAN).session_id
-    dr_b = rbac.create_session("dr_b", UserRole.CLINICIAN).session_id
-    researcher = rbac.create_session("res", UserRole.RESEARCHER).session_id
+    w, kb, retriever = s["wrapper"], s["kb"], s["retriever"]
+    dr_a, dr_b = "dr_a", "dr_b"  # stand-ins for two verified users
     n_before = len(kb.chunks)
 
-    q = w.submit_query(dr_a, "Metformin dose for this patient?", patient_id="PAT-DM")
+    q = w.submit_query("Metformin dose for this patient?", patient_id="PAT-DM")
     fb = w.submit_feedback(
         dr_a,
         q["query_id"],
@@ -366,10 +384,6 @@ def check_feedback(s, rep):
     rep.check(
         "correction is queued, KB untouched",
         fb.get("status") == "pending_review" and len(kb.chunks) == n_before,
-    )
-    rep.check(
-        "researcher cannot submit feedback",
-        w.submit_feedback(researcher, q["query_id"], "correct", "x").get("allowed") is False,
     )
     rep.check(
         "submitter cannot approve own correction",
@@ -398,8 +412,6 @@ def check_feedback(s, rep):
         "approved correction is invisible to other patients",
         not any(r.chunk.chunk_id == new[0].chunk_id for r in other),
     )
-    valid, n = s["audit"].verify_chain()
-    rep.check("audit chain intact", valid, f"{n} entries")
 
 
 def measure_guardrails(s, rep):
@@ -476,7 +488,18 @@ def main():
         default="rule_based",
         help='"rule_based" (fast) or "llm" to generate every suite case',
     )
+    ap.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="required: confirms this runs on synthetic data only",
+    )
     args = ap.parse_args()
+    if not args.synthetic:
+        ap.exit(
+            2,
+            "refusing to run without --synthetic: this script runs the models without "
+            "core's identity and permission checks, on synthetic data only\n",
+        )
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

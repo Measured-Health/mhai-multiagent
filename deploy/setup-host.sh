@@ -16,7 +16,8 @@
 # It needs sudo only to create /srv/mhai-backend; file ownership for the
 # containers' users is set from throwaway containers (no network).
 #   .env also holds the BFF's NATS NKey (NATS_BFF_NKEY, NATS_BFF_NKEY_SEED)
-# the Docker volumes mhai-backend-pgdata, -natsdata and -corekeys, and the
+# the Docker volumes mhai-backend-pgdata, -natsdata, -corekeys and
+# -trustedkeys, and the
 # internal Docker network mhai-bff that the frontend's containers join.
 
 set -euo pipefail
@@ -190,6 +191,9 @@ volume mhai-backend-pgdata   "$PG_UID"   "$POSTGRES_IMAGE"
 volume mhai-backend-natsdata "$NATS_UID" "$NATS_IMAGE"
 # Filled from the image (owned by 65532) on the core-keys container's first start.
 volume mhai-backend-corekeys ""          ""
+# The request-token trusted-keys file (public keys), filled the same way by
+# the core-request-key container.
+volume mhai-backend-trustedkeys ""       ""
 
 say "Loopback ports"
 check_port() {

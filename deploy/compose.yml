@@ -79,6 +79,7 @@ services:
     environment:
       # Public keys, not secrets. The core seed is only in the core
       # container; the BFF seed is in .env for the frontend, later.
+      # NATS_BFF_NKEY is the clinical app's BFF (bff_clinical).
       NATS_GATEWAY_NKEY: ${NATS_GATEWAY_NKEY:?set in /srv/mhai-backend/.env}
       NATS_BFF_NKEY: ${NATS_BFF_NKEY:?set in /srv/mhai-backend/.env}
       GOMEMLIMIT: 96MiB
@@ -141,6 +142,23 @@ services:
       - corekeys:/keys
     mem_limit: 64m
 
+  # One-shot: the request-token signing key (a different key from the
+  # access-token key, spec §7.2) in corekeys, and its public half in the
+  # trusted-keys file on its own volume, for the workers to mount read-only.
+  # Kept when already there (core keys ensure).
+  core-request-key:
+    <<: [*hardening, *core-image]
+    restart: "no"
+    command: ["keys", "ensure", "--kind", "request", "--out", "/keys/request.pem",
+              "--trusted-out", "/trusted/request-keys.json"]
+    network_mode: none
+    volumes:
+      - corekeys:/keys
+      - trustedkeys:/trusted
+    mem_limit: 64m
+    depends_on:
+      core-keys: { condition: service_completed_successfully }
+
   # The core service: the API the BFFs call. Its environment holds only its
   # own settings and secrets: the core_app login, its NATS NKey seed (a
   # file), the signing key (a file), the MFA key and the BFF keys.
@@ -151,7 +169,8 @@ services:
     environment:
       # The demo server runs as development (product owner, 28 Oct), which
       # turns on Redoc at /api/docs on the loopback port (view it through an
-      # SSH tunnel). CORE_ENV changes nothing else in core today; production
+      # SSH tunnel), and lets core reach NATS without TLS (outside
+      # development core refuses to start without NATS_TLS_*). Production
       # must not be development.
       CORE_ENV: development
       HTTP_ADDR: ":8080"
@@ -159,6 +178,13 @@ services:
       NATS_URL: nats://nats:4222
       NATS_NKEY_SEED_PATH: /run/secrets/nats-gateway.nk
       ACCESS_KEY_PATH: /keys/access.pem
+      REQUEST_KEY_PATH: /keys/request.pem
+      REQUEST_TRUSTED_KEYS_PATH: /trusted/request-keys.json   # public; dead-letter re-mint after a rotation
+      INTELLIGENCE_QUERY_CAP: "10"   # questions in flight per hospital (decision 8)
+      # The API over HTTP too: the frontend still calls HTTP until mhai-web's
+      # BFF moves to NATS (spec §17.1). Core serves api.v1.<app> over NATS
+      # as well.
+      CORE_HTTP_API: "on"
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set in /srv/mhai-backend/.env}
       BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set in /srv/mhai-backend/.env}
       GOMEMLIMIT: 256MiB
@@ -168,6 +194,7 @@ services:
       - "127.0.0.1:${CORE_HOST_PORT:-8092}:8080"
     volumes:
       - corekeys:/keys:ro
+      - trustedkeys:/trusted:ro
       # Owned by the container's user (65532), mode 400 (setup-host.sh).
       - ./secrets/nats-gateway.nk:/run/secrets/nats-gateway.nk:ro
     tmpfs:
@@ -182,6 +209,7 @@ services:
       nats: { condition: service_healthy }
       core-migrate: { condition: service_completed_successfully }
       core-keys: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
     # The image is distroless (no shell or curl): the deploy workflow probes
     # GET /api/v1/readyz from the host.
     healthcheck:
@@ -200,15 +228,34 @@ services:
     depends_on:
       core-migrate: { condition: service_completed_successfully }
 
-  # The intelligence service (Python workers) is not deployed yet: it is not
-  # wired to NATS until the boundary plan lands. When it is:
-  #   - its own NATS NKey (a `worker` user in nats/nats.conf) and its own
-  #     database login (not the superuser, not core_app);
+  # The intelligence workers (pipeline, echo) are not deployed on the demo
+  # in Plan 3, on purpose: the instance is small (3.7 GiB shared with the
+  # EMR and the web demo) and the models are heavy. Without them, core
+  # still starts and serves everything else; a question (POST /queries) is
+  # queued and, with no pipeline to take it, fails at its 10-minute
+  # deadline (deadline_exceeded). echo is test-only and never comes here.
+  # When the pipeline is deployed (a bigger host, or a model service):
+  #   - its own NATS NKey (a `pipeline` user in nats/nats.conf with the
+  #     permissions from services/nats/nats.conf) and TLS (nats.conf);
+  #   - its own database login, INTELLIGENCE_DB_USER (a member of
+  #     mhai_worker_app only; core-migrate makes it when
+  #     INTELLIGENCE_DB_PASSWORD is set), the password from a file, and
+  #     sslmode=verify-full (the worker refuses anything else outside
+  #     development);
+  #   - the trusted keys read-only (trustedkeys:/trusted:ro), never corekeys;
   #   - no env_file: it must not see the core service's secrets;
-  #   - on `backend` only, no published port, and a mem_limit that fits
-  #     next to the EMR (the models may need a bigger host).
-  # intelligence:
+  #   - on `backend` only, no published port, a mem_limit.
+  # pipeline:
   #   image: ghcr.io/measured-health/mhai-multiagent:<version>
+  #   command: ["worker", "--service", "pipeline"]
+  #   environment:
+  #     APP_ENV: production
+  #     NATS_URL: tls://nats:4222
+  #     NATS_NKEY_SEED_PATH: /run/secrets/nats-pipeline.nk
+  #     INTELLIGENCE_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+  #     INTELLIGENCE_DB_URL: postgres://postgres:5432/mhai?sslmode=verify-full
+  #     INTELLIGENCE_DB_PASSWORD_FILE: /run/secrets/intelligence-db-password
+  #   volumes: ["trustedkeys:/trusted:ro"]
   #   networks: [backend]
   #   mem_limit: ...
 
@@ -226,8 +273,9 @@ networks:
     external: true
     name: mhai-bff
 
-# Made once by setup-host.sh. External, so `docker compose down -v` can never
-# delete the database, the JetStream store or the signing key.
+# Made once by setup-host.sh (trustedkeys also by the deploy workflow, if
+# missing). External, so `docker compose down -v` can never delete the
+# database, the JetStream store or the signing keys.
 volumes:
   pgdata:
     external: true
@@ -238,3 +286,7 @@ volumes:
   corekeys:
     external: true
     name: mhai-backend-corekeys
+  # Public keys only (the request-token trusted-keys file).
+  trustedkeys:
+    external: true
+    name: mhai-backend-trustedkeys

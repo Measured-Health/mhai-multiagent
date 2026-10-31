@@ -1,0 +1,13 @@
+{
+  "accessToken": "synthetic-access-token",
+  "operation": "echo.ping",
+  "subject": "inference.v1.echo.ping",
+  "bodyHash": "synthetic-body-hash",
+  "patientIds": [
+    "00000000-0000-4000-8000-0000000000b1",
+    "00000000-0000-4000-8000-0000000000b2"
+  ],
+  "replyPrefix": "_INBOX_bff.clinical.",
+  "requestId": "00000000-0000-4000-8000-000000000004",
+  "deadlineMs": 5000
+}

@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 )
 
 // NormaliseEmail trims surrounding space and lowercases, so the stored login
@@ -35,7 +37,16 @@ var (
 )
 
 var platformRoles = map[string]bool{"platform_admin": true, "auditor": true}
-var clinicalRoles = map[string]bool{"clinician": true, "hospital_admin": true, "analyst": true}
+
+// clinicalRoles is authz's list (the roles a clinical route may admit), so
+// the two can't drift apart (final review M-8).
+var clinicalRoles = func() map[string]bool {
+	m := map[string]bool{}
+	for _, r := range authz.ClinicalRoles() {
+		m[r] = true
+	}
+	return m
+}()
 
 // ValidateRoles checks the role set against whether the account has a
 // hospital. The database triggers enforce the same pairing; this gives a

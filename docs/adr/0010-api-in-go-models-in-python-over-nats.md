@@ -54,5 +54,5 @@ The design is in `docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md`.
 - The risk ADR 0007 avoided, two copies of the security rules, is contained differently:
   - Go is the only place rules are written;
   - Python only verifies a signed decision and checks hospital scope.
-- NATS is a new piece to run. It replaces the Redis job queue, which was a stub (`services/intelligence/intelligence/queue`). Redis stays only if a cache is needed.
+- NATS is a new piece to run. It replaces the Redis job queue, which was a stub (`services/intelligence/intelligence/queue`, removed in Plan 3 Task 13, with Redis in compose). Redis returns only if a cache is needed.
 - Plan 1 (inference boundary) is rewritten for NATS before it is built.

@@ -13,8 +13,9 @@ const BasePath = "/api/v1"
 const MaxBody = 64 << 10
 
 // Router collects the /api/v1 routes. Handler wraps them in the request
-// id, BFF credential and body limit; there is no way to serve a route
-// without them.
+// id, BFF credential and body limit; NATSHandler in the request id, the
+// NATS mark (ViaNATS) and body limit. There is no way to serve a route
+// without one or the other.
 //
 // Application routes register through authz.Route, never Handle directly:
 // authz.Route puts the route behind the principal middleware and in the
@@ -48,7 +49,19 @@ func (rt *Router) Patterns() []string {
 // Handler is the router behind RequestID → BFF(serviceKeys) → body limit.
 // An unknown route gets 404 not_found as a problem body.
 func (rt *Router) Handler(serviceKeys []string) http.Handler {
-	routes := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return RequestID(BFF(serviceKeys)(limitBody(rt.routes())))
+}
+
+// NATSHandler is the same router behind RequestID → requireNATS → body
+// limit: the HTTP chain with the BFF key check replaced by the NATS mark
+// (ViaNATS, set by internal/natsapi only). Everything after it, the
+// guard included, is the same handler as over HTTP.
+func (rt *Router) NATSHandler() http.Handler {
+	return RequestID(requireNATS(limitBody(rt.routes())))
+}
+
+func (rt *Router) routes() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// An unclean path ("//", "." or "..") is refused, not redirected.
 		if !cleanPath(r.URL.Path) {
 			Error(w, r, "not_found")
@@ -60,7 +73,6 @@ func (rt *Router) Handler(serviceKeys []string) http.Handler {
 		}
 		rt.mux.ServeHTTP(w, r)
 	})
-	return RequestID(BFF(serviceKeys)(limitBody(routes)))
 }
 
 func limitBody(next http.Handler) http.Handler {

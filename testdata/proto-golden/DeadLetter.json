@@ -1,0 +1,9 @@
+{
+  "jobId": "00000000-0000-4000-8000-000000000002",
+  "type": "run_query",
+  "subjectHospital": "00000000-0000-4000-8000-0000000000a1",
+  "attempts": 3,
+  "code": "unauthorized",
+  "reason": "signature",
+  "kid": "synthetic-kid-1"
+}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 )
 
 // Codes maps every error code the gateway returns to its HTTP status
@@ -27,46 +28,57 @@ var Codes = map[string]int{
 	"rate_limited":      http.StatusTooManyRequests,
 	"login_locked":      http.StatusTooManyRequests,
 	"not_ready":         http.StatusServiceUnavailable,
+	"unavailable":       http.StatusServiceUnavailable, // intelligence didn't answer (spec §10.1), or the NATS API is full
 	"internal_error":    http.StatusInternalServerError,
+	// Over NATS only (internal/natsapi): a Mhai-Method outside the six the
+	// API uses, and a body over MaxBody, refused before the handler chain.
+	"method_not_allowed": http.StatusMethodNotAllowed,
+	"payload_too_large":  http.StatusRequestEntityTooLarge,
 }
 
 // titles and details are fixed per code. They never carry input or error
 // text, so a problem body can't leak what the client sent or why a query
 // failed.
 var titles = map[string]string{
-	"unauthenticated":   "Unauthenticated",
-	"token_expired":     "Token expired",
-	"mfa_required":      "Two-step verification required",
-	"mfa_invalid":       "Invalid verification code",
-	"mfa_locked":        "Too many verification attempts",
-	"forbidden":         "Forbidden",
-	"not_platform":      "Platform accounts only",
-	"not_found":         "Not found",
-	"conflict":          "Conflict",
-	"validation_failed": "Validation failed",
-	"weak_password":     "Weak password",
-	"rate_limited":      "Too many requests",
-	"login_locked":      "Sign-in locked",
-	"not_ready":         "Not ready",
-	"internal_error":    "Internal error",
+	"unauthenticated":    "Unauthenticated",
+	"token_expired":      "Token expired",
+	"mfa_required":       "Two-step verification required",
+	"mfa_invalid":        "Invalid verification code",
+	"mfa_locked":         "Too many verification attempts",
+	"forbidden":          "Forbidden",
+	"not_platform":       "Platform accounts only",
+	"not_found":          "Not found",
+	"conflict":           "Conflict",
+	"validation_failed":  "Validation failed",
+	"weak_password":      "Weak password",
+	"rate_limited":       "Too many requests",
+	"login_locked":       "Sign-in locked",
+	"not_ready":          "Not ready",
+	"unavailable":        "Unavailable",
+	"internal_error":     "Internal error",
+	"method_not_allowed": "Method not allowed",
+	"payload_too_large":  "Payload too large",
 }
 
 var details = map[string]string{
-	"unauthenticated":   "Sign-in is required.",
-	"token_expired":     "The access token has expired.",
-	"mfa_required":      "Two-step verification is required.",
-	"mfa_invalid":       "The verification code is not valid.",
-	"mfa_locked":        "Too many verification attempts. Try again later.",
-	"forbidden":         "You do not have permission to do this.",
-	"not_platform":      "This route is for platform accounts only.",
-	"not_found":         "The resource was not found.",
-	"conflict":          "The request conflicts with the current state.",
-	"validation_failed": "The request is not valid.",
-	"weak_password":     "The password does not meet the requirements.",
-	"rate_limited":      "Too many requests. Try again later.",
-	"login_locked":      "Too many sign-in attempts. Try again later.",
-	"not_ready":         "The service is not ready.",
-	"internal_error":    "Something went wrong.",
+	"unauthenticated":    "Sign-in is required.",
+	"token_expired":      "The access token has expired.",
+	"mfa_required":       "Two-step verification is required.",
+	"mfa_invalid":        "The verification code is not valid.",
+	"mfa_locked":         "Too many verification attempts. Try again later.",
+	"forbidden":          "You do not have permission to do this.",
+	"not_platform":       "This route is for platform accounts only.",
+	"not_found":          "The resource was not found.",
+	"conflict":           "The request conflicts with the current state.",
+	"validation_failed":  "The request is not valid.",
+	"weak_password":      "The password does not meet the requirements.",
+	"rate_limited":       "Too many requests. Try again later.",
+	"login_locked":       "Too many sign-in attempts. Try again later.",
+	"not_ready":          "The service is not ready.",
+	"unavailable":        "Couldn't get an answer. Try again.",
+	"internal_error":     "Something went wrong.",
+	"method_not_allowed": "The method is not allowed.",
+	"payload_too_large":  "The request body is too large.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.
@@ -111,6 +123,15 @@ func Error(w http.ResponseWriter, r *http.Request, code string) {
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+}
+
+// ErrorRetryAfter is Error with a Retry-After header of seconds (whole
+// seconds, only when positive), for a refusal the client may retry later.
+func ErrorRetryAfter(w http.ResponseWriter, r *http.Request, code string, seconds int) {
+	if seconds > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	}
+	Error(w, r, code)
 }
 
 // JSON writes v as an application/json response.

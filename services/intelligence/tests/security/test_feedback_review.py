@@ -1,4 +1,15 @@
-"""Issue #3: corrections need a second clinician before they change anything."""
+"""Issue #3: corrections need a second clinician before they change anything.
+
+Who may submit or approve feedback is core's decision, and the audit trail is
+core's chain (the request token carries the verified user). What stays here
+is the two-person rule itself, in DoctorFeedbackLoop and the orchestrator,
+and the check that nothing in the boundary can reach it without core.
+"""
+
+import json
+import re
+from importlib import resources
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,7 +23,6 @@ from intelligence.agents.orchestrator import (
     TrustWeightOptimizer,
 )
 from intelligence.knowledge_base.kb_builder import KBChunk, RAGClinicalContextAgent
-from intelligence.security.hipaa import AuditLogger, RBACManager, SecurePipelineWrapper, UserRole
 
 from .conftest import PATIENT_A
 
@@ -21,7 +31,7 @@ CORRECTION = "Use 500 mg twice daily. Call 555-123-4567, SSN 123-45-6789."
 
 
 @pytest.fixture
-def system(two_patient_kb, retriever, tmp_path):
+def system(two_patient_kb, retriever):
     pv = PersonaVectorUpdater(d_model=8)
     tw = TrustWeightOptimizer(buffer_size=1)  # optimise on the first correction
     tm = GuardrailThresholdManager()
@@ -32,23 +42,7 @@ def system(two_patient_kb, retriever, tmp_path):
         threshold_manager=tm,
         feedback_loop=loop,
     )
-    rbac = RBACManager()
-    audit = AuditLogger(log_dir=str(tmp_path / "audit"))
-    wrapper = SecurePipelineWrapper(orch, rbac=rbac, audit=audit)
-    return {
-        "kb": two_patient_kb,
-        "loop": loop,
-        "orch": orch,
-        "pv": pv,
-        "tw": tw,
-        "rbac": rbac,
-        "audit": audit,
-        "wrapper": wrapper,
-    }
-
-
-def _session(system, user, role=UserRole.CLINICIAN):
-    return system["rbac"].create_session(user, role).session_id
+    return {"kb": two_patient_kb, "loop": loop, "orch": orch, "pv": pv, "tw": tw}
 
 
 def _corrections(kb):
@@ -56,10 +50,11 @@ def _corrections(kb):
 
 
 def _submit(system, user="dr_a"):
-    w = system["wrapper"]
-    sid = _session(system, user)
-    q = w.submit_query(sid, QUERY, patient_id=PATIENT_A)
-    fb = w.submit_feedback(sid, q["query_id"], "correct", CORRECTION)
+    """What the worker does with core's verified user id: ask, then give
+    feedback as that user."""
+    orch = system["orch"]
+    q = orch.process_query(QUERY, patient_id=PATIENT_A)
+    fb = orch.process_feedback(q["query_id"], "correct", CORRECTION, submitted_by=user)
     return q, fb
 
 
@@ -79,26 +74,35 @@ def test_correction_changes_nothing_until_approved(system):
 def test_submitter_cannot_approve_own_correction(system):
     _, fb = _submit(system, "dr_a")
 
-    result = system["wrapper"].approve_correction(_session(system, "dr_a"), fb["correction_id"])
+    result = system["orch"].approve_correction(fb["correction_id"], "dr_a")
 
     assert "different clinician" in result["error"]
     assert _corrections(system["kb"]) == []
 
 
-def test_non_clinician_cannot_submit_or_approve(system):
-    q, fb = _submit(system)
-    w = system["wrapper"]
+def test_feedback_has_no_boundary_operation():
+    # Replaces "a non-clinician cannot submit or approve": the worker serves
+    # only the operations core's table names, and none is feedback or
+    # approval. Adding one needs a role in operations.json, which is core's
+    # table to gate (Python holds no permission rule).
+    ops = json.loads((resources.files("intelligence.boundary") / "operations.json").read_text())
+    for op in ops:
+        assert not re.search(r"feedback|correction|approve", op["name"]), op["name"]
 
-    researcher = _session(system, "res_1", UserRole.RESEARCHER)
-    assert w.submit_feedback(researcher, q["query_id"], "correct", "x")["allowed"] is False
-    assert w.approve_correction(researcher, fb["correction_id"])["allowed"] is False
-    assert w.submit_feedback("forged-session", q["query_id"], "correct", "x")["allowed"] is False
+
+def test_boundary_code_never_reaches_the_feedback_loop():
+    # And nothing in the boundary package calls it behind the table's back.
+    boundary = Path(str(resources.files("intelligence.boundary")))
+    for path in boundary.rglob("*.py"):
+        text = path.read_text()
+        for name in ("process_feedback", "approve_correction", "DoctorFeedbackLoop"):
+            assert name not in text, f"{path.name} reaches {name}"
 
 
 def test_second_clinician_approval_applies_scoped_masked_correction(system):
     q, fb = _submit(system, "dr_a")
 
-    result = system["wrapper"].approve_correction(_session(system, "dr_b"), fb["correction_id"])
+    result = system["orch"].approve_correction(fb["correction_id"], "dr_b")
 
     assert result["status"] == "approved"
     assert result["updates"]["kb_enriched"] is True
@@ -112,19 +116,18 @@ def test_second_clinician_approval_applies_scoped_masked_correction(system):
     assert "555-123-4567" not in chunk.content
     # The KB can still be re-indexed after a correction lands.
     assert (chunk.chunk_id, chunk.content) in system["kb"].get_all_texts()
-
-    events = [(e["event_type"], e["user_id"]) for e in system["audit"].entries]
-    assert ("FEEDBACK", "dr_a") in events
-    assert ("CORRECTION_APPROVED", "dr_b") in events
-    assert system["audit"].verify_chain()[0]
+    # Submitter and approver are on the record the loop keeps (core's audit
+    # chain records the same two ids from the verified token).
+    [pending] = system["loop"].pending_corrections.values()
+    assert (pending.entry.submitted_by, pending.approved_by) == ("dr_a", "dr_b")
 
 
 def test_correction_cannot_be_approved_twice(system):
     _, fb = _submit(system, "dr_a")
-    w = system["wrapper"]
-    w.approve_correction(_session(system, "dr_b"), fb["correction_id"])
+    orch = system["orch"]
+    orch.approve_correction(fb["correction_id"], "dr_b")
 
-    again = w.approve_correction(_session(system, "dr_c"), fb["correction_id"])
+    again = orch.approve_correction(fb["correction_id"], "dr_c")
 
     assert "already approved" in again["error"]
     assert len(_corrections(system["kb"])) == 1
@@ -162,12 +165,16 @@ def test_two_person_rule_cannot_be_sidestepped(system, submitter, reviewer):
     assert _corrections(system["kb"]) == []
 
 
-def test_session_without_a_real_user_cannot_give_feedback(system):
-    w = system["wrapper"]
-    q = w.submit_query(_session(system, "dr_a"), QUERY, patient_id=PATIENT_A)
-    ghost = _session(system, "unknown")
+@pytest.mark.parametrize("ghost", ["", "unknown", "  ", "system"])
+def test_feedback_without_a_real_user_can_never_be_approved(system, ghost):
+    # Replaces "a session with no real user cannot give feedback": the
+    # placeholder submitter is nobody, so no reviewer can sign it off.
+    orch = system["orch"]
+    q = orch.process_query(QUERY, patient_id=PATIENT_A)
+    fb = orch.process_feedback(q["query_id"], "correct", "x", submitted_by=ghost)
 
-    assert w.submit_feedback(ghost, q["query_id"], "correct", "x")["allowed"] is False
+    assert "error" in orch.approve_correction(fb["correction_id"], "dr_b")
+    assert _corrections(system["kb"]) == []
 
 
 def test_persona_vector_moves_only_on_approval(system):

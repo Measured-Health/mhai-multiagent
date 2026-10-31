@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package mhai.intelligence.v1;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb;intelpb";
+
+// Error is what a worker returns when it refuses or fails a call. It holds a
+// code from a closed set and a retry hint, and nothing else: no free text, so
+// no PHI or internals can leak through it.
+message Error {
+  string code = 1;
+  bool retryable = 2;
+}
+
+// AuditFact is something a worker did that core should write to the audit
+// chain. Core takes the actor, hospital and request id from what it minted or
+// stored, never from a fact.
+message AuditFact {
+  string action = 1;
+  string entity = 2;
+  string entity_id = 3;
+  google.protobuf.Struct payload = 4;
+}
+
+message ResponseMeta {
+  repeated AuditFact audit_facts = 1;
+  map<string, string> model_versions = 2;
+  map<string, double> timings_ms = 3;
+}
+
+// DeadLetter is published when a job can't be processed. It holds ids, a type,
+// a count and codes only. subject_hospital is unverified by definition: it is
+// copied from the subject the job arrived on, not from a verified token.
+message DeadLetter {
+  string job_id = 1;
+  string type = 2;
+  string subject_hospital = 3;
+  uint32 attempts = 4;
+  string code = 5;
+  string reason = 6;
+  string kid = 7;
+}

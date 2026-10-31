@@ -1,0 +1,18 @@
+{
+  "name": "null_in_roles",
+  "note": "roles holds a null",
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6Im1oYWktcmVxK2p3dCIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEifQ.eyJpc3MiOiJtaGFpLWdhdGV3YXkiLCJhdWQiOiJlY2hvIiwic3ViIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiaGlkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwicm9sZXMiOltudWxsXSwicmlkIjoiNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0IiwianRpIjoiczRtaDNPcWVYZnJuWTdQSDBMMm1ZQSIsImlhdCI6MTc5MzE4ODgwMCwiZXhwIjoxNzkzMTg4ODA1LCJrbmQiOiJyZXEiLCJuc3ViIjoiaW5mZXJlbmNlLnYxLmVjaG8ucGluZyIsImJoIjoiOExFYXRyRW8tU0NmWWZSelNhTVNiTFJrMEdTTDdCTUJ5eEZxOXE4aU1VQSIsInJwbCI6Il9JTkJPWF9nYXRld2F5LiIsInZpYSI6ImNvcmUifQ.6XbYS4I50TS_QghzpdcG1Ctu2s4PR__Buh_Pccn2j2f86buBFQ8ZedS6VlA_ZPUF0jkGMJKtH9h6ADRZrS6HDg",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "Cg5zeW50aGV0aWMgcGluZxIkMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIy",
+  "subject": "inference.v1.echo.ping",
+  "reply": "_INBOX_gateway.vectors.1",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.intelligence.v1.PingRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "echo",
+  "now": 1793188801,
+  "verdict": "malformed"
+}

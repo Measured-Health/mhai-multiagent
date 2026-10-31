@@ -157,3 +157,28 @@ func isUnique(err error) bool {
 	var pe *pgconn.PgError
 	return errors.As(err, &pe) && pe.Code == "23505"
 }
+
+// ErrRotationAudit: the key rotation couldn't be audited, so it wasn't made.
+var ErrRotationAudit = errors.New("could not audit the key rotation; nothing was changed")
+
+// AuditKeyRotation appends intelligence.key_rotated (spec §7.5, §10.2) for
+// request-signing kid kid as the provisioning login (mhai_provision, no
+// actor, no hospital), and runs prepare inside the same transaction, after
+// the row is written. prepare only stages the file change (temp files
+// beside the real ones); the caller moves them into place once this
+// returns nil, that is once the row has committed, and removes them
+// otherwise. So the files never change unless the rotation is on the chain.
+// mode is planned or emergency; change is added or removed. Ids and codes
+// only.
+func AuditKeyRotation(ctx context.Context, pool *pgxpool.Pool, kid, mode, change string, prepare func() error) error {
+	if (mode != "planned" && mode != "emergency") || (change != "added" && change != "removed") || kid == "" || prepare == nil {
+		return errors.New("invalid key rotation")
+	}
+	return inTx(ctx, pool, func(tx pgx.Tx) error {
+		if err := audit.Write(ctx, tx, audit.Event{Action: "intelligence.key_rotated", Entity: "request_key", EntityID: kid,
+			Payload: map[string]any{"kid": kid, "rotation": mode, "change": change}}); err != nil {
+			return ErrRotationAudit
+		}
+		return prepare()
+	})
+}

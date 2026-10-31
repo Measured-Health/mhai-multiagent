@@ -37,6 +37,24 @@ jobs:
       - name: Lockfile is current
         run: uv lock --check
 
+      # The contract in proto/ (spec 6.3): buf lint, buf breaking against
+      # origin/main (fetch-depth 0 above; skipped only while main has no
+      # proto/), and the committed generated code matches a fresh
+      # `make proto`. Runs from the repository root.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Install buf and protoc-gen-go
+        working-directory: .
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@v1.50.0
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Protobuf lint, breaking and generated code
+        working-directory: .
+        run: make proto-check
+
       - name: Lint
         run: uv run ruff check .
 
@@ -46,11 +64,83 @@ jobs:
       - name: Type-check
         run: uv run mypy
 
+      # Tests marked boundary need Docker and run in intelligence-boundary;
+      # the coverage job combines both runs before diff-cover (F17).
       - name: Test
-        run: uv run pytest -m "not models" --cov=intelligence --cov-report=xml
+        env:
+          COVERAGE_FILE: coverage.checks
+        run: uv run pytest -m "not models and not boundary" --cov=intelligence --cov-report=
 
+      - name: Keep the coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-checks
+          path: services/intelligence/coverage.checks
+          retention-days: 1
+
+  # Spec section 12: the Python tests marked boundary, against Postgres 16
+  # and NATS 2.10 (testcontainers) with the real services/nats/nats.conf,
+  # and core's migrations from the mhai-core image.
+  intelligence-boundary:
+    runs-on: ubuntu-latest  # ships Docker
+    defaults:
+      run:
+        working-directory: services/intelligence
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.23"
+          enable-cache: true
+          cache-dependency-glob: services/intelligence/uv.lock
+      - name: Install
+        run: uv sync --locked
+      - name: Build the core image (migrations)
+        working-directory: .
+        run: docker build -t mhai-core:test services/core
+      - name: Boundary tests
+        env:
+          COVERAGE_FILE: coverage.boundary
+        run: uv run pytest -m boundary tests/boundary --cov=intelligence --cov-report=
+      - name: Keep the coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-boundary
+          path: services/intelligence/coverage.boundary
+          retention-days: 1
+
+  # diff-cover on both runs together: boundary code is covered mostly by
+  # the Docker tests, the rest by checks. pb/ is omitted (pyproject.toml).
+  coverage:
+    if: github.event_name == 'pull_request'
+    needs: [checks, intelligence-boundary]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/intelligence
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # diff-cover compares against the base branch
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.23"
+          enable-cache: true
+          cache-dependency-glob: services/intelligence/uv.lock
+      - name: Install
+        run: uv sync --locked --no-default-groups --group dev
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+          path: services/intelligence
+      - name: Combine
+        run: |
+          uv run coverage combine coverage.checks coverage.boundary
+          uv run coverage xml
       - name: Coverage of changed lines
-        if: github.event_name == 'pull_request'
         run: >
           uv run diff-cover coverage.xml
           --compare-branch=origin/${{ github.base_ref }}
@@ -67,6 +157,8 @@ jobs:
         with:
           go-version: "1.24"
           cache-dependency-path: services/core/go.mod
+      - name: Formatted (gofmt)
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
       - name: Vet
         run: go vet ./...
       - name: Staticcheck
@@ -77,6 +169,9 @@ jobs:
         run: go test -race -tags integration ./...
       - name: Integration tests with the test-only fixture routes
         run: go test -race -tags "integration test" ./...
+      # The smoke test runs in boundary-smoke; here it only has to build.
+      - name: Vet the smoke test
+        run: go vet -tags smoke ./internal/smoke/...
 
   # ADR 0012: a breaking change to the HTTP contract needs a new major
   # version (/api/v2), so it may not change /api/v1 in place.
@@ -131,6 +226,64 @@ jobs:
         run: |
           docker run --rm mhai-intelligence:ci --help
           docker run --rm --entrypoint python mhai-intelligence:ci -c "import intelligence.agents, intelligence.security.hipaa"
+      # F13: the generated operations table and catalogue are package data,
+      # so the installed (not editable) image loads them without a mount.
+      - name: The image ships operations.json and catalogue.json
+        if: steps.changes.outputs.image == 'true'
+        run: |
+          docker run --rm --entrypoint python mhai-intelligence:ci -c "
+          from intelligence.boundary.operations import Operations, clinical_roles
+          ops = Operations.load(development=False)
+          assert ops.for_subject('inference.v1.pipeline.health') is not None
+          assert ops.for_subject('inference.v1.echo.ping') is None  # test-only, left out in production
+          assert clinical_roles()
+          print('operations.json and catalogue.json load from the installed package')
+          "
+
+  # Spec section 12: the whole boundary end to end. The smoke stack
+  # (docker-compose.yml + docker-compose.smoke.yml: core, NATS, Postgres,
+  # the pipeline worker with the stub models, the echo worker), then
+  # services/core/internal/smoke as the clinical BFF over NATS, then down.
+  # Every secret is generated for the run (.github/scripts/boundary-smoke.sh).
+  boundary-smoke:
+    needs: [image]
+    runs-on: ubuntu-latest  # ships Docker and Compose
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: services/core/go.mod
+      # Every compose file parses with the example settings (never run
+      # before Task 15), the test profile included.
+      - name: Compose files are valid
+        run: |
+          docker compose --env-file .env.example config -q
+          docker compose --env-file .env.example --profile test --profile observability config -q
+          docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.smoke.yml config -q
+          docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.gpu.yml config -q
+          # The demo deploy's file, with synthetic values for the host's .env.
+          env POSTGRES_PASSWORD=x CORE_DB_PASSWORD=x PROVISION_DB_PASSWORD=x MFA_ENCRYPTION_KEY=x \
+            BFF_SERVICE_KEYS=x NATS_GATEWAY_NKEY=x NATS_BFF_NKEY=x \
+            docker compose -f deploy/compose.yml config -q
+      - uses: docker/setup-buildx-action@v3
+      # The same layers as the image job, from the GitHub Actions cache.
+      - name: Build the intelligence image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/intelligence
+          build-args: TORCH=cpu
+          load: true
+          tags: mhai-intelligence:cpu
+          cache-from: type=gha
+      - name: Build the core image
+        run: docker build -t mhai-core:local services/core
+      # The demo deploy's pre-migration check, against a throwaway Postgres
+      # with core's migrations (fails closed on every error).
+      - name: Pre-migration check tests
+        run: .github/scripts/premigrate-check-test.sh
+      - name: Smoke test
+        run: .github/scripts/boundary-smoke.sh
 
   secrets:
     runs-on: ubuntu-latest

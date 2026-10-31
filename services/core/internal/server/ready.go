@@ -11,6 +11,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
@@ -43,6 +44,24 @@ func Readiness(pool *pgxpool.Pool, nc *nats.Conn, buckets map[string]jetstream.K
 			}
 		}
 		return nil
+	}
+}
+
+// WithLink makes check fail while the NATS connection is down by its link's
+// handlers (bus.Link), before any dependency is asked. A nil link changes
+// nothing.
+func WithLink(check func(context.Context) error, l *bus.Link) func(context.Context) error {
+	if l == nil {
+		return check
+	}
+	return func(ctx context.Context) error {
+		if !l.Up() {
+			return errNotReady
+		}
+		if check == nil {
+			return errNotReady
+		}
+		return check(ctx)
 	}
 }
 

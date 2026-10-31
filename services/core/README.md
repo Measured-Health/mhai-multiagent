@@ -10,8 +10,10 @@ Design: `docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md`.
   served routes differ, or if it names an error code the service doesn't
   have.
 - **Permissions:** every route registers through `authz.Route`. The table
-  is published as `docs/specs/generated/permissions.md` and
-  `services/intelligence/intelligence/security/permissions.json`
+  is published as `docs/specs/generated/permissions.md`, which also lists
+  the operations table (`internal/authz/operations.go`: the calls to the
+  intelligence workers). The operations table is also published as
+  `services/intelligence/intelligence/boundary/operations.json`
   (`go run ./cmd/permgen`; a test fails when they are stale).
 
 Module `github.com/Measured-Health/mhai-multiagent/services/core`, binary
@@ -63,9 +65,12 @@ one job:
 - `mhai_app` holds nothing itself. Each transaction runs
   `SET LOCAL ROLE mhai_gateway`, `mhai_platform` or `mhai_auth`, so a
   query outside `db.With*` or `authz.Tx` fails.
-- `core migrate up` creates or resets the two logins when `CORE_DB_USER` /
-  `CORE_DB_PASSWORD` and `PROVISION_DB_USER` / `PROVISION_DB_PASSWORD` are
-  set. It sets the password and revokes any other membership. Placeholder
+- `core migrate up` creates or resets the logins when `CORE_DB_USER` /
+  `CORE_DB_PASSWORD`, `PROVISION_DB_USER` / `PROVISION_DB_PASSWORD` and
+  `INTELLIGENCE_DB_USER` (default `intelligence_app`) /
+  `INTELLIGENCE_DB_PASSWORD` are set. The pipeline's login is a member of
+  `mhai_worker_app` only, which holds `mhai_worker` without inheriting it
+  (00008), so it holds nothing until `SET LOCAL ROLE mhai_worker`. It sets the password and revokes any other membership. Placeholder
   or short passwords (under 16 characters) are refused before the database
   is touched.
 - On managed Postgres, run `migrate` as a `CREATEROLE` admin instead of a
@@ -75,20 +80,28 @@ one job:
 
 | Variable | Required | Notes |
 |---|---|---|
-| `DATABASE_URL` | yes | the `mhai_app` login; a placeholder password is refused |
+| `DATABASE_URL` | yes | the `mhai_app` login; a placeholder password is refused. Outside development, a `postgres://` URL with `sslmode=verify-full` |
 | `NATS_URL` | yes | `nats://gateway:PASSWORD@host:4222` in dev; a placeholder password is refused |
-| `NATS_NKEY_SEED_PATH` | production | the `gateway` user's NKey seed file (see `services/nats/nats.conf`) |
+| `NATS_NKEY_SEED_PATH` | production | the `gateway` user's NKey seed file (see `services/nats/README.md`) |
+| `NATS_TLS_CA_PATH`, `NATS_TLS_CERT_PATH`, `NATS_TLS_KEY_PATH` | outside development | PEM files: the CA for the NATS server's certificate, and core's client certificate and key. All three or none; required unless `CORE_ENV` is `development` |
+| `NATS_JS_REPLICAS` | no | replicas for `JOBS`, `DEAD` and the KV buckets: `1` (default, dev compose), `3` on the production cluster (R3), or `5`. Outside development, 3 or more unless `CORE_ALLOW_SINGLE_NODE` |
+| `CORE_ALLOW_SINGLE_NODE` | no | `true` lets a non-development core run with fewer than 3 replicas (a single-node install); serve logs a warning. Default `false` |
+| `JOBS_PIPELINE_MAX_ACK_PENDING` | no | jobs the pipeline workers hold at once: worker count × concurrency; default `8` |
 | `ACCESS_KEY_PATH` | yes | PKCS#8 Ed25519 PEM from `core keys new` |
+| `REQUEST_KEY_PATH` | yes | the request-token key (spec §7.2), from `core keys new --kind request`: another file and another key than `ACCESS_KEY_PATH` (start-up refuses the same key id) |
+| `INTELLIGENCE_QUERY_CAP` | no | clinical questions one hospital may have queued or running at once; past it a submit is 429 `rate_limited`. Default `10`, 1 to 1000 |
 | `MFA_ENCRYPTION_KEY` | yes | at least 32 bytes; seals TOTP secrets, keys backup-code hashes, and derives the counter key (HKDF-SHA256, label `mhai lockout key v1`) that names the lockout and MFA counters. Changing it forgets live lockouts. |
-| `BFF_SERVICE_KEYS` | yes | comma-separated, each at least 32 bytes; one per BFF |
-| `HTTP_ADDR` | no | default `:8080` |
-| `CORE_ENV` | no | default `development` |
+| `BFF_SERVICE_KEYS` | while `CORE_HTTP_API` is on | comma-separated, each at least 32 bytes; one per BFF |
+| `HTTP_ADDR` | no | default `:8080`, or `127.0.0.1:8080` when `CORE_HTTP_API` is off. With the API off it must be a loopback IP (`127.0.0.1`, `[::1]`); anything else is refused at start-up |
+| `CORE_HTTP_API` | no | `on` (default) or `off`. On: the frontend contract over HTTP with the BFF key, for the switch-over while mhai-web still uses `fetch`. Off: HTTP serves only the probes, on loopback, and `BFF_SERVICE_KEYS` is no longer required. The NATS API is served either way (below) |
+| `CORE_NATS_API_CONCURRENCY` | no | `api.v1` messages handled at once per core copy; past it a message gets 503 `unavailable` at once. Default `256`, 1 to 100000 |
+| `CORE_ENV` | no | default `production`, which fails closed: no API docs, NATS TLS required, no test-only intelligence operations. Compose sets `development` |
 | `CORE_API_DOCS` | no | `true` or `false`: serve the API docs page. Default: on when `CORE_ENV` is `development`, off for every other value (production included). Anything else is refused at start-up. |
 
 Secrets must not contain `changeme`, `change-me` or `placeholder`. Errors
 name the variable, never the value. The core service reads only its own
-secrets: the NATS worker password and the database owner password are not
-in its environment.
+secrets: the other NATS users' passwords, the JetStream key and the
+database owner password are not in its environment.
 
 ## API docs
 
@@ -97,6 +110,16 @@ in its environment.
 (`go:embed`), so the page and the served spec are the committed file.
 Redoc 2.5.4 is vendored in `internal/apidocs/assets/` with its licence and
 SHA-256 (see the README there); the page loads nothing from a CDN.
+
+`GET /api/docs/intelligence` is the second tab: the Intelligence API, which
+is NATS operations, not HTTP. It is a static page **generated** by
+`go run ./cmd/permgen` from `proto/` (messages, fields, comments) and the
+operations table in `internal/authz/operations.go` (subjects, kind, who may
+call, `bff_direct`, timeout, hospital), plus the closed error-code set. It is
+committed as `internal/apidocs/assets/intelligence.html` and embedded.
+`TestGeneratedFilesUpToDate` fails when it is stale. Subjects and streams:
+[`services/nats/README.md`](../nats/README.md). The two pages link each other
+with a plain nav (`aria-current`); neither needs a script of its own.
 
 - **Switch:** `CORE_API_DOCS` (above). When off, these paths answer the
   normal 404 `not_found` problem. The demo (`deploy/compose.yml`) and the
@@ -116,9 +139,10 @@ SHA-256 (see the README there); the page loads nothing from a CDN.
   elements at run time; scripts are `'self'` only. Redoc's search is off,
   since it needs a `blob:` worker.
 - **Never over NATS:** `apidocs.Wrap` is applied only around the HTTP
-  listener in `cmd/core/serve.go`. `internal/natsapi` (Plan 3) must wrap the
-  `authz.Mux` handler, as the probes' HTTP path does, and must not include
-  these routes. They are for people with a browser, not for the BFFs.
+  listener in `cmd/core/serve.go`, and only while `CORE_HTTP_API` is on.
+  `internal/natsapi` serves `authz.Mux.NATSHandler`, which doesn't include
+  these routes (`TestDocsAndProbesNotOverNATS`). They are for people with
+  a browser, not for the BFFs.
 
 **On the demo host,** core listens on loopback only. Open a tunnel and
 browse locally:
@@ -145,7 +169,7 @@ retired; nothing uses it yet, and the retirement policy will.
 From the repository root, with every `changeme` in `.env` replaced:
 
 ```bash
-make core-up      # postgres, nats, core-migrate, core-keys, core on 127.0.0.1:${CORE_PORT:-8080}
+make core-up      # postgres, nats, core-migrate, core-keys, core-request-key, core on 127.0.0.1:${CORE_PORT:-8080}
 curl -s localhost:8080/api/v1/readyz           # {"status":"ready"}
 
 # Seed a synthetic hospital and clinician as the provisioning login:
@@ -158,9 +182,87 @@ curl -s localhost:8080/api/v1/auth/login \
   -d '{"username":"synthetic.clinician@havana.example","password":"..."}'
 ```
 
-`core-keys` writes the dev signing key into the `corekeys` volume once. In
-production, mount a key made with `core keys new` and point
-`ACCESS_KEY_PATH` at it.
+`make up` also starts the pipeline worker (and Ollama); `docker compose
+--profile test up -d` adds the echo worker. A hospital made with the CLI
+is `setup_incomplete`; set it `active` (as the owner) before asking a
+question.
+
+### The end-to-end smoke test
+
+`make smoke` (`.github/scripts/boundary-smoke.sh --build`, CI job
+`boundary-smoke`) starts `docker-compose.yml` with
+`docker-compose.smoke.yml` (the stub models, echo on, no Ollama) under
+throwaway generated secrets and runs `go test -tags smoke
+./internal/smoke/...` against it, as the clinical BFF over NATS:
+`TestQuestionEndToEnd` (sign in, `POST /queries`, poll, the result, and
+`query.completed` on a verified chain), `TestEchoNeedsToken`,
+`TestBFFDirectEchoEndToEnd` (`echo.ping` through a grant; the chain holds
+`intelligence.granted`) and `TestQuestionOverHTTPStillWorks`. Set
+`POSTGRES_PORT`, `NATS_PORT`, `CORE_PORT` and `SMOKE_PROJECT` when the
+defaults clash.
+
+`core-keys` writes the dev access-token key into the `corekeys` volume once;
+`core-request-key` writes the request-token key there too, and its public
+half to `request-keys.json` in the `trustedkeys` volume (public keys only,
+for the workers to mount read-only). In production, mount keys made with
+`core keys new` (and `--kind request`) and point `ACCESS_KEY_PATH` and
+`REQUEST_KEY_PATH` at them.
+
+## The API over NATS (`internal/natsapi`)
+
+Spec §17.1. The BFFs call core over NATS: one HTTP request per message on
+`api.v1.clinical` (user `bff_clinical`) or `api.v1.platform` (user
+`bff_platform`). Every core copy subscribes both in queue group `core`, so
+each message is handled by one copy, and a copy that dies loses only the
+calls it held: the BFF times out and retries (writes with the same
+`Idempotency-Key`), and another copy answers.
+
+| Message | |
+|---|---|
+| `Mhai-Method` | `GET`, `HEAD`, `POST`, `PUT`, `PATCH` or `DELETE`; else 405 `method_not_allowed` |
+| `Mhai-Path` | path and query under `/api/v1/`, at most 2 KB of printable ASCII, no fragment; else 404 `not_found` |
+| `Mhai-Timeout-Ms` | optional; the handler's deadline is 30 s or this, whichever is sooner |
+| other headers | only `Authorization`, `Content-Type`, `Idempotency-Key`, `If-None-Match`, `X-MHAI-Client-IP` and `traceparent` pass; everything else is dropped (`X-MHAI-Service`, `X-MHAI-Audience`, `X-Request-ID`, `Mhai-Request-Id`, `Cookie`, `X-Forwarded-For`, hop-by-hop headers ...) |
+| body | the HTTP body, at most 64 KB (`httpx.MaxBody`); over it, 413 `payload_too_large` |
+| reply | `Mhai-Status-Code`, the allow-listed response headers (`Content-Type`, `Cache-Control`, `ETag`, `Retry-After`, `X-Request-ID`, `Idempotent-Replayed`, `Deprecation`, `Sunset`, `Link`, `X-Content-Type-Options`) and the response body |
+
+- **The same chain.** The adapter builds an `*http.Request` and calls
+  `authz.Mux.NATSHandler()`: request id, body limit, principal and access
+  token, route rule, idempotency, the RLS transaction and audit, exactly
+  the handlers HTTP runs. `TestAPIParityOverNATS` sends every route of
+  `server.Table()` both ways, for the auth fixture matrix, and compares
+  status, body and headers.
+- **How the BFF key is bypassed, for NATS only.** `Mux.Handler` (HTTP) is
+  `RequestID → httpx.BFF(keys) → body limit → routes`, unchanged.
+  `Mux.NATSHandler` is `RequestID → requireNATS → body limit → routes`:
+  instead of the key, it requires the mark `httpx.ViaNATS` puts on the
+  request's context, which only `internal/natsapi` sets, on requests it
+  builds from NATS messages. A context value can't be set from HTTP, so the
+  HTTP path still needs the key, and the NATS handler answers 401 to any
+  request that reaches it unmarked. What the key proved ("this came from
+  our BFF") the NATS user proves: only `bff_<app>` may publish
+  `api.v1.<app>` (`services/nats/nats.conf`, tested in
+  `internal/bus`). `X-MHAI-Client-IP` is trusted for the same reason.
+- **The audience is the subject's.** `api.v1.platform` is the platform
+  audience, `api.v1.clinical` the clinical one; an `X-MHAI-Audience`
+  header in the message is dropped.
+- **The request id is core's.** `httpx.RequestID` makes it, as over HTTP; a
+  BFF's `X-Request-ID` or `Mhai-Request-Id` never reaches the audit chain.
+- **The reply subject is checked first.** NATS lets the requester choose
+  the reply subject, and `allow_responses` lets core publish there once
+  with core's permissions (a job on `jobs.v1.…`, a `$KV` write, a
+  `$JS.API` call; `services/nats/README.md`). So a message is answered
+  only when its reply subject is `_INBOX_bff.<app>.` (the app of the
+  subject it came on) followed by literal tokens (non-empty, printable
+  ASCII, no `*`, `>` or space). Otherwise nothing is sent and no handler
+  runs; the refusal is logged at error level with the app only (never the
+  subject) and counted.
+- **Bounded.** At most `CORE_NATS_API_CONCURRENCY` messages at once per
+  copy; past it, 503 `unavailable` at once. A reply larger than the NATS
+  payload limit becomes 500 `internal_error`.
+- **Not over NATS:** the probes (HTTP only, for the container's health
+  check) and the API docs (`internal/apidocs` wraps only the HTTP
+  handler). Both are 404 over NATS.
 
 ## Probes
 
@@ -168,7 +270,9 @@ production, mount a key made with `core keys new` and point
 - `GET /api/v1/readyz`: 200 when Postgres answers and NATS is connected
   with every KV bucket reachable; otherwise 503 `not_ready`.
 
-Neither needs the BFF key, and neither says what failed.
+Neither needs the BFF key, and neither says what failed. They are served
+over HTTP only; with `CORE_HTTP_API` off they are all the HTTP listener
+serves.
 
 ## Limits the service applies
 
@@ -208,7 +312,21 @@ Neither needs the BFF key, and neither says what failed.
   logs the verifier there.
 - At startup, `serve` refuses a database login that is a superuser, has
   BYPASSRLS, CREATEROLE, CREATEDB or REPLICATION, holds any membership but
-  `mhai_app`, or owns the database, a schema or a table.
+  `mhai_app`, inherits an app role (`mhai_jobs` included), or owns the
+  database, a schema or a table.
+- Calls to intelligence (`internal/intel`): core checks the operation's
+  roles before minting, a request/reply call is never retried, and no
+  answer in time or no worker running is 503 `unavailable` (`overloaded`
+  adds `Retry-After: 5`). A worker's `unauthorized`, `forbidden` and
+  `invalid_request` all become one fixed 500 `internal_error`, audited as
+  `intelligence.refused`. Jobs go only on `jobs.v1.<the caller's
+  hospital>.<type>`; a full JOBS subject is 503 `unavailable`.
+- The publish sweeper runs every 10 seconds as `mhai_jobs` (job columns
+  only, never the question): a queued question with no `published_at`
+  after 10 seconds is re-minted as its creator, with the creator's current
+  roles, and published again under the same `Nats-Msg-Id`; a creator who
+  can no longer use the service gets it cancelled, and one past its
+  deadline fails with `deadline_exceeded`.
 
 ## Known limits
 
@@ -223,15 +341,18 @@ Neither needs the BFF key, and neither says what failed.
   the 15-minute access-token life if the NATS KV denylist is down when the
   password changes.
 - **No TLS inside compose.** Postgres (`sslmode=disable`) and NATS run
-  without TLS on the compose network. Production needs TLS on both.
+  without TLS on the compose network. Production needs TLS on both; core
+  refuses to start outside development without the NATS TLS files.
 - **The argon2 gate is per process** and sized by CPU count; the BFF must
   rate-limit sign-in in front of it.
 - **`setup_incomplete` hospitals are served**, so their first admin can
-  finish setup.
+  finish setup, but `POST /queries` needs an `active` hospital (401
+  `unauthenticated` otherwise), and nothing activates a hospital yet: an
+  operator sets `hospitals.status = 'active'` by hand (TODO.md).
 - **Self-enrolment of two-step** stays open on first sign-in until the
   invite flow exists: whoever has the first password owns the second factor.
-- **The `intelligence` service connects to Postgres as the superuser**
-  (T2 M6) until the boundary plan; it no longer gets the core secrets.
+- **Postgres TLS.** The pipeline worker requires `sslmode=verify-full`
+  outside development; core does not yet (TODO.md).
 
 ## Layout
 
@@ -242,7 +363,10 @@ internal/auth   sign-in, refresh, two-step, password, sessions, terms
 internal/authz  principal middleware, permission table, authz.Tx
 internal/db     pool, migrations (goose), role checks, sweep, logins
 internal/httpx  errors, BFF key, request id, idempotency, router
-internal/bus    NATS connection and KV buckets
+internal/bus    NATS connection (TLS option), KV buckets, the JOBS and DEAD streams
+internal/intel  the intelligence client, job publisher, publish sweeper, in-flight cap
+internal/smoke  the end-to-end smoke test (build tag smoke; make smoke)
+internal/natsapi  the frontend contract over NATS (api.v1.<app>), on the same handler chain
 internal/audit  the hash-chained audit log
 internal/token  access tokens (EdDSA) and refresh tokens
 internal/password  argon2id, the breached list, the concurrency gate

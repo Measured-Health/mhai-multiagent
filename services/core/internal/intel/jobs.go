@@ -1,0 +1,153 @@
+package intel
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
+)
+
+// jsStoreFailed is JetStream's "store failed" API error (10077): what a
+// publish gets when DiscardNew refuses it (maximum messages per subject,
+// messages or bytes exceeded).
+const jsStoreFailed jetstream.ErrorCode = 10077
+
+// PublishJob publishes the job operation opName for caller: msg (the
+// operation's request message) on jobs.v1.<caller's hospital>.<type>, or
+// jobs.v1.global.<type> for an operation that needs no hospital and a
+// caller with none. The subject's hospital is the token's hid: there is no
+// other way to name a subject, so core only ever publishes on the caller's
+// own hospital (the per-hospital limits then hold).
+//
+// jobID is the Nats-Msg-Id, so JetStream drops a second publish of the same
+// id within its duplicate window: the job id on the first publish and on a
+// sweep (Republish). The job token's exp is deadline (whole seconds), at
+// least a second away; a deadline past the operation's limit (clock skew,
+// a long-lived row) is cut to the limit, never refused.
+//
+// Errors: ErrNotAllowed, ErrMisuse, ErrNoHospital, ErrDeadline (nothing
+// published); ErrBackpressure (JOBS refused it), ErrNoResponders,
+// ErrTimeout, ErrPublish. Map any of them with Code.
+func (c *Client) PublishJob(ctx context.Context, caller Caller, opName string, jobID uuid.UUID, msg proto.Message, deadline time.Time) error {
+	if jobID == uuid.Nil {
+		return ErrMisuse
+	}
+	return c.publishJob(ctx, caller, opName, jobID.String(), msg, deadline)
+}
+
+// validMsgID is a Nats-Msg-Id core sets: the job id, or the job id and a
+// retry suffix (<id>.r<n>, Republish after a dead letter).
+func validMsgID(s string) bool {
+	if len(s) < 36 || len(s) > 64 || !canonicalUUID(s[:36]) {
+		return false
+	}
+	for i := 36; i < len(s); i++ {
+		if c := s[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// publishJob is PublishJob with the message id as a string (validMsgID).
+func (c *Client) publishJob(ctx context.Context, caller Caller, opName, msgID string, msg proto.Message, deadline time.Time) error {
+	op, err := operation(opName, reqtoken.KindJob, msg, nil)
+	if err != nil {
+		return err
+	}
+	if err := checkCaller(op, caller); err != nil {
+		return err
+	}
+	if !validMsgID(msgID) || c.JS == nil {
+		return ErrMisuse
+	}
+	var subject string
+	switch {
+	case caller.Hid != "":
+		subject = "jobs.v1." + caller.Hid + "." + op.Op
+	case op.NeedsHospital:
+		return ErrNoHospital
+	default:
+		subject = "jobs.v1.global." + op.Op
+	}
+	// One clock reading for the check and the token, so exp is the
+	// deadline (to the second).
+	now := time.Now()
+	if c.Signer.Now != nil {
+		now = c.Signer.Now()
+	}
+	if deadline.Sub(now) < time.Second {
+		return ErrDeadline
+	}
+	ttl := deadline.Sub(time.Unix(now.Unix(), 0))
+	if ttl > op.Timeout {
+		ttl = op.Timeout
+	}
+	signer := c.Signer
+	signer.Now = func() time.Time { return now }
+	body, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
+	if err != nil {
+		return ErrMisuse
+	}
+	tok, _, err := signer.Mint(reqtoken.Claims{
+		Aud: op.Service, Sub: caller.Sub, Hid: caller.Hid, Roles: slices.Clone(caller.Roles), Rid: caller.Rid,
+		Kind: reqtoken.KindJob, Subject: subject, Via: reqtoken.ViaCore,
+	}, body, ttl)
+	if err != nil {
+		c.log().Error("intel: refused to mint", "operation", op.Name, "request_id", caller.Rid, "error", err)
+		return ErrMisuse
+	}
+	m := nats.NewMsg(subject)
+	m.Header.Set(hdrToken, tok)
+	m.Header.Set(hdrSchema, op.RequestSchema)
+	m.Header.Set(hdrRequestID, caller.Rid)
+	m.Data = body
+	// The producer span. The worker's job span links to it rather than
+	// hanging under it: a job outlives the request that queued it (§10.3).
+	ctx, span := telemetry.Start(ctx, trace.SpanKindProducer, "intelligence.publish "+op.Op,
+		attribute.String("operation", op.Name), attribute.String("job_type", op.Op),
+		attribute.String("job_id", msgID[:36]), attribute.String("request_id", caller.Rid),
+		attribute.String("hospital_id", caller.Hid))
+	telemetry.Inject(ctx, m.Header)
+	_, err = c.JS.PublishMsg(ctx, m, jetstream.WithMsgID(msgID), jetstream.WithExpectStream(bus.JobsStream))
+	if err == nil {
+		telemetry.End(span, "ok")
+		return nil
+	}
+	out := classifyPublish(err)
+	code, _ := Code(out)
+	telemetry.End(span, code)
+	attrs := []any{"operation", op.Name, "msg_id", msgID, "request_id", caller.Rid, "hospital_id", caller.Hid, "error", out}
+	var apiErr *jetstream.APIError
+	if errors.As(err, &apiErr) {
+		attrs = append(attrs, "js_err_code", int(apiErr.ErrorCode))
+	}
+	c.log().Warn("intel: job not published", attrs...)
+	return out
+}
+
+// classifyPublish maps a JetStream publish error to one of ours. The
+// driver's error is never passed on.
+func classifyPublish(err error) error {
+	var apiErr *jetstream.APIError
+	switch {
+	case errors.As(err, &apiErr) && apiErr.ErrorCode == jsStoreFailed:
+		return ErrBackpressure
+	case errors.Is(err, jetstream.ErrNoStreamResponse), errors.Is(err, nats.ErrNoResponders):
+		return ErrNoResponders
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, nats.ErrTimeout):
+		return ErrTimeout
+	}
+	return ErrPublish
+}

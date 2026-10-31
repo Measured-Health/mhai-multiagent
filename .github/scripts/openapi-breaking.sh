@@ -30,5 +30,33 @@ tar -xzf "$tmp/$tgz" -C "$tmp" oasdiff
 
 "$tmp/oasdiff" --version
 # ERR level is a breaking change; warnings are listed but do not fail.
-"$tmp/oasdiff" breaking "$base" "$head" --fail-on ERR
+# ADR 0012: adding a value to Problem.code is not breaking. oasdiff reports it
+# as response-property-enum-value-added on the Problem schema's code property;
+# drop exactly those findings (matched on the structured id and property path)
+# and fail on anything else.
+"$tmp/oasdiff" breaking "$base" "$head" --format json > "$tmp/findings.json"
+python3 - "$tmp/findings.json" <<'PY'
+import json, re, sys
+
+ALLOWED_ID = "response-property-enum-value-added"
+# text: added the new `X` enum value to the `oneOf[#/components/schemas/Problem]/code` response property ...
+ALLOWED_TEXT = re.compile(
+    r"^added the new `[^`]+` enum value to the `(?:oneOf\[)?#/components/schemas/Problem\]?/code` response property "
+)
+findings = json.load(open(sys.argv[1])) or []
+kept, allowed = [], 0
+for f in findings:
+    if f.get("id") == ALLOWED_ID and ALLOWED_TEXT.match(f.get("text", "")):
+        allowed += 1
+    else:
+        kept.append(f)
+errors = [f for f in kept if f.get("level", 0) >= 3]
+for f in kept:
+    lvl = "error" if f.get("level", 0) >= 3 else "warning"
+    print(f"{lvl}\t[{f.get('id')}] {f.get('operation', '')} {f.get('path', '')}: {f.get('text')}")
+print(f"openapi-breaking: {allowed} new Problem.code value finding(s) allowed (ADR 0012)")
+if errors:
+    print(f"openapi-breaking: {len(errors)} breaking change(s)")
+    sys.exit(1)
+PY
 echo "openapi-breaking: no breaking changes"

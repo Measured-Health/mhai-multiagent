@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package mhai.intelligence.v1;
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb;intelpb";
+
+// GrantRequest is what a BFF-direct call sends core on authz.v1.grant.<service>
+// (spec section 17.2). Core decides from the access token and its own rules; no
+// field here is trusted on its own.
+message GrantRequest {
+  string access_token = 1;
+  string operation = 2;
+  string subject = 3;
+  string body_hash = 4;
+  repeated string patient_ids = 5;
+  string reply_prefix = 6;
+  string request_id = 7;
+  uint32 deadline_ms = 8;
+}
+
+message GrantResponse {
+  string request_token = 1;
+}
+
+message GrantRefused {
+  string code = 1;
+}

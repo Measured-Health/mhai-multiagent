@@ -1,9 +1,13 @@
 # MHAI local stack.
 #
 #   cp .env.example .env
-#   make up                  # postgres, nats, core (+ migrations), redis, ollama (+ model pull), intelligence
+#   make up                  # postgres, nats, core (+ migrations, keys), ollama (+ model pull), pipeline
 #   make up-gpu              # same, with Ollama and PyTorch on an NVIDIA GPU
 #   make up-observability    # also starts the OpenTelemetry collector
+#   docker compose --profile test up -d   # also the test-only echo worker
+#
+# The end-to-end smoke stack (stub models, echo on) is this file plus
+# docker-compose.smoke.yml: .github/scripts/boundary-smoke.sh.
 #
 # Every port is bound to 127.0.0.1; nothing is reachable from other hosts.
 
@@ -30,9 +34,11 @@ services:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
 
   # One-shot: apply the core service's goose migrations (the whole schema, roles
-  # and row-level security), then create or reset the two deployment logins:
-  #   CORE_DB_USER       the core service's login, a member of mhai_app only
-  #   PROVISION_DB_USER  the seed CLI's login, a member of mhai_provision only
+  # and row-level security), then create or reset the deployment logins:
+  #   CORE_DB_USER          the core service's login, a member of mhai_app only
+  #   PROVISION_DB_USER     the seed CLI's login, a member of mhai_provision only
+  #   INTELLIGENCE_DB_USER  the pipeline worker's login, a member of
+  #                         mhai_worker_app only (spec §8.2)
   # It connects as the owner (the local POSTGRES_USER is a superuser), and
   # carries no core service secrets. Placeholder passwords are refused.
   core-migrate:
@@ -47,6 +53,8 @@ services:
       CORE_DB_PASSWORD: ${CORE_DB_PASSWORD:?set CORE_DB_PASSWORD in .env}
       PROVISION_DB_USER: ${PROVISION_DB_USER:-core_provision}
       PROVISION_DB_PASSWORD: ${PROVISION_DB_PASSWORD:?set PROVISION_DB_PASSWORD in .env}
+      INTELLIGENCE_DB_USER: ${INTELLIGENCE_DB_USER:-intelligence_app}
+      INTELLIGENCE_DB_PASSWORD: ${INTELLIGENCE_DB_PASSWORD:?set INTELLIGENCE_DB_PASSWORD in .env}
     depends_on:
       postgres: { condition: service_healthy }
 
@@ -61,6 +69,21 @@ services:
     depends_on:
       core-migrate: { condition: service_completed_successfully }
 
+  # One-shot: the request-token signing key (spec §7.2, a different key from
+  # the access-token key) in corekeys, and its public half in the
+  # trusted-keys file on its own volume, which the workers mount read-only
+  # (it holds public keys only). Kept when already there.
+  core-request-key:
+    image: mhai-core:local
+    restart: "no"
+    command: ["keys", "ensure", "--kind", "request", "--out", "/keys/request.pem",
+              "--trusted-out", "/trusted/request-keys.json"]
+    volumes:
+      - corekeys:/keys
+      - trustedkeys:/trusted
+    depends_on:
+      core-keys: { condition: service_completed_successfully }
+
   # The core service (Go): the API the BFFs call. Its environment is only
   # its own settings (no env_file): the core login, the gateway NATS user,
   # its key and its secrets. The config rejects placeholder values.
@@ -74,17 +97,31 @@ services:
       HTTP_ADDR: ":8080"
       DATABASE_URL: postgres://${CORE_DB_USER:-core_app}:${CORE_DB_PASSWORD:?set CORE_DB_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
       NATS_URL: nats://gateway:${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}@nats:4222
+      NATS_JS_REPLICAS: ${NATS_JS_REPLICAS:-1}   # one server in dev; 3 (R3) on the production cluster
+      JOBS_PIPELINE_MAX_ACK_PENDING: ${JOBS_PIPELINE_MAX_ACK_PENDING:-8}
       ACCESS_KEY_PATH: /keys/access.pem
+      REQUEST_KEY_PATH: /keys/request.pem
+      REQUEST_TRUSTED_KEYS_PATH: /trusted/request-keys.json   # public; dead-letter re-mint after a rotation
+      INTELLIGENCE_QUERY_CAP: ${INTELLIGENCE_QUERY_CAP:-10}   # questions in flight per hospital
+      # The API over HTTP as well as over NATS (api.v1.<app>): on until
+      # mhai-web's BFF uses NATS (spec §17.1). The BFF users' NATS
+      # passwords go to the nats service only, never here.
+      CORE_HTTP_API: ${CORE_HTTP_API:-on}
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set MFA_ENCRYPTION_KEY in .env}
       BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set BFF_SERVICE_KEYS in .env}
+      # Traces and metrics, off while empty. With the observability profile:
+      # http://otel-collector:4317. Spans carry ids, codes and numbers only.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${CORE_OTEL_ENDPOINT:-}
     ports: ["127.0.0.1:${CORE_PORT:-8080}:8080"]
     volumes:
       - corekeys:/keys:ro
+      - trustedkeys:/trusted:ro
     depends_on:
       postgres: { condition: service_healthy }
       nats: { condition: service_healthy }
       core-migrate: { condition: service_completed_successfully }
       core-keys: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
     # The image is distroless (no shell or curl): probe from outside with
     # GET /api/v1/readyz (200 ready, 503 not ready).
     healthcheck:
@@ -102,36 +139,40 @@ services:
     depends_on:
       core-migrate: { condition: service_completed_successfully }
 
-  redis:
-    image: redis:7.4.11-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "redis-cli", "ping"]
-
-  # The only link between the core service and the Python workers. Two NATS
-  # users (gateway, worker) with their own permissions; see services/nats.
+  # The only link between the core service, the BFFs and the Python
+  # workers. One NATS user per service (gateway, pipeline, echo,
+  # bff_clinical, bff_platform), each with its own password, and JetStream
+  # encrypted at rest with NATS_JS_KEY; see services/nats. Only this
+  # service holds every password; each worker gets its own, and the BFF
+  # users' passwords go to mhai-web's BFF (its own compose), never to core
+  # or a worker. TestComposeSplitsSecretsPerService checks this.
   nats:
     image: nats:2.10-alpine
     restart: unless-stopped
-    # Refuse to start with a placeholder password.
+    # Refuse to start with a missing or placeholder secret, or a JetStream
+    # key shorter than 32 characters or starting with a digit.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        case "$$NATS_GATEWAY_PASSWORD $$NATS_WORKER_PASSWORD" in
-          *[Cc]hange[Mm]e*|*[Cc]hange-[Mm]e*|*[Pp]laceholder*|*[Pp]LACEHOLDER*) echo "NATS passwords are placeholders" >&2; exit 1;;
-        esac
+        for v in "$$NATS_GATEWAY_PASSWORD" "$$NATS_PIPELINE_PASSWORD" "$$NATS_ECHO_PASSWORD" "$$NATS_BFF_CLINICAL_PASSWORD" "$$NATS_BFF_PLATFORM_PASSWORD" "$$NATS_JS_KEY"; do
+          case "$$v" in
+            ""|*[Cc][Hh][Aa][Nn][Gg][Ee][Mm][Ee]*|*[Cc][Hh][Aa][Nn][Gg][Ee]-[Mm][Ee]*|*[Pp][Ll][Aa][Cc][Ee][Hh][Oo][Ll][Dd][Ee][Rr]*) echo "NATS secrets are missing or placeholders" >&2; exit 1;;
+          esac
+        done
+        case "$$NATS_JS_KEY" in [0-9]*) echo "NATS_JS_KEY must start with a letter" >&2; exit 1;; esac
+        [ "$${#NATS_JS_KEY}" -ge 32 ] || { echo "NATS_JS_KEY must be at least 32 characters" >&2; exit 1; }
         exec nats-server -c /etc/nats/nats.conf
     environment:
       NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}
-      NATS_WORKER_PASSWORD: ${NATS_WORKER_PASSWORD:?set NATS_WORKER_PASSWORD in .env}
+      NATS_PIPELINE_PASSWORD: ${NATS_PIPELINE_PASSWORD:?set NATS_PIPELINE_PASSWORD in .env}
+      NATS_ECHO_PASSWORD: ${NATS_ECHO_PASSWORD:?set NATS_ECHO_PASSWORD in .env}
+      NATS_BFF_CLINICAL_PASSWORD: ${NATS_BFF_CLINICAL_PASSWORD:?set NATS_BFF_CLINICAL_PASSWORD in .env}
+      NATS_BFF_PLATFORM_PASSWORD: ${NATS_BFF_PLATFORM_PASSWORD:?set NATS_BFF_PLATFORM_PASSWORD in .env}
+      NATS_JS_KEY: ${NATS_JS_KEY:?set NATS_JS_KEY in .env}
     ports: ["127.0.0.1:${NATS_PORT:-4222}:4222"]
     volumes:
       - ./services/nats/nats.conf:/etc/nats/nats.conf:ro
+      - ./services/nats/bff-clinical.test.conf:/etc/nats/bff-clinical.test.conf:ro
       - natsdata:/data
     healthcheck:
       <<: *healthcheck-defaults
@@ -161,34 +202,45 @@ services:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5:7b-instruct}"]
 
-  intelligence:
+  # The intelligence workers (Python, spec §4): `intelligence worker
+  # --service <name>`, joined to core only by NATS. Each gets only its own
+  # settings: no env_file (.env also holds core's secrets), its own NATS
+  # user and password, the request-token trusted keys (public keys only,
+  # read-only; never the private key) and, for the pipeline, its own
+  # database login. TestComposeSplitsSecretsPerService checks this.
+  #
+  # APP_ENV must name development here: an unset APP_ENV counts as
+  # production, where a worker needs NKeys and TLS and refuses to start
+  # without them. Health is a NATS request (pipeline.health), so there is
+  # no compose health check.
+  pipeline:
     build:
       context: ./services/intelligence
       args:
         TORCH: ${TORCH:-cpu}
     image: mhai-intelligence:${TORCH:-cpu}
-    # The image's default command is a one-shot CLI until the API server
-    # exists; switch to unless-stopped once it serves on :8000.
-    restart: "no"
-    # No env_file: .env also holds the core service's secrets (MFA key, BFF
-    # keys, database logins, gateway NATS password), and this container,
-    # with its model downloads and many dependencies, must not see them.
-    # Only the settings the Python service reads are listed; the defaults
-    # match .env.example. TestComposeSplitsSecretsPerService checks this.
+    restart: unless-stopped
+    command: ["worker", "--service", "pipeline"]
     environment:
-      # Superuser URL until the boundary plan (known limit, T2 M6).
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mhai}:${POSTGRES_PASSWORD:-mhai}@postgres:5432/${POSTGRES_DB:-mhai}
-      REDIS_URL: redis://redis:6379/0
+      APP_ENV: development
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      NATS_URL: nats://pipeline:${NATS_PIPELINE_PASSWORD:?set NATS_PIPELINE_PASSWORD in .env}@nats:4222
+      INTELLIGENCE_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+      INTELLIGENCE_MAX_CONCURRENCY: ${INTELLIGENCE_MAX_CONCURRENCY:-4}
+      # Its own login (a member of mhai_worker_app only; core-migrate makes
+      # it). The password is a separate variable, never in the URL.
+      INTELLIGENCE_DB_URL: postgres://postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
+      INTELLIGENCE_DB_USER: ${INTELLIGENCE_DB_USER:-intelligence_app}
+      INTELLIGENCE_DB_PASSWORD: ${INTELLIGENCE_DB_PASSWORD:?set INTELLIGENCE_DB_PASSWORD in .env}
+      # orchestrator (the real models) or stub (synthetic answers, development only).
+      INTELLIGENCE_MODEL_CLIENT: ${INTELLIGENCE_MODEL_CLIENT:-orchestrator}
+      # Traces and metrics, off while empty. With the observability profile:
+      # http://otel-collector:4317. Spans carry ids, codes and numbers only.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${INTELLIGENCE_OTEL_ENDPOINT:-}
+      # The models, as before the boundary.
       OLLAMA_URL: http://ollama:11434
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       HF_HOME: /home/appuser/.cache/huggingface
       HF_TOKEN: ${HF_TOKEN:-}
-      APP_ENV: ${APP_ENV:-local}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      QUEUE_BACKEND: ${QUEUE_BACKEND:-redis}
-      QUEUE_URL: ${QUEUE_URL:-mhai.queries}
-      QUEUE_DLQ_URL: ${QUEUE_DLQ_URL:-mhai.queries.dlq}
-      QUEUE_WORKERS: ${QUEUE_WORKERS:-3}
       NLI_MODEL: ${NLI_MODEL:-cross-encoder/nli-deberta-v3-base}
       CCA_BACKEND: ${CCA_BACKEND:-ollama}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
@@ -206,19 +258,41 @@ services:
       CMA_ES_MIN_CORRECTIONS: ${CMA_ES_MIN_CORRECTIONS:-50}
       AGENT_HTTP_TIMEOUT: ${AGENT_HTTP_TIMEOUT:-300}
       AGENT_HTTP_RETRIES: ${AGENT_HTTP_RETRIES:-2}
-      S3_BUCKET: ${S3_BUCKET:-mhai-artifacts-dev}
     depends_on:
       postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
       core-migrate: { condition: service_completed_successfully }
-      redis: { condition: service_healthy }
+      core-request-key: { condition: service_completed_successfully }
       ollama-init: { condition: service_completed_successfully }
-    ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
     volumes:
+      - trustedkeys:/trusted:ro
       - ./data:/app/data
       - ./artifacts:/app/artifacts
       - hf-cache:/home/appuser/.cache/huggingface
-    # The API gateway (/healthz, /api/v1/...) is not implemented yet, so
-    # the image's healthcheck has nothing to probe.
+    healthcheck:
+      disable: true
+
+  # The echo worker: tests and the smoke run only (spec §4), never in
+  # production (it refuses to start outside development). Profile `test`;
+  # the bff_direct echo.ping line for the BFF is in
+  # services/nats/bff-clinical.test.conf only.
+  echo:
+    image: mhai-intelligence:${TORCH:-cpu}
+    profiles: ["test"]
+    restart: unless-stopped
+    command: ["worker", "--service", "echo"]
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      NATS_URL: nats://echo:${NATS_ECHO_PASSWORD:?set NATS_ECHO_PASSWORD in .env}@nats:4222
+      INTELLIGENCE_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${INTELLIGENCE_OTEL_ENDPOINT:-}
+    depends_on:
+      nats: { condition: service_healthy }
+      core-request-key: { condition: service_completed_successfully }
+      pipeline: { condition: service_started }   # builds the shared image
+    volumes:
+      - trustedkeys:/trusted:ro
     healthcheck:
       disable: true
 
@@ -235,8 +309,8 @@ services:
 
 volumes:
   pgdata:
-  redisdata:
   natsdata:
   corekeys:
+  trustedkeys:
   ollama:
   hf-cache:

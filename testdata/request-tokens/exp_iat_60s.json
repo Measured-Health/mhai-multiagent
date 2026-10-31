@@ -1,0 +1,18 @@
+{
+  "name": "exp_iat_60s",
+  "note": "exp - iat exactly 60 s, the req cap",
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6Im1oYWktcmVxK2p3dCIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEifQ.eyJpc3MiOiJtaGFpLWdhdGV3YXkiLCJhdWQiOiJlY2hvIiwic3ViIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiaGlkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwicm9sZXMiOlsiY2xpbmljaWFuIl0sInJpZCI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsImp0aSI6IkRxQTJ0S09jbGxjb0ZQVm14cE9zV3ciLCJpYXQiOjE3OTMxODg4MDAsImV4cCI6MTc5MzE4ODg2MCwia25kIjoicmVxIiwibnN1YiI6ImluZmVyZW5jZS52MS5lY2hvLnBpbmciLCJiaCI6IjhMRWF0ckVvLVNDZllmUnpTYU1TYkxSazBHU0w3Qk1CeXhGcTlxOGlNVUEiLCJycGwiOiJfSU5CT1hfZ2F0ZXdheS4iLCJ2aWEiOiJjb3JlIn0.Syjk26WeV33E9R94YZAtgEznDxZ5NOCAYFrALLMHfwJMALA8s4tzZnFwwfSrgmlAhwLAKJvI7OG0VC_siv6DDw",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "Cg5zeW50aGV0aWMgcGluZxIkMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIy",
+  "subject": "inference.v1.echo.ping",
+  "reply": "_INBOX_gateway.vectors.1",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.intelligence.v1.PingRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "echo",
+  "now": 1793188801,
+  "verdict": "ok"
+}

@@ -1,0 +1,7 @@
+version: v2
+# Run from proto/ (make proto). module= drops the module path from the output
+# path, so the Go package lands in services/core/internal/intelpb.
+plugins:
+  - local: protoc-gen-go
+    out: ../services/core
+    opt: module=github.com/Measured-Health/mhai-multiagent/services/core

@@ -89,14 +89,14 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
-      # The compose file and the NATS config of this commit go to the
-      # instance with the deploy, so the host never runs a stale config.
-      # Neither holds a secret.
+      # The compose file, the NATS config and the pre-migration check of
+      # this commit go to the instance with the deploy, so the host never
+      # runs a stale config. None holds a secret.
       - name: Bundle the deploy config
         id: bundle
         run: |
           set -euo pipefail
-          b=$(tar -C deploy -czf - compose.yml nats/nats.conf | base64 -w0)
+          b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh | base64 -w0)
           echo "value=$b" >> "$GITHUB_OUTPUT"
 
       # Without a host-key check the SSH step would trust whatever answers at
@@ -142,15 +142,28 @@ jobs:
               docker compose restart nats
             fi
 
+            # Volumes added since setup-host.sh first ran (it makes them too):
+            # created empty, so the image fills them on first mount.
+            for v in mhai-backend-trustedkeys; do
+              if ! docker volume inspect "$v" >/dev/null 2>&1; then
+                docker volume create --label org.measured-health.stack=mhai-backend "$v" >/dev/null
+                echo "created volume $v"
+              fi
+            done
+
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
             docker compose pull core
 
-            # Migrations and the key run first (depends_on); a failed
+            # Migration 00007 (Plan 3) validates existing clinical_queries
+            # rows: stop here, before anything migrates, if one doesn't fit.
+            bash premigrate-check.sh
+
+            # Migrations and the keys run first (depends_on); a failed
             # migration stops here and leaves the running core alone.
             if ! docker compose up -d --remove-orphans core; then
               echo "Start failed. Recent logs:"
-              docker compose logs --tail=80 postgres nats core-migrate core-keys core
+              docker compose logs --tail=80 postgres nats core-migrate core-keys core-request-key core
               exit 1
             fi
             docker compose logs --no-log-prefix core-migrate | tail -n 20

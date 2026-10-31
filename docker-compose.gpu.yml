@@ -12,7 +12,7 @@ services:
               count: all
               capabilities: [gpu]
 
-  intelligence:
+  pipeline:
     build:
       args:
         TORCH: cu128

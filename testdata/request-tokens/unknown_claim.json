@@ -1,0 +1,18 @@
+{
+  "name": "unknown_claim",
+  "note": "an extra claim adm",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEiLCJ0eXAiOiJtaGFpLXJlcStqd3QifQ.eyJhZG0iOnRydWUsImF1ZCI6ImVjaG8iLCJiaCI6IjhMRWF0ckVvLVNDZllmUnpTYU1TYkxSazBHU0w3Qk1CeXhGcTlxOGlNVUEiLCJleHAiOjE3OTMxODg4MDUsImhpZCI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImlhdCI6MTc5MzE4ODgwMCwiaXNzIjoibWhhaS1nYXRld2F5IiwianRpIjoiMlRnYm5fV1RsU0ktX3lKbDNBYkFiZyIsImtuZCI6InJlcSIsIm5zdWIiOiJpbmZlcmVuY2UudjEuZWNoby5waW5nIiwicmlkIjoiNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0Iiwicm9sZXMiOlsiY2xpbmljaWFuIl0sInJwbCI6Il9JTkJPWF9nYXRld2F5LiIsInN1YiI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsInZpYSI6ImNvcmUifQ.dGDp5X9sJ_RQEp0MKnlCuXdGik4EteGkIJSpCWnH2wfCvmH8pCXshOap0WALXYAiUxC-9kAYSzA-f0oGQ6boDw",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "Cg5zeW50aGV0aWMgcGluZxIkMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIy",
+  "subject": "inference.v1.echo.ping",
+  "reply": "_INBOX_gateway.vectors.1",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.intelligence.v1.PingRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "echo",
+  "now": 1793188801,
+  "verdict": "malformed"
+}

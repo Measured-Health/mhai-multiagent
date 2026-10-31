@@ -61,18 +61,19 @@ the [review checklist](#review-checklist).
   and record `submitted_by` and `approved_by`.
 - Anonymous corrections can't be approved.
 
-## 5. Identity comes from the session, never from the request
+## 5. Identity comes from core's token, never from the request
 
-- User ids come from `RBACManager` sessions via `SecurePipelineWrapper`.
-  Never accept a `clinician_id` or `user_id` from a request body. The
-  integration guide's feedback payload has one, and the API layer must
-  ignore it.
+- User ids come from core's verified request token: the worker checks its
+  signature, audience, expiry and replay, and reads the user and hospital
+  from it. Never accept a `clinician_id` or `user_id` from a request body
+  or job payload.
 - Compare identities with `_normalize_user()`. Placeholder ids
-  (`unknown`, `system`, empty) are "nobody", and a session without a
-  real user is refused.
-- `DynamicOrchestratorAgent` does no access control. Clinician-facing
-  code, including the future API gateway, must go through
-  `SecurePipelineWrapper`.
+  (`unknown`, `system`, empty) are "nobody", and a feedback or approval
+  with no real user is refused.
+- `DynamicOrchestratorAgent` does no access control. Who may do what is
+  core's decision (the operations table); the worker serves only the
+  operations in `boundary/operations.json`, and reads the database through
+  the hospital-scoped helper (`with_hospital`).
 - Ids that clients can address (query ids, correction ids) are random,
   never sequential.
 

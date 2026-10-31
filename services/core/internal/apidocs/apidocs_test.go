@@ -12,7 +12,11 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/reflect/protoreflect"
+
 	core "github.com/Measured-Health/mhai-multiagent/services/core"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
 )
 
 const bundleSHA256 = "dcaf76612bc4a3fbcc923a8966dee2f6146a5f32e5ce1b6f02dd60cbbf89500b"
@@ -37,11 +41,12 @@ func get(h http.Handler, method, path string) *httptest.ResponseRecorder {
 func TestOnServesPageBundleAndSpec(t *testing.T) {
 	h := handler(true)
 	for path, ct := range map[string]string{
-		PagePath:   "text/html; charset=utf-8",
-		BundlePath: "text/javascript; charset=utf-8",
-		LogoPath:   "image/png",
-		ShimPath:   "text/javascript; charset=utf-8",
-		SpecPath:   "text/plain; charset=utf-8",
+		PagePath:         "text/html; charset=utf-8",
+		BundlePath:       "text/javascript; charset=utf-8",
+		LogoPath:         "image/png",
+		ShimPath:         "text/javascript; charset=utf-8",
+		SpecPath:         "text/plain; charset=utf-8",
+		IntelligencePath: "text/html; charset=utf-8",
 	} {
 		rec := get(h, http.MethodGet, path)
 		if rec.Code != 200 {
@@ -64,7 +69,7 @@ func TestHeaders(t *testing.T) {
 		"Referrer-Policy":         "no-referrer",
 		"Cache-Control":           "no-store",
 	}
-	for _, path := range []string{PagePath, BundlePath, LogoPath, ShimPath, SpecPath} {
+	for _, path := range []string{PagePath, IntelligencePath, BundlePath, LogoPath, ShimPath, SpecPath} {
 		rec := get(h, http.MethodGet, path)
 		for k, v := range want {
 			if got := rec.Header().Get(k); got != v {
@@ -124,10 +129,24 @@ func TestLogoIsAPNG(t *testing.T) {
 // (img-src 'self'): the page's own references, and the spec's x-logo.
 func TestPageAndSpecReferenceOnlySameOrigin(t *testing.T) {
 	h := handler(true)
-	page := get(h, http.MethodGet, PagePath).Body.String()
-	for _, ref := range regexp.MustCompile(`(?:src|href)="([^"]*)"`).FindAllStringSubmatch(page, -1) {
-		if !strings.HasPrefix(ref[1], "/api/") {
-			t.Errorf("page references %q", ref[1])
+	for _, p := range []string{PagePath, IntelligencePath} {
+		page := get(h, http.MethodGet, p).Body.String()
+		refs := regexp.MustCompile(`(?:src|href|action)="([^"]*)"`).FindAllStringSubmatch(page, -1)
+		if len(refs) == 0 {
+			t.Errorf("%s has no references to check", p)
+		}
+		for _, ref := range refs {
+			if !strings.HasPrefix(ref[1], "/api/") && !strings.HasPrefix(ref[1], "#") {
+				t.Errorf("%s references %q", p, ref[1])
+			}
+			if strings.HasPrefix(ref[1], "/api/") && get(h, http.MethodGet, ref[1]).Code != 200 {
+				t.Errorf("%s references %q, which is not served", p, ref[1])
+			}
+		}
+		for _, bad := range []string{"http://", "https://", "<script>", "onload", "onclick", "javascript:"} {
+			if strings.Contains(page, bad) {
+				t.Errorf("%s contains %q", p, bad)
+			}
 		}
 	}
 	spec := get(h, http.MethodGet, SpecPath).Body.String()
@@ -159,7 +178,7 @@ func TestBundleIsThePinnedOne(t *testing.T) {
 
 func TestOffIs404Problem(t *testing.T) {
 	h := handler(false)
-	for _, path := range []string{PagePath, BundlePath, SpecPath, PagePath + "/x"} {
+	for _, path := range []string{PagePath, IntelligencePath, BundlePath, SpecPath, PagePath + "/x"} {
 		rec := get(h, http.MethodGet, path)
 		if rec.Code != 404 {
 			t.Fatalf("%s: status %d", path, rec.Code)
@@ -217,5 +236,73 @@ func TestMethodsAndPassthrough(t *testing.T) {
 		if rec := get(h, http.MethodGet, path); rec.Code != http.StatusTeapot {
 			t.Errorf("%s: %d, want pass-through", path, rec.Code)
 		}
+	}
+}
+
+func TestIntelligencePageHasNoScript(t *testing.T) {
+	if body := get(handler(true), http.MethodGet, IntelligencePath).Body.String(); strings.Contains(body, "<script") {
+		t.Error("the intelligence page must carry no script")
+	}
+}
+
+func TestTabsLinkBothPages(t *testing.T) {
+	h := handler(true)
+	for _, p := range []string{PagePath, IntelligencePath} {
+		body := get(h, http.MethodGet, p).Body.String()
+		for _, want := range []string{`<nav class="tabs" aria-label="API documentation">`, `href="` + PagePath + `"`, `href="` + IntelligencePath + `"`, `aria-current="page"`} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s lacks %s", p, want)
+			}
+		}
+	}
+}
+
+// Drift: the page lists every operation in the table and every message in
+// proto/ (the compiled descriptors are generated from the same files).
+func TestIntelligencePageListsEveryOperationAndMessage(t *testing.T) {
+	body := get(handler(true), http.MethodGet, IntelligencePath).Body.String()
+	if len(authz.Operations()) == 0 {
+		t.Fatal("no operations")
+	}
+	for _, o := range authz.Operations() {
+		if !strings.Contains(body, "<code>"+o.Name+"</code>") {
+			t.Errorf("page lacks operation %s", o.Name)
+		}
+	}
+	for _, f := range []protoreflect.FileDescriptor{
+		intelpb.File_mhai_intelligence_v1_authz_proto, intelpb.File_mhai_intelligence_v1_echo_proto,
+		intelpb.File_mhai_intelligence_v1_envelope_proto, intelpb.File_mhai_intelligence_v1_pipeline_proto,
+	} {
+		ms := f.Messages()
+		for i := 0; i < ms.Len(); i++ {
+			if n := string(ms.Get(i).FullName()); !strings.Contains(body, `id="msg-`+n+`"`) {
+				t.Errorf("page lacks message %s", n)
+			}
+		}
+	}
+	for _, c := range authz.ErrorCodes() {
+		if !strings.Contains(body, "<code>"+c.Code+"</code>") {
+			t.Errorf("page lacks error code %s", c.Code)
+		}
+	}
+	for _, want := range []string{"never over HTTP", "core-signed request token", "test only"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+}
+
+func TestOnlyGetAndHeadServeIntelligence(t *testing.T) {
+	h := handler(true)
+	if rec := get(h, http.MethodHead, IntelligencePath); rec.Code != 200 || rec.Body.Len() != 0 {
+		t.Errorf("HEAD: %d, %d bytes", rec.Code, rec.Body.Len())
+	}
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		if rec := get(h, m, IntelligencePath); rec.Code != 404 {
+			t.Errorf("%s: %d", m, rec.Code)
+		}
+	}
+	if rec := get(h, http.MethodGet, IntelligencePath+"/"); rec.Code != 404 {
+		t.Errorf("trailing slash: %d", rec.Code)
 	}
 }

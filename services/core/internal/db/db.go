@@ -1,7 +1,8 @@
 // Package db opens the gateway's Postgres pool, applies the embedded goose
 // migrations and runs transactions under the right database role.
 //
-// Every query runs inside one of WithHospital, WithPlatform or WithAuth.
+// Every query runs inside one of WithHospital, WithPlatform, WithAuth,
+// WithJobs or WithAuditDrain.
 // The gateway's login user holds no table privileges of its own (it is a
 // member of mhai_app, see 00003_rls_roles.sql), so a query outside them
 // fails instead of reading anything.
@@ -31,6 +32,8 @@ const (
 	roleGateway  = "mhai_gateway"
 	rolePlatform = "mhai_platform"
 	roleAuth     = "mhai_auth"
+	roleJobs     = "mhai_jobs"
+	roleDrain    = "mhai_audit_drain"
 )
 
 // ErrNoHospital is returned by WithHospital for the nil hospital id.
@@ -73,6 +76,23 @@ func WithPlatform(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error
 // before a hospital is known.
 func WithAuth(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
 	return inRole(ctx, pool, roleAuth, "", fn)
+}
+
+// WithJobs runs fn in a transaction as mhai_jobs: the job columns of
+// clinical_queries across hospitals (never the question or patient data)
+// and the job audit actions, for core's background loops only (the publish
+// sweeper and the dead-letter consumer). See 00007_jobs.sql.
+func WithJobs(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	return inRole(ctx, pool, roleJobs, "", fn)
+}
+
+// WithAuditDrain runs fn in a transaction as mhai_audit_drain: read and
+// delete intelligence_audit_outbox rows of every hospital, the four id
+// columns of clinical_queries, and append query.completed, query.failed and
+// query.cancelled to the chain. For core's audit drainer only (intel.RunDrainer).
+// See 00008_intelligence_worker.sql.
+func WithAuditDrain(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	return inRole(ctx, pool, roleDrain, "", fn)
 }
 
 func inRole(ctx context.Context, pool *pgxpool.Pool, role, hospital string, fn func(pgx.Tx) error) (err error) {
@@ -131,7 +151,9 @@ func MigrateDownTo(ctx context.Context, url string, version int64) error {
 //     directly or through another role: only SET ROLE inside db.With* may
 //     reach them;
 //   - a role that is, or can act as, the owner of the database, a schema or
-//     a table.
+//     a table;
+//   - a connection that starts in another role or with a hospital set (a
+//     role default or PGOPTIONS).
 //
 // The gateway's login must be a plain member of mhai_app, so that a query
 // outside With* fails and RESET ROLE inside one falls back to a role with
@@ -149,11 +171,13 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 		ownedSchemas   []string
 		ownedRelations int
 		otherRoles     []string
+		current        string
+		atHospital     string
 	)
 	err := pool.QueryRow(ctx, `
 		SELECT r.rolname, r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb, r.rolreplication,
 		       pg_has_role(session_user, 'mhai_app', 'MEMBER'),
-		       ARRAY(SELECT x FROM unnest(ARRAY['mhai_migrate', 'mhai_gateway', 'mhai_platform', 'mhai_auth', 'mhai_worker', 'mhai_provision']) AS x
+		       ARRAY(SELECT x FROM unnest(ARRAY['mhai_migrate', 'mhai_gateway', 'mhai_platform', 'mhai_auth', 'mhai_worker', 'mhai_provision', 'mhai_jobs', 'mhai_audit_drain', 'mhai_worker_app']) AS x
 		             WHERE EXISTS (SELECT 1 FROM pg_roles p WHERE p.rolname = x)
 		               AND pg_has_role(session_user, x, 'USAGE')),
 		       pg_has_role(session_user, (SELECT d.datdba FROM pg_database d WHERE d.datname = current_database()), 'MEMBER'),
@@ -165,9 +189,12 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 		        WHERE pg_has_role(session_user, c.relowner, 'MEMBER')
 		          AND n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'),
 		       ARRAY(SELECT g.rolname::text FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
-		             WHERE m.member = r.oid AND g.rolname <> 'mhai_app' ORDER BY 1)
+		             WHERE m.member = r.oid AND g.rolname <> 'mhai_app' ORDER BY 1),
+		       current_user::text,
+		       COALESCE(current_setting('mhai.hospital_id', true), '')
 		FROM pg_roles r WHERE r.rolname = session_user`).
-		Scan(&name, &super, &bypass, &createRole, &createDB, &replication, &member, &inherited, &ownsDatabase, &ownedSchemas, &ownedRelations, &otherRoles)
+		Scan(&name, &super, &bypass, &createRole, &createDB, &replication, &member, &inherited, &ownsDatabase, &ownedSchemas, &ownedRelations, &otherRoles,
+			&current, &atHospital)
 	if err != nil {
 		return fmt.Errorf("db: check login role: %w", err)
 	}
@@ -195,6 +222,15 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	if len(inherited) > 0 {
 		problems = append(problems, "it inherits the privileges of "+strings.Join(inherited, ", "))
+	}
+	if current != name {
+		// A default role (ALTER ROLE ... SET role, or PGOPTIONS): every
+		// connection starts in it, outside db.With*, and RESET ROLE inside
+		// one falls back to it.
+		problems = append(problems, "it starts as "+current+", not as itself")
+	}
+	if atHospital != "" {
+		problems = append(problems, "it starts with a hospital set")
 	}
 	if ownsDatabase {
 		problems = append(problems, "it owns the database")

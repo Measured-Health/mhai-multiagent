@@ -30,9 +30,9 @@ gateway spec or an ADR says so.
 
 ### Status labels
 
-- **Built (Plan 2):** served by the core service today, with the shape in
-  `services/core/openapi.yaml` (the committed contract; a test keeps it in
-  step with the routes).
+- **Built (Plan 2)**, **Built (Plan 3):** served by the core service today,
+  with the shape in `services/core/openapi.yaml` (the committed contract; a
+  test keeps it in step with the routes).
 - **Gateway:** in the gateway design. Designed, not built yet.
 - **Gateway + change:** in the gateway design, but the frontend needs a
   different or larger shape.
@@ -307,6 +307,10 @@ Source: UI design §10 items 9–12.
 
 | Item | Need | Status |
 |---|---|---|
+| Ask a question | `POST /queries {patient_data, clinical_question, urgency, specialty?, client_created_at?}` → **202** `{query_id, status: "queued"}`; clinicians only; 429 `rate_limited` past 10 in flight per hospital; `Idempotency-Key` | **Built (Plan 3)** |
+| Status | `GET /queries/{id}` → `{query_id, status, progress, current_stage, error_code?}`; `status` is `queued`, `processing`, `completed` or `failed` (a cancelled question is `failed` with `error_code: "cancelled"`); another clinician's or hospital's id is 404 | **Built (Plan 3)** |
+| Result | `GET /queries/{id}/result` → `ClinicalResult`, 404 until completed; adds `trust_band` (provisional) and `cited_chunk_ids`; `citations` stays empty until the pipeline stores citation details | **Built (Plan 3)** |
+| Intelligence unavailable | **503 `unavailable`** (title "Unavailable", detail "Couldn't get an answer. Try again."): intelligence didn't answer in time, no worker is running, or core's NATS API pool is full; `not_ready` stays for readiness | **Built (Plan 3)**: used |
 | Confidence breakdown | all four measures: evidence match, internal consistency, values and dosages, answer stability. The UI hides a bar until its value exists; it never invents one | Gateway + change (L1, L2 are `null` today) |
 | ICD-10 | `icd10_code` nullable | Gateway |
 | Consultation history | persistent, per clinician, searchable; stores clinical text, so needs retention and access rules. Session-only until then | New |
@@ -318,9 +322,9 @@ Source: UI design §10 items 15–19.
 
 | Item | Need | Status |
 |---|---|---|
-| Retry-safe writes | `Idempotency-Key` on `POST /queries`, `POST /feedback`, the correction actions, every hospital admin write, alert actions and clearances. A repeat with the same key returns the first response and does no new work | New (gateway: DLQ retry only) |
+| Retry-safe writes | `Idempotency-Key` on `POST /queries`, `POST /feedback`, the correction actions, every hospital admin write, alert actions and clearances. A repeat with the same key returns the first response and does no new work | **Built** for `POST /queries` (Plan 3) and the Plan 2 writes; New for the rest |
 | Key lifetime | keep results for **at least 72 hours** (offline outbox) | New |
-| `client_created_at` | optional ISO 8601 on `POST /queries` and `POST /feedback`, so the record shows when the clinician asked | New |
+| `client_created_at` | optional ISO 8601 on `POST /queries` and `POST /feedback`, so the record shows when the clinician asked | **Built (Plan 3)** on `POST /queries` (checked, not stored); New for `POST /feedback` |
 | Compression | gzip or brotli on JSON | New |
 | Cheaper polling | `ETag` on `GET /queries/{id}` with `If-None-Match` → 304; optionally `?wait=20` long poll | New |
 | Tolerant sessions | keep rate limits loose enough for backed-off retries | Gateway |

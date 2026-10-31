@@ -14,7 +14,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 )
 
-const usage = "usage: core serve | core migrate up|status | core keys new --out PATH | core hospitals create ... | core users create ..."
+const usage = "usage: core serve | core migrate up|status | core keys new|ensure|untrust ... | core hospitals create ... | core users create ..."
 
 func main() {
 	var err error
@@ -66,13 +66,17 @@ type loginRequest struct {
 	userVar, pwVar string
 	user, password string
 	role           string
+	defaultUser    string // used when only the password is set; "" = none
 }
 
 // loginRequests reads the logins to ensure from the environment:
 //   - CORE_DB_USER / CORE_DB_PASSWORD: the core service's login, a member
 //     of mhai_app only;
 //   - PROVISION_DB_USER / PROVISION_DB_PASSWORD: the seed CLI's login, a
-//     member of mhai_provision only.
+//     member of mhai_provision only;
+//   - INTELLIGENCE_DB_USER / INTELLIGENCE_DB_PASSWORD: the pipeline's
+//     login (spec §8.2), a member of mhai_worker_app only. The user
+//     defaults to intelligence_app when only the password is set.
 //
 // Each pair is both set or both unset. Passwords must not be placeholders.
 // Errors name variables, never values.
@@ -82,8 +86,12 @@ func loginRequests(getenv func(string) string) ([]loginRequest, error) {
 	for _, l := range []loginRequest{
 		{userVar: "CORE_DB_USER", pwVar: "CORE_DB_PASSWORD", role: "mhai_app"},
 		{userVar: "PROVISION_DB_USER", pwVar: "PROVISION_DB_PASSWORD", role: "mhai_provision"},
+		{userVar: "INTELLIGENCE_DB_USER", pwVar: "INTELLIGENCE_DB_PASSWORD", role: "mhai_worker_app", defaultUser: "intelligence_app"},
 	} {
 		l.user, l.password = getenv(l.userVar), getenv(l.pwVar)
+		if l.user == "" && l.password != "" {
+			l.user = l.defaultUser
+		}
 		switch {
 		case l.user == "" && l.password == "":
 			continue
@@ -96,6 +104,16 @@ func loginRequests(getenv func(string) string) ([]loginRequest, error) {
 			continue
 		}
 		out = append(out, l)
+	}
+	// One login per role: two variables naming the same user would make
+	// the second EnsureLogin take the first one's membership away.
+	byUser := map[string]string{}
+	for _, l := range out {
+		if prev, ok := byUser[l.user]; ok {
+			errs = append(errs, fmt.Errorf("%s and %s name the same database login", prev, l.userVar))
+			continue
+		}
+		byUser[l.user] = l.userVar
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err

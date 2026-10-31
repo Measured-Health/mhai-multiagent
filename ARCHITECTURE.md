@@ -14,13 +14,17 @@ sessions, two-step verification, password change, the permission table
 and principal middleware, hospital separation by row-level security, the
 audit chain, idempotency, and the NATS connection with its KV buckets
 (config in `services/nats/`). Its contract is `services/core/openapi.yaml`,
-and it runs in Docker Compose (`make core-up`). **Next:** the Python side
-behind NATS (the boundary plan), then the hospital and platform endpoints.
+and it runs in Docker Compose (`make core-up`). **Built (Plan 3):** the Python
+side behind NATS: the pipeline and echo workers, request tokens, grants for
+BFF-direct calls, `POST /queries` and the API over NATS (`api.v1.<app>`),
+with an end-to-end smoke test, run on the build server and wired into
+CI (job `boundary-smoke`). **Next:** the hospital and platform
+endpoints.
 
 | Service | Job |
 |---|---|
 | **Core service** (Go, `services/core/`) | The API, sign-in and sessions, permissions, tenancy and audit. Every frontend call is decided here: either core serves it, or it grants intelligence a per-call token for it. |
-| **NATS** (`services/nats/`) | The only link between the BFF, Go and Python (ADR 0011). Request/reply for calls someone waits on; JetStream for background jobs; KV for the core service's denylist and attempt counters. Replaces the Redis queue stub once the Python side moves over. |
+| **NATS** (`services/nats/`) | The only link between the BFF, Go and Python (ADR 0011). Request/reply for calls someone waits on; JetStream for background jobs; KV for the core service's denylist and attempt counters. Replaces the old Redis queue stub, which is gone. |
 | **Python services** (`services/intelligence/`) | The models: agents, retrieval and the knowledge base, guardrails, PII masking, inference. Reached only through NATS. Each request carries a token signed by the core service, and the service checks it before doing any work. |
 | **EMR integration service** (planned, `services/emr/`) | Connects to each hospital's EMR/EHR (one connector per EMR type, ADR 0009): receives or fetches records, maps them to the FHIR-based model, normalises codes and units, keeps the per-hospital patient index, and tells core when new data arrives. Its own service because it holds outside credentials and talks to hospital networks; a fault or breach there must not reach sign-in and permissions. Connections are configured in the platform app. |
 | **Documents service** (planned, `services/documents/`) | Uploads, letters and exports: virus scanning, storing files in object storage, signed download links, and handing new documents to intelligence's document reading (DIA) as jobs. Core still decides who may upload or download. |
@@ -81,8 +85,10 @@ core's HTTP listener serves only health probes, on localhost.
 
 ### A call to the intelligence service that core makes
 
-Approved design, being built (Plan 3,
-`docs/specs/2026-10-28-intelligence-boundary-design.md`). This is how a
+Built (Plan 3,
+`docs/specs/2026-10-28-intelligence-boundary-design.md`); the smoke test
+in `services/core/internal/smoke` runs it end to end (on the build
+server; wired into CI as `boundary-smoke`). This is how a
 clinical question runs: the BFF asks core (`POST /queries` over
 `api.v1`), and core sends the job.
 
@@ -172,16 +178,16 @@ but has no design yet. The demo runs on a single host.
 
 | Area | Status |
 |---|---|
-| Rate limiting and back-pressure | **Built:** sign-in limits (5 failures per login and client IP in 15 minutes, a per-login ceiling across addresses, two-step code attempts), held in NATS KV and failing closed. **Designed:** a cap of 10 questions in flight per hospital, JetStream `discard: new` limits, per-worker concurrency with `overloaded`, and grant rate limits ([boundary design](docs/specs/2026-10-28-intelligence-boundary-design.md) §9, §17.3; [Plan 3](docs/plans/2026-10-28-plan-3-intelligence-boundary.md) Tasks 4, 5, 7). **Planned:** NATS per-user connection and subscription limits. |
-| Timeouts, retries and idempotency | **Built** in core: `Idempotency-Key` on writes (72 hours), and retried counter writes with backoff. **Designed** for intelligence: per-operation timeouts, no silent retry of request/reply, job claim and lease, completion at most once ([boundary design](docs/specs/2026-10-28-intelligence-boundary-design.md) §9). |
+| Rate limiting and back-pressure | **Built:** sign-in limits (5 failures per login and client IP in 15 minutes, a per-login ceiling across addresses, two-step code attempts), held in NATS KV and failing closed. **Built (Plan 3):** a cap of 10 questions in flight per hospital (429 `rate_limited`), bounded JetStream streams (JOBS per-subject limits, DEAD), per-worker concurrency with `overloaded`, a bounded NATS API pool (503 `unavailable`) and grant rate limits ([boundary design](docs/specs/2026-10-28-intelligence-boundary-design.md) §9, §17.3). **Planned:** NATS per-user connection and subscription limits. |
+| Timeouts, retries and idempotency | **Built** in core: `Idempotency-Key` on writes (72 hours), and retried counter writes with backoff. **Built (Plan 3)** for intelligence: per-operation timeouts, no silent retry of request/reply, job claim and lease with `+WIP`, retries by `Nak(delay)`, completion at most once, dead letters and a 10-minute deadline sweep ([boundary design](docs/specs/2026-10-28-intelligence-boundary-design.md) §9). |
 | Failover and HA | **Planned:** a 3-node NATS cluster with JetStream at R3, and a Postgres replica with failover ([core design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md) §4.5). Core and intelligence already scale out through queue groups (above). The demo is a single host. |
 | Backups and DR | **Planned:** Postgres and JetStream backups, a tested restore, and RPO and RTO targets. None exist today. **Required before any real patient data.** |
-| Monitoring and alerting | **Built:** health and readiness probes, JSON logs with redaction, and `audit.Verify`, which finds a break in the audit chain when it is run (nothing runs it on a timer yet). An OpenTelemetry collector is in compose. **Designed:** trace propagation across NATS, refusal and queue metrics ([boundary design](docs/specs/2026-10-28-intelligence-boundary-design.md) §10.3; Plan 3 Task 14). **Planned:** dashboards and alerts on errors, latency, refused tokens and audit-chain breaks. |
-| Secrets and key rotation | **Built:** startup refuses missing or placeholder secrets; each container gets only its own (a compose test checks it); NATS NKey seed files are supported. **Designed:** request-signing key rotation, planned and emergency ([boundary design](docs/specs/2026-10-28-intelligence-boundary-design.md) §7.5). Secrets live in `.env` and key files on the host for now; **Planned:** a secret store. |
-| Encryption | **Built:** HTTPS at nginx for the frontends (certbot); two-step secrets encrypted in the database (AES-256-GCM). **Designed:** TLS for NATS and JetStream encryption at rest (Plan 3 Task 4). **Planned:** TLS to Postgres, and encrypted disks and backups. |
-| Deploys and rollback | **Built:** the frontends deploy automatically when CI on `main` is green. The backend demo deploy is in progress. **Planned:** rolling deploys, backward-compatible migrations, and one-step rollback. |
+| Monitoring and alerting | **Built:** health and readiness probes, JSON logs with redaction, and `audit.Verify`, which finds a break in the audit chain when it is run (nothing runs it on a timer yet). An OpenTelemetry collector is in compose. **Built (Plan 3):** tracing (`traceparent` only, across NATS, always sampled) and metrics in core and the workers, with an attribute allow-list so spans carry ids, codes and numbers only; refusal, verify-time and queue metrics ([boundary design](docs/specs/2026-10-28-intelligence-boundary-design.md) §10.3). Off until `OTEL_EXPORTER_OTLP_ENDPOINT` is set; plaintext only to loopback or on request, with a warning outside development. **Planned:** dashboards and alerts on errors, latency, refused tokens and audit-chain breaks. |
+| Secrets and key rotation | **Built:** startup refuses missing or placeholder secrets; each container gets only its own (a compose test checks it); NATS NKey seed files are supported. **Built (Plan 3):** a separate request-signing key, its public half in a trusted-keys file the workers mount read-only, planned and emergency rotation (`core keys`, audited; workers reload on SIGHUP) ([boundary design](docs/specs/2026-10-28-intelligence-boundary-design.md) §7.5). Secrets live in `.env` and key files on the host for now; **Planned:** a secret store. |
+| Encryption | **Built:** HTTPS at nginx for the frontends (certbot); two-step secrets encrypted in the database (AES-256-GCM). **Built (Plan 3):** JetStream encrypted at rest in dev and tests (`NATS_JS_KEY`); the workers require NATS TLS and NKeys, and the pipeline `sslmode=verify-full` to Postgres, outside development. **Planned:** the NATS TLS block and encryption at rest on deployed hosts (none on the demo yet), TLS from core to Postgres, and encrypted disks and backups. |
+| Deploys and rollback | **Built:** the frontends and the backend demo (core, NATS, Postgres; no intelligence workers) deploy automatically when CI on `main` is green; the backend deploy stops before migrating if existing rows would fail a new constraint. **Planned:** rolling deploys, backward-compatible migrations, and one-step rollback. |
 | Environments | Demo only. **Planned:** separate staging and production; production never runs on the demo host. |
-| Caching | **Built:** shared reference content (`kb_chunks` with no hospital), readable by every hospital and writable by none, by row-level security; a 30-second cache of user and hospital state in core. **Designed:** the pipeline reading shared content (Plan 3 Task 11), and a per-hospital prompt-cache salt for the model servers ([boundary design](docs/specs/2026-10-28-intelligence-boundary-design.md) §11). |
+| Caching | **Built:** shared reference content (`kb_chunks` with no hospital), readable by every hospital and writable by none, by row-level security; a 30-second cache of user and hospital state in core. **Built (Plan 3):** the pipeline reading shared content under row-level security. **Designed:** a per-hospital prompt-cache salt for the model servers ([boundary design](docs/specs/2026-10-28-intelligence-boundary-design.md) §11). |
 | Data lifecycle | **Planned:** retention, legal holds and hospital offboarding, on the platform roadmap (frontend contract §14.8). |
 
 ## Intelligence service
@@ -217,4 +223,4 @@ Each response must pass ALL layers to auto-approve. Any single failure triggers 
 
 ### Security pipeline order
 
-RBAC → PII Mask → Route → Audit → Encrypt
+Core: permission check → request token (audit written by core) → Worker: verify token → hospital-scoped read → PII mask → route → verify → result

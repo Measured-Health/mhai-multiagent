@@ -21,3 +21,8 @@ MODULES = sorted(
 @pytest.mark.parametrize("name", MODULES)
 def test_module_imports(name):
     importlib.import_module(name)
+
+
+def test_retired_modules_are_not_in_the_package():
+    # The queue stubs went with Redis (Plan 3 T13).
+    assert not [m for m in MODULES if m.startswith("intelligence.queue")]

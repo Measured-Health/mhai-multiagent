@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 )
 
 // Rule is what a route needs (contract §3, §14.1). The zero Rule is "any
@@ -31,7 +32,7 @@ type Rule struct {
 	// factor (mfa = true), whatever the account's policy.
 	NeedsMFA bool
 	// StepUp: the handler asks for a fresh code (auth.StepUp). Recorded in
-	// the table for the generated docs and the Python checks.
+	// the table for the generated docs.
 	StepUp bool
 	// Write: the route changes data; auditors get 403 forbidden. Auditors
 	// are refused every unsafe method outside SelfService routes anyway;
@@ -49,6 +50,11 @@ type Rule struct {
 	// Probe: a public GET served before the BFF credential check (health
 	// probes only).
 	Probe bool
+	// Calls names the intelligence operations the route publishes to (the
+	// operations table, operations.go). The route's roles, or every
+	// clinical role when AnyRole is empty, must all be allowed by each
+	// operation, or the route panics at registration.
+	Calls []string
 }
 
 // RouteRule is one row of the permission table. Pattern is the full path,
@@ -99,7 +105,9 @@ func Route(m *Mux, method, pattern string, rule Rule, h http.Handler) {
 	} else {
 		guarded = m.guard.wrap(rule, h)
 	}
-	m.rt.Handle(method, pattern, guarded)
+	// One server span per route, named by the registered pattern (never
+	// the request path), parented on a valid traceparent.
+	m.rt.Handle(method, pattern, telemetry.HTTPServer(method, httpx.BasePath+pattern, httpx.RequestIDFrom, guarded))
 }
 
 func validate(method, pattern string, rule Rule) error {
@@ -133,7 +141,7 @@ func validate(method, pattern string, rule Rule) error {
 			return fmt.Errorf("authz: route %s %s mixes platform and clinical rules (%q)", method, pattern, r)
 		}
 	}
-	return nil
+	return validateCalls(method, pattern, rule)
 }
 
 // Table returns the permission table, sorted by pattern then method.
@@ -172,5 +180,30 @@ func (m *Mux) Handler(serviceKeys []string) http.Handler {
 			return
 		}
 		api.ServeHTTP(w, r)
+	})
+}
+
+// NATSHandler serves the same routes for core's NATS API (internal/natsapi,
+// spec §17.1): RequestID → the NATS mark (httpx.ViaNATS) → body limit →
+// guard, the chain of Handler with the BFF key check replaced by the NATS
+// user, and without the probes (HTTP only, for the container's health
+// check). A request that natsapi didn't mark is 401. Handler is unchanged
+// for HTTP.
+func (m *Mux) NATSHandler() http.Handler {
+	return m.rt.NATSHandler()
+}
+
+// ProbesHandler serves the probes and nothing else: every other path is
+// 404 not_found. It is the HTTP listener's handler when CORE_HTTP_API is
+// off, so the API is reachable over NATS only.
+func (m *Mux) ProbesHandler() http.Handler {
+	probes := httpx.RequestID(m.probes)
+	notFound := httpx.RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { httpx.Error(w, r, "not_found") }))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, p := m.probes.Handler(r); p != "" && path.Clean(r.URL.Path) == r.URL.Path {
+			probes.ServeHTTP(w, r)
+			return
+		}
+		notFound.ServeHTTP(w, r)
 	})
 }

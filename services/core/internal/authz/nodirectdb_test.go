@@ -30,6 +30,23 @@ var dbTxAllowedFiles = map[string]string{
 	// Provisioning CLI on the owner/migrate connection (SET LOCAL ROLE
 	// mhai_provision), never on a request path.
 	"internal/account/create.go": "the users/hospitals create CLI",
+	// Core's background job loop, never on a request path: it runs with no
+	// principal, reads and updates job rows of every hospital (job columns
+	// only, as mhai_jobs) and re-checks a job's creator (as mhai_auth)
+	// before re-minting. Request paths reserve in-flight slots and append
+	// facts inside the caller's authz.Tx instead.
+	"internal/intel/sweeper.go": "the publish sweeper (db.WithJobs) and Republish's creator re-check (db.WithAuth)",
+	// Core's audit drainer: moves every hospital's outbox facts onto the
+	// chain as mhai_audit_drain, with no principal (F2, F28).
+	"internal/intel/drain.go": "the audit drainer (db.WithAuditDrain)",
+	// Core's dead-letter consumer: looks a letter's job up by id and marks
+	// it, as mhai_jobs, with no principal; a letter is untrusted input and
+	// never acts beyond its own subject's hospital (F5, F28).
+	"internal/intel/deadletter.go": "the dead-letter consumer (db.WithJobs)",
+	// The grant endpoint audits token and session refusals before a
+	// principal exists, as mhai_auth, as sign-in failures are (F7).
+	// Everything after the principal goes through authz.Tx.
+	"internal/grant/grant.go": "grant refusals before a principal exists (db.WithAuth, mhai_auth)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on

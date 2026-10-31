@@ -13,12 +13,17 @@ updates:
       dev-tools:
         dependency-type: development
 
+  - package-ecosystem: gomod
+    directory: /services/core
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
 
   # Images: patch and minor updates only where they are safe. Python must stay
-  # on 3.12 (requires-python), and a major Postgres or Redis upgrade needs a
+  # on 3.12 (requires-python), and a major Postgres upgrade needs a
   # data migration, so those are deliberate PRs, not weekly bumps.
   - package-ecosystem: docker
     directory: /services/intelligence
@@ -32,8 +37,6 @@ updates:
     schedule: { interval: weekly }
     ignore:
       - dependency-name: "postgres"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "redis"
         update-types: ["version-update:semver-major"]
       - dependency-name: "ollama/ollama"
         update-types: ["version-update:semver-major"]
