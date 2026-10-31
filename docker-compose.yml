@@ -147,7 +147,7 @@ services:
   # users' passwords go to mhai-web's BFF (its own compose), never to core
   # or a worker. TestComposeSplitsSecretsPerService checks this.
   nats:
-    image: nats:2.10-alpine
+    image: nats:2.15-alpine
     restart: unless-stopped
     # Refuse to start with a missing or placeholder secret, or a JetStream
     # key shorter than 32 characters or starting with a digit.
