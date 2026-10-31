@@ -208,7 +208,7 @@ jobs:
               - services/intelligence/pyproject.toml
               - services/intelligence/uv.lock
               - services/intelligence/intelligence/**
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
         if: steps.changes.outputs.image == 'true'
       # Layers are cached between runs, so only changed layers rebuild.
       - name: Build CPU image
@@ -266,7 +266,7 @@ jobs:
           env POSTGRES_PASSWORD=x CORE_DB_PASSWORD=x PROVISION_DB_PASSWORD=x MFA_ENCRYPTION_KEY=x \
             BFF_SERVICE_KEYS=x NATS_GATEWAY_NKEY=x NATS_BFF_NKEY=x \
             docker compose -f deploy/compose.yml config -q
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       # The same layers as the image job, from the GitHub Actions cache.
       - name: Build the intelligence image
         uses: docker/build-push-action@v6
