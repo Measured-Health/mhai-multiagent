@@ -213,7 +213,7 @@ jobs:
       # Layers are cached between runs, so only changed layers rebuild.
       - name: Build CPU image
         if: steps.changes.outputs.image == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: services/intelligence
           build-args: TORCH=cpu
@@ -269,7 +269,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       # The same layers as the image job, from the GitHub Actions cache.
       - name: Build the intelligence image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: services/intelligence
           build-args: TORCH=cpu
