@@ -7,6 +7,7 @@ Open work and decisions for mhai-multiagent. Remove an entry once it's done or d
 - **Go alongside Python.** The core service (Go, `services/core/`) owns the API, auth, tenancy, audit and EMR plumbing. The Python services (`services/intelligence/`) keep the models and are reached only over NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md).
 - **The intelligence boundary (product owner, 28 Oct).** Core calls the Python services over NATS with a per-call Ed25519 request token; Protobuf with `buf` for the messages; a 10-minute limit on clinical questions; per-worker replay check; user-level audit plus refusals; intelligence writes results under RLS with audit facts in an outbox; `POST /queries` in the plan; a separate request-signing key; 10 questions in flight per hospital; streaming left to the performance plan; no separate NATS account yet. See the [design](docs/specs/2026-10-28-intelligence-boundary-design.md) §16 and [Plan 3](docs/plans/2026-10-28-plan-3-intelligence-boundary.md).
 - **Frontend ingress over NATS (product owner, 28 Oct).** The BFF talks to core over NATS (`api.v1.<audience>`), its NATS identity replaces the `X-MHAI-Service` key, and the BFF may call intelligence operations marked `bff_direct`, which intelligence serves only after core grants them (`authz.v1.grant.<service>`). See [ADR 0011](docs/adr/0011-frontend-ingress-over-nats.md) and the design §17; built in Plan 3.
+- **Plan 4: feedback and corrections, the audit log, platform operations (product owner, 3 Nov).** Built in three parts (4a, 4b, 4c). Corrections are approved by a second clinician, with the rule enforced in core and in the database; approved corrections only fill a per-hospital buffer, which nothing applies to the live guardrails; the audit log is served as `/platform/audit`. See the [design](docs/specs/2026-10-31-plan-4-feedback-audit-documents-admin-design.md) §15 and [Plan 4](docs/plans/2026-11-03-plan-4-feedback-audit-admin.md).
 
 ## Open items for the core service
 
@@ -24,7 +25,7 @@ From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.
 - **Turn core's HTTP API off** (`CORE_HTTP_API=off`, probes only on localhost) once mhai-web's BFF talks to core over NATS. That switch is mhai-web work (its TODO.md, "BFF over NATS"). The same change brings mhai-web's `contract.ts` in line with Plan 3: `ClinicalResult` gains `trust_band` and `cited_chunk_ids`, and the problem codes gain 405 `method_not_allowed`, 413 `payload_too_large` (both on the NATS path) and 503 `unavailable`.
 - **Citations are empty** in `GET /queries/{id}/result` until the pipeline stores citation details: today it stores only `cited_chunk_ids`. Flagged to the product owner and the intelligence lead (Plan 3 T12).
 - **Patient ids in questions and tokens** (`pids`, plan departure 7): with the EMR plan. Until then retrieval returns shared guidelines only.
-- **Platform job views:** retry and cancel endpoints and the Failed jobs list (frontend §14.8). Plan 3 built the dead-letter consumer and the re-mint they will call.
+- **Platform job views:** in Plan 4 (part 4c). retry and cancel endpoints and the Failed jobs list (frontend §14.8). Plan 3 built the dead-letter consumer and the re-mint they will call.
 - **The shared replay check** (NATS KV) when a request/reply operation first writes data (boundary design, decision 3). Today each worker copy keeps its own `jti` set, which is enough while request/reply operations only read.
 - **Hospital setup flow.** `setup_incomplete` hospitals can sign in so the first admin can finish setup; revisit when the flow exists (T8 M8). Nothing activates a hospital yet (no CLI command or endpoint), and `POST /queries` asks for an `active` hospital, so a clinician of a CLI-made hospital gets 401 `unauthenticated` on every question until an operator sets `hospitals.status = 'active'` by hand (found by the Plan 3 smoke test, which does exactly that). Add `core hospitals activate` or the setup flow, and decide whether `setup_incomplete` should be 403 rather than 401.
 - **Admin unlock** for the per-login ceiling, with the staff endpoints (only a trusted device gets past it today); alert on `auth.login.ceiling` audit rows.
@@ -67,6 +68,16 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 
 **Repo and CI**
 - **CODEOWNERS** entries without a space (`orchestrator.py@ojies` and two more) match nothing; fix them and add `/services/core/internal/{auth,authz,db,httpx}/` and `/services/nats/`. [final m6]
+
+## Deferred from Plan 4 (decided 3 Nov)
+
+- **Document upload and the `ingest_document` job:** moved to the document pipeline plan, with the documents service, object storage and the scanner (Plan 4 design §7). Nothing is uploaded before files can be scanned and read. Plan 4's generic `jobs` table is ready for `ingest_document` and `finalise_document`.
+- **`POST /triage` (QDA):** deferred until QDA passes its evaluation and has clinical sign-off. Integrated accuracy is about 30% (tracker KI-2). It will be a `run_triage` job behind the platform's triage switch (design §8).
+- **`GET /kb/search`:** deferred until a screen needs it; then a core-initiated, read-only request/reply operation, shared guidelines only until patient ids exist (design §8).
+- **Reset the feedback buffer** (tracker B-23, KI-5): moved to the platform settings plan, with `GET /platform/settings`. Buffer rows carry `model_versions`, `cleared_at` and `reset_id`, so the reset is one function plus the route (design §8).
+- **Applying corrections to live behaviour:** a CMA-ES run produces only a *proposed* weight set, under clinical change control. The persona vector waits for the pipeline to capture model activations (the intelligence lead's work). KB enrichment waits for patient ids (design §4.8, decisions 3 and 4).
+- **The rest of the audit log:** exports, named access and pseudonym reveal (`/platform/audit/exports*`, `/named-access`, `/{id}/patients`). They need Analysis pseudonyms, clearance letters and object storage. The bell and email on a broken chain wait for the notifications service.
+- **mhai-web dependency:** seven audit event kinds must ship in mhai-web before Plan 4b deploys, or those entries show as "can't be displayed": `answer_agreed`, `review_withdrawn`, `review_refused`, `learning_recorded`, `audit_check_started`, `audit_check_finished` and `audit_undisplayable_reported` (design §5.3; the 31 Oct summary said six, but the table lists seven). mhai-web must also accept a health reading without the `documents` and `clean_up` parts (decision 7).
 
 ## Under consideration
 
