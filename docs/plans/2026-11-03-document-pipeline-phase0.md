@@ -613,7 +613,7 @@ Real Drive access is Task 28; this task writes the Drive adapter against the Dri
   - The check also fails on a malformed lock, a role name or gate outside the known set, or two roles pinning versions whose dependencies disagree.
 - The GitHub API is reached through a small client with the job's `GITHUB_TOKEN` (`pull-requests: read`); tests use a fake.
 
-- [ ] **Step 1: Write the failing tests:** `test_pin_refuses_failing_gate_fixture_and_rehearsal` (P14), `test_pin_refuses_unsigned_or_tampered` (B19, P14), `test_lock_check_needs_label` , `test_lock_check_needs_clinical_and_platform_on_head_commit` (an approval on an older commit doesn't count), `test_promoter_or_trainer_cannot_be_the_approver` (P15), `test_reviewers_read_from_base_not_head` (P15), `test_rollback_to_signed_off_version_needs_no_eval` , `test_rollback_to_never_approved_refused` (P16), `test_malformed_lock_refused`.
+- [ ] **Step 1: Write the failing tests:** `test_pin_refuses_failing_gate_fixture_and_rehearsal` (P14), `test_pin_refuses_unsigned_or_tampered` (B19, P14), `test_lock_check_needs_label`, `test_lock_check_needs_clinical_and_platform_on_head_commit` (an approval on an older commit doesn't count), `test_promoter_or_trainer_cannot_be_the_approver` (P15), `test_reviewers_read_from_base_not_head` (P15), `test_rollback_to_signed_off_version_needs_no_eval`, `test_rollback_to_never_approved_refused` (P16), `test_malformed_lock_refused`.
 - [ ] **Step 2: Run (Python, remote):** `uv run pytest -q tests/modelstore/test_lock.py` → fails.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run tests, lint, format, mypy.
@@ -630,7 +630,7 @@ Real Drive access is Task 28; this task writes the Drive adapter against the Dri
 - A refused sign-off fails the workflow and writes a job summary with the reason; the loader then refuses that pin (Task 22), so the service stays not ready on it.
 - `mhai-models rollback ROLE [--to VERSION]`: picks the latest version of the pinned name (or `--to`) that has a valid sign-off for this role and is older than the current pin; refuses one without a sign-off (P16); writes `models.lock`. The PR it goes in follows `lock-check`'s rollback rule.
 
-- [ ] **Step 1: Write the failing tests** (fake GitHub API; `store` for the writes): `test_signoff_written_and_signed_by_signoff_key` , `test_signoff_refused_without_approvals` (P17), `test_signoff_retention_extended` (store), `test_signoff_idempotent`, `test_rollback_picks_previous_signed_off` , `test_rollback_refuses_never_approved` (P16).
+- [ ] **Step 1: Write the failing tests** (fake GitHub API; `store` for the writes): `test_signoff_written_and_signed_by_signoff_key`, `test_signoff_refused_without_approvals` (P17), `test_signoff_retention_extended` (store), `test_signoff_idempotent`, `test_rollback_picks_previous_signed_off`, `test_rollback_refuses_never_approved` (P16).
 - [ ] **Step 2: Run (Python, remote):** `uv run pytest -q tests/modelstore/test_signoff.py` (and `-m store`) → fails.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run tests, lint, format, mypy.
@@ -654,7 +654,7 @@ Real Drive access is Task 28; this task writes the Drive adapter against the Dri
 - **The cache is never trusted.** An existing final directory is re-hashed in full against the manifest every time (P11). A mismatch deletes it and re-downloads once; a second mismatch refuses.
 - Nothing is loaded here. Warm-up needs the runtime and lives in the loader (Task 23).
 
-- [ ] **Step 1: Write the failing tests** (`store` with MinIO plus unit fakes): `test_good_pin_verifies` , `test_one_byte_changed_refused` (B18: the cached file edited after a first verify; and a second store version uploaded under a file key, which must be ignored because the recorded version id is used), `test_unsigned_or_wrong_signer_refused` (B19), `test_lock_hash_differs_refused` (B19), `test_manifest_for_other_name_version_or_role_refused` (P9), `test_extra_or_missing_file_refused` (P10), `test_partial_upload_not_found` (P8), `test_no_signoff_refused_in_production_allowed_in_development` (P17), `test_dev_policy_refused_in_production` (P12), `test_cache_rehashed_every_start` (P11), `test_shadowing_manifest_version_ignored`, `test_refusal_logs_ids_only`.
+- [ ] **Step 1: Write the failing tests** (`store` with MinIO plus unit fakes): `test_good_pin_verifies`, `test_one_byte_changed_refused` (B18: the cached file edited after a first verify; and a second store version uploaded under a file key, which must be ignored because the recorded version id is used), `test_unsigned_or_wrong_signer_refused` (B19), `test_lock_hash_differs_refused` (B19), `test_manifest_for_other_name_version_or_role_refused` (P9), `test_extra_or_missing_file_refused` (P10), `test_partial_upload_not_found` (P8), `test_no_signoff_refused_in_production_allowed_in_development` (P17), `test_dev_policy_refused_in_production` (P12), `test_cache_rehashed_every_start` (P11), `test_shadowing_manifest_version_ignored`, `test_refusal_logs_ids_only`.
 - [ ] **Step 2: Run (Python, remote):** `uv run pytest -q tests/modelstore/test_verify.py` and `-m store` → fail.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run tests, lint, format, mypy.
