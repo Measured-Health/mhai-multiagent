@@ -452,5 +452,6 @@ func (s Store) Stats(ctx context.Context, hid, me uuid.UUID) (FeedbackStatsOut, 
 	return st, err
 }
 
-// afterApproveAudit is a test hook (export_test.go): nil in production.
+// afterApproveAudit is a test hook: nil in production. It is declared here
+// because Decide reads it; export_test.go sets it.
 var afterApproveAudit func() error

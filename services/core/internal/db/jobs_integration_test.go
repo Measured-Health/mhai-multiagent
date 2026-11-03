@@ -799,7 +799,10 @@ func TestJobsGrantsAndSubjectScoping(t *testing.T) {
 	if _, err := super.Exec(ctx, ins, a, cb, ua); pgCode(err) != "23514" {
 		t.Errorf("owner: job on another hospital's correction: %v", err)
 	}
-	if _, err := inTx(ctx, super, []string{`SET LOCAL ROLE mhai_gateway`}, &a, ins, a, cb, ua); pgCode(err) != "23514" {
+	asUser := func(u uuid.UUID) []string {
+		return []string{`SET LOCAL ROLE mhai_gateway`, `SELECT set_config('mhai.user_id', '` + u.String() + `', true)`}
+	}
+	if _, err := inTx(ctx, super, asUser(ua), &a, ins, a, cb, ua); pgCode(err) != "23514" {
 		t.Errorf("gateway: job on another hospital's correction: %v", err)
 	}
 	if _, err := super.Exec(ctx, ins, a, uuid.New(), ua); pgCode(err) != "23514" {
@@ -807,7 +810,7 @@ func TestJobsGrantsAndSubjectScoping(t *testing.T) {
 	}
 	// A correction of its own hospital is accepted by the gateway.
 	own := seedCorrection(t, super, a, seedQueryIn(t, super, a), ua)
-	if n, err := inTx(ctx, super, []string{`SET LOCAL ROLE mhai_gateway`}, &a, ins, a, own, ua); err != nil || n != 1 {
+	if n, err := inTx(ctx, super, asUser(ua), &a, ins, a, own, ua); err != nil || n != 1 {
 		t.Errorf("gateway: job on own correction: %d %v", n, err)
 	}
 
@@ -828,11 +831,20 @@ func TestJobsGrantsAndSubjectScoping(t *testing.T) {
 
 	// The gateway inserts only a fresh queued job.
 	for _, col := range []string{"status = 'completed'", "status = 'running'", "attempts = 1", "retry_count = 1",
-		"cancelled_by = $3", "cancel_note = 'x'", "cancel_reason = 'x'", "error = 'x'"} {
+		"cancelled_by = $3", "cancel_note = 'x'", "cancel_reason = 'x'", "error = 'x'",
+		"lease_until = now()", "published_at = now()"} {
 		name, val, _ := strings.Cut(col, " = ")
 		corr := seedCorrection(t, super, a, seedQueryIn(t, super, a), ua)
 		q := `INSERT INTO jobs (id, hospital_id, type, subject_id, created_by, ` + name + `) VALUES (gen_random_uuid(), $1, 'approve_correction', $2, $3, ` + val + `)`
-		_, err := inTx(ctx, super, []string{`SET LOCAL ROLE mhai_gateway`}, &a, q, a, corr, ua)
+		_, err := inTx(ctx, super, asUser(ua), &a, q, a, corr, ua)
 		requireDenied(t, err, "gateway insert with "+col)
+	}
+	// The creator is the signed-in user: another user's id, or none, is refused.
+	{
+		corr := seedCorrection(t, super, a, seedQueryIn(t, super, a), ua)
+		_, err := inTx(ctx, super, asUser(uuid.New()), &a, ins, a, corr, ua)
+		requireDenied(t, err, "gateway insert naming another creator")
+		_, err = inTx(ctx, super, []string{`SET LOCAL ROLE mhai_gateway`}, &a, ins, a, corr, ua)
+		requireDenied(t, err, "gateway insert with no signed-in user")
 	}
 }

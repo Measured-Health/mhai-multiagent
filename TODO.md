@@ -75,6 +75,9 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 - **`deploy/nats/nats.conf` needs the pipeline user's learning subjects** (`$JS.API.CONSUMER.INFO.JOBS.pipeline_learning`, `$JS.API.CONSUMER.MSG.NEXT.JOBS.pipeline_learning`, `$JS.ACK.JOBS.pipeline_learning.>`) when the pipeline is deployed. `services/nats/nats.conf` (dev, smoke) has them.
 - **Refusal audit rows are unthrottled** (`correction.decision_refused`): a signed-in clinician can write one per request. Residual risk, accepted for 4a; the request rate limits bound it.
 - **`auth.terms.accepted.version` is user text in a closed schema.** The version string the client sends is stored in the audit payload; pin it to a known list of terms versions.
+- **4a: an approved correction whose `approve_correction` job fails or expires has no recovery until 4b's platform retry (Task 12).** The decision stands; on the demo, with no pipeline deployed, every approval ends `job.dead_lettered`/`deadline_exceeded`.
+- **`deploy/nats/nats.conf` lacks the pipeline user's learning subjects.** Without them the worker can bind neither durable, so `run_query` stops too. Add them when the pipeline is deployed.
+- **The idempotency store keeps a plain SHA-256 of the request body** (for `POST /feedback` this includes free text); key it with an HMAC.
 
 ## Deferred from Plan 4 (decided 3 Nov)
 

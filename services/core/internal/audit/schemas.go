@@ -112,6 +112,17 @@ func checkPayload(action string, raw []byte) error {
 	return nil
 }
 
+// CheckActionPayload reports whether payload fits action's registered schema, as
+// Write checks it. Tests in other packages use it to hold a second copy of a
+// schema (intel's drained facts) against this registry.
+func CheckActionPayload(action string, payload map[string]any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return ErrSchema
+	}
+	return checkPayload(action, raw)
+}
+
 // UUID: a canonical (lower-case, hyphenated) uuid string.
 func UUID(v any) bool {
 	s, ok := v.(string)

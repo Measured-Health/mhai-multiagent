@@ -88,10 +88,10 @@ func AppendFacts(ctx context.Context, tx pgx.Tx, caller Caller, meta *intelpb.Re
 			Action: f.Action, Entity: f.Entity, EntityID: f.EntityId, Payload: payload,
 		}); err != nil {
 			// audit.Write's error can name the worker's payload key or carry
-			// driver text: return a fixed value only. A sensitive key is the
-			// worker's fault (ErrBadFact); anything else (the database, the
+			// driver text: return a fixed value only. A sensitive key or a payload
+			// outside the audit schema is the worker's fault (ErrBadFact); anything else (the database, the
 			// role's policy) is core's own failure, not a bad fact.
-			if errors.Is(err, audit.ErrSensitiveKey) {
+			if errors.Is(err, audit.ErrSensitiveKey) || errors.Is(err, audit.ErrSchema) {
 				return ErrBadFact
 			}
 			return ErrAuditWrite

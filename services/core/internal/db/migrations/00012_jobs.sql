@@ -79,10 +79,14 @@ GRANT UPDATE (status, attempts, lease_until, error, completed_at, failed_at) ON 
 
 CREATE POLICY hospital_rows ON jobs TO mhai_gateway, mhai_worker
     USING (hospital_id = mhai_current_hospital()) WITH CHECK (hospital_id = mhai_current_hospital());
--- A job is born queued and untouched: core's insert sets no state.
+-- A job is born queued and untouched: core's insert sets no state, no lease
+-- and no publish mark, and names the signed-in user (db.WithHospitalUser,
+-- the only way intel.QueueJob is reached) as its creator.
 CREATE POLICY gateway_new_job ON jobs AS RESTRICTIVE FOR INSERT TO mhai_gateway
     WITH CHECK (status = 'queued' AND attempts = 0 AND retry_count = 0 AND cancelled_by IS NULL
-                AND cancel_note IS NULL AND cancel_reason IS NULL AND error IS NULL);
+                AND cancel_note IS NULL AND cancel_reason IS NULL AND error IS NULL
+                AND lease_until IS NULL AND published_at IS NULL
+                AND created_by = mhai_current_user());
 CREATE POLICY worker_status ON jobs AS RESTRICTIVE FOR UPDATE TO mhai_worker
     USING (status IN ('queued', 'running'))
     WITH CHECK (status IN ('running', 'completed', 'failed'));

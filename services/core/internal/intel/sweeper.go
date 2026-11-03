@@ -330,8 +330,9 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 	return res, nil
 }
 
-// jobsTableFault is a test hook (export_test.go): an error it returns
-// fails the sweep's jobs-table steps. Nil in production.
+// jobsTableFault is a test hook: an error it returns fails the sweep's
+// jobs-table steps. Nil in production. It is declared here because the
+// sweep reads it; the tests set it.
 var jobsTableFault func() error
 
 // sweepableJobs is step 3's rows: per type with a budget, up to 100 queued,
