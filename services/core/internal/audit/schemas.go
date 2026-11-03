@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"sync"
 	"time"
 
@@ -37,6 +38,32 @@ type Check func(v any) bool
 type Schema struct {
 	Fields   map[string]Check
 	Required []string
+	// Shapes, when set, are the payload's alternatives: it must fit one of
+	// them, carrying all of that shape's required keys and no key outside
+	// its keys (an action two writers use with two shapes: job.retried and
+	// job.cancelled, per job and per platform call).
+	Shapes []Shape
+}
+
+// Shape is one alternative payload of an action: the keys it may carry and
+// those it must.
+type Shape struct {
+	Keys, Required []string
+}
+
+// fits reports whether payload's keys fit shape.
+func (sh Shape) fits(payload map[string]any) bool {
+	for k := range payload {
+		if !slices.Contains(sh.Keys, k) {
+			return false
+		}
+	}
+	for _, k := range sh.Required {
+		if _, ok := payload[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // ErrSchema is returned by Write for an action with no schema, or a
@@ -66,6 +93,18 @@ func Register(action string, s Schema) {
 	for _, k := range s.Required {
 		if s.Fields[k] == nil {
 			panic(fmt.Sprintf("audit: %s: required key %q has no check", action, k))
+		}
+	}
+	for _, sh := range s.Shapes {
+		for _, k := range append(slices.Clone(sh.Keys), sh.Required...) {
+			if s.Fields[k] == nil {
+				panic(fmt.Sprintf("audit: %s: shape key %q has no check", action, k))
+			}
+		}
+		for _, k := range sh.Required {
+			if !slices.Contains(sh.Keys, k) {
+				panic(fmt.Sprintf("audit: %s: shape requires %q outside its keys", action, k))
+			}
 		}
 	}
 	registryMu.Lock()
@@ -109,6 +148,9 @@ func checkPayload(action string, raw []byte) error {
 		if _, ok := payload[k]; !ok {
 			return fmt.Errorf("%w: %s lacks %q", ErrSchema, action, k)
 		}
+	}
+	if len(s.Shapes) > 0 && !slices.ContainsFunc(s.Shapes, func(sh Shape) bool { return sh.fits(payload) }) {
+		return fmt.Errorf("%w: %s fits none of its shapes", ErrSchema, action)
 	}
 	return nil
 }
@@ -349,7 +391,11 @@ func init() {
 	// dead-letter re-mint: job_id, msg_id) and the platform's one row per
 	// retry call (job_count, 1-50, no job), whose actor is the admin. The
 	// catalogue shows only the batch row (batchRow; ruling R24).
-	Register("job.retried", Schema{Fields: fields("job_id", id, "msg_id", token, "job_count", Int(1, 50))})
+	Register("job.retried", Schema{Fields: fields("job_id", id, "msg_id", token, "job_count", Int(1, 50)),
+		Shapes: []Shape{
+			{Keys: []string{"job_id", "msg_id"}, Required: []string{"job_id", "msg_id"}},
+			{Keys: []string{"job_count"}, Required: []string{"job_count"}},
+		}})
 
 	// Plan 4 (spec §9 rows 1-6): feedback and corrections. Ids and codes
 	// only: never the reason, the corrected diagnosis or a rejection note.
@@ -401,7 +447,11 @@ func init() {
 		"reason", OneOf("user_deactivated", "hospital_deactivated", "account_unusable",
 			"no_longer_needed", "cant_succeed", "other"),
 		"job_count", Int(1, 50)),
-		Required: []string{"reason"}})
+		Required: []string{"reason"},
+		Shapes: []Shape{
+			{Keys: []string{"job_id", "type", "reason"}, Required: []string{"job_id", "type", "reason"}},
+			{Keys: []string{"job_count", "reason"}, Required: []string{"job_count", "reason"}},
+		}})
 
 	// Plan 4 (spec §9): the audit reader's own actions, written by core as
 	// mhai_platform (00014's platform_append). Never the searched text, the

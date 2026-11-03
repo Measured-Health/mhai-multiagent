@@ -273,8 +273,10 @@ func TestApprovalBudget(t *testing.T) {
 	if r := rowOf(t, last); r.status != "approved" {
 		t.Fatalf("21st approval not committed: %+v", r)
 	}
-	// Old enough for the sweeper, the order kept; still no free slot.
-	if _, err := super.Exec(ctx, `UPDATE jobs SET created_at = created_at - interval '30 seconds' WHERE hospital_id = $1`, hid); err != nil {
+	// Old enough for the sweeper (its age gate is queued_at, 00016), the
+	// order kept; still no free slot.
+	if _, err := super.Exec(ctx, `UPDATE jobs SET created_at = created_at - interval '30 seconds',
+		queued_at = queued_at - interval '30 seconds' WHERE hospital_id = $1`, hid); err != nil {
 		t.Fatal(err)
 	}
 	_, _ = intel.SweepOnce(ctx, app, e.client)

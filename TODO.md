@@ -107,6 +107,12 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 - **The non-superuser migrate path and `mhai_health_reader`.** On a CREATEROLE (not superuser) migration login, 00015's `ALTER FUNCTION ... OWNER TO mhai_health_reader` needs the new owner to hold CREATE on schema `public`, which it doesn't (it has USAGE only). Grant it for the hand-over and revoke it after, or run that step as a superuser. The demo migrates as a superuser, so it isn't affected.
 - **Bound the health failures scan with retention.** `mhai_health_failures()` counts every failed question and job, however old (partial indexes on failed rows keep it to those rows). Once the retention plan purges old jobs and questions, the scan is bounded by it; until then it grows with the failed rows kept.
 
+## Plan 4c follow-ups (Task 12 review)
+
+- **mhai-web: map `validation_failed` on the failed jobs writes.** Core answers a bad id list, reason or note on `POST /platform/jobs/retry` and `/cancel` with 422 `validation_failed`, the code every core route uses; contract §14.8.3 says 422 `invalid`. mhai-web must map `validation_failed` there (record it in spec §16 at Task 14).
+- **mhai-web: a facts key for the cancel reason.** The `jobs_cancelled` audit entry sends `facts.job_count` only: the batch row stores the reason (`no_longer_needed`, `cant_succeed`, `other`), but mhai-web has no facts key for it, so Activity can't show the reason in words as §14.8.3 asks. When mhai-web adds one, map `reason` in the `job.cancelled` catalogue row (`services/core/internal/audit/catalogue.go`) and refresh `testdata/web-audit-vocabulary.json`.
+- **Deploy order for 00016.** The `run_query` worker's claim reads `clinical_queries.retry_count` (00016): migrate before deploying the worker (the usual order).
+
 ## Test follow-ups
 
 - **Interop test of the health probe against the real Python worker.** The sampler's `pipeline.health` token (svc:core, no roles, the fixed probe hospital id) is tested only against a Go fake. Add a test, in the smoke run or the boundary tests, that the Python `pipeline.health` handler accepts it and answers `models_ready` and `database_ready`.

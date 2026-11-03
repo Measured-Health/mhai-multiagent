@@ -597,7 +597,9 @@ func (d Deps) jobsCancel(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "mfa_required")
 		return
 	}
-	if err := d.Auth.StepUp(r.Context(), nil, p.UserID.String(), body.MFACode, body.BackupCode); err != nil {
+	// A refused code is audited (auth.mfa.failed or auth.mfa.locked), as
+	// every step-up is.
+	if err := d.Auth.StepUpAudited(r, body.MFACode, body.BackupCode); err != nil {
 		d.Auth.WriteStepUpError(w, r, err)
 		return
 	}

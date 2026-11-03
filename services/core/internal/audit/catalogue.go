@@ -213,11 +213,16 @@ func runTarget(e Event) *Target {
 }
 
 // batchRow reports whether a job row is the platform's one-per-call row:
-// no job id, no entity, and a job count.
+// a job count, no entity, and none of the per-job keys (job_id, msg_id,
+// type), so the gate is the schema's batch shape exactly.
 func batchRow(e Event) bool {
-	_, hasJob := e.Payload["job_id"]
+	for _, k := range []string{"job_id", "msg_id", "type"} {
+		if _, ok := e.Payload[k]; ok {
+			return false
+		}
+	}
 	_, hasCount := e.Payload["job_count"]
-	return !hasJob && hasCount && e.Entity == "" && e.EntityID == ""
+	return hasCount && e.Entity == "" && e.EntityID == ""
 }
 
 // searchedInWeb reports whether an audit.searched row's kind is one

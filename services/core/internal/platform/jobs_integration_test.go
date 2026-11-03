@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
@@ -528,34 +530,50 @@ func TestRetrySecondPersonRechecked(t *testing.T) {
 	tok := mint(t, platformAdmin(t))
 	j, corr := s.failedApproval(t, "internal")
 	ctx := context.Background()
-	if _, err := super.Exec(ctx, `ALTER TABLE feedback_events DROP CONSTRAINT feedback_not_self_decided`); err != nil {
-		t.Fatal(err)
-	}
-	force := func(submitter uuid.UUID) {
-		t.Helper()
+	// The triggers are off only inside force's own transaction
+	// (session_replication_role is transaction-local); the CHECK is
+	// dropped for the test and always put back.
+	force := func(submitter uuid.UUID) error {
 		tx, err := super.Begin(ctx)
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
 		if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
-			t.Fatal(err)
+			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE feedback_events SET submitted_by = $2 WHERE id = $1`, corr, submitter); err != nil {
-			t.Fatal(err)
+			return err
 		}
-		if err := tx.Commit(ctx); err != nil {
-			t.Fatal(err)
-		}
+		return tx.Commit(ctx)
 	}
 	t.Cleanup(func() {
-		force(s.submitter.id)
+		// Non-fatal throughout, so each step is tried whatever the last did.
+		if err := force(s.submitter.id); err != nil {
+			t.Errorf("restore the submitter: %v", err)
+		}
+		_, _ = super.Exec(ctx, `SET session_replication_role = origin`)
 		if _, err := super.Exec(ctx, `ALTER TABLE feedback_events ADD CONSTRAINT feedback_not_self_decided
 			CHECK (decided_by IS NULL OR decided_by <> submitted_by)`); err != nil {
 			t.Errorf("restore the CHECK: %v", err)
+			if _, err := super.Exec(ctx, `ALTER TABLE feedback_events ADD CONSTRAINT feedback_not_self_decided
+				CHECK (decided_by IS NULL OR decided_by <> submitted_by) NOT VALID`); err != nil {
+				t.Errorf("restore the CHECK (not valid): %v", err)
+			}
 		}
 	})
-	force(s.approver.id)
+	if _, err := super.Exec(ctx, `ALTER TABLE feedback_events DROP CONSTRAINT feedback_not_self_decided`); err != nil {
+		t.Fatal(err)
+	}
+	if err := force(s.approver.id); err != nil {
+		t.Fatal(err)
+	}
+	// The check itself refuses the row as it stands.
+	row := intel.JobRow{ID: j, HospitalID: s.hid, CreatedBy: s.approver.id, RequestID: "rid-j-" + j.String(),
+		Type: "approve_correction", SubjectID: corr, Deadline: time.Now().Add(time.Minute)}
+	if err := intel.Publishable(ctx, app, intelClient, row); !errors.Is(err, intel.ErrJobSkipped) {
+		t.Errorf("Publishable: %v, want ErrJobSkipped", err)
+	}
 	r := retry(t, tok, jid(j))
 	ok(t, "retry", r)
 	if len(strs(r.body["retried"])) != 0 || strings.Join(strs(r.body["skipped"]), ",") != jid(j) {
@@ -643,16 +661,44 @@ func TestRetryKeepsTheBudgets(t *testing.T) {
 	if st, _, _ := queryState(t, q); st != "failed" {
 		t.Errorf("question at the cap: %s", st)
 	}
-	// A slot frees: the sweeper publishes the retried job, under its retry's id.
+}
+
+// The sweeper's age gate for a jobs row is queued_at (fix round 1): a job
+// the platform just retried is not swept at once on its old created_at;
+// past the gate the sweeper publishes it once, under its retry's id.
+func TestRetryAndSweepPublishOnce(t *testing.T) {
+	s := newSite(t)
+	tok := mint(t, platformAdmin(t))
+	ctx := context.Background()
+	var live []uuid.UUID
+	for i := 0; i < 20; i++ {
+		c := seedCorrection(t, s.hid, s.submitter.id, s.approver.id)
+		live = append(live, seedApproveJob(t, s.hid, c, s.approver.id, "queued", ""))
+	}
+	j, _ := s.failedApproval(t, "internal")
+	r := retry(t, tok, jid(j))
+	ok(t, "retry", r)
+	if strings.Join(strs(r.body["retried"]), ",") != jid(j) {
+		t.Fatalf("retry: %s", r.raw)
+	}
+	// A slot frees at once; the row was queued under 10 s ago.
 	if _, err := super.Exec(ctx, `UPDATE jobs SET status = 'completed', completed_at = now() WHERE id = $1`, live[0]); err != nil {
 		t.Fatal(err)
 	}
+	_, _ = intel.SweepOnce(ctx, app, intelClient)
+	if _, _, pub := jobState(t, j); pub {
+		t.Error("the sweeper published a job retried under 10 s ago")
+	}
+	if _, err := super.Exec(ctx, `UPDATE jobs SET queued_at = queued_at - interval '11 seconds' WHERE id = $1`, j); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = intel.SweepOnce(ctx, app, intelClient)
 	_, _ = intel.SweepOnce(ctx, app, intelClient)
 	if _, _, pub := jobState(t, j); !pub {
 		t.Error("the sweeper didn't publish the retried job")
 	}
 	if got := published.msgIDsFor(j); len(got) != 1 || !strings.HasSuffix(got[0], j.String()+".p1") {
-		t.Errorf("swept: %v", got)
+		t.Errorf("published: %v", got)
 	}
 }
 
@@ -728,7 +774,15 @@ func TestCancelNeedsCode(t *testing.T) {
 	q := seedJobQuestion(t, s.hid, s.submitter.id, "failed", "internal")
 	ids := []string{qid(q)}
 	problem(t, "no code", post(t, "/platform/jobs/cancel", tok, cancelBody(ids, "no_longer_needed", nil, "")), 403, "mfa_required")
+	// No code at all is not a code check: nothing is audited (R38).
+	if n := mfaRows(t, admin, "auth.mfa.failed", "method", "step_up") + mfaRows(t, admin, "auth.mfa.locked", "reason", "account_attempts"); n != 0 {
+		t.Errorf("no code audited %d rows", n)
+	}
 	problem(t, "wrong code", post(t, "/platform/jobs/cancel", tok, cancelBody(ids, "no_longer_needed", nil, "wrong"+uniq())), 403, "mfa_invalid")
+	// A wrong code is audited as the recovery-codes step-up does (R38).
+	if n := mfaRows(t, admin, "auth.mfa.failed", "method", "step_up"); n != 1 {
+		t.Errorf("auth.mfa.failed rows after a wrong code: %d", n)
+	}
 	if st, _, _ := queryState(t, q); st != "failed" {
 		t.Fatalf("cancelled without a code: %s", st)
 	}
@@ -740,6 +794,40 @@ func TestCancelNeedsCode(t *testing.T) {
 	if st, _, _ := queryState(t, q); st != "cancelled" {
 		t.Errorf("question: %s", st)
 	}
+}
+
+// R38: wrong codes past the limit lock step-up, audited auth.mfa.locked;
+// nothing is cancelled.
+func TestCancelStepUpLockAudited(t *testing.T) {
+	s := newSite(t)
+	admin := platformAdmin(t)
+	tok := mint(t, admin)
+	q := seedJobQuestion(t, s.hid, s.submitter.id, "failed", "internal")
+	body := func() string { return cancelBody([]string{qid(q)}, "no_longer_needed", nil, "wrong"+uniq()) }
+	for i := 0; i < auth.MaxMFAFailures; i++ {
+		problem(t, fmt.Sprintf("wrong code %d", i+1), post(t, "/platform/jobs/cancel", tok, body()), 403, "mfa_invalid")
+	}
+	problem(t, "locked", post(t, "/platform/jobs/cancel", tok, body()), 429, "mfa_locked")
+	if n := mfaRows(t, admin, "auth.mfa.failed", "method", "step_up"); n != auth.MaxMFAFailures {
+		t.Errorf("auth.mfa.failed rows: %d", n)
+	}
+	if n := mfaRows(t, admin, "auth.mfa.locked", "reason", "account_attempts"); n != 1 {
+		t.Errorf("auth.mfa.locked rows: %d", n)
+	}
+	if st, _, _ := queryState(t, q); st != "failed" {
+		t.Errorf("question: %s", st)
+	}
+}
+
+// mfaRows counts u's action rows whose payload has key = value.
+func mfaRows(t *testing.T, u user, action, key, value string) int {
+	t.Helper()
+	var n int
+	if err := super.QueryRow(context.Background(), `SELECT count(*) FROM audit_log WHERE actor_id = $1 AND action = $2 AND payload->>$3 = $4`,
+		u.id, action, key, value).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 // C29: a running job is skipped; a failed and a queued one are cancelled,

@@ -283,3 +283,22 @@ func (s *Service) WriteStepUpError(w http.ResponseWriter, r *http.Request, err e
 		s.fail(w, r, "not_ready", "auth: step-up check failed")
 	}
 }
+
+// StepUpAudited is StepUp, in its own mhai_auth transaction, for the
+// request's verified caller (the principal: never a body), auditing a
+// refusal as the recovery-codes step-up does: a wrong, reused or missing
+// code writes auth.mfa.failed {method: step_up}, a lockout auth.mfa.locked
+// {reason: account_attempts}. For the sensitive writes of other packages
+// (the platform's job cancel, Plan 4 Task 12). Callers that answer a
+// request with no code at all before calling it write nothing.
+func (s *Service) StepUpAudited(r *http.Request, mfaCode, backupCode string) error {
+	c := callerOf(r)
+	err := s.StepUp(r.Context(), nil, c.Sub, mfaCode, backupCode)
+	switch {
+	case errors.Is(err, ErrMFAInvalid):
+		s.auditOnly(nil, r, "auth.mfa.failed", c.Sub, c.Hid, map[string]any{"method": "step_up"})
+	case errors.Is(err, ErrMFALocked):
+		s.auditOnly(nil, r, "auth.mfa.locked", c.Sub, c.Hid, map[string]any{"reason": "account_attempts"})
+	}
+	return err
+}

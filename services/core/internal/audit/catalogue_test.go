@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -498,11 +499,19 @@ func fuzzCatalogue(t *testing.T, voc *vocabulary, n int) {
 				t.Fatalf("%s: no generated value fits required key %q", a, f)
 			}
 		}
+		shapes := audit.SchemaShapes(a)
 		for i := 0; i < n; i++ {
 			payload := map[string]any{}
+			// An action with shapes: one shape per event, its required
+			// keys always and its other keys at random.
+			keys, must := fields, required
+			if len(shapes) > 0 {
+				sh := shapes[rng.Intn(len(shapes))]
+				keys, must = sh.Keys, append(slices.Clone(required), sh.Required...)
+			}
 			for _, f := range fields {
 				vals := accepted[f]
-				if len(vals) == 0 || (!in(required, f) && rng.Intn(2) == 0) {
+				if len(vals) == 0 || !in(keys, f) || (!in(must, f) && rng.Intn(2) == 0) {
 					continue
 				}
 				payload[f] = vals[rng.Intn(len(vals))]
@@ -651,7 +660,10 @@ func TestPerJobRowsAreNotPlatformBatches(t *testing.T) {
 				t.Errorf("%s: the %s row passes the batch gate", a, name)
 			}
 		}
-		if !e.When(audit.Event{Action: a, Payload: map[string]any{"job_count": 3.0, "type": "run_query"}}) {
+		if e.When(audit.Event{Action: a, Payload: map[string]any{"job_count": 3.0, "type": "run_query"}}) {
+			t.Errorf("%s: a count with a per-job type passes the batch gate", a)
+		}
+		if !e.When(audit.Event{Action: a, Payload: map[string]any{"job_count": 3.0}}) {
 			t.Errorf("%s: the batch row fails the batch gate", a)
 		}
 	}
@@ -716,7 +728,14 @@ func TestBatchJobRowsMap(t *testing.T) {
 			t.Errorf("%s mapped to %+v, %v", c.action, m, ok)
 		}
 	}
+	job := "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11"
 	for name, p := range map[string]map[string]any{
+		"retried, empty":              {},
+		"retried, mixed":              {"job_count": 1.0, "job_id": job, "msg_id": "msg-1"},
+		"retried, half a per-job":     {"job_id": job},
+		"cancelled, empty":            {},
+		"cancelled, mixed":            {"job_count": 1.0, "job_id": job, "type": "run_query", "reason": "other"},
+		"cancelled, count and type":   {"job_count": 1.0, "type": "run_query", "reason": "other"},
 		"retried, 0 jobs":             {"job_count": 0.0},
 		"retried, 51 jobs":            {"job_count": 51.0},
 		"retried, a note":             {"job_count": 1.0, "note": "synthetic"},

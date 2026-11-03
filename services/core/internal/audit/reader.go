@@ -238,8 +238,8 @@ type cond struct {
 	batch   bool
 }
 
-// batchSQL is batchRow in SQL: no job, a job count, no entity.
-const batchSQL = `(NOT (payload ? 'job_id') AND payload ? 'job_count' AND COALESCE(entity, '') = '' AND COALESCE(entity_id, '') = '')`
+// batchSQL is batchRow in SQL: a job count, no per-job key, no entity.
+const batchSQL = `(NOT (payload ?| ARRAY['job_id', 'msg_id', 'type']) AND payload ? 'job_count' AND COALESCE(entity, '') = '' AND COALESCE(entity_id, '') = '')`
 
 func (c cond) holds(e Event) bool {
 	if !slices.Contains(c.actions, e.Action) {

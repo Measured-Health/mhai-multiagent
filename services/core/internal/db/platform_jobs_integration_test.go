@@ -74,6 +74,16 @@ func TestPlatformJobsFunction(t *testing.T) {
 	retried := seedQuestionAs(t, h, "completed", "", 1, "1 minute")
 	oldRetried := seedQuestionAs(t, h, "completed", "", 1, "40 days")
 	cancelled := seedQuestionAs(t, h, "cancelled", "", 0, "1 minute")
+	// The window runs from the action, not the failure (fix round 1): a
+	// failure 40 days old cancelled today is listed, and so is one still
+	// being retried.
+	oldCancelled := seedQuestionAs(t, h, "cancelled", "", 0, "1 minute")
+	oldRetrying := seedQuestionAs(t, h, "running", "", 1, "1 minute")
+	for _, id := range []uuid.UUID{oldCancelled, oldRetrying} {
+		if _, err := pool.Exec(ctx, `UPDATE clinical_queries SET failed_at = now() - interval '40 days' WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	seedQuestionAs(t, h, "completed", "", 0, "1 minute") // never listed
 	seedQuestionAs(t, h, "queued", "", 0, "1 minute")    // never listed
 	u := seedClinician(t, pool, h)
@@ -83,7 +93,7 @@ func TestPlatformJobsFunction(t *testing.T) {
 	}
 	all := platformJobs(t, h, "all", nil, nil)
 	want := map[uuid.UUID]string{failed: "failed", expired: "failed", retrying: "retrying", retried: "retried",
-		cancelled: "cancelled", job: "failed"}
+		cancelled: "cancelled", job: "failed", oldCancelled: "cancelled", oldRetrying: "retrying"}
 	if len(all) != len(want) {
 		t.Errorf("all: %v, want %v", all, want)
 	}
@@ -96,7 +106,7 @@ func TestPlatformJobsFunction(t *testing.T) {
 		t.Error("a retried job older than 30 days is listed")
 	}
 	for status, ids := range map[string][]uuid.UUID{
-		"failed": {failed, expired, job}, "retrying": {retrying}, "retried": {retried}, "cancelled": {cancelled},
+		"failed": {failed, expired, job}, "retrying": {retrying, oldRetrying}, "retried": {retried}, "cancelled": {cancelled, oldCancelled},
 	} {
 		got := platformJobs(t, h, status, nil, nil)
 		if len(got) != len(ids) {
@@ -113,7 +123,7 @@ func TestPlatformJobsFunction(t *testing.T) {
 		t.Errorf("timeout codes: %v", got)
 	}
 	got := platformJobs(t, h, "all", nil, []string{"deadline_exceeded", "overloaded", "unavailable", "unauthorized", "forbidden", "invalid_request"})
-	for _, id := range []uuid.UUID{failed, retrying, retried, cancelled} {
+	for _, id := range []uuid.UUID{failed, retrying, retried, cancelled, oldCancelled, oldRetrying} {
 		if got[id] == "" {
 			t.Errorf("other: %s missing (%v)", id, got)
 		}
@@ -203,6 +213,16 @@ func TestQueryCancellationsScoped(t *testing.T) {
 	h, queued := seedHospital(t, pool, uniqueCode("C"))
 	admin := seedUser(t, pool, nil)
 	cancelled := seedQuestionAs(t, h, "cancelled", "", 0, "1 minute")
+	// The window runs from the action, not the failure (fix round 1): a
+	// failure 40 days old cancelled today is listed, and so is one still
+	// being retried.
+	oldCancelled := seedQuestionAs(t, h, "cancelled", "", 0, "1 minute")
+	oldRetrying := seedQuestionAs(t, h, "running", "", 1, "1 minute")
+	for _, id := range []uuid.UUID{oldCancelled, oldRetrying} {
+		if _, err := pool.Exec(ctx, `UPDATE clinical_queries SET failed_at = now() - interval '40 days' WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ins := `INSERT INTO query_cancellations (query_id, hospital_id, cancelled_by, cancel_note) VALUES ($1, $2, $3, 'synthetic')`
 	if err := db.WithJobs(ctx, app, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, ins, cancelled, h, admin); return err }); err != nil {
 		t.Errorf("jobs role recording a cancelled question: %v", err)
@@ -271,6 +291,31 @@ func TestFailedAtAndQueuedAt(t *testing.T) {
 	if n, err := inTx(ctx, pool, asUserSetup, &h, `INSERT INTO jobs (id, hospital_id, type, subject_id, created_by)
 		VALUES (gen_random_uuid(), $1, 'approve_correction', $2, $3)`, h, corr, u); err != nil || n != 1 {
 		t.Errorf("gateway insert: %d %v", n, err)
+	}
+	// retry_count moves only with the retry's own step (fix round 1): not
+	// on a failed row left failed, not on a queued one, on either table.
+	fq := seedQuestionAs(t, h, "failed", "internal", 0, "1 minute")
+	fj := seedJob(t, pool, h, u, "failed")
+	for name, q := range map[string]string{
+		"question, failed": `UPDATE clinical_queries SET retry_count = retry_count + 1 WHERE id = $1`,
+		"job, failed":      `UPDATE jobs SET retry_count = retry_count + 1 WHERE id = $1`,
+		"question, to 0":   `UPDATE clinical_queries SET retry_count = 0, status = 'queued' WHERE id = $1`,
+	} {
+		id := fq
+		if strings.HasPrefix(name, "job") {
+			id = fj
+		}
+		err := db.WithJobs(ctx, app, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q, id); return err })
+		if pgCode(err) != "23514" {
+			t.Errorf("%s: want check violation, got %v", name, err)
+		}
+	}
+	err = db.WithJobs(ctx, app, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE clinical_queries SET retry_count = retry_count + 1 WHERE id = $1`, q)
+		return err
+	})
+	if pgCode(err) != "23514" {
+		t.Errorf("raising a queued question's retry_count: %v", err)
 	}
 	// mhai_jobs reads and moves queued_at; nobody else may read it but the owner.
 	if err := db.WithJobs(ctx, app, func(tx pgx.Tx) error {

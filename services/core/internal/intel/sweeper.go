@@ -401,7 +401,9 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 var jobsTableFault func() error
 
 // sweepableJobs is step 3's rows: per type with a budget, up to 100 queued,
-// unpublished jobs rows older than sweepAge and within their deadline,
+// unpublished jobs rows queued over sweepAge ago (queued_at: a row the
+// platform just retried is its retry's own to publish first) and within
+// their deadline,
 // with fewer than the budget live rows of their hospital and type ahead of
 // them in the queue (queued_at, id: created_at, or the platform's retry
 // time; 00016), first in the queue first.
@@ -417,7 +419,7 @@ func sweepableJobs(ctx context.Context, pool *pgxpool.Pool) ([]JobRow, error) {
 				       j.retry_count
 				FROM jobs j
 				WHERE j.type = $1 AND j.status = 'queued' AND j.published_at IS NULL
-				  AND j.created_at < now() - make_interval(secs => $2)
+				  AND j.queued_at < now() - make_interval(secs => $2)
 				  AND `+jobDeadline("j.")+` > now()
 				  AND (SELECT count(*) FROM jobs a
 				       WHERE a.hospital_id = j.hospital_id AND a.type = j.type AND a.status IN ('queued', 'running')

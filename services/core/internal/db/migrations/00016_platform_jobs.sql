@@ -29,9 +29,10 @@
 --     (00012 jobs_role_update) no longer reach a cancelled row: a
 --     cancelled job (by the platform, or because its user or hospital was
 --     deactivated) can never be re-queued. A trigger on both tables holds
---     the rest for every role but a superuser: a row enters queued only
---     from failed, with retry_count one higher. So a retry is failed →
---     queued and nothing else.
+--     the rest for every role but a superuser: a row enters queued, and
+--     retry_count changes, only as one step from failed to queued with
+--     retry_count one higher. So a retry is failed → queued and nothing
+--     else, and the attempts budget can't be renewed without one.
 --   - it may set retry_count and deadline_at (and queued_at on jobs), and
 --     reads the outbox's two parent ids: the retry waits until a failed
 --     job's facts have drained (a fact stating a status the row has left
@@ -131,7 +132,12 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname = current_user AND r.rolsuper) THEN
         RETURN NEW;
     END IF;
-    IF OLD.status IS DISTINCT FROM 'failed' OR NEW.retry_count IS DISTINCT FROM OLD.retry_count + 1 THEN
+    -- Entering queued, or a retry_count change, is one step only: failed
+    -- to queued with retry_count one higher. So retry_count can't be raised
+    -- (a fresh attempts budget) without re-queueing, nor a row re-queued
+    -- without counting the retry.
+    IF OLD.status IS DISTINCT FROM 'failed' OR NEW.status IS DISTINCT FROM 'queued'
+       OR NEW.retry_count IS DISTINCT FROM OLD.retry_count + 1 THEN
         RAISE EXCEPTION USING ERRCODE = 'check_violation',
             MESSAGE = 'jobs: a row is re-queued only from failed, as a retry';
     END IF;
@@ -141,11 +147,13 @@ $$;
 -- +goose StatementEnd
 ALTER FUNCTION mhai_job_requeue_check() OWNER TO mhai_migrate;
 REVOKE ALL ON FUNCTION mhai_job_requeue_check() FROM PUBLIC;
-CREATE TRIGGER clinical_queries_requeue BEFORE UPDATE OF status ON clinical_queries
-    FOR EACH ROW WHEN (NEW.status = 'queued' AND OLD.status IS DISTINCT FROM 'queued')
+CREATE TRIGGER clinical_queries_requeue BEFORE UPDATE OF status, retry_count ON clinical_queries
+    FOR EACH ROW WHEN ((NEW.status = 'queued' AND OLD.status IS DISTINCT FROM 'queued')
+                       OR NEW.retry_count IS DISTINCT FROM OLD.retry_count)
     EXECUTE FUNCTION mhai_job_requeue_check();
-CREATE TRIGGER jobs_requeue BEFORE UPDATE OF status ON jobs
-    FOR EACH ROW WHEN (NEW.status = 'queued' AND OLD.status IS DISTINCT FROM 'queued')
+CREATE TRIGGER jobs_requeue BEFORE UPDATE OF status, retry_count ON jobs
+    FOR EACH ROW WHEN ((NEW.status = 'queued' AND OLD.status IS DISTINCT FROM 'queued')
+                       OR NEW.retry_count IS DISTINCT FROM OLD.retry_count)
     EXECUTE FUNCTION mhai_job_requeue_check();
 
 -- mhai_jobs never touches a cancelled row again (it may still cancel a
@@ -232,10 +240,12 @@ DROP FUNCTION mhai_platform_jobs(text, text, uuid, text[], timestamptz, uuid, in
 
 -- status is the contract's: cancelled, failed, retrying (queued or running
 -- after a retry) or retried (completed after a retry); p_status is one of
--- them or 'all'. Retried and cancelled jobs are listed for 30 days, failed
--- ones until they leave failed. failed_at is the last failure (or, for a
--- job cancelled before it ever failed, when it was cancelled). Newest
--- first, keyset after (p_after_failed_at, p_after_id); the limit is 1-100.
+-- them or 'all'. Retried and cancelled jobs are listed for 30 days from
+-- the retry's completion or the cancel; failed and retrying ones while
+-- they are so. failed_at is the last failure (or, for a job cancelled
+-- before it ever failed, when it was cancelled), the sort key. Newest
+-- failure first, keyset after (p_after_failed_at, p_after_id); the limit
+-- is 1-100.
 -- +goose StatementBegin
 CREATE FUNCTION mhai_platform_jobs(p_status text, p_type text, p_hospital uuid, p_errors text[], p_not_errors text[],
                                    p_after_failed_at timestamptz, p_after_id uuid, p_limit integer)
@@ -264,7 +274,9 @@ BEGIN
                     WHEN cq.status IN ('queued', 'running') AND cq.retry_count > 0 THEN 'retrying'
                     WHEN cq.status = 'completed' AND cq.retry_count > 0 THEN 'retried' END AS st,
                cq.retry_count AS rc, c.cancelled_by AS cby,
-               CASE WHEN cq.status = 'cancelled' THEN COALESCE(c.cancelled_at, cq.completed_at) END AS cnat
+               CASE WHEN cq.status = 'cancelled' THEN COALESCE(c.cancelled_at, cq.completed_at) END AS cnat,
+               CASE WHEN cq.status = 'cancelled' THEN COALESCE(c.cancelled_at, cq.completed_at)
+                    WHEN cq.status = 'completed' THEN cq.completed_at END AS act
         FROM public.clinical_queries cq
         LEFT JOIN public.query_cancellations c ON c.query_id = cq.id
         WHERE (p_type IS NULL OR p_type = 'run_query')
@@ -278,7 +290,9 @@ BEGIN
                     WHEN j.status IN ('queued', 'running') AND j.retry_count > 0 THEN 'retrying'
                     WHEN j.status = 'completed' AND j.retry_count > 0 THEN 'retried' END,
                j.retry_count, j.cancelled_by,
-               CASE WHEN j.status = 'cancelled' THEN COALESCE(j.cancelled_at, j.completed_at) END
+               CASE WHEN j.status = 'cancelled' THEN COALESCE(j.cancelled_at, j.completed_at) END,
+               CASE WHEN j.status = 'cancelled' THEN COALESCE(j.cancelled_at, j.completed_at)
+                    WHEN j.status = 'completed' THEN j.completed_at END
         FROM public.jobs j
         WHERE (p_type IS NULL OR j.type = p_type)
           AND (j.status IN ('failed', 'cancelled') OR j.retry_count > 0)
@@ -287,7 +301,7 @@ BEGIN
     FROM a
     WHERE a.st IS NOT NULL
       AND (p_status = 'all' OR a.st = p_status)
-      AND (a.st = 'failed' OR a.fat >= now() - interval '30 days')
+      AND (a.st IN ('failed', 'retrying') OR a.act >= now() - interval '30 days')
       AND (p_hospital IS NULL OR a.hid = p_hospital)
       AND (p_errors IS NULL OR COALESCE(a.err, '') = ANY (p_errors))
       AND (p_not_errors IS NULL OR NOT (COALESCE(a.err, '') = ANY (p_not_errors)))

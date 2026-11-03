@@ -55,6 +55,13 @@ func SchemaRequired(action string) []string {
 	return append([]string(nil), registry[action].Required...)
 }
 
+// SchemaShapes lists action's shapes: each one's keys and required keys.
+func SchemaShapes(action string) []Shape {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return append([]Shape(nil), registry[action].Shapes...)
+}
+
 // FieldAccepts reports whether action's schema accepts v under key, as
 // Write would see v after a JSON round trip.
 func FieldAccepts(action, key string, v any) bool {
