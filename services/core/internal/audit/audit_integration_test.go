@@ -52,7 +52,7 @@ func TestMain(m *testing.M) {
 		// action's shape) under test actions with open schemas.
 		audit.RegisterOpenForTest([]string{"reason", "n", "big", "f", "tiny", "nested", "huge", "neg", "unicode"},
 			"test.chain.gateway", "test.chain.auth", "test.chain.platform", "test.chain.empty", "test.concurrent",
-			"test.sensitive", "test.benign", "test.payload", "test.tamper", "test.column", "test.delete", "test.cross", "test.iso", "x")
+			"test.sensitive", "test.benign", "test.payload", "test.tamper", "test.column", "test.delete", "test.cross", "test.iso")
 		return m.Run()
 	}()
 	os.Exit(code)
