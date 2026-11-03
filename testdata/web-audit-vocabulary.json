@@ -1,0 +1,685 @@
+{
+  "_about": ["mhai-web's audit vocabulary, as its audit screens accept it (Plan 4 spec 5.3). Copied by hand from the commit below; never edited here except to re-copy.", "types: AUDIT_TYPES (audit-contract.ts). kinds: KINDS (kinds.ts), each with its type, the target kinds it may name and whether it may carry a note.", "facts and filters: AuditFacts and RecordedFilters (audit-contract.ts) with the shapes read.ts checks (isFacts, isFilters).", "pending_in_web: kinds this backend sends that mhai-web has not shipped yet; until it does, those entries show as undisplayable. Remove the list once mhai-web ships them (Plan 4 Task 14, TODO.md).", "Spec 5.3 marks seven kinds new; audit_undisplayable_reported is already in mhai-web at this commit, so six are pending."],
+  "source": {
+    "repo": "Measured-Health/mhai-web",
+    "commit": "b2f1104001d595f19c29ff71f1e0f5143b346dae",
+    "files": ["apps/platform/lib/api/audit-contract.ts", "apps/platform/lib/audit/kinds.ts", "apps/platform/lib/audit/read.ts"]
+  },
+  "types": ["sign_in", "account", "staff", "hospital_settings", "consultation", "review", "alerts", "analysis", "named_access", "platform", "export", "audit", "retention", "security"],
+  "outcomes": ["succeeded", "refused", "failed"],
+  "flags": ["security", "policy"],
+  "target_kinds": ["staff", "hospital", "setting", "clearance", "team_member", "change", "hold", "connection", "export", "run", "event", "session", "patient"],
+  "facts": {
+    "specialty": {
+      "shape": "code"
+    },
+    "confidence": {
+      "shape": "enum",
+      "values": ["high", "medium", "low"]
+    },
+    "view": {
+      "shape": "view"
+    },
+    "location_type": {
+      "shape": "code"
+    },
+    "from": {
+      "shape": "time"
+    },
+    "to": {
+      "shape": "time"
+    },
+    "patient_count": {
+      "shape": "count"
+    },
+    "purpose": {
+      "shape": "enum",
+      "values": ["clinical_follow_up", "quality_improvement", "audit", "other"]
+    },
+    "purged_count": {
+      "shape": "count"
+    },
+    "before": {
+      "shape": "time"
+    },
+    "checkpoint_id": {
+      "shape": "id"
+    },
+    "incident_ref": {
+      "shape": "id"
+    },
+    "filters": {
+      "shape": "filters"
+    },
+    "searched": {
+      "shape": "id_or_marker"
+    },
+    "searched_kind": {
+      "shape": "enum",
+      "values": ["event", "request", "export", "clearance", "pseudonym"]
+    },
+    "rows": {
+      "shape": "count"
+    },
+    "capped": {
+      "shape": "bool"
+    },
+    "checksum": {
+      "shape": "hash"
+    },
+    "state": {
+      "shape": "enum",
+      "values": ["running", "intact", "broken", "error"]
+    },
+    "first_broken_seq": {
+      "shape": "positive"
+    },
+    "list": {
+      "shape": "enum",
+      "values": ["events", "named_access"]
+    },
+    "job_count": {
+      "shape": "count"
+    },
+    "switched": {
+      "shape": "enum",
+      "values": ["on", "off"]
+    }
+  },
+  "filters": {
+    "hospital": {
+      "shape": "id"
+    },
+    "person": {
+      "shape": "id"
+    },
+    "clearance": {
+      "shape": "id"
+    },
+    "type": {
+      "shape": "types"
+    },
+    "outcome": {
+      "shape": "enum",
+      "values": ["succeeded", "refused", "failed"]
+    },
+    "flagged": {
+      "shape": "bool"
+    },
+    "from": {
+      "shape": "time"
+    },
+    "to": {
+      "shape": "time"
+    },
+    "q": {
+      "shape": "id_or_marker"
+    }
+  },
+  "kinds": {
+    "signed_in": {
+      "type": "sign_in",
+      "targets": [],
+      "note": false
+    },
+    "sign_in_refused": {
+      "type": "sign_in",
+      "targets": [],
+      "note": false
+    },
+    "sign_in_locked": {
+      "type": "sign_in",
+      "targets": [],
+      "note": false
+    },
+    "signed_out": {
+      "type": "sign_in",
+      "targets": ["session"],
+      "note": false
+    },
+    "password_changed": {
+      "type": "account",
+      "targets": [],
+      "note": false
+    },
+    "two_step_set_up": {
+      "type": "account",
+      "targets": [],
+      "note": false
+    },
+    "backup_codes_made": {
+      "type": "account",
+      "targets": [],
+      "note": false
+    },
+    "device_signed_out": {
+      "type": "account",
+      "targets": ["session"],
+      "note": false
+    },
+    "staff_invited": {
+      "type": "staff",
+      "targets": ["staff"],
+      "note": false
+    },
+    "staff_role_changed": {
+      "type": "staff",
+      "targets": ["staff"],
+      "note": false
+    },
+    "staff_deactivated": {
+      "type": "staff",
+      "targets": ["staff"],
+      "note": false
+    },
+    "staff_reactivated": {
+      "type": "staff",
+      "targets": ["staff"],
+      "note": false
+    },
+    "own_role_change_refused": {
+      "type": "staff",
+      "targets": ["staff", "team_member"],
+      "note": false
+    },
+    "team_invited": {
+      "type": "staff",
+      "targets": ["team_member"],
+      "note": false
+    },
+    "team_role_changed": {
+      "type": "staff",
+      "targets": ["team_member"],
+      "note": false
+    },
+    "team_removed": {
+      "type": "staff",
+      "targets": ["team_member"],
+      "note": false
+    },
+    "hospital_added": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": false
+    },
+    "hospital_updated": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": false
+    },
+    "hospital_deactivated": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": true
+    },
+    "hospital_reactivated": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": false
+    },
+    "removal_requested": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": false
+    },
+    "removal_blocked": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": false
+    },
+    "removal_approved": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": false
+    },
+    "removal_cancelled": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": false
+    },
+    "hospital_removed": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": false
+    },
+    "sso_updated": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": false
+    },
+    "sso_tested": {
+      "type": "hospital_settings",
+      "targets": ["hospital"],
+      "note": false
+    },
+    "emr_connection_added": {
+      "type": "hospital_settings",
+      "targets": ["connection"],
+      "note": false
+    },
+    "emr_connection_changed": {
+      "type": "hospital_settings",
+      "targets": ["connection"],
+      "note": false
+    },
+    "emr_connection_switched_on": {
+      "type": "hospital_settings",
+      "targets": ["connection"],
+      "note": false
+    },
+    "emr_connection_switched_off": {
+      "type": "hospital_settings",
+      "targets": ["connection"],
+      "note": false
+    },
+    "emr_connection_tested": {
+      "type": "hospital_settings",
+      "targets": ["connection"],
+      "note": false
+    },
+    "setting_changed": {
+      "type": "hospital_settings",
+      "targets": ["setting"],
+      "note": false
+    },
+    "admin_invited": {
+      "type": "hospital_settings",
+      "targets": ["staff"],
+      "note": false
+    },
+    "admin_invite_resent": {
+      "type": "hospital_settings",
+      "targets": ["staff"],
+      "note": false
+    },
+    "question_asked": {
+      "type": "consultation",
+      "targets": [],
+      "note": false
+    },
+    "answer_sent_for_review": {
+      "type": "consultation",
+      "targets": [],
+      "note": false
+    },
+    "review_submitted": {
+      "type": "review",
+      "targets": [],
+      "note": false
+    },
+    "review_reassigned": {
+      "type": "review",
+      "targets": [],
+      "note": false
+    },
+    "alert_acknowledged": {
+      "type": "alerts",
+      "targets": [],
+      "note": false
+    },
+    "alert_escalated": {
+      "type": "alerts",
+      "targets": [],
+      "note": false
+    },
+    "alert_units_changed": {
+      "type": "alerts",
+      "targets": [],
+      "note": false
+    },
+    "alert_rules_changed": {
+      "type": "alerts",
+      "targets": [],
+      "note": false
+    },
+    "alert_recipients_changed": {
+      "type": "alerts",
+      "targets": [],
+      "note": false
+    },
+    "analysis_viewed": {
+      "type": "analysis",
+      "targets": [],
+      "note": false
+    },
+    "drilldown_deidentified": {
+      "type": "analysis",
+      "targets": ["patient"],
+      "note": false
+    },
+    "drilldown_named": {
+      "type": "named_access",
+      "targets": ["patient", "clearance"],
+      "note": false
+    },
+    "clearance_uploaded": {
+      "type": "named_access",
+      "targets": ["clearance"],
+      "note": false
+    },
+    "clearance_refused": {
+      "type": "named_access",
+      "targets": ["clearance"],
+      "note": false
+    },
+    "clearance_verified": {
+      "type": "named_access",
+      "targets": ["clearance"],
+      "note": false
+    },
+    "clearance_rejected": {
+      "type": "named_access",
+      "targets": ["clearance"],
+      "note": false
+    },
+    "clearance_narrowed": {
+      "type": "named_access",
+      "targets": ["clearance"],
+      "note": false
+    },
+    "clearance_revoked": {
+      "type": "named_access",
+      "targets": ["clearance"],
+      "note": false
+    },
+    "clearance_ended": {
+      "type": "named_access",
+      "targets": ["clearance"],
+      "note": false
+    },
+    "clearance_viewed": {
+      "type": "named_access",
+      "targets": ["clearance"],
+      "note": false
+    },
+    "clearance_reminder_sent": {
+      "type": "named_access",
+      "targets": ["clearance"],
+      "note": false
+    },
+    "clearance_verify_refused": {
+      "type": "named_access",
+      "targets": ["clearance"],
+      "note": false
+    },
+    "named_access_requested": {
+      "type": "named_access",
+      "targets": ["setting"],
+      "note": false
+    },
+    "named_access_approved": {
+      "type": "named_access",
+      "targets": ["setting"],
+      "note": false
+    },
+    "named_access_cancelled": {
+      "type": "named_access",
+      "targets": ["setting"],
+      "note": false
+    },
+    "named_access_lowered": {
+      "type": "named_access",
+      "targets": ["setting"],
+      "note": false
+    },
+    "change_followed_up": {
+      "type": "platform",
+      "targets": ["change"],
+      "note": true
+    },
+    "change_note_edited": {
+      "type": "platform",
+      "targets": ["change"],
+      "note": true
+    },
+    "change_follow_up_undone": {
+      "type": "platform",
+      "targets": ["change"],
+      "note": false
+    },
+    "analytics_email_changed": {
+      "type": "platform",
+      "targets": [],
+      "note": false
+    },
+    "analysis_switched": {
+      "type": "platform",
+      "targets": [],
+      "note": false
+    },
+    "patient_views_switched": {
+      "type": "platform",
+      "targets": [],
+      "note": false
+    },
+    "jobs_retried": {
+      "type": "platform",
+      "targets": [],
+      "note": false
+    },
+    "jobs_cancelled": {
+      "type": "platform",
+      "targets": [],
+      "note": false
+    },
+    "retention_changed": {
+      "type": "platform",
+      "targets": ["setting"],
+      "note": false
+    },
+    "setting_change_requested": {
+      "type": "platform",
+      "targets": ["setting"],
+      "note": false
+    },
+    "setting_change_approved": {
+      "type": "platform",
+      "targets": ["setting"],
+      "note": false
+    },
+    "setting_change_cancelled": {
+      "type": "platform",
+      "targets": ["setting"],
+      "note": false
+    },
+    "setting_change_lapsed": {
+      "type": "platform",
+      "targets": ["setting"],
+      "note": false
+    },
+    "clean_up_paused": {
+      "type": "platform",
+      "targets": [],
+      "note": false
+    },
+    "clean_up_resumed": {
+      "type": "platform",
+      "targets": [],
+      "note": false
+    },
+    "triage_switched_off": {
+      "type": "platform",
+      "targets": [],
+      "note": false
+    },
+    "feedback_buffer_cleared": {
+      "type": "platform",
+      "targets": [],
+      "note": false
+    },
+    "audit_exported": {
+      "type": "export",
+      "targets": ["export"],
+      "note": true
+    },
+    "named_access_exported": {
+      "type": "export",
+      "targets": ["export"],
+      "note": true
+    },
+    "export_downloaded": {
+      "type": "export",
+      "targets": ["export"],
+      "note": false
+    },
+    "export_download_refused": {
+      "type": "export",
+      "targets": ["export"],
+      "note": false
+    },
+    "activity_exported": {
+      "type": "export",
+      "targets": ["export", "hospital"],
+      "note": false
+    },
+    "audit_viewed": {
+      "type": "audit",
+      "targets": [],
+      "note": false
+    },
+    "audit_searched": {
+      "type": "audit",
+      "targets": [],
+      "note": false
+    },
+    "audit_event_opened": {
+      "type": "audit",
+      "targets": ["event"],
+      "note": false
+    },
+    "audit_patients_viewed": {
+      "type": "audit",
+      "targets": ["event"],
+      "note": false
+    },
+    "audit_check_run": {
+      "type": "audit",
+      "targets": ["run"],
+      "note": false
+    },
+    "audit_check_outcome": {
+      "type": "audit",
+      "targets": ["run"],
+      "note": true
+    },
+    "audit_undisplayable_reported": {
+      "type": "audit",
+      "targets": ["event"],
+      "note": false
+    },
+    "retention_run": {
+      "type": "retention",
+      "targets": [],
+      "note": false
+    },
+    "retention_checkpoint": {
+      "type": "retention",
+      "targets": [],
+      "note": false
+    },
+    "re_anchor": {
+      "type": "retention",
+      "targets": [],
+      "note": false
+    },
+    "hold_placed": {
+      "type": "retention",
+      "targets": ["hold", "hospital"],
+      "note": false
+    },
+    "hold_lifted": {
+      "type": "retention",
+      "targets": ["hold", "hospital"],
+      "note": false
+    },
+    "hold_edited": {
+      "type": "retention",
+      "targets": ["hold", "hospital"],
+      "note": false
+    },
+    "hold_lift_requested": {
+      "type": "retention",
+      "targets": ["hold", "hospital"],
+      "note": false
+    },
+    "hold_lift_cancelled": {
+      "type": "retention",
+      "targets": ["hold", "hospital"],
+      "note": false
+    },
+    "hold_lift_lapsed": {
+      "type": "retention",
+      "targets": ["hold", "hospital"],
+      "note": false
+    },
+    "hold_lift_undone": {
+      "type": "retention",
+      "targets": ["hold", "hospital"],
+      "note": false
+    },
+    "hold_released": {
+      "type": "retention",
+      "targets": ["hold", "hospital"],
+      "note": false
+    },
+    "step_up_refused": {
+      "type": "security",
+      "targets": [],
+      "note": false
+    },
+    "mfa_locked": {
+      "type": "security",
+      "targets": [],
+      "note": false
+    },
+    "session_revoked": {
+      "type": "security",
+      "targets": ["session"],
+      "note": false
+    }
+  },
+  "pending_in_web": [
+    {
+      "kind": "answer_agreed",
+      "type": "consultation",
+      "targets": [],
+      "note": false,
+      "for": ["feedback.validated"]
+    },
+    {
+      "kind": "review_withdrawn",
+      "type": "review",
+      "targets": [],
+      "note": false,
+      "for": ["correction.withdrawn"]
+    },
+    {
+      "kind": "review_refused",
+      "type": "security",
+      "targets": [],
+      "note": false,
+      "for": ["correction.decision_refused"]
+    },
+    {
+      "kind": "learning_recorded",
+      "type": "review",
+      "targets": [],
+      "note": false,
+      "for": ["correction.applied", "correction.apply_failed"]
+    },
+    {
+      "kind": "audit_check_started",
+      "type": "audit",
+      "targets": ["run"],
+      "note": false,
+      "for": ["audit.verify_started"]
+    },
+    {
+      "kind": "audit_check_finished",
+      "type": "audit",
+      "targets": ["run"],
+      "note": false,
+      "for": ["audit.verify_finished"]
+    }
+  ]
+}
