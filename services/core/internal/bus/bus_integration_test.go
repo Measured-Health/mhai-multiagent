@@ -291,6 +291,96 @@ func TestPipelineCanPublishDead(t *testing.T) {
 	p.noViolation(t)
 }
 
+// fetchSubjects fetches from durable as the pipeline user until it waits
+// maxWait with nothing, acking each message, and returns their subjects.
+func fetchSubjects(ctx context.Context, t *testing.T, js jetstream.JetStream, durable string, maxWait time.Duration) []string {
+	t.Helper()
+	cons, err := js.Consumer(ctx, bus.JobsStream, durable)
+	if err != nil {
+		t.Fatalf("consumer info %s as pipeline: %v", durable, err)
+	}
+	var out []string
+	for {
+		batch, err := cons.Fetch(10, jetstream.FetchMaxWait(maxWait))
+		if err != nil {
+			t.Fatalf("fetch %s: %v", durable, err)
+		}
+		n := 0
+		for m := range batch.Messages() {
+			n++
+			out = append(out, m.Subject())
+			if err := m.DoubleAck(ctx); err != nil {
+				t.Fatalf("ack %s: %v", durable, err)
+			}
+		}
+		if n == 0 {
+			return out // waited maxWait with nothing (a timeout, or no error)
+		}
+		if err := batch.Error(); err != nil && !errors.Is(err, nats.ErrTimeout) {
+			t.Fatalf("fetch %s: %v", durable, err)
+		}
+	}
+}
+
+func containsSubject(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// Plan 4 spec §10.5: the pipeline user uses its second durable,
+// pipeline_learning (info, fetch, ack), which delivers approve_correction
+// jobs only; its first, pipeline, never delivers them, and the learning
+// one never delivers run_query. It still can't publish a job, reach the
+// stream API, or touch another consumer, and echo can't use either.
+func TestPipelineUserLearningConsumerOnly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	g := gateway(t)
+	gjs, _ := jetstream.New(g.nc)
+	learning, query := jobSubject("approve_correction"), jobSubject("run_query")
+	for _, subj := range []string{learning, query} {
+		if _, err := gjs.Publish(ctx, subj, []byte("synthetic job")); err != nil {
+			t.Fatalf("gateway publish %s: %v", subj, err)
+		}
+	}
+	p := pipeline(t)
+	js, _ := jetstream.New(p.nc)
+	gotLearning := fetchSubjects(ctx, t, js, bus.LearningConsumer, 2*time.Second)
+	if !containsSubject(gotLearning, learning) {
+		t.Fatalf("pipeline_learning didn't deliver %s: %v", learning, gotLearning)
+	}
+	gotPipeline := fetchSubjects(ctx, t, js, bus.PipelineConsumer, 2*time.Second)
+	if !containsSubject(gotPipeline, query) {
+		t.Fatalf("pipeline didn't deliver %s: %v", query, gotPipeline)
+	}
+	for _, s := range gotLearning {
+		if !strings.HasSuffix(s, ".approve_correction") {
+			t.Fatalf("pipeline_learning delivered %s", s)
+		}
+	}
+	for _, s := range gotPipeline {
+		if !strings.HasSuffix(s, ".run_query") {
+			t.Fatalf("pipeline delivered %s", s)
+		}
+	}
+	p.noViolation(t)
+
+	cannotPublish(t, pipeline, jobSubject("approve_correction"), "jobs.v1.>", "inference.v1.pipeline.health",
+		"$JS.API.STREAM.INFO.JOBS", "$JS.API.STREAM.LIST", "$JS.API.STREAM.NAMES", "$JS.API.STREAM.PURGE.JOBS",
+		"$JS.API.STREAM.MSG.GET.JOBS", "$JS.API.STREAM.DELETE.JOBS",
+		"$JS.API.CONSUMER.DELETE.JOBS.pipeline_learning", "$JS.API.CONSUMER.CREATE.JOBS.pipeline_learning",
+		"$JS.API.CONSUMER.DURABLE.CREATE.JOBS.pipeline_learning",
+		"$JS.API.CONSUMER.INFO.JOBS.pipeline_learningx", "$JS.API.CONSUMER.MSG.NEXT.JOBS.pipeline_learningx",
+		"$JS.API.CONSUMER.MSG.NEXT.DEAD.pipeline_learning")
+	cannotPublish(t, echo, "$JS.API.CONSUMER.INFO.JOBS.pipeline_learning",
+		"$JS.API.CONSUMER.MSG.NEXT.JOBS.pipeline_learning", "$JS.ACK.JOBS.pipeline_learning.x")
+	cannotPublish(t, bffClinical, "$JS.API.CONSUMER.MSG.NEXT.JOBS.pipeline_learning")
+}
+
 // --- A26, A27: the BFF users reach only their API subject (and, clinical, bff_direct).
 
 func TestBFFUserCannotReachJobsKVOrGrants(t *testing.T) {
@@ -747,6 +837,16 @@ func TestEnsureStreamsIdempotent(t *testing.T) {
 	if c.Durable != "pipeline" || c.FilterSubject != "jobs.v1.*.run_query" || c.AckPolicy != jetstream.AckExplicitPolicy ||
 		c.AckWait != 60*time.Second || c.MaxDeliver != 5 || len(c.BackOff) != 0 || c.MaxAckPending != 8 {
 		t.Fatalf("pipeline consumer = %+v", c)
+	}
+	lc, err := js.Consumer(ctx, bus.JobsStream, bus.LearningConsumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := lc.CachedInfo().Config
+	if l.Durable != "pipeline_learning" || l.FilterSubject != "jobs.v1.*.approve_correction" ||
+		l.AckPolicy != jetstream.AckExplicitPolicy || l.AckWait != 60*time.Second || l.MaxDeliver != 5 ||
+		len(l.BackOff) != 0 || l.MaxAckPending != 4 {
+		t.Fatalf("pipeline_learning consumer = %+v", l)
 	}
 	cd, err := js.Consumer(ctx, bus.DeadStream, bus.CoreDeadConsumer)
 	if err != nil {
