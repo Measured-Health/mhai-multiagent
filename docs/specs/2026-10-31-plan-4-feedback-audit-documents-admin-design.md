@@ -489,7 +489,7 @@ Actors: clinicians (submitter, reviewer), hospital admins (non-clinician), platf
 | P5 | Tampering (clinical) | **Feedback poisoning:** one clinician (or two colluding) floods corrections to steer the guardrails, including other hospitals' | nothing in Plan 4 changes `guardrail_weights` or the persona; one live feedback per query and only on one's own completed queries; every correction needs a second clinician; buffer rows per hospital with `model_versions`; any later CMA-ES result is a proposal under clinical change control (decision 3) | C10, C11 |
 | P6 | Tampering | **A stale decision:** approve after withdraw, approve twice, approve and reject at once | conditional `UPDATE ... WHERE status='pending_review'`; transition trigger; 409 `already_decided`; one live job per subject | C12, C13 |
 | P7 | Information disclosure | A reviewer sees the **unmasked** question or patient details | the reviewer's view reads only `masked_question` and `masked_patient_json`; a test that no other handler selects them and that the corrections reader never selects `clinical_queries.clinical_question`/`patient_data_json` | C14, C15 |
-| P8 | Information disclosure | Free-text **reason, diagnosis, rejection note, cancel note or outcome note** reaches logs, traces, the audit chain, NATS or the worker | closed payload schemas (§9); worker column grants exclude the text; job bodies hold ids; `logx` redaction; marker-string test across the flow | C16 |
+| P8 | Information disclosure | Free-text **reason, diagnosis, rejection note, cancel note or outcome note** reaches logs, traces, the audit chain, NATS or the worker (the outcome note is returned only in `VerifyRun` on the platform routes: §16 R31) | closed payload schemas (§9); worker column grants exclude the text; job bodies hold ids; `logx` redaction; marker-string test across the flow | C16 |
 | P9 | Information disclosure | A platform admin or auditor reaches **clinical content** through the new platform routes | `mhai_platform` has no row grant on clinical tables; SECURITY DEFINER functions return aggregates or contract columns only; jobs list never shows subject, user or message | C17, C18 |
 | P10 | Information disclosure | **Small-group leaks** in guardrail statistics: a 1–4 count, a share from a small numerator, or subtraction across `all` and shown hospitals | §6.3 rules applied in Go before encoding; secondary suppression; property test over random tables that no hidden value can be derived from shown ones | C19, C20 |
 | P11 | Information disclosure | The audit reader sends a value the contract doesn't know (an unmapped payload key), a pseudonym, or free text | the catalogue maps every action; unmapped actions send no payload values; pseudonym-shape test; vocabulary test against mhai-web's lists | C21, C22 |
@@ -632,7 +632,9 @@ The product owner approved the design on 2026-11-03 ("yes") and accepted every r
 11. **The migration that changes `feedback_events`:** it renames `clinician_id` and drops three unused columns.
     *Decided:* accept; the table is empty outside tests (synthetic data only), and the deploy's pre-migrate check will stop if it isn't.
 
-## 16. Amended during the build (4a)
+## 16. Amended during the build
+
+### 4a
 
 Rulings made while building part 4a. Where they differ from the text above, these win.
 
@@ -641,3 +643,21 @@ Rulings made while building part 4a. Where they differ from the text above, thes
 - **§4.7 step 5 (a second job for an applied correction):** a second `approve_correction` job for a correction that is already applied completes with its own `correction.applied` fact, and the buffer keeps its one row. The unique violation on `correction_id` rolls back only the insert; the job and its fact are still recorded.
 - **R11 (§4.4, free-text rules):** newlines (`\n`, `\r\n`) are allowed in `reason` and in `rejection_note`. Unicode format characters (category Cf: bidi controls, zero-width) and the line and paragraph separators (Zl, Zp: U+2028, U+2029) are refused in all three texts. `corrected_diagnosis` stays a single line.
 - **Accepted deviation (guard order):** a route whose body carries the target (submit: `query_id`) or whose body is oversized can answer 422 `validation_failed` before 404 `not_found`, because the body is read before the target is known. The 404 order holds on every route that names the target in the path.
+
+### 4b
+
+Rulings made while building part 4b (Tasks 8 to 10). Where they differ from the text above, these win.
+
+- **R21 (§5.3, actions with no mhai-web kind):** the 17 actions from Plans 2 and 3 that have no kind in mhai-web stay withheld rows: the reader sends the bare undisplayable entry and nothing of the payload. It fails closed. The audit list is noisy (`intelligence.granted`, `query.completed`, `auth.mfa.verified`) until mhai-web adds kinds (TODO.md).
+- **R22 (§5.3, `review_submitted`):** it sends no `facts.state`. mhai-web accepts only `running`, `intact`, `broken` and `error`, so the decision outcome (`approved` or `rejected`) is not shown until mhai-web adds those values (TODO.md).
+- **R23 (§5.3, new kinds):** six kinds are new, not seven: `audit_undisplayable_reported` is already in mhai-web. The six are `answer_agreed`, `review_withdrawn`, `review_refused`, `learning_recorded`, `audit_check_started` and `audit_check_finished`.
+- **R24 (§5.3, per-job rows):** the per-job `job.retried` and `job.cancelled` rows (with a `job_id`) are system rows and stay withheld. `jobs_retried` and `jobs_cancelled` are for the batch rows (no `job_id`, a `job_count`) that Task 12 writes. System retries and cancels are not visible in the audit UI until a kind exists.
+- **R25 (§5.2, read dedupe):** the `audit.viewed` and `audit.searched` dedupe uses Postgres, in `idempotency_keys` (scope `audit.read`, 5 minutes), in the same transaction as the audit row. There is no KV bucket for it, and the transaction is stronger.
+- **R26 (§5.2, search dedupe):** the `audit.searched` dedupe key includes a hash of `q`, so each distinct search is recorded. A few more rows.
+- **R27 (§5.3, analyst actors):** an entry whose only actor role is `analyst` is undisplayable (mhai-web's `ActorRole` has none), and the person picker leaves analyst-only accounts out (TODO.md).
+- **R28 (§5.5, indexes and cursor):** migration 00014 adds `audit_log(actor_id, id)` and a request id index. The list cursor is hex and HMAC-bound to the session and the filters, so it never has a pseudonym's shape and a forged one is 422.
+- **R29 (§5.4, `open_failure`):** `open_failure` is a `VerifyRun` or null (mhai-web's type, not a boolean), set exactly while the failure is open: the latest broken check, until a later check is intact and the broken one has its outcome note.
+- **Recorded reads (§5.2):** the detail, people and hospitals reads are recorded as `audit.searched` too, with `searched_kind` `event` (the detail), `person` or `hospital` (a read of the chain checks is `run`), not only the list and `q`. `audit.searched` carries no `facts.searched` for these. The kinds are gated out until mhai-web takes the values (TODO.md).
+- **R30 (§5.2, runs list reads):** every page of `GET /platform/audit/verify/runs` is recorded as `audit.searched {searched_kind: run}`, and the 5-minute dedupe collapses them, as R25 does for the list. The runs cursor is also HMAC-bound to the session (80 hex characters; the same HKDF master key as the list cursor, a distinct label), so a forged cursor is 422. This reverses "a page with a cursor writes nothing".
+- **R31 (§11, free text: the outcome note):** the outcome note IS returned in `VerifyRun.outcome` on the platform routes (the runs list, a run, the status and the outcome reply, over `api.v1.platform`), as the contract and R29 require; it is re-checked with the note rules on the way out and a run whose stored note fails them is not sent (500). It is never logged, never in `audit_log.payload` (the chain gets `audit.check_outcome` with the run id only), and never on any other subject or route. Where P8 and C16 above say the note reaches no response, they mean no other response.
+- **Undisplayable reports (§5.2):** a repeat of the same ids by the same session within 5 minutes writes no new `audit.undisplayable_reported` entry (the same dedupe as the reads).

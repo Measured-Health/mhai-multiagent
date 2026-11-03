@@ -173,3 +173,31 @@ func TestProbesHandlerServesOnlyProbes(t *testing.T) {
 		}
 	}
 }
+
+// C26: the auditors' writes are exactly the three audit routes of spec
+// §5.2, with their roles; nothing else carries AuditorWrite.
+func TestAuditorWriteRoutesPinned(t *testing.T) {
+	want := map[string][]string{
+		"POST /api/v1/platform/audit/undisplayable":            {authz.RolePlatformAdmin, authz.RoleAuditor},
+		"POST /api/v1/platform/audit/verify":                   {authz.RolePlatformAdmin, authz.RoleAuditor},
+		"POST /api/v1/platform/audit/verify/runs/{id}/outcome": {authz.RoleAuditor},
+	}
+	got := map[string][]string{}
+	for _, rr := range Table() {
+		if !rr.Rule.AuditorWrite {
+			continue
+		}
+		got[rr.Method+" "+rr.Pattern] = rr.Rule.AnyRole
+		if !rr.Rule.Platform || !rr.Rule.NeedsMFA || rr.Rule.StepUp || rr.Rule.Write {
+			t.Errorf("%s %s: rule %+v", rr.Method, rr.Pattern, rr.Rule)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("auditor writes: got %v want %v", got, want)
+	}
+	for k, roles := range want {
+		if !slices.Equal(got[k], authz.SortRoles(roles)) {
+			t.Errorf("%s: roles %v want %v", k, got[k], authz.SortRoles(roles))
+		}
+	}
+}

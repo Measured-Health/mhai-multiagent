@@ -18,7 +18,9 @@ The backend has two parts:
   API over NATS for the BFFs; (Plan 4, part 4a) feedback and corrections with
   a two-person rule: a clinician suggests a correction, a different
   clinician of the hospital approves it, and an approved correction only
-  fills a per-hospital buffer. The contract is
+  fills a per-hospital buffer; (Plan 4, part 4b) the audit log for platform
+  admins and auditors (`/platform/audit`, with chain checks run on demand and
+  daily). The contract is
   [services/core/openapi.yaml](services/core/openapi.yaml).
 
 ## Agents

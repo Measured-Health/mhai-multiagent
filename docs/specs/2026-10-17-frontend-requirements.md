@@ -1076,12 +1076,31 @@ and `mock-settings.ts`, as spec §9 and the rulings while building.
 
 Source: mhai-web `docs/specs/2026-10-22-platform-audit-log-design.md` §13, as
 built (`apps/platform/lib/api/audit-contract.ts`, `live-audit.ts`) and as
-ruled while building (Plan 9). Status: **Assumed** (Plan 9 built on sample
+ruled while building (Plan 9). Status: the Plan 4 subset is **Built** (Plan
+4, part 4b; OpenAPI 1.6.0); the rest is **Assumed** (Plan 9 built on sample
 data). These are the platform-audience forms of the gateway's
 `GET /security/audit` and `GET /security/audit/verify`, over the same log. No
 patient data in any entry, field or file; patients appear only as pseudonyms,
 and only through the recorded reveal below. Ids are opaque
 (`[A-Za-z0-9_-]+`); errors carry only `code`.
+
+**Built (Plan 4b):** `GET /platform/audit` and `/{id}`, `/people`,
+`/hospitals`, `POST /platform/audit/undisplayable`, `POST /platform/audit/verify`,
+`GET /platform/audit/verify/runs`, `/runs/{id}` and `/status`, and
+`POST /platform/audit/verify/runs/{id}/outcome` (auditors only), with every
+read recorded and the daily check at 06:00 UTC. **Deferred, still Assumed:**
+`GET /platform/audit/{id}/patients` and `audit_patients_viewed` (the detail
+answers `patients: null`), `GET /platform/audit/named-access` (and the
+`letter` on a detail), and the export routes (`/platform/audit/exports*`),
+which need Analysis pseudonyms, clearance letters and object storage; the
+bell (`audit_integrity`) and email on a Broken check, which wait for the
+notifications service; signed checkpoints, so `from_checkpoint` and
+`last_checkpoint` are null and a run is `intact` only `from_first`; and the
+event's `ip`, `device`, `reason` and `note`, which are null. A chain row with
+no mhai-web kind is sent as the bare entry (`type: security`,
+`kind: unknown`). Ruled while building: `facts.searched_kind` also takes
+`person`, `hospital` and `run` from core, and `review_submitted` has no
+`facts.state` yet (TODO.md, mhai-web dependencies).
 
 **Who and how**
 

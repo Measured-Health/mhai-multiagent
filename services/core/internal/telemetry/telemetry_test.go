@@ -218,6 +218,8 @@ func TestUnreachableCollectorIsHarmless(t *testing.T) {
 
 func TestMetricsAreLowCardinality(t *testing.T) {
 	_, rd := setup(t)
+	SetAuditChainBroken(true)
+	t.Cleanup(func() { SetAuditChainBroken(false) })
 	ObserveRequest("pipeline.run_query", 120*time.Millisecond)
 	NATSReconnected()
 	if err := ObserveCount("natsapi_refused_replies_total", "x", func() int64 { return 7 }); err != nil {
@@ -236,9 +238,15 @@ func TestMetricsAreLowCardinality(t *testing.T) {
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			seen[m.Name] = true
+			if m.Name == "audit_chain_broken" {
+				g, ok := m.Data.(metricdata.Gauge[int64])
+				if !ok || len(g.DataPoints) != 1 || g.DataPoints[0].Value != 1 || g.DataPoints[0].Attributes.Len() != 0 {
+					t.Errorf("audit_chain_broken: %+v", m.Data)
+				}
+			}
 		}
 	}
-	for _, n := range []string{"intelligence_request_seconds", "nats_reconnects_total", "natsapi_refused_replies_total", "jobs_queue_depth"} {
+	for _, n := range []string{"intelligence_request_seconds", "nats_reconnects_total", "natsapi_refused_replies_total", "jobs_queue_depth", "audit_chain_broken"} {
 		if !seen[n] {
 			t.Fatalf("metric %s missing: %v", n, seen)
 		}

@@ -24,8 +24,15 @@ routes, an `approve_correction` job on a second JetStream consumer
 (`pipeline_learning`) that fills a per-hospital `feedback_buffer` and
 records `correction.applied`. Nothing is applied to live guardrail
 weights, the knowledge base or any model: the buffer is only a record for
-a later, change-controlled run. **Next:** the audit log and platform
-operations (4b, 4c), then the hospital endpoints.
+a later, change-controlled run. **Built (Plan 4, part 4b):** the audit log
+for platform admins and auditors, served on the platform audience as
+`/platform/audit`: a reader that maps chain rows to the frontend's events
+through a catalogue (a row it can't map is sent bare, never as stored),
+every page read recorded as `audit.viewed` or `audit.searched`, and chain
+checks (`POST /platform/audit/verify`, a daily run at 06:00 UTC, the status
+and runs reads, an auditor's outcome note) that walk the whole chain in one
+read-only snapshot. The smoke test signs in as a synthetic auditor and runs
+one. **Next:** platform operations (4c), then the hospital endpoints.
 
 | Service | Job |
 |---|---|

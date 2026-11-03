@@ -283,3 +283,72 @@ func TestNewMuxRefusesGuardWithoutIdempotency(t *testing.T) {
 	NewMux(&Guard{Idem: passIdem, IdemAnon: passIdem})
 	NewMux(nil) // table only
 }
+
+// C26: an AuditorWrite route admits auditors on its own method only; a Write
+// route and an unmarked unsafe route still refuse them.
+func TestAuditorWriteAdmitsAuditors(t *testing.T) {
+	aw := Rule{Platform: true, NeedsMFA: true, AnyRole: []string{RolePlatformAdmin, RoleAuditor}, AuditorWrite: true}
+	auditorOnly := Rule{Platform: true, NeedsMFA: true, AnyRole: []string{RoleAuditor}, AuditorWrite: true}
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		r := requestWith(t, m, true)
+		if got := check(r, aw, platform(RoleAuditor)); got != "" {
+			t.Errorf("auditor %s auditor-write: %q", m, got)
+		}
+		if got := check(r, aw, platform(RolePlatformAdmin)); got != "" {
+			t.Errorf("platform admin %s auditor-write: %q", m, got)
+		}
+		if got := check(r, auditorOnly, platform(RolePlatformAdmin)); got != "forbidden" {
+			t.Errorf("platform admin %s auditor-only: %q", m, got)
+		}
+		if got := check(r, platformWrite, platform(RoleAuditor)); got != "forbidden" {
+			t.Errorf("auditor %s write: %q", m, got)
+		}
+		// The rule is still a platform route: a clinical account is refused.
+		if got := check(r, aw, clinical(RoleClinician)); got != "not_platform" {
+			t.Errorf("clinician %s auditor-write: %q", m, got)
+		}
+	}
+	// Two-step is still required.
+	noMFA := platform(RoleAuditor)
+	noMFA.MFA = false
+	if got := check(requestWith(t, http.MethodPost, true), aw, noMFA); got != "mfa_required" {
+		t.Errorf("auditor without two-step: %q", got)
+	}
+}
+
+// C26: AuditorWrite outside /platform/audit/, on a safe method, off the
+// platform, or with StepUp or Write panics at registration.
+func TestAuditorWriteOutsideAuditPanics(t *testing.T) {
+	roles := []string{RolePlatformAdmin, RoleAuditor}
+	bad := map[string]struct {
+		method, pattern string
+		rule            Rule
+	}{
+		"jobs retry":            {"POST", "/platform/jobs/retry", Rule{Platform: true, AnyRole: roles, AuditorWrite: true}},
+		"jobs cancel":           {"POST", "/platform/jobs/cancel", Rule{Platform: true, AnyRole: roles, AuditorWrite: true}},
+		"audit list itself":     {"POST", "/platform/audit", Rule{Platform: true, AnyRole: roles, AuditorWrite: true}},
+		"look-alike prefix":     {"POST", "/platform/auditx/verify", Rule{Platform: true, AnyRole: roles, AuditorWrite: true}},
+		"dot-dot escape":        {"POST", "/platform/audit/../jobs/retry", Rule{Platform: true, AnyRole: roles, AuditorWrite: true}},
+		"clinical route":        {"POST", "/platform/audit/verify", Rule{AnyRole: []string{RoleClinician}, AuditorWrite: true}},
+		"no platform":           {"POST", "/platform/audit/verify", Rule{AuditorWrite: true}},
+		"safe method":           {"GET", "/platform/audit/verify", Rule{Platform: true, AnyRole: roles, AuditorWrite: true}},
+		"head":                  {"HEAD", "/platform/audit/verify", Rule{Platform: true, AnyRole: roles, AuditorWrite: true}},
+		"with step-up":          {"POST", "/platform/audit/verify", Rule{Platform: true, AnyRole: roles, AuditorWrite: true, StepUp: true}},
+		"with write":            {"POST", "/platform/audit/verify", Rule{Platform: true, AnyRole: roles, AuditorWrite: true, Write: true}},
+		"public":                {"POST", "/platform/audit/verify", Rule{Public: true, AuditorWrite: true}},
+		"self-service on /auth": {"POST", "/auth/x", Rule{SelfService: true, AuditorWrite: true}},
+	}
+	for name, c := range bad {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: no panic", name)
+				}
+			}()
+			Route(NewMux(nil), c.method, c.pattern, c.rule, http.NotFoundHandler())
+		}()
+	}
+	// The good form registers.
+	Route(NewMux(nil), "POST", "/platform/audit/verify",
+		Rule{Platform: true, NeedsMFA: true, AnyRole: roles, AuditorWrite: true}, http.NotFoundHandler())
+}

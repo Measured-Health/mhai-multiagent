@@ -451,8 +451,8 @@ func bearer(vals []string) (string, bool) {
 //     either audience, so a clinical handler never runs as mhai_platform.
 //
 // Then AnyRole, then auditors: refused on every Write and on every unsafe
-// method (anything but GET, HEAD, OPTIONS) outside SelfService routes, so a
-// forgotten Write mark can't open a write to them.
+// method (anything but GET, HEAD, OPTIONS) outside SelfService and
+// AuditorWrite routes, so a forgotten Write mark can't open a write to them.
 func check(r *http.Request, rule Rule, p Principal) string {
 	platformAud := httpx.Audience(r.Context()) == httpx.AudiencePlatform
 	switch {
@@ -471,7 +471,7 @@ func check(r *http.Request, rule Rule, p Principal) string {
 	if len(rule.AnyRole) > 0 && !slices.ContainsFunc(rule.AnyRole, p.HasRole) {
 		return "forbidden"
 	}
-	if p.HasRole(RoleAuditor) && (rule.Write || (!rule.SelfService && !safeMethod(r.Method))) {
+	if p.HasRole(RoleAuditor) && (rule.Write || (!rule.SelfService && !rule.AuditorWrite && !safeMethod(r.Method))) {
 		return "forbidden"
 	}
 	if rule.NeedsMFA && !p.MFA {

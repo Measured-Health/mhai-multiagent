@@ -131,6 +131,76 @@ add_secret MFA_ENCRYPTION_KEY    "$(rand_hex 32)"
 add_secret BFF_SERVICE_KEYS      "$(rand_hex 32)"
 info "mode $(stat -c '%a %U' "$ENV_FILE")"
 
+say "Security contact in $DEST/.env (named on the platform app's audit integrity page)"
+# Not a secret, and never generated: a made-up contact would be shown to
+# auditors as real. From the environment, else kept from .env, else asked
+# for when there is a terminal. Left unset, core still starts on the demo
+# (development) but GET /platform/audit/verify/status answers 503 until it
+# is set; outside development core refuses to start without it.
+CONTACT_MISSING=0
+# contact_ok KIND VALUE: KIND is name or email. It must accept exactly what
+# core's config.SecurityContactOK accepts (services/core/internal/config,
+# kept in step by contact_script_test.go there), and also refuse what .env
+# can't hold: compose reads a quote, backslash, backtick or $, and treats an
+# unquoted " #" as a comment, so none of those, and no "#" at all.
+contact_ok() {
+  local kind=$1 v=$2
+  case "$v" in *[\$\"\'\\\`\#]*|"") return 1 ;; esac
+  case "$v" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  printf '%s' "$v" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || return 1
+  local lc=C.UTF-8 sp='[\s\p{Z}\x{85}]'
+  if [ "$kind" = name ]; then
+    # 1-120 characters, trimmed, no control or format character, and
+    # nothing of the pseudonym's shape (mhai-web's PSEUDONYM_IN).
+    printf '%s\n' "$v" | LC_ALL=$lc grep -qP '^.{1,120}$' || return 1
+    printf '%s\n' "$v" | LC_ALL=$lc grep -qP "^$sp|$sp\$" && return 1
+    printf '%s\n' "$v" | LC_ALL=$lc grep -qP '[\p{Cc}\p{Cf}]' && return 1
+    printf '%s\n' "$v" | LC_ALL=C grep -qE '(^|[^A-Za-z0-9])P-[A-Z0-9]{4,12}([^A-Za-z0-9]|$)' && return 1
+    return 0
+  fi
+  # email: at most 254 bytes, a plain address (no display name) of dot
+  # atoms either side of one @ (core also takes an IP-literal domain such as
+  # a@[1.2.3.4]; this refuses it).
+  [ "$(printf '%s' "$v" | LC_ALL=C wc -c)" -le 254 ] || return 1
+  local atom='[^\x00-\x20\x7f()<>\[\]:;@\\,".]+'
+  printf '%s\n' "$v" | LC_ALL=$lc grep -qP "^$atom(\\.$atom)*@$atom(\\.$atom)*\$"
+}
+# contact_half_set: exactly one of the two is set in $ENV_FILE. Core refuses
+# that outside development, and on the demo the status would answer 503 with
+# a name and no address, so it is an error, not a skipped step.
+contact_half_set() {
+  local n e
+  n=$(grep -c '^SECURITY_CONTACT_NAME=.' "$ENV_FILE" || true)
+  e=$(grep -c '^SECURITY_CONTACT_EMAIL=.' "$ENV_FILE" || true)
+  [ "$n" != "$e" ]
+}
+set_contact() {
+  local name=$1 value=${2:-} prompt=$3
+  if [ -z "$value" ] && grep -q "^${name}=." "$ENV_FILE"; then
+    info "$name already set, kept"
+    return
+  fi
+  if [ -z "$value" ] && [ -t 0 ]; then
+    read -r -p "    $prompt (empty to skip): " value || value=
+  fi
+  if [ -z "$value" ]; then
+    info "$name not set"
+    CONTACT_MISSING=1
+    return
+  fi
+  kind=name
+  case "$name" in *EMAIL) kind=email ;; esac
+  contact_ok "$kind" "$value" || die "$name is not acceptable: core shows it on the audit page and refuses it if it has a quote, backslash, backtick, \$ or #, a control character, a pseudonym (P-XXXX), is longer than 120 (name) or 254 (email), or is not a plain address"
+  sed -i "/^${name}=/d" "$ENV_FILE"
+  printf '%s=%s\n' "$name" "$value" >> "$ENV_FILE"
+  info "$name written"
+}
+set_contact SECURITY_CONTACT_NAME  "${SECURITY_CONTACT_NAME:-}"  "Security contact name (e.g. Measured Health security)"
+set_contact SECURITY_CONTACT_EMAIL "${SECURITY_CONTACT_EMAIL:-}" "Security contact email"
+if contact_half_set; then
+  die "Only one of SECURITY_CONTACT_NAME and SECURITY_CONTACT_EMAIL is set in $ENV_FILE: set both, or neither"
+fi
+
 say "NATS NKey for the core service ($DEST/secrets/nats-gateway.nk)"
 mkdir -p "$DEST/secrets"
 chmod 700 "$DEST/secrets"
@@ -313,6 +383,11 @@ say "Done"
 if [ "$ROTATED" = 1 ]; then
   info "A BFF key was rotated: restart nats and that BFF's app, or it cannot connect:"
   info "  (cd $DEST && docker compose up -d --force-recreate nats), then restart the app"
+fi
+if [ "$CONTACT_MISSING" = 1 ]; then
+  info "No security contact yet: the audit integrity status answers 503 until it is set. Run again with"
+  info "  SECURITY_CONTACT_NAME='...' SECURITY_CONTACT_EMAIL='...' bash $DEST/setup-host.sh"
+  info "then redeploy (or: cd $DEST && docker compose up -d core)."
 fi
 info "Nothing was started. Next: set the repository variable DEPLOY_ENABLED=true"
 info "and run the Deploy backend demo workflow (deploy/README.md)."

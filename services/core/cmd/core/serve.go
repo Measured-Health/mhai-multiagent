@@ -16,6 +16,7 @@ import (
 
 	core "github.com/Measured-Health/mhai-multiagent/services/core"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/apidocs"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
@@ -27,6 +28,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/natsapi"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
@@ -149,8 +151,12 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		IdemAnon: httpx.IdempotentAnonLog(a.pool, log),
 	}
 	m := authz.NewMux(guard)
+	contact := platform.SecurityContact{Name: cfg.SecurityContactName, Email: cfg.SecurityContactEmail}
+	if !contact.OK() {
+		log.Warn("core: no usable security contact (SECURITY_CONTACT_NAME, SECURITY_CONTACT_EMAIL); the audit integrity status answers 503")
+	}
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.WithLink(server.Readiness(a.pool, nc, buckets.All()), link),
-		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap})
+		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}
@@ -285,6 +291,13 @@ func serve() error {
 	go func() {
 		if err := intel.RunDeadLetters(ctx, a.pool, a.js, a.intel); err != nil {
 			log.Error("core: dead-letter consumer stopped", "error", err)
+		}
+	}()
+	// The daily audit chain check at 06:00 UTC; one core copy starts it
+	// (an advisory lock). It also sets audit_chain_broken at start-up.
+	go func() {
+		if err := audit.RunScheduler(ctx, a.pool, audit.ScheduleAt, log); err != nil {
+			log.Error("core: audit check schedule stopped", "reason", "internal_error")
 		}
 	}()
 	// SIGHUP re-reads the trusted request-keys file (after keys untrust).

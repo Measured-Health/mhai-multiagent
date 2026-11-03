@@ -34,7 +34,8 @@ func Markdown(table []RouteRule) []byte {
 	b.WriteString("- **Roles:** any one of them. Roles combine on clinical accounts.\n")
 	b.WriteString("- **Audience:** `platform` needs `X-MHAI-Audience: platform` and a platform account (else 403 `not_platform`);\n")
 	b.WriteString("  `clinical` refuses platform accounts (403 `forbidden`); `both` (the account's own routes) is either account on its own audience.\n")
-	b.WriteString("- **Write:** auditors get 403 `forbidden`; they are also refused every method but GET, HEAD and OPTIONS outside the `both` routes.\n")
+	b.WriteString("- **Write:** auditors get 403 `forbidden`; they are also refused every method but GET, HEAD and OPTIONS outside the `both` routes\n")
+	b.WriteString("  and the `auditor write` routes (the audit log's own writes, which auditors may make; spec §5.2).\n")
 	b.WriteString("- Another hospital's resource is 404 `not_found`, never 403.\n\n")
 	b.WriteString("| Method | Path | Access | Roles | Audience | Two-step session | Step-up | Write |\n")
 	b.WriteString("|---|---|---|---|---|---|---|---|\n")
@@ -64,7 +65,7 @@ func Markdown(table []RouteRule) []byte {
 			roles = "-"
 		}
 		fmt.Fprintf(&b, "| %s | `%s` | %s | %s | %s | %s | %s | %s |\n",
-			rr.Method, rr.Pattern, access, roles, aud, yes(r.NeedsMFA), yes(r.StepUp), yes(r.Write))
+			rr.Method, rr.Pattern, access, roles, aud, yes(r.NeedsMFA), yes(r.StepUp), writeCell(r))
 	}
 	b.Write(operationsMarkdown(Operations()))
 	return b.Bytes()
@@ -90,6 +91,14 @@ func operationsMarkdown(ops []Operation) []byte {
 			o.Name, o.Kind, roles, yes(o.SvcCore), yes(o.NeedsHospital), yes(o.BFFDirect), o.Timeout, yes(o.TestOnly))
 	}
 	return b.Bytes()
+}
+
+// writeCell is the Write column: yes, auditor write, or no.
+func writeCell(r Rule) string {
+	if r.AuditorWrite {
+		return "auditor write"
+	}
+	return yes(r.Write)
 }
 
 func yes(v bool) string {

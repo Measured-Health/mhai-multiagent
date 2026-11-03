@@ -112,6 +112,9 @@ services:
       # Traces and metrics, off while empty. With the observability profile:
       # http://otel-collector:4317. Spans carry ids, codes and numbers only.
       OTEL_EXPORTER_OTLP_ENDPOINT: ${CORE_OTEL_ENDPOINT:-}
+      # Who the audit integrity page names; unset, its status answers 503.
+      SECURITY_CONTACT_NAME: ${SECURITY_CONTACT_NAME:-}
+      SECURITY_CONTACT_EMAIL: ${SECURITY_CONTACT_EMAIL:-}
     ports: ["127.0.0.1:${CORE_PORT:-8080}:8080"]
     volumes:
       - corekeys:/keys:ro

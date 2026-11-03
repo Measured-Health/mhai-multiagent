@@ -16,12 +16,17 @@ package smoke
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha1"
+	"encoding/base32"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -77,6 +82,10 @@ func bffConn(t *testing.T) *nats.Conn {
 	return connect(t, "bff_clinical", env(t, "SMOKE_NATS_BFF_CLINICAL_PASSWORD"), bus.BFFInboxPrefix+"."+natsapi.AppClinical)
 }
 
+func platformConn(t *testing.T) *nats.Conn {
+	return connect(t, "bff_platform", env(t, "SMOKE_NATS_BFF_PLATFORM_PASSWORD"), bus.BFFInboxPrefix+"."+natsapi.AppPlatform)
+}
+
 func ownerPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	pool, err := pgxpool.New(context.Background(), env(t, "SMOKE_DATABASE_URL"))
@@ -97,7 +106,13 @@ type reply struct {
 // api sends one request over api.v1.clinical, as the BFF does.
 func api(t *testing.T, nc *nats.Conn, method, path, bearer string, body any) reply {
 	t.Helper()
-	m := nats.NewMsg(natsapi.SubjectClinical)
+	return apiOn(t, nc, natsapi.SubjectClinical, method, path, bearer, body)
+}
+
+// apiOn sends one request on subject: api.v1.clinical or api.v1.platform.
+func apiOn(t *testing.T, nc *nats.Conn, subject, method, path, bearer string, body any) reply {
+	t.Helper()
+	m := nats.NewMsg(subject)
 	m.Header.Set(natsapi.HeaderMethod, method)
 	m.Header.Set(natsapi.HeaderPath, "/api/v1"+path)
 	m.Header.Set("X-MHAI-Client-IP", "198.51.100.15") // TEST-NET-2
@@ -407,6 +422,15 @@ func TestQuestionOverHTTPStillWorks(t *testing.T) {
 // correction.applied on the chain, which still verifies.
 func TestSmokeCorrectionApproved(t *testing.T) {
 	nc := bffConn(t)
+	cid, _, _ := approvedCorrection(t, nc)
+	checkBuffer(t, cid)
+}
+
+// approvedCorrection runs the two-person flow: A asks, suggests a
+// correction and fails to approve it; B approves. It returns the correction
+// id and both clinicians. The caller waits for correction.applied.
+func approvedCorrection(t *testing.T, nc *nats.Conn) (string, clinician, clinician) {
+	t.Helper()
 	a := signIn(t, nc)
 	b := signIn(t, nc)
 	if a.hospitalID != b.hospitalID {
@@ -439,7 +463,11 @@ func TestSmokeCorrectionApproved(t *testing.T) {
 		t.Fatalf("B approving: %d %s, want 204", r.status, r.raw)
 	}
 	t.Logf("B approving: 204")
+	return cid, a, b
+}
 
+func checkBuffer(t *testing.T, cid string) {
+	t.Helper()
 	// chainHas waits for the one row and verifies the whole chain.
 	chainHas(t, "correction.applied", "", cid)
 
@@ -456,4 +484,135 @@ func TestSmokeCorrectionApproved(t *testing.T) {
 		t.Fatalf("audit chain: ok=%v first broken=%d err=%v", ok, broken, err)
 	}
 	t.Logf("one feedback_buffer row; audit chain verifies")
+}
+
+// totpFor is the RFC 6238 code (SHA-1, 30 s, 6 digits) for a step.
+func totpFor(secret []byte, step int64) string {
+	var msg [8]byte
+	binary.BigEndian.PutUint64(msg[:], uint64(step))
+	m := hmac.New(sha1.New, secret)
+	m.Write(msg[:])
+	sum := m.Sum(nil)
+	off := sum[len(sum)-1] & 0x0f
+	v := binary.BigEndian.Uint32(sum[off:off+4]) & 0x7fffffff
+	return fmt.Sprintf("%06d", v%1000000)
+}
+
+// auditorSignIn creates a synthetic auditor with the CLI and signs in over
+// api.v1.platform: the password step, an enrolment-only session, two-step
+// enrolment, then a full session with a code (the next 30 s step, which the
+// verifier accepts and which is later than the enrolment code).
+func auditorSignIn(t *testing.T, nc *nats.Conn) string {
+	t.Helper()
+	email := "smoke-auditor-" + randomHex(t, 6) + "@platform.example.test"
+	pw := "Smoke-auditor-" + randomHex(t, 12)
+	cli(t, pw+"\n", "users", "create", "--email", email, "--name", "Synthetic Smoke Auditor", "--roles", "auditor")
+	call := func(method, path, bearer string, body any) reply {
+		return apiOn(t, nc, natsapi.SubjectPlatform, method, path, bearer, body)
+	}
+	login := func() string {
+		r := call("POST", "/auth/login", "", map[string]any{"username": email, "password": pw})
+		tok, _ := r.body["mfa_token"].(string)
+		if r.status != http.StatusOK || r.body["mfa_required"] != true || tok == "" {
+			t.Fatalf("auditor sign in: %d %s, want the two-step branch", r.status, r.raw)
+		}
+		return tok
+	}
+	r := call("POST", "/auth/mfa/challenge", "", map[string]any{"mfa_token": login(), "code": ""})
+	limited, _ := r.body["access_token"].(string)
+	if r.status != http.StatusOK || limited == "" {
+		t.Fatalf("auditor enrolment session: %d %s", r.status, r.raw)
+	}
+	r = call("POST", "/auth/mfa/enroll", limited, nil)
+	uri, _ := r.body["otpauth_uri"].(string)
+	u, err := url.Parse(uri)
+	if r.status != http.StatusOK || err != nil {
+		t.Fatalf("auditor enrol: %d", r.status)
+	}
+	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(u.Query().Get("secret"))
+	if err != nil || len(secret) == 0 {
+		t.Fatalf("auditor enrol: no secret")
+	}
+	step := time.Now().Unix() / 30
+	if r := call("POST", "/auth/mfa/verify", limited, map[string]any{"code": totpFor(secret, step)}); r.status != http.StatusNoContent {
+		t.Fatalf("auditor mfa verify: %d %s", r.status, r.raw)
+	}
+	r = call("POST", "/auth/mfa/challenge", "", map[string]any{"mfa_token": login(), "code": totpFor(secret, step+1)})
+	access, _ := r.body["access_token"].(string)
+	if r.status != http.StatusOK || access == "" {
+		t.Fatalf("auditor challenge: %d %s", r.status, r.raw)
+	}
+	t.Logf("signed in a synthetic auditor over api.v1.platform (two-step)")
+	return access
+}
+
+// TestSmokeAuditLog (Plan 4b): a synthetic auditor over api.v1.platform
+// starts a chain check and polls it to intact, reads the integrity status
+// (which needs the stack's synthetic security contact), and finds clinician
+// B's review_submitted in the log filtered to type=review.
+func TestSmokeAuditLog(t *testing.T) {
+	clinical := bffConn(t)
+	cid, _, b := approvedCorrection(t, clinical)
+	chainHas(t, "correction.applied", "", cid)
+
+	nc := platformConn(t)
+	access := auditorSignIn(t, nc)
+	call := func(method, path string, body any) reply {
+		return apiOn(t, nc, natsapi.SubjectPlatform, method, path, access, body)
+	}
+
+	r := call("POST", "/platform/audit/verify", nil)
+	runID, _ := r.body["run_id"].(string)
+	if r.status != http.StatusOK || runID == "" {
+		t.Fatalf("POST /platform/audit/verify: %d %s", r.status, r.raw)
+	}
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		r = call("GET", "/platform/audit/verify/runs/"+runID, nil)
+		if r.status != http.StatusOK {
+			t.Fatalf("GET run: %d %s", r.status, r.raw)
+		}
+		state, _ := r.body["state"].(string)
+		if state == "intact" {
+			break
+		}
+		if state != "running" {
+			t.Fatalf("chain check ended %q, want intact: %s", state, r.raw)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("chain check still running after 90 s")
+		}
+		time.Sleep(time.Second)
+	}
+	if n, _ := r.body["entries_checked"].(float64); n <= 0 {
+		t.Fatalf("intact check with entries_checked %v", r.body["entries_checked"])
+	}
+	t.Logf("chain check %s: intact", runID)
+
+	r = call("GET", "/platform/audit/verify/status", nil)
+	if r.status != http.StatusOK {
+		t.Fatalf("GET /platform/audit/verify/status: %d %s (is SECURITY_CONTACT_NAME/EMAIL set in the stack?)", r.status, r.raw)
+	}
+	t.Logf("integrity status: 200")
+
+	r = call("GET", "/platform/audit?type=review&limit=100", nil)
+	if r.status != http.StatusOK {
+		t.Fatalf("GET /platform/audit?type=review: %d %s", r.status, r.raw)
+	}
+	events, _ := r.body["events"].([]any)
+	found := false
+	for _, e := range events {
+		ev, _ := e.(map[string]any)
+		actor, _ := ev["actor"].(map[string]any)
+		if ev["type"] != "review" {
+			t.Fatalf("type=review returned a %v entry", ev["type"])
+		}
+		if ev["kind"] == "review_submitted" && actor["id"] == b.id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no review_submitted by clinician B among %d review entries: %s", len(events), r.raw)
+	}
+	t.Logf("audit log: B's review_submitted is listed under type=review")
 }

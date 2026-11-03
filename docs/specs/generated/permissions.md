@@ -8,7 +8,8 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 - **Roles:** any one of them. Roles combine on clinical accounts.
 - **Audience:** `platform` needs `X-MHAI-Audience: platform` and a platform account (else 403 `not_platform`);
   `clinical` refuses platform accounts (403 `forbidden`); `both` (the account's own routes) is either account on its own audience.
-- **Write:** auditors get 403 `forbidden`; they are also refused every method but GET, HEAD and OPTIONS outside the `both` routes.
+- **Write:** auditors get 403 `forbidden`; they are also refused every method but GET, HEAD and OPTIONS outside the `both` routes
+  and the `auditor write` routes (the audit log's own writes, which auditors may make; spec §5.2).
 - Another hospital's resource is 404 `not_found`, never 403.
 
 | Method | Path | Access | Roles | Audience | Two-step session | Step-up | Write |
@@ -34,6 +35,16 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/feedback` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/feedback/stats/mine` | signed in | `clinician` | clinical | no | no | no |
 | GET | `/api/v1/healthz` | public | - | - | no | no | no |
+| GET | `/api/v1/platform/audit` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/audit/hospitals` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/audit/people` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| POST | `/api/v1/platform/audit/undisplayable` | signed in | `platform_admin`, `auditor` | platform | yes | no | auditor write |
+| POST | `/api/v1/platform/audit/verify` | signed in | `platform_admin`, `auditor` | platform | yes | no | auditor write |
+| GET | `/api/v1/platform/audit/verify/runs` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/audit/verify/runs/{id}` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| POST | `/api/v1/platform/audit/verify/runs/{id}/outcome` | signed in | `auditor` | platform | yes | no | auditor write |
+| GET | `/api/v1/platform/audit/verify/status` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/audit/{id}` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | POST | `/api/v1/queries` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/queries/{id}` | signed in | `clinician` | clinical | no | no | no |
 | GET | `/api/v1/queries/{id}/result` | signed in | `clinician` | clinical | no | no | no |

@@ -36,8 +36,15 @@ type Rule struct {
 	StepUp bool
 	// Write: the route changes data; auditors get 403 forbidden. Auditors
 	// are refused every unsafe method outside SelfService routes anyway;
-	// Write makes it explicit (and Platform routes must set it).
+	// Write makes it explicit (and Platform routes must set it, or
+	// AuditorWrite).
 	Write bool
+	// AuditorWrite: an unsafe platform route that admits auditors (Plan 4
+	// spec §5.2; contract §14.9: the auditors' own audit writes). Only on a
+	// Platform route with an unsafe method under /platform/audit/, never
+	// with StepUp or Write. The exact list is pinned by
+	// TestAuditorWriteRoutesPinned, so it can't spread.
+	AuditorWrite bool
 	// MFAEnrol: the route also accepts a session limited to two-step
 	// enrolment, of an account that hasn't turned two-step on (enrol,
 	// verify, password change and logout only; SelfService required).
@@ -110,6 +117,10 @@ func Route(m *Mux, method, pattern string, rule Rule, h http.Handler) {
 	m.rt.Handle(method, pattern, telemetry.HTTPServer(method, httpx.BasePath+pattern, httpx.RequestIDFrom, guarded))
 }
 
+// AuditorWritePrefix is where an AuditorWrite route may live: the audit
+// log's own routes.
+const AuditorWritePrefix = "/platform/audit/"
+
 func validate(method, pattern string, rule Rule) error {
 	if method == "" || !strings.HasPrefix(pattern, "/") {
 		return fmt.Errorf("authz: route %q %q needs a method and a pattern starting with /", method, pattern)
@@ -130,7 +141,12 @@ func validate(method, pattern string, rule Rule) error {
 	if rule.MFAEnrol && (!rule.SelfService || rule.NeedsMFA) {
 		return fmt.Errorf("authz: enrolment route %s %s must be a self-service route", method, pattern)
 	}
-	if rule.Platform && !safeMethod(method) && !rule.Write {
+	if rule.AuditorWrite && (!rule.Platform || safeMethod(method) || rule.StepUp || rule.Write ||
+		!strings.HasPrefix(pattern, AuditorWritePrefix) || path.Clean(pattern) != pattern) {
+		return fmt.Errorf("authz: auditor write %s %s must be an unsafe platform route under %s, without StepUp or Write",
+			method, pattern, AuditorWritePrefix)
+	}
+	if rule.Platform && !safeMethod(method) && !rule.Write && !rule.AuditorWrite {
 		return fmt.Errorf("authz: platform route %s %s changes data and must set Write", method, pattern)
 	}
 	for _, r := range rule.AnyRole {

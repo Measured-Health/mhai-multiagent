@@ -113,8 +113,20 @@ func WithAuditDrain(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) err
 	return inRole(ctx, pool, roleDrain, "", nil, fn)
 }
 
-func inRole(ctx context.Context, pool *pgxpool.Pool, role, hospital string, user *uuid.UUID, fn func(pgx.Tx) error) (err error) {
-	tx, err := pool.Begin(ctx)
+// WithPlatformSnapshot runs fn as mhai_platform in one REPEATABLE READ,
+// READ ONLY transaction: every statement sees the same snapshot, so a walk
+// over several statements (the audit chain check's pages) reads one
+// consistent chain, and nothing in it can write.
+func WithPlatformSnapshot(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	return inRoleOpts(ctx, pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, rolePlatform, "", nil, fn)
+}
+
+func inRole(ctx context.Context, pool *pgxpool.Pool, role, hospital string, user *uuid.UUID, fn func(pgx.Tx) error) error {
+	return inRoleOpts(ctx, pool, pgx.TxOptions{}, role, hospital, user, fn)
+}
+
+func inRoleOpts(ctx context.Context, pool *pgxpool.Pool, opts pgx.TxOptions, role, hospital string, user *uuid.UUID, fn func(pgx.Tx) error) (err error) {
+	tx, err := pool.BeginTx(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("db: begin: %w", err)
 	}

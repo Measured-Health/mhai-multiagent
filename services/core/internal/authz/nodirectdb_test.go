@@ -26,7 +26,11 @@ var dbTxAllowedDirs = map[string]string{
 var dbTxAllowedFiles = map[string]string{
 	// Infrastructure that can't import authz (authz imports it):
 	"internal/httpx/idempotency.go": "the idempotency store scopes its own rows by the principal it is given",
-	"internal/audit/audit.go":       "Verify reads the whole chain as mhai_platform",
+	// The chain check (Plan 4 §5.4): the walk reads the whole chain as
+	// mhai_platform under its budget, off the request path; the daily
+	// schedule and the finish run with no principal. A person's start
+	// goes through authz.Tx (StartRunTx).
+	"internal/audit/verify.go": "the chain walk, run finish and daily schedule (db.WithPlatform, the schedule's advisory lock)",
 	// Provisioning CLI on the owner/migrate connection (SET LOCAL ROLE
 	// mhai_provision), never on a request path.
 	"internal/account/create.go": "the users/hospitals create CLI",

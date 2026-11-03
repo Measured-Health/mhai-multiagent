@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -88,6 +89,13 @@ func same(t *testing.T, name string, h, n resp) {
 		if h.raw != n.raw {
 			t.Errorf("%s: body HTTP %q, NATS %q", name, h.raw, n.raw)
 		}
+	case h.code < 300 && strings.HasPrefix(name, "GET /api/v1/platform/audit / "):
+		// The log lists its own reads (audit.viewed is written per
+		// session, so the second call sees the first's row): the entries
+		// differ in number and kind, so compare the page's fields only.
+		if !reflect.DeepEqual(keysOf(h.body), keysOf(n.body)) {
+			t.Errorf("%s: fields HTTP %s, NATS %s", name, h.raw, n.raw)
+		}
 	case h.code < 300:
 		if !reflect.DeepEqual(shape(h.body), shape(n.body)) {
 			t.Errorf("%s: body shape HTTP %s, NATS %s", name, h.raw, n.raw)
@@ -100,6 +108,15 @@ func same(t *testing.T, name string, h, n resp) {
 			t.Errorf("%s: body HTTP %s, NATS %s", name, h.raw, n.raw)
 		}
 	}
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func clone(m map[string]any) map[string]any {
