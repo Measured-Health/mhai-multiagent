@@ -2,6 +2,9 @@ package audit
 
 import (
 	"context"
+	"crypto/hkdf"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -136,6 +139,9 @@ func scanRuns(rows pgx.Rows) ([]RunOut, []time.Time, error) {
 			r.By = &p
 		}
 		if note != nil && noteBy != nil && noteAt != nil {
+			if !OutcomeNoteOK(*note) {
+				return nil, nil, errors.New("audit: runs: an outcome note that can't be shown")
+			}
 			p, err := showablePerson(*noteBy, noteByName)
 			if err != nil {
 				return nil, nil, err
@@ -157,39 +163,80 @@ type RunCursor struct {
 	ID        uuid.UUID
 }
 
-// Encode is 48 lowercase hex characters (start in microseconds, then the
-// id), so it never has the pseudonym's shape. It is not authenticated:
-// a forged cursor only pages the runs (no patient data, nothing a first
-// page and the run reads don't show, and those are recorded), and paging
-// writes no entry (spec §5.2).
-func (c RunCursor) Encode() string {
-	var b [24]byte
-	binary.BigEndian.PutUint64(b[:8], uint64(c.StartedAt.UnixMicro()))
-	copy(b[8:], c.ID[:])
-	return hex.EncodeToString(b[:])
+// RunCursorKeyLabel is the HKDF-SHA256 info label of the runs cursor's HMAC
+// key: the same master key as the events cursor's, a distinct label.
+const RunCursorKeyLabel = "mhai audit runs cursor key v1"
+
+// RunCursorKey derives the runs cursor key from the master key (at least
+// 32 bytes), or ErrCursorKey. It is never logged.
+func RunCursorKey(master []byte) ([]byte, error) {
+	if len(master) < 32 {
+		return nil, ErrCursorKey
+	}
+	k, err := hkdf.Key(sha256.New, master, nil, RunCursorKeyLabel, 32)
+	if err != nil {
+		return nil, ErrCursorKey
+	}
+	return k, nil
 }
 
-// DecodeRunCursor parses Encode's form, or ErrCursor.
-func DecodeRunCursor(s string) (RunCursor, error) {
-	if len(s) != 48 || strings.ToLower(s) != s {
+// RunCursors makes and checks one session's runs cursors.
+type RunCursors struct {
+	Key     []byte // from RunCursorKey
+	Session string // the principal's session id
+}
+
+const runCursorLen = 8 + 16 + 16
+
+func (c RunCursors) tag(us int64, id uuid.UUID) []byte {
+	var t [8]byte
+	binary.BigEndian.PutUint64(t[:], uint64(us))
+	m := hmac.New(sha256.New, c.Key)
+	for _, part := range [][]byte{[]byte("audit.runcursor.v1"), []byte(c.Session), t[:], id[:]} {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(part)))
+		m.Write(n[:])
+		m.Write(part)
+	}
+	return m.Sum(nil)[:16]
+}
+
+// Encode is 80 lowercase hex characters (start in microseconds, the id,
+// then a tag bound to the session), so it never has the pseudonym's shape.
+// Without a key or session it is "" (callers check first).
+func (c RunCursors) Encode(cur RunCursor) string {
+	if len(c.Key) < 32 || c.Session == "" {
+		return ""
+	}
+	us := cur.StartedAt.UnixMicro()
+	b := make([]byte, 8, runCursorLen)
+	binary.BigEndian.PutUint64(b, uint64(us))
+	b = append(b, cur.ID[:]...)
+	return hex.EncodeToString(append(b, c.tag(us, cur.ID)...))
+}
+
+// Decode parses Encode's form, or ErrCursor when it doesn't decode or its
+// tag isn't this session's (forged, tampered, another session's).
+func (c RunCursors) Decode(s string) (RunCursor, error) {
+	if len(c.Key) < 32 || c.Session == "" {
 		return RunCursor{}, ErrCursor
 	}
 	b, err := hex.DecodeString(s)
-	if err != nil {
+	if err != nil || len(b) != runCursorLen || hex.EncodeToString(b) != s {
 		return RunCursor{}, ErrCursor
 	}
 	us := int64(binary.BigEndian.Uint64(b[:8]))
-	if us <= 0 {
+	var id uuid.UUID
+	copy(id[:], b[8:24])
+	if us <= 0 || !hmac.Equal(b[24:], c.tag(us, id)) {
 		return RunCursor{}, ErrCursor
 	}
-	var id uuid.UUID
-	copy(id[:], b[8:])
 	return RunCursor{StartedAt: time.UnixMicro(us).UTC(), ID: id}, nil
 }
 
 // ListRuns is a page of runs, newest first, after the cursor (nil: the
 // first page). next is "" on the last page.
-func ListRuns(ctx context.Context, tx pgx.Tx, after *RunCursor) (runs []RunOut, next string, err error) {
+func ListRuns(ctx context.Context, tx pgx.Tx, cur RunCursors, after *RunCursor) (runs []RunOut, next string, err error) {
 	q := runColumns
 	args := []any{RunsLimit + 1}
 	if after != nil {
@@ -207,7 +254,7 @@ func ListRuns(ctx context.Context, tx pgx.Tx, after *RunCursor) (runs []RunOut, 
 	if len(runs) > RunsLimit {
 		runs, starts = runs[:RunsLimit], starts[:RunsLimit]
 		last := len(runs) - 1
-		next = RunCursor{StartedAt: starts[last], ID: uuid.MustParse(runs[last].ID)}.Encode()
+		next = cur.Encode(RunCursor{StartedAt: starts[last], ID: uuid.MustParse(runs[last].ID)})
 	}
 	if runs == nil {
 		runs = []RunOut{}
@@ -329,8 +376,8 @@ func AddOutcome(ctx context.Context, tx pgx.Tx, r Reader, runID uuid.UUID, note 
 
 // RecordRunsRead records a read of the chain checks inside tx, the way
 // RecordRead does the list's: audit.searched {searched_kind: run}, once
-// per session and read per 5 minutes. what is "runs" (the list's first
-// page; the handler records no page after it), "run" (one run; key its id, which goes in entity_id) or
+// per session and read per 5 minutes. what is "runs" (every page of the
+// list, collapsed by the dedupe), "run" (one run; key its id, which goes in entity_id) or
 // "status". mhai-web has no searched_kind run yet, so these rows are sent
 // bare (TODO.md), as the person and hospital reads are.
 func RecordRunsRead(ctx context.Context, tx pgx.Tx, r Reader, what, key string) (bool, error) {
@@ -347,7 +394,8 @@ func RecordRunsRead(ctx context.Context, tx pgx.Tx, r Reader, what, key string) 
 
 // RecordUndisplayable writes one audit.undisplayable_reported for a report
 // of 1 to 50 event ids: their count (distinct) and the first and last ids
-// in seq order, never the list. ids are decimal event ids (EventID).
+// in seq order, never the list. A repeat of the same ids by the same session
+// within 5 minutes is not written again. ids are decimal event ids (EventID).
 func RecordUndisplayable(ctx context.Context, tx pgx.Tx, r Reader, ids []int64) error {
 	set := map[int64]bool{}
 	for _, id := range ids {
@@ -364,7 +412,16 @@ func RecordUndisplayable(ctx context.Context, tx pgx.Tx, r Reader, ids []int64) 
 	if _, err := uuid.Parse(r.UserID); err != nil {
 		return errors.New("audit: report without a user")
 	}
-	return Write(ctx, tx, Event{ActorID: r.UserID, RequestID: r.RequestID, Action: "audit.undisplayable_reported",
+	// The same session reporting the same ids again within 5 minutes
+	// writes nothing (recordRead's dedupe), so repeats don't grow the chain.
+	h := sha256.New()
+	for _, id := range seqs {
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], uint64(id))
+		h.Write(b[:])
+	}
+	_, err := recordRead(ctx, tx, r, "undisplayable", h.Sum(nil), Event{Action: "audit.undisplayable_reported",
 		Payload: map[string]any{"count": len(seqs), "first_id": strconv.FormatInt(seqs[0], 10),
 			"last_id": strconv.FormatInt(seqs[len(seqs)-1], 10)}})
+	return err
 }

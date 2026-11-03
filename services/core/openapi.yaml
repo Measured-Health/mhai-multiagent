@@ -985,14 +985,14 @@ paths:
       summary: The chain checks, newest first.
       description: |
         20 per page. `cursor` is the opaque `next_cursor` (hex); anything
-        else is 422. The first page is recorded as `audit.searched`
-        (`searched_kind: run`), once per session per 5 minutes; a page with
-        a cursor writes nothing.
+        else is 422; it is bound to the session. Every page is recorded as
+        `audit.searched` (`searched_kind: run`), collapsed to one entry per
+        session per 5 minutes.
       tags: [audit]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: *auditListErrors
       parameters:
-        - { name: cursor, in: query, required: false, schema: { type: string, pattern: "^[0-9a-f]{48}$" } }
+        - { name: cursor, in: query, required: false, schema: { type: string, pattern: "^[0-9a-f]{80}$" } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
       responses:

@@ -56,18 +56,37 @@ func TestOutcomeNoteOK(t *testing.T) {
 }
 
 func TestRunCursorRoundTrip(t *testing.T) {
+	key, err := RunCursorKey([]byte(strings.Repeat("k", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := RunCursorKey([]byte(strings.Repeat("j", 32)))
+	cs := RunCursors{Key: key, Session: "s1"}
 	c := RunCursor{StartedAt: time.Date(2026, 11, 3, 6, 0, 0, 123456000, time.UTC), ID: uuid.New()}
-	s := c.Encode()
-	if len(s) != 48 || strings.ToLower(s) != s {
+	s := cs.Encode(c)
+	if len(s) != 80 || strings.ToLower(s) != s {
 		t.Fatalf("cursor %q", s)
 	}
-	back, err := DecodeRunCursor(s)
+	back, err := cs.Decode(s)
 	if err != nil || !back.StartedAt.Equal(c.StartedAt) || back.ID != c.ID {
 		t.Fatalf("round trip: %+v %v", back, err)
 	}
-	for _, bad := range []string{"", s[:47], s + "0", strings.ToUpper(s), "zz" + s[2:], strings.Repeat("0", 48)} {
-		if _, err := DecodeRunCursor(bad); !errors.Is(err, ErrCursor) {
+	madeWithKey := RunCursors{Key: key, Session: "s1"}.Encode(RunCursor{StartedAt: time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC), ID: uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff")})
+	// A hand-made cursor (year 3000, all-f id, all-f tag) has no valid tag.
+	handMade := "00e0" + strings.Repeat("0", 4) + strings.Repeat("f", 72)
+	for _, bad := range []string{"", s[:79], s + "0", strings.ToUpper(s), "zz" + s[2:], strings.Repeat("0", 80), strings.Repeat("f", 80), handMade} {
+		if _, err := cs.Decode(bad); !errors.Is(err, ErrCursor) {
 			t.Errorf("%q: %v", bad, err)
 		}
+	}
+	// Another session's, another key's: refused. (madeWithKey is valid for s1.)
+	if _, err := (RunCursors{Key: key, Session: "s2"}).Decode(s); !errors.Is(err, ErrCursor) {
+		t.Errorf("another session: %v", err)
+	}
+	if _, err := (RunCursors{Key: other, Session: "s1"}).Decode(s); !errors.Is(err, ErrCursor) {
+		t.Errorf("another key: %v", err)
+	}
+	if _, err := (RunCursors{Key: key, Session: "s1"}).Decode(madeWithKey); err != nil {
+		t.Errorf("a cursor made with the key: %v", err)
 	}
 }

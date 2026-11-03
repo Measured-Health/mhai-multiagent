@@ -13,6 +13,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
 // Migration 00014: the platform's reads. mhai_platform reaches clinical data
@@ -434,5 +435,48 @@ func TestOneRunningVerifyRun(t *testing.T) {
 	}
 	for _, role := range []string{"mhai_gateway", "mhai_auth", "mhai_worker", "mhai_jobs", "mhai_audit_drain", "mhai_provision"} {
 		requireDenied(t, asRole(ctx, pool, role, `SELECT count(*) FROM audit_verify_runs`), role+" reading audit_verify_runs")
+	}
+}
+
+// TestMigration14DownRestoresPlatformAppend: 00014's Down puts 00003's
+// unrestricted platform append back and drops both audit_log indexes; Up
+// applies again.
+func TestMigration14DownRestoresPlatformAppend(t *testing.T) {
+	pg := testutil.StartPostgres(t)
+	ctx := context.Background()
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.Open(ctx, pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	state := func() (check string, indexes int) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `SELECT coalesce((SELECT with_check FROM pg_policies WHERE tablename = 'audit_log' AND policyname = 'platform_append'), ''),
+			(SELECT count(*) FROM pg_indexes WHERE tablename = 'audit_log' AND indexname IN ('audit_log_actor_idx', 'audit_log_request_idx'))`).
+			Scan(&check, &indexes); err != nil {
+			t.Fatal(err)
+		}
+		return check, indexes
+	}
+	if check, n := state(); check == "true" || n != 2 {
+		t.Fatalf("after up: with check %q, %d indexes", check, n)
+	}
+	if err := db.MigrateDownTo(ctx, pg.URL, 13); err != nil {
+		t.Fatalf("down to 13: %v", err)
+	}
+	if check, n := state(); check != "true" || n != 0 {
+		t.Fatalf("after down: with check %q (want true), %d indexes (want 0)", check, n)
+	}
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	if check, n := state(); check == "true" || n != 2 {
+		t.Fatalf("after up again: with check %q, %d indexes", check, n)
+	}
+	if err := db.MigrateDownTo(ctx, pg.URL, 0); err != nil {
+		t.Fatalf("down to 0: %v", err)
 	}
 }

@@ -66,3 +66,43 @@ func TestSetupHostContactOKMatches(t *testing.T) {
 		}
 	}
 }
+
+// TestSetupHostHalfSetContact: contact_half_set is true when exactly one of
+// the two lines is in the env file.
+func TestSetupHostHalfSetContact(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("no bash")
+	}
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "deploy", "setup-host.sh"))
+	if err != nil {
+		t.Skip("deploy/setup-host.sh is not beside this module")
+	}
+	text := string(src)
+	a := strings.Index(text, "contact_half_set() {")
+	b := strings.Index(text, "set_contact() {")
+	if a < 0 || b < a {
+		t.Fatal("contact_half_set not found in deploy/setup-host.sh")
+	}
+	if !strings.Contains(text, "if contact_half_set; then") {
+		t.Fatal("setup-host.sh does not call contact_half_set")
+	}
+	fn := text[a:b]
+	for _, c := range []struct {
+		env  string
+		half bool
+	}{
+		{"", false}, {"OTHER=1\n", false},
+		{"SECURITY_CONTACT_NAME=Desk\nSECURITY_CONTACT_EMAIL=a@b.example\n", false},
+		{"SECURITY_CONTACT_NAME=Desk\n", true}, {"SECURITY_CONTACT_EMAIL=a@b.example\n", true},
+		{"SECURITY_CONTACT_NAME=\nSECURITY_CONTACT_EMAIL=a@b.example\n", true},
+	} {
+		f := filepath.Join(t.TempDir(), ".env")
+		if err := os.WriteFile(f, []byte(c.env), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", "-c", "ENV_FILE=\"$1\"\n"+fn+"\ncontact_half_set", "bash", f)
+		if got := cmd.Run() == nil; got != c.half {
+			t.Errorf("env %q: half set %v, want %v", c.env, got, c.half)
+		}
+	}
+}

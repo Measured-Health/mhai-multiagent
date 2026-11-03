@@ -95,6 +95,13 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 - **mhai-web: `searched_kind` values `person`, `hospital` and `run`.** Core records a person-picker search, a read of the audit hospitals list and a read of the chain checks (the runs list, a run, the integrity status) as `audit.searched` with `searched_kind` `person`, `hospital` or `run` (Plan 4 Tasks 9 and 10). mhai-web's `facts.searched_kind` takes only `event`, `request`, `export`, `clearance` and `pseudonym`, so the catalogue gates those rows out (`searchedInWeb`) and they show as "can't be displayed". When mhai-web takes the values, widen `searchedInWeb` and the reader's `audit.searched` gate in `services/core/internal/audit/`, and refresh `testdata/web-audit-vocabulary.json`.
 - **mhai-web: an `analyst` actor role.** mhai-web's `ActorRole` has no `analyst`, so an audit entry whose actor is an analyst and nothing else is sent as the bare entry ("can't be displayed"), and the person picker (`GET /platform/audit/people`) leaves analyst-only accounts out (Plan 4 Task 9 ruling). When mhai-web adds the role, add it to `actorRoles` in `services/core/internal/audit/reader.go` and to `AuditPerson`/`AuditEvent` in `openapi.yaml`.
 
+## Plan 4b follow-ups (final review)
+
+- **Audit list filters still see attributes of rows sent bare.** A filter (`person`, `hospital`, `type`, `outcome`, `flagged`, `from`, `to`) matches on a row's real attributes even when the row is sent as the bare entry, so a filtered result can tell a platform admin or auditor something about a withheld row. Metadata only, no payload or free text (final review M2).
+- **A user name that can't be shown makes the integrity page 500.** A run's `by` or note author whose name fails the display rules fails the whole read. Validate names at provisioning so none can be stored (M4).
+- **The contact name is counted in runes in core and in UTF-16 units in mhai-web, and U+FFFD is not refused.** A name of 120 runes with characters outside the basic plane can pass core and fail mhai-web. Count UTF-16 units in `SecurityContactOK` and refuse U+FFFD, in `deploy/setup-host.sh` too (M7).
+- **The `audit_chain_broken` gauge is stale on the copy walking the scheduled check.** The copy that is walking the scheduled check does not refresh its gauge until the walk ends, so it can show an old value for up to the 10-minute budget (M8).
+
 ## Test follow-ups
 
 - **`TestTwoCoreCopiesShareGrants` (`internal/grant`) is flaky.** Seen once in CI during Plan 4b; it passed on a re-run. Find the race (two core copies sharing the grants KV) before it hides a real fault.

@@ -124,7 +124,8 @@ func (d Deps) startVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 // runs is GET /platform/audit/verify/runs?cursor → {runs, next_cursor}.
-// The first page is recorded; a page with a cursor is not.
+// Every page is recorded, and the 5-minute dedupe collapses them (R30): the
+// cursor is bound to the session, but a read never depends on it.
 func (d Deps) runs(w http.ResponseWriter, r *http.Request) {
 	p, ok := caller(w, r)
 	if !ok {
@@ -135,9 +136,17 @@ func (d Deps) runs(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "validation_failed")
 		return
 	}
+	key, err := audit.RunCursorKey(d.MasterKey)
+	if err != nil {
+		d.log().Error("platform: runs list refused: no cursor key", "request_id", httpx.RequestIDFrom(r.Context()),
+			"reason", "not_ready")
+		httpx.Error(w, r, "not_ready")
+		return
+	}
+	curs := audit.RunCursors{Key: key, Session: p.SessionID}
 	var after *audit.RunCursor
 	if c, ok := v["cursor"]; ok {
-		cur, err := audit.DecodeRunCursor(c)
+		cur, err := curs.Decode(c)
 		if err != nil {
 			httpx.Error(w, r, "validation_failed")
 			return
@@ -148,13 +157,8 @@ func (d Deps) runs(w http.ResponseWriter, r *http.Request) {
 	var next string
 	err = d.tx(r.Context(), func(tx pgx.Tx) error {
 		var err error
-		if out, next, err = audit.ListRuns(r.Context(), tx, after); err != nil {
+		if out, next, err = audit.ListRuns(r.Context(), tx, curs, after); err != nil {
 			return err
-		}
-		// The first page is the read; paging with a cursor writes nothing
-		// (spec §5.2).
-		if after != nil {
-			return nil
 		}
 		_, err = audit.RecordRunsRead(r.Context(), tx, reader(r, p), "runs", "")
 		return err

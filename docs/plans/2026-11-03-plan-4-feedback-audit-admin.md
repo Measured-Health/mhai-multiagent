@@ -46,7 +46,7 @@ In addition:
   No task removes or weakens one because another exists.
 - **`decided_by` comes only from the token.** No request body field, header or job field can set it.
 - **Free text stays in `feedback_events`:** `reason`, `corrected_diagnosis`, `rejection_note`, `jobs.cancel_note` and `audit_verify_runs.outcome_note`.
-  - None of it is logged, traced, audited, published on NATS, readable by `mhai_worker` or returned on a platform route.
+  - None of it is logged, traced, audited, published on NATS or readable by `mhai_worker`, and none is returned on a platform route, except the outcome note, which `VerifyRun` carries on the platform audit routes over `api.v1.platform` (spec §16, R31).
   - The reason and the corrected diagnosis are shown only on the clinical corrections routes. The rejection note goes only to the submitter and the reviewer.
 - **Reviewers see masked text only:** `clinical_decisions.masked_question` and `masked_patient_json`. They never see `clinical_queries.clinical_question` or `patient_data_json`.
 - **Python writes no permission rule.** The worker reads `operations.json` and never checks who approved. `SecondPerson` is core's flag; Python carries it as data and never acts on it.

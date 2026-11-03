@@ -165,6 +165,15 @@ contact_ok() {
   local atom='[^\x00-\x20\x7f()<>\[\]:;@\\,".]+'
   printf '%s\n' "$v" | LC_ALL=$lc grep -qP "^$atom(\\.$atom)*@$atom(\\.$atom)*\$"
 }
+# contact_half_set: exactly one of the two is set in $ENV_FILE. Core refuses
+# that outside development, and on the demo the status would answer 503 with
+# a name and no address, so it is an error, not a skipped step.
+contact_half_set() {
+  local n e
+  n=$(grep -c '^SECURITY_CONTACT_NAME=.' "$ENV_FILE" || true)
+  e=$(grep -c '^SECURITY_CONTACT_EMAIL=.' "$ENV_FILE" || true)
+  [ "$n" != "$e" ]
+}
 set_contact() {
   local name=$1 value=${2:-} prompt=$3
   if [ -z "$value" ] && grep -q "^${name}=." "$ENV_FILE"; then
@@ -188,6 +197,9 @@ set_contact() {
 }
 set_contact SECURITY_CONTACT_NAME  "${SECURITY_CONTACT_NAME:-}"  "Security contact name (e.g. Measured Health security)"
 set_contact SECURITY_CONTACT_EMAIL "${SECURITY_CONTACT_EMAIL:-}" "Security contact email"
+if contact_half_set; then
+  die "Only one of SECURITY_CONTACT_NAME and SECURITY_CONTACT_EMAIL is set in $ENV_FILE: set both, or neither"
+fi
 
 say "NATS NKey for the core service ($DEST/secrets/nats-gateway.nk)"
 mkdir -p "$DEST/secrets"

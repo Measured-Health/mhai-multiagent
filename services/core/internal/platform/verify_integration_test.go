@@ -228,18 +228,26 @@ func TestVerifyRunsReads(t *testing.T) {
 		}
 	}
 	next, _ := r.body["next_cursor"].(string)
-	if len(next) != 48 {
+	if len(next) != 80 {
 		t.Fatalf("next_cursor %q", next)
 	}
 	firstPage := len(actionsBy(t, u, "audit.searched"))
 	r = get(t, "/platform/audit/verify/runs?cursor="+next, tok)
 	ok(t, "runs page 2", r)
-	// Paging writes nothing (spec §5.2): only the first page is a read.
+	// Every page is a read, and the dedupe collapses them (R30).
 	if n := len(actionsBy(t, u, "audit.searched")); n != firstPage || firstPage != 1 {
 		t.Fatalf("recorded reads: %d after the first page, %d after the second", firstPage, n)
 	}
 	if p2 := r.body["runs"].([]any); len(p2) != 3 || r.body["next_cursor"] != nil || p2[0].(map[string]any)["id"] != made[audit.RunsLimit].String() {
 		t.Fatalf("page 2: %s", r.raw)
+	}
+	// A hand-made cursor (year 3000, all-f id) is refused: the cursor is
+	// bound to the session. Another session's is refused too.
+	forged := "?cursor=00e0" + strings.Repeat("0", 4) + strings.Repeat("f", 72)
+	problem(t, "forged cursor", get(t, "/platform/audit/verify/runs"+forged, tok), 422, "validation_failed")
+	problem(t, "another session's cursor", get(t, "/platform/audit/verify/runs?cursor="+next, mint(t, u)), 422, "validation_failed")
+	if n := len(actionsBy(t, u, "audit.searched")); n != 1 {
+		t.Fatalf("refused cursors left %d read rows", n)
 	}
 	for _, bad := range []string{"?cursor=zz", "?cursor=" + strings.ToUpper(next), "?cursor=", "?limit=5", "?cursor=" + next + "&cursor=" + next} {
 		problem(t, "runs "+bad, get(t, "/platform/audit/verify/runs"+bad, tok), 422, "validation_failed")
@@ -482,6 +490,20 @@ func TestUndisplayableReportOneRow(t *testing.T) {
 	if len(got) != 1 || len(got[0]) != 3 || got[0]["count"] != float64(3) || got[0]["first_id"] != "3" || got[0]["last_id"] != "50" {
 		t.Fatalf("rows: %v", got)
 	}
+	// The same ids again (any order, repeats) by the same session write
+	// nothing; another set is its own row.
+	if r := post(t, "/platform/audit/undisplayable", tok, `{"ids":["9","3","50"]}`); r.code != 204 {
+		t.Fatalf("repeat report: %d %s", r.code, r.raw)
+	}
+	if n := len(rows(u)); n != 1 {
+		t.Fatalf("a repeated report wrote %d rows, want 1", n)
+	}
+	if r := post(t, "/platform/audit/undisplayable", tok, `{"ids":["9","3"]}`); r.code != 204 {
+		t.Fatalf("other report: %d %s", r.code, r.raw)
+	}
+	if n := len(rows(u)); n != 2 {
+		t.Fatalf("another set wrote %d rows, want 2", n)
+	}
 	var many []string
 	for i := 1; i <= 51; i++ {
 		many = append(many, strconv.Itoa(i))
@@ -502,7 +524,7 @@ func TestUndisplayableReportOneRow(t *testing.T) {
 	} {
 		problem(t, name, post(t, "/platform/audit/undisplayable", tok, b), 422, "validation_failed")
 	}
-	if got := rows(u); len(got) != 1 {
+	if got := rows(u); len(got) != 2 {
 		t.Fatalf("refusals wrote rows: %v", got)
 	}
 	// 50 is allowed, and platform admins report too.
@@ -519,5 +541,24 @@ func TestUndisplayableReportOneRow(t *testing.T) {
 	found := slices.ContainsFunc(events(t, l), func(e map[string]any) bool { return e["kind"] == "audit_undisplayable_reported" })
 	if !found {
 		t.Error("the report is not in the list as audit_undisplayable_reported")
+	}
+}
+
+// TestRunWithUnshowableNoteFailsClosed: a note stored by other means that
+// OutcomeNoteOK refuses is never sent; the read fails.
+func TestRunWithUnshowableNoteFailsClosed(t *testing.T) {
+	clearRuns(t)
+	u := auditor(t)
+	tok := mint(t, u)
+	id := seedRun(t, "broken", 100*time.Second)
+	if _, err := super.Exec(context.Background(), `UPDATE audit_verify_runs SET outcome_note = 'see P-ABCD12 for it', outcome_by = $2, outcome_at = now()
+		WHERE id = $1`, id, u.id); err != nil {
+		t.Skipf("the database refuses such a note itself: %v", err)
+	}
+	for _, path := range []string{"/platform/audit/verify/runs/" + id.String(), "/platform/audit/verify/runs"} {
+		r := get(t, path, tok)
+		if r.code != 500 || strings.Contains(r.raw, "P-ABCD12") {
+			t.Errorf("%s: %d %s", path, r.code, r.raw)
+		}
 	}
 }
