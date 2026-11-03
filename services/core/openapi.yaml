@@ -543,8 +543,10 @@ paths:
         `not_found` (not the caller's, another hospital's, unknown, or not
         completed), 409 `conflict` (a live feedback exists for the
         question; a correction on an answer with no masked consultation),
-        then 422 `validation_failed` (`corrected_diagnosis` 1–200 and
-        `reason` 3–1000 characters once trimmed, no control characters;
+        then 422 `validation_failed` (`corrected_diagnosis` 1–200 characters
+        on one line and `reason` 3–1000 characters, which may span lines
+        (`\n`, `\r\n`), both once trimmed, no other control character and
+        no Unicode format character (bidi controls, zero-width);
         `client_created_at` at most 5 minutes ahead). After a withdrawal a
         new correction is allowed. The text is never logged or audited.
         Send an `Idempotency-Key`.
@@ -1110,8 +1112,8 @@ components:
       properties:
         query_id: { type: string, format: uuid }
         action: { type: string, enum: [validate, correct] }
-        corrected_diagnosis: { type: string, minLength: 1, maxLength: 200, description: "`correct` only." }
-        reason: { type: string, minLength: 3, maxLength: 1000, description: "`correct` only." }
+        corrected_diagnosis: { type: string, minLength: 1, maxLength: 200, description: "`correct` only. One line." }
+        reason: { type: string, minLength: 3, maxLength: 1000, description: "`correct` only. May span lines (`\\n`, `\\r\\n`)." }
         client_created_at: { type: string, format: date-time, description: When the app queued it (offline). }
     FeedbackOut:
       type: object
@@ -1125,7 +1127,7 @@ components:
       additionalProperties: false
       properties:
         reason_code: { type: string, enum: [not_supported, needs_rewording, unsafe, out_of_scope] }
-        note: { type: string, maxLength: 500 }
+        note: { type: string, maxLength: 500, description: "May span lines (`\\n`, `\\r\\n`); no other control character and no Unicode format character." }
     FeedbackStatsOut:
       type: object
       required: [agreed, corrections_waiting, corrections_approved, corrections_rejected, corrections_withdrawn]

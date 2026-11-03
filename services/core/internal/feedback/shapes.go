@@ -41,9 +41,11 @@ type submission struct {
 }
 
 // validate checks the body (spec §4.2): validate carries no text; correct
-// carries a corrected diagnosis of 1-200 and a reason of 3-1000 characters,
-// trimmed, with no control characters; client_created_at is RFC 3339 and at
-// most 5 minutes ahead of now.
+// carries a corrected diagnosis of 1-200 characters on one line and a
+// reason of 3-1000 characters that may span lines (\n, \r\n), both
+// trimmed, with no other control character and no Unicode format
+// character (R11); client_created_at is RFC 3339 and at most 5 minutes
+// ahead of now.
 func (in FeedbackIn) validate(now time.Time) (submission, bool) {
 	s := submission{action: in.Action}
 	switch in.Action {
@@ -52,8 +54,8 @@ func (in FeedbackIn) validate(now time.Time) (submission, bool) {
 			return s, false
 		}
 	case "correct":
-		d, ok1 := text(in.CorrectedDiagnosis, 1, 200)
-		r, ok2 := text(in.Reason, 3, 1000)
+		d, ok1 := text(in.CorrectedDiagnosis, 1, 200, false)
+		r, ok2 := text(in.Reason, 3, 1000, true)
 		if !ok1 || !ok2 {
 			return s, false
 		}
@@ -71,16 +73,27 @@ func (in FeedbackIn) validate(now time.Time) (submission, bool) {
 	return s, true
 }
 
-// text trims p and checks it is lo-hi characters with no control
-// characters.
-func text(p *string, lo, hi int) (string, bool) {
+// text trims p and checks it is lo-hi characters of valid UTF-8 with no
+// control character and no Unicode format character (category Cf: bidi
+// overrides and isolates, zero-width characters, the BOM), which could
+// make the text read differently from what it holds (R11). multiline
+// allows line breaks, \n and \r\n only (a lone \r is refused).
+func text(p *string, lo, hi int, multiline bool) (string, bool) {
 	if p == nil {
 		return "", false
 	}
 	s := strings.TrimSpace(*p)
 	n := utf8.RuneCountInString(s)
-	if !utf8.ValidString(s) || n < lo || n > hi || strings.ContainsFunc(s, unicode.IsControl) {
+	if !utf8.ValidString(s) || n < lo || n > hi {
 		return "", false
+	}
+	for i, r := range s {
+		switch {
+		case multiline && r == '\n':
+		case multiline && r == '\r' && i+1 < len(s) && s[i+1] == '\n':
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			return "", false
+		}
 	}
 	return s, true
 }
@@ -106,8 +119,9 @@ var rejectCodes = func() map[string]bool {
 }()
 
 // parseReject decodes and checks a reject body: a known reason_code and a
-// note of at most 500 characters with no control characters (trimmed; a
-// blank note is no note).
+// note of at most 500 characters that may span lines, with no other
+// control character and no format character (text; trimmed; a blank note
+// is no note).
 func parseReject(body []byte) (code string, note *string, ok bool) {
 	var in RejectIn
 	if len(bytes.TrimSpace(body)) == 0 || decodeStrict(body, &in) != nil || !rejectCodes[in.ReasonCode] {
@@ -116,7 +130,7 @@ func parseReject(body []byte) (code string, note *string, ok bool) {
 	if in.Note != nil {
 		n := strings.TrimSpace(*in.Note)
 		if n != "" {
-			t, ok := text(&n, 1, 500)
+			t, ok := text(&n, 1, 500, true)
 			if !ok {
 				return "", nil, false
 			}
