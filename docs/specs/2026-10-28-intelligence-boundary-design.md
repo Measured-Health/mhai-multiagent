@@ -8,6 +8,7 @@
   - [ADR 0010](../adr/0010-api-in-go-models-in-python-over-nats.md): API in Go, models in Python, NATS between them.
   - The core design, `docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md` (approved). This document details its §4.3, §5, §7.4–§7.7 and step 4 of its §10. Where this design refines a rule there, it says so and why (§14).
   - Plan 2, `docs/plans/2026-10-26-plan-2-go-gateway-auth.md`, and what it built in `services/core` (`internal/bus`, `internal/token`, `internal/authz`, `internal/audit`, `internal/db`) and `services/nats/nats.conf`.
+- **Amended 2026-11-03 (ADR 0013):** for `run_query`, masked text (the question, two allow-listed patient fields and shared guideline chunks) may go to a cloud language model for a hospital a platform admin has opted in; verification stays local. See [ADR 0013](../adr/0013-allow-masked-text-to-cloud-language-models.md) and [the cloud model providers design](2026-11-03-cloud-model-providers-design.md). §8.2 and §13.4 are amended by it.
 - **Built:** Plan 3 (Tasks 1–15). Where the build departs from the letter of a section, §18 records it.
 - **Must not block:** the parked performance design, `docs/specs/2026-10-27-intelligence-performance-design.md` (GPU, millisecond steps, streaming). §11 shows how.
 
@@ -301,6 +302,7 @@ The token is the main check. NATS permissions make sure only core can even put a
 - **Shared reference content:** visible through the existing `shared_read` policy. The `hospital_rows` `WITH CHECK` stops any app role writing a row with `hospital_id IS NULL`. Shared content is loaded by the owner-side seed tool, never by a worker.
 - **Patient scope inside a hospital:** RLS separates hospitals, not patients. Retrieval keeps its existing per-patient filter (`chunk_visible_to()`, ADR 0004), with the patient id taken from the claimed `clinical_queries` row, never from a message body.
 - **Data in messages:** jobs carry ids (`query_id`); the worker reads the question and patient data from `clinical_queries` under RLS. A row from another hospital is invisible, so a forged id gives `not_found`, never data.
+- **Amended by [ADR 0013](../adr/0013-allow-masked-text-to-cloud-language-models.md):** for a hospital opted in to a cloud model (`clinical_queries.model_route`, set by core), the pipeline sends the masked question, two allow-listed masked patient fields and the text of the shared chunks local retrieval selected to that provider, through an egress proxy, and nothing else. The masking gate, the residual-PII scan and the route rules are in [the cloud model providers design](2026-11-03-cloud-model-providers-design.md) §4–§6.
 
 ### 8.3 Stale roles on long jobs
 
