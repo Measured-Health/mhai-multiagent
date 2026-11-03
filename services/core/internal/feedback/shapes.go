@@ -76,8 +76,10 @@ func (in FeedbackIn) validate(now time.Time) (submission, bool) {
 // text trims p and checks it is lo-hi characters of valid UTF-8 with no
 // control character and no Unicode format character (category Cf: bidi
 // overrides and isolates, zero-width characters, the BOM), which could
-// make the text read differently from what it holds (R11). multiline
-// allows line breaks, \n and \r\n only (a lone \r is refused).
+// make the text read differently from what it holds (R11), and no line or
+// paragraph separator (U+2028, U+2029: a line break by another name).
+// multiline allows line breaks, \n and \r\n only (a lone \r is
+// refused).
 func text(p *string, lo, hi int, multiline bool) (string, bool) {
 	if p == nil {
 		return "", false
@@ -91,7 +93,7 @@ func text(p *string, lo, hi int, multiline bool) (string, bool) {
 		switch {
 		case multiline && r == '\n':
 		case multiline && r == '\r' && i+1 < len(s) && s[i+1] == '\n':
-		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+		case unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
 			return "", false
 		}
 	}
