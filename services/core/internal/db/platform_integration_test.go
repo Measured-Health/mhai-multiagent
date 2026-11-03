@@ -216,6 +216,9 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		case name == "mhai_platform_jobs":
 			// 00016 (Task 12): the failed-jobs list's own reader.
 			wantOwner = "mhai_jobs_reader"
+		case name == "mhai_guardrail_counts":
+			// 00017 (Task 13): the guardrail statistics' own reader.
+			wantOwner = "mhai_guardrail_reader"
 		}
 		if owner != wantOwner || !definer {
 			t.Errorf("%s: owner %s (want %s), security definer %v", name, owner, wantOwner, definer)
@@ -229,9 +232,9 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		}
 	}
 
-	// The platform may call them: the health bodies are built (00015) and
-	// the jobs list (00016); the guardrail counts still refuse until Task
-	// 13; nobody else may call any.
+	// The platform may call them: the health bodies are built (00015), the
+	// jobs list (00016) and the guardrail counts (00017); nobody else may
+	// call any.
 	call := map[string]string{
 		"mhai_health_timings":    `SELECT * FROM mhai_health_timings('1 hour')`,
 		"mhai_health_failures":   `SELECT * FROM mhai_health_failures()`,
@@ -240,7 +243,7 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"mhai_guardrail_counts":  `SELECT * FROM mhai_guardrail_counts(now() - interval '7 days', now())`,
 	}
 	built := map[string]bool{"mhai_health_timings": true, "mhai_health_failures": true, "mhai_health_guidelines": true,
-		"mhai_platform_jobs": true}
+		"mhai_platform_jobs": true, "mhai_guardrail_counts": true}
 	for name, q := range call {
 		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q); return err })
 		switch {
