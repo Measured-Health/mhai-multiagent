@@ -87,7 +87,7 @@ or an image:
 
 | Where | What |
 |---|---|
-| `/srv/mhai-backend/.env` (mode 600) | `POSTGRES_PASSWORD`, `CORE_DB_PASSWORD`, `PROVISION_DB_PASSWORD`, `MFA_ENCRYPTION_KEY`, `BFF_SERVICE_KEYS`; the NATS public keys `NATS_GATEWAY_NKEY`, `NATS_BFF_NKEY`, `NATS_BFF_PLATFORM_NKEY` (no seed is ever in `.env`) |
+| `/srv/mhai-backend/.env` (mode 600) | `POSTGRES_PASSWORD`, `CORE_DB_PASSWORD`, `PROVISION_DB_PASSWORD`, `MFA_ENCRYPTION_KEY`, `BFF_SERVICE_KEYS`; the NATS public keys `NATS_GATEWAY_NKEY`, `NATS_BFF_NKEY`, `NATS_BFF_PLATFORM_NKEY` (no seed is ever in `.env`); the security contact `SECURITY_CONTACT_NAME`, `SECURITY_CONTACT_EMAIL` (not secrets) |
 | `/srv/mhai-backend/secrets/nats-gateway.nk` (mode 400, uid 65532) | the core service's NATS NKey seed, mounted into `core` only |
 | `/srv/mhai-backend/secrets/bff/nats-bff-clinical.nk`, `nats-bff-platform.nk` (mode 400, uid 1001; folder mode 750) | each frontend BFF's NATS NKey seed, mounted by mhai-web's compose into that app's container only |
 | volume `mhai-backend-corekeys` | the access-token signing key (Ed25519) |
@@ -173,6 +173,26 @@ another, which it saves in `.env` for the workflow:
 
 It pulls `natsio/nats-box` once, to make the NKeys inside a container with
 no network.
+
+**The security contact** (`SECURITY_CONTACT_NAME`, `SECURITY_CONTACT_EMAIL`)
+is who the platform app's audit integrity page names. It is required: core
+refuses to start without it outside development. It is never generated (a
+made-up contact would be shown to auditors as real): `setup-host.sh` takes it
+from the environment, keeps it from `.env`, or asks for it at a terminal.
+On this demo (development) a missing contact doesn't stop the deploy, but
+`GET /platform/audit/verify/status` answers 503 until it is set. On a host
+that is already set up, either run this repo's newer `setup-host.sh` again
+(as in step 2) with the two variables in its environment, or add the two
+lines to `/srv/mhai-backend/.env` yourself; then recreate core (the next
+deploy does it too):
+
+```bash
+cd /srv/mhai-backend
+printf '%s\n' "SECURITY_CONTACT_NAME=Measured Health security" "SECURITY_CONTACT_EMAIL=security@example.org" >> .env
+docker compose up -d core
+```
+
+Values hold no quotes, backslash, `$` or new line (compose reads `.env`).
 
 ### 3. Turn the deploy on
 

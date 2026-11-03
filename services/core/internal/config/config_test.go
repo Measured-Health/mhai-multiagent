@@ -262,7 +262,7 @@ func TestLoadNATSTLSAndStreams(t *testing.T) {
 func TestValidateServeRequiresNATSTLSOutsideDevelopment(t *testing.T) {
 	full := NATSTLS{CAPath: "/tls/ca.pem", CertPath: "/tls/core.pem", KeyPath: "/tls/core-key.pem"}
 	base := Config{DatabaseURL: "postgres://u:p@h/db?sslmode=verify-full", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem",
-		NATSJSReplicas: 3}
+		NATSJSReplicas: 3, SecurityContactName: "Synthetic Security Desk", SecurityContactEmail: "security@havana.example"}
 	for _, env := range []string{"production", "Production", "staging", ""} {
 		c := base
 		c.Env = env
@@ -412,7 +412,36 @@ func TestUnsetEnvIsProduction(t *testing.T) {
 func productionServe() Config {
 	return Config{Env: "production", DatabaseURL: "postgres://u:p@db.internal/mhai?sslmode=verify-full", NATSURL: "tls://h:4222",
 		AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem", NATSJSReplicas: 3,
-		NATSTLS: NATSTLS{CAPath: "/tls/ca.pem", CertPath: "/tls/core.pem", KeyPath: "/tls/core-key.pem"}}
+		NATSTLS:             NATSTLS{CAPath: "/tls/ca.pem", CertPath: "/tls/core.pem", KeyPath: "/tls/core-key.pem"},
+		SecurityContactName: "Synthetic Security Desk", SecurityContactEmail: "security@havana.example"}
+}
+
+// Plan 4 Task 10: the audit integrity page's security contact is required
+// outside development, and must be well formed wherever it is set.
+func TestValidateServeSecurityContact(t *testing.T) {
+	for _, env := range []string{"production", "staging", ""} {
+		c := productionServe()
+		c.Env, c.SecurityContactName, c.SecurityContactEmail = env, "", ""
+		if err := c.ValidateServe(); err == nil || !strings.Contains(err.Error(), "SECURITY_CONTACT_NAME") {
+			t.Errorf("%q without a contact: %v", env, err)
+		}
+	}
+	d := Config{Env: "development", DatabaseURL: "postgres://u:p@h/db?sslmode=disable", NATSURL: "nats://h:4222",
+		AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem", NATSJSReplicas: 1}
+	if err := d.ValidateServe(); err != nil {
+		t.Fatalf("development without a contact: %v", err)
+	}
+	for _, bad := range [][2]string{
+		{"Desk", ""}, {"", "a@b.example"}, {" Desk", "a@b.example"}, {"Desk\u202e", "a@b.example"}, {"Dr P-ABCD12", "a@b.example"},
+		{"Desk", "not an address"}, {"Desk", "Desk <a@b.example>"}, {strings.Repeat("n", 121), "a@b.example"},
+	} {
+		for _, c := range []Config{productionServe(), d} {
+			c.SecurityContactName, c.SecurityContactEmail = bad[0], bad[1]
+			if err := c.ValidateServe(); err == nil || !strings.Contains(err.Error(), "SECURITY_CONTACT") {
+				t.Errorf("%s %q/%q: %v", c.Env, bad[0], bad[1], err)
+			}
+		}
+	}
 }
 
 // Final review I-2: outside development core's Postgres connection must be

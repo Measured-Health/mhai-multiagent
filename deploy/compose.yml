@@ -189,6 +189,12 @@ services:
       CORE_HTTP_API: "on"
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set in /srv/mhai-backend/.env}
       BFF_SERVICE_KEYS: ${BFF_SERVICE_KEYS:?set in /srv/mhai-backend/.env}
+      # Who the platform app's audit integrity page names (setup-host.sh
+      # asks for them; never generated). Core refuses to start without them
+      # outside development; on this development demo the integrity status
+      # answers 503 until they are set, and the deploy still goes ahead.
+      SECURITY_CONTACT_NAME: ${SECURITY_CONTACT_NAME:-}
+      SECURITY_CONTACT_EMAIL: ${SECURITY_CONTACT_EMAIL:-}
       GOMEMLIMIT: 256MiB
     # Loopback only. Nothing is in front of it yet; see deploy/nginx/ for the
     # disabled site to enable once the frontend's BFF calls it.

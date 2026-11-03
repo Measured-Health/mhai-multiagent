@@ -131,6 +131,41 @@ add_secret MFA_ENCRYPTION_KEY    "$(rand_hex 32)"
 add_secret BFF_SERVICE_KEYS      "$(rand_hex 32)"
 info "mode $(stat -c '%a %U' "$ENV_FILE")"
 
+say "Security contact in $DEST/.env (named on the platform app's audit integrity page)"
+# Not a secret, and never generated: a made-up contact would be shown to
+# auditors as real. From the environment, else kept from .env, else asked
+# for when there is a terminal. Left unset, core still starts on the demo
+# (development) but GET /platform/audit/verify/status answers 503 until it
+# is set; outside development core refuses to start without it.
+CONTACT_MISSING=0
+contact_ok() {
+  # One line, no quotes, backslash or $ (compose would read them), 1-254 chars.
+  case "$1" in *[\$\"\'\\\`]*|"") return 1 ;; esac
+  [ "${#1}" -le 254 ] && [ "$(printf '%s' "$1" | wc -l)" -eq 0 ]
+}
+set_contact() {
+  local name=$1 value=${2:-} prompt=$3
+  if [ -z "$value" ] && grep -q "^${name}=." "$ENV_FILE"; then
+    info "$name already set, kept"
+    return
+  fi
+  if [ -z "$value" ] && [ -t 0 ]; then
+    read -r -p "    $prompt (empty to skip): " value || value=
+  fi
+  if [ -z "$value" ]; then
+    info "$name not set"
+    CONTACT_MISSING=1
+    return
+  fi
+  contact_ok "$value" || die "$name has a character .env can't hold (quotes, backslash, \$, a new line)"
+  case "$name" in *EMAIL) case "$value" in *@*.*) ;; *) die "$name is not an email address" ;; esac ;; esac
+  sed -i "/^${name}=/d" "$ENV_FILE"
+  printf '%s=%s\n' "$name" "$value" >> "$ENV_FILE"
+  info "$name written"
+}
+set_contact SECURITY_CONTACT_NAME  "${SECURITY_CONTACT_NAME:-}"  "Security contact name (e.g. Measured Health security)"
+set_contact SECURITY_CONTACT_EMAIL "${SECURITY_CONTACT_EMAIL:-}" "Security contact email"
+
 say "NATS NKey for the core service ($DEST/secrets/nats-gateway.nk)"
 mkdir -p "$DEST/secrets"
 chmod 700 "$DEST/secrets"
@@ -313,6 +348,11 @@ say "Done"
 if [ "$ROTATED" = 1 ]; then
   info "A BFF key was rotated: restart nats and that BFF's app, or it cannot connect:"
   info "  (cd $DEST && docker compose up -d --force-recreate nats), then restart the app"
+fi
+if [ "$CONTACT_MISSING" = 1 ]; then
+  info "No security contact yet: the audit integrity status answers 503 until it is set. Run again with"
+  info "  SECURITY_CONTACT_NAME='...' SECURITY_CONTACT_EMAIL='...' bash $DEST/setup-host.sh"
+  info "then redeploy (or: cd $DEST && docker compose up -d core)."
 fi
 info "Nothing was started. Next: set the repository variable DEPLOY_ENABLED=true"
 info "and run the Deploy backend demo workflow (deploy/README.md)."

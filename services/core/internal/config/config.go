@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const minSecretLen = 32
@@ -60,8 +64,9 @@ type Config struct {
 	OTLPInsecure bool
 	// SecurityContactName and SecurityContactEmail are who the audit
 	// integrity page names (SECURITY_CONTACT_NAME, SECURITY_CONTACT_EMAIL;
-	// Plan 4 spec §5.2). Unset, GET /platform/audit/verify/status answers
-	// 503 not_ready; serve warns at start-up.
+	// Plan 4 spec §5.2). Required outside development (ValidateServe); in
+	// development, unset, GET /platform/audit/verify/status answers 503
+	// not_ready and serve warns at start-up.
 	SecurityContactName  string
 	SecurityContactEmail string
 }
@@ -195,6 +200,26 @@ func Load() (Config, error) {
 	return c, nil
 }
 
+// pseudonymIn is mhai-web's PSEUDONYM_IN: a pseudonym anywhere in a string.
+var pseudonymIn = regexp.MustCompile(`(^|[^A-Za-z0-9])P-[A-Z0-9]{4,12}([^A-Za-z0-9]|$)`)
+
+// SecurityContactOK reports whether name and email are a contact mhai-web
+// shows: a trimmed name of 1 to 120 characters with no control or format
+// character and nothing of the pseudonym's shape, and a plain address (no
+// display name) of at most 254 characters.
+func SecurityContactOK(name, email string) bool {
+	if name == "" || strings.TrimSpace(name) != name || utf8.RuneCountInString(name) > 120 || !utf8.ValidString(name) ||
+		strings.ContainsFunc(name, func(r rune) bool { return unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) }) ||
+		pseudonymIn.MatchString(name) {
+		return false
+	}
+	if email == "" || len(email) > 254 {
+		return false
+	}
+	a, err := mail.ParseAddress(email)
+	return err == nil && a.Address == email && a.Name == ""
+}
+
 func secret(name string) (string, error) {
 	v := strings.TrimSpace(os.Getenv(name))
 	if v == "" {
@@ -268,6 +293,16 @@ func (c Config) ValidateServe() error {
 		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH must be set together"))
 	case !allTLS && !c.Development():
 		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH are required outside development"))
+	}
+	// The audit integrity page names a security contact (Plan 4 §5.2):
+	// required outside development, and always well formed when set.
+	switch {
+	case c.SecurityContactName == "" && c.SecurityContactEmail == "":
+		if !c.Development() {
+			errs = append(errs, errors.New("SECURITY_CONTACT_NAME and SECURITY_CONTACT_EMAIL are required outside development"))
+		}
+	case !SecurityContactOK(c.SecurityContactName, c.SecurityContactEmail):
+		errs = append(errs, errors.New("SECURITY_CONTACT_NAME must be 1 to 120 characters with no control character, and SECURITY_CONTACT_EMAIL a plain address; set both"))
 	}
 	if !c.Development() {
 		// Final review I-2: the database carries every hospital's clinical
