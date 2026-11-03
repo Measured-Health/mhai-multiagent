@@ -218,7 +218,13 @@ throwaway generated secrets and runs `go test -tags smoke
 runs the two-person rule: clinician A asks and suggests a correction, A's
 approve is 403 `self_approval`, clinician B of the same hospital approves
 (204), `correction.applied` lands on a verified chain, and exactly one
-`feedback_buffer` row exists. Set
+`feedback_buffer` row exists. `TestSmokeAuditLog` (Plan 4b) signs in a
+synthetic auditor over `api.v1.platform` (two-step enrolled with a code
+the test computes), starts `POST /platform/audit/verify` and polls the run
+to `intact`, reads `GET /platform/audit/verify/status` (200 only with the
+stack's synthetic `SECURITY_CONTACT_NAME` and `SECURITY_CONTACT_EMAIL`), and
+finds clinician B's `review_submitted` in the log filtered to `type=review`.
+Set
 `POSTGRES_PORT`, `NATS_PORT`, `CORE_PORT` and `SMOKE_PROJECT` when the
 defaults clash.
 
@@ -368,6 +374,36 @@ note) is never logged or audited; refusals are audited with the key
 `reason`. Core's `pipeline_learning` JetStream consumer delivers
 `jobs.v1.*.approve_correction` to the pipeline worker, and the drainer
 turns the worker's fact into `correction.applied` against the correction.
+
+## The audit log (Plan 4, part 4b)
+
+Platform admins and auditors (platform audience, two-step always) read the
+hash chain as the frontend's audit events (`internal/platform`,
+`internal/audit`):
+
+- `GET /platform/audit` lists newest first with the filters `hospital`,
+  `person`, `type`, `outcome`, `flagged`, `from`, `to` and an exact-id `q`;
+  `/{id}`, `/hospitals` and `/people` read one entry and the pickers. The
+  cursor is a hex HMAC bound to the session and the filters. A pseudonym
+  shape, in a query, a cursor or a response, is refused or never sent.
+- A catalogue maps each action to an mhai-web `type` and `kind`. An action
+  with no kind (17 from Plans 2 and 3, and the per-job `job.retried` and
+  `job.cancelled` rows) stays a withheld row: the bare entry (`type:
+  security`, `kind: unknown`), so nothing leaks and the app reports it as
+  undisplayable. `review_submitted` carries no `facts.state` yet.
+- Every page, detail, people and hospitals read is itself recorded
+  (`audit.viewed`, or `audit.searched` for `q`, a person or hospital search
+  and a read of the chain checks), deduped per session and filter set for 5
+  minutes in Postgres (`idempotency_keys`, scope `audit.read`) in the same
+  transaction as the row.
+- Chain checks: `POST /platform/audit/verify` starts one (or returns the
+  running one); it walks the whole chain in keyset pages inside one
+  read-only snapshot as `mhai_platform`, with a 10-minute budget, and is
+  `intact` only when the whole chain was walked. A daily check runs at 06:00
+  UTC. `GET .../verify/status` is the header's read (503 `not_ready` without
+  `SECURITY_CONTACT_NAME` and `SECURITY_CONTACT_EMAIL`); an auditor can add
+  an outcome note to a broken check. Auditors can write on these routes only
+  (`AuditorWrite`).
 
 ## Known limits
 

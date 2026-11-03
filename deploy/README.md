@@ -175,8 +175,10 @@ It pulls `natsio/nats-box` once, to make the NKeys inside a container with
 no network.
 
 **The security contact** (`SECURITY_CONTACT_NAME`, `SECURITY_CONTACT_EMAIL`)
-is who the platform app's audit integrity page names. It is required: core
-refuses to start without it outside development. It is never generated (a
+must be in `/srv/mhai-backend/.env` for the demo's audit integrity page to
+work (Plan 4b): the smoke test and the page both need them. They name who
+the platform app's audit integrity page shows. They are required: core
+refuses to start without them outside development. They are never generated (a
 made-up contact would be shown to auditors as real): `setup-host.sh` takes it
 from the environment, keeps it from `.env`, or asks for it at a terminal.
 On this demo (development) a missing contact doesn't stop the deploy, but
@@ -192,7 +194,10 @@ printf '%s\n' "SECURITY_CONTACT_NAME=Measured Health security" "SECURITY_CONTACT
 docker compose up -d core
 ```
 
-Values hold no quotes, backslash, `$` or new line (compose reads `.env`).
+`setup-host.sh` checks the values as core does (a name of 1 to 120 characters,
+trimmed, no control character and no pseudonym such as `P-AB12`; a plain
+address of at most 254 characters). Values also hold no quote, backslash,
+backtick, `$`, `#` or new line, because compose reads `.env`.
 
 ### 3. Turn the deploy on
 

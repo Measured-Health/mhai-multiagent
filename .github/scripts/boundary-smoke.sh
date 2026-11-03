@@ -41,6 +41,7 @@ secret() { printf 'k%s' "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"; }
 pg_pw=$(secret)
 gateway_pw=$(secret)
 bff_clinical_pw=$(secret)
+bff_platform_pw=$(secret)
 bff_key=$(secret)
 cat > "$envfile" <<EOF
 POSTGRES_DB=mhai
@@ -58,7 +59,9 @@ NATS_GATEWAY_PASSWORD=$gateway_pw
 NATS_PIPELINE_PASSWORD=$(secret)
 NATS_ECHO_PASSWORD=$(secret)
 NATS_BFF_CLINICAL_PASSWORD=$bff_clinical_pw
-NATS_BFF_PLATFORM_PASSWORD=$(secret)
+NATS_BFF_PLATFORM_PASSWORD=$bff_platform_pw
+SECURITY_CONTACT_NAME=Synthetic Smoke Security
+SECURITY_CONTACT_EMAIL=security@smoke.example.test
 NATS_JS_KEY=$(secret)$(secret)
 EOF
 
@@ -96,6 +99,7 @@ echo "smoke: stack up (core ready)"
 
 export SMOKE_NATS_URL="nats://127.0.0.1:$nats_port"
 export SMOKE_NATS_BFF_CLINICAL_PASSWORD=$bff_clinical_pw
+export SMOKE_NATS_BFF_PLATFORM_PASSWORD=$bff_platform_pw
 export SMOKE_NATS_GATEWAY_PASSWORD=$gateway_pw
 export SMOKE_DATABASE_URL="postgres://mhai:$pg_pw@127.0.0.1:$pg_port/mhai?sslmode=disable"
 export SMOKE_CORE_URL="http://127.0.0.1:$core_port"

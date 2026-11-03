@@ -8,6 +8,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The audit log for platform admins and auditors (Plan 4, part 4b;
+  OpenAPI 1.6.0, additive). `GET /platform/audit` (filters, `q`, HMAC-bound
+  cursor), `/platform/audit/{id}`, `/hospitals`, `/people` and
+  `POST /platform/audit/undisplayable`; every page read is recorded as
+  `audit.viewed` or `audit.searched` (once per session and filter set per
+  5 minutes, in the same transaction). Chain checks: `POST
+  /platform/audit/verify` (auditors may write here and nowhere else),
+  `GET /platform/audit/verify/runs`, `/runs/{id}`, `/status`, and an
+  auditor's `POST .../runs/{id}/outcome`; a check also runs daily at
+  06:00 UTC and sets the `audit_chain_broken` gauge. A chain row the
+  catalogue can't map to an mhai-web kind is sent as the bare entry.
+  `SECURITY_CONTACT_NAME` and `SECURITY_CONTACT_EMAIL` are required outside
+  development (the status route is 503 without them);
+  `deploy/setup-host.sh` asks for them and checks them as core does. Migration
+  00014. New smoke test `TestSmokeAuditLog` (a synthetic auditor over
+  `api.v1.platform`: start a check, poll it to `intact`, read the status,
+  find clinician B's `review_submitted` under `type=review`); the smoke
+  stack now has a `bff_platform` password and a synthetic security contact.
 - `mfa_enrolled` on the `MFARequired` sign-in reply (`POST /auth/login`,
   OpenAPI 1.4.0). `false`: the account has no two-step set up, so the
   frontend sends the challenge with an empty code to get the enrolment-only

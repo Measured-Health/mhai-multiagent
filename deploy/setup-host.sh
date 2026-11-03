@@ -138,10 +138,32 @@ say "Security contact in $DEST/.env (named on the platform app's audit integrity
 # (development) but GET /platform/audit/verify/status answers 503 until it
 # is set; outside development core refuses to start without it.
 CONTACT_MISSING=0
+# contact_ok KIND VALUE: KIND is name or email. It must accept exactly what
+# core's config.SecurityContactOK accepts (services/core/internal/config,
+# kept in step by contact_script_test.go there), and also refuse what .env
+# can't hold: compose reads a quote, backslash, backtick or $, and treats an
+# unquoted " #" as a comment, so none of those, and no "#" at all.
 contact_ok() {
-  # One line, no quotes, backslash or $ (compose would read them), 1-254 chars.
-  case "$1" in *[\$\"\'\\\`]*|"") return 1 ;; esac
-  [ "${#1}" -le 254 ] && [ "$(printf '%s' "$1" | wc -l)" -eq 0 ]
+  local kind=$1 v=$2
+  case "$v" in *[\$\"\'\\\`\#]*|"") return 1 ;; esac
+  case "$v" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  printf '%s' "$v" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || return 1
+  local lc=C.UTF-8 sp='[\s\p{Z}\x{85}]'
+  if [ "$kind" = name ]; then
+    # 1-120 characters, trimmed, no control or format character, and
+    # nothing of the pseudonym's shape (mhai-web's PSEUDONYM_IN).
+    printf '%s\n' "$v" | LC_ALL=$lc grep -qP '^.{1,120}$' || return 1
+    printf '%s\n' "$v" | LC_ALL=$lc grep -qP "^$sp|$sp\$" && return 1
+    printf '%s\n' "$v" | LC_ALL=$lc grep -qP '[\p{Cc}\p{Cf}]' && return 1
+    printf '%s\n' "$v" | LC_ALL=C grep -qE '(^|[^A-Za-z0-9])P-[A-Z0-9]{4,12}([^A-Za-z0-9]|$)' && return 1
+    return 0
+  fi
+  # email: at most 254 bytes, a plain address (no display name) of dot
+  # atoms either side of one @ (core also takes an IP-literal domain such as
+  # a@[1.2.3.4]; this refuses it).
+  [ "$(printf '%s' "$v" | LC_ALL=C wc -c)" -le 254 ] || return 1
+  local atom='[^\x00-\x20\x7f()<>\[\]:;@\\,".]+'
+  printf '%s\n' "$v" | LC_ALL=$lc grep -qP "^$atom(\\.$atom)*@$atom(\\.$atom)*\$"
 }
 set_contact() {
   local name=$1 value=${2:-} prompt=$3
@@ -157,8 +179,9 @@ set_contact() {
     CONTACT_MISSING=1
     return
   fi
-  contact_ok "$value" || die "$name has a character .env can't hold (quotes, backslash, \$, a new line)"
-  case "$name" in *EMAIL) case "$value" in *@*.*) ;; *) die "$name is not an email address" ;; esac ;; esac
+  kind=name
+  case "$name" in *EMAIL) kind=email ;; esac
+  contact_ok "$kind" "$value" || die "$name is not acceptable: core shows it on the audit page and refuses it if it has a quote, backslash, backtick, \$ or #, a control character, a pseudonym (P-XXXX), is longer than 120 (name) or 254 (email), or is not a plain address"
   sed -i "/^${name}=/d" "$ENV_FILE"
   printf '%s=%s\n' "$name" "$value" >> "$ENV_FILE"
   info "$name written"

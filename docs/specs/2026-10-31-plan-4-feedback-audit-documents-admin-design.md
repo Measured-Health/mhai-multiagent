@@ -632,7 +632,9 @@ The product owner approved the design on 2026-11-03 ("yes") and accepted every r
 11. **The migration that changes `feedback_events`:** it renames `clinician_id` and drops three unused columns.
     *Decided:* accept; the table is empty outside tests (synthetic data only), and the deploy's pre-migrate check will stop if it isn't.
 
-## 16. Amended during the build (4a)
+## 16. Amended during the build
+
+### 4a
 
 Rulings made while building part 4a. Where they differ from the text above, these win.
 
@@ -641,3 +643,18 @@ Rulings made while building part 4a. Where they differ from the text above, thes
 - **§4.7 step 5 (a second job for an applied correction):** a second `approve_correction` job for a correction that is already applied completes with its own `correction.applied` fact, and the buffer keeps its one row. The unique violation on `correction_id` rolls back only the insert; the job and its fact are still recorded.
 - **R11 (§4.4, free-text rules):** newlines (`\n`, `\r\n`) are allowed in `reason` and in `rejection_note`. Unicode format characters (category Cf: bidi controls, zero-width) and the line and paragraph separators (Zl, Zp: U+2028, U+2029) are refused in all three texts. `corrected_diagnosis` stays a single line.
 - **Accepted deviation (guard order):** a route whose body carries the target (submit: `query_id`) or whose body is oversized can answer 422 `validation_failed` before 404 `not_found`, because the body is read before the target is known. The 404 order holds on every route that names the target in the path.
+
+### 4b
+
+Rulings made while building part 4b (Tasks 8 to 10). Where they differ from the text above, these win.
+
+- **R21 (§5.3, actions with no mhai-web kind):** the 17 actions from Plans 2 and 3 that have no kind in mhai-web stay withheld rows: the reader sends the bare undisplayable entry and nothing of the payload. It fails closed. The audit list is noisy (`intelligence.granted`, `query.completed`, `auth.mfa.verified`) until mhai-web adds kinds (TODO.md).
+- **R22 (§5.3, `review_submitted`):** it sends no `facts.state`. mhai-web accepts only `running`, `intact`, `broken` and `error`, so the decision outcome (`approved` or `rejected`) is not shown until mhai-web adds those values (TODO.md).
+- **R23 (§5.3, new kinds):** six kinds are new, not seven: `audit_undisplayable_reported` is already in mhai-web. The six are `answer_agreed`, `review_withdrawn`, `review_refused`, `learning_recorded`, `audit_check_started` and `audit_check_finished`.
+- **R24 (§5.3, per-job rows):** the per-job `job.retried` and `job.cancelled` rows (with a `job_id`) are system rows and stay withheld. `jobs_retried` and `jobs_cancelled` are for the batch rows (no `job_id`, a `job_count`) that Task 12 writes. System retries and cancels are not visible in the audit UI until a kind exists.
+- **R25 (§5.2, read dedupe):** the `audit.viewed` and `audit.searched` dedupe uses Postgres, in `idempotency_keys` (scope `audit.read`, 5 minutes), in the same transaction as the audit row. There is no KV bucket for it, and the transaction is stronger.
+- **R26 (§5.2, search dedupe):** the `audit.searched` dedupe key includes a hash of `q`, so each distinct search is recorded. A few more rows.
+- **R27 (§5.3, analyst actors):** an entry whose only actor role is `analyst` is undisplayable (mhai-web's `ActorRole` has none), and the person picker leaves analyst-only accounts out (TODO.md).
+- **R28 (§5.5, indexes and cursor):** migration 00014 adds `audit_log(actor_id, id)` and a request id index. The list cursor is hex and HMAC-bound to the session and the filters, so it never has a pseudonym's shape and a forged one is 422.
+- **R29 (§5.4, `open_failure`):** `open_failure` is a `VerifyRun` or null (mhai-web's type, not a boolean), set exactly while the failure is open: the latest broken check, until a later check is intact and the broken one has its outcome note.
+- **Recorded reads (§5.2):** the detail, people and hospitals reads are recorded as `audit.searched` too, with `searched_kind` `event` (the detail), `person` or `hospital` (a read of the chain checks is `run`), not only the list and `q`. `audit.searched` carries no `facts.searched` for these. The kinds are gated out until mhai-web takes the values (TODO.md).

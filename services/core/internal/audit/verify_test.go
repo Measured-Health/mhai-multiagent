@@ -48,7 +48,7 @@ func TestOutcomeNoteOK(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"", "   \n ", strings.Repeat("n", 1001), strings.Repeat("😀", 501), "tab\there",
-		"bidi‮", "zero​width", "line sep", "para sep", "nul\x00", "see P-ABCD12 here", "\xff"} {
+		"bidi\u202e", "zero\u200bwidth", "line\u2028sep", "para\u2029sep", "nul\x00", "see P-ABCD12 here", "\xff"} {
 		if OutcomeNoteOK(bad) {
 			t.Errorf("accepted %q", bad)
 		}
