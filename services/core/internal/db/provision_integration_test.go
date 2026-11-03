@@ -5,6 +5,7 @@ package db_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -49,7 +50,7 @@ func TestProvisionRoleCannotBypassAnything(t *testing.T) {
 	wantDenied(t, "SET ROLE mhai_migrate", err)
 }
 
-func TestProvisionReadsOnlyHospitalIDAndCode(t *testing.T) {
+func TestProvisionReadsOnlyHospitalIDCodeAndStatus(t *testing.T) {
 	ctx, prov := provPool(t)
 	for _, q := range []string{
 		`SELECT 1 FROM users`, `SELECT password_hash FROM users`, `SELECT 1 FROM hospital_settings`,
@@ -61,8 +62,8 @@ func TestProvisionReadsOnlyHospitalIDAndCode(t *testing.T) {
 		_, err := prov.Exec(ctx, q)
 		wantDenied(t, q, err)
 	}
-	if _, err := prov.Exec(ctx, `SELECT id, short_code FROM hospitals`); err != nil {
-		t.Errorf("select id, short_code: %v", err)
+	if _, err := prov.Exec(ctx, `SELECT id, short_code, status FROM hospitals`); err != nil {
+		t.Errorf("select id, short_code, status: %v", err)
 	}
 }
 
@@ -73,7 +74,8 @@ func TestProvisionCannotUpdateOrDelete(t *testing.T) {
 		wantDenied(t, "DELETE "+tbl, err)
 	}
 	for _, q := range []string{
-		`UPDATE hospitals SET name = 'x'`, `UPDATE hospital_settings SET allow_trust_device = true`,
+		`UPDATE hospitals SET name = 'x'`, `UPDATE hospitals SET short_code = 'x'`,
+		`UPDATE hospitals SET time_zone = 'UTC'`, `UPDATE hospital_settings SET allow_trust_device = true`,
 		`UPDATE users SET is_active = false`, `UPDATE user_roles SET role = 'clinician'`,
 		`UPDATE audit_log SET action = 'x'`,
 	} {
@@ -96,4 +98,57 @@ func TestProvisionInsertPoliciesHold(t *testing.T) {
 	wantDenied(t, "foreign audit action", err)
 	_, err = prov.Exec(ctx, `INSERT INTO audit_log (action, actor_id, prev_hash, hash) VALUES ('user.created', gen_random_uuid(), 'a', 'b2')`)
 	wantDenied(t, "audit with actor", err)
+}
+
+// 00010: mhai_provision may move a hospital from setup_incomplete to active
+// and nothing else: not to another status, not from another status (rows
+// it can't update are simply not matched), and only the status column.
+func TestProvisionActivatesOnlySetupIncomplete(t *testing.T) {
+	_, super := shared(t)
+	ctx, prov := provPool(t)
+	mk := func(code, status string) string {
+		t.Helper()
+		var id string
+		if err := super.QueryRow(ctx, `INSERT INTO hospitals (name, short_code, status) VALUES ('Synthetic', $1, $2) RETURNING id::text`,
+			code, status).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	status := func(id string) string {
+		t.Helper()
+		var s string
+		if err := super.QueryRow(ctx, `SELECT status FROM hospitals WHERE id = $1`, id).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	setup := mk("PRA1", "setup_incomplete")
+	for _, to := range []string{"deactivated", "removal_pending", "removed", "setup_incomplete"} {
+		_, err := prov.Exec(ctx, `UPDATE hospitals SET status = $1 WHERE id = $2`, to, setup)
+		wantDenied(t, "setup_incomplete -> "+to, err)
+	}
+	_, err := prov.Exec(ctx, `UPDATE hospitals SET status = 'active', name = 'x' WHERE id = $1`, setup)
+	wantDenied(t, "status and name", err)
+	for i, from := range []string{"active", "deactivated", "removal_pending", "removal_scheduled", "removed"} {
+		id := mk(fmt.Sprintf("PRB%d", i), from)
+		for _, to := range []string{"active", "deactivated", "setup_incomplete"} {
+			tag, err := prov.Exec(ctx, `UPDATE hospitals SET status = $1 WHERE id = $2`, to, id)
+			if err == nil && tag.RowsAffected() != 0 {
+				t.Errorf("%s -> %s: %d rows", from, to, tag.RowsAffected())
+			}
+		}
+		if s := status(id); s != from {
+			t.Errorf("%s became %s", from, s)
+		}
+	}
+	tag, err := prov.Exec(ctx, `UPDATE hospitals SET status = 'active' WHERE id = $1`, setup)
+	if err != nil || tag.RowsAffected() != 1 || status(setup) != "active" {
+		t.Fatalf("setup_incomplete -> active: %v %v", tag, err)
+	}
+	// Its audit action, still with no actor.
+	_, err = prov.Exec(ctx, `INSERT INTO audit_log (action, actor_id, prev_hash, hash) VALUES ('hospital.activated', gen_random_uuid(), 'a', 'b3')`)
+	wantDenied(t, "hospital.activated with actor", err)
+	_, err = prov.Exec(ctx, `INSERT INTO audit_log (action, prev_hash, hash) VALUES ('hospital.deactivated', 'a', 'b4')`)
+	wantDenied(t, "hospital.deactivated", err)
 }

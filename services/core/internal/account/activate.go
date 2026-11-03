@@ -45,6 +45,13 @@ func parseHospitalRef(s string) (hospitalRef, error) {
 	return hospitalRef{}, ErrBadHospitalRef
 }
 
+// ValidateHospitalRef checks a hospital reference (id or short code) with no
+// database access, so the CLI can fail before it connects.
+func ValidateHospitalRef(s string) error {
+	_, err := parseHospitalRef(s)
+	return err
+}
+
 // where is the WHERE clause for r, with $1 its value.
 func (r hospitalRef) where() (string, any) {
 	if r.code != "" {
