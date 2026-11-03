@@ -28,6 +28,7 @@ core keys new --out PATH           # a new Ed25519 access-token key (PKCS#8 PEM,
 core keys ensure --out PATH        # keep PATH if it is a usable key, else make one
 core hospitals create --name N --short-code CODE --time-zone TZ \
     [--require-mfa-for-clinicians] [--allow-trust-device]
+core hospitals activate ID|CODE    # setup_incomplete -> active, audited (see "Running it in compose")
 core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
 ```
 
@@ -56,7 +57,7 @@ one job:
 |---|---|---|
 | `POSTGRES_USER` (owner / superuser) | — | `core migrate` only |
 | `core_app` (`CORE_DB_USER`) | `mhai_app` only | `core serve` |
-| `core_provision` (`PROVISION_DB_USER`) | `mhai_provision` only | `core hospitals/users create` |
+| `core_provision` (`PROVISION_DB_USER`) | `mhai_provision` only | `core hospitals create`, `core hospitals activate`, `core users create`, `core keys` rotations |
 
 - `core serve` refuses any other login at start-up (`db.CheckLoginRole`):
   a superuser, `BYPASSRLS`, an owner, a login that inherits an app role, or
@@ -174,6 +175,7 @@ curl -s localhost:8080/api/v1/readyz           # {"status":"ready"}
 
 # Seed a synthetic hospital and clinician as the provisioning login:
 docker compose run --rm -T core-cli hospitals create --name "Havana General" --short-code HAV --time-zone Africa/Lagos
+docker compose run --rm -T core-cli hospitals activate HAV   # or the hospital's id
 printf '%s\n' "$SYNTHETIC_PASSWORD" | docker compose run --rm -T core-cli users create \
   --email synthetic.clinician@havana.example --name "Synthetic Clinician" --roles clinician --hospital HAV
 
@@ -184,8 +186,23 @@ curl -s localhost:8080/api/v1/auth/login \
 
 `make up` also starts the pipeline worker (and Ollama); `docker compose
 --profile test up -d` adds the echo worker. A hospital made with the CLI
-is `setup_incomplete`; set it `active` (as the owner) before asking a
-question.
+is `setup_incomplete`, and `POST /queries` needs an `active` one, so
+activate it before asking a question.
+
+`core hospitals activate <id or short code>` runs as the provisioning login
+(`SET LOCAL ROLE mhai_provision`, like `hospitals create`). It moves the
+hospital from `setup_incomplete` to `active` and appends
+`hospital.activated` (no actor, `{"via": "cli", "from":
+"setup_incomplete"}`) in the same transaction. An already active hospital
+is left alone ("already active; nothing changed", nothing audited). Any
+other status is refused: a `deactivated` hospital is reactivated through
+the platform app, with a reason and two-step (frontend §14.2), and the
+removal states never return to `active`. Migration 00010 gives
+`mhai_provision` `SELECT (status)` and `UPDATE (status)` on `hospitals`,
+held by the policy `provision_activate` to exactly `setup_incomplete` →
+`active`. There is no `deactivate` command: deactivation takes a reason,
+signs staff out and cancels the hospital's questions (00009), which is the
+platform app's.
 
 ### The end-to-end smoke test
 
@@ -347,8 +364,8 @@ serves.
   rate-limit sign-in in front of it.
 - **`setup_incomplete` hospitals are served**, so their first admin can
   finish setup, but `POST /queries` needs an `active` hospital (401
-  `unauthenticated` otherwise), and nothing activates a hospital yet: an
-  operator sets `hospitals.status = 'active'` by hand (TODO.md).
+  `unauthenticated` otherwise): an operator runs `core hospitals
+  activate` first (TODO.md, the setup flow).
 - **Self-enrolment of two-step** stays open on first sign-in until the
   invite flow exists: whoever has the first password owns the second factor.
 - **Postgres TLS.** The pipeline worker requires `sslmode=verify-full`

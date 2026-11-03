@@ -26,7 +26,7 @@ From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.
 - **Patient ids in questions and tokens** (`pids`, plan departure 7): with the EMR plan. Until then retrieval returns shared guidelines only.
 - **Platform job views:** retry and cancel endpoints and the Failed jobs list (frontend §14.8). Plan 3 built the dead-letter consumer and the re-mint they will call.
 - **The shared replay check** (NATS KV) when a request/reply operation first writes data (boundary design, decision 3). Today each worker copy keeps its own `jti` set, which is enough while request/reply operations only read.
-- **Hospital setup flow.** `setup_incomplete` hospitals can sign in so the first admin can finish setup; revisit when the flow exists (T8 M8). Nothing activates a hospital yet (no CLI command or endpoint), and `POST /queries` asks for an `active` hospital, so a clinician of a CLI-made hospital gets 401 `unauthenticated` on every question until an operator sets `hospitals.status = 'active'` by hand (found by the Plan 3 smoke test, which does exactly that). Add `core hospitals activate` or the setup flow, and decide whether `setup_incomplete` should be 403 rather than 401.
+- **Hospital setup flow.** `setup_incomplete` hospitals can sign in so the first admin can finish setup; revisit when the flow exists (T8 M8), and decide whether `POST /queries` for a `setup_incomplete` hospital should be 403 rather than 401. Until then an operator activates a hospital with `core hospitals activate`.
 - **Admin unlock** for the per-login ceiling, with the staff endpoints (only a trusted device gets past it today); alert on `auth.login.ceiling` audit rows.
 
 ### Deferred minors to follow up

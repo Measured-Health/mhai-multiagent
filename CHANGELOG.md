@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `core hospitals activate <id or short code>`: moves a hospital made with
+  the CLI from `setup_incomplete` to `active`, so its clinicians can
+  `POST /queries`, and appends `hospital.activated` to the audit chain in
+  the same transaction. It runs as the provisioning login (`mhai_provision`);
+  an already active hospital is a no-op, and any other status is refused
+  (a deactivated hospital is reactivated through the platform app).
+  Migration 00010 gives `mhai_provision` `SELECT (status)` and
+  `UPDATE (status)` on `hospitals`, held by the policy `provision_activate`
+  to `setup_incomplete` -> `active` only, and lets it append
+  `hospital.activated`. The smoke test activates its hospital with the
+  command instead of an UPDATE as the owner.
 - The intelligence boundary runs end to end (Plan 3 T15). Compose runs the
   Python workers as `pipeline` (`intelligence worker --service pipeline`, its
   own NATS user and password, its own database login `intelligence_app`, the

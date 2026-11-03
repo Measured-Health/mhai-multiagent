@@ -84,8 +84,8 @@ generates through Ollama (`CCA_BACKEND=ollama`, model `OLLAMA_MODEL`).
 The `pipeline` service is the Python worker (`intelligence worker --service
 pipeline`), reached only over NATS: it has no port. `docker compose
 --profile test up -d` adds the test-only `echo` worker. A hospital made with
-the CLI starts `setup_incomplete`; set it `active` before asking questions
-(services/core/README.md).
+the CLI starts `setup_incomplete`; activate it with `core hospitals activate`
+before asking questions (services/core/README.md).
 
 ## Security
 

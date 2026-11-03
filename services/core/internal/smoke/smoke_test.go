@@ -159,12 +159,9 @@ func signIn(t *testing.T, nc *nats.Conn) clinician {
 		cli(t, "", "hospitals", "create", "--name", "Synthetic Hospital HAV", "--short-code", hospitalCode, "--time-zone", "UTC")
 	}
 	// The CLI creates a hospital setup_incomplete. Sign-in accepts that, but
-	// POST /queries asks only for an active hospital (h.status = 'active'),
-	// and nothing in core activates one yet (no CLI command or endpoint;
-	// TODO.md). As the owner, the way an operator does it today.
-	if _, err := pool.Exec(ctx, `UPDATE hospitals SET status = 'active' WHERE short_code = $1 AND status = 'setup_incomplete'`, hospitalCode); err != nil {
-		t.Fatal(err)
-	}
+	// POST /queries asks for an active hospital: activate it with the CLI, as
+	// the provisioning login. On a re-run it is already active, a no-op.
+	cli(t, "", "hospitals", "activate", hospitalCode)
 	email := "smoke-" + randomHex(t, 6) + "@hav.example.test"
 	first, second := "Smoke-first-"+randomHex(t, 12), "Smoke-second-"+randomHex(t, 12)
 	cli(t, first+"\n", "users", "create", "--email", email, "--name", "Synthetic Smoke Clinician", "--roles", "clinician", "--hospital", hospitalCode)
@@ -180,6 +177,7 @@ func signIn(t *testing.T, nc *nats.Conn) clinician {
 	if access == "" || c.id == "" || c.hospitalID == "" {
 		t.Fatalf("sign in: no token, user or hospital in the answer")
 	}
+	chainHas(t, "hospital.activated", "", c.hospitalID)
 	if must, _ := user["must_change_password"].(bool); must {
 		if r := api(t, nc, "POST", "/auth/password", access, map[string]any{"current_password": first, "new_password": second}); r.status != http.StatusNoContent {
 			t.Fatalf("change password: %d %s", r.status, r.raw)
