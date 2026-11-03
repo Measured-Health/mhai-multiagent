@@ -781,3 +781,178 @@ The GPU rental needs the product owner's go-ahead (H6; design decision 5: one L4
 4. Phase 1 then adds the model host's own verify-at-load (Task 22's verifier, unchanged), the `model.loaded` audit fact, and the emergency stop.
 
 ---
+## Security and threat model
+
+Phase 0 handles no patient data: everything it touches is synthetic. What it protects is the **integrity of the path from a notebook to production weights**, the **integrity of the evaluation that gates it**, and the rule that **patient data never enters that path**. The design's §9 threat model covers the whole pipeline; this section is phase 0's slice of it, made concrete, with the threats the brief names (tampered weights, pickle and the supply chain, a Drive credential leak, signing-key compromise, PHI in training or evaluation data, and bypassing promotion).
+
+### Assets
+
+- **Model weights and their provenance:** what the model host loads must be exactly what was evaluated and approved (design anti-goal: "weights in production that nobody can trace to a promoted, evaluated, signed-off version").
+- **The signing keys or identities** for manifests, sign-offs and test sets.
+- **The model store's integrity:** versions immutable for their retention; the store's write roles.
+- **The locked test split's secrecy:** an evaluation is only meaningful if the model never saw the test pages.
+- **The approval chain:** the `model-promotion` environment approval, the `clinical-review` PR, separation of duties, and the sign-off record.
+- **The Drive credential** and the Drive folder's contents (synthetic research files only).
+- **Clinical safety, indirectly:** a wrong or swapped extraction model leads to wrong values reaching review queues in phase 1.
+- **The build and CI runners** (they execute model-adjacent code and hold short-lived credentials).
+
+### Actors and trust boundaries
+
+Actors: the intelligence lead (notebooks, Drive, dispatching promotion), the platform reviewer of `model-promotion`, code reviewers and the clinical reviewer on the pin PR, the repository admins, GitHub Actions (workflows, environments, OIDC), the CI runners, Google Drive, upstream model hubs, the model store, the intelligence service (pipeline worker) and later the model host, and an attacker who holds one of: Drive write access, a repository write login, a leaked short-lived token, a malicious model file, or a compromised upstream repository.
+
+| Crossing | What is checked |
+|---|---|
+| notebook → Drive | policy (design §7.7), Workspace DLP flags on the folder (optional, H3); nothing technical stops a person copying data by hand (residual risk) |
+| Drive → promote job | federated, short-lived, `drive.readonly`, one folder shared (B22); folder ids not paths; names, types, sizes and checksums (P1–P5); the files the approver saw (P26) |
+| Hugging Face → promote job | revision pinned to a commit (P23); allow-listed files only |
+| run files → our code | allow-list, no pickle or code (B20), strict safetensors headers (B21), JSON with no `auto_map` (P6), training manifest and registries (B16, B17) |
+| dispatch → `model-promotion` job | environment limited to `main`, required platform reviewer, self-review prevented (B23); inputs only through `env:` (P18) |
+| promote job → store | promoter role only from that environment; conditional create, object lock (P7, P24) |
+| store eval area → evaluation | eval-reader only from `model-eval`/`model-promotion`; signed, pinned test set (P19, P25) |
+| PR → `models.lock` on `main` | `lock-check`: signature, gate, label, approvals on the head commit, separation of duties (P14–P16); CODEOWNERS; branch protection |
+| `main` → sign-off | sign-off workflow re-checks the approvals (P17); its own signer, its own environment |
+| store → intelligence service / model host | reader role; trust policy; lock hash, identity, signature, every file, sign-off; no fallback (B18, B19, P8–P12) |
+
+### Threats (STRIDE) and mitigations
+
+| # | STRIDE | Threat | Mitigation | Tests |
+|---|---|---|---|---|
+| Z1 | Tampering | **Tampered weights** in Drive, in transit, in the store or in the host's cache | our own evaluation of the fetched bytes; SHA-256 of every file in a signed manifest; object lock (compliance) and recorded object version ids; the lock pins the manifest hash; full verification at every start, cache never trusted; warm-up output must match | B18, B19, P9, P10, P11 |
+| Z2 | Elevation of privilege | **Pickle and code in model files** (`.bin`, `.pt`, `.ckpt`, `.pkl`, `.py`, custom modelling code, `auto_map`) | allow-list; safetensors only with our own header validator; JSON configs with no `auto_map`/`trust_remote_code`; no unsafe loader anywhere (grep test); file checks re-run at load; `trust_remote_code` off and `HF_HUB_OFFLINE=1` | B20, B21, P6 |
+| Z3 | Tampering / EoP | **Supply chain:** an upstream repo changed after review; a dependency or action swapped | upstream revisions pinned to commits and promoted like our own; actions pinned by SHA; `uv.lock` and image digests pinned; dependabot; `zizmor` and `actionlint` in CI | P23, P18 |
+| Z4 | Spoofing | **Drive credential leak** | no key file exists (federated, 15-minute tokens); `drive.readonly`; one folder; the identity can't write Drive or the store; the provider's attribute condition limits it to two environments on `main`; a leak exposes only synthetic research files | B22 (fake now, live in Task 28) |
+| Z5 | Spoofing / Tampering | **Signing-key compromise** | phase 0: development keys only, generated per test or job, refused in production (P12). Production (H1): non-exportable HSM keys usable only by one environment's federated identity, or Sigstore keyless with the workflow identity pinned; separate signers for manifests and sign-offs (P13); domain-separated messages. A stolen manifest signer alone can't load anything: the lock pins the manifest hash through a reviewed PR, and production also needs a sign-off from the other signer. Rotation: a PR to `trust-policy.json` | P12, P13, B19 |
+| Z6 | Information disclosure | **PHI in training or evaluation data** | synthetic-only generator with recognisably synthetic identifiers; the synthetic-data scanner on every generated and ingested set; intake accepts only pages with known fiducial ids; training manifests limited to the registry, synthetic only in phase 0; no PHI in Drive by policy | B16, B17, P20 |
+| Z7 | Tampering / EoP | **Promotion bypass:** weights reach production without the environment approval, the evaluation or clinical sign-off (a direct store write, a dry-run job writing, an admin merge, a pin of an unapproved or failing version) | only the promoter role writes models, only from the protected environment; dry runs hold no write credentials; `lock-check` (gate, label, approvals, separation of duties) as a required check; sign-off re-checks after merge and the loader requires the sign-off in production; fixture names and the rehearsal gate refused in production | B23, P14, P15, P16, P17, P24 |
+| Z8 | Information disclosure | **Test split leakage** (a model trained or tuned on the test pages) | test seed never stored; the split exists only in the eval area; eval-reader only in two environments; dry runs elsewhere use the dev split; reports carry aggregates only; train template seeds disjoint from eval ones | P19, P25 |
+| Z9 | Tampering | **Workflow script injection** through dispatch inputs or PR data | inputs only via `env:` and re-validated by the CLI; no `pull_request_target`; `permissions: {}` by default | P18 |
+| Z10 | Tampering | **Swapping files between dry run and promotion** (the approver approved different bytes) | the promote job re-fetches and must match the dry run's files hash | P26 |
+| Z11 | Tampering | **Version substitution or shadowing**: a valid signed manifest of another model served at the pinned path, or a newer object version under the same key | manifest identity must equal the lock entry; the verifier picks the manifest version by hash and files by recorded version id | P9, `test_shadowing_manifest_version_ignored` |
+| Z12 | Repudiation | Who promoted, approved, pinned or rolled back can't be shown | the manifest records the dispatching actor, run and commit; `signoff.json` records the PR and approvers, signed; the PR and the environment's deployment log; `model.loaded` logged with hashes | P17, Task 21 tests |
+| Z13 | DoS | Huge or endless downloads, a hung extractor, a flood of promotions | per-file and total caps, byte counters, per-page deadlines, the runner's timeout bound, a concurrency group per model name; the promote job's own timeout | P4, `test_deadline_enforced` |
+| Z14 | Information disclosure | Values, truth, tokens or signed URLs in logs or artifacts | ids, hashes and reason codes only; caplog tests; artifacts limited to aggregate reports | P21, `test_errors_have_no_url_or_credentials`, `test_no_tokens_in_logs` |
+
+### Controls (decided)
+
+- **Authentication and step-up:** people act through GitHub (2FA required by the org); the promotion needs the `model-promotion` environment's reviewer approval; pins need PR approvals. Machines act through OIDC-federated, short-lived identities bound to repository, branch and environment. No long-lived cloud or Drive keys exist.
+- **Authorisation:** five store roles (promoter, sign-off, reader, eval-writer, eval-reader) with prefix-scoped grants and explicit denies (Task 16, Task 27); CODEOWNERS on `models.lock`, `models/`, thresholds, schema, the two packages and the model workflows; `lock-check` a required status check; `reviewers.json` read from the base ref.
+- **Data handling:** synthetic data only; scratch directories 0700 and removed on exit; the runner's disk encrypted (self-hosted runner, with the GPU host); nothing from the test split leaves the eval area except into an environment job's scratch; reports are aggregates.
+- **Concurrency:** a version is reserved by a conditional create before any work (reserve, then check); one promotion per model name at a time (workflow concurrency); `manifest.json` written last with a conditional create; sign-off idempotent.
+- **Secrets:** development keys only in `tmp_path` or `$RUNNER_TEMP`; production signing per H1 with no exportable key; MinIO passwords generated at init into a 0600 file; store credentials only through `*_FILE` variables, placeholders refused at start.
+- **Third parties and hosting:** Google Drive holds synthetic research files only (design §7.7); upstream hubs are read once, at promotion, at a pinned commit; nothing in phase 0 sends data anywhere else. The store and KMS live in our own cloud account (H2).
+
+### Abuse-case tests
+
+Listed in full in the next section, mapped to tasks. Design B16–B23 are all covered (B22 and B23 in two stages: against fakes and MinIO now, live once the credentials exist).
+
+### Residual risk and sign-off
+
+- **Hand-copied patient data in Drive or a notebook** can't be stopped technically. Accepted with policy (CONTRIBUTING's Data rule, Task 25), training, optional DLP flags (H3), and the registry rule that blocks any such dataset from promotion.
+- **A malicious but well-formed safetensors file** is just numbers: it can make a bad model, not run code. Bad models are what the evaluation and the clinical review catch; the hostile slice tests the worst inputs.
+- **Repository admins** can change branch protection or environments. Their changes are in GitHub's audit log, and the sign-off re-check plus the loader's sign-off requirement means an admin merge alone still can't load a model. Accepted.
+- **Rehearsal mode** runs the promote workflow against an in-job MinIO with development keys. It can't touch production (no production credentials or signers exist in that mode, and `lock-check` refuses fixture names and the rehearsal gate).
+- **MinIO images** are no longer published for new community releases; the pinned digest is used for tests and local compose only, never shipped (TODO.md).
+- **Evaluation integrity depends on the generator.** Synthetic pages are not real pages; v1.1's real scans and volunteer handwriting (H5) reduce that gap before phase 1's gate.
+- **Needs sign-off:** clinical (the thresholds files and gates, as the design's decision 3 says; every production pin); privacy (the dataset registry rule; the Drive arrangement); the compliance lead (approved-version retention, H2); the platform owner (the trust policy and the environment settings, H1 and H4).
+
+---
+
+## Abuse cases → tests
+
+Every case is a named test, written before the code it proves.
+
+| Case | Test (task) |
+|---|---|
+| B16 unknown dataset id, or no training manifest | `test_missing_training_manifest_refused`, `test_unknown_dataset_refused` (14); `test_each_bad_fixture_refused_with_its_reason` (19) |
+| B17 non-synthetic dataset (memorisation probe not built: refused outright) | `test_non_synthetic_dataset_refused` (14); `test_each_bad_fixture_refused_with_its_reason` (19) |
+| B18 one byte changed in a weights file | `test_one_byte_changed_refused` (22); `test_unverified_pin_not_ready_and_no_jobs` (23); the tamper stage of `rehearse-promotion.sh` (24) |
+| B19 manifest not signed by the trusted signer; lock hash differs | `test_signature_by_untrusted_key_refused` (15); `test_unsigned_or_wrong_signer_refused`, `test_lock_hash_differs_refused` (22); `test_pin_refuses_unsigned_or_tampered` (20); `test_wrong_identity_or_key_refused` (26) |
+| B20 `pytorch_model.bin`, `.pkl` or `.py` in a run | `test_pickle_and_code_refused` (13); `test_each_bad_fixture_refused_with_its_reason` (19); live in Task 28 step 3 |
+| B21 safetensors with an overlapping offset or a header past the end | `test_header_overlap_past_end_gap_trailing_refused` (13) |
+| B22 the Drive account sees exactly one folder and can't write it | `test_drive_check_one_folder_read_only` (18, fake); live in Task 28 step 1 |
+| B23 a promotion without the environment approval never writes | `test_dry_run_writes_nothing` (19); `test_writing_jobs_have_environment`, `test_id_token_only_where_needed`, `test_write_variables_scoped` (24); live in Task 27 step 2 |
+| P1 path traversal, symlinks, hard links, bad names | `test_symlink_and_hardlink_refused` (13); `test_local_traversal_and_symlink_refused`, `test_drive_bad_names_refused` (18) |
+| P2 duplicate names in a Drive folder | `test_drive_duplicate_names_refused` (18); live in Task 28 |
+| P3 Google-native files, shortcuts, subfolders | `test_drive_native_shortcut_subfolder_refused` (18) |
+| P4 size and count caps | `test_limits` (13); `test_drive_size_cap_and_overrun` (18) |
+| P5 Drive checksum mismatch | `test_drive_checksum_mismatch_refused` (18) |
+| P6 `auto_map` or remote code in configs | `test_auto_map_and_remote_code_refused` (13) |
+| P7 an existing version, or a race for one | `test_put_new_refuses_existing_key` (16); `test_version_exists_refused_before_download` (19) |
+| P8 a partial upload never loads | `test_crash_before_manifest_leaves_no_version` (19); `test_partial_upload_not_found` (22) |
+| P9 a signed manifest for another name, version or role | `test_manifest_for_other_name_version_or_role_refused` (22) |
+| P10 an extra or missing file | `test_extra_or_missing_file_refused` (22) |
+| P11 the cache changed between starts | `test_cache_rehashed_every_start` (22) |
+| P12 a development signer or key in production | `test_file_signer_refused_outside_development`, `test_dev_signer_in_policy_refused_in_production` (15); `test_dev_policy_refused_in_production` (22); `test_dev_signer_still_refused_in_production` (26) |
+| P13 a signature for one purpose used as another | `test_purpose_confusion_refused` (15); `test_signoff_key_cannot_sign_manifest` (26) |
+| P14 pinning a failing, unsigned, fixture or rehearsal version | `test_pin_refuses_failing_gate_fixture_and_rehearsal`, `test_pin_refuses_unsigned_or_tampered` (20) |
+| P15 the promoter or trainer approves their own model; reviewers added in the same PR | `test_promoter_or_trainer_cannot_be_the_approver`, `test_reviewers_read_from_base_not_head`, `test_lock_check_needs_clinical_and_platform_on_head_commit` (20) |
+| P16 rollback to a never-approved version | `test_rollback_to_never_approved_refused` (20, 21) |
+| P17 a lock on `main` without the approvals | `test_signoff_refused_without_approvals` (21); `test_no_signoff_refused_in_production_allowed_in_development` (22); `test_ready_after_signoff_appears` (23) |
+| P18 workflow input injection; unpinned actions | `test_inputs_only_through_env`, `test_actions_pinned_by_sha`, `test_no_pull_request_target` (24); `zizmor` in CI |
+| P19 test split leakage | `test_test_refuses_explicit_seed`, `test_two_test_builds_differ`, `test_test_seed_not_in_outputs_or_logs` (8); `test_report_has_no_per_document_data`, `test_cli_refuses_test_build` (11); `test_eval_reader_only_reads_eval` (16); `test_scratch_removed_and_seed_absent`, `test_wrong_role_cannot_build_or_read` (17); `test_dry_run_outside_eval_env_uses_dev_split`, `test_locked_split_needs_eval_role` (19) |
+| P20 non-synthetic identifiers in a generated or ingested set | `test_scanner_flags_real_looking_mrn_and_name` (3); `test_scanner_passes_on_built_set` (8); `test_unknown_or_missing_id_refused`, `test_scanner_runs_on_intake` (7) |
+| P21 values in logs | `test_runner_logs_no_values` (10); `test_promote_logs_ids_only` (19); `test_refusal_logs_ids_only` (22) |
+| P22 malformed or oversize extractor output | `test_invalid_outputs_counted_not_crashing` (10); `test_openai_compat_oversize_and_invalid_responses` (12) |
+| P23 an unpinned upstream revision | `test_unpinned_upstream_revision_refused` (14); `test_hf_revision_must_be_commit` (18) |
+| P24 a store role doing another's job | `test_reader_cannot_write`, `test_promoter_cannot_write_signoff_or_eval_or_delete`, `test_signoff_cannot_write_manifest_or_files` (16); live in Task 27 step 2 |
+| P25 a tampered or unpinned test set | `test_testset_tamper_refused_before_running` (10); `test_testset_tampered_file_refused`, `test_testset_lock_mismatch_refused` (17) |
+| P26 different files promoted from those dry-run and approved | `test_expect_files_mismatch_refused` (19) |
+
+## What's needed from people, and when
+
+Nothing below blocks Tasks 1–25. Each item is placed as late as it can be.
+
+| # | Who | What, exactly | Needed by |
+|---|---|---|---|
+| H4 | Repository admin | Create the GitHub environments: `model-eval` (deployment branches: `main` only; no reviewer), `model-promotion` (`main` only; required reviewers: the platform team, at least two people; "prevent self-review" on), `model-signoff` (`main` only). Make `model-lock-check` a required status check on `main`, with "require review from Code Owners". Name the clinical reviewer(s) for CODEOWNERS and `models/reviewers.json` (two people, since the author can't approve their own PR). | Task 24's GitHub dispatch (the tests don't need it) |
+| H1 | Product owner and platform lead | **Signing-key custody.** Choose: (a) cloud KMS, two non-exportable HSM keys (manifests and test sets; sign-offs), usable only by the federated identities of `model-promotion` and `model-signoff`; or (b) Sigstore keyless with the workflow identity. Recommended: (a), because the model host verifies offline with a pinned public key, nothing is published to a public log, and custody is simply "the key never leaves the HSM; only the two environments can ask it to sign". Also name who may change `trust-policy.json` (CODEOWNERS). | Task 26 |
+| H2 | Product owner (account), compliance lead (retention) | **The production model store:** which cloud account (recommended: the one the GPU host will live in), permission for the platform team to create one bucket with versioning and object lock in compliance mode, and the approved-version retention period (design decision 9: at least the documents retention). Candidate retention defaults to one year. | Task 27 |
+| H3 | Product owner (Google Workspace and Google Cloud admin) | **Drive access, no key file:** a Google Cloud project; a service account with no keys and no domain-wide delegation; a workload identity pool and GitHub provider limited by attribute condition to `repository == "Measured-Health/mhai-multiagent"` and `environment` in `model-eval`, `model-promotion`, with `roles/iam.workloadIdentityUser` on the service account; the Drive API enabled; the `MHAI models` folder shared with the service account's email as **Viewer** (nothing else shared with it); then send the platform team the provider resource name, the service account email and the folder id (none of these is a secret). Optional: a Workspace DLP rule on the folder that flags MRN and national-id patterns. | Task 28 (the last task) |
+| H5 | Product owner (people and budget) | **Synthetic set v1.1:** print and scan 150 generated pages, take 100 phone photos of generated pages, and have paid volunteers hand-fill blank forms from invented records (design §6.2). The intake tool (Task 7) and the printable pages are ready. | Before the phase 1 gate, not phase 0 |
+| H6 | Product owner | **The GPU go-ahead** (design decision 5). External dependency; see "When the GPU arrives". | Evaluating any real model |
+
+The intelligence lead's part is unchanged: train in notebooks on synthetic data, save runs to `MHAI models/models/<name>/<run>/` with a `training_manifest.json` (the example is in `docs/models/`), run `mhai-models check` locally, and dispatch the workflow.
+
+## Open questions
+
+1. **Signing custody (H1).** KMS or Sigstore? *Recommendation:* KMS with HSM-backed, non-exportable keys, one per signer, in the same cloud account as the store; Sigstore stays a documented alternative.
+2. **Where the store lives (H2).** *Recommendation:* the GPU host's cloud account. If that's Google Cloud, add the small GCS retention-lock adapter in Task 27 rather than run MinIO in production.
+3. **Retention.** *Recommendation:* candidates one year in compliance mode (rejected candidates then expire on their own); the sign-off extends an approved version to the compliance lead's period, and every later pin or rollback extends it again.
+4. **Should the loader require a sign-off in production (departure 4)?** *Recommendation:* yes; it is the only control that survives an admin merge, and the cost is that a deploy waits a minute for the sign-off workflow.
+5. **Set v1.0 vs v1.1 (departure 9).** *Recommendation:* ship phase 0 on v1.0 (fully generated) and require v1.1 for the phase 1 gate.
+6. **SNOMED CT in ground truth (departure 11).** *Recommendation:* leave it out until the licence is confirmed for our hosting countries; ICD-10 covers conditions for the evaluation.
+
+## Out of this plan
+
+- The documents service, the upload path, rasterising, `ingest_document`, `finalise_document`, normalisation, review and the canonical records: phases 1–4 of the design.
+- The GPU host, the self-hosted runner and vLLM (H6); the model host's own verify-at-load and the `model.loaded` audit fact; the emergency stop.
+- The memorisation probe and any non-synthetic dataset (design §5.5, B17).
+- Evaluation suites for roles other than `extract` (OCR alone, NLI, embeddings); they plug into Task 19's suite selection.
+- A model registry UI (design decision 7: only if needed).
+
+## Self-review notes
+
+- **Brief coverage:**
+
+  | Brief item | Task |
+  |---|---|
+  | `mhai-models` CLI, dry run and promote | 19 (with 13–18) |
+  | manifest format and signing; where the key lives | 15, 26 (H1) |
+  | object store layout with object lock; MinIO in compose | 16, 17, 27 (H2) |
+  | `models.lock` via a `clinical-review` PR | 20, 21 |
+  | load-time hash verification, failing closed | 22, 23 |
+  | `model_versions()` reports `name@version#hash` | 23 (Python and Go) |
+  | rollback | 21 |
+  | GitHub workflow with an approval environment, runnable with stubbed Drive | 24 (rehearsal mode) |
+  | real Google Drive last and small | 18 (adapter, fakes), 28 (credentials, wiring) |
+  | synthetic generator: typed, scanned-looking, handwriting-like, adversarial | 3–7 |
+  | ground truth in `mhai.extraction.clinical_document` 1.0.0 | 2, 3, 4 |
+  | the locked test split | 8, 17 |
+  | metrics: field P/R, code exact match, calibration, latency (and the rest of §6.3) | 9 |
+  | report format | 11 |
+  | runner over any extractor, tested with a stub | 10, 12 |
+  | not the documents service, upload path or GPU host | "Out of this plan"; "When the GPU arrives" |
+
+- **Design §9.5 coverage:** B16–B23, all in the table above. B1–B15 and B24–B27 belong to phases 1–4.
+- **Names across tasks:** `Refused`, `REASONS`; `canonical.dumps`/`loads_strict`; `schema.validate_model_output`/`validate_stored`/`iter_fields`/`FIELD_TYPES`; `sets.build`, `COMPOSITION_V1`, `DEV_SEED_V1`, `EVAL_TEMPLATE_SEEDS`, `TRAIN_TEMPLATE_SEEDS`; `Extractor`, `ExtractionResult`, `OracleExtractor`, `TinyExtractor`, `OpenAICompatExtractor`; `runner.run`; `report.compare`; `files.check_run`/`check_json`/`check_safetensors`; `training.check`; `manifest.build`/`parse`; `Signer`, `Verifier`, `FileSigner`, `TrustPolicy`; `ObjectStore`, `S3Store.put_new`; `testsets.fetch`; `Source`, `LocalSource`, `DriveSource`, `DriveApi`, `HttpDriveApi`, `drive_check`, `HFSource`; `verify.verify_pin`, `VerifiedModel`; `loader.PinnedModels`; CLI commands `check`, `promote`, `pin`, `lock-check`, `signoff`, `rollback`, `testset-build`, `drive-check`, `dev-keygen`, `make-fixture`, `store-init`.
+- **No task needs a weight file, a GPU or a credential before Task 26.** Checked task by task: the tiny model and fixtures (12), MinIO (16), fakes for Drive, Hugging Face and GitHub (18, 20, 21), development keys (15), rehearsal mode (24).
