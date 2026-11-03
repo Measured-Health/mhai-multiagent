@@ -159,10 +159,10 @@ func canonical(v any) bool {
 	return err == nil && u.String() == s
 }
 
-// pendingWrites are writes the plan adds later (Task 12) that an auditor
-// must be refused; until they are registered they are carried here, and
-// the test checks they aren't served yet.
-var pendingWrites = []string{"POST /api/v1/platform/jobs/retry", "POST /api/v1/platform/jobs/cancel"}
+// taskWrites are the writes Task 12 added (Task 10 carried them as
+// pending): they must be registered now, and refused to an auditor like
+// any other write.
+var taskWrites = []string{"POST /api/v1/platform/jobs/retry", "POST /api/v1/platform/jobs/cancel"}
 
 // C26: an auditor gets 403 on every unsafe route but the self-service ones
 // and the three audit writes.
@@ -188,18 +188,16 @@ func TestAuditorRefusedOtherWrites(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("no write routes checked")
 	}
-	for _, key := range pendingWrites {
+	for _, key := range taskWrites {
 		method, pattern, _ := strings.Cut(key, " ")
-		r := send(t, handler, method, strings.TrimPrefix(pattern, httpx.BasePath), tok, `{}`)
-		if registered[key] {
-			// Registered now: it must be refused like any other write.
-			if r.code != 403 || r.body["code"] != "forbidden" {
-				t.Errorf("auditor %s: %d %s", key, r.code, r.raw)
-			}
+		if !registered[key] {
+			t.Errorf("%s is not registered", key)
 			continue
 		}
-		t.Logf("pending (Task 12): %s", key)
-		problem(t, "pending "+key, r, 404, "not_found")
+		r := send(t, handler, method, strings.TrimPrefix(pattern, httpx.BasePath), tok, `{}`)
+		if r.code != 403 || r.body["code"] != "forbidden" {
+			t.Errorf("auditor %s: %d %s", key, r.code, r.raw)
+		}
 	}
 }
 

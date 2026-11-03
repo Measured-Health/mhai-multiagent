@@ -3,6 +3,7 @@ package intel
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 )
@@ -186,4 +187,29 @@ func ErrorKind(code string) string {
 		return k
 	}
 	return KindOther
+}
+
+// KindCodes is how a list filters failed jobs by kind (the platform's
+// failed jobs, spec §6.2): the stored codes of kind, or, for other, the
+// codes of every other kind to leave out (other is every code no other
+// kind names, an empty or unknown one included). Exactly one of the two is
+// non-nil for a known kind; both nil for an unknown kind.
+func KindCodes(kind string) (in, notIn []string) {
+	if !slices.Contains(ErrorKinds, kind) {
+		return nil, nil
+	}
+	for code, k := range errorKinds {
+		switch {
+		case kind == KindOther && k != KindOther:
+			notIn = append(notIn, code)
+		case kind != KindOther && k == kind:
+			in = append(in, code)
+		}
+	}
+	slices.Sort(in)
+	slices.Sort(notIn)
+	if kind == KindOther {
+		return nil, append([]string{}, notIn...)
+	}
+	return append([]string{}, in...), nil
 }

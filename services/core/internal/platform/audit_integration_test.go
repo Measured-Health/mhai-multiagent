@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -72,6 +71,10 @@ var (
 	healthKV    jetstream.KeyValue
 	reqSigner   reqtoken.Signer
 	intelClient *intel.Client
+	// The failed jobs tests (Task 12): what core published to JOBS, and
+	// every log line the service wrote.
+	published *recJS
+	logs      syncBuffer
 )
 
 // testContact is the configured security contact (synthetic).
@@ -129,12 +132,17 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, "health bucket:", err)
 			return 1
 		}
+		if err := bus.EnsureStreams(ctx, jsh, bus.StreamConfig{}); err != nil {
+			fmt.Fprintln(os.Stderr, "streams:", err)
+			return 1
+		}
+		published = &recJS{JetStream: jsh}
 		_, reqPriv, _ := ed25519.GenerateKey(rand.Reader)
 		reqSigner = reqtoken.Signer{Key: reqPriv, KeyID: reqtoken.KeyID(reqPriv.Public().(ed25519.PublicKey))}
-		intelClient = &intel.Client{NC: gwNC, JS: jsh, Signer: reqSigner, Pool: app}
+		intelClient = &intel.Client{NC: gwNC, JS: published, Signer: reqSigner, Pool: app}
 		_, priv, _ := ed25519.GenerateKey(rand.Reader)
 		issuer = token.Issuer{Key: priv, KeyID: "test-kid"}
-		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		log := slog.New(slog.NewTextHandler(&logs, nil))
 		authSvc = &auth.Service{Pool: app, Buckets: buckets, Issuer: issuer, Keys: issuer.PublicKeys(), Log: log,
 			MFAKey: []byte(testMFAKey), Argon: password.NewGate(64, time.Minute)}
 		svc := authSvc
@@ -142,7 +150,7 @@ func TestMain(m *testing.M) {
 			Idem: httpx.IdempotentLog(app, log), IdemAnon: httpx.IdempotentAnonLog(app, log)}
 		mux := authz.NewMux(guard)
 		server.Register(mux, server.Deps{Auth: svc, Pool: app, SecurityContact: testContact,
-			AuditWalk: func(id uuid.UUID) { walks <- id }, Health: healthKV, Intel: intelClient})
+			AuditWalk: func(id uuid.UUID) { walks <- id }, Health: healthKV, Intel: intelClient, QueryCap: testQueryCap})
 		handler = mux.Handler([]string{serviceKey})
 		return m.Run()
 	}()

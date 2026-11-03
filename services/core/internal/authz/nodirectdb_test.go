@@ -52,6 +52,13 @@ var dbTxAllowedFiles = map[string]string{
 	// it, as mhai_jobs, with no principal; a letter is untrusted input and
 	// never acts beyond its own subject's hospital (F5, F28).
 	"internal/intel/deadletter.go": "the dead-letter consumer (db.WithJobs)",
+	// The platform's retry and cancel of failed jobs (Plan 4 §6.2): a
+	// platform principal acts on job rows of every hospital, which only
+	// mhai_jobs may touch (job columns only), and the call's audit row is
+	// the admin's, appended as mhai_platform in the same transaction
+	// (db.WithJobsThenPlatform). The actor comes from the handler's
+	// principal; the creator re-check is Republish's (db.WithAuth).
+	"internal/intel/retry.go": "the platform's job retry and cancel (db.WithJobs, db.WithJobsThenPlatform)",
 	// The grant endpoint audits token and session refusals before a
 	// principal exists, as mhai_auth, as sign-in failures are (F7).
 	// Everything after the principal goes through authz.Tx.

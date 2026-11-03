@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.7.0"
+  version: "1.8.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1153,6 +1153,156 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/jobs:
+    get:
+      operationId: listPlatformJobs
+      summary: The failed jobs, newest failure first.
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        `run_query` (questions) and `approve_correction` jobs of every
+        hospital, read through `mhai_platform_jobs()`: the contract's keys
+        only, never the subject, the user or an error message. `status` is
+        `failed` (default), `retrying`, `retried`, `cancelled` or `all`;
+        retried and cancelled jobs are listed for 30 days. `kind` is the
+        error kind (Plan 3's code-to-kind table). Ids are `q_<uuid>` for a
+        question and `j_<uuid>` for a jobs row, opaque to the app. Pages of
+        50; `cursor` is bound to the session and the filters (another
+        session's, or one reused with other filters, is 422). Not recorded
+        in the audit log.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: status, in: query, schema: { type: string, enum: [failed, retrying, retried, cancelled, all] } }
+        - name: type
+          in: query
+          schema: { type: string, enum: [run_query, submit_feedback, approve_correction, ingest_document, run_triage, kb_search, feedback_buffer_reset, retention_purge] }
+        - { name: hospital, in: query, schema: { type: string, format: uuid } }
+        - { name: kind, in: query, schema: { type: string, enum: [timeout, unreachable, unreadable, invalid, other] } }
+        - { name: cursor, in: query, schema: { type: string, pattern: "^[0-9a-f]{80}$" } }
+      responses:
+        "200":
+          description: A page of jobs.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobList" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/jobs/retry:
+    post:
+      operationId: retryPlatformJobs
+      summary: Retry failed jobs, each as the job's creator.
+      description: |
+        Platform admins only (an auditor is 403); no step-up. 1 to 50 ids.
+        Each job that is `failed` now is re-queued (a retry: its attempts
+        start a new budget) and re-minted as its creator with their current
+        roles, under a new message id; it joins its kind's in-flight limit
+        (a question at its hospital's cap, and a job whose audit facts are
+        still being recorded, are skipped). A job whose creator was
+        deactivated or no longer holds the operation's role, an approval
+        whose correction no longer has a second person, an unknown id and a
+        job that isn't failed are `skipped`, never an error. `retried` means
+        attempted: a job can fail again. 10 calls a minute per session (429
+        `rate_limited`). One `job.retried` audit entry per call with the
+        count, when any job was retried.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, rate_limited, unavailable, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              additionalProperties: false
+              properties:
+                ids: { $ref: "#/components/schemas/JobIDs" }
+      responses:
+        "200":
+          description: What was retried and what was skipped.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [retried, skipped]
+                additionalProperties: false
+                properties:
+                  retried: { type: array, items: { type: string } }
+                  skipped: { type: array, items: { type: string } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/jobs/cancel:
+    post:
+      operationId: cancelPlatformJobs
+      summary: Cancel failed or waiting jobs (step-up).
+      description: |
+        Platform admins only (an auditor is 403), with a fresh TOTP code
+        (`mfa_code`) or an unused backup code (`backup_code`): none is 403
+        `mfa_required`, a wrong one 403 `mfa_invalid`. 1 to 50 ids; `reason`
+        is `no_longer_needed`, `cant_succeed` or `other` (`other` needs a
+        note); `note` is at most 500 characters, stored with the
+        cancellation and never logged or audited. A `failed`, queued or
+        retrying job is cancelled (a question then shows as failed,
+        cancelled); a running or finished job, an unknown id and a job whose
+        audit facts are still being recorded are `skipped`. One
+        `job.cancelled` audit entry per call with the count and the reason,
+        when any job was cancelled.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, validation_failed, unavailable, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, reason]
+              additionalProperties: false
+              properties:
+                ids: { $ref: "#/components/schemas/JobIDs" }
+                reason: { type: string, enum: [no_longer_needed, cant_succeed, other] }
+                note: { type: string, maxLength: 500 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: What was cancelled and what was skipped.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cancelled, skipped]
+                additionalProperties: false
+                properties:
+                  cancelled: { type: array, items: { type: string } }
+                  skipped: { type: array, items: { type: string } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
 components:
   securitySchemes:
     ServiceKey:
@@ -1703,6 +1853,34 @@ components:
               step: { type: string, enum: [privacy, guidelines, answer, evidence] }
               p50_ms: { type: integer, minimum: 0 }
               p95_ms: { type: integer, minimum: 0 }
+    JobIDs:
+      type: array
+      minItems: 1
+      maxItems: 50
+      items: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" }
+    Job:
+      type: object
+      description: One failed job (contract §14.8.3). Never the subject, the user or the error message.
+      required: [id, type, hospital, created_at, failed_at, attempts, kind, status, cancelled_by, cancelled_at]
+      additionalProperties: false
+      properties:
+        id: { type: string, pattern: "^[qj]_[0-9a-f-]{36}$" }
+        type: { type: string, enum: [run_query, submit_feedback, approve_correction, ingest_document, run_triage, kb_search, feedback_buffer_reset, retention_purge] }
+        hospital: { allOf: [{ $ref: "#/components/schemas/PersonRef" }], nullable: true }
+        created_at: { type: string, format: date-time }
+        failed_at: { type: string, format: date-time }
+        attempts: { type: integer, minimum: 0 }
+        kind: { type: string, enum: [timeout, unreachable, unreadable, invalid, other] }
+        status: { type: string, enum: [failed, retrying, retried, cancelled] }
+        cancelled_by: { allOf: [{ $ref: "#/components/schemas/PersonRef" }], nullable: true }
+        cancelled_at: { type: string, format: date-time, nullable: true }
+    JobList:
+      type: object
+      required: [jobs, next_cursor]
+      additionalProperties: false
+      properties:
+        jobs: { type: array, items: { $ref: "#/components/schemas/Job" } }
+        next_cursor: { type: string, nullable: true }
     HealthOut:
       type: object
       description: Contract §14.8.2's reading, without the parts and block that don't exist yet (Plan 4 decision 7).
