@@ -791,7 +791,7 @@ paths:
         - { name: flagged, in: query, required: false, schema: { type: string, enum: ["true", "false"] } }
         - { name: from, in: query, required: false, schema: { type: string, format: date-time } }
         - { name: to, in: query, required: false, schema: { type: string, format: date-time } }
-        - { name: q, in: query, required: false, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: q, in: query, required: false, schema: { type: string, pattern: "^([1-9][0-9]{0,18}|[A-Za-z0-9_-]{8,64})$" } }
         - { name: cursor, in: query, required: false, schema: { type: string } }
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
         - $ref: "#/components/parameters/ClientIP"
@@ -812,6 +812,9 @@ paths:
     get:
       operationId: listAuditHospitals
       summary: Every hospital the audit log names, removed ones included.
+      description: |
+        Recorded as `audit.searched` (`searched_kind: hospital`), once per
+        session per 5 minutes.
       tags: [audit]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: *auditListErrors
@@ -841,7 +844,9 @@ paths:
       summary: People whose name or email holds q (the person picker).
       description: |
         `q` of 2 to 100 characters once trimmed, no control or format
-        character; at most 20 people, platform-wide by design.
+        character; at most 20 people, platform-wide by design. Recorded as
+        `audit.searched` (`searched_kind: person`, never the text), once
+        per session and `q` per 5 minutes.
       tags: [audit]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: *auditListErrors
@@ -872,7 +877,10 @@ paths:
       summary: One audit entry, with `patients` and `letter` (both null until named access exists).
       description: |
         `id` is the decimal event id; anything else, or no such entry, is
-        404 `not_found`. `/platform/audit/{id}/patients`,
+        404 `not_found`. The read is recorded as the exact-id search for
+        that id (`audit.searched`, `searched_kind: event`), once per session
+        and id per 5 minutes; if it can't be recorded the reply is 500 and
+        no entry. `/platform/audit/{id}/patients`,
         `/platform/audit/named-access` and `/platform/audit/exports*` are
         not served yet (404 `not_found`).
       tags: [audit]

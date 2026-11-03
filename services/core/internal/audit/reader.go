@@ -274,10 +274,19 @@ var (
 	}
 )
 
+// gates are the catalogue's When rows as conditions SQL can check: the
+// batch gate of the job rows, and audit.searched's web kinds. A When row
+// with no gate here panics at first use; TestGatesAgreeWithWhen holds each
+// gate against its When.
+var gates = map[string]cond{
+	"job.retried":    {batch: true},
+	"job.cancelled":  {batch: true},
+	"audit.searched": {key: "searched_kind", values: []string{"event", "request"}},
+}
+
 // typeConds are the conditions under which a row maps to each type: the
 // catalogue's static type of each action that isn't withheld, through its
-// batch gate where it has one (the only When the catalogue uses; the
-// gate test holds it against When).
+// gate where it has a When.
 var typeConds = sync.OnceValue(func() map[string][]cond {
 	plain := map[string][]string{}
 	out := map[string][]cond{}
@@ -292,7 +301,12 @@ var typeConds = sync.OnceValue(func() map[string][]cond {
 			continue
 		}
 		if e.When != nil {
-			out[e.Type] = append(out[e.Type], cond{actions: []string{a}, batch: true})
+			g, ok := gates[a]
+			if !ok {
+				panic("audit: catalogue row " + a + " has a When the reader has no gate for")
+			}
+			g.actions = []string{a}
+			out[e.Type] = append(out[e.Type], g)
 			continue
 		}
 		plain[e.Type] = append(plain[e.Type], a)
@@ -932,46 +946,82 @@ func likeEscape(s string) string {
 // couldn't show (a name, email or hospital name it wouldn't read, no role
 // it knows, anything of the pseudonym's shape) is left out.
 func SearchPeople(ctx context.Context, tx pgx.Tx, q string) ([]PersonOut, error) {
+	out := []PersonOut{}
+	pattern := "%" + likeEscape(q) + "%"
+	// Keyset pages over (display_name, id) until 20 people can be shown or
+	// the matches run out: a match mhai-web couldn't show never shortens
+	// the list while showable matches remain.
+	var afterName, afterID *string
+	for {
+		n, last, lastID, err := peoplePage(ctx, tx, pattern, afterName, afterID, &out)
+		if err != nil {
+			return nil, err
+		}
+		if len(out) == peopleMax || n < peopleBatch {
+			return out, nil
+		}
+		afterName, afterID = &last, &lastID
+	}
+}
+
+// peopleBatch is how many matches one round reads.
+const peopleBatch = 100
+
+// peoplePage reads one batch of matches after (afterName, afterID), adds
+// the showable ones to out until it holds 20, and returns how many rows it
+// read and the last row's key.
+func peoplePage(ctx context.Context, tx pgx.Tx, pattern string, afterName, afterID *string, out *[]PersonOut) (n int, lastName, lastID string, err error) {
 	rows, err := tx.Query(ctx, `
 		SELECT u.id::text, u.display_name, u.email::text, u.hospital_id::text, h.name,
 		       ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id)
 		FROM users u LEFT JOIN hospitals h ON h.id = u.hospital_id
-		WHERE u.display_name ILIKE $1 ESCAPE '\' OR u.email::text ILIKE $1 ESCAPE '\'
-		ORDER BY u.display_name, u.id LIMIT $2`, "%"+likeEscape(q)+"%", peopleMax*3)
+		WHERE (u.display_name ILIKE $1 ESCAPE '\' OR u.email::text ILIKE $1 ESCAPE '\')
+		  AND ($2::text IS NULL OR (u.display_name, u.id::text) > ($2::text, $3::text))
+		ORDER BY u.display_name, u.id::text LIMIT $4`, pattern, afterName, afterID, peopleBatch)
 	if err != nil {
-		return nil, fmt.Errorf("audit: people: %w", err)
+		return 0, "", "", fmt.Errorf("audit: people: %w", err)
 	}
 	defer rows.Close()
-	out := []PersonOut{}
 	for rows.Next() {
 		var p PersonOut
 		var hid, hname *string
 		var roles []string
 		if err := rows.Scan(&p.ID, &p.Name, &p.Email, &hid, &hname, &roles); err != nil {
-			return nil, fmt.Errorf("audit: people: %w", err)
+			return 0, "", "", fmt.Errorf("audit: people: %w", err)
 		}
-		if len(out) == peopleMax {
-			continue
+		n++
+		lastName, lastID = p.Name, p.ID
+		if len(*out) == peopleMax {
+			break
 		}
-		a, ok := actorOf(p.ID, "", map[string]person{p.ID: {name: p.Name, hospital: hid, roles: roles}})
-		if !ok || !displayText(p.Email, emailMax) {
-			continue
+		if showable(&p, hid, hname, roles) {
+			*out = append(*out, p)
 		}
-		p.Role, p.Kind = a.Role, a.Kind
-		if hid != nil {
-			if hname == nil || !displayText(*hname, nameMax) {
-				continue
-			}
-			p.Hospital = &PersonRef{ID: *hid, Name: *hname}
-		}
-		raw, _ := json.Marshal(p)
-		var back any
-		if json.Unmarshal(raw, &back) != nil || holdsPseudonym(back) {
-			continue
-		}
-		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return 0, "", "", fmt.Errorf("audit: people: %w", err)
+	}
+	return n, lastName, lastID, nil
+}
+
+// showable fills p's role, kind and hospital, and reports whether mhai-web
+// could show p: a role it knows, names and an email it would read, nothing
+// of the pseudonym's shape.
+func showable(p *PersonOut, hid, hname *string, roles []string) bool {
+	a, ok := actorOf(p.ID, "", map[string]person{p.ID: {name: p.Name, hospital: hid, roles: roles}})
+	if !ok || !displayText(p.Email, emailMax) {
+		return false
+	}
+	p.Role, p.Kind = a.Role, a.Kind
+	if hid != nil {
+		if hname == nil || !displayText(*hname, nameMax) {
+			return false
+		}
+		p.Hospital = &PersonRef{ID: *hid, Name: *hname}
+	}
+	raw, _ := json.Marshal(p)
+	var back any
+	return json.Unmarshal(raw, &back) == nil && !holdsPseudonym(back)
 }
 
 // --- reads are recorded ----------------------------------------------------
@@ -981,21 +1031,55 @@ type Reader struct {
 	UserID, SessionID, RequestID string
 }
 
-// RecordRead writes audit.viewed (or, for a q search, audit.searched)
-// inside tx for every page read, collapsed to one row per session, list and
-// filters (q included, so each distinct search is its own row) for 5
-// minutes (spec §5.2). The handler calls it on cursor pages too: a cursor
-// never decides whether a read is recorded: a dedupe key in idempotency_keys, inserted in
-// the same transaction as the entry, so the key and the entry commit or
-// roll back together and only the first of parallel reads writes. Call it
-// last in tx: audit.Write holds the chain lock until commit. recorded is
-// false when the key was already held.
+// RecordRead records a list page or a detail read inside tx: audit.viewed
+// for the list, audit.searched for a q search (an event or request id).
+// The detail of event n is recorded as the search q=n, so a walk over ids
+// leaves one row per entry read. Every page is recorded, cursor or not.
+// Rows collapse per session, list and filters (q included, so each
+// distinct search is its own row) for 5 minutes (spec §5.2). Call it last
+// in tx: audit.Write holds the chain lock until commit.
 func RecordRead(ctx context.Context, tx pgx.Tx, r Reader, f Filters) (recorded bool, err error) {
+	var e Event
+	switch _, isEvent := eventID(f.Q); {
+	case f.Q != "" && isEvent:
+		e = Event{Action: "audit.searched", Entity: "audit_event", EntityID: f.Q,
+			Payload: map[string]any{"searched_kind": "event"}}
+	case f.Q != "":
+		e = Event{Action: "audit.searched", Entity: "request", EntityID: f.Q,
+			Payload: map[string]any{"searched_kind": "request"}}
+	default:
+		e = Event{Action: "audit.viewed", Payload: map[string]any{"list": "events", "filters": f.Recorded()}}
+	}
+	return recordRead(ctx, tx, r, "events", f.hash(), e)
+}
+
+// RecordPeopleSearch records a person-picker search: audit.searched
+// {searched_kind: person}, never the text searched; rows collapse per
+// session and a hash of q for 5 minutes.
+func RecordPeopleSearch(ctx context.Context, tx pgx.Tx, r Reader, q string) (bool, error) {
+	sum := sha256.Sum256([]byte(q))
+	return recordRead(ctx, tx, r, "people", sum[:], Event{Action: "audit.searched",
+		Payload: map[string]any{"searched_kind": "person"}})
+}
+
+// RecordHospitalsRead records a read of the hospitals list: audit.searched
+// {searched_kind: hospital}, once per session per 5 minutes.
+func RecordHospitalsRead(ctx context.Context, tx pgx.Tx, r Reader) (bool, error) {
+	return recordRead(ctx, tx, r, "hospitals", nil, Event{Action: "audit.searched",
+		Payload: map[string]any{"searched_kind": "hospital"}})
+}
+
+// recordRead writes e unless this session already recorded the same list and
+// dedupe material in the last 5 minutes. The dedupe key is a row in
+// idempotency_keys inserted in the same transaction as the entry, so both
+// commit or neither, and only the first of parallel reads writes. recorded
+// is false when the key was already held.
+func recordRead(ctx context.Context, tx pgx.Tx, r Reader, list string, material []byte, e Event) (recorded bool, err error) {
 	if _, err := uuid.Parse(r.UserID); err != nil || r.SessionID == "" {
 		return false, errors.New("audit: read without a reader")
 	}
 	sum := sha256.New()
-	for _, part := range [][]byte{[]byte(r.SessionID), []byte("events"), f.hash()} {
+	for _, part := range [][]byte{[]byte(r.SessionID), []byte(list), material} {
 		var n [8]byte
 		binary.BigEndian.PutUint64(n[:], uint64(len(part)))
 		sum.Write(n[:])
@@ -1015,17 +1099,6 @@ func RecordRead(ctx context.Context, tx pgx.Tx, r Reader, f Filters) (recorded b
 	}
 	if tag.RowsAffected() != 1 {
 		return false, nil
-	}
-	var e Event
-	switch _, isEvent := eventID(f.Q); {
-	case f.Q != "" && isEvent:
-		e = Event{Action: "audit.searched", Entity: "audit_event", EntityID: f.Q,
-			Payload: map[string]any{"searched_kind": "event"}}
-	case f.Q != "":
-		e = Event{Action: "audit.searched", Entity: "request", EntityID: f.Q,
-			Payload: map[string]any{"searched_kind": "request"}}
-	default:
-		e = Event{Action: "audit.viewed", Payload: map[string]any{"list": "events", "filters": f.Recorded()}}
 	}
 	e.ActorID, e.RequestID = r.UserID, r.RequestID
 	if err := Write(ctx, tx, e); err != nil {

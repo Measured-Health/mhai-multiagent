@@ -220,6 +220,13 @@ func batchRow(e Event) bool {
 	return !hasJob && hasCount && e.Entity == "" && e.EntityID == ""
 }
 
+// searchedInWeb reports whether an audit.searched row's kind is one
+// mhai-web's facts.searched_kind takes.
+func searchedInWeb(e Event) bool {
+	k := str(e, "searched_kind")
+	return k == "event" || k == "request"
+}
+
 // withheld is a row for an action mhai-web has no kind for yet: it is sent
 // as the bare entry until one exists (see the vocabulary's notes).
 func withheld() Entry { return Entry{Type: UnknownType, Kind: UnknownKind} }
@@ -299,8 +306,12 @@ var Catalogue = map[string]Entry{
 	"correction.apply_failed": {Type: "review", Kind: "learning_recorded", Outcome: fixed("failed")},
 
 	// Plan 4: the audit reader's own actions (spec §5.2, §5.4).
-	"audit.viewed":         {Type: "audit", Kind: "audit_viewed", Facts: map[string]string{"list": "list", "filters": "filters"}},
-	"audit.searched":       {Type: "audit", Kind: "audit_searched", Facts: map[string]string{"searched_kind": "searched_kind"}},
+	"audit.viewed": {Type: "audit", Kind: "audit_viewed", Facts: map[string]string{"list": "list", "filters": "filters"}},
+	// Only the searched kinds mhai-web knows map; a person-picker or
+	// hospitals-list read (searched_kind person, hospital) is sent bare
+	// until mhai-web takes those values (TODO.md).
+	"audit.searched": {Type: "audit", Kind: "audit_searched", When: searchedInWeb,
+		Facts: map[string]string{"searched_kind": "searched_kind"}},
 	"audit.verify_started": {Type: "audit", Kind: "audit_check_started", Target: runTarget},
 	"audit.verify_finished": {Type: "audit", Kind: "audit_check_finished", Target: runTarget,
 		Outcome: func(e Event) string {

@@ -1,9 +1,6 @@
 package audit
 
-import (
-	"encoding/json"
-	"slices"
-)
+import "encoding/json"
 
 // CheckPayload runs Write's checks on e (action, ids, sensitive keys, the
 // schema) without a transaction.
@@ -85,15 +82,13 @@ func MapRow(row Entry, e Event) (Mapped, bool) { return mapRow(row, e) }
 // Classify is what the list's filters see of e (reader.go).
 func Classify(e Event) Class { return classify(e) }
 
-// GateHolds evaluates the reader's batch-gated condition for e's action,
-// as the list's SQL applies it.
-func GateHolds(e Event) bool {
-	for _, cs := range typeConds() {
-		for _, c := range cs {
-			if c.batch && slices.Contains(c.actions, e.Action) {
-				return c.holds(e)
-			}
-		}
+// GateHolds evaluates the reader's gate for e's action, as the list's SQL
+// applies it; ok is false when the reader has no gate for it.
+func GateHolds(e Event) (holds, ok bool) {
+	g, ok := gates[e.Action]
+	if !ok {
+		return false, false
 	}
-	return false
+	g.actions = []string{e.Action}
+	return g.holds(e), true
 }

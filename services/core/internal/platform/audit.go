@@ -80,6 +80,11 @@ func (d Deps) fail(w http.ResponseWriter, r *http.Request, p authz.Principal, wh
 	httpx.Error(w, r, "internal_error")
 }
 
+// reader is who reads, from the verified principal only.
+func reader(r *http.Request, p authz.Principal) audit.Reader {
+	return audit.Reader{UserID: p.UserID.String(), SessionID: p.SessionID, RequestID: httpx.RequestIDFrom(r.Context())}
+}
+
 func (d Deps) tx(ctx context.Context, fn func(pgx.Tx) error) error { return authz.Tx(ctx, d.Pool, fn) }
 
 var (
@@ -233,8 +238,7 @@ func (d Deps) list(w http.ResponseWriter, r *http.Request) {
 		// load into one row, and a cursor never decides whether a read
 		// is recorded. Last in the transaction: the chain lock is held
 		// until commit.
-		_, err = audit.RecordRead(r.Context(), tx, audit.Reader{UserID: p.UserID.String(), SessionID: p.SessionID,
-			RequestID: httpx.RequestIDFrom(r.Context())}, f)
+		_, err = audit.RecordRead(r.Context(), tx, reader(r, p), f)
 		return err
 	})
 	if err != nil {
@@ -244,7 +248,9 @@ func (d Deps) list(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, page)
 }
 
-// detail is GET /platform/audit/{id}.
+// detail is GET /platform/audit/{id}. The read is recorded as the exact-id
+// search for that id (audit.searched, searched_kind event), in the same
+// transaction: no entry is shown unrecorded.
 func (d Deps) detail(w http.ResponseWriter, r *http.Request) {
 	p, ok := caller(w, r)
 	if !ok {
@@ -258,7 +264,10 @@ func (d Deps) detail(w http.ResponseWriter, r *http.Request) {
 	var out audit.Detail
 	err := d.tx(r.Context(), func(tx pgx.Tx) error {
 		var err error
-		out, err = audit.GetEvent(r.Context(), tx, seq)
+		if out, err = audit.GetEvent(r.Context(), tx, seq); err != nil {
+			return err
+		}
+		_, err = audit.RecordRead(r.Context(), tx, reader(r, p), audit.Filters{Q: strconv.FormatInt(seq, 10)})
 		return err
 	})
 	switch {
@@ -271,7 +280,8 @@ func (d Deps) detail(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// hospitals is GET /platform/audit/hospitals.
+// hospitals is GET /platform/audit/hospitals, recorded as audit.searched
+// {searched_kind: hospital}.
 func (d Deps) hospitals(w http.ResponseWriter, r *http.Request) {
 	p, ok := caller(w, r)
 	if !ok {
@@ -284,7 +294,10 @@ func (d Deps) hospitals(w http.ResponseWriter, r *http.Request) {
 	var out []audit.HospitalRef
 	err := d.tx(r.Context(), func(tx pgx.Tx) error {
 		var err error
-		out, err = audit.Hospitals(r.Context(), tx)
+		if out, err = audit.Hospitals(r.Context(), tx); err != nil {
+			return err
+		}
+		_, err = audit.RecordHospitalsRead(r.Context(), tx, reader(r, p))
 		return err
 	})
 	if err != nil {
@@ -300,7 +313,8 @@ func (d Deps) hospitals(w http.ResponseWriter, r *http.Request) {
 const peopleQueryMax = 100
 
 // people is GET /platform/audit/people?q: q of 2 to 100 characters once
-// trimmed, with no control or format character.
+// trimmed, with no control or format character. Recorded as audit.searched
+// {searched_kind: person}, never the text.
 func (d Deps) people(w http.ResponseWriter, r *http.Request) {
 	p, ok := caller(w, r)
 	if !ok {
@@ -316,7 +330,10 @@ func (d Deps) people(w http.ResponseWriter, r *http.Request) {
 	var out []audit.PersonOut
 	err = d.tx(r.Context(), func(tx pgx.Tx) error {
 		var err error
-		out, err = audit.SearchPeople(r.Context(), tx, q)
+		if out, err = audit.SearchPeople(r.Context(), tx, q); err != nil {
+			return err
+		}
+		_, err = audit.RecordPeopleSearch(r.Context(), tx, reader(r, p), q)
 		return err
 	})
 	if err != nil {

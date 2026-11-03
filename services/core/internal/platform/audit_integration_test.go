@@ -380,6 +380,18 @@ func readsBy(t *testing.T, u user) []auditRow {
 	return out
 }
 
+// actionsBy are u's rows of one action.
+func actionsBy(t *testing.T, u user, action string) []auditRow {
+	t.Helper()
+	var out []auditRow
+	for _, r := range readsBy(t, u) {
+		if r.action == action {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 var eventKeys = []string{"id", "seq", "hash", "at", "actor", "hospital", "type", "kind", "target", "outcome",
 	"ip", "device", "flag", "reason", "note", "refs", "facts", "after_break"}
 
@@ -750,6 +762,22 @@ func TestAuditTotalCapped(t *testing.T) {
 	if p := strings.Join(plan, "\n"); !strings.Contains(p, "audit_log_actor_idx") || strings.Contains(p, "Seq Scan") {
 		t.Errorf("person filter plan doesn't use audit_log_actor_idx:\n%s", p)
 	}
+	rows, err = super.Query(ctx, `EXPLAIN SELECT id FROM audit_log WHERE request_id = $1 ORDER BY id DESC LIMIT 51`, "req_"+uniq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan = nil
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, line)
+	}
+	rows.Close()
+	if p := strings.Join(plan, "\n"); !strings.Contains(p, "audit_log_request_idx") || strings.Contains(p, "Seq Scan") {
+		t.Errorf("request search plan doesn't use audit_log_request_idx:\n%s", p)
+	}
 	tok := mint(t, auditor(t))
 	r := get(t, "/platform/audit?hospital="+big.String(), tok)
 	ok(t, "big", r)
@@ -814,11 +842,12 @@ func TestAuditViewedOncePerPageLoad(t *testing.T) {
 	if n := len(readsBy(t, a)); n != 4 {
 		t.Fatalf("after expiry: want 4 rows, got %d", n)
 	}
-	// The detail, hospitals and people reads write no audit.viewed.
+	// The hospitals and people reads write no audit.viewed (they are
+	// searches: TestAuditPeopleAndHospitalsRecorded).
 	ok(t, "hospitals", get(t, "/platform/audit/hospitals", s.tok))
 	ok(t, "people", get(t, "/platform/audit/people?q=Synthetic", s.tok))
-	if n := len(readsBy(t, a)); n != 4 {
-		t.Fatalf("other reads wrote audit rows: %d", n)
+	if n := len(actionsBy(t, a, "audit.viewed")); n != 4 {
+		t.Fatalf("other reads wrote audit.viewed rows: %d", n)
 	}
 	// Parallel first pages of one new filter set: one row.
 	b := auditor(t)
@@ -1175,4 +1204,147 @@ func TestAuditPeopleNeedsTwoChars(t *testing.T) {
 		t.Errorf("q=__ matched %d people", n)
 	}
 	_ = made
+}
+
+// --- every read path is recorded (Task 9 review) ------------------------
+
+// The detail is recorded as the exact-id search for its id, in the same
+// transaction: a walk over ids leaves a row per entry read, and if the row
+// can't be written nothing is shown.
+func TestAuditDetailIsRecorded(t *testing.T) {
+	h := seedHospital(t, "active")
+	x := insertRow(t, row{hospital: h, action: "auth.logout"})
+	y := insertRow(t, row{hospital: h, action: "auth.logout"})
+	a := auditor(t)
+	s := signIn(t, a, true)
+	xs, ys := strconv.FormatInt(x, 10), strconv.FormatInt(y, 10)
+	ok(t, "detail x", get(t, "/platform/audit/"+xs, s.tok))
+	searched := actionsBy(t, a, "audit.searched")
+	if len(searched) != 1 {
+		t.Fatalf("detail: want one audit.searched, got %+v", searched)
+	}
+	if r := searched[0]; r.entity != "audit_event" || r.entityID != xs || r.hospital != nil ||
+		mustJSON(r.payload) != `{"searched_kind":"event"}` {
+		t.Errorf("detail row %+v", r)
+	}
+	// The same id again, or its q search, within 5 minutes: the same read.
+	ok(t, "detail x again", get(t, "/platform/audit/"+xs, s.tok))
+	ok(t, "q=x", get(t, "/platform/audit?q="+xs, s.tok))
+	if n := len(actionsBy(t, a, "audit.searched")); n != 1 {
+		t.Errorf("repeats wrote rows: %d", n)
+	}
+	// Another id, another session: rows of their own.
+	ok(t, "detail y", get(t, "/platform/audit/"+ys, s.tok))
+	ok(t, "detail x, other session", get(t, "/platform/audit/"+xs, signIn(t, a, true).tok))
+	if n := len(actionsBy(t, a, "audit.searched")); n != 3 {
+		t.Errorf("want 3 rows, got %d", n)
+	}
+	// An id with no entry shows nothing and records nothing.
+	problem(t, "no such id", get(t, "/platform/audit/987654321098", s.tok), 404, "not_found")
+	if n := len(actionsBy(t, a, "audit.searched")); n != 3 {
+		t.Errorf("a 404 wrote a row: %d", n)
+	}
+	// Fail closed: when the row can't be written, 500 and no entry.
+	ctx := context.Background()
+	var check string
+	if err := super.QueryRow(ctx, `SELECT with_check FROM pg_policies WHERE tablename = 'audit_log' AND policyname = 'platform_append'`).
+		Scan(&check); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := super.Exec(ctx, `ALTER POLICY platform_append ON audit_log WITH CHECK (false)`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := super.Exec(ctx, `ALTER POLICY platform_append ON audit_log WITH CHECK (`+check+`)`); err != nil {
+			t.Errorf("restore platform_append: %v", err)
+		}
+	})
+	z := insertRow(t, row{hospital: h, action: "auth.logout"})
+	var hash string
+	if err := super.QueryRow(ctx, `SELECT hash FROM audit_log WHERE id = $1`, z).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	r := get(t, "/platform/audit/"+strconv.FormatInt(z, 10), signIn(t, a, true).tok)
+	problem(t, "unrecordable detail", r, 500, "internal_error")
+	if strings.Contains(r.raw, hash) || strings.Contains(r.raw, "signed_out") {
+		t.Errorf("an unrecorded detail leaked the entry: %s", r.raw)
+	}
+	sameKeys(t, "500 body", r.body, "code")
+}
+
+// The person picker and the hospitals list are recorded as audit.searched
+// with searched_kind person or hospital, never the text searched; mhai-web
+// has no such kind yet, so they are listed as bare entries.
+func TestAuditPeopleAndHospitalsRecorded(t *testing.T) {
+	a := auditor(t)
+	s := signIn(t, a, true)
+	tag := "Findme" + uniq()
+	ok(t, "people", get(t, "/platform/audit/people?q="+tag, s.tok))
+	ok(t, "people again", get(t, "/platform/audit/people?q="+url.QueryEscape("  "+tag+" "), s.tok))
+	ok(t, "people other", get(t, "/platform/audit/people?q="+tag+"x", s.tok))
+	ok(t, "hospitals", get(t, "/platform/audit/hospitals", s.tok))
+	ok(t, "hospitals again", get(t, "/platform/audit/hospitals", s.tok))
+	var kinds []string
+	for _, r := range actionsBy(t, a, "audit.searched") {
+		if r.entity != "" || r.entityID != "" || r.hospital != nil || len(r.payload) != 1 {
+			t.Errorf("searched row %+v", r)
+		}
+		if strings.Contains(mustJSON(r.payload), tag) {
+			t.Errorf("the text searched is recorded: %v", r.payload)
+		}
+		kinds = append(kinds, fmt.Sprint(r.payload["searched_kind"]))
+	}
+	if want := []string{"person", "person", "hospital"}; !slices.Equal(kinds, want) {
+		t.Errorf("searched rows %v, want %v", kinds, want)
+	}
+	// Listed, but bare until mhai-web takes the kinds.
+	r := get(t, "/platform/audit?hospital=platform&person="+a.id.String()+"&type=security", mint(t, auditor(t)))
+	ok(t, "list", r)
+	es := events(t, r)
+	if len(es) != 3 {
+		t.Fatalf("want the 3 search rows, got %s", r.raw)
+	}
+	for _, e := range es {
+		sameKeys(t, "person/hospital search entry", e, bareKeys...)
+	}
+	// An event search still maps.
+	ok(t, "event search", get(t, "/platform/audit?q=1", s.tok))
+	r = get(t, "/platform/audit?hospital=platform&person="+a.id.String()+"&type=audit", mint(t, auditor(t)))
+	ok(t, "list audit", r)
+	found := false
+	for _, e := range events(t, r) {
+		if e["kind"] == "audit_searched" {
+			found = true
+			if f := e["facts"].(map[string]any); f["searched_kind"] != "event" {
+				t.Errorf("event search facts %v", f)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the event search isn't listed as audit_searched: %s", r.raw)
+	}
+}
+
+// People search pages past matches it can't show: 105 analyst-only
+// matches sort first, and the 20 clinicians after them are still found.
+func TestAuditPeopleSearchFillsPastUnshowable(t *testing.T) {
+	h := seedHospital(t, "active")
+	tag := "Pagethru" + uniq()
+	for i := 0; i < 105; i++ {
+		seedUser(t, h, fmt.Sprintf("Dr %s a%03d", tag, i), authz.RoleAnalyst)
+	}
+	var want []string
+	for i := 0; i < 22; i++ {
+		u := seedUser(t, h, fmt.Sprintf("Dr %s b%03d", tag, i), authz.RoleClinician)
+		want = append(want, u.id.String())
+	}
+	r := get(t, "/platform/audit/people?q="+tag, mint(t, auditor(t)))
+	ok(t, "people", r)
+	var got []string
+	for _, x := range r.body["people"].([]any) {
+		got = append(got, x.(map[string]any)["id"].(string))
+	}
+	if !slices.Equal(got, want[:20]) {
+		t.Errorf("got %d people %v, want the first 20 clinicians", len(got), got)
+	}
 }

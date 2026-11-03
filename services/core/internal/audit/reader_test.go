@@ -75,9 +75,10 @@ func TestClassifyAgreesWithMap(t *testing.T) {
 	}
 }
 
-// The batch gate in SQL is the catalogue's When for the job rows: held
-// against When directly, since no schema takes job_count until Task 12.
-func TestBatchGateAgreesWithWhen(t *testing.T) {
+// Each reader gate is the catalogue's When for its row, held against
+// When directly (no schema takes job_count until Task 12, so the fuzz
+// can't reach the batch shape).
+func TestGatesAgreeWithWhen(t *testing.T) {
 	job := "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11"
 	gated := 0
 	for a, e := range audit.Catalogue {
@@ -85,21 +86,33 @@ func TestBatchGateAgreesWithWhen(t *testing.T) {
 			continue
 		}
 		gated++
-		for _, ev := range []audit.Event{
-			{Action: a, Payload: map[string]any{"job_count": 3}},
-			{Action: a, Payload: map[string]any{"job_count": 3, "job_id": job}},
-			{Action: a, Payload: map[string]any{"job_id": job}},
-			{Action: a, Payload: map[string]any{}},
-			{Action: a, Entity: "job", EntityID: job, Payload: map[string]any{"job_count": 3}},
-			{Action: a, EntityID: job, Payload: map[string]any{"job_count": 3}},
-		} {
-			if got, want := audit.GateHolds(ev), e.When(ev); got != want {
-				t.Errorf("%s %+v: the reader's gate says %v, the catalogue's When %v", a, ev, got, want)
+		var payloads []map[string]any
+		for _, k := range []any{"event", "request", "person", "hospital", "export", nil, 5} {
+			p := map[string]any{"job_count": 3}
+			if k != nil {
+				p["searched_kind"] = k
+			}
+			payloads = append(payloads, p, map[string]any{"searched_kind": k, "job_id": job})
+		}
+		payloads = append(payloads, map[string]any{"job_id": job}, map[string]any{})
+		for _, p := range payloads {
+			for _, ev := range []audit.Event{
+				{Action: a, Payload: p},
+				{Action: a, Entity: "job", EntityID: job, Payload: p},
+				{Action: a, EntityID: job, Payload: p},
+			} {
+				got, ok := audit.GateHolds(ev)
+				if !ok {
+					t.Fatalf("%s has a When but no reader gate", a)
+				}
+				if want := e.When(ev); got != want {
+					t.Errorf("%s %+v: the reader's gate says %v, the catalogue's When %v", a, ev, got, want)
+				}
 			}
 		}
 	}
-	if gated == 0 {
-		t.Fatal("no gated row: the test proves nothing")
+	if gated < 3 {
+		t.Fatalf("only %d gated rows: the test proves less than it says", gated)
 	}
 }
 
