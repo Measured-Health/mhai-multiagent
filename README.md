@@ -15,7 +15,10 @@ The backend has two parts:
   sign-in, sessions, two-step verification, permissions, tenancy and audit;
   (Plan 3) the intelligence boundary: the Python workers behind NATS with
   core-signed request tokens, clinical questions (`POST /queries`), and the
-  API over NATS for the BFFs. The contract is
+  API over NATS for the BFFs; (Plan 4, part 4a) feedback and corrections with
+  a two-person rule: a clinician suggests a correction, a different
+  clinician of the hospital approves it, and an approved correction only
+  fills a per-hospital buffer. The contract is
   [services/core/openapi.yaml](services/core/openapi.yaml).
 
 ## Agents

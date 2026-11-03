@@ -30,6 +30,14 @@ workers hand it facts.
   question), on its own database login (`intelligence_app`, a member of
   `mhai_worker_app` only), reading and writing under row-level security for
   the token's hospital only.
+- **pipeline, learning (Plan 4a):** the `approve_correction` jobs, from a
+  second consumer (`pipeline_learning`) so they never wait behind clinical
+  questions. The job checks that the correction is approved by a different
+  person, stores one `feedback_buffer` row (the four expert scores, the
+  system decision, the model versions; never free text) and hands core a
+  `correction.applied` fact. It changes no weight and writes no knowledge
+  base: `INTELLIGENCE_LEARNING_CLIENT` is `trust_buffer` (default) or
+  `stub` (development only).
 - **echo:** tests and the smoke run only; refuses to start outside
   development.
 

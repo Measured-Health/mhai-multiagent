@@ -69,6 +69,13 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 **Repo and CI**
 - **CODEOWNERS** entries without a space (`orchestrator.py@ojies` and two more) match nothing; fix them and add `/services/core/internal/{auth,authz,db,httpx}/` and `/services/nats/`. [final m6]
 
+## Plan 4a follow-ups (built 3 Nov)
+
+- **`run_query`'s lifetime attempts cap blocks a platform retry of a failed question.** `clinical_queries` has no `retry_count` (jobs has), so a retried question runs out of attempts. Decide in Task 12 (the platform retry).
+- **`deploy/nats/nats.conf` needs the pipeline user's learning subjects** (`$JS.API.CONSUMER.INFO.JOBS.pipeline_learning`, `$JS.API.CONSUMER.MSG.NEXT.JOBS.pipeline_learning`, `$JS.ACK.JOBS.pipeline_learning.>`) when the pipeline is deployed. `services/nats/nats.conf` (dev, smoke) has them.
+- **Refusal audit rows are unthrottled** (`correction.decision_refused`): a signed-in clinician can write one per request. Residual risk, accepted for 4a; the request rate limits bound it.
+- **`auth.terms.accepted.version` is user text in a closed schema.** The version string the client sends is stored in the audit payload; pin it to a known list of terms versions.
+
 ## Deferred from Plan 4 (decided 3 Nov)
 
 - **Document upload and the `ingest_document` job:** moved to the document pipeline plan, with the documents service, object storage and the scanner (Plan 4 design §7). Nothing is uploaded before files can be scanned and read. Plan 4's generic `jobs` table is ready for `ingest_document` and `finalise_document`.

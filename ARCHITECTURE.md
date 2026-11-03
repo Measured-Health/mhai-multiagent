@@ -18,8 +18,14 @@ and it runs in Docker Compose (`make core-up`). **Built (Plan 3):** the Python
 side behind NATS: the pipeline and echo workers, request tokens, grants for
 BFF-direct calls, `POST /queries` and the API over NATS (`api.v1.<app>`),
 with an end-to-end smoke test, run on the build server and wired into
-CI (job `boundary-smoke`). **Next:** the hospital and platform
-endpoints.
+CI (job `boundary-smoke`). **Built (Plan 4, part 4a):** feedback and
+corrections with a two-person rule: `POST /feedback`, the `/corrections`
+routes, an `approve_correction` job on a second JetStream consumer
+(`pipeline_learning`) that fills a per-hospital `feedback_buffer` and
+records `correction.applied`. Nothing is applied to live guardrail
+weights, the knowledge base or any model: the buffer is only a record for
+a later, change-controlled run. **Next:** the audit log and platform
+operations (4b, 4c), then the hospital endpoints.
 
 | Service | Job |
 |---|---|

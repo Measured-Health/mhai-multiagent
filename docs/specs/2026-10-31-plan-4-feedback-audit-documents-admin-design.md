@@ -631,3 +631,13 @@ The product owner approved the design on 2026-11-03 ("yes") and accepted every r
     *Decided:* defer all three (§8): triage until QDA passes evaluation and clinical sign-off; KB search until a screen needs it; the reset into the platform settings plan, which Plan 4 makes small.
 11. **The migration that changes `feedback_events`:** it renames `clinician_id` and drops three unused columns.
     *Decided:* accept; the table is empty outside tests (synthetic data only), and the deploy's pre-migrate check will stop if it isn't.
+
+## 16. Amended during the build (4a)
+
+Rulings made while building part 4a. Where they differ from the text above, these win.
+
+- **R10 (§9, the refusal audit row):** the key that names why a decision was refused is `reason` (`self_approval`, `forbidden` or `already_decided`), not `code`. `audit.Write` refuses `code` as a sensitive key.
+- **R16 (§9, `job.cancelled` and `job.dead_lettered`):** the payload key is `type`, not `job_type`, as in Plan 3's frozen schema. The sweeper's cancelled jobs rows use the same key.
+- **§4.7 step 5 (a second job for an applied correction):** a second `approve_correction` job for a correction that is already applied completes with its own `correction.applied` fact, and the buffer keeps its one row. The unique violation on `correction_id` rolls back only the insert; the job and its fact are still recorded.
+- **R11 (§4.4, free-text rules):** newlines (`\n`, `\r\n`) are allowed in `reason` and in `rejection_note`. Unicode format characters (category Cf: bidi controls, zero-width) and the line and paragraph separators (Zl, Zp: U+2028, U+2029) are refused in all three texts. `corrected_diagnosis` stays a single line.
+- **Accepted deviation (guard order):** a route whose body carries the target (submit: `query_id`) or whose body is oversized can answer 422 `validation_failed` before 404 `not_found`, because the body is read before the target is known. The 404 order holds on every route that names the target in the path.

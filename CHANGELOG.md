@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Feedback and corrections with a two-person rule (Plan 4, part 4a).
+  `POST /feedback` (validate, or suggest a correction on your own completed
+  question), `GET /feedback/stats/mine`, `GET /corrections`, `/mine` and
+  `/reviewed`, and `POST /corrections/{id}/approve|reject|withdraw`. A
+  correction is approved only by a different, active clinician of the same
+  hospital (403 `self_approval` otherwise, audited); core and the database
+  both hold the rule (migrations 00011 to 00013). An approval queues an
+  `approve_correction` job in the same transaction; the pipeline worker's
+  second consumer, `pipeline_learning`, stores one per-hospital
+  `feedback_buffer` row and core records `correction.applied`. Nothing is
+  applied to guardrail weights, the knowledge base or any model. The
+  `pipeline` NATS user gains the learning consumer's three subjects only.
+  New smoke test `TestSmokeCorrectionApproved`. The contract change is
+  additive (`oasdiff`).
 - `core hospitals activate <id or short code>`: moves a hospital made with
   the CLI from `setup_incomplete` to `active`, so its clinicians can
   `POST /queries`, and appends `hospital.activated` to the audit chain in
