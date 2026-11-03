@@ -18,6 +18,12 @@
 
 -- +goose Up
 
+-- No role of Plan 4 writes the knowledge base: the gateway's 00003 write
+-- grants on kb_chunks go, as the worker's did in 00008. Nothing in core
+-- writes it as the gateway.
+REVOKE INSERT, UPDATE, DELETE ON kb_chunks FROM mhai_gateway;
+REVOKE USAGE ON SEQUENCE kb_chunks_id_seq FROM mhai_gateway;
+
 -- The target of the same-hospital FK below.
 ALTER TABLE feedback_events ADD CONSTRAINT feedback_events_id_hospital_key UNIQUE (id, hospital_id);
 
@@ -72,6 +78,8 @@ REVOKE ALL ON FUNCTION mhai_feedback_buffer_waiting() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION mhai_feedback_buffer_waiting() TO mhai_platform;
 
 -- +goose Down
+GRANT INSERT, UPDATE, DELETE ON kb_chunks TO mhai_gateway;
+GRANT USAGE ON SEQUENCE kb_chunks_id_seq TO mhai_gateway;
 DROP FUNCTION mhai_feedback_buffer_waiting();
 -- The table takes its policies, grants, index and sequence with it.
 DROP TABLE feedback_buffer;

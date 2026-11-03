@@ -289,6 +289,12 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		}
 	}
 
+	// And the worker, with no hospital set, is refused by the policy itself
+	// (the buffer row's own check, not a missing privilege).
+	if _, err := inTx(ctx, one, []string{`SET LOCAL ROLE mhai_worker`}, nil, bufferInsertSQL, a, bufferedID); pgCode(err) != rlsViolation || !strings.Contains(err.Error(), "row-level security") {
+		t.Fatalf("worker insert with no hospital set: want RLS refusal, got %v", err)
+	}
+
 	if err := db.WithHospital(ctx, one, uuid.Nil, func(pgx.Tx) error { return nil }); err == nil {
 		t.Fatal("WithHospital accepted the nil hospital id")
 	}
@@ -366,22 +372,21 @@ func TestSharedKBVisible(t *testing.T) {
 			if want := map[bool]int{true: 1, false: 0}[h == a]; n != want {
 				t.Errorf("hospital %s sees %d of A's chunks, want %d", h, n, want)
 			}
-			for _, q := range []string{
-				`UPDATE kb_chunks SET content = 'tampered' WHERE chunk_id = $1`,
-				`DELETE FROM kb_chunks WHERE chunk_id = $1`,
-			} {
-				tag, err := tx.Exec(ctx, q, shared)
-				if err != nil {
-					return err
-				}
-				if tag.RowsAffected() != 0 {
-					t.Errorf("%q on the shared chunk affected %d rows", q, tag.RowsAffected())
-				}
-			}
 			return nil
 		})
 		if err != nil {
 			t.Fatalf("WithHospital(%s): %v", h, err)
+		}
+		// The gateway holds no write on the knowledge base (00013).
+		for _, q := range []string{
+			`UPDATE kb_chunks SET content = 'tampered' WHERE chunk_id = $1`,
+			`DELETE FROM kb_chunks WHERE chunk_id = $1`,
+		} {
+			err := db.WithHospital(ctx, pool, h, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, q, shared)
+				return err
+			})
+			requireDenied(t, err, q)
 		}
 	}
 

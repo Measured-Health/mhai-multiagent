@@ -102,10 +102,11 @@ func TestBufferRefusesUnapproved(t *testing.T) {
 	// Nothing was left dropped or disabled.
 	var n int
 	if err := pool.QueryRow(ctx, `SELECT
-		(SELECT count(*) FROM pg_constraint WHERE conname IN ('feedback_not_self_decided', 'feedback_decided_shape'))
-		+ (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'feedback_events'::regclass AND tgenabled <> 'O'
-		   AND tgname IN ('feedback_decider_check', 'feedback_transition_check'))`).Scan(&n); err != nil || n != 2 {
-		t.Fatalf("feedback_events guards after rollback: %d present (want 2 constraints, no disabled triggers), %v", n, err)
+		(SELECT count(*) FROM pg_constraint WHERE conrelid = 'feedback_events'::regclass
+		   AND conname IN ('feedback_not_self_decided', 'feedback_decided_shape'))
+		+ (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'feedback_events'::regclass AND tgenabled <> 'D'
+		   AND tgname IN ('feedback_decider_check', 'feedback_transition_check'))`).Scan(&n); err != nil || n != 4 {
+		t.Fatalf("feedback_events guards after rollback: %d present and enabled (want 2 constraints + 2 triggers), %v", n, err)
 	}
 }
 
@@ -162,13 +163,13 @@ func TestBufferOtherHospitalInvisible(t *testing.T) {
 
 	// B's worker can't buffer A's correction, under either hospital id.
 	for _, hid := range []uuid.UUID{a, b} {
-		if _, err := asWorker(ctx, pool, b, bufferInsertSQL, hid, inA); pgCode(err) != rlsViolation {
+		if _, err := asWorker(ctx, pool, b, bufferInsertSQL, hid, inA); pgCode(err) != rlsViolation || !strings.Contains(err.Error(), "row-level security") {
 			t.Errorf("hospital B worker, row for %v: want RLS refusal, got %v", hid == a, err)
 		}
 	}
 	// A's own worker can't write a row for B's correction either.
 	inB := seedApproved(t, pool, b)
-	if _, err := asWorker(ctx, pool, a, bufferInsertSQL, a, inB); pgCode(err) != rlsViolation {
+	if _, err := asWorker(ctx, pool, a, bufferInsertSQL, a, inB); pgCode(err) != rlsViolation || !strings.Contains(err.Error(), "row-level security") {
 		t.Errorf("hospital A worker, B's correction: want RLS refusal, got %v", err)
 	}
 	// The FK ties the pair even for the owner.
@@ -185,18 +186,14 @@ func TestBufferOtherHospitalInvisible(t *testing.T) {
 	}
 }
 
-// C10: no Plan 4 role writes the weights or the knowledge base. The gateway's
-// 00003 grant on kb_chunks (a hospital's own knowledge base, under
-// hospital_rows) predates Plan 4 and is left as it is; the brief's "none"
-// for it contradicts the schema, so only the weights are asserted for it.
+// C10: no Plan 4 role writes the weights or the knowledge base. 00013 takes
+// the gateway's 00003 write grants on kb_chunks (and its sequence) away, as
+// 00008 did for the worker.
 func TestNoPlan4RoleWritesWeightsOrKB(t *testing.T) {
 	_, pool := shared(t)
 	ctx := context.Background()
 	for _, role := range []string{"mhai_worker", "mhai_gateway"} {
 		for _, table := range []string{"guardrail_weights", "kb_chunks"} {
-			if role == "mhai_gateway" && table == "kb_chunks" {
-				continue
-			}
 			for _, priv := range []string{"INSERT", "UPDATE", "DELETE"} {
 				var ok bool
 				if err := pool.QueryRow(ctx, `SELECT has_table_privilege($1, $2, $3)`, role, table, priv).Scan(&ok); err != nil {
@@ -207,6 +204,14 @@ func TestNoPlan4RoleWritesWeightsOrKB(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestGatewayNoKBSequence(t *testing.T) {
+	_, pool := shared(t)
+	var ok bool
+	if err := pool.QueryRow(context.Background(), `SELECT has_sequence_privilege('mhai_gateway', 'kb_chunks_id_seq', 'USAGE, UPDATE')`).Scan(&ok); err != nil || ok {
+		t.Fatalf("mhai_gateway holds USAGE or UPDATE on kb_chunks_id_seq (%v)", err)
 	}
 }
 
