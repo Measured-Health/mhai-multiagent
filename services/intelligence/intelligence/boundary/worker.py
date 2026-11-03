@@ -28,6 +28,10 @@ Jobs (spec §9.2, T11): a service with job handlers also pulls from its own
 durable consumer on JOBS (named after the service, shared by every copy),
 one message at a time and only while it has a free job slot and its
 readiness check passes (no database: no job is taken). Jobs never reply.
+A job type with a durable of its own (JOB_CONSUMERS: the pipeline's
+approve_correction on pipeline_learning, Plan 4 §4.7) is pulled by a loop
+of its own with its own slots, so learning jobs never wait behind clinical
+questions.
 A job that fails verification is Termed with a dead letter (ids, type,
 attempts, code and reason only) and touches nothing else: without a
 verified hospital there is no database access (departure 5). A verified job
@@ -98,6 +102,9 @@ Handler = Callable[[Verified, Message], Awaitable[tuple[envelope_pb2.ResponseMet
 Readiness = Callable[[], bool | Awaitable[bool]]
 
 JOBS_STREAM = "JOBS"  # core's bus.JobsStream; the durable is the service's name
+# Job operations pulled from a durable other than the service's own (core's
+# bus.LearningConsumer). The NATS user may use only these and its own.
+JOB_CONSUMERS = {"pipeline.approve_correction": "pipeline_learning"}
 DEAD_STREAM = "DEAD"
 NATS_MSG_ID = "Nats-Msg-Id"
 
@@ -257,6 +264,8 @@ class Worker:
                 raise ValueError(f"handler {op.name} is not request/reply")
             self._handlers[op.name] = (op, h, _decoder_for(op))
         self._jobs: dict[str, tuple[Operation, JobHandler, Decoder]] = {}
+        # Each durable this worker pulls from, and its job slots.
+        self._durables: dict[str, asyncio.Semaphore] = {}
         if jobs:
             ops.require(service, jobs)
             if jobs_ready is None:
@@ -267,13 +276,16 @@ class Worker:
                 if op.kind != "job":
                     raise ValueError(f"handler {op.name} is not a job")
                 self._jobs[op.op] = (op, jh, _decoder_for(op))
+                durable = JOB_CONSUMERS.get(op.name, service)
+                if durable not in self._durables:
+                    self._durables[durable] = asyncio.Semaphore(settings.max_concurrency)
         self._jobs_ready = jobs_ready
         self._sem = asyncio.Semaphore(settings.max_concurrency)
-        # Job slots, apart from request/reply's, so a long job never makes
-        # health answer overloaded. A slot is held until its model threads end.
-        self._job_sem = asyncio.Semaphore(settings.max_concurrency)
-        self._job_loop: asyncio.Task[None] | None = None
-        self._psub: Any = None
+        # Job slots (self._durables), apart from request/reply's, so a long
+        # job never makes health answer overloaded. A slot is held until its
+        # model threads end.
+        self._job_loops: list[asyncio.Task[None]] = []
+        self._psubs: list[Any] = []
         self._js: Any = None
         self.fetch_timeout = 5.0
         self._tasks: set[asyncio.Task[None]] = set()
@@ -733,20 +745,24 @@ class Worker:
     # --- jobs (JetStream) -----------------------------------------------------------
 
     async def _start_jobs(self) -> None:
-        """Bind the service's durable pull consumer (core made it) and start
-        the loop that feeds the job handlers."""
+        """Bind each durable pull consumer the job handlers need (core made
+        them) and start one loop per durable that feeds them."""
         self._js = self.connection.jetstream()
-        self._psub = await self._js.pull_subscribe_bind(durable=self.service, stream=JOBS_STREAM)
-        self._job_loop = asyncio.get_running_loop().create_task(self._consume())
+        loop = asyncio.get_running_loop()
+        for durable, sem in self._durables.items():
+            psub = await self._js.pull_subscribe_bind(durable=durable, stream=JOBS_STREAM)
+            self._psubs.append(psub)
+            self._job_loops.append(loop.create_task(self._consume(durable, psub, sem)))
 
     async def _stop_jobs(self) -> None:
-        loop, self._job_loop = self._job_loop, None
-        if loop is not None:
-            loop.cancel()
+        loops, self._job_loops = self._job_loops, []
+        for t in loops:
+            t.cancel()
+        for t in loops:
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await loop
-        psub, self._psub = self._psub, None
-        if psub is not None:
+                await t
+        psubs, self._psubs = self._psubs, []
+        for psub in psubs:
             with contextlib.suppress(Exception):
                 await psub.unsubscribe()
 
@@ -763,44 +779,47 @@ class Worker:
             return False
         return r is True
 
-    async def _consume(self) -> None:
-        """One job at a time per free slot, only while ready. A message is
-        fetched only with a slot in hand, so JetStream (not this process)
-        holds the queue, and max_ack_pending bounds what every copy has."""
+    async def _consume(self, durable: str, psub: Any, sem: asyncio.Semaphore) -> None:
+        """One job at a time per free slot of this durable, only while
+        ready. A message is fetched only with a slot in hand, so JetStream
+        (not this process) holds the queue, and max_ack_pending bounds what
+        every copy has."""
         not_ready = False
         while not self.draining:
             if not await self._ready_for_jobs():
                 if not not_ready:
                     self.refusals["jobs_not_ready"] += 1
-                    log.warning("jobs paused service=%s: not ready", self.service)
+                    log.warning(
+                        "jobs paused service=%s consumer=%s: not ready", self.service, durable
+                    )
                 not_ready = True
                 await asyncio.sleep(1.0)
                 continue
             if not_ready:
-                log.info("jobs resumed service=%s", self.service)
+                log.info("jobs resumed service=%s consumer=%s", self.service, durable)
                 not_ready = False
-            await self._job_sem.acquire()
+            await sem.acquire()
             try:
-                msgs = await self._psub.fetch(1, timeout=self.fetch_timeout)
+                msgs = await psub.fetch(1, timeout=self.fetch_timeout)
             except asyncio.CancelledError:
-                self._job_sem.release()
+                sem.release()
                 raise
             except nats_errors.TimeoutError:
-                self._job_sem.release()
+                sem.release()
                 continue
             except Exception as e:
-                self._job_sem.release()
+                sem.release()
                 log.warning("job fetch failed service=%s error=%s", self.service, type(e).__name__)
                 await asyncio.sleep(1.0)
                 continue
             if not msgs:
-                self._job_sem.release()
+                sem.release()
                 continue
             for i, m in enumerate(msgs):
                 if i:  # fetch(1) gives one; any extra needs its own slot
-                    await self._job_sem.acquire()
+                    await sem.acquire()
                 self.received += 1
-                self._spawn(self._job(m, Slot(self._job_sem)))
+                self._spawn(self._job(m, Slot(sem)))
 
     async def _job(self, msg: Msg, slot: Slot) -> None:
         try:
@@ -1001,7 +1020,9 @@ async def run_service(settings: WorkerSettings) -> None:
 
             jobs, runner = pipeline.job_handlers(settings, database, clock=verifier.clock)
             if database is None:
-                log.warning("no INTELLIGENCE_DB_URL: run_query jobs are not taken")
+                log.warning(
+                    "no INTELLIGENCE_DB_URL: run_query and approve_correction jobs are not taken"
+                )
         w = Worker(
             settings,
             service_handlers(settings.service, database, models_ready=runner is not None),

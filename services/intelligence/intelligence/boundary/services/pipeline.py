@@ -6,8 +6,12 @@ INTELLIGENCE_DB_URL is set. Without one the default is "not ready", and a
 check that raises is "not ready" too. models_ready is true once the model
 client INTELLIGENCE_MODEL_CLIENT names was built.
 
-run_query (jobs/run_query.py) runs only with a database: job_handlers
-gives none without one, so the worker takes no job (T10 note).
+run_query (jobs/run_query.py) and approve_correction
+(jobs/approve_correction.py, Plan 4 §4.7) run only with a database:
+job_handlers gives none without one, so the worker takes no job (T10
+note). The worker refuses to start if operations.json lacks either
+operation (Operations.require), and pulls approve_correction from its own
+durable, pipeline_learning (worker.JOB_CONSUMERS).
 """
 
 from __future__ import annotations
@@ -76,18 +80,24 @@ def job_handlers(
     *,
     clock: Callable[[], float] = time.time,
 ) -> tuple[dict[str, JobHandler] | None, RunQuery | None]:
-    """The pipeline's job handlers and their runner, or (None, None) without
-    a database: no job is taken then. The model client is the one
-    INTELLIGENCE_MODEL_CLIENT names (the stub only in development)."""
+    """The pipeline's job handlers and the run_query runner (whose
+    readiness gates every job, and which the caller closes), or (None,
+    None) without a database: no job is taken then. The model client is
+    the one INTELLIGENCE_MODEL_CLIENT names, the learning client the one
+    INTELLIGENCE_LEARNING_CLIENT names (each stub only in development)."""
     if database is None:
         return None, None
+    from intelligence.boundary.jobs.approve_correction import ApproveCorrection
     from intelligence.boundary.jobs.run_query import RunQuery
+    from intelligence.boundary.learning import build_learning_client
     from intelligence.boundary.models import build_model_client
 
+    learning_client = build_learning_client(settings)  # refuses a bad one before any thread
     runner = RunQuery(
         database,
         build_model_client(settings),
         clock=clock,
         max_concurrency=settings.max_concurrency,
     )
-    return {"run_query": runner.handle}, runner
+    learning = ApproveCorrection(database, learning_client, clock=clock)
+    return {"run_query": runner.handle, "approve_correction": learning.handle}, runner

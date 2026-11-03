@@ -6,6 +6,7 @@ is the two-person rule itself, in DoctorFeedbackLoop and the orchestrator,
 and the check that nothing in the boundary can reach it without core.
 """
 
+import ast
 import json
 import re
 from importlib import resources
@@ -97,11 +98,33 @@ def test_only_feedback_operation_is_approve_correction():
 
 def test_boundary_code_never_reaches_the_feedback_loop():
     # And nothing in the boundary package calls it behind the table's back.
+    # approve_correction is also the job's name (Plan 4 spec §4.7: the
+    # module, the operation, the jobs type), so for it the check is the
+    # method: no call to an approve_correction function or method, and no
+    # attribute of that name (an import names the job's module as a string).
     boundary = Path(str(resources.files("intelligence.boundary")))
     for path in boundary.rglob("*.py"):
         text = path.read_text()
-        for name in ("process_feedback", "approve_correction", "DoctorFeedbackLoop"):
+        for name in ("process_feedback", "DoctorFeedbackLoop"):
             assert name not in text, f"{path.name} reaches {name}"
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, ast.Call):
+                f = node.func
+                called = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+                assert called != "approve_correction", f"{path.name} calls approve_correction()"
+            elif isinstance(node, ast.Attribute) and node.attr == "approve_correction":
+                raise AssertionError(f"{path.name} reaches .approve_correction")
+
+
+def test_feedback_loop_guard_is_not_vacuous():
+    for src in ("orch.approve_correction(cid, 'dr_b')", "approve_correction(x)"):
+        calls = [
+            n
+            for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Call)
+            and getattr(n.func, "attr", getattr(n.func, "id", "")) == "approve_correction"
+        ]
+        assert calls, src
 
 
 def test_second_clinician_approval_applies_scoped_masked_correction(system):
