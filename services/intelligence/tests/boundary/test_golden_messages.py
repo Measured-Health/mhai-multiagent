@@ -12,12 +12,12 @@ import pytest
 from google.protobuf import json_format
 from google.protobuf.message import Message
 
-from intelligence.boundary.pb import authz_pb2, echo_pb2, envelope_pb2, pipeline_pb2
+from intelligence.boundary.pb import authz_pb2, echo_pb2, envelope_pb2, learning_pb2, pipeline_pb2
 
 GOLDEN = Path(__file__).resolve().parents[4] / "testdata" / "proto-golden"
 
 MESSAGES: dict[str, type[Message]] = {}
-for _mod in (envelope_pb2, pipeline_pb2, echo_pb2, authz_pb2):
+for _mod in (envelope_pb2, pipeline_pb2, learning_pb2, echo_pb2, authz_pb2):
     for _name, _desc in _mod.DESCRIPTOR.message_types_by_name.items():
         MESSAGES[_name] = getattr(_mod, _name)
 
@@ -27,6 +27,7 @@ EXPECTED = {
     "ResponseMeta",
     "DeadLetter",
     "RunQueryJob",
+    "ApproveCorrectionJob",
     "HealthRequest",
     "HealthResponse",
     "PingRequest",

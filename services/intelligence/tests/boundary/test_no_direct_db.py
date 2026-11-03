@@ -2,7 +2,8 @@
 
 Only boundary/db.py opens a connection or a cursor, so every query runs
 inside with_hospital (SET LOCAL ROLE mhai_worker, the verified hospital).
-The repositories (boundary/kb_repo.py, boundary/jobs_repo.py) may run SQL
+The repositories (boundary/kb_repo.py, boundary/jobs_repo.py,
+boundary/learning_repo.py) may run SQL
 only on a cursor they are handed as a parameter, and only with SQL text
 that is a literal (a string, a module constant bound once to one, or a
 psycopg sql.SQL composition of one), so it is always parameterised.
@@ -19,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2] / "intelligence"
 HELPER = "boundary/db.py"
-REPOS = {"boundary/kb_repo.py", "boundary/jobs_repo.py"}
+REPOS = {"boundary/kb_repo.py", "boundary/jobs_repo.py", "boundary/learning_repo.py"}
 GENERATED = "boundary/pb/"
 
 DRIVERS = {"psycopg", "psycopg_pool", "psycopg2", "asyncpg", "sqlalchemy", "sqlite3", "pg8000"}
@@ -188,6 +189,17 @@ def test_no_direct_db() -> None:
 def test_the_helper_and_repositories_exist() -> None:
     assert (ROOT / HELPER).is_file()
     assert (ROOT / "boundary/jobs_repo.py").is_file()
+    assert (ROOT / "boundary/learning_repo.py").is_file()
+
+
+def test_learning_job_runs_no_sql_of_its_own() -> None:
+    """The approve_correction job and the learning client hand every
+    statement to learning_repo: they never execute SQL themselves."""
+    for rel in ("boundary/jobs/approve_correction.py", "boundary/learning.py"):
+        assert rel not in REPOS
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        assert offenders(rel, src) == []
+        assert ".execute(" not in src, rel
 
 
 def test_guard_catches_each_kind() -> None:

@@ -389,7 +389,10 @@ func TestJobsAuditTiedToRowHospital(t *testing.T) {
 	u := seedUser(t, hid, true, authz.RoleClinician)
 	deadline := time.Now().Add(5 * time.Minute)
 	q := seedQuery(t, hid, u, 0, &deadline, true)
+	// Every event carries a payload that fits job.dead_lettered's schema,
+	// so only 00009's policy can refuse.
 	write := func(e audit.Event) error {
+		e.Payload = map[string]any{"job_id": q.String(), "type": "run_query", "error": "unavailable", "attempts": 1}
 		return db.WithJobs(ctx, app, func(tx pgx.Tx) error { return audit.Write(ctx, tx, e) })
 	}
 	ok := audit.Event{HospitalID: hid.String(), Action: "job.dead_lettered", Entity: "query", EntityID: q.String()}

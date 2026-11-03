@@ -35,10 +35,11 @@ var (
 	modelVersionPattern = regexp.MustCompile(`^[A-Za-z0-9_.:/@+-]{1,128}$`) // the worker's _SAFE_VERSION
 	factEntityIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 
-	decisions     = map[string]bool{"PASS": true, "REGENERATE": true, "ESCALATE": true}
-	trustBands    = map[string]bool{"low": true, "mid": true, "high": true}
-	cancelReasons = map[string]bool{"user_deactivated": true, "hospital_deactivated": true, cancelUnusable: true}
-	errorCodes    = func() map[string]bool {
+	decisions      = map[string]bool{"PASS": true, "REGENERATE": true, "ESCALATE": true}
+	trustBands     = map[string]bool{"low": true, "mid": true, "high": true}
+	cancelReasons  = map[string]bool{"user_deactivated": true, "hospital_deactivated": true, cancelUnusable: true}
+	personaUpdates = map[string]bool{"skipped": true, "applied": true}
+	errorCodes     = func() map[string]bool {
 		m := map[string]bool{}
 		for _, c := range authz.ErrorCodes() {
 			m[c.Code] = true
@@ -57,11 +58,19 @@ type factSchema struct {
 	required []string
 }
 
-// jobFactSchemas are the outbox's actions (00008's CHECK allows these three),
-// each tied to the job status it reports.
+// jobFactSchemas are the outbox's actions (00012's CHECK allows these
+// five), each tied to the job status it reports and to its parent's kind:
+// jobType "" is a clinical_queries row (query_id facts), otherwise the
+// jobs row's type (job_id facts). A job fact names the job's subject under
+// subjectKey (and, if it names an entity of its own, as subjectEntity):
+// both must be the jobs row's subject_id, as a query fact's query_id must
+// be its question's.
 var jobFactSchemas = map[string]struct {
-	schema factSchema
-	status string
+	schema        factSchema
+	status        string
+	jobType       string
+	subjectKey    string
+	subjectEntity string
 }{
 	"query.completed": {factSchema{fields: map[string]fieldCheck{
 		"decision":       inSet(decisions),
@@ -69,14 +78,27 @@ var jobFactSchemas = map[string]struct {
 		"chunk_ids":      stringList(maxChunkIDs, chunkIDPattern),
 		"model_versions": stringMap(maxModelVersions, modelNamePattern, modelVersionPattern),
 		"attempts":       integer,
-	}, required: []string{"decision", "attempts"}}, "completed"},
+	}, required: []string{"decision", "attempts"}}, "completed", "", "", ""},
 	"query.failed": {factSchema{fields: map[string]fieldCheck{
 		"error":    inSet(errorCodes),
 		"attempts": integer,
-	}, required: []string{"error", "attempts"}}, "failed"},
+	}, required: []string{"error", "attempts"}}, "failed", "", "", ""},
 	"query.cancelled": {factSchema{fields: map[string]fieldCheck{
 		"reason": inSet(cancelReasons),
-	}, required: []string{"reason"}}, "cancelled"},
+	}, required: []string{"reason"}}, "cancelled", "", "", ""},
+	// Plan 4 spec §9: the approve_correction job's facts. Ids and codes
+	// only: never the reason or the corrected diagnosis.
+	"correction.applied": {factSchema{fields: map[string]fieldCheck{
+		"correction_id":  uuidValue,
+		"attempts":       integer,
+		"model_versions": stringMap(maxModelVersions, modelNamePattern, modelVersionPattern),
+		"persona_update": inSet(personaUpdates),
+	}, required: []string{"correction_id", "attempts", "persona_update"}}, "completed", "approve_correction", "correction_id", "correction"},
+	"correction.apply_failed": {factSchema{fields: map[string]fieldCheck{
+		"correction_id": uuidValue,
+		"error":         inSet(errorCodes),
+		"attempts":      integer,
+	}, required: []string{"correction_id", "error", "attempts"}}, "failed", "approve_correction", "correction_id", "correction"},
 }
 
 // replyFactSchemas are the request/reply facts core records
@@ -113,6 +135,12 @@ func inSet(set map[string]bool) fieldCheck {
 		s, ok := v.(string)
 		return ok && set[s]
 	}
+}
+
+// uuidValue: a canonical (lower-case, non-nil) uuid string.
+func uuidValue(v any) bool {
+	s, ok := v.(string)
+	return ok && canonicalUUID(s)
 }
 
 func nullOr(f fieldCheck) fieldCheck {

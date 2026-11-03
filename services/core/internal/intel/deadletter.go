@@ -33,9 +33,16 @@ const (
 	deadFetchWait  = 2 * time.Second
 	// deadMaxBody: bus.DeadMaxMsgSize; anything larger isn't a letter.
 	deadMaxBody = bus.DeadMaxMsgSize
-	// jobType is the one job type with a clinical_queries row.
+	// jobType is the one job type with a clinical_queries row; every other
+	// type a letter may name has a jobs row (jobBudgets).
 	jobType = "run_query"
 )
+
+// letterType reports whether core handles letters of job type typ.
+func letterType(typ string) bool {
+	_, ok := jobBudgets[typ]
+	return typ == jobType || ok
+}
 
 var (
 	errDeadLetters = errors.New("intel: dead-letter consumer unavailable")
@@ -57,6 +64,7 @@ type Metrics struct {
 	DeadExpired  atomic.Int64 // deadline_exceeded letters (no alert, F6)
 	DeadRetried  atomic.Int64 // jobs re-minted after an emergency key rotation
 	DeadErrors   atomic.Int64 // transient failures (letter Nak'd)
+	SweepSkipped atomic.Int64 // jobs rows the sweeper left unpublished (two-person refusal)
 }
 
 // unattached counts for a Client without Metrics, so log sampling still
@@ -90,16 +98,20 @@ const (
 //
 // A dead letter is untrusted input: a worker wrote it, and any worker may
 // publish dead.v1.>. Core acts only on a letter whose own subject,
-// dead.v1.<hospital>.run_query, names the same hospital as its
-// subject_hospital, and whose job_id is a clinical_queries row of that
-// hospital, looked up as mhai_jobs (F5); anything else is logged by ids and
-// acked. Then:
+// dead.v1.<hospital>.<type>, names the same hospital as its
+// subject_hospital and the same type as its type, and whose job_id is a
+// row of that hospital and type, looked up as mhai_jobs (F5): a
+// clinical_queries row for run_query, a jobs row for approve_correction.
+// Anything else is logged by ids and acked. Then:
 //   - reason signature from a kid core no longer trusts (an emergency
 //     rotation, spec §7.5), on a job still queued: Republish as the
 //     creator, after re-checking the account and hospital (F23), with a new
 //     message id (RetryMsgID), audited job.dead_lettered and job.retried;
+//     (a run_query row only: a jobs row has no retried_kid to claim, so
+//     it is failed as below and the platform's retry re-publishes it);
 //   - otherwise the row, if still queued, is set failed with the letter's
-//     code, audited job.dead_lettered and query.failed; unauthorized,
+//     code, audited job.dead_lettered and, for a question, query.failed
+//     (a jobs row's audit rows are against the job); unauthorized,
 //     forbidden and invalid_request also audit intelligence.refused and
 //     count the DeadRefused alert; deadline_exceeded (a job that expired in
 //     the queue, F6) doesn't;
@@ -180,8 +192,8 @@ func HandleDeadLetter(ctx context.Context, pool *pgxpool.Pool, client *Client, s
 	if len(seg) != 4 || seg[0] != "dead" || seg[1] != "v1" {
 		return ignore("subject")
 	}
-	if seg[3] != jobType {
-		return ignore("type") // no other job type has a row to mark yet
+	if !letterType(seg[3]) {
+		return ignore("type")
 	}
 	hid, err := uuid.Parse(seg[2])
 	if err != nil || !canonicalUUID(seg[2]) {
@@ -194,7 +206,7 @@ func HandleDeadLetter(ctx context.Context, pool *pgxpool.Pool, client *Client, s
 	if err := proto.Unmarshal(data, &dl); err != nil {
 		return ignore("body")
 	}
-	if dl.SubjectHospital != seg[2] || dl.Type != jobType {
+	if dl.SubjectHospital != seg[2] || dl.Type != seg[3] {
 		return ignore("letter names another hospital or type")
 	}
 	if _, ok := workerCodes[dl.Code]; !ok {
@@ -213,7 +225,7 @@ func HandleDeadLetter(ctx context.Context, pool *pgxpool.Pool, client *Client, s
 		reason = dl.Reason
 	}
 
-	row, found, err := lookupDeadJob(ctx, pool, jobID, hid)
+	row, found, err := lookupDeadJob(ctx, pool, jobID, hid, dl.Type)
 	if err != nil {
 		met.DeadErrors.Add(1)
 		return deadRetry
@@ -223,7 +235,7 @@ func HandleDeadLetter(ctx context.Context, pool *pgxpool.Pool, client *Client, s
 	}
 
 	code := dl.Code
-	if code == "unauthorized" && reason == "signature" && kid != "" && row.status == "queued" && rotatedOut(client, kid) {
+	if code == "unauthorized" && reason == "signature" && kid != "" && row.status == "queued" && !row.jobsRow() && rotatedOut(client, kid) {
 		switch err := remint(ctx, pool, client, row, kid); {
 		case err == nil:
 			met.DeadRetried.Add(1)
@@ -277,19 +289,28 @@ func rotatedOut(client *Client, kid string) bool {
 	return t.Known() && !t.Has(kid) && t.Has(client.Signer.KeyID) && kid != client.Signer.KeyID
 }
 
-func lookupDeadJob(ctx context.Context, pool *pgxpool.Pool, id, hid uuid.UUID) (deadRow, bool, error) {
+// lookupDeadJob reads job id of hospital hid and type typ: a
+// clinical_queries row for run_query, a jobs row of that type otherwise.
+func lookupDeadJob(ctx context.Context, pool *pgxpool.Pool, id, hid uuid.UUID, typ string) (deadRow, bool, error) {
 	var r deadRow
 	found := false
 	op, ok := authz.OperationByName(runQuery)
-	if !ok {
+	if !ok || !letterType(typ) {
 		return r, false, errDeadTx
 	}
 	err := db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		var by *uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT id, hospital_id, created_by, COALESCE(request_id, ''), attempts, status,
-			       COALESCE(deadline_at, created_at + make_interval(secs => $3))
-			FROM clinical_queries WHERE id = $1 AND hospital_id = $2`, id, hid, op.Timeout.Seconds()).
-			Scan(&r.ID, &r.HospitalID, &by, &r.RequestID, &r.Attempts, &r.status, &r.Deadline)
+		var row pgx.Row
+		if typ == jobType {
+			row = tx.QueryRow(ctx, `SELECT id, hospital_id, created_by, COALESCE(request_id, ''), attempts, status,
+			       COALESCE(deadline_at, created_at + make_interval(secs => $3)), '', id
+			FROM clinical_queries WHERE id = $1 AND hospital_id = $2`, id, hid, op.Timeout.Seconds())
+		} else {
+			row = tx.QueryRow(ctx, `SELECT j.id, j.hospital_id, j.created_by, COALESCE(j.request_id, ''), j.attempts, j.status,
+			       `+jobDeadline("j.")+`, j.type, j.subject_id
+			FROM jobs j WHERE j.id = $1 AND j.hospital_id = $2 AND j.type = $3`, id, hid, typ)
+		}
+		err := row.Scan(&r.ID, &r.HospitalID, &by, &r.RequestID, &r.Attempts, &r.status, &r.Deadline, &r.Type, &r.SubjectID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -312,8 +333,8 @@ func lookupDeadJob(ctx context.Context, pool *pgxpool.Pool, id, hid uuid.UUID) (
 // mhai_jobs: no actor, the row's hospital and request id (00009 ties the
 // row to a job of that hospital).
 func jobEvent(row JobRow, action string, payload map[string]any) audit.Event {
-	return audit.Event{HospitalID: row.HospitalID.String(), RequestID: JobRID(row.ID, row.RequestID),
-		Action: action, Entity: "query", EntityID: row.ID.String(), Payload: payload}
+	return audit.Event{HospitalID: row.HospitalID.String(), RequestID: row.rid(),
+		Action: action, Entity: row.entity(), EntityID: row.ID.String(), Payload: payload}
 }
 
 // remint re-publishes a queued job refused for a removed kid (F23: the one
@@ -369,16 +390,25 @@ func remint(ctx context.Context, pool *pgxpool.Pool, client *Client, row deadRow
 }
 
 // markDead fails row with code if it is still queued and, only then,
-// audits the letter (job.dead_lettered, query.failed and, for a refusal,
-// intelligence.refused) in the same transaction as mhai_jobs. It reports
-// whether it marked the row; a letter that changes nothing writes nothing.
+// audits the letter (job.dead_lettered, query.failed for a question and,
+// for a refusal, intelligence.refused) in the same transaction as
+// mhai_jobs. It reports whether it marked the row; a letter that changes
+// nothing writes nothing.
 func markDead(ctx context.Context, pool *pgxpool.Pool, row deadRow, code, kid string) (bool, error) {
 	marked := false
+	typ, opName := jobType, runQuery
+	q := `UPDATE clinical_queries SET status = 'failed', error = $3, completed_at = now()
+			WHERE id = $1 AND hospital_id = $2 AND status = 'queued'
+			RETURNING attempts`
+	if row.jobsRow() {
+		typ, opName = row.Type, "pipeline."+row.Type
+		q = `UPDATE jobs SET status = 'failed', error = $3, failed_at = now(), completed_at = now()
+			WHERE id = $1 AND hospital_id = $2 AND status = 'queued'
+			RETURNING attempts`
+	}
 	err := db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		var attempts int
-		err := tx.QueryRow(ctx, `UPDATE clinical_queries SET status = 'failed', error = $3, completed_at = now()
-			WHERE id = $1 AND hospital_id = $2 AND status = 'queued'
-			RETURNING attempts`, row.ID, row.HospitalID, code).Scan(&attempts)
+		err := tx.QueryRow(ctx, q, row.ID, row.HospitalID, code).Scan(&attempts)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			return nil
@@ -387,17 +417,19 @@ func markDead(ctx context.Context, pool *pgxpool.Pool, row deadRow, code, kid st
 		}
 		marked = true
 		if err := audit.Write(ctx, tx, jobEvent(row.JobRow, "job.dead_lettered", map[string]any{
-			"job_id": row.ID.String(), "type": jobType, "error": code, "attempts": attempts,
+			"job_id": row.ID.String(), "type": typ, "error": code, "attempts": attempts,
 		})); err != nil {
 			return errDeadTx
 		}
-		if err := audit.Write(ctx, tx, jobEvent(row.JobRow, "query.failed", map[string]any{
-			"query_id": row.ID.String(), "error": code, "attempts": attempts,
-		})); err != nil {
-			return errDeadTx
+		if !row.jobsRow() {
+			if err := audit.Write(ctx, tx, jobEvent(row.JobRow, "query.failed", map[string]any{
+				"query_id": row.ID.String(), "error": code, "attempts": attempts,
+			})); err != nil {
+				return errDeadTx
+			}
 		}
 		if refusalCodes[code] {
-			p := map[string]any{"operation": runQuery, "reason": code}
+			p := map[string]any{"operation": opName, "reason": code}
 			if kid != "" {
 				p["kid"] = kid
 			}

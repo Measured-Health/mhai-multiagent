@@ -214,7 +214,11 @@ throwaway generated secrets and runs `go test -tags smoke
 `TestQuestionEndToEnd` (sign in, `POST /queries`, poll, the result, and
 `query.completed` on a verified chain), `TestEchoNeedsToken`,
 `TestBFFDirectEchoEndToEnd` (`echo.ping` through a grant; the chain holds
-`intelligence.granted`) and `TestQuestionOverHTTPStillWorks`. Set
+`intelligence.granted`) and `TestQuestionOverHTTPStillWorks`. `TestSmokeCorrectionApproved` (Plan 4a)
+runs the two-person rule: clinician A asks and suggests a correction, A's
+approve is 403 `self_approval`, clinician B of the same hospital approves
+(204), `correction.applied` lands on a verified chain, and exactly one
+`feedback_buffer` row exists. Set
 `POSTGRES_PORT`, `NATS_PORT`, `CORE_PORT` and `SMOKE_PROJECT` when the
 defaults clash.
 
@@ -345,6 +349,26 @@ serves.
   can no longer use the service gets it cancelled, and one past its
   deadline fails with `deadline_exceeded`.
 
+## Feedback and corrections (Plan 4, part 4a)
+
+`POST /feedback` (clinicians; `validate` or `correct`, on their own
+completed question), `GET /feedback/stats/mine`, and
+`GET /corrections`, `/corrections/mine`, `/corrections/reviewed`,
+`POST /corrections/{id}/approve|reject|withdraw` (`internal/feedback`).
+Rules: the decider is always the token's user, never the body's; the
+submitter can't decide their own correction (403 `self_approval`); a
+decider must be an active clinician of the same hospital; another
+hospital's correction is 404. The same rule is held by the database (a
+check on `feedback_events`, and the RESTRICTIVE policy
+`buffer_needs_approval` on `feedback_buffer`, migrations 00011 to 00013).
+An approval writes its audit row and queues an `approve_correction` job in
+one transaction, then publishes it after the commit (the publish sweeper
+retries it). Free text (`corrected_diagnosis`, `reason`, the rejection
+note) is never logged or audited; refusals are audited with the key
+`reason`. Core's `pipeline_learning` JetStream consumer delivers
+`jobs.v1.*.approve_correction` to the pipeline worker, and the drainer
+turns the worker's fact into `correction.applied` against the correction.
+
 ## Known limits
 
 - **Third-party lockout.** Someone who knows an email can hold any account
@@ -368,6 +392,8 @@ serves.
   activate` first (TODO.md, the setup flow).
 - **Self-enrolment of two-step** stays open on first sign-in until the
   invite flow exists: whoever has the first password owns the second factor.
+- **Refusal audit rows are unthrottled** (a refused approval is audited
+  every time; residual risk, TODO.md).
 - **Postgres TLS.** The pipeline worker requires `sslmode=verify-full`
   outside development; core does not yet (TODO.md).
 

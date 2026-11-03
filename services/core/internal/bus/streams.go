@@ -17,10 +17,17 @@ const (
 	DeadStream       = "DEAD"      // dead.v1.<hospital_id|global>.<type>
 	PipelineConsumer = "pipeline"  // the pipeline worker's durable on JOBS
 	CoreDeadConsumer = "core_dead" // core's durable on DEAD
+	// LearningConsumer is the pipeline worker's second durable on JOBS
+	// (Plan 4 spec §4.7, §10.5): approve_correction jobs, so learning
+	// bookkeeping never waits behind clinical questions.
+	LearningConsumer = "pipeline_learning"
 
 	// PipelineFilter is the pipeline consumer's subjects: run_query jobs
 	// of every hospital.
 	PipelineFilter = "jobs.v1.*.run_query"
+	// LearningFilter is the learning consumer's subjects. It doesn't overlap
+	// PipelineFilter: a work-queue stream allows one consumer per subject.
+	LearningFilter = "jobs.v1.*.approve_correction"
 
 	// JobsMaxPerSubject bounds what one hospital can queue per job type.
 	// Past it a publish is refused (DiscardNewPerSubject) and core answers
@@ -72,6 +79,12 @@ const (
 	PipelineMaxDeliver = 5
 	CoreDeadAckWait    = 30 * time.Second
 
+	// The learning consumer: as the pipeline's, with its own, smaller
+	// in-flight budget (spec §10.5).
+	LearningAckWait       = 60 * time.Second
+	LearningMaxDeliver    = 5
+	LearningMaxAckPending = 4
+
 	// DefaultPipelineMaxAckPending is JOBS_PIPELINE_MAX_ACK_PENDING's
 	// default: the worker count times its concurrency.
 	DefaultPipelineMaxAckPending = 8
@@ -111,8 +124,8 @@ func replicaCount(n int) (int, error) {
 //     refused at publish instead of dropping the oldest. Work-queue streams
 //     allow one consumer per subject, so every job type has exactly one
 //     durable, shared by all copies of its service.
-//   - The pipeline consumer has no BackOff (plan departure 4): the worker
-//     chooses each retry's delay with Nak(delay).
+//   - The pipeline and pipeline_learning consumers have no BackOff (plan
+//     departure 4): the worker chooses each retry's delay with Nak(delay).
 //   - DEAD keeps dead letters 30 days, for core's consumer and for review.
 //   - Both are bounded in message size, per subject and in bytes, so
 //     neither can fill the store the KV buckets share. JOBS discards new
@@ -172,6 +185,16 @@ func EnsureStreams(ctx context.Context, js jetstream.JetStream, sc StreamConfig)
 		MaxAckPending: sc.PipelineMaxAckPending,
 	}); err != nil {
 		return fmt.Errorf("bus: ensure consumer JOBS/pipeline: %w", err)
+	}
+	if _, err := js.CreateOrUpdateConsumer(ctx, JobsStream, jetstream.ConsumerConfig{
+		Durable:       LearningConsumer,
+		FilterSubject: LearningFilter,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       LearningAckWait,
+		MaxDeliver:    LearningMaxDeliver,
+		MaxAckPending: LearningMaxAckPending,
+	}); err != nil {
+		return fmt.Errorf("bus: ensure consumer JOBS/pipeline_learning: %w", err)
 	}
 	if _, err := js.CreateOrUpdateConsumer(ctx, DeadStream, jetstream.ConsumerConfig{
 		Durable:   CoreDeadConsumer,

@@ -23,6 +23,9 @@ SERVICES = frozenset({"pipeline", "echo"})
 # INTELLIGENCE_MODEL_CLIENT (F14): the real models, or the synthetic stub
 # (tests and the CI smoke test; development only).
 MODEL_CLIENTS = frozenset({"orchestrator", "stub"})
+# INTELLIGENCE_LEARNING_CLIENT (Plan 4 §10.6): the buffer arithmetic, or the
+# stub (tests and the CI smoke test; development only).
+LEARNING_CLIENTS = frozenset({"trust_buffer", "stub"})
 MAX_CONCURRENCY = 1024
 _PLACEHOLDERS = ("change-me", "changeme", "placeholder")
 DEFAULT_DB_USER = "intelligence_app"
@@ -146,6 +149,9 @@ class WorkerSettings:
     development: bool = False
     # The pipeline's models: orchestrator (default) or stub (development only).
     model_client: str = "orchestrator"
+    # The approve_correction job's learning client: trust_buffer (default)
+    # or stub (development only).
+    learning_client: str = "trust_buffer"
 
     @classmethod
     def from_env(
@@ -222,6 +228,11 @@ class WorkerSettings:
             # The stub serves invented answers (ADR 0005): never in production,
             # and an unset APP_ENV counts as production.
             errs.append("INTELLIGENCE_MODEL_CLIENT=stub runs only with APP_ENV=development")
+        learning_client = get("INTELLIGENCE_LEARNING_CLIENT") or "trust_buffer"
+        if learning_client not in LEARNING_CLIENTS:
+            errs.append("INTELLIGENCE_LEARNING_CLIENT must be trust_buffer or stub")
+        elif learning_client == "stub" and not development:
+            errs.append("INTELLIGENCE_LEARNING_CLIENT=stub runs only with APP_ENV=development")
         if errs:
             raise ConfigError("; ".join(errs))
         assert svc is not None and url is not None and keys is not None
@@ -240,6 +251,7 @@ class WorkerSettings:
             db_password=db_password,
             development=development,
             model_client=model_client,
+            learning_client=learning_client,
         )
 
 

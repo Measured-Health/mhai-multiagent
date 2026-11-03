@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.2.0"
+  version: "1.3.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -531,6 +531,233 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /feedback:
+    post:
+      operationId: submitFeedback
+      summary: Agree with an answer, or suggest a correction for review.
+      description: |
+        Clinicians only, on their own completed question. `validate` records
+        agreement (`{status: recorded}`); `correct` records a correction
+        that waits for a different clinician of the hospital
+        (`{status: pending_review, correction_id}`). Guards in order: 404
+        `not_found` (not the caller's, another hospital's, unknown, or not
+        completed), 409 `conflict` (a live feedback exists for the
+        question; a correction on an answer with no masked consultation),
+        then 422 `validation_failed` (`corrected_diagnosis` 1–200 characters
+        on one line and `reason` 3–1000 characters, which may span lines
+        (`\n`, `\r\n`), both once trimmed, no other control character, no
+        Unicode format character (bidi controls, zero-width) and no line or
+        paragraph separator (U+2028, U+2029);
+        `client_created_at` at most 5 minutes ahead). After a withdrawal a
+        new correction is allowed. The text is never logged or audited.
+        Send an `Idempotency-Key`.
+      tags: [feedback]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FeedbackIn" }
+      responses:
+        "200":
+          description: Recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeedbackOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /feedback/stats/mine:
+    get:
+      operationId: getMyFeedbackStats
+      summary: The caller's own feedback counts.
+      tags: [feedback]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: &feedbackReadErrors [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The counts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeedbackStatsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /corrections:
+    get:
+      operationId: listPendingCorrections
+      summary: Corrections waiting for review in the caller's hospital.
+      description: |
+        Never the caller's own; oldest first; at most 100. The consultation
+        is the masked copy only. `status` may be omitted or `pending`; any
+        other value is 422 `validation_failed`.
+      tags: [corrections]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [pending] }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The waiting corrections.
+          content:
+            application/json:
+              schema: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/CorrectionOut" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /corrections/mine:
+    get:
+      operationId: listMyCorrections
+      summary: The caller's own corrections, every status, newest first (at most 200).
+      tags: [corrections]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *feedbackReadErrors
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The caller's corrections.
+          content:
+            application/json:
+              schema: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/CorrectionOut" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /corrections/reviewed:
+    get:
+      operationId: listReviewedCorrections
+      summary: Corrections the caller decided in the last 30 days, newest first (at most 50).
+      tags: [corrections]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *feedbackReadErrors
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The caller's decisions.
+          content:
+            application/json:
+              schema: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/CorrectionOut" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /corrections/{id}/approve:
+    post:
+      operationId: approveCorrection
+      summary: Approve another clinician's waiting correction.
+      description: |
+        Guards in order: 404 `not_found` (unknown, another hospital's),
+        403 `self_approval` (your own), 409 `already_decided` (no longer
+        waiting), then the body (none, or `{}`; anything else is 422).
+        409 `conflict` when the database no longer finds the caller an
+        active clinician of the hospital. The decider is always the
+        token's user. A refusal is audited. An approval queues the
+        `approve_correction` job in the same transaction and publishes it
+        after the commit; 204 even when the publish fails or the hospital
+        has 20 such jobs in flight (the job then waits for the sweeper).
+      tags: [corrections]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: &decideErrors [unauthenticated, token_expired, mfa_required, forbidden, not_platform, self_approval, not_found, conflict, already_decided, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/CorrectionID"
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204": { description: Approved. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /corrections/{id}/reject:
+    post:
+      operationId: rejectCorrection
+      summary: Reject another clinician's waiting correction, with a reason code.
+      description: |
+        The same guards and refusals as approve; the body is checked last.
+        The note is shown to the submitter and the reviewer only, and never
+        audited.
+      tags: [corrections]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *decideErrors
+      parameters:
+        - $ref: "#/components/parameters/CorrectionID"
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RejectIn" }
+      responses:
+        "204": { description: Rejected. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /corrections/{id}/withdraw:
+    post:
+      operationId: withdrawCorrection
+      summary: Withdraw your own waiting correction.
+      description: |
+        Someone else's is 403 `forbidden`; a decided or withdrawn one is
+        409 `already_decided`. No body (or `{}`).
+      tags: [corrections]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, already_decided, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/CorrectionID"
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204": { description: Withdrawn. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
 components:
   securitySchemes:
     ServiceKey:
@@ -558,6 +785,11 @@ components:
       in: header
       required: false
       schema: { type: string, enum: [clinical, platform], default: clinical }
+    CorrectionID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -605,6 +837,8 @@ components:
             - internal_error
             - method_not_allowed
             - payload_too_large
+            - self_approval
+            - already_decided
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -874,3 +1108,98 @@ components:
             cascade_pass: { type: boolean }
         retrieval_ms: { type: number }
         generation_ms: { type: number }
+
+    FeedbackIn:
+      type: object
+      required: [query_id, action]
+      additionalProperties: false
+      properties:
+        query_id: { type: string, format: uuid }
+        action: { type: string, enum: [validate, correct] }
+        corrected_diagnosis: { type: string, minLength: 1, maxLength: 200, description: "`correct` only. One line." }
+        reason: { type: string, minLength: 3, maxLength: 1000, description: "`correct` only. May span lines (`\\n`, `\\r\\n`)." }
+        client_created_at: { type: string, format: date-time, description: When the app queued it (offline). }
+    FeedbackOut:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [recorded, pending_review] }
+        correction_id: { type: string, format: uuid, description: For a correction only. }
+    RejectIn:
+      type: object
+      required: [reason_code]
+      additionalProperties: false
+      properties:
+        reason_code: { type: string, enum: [not_supported, needs_rewording, unsafe, out_of_scope] }
+        note: { type: string, maxLength: 500, description: "May span lines (`\\n`, `\\r\\n`); no other control character, no Unicode format character and no U+2028 or U+2029." }
+    FeedbackStatsOut:
+      type: object
+      required: [agreed, corrections_waiting, corrections_approved, corrections_rejected, corrections_withdrawn]
+      properties:
+        agreed: { type: integer }
+        corrections_waiting: { type: integer }
+        corrections_approved: { type: integer }
+        corrections_rejected: { type: integer }
+        corrections_withdrawn: { type: integer }
+    PersonOut:
+      type: object
+      description: A person as the API shows them; never an id.
+      required: [display_name, full_name, specialty, hospital]
+      properties:
+        display_name: { type: string }
+        full_name: { type: string, nullable: true }
+        specialty: { type: string, nullable: true }
+        hospital: { type: string, nullable: true }
+    CorrectionOut:
+      type: object
+      required: [id, query_id, status, corrected_diagnosis, reason, submitted_by, submitted_at, original, consultation,
+                 decided_by, decided_at, rejection]
+      properties:
+        id: { type: string, format: uuid }
+        query_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending_review, approved, rejected, withdrawn] }
+        corrected_diagnosis: { type: string }
+        reason: { type: string }
+        submitted_by: { $ref: "#/components/schemas/PersonOut" }
+        submitted_at: { type: string, format: date-time }
+        original:
+          type: object
+          description: What the system said.
+          required: [decision, degraded, diagnosis, icd10_code, response_text, citations]
+          properties:
+            decision: { type: string, enum: [PASS, REGENERATE, ESCALATE] }
+            degraded: { type: boolean }
+            diagnosis: { type: string, nullable: true }
+            icd10_code: { type: string, nullable: true }
+            response_text: { type: string }
+            citations:
+              type: array
+              items:
+                type: object
+                required: [source_title, claim_text, action]
+                properties:
+                  source_title: { type: string }
+                  claim_text: { type: string }
+                  action: { type: string, enum: [PASS, FLAG, REDACT] }
+        consultation:
+          type: object
+          description: The consultation as it was asked, patient details already masked.
+          required: [age, sex, symptoms, clinical_question, urgency, specialty]
+          properties:
+            age: { type: number }
+            sex: { type: string, enum: [female, male, other, unknown] }
+            symptoms: { type: array, items: { type: string } }
+            clinical_question: { type: string }
+            urgency: { type: string, enum: [routine, urgent, emergency] }
+            specialty: { type: string, nullable: true }
+        decided_by:
+          allOf: [{ $ref: "#/components/schemas/PersonOut" }]
+          nullable: true
+        decided_at: { type: string, format: date-time, nullable: true, description: Also set when withdrawn. }
+        rejection:
+          type: object
+          nullable: true
+          required: [reason_code, note]
+          properties:
+            reason_code: { type: string, enum: [not_supported, needs_rewording, unsafe, out_of_scope] }
+            note: { type: string, nullable: true }

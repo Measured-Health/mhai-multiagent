@@ -61,7 +61,11 @@ func samples(t *testing.T) map[string]proto.Message {
 			Reason:          "signature",
 			Kid:             "synthetic-kid-1",
 		},
-		"RunQueryJob":   &RunQueryJob{QueryId: "00000000-0000-4000-8000-000000000003"},
+		"RunQueryJob": &RunQueryJob{QueryId: "00000000-0000-4000-8000-000000000003"},
+		"ApproveCorrectionJob": &ApproveCorrectionJob{
+			JobId:        "00000000-0000-4000-8000-000000000005",
+			CorrectionId: "00000000-0000-4000-8000-000000000006",
+		},
 		"HealthRequest": &HealthRequest{},
 		"HealthResponse": &HealthResponse{
 			Meta:          meta,

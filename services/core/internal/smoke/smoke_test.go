@@ -398,3 +398,62 @@ func TestQuestionOverHTTPStillWorks(t *testing.T) {
 	id := ask(t, call)
 	chainHas(t, "query.completed", "", id)
 }
+
+// TestSmokeCorrectionApproved (Plan 4a): the two-person rule end to end.
+// Clinician A asks and gets an answer, then suggests a correction. A can't
+// approve it (403 self_approval); clinician B of the same hospital can. The
+// approval queues approve_correction; the pipeline worker's learning
+// consumer fills the buffer with exactly one row and core's drainer puts
+// correction.applied on the chain, which still verifies.
+func TestSmokeCorrectionApproved(t *testing.T) {
+	nc := bffConn(t)
+	a := signIn(t, nc)
+	b := signIn(t, nc)
+	if a.hospitalID != b.hospitalID {
+		t.Fatalf("A and B are in different hospitals")
+	}
+	qid := ask(t, func(method, path string, body any) reply { return api(t, nc, method, path, a.access, body) })
+
+	r := api(t, nc, "POST", "/feedback", a.access, map[string]any{
+		"query_id": qid, "action": "correct",
+		"corrected_diagnosis": "Synthetic corrected diagnosis",
+		"reason":              "Synthetic smoke-test reason for the correction.",
+	})
+	if r.status != http.StatusOK || r.body["status"] != "pending_review" {
+		t.Fatalf("POST /feedback: %d %s", r.status, r.raw)
+	}
+	cid, _ := r.body["correction_id"].(string)
+	if cid == "" {
+		t.Fatalf("POST /feedback: no correction_id: %s", r.raw)
+	}
+	t.Logf("POST /feedback: pending_review")
+
+	r = api(t, nc, "POST", "/corrections/"+cid+"/approve", a.access, nil)
+	if r.status != http.StatusForbidden || r.body["code"] != "self_approval" {
+		t.Fatalf("A approving own correction: %d %s, want 403 self_approval", r.status, r.raw)
+	}
+	t.Logf("A approving own correction: 403 self_approval")
+
+	r = api(t, nc, "POST", "/corrections/"+cid+"/approve", b.access, nil)
+	if r.status != http.StatusNoContent {
+		t.Fatalf("B approving: %d %s, want 204", r.status, r.raw)
+	}
+	t.Logf("B approving: 204")
+
+	// chainHas waits for the one row and verifies the whole chain.
+	chainHas(t, "correction.applied", "", cid)
+
+	var rows int
+	if err := ownerPool(t).QueryRow(context.Background(),
+		`SELECT count(*) FROM feedback_buffer WHERE correction_id = $1`, cid).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("%d feedback_buffer rows for the correction, want 1", rows)
+	}
+	ok, broken, err := audit.Verify(context.Background(), ownerPool(t))
+	if err != nil || !ok {
+		t.Fatalf("audit chain: ok=%v first broken=%d err=%v", ok, broken, err)
+	}
+	t.Logf("one feedback_buffer row; audit chain verifies")
+}

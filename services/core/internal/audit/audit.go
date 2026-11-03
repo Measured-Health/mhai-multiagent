@@ -115,19 +115,46 @@ func nullable(s string) any {
 	return s
 }
 
+// prepare runs every check that needs no database, in order: the action,
+// the ids, the payload's JSON, its sensitive keys, then the action's closed
+// schema (schemas.go). It returns the normalised ids and the marshalled
+// payload.
+func prepare(e Event) (actor, hospital string, raw []byte, err error) {
+	if e.Action == "" {
+		return "", "", nil, errors.New("audit: event has no action")
+	}
+	if actor, err = normUUID("actor id", e.ActorID); err != nil {
+		return "", "", nil, err
+	}
+	if hospital, err = normUUID("hospital id", e.HospitalID); err != nil {
+		return "", "", nil, err
+	}
+	payload := e.Payload
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	if raw, err = json.Marshal(payload); err != nil {
+		return "", "", nil, errors.New("audit: payload is not JSON")
+	}
+	// Scan the marshalled JSON, so struct values are checked by their JSON
+	// field names too. The key name may be reported; its value never is.
+	if k, bad := logx.SensitiveKeyInJSON(raw); bad {
+		return "", "", nil, fmt.Errorf("%w: %q", ErrSensitiveKey, k)
+	}
+	if err := checkPayload(e.Action, raw); err != nil {
+		return "", "", nil, err
+	}
+	return actor, hospital, raw, nil
+}
+
 // Write appends e to the chain inside tx, which must be a READ COMMITTED
 // transaction under an app role allowed to insert this row (mhai_gateway
 // for its own hospital, mhai_auth, mhai_platform). The advisory lock is
-// held until tx ends, so commit promptly.
+// held until tx ends, so commit promptly. An action with no schema, or a
+// payload outside it, is ErrSchema, before tx is used: the caller's
+// transaction then rolls back.
 func Write(ctx context.Context, tx pgx.Tx, e Event) error {
-	if e.Action == "" {
-		return errors.New("audit: event has no action")
-	}
-	actor, err := normUUID("actor id", e.ActorID)
-	if err != nil {
-		return err
-	}
-	hospital, err := normUUID("hospital id", e.HospitalID)
+	actor, hospital, raw, err := prepare(e)
 	if err != nil {
 		return err
 	}
@@ -137,19 +164,6 @@ func Write(ctx context.Context, tx pgx.Tx, e Event) error {
 	}
 	if iso != "read committed" {
 		return ErrIsolation
-	}
-	payload := e.Payload
-	if payload == nil {
-		payload = map[string]any{}
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return errors.New("audit: payload is not JSON")
-	}
-	// Scan the marshalled JSON, so struct values are checked by their JSON
-	// field names too. The key name may be reported; its value never is.
-	if k, bad := logx.SensitiveKeyInJSON(raw); bad {
-		return fmt.Errorf("%w: %q", ErrSensitiveKey, k)
 	}
 	// Hash the payload as Postgres will store it, so Verify, reading it
 	// back, computes the same hash.

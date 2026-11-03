@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel/attribute"
@@ -85,6 +86,10 @@ type Client struct {
 	Trusted *TrustedKeys
 	// Metrics counts the background loops' outcomes; nil counts nowhere.
 	Metrics *Metrics
+	// Pool is core's database. PublishJob uses it, under the caller's
+	// hospital, to load the subject of a second_person job (subjects.go).
+	// Nil: such a job is refused (ErrMisuse), never published unchecked.
+	Pool *pgxpool.Pool
 }
 
 func (c *Client) log() *slog.Logger {

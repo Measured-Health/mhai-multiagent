@@ -159,8 +159,9 @@ analysis design §2.
 
 ## 4. Corrections
 
-Source: UI design §5.4, §10 item 1. Status: **Assumed** (Plan 3) unless
-marked. Builds on ADR 0005.
+Source: UI design §5.4, §10 item 1. Every row below is **Built (Plan 4,
+part 4a)**: the two-person rule is held in core and in the database.
+Builds on ADR 0005.
 
 **Correction object:** `id`, `query_id`, `status` (`pending_review`,
 `approved`, `rejected`, `withdrawn`), `corrected_diagnosis`, `reason`,
@@ -174,13 +175,13 @@ has `original` (`decision`, `degraded`, `diagnosis`, `icd10_code`,
 
 | Endpoint | Behaviour | Status |
 |---|---|---|
-| `GET /corrections?status=pending` | others' waiting corrections, never your own | Gateway + change (shape) |
-| `GET /corrections/mine` | your own, every status, newest first | Assumed |
-| `GET /corrections/reviewed` | your decisions as reviewer, last 30 days, at most 50 | Assumed |
-| `POST /corrections/{id}/approve` | 204; **403** `self_approval` on your own | Gateway + change (204) |
-| `POST /corrections/{id}/reject {reason_code, note?}` | 204; `reason_code` one of `not_supported`, `needs_rewording`, `unsafe`, `out_of_scope`; `note` ≤500 chars; the submitter sees it; **403** `self_approval` on your own | Assumed |
-| `POST /corrections/{id}/withdraw` | 204; your own waiting correction only; **403** `forbidden` otherwise | Assumed |
-| `GET /feedback/stats/mine` | `agreed`, `corrections_waiting`, `corrections_approved`, `corrections_rejected`, `corrections_withdrawn` | Assumed |
+| `GET /corrections?status=pending` | others' waiting corrections, never your own | **Built (Plan 4)** |
+| `GET /corrections/mine` | your own, every status, newest first | **Built (Plan 4)** |
+| `GET /corrections/reviewed` | your decisions as reviewer, last 30 days, at most 50 | **Built (Plan 4)** |
+| `POST /corrections/{id}/approve` | 204; **403** `self_approval` on your own | **Built (Plan 4)** |
+| `POST /corrections/{id}/reject {reason_code, note?}` | 204; `reason_code` one of `not_supported`, `needs_rewording`, `unsafe`, `out_of_scope`; `note` ≤500 chars; the submitter sees it; **403** `self_approval` on your own | **Built (Plan 4)** |
+| `POST /corrections/{id}/withdraw` | 204; your own waiting correction only; **403** `forbidden` otherwise | **Built (Plan 4)** |
+| `GET /feedback/stats/mine` | `agreed`, `corrections_waiting`, `corrections_approved`, `corrections_rejected`, `corrections_withdrawn` | **Built (Plan 4)** |
 
 - **409 `already_decided`** when approve, reject or withdraw meets a
   correction that is no longer waiting. **404** `not_found` for an unknown

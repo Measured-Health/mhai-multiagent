@@ -51,6 +51,19 @@ a{color:#1a5fb4}
 <dt>Needs a hospital</dt><dd>yes</dd>
 </dl>
 </section>
+<section class="op" id="op-pipeline.approve_correction" aria-labelledby="h-pipeline.approve_correction">
+<h3 id="h-pipeline.approve_correction"><code>pipeline.approve_correction</code></h3>
+<dl>
+<dt>Kind</dt><dd>job</dd>
+<dt>Subject</dt><dd><code>jobs.v1.&lt;hospital_id&gt;.approve_correction</code></dd>
+<dt>Request</dt><dd><a href="#msg-mhai.intelligence.v1.ApproveCorrectionJob"><code>mhai.intelligence.v1.ApproveCorrectionJob</code></a></dd>
+<dt>Response</dt><dd>none (a job has no reply message; its outcome is recorded by core)</dd>
+<dt>Who may call</dt><dd><code>clinician</code></dd>
+<dt>BFF direct</dt><dd>no</dd>
+<dt>Deadline</dt><dd>5 minutes</dd>
+<dt>Needs a hospital</dt><dd>yes</dd>
+</dl>
+</section>
 <section class="op" id="op-pipeline.health" aria-labelledby="h-pipeline.health">
 <h3 id="h-pipeline.health"><code>pipeline.health</code></h3>
 <dl>
@@ -207,6 +220,17 @@ a{color:#1a5fb4}
 <tr><td><code>code</code></td><td>5</td><td><code>string</code></td><td></td></tr>
 <tr><td><code>reason</code></td><td>6</td><td><code>string</code></td><td></td></tr>
 <tr><td><code>kid</code></td><td>7</td><td><code>string</code></td><td></td></tr>
+</tbody>
+</table>
+</section>
+<section class="msg" id="msg-mhai.intelligence.v1.ApproveCorrectionJob" aria-labelledby="h-msg-mhai.intelligence.v1.ApproveCorrectionJob">
+<h3 id="h-msg-mhai.intelligence.v1.ApproveCorrectionJob"><code>mhai.intelligence.v1.ApproveCorrectionJob</code></h3>
+<p>Defined in <code>proto/mhai/intelligence/v1/learning.proto</code>. ApproveCorrectionJob carries the ids only. The worker reads the correction from the database under the hospital in the verified job token. Core publishes it only for the clinician who approved the correction and did not submit it (the operation&#39;s second_person rule).</p>
+<table>
+<thead><tr><th scope="col">Field</th><th scope="col">Number</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead>
+<tbody>
+<tr><td><code>job_id</code></td><td>1</td><td><code>string</code></td><td></td></tr>
+<tr><td><code>correction_id</code></td><td>2</td><td><code>string</code></td><td></td></tr>
 </tbody>
 </table>
 </section>

@@ -1,7 +1,7 @@
 // Package db opens the gateway's Postgres pool, applies the embedded goose
 // migrations and runs transactions under the right database role.
 //
-// Every query runs inside one of WithHospital, WithPlatform, WithAuth,
+// Every query runs inside one of WithHospital, WithHospitalUser, WithPlatform, WithAuth,
 // WithJobs or WithAuditDrain.
 // The gateway's login user holds no table privileges of its own (it is a
 // member of mhai_app, see 00003_rls_roles.sql), so a query outside them
@@ -39,6 +39,9 @@ const (
 // ErrNoHospital is returned by WithHospital for the nil hospital id.
 var ErrNoHospital = errors.New("db: no hospital id")
 
+// ErrNoUser is returned by WithHospitalUser for the nil user id.
+var ErrNoUser = errors.New("db: no user id")
+
 // Open connects a pool and checks it with a ping.
 func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(url)
@@ -63,19 +66,34 @@ func WithHospital(ctx context.Context, pool *pgxpool.Pool, hospitalID uuid.UUID,
 	if hospitalID == uuid.Nil {
 		return ErrNoHospital
 	}
-	return inRole(ctx, pool, roleGateway, hospitalID.String(), fn)
+	return inRole(ctx, pool, roleGateway, hospitalID.String(), nil, fn)
+}
+
+// WithHospitalUser is WithHospital plus mhai.user_id set (transaction-local)
+// to the verified caller, for the writes whose database guards need to know
+// who is acting: the two-person rule on feedback_events (00011) reads it
+// through mhai_current_user(). RLS stays hospital-only. The id comes from
+// the verified token, never from a request body.
+func WithHospitalUser(ctx context.Context, pool *pgxpool.Pool, hospitalID, userID uuid.UUID, fn func(pgx.Tx) error) error {
+	if hospitalID == uuid.Nil {
+		return ErrNoHospital
+	}
+	if userID == uuid.Nil {
+		return ErrNoUser
+	}
+	return inRole(ctx, pool, roleGateway, hospitalID.String(), &userID, fn)
 }
 
 // WithPlatform runs fn in a transaction as mhai_platform: metadata across
 // hospitals, no clinical tables.
 func WithPlatform(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
-	return inRole(ctx, pool, rolePlatform, "", fn)
+	return inRole(ctx, pool, rolePlatform, "", nil, fn)
 }
 
 // WithAuth runs fn in a transaction as mhai_auth. Only sign-in uses it,
 // before a hospital is known.
 func WithAuth(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
-	return inRole(ctx, pool, roleAuth, "", fn)
+	return inRole(ctx, pool, roleAuth, "", nil, fn)
 }
 
 // WithJobs runs fn in a transaction as mhai_jobs: the job columns of
@@ -83,7 +101,7 @@ func WithAuth(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) er
 // and the job audit actions, for core's background loops only (the publish
 // sweeper and the dead-letter consumer). See 00007_jobs.sql.
 func WithJobs(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
-	return inRole(ctx, pool, roleJobs, "", fn)
+	return inRole(ctx, pool, roleJobs, "", nil, fn)
 }
 
 // WithAuditDrain runs fn in a transaction as mhai_audit_drain: read and
@@ -92,10 +110,10 @@ func WithJobs(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) er
 // query.cancelled to the chain. For core's audit drainer only (intel.RunDrainer).
 // See 00008_intelligence_worker.sql.
 func WithAuditDrain(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
-	return inRole(ctx, pool, roleDrain, "", fn)
+	return inRole(ctx, pool, roleDrain, "", nil, fn)
 }
 
-func inRole(ctx context.Context, pool *pgxpool.Pool, role, hospital string, fn func(pgx.Tx) error) (err error) {
+func inRole(ctx context.Context, pool *pgxpool.Pool, role, hospital string, user *uuid.UUID, fn func(pgx.Tx) error) (err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("db: begin: %w", err)
@@ -112,6 +130,11 @@ func inRole(ctx context.Context, pool *pgxpool.Pool, role, hospital string, fn f
 	if hospital != "" {
 		if _, err = tx.Exec(ctx, "SELECT set_config('mhai.hospital_id', $1, true)", hospital); err != nil {
 			return fmt.Errorf("db: set hospital: %w", err)
+		}
+	}
+	if user != nil {
+		if _, err = tx.Exec(ctx, "SELECT set_config('mhai.user_id', $1, true)", user.String()); err != nil {
+			return fmt.Errorf("db: set user: %w", err)
 		}
 	}
 	if err = fn(tx); err != nil {

@@ -6,6 +6,7 @@ is the two-person rule itself, in DoctorFeedbackLoop and the orchestrator,
 and the check that nothing in the boundary can reach it without core.
 """
 
+import ast
 import json
 import re
 from importlib import resources
@@ -80,23 +81,78 @@ def test_submitter_cannot_approve_own_correction(system):
     assert _corrections(system["kb"]) == []
 
 
-def test_feedback_has_no_boundary_operation():
-    # Replaces "a non-clinician cannot submit or approve": the worker serves
-    # only the operations core's table names, and none is feedback or
-    # approval. Adding one needs a role in operations.json, which is core's
-    # table to gate (Python holds no permission rule).
+def test_only_feedback_operation_is_approve_correction():
+    # The worker serves only the operations core's table names. The one that
+    # touches feedback is pipeline.approve_correction: clinicians only, never
+    # bff_direct. second_person is data here: core enforces the rule when it
+    # publishes the job, and Python never acts on the flag.
     ops = json.loads((resources.files("intelligence.boundary") / "operations.json").read_text())
-    for op in ops:
-        assert not re.search(r"feedback|correction|approve", op["name"]), op["name"]
+    named = [op for op in ops if re.search(r"feedback|correction|approve", op["name"])]
+    assert [op["name"] for op in named] == ["pipeline.approve_correction"]
+    [op] = named
+    assert op["any_role"] == ["clinician"]
+    assert op["bff_direct"] is False
+    assert op["svc_core"] is False
+    assert op["second_person"] is True
+
+
+_METHOD = "approve_correction"
+_DYNAMIC = {"getattr", "methodcaller", "attrgetter"}
+
+
+def _reaches_feedback_method(source: str) -> list[str]:
+    """Where source reaches the feedback loop's approve_correction method:
+    a call of that name, an attribute of that name, or the name handed to
+    getattr, operator.methodcaller or operator.attrgetter (R17: a dynamic
+    lookup is the same reach). An import names the job's module as a
+    string, which is not a reach."""
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr == _METHOD:
+            found.append(f"{node.lineno}: .{_METHOD}")
+        elif isinstance(node, ast.Call):
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+            if name == _METHOD:
+                found.append(f"{node.lineno}: {_METHOD}()")
+            elif name in _DYNAMIC and any(
+                isinstance(a, ast.Constant) and a.value == _METHOD for a in node.args
+            ):
+                found.append(f"{node.lineno}: {name}(..., {_METHOD!r})")
+    return found
 
 
 def test_boundary_code_never_reaches_the_feedback_loop():
     # And nothing in the boundary package calls it behind the table's back.
+    # approve_correction is also the job's name (Plan 4 spec §4.7: the
+    # module, the operation, the jobs type), so for it the check is the
+    # method (_reaches_feedback_method), not the bare text.
     boundary = Path(str(resources.files("intelligence.boundary")))
     for path in boundary.rglob("*.py"):
         text = path.read_text()
-        for name in ("process_feedback", "approve_correction", "DoctorFeedbackLoop"):
+        for name in ("process_feedback", "DoctorFeedbackLoop"):
             assert name not in text, f"{path.name} reaches {name}"
+        assert _reaches_feedback_method(text) == [], path.name
+
+
+def test_feedback_loop_guard_is_not_vacuous():
+    for src in (
+        "orch.approve_correction(cid, 'dr_b')",
+        "approve_correction(x)",
+        "f = orch.approve_correction",
+        "getattr(x, 'approve_correction')",
+        "getattr(x, 'approve_correction')(cid, 'dr_b')",
+        "operator.methodcaller('approve_correction', cid, 'dr_b')(orch)",
+        "from operator import attrgetter\nattrgetter('approve_correction')(orch)",
+    ):
+        assert _reaches_feedback_method(src), src
+    for src in (
+        "from intelligence.boundary.jobs.approve_correction import ApproveCorrection",
+        "TYPE = 'approve_correction'",
+        "jobs = {'approve_correction': runner.handle}",
+        "getattr(x, 'approve')",
+    ):
+        assert _reaches_feedback_method(src) == [], src
 
 
 def test_second_clinician_approval_applies_scoped_masked_correction(system):

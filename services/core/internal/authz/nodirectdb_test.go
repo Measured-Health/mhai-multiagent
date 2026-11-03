@@ -36,6 +36,11 @@ var dbTxAllowedFiles = map[string]string{
 	// before re-minting. Request paths reserve in-flight slots and append
 	// facts inside the caller's authz.Tx instead.
 	"internal/intel/sweeper.go": "the publish sweeper (db.WithJobs) and Republish's creator re-check (db.WithAuth)",
+	// The two-person check PublishJob makes before it mints a second_person
+	// job: it reads the job's subject under the Caller's hospital (the
+	// token's hid) and runs for the sweeper's Republish too, which has no
+	// principal, so it can't use authz.Tx.
+	"internal/intel/subjects.go": "the subject loader's read of a second_person job (db.WithHospital)",
 	// Core's audit drainer: moves every hospital's outbox facts onto the
 	// chain as mhai_audit_drain, with no principal (F2, F28).
 	"internal/intel/drain.go": "the audit drainer (db.WithAuditDrain)",
@@ -47,6 +52,11 @@ var dbTxAllowedFiles = map[string]string{
 	// principal exists, as mhai_auth, as sign-in failures are (F7).
 	// Everything after the principal goes through authz.Tx.
 	"internal/grant/grant.go": "grant refusals before a principal exists (db.WithAuth, mhai_auth)",
+	// Feedback and corrections run as the caller's hospital and user
+	// (db.WithHospitalUser), so 00011's two-person triggers and insert
+	// policy see the verified user; authz.Tx sets the hospital only. The
+	// store takes both ids from the handler's principal, never a body.
+	"internal/feedback/store.go": "feedback and corrections as the token's hospital and user (db.WithHospitalUser)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on

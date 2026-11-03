@@ -175,3 +175,35 @@ func TestDeployBFFUsersAreSeparate(t *testing.T) {
 		t.Fatalf("a BFF user holds the other app's subject:\nclinical: %s\nplatform: %s", clin, plat)
 	}
 }
+
+// Plan 4 spec §10.5: the pipeline user's JetStream rights are exactly its
+// two durables' three subjects each (pipeline for run_query,
+// pipeline_learning for approve_correction): no stream API, no other
+// consumer, no create or delete.
+func TestPipelineUserJSSubjectsAreItsTwoConsumersOnly(t *testing.T) {
+	perms := permissionsAfter(t, readConf(t, "services/nats/nats.conf"), "password: $NATS_PIPELINE_PASSWORD")
+	got := map[string]bool{}
+	for _, m := range regexp.MustCompile(`"(\$JS[^"]*)"`).FindAllStringSubmatch(perms, -1) {
+		got[m[1]] = true
+	}
+	want := map[string]bool{}
+	for _, c := range []string{bus.PipelineConsumer, bus.LearningConsumer} {
+		want["$JS.API.CONSUMER.INFO.JOBS."+c] = true
+		want["$JS.API.CONSUMER.MSG.NEXT.JOBS."+c] = true
+		want["$JS.ACK.JOBS."+c+".>"] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("pipeline $JS subjects = %v, want %v", got, want)
+	}
+	for s := range want {
+		if !got[s] {
+			t.Fatalf("pipeline lacks %s (has %v)", s, got)
+		}
+	}
+	if strings.Contains(perms, "jobs.v1") || strings.Contains(perms, "$JS.API.STREAM") || strings.Contains(perms, "$JS.API.>") {
+		t.Fatalf("pipeline may publish jobs or reach the stream API: %s", stripComments(perms))
+	}
+	if bus.LearningFilter == bus.PipelineFilter || bus.LearningFilter != "jobs.v1.*.approve_correction" {
+		t.Fatalf("learning filter %q", bus.LearningFilter)
+	}
+}

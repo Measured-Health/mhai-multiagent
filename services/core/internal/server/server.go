@@ -11,6 +11,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/feedback"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/queries"
 )
@@ -39,6 +40,9 @@ func Register(m *authz.Mux, d Deps) {
 	}
 	a.Register(m)
 	queries.Register(m, queries.Deps{Pool: d.Pool, Intel: d.Intel, Cap: d.QueryCap})
+	// The feedback routes log through the service's logger, whether or not
+	// an intelligence client is set.
+	feedback.Register(m, feedback.Deps{Pool: d.Pool, Intel: d.Intel, Log: a.Log})
 	registerFixtures(m, d)
 }
 

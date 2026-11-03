@@ -110,8 +110,8 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(st) != 10 {
-		t.Fatalf("want 10 migrations, got %d", len(st))
+	if len(st) != 13 {
+		t.Fatalf("want 13 migrations, got %d", len(st))
 	}
 	for i, s := range st {
 		if s.Source.Version != int64(i+1) || s.State != goose.StateApplied {
@@ -239,8 +239,18 @@ func TestRLSHidesOtherHospital(t *testing.T) {
 func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	_, pool := shared(t)
 	ctx := context.Background()
-	a, _ := seedHospital(t, pool, uniqueCode("A"))
+	a, qa := seedHospital(t, pool, uniqueCode("A"))
 	seedHospital(t, pool, uniqueCode("B"))
+	// A feedback row, so feedback_events is checked with a row to hide.
+	fb := seedClinician(t, pool, a)
+	seedCorrection(t, pool, a, qa, fb)
+	// A job row, so jobs is checked with a row to hide.
+	seedJob(t, pool, a, fb, "queued")
+	// An approved correction in the buffer, so feedback_buffer has a row to hide.
+	bufferedID := seedApproved(t, pool, a)
+	if _, err := pool.Exec(ctx, bufferInsertSQL, a, bufferedID); err != nil {
+		t.Fatal(err)
+	}
 
 	// One connection, so the second transaction reuses the session that
 	// had mhai.hospital_id set by the first.
@@ -255,7 +265,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if err := db.WithHospital(ctx, one, a, func(pgx.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks"} {
+	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer"} {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -266,12 +276,23 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		var n int
 		err = tx.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE hospital_id IS NOT NULL`).Scan(&n)
 		_ = tx.Rollback(ctx)
+		if table == "feedback_buffer" {
+			// No role but the owner reads the buffer: the gateway is denied outright.
+			requireDenied(t, err, "gateway reading feedback_buffer")
+			continue
+		}
 		if err != nil {
 			t.Fatalf("%s without hospital: %v", table, err)
 		}
 		if n != 0 {
 			t.Fatalf("%s without hospital: %d rows, want 0", table, n)
 		}
+	}
+
+	// And the worker, with no hospital set, is refused by the policy itself
+	// (the buffer row's own check, not a missing privilege).
+	if _, err := inTx(ctx, one, []string{`SET LOCAL ROLE mhai_worker`}, nil, bufferInsertSQL, a, bufferedID); pgCode(err) != rlsViolation || !strings.Contains(err.Error(), "row-level security") {
+		t.Fatalf("worker insert with no hospital set: want RLS refusal, got %v", err)
 	}
 
 	if err := db.WithHospital(ctx, one, uuid.Nil, func(pgx.Tx) error { return nil }); err == nil {
@@ -351,22 +372,21 @@ func TestSharedKBVisible(t *testing.T) {
 			if want := map[bool]int{true: 1, false: 0}[h == a]; n != want {
 				t.Errorf("hospital %s sees %d of A's chunks, want %d", h, n, want)
 			}
-			for _, q := range []string{
-				`UPDATE kb_chunks SET content = 'tampered' WHERE chunk_id = $1`,
-				`DELETE FROM kb_chunks WHERE chunk_id = $1`,
-			} {
-				tag, err := tx.Exec(ctx, q, shared)
-				if err != nil {
-					return err
-				}
-				if tag.RowsAffected() != 0 {
-					t.Errorf("%q on the shared chunk affected %d rows", q, tag.RowsAffected())
-				}
-			}
 			return nil
 		})
 		if err != nil {
 			t.Fatalf("WithHospital(%s): %v", h, err)
+		}
+		// The gateway holds no write on the knowledge base (00013).
+		for _, q := range []string{
+			`UPDATE kb_chunks SET content = 'tampered' WHERE chunk_id = $1`,
+			`DELETE FROM kb_chunks WHERE chunk_id = $1`,
+		} {
+			err := db.WithHospital(ctx, pool, h, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, q, shared)
+				return err
+			})
+			requireDenied(t, err, q)
 		}
 	}
 

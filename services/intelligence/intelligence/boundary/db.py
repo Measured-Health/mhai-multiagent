@@ -109,6 +109,12 @@ def is_unique_violation(e: BaseException) -> bool:
     return isinstance(e, psycopg.errors.UniqueViolation)
 
 
+def is_insufficient_privilege(e: BaseException) -> bool:
+    """e is SQLSTATE 42501: a grant or a row-level security policy refused
+    the statement. Permanent: retrying the same write is refused again."""
+    return isinstance(e, psycopg.errors.InsufficientPrivilege)
+
+
 def connect_kwargs(
     url: str, *, user: str | None = None, password: str | None = None
 ) -> dict[str, Any]:
