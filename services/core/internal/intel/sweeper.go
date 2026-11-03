@@ -567,3 +567,22 @@ func QueueStats(ctx context.Context, pool *pgxpool.Pool) (depth int64, oldest ti
 	})
 	return depth, oldest, err
 }
+
+// LearningQueueStats is QueueStats for the learning consumer's jobs: how
+// many approve_correction jobs wait to be picked up (jobs rows, status
+// queued, across hospitals) and how long the oldest has waited. Counts and
+// an age only, as QueueStats.
+func LearningQueueStats(ctx context.Context, pool *pgxpool.Pool) (depth int64, oldest time.Duration, err error) {
+	ctx, cancel := context.WithTimeout(ctx, statsTimeout)
+	defer cancel()
+	err = db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
+		var secs float64
+		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)::float8
+			FROM jobs WHERE status = 'queued' AND type = 'approve_correction'`).Scan(&depth, &secs); err != nil {
+			return err
+		}
+		oldest = time.Duration(secs * float64(time.Second))
+		return nil
+	})
+	return depth, oldest, err
+}
