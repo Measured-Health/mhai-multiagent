@@ -410,6 +410,16 @@ func TestOneRunningVerifyRun(t *testing.T) {
 		"an intact run": `INSERT INTO audit_verify_runs (state, finished_at, entries_checked, from_first, to_seq, to_at)
 			VALUES ('intact', now(), 5, true, 5, now())`,
 		"an error run": `INSERT INTO audit_verify_runs (state, finished_at, error_code) VALUES ('error', now(), 'timed_out')`,
+		// The proof fields are written only when a run finishes (Task 8
+		// review): a running row born with them could be finished intact
+		// without a walk.
+		"running with entries_checked": `INSERT INTO audit_verify_runs (entries_checked) VALUES (5)`,
+		"running from the first":       `INSERT INTO audit_verify_runs (from_first) VALUES (true)`,
+		"running with to_seq":          `INSERT INTO audit_verify_runs (to_seq) VALUES (5)`,
+		"running with to_at":           `INSERT INTO audit_verify_runs (to_at) VALUES (now())`,
+		"running with every proof": `INSERT INTO audit_verify_runs (entries_checked, from_first, to_seq, to_at)
+			VALUES (5, true, 5, now())`,
+		"running at version 2": `INSERT INTO audit_verify_runs (version) VALUES (2)`,
 	} {
 		requireDenied(t, asPlatform(q), "platform inserting "+name)
 	}

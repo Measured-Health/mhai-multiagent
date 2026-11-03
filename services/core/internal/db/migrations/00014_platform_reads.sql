@@ -83,10 +83,17 @@ GRANT UPDATE (finished_at, state, entries_checked, from_first, from_checkpoint, 
               outcome_note, outcome_by, outcome_at, version)
     ON audit_verify_runs TO mhai_platform;
 CREATE POLICY platform_runs ON audit_verify_runs TO mhai_platform USING (true) WITH CHECK (true);
--- A run is born running, with no outcome: the platform can't insert a
--- finished (say, intact) run, only finish one it started.
+-- A run is born running, with no result, proof or outcome: the platform
+-- can't insert a finished (say, intact) run, or a running one that already
+-- claims its proof; the proof fields are written only when the walk ends.
 CREATE POLICY platform_runs_start ON audit_verify_runs AS RESTRICTIVE FOR INSERT TO mhai_platform
-    WITH CHECK (state = 'running' AND outcome_note IS NULL);
+    WITH CHECK (state = 'running' AND finished_at IS NULL
+                AND entries_checked IS NULL AND NOT from_first AND from_checkpoint IS NULL
+                AND to_seq IS NULL AND to_at IS NULL
+                AND first_broken_seq IS NULL AND first_broken_id IS NULL AND first_broken_at IS NULL
+                AND error_code IS NULL
+                AND outcome_note IS NULL AND outcome_by IS NULL AND outcome_at IS NULL
+                AND version = 1);
 
 -- Only a running run may finish; a finished run is fixed, but for its
 -- outcome (note, author, time) and version. Whoever writes, owner included.
