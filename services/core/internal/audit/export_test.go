@@ -92,3 +92,11 @@ func GateHolds(e Event) (holds, ok bool) {
 	g.actions = []string{e.Action}
 	return g.holds(e), true
 }
+
+// SetWalkPageForTest sets the chain walk's page size and returns a func
+// that restores it. Test builds only.
+func SetWalkPageForTest(n int) func() {
+	old := walkPage
+	walkPage = n
+	return func() { walkPage = old }
+}

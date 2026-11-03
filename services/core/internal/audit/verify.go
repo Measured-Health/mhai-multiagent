@@ -56,12 +56,21 @@ type Result struct {
 	Complete       bool
 }
 
+// walkPage is how many entries one statement of the walk reads (a var
+// only so a test can make the pages small).
+var walkPage = 5000
+
 // VerifyRange walks the whole chain in id order from the first entry, as
-// mhai_platform, within budget (0: no budget). The range is the chain as
-// one statement's snapshot sees it, so entries appended during the walk
-// wait for the next run. It stops at the first entry whose prev_hash
-// doesn't match the entry before it, or whose hash doesn't match its
-// contents. A spent budget returns the partial Result and ErrBudget.
+// mhai_platform, within budget (0: no budget). It reads keyset pages of
+// walkPage entries inside one REPEATABLE READ, READ ONLY transaction, so
+// every page sees the same chain: entries appended during the walk wait for
+// the next run. It stops at the first entry whose prev_hash doesn't match
+// the entry before it, or whose hash doesn't match its contents.
+//
+// A break found is the result, whatever happens after it: an error while
+// the rest of its page drains, or at the end of the transaction, never
+// turns a broken chain into timed_out. Without a break, a spent budget
+// returns the partial Result and ErrBudget.
 func VerifyRange(ctx context.Context, pool *pgxpool.Pool, budget time.Duration) (Result, error) {
 	wctx := ctx
 	if budget > 0 {
@@ -70,49 +79,32 @@ func VerifyRange(ctx context.Context, pool *pgxpool.Pool, budget time.Duration) 
 		defer cancel()
 	}
 	var res Result
-	err := db.WithPlatform(wctx, pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(wctx, `
-			SELECT id, ts, actor_id::text, hospital_id::text, request_id, action, entity, entity_id,
-			       payload, prev_hash, hash
-			FROM audit_log ORDER BY id`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+	err := db.WithPlatformSnapshot(wctx, pool, func(tx pgx.Tx) error {
 		prev := genesis
-		for rows.Next() {
-			var (
-				id                                           int64
-				r                                            record
-				actor, hospital, requestID, entity, entityID *string
-				prevHash, hash                               string
-			)
-			if err := rows.Scan(&id, &r.ts, &actor, &hospital, &requestID, &r.action, &entity, &entityID,
-				&r.payload, &prevHash, &hash); err != nil {
+		last := int64(0)
+		for {
+			n, err := walkOnePage(wctx, tx, &res, &prev, &last)
+			if res.FirstBroken != nil {
+				return errStopWalk
+			}
+			if err != nil {
 				return err
 			}
-			r.actorID, r.hospitalID, r.requestID = deref(actor), deref(hospital), deref(requestID)
-			r.entity, r.entityID = deref(entity), deref(entityID)
-			want, err := r.hash(prevHash)
-			if err != nil || prevHash != prev || want != hash {
-				at := r.ts.UTC()
-				res.FirstBroken, res.FirstBrokenID, res.FirstBrokenAt = &id, strconv.FormatInt(id, 10), &at
-				return nil
+			if n < walkPage {
+				break
 			}
-			at := r.ts.UTC()
-			res.EntriesChecked, res.ToSeq, res.ToAt = res.EntriesChecked+1, id, &at
-			prev = hash
 		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		// The budget may run out between the last row and here.
+		// The budget may run out between the last page and here.
 		if wctx.Err() != nil {
 			return wctx.Err()
 		}
 		res.Complete = true
 		return nil
 	})
+	if res.FirstBroken != nil {
+		res.Complete = false
+		return res, nil
+	}
 	if err != nil {
 		res.Complete = false
 		if budget > 0 && wctx.Err() != nil && ctx.Err() == nil {
@@ -121,6 +113,49 @@ func VerifyRange(ctx context.Context, pool *pgxpool.Pool, budget time.Duration) 
 		return res, fmt.Errorf("audit: verify: %w", err)
 	}
 	return res, nil
+}
+
+// errStopWalk ends the walk's transaction (rolled back: it only read) once
+// a break is found.
+var errStopWalk = errors.New("audit: walk stopped at a break")
+
+// walkOnePage checks the entries after *last, at most walkPage of them, and
+// returns how many it read. It returns as soon as it records a break in res.
+func walkOnePage(ctx context.Context, tx pgx.Tx, res *Result, prev *string, last *int64) (int, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, ts, actor_id::text, hospital_id::text, request_id, action, entity, entity_id,
+		       payload, prev_hash, hash
+		FROM audit_log WHERE id > $1 ORDER BY id LIMIT $2`, *last, walkPage)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		n++
+		var (
+			id                                           int64
+			r                                            record
+			actor, hospital, requestID, entity, entityID *string
+			prevHash, hash                               string
+		)
+		if err := rows.Scan(&id, &r.ts, &actor, &hospital, &requestID, &r.action, &entity, &entityID,
+			&r.payload, &prevHash, &hash); err != nil {
+			return n, err
+		}
+		r.actorID, r.hospitalID, r.requestID = deref(actor), deref(hospital), deref(requestID)
+		r.entity, r.entityID = deref(entity), deref(entityID)
+		want, err := r.hash(prevHash)
+		if err != nil || prevHash != *prev || want != hash {
+			at := r.ts.UTC()
+			res.FirstBroken, res.FirstBrokenID, res.FirstBrokenAt = &id, strconv.FormatInt(id, 10), &at
+			return n, nil
+		}
+		at := r.ts.UTC()
+		res.EntriesChecked, res.ToSeq, res.ToAt = res.EntriesChecked+1, id, &at
+		*prev, *last = hash, id
+	}
+	return n, rows.Err()
 }
 
 // Verify walks the whole chain with no budget. ok is true, and firstBroken
@@ -164,22 +199,8 @@ func StartRun(ctx context.Context, pool *pgxpool.Pool, by *uuid.UUID) (runID uui
 // writes audit.verify_started {run_id, by} in the same transaction; call
 // it last in tx (the chain lock is held until commit).
 func StartRunTx(ctx context.Context, tx pgx.Tx, by *uuid.UUID, requestID string) (runID uuid.UUID, started bool, err error) {
-	rows, err := tx.Query(ctx, `
-		UPDATE audit_verify_runs SET state = 'error', error_code = 'timed_out', finished_at = now(), version = version + 1
-		WHERE state = 'running' AND started_at < now() - make_interval(secs => $1)
-		RETURNING id`, staleAfter.Seconds())
-	if err != nil {
-		return uuid.Nil, false, fmt.Errorf("audit: stale runs: %w", err)
-	}
-	stale, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
-	if err != nil {
-		return uuid.Nil, false, fmt.Errorf("audit: stale runs: %w", err)
-	}
-	for _, id := range stale {
-		if err := Write(ctx, tx, runEvent("audit.verify_finished", id, nil, requestID,
-			map[string]any{"run_id": id.String(), "state": "error", "error_code": "timed_out"})); err != nil {
-			return uuid.Nil, false, err
-		}
+	if err := closeStale(ctx, tx, requestID); err != nil {
+		return uuid.Nil, false, err
 	}
 	// A run that finished between the conflict and the read leaves none
 	// running: try again, a few times.
@@ -212,6 +233,31 @@ func StartRunTx(ctx context.Context, tx pgx.Tx, by *uuid.UUID, requestID string)
 		}
 	}
 	return uuid.Nil, false, errors.New("audit: start run: no run started or running")
+}
+
+// closeStale closes every run left running past staleAfter (its core
+// died mid-walk) as error timed_out, with its audit.verify_finished, in tx.
+// Its finished_at is at least staleAfter after its start, which is how the
+// schedule tells such a run from a walk that spent its budget.
+func closeStale(ctx context.Context, tx pgx.Tx, requestID string) error {
+	rows, err := tx.Query(ctx, `
+		UPDATE audit_verify_runs SET state = 'error', error_code = 'timed_out', finished_at = now(), version = version + 1
+		WHERE state = 'running' AND started_at < now() - make_interval(secs => $1)
+		RETURNING id`, staleAfter.Seconds())
+	if err != nil {
+		return fmt.Errorf("audit: stale runs: %w", err)
+	}
+	stale, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return fmt.Errorf("audit: stale runs: %w", err)
+	}
+	for _, id := range stale {
+		if err := Write(ctx, tx, runEvent("audit.verify_finished", id, nil, requestID,
+			map[string]any{"run_id": id.String(), "state": "error", "error_code": "timed_out"})); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // outcome is how a walk ends: a state, and for error its code.
@@ -332,8 +378,8 @@ const ScheduleAt = "06:00"
 // copy (C25).
 const scheduleLock = "mhai.audit.verify"
 
-// Scheduler starts the daily run at At (UTC, "HH:MM"). Each Tick at or
-// after today's At, under pg_try_advisory_lock(hashtext('mhai.audit.verify')),
+// Scheduler starts the daily run at At (UTC, "HH:MM", by the database's
+// clock). Each Tick at or after today's At, under pg_try_advisory_lock(hashtext('mhai.audit.verify')),
 // starts the run unless a scheduled run already started since then, and
 // walks it. A core that missed At (it was down) runs the check when it
 // comes back.
@@ -341,7 +387,7 @@ type Scheduler struct {
 	Pool   *pgxpool.Pool
 	At     string
 	Budget time.Duration    // 0: VerifyBudget
-	Now    func() time.Time // nil: time.Now
+	Now    func() time.Time // nil: the database's clock (tests fix it)
 	Every  time.Duration    // 0: a minute
 	Log    *slog.Logger
 }
@@ -394,20 +440,40 @@ func (s Scheduler) Run(ctx context.Context) error {
 	}
 }
 
-// Tick starts and walks today's scheduled run if it is due and no copy has
-// started it. state is the finished run's state, "" when nothing ran.
+// Tick runs on every tick, on every core copy: it first refreshes the
+// audit_chain_broken gauge from the database (so every copy converges on
+// the open failure, whichever copy saw the break; a failed read keeps the
+// last value, so a 1 holds) and closes runs left running by a core that
+// died. Then, if today's run is due and no copy has started it, it starts
+// and walks it. Due is computed by the database's clock, not this
+// process's: today's At in UTC. state is the finished run's state, "" when
+// nothing ran.
 func (s Scheduler) Tick(ctx context.Context) (runID uuid.UUID, state string, err error) {
-	h, m, err := parseAt(s.At)
-	if err != nil {
+	if _, _, err := parseAt(s.At); err != nil {
 		return uuid.Nil, "", err
 	}
-	now := time.Now
-	if s.Now != nil {
-		now = s.Now
+	if err := RefreshBrokenGauge(ctx, s.Pool); err != nil && ctx.Err() == nil {
+		s.log().Error("audit: chain gauge not read", "reason", "internal_error")
 	}
-	n := now().UTC()
-	due := time.Date(n.Year(), n.Month(), n.Day(), h, m, 0, 0, time.UTC)
-	if n.Before(due) {
+	if err := db.WithPlatform(ctx, s.Pool, func(tx pgx.Tx) error { return closeStale(ctx, tx, "") }); err != nil {
+		return uuid.Nil, "", err
+	}
+	// now is the database's, unless a test fixes it.
+	var now any
+	if s.Now != nil {
+		now = s.Now().UTC()
+	}
+	var isDue bool
+	var due time.Time
+	if err := db.WithPlatform(ctx, s.Pool, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			WITH c AS (SELECT coalesce($2::timestamptz, now()) AS t),
+			     d AS (SELECT t, (date_trunc('day', t AT TIME ZONE 'UTC') + $1::time) AT TIME ZONE 'UTC' AS due FROM c)
+			SELECT t >= due, due FROM d`, s.At, now).Scan(&isDue, &due)
+	}); err != nil {
+		return uuid.Nil, "", fmt.Errorf("audit: schedule: %w", err)
+	}
+	if !isDue {
 		return uuid.Nil, "", nil
 	}
 	conn, err := s.Pool.Acquire(ctx)
@@ -437,7 +503,10 @@ func (s Scheduler) Tick(ctx context.Context) (runID uuid.UUID, state string, err
 		return db.WithPlatform(ctx, s.Pool, func(tx pgx.Tx) error {
 			var done bool
 			if err := tx.QueryRow(ctx, `
-				SELECT EXISTS (SELECT 1 FROM audit_verify_runs WHERE "by" IS NULL AND started_at >= $1)`, due).Scan(&done); err != nil {
+				SELECT EXISTS (SELECT 1 FROM audit_verify_runs WHERE "by" IS NULL AND started_at >= $1
+				               AND NOT (state = 'error' AND error_code = 'timed_out'
+				                        AND finished_at >= started_at + make_interval(secs => $2)))`,
+				due, staleAfter.Seconds()).Scan(&done); err != nil {
 				return fmt.Errorf("audit: schedule: %w", err)
 			}
 			if done {

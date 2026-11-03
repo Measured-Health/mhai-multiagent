@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
@@ -360,5 +361,162 @@ func TestSchedulerOneCopy(t *testing.T) {
 	}
 	if _, _, err := (audit.Scheduler{Pool: app, At: "6:00"}).Tick(ctx); err == nil || !strings.Contains(err.Error(), "HH:MM") {
 		t.Fatalf("a bad schedule time: %v", err)
+	}
+}
+
+// Fix round 1: a break near the start of a large chain is broken, even
+// when the budget can't cover the whole walk: nothing after the break
+// (draining a page, ending the transaction) turns it into timed_out.
+func TestBrokenEarlyStaysBrokenUnderTightBudget(t *testing.T) {
+	resetChain(t)
+	resetRuns(t)
+	t.Cleanup(func() { telemetry.SetAuditChainBroken(false) })
+	telemetry.SetAuditChainBroken(false)
+	ctx := context.Background()
+	// Small pages, so the break is found in a small fraction of a walk:
+	// the budget below covers a few pages but nowhere near the chain.
+	t.Cleanup(audit.SetWalkPageForTest(500))
+	writeMany(t, 40000)
+	start := time.Now()
+	if res, err := audit.VerifyRange(ctx, app, 0); err != nil || !res.Complete {
+		t.Fatalf("untimed walk: %v %+v", err, res)
+	}
+	full := time.Since(start)
+	// A budget the intact walk can't finish in: a twentieth of a full
+	// walk (some 4 pages of 80), smaller if the walk happens to fit.
+	budget := full / 20
+	for i := 0; ; i++ {
+		if _, err := audit.VerifyRange(ctx, app, budget); errors.Is(err, audit.ErrBudget) {
+			break
+		}
+		if i == 4 {
+			t.Fatalf("no budget under %v stops the intact walk (full walk %v)", budget, full)
+		}
+		budget /= 2
+	}
+	var target int64
+	var targetAt time.Time
+	if err := super.QueryRow(ctx, `SELECT id, ts FROM audit_log ORDER BY id OFFSET 1 LIMIT 1`).Scan(&target, &targetAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := super.Exec(ctx, `UPDATE audit_log SET hash = repeat('f', 64) WHERE id = $1`, target); err != nil {
+		t.Fatal(err)
+	}
+	id, state := startAndRun(t, budget)
+	if state != "broken" {
+		t.Fatalf("state %q with budget %v (full walk %v), want broken", state, budget, full)
+	}
+	r := readRun(t, id)
+	if r.brokenSeq == nil || *r.brokenSeq != target || r.brokenAt == nil || !r.brokenAt.Equal(targetAt) {
+		t.Fatalf("broken run: %+v (target %d)", r, target)
+	}
+	if !telemetry.AuditChainBroken() {
+		t.Error("audit_chain_broken is 0 after a broken run")
+	}
+}
+
+// Fix round 1: the gauge is per process, so every copy's scheduler tick
+// reads it from the database: a break another copy found shows here on
+// the next tick, a closed failure clears it, and a failed read holds 1.
+func TestGaugeConvergesAcrossCopies(t *testing.T) {
+	resetChain(t)
+	resetRuns(t)
+	t.Cleanup(func() { telemetry.SetAuditChainBroken(false) })
+	ctx := context.Background()
+	early := audit.Scheduler{Pool: app, At: "23:59", Now: func() time.Time {
+		n := time.Now().UTC()
+		return time.Date(n.Year(), n.Month(), n.Day(), 0, 1, 0, 0, time.UTC)
+	}}
+	telemetry.SetAuditChainBroken(false)
+	// Another copy finished a broken run: this one never saw it.
+	var broken uuid.UUID
+	if err := super.QueryRow(ctx, `INSERT INTO audit_verify_runs (started_at, state, finished_at, entries_checked, from_first,
+		first_broken_seq, first_broken_id, first_broken_at)
+		VALUES (now() - interval '2 hours', 'broken', now() - interval '2 hours', 1, true, 2, '2', now()) RETURNING id`).Scan(&broken); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := early.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !telemetry.AuditChainBroken() {
+		t.Fatal("a tick didn't pick up another copy's broken run")
+	}
+	// A failed read holds the 1.
+	dead, err := pgxpool.NewWithConfig(ctx, app.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead.Close()
+	if _, _, err := (audit.Scheduler{Pool: dead, At: "23:59", Now: early.Now}).Tick(ctx); err == nil {
+		t.Error("a tick on a closed pool reported no error")
+	}
+	if !telemetry.AuditChainBroken() {
+		t.Fatal("a failed read cleared the gauge")
+	}
+	// Closed elsewhere (a later intact run and the note): the next tick
+	// clears it.
+	u := uuid.New()
+	if _, err := super.Exec(ctx, `INSERT INTO users (id, email, password_hash, display_name, full_name)
+		VALUES ($1, $2, 'synthetic-hash', 'Synthetic Auditor', 'Synthetic Fullname')`, u, "synthetic."+u.String()[:8]+"@havana.example"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := super.Exec(ctx, `UPDATE audit_verify_runs SET outcome_note = 'synthetic', outcome_by = $2, outcome_at = now(),
+		version = version + 1 WHERE id = $1`, broken, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := super.Exec(ctx, `INSERT INTO audit_verify_runs (started_at, state, finished_at, entries_checked, from_first, to_seq, to_at)
+		VALUES (now() - interval '1 hour', 'intact', now() - interval '1 hour', 3, true, 3, now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := early.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if telemetry.AuditChainBroken() {
+		t.Fatal("a closed failure left the gauge at 1")
+	}
+}
+
+// Fix round 1: every tick closes a run a dead core left running, due or
+// not; and a scheduled run closed that way doesn't count as today's run,
+// so the schedule starts another.
+func TestSchedulerSweepsStaleRun(t *testing.T) {
+	resetChain(t)
+	resetRuns(t)
+	ctx := context.Background()
+	n := time.Now().UTC()
+	at := time.Date(n.Year(), n.Month(), n.Day(), 6, 0, 0, 0, time.UTC)
+	if n.Before(at.Add(20 * time.Minute)) {
+		at = at.AddDate(0, 0, -1)
+	}
+	stale := func(started time.Time) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := super.QueryRow(ctx, `INSERT INTO audit_verify_runs (started_at) VALUES ($1) RETURNING id`, started).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	// Not due: the stale run is still closed.
+	first := stale(at.Add(time.Minute))
+	before := audit.Scheduler{Pool: app, At: "06:00", Now: func() time.Time { return at.Add(-time.Minute) }}
+	if id, _, err := before.Tick(ctx); err != nil || id != uuid.Nil {
+		t.Fatalf("early tick: %v %v", id, err)
+	}
+	if r := readRun(t, first); r.state != "error" || r.code == nil || *r.code != "timed_out" {
+		t.Fatalf("stale run after an early tick: %+v", r)
+	}
+	// Due, with today's scheduled run closed as stale: a new one starts.
+	due := audit.Scheduler{Pool: app, At: "06:00", Now: func() time.Time { return at.Add(2 * time.Minute) }}
+	id, state, err := due.Tick(ctx)
+	if err != nil || id == uuid.Nil || id == first || state != "intact" {
+		t.Fatalf("due tick after a stale run: %v %q %v", id, state, err)
+	}
+	// That one counts: the next tick starts nothing.
+	if again, _, err := due.Tick(ctx); err != nil || again != uuid.Nil {
+		t.Fatalf("second due tick: %v %v", again, err)
+	}
+	var runs int
+	if err := super.QueryRow(ctx, `SELECT count(*) FROM audit_verify_runs WHERE "by" IS NULL`).Scan(&runs); err != nil || runs != 2 {
+		t.Fatalf("scheduled runs %d %v, want 2 (the stale one and its replacement)", runs, err)
 	}
 }
