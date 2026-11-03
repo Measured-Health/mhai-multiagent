@@ -25,6 +25,14 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/auth/sessions/revoke-all` | signed in | any | both | no | no | no |
 | DELETE | `/api/v1/auth/sessions/{id}` | signed in | any | both | no | no | no |
 | POST | `/api/v1/auth/terms` | signed in | any | both | no | no | no |
+| GET | `/api/v1/corrections` | signed in | `clinician` | clinical | no | no | no |
+| GET | `/api/v1/corrections/mine` | signed in | `clinician` | clinical | no | no | no |
+| GET | `/api/v1/corrections/reviewed` | signed in | `clinician` | clinical | no | no | no |
+| POST | `/api/v1/corrections/{id}/approve` | signed in | `clinician` | clinical | no | no | yes |
+| POST | `/api/v1/corrections/{id}/reject` | signed in | `clinician` | clinical | no | no | yes |
+| POST | `/api/v1/corrections/{id}/withdraw` | signed in | `clinician` | clinical | no | no | yes |
+| POST | `/api/v1/feedback` | signed in | `clinician` | clinical | no | no | yes |
+| GET | `/api/v1/feedback/stats/mine` | signed in | `clinician` | clinical | no | no | no |
 | GET | `/api/v1/healthz` | public | - | - | no | no | no |
 | POST | `/api/v1/queries` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/queries/{id}` | signed in | `clinician` | clinical | no | no | no |

@@ -48,6 +48,11 @@ func TestMain(m *testing.M) {
 			return 1
 		}
 		defer app.Close()
+		// The chain tests write synthetic payloads (hashing, not a real
+		// action's shape) under test actions with open schemas.
+		audit.RegisterOpenForTest([]string{"reason", "n", "big", "f", "tiny", "nested", "huge", "neg", "unicode"},
+			"test.chain.gateway", "test.chain.auth", "test.chain.platform", "test.chain.empty", "test.concurrent",
+			"test.sensitive", "test.benign", "test.payload", "test.tamper", "test.column", "test.delete", "test.cross", "test.iso", "x")
 		return m.Run()
 	}()
 	os.Exit(code)
@@ -151,12 +156,12 @@ func lastID(t *testing.T) int64 {
 func TestAuditChainVerifies(t *testing.T) {
 	resetChain(t)
 	a, b := seedHospital(t), seedHospital(t)
-	writeAs(t, "gateway", event(a, "auth.login.succeeded"))
-	writeAs(t, "gateway", event(b, "auth.login.succeeded"))
-	writeAs(t, "auth", event(uuid.Nil, "auth.login.failed"))
-	writeAs(t, "platform", event(uuid.Nil, "platform.hospital.viewed"))
-	writeAs(t, "gateway", event(a, "auth.logout"))
-	writeAs(t, "gateway", audit.Event{HospitalID: a.String(), Action: "auth.refresh"})
+	writeAs(t, "gateway", event(a, "test.chain.gateway"))
+	writeAs(t, "gateway", event(b, "test.chain.gateway"))
+	writeAs(t, "auth", event(uuid.Nil, "test.chain.auth"))
+	writeAs(t, "platform", event(uuid.Nil, "test.chain.platform"))
+	writeAs(t, "gateway", audit.Event{HospitalID: a.String(), Action: "auth.logout"})
+	writeAs(t, "gateway", audit.Event{HospitalID: a.String(), Action: "test.chain.empty"})
 
 	if ok, broken := verify(t); !ok {
 		t.Fatalf("chain broken at %d", broken)

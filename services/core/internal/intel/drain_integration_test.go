@@ -156,7 +156,8 @@ func TestTwoDrainersAppendOnce(t *testing.T) {
 func TestDrainRoleActionAllowList(t *testing.T) {
 	hid := seedHospital(t, "active")
 	err := db.WithAuditDrain(context.Background(), app, func(tx pgx.Tx) error {
-		return audit.Write(context.Background(), tx, audit.Event{HospitalID: hid.String(), Action: "user.created"})
+		return audit.Write(context.Background(), tx, audit.Event{HospitalID: hid.String(), Action: "user.created",
+			Payload: map[string]any{"via": "cli"}}) // a payload that fits, so only 00008's policy refuses
 	})
 	if err == nil {
 		t.Fatal("the drain role appended user.created")

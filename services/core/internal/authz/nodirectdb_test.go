@@ -52,6 +52,11 @@ var dbTxAllowedFiles = map[string]string{
 	// principal exists, as mhai_auth, as sign-in failures are (F7).
 	// Everything after the principal goes through authz.Tx.
 	"internal/grant/grant.go": "grant refusals before a principal exists (db.WithAuth, mhai_auth)",
+	// Feedback and corrections run as the caller's hospital and user
+	// (db.WithHospitalUser), so 00011's two-person triggers and insert
+	// policy see the verified user; authz.Tx sets the hospital only. The
+	// store takes both ids from the handler's principal, never a body.
+	"internal/feedback/store.go": "feedback and corrections as the token's hospital and user (db.WithHospitalUser)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on
