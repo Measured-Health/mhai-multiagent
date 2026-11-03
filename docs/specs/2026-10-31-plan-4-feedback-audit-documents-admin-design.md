@@ -2,7 +2,7 @@
 
 - **Status:** Draft, for the product owner's approval. Design only; no code.
 - **Date:** 2026-10-31 (product owner approved starting Plan 4 on 31 Oct)
-- **Plan:** to be written from §15 as `docs/plans/2026-11-xx-plan-4-feedback-audit-admin.md` once this is approved.
+- **Plan:** to be written from §14 as `docs/plans/2026-11-xx-plan-4-feedback-audit-admin.md` once this is approved; the task breakdown is §14.
 - **Builds on (and must stay consistent with):**
   - [ADR 0004](../adr/0004-scope-retrieval-to-one-patient.md) (retrieval scoped to one patient), [ADR 0005](../adr/0005-fail-closed-and-review-corrections.md) (fail closed; a correction changes nothing until a different clinician approves it), [ADR 0009](../adr/0009-integrate-many-emr-systems.md), [ADR 0010](../adr/0010-api-in-go-models-in-python-over-nats.md), [ADR 0011](../adr/0011-frontend-ingress-over-nats.md), [ADR 0012](../adr/0012-api-versioning.md) (additive changes only inside `v1`).
   - The intelligence boundary design, `docs/specs/2026-10-28-intelligence-boundary-design.md`, **as built** (its §18): request tokens, the operations table, `with_hospital`, the outbox and its closed payload schemas, dead letters, `mhai_jobs`, `mhai_audit_drain`, the per-hospital cap. Plan 4 mirrors the `run_query` path; where it widens a Plan 3 piece it says so.
@@ -196,7 +196,7 @@ Every route: `Platform: true`, two-step always (`NeedsMFA`), `AnyRole [platform_
 | `GET /platform/audit/{id}` | yes | the event, plus `patients: null` and `letter: null` (no named access or pseudonyms exist yet) |
 | `GET /platform/audit/hospitals` | yes | every hospital the log names, removed ones included |
 | `GET /platform/audit/people?q` | yes | `q` ≥ 2 characters; at most 20 `{id, name, email, role, kind, hospital}`. Platform-wide by design (auditors search everyone) |
-| `POST /platform/audit/undisplayable {ids}` | yes | 1–50 ids → 204, written as one `audit.undisplayable_reported` entry with `facts.job_count`-style count (`count`) and no ids in free form. **Auditor write.** |
+| `POST /platform/audit/undisplayable {ids}` | yes | 1–50 ids → 204, written as one `audit.undisplayable_reported` entry (a count and the first and last ids, §9). **Auditor write.** |
 | `POST /platform/audit/verify` | yes | → `{run_id}`, or the running one. **Auditor write.** |
 | `GET /platform/audit/verify/runs?cursor`, `GET .../runs/{id}`, `GET .../verify/status` | yes | as contract §14.9. `status` → `{latest, running, open_failure, security_contact, oldest_kept_at}`; `security_contact` from configuration |
 | `POST /platform/audit/verify/runs/{id}/outcome {note, version}` | yes | **auditors only** (`AnyRole [auditor]`); broken runs only; note ≤ 1000 characters, stored on the run row and written as a new `audit.check_outcome` entry whose payload holds the run id only, never the note |
@@ -257,7 +257,7 @@ The chain stores `action`, `entity`, `entity_id`, `payload` (Plan 2). The contra
 
 Contract §14.8.2, unchanged: `{updated_at, overall, parts, queue, failed_jobs, timing, errors, versions, triage, clean_up}`. Roles: `platform_admin`, `auditor` (the contract lets auditors read every 14.8 `GET`; the tracker's "admin" is read as the platform roles). No hospital, user or content anywhere in it.
 
-- **A sampler, not a per-request computation.** A core loop (advisory-lock leader, every 30 s) takes a reading and stores it in memory and in NATS KV (`health` bucket, one key); the route returns the stored reading with its own `updated_at`. A poll costs one KV get, so a polling client can't make core run the queries or call the workers (§11, T-D2). The reading is 503 when it is older than 2 minutes or missing.
+- **A sampler, not a per-request computation.** A core loop (advisory-lock leader, every 30 s) takes a reading and stores it in memory and in NATS KV (`health` bucket, one key); the route returns the stored reading with its own `updated_at`. A poll costs one KV get, so a polling client can't make core run the queries or call the workers (§11, P17). The reading is 503 when it is older than 2 minutes or missing.
 - **Where each figure comes from:**
 
 | Block | Source |
@@ -352,7 +352,7 @@ Building "the upload endpoint plus quarantine storage" first looks cheap, but it
 ## 8. The other listed items
 
 - **`POST /triage` (QDA): deferred.** The QDA model's integrated accuracy is about 30% (tracker KI-2, Integration Guide §13), and contract §14.8.4 only lets a platform admin turn triage on with clinical sign-off and a model whose report, files and checksums are present (`not_ready_reason`). Exposing an endpoint before that would put an unvalidated clinical classifier one request away. When it comes, it is `pipeline.run_triage` (a job, like `run_query`, because QDA reads patient data) behind the triage switch, and its own design with clinical sign-off. Plan 4 sends `triage: {enabled: false}` in health.
-- **`GET /kb/search`: deferred.** No screen in either app calls it. If one does, it is a request/reply operation `pipeline.kb_search`, core-initiated (ADR 0011 recommends the core path for anything touching patient data), shared guidelines only until patient ids exist (ADR 0004: with no patient, only guidelines), with the shared replay check (boundary decision 3 applies only to writes, so not needed), a rate limit and an audit row of the query's hash, never its text.
+- **`GET /kb/search`: deferred.** No screen in either app calls it. If one does, it is a request/reply operation `pipeline.kb_search`, core-initiated (ADR 0011 recommends the core path for anything touching patient data), shared guidelines only until patient ids exist (ADR 0004: with no patient, only guidelines) (read-only, so Plan 3's per-worker replay check is enough), a rate limit and an audit row of the query's hash, never its text.
 - **Reset the feedback buffer: deferred to the platform settings plan.** It is `POST /platform/settings/feedback-buffer/reset`, shown inside `GET /platform/settings` together with retention and triage, none of which exist. Plan 4 never applies the buffer to the live guardrails (§4.8), so nothing has been learned that a reset would need to undo. Plan 4 makes the reset cheap later: buffer rows carry `model_versions` (so a reset can clear exactly the rows scored by a broken NLI model, the reason KI-5 exists), `cleared_at` and `reset_id`, and the reset becomes one SECURITY DEFINER function plus the route.
 
 ## 9. Audit: the closed payload schemas for each new fact
@@ -574,3 +574,60 @@ Plan 4 ships in three parts, each mergeable on its own (one PR each, per the age
 - **TODO.md:** remove "Platform job views"; add the deferred items (document pipeline plan, triage, KB search, buffer reset, audit exports and named access, the audit bell and email, CMA-ES proposals, persona capture); keep "Audit tail deletion".
 - **ARCHITECTURE.md:** "Built (Plan 4)" lines; the `jobs` table and the second consumer in the jobs flow.
 - **Tracker:** B-14, B-20, B-21, B-22 to their Plan 4 parts; B-17, B-18, B-19, B-23, KI-5 to "deferred" with the plan named.
+
+## 14. Task breakdown for the plan
+
+In the style of Plan 3: each task starts with its abuse-case tests (§11.5), runs on the remote build hosts only, and ends with the `secure-build` checklist and a `security-review` of its own diff. The plan expands each into files, interfaces and checkbox steps.
+
+| # | Part | Task | Main tests |
+|---|---|---|---|
+| 1 | 4a | **Migration 00010: feedback.** Widen `feedback_events`; CHECKs; decider and transition triggers; partial unique index; `mhai.user_id` local setting in `db.WithHospital`; masked columns and `timings_ms` on `clinical_decisions`; grants | C2, C6 (trigger part), C8 setup, RLS seeding |
+| 2 | 4a | **Migration 00011: the `jobs` table.** RLS, worker and `mhai_jobs` policies, deadline expiry and cancel-on-deactivate widened, outbox `job_id` and actions, drainer grants | the 00008/00009 policy tests repeated for `jobs`; A21-style cancel on deactivation |
+| 3 | 4a | **Migration 00012: `feedback_buffer`.** RLS, `buffer_needs_approval`, `mhai_feedback_buffer_waiting()` | C8, C10 (grants) |
+| 4 | 4a | **The operations table and the contract.** `pipeline.approve_correction`; the `SecondPerson` field and its subject loader; `learning.proto`; `make proto`; `operations.json`; problem codes `self_approval`, `already_decided`; replace the Plan 3 feedback-operation test | C28 (unit), drift test, golden messages |
+| 5 | 4a | **Core: `POST /feedback` and the corrections routes.** Handlers, `CorrectionOut` from the masked consultation, guards in order, audit actions with schemas (`audit/schemas.go`) | C1, C3–C5, C7, C11–C15 |
+| 6 | 4a | **Core: approval publishes the job.** One transaction (decision, `jobs` row, audit), publish after commit, sweeper and dead-letter consumer and drainer widened to `jobs`, the per-hospital approval budget | C3, C13, C23, C32 |
+| 7 | 4a | **Python: `approve_correction`.** `learning.py` (`LearningClient`, stub refused in production), `learning_repo.py`, the job handler, the `pipeline_learning` consumer, NATS permissions for it; `run_query` writes masked text and `timings_ms` | C8, C9, C16 (worker side), A4/A13/A20 equivalents for the new job |
+| 8 | 4b | **Migration 00013 and the audit catalogue.** `audit_verify_runs`; `mhai_platform` append policy; `audit/catalogue.go`; the vocabulary file and its tests | C21, C22 |
+| 9 | 4b | **Core: `/platform/audit` reads.** List (filters, keyset cursor, `total` cap), detail, hospitals, people; `audit.viewed` and `audit.searched` with KV dedupe; 404 for the deferred routes | C17, C22, C33 |
+| 10 | 4b | **Core: verification.** `audit.Verify` reporting progress; runs; scheduler with advisory lock; `POST /verify`, runs, status, outcome; `AuditorWrite`; undisplayable reports; the broken-chain alert | C24–C26 |
+| 11 | 4c | **Core: health.** The sampler, the `health` KV bucket, the SECURITY DEFINER aggregates, `GET /platform/health` | C30, staleness 503 |
+| 12 | 4c | **Core: failed jobs.** `mhai_platform_jobs()`, list, retry (Republish with checks), cancel (step-up), batch audit rows | C18, C27–C29, C33 |
+| 13 | 4c | **Core: guardrail statistics.** `internal/smallgroup` (rules, property tests), `mhai_guardrail_counts()`, the route, cache and rate limit | C19, C20, C31 |
+| 14 | all | **The smoke test, docs and contract.** Smoke: a clinician asks, a second clinician approves, the buffer row and `correction.applied` appear, the chain verifies `intact` through `POST /platform/audit/verify`; `openapi.yaml` (minor version bump); README, ARCHITECTURE, TODO, frontend contract statuses | the smoke test; `oasdiff` additive |
+
+**Order:** 1 → 2 → 3 (one migration chain). 4 needs nothing. 5 needs 1. 6 needs 2, 4, 5. 7 needs 2–4. 8 can start after 2 (actions settle with 5–7; its test pins the merged set). 9 and 10 need 8. 11 and 12 need 2. 13 needs 1 (`timings_ms` not needed; the counts are). 14 last in each part for that part's slice.
+
+**Review focus for the plan** (where a reviewer should look hardest):
+1. The two-person rule in all four places (handler, publisher, CHECK/triggers, buffer policy), and that no path writes `decided_by` from anything but the token (Tasks 1, 4, 5, 6).
+2. The reviewer's view reads masked text only (Task 5).
+3. `mhai_platform` never gains a row grant on a clinical table (Tasks 8, 11–13).
+4. The small-group rules, including subtraction across `all` (Task 13).
+5. `intact` means the whole range was walked (Task 10).
+
+## 15. Open questions for the product owner
+
+Each has a recommendation; "approve as recommended" decides them all.
+
+1. **Serve the audit log as `/platform/audit/*` only, or also as `/security/audit`?**
+   *Recommendation:* `/platform/audit/*` only. It is what the built platform app calls, over the same log; a second path would be a second thing to secure for no caller. The tracker row B-22 is marked done by it.
+2. **Build a `submit_feedback` job now?**
+   *Recommendation:* no; reserve the name. Submitting needs no model, and ADR 0005 says it changes nothing until approval. Add the job when submission needs model work.
+3. **What may a full CMA-ES buffer change?** Today's Python retunes the global trust weights after 50 corrections, automatically, for every hospital.
+   *Recommendation:* in Plan 4, nothing: the buffer accumulates only. Later (a plan with the intelligence lead), a CMA-ES run produces a *proposed* weight set, evaluated offline on the synthetic set and applied only through clinical change control (a `clinical-review` PR, as model pins are), never automatically and never from one hospital's corrections alone.
+4. **Persona vector updates?** They need the model's activations for the wrong and corrected answers, which the pipeline doesn't capture.
+   *Recommendation:* defer to the intelligence lead (model internals are his): Plan 4 records `persona_update: skipped` and keeps every approved correction's ids, so a later capture can be back-filled for new answers only. Like question 3, any change to live behaviour goes through clinical change control.
+5. **Who may review a correction?**
+   *Recommendation:* any active clinician of the same hospital other than the submitter, until the hospital admin plan adds `can_review` and `review_specialties` (contract §5.1); then the decider trigger checks those too. `reviewers_share_specialty` stays off by default (contract §4: "every clinician sees the whole queue").
+6. **Does approving a correction need the two-step code again?**
+   *Recommendation:* no. The contract doesn't ask for it, the app has a 60-second undo, and in Plan 4 an approval changes no answer. Revisit when approvals start changing live guardrails (question 3).
+7. **Health parts that don't exist yet (`documents`, `clean_up`) and `clean_up` block:** send them as `problem`, as `ok`, or leave them out?
+   *Recommendation:* leave them out and ask mhai-web to accept a missing part (a one-line change there), because `ok` would be false and `problem` would raise an alarm about something that doesn't exist. If mhai-web prefers not to change, send `problem` with `since` null.
+8. **Who may read health, failed jobs and guardrail statistics?** The tracker says "admin"; the contract lets auditors read every §14.8 `GET`.
+   *Recommendation:* platform admins and auditors read; only platform admins retry and cancel; hospital roles never.
+9. **Document upload in Plan 4?**
+   *Recommendation:* no (§7). Start the document pipeline plan with phase 0 (evaluation harness, model store, GPU host) and the documents service, then upload and `ingest_document` together, as the approved design phases them.
+10. **Triage, KB search and the feedback buffer reset?**
+    *Recommendation:* defer all three (§8): triage until QDA passes evaluation and clinical sign-off; KB search until a screen needs it; the reset into the platform settings plan, which Plan 4 makes small.
+11. **The migration that changes `feedback_events`:** it renames `clinician_id` and drops three unused columns.
+    *Recommendation:* accept; the table is empty outside tests (synthetic data only), and the deploy's pre-migrate check will stop if it isn't.
