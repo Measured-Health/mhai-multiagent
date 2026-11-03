@@ -3,6 +3,7 @@
 - **Status:** Approved by the product owner, 2026-10-28: every open question in §11 decided as recommended. Design only; no code yet.
 - **Date:** 2026-10-28
 - **Context:** [intelligence meeting notes, 28 Oct](../meetings/2026-10-28-intelligence-meeting.md). The product owner approved writing this design and adding the TODO and tracker entries.
+- **Amended 2026-11-03 (proposed, ADR 0013):** [ADR 0013](../adr/0013-allow-masked-text-to-cloud-language-models.md) lets masked text from clinical questions go to a cloud language model for opted-in hospitals. **It does not change this design:** documents, page images, OCR text and extraction stay self-hosted, and the model rules in §2 and §6.1 stand for documents.
 - **Builds on:**
   - [ADR 0009](../adr/0009-integrate-many-emr-systems.md): the FHIR-based canonical model, normalisation in one place, provenance, the per-hospital patient index, and unmapped codes kept and flagged.
   - [Intelligence boundary design](2026-10-28-intelligence-boundary-design.md): the `ingest_document` job type, request tokens, `with_hospital`, the operations table, error codes, the audit outbox.
