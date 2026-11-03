@@ -4,10 +4,12 @@ package db_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
@@ -70,16 +72,20 @@ func TestFeedbackSelfDecisionFailsCheck(t *testing.T) {
 	sub := seedClinician(t, pool, h)
 	id := seedCorrection(t, pool, h, seedQueryIn(t, pool, h), sub)
 
+	// The setting names the submitter, so the transition trigger (decider =
+	// session user) passes and only the CHECK can refuse.
 	err := asUser(ctx, pool, h, sub, `UPDATE feedback_events SET status = 'approved', decided_by = submitted_by, decided_at = now() WHERE id = $1`, id)
-	if pgCode(err) != checkViolation {
-		t.Fatalf("gateway self-approval: want 23514, got %v", err)
+	if c := pgConstraint(err); pgCode(err) != checkViolation || c != "feedback_not_self_decided" {
+		t.Fatalf("gateway self-approval: want 23514 feedback_not_self_decided, got %q %v", c, err)
 	}
-	// The owner connection (no RLS), with the setting set to someone else too.
+	// The owner connection (no RLS), with mhai.user_id set to the submitter
+	// too: again only the CHECK stands in the way.
 	for _, st := range []string{"approved", "rejected"} {
-		_, err = pool.Exec(ctx, `UPDATE feedback_events SET status = $2, decided_by = submitted_by, decided_at = now(),
+		_, err = inTx(ctx, pool, []string{`SELECT set_config('mhai.user_id', '` + sub.String() + `', true)`}, nil,
+			`UPDATE feedback_events SET status = $2, decided_by = submitted_by, decided_at = now(),
 			rejection_code = CASE WHEN $2 = 'rejected' THEN 'unsafe' END WHERE id = $1`, id, st)
-		if pgCode(err) != checkViolation {
-			t.Fatalf("owner self-%s: want 23514, got %v", st, err)
+		if c := pgConstraint(err); pgCode(err) != checkViolation || c != "feedback_not_self_decided" {
+			t.Fatalf("owner self-%s: want 23514 feedback_not_self_decided, got %q %v", st, c, err)
 		}
 	}
 	// As mhai_migrate itself: refused (FORCE RLS shows it no row, so at worst nothing changes).
@@ -144,8 +150,8 @@ func TestFeedbackDeciderMustBeActiveClinicianSameHospital(t *testing.T) {
 	}
 }
 
-// The decider is checked at the moment of the move: the setting can't stand
-// in for a deactivated account.
+// Status moves only pending_review -> approved | rejected | withdrawn, and a
+// recorded or decided row never changes again.
 func TestFeedbackTransitionsAreOneWay(t *testing.T) {
 	_, pool := shared(t)
 	ctx := context.Background()
@@ -188,9 +194,12 @@ func TestFeedbackTransitionsAreOneWay(t *testing.T) {
 		t.Fatalf("validate row: %v", err)
 	}
 	for _, st := range []string{"approved", "rejected", "withdrawn", "pending_review"} {
-		if _, err := pool.Exec(ctx, `UPDATE feedback_events SET status = $2 WHERE id = $1`, rec, st); err == nil {
-			t.Errorf("recorded -> %s was allowed", st)
+		if _, err := pool.Exec(ctx, `UPDATE feedback_events SET status = $2 WHERE id = $1`, rec, st); pgCode(err) != checkViolation {
+			t.Errorf("recorded -> %s: want 23514, got %v", st, err)
 		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE feedback_events SET decided_at = now() WHERE id = $1`, rec); pgCode(err) != checkViolation {
+		t.Errorf("recorded row given a decided_at: want 23514, got %v", err)
 	}
 
 	// A waiting correction: nothing but the decision columns changes.
@@ -199,25 +208,26 @@ func TestFeedbackTransitionsAreOneWay(t *testing.T) {
 		`reason = 'a different reason'`, `corrected_diagnosis = 'other'`, `action = 'validate'`,
 		`submitted_by = '` + dec.String() + `'`, `query_id = '` + seedQueryIn(t, pool, h).String() + `'`,
 	} {
-		if _, err := pool.Exec(ctx, `UPDATE feedback_events SET `+set+` WHERE id = $1`, w); err == nil {
-			t.Errorf("changing %q after submission was allowed", set)
+		if _, err := pool.Exec(ctx, `UPDATE feedback_events SET `+set+` WHERE id = $1`, w); pgCode(err) != checkViolation {
+			t.Errorf("changing %q after submission: want 23514, got %v", set, err)
 		}
 	}
 	// And a no-op status stay is not a transition.
-	if err := asUser(ctx, pool, h, dec, `UPDATE feedback_events SET status = 'pending_review' WHERE id = $1`, w); err == nil {
-		t.Error("pending_review -> pending_review was allowed")
+	if err := asUser(ctx, pool, h, dec, `UPDATE feedback_events SET status = 'pending_review' WHERE id = $1`, w); pgCode(err) != checkViolation {
+		t.Errorf("pending_review -> pending_review: want 23514, got %v", err)
 	}
-	// A deactivated decider can't finish a move the setting names.
+	// The decider is checked at the moment of the move: the setting can't
+	// stand in for a deactivated account.
 	if _, err := pool.Exec(ctx, `UPDATE users SET is_active = false WHERE id = $1`, dec); err != nil {
 		t.Fatal(err)
 	}
-	if err := asUser(ctx, pool, h, dec, approveSQL, w, dec); err == nil {
-		t.Error("a deactivated clinician approved")
+	if err := asUser(ctx, pool, h, dec, approveSQL, w, dec); pgCode(err) != checkViolation {
+		t.Errorf("a deactivated clinician approving: want 23514, got %v", err)
 	}
 	// A move to approved by the owner connection with no user set is refused.
 	other := seedClinician(t, pool, h)
-	if _, err := pool.Exec(ctx, `UPDATE feedback_events SET status = 'approved', decided_by = $2, decided_at = now() WHERE id = $1`, w, other); err == nil {
-		t.Error("approval with no mhai.user_id was allowed")
+	if _, err := pool.Exec(ctx, `UPDATE feedback_events SET status = 'approved', decided_by = $2, decided_at = now() WHERE id = $1`, w, other); pgCode(err) != checkViolation {
+		t.Errorf("approval with no mhai.user_id: want 23514, got %v", err)
 	}
 	// The gateway's column grant leaves the text alone.
 	err := asUser(ctx, pool, h, sub, `UPDATE feedback_events SET reason = 'x y z' WHERE id = $1`, w)
@@ -331,6 +341,44 @@ func TestFeedbackShapeChecks(t *testing.T) {
 		if (err == nil) != c.ok {
 			t.Errorf("rejection %q/%d chars: ok=%v err=%v", c.code, len(c.note), c.ok, err)
 		}
+	}
+}
+
+func pgConstraint(err error) string {
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		return pe.ConstraintName
+	}
+	return ""
+}
+
+// R4: the gateway inserts feedback only as the signed-in user, and never
+// with an assignee: a forged submitter, no user at all, or an assigned_to
+// is refused by the restrictive insert policy.
+func TestFeedbackInsertOnlyAsSessionUser(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	h, _ := seedHospital(t, pool, uniqueCode("F"))
+	me := seedClinician(t, pool, h)
+	other := seedClinician(t, pool, h)
+	ins := `INSERT INTO feedback_events (id, hospital_id, query_id, submitted_by, action, status, reason, corrected_diagnosis, assigned_to)
+		VALUES (gen_random_uuid(), $1, $2, $3, 'correct', 'pending_review', 'synthetic reason', 'synthetic diagnosis', $4)`
+
+	if err := asUser(ctx, pool, h, me, ins, h, seedQueryIn(t, pool, h), other, nil); pgCode(err) != permissionDenied {
+		t.Errorf("forged submitter: want 42501, got %v", err)
+	}
+	if err := asUser(ctx, pool, h, me, ins, h, seedQueryIn(t, pool, h), me, other); pgCode(err) != permissionDenied {
+		t.Errorf("born assigned: want 42501, got %v", err)
+	}
+	err := db.WithHospital(ctx, pool, h, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, ins, h, seedQueryIn(t, pool, h), me, nil)
+		return err
+	})
+	if pgCode(err) != permissionDenied {
+		t.Errorf("no session user: want 42501, got %v", err)
+	}
+	if err := asUser(ctx, pool, h, me, ins, h, seedQueryIn(t, pool, h), me, nil); err != nil {
+		t.Errorf("the session user submitting: %v", err)
 	}
 }
 

@@ -28,7 +28,9 @@
 --     submitter and approved or rejected needs the decider to be the
 --     session's user (mhai.user_id, set by db.WithHospitalUser from the
 --     verified token). The setting is only a claim; the decider check
---     above is what makes the claim worth anything.
+--     above is what makes the claim worth anything;
+--   - feedback_insert_as_submitter (restrictive, mhai_gateway): a new row's
+--     submitted_by is the session's user and assigned_to is null.
 --
 -- clinical_decisions gains masked_question and masked_patient_json (what a
 -- reviewer may read in place of the raw consultation, spec §4.4) and
@@ -44,9 +46,11 @@
 -- +goose Up
 
 -- The verified caller of this transaction, or null (db.WithHospitalUser).
+-- The function and the type are schema-qualified; NULLIF is SQL syntax,
+-- not a function looked up on the search_path (there is no pg_catalog.nullif).
 CREATE FUNCTION mhai_current_user() RETURNS uuid
     LANGUAGE sql STABLE
-    AS $$ SELECT nullif(current_setting('mhai.user_id', true), '')::uuid $$;
+    AS $$ SELECT NULLIF(pg_catalog.current_setting('mhai.user_id', true), '')::pg_catalog.uuid $$;
 ALTER FUNCTION mhai_current_user() OWNER TO mhai_migrate;
 
 ------------------------------------------------------------------------
@@ -188,6 +192,12 @@ CREATE TRIGGER feedback_transition_check BEFORE INSERT OR UPDATE ON feedback_eve
     FOR EACH ROW EXECUTE FUNCTION mhai_feedback_transition_check();
 
 -- Grants (spec §4.9). RLS hospital_rows (00003) already covers both roles.
+-- The gateway inserts feedback only as the signed-in user (mhai.user_id,
+-- from the verified token), and never with an assignee (reserved for the
+-- hospital admin plan): a forged submitter or an assigned_to fails here
+-- whatever core does. Restrictive, so it narrows hospital_rows.
+CREATE POLICY feedback_insert_as_submitter ON feedback_events AS RESTRICTIVE FOR INSERT TO mhai_gateway
+    WITH CHECK (submitted_by = mhai_current_user() AND assigned_to IS NULL);
 REVOKE UPDATE ON feedback_events FROM mhai_gateway;
 GRANT UPDATE (status, decided_by, decided_at, rejection_code, rejection_note) ON feedback_events TO mhai_gateway;
 GRANT SELECT (id, hospital_id, query_id, action, status, submitted_by, decided_by) ON feedback_events TO mhai_worker;
@@ -224,6 +234,7 @@ ALTER TABLE clinical_decisions
 REVOKE SELECT ON feedback_events FROM mhai_worker;
 REVOKE UPDATE (status, decided_by, decided_at, rejection_code, rejection_note) ON feedback_events FROM mhai_gateway;
 GRANT UPDATE ON feedback_events TO mhai_gateway;
+DROP POLICY feedback_insert_as_submitter ON feedback_events;
 
 DROP TRIGGER feedback_transition_check ON feedback_events;
 DROP TRIGGER feedback_decider_check ON feedback_events;
