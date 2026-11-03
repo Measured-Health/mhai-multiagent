@@ -51,7 +51,7 @@ func TestMain(m *testing.M) {
 		// The chain tests write synthetic payloads (hashing, not a real
 		// action's shape) under test actions with open schemas.
 		audit.RegisterOpenForTest([]string{"reason", "n", "big", "f", "tiny", "nested", "huge", "neg", "unicode"},
-			"test.chain.gateway", "test.chain.auth", "test.chain.platform", "test.chain.empty", "test.concurrent",
+			"test.chain.gateway", "test.chain.auth", "test.chain.empty", "test.concurrent",
 			"test.sensitive", "test.benign", "test.payload", "test.tamper", "test.column", "test.delete", "test.cross", "test.iso")
 		return m.Run()
 	}()
@@ -159,7 +159,9 @@ func TestAuditChainVerifies(t *testing.T) {
 	writeAs(t, "gateway", event(a, "test.chain.gateway"))
 	writeAs(t, "gateway", event(b, "test.chain.gateway"))
 	writeAs(t, "auth", event(uuid.Nil, "test.chain.auth"))
-	writeAs(t, "platform", event(uuid.Nil, "test.chain.platform"))
+	// The platform appends only its own actions (00014's platform_append).
+	writeAs(t, "platform", audit.Event{ActorID: uuid.NewString(), Action: "audit.searched", Entity: "audit_search",
+		Payload: map[string]any{"searched_kind": "event"}})
 	writeAs(t, "gateway", audit.Event{HospitalID: a.String(), Action: "auth.logout"})
 	writeAs(t, "gateway", audit.Event{HospitalID: a.String(), Action: "test.chain.empty"})
 

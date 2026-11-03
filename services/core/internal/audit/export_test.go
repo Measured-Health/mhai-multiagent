@@ -1,5 +1,7 @@
 package audit
 
+import "encoding/json"
+
 // CheckPayload runs Write's checks on e (action, ids, sensitive keys, the
 // schema) without a transaction.
 func CheckPayload(e Event) error {
@@ -22,4 +24,53 @@ func RegisterOpenForTest(keys []string, actions ...string) {
 		}
 		Register(a, Schema{Fields: f})
 	}
+}
+
+// RegisteredActions lists every action with a schema.
+func RegisteredActions() []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	out := make([]string, 0, len(registry))
+	for a := range registry {
+		out = append(out, a)
+	}
+	return out
+}
+
+// SchemaFields lists the keys action's schema allows.
+func SchemaFields(action string) []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	var out []string
+	for k := range registry[action].Fields {
+		out = append(out, k)
+	}
+	return out
+}
+
+// SchemaRequired lists the keys action's schema requires.
+func SchemaRequired(action string) []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return append([]string(nil), registry[action].Required...)
+}
+
+// FieldAccepts reports whether action's schema accepts v under key, as
+// Write would see v after a JSON round trip.
+func FieldAccepts(action, key string, v any) bool {
+	registryMu.RLock()
+	c := registry[action].Fields[key]
+	registryMu.RUnlock()
+	if c == nil {
+		return false
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return false
+	}
+	var back any
+	if err := json.Unmarshal(raw, &back); err != nil {
+		return false
+	}
+	return c(back)
 }

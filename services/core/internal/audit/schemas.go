@@ -7,6 +7,7 @@ import (
 	"math"
 	"regexp"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -200,6 +201,34 @@ func StringMap(max int, key *regexp.Regexp, c Check) Check {
 	}
 }
 
+// Object: an object whose keys are all in fields, each value accepted by
+// its check. None is required.
+func Object(fields map[string]Check) Check {
+	return func(v any) bool {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return false
+		}
+		for k, e := range m {
+			c, known := fields[k]
+			if !known || !c(e) {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+// Instant: an RFC 3339 time with its zone, as the audit filters carry it.
+func Instant(v any) bool {
+	s, ok := v.(string)
+	if !ok || !instantPattern.MatchString(s) {
+		return false
+	}
+	_, err := time.Parse(time.RFC3339Nano, s)
+	return err == nil
+}
+
 // RejectReasonCodes are the codes a correction is rejected with (spec §4.2).
 var RejectReasonCodes = []string{"not_supported", "needs_rewording", "unsafe", "out_of_scope"}
 
@@ -215,6 +244,10 @@ var (
 	// A terms version as POST /auth/terms accepts it (Plan 2): at most 64
 	// characters with no control characters.
 	termsVersion = regexp.MustCompile(`^[^\x00-\x1f\x7f]{1,64}$`)
+	// An instant with its zone, never a local time (the audit filters).
+	instantPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$`)
+	// An audit event id as core sends it: the entry's sequence number.
+	eventIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 	// intelligence's facts, as intel/factschema.go checks them first.
 	chunkIDPattern      = regexp.MustCompile(`^[A-Za-z0-9#_.:-]{1,128}$`)
 	modelNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,64}$`)
@@ -360,4 +393,34 @@ func init() {
 		"job_id", id, "type", OneOf("run_query", "approve_correction"),
 		"reason", OneOf("user_deactivated", "hospital_deactivated", "account_unusable")),
 		Required: []string{"job_id", "type", "reason"}})
+
+	// Plan 4 (spec §9): the audit reader's own actions, written by core as
+	// mhai_platform (00014's platform_append). Never the searched text, the
+	// outcome note, or anything of the entries read.
+	seq := Int(1, 1<<53-1)
+	Register("audit.viewed", Schema{Fields: fields(
+		"list", OneOf("events", "named_access"),
+		"filters", Object(map[string]Check{
+			"hospital": func(v any) bool { return v == "platform" || UUID(v) },
+			"person":   id,
+			"type":     List(len(AuditTypes), OneOf(AuditTypes...)),
+			"outcome":  OneOf(Outcomes...),
+			"flagged":  b,
+			"from":     Instant,
+			"to":       Instant,
+		})),
+		Required: []string{"list"}})
+	Register("audit.searched", Schema{Fields: fields("searched_kind", OneOf("event", "request")),
+		Required: []string{"searched_kind"}})
+	Register("audit.verify_started", Schema{Fields: fields("run_id", id, "by", OneOf("person", "schedule")),
+		Required: []string{"run_id", "by"}})
+	Register("audit.verify_finished", Schema{Fields: fields(
+		"run_id", id, "state", OneOf("intact", "broken", "error"),
+		"entries_checked", Int(0, 1<<53-1), "first_broken_seq", seq,
+		"error_code", OneOf("timed_out", "unreachable", "unexpected_reply")),
+		Required: []string{"run_id", "state"}})
+	Register("audit.check_outcome", Schema{Fields: fields("run_id", id), Required: []string{"run_id"}})
+	Register("audit.undisplayable_reported", Schema{Fields: fields(
+		"count", Int(1, 50), "first_id", Pattern(eventIDPattern), "last_id", Pattern(eventIDPattern)),
+		Required: []string{"count", "first_id", "last_id"}})
 }

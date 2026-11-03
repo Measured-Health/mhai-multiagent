@@ -110,8 +110,8 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(st) != 13 {
-		t.Fatalf("want 13 migrations, got %d", len(st))
+	if len(st) != 14 {
+		t.Fatalf("want 14 migrations, got %d", len(st))
 	}
 	for i, s := range st {
 		if s.Source.Version != int64(i+1) || s.State != goose.StateApplied {
@@ -251,6 +251,10 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if _, err := pool.Exec(ctx, bufferInsertSQL, a, bufferedID); err != nil {
 		t.Fatal(err)
 	}
+	// A finished verify run, so audit_verify_runs has a row to hide.
+	if _, err := pool.Exec(ctx, `INSERT INTO audit_verify_runs (state, finished_at, error_code) VALUES ('error', now(), 'timed_out')`); err != nil {
+		t.Fatal(err)
+	}
 
 	// One connection, so the second transaction reuses the session that
 	// had mhai.hospital_id set by the first.
@@ -265,7 +269,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if err := db.WithHospital(ctx, one, a, func(pgx.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer"} {
+	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs"} {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -274,8 +278,16 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 		var n int
-		err = tx.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE hospital_id IS NOT NULL`).Scan(&n)
+		where := ` WHERE hospital_id IS NOT NULL`
+		if table == "audit_verify_runs" {
+			where = "" // global, no hospital column: the gateway may not read it at all
+		}
+		err = tx.QueryRow(ctx, `SELECT count(*) FROM `+table+where).Scan(&n)
 		_ = tx.Rollback(ctx)
+		if table == "audit_verify_runs" {
+			requireDenied(t, err, "gateway reading audit_verify_runs")
+			continue
+		}
 		if table == "feedback_buffer" {
 			// No role but the owner reads the buffer: the gateway is denied outright.
 			requireDenied(t, err, "gateway reading feedback_buffer")
