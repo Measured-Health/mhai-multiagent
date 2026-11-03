@@ -47,6 +47,11 @@ type loginResponse struct {
 type mfaResponse struct {
 	MFARequired bool   `json:"mfa_required"`
 	MFAToken    string `json:"mfa_token"`
+	// MFAEnrolled is whether the account already has two-step set up: the
+	// same acct.MFAEnabled that the login check read in its transaction, and
+	// that challenge uses to choose between enrolment-only and verify. It is
+	// sent only here, after the password was proven.
+	MFAEnrolled bool `json:"mfa_enrolled"`
 }
 
 func clientIP(r *http.Request) string {
@@ -253,7 +258,7 @@ func (s *Service) mfaPending(w http.ResponseWriter, r *http.Request, acct *acctR
 		s.fail(w, r, "not_ready", "auth: mfa token store failed", "user_id", acct.ID.String())
 		return
 	}
-	httpx.JSON(w, http.StatusOK, mfaResponse{MFARequired: true, MFAToken: tok})
+	httpx.JSON(w, http.StatusOK, mfaResponse{MFARequired: true, MFAToken: tok, MFAEnrolled: acct.MFAEnabled})
 }
 
 // startSession opens a session with its first refresh token, mints the
