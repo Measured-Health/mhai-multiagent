@@ -102,9 +102,15 @@ func setJob(t *testing.T, id uuid.UUID, set string) {
 // would.
 func addJobFact(t *testing.T, hid, job, correction uuid.UUID, action string, payload map[string]any) {
 	t.Helper()
+	addJobFactAs(t, hid, job, "correction", correction.String(), action, payload)
+}
+
+// addJobFactAs is addJobFact with the fact's own entity and entity id.
+func addJobFactAs(t *testing.T, hid, job uuid.UUID, entity, entityID, action string, payload map[string]any) {
+	t.Helper()
 	raw, _ := json.Marshal(payload)
 	if _, err := super.Exec(context.Background(), `INSERT INTO intelligence_audit_outbox (hospital_id, job_id, action, entity, entity_id, payload)
-		VALUES ($1, $2, $3, 'correction', $4, $5::jsonb)`, hid, job, action, correction.String(), string(raw)); err != nil {
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, hid, job, action, entity, entityID, string(raw)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -337,9 +343,10 @@ func TestDrainerJobFactUsesJobsIdentity(t *testing.T) {
 	}
 	// A payload outside the schema (free text under a known key) is
 	// recorded as refused, with no text.
-	job2 := seedJob(t, hid, seedCorrection(t, hid, sub, dec), dec, 0, time.Now().Add(5*time.Minute), true)
+	cor2 := seedCorrection(t, hid, sub, dec)
+	job2 := seedJob(t, hid, cor2, dec, 0, time.Now().Add(5*time.Minute), true)
 	setJob(t, job2, "status = 'failed', attempts = 1, error = 'internal', failed_at = now()")
-	addJobFact(t, hid, job2, cor, "correction.apply_failed", map[string]any{"correction_id": cor.String(), "error": "a synthetic note", "attempts": 1})
+	addJobFact(t, hid, job2, cor2, "correction.apply_failed", map[string]any{"correction_id": cor2.String(), "error": "a synthetic note", "attempts": 1})
 	drainAll(t)
 	rows = auditFor(t, "correction.apply_failed", job2.String())
 	if len(rows) != 1 || rows[0].payload["payload_refused"] != true || rows[0].payload["error"] != nil {
@@ -411,5 +418,51 @@ func TestDrainerJobFactsDoNotStallQueryFacts(t *testing.T) {
 	}
 	if outboxCount(t, q) != 0 || jobOutboxCount(t, job) != 0 {
 		t.Fatal("facts left in the outbox")
+	}
+}
+
+// A job fact names the job's own correction: a correction_id, or an entity
+// id, of another correction (or another job, or an entity that isn't the
+// correction) is recorded as {payload_refused}, never as said. The job's
+// own correction goes through.
+func TestDrainerJobFactCorrectionMustMatchSubject(t *testing.T) {
+	hid := seedHospital(t, "active")
+	sub, dec := seedUser(t, hid, true, authz.RoleClinician), seedUser(t, hid, true, authz.RoleClinician)
+	other := seedCorrection(t, hid, sub, dec)
+	otherJob := seedJob(t, hid, other, dec, 0, time.Now().Add(5*time.Minute), true)
+	for name, c := range map[string]struct {
+		entity     string
+		entityID   func(cor uuid.UUID) string
+		correction func(cor uuid.UUID) string
+		ok         bool
+	}{
+		"its own correction":           {"correction", func(cor uuid.UUID) string { return cor.String() }, func(cor uuid.UUID) string { return cor.String() }, true},
+		"no entity id":                 {"correction", func(uuid.UUID) string { return "" }, func(cor uuid.UUID) string { return cor.String() }, true},
+		"another correction_id":        {"correction", func(cor uuid.UUID) string { return cor.String() }, func(uuid.UUID) string { return other.String() }, false},
+		"another correction as entity": {"correction", func(uuid.UUID) string { return other.String() }, func(cor uuid.UUID) string { return cor.String() }, false},
+		"both another correction":      {"correction", func(uuid.UUID) string { return other.String() }, func(uuid.UUID) string { return other.String() }, false},
+		"another job as entity":        {"job", func(uuid.UUID) string { return otherJob.String() }, func(cor uuid.UUID) string { return cor.String() }, false},
+		"the correction as a query":    {"query", func(cor uuid.UUID) string { return cor.String() }, func(cor uuid.UUID) string { return cor.String() }, false},
+	} {
+		cor := seedCorrection(t, hid, sub, dec)
+		job := seedJob(t, hid, cor, dec, 0, time.Now().Add(5*time.Minute), true)
+		setJob(t, job, "status = 'completed', attempts = 1")
+		addJobFactAs(t, hid, job, c.entity, c.entityID(cor), "correction.applied",
+			map[string]any{"correction_id": c.correction(cor), "attempts": 1, "persona_update": "skipped"})
+		drainAll(t)
+		rows := auditFor(t, "correction.applied", job.String())
+		if len(rows) != 1 {
+			t.Fatalf("%s: %d rows", name, len(rows))
+		}
+		p := rows[0].payload
+		switch {
+		case c.ok && (p["payload_refused"] != nil || p["correction_id"] != cor.String()):
+			t.Errorf("%s: refused: %v", name, p)
+		case !c.ok && (p["payload_refused"] != true || len(p) != 1):
+			t.Errorf("%s: recorded: %v", name, p)
+		}
+		if jobOutboxCount(t, job) != 0 {
+			t.Errorf("%s: left in the outbox", name)
+		}
 	}
 }

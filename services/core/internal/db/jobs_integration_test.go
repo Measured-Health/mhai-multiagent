@@ -721,11 +721,15 @@ func TestOutboxExactlyOneParent(t *testing.T) {
 	if n, err := asDrain(ctx, pool, `SELECT id FROM intelligence_audit_outbox WHERE job_id IS NOT NULL`); err != nil || n != 2 {
 		t.Errorf("drain read: %d %v", n, err)
 	}
-	if n, err := asDrain(ctx, pool, `SELECT id, hospital_id, created_by, request_id, status, type FROM jobs WHERE id = $1`, j); err != nil || n != 1 {
+	// The subject too: a correction fact must name the job's own
+	// correction (Task 6 review). Never the cancel note or who cancelled.
+	if n, err := asDrain(ctx, pool, `SELECT id, hospital_id, created_by, request_id, status, type, subject_id FROM jobs WHERE id = $1`, j); err != nil || n != 1 {
 		t.Errorf("drain reads jobs: %d %v", n, err)
 	}
-	_, err := asDrain(ctx, pool, `SELECT subject_id FROM jobs`)
-	requireDenied(t, err, "drain reading subject_id")
+	for _, col := range []string{"cancel_note", "cancelled_by", "lease_until"} {
+		_, err := asDrain(ctx, pool, `SELECT `+col+` FROM jobs`)
+		requireDenied(t, err, "drain reading "+col)
+	}
 	for _, action := range []string{"correction.applied", "correction.apply_failed"} {
 		if _, err := asDrain(ctx, pool, `INSERT INTO audit_log (hospital_id, action, payload, prev_hash, hash) VALUES ($1, $2, '{}', 'p', $3)`, a, action, uuid.NewString()); err != nil {
 			t.Errorf("drain appending %s: %v", action, err)

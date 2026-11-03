@@ -80,6 +80,7 @@ type outboxRow struct {
 	payload          []byte
 	jobID, hospital  uuid.UUID  // the parent row's id and hospital
 	jobType          *string    // the jobs row's type; nil for a question
+	subject          *uuid.UUID // the jobs row's subject; nil for a question
 	createdBy        *uuid.UUID // the parent row's creator
 	requestID        *string
 	status           *string // the parent's status now; nil: no parent row
@@ -102,7 +103,9 @@ type outboxRow struct {
 // entity is always the job (query and its id, or job and its id), never
 // from the fact: the fact gives the action (one the outbox allows) and the
 // payload (its own entity and entity id, if other than the job, go in as
-// fact_entity and fact_entity_id), and payload keys naming an identity
+// fact_entity and fact_entity_id; a job fact's correction_id, and its own
+// entity id if it names the correction, must be the jobs row's
+// subject_id), and payload keys naming an identity
 // (actor_id, hospital_id, request_id, sub) are dropped before audit.Write's
 // sensitive-key check. The payload must then fit its action's closed
 // schema (factschema.go: closed-set codes, ids of a fixed shape, bounded
@@ -128,7 +131,7 @@ func DrainOnce(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (int, 
 				RETURNING o.id, o.action, o.entity, o.entity_id, o.payload, o.hospital_id, o.query_id, o.job_id
 			)
 			SELECT g.id, g.action, g.entity, g.entity_id, g.payload, g.hospital_id,
-			       COALESCE(g.query_id, g.job_id), j.type,
+			       COALESCE(g.query_id, g.job_id), j.type, j.subject_id,
 			       CASE WHEN g.query_id IS NOT NULL THEN q.created_by ELSE j.created_by END,
 			       CASE WHEN g.query_id IS NOT NULL THEN q.request_id ELSE j.request_id END,
 			       CASE WHEN g.query_id IS NOT NULL THEN q.status ELSE j.status END
@@ -144,7 +147,7 @@ func DrainOnce(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (int, 
 			var o outboxRow
 			var parent *uuid.UUID
 			if err := r.Scan(&o.id, &o.action, &o.entity, &o.entityID, &o.payload, &o.hospital, &parent, &o.jobType,
-				&o.createdBy, &o.requestID, &o.status); err != nil {
+				&o.subject, &o.createdBy, &o.requestID, &o.status); err != nil {
 				r.Close()
 				return errDrain
 			}
@@ -245,16 +248,34 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 	if isJob {
 		queryID = uuid.Nil
 	}
-	fits := jobFactSchemas[o.action].schema.check(payload, queryID)
+	f := jobFactSchemas[o.action]
+	fits := f.schema.check(payload, queryID)
+	// A job fact names the job's own subject (correction_id is the jobs
+	// row's subject_id), never another: a worker can't put another
+	// correction on the chain under this job.
+	if isJob && f.subjectKey != "" {
+		s, ok := payload[f.subjectKey].(string)
+		fits = fits && ok && o.subject != nil && s == o.subject.String()
+	}
 	// The row is always about the job (entity query or job, entity id the
 	// job's): a fact's own entity, if another, is detail in the payload
-	// only.
+	// only. A job fact's own entity is its subject, by the subject's id.
 	if o.entity != nil && *o.entity != "" && *o.entity != e.Entity {
 		fits = fits && factEntity.MatchString(*o.entity)
+		if isJob {
+			fits = fits && *o.entity == f.subjectEntity && o.subject != nil &&
+				(o.entityID == nil || *o.entityID == "" || *o.entityID == o.subject.String())
+		}
 		payload["fact_entity"] = *o.entity
 	}
 	if o.entityID != nil && *o.entityID != "" && *o.entityID != e.EntityID {
 		fits = fits && factEntityIDPattern.MatchString(*o.entityID)
+		if isJob {
+			// Another id than the job's can only be the subject's, named as
+			// the subject.
+			fits = fits && o.entity != nil && *o.entity == f.subjectEntity && o.subject != nil &&
+				*o.entityID == o.subject.String()
+		}
 		payload["fact_entity_id"] = *o.entityID
 	}
 	raw, err := json.Marshal(payload)

@@ -26,7 +26,7 @@
 -- The outbox is widened: query_id becomes nullable, job_id (with the
 -- same-hospital FK) is added, and exactly one of the two is set. Its action
 -- CHECK adds correction.applied and correction.apply_failed. The drainer's
--- role reads the six job columns it needs and appends the two actions.
+-- role reads the seven job columns it needs and appends the two actions.
 --
 -- 00009's jobs_append_own_job ties mhai_jobs's audit rows to a job of the
 -- row's own hospital; it now accepts a jobs row too (entity 'job').
@@ -281,9 +281,10 @@ ALTER TABLE intelligence_audit_outbox
         CHECK (action IN ('query.completed', 'query.failed', 'query.cancelled', 'correction.applied', 'correction.apply_failed'));
 CREATE INDEX intelligence_audit_outbox_job_idx ON intelligence_audit_outbox (job_id, hospital_id);
 
--- The drainer: the ids and status of a job (to check a fact against it), and
--- the two new actions.
-GRANT SELECT (id, hospital_id, created_by, request_id, status, type) ON jobs TO mhai_audit_drain;
+-- The drainer: the ids and status of a job (to check a fact against it), its
+-- subject (a correction fact must name the job's own correction), and the
+-- two new actions. Never the cancel note or who cancelled.
+GRANT SELECT (id, hospital_id, created_by, request_id, status, type, subject_id) ON jobs TO mhai_audit_drain;
 CREATE POLICY drain_read ON jobs FOR SELECT TO mhai_audit_drain USING (true);
 DROP POLICY drain_append ON audit_log;
 CREATE POLICY drain_append ON audit_log FOR INSERT TO mhai_audit_drain
