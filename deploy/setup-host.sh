@@ -15,7 +15,15 @@
 #   secrets/nats-gateway.pub its public key (also in .env as NATS_GATEWAY_NKEY)
 # It needs sudo only to create /srv/mhai-backend; file ownership for the
 # containers' users is set from throwaway containers (no network).
-#   .env also holds the BFF's NATS NKey (NATS_BFF_NKEY, NATS_BFF_NKEY_SEED)
+#   secrets/bff/nats-bff-clinical.nk, nats-bff-platform.nk
+#                            each frontend BFF's NATS NKey seed, mode 400,
+#                            owned by uid 1001 (mhai-web's container user);
+#                            the folder is mode 750. The public keys are in
+#                            .env (NATS_BFF_NKEY, NATS_BFF_PLATFORM_NKEY).
+#                            An older NATS_BFF_NKEY_SEED in .env is moved
+#                            into its file (same pair) and removed.
+#   --rotate-bff clinical|platform|all   makes a new pair for that BFF
+#                            (restart nats and the app afterwards)
 # the Docker volumes mhai-backend-pgdata, -natsdata, -corekeys and
 # -trustedkeys, and the
 # internal Docker network mhai-bff that the frontend's containers join.
@@ -32,6 +40,20 @@ POSTGRES_IMAGE=${POSTGRES_IMAGE:-postgres:16.15-alpine}
 CORE_UID=65532   # distroless nonroot
 NATS_UID=1000    # compose.yml: nats user
 PG_UID=70        # postgres alpine image's postgres user
+WEB_UID=1001     # mhai-web's containers: the nextjs user in both Dockerfiles
+WEB_GID=1001     # its group (nodejs)
+ROTATE_BFF=      # clinical, platform or all: --rotate-bff
+ROTATED=0
+
+usage() { echo "usage: bash setup-host.sh [--rotate-bff clinical|platform|all]" >&2; exit 2; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rotate-bff) [ $# -ge 2 ] || usage; ROTATE_BFF=$2; shift 2 ;;
+    -h|--help) usage ;;
+    *) usage ;;
+  esac
+done
+case "$ROTATE_BFF" in ""|clinical|platform|all) ;; *) usage ;; esac
 
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 OWNER=$(id -un)
@@ -82,6 +104,8 @@ copy() {
 }
 copy "$SRC/compose.yml"                   "$DEST/compose.yml"                   644
 copy "$SRC/nats/nats.conf"                "$DEST/nats/nats.conf"                644
+# This script too, so a later run (--rotate-bff) needs no new copy of deploy/.
+copy "$SRC/setup-host.sh"                 "$DEST/setup-host.sh"                 750
 
 say "Secrets in $DEST/.env"
 umask 077
@@ -141,23 +165,87 @@ else
 fi
 info "seed: mode 400, owner uid $CORE_UID; the folder is mode 700"
 
-say "NATS NKey for the frontend's BFF (placeholder user, no publish rights yet)"
-# Both halves go into .env (mode 600): the frontend's deploy reads the seed
-# from there once Plan 3 wires its BFF to NATS. Generated in a throwaway
-# container with no network; never printed.
-if grep -q '^NATS_BFF_NKEY_SEED=SU' "$ENV_FILE" && grep -q '^NATS_BFF_NKEY=U' "$ENV_FILE"; then
-  info "NATS_BFF_NKEY and NATS_BFF_NKEY_SEED already set, kept"
-else
-  out=$(docker run --rm --network none --entrypoint nsc "$NATS_BOX_IMAGE" generate nkey --user 2>/dev/null)
-  bff_seed=$(printf '%s\n' "$out" | sed -n 1p)
-  bff_pub=$(printf '%s\n' "$out" | sed -n 2p)
-  unset out
-  case "$bff_seed:$bff_pub" in SU?*:U?*) ;; *) die "could not generate the BFF NKey" ;; esac
-  sed -i '/^NATS_BFF_NKEY=/d; /^NATS_BFF_NKEY_SEED=/d' "$ENV_FILE"
-  printf 'NATS_BFF_NKEY=%s\nNATS_BFF_NKEY_SEED=%s\n' "$bff_pub" "$bff_seed" >> "$ENV_FILE"
-  unset bff_seed bff_pub
-  info "NATS_BFF_NKEY (public) and NATS_BFF_NKEY_SEED written to .env"
+say "NATS NKeys for the frontend's BFFs ($DEST/secrets/bff/)"
+# One pair per BFF app. The public key goes in .env (NATS reads it); the seed
+# goes only in its own file, mode 400, owned by uid $WEB_UID (the frontend
+# container's user), and mhai-web's compose mounts that file as a secret. The
+# seed is never in .env, an environment variable, an image or this output:
+# it is made, moved and checked inside a throwaway container with no network,
+# and only the public key comes back. The folder is mode 750.
+if getent passwd "$WEB_UID" >/dev/null; then
+  echo "    warning: uid $WEB_UID is a login on this host ($(getent passwd "$WEB_UID" | cut -d: -f1)); it will be able to read the BFF seed files" >&2
 fi
+mkdir -p "$DEST/secrets/bff"
+bff_key() {
+  local app=$1 pubvar=$2 legacyvar=$3 rotate=0 legacy="" envpub pub
+  if [ "$ROTATE_BFF" = all ] || [ "$ROTATE_BFF" = "$app" ]; then rotate=1; fi
+  if [ -n "$legacyvar" ]; then
+    legacy=$(sed -n "s/^${legacyvar}=\(SU.*\)$/\1/p" "$ENV_FILE" | tail -n1)
+  fi
+  envpub=$(sed -n "s/^${pubvar}=\(U.*\)$/\1/p" "$ENV_FILE" | tail -n1)
+  # In the container: the seed is read from stdin (a legacy seed) or made, and
+  # is written to a temp file in the volume, then moved into place, so a
+  # failure never leaves a half-written or replaced seed. Any disagreement
+  # between the seed file, the legacy seed and the public key in .env stops
+  # here, before .env is touched; a new pair is only ever made on a first run
+  # (no key anywhere) or by --rotate-bff.
+  pub=$(printf '%s' "$legacy" | docker run --rm -i --network none --user 0 --entrypoint sh \
+    -e APP="$app" -e ROTATE="$rotate" -e ENVPUB="$envpub" -e PUBVAR="$pubvar" -e DIR_OWNER="$(id -u):$WEB_GID" \
+    -e WEB_UID="$WEB_UID" -e WEB_GID="$WEB_GID" \
+    -v "$DEST/secrets/bff:/s" "$NATS_BOX_IMAGE" -c '
+      set -eu; umask 077
+      f=/s/nats-bff-$APP.nk; t=/s/.nats-bff-$APP.nk.new
+      trap "rm -f $t $t.in" EXIT
+      incoming=$(cat)
+      pubof() { nats auth nkey show "$1"; }
+      user_seed() { case "$(head -c 2 "$1")" in SU) ;; *) echo "the $APP seed is not a user seed" >&2; exit 1;; esac; }
+      place() { chown "$WEB_UID:$WEB_GID" "$t"; chmod 400 "$t"; mv -f "$t" "$f"; }
+      if [ -n "$incoming" ]; then
+        printf "%s\n" "$incoming" > "$t.in"; user_seed "$t.in"; ipub=$(pubof "$t.in")
+      else ipub=""; fi
+      unset incoming
+      if [ "$ROTATE" = 1 ]; then
+        out=$(nsc generate nkey --user 2>/dev/null)
+        printf "%s\n" "$out" | sed -n 1p > "$t"; unset out
+        user_seed "$t"; place; echo "new pair made (rotated)" >&2
+      elif [ -s "$f" ]; then
+        user_seed "$f"
+        if [ -n "$ipub" ] && [ "$ipub" != "$(pubof "$f")" ]; then
+          echo "the seed file and the seed still in .env are different keys: nothing changed; decide which is right (the one whose public key is in .env is the live one), then remove the other" >&2; exit 3
+        fi
+        echo "seed file exists, kept" >&2
+      elif [ -n "$ipub" ]; then
+        if [ -n "$ENVPUB" ] && [ "$ENVPUB" != "$ipub" ]; then
+          echo "the seed in .env does not match $PUBVAR in .env: nothing changed" >&2; exit 3
+        fi
+        cp "$t.in" "$t"; place; echo "seed moved from .env into its file (same key pair)" >&2
+      elif [ -n "$ENVPUB" ]; then
+        echo "$PUBVAR is in .env but there is no seed file and no seed to move: refusing to make a new pair silently (it would lock the frontend out). If the seed is lost, run with --rotate-bff $APP" >&2; exit 3
+      else
+        out=$(nsc generate nkey --user 2>/dev/null)
+        printf "%s\n" "$out" | sed -n 1p > "$t"; unset out
+        user_seed "$t"; place; echo "new pair made" >&2
+      fi
+      chown "$DIR_OWNER" /s; chmod 750 /s
+      pubof "$f"' 2> >(sed 's/^/    /' >&2)) || die "the $app BFF key was not changed (see above)"
+  case "$pub" in U?*) ;; *) die "could not read the $app BFF public key from its seed" ;; esac
+  if [ "$envpub" = "$pub" ]; then
+    info "$pubvar matches the seed, kept"
+  else
+    sed -i "/^${pubvar}=/d" "$ENV_FILE"
+    printf '%s=%s\n' "$pubvar" "$pub" >> "$ENV_FILE"
+    info "$pubvar (the public key) written to .env"
+    if [ "$rotate" = 1 ]; then ROTATED=1; fi
+  fi
+  if [ -n "$legacyvar" ] && grep -q "^${legacyvar}=" "$ENV_FILE"; then
+    sed -i "/^${legacyvar}=/d" "$ENV_FILE"
+    info "$legacyvar removed from .env"
+  fi
+  info "$app: seed mode 400, owner uid $WEB_UID"
+}
+bff_key clinical NATS_BFF_NKEY          NATS_BFF_NKEY_SEED
+bff_key platform NATS_BFF_PLATFORM_NKEY ""
+info "folder: mode 750"
 
 say "Docker network mhai-bff (shared with the frontend's containers)"
 if docker network inspect mhai-bff >/dev/null 2>&1; then
@@ -222,5 +310,9 @@ say "Checking the compose file"
 info "compose.yml and .env are valid"
 
 say "Done"
+if [ "$ROTATED" = 1 ]; then
+  info "A BFF key was rotated: restart nats and that BFF's app, or it cannot connect:"
+  info "  (cd $DEST && docker compose up -d --force-recreate nats), then restart the app"
+fi
 info "Nothing was started. Next: set the repository variable DEPLOY_ENABLED=true"
 info "and run the Deploy backend demo workflow (deploy/README.md)."

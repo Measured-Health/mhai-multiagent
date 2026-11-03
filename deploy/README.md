@@ -32,7 +32,7 @@ touches the EMR containers, the web demo or nginx.
 | Service | Image | Role | Memory cap |
 |---|---|---|---|
 | `postgres` | `postgres:16.15-alpine`, uid 70 | the database; no published port | 256 MiB |
-| `nats` | `nats:2.10.29-alpine`, uid 1000 | JetStream (KV buckets, the `JOBS` and `DEAD` streams) on a volume; NKey users `gateway` (core) and the clinical BFF (`NATS_BFF_NKEY`: `api.v1.clinical` only) | 128 MiB |
+| `nats` | `nats:2.10.29-alpine`, uid 1000 | JetStream (KV buckets, the `JOBS` and `DEAD` streams) on a volume; NKey users `gateway` (core), the clinical BFF (`NATS_BFF_NKEY`: `api.v1.clinical` only) and the platform BFF (`NATS_BFF_PLATFORM_NKEY`: `api.v1.platform` only) | 128 MiB |
 | `core-migrate` | core | one-shot each deploy: goose migrations, then the `core_app` and `core_provision` logins | 128 MiB |
 | `core-keys` | core | one-shot: the access-token signing key, made once (`core keys ensure`) | 64 MiB |
 | `core-request-key` | core | one-shot: the request-token signing key, made once, and its public half in the `mhai-backend-trustedkeys` volume | 64 MiB |
@@ -87,8 +87,9 @@ or an image:
 
 | Where | What |
 |---|---|
-| `/srv/mhai-backend/.env` (mode 600) | `POSTGRES_PASSWORD`, `CORE_DB_PASSWORD`, `PROVISION_DB_PASSWORD`, `MFA_ENCRYPTION_KEY`, `BFF_SERVICE_KEYS`; the NATS public keys `NATS_GATEWAY_NKEY`, `NATS_BFF_NKEY`; and the BFF's seed `NATS_BFF_NKEY_SEED` |
+| `/srv/mhai-backend/.env` (mode 600) | `POSTGRES_PASSWORD`, `CORE_DB_PASSWORD`, `PROVISION_DB_PASSWORD`, `MFA_ENCRYPTION_KEY`, `BFF_SERVICE_KEYS`; the NATS public keys `NATS_GATEWAY_NKEY`, `NATS_BFF_NKEY`, `NATS_BFF_PLATFORM_NKEY` (no seed is ever in `.env`) |
 | `/srv/mhai-backend/secrets/nats-gateway.nk` (mode 400, uid 65532) | the core service's NATS NKey seed, mounted into `core` only |
+| `/srv/mhai-backend/secrets/bff/nats-bff-clinical.nk`, `nats-bff-platform.nk` (mode 400, uid 1001; folder mode 750) | each frontend BFF's NATS NKey seed, mounted by mhai-web's compose into that app's container only |
 | volume `mhai-backend-corekeys` | the access-token signing key (Ed25519) |
 
 Each container gets only its own secrets: `core` never sees the owner
@@ -222,17 +223,90 @@ Deleting the database for real is `docker compose down` then
 
 ## The frontend and NATS (Plan 3)
 
-The frontend's BFF can reach core over NATS (spec §17.1): the NKey in
-`NATS_BFF_NKEY` is the clinical app's BFF and may publish `api.v1.clinical`
-and receive on `_INBOX_bff.clinical.>` (nats.go:
-`nats.CustomInboxPrefix("_INBOX_bff.clinical")`). No BFF-direct
-intelligence operation is open on the demo. The platform app's BFF needs
-its own NKey (`bff_platform`) before it moves to NATS (TODO.md).
+The frontend's BFFs can reach core over NATS (spec §17.1). Two NKey users,
+each with its own subject and inbox and nothing else:
+
+| User | Public key in `.env` | Publishes | Receives |
+|---|---|---|---|
+| `bff_clinical` | `NATS_BFF_NKEY` | `api.v1.clinical` | `_INBOX_bff.clinical.>` |
+| `bff_platform` | `NATS_BFF_PLATFORM_NKEY` | `api.v1.platform` | `_INBOX_bff.platform.>` |
+
+(nats.go: `nats.CustomInboxPrefix("_INBOX_bff.clinical")`.) No BFF-direct
+intelligence operation is open on the demo.
+
+Each seed is a file written by `setup-host.sh`, never in `.env`:
+`/srv/mhai-backend/secrets/bff/nats-bff-clinical.nk` and
+`nats-bff-platform.nk`, mode 400, owned by uid 1001 (the `nextjs` user in
+mhai-web's images), in a folder of mode 750. mhai-web's compose mounts the
+file as a secret at `/run/secrets/`. An older `NATS_BFF_NKEY_SEED` in `.env`
+is moved into its file on the next run (same key pair, so nothing re-keys)
+and the line is removed.
+
+### Before merging (once, on the instance)
+
+The nats service now needs `NATS_BFF_PLATFORM_NKEY` (`:?`), and merging
+deploys at once, so run the new `setup-host.sh` first or the deploy stops at
+the compose check. From a checkout of this branch (a fresh folder on the
+host each time, removed afterwards; never a fixed path in `/tmp`):
+
+```bash
+( H=ubuntu@3.239.87.6; K=mh.pem
+  d=$(ssh -i $K $H 'mktemp -d') && trap 'ssh -i $K $H "rm -rf $d"' EXIT \
+  && scp -i $K -r deploy "$H:$d/" \
+  && ssh -i $K $H "bash $d/deploy/setup-host.sh" )
+```
+
+It adds the platform pair, moves the clinical seed into its file, and
+rewrites `/srv/mhai-backend/nats/nats.conf` and `compose.yml`. **Merge
+promptly after running it.** Until the deploy recreates `nats`, the running
+container keeps its old environment but the file on disk is the new config
+(which names `$NATS_BFF_PLATFORM_NKEY`): if NATS is restarted in that window
+(a host reboot, `docker restart`) it fails to start and crash-loops. If that
+happens, `cd /srv/mhai-backend && docker compose up -d nats` recreates it
+with the new environment.
+
+Checks: `grep -c SEED /srv/mhai-backend/.env` prints 0 and
+`sudo ls -ln /srv/mhai-backend/secrets/bff` shows two `-r--------` files for
+uid 1001.
+
+**uid 1001.** The seed files are owned by uid 1001, the `nextjs` user inside
+mhai-web's images. On the host that number should belong to nobody. Check
+first with `getent passwd 1001`: it should print nothing. On a typical
+Ubuntu host the deploy user `ubuntu` is uid 1000 and 1001 is free, but an AWS
+instance with the SSM agent creates `ssm-user` as 1001 (a login with sudo).
+If it prints a user, that user can read both seeds; `setup-host.sh` prints a
+warning in that case. Fix it by giving mhai-web's images a different uid
+(and `WEB_UID` in the script), not by ignoring the warning. It has not been
+checked on the demo instance itself: do it before running the script.
+
+The script also copies itself to `/srv/mhai-backend/setup-host.sh`
+(mode 750), so later runs need no new copy of `deploy/`.
+
+### Rotating a BFF's key
+
+On the instance, as the deploy user:
+
+```bash
+bash /srv/mhai-backend/setup-host.sh --rotate-bff clinical   # or platform, or all
+```
+
+It makes a new pair (the seed goes to a temporary file in the folder and is
+moved into place, so a failure leaves the old seed), replaces the public key
+in `.env` and the seed file, and prints under "Done" what to restart:
+`docker compose up -d --force-recreate nats` in `/srv/mhai-backend`, then the
+app's container (it reads the file at start). Until both are restarted that
+BFF cannot connect. Rotate after any suspected leak of a seed.
+
+A normal run never makes a new pair when a key exists: if `.env` has a BFF
+public key but there is neither a seed file nor a legacy seed to move, or a
+legacy seed in `.env` differs from the seed file or from the public key, the
+script stops and changes nothing. Use `--rotate-bff` only when you mean to
+re-key.
 
 - **From a container** (how mhai-web runs): add the shared network to the
   service in mhai-web's `deploy/compose.yml` and connect to
-  `nats://mhai-nats:4222` with the BFF seed (`NATS_BFF_NKEY_SEED` from
-  `/srv/mhai-backend/.env`, given to the web container only):
+  `nats://mhai-nats:4222` with that app's seed file (mounted as a secret into
+  that app's container only):
 
   ```yaml
   services:

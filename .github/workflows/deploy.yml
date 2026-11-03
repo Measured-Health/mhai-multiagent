@@ -136,10 +136,14 @@ jobs:
             before=$(sha256sum nats/nats.conf 2>/dev/null || true)
             printf '%s' "$DEPLOY_BUNDLE" | base64 -d | tar -xzf - -C /srv/mhai-backend
             docker compose config --quiet
-            # NATS reads its config at start: restart it when the file changed.
+            # NATS reads its config at start: recreate it when the file
+            # changed. A restart would keep the container's old environment,
+            # and the config names its NKeys as variables (a new one, such as
+            # NATS_BFF_PLATFORM_NKEY, would be undefined and NATS would not
+            # start). `up -d core` below waits for nats to be healthy.
             if [ "$before" != "$(sha256sum nats/nats.conf)" ] && [ -n "$(docker compose ps -q nats)" ]; then
-              echo "nats.conf changed; restarting nats"
-              docker compose restart nats
+              echo "nats.conf changed; recreating nats"
+              docker compose up -d --force-recreate --no-deps nats
             fi
 
             # Volumes added since setup-host.sh first ran (it makes them too):
