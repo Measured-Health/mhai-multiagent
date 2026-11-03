@@ -102,7 +102,13 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 - **The contact name is counted in runes in core and in UTF-16 units in mhai-web, and U+FFFD is not refused.** A name of 120 runes with characters outside the basic plane can pass core and fail mhai-web. Count UTF-16 units in `SecurityContactOK` and refuse U+FFFD, in `deploy/setup-host.sh` too (M7).
 - **The `audit_chain_broken` gauge is stale on the copy walking the scheduled check.** The copy that is walking the scheduled check does not refresh its gauge until the walk ends, so it can show an old value for up to the 10-minute budget (M8).
 
+## Plan 4c follow-ups (Task 11 review)
+
+- **Bound the health failures scan with retention.** `mhai_health_failures()` counts every failed question and job, however old (partial indexes on failed rows keep it to those rows). Once the retention plan purges old jobs and questions, the scan is bounded by it; until then it grows with the failed rows kept.
+
 ## Test follow-ups
+
+- **Interop test of the health probe against the real Python worker.** The sampler's `pipeline.health` token (svc:core, no roles, the fixed probe hospital id) is tested only against a Go fake. Add a test, in the smoke run or the boundary tests, that the Python `pipeline.health` handler accepts it and answers `models_ready` and `database_ready`.
 
 - **`TestTwoCoreCopiesShareGrants` (`internal/grant`) is flaky.** Seen once in CI during Plan 4b; it passed on a re-run. Find the race (two core copies sharing the grants KV) before it hides a real fault.
 
