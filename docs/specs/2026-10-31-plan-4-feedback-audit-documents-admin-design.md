@@ -354,3 +354,101 @@ Building "the upload endpoint plus quarantine storage" first looks cheap, but it
 - **`POST /triage` (QDA): deferred.** The QDA model's integrated accuracy is about 30% (tracker KI-2, Integration Guide §13), and contract §14.8.4 only lets a platform admin turn triage on with clinical sign-off and a model whose report, files and checksums are present (`not_ready_reason`). Exposing an endpoint before that would put an unvalidated clinical classifier one request away. When it comes, it is `pipeline.run_triage` (a job, like `run_query`, because QDA reads patient data) behind the triage switch, and its own design with clinical sign-off. Plan 4 sends `triage: {enabled: false}` in health.
 - **`GET /kb/search`: deferred.** No screen in either app calls it. If one does, it is a request/reply operation `pipeline.kb_search`, core-initiated (ADR 0011 recommends the core path for anything touching patient data), shared guidelines only until patient ids exist (ADR 0004: with no patient, only guidelines), with the shared replay check (boundary decision 3 applies only to writes, so not needed), a rate limit and an audit row of the query's hash, never its text.
 - **Reset the feedback buffer: deferred to the platform settings plan.** It is `POST /platform/settings/feedback-buffer/reset`, shown inside `GET /platform/settings` together with retention and triage, none of which exist. Plan 4 never applies the buffer to the live guardrails (§4.8), so nothing has been learned that a reset would need to undo. Plan 4 makes the reset cheap later: buffer rows carry `model_versions` (so a reset can clear exactly the rows scored by a broken NLI model, the reason KI-5 exists), `cleared_at` and `reset_id`, and the reset becomes one SECURITY DEFINER function plus the route.
+
+## 9. Audit: the closed payload schemas for each new fact
+
+Plan 3 closed the payloads of intelligence's facts (§18 there: every key named, every value a closed-set code, an id of a fixed shape or a bounded integer; anything else refused). Plan 4 applies the same rule to **core's own** new actions, not only intelligence's: `audit.Write` callers pass a typed payload, and a registry `audit/schemas.go` holds one schema per action, checked at write time (a payload that doesn't fit is a programming error: the write fails and the request answers 500, so nothing half-checked reaches the append-only chain). A test fails if any `Action` literal in the code has no schema.
+
+Ids are canonical uuids unless stated. No action carries free text, a name, an email, a diagnosis, a reason note, a cancel note, an outcome note or a search string.
+
+| Action | Written by | Entity / entity_id | Payload (all keys; required in bold) |
+|---|---|---|---|
+| `feedback.validated` | core, `POST /feedback` | `query` / query id | **`query_id`** |
+| `correction.submitted` | core, `POST /feedback` | `correction` / id | **`correction_id`**, **`query_id`** |
+| `correction.approved` | core, approve | `correction` / id | **`correction_id`**, **`job_id`** |
+| `correction.rejected` | core, reject | `correction` / id | **`correction_id`**, **`reason_code`** ∈ the four codes |
+| `correction.withdrawn` | core, withdraw | `correction` / id | **`correction_id`** |
+| `correction.decision_refused` | core, approve/reject/withdraw refused | `correction` / id | **`correction_id`**, **`code`** ∈ `self_approval`, `forbidden`, `already_decided`; **`attempted`** ∈ `approve`, `reject`, `withdraw` |
+| `correction.applied` | outbox (job `completed`) | `correction` / id | **`correction_id`**, **`attempts`** (int ≤ 2^16), `model_versions` (map ≤ 16, Plan 3 patterns), **`persona_update`** ∈ `skipped`, `applied` |
+| `correction.apply_failed` | outbox (job `failed`) | `correction` / id | **`correction_id`**, **`error`** ∈ worker error codes, **`attempts`** |
+| `job.dead_lettered`, `job.retried`, `job.cancelled` (Plan 3, widened) | core | `job` / id, or none for the batch rows | `job_type` ∈ vocabulary; `job_count` (int 1–50) for the batch rows; `reason` ∈ the three cancel codes for `job.cancelled` |
+| `audit.viewed` | core, first page | `audit_list` / `events` | **`list`** ∈ `events`, `named_access`; `filters`: an object with only `hospital` (uuid or `platform`), `person` (uuid), `type` (list of known types), `outcome`, `flagged` (bool), `from`, `to` (RFC 3339) |
+| `audit.searched` | core, exact-id search | `audit_search` / the searched id if it matches the id shape, else none | **`searched_kind`** ∈ `event`, `request` |
+| `audit.verify_started` | core | `audit_run` / run id | **`run_id`**, **`by`** ∈ `person`, `schedule` |
+| `audit.verify_finished` | core | `audit_run` / run id | **`run_id`**, **`state`** ∈ `intact`, `broken`, `error`, `entries_checked` (int), `first_broken_seq` (int), `error_code` ∈ `timed_out`, `unreachable`, `unexpected_reply` |
+| `audit.check_outcome` | core | `audit_run` / run id | **`run_id`** (the note is on the run row only) |
+| `audit.undisplayable_reported` | core | none | **`count`** (int 1–50), **`first_id`**, **`last_id`** (event ids) |
+
+Actor, hospital and request id are always set by core from the session or, for outbox facts, from the `jobs` row: never from a payload. The drainer refuses a fact whose action doesn't match the job's status, as Plan 3 does for `run_query`.
+
+## 10. Permissions, roles and the database
+
+### 10.1 Route rows (core's permission table)
+
+| Method and path | Audience | Roles | Rule flags | Calls |
+|---|---|---|---|---|
+| `POST /feedback` | clinical | `clinician` | `Write` | — |
+| `GET /corrections`, `/corrections/mine`, `/corrections/reviewed` | clinical | `clinician` | — | — |
+| `POST /corrections/{id}/approve` | clinical | `clinician` | `Write` | `pipeline.approve_correction` |
+| `POST /corrections/{id}/reject`, `/withdraw` | clinical | `clinician` | `Write` | — |
+| `GET /feedback/stats/mine` | clinical | `clinician` | — | — |
+| `GET /platform/audit`, `/{id}`, `/hospitals`, `/people`, `/verify/runs`, `/verify/runs/{id}`, `/verify/status` | platform | `platform_admin`, `auditor` | `Platform`, `NeedsMFA` | — |
+| `POST /platform/audit/undisplayable`, `/verify` | platform | `platform_admin`, `auditor` | `Platform`, `NeedsMFA`, **`AuditorWrite`** | — |
+| `POST /platform/audit/verify/runs/{id}/outcome` | platform | `auditor` | `Platform`, `NeedsMFA`, **`AuditorWrite`** | — |
+| `GET /platform/health`, `/platform/jobs`, `/platform/guardrails` | platform | `platform_admin`, `auditor` | `Platform`, `NeedsMFA` | — |
+| `POST /platform/jobs/retry` | platform | `platform_admin` | `Platform`, `NeedsMFA`, `Write` | (re-mints the job's own operation as its creator) |
+| `POST /platform/jobs/cancel` | platform | `platform_admin` | `Platform`, `NeedsMFA`, `Write`, `StepUp` | — |
+
+None of these is `bff_direct`. The generated permissions markdown and `operations.json` change with them; `cmd/permgen`'s drift test catches a hand edit.
+
+### 10.2 The operations table
+
+One new row, `pipeline.approve_correction` (§4.7), and one new field, `SecondPerson bool`, validated: only on a `job` operation with a role, and only where core's publisher knows the subject table (a Go map from operation to "subject loader", tested). `submit_feedback`, `ingest_document`, `finalise_document`, `run_triage`, `kb_search` and `feedback_buffer_reset` get **no** rows in Plan 4: a row without a handler would advertise a permission nothing enforces.
+
+### 10.3 Database roles and grants, per table
+
+| Table / object | `mhai_gateway` (clinical requests) | `mhai_worker` (pipeline) | `mhai_platform` (platform requests) | `mhai_jobs` | `mhai_audit_drain` |
+|---|---|---|---|---|---|
+| `feedback_events` | `SELECT`, `INSERT`, `UPDATE (status, decided_by, decided_at, rejection_code, rejection_note)`; RLS hospital | `SELECT (id, hospital_id, query_id, action, status, submitted_by, decided_by)`; RLS hospital | none | none | none |
+| `clinical_decisions` (+ masked, `timings_ms`) | `SELECT` incl. masked columns (one reader) | `INSERT` incl. new columns | none (functions only) | none | none |
+| `feedback_buffer` (new) | none | `INSERT` + RESTRICTIVE `buffer_needs_approval` | `EXECUTE mhai_feedback_buffer_waiting()` | none | none |
+| `jobs` (new) | `SELECT`, `INSERT`, `UPDATE (published_at)` | `SELECT`, `UPDATE (status, attempts, lease_until, error, completed_at, failed_at)` with `worker_status`, `worker_hospital_active` | none (functions only) | job columns, as 00007 on `clinical_queries` | `SELECT (id, hospital_id, created_by, request_id, status, type)` |
+| `intelligence_audit_outbox` (+ `job_id`) | none | `INSERT` (own hospital) | none | none | `SELECT`, `DELETE` |
+| `audit_verify_runs` (new) | none | none | `SELECT`, `INSERT`, `UPDATE` | none | none |
+| `audit_log` | as today | none | + `INSERT` for the eight platform actions (§5.5) | + `job.retried`, `job.cancelled` | + the two correction actions |
+| SECURITY DEFINER functions `mhai_health_timings`, `mhai_health_failures`, `mhai_platform_jobs`, `mhai_guardrail_counts`, `mhai_feedback_buffer_waiting` | — | — | `EXECUTE` (only role) | `mhai_platform_jobs`: no | — |
+
+Every function: owned by `mhai_migrate`, `SET search_path = pg_catalog, pg_temp`, `REVOKE ALL FROM PUBLIC`, returns aggregates or the contract's columns only, parameters bounded inside the function (limits clamped, periods from a closed set). Every new table: `ENABLE` and `FORCE` row-level security, owner `mhai_migrate`, a row in `TestRLSWithoutHospitalSeesNothing` (which TODO says should seed every table: Plan 4 does it for the new ones).
+
+### 10.4 Migrations
+
+Numbered from 00010 (main ends at 00009; no open PR adds a migration as of 3 Nov). If another migration lands first, these renumber; goose orders by number.
+
+| Migration | Contents |
+|---|---|
+| `00010_feedback.sql` | widen `feedback_events` (§4.3), its CHECKs, the decider and transition triggers, the partial unique index; `clinical_decisions` masked columns and `timings_ms` with key CHECK; grants and policies for `mhai_gateway` and `mhai_worker` |
+| `00011_jobs.sql` | `jobs` with RLS and the worker and `mhai_jobs` policies; widen the deadline-expiry function and 00009's cancel-on-deactivate triggers to `jobs`; widen the outbox (`job_id`, actions) and `mhai_audit_drain` |
+| `00012_feedback_buffer.sql` | `feedback_buffer`, its RLS, `buffer_needs_approval`, `mhai_feedback_buffer_waiting()` |
+| `00013_platform_reads.sql` | `audit_verify_runs`; `mhai_platform` append policy; the four platform SECURITY DEFINER functions |
+
+Each has a full `Down` that removes every grant it made (Plan 3 convention), and the backend deploy's pre-migrate check (rows that would fail a new constraint) gains the new CHECKs on `feedback_events`.
+
+### 10.5 NATS
+
+- The `JOBS` stream already covers `jobs.v1.>`; its per-subject limits apply to `jobs.v1.<hid>.approve_correction` as they do to `run_query`.
+- New durable consumer `pipeline_learning` (filter `jobs.v1.*.approve_correction`, explicit ack, `ack_wait` 60 s, `max_deliver` 5, `max_ack_pending` 4, no `BackOff`: Plan 3 departure 4).
+- The `pipeline` user gains exactly `$JS.API.CONSUMER.INFO.JOBS.pipeline_learning`, `$JS.API.CONSUMER.MSG.NEXT.JOBS.pipeline_learning`, `$JS.ACK.JOBS.pipeline_learning.>`. Test: it still can't publish `jobs.v1.>`, `inference.v1.>` or reach another consumer.
+- The health sampler uses a new KV bucket `health` (one key, history 1, TTL 5 minutes), written and read by `gateway` only.
+- `dead.v1.<hid>.approve_correction` is handled by Plan 3's dead-letter consumer, which learns the `jobs` table.
+
+### 10.6 What intelligence's side needs, and what it must not do
+
+Within the boundary rules (Python writes no permission rule; hospital and user only from the token):
+
+- `proto/mhai/intelligence/v1/learning.proto`: `ApproveCorrectionJob {job_id, correction_id}`; regenerated Go and Python; golden messages both ways.
+- `boundary/learning.py`: `LearningClient` Protocol (`buffer_entry`, `persona_update`, `model_versions`), `TrustBufferLearningClient` (a pure function over the four scores and the decision, the same arithmetic `TrustWeightOptimizer.add_correction` stores) and `StubLearningClient`. Built by `build_learning_client(settings)`; the stub is refused in production, as `INTELLIGENCE_MODEL_CLIENT=stub` is (Plan 3 ruling F14).
+- `boundary/jobs/approve_correction.py` on the `run_query` skeleton (claim, lease, `+WIP` if ever needed, complete once, `Nak`/`Term`, dead letter, cancellation check before writing).
+- `boundary/learning_repo.py`: the job's SQL, allow-listed in the no-direct-DB test, as `jobs_repo.py` is.
+- `boundary/jobs/run_query.py`: write `masked_question`, `masked_patient_json` and `timings_ms` in the completion transaction (already computed; one change to the insert).
+- `services/pipeline.py`: bind the second consumer; refuse to start if `operations.json` lacks `pipeline.approve_correction` (it already refuses a handler with no entry).
+- **Must not:** check who approved, read `reason` or `corrected_diagnosis`, call `DoctorFeedbackLoop`, write `kb_chunks` or `guardrail_weights`, or decide anything from `SecondPerson` (core's flag). The intelligence lead keeps model internals (persona vectors, CMA-ES runs) outside the boundary until open questions 3 and 4 are decided.
