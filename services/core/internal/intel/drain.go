@@ -99,20 +99,22 @@ type outboxRow struct {
 // head stalled it).
 //
 // The actor, hospital and request id come from the parent row core wrote
-// (created_by, hospital_id, request_id or JobRID/JobsRowRID), and the
-// entity is always the job (query and its id, or job and its id), never
-// from the fact: the fact gives the action (one the outbox allows) and the
-// payload (its own entity and entity id, if other than the job, go in as
+// (created_by, hospital_id, request_id or JobRID/JobsRowRID), and so does
+// the entity, never the fact: the question (query and its id) for a query
+// fact; for a correction fact the jobs row's subject (correction and
+// subject_id, spec §9), with the job's id as job_id in the payload. The
+// fact gives the action (one the outbox allows) and the payload (a query
+// fact's own entity and entity id, if other than the question, go in as
 // fact_entity and fact_entity_id; a job fact's correction_id, and its own
-// entity id if it names the correction, must be the jobs row's
-// subject_id), and payload keys naming an identity
+// entity id if any, must be the jobs row's subject_id), and payload keys
+// naming an identity
 // (actor_id, hospital_id, request_id, sub) are dropped before audit.Write's
 // sensitive-key check. The payload must then fit its action's closed
 // schema (factschema.go: closed-set codes, ids of a fixed shape, bounded
 // integers; final review I-1). A payload that fails either check is
-// replaced by {query_id, payload_refused: true} ({payload_refused: true}
-// for a job fact), so one bad fact can't hold the outbox up and no free
-// text reaches the chain. A fact whose action doesn't belong to its
+// replaced by {query_id, payload_refused: true} ({job_id,
+// payload_refused: true} for a job fact), so one bad fact can't hold the
+// outbox up and no free text reaches the chain. A fact whose action doesn't belong to its
 // parent's kind (a correction.* fact on a question, a query.* fact on a
 // job, a fact for another job type) or doesn't match the parent's status
 // now (query.completed for a job that isn't completed, and so on), or
@@ -209,16 +211,28 @@ func factMatchesParent(o outboxRow) bool {
 
 // drainEvent builds the audit event for o: identity from the parent row,
 // the rest from the fact.
+//
+// A question's fact is recorded against the question (entity query). A job
+// fact whose action names a subject (correction.applied and
+// correction.apply_failed, spec §9) is recorded against the jobs row's
+// subject (entity correction, the jobs row's subject_id: never an id from
+// the fact), with job_id, the job's own id, in the payload.
 func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 	isJob := o.jobType != nil
+	f := jobFactSchemas[o.action]
 	e := audit.Event{
 		HospitalID: o.hospital.String(),
 		Action:     o.action,
 		Entity:     "query",
 		EntityID:   o.jobID.String(),
 	}
+	subject := ""
 	if isJob {
 		e.Entity = "job"
+		if f.subjectEntity != "" && o.subject != nil {
+			subject = o.subject.String()
+			e.Entity, e.EntityID = f.subjectEntity, subject
+		}
 	}
 	if o.createdBy != nil {
 		e.ActorID = o.createdBy.String()
@@ -241,6 +255,15 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 	for _, k := range identityKeys {
 		delete(payload, k)
 	}
+	fits := true
+	if isJob {
+		// job_id is core's to write: one the fact gives must be the job's.
+		if v, ok := payload["job_id"]; ok {
+			s, isStr := v.(string)
+			fits = isStr && s == o.jobID.String()
+			delete(payload, "job_id")
+		}
+	}
 	// The closed schema of the action (factschema.go), before the fact's
 	// own entity is added: ids and codes only, never text. query_id, if
 	// present, must be the question's; a job fact may carry none.
@@ -248,35 +271,41 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 	if isJob {
 		queryID = uuid.Nil
 	}
-	f := jobFactSchemas[o.action]
-	fits := f.schema.check(payload, queryID)
-	// A job fact names the job's own subject (correction_id is the jobs
-	// row's subject_id), never another: a worker can't put another
-	// correction on the chain under this job.
-	if isJob && f.subjectKey != "" {
-		s, ok := payload[f.subjectKey].(string)
-		fits = fits && ok && o.subject != nil && s == o.subject.String()
+	fits = fits && f.schema.check(payload, queryID)
+	ent, entID := "", ""
+	if o.entity != nil {
+		ent = *o.entity
 	}
-	// The row is always about the job (entity query or job, entity id the
-	// job's): a fact's own entity, if another, is detail in the payload
-	// only. A job fact's own entity is its subject, by the subject's id.
-	if o.entity != nil && *o.entity != "" && *o.entity != e.Entity {
-		fits = fits && factEntity.MatchString(*o.entity)
-		if isJob {
-			fits = fits && *o.entity == f.subjectEntity && o.subject != nil &&
-				(o.entityID == nil || *o.entityID == "" || *o.entityID == o.subject.String())
-		}
-		payload["fact_entity"] = *o.entity
+	if o.entityID != nil {
+		entID = *o.entityID
 	}
-	if o.entityID != nil && *o.entityID != "" && *o.entityID != e.EntityID {
-		fits = fits && factEntityIDPattern.MatchString(*o.entityID)
-		if isJob {
-			// Another id than the job's can only be the subject's, named as
-			// the subject.
-			fits = fits && o.entity != nil && *o.entity == f.subjectEntity && o.subject != nil &&
-				*o.entityID == o.subject.String()
+	if isJob {
+		// A job fact names the job's own subject (correction_id is the jobs
+		// row's subject_id), never another: a worker can't put another
+		// correction on the chain under this job. Its own entity, if it
+		// names one, is that subject or the job itself.
+		if f.subjectKey != "" {
+			s, ok := payload[f.subjectKey].(string)
+			fits = fits && ok && subject != "" && s == subject
 		}
-		payload["fact_entity_id"] = *o.entityID
+		switch {
+		case ent == "" && entID == "":
+		case f.subjectEntity != "" && ent == f.subjectEntity && (entID == "" || entID == subject):
+		case ent == "job" && (entID == "" || entID == o.jobID.String()):
+		default:
+			fits = false
+		}
+	} else {
+		// The row is always about the question: a fact's own entity, if
+		// another, is detail in the payload only.
+		if ent != "" && ent != e.Entity {
+			fits = fits && factEntity.MatchString(ent)
+			payload["fact_entity"] = ent
+		}
+		if entID != "" && entID != e.EntityID {
+			fits = fits && factEntityIDPattern.MatchString(entID)
+			payload["fact_entity_id"] = entID
+		}
 	}
 	raw, err := json.Marshal(payload)
 	if _, bad := logx.SensitiveKeyInJSON(raw); err != nil || bad || !fits {
@@ -286,6 +315,9 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 		if !isJob {
 			payload["query_id"] = o.jobID.String()
 		}
+	}
+	if isJob {
+		payload["job_id"] = o.jobID.String()
 	}
 	e.Payload = payload
 	return e

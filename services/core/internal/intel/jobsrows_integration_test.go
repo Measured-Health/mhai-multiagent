@@ -185,6 +185,16 @@ func TestSweeperRepublishesJobsRows(t *testing.T) {
 	wrongPerson := seedJob(t, hid, seedCorrection(t, hid, submitter, decider), bystander, 20*time.Second, deadline, false)
 	young := seedJob(t, hid, seedCorrection(t, hid, submitter, decider), decider, 0, deadline, false)
 	expired := seedJob(t, hid, seedCorrection(t, hid, submitter, decider), decider, 20*time.Second, time.Now().Add(-time.Second), false)
+	// An approver who has since lost the clinician role: the row is
+	// cancelled, not left.
+	demoted := seedUser(t, hid, true, authz.RoleClinician)
+	lostRole := seedJob(t, hid, seedCorrection(t, hid, submitter, demoted), demoted, 20*time.Second, deadline, false)
+	if _, err := super.Exec(ctx, `DELETE FROM user_roles WHERE user_id = $1`, demoted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := super.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, $2)`, demoted, authz.RoleAnalyst); err != nil {
+		t.Fatal(err)
+	}
 	// The sweep is global: the rows left queued and unpublished here must
 	// not reach other tests' sweeps (their clients have no pool, so the
 	// two-person check can't run there).
@@ -230,6 +240,19 @@ func TestSweeperRepublishesJobsRows(t *testing.T) {
 		a[0].payload["error"] != "deadline_exceeded" || a[0].payload["job_id"] != expired.String() {
 		t.Fatalf("expiry audit %+v", a)
 	}
+	if s := jobStateOf(t, lostRole); s.status != "cancelled" || s.published {
+		t.Fatalf("lost-role row %+v", s)
+	}
+	var reason *string
+	if err := super.QueryRow(ctx, `SELECT cancel_reason FROM jobs WHERE id = $1`, lostRole).Scan(&reason); err != nil ||
+		reason == nil || *reason != "account_unusable" {
+		t.Fatalf("cancel reason %v %v", reason, err)
+	}
+	if c := auditFor(t, "job.cancelled", lostRole.String()); len(c) != 1 || c[0].actor != nil || *c[0].entity != "job" ||
+		*c[0].hospital != hid.String() || c[0].payload["job_id"] != lostRole.String() ||
+		c[0].payload["type"] != "approve_correction" || c[0].payload["reason"] != "account_unusable" {
+		t.Fatalf("job.cancelled %+v", c)
+	}
 	// The skipped row is never published, sweep after sweep.
 	_, _ = SweepOnce(ctx, app, c)
 	if n := len(rec.on(approveSubjectOf(hid))); n != 1 {
@@ -237,6 +260,9 @@ func TestSweeperRepublishesJobsRows(t *testing.T) {
 	}
 	if s := jobStateOf(t, wrongPerson); s.published {
 		t.Fatal("the wrong-person row was published")
+	}
+	if n := len(auditFor(t, "job.cancelled", lostRole.String())); n != 1 {
+		t.Fatalf("%d job.cancelled rows after a second sweep", n)
 	}
 }
 
@@ -322,12 +348,13 @@ func TestDrainerJobFactUsesJobsIdentity(t *testing.T) {
 		"actor_id":       intruder.String(), "hospital_id": other.String(), "request_id": "forged", "sub": intruder.String(),
 	})
 	drainAll(t)
-	rows := auditFor(t, "correction.applied", job.String())
+	rows := auditFor(t, "correction.applied", cor.String())
 	if len(rows) != 1 {
 		t.Fatalf("%d rows", len(rows))
 	}
 	r := rows[0]
-	if r.actor == nil || *r.actor != dec.String() || *r.hospital != hid.String() || *r.requestID != "rid-"+job.String() || *r.entity != "job" {
+	if r.actor == nil || *r.actor != dec.String() || *r.hospital != hid.String() || *r.requestID != "rid-"+job.String() ||
+		*r.entity != "correction" || *r.entityID != cor.String() {
 		t.Fatalf("identity from the fact: %+v", r)
 	}
 	for _, k := range identityKeys {
@@ -335,7 +362,8 @@ func TestDrainerJobFactUsesJobsIdentity(t *testing.T) {
 			t.Errorf("payload kept %q: %v", k, r.payload)
 		}
 	}
-	if r.payload["correction_id"] != cor.String() || r.payload["persona_update"] != "skipped" || r.payload["fact_entity"] != "correction" {
+	if r.payload["correction_id"] != cor.String() || r.payload["persona_update"] != "skipped" || r.payload["job_id"] != job.String() ||
+		r.payload["fact_entity"] != nil || r.payload["fact_entity_id"] != nil {
 		t.Fatalf("payload %v", r.payload)
 	}
 	if jobOutboxCount(t, job) != 0 {
@@ -348,8 +376,9 @@ func TestDrainerJobFactUsesJobsIdentity(t *testing.T) {
 	setJob(t, job2, "status = 'failed', attempts = 1, error = 'internal', failed_at = now()")
 	addJobFact(t, hid, job2, cor2, "correction.apply_failed", map[string]any{"correction_id": cor2.String(), "error": "a synthetic note", "attempts": 1})
 	drainAll(t)
-	rows = auditFor(t, "correction.apply_failed", job2.String())
-	if len(rows) != 1 || rows[0].payload["payload_refused"] != true || rows[0].payload["error"] != nil {
+	rows = auditFor(t, "correction.apply_failed", cor2.String())
+	if len(rows) != 1 || rows[0].payload["payload_refused"] != true || rows[0].payload["error"] != nil ||
+		rows[0].payload["job_id"] != job2.String() || *rows[0].entity != "correction" {
 		t.Fatalf("refused payload %+v", rows)
 	}
 	ok, broken, err := audit.Verify(context.Background(), app)
@@ -384,7 +413,7 @@ func TestDrainerRefusesMismatchedAction(t *testing.T) {
 		}
 		addJobFact(t, hid, job, cor, c.action, p)
 		drainAll(t)
-		if rows := auditFor(t, c.action, job.String()); len(rows) != 0 {
+		if rows := auditFor(t, c.action, cor.String()); len(rows) != 0 {
 			t.Errorf("%s with %s appended: %+v", c.action, c.set, rows)
 		}
 		if jobOutboxCount(t, job) != 0 {
@@ -413,7 +442,7 @@ func TestDrainerJobFactsDoNotStallQueryFacts(t *testing.T) {
 	if n := len(auditFor(t, "query.completed", q.String())); n != 1 {
 		t.Fatalf("query fact appended %d times", n)
 	}
-	if n := len(auditFor(t, "correction.applied", job.String())); n != drainBatch+1 {
+	if n := len(auditFor(t, "correction.applied", cor.String())); n != drainBatch+1 {
 		t.Fatalf("%d job facts appended", n)
 	}
 	if outboxCount(t, q) != 0 || jobOutboxCount(t, job) != 0 {
@@ -443,6 +472,7 @@ func TestDrainerJobFactCorrectionMustMatchSubject(t *testing.T) {
 		"both another correction":      {"correction", func(uuid.UUID) string { return other.String() }, func(uuid.UUID) string { return other.String() }, false},
 		"another job as entity":        {"job", func(uuid.UUID) string { return otherJob.String() }, func(cor uuid.UUID) string { return cor.String() }, false},
 		"the correction as a query":    {"query", func(cor uuid.UUID) string { return cor.String() }, func(cor uuid.UUID) string { return cor.String() }, false},
+		"the job itself as entity":     {"job", func(uuid.UUID) string { return "" }, func(cor uuid.UUID) string { return cor.String() }, true},
 	} {
 		cor := seedCorrection(t, hid, sub, dec)
 		job := seedJob(t, hid, cor, dec, 0, time.Now().Add(5*time.Minute), true)
@@ -450,19 +480,44 @@ func TestDrainerJobFactCorrectionMustMatchSubject(t *testing.T) {
 		addJobFactAs(t, hid, job, c.entity, c.entityID(cor), "correction.applied",
 			map[string]any{"correction_id": c.correction(cor), "attempts": 1, "persona_update": "skipped"})
 		drainAll(t)
-		rows := auditFor(t, "correction.applied", job.String())
-		if len(rows) != 1 {
-			t.Fatalf("%s: %d rows", name, len(rows))
+		rows := auditFor(t, "correction.applied", cor.String())
+		if len(rows) != 1 || *rows[0].entity != "correction" {
+			t.Fatalf("%s: rows %+v", name, rows)
 		}
 		p := rows[0].payload
 		switch {
-		case c.ok && (p["payload_refused"] != nil || p["correction_id"] != cor.String()):
+		case c.ok && (p["payload_refused"] != nil || p["correction_id"] != cor.String() || p["job_id"] != job.String()):
 			t.Errorf("%s: refused: %v", name, p)
-		case !c.ok && (p["payload_refused"] != true || len(p) != 1):
+		case !c.ok && (p["payload_refused"] != true || len(p) != 2 || p["job_id"] != job.String()):
 			t.Errorf("%s: recorded: %v", name, p)
 		}
 		if jobOutboxCount(t, job) != 0 {
 			t.Errorf("%s: left in the outbox", name)
 		}
+	}
+}
+
+// M-2: an error in the jobs table's steps doesn't stop the questions'
+// sweep: the stale question is still published, and the sweep reports
+// the error.
+func TestSweeperJobsErrorDoesNotStopQueries(t *testing.T) {
+	c, _ := newClient(t)
+	ctx := context.Background()
+	drainJobs(t, sharedNATS.PipelineURL)
+	hid := seedHospital(t, "active")
+	creator := seedUser(t, hid, true, authz.RoleClinician)
+	deadline := time.Now().Add(5 * time.Minute)
+	q := seedQuery(t, hid, creator, 20*time.Second, &deadline, false)
+	jobsTableFault = func() error { return errors.New("synthetic jobs-table fault") }
+	_, err := SweepOnce(ctx, app, c)
+	jobsTableFault = nil
+	if err == nil {
+		t.Fatal("the jobs-table fault wasn't reported")
+	}
+	if s := stateOf(t, q); !s.published {
+		t.Fatalf("question not published: %+v", s)
+	}
+	if n := len(jobsFor(drainJobs(t, sharedNATS.PipelineURL), "jobs.v1."+hid.String()+".run_query")); n != 1 {
+		t.Fatalf("%d run_query jobs published", n)
 	}
 }

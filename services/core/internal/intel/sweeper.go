@@ -176,9 +176,8 @@ func RetryMsgID(id uuid.UUID, attempts int) string {
 // SweepResult counts what one sweep did.
 type SweepResult struct {
 	Expired, Published, Cancelled, Left int // Left: rows kept for the next sweep after an error
-	// Skipped: jobs rows not publishable as they stand (the creator can't
-	// use the service, or the two-person rule refuses them); not an error,
-	// and never cancelled here: the deadline ends them.
+	// Skipped: jobs rows the two-person rule refuses as they stand; not an
+	// error, and never cancelled here: the deadline ends them.
 	Skipped int
 }
 
@@ -226,10 +225,13 @@ func RunPublishSweeper(ctx context.Context, pool *pgxpool.Pool, client *Client, 
 //     publish did land), then published_at.
 //  3. The same for jobs rows, per type, but only rows within their type's
 //     in-flight budget (fewer than the budget live rows of the hospital and
-//     type ahead of them; QueueJob). A jobs row that can't be published as
-//     it stands (creator unusable, the two-person rule refuses it) is
-//     skipped, not cancelled: the deadline ends it, and the platform's
-//     retry is the way back.
+//     type ahead of them; QueueJob). A creator who can't use the service
+//     gets the row cancelled (account_unusable, audited job.cancelled). A
+//     row the two-person rule refuses is skipped (a sampled warning): its
+//     deadline ends it, and the platform's retry is the way back.
+//
+// An error in the jobs table's steps doesn't stop the questions' sweep:
+// it is recorded and the sweep returns an error at the end.
 //
 // A row that fails (NATS down, JOBS full) stays as it is for the next
 // sweep, counted in Left, and the sweep returns an error. Each update
@@ -245,10 +247,13 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 	if err != nil {
 		return res, errSweep
 	}
+	// The jobs table's steps fail on their own: an error there is
+	// recorded and the questions are still swept (and the reverse).
+	jobsFailed := false
 	n, err = failExpiredJobs(ctx, pool)
 	res.Expired += n
 	if err != nil {
-		return res, errSweep
+		jobsFailed = true
 	}
 	var rows []JobRow
 	err = db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
@@ -282,11 +287,11 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 	if err != nil {
 		return res, errSweep
 	}
-	jobs, err := sweepableJobs(ctx, pool)
-	if err != nil {
-		return res, errSweep
+	if jobs, err := sweepableJobs(ctx, pool); err != nil {
+		jobsFailed = true
+	} else {
+		rows = append(rows, jobs...)
 	}
-	rows = append(rows, jobs...)
 	for _, r := range rows {
 		if ctx.Err() != nil {
 			return res, ctx.Err()
@@ -298,10 +303,15 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 			} else {
 				res.Published++
 			}
-		case r.jobsRow() && (errors.Is(err, ErrCreatorUnusable) || errors.Is(err, ErrJobSkipped)):
+		case r.jobsRow() && errors.Is(err, ErrJobSkipped):
+			// The two-person rule refuses the row as it stands: left for
+			// its deadline, never retried as transient. Sampled: the same
+			// row comes back every sweep until it expires.
 			res.Skipped++
-			client.log().Warn("intel: job not publishable; left for its deadline", "job_id", r.ID.String(),
-				"job_type", r.Type, "hospital_id", r.HospitalID.String())
+			if k := client.metrics().SweepSkipped.Add(1); k == 1 || k%deadLogEvery == 0 {
+				client.log().Warn("intel: job not publishable; left for its deadline", "job_id", r.ID.String(),
+					"job_type", r.Type, "hospital_id", r.HospitalID.String(), "skipped_total", k)
+			}
 		case errors.Is(err, ErrCreatorUnusable):
 			if cancelRow(ctx, pool, r) != nil {
 				res.Left++
@@ -314,17 +324,24 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 			res.Left++
 		}
 	}
-	if res.Left > 0 {
+	if res.Left > 0 || jobsFailed {
 		return res, errSweep
 	}
 	return res, nil
 }
+
+// jobsTableFault is a test hook (export_test.go): an error it returns
+// fails the sweep's jobs-table steps. Nil in production.
+var jobsTableFault func() error
 
 // sweepableJobs is step 3's rows: per type with a budget, up to 100 queued,
 // unpublished jobs rows older than sweepAge and within their deadline,
 // with fewer than the budget live rows of their hospital and type ahead of
 // them (created_at, id), oldest first.
 func sweepableJobs(ctx context.Context, pool *pgxpool.Pool) ([]JobRow, error) {
+	if jobsTableFault != nil && jobsTableFault() != nil {
+		return nil, errSweep
+	}
 	var rows []JobRow
 	err := db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		for typ, budget := range jobBudgets {
@@ -421,6 +438,9 @@ func failExpired(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 // hospital; none in Plan 4) can't be tied to a hospital's chain and is
 // failed without a row.
 func failExpiredJobs(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	if jobsTableFault != nil && jobsTableFault() != nil {
+		return 0, errSweep
+	}
 	n := 0
 	err := db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		r, err := tx.Query(ctx, `SELECT id, hospital_id, type, COALESCE(request_id, ''), attempts FROM mhai_fail_expired_jobs($1)`, sweepBatch)
@@ -479,8 +499,12 @@ func markPublished(ctx context.Context, pool *pgxpool.Pool, row JobRow) error {
 
 // cancelRow cancels a queued, unpublished row whose creator can't use the
 // service (account_unusable) and audits it in the same transaction, with
-// the row's hospital and request id (JobRID) and no actor.
+// the row's hospital and request id and no actor: query.cancelled for a
+// question, job.cancelled against the job for a jobs row.
 func cancelRow(ctx context.Context, pool *pgxpool.Pool, row JobRow) error {
+	if row.jobsRow() {
+		return cancelJobsRow(ctx, pool, row)
+	}
 	return db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE clinical_queries SET status = 'cancelled', cancel_reason = '`+cancelUnusable+`', completed_at = now()
 			WHERE id = $1 AND status = 'queued' AND published_at IS NULL`, row.ID)
@@ -493,6 +517,28 @@ func cancelRow(ctx context.Context, pool *pgxpool.Pool, row JobRow) error {
 		if err := audit.Write(ctx, tx, audit.Event{HospitalID: row.HospitalID.String(), RequestID: JobRID(row.ID, row.RequestID),
 			Action: "query.cancelled", Entity: "query", EntityID: row.ID.String(),
 			Payload: map[string]any{"query_id": row.ID.String(), "reason": cancelUnusable}}); err != nil {
+			return errSweep
+		}
+		return nil
+	})
+}
+
+// cancelJobsRow is cancelRow for a jobs row, as mhai_jobs (jobs_append
+// allows job.cancelled, tied to a job of the row's hospital).
+func cancelJobsRow(ctx context.Context, pool *pgxpool.Pool, row JobRow) error {
+	return db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE jobs SET status = 'cancelled', cancel_reason = '`+cancelUnusable+`',
+			cancelled_at = now(), completed_at = now()
+			WHERE id = $1 AND hospital_id = $2 AND status = 'queued' AND published_at IS NULL`, row.ID, row.HospitalID)
+		if err != nil {
+			return errSweep
+		}
+		if tag.RowsAffected() != 1 {
+			return nil // someone else moved it on
+		}
+		if err := audit.Write(ctx, tx, jobEvent(row, "job.cancelled", map[string]any{
+			"job_id": row.ID.String(), "type": row.Type, "reason": cancelUnusable,
+		})); err != nil {
 			return errSweep
 		}
 		return nil

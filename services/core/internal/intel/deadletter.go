@@ -64,6 +64,7 @@ type Metrics struct {
 	DeadExpired  atomic.Int64 // deadline_exceeded letters (no alert, F6)
 	DeadRetried  atomic.Int64 // jobs re-minted after an emergency key rotation
 	DeadErrors   atomic.Int64 // transient failures (letter Nak'd)
+	SweepSkipped atomic.Int64 // jobs rows the sweeper left unpublished (two-person refusal)
 }
 
 // unattached counts for a Client without Metrics, so log sampling still

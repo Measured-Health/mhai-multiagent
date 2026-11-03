@@ -325,19 +325,28 @@ func init() {
 
 	// Plan 4 (spec §9): the approve_correction job's facts, through the
 	// outbox and the drainer, which checks intel's schema first (keys
-	// required there) and may add fact_entity and fact_entity_id, or replace
-	// a payload that doesn't fit with {payload_refused}. The row's entity is
-	// the job; the correction is in the payload.
+	// required there, and correction_id bound to the job's subject) and
+	// may replace a payload that doesn't fit with {job_id,
+	// payload_refused}. The row's entity is the correction (the jobs row's
+	// subject); job_id is the job's id, which the drainer sets.
 	jobFact := func(kv ...any) map[string]Check {
 		m := fields(kv...)
-		m["fact_entity"] = Pattern(factEntityPattern)
-		m["fact_entity_id"] = Pattern(factEntityIDPattern)
+		m["job_id"] = id
 		m["payload_refused"] = b
 		return m
 	}
 	Register("correction.applied", Schema{Fields: jobFact(
 		"correction_id", id, "attempts", count,
 		"model_versions", StringMap(16, modelNamePattern, Pattern(modelVersionPattern)),
-		"persona_update", OneOf("skipped", "applied"))})
-	Register("correction.apply_failed", Schema{Fields: jobFact("correction_id", id, "error", errorCode, "attempts", count)})
+		"persona_update", OneOf("skipped", "applied")), Required: []string{"job_id"}})
+	Register("correction.apply_failed", Schema{Fields: jobFact("correction_id", id, "error", errorCode, "attempts", count),
+		Required: []string{"job_id"}})
+	// A jobs row core cancelled (the sweeper: its creator can't use the
+	// service any more), against the job. Keys as job.dead_lettered's
+	// (type, not spec §9's job_type: Plan 3's frozen key) and as
+	// query.cancelled's reason codes.
+	Register("job.cancelled", Schema{Fields: fields(
+		"job_id", id, "type", OneOf("run_query", "approve_correction"),
+		"reason", OneOf("user_deactivated", "hospital_deactivated", "account_unusable")),
+		Required: []string{"job_id", "type", "reason"}})
 }
