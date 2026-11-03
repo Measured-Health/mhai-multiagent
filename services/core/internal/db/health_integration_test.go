@@ -4,6 +4,7 @@ package db_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -293,6 +294,16 @@ func TestMigration15DownRestoresStubs(t *testing.T) {
 	if n := policies(); n != 0 {
 		t.Errorf("after down, %d health_read policies remain", n)
 	}
+	var left int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM pg_indexes WHERE indexname IN ('clinical_queries_failed_idx', 'jobs_failed_idx'))
+		+ (SELECT count(*) FROM unnest(ARRAY['clinical_queries', 'clinical_decisions', 'jobs', 'kb_chunks']) t
+		   WHERE has_any_column_privilege('mhai_health_reader', t, 'SELECT'))
+		+ (SELECT count(*) FROM pg_proc WHERE proowner = 'mhai_health_reader'::regrole)`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("after down, %d indexes, grants or functions of 00015 remain", left)
+	}
 	var grantees []string
 	if err := pool.QueryRow(ctx, `
 		SELECT COALESCE(array_agg(DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END), '{}')
@@ -307,4 +318,122 @@ func TestMigration15DownRestoresStubs(t *testing.T) {
 		t.Fatalf("up again: %v", err)
 	}
 	built()
+}
+
+// countAs counts q's rows as role (SET LOCAL ROLE, as the superuser pool).
+func countAs(t *testing.T, pool *pgxpool.Pool, role, q string, args ...any) (int, error) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL ROLE `+pgx.Identifier{role}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	err = tx.QueryRow(ctx, q, args...).Scan(&n)
+	return n, err
+}
+
+// TestHealthReaderScoped (fix round 1): the health functions read through
+// mhai_health_reader, not mhai_migrate. mhai_migrate (any function it owns,
+// or a migration login acting as it) sees none of the rows the health
+// policies open; the reader sees them, but only the columns the functions
+// aggregate; nobody can log in as it or reach it through a membership.
+func TestHealthReaderScoped(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	a, _ := seedHospital(t, pool, uniqueCode("R"))
+	failed, completed := uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO clinical_queries (id, hospital_id, clinical_question, urgency, status, error, completed_at)
+		VALUES ($1, $3, 'synthetic question', 'routine', 'failed', 'unavailable', now()),
+		       ($2, $3, 'synthetic question', 'routine', 'completed', NULL, now())`, failed, completed, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO clinical_decisions (id, query_id, hospital_id, timings_ms, masked_question)
+		VALUES (gen_random_uuid(), $1, $2, '{"answer": 10}', 'synthetic masked')`, completed, a); err != nil {
+		t.Fatal(err)
+	}
+	job := seedJob(t, pool, a, seedClinician(t, pool, a), "failed")
+	if _, err := pool.Exec(ctx, `UPDATE jobs SET error = 'internal', failed_at = now() WHERE id = $1`, job); err != nil {
+		t.Fatal(err)
+	}
+	chunk := uniqueCode("k")
+	if _, err := pool.Exec(ctx, `INSERT INTO kb_chunks (chunk_id, content, chunk_type) VALUES ($1, 'synthetic guideline', 'guideline')`, chunk); err != nil {
+		t.Fatal(err)
+	}
+	// The reader may name only the columns it aggregates, so the job and
+	// the chunk are found by those (at least the seeded one).
+	reads := map[string]struct {
+		q   string
+		arg []any
+	}{
+		"failed question":    {`SELECT count(*) FROM clinical_queries WHERE id = $1`, []any{failed}},
+		"completed question": {`SELECT count(*) FROM clinical_queries WHERE id = $1`, []any{completed}},
+		"decision":           {`SELECT count(*) FROM clinical_decisions WHERE query_id = $1`, []any{completed}},
+		"failed job":         {`SELECT count(*) FROM jobs WHERE status = 'failed' AND error = 'internal'`, nil},
+		"shared chunk":       {`SELECT count(*) FROM kb_chunks WHERE hospital_id IS NULL`, nil},
+	}
+	for name, r := range reads {
+		if n, err := countAs(t, pool, "mhai_migrate", r.q, r.arg...); err != nil || n != 0 {
+			t.Errorf("mhai_migrate sees the %s: %d rows (%v)", name, n, err)
+		}
+		if n, err := countAs(t, pool, "mhai_health_reader", r.q, r.arg...); err != nil || n < 1 {
+			t.Errorf("mhai_health_reader, the %s: %d rows (%v)", name, n, err)
+		}
+	}
+	for _, q := range []string{
+		`SELECT count(clinical_question) FROM clinical_queries`,
+		`SELECT count(patient_data_json) FROM clinical_queries`,
+		`SELECT count(created_by) FROM clinical_queries`,
+		`SELECT count(response_text) FROM clinical_decisions`,
+		`SELECT count(masked_question) FROM clinical_decisions`,
+		`SELECT count(masked_patient_json) FROM clinical_decisions`,
+		`SELECT count(subject_id) FROM jobs`,
+		`SELECT count(cancel_note) FROM jobs`,
+		`SELECT count(created_by) FROM jobs`,
+		`SELECT count(content) FROM kb_chunks`,
+		`SELECT count(*) FROM feedback_events`,
+		`SELECT count(*) FROM users`,
+	} {
+		_, err := countAs(t, pool, "mhai_health_reader", q)
+		requireDenied(t, err, "mhai_health_reader: "+q)
+	}
+	var login, inherit, bypass bool
+	var members, memberOf int
+	if err := pool.QueryRow(ctx, `
+		SELECT r.rolcanlogin, r.rolinherit, r.rolbypassrls,
+		       (SELECT count(*) FROM pg_auth_members m WHERE m.roleid = r.oid),
+		       (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid)
+		FROM pg_roles r WHERE r.rolname = 'mhai_health_reader'`).Scan(&login, &inherit, &bypass, &members, &memberOf); err != nil {
+		t.Fatal(err)
+	}
+	if login || inherit || bypass || members != 0 || memberOf != 0 {
+		t.Errorf("mhai_health_reader: login %v inherit %v bypassrls %v, %d members, member of %d", login, inherit, bypass, members, memberOf)
+	}
+	// It owns the three health functions and nothing else.
+	var owned []string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(array_agg(p.proname::text ORDER BY p.proname), '{}') FROM pg_proc p
+		WHERE p.proowner = 'mhai_health_reader'::regrole`).Scan(&owned); err != nil {
+		t.Fatal(err)
+	}
+	var rels int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relowner = 'mhai_health_reader'::regrole`).Scan(&rels); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(owned, ",") != "mhai_health_failures,mhai_health_guidelines,mhai_health_timings" || rels != 0 {
+		t.Errorf("mhai_health_reader owns functions %v and %d relations", owned, rels)
+	}
+	// The failed-row indexes are there and partial.
+	var idx int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE indexname IN ('clinical_queries_failed_idx', 'jobs_failed_idx')
+		AND indexdef ~ 'WHERE \(+status\)?(::text)? = ''failed''::text\)'`).Scan(&idx); err != nil {
+		t.Fatal(err)
+	}
+	if idx != 2 {
+		t.Errorf("%d partial failed-row indexes, want 2", idx)
+	}
 }

@@ -205,8 +205,14 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		if args != sig[0] || result != sig[1] {
 			t.Errorf("%s(%s) RETURNS %s\nwant (%s) RETURNS %s", name, args, result, sig[0], sig[1])
 		}
-		if owner != "mhai_migrate" || !definer {
-			t.Errorf("%s: owner %s, security definer %v", name, owner, definer)
+		// The health functions are owned by their own column-limited reader
+		// (00015); the rest by mhai_migrate.
+		wantOwner := "mhai_migrate"
+		if strings.HasPrefix(name, "mhai_health_") {
+			wantOwner = "mhai_health_reader"
+		}
+		if owner != wantOwner || !definer {
+			t.Errorf("%s: owner %s (want %s), security definer %v", name, owner, wantOwner, definer)
 		}
 		if len(config) != 1 || config[0] != "search_path=pg_catalog, pg_temp" {
 			t.Errorf("%s: config %v, want the fixed search_path", name, config)

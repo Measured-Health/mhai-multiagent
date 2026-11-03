@@ -2,8 +2,8 @@
 --
 -- 00014 fixed the health functions' signatures and grants with bodies that
 -- refuse; this migration writes the bodies. Each is SECURITY DEFINER, owned
--- by mhai_migrate, with a fixed search_path, executable by mhai_platform
--- only, and returns aggregates only: counts, percentiles, a job type and a
+-- by mhai_health_reader (below), with a fixed search_path, executable by
+-- mhai_platform only, and returns aggregates only: counts, percentiles, a job type and a
 -- stored error code (^[a-z_]{1,32}$, 00007/00012). Never a hospital, a
 -- user, a patient, a row id or free text.
 --
@@ -24,22 +24,57 @@
 --     mhai_platform has no grant on kb_chunks; shared rows are reference
 --     content, never patient data (00002's kb_shared_has_no_patient).
 --
--- Under FORCE the owner reads a table only through a policy, so each read
--- gets one, scoped to the rows its body needs: failed and recently
--- completed questions, their recent decisions, failed jobs, shared chunks.
+-- Who reads: mhai_health_reader, a role of its own (NOLOGIN, NOINHERIT,
+-- member of nothing, with no member), not mhai_migrate. It holds SELECT on
+-- the columns the bodies aggregate only (never clinical_question, patient
+-- data, a decision's text or the masked consultation), and one policy per
+-- table, scoped to the rows the bodies need: failed and recently completed
+-- questions, their recent decisions, failed jobs, shared chunks. So no
+-- other function mhai_migrate owns, and no migration login, sees a row
+-- through these policies, and the functions can't read a column they don't
+-- aggregate. The role is cluster-wide, so it is created only if missing and
+-- kept on Down (as 00007's mhai_jobs), with every grant revoked.
+--
+-- The migration runner briefly becomes a member (a no-op for a superuser)
+-- to hand the functions over, and leaves again.
+--
+-- Partial indexes on failed rows keep the failures scan to failed rows.
 
 -- +goose Up
 
-CREATE POLICY health_read ON clinical_queries FOR SELECT TO mhai_migrate
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mhai_health_reader') THEN
+        CREATE ROLE mhai_health_reader NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+    END IF;
+    IF NOT pg_has_role(current_user, 'mhai_health_reader', 'MEMBER') THEN
+        EXECUTE format('GRANT mhai_health_reader TO %I', current_user);
+        PERFORM set_config('mhai.health_reader_granted', 'yes', false);
+    END IF;
+END
+$$;
+-- +goose StatementEnd
+
+GRANT USAGE ON SCHEMA public TO mhai_health_reader;
+GRANT SELECT (id, hospital_id, status, error, created_at, completed_at) ON clinical_queries TO mhai_health_reader;
+GRANT SELECT (query_id, hospital_id, timings_ms, created_at) ON clinical_decisions TO mhai_health_reader;
+GRANT SELECT (type, status, error, failed_at) ON jobs TO mhai_health_reader;
+GRANT SELECT (hospital_id) ON kb_chunks TO mhai_health_reader;
+
+CREATE POLICY health_read ON clinical_queries FOR SELECT TO mhai_health_reader
     USING (status = 'failed' OR (status = 'completed' AND completed_at >= now() - interval '24 hours'));
 -- A decision is written in its question's completion transaction; the
 -- hour of slack keeps the policy from cutting a sample the body counts.
-CREATE POLICY health_read ON clinical_decisions FOR SELECT TO mhai_migrate
+CREATE POLICY health_read ON clinical_decisions FOR SELECT TO mhai_health_reader
     USING (timings_ms IS NOT NULL AND created_at >= now() - interval '25 hours');
-CREATE POLICY health_read ON jobs FOR SELECT TO mhai_migrate
+CREATE POLICY health_read ON jobs FOR SELECT TO mhai_health_reader
     USING (status = 'failed');
-CREATE POLICY health_read ON kb_chunks FOR SELECT TO mhai_migrate
+CREATE POLICY health_read ON kb_chunks FOR SELECT TO mhai_health_reader
     USING (hospital_id IS NULL);
+
+CREATE INDEX clinical_queries_failed_idx ON clinical_queries (completed_at) WHERE status = 'failed';
+CREATE INDEX jobs_failed_idx ON jobs (failed_at) WHERE status = 'failed';
 
 DROP FUNCTION mhai_health_timings(interval);
 
@@ -91,8 +126,10 @@ END
 $$;
 -- +goose StatementEnd
 
+DROP FUNCTION mhai_health_failures();
+
 -- +goose StatementBegin
-CREATE OR REPLACE FUNCTION mhai_health_failures()
+CREATE FUNCTION mhai_health_failures()
     RETURNS TABLE (job_type text, error text, failed_now bigint, failed_last_hour bigint, failed_last_24h bigint)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path = pg_catalog, pg_temp
@@ -127,15 +164,37 @@ CREATE FUNCTION mhai_health_guidelines()
     AS $$ SELECT EXISTS (SELECT 1 FROM public.kb_chunks k WHERE k.hospital_id IS NULL) $$;
 -- +goose StatementEnd
 
-ALTER FUNCTION mhai_health_timings(text) OWNER TO mhai_migrate;
-ALTER FUNCTION mhai_health_failures() OWNER TO mhai_migrate;
-ALTER FUNCTION mhai_health_guidelines() OWNER TO mhai_migrate;
+ALTER FUNCTION mhai_health_timings(text) OWNER TO mhai_health_reader;
+ALTER FUNCTION mhai_health_failures() OWNER TO mhai_health_reader;
+ALTER FUNCTION mhai_health_guidelines() OWNER TO mhai_health_reader;
 REVOKE ALL ON FUNCTION mhai_health_timings(text), mhai_health_failures(), mhai_health_guidelines() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION mhai_health_timings(text), mhai_health_failures(), mhai_health_guidelines() TO mhai_platform;
 
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF current_setting('mhai.health_reader_granted', true) = 'yes' THEN
+        EXECUTE format('REVOKE mhai_health_reader FROM %I', current_user);
+        PERFORM set_config('mhai.health_reader_granted', '', false);
+    END IF;
+END
+$$;
+-- +goose StatementEnd
+
 -- +goose Down
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF NOT pg_has_role(current_user, 'mhai_health_reader', 'MEMBER') THEN
+        EXECUTE format('GRANT mhai_health_reader TO %I', current_user);
+        PERFORM set_config('mhai.health_reader_granted', 'yes', false);
+    END IF;
+END
+$$;
+-- +goose StatementEnd
 DROP FUNCTION mhai_health_guidelines();
 DROP FUNCTION mhai_health_timings(text);
+DROP FUNCTION mhai_health_failures();
 
 -- 00014's stubs, as they were.
 -- +goose StatementBegin
@@ -155,7 +214,7 @@ $$;
 -- +goose StatementEnd
 
 -- +goose StatementBegin
-CREATE OR REPLACE FUNCTION mhai_health_failures()
+CREATE FUNCTION mhai_health_failures()
     RETURNS TABLE (job_type text, error text, failed_now bigint, failed_last_hour bigint, failed_last_24h bigint)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path = pg_catalog, pg_temp
@@ -171,7 +230,23 @@ ALTER FUNCTION mhai_health_failures() OWNER TO mhai_migrate;
 REVOKE ALL ON FUNCTION mhai_health_timings(interval), mhai_health_failures() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION mhai_health_timings(interval), mhai_health_failures() TO mhai_platform;
 
+DROP INDEX jobs_failed_idx;
+DROP INDEX clinical_queries_failed_idx;
+
 DROP POLICY health_read ON kb_chunks;
 DROP POLICY health_read ON jobs;
 DROP POLICY health_read ON clinical_decisions;
 DROP POLICY health_read ON clinical_queries;
+REVOKE ALL ON kb_chunks, jobs, clinical_decisions, clinical_queries FROM mhai_health_reader;
+REVOKE USAGE ON SCHEMA public FROM mhai_health_reader;
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF current_setting('mhai.health_reader_granted', true) = 'yes' THEN
+        EXECUTE format('REVOKE mhai_health_reader FROM %I', current_user);
+        PERFORM set_config('mhai.health_reader_granted', '', false);
+    END IF;
+END
+$$;
+-- +goose StatementEnd

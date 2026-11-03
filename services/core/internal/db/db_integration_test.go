@@ -132,7 +132,7 @@ func TestAppRolesAreNotOwnersAndCannotBypassRLS(t *testing.T) {
 	ctx := context.Background()
 	rows, err := pool.Query(ctx,
 		`SELECT rolname, rolsuper, rolbypassrls, rolcanlogin FROM pg_roles
-		 WHERE rolname IN ('mhai_gateway','mhai_platform','mhai_auth','mhai_worker','mhai_migrate','mhai_app','mhai_provision','mhai_jobs','mhai_worker_app','mhai_audit_drain')`)
+		 WHERE rolname IN ('mhai_gateway','mhai_platform','mhai_auth','mhai_worker','mhai_migrate','mhai_app','mhai_provision','mhai_jobs','mhai_worker_app','mhai_audit_drain','mhai_health_reader')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestAppRolesAreNotOwnersAndCannotBypassRLS(t *testing.T) {
 			t.Errorf("%s: super=%v bypassrls=%v login=%v, want all false", name, super, bypass, login)
 		}
 	}
-	if len(seen) != 10 {
+	if len(seen) != 11 {
 		t.Fatalf("roles found: %v", seen)
 	}
 
