@@ -110,8 +110,8 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(st) != 11 {
-		t.Fatalf("want 11 migrations, got %d", len(st))
+	if len(st) != 12 {
+		t.Fatalf("want 12 migrations, got %d", len(st))
 	}
 	for i, s := range st {
 		if s.Source.Version != int64(i+1) || s.State != goose.StateApplied {
@@ -244,6 +244,8 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	// A feedback row, so feedback_events is checked with a row to hide.
 	fb := seedClinician(t, pool, a)
 	seedCorrection(t, pool, a, qa, fb)
+	// A job row, so jobs is checked with a row to hide.
+	seedJob(t, pool, a, fb, "queued")
 
 	// One connection, so the second transaction reuses the session that
 	// had mhai.hospital_id set by the first.
@@ -258,7 +260,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if err := db.WithHospital(ctx, one, a, func(pgx.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events"} {
+	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs"} {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
