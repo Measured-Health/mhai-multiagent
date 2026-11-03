@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import copy
 import logging
 import math
 import time
@@ -383,6 +384,9 @@ class RunQuery:
     async def _pipeline(self, job: _Job, claim: jobs_repo.Claim) -> None:
         patient = claim.patient_data if isinstance(claim.patient_data, dict) else {}
         question, context = await self._stage(job, self._mask_all, claim.question, patient)
+        # The reviewer's copy, taken before any model sees the context: a
+        # client that mutates it can't change what the decision stores.
+        masked_patient = copy.deepcopy(context)
         await self._checkpoint(job, 0.25, "generation")
         started = time.monotonic()
         chunks = await self._chunks(job)
@@ -394,7 +398,7 @@ class RunQuery:
         decision = replace(
             self._decision(generation, verification),
             masked_question=question,
-            masked_patient=context,
+            masked_patient=masked_patient,
             timings_ms=_timings(job.stage_ms, generation, chunks_ms),
         )
         await self._complete(job, decision)

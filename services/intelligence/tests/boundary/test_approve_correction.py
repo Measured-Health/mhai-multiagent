@@ -35,7 +35,12 @@ from intelligence.boundary.db import Database
 from intelligence.boundary.jobs.approve_correction import ApproveCorrection
 from intelligence.boundary.jobs.run_query import JobSettings, RunQuery
 from intelligence.boundary.keys import TrustedKeys
-from intelligence.boundary.learning import LearningClient, StubLearningClient
+from intelligence.boundary.learning import (
+    BufferEntry,
+    LearningClient,
+    Scores,
+    StubLearningClient,
+)
 from intelligence.boundary.models import StubModelClient
 from intelligence.boundary.operations import Operations
 from intelligence.boundary.pb import envelope_pb2, learning_pb2
@@ -571,6 +576,109 @@ async def test_poison_job_dead_letters_after_five(make_env: MakeEnv, postgres: P
     await asyncio.sleep(0.5)
     assert stub.calls["buffer_entry"] == 5
     assert len(await env.dead_letters(1, timeout=1)) == 0
+
+
+class FailFirst(StubLearningClient):
+    """The stub, failing its first `failures` buffer entries (synthetic)."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.left = failures
+
+    def buffer_entry(self, scores: Scores, system_decision: str) -> BufferEntry:
+        if self.left > 0:
+            self.left -= 1
+            self.calls["buffer_entry"] += 1
+            raise RuntimeError("synthetic")
+        return super().buffer_entry(scores, system_decision)
+
+
+async def test_retried_job_after_five_attempts_completes(
+    make_env: MakeEnv, postgres: Postgres
+) -> None:
+    """Review fix 1: attempts never goes down, so the cap is per platform
+    retry. A job failed after five attempts, re-queued as the platform's
+    retry does (queued, retry_count + 1), is claimed (attempts 6, within
+    its second budget) and completes."""
+    env = await make_env()
+    c = await seed_correction(postgres)
+    stub = FailFirst(5)
+    await env.start(stub)
+    await env.publish(c)
+    dead = await env.dead_letters(1, timeout=20)
+    assert [(d.code, d.attempts) for _, d in dead] == [("internal", 5)]
+    j = await job_row(postgres, c.job_id)
+    assert (j["status"], j["attempts"]) == ("failed", 5)
+    assert await env.settled()
+    async with await su(postgres) as conn:
+        await conn.execute(
+            "UPDATE jobs SET status = 'queued', retry_count = retry_count + 1, error = NULL, "
+            "failed_at = NULL, completed_at = NULL WHERE id = %s",
+            (c.job_id,),
+        )
+    await env.publish(c, msg_id=f"{c.job_id}.retry1")
+    assert await until(lambda: job_is(postgres, c.job_id, "completed"))
+    j = await job_row(postgres, c.job_id)
+    assert (j["attempts"], j["error"]) == (6, None)
+    assert len(await buffer_rows(postgres, c.correction_id)) == 1
+    out = await facts(postgres, c.job_id)
+    assert [(f[0], f[5]["attempts"]) for f in out] == [
+        ("correction.apply_failed", 5),
+        ("correction.applied", 6),
+    ]
+    assert await env.settled()
+
+
+class FlipBeforeInsert(StubLearningClient):
+    """The stub that, while computing the entry (after the job read the
+    correction as approved, before the buffer insert), forces the
+    correction back to pending_review as the superuser: the handler's check
+    has passed, so only the database stands in the way."""
+
+    def __init__(self, url: str, correction_id: str) -> None:
+        super().__init__()
+        self._url = url
+        self._cid = correction_id
+
+    def buffer_entry(self, scores: Scores, system_decision: str) -> BufferEntry:
+        with psycopg.connect(self._url, autocommit=True) as conn, conn.transaction():
+            conn.execute("SET LOCAL session_replication_role = replica")
+            conn.execute(
+                "UPDATE feedback_events SET status = 'pending_review', decided_by = NULL, "
+                "decided_at = NULL WHERE id = %s",
+                (self._cid,),
+            )
+        return super().buffer_entry(scores, system_decision)
+
+
+async def test_rls_refusal_is_invalid_request_not_retried(
+    make_env: MakeEnv, postgres: Postgres
+) -> None:
+    """Review fix 2: buffer_needs_approval's refusal (42501) is permanent:
+    one delivery, failed invalid_request with correction.apply_failed, a
+    dead letter, Term, no buffer row. Never retried as unavailable."""
+    env = await make_env()
+    c = await seed_correction(postgres)
+    stub = FlipBeforeInsert(postgres.url, c.correction_id)
+    await env.start(stub)
+    await env.publish(c)
+    dead = await env.dead_letters(1)
+    assert [(d.job_id, d.code, d.attempts) for _, d in dead] == [(c.job_id, "invalid_request", 1)]
+    j = await job_row(postgres, c.job_id)
+    assert (j["status"], j["error"], j["attempts"]) == ("failed", "invalid_request", 1)
+    out = await facts(postgres, c.job_id)
+    assert [(f[0], f[5]) for f in out] == [
+        (
+            "correction.apply_failed",
+            {"correction_id": c.correction_id, "error": "invalid_request", "attempts": 1},
+        )
+    ]
+    assert await buffer_rows(postgres, c.correction_id) == []
+    assert await env.settled()
+    await asyncio.sleep(0.5)
+    assert stub.calls["buffer_entry"] == 1
+    ci = await env.consumer()
+    assert ci.num_redelivered == 0
 
 
 async def test_foreign_correction_is_not_found_and_reads_nothing(

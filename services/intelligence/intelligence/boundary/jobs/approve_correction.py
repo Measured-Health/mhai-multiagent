@@ -78,6 +78,9 @@ class _Job:
     delivered: int
     jid: str = ""
     cid: str = ""
+    # The attempts this claim may reach: max_attempts per platform retry
+    # (attempts never goes down; each retry is a fresh budget).
+    cap: int = 0
     attempts: int = 0
     committed: bool = False
     settled: bool = False
@@ -179,7 +182,19 @@ class ApproveCorrection:
             return
         if not await self._claim(job):
             return
-        await self._apply(job)
+        try:
+            await self._apply(job)
+        except learning_repo.BufferRefused:
+            # buffer_needs_approval (or the grant) refused the row: the
+            # correction isn't approved by a second person. Permanent, never
+            # retried; error level, it alerts (core or the database is
+            # wrong). The transaction rolled back; the failure is its own.
+            log.error(
+                "approve_correction buffer row refused job_id=%s correction_id=%s",
+                job.jid,
+                job.cid,
+            )
+            await self._give_up(job, "invalid_request")
 
     def _last(self, job: _Job) -> bool:
         """This is the consumer's last delivery: a Nak would never come back."""
@@ -200,8 +215,9 @@ class ApproveCorrection:
             return False
         if c.attempts is not None:
             job.attempts = c.attempts
+            job.cap = self._s.max_attempts * (c.retry_count + 1)
             telemetry.annotate(attempt=c.attempts)
-            if c.attempts > self._s.max_attempts:
+            if c.attempts > job.cap:
                 log.warning("approve_correction over the attempts cap job_id=%s", job.jid)
                 await self._give_up(job, "internal")
                 return False
@@ -233,8 +249,11 @@ class ApproveCorrection:
         async with self._db.with_hospital(job.v) as cur:
             if not await learning_repo.ours(cur, job.jid, job.attempts):
                 # Cancelled, failed by the sweeper, or re-claimed by another
-                # delivery: leave the message; its redelivery's claim sorts
-                # it out (terminal: ack; held: Nak).
+                # delivery. Not settled here on purpose: which of those it
+                # is would take another read, and acking a message another
+                # delivery now owns could drop it if that one later Naks.
+                # JetStream redelivers this one after ack_wait, and that
+                # delivery's claim sorts it out (terminal: ack; held: Nak).
                 log.info("approve_correction no longer ours job_id=%s", job.jid)
                 job.settled = True
                 return
@@ -262,7 +281,7 @@ class ApproveCorrection:
                 persona = self._learning.persona_update(job.cid)
                 if persona not in PERSONA_UPDATES:
                     raise ValueError("unknown persona update")
-                await learning_repo.complete(
+                applied = await learning_repo.complete(
                     cur,
                     job.jid,
                     job.cid,
@@ -272,6 +291,12 @@ class ApproveCorrection:
                     _fact_versions(self._learning.model_versions()),
                     persona,
                 )
+                if not applied:
+                    log.warning(
+                        "approve_correction already applied job_id=%s correction_id=%s",
+                        job.jid,
+                        job.cid,
+                    )
         if code:
             log.info(
                 "approve_correction failed job_id=%s attempts=%d code=%s",
@@ -292,7 +317,7 @@ class ApproveCorrection:
 
     async def _failure(self, job: _Job, code: str) -> None:
         """Retry (Nak with the schedule) or, permanent or last, give up."""
-        last = self._last(job) or job.attempts >= self._s.max_attempts
+        last = self._last(job) or (job.cap > 0 and job.attempts >= job.cap)
         if code in RETRYABLE and not last:
             if job.attempts and self._db is not None:
                 try:

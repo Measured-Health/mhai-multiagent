@@ -96,35 +96,63 @@ def test_only_feedback_operation_is_approve_correction():
     assert op["second_person"] is True
 
 
+_METHOD = "approve_correction"
+_DYNAMIC = {"getattr", "methodcaller", "attrgetter"}
+
+
+def _reaches_feedback_method(source: str) -> list[str]:
+    """Where source reaches the feedback loop's approve_correction method:
+    a call of that name, an attribute of that name, or the name handed to
+    getattr, operator.methodcaller or operator.attrgetter (R17: a dynamic
+    lookup is the same reach). An import names the job's module as a
+    string, which is not a reach."""
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr == _METHOD:
+            found.append(f"{node.lineno}: .{_METHOD}")
+        elif isinstance(node, ast.Call):
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+            if name == _METHOD:
+                found.append(f"{node.lineno}: {_METHOD}()")
+            elif name in _DYNAMIC and any(
+                isinstance(a, ast.Constant) and a.value == _METHOD for a in node.args
+            ):
+                found.append(f"{node.lineno}: {name}(..., {_METHOD!r})")
+    return found
+
+
 def test_boundary_code_never_reaches_the_feedback_loop():
     # And nothing in the boundary package calls it behind the table's back.
     # approve_correction is also the job's name (Plan 4 spec §4.7: the
     # module, the operation, the jobs type), so for it the check is the
-    # method: no call to an approve_correction function or method, and no
-    # attribute of that name (an import names the job's module as a string).
+    # method (_reaches_feedback_method), not the bare text.
     boundary = Path(str(resources.files("intelligence.boundary")))
     for path in boundary.rglob("*.py"):
         text = path.read_text()
         for name in ("process_feedback", "DoctorFeedbackLoop"):
             assert name not in text, f"{path.name} reaches {name}"
-        for node in ast.walk(ast.parse(text)):
-            if isinstance(node, ast.Call):
-                f = node.func
-                called = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
-                assert called != "approve_correction", f"{path.name} calls approve_correction()"
-            elif isinstance(node, ast.Attribute) and node.attr == "approve_correction":
-                raise AssertionError(f"{path.name} reaches .approve_correction")
+        assert _reaches_feedback_method(text) == [], path.name
 
 
 def test_feedback_loop_guard_is_not_vacuous():
-    for src in ("orch.approve_correction(cid, 'dr_b')", "approve_correction(x)"):
-        calls = [
-            n
-            for n in ast.walk(ast.parse(src))
-            if isinstance(n, ast.Call)
-            and getattr(n.func, "attr", getattr(n.func, "id", "")) == "approve_correction"
-        ]
-        assert calls, src
+    for src in (
+        "orch.approve_correction(cid, 'dr_b')",
+        "approve_correction(x)",
+        "f = orch.approve_correction",
+        "getattr(x, 'approve_correction')",
+        "getattr(x, 'approve_correction')(cid, 'dr_b')",
+        "operator.methodcaller('approve_correction', cid, 'dr_b')(orch)",
+        "from operator import attrgetter\nattrgetter('approve_correction')(orch)",
+    ):
+        assert _reaches_feedback_method(src), src
+    for src in (
+        "from intelligence.boundary.jobs.approve_correction import ApproveCorrection",
+        "TYPE = 'approve_correction'",
+        "jobs = {'approve_correction': runner.handle}",
+        "getattr(x, 'approve')",
+    ):
+        assert _reaches_feedback_method(src) == [], src
 
 
 def test_second_clinician_approval_applies_scoped_masked_correction(system):

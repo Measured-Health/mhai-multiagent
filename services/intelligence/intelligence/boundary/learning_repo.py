@@ -32,7 +32,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from intelligence.boundary.db import Cursor, is_unique_violation
+from intelligence.boundary.db import Cursor, is_insufficient_privilege, is_unique_violation
 from intelligence.boundary.learning import BufferEntry, Scores
 
 TYPE = "approve_correction"
@@ -49,9 +49,9 @@ _CLAIM = """WITH claimed AS (
         lease_until = now() + interval '60 s'
     WHERE id = %s AND type = 'approve_correction' AND subject_id = %s
         AND (status = 'queued' OR (status = 'running' AND lease_until < now()))
-    RETURNING attempts
+    RETURNING attempts, retry_count
 )
-SELECT (SELECT attempts FROM claimed), j.status,
+SELECT (SELECT attempts FROM claimed), (SELECT retry_count FROM claimed), j.status,
     greatest(0, extract(epoch FROM (j.lease_until - now())))::float8
 FROM jobs j WHERE j.id = %s AND j.type = 'approve_correction' AND j.subject_id = %s"""
 
@@ -100,6 +100,12 @@ _MAX_VERSIONS = 16
 _MAX_VERSIONS_BYTES = 4000
 
 
+class BufferRefused(Exception):
+    """The database refused the buffer row (42501: buffer_needs_approval or
+    the grant). Permanent: the correction isn't approved by a second
+    person, whatever the handler read a moment before."""
+
+
 def _uuid(v: str) -> str:
     return str(uuid.UUID(v))
 
@@ -113,6 +119,9 @@ class Claim:
     attempts: int | None
     status: str | None
     lease_left: float = 0.0
+    # The platform's retries of this row (spec §6.2): each retry gives the
+    # job a fresh attempts budget, as attempts itself never goes down.
+    retry_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -137,11 +146,12 @@ async def claim(cur: Cursor, job_id: str, correction_id: str) -> Claim:
     row = await cur.fetchone()
     if row is None:
         return Claim(None, None)
-    attempts, status, lease_left = row
+    attempts, retry_count, status, lease_left = row
     return Claim(
         int(attempts) if attempts is not None else None,
         str(status),
         float(lease_left or 0.0),
+        int(retry_count or 0),
     )
 
 
@@ -217,13 +227,14 @@ async def complete(
     buffer_versions: Mapping[str, str],
     fact_versions: Mapping[str, str],
     persona_update: str,
-) -> None:
+) -> bool:
     """The completion (spec §4.7 step 5), in the caller's one transaction:
     the buffer row, the correction.applied fact, status completed. The
     caller holds the row (ours()). A buffer row already there for this
     correction (23505: another job of the same correction applied it) is
     "already applied": its insert alone is rolled back and the job still
-    completes."""
+    completes. Returns False in that case (already applied), else True.
+    A refusal by the database (42501) raises BufferRefused."""
     jid, cid = _uuid(job_id), _uuid(correction_id)
     await cur.execute(_SAVEPOINT)
     try:
@@ -240,9 +251,14 @@ async def complete(
             ),
         )
     except Exception as e:
+        if is_insufficient_privilege(e):
+            raise BufferRefused("feedback_buffer: refused") from None
         if not is_unique_violation(e):
             raise
         await cur.execute(_ROLLBACK_SAVEPOINT)
+        applied = False
+    else:
+        applied = True
     await cur.execute(_RELEASE_SAVEPOINT)
     payload = {
         "correction_id": cid,
@@ -254,6 +270,7 @@ async def complete(
     await cur.execute(_COMPLETE, (jid, int(attempts)))
     if await cur.fetchone() is None:  # can't happen while ours() holds the row lock
         raise RuntimeError("completion lost the row")
+    return applied
 
 
 async def fail(cur: Cursor, job_id: str, correction_id: str, attempts: int, code: str) -> bool:

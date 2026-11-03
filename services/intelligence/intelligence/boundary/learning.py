@@ -86,6 +86,11 @@ def decision_code(d: object) -> str:
     return d if isinstance(d, str) and d in DECISIONS else "ESCALATE"
 
 
+# TODO(learning): the job calls these inline, inside its one transaction,
+# with a fixed 60 s lease and no +WIP: fine for today's pure arithmetic. A
+# client that does real work (a persona update needing activations, a
+# model call) must move to worker threads with run_query's heartbeat (+WIP
+# and lease renewal, jobs/run_query.py _stage/_heartbeat) first.
 @runtime_checkable
 class LearningClient(Protocol):
     def buffer_entry(self, scores: Scores, system_decision: str) -> BufferEntry: ...
