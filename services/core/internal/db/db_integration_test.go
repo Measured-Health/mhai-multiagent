@@ -110,8 +110,8 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(st) != 12 {
-		t.Fatalf("want 12 migrations, got %d", len(st))
+	if len(st) != 13 {
+		t.Fatalf("want 13 migrations, got %d", len(st))
 	}
 	for i, s := range st {
 		if s.Source.Version != int64(i+1) || s.State != goose.StateApplied {
@@ -246,6 +246,11 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	seedCorrection(t, pool, a, qa, fb)
 	// A job row, so jobs is checked with a row to hide.
 	seedJob(t, pool, a, fb, "queued")
+	// An approved correction in the buffer, so feedback_buffer has a row to hide.
+	bufferedID := seedApproved(t, pool, a)
+	if _, err := pool.Exec(ctx, bufferInsertSQL, a, bufferedID); err != nil {
+		t.Fatal(err)
+	}
 
 	// One connection, so the second transaction reuses the session that
 	// had mhai.hospital_id set by the first.
@@ -260,7 +265,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if err := db.WithHospital(ctx, one, a, func(pgx.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs"} {
+	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer"} {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -271,6 +276,11 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		var n int
 		err = tx.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE hospital_id IS NOT NULL`).Scan(&n)
 		_ = tx.Rollback(ctx)
+		if table == "feedback_buffer" {
+			// No role but the owner reads the buffer: the gateway is denied outright.
+			requireDenied(t, err, "gateway reading feedback_buffer")
+			continue
+		}
 		if err != nil {
 			t.Fatalf("%s without hospital: %v", table, err)
 		}
