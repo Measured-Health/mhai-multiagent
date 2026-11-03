@@ -78,10 +78,12 @@ services:
     command: ["-c", "/etc/nats/nats.conf"]
     environment:
       # Public keys, not secrets. The core seed is only in the core
-      # container; the BFF seed is in .env for the frontend, later.
-      # NATS_BFF_NKEY is the clinical app's BFF (bff_clinical).
+      # container; each BFF seed is a file in secrets/bff/ for the frontend.
+      # NATS_BFF_NKEY is the clinical app's BFF (bff_clinical),
+      # NATS_BFF_PLATFORM_NKEY the platform app's (bff_platform).
       NATS_GATEWAY_NKEY: ${NATS_GATEWAY_NKEY:?set in /srv/mhai-backend/.env}
       NATS_BFF_NKEY: ${NATS_BFF_NKEY:?set in /srv/mhai-backend/.env}
+      NATS_BFF_PLATFORM_NKEY: ${NATS_BFF_PLATFORM_NKEY:?set in /srv/mhai-backend/.env (run setup-host.sh)}
       GOMEMLIMIT: 96MiB
     volumes:
       - ./nats/nats.conf:/etc/nats/nats.conf:ro

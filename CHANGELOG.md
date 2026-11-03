@@ -19,6 +19,17 @@ All notable changes to this project are documented here. The format follows
   to `setup_incomplete` -> `active` only, and lets it append
   `hospital.activated`. The smoke test activates its hospital with the
   command instead of an UPDATE as the owner.
+
+- The demo's NATS has a `bff_platform` NKey user (publish `api.v1.platform`,
+  receive `_INBOX_bff.platform.>`, nothing else), and both BFF seeds are now
+  files under `/srv/mhai-backend/secrets/bff/` (mode 400, uid 1001, mhai-web's
+  container user) instead of lines in `.env`. `deploy/setup-host.sh` makes the
+  platform pair, moves the existing clinical seed into its file (same key
+  pair) and removes it from `.env`, and takes `--rotate-bff
+  clinical|platform|all`. `deploy/compose.yml` requires
+  `NATS_BFF_PLATFORM_NKEY`: **run the new `setup-host.sh` on the instance
+  before merging** (deploy/README.md, "Before merging"). A test holds the
+  demo's BFF permissions equal to the dev config's.
 - The intelligence boundary runs end to end (Plan 3 T15). Compose runs the
   Python workers as `pipeline` (`intelligence worker --service pipeline`, its
   own NATS user and password, its own database login `intelligence_app`, the

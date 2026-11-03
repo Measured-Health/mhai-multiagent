@@ -149,3 +149,29 @@ func TestDeployBFFClinicalMatchesDevWithoutTestOnly(t *testing.T) {
 		t.Fatalf("bff_clinical permissions differ:\ndev (no test-only): %s\nprod: %s", dev, prod)
 	}
 }
+
+// Spec §17.1, §17.4: the demo's platform BFF user has the dev config's
+// bff_platform permissions exactly (the dev one has no test-only grants),
+// so the two can't drift; nothing else is granted.
+func TestDeployBFFPlatformMatchesDev(t *testing.T) {
+	dev := stripComments(permissionsAfter(t, readConf(t, "services/nats/nats.conf"), "user: bff_platform"))
+	prod := stripComments(permissionsAfter(t, readConf(t, "deploy/nats/nats.conf"), "nkey: $NATS_BFF_PLATFORM_NKEY"))
+	if dev != prod {
+		t.Fatalf("bff_platform permissions differ:\ndev: %s\nprod: %s", dev, prod)
+	}
+	want := `permissions:{publish:{allow:["api.v1.platform"]}subscribe:{allow:["_INBOX_bff.platform.>"]}}`
+	if got := "permissions:" + prod; got != want {
+		t.Fatalf("bff_platform must publish api.v1.platform and subscribe _INBOX_bff.platform.> only:\n%s", got)
+	}
+}
+
+// The two BFF users in the demo config are separate NKeys: neither may be
+// the other's variable, and neither may carry the other's subjects.
+func TestDeployBFFUsersAreSeparate(t *testing.T) {
+	prod := readConf(t, "deploy/nats/nats.conf")
+	clin := stripComments(permissionsAfter(t, prod, "nkey: $NATS_BFF_NKEY"))
+	plat := stripComments(permissionsAfter(t, prod, "nkey: $NATS_BFF_PLATFORM_NKEY"))
+	if strings.Contains(clin, "platform") || strings.Contains(plat, "clinical") {
+		t.Fatalf("a BFF user holds the other app's subject:\nclinical: %s\nplatform: %s", clin, plat)
+	}
+}
