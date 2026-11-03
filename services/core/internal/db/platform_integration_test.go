@@ -22,12 +22,15 @@ import (
 
 const uniqueViolation = "23505"
 
-// platformFunctions are the four functions with their final signatures
-// (spec §6.1-§6.3): identity arguments and declared result, as Postgres
-// prints them. Tasks 11-13 fill the bodies; the columns don't change.
+// platformFunctions are the platform's functions with their final
+// signatures (spec §6.1-§6.3): identity arguments and declared result, as
+// Postgres prints them. Tasks 11-13 fill the bodies. 00015 (Task 11)
+// replaced the health window's interval with text (an interval can't tell
+// '60 minutes' from '1 hour') and added mhai_health_guidelines.
 var platformFunctions = map[string][2]string{
-	"mhai_health_timings": {"time_window interval",
+	"mhai_health_timings": {"p_window text",
 		"TABLE(step text, p50_ms integer, p95_ms integer, samples bigint)"},
+	"mhai_health_guidelines": {"", "boolean"},
 	"mhai_health_failures": {"",
 		"TABLE(job_type text, error text, failed_now bigint, failed_last_hour bigint, failed_last_24h bigint)"},
 	"mhai_platform_jobs": {"p_status text, p_type text, p_hospital uuid, p_errors text[], p_after_failed_at timestamp with time zone, p_after_id uuid, p_limit integer",
@@ -129,7 +132,8 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 
 	// The exact set of SECURITY DEFINER functions it may run, PUBLIC's
 	// EXECUTE included, each with its full arguments and result: the four
-	// of 00014, the buffer count (00013) and the chain head (00003).
+	// of 00014 (one replaced by 00015), 00015's guidelines check, the
+	// buffer count (00013) and the chain head (00003).
 	wantFuncs := map[string][2]string{
 		"audit_chain_head":             {"OUT id bigint, OUT hash text", "record"},
 		"mhai_feedback_buffer_waiting": {"", "bigint"},
@@ -213,29 +217,56 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		}
 	}
 
-	// The platform may call them (the bodies come with Tasks 11-13), and
-	// the timing window is checked first; nobody else may call them.
+	// The platform may call them: the health bodies are built (00015), the
+	// other two still refuse until Tasks 12-13; nobody else may call any.
 	call := map[string]string{
-		"mhai_health_timings":   `SELECT * FROM mhai_health_timings(interval '1 hour')`,
-		"mhai_health_failures":  `SELECT * FROM mhai_health_failures()`,
-		"mhai_platform_jobs":    `SELECT * FROM mhai_platform_jobs('failed', NULL, NULL, NULL, NULL, NULL, 50)`,
-		"mhai_guardrail_counts": `SELECT * FROM mhai_guardrail_counts(now() - interval '7 days', now())`,
+		"mhai_health_timings":    `SELECT * FROM mhai_health_timings('1 hour')`,
+		"mhai_health_failures":   `SELECT * FROM mhai_health_failures()`,
+		"mhai_health_guidelines": `SELECT mhai_health_guidelines()`,
+		"mhai_platform_jobs":     `SELECT * FROM mhai_platform_jobs('failed', NULL, NULL, NULL, NULL, NULL, 50)`,
+		"mhai_guardrail_counts":  `SELECT * FROM mhai_guardrail_counts(now() - interval '7 days', now())`,
 	}
+	built := map[string]bool{"mhai_health_timings": true, "mhai_health_failures": true, "mhai_health_guidelines": true}
 	for name, q := range call {
 		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q); return err })
-		if pgCode(err) != "0A000" {
+		switch {
+		case built[name] && err != nil:
+			t.Errorf("platform calling %s: %v", name, err)
+		case !built[name] && pgCode(err) != "0A000":
 			t.Errorf("platform calling %s: want the not-built-yet refusal (0A000), got %v", name, err)
 		}
 		for _, role := range []string{"mhai_gateway", "mhai_auth", "mhai_worker", "mhai_jobs", "mhai_audit_drain", "mhai_provision"} {
 			requireDenied(t, asRole(ctx, pool, role, q), role+" calling "+name)
 		}
 	}
+	// The window is exactly '1 hour' or '24 hours', compared as text: an
+	// equal interval written another way is refused too.
+	for _, w := range []string{"'1 hour'", "'24 hours'"} {
+		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `SELECT * FROM mhai_health_timings(`+w+`)`)
+			return err
+		})
+		if err != nil {
+			t.Errorf("window %s: %v", w, err)
+		}
+	}
+	for _, w := range []string{"'5 minutes'", "'60 minutes'", "'3600 seconds'", "'1 day'", "'01:00:00'", "'1 hours'",
+		"'1 Hour'", "' 1 hour'", "'24 hour'", "''", "NULL"} {
+		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `SELECT * FROM mhai_health_timings(`+w+`)`)
+			return err
+		})
+		if pgCode(err) != "22023" {
+			t.Errorf("window %s: want 22023, got %v", w, err)
+		}
+	}
+	// The interval form 00014 had is gone.
 	err = db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `SELECT * FROM mhai_health_timings(interval '5 minutes')`)
+		_, err := tx.Exec(ctx, `SELECT * FROM mhai_health_timings(interval '1 hour')`)
 		return err
 	})
-	if pgCode(err) != "22023" {
-		t.Errorf("a window other than 1 hour or 24 hours: want 22023, got %v", err)
+	if err == nil {
+		t.Error("mhai_health_timings(interval) still exists")
 	}
 }
 
