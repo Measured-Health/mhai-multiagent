@@ -411,9 +411,10 @@ func init() {
 		})),
 		Required: []string{"list"}})
 	// person and hospital: the person picker and the hospitals list (Task 9
-	// review); mhai-web has no such searched_kind yet, so those rows are
-	// gated out of the catalogue and sent bare (TODO.md).
-	Register("audit.searched", Schema{Fields: fields("searched_kind", OneOf("event", "request", "person", "hospital")),
+	// review); run: the chain checks' reads (runs, a run, the status).
+	// mhai-web has no such searched_kind yet, so those rows are gated out
+	// of the catalogue and sent bare (TODO.md).
+	Register("audit.searched", Schema{Fields: fields("searched_kind", OneOf("event", "request", "person", "hospital", "run")),
 		Required: []string{"searched_kind"}})
 	Register("audit.verify_started", Schema{Fields: fields("run_id", id, "by", OneOf("person", "schedule")),
 		Required: []string{"run_id", "by"}})

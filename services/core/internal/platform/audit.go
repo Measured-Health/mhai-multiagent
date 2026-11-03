@@ -43,6 +43,12 @@ type Deps struct {
 	// HMAC key is derived from it (audit.CursorKey). Without a usable one
 	// the list fails closed (503 not_ready). Never logged.
 	MasterKey []byte
+	// SecurityContact is named by the integrity status; unset, the status
+	// answers 503 not_ready.
+	SecurityContact SecurityContact
+	// Walk runs a started chain check's walk (nil: in the background, with
+	// the 10-minute budget). Tests set it to hold runs running.
+	Walk func(runID uuid.UUID)
 }
 
 func (d Deps) log() *slog.Logger {
@@ -52,13 +58,15 @@ func (d Deps) log() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// Register adds the audit log reads.
+// Register adds the audit log reads, and the chain check and the
+// auditors' writes (verify.go).
 func Register(m *authz.Mux, d Deps) {
 	read := authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin, authz.RoleAuditor}}
 	authz.Route(m, http.MethodGet, "/platform/audit", read, http.HandlerFunc(d.list))
 	authz.Route(m, http.MethodGet, "/platform/audit/hospitals", read, http.HandlerFunc(d.hospitals))
 	authz.Route(m, http.MethodGet, "/platform/audit/people", read, http.HandlerFunc(d.people))
 	authz.Route(m, http.MethodGet, "/platform/audit/{id}", read, http.HandlerFunc(d.detail))
+	registerVerify(m, d)
 }
 
 // caller is the verified platform principal, or a 500 (the guard admits

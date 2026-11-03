@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
@@ -29,6 +30,11 @@ type Deps struct {
 	// QueryCap is the questions in flight per hospital
 	// (INTELLIGENCE_QUERY_CAP), for intel.ReserveInFlight.
 	QueryCap int
+	// SecurityContact is the integrity page's contact (configuration).
+	SecurityContact platform.SecurityContact
+	// AuditWalk runs a started chain check (nil: in the background with
+	// the 10-minute budget); tests hold runs running with it.
+	AuditWalk func(runID uuid.UUID)
 }
 
 // Register adds every route to m.
@@ -45,7 +51,8 @@ func Register(m *authz.Mux, d Deps) {
 	// an intelligence client is set.
 	feedback.Register(m, feedback.Deps{Pool: d.Pool, Intel: d.Intel, Log: a.Log})
 	// The platform app's audit log reads (Plan 4 spec §5.2).
-	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log, MasterKey: a.MFAKey})
+	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log, MasterKey: a.MFAKey,
+		SecurityContact: d.SecurityContact, Walk: d.AuditWalk})
 	registerFixtures(m, d)
 }
 

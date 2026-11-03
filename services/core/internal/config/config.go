@@ -58,6 +58,12 @@ type Config struct {
 	// OTLPInsecure (OTEL_EXPORTER_OTLP_INSECURE=true) allows a plaintext
 	// non-loopback endpoint; development allows it too.
 	OTLPInsecure bool
+	// SecurityContactName and SecurityContactEmail are who the audit
+	// integrity page names (SECURITY_CONTACT_NAME, SECURITY_CONTACT_EMAIL;
+	// Plan 4 spec §5.2). Unset, GET /platform/audit/verify/status answers
+	// 503 not_ready; serve warns at start-up.
+	SecurityContactName  string
+	SecurityContactEmail string
 }
 
 // NATSTLS names the PEM files for TLS to NATS with a client certificate.
@@ -85,6 +91,8 @@ func Load() (Config, error) {
 		BreachedListPath:       os.Getenv("BREACHED_LIST_PATH"),
 		OTLPEndpoint:           strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
 		OTLPInsecure:           strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")), "true"),
+		SecurityContactName:    strings.TrimSpace(os.Getenv("SECURITY_CONTACT_NAME")),
+		SecurityContactEmail:   strings.TrimSpace(os.Getenv("SECURITY_CONTACT_EMAIL")),
 		NATSTLS: NATSTLS{
 			CAPath:   os.Getenv("NATS_TLS_CA_PATH"),
 			CertPath: os.Getenv("NATS_TLS_CERT_PATH"),

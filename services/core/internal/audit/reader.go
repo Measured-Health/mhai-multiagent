@@ -666,26 +666,39 @@ func oldestKept(ctx context.Context, tx pgx.Tx) (string, error) {
 }
 
 // openBreak is the first broken seq of the latest broken run while its
-// failure is open (no later intact run, or no outcome note yet), or 0.
-// The note itself is never read.
+// failure is open (OpenFailure), or 0.
 func openBreak(ctx context.Context, tx pgx.Tx) (int64, error) {
+	_, seq, err := openFailure(ctx, tx)
+	return seq, err
+}
+
+// OpenFailure is the latest broken run while its failure is open, or
+// uuid.Nil: open until a later run is intact and the broken run has its
+// outcome note (spec §5.4; contract §14.9). The note itself is never read.
+func OpenFailure(ctx context.Context, tx pgx.Tx) (uuid.UUID, error) {
+	id, _, err := openFailure(ctx, tx)
+	return id, err
+}
+
+func openFailure(ctx context.Context, tx pgx.Tx) (uuid.UUID, int64, error) {
+	var id uuid.UUID
 	var seq int64
 	var noted, intactAfter bool
 	err := tx.QueryRow(ctx, `
-		SELECT b.first_broken_seq, b.outcome_note IS NOT NULL,
+		SELECT b.id, b.first_broken_seq, b.outcome_note IS NOT NULL,
 		       EXISTS (SELECT 1 FROM audit_verify_runs i WHERE i.state = 'intact' AND i.started_at > b.started_at)
 		FROM audit_verify_runs b WHERE b.state = 'broken'
-		ORDER BY b.started_at DESC, b.id DESC LIMIT 1`).Scan(&seq, &noted, &intactAfter)
+		ORDER BY b.started_at DESC, b.id DESC LIMIT 1`).Scan(&id, &seq, &noted, &intactAfter)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
+		return uuid.Nil, 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("audit: open failure: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("audit: open failure: %w", err)
 	}
 	if noted && intactAfter {
-		return 0, nil
+		return uuid.Nil, 0, nil
 	}
-	return seq, nil
+	return id, seq, nil
 }
 
 type person struct {

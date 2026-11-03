@@ -22,9 +22,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 )
 
@@ -54,7 +52,7 @@ var ErrSensitiveKey = errors.New("audit: payload has a sensitive key")
 const tsLayout = "2006-01-02T15:04:05.000000Z07:00"
 
 // record is a row as hashed: the same fields whether built by Write or read
-// back by Verify.
+// back by VerifyRange (verify.go).
 type record struct {
 	ts                                                       time.Time
 	actorID, hospitalID, requestID, action, entity, entityID string
@@ -205,54 +203,6 @@ func Write(ctx context.Context, tx pgx.Tx, e Event) error {
 		return fmt.Errorf("audit: insert: %w", err)
 	}
 	return nil
-}
-
-// Verify walks the whole chain in id order and reports the first row whose
-// prev_hash doesn't match the row before it, or whose hash doesn't match
-// its contents. It reads as mhai_platform, the one app role that can see
-// every hospital's audit rows. ok is true, and firstBroken 0, for an
-// intact (or empty) chain.
-func Verify(ctx context.Context, pool *pgxpool.Pool) (ok bool, firstBroken int64, err error) {
-	err = db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `
-			SELECT id, ts, actor_id::text, hospital_id::text, request_id, action, entity, entity_id,
-			       payload, prev_hash, hash
-			FROM audit_log ORDER BY id`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		prev := genesis
-		for rows.Next() {
-			var (
-				id                                           int64
-				r                                            record
-				actor, hospital, requestID, entity, entityID *string
-				prevHash, hash                               string
-			)
-			if err := rows.Scan(&id, &r.ts, &actor, &hospital, &requestID, &r.action, &entity, &entityID,
-				&r.payload, &prevHash, &hash); err != nil {
-				return err
-			}
-			r.actorID, r.hospitalID, r.requestID = deref(actor), deref(hospital), deref(requestID)
-			r.entity, r.entityID = deref(entity), deref(entityID)
-			want, err := r.hash(prevHash)
-			if err != nil || prevHash != prev || want != hash {
-				firstBroken = id
-				return nil
-			}
-			prev = hash
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		ok = true
-		return nil
-	})
-	if err != nil {
-		return false, 0, fmt.Errorf("audit: verify: %w", err)
-	}
-	return ok, firstBroken, nil
 }
 
 func deref(s *string) string {
