@@ -89,6 +89,7 @@ Until `idle_timeout_minutes` and `review_overdue_hours` exist, the app uses
 
 | Item | Shape | Status |
 |---|---|---|
+| Sign-in reply | When two-step applies, `POST /auth/login` answers `{mfa_required: true, mfa_token, mfa_enrolled}`. `mfa_enrolled` false: send the challenge with an empty `code` to get the enrolment-only session. True: ask the user for a code (an empty-code probe would burn an attempt and log `auth.mfa.failed`). Only sent after the password is proven; a wrong password gets the plain 401 | **Built** (OpenAPI 1.4.0) |
 | Challenge | `POST /auth/mfa/challenge {mfa_token, code, trust_device?}` → token, plus `device_token` when `trust_device` was set and the hospital allows it | **Built (Plan 2)** |
 | Enrol, verify | `POST /auth/mfa/enroll`, `POST /auth/mfa/verify` | **Built (Plan 2)** |
 | Backup codes | 10 codes at enrolment (the gateway's recovery codes; the UI calls them backup codes); each works once | **Built (Plan 2)** |

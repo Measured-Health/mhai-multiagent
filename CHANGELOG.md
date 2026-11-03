@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `mfa_enrolled` on the `MFARequired` sign-in reply (`POST /auth/login`,
+  OpenAPI 1.4.0). `false`: the account has no two-step set up, so the
+  frontend sends the challenge with an empty code to get the enrolment-only
+  session; `true`: ask the user for a code. It is the same enrolment value
+  the sign-in check read and that the challenge uses, and is sent only
+  after the password was proven. Wrong-password replies, audit rows and
+  logs are unchanged. Additive (`oasdiff`).
 - Feedback and corrections with a two-person rule (Plan 4, part 4a).
   `POST /feedback` (validate, or suggest a correction on your own completed
   question), `GET /feedback/stats/mine`, `GET /corrections`, `/mine` and

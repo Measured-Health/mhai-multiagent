@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.5.0"
+  version: "1.6.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1240,10 +1240,17 @@ components:
         device_token: { type: string, description: Only from the challenge, when trust_device was set and allowed. }
     MFARequired:
       type: object
-      required: [mfa_required, mfa_token]
+      required: [mfa_required, mfa_token, mfa_enrolled]
       properties:
         mfa_required: { type: boolean, enum: [true] }
         mfa_token: { type: string }
+        mfa_enrolled:
+          type: boolean
+          description: |
+            Whether the account already has two-step set up. False: send the
+            challenge with an empty code to get the enrolment-only session.
+            True: ask the user for a code. Sent only after the password was
+            proven, and only in this reply.
     User:
       type: object
       required: [id, role, roles, email, display_name, full_name, role_title, specialty, hospital, mfa_enabled,

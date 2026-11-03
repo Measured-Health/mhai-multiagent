@@ -531,7 +531,8 @@ func TestMFARequiredBranch(t *testing.T) {
 	if r.code != 200 {
 		t.Fatalf("status %d %s", r.code, r.raw)
 	}
-	if strings.Join(keys(r.body), ",") != "mfa_required,mfa_token" || r.body["mfa_required"] != true {
+	if strings.Join(keys(r.body), ",") != "mfa_enrolled,mfa_required,mfa_token" || r.body["mfa_required"] != true ||
+		r.body["mfa_enrolled"] != true {
 		t.Fatalf("body keys %v", keys(r.body))
 	}
 	tok, _ := r.body["mfa_token"].(string)
@@ -562,6 +563,49 @@ func TestMFARequiredBranch(t *testing.T) {
 	c := seedUser(t, seedHospital(t, hospitalOpts{requireMFAClinicians: true}), true, "clinician")
 	if r := e.login(t, c.email, testPassword, newIP()); r.body["mfa_required"] != true {
 		t.Fatalf("clinician with hospital policy: %s", r.raw)
+	}
+}
+
+func TestMFARequiredReportsEnrolment(t *testing.T) {
+	e := newEnv(t)
+	hid := seedHospital(t, hospitalOpts{})
+	enrolled := seedUser(t, hid, true, "hospital_admin")
+	bare := seedUser(t, hid, false, "hospital_admin")
+	for _, c := range []struct {
+		u    user
+		want bool
+	}{{enrolled, true}, {bare, false}} {
+		r := e.login(t, c.u.email, testPassword, newIP())
+		if r.code != 200 || r.body["mfa_required"] != true {
+			t.Fatalf("status %d %s", r.code, r.raw)
+		}
+		got, ok := r.body["mfa_enrolled"].(bool)
+		if !ok || got != c.want {
+			t.Fatalf("mfa_enrolled = %v (present %v), want %v: %s", got, ok, c.want, r.raw)
+		}
+		// The audit row is the one it always was, with its old payload.
+		assertAudit(t, r, "auth.login.succeeded", c.u.email)
+		var payload string
+		if err := super.QueryRow(context.Background(), `SELECT payload::text FROM audit_log WHERE request_id = $1`,
+			r.hdr.Get("X-Request-ID")).Scan(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(payload, "enrolled") {
+			t.Fatalf("audit payload %s", payload)
+		}
+		// The token agrees with the flag.
+		rec, err := e.svc.MFATokens().Lookup(context.Background(), r.body["mfa_token"].(string))
+		if err != nil || rec.Enrolled != c.want {
+			t.Fatalf("token enrolled %v, %v", rec.Enrolled, err)
+		}
+	}
+	// A wrong password is the plain 401, with no such field, for both.
+	for _, u := range []user{enrolled, bare} {
+		r := e.login(t, u.email, "not-the-password-at-all", newIP())
+		if r.code != 401 || strings.Contains(r.raw, "mfa_enrolled") || strings.Contains(r.raw, "mfa_required") {
+			t.Fatalf("wrong password: %d %s", r.code, r.raw)
+		}
+		assertAudit(t, r, "auth.login.failed", u.email)
 	}
 }
 
