@@ -993,6 +993,24 @@ the subject, the user or the error message.
   words (for example "No longer needed"), with the count of jobs.
 - A bad id list (empty, over 50) or a bad reason is **422 `invalid`**.
 
+#### 14.8.3a Guardrail statistics (HGA stats)
+
+Source: the backend's Plan 4 design (§6.3). No screen asks for it yet; it
+is offered so the app can show it, and so the §14.7 `quality` area can reuse
+its query. Served by the core service; the shape is in
+`services/core/openapi.yaml` (`GuardrailsOut`).
+
+| Endpoint | Behaviour | Status |
+|---|---|---|
+| `GET /platform/guardrails?period=7d\|30d\|90d` | → `{period, from, to, updated_at, all, hospitals}`; `all` and each hospital row (`{hospital: {id, name}, ...}`) carry `answers`, `pass`, `regenerate`, `escalate`, `degraded`, `pass_share`, `regenerate_share`, `escalate_share`, every one guarded (`{value, suppressed}`, §14.7). Active hospitals only. Platform admins and auditors; two-step. Cached 60 s per period; 6 reads a minute per session, then **429 `rate_limited`**. Not audited | **New** (built, Plan 4) |
+
+The server applies the §14.7 small-group duties: no count of 1–4; in each
+set that adds up (a row's answers and its parts, each column's `all` and its
+hospitals) the hidden members total at least 5 and never exactly one is
+hidden; a share is hidden when its numerator or complement is 1–4 or either
+count is hidden; and no hidden value can be worked out from `all` and the
+shown rows. Shares are 0 to 1 with four decimal places.
+
 #### 14.8.4 Settings
 
 Built on sample data (Plan 8c): `apps/platform/lib/api/settings-contract.ts`

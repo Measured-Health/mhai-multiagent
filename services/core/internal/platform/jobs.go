@@ -436,12 +436,18 @@ func sortOut(ids []string, done []intel.JobRef) (yes, no []string) {
 	return yes, no
 }
 
-// reserveRetry counts one retry call against the session's minute (C32):
-// a counter row in idempotency_keys, taken by one conditional upsert (the
-// row lock orders parallel calls), before any job is looked at. false is
-// over the limit. An error fails closed (the caller answers 503).
+// reserveRetry counts one retry call against the session's minute (C32).
 func (d Deps) reserveRetry(r *http.Request, p authz.Principal) (bool, error) {
-	sum := sha256.Sum256([]byte("platform.jobs.retry.v1\x00" + p.SessionID))
+	return d.reserveRate(r, p, retryScope, "platform.jobs.retry.v1", RetriesPerMinute)
+}
+
+// reserveRate counts one call against the session's minute under scope: a
+// counter row in idempotency_keys (the key a hash of label and the session
+// id), taken by one conditional upsert (the row lock orders parallel
+// calls), before any work is done. false is over limit. An error fails
+// closed (the caller answers 503).
+func (d Deps) reserveRate(r *http.Request, p authz.Principal, scope, label string, limit int) (bool, error) {
+	sum := sha256.Sum256([]byte(label + "\x00" + p.SessionID))
 	key := hex.EncodeToString(sum[:])
 	allowed := false
 	err := d.tx(r.Context(), func(tx pgx.Tx) error {
@@ -453,7 +459,7 @@ func (d Deps) reserveRetry(r *http.Request, p authz.Principal) (bool, error) {
 			SET status = CASE WHEN k.expires_at <= now() THEN 1 ELSE k.status + 1 END,
 			    expires_at = CASE WHEN k.expires_at <= now() THEN now() + interval '1 minute' ELSE k.expires_at END
 			WHERE k.expires_at <= now() OR k.status < $3
-			RETURNING k.status`, retryScope, key, RetriesPerMinute).Scan(&n)
+			RETURNING k.status`, scope, key, limit).Scan(&n)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}

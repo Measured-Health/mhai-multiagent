@@ -55,7 +55,8 @@ func Register(m *authz.Mux, d Deps) {
 	// an intelligence client is set.
 	feedback.Register(m, feedback.Deps{Pool: d.Pool, Intel: d.Intel, Log: a.Log})
 	// The platform app's audit log reads (Plan 4 spec §5.2), system
-	// health (§6.1) and the failed jobs (§6.2).
+	// health (§6.1), the failed jobs (§6.2) and the guardrail statistics
+	// (§6.3).
 	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log, MasterKey: a.MFAKey,
 		SecurityContact: d.SecurityContact, Walk: d.AuditWalk, Health: d.Health, Intel: d.Intel,
 		Auth: a, QueryCap: d.QueryCap})

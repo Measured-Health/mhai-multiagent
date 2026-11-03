@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.8.0"
+  version: "1.9.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1153,6 +1153,57 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/guardrails:
+    get:
+      operationId: getPlatformGuardrails
+      summary: Guardrail (HGA) statistics across the active hospitals, under the small-group rules.
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        New (Plan 4 spec §6.3; not in the frontend contract yet). Per active
+        hospital and across all of them (`all`), over the last `period`
+        (`7d`, `30d` or `90d`, required): the answers, and of those
+        `pass`, `regenerate` and `escalate` (a missing or unknown decision
+        counts as `escalate`), the `degraded` ones, and the three shares of
+        `answers`. Hospitals that aren't active have no row and aren't in
+        `all`.
+
+        Every value is guarded, `{value, suppressed}`, by the small-group
+        rules: a count of 1 to 4 is `{value: null, suppressed: true}`, 0 is
+        0; in each set that adds up (a row's answers and its three parts,
+        each column's `all` and its hospitals, degraded's `all` and its
+        hospitals) enough is hidden that the hidden members together are at
+        least 5 and never exactly one is hidden; a share is hidden when its
+        numerator or its complement is 1 to 4 or either count is hidden; and
+        more is hidden until no hidden value can be worked out from the
+        shown ones (row sums, `all` minus the shown rows). A share is 0 to 1
+        with four decimal places; `{value: null, suppressed: false}` is no
+        answers to divide by. `from` and `to` bound the period;
+        `updated_at` is when the figures were taken. Each period is computed
+        at most once a minute (the same response within that minute). Six
+        reads a minute per session, then 429 `rate_limited`. Not recorded in
+        the audit log (aggregates about no person).
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: period, in: query, required: true, schema: { type: string, enum: [7d, 30d, 90d] } }
+      responses:
+        "200":
+          description: The guarded statistics.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GuardrailsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
   /platform/jobs:
     get:
       operationId: listPlatformJobs
@@ -1881,6 +1932,54 @@ components:
       properties:
         jobs: { type: array, items: { $ref: "#/components/schemas/Job" } }
         next_cursor: { type: string, nullable: true }
+    GuardedCount:
+      type: object
+      description: "A count under the small-group rule. Never 1 to 4; hidden is `{value: null, suppressed: true}`."
+      required: [value, suppressed]
+      additionalProperties: false
+      properties:
+        value: { type: integer, minimum: 0, nullable: true }
+        suppressed: { type: boolean }
+    GuardedShare:
+      type: object
+      description: "A share (0 to 1, four decimal places) under the small-group rule; `{value: null, suppressed: false}` is nothing to divide by."
+      required: [value, suppressed]
+      additionalProperties: false
+      properties:
+        value: { type: number, minimum: 0, maximum: 1, nullable: true }
+        suppressed: { type: boolean }
+    GuardrailRates:
+      type: object
+      required: [answers, pass, regenerate, escalate, degraded, pass_share, regenerate_share, escalate_share]
+      properties:
+        answers: { $ref: "#/components/schemas/GuardedCount" }
+        pass: { $ref: "#/components/schemas/GuardedCount" }
+        regenerate: { $ref: "#/components/schemas/GuardedCount" }
+        escalate: { $ref: "#/components/schemas/GuardedCount" }
+        degraded: { $ref: "#/components/schemas/GuardedCount" }
+        pass_share: { $ref: "#/components/schemas/GuardedShare" }
+        regenerate_share: { $ref: "#/components/schemas/GuardedShare" }
+        escalate_share: { $ref: "#/components/schemas/GuardedShare" }
+    GuardrailsOut:
+      type: object
+      description: Plan 4 spec §6.3 (New).
+      required: [period, from, to, updated_at, all, hospitals]
+      additionalProperties: false
+      properties:
+        period: { type: string, enum: [7d, 30d, 90d] }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        all: { $ref: "#/components/schemas/GuardrailRates" }
+        hospitals:
+          type: array
+          items:
+            allOf:
+              - $ref: "#/components/schemas/GuardrailRates"
+              - type: object
+                required: [hospital]
+                properties:
+                  hospital: { $ref: "#/components/schemas/PersonRef" }
     HealthOut:
       type: object
       description: Contract §14.8.2's reading, without the parts and block that don't exist yet (Plan 4 decision 7).

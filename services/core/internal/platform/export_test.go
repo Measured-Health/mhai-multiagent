@@ -7,3 +7,7 @@ func SetLeaderSession(stmt string) (restore func()) {
 	leaderSession = stmt
 	return func() { leaderSession = old }
 }
+
+// ResetGuardrailsCache empties the guardrail statistics' cache, so a test
+// sees what it seeded.
+func ResetGuardrailsCache() { guardrailsCache.reset() }

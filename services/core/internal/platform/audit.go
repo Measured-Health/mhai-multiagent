@@ -85,8 +85,8 @@ func (d Deps) log() *slog.Logger {
 }
 
 // Register adds the audit log reads, the chain check and the auditors'
-// writes (verify.go), system health (health.go) and the failed jobs
-// (jobs.go).
+// writes (verify.go), system health (health.go), the failed jobs (jobs.go)
+// and the guardrail statistics (guardrails.go).
 func Register(m *authz.Mux, d Deps) {
 	read := authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin, authz.RoleAuditor}}
 	authz.Route(m, http.MethodGet, "/platform/audit", read, http.HandlerFunc(d.list))
@@ -96,6 +96,7 @@ func Register(m *authz.Mux, d Deps) {
 	registerVerify(m, d)
 	registerHealth(m, d)
 	registerJobs(m, d)
+	registerGuardrails(m, d)
 }
 
 // caller is the verified platform principal, or a 500 (the guard admits
