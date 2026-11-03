@@ -43,5 +43,6 @@ The same table is published as `services/intelligence/intelligence/boundary/oper
 | Operation | Kind | Roles | svc:core | Hospital | BFF direct | Timeout | Test only |
 |---|---|---|---|---|---|---|---|
 | `echo.ping` | req | `clinician` | yes | yes | yes | 5s | yes |
+| `pipeline.approve_correction` | job | `clinician` | no | yes | no | 5m0s | no |
 | `pipeline.health` | req | - | yes | no | no | 2s | no |
 | `pipeline.run_query` | job | `clinician` | no | yes | no | 10m0s | no |

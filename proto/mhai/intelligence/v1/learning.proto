@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package mhai.intelligence.v1;
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb;intelpb";
+
+// ApproveCorrectionJob carries the ids only. The worker reads the correction
+// from the database under the hospital in the verified job token. Core
+// publishes it only for the clinician who approved the correction and did
+// not submit it (the operation's second_person rule).
+message ApproveCorrectionJob {
+  string job_id = 1;
+  string correction_id = 2;
+}

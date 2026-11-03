@@ -33,7 +33,13 @@ type Operation struct {
 	BFFDirect bool
 	// TestOnly rows exist for the echo worker and are refused in production.
 	TestOnly bool
-	Timeout  time.Duration
+	// SecondPerson: the job's subject is a decision one clinician made on
+	// another's submission (the two-person rule, spec §4.7). core's job
+	// publisher refuses it unless the caller is the subject's decider and
+	// not its submitter; intel must register a subject loader for the row.
+	// Python carries the flag as data and never acts on it.
+	SecondPerson bool
+	Timeout      time.Duration
 	// RequestSchema and ResponseSchema are protobuf message names; empty
 	// means none (a job has no reply message).
 	RequestSchema  string
@@ -56,6 +62,11 @@ var operations = []Operation{
 		Name: "pipeline.run_query", Service: "pipeline", Op: "run_query", Kind: reqtoken.KindJob,
 		AnyRole: []string{RoleClinician}, NeedsHospital: true, Timeout: 10 * time.Minute,
 		RequestSchema: "mhai.intelligence.v1.RunQueryJob",
+	},
+	{
+		Name: "pipeline.approve_correction", Service: "pipeline", Op: "approve_correction", Kind: reqtoken.KindJob,
+		AnyRole: []string{RoleClinician}, NeedsHospital: true, SecondPerson: true, Timeout: 5 * time.Minute,
+		RequestSchema: "mhai.intelligence.v1.ApproveCorrectionJob",
 	},
 }
 
@@ -96,6 +107,9 @@ func validateOperation(o Operation) error {
 	}
 	if o.BFFDirect && (o.Kind != reqtoken.KindReq || len(o.AnyRole) == 0) {
 		return fmt.Errorf("authz: operation %s: bff_direct needs a request/reply operation with at least one role", o.Name)
+	}
+	if o.SecondPerson && (o.Kind != reqtoken.KindJob || len(o.AnyRole) == 0 || o.SvcCore) {
+		return fmt.Errorf("authz: operation %s: second_person needs a job that a user with a role starts (no svc:core)", o.Name)
 	}
 	return nil
 }
@@ -180,6 +194,7 @@ type jsonOperation struct {
 	RequestSchema  string   `json:"request_schema"`
 	ResponseSchema string   `json:"response_schema"`
 	TestOnly       bool     `json:"test_only"`
+	SecondPerson   bool     `json:"second_person"`
 }
 
 // OperationsJSON renders ops as operations.json, sorted by name.
@@ -196,7 +211,7 @@ func OperationsJSON(ops []Operation) ([]byte, error) {
 			Name: o.Name, Service: o.Service, Op: o.Op, Kind: string(o.Kind), AnyRole: roles,
 			SvcCore: o.SvcCore, NeedsHospital: o.NeedsHospital, BFFDirect: o.BFFDirect,
 			TimeoutMS: o.Timeout.Milliseconds(), RequestSchema: o.RequestSchema,
-			ResponseSchema: o.ResponseSchema, TestOnly: o.TestOnly,
+			ResponseSchema: o.ResponseSchema, TestOnly: o.TestOnly, SecondPerson: o.SecondPerson,
 		})
 	}
 	b, err := json.MarshalIndent(rows, "", "  ")

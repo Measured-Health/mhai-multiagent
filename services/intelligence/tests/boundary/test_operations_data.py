@@ -19,6 +19,7 @@ REQUIRED = {
     "request_schema",
     "response_schema",
     "test_only",
+    "second_person",
 }
 
 
@@ -26,7 +27,12 @@ def test_operations_json_is_package_data() -> None:
     raw = (resources.files("intelligence.boundary") / "operations.json").read_text()
     rows = json.loads(raw)
     names = {r["name"] for r in rows}
-    assert {"pipeline.run_query", "pipeline.health", "echo.ping"} <= names
+    assert {
+        "pipeline.run_query",
+        "pipeline.health",
+        "echo.ping",
+        "pipeline.approve_correction",
+    } <= names
     for r in rows:
         assert set(r) == REQUIRED
     assert [r["name"] for r in rows if r["bff_direct"]] == ["echo.ping"]

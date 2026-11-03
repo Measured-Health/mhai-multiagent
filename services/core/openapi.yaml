@@ -605,6 +605,8 @@ components:
             - internal_error
             - method_not_allowed
             - payload_too_large
+            - self_approval
+            - already_decided
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:

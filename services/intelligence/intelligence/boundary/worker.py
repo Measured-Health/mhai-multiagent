@@ -72,7 +72,12 @@ from intelligence.boundary.operations import Operation, Operations
 
 # The request and response types the operations name, registered in the
 # default descriptor pool for _decoder_for.
-from intelligence.boundary.pb import echo_pb2, envelope_pb2, pipeline_pb2  # noqa: F401
+from intelligence.boundary.pb import (  # noqa: F401
+    echo_pb2,
+    envelope_pb2,
+    learning_pb2,
+    pipeline_pb2,
+)
 from intelligence.boundary.replay import JtiSet
 from intelligence.boundary.verify import (
     REPLY_CORE,

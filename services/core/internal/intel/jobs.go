@@ -36,7 +36,11 @@ const jsStoreFailed jetstream.ErrorCode = 10077
 // least a second away; a deadline past the operation's limit (clock skew,
 // a long-lived row) is cut to the limit, never refused.
 //
-// Errors: ErrNotAllowed, ErrMisuse, ErrNoHospital, ErrDeadline (nothing
+// A second_person operation (the two-person rule) is published only when
+// the database says the caller decided its subject and didn't submit it
+// (ErrSecondPerson; subjects.go). Republish goes through the same path.
+//
+// Errors: ErrNotAllowed, ErrMisuse, ErrSecondPerson, ErrNoHospital, ErrDeadline (nothing
 // published); ErrBackpressure (JOBS refused it), ErrNoResponders,
 // ErrTimeout, ErrPublish. Map any of them with Code.
 func (c *Client) PublishJob(ctx context.Context, caller Caller, opName string, jobID uuid.UUID, msg proto.Message, deadline time.Time) error {
@@ -71,6 +75,11 @@ func (c *Client) publishJob(ctx context.Context, caller Caller, opName, msgID st
 	}
 	if !validMsgID(msgID) || c.JS == nil {
 		return ErrMisuse
+	}
+	if op.SecondPerson {
+		if err := c.checkSecondPerson(ctx, op, caller, msg); err != nil {
+			return err
+		}
 	}
 	var subject string
 	switch {

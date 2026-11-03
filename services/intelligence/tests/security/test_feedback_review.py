@@ -80,14 +80,19 @@ def test_submitter_cannot_approve_own_correction(system):
     assert _corrections(system["kb"]) == []
 
 
-def test_feedback_has_no_boundary_operation():
-    # Replaces "a non-clinician cannot submit or approve": the worker serves
-    # only the operations core's table names, and none is feedback or
-    # approval. Adding one needs a role in operations.json, which is core's
-    # table to gate (Python holds no permission rule).
+def test_only_feedback_operation_is_approve_correction():
+    # The worker serves only the operations core's table names. The one that
+    # touches feedback is pipeline.approve_correction: clinicians only, never
+    # bff_direct. second_person is data here: core enforces the rule when it
+    # publishes the job, and Python never acts on the flag.
     ops = json.loads((resources.files("intelligence.boundary") / "operations.json").read_text())
-    for op in ops:
-        assert not re.search(r"feedback|correction|approve", op["name"]), op["name"]
+    named = [op for op in ops if re.search(r"feedback|correction|approve", op["name"])]
+    assert [op["name"] for op in named] == ["pipeline.approve_correction"]
+    [op] = named
+    assert op["any_role"] == ["clinician"]
+    assert op["bff_direct"] is False
+    assert op["svc_core"] is False
+    assert op["second_person"] is True
 
 
 def test_boundary_code_never_reaches_the_feedback_loop():

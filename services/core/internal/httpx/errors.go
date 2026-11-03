@@ -34,6 +34,9 @@ var Codes = map[string]int{
 	// API uses, and a body over MaxBody, refused before the handler chain.
 	"method_not_allowed": http.StatusMethodNotAllowed,
 	"payload_too_large":  http.StatusRequestEntityTooLarge,
+	// Plan 4 (ADR 0012, additive): the two-person rule on corrections.
+	"self_approval":   http.StatusForbidden,
+	"already_decided": http.StatusConflict,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -58,6 +61,8 @@ var titles = map[string]string{
 	"internal_error":     "Internal error",
 	"method_not_allowed": "Method not allowed",
 	"payload_too_large":  "Payload too large",
+	"self_approval":      "Not allowed",
+	"already_decided":    "Already decided",
 }
 
 var details = map[string]string{
@@ -79,6 +84,8 @@ var details = map[string]string{
 	"internal_error":     "Something went wrong.",
 	"method_not_allowed": "The method is not allowed.",
 	"payload_too_large":  "The request body is too large.",
+	"self_approval":      "You can't decide your own correction.",
+	"already_decided":    "This correction has already been decided.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.

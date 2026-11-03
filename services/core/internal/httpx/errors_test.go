@@ -37,6 +37,7 @@ func TestCodesCatalogue(t *testing.T) {
 		"rate_limited": 429, "login_locked": 429, "not_ready": 503,
 		"unavailable": 503, "internal_error": 500,
 		"method_not_allowed": 405, "payload_too_large": 413,
+		"self_approval": 403, "already_decided": 409,
 	}
 	if len(Codes) != len(want) {
 		t.Fatalf("Codes has %d entries, want %d", len(Codes), len(want))
@@ -270,6 +271,25 @@ func TestErrorRetryAfter(t *testing.T) {
 		}
 		if !strings.Contains(rec.Body.String(), `"code":"unavailable"`) {
 			t.Errorf("%d: body %s", c.seconds, rec.Body.String())
+		}
+	}
+}
+
+// Plan 4 (ADR 0012, additive): the two-person rule's refusals have fixed
+// text and the platform audience gets the code only.
+func TestTwoPersonCodes(t *testing.T) {
+	for code, want := range map[string][3]any{
+		"self_approval":   {403, "Not allowed", "You can't decide your own correction."},
+		"already_decided": {409, "Already decided", "This correction has already been decided."},
+	} {
+		if Codes[code] != want[0] || titles[code] != want[1] || details[code] != want[2] {
+			t.Errorf("%s: %d %q %q", code, Codes[code], titles[code], details[code])
+		}
+		rec := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { Error(w, r, code) }),
+			bffRequest(http.MethodGet, "/api/v1/probe", ""))
+		var p map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil || rec.Code != want[0] || p["code"] != code || p["title"] != want[1] {
+			t.Errorf("%s: %d %s", code, rec.Code, rec.Body.String())
 		}
 	}
 }

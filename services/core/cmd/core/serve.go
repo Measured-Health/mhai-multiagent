@@ -124,7 +124,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
-	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log, Metrics: &intel.Metrics{}}
+	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log, Metrics: &intel.Metrics{}, Pool: a.pool}
 	a.js = js
 	if cfg.RequestTrustedKeysPath != "" {
 		// The workers' public file: a kid missing from it is one an

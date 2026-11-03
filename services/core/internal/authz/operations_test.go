@@ -156,7 +156,7 @@ func TestOperationsJSON(t *testing.T) {
 		t.Fatalf("rows %d, operations %d", len(rows), len(Operations()))
 	}
 	want := []string{"any_role", "bff_direct", "name", "needs_hospital", "op", "kind", "request_schema",
-		"response_schema", "service", "svc_core", "test_only", "timeout_ms"}
+		"response_schema", "second_person", "service", "svc_core", "test_only", "timeout_ms"}
 	for _, r := range rows {
 		for _, k := range want {
 			if _, ok := r[k]; !ok {
@@ -237,5 +237,45 @@ func TestCatalogueJSON(t *testing.T) {
 	}
 	if !slices.Equal(got.ClinicalRoles, ClinicalRoles()) {
 		t.Errorf("clinical_roles = %v, want %v", got.ClinicalRoles, ClinicalRoles())
+	}
+}
+
+// pipeline.approve_correction is the one job with the two-person rule (spec
+// §4.7): clinicians only, no svc:core, not bff_direct, second_person set.
+func TestApproveCorrectionOperationRow(t *testing.T) {
+	o, ok := OperationByName("pipeline.approve_correction")
+	if !ok || o.Kind != reqtoken.KindJob || !slices.Equal(o.AnyRole, []string{RoleClinician}) ||
+		o.SvcCore || o.BFFDirect || o.TestOnly || !o.NeedsHospital || !o.SecondPerson ||
+		o.Timeout != 5*time.Minute || o.RequestSchema != "mhai.intelligence.v1.ApproveCorrectionJob" || o.ResponseSchema != "" {
+		t.Errorf("pipeline.approve_correction: %+v", o)
+	}
+	for _, other := range Operations() {
+		if other.SecondPerson && other.Name != o.Name {
+			t.Errorf("%s sets second_person", other.Name)
+		}
+	}
+	b, err := OperationsJSON([]Operation{o})
+	if err != nil || !strings.Contains(string(b), `"second_person": true`) {
+		t.Errorf("operations.json lacks second_person: %s %v", b, err)
+	}
+}
+
+// second_person is only meaningful on a job a user starts.
+func TestSecondPersonValidation(t *testing.T) {
+	ok := Operation{Name: "x.y", Service: "x", Op: "y", Kind: reqtoken.KindJob, AnyRole: []string{RoleClinician},
+		SecondPerson: true, Timeout: time.Minute}
+	if err := validateOperation(ok); err != nil {
+		t.Fatalf("valid row refused: %v", err)
+	}
+	for name, mutate := range map[string]func(*Operation){
+		"request/reply": func(o *Operation) { o.Kind = reqtoken.KindReq },
+		"no role":       func(o *Operation) { o.AnyRole = nil },
+		"svc:core":      func(o *Operation) { o.SvcCore = true },
+	} {
+		o := ok
+		mutate(&o)
+		if err := validateOperation(o); err == nil {
+			t.Errorf("%s: a second_person row was accepted", name)
+		}
 	}
 }

@@ -13,7 +13,25 @@
     "timeout_ms": 5000,
     "request_schema": "mhai.intelligence.v1.PingRequest",
     "response_schema": "mhai.intelligence.v1.PingResponse",
-    "test_only": true
+    "test_only": true,
+    "second_person": false
+  },
+  {
+    "name": "pipeline.approve_correction",
+    "service": "pipeline",
+    "op": "approve_correction",
+    "kind": "job",
+    "any_role": [
+      "clinician"
+    ],
+    "svc_core": false,
+    "needs_hospital": true,
+    "bff_direct": false,
+    "timeout_ms": 300000,
+    "request_schema": "mhai.intelligence.v1.ApproveCorrectionJob",
+    "response_schema": "",
+    "test_only": false,
+    "second_person": true
   },
   {
     "name": "pipeline.health",
@@ -27,7 +45,8 @@
     "timeout_ms": 2000,
     "request_schema": "mhai.intelligence.v1.HealthRequest",
     "response_schema": "mhai.intelligence.v1.HealthResponse",
-    "test_only": false
+    "test_only": false,
+    "second_person": false
   },
   {
     "name": "pipeline.run_query",
@@ -43,6 +62,7 @@
     "timeout_ms": 600000,
     "request_schema": "mhai.intelligence.v1.RunQueryJob",
     "response_schema": "",
-    "test_only": false
+    "test_only": false,
+    "second_person": false
   }
 ]

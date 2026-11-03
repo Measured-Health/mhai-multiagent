@@ -41,6 +41,10 @@ var (
 	// ErrAuditWrite: core couldn't append to the audit chain (the
 	// database or a policy refused it): core's failure, not the worker's.
 	ErrAuditWrite = errors.New("intel: audit append failed")
+	// ErrSecondPerson: the two-person rule refused a job: the caller isn't
+	// the clinician who decided its subject, decided it themselves, or
+	// nobody has decided it (C28). Nothing was published.
+	ErrSecondPerson = errors.New("intel: the two-person rule refused the job")
 	// ErrCreatorUnusable: a job's creator can't use the service any more
 	// (inactive, another hospital, hospital not running, no allowed role).
 	ErrCreatorUnusable = errors.New("intel: the job's creator can no longer use the service")
@@ -124,7 +128,7 @@ func Code(err error) (code string, retryAfter int) {
 		return "unavailable", 0
 	case errors.Is(err, ErrAtCap):
 		return "rate_limited", 0
-	case errors.Is(err, ErrNotAllowed):
+	case errors.Is(err, ErrNotAllowed), errors.Is(err, ErrSecondPerson):
 		return "forbidden", 0
 	}
 	return "internal_error", 0

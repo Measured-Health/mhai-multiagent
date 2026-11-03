@@ -35,6 +35,7 @@ _FIELDS: dict[str, type] = {
     "request_schema": str,
     "response_schema": str,
     "test_only": bool,
+    "second_person": bool,
 }
 
 
@@ -56,6 +57,9 @@ class Operation:
     request_schema: str
     response_schema: str
     test_only: bool
+    # Data only: core enforces the two-person rule when it publishes the job
+    # (internal/intel), and nothing in Python acts on this flag.
+    second_person: bool
 
 
 def _packaged(name: str) -> bytes:
@@ -112,6 +116,7 @@ def _row(raw: Any, roles: frozenset[str]) -> Operation:
         request_schema=raw["request_schema"],
         response_schema=raw["response_schema"],
         test_only=raw["test_only"],
+        second_person=raw["second_person"],
     )
 
 

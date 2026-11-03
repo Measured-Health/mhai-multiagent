@@ -36,6 +36,11 @@ var dbTxAllowedFiles = map[string]string{
 	// before re-minting. Request paths reserve in-flight slots and append
 	// facts inside the caller's authz.Tx instead.
 	"internal/intel/sweeper.go": "the publish sweeper (db.WithJobs) and Republish's creator re-check (db.WithAuth)",
+	// The two-person check PublishJob makes before it mints a second_person
+	// job: it reads the job's subject under the Caller's hospital (the
+	// token's hid) and runs for the sweeper's Republish too, which has no
+	// principal, so it can't use authz.Tx.
+	"internal/intel/subjects.go": "the subject loader's read of a second_person job (db.WithHospital)",
 	// Core's audit drainer: moves every hospital's outbox facts onto the
 	// chain as mhai_audit_drain, with no principal (F2, F28).
 	"internal/intel/drain.go": "the audit drainer (db.WithAuditDrain)",
