@@ -498,3 +498,314 @@ services/intelligence/
 **Phase 4a done when:** Task 14's 4a slice passes (the smoke test: a clinician asks, a second clinician approves, the buffer row and `correction.applied` reach the chain), CI is green, and the PR is reviewed.
 
 ---
+## Phase 4b: the audit log
+
+### Task 8: Migration 00014 and the audit catalogue (spec §5.3, §5.5, §9)
+
+**Files:**
+- Create:
+  - `services/core/internal/db/migrations/00014_platform_reads.sql`, `services/core/internal/db/platform_integration_test.go`;
+  - `services/core/internal/audit/{catalogue.go,catalogue_test.go}`;
+  - `testdata/web-audit-vocabulary.json`.
+
+**Schema:**
+- `audit_verify_runs` (spec §5.4 columns):
+  - a `state` CHECK;
+  - `audit_verify_one_running` unique `((true)) WHERE state = 'running'`;
+  - `outcome_note` ≤ 1000;
+  - RLS `FORCE`, with a `mhai_platform` policy over all rows.
+- `mhai_platform`:
+  - `SELECT`, `INSERT` and `UPDATE` on `audit_verify_runs`;
+  - `INSERT` on `audit_log`, plus the sequence and `audit_chain_head()`, under `platform_append`, which allows only the eight actions in spec §5.5.
+- SECURITY DEFINER functions, with `EXECUTE` for `mhai_platform` only:
+  - `mhai_health_timings(window interval)`, where window is `1 hour` or `24 hours` only;
+  - `mhai_health_failures()`;
+  - `mhai_platform_jobs(...)`;
+  - `mhai_guardrail_counts(from, to)`.
+
+  Their bodies are filled by Tasks 11–13. This task creates them with their final signatures and a `RAISE` body, so the grants and the C17 test exist from the start.
+
+**Interfaces:**
+- `audit.Catalogue map[string]Entry`, where `Entry{Type, Kind string; Target func(Event) *Target; Outcome func(Event) string; Flag func(Event) *string; Facts map[string]string /* payload key → facts key */}`.
+- `audit.Unmapped(e)` returns the bare `{id, seq, hash, at, type: "security", kind: "unknown"}`.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `TestEveryActionHasCatalogueRow` (C21): every `Action:` literal under `internal/` and every outbox action in 00008 and 00012 has a row.
+  - `TestCatalogueUsesOnlyWebVocabulary` (C21): every emitted `type`, `kind` and `facts` key is in `testdata/web-audit-vocabulary.json`. The new kinds of spec §5.3 are listed there under `"pending_in_web": [...]` so the test passes, and Task 14 removes that list once mhai-web ships them (TODO.md).
+  - `TestCatalogueNeverEmitsPseudonymShape` (C22): fuzz every row's facts mapping with payloads of the schema's shapes; no output string matches `^P-[A-Z0-9]{4,12}$`.
+  - `TestUnmappedActionSendsNoPayload`.
+  - `TestPlatformRoleHasNoClinicalRows` (C17): as `mhai_platform`, `SELECT` on `clinical_queries`, `clinical_decisions`, `hga_evaluations`, `feedback_events`, `feedback_buffer` and `jobs` fails, and each function's declared result columns match a fixed list.
+  - `TestPlatformAppendOnlyItsActions`.
+  - `TestOneRunningVerifyRun`.
+  - `TestRLSWithoutHospitalSeesNothing` gains the new table.
+- [ ] **Step 2: Run (Go, remote):** `go test -race ./internal/audit/... && go test -race -tags integration -run 'Platform|Verify|RLSWithout' ./internal/db/...` → fail.
+- [ ] **Step 3:** Write the migration, the catalogue and the vocabulary file. The vocabulary is copied from mhai-web `apps/platform/lib/api/audit-contract.ts` and `apps/platform/lib/audit/kinds.ts` at the commit named in the file.
+- [ ] **Step 4:** Run the tests.
+- [ ] **Step 5:** Commit: "Audit catalogue and platform reads: no row grant on clinical tables".
+
+### Task 9: Core, the `/platform/audit` reads (spec §5.2, §5.3, §5.6)
+
+**Files:**
+- Create: `services/core/internal/audit/reader.go`, `services/core/internal/platform/{audit.go,audit_integration_test.go}`
+- Modify: `services/core/internal/server/server.go`, `services/core/openapi.yaml`
+
+**Interfaces:**
+- Routes: `GET /platform/audit`, `/platform/audit/{id}`, `/platform/audit/hospitals` and `/platform/audit/people`, each with `Platform`, `NeedsMFA` and `AnyRole [platform_admin, auditor]`. All run in `db.WithPlatform`.
+- Cursor: `base64url(last_id || sha256(canonical filters)[:16])`. A mismatched filter hash gives 422 `validation_failed`.
+- `total`: `SELECT count(*) FROM (SELECT 1 ... LIMIT 10001)`, with `total_capped` when it returns 10001.
+- `audit.viewed` dedupe: a KV key in the existing idempotency bucket made of `sha256(session id, list, filter hash)`, TTL 5 minutes, written with `Create` (only the first writer audits).
+- `q`: an exact event id (decimal) or a request id (`^[A-Za-z0-9_-]{8,64}$`). It ignores the other filters and writes `audit.searched`.
+- Deferred routes (`/{id}/patients`, `/named-access`, `/exports*`) are not registered, so they get 404 `not_found` from the router.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `TestAuditListShapeAndOrder`: exact keys per contract §14.9, newest first.
+  - `TestAuditFilters`: each filter and its combinations.
+  - `TestAuditCursorBoundToFilters` (C33, audit part).
+  - `TestAuditTotalCapped`.
+  - `TestAuditViewedOncePerPageLoad`: two first-page reads within 5 minutes give one row, and a cursor read writes none.
+  - `TestAuditSearchIgnoresFiltersAndAudits`.
+  - `TestAuditResponsesHaveNoPseudonymOrFreeText` (C22, end to end): seed every action with marker payloads; no response contains the markers or the pseudonym shape.
+  - `TestAuditClinicalAndHospitalRolesRefused`: 403 `not_platform` or `forbidden`.
+  - `TestAuditNeedsTwoStep`.
+  - `TestDeferredAuditRoutes404`.
+  - `TestAuditPeopleNeedsTwoChars`.
+- [ ] **Step 2: Run (Go, remote):** `go test -race -tags integration ./internal/platform/... ./internal/audit/...` → fail.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the tests, `go test -race ./internal/authz/...` (the permission table and its generated doc), and `oasdiff`.
+- [ ] **Step 5:** Commit: "Platform audit log: list, detail, hospitals, people; reads are recorded".
+
+### Task 10: Core, chain verification and the auditors' writes (spec §5.2, §5.4)
+
+**Files:**
+- Create: `services/core/internal/audit/{verify.go,verify_integration_test.go}`
+- Modify:
+  - `services/core/internal/audit/audit.go`: `Verify` becomes `VerifyRange(ctx, pool, budget) (Result, error)`, with `Result{EntriesChecked, ToSeq, ToAt, FirstBroken *int64, FirstBrokenID, FirstBrokenAt, Complete bool}`. `Verify` stays as a wrapper for its existing callers.
+  - `services/core/internal/authz/permissions.go`: `Rule.AuditorWrite` and its validation.
+  - `authz_test.go`.
+  - `services/core/internal/platform/audit.go`, `server.go`.
+  - `services/core/internal/telemetry` (the `audit_chain_broken` metric).
+
+**Interfaces:**
+- Routes:
+  - `POST /platform/audit/verify` and `POST /platform/audit/undisplayable`: `AuditorWrite`, roles platform admin and auditor;
+  - `POST /platform/audit/verify/runs/{id}/outcome`: `AuditorWrite`, `AnyRole [auditor]`;
+  - `GET /platform/audit/verify/runs`, `/runs/{id}` and `/verify/status`.
+- `audit.StartRun(ctx, pool, by *uuid.UUID) (runID, started bool, err)`: an insert that, on a `audit_verify_one_running` conflict, returns the running id.
+- `audit.RunScheduler(ctx, pool, at "06:00" UTC)` takes `pg_try_advisory_lock(hashtext('mhai.audit.verify'))`.
+- The walk runs as `mhai_platform` with a 10-minute budget. The run is `intact` only if `Complete`, `EntriesChecked > 0`, `ToAt` is set and `from_first` holds; a timeout gives `error` with `timed_out`. On `broken`, the metric `audit_chain_broken` is set to 1, which alerts.
+- `open_failure` is true from the latest broken run until a later `intact` run exists *and* the broken run has its outcome note.
+- `authz.validate`: `AuditorWrite` requires `Platform`, an unsafe method, a pattern prefix `/platform/audit/`, no `StepUp` and no `Write`. `TestAuditorWriteRoutesPinned` lists the three routes exactly.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `TestVerifyTimeoutIsErrorNotIntact` (C24): budget 1 ms over 10,000 rows gives `error`/`timed_out`, with no `intact`.
+  - `TestIntactHasProofFields` (C24).
+  - `TestBrokenRunFindsFirstBroken`: tamper one row's hash as superuser.
+  - `TestTwoStartsOneRun` (C25): parallel `POST /verify` return the same `run_id`.
+  - `TestSchedulerOneCopy` (C25): two schedulers with the clock at 06:00 start one run.
+  - `TestAuditorWriteRoutesPinned` and `TestAuditorWriteOutsideAuditPanics` (C26).
+  - `TestAuditorRefusedOtherWrites` (C26): an auditor gets 403 on `POST /platform/jobs/retry` and `/cancel` (registered in Task 12; until then the test table carries them as pending).
+  - `TestOutcomeAuditorOnlyBrokenOnly`: a platform admin gets 403, an `intact` run gets 409 `conflict`, and the note is never in `audit_log.payload`.
+  - `TestOpenFailureClears`.
+  - `TestUndisplayableReportOneRow`.
+- [ ] **Step 2: Run (Go, remote):** `go test -race ./internal/authz/... && go test -race -tags integration ./internal/audit/... ./internal/platform/...` → fail.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the tests and the whole `./internal/...` with `-tags integration`.
+- [ ] **Step 5:** Commit: "Audit chain verification: runs, daily schedule, status, outcome; AuditorWrite".
+
+**Phase 4b done when:** Task 14's 4b slice passes, mhai-web has shipped the seven new kinds or they are knowingly left undisplayable (TODO.md), and CI is green.
+
+---
+
+## Phase 4c: platform operations
+
+### Task 11: Core, system health (spec §6.1)
+
+**Files:**
+- Create: `services/core/internal/platform/{health.go,sampler.go,health_integration_test.go}`
+- Modify:
+  - the `mhai_health_timings` and `mhai_health_failures` bodies, through a new statement block in `00014` (this plan's own migration, still unmerged when 4c is built in the same series) or, if 4b has merged, through `00015_health_functions.sql`;
+  - `services/core/internal/bus/streams.go` (the `health` KV bucket: history 1, TTL 5 minutes);
+  - `services/nats/nats.conf` (`$KV.health.>` for `gateway` only);
+  - `server.go`.
+
+**Interfaces:**
+- `platform.RunSampler(ctx, deps, every 30s)` takes an advisory lock as leader. It builds `HealthOut` from:
+  - `pipeline.health` (`intel.Client.Request` as `intel.System`);
+  - `intel.QueueStats` for each consumer;
+  - the two functions;
+  - model versions.
+
+  It writes the JSON to KV key `health.reading` with `updated_at` = the time it was sampled.
+- `GET /platform/health` reads KV only. It answers 503 `unavailable` when the key is missing or older than 2 minutes.
+- Per decision 7, the `documents` and `clean_up` parts and the `clean_up` block are omitted. `triage` is `{enabled: false}`.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `TestHealthShape`: exact keys and enum values from `ops-contract.ts`.
+  - `TestHealthStaleIs503`.
+  - `TestHealthPollsDontQuery` (C30): 100 parallel GETs give 0 statements in `pg_stat_statements` deltas beyond the sampler's and 0 `pipeline.health` requests (the fake worker's counter).
+  - `TestSamplerOneLeader`.
+  - `TestHealthWorkersProblemWhenNoResponders`.
+  - `TestHealthHasNoHospitalOrUser`: scan the JSON for every seeded hospital id, name and user id.
+- [ ] **Step 2: Run (Go, remote):** `go test -race -tags integration ./internal/platform/... ./internal/bus/...` → fail.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the tests.
+- [ ] **Step 5:** Commit: "Platform health: a sampled reading, cached in KV".
+
+### Task 12: Core, failed jobs, retry and cancel (spec §6.2)
+
+**Files:**
+- Create: `services/core/internal/platform/{jobs.go,jobs_integration_test.go}`
+- Modify: the `mhai_platform_jobs` body (00014 or 00015, as Task 11); `services/core/internal/intel/sweeper.go` (`Republish` for `jobs` rows with `SecondPerson`); `server.go`; `openapi.yaml`
+
+**Interfaces:**
+- `GET /platform/jobs` (platform admin and auditor) returns ids `q_<uuid>` or `j_<uuid>` (departure 4) and `kind` from Plan 3's code-to-kind table.
+- `POST /platform/jobs/retry {ids}` (platform admin, `Write`):
+  - in `db.WithJobs`, a `failed` row → `retry_count+1`, `queued`; then `intel.Republish` after commit;
+  - anything else → `skipped`.
+- `POST /platform/jobs/cancel {ids, reason, note?, mfa_code|backup_code}` (platform admin, `Write`, `StepUp` through `auth.Service.StepUp`).
+- One audit row per call: `job.retried` or `job.cancelled` with `job_count`.
+- Validation: 1–50 ids; `reason` in the set; `other` needs a note; note ≤ 500. Anything else is 422 `validation_failed`.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `TestJobsListShape` (C18): exact contract keys, with no subject, user or message.
+  - `TestRetryDeactivatedCreatorSkipped` (C27).
+  - `TestRetryLostRoleSkipped` (C27).
+  - `TestRetrySecondPersonRechecked` (C28): an `approve_correction` row whose correction is forced (superuser, scratch copy without the CHECK) to `decided_by = submitted_by` → `skipped`, nothing published.
+  - `TestCancelNeedsCode` (C29): no code gives 403 `mfa_required`, a wrong code gives 403 `mfa_invalid`.
+  - `TestCancelRunningSkipped` (C29).
+  - `TestJobsUnknownIdSkipped` (C33, jobs part).
+  - `TestRetryCancelOneAuditRowPerCall`.
+  - `TestCancelNoteNeverLogged` (C16, cancel note).
+  - `TestRetryRateLimited`: 10 calls a minute per session (C32, retry part).
+  - `TestAuditorCantRetryOrCancel` (C26, completing Task 10's pending rows).
+- [ ] **Step 2: Run (Go, remote):** `go test -race -tags integration ./internal/platform/... ./internal/intel/...` → fail.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the tests.
+- [ ] **Step 5:** Commit: "Platform failed jobs: list, retry as the creator, cancel with step-up".
+
+### Task 13: Core, guardrail statistics and the small-group rules (spec §6.3)
+
+**Files:**
+- Create: `services/core/internal/smallgroup/{rules.go,rules_test.go,property_test.go}`, `services/core/internal/platform/{guardrails.go,guardrails_integration_test.go}`
+- Modify: the `mhai_guardrail_counts` body (00014 or 00015); `server.go`; `openapi.yaml`; `docs/specs/2026-10-17-frontend-requirements.md` (a **New** row)
+
+**Interfaces:**
+- `smallgroup.Guarded{Value *int64; Suppressed bool}` and `smallgroup.Guarded{Share *float64; ...}`.
+- `smallgroup.Count(n) Guarded`, rule 1.
+- `smallgroup.Set(total, parts...) []Guarded`, rule 2: hidden members total at least 5, and never exactly one hidden member.
+- `smallgroup.Share(num, den) Guarded`, rule 3.
+- `smallgroup.AcrossRows(all, rows)`, rule 4: when `all` is shown, at least two rows are hidden per column.
+- `GET /platform/guardrails?period=7d|30d|90d` (platform admin and auditor): cached 60 s per period, and rate-limited to 6 a minute per session (429 `rate_limited`).
+
+- [ ] **Step 1: Write the failing tests:**
+  - `TestCountRule` (C19): 0 is shown as 0, 1–4 are hidden, 5+ are shown.
+  - `TestSetNeverOneHidden` (C19): every combination of three parts in 0–6.
+  - `TestShareRule` (C19).
+  - `TestNoHiddenValueDerivable` (C20, property): 10,000 random tables of 1–8 hospitals; a solver over row sums and `all − Σ shown` recovers no hidden cell.
+  - `TestGuardrailsShape`.
+  - `TestGuardrailsActiveHospitalsOnly`.
+  - `TestGuardrailsRateLimited` (C31).
+  - `TestGuardrailsNoRawSmallCount` (C19, end to end): the JSON contains no `"value":1..4`.
+- [ ] **Step 2: Run (Go, remote):** `go test -race ./internal/smallgroup/... && go test -race -tags integration ./internal/platform/...` → fail.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the tests.
+- [ ] **Step 5:** Commit: "Guardrail statistics with the small-group rules".
+
+**Phase 4c done when:** Task 14's 4c slice passes and CI is green.
+
+---
+
+### Task 14: Smoke test, docs and contract (each phase's slice)
+
+**Files:**
+- Modify:
+  - `services/core/internal/smoke/smoke_test.go`;
+  - `services/core/openapi.yaml`;
+  - `README.md`, `ARCHITECTURE.md`, `TODO.md`, `CHANGELOG.md`;
+  - `services/core/README.md`, `services/intelligence/README.md`;
+  - `docs/specs/2026-10-17-frontend-requirements.md`;
+  - `testdata/web-audit-vocabulary.json` (drop `pending_in_web` once mhai-web ships the kinds).
+
+- [ ] **4a slice:** smoke `TestSmokeCorrectionApproved`:
+  1. clinician A asks a question and polls it to `completed`;
+  2. A submits a correction;
+  3. A's approve gets 403 `self_approval`;
+  4. clinician B (same hospital) approves;
+  5. poll until `correction.applied` is on the chain;
+  6. one `feedback_buffer` row exists;
+  7. `audit.Verify` is ok.
+
+  Update the contract §4 rows to **Built (Plan 4)**.
+- [ ] **4b slice:** the smoke test signs in as a synthetic auditor over `api.v1.platform`, runs `POST /platform/audit/verify` and polls it to `intact`, then lists events filtered to `type=review` and sees B's `review_submitted`. Update contract §14.9 (Plan 4 subset Built, deferred rows named).
+- [ ] **4c slice:** the smoke test reads `GET /platform/health` (fresh, `workers ok`), and lists `GET /platform/jobs` after a forced dead letter, then retries it. Update contract §14.8.2 and §14.8.3 to Built, and add the `GET /platform/guardrails` row as Built.
+- [ ] **Each slice:** `make smoke` (remote), `oasdiff` additive, the docs, and the TODO entries removed or added (spec §13).
+- [ ] **Commit per slice:** "Smoke and docs: Plan 4a" (4b, 4c).
+
+---
+
+## Abuse cases → tests
+
+Every abuse case in spec §11.5 has a named test.
+
+| Case | Test (task) |
+|---|---|
+| C1 | `TestSelfApprovalRefusedAndAudited` (5) |
+| C2 | `TestFeedbackSelfDecisionFailsCheck` (1) |
+| C3 | `TestParallelApprovals` (5), `TestApprovePublishesOneJob` (6) |
+| C4 | `TestApproveBodyCannotNameDecider` (5) |
+| C5 | `TestNonCliniciansRefused` (5) |
+| C6 | `TestFeedbackDeciderMustBeActiveClinicianSameHospital` (1), `TestDeciderLostRoleBetweenLoadAndApprove` (5) |
+| C7 | `TestOtherHospitalIs404` (5) |
+| C8 | `TestBufferRefusesUnapproved` (3), `test_unapproved_correction_terminated` (7) |
+| C9 | `test_foreign_correction_is_not_found_and_reads_nothing` (7) |
+| C10 | `TestNoPlan4RoleWritesWeightsOrKB` (3), `test_no_learning_code_writes_weights_or_kb` (7) |
+| C11 | `TestFeedbackOneLivePerQuery` (1), `TestSubmitOnOthersQueryIs404`, `TestSecondFeedbackIs409` (5) |
+| C12 | `TestWithdrawThenApprove409`, `TestApproveThenWithdraw409` (5) |
+| C13 | `TestApproveIdempotent` (6) |
+| C14 | `TestPendingListShowsMaskedTextOnly` (5) |
+| C15 | `TestOnlyCorrectionsReaderSelectsMaskedColumns` (5) |
+| C16 | `TestFeedbackTextNeverLeaves` (5), `test_worker_never_selects_free_text` (7), `TestCancelNoteNeverLogged` (12), `TestOutcomeAuditorOnlyBrokenOnly` (10) |
+| C17 | `TestPlatformRoleHasNoClinicalRows` (8) |
+| C18 | `TestJobsListShape` (12) |
+| C19 | `TestCountRule`, `TestSetNeverOneHidden`, `TestShareRule`, `TestGuardrailsNoRawSmallCount` (13) |
+| C20 | `TestNoHiddenValueDerivable` (13) |
+| C21 | `TestEveryActionHasSchema` (5), `TestEveryActionHasCatalogueRow`, `TestCatalogueUsesOnlyWebVocabulary` (8) |
+| C22 | `TestCatalogueNeverEmitsPseudonymShape` (8), `TestAuditResponsesHaveNoPseudonymOrFreeText` (9) |
+| C23 | `TestApprovalAuditInSameTransaction` (6), `test_commit_then_crash_still_audited` (7) |
+| C24 | `TestVerifyTimeoutIsErrorNotIntact`, `TestIntactHasProofFields` (10) |
+| C25 | `TestTwoStartsOneRun`, `TestSchedulerOneCopy` (10) |
+| C26 | `TestAuditorWriteRoutesPinned`, `TestAuditorWriteOutsideAuditPanics`, `TestAuditorRefusedOtherWrites` (10), `TestAuditorCantRetryOrCancel` (12) |
+| C27 | `TestRetryDeactivatedCreatorSkipped`, `TestRetryLostRoleSkipped` (12) |
+| C28 | `TestPublishJobRefusesSecondPersonMismatch` (4), `TestRetrySecondPersonRechecked` (12) |
+| C29 | `TestJobsJobsRoleCantTouchRunning` (2), `TestCancelNeedsCode`, `TestCancelRunningSkipped` (12) |
+| C30 | `TestHealthPollsDontQuery` (11) |
+| C31 | `TestGuardrailsRateLimited` (13) |
+| C32 | `TestApprovalBudget` (6), `TestRetryRateLimited` (12) |
+| C33 | `TestAuditCursorBoundToFilters` (9), `TestJobsUnknownIdSkipped` (12) |
+
+## Out of this plan
+
+These are in TODO.md "Deferred from Plan 4":
+- **Document upload and `ingest_document`:** the document pipeline plan.
+- **`POST /triage`:** after QDA's evaluation and clinical sign-off.
+- **`GET /kb/search`:** when a screen needs it.
+- **Reset the feedback buffer:** the platform settings plan.
+- **CMA-ES weight proposals and persona capture:** with the intelligence lead, under clinical change control.
+- **KB enrichment:** needs patient ids.
+- **Audit exports, named access and pseudonym reveal.**
+- **The bell and email on a broken chain:** the notifications service.
+- **Hospital-admin correction oversight** (assign, remind, eligible reviewers) and `can_review`: the hospital admin plan.
+
+## Self-review notes
+
+- **Spec coverage:** §4 is Tasks 1–7; §5 is Tasks 8–10; §6.1 is Task 11; §6.2 is Task 12; §6.3 is Task 13; §6.5 is Task 2; §9 is Tasks 5, 6 and 8; §10 is spread across tasks as listed; §11.5 is in the table above; §13 is Task 14.
+- **Real names on main (220ed33):**
+  - `db.WithHospital`, `WithPlatform`, `WithJobs` and `WithAuditDrain`;
+  - `intel.PublishJob`, `Republish`, `ReserveInFlight`, `QueueStats`, `HandleDeadLetter` and `DrainOnce`;
+  - `audit.Write` and `audit.Verify`;
+  - `authz.Operation` and `authz.Rule`;
+  - Python `boundary/jobs/run_query.py`, `jobs_repo.py`, `models.py` and `services/pipeline.py`;
+  - `tests/boundary/*`;
+  - `make proto`, `make proto-check`, `make smoke` and `make test-boundary`.
+- **Migrations are 00011–00014.** PR #82 (00010, hospital activation) was still open on 3 Nov. Tasks 11–13 put their function bodies in 00014 if 4b and 4c land in one series, otherwise in 00015.
+- **Seven new audit kinds,** not six: the design summary of 31 Oct said six, but the §5.3 table lists seven. TODO.md lists all seven.
