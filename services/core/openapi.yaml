@@ -679,7 +679,10 @@ paths:
         waiting), then the body (none, or `{}`; anything else is 422).
         409 `conflict` when the database no longer finds the caller an
         active clinician of the hospital. The decider is always the
-        token's user. A refusal is audited.
+        token's user. A refusal is audited. An approval queues the
+        `approve_correction` job in the same transaction and publishes it
+        after the commit; 204 even when the publish fails or the hospital
+        has 20 such jobs in flight (the job then waits for the sweeper).
       tags: [corrections]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: &decideErrors [unauthenticated, token_expired, mfa_required, forbidden, not_platform, self_approval, not_found, conflict, already_decided, validation_failed, not_ready, internal_error]

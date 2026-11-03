@@ -69,3 +69,11 @@ func TestOnlyCorrectionsReaderSelectsMaskedColumns(t *testing.T) {
 		t.Fatalf("checked %d files, reader seen %v: the test proves nothing", checked, readerSeen)
 	}
 }
+
+// SetAfterApproveAudit sets the hook Decide runs right after an approval's
+// audit.Write, inside its transaction (C23), and returns the restore.
+func SetAfterApproveAudit(f func() error) func() {
+	old := afterApproveAudit
+	afterApproveAudit = f
+	return func() { afterApproveAudit = old }
+}

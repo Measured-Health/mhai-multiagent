@@ -13,6 +13,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 )
 
 // The store is the only code that reads or writes feedback_events, and the
@@ -150,10 +151,15 @@ type Decision struct {
 	Body []byte
 }
 
-// Decided is what Decide did. JobID is the approve_correction job's id for
-// an approval (recorded in correction.approved); uuid.Nil otherwise.
+// Decided is what Decide did. For an approval: JobID is the
+// approve_correction job's id (the jobs row, and correction.approved's
+// job_id), Deadline its deadline, and Publish whether it is within the
+// hospital's in-flight budget (intel.QueueJob), so the caller publishes it
+// after the commit; past the budget the sweeper does. Zero otherwise.
 type Decided struct {
-	JobID uuid.UUID
+	JobID    uuid.UUID
+	Deadline time.Time
+	Publish  bool
 }
 
 // Decide approves, rejects or withdraws correction id as the caller.
@@ -165,9 +171,10 @@ type Decided struct {
 // the decider (no longer an active clinician of the hospital) is
 // ErrConflict.
 //
-// An approval is one conditional UPDATE and correction.approved, with the
-// job id chosen here; Plan 4 Task 6 inserts the jobs row in this same
-// transaction (approveJob) and publishes after the commit.
+// An approval is, in this one transaction: the conditional UPDATE, the
+// queued approve_correction jobs row (approveJob, created by the caller,
+// with the job id chosen here), and correction.approved naming that job.
+// The caller publishes the job after the commit (spec §4.5).
 func (s Store) Decide(ctx context.Context, hid, me, id uuid.UUID, rid string, d Decision) (Decided, error) {
 	var out Decided
 	var refused error
@@ -244,11 +251,17 @@ func (s Store) Decide(ctx context.Context, hid, me, id uuid.UUID, rid string, d 
 			return ErrDecided // unreachable under the row lock
 		}
 		if d.Kind == "approve" {
-			if err := approveJob(ctx, tx, id, out.JobID); err != nil {
+			if out.Deadline, out.Publish, err = approveJob(ctx, tx, hid, me, id, out.JobID, rid); err != nil {
 				return err
 			}
 		}
-		return audit.Write(ctx, tx, e)
+		if err := audit.Write(ctx, tx, e); err != nil {
+			return err
+		}
+		if d.Kind == "approve" && afterApproveAudit != nil {
+			return afterApproveAudit()
+		}
+		return nil
 	})
 	if err != nil {
 		return Decided{}, err
@@ -259,9 +272,24 @@ func (s Store) Decide(ctx context.Context, hid, me, id uuid.UUID, rid string, d 
 	return out, nil
 }
 
-// approveJob is where the approve_correction job row goes, in the
-// approval's own transaction (Plan 4 Task 6). Nothing yet.
-func approveJob(context.Context, pgx.Tx, uuid.UUID, uuid.UUID) error { return nil }
+// approveJob queues the approve_correction job for correction id in the
+// approval's own transaction: created by the approver (the token's user),
+// with the request id, the id correction.approved records, and a deadline
+// of the operation's timeout (intel.QueueJob, which also says whether the
+// job is within the hospital's budget).
+func approveJob(ctx context.Context, tx pgx.Tx, hid, me, id, jobID uuid.UUID, rid string) (time.Time, bool, error) {
+	return intel.QueueJob(ctx, tx, intel.NewJob{ID: jobID, HospitalID: hid, SubjectID: id, CreatedBy: me,
+		Type: approveCorrectionType, RequestID: rid})
+}
+
+// MarkPublished sets the job's published_at once its publish succeeded,
+// if it is still queued and unpublished.
+func (s Store) MarkPublished(ctx context.Context, hid, me, jobID uuid.UUID) error {
+	return s.tx(ctx, hid, me, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE jobs SET published_at = now() WHERE id = $1 AND status = 'queued' AND published_at IS NULL`, jobID)
+		return err
+	})
+}
 
 // deciderRefused reports whether err is 00011's decider check refusing the
 // move (the decider is no longer an active clinician of the hospital):
@@ -423,3 +451,6 @@ func (s Store) Stats(ctx context.Context, hid, me uuid.UUID) (FeedbackStatsOut, 
 	})
 	return st, err
 }
+
+// afterApproveAudit is a test hook (export_test.go): nil in production.
+var afterApproveAudit func() error

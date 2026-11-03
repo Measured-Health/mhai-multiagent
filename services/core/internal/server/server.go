@@ -40,11 +40,9 @@ func Register(m *authz.Mux, d Deps) {
 	}
 	a.Register(m)
 	queries.Register(m, queries.Deps{Pool: d.Pool, Intel: d.Intel, Cap: d.QueryCap})
-	fd := feedback.Deps{Pool: d.Pool}
-	if d.Intel != nil {
-		fd.Log = d.Intel.Log
-	}
-	feedback.Register(m, fd)
+	// The feedback routes log through the service's logger, whether or not
+	// an intelligence client is set.
+	feedback.Register(m, feedback.Deps{Pool: d.Pool, Intel: d.Intel, Log: a.Log})
 	registerFixtures(m, d)
 }
 

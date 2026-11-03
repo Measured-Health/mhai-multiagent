@@ -48,6 +48,10 @@ var (
 	// ErrCreatorUnusable: a job's creator can't use the service any more
 	// (inactive, another hospital, hospital not running, no allowed role).
 	ErrCreatorUnusable = errors.New("intel: the job's creator can no longer use the service")
+	// ErrJobSkipped: a jobs row Republish won't publish as it stands (the
+	// two-person rule refuses its creator). Not transient: the sweeper
+	// skips the row instead of retrying it, and its deadline ends it.
+	ErrJobSkipped = errors.New("intel: the job can't be published as it stands")
 )
 
 // Error is a worker's answer when it refused or failed a call: a code from

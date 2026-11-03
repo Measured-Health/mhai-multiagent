@@ -71,40 +71,50 @@ func RunDrainer(ctx context.Context, pool *pgxpool.Pool, every time.Duration, lo
 	}
 }
 
-// outboxRow is one fact with the identity of its job.
+// outboxRow is one fact with the identity of its job: a clinical_queries
+// row (query_id facts) or a jobs row (job_id facts).
 type outboxRow struct {
-	id                int64
-	action            string
-	entity, entityID  *string
-	payload           []byte
-	queryID, hospital uuid.UUID
-	createdBy         *uuid.UUID
-	requestID         *string
-	status            string // the job's status now
+	id               int64
+	action           string
+	entity, entityID *string
+	payload          []byte
+	jobID, hospital  uuid.UUID  // the parent row's id and hospital
+	jobType          *string    // the jobs row's type; nil for a question
+	createdBy        *uuid.UUID // the parent row's creator
+	requestID        *string
+	status           *string // the parent's status now; nil: no parent row
 }
 
 // DrainOnce moves up to 100 facts from intelligence_audit_outbox onto the
 // audit chain, oldest first, in one transaction as mhai_audit_drain (spec
-// §10.2): it deletes them (DELETE ... WHERE id IN (oldest 100) RETURNING,
-// joined to their clinical_queries row), appends each with audit.Write,
-// and commits. A second drainer running at once waits on the deleted rows'
-// locks and then finds them gone, so each fact is appended once (F2).
+// §10.2, Plan 4 §6.5): it deletes the oldest 100 whatever their parent
+// (DELETE ... WHERE id IN (oldest 100) RETURNING), reads each one's parent
+// (its clinical_queries row for a query_id fact, its jobs row for a job_id
+// fact, of the fact's own hospital), appends each with audit.Write, and
+// commits. A second drainer running at once waits on the deleted rows'
+// locks and then finds them gone, so each fact is appended once (F2). Facts
+// of one kind at the head never hold up the other kind (Plan 3's drainer
+// deleted only facts joined to clinical_queries, so 100 job facts at the
+// head stalled it).
 //
-// The actor, hospital and request id come from the job row core wrote
-// (created_by, hospital_id, request_id or JobRID), and the entity is always
-// the job (query, its id), never from the fact: the fact gives the action
-// (one of the three the outbox allows) and the payload (its own entity and
-// entity id, if other than the job, go in as fact_entity and
-// fact_entity_id), and payload keys naming an identity (actor_id,
-// hospital_id, request_id, sub) are dropped before audit.Write's
+// The actor, hospital and request id come from the parent row core wrote
+// (created_by, hospital_id, request_id or JobRID/JobsRowRID), and the
+// entity is always the job (query and its id, or job and its id), never
+// from the fact: the fact gives the action (one the outbox allows) and the
+// payload (its own entity and entity id, if other than the job, go in as
+// fact_entity and fact_entity_id), and payload keys naming an identity
+// (actor_id, hospital_id, request_id, sub) are dropped before audit.Write's
 // sensitive-key check. The payload must then fit its action's closed
 // schema (factschema.go: closed-set codes, ids of a fixed shape, bounded
 // integers; final review I-1). A payload that fails either check is
-// replaced by {query_id, payload_refused: true}, so one bad fact can't hold
-// the outbox up and no free text reaches the chain. A fact whose action
-// doesn't match the job's status now (query.completed for a job that isn't
-// completed, and so on) is deleted and not appended. Anything else rolls
-// the batch back for the next run.
+// replaced by {query_id, payload_refused: true} ({payload_refused: true}
+// for a job fact), so one bad fact can't hold the outbox up and no free
+// text reaches the chain. A fact whose action doesn't belong to its
+// parent's kind (a correction.* fact on a question, a query.* fact on a
+// job, a fact for another job type) or doesn't match the parent's status
+// now (query.completed for a job that isn't completed, and so on), or
+// whose parent can't be found, is deleted and not appended. Anything else
+// rolls the batch back for the next run.
 func DrainOnce(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (int, error) {
 	if log == nil {
 		log = logx.New(io.Discard)
@@ -112,20 +122,34 @@ func DrainOnce(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (int, 
 	n := 0
 	err := db.WithAuditDrain(ctx, pool, func(tx pgx.Tx) error {
 		r, err := tx.Query(ctx, `
-			DELETE FROM intelligence_audit_outbox o
-			USING clinical_queries q
-			WHERE o.id IN (SELECT id FROM intelligence_audit_outbox ORDER BY id LIMIT $1)
-			  AND q.id = o.query_id AND q.hospital_id = o.hospital_id
-			RETURNING o.id, o.action, o.entity, o.entity_id, o.payload, q.id, q.hospital_id, q.created_by, q.request_id, q.status`, drainBatch)
+			WITH gone AS (
+				DELETE FROM intelligence_audit_outbox o
+				WHERE o.id IN (SELECT id FROM intelligence_audit_outbox ORDER BY id LIMIT $1)
+				RETURNING o.id, o.action, o.entity, o.entity_id, o.payload, o.hospital_id, o.query_id, o.job_id
+			)
+			SELECT g.id, g.action, g.entity, g.entity_id, g.payload, g.hospital_id,
+			       COALESCE(g.query_id, g.job_id), j.type,
+			       CASE WHEN g.query_id IS NOT NULL THEN q.created_by ELSE j.created_by END,
+			       CASE WHEN g.query_id IS NOT NULL THEN q.request_id ELSE j.request_id END,
+			       CASE WHEN g.query_id IS NOT NULL THEN q.status ELSE j.status END
+			FROM gone g
+			LEFT JOIN clinical_queries q ON g.query_id IS NOT NULL AND q.id = g.query_id AND q.hospital_id = g.hospital_id
+			LEFT JOIN jobs j ON g.job_id IS NOT NULL AND j.id = g.job_id AND j.hospital_id = g.hospital_id
+			ORDER BY g.id`, drainBatch)
 		if err != nil {
 			return errDrain
 		}
 		var rows []outboxRow
 		for r.Next() {
 			var o outboxRow
-			if err := r.Scan(&o.id, &o.action, &o.entity, &o.entityID, &o.payload, &o.queryID, &o.hospital, &o.createdBy, &o.requestID, &o.status); err != nil {
+			var parent *uuid.UUID
+			if err := r.Scan(&o.id, &o.action, &o.entity, &o.entityID, &o.payload, &o.hospital, &parent, &o.jobType,
+				&o.createdBy, &o.requestID, &o.status); err != nil {
 				r.Close()
 				return errDrain
+			}
+			if parent != nil {
+				o.jobID = *parent
 			}
 			rows = append(rows, o)
 		}
@@ -143,11 +167,13 @@ func DrainOnce(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (int, 
 			return 0
 		})
 		for _, o := range rows {
-			if job, ok := jobFactSchemas[o.action]; !ok || job.status != o.status {
+			if !factMatchesParent(o) {
 				// A false statement (query.completed for a job that isn't
-				// completed): taken off the outbox, never appended. Ids only.
-				log.Error("intel: outbox fact refused: action doesn't match the job's status",
-					"action", o.action, "query_id", o.queryID.String())
+				// completed, a correction fact on a question), or a parent
+				// that isn't there: taken off the outbox, never appended.
+				// Ids only.
+				log.Error("intel: outbox fact refused: action doesn't match the job's kind or status",
+					"action", o.action, "job_id", o.jobID.String())
 				continue
 			}
 			e := drainEvent(o, log)
@@ -164,14 +190,32 @@ func DrainOnce(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (int, 
 	return n, nil
 }
 
-// drainEvent builds the audit event for o: identity from the job row, the
-// rest from the fact.
+// factMatchesParent reports whether o's action is one of its parent's kind
+// (a query fact on a question, a job fact on a jobs row of the action's
+// type) and states the parent's status now.
+func factMatchesParent(o outboxRow) bool {
+	f, ok := jobFactSchemas[o.action]
+	if !ok || o.status == nil || o.jobID == uuid.Nil || *o.status != f.status {
+		return false
+	}
+	if f.jobType == "" {
+		return o.jobType == nil
+	}
+	return o.jobType != nil && *o.jobType == f.jobType
+}
+
+// drainEvent builds the audit event for o: identity from the parent row,
+// the rest from the fact.
 func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
+	isJob := o.jobType != nil
 	e := audit.Event{
 		HospitalID: o.hospital.String(),
 		Action:     o.action,
 		Entity:     "query",
-		EntityID:   o.queryID.String(),
+		EntityID:   o.jobID.String(),
+	}
+	if isJob {
+		e.Entity = "job"
 	}
 	if o.createdBy != nil {
 		e.ActorID = o.createdBy.String()
@@ -180,7 +224,11 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 	if o.requestID != nil {
 		rid = *o.requestID
 	}
-	e.RequestID = JobRID(o.queryID, rid)
+	if isJob {
+		e.RequestID = JobsRowRID(o.jobID, rid)
+	} else {
+		e.RequestID = JobRID(o.jobID, rid)
+	}
 	payload := map[string]any{}
 	if len(o.payload) > 0 {
 		if err := json.Unmarshal(o.payload, &payload); err != nil || payload == nil {
@@ -191,11 +239,18 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 		delete(payload, k)
 	}
 	// The closed schema of the action (factschema.go), before the fact's
-	// own entity is added: ids and codes only, never text.
-	fits := jobFactSchemas[o.action].schema.check(payload, o.queryID)
-	// The row is always about the job (entity query, entity id the job's):
-	// a fact's own entity, if another, is detail in the payload only.
+	// own entity is added: ids and codes only, never text. query_id, if
+	// present, must be the question's; a job fact may carry none.
+	queryID := o.jobID
+	if isJob {
+		queryID = uuid.Nil
+	}
+	fits := jobFactSchemas[o.action].schema.check(payload, queryID)
+	// The row is always about the job (entity query or job, entity id the
+	// job's): a fact's own entity, if another, is detail in the payload
+	// only.
 	if o.entity != nil && *o.entity != "" && *o.entity != e.Entity {
+		fits = fits && factEntity.MatchString(*o.entity)
 		payload["fact_entity"] = *o.entity
 	}
 	if o.entityID != nil && *o.entityID != "" && *o.entityID != e.EntityID {
@@ -205,8 +260,11 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 	raw, err := json.Marshal(payload)
 	if _, bad := logx.SensitiveKeyInJSON(raw); err != nil || bad || !fits {
 		// Ids only in the log: the action and the job, never the key's value.
-		log.Error("intel: outbox fact payload refused", "action", o.action, "query_id", o.queryID.String())
-		payload = map[string]any{"query_id": o.queryID.String(), "payload_refused": true}
+		log.Error("intel: outbox fact payload refused", "action", o.action, "job_id", o.jobID.String())
+		payload = map[string]any{"payload_refused": true}
+		if !isJob {
+			payload["query_id"] = o.jobID.String()
+		}
 	}
 	e.Payload = payload
 	return e

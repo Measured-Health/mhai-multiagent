@@ -123,8 +123,10 @@ func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
 type env struct {
-	h    http.Handler
-	logs *syncBuf
+	h      http.Handler
+	logs   *syncBuf
+	js     *recJS
+	client *intel.Client
 }
 
 // newEnv is core's whole chain: server.Register with the real guard,
@@ -138,8 +140,9 @@ func newEnv(t *testing.T) *env {
 	guard := &authz.Guard{Keys: issuer.PublicKeys(), Denylist: buckets.Denylist, Pool: app, Log: log,
 		Idem: httpx.IdempotentLog(app, log), IdemAnon: httpx.IdempotentAnonLog(app, log)}
 	m := authz.NewMux(guard)
-	client := &intel.Client{NC: gwNC, JS: gwJS, Signer: signer, Log: log}
-	server.Register(m, server.Deps{Auth: svc, Pool: app, Intel: client, QueryCap: 10})
+	e.js = &recJS{JetStream: gwJS}
+	e.client = &intel.Client{NC: gwNC, JS: e.js, Signer: signer, Log: log, Pool: app}
+	server.Register(m, server.Deps{Auth: svc, Pool: app, Intel: e.client, QueryCap: 10})
 	e.h = m.Handler([]string{serviceKey})
 	return e
 }

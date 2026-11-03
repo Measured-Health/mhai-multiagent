@@ -322,4 +322,22 @@ func init() {
 		"reason", OneOf("self_approval", "forbidden", "already_decided"),
 		"attempted", OneOf("approve", "reject", "withdraw")),
 		Required: []string{"correction_id", "reason", "attempted"}})
+
+	// Plan 4 (spec §9): the approve_correction job's facts, through the
+	// outbox and the drainer, which checks intel's schema first (keys
+	// required there) and may add fact_entity and fact_entity_id, or replace
+	// a payload that doesn't fit with {payload_refused}. The row's entity is
+	// the job; the correction is in the payload.
+	jobFact := func(kv ...any) map[string]Check {
+		m := fields(kv...)
+		m["fact_entity"] = Pattern(factEntityPattern)
+		m["fact_entity_id"] = Pattern(factEntityIDPattern)
+		m["payload_refused"] = b
+		return m
+	}
+	Register("correction.applied", Schema{Fields: jobFact(
+		"correction_id", id, "attempts", count,
+		"model_versions", StringMap(16, modelNamePattern, Pattern(modelVersionPattern)),
+		"persona_update", OneOf("skipped", "applied"))})
+	Register("correction.apply_failed", Schema{Fields: jobFact("correction_id", id, "error", errorCode, "attempts", count)})
 }

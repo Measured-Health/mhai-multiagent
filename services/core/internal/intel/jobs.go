@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
@@ -39,6 +40,9 @@ const jsStoreFailed jetstream.ErrorCode = 10077
 // A second_person operation (the two-person rule) is published only when
 // the database says the caller decided its subject and didn't submit it
 // (ErrSecondPerson; subjects.go). Republish goes through the same path.
+//
+// A message with a job_id field (ApproveCorrectionJob) must name jobID
+// there, else ErrMisuse.
 //
 // Errors: ErrNotAllowed, ErrMisuse, ErrSecondPerson, ErrNoHospital, ErrDeadline (nothing
 // published); ErrBackpressure (JOBS refused it), ErrNoResponders,
@@ -73,7 +77,7 @@ func (c *Client) publishJob(ctx context.Context, caller Caller, opName, msgID st
 	if err := checkCaller(op, caller); err != nil {
 		return err
 	}
-	if !validMsgID(msgID) || c.JS == nil {
+	if !validMsgID(msgID) || c.JS == nil || !jobIDMatches(msg, msgID[:36]) {
 		return ErrMisuse
 	}
 	if op.SecondPerson {
@@ -144,6 +148,23 @@ func (c *Client) publishJob(ctx context.Context, caller Caller, opName, msgID st
 	}
 	c.log().Warn("intel: job not published", attrs...)
 	return out
+}
+
+// jobIDMatches reports whether a job message that names its job (a string
+// job_id field, as ApproveCorrectionJob has) names the one being published:
+// the Nats-Msg-Id's job id. A message with no job_id field has nothing to
+// check. So a body can't name one job while JetStream dedupes, the sweeper
+// tracks and the token is minted for another.
+func jobIDMatches(msg proto.Message, jobID string) bool {
+	r := msg.ProtoReflect()
+	fd := r.Descriptor().Fields().ByName("job_id")
+	if fd == nil {
+		return true
+	}
+	if fd.Kind() != protoreflect.StringKind || fd.IsList() || fd.IsMap() {
+		return false
+	}
+	return r.Get(fd).String() == jobID
 }
 
 // classifyPublish maps a JetStream publish error to one of ours. The

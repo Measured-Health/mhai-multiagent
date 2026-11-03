@@ -23,15 +23,23 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
+	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
 )
 
-// ApproveCorrection is the job an approval feeds (published by Task 6).
+// ApproveCorrection is the job an approval publishes.
 const ApproveCorrection = "pipeline.approve_correction"
+
+// approveCorrectionType is its jobs.type.
+const approveCorrectionType = "approve_correction"
 
 // Deps are what the routes need.
 type Deps struct {
 	Pool *pgxpool.Pool
-	Log  *slog.Logger
+	// Intel publishes the approve_correction job after an approval's
+	// commit. Nil: nothing is published at once, and the sweeper does it.
+	Intel *intel.Client
+	Log   *slog.Logger
 }
 
 func (d Deps) log() *slog.Logger {
@@ -157,13 +165,46 @@ func (d Deps) decide(kind string) http.Handler {
 			httpx.Error(w, r, "validation_failed")
 			return
 		}
-		if _, err := d.store().Decide(r.Context(), p.HospitalID, p.UserID, id, httpx.RequestIDFrom(r.Context()),
-			Decision{Kind: kind, Body: body}); err != nil {
+		rid := httpx.RequestIDFrom(r.Context())
+		out, err := d.store().Decide(r.Context(), p.HospitalID, p.UserID, id, rid, Decision{Kind: kind, Body: body})
+		if err != nil {
 			d.fail(w, r, p, kind, id, err)
 			return
 		}
+		if kind == "approve" && out.JobID != uuid.Nil {
+			d.publish(r.Context(), p, rid, id, out)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+// publish publishes an approval's approve_correction job after the commit
+// (spec §4.5), as the approver with their current roles, then sets its
+// published_at. The body is ids only. The decision stands whatever happens
+// here: a job past the hospital's budget, or a failed publish, is logged by
+// ids and left to the sweeper, which publishes an unpublished row once it
+// is within the budget; JetStream drops a duplicate (Nats-Msg-Id is the job
+// id) within its window, and jobs_one_live keeps one live job per
+// correction.
+func (d Deps) publish(ctx context.Context, p authz.Principal, rid string, correction uuid.UUID, out Decided) {
+	// The answer is already decided: finish even if the client went away.
+	ctx = context.WithoutCancel(ctx)
+	attrs := []any{"job_id", out.JobID.String(), "correction_id", correction.String(), "request_id", rid,
+		"hospital_id", p.HospitalID.String()}
+	if !out.Publish || d.Intel == nil {
+		d.log().Info("feedback: approve_correction job left for the sweeper", attrs...)
+		return
+	}
+	caller := intel.FromPrincipal(p, intel.JobsRowRID(out.JobID, rid))
+	msg := &intelpb.ApproveCorrectionJob{JobId: out.JobID.String(), CorrectionId: correction.String()}
+	if err := d.Intel.PublishJob(ctx, caller, ApproveCorrection, out.JobID, msg, out.Deadline); err != nil {
+		code, _ := intel.Code(err)
+		d.log().Warn("feedback: approve_correction job not published; the sweeper will", append(attrs, "reason", code)...)
+		return
+	}
+	if err := d.store().MarkPublished(ctx, p.HospitalID, p.UserID, out.JobID); err != nil {
+		d.log().Warn("feedback: published_at not set", attrs...)
+	}
 }
 
 // pending is GET /corrections?status=pending (no status means pending).
