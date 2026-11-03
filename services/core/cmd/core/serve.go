@@ -45,6 +45,7 @@ type app struct {
 	nc      *nats.Conn
 	intel   *intel.Client
 	js      jetstream.JetStream
+	health  jetstream.KeyValue // the health bucket (platform.RunSampler)
 	log     *slog.Logger
 	// stopAPI ends core's NATS API (natsapi.Serve) and stopGrant its grant
 	// endpoint (grant.Server) before NATS closes.
@@ -120,6 +121,10 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
+	if a.health, err = bus.OpenHealthBucket(ctx, js, cfg.NATSJSReplicas); err != nil {
+		a.close()
+		return nil, err
+	}
 	if err := bus.EnsureStreams(ctx, js, bus.StreamConfig{
 		Replicas: cfg.NATSJSReplicas, PipelineMaxAckPending: cfg.JobsPipelineMaxAckPending,
 	}); err != nil {
@@ -156,7 +161,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		log.Warn("core: no usable security contact (SECURITY_CONTACT_NAME, SECURITY_CONTACT_EMAIL); the audit integrity status answers 503")
 	}
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.WithLink(server.Readiness(a.pool, nc, buckets.All()), link),
-		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact})
+		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}
@@ -298,6 +303,14 @@ func serve() error {
 	go func() {
 		if err := audit.RunScheduler(ctx, a.pool, audit.ScheduleAt, log); err != nil {
 			log.Error("core: audit check schedule stopped", "reason", "internal_error")
+		}
+	}()
+	// The platform health reading every 30 s; one core copy samples (an
+	// advisory lock) and GET /platform/health serves it from KV.
+	go func() {
+		if err := platform.RunSampler(ctx, platform.Deps{Pool: a.pool, Intel: a.intel, Health: a.health, Log: log},
+			platform.SampleEvery); err != nil {
+			log.Error("core: health sampler stopped", "reason", "internal_error")
 		}
 	}()
 	// SIGHUP re-reads the trusted request-keys file (after keys untrust).

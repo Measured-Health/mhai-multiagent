@@ -45,17 +45,27 @@ func (pg *PG) Logs(ctx context.Context) (string, error) {
 	return string(b), err
 }
 
+// StatementStats is the server setting that loads pg_stat_statements, for
+// a test that counts the statements a path runs (NewPostgres(ctx,
+// StatementStats), then CREATE EXTENSION pg_stat_statements).
+const StatementStats = "shared_preload_libraries=pg_stat_statements"
+
 // NewPostgres starts an empty Postgres 16 container (no migrations). Call
 // stop when done; TestMain uses this to share one server across a package.
-func NewPostgres(ctx context.Context) (pg *PG, stop func(), err error) {
-	c, err := postgres.Run(ctx, PostgresImage,
+// Each setting is a server setting ("name=value", postgres -c).
+func NewPostgres(ctx context.Context, settings ...string) (pg *PG, stop func(), err error) {
+	opts := []testcontainers.ContainerCustomizer{
 		postgres.WithDatabase("mhai"),
 		postgres.WithUsername("mhai_super"),
 		postgres.WithPassword("test-only-superuser-password"),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).WithStartupTimeout(90*time.Second)),
-	)
+				WithOccurrence(2).WithStartupTimeout(90 * time.Second)),
+	}
+	for _, s := range settings {
+		opts = append(opts, testcontainers.WithCmdArgs("-c", s))
+	}
+	c, err := postgres.Run(ctx, PostgresImage, opts...)
 	if err != nil {
 		if c != nil {
 			_ = testcontainers.TerminateContainer(c)

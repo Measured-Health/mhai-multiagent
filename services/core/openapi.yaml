@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.6.0"
+  version: "1.7.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1116,6 +1116,43 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/health:
+    get:
+      operationId: getPlatformHealth
+      summary: System health, a sampled reading (polled in the background).
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        The reading one core copy takes every 30 s (pipeline.health and the
+        database's aggregates) and stores in the `health` KV bucket; this
+        route only reads it, so a poll runs no database statement and no
+        worker call. `updated_at` is when the figures were taken. A reading
+        that is missing, older than 2 minutes, or not of this shape is 503
+        `unavailable`. No hospital, person, patient or content is in it.
+        `parts` are `app`, `workers`, `evidence` and `guidelines`;
+        `documents` and `clean_up` (and the `clean_up` block) are not sent
+        until those services exist. `triage.enabled` is false until triage
+        exists. `versions` is empty until the workers report model versions.
+        Not recorded in the audit log. No query parameters (422).
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, unavailable, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The latest reading.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
 components:
   securitySchemes:
     ServiceKey:
@@ -1641,6 +1678,96 @@ components:
             by: { $ref: "#/components/schemas/PersonRef" }
             at: { type: string, format: date-time }
         version: { type: integer, minimum: 1 }
+    HealthStatus: { type: string, enum: [ok, slow, problem] }
+    HealthTiming:
+      type: object
+      required: [p50_ms, p95_ms]
+      additionalProperties: false
+      properties:
+        p50_ms: { type: integer, minimum: 0 }
+        p95_ms: { type: integer, minimum: 0 }
+    HealthTimingBlock:
+      type: object
+      required: [overall, steps]
+      additionalProperties: false
+      properties:
+        overall: { $ref: "#/components/schemas/HealthTiming" }
+        steps:
+          type: array
+          description: The steps with samples in the window, in this order.
+          items:
+            type: object
+            required: [step, p50_ms, p95_ms]
+            additionalProperties: false
+            properties:
+              step: { type: string, enum: [privacy, guidelines, answer, evidence] }
+              p50_ms: { type: integer, minimum: 0 }
+              p95_ms: { type: integer, minimum: 0 }
+    HealthOut:
+      type: object
+      description: Contract §14.8.2's reading, without the parts and block that don't exist yet (Plan 4 decision 7).
+      required: [updated_at, overall, parts, queue, failed_jobs, timing, errors, versions, triage]
+      additionalProperties: false
+      properties:
+        updated_at: { type: string, format: date-time }
+        overall: { $ref: "#/components/schemas/HealthStatus" }
+        parts:
+          type: array
+          items:
+            type: object
+            required: [key, status, since]
+            additionalProperties: false
+            properties:
+              key: { type: string, enum: [app, workers, evidence, guidelines] }
+              status: { $ref: "#/components/schemas/HealthStatus" }
+              since: { type: string, format: date-time }
+        queue:
+          type: object
+          required: [waiting, oldest_wait_s]
+          additionalProperties: false
+          properties:
+            waiting: { type: integer, minimum: 0 }
+            oldest_wait_s: { type: integer, minimum: 0, nullable: true }
+        failed_jobs:
+          type: object
+          required: [now, last_24h]
+          additionalProperties: false
+          properties:
+            now: { type: integer, minimum: 0 }
+            last_24h: { type: integer, minimum: 0 }
+        timing:
+          type: object
+          required: [last_hour, last_24h]
+          additionalProperties: false
+          properties:
+            last_hour: { $ref: "#/components/schemas/HealthTimingBlock" }
+            last_24h: { $ref: "#/components/schemas/HealthTimingBlock" }
+        errors:
+          type: array
+          description: One entry per kind, in this order.
+          items:
+            type: object
+            required: [kind, last_hour, last_24h]
+            additionalProperties: false
+            properties:
+              kind: { type: string, enum: [timeout, unreachable, unreadable, invalid, other] }
+              last_hour: { type: integer, minimum: 0 }
+              last_24h: { type: integer, minimum: 0 }
+        versions:
+          type: array
+          items:
+            type: object
+            required: [part, label]
+            additionalProperties: false
+            properties:
+              part: { type: string, enum: [app, workers, evidence, guidelines] }
+              label: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$" }
+        triage:
+          type: object
+          required: [enabled]
+          additionalProperties: false
+          properties:
+            enabled: { type: boolean }
     IntegrityStatus:
       type: object
       required: [latest, running, open_failure, security_contact, oldest_kept_at]

@@ -61,6 +61,11 @@ var dbTxAllowedFiles = map[string]string{
 	// policy see the verified user; authz.Tx sets the hospital only. The
 	// store takes both ids from the handler's principal, never a body.
 	"internal/feedback/store.go": "feedback and corrections as the token's hospital and user (db.WithHospitalUser)",
+	// The health sampler (Plan 4 §6.1): a background loop with no
+	// principal, one core copy at a time (a session advisory lock on a
+	// connection it takes out of the pool), reading the health functions
+	// as mhai_platform. GET /platform/health reads the KV bucket only.
+	"internal/platform/sampler.go": "the health sampler's leader lock (Acquire) and its reads (db.WithPlatformSnapshot)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on
