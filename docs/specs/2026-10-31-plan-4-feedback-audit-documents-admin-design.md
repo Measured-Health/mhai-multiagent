@@ -179,3 +179,178 @@ The tracker says corrections feed the persona vector, the CMA-ES buffer and the 
 - `feedback_events`: RLS `hospital_rows` (exists, 00003) for `mhai_gateway` and `mhai_worker`. `mhai_gateway`: `SELECT`, `INSERT`, and `UPDATE (status, decided_by, decided_at, rejection_code, rejection_note)` only. `mhai_worker`: `SELECT (id, hospital_id, query_id, action, status, submitted_by, decided_by)` only, no write.
 - `clinical_decisions`: `mhai_worker` `INSERT` gains the masked columns; `mhai_gateway` `SELECT` gains them (one reader, test-enforced).
 - `feedback_buffer` (new): RLS hospital rows, `FORCE`. `mhai_worker`: `INSERT` only, with a **RESTRICTIVE** policy `buffer_needs_approval`: the row's `correction_id` names a `feedback_events` row of the same hospital with `status='approved'` and `decided_by <> submitted_by`. So even a worker bug or a compromised worker can't put an unapproved correction into the buffer. `mhai_gateway`: none. The platform count for the later settings screen is a SECURITY DEFINER function `mhai_feedback_buffer_waiting()` returning one integer, executable by `mhai_platform` only.
+
+## 5. The audit log (`GET /security/audit`, served as `/platform/audit`)
+
+### 5.1 Which path
+
+The tracker and the gateway design name `GET /security/audit` and `GET /security/audit/verify`. Frontend contract §14.9 says the platform app calls their platform-audience forms, `/platform/audit/*`, "over the same log", and that is what the built screens call. **Plan 4 serves `/platform/audit/*` only**, and records in the contract that these are the `/security/audit` rows. A second path for the same read would be a second thing to secure for no caller. **Open question 1.**
+
+### 5.2 Endpoints (platform audience)
+
+Every route: `Platform: true`, two-step always (`NeedsMFA`), `AnyRole [platform_admin, auditor]` unless marked. Ids are opaque (`[A-Za-z0-9_-]+`); errors carry only `code`.
+
+| Endpoint | Plan 4 | Behaviour |
+|---|---|---|
+| `GET /platform/audit?hospital&person&type&outcome&flagged&from&to&q&cursor&limit` | yes | `{events, next_cursor, total, total_capped, oldest_kept_at, last_checkpoint}`, newest first. `limit` 1–100 (the app sends 50). `total` counts up to 10,000, then `total_capped: true`. `q` is an exact-id search (event id, request id) and ignores the other filters. Keyset paging on `id`; the cursor is opaque (base64url of the last id and a hash of the filters, so a cursor can't be replayed under other filters). |
+| `GET /platform/audit/{id}` | yes | the event, plus `patients: null` and `letter: null` (no named access or pseudonyms exist yet) |
+| `GET /platform/audit/hospitals` | yes | every hospital the log names, removed ones included |
+| `GET /platform/audit/people?q` | yes | `q` ≥ 2 characters; at most 20 `{id, name, email, role, kind, hospital}`. Platform-wide by design (auditors search everyone) |
+| `POST /platform/audit/undisplayable {ids}` | yes | 1–50 ids → 204, written as one `audit.undisplayable_reported` entry with `facts.job_count`-style count (`count`) and no ids in free form. **Auditor write.** |
+| `POST /platform/audit/verify` | yes | → `{run_id}`, or the running one. **Auditor write.** |
+| `GET /platform/audit/verify/runs?cursor`, `GET .../runs/{id}`, `GET .../verify/status` | yes | as contract §14.9. `status` → `{latest, running, open_failure, security_contact, oldest_kept_at}`; `security_contact` from configuration |
+| `POST /platform/audit/verify/runs/{id}/outcome {note, version}` | yes | **auditors only** (`AnyRole [auditor]`); broken runs only; note ≤ 1000 characters, stored on the run row and written as a new `audit.check_outcome` entry whose payload holds the run id only, never the note |
+| `GET /platform/audit/{id}/patients`, `GET /platform/audit/named-access`, `POST/GET /platform/audit/exports*` | **no** | They need pseudonyms (Analysis, Plan 6 backend), clearance letters (Plan 11) and export files (object storage). Until then the app's calls get 404 `not_found` (§5.6). |
+
+**A new rule field, `AuditorWrite`.** Plan 2's route rule refuses every unsafe method to an auditor (`Write`), and requires `Write` on every unsafe platform route. Contract §14.9 gives auditors exactly four audit writes. Plan 4 adds `Rule.AuditorWrite`: an unsafe platform route that admits auditors. `authz.validate` allows it only on patterns under `/platform/audit/` and never with `StepUp`, and a test pins the exact list of such routes (undisplayable, verify, outcome), so it can't spread.
+
+**Reads are recorded** (contract §14.9): the first page of a filter set writes one `audit.viewed` (payload `{list: "events", filters}` with the filters as closed codes and ids; `q` never appears in `filters`); an exact-id search writes `audit.searched` (`{searched_kind}`; the id searched goes in `entity_id`). Paging with a cursor writes nothing. The dedupe key is the session, the list and a hash of the filters, held for the page load (5 minutes) in the existing NATS KV idempotency bucket.
+
+### 5.3 Mapping chain rows to the contract's event
+
+The chain stores `action`, `entity`, `entity_id`, `payload` (Plan 2). The contract's event wants `type`, `kind`, `target`, `outcome`, `flag`, `reason`, `facts`, and fails closed on any value it doesn't know (an "undisplayable" entry).
+
+- **One table in Go, `audit/catalogue.go`:** for every action core writes, its contract `type` and `kind`, how its `target`, `outcome` and `flag` are derived, and which payload keys become which `facts` keys. A test walks the source for every `audit.Event{Action: ...}` literal and every outbox action and fails if one has no row; a second test fails if a row emits a `type`, `kind` or `facts` key that isn't in mhai-web's lists (vendored as `testdata/web-audit-vocabulary.json`, refreshed by hand with the mhai-web PR that adds them).
+- **Nothing is sent that isn't mapped:** an action with no catalogue row (an old test action, a future one) is sent with only `id`, `seq`, `hash`, `at` and `type: "security"`, `kind: "unknown"`, which the app shows as undisplayable and reports once. Payload values never pass through unmapped.
+- **New kinds need the app first** (contract §14.9: "a new kind ... needs a matching app change first"). Plan 4's new actions map to these kinds; mhai-web must add the ones marked new before the backend sends them, or they show as undisplayable (safe, but noisy):
+
+| Action (core) | `type` / `kind` | New in mhai-web? |
+|---|---|---|
+| `query.submitted` | `consultation` / `question_asked` | no |
+| `correction.submitted` | `consultation` / `answer_sent_for_review` | no |
+| `feedback.validated` | `consultation` / `answer_agreed` | **new** |
+| `correction.approved`, `.rejected` | `review` / `review_submitted` (`facts.state` `approved`/`rejected`) | no (`state` is a known facts key) |
+| `correction.withdrawn` | `review` / `review_withdrawn` | **new** |
+| `correction.decision_refused` | `security` / `review_refused` | **new** |
+| `correction.applied`, `.apply_failed` | `review` / `learning_recorded` | **new** |
+| `job.retried` ×n, `job.cancelled` ×n | `platform` / `jobs_retried`, `jobs_cancelled` with `facts.job_count`, no target | no |
+| `audit.viewed`, `audit.searched`, `audit.check_outcome` | `audit` / `audit_viewed`, `audit_searched`, `audit_check_outcome` | no |
+| `audit.verify_started`, `audit.verify_finished` | `audit` / `audit_check_started`, `audit_check_finished` (`facts.state`, `first_broken_seq`) | **new** |
+| `audit.undisplayable_reported` | `audit` / `audit_undisplayable_reported` | **new** |
+| `auth.*` (Plan 2) | `sign_in` / `signed_in`, `sign_in_refused`, `sign_in_locked`, `signed_out`; `account` / `password_changed`, `two_step_set_up`, ... | no |
+
+- **People:** `actor` is looked up by `actor_id` (`users`, through `mhai_platform`'s existing column grant): `{id, name: display_name, role, kind}`; `role` is the primary role at read time (`reviewer` for a clinician acting on a correction, per the app's `ActorRole`), `kind` `staff`, `platform` or `system` (`svc:core` and the drainer's system facts).
+- **`ip` and `device`:** sent when Plan 2 recorded them in the payload (sign-in rows), otherwise null.
+- **`after_break`:** true for every entry after the latest broken run's `first_broken_seq` while `open_failure` holds.
+- **No patient data:** no audit payload holds any (Plan 3's closed schemas and the sensitive-key check); a patient target is `{kind: "patient"}` with no id. The catalogue test also fails if any mapped `facts` value could match the pseudonym shape `^P-[A-Z0-9]{4,12}$`.
+
+### 5.4 Chain verification
+
+- **Runs table `audit_verify_runs`** (global, platform-only, no hospital): `id, started_at, finished_at, by (uuid or null for the schedule), state (running|intact|broken|error), entries_checked, from_first, from_checkpoint, to_seq, to_at, first_broken_seq, first_broken_id, first_broken_at, error_code, outcome_note, outcome_by, outcome_at, version`. A partial unique index `WHERE state = 'running'` allows one run at a time; `POST /verify` returns the running one.
+- **The walk** reuses `audit.Verify` (Plan 2), widened to report how far it got: a core loop runs it as `mhai_platform` (which already reads `audit_log` and `audit_checkpoints`), in a goroutine with a 10-minute budget; `intact` only when the whole range was walked (`entries_checked > 0`, `to_at` set, `from_first` true); a timeout or error is `error` with a code, never `intact` (contract proof fields).
+- **Daily at 06:00 UTC** by a scheduler in core that takes a Postgres advisory lock, so only one core copy starts it.
+- **Broken:** state `broken`, `audit.verify_finished` on the chain, `open_failure` true until a later run is `intact` and the outcome note exists. The contract also wants a bell and an email to every auditor and platform admin; the notifications service doesn't exist, so Plan 4 raises an alert (`audit_chain_broken` metric, alerting, ARCHITECTURE "Monitoring") and the bell and email wait for that service (§13).
+- **Known gap, unchanged:** the chain can't show rows deleted from its end (TODO "Audit tail deletion"); `from_checkpoint` is always null until signed checkpoints exist. Recorded in §11.6.
+
+### 5.5 Database for the audit reader
+
+- `mhai_platform` keeps its `SELECT` on `audit_log`, `audit_checkpoints`, `hospitals`, `users` (columns), `user_roles` (00003). Plan 4 adds: `SELECT, INSERT, UPDATE` on `audit_verify_runs`; `INSERT` on `audit_log` with the sequence and `audit_chain_head()`, under a policy `platform_append` that allows only the actions `audit.viewed`, `audit.searched`, `audit.verify_started`, `audit.verify_finished`, `audit.check_outcome`, `audit.undisplayable_reported`, `job.retried`, `job.cancelled`. Platform routes run inside `db.WithPlatform`, which sets no hospital.
+- A platform account has no hospital, so none of these routes can reach a hospital's clinical tables: `mhai_platform` has no grant on them (the guardrail counts in §6.3 go through one SECURITY DEFINER function).
+
+### 5.6 What the app sees for the deferred audit routes
+
+`/patients`, `/named-access` and `/exports*` answer 404 `not_found`, which the app already treats as "Couldn't load" for that panel. Named-access entries can't exist yet, so nothing is hidden by their absence. The exports wait for object storage and the documents service (signed, one-time files).
+
+## 6. Platform operations: health, failed jobs and guardrail statistics
+
+### 6.1 `GET /platform/health` ("agent status")
+
+Contract §14.8.2, unchanged: `{updated_at, overall, parts, queue, failed_jobs, timing, errors, versions, triage, clean_up}`. Roles: `platform_admin`, `auditor` (the contract lets auditors read every 14.8 `GET`; the tracker's "admin" is read as the platform roles). No hospital, user or content anywhere in it.
+
+- **A sampler, not a per-request computation.** A core loop (advisory-lock leader, every 30 s) takes a reading and stores it in memory and in NATS KV (`health` bucket, one key); the route returns the stored reading with its own `updated_at`. A poll costs one KV get, so a polling client can't make core run the queries or call the workers (§11, T-D2). The reading is 503 when it is older than 2 minutes or missing.
+- **Where each figure comes from:**
+
+| Block | Source |
+|---|---|
+| `parts.app` | core itself (always `ok` if it answers) |
+| `parts.workers` | `pipeline.health` request/reply as `svc:core` (Plan 3): `ok`; a slow answer (> 1 s) `slow`; no responders or timeout `problem` |
+| `parts.evidence` | the NLI model's `loaded` flag in `HealthResponse` |
+| `parts.guidelines` | at least one shared `kb_chunks` row (count only) |
+| `parts.documents`, `parts.clean_up` | **not sent** until those services exist (open question 7) |
+| `queue` | JetStream `JOBS` consumer info: pending count and the oldest pending message's age |
+| `failed_jobs` | `{now, last_24h}` counts over `clinical_queries` and `jobs` (job columns only) |
+| `timing` | p50 and p95 over the last hour and 24 hours of `clinical_queries.completed_at − created_at` (overall) and per step from a new `clinical_decisions.timings_ms` (closed keys `privacy`, `guidelines`, `answer`, `evidence`, written by the worker from its stage timings; 00010) |
+| `errors` | counts of failed jobs by `kind`, from the error code through Plan 3's mapping table (§10.1 there) |
+| `versions` | `HealthResponse.model_versions`, filtered to the safe pattern |
+| `triage` | `{enabled: false}` until triage exists |
+| `clean_up` | not sent until retention exists (open question 7) |
+
+- **Small groups:** none of these figures is about a hospital or a person (no split by hospital, no counts of patients), so no suppression applies; the contract's §14.7 rules are for per-hospital figures.
+- The cross-hospital reads (`clinical_queries` job columns, `clinical_decisions` timings, `jobs`) go through SECURITY DEFINER functions owned by `mhai_migrate` that return aggregates only (`mhai_health_timings(window)`, `mhai_health_failures()`), executable by `mhai_platform` only. No row-level grant on a clinical table is given to a platform role.
+
+### 6.2 `GET /platform/jobs`, retry and cancel (the dead-letter inspector)
+
+Contract §14.8.3, unchanged.
+
+| Endpoint | Roles | Behaviour |
+|---|---|---|
+| `GET /platform/jobs?status&type&hospital&kind&cursor` | `platform_admin`, `auditor` | `{jobs, next_cursor}`, newest failure first; each `{id, type, hospital, created_at, failed_at, attempts, kind, status, cancelled_by, cancelled_at}`. **Never the subject, the user or an error message.** |
+| `POST /platform/jobs/retry {ids}` | `platform_admin` (`Write`) | 1–50 ids → `{retried, skipped}`. No step-up. |
+| `POST /platform/jobs/cancel {ids, reason, note?, mfa_code \| backup_code}` | `platform_admin` (`Write`, `StepUp`) | 1–50 ids → `{cancelled, skipped}`. `reason` ∈ `no_longer_needed`, `cant_succeed`, `other` (note required); note ≤ 500, stored, **never logged or audited**. |
+
+- **Which jobs:** `run_query` (rows of `clinical_queries`, Plan 3) and `approve_correction` (rows of `jobs`, §6.5). A view would join two tables of different shapes under two RLS regimes, so the list is built by one SECURITY DEFINER function `mhai_platform_jobs(filters, cursor, limit)` returning only the contract's columns, executable by `mhai_platform` only.
+- **Job ids** are the row ids, opaque to the app. The `type` tells core which table an id belongs to; an id in neither is `skipped`.
+- **Retry** runs as `mhai_jobs` (Plan 3's cross-hospital job role), widened to `jobs`: for each `failed` row, check the creator and hospital are still active, increment `retry_count`, set `queued`, commit, then `intel.Republish` (Plan 3: a new token minted as the creator with their **current** roles, a new message id). A creator who is no longer active or no longer holds the operation's role: `skipped`, never minted as someone else. An `approve_correction` retry also re-checks `SecondPerson` (§4.7). One `job.retried` audit row per call with `facts.job_count`, not one per id.
+- **Cancel** moves `failed`, `queued` or `retrying` rows to `cancelled` (Plan 3's `mhai_jobs` policy already forbids touching a `running` or `completed` row; a running one is `skipped`), sets `cancelled_by`, `cancelled_at`, `cancel_reason`, `cancel_note`. One `job.cancelled` row with `facts.job_count` and the reason code.
+- **Status shown:** `cancelled` if cancelled; `failed` if failed; `retrying` if queued or running with `retry_count > 0`; `retried` if completed with `retry_count > 0`. Retried and cancelled jobs stay listed for 30 days.
+
+### 6.3 `GET /platform/guardrails` (HGA statistics), new
+
+Not in the frontend contract; added as **New** (additive, ADR 0012), so mhai-web can show it and Plan 7c's `quality` area can reuse its query.
+
+`GET /platform/guardrails?period=7d|30d|90d` → `{period, from, to, updated_at, all: Rates, hospitals: [{hospital: {id, name}, ...Rates}]}`, active hospitals only, where `Rates` is `{answers, pass, regenerate, escalate, degraded, pass_share, regenerate_share, escalate_share}` and every value is guarded: `{value, suppressed}`. Counts from `clinical_decisions.hga_decision` and `degraded`. Roles: `platform_admin`, `auditor`.
+
+**Small-group rules (the server applies them, contract §14.7 and §9.1):**
+1. Any count of 1–4 is sent as `{value: null, suppressed: true}`; zero is sent as 0.
+2. `pass + regenerate + escalate = answers` is a set that adds up: if any member is hidden, hide enough others that the hidden ones together are at least 5, and never exactly one hidden member (secondary suppression).
+3. A share is hidden when its numerator or its complement (`answers − numerator`) is 1–4, or when `answers` is hidden.
+4. `all` is computed over every active hospital and follows the same rules. It is not used to back out a hidden hospital row: with any hospital row hidden, `all` is still shown, so the rules also hide one more hospital's member when a single hospital's hidden value could be found as `all − Σ shown` (the app can't check this; a property test can).
+5. `degraded` is its own count, rule 1 only.
+
+The counts come from one SECURITY DEFINER function (`mhai_guardrail_counts(from, to)`, aggregates per hospital only, `mhai_platform` only); suppression is in Go (`internal/smallgroup`, with the rules as table-driven and property tests), applied before the value is encoded, so a raw 1–4 never reaches the response writer.
+
+Not audited per read (aggregates, no person, polled like health); the route is rate-limited per session (6 per minute) because it scans `clinical_decisions` (cached 60 s per period).
+
+### 6.4 Why not a hospital-side "HGA stats" route
+
+Hospital admins see confidence counts in `GET /hospital/usage` (contract §5.2, `confidence: high/caution/review/failed`), which the hospital admin plan builds over the same function with the same rules. Plan 4 doesn't add a second hospital route.
+
+### 6.5 The generic `jobs` table
+
+`run_query` keeps its job columns on `clinical_queries` (Plan 3; moving them is churn with no gain). Every new job type gets a row in one table, so the documents plan's `ingest_document` and `finalise_document` and a later `feedback_buffer_reset` drop in without a new table each:
+
+| Column | Notes |
+|---|---|
+| `id uuid` | the job id and `Nats-Msg-Id` |
+| `hospital_id uuid` | null only for `global` jobs (none in Plan 4); RLS |
+| `type text` | CHECK in the job-type vocabulary; Plan 4 allows `approve_correction` only |
+| `subject_id uuid NOT NULL` | the row the job is about (the correction) |
+| `created_by uuid`, `request_id text` | the drainer's actor and request id (never from a fact) |
+| `status` | `queued`, `running`, `completed`, `failed`, `cancelled` (as `clinical_queries`) |
+| `attempts`, `lease_until`, `published_at`, `deadline_at` | as Plan 3 |
+| `error text`, `cancel_reason text` | codes only (`^[a-z_]{1,32}$`) |
+| `cancelled_by uuid`, `cancelled_at`, `cancel_note text` | the platform cancel; note ≤ 500, never logged |
+| `retry_count int`, `failed_at`, `completed_at`, `created_at` | |
+
+Unique `(type, subject_id) WHERE status IN ('queued','running')`: one live job per subject. Policies as 00008/00009 for `clinical_queries`: `mhai_worker` may move only `queued`/`running` rows to `running`, `completed` or `failed`, of an active hospital (`worker_status` RESTRICTIVE, `worker_hospital_active`); `mhai_jobs` only `queued`/`failed`/`cancelled` rows among those three states; `mhai_gateway` `INSERT` and `UPDATE (published_at)`. The sweeper, the dead-letter consumer, the deadline expiry function and cancel-on-deactivate (00009's triggers) are widened to `jobs`.
+
+**The outbox, widened.** `intelligence_audit_outbox.query_id` becomes nullable and gains `job_id uuid` (FK `(job_id, hospital_id)` → `jobs`), with `CHECK (num_nonnulls(query_id, job_id) = 1)`; the action CHECK adds `correction.applied` and `correction.apply_failed`. The drainer takes the actor, hospital and request id from `jobs` for a `job_id` fact, exactly as it does from `clinical_queries` today, and appends a fact only if its action matches the job's status. `mhai_audit_drain` gains `SELECT (id, hospital_id, created_by, request_id, status, type)` on `jobs` and the two actions in its append policy.
+
+## 7. Document upload and `ingest_document`: recommendation
+
+**Recommendation: Plan 4 builds no document work. All of it goes to a separate document pipeline plan, phases 0 and 1 of the approved design (its §10).**
+
+Building "the upload endpoint plus quarantine storage" first looks cheap, but it would:
+
+- **store untrusted patient files with nothing behind them.** The approved flow is upload → magic-byte check → virus scan → sandboxed rasterising → `ingest_document` (§3 there). Without the documents service, uploaded files sit in `quarantine/` unscanned, with no consumer, no retention run and no way for anyone to see them. That is PHI at rest with no purpose, which the Data Protection Act check (TODO) would ask us to justify.
+- **need infrastructure that doesn't exist:** object storage with per-hospital prefixes and keys, versioning and presigned PUTs (ARCHITECTURE: "Object storage (planned)"), and a bucket policy review. That is the documents plan's first task anyway, and it belongs with the scanner.
+- **build a screen nobody can use:** mhai-web has no upload screen (tracker F-44, "not in any plan yet"); the review screens are a mhai-web plan of their own.
+- **not unblock anything:** `ingest_document` needs the GPU host, the evaluation (phase 0) and the canonical tables. Upload is the last thing in that chain to be useful, not the first.
+
+**What Plan 4 does that the documents plan will reuse:** the generic `jobs` table and its policies (§6.5), the outbox's `job_id` path, the second durable consumer pattern, `SecondPerson`-style operation flags, the Failed jobs list that already knows `ingest_document` as a type, and the `AuditorWrite`-style discipline for new rule fields. The documents plan then adds `documents`, `document_extractions` and the rest as the approved design §9.4 lists, with `ingest_document` as one more `jobs.type`.
+
+## 8. The other listed items
+
+- **`POST /triage` (QDA): deferred.** The QDA model's integrated accuracy is about 30% (tracker KI-2, Integration Guide §13), and contract §14.8.4 only lets a platform admin turn triage on with clinical sign-off and a model whose report, files and checksums are present (`not_ready_reason`). Exposing an endpoint before that would put an unvalidated clinical classifier one request away. When it comes, it is `pipeline.run_triage` (a job, like `run_query`, because QDA reads patient data) behind the triage switch, and its own design with clinical sign-off. Plan 4 sends `triage: {enabled: false}` in health.
+- **`GET /kb/search`: deferred.** No screen in either app calls it. If one does, it is a request/reply operation `pipeline.kb_search`, core-initiated (ADR 0011 recommends the core path for anything touching patient data), shared guidelines only until patient ids exist (ADR 0004: with no patient, only guidelines), with the shared replay check (boundary decision 3 applies only to writes, so not needed), a rate limit and an audit row of the query's hash, never its text.
+- **Reset the feedback buffer: deferred to the platform settings plan.** It is `POST /platform/settings/feedback-buffer/reset`, shown inside `GET /platform/settings` together with retention and triage, none of which exist. Plan 4 never applies the buffer to the live guardrails (§4.8), so nothing has been learned that a reset would need to undo. Plan 4 makes the reset cheap later: buffer rows carry `model_versions` (so a reset can clear exactly the rows scored by a broken NLI model, the reason KI-5 exists), `cleared_at` and `reset_id`, and the reset becomes one SECURITY DEFINER function plus the route.
