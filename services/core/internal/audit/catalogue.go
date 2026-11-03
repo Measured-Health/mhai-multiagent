@@ -46,9 +46,11 @@ type Target struct {
 
 // Entry is one action's catalogue row. Target, Outcome and Flag may be nil
 // (no target, "succeeded", no flag). Facts maps a payload key to the facts
-// key its value is sent under.
+// key its value is sent under. When, if set, says which of the action's
+// rows the kind fits; any other row of the action is sent as the bare entry.
 type Entry struct {
 	Type, Kind string
+	When       func(Event) bool
 	Target     func(Event) *Target
 	Outcome    func(Event) string
 	Flag       func(Event) *string
@@ -105,7 +107,15 @@ var (
 // schema, or a target or facts value of the pseudonym's shape.
 func Map(e Event) (m Mapped, ok bool) {
 	row, found := Catalogue[e.Action]
-	if !found || row.Kind == UnknownKind {
+	if !found {
+		return Mapped{}, false
+	}
+	return mapRow(row, e)
+}
+
+// mapRow applies row to e.
+func mapRow(row Entry, e Event) (m Mapped, ok bool) {
+	if row.Kind == UnknownKind || (row.When != nil && !row.When(e)) {
 		return Mapped{}, false
 	}
 	payload := e.Payload
@@ -202,6 +212,14 @@ func runTarget(e Event) *Target {
 	return nil
 }
 
+// batchRow reports whether a job row is the platform's one-per-call row:
+// no job id, no entity, and a job count.
+func batchRow(e Event) bool {
+	_, hasJob := e.Payload["job_id"]
+	_, hasCount := e.Payload["job_count"]
+	return !hasJob && hasCount && e.Entity == "" && e.EntityID == ""
+}
+
 // withheld is a row for an action mhai-web has no kind for yet: it is sent
 // as the bare entry until one exists (see the vocabulary's notes).
 func withheld() Entry { return Entry{Type: UnknownType, Kind: UnknownKind} }
@@ -251,10 +269,13 @@ var Catalogue = map[string]Entry{
 	"query.failed":      withheld(),
 	"query.cancelled":   withheld(),
 	"job.dead_lettered": withheld(),
-	// No target: the batch rows name no job (spec §5.3). facts.job_count
-	// comes with the batch payload (Plan 4 Task 12).
-	"job.retried":   {Type: "platform", Kind: "jobs_retried"},
-	"job.cancelled": {Type: "platform", Kind: "jobs_cancelled"},
+	// The platform's "Retried/Cancelled failed jobs" is the batch row only
+	// (ruling R24): one row per call, no job, no entity, with job_count
+	// (spec §5.3). The per-job rows core's loops write (the dead-letter
+	// re-mint, the sweeper's cancels) are system rows, withheld like R21's.
+	// The batch shape and facts.job_count come with Plan 4 Task 12.
+	"job.retried":   {Type: "platform", Kind: "jobs_retried", When: batchRow},
+	"job.cancelled": {Type: "platform", Kind: "jobs_cancelled", When: batchRow},
 
 	// Plan 4: feedback and corrections (spec §5.3). No target: mhai-web has
 	// no query or correction target kind.

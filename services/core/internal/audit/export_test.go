@@ -74,3 +74,7 @@ func FieldAccepts(action, key string, v any) bool {
 	}
 	return c(back)
 }
+
+// MapRow applies row to e, as Map applies e's own row: for testing the
+// guards against rows the catalogue doesn't have.
+func MapRow(row Entry, e Event) (Mapped, bool) { return mapRow(row, e) }

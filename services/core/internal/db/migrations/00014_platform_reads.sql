@@ -8,6 +8,8 @@
 -- broken run carries an outcome note (at most 1000 characters, with its
 -- author and time). The note is free text: it lives on this row only, never
 -- in the audit chain or a log.
+-- The platform inserts a run only as running, and a trigger fixes a
+-- finished run but for its outcome and version.
 --
 -- mhai_platform's append to audit_log (00003: WITH CHECK (true)) narrows to
 -- spec §5.5's eight actions, with no hospital: a platform account has none.
@@ -50,8 +52,10 @@ CREATE TABLE audit_verify_runs (
     -- Running exactly while unfinished.
     CONSTRAINT audit_verify_runs_finished CHECK ((state = 'running') = (finished_at IS NULL)),
     -- intact only when the whole chain was walked (C24).
+    -- Every clause is NULL-safe: a NULL inside the OR would pass the CHECK.
     CONSTRAINT audit_verify_runs_intact_proof CHECK (state <> 'intact'
-        OR (entries_checked > 0 AND to_seq IS NOT NULL AND to_at IS NOT NULL AND from_first)),
+        OR (entries_checked IS NOT NULL AND entries_checked > 0
+            AND to_seq IS NOT NULL AND to_at IS NOT NULL AND from_first)),
     -- The first broken entry: all three fields together, and only on a broken run.
     CONSTRAINT audit_verify_runs_broken_entry CHECK (
         num_nonnulls(first_broken_seq, first_broken_id, first_broken_at) IN (0, 3)
@@ -76,6 +80,39 @@ GRANT UPDATE (finished_at, state, entries_checked, from_first, from_checkpoint, 
               outcome_note, outcome_by, outcome_at, version)
     ON audit_verify_runs TO mhai_platform;
 CREATE POLICY platform_runs ON audit_verify_runs TO mhai_platform USING (true) WITH CHECK (true);
+-- A run is born running, with no outcome: the platform can't insert a
+-- finished (say, intact) run, only finish one it started.
+CREATE POLICY platform_runs_start ON audit_verify_runs AS RESTRICTIVE FOR INSERT TO mhai_platform
+    WITH CHECK (state = 'running' AND outcome_note IS NULL);
+
+-- Only a running run may finish; a finished run is fixed, but for its
+-- outcome (note, author, time) and version. Whoever writes, owner included.
+-- +goose StatementBegin
+CREATE FUNCTION mhai_verify_run_transition() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+BEGIN
+    -- "by" is quoted: plpgsql reads a bare BY as a keyword.
+    IF OLD.state <> 'running'
+       AND (NEW.id, NEW.started_at, NEW.finished_at, NEW."by", NEW.state, NEW.entries_checked, NEW.from_first,
+            NEW.from_checkpoint, NEW.to_seq, NEW.to_at, NEW.first_broken_seq, NEW.first_broken_id,
+            NEW.first_broken_at, NEW.error_code)
+           IS DISTINCT FROM
+           (OLD.id, OLD.started_at, OLD.finished_at, OLD."by", OLD.state, OLD.entries_checked, OLD.from_first,
+            OLD.from_checkpoint, OLD.to_seq, OLD.to_at, OLD.first_broken_seq, OLD.first_broken_id,
+            OLD.first_broken_at, OLD.error_code) THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+            MESSAGE = 'audit_verify_runs: a finished run changes only its outcome';
+    END IF;
+    RETURN NEW;
+END
+$$;
+-- +goose StatementEnd
+ALTER FUNCTION mhai_verify_run_transition() OWNER TO mhai_migrate;
+REVOKE ALL ON FUNCTION mhai_verify_run_transition() FROM PUBLIC;
+CREATE TRIGGER audit_verify_runs_transition BEFORE UPDATE ON audit_verify_runs
+    FOR EACH ROW EXECUTE FUNCTION mhai_verify_run_transition();
 
 ------------------------------------------------------------------------
 -- mhai_platform's audit append: spec §5.5's eight actions, no hospital.
@@ -177,5 +214,6 @@ DROP FUNCTION mhai_health_timings(interval);
 DROP POLICY platform_append ON audit_log;
 CREATE POLICY platform_append ON audit_log FOR INSERT TO mhai_platform WITH CHECK (true);
 
--- The table takes its policy, grants and indexes with it.
+-- The table takes its policies, grants, indexes and trigger with it.
 DROP TABLE audit_verify_runs;
+DROP FUNCTION mhai_verify_run_transition();

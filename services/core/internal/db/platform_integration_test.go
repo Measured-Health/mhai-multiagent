@@ -70,6 +70,117 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		}
 	}
 
+	// C17, any path: the exact set of relations mhai_platform holds any
+	// privilege on (directly, through PUBLIC or a column grant), each with
+	// its reason. A new grant to the platform fails here until it is
+	// justified in this list.
+	wantRelations := map[string]string{
+		"hospitals":         "00003: names and status for the platform screens",
+		"users":             "00003: column SELECT without password_hash (the audit's actor, people search)",
+		"platform_users":    "00003: security_invoker view over users' granted columns",
+		"user_roles":        "00003: roles of the audit's actors",
+		"sessions":          "00003: session metadata (no tokens: those are refresh_tokens)",
+		"audit_log":         "00003: read the chain; append its eight actions (00014 platform_append)",
+		"audit_checkpoints": "00003: the chain's checkpoints, for verification",
+		"idempotency_keys":  "00003: Idempotency-Key replies of platform writes, null-hospital rows only",
+		"audit_verify_runs": "00014: the chain checks",
+	}
+	got := map[string]bool{}
+	rows, err := pool.Query(ctx, `
+		SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+		  AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
+		  AND (has_table_privilege('mhai_platform', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+		       OR has_any_column_privilege('mhai_platform', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES'))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		got[name] = true
+		if _, ok := wantRelations[name]; !ok {
+			t.Errorf("mhai_platform holds a privilege on %s, which isn't in the justified list", name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for name := range wantRelations {
+		if !got[name] {
+			t.Errorf("mhai_platform has no privilege on %s: update the justified list", name)
+		}
+	}
+	// Sequences: the chain's id only (00003, for its appends).
+	var seqs []string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(array_agg(c.relname ORDER BY c.relname), '{}') FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = 'public'
+		  AND CASE WHEN c.relkind = 'S' THEN has_sequence_privilege('mhai_platform', c.oid, 'USAGE,SELECT,UPDATE') END`).Scan(&seqs); err != nil {
+		t.Fatal(err)
+	}
+	if len(seqs) != 1 || seqs[0] != "audit_log_id_seq" {
+		t.Errorf("mhai_platform may use sequences %v, want audit_log_id_seq only", seqs)
+	}
+
+	// The exact set of SECURITY DEFINER functions it may run, PUBLIC's
+	// EXECUTE included, each with its full arguments and result: the four
+	// of 00014, the buffer count (00013) and the chain head (00003).
+	wantFuncs := map[string][2]string{
+		"audit_chain_head":             {"OUT id bigint, OUT hash text", "record"},
+		"mhai_feedback_buffer_waiting": {"", "bigint"},
+	}
+	for name, sig := range platformFunctions {
+		wantFuncs[name] = sig
+	}
+	gotFuncs := map[string]bool{}
+	rows, err = pool.Query(ctx, `
+		SELECT p.proname, pg_get_function_arguments(p.oid), pg_get_function_result(p.oid)
+		FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND p.prosecdef AND has_function_privilege('mhai_platform', p.oid, 'EXECUTE')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var name, args, result string
+		if err := rows.Scan(&name, &args, &result); err != nil {
+			t.Fatal(err)
+		}
+		gotFuncs[name] = true
+		sig, ok := wantFuncs[name]
+		if !ok {
+			t.Errorf("mhai_platform may run SECURITY DEFINER %s(%s), which isn't in the list", name, args)
+			continue
+		}
+		if args != sig[0] || result != sig[1] {
+			t.Errorf("%s(%s) RETURNS %s\nwant (%s) RETURNS %s", name, args, result, sig[0], sig[1])
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for name := range wantFuncs {
+		if !gotFuncs[name] {
+			t.Errorf("mhai_platform can't run %s", name)
+		}
+	}
+
+	// And it is a member of no role, inheriting or not, so no grant reaches
+	// it through another role.
+	var member []string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(array_agg(r.rolname), '{}') FROM pg_roles r
+		WHERE r.rolname <> 'mhai_platform' AND pg_has_role('mhai_platform', r.oid, 'MEMBER')`).Scan(&member); err != nil {
+		t.Fatal(err)
+	}
+	if len(member) != 0 {
+		t.Errorf("mhai_platform is a member of %v", member)
+	}
+
 	for name, sig := range platformFunctions {
 		var args, result, owner string
 		var definer bool
@@ -118,7 +229,7 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 			requireDenied(t, asRole(ctx, pool, role, q), role+" calling "+name)
 		}
 	}
-	err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+	err = db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `SELECT * FROM mhai_health_timings(interval '5 minutes')`)
 		return err
 	})
@@ -158,26 +269,30 @@ func TestPlatformAppendOnlyItsActions(t *testing.T) {
 		requireDenied(t, err, "platform appending "+action)
 	}
 
-	// A real append, as a platform route makes it, extends the chain.
-	var headBefore string
+	// A real append, as a platform route makes it, extends the chain: the
+	// row it wrote (found by its own id, through the sequence it used)
+	// links to the row before it.
+	var written int64
 	err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT hash FROM audit_chain_head()`).Scan(&headBefore); err != nil {
+		if err := audit.Write(ctx, tx, audit.Event{ActorID: uuid.NewString(), Action: "audit.searched",
+			Entity: "audit_search", Payload: map[string]any{"searched_kind": "request"}}); err != nil {
 			return err
 		}
-		return audit.Write(ctx, tx, audit.Event{ActorID: uuid.NewString(), Action: "audit.searched",
-			Entity: "audit_search", Payload: map[string]any{"searched_kind": "request"}})
+		return tx.QueryRow(ctx, `SELECT currval('audit_log_id_seq')`).Scan(&written)
 	})
 	if err != nil {
 		t.Fatalf("audit.Write as the platform: %v", err)
 	}
-	var prev, action string
+	var prev, before, action string
 	var hospital *uuid.UUID
-	if err := pool.QueryRow(ctx, `SELECT prev_hash, action, hospital_id FROM audit_log ORDER BY id DESC LIMIT 1`).
-		Scan(&prev, &action, &hospital); err != nil {
+	if err := pool.QueryRow(ctx, `
+		SELECT a.prev_hash, a.action, a.hospital_id,
+		       (SELECT b.hash FROM audit_log b WHERE b.id < a.id ORDER BY b.id DESC LIMIT 1)
+		FROM audit_log a WHERE a.id = $1`, written).Scan(&prev, &action, &hospital, &before); err != nil {
 		t.Fatal(err)
 	}
-	if prev != headBefore || action != "audit.searched" || hospital != nil {
-		t.Errorf("platform row: prev %q (head was %q), action %s, hospital %v", prev, headBefore, action, hospital)
+	if prev != before || action != "audit.searched" || hospital != nil {
+		t.Errorf("platform row %d: prev %q (the row before has %q), action %s, hospital %v", written, prev, before, action, hospital)
 	}
 	// Still append-only.
 	for _, q := range []string{`UPDATE audit_log SET action = 'audit.viewed'`, `DELETE FROM audit_log`} {
@@ -210,15 +325,30 @@ func TestOneRunningVerifyRun(t *testing.T) {
 		pgConstraint(err) != "audit_verify_one_running" {
 		t.Fatalf("second running run: want audit_verify_one_running, got %v", err)
 	}
-	// intact needs every proof field (C24's database half).
-	if err := asPlatform(`UPDATE audit_verify_runs SET state = 'intact', finished_at = now() WHERE id = $1`, first); pgCode(err) != checkViolation {
-		t.Errorf("intact without proof: want 23514, got %v", err)
+	// intact needs every proof field (C24's database half), entries_checked
+	// included: a NULL there must not slip through the CHECK.
+	for name, q := range map[string]string{
+		"no proof at all":      `UPDATE audit_verify_runs SET state = 'intact', finished_at = now() WHERE id = $1`,
+		"no entries_checked":   `UPDATE audit_verify_runs SET state = 'intact', finished_at = now(), from_first = true, to_seq = 3, to_at = now() WHERE id = $1`,
+		"no entries (0)":       `UPDATE audit_verify_runs SET state = 'intact', finished_at = now(), entries_checked = 0, from_first = true, to_seq = 3, to_at = now() WHERE id = $1`,
+		"no to_seq":            `UPDATE audit_verify_runs SET state = 'intact', finished_at = now(), entries_checked = 3, from_first = true, to_at = now() WHERE id = $1`,
+		"no to_at":             `UPDATE audit_verify_runs SET state = 'intact', finished_at = now(), entries_checked = 3, from_first = true, to_seq = 3 WHERE id = $1`,
+		"not from the first":   `UPDATE audit_verify_runs SET state = 'intact', finished_at = now(), entries_checked = 3, to_seq = 3, to_at = now() WHERE id = $1`,
+		"finished but running": `UPDATE audit_verify_runs SET finished_at = now() WHERE id = $1`,
+	} {
+		if err := asPlatform(q, first); pgCode(err) != checkViolation {
+			t.Errorf("intact, %s: want 23514, got %v", name, err)
+		}
 	}
 	if err := asPlatform(`UPDATE audit_verify_runs SET state = 'intact', finished_at = now(), entries_checked = 3,
 		from_first = true, to_seq = 3, to_at = now(), version = version + 1 WHERE id = $1`, first); err != nil {
 		t.Fatalf("finishing the run: %v", err)
 	}
-	if err := asPlatform(`INSERT INTO audit_verify_runs DEFAULT VALUES`); err != nil {
+	var second uuid.UUID
+	err = db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `INSERT INTO audit_verify_runs DEFAULT VALUES RETURNING id`).Scan(&second)
+	})
+	if err != nil {
 		t.Fatalf("a run after the first finished: %v", err)
 	}
 
@@ -232,19 +362,56 @@ func TestOneRunningVerifyRun(t *testing.T) {
 			t.Errorf("%s: want 23514, got %v", name, err)
 		}
 	}
+
+	// M1: a finished run is fixed but for its outcome and version, even
+	// where the CHECKs would allow the change, and whoever writes it.
+	for name, q := range map[string]string{
+		"rewrite entries_checked": `UPDATE audit_verify_runs SET entries_checked = 4 WHERE id = $1`,
+		"rewrite to_seq":          `UPDATE audit_verify_runs SET to_seq = 2 WHERE id = $1`,
+		"reopen":                  `UPDATE audit_verify_runs SET state = 'running', finished_at = NULL WHERE id = $1`,
+		"intact to error":         `UPDATE audit_verify_runs SET state = 'error', error_code = 'timed_out', entries_checked = NULL WHERE id = $1`,
+		"move its finish":         `UPDATE audit_verify_runs SET finished_at = finished_at - interval '1 hour' WHERE id = $1`,
+	} {
+		if err := asPlatform(q, first); pgCode(err) != checkViolation {
+			t.Errorf("finished run, %s: want 23514, got %v", name, err)
+		}
+		if _, err := pool.Exec(ctx, q, first); pgCode(err) != checkViolation {
+			t.Errorf("finished run as the owner, %s: want 23514, got %v", name, err)
+		}
+	}
+	if err := asPlatform(`UPDATE audit_verify_runs SET version = version + 1 WHERE id = $1`, first); err != nil {
+		t.Errorf("a version bump on a finished run: %v", err)
+	}
+
+	// A broken run takes an outcome: note, author and time, the note at
+	// most 1000 characters; then nothing but the outcome moves.
+	if err := asPlatform(`UPDATE audit_verify_runs SET state = 'broken', finished_at = now(), entries_checked = 2,
+		first_broken_seq = 2, first_broken_id = '2', first_broken_at = now() WHERE id = $1`, second); err != nil {
+		t.Fatalf("finishing a run broken: %v", err)
+	}
 	auditor := seedUser(t, pool, nil)
-	broken := `INSERT INTO audit_verify_runs (state, finished_at, first_broken_seq, first_broken_id, first_broken_at,
-		entries_checked, outcome_note, outcome_by, outcome_at) VALUES ('broken', now(), 2, '2', now(), 2, $1, $2, now())`
+	outcome := `UPDATE audit_verify_runs SET outcome_note = $2, outcome_by = $3, outcome_at = now(), version = version + 1 WHERE id = $1`
 	long := strings.Repeat("n", 1001)
-	if err := asPlatform(broken, long, auditor); pgCode(err) != checkViolation {
+	if err := asPlatform(outcome, second, long, auditor); pgCode(err) != checkViolation {
 		t.Errorf("1001-character outcome note: want 23514, got %v", err)
 	}
-	if err := asPlatform(broken, long[:1000], auditor); err != nil {
+	if err := asPlatform(`UPDATE audit_verify_runs SET outcome_note = 'synthetic', outcome_at = now() WHERE id = $1`, second); pgCode(err) != checkViolation {
+		t.Errorf("an outcome note with no author: want 23514, got %v", err)
+	}
+	if err := asPlatform(outcome, second, long[:1000], auditor); err != nil {
 		t.Errorf("1000-character outcome note on a broken run: %v", err)
 	}
-	if err := asPlatform(`INSERT INTO audit_verify_runs (state, finished_at, first_broken_seq, first_broken_id, first_broken_at,
-		entries_checked, outcome_note, outcome_at) VALUES ('broken', now(), 2, '2', now(), 2, 'synthetic', now())`); pgCode(err) != checkViolation {
-		t.Errorf("an outcome note with no author: want 23514, got %v", err)
+	if err := asPlatform(`UPDATE audit_verify_runs SET first_broken_seq = 3, first_broken_id = '3' WHERE id = $1`, second); pgCode(err) != checkViolation {
+		t.Errorf("moving a broken run's first broken entry: want 23514, got %v", err)
+	}
+
+	// The platform starts runs only as running, with no outcome.
+	for name, q := range map[string]string{
+		"an intact run": `INSERT INTO audit_verify_runs (state, finished_at, entries_checked, from_first, to_seq, to_at)
+			VALUES ('intact', now(), 5, true, 5, now())`,
+		"an error run": `INSERT INTO audit_verify_runs (state, finished_at, error_code) VALUES ('error', now(), 'timed_out')`,
+	} {
+		requireDenied(t, asPlatform(q), "platform inserting "+name)
 	}
 
 	for _, q := range []string{

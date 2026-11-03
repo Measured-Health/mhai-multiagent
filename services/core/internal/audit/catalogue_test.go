@@ -461,6 +461,23 @@ func fuzzCatalogue(t *testing.T, voc *vocabulary, n int) {
 	entities := []string{"", "session", "hospital", "query", "correction", "job", "audit_run", "audit_list", "audit_search", "user", "operation"}
 	entityIDs := append([]string{"", "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11", "pipeline.run_query", "has space"}, pseudonyms...)
 	hospitals := []string{"", "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11"}
+	mappedOnce := map[string]bool{}
+	defer func() {
+		for a, e := range audit.Catalogue {
+			if withheld(e) || mappedOnce[a] {
+				continue
+			}
+			if awaitingBatchShape[a] {
+				// Gated on a shape its schema doesn't take yet: once it
+				// does, it must leave this list and map here.
+				if in(audit.SchemaFields(a), "job_count") {
+					t.Errorf("%s now takes job_count: remove it from awaitingBatchShape", a)
+				}
+				continue
+			}
+			t.Errorf("%s never mapped over %d generated events: the fuzz proves nothing for it", a, n)
+		}
+	}()
 	actions := make([]string, 0, len(audit.Catalogue))
 	for a := range audit.Catalogue {
 		actions = append(actions, a)
@@ -508,18 +525,18 @@ func fuzzCatalogue(t *testing.T, voc *vocabulary, n int) {
 				t.Fatalf("%s: the generator built a payload its schema refuses: %v", a, err)
 			}
 			m, ok := audit.Map(ev)
-			if withheld(e) {
-				if ok {
-					t.Errorf("%s is withheld but mapped", a)
-				}
-				continue
+			// A schema-valid payload maps exactly when its row is not
+			// withheld and takes this row of the action: the guards
+			// (pseudonym, target id) never fire on what the schemas let
+			// through, so a refusal here is a catalogue bug.
+			want := !withheld(e) && (e.When == nil || e.When(ev))
+			if ok != want {
+				t.Fatalf("%s: Map ok=%v, want %v, for payload %v entity %q/%q", a, ok, want, payload, ev.Entity, ev.EntityID)
 			}
 			if !ok {
-				// A row may still refuse an event (an entity it can't
-				// name); it must then be the bare entry, which is checked
-				// in TestUnmappedActionSendsNoPayload.
 				continue
 			}
+			mappedOnce[a] = true
 			if m.Type != e.Type || m.Kind != e.Kind {
 				t.Errorf("%s mapped to %s/%s, its row says %s/%s", a, m.Type, m.Kind, e.Type, e.Kind)
 			}
@@ -599,5 +616,88 @@ func TestUnmappedActionSendsNoPayload(t *testing.T) {
 	m, ok := audit.Map(audit.Event{Action: "audit.searched", Payload: map[string]any{"searched_kind": "request"}})
 	if !ok || m.Kind != "audit_searched" || m.Facts["searched_kind"] != "request" || m.Outcome != "succeeded" {
 		t.Errorf("audit.searched mapped to %+v, %v", m, ok)
+	}
+}
+
+// awaitingBatchShape are the rows gated on the batch payload (job_count, no
+// job) that Plan 4 Task 12 adds to their schemas. Until then they never map.
+var awaitingBatchShape = map[string]bool{"job.retried": true, "job.cancelled": true}
+
+// TestPerJobRowsAreNotPlatformBatches (ruling R24): a job.retried or
+// job.cancelled row naming one job (core's dead-letter re-mint, the
+// sweeper's cancels) is a system row and is withheld; only the platform's
+// one-per-call row, with job_count and no job, is "Retried/Cancelled
+// failed jobs".
+func TestPerJobRowsAreNotPlatformBatches(t *testing.T) {
+	job := "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11"
+	perJob := map[string]audit.Event{
+		"job.retried": {Action: "job.retried", Entity: "job", EntityID: job,
+			Payload: map[string]any{"job_id": job, "msg_id": "msg-1"}},
+		"job.cancelled": {Action: "job.cancelled", Entity: "job", EntityID: job,
+			Payload: map[string]any{"job_id": job, "type": "approve_correction", "reason": "user_deactivated"}},
+	}
+	for a, ev := range perJob {
+		if err := audit.CheckActionPayload(a, ev.Payload); err != nil {
+			t.Fatalf("%s: the per-job row doesn't fit its schema: %v", a, err)
+		}
+		if m, ok := audit.Map(ev); ok {
+			t.Errorf("%s per-job row mapped to %s/%s", a, m.Type, m.Kind)
+		}
+		e := audit.Catalogue[a]
+		if e.When == nil {
+			t.Fatalf("%s has no batch gate", a)
+		}
+		for name, x := range map[string]audit.Event{
+			"per-job":             ev,
+			"job id with a count": {Action: a, Payload: map[string]any{"job_id": job, "job_count": 2.0}},
+			"entity with a count": {Action: a, Entity: "job", EntityID: job, Payload: map[string]any{"job_count": 2.0}},
+			"no count":            {Action: a, Payload: map[string]any{}},
+		} {
+			if e.When(x) {
+				t.Errorf("%s: the %s row passes the batch gate", a, name)
+			}
+		}
+		if !e.When(audit.Event{Action: a, Payload: map[string]any{"job_count": 3.0, "type": "run_query"}}) {
+			t.Errorf("%s: the batch row fails the batch gate", a)
+		}
+	}
+}
+
+// TestMapGuardsRefusePseudonymShapes: whatever a row derives, a target id
+// or a facts value of the pseudonym's shape (alone or inside a string), or
+// a target id that isn't opaque, sends the bare entry. The catalogue's own
+// rows can't produce one (TestCatalogueNeverEmitsPseudonymShape); this
+// holds the runtime guard on its own.
+func TestMapGuardsRefusePseudonymShapes(t *testing.T) {
+	run := "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11"
+	outcome := audit.Event{Action: "audit.check_outcome", Payload: map[string]any{"run_id": run}}
+	target := func(id string) audit.Entry {
+		return audit.Entry{Type: "audit", Kind: "audit_check_outcome",
+			Target: func(audit.Event) *audit.Target { return &audit.Target{Kind: "run", ID: id} }}
+	}
+	for _, id := range []string{"P-ABCD12", "P-7F3K2", "req-P-7F3K2", "has space", ""} {
+		if m, ok := audit.MapRow(target(id), outcome); ok {
+			t.Errorf("target id %q mapped: %+v", id, m)
+		}
+	}
+	if m, ok := audit.MapRow(target(run), outcome); !ok || m.Target == nil || m.Target.ID != run {
+		t.Errorf("a uuid target was refused: %+v %v", m, ok)
+	}
+
+	// msg_id is a token its schema lets take the pseudonym's shape; a row
+	// that (wrongly) mapped it to facts is stopped at the door.
+	facts := audit.Entry{Type: "platform", Kind: "jobs_retried", Facts: map[string]string{"msg_id": "searched"}}
+	for _, msg := range []string{"P-ABCD12", "P-7F3K2", "req-P-7F3K2", "P-ABCDEFGHIJKL"} {
+		ev := audit.Event{Action: "job.retried", Payload: map[string]any{"job_id": run, "msg_id": msg}}
+		if err := audit.CheckActionPayload("job.retried", ev.Payload); err != nil {
+			t.Fatalf("msg_id %q: %v", msg, err)
+		}
+		if m, ok := audit.MapRow(facts, ev); ok {
+			t.Errorf("facts value %q mapped: %+v", msg, m)
+		}
+	}
+	m, ok := audit.MapRow(facts, audit.Event{Action: "job.retried", Payload: map[string]any{"job_id": run, "msg_id": "msg-1"}})
+	if !ok || m.Facts["searched"] != "msg-1" {
+		t.Errorf("a plain facts value was refused: %+v %v", m, ok)
 	}
 }
