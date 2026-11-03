@@ -246,32 +246,62 @@ and the line is removed.
 
 The nats service now needs `NATS_BFF_PLATFORM_NKEY` (`:?`), and merging
 deploys at once, so run the new `setup-host.sh` first or the deploy stops at
-the compose check. From a checkout of this branch, as the deploy user:
+the compose check. From a checkout of this branch (a fresh folder on the
+host each time, removed afterwards; never a fixed path in `/tmp`):
 
 ```bash
-scp -i mh.pem -r deploy ubuntu@3.239.87.6:/tmp/mhai-backend-deploy \
-  && ssh -i mh.pem ubuntu@3.239.87.6 \
-  'bash /tmp/mhai-backend-deploy/setup-host.sh && rm -rf /tmp/mhai-backend-deploy'
+( H=ubuntu@3.239.87.6; K=mh.pem
+  d=$(ssh -i $K $H 'mktemp -d') && trap 'ssh -i $K $H "rm -rf $d"' EXIT \
+  && scp -i $K -r deploy "$H:$d/" \
+  && ssh -i $K $H "bash $d/deploy/setup-host.sh" )
 ```
 
 It adds the platform pair, moves the clinical seed into its file, and
-rewrites `/srv/mhai-backend/nats/nats.conf` and `compose.yml` (the running
-NATS keeps its old config until the deploy recreates it, which core rides
-out). Check: `grep -c SEED /srv/mhai-backend/.env` prints 0 and
+rewrites `/srv/mhai-backend/nats/nats.conf` and `compose.yml`. **Merge
+promptly after running it.** Until the deploy recreates `nats`, the running
+container keeps its old environment but the file on disk is the new config
+(which names `$NATS_BFF_PLATFORM_NKEY`): if NATS is restarted in that window
+(a host reboot, `docker restart`) it fails to start and crash-loops. If that
+happens, `cd /srv/mhai-backend && docker compose up -d nats` recreates it
+with the new environment.
+
+Checks: `grep -c SEED /srv/mhai-backend/.env` prints 0 and
 `sudo ls -ln /srv/mhai-backend/secrets/bff` shows two `-r--------` files for
 uid 1001.
 
+**uid 1001.** The seed files are owned by uid 1001, the `nextjs` user inside
+mhai-web's images. On the host that number should belong to nobody. Check
+first with `getent passwd 1001`: it should print nothing. On a typical
+Ubuntu host the deploy user `ubuntu` is uid 1000 and 1001 is free, but an AWS
+instance with the SSM agent creates `ssm-user` as 1001 (a login with sudo).
+If it prints a user, that user can read both seeds; `setup-host.sh` prints a
+warning in that case. Fix it by giving mhai-web's images a different uid
+(and `WEB_UID` in the script), not by ignoring the warning. It has not been
+checked on the demo instance itself: do it before running the script.
+
+The script also copies itself to `/srv/mhai-backend/setup-host.sh`
+(mode 750), so later runs need no new copy of `deploy/`.
+
 ### Rotating a BFF's key
 
+On the instance, as the deploy user:
+
 ```bash
-bash /tmp/mhai-backend-deploy/setup-host.sh --rotate-bff clinical   # or platform, or all
+bash /srv/mhai-backend/setup-host.sh --rotate-bff clinical   # or platform, or all
 ```
 
-It makes a new pair, replaces the public key in `.env` and the seed file, and
-says what to restart: `docker compose up -d --force-recreate nats` in
-`/srv/mhai-backend`, then the app's container (it reads the file at start).
-Until both are restarted that BFF cannot connect. Rotate after any suspected
-leak of a seed.
+It makes a new pair (the seed goes to a temporary file in the folder and is
+moved into place, so a failure leaves the old seed), replaces the public key
+in `.env` and the seed file, and prints under "Done" what to restart:
+`docker compose up -d --force-recreate nats` in `/srv/mhai-backend`, then the
+app's container (it reads the file at start). Until both are restarted that
+BFF cannot connect. Rotate after any suspected leak of a seed.
+
+A normal run never makes a new pair when a key exists: if `.env` has a BFF
+public key but there is neither a seed file nor a legacy seed to move, or a
+legacy seed in `.env` differs from the seed file or from the public key, the
+script stops and changes nothing. Use `--rotate-bff` only when you mean to
+re-key.
 
 - **From a container** (how mhai-web runs): add the shared network to the
   service in mhai-web's `deploy/compose.yml` and connect to

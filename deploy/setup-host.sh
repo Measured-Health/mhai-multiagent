@@ -104,6 +104,8 @@ copy() {
 }
 copy "$SRC/compose.yml"                   "$DEST/compose.yml"                   644
 copy "$SRC/nats/nats.conf"                "$DEST/nats/nats.conf"                644
+# This script too, so a later run (--rotate-bff) needs no new copy of deploy/.
+copy "$SRC/setup-host.sh"                 "$DEST/setup-host.sh"                 750
 
 say "Secrets in $DEST/.env"
 umask 077
@@ -170,39 +172,64 @@ say "NATS NKeys for the frontend's BFFs ($DEST/secrets/bff/)"
 # seed is never in .env, an environment variable, an image or this output:
 # it is made, moved and checked inside a throwaway container with no network,
 # and only the public key comes back. The folder is mode 750.
+if getent passwd "$WEB_UID" >/dev/null; then
+  echo "    warning: uid $WEB_UID is a login on this host ($(getent passwd "$WEB_UID" | cut -d: -f1)); it will be able to read the BFF seed files" >&2
+fi
 mkdir -p "$DEST/secrets/bff"
 bff_key() {
-  local app=$1 pubvar=$2 legacyvar=$3 rotate=0 legacy="" pub
+  local app=$1 pubvar=$2 legacyvar=$3 rotate=0 legacy="" envpub pub
   if [ "$ROTATE_BFF" = all ] || [ "$ROTATE_BFF" = "$app" ]; then rotate=1; fi
   if [ -n "$legacyvar" ]; then
     legacy=$(sed -n "s/^${legacyvar}=\(SU.*\)$/\1/p" "$ENV_FILE" | tail -n1)
   fi
+  envpub=$(sed -n "s/^${pubvar}=\(U.*\)$/\1/p" "$ENV_FILE" | tail -n1)
+  # In the container: the seed is read from stdin (a legacy seed) or made, and
+  # is written to a temp file in the volume, then moved into place, so a
+  # failure never leaves a half-written or replaced seed. Any disagreement
+  # between the seed file, the legacy seed and the public key in .env stops
+  # here, before .env is touched; a new pair is only ever made on a first run
+  # (no key anywhere) or by --rotate-bff.
   pub=$(printf '%s' "$legacy" | docker run --rm -i --network none --user 0 --entrypoint sh \
-    -e APP="$app" -e ROTATE="$rotate" -e DIR_OWNER="$(id -u):$WEB_GID" -e WEB_UID="$WEB_UID" -e WEB_GID="$WEB_GID" \
+    -e APP="$app" -e ROTATE="$rotate" -e ENVPUB="$envpub" -e PUBVAR="$pubvar" -e DIR_OWNER="$(id -u):$WEB_GID" \
+    -e WEB_UID="$WEB_UID" -e WEB_GID="$WEB_GID" \
     -v "$DEST/secrets/bff:/s" "$NATS_BOX_IMAGE" -c '
       set -eu; umask 077
-      f=/s/nats-bff-$APP.nk
+      f=/s/nats-bff-$APP.nk; t=/s/.nats-bff-$APP.nk.new
+      trap "rm -f $t $t.in" EXIT
       incoming=$(cat)
-      if [ "$ROTATE" = 1 ] || [ ! -s "$f" ]; then
-        if [ "$ROTATE" != 1 ] && [ -n "$incoming" ]; then
-          printf "%s\n" "$incoming" > "$f"
-          echo "seed moved from .env into its file (same key pair)" >&2
-        else
-          out=$(nsc generate nkey --user 2>/dev/null)
-          printf "%s\n" "$out" | sed -n 1p > "$f"
-          [ "$ROTATE" = 1 ] && echo "new pair made (rotated)" >&2 || echo "new pair made" >&2
-          unset out
-        fi
-      else
-        echo "seed file exists, kept" >&2
-      fi
+      pubof() { nats auth nkey show "$1"; }
+      user_seed() { case "$(head -c 2 "$1")" in SU) ;; *) echo "the $APP seed is not a user seed" >&2; exit 1;; esac; }
+      place() { chown "$WEB_UID:$WEB_GID" "$t"; chmod 400 "$t"; mv -f "$t" "$f"; }
+      if [ -n "$incoming" ]; then
+        printf "%s\n" "$incoming" > "$t.in"; user_seed "$t.in"; ipub=$(pubof "$t.in")
+      else ipub=""; fi
       unset incoming
-      case "$(head -c 2 "$f")" in SU) ;; *) echo "the seed is not a user seed" >&2; exit 1;; esac
-      chown "$WEB_UID:$WEB_GID" "$f"; chmod 400 "$f"
+      if [ "$ROTATE" = 1 ]; then
+        out=$(nsc generate nkey --user 2>/dev/null)
+        printf "%s\n" "$out" | sed -n 1p > "$t"; unset out
+        user_seed "$t"; place; echo "new pair made (rotated)" >&2
+      elif [ -s "$f" ]; then
+        user_seed "$f"
+        if [ -n "$ipub" ] && [ "$ipub" != "$(pubof "$f")" ]; then
+          echo "the seed file and the seed still in .env are different keys: nothing changed; decide which is right (the one whose public key is in .env is the live one), then remove the other" >&2; exit 3
+        fi
+        echo "seed file exists, kept" >&2
+      elif [ -n "$ipub" ]; then
+        if [ -n "$ENVPUB" ] && [ "$ENVPUB" != "$ipub" ]; then
+          echo "the seed in .env does not match $PUBVAR in .env: nothing changed" >&2; exit 3
+        fi
+        cp "$t.in" "$t"; place; echo "seed moved from .env into its file (same key pair)" >&2
+      elif [ -n "$ENVPUB" ]; then
+        echo "$PUBVAR is in .env but there is no seed file and no seed to move: refusing to make a new pair silently (it would lock the frontend out). If the seed is lost, run with --rotate-bff $APP" >&2; exit 3
+      else
+        out=$(nsc generate nkey --user 2>/dev/null)
+        printf "%s\n" "$out" | sed -n 1p > "$t"; unset out
+        user_seed "$t"; place; echo "new pair made" >&2
+      fi
       chown "$DIR_OWNER" /s; chmod 750 /s
-      nats auth nkey show "$f"' 2> >(sed 's/^/    /' >&2))
+      pubof "$f"' 2> >(sed 's/^/    /' >&2)) || die "the $app BFF key was not changed (see above)"
   case "$pub" in U?*) ;; *) die "could not read the $app BFF public key from its seed" ;; esac
-  if grep -qx "${pubvar}=$pub" "$ENV_FILE"; then
+  if [ "$envpub" = "$pub" ]; then
     info "$pubvar matches the seed, kept"
   else
     sed -i "/^${pubvar}=/d" "$ENV_FILE"
@@ -219,10 +246,6 @@ bff_key() {
 bff_key clinical NATS_BFF_NKEY          NATS_BFF_NKEY_SEED
 bff_key platform NATS_BFF_PLATFORM_NKEY ""
 info "folder: mode 750"
-if [ "$ROTATED" = 1 ]; then
-  info "Rotated: restart nats and the BFF's app so both use the new pair:"
-  info "  (cd $DEST && docker compose up -d --force-recreate nats), then restart the app"
-fi
 
 say "Docker network mhai-bff (shared with the frontend's containers)"
 if docker network inspect mhai-bff >/dev/null 2>&1; then
@@ -287,5 +310,9 @@ say "Checking the compose file"
 info "compose.yml and .env are valid"
 
 say "Done"
+if [ "$ROTATED" = 1 ]; then
+  info "A BFF key was rotated: restart nats and that BFF's app, or it cannot connect:"
+  info "  (cd $DEST && docker compose up -d --force-recreate nats), then restart the app"
+fi
 info "Nothing was started. Next: set the repository variable DEPLOY_ENABLED=true"
 info "and run the Deploy backend demo workflow (deploy/README.md)."
