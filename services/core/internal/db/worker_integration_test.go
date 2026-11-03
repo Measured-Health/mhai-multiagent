@@ -293,9 +293,11 @@ func TestWorkerGrantsNarrowed(t *testing.T) {
 	// Nothing else (hospitals: its own row's id and status only,
 	// TestWorkerRefusesInactiveHospital).
 	for _, tbl := range []string{"users", "sessions", "audit_log", "user_roles", "idempotency_keys",
-		"feedback_events", "refresh_tokens", "audit_checkpoints"} {
+		"refresh_tokens", "audit_checkpoints"} {
 		deny("select "+tbl, `SELECT 1 FROM `+tbl)
 	}
+	// feedback_events: ids and statuses only (00011, TestWorkerCannotReadFeedbackText).
+	deny("select feedback text", `SELECT reason FROM feedback_events`)
 	deny("chain head", `SELECT * FROM audit_chain_head()`)
 	deny("expire function", `SELECT * FROM mhai_fail_expired_queries(1)`)
 }
