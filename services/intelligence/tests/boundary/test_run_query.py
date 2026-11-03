@@ -68,8 +68,8 @@ async def _connect(server: NatsServer, user: str, inbox: str) -> Client:
 
 
 async def ensure_streams(js: Any, ack_wait: float, max_deliver: int = 5) -> None:
-    """bus.EnsureStreams' JOBS, DEAD, pipeline and core_dead (values from
-    streams.go), with ack_wait as the test needs."""
+    """bus.EnsureStreams' JOBS, DEAD, pipeline, pipeline_learning and
+    core_dead (values from streams.go), with ack_wait as the test needs."""
     await js.add_stream(
         api.StreamConfig(
             name="JOBS",
@@ -104,6 +104,17 @@ async def ensure_streams(js: Any, ack_wait: float, max_deliver: int = 5) -> None
             ack_wait=ack_wait,
             max_deliver=max_deliver,
             max_ack_pending=8,
+        ),
+    )
+    await js.add_consumer(
+        "JOBS",
+        api.ConsumerConfig(
+            durable_name="pipeline_learning",
+            filter_subject="jobs.v1.*.approve_correction",
+            ack_policy=api.AckPolicy.EXPLICIT,
+            ack_wait=ack_wait,
+            max_deliver=max_deliver,
+            max_ack_pending=4,
         ),
     )
     await js.add_consumer(
@@ -473,6 +484,35 @@ async def test_job_runs_to_completed(
     # No question text, patient data or answer in any log line (spec §10.3).
     assert MARKER not in caplog.text
     assert StubModelClient.ANSWER not in caplog.text
+
+
+async def test_run_query_writes_masked_copy_and_timings(
+    make_env: MakeEnv, postgres: Postgres
+) -> None:
+    """Plan 4 spec §4.4, §6.3: the completion stores what a reviewer may
+    read (the question and patient data as masked before generation, never
+    the raw text) and the step timings, under closed keys."""
+    env = await make_env()
+    qid = await seed_query(postgres, question=f"Synthetic question {MARKER}")
+    stub = StubModelClient()
+    await env.start(stub)
+    await env.publish(qid)
+    assert await until(lambda: status_is(postgres, qid, "completed"))
+    async with await su(postgres) as conn:
+        cur = await conn.execute(
+            "SELECT masked_question, masked_patient_json, timings_ms FROM clinical_decisions "
+            "WHERE query_id = %s",
+            (qid,),
+        )
+        r = await cur.fetchone()
+    assert r is not None
+    masked_q, masked_p, timings = r
+    assert masked_q == StubModelClient.MASKED
+    assert MARKER not in masked_q and MARKER not in json.dumps(masked_p)
+    # The patient data's shape, every string masked.
+    assert masked_p == {"note": StubModelClient.MASKED, "marker": StubModelClient.MASKED}
+    assert set(timings) == {"privacy", "guidelines", "answer", "evidence"}
+    assert all(isinstance(v, int) and v >= 0 for v in timings.values())
 
 
 async def test_redelivery_after_completion_acks_without_second_decision(

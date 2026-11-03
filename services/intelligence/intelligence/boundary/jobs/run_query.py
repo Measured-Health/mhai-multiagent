@@ -22,7 +22,8 @@ check of spec §7.3. In order:
      cancelled, failed or done is acked and left alone, one re-claimed by
      another delivery is left to it.
   4. Complete in one transaction (jobs_repo.complete): the decision (unique
-     query_id), the evaluation, the query.completed outbox fact, status
+     query_id, with the masked question and patient data a reviewer may
+     read, and the step timings: Plan 4 spec §4.4, §6.3), the evaluation, the query.completed outbox fact, status
      completed, only while this claim owns the row (the check before
      writing). Then ack. A unique violation: another delivery finished it,
      ack.
@@ -43,10 +44,11 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import math
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from intelligence.boundary import jobs_repo, kb_repo, telemetry
@@ -129,6 +131,8 @@ class _Job:
     abandoned: bool = False
     settled: bool = False
     heartbeat_failures: int = 0
+    # Whole milliseconds each stage took, by stage name (Plan 4 §6.3).
+    stage_ms: dict[str, int] = field(default_factory=dict)
 
 
 def _delivered(msg: Msg) -> int:
@@ -158,6 +162,29 @@ def _mask_tree(mask: Callable[[str], str], value: Any, depth: int = 0) -> Any:
     if isinstance(value, int | float | bool) or value is None:
         return value
     return None
+
+
+def _ms(seconds: float | None) -> int:
+    """Whole, non-negative milliseconds."""
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        return 0
+    return int(seconds * 1000)
+
+
+def _timings(stage_ms: Mapping[str, int], g: Generation, chunks_ms: int) -> dict[str, int]:
+    """The step timings the decision stores, under the health view's keys
+    (00011's closed set): masking is privacy; loading the shared guidelines
+    plus the model's own retrieval is guidelines; generation is answer;
+    verification is evidence. The model's own split is used where it gives
+    one, the stage's wall time where it doesn't."""
+    retrieval = g.retrieval_ms if g.retrieval_ms is not None else 0.0
+    answer = g.generation_ms if g.generation_ms is not None else None
+    return {
+        "privacy": stage_ms.get("mask_all", 0),
+        "guidelines": chunks_ms + _ms(retrieval / 1000),
+        "answer": _ms(answer / 1000) if answer is not None else stage_ms.get("generate", 0),
+        "evidence": stage_ms.get("verify", 0),
+    }
 
 
 class RunQuery:
@@ -357,12 +384,20 @@ class RunQuery:
         patient = claim.patient_data if isinstance(claim.patient_data, dict) else {}
         question, context = await self._stage(job, self._mask_all, claim.question, patient)
         await self._checkpoint(job, 0.25, "generation")
+        started = time.monotonic()
         chunks = await self._chunks(job)
+        chunks_ms = _ms(time.monotonic() - started)
         generation = await self._stage(job, self._models.generate, question, context, None, chunks)
         await self._checkpoint(job, 0.6, "hga_verification")
         verification = await self._stage(job, self._models.verify, generation)
         await self._checkpoint(job, 0.9, "decision")
-        await self._complete(job, self._decision(generation, verification))
+        decision = replace(
+            self._decision(generation, verification),
+            masked_question=question,
+            masked_patient=context,
+            timings_ms=_timings(job.stage_ms, generation, chunks_ms),
+        )
+        await self._complete(job, decision)
 
     def _mask_all(self, question: str, patient: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
         masked = _mask_tree(self._models.mask, dict(patient))
@@ -391,7 +426,9 @@ class RunQuery:
                 telemetry.fail(sp, "deadline_exceeded")
                 raise
             finally:
-                sp.set_attribute("timing_ms", int((time.monotonic() - started) * 1000))
+                took = _ms(time.monotonic() - started)
+                job.stage_ms[stage] = took
+                sp.set_attribute("timing_ms", took)
 
     async def _stage_run(self, job: _Job, fn: Callable[..., Any], *args: Any) -> Any:
         loop = asyncio.get_running_loop()

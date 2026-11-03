@@ -60,9 +60,10 @@ RETURNING id"""
 
 _INSERT_DECISION = """INSERT INTO clinical_decisions (id, hospital_id, query_id, response_text,
     citations_json, trust_score, hga_decision, guardrail_report_json, retrieval_ms,
-    generation_ms, verified, degraded, failed_agents, model_versions, trust_band)
+    generation_ms, verified, degraded, failed_agents, model_versions, trust_band,
+    masked_question, masked_patient_json, timings_ms)
 VALUES (%s, mhai_current_hospital(), %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s, %s,
-    %s::text[], %s::jsonb, %s)"""
+    %s::text[], %s::jsonb, %s, %s, %s::jsonb, %s::jsonb)"""
 
 _INSERT_HGA = """INSERT INTO hga_evaluations (hospital_id, query_id, target_agent, trust, decision,
     nli_score, coherence_score, numerical_score, se_score, flag_penalty, weights_snapshot_json,
@@ -82,6 +83,15 @@ _FAIL = """UPDATE clinical_queries SET status = 'failed', error = %s, completed_
     lease_until = NULL
 WHERE id = %s AND status = 'running' AND attempts = %s
 RETURNING attempts"""
+
+
+# The step timings' keys (00011's decisions_timings_check): what the
+# platform's health view shows for each step.
+TIMING_KEYS = frozenset({"privacy", "guidelines", "answer", "evidence"})
+# 00011's limits on the masked copy. jsonb renders a little differently
+# from json.dumps, so the patient data keeps a margin under 32768 bytes.
+MAX_MASKED_QUESTION = 8000
+MAX_MASKED_PATIENT_BYTES = 30000
 
 
 def _qid(query_id: str) -> str:
@@ -129,6 +139,37 @@ class Decision:
     flag_penalty: float | None
     weights: Mapping[str, float]
     flags: Sequence[Sequence[str]]
+    # What a reviewer may read in place of the consultation (Plan 4 spec
+    # §4.4): the question and patient data as masked before generation.
+    # None when there is none, or it is over 00011's limits (core then
+    # refuses a correction of this decision rather than show less).
+    masked_question: str | None = field(default=None, repr=False)
+    masked_patient: Mapping[str, Any] | None = field(default=None, repr=False)
+    # Whole milliseconds per step, keys from TIMING_KEYS.
+    timings_ms: Mapping[str, int] = field(default_factory=dict)
+
+
+def _masked_question(q: str | None) -> str | None:
+    return q if isinstance(q, str) and len(q) <= MAX_MASKED_QUESTION else None
+
+
+def _masked_patient(p: Mapping[str, Any] | None) -> str | None:
+    if p is None:
+        return None
+    try:
+        raw = json.dumps(dict(p), ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        return None
+    return raw if len(raw.encode()) <= MAX_MASKED_PATIENT_BYTES else None
+
+
+def _timings(t: Mapping[str, int]) -> str | None:
+    clean = {
+        k: int(v)
+        for k, v in t.items()
+        if k in TIMING_KEYS and isinstance(v, int) and not isinstance(v, bool) and v >= 0
+    }
+    return json.dumps(clean) if clean else None
 
 
 async def read_status(cur: Cursor, query_id: str) -> str | None:
@@ -215,6 +256,9 @@ async def complete(cur: Cursor, query_id: str, attempts: int, d: Decision) -> bo
             list(d.failed_agents),
             json.dumps(dict(d.model_versions)),
             d.trust_band,
+            _masked_question(d.masked_question),
+            _masked_patient(d.masked_patient),
+            _timings(d.timings_ms),
         ),
     )
     await cur.execute(
