@@ -19,7 +19,6 @@ All notable changes to this project are documented here. The format follows
   to `setup_incomplete` -> `active` only, and lets it append
   `hospital.activated`. The smoke test activates its hospital with the
   command instead of an UPDATE as the owner.
-
 - The demo's NATS has a `bff_platform` NKey user (publish `api.v1.platform`,
   receive `_INBOX_bff.platform.>`, nothing else), and both BFF seeds are now
   files under `/srv/mhai-backend/secrets/bff/` (mode 400, uid 1001, mhai-web's
