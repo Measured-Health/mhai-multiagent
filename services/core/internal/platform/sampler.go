@@ -46,15 +46,17 @@ const (
 	// takes over.
 	maxFailures = 2
 	// stepDownTicks: after stepping down a copy leaves the lock alone this
-	// many ticks, so another copy gets it first.
-	stepDownTicks = 3
+	// many ticks, so another copy gets it first. One: with a single copy
+	// (the demo) the next try is two ticks after the second failure.
+	stepDownTicks = 1
 )
 
 // leaderSession bounds how long a frozen leader (its host or network gone
 // without a FIN) keeps the lock: the server drops the session, and with it
 // the lock, after about 30 s of silence instead of the kernel's default
-// (about 2 hours). Session settings, so they need no privilege.
-const leaderSession = `SET tcp_keepalives_idle = 15; SET tcp_keepalives_interval = 5; SET tcp_keepalives_count = 3; SET tcp_user_timeout = 30000`
+// (about 2 hours). Session settings, so they need no privilege. A var
+// only so a test can make it fail (export_test.go).
+var leaderSession = `SET tcp_keepalives_idle = 15; SET tcp_keepalives_interval = 5; SET tcp_keepalives_count = 3; SET tcp_user_timeout = 30000`
 
 // healthProbeHospital is the hospital the pipeline.health token names. A
 // request token always carries one (Plan 3 F10), but the probe is about no

@@ -757,3 +757,48 @@ func TestHealthSinceResetsAfterAGap(t *testing.T) {
 		t.Errorf("since %s carried over a 3-minute gap (reading at %s)", late.Parts[0].Since, late.UpdatedAt)
 	}
 }
+
+// TestSamplerDoesntLeadWithoutTimeouts (fix round 2): if the leader's
+// keepalive and timeout settings can't be set, the copy gives the lock up
+// at once and never samples; a copy that can set them leads at once.
+func TestSamplerDoesntLeadWithoutTimeouts(t *testing.T) {
+	clearHealth(t)
+	startPipeline(t)
+	const tick = 100 * time.Millisecond
+	restore := platform.SetLeaderSession(`SELECT synthetic_no_such_function()`)
+	var sampled atomic.Int32
+	s := sampler(nil)
+	s.Sampled = func(platform.HealthOut) { sampled.Add(1) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = s.Run(ctx, tick)
+	}()
+	time.Sleep(5 * tick)
+	cancel()
+	<-done
+	restore()
+	if n := sampled.Load(); n != 0 {
+		t.Fatalf("a copy without the session timeouts sampled %d times", n)
+	}
+	// The lock wasn't left held: a working copy leads on its first tick.
+	var wrote atomic.Int32
+	w := sampler(nil)
+	w.Sampled = func(platform.HealthOut) { wrote.Add(1) }
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		_ = w.Run(ctx2, time.Hour)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for wrote.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel2()
+	<-done2
+	if wrote.Load() == 0 {
+		t.Fatal("the lock was left held after the failed session setup")
+	}
+}

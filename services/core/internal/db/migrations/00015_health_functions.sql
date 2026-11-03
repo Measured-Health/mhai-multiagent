@@ -48,6 +48,21 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mhai_health_reader') THEN
         CREATE ROLE mhai_health_reader NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
     END IF;
+    -- Whatever a pre-existing role looked like, it is this one now. The
+    -- superuser, BYPASSRLS and REPLICATION attributes need a superuser to
+    -- change, so they are cleared only when set (a non-superuser runner
+    -- then fails here, which is the point).
+    ALTER ROLE mhai_health_reader NOLOGIN NOINHERIT NOCREATEDB NOCREATEROLE;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mhai_health_reader'
+               AND (rolsuper OR rolbypassrls OR rolreplication)) THEN
+        ALTER ROLE mhai_health_reader NOSUPERUSER NOBYPASSRLS NOREPLICATION;
+    END IF;
+    -- Nobody may already act as it: its grants open clinical rows.
+    IF EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
+               WHERE r.rolname = 'mhai_health_reader') THEN
+        RAISE EXCEPTION USING ERRCODE = 'object_in_use',
+            MESSAGE = '00015: mhai_health_reader already has members; remove them first';
+    END IF;
     IF NOT pg_has_role(current_user, 'mhai_health_reader', 'MEMBER') THEN
         EXECUTE format('GRANT mhai_health_reader TO %I', current_user);
         PERFORM set_config('mhai.health_reader_granted', 'yes', false);

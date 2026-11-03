@@ -104,6 +104,7 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 
 ## Plan 4c follow-ups (Task 11 review)
 
+- **The non-superuser migrate path and `mhai_health_reader`.** On a CREATEROLE (not superuser) migration login, 00015's `ALTER FUNCTION ... OWNER TO mhai_health_reader` needs the new owner to hold CREATE on schema `public`, which it doesn't (it has USAGE only). Grant it for the hand-over and revoke it after, or run that step as a superuser. The demo migrates as a superuser, so it isn't affected.
 - **Bound the health failures scan with retention.** `mhai_health_failures()` counts every failed question and job, however old (partial indexes on failed rows keep it to those rows). Once the retention plan purges old jobs and questions, the scan is bounded by it; until then it grows with the failed rows kept.
 
 ## Test follow-ups
