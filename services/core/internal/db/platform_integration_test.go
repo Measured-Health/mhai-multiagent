@@ -26,14 +26,16 @@ const uniqueViolation = "23505"
 // signatures (spec §6.1-§6.3): identity arguments and declared result, as
 // Postgres prints them. Tasks 11-13 fill the bodies. 00015 (Task 11)
 // replaced the health window's interval with text (an interval can't tell
-// '60 minutes' from '1 hour') and added mhai_health_guidelines.
+// '60 minutes' from '1 hour') and added mhai_health_guidelines. 00016
+// (Task 12) added p_not_errors to mhai_platform_jobs (the "other" kind is
+// every code that isn't another kind's).
 var platformFunctions = map[string][2]string{
 	"mhai_health_timings": {"p_window text",
 		"TABLE(step text, p50_ms integer, p95_ms integer, samples bigint)"},
 	"mhai_health_guidelines": {"", "boolean"},
 	"mhai_health_failures": {"",
 		"TABLE(job_type text, error text, failed_now bigint, failed_last_hour bigint, failed_last_24h bigint)"},
-	"mhai_platform_jobs": {"p_status text, p_type text, p_hospital uuid, p_errors text[], p_after_failed_at timestamp with time zone, p_after_id uuid, p_limit integer",
+	"mhai_platform_jobs": {"p_status text, p_type text, p_hospital uuid, p_errors text[], p_not_errors text[], p_after_failed_at timestamp with time zone, p_after_id uuid, p_limit integer",
 		"TABLE(id uuid, type text, hospital_id uuid, created_at timestamp with time zone, failed_at timestamp with time zone, attempts integer, error text, status text, retry_count integer, cancelled_by uuid, cancelled_at timestamp with time zone)"},
 	"mhai_guardrail_counts": {"p_from timestamp with time zone, p_to timestamp with time zone",
 		"TABLE(hospital_id uuid, answers bigint, pass bigint, regenerate bigint, escalate bigint, degraded bigint)"},
@@ -208,8 +210,12 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		// The health functions are owned by their own column-limited reader
 		// (00015); the rest by mhai_migrate.
 		wantOwner := "mhai_migrate"
-		if strings.HasPrefix(name, "mhai_health_") {
+		switch {
+		case strings.HasPrefix(name, "mhai_health_"):
 			wantOwner = "mhai_health_reader"
+		case name == "mhai_platform_jobs":
+			// 00016 (Task 12): the failed-jobs list's own reader.
+			wantOwner = "mhai_jobs_reader"
 		}
 		if owner != wantOwner || !definer {
 			t.Errorf("%s: owner %s (want %s), security definer %v", name, owner, wantOwner, definer)
@@ -223,16 +229,18 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		}
 	}
 
-	// The platform may call them: the health bodies are built (00015), the
-	// other two still refuse until Tasks 12-13; nobody else may call any.
+	// The platform may call them: the health bodies are built (00015) and
+	// the jobs list (00016); the guardrail counts still refuse until Task
+	// 13; nobody else may call any.
 	call := map[string]string{
 		"mhai_health_timings":    `SELECT * FROM mhai_health_timings('1 hour')`,
 		"mhai_health_failures":   `SELECT * FROM mhai_health_failures()`,
 		"mhai_health_guidelines": `SELECT mhai_health_guidelines()`,
-		"mhai_platform_jobs":     `SELECT * FROM mhai_platform_jobs('failed', NULL, NULL, NULL, NULL, NULL, 50)`,
+		"mhai_platform_jobs":     `SELECT * FROM mhai_platform_jobs('failed', NULL, NULL, NULL, NULL, NULL, NULL, 50)`,
 		"mhai_guardrail_counts":  `SELECT * FROM mhai_guardrail_counts(now() - interval '7 days', now())`,
 	}
-	built := map[string]bool{"mhai_health_timings": true, "mhai_health_failures": true, "mhai_health_guidelines": true}
+	built := map[string]bool{"mhai_health_timings": true, "mhai_health_failures": true, "mhai_health_guidelines": true,
+		"mhai_platform_jobs": true}
 	for name, q := range call {
 		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q); return err })
 		switch {

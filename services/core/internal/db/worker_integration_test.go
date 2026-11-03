@@ -213,8 +213,12 @@ func TestWorkerGrantsNarrowed(t *testing.T) {
 	queued := freshQuery("")
 	refusedByPolicy("complete without a decision", `UPDATE clinical_queries SET status = 'completed' WHERE id = $1`, queued)
 	refusedByPolicy("cancel", `UPDATE clinical_queries SET status = 'cancelled' WHERE id = $1`, queued)
-	refusedByPolicy("re-queue a running row", `UPDATE clinical_queries SET status = 'queued' WHERE id = $1`,
-		freshQuery(`status = 'running'`))
+	// 00016's trigger refuses a re-queue from anything but failed before
+	// the policy's WITH CHECK is reached.
+	if _, err := asWorker(ctx, super, a, `UPDATE clinical_queries SET status = 'queued' WHERE id = $1`,
+		freshQuery(`status = 'running'`)); pgCode(err) != "23514" {
+		t.Fatalf("worker re-queue a running row: want check violation, got %v", err)
+	}
 	tried := freshQuery(`attempts = 3`)
 	if _, err := asWorker(ctx, super, a, `UPDATE clinical_queries SET attempts = 1 WHERE id = $1`, tried); pgCode(err) != "23514" {
 		t.Fatalf("worker decreasing attempts: want check violation, got %v", err)
@@ -363,7 +367,15 @@ func TestOutboxRLS(t *testing.T) {
 	for _, role := range []string{"mhai_gateway", "mhai_platform", "mhai_auth", "mhai_jobs", "mhai_provision"} {
 		_, err := inTx(ctx, super, []string{`SET LOCAL ROLE ` + role}, &a, ins, a, qa, "query.completed")
 		requireDenied(t, err, role+" outbox insert")
-		_, err = inTx(ctx, super, []string{`SET LOCAL ROLE ` + role}, &a, `SELECT 1 FROM intelligence_audit_outbox`)
+		q := `SELECT 1 FROM intelligence_audit_outbox`
+		if role == "mhai_jobs" {
+			// 00016: the retry reads the two parent ids, nothing else.
+			if _, err := inTx(ctx, super, []string{`SET LOCAL ROLE ` + role}, &a, `SELECT query_id, job_id FROM intelligence_audit_outbox`); err != nil {
+				t.Errorf("mhai_jobs reading the outbox's parent ids: %v", err)
+			}
+			q = `SELECT payload FROM intelligence_audit_outbox`
+		}
+		_, err = inTx(ctx, super, []string{`SET LOCAL ROLE ` + role}, &a, q)
 		requireDenied(t, err, role+" outbox read")
 	}
 }
