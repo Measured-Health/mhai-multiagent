@@ -57,8 +57,9 @@ CREATE TABLE jobs (
     created_at    timestamptz NOT NULL DEFAULT now(),
     UNIQUE (id, hospital_id)
 );
--- One live job per subject.
-CREATE UNIQUE INDEX jobs_one_live ON jobs (type, subject_id) WHERE status IN ('queued', 'running');
+-- One live job per subject, within a hospital: a subject id of another
+-- hospital can neither collide with nor block this one's.
+CREATE UNIQUE INDEX jobs_one_live ON jobs (hospital_id, type, subject_id) WHERE status IN ('queued', 'running');
 -- The publish sweeper: queued rows with no published_at.
 CREATE INDEX jobs_status_published_idx ON jobs (status, published_at);
 ALTER TABLE jobs OWNER TO mhai_migrate;
@@ -67,13 +68,21 @@ ALTER TABLE jobs ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 ------------------------------------------------------------------------
 -- mhai_gateway and mhai_worker (00003, 00008, 00009)
 ------------------------------------------------------------------------
-GRANT SELECT, INSERT ON jobs TO mhai_gateway;
+-- cancel_note (free text from the platform) and cancelled_by are read by
+-- neither role: the platform reads them through its own functions (spec 6.2).
+GRANT INSERT ON jobs TO mhai_gateway;
+GRANT SELECT (id, hospital_id, type, subject_id, created_by, request_id, status, attempts, lease_until, published_at,
+              deadline_at, error, cancel_reason, cancelled_at, retry_count, failed_at, completed_at, created_at)
+    ON jobs TO mhai_gateway, mhai_worker;
 GRANT UPDATE (published_at) ON jobs TO mhai_gateway;
-GRANT SELECT ON jobs TO mhai_worker;
 GRANT UPDATE (status, attempts, lease_until, error, completed_at, failed_at) ON jobs TO mhai_worker;
 
 CREATE POLICY hospital_rows ON jobs TO mhai_gateway, mhai_worker
     USING (hospital_id = mhai_current_hospital()) WITH CHECK (hospital_id = mhai_current_hospital());
+-- A job is born queued and untouched: core's insert sets no state.
+CREATE POLICY gateway_new_job ON jobs AS RESTRICTIVE FOR INSERT TO mhai_gateway
+    WITH CHECK (status = 'queued' AND attempts = 0 AND retry_count = 0 AND cancelled_by IS NULL
+                AND cancel_note IS NULL AND cancel_reason IS NULL AND error IS NULL);
 CREATE POLICY worker_status ON jobs AS RESTRICTIVE FOR UPDATE TO mhai_worker
     USING (status IN ('queued', 'running'))
     WITH CHECK (status IN ('running', 'completed', 'failed'));
@@ -96,6 +105,31 @@ ALTER FUNCTION mhai_job_attempts_never_decrease() OWNER TO mhai_migrate;
 REVOKE ALL ON FUNCTION mhai_job_attempts_never_decrease() FROM PUBLIC;
 CREATE TRIGGER jobs_attempts BEFORE UPDATE OF attempts ON jobs
     FOR EACH ROW WHEN (NEW.attempts < OLD.attempts) EXECUTE FUNCTION mhai_job_attempts_never_decrease();
+
+-- The subject of an approve_correction job is a correction of the job's own
+-- hospital. No generic FK (jobs is generic). It runs as the inserting role,
+-- not SECURITY DEFINER: the gateway reads feedback_events under
+-- hospital_rows, which is exactly the check wanted (another hospital's
+-- correction is invisible, so it is refused with a message that says nothing
+-- about whether it exists). Owner and superuser inserts see every row.
+-- +goose StatementBegin
+CREATE FUNCTION mhai_job_subject_check() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+BEGIN
+    IF NEW.type = 'approve_correction' AND NOT EXISTS (
+        SELECT 1 FROM public.feedback_events f WHERE f.id = NEW.subject_id AND f.hospital_id = NEW.hospital_id) THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE = 'jobs: subject is not a correction of this hospital';
+    END IF;
+    RETURN NEW;
+END
+$$;
+-- +goose StatementEnd
+ALTER FUNCTION mhai_job_subject_check() OWNER TO mhai_migrate;
+REVOKE ALL ON FUNCTION mhai_job_subject_check() FROM PUBLIC;
+CREATE TRIGGER jobs_subject BEFORE INSERT ON jobs
+    FOR EACH ROW EXECUTE FUNCTION mhai_job_subject_check();
 
 ------------------------------------------------------------------------
 -- mhai_jobs (00007)
@@ -239,6 +273,8 @@ ALTER TABLE intelligence_audit_outbox
     ALTER COLUMN query_id DROP NOT NULL,
     ADD COLUMN job_id uuid,
     ADD FOREIGN KEY (job_id, hospital_id) REFERENCES jobs (id, hospital_id),
+    ADD CONSTRAINT intelligence_audit_outbox_parent_matches_action
+        CHECK ((query_id IS NOT NULL) = (action LIKE 'query.%')),
     ADD CONSTRAINT intelligence_audit_outbox_one_parent CHECK (num_nonnulls(query_id, job_id) = 1),
     DROP CONSTRAINT intelligence_audit_outbox_action_check,
     ADD CONSTRAINT intelligence_audit_outbox_action_check
@@ -270,6 +306,7 @@ ALTER TABLE intelligence_audit_outbox
     ADD CONSTRAINT intelligence_audit_outbox_action_check
         CHECK (action IN ('query.completed', 'query.failed', 'query.cancelled')),
     DROP CONSTRAINT intelligence_audit_outbox_one_parent,
+    DROP CONSTRAINT intelligence_audit_outbox_parent_matches_action,
     DROP COLUMN job_id,
     ALTER COLUMN query_id SET NOT NULL;
 
@@ -331,3 +368,4 @@ CREATE POLICY jobs_append ON audit_log FOR INSERT TO mhai_jobs
 DROP TABLE jobs;
 DROP FUNCTION mhai_fail_expired_jobs(integer);
 DROP FUNCTION mhai_job_attempts_never_decrease();
+DROP FUNCTION mhai_job_subject_check();

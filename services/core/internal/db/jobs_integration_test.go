@@ -325,11 +325,17 @@ func TestJobsRoleTransitions(t *testing.T) {
 // seedJob inserts an approve_correction job as the owner connection.
 func seedJob(t *testing.T, pool *pgxpool.Pool, hospital, createdBy uuid.UUID, status string) uuid.UUID {
 	t.Helper()
+	return seedJobFor(t, pool, hospital, createdBy, status, seedCorrection(t, pool, hospital, seedQueryIn(t, pool, hospital), createdBy))
+}
+
+// seedJobFor is seedJob for a given subject (a correction of the hospital).
+func seedJobFor(t *testing.T, pool *pgxpool.Pool, hospital, createdBy uuid.UUID, status string, subject uuid.UUID) uuid.UUID {
+	t.Helper()
 	id := uuid.New()
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO jobs (id, hospital_id, type, subject_id, created_by, request_id, status, deadline_at)
 		 VALUES ($1, $2, 'approve_correction', $3, $4, 'req-synthetic', $5, now() + interval '5 minutes')`,
-		id, hospital, uuid.New(), createdBy, status); err != nil {
+		id, hospital, subject, createdBy, status); err != nil {
 		t.Fatalf("seed job: %v", err)
 	}
 	return id
@@ -500,8 +506,9 @@ func TestJobsJobsRoleCantTouchRunning(t *testing.T) {
 	// Columns outside its list.
 	_, err := update(seedJob(t, pool, a, u, "queued"), "attempts = 5")
 	requireDenied(t, err, "attempts")
-	// job.cancelled and job.retried are its audit actions.
-	for _, action := range []string{"job.cancelled", "job.retried"} {
+	// job.dead_lettered is one of its audit actions (job.cancelled and job.retried
+	// are per-call platform rows, written by mhai_platform).
+	for _, action := range []string{"job.dead_lettered"} {
 		id := seedJob(t, pool, a, u, "failed")
 		err := db.WithJobs(ctx, app, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `INSERT INTO audit_log (hospital_id, action, entity, entity_id, payload, prev_hash, hash)
@@ -516,10 +523,10 @@ func TestJobsJobsRoleCantTouchRunning(t *testing.T) {
 	b, _ := seedHospital(t, pool, uniqueCode("Q"))
 	err = db.WithJobs(ctx, app, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO audit_log (hospital_id, action, entity, entity_id, payload, prev_hash, hash)
-			VALUES ($1, 'job.cancelled', 'job', $2, '{}', 'p', $3)`, b, seedJob(t, pool, a, u, "failed").String(), uuid.NewString())
+			VALUES ($1, 'job.dead_lettered', 'job', $2, '{}', 'p', $3)`, b, seedJob(t, pool, a, u, "failed").String(), uuid.NewString())
 		return err
 	})
-	requireDenied(t, err, "job.cancelled for another hospital's job")
+	requireDenied(t, err, "job.dead_lettered for another hospital's job")
 }
 
 func TestJobsOneLivePerSubject(t *testing.T) {
@@ -527,7 +534,7 @@ func TestJobsOneLivePerSubject(t *testing.T) {
 	ctx := context.Background()
 	a, _ := seedHospital(t, pool, uniqueCode("L"))
 	u := seedClinician(t, pool, a)
-	subject := uuid.New()
+	subject := seedCorrection(t, pool, a, seedQueryIn(t, pool, a), u)
 	ins := func(status string) error {
 		_, err := pool.Exec(ctx, `INSERT INTO jobs (id, hospital_id, type, subject_id, created_by, status)
 			VALUES ($1, $2, 'approve_correction', $3, $4, $5)`, uuid.New(), a, subject, u, status)
@@ -558,7 +565,7 @@ func TestJobsExpiredFailed(t *testing.T) {
 		id := uuid.New()
 		if _, err := pool.Exec(ctx, `INSERT INTO jobs (id, hospital_id, type, subject_id, created_by, status, deadline_at, created_at)
 			VALUES ($1, $2, 'approve_correction', $3, $4, $5, `+deadline+`, now() - interval '20 minutes')`,
-			id, a, uuid.New(), u, status); err != nil {
+			id, a, seedCorrection(t, pool, a, seedQueryIn(t, pool, a), u), u, status); err != nil {
 			t.Fatal(err)
 		}
 		return id
@@ -686,6 +693,12 @@ func TestOutboxExactlyOneParent(t *testing.T) {
 	if err := ins("correction.applied", q, j); pgCode(err) != "23514" {
 		t.Errorf("both parents: %v", err)
 	}
+	if err := ins("query.completed", nil, j); pgCode(err) != "23514" {
+		t.Errorf("query action with a job parent: %v", err)
+	}
+	if err := ins("correction.applied", q, nil); pgCode(err) != "23514" {
+		t.Errorf("correction action with a query parent: %v", err)
+	}
 	if err := ins("query.completed", q, nil); err != nil {
 		t.Errorf("query parent: %v", err)
 	}
@@ -753,5 +766,69 @@ func TestMigration00012RoundTrip(t *testing.T) {
 	}
 	if err := db.MigrateDownTo(ctx, pg.URL, 0); err != nil {
 		t.Fatalf("down to 0: %v", err)
+	}
+}
+
+// Fix round 1: grants, hospital scoping, the new-job policy.
+func TestJobsGrantsAndSubjectScoping(t *testing.T) {
+	_, super := shared(t)
+	ctx := context.Background()
+	a, _ := seedHospital(t, super, uniqueCode("F"))
+	b, _ := seedHospital(t, super, uniqueCode("G"))
+	ua, ub := seedClinician(t, super, a), seedClinician(t, super, b)
+	ja := seedJob(t, super, a, ua, "queued")
+
+	// Neither the worker nor the gateway reads cancel_note or cancelled_by.
+	for _, role := range []string{"mhai_worker", "mhai_gateway"} {
+		for _, q := range []string{`SELECT cancel_note FROM jobs`, `SELECT cancelled_by FROM jobs`, `SELECT * FROM jobs`} {
+			_, err := inTx(ctx, super, []string{`SET LOCAL ROLE ` + role}, &a, q)
+			requireDenied(t, err, role+" "+q)
+		}
+		if n, err := inTx(ctx, super, []string{`SET LOCAL ROLE ` + role}, &a, `SELECT id, status, error FROM jobs WHERE id = $1`, ja); err != nil || n != 1 {
+			t.Errorf("%s reading job columns: %d %v", role, n, err)
+		}
+	}
+
+	// A job naming another hospital's correction is refused, as owner and gateway.
+	cb := seedCorrection(t, super, b, seedQueryIn(t, super, b), ub)
+	ins := `INSERT INTO jobs (id, hospital_id, type, subject_id, created_by) VALUES (gen_random_uuid(), $1, 'approve_correction', $2, $3)`
+	if _, err := super.Exec(ctx, ins, a, cb, ua); pgCode(err) != "23514" {
+		t.Errorf("owner: job on another hospital's correction: %v", err)
+	}
+	if _, err := inTx(ctx, super, []string{`SET LOCAL ROLE mhai_gateway`}, &a, ins, a, cb, ua); pgCode(err) != "23514" {
+		t.Errorf("gateway: job on another hospital's correction: %v", err)
+	}
+	if _, err := super.Exec(ctx, ins, a, uuid.New(), ua); pgCode(err) != "23514" {
+		t.Errorf("job on no correction: %v", err)
+	}
+	// A correction of its own hospital is accepted by the gateway.
+	own := seedCorrection(t, super, a, seedQueryIn(t, super, a), ua)
+	if n, err := inTx(ctx, super, []string{`SET LOCAL ROLE mhai_gateway`}, &a, ins, a, own, ua); err != nil || n != 1 {
+		t.Errorf("gateway: job on own correction: %d %v", n, err)
+	}
+
+	// The unique index is per hospital: the same subject id in two
+	// hospitals doesn't collide (hospital_id is the scope, so a foreign id
+	// can't block). The subject check is lifted for this one probe.
+	if _, err := super.Exec(ctx, `ALTER TABLE jobs DISABLE TRIGGER jobs_subject`); err != nil {
+		t.Fatal(err)
+	}
+	subject := uuid.New()
+	_, e1 := super.Exec(ctx, ins, a, subject, ua)
+	_, e2 := super.Exec(ctx, ins, b, subject, ub)
+	_, e3 := super.Exec(ctx, ins, a, subject, ua)
+	_, _ = super.Exec(ctx, `ALTER TABLE jobs ENABLE TRIGGER jobs_subject`)
+	if e1 != nil || e2 != nil || pgCode(e3) != "23505" {
+		t.Errorf("per-hospital uniqueness: %v %v %v", e1, e2, e3)
+	}
+
+	// The gateway inserts only a fresh queued job.
+	for _, col := range []string{"status = 'completed'", "status = 'running'", "attempts = 1", "retry_count = 1",
+		"cancelled_by = $3", "cancel_note = 'x'", "cancel_reason = 'x'", "error = 'x'"} {
+		name, val, _ := strings.Cut(col, " = ")
+		corr := seedCorrection(t, super, a, seedQueryIn(t, super, a), ua)
+		q := `INSERT INTO jobs (id, hospital_id, type, subject_id, created_by, ` + name + `) VALUES (gen_random_uuid(), $1, 'approve_correction', $2, $3, ` + val + `)`
+		_, err := inTx(ctx, super, []string{`SET LOCAL ROLE mhai_gateway`}, &a, q, a, corr, ua)
+		requireDenied(t, err, "gateway insert with "+col)
 	}
 }
