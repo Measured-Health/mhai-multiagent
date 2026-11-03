@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.4.0"
+  version: "1.5.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -902,6 +902,219 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/audit/undisplayable:
+    post:
+      operationId: reportUndisplayable
+      summary: Report audit entries the app couldn't display.
+      description: |
+        Platform admins and auditors (an auditor write: one of the three
+        unsafe routes an auditor may call). `ids` is 1 to 50 decimal event
+        ids; anything else is 422. Written as one
+        `audit.undisplayable_reported` entry: the count of distinct ids and
+        the first and last of them, never the list.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              additionalProperties: false
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items: { type: string, pattern: "^[1-9][0-9]{0,18}$" }
+      responses:
+        "204": { description: Recorded. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/audit/verify:
+    post:
+      operationId: startAuditCheck
+      summary: Start a check of the audit chain, or get the running one.
+      description: |
+        Platform admins and auditors (an auditor write). No body, or `{}`.
+        One check runs at a time: a start while one is running returns its
+        id. The check walks the whole chain as `mhai_platform` with a
+        10-minute budget; it is `intact` only when the whole chain was
+        walked, and a spent budget is `error` (`timed_out`). Written as
+        `audit.verify_started` and, when it ends, `audit.verify_finished`.
+        A check also runs daily at 06:00 UTC.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: The new or running check.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id]
+                additionalProperties: false
+                properties:
+                  run_id: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/audit/verify/runs:
+    get:
+      operationId: listAuditChecks
+      summary: The chain checks, newest first.
+      description: |
+        20 per page. `cursor` is the opaque `next_cursor` (hex); anything
+        else is 422. Recorded as `audit.searched` (`searched_kind: run`),
+        once per session and cursor per 5 minutes.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *auditListErrors
+      parameters:
+        - { name: cursor, in: query, required: false, schema: { type: string, pattern: "^[0-9a-f]{48}$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: A page of checks.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs, next_cursor]
+                additionalProperties: false
+                properties:
+                  runs: { type: array, items: { $ref: "#/components/schemas/VerifyRun" } }
+                  next_cursor: { type: string, nullable: true }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/audit/verify/runs/{id}:
+    get:
+      operationId: getAuditCheck
+      summary: One chain check (polled in the background while running).
+      description: |
+        An id that isn't a canonical uuid, or no such check, is 404.
+        Recorded as `audit.searched` (`searched_kind: run`, the run id in
+        `entity_id`), once per session and run per 5 minutes.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The check.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerifyRun" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/audit/verify/runs/{id}/outcome:
+    post:
+      operationId: addAuditCheckOutcome
+      summary: An auditor's outcome note on a broken check.
+      description: |
+        Auditors only: a platform admin gets 403 `forbidden`. `note` is 1 to
+        1000 characters, not blank, line breaks allowed but no other
+        control or format character, nothing of the pseudonym's shape;
+        `version` is the check's. A check that isn't broken, already has
+        its note, or is at another version is 409 `conflict`. The note is
+        stored on the check only; the chain gets `audit.check_outcome` with
+        the run id, never the note. → the check.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [note, version]
+              additionalProperties: false
+              properties:
+                note: { type: string, minLength: 1, maxLength: 1000 }
+                version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: The check, with its outcome.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerifyRun" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/audit/verify/status:
+    get:
+      operationId: getAuditIntegrity
+      summary: The integrity header's read (polled in the background).
+      description: |
+        `latest` is the latest finished check, `running` the running one,
+        `open_failure` the latest broken check while its failure is open
+        (until a later check is intact and the broken one has its outcome
+        note), each or null. `security_contact` comes from configuration
+        (`SECURITY_CONTACT_NAME`, `SECURITY_CONTACT_EMAIL`); without it the
+        status is 503 `not_ready`. Recorded as `audit.searched`
+        (`searched_kind: run`), once per session per 5 minutes.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *auditListErrors
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IntegrityStatus" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
 components:
   securitySchemes:
     ServiceKey:
@@ -1374,6 +1587,68 @@ components:
           properties:
             id: { type: string }
             name: { type: string }
+    PersonRef:
+      type: object
+      required: [id, name]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+    VerifyRun:
+      type: object
+      description: |
+        A chain check (mhai-web's VerifyRun). `intact` carries every proof
+        field (`entries_checked` above 0, `to_seq`, `to_at`, `finished_at`,
+        `from_first`); `first_broken_seq`, `first_broken_id` (the entry's
+        decimal id) and `first_broken_at` are set together, on `broken`
+        only. `from_checkpoint` is null until signed checkpoints exist.
+      required: [id, started_at, finished_at, by, state, entries_checked, from_checkpoint, from_first, to_seq, to_at,
+                 first_broken_seq, first_broken_id, first_broken_at, error_code, outcome, version]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        by:
+          description: Who started it; null for the daily schedule.
+          allOf: [{ $ref: "#/components/schemas/PersonRef" }]
+          nullable: true
+        state: { type: string, enum: [running, intact, broken, error] }
+        entries_checked: { type: integer, nullable: true }
+        from_checkpoint: { type: object, nullable: true }
+        from_first: { type: boolean }
+        to_seq: { type: integer, nullable: true }
+        to_at: { type: string, format: date-time, nullable: true }
+        first_broken_seq: { type: integer, nullable: true }
+        first_broken_id: { type: string, nullable: true }
+        first_broken_at: { type: string, format: date-time, nullable: true }
+        error_code: { type: string, enum: [timed_out, unreachable, unexpected_reply], nullable: true }
+        outcome:
+          type: object
+          nullable: true
+          required: [note, by, at]
+          additionalProperties: false
+          properties:
+            note: { type: string, maxLength: 1000 }
+            by: { $ref: "#/components/schemas/PersonRef" }
+            at: { type: string, format: date-time }
+        version: { type: integer, minimum: 1 }
+    IntegrityStatus:
+      type: object
+      required: [latest, running, open_failure, security_contact, oldest_kept_at]
+      additionalProperties: false
+      properties:
+        latest: { allOf: [{ $ref: "#/components/schemas/VerifyRun" }], nullable: true }
+        running: { allOf: [{ $ref: "#/components/schemas/VerifyRun" }], nullable: true }
+        open_failure: { allOf: [{ $ref: "#/components/schemas/VerifyRun" }], nullable: true }
+        security_contact:
+          type: object
+          required: [name, email]
+          additionalProperties: false
+          properties:
+            name: { type: string }
+            email: { type: string }
+        oldest_kept_at: { type: string, format: date-time }
     AuditBareEntry:
       type: object
       description: An entry the catalogue doesn't map; the app shows it as undisplayable.

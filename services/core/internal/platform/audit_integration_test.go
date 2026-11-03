@@ -37,6 +37,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
@@ -58,7 +59,15 @@ var (
 	buckets    bus.Buckets
 	issuer     token.Issuer
 	handler    http.Handler
+	guard      *authz.Guard
+	authSvc    *auth.Service
+	// walks receives each run the handler started (Task 10): the walk is
+	// held, so runs stay running until a test finishes them.
+	walks = make(chan uuid.UUID, 1024)
 )
+
+// testContact is the configured security contact (synthetic).
+var testContact = platform.SecurityContact{Name: "Synthetic Security Desk", Email: "security@havana.example"}
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
@@ -102,12 +111,14 @@ func TestMain(m *testing.M) {
 		_, priv, _ := ed25519.GenerateKey(rand.Reader)
 		issuer = token.Issuer{Key: priv, KeyID: "test-kid"}
 		log := slog.New(slog.NewTextHandler(io.Discard, nil))
-		svc := &auth.Service{Pool: app, Buckets: buckets, Issuer: issuer, Keys: issuer.PublicKeys(), Log: log,
+		authSvc = &auth.Service{Pool: app, Buckets: buckets, Issuer: issuer, Keys: issuer.PublicKeys(), Log: log,
 			MFAKey: []byte(testMFAKey), Argon: password.NewGate(64, time.Minute)}
-		guard := &authz.Guard{Keys: issuer.PublicKeys(), Denylist: buckets.Denylist, Pool: app, Log: log,
+		svc := authSvc
+		guard = &authz.Guard{Keys: issuer.PublicKeys(), Denylist: buckets.Denylist, Pool: app, Log: log,
 			Idem: httpx.IdempotentLog(app, log), IdemAnon: httpx.IdempotentAnonLog(app, log)}
 		mux := authz.NewMux(guard)
-		server.Register(mux, server.Deps{Auth: svc, Pool: app})
+		server.Register(mux, server.Deps{Auth: svc, Pool: app, SecurityContact: testContact,
+			AuditWalk: func(id uuid.UUID) { walks <- id }})
 		handler = mux.Handler([]string{serviceKey})
 		return m.Run()
 	}()
