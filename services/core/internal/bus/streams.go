@@ -205,3 +205,20 @@ func EnsureStreams(ctx context.Context, js jetstream.JetStream, sc StreamConfig)
 	}
 	return nil
 }
+
+// The health bucket (Plan 4 spec §6.1, §10.5): one key, the platform
+// health reading the sampler takes every 30 s. History 1; an entry not
+// rewritten within HealthTTL is gone, so a reading outlives its sampler by
+// at most five minutes (the route already refuses one older than two).
+// Counts and statuses only: no secret, hospital, person or patient.
+const (
+	HealthBucket = "health"
+	HealthTTL    = 5 * time.Minute
+)
+
+// OpenHealthBucket creates the health bucket, or updates it to HealthTTL
+// and replicas copies, and returns it. Only the gateway user may open,
+// read or write it (services/nats/nats.conf).
+func OpenHealthBucket(ctx context.Context, js jetstream.JetStream, replicas int) (jetstream.KeyValue, error) {
+	return OpenBucket(ctx, js, HealthBucket, HealthTTL, replicas)
+}

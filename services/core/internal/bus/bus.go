@@ -216,7 +216,8 @@ func Connect(ctx context.Context, rawURL, nkeySeedPath, inboxPrefix string, tlsF
 // OpenBucket creates the KV bucket, or updates it to this lifetime and
 // replica count, and returns it. Entries expire ttl after they were last
 // written (NATS 2.10 has no per-key TTL); one revision is kept. The NATS
-// user may open only the four buckets below (services/nats/nats.conf).
+// user may open only the four buckets below and the health bucket
+// (streams.go; services/nats/nats.conf).
 func OpenBucket(ctx context.Context, js jetstream.JetStream, name string, ttl time.Duration, replicas int) (jetstream.KeyValue, error) {
 	replicas, err := replicaCount(replicas)
 	if err != nil {
