@@ -114,6 +114,12 @@ func MigratedPostgres(t testing.TB) (*PG, *pgxpool.Pool) {
 // like the gateway's own login, and returns a pool connected as it. super
 // must be a superuser pool on pg.
 func AppLogin(ctx context.Context, pg *PG, super *pgxpool.Pool) (*pgxpool.Pool, error) {
+	return AppLoginWith(ctx, pg, super, nil)
+}
+
+// AppLoginWith is AppLogin with configure applied to the pool's config
+// before it connects (a query tracer, say); nil changes nothing.
+func AppLoginWith(ctx context.Context, pg *PG, super *pgxpool.Pool, configure func(*pgxpool.Config)) (*pgxpool.Pool, error) {
 	name := "app_login_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
 	if _, err := super.Exec(ctx, `CREATE ROLE `+name+` LOGIN PASSWORD 'test-only-login-password' IN ROLE mhai_app`); err != nil {
 		return nil, err
@@ -124,6 +130,9 @@ func AppLogin(ctx context.Context, pg *PG, super *pgxpool.Pool) (*pgxpool.Pool, 
 	}
 	cfg.ConnConfig.User = name
 	cfg.ConnConfig.Password = "test-only-login-password"
+	if configure != nil {
+		configure(cfg)
+	}
 	return pgxpool.NewWithConfig(ctx, cfg)
 }
 

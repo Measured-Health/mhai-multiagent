@@ -41,7 +41,20 @@ const (
 	// healthLock is the advisory lock that makes one core copy the
 	// sampler.
 	healthLock = "mhai.platform.health"
+	// maxFailures: a leader whose readings fail this many times in a row
+	// steps down (closes its lock connection), so a copy that can sample
+	// takes over.
+	maxFailures = 2
+	// stepDownTicks: after stepping down a copy leaves the lock alone this
+	// many ticks, so another copy gets it first.
+	stepDownTicks = 3
 )
+
+// leaderSession bounds how long a frozen leader (its host or network gone
+// without a FIN) keeps the lock: the server drops the session, and with it
+// the lock, after about 30 s of silence instead of the kernel's default
+// (about 2 hours). Session settings, so they need no privilege.
+const leaderSession = `SET tcp_keepalives_idle = 15; SET tcp_keepalives_interval = 5; SET tcp_keepalives_count = 3; SET tcp_user_timeout = 30000`
 
 // healthProbeHospital is the hospital the pipeline.health token names. A
 // request token always carries one (Plan 3 F10), but the probe is about no
@@ -108,11 +121,24 @@ func (s Sampler) Run(ctx context.Context, every time.Duration) error {
 	}()
 	t := time.NewTicker(every)
 	defer t.Stop()
+	failures, wait := 0, 0
 	for {
-		lead = s.lead(ctx, lead)
-		if lead != nil {
-			if _, err := s.Sample(ctx); err != nil && ctx.Err() == nil {
-				s.log().Error("platform: health reading not taken", "reason", "internal_error")
+		if wait > 0 {
+			wait--
+		} else if lead = s.lead(ctx, lead); lead == nil {
+			failures = 0
+		} else if _, err := s.Sample(ctx); err == nil {
+			failures = 0
+		} else if ctx.Err() == nil {
+			failures++
+			s.log().Error("platform: health reading not taken", "reason", "internal_error", "failures", failures)
+			if failures >= maxFailures {
+				// Step down: closing the session releases the lock.
+				c, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				_ = lead.Close(c)
+				cancel()
+				lead, failures, wait = nil, 0, stepDownTicks
+				s.log().Warn("platform: health sampler stepped down after failed readings")
 			}
 		}
 		select {
@@ -153,7 +179,16 @@ func (s Sampler) lead(ctx context.Context, held *pgx.Conn) *pgx.Conn {
 	}
 	// Out of the pool: the lock lives as long as this connection, and the
 	// pool can't hand it to a request.
-	return pc.Hijack()
+	conn := pc.Hijack()
+	if _, err := conn.Exec(ctx, leaderSession); err != nil {
+		// Without the timeouts a frozen leader could hold the lock for
+		// hours: don't lead.
+		c, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		_ = conn.Close(c)
+		cancel()
+		return nil
+	}
+	return conn
 }
 
 // Sample takes one reading and writes it to the health bucket. Run calls it
@@ -165,7 +200,7 @@ func (s Sampler) Sample(ctx context.Context) (HealthOut, error) {
 	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
 	defer cancel()
 	at := s.now()
-	prev := s.previous(ctx)
+	prev := s.previous(ctx, at)
 
 	workers, evidence := s.workers(ctx)
 	figures, err := s.figures(ctx)
@@ -222,8 +257,10 @@ func stamp(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z
 
 // previous is the last reading's parts, for since: a part keeps its since
 // while its status holds, across samples and leaders. A missing or
-// unusable reading gives none (every since is now).
-func (s Sampler) previous(ctx context.Context) map[string]HealthPart {
+// unusable reading gives none (every since is now), and so does one taken
+// more than HealthMaxAge before at, or after it: across a gap nobody
+// watched, the status may have changed and back.
+func (s Sampler) previous(ctx context.Context, at time.Time) map[string]HealthPart {
 	out := map[string]HealthPart{}
 	e, err := s.KV.Get(ctx, HealthKey)
 	if err != nil {
@@ -231,6 +268,10 @@ func (s Sampler) previous(ctx context.Context) map[string]HealthPart {
 	}
 	h, err := decodeReading(e.Value())
 	if err != nil {
+		return out
+	}
+	prevAt, _ := parseTime(h.UpdatedAt)
+	if prevAt.After(at) || at.Sub(prevAt) > HealthMaxAge {
 		return out
 	}
 	for _, p := range h.Parts {

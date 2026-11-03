@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,7 +21,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
@@ -94,6 +97,31 @@ func (f *fakePipeline) seen() ([]reqtoken.Claims, []error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.claims), slices.Clone(f.bad)
+}
+
+// statementCounter counts every statement the app pool starts, whether it
+// succeeds or not (pgx.QueryTracer: Exec, Query, QueryRow, and the BEGIN
+// and COMMIT of every transaction).
+type statementCounter struct{ n atomic.Int64 }
+
+func (c *statementCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.n.Add(1)
+	return ctx
+}
+
+func (c *statementCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+var appStatements = &statementCounter{}
+
+// failingPut is the health bucket with every Put refused.
+type failingPut struct {
+	jetstream.KeyValue
+	puts atomic.Int32
+}
+
+func (f *failingPut) Put(context.Context, string, []byte) (uint64, error) {
+	f.puts.Add(1)
+	return 0, errors.New("synthetic: put refused")
 }
 
 func sampler(now func() time.Time) platform.Sampler {
@@ -424,26 +452,29 @@ func statementCalls(t *testing.T) int64 {
 
 // TestHealthPollsDontQuery (C30): 100 parallel GETs run no database
 // statement and make no pipeline.health call beyond the sampler's: the
-// route reads the KV bucket only. The session's state is cached by the
-// principal middleware after its first request (authz.Guard), so one
-// warm-up GET comes first.
+// route reads the KV bucket only. Statements are counted twice: by a pgx
+// tracer on the app pool (every statement started, failed ones too) and
+// by pg_stat_statements on the server.
+//
+// C30 excludes the principal middleware's per-session state read
+// (authz.Guard, cached up to 30 s): it is part of authenticating any
+// request, not of the health route, so one warm-up GET comes first.
 func TestHealthPollsDontQuery(t *testing.T) {
 	clearHealth(t)
 	f := startPipeline(t)
 	tok := mint(t, auditor(t))
 
-	before := statementCalls(t)
+	before, beforeSrv := appStatements.n.Load(), statementCalls(t)
 	sample(t, nil)
-	sampled := statementCalls(t)
-	if sampled <= before {
-		t.Fatalf("the sampler's statements weren't counted (%d → %d): the measurement proves nothing", before, sampled)
+	if appStatements.n.Load() <= before || statementCalls(t) <= beforeSrv {
+		t.Fatal("the sampler's statements weren't counted: the measurement proves nothing")
 	}
 	if f.calls.Load() != 1 {
 		t.Fatalf("%d pipeline.health calls for one sample", f.calls.Load())
 	}
 	ok(t, "warm-up", get(t, "/platform/health", tok))
 
-	start := statementCalls(t)
+	start, startSrv := appStatements.n.Load(), statementCalls(t)
 	var wg sync.WaitGroup
 	var failed atomic.Int32
 	for i := 0; i < 100; i++ {
@@ -459,8 +490,11 @@ func TestHealthPollsDontQuery(t *testing.T) {
 	if n := failed.Load(); n != 0 {
 		t.Fatalf("%d of 100 polls failed", n)
 	}
-	if d := statementCalls(t) - start; d != 0 {
-		t.Errorf("100 polls ran %d database statements, want 0", d)
+	if d := appStatements.n.Load() - start; d != 0 {
+		t.Errorf("100 polls started %d statements on the app pool, want 0", d)
+	}
+	if d := statementCalls(t) - startSrv; d != 0 {
+		t.Errorf("100 polls ran %d statements on the server, want 0", d)
 	}
 	if n := f.calls.Load(); n != 1 {
 		t.Errorf("100 polls made %d pipeline.health calls beyond the sampler's", n-1)
@@ -608,5 +642,118 @@ func TestHealthHasNoHospitalOrUser(t *testing.T) {
 				t.Errorf("the %s reading has a key like %s", where.name, key)
 			}
 		}
+	}
+}
+
+// TestSamplerStepsDownWhenItCantWrite (fix round 1): a leader whose
+// readings keep failing (here its KV Put) steps down after two, and another
+// copy writes within three ticks of starting; the failed one stays out.
+func TestSamplerStepsDownWhenItCantWrite(t *testing.T) {
+	clearHealth(t)
+	startPipeline(t)
+	const tick = 200 * time.Millisecond
+	bad := &failingPut{KeyValue: healthKV}
+	ctxA, cancelA := context.WithCancel(context.Background())
+	ctxB, cancelB := context.WithCancel(context.Background())
+	doneA, doneB := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		cancelA()
+		cancelB()
+		<-doneA
+		<-doneB
+	})
+	a := sampler(nil)
+	a.KV = bad
+	go func() {
+		defer close(doneA)
+		_ = a.Run(ctxA, tick)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for bad.puts.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if bad.puts.Load() == 0 {
+		close(doneB)
+		t.Fatal("the failing sampler never led")
+	}
+	// a leads and has failed once; b starts now.
+	var wrote atomic.Int32
+	b := sampler(nil)
+	b.Sampled = func(platform.HealthOut) { wrote.Add(1) }
+	started := time.Now()
+	go func() {
+		defer close(doneB)
+		_ = b.Run(ctxB, tick)
+	}()
+	// Three ticks, plus one reading's time.
+	for wrote.Load() == 0 && time.Since(started) < 3*tick+300*time.Millisecond {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if wrote.Load() == 0 {
+		t.Fatalf("no other sampler wrote within 3 ticks (the failing one tried %d puts)", bad.puts.Load())
+	}
+	if n := bad.puts.Load(); n != 2 {
+		t.Errorf("the failing leader tried %d puts before stepping down, want 2", n)
+	}
+	time.Sleep(4 * tick)
+	if n := bad.puts.Load(); n != 2 {
+		t.Errorf("the failing sampler took the lock back from a working one (%d puts)", n)
+	}
+	ok(t, "health after the step-down", get(t, "/platform/health", mint(t, auditor(t))))
+}
+
+// TestHealthQueueCountsLearningJobs (fix round 1): a queued
+// approve_correction job (the learning consumer's) counts in queue.waiting
+// and its age in oldest_wait_s, as run_query questions do.
+func TestHealthQueueCountsLearningJobs(t *testing.T) {
+	clearHealth(t)
+	startPipeline(t)
+	ctx := context.Background()
+	h := seedHospital(t, "active")
+	u := seedUser(t, h, "", authz.RoleClinician)
+	q := seedQuestion(t, h, u.id, "completed", "", time.Hour, 100, "")
+	corr, job := uuid.New(), uuid.New()
+	if _, err := super.Exec(ctx, `INSERT INTO feedback_events (id, hospital_id, query_id, submitted_by, action, status, reason, corrected_diagnosis)
+		VALUES ($1, $2, $3, $4, 'correct', 'pending_review', 'synthetic reason', 'synthetic diagnosis')`, corr, h, q, u.id); err != nil {
+		t.Fatal(err)
+	}
+	waitingBefore := sample(t, nil).Queue.Waiting
+	if _, err := super.Exec(ctx, `INSERT INTO jobs (id, hospital_id, type, subject_id, created_by, request_id, status, deadline_at, created_at)
+		VALUES ($1, $2, 'approve_correction', $3, $4, 'req-synthetic', 'queued', now() + interval '5 minutes', now() - interval '20 minutes')`,
+		job, h, corr, u.id); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = super.Exec(context.Background(), `DELETE FROM jobs WHERE id = $1`, job) })
+	got := sample(t, nil).Queue
+	if got.Waiting != waitingBefore+1 {
+		t.Errorf("waiting %d, want %d (the queued learning job)", got.Waiting, waitingBefore+1)
+	}
+	if got.OldestWaitS == nil || *got.OldestWaitS < 1190 {
+		t.Errorf("oldest_wait_s %v, want the 20-minute-old learning job", got.OldestWaitS)
+	}
+	// Once it is running it no longer waits.
+	if _, err := super.Exec(ctx, `UPDATE jobs SET status = 'running' WHERE id = $1`, job); err != nil {
+		t.Fatal(err)
+	}
+	if n := sample(t, nil).Queue.Waiting; n != waitingBefore {
+		t.Errorf("waiting %d with the job running, want %d", n, waitingBefore)
+	}
+}
+
+// TestHealthSinceResetsAfterAGap (fix round 1): a part's since carries
+// over only from a reading at most HealthMaxAge older; after a longer gap
+// (nobody watched) it starts again at the new reading.
+func TestHealthSinceResetsAfterAGap(t *testing.T) {
+	clearHealth(t)
+	startPipeline(t)
+	base := time.Now()
+	first := sample(t, func() time.Time { return base.Add(-4 * time.Minute) })
+	near := sample(t, func() time.Time { return base.Add(-3 * time.Minute) })
+	if near.Parts[0].Since != first.Parts[0].Since {
+		t.Errorf("since moved within the max age: %s → %s", first.Parts[0].Since, near.Parts[0].Since)
+	}
+	late := sample(t, func() time.Time { return base })
+	if late.Parts[0].Since != late.UpdatedAt {
+		t.Errorf("since %s carried over a 3-minute gap (reading at %s)", late.Parts[0].Since, late.UpdatedAt)
 	}
 }

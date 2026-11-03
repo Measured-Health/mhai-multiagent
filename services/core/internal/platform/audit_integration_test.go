@@ -108,7 +108,9 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, "pg_stat_statements:", err)
 			return 1
 		}
-		if app, err = testutil.AppLogin(ctx, pg, super); err != nil {
+		// Every statement the app pool sends is counted (C30), failed
+		// ones included.
+		if app, err = testutil.AppLoginWith(ctx, pg, super, func(c *pgxpool.Config) { c.ConnConfig.Tracer = appStatements }); err != nil {
 			fmt.Fprintln(os.Stderr, "app login:", err)
 			return 1
 		}
