@@ -1,6 +1,6 @@
 # 0013. Allow masked text to go to cloud language models, per hospital, off by default
 
-- **Status:** Proposed (for the product owner's approval)
+- **Status:** Accepted 2026-11-03 by the product owner ("approve both as recommended"; PR #85)
 - **Date:** 2026-11-03
 - **Deciders:** product owner
 - **Amends:** the intelligence boundary design (`docs/specs/2026-10-28-intelligence-boundary-design.md`) §8.2 "Data in messages" and §13.4 "Data handling"; the document pipeline design (`docs/specs/2026-10-28-document-pipeline-and-model-promotion-design.md`) §2 and §6.1; the performance design (`docs/specs/2026-10-27-intelligence-performance-design.md`) §4.2, which those two cite.

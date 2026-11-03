@@ -65,7 +65,7 @@ These targets are my call. They get re-set from the first measurements (§6).
 The GPU host sees patient data in the prompts. So:
 - It runs **in our own AWS account and network**, in the same region as the core service, and is reached only over NATS with its own credentials (core design §5).
 - **Third-party GPU marketplaces and hosted inference APIs are not used** for patient data until a data processing agreement is in place.
-- **Amended 2026-11-03 (proposed, [ADR 0013](../adr/0013-allow-masked-text-to-cloud-language-models.md)):** masked text from clinical questions may go to OpenAI, Anthropic or xAI for a hospital a platform admin has opted in, under zero-data-retention terms; unmasked patient data and documents still never do. See [the cloud model providers design](2026-11-03-cloud-model-providers-design.md).
+- **Amended 2026-11-03 ([ADR 0013](../adr/0013-allow-masked-text-to-cloud-language-models.md)):** masked text from clinical questions may go to OpenAI, Anthropic or xAI for a hospital a platform admin has opted in, under zero-data-retention terms; unmasked patient data and documents still never do. See [the cloud model providers design](2026-11-03-cloud-model-providers-design.md).
 - **Disks are encrypted.** Nothing writes prompts or answers to logs (SKILLS.md, logging rules).
 - **Synthetic data only** until go-live, as everywhere else.
 

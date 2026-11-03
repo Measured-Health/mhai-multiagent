@@ -1,8 +1,8 @@
 # Cloud model providers (OpenAI, Anthropic, xAI) for clinical answers: design addendum
 
-- **Status:** Draft, for the product owner's approval. The questions in §16 each carry a recommendation.
+- **Status:** Approved (product owner, 2026-11-03: "approve both as recommended"). The six questions in §16 are decided as recommended. The gate before real patient data (§13.6) stands: no real patient data goes to a cloud model until the masker upgrade passes its recall bar with the privacy lead's sign-off, and the legal check (hospital data agreements, NDPA 2023, provider DPAs and zero-retention terms) is signed off.
 - **Date:** 2026-11-03
-- **Decision recorded in:** [ADR 0013](../adr/0013-allow-masked-text-to-cloud-language-models.md) (proposed). It amends the intelligence boundary design §8.2 and §13.4, the document pipeline design §2 and §6.1, and the performance design §4.2.
+- **Decision recorded in:** [ADR 0013](../adr/0013-allow-masked-text-to-cloud-language-models.md) (accepted 2026-11-03). It amends the intelligence boundary design §8.2 and §13.4, the document pipeline design §2 and §6.1, and the performance design §4.2.
 - **Builds on (and must stay consistent with):**
   - the intelligence boundary design, `docs/specs/2026-10-28-intelligence-boundary-design.md`, **as built** (§18): the request token, `with_hospital`, the `run_query` job, the closed audit payloads;
   - the document pipeline design, `docs/specs/2026-10-28-document-pipeline-and-model-promotion-design.md`: unchanged for documents (§3.4 below);
@@ -138,7 +138,7 @@ Any hit: nothing is sent, the generation fails with outcome `egress_blocked` (§
 
 ### 5.1 Where it's stored
 
-New table `hospital_model_policy` in core (migration `00015_model_policy.sql`, after Plan 4's 00011–00014; renumbered if others land first):
+New table `hospital_model_policy` in core (migration `NNNNN_model_policy.sql`: 00015 is the next number after Plan 4's 00011–00014, but Plan 4c may take 00015, so **the build takes the next free number** when it starts):
 
 | Column | Type | Rule |
 |---|---|---|
@@ -338,7 +338,20 @@ The demo runs synthetic data only, so it can run before §13.6's sign-offs. It n
 
 The provider account for the demo should be a separate project or workspace with a small spend limit; ZDR is requested at the same time so the same account can serve real data later.
 
-## 16. Open questions (each with a recommendation)
+## 16. Decisions (approved 2026-11-03, all as recommended)
+
+The product owner approved this design on 3 Nov ("approve both as recommended"). Each question below was open in the draft; its recommendation is now the decision:
+
+- **Default provider:** Anthropic, then OpenAI, then xAI.
+- **Models:** Anthropic `claude-opus-5-5` (effort `medium`), OpenAI `gpt-6.1-sol`, xAI `grok-4.7`, pinned by setting.
+- **Verification:** stays local.
+- **Budget:** 2,000,000 tokens per hospital per month, alert at 80%, escalate at 100%; USD 50/month spend limit on the demo provider project.
+- **Cloud failure:** escalate; no fallback (except a hospital switched off, which runs local).
+- **Separate egress service:** not in the first build.
+
+The gate before real patient data (§13.6) is unchanged by these decisions.
+
+The questions as written in the draft:
 
 1. **Which provider is the default for the demo?**
    *Recommendation: Anthropic.* Its structured output and refusal signal map cleanly onto §9 and §11, Claude Opus 5 is available under zero data retention and nothing different is documented for Opus 5.5 (to confirm with Anthropic when ZDR is requested; Fable and Mythos models are excluded), and its terms exclude training by default. OpenAI is a close second; its ZDR needs sales approval, so start that request now if OpenAI is wanted. xAI as the third adapter, enabled when its ZDR setting is confirmed on our team.
@@ -356,7 +369,7 @@ The provider account for the demo should be a separate project or workspace with
 ## 17. Task breakdown
 
 1. **ADR and spec amendments** (this PR): ADR 0013; "Amended" notes in the boundary, document pipeline and performance designs.
-2. **Core: policy and route** — migration 00015 (`hospital_model_policy`, `clinical_queries.model_route` with its trigger, `cloud_usage`, grants, RLS); the two platform routes and the CLI; `hospital.model_policy_changed` schema; `CORE_CLOUD_PROVIDERS`; the `generated_by` result field (openapi minor bump); tests A13, A14, A16.
+2. **Core: policy and route** — the migration with the next free number (00015 or later; Plan 4c may take 00015) (`hospital_model_policy`, `clinical_queries.model_route` with its trigger, `cloud_usage`, grants, RLS); the two platform routes and the CLI; `hospital.model_policy_changed` schema; `CORE_CLOUD_PROVIDERS`; the `generated_by` result field (openapi minor bump); tests A13, A14, A16.
 3. **Core: audit schema** — `egress` and `cloud_outcome` on `query.completed` in `factschema.go`; tests.
 4. **Worker: routing and versions** — `ModelRouter`; `run_query` picks the client after the claim, passes `identifiers`, merges `Generation.versions`, writes the outcome and token counts; the claim returns and re-checks the route; the run_query suite on both paths.
 5. **Worker: the gate** — `MaskedText`, `CloudContext`, `SharedChunk`, `CloudPrompt`, the egress scan; tests A1–A6, the property test and the AST test.
