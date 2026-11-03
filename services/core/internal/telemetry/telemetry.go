@@ -153,6 +153,14 @@ func install(traceOpt sdktrace.TracerProviderOption, reader sdkmetric.Reader) (f
 		metric.WithDescription("Times core's NATS connection reconnected.")); err != nil {
 		return nil, err
 	}
+	if _, err = m.Int64ObservableGauge("audit_chain_broken",
+		metric.WithDescription("1 while the latest audit chain check found a broken chain and the failure is open (alert); else 0."),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(auditChainBroken.Load())
+			return nil
+		})); err != nil {
+		return nil, err
+	}
 	p := &providers{tp: tp, mp: mp, in: in}
 	cur.Store(p)
 	return func(ctx context.Context) error {
@@ -207,6 +215,25 @@ func ObserveRequest(operation string, d time.Duration) {
 		in.request.Record(context.Background(), d.Seconds(), metric.WithAttributes(attribute.String("operation", operation)))
 	}
 }
+
+// auditChainBroken backs the audit_chain_broken gauge. It is process
+// state, set whether or not telemetry is on, so the gauge is right from
+// the first collection after Setup.
+var auditChainBroken atomic.Int64
+
+// SetAuditChainBroken sets the audit_chain_broken gauge: 1 when a chain
+// check finds the chain broken (spec §5.4: it alerts), 0 once the failure
+// is closed. No label: the run and entry ids stay in the database.
+func SetAuditChainBroken(broken bool) {
+	var v int64
+	if broken {
+		v = 1
+	}
+	auditChainBroken.Store(v)
+}
+
+// AuditChainBroken reports the gauge's value.
+func AuditChainBroken() bool { return auditChainBroken.Load() == 1 }
 
 // NATSReconnected counts one reconnect.
 func NATSReconnected() {
