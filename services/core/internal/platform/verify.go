@@ -5,7 +5,8 @@ package platform
 //
 //   - POST /platform/audit/verify: start a check, or get the running one.
 //   - GET /platform/audit/verify/runs, /verify/runs/{id}, /verify/status:
-//     reads, each recorded (audit.searched {searched_kind: run}).
+//     reads, each recorded (audit.searched {searched_kind: run}); the runs
+//     list on its first page only (spec §5.2: paging writes nothing).
 //   - POST /platform/audit/verify/runs/{id}/outcome: an auditor's note on a
 //     broken run.
 //   - POST /platform/audit/undisplayable: the app's report of entries it
@@ -21,14 +22,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/mail"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
@@ -39,14 +39,9 @@ type SecurityContact struct {
 	Email string `json:"email"`
 }
 
-// OK reports whether c is set and of a shape mhai-web reads.
-func (c SecurityContact) OK() bool {
-	if c.Name == "" || c.Email == "" || len(c.Email) > 254 || strings.TrimSpace(c.Name) != c.Name {
-		return false
-	}
-	a, err := mail.ParseAddress(c.Email)
-	return err == nil && a.Address == c.Email && a.Name == "" && !pseudonymIn.MatchString(c.Name)
-}
+// OK reports whether c is set and of a shape mhai-web reads
+// (config.SecurityContactOK).
+func (c SecurityContact) OK() bool { return config.SecurityContactOK(c.Name, c.Email) }
 
 func registerVerify(m *authz.Mux, d Deps) {
 	both := []string{authz.RolePlatformAdmin, authz.RoleAuditor}
@@ -129,6 +124,7 @@ func (d Deps) startVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 // runs is GET /platform/audit/verify/runs?cursor → {runs, next_cursor}.
+// The first page is recorded; a page with a cursor is not.
 func (d Deps) runs(w http.ResponseWriter, r *http.Request) {
 	p, ok := caller(w, r)
 	if !ok {
@@ -155,7 +151,12 @@ func (d Deps) runs(w http.ResponseWriter, r *http.Request) {
 		if out, next, err = audit.ListRuns(r.Context(), tx, after); err != nil {
 			return err
 		}
-		_, err = audit.RecordRunsRead(r.Context(), tx, reader(r, p), "runs", v["cursor"])
+		// The first page is the read; paging with a cursor writes nothing
+		// (spec §5.2).
+		if after != nil {
+			return nil
+		}
+		_, err = audit.RecordRunsRead(r.Context(), tx, reader(r, p), "runs", "")
 		return err
 	})
 	if err != nil {

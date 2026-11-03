@@ -985,8 +985,9 @@ paths:
       summary: The chain checks, newest first.
       description: |
         20 per page. `cursor` is the opaque `next_cursor` (hex); anything
-        else is 422. Recorded as `audit.searched` (`searched_kind: run`),
-        once per session and cursor per 5 minutes.
+        else is 422. The first page is recorded as `audit.searched`
+        (`searched_kind: run`), once per session per 5 minutes; a page with
+        a cursor writes nothing.
       tags: [audit]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: *auditListErrors

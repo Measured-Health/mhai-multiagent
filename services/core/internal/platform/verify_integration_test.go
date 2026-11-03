@@ -231,8 +231,13 @@ func TestVerifyRunsReads(t *testing.T) {
 	if len(next) != 48 {
 		t.Fatalf("next_cursor %q", next)
 	}
+	firstPage := len(actionsBy(t, u, "audit.searched"))
 	r = get(t, "/platform/audit/verify/runs?cursor="+next, tok)
 	ok(t, "runs page 2", r)
+	// Paging writes nothing (spec §5.2): only the first page is a read.
+	if n := len(actionsBy(t, u, "audit.searched")); n != firstPage || firstPage != 1 {
+		t.Fatalf("recorded reads: %d after the first page, %d after the second", firstPage, n)
+	}
 	if p2 := r.body["runs"].([]any); len(p2) != 3 || r.body["next_cursor"] != nil || p2[0].(map[string]any)["id"] != made[audit.RunsLimit].String() {
 		t.Fatalf("page 2: %s", r.raw)
 	}
@@ -245,12 +250,12 @@ func TestVerifyRunsReads(t *testing.T) {
 	for _, bad := range []string{uuid.NewString(), "1", strings.ToUpper(made[0].String())} {
 		problem(t, "run "+bad, get(t, "/platform/audit/verify/runs/"+bad, tok), 404, "not_found")
 	}
-	// Recorded: the list (one row per cursor), the run (its id in
-	// entity_id); a repeat collapses.
+	// Recorded: the list's first page, the run (its id in entity_id); a
+	// repeat collapses.
 	ok(t, "run again", get(t, "/platform/audit/verify/runs/"+made[0].String(), tok))
 	ok(t, "runs again", get(t, "/platform/audit/verify/runs", tok))
 	rows := actionsBy(t, u, "audit.searched")
-	if len(rows) != 3 {
+	if len(rows) != 2 {
 		t.Fatalf("recorded reads: %+v", rows)
 	}
 	for _, row := range rows {
@@ -258,7 +263,7 @@ func TestVerifyRunsReads(t *testing.T) {
 			t.Errorf("read row: %+v", row)
 		}
 	}
-	if rows[2].entity != "audit_run" || rows[2].entityID != made[0].String() || rows[0].entity != "" {
+	if rows[1].entity != "audit_run" || rows[1].entityID != made[0].String() || rows[0].entity != "" {
 		t.Errorf("read rows' entities: %+v", rows)
 	}
 	// Clinical accounts are refused.

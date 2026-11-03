@@ -158,9 +158,10 @@ type RunCursor struct {
 }
 
 // Encode is 48 lowercase hex characters (start in microseconds, then the
-// id), so it never has the pseudonym's shape. It is not secret: paging
-// anywhere in the runs shows nothing a first page doesn't, and every page
-// is recorded.
+// id), so it never has the pseudonym's shape. It is not authenticated:
+// a forged cursor only pages the runs (no patient data, nothing a first
+// page and the run reads don't show, and those are recorded), and paging
+// writes no entry (spec §5.2).
 func (c RunCursor) Encode() string {
 	var b [24]byte
 	binary.BigEndian.PutUint64(b[:8], uint64(c.StartedAt.UnixMicro()))
@@ -328,8 +329,8 @@ func AddOutcome(ctx context.Context, tx pgx.Tx, r Reader, runID uuid.UUID, note 
 
 // RecordRunsRead records a read of the chain checks inside tx, the way
 // RecordRead does the list's: audit.searched {searched_kind: run}, once
-// per session and read per 5 minutes. what is "runs" (the list; key the
-// cursor), "run" (one run; key its id, which goes in entity_id) or
+// per session and read per 5 minutes. what is "runs" (the list's first
+// page; the handler records no page after it), "run" (one run; key its id, which goes in entity_id) or
 // "status". mhai-web has no searched_kind run yet, so these rows are sent
 // bare (TODO.md), as the person and hospital reads are.
 func RecordRunsRead(ctx context.Context, tx pgx.Tx, r Reader, what, key string) (bool, error) {
