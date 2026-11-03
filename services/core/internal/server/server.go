@@ -45,7 +45,7 @@ func Register(m *authz.Mux, d Deps) {
 	// an intelligence client is set.
 	feedback.Register(m, feedback.Deps{Pool: d.Pool, Intel: d.Intel, Log: a.Log})
 	// The platform app's audit log reads (Plan 4 spec §5.2).
-	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log})
+	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log, MasterKey: a.MFAKey})
 	registerFixtures(m, d)
 }
 

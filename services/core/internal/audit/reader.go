@@ -1,10 +1,10 @@
 package audit
 
 import (
-	"bytes"
 	"context"
+	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -151,23 +151,76 @@ func (f Filters) Recorded() map[string]any {
 	return out
 }
 
-// EncodeCursor is base64url(last id, 8 bytes big-endian || the filters'
-// hash): opaque, and bound to the filters it was made under.
-func EncodeCursor(last int64, f Filters) string {
-	b := make([]byte, 8, 24)
-	binary.BigEndian.PutUint64(b, uint64(last))
-	return base64.RawURLEncoding.EncodeToString(append(b, f.hash()...))
+// CursorKeyLabel is the HKDF-SHA256 info label that derives the cursor's
+// HMAC key from MFA_ENCRYPTION_KEY (Config.MFAKey), apart from the MFA
+// and counter keys.
+const CursorKeyLabel = "mhai audit cursor key v1"
+
+// ErrCursorKey means no usable cursor key: the list fails closed.
+var ErrCursorKey = errors.New("audit: cursor key not configured")
+
+// CursorKey derives the cursor key from the server's master key (at least
+// 32 bytes). The key is never logged.
+func CursorKey(master []byte) ([]byte, error) {
+	if len(master) < 32 {
+		return nil, ErrCursorKey
+	}
+	k, err := hkdf.Key(sha256.New, master, nil, CursorKeyLabel, 32)
+	if err != nil {
+		return nil, ErrCursorKey
+	}
+	return k, nil
 }
 
-// DecodeCursor returns the cursor's last id, or ErrCursor when it doesn't
-// decode, names no row id, or was made under other filters.
-func DecodeCursor(s string, f Filters) (int64, error) {
-	b, err := base64.RawURLEncoding.DecodeString(s)
-	if err != nil || len(b) != 24 || base64.RawURLEncoding.EncodeToString(b) != s {
+// Cursors makes and checks one session's cursors.
+type Cursors struct {
+	Key     []byte // from CursorKey
+	Session string // the principal's session id
+}
+
+const cursorLen = 8 + 16
+
+// tag is HMAC-SHA256(key, "audit.cursor.v1" | session | canonical filters |
+// last id), each part length-prefixed, cut to 16 bytes.
+func (c Cursors) tag(last int64, f Filters) []byte {
+	raw, _ := json.Marshal(f.canonical())
+	var id [8]byte
+	binary.BigEndian.PutUint64(id[:], uint64(last))
+	m := hmac.New(sha256.New, c.Key)
+	for _, part := range [][]byte{[]byte("audit.cursor.v1"), []byte(c.Session), raw, id[:]} {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(part)))
+		m.Write(n[:])
+		m.Write(part)
+	}
+	return m.Sum(nil)[:16]
+}
+
+// Encode is hex(last id, 8 bytes big-endian || the tag): opaque, bound to
+// the session and the filters, and in an alphabet (lowercase hex) that
+// can't hold a pseudonym. Without a key it is "" (callers check first).
+func (c Cursors) Encode(last int64, f Filters) string {
+	if len(c.Key) < 32 || c.Session == "" {
+		return ""
+	}
+	b := make([]byte, 8, cursorLen)
+	binary.BigEndian.PutUint64(b, uint64(last))
+	return hex.EncodeToString(append(b, c.tag(last, f)...))
+}
+
+// Decode returns the cursor's last id, or ErrCursor when it doesn't
+// decode, names no row id, or its tag isn't this session's for these
+// filters (forged, tampered, another session's, other filters: C33).
+func (c Cursors) Decode(s string, f Filters) (int64, error) {
+	if len(c.Key) < 32 || c.Session == "" {
+		return 0, ErrCursor
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != cursorLen || hex.EncodeToString(b) != s {
 		return 0, ErrCursor
 	}
 	last := int64(binary.BigEndian.Uint64(b[:8]))
-	if last <= 0 || !bytes.Equal(b[8:], f.hash()) {
+	if last <= 0 || !hmac.Equal(b[8:], c.tag(last, f)) {
 		return 0, ErrCursor
 	}
 	return last, nil
@@ -517,8 +570,11 @@ func scanRows(rows pgx.Rows) ([]rawRow, error) {
 }
 
 // ListEvents is one page of the filters' entries, newest first, after the
-// cursor's id (0: the first page).
-func ListEvents(ctx context.Context, tx pgx.Tx, f Filters, after int64, limit int) (Page, error) {
+// cursor's id (0: the first page). cur signs the next cursor.
+func ListEvents(ctx context.Context, tx pgx.Tx, cur Cursors, f Filters, after int64, limit int) (Page, error) {
+	if len(cur.Key) < 32 || cur.Session == "" {
+		return Page{}, ErrCursorKey
+	}
 	if limit < 1 || limit > MaxLimit {
 		return Page{}, errors.New("audit: bad limit")
 	}
@@ -549,7 +605,7 @@ func ListEvents(ctx context.Context, tx pgx.Tx, f Filters, after int64, limit in
 	out := Page{Events: []any{}, Total: min(total, TotalCap), TotalCapped: total > TotalCap}
 	if len(raws) > limit {
 		raws = raws[:limit]
-		c := EncodeCursor(raws[len(raws)-1].row.Seq, f)
+		c := cur.Encode(raws[len(raws)-1].row.Seq, f)
 		out.NextCursor = &c
 	}
 	if out.Events, err = entries(ctx, tx, raws); err != nil {
@@ -925,9 +981,11 @@ type Reader struct {
 	UserID, SessionID, RequestID string
 }
 
-// RecordRead writes the first page's audit.viewed (or, for a q search,
-// audit.searched) inside tx, at most once per session, list and filters
-// for 5 minutes (spec §5.2): a dedupe key in idempotency_keys, inserted in
+// RecordRead writes audit.viewed (or, for a q search, audit.searched)
+// inside tx for every page read, collapsed to one row per session, list and
+// filters (q included, so each distinct search is its own row) for 5
+// minutes (spec §5.2). The handler calls it on cursor pages too: a cursor
+// never decides whether a read is recorded: a dedupe key in idempotency_keys, inserted in
 // the same transaction as the entry, so the key and the entry commit or
 // roll back together and only the first of parallel reads writes. Call it
 // last in tx: audit.Write holds the chain lock until commit. recorded is

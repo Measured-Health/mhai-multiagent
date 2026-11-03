@@ -6,6 +6,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -643,6 +645,9 @@ func TestAuditCursorBoundToFilters(t *testing.T) {
 	}
 	r := get(t, "/platform/audit?"+hq+"&limit=2", tok)
 	cursor = r.body["next_cursor"].(string)
+	if !regexp.MustCompile(`^[0-9a-f]{48}$`).MatchString(cursor) {
+		t.Errorf("cursor %q is not 48 lowercase hex", cursor)
+	}
 	// The same filters, given in another order, take it.
 	ok(t, "same filters", get(t, "/platform/audit?limit=2&cursor="+url.QueryEscape(cursor)+"&"+hq, tok))
 	other := seedHospital(t, "active")
@@ -652,8 +657,62 @@ func TestAuditCursorBoundToFilters(t *testing.T) {
 	} {
 		problem(t, "cursor under "+q, get(t, "/platform/audit?"+q+"&cursor="+url.QueryEscape(cursor), tok), 422, "validation_failed")
 	}
-	for _, bad := range []string{"garbage", "AAAA", cursor + "A", cursor[:len(cursor)-2]} {
+	for _, bad := range []string{"garbage", "AAAA", cursor + "A", cursor[:len(cursor)-2], strings.ToUpper(cursor)} {
 		problem(t, "cursor "+bad, get(t, "/platform/audit?"+hq+"&cursor="+url.QueryEscape(bad), tok), 422, "validation_failed")
+	}
+}
+
+// The cursor is HMAC-bound to its session: a forged cursor, or another
+// session's, is refused, so no page is read through a cursor that wasn't
+// handed out, and every page, cursor or not, is recorded (security review).
+func TestAuditForgedCursorRefusedAndReadsRecorded(t *testing.T) {
+	h := seedHospital(t, "active")
+	for i := 0; i < 4; i++ {
+		insertRow(t, row{hospital: h, action: "auth.logout"})
+	}
+	hq := "hospital=" + h.String()
+	a := auditor(t)
+	s1 := signIn(t, a, true)
+	r := get(t, "/platform/audit?"+hq+"&limit=1", s1.tok)
+	ok(t, "first page", r)
+	mine := r.body["next_cursor"].(string)
+	if n := len(readsBy(t, a)); n != 1 {
+		t.Fatalf("first page: want 1 row, got %d", n)
+	}
+	// The newest page through a forged cursor: last = MaxInt64 with the
+	// unkeyed filter hash, a zero tag, or this session's tag; and the
+	// unkeyed base64url form the first version made.
+	maxID := "7fffffffffffffff"
+	sum := sha256.Sum256([]byte(`{"hospital":"` + h.String() + `"}`))
+	forged := []string{
+		maxID + hex.EncodeToString(sum[:16]),
+		maxID + strings.Repeat("0", 32),
+		maxID + mine[16:],
+		base64.RawURLEncoding.EncodeToString(append([]byte{0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, sum[:16]...)),
+	}
+	s2 := signIn(t, a, true)
+	other := signIn(t, auditor(t), true)
+	for _, c := range forged {
+		for _, s := range []session{s1, s2, other} {
+			problem(t, "forged cursor "+c, get(t, "/platform/audit?"+hq+"&cursor="+url.QueryEscape(c), s.tok), 422, "validation_failed")
+		}
+	}
+	// Another session's cursor, even the same user's.
+	problem(t, "same user, other session", get(t, "/platform/audit?"+hq+"&limit=1&cursor="+url.QueryEscape(mine), s2.tok), 422, "validation_failed")
+	problem(t, "other user", get(t, "/platform/audit?"+hq+"&limit=1&cursor="+url.QueryEscape(mine), other.tok), 422, "validation_failed")
+	if n := len(readsBy(t, a)); n != 1 {
+		t.Fatalf("refused cursors wrote rows: %d", n)
+	}
+	// A real cursor page after the page load's 5 minutes is recorded: a
+	// cursor never decides whether a read is recorded.
+	if _, err := super.Exec(context.Background(),
+		`UPDATE idempotency_keys SET expires_at = now() - interval '1 second' WHERE scope = 'audit.read'`); err != nil {
+		t.Fatal(err)
+	}
+	ok(t, "cursor page after expiry", get(t, "/platform/audit?"+hq+"&limit=1&cursor="+url.QueryEscape(mine), s1.tok))
+	reads := readsBy(t, a)
+	if len(reads) != 2 || reads[1].action != "audit.viewed" {
+		t.Fatalf("cursor page after expiry: want a second audit.viewed, got %+v", reads)
 	}
 }
 
@@ -668,6 +727,28 @@ func TestAuditTotalCapped(t *testing.T) {
 	}
 	for i := 0; i < 3; i++ {
 		insertRow(t, row{hospital: small, action: "auth.logout"})
+	}
+	// The person filter's page query uses audit_log_actor_idx, not a scan
+	// of the 10k-row table.
+	ctx := context.Background()
+	if _, err := super.Exec(ctx, `ANALYZE audit_log`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := super.Query(ctx, `EXPLAIN SELECT id FROM audit_log WHERE actor_id = $1 ORDER BY id DESC LIMIT 51`, uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, line)
+	}
+	rows.Close()
+	if p := strings.Join(plan, "\n"); !strings.Contains(p, "audit_log_actor_idx") || strings.Contains(p, "Seq Scan") {
+		t.Errorf("person filter plan doesn't use audit_log_actor_idx:\n%s", p)
 	}
 	tok := mint(t, auditor(t))
 	r := get(t, "/platform/audit?hospital="+big.String(), tok)
@@ -794,6 +875,8 @@ func TestAuditSearchIgnoresFiltersAndAudits(t *testing.T) {
 	if got := seqs(t, r2); !slices.Equal(got, []int64{x}) {
 		t.Errorf("page 2: %v", got)
 	}
+	// An identical repeat within 5 minutes is the same read.
+	ok(t, "repeat", get(t, "/platform/audit?q="+strconv.FormatInt(x, 10), s.tok))
 	// Nothing found is an empty list.
 	r = get(t, "/platform/audit?q=987654321012", s.tok)
 	ok(t, "no match", r)
@@ -882,11 +965,8 @@ func TestAuditResponsesHaveNoPseudonymOrFreeText(t *testing.T) {
 		}
 		r := get(t, path, tok)
 		ok(t, "list", r)
-		// The cursor is opaque, not an entry; the scan covers the entries.
-		body := map[string]any{}
-		_ = json.Unmarshal([]byte(r.raw), &body)
-		delete(body, "next_cursor")
-		scan("list", mustJSON(body))
+		// The whole reply, the cursor included (hex: no pseudonym).
+		scan("list", r.raw)
 		for _, e := range events(t, r) {
 			if e["kind"] != "unknown" {
 				mapped++

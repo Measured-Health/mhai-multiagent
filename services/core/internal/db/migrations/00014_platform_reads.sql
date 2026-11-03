@@ -17,6 +17,9 @@
 -- audit.Write's advisory lock and chain head are the same path the other
 -- roles take, so the chain stays one chain.
 --
+-- audit_log gains an index on (actor_id, id) for the audit list's person
+-- filter.
+--
 -- mhai_platform holds no grant on any clinical table (C17). It reaches
 -- clinical data only through four SECURITY DEFINER functions owned by
 -- mhai_migrate, which return aggregates or the failed-jobs list's columns
@@ -124,6 +127,11 @@ CREATE POLICY platform_append ON audit_log FOR INSERT TO mhai_platform
                 AND hospital_id IS NULL);
 
 ------------------------------------------------------------------------
+-- The audit list's person filter (spec §5.2: actor_id, newest first).
+------------------------------------------------------------------------
+CREATE INDEX audit_log_actor_idx ON audit_log (actor_id, id);
+
+------------------------------------------------------------------------
 -- The four platform functions. Owned by mhai_migrate (under FORCE, the
 -- owner reads a clinical table only through a policy a later body adds),
 -- a fixed search_path, executable by mhai_platform only.
@@ -209,6 +217,8 @@ DROP FUNCTION mhai_guardrail_counts(timestamptz, timestamptz);
 DROP FUNCTION mhai_platform_jobs(text, text, uuid, text[], timestamptz, uuid, integer);
 DROP FUNCTION mhai_health_failures();
 DROP FUNCTION mhai_health_timings(interval);
+
+DROP INDEX audit_log_actor_idx;
 
 -- 00003's append, as it was.
 DROP POLICY platform_append ON audit_log;

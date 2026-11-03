@@ -1,10 +1,17 @@
 package audit_test
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"math"
 	"math/rand"
+	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -96,22 +103,39 @@ func TestBatchGateAgreesWithWhen(t *testing.T) {
 	}
 }
 
-func TestCursorBoundToFilters(t *testing.T) {
+var (
+	testMaster = []byte("test-only-master-key-0123456789abcdef0123")
+	cursorHex  = regexp.MustCompile(`^[0-9a-f]{48}$`)
+)
+
+func cursors(t *testing.T, session string) audit.Cursors {
+	t.Helper()
+	k, err := audit.CursorKey(testMaster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return audit.Cursors{Key: k, Session: session}
+}
+
+// C33 and the cursor-forgery review finding: a cursor is HMAC-bound to the
+// session and the filters, under a server key.
+func TestCursorBoundToSessionAndFilters(t *testing.T) {
 	from := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	yes := true
 	f := audit.Filters{Hospital: "platform", Types: []string{"sign_in", "audit"}, Outcome: "refused", Flagged: &yes, From: &from}
-	c := audit.EncodeCursor(42, f)
-	if _, err := base64.RawURLEncoding.DecodeString(c); err != nil {
-		t.Fatalf("cursor %q is not base64url: %v", c, err)
+	cur := cursors(t, "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11")
+	c := cur.Encode(42, f)
+	if !cursorHex.MatchString(c) {
+		t.Fatalf("cursor %q is not 48 lowercase hex", c)
 	}
-	got, err := audit.DecodeCursor(c, f)
+	got, err := cur.Decode(c, f)
 	if err != nil || got != 42 {
 		t.Fatalf("round trip: %d, %v", got, err)
 	}
 	// The same filters in another order are the same filters.
 	same := audit.Filters{Hospital: "platform", Types: []string{"audit", "sign_in", "audit"}, Outcome: "refused", Flagged: &yes,
 		From: func() *time.Time { x := from.In(time.FixedZone("x", 3600)); return &x }()}
-	if got, err := audit.DecodeCursor(c, same); err != nil || got != 42 {
+	if got, err := cur.Decode(c, same); err != nil || got != 42 {
 		t.Errorf("equivalent filters: %d, %v", got, err)
 	}
 	no := false
@@ -126,14 +150,61 @@ func TestCursorBoundToFilters(t *testing.T) {
 		"from as to":      {Hospital: "platform", Types: f.Types, Outcome: "refused", Flagged: &yes, To: &from},
 		"with a search q": {Hospital: "platform", Types: f.Types, Outcome: "refused", Flagged: &yes, From: &from, Q: "42"},
 	} {
-		if _, err := audit.DecodeCursor(c, other); !errors.Is(err, audit.ErrCursor) {
+		if _, err := cur.Decode(c, other); !errors.Is(err, audit.ErrCursor) {
 			t.Errorf("%s: want ErrCursor, got %v", name, err)
 		}
 	}
-	for _, bad := range []string{"", "x", "!!!!", c + "A", c[:len(c)-1], strings.Repeat("A", 32),
-		audit.EncodeCursor(0, f), audit.EncodeCursor(-5, f), base64.StdEncoding.EncodeToString([]byte(c))} {
-		if _, err := audit.DecodeCursor(bad, f); !errors.Is(err, audit.ErrCursor) {
+	// Another session, another key, no key: refused.
+	if _, err := cursors(t, "0b6c6d4e-8a9f-4f6e-b2d3-1c2a3b4c5d6e").Decode(c, f); !errors.Is(err, audit.ErrCursor) {
+		t.Errorf("another session's cursor: %v", err)
+	}
+	otherKey, _ := audit.CursorKey([]byte("test-only-other-master-key-0123456789abcd"))
+	if _, err := (audit.Cursors{Key: otherKey, Session: cur.Session}).Decode(c, f); !errors.Is(err, audit.ErrCursor) {
+		t.Errorf("another key's cursor: %v", err)
+	}
+	if _, err := (audit.Cursors{Session: cur.Session}).Decode(c, f); !errors.Is(err, audit.ErrCursor) {
+		t.Errorf("no key: %v", err)
+	}
+	if (audit.Cursors{Session: cur.Session}).Encode(42, f) != "" {
+		t.Error("a cursor was made without a key")
+	}
+	if _, err := audit.CursorKey([]byte("short")); !errors.Is(err, audit.ErrCursorKey) {
+		t.Errorf("short master key: %v", err)
+	}
+	// Forgeries: the newest page (last = MaxInt64) with the unkeyed filter
+	// hash or a zero tag; another id under a valid tag; one flipped bit.
+	b, _ := hex.DecodeString(c)
+	maxID := make([]byte, 8)
+	binary.BigEndian.PutUint64(maxID, math.MaxInt64)
+	sum := sha256.Sum256([]byte(`{"hospital":"platform"}`))
+	flipped := slices.Clone(b)
+	flipped[len(flipped)-1] ^= 1
+	moved := slices.Clone(b)
+	moved[7]++
+	forged := []string{
+		hex.EncodeToString(append(slices.Clone(maxID), sum[:16]...)),
+		hex.EncodeToString(append(slices.Clone(maxID), make([]byte, 16)...)),
+		hex.EncodeToString(append(slices.Clone(maxID), b[8:]...)),
+		hex.EncodeToString(moved), hex.EncodeToString(flipped),
+		base64.RawURLEncoding.EncodeToString(b),
+	}
+	for _, bad := range append(forged, "", "x", strings.ToUpper(c), c+"00", c[:len(c)-2], strings.Repeat("0", 48),
+		cur.Encode(0, f), cur.Encode(-5, f)) {
+		if _, err := cur.Decode(bad, f); !errors.Is(err, audit.ErrCursor) {
 			t.Errorf("cursor %q: want ErrCursor, got %v", bad, err)
+		}
+	}
+}
+
+// The cursor's alphabet can't hold a pseudonym (C22, ruling 5).
+func TestCursorNeverPseudonymShaped(t *testing.T) {
+	pseudonym := regexp.MustCompile(`(^|[^A-Za-z0-9])P-[A-Z0-9]{4,12}([^A-Za-z0-9]|$)`)
+	rng := rand.New(rand.NewSource(20261105))
+	for i := 0; i < 5000; i++ {
+		cur := cursors(t, strconv.FormatInt(rng.Int63(), 36))
+		c := cur.Encode(rng.Int63n(math.MaxInt64-1)+1, audit.Filters{Q: strconv.FormatInt(rng.Int63(), 10)})
+		if !cursorHex.MatchString(c) || pseudonym.MatchString(c) {
+			t.Fatalf("cursor %q", c)
 		}
 	}
 }

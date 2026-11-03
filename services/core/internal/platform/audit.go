@@ -39,6 +39,10 @@ import (
 type Deps struct {
 	Pool *pgxpool.Pool
 	Log  *slog.Logger
+	// MasterKey is MFA_ENCRYPTION_KEY (Config.MFAKey); the audit cursor's
+	// HMAC key is derived from it (audit.CursorKey). Without a usable one
+	// the list fails closed (503 not_ready). Never logged.
+	MasterKey []byte
 }
 
 func (d Deps) log() *slog.Logger {
@@ -190,9 +194,10 @@ func listQuery(r *http.Request) (f audit.Filters, cursor string, limit int, err 
 	return f, v["cursor"], limit, nil
 }
 
-// list is GET /platform/audit: a page of entries. The first page (no
-// cursor) is recorded once per page load: audit.viewed, or audit.searched
-// for q.
+// list is GET /platform/audit: a page of entries. Every page is recorded,
+// once per session and filters per 5 minutes: audit.viewed, or
+// audit.searched for q. The cursor is HMAC-bound to the session and the
+// filters.
 func (d Deps) list(w http.ResponseWriter, r *http.Request) {
 	p, ok := caller(w, r)
 	if !ok {
@@ -203,9 +208,17 @@ func (d Deps) list(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "validation_failed")
 		return
 	}
+	key, err := audit.CursorKey(d.MasterKey)
+	if err != nil {
+		d.log().Error("platform: audit list refused: no cursor key", "request_id", httpx.RequestIDFrom(r.Context()),
+			"reason", "not_ready")
+		httpx.Error(w, r, "not_ready")
+		return
+	}
+	cur := audit.Cursors{Key: key, Session: p.SessionID}
 	var after int64
 	if cursor != "" {
-		if after, err = audit.DecodeCursor(cursor, f); err != nil {
+		if after, err = cur.Decode(cursor, f); err != nil {
 			httpx.Error(w, r, "validation_failed")
 			return
 		}
@@ -213,13 +226,13 @@ func (d Deps) list(w http.ResponseWriter, r *http.Request) {
 	var page audit.Page
 	err = d.tx(r.Context(), func(tx pgx.Tx) error {
 		var err error
-		if page, err = audit.ListEvents(r.Context(), tx, f, after, limit); err != nil {
+		if page, err = audit.ListEvents(r.Context(), tx, cur, f, after, limit); err != nil {
 			return err
 		}
-		if cursor != "" {
-			return nil
-		}
-		// Last in the transaction: the chain lock is held until commit.
+		// Every page, cursor or not: the 5-minute dedupe collapses a page
+		// load into one row, and a cursor never decides whether a read
+		// is recorded. Last in the transaction: the chain lock is held
+		// until commit.
 		_, err = audit.RecordRead(r.Context(), tx, audit.Reader{UserID: p.UserID.String(), SessionID: p.SessionID,
 			RequestID: httpx.RequestIDFrom(r.Context())}, f)
 		return err
