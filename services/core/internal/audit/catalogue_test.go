@@ -467,14 +467,6 @@ func fuzzCatalogue(t *testing.T, voc *vocabulary, n int) {
 			if withheld(e) || mappedOnce[a] {
 				continue
 			}
-			if awaitingBatchShape[a] {
-				// Gated on a shape its schema doesn't take yet: once it
-				// does, it must leave this list and map here.
-				if in(audit.SchemaFields(a), "job_count") {
-					t.Errorf("%s now takes job_count: remove it from awaitingBatchShape", a)
-				}
-				continue
-			}
 			t.Errorf("%s never mapped over %d generated events: the fuzz proves nothing for it", a, n)
 		}
 	}()
@@ -520,6 +512,12 @@ func fuzzCatalogue(t *testing.T, voc *vocabulary, n int) {
 				Entity:     entities[rng.Intn(len(entities))],
 				EntityID:   entityIDs[rng.Intn(len(entityIDs))],
 				HospitalID: hospitals[rng.Intn(len(hospitals))],
+			}
+			if e.When != nil && i%2 == 1 {
+				// A gated row (the job batch rows want no entity): half
+				// the events have none, so the gate's mapped side is
+				// reached as well as its refused one.
+				ev.Entity, ev.EntityID = "", ""
 			}
 			if err := audit.CheckActionPayload(a, payload); err != nil {
 				t.Fatalf("%s: the generator built a payload its schema refuses: %v", a, err)
@@ -619,10 +617,6 @@ func TestUnmappedActionSendsNoPayload(t *testing.T) {
 	}
 }
 
-// awaitingBatchShape are the rows gated on the batch payload (job_count, no
-// job) that Plan 4 Task 12 adds to their schemas. Until then they never map.
-var awaitingBatchShape = map[string]bool{"job.retried": true, "job.cancelled": true}
-
 // TestPerJobRowsAreNotPlatformBatches (ruling R24): a job.retried or
 // job.cancelled row naming one job (core's dead-letter re-mint, the
 // sweeper's cancels) is a system row and is withheld; only the platform's
@@ -699,5 +693,43 @@ func TestMapGuardsRefusePseudonymShapes(t *testing.T) {
 	m, ok := audit.MapRow(facts, audit.Event{Action: "job.retried", Payload: map[string]any{"job_id": run, "msg_id": "msg-1"}})
 	if !ok || m.Facts["searched"] != "msg-1" {
 		t.Errorf("a plain facts value was refused: %+v %v", m, ok)
+	}
+}
+
+// Plan 4 Task 12 (carry item 6): the platform's batch rows fit the widened
+// schemas and map to jobs_retried and jobs_cancelled with facts.job_count
+// only (never the reason, which mhai-web has no key for); the per-job
+// system rows keep their shape and stay withheld (R24).
+func TestBatchJobRowsMap(t *testing.T) {
+	for _, c := range []struct {
+		action, kind string
+		payload      map[string]any
+	}{
+		{"job.retried", "jobs_retried", map[string]any{"job_count": 3.0}},
+		{"job.cancelled", "jobs_cancelled", map[string]any{"job_count": 2.0, "reason": "other"}},
+	} {
+		if err := audit.CheckActionPayload(c.action, c.payload); err != nil {
+			t.Fatalf("%s batch row: %v", c.action, err)
+		}
+		m, ok := audit.Map(audit.Event{Action: c.action, Payload: c.payload})
+		if !ok || m.Type != "platform" || m.Kind != c.kind || len(m.Facts) != 1 || m.Facts["job_count"] != c.payload["job_count"] {
+			t.Errorf("%s mapped to %+v, %v", c.action, m, ok)
+		}
+	}
+	for name, p := range map[string]map[string]any{
+		"retried, 0 jobs":             {"job_count": 0.0},
+		"retried, 51 jobs":            {"job_count": 51.0},
+		"retried, a note":             {"job_count": 1.0, "note": "synthetic"},
+		"cancelled, a note":           {"job_count": 1.0, "reason": "other", "note": "synthetic"},
+		"cancelled, no reason":        {"job_count": 1.0},
+		"cancelled, a made-up reason": {"job_count": 1.0, "reason": "bored"},
+	} {
+		action := "job.retried"
+		if strings.HasPrefix(name, "cancelled") {
+			action = "job.cancelled"
+		}
+		if err := audit.CheckActionPayload(action, p); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

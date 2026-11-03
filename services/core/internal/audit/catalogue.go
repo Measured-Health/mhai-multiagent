@@ -280,9 +280,10 @@ var Catalogue = map[string]Entry{
 	// (ruling R24): one row per call, no job, no entity, with job_count
 	// (spec §5.3). The per-job rows core's loops write (the dead-letter
 	// re-mint, the sweeper's cancels) are system rows, withheld like R21's.
-	// The batch shape and facts.job_count come with Plan 4 Task 12.
-	"job.retried":   {Type: "platform", Kind: "jobs_retried", When: batchRow},
-	"job.cancelled": {Type: "platform", Kind: "jobs_cancelled", When: batchRow},
+	// The batch rows are the platform's retry and cancel (Plan 4 Task 12).
+	// mhai-web has no facts key for the cancel reason: the count only.
+	"job.retried":   {Type: "platform", Kind: "jobs_retried", When: batchRow, Facts: map[string]string{"job_count": "job_count"}},
+	"job.cancelled": {Type: "platform", Kind: "jobs_cancelled", When: batchRow, Facts: map[string]string{"job_count": "job_count"}},
 
 	// Plan 4: feedback and corrections (spec §5.3). No target: mhai-web has
 	// no query or correction target kind.

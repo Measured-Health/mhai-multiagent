@@ -907,6 +907,13 @@ func displayText(s string, max int) bool {
 	return true
 }
 
+// ShowableName reports whether a person's or hospital's name may be sent to
+// the platform app as it is: mhai-web's text check (at most 120 UTF-16
+// units, no control or format character) and nothing of a pseudonym's
+// shape. The failed jobs list (Plan 4 Task 12) applies it as the audit
+// list does.
+func ShowableName(s string) bool { return displayText(s, nameMax) && !holdsPseudonym(s) }
+
 // --- hospitals and people --------------------------------------------------
 
 // Hospitals is every hospital the log names, removed ones included, by

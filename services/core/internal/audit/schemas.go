@@ -345,7 +345,11 @@ func init() {
 	Register("job.dead_lettered", Schema{Fields: fields(
 		"job_id", id, "type", OneOf("run_query", "approve_correction"), "error", errorCode, "attempts", count, "kid", token),
 		Required: []string{"job_id", "type", "error"}})
-	Register("job.retried", Schema{Fields: fields("job_id", id, "msg_id", token), Required: []string{"job_id", "msg_id"}})
+	// Two shapes (spec §9, Plan 4 Task 12): core's per-job row (the
+	// dead-letter re-mint: job_id, msg_id) and the platform's one row per
+	// retry call (job_count, 1-50, no job), whose actor is the admin. The
+	// catalogue shows only the batch row (batchRow; ruling R24).
+	Register("job.retried", Schema{Fields: fields("job_id", id, "msg_id", token, "job_count", Int(1, 50))})
 
 	// Plan 4 (spec §9 rows 1-6): feedback and corrections. Ids and codes
 	// only: never the reason, the corrected diagnosis or a rejection note.
@@ -389,10 +393,15 @@ func init() {
 	// service any more), against the job. Keys as job.dead_lettered's
 	// (type, not spec §9's job_type: Plan 3's frozen key) and as
 	// query.cancelled's reason codes.
+	// Widened for the platform's one row per cancel call (Plan 4 Task 12):
+	// job_count (1-50), no job, and the reason as one of the platform's
+	// three codes. Never the note (C16).
 	Register("job.cancelled", Schema{Fields: fields(
 		"job_id", id, "type", OneOf("run_query", "approve_correction"),
-		"reason", OneOf("user_deactivated", "hospital_deactivated", "account_unusable")),
-		Required: []string{"job_id", "type", "reason"}})
+		"reason", OneOf("user_deactivated", "hospital_deactivated", "account_unusable",
+			"no_longer_needed", "cant_succeed", "other"),
+		"job_count", Int(1, 50)),
+		Required: []string{"reason"}})
 
 	// Plan 4 (spec §9): the audit reader's own actions, written by core as
 	// mhai_platform (00014's platform_append). Never the searched text, the
