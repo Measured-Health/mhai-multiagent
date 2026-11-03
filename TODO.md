@@ -36,6 +36,8 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 
 **Database and audit**
 - **Audit tail deletion.** The hash chain can't show rows deleted from the end. Add signed checkpoints (`audit_checkpoints`) on a timer. [T4 M6]
+- **A cool-down on starting audit chain checks.** One check runs at a time, but `POST /platform/audit/verify` starts a new whole-chain walk (up to 10 minutes) as soon as the last one ends, so an auditor or platform admin can keep one running all the time. Add a cool-down (for example, return the latest run if one finished in the last few minutes). [Plan 4 Task 10]
+- **Keep the outcome reply out of the idempotency store.** `POST /platform/audit/verify/runs/{id}/outcome` returns the run with its note, and the Idempotency-Key middleware stores the reply for 72 hours, so the auditor's free-text note sits in `idempotency_keys` too (core-only, not a log or audit payload). Store a reply without the note, or mark the route as not storing its body. [Plan 4 Task 10]
 - **Direct `audit_log` inserts.** The app roles can INSERT into `audit_log` without the chain lock. Route every append through a SECURITY DEFINER `audit_append()` and revoke INSERT. [T4 M8]
 - **Lateral `SET ROLE` / `set_config`** inside a request transaction can reach `mhai_auth` or another hospital; it needs injected SQL first (RLS guards a forgotten filter, not injection). [T2 M1]
 - **RLS tests:** seed every table in `TestRLSWithoutHospitalSeesNothing`; add WITH CHECK tests for UPDATE and the account tables. [T2 M3, M4]
