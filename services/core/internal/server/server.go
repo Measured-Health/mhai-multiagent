@@ -13,6 +13,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/feedback"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/queries"
 )
 
@@ -43,6 +44,8 @@ func Register(m *authz.Mux, d Deps) {
 	// The feedback routes log through the service's logger, whether or not
 	// an intelligence client is set.
 	feedback.Register(m, feedback.Deps{Pool: d.Pool, Intel: d.Intel, Log: a.Log})
+	// The platform app's audit log reads (Plan 4 spec §5.2).
+	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log})
 	registerFixtures(m, d)
 }
 

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.3.0"
+  version: "1.4.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -758,6 +758,141 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/audit:
+    get:
+      operationId: listAuditEvents
+      summary: The audit log, newest first (the platform form of `GET /security/audit`).
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        Filters: `hospital` (an id, or `platform` for entries with no
+        hospital), `person` (the actor's id), `type` (a comma list),
+        `outcome`, `flagged`, `from` and `to` (instants with a zone,
+        `[from, to)`). `q` is an exact event id (decimal) or request id
+        (`[A-Za-z0-9_-]{8,64}`) and ignores the other filters; a
+        pseudonym-shaped `q` is 422. An unknown, repeated or empty
+        parameter is 422 `validation_failed`. `limit` 1–100 (default 50).
+        `next_cursor` is opaque and bound to the filters: under other
+        filters it is 422. `total` counts up to 10,000, then
+        `total_capped`. Each entry is the contract's event, or the bare
+        entry (`id`, `seq`, `hash`, `at`, `type: security`,
+        `kind: unknown`) for one the catalogue doesn't map; no payload is
+        ever sent as stored. The first page of a filter set is recorded
+        once per session per 5 minutes (`audit.viewed`, or
+        `audit.searched` for `q`); a page with a cursor is not.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: &auditListErrors [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: hospital, in: query, required: false, schema: { type: string } }
+        - { name: person, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: type, in: query, required: false, schema: { type: string }, description: "A comma list of event types." }
+        - { name: outcome, in: query, required: false, schema: { type: string, enum: [succeeded, refused, failed] } }
+        - { name: flagged, in: query, required: false, schema: { type: string, enum: ["true", "false"] } }
+        - { name: from, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: q, in: query, required: false, schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" } }
+        - { name: cursor, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: A page of entries.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditList" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/audit/hospitals:
+    get:
+      operationId: listAuditHospitals
+      summary: Every hospital the audit log names, removed ones included.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *auditListErrors
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The hospitals, by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hospitals]
+                additionalProperties: false
+                properties:
+                  hospitals: { type: array, items: { $ref: "#/components/schemas/AuditHospital" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/audit/people:
+    get:
+      operationId: searchAuditPeople
+      summary: People whose name or email holds q (the person picker).
+      description: |
+        `q` of 2 to 100 characters once trimmed, no control or format
+        character; at most 20 people, platform-wide by design.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *auditListErrors
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2, maxLength: 100 } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The people.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [people]
+                additionalProperties: false
+                properties:
+                  people: { type: array, maxItems: 20, items: { $ref: "#/components/schemas/AuditPerson" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/audit/{id}:
+    get:
+      operationId: getAuditEvent
+      summary: One audit entry, with `patients` and `letter` (both null until named access exists).
+      description: |
+        `id` is the decimal event id; anything else, or no such entry, is
+        404 `not_found`. `/platform/audit/{id}/patients`,
+        `/platform/audit/named-access` and `/platform/audit/exports*` are
+        not served yet (404 `not_found`).
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[1-9][0-9]{0,18}$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The entry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditDetail" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
 components:
   securitySchemes:
     ServiceKey:
@@ -1203,3 +1338,111 @@ components:
           properties:
             reason_code: { type: string, enum: [not_supported, needs_rewording, unsafe, out_of_scope] }
             note: { type: string, nullable: true }
+
+    AuditHospital:
+      type: object
+      required: [id, name, removed]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        removed: { type: boolean }
+    AuditPerson:
+      type: object
+      required: [id, name, email, role, kind, hospital]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string }
+        role: { type: string, enum: [clinician, hospital_admin, platform_admin, auditor] }
+        kind: { type: string, enum: [staff, platform] }
+        hospital:
+          type: object
+          nullable: true
+          required: [id, name]
+          additionalProperties: false
+          properties:
+            id: { type: string }
+            name: { type: string }
+    AuditBareEntry:
+      type: object
+      description: An entry the catalogue doesn't map; the app shows it as undisplayable.
+      required: [id, seq, hash, at, type, kind]
+      properties:
+        id: { type: string }
+        seq: { type: integer, format: int64 }
+        hash: { type: string }
+        at: { type: string, format: date-time }
+        type: { type: string, enum: [security] }
+        kind: { type: string, enum: [unknown] }
+    AuditEvent:
+      type: object
+      description: Contract §14.9's event. `ip`, `device`, `reason` and `note` are null for now.
+      required: [id, seq, hash, at, actor, hospital, type, kind, target, outcome, ip, device, flag, reason, note, refs, facts, after_break]
+      properties:
+        id: { type: string }
+        seq: { type: integer, format: int64 }
+        hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        at: { type: string, format: date-time }
+        actor:
+          type: object
+          required: [id, name, role, kind]
+          additionalProperties: false
+          properties:
+            id: { type: string }
+            name: { type: string }
+            role: { type: string, enum: [clinician, reviewer, hospital_admin, platform_admin, auditor, system] }
+            kind: { type: string, enum: [staff, platform, system] }
+        hospital:
+          allOf: [{ $ref: "#/components/schemas/AuditHospital" }]
+          nullable: true
+        type: { type: string }
+        kind: { type: string }
+        target:
+          type: object
+          nullable: true
+          required: [kind, id]
+          properties:
+            kind: { type: string }
+            id: { type: string }
+        outcome: { type: string, enum: [succeeded, refused, failed] }
+        ip: { type: string, nullable: true }
+        device: { type: string, nullable: true }
+        flag: { type: string, nullable: true, enum: [security, policy] }
+        reason: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        refs:
+          type: object
+          required: [clearance_id, export_id, request_id]
+          additionalProperties: false
+          properties:
+            clearance_id: { type: string, nullable: true }
+            export_id: { type: string, nullable: true }
+            request_id: { type: string, nullable: true }
+        facts: { type: object, description: "Typed facts; keys from the contract's list only." }
+        after_break: { type: boolean }
+    AuditEntry:
+      oneOf:
+        - $ref: "#/components/schemas/AuditEvent"
+        - $ref: "#/components/schemas/AuditBareEntry"
+    AuditList:
+      type: object
+      required: [events, next_cursor, total, total_capped, oldest_kept_at, last_checkpoint]
+      additionalProperties: false
+      properties:
+        events: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/AuditEntry" } }
+        next_cursor: { type: string, nullable: true }
+        total: { type: integer, minimum: 0, maximum: 10000 }
+        total_capped: { type: boolean }
+        oldest_kept_at: { type: string, format: date-time }
+        last_checkpoint: { type: object, nullable: true, description: Always null until retention checkpoints exist. }
+    AuditDetail:
+      description: The entry (event or bare) plus `patients` and `letter`, both null for now.
+      allOf:
+        - $ref: "#/components/schemas/AuditEntry"
+        - type: object
+          required: [patients, letter]
+          properties:
+            patients: { type: object, nullable: true }
+            letter: { type: object, nullable: true }
