@@ -22,6 +22,7 @@ import (
 
 const seedUsage = `usage:
   core hospitals create --name N --short-code CODE --time-zone TZ [--require-mfa-for-clinicians] [--allow-trust-device]
+  core hospitals activate <hospital id or short code>
   core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
 
 The password is never an argument: users create prompts for it on a terminal
@@ -33,15 +34,27 @@ provisioning login: a login that is a plain member of mhai_provision, for
 example
   CREATE ROLE provisioner LOGIN PASSWORD '...' IN ROLE mhai_provision;
 Each command runs SET LOCAL ROLE mhai_provision, which can insert hospitals,
-settings, users and roles and read only hospitals(id, short_code); it has no
-BYPASSRLS, UPDATE or DELETE. The core service's runtime login must not be a member
-of it (the core service refuses to start if it is).`
+settings, users and roles, read only hospitals(id, short_code, status), and
+update only hospitals.status from setup_incomplete to active; it has no
+BYPASSRLS or DELETE. The core service's runtime login must not be a member
+of it (the core service refuses to start if it is).
+
+hospitals activate moves a setup_incomplete hospital to active (POST /queries
+needs an active hospital) and audits hospital.activated. An active hospital
+is left as it is. It refuses any other status: a deactivated hospital is
+reactivated through the platform app.`
 
 var errArgs = errors.New("invalid arguments (run core hospitals|users create -h)")
 
-// seed runs "hospitals create" or "users create". url is the owner/migrate
-// connection. Errors and output never contain the email, name or password.
+var errActivateArgs = errors.New("usage: core hospitals activate <hospital id or short code>")
+
+// seed runs "hospitals create", "hospitals activate" or "users create". url
+// is the provisioning login. Errors and output never contain the email, name
+// or password.
 func seed(ctx context.Context, args []string, url string, stdin io.Reader, out io.Writer) error {
+	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "activate" {
+		return hospitalsActivate(ctx, args[2:], url, out)
+	}
 	if len(args) < 2 || args[1] != "create" {
 		return fmt.Errorf("%s", seedUsage)
 	}
@@ -87,6 +100,33 @@ func hospitalsCreate(ctx context.Context, args []string, url string, out io.Writ
 		return err
 	}
 	fmt.Fprintf(out, "created hospital %s\n", id)
+	return nil
+}
+
+// hospitalsActivate is "hospitals activate <id or short code>"
+// (account.ActivateHospital). The reference is checked before connecting.
+func hospitalsActivate(ctx context.Context, args []string, url string, out io.Writer) error {
+	if len(args) != 1 || strings.HasPrefix(args[0], "-") {
+		return errActivateArgs
+	}
+	ref := args[0]
+	if err := account.ValidateHospitalRef(ref); err != nil {
+		return err
+	}
+	pool, err := openOwner(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	id, already, err := account.ActivateHospital(ctx, pool, ref)
+	if err != nil {
+		return err
+	}
+	if already {
+		fmt.Fprintf(out, "hospital %s is already active; nothing changed\n", id)
+		return nil
+	}
+	fmt.Fprintf(out, "activated hospital %s\n", id)
 	return nil
 }
 

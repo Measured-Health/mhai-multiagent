@@ -49,6 +49,7 @@ const (
 
 var (
 	super, app *pgxpool.Pool
+	pgSrv      *testutil.PG
 	natsSrv    *testutil.NATS
 	gwNC       *nats.Conn
 	gwJS       jetstream.JetStream
@@ -66,6 +67,7 @@ func TestMain(m *testing.M) {
 			return 1
 		}
 		defer stopPG()
+		pgSrv = pg
 		n, stopNATS, err := testutil.NewNATS(ctx)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "start nats:", err)
