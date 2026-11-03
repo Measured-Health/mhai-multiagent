@@ -452,3 +452,125 @@ Within the boundary rules (Python writes no permission rule; hospital and user o
 - `boundary/jobs/run_query.py`: write `masked_question`, `masked_patient_json` and `timings_ms` in the completion transaction (already computed; one change to the insert).
 - `services/pipeline.py`: bind the second consumer; refuse to start if `operations.json` lacks `pipeline.approve_correction` (it already refuses a handler with no entry).
 - **Must not:** check who approved, read `reason` or `corrected_diagnosis`, call `DoctorFeedbackLoop`, write `kb_chunks` or `guardrail_weights`, or decide anything from `SecondPerson` (core's flag). The intelligence lead keeps model internals (persona vectors, CMA-ES runs) outside the boundary until open questions 3 and 4 are decided.
+
+## 11. Security and threat model
+
+### 11.1 Assets
+
+- **Clinical safety and the guardrails:** a correction must not change what any clinician is shown until a different clinician has approved it (ADR 0005), and never another hospital's guardrails.
+- **Patient data:** the consultation and answer shown to a reviewer; the clinician's free-text reason and corrected diagnosis.
+- **Hospital separation:** corrections, buffer rows and jobs of one hospital invisible to another; platform roles see aggregates and metadata only.
+- **The audit chain** and its verification result: auditors rely on "Intact" meaning intact.
+- **Availability** of the API under health and statistics polling.
+
+### 11.2 Actors and trust boundaries
+
+Actors: clinicians (submitter, reviewer), hospital admins (non-clinician), platform admins, auditors, the clinical and platform BFFs, core and its background loops (sampler, scheduler, sweeper, drainer, dead-letter consumer), the pipeline worker, NATS, Postgres; and an attacker with one stolen clinical or platform session, a compromised worker, or a malicious insider clinician.
+
+| Crossing | What is checked there |
+|---|---|
+| BFF → core (`api.v1.clinical`, `api.v1.platform`) | Plan 2/3 unchanged: the BFF's NATS identity, access token, denylist, account and hospital state, route rule (roles, platform audience, two-step, `Write`/`AuditorWrite`, step-up), idempotency, RLS transaction, audit |
+| core → Postgres (clinical) | `mhai_gateway`, hospital from the token, `mhai.user_id` from the token; column grants; the two-person CHECK and triggers |
+| core → Postgres (platform) | `mhai_platform`, no hospital; no row grant on clinical tables; aggregates through SECURITY DEFINER functions |
+| core → JetStream | only `gateway` publishes `jobs.v1.>`; the token binds subject, body, hospital and `sub`; `SecondPerson` checked before minting |
+| JetStream → worker | every Plan 3 check (§7.3 there); operation row for `approve_correction` |
+| worker → Postgres | `with_hospital`; claim; column grants without the free text; RESTRICTIVE `buffer_needs_approval` |
+| outbox → chain | the drainer takes actor, hospital and request id from `jobs`; closed payload schemas; action must match job status |
+| core loops → workers (`pipeline.health`) | `svc:core` request token (Plan 3) |
+
+### 11.3 Threats and mitigations (STRIDE)
+
+| # | STRIDE | Threat | Mitigation | Test (§11.5) |
+|---|---|---|---|---|
+| P1 | EoP (clinical) | **A clinician approves their own correction** (directly, by a raced request, by a forged body, or with a second session) | identity from the token only; the handler refuses `self_approval`; the conditional `UPDATE ... AND submitted_by <> $me`; `CHECK (decided_by <> submitted_by)`; `SecondPerson` before minting; the buffer's RESTRICTIVE policy | C1–C4 |
+| P2 | EoP | **A non-clinician** (hospital admin, analyst, platform admin) approves or rejects | route role `clinician`; operation role `clinician`; the decider trigger checks the `clinician` role, active, same hospital at decision time | C5, C6 |
+| P3 | EoP | A reviewer from **another hospital** decides, or reads the queue | RLS (another hospital's correction is invisible: 404); the decider trigger's same-hospital check | C7 |
+| P4 | Tampering | A **compromised or buggy worker** puts an unapproved correction, or another hospital's, into the buffer | the worker has no write on `feedback_events`; `buffer_needs_approval`; `with_hospital` RLS; unique `correction_id` | C8, C9 |
+| P5 | Tampering (clinical) | **Feedback poisoning:** one clinician (or two colluding) floods corrections to steer the guardrails, including other hospitals' | nothing in Plan 4 changes `guardrail_weights` or the persona; one live feedback per query and only on one's own completed queries; every correction needs a second clinician; buffer rows per hospital with `model_versions`; any later CMA-ES result is a proposal under clinical change control (open question 3) | C10, C11 |
+| P6 | Tampering | **A stale decision:** approve after withdraw, approve twice, approve and reject at once | conditional `UPDATE ... WHERE status='pending_review'`; transition trigger; 409 `already_decided`; one live job per subject | C12, C13 |
+| P7 | Information disclosure | A reviewer sees the **unmasked** question or patient details | the reviewer's view reads only `masked_question` and `masked_patient_json`; a test that no other handler selects them and that the corrections reader never selects `clinical_queries.clinical_question`/`patient_data_json` | C14, C15 |
+| P8 | Information disclosure | Free-text **reason, diagnosis, rejection note, cancel note or outcome note** reaches logs, traces, the audit chain, NATS or the worker | closed payload schemas (§9); worker column grants exclude the text; job bodies hold ids; `logx` redaction; marker-string test across the flow | C16 |
+| P9 | Information disclosure | A platform admin or auditor reaches **clinical content** through the new platform routes | `mhai_platform` has no row grant on clinical tables; SECURITY DEFINER functions return aggregates or contract columns only; jobs list never shows subject, user or message | C17, C18 |
+| P10 | Information disclosure | **Small-group leaks** in guardrail statistics: a 1–4 count, a share from a small numerator, or subtraction across `all` and shown hospitals | §6.3 rules applied in Go before encoding; secondary suppression; property test over random tables that no hidden value can be derived from shown ones | C19, C20 |
+| P11 | Information disclosure | The audit reader sends a value the contract doesn't know (an unmapped payload key), a pseudonym, or free text | the catalogue maps every action; unmapped actions send no payload values; pseudonym-shape test; vocabulary test against mhai-web's lists | C21, C22 |
+| P12 | Repudiation | Who submitted, approved, rejected, withdrew, retried, cancelled, viewed or searched the audit log can't be shown | §9's actions, each in the same transaction as the change (or from the outbox for job facts); `audit.viewed`/`searched` for reads; refusals audited | C23 |
+| P13 | Repudiation / Tampering | **A false "Intact"**: a run that didn't walk the whole chain reported intact, or two runs racing | `intact` only with the proof fields; timeout is `error`; one running run (partial unique index); advisory-lock scheduler | C24, C25 |
+| P14 | Tampering | Auditors' new writes widen into other writes | `AuditorWrite` allowed only under `/platform/audit/`, never with step-up; a test pins the three routes; auditors still get 403 on every other write | C26 |
+| P15 | EoP | **Retry re-mints as someone else**, or for a user who lost the role or was deactivated, or re-runs an approval that no longer has a second person | `intel.Republish` mints as the job's creator with current roles, after checking user and hospital are active and the role still allows the operation; `SecondPerson` re-checked; else `skipped` | C27, C28 |
+| P16 | Tampering | Cancel of a running or completed job, or a cancel without step-up | `mhai_jobs` policies (running and completed untouchable); `StepUp` on cancel | C29 |
+| P17 | DoS | **Polling** `/platform/health`, `/platform/guardrails` or the audit list as an expensive query | health from the sampler's stored reading; guardrails cached 60 s and rate-limited; audit list keyset-paged, `limit` ≤ 100, `total` capped at 10,000, indexed filters | C30, C31 |
+| P18 | DoS | A **flood of approvals** or retries fills `JOBS` | 20 `approve_correction` jobs in flight per hospital (the decision still commits; the job waits); `JOBS` per-subject limits; retry 1–50 ids per call and per-session rate limit | C32 |
+| P19 | DoS | A verify run that never ends blocks all later checks | 10-minute budget; the run becomes `error`; the partial unique index frees | C25 |
+| P20 | Spoofing | A cursor or job id forged to read other filters or another table's rows | cursors bind a hash of the filters; job ids resolved only through `mhai_platform_jobs` by type; unknown ids `skipped` | C33 |
+
+### 11.4 Controls (decided)
+
+- **Authentication and step-up:** Plan 2 sessions; two-step always on platform routes; step-up (`mfa_code` or `backup_code`) on job cancel, as the contract says. Approving a correction needs no step-up (the contract doesn't ask for one; the 60-second undo is the safeguard).
+- **Authorisation:** core's route table (§10.1) and operations table (§10.2) are the only rules; the two-person rule is enforced by core's handler, core's publisher (`SecondPerson`) and the database (CHECK, triggers, RESTRICTIVE policy). Python holds no rule. RLS on every new table, with the hospital from the token; platform reads only through aggregate functions.
+- **Data handling:** free text stays in `feedback_events`, under RLS, readable by the hospital's clinicians through the corrections routes only; never logged, traced, audited, published or given to the worker. Reviewers see the masked consultation only. Retention of corrections follows the contract's `pending_corrections` period when the retention plan builds it (TODO).
+- **Concurrency:** every decision is one conditional `UPDATE`; one live feedback per query and one live job per subject by partial unique indexes; job claim and completion as Plan 3; one verify run by a partial unique index; schedulers by advisory lock.
+- **Secrets:** none new. The `health` KV bucket holds no secret and no patient data.
+- **Third parties:** none. The audit-integrity email waits for the notifications service and a mail provider (TODO).
+
+### 11.5 Abuse-case tests (the plan writes these first)
+
+- **C1** A clinician approving their own correction gets 403 `self_approval`, an audit row `correction.decision_refused`, and no job.
+- **C2** As the database login, `UPDATE feedback_events SET status='approved', decided_by=submitted_by ...` fails the CHECK, whatever the role.
+- **C3** Two sessions of the submitter and one of a reviewer approve in parallel: exactly one approval, by the reviewer; the others get 403 or 409.
+- **C4** A forged approve body naming another `decided_by` is ignored; `decided_by` is the token's user.
+- **C5** A hospital admin without `clinician`, an analyst, a platform admin and an auditor each get 403 on approve, reject and the pending list.
+- **C6** A clinician whose `clinician` role is removed (or who is deactivated) between loading the queue and approving: refused (the decider trigger), 409 `conflict` or 401 per Plan 2, and nothing published.
+- **C7** A clinician of hospital B gets 404 on hospital A's correction id for every corrections route.
+- **C8** As `mhai_worker` under hospital A, inserting a `feedback_buffer` row for a `pending_review`, `rejected` or self-approved (forced as superuser) correction fails the RESTRICTIVE policy.
+- **C9** An `approve_correction` job for hospital A naming hospital B's correction: `not_found`, dead letter, no read of B's rows (database log), no buffer row.
+- **C10** No Plan 4 code path writes `guardrail_weights` or `kb_chunks`: a grant test (`mhai_worker`, `mhai_gateway` have no write) and a grep test in the boundary package.
+- **C11** A second `POST /feedback` for the same query gives 409; a feedback on another clinician's query gives 404.
+- **C12** Withdraw then approve: 409 `already_decided`; approve then withdraw: 409.
+- **C13** The same approval replayed with the same `Idempotency-Key` returns 204 once and publishes one job; with a new key, 409.
+- **C14** The pending list for a correction whose stored question contains a synthetic name and MRN shows only the masked text.
+- **C15** A Go test fails if any handler other than the corrections reader selects `masked_question` or `masked_patient_json`, or if the corrections reader selects `clinical_queries.clinical_question` or `patient_data_json`.
+- **C16** A synthetic marker in `reason`, `corrected_diagnosis`, `rejection.note`, a cancel note and an outcome note appears in no log line, span, audit payload, NATS message or worker-readable column.
+- **C17** As `mhai_platform`, `SELECT` on `clinical_queries`, `clinical_decisions`, `feedback_events`, `feedback_buffer`, `jobs` fails; the functions return only their declared columns.
+- **C18** `GET /platform/jobs` items carry exactly the contract's keys (no subject, user or message).
+- **C19** Guardrail tables with counts 0–6 in every combination: no value 1–4 is sent; no set has exactly one hidden member; shares follow rule 3.
+- **C20** Property test: for random per-hospital tables, no hidden cell can be computed from the response (row sums, `all` minus shown rows).
+- **C21** Every audit action in the code has a catalogue row and a payload schema; every emitted `type`, `kind` and `facts` key is in mhai-web's vocabulary file.
+- **C22** No audit response anywhere contains a string matching the pseudonym shape.
+- **C23** Each action in §9 is written once, in the same transaction as its change (a forced failure after the change rolls both back); outbox facts reach the chain after a worker crash post-commit.
+- **C24** A verify run stopped by its budget ends `error`, never `intact`; an `intact` run has every proof field.
+- **C25** Two `POST /verify` at once return the same `run_id`; the 06:00 schedule on two core copies starts one run.
+- **C26** An auditor gets 403 on `POST /platform/jobs/retry` and every other write outside the three audit routes; a route with `AuditorWrite` outside `/platform/audit/` panics at registration.
+- **C27** Retry of a job whose creator was deactivated, or lost `clinician`: `skipped`, nothing published.
+- **C28** Retry of an `approve_correction` whose correction was forced (as superuser) to `decided_by = submitted_by`: refused by `SecondPerson`, `skipped`.
+- **C29** Cancel without a code: 403 `mfa_required`/`mfa_invalid`; cancel of a `running` job: `skipped`.
+- **C30** 100 parallel `GET /platform/health` cause no database query and no `pipeline.health` call beyond the sampler's.
+- **C31** `GET /platform/guardrails` past 6 per minute per session: 429 `rate_limited`.
+- **C32** A 21st approval in flight for one hospital still returns 204 and the job is published by the sweeper when a slot frees.
+- **C33** A cursor reused with other filters is 422; a job id from neither table is `skipped`.
+
+### 11.6 Residual risk and sign-off
+
+- **Two accounts, one person.** The database can tell two accounts apart, not two people. A clinician with two accounts at one hospital could approve their own correction. Accepted: accounts are made by hospital admins (Plan 2 provisioning), and nothing a correction does in Plan 4 changes any answer.
+- **Collusion between two clinicians** passes the two-person rule. Accepted for the same reason; the buffer is never applied automatically (open question 3), and the audit chain names both.
+- **The masker misses an identifier** in the reviewer's view: a peer clinician of the same hospital sees it. Accepted: within-hospital peer review is normal practice, and the reviewer is a clinician bound by the same duty.
+- **Audit tail deletion** is still undetectable until signed checkpoints exist (TODO). "Intact" means "no break in what is there".
+- **No bell or email on a broken chain** until the notifications service exists; an alert covers it.
+- **Sign-off needed:** clinical: that correction review needs no step-up, and open questions 3 and 4 (any change to live guardrails). Privacy: the masked consultation shown to peers (§4.4), and the retention period for corrections. Product owner: every open question in §15.
+
+## 12. Phasing
+
+Plan 4 ships in three parts, each mergeable on its own (one PR each, per the agent workflow):
+
+| Part | Ships | Depends on |
+|---|---|---|
+| **4a. Feedback and corrections** | 00010–00012, the corrections routes, `POST /feedback`, stats, the `jobs` table, `approve_correction` end to end, the outbox widening, masked consultation and `timings_ms` in `run_query` | Plan 3 (merged) |
+| **4b. The audit log** | 00013 (runs table, platform append), `/platform/audit/*` (Plan 4 subset), the catalogue, verify runs and the schedule, `AuditorWrite` | 4a for the new actions' catalogue rows (can start in parallel; the catalogue test pins whatever is merged) |
+| **4c. Platform operations** | `/platform/health` and the sampler, `/platform/jobs` with retry and cancel, `/platform/guardrails` and `internal/smallgroup` | 4a (the `jobs` table) |
+
+## 13. Changes outside this design's code
+
+- **Frontend contract** (`docs/specs/2026-10-17-frontend-requirements.md`): §4 rows to **Built (Plan 4)**; `POST /feedback`'s `client_created_at` and `Idempotency-Key` to Built; §14.8.2, §14.8.3 and the Plan 4 subset of §14.9 to Built, with the deferred §14.9 rows named; a new **New** row for `GET /platform/guardrails`; a note that `/platform/audit` is the `/security/audit` of the gateway design.
+- **mhai-web** (its TODO, not this repository): add the audit kinds marked new in §5.3 before 4b deploys; handle a missing `documents` and `clean_up` health part if open question 7 is decided as recommended; a screen for guardrail statistics when wanted.
+- **TODO.md:** remove "Platform job views"; add the deferred items (document pipeline plan, triage, KB search, buffer reset, audit exports and named access, the audit bell and email, CMA-ES proposals, persona capture); keep "Audit tail deletion".
+- **ARCHITECTURE.md:** "Built (Plan 4)" lines; the `jobs` table and the second consumer in the jobs flow.
+- **Tracker:** B-14, B-20, B-21, B-22 to their Plan 4 parts; B-17, B-18, B-19, B-23, KI-5 to "deferred" with the plan named.
