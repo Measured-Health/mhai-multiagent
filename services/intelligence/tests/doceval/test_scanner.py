@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import os
 import random
@@ -393,3 +394,73 @@ def test_synthetic_phone_only_as_whole_token() -> None:
     assert scanner.check_document(_note_doc("ph 555-0142")) == []
     for text in ("5555-0142", "1-555-0142", "555-01421", "555-0142-99"):
         assert scanner.check_document(_note_doc(text)), text
+
+
+def test_computed_values_exempt_only_at_their_path_and_shape() -> None:
+    sha = "0123456789abcdef" * 4
+    commit = "0803123456789abcdef0123456789abcdef01234"
+    good = {
+        "files": [{"path": "truth/x.json", "size": 123456789, "sha256": sha}],
+        "generator": {"commit": commit},
+        "expected": {"regions": [{"bbox": [0.1234, 0.2, 0.9876, 1]}]},
+        "schema": "mhai.evaluation.testset/1",
+    }
+    assert scanner.check_metadata(good) == []
+    nin, phone = 12345678901, "08031234567"
+    # An exempt key name at a path the set builder does not write is checked as usual.
+    for bad in (
+        {"size": nin},
+        {"patient": {"size": nin}},
+        {"files": {"size": nin}},
+        {"files": [{"meta": {"size": nin}}]},
+        {"sha256": phone},
+        {"files": [{"sha256": phone}]},
+        {"commit": phone},
+        {"generator": {"commit": phone}},
+        {"note": sha},
+        {"note": commit},
+        {"x": {"generator": {"commit": commit}}},
+        {"regions": [{"bbox": [0.1234567]}]},
+        {"bbox": [0.1234567]},
+        {"count": 123456789},
+        {"schema": "folder/123456"},
+        {"x": {"schema": "mhai.evaluation.testset/1"}},
+    ):
+        assert scanner.check_metadata(bad), bad
+    # The right path with the wrong shape is checked as usual.
+    for bad in (
+        {"files": [{"size": "08031234567"}]},
+        {"files": [{"size": -12345678901}]},
+        {"files": [{"sha256": sha.upper()}]},
+        {"expected": {"regions": [{"bbox": [0.1234567, 0, 0, 0]}]}},  # too precise
+        {"expected": {"regions": [{"bbox": [0, 0, 0, 0, 0.1234567]}]}},  # fifth item
+        {"expected": {"regions": [{"bbox": [12345678.0]}]}},
+    ):
+        assert scanner.check_metadata(bad), bad
+
+
+def _write_listing(root: Path, entries: list[dict[str, Any]]) -> None:
+    (root / "listing.json").write_text(json.dumps({"files": entries}), encoding="utf-8")
+
+
+def test_listed_size_and_hash_recomputed(tmp_path: Path) -> None:
+    (tmp_path / "a.json").write_text(json.dumps(_doc()), encoding="utf-8")
+    data = (tmp_path / "a.json").read_bytes()
+    sha = hashlib.sha256(data).hexdigest()
+    _write_listing(tmp_path, [{"path": "a.json", "size": len(data), "sha256": sha}])
+    assert scanner.scan_set(tmp_path).ok
+    for entry, rule in (
+        ({"path": "a.json", "size": 12345678901, "sha256": sha}, "listed_size_mismatch"),
+        ({"path": "a.json", "size": len(data), "sha256": "0" * 64}, "listed_hash_mismatch"),
+        ({"path": "missing.json", "size": 1}, "listed_file_missing"),
+        ({"path": "../a.json", "size": len(data)}, "listed_file_missing"),
+    ):
+        _write_listing(tmp_path, [entry])
+        res = scanner.scan_set(tmp_path)
+        assert not res.ok
+        assert any(f.rule == rule and f.path == "listing.json#files[0]" for f in res.findings)
+
+
+def test_text_ok() -> None:
+    assert scanner.text_ok("pages/kq2mzt4vbe/1.png")
+    assert not scanner.text_ok("pages/08031234567/1.png")

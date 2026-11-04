@@ -14,7 +14,9 @@ A finding carries the location (a field path), the reason ``not_synthetic`` and
 a fixed rule name. It never carries the offending value.
 """
 
+import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -241,6 +243,11 @@ def _text_rules(text: str, lab: bool = False, numeric: bool = False) -> list[str
     return sorted(set(rules))
 
 
+def text_ok(text: str) -> bool:
+    """Would ``text`` pass the free-text rules (as a metadata string or a file name part)?"""
+    return not _text_rules(text)
+
+
 def _is_name(text: str, kind: str) -> bool:
     words = text.split()
     allowed = terminology.name_set(kind)
@@ -366,39 +373,102 @@ _META_KEYS: dict[str, str] = {
 }
 
 
-def _metadata_leaves(meta: Any) -> Iterator[tuple[str, str | None, Any, bool]]:
-    """Yield ``(display_path, key, leaf, False)`` for leaves, and ``(path, None, key, True)`` for keys.
+RawPath = tuple[str | int, ...]
+
+
+def _metadata_leaves(meta: Any) -> Iterator[tuple[str, str | None, Any, bool, RawPath]]:
+    """Yield ``(display_path, key, leaf, False, raw)`` for leaves and ``(path, None, key,
+    True, raw)`` for keys; ``raw`` is the real path (keys and indexes), never displayed.
 
     Only known metadata key names and list indexes appear in a display path; any other
     key is shown as ``[k<position>]``, because a key may itself be a real value.
     """
-    stack: list[tuple[str, str | None, Any]] = [("", None, meta)]
+    stack: list[tuple[str, str | None, Any, RawPath]] = [("", None, meta, ())]
     while stack:
-        where, key, cur = stack.pop()
+        where, key, cur, raw = stack.pop()
         if isinstance(cur, dict):
             for i, (k, child) in enumerate(cur.items()):
                 shown = k if k in _META_KEYS else f"[k{i}]"
                 here = f"{where}.{shown}" if where else shown
-                yield here, None, k, True
-                stack.append((here, k, child))
+                yield here, None, k, True, (*raw, k)
+                stack.append((here, k, child, (*raw, k)))
         elif isinstance(cur, list):
             for i, child in enumerate(cur):
-                stack.append((f"{where}[{i}]", key, child))
+                stack.append((f"{where}[{i}]", key, child, (*raw, i)))
         else:
-            yield where, key, cur, False
+            yield where, key, cur, False, raw
+
+
+# Values the set builder computes rather than copies from a document: a file's size and
+# SHA-256 in a test-set manifest, the generator's git commit, and a hostile region's box.
+# Exempt only at exactly these paths (``*`` is a list index) and only in exactly this shape.
+# ``scan_set`` also recomputes every manifest ``size`` and ``sha256`` from the file on disk.
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_COMMIT_HEX = re.compile(r"[0-9a-f]{40}")
+_BBOX_NUMBER = re.compile(r"(?:0|1)(?:\.[0-9]{1,4})?")
+_MAX_SIZE = 1 << 40
+# Format names the set builder writes as a file's top-level ``schema`` (``testset/1`` would
+# otherwise read as a slashed id).
+SCHEMA_IDS = frozenset({"mhai.evaluation.testset/1", "mhai.evaluation.hostile/1"})
+_COMPUTED: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("files", "*", "size"), "size"),
+    (("files", "*", "sha256"), "sha256"),
+    (("generator", "commit"), "commit"),
+    (("expected", "regions", "*", "bbox", "*"), "bbox"),
+    (("schema",), "schema_id"),
+)
+
+
+def _path_matches(raw: RawPath, pattern: tuple[str, ...]) -> bool:
+    if len(raw) != len(pattern):
+        return False
+    for part, want in zip(raw, pattern, strict=True):
+        if want == "*":
+            if isinstance(part, bool) or not isinstance(part, int):
+                return False
+        elif part != want:
+            return False
+    return True
+
+
+def _computed_leaf(raw: RawPath, leaf: Any) -> bool:
+    if isinstance(leaf, bool):
+        return False
+    kind = next((k for pat, k in _COMPUTED if _path_matches(raw, pat)), None)
+    if kind == "sha256":
+        return isinstance(leaf, str) and _SHA256_HEX.fullmatch(leaf) is not None
+    if kind == "schema_id":
+        return isinstance(leaf, str) and leaf in SCHEMA_IDS
+    if kind == "commit":
+        return isinstance(leaf, str) and _COMMIT_HEX.fullmatch(leaf) is not None
+    if kind == "size":
+        return isinstance(leaf, int) and 0 <= leaf <= _MAX_SIZE
+    if kind == "bbox":
+        # At most 4 fractional digits, so a coordinate cannot carry a long digit run.
+        return (
+            isinstance(leaf, int | float)
+            and math.isfinite(leaf)
+            and 0 <= leaf <= 1
+            and raw[-1] in (0, 1, 2, 3)
+            and _BBOX_NUMBER.fullmatch(repr(leaf)) is not None
+        )
+    return False
 
 
 def check_metadata(meta: Any) -> list[Finding]:
     """Check intake metadata (any JSON). Known keys use their list or pattern.
 
-    Every key and every string or number leaf goes through the text rules.
+    Every key and every string or number leaf goes through the text rules, except a
+    computed value at its own path (``files[*].size``, ``files[*].sha256``,
+    ``generator.commit``, ``expected.regions[*].bbox[0..3]``, a known top-level
+    ``schema`` name) in its own shape.
     """
     found: dict[tuple[str, str], Finding] = {}
-    for path, key, leaf, is_key in _metadata_leaves(meta):
+    for path, key, leaf, is_key, raw in _metadata_leaves(meta):
         rules: list[str]
         if is_key:
             rules = [f"key_{r}" for r in _text_rules(str(leaf))]
-        elif isinstance(leaf, bool) or leaf is None:
+        elif isinstance(leaf, bool) or leaf is None or _computed_leaf(raw, leaf):
             continue
         elif isinstance(leaf, int | float):
             rules = _digit_rules(_normalise(str(leaf)), False)
@@ -433,7 +503,16 @@ def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def _check_json_text(text: str, rel: str, jsonl: bool, referenced: set[str]) -> list[Finding]:
+@dataclass(frozen=True)
+class _Listed:
+    label: str  # display path of the entry, e.g. ``testset.json#files[3]``
+    base: str  # the listing file's folder, relative to the scan root
+    entry: Any
+
+
+def _check_json_text(
+    text: str, rel: str, jsonl: bool, referenced: set[str], listed: list[_Listed] | None = None
+) -> list[Finding]:
     out: list[Finding] = []
     lines = text.splitlines() if jsonl else [text]
     for number, line in enumerate(lines, start=1):
@@ -450,11 +529,53 @@ def _check_json_text(text: str, rel: str, jsonl: bool, referenced: set[str]) -> 
             sub = check_document(obj)
         else:
             sub = check_metadata(obj)
-            for _, _key, leaf, is_key in _metadata_leaves(obj):
+            files = obj.get("files") if isinstance(obj, dict) else None
+            if listed is not None and isinstance(files, list):
+                base = str(Path(rel).parent)
+                listed.extend(_Listed(f"{label}#files[{i}]", base, e) for i, e in enumerate(files))
+            for _, _key, leaf, is_key, _raw in _metadata_leaves(obj):
                 if not is_key and isinstance(leaf, str):
                     referenced.add(leaf)
                     referenced.add(Path(leaf).name)
         out.extend(Finding(f"{label}#{f.path}", f.rule) for f in sub)
+    return out
+
+
+def _check_listed(listed: list[_Listed], by_rel: dict[str, Path]) -> list[Finding]:
+    """Every ``files[*]`` entry with a ``size`` or ``sha256`` must match the file it names.
+
+    The scanner exempts those values from the digit rules only because it recomputes them
+    here: a listed size or hash that is not the named file's own is refused.
+    """
+    out: list[Finding] = []
+    for item in listed:
+        e = item.entry
+        if not isinstance(e, dict) or not ("size" in e or "sha256" in e):
+            continue
+        name = e.get("path")
+        full = None
+        if isinstance(name, str) and not Path(name).is_absolute() and ".." not in Path(name).parts:
+            rel = str(Path(item.base) / name) if item.base not in ("", ".") else name
+            full = by_rel.get(str(Path(rel)))
+        if full is None:
+            out.append(Finding(item.label, "listed_file_missing"))
+            continue
+        try:
+            st = os.lstat(full)
+            if not stat.S_ISREG(st.st_mode):  # never follow a link or open a pipe
+                out.append(Finding(item.label, "unexpected_file"))
+                continue
+            if st.st_size > MAX_FILE_BYTES:
+                out.append(Finding(item.label, "too_large"))
+                continue
+            data = full.read_bytes()
+        except OSError:
+            out.append(Finding(item.label, "unreadable"))
+            continue
+        if "size" in e and (isinstance(e["size"], bool) or e["size"] != len(data)):
+            out.append(Finding(item.label, "listed_size_mismatch"))
+        if "sha256" in e and e["sha256"] != hashlib.sha256(data).hexdigest():
+            out.append(Finding(item.label, "listed_hash_mismatch"))
     return out
 
 
@@ -500,6 +621,7 @@ def scan_set(path: str | Path) -> ScanResult:
                 if (Path(base) / d).is_symlink():
                     entries.append((Path(base) / d, str((Path(base) / d).relative_to(root))))
     referenced: set[str] = set()
+    listed: list[_Listed] = []
     images: list[tuple[Path, str, str]] = []
     json_files: set[Path] = set()
     for index, (full, rel) in enumerate(entries):
@@ -535,7 +657,9 @@ def scan_set(path: str | Path) -> ScanResult:
         scanned += 1
         if suffix == ".json":
             json_files.add(full)
-        findings.extend(_check_json_text(text, shown, suffix == ".jsonl", referenced))
+        findings.extend(_check_json_text(text, shown, suffix == ".jsonl", referenced, listed))
+    by_rel = {rel: full for full, rel in entries}
+    findings.extend(_check_listed(listed, by_rel))
     for full, shown, rel in images:
         sibling = full.with_suffix(".json")
         if sibling in json_files or rel in referenced or full.name in referenced:
