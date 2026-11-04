@@ -20,11 +20,14 @@ Limits (the pipeline's own, design section 3.2): at most 50 pages per document
 and 10,000 px on either side of a page.
 """
 
+import base64
+import binascii
 import copy
+import hashlib
 import io
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -144,6 +147,7 @@ class RenderedDocument:
     pages: list[bytes]
     boxes: dict[str, tuple[int, Box]]
     ground_truth: dict[str, Any]  # a deep copy of the input with page and bbox filled in
+    page_ids: tuple[str, ...] = ()  # one page id per page, when marks were drawn
 
 
 @lru_cache(maxsize=64)
@@ -647,6 +651,140 @@ class _Doc:
         return out
 
 
+# ------------------------------------------------------------ registration marks
+#
+# Pages meant for printing carry four corner fiducials (a black square frame with a
+# white hole, so a solid logo is never mistaken for one) and a code strip at the top
+# centre holding the page id: one black cell, one white cell (grey references), 40 id
+# bits and an 8-bit CRC. A readable ``SYN-PG-<base32>`` is printed under the strip.
+# All geometry is a fraction of the page width, so intake can rebuild it from the page
+# size alone. The marks sit in the top and bottom 11 mm of the page, inside the
+# smallest margin (12 mm), clear of the footer text and the header. Fiducials sit 5 mm
+# from the edge, inside what ordinary printers can print.
+
+PAGE_ID_PREFIX = "SYN-PG-"
+PAGE_ID_CHARS = 8  # base32 characters: 40 bits
+FID_SIZE = 0.022  # side, fraction of page width
+FID_OFFSET = 0.024  # distance from the page edge
+STRIP_CELLS = 50  # reference black, reference white, 40 id bits, 8 crc bits
+STRIP_CELL_W = 0.0125
+STRIP_TOP = 0.02
+STRIP_CELL_H = 0.011
+_PAGE_ID_RE = re.compile(r"SYN-PG-[A-Z2-7]{8}")
+_DIGIT_RUN = re.compile(r"[0-9]{4,}")
+
+
+def _crc8(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def page_id_ok(page_id: object) -> bool:
+    """A well-formed page id: ``SYN-PG-`` and 8 base32 characters, no digit run over 3."""
+    return (
+        isinstance(page_id, str)
+        and _PAGE_ID_RE.fullmatch(page_id) is not None
+        and _DIGIT_RUN.search(page_id) is None
+    )
+
+
+def make_page_id(material: str) -> str:
+    """A deterministic page id from any string (a seed and a counter, say)."""
+    for attempt in range(1000):
+        digest = hashlib.sha256(f"{material}/{attempt}".encode()).digest()[:5]
+        page_id = PAGE_ID_PREFIX + base64.b32encode(digest).decode("ascii")
+        if page_id_ok(page_id):
+            return page_id
+    raise RenderError("page_id")  # pragma: no cover - 1000 draws all failing is not possible
+
+
+def page_id_bits(page_id: str) -> list[int]:
+    """The 48 bits (40 id, 8 crc) the strip carries for ``page_id``."""
+    if not page_id_ok(page_id):
+        raise RenderError("bad_page_id")
+    raw = base64.b32decode(page_id[len(PAGE_ID_PREFIX) :])
+    bits = [(byte >> (7 - i)) & 1 for byte in raw + bytes([_crc8(raw)]) for i in range(8)]
+    return bits
+
+
+def page_id_from_bits(bits: Sequence[int]) -> str | None:
+    """The page id for 48 bits, or ``None`` if the CRC or the id's form is wrong."""
+    if len(bits) != 48:
+        return None
+    data = bytes(sum(b << (7 - i) for i, b in enumerate(bits[k : k + 8])) for k in range(0, 48, 8))
+    if _crc8(data[:5]) != data[5]:
+        return None
+    try:
+        page_id = PAGE_ID_PREFIX + base64.b32encode(data[:5]).decode("ascii")
+    except binascii.Error:  # pragma: no cover - 5 bytes always encode
+        return None
+    return page_id if page_id_ok(page_id) else None
+
+
+def fiducial_geometry(width: int, height: int) -> tuple[int, list[tuple[int, int]]]:
+    """The side in pixels and the top-left corners of the four fiducials, clockwise from TL."""
+    side = max(14, round(FID_SIZE * width) // 2 * 2)
+    off = max(2, round(FID_OFFSET * width))
+    return side, [
+        (off, off),
+        (width - off - side, off),
+        (width - off - side, height - off - side),
+        (off, height - off - side),
+    ]
+
+
+def fiducial_centres(width: int, height: int) -> list[tuple[float, float]]:
+    """Centres of the four fiducials in page pixels (continuous coordinates), clockwise from TL."""
+    side, corners = fiducial_geometry(width, height)
+    return [(x + side / 2, y + side / 2) for x, y in corners]
+
+
+def strip_cells(width: int) -> list[tuple[float, float, float, float]]:
+    """Cell rectangles ``(x0, y0, x1, y1)`` of the code strip in page pixels, left to right."""
+    cw = STRIP_CELL_W * width
+    x0 = (width - STRIP_CELLS * cw) / 2
+    y0, y1 = STRIP_TOP * width, (STRIP_TOP + STRIP_CELL_H) * width
+    return [(x0 + i * cw, y0, x0 + (i + 1) * cw, y1) for i in range(STRIP_CELLS)]
+
+
+def draw_registration(img: Image.Image, page_id: str) -> None:
+    """Draw the four fiducials, the code strip and the readable id on ``img`` in place."""
+    w, h = img.size
+    bits = page_id_bits(page_id)
+    d = ImageDraw.Draw(img)
+    side, corners = fiducial_geometry(w, h)
+    thick = max(2, round(side * 2 / 7))
+    for x, y in corners:
+        d.rectangle((x, y, x + side - 1, y + side - 1), fill=(0, 0, 0))
+        d.rectangle((x + thick, y + thick, x + side - 1 - thick, y + side - 1 - thick), fill=WHITE)
+    cells = strip_cells(w)
+    values = [1, 0, *bits]
+    for (x0, y0, x1, y1), bit in zip(cells, values, strict=True):
+        if bit:
+            d.rectangle((round(x0), round(y0), round(x1) - 1, round(y1) - 1), fill=(0, 0, 0))
+    px = max(8, round(0.012 * w))
+    font = _font("dejavu-mono", False, px)
+    d.text((w / 2, round(0.034 * w)), page_id, font=font, fill=INK, anchor="mt")
+
+
+def stamp_registration(page: bytes, page_id: str) -> bytes:
+    """Add registration marks to an already rendered PNG page (same size and dpi)."""
+    with Image.open(io.BytesIO(page)) as src:
+        dpi = src.info.get("dpi")
+        img = src.convert("RGB")
+    draw_registration(img, page_id)
+    buf = io.BytesIO()
+    if dpi:
+        img.save(buf, format="PNG", compress_level=6, dpi=dpi)
+    else:
+        img.save(buf, format="PNG", compress_level=6)
+    return buf.getvalue()
+
+
 def _kv_label(layout: LayoutSpec, key: str) -> str:
     variants = _KV_LABELS.get(key)
     return variants[layout.label_style] if variants else key.split(".")[-1].replace("_", " ")
@@ -672,7 +810,11 @@ def _rows(gt: dict[str, Any], name: str) -> list[dict[str, Any]]:
 
 
 def _render(
-    gt: dict[str, Any], layout: LayoutSpec, dpi: int, highlight: str | None
+    gt: dict[str, Any],
+    layout: LayoutSpec,
+    dpi: int,
+    highlight: str | None,
+    page_id_for: Callable[[int], str] | None = None,
 ) -> RenderedDocument:
     if isinstance(dpi, bool) or not isinstance(dpi, int) or not MIN_DPI <= dpi <= MAX_DPI:
         raise RenderError("bad_dpi")
@@ -736,6 +878,13 @@ def _render(
         _draw_kv(doc, [(p, p, str(_text_of(fields[p]))) for p in sorted(skipped)])
 
     doc.footers()
+    ids: tuple[str, ...] = ()
+    if page_id_for is not None:
+        ids = tuple(page_id_for(n) for n in range(1, len(doc.images) + 1))
+        if len(set(ids)) != len(ids):
+            raise RenderError("duplicate_page_id")
+        for img, page_id in zip(doc.images, ids, strict=True):
+            draw_registration(img, page_id)
     pages = doc.encode()
 
     boxes: dict[str, tuple[int, Box]] = {}
@@ -753,7 +902,7 @@ def _render(
         boxes[path] = (page, box)
         fields[path]["page"] = page
         fields[path]["bbox"] = list(box)
-    return RenderedDocument(pages=pages, boxes=boxes, ground_truth=gt)
+    return RenderedDocument(pages=pages, boxes=boxes, ground_truth=gt, page_ids=ids)
 
 
 def _draw_kv(doc: _Doc, items: list[tuple[str, str, str]]) -> None:
@@ -770,15 +919,25 @@ def _draw_notes(doc: _Doc, notes: list[dict[str, Any]]) -> None:
     doc.end_flow()
 
 
-def render(document_gt: dict[str, Any], layout: LayoutSpec, dpi: int = 200) -> RenderedDocument:
+def render(
+    document_gt: dict[str, Any],
+    layout: LayoutSpec,
+    dpi: int = 200,
+    *,
+    page_id_for: Callable[[int], str] | None = None,
+) -> RenderedDocument:
     """Render ``document_gt`` (model-output view) with ``layout``.
 
     The input is never changed. The result carries the PNG pages, the boxes by field
     path, and ``ground_truth``: a deep copy of the input with ``page`` and ``bbox``
     filled in. Raises :class:`RenderError` (a code only, no content) beyond 50 pages,
     10,000 px per side, 400 dpi or the total pixel budget.
+
+    With ``page_id_for`` (page number from 1 to a page id), pages meant for printing get
+    four corner fiducials, a code strip and the printed id (see "registration marks");
+    the ids are returned in ``RenderedDocument.page_ids``. Without it nothing changes.
     """
-    return _render(document_gt, layout, dpi, None)
+    return _render(document_gt, layout, dpi, None, page_id_for)
 
 
 def render_highlighted(
