@@ -17,7 +17,11 @@ frame. Then:
 
 Photometric steps (blur, noise, lighting, shadows, folds, stamps, JPEG round trip,
 binarisation) do not move anything. Stamps and folds are drawn in page space; a field
-a stamp covers is listed under ``occluded`` (its box stays, the text is harder to read).
+a stamp covers, or a fold line crosses, is listed under ``occluded`` (its box stays, the text is harder to read).
+
+Fields listed as unreadable keep their value and ``raw_text`` in the ground truth, with
+null ``page`` and ``bbox``. Metrics and grounding checks must treat them as not visible
+(not as fields without text).
 
 Output pages are fresh RGB PNGs with pixel data only: no text chunks, no dpi, no ICC
 profile, nothing carried over from the input. The parameters used are returned in the
@@ -25,7 +29,9 @@ page metadata, never embedded in the image.
 
 Limits (same family as ``render``): at most ``MAX_PAGES`` pages, ``MAX_SIDE_PX`` per
 side, ``MAX_PAGE_PIXELS`` per page (input, working canvas and output) and
-``MAX_TOTAL_PIXELS`` of input per document. Pages are processed one at a time.
+``MAX_TOTAL_PIXELS`` of input per document; a document's output never has more pixels than
+its input (the resample is clamped, a running total is checked). The source dpi of the
+rendered pages must be given: it is not stored on the pages. Pages are processed one at a time.
 """
 
 import copy
@@ -52,6 +58,12 @@ from intelligence.doceval.synth.render import (
 )
 
 MAX_PAGE_PIXELS = 25_000_000
+MAX_FOLDS = 10
+MAX_STAMPS = 10
+MAX_BLUR_PX = 10.0
+MAX_NOISE = 60.0
+MAX_PERSPECTIVE = 0.2
+MAX_SKEW_DEG = 15.0
 MIN_VISIBLE = 0.8  # fraction of a box that must stay in frame to keep a (clipped) box
 _STAMP_OVERLAP = 0.25
 
@@ -104,6 +116,8 @@ class Profile:
         }
 
     def __post_init__(self) -> None:
+        if not all(math.isfinite(v) for r in self.ranges().values() for v in r):
+            raise DegradeError("bad_range_nan")
         for key, (lo, hi) in self.ranges().items():
             if not lo <= hi:
                 raise DegradeError(f"bad_range_{key}")
@@ -115,6 +129,20 @@ class Profile:
             raise DegradeError("bad_range_long_side_px")
         if self.jpeg_quality[0] < 1 or self.jpeg_quality[1] > 95:
             raise DegradeError("bad_range_jpeg_quality")
+        caps: list[tuple[str, bool]] = [
+            ("folds", 0 <= self.folds[0] and self.folds[1] <= MAX_FOLDS),
+            ("stamps", 0 <= self.stamps[0] and self.stamps[1] <= MAX_STAMPS),
+            ("blur_px", 0 <= self.blur_px[0] and self.blur_px[1] <= MAX_BLUR_PX),
+            ("noise_sigma", 0 <= self.noise_sigma[0] and self.noise_sigma[1] <= MAX_NOISE),
+            ("perspective", 0 <= self.perspective[0] and self.perspective[1] <= MAX_PERSPECTIVE),
+            ("skew_deg", -MAX_SKEW_DEG <= self.skew_deg[0] and self.skew_deg[1] <= MAX_SKEW_DEG),
+            ("lighting", 0 <= self.lighting[0] and self.lighting[1] <= 1),
+            ("shadow", 0 <= self.shadow[0] and self.shadow[1] <= 1),
+            ("binarise_level", 0 < self.binarise_level[0] and self.binarise_level[1] < 1),
+        ]
+        for key, ok in caps:
+            if not ok:
+                raise DegradeError(f"bad_range_{key}")
         if self.crop_margin[0] <= -0.4 or self.crop_margin[1] > 0.5:
             raise DegradeError("bad_range_crop_margin")
 
@@ -291,12 +319,10 @@ def _open(page: bytes) -> Image.Image:
         raise DegradeError("bad_image") from e
 
 
-def _png(arr_or_im: Image.Image) -> bytes:
+def _png(im: Image.Image) -> bytes:
     out = io.BytesIO()
     # A fresh image has no info, so the file holds IHDR, IDAT and IEND only.
-    Image.frombytes("RGB", arr_or_im.size, arr_or_im.tobytes()).save(
-        out, format="PNG", compress_level=6
-    )
+    Image.frombytes("RGB", im.size, im.tobytes()).save(out, format="PNG", compress_level=6)
     return out.getvalue()
 
 
@@ -336,10 +362,14 @@ def _stamps(im: Image.Image, rng: random.Random, count: int, boxes: Mapping[str,
     return sorted(occluded)
 
 
-def _folds(im: Image.Image, rng: random.Random, count: int) -> None:
-    """A fold is a thin dark line with a light edge, across the whole page."""
+def _folds(im: Image.Image, rng: random.Random, count: int) -> list[Box]:
+    """A fold is a thin dark line with a light edge, across the whole page.
+
+    Returns the band of each fold as a page-fraction box.
+    """
+    bands: list[Box] = []
     if count <= 0:
-        return
+        return bands
     arr = np.asarray(im).copy()
     h, w = arr.shape[:2]
     for _ in range(count):
@@ -348,6 +378,8 @@ def _folds(im: Image.Image, rng: random.Random, count: int) -> None:
         width = max(2, round(min(w, h) / 500))
         n = h if horizontal else w
         c = int(pos * n)
+        lo_f, hi_f = max(0.0, (c - width) / n), min(1.0, (c + 2 * width) / n)
+        bands.append((0.0, lo_f, 1.0, hi_f) if horizontal else (lo_f, 0.0, hi_f, 1.0))
         for off, gain in ((0, 0.78), (width, 1.06), (-width, 1.03)):
             lo, hi = c + off, c + off + width
             if lo < 0 or hi > n:
@@ -355,6 +387,7 @@ def _folds(im: Image.Image, rng: random.Random, count: int) -> None:
             sl = arr[lo:hi, :, :] if horizontal else arr[:, lo:hi, :]
             sl[...] = np.clip(sl.astype(np.float32) * gain, 0, 255).astype(np.uint8)
     im.paste(Image.fromarray(arr), (0, 0))
+    return bands
 
 
 def _field(h: int, w: int, angle: float) -> _F32:
@@ -432,6 +465,7 @@ def _degrade(
     profile: "Profile | str",
     mode: Mode,
     source_dpi: float,
+    max_pixels: int = MAX_PAGE_PIXELS,
 ) -> DegradedPage:
     p = get_profile(profile)
     if not MIN_DPI <= source_dpi <= MAX_DPI:
@@ -449,7 +483,11 @@ def _degrade(
 
     # Photometric steps in page space: they move with the paper.
     occluded = _stamps(src, stamp_rng, params["stamps"], boxes)
-    _folds(src, fold_rng, params["folds"])
+    for band in _folds(src, fold_rng, params["folds"]):  # a fold line through text occludes it
+        for path, b in boxes.items():
+            if min(b[2], band[2]) > max(b[0], band[0]) and min(b[3], band[3]) > max(b[1], band[1]):
+                occluded.append(path)
+    occluded = sorted(set(occluded))
 
     # One homography for skew, perspective and margin or crop.
     m = params["crop_margin"] if mode == "photo" else 0.0
@@ -502,8 +540,10 @@ def _degrade(
     else:
         scale = min(1.0, params["long_side_px"] / max(cw, ch))
         eff = {}
-    scale = min(scale, MAX_SIDE_PX / max(cw, ch), math.sqrt(MAX_PAGE_PIXELS / (cw * ch)))
-    ow, oh = max(8, round(cw * scale)), max(8, round(ch * scale))
+    scale = min(
+        scale, MAX_SIDE_PX / max(cw, ch), math.sqrt(min(max_pixels, MAX_PAGE_PIXELS) / (cw * ch))
+    )
+    ow, oh = max(8, int(cw * scale)), max(8, int(ch * scale))
     resample = Image.Resampling.LANCZOS if scale < 1 else Image.Resampling.BICUBIC
     img = moved.resize((ow, oh), resample)  # antialiased: no moire from the downscale
     del moved
@@ -549,7 +589,7 @@ def scan(
     rng: random.Random,
     profile: "Profile | str",
     *,
-    source_dpi: float = 200,
+    source_dpi: float,
 ) -> DegradedPage:
     """Print-and-scan: skew, folds, stamps, shadow, resample, blur, noise, JPEG, fax."""
     return _degrade(page, boxes, rng, profile, "scan", source_dpi)
@@ -561,7 +601,7 @@ def photo(
     rng: random.Random,
     profile: "Profile | str",
     *,
-    source_dpi: float = 200,
+    source_dpi: float,
 ) -> DegradedPage:
     """Phone photo: perspective, margin or crop, uneven light, moire-free downscale."""
     return _degrade(page, boxes, rng, profile, "photo", source_dpi)
@@ -579,7 +619,7 @@ def degrade_document(
     profile: "Profile | str",
     mode: Mode,
     *,
-    source_dpi: float = 200,
+    source_dpi: float,
 ) -> DegradedDocument:
     """Degrade every page of a rendered document; boxes and ground truth follow.
 
@@ -598,29 +638,36 @@ def degrade_document(
             raise DegradeError("bad_box_page")
         by_page.setdefault(pg, {})[path] = box
     total = 0
+    in_pixels: list[int] = []
     for data in doc.pages:
         try:
             with Image.open(io.BytesIO(data)) as im:
-                total += im.size[0] * im.size[1]
+                in_pixels.append(im.size[0] * im.size[1])
+                total += in_pixels[-1]
         except Exception as e:  # noqa: BLE001
             raise DegradeError("bad_image") from e
     if total > MAX_TOTAL_PIXELS:
         raise DegradeError("document_too_large")
 
     master = random.Random(seed)
-    fn = scan if mode == "scan" else photo
     acc = _Acc()
     new: dict[str, tuple[int, Box]] = {}
     gt = copy.deepcopy(doc.ground_truth)
     fields = dict(schema.iter_fields(gt))
+    out_total = 0
     for i, data in enumerate(doc.pages, start=1):
-        res = fn(
+        res = _degrade(
             data,
             by_page.get(i, {}),
             random.Random(master.getrandbits(64)),
             profile,
-            source_dpi=source_dpi,
+            mode,
+            source_dpi,
+            max_pixels=in_pixels[i - 1],
         )
+        out_total += res.metadata["size"][0] * res.metadata["size"][1]
+        if out_total > min(total, MAX_TOTAL_PIXELS):
+            raise DegradeError("document_too_large")
         acc.pages.append(res.page)
         acc.meta.append(res.metadata)
         for path, b in res.boxes.items():
