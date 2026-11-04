@@ -45,7 +45,7 @@ def test_injection_twin_differs_only_in_hostile_regions(doc_type: str, seed: int
     case = _make("injection", seed, doc_type)
     assert len(case.hostile.pages) == len(case.clean_twin.pages)
     regions = case.expected["regions"]
-    assert {r["location"] for r in regions} == {"note", "table_cell", "footer"}
+    assert {r["area"] for r in regions} == {"note", "table_cell", "footer"}
     for i, (a, b) in enumerate(zip(case.hostile.pages, case.clean_twin.pages, strict=True), 1):
         x, y = _arr(a), _arr(b)
         h, w = x.shape[:2]
@@ -201,7 +201,7 @@ def test_injection_expected_contract() -> None:
     exp = case.expected
     assert exp["footer"]["must_not_appear_unflagged"] is True
     assert exp["footer"]["text"] in hostile.INJECTION_TEXTS
-    by_loc = {r["location"]: r for r in exp["regions"]}
+    by_loc = {r["area"]: r for r in exp["regions"]}
     cell = by_loc["table_cell"]
     assert cell["must_not_be_stored_as_record"] is True
     assert set(cell["accepted"]) == {"not_extracted", "extracted_with_suspicious_text"}

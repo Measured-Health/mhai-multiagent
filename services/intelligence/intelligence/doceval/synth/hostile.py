@@ -75,7 +75,7 @@ PxBox = tuple[int, int, int, int]
 class Region(TypedDict):
     """Where the hostile part is, and what is expected of a pipeline there."""
 
-    location: str
+    area: str  # where on the page: note, table_cell, footer, second_patient, sticker
     path: str | None  # ground-truth field path, None when the text is in no field
     page: int
     bbox: list[float]
@@ -274,7 +274,7 @@ def _draw_lines(
 
 
 def _region(
-    location: str,
+    area: str,
     path: str | None,
     page: int,
     box: Box,
@@ -286,7 +286,7 @@ def _region(
     drawn: list[str] | None = None,
 ) -> Region:
     out: Region = {
-        "location": location,
+        "area": area,
         "path": path,
         "page": page,
         "bbox": list(box),
