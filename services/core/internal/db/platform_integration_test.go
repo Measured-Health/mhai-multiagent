@@ -81,15 +81,16 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 	// its reason. A new grant to the platform fails here until it is
 	// justified in this list.
 	wantRelations := map[string]string{
-		"hospitals":         "00003: names and status for the platform screens",
-		"users":             "00003: column SELECT without password_hash (the audit's actor, people search)",
-		"platform_users":    "00003: security_invoker view over users' granted columns",
-		"user_roles":        "00003: roles of the audit's actors",
-		"sessions":          "00003: session metadata (no tokens: those are refresh_tokens)",
-		"audit_log":         "00003: read the chain; append its eight actions (00014 platform_append)",
-		"audit_checkpoints": "00003: the chain's checkpoints, for verification",
-		"idempotency_keys":  "00003: Idempotency-Key replies of platform writes, null-hospital rows only",
-		"audit_verify_runs": "00014: the chain checks",
+		"hospitals":           "00003: names and status for the platform screens",
+		"users":               "00003: column SELECT without password_hash (the audit's actor, people search)",
+		"platform_users":      "00003: security_invoker view over users' granted columns",
+		"user_roles":          "00003: roles of the audit's actors",
+		"sessions":            "00003: session metadata (no tokens: those are refresh_tokens)",
+		"audit_log":           "00003: read the chain; append its eight actions (00014 platform_append)",
+		"audit_checkpoints":   "00003: the chain's checkpoints, for verification",
+		"idempotency_keys":    "00003: Idempotency-Key replies of platform writes, null-hospital rows only",
+		"audit_verify_runs":   "00014: the chain checks",
+		"guardrail_snapshots": "00017: the guarded guardrail statistics, one per period and day (SELECT, INSERT)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `

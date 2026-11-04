@@ -28,6 +28,15 @@
 --
 -- An index on clinical_decisions (created_at, hospital_id) keeps the scan
 -- to the window.
+--
+-- guardrail_snapshots (ruling R43): one guarded response per period and UTC
+-- day, shared by every core copy, so each copy serves the same figures all
+-- day whatever it computed itself (a decision committed late, a hospital
+-- deactivated mid-day). The first copy to compute a day's figures inserts
+-- them (ON CONFLICT DO NOTHING) and every copy reads back the stored row.
+-- It holds the guarded output only (the response's JSON), never a raw
+-- count; it names hospitals, as the response does, so mhai_platform alone
+-- may read and insert it, and nobody may change or delete a row.
 
 -- +goose Up
 
@@ -66,6 +75,20 @@ CREATE POLICY guardrail_read ON hospitals FOR SELECT TO mhai_guardrail_reader
     USING (status = 'active');
 
 CREATE INDEX clinical_decisions_created_idx ON clinical_decisions (created_at, hospital_id);
+
+CREATE TABLE guardrail_snapshots (
+    period      text        NOT NULL CHECK (period IN ('7d', '30d', '90d')),
+    day         date        NOT NULL,
+    body        jsonb       NOT NULL CHECK (jsonb_typeof(body) = 'object' AND octet_length(body::text) <= 4194304),
+    computed_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (period, day)
+);
+ALTER TABLE guardrail_snapshots OWNER TO mhai_migrate;
+ALTER TABLE guardrail_snapshots ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON guardrail_snapshots FROM PUBLIC;
+GRANT SELECT, INSERT ON guardrail_snapshots TO mhai_platform;
+CREATE POLICY platform_read ON guardrail_snapshots FOR SELECT TO mhai_platform USING (true);
+CREATE POLICY platform_insert ON guardrail_snapshots FOR INSERT TO mhai_platform WITH CHECK (true);
 
 DROP FUNCTION mhai_guardrail_counts(timestamptz, timestamptz);
 
@@ -147,6 +170,9 @@ REVOKE ALL ON FUNCTION mhai_guardrail_counts(timestamptz, timestamptz) FROM PUBL
 GRANT EXECUTE ON FUNCTION mhai_guardrail_counts(timestamptz, timestamptz) TO mhai_platform;
 
 DROP INDEX clinical_decisions_created_idx;
+
+-- The table takes its policies and grants with it.
+DROP TABLE guardrail_snapshots;
 
 DROP POLICY guardrail_read ON hospitals;
 DROP POLICY guardrail_read ON clinical_decisions;

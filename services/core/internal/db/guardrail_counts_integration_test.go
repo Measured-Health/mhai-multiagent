@@ -202,6 +202,7 @@ func TestMigration00017RoundTrip(t *testing.T) {
 	}
 	var left int
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM pg_policies WHERE policyname = 'guardrail_read')
+		+ (SELECT count(*) FROM pg_class WHERE relname = 'guardrail_snapshots')
 		+ (SELECT count(*) FROM pg_indexes WHERE indexname = 'clinical_decisions_created_idx')
 		+ (SELECT count(*) FROM unnest(ARRAY['clinical_decisions', 'hospitals']) t
 		   WHERE has_any_column_privilege('mhai_guardrail_reader', t, 'SELECT'))
@@ -216,5 +217,60 @@ func TestMigration00017RoundTrip(t *testing.T) {
 	}
 	if err := db.MigrateDownTo(ctx, pg.URL, 0); err != nil {
 		t.Fatalf("down to 0: %v", err)
+	}
+}
+
+// guardrail_snapshots (R43): mhai_platform reads and inserts, and may not
+// change or delete a row; nobody else may touch it; RLS is forced; the
+// period is one of three and a day has one row per period.
+func TestGuardrailSnapshotsScoped(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	const day = "2001-01-01" // a day no route computes
+	if _, err := pool.Exec(ctx, `DELETE FROM guardrail_snapshots WHERE day = $1::date`, day); err != nil {
+		t.Fatal(err)
+	}
+	ins := `INSERT INTO guardrail_snapshots (period, day, body) VALUES ('7d', '` + day + `', '{"period": "7d"}')`
+	if err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, ins); return err }); err != nil {
+		t.Fatalf("platform inserting: %v", err)
+	}
+	err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, ins); return err })
+	if pgCode(err) != "23505" {
+		t.Errorf("a second row for the day: want 23505, got %v", err)
+	}
+	if err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, ins+` ON CONFLICT (period, day) DO NOTHING`)
+		return err
+	}); err != nil {
+		t.Errorf("ON CONFLICT DO NOTHING: %v", err)
+	}
+	var n int
+	if err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM guardrail_snapshots WHERE day = $1::date`, day).Scan(&n)
+	}); err != nil || n != 1 {
+		t.Errorf("platform reads %d rows (%v)", n, err)
+	}
+	for _, q := range []string{`UPDATE guardrail_snapshots SET body = '{}'`, `DELETE FROM guardrail_snapshots`, `TRUNCATE guardrail_snapshots`} {
+		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q); return err })
+		requireDenied(t, err, "platform: "+q)
+	}
+	for _, role := range []string{"mhai_gateway", "mhai_auth", "mhai_worker", "mhai_jobs", "mhai_audit_drain", "mhai_provision", "mhai_guardrail_reader"} {
+		requireDenied(t, asRole(ctx, pool, role, `SELECT count(*) FROM guardrail_snapshots`), role+" reading the snapshots")
+		requireDenied(t, asRole(ctx, pool, role, ins), role+" inserting a snapshot")
+	}
+	err = db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO guardrail_snapshots (period, day, body) VALUES ('1d', '`+day+`', '{}')`)
+		return err
+	})
+	if pgCode(err) != "23514" {
+		t.Errorf("period 1d: want 23514, got %v", err)
+	}
+	var rls, force bool
+	var owner string
+	if err := pool.QueryRow(ctx, `SELECT relrowsecurity, relforcerowsecurity, pg_get_userbyid(relowner) FROM pg_class WHERE relname = 'guardrail_snapshots'`).Scan(&rls, &force, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if !rls || !force || owner != "mhai_migrate" {
+		t.Errorf("rls %v force %v owner %s", rls, force, owner)
 	}
 }
