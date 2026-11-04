@@ -290,16 +290,20 @@ func TestGuardrailsGraceServesPreviousDay(t *testing.T) {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	tok := mint(t, platformAdmin(t))
 	for _, c := range []struct {
-		at   time.Duration
-		want time.Time
+		at     time.Duration
+		period string
+		want   time.Time
 	}{
-		{5 * time.Minute, today.AddDate(0, 0, -1)},
-		{20 * time.Minute, today},
+		{5 * time.Minute, "7d", today.AddDate(0, 0, -1)},
+		{20 * time.Minute, "7d", today},
+		// Fix round 3: 90 days to yesterday's midnight starts just over 91
+		// days before the database's clock, and is computed (not stored yet).
+		{5 * time.Minute, "90d", today.AddDate(0, 0, -1)},
 	} {
 		restore := platform.SetGuardrailsClock(func() time.Time { return today.Add(c.at) })
-		r := guardrails(t, tok, "?period=7d")
+		r := guardrails(t, tok, "?period="+c.period)
 		restore()
-		ok(t, c.at.String(), r)
+		ok(t, c.period+" at "+c.at.String(), r)
 		if r.body["to"] != c.want.Format("2006-01-02T15:04:05.000Z") || r.body["updated_at"] != r.body["to"] {
 			t.Errorf("at %v past midnight: to %v updated_at %v, want %v", c.at, r.body["to"], r.body["updated_at"], c.want)
 		}
