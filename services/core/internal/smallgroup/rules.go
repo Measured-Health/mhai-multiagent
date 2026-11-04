@@ -193,7 +193,8 @@ func ShareOf(num, den int64, numG, denG Guarded) GuardedShare {
 
 // skipBridge turns the bridge repair off, so a test can show the property
 // test catches rule 4 taken literally (two hidden per column). Never set
-// outside tests.
+// outside tests. It stays an unexported variable because the tests that set it
+// are in this package (an export_test.go setter would not hide it from them).
 var skipBridge bool
 
 // line is one set that adds up: total = Σ parts, as cell indexes.

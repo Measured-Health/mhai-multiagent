@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
@@ -498,15 +499,22 @@ func totpFor(secret []byte, step int64) string {
 	return fmt.Sprintf("%06d", v%1000000)
 }
 
-// auditorSignIn creates a synthetic auditor with the CLI and signs in over
+// auditorSignIn is platformSignIn for an auditor.
+func auditorSignIn(t *testing.T, nc *nats.Conn) string {
+	t.Helper()
+	return platformSignIn(t, nc, "auditor")
+}
+
+// platformSignIn creates a synthetic platform user with role (auditor or
+// platform_admin) with the CLI and signs in over
 // api.v1.platform: the password step, an enrolment-only session, two-step
 // enrolment, then a full session with a code (the next 30 s step, which the
 // verifier accepts and which is later than the enrolment code).
-func auditorSignIn(t *testing.T, nc *nats.Conn) string {
+func platformSignIn(t *testing.T, nc *nats.Conn, role string) string {
 	t.Helper()
-	email := "smoke-auditor-" + randomHex(t, 6) + "@platform.example.test"
-	pw := "Smoke-auditor-" + randomHex(t, 12)
-	cli(t, pw+"\n", "users", "create", "--email", email, "--name", "Synthetic Smoke Auditor", "--roles", "auditor")
+	email := "smoke-" + role + "-" + randomHex(t, 6) + "@platform.example.test"
+	pw := "Smoke-platform-" + randomHex(t, 12)
+	cli(t, pw+"\n", "users", "create", "--email", email, "--name", "Synthetic Smoke Platform User", "--roles", role)
 	call := func(method, path, bearer string, body any) reply {
 		return apiOn(t, nc, natsapi.SubjectPlatform, method, path, bearer, body)
 	}
@@ -542,7 +550,7 @@ func auditorSignIn(t *testing.T, nc *nats.Conn) string {
 	if r.status != http.StatusOK || access == "" {
 		t.Fatalf("auditor challenge: %d %s", r.status, r.raw)
 	}
-	t.Logf("signed in a synthetic auditor over api.v1.platform (two-step)")
+	t.Logf("signed in a synthetic %s over api.v1.platform (two-step)", role)
 	return access
 }
 
@@ -615,4 +623,155 @@ func TestSmokeAuditLog(t *testing.T) {
 		t.Fatalf("no review_submitted by clinician B among %d review entries: %s", len(events), r.raw)
 	}
 	t.Logf("audit log: B's review_submitted is listed under type=review")
+}
+
+// guardedOK checks one guarded figure's shape and that a shown integer is
+// not 1 to 4 (the small-group rule).
+func guardedOK(t *testing.T, where string, v any, share bool) {
+	t.Helper()
+	g, ok := v.(map[string]any)
+	if !ok || len(g) != 2 {
+		t.Fatalf("guardrails %s: %v, want {value, suppressed}", where, v)
+	}
+	sup, ok := g["suppressed"].(bool)
+	if !ok {
+		t.Fatalf("guardrails %s: no suppressed flag: %v", where, g)
+	}
+	val, present := g["value"]
+	if !present {
+		t.Fatalf("guardrails %s: no value key: %v", where, g)
+	}
+	if sup {
+		if val != nil {
+			t.Fatalf("guardrails %s: suppressed with a value: %v", where, g)
+		}
+		return
+	}
+	if val == nil && share {
+		return // a share of no answers: nothing to divide, nothing hidden
+	}
+	n, ok := val.(float64)
+	if !ok {
+		t.Fatalf("guardrails %s: shown without a number: %v", where, g)
+	}
+	if share {
+		if n < 0 || n > 1 {
+			t.Fatalf("guardrails %s: share %v out of range", where, n)
+		}
+	} else if n >= 1 && n <= 4 {
+		t.Fatalf("guardrails %s: shows %v, a count of 1 to 4", where, n)
+	}
+}
+
+func ratesOK(t *testing.T, where string, m map[string]any) {
+	t.Helper()
+	for _, k := range []string{"answers", "pass", "regenerate", "escalate", "degraded"} {
+		guardedOK(t, where+"."+k, m[k], false)
+	}
+	for _, k := range []string{"pass_share", "regenerate_share", "escalate_share"} {
+		guardedOK(t, where+"."+k, m[k], true)
+	}
+}
+
+// TestSmokePlatformOps (Plan 4c): a synthetic platform admin over
+// api.v1.platform reads system health once the sampler has taken its first
+// reading (fresh, workers ok), finds a forced dead letter in the failed jobs
+// list and retries it, and reads the guardrail statistics for 7 days: the
+// right shape, no shown count of 1 to 4.
+func TestSmokePlatformOps(t *testing.T) {
+	clinical := bffConn(t)
+	creator := signIn(t, clinical)
+	nc := platformConn(t)
+	access := platformSignIn(t, nc, "platform_admin")
+	call := func(method, path string, body any) reply {
+		return apiOn(t, nc, natsapi.SubjectPlatform, method, path, access, body)
+	}
+
+	// Health: 503 until the sampler's first reading, and a reading taken
+	// before the workers were up says so; wait (the sampler runs every
+	// 30 s) for a fresh reading with the workers ok.
+	var r reply
+	workers := ""
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		r = call("GET", "/platform/health", nil)
+		if r.status != http.StatusOK && r.status != http.StatusServiceUnavailable {
+			t.Fatalf("GET /platform/health: %d %s", r.status, r.raw)
+		}
+		workers = ""
+		parts, _ := r.body["parts"].([]any)
+		for _, p := range parts {
+			if m, _ := p.(map[string]any); m["key"] == "workers" {
+				workers, _ = m["status"].(string)
+			}
+		}
+		if r.status == http.StatusOK && workers == "ok" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("GET /platform/health: %d, workers %q after 120 s, want 200 and ok: %s", r.status, workers, r.raw)
+		}
+		time.Sleep(3 * time.Second)
+	}
+	updated, err := time.Parse(time.RFC3339, fmt.Sprint(r.body["updated_at"]))
+	if err != nil || time.Since(updated) > 2*time.Minute || time.Until(updated) > 30*time.Second {
+		t.Fatalf("health reading not fresh: updated_at %v", r.body["updated_at"])
+	}
+	t.Logf("health: fresh (%s), workers ok, overall %v", updated.Format(time.RFC3339), r.body["overall"])
+
+	// A dead letter: a failed question of the clinician's hospital.
+	qid := uuid.NewString()
+	if _, err := ownerPool(t).Exec(context.Background(), `INSERT INTO clinical_queries
+		(id, hospital_id, clinical_question, urgency, status, error, attempts, created_by, request_id, created_at, completed_at, deadline_at)
+		VALUES ($1, $2, $3, 'routine', 'failed', 'deadline_exceeded', 5, $4, $5, now() - interval '1 hour', now() - interval '1 minute',
+		        now() - interval '50 minutes')`,
+		qid, creator.hospitalID, "Synthetic smoke dead letter "+qid, creator.id, "rid-q-"+qid); err != nil {
+		t.Fatal(err)
+	}
+	jobID := "q_" + qid
+	r = call("GET", "/platform/jobs?status=failed&hospital="+creator.hospitalID, nil)
+	if r.status != http.StatusOK {
+		t.Fatalf("GET /platform/jobs: %d %s", r.status, r.raw)
+	}
+	listed := false
+	jobs, _ := r.body["jobs"].([]any)
+	for _, x := range jobs {
+		if j, _ := x.(map[string]any); j["id"] == jobID {
+			listed = j["status"] == "failed"
+		}
+	}
+	if !listed {
+		t.Fatalf("the dead letter %s is not among %d failed jobs: %s", jobID, len(jobs), r.raw)
+	}
+	t.Logf("jobs: the dead letter is listed as failed")
+
+	r = call("POST", "/platform/jobs/retry", map[string]any{"ids": []string{jobID}})
+	retried, _ := r.body["retried"].([]any)
+	if r.status != http.StatusOK || len(retried) != 1 || retried[0] != jobID {
+		t.Fatalf("POST /platform/jobs/retry: %d %s, want %s retried", r.status, r.raw, jobID)
+	}
+	t.Logf("jobs: retried")
+
+	// Guardrails: shape and the small-group rule.
+	r = call("GET", "/platform/guardrails?period=7d", nil)
+	if r.status != http.StatusOK {
+		t.Fatalf("GET /platform/guardrails: %d %s", r.status, r.raw)
+	}
+	if r.body["period"] != "7d" || r.body["from"] == nil || r.body["to"] == nil || r.body["updated_at"] == nil {
+		t.Fatalf("guardrails: missing period, from, to or updated_at: %s", r.raw)
+	}
+	all, _ := r.body["all"].(map[string]any)
+	ratesOK(t, "all", all)
+	hospitals, ok := r.body["hospitals"].([]any)
+	if !ok {
+		t.Fatalf("guardrails: hospitals is not a list: %s", r.raw)
+	}
+	for i, h := range hospitals {
+		m, _ := h.(map[string]any)
+		if _, ok := m["hospital"].(map[string]any); !ok {
+			t.Fatalf("guardrails hospitals[%d]: no hospital: %v", i, m)
+		}
+		ratesOK(t, fmt.Sprintf("hospitals[%d]", i), m)
+	}
+	t.Logf("guardrails: 7d shape ok, %d hospital rows, no shown count of 1 to 4", len(hospitals))
 }

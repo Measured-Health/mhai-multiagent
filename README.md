@@ -20,7 +20,10 @@ The backend has two parts:
   clinician of the hospital approves it, and an approved correction only
   fills a per-hospital buffer; (Plan 4, part 4b) the audit log for platform
   admins and auditors (`/platform/audit`, with chain checks run on demand and
-  daily). The contract is
+  daily); (Plan 4, part 4c) platform operations: system health
+  (`/platform/health`), the failed jobs list with retry and cancel
+  (`/platform/jobs`), and guardrail statistics under small-group rules
+  (`/platform/guardrails`). The contract is
   [services/core/openapi.yaml](services/core/openapi.yaml).
 
 ## Agents

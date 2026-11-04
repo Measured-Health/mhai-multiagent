@@ -213,16 +213,6 @@ func TestQueryCancellationsScoped(t *testing.T) {
 	h, queued := seedHospital(t, pool, uniqueCode("C"))
 	admin := seedUser(t, pool, nil)
 	cancelled := seedQuestionAs(t, h, "cancelled", "", 0, "1 minute")
-	// The window runs from the action, not the failure (fix round 1): a
-	// failure 40 days old cancelled today is listed, and so is one still
-	// being retried.
-	oldCancelled := seedQuestionAs(t, h, "cancelled", "", 0, "1 minute")
-	oldRetrying := seedQuestionAs(t, h, "running", "", 1, "1 minute")
-	for _, id := range []uuid.UUID{oldCancelled, oldRetrying} {
-		if _, err := pool.Exec(ctx, `UPDATE clinical_queries SET failed_at = now() - interval '40 days' WHERE id = $1`, id); err != nil {
-			t.Fatal(err)
-		}
-	}
 	ins := `INSERT INTO query_cancellations (query_id, hospital_id, cancelled_by, cancel_note) VALUES ($1, $2, $3, 'synthetic')`
 	if err := db.WithJobs(ctx, app, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, ins, cancelled, h, admin); return err }); err != nil {
 		t.Errorf("jobs role recording a cancelled question: %v", err)

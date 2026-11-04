@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Platform operations for platform admins and auditors (Plan 4, part 4c;
+  OpenAPI 1.9.0, additive). `GET /platform/health` (the sampler's stored
+  reading, one KV get per poll, 503 when none is fresh), `GET
+  /platform/jobs` (HMAC-bound cursor), `POST /platform/jobs/retry` (platform
+  admins, 10 calls a minute, creator and second-person rules re-checked),
+  `POST /platform/jobs/cancel` (step-up code) and `GET
+  /platform/guardrails?period=7d|30d|90d` (new: small-group rules, whole UTC
+  days, one stored snapshot per period and day with a 15-minute grace, 6
+  reads a minute). Migrations 00015 to 00017. New smoke test
+  `TestSmokePlatformOps`. Reads of health, jobs and guardrails are not
+  audit-recorded; retry and cancel write `job.retried` and `job.cancelled`.
 - The audit log for platform admins and auditors (Plan 4, part 4b;
   OpenAPI 1.6.0, additive). `GET /platform/audit` (filters, `q`, HMAC-bound
   cursor), `/platform/audit/{id}`, `/hospitals`, `/people` and

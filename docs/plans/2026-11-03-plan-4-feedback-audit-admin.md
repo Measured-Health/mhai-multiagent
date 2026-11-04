@@ -695,7 +695,7 @@ services/intelligence/
 - `smallgroup.Set(total, parts...) []Guarded`, rule 2: hidden members total at least 5, and never exactly one hidden member.
 - `smallgroup.Share(num, den) Guarded`, rule 3.
 - `smallgroup.AcrossRows(all, rows)`, rule 4: when `all` is shown, at least two rows are hidden per column.
-- `GET /platform/guardrails?period=7d|30d|90d` (platform admin and auditor): cached 60 s per period, and rate-limited to 6 a minute per session (429 `rate_limited`).
+- `GET /platform/guardrails?period=7d|30d|90d` (platform admin and auditor): whole UTC days, one stored snapshot per period and day (a 15-minute grace after midnight), and rate-limited to 6 a minute per session (429 `rate_limited`).
 
 - [ ] **Step 1: Write the failing tests:**
   - `TestCountRule` (C19): 0 is shown as 0, 1–4 are hidden, 5+ are shown.
