@@ -120,6 +120,43 @@ def test_handwritten_pr_hand_computed() -> None:
     assert metrics.handwritten_pr(fx["truth"], fx["pred"]) == _expect(fx["expected_handwritten_pr"])
 
 
+def _f(value: Any, script: str | None = None, **extra: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {"value": value, "raw_text": None if value is None else str(value)}
+    out.update(page=None if value is None else 1, bbox=None if value is None else [0, 0, 1, 1])
+    if script is not None:
+        out["script"] = script
+    out.update(extra)
+    return out
+
+
+def test_handwritten_extras_take_the_truths_script_not_the_predictions() -> None:
+    hand_doc = {
+        "patient": {"given_names": _f("Avelor", "handwritten"), "family_name": _f(None)},
+        "observations": [{"name_text": _f("Glucose", "handwritten"), "value_text": _f(None)}],
+    }
+    pred = {
+        "patient": {
+            "given_names": _f("Avelor", "printed"),
+            "family_name": _f("Bellwater", "printed"),  # extra: the document is handwritten
+        },
+        "observations": [
+            {"name_text": _f("Glucose", "printed"), "value_text": _f("5", "printed")},
+            {"name_text": _f("Sodium", "printed")},  # extra row: the document decides
+        ],
+    }
+    got = metrics.handwritten_pr(hand_doc, pred)
+    assert (got["tp"], got["fp"], got["fn"]) == (2, 3, 0)
+    printed_doc = {"patient": {"given_names": _f("Avelor", "printed")}}
+    claims = {
+        "patient": {
+            "given_names": _f("Avelor", "handwritten"),
+            "family_name": _f("Bellwater", "handwritten"),
+        }
+    }
+    got = metrics.handwritten_pr(printed_doc, claims)
+    assert (got["tp"], got["fp"], got["fn"]) == (0, 0, 0)
+
+
 # --- normalisation ----------------------------------------------------------------------
 
 
@@ -209,6 +246,14 @@ def test_confidence_pairs_hand_listed() -> None:
     assert got == [(c, ok) for c, ok in fx["expected_confidence_pairs"]]
 
 
+def test_missing_confidence_raises() -> None:
+    truth = {"patient": {"given_names": _f("Avelor")}}
+    for bad in ({}, {"confidence": None}, {"confidence": "high"}, {"confidence": True}):
+        pred = {"patient": {"given_names": _f("Avelor", band="high", **bad)}}
+        with pytest.raises(ValueError, match="bad_confidence"):
+            metrics.confidence_pairs(truth, pred)
+
+
 def test_ece_hand_computed() -> None:
     fx = _load("calibration")
     for case in fx["cases"]:
@@ -291,6 +336,21 @@ def test_hostile_unknown_outcome_raises() -> None:
     c["expected"]["outcome"] = "anything"
     with pytest.raises(ValueError):
         metrics.hostile_outcome(c, {})
+
+
+def test_hostile_missing_page_count_fails() -> None:
+    cases = {c["name"]: c for c in _load("hostile")["cases"]}
+    c = copy.deepcopy(cases["inj_all_flagged"])
+    del c["pred"]["document"]["page_count"]
+    got = metrics.hostile_outcome(c["case"], c["pred"])
+    assert got["other_fields_unchanged"] is False
+    assert got["failures"] == ["page_count_mismatch"]
+
+
+def test_hostile_none_prediction_raises() -> None:
+    case = _load("hostile")["cases"][0]["case"]
+    with pytest.raises(TypeError):
+        metrics.hostile_outcome(case, None)
 
 
 def _stored(gt: dict[str, Any], page_count: int, flags: dict[str, list[str]]) -> dict[str, Any]:

@@ -173,6 +173,66 @@
    "type": "text",
    "a": "...",
    "b": null,
+   "equal": false
+  },
+  {
+   "type": "text",
+   "a": "-2.1",
+   "b": "2.1",
+   "equal": false
+  },
+  {
+   "type": "text",
+   "a": "\u22122.1",
+   "b": "-2.1",
+   "equal": true
+  },
+  {
+   "type": "text",
+   "a": "+2.1",
+   "b": "2.1",
+   "equal": true
+  },
+  {
+   "type": "text",
+   "a": "-",
+   "b": null,
+   "equal": false
+  },
+  {
+   "type": "text",
+   "a": "-",
+   "b": "+",
+   "equal": false
+  },
+  {
+   "type": "text",
+   "a": "(-)",
+   "b": "(+)",
+   "equal": false
+  },
+  {
+   "type": "text",
+   "a": " (+) ",
+   "b": "(+)",
+   "equal": true
+  },
+  {
+   "type": "text",
+   "a": "Negative.",
+   "b": "negative",
+   "equal": true
+  },
+  {
+   "type": "numeric_lab_value",
+   "a": "-2.1",
+   "b": 2.1,
+   "equal": false
+  },
+  {
+   "type": "numeric_lab_value",
+   "a": "\u22122.1",
+   "b": -2.1,
    "equal": true
   },
   {
