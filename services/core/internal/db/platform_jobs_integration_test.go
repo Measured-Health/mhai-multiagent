@@ -354,6 +354,23 @@ func TestMigration00016RoundTrip(t *testing.T) {
 	if table || newFn || !oldFn || len(cols) != 0 {
 		t.Fatalf("after down: table %v new %v old %v columns %v", table, newFn, oldFn, cols)
 	}
+	// Every column privilege 00016 gave mhai_jobs is gone after the Down.
+	for _, c := range []struct{ table, col, priv string }{
+		{"clinical_queries", "retry_count", "SELECT"}, {"clinical_queries", "retry_count", "UPDATE"},
+		{"clinical_queries", "deadline_at", "UPDATE"}, {"clinical_queries", "progress", "UPDATE"},
+		{"clinical_queries", "current_stage", "UPDATE"}, {"clinical_queries", "started_at", "UPDATE"},
+		{"clinical_queries", "lease_until", "UPDATE"},
+		{"jobs", "queued_at", "SELECT"}, {"jobs", "queued_at", "UPDATE"}, {"jobs", "deadline_at", "UPDATE"},
+		{"intelligence_audit_outbox", "query_id", "SELECT"}, {"intelligence_audit_outbox", "job_id", "SELECT"},
+	} {
+		if c.table == "clinical_queries" && c.col == "retry_count" || c.table == "jobs" && c.col == "queued_at" {
+			continue // the column itself is gone; checked above
+		}
+		var has bool
+		if err := pool.QueryRow(ctx, `SELECT has_column_privilege('mhai_jobs', $1, $2, $3)`, c.table, c.col, c.priv).Scan(&has); err != nil || has {
+			t.Errorf("mhai_jobs still has %s on %s.%s after down (%v)", c.priv, c.table, c.col, err)
+		}
+	}
 	var owner string
 	if err := pool.QueryRow(ctx, `SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE proname = 'mhai_platform_jobs'`).Scan(&owner); err != nil || owner != "mhai_migrate" {
 		t.Errorf("the stub's owner: %s %v", owner, err)
