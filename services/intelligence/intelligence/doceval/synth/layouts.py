@@ -183,3 +183,12 @@ def for_type(doc_type: str, template_seed: int, *, purpose: Purpose) -> list[Lay
             )
         )
     return out
+
+
+def printable(doc_type: str, template_seed: int, *, purpose: Purpose) -> list[LayoutSpec]:
+    """The layouts of :func:`for_type` wide enough in the margin to carry registration marks.
+
+    Pages meant for printing (fiducials and a code strip, see ``render``) need a margin of
+    at least 22 mm; the others stay valid for generated-only sets.
+    """
+    return [x for x in for_type(doc_type, template_seed, purpose=purpose) if x.margin_mm >= 22]

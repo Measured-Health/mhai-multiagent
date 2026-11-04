@@ -14,6 +14,10 @@ Open work and decisions for mhai-multiagent. Remove an entry once it's done or d
 - **Layout separation is by seed only (ruling D7).** An eval layout can look like a training one, so the eval score does not measure unseen template families. Held-out layout families (unseen templates) come with set v1.1.
 - **File names (ruling D6).** Generated file names must keep digit runs to 5 or fewer: the scanner refuses 6 or more as `filename`. Task 8 names files and must follow this. The renderer itself generates no file names.
 
+- **Volunteer handwriting is not machine-checked (H5).** The intake registers a filled form and records its consent id and role, but nothing reads or verifies what was written. A person must look at each filled sheet (or sign it off) before it joins set v1.1.
+- **Consent ids are checked for format only (H5).** Intake accepts `CN-<base32>` and a role from a closed set; it does not look the id up in any consent register. The register itself is a human process outside this repo.
+- **Printable pages need a margin of 22 mm.** Only `layouts.printable(...)` layouts carry registration marks; the blank form and record sheet are in `synth/forms.py`.
+
 ## Open items for the core service
 
 From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md):

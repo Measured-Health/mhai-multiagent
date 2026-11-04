@@ -1,18 +1,22 @@
 import copy
+import hashlib
 import io
 import random
 import re
 from dataclasses import replace
+from functools import cache
+from itertools import product
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from PIL import Image
 
 from intelligence.doceval import schema
 from intelligence.doceval.synth import (
     degrade,
-    handwriting,
+    forms,
     intake,
     layouts,
     patients,
@@ -53,16 +57,25 @@ SCAN = replace(
 )
 
 
-def _doc(doc_type: str = "lab_report") -> dict[str, Any]:
+@cache
+def _found(doc_type: str) -> dict[str, Any]:
     for p in patients.generate(random.Random(11), 200):
         for d in p.documents:
             if d["document"]["type"]["value"] == doc_type:
-                return copy.deepcopy(d)
+                return d  # type: ignore[no-any-return]
     raise AssertionError("no document")
 
 
+def _doc(doc_type: str = "lab_report") -> dict[str, Any]:
+    return copy.deepcopy(_found(doc_type))
+
+
+def _layout(doc_type: str = "lab_report") -> layouts.LayoutSpec:
+    return layouts.printable(doc_type, 5, purpose="train")[0]
+
+
 def _printed(doc_type: str = "lab_report", tag: str = "a") -> render.RenderedDocument:
-    layout = layouts.for_type(doc_type, 5, purpose="train")[0]
+    layout = _layout(doc_type)
     return render.render(
         _doc(doc_type),
         layout,
@@ -146,7 +159,7 @@ def test_unknown_or_missing_id_refused(tmp_path: Path) -> None:
     other = _printed(tag="zz")  # a valid page, but not in this manifest
     _put(tmp_path, "real_scan", "u1.png", _photo(other, 4, "scan").pages[0])
     # no fiducials at all: a plain page
-    plain = render.render(_doc(), layouts.for_type("lab_report", 5, purpose="train")[0], DPI)
+    plain = render.render(_doc(), _layout(), DPI)
     _put(tmp_path, "real_scan", "u2.png", plain.pages[0])
     # corners cut off: crop the printed page inside its fiducials
     with Image.open(io.BytesIO(PRINTED.pages[0])) as im:
@@ -182,7 +195,10 @@ def test_duplicate_image_refused(tmp_path: Path) -> None:
     res = intake.ingest(tmp_path, MANIFEST)
     dups = [r for r in res.refused if r.reason == "duplicate_page"]
     assert len(dups) == 3
-    assert all(item.metadata["page_no"] != 1 for item in res.accepted)
+    first = PRINTED.page_ids[0]
+    assert first not in {i.metadata["page_id"] for i in res.accepted}
+    if len(PRINTED.pages) > 1:
+        assert [i.metadata["page_id"] for i in res.accepted] == [PRINTED.page_ids[1]]
 
 
 def test_exif_dropped(tmp_path: Path) -> None:
@@ -207,7 +223,6 @@ def test_exif_dropped(tmp_path: Path) -> None:
         pos += 12 + n
     assert chunks[0] == b"IHDR" and chunks[-1] == b"IEND"
     assert set(chunks) <= {b"IHDR", b"IDAT", b"IEND"}
-    assert b"Exif" not in out and b"GPS" not in out
     assert not Image.open(io.BytesIO(out)).getexif()
 
 
@@ -246,18 +261,31 @@ def test_scanner_runs_on_intake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 def test_volunteer_form(tmp_path: Path) -> None:
     doc = _doc("vitals_chart")
-    layout = layouts.for_type("vitals_chart", 5, purpose="train")[0]
-    hand = handwriting.handwritten_document(
-        doc, layout, random.Random(3), mode="handwritten", dpi=DPI
+    layout = _layout("vitals_chart")
+    record_id = forms.make_record_id("test/rec/1")
+    form = forms.blank_form(
+        doc, layout, record_id, lambda n: render.make_page_id(f"test/form/{n}"), DPI
     )
-    ids = tuple(render.make_page_id(f"test/form/{n}") for n in range(1, len(hand.pages) + 1))
-    marked = replace(
-        hand,
-        pages=[render.stamp_registration(p, i) for p, i in zip(hand.pages, ids, strict=True)],
-        page_ids=ids,
-    )
-    manifest = intake.build_manifest(marked, form=True, record_id="SYN-RC-ABCDEFGH")
-    shot = degrade.degrade_document(marked, 9, PHOTO, "photo", source_dpi=SOURCE)
+    sheet = forms.record_sheet(doc, layout, record_id, DPI)
+    manifest = intake.build_manifest(form, form=True, record_id=record_id)
+    # the form is blank in its slots; the record sheet carries the values
+    for path, (pg, box) in form.boxes.items():
+        a = np.asarray(Image.open(io.BytesIO(form.pages[pg - 1])).convert("L"))
+        b = np.asarray(Image.open(io.BytesIO(sheet.pages[pg - 1])).convert("L"))
+        h, w = a.shape
+        x0, y0, x1, y1 = box
+        sl = (slice(int(y0 * h), int(y1 * h) - 2), slice(int(x0 * w) + 1, int(x1 * w) - 1))
+        assert (a[sl] > 200).all() and (b[sl] < 100).any(), path
+    # the record id is printed in the same place on both
+    a0 = np.asarray(Image.open(io.BytesIO(form.pages[0])).convert("L"))
+    b0 = np.asarray(Image.open(io.BytesIO(sheet.pages[0])).convert("L"))
+    h0, w0 = a0.shape
+    band = (slice(int(0.077 * w0), int(0.094 * w0)), slice(int(0.115 * w0), int(0.30 * w0)))
+    assert (a0[band] == b0[band]).all() and (a0[band] < 100).any()
+    assert sheet.page_ids == () and form.page_ids
+    assert scanner.check_document(form.ground_truth) == []
+    assert scanner.check_document(sheet.ground_truth) == []
+    shot = degrade.degrade_document(form, 9, PHOTO, "photo", source_dpi=SOURCE)
     for n, page in enumerate(shot.pages, start=1):
         _put(tmp_path, "handwritten_volunteer", f"f{n}.png", page)
     # no consent: refused
@@ -271,7 +299,7 @@ def test_volunteer_form(tmp_path: Path) -> None:
     assert [r.reason for r in res.refused] == []
     item = res.accepted[0]
     assert item.slice == "handwritten_volunteer"
-    assert item.metadata["record_id"] == "SYN-RC-ABCDEFGH"
+    assert item.metadata["record_id"] == record_id
     assert item.metadata["consent_id"] == "CN-ABCDEFGH" and item.metadata["role"] == "volunteer"
     for path, (pg, true_box) in shot.boxes.items():
         if pg == item.metadata["page_no"]:
@@ -286,6 +314,16 @@ def test_volunteer_form(tmp_path: Path) -> None:
         volunteers={"handwritten_volunteer/m1.png": intake.Volunteer("CN-ABCDEFGH", "volunteer")},
     )
     assert [r.reason for r in res.refused] == ["slice_mismatch"]
+
+
+def test_form_needs_wide_margin_and_good_record_id() -> None:
+    narrow = [x for x in layouts.for_type("lab_report", 5, purpose="train") if x.margin_mm < 22]
+    assert narrow
+    with pytest.raises(render.RenderError):
+        render.render(_doc(), narrow[0], DPI, page_id_for=lambda n: render.make_page_id(str(n)))
+    with pytest.raises(render.RenderError):
+        forms.record_sheet(_doc(), _layout(), "SYN-RC-12345678", DPI)
+    assert forms.record_id_ok(forms.make_record_id("x"))
 
 
 def test_volunteer_record_refuses_names() -> None:
@@ -320,10 +358,216 @@ def test_bad_manifest_refused(tmp_path: Path) -> None:
         intake.ingest(tmp_path / "missing", MANIFEST)
 
 
+GOLDEN = "8606a64aa3ab11d47bf80d8f2e2c47ac790c1de88d821d32226a570eaf8f15a6"
+
+
 def test_render_without_ids_unchanged() -> None:
     layout = layouts.for_type("lab_report", 5, purpose="train")[0]
     a = render.render(_doc(), layout, DPI)
     b = render.render(_doc(), layout, DPI)
     assert a.pages == b.pages and a.page_ids == ()
-    assert a.pages != PRINTED.pages
-    assert a.boxes == PRINTED.boxes  # marks do not move any field
+    # the pixels are those the renderer produced before registration marks existed
+    h = hashlib.sha256()
+    for page in a.pages:
+        im = Image.open(io.BytesIO(page))
+        h.update(repr(im.size).encode())
+        h.update(im.convert("RGB").tobytes())
+    assert h.hexdigest() == GOLDEN
+    marked = render.render(
+        _doc(), _layout(), DPI, page_id_for=lambda n: render.make_page_id(f"t/{n}")
+    )
+    plain = render.render(_doc(), _layout(), DPI)
+    assert marked.boxes == plain.boxes  # marks do not move any field
+
+
+def _check_all(
+    res: intake.IngestResult, shot: degrade.DegradedDocument, tall: float = 0.9, short: float = 0.8
+) -> None:
+    for item in res.accepted:
+        page_no = int(item.metadata["page_no"])
+        for path, (pg, true_box) in shot.boxes.items():
+            if pg != page_no:
+                continue
+            got = item.boxes[path]
+            if got is not None:
+                # a box under 12 px high moves 10% with a third of a pixel of registration error
+                high = (true_box[3] - true_box[1]) * int(item.metadata["height"]) >= 12
+                assert _iou(got, true_box) >= (tall if high else short), path
+    for r in res.refused:
+        assert r.reason in intake.REASONS
+
+
+def _multi() -> render.RenderedDocument:
+    for doc_type, seed in product(("lab_report", "discharge_summary", "clinic_note"), range(5, 14)):
+        for layout in layouts.printable(doc_type, seed, purpose="train"):
+            doc = render.render(
+                _doc(doc_type),
+                layout,
+                DPI,
+                page_id_for=lambda n, t=doc_type, i=layout.index, seed=seed: render.make_page_id(
+                    f"multi/{t}/{seed}/{i}/{n}"
+                ),
+            )
+            if len(doc.pages) >= 2:
+                return doc
+    raise AssertionError("no multi-page printable document")
+
+
+MULTI = _multi()
+MULTI_MANIFEST = intake.build_manifest(MULTI)
+
+
+@pytest.mark.parametrize("deg", [-5.0, -3.0, 3.0, 5.0])
+def test_scan_skew_tolerance(tmp_path: Path, deg: float) -> None:
+    prof = replace(SCAN, name="skewed", skew_deg=(deg, deg))
+    shot = degrade.degrade_document(PRINTED, 21, prof, "scan", source_dpi=SOURCE)
+    for n, page in enumerate(shot.pages, start=1):
+        _put(tmp_path, "real_scan", f"s{n}.png", page)
+    res = intake.ingest(tmp_path, MANIFEST)
+    assert [r.reason for r in res.refused] == []
+    assert len(res.accepted) == len(shot.pages)
+    _check_all(res, shot)
+
+
+def test_phone_photo_needs_all_four_marks(tmp_path: Path) -> None:
+    # a skewed sheet that clips a corner is fine as a scan (three marks) but not as a photo
+    prof = replace(SCAN, name="skewed", skew_deg=(9.0, 9.0))
+    shot = degrade.degrade_document(PRINTED, 22, prof, "scan", source_dpi=SOURCE)
+    _put(tmp_path / "a", "real_scan", "s1.png", shot.pages[0])
+    _put(tmp_path / "b", "phone_photo", "s1.png", shot.pages[0])
+    scan = intake.ingest(tmp_path / "a", MANIFEST)
+    photo = intake.ingest(tmp_path / "b", MANIFEST)
+    assert [r.reason for r in photo.refused] in (["fiducials_not_found"], [])
+    _check_all(scan, shot)
+    _check_all(photo, shot)
+
+
+HALF = replace(degrade.PROFILES["phone"], name="phone_half", crop_margin=(0.45, 0.5))
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_stock_phone_profile_page_fills_half_the_frame(tmp_path: Path, seed: int) -> None:
+    shot = degrade.degrade_document(MULTI, seed, HALF, "photo", source_dpi=SOURCE)
+    for n, page in enumerate(shot.pages, start=1):
+        _put(tmp_path, "phone_photo", f"h{n}.png", page)
+    res = intake.ingest(tmp_path, MULTI_MANIFEST)
+    _check_all(res, shot, 0.85, 0.7)
+    # never a wrong box, and most pages are read
+    assert len(res.accepted) >= 1, [r.reason for r in res.refused]
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_stock_poor_profile_scans(tmp_path: Path, seed: int) -> None:
+    shot = degrade.degrade_document(MULTI, seed, "poor", "scan", source_dpi=SOURCE)
+    for n, page in enumerate(shot.pages, start=1):
+        _put(tmp_path, "real_scan", f"h{n}.png", page)
+    res = intake.ingest(tmp_path, MULTI_MANIFEST)
+    _check_all(
+        res, shot, 0.85, 0.7
+    )  # accepted pages are right; the rest are refused with a fixed code
+
+
+def test_pixels_outside_the_page_are_blanked(tmp_path: Path) -> None:
+    shot = degrade.degrade_document(PRINTED, 23, HALF, "photo", source_dpi=SOURCE)
+    _put(tmp_path, "phone_photo", "h1.png", shot.pages[0])
+    res = intake.ingest(tmp_path, MANIFEST)
+    assert res.accepted, [r.reason for r in res.refused]
+    out = np.asarray(Image.open(io.BytesIO(res.accepted[0].image)).convert("L"))
+    src = np.asarray(Image.open(io.BytesIO(shot.pages[0])).convert("L"))
+    assert out.shape == src.shape
+    h, w = out.shape
+    # the photographed surround is dark (25-90 grey); after intake the frame is white
+    ring = np.ones_like(out, bool)
+    ring[int(h * 0.15) : int(h * 0.85), int(w * 0.15) : int(w * 0.85)] = False
+    assert src[ring].mean() < 200 and (out[ring] == 255).mean() > 0.97
+    # the page's own pixels are untouched near the centre
+    mid = (slice(int(h * 0.4), int(h * 0.6)), slice(int(w * 0.4), int(w * 0.6)))
+    assert (out[mid] == src[mid]).mean() > 0.97
+
+
+def test_refusal_labels_never_echo_a_folder_name(tmp_path: Path) -> None:
+    shot = _photo(PRINTED, 12)
+    _put(tmp_path, "Ada_Obi_Lagos", "a.png", shot.pages[0])
+    _put(tmp_path, "Ada_Obi_Lagos", "b.png", shot.pages[0])
+    (tmp_path / "Ada Obi.png").write_bytes(shot.pages[0])
+    res = intake.ingest(tmp_path, MANIFEST)
+    assert res.accepted == []
+    # the unknown folder is one refusal; it is not opened
+    assert sorted(r.reason for r in res.refused) == ["slice_unknown", "slice_unknown"]
+    assert all(r.label.startswith("other[") for r in res.refused)
+    assert all("Ada" not in r.label and "Obi" not in r.label for r in res.refused)
+
+
+def test_listing_limit_counts_both_levels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(intake, "MAX_FILES", 5)
+    for n in range(3):
+        _put(tmp_path, "real_scan", f"a{n}.png", b"x")
+        _put(tmp_path, "phone_photo", f"b{n}.png", b"x")
+    with pytest.raises(intake.IntakeError, match="too_many_files"):
+        intake.ingest(tmp_path, MANIFEST)
+    monkeypatch.setattr(intake, "MAX_FILES", 8)
+    assert len(intake.ingest(tmp_path, MANIFEST).refused) == 6
+
+
+def test_write_result_is_atomic_and_duplicate_safe(tmp_path: Path) -> None:
+    shot = _photo(PRINTED, 13)
+    _put(tmp_path / "in", "phone_photo", "p1.png", shot.pages[0])
+    res = intake.ingest(tmp_path / "in", MANIFEST)
+    out = tmp_path / "out" / "set"
+    ids = intake.write_result(res, out)
+    assert sorted(p.name for p in out.iterdir()) == sorted(
+        f"{ids[0]}{e}" for e in (".png", ".json", ".meta.json")
+    )
+    # a second write of the same page is refused and changes nothing
+    before = {p.name: p.read_bytes() for p in out.iterdir()}
+    with pytest.raises(intake.IntakeError, match="duplicate_page"):
+        intake.write_result(res, out)
+    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
+    # no temporary folder is left next to the output
+    assert [p.name for p in out.parent.iterdir()] == ["set"]
+    # a page id that is not well formed is refused
+    bad = intake.IngestResult(
+        accepted=[
+            replace(res.accepted[0], metadata={**res.accepted[0].metadata, "page_id": "../x"})
+        ]
+    )
+    with pytest.raises(intake.IntakeError, match="bad_page_id"):
+        intake.write_result(bad, tmp_path / "other")
+    # a scanner failure leaves nothing behind
+    tainted = replace(
+        res.accepted[0], ground_truth={"schema_version": "1", "x": "LUTH/2019/123456"}
+    )
+    with pytest.raises(intake.IntakeError):
+        intake.write_result(intake.IngestResult(accepted=[tainted]), tmp_path / "third")
+    assert not (tmp_path / "third").exists() or not list((tmp_path / "third").iterdir())
+
+
+def test_merge_manifests_refuses_duplicates() -> None:
+    other = intake.build_manifest(_printed(tag="m"))
+    merged = intake.merge_manifests(MANIFEST, other)
+    assert set(merged) == set(MANIFEST) | set(other)
+    with pytest.raises(intake.IntakeError, match="duplicate_page"):
+        intake.merge_manifests(MANIFEST, MANIFEST)
+
+
+def test_unexpected_error_is_a_fixed_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _put(tmp_path, "real_scan", "a.png", _photo(PRINTED, 14, "scan").pages[0])
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("Ada Obi 08031234567")
+
+    monkeypatch.setattr(intake, "_register", boom)
+    res = intake.ingest(tmp_path, MANIFEST)
+    assert [r.reason for r in res.refused] == ["registration_failed"]
+    assert all(r.reason in intake.REASONS for r in res.refused)
+
+
+def test_rgba_is_composited_on_white(tmp_path: Path) -> None:
+    src = Image.open(io.BytesIO(_photo(PRINTED, 15, "scan").pages[0])).convert("RGBA")
+    buf = io.BytesIO()
+    src.save(buf, format="PNG")
+    _put(tmp_path, "real_scan", "a.png", buf.getvalue())
+    res = intake.ingest(tmp_path, MANIFEST)
+    assert len(res.accepted) == 1

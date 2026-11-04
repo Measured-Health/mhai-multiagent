@@ -658,17 +658,19 @@ class _Doc:
 # centre holding the page id: one black cell, one white cell (grey references), 40 id
 # bits and an 8-bit CRC. A readable ``SYN-PG-<base32>`` is printed under the strip.
 # All geometry is a fraction of the page width, so intake can rebuild it from the page
-# size alone. The marks sit in the top and bottom 11 mm of the page, inside the
-# smallest margin (12 mm), clear of the footer text and the header. Fiducials sit 5 mm
-# from the edge, inside what ordinary printers can print.
+# size alone. Fiducials sit 0.065 of the width (about 14 mm) from the edge, so a scan
+# skewed by 5 degrees still keeps all four in frame, and the marks end 0.092 of the
+# width (about 19 mm) from the edge: only layouts with a margin of at least
+# ``MIN_MARK_MARGIN_MM`` (22) may carry them (``layouts.printable``).
 
 PAGE_ID_PREFIX = "SYN-PG-"
 PAGE_ID_CHARS = 8  # base32 characters: 40 bits
 FID_SIZE = 0.022  # side, fraction of page width
-FID_OFFSET = 0.024  # distance from the page edge
+FID_OFFSET = 0.065  # distance from the page edge
+MIN_MARK_MARGIN_MM = 22
 STRIP_CELLS = 50  # reference black, reference white, 40 id bits, 8 crc bits
 STRIP_CELL_W = 0.0125
-STRIP_TOP = 0.02
+STRIP_TOP = 0.065
 STRIP_CELL_H = 0.011
 _PAGE_ID_RE = re.compile(r"SYN-PG-[A-Z2-7]{8}")
 _DIGIT_RUN = re.compile(r"[0-9]{4,}")
@@ -768,7 +770,16 @@ def draw_registration(img: Image.Image, page_id: str) -> None:
             d.rectangle((round(x0), round(y0), round(x1) - 1, round(y1) - 1), fill=(0, 0, 0))
     px = max(8, round(0.012 * w))
     font = _font("dejavu-mono", False, px)
-    d.text((w / 2, round(0.034 * w)), page_id, font=font, fill=INK, anchor="mt")
+    d.text((w / 2, round(0.079 * w)), page_id, font=font, fill=INK, anchor="mt")
+
+
+def draw_record_id(img: Image.Image, record_id: str) -> None:
+    """Print ``RECORD <id>`` at the top left, level with the page id (volunteer sheets)."""
+    w = img.size[0]
+    font = _font("dejavu-mono", False, max(8, round(0.012 * w)))
+    ImageDraw.Draw(img).text(
+        (round(0.12 * w), round(0.079 * w)), f"RECORD {record_id}", font=font, fill=INK, anchor="lt"
+    )
 
 
 def stamp_registration(page: bytes, page_id: str) -> bytes:
@@ -823,6 +834,8 @@ def _render(
     for fld in fields.values():
         fld["page"] = None
         fld["bbox"] = None
+    if page_id_for is not None and layout.margin_mm < MIN_MARK_MARGIN_MM:
+        raise RenderError("margin_too_small_for_marks")
     doc = _Doc(layout, dpi, highlight)
 
     fac_text = _text_of(fields.get("document.facility_name"))

@@ -23,24 +23,28 @@ Metadata holds keyed fields only (ids, counts, sizes), so the scanner can check 
 """
 
 import copy
+import hashlib
 import io
 import json
 import math
 import os
 import re
+import shutil
 import stat
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from itertools import product
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 from scipy import ndimage
 
 from intelligence.doceval import schema
-from intelligence.doceval.synth import render, scanner
+from intelligence.doceval.synth import forms, render, scanner
 from intelligence.doceval.synth.render import Box, RenderedDocument
 
 Slice = Literal["real_scan", "phone_photo", "handwritten_volunteer"]
@@ -53,7 +57,7 @@ MAX_PIXELS = 25_000_000
 MIN_SIDE_PX = 200
 MAX_FILES = 5_000
 MIN_VISIBLE = 0.8  # fraction of a mapped box that must be in frame
-_DETECT_SIDE = 1000  # long side the fiducial search works at
+_DETECT_SIDE = 2000  # long side the fiducial search works at
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
 
 REASONS = frozenset(
@@ -77,7 +81,6 @@ REASONS = frozenset(
     }
 )
 
-_RECORD_RE = re.compile(r"SYN-RC-[A-Z2-7]{8}")
 _CONSENT_RE = re.compile(r"CN-[A-Z2-7]{8}")
 _DIGITS = re.compile(r"[0-9]{4,}")
 
@@ -173,7 +176,7 @@ def build_manifest(
 
 
 def _record_ok(record_id: str) -> bool:
-    return _RECORD_RE.fullmatch(record_id) is not None and _DIGITS.search(record_id) is None
+    return forms.record_id_ok(record_id)
 
 
 def _check_manifest(manifest: PrintedManifest) -> None:
@@ -252,6 +255,21 @@ def _map_box(h: _F64, box: Box, page_w: int, page_h: int, w: int, hh: int) -> Bo
 # ---------------------------------------------------------------- fiducials
 
 
+def _affine(src: list[tuple[float, float]], dst: list[tuple[float, float]]) -> _F64 | None:
+    """The affine map taking three ``src`` points to ``dst``, as a 3x3 matrix, or ``None``."""
+    a = np.zeros((6, 6), dtype=np.float64)
+    b = np.zeros(6, dtype=np.float64)
+    for i, ((x, y), (u, v)) in enumerate(zip(src, dst, strict=True)):
+        a[2 * i] = [x, y, 1, 0, 0, 0]
+        a[2 * i + 1] = [0, 0, 0, x, y, 1]
+        b[2 * i], b[2 * i + 1] = u, v
+    if abs(np.linalg.det(a)) < 1e-6 or np.linalg.cond(a) > 1e9:
+        return None
+    m = np.linalg.solve(a, b)
+    out = np.array([[m[0], m[1], m[2]], [m[3], m[4], m[5]], [0.0, 0.0, 1.0]])
+    return out if bool(np.isfinite(out).all()) else None
+
+
 def _ink_mask(gray: _F64) -> tuple[npt.NDArray[np.bool_], _F64]:
     """Dark marks on locally bright paper, and the paper brightness estimate.
 
@@ -266,18 +284,21 @@ def _ink_mask(gray: _F64) -> tuple[npt.NDArray[np.bool_], _F64]:
     return ink, np.asarray(paper, dtype=np.float64)
 
 
-def _candidates(ink: npt.NDArray[np.bool_]) -> list[tuple[float, float, float, float]]:
+Cand = tuple[float, float, float, float]
+
+
+def _candidates(ink: npt.NDArray[np.bool_]) -> list[Cand]:
     """Frames: roughly square, sized like a fiducial, dark all round and white inside.
 
     Returns ``(x0, y0, x1, y1)`` boxes in the mask's pixels.
     """
     h, w = ink.shape
     labels, count = ndimage.label(ink, structure=np.ones((3, 3), dtype=int))
-    if count == 0 or count > 20_000:
+    if count == 0 or count > 100_000:
         # An image that is mostly specks is not a page we can read.
         return []
-    found: list[tuple[float, float, float, float]] = []
-    lo, hi = 0.008 * max(w, h), 0.08 * max(w, h)
+    found: list[Cand] = []
+    lo, hi = 0.005 * max(w, h), 0.08 * max(w, h)
     for idx, sl in enumerate(ndimage.find_objects(labels), start=1):
         if sl is None:
             continue
@@ -307,9 +328,7 @@ def _candidates(ink: npt.NDArray[np.bool_]) -> list[tuple[float, float, float, f
     return found
 
 
-def _refine(
-    gray: _F64, box: tuple[float, float, float, float], scale: float
-) -> tuple[float, float]:
+def _refine(gray: _F64, box: Cand, scale: float) -> tuple[float, float]:
     """The sub-pixel centre of one fiducial, from the full-size image (continuous coordinates)."""
     h, w = gray.shape
     x0, y0, x1, y1 = (v / scale for v in box)
@@ -330,45 +349,28 @@ def _refine(
     )
 
 
-def _pick_four(
-    cands: list[tuple[float, float, float, float]], w: int, h: int
-) -> list[tuple[float, float, float, float]]:
-    """The four frames that are the page's corners: one per image quadrant, alike in size,
-    spanning the largest quad. Fewer than four candidates, or two equally good sets, refuse."""
-    if len(cands) < 4:
-        raise _Refuse("fiducials_not_found")
+def _centre(c: Cand) -> tuple[float, float]:
+    return (c[0] + c[2]) / 2, (c[1] + c[3]) / 2
+
+
+def _pick(cands: list[Cand], w: int, h: int, allow_three: bool) -> list[Cand]:
+    """The frames that are the page's corners: one per image quadrant, alike in size,
+    spanning the largest quad (or, for a scan only, triangle with three). Too few
+    candidates, or two equally good sets, refuse."""
     corners = [(0.0, 0.0), (float(w), 0.0), (float(w), float(h)), (0.0, float(h))]
-    quads: list[list[tuple[float, float, float, float]]] = [[], [], [], []]
+    quads: list[list[Cand]] = [[], [], [], []]
     for box in cands:
-        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        cx, cy = _centre(box)
         q = (0 if cx < w / 2 else 1) if cy < h / 2 else (3 if cx < w / 2 else 2)
         quads[q].append(box)
     for q, group in enumerate(quads):
-        if not group:
-            raise _Refuse("fiducials_not_found")
         qx, qy = corners[q]
-        group.sort(key=lambda b: math.hypot((b[0] + b[2]) / 2 - qx, (b[1] + b[3]) / 2 - qy))
+        group.sort(key=lambda b: math.hypot(_centre(b)[0] - qx, _centre(b)[1] - qy))
         del group[8:]
-    scored: list[tuple[float, tuple[tuple[float, float, float, float], ...]]] = []
-    for a in quads[0]:
-        for b in quads[1]:
-            for c in quads[2]:
-                for d in quads[3]:
-                    combo = (a, b, c, d)
-                    sides = sorted(math.sqrt((x[2] - x[0]) * (x[3] - x[1])) for x in combo)
-                    if sides[3] > 1.2 * sides[0]:
-                        continue
-                    pts = [((x[0] + x[2]) / 2, (x[1] + x[3]) / 2) for x in combo]
-                    if not _convex(pts):
-                        continue
-                    area = 0.5 * abs(
-                        sum(
-                            pts[i][0] * pts[(i + 1) % 4][1] - pts[(i + 1) % 4][0] * pts[i][1]
-                            for i in range(4)
-                        )
-                    )
-                    if area >= 200 * sides[0] ** 2:
-                        scored.append((area, combo))
+    scored = _score(quads, [0, 1, 2, 3])
+    if not scored and allow_three:
+        for omit in range(4):
+            scored.extend(_score(quads, [q for q in range(4) if q != omit]))
     if not scored:
         raise _Refuse("fiducials_not_found")
     scored.sort(key=lambda t: -t[0])
@@ -376,29 +378,36 @@ def _pick_four(
     for other in scored[1:]:
         if other[0] < 0.995 * best[0]:
             break
-        if sum(1 for x in other[1] if x in best[1]) <= 2:
+        if len(other[1]) == len(best[1]) and sum(1 for x in other[1] if x in best[1]) <= 2:
             raise _Refuse("fiducials_ambiguous")
     return list(best[1])
 
 
-def _find_fiducials(gray: _F64) -> list[tuple[float, float]]:
-    """Centres of the fiducial frames in an image; raises :class:`_Refuse` unless exactly four."""
-    h, w = gray.shape
-    scale = min(1.0, _DETECT_SIDE / max(w, h))
-    small = gray
-    if scale < 1.0:
-        im = Image.fromarray(gray.astype(np.float32), mode="F")
-        im = im.resize((max(8, round(w * scale)), max(8, round(h * scale))), Image.Resampling.BOX)
-        small = np.asarray(im, dtype=np.float64)
-    ink, _ = _ink_mask(small)
-    boxes = _pick_four(_candidates(ink), small.shape[1], small.shape[0])
-    sx, sy = small.shape[1] / w, small.shape[0] / h
-    return [_refine(gray, b, scale=(sx + sy) / 2) for b in boxes]
+def _score(quads: list[list[Cand]], which: list[int]) -> list[tuple[float, tuple[Cand, ...]]]:
+    out: list[tuple[float, tuple[Cand, ...]]] = []
+    if any(not quads[q] for q in which):
+        return out
+    for combo in product(*(quads[q] for q in which)):
+        sides = sorted(math.sqrt((x[2] - x[0]) * (x[3] - x[1])) for x in combo)
+        if sides[-1] > 1.2 * sides[0]:
+            continue
+        pts = [_centre(x) for x in combo]
+        if len(pts) == 4 and not _convex(pts):
+            continue
+        area = 0.5 * abs(
+            sum(
+                pts[i][0] * pts[(i + 1) % len(pts)][1] - pts[(i + 1) % len(pts)][0] * pts[i][1]
+                for i in range(len(pts))
+            )
+        )
+        if area >= (200 if len(pts) == 4 else 100) * sides[0] ** 2:
+            out.append((area, combo))
+    return out
 
 
 def _order_clockwise(pts: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    cx = sum(p[0] for p in pts) / 4
-    cy = sum(p[1] for p in pts) / 4
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
     return sorted(pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
 
 
@@ -412,9 +421,11 @@ def _convex(pts: list[tuple[float, float]]) -> bool:
 
 
 class _Refuse(Exception):
-    """Internal: one image is refused with ``code``."""
+    """Internal: one image is refused with ``code`` (always one of :data:`REASONS`)."""
 
     def __init__(self, code: str) -> None:
+        if code not in REASONS:
+            raise ValueError("unknown refusal code")
         super().__init__(code)
         self.code = code
 
@@ -450,7 +461,7 @@ def _read_strip(gray: _F64, paper: _F64, h: _F64, page_w: int) -> str | None:
         return None
     coords = np.array([mapped[:, 1] - 0.5, mapped[:, 0] - 0.5])
     vals = ndimage.map_coordinates(gray, coords, order=1, mode="nearest")
-    # paper level was computed at the detection scale
+    # the paper level was computed at the detection scale
     ph, pw = paper.shape
     pcoords = np.array([(mapped[:, 1] - 0.5) * ph / gh, (mapped[:, 0] - 0.5) * pw / gw])
     pvals = ndimage.map_coordinates(paper, pcoords, order=1, mode="nearest")
@@ -466,18 +477,49 @@ def _read_strip(gray: _F64, paper: _F64, h: _F64, page_w: int) -> str | None:
 # ------------------------------------------------------------------- reading
 
 
-def _load(full: Path) -> Image.Image:
-    """Decode within limits and return fresh RGB pixels (no metadata of any kind)."""
+def _read_file(path: Path) -> bytes:
+    """Read a regular file without following a symlink; the size is checked on the open fd."""
     try:
-        with Image.open(full) as im:
-            if im.format not in ("PNG", "JPEG"):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError as e:
+        try:
+            linked = stat.S_ISLNK(os.lstat(path).st_mode)
+        except OSError:
+            linked = False
+        raise _Refuse("unexpected_entry" if linked else "unreadable") from e
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise _Refuse("unexpected_entry")
+        if st.st_size > MAX_FILE_BYTES:
+            raise _Refuse("too_large")
+        return fh.read(MAX_FILE_BYTES + 1)
+
+
+def _decode(data: bytes) -> Image.Image:
+    """Decode within limits and return fresh RGB pixels (no metadata of any kind).
+
+    PNG, JPEG and MPO (the first frame) are read; HEIC and other formats are not
+    supported and are refused as unreadable. Transparency is composited onto white.
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            if im.format not in ("PNG", "JPEG", "MPO"):
                 raise _Refuse("unreadable")
             w, h = im.size
             if min(w, h) < MIN_SIDE_PX or max(w, h) > MAX_SIDE_PX or w * h > MAX_PIXELS:
                 raise _Refuse("image_size")
+            if getattr(im, "n_frames", 1) > 1:
+                im.seek(0)
             im.load()
             turned = ImageOps.exif_transpose(im) or im  # honour a phone's rotation flag
-            rgb = turned.convert("RGB")
+            if "A" in turned.getbands() or "transparency" in turned.info:
+                rgba = turned.convert("RGBA")
+                canvas = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                canvas.alpha_composite(rgba)
+                rgb = canvas.convert("RGB")
+            else:
+                rgb = turned.convert("RGB")
         return Image.frombytes("RGB", rgb.size, rgb.tobytes())
     except _Refuse:
         raise
@@ -491,51 +533,81 @@ def _png(im: Image.Image) -> bytes:
     return out.getvalue()
 
 
+def _blank_outside(img: Image.Image, hom: _F64, page_w: int, page_h: int) -> Image.Image:
+    """White out everything outside the projected page (a table, a hand, a room)."""
+    quad = _project(
+        hom,
+        np.array(
+            [[0, 0], [page_w, 0], [page_w, page_h], [0, page_h]],
+            dtype=np.float64,
+        ),
+    )
+    if quad is None:
+        raise _Refuse("registration_failed")
+    centre = quad.mean(axis=0)
+    away = quad - centre
+    norm = np.maximum(np.linalg.norm(away, axis=1, keepdims=True), 1.0)
+    grown = quad + away / norm * 2.0  # keep the paper's own edge
+    mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(mask).polygon([(float(x), float(y)) for x, y in grown], fill=255)
+    white = Image.new("RGB", img.size, (255, 255, 255))
+    return Image.composite(img, white, mask)
+
+
 @dataclass
 class _Found:
     label: str
     slice: Slice
     rel: str
-    img: Image.Image
+    path: Path
+    digest: str
     page: PrintedPage
     h: _F64
 
 
-def _register(img: Image.Image, manifest: PrintedManifest) -> tuple[PrintedPage, _F64]:
+def _downscale(gray: _F64, scale: float) -> _F64:
+    if scale >= 1.0:
+        return gray
+    h, w = gray.shape
+    im = Image.fromarray(gray.astype(np.float32), mode="F")
+    im = im.resize((max(8, round(w * scale)), max(8, round(h * scale))), Image.Resampling.BOX)
+    return np.asarray(im, dtype=np.float64)
+
+
+def _register(
+    img: Image.Image, manifest: PrintedManifest, allow_three: bool
+) -> tuple[PrintedPage, _F64]:
     gray = np.asarray(img.convert("L"), dtype=np.float64)
-    centres = _order_clockwise(_find_fiducials(gray))
-    if not _convex(centres):
+    h, w = gray.shape
+    scale = min(1.0, _DETECT_SIDE / max(w, h))
+    small = _downscale(gray, scale)  # once: the search and the paper level share it
+    ink, paper = _ink_mask(small)
+    boxes = _pick(_candidates(ink), small.shape[1], small.shape[0], allow_three)
+    eff = (small.shape[1] / w + small.shape[0] / h) / 2
+    found = _order_clockwise([_refine(gray, b, eff) for b in boxes])
+    if len(found) == 4 and not _convex(found):
         raise _Refuse("registration_failed")
-    # The strip is read at the detection scale's paper level; recompute it once.
-    scale = min(1.0, _DETECT_SIDE / max(gray.shape))
-    if scale < 1.0:
-        sm = Image.fromarray(gray.astype(np.float32), mode="F").resize(
-            (max(8, round(gray.shape[1] * scale)), max(8, round(gray.shape[0] * scale))),
-            Image.Resampling.BOX,
-        )
-        small = np.asarray(sm, dtype=np.float64)
-    else:
-        small = gray
-    _, paper = _ink_mask(small)
-    # The page's width and height are not known until its id is, so try the page sizes in
-    # the manifest: one homography per distinct size and rotation.
+    # The page's size is not known until its id is, so try each size in the manifest, with
+    # every way the found marks can line up with the page's corners.
     sizes = sorted({p.size_px for p in manifest.values()})
+    lineups = [found[r:] + found[:r] for r in range(len(found))] if len(found) == 3 else [found]
     readable = False
     hits: dict[str, tuple[PrintedPage, _F64]] = {}
     for width, height in sizes:
-        src = render.fiducial_centres(width, height)
-        for shift in range(4):
-            dst = centres[shift:] + centres[:shift]
-            hom = _homography(src, dst)
-            if hom is None:
-                continue
-            page_id = _read_strip(gray, paper, hom, width)
-            if page_id is None:
-                continue
-            readable = True
-            page = manifest.get(page_id)
-            if page is not None and page.size_px == (width, height):
-                hits[page_id] = (page, hom)
+        centres = render.fiducial_centres(width, height)
+        for dst in lineups:
+            for shift in range(4):
+                src = [centres[(shift + i) % 4] for i in range(len(dst))]
+                hom = _homography(src, dst) if len(dst) == 4 else _affine(src, dst)
+                if hom is None:
+                    continue
+                page_id = _read_strip(gray, paper, hom, width)
+                if page_id is None:
+                    continue
+                readable = True
+                page = manifest.get(page_id)
+                if page is not None and page.size_px == (width, height):
+                    hits[page_id] = (page, hom)
     if len(hits) > 1:
         raise _Refuse("page_id_ambiguous")
     if not hits:
@@ -548,22 +620,37 @@ def _register(img: Image.Image, manifest: PrintedManifest) -> tuple[PrintedPage,
 
 
 def _listing(root: Path) -> list[tuple[str, str, Path]]:
-    """``(slice_name, rel, path)`` for every entry one level down, sorted, nothing followed."""
+    """``(folder, rel, path)`` for each entry one level down, nothing followed.
+
+    A folder that is not a slice is one entry (refused later) and is never opened. The
+    entries of every folder share one running count: more than ``MAX_FILES`` raises as
+    soon as the count passes it, before anything is sorted.
+    """
     if root.is_symlink() or not root.is_dir():
         raise IntakeError("images_dir")
+    count = 0
+    top: list[tuple[str, bool, Path]] = []
+    with os.scandir(root) as it:
+        for entry in it:
+            count += 1
+            if count > MAX_FILES:
+                raise IntakeError("too_many_files")
+            top.append((entry.name, entry.is_dir(follow_symlinks=False), Path(entry.path)))
     out: list[tuple[str, str, Path]] = []
-    with os.scandir(root) as top:
-        entries = sorted(top, key=lambda e: e.name)
-    for entry in entries:
-        mode = entry.stat(follow_symlinks=False).st_mode
-        if stat.S_ISDIR(mode):
-            with os.scandir(entry.path) as inner:
-                for sub in sorted(inner, key=lambda e: e.name):
-                    out.append((entry.name, f"{entry.name}/{sub.name}", Path(sub.path)))
+    for name, is_dir, path in sorted(top, key=lambda t: t[0]):
+        if not is_dir:
+            out.append(("", name, path))
+        elif name not in SLICES:
+            out.append((name, name, path))
         else:
-            out.append(("", entry.name, Path(entry.path)))
-        if len(out) > MAX_FILES:
-            raise IntakeError("too_many_files")
+            inner: list[tuple[str, Path]] = []
+            with os.scandir(path) as it:
+                for sub in it:
+                    count += 1
+                    if count > MAX_FILES:
+                        raise IntakeError("too_many_files")
+                    inner.append((sub.name, Path(sub.path)))
+            out.extend((name, f"{name}/{n}", p) for n, p in sorted(inner, key=lambda t: t[0]))
     return out
 
 
@@ -602,6 +689,17 @@ def _ground_truth(page: PrintedPage, boxes: dict[str, Box | None]) -> dict[str, 
     return gt
 
 
+def merge_manifests(*manifests: PrintedManifest) -> dict[str, PrintedPage]:
+    """Join manifests (printed pages and blank forms); a page id in two of them is refused."""
+    out: dict[str, PrintedPage] = {}
+    for manifest in manifests:
+        for page_id, page in manifest.items():
+            if page_id in out:
+                raise IntakeError("duplicate_page")
+            out[page_id] = page
+    return out
+
+
 def ingest(
     images_dir: str | Path,
     printed_manifest: PrintedManifest,
@@ -611,32 +709,39 @@ def ingest(
     """Register every image under ``images_dir`` against the printed manifest.
 
     ``images_dir`` holds one folder per slice (``real_scan``, ``phone_photo``,
-    ``handwritten_volunteer``), images directly inside. ``volunteers`` maps a relative
-    path (``handwritten_volunteer/<file>``) to that page's consent id and role.
+    ``handwritten_volunteer``), images directly inside; any other folder is refused
+    without being opened. ``volunteers`` maps a relative path
+    (``handwritten_volunteer/<file>``) to that page's consent id and role (the id's format
+    is checked, nothing more; handwritten pages still need a person's check).
     The result lists the pages accepted and the files refused (by position, with a code).
-    A page id seen on two images refuses both.
+    A page id seen on two images refuses both. A real scan may be registered from three
+    fiducials (a corner clipped by a skewed sheet); a phone photo needs all four.
+
+    Only one decoded image is held at a time: the first pass keeps the path, a hash and
+    the registration, and an accepted file is read again (and must hash the same).
     """
     _check_manifest(printed_manifest)
     root = Path(images_dir)
     result = IngestResult()
     found: list[_Found] = []
     for index, (folder, rel, full) in enumerate(_listing(root)):
-        label = f"{folder or 'root'}[{index}]"
+        label = f"{folder if folder in SLICES else 'other'}[{index}]"
         try:
             if folder not in SLICES:
                 raise _Refuse("slice_unknown")
-            mode = os.lstat(full).st_mode
-            if not stat.S_ISREG(mode):
-                raise _Refuse("unexpected_entry")
             if full.suffix.lower() not in _IMAGE_SUFFIXES:
                 raise _Refuse("unsupported_file")
-            if os.lstat(full).st_size > MAX_FILE_BYTES:
-                raise _Refuse("too_large")
-            img = _load(full)
-            page, hom = _register(img, printed_manifest)
-            found.append(_Found(label, SLICE_BY_NAME[folder], rel, img, page, hom))
+            data = _read_file(full)
+            digest = hashlib.sha256(data).hexdigest()
+            img = _decode(data)
+            del data
+            page, hom = _register(img, printed_manifest, folder == "real_scan")
+            del img
+            found.append(_Found(label, SLICE_BY_NAME[folder], rel, full, digest, page, hom))
         except _Refuse as e:
             result.refused.append(Refusal(label, e.code))
+        except Exception:  # noqa: BLE001 - one image never stops the batch, and says nothing
+            result.refused.append(Refusal(label, "registration_failed"))
 
     counts: dict[str, int] = {}
     for item in found:
@@ -648,6 +753,8 @@ def ingest(
             result.accepted.append(_accept(item, volunteers))
         except _Refuse as e:
             result.refused.append(Refusal(item.label, e.code))
+        except Exception:  # noqa: BLE001
+            result.refused.append(Refusal(item.label, "registration_failed"))
     return result
 
 
@@ -660,7 +767,12 @@ def _accept(item: _Found, volunteers: Mapping[str, Volunteer] | None) -> Ingeste
         raise _Refuse("consent_missing")
     if item.slice != "handwritten_volunteer":
         volunteer = None
-    w, h = item.img.size
+    data = _read_file(item.path)
+    if hashlib.sha256(data).hexdigest() != item.digest:
+        raise _Refuse("unreadable")  # the file changed between the passes
+    img = _decode(data)
+    del data
+    w, h = img.size
     pw, ph = page.size_px
     boxes: dict[str, Box | None] = {
         path: _map_box(item.h, box, pw, ph, w, h) for path, box in page.boxes.items()
@@ -671,7 +783,7 @@ def _accept(item: _Found, volunteers: Mapping[str, Volunteer] | None) -> Ingeste
     if scanner.check_metadata(meta) or scanner.check_document(gt):
         raise _Refuse("scanner_refused")
     return IngestedImage(
-        image=_png(item.img),
+        image=_png(_blank_outside(img, item.h, pw, ph)),
         boxes=boxes,
         ground_truth=gt,
         slice=item.slice,
@@ -682,27 +794,56 @@ def _accept(item: _Found, volunteers: Mapping[str, Volunteer] | None) -> Ingeste
 
 def write_result(result: IngestResult, out_dir: str | Path) -> list[str]:
     """Write each accepted image as ``<page id>.png`` with ``<page id>.json`` (ground truth)
-    and ``<page id>.meta.json`` (metadata), never overwriting. Returns the page ids.
+    and ``<page id>.meta.json`` (metadata). Returns the page ids.
 
-    The folder passes :func:`scanner.scan_set`; a failing scan raises ``IntakeError``.
+    All-or-nothing and never overwriting: the files go to a temporary folder next to
+    ``out_dir``, :func:`scanner.scan_set` runs over it, and only then are they linked into
+    place. A page id already in ``out_dir`` (or twice in the result) is refused with
+    ``duplicate_page``; a malformed one with ``bad_page_id``.
     """
     root = Path(out_dir)
+    stems = [str(item.metadata["page_id"]) for item in result.accepted]
+    if not all(render.page_id_ok(s) for s in stems):
+        raise IntakeError("bad_page_id")
+    if len(set(stems)) != len(stems):
+        raise IntakeError("duplicate_page")
+    if not stems:
+        return []
     root.mkdir(parents=True, exist_ok=True)
-    ids: list[str] = []
-    for item in result.accepted:
-        stem = str(item.metadata["page_id"])
-        files = {
-            f"{stem}.png": item.image,
-            f"{stem}.json": _dump(item.ground_truth),
-            f"{stem}.meta.json": _dump(item.metadata),
-        }
-        for name, payload in files.items():
-            with open(root / name, "xb") as fh:
-                fh.write(payload)
-        ids.append(stem)
-    if ids and not scanner.scan_set(root).ok:
-        raise IntakeError("scanner_refused")
-    return ids
+    for stem in stems:
+        if any(os.path.lexists(root / f"{stem}{ext}") for ext in _EXTS):
+            raise IntakeError("duplicate_page")
+    tmp = Path(tempfile.mkdtemp(prefix=".intake-", dir=root.parent))
+    moved: list[Path] = []
+    try:
+        for item, stem in zip(result.accepted, stems, strict=True):
+            payloads = {
+                f"{stem}.png": item.image,
+                f"{stem}.json": _dump(item.ground_truth),
+                f"{stem}.meta.json": _dump(item.metadata),
+            }
+            for name, payload in payloads.items():
+                with open(tmp / name, "xb") as fh:
+                    fh.write(payload)
+        if not scanner.scan_set(tmp).ok:
+            raise IntakeError("scanner_refused")
+        for name in sorted(os.listdir(tmp)):
+            os.link(tmp / name, root / name)  # fails if it exists: never overwrites
+            moved.append(root / name)
+    except FileExistsError as e:
+        for path in moved:
+            path.unlink(missing_ok=True)
+        raise IntakeError("duplicate_page") from e
+    except BaseException:
+        for path in moved:
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return stems
+
+
+_EXTS = (".png", ".json", ".meta.json")
 
 
 def _dump(obj: Any) -> bytes:
@@ -721,5 +862,6 @@ __all__ = [
     "Volunteer",
     "build_manifest",
     "ingest",
+    "merge_manifests",
     "write_result",
 ]
