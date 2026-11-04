@@ -244,7 +244,7 @@ def _document(p: SynthPatient, enc: SynthEncounter) -> dict[str, Any]:
         if enc.doc_type in ("clinic_note", "discharge_summary")
         else []
     )
-    contact = f"Tel {p.phone}; {p.street_address}"
+    contact = f"{p.street_address}; Tel {p.phone}"
     return {
         "schema_version": "1.0.0",
         "document": {

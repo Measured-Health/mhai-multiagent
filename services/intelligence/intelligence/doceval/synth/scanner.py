@@ -35,8 +35,8 @@ JSON_SUFFIXES = frozenset({".json", ".jsonl"})
 MRN_RE = re.compile(r"SYN-[0-9]{8}")
 OTHER_ID_RE = re.compile(r"SYN(?:ID|INS)-[0-9]{8}")
 _ALLOWED_TOKEN = re.compile(r"(?<![A-Za-z0-9])SYN(?:ID|INS)?-[0-9]{8}(?![0-9])")
-# Only as a whole token: not inside a longer number or after/before more digit groups.
-_ALLOWED_PHONE = re.compile(r"(?<!\w)(?<![0-9][-.\s])555-01[0-9]{2}(?!\w)(?![-.\s]?[0-9])")
+# Whole token only; being joined to other digits is refused later (see _strip_allowed).
+_ALLOWED_PHONE = re.compile(r"(?<![0-9A-Za-z])555-01[0-9]{2}(?![0-9A-Za-z])")
 _ISO = re.compile(
     r"(?<![0-9])[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[Tt ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?"
     r"(?:[Zz]|[+-][0-9]{2}:[0-9]{2})?)?(?![0-9])"
@@ -59,6 +59,8 @@ _MRN_WORD = re.compile(
     re.IGNORECASE,
 )
 _PREFIXED_ID = re.compile(r"\b[A-Z]{2,6}[-/ ]?[0-9]{5,}\b")
+# Letters, then 5 or more digits joined through up to 5 separators: LUTH ( 2019 ) 12345.
+_LETTERS_DIGITS = re.compile(r"[^\W\d_]{2,8}(?:[^\w]|_){0,5}[0-9](?:(?:[^\w]|_){0,5}[0-9]){4,}")
 _SLASHED_ID = re.compile(r"\b[^\W\d_]{2,8}(?:[/\-][0-9]{1,6}){1,4}\b")
 _TITLES = (
     "Dr|Doctor|Mr|Mrs|Ms|Miss|Prof|Nurse|Sister|Chief|Alh|Alhaji|Alhaja|Pastor|Engr|Barr|"
@@ -76,7 +78,7 @@ _ADDRESS = re.compile(
 _CLINICAL_PHRASES = frozenset(
     {("chief", "complaint"), ("nurse", "practitioner"), ("nurse", "notes"), ("nurse", "note")}
 )
-_CONTACT = re.compile(r"Tel 555-01[0-9]{2}; [0-9]{1,5} (.+)")
+_CONTACT = re.compile(r"[0-9]{1,5} (.+); Tel 555-01[0-9]{2}")
 _SAFE_NAME = re.compile(r"[A-Za-z0-9._-]{1,128}")
 
 # Fields that legitimately hold numbers and codes: free-text digit rules are looser there
@@ -129,33 +131,88 @@ def _normalise(text: str) -> str:
     return "".join(str(unicodedata.decimal(c)) if c.isdecimal() else c for c in text)
 
 
-def _digit_rules(rest: str, lab: bool) -> list[str]:
+def _has_phone_window(digits: str) -> bool:
+    """Does any contiguous substring of the digits fully match a Nigerian phone?"""
+    for size in (10, 11, 13):
+        for i in range(len(digits) - size + 1):
+            if _NG_PHONE_DIGITS.fullmatch(digits[i : i + size]):
+                return True
+    return False
+
+
+def _digit_rules(rest: str, lab: bool, numeric: bool = False) -> list[str]:
     """Phone, national-id-like and long digit runs.
 
-    Digits are joined across separators in every field, so a phone or an 11-digit
-    id is caught everywhere. ``lab`` only loosens the long-run threshold, to a
-    single number of 7 or more digits, for fields that hold lab numbers and codes.
+    Digits are joined across up to 5 separator characters in every field, and no
+    text is removed first (see ``_strip_allowed``). A joined run is refused when
+    it is 10 or more digits (a phone, NIN or BVN, however it is glued), or when
+    any substring of it is a Nigerian phone. ``lab`` fields (lab text, codes,
+    doses) only loosen the shorter runs: a single number of up to 6 digits is
+    fine, and ``numeric`` (the numeric lab value fields) up to 9.
     """
     rules: list[str] = []
     for m in _RUN.finditer(rest):
         digits = re.sub(r"[^0-9]", "", m.group(0))
-        if _NG_PHONE_DIGITS.fullmatch(digits):
+        if _has_phone_window(digits):
             rules.append("phone")
-        elif len(digits) == 11:
+        elif len(digits) >= 11:
             rules.append("national_id_like")
-        elif not lab and len(digits) >= 6:
+        elif len(digits) >= 10 or (not lab and len(digits) >= 6):
             rules.append("long_digits")
-    if lab:
+    if lab and not numeric:
         for m in _TOKEN_NUMBER.finditer(rest):
             if len(m.group(0).replace(".", "")) >= 7:
                 rules.append("long_digits")
     return rules
 
 
-def _text_rules(text: str, lab: bool = False) -> list[str]:
+def _is_sep(char: str) -> bool:
+    return not char.isalnum()
+
+
+def _joined(text: str, start: int, end: int, left: bool, right: bool, covered: set[int]) -> bool:
+    """Is the span joined, through up to 5 separators, to a digit outside any allowed span?"""
+    if left:
+        j, seps = start - 1, 0
+        while j >= 0 and _is_sep(text[j]) and seps < 5:
+            j, seps = j - 1, seps + 1
+        if j >= 0 and text[j].isdigit() and j not in covered:
+            return True
+    if right:
+        j, seps = end, 0
+        while j < len(text) and _is_sep(text[j]) and seps < 5:
+            j, seps = j + 1, seps + 1
+        if j < len(text) and text[j].isdigit() and j not in covered:
+            return True
+    return False
+
+
+def _strip_allowed(text: str) -> str:
+    """Blank out synthetic tokens, ISO and printed dates and ``555-01NN``, but only
+    where the token stands alone: one joined to other digits (``0803 555-0123``)
+    stays in the text, so the digit rules see the whole run.
+    """
+    kept: list[tuple[int, int, bool, bool]] = []
+    for pattern, left, right in (
+        (_ISO, True, True),
+        (_PRINTED_DATE, True, True),
+        (_ALLOWED_PHONE, True, True),
+        (_ALLOWED_TOKEN, False, True),
+    ):
+        for m in pattern.finditer(text):
+            if not any(m.start() < e and s < m.end() for s, e, _, _ in kept):
+                kept.append((m.start(), m.end(), left, right))
+    covered = {i for s, e, _, _ in kept for i in range(s, e)}
+    out = text
+    for s, e, left, right in sorted(kept, reverse=True):
+        if not _joined(text, s, e, left, right, covered):
+            out = out[:s] + " zz " + out[e:]
+    return out
+
+
+def _text_rules(text: str, lab: bool = False, numeric: bool = False) -> list[str]:
     """Rule names that fire on free text.
 
-    Synthetic tokens, ISO and printed dates and ``555-01NN`` are removed first.
     ``lab`` loosens the digit rule for fields that hold lab numbers and codes.
     """
     text = _normalise(text)
@@ -164,11 +221,9 @@ def _text_rules(text: str, lab: bool = False) -> list[str]:
         rules.append("email")
     if _URL.search(text):
         rules.append("url")
-    rest = _ALLOWED_TOKEN.sub(" ", text)
-    for pattern in (_ISO, _PRINTED_DATE, _ALLOWED_PHONE):
-        rest = pattern.sub(" zz ", rest)
-    rules.extend(_digit_rules(rest, lab))
-    if _MRN_WORD.search(rest) or _PREFIXED_ID.search(rest) or _SLASHED_ID.search(rest):
+    rest = _strip_allowed(text)
+    rules.extend(_digit_rules(rest, lab, numeric))
+    if any(p.search(rest) for p in (_MRN_WORD, _PREFIXED_ID, _SLASHED_ID, _LETTERS_DIGITS)):
         rules.append("mrn_like")
     tokens = {t.casefold() for t in terminology.all_name_tokens()}
     for m in _TITLED.finditer(rest):
@@ -219,7 +274,7 @@ def _typed_rule(pattern: str, text: str) -> str | None:
         return None if text in terminology.name_set("facilities") else "facility"
     if pattern == "encounter.clinician_text":
         return None if _is_clinician(text) else "clinician"
-    if pattern == "notes[].text" and text.startswith("Tel "):
+    if pattern == "notes[].text" and "Tel " in text:
         return None if _is_contact(text) else "contact"
     return None
 
@@ -278,9 +333,9 @@ def check_document(gt: Any) -> list[Finding]:
         if isinstance(leaf, int | float):
             if _numeric_exempt(path, pattern):
                 continue
-            rules = _digit_rules(_normalise(str(leaf)), lab)
+            rules = _digit_rules(_normalise(str(leaf)), lab, pattern in _NUMERIC_LAB)
         elif isinstance(leaf, str):
-            rules = _text_rules(leaf, lab)
+            rules = _text_rules(leaf, lab, pattern in _NUMERIC_LAB)
             if pattern is not None:
                 typed = _typed_rule(pattern, leaf)
                 if typed is not None:
