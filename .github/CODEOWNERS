@@ -22,3 +22,12 @@
 /services/*/Dockerfile                              @ojies
 /docker-compose*.yml                                @ojies
 /services/intelligence/uv.lock                      @ojies
+
+# Model promotion: pins, trust policy, thresholds, the schema and the store
+# code. The platform owner now; add the clinical reviewer team once named (H4).
+/models.lock                                        @ojies
+/models/                                            @ojies
+/services/intelligence/intelligence/doceval/thresholds/ @ojies
+/services/intelligence/intelligence/schemas/        @ojies
+/services/intelligence/intelligence/modelstore/     @ojies
+/.github/workflows/model-*.yml                      @ojies
