@@ -58,3 +58,12 @@ def test_not_canonical_forms() -> None:
     assert not canonical.is_canonical(b'{"a": 1}')
     assert not canonical.is_canonical(b'{"a":"\xc3\xa9"}')
     assert not canonical.is_canonical(b'{"a":-0}')
+
+
+def test_nesting_depth_limit_is_pinned() -> None:
+    deep64 = b"[" * 64 + b"]" * 64
+    deep65 = b"[" * 65 + b"]" * 65
+    canonical.loads_strict(deep64, 10_000)
+    with pytest.raises(Refused) as exc:
+        canonical.loads_strict(deep65, 10_000)
+    assert str(exc.value) == "json_invalid"

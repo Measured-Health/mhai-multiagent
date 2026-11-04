@@ -6,7 +6,9 @@ Two views of one schema file:
   ``band``, ``grounded``, ``flags`` on every field and ``document.page_count``).
   This is what constrained decoding gets, and a model that sets any of them is
   refused: the model's own confidence is never used.
-* ``STORED``: the full schema, for what the pipeline writes.
+* ``STORED``: the full schema, for what the pipeline writes; it requires the
+  pipeline-set keys on every field and ``document.page_count``. Ground-truth or
+  evaluation documents without them use the model-output view.
 
 Validation raises :class:`SchemaError` carrying a JSON pointer only, never a
 value (documents hold patient data).
@@ -15,6 +17,7 @@ value (documents hold patient data).
 import copy
 import datetime
 import json
+import math
 import re
 from collections.abc import Iterator
 from importlib import resources
@@ -59,8 +62,11 @@ def _model_output_view(full: dict[str, Any]) -> dict[str, Any]:
         if name.startswith(_FIELD_DEF_PREFIX):
             for key in PIPELINE_KEYS:
                 sub["properties"].pop(key, None)
+            sub["required"] = [k for k in sub["required"] if k not in PIPELINE_KEYS]
+    document = view["properties"]["document"]
     for key in _PIPELINE_DOCUMENT_KEYS:
-        view["properties"]["document"]["properties"].pop(key, None)
+        document["properties"].pop(key, None)
+    document["required"] = [k for k in document["required"] if k not in _PIPELINE_DOCUMENT_KEYS]
     view["$id"] = "mhai.extraction.clinical_document.model-output/" + SCHEMA_VERSION
     return view
 
@@ -101,7 +107,7 @@ def _valid_datetime(text: object) -> bool:
 
 
 _FORMATS.checks("date")(_valid_date)
-_FORMATS.checks("date-time")(_valid_datetime)
+_FORMATS.checks("mhai-datetime")(_valid_datetime)
 
 STORED: dict[str, Any] = _load()
 MODEL_OUTPUT: dict[str, Any] = _model_output_view(STORED)
@@ -116,7 +122,22 @@ def _pointer(parts: Any) -> str:
     return "".join("/" + str(p).replace("~", "~0").replace("/", "~1") for p in parts)
 
 
+def _refuse_non_finite(doc: Any) -> None:
+    """Refuse NaN and Infinity anywhere (Python's parser accepts them; JSON has none)."""
+    stack: list[tuple[Any, tuple[Any, ...]]] = [(doc, ())]
+    while stack:
+        node, where = stack.pop()
+        if isinstance(node, float):
+            if not math.isfinite(node):
+                raise SchemaError(_pointer(where), "finite")
+        elif isinstance(node, dict):
+            stack.extend((v, (*where, k)) for k, v in node.items())
+        elif isinstance(node, list):
+            stack.extend((v, (*where, i)) for i, v in enumerate(node))
+
+
 def _validate(validator: Draft202012Validator, doc: Any) -> None:
+    _refuse_non_finite(doc)
     error = best_match(validator.iter_errors(doc))
     if error is not None:
         raise SchemaError(_pointer(error.absolute_path), str(error.validator))
@@ -204,7 +225,7 @@ FIELD_TYPES: dict[str, str] = {
     "encounter.start": "datetime",
     "encounter.end": "datetime",
     "encounter.location_text": "text",
-    "encounter.clinician_text": "name",
+    "encounter.clinician_text": "text",
     "observations[].category": "enum",
     "observations[].name_text": "text",
     "observations[].local_code": "code",

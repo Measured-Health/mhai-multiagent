@@ -96,7 +96,11 @@
             0.4,
             0.15
           ],
-          "script": "printed"
+          "script": "printed",
+          "confidence": 0.97,
+          "band": "high",
+          "grounded": true,
+          "flags": []
         },
         "value": {
           "value": "SYN-INS-77",
@@ -108,7 +112,11 @@
             0.4,
             0.15
           ],
-          "script": "printed"
+          "script": "printed",
+          "confidence": 0.97,
+          "band": "high",
+          "grounded": true,
+          "flags": []
         }
       }
     ],
@@ -682,7 +690,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "strength_text": {
         "value": "500 mg",
@@ -694,7 +706,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "dose_text": {
         "value": "1 tablet",
@@ -706,7 +722,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "route_text": {
         "value": "oral",
@@ -718,7 +738,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "frequency_text": {
         "value": "twice daily",
@@ -730,7 +754,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "start": {
         "value": "2026-01-10",
@@ -742,7 +770,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "stop": {
         "value": null,
@@ -765,7 +797,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       }
     }
   ],
@@ -781,7 +817,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "local_code": {
         "value": "E11.9",
@@ -793,7 +833,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "local_system": {
         "value": "icd10",
@@ -805,7 +849,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "clinical_status": {
         "value": "active",
@@ -817,7 +865,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "verification": {
         "value": "confirmed",
@@ -829,7 +881,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "onset": {
         "value": null,
@@ -856,7 +912,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       },
       "text": {
         "value": "Synthetic note for tests only.",
@@ -868,7 +928,11 @@
           0.4,
           0.15
         ],
-        "script": "printed"
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
       }
     }
   ]
