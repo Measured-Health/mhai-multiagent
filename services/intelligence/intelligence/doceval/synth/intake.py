@@ -353,34 +353,62 @@ def _centre(c: Cand) -> tuple[float, float]:
     return (c[0] + c[2]) / 2, (c[1] + c[3]) / 2
 
 
-def _pick(cands: list[Cand], w: int, h: int, allow_three: bool) -> list[Cand]:
-    """The frames that are the page's corners: one per image quadrant, alike in size,
-    spanning the largest quad (or, for a scan only, triangle with three). Too few
-    candidates, or two equally good sets, refuse."""
-    corners = [(0.0, 0.0), (float(w), 0.0), (float(w), float(h)), (0.0, float(h))]
-    quads: list[list[Cand]] = [[], [], [], []]
-    for box in cands:
-        cx, cy = _centre(box)
-        q = (0 if cx < w / 2 else 1) if cy < h / 2 else (3 if cx < w / 2 else 2)
-        quads[q].append(box)
-    for q, group in enumerate(quads):
-        qx, qy = corners[q]
-        group.sort(key=lambda b: math.hypot(_centre(b)[0] - qx, _centre(b)[1] - qy))
-        del group[8:]
-    scored = _score(quads, [0, 1, 2, 3])
-    if not scored and allow_three:
-        for omit in range(4):
-            scored.extend(_score(quads, [q for q in range(4) if q != omit]))
+def _quadrant(box: Cand, w: int, h: int) -> int:
+    """0 top left, 1 top right, 2 bottom right, 3 bottom left (the order of the page corners)."""
+    cx, cy = _centre(box)
+    return (0 if cx < w / 2 else 1) if cy < h / 2 else (3 if cx < w / 2 else 2)
+
+
+def _best(
+    scored: list[tuple[float, tuple[Cand, ...]]],
+) -> tuple[Cand, ...] | None:
+    """The largest set; two equally large, different sets are ambiguous."""
     if not scored:
-        raise _Refuse("fiducials_not_found")
+        return None
     scored.sort(key=lambda t: -t[0])
     best = scored[0]
     for other in scored[1:]:
         if other[0] < 0.995 * best[0]:
             break
-        if len(other[1]) == len(best[1]) and sum(1 for x in other[1] if x in best[1]) <= 2:
+        if sum(1 for x in other[1] if x in best[1]) <= len(best[1]) - 2:
             raise _Refuse("fiducials_ambiguous")
-    return list(best[1])
+    return best[1]
+
+
+def _pick(
+    cands: list[Cand], w: int, h: int, allow_three: bool
+) -> list[tuple[list[Cand], int | None]]:
+    """Mark sets to try, best first, each with the image quadrant it leaves out.
+
+    The first is the four frames that are the page's corners: one per image quadrant, alike
+    in size, spanning the largest quad. For a scan only (``allow_three``), triples follow,
+    one per left-out quadrant, largest first. Nothing found refuses.
+    """
+    corners = [(0.0, 0.0), (float(w), 0.0), (float(w), float(h)), (0.0, float(h))]
+    quads: list[list[Cand]] = [[], [], [], []]
+    for box in cands:
+        quads[_quadrant(box, w, h)].append(box)
+    for q, group in enumerate(quads):
+        qx, qy = corners[q]
+        group.sort(key=lambda b: math.hypot(_centre(b)[0] - qx, _centre(b)[1] - qy))
+        del group[8:]
+    sets: list[tuple[list[Cand], int | None]] = []
+    four = _best(_score(quads, [0, 1, 2, 3]))
+    if four is not None:
+        sets.append((list(four), None))
+    if allow_three:
+        triples: list[tuple[float, list[Cand], int]] = []
+        for omit in range(4):
+            scored = _score(quads, [q for q in range(4) if q != omit])
+            best = _best(list(scored))
+            if best is not None:
+                area = max(a for a, c in scored if c == best)
+                triples.append((area, list(best), omit))
+        triples.sort(key=lambda t: -t[0])
+        sets.extend((c, omit) for _, c, omit in triples)
+    if not sets:
+        raise _Refuse("fiducials_not_found")
+    return sets
 
 
 def _score(quads: list[list[Cand]], which: list[int]) -> list[tuple[float, tuple[Cand, ...]]]:
@@ -478,22 +506,28 @@ def _read_strip(gray: _F64, paper: _F64, h: _F64, page_w: int) -> str | None:
 
 
 def _read_file(path: Path) -> bytes:
-    """Read a regular file without following a symlink; the size is checked on the open fd."""
+    """Read a regular file without following a symlink or blocking on a pipe.
+
+    The type is checked with ``lstat`` before the open (a FIFO would block it), the open
+    is non-blocking and never follows a link, and the size is checked again on the open fd.
+    """
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise _Refuse("unexpected_entry")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(path, flags)
     except OSError as e:
-        try:
-            linked = stat.S_ISLNK(os.lstat(path).st_mode)
-        except OSError:
-            linked = False
-        raise _Refuse("unexpected_entry" if linked else "unreadable") from e
+        raise _Refuse("unreadable") from e
     with os.fdopen(fd, "rb") as fh:
         st = os.fstat(fh.fileno())
         if not stat.S_ISREG(st.st_mode):
             raise _Refuse("unexpected_entry")
         if st.st_size > MAX_FILE_BYTES:
             raise _Refuse("too_large")
-        return fh.read(MAX_FILE_BYTES + 1)
+        data = fh.read(MAX_FILE_BYTES + 1)
+    if len(data) > MAX_FILE_BYTES:
+        raise _Refuse("too_large")  # it grew while it was being read
+    return data
 
 
 def _decode(data: bytes) -> Image.Image:
@@ -574,6 +608,31 @@ def _downscale(gray: _F64, scale: float) -> _F64:
     return np.asarray(im, dtype=np.float64)
 
 
+MAX_SHEAR = 0.05  # |cos| of the angle between the mapped page axes (about 3 degrees)
+MAX_SCALE_SKEW = 0.05  # the two axes may differ in scale by this fraction
+
+
+def _similar(m: _F64) -> bool:
+    """A scan's map from three marks must be close to a similarity: a turn and one scale.
+
+    Three marks fit any affine map exactly, so a sheared or stretched one would also fit a
+    wrong lineup. A flatbed scan keeps the axes square (shear below ``MAX_SHEAR``, scales
+    within ``MAX_SCALE_SKEW`` of each other) and never mirrors the page.
+    """
+    a, b, c, d = float(m[0, 0]), float(m[0, 1]), float(m[1, 0]), float(m[1, 1])
+    sx, sy = math.hypot(a, c), math.hypot(b, d)
+    if sx <= 0 or sy <= 0 or a * d - b * c <= 0:
+        return False
+    return abs(sx / sy - 1.0) <= MAX_SCALE_SKEW and abs((a * b + c * d) / (sx * sy)) <= MAX_SHEAR
+
+
+def _same_map(a: _F64, b: _F64, width: int, height: int) -> bool:
+    """Two maps that send the page corners within 2 px of each other are the same map."""
+    corners = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float64)
+    pa, pb = _project(a, corners), _project(b, corners)
+    return pa is not None and pb is not None and float(np.abs(pa - pb).max()) <= 2.0
+
+
 def _register(
     img: Image.Image, manifest: PrintedManifest, allow_three: bool
 ) -> tuple[PrintedPage, _F64]:
@@ -582,32 +641,42 @@ def _register(
     scale = min(1.0, _DETECT_SIDE / max(w, h))
     small = _downscale(gray, scale)  # once: the search and the paper level share it
     ink, paper = _ink_mask(small)
-    boxes = _pick(_candidates(ink), small.shape[1], small.shape[0], allow_three)
+    sets = _pick(_candidates(ink), small.shape[1], small.shape[0], allow_three)
     eff = (small.shape[1] / w + small.shape[0] / h) / 2
-    found = _order_clockwise([_refine(gray, b, eff) for b in boxes])
-    if len(found) == 4 and not _convex(found):
-        raise _Refuse("registration_failed")
-    # The page's size is not known until its id is, so try each size in the manifest, with
-    # every way the found marks can line up with the page's corners.
     sizes = sorted({p.size_px for p in manifest.values()})
-    lineups = [found[r:] + found[:r] for r in range(len(found))] if len(found) == 3 else [found]
     readable = False
     hits: dict[str, tuple[PrintedPage, _F64]] = {}
-    for width, height in sizes:
-        centres = render.fiducial_centres(width, height)
-        for dst in lineups:
+    for boxes, omit in sets:
+        # The page's size is not known until its id is, so try each size in the manifest,
+        # with every quarter turn of the page. With three marks the left-out image quadrant
+        # fixes their order: clockwise from the one after it.
+        if omit is None:
+            found = _order_clockwise([_refine(gray, b, eff) for b in boxes])
+            if not _convex(found):
+                raise _Refuse("registration_failed")
+        else:
+            sw, sh = small.shape[1], small.shape[0]
+            ordered = sorted(boxes, key=lambda b: (_quadrant(b, sw, sh) - omit - 1) % 4)
+            found = [_refine(gray, b, eff) for b in ordered]
+        for width, height in sizes:
+            centres = render.fiducial_centres(width, height)
             for shift in range(4):
-                src = [centres[(shift + i) % 4] for i in range(len(dst))]
-                hom = _homography(src, dst) if len(dst) == 4 else _affine(src, dst)
-                if hom is None:
+                src = [centres[(shift + i) % 4] for i in range(len(found))]
+                hom = _homography(src, found) if omit is None else _affine(src, found)
+                if hom is None or (omit is not None and not _similar(hom)):
                     continue
                 page_id = _read_strip(gray, paper, hom, width)
                 if page_id is None:
                     continue
                 readable = True
                 page = manifest.get(page_id)
-                if page is not None and page.size_px == (width, height):
-                    hits[page_id] = (page, hom)
+                if page is None or page.size_px != (width, height):
+                    continue
+                if page_id in hits and not _same_map(hits[page_id][1], hom, width, height):
+                    raise _Refuse("page_id_ambiguous")  # two maps read one id: never pick one
+                hits.setdefault(page_id, (page, hom))
+        if hits:
+            break  # a full set that reads is not second-guessed by the triples
     if len(hits) > 1:
         raise _Refuse("page_id_ambiguous")
     if not hits:
@@ -809,11 +878,17 @@ def write_result(result: IngestResult, out_dir: str | Path) -> list[str]:
         raise IntakeError("duplicate_page")
     if not stems:
         return []
-    root.mkdir(parents=True, exist_ok=True)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise IntakeError("write_failed") from e
     for stem in stems:
         if any(os.path.lexists(root / f"{stem}{ext}") for ext in _EXTS):
             raise IntakeError("duplicate_page")
-    tmp = Path(tempfile.mkdtemp(prefix=".intake-", dir=root.parent))
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix=".intake-", dir=root.parent))
+    except OSError as e:
+        raise IntakeError("write_failed") from e
     moved: list[Path] = []
     try:
         for item, stem in zip(result.accepted, stems, strict=True):
@@ -834,6 +909,10 @@ def write_result(result: IngestResult, out_dir: str | Path) -> list[str]:
         for path in moved:
             path.unlink(missing_ok=True)
         raise IntakeError("duplicate_page") from e
+    except OSError as e:
+        for path in moved:
+            path.unlink(missing_ok=True)
+        raise IntakeError("write_failed") from e
     except BaseException:
         for path in moved:
             path.unlink(missing_ok=True)

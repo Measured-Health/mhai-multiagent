@@ -22,6 +22,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 from intelligence.doceval import schema
@@ -105,8 +106,18 @@ def blank_form(
         w, h = img.size
         x0, y0 = max(0, int(box[0] * w)), max(0, int(box[1] * h))
         x1, y1 = min(w, int(box[2] * w) + 1), min(h, int(box[3] * h) + 1)
+        arr = np.asarray(img.crop((x0, y0, x1, y1)))
         d = ImageDraw.Draw(img)
-        d.rectangle((x0, y0, x1 - 1, y1 - 1), fill=img.getpixel((x0, y0)))
+        edge = np.concatenate(
+            [
+                arr[0, :],
+                arr[-1, :],
+                arr[:, 0],
+                arr[:, -1],
+            ]
+        )
+        fill = tuple(int(v) for v in np.median(edge, axis=0))  # the paper, not the ink
+        d.rectangle((x0, y0, x1 - 1, y1 - 1), fill=fill)
         d.line((x0, y1 - 1, x1 - 1, y1 - 1), fill=render.RULE, width=1)
     pages = []
     for img, page_id in zip(images, ids, strict=True):

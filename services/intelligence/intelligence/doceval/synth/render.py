@@ -782,20 +782,6 @@ def draw_record_id(img: Image.Image, record_id: str) -> None:
     )
 
 
-def stamp_registration(page: bytes, page_id: str) -> bytes:
-    """Add registration marks to an already rendered PNG page (same size and dpi)."""
-    with Image.open(io.BytesIO(page)) as src:
-        dpi = src.info.get("dpi")
-        img = src.convert("RGB")
-    draw_registration(img, page_id)
-    buf = io.BytesIO()
-    if dpi:
-        img.save(buf, format="PNG", compress_level=6, dpi=dpi)
-    else:
-        img.save(buf, format="PNG", compress_level=6)
-    return buf.getvalue()
-
-
 def _kv_label(layout: LayoutSpec, key: str) -> str:
     variants = _KV_LABELS.get(key)
     return variants[layout.label_style] if variants else key.split(".")[-1].replace("_", " ")

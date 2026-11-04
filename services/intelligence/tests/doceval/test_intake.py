@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import io
+import os
 import random
 import re
 from dataclasses import replace
@@ -11,7 +12,7 @@ from typing import Any
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from intelligence.doceval import schema
 from intelligence.doceval.synth import (
@@ -380,21 +381,43 @@ def test_render_without_ids_unchanged() -> None:
     assert marked.boxes == plain.boxes  # marks do not move any field
 
 
+def _edge_px(got: tuple[float, ...], true: tuple[float, ...], w: int, h: int) -> float:
+    """The largest distance, in photo pixels, between matching box edges."""
+    return max(
+        abs(got[0] - true[0]) * w,
+        abs(got[2] - true[2]) * w,
+        abs(got[1] - true[1]) * h,
+        abs(got[3] - true[3]) * h,
+    )
+
+
 def _check_all(
-    res: intake.IngestResult, shot: degrade.DegradedDocument, tall: float = 0.9, short: float = 0.8
-) -> None:
+    res: intake.IngestResult,
+    shot: degrade.DegradedDocument,
+    tall: float = 0.9,
+    short: float = 0.8,
+    max_px: float = 1.5,
+) -> float:
+    """Every accepted box agrees with the truth (IoU, and no edge off by more than
+    ``max_px``); every refusal carries a fixed code. Returns the largest edge error."""
+    worst = 0.0
     for item in res.accepted:
         page_no = int(item.metadata["page_no"])
+        w, h = int(item.metadata["width"]), int(item.metadata["height"])
         for path, (pg, true_box) in shot.boxes.items():
             if pg != page_no:
                 continue
             got = item.boxes[path]
             if got is not None:
                 # a box under 12 px high moves 10% with a third of a pixel of registration error
-                high = (true_box[3] - true_box[1]) * int(item.metadata["height"]) >= 12
+                high = (true_box[3] - true_box[1]) * h >= 12
                 assert _iou(got, true_box) >= (tall if high else short), path
+                err = _edge_px(got, true_box, w, h)
+                assert err <= max_px, (path, err)
+                worst = max(worst, err)
     for r in res.refused:
         assert r.reason in intake.REASONS
+    return worst
 
 
 def _multi() -> render.RenderedDocument:
@@ -429,42 +452,119 @@ def test_scan_skew_tolerance(tmp_path: Path, deg: float) -> None:
     _check_all(res, shot)
 
 
+def _without_corner(corner: int) -> render.RenderedDocument:
+    """``PRINTED`` with one corner fiducial painted out (as if the sheet's corner were lost)."""
+    im = Image.open(io.BytesIO(PRINTED.pages[0])).convert("RGB")
+    side, corners = render.fiducial_geometry(*im.size)
+    x, y = corners[corner]
+    ImageDraw.Draw(im).rectangle((x - 2, y - 2, x + side + 2, y + side + 2), fill=(255, 255, 255))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return replace(PRINTED, pages=[buf.getvalue(), *PRINTED.pages[1:]])
+
+
+@pytest.mark.parametrize("corner", range(4))
+def test_scan_with_one_corner_lost(tmp_path: Path, corner: int) -> None:
+    shot = degrade.degrade_document(_without_corner(corner), 31, SCAN, "scan", source_dpi=SOURCE)
+    _put(tmp_path, "real_scan", "s1.png", shot.pages[0])
+    res = intake.ingest(tmp_path, MANIFEST)
+    assert [r.reason for r in res.refused] == []
+    assert [i.metadata["page_id"] for i in res.accepted] == [PRINTED.page_ids[0]]
+    assert _check_all(res, shot, 0.9, 0.8, 1.5) <= 1.5
+
+
 def test_phone_photo_needs_all_four_marks(tmp_path: Path) -> None:
-    # a skewed sheet that clips a corner is fine as a scan (three marks) but not as a photo
-    prof = replace(SCAN, name="skewed", skew_deg=(9.0, 9.0))
-    shot = degrade.degrade_document(PRINTED, 22, prof, "scan", source_dpi=SOURCE)
-    _put(tmp_path / "a", "real_scan", "s1.png", shot.pages[0])
-    _put(tmp_path / "b", "phone_photo", "s1.png", shot.pages[0])
-    scan = intake.ingest(tmp_path / "a", MANIFEST)
-    photo = intake.ingest(tmp_path / "b", MANIFEST)
-    assert [r.reason for r in photo.refused] in (["fiducials_not_found"], [])
-    _check_all(scan, shot)
-    _check_all(photo, shot)
+    lost = _without_corner(1)
+    scan = degrade.degrade_document(lost, 32, SCAN, "scan", source_dpi=SOURCE)
+    photo = degrade.degrade_document(lost, 32, PHOTO, "photo", source_dpi=SOURCE)
+    _put(tmp_path / "a", "real_scan", "s1.png", scan.pages[0])
+    _put(tmp_path / "b", "phone_photo", "s1.png", photo.pages[0])
+    got = intake.ingest(tmp_path / "a", MANIFEST)
+    assert [r.reason for r in got.refused] == [] and len(got.accepted) == 1
+    _check_all(got, scan)
+    refused = intake.ingest(tmp_path / "b", MANIFEST)
+    assert refused.accepted == []
+    assert [r.reason for r in refused.refused] == ["fiducials_not_found"]
+
+
+def test_two_maps_reading_one_id_are_ambiguous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a strip reader that answers the same id for every way of lining the marks up
+    _put(tmp_path, "real_scan", "s1.png", _photo(PRINTED, 33, "scan").pages[0])
+    monkeypatch.setattr(intake, "_read_strip", lambda *_a, **_k: PRINTED.page_ids[0])
+    res = intake.ingest(tmp_path, MANIFEST)
+    assert res.accepted == []
+    assert [r.reason for r in res.refused] == ["page_id_ambiguous"]
+
+
+def test_a_sheared_three_mark_map_is_not_a_scan() -> None:
+    ok = np.array([[1.0, 0.02, 5], [-0.02, 1.0, 7], [0, 0, 1]])
+    sheared = np.array([[1.0, 0.4, 5], [0.0, 1.0, 7], [0, 0, 1]])
+    stretched = np.array([[1.0, 0.0, 5], [0.0, 1.3, 7], [0, 0, 1]])
+    mirrored = np.array([[-1.0, 0.0, 5], [0.0, 1.0, 7], [0, 0, 1]])
+    assert intake._similar(ok)
+    assert not (intake._similar(sheared) or intake._similar(stretched) or intake._similar(mirrored))
+
+
+def test_a_pipe_named_like_an_image_does_not_hang(tmp_path: Path) -> None:
+    (tmp_path / "real_scan").mkdir()
+    os.mkfifo(tmp_path / "real_scan" / "pipe.png")
+    res = intake.ingest(tmp_path, MANIFEST)
+    assert [r.reason for r in res.refused] == ["unexpected_entry"]
+
+
+def test_write_failure_is_an_intake_error(tmp_path: Path) -> None:
+    _put(tmp_path / "in", "phone_photo", "p1.png", _photo(PRINTED, 34).pages[0])
+    res = intake.ingest(tmp_path / "in", MANIFEST)
+    assert res.accepted
+    (tmp_path / "afile").write_bytes(b"x")
+    with pytest.raises(intake.IntakeError, match="write_failed"):
+        intake.write_result(res, tmp_path / "afile" / "set")
 
 
 HALF = replace(degrade.PROFILES["phone"], name="phone_half", crop_margin=(0.45, 0.5))
 
 
-@pytest.mark.parametrize("seed", range(6))
-def test_stock_phone_profile_page_fills_half_the_frame(tmp_path: Path, seed: int) -> None:
-    shot = degrade.degrade_document(MULTI, seed, HALF, "photo", source_dpi=SOURCE)
-    for n, page in enumerate(shot.pages, start=1):
-        _put(tmp_path, "phone_photo", f"h{n}.png", page)
-    res = intake.ingest(tmp_path, MULTI_MANIFEST)
-    _check_all(res, shot, 0.85, 0.7)
-    # never a wrong box, and most pages are read
-    assert len(res.accepted) >= 1, [r.reason for r in res.refused]
+def _group(
+    tmp_path: Path,
+    profile: degrade.Profile | str,
+    mode: str,
+    folder: str,
+    seeds: range,
+    max_px: float,
+) -> tuple[int, int, float]:
+    """Degrade ``MULTI`` for each seed, ingest, check; return accepted, total, worst edge."""
+    accepted = total = 0
+    worst = 0.0
+    for seed in seeds:
+        root = tmp_path / f"g{seed}"
+        shot = degrade.degrade_document(MULTI, seed, profile, mode, source_dpi=SOURCE)  # type: ignore[arg-type]
+        for n, page in enumerate(shot.pages, start=1):
+            _put(root, folder, f"h{n}.png", page)
+        res = intake.ingest(root, MULTI_MANIFEST)
+        worst = max(worst, _check_all(res, shot, 0.85, 0.7, max_px))
+        accepted += len(res.accepted)
+        total += len(shot.pages)
+    return accepted, total, worst
 
 
-@pytest.mark.parametrize("seed", range(6))
-def test_stock_poor_profile_scans(tmp_path: Path, seed: int) -> None:
-    shot = degrade.degrade_document(MULTI, seed, "poor", "scan", source_dpi=SOURCE)
-    for n, page in enumerate(shot.pages, start=1):
-        _put(tmp_path, "real_scan", f"h{n}.png", page)
-    res = intake.ingest(tmp_path, MULTI_MANIFEST)
-    _check_all(
-        res, shot, 0.85, 0.7
-    )  # accepted pages are right; the rest are refused with a fixed code
+def test_stock_phone_profile_page_fills_half_the_frame(tmp_path: Path) -> None:
+    accepted, total, _worst = _group(tmp_path, HALF, "photo", "phone_photo", range(8), PHONE_PX)
+    assert accepted >= PHONE_MIN * total, (accepted, total)
+
+
+def test_stock_poor_profile_scans(tmp_path: Path) -> None:
+    accepted, total, _worst = _group(tmp_path, "poor", "scan", "real_scan", range(8), POOR_PX)
+    assert accepted >= POOR_MIN * total, (accepted, total)
+
+
+# measured on 8 seeds x 2 pages: 14 of 16 read in both groups; worst edge 0.63 px (half-frame
+# photo) and 0.18 px (poor scan)
+PHONE_PX = 1.0
+POOR_PX = 0.5
+PHONE_MIN = 0.75
+POOR_MIN = 0.75
 
 
 def test_pixels_outside_the_page_are_blanked(tmp_path: Path) -> None:
