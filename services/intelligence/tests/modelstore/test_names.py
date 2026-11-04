@@ -55,3 +55,12 @@ def test_version_ordering_is_numeric() -> None:
     assert Version.parse("2.0.0") > Version.parse("1.99.99")
     assert sorted([Version.parse("1.10.0"), Version.parse("1.9.0")])[0] == Version.parse("1.9.0")
     assert str(Version.parse("1.2.3")) == "1.2.3"
+
+
+@pytest.mark.parametrize("bad", ["1" * 5000 + ".0.0", "1.0." + "9" * 10, "0000000001.0.0"])
+def test_version_components_are_bounded(bad: str) -> None:
+    with pytest.raises(Refused) as exc:
+        Version.parse(bad)
+    assert str(exc.value) == "invalid_name"
+    with pytest.raises(Refused):
+        check_version(bad)

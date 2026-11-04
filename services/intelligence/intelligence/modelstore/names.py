@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from intelligence.modelstore.reasons import Refused
 
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,62}", re.ASCII)
-_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", re.ASCII)
+_VERSION = re.compile(r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})", re.ASCII)
 _ROLE = re.compile(r"[a-z][a-z0-9_]{1,31}", re.ASCII)
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}", re.ASCII)
 

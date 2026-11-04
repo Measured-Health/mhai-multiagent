@@ -47,6 +47,21 @@ def _check_value(obj: Any) -> None:
     raise Refused("json_invalid")
 
 
+_MAX_DEPTH = 64
+
+
+def _check_depth(obj: Any) -> None:
+    """Refuse nesting deeper than ``_MAX_DEPTH`` (iterative, so it cannot recurse)."""
+    stack: list[tuple[Any, int]] = [(obj, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, (list, dict)):
+            if depth > _MAX_DEPTH:
+                raise Refused("json_invalid")
+            children = item.values() if isinstance(item, dict) else item
+            stack.extend((child, depth + 1) for child in children)
+
+
 def dumps(obj: Any) -> bytes:
     try:
         _check_value(obj)
@@ -79,6 +94,7 @@ def loads_strict(b: bytes, max_bytes: int) -> Any:
         raise Refused("json_invalid") from exc
     if end != len(text):
         raise Refused("json_invalid")
+    _check_depth(obj)
     return obj
 
 

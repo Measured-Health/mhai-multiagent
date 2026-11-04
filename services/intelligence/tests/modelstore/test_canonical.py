@@ -29,6 +29,9 @@ def test_canonical_round_trip() -> None:
         b"\xff\xfe",
         b"",
         b"[" * 100000,
+        b"[" * 5000 + b"]" * 5000,
+        b'{"a":-0.0}',
+        b'{"a":1E5}',
     ],
 )
 def test_canonical_refuses_floats_duplicates_trailing_bom(raw: bytes) -> None:
@@ -54,3 +57,4 @@ def test_not_canonical_forms() -> None:
     assert not canonical.is_canonical(b'{"b":1,"a":2}')
     assert not canonical.is_canonical(b'{"a": 1}')
     assert not canonical.is_canonical(b'{"a":"\xc3\xa9"}')
+    assert not canonical.is_canonical(b'{"a":-0}')
