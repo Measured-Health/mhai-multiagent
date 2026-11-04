@@ -348,3 +348,48 @@ def test_lab_text_fields_still_catch_phone_and_nin(path: tuple[Any, ...], text: 
     where = f"{path[0]}[{path[1]}].{path[2]}.value"
     assert where in _paths(found)
     assert text not in repr(found)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "0803 - 123 - 4567",
+        "0803 -- 123 -- 4567",
+        "0803.123.4567",
+        "+234 (803) 123 4567",
+        "0803 \u2013 123 \u2014 4567",
+        "0803 / 123 / 4567",
+    ],
+)
+def test_phone_separator_variants(text: str, tmp_path: Path) -> None:
+    assert "phone" in {f.rule for f in scanner.check_document(_note_doc("Call " + text))}
+    meds = [
+        m
+        for p in patients.generate(random.Random(5), 50)
+        for d in p.documents
+        for m in d["medications"]
+    ]
+    for where, field in (("observations", "value_text"), ("medications", "dose_text")):
+        doc = _doc()
+        if where == "medications":
+            doc["medications"] = meds[:1]
+        found = scanner.check_document(_set(doc, (where, 0, field, "value"), text))
+        assert "phone" in {f.rule for f in found}, field
+    name = text.replace("/", "_").replace("\u2013", "-").replace("\u2014", "-")
+    (tmp_path / (name + ".json")).write_text("{}", encoding="utf-8")
+    res = scanner.scan_set(tmp_path)
+    assert any(f.rule == "filename" for f in res.findings)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Dr.Smith", "Dr.smith", "Doctor Smith", "Alh Musa", "Barrister Eze", "Oba Ade", "Mr.Bello"],
+)
+def test_titles_without_space_and_more_honorifics(text: str) -> None:
+    assert "titled_name" in {f.rule for f in scanner.check_document(_note_doc("seen by " + text))}
+
+
+def test_synthetic_phone_only_as_whole_token() -> None:
+    assert scanner.check_document(_note_doc("ph 555-0142")) == []
+    for text in ("5555-0142", "1-555-0142", "555-01421", "555-0142-99"):
+        assert scanner.check_document(_note_doc(text)), text

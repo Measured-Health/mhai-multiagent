@@ -35,7 +35,8 @@ JSON_SUFFIXES = frozenset({".json", ".jsonl"})
 MRN_RE = re.compile(r"SYN-[0-9]{8}")
 OTHER_ID_RE = re.compile(r"SYN(?:ID|INS)-[0-9]{8}")
 _ALLOWED_TOKEN = re.compile(r"(?<![A-Za-z0-9])SYN(?:ID|INS)?-[0-9]{8}(?![0-9])")
-_ALLOWED_PHONE = re.compile(r"(?<![0-9])555-01[0-9]{2}(?![0-9])")
+# Only as a whole token: not inside a longer number or after/before more digit groups.
+_ALLOWED_PHONE = re.compile(r"(?<!\w)(?<![0-9][-.\s])555-01[0-9]{2}(?!\w)(?![-.\s]?[0-9])")
 _ISO = re.compile(
     r"(?<![0-9])[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[Tt ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?"
     r"(?:[Zz]|[+-][0-9]{2}:[0-9]{2})?)?(?![0-9])"
@@ -45,7 +46,8 @@ _PRINTED_DATE = re.compile(
     r"(?<![0-9])(?:[0-9]{1,2}[-./][0-9]{1,2}[-./](?:[0-9]{4}|[0-9]{2})"
     r"|[0-9]{4}[-./][0-9]{1,2}[-./][0-9]{1,2})(?![0-9])"
 )
-_RUN = re.compile(r"\+?[0-9](?:[\s().\-/]{0,2}[0-9])*")
+# Digit groups joined by up to 5 separator characters (spaces, punctuation, any dash).
+_RUN = re.compile(r"\+?[0-9](?:(?:[^\w]|_){0,5}[0-9])*")
 _TOKEN_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 _NG_PHONE_DIGITS = re.compile(r"(?:234|0)?[789][01][0-9]{8}")
 _EMAIL = re.compile(r"@")
@@ -59,10 +61,11 @@ _MRN_WORD = re.compile(
 _PREFIXED_ID = re.compile(r"\b[A-Z]{2,6}[-/ ]?[0-9]{5,}\b")
 _SLASHED_ID = re.compile(r"\b[^\W\d_]{2,8}(?:[/\-][0-9]{1,6}){1,4}\b")
 _TITLES = (
-    "Dr|Mr|Mrs|Ms|Miss|Prof|Nurse|Sister|Chief|Alhaji|Alhaja|Pastor|Engr|Barr|Rev|Hon|Mallam|Madam"
+    "Dr|Doctor|Mr|Mrs|Ms|Miss|Prof|Nurse|Sister|Chief|Alh|Alhaji|Alhaja|Pastor|Engr|Barr|"
+    "Barrister|Rev|Hon|Mallam|Madam|Oba"
 )
 _WORD = r"[^\W\d_][^\W\d_'\-]*"
-_TITLED = re.compile(rf"\b(?:{_TITLES})\b\.?\s+({_WORD})((?:\s+{_WORD}){{0,2}})", re.IGNORECASE)
+_TITLED = re.compile(rf"\b({_TITLES})(?:\.\s*|\s+)({_WORD})((?:\s+{_WORD}){{0,2}})", re.IGNORECASE)
 _ADDRESS = re.compile(
     r"(?<![0-9])[0-9]{1,5}[A-Za-z]?[,\s]+((?:[^\W\d_]+\s+){1,3}"
     r"(?:Street|St|Str|Road|Rd|Avenue|Ave|Lane|Close|Crescent|Drive|Way|Estate|Layout|Court|"
@@ -163,19 +166,16 @@ def _text_rules(text: str, lab: bool = False) -> list[str]:
         rules.append("url")
     rest = _ALLOWED_TOKEN.sub(" ", text)
     for pattern in (_ISO, _PRINTED_DATE, _ALLOWED_PHONE):
-        rest = pattern.sub(" <> ", rest)
+        rest = pattern.sub(" zz ", rest)
     rules.extend(_digit_rules(rest, lab))
     if _MRN_WORD.search(rest) or _PREFIXED_ID.search(rest) or _SLASHED_ID.search(rest):
         rules.append("mrn_like")
     tokens = {t.casefold() for t in terminology.all_name_tokens()}
     for m in _TITLED.finditer(rest):
-        if (
-            m.group(0).split()[0].rstrip(".").casefold(),
-            m.group(1).casefold(),
-        ) in _CLINICAL_PHRASES:
+        if (m.group(1).casefold(), m.group(2).casefold()) in _CLINICAL_PHRASES:
             continue
-        extra = [w for w in m.group(2).split() if w[:1].isupper()]
-        if m.group(1).casefold() not in tokens or any(w.casefold() not in tokens for w in extra):
+        extra = [w for w in m.group(3).split() if w[:1].isupper()]
+        if m.group(2).casefold() not in tokens or any(w.casefold() not in tokens for w in extra):
             rules.append("titled_name")
             break
     streets = {s.casefold() for s in terminology.name_set("streets")}
