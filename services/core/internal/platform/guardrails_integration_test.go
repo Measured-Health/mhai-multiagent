@@ -25,12 +25,21 @@ var rawSmall = regexp.MustCompile(`"value":\s*[1-4]\s*[,}]`)
 
 var rateKeys = []string{"answers", "pass", "regenerate", "escalate", "degraded", "pass_share", "regenerate_share", "escalate_share"}
 
-// seedDecisions adds n decisions of hid, ago before now, as the superuser.
+// startOfToday is where every window ends (ruling R42).
+func startOfToday() time.Time { return time.Now().UTC().Truncate(24 * time.Hour) }
+
+// seedDecisions adds n decisions of hid, ago before the start of today
+// (UTC), as the superuser.
 func seedDecisions(t *testing.T, hid uuid.UUID, decision string, degraded bool, n int, ago time.Duration) {
+	t.Helper()
+	seedDecisionsAt(t, hid, decision, degraded, n, startOfToday().Add(-ago))
+}
+
+func seedDecisionsAt(t *testing.T, hid uuid.UUID, decision string, degraded bool, n int, at time.Time) {
 	t.Helper()
 	for i := 0; i < n; i++ {
 		if _, err := super.Exec(context.Background(), `INSERT INTO clinical_decisions (id, hospital_id, hga_decision, degraded, response_text, created_at)
-			VALUES (gen_random_uuid(), $1, $2, $3, 'SYNTHETIC answer', $4)`, hid, decision, degraded, time.Now().Add(-ago)); err != nil {
+			VALUES (gen_random_uuid(), $1, $2, $3, 'SYNTHETIC answer', $4)`, hid, decision, degraded, at); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -103,6 +112,8 @@ func TestGuardrailsShape(t *testing.T) {
 	seedDecisions(t, h, "PASS", false, 10, time.Hour)
 	seedDecisions(t, h, "REGENERATE", true, 6, 2*time.Hour)
 	seedDecisions(t, h, "ESCALATE", true, 5, 3*time.Hour)
+	// Today's decisions are not in any window until tomorrow.
+	seedDecisionsAt(t, h, "PASS", false, 3, time.Now())
 	raw := map[string]float64{"answers": 21, "pass": 10, "regenerate": 6, "escalate": 5, "degraded": 11}
 	for _, role := range []string{authz.RolePlatformAdmin, authz.RoleAuditor} {
 		for period, days := range map[string]int{"7d": 7, "30d": 30, "90d": 90} {
@@ -115,7 +126,8 @@ func TestGuardrailsShape(t *testing.T) {
 			from, err1 := time.Parse(time.RFC3339Nano, top["from"].(string))
 			to, err2 := time.Parse(time.RFC3339Nano, top["to"].(string))
 			at, err3 := time.Parse(time.RFC3339Nano, top["updated_at"].(string))
-			if err1 != nil || err2 != nil || err3 != nil || to.Sub(from) != time.Duration(days)*24*time.Hour || at.Before(from) {
+			if err1 != nil || err2 != nil || err3 != nil || to.Sub(from) != time.Duration(days)*24*time.Hour ||
+				!to.Equal(startOfToday()) || !at.Equal(to) {
 				t.Errorf("%s: from %v to %v updated_at %v", period, top["from"], top["to"], top["updated_at"])
 			}
 			checkRates(t, period+" all", top["all"])

@@ -1002,12 +1002,13 @@ its query. Served by the core service; the shape is in
 
 | Endpoint | Behaviour | Status |
 |---|---|---|
-| `GET /platform/guardrails?period=7d\|30d\|90d` | → `{period, from, to, updated_at, all, hospitals}`; `all` and each hospital row (`{hospital: {id, name}, ...}`) carry `answers`, `pass`, `regenerate`, `escalate`, `degraded`, `pass_share`, `regenerate_share`, `escalate_share`, every one guarded (`{value, suppressed}`, §14.7). Active hospitals only. Platform admins and auditors; two-step. Cached 60 s per period; 6 reads a minute per session, then **429 `rate_limited`**. Not audited | **New** (built, Plan 4) |
+| `GET /platform/guardrails?period=7d\|30d\|90d` | → `{period, from, to, updated_at, all, hospitals}`; `all` and each hospital row (`{hospital: {id, name}, ...}`) carry `answers`, `pass`, `regenerate`, `escalate`, `degraded`, `pass_share`, `regenerate_share`, `escalate_share`, every one guarded (`{value, suppressed}`, §14.7). Active hospitals only. The period is whole UTC days ending at the start of today (`to`, and `updated_at`, are 00:00 UTC today), so the figures are the same all day. Platform admins and auditors; two-step. 6 reads a minute per session, then **429 `rate_limited`**. Not audited | **New** (built, Plan 4) |
 
 The server applies the §14.7 small-group duties: no count of 1–4; in each
 set that adds up (a row's answers and its parts, each column's `all` and its
 hospitals) the hidden members total at least 5 and never exactly one is
-hidden; a share is hidden when its numerator or complement is 1–4 or either
+hidden; `degraded` is hidden when its `answers` is, or when `answers − degraded`
+is 1–4; a share is hidden when its numerator or complement is 1–4 or either
 count is hidden; and no hidden value can be worked out from `all` and the
 shown rows. Shares are 0 to 1 with four decimal places.
 

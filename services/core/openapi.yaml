@@ -1160,8 +1160,9 @@ paths:
       description: |
         Platform admins and auditors, platform audience, two-step always.
         New (Plan 4 spec §6.3; not in the frontend contract yet). Per active
-        hospital and across all of them (`all`), over the last `period`
-        (`7d`, `30d` or `90d`, required): the answers, and of those
+        hospital and across all of them (`all`), over `period` (`7d`, `30d`
+        or `90d`, required) as whole UTC days ending at the start of today
+        (00:00 UTC): the answers, and of those
         `pass`, `regenerate` and `escalate` (a missing or unknown decision
         counts as `escalate`), the `degraded` ones, and the three shares of
         `answers`. Hospitals that aren't active have no row and aren't in
@@ -1172,14 +1173,16 @@ paths:
         0; in each set that adds up (a row's answers and its three parts,
         each column's `all` and its hospitals, degraded's `all` and its
         hospitals) enough is hidden that the hidden members together are at
-        least 5 and never exactly one is hidden; a share is hidden when its
+        least 5 and never exactly one is hidden; `degraded` is hidden when
+        its `answers` is, or when `answers − degraded` is 1 to 4; a share is hidden when its
         numerator or its complement is 1 to 4 or either count is hidden; and
         more is hidden until no hidden value can be worked out from the
         shown ones (row sums, `all` minus the shown rows). A share is 0 to 1
         with four decimal places; `{value: null, suppressed: false}` is no
-        answers to divide by. `from` and `to` bound the period;
-        `updated_at` is when the figures were taken. Each period is computed
-        at most once a minute (the same response within that minute). Six
+        answers to divide by. `from` and `to` bound the period; the figures
+        run to `to`, the start of today, UTC, and `updated_at` is that same
+        instant. A period's response is the same all day (computed once a day
+        per core copy), so reads can't be differenced minute by minute. Six
         reads a minute per session, then 429 `rate_limited`. Not recorded in
         the audit log (aggregates about no person).
       tags: [platform]

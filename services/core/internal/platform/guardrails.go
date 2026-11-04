@@ -10,11 +10,12 @@ package platform
 // reaches the response writer, nor anything that could be worked out from
 // what is shown (C19, C20).
 //
-// Platform admins and auditors, two-step always. Each period's response is
-// computed at most once a minute per core copy (the cache holds the guarded
-// response, never the raw counts), and each session may ask 6 times a
-// minute (429 rate_limited, C31), because the computation scans
-// clinical_decisions (P17).
+// Platform admins and auditors, two-step always. The window is whole UTC
+// days ending at the start of today (ruling R42), so each period's
+// response is computed once a day per core copy and every read within the
+// day is the same (the cache holds the guarded response, never the raw
+// counts); each session may ask 6 times a minute (429 rate_limited, C31),
+// because the computation scans clinical_decisions (P17).
 //
 // Not recorded in the audit log: the spec rules it out (§6.3, "not audited
 // per read": aggregates about no person, polled like health).
@@ -38,9 +39,6 @@ import (
 const (
 	// GuardrailsPerMinute is the reads one session may make a minute (C31).
 	GuardrailsPerMinute = 6
-	// GuardrailsCacheTTL is how long one period's response is served
-	// before it is computed again.
-	GuardrailsCacheTTL = 60 * time.Second
 	// guardrailsScope is the idempotency_keys scope of the read rate
 	// counter; no Idempotency-Key scope (a user id) takes this form.
 	guardrailsScope = "platform.guardrails.rate"
@@ -81,18 +79,21 @@ type GuardrailsOut struct {
 	Hospitals []GuardrailHospital `json:"hospitals"`
 }
 
-// guardCache holds each period's guarded response for GuardrailsCacheTTL.
-// One computation per period at a time: a caller waits for the one in
-// progress rather than starting another.
+// guardCache holds each period's guarded response for the UTC day it runs
+// to (ruling R42): the window is whole days, ending at the start of today,
+// so every read of a period within a day is byte-identical, and a client
+// can't difference two reads minutes apart. One computation per period at
+// a time: a caller waits for the one in progress (or gives up when its own
+// request ends) rather than starting another.
 type guardCache struct {
 	mu      sync.Mutex
 	periods map[string]*guardEntry
 }
 
 type guardEntry struct {
-	mu  sync.Mutex
-	at  time.Time
-	out *GuardrailsOut
+	lock chan struct{} // held while computing; one slot
+	to   time.Time
+	out  *GuardrailsOut
 }
 
 var guardrailsCache = &guardCache{periods: map[string]*guardEntry{}}
@@ -102,7 +103,7 @@ func (c *guardCache) entry(period string) *guardEntry {
 	defer c.mu.Unlock()
 	e, ok := c.periods[period]
 	if !ok {
-		e = &guardEntry{}
+		e = &guardEntry{lock: make(chan struct{}, 1)}
 		c.periods[period] = e
 	}
 	return e
@@ -114,21 +115,32 @@ func (c *guardCache) reset() {
 	c.periods = map[string]*guardEntry{}
 }
 
-// get serves period's response, computing it when there is none fresh at
-// now (an entry dated after now, another clock's, is not fresh either).
-func (c *guardCache) get(period string, now time.Time, compute func() (GuardrailsOut, error)) (GuardrailsOut, error) {
+// get serves period's response for the day ending at to, computing it when
+// the entry holds another day's (or none). ctx bounds only the wait.
+func (c *guardCache) get(ctx context.Context, period string, to time.Time, compute func() (GuardrailsOut, error)) (GuardrailsOut, error) {
 	e := c.entry(period)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.out != nil && !now.Before(e.at) && now.Sub(e.at) < GuardrailsCacheTTL {
+	select {
+	case e.lock <- struct{}{}:
+	case <-ctx.Done():
+		return GuardrailsOut{}, ctx.Err()
+	}
+	defer func() { <-e.lock }()
+	if e.out != nil && e.to.Equal(to) {
 		return *e.out, nil
 	}
 	out, err := compute()
 	if err != nil {
 		return GuardrailsOut{}, err
 	}
-	e.out, e.at = &out, now
+	e.out, e.to = &out, to
 	return out, nil
+}
+
+// guardWindow is the period's window: whole UTC days, ending at the start
+// of today (R42).
+func guardWindow(now time.Time, days int) (from, to time.Time) {
+	to = now.UTC().Truncate(24 * time.Hour)
+	return to.AddDate(0, 0, -days), to
 }
 
 func registerGuardrails(m *authz.Mux, d Deps) {
@@ -160,9 +172,11 @@ func (d Deps) guardrails(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "rate_limited")
 		return
 	}
-	now := d.now()
-	out, err := guardrailsCache.get(period, now, func() (GuardrailsOut, error) {
-		return d.computeGuardrails(r.Context(), period, days, now)
+	from, to := guardWindow(d.now(), days)
+	// The computation outlives a caller who goes away (others may be
+	// waiting for it), bounded by its own timeout.
+	out, err := guardrailsCache.get(r.Context(), period, to, func() (GuardrailsOut, error) {
+		return d.computeGuardrails(context.WithoutCancel(r.Context()), period, from, to)
 	})
 	if err != nil {
 		// No count is ever in the log: ids and a fixed reason only.
@@ -184,15 +198,13 @@ type guardRow struct {
 
 var errCounts = errors.New("platform: guardrail counts don't add up")
 
-// computeGuardrails reads the counts over [now − days, now) and guards
-// them: rules 1, 2 and 4 over the table of hospitals and all
-// (smallgroup.AcrossRows), rule 1 and 2 over degraded's column, rule 3 for
-// each share. Counts that don't add up fail the response (no guess).
-func (d Deps) computeGuardrails(ctx context.Context, period string, days int, now time.Time) (GuardrailsOut, error) {
+// computeGuardrails reads the counts over [from, to) and guards them.
+// Counts that don't add up (or a degraded count over its answers) fail the
+// response (no guess). updated_at is to: the figures run to the start of
+// today, UTC.
+func (d Deps) computeGuardrails(ctx context.Context, period string, from, to time.Time) (GuardrailsOut, error) {
 	ctx, cancel := context.WithTimeout(ctx, guardrailsTimeout)
 	defer cancel()
-	to := now.UTC().Truncate(time.Millisecond)
-	from := to.Add(-time.Duration(days) * 24 * time.Hour)
 	var rows []guardRow
 	err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error {
 		q, err := tx.Query(ctx, `SELECT g.hospital_id, h.name, g.answers, g.pass, g.regenerate, g.escalate, g.degraded
@@ -208,7 +220,7 @@ func (d Deps) computeGuardrails(ctx context.Context, period string, days int, no
 			if err := q.Scan(&g.id, &g.name, &g.answers, &g.pass, &g.regenerate, &g.escalate, &g.degraded); err != nil {
 				return err
 			}
-			if g.pass < 0 || g.regenerate < 0 || g.escalate < 0 || g.degraded < 0 ||
+			if g.pass < 0 || g.regenerate < 0 || g.escalate < 0 || g.degraded < 0 || g.degraded > g.answers ||
 				g.answers != g.pass+g.regenerate+g.escalate {
 				return errCounts
 			}
@@ -220,20 +232,19 @@ func (d Deps) computeGuardrails(ctx context.Context, period string, days int, no
 		return GuardrailsOut{}, err
 	}
 
-	all := make([]int64, 4)
 	table := make([][]int64, len(rows))
 	degraded := make([]int64, len(rows))
-	var allDegraded int64
+	all := make([]int64, 4)
 	for i, g := range rows {
 		table[i] = []int64{g.answers, g.pass, g.regenerate, g.escalate}
 		for j, v := range table[i] {
 			all[j] += v
 		}
 		degraded[i] = g.degraded
-		allDegraded += g.degraded
 	}
-	allG, rowsG := smallgroup.AcrossRows(all, table)
-	degG := smallgroup.Set(allDegraded, degraded...)
+	// Rules 1, 2 and 4 over the hospitals and all; degraded within answers
+	// and as its own column (smallgroup.Table); rule 3 for each share.
+	t := smallgroup.Table(table, degraded)
 	rates := func(raw []int64, g []smallgroup.Guarded, deg smallgroup.Guarded) Rates {
 		return Rates{
 			Answers: g[0], Pass: g[1], Regenerate: g[2], Escalate: g[3], Degraded: deg,
@@ -243,7 +254,7 @@ func (d Deps) computeGuardrails(ctx context.Context, period string, days int, no
 		}
 	}
 	out := GuardrailsOut{Period: period, From: stamp(from), To: stamp(to), UpdatedAt: stamp(to),
-		All: rates(all, allG, degG[0]), Hospitals: make([]GuardrailHospital, 0, len(rows))}
+		All: rates(all, t.All, t.Subset[0]), Hospitals: make([]GuardrailHospital, 0, len(rows))}
 	for i, g := range rows {
 		if !audit.ShowableName(g.name) {
 			// Left out: every one of its cells is then unknown, which only
@@ -253,7 +264,7 @@ func (d Deps) computeGuardrails(ctx context.Context, period string, days int, no
 		}
 		out.Hospitals = append(out.Hospitals, GuardrailHospital{
 			Hospital: Ref{ID: g.id.String(), Name: g.name},
-			Rates:    rates(table[i], rowsG[i], degG[i+1]),
+			Rates:    rates(table[i], t.Rows[i], t.Subset[i+1]),
 		})
 	}
 	return out, nil
