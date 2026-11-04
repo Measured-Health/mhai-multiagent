@@ -1016,7 +1016,7 @@ requires-dist = [
     { name = "opentelemetry-sdk", specifier = "==1.45.2" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "peft", specifier = ">=0.5" },
-    { name = "pillow", specifier = ">=12.3.0" },
+    { name = "pillow", specifier = ">=12.3.0,<13" },
     { name = "protobuf", specifier = ">=6.33.5,<7" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "psycopg-pool", specifier = ">=3.2,<4" },

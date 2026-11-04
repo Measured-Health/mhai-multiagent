@@ -27,7 +27,7 @@ DOCS = _docs()
 
 
 def _pick_layouts(doc_type: str) -> list[layouts.LayoutSpec]:
-    ls = layouts.for_type(doc_type, 5)
+    ls = layouts.for_type(doc_type, 5, purpose="train")
     two = next(x for x in ls if x.columns == 2)
     paged = next(x for x in ls if x.new_page_per_section)
     return [ls[0], two, paged, ls[7]]
@@ -47,11 +47,11 @@ def _red_mask(a: np.ndarray) -> np.ndarray:
 
 def test_fifteen_layouts_per_type() -> None:
     for doc_type in layouts.DOC_TYPES:
-        ls = layouts.for_type(doc_type, 3)
+        ls = layouts.for_type(doc_type, 3, purpose="train")
         assert len(ls) >= 15
         assert len({x.signature() for x in ls}) == len(ls)
-        assert ls == layouts.for_type(doc_type, 3)
-        assert ls != layouts.for_type(doc_type, 4)
+        assert ls == layouts.for_type(doc_type, 3, purpose="train")
+        assert ls != layouts.for_type(doc_type, 4, purpose="train")
         assert {x.font for x in ls} == set(layouts.FONT_FAMILIES)
         assert {x.table_style for x in ls} == set(layouts.TABLE_STYLES)
         assert {x.columns for x in ls} == {1, 2}
@@ -59,7 +59,9 @@ def test_fifteen_layouts_per_type() -> None:
         assert len({x.logo_shape for x in ls}) > 1
         assert any(x.stamp for x in ls) and any(x.new_page_per_section for x in ls)
     with pytest.raises(ValueError):
-        layouts.for_type("no_such_type", 3)
+        layouts.for_type("no_such_type", 3, purpose="train")
+    with pytest.raises(TypeError):
+        layouts.for_type("lab_report", 3)  # type: ignore[call-arg]
 
 
 def test_train_refuses_eval_template_seed() -> None:
@@ -73,7 +75,11 @@ def test_train_refuses_eval_template_seed() -> None:
             layouts.for_type("lab_report", train_seed, purpose=purpose)  # type: ignore[arg-type]
     for bad in (-1, 1_100_000, True):
         with pytest.raises(layouts.LayoutSeedError):
-            layouts.for_type("lab_report", bad)
+            layouts.for_type("lab_report", bad, purpose="train")
+    for odd in ("training", "Train", "TRAIN", "eval", "", None, 1):
+        for seed in (train_seed, eval_seed):
+            with pytest.raises(layouts.LayoutSeedError):
+                layouts.for_type("lab_report", seed, purpose=odd)  # type: ignore[arg-type]
     assert layouts.for_type("lab_report", train_seed, purpose="train")
     assert layouts.for_type("lab_report", eval_seed, purpose="test")
     assert layouts.for_type("lab_report", eval_seed, purpose="dev")
@@ -84,6 +90,8 @@ def test_boxes_in_unit_square() -> None:
         for layout in _pick_layouts(doc_type):
             gt = copy.deepcopy(doc)
             out = render.render(gt, layout, DPI)
+            assert gt == doc  # the input is untouched
+            gt = out.ground_truth
             assert 1 <= len(out.pages) <= render.MAX_PAGES
             for path, fld in _fields(gt).items():
                 if fld["raw_text"] is None:
@@ -102,6 +110,7 @@ def test_boxes_cover_rendered_text() -> None:
         for layout in _pick_layouts(doc_type):
             gt = copy.deepcopy(doc)
             plain = render.render(gt, layout, DPI)
+            gt = plain.ground_truth
             assert not any(_red_mask(_png(p)).any() for p in plain.pages), "furniture is red"
             paths = [p for p, f in _fields(gt).items() if f["raw_text"] is not None]
             sample = paths[:: max(1, len(paths) // 9)]
@@ -132,10 +141,10 @@ def test_boxes_cover_rendered_text() -> None:
 
 def test_every_nonnull_field_has_a_box() -> None:
     for doc_type, doc in DOCS.items():
-        for layout in layouts.for_type(doc_type, 9):
+        for layout in layouts.for_type(doc_type, 9, purpose="train"):
             gt = copy.deepcopy(doc)
             out = render.render(gt, layout, DPI)
-            for path, fld in _fields(gt).items():
+            for path, fld in _fields(out.ground_truth).items():
                 assert (fld["raw_text"] is not None) == (path in out.boxes), path
 
 
@@ -143,10 +152,10 @@ def test_multi_page_report_page_numbers() -> None:
     base = DOCS["lab_report"]
     gt = copy.deepcopy(base)
     gt["observations"] = [copy.deepcopy(base["observations"][0]) for _ in range(150)]
-    layout = layouts.for_type("lab_report", 2)[0]
+    layout = layouts.for_type("lab_report", 2, purpose="train")[0]
     out = render.render(gt, layout, DPI)
     assert len(out.pages) > 2
-    pages = [gt["observations"][i]["value_text"]["page"] for i in range(150)]
+    pages = [out.ground_truth["observations"][i]["value_text"]["page"] for i in range(150)]
     assert pages == sorted(pages)
     assert pages[0] == 1 and pages[-1] == len(out.pages)
     assert set(pages) == set(range(1, len(out.pages) + 1))
@@ -161,19 +170,70 @@ def test_multi_page_report_page_numbers() -> None:
 
 def test_render_deterministic() -> None:
     doc = DOCS["discharge_summary"]
-    for layout in layouts.for_type("discharge_summary", 1)[:4]:
+    for layout in layouts.for_type("discharge_summary", 1, purpose="train")[:4]:
         a = render.render(copy.deepcopy(doc), layout, DPI)
         b = render.render(copy.deepcopy(doc), layout, DPI)
         assert a.pages == b.pages and a.boxes == b.boxes
         assert all(p.startswith(b"\x89PNG") for p in a.pages)
         assert b"tIME" not in a.pages[0]
-    other = render.render(copy.deepcopy(doc), layouts.for_type("discharge_summary", 1)[5], DPI)
+    other = render.render(
+        copy.deepcopy(doc), layouts.for_type("discharge_summary", 1, purpose="train")[5], DPI
+    )
     assert other.pages != a.pages
+
+
+def test_input_untouched_and_results_independent() -> None:
+    doc = DOCS["lab_report"]
+    layout = layouts.for_type("lab_report", 2, purpose="train")[0]
+    original = copy.deepcopy(doc)
+    a = render.render(doc, layout, DPI)
+    assert doc == original
+    other = layouts.for_type("lab_report", 2, purpose="train")[5]
+    b = render.render(doc, other, DPI)
+    assert doc == original
+    assert a.ground_truth is not b.ground_truth
+    assert a.ground_truth != b.ground_truth  # different layouts, different boxes
+    a_before = copy.deepcopy(a.ground_truth)
+    a.ground_truth["patient"]["mrn"]["raw_text"] = "changed"
+    assert b.ground_truth["patient"]["mrn"]["raw_text"] != "changed"
+    assert a_before["patient"]["mrn"]["raw_text"] != "changed"
+    # a failed render leaves the input exactly as it was
+    big = copy.deepcopy(doc)
+    big["observations"] = [copy.deepcopy(doc["observations"][0]) for _ in range(1500)]
+    big_before = copy.deepcopy(big)
+    with pytest.raises(render.RenderError):
+        render.render(big, layout, dpi=50)
+    assert big == big_before
+
+
+def test_newlines_outside_notes_and_whole_token_aliases() -> None:
+    doc = copy.deepcopy(DOCS["lab_report"])
+    layout = layouts.for_type("lab_report", 2, purpose="train")[0]
+    doc["patient"]["family_name"]["raw_text"] = "Ab\ncd\r\nef"
+    doc["observations"][0]["value_text"]["raw_text"] = "12"
+    doc["observations"][0]["value_numeric"]["raw_text"] = "1"  # inside "12", not a token
+    out = render.render(doc, layout, DPI)
+    boxes = out.boxes
+    assert "patient.family_name" in boxes
+    assert boxes["observations[0].value_numeric"] != boxes["observations[0].value_text"]
+    assert boxes["observations[0].value_text"] != boxes["observations[0].unit_text"]
+
+
+def test_budget_high_dpi_many_pages() -> None:
+    base = DOCS["lab_report"]
+    layout = layouts.for_type("lab_report", 2, purpose="train")[0]
+    gt = copy.deepcopy(base)
+    gt["observations"] = [copy.deepcopy(base["observations"][0]) for _ in range(1500)]
+    with pytest.raises(render.RenderError) as err:
+        render.render(gt, layout, dpi=render.MAX_DPI)
+    assert str(err.value) == "pixel_budget"
+    with pytest.raises(render.RenderError):
+        render.render(copy.deepcopy(base), layout, dpi=render.MAX_DPI + 1)
 
 
 def test_page_limits() -> None:
     base = DOCS["lab_report"]
-    layout = layouts.for_type("lab_report", 2)[0]
+    layout = layouts.for_type("lab_report", 2, purpose="train")[0]
     with pytest.raises(render.RenderError):
         render.render(copy.deepcopy(base), layout, dpi=1000)
     with pytest.raises(render.RenderError):

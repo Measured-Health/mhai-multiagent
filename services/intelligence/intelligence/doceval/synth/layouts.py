@@ -9,6 +9,11 @@ on is never one it is evaluated on: :data:`TRAIN_TEMPLATE_SEEDS` and
 :data:`EVAL_TEMPLATE_SEEDS` (dev and test). A build for ``purpose="train"``
 refuses an eval seed, and the dev and test purposes refuse a train seed.
 
+Separation is by seed only. A layout built from an eval seed can still look like one
+built from a train seed (the same fonts, header styles and table styles recur), so
+this does not measure how a model copes with a template family it has never seen.
+Held-out layout families (unseen templates) come with set v1.1.
+
 Logos are drawn shapes and the organisation names are invented from the word
 lists below; nothing here is, or imitates, a real logo.
 """
@@ -117,24 +122,35 @@ class LayoutSpec:
         )
 
 
-def check_seed(template_seed: int, purpose: Purpose | None) -> None:
-    """Refuse a seed outside both ranges, or in the wrong split for ``purpose``."""
+def check_seed(template_seed: int, purpose: str) -> None:
+    """Refuse a seed outside both ranges, or in the wrong split for ``purpose``.
+
+    ``purpose`` must be exactly ``train``, ``dev`` or ``test``; anything else is refused.
+    """
     if isinstance(template_seed, bool) or not isinstance(template_seed, int):
         raise LayoutSeedError("template seed must be an integer")
     in_train = template_seed in TRAIN_TEMPLATE_SEEDS
     in_eval = template_seed in EVAL_TEMPLATE_SEEDS
     if not (in_train or in_eval):
         raise LayoutSeedError("template seed outside the train and eval ranges")
-    if purpose == "train" and in_eval:
-        raise LayoutSeedError("an eval template seed cannot be used to build training data")
-    if purpose in ("dev", "test") and in_train:
-        raise LayoutSeedError("a train template seed cannot be used to build dev or test data")
+    match purpose:
+        case "train":
+            if in_eval:
+                raise LayoutSeedError("an eval template seed cannot be used to build training data")
+        case "dev" | "test":
+            if in_train:
+                raise LayoutSeedError(
+                    "a train template seed cannot be used to build dev or test data"
+                )
+        case _:
+            raise LayoutSeedError("purpose must be train, dev or test")
 
 
-def for_type(
-    doc_type: str, template_seed: int, *, purpose: Purpose | None = None
-) -> list[LayoutSpec]:
-    """The layouts of ``doc_type`` for a template seed, all distinct, in a fixed order."""
+def for_type(doc_type: str, template_seed: int, *, purpose: Purpose) -> list[LayoutSpec]:
+    """The layouts of ``doc_type`` for a template seed, all distinct, in a fixed order.
+
+    ``purpose`` is required (no default): the split check can never be skipped.
+    """
     if doc_type not in DOC_TYPES:
         raise ValueError("unknown document type")
     check_seed(template_seed, purpose)

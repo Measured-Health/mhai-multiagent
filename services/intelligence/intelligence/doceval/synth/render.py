@@ -8,7 +8,8 @@ that is not in the ground truth (headers, labels, footers, stamps, legends) is
 drawn without a box.
 
 Boxes are fractions of the page, ``(x0, y0, x1, y1)``, and are written back into
-the ground truth's ``page`` (1-based) and ``bbox``. A field with no text keeps
+the ``page`` (1-based) and ``bbox`` of a copy of the ground truth, returned as
+``RenderedDocument.ground_truth`` (the input is never changed). A field with no text keeps
 ``page`` and ``bbox`` null. A few fields repeat text that another field already
 shows (``value_numeric`` is the text of ``value_text``; ``reference_low`` and
 ``reference_high`` are parts of ``reference_text``): they share their owner's box.
@@ -19,8 +20,10 @@ Limits (the pipeline's own, design section 3.2): at most 50 pages per document
 and 10,000 px on either side of a page.
 """
 
+import copy
 import io
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -34,6 +37,10 @@ from intelligence.doceval.synth.layouts import LayoutSpec
 
 MAX_PAGES = 50
 MAX_SIDE_PX = 10_000
+MAX_DPI = 400
+# All pages are held as RGB images until the footers know the page count, so the
+# total is bounded: 300 million pixels is about 900 MB.
+MAX_TOTAL_PIXELS = 300_000_000
 MIN_DPI = 36
 MIN_FONT_PX = 12
 _CHUNK = 5  # table columns per cell row
@@ -136,6 +143,7 @@ Box = tuple[float, float, float, float]
 class RenderedDocument:
     pages: list[bytes]
     boxes: dict[str, tuple[int, Box]]
+    ground_truth: dict[str, Any]  # a deep copy of the input with page and bbox filled in
 
 
 @lru_cache(maxsize=64)
@@ -144,12 +152,24 @@ def _font(family: str, bold: bool, px: int) -> ImageFont.FreeTypeFont:
     return ImageFont.truetype(str(_FONT_DIR / name), px, layout_engine=ImageFont.Layout.BASIC)
 
 
-def _text_of(field: Any) -> str | None:
+_CONTROL = re.compile(r"[\r\n\t\v\f\x85\u2028\u2029]+")
+
+
+def _text_of(field: Any, multiline: bool = False) -> str | None:
+    """The text to draw for a field. Line breaks and tabs become one space, except
+    in a note's text (``multiline``), which keeps newlines and drops carriage returns."""
     if isinstance(field, dict):
         raw = field.get("raw_text")
         if isinstance(raw, str) and raw.strip():
-            return raw
+            if multiline:
+                return raw.replace("\r\n", "\n").replace("\r", "\n")
+            return _CONTROL.sub(" ", raw)
     return None
+
+
+def _shares(part: str, whole: str) -> bool:
+    """``part`` occurs in ``whole`` as a whole token, not inside a longer number or word."""
+    return re.search(r"(?<![\w.])" + re.escape(part) + r"(?![\w.])", whole) is not None
 
 
 class _Doc:
@@ -196,6 +216,8 @@ class _Doc:
     def new_page(self) -> None:
         if len(self.images) >= MAX_PAGES:
             raise RenderError("too_many_pages")
+        if self.W * self.H * (len(self.images) + 1) > MAX_TOTAL_PIXELS:
+            raise RenderError("pixel_budget")
         img = Image.new("RGB", (self.W, self.H), WHITE)
         self.images.append(img)
         self.d = ImageDraw.Draw(img)
@@ -371,7 +393,7 @@ class _Doc:
             for owner, names in aliases.items():
                 if owner not in cur:
                     continue
-                shared = tuple(a for a in names if a in cur and cur[a] in cur[owner])
+                shared = tuple(a for a in names if a in cur and _shares(cur[a], cur[owner]))
                 if shared:
                     self.aliases[f"{base}[{i}].{owner}"] = tuple(f"{base}[{i}].{a}" for a in shared)
                     for a in shared:
@@ -652,8 +674,9 @@ def _rows(gt: dict[str, Any], name: str) -> list[dict[str, Any]]:
 def _render(
     gt: dict[str, Any], layout: LayoutSpec, dpi: int, highlight: str | None
 ) -> RenderedDocument:
-    if isinstance(dpi, bool) or not isinstance(dpi, int) or dpi < MIN_DPI:
+    if isinstance(dpi, bool) or not isinstance(dpi, int) or not MIN_DPI <= dpi <= MAX_DPI:
         raise RenderError("bad_dpi")
+    gt = copy.deepcopy(gt)  # the caller's ground truth is never touched
     fields = dict(schema.iter_fields(gt))
     for fld in fields.values():
         fld["page"] = None
@@ -719,6 +742,8 @@ def _render(
     for path, (page, px) in doc.px.items():
         x0, y0 = max(0, px[0] - 1), max(0, px[1] - 1)
         x1, y1 = min(doc.W, px[2] + 1), min(doc.H, px[3] + 1)
+        if x1 <= x0 or y1 <= y0:
+            raise RenderError("field_off_page")
         box = (
             round(x0 / doc.W, 6),
             round(y0 / doc.H, 6),
@@ -728,7 +753,7 @@ def _render(
         boxes[path] = (page, box)
         fields[path]["page"] = page
         fields[path]["bbox"] = list(box)
-    return RenderedDocument(pages=pages, boxes=boxes)
+    return RenderedDocument(pages=pages, boxes=boxes, ground_truth=gt)
 
 
 def _draw_kv(doc: _Doc, items: list[tuple[str, str, str]]) -> None:
@@ -741,16 +766,17 @@ def _draw_kv(doc: _Doc, items: list[tuple[str, str, str]]) -> None:
 def _draw_notes(doc: _Doc, notes: list[dict[str, Any]]) -> None:
     doc.begin_flow(doc.layout.columns)
     for i, row in enumerate(notes):
-        doc.note(i, _text_of(row.get("heading")), _text_of(row.get("text")))
+        doc.note(i, _text_of(row.get("heading")), _text_of(row.get("text"), True))
     doc.end_flow()
 
 
 def render(document_gt: dict[str, Any], layout: LayoutSpec, dpi: int = 200) -> RenderedDocument:
     """Render ``document_gt`` (model-output view) with ``layout``.
 
-    Writes ``page`` and ``bbox`` back into the ground truth's fields (in place), and
-    returns the PNG pages and the boxes by field path. Raises :class:`RenderError`
-    beyond 50 pages or 10,000 px per side.
+    The input is never changed. The result carries the PNG pages, the boxes by field
+    path, and ``ground_truth``: a deep copy of the input with ``page`` and ``bbox``
+    filled in. Raises :class:`RenderError` (a code only, no content) beyond 50 pages,
+    10,000 px per side, 400 dpi or the total pixel budget.
     """
     return _render(document_gt, layout, dpi, None)
 

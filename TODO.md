@@ -9,6 +9,11 @@ Open work and decisions for mhai-multiagent. Remove an entry once it's done or d
 - **Frontend ingress over NATS (product owner, 28 Oct).** The BFF talks to core over NATS (`api.v1.<audience>`), its NATS identity replaces the `X-MHAI-Service` key, and the BFF may call intelligence operations marked `bff_direct`, which intelligence serves only after core grants them (`authz.v1.grant.<service>`). See [ADR 0011](docs/adr/0011-frontend-ingress-over-nats.md) and the design §17; built in Plan 3.
 - **Plan 4: feedback and corrections, the audit log, platform operations (product owner, 3 Nov).** Built in three parts (4a, 4b and 4c, all built). Corrections are approved by a second clinician, with the rule enforced in core and in the database; approved corrections only fill a per-hospital buffer, which nothing applies to the live guardrails; the audit log is served as `/platform/audit`; platform operations (health, failed jobs, guardrail statistics) are served as `/platform/health`, `/platform/jobs` and `/platform/guardrails`. See the [design](docs/specs/2026-10-31-plan-4-feedback-audit-documents-admin-design.md) §15 and [Plan 4](docs/plans/2026-11-03-plan-4-feedback-audit-admin.md).
 
+## Document pipeline phase 0: notes for later tasks
+
+- **Layout separation is by seed only (ruling D7).** An eval layout can look like a training one, so the eval score does not measure unseen template families. Held-out layout families (unseen templates) come with set v1.1.
+- **File names (ruling D6).** Generated file names must keep digit runs to 5 or fewer: the scanner refuses 6 or more as `filename`. Task 8 names files and must follow this. The renderer itself generates no file names.
+
 ## Open items for the core service
 
 From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md):

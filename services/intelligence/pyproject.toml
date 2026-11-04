@@ -55,7 +55,7 @@ dependencies = [
     "boto3>=1.43.123",
     "jsonschema>=4.26.0",
     "safetensors>=0.8.0",
-    "pillow>=12.3.0",
+    "pillow>=12.3.0,<13",
 ]
 
 [dependency-groups]
