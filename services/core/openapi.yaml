@@ -1180,9 +1180,11 @@ paths:
         shown ones (row sums, `all` minus the shown rows). A share is 0 to 1
         with four decimal places; `{value: null, suppressed: false}` is no
         answers to divide by. `from` and `to` bound the period; the figures
-        run to `to`, the start of today, UTC, and `updated_at` is that same
-        instant. A period's response is the same all day (computed once a day
-        per core copy), so reads can't be differenced minute by minute. Six
+        run to `to`, the start of today, UTC (until 00:15 UTC, the start of
+        yesterday: a day's figures wait 15 minutes for late commits), and
+        `updated_at` is that same instant. Each period's day is one stored
+        snapshot, computed once and served by every core copy all day, so
+        reads within a day are identical. Six
         reads a minute per session, then 429 `rate_limited`. Not recorded in
         the audit log (aggregates about no person).
       tags: [platform]

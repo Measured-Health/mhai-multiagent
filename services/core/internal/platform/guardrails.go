@@ -11,17 +11,20 @@ package platform
 // what is shown (C19, C20).
 //
 // Platform admins and auditors, two-step always. The window is whole UTC
-// days ending at the start of today (ruling R42), so each period's
-// response is computed once a day per core copy and every read within the
-// day is the same (the cache holds the guarded response, never the raw
-// counts); each session may ask 6 times a minute (429 rate_limited, C31),
+// days ending at the start of today (ruling R42; the previous day's until
+// 00:15 UTC), and each period's day is one snapshot in guardrail_snapshots
+// (R43, 00017), computed once by whichever copy asks first and served by
+// every copy all day (the snapshot and the in-process cache hold the
+// guarded response, never the raw counts); each session may ask 6 times a minute (429 rate_limited, C31),
 // because the computation scans clinical_decisions (P17).
 //
 // Not recorded in the audit log: the spec rules it out (§6.3, "not audited
 // per read": aggregates about no person, polled like health).
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sync"
@@ -80,9 +83,10 @@ type GuardrailsOut struct {
 }
 
 // guardCache holds each period's guarded response for the UTC day it runs
-// to (ruling R42): the window is whole days, ending at the start of today,
-// so every read of a period within a day is byte-identical, and a client
-// can't difference two reads minutes apart. One computation per period at
+// to (rulings R42, R43), in front of the stored snapshot: the window is
+// whole days, and every copy serves the one stored row for the day, so
+// every read of a period within a day is byte-identical, and a client
+// can't difference two reads. One computation per period at
 // a time: a caller waits for the one in progress (or gives up when its own
 // request ends) rather than starting another.
 type guardCache struct {
@@ -136,11 +140,100 @@ func (c *guardCache) get(ctx context.Context, period string, to time.Time, compu
 	return out, nil
 }
 
-// guardWindow is the period's window: whole UTC days, ending at the start
-// of today (R42).
+// GuardrailsGrace is how long after midnight UTC a day's figures wait
+// before they are computed (R43): longer than any write transaction, so a
+// decision committed after midnight but dated before it is in them. Until
+// then the previous day's figures are served.
+const GuardrailsGrace = 15 * time.Minute
+
+// guardClock replaces the route's clock in tests (nil: Deps.now).
+var guardClock func() time.Time
+
+// guardWindow is the period's window (R42, R43): whole UTC days, ending at
+// the start of the UTC day GuardrailsGrace before now. So from 00:00 to
+// 00:15 UTC the figures to yesterday's midnight are served, and from 00:15
+// those to today's.
 func guardWindow(now time.Time, days int) (from, to time.Time) {
-	to = now.UTC().Truncate(24 * time.Hour)
+	to = now.UTC().Add(-GuardrailsGrace).Truncate(24 * time.Hour)
 	return to.AddDate(0, 0, -days), to
+}
+
+// maxSnapshotBytes bounds a stored snapshot read back.
+const maxSnapshotBytes = 4 << 20
+
+// snapshot is period's figures for the day ending at to (R43): the stored
+// row if there is one; otherwise computed, inserted if no other copy got
+// there first (ON CONFLICT DO NOTHING), and the stored row read back. Every
+// copy serves the stored row, so a day's figures are one snapshot whoever
+// asks, whatever changed since (a late decision, a hospital deactivated).
+func (d Deps) snapshot(ctx context.Context, period string, from, to time.Time) (GuardrailsOut, error) {
+	ctx, cancel := context.WithTimeout(ctx, guardrailsTimeout)
+	defer cancel()
+	day := to.Format(time.DateOnly)
+	read := func() ([]byte, error) {
+		var body []byte
+		err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT body::text FROM guardrail_snapshots WHERE period = $1 AND day = $2::date`, period, day).Scan(&body)
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return body, err
+	}
+	body, err := read()
+	if err != nil {
+		return GuardrailsOut{}, err
+	}
+	if body == nil {
+		out, err := d.computeGuardrails(ctx, period, from, to)
+		if err != nil {
+			return GuardrailsOut{}, err
+		}
+		raw, err := json.Marshal(out)
+		if err != nil {
+			return GuardrailsOut{}, err
+		}
+		if err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO guardrail_snapshots (period, day, body) VALUES ($1, $2::date, $3::jsonb)
+				ON CONFLICT (period, day) DO NOTHING`, period, day, string(raw))
+			return err
+		}); err != nil {
+			return GuardrailsOut{}, err
+		}
+		if body, err = read(); err != nil {
+			return GuardrailsOut{}, err
+		}
+		if body == nil {
+			return GuardrailsOut{}, errSnapshot
+		}
+	}
+	return decodeSnapshot(body, period, from, to)
+}
+
+var errSnapshot = errors.New("platform: guardrail snapshot not usable")
+
+// decodeSnapshot reads a stored snapshot strictly: no unknown field, every
+// value a guarded one (smallgroup's decoders refuse a shown 1 to 4), the
+// period and window it was stored for, four-column rows.
+func decodeSnapshot(b []byte, period string, from, to time.Time) (GuardrailsOut, error) {
+	var out GuardrailsOut
+	if len(b) == 0 || len(b) > maxSnapshotBytes {
+		return out, errSnapshot
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&out); err != nil || dec.More() {
+		return GuardrailsOut{}, errSnapshot
+	}
+	if out.Period != period || out.From != stamp(from) || out.To != stamp(to) || out.UpdatedAt != stamp(to) || out.Hospitals == nil {
+		return GuardrailsOut{}, errSnapshot
+	}
+	for _, h := range out.Hospitals {
+		if !canonicalUUID(h.Hospital.ID) || !audit.ShowableName(h.Hospital.Name) {
+			return GuardrailsOut{}, errSnapshot
+		}
+	}
+	return out, nil
 }
 
 func registerGuardrails(m *authz.Mux, d Deps) {
@@ -172,11 +265,16 @@ func (d Deps) guardrails(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "rate_limited")
 		return
 	}
-	from, to := guardWindow(d.now(), days)
-	// The computation outlives a caller who goes away (others may be
-	// waiting for it), bounded by its own timeout.
+	now := d.now()
+	if guardClock != nil {
+		now = guardClock().UTC()
+	}
+	from, to := guardWindow(now, days)
+	// The in-process cache reads through to the stored snapshot. The work
+	// outlives a caller who goes away (others may be waiting for it),
+	// bounded by its own timeout.
 	out, err := guardrailsCache.get(r.Context(), period, to, func() (GuardrailsOut, error) {
-		return d.computeGuardrails(context.WithoutCancel(r.Context()), period, from, to)
+		return d.snapshot(context.WithoutCancel(r.Context()), period, from, to)
 	})
 	if err != nil {
 		// No count is ever in the log: ids and a fixed reason only.
@@ -203,8 +301,6 @@ var errCounts = errors.New("platform: guardrail counts don't add up")
 // response (no guess). updated_at is to: the figures run to the start of
 // today, UTC.
 func (d Deps) computeGuardrails(ctx context.Context, period string, from, to time.Time) (GuardrailsOut, error) {
-	ctx, cancel := context.WithTimeout(ctx, guardrailsTimeout)
-	defer cancel()
 	var rows []guardRow
 	err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error {
 		q, err := tx.Query(ctx, `SELECT g.hospital_id, h.name, g.answers, g.pass, g.regenerate, g.escalate, g.degraded
@@ -231,7 +327,12 @@ func (d Deps) computeGuardrails(ctx context.Context, period string, from, to tim
 	if err != nil {
 		return GuardrailsOut{}, err
 	}
+	return d.guardOut(period, from, to, rows)
+}
 
+// guardOut guards rows' raw counts into the response. No rows (no active
+// hospital) is a response with an all row of zeros and no hospitals.
+func (d Deps) guardOut(period string, from, to time.Time, rows []guardRow) (GuardrailsOut, error) {
 	table := make([][]int64, len(rows))
 	degraded := make([]int64, len(rows))
 	all := make([]int64, 4)
@@ -244,7 +345,15 @@ func (d Deps) computeGuardrails(ctx context.Context, period string, from, to tim
 	}
 	// Rules 1, 2 and 4 over the hospitals and all; degraded within answers
 	// and as its own column (smallgroup.Table); rule 3 for each share.
-	t := smallgroup.Table(table, degraded)
+	t := smallgroup.Table(4, table, degraded)
+	if len(t.All) != 4 || len(t.Rows) != len(rows) || len(t.Subset) != len(rows)+1 {
+		return GuardrailsOut{}, errCounts
+	}
+	for _, r := range t.Rows {
+		if len(r) != 4 {
+			return GuardrailsOut{}, errCounts
+		}
+	}
 	rates := func(raw []int64, g []smallgroup.Guarded, deg smallgroup.Guarded) Rates {
 		return Rates{
 			Answers: g[0], Pass: g[1], Regenerate: g[2], Escalate: g[3], Degraded: deg,

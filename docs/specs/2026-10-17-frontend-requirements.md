@@ -1002,7 +1002,7 @@ its query. Served by the core service; the shape is in
 
 | Endpoint | Behaviour | Status |
 |---|---|---|
-| `GET /platform/guardrails?period=7d\|30d\|90d` | → `{period, from, to, updated_at, all, hospitals}`; `all` and each hospital row (`{hospital: {id, name}, ...}`) carry `answers`, `pass`, `regenerate`, `escalate`, `degraded`, `pass_share`, `regenerate_share`, `escalate_share`, every one guarded (`{value, suppressed}`, §14.7). Active hospitals only. The period is whole UTC days ending at the start of today (`to`, and `updated_at`, are 00:00 UTC today), so the figures are the same all day. Platform admins and auditors; two-step. 6 reads a minute per session, then **429 `rate_limited`**. Not audited | **New** (built, Plan 4) |
+| `GET /platform/guardrails?period=7d\|30d\|90d` | → `{period, from, to, updated_at, all, hospitals}`; `all` and each hospital row (`{hospital: {id, name}, ...}`) carry `answers`, `pass`, `regenerate`, `escalate`, `degraded`, `pass_share`, `regenerate_share`, `escalate_share`, every one guarded (`{value, suppressed}`, §14.7). Active hospitals only. The period is whole UTC days ending at the start of today (`to`, and `updated_at`, are 00:00 UTC today; until 00:15 UTC, yesterday's), and each day's figures are one stored snapshot, so they are the same all day. Platform admins and auditors; two-step. 6 reads a minute per session, then **429 `rate_limited`**. Not audited | **New** (built, Plan 4) |
 
 The server applies the §14.7 small-group duties: no count of 1–4; in each
 set that adds up (a row's answers and its parts, each column's `all` and its

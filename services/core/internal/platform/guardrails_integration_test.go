@@ -25,8 +25,21 @@ var rawSmall = regexp.MustCompile(`"value":\s*[1-4]\s*[,}]`)
 
 var rateKeys = []string{"answers", "pass", "regenerate", "escalate", "degraded", "pass_share", "regenerate_share", "escalate_share"}
 
-// startOfToday is where every window ends (ruling R42).
-func startOfToday() time.Time { return time.Now().UTC().Truncate(24 * time.Hour) }
+// startOfToday is where every window ends (rulings R42, R43): the start of
+// the UTC day 15 minutes ago.
+func startOfToday() time.Time {
+	return time.Now().UTC().Add(-platform.GuardrailsGrace).Truncate(24 * time.Hour)
+}
+
+// freshGuardrails empties the in-process cache and the stored snapshots,
+// so a test sees what it seeded.
+func freshGuardrails(t *testing.T) {
+	t.Helper()
+	platform.ResetGuardrailsCache()
+	if _, err := super.Exec(context.Background(), `DELETE FROM guardrail_snapshots`); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // seedDecisions adds n decisions of hid, ago before the start of today
 // (UTC), as the superuser.
@@ -107,7 +120,7 @@ func shownValue(m map[string]any, k string) (float64, bool) {
 }
 
 func TestGuardrailsShape(t *testing.T) {
-	platform.ResetGuardrailsCache()
+	freshGuardrails(t)
 	h := seedHospital(t, "active")
 	seedDecisions(t, h, "PASS", false, 10, time.Hour)
 	seedDecisions(t, h, "REGENERATE", true, 6, 2*time.Hour)
@@ -173,7 +186,7 @@ func TestGuardrailsShape(t *testing.T) {
 // Active hospitals only: a deactivated or set-up hospital has no row and
 // isn't in all; all is the sum over active hospitals when shown.
 func TestGuardrailsActiveHospitalsOnly(t *testing.T) {
-	platform.ResetGuardrailsCache()
+	freshGuardrails(t)
 	active := seedHospital(t, "active")
 	gone := seedHospital(t, "deactivated")
 	setup := seedHospital(t, "setup_incomplete")
@@ -225,35 +238,104 @@ func TestGuardrailsRateLimited(t *testing.T) {
 	ok(t, "another session", guardrails(t, mint(t, u), "?period=30d"))
 }
 
-// Cached 60 s per period: a second read within the minute doesn't see new
-// decisions; a fresh computation does.
-func TestGuardrailsCached(t *testing.T) {
-	platform.ResetGuardrailsCache()
+// R43: a period's day is one stored snapshot. A second core copy (a fresh
+// in-process cache) serves the same bytes, though decisions were added and
+// a hospital deactivated after the snapshot; with the snapshot gone, a
+// fresh computation shows the change.
+func TestGuardrailsOneSnapshotPerDay(t *testing.T) {
+	freshGuardrails(t)
 	h := seedHospital(t, "active")
+	gone := seedHospital(t, "active")
 	seedDecisions(t, h, "PASS", false, 20, time.Hour)
+	seedDecisions(t, gone, "PASS", false, 30, time.Hour)
 	tok := mint(t, platformAdmin(t))
 	first := guardrails(t, tok, "?period=90d")
 	ok(t, "first", first)
-	seedDecisions(t, h, "PASS", false, 20, time.Hour)
+	if hospitalRow(t, first, gone) == nil {
+		t.Fatal("the hospital to deactivate is missing")
+	}
+	seedDecisions(t, h, "PASS", false, 20, time.Hour) // a late commit, dated yesterday
+	if _, err := super.Exec(context.Background(), `UPDATE hospitals SET status = 'deactivated' WHERE id = $1`, gone); err != nil {
+		t.Fatal(err)
+	}
 	second := guardrails(t, tok, "?period=90d")
-	ok(t, "second", second)
-	if first.raw != second.raw {
-		t.Error("a read within the minute was computed again")
+	ok(t, "second, same copy", second)
+	platform.ResetGuardrailsCache() // another core copy
+	third := guardrails(t, mint(t, auditor(t)), "?period=90d")
+	ok(t, "third, another copy", third)
+	if first.raw != second.raw || first.raw != third.raw {
+		t.Errorf("one day's reads differ:\n%s\n%s\n%s", first.raw, second.raw, third.raw)
+	}
+	var n int
+	if err := super.QueryRow(context.Background(), `SELECT count(*) FROM guardrail_snapshots WHERE period = '90d'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("%d stored snapshots for 90d (%v), want 1", n, err)
+	}
+	freshGuardrails(t)
+	fourth := guardrails(t, tok, "?period=90d")
+	ok(t, "fourth, after the snapshot is gone", fourth)
+	a1, shown1 := shownValue(hospitalRow(t, first, h), "answers")
+	a4, shown4 := shownValue(hospitalRow(t, fourth, h), "answers")
+	if !shown1 || !shown4 || a1 != 20 || a4 != 40 {
+		t.Errorf("answers: first %v (shown %v), recomputed %v (shown %v); want 20 then 40", a1, shown1, a4, shown4)
+	}
+	if hospitalRow(t, fourth, gone) != nil {
+		t.Error("a recomputed day lists the deactivated hospital")
+	}
+}
+
+// R43: from 00:00 to 00:15 UTC the previous day's figures are served (and
+// computed if missing); from 00:15, today's.
+func TestGuardrailsGraceServesPreviousDay(t *testing.T) {
+	freshGuardrails(t)
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	tok := mint(t, platformAdmin(t))
+	for _, c := range []struct {
+		at   time.Duration
+		want time.Time
+	}{
+		{5 * time.Minute, today.AddDate(0, 0, -1)},
+		{20 * time.Minute, today},
+	} {
+		restore := platform.SetGuardrailsClock(func() time.Time { return today.Add(c.at) })
+		r := guardrails(t, tok, "?period=7d")
+		restore()
+		ok(t, c.at.String(), r)
+		if r.body["to"] != c.want.Format("2006-01-02T15:04:05.000Z") || r.body["updated_at"] != r.body["to"] {
+			t.Errorf("at %v past midnight: to %v updated_at %v, want %v", c.at, r.body["to"], r.body["updated_at"], c.want)
+		}
+	}
+	var days []string
+	if err := super.QueryRow(context.Background(), `SELECT array_agg(day::text ORDER BY day) FROM guardrail_snapshots WHERE period = '7d'`).Scan(&days); err != nil {
+		t.Fatal(err)
+	}
+	if len(days) != 2 || days[0] != today.AddDate(0, 0, -1).Format(time.DateOnly) || days[1] != today.Format(time.DateOnly) {
+		t.Errorf("stored days %v", days)
+	}
+}
+
+// A stored snapshot that breaks rule 1 (a shown 3, put there by hand) is
+// never served: 500, no body.
+func TestGuardrailsBadSnapshotRefused(t *testing.T) {
+	freshGuardrails(t)
+	tok := mint(t, platformAdmin(t))
+	r := guardrails(t, tok, "?period=30d")
+	ok(t, "first", r)
+	if _, err := super.Exec(context.Background(), `UPDATE guardrail_snapshots
+		SET body = jsonb_set(body, '{all,answers}', '{"value": 3, "suppressed": false}') WHERE period = '30d'`); err != nil {
+		t.Fatal(err)
 	}
 	platform.ResetGuardrailsCache()
-	third := guardrails(t, tok, "?period=90d")
-	ok(t, "third", third)
-	a1, shown1 := shownValue(hospitalRow(t, first, h), "answers")
-	a3, shown3 := shownValue(hospitalRow(t, third, h), "answers")
-	if !shown1 || !shown3 || a1 != 20 || a3 != 40 {
-		t.Errorf("answers: first %v (shown %v), after a fresh computation %v (shown %v); want 20 then 40", a1, shown1, a3, shown3)
+	bad := guardrails(t, tok, "?period=30d")
+	problem(t, "a stored small count", bad, 500, "internal_error")
+	if rawSmall.MatchString(bad.raw) {
+		t.Errorf("the small count was sent: %s", bad.raw)
 	}
 }
 
 // C19 end to end: hospitals with counts of 1 to 4 everywhere; the JSON
 // never holds a "value" of 1 to 4, and no shown count is one.
 func TestGuardrailsNoRawSmallCount(t *testing.T) {
-	platform.ResetGuardrailsCache()
+	freshGuardrails(t)
 	for _, c := range [][4]int{{1, 0, 0, 1}, {3, 2, 1, 2}, {4, 4, 4, 4}, {0, 1, 0, 0}, {6, 3, 0, 2}, {2, 0, 7, 1}, {12, 4, 1, 3}} {
 		h := seedHospital(t, "active")
 		seedDecisions(t, h, "PASS", false, c[0], time.Hour)
