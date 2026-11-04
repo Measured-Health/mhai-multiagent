@@ -129,6 +129,11 @@ func ShareOf(num, den int64, numG, denG Guarded) GuardedShare {
 	return Share(num, den)
 }
 
+// skipBridge turns the bridge repair off, so a test can show the property
+// test catches rule 4 taken literally (two hidden per column). Never set
+// outside tests.
+var skipBridge bool
+
 // line is one set that adds up: total = Σ parts, as cell indexes.
 type line struct {
 	total int
@@ -331,7 +336,7 @@ func AcrossRows(all []int64, rows [][]int64) ([]Guarded, [][]Guarded) {
 			continue
 		}
 		b, ok := bridge(g.hide, h, w)
-		if !ok {
+		if !ok || skipBridge {
 			break
 		}
 		g.hide[g.breakBridge(b, h, w)] = true
@@ -473,4 +478,74 @@ func (g *grid) breakBridge(b, h, w int) int {
 		all[i] = i
 	}
 	return g.pick(all)
+}
+
+// Within is rules 1 and 2 over a set that adds up (total = Σ parts) whose
+// every member is a subset of another shown or hidden count: within[0]
+// holds the total, within[i+1] part i (degraded within answers). A member
+// is hidden first when its container is hidden, or when container −
+// member is 1 to 4 (the two shown would give a small group away); then
+// rule 2 runs on the set.
+func Within(total int64, parts []int64, within []int64, withinG []Guarded) []Guarded {
+	vals := append([]int64{total}, parts...)
+	g := newGrid(vals)
+	if len(within) != len(vals) || len(withinG) != len(vals) {
+		for i := range g.hide {
+			g.hide[i] = true
+		}
+		return g.out()
+	}
+	for i, v := range vals {
+		if !withinG[i].Shown() || v > within[i] || small(within[i]-v) {
+			g.hide[i] = true
+		}
+	}
+	l := line{total: 0}
+	for i := range parts {
+		l.parts = append(l.parts, i+1)
+	}
+	g.enforce(l)
+	return g.out()
+}
+
+// TableOut is a guarded table: the all row, each row, and the subset
+// column (all first, then each row's).
+type TableOut struct {
+	All    []Guarded
+	Rows   [][]Guarded
+	Subset []Guarded
+}
+
+// Table guards a table of rows [total, part1, …] with the all row their
+// column sums (AcrossRows), and a subset count per row (sub[i] is within
+// rows[i][0], as degraded is within answers), whose column is a set that
+// adds up of its own (Within). The route and the property test both run
+// this.
+func Table(rows [][]int64, sub []int64) TableOut {
+	w := 0
+	if len(rows) > 0 {
+		w = len(rows[0])
+	}
+	all := make([]int64, max(w, 2))
+	for _, r := range rows {
+		for j, v := range r {
+			if j < len(all) {
+				all[j] += v
+			}
+		}
+	}
+	ga, gr := AcrossRows(all, rows)
+	var subAll int64
+	for _, v := range sub {
+		subAll += v
+	}
+	within := []int64{all[0]}
+	withinG := []Guarded{ga[0]}
+	for i := range sub {
+		if i < len(rows) && len(rows[i]) > 0 {
+			within = append(within, rows[i][0])
+			withinG = append(withinG, gr[i][0])
+		}
+	}
+	return TableOut{All: ga, Rows: gr, Subset: Within(subAll, sub, within, withinG)}
 }

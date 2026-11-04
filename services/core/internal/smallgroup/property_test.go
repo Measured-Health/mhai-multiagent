@@ -2,8 +2,10 @@ package smallgroup
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -147,26 +149,24 @@ func recovered(nCells int, eqs [][][2]int, hide []bool) []int {
 	return out
 }
 
-// guard runs the rules as the route does: AcrossRows on the main table, Set
-// on degraded's column. Cells: the all row (4), each hospital (4), then
-// degraded's all, then each hospital's degraded.
+// guard runs the rules as the route does (Table). Cells: the all row (4),
+// each hospital (4), then degraded's all, then each hospital's degraded.
 func guard(t table) ([]int64, []Guarded) {
 	all := sums(t.rows)
-	ga, gr := AcrossRows(all, t.rows)
+	o := Table(t.rows, t.degraded)
 	var dAll int64
 	for _, d := range t.degraded {
 		dAll += d
 	}
-	gd := Set(dAll, t.degraded...)
 	vals := append([]int64{}, all...)
-	out := append([]Guarded{}, ga...)
+	out := append([]Guarded{}, o.All...)
 	for i, row := range t.rows {
 		vals = append(vals, row...)
-		out = append(out, gr[i]...)
+		out = append(out, o.Rows[i]...)
 	}
 	vals = append(vals, dAll)
 	vals = append(vals, t.degraded...)
-	out = append(out, gd...)
+	out = append(out, o.Subset...)
 	return vals, out
 }
 
@@ -197,14 +197,16 @@ func equations(h int) [][][2]int {
 	return append(eqs, eq)
 }
 
-// contains lists, for each cell, the hospital-level atoms it adds up, so
+// atoms lists, for each cell, the hospital-level atoms it adds up, so
 // nested shown pairs can be compared (secure-build: a shown pair where one
-// contains the other must not differ by 1 to 4).
+// contains the other must not differ by 1 to 4). An atom is (hospital,
+// part, degraded or not): degraded is within answers, not within any one
+// part, so a part and degraded are never nested, but answers and degraded
+// are.
 func atoms(h int) [][]int {
 	const w = 4
+	atom := func(hi, pj, d int) int { return ((hi-1)*(w-1)+(pj-1))*2 + d }
 	var out [][]int
-	atom := func(i, j int) int { return (i-1)*(w-1) + (j - 1) } // parts of hospitals
-	nParts := h * (w - 1)
 	for i := 0; i <= h; i++ {
 		for j := 0; j < w; j++ {
 			var a []int
@@ -216,20 +218,26 @@ func atoms(h int) [][]int {
 					if j != 0 && pj != j {
 						continue
 					}
-					a = append(a, atom(hi, pj))
+					a = append(a, atom(hi, pj, 0), atom(hi, pj, 1))
 				}
 			}
 			out = append(out, a)
 		}
 	}
-	// degraded: its all, then each hospital's.
+	deg := func(hi int) []int {
+		var a []int
+		for pj := 1; pj < w; pj++ {
+			a = append(a, atom(hi, pj, 1))
+		}
+		return a
+	}
 	var dAll []int
 	for hi := 1; hi <= h; hi++ {
-		dAll = append(dAll, nParts+hi)
+		dAll = append(dAll, deg(hi)...)
 	}
 	out = append(out, dAll)
 	for hi := 1; hi <= h; hi++ {
-		out = append(out, []int{nParts + hi})
+		out = append(out, deg(hi))
 	}
 	return out
 }
@@ -247,11 +255,12 @@ func subset(a, b []int) bool {
 	return true
 }
 
-func TestNoHiddenValueDerivable(t *testing.T) {
-	r := rand.New(rand.NewSource(20261103))
-	const tables = 10000
+// leak runs the property over n random tables and describes the first
+// table that gives a hidden value away, or returns "".
+func leak(seed int64, n int) string {
+	r := rand.New(rand.NewSource(seed))
 	hiddenCells := 0
-	for k := 0; k < tables; k++ {
+	for k := 0; k < n; k++ {
 		tb := randomTable(r)
 		h := len(tb.rows)
 		vals, g := guard(tb)
@@ -262,16 +271,15 @@ func TestNoHiddenValueDerivable(t *testing.T) {
 				hiddenCells++
 			}
 			if x.Shown() && (*x.Value != vals[i] || small(vals[i])) {
-				t.Fatalf("table %d %v: cell %d shown as %d (raw %d)", k, tb, i, *x.Value, vals[i])
+				return fmt.Sprintf("table %d %v: cell %d shown as %d (raw %d)", k, tb, i, *x.Value, vals[i])
 			}
 			if !x.Shown() && !x.Suppressed {
-				t.Fatalf("table %d: cell %d neither shown nor hidden", k, i)
+				return fmt.Sprintf("table %d: cell %d neither shown nor hidden", k, i)
 			}
 		}
 		if got := recovered(len(vals), equations(h), hide); len(got) > 0 {
-			t.Fatalf("table %d %v (degraded %v): hidden cells %v recovered; hidden %v", k, tb.rows, tb.degraded, got, hide)
+			return fmt.Sprintf("table %d %v (degraded %v): hidden cells %v recovered", k, tb.rows, tb.degraded, got)
 		}
-		// No shown pair where one contains the other differs by 1 to 4.
 		at := atoms(h)
 		for i := range vals {
 			for j := range vals {
@@ -279,20 +287,36 @@ func TestNoHiddenValueDerivable(t *testing.T) {
 					continue
 				}
 				if d := vals[i] - vals[j]; small(d) {
-					t.Fatalf("table %d %v: cells %d and %d differ by %d", k, tb.rows, i, j, d)
+					return fmt.Sprintf("table %d %v (degraded %v): shown cells %d and %d differ by %d", k, tb.rows, tb.degraded, i, j, d)
 				}
 			}
 		}
-		b, err := json.Marshal(g)
-		if err != nil {
-			t.Fatal(err)
-		}
+		b, _ := json.Marshal(g)
 		if smallValue.Match(b) {
-			t.Fatalf("table %d encodes a small value: %s", k, b)
+			return fmt.Sprintf("table %d encodes a small value: %s", k, b)
 		}
 	}
 	if hiddenCells == 0 {
-		t.Fatal("no cell was ever hidden: the generator tests nothing")
+		return "no cell was ever hidden: the generator tests nothing"
+	}
+	return ""
+}
+
+func TestNoHiddenValueDerivable(t *testing.T) {
+	if msg := leak(20261103, 10000); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
+// With the bridge repair off (rule 4 taken literally: two hidden per
+// column, hidden sums at least 5), the same property finds a hidden value
+// it can solve for: the repair is what C20 rests on.
+func TestPropertyCatchesLiteralRule4(t *testing.T) {
+	skipBridge = true
+	defer func() { skipBridge = false }()
+	msg := leak(20261103, 10000)
+	if !strings.Contains(msg, "recovered") {
+		t.Fatalf("the property passed rule 4 taken literally: %q", msg)
 	}
 }
 
