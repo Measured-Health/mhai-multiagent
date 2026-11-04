@@ -188,7 +188,7 @@ def test_deadline_over_five_percent_stops_the_run(small: minisets.MiniSet) -> No
         runner.run(extractors.SlowExtractor(30), small.root, per_page_deadline_s=0.2)
     assert time.perf_counter() - t < 2.0
     assert e.value.reason == "evaluation_failed"
-    assert e.value.detail_code == "internal"
+    assert e.value.detail_code == "timeouts"
 
 
 @pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"), True])

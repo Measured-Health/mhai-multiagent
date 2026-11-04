@@ -15,7 +15,7 @@ Order of work:
    ``per_page_deadline_s`` times the page count; a call past it is abandoned (its result
    is never read) and counted ``deadline``. When more than 5% of the set's documents
    have hit the deadline the run stops: ``Refused("evaluation_failed",
-   detail_code="internal")``. An abandoned call may still be running while the next
+   detail_code="timeouts")``. An abandoned call may still be running while the next
    document starts; an extractor that is not thread-safe should refuse to overlap.
 3. **Check every output.** A document must serialise to at most ``max_output_bytes``
    of strict JSON (no NaN, no duplicate keys) and validate against the stored view.
@@ -573,7 +573,7 @@ def run(
     """Verify ``set_dir`` against its ``testset.json``, run ``extractor`` over it, score it.
 
     Raises ``Refused("testset_mismatch")`` if the set does not verify (nothing is run),
-    and ``Refused("evaluation_failed", detail_code="internal")`` when more than 5% of
+    and ``Refused("evaluation_failed", detail_code="timeouts")`` when more than 5% of
     the documents time out.
     """
     deadline = _positive(per_page_deadline_s, "bad_deadline")
@@ -641,7 +641,7 @@ def run(
                     timeouts,
                     total_docs,
                 )
-                raise Refused("evaluation_failed", detail_code="internal")
+                raise Refused("evaluation_failed", detail_code="timeouts")
 
         if doc.hostile:
             assert doc.twin is not None
