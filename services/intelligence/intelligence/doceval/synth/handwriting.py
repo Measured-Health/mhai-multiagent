@@ -303,6 +303,14 @@ def _targets(
     return chosen
 
 
+def _border_colour(img: Image.Image, px: PixelBox) -> tuple[int, int, int]:
+    """The paper colour around a box: the median of its one-pixel border."""
+    arr = np.asarray(img.crop(px)).astype(np.int32)
+    ring = np.concatenate([arr[0], arr[-1], arr[:, 0], arr[:, -1]])
+    med = np.median(ring, axis=0)
+    return (int(med[0]), int(med[1]), int(med[2]))
+
+
 def _split_column(region: Image.Image) -> int | None:
     """Local x where a printed title ends and the written part begins: the first gap
     between words (a run of blank columns at least 0.18 of the height wide)."""
@@ -375,7 +383,7 @@ def handwritten_document(
             hand = render_field(text, px, rng, style)
         except HandwritingError:
             continue  # too small to write by hand: stays printed
-        bg = img.getpixel((px[0], px[1]))
+        bg = _border_colour(img, px)
         ImageDraw.Draw(img).rectangle((px[0], px[1], px[2] - 1, px[3] - 1), fill=bg)
         img.paste(hand.image, (px[0], px[1]), hand.image.getchannel("A"))
         ink = (
@@ -397,6 +405,8 @@ def handwritten_document(
         for path in paths:
             boxes[path] = (page_no, new)
             scripts[path] = script
+    if mode == "handwritten" and not scripts:
+        raise HandwritingError("no_handwriting")
     for path, fld in fields.items():
         if path in scripts:
             fld["script"] = scripts[path]

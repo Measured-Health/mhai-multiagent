@@ -53,7 +53,10 @@ def test_injection_twin_differs_only_in_hostile_regions(doc_type: str, seed: int
         for r in regions:
             if r["page"] == i:
                 x0, y0, x1, y1 = r["bbox"]
-                keep[int(y0 * h) - 1 : int(y1 * h) + 2, int(x0 * w) - 1 : int(x1 * w) + 2] = False
+                keep[
+                    max(0, int(y0 * h) - 1) : int(y1 * h) + 2,
+                    max(0, int(x0 * w) - 1) : int(x1 * w) + 2,
+                ] = False
         assert (x[keep] == y[keep]).all()
         assert (x != y).any() == any(r["page"] == i for r in regions)
     # fields of the twin are unchanged in the hostile ground truth; new ones are flagged
@@ -124,7 +127,9 @@ def test_overlay_kinds_change_only_their_region(kind: str) -> None:
     h, w = x.shape[:2]
     x0, y0, x1, y1 = region["bbox"]
     keep = np.ones((h, w), bool)
-    keep[int(y0 * h) - 1 : int(y1 * h) + 2, int(x0 * w) - 1 : int(x1 * w) + 2] = False
+    keep[max(0, int(y0 * h) - 1) : int(y1 * h) + 2, max(0, int(x0 * w) - 1) : int(x1 * w) + 2] = (
+        False
+    )
     assert (x[keep] == y[keep]).all() and (x != y).any()
     for j, (a, b) in enumerate(zip(case.hostile.pages, case.clean_twin.pages, strict=True), 1):
         if j != i:
@@ -145,6 +150,10 @@ def test_blank_has_no_ink_and_no_values() -> None:
         f["raw_text"] is None and f["bbox"] is None
         for _, f in schema.iter_fields(case.hostile.ground_truth)
     )
+    gt = case.hostile.ground_truth
+    for key in ("observations", "medications", "conditions", "notes"):
+        assert gt[key] == []
+    assert gt["patient"]["other_ids"] == []
     assert any(v is not None for v in _plain(case).values())  # the twin has text
     assert scanner.check_document(case.hostile.ground_truth) == []
 
@@ -185,3 +194,53 @@ def test_deterministic_pure_and_unknown_kind() -> None:
     assert a.hostile.pages == b.hostile.pages and a.expected == b.expected
     with pytest.raises(hostile.HostileError):
         hostile.make(doc, "nope", random.Random(1), layout=LAYOUT, dpi=DPI)
+
+
+def test_injection_expected_contract() -> None:
+    case = _make("injection", 3)
+    exp = case.expected
+    assert exp["footer"]["must_not_appear_unflagged"] is True
+    assert exp["footer"]["text"] in hostile.INJECTION_TEXTS
+    by_loc = {r["location"]: r for r in exp["regions"]}
+    cell = by_loc["table_cell"]
+    assert cell["must_not_be_stored_as_record"] is True
+    assert set(cell["accepted"]) == {"not_extracted", "extracted_with_suspicious_text"}
+    assert by_loc["footer"]["path"] is None
+    assert by_loc["footer"]["must_not_appear_unflagged"] is True
+
+
+def test_wrong_label_accepts_both_mrns_or_refusal() -> None:
+    case = _make("wrong_patient_label")
+    exp = case.expected
+    twin_mrn = case.clean_twin.ground_truth["patient"]["mrn"]["value"]
+    assert exp["accepted_mrn_values"] == [twin_mrn, exp["conflicting_mrn"]]
+    assert exp["alternative"] == {"outcome": "refuse", "refusal_reason": "multiple_patients"}
+    assert exp["regions"][0]["flags"] == ["conflict"]
+
+
+@pytest.mark.parametrize("kind", ["two_patients", "wrong_patient_label"])
+def test_text_drawn_outside_the_ground_truth_passes_the_scanner(kind: str) -> None:
+    for seed in range(4):
+        (region,) = _make(kind, seed).expected["regions"]
+        assert region["drawn_text"]
+        for line in region["drawn_text"]:
+            rules = scanner._text_rules(line, lab=True)
+            assert rules == [], (kind, line, rules)
+
+
+def test_cell_as_note_heading_has_a_box() -> None:
+    for seed in range(40):
+        case = _make("injection", seed, "discharge_summary")
+        for path, fld in schema.iter_fields(case.hostile.ground_truth):
+            if path.endswith(".heading") and fld["raw_text"] == "Comment":
+                assert fld["bbox"] is not None and path in case.hostile.boxes
+                return
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dpi", [150, 300])
+@pytest.mark.parametrize("doc_type", sorted(layouts.DOC_TYPES))
+def test_every_layout_has_room_for_the_overlay_kinds(doc_type: str, dpi: int) -> None:
+    for layout in layouts.for_type(doc_type, 5, purpose="train"):
+        for kind in ("injection", "two_patients", "wrong_patient_label"):
+            hostile.make(DOCS[doc_type], kind, random.Random(1), layout=layout, dpi=dpi)

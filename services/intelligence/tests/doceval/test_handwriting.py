@@ -66,7 +66,9 @@ def test_handwritten_fields_marked_script(doc_type: str) -> None:
         if out.boxes[p][0] == 1:
             x0, y0, x1, y1 = plain.boxes[p][1]
             h, w = keep.shape
-            keep[int(y0 * h) - 2 : int(y1 * h) + 3, int(x0 * w) - 2 : int(x1 * w) + 3] = False
+            keep[
+                max(0, int(y0 * h) - 2) : int(y1 * h) + 3, max(0, int(x0 * w) - 2) : int(x1 * w) + 3
+            ] = False
     assert (a[keep] == b[keep]).all()
     assert (a != b).any()
     assert scanner.check_document(out.ground_truth) == []
@@ -127,3 +129,12 @@ def test_fonts_have_licences() -> None:
         assert font in names
     for lic in ("LICENCE-Patrick.txt", "LICENCE-Kalam.txt", "LICENCE-IndieFlower.txt"):
         assert "SIL Open Font License" in (handwriting.FONT_DIR / lic).read_text()
+
+
+def test_handwritten_mode_without_handwriting_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*_: Any, **__: Any) -> Any:
+        raise handwriting.HandwritingError("box_too_small")
+
+    monkeypatch.setattr(handwriting, "render_field", refuse)
+    with pytest.raises(handwriting.HandwritingError, match="no_handwriting"):
+        _hand("vitals_chart", 1, "handwritten")
