@@ -97,7 +97,7 @@ class JobSettings:
     tick: float = 1.0  # how often a running stage looks at the clock
     nak_delays: tuple[float, ...] = (10.0, 30.0, 120.0, 300.0)  # by delivery
     max_deliver: int = MAX_DELIVER  # the pipeline consumer's MaxDeliver
-    max_attempts: int = 5  # claims of one row, across messages
+    max_attempts: int = 5  # claims of one row per platform retry, across messages
 
 
 class _Stop(Exception):
@@ -126,6 +126,9 @@ class _Job:
     ctx: JobContext = field(repr=False)
     delivered: int
     qid: str = ""
+    # The attempts this claim may reach: max_attempts per platform retry
+    # (attempts never goes down; each retry is a fresh budget).
+    cap: int = 0
     attempts: int = 0
     last_wip: float = 0.0
     committed: bool = False
@@ -317,9 +320,10 @@ class RunQuery:
             return None
         if claim is not None:
             job.attempts = claim.attempts
+            job.cap = self._s.max_attempts * (claim.retry_count + 1)
             telemetry.annotate(attempt=claim.attempts)
             job.last_wip = self._wip_clock()
-            if claim.attempts > self._s.max_attempts:
+            if claim.attempts > job.cap:
                 log.warning("run_query over the attempts cap query_id=%s", job.qid)
                 await self._give_up(job, "internal")
                 return None
@@ -600,7 +604,7 @@ class RunQuery:
 
     async def _failure(self, job: _Job, code: str) -> None:
         """Retry (Nak with the schedule) or, permanent or last, give up."""
-        last = job.delivered >= self._s.max_deliver or job.attempts >= self._s.max_attempts
+        last = job.delivered >= self._s.max_deliver or (job.cap > 0 and job.attempts >= job.cap)
         if code in RETRYABLE and not last:
             if job.attempts and self._db is not None:
                 try:

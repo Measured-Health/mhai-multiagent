@@ -15,6 +15,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 )
 
 const (
@@ -53,6 +54,27 @@ type JobRow struct {
 	Deadline                  time.Time
 	Type                      string
 	SubjectID                 uuid.UUID
+	// RetryCount is the platform's retries of the row (00016): a retried
+	// row is published under PlatformRetryMsgID, never its job id again.
+	RetryCount int
+}
+
+// msgID is the Nats-Msg-Id a sweep publishes r under: the job id, or for
+// a row the platform retried, that retry's id (the job id may still be in
+// JetStream's duplicate window from the first publish).
+func (r JobRow) msgID() string {
+	if r.RetryCount > 0 {
+		return PlatformRetryMsgID(r.ID, r.RetryCount)
+	}
+	return r.ID.String()
+}
+
+// PlatformRetryMsgID is the Nats-Msg-Id of a job the platform retried:
+// <job id>.p<retry_count>, a new id for each retry (spec §6.2: a new
+// message id), and the same one for the retry's own publish and any sweep
+// of it, so JetStream drops the second copy.
+func PlatformRetryMsgID(id uuid.UUID, retryCount int) string {
+	return fmt.Sprintf("%s.p%d", id, retryCount)
 }
 
 // jobsRow reports whether r is a jobs-table row (not clinical_queries).
@@ -122,12 +144,63 @@ func JobRID(id uuid.UUID, rid string) string {
 // lookup is an error to retry later, never a cancellation. The request id
 // is the row's (JobRID, JobsRowRID).
 func Republish(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobRow, msgID string) error {
+	opName, msg, caller, err := creatorCaller(ctx, pool, row)
+	if err != nil {
+		return err
+	}
+	err = client.publishJob(ctx, caller, opName, msgID, msg, row.Deadline)
+	switch {
+	case errors.Is(err, ErrNotAllowed):
+		return ErrCreatorUnusable
+	case errors.Is(err, ErrSecondPerson):
+		return ErrJobSkipped
+	}
+	return err
+}
+
+// Publishable runs Republish's checks on row without publishing anything:
+// the creator (usable, of the row's hospital, holding one of the
+// operation's roles now), then the two-person rule for a second_person
+// job. nil, ErrCreatorUnusable, ErrJobSkipped, or an error to retry later
+// (ErrPublish for a failed read); ErrMisuse for a row with no message.
+// The platform's retry asks before it re-queues a row (spec §6.2, C27,
+// C28), and Republish asks again after the commit.
+func Publishable(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobRow) error {
+	opName, msg, caller, err := creatorCaller(ctx, pool, row)
+	if err != nil {
+		return err
+	}
+	op, err := operation(opName, reqtoken.KindJob, msg, nil)
+	if err != nil {
+		return err
+	}
+	switch err := checkCaller(op, caller); {
+	case errors.Is(err, ErrNotAllowed):
+		return ErrCreatorUnusable
+	case err != nil:
+		return err
+	}
+	if op.SecondPerson {
+		switch err := client.checkSecondPerson(ctx, op, caller, msg); {
+		case errors.Is(err, ErrSecondPerson):
+			return ErrJobSkipped
+		case err != nil:
+			return err
+		}
+	}
+	return nil
+}
+
+// creatorCaller is the operation, message and Caller to publish row's job
+// as: its creator with their current roles, after re-checking (as
+// mhai_auth) that the account is usable and of the row's hospital.
+func creatorCaller(ctx context.Context, pool *pgxpool.Pool, row JobRow) (string, proto.Message, Caller, error) {
 	opName, msg, ok := row.message()
 	if !ok {
-		return ErrMisuse
+		return "", nil, Caller{}, ErrMisuse
 	}
 	if row.CreatedBy == uuid.Nil {
-		return ErrCreatorUnusable
+		return "", nil, Caller{}, ErrCreatorUnusable
 	}
 	var roles []string
 	usable := false
@@ -150,20 +223,12 @@ func Republish(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobR
 		return nil
 	})
 	if err != nil {
-		return errLookup // driver errors can carry row values: classify, never wrap
+		return "", nil, Caller{}, errLookup // driver errors can carry row values: classify, never wrap
 	}
 	if !usable {
-		return ErrCreatorUnusable
+		return "", nil, Caller{}, ErrCreatorUnusable
 	}
-	caller := Caller{Sub: row.CreatedBy.String(), Hid: row.HospitalID.String(), Rid: row.rid(), Roles: roles}
-	err = client.publishJob(ctx, caller, opName, msgID, msg, row.Deadline)
-	switch {
-	case errors.Is(err, ErrNotAllowed):
-		return ErrCreatorUnusable
-	case errors.Is(err, ErrSecondPerson):
-		return ErrJobSkipped
-	}
-	return err
+	return opName, msg, Caller{Sub: row.CreatedBy.String(), Hid: row.HospitalID.String(), Rid: row.rid(), Roles: roles}, nil
 }
 
 // RetryMsgID is the Nats-Msg-Id of a job re-minted after a dead letter:
@@ -258,8 +323,8 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 	var rows []JobRow
 	err = db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		r, err := tx.Query(ctx, `
-			SELECT id, hospital_id, created_by, COALESCE(request_id, ''), attempts, d
-			FROM (SELECT id, hospital_id, created_by, request_id, attempts, created_at,
+			SELECT id, hospital_id, created_by, COALESCE(request_id, ''), attempts, d, retry_count
+			FROM (SELECT id, hospital_id, created_by, request_id, attempts, created_at, retry_count,
 			             COALESCE(deadline_at, created_at + make_interval(secs => $2)) AS d
 			      FROM clinical_queries
 			      WHERE status = 'queued' AND published_at IS NULL
@@ -274,7 +339,7 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 		for r.Next() {
 			var s JobRow
 			var by *uuid.UUID
-			if err := r.Scan(&s.ID, &s.HospitalID, &by, &s.RequestID, &s.Attempts, &s.Deadline); err != nil {
+			if err := r.Scan(&s.ID, &s.HospitalID, &by, &s.RequestID, &s.Attempts, &s.Deadline, &s.RetryCount); err != nil {
 				return err
 			}
 			if by != nil {
@@ -296,7 +361,7 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
-		switch err := Republish(ctx, pool, client, r, r.ID.String()); {
+		switch err := Republish(ctx, pool, client, r, r.msgID()); {
 		case err == nil:
 			if markPublished(ctx, pool, r) != nil {
 				res.Left++
@@ -336,9 +401,12 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 var jobsTableFault func() error
 
 // sweepableJobs is step 3's rows: per type with a budget, up to 100 queued,
-// unpublished jobs rows older than sweepAge and within their deadline,
+// unpublished jobs rows queued over sweepAge ago (queued_at: a row the
+// platform just retried is its retry's own to publish first) and within
+// their deadline,
 // with fewer than the budget live rows of their hospital and type ahead of
-// them (created_at, id), oldest first.
+// them in the queue (queued_at, id: created_at, or the platform's retry
+// time; 00016), first in the queue first.
 func sweepableJobs(ctx context.Context, pool *pgxpool.Pool) ([]JobRow, error) {
 	if jobsTableFault != nil && jobsTableFault() != nil {
 		return nil, errSweep
@@ -347,16 +415,17 @@ func sweepableJobs(ctx context.Context, pool *pgxpool.Pool) ([]JobRow, error) {
 	err := db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		for typ, budget := range jobBudgets {
 			r, err := tx.Query(ctx, `
-				SELECT j.id, j.hospital_id, j.created_by, COALESCE(j.request_id, ''), j.attempts, `+jobDeadline("j.")+`, j.type, j.subject_id
+				SELECT j.id, j.hospital_id, j.created_by, COALESCE(j.request_id, ''), j.attempts, `+jobDeadline("j.")+`, j.type, j.subject_id,
+				       j.retry_count
 				FROM jobs j
 				WHERE j.type = $1 AND j.status = 'queued' AND j.published_at IS NULL
-				  AND j.created_at < now() - make_interval(secs => $2)
+				  AND j.queued_at < now() - make_interval(secs => $2)
 				  AND `+jobDeadline("j.")+` > now()
 				  AND (SELECT count(*) FROM jobs a
 				       WHERE a.hospital_id = j.hospital_id AND a.type = j.type AND a.status IN ('queued', 'running')
 				         AND `+jobDeadline("a.")+` > now()
-				         AND (a.created_at, a.id) < (j.created_at, j.id)) < $3
-				ORDER BY j.created_at, j.id
+				         AND (a.queued_at, a.id) < (j.queued_at, j.id)) < $3
+				ORDER BY j.queued_at, j.id
 				LIMIT $4`, typ, sweepAge.Seconds(), budget, sweepBatch)
 			if err != nil {
 				return err
@@ -364,7 +433,7 @@ func sweepableJobs(ctx context.Context, pool *pgxpool.Pool) ([]JobRow, error) {
 			for r.Next() {
 				var s JobRow
 				var by, hid *uuid.UUID
-				if err := r.Scan(&s.ID, &hid, &by, &s.RequestID, &s.Attempts, &s.Deadline, &s.Type, &s.SubjectID); err != nil {
+				if err := r.Scan(&s.ID, &hid, &by, &s.RequestID, &s.Attempts, &s.Deadline, &s.Type, &s.SubjectID, &s.RetryCount); err != nil {
 					r.Close()
 					return err
 				}
@@ -558,8 +627,28 @@ func QueueStats(ctx context.Context, pool *pgxpool.Pool) (depth int64, oldest ti
 	defer cancel()
 	err = db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		var secs float64
-		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)::float8
+		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(
+				CASE WHEN retry_count > 0 THEN deadline_at - interval '10 minutes' ELSE created_at END)), 0)::float8
 			FROM clinical_queries WHERE status = 'queued'`).Scan(&depth, &secs); err != nil {
+			return err
+		}
+		oldest = time.Duration(secs * float64(time.Second))
+		return nil
+	})
+	return depth, oldest, err
+}
+
+// LearningQueueStats is QueueStats for the learning consumer's jobs: how
+// many approve_correction jobs wait to be picked up (jobs rows, status
+// queued, across hospitals) and how long the oldest has waited. Counts and
+// an age only, as QueueStats.
+func LearningQueueStats(ctx context.Context, pool *pgxpool.Pool) (depth int64, oldest time.Duration, err error) {
+	ctx, cancel := context.WithTimeout(ctx, statsTimeout)
+	defer cancel()
+	err = db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
+		var secs float64
+		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(queued_at)), 0)::float8
+			FROM jobs WHERE status = 'queued' AND type = 'approve_correction'`).Scan(&depth, &secs); err != nil {
 			return err
 		}
 		oldest = time.Duration(secs * float64(time.Second))

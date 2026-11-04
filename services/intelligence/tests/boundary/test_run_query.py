@@ -738,6 +738,40 @@ async def test_poison_job_dead_letters_after_five_deliveries(
     assert len(await env.dead_letters(1, timeout=1)) == 0
 
 
+async def test_retried_question_after_five_attempts_completes(
+    make_env: MakeEnv, postgres: Postgres
+) -> None:
+    """Plan 4 Task 12: attempts never goes down, so the cap is per platform
+    retry (retry_count, 00016), as approve_correction's. A question failed
+    after five attempts, re-queued as the platform's retry does (queued,
+    retry_count + 1, a new deadline), is claimed (attempts 6, within its
+    second budget) and completes, instead of failing at once on the old
+    lifetime cap."""
+    env = await make_env()
+    qid = await seed_query(postgres)
+    stub = StubModelClient(fail={"generate": "unavailable"})
+    await env.start(stub)
+    await env.publish(qid)
+    dead = await env.dead_letters(1, timeout=20)
+    assert [(d.code, d.attempts) for _, d in dead] == [("unavailable", 5)]
+    assert await env.settled()
+    stub._fail.clear()
+    async with await su(postgres) as conn:
+        await conn.execute(
+            "UPDATE clinical_queries SET status = 'queued', retry_count = retry_count + 1, "
+            "error = NULL, completed_at = NULL, deadline_at = now() + interval '10 minutes' "
+            "WHERE id = %s",
+            (qid,),
+        )
+    await env.publish(qid, msg_id=f"{qid}.p1")
+    assert await until(lambda: status_is(postgres, qid, "completed", "failed"))
+    r = await row(postgres, qid)
+    assert (r["status"], r["attempts"], r["error"]) == ("completed", 6, None)
+    assert await count(postgres, "decisions", qid) == 1
+    assert [a for a, _, _ in await outbox(postgres, qid)] == ["query.failed", "query.completed"]
+    assert await env.settled()
+
+
 async def test_cancelled_between_stages_stops(make_env: MakeEnv, postgres: Postgres) -> None:
     """A21 (worker side): cancelled while generation runs: no decision, no
     query.completed, the message acked."""

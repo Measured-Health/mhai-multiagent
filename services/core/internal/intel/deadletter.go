@@ -397,13 +397,21 @@ func remint(ctx context.Context, pool *pgxpool.Pool, client *Client, row deadRow
 func markDead(ctx context.Context, pool *pgxpool.Pool, row deadRow, code, kid string) (bool, error) {
 	marked := false
 	typ, opName := jobType, runQuery
+	// A deadline_exceeded letter is about one delivery. If the row was
+	// retried since (fresh deadline), the letter is stale: the row must have
+	// passed its own deadline too, or the retry would be failed again.
+	qDue, jDue := "", ""
+	if code == "deadline_exceeded" {
+		qDue = " AND " + jobDeadline("") + " <= now()"
+		jDue = qDue
+	}
 	q := `UPDATE clinical_queries SET status = 'failed', error = $3, completed_at = now()
-			WHERE id = $1 AND hospital_id = $2 AND status = 'queued'
+			WHERE id = $1 AND hospital_id = $2 AND status = 'queued'` + qDue + `
 			RETURNING attempts`
 	if row.jobsRow() {
 		typ, opName = row.Type, "pipeline."+row.Type
 		q = `UPDATE jobs SET status = 'failed', error = $3, failed_at = now(), completed_at = now()
-			WHERE id = $1 AND hospital_id = $2 AND status = 'queued'
+			WHERE id = $1 AND hospital_id = $2 AND status = 'queued'` + jDue + `
 			RETURNING attempts`
 	}
 	err := db.WithJobs(ctx, pool, func(tx pgx.Tx) error {

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 )
@@ -205,5 +206,40 @@ func TestPipelineUserJSSubjectsAreItsTwoConsumersOnly(t *testing.T) {
 	}
 	if bus.LearningFilter == bus.PipelineFilter || bus.LearningFilter != "jobs.v1.*.approve_correction" {
 		t.Fatalf("learning filter %q", bus.LearningFilter)
+	}
+}
+
+// Plan 4 spec §10.5: the health bucket is the gateway's alone. In both
+// configs, no user but the gateway names it, and the gateway names exactly
+// its KV subjects, its stream's create, update and info, and its reads.
+func TestHealthBucketIsTheGatewaysOnly(t *testing.T) {
+	want := []string{
+		`"$KV.health.>"`,
+		`"$JS.API.STREAM.CREATE.KV_health"`, `"$JS.API.STREAM.UPDATE.KV_health"`, `"$JS.API.STREAM.INFO.KV_health"`,
+		`"$JS.API.STREAM.MSG.GET.KV_health"`, `"$JS.API.DIRECT.GET.KV_health.>"`,
+	}
+	for _, c := range []struct{ file, gateway string }{
+		{"services/nats/nats.conf", "password: $NATS_GATEWAY_PASSWORD"},
+		{"deploy/nats/nats.conf", "nkey: $NATS_GATEWAY_NKEY"},
+	} {
+		conf := readConf(t, c.file)
+		gw := permissionsAfter(t, conf, c.gateway)
+		got := regexp.MustCompile(`"[^"]*health[^"]*"`).FindAllString(stripComments(gw), -1)
+		if strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("%s: gateway's health subjects %v, want %v", c.file, got, want)
+		}
+		// Every other occurrence of the bucket's subjects is the gateway's:
+		// remove its block and nothing names the bucket.
+		rest := stripComments(strings.Replace(conf, gw, "", 1))
+		if strings.Contains(rest, "KV.health") || strings.Contains(rest, "KV_health") {
+			t.Errorf("%s: a user other than the gateway names the health bucket", c.file)
+		}
+	}
+	// Nor the include, where the clinical BFF lives in dev.
+	if inc := readConf(t, "services/nats/bff-clinical.test.conf"); strings.Contains(inc, "health") {
+		t.Error("bff-clinical.test.conf names the health bucket")
+	}
+	if bus.HealthBucket != "health" || bus.HealthTTL != 5*time.Minute {
+		t.Errorf("health bucket %q, ttl %v", bus.HealthBucket, bus.HealthTTL)
 	}
 }

@@ -32,7 +32,17 @@ every page read recorded as `audit.viewed` or `audit.searched`, and chain
 checks (`POST /platform/audit/verify`, a daily run at 06:00 UTC, the status
 and runs reads, an auditor's outcome note) that walk the whole chain in one
 read-only snapshot. The smoke test signs in as a synthetic auditor and runs
-one. **Next:** platform operations (4c), then the hospital endpoints.
+one. **Built (Plan 4, part 4c):** platform operations on the platform
+audience. A sampler (one core copy at a time, every 30 s) stores a health
+reading in a KV bucket that `GET /platform/health` serves without touching
+the database or a worker; `GET /platform/jobs` lists failed questions and
+jobs, `POST /platform/jobs/retry` re-queues and re-publishes them as the
+job's creator (second-person rule re-checked), `POST /platform/jobs/cancel`
+needs a fresh two-step code; `GET /platform/guardrails` serves HGA decision
+counts for whole UTC days, one stored snapshot per period and day, through
+the small-group rules (`internal/smallgroup`). The smoke test reads health,
+retries a forced dead letter and reads the statistics. **Next:** the
+hospital endpoints.
 
 | Service | Job |
 |---|---|

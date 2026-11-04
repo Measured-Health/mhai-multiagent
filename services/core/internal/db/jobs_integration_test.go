@@ -246,8 +246,9 @@ func TestJobsRoleTransitions(t *testing.T) {
 		{"queued", "status = 'failed', error = 'deadline_exceeded'", "failed"},
 		{"queued", "status = 'cancelled', cancel_reason = 'account_unusable'", "cancelled"},
 		{"queued", "published_at = now()", "queued"},
-		{"failed", "status = 'queued', error = NULL", "queued"},
-		{"cancelled", "status = 'queued'", "queued"},
+		// A retry: failed → queued with retry_count one higher (00016).
+		{"failed", "status = 'queued', error = NULL, retry_count = retry_count + 1", "queued"},
+		{"failed", "status = 'cancelled', cancel_reason = 'no_longer_needed'", "cancelled"},
 	} {
 		id := row(c.from, future)
 		if n, err := update(id, c.set); err != nil || n != 1 || statusOf(id) != c.to {
@@ -261,6 +262,10 @@ func TestJobsRoleTransitions(t *testing.T) {
 		{"running", "status = 'cancelled'"},
 		{"completed", "status = 'queued'"},
 		{"completed", "status = 'failed'"},
+		// A cancelled question is final (00016): the platform or a
+		// deactivation cancelled it, and nothing re-queues it.
+		{"cancelled", "status = 'queued', retry_count = retry_count + 1"},
+		{"cancelled", "status = 'failed'"},
 	} {
 		id := row(c.from, future)
 		if n, err := update(id, c.set); err != nil || n != 0 || statusOf(id) != c.from {
@@ -270,6 +275,14 @@ func TestJobsRoleTransitions(t *testing.T) {
 	for _, set := range []string{"status = 'running'", "status = 'completed'"} {
 		_, err := update(row("queued", future), set)
 		requireDenied(t, err, "queued: "+set)
+	}
+	// A failed row re-queued without counting the retry is refused
+	// (00016's trigger), and so is a count of more than one.
+	for _, set := range []string{"status = 'queued', error = NULL", "status = 'queued', retry_count = retry_count + 2"} {
+		id := row("failed", future)
+		if _, err := update(id, set); pgCode(err) != "23514" || statusOf(id) != "failed" {
+			t.Errorf("failed: %s: %v, now %s", set, err, statusOf(id))
+		}
 	}
 
 	// The expiry function: expired queued and running rows (published or
@@ -486,6 +499,17 @@ func TestJobsJobsRoleCantTouchRunning(t *testing.T) {
 				t.Errorf("%s: %s: %d rows, %v", from, set, n, err)
 			}
 		}
+	}
+	// A cancelled job is final (00016), and a failed one is re-queued only
+	// as a retry.
+	for _, set := range []string{"status = 'queued', retry_count = retry_count + 1", "status = 'failed', error = 'internal'"} {
+		id := seedJob(t, pool, a, u, "cancelled")
+		if n, err := update(id, set); err != nil || n != 0 || jobStatus(t, pool, id) != "cancelled" {
+			t.Errorf("cancelled: %s: %d rows, %v", set, n, err)
+		}
+	}
+	if _, err := update(seedJob(t, pool, a, u, "failed"), "status = 'queued', error = NULL"); pgCode(err) != "23514" {
+		t.Errorf("failed re-queued without the retry count: %v", err)
 	}
 	for _, c := range []struct{ from, set, to string }{
 		{"failed", "status = 'queued', error = NULL, retry_count = retry_count + 1", "queued"},

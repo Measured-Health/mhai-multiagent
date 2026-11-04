@@ -88,8 +88,10 @@ type NewJob struct {
 // Reserve, then check: it locks the hospital's counter for the type
 // (pg_advisory_xact_lock, held until tx ends), counts the type's live rows
 // (queued or running, within their deadline), and inserts the row with
-// created_at taken after the lock (clock_timestamp()), so the rows of a
-// hospital and type are ordered as they took the lock. A row may be
+// created_at taken after the lock (clock_timestamp()); its queued_at, the
+// queue order, is that created_at (00016's trigger), so the rows of a
+// hospital and type are ordered as they took the lock. The platform's
+// retry (RetryJobs) takes the same lock and sets queued_at the same way. A row may be
 // published only while fewer than the budget live rows are ahead of it,
 // here and in the sweeper (SweepOnce): a row's place only moves up, so no
 // more than the budget are ever published and live together. Past the

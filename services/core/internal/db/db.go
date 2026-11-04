@@ -104,6 +104,28 @@ func WithJobs(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) er
 	return inRole(ctx, pool, roleJobs, "", nil, fn)
 }
 
+// WithJobsThenPlatform runs jobs as mhai_jobs and then platform as
+// mhai_platform, in one transaction: both commit or neither. For the
+// platform's retry and cancel of failed jobs (Plan 4 spec §6.2): the job
+// rows of every hospital change as mhai_jobs, and the one audit row of the
+// call is the platform admin's, appended as mhai_platform under its
+// platform_append policy (00014), never by widening mhai_jobs's. platform
+// runs only if jobs returned nil; nothing jobs did can be carried into it
+// but through its own variables.
+func WithJobsThenPlatform(ctx context.Context, pool *pgxpool.Pool, jobs, platform func(pgx.Tx) error) error {
+	return inRole(ctx, pool, roleJobs, "", nil, func(tx pgx.Tx) error {
+		if err := jobs(tx); err != nil {
+			return err
+		}
+		// Both roles are constants; the login holds each WITH INHERIT FALSE,
+		// so SET ROLE reaches them and nothing else.
+		if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+rolePlatform); err != nil {
+			return fmt.Errorf("db: set role: %w", err)
+		}
+		return platform(tx)
+	})
+}
+
 // WithAuditDrain runs fn in a transaction as mhai_audit_drain: read and
 // delete intelligence_audit_outbox rows of every hospital, the four id
 // columns of clinical_queries, and append query.completed, query.failed and
@@ -212,7 +234,7 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 	err := pool.QueryRow(ctx, `
 		SELECT r.rolname, r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb, r.rolreplication,
 		       pg_has_role(session_user, 'mhai_app', 'MEMBER'),
-		       ARRAY(SELECT x FROM unnest(ARRAY['mhai_migrate', 'mhai_gateway', 'mhai_platform', 'mhai_auth', 'mhai_worker', 'mhai_provision', 'mhai_jobs', 'mhai_audit_drain', 'mhai_worker_app']) AS x
+		       ARRAY(SELECT x FROM unnest(ARRAY['mhai_migrate', 'mhai_gateway', 'mhai_platform', 'mhai_auth', 'mhai_worker', 'mhai_provision', 'mhai_jobs', 'mhai_audit_drain', 'mhai_worker_app', 'mhai_health_reader', 'mhai_jobs_reader', 'mhai_guardrail_reader']) AS x
 		             WHERE EXISTS (SELECT 1 FROM pg_roles p WHERE p.rolname = x)
 		               AND pg_has_role(session_user, x, 'USAGE')),
 		       pg_has_role(session_user, (SELECT d.datdba FROM pg_database d WHERE d.datname = current_database()), 'MEMBER'),

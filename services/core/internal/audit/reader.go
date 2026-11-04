@@ -238,8 +238,8 @@ type cond struct {
 	batch   bool
 }
 
-// batchSQL is batchRow in SQL: no job, a job count, no entity.
-const batchSQL = `(NOT (payload ? 'job_id') AND payload ? 'job_count' AND COALESCE(entity, '') = '' AND COALESCE(entity_id, '') = '')`
+// batchSQL is batchRow in SQL: a job count, no per-job key, no entity.
+const batchSQL = `(NOT (payload ?| ARRAY['job_id', 'msg_id', 'type']) AND payload ? 'job_count' AND COALESCE(entity, '') = '' AND COALESCE(entity_id, '') = '')`
 
 func (c cond) holds(e Event) bool {
 	if !slices.Contains(c.actions, e.Action) {
@@ -906,6 +906,13 @@ func displayText(s string, max int) bool {
 	}
 	return true
 }
+
+// ShowableName reports whether a person's or hospital's name may be sent to
+// the platform app as it is: mhai-web's text check (at most 120 UTF-16
+// units, no control or format character) and nothing of a pseudonym's
+// shape. The failed jobs list (Plan 4 Task 12) applies it as the audit
+// list does.
+func ShowableName(s string) bool { return displayText(s, nameMax) && !holdsPseudonym(s) }
 
 // --- hospitals and people --------------------------------------------------
 

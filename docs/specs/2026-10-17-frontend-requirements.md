@@ -938,6 +938,10 @@ period). `removal.checks.legal_holds` (§14.3) counts the same set.
 
 #### 14.8.2 System health
 
+**Built (Plan 4c).** Served from the sampler's stored reading; `documents`,
+`clean_up` and the `clean_up` block are not sent until those services exist
+(decision 7); `versions` is `[]` for now; `triage` is `{enabled: false}`.
+
 `GET /platform/health` → `{updated_at, overall, parts, queue, failed_jobs,
 timing, errors, versions, triage, clean_up}`. No hospital, user or content
 anywhere in it.
@@ -969,6 +973,10 @@ let a health poll refresh any server-side idle clock either.
 
 #### 14.8.3 Failed jobs
 
+**Built (Plan 4c).** Core answers a bad id list, reason or note with 422
+`validation_failed` (every core route's code), not `invalid`; the app must
+map `validation_failed` there.
+
 | Endpoint | Behaviour |
 |---|---|
 | `GET /platform/jobs?status&type&hospital&kind&cursor` | → `{jobs, next_cursor}`, newest failure first. `status` is `failed` (default), `retrying`, `retried`, `cancelled` or `all` |
@@ -992,6 +1000,25 @@ the subject, the user or the error message.
   with the cancellation but **never logged**. Activity shows the reason in
   words (for example "No longer needed"), with the count of jobs.
 - A bad id list (empty, over 50) or a bad reason is **422 `invalid`**.
+
+#### 14.8.3a Guardrail statistics (HGA stats)
+
+Source: the backend's Plan 4 design (§6.3). No screen asks for it yet; it
+is offered so the app can show it, and so the §14.7 `quality` area can reuse
+its query. Served by the core service; the shape is in
+`services/core/openapi.yaml` (`GuardrailsOut`).
+
+| Endpoint | Behaviour | Status |
+|---|---|---|
+| `GET /platform/guardrails?period=7d\|30d\|90d` | → `{period, from, to, updated_at, all, hospitals}`; `all` and each hospital row (`{hospital: {id, name}, ...}`) carry `answers`, `pass`, `regenerate`, `escalate`, `degraded`, `pass_share`, `regenerate_share`, `escalate_share`, every one guarded (`{value, suppressed}`, §14.7). Active hospitals only. The period is whole UTC days ending at the start of today (`to`, and `updated_at`, are 00:00 UTC today; until 00:15 UTC, yesterday's), and each day's figures are one stored snapshot, so they are the same all day. Platform admins and auditors; two-step. 6 reads a minute per session, then **429 `rate_limited`**. Not audited | **Built (Plan 4c)**, New |
+
+The server applies the §14.7 small-group duties: no count of 1–4; in each
+set that adds up (a row's answers and its parts, each column's `all` and its
+hospitals) the hidden members total at least 5 and never exactly one is
+hidden; `degraded` is hidden when its `answers` is, or when `answers − degraded`
+is 1–4; a share is hidden when its numerator or complement is 1–4 or either
+count is hidden; and no hidden value can be worked out from `all` and the
+shown rows. Shares are 0 to 1 with four decimal places.
 
 #### 14.8.4 Settings
 

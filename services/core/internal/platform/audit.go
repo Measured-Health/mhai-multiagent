@@ -29,10 +29,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 )
 
 // Deps are what the routes need.
@@ -49,6 +52,29 @@ type Deps struct {
 	// Walk runs a started chain check's walk (nil: in the background, with
 	// the 10-minute budget). Tests set it to hold runs running.
 	Walk func(runID uuid.UUID)
+	// Health is the health bucket (bus.OpenHealthBucket): GET
+	// /platform/health reads it and the sampler writes it. Nil: the route
+	// answers 503 unavailable and the sampler doesn't run.
+	Health jetstream.KeyValue
+	// Intel calls pipeline.health for the sampler (as svc:core).
+	Intel *intel.Client
+	// Now is the clock the health route judges a reading's age by and the
+	// sampler dates it with; nil is time.Now.
+	Now func() time.Time
+	// Auth checks the step-up code of a job cancel (auth.Service.StepUp).
+	// Nil: the cancel answers 503 not_ready.
+	Auth *auth.Service
+	// QueryCap is the questions in flight per hospital
+	// (INTELLIGENCE_QUERY_CAP): a retried question takes a slot like a new
+	// one. Under 1 (or no Intel): the retry answers 503 not_ready.
+	QueryCap int
+}
+
+func (d Deps) now() time.Time {
+	if d.Now != nil {
+		return d.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (d Deps) log() *slog.Logger {
@@ -58,8 +84,9 @@ func (d Deps) log() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// Register adds the audit log reads, and the chain check and the
-// auditors' writes (verify.go).
+// Register adds the audit log reads, the chain check and the auditors'
+// writes (verify.go), system health (health.go), the failed jobs (jobs.go)
+// and the guardrail statistics (guardrails.go).
 func Register(m *authz.Mux, d Deps) {
 	read := authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin, authz.RoleAuditor}}
 	authz.Route(m, http.MethodGet, "/platform/audit", read, http.HandlerFunc(d.list))
@@ -67,6 +94,9 @@ func Register(m *authz.Mux, d Deps) {
 	authz.Route(m, http.MethodGet, "/platform/audit/people", read, http.HandlerFunc(d.people))
 	authz.Route(m, http.MethodGet, "/platform/audit/{id}", read, http.HandlerFunc(d.detail))
 	registerVerify(m, d)
+	registerHealth(m, d)
+	registerJobs(m, d)
+	registerGuardrails(m, d)
 }
 
 // caller is the verified platform principal, or a 500 (the guard admits

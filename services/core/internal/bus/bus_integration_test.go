@@ -1411,3 +1411,68 @@ func TestEnsureStreamsUpdatesThePreviousConfig(t *testing.T) {
 		t.Fatalf("pipeline consumer not updated: %+v", c)
 	}
 }
+
+// Plan 4 spec §10.5: the gateway opens the health bucket (history 1, five
+// minutes) and reads and writes its key; no other user may read, write,
+// watch or manage it.
+func TestHealthBucketGatewayOnly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	nc, js, err := bus.Connect(ctx, sharedNATS.GatewayURL, "", bus.GatewayInboxPrefix, bus.TLS{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	for i := 0; i < 2; i++ {
+		kv, err := bus.OpenHealthBucket(ctx, js, 1)
+		if err != nil {
+			t.Fatalf("open health bucket (round %d): %v", i, err)
+		}
+		st, err := kv.Status(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.TTL() != 5*time.Minute || st.History() != 1 || st.Bucket() != "health" {
+			t.Fatalf("health bucket: ttl %v history %d name %s", st.TTL(), st.History(), st.Bucket())
+		}
+		if _, err := kv.Put(ctx, "health.reading", []byte(`{"synthetic":true}`)); err != nil {
+			t.Fatalf("put as gateway: %v", err)
+		}
+		if e, err := kv.Get(ctx, "health.reading"); err != nil || string(e.Value()) != `{"synthetic":true}` {
+			t.Fatalf("get as gateway: %v", err)
+		}
+	}
+
+	subjects := []string{
+		"$KV.health.health.reading", "$KV.health.x",
+		"$JS.API.DIRECT.GET.KV_health.$KV.health.health.reading", "$JS.API.DIRECT.GET.KV_health",
+		"$JS.API.STREAM.MSG.GET.KV_health", "$JS.API.STREAM.INFO.KV_health",
+		"$JS.API.STREAM.CREATE.KV_health", "$JS.API.STREAM.UPDATE.KV_health",
+		"$JS.API.STREAM.DELETE.KV_health", "$JS.API.STREAM.PURGE.KV_health",
+		"$JS.API.CONSUMER.CREATE.KV_health", "$JS.API.CONSUMER.CREATE.KV_health.x.$KV.health.>",
+		"$JS.API.CONSUMER.DURABLE.CREATE.KV_health.x",
+	}
+	for _, mk := range []func(*testing.T) *svc{pipeline, echo, bffClinical, bffPlatform} {
+		cannotPublish(t, mk, subjects...)
+		cannotSubscribe(t, mk, "$KV.health.>", "$KV.health.health.reading")
+	}
+	// The gateway itself can't destroy it or watch it through a consumer.
+	cannotPublish(t, gateway, "$JS.API.STREAM.DELETE.KV_health", "$JS.API.STREAM.PURGE.KV_health",
+		"$JS.API.STREAM.MSG.DELETE.KV_health", "$JS.API.CONSUMER.CREATE.KV_health.x")
+
+	// And through the KV API, as another user (on its own inbox): no
+	// bucket, no read, no write.
+	for name, mk := range map[string]func(*testing.T) *svc{"pipeline": pipeline, "bff_platform": bffPlatform} {
+		ojs, _ := jetstream.New(mk(t).nc)
+		octx, ocancel := context.WithTimeout(ctx, 3*time.Second)
+		if kv, err := ojs.KeyValue(octx, "health"); err == nil {
+			if _, err := kv.Get(octx, "health.reading"); err == nil {
+				t.Errorf("%s read the health reading", name)
+			}
+			if _, err := kv.Put(octx, "health.reading", []byte("{}")); err == nil {
+				t.Errorf("%s wrote the health reading", name)
+			}
+		}
+		ocancel()
+	}
+}

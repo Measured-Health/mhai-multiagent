@@ -309,7 +309,7 @@ Not in the frontend contract; added as **New** (additive, ADR 0012), so mhai-web
 
 The counts come from one SECURITY DEFINER function (`mhai_guardrail_counts(from, to)`, aggregates per hospital only, `mhai_platform` only); suppression is in Go (`internal/smallgroup`, with the rules as table-driven and property tests), applied before the value is encoded, so a raw 1–4 never reaches the response writer.
 
-Not audited per read (aggregates, no person, polled like health); the route is rate-limited per session (6 per minute) because it scans `clinical_decisions` (cached 60 s per period).
+Not audited per read (aggregates, no person, polled like health); the route is rate-limited per session (6 per minute) because it scans `clinical_decisions` (whole UTC days: one stored snapshot per period and day, R42, R43).
 
 ### 6.4 Why not a hospital-side "HGA stats" route
 
@@ -498,7 +498,7 @@ Actors: clinicians (submitter, reviewer), hospital admins (non-clinician), platf
 | P14 | Tampering | Auditors' new writes widen into other writes | `AuditorWrite` allowed only under `/platform/audit/`, never with step-up; a test pins the three routes; auditors still get 403 on every other write | C26 |
 | P15 | EoP | **Retry re-mints as someone else**, or for a user who lost the role or was deactivated, or re-runs an approval that no longer has a second person | `intel.Republish` mints as the job's creator with current roles, after checking user and hospital are active and the role still allows the operation; `SecondPerson` re-checked; else `skipped` | C27, C28 |
 | P16 | Tampering | Cancel of a running or completed job, or a cancel without step-up | `mhai_jobs` policies (running and completed untouchable); `StepUp` on cancel | C29 |
-| P17 | DoS | **Polling** `/platform/health`, `/platform/guardrails` or the audit list as an expensive query | health from the sampler's stored reading; guardrails cached 60 s and rate-limited; audit list keyset-paged, `limit` ≤ 100, `total` capped at 10,000, indexed filters | C30, C31 |
+| P17 | DoS | **Polling** `/platform/health`, `/platform/guardrails` or the audit list as an expensive query | health from the sampler's stored reading; guardrails served from one stored snapshot per period and UTC day (R43) and rate-limited; audit list keyset-paged, `limit` ≤ 100, `total` capped at 10,000, indexed filters | C30, C31 |
 | P18 | DoS | A **flood of approvals** or retries fills `JOBS` | 20 `approve_correction` jobs in flight per hospital (the decision still commits; the job waits); `JOBS` per-subject limits; retry 1–50 ids per call and per-session rate limit | C32 |
 | P19 | DoS | A verify run that never ends blocks all later checks | 10-minute budget; the run becomes `error`; the partial unique index frees | C25 |
 | P20 | Spoofing | A cursor or job id forged to read other filters or another table's rows | cursors bind a hash of the filters; job ids resolved only through `mhai_platform_jobs` by type; unknown ids `skipped` | C33 |
@@ -661,3 +661,24 @@ Rulings made while building part 4b (Tasks 8 to 10). Where they differ from the 
 - **R30 (§5.2, runs list reads):** every page of `GET /platform/audit/verify/runs` is recorded as `audit.searched {searched_kind: run}`, and the 5-minute dedupe collapses them, as R25 does for the list. The runs cursor is also HMAC-bound to the session (80 hex characters; the same HKDF master key as the list cursor, a distinct label), so a forged cursor is 422. This reverses "a page with a cursor writes nothing".
 - **R31 (§11, free text: the outcome note):** the outcome note IS returned in `VerifyRun.outcome` on the platform routes (the runs list, a run, the status and the outcome reply, over `api.v1.platform`), as the contract and R29 require; it is re-checked with the note rules on the way out and a run whose stored note fails them is not sent (500). It is never logged, never in `audit_log.payload` (the chain gets `audit.check_outcome` with the run id only), and never on any other subject or route. Where P8 and C16 above say the note reaches no response, they mean no other response.
 - **Undisplayable reports (§5.2):** a repeat of the same ids by the same session within 5 minutes writes no new `audit.undisplayable_reported` entry (the same dedupe as the reads).
+
+### 4c
+
+Rulings made while building part 4c (Tasks 11 to 13). Where they differ from the text above, these win.
+
+- **R32 (§6.1, health reads):** health reads are not audit-recorded (C30: zero statements per poll). C30 excludes the authorization guard's cached per-session state read, which is part of authenticating any request.
+- **R33 (§6.1, evidence and versions):** `evidence` is ok only when `models_ready`; `versions` is `[]`, because `HealthResponse` carries no NLI flag or model versions (TODO.md: extend the intelligence boundary).
+- **R34 (§6.1, guidelines part):** a third SECURITY DEFINER aggregate, `mhai_health_guidelines()` (platform-only EXECUTE), feeds `parts.guidelines`. The spec names two; it returns aggregates only, so C17 holds.
+- **R35 (§6.1, queue counts):** the queue counts for both job types come from `QueueStats` in the database (Plan 4 departure 3).
+- **R36 (§6.2, jobs list, retry and cancel):** `mhai_platform_jobs` takes a `p_not_errors` argument; cancel who, when and note live in a new `query_cancellations` table (isolating free text from the worker and gateway); `mhai_jobs_reader` is an owner role; a call that changes nothing writes no audit row; `jobs.queued_at` orders the retry budget. All fail closed.
+- **R37 (§6.2, list reads):** `GET /platform/jobs` is not audit-recorded: its shape carries no subject, user or message (C18). Revisit if the list gains identifying fields.
+- **R38 (§6.2, refused step-up):** a refused step-up on cancel is audited like other MFA failures (as the recovery-codes step-up is).
+- **R39 (§6.3, guardrail reads):** the guardrails read is not audit-recorded ("not audited per read" overrides the plan's lean).
+- **R40 (§6.3, suppression):** the rules are stricter than the text. `degraded` is checked down its column; rule 4 also requires the hidden cells in each column to total at least 5, and keeps hiding until no cell can be solved exactly; shares carry 4 decimals. More cells are hidden than the text needs.
+- **R41 (§6.3, differencing):** differencing across periods (30d minus 7d) and across days can still reveal a count of 1 to 4. It is residual risk for Plan 4, because the counts are of AI guardrail decisions, not patients, and the route is for MFA-verified platform admins and auditors at 6 reads a minute (TODO.md, with mitigation options, for a privacy ruling before Plan 7c).
+- **R42 (§6.3, windows and cache):** the window is whole UTC days ending at the start of today, and the cache is keyed by period and that day. Reads a minute apart can no longer be differenced. The cost is up to a day of staleness.
+- **R43 (§6.3, snapshots):** each (period, UTC day) figure is one stored snapshot in `guardrail_snapshots` (guarded output only; `INSERT ... ON CONFLICT DO NOTHING`; `mhai_platform` only), computed after the day ends plus a 15-minute grace period (until then the previous day is served) with the active hospitals fixed at compute time. Every copy serves the same bytes, which closes differencing across copies and within a day.
+- **C30 (§11.5):** the zero-statements claim excludes the guard's cached per-session state read (see R32).
+- **Error code on the failed jobs writes:** core answers a bad id list, reason or note with 422 `validation_failed`, the code every core route uses; the contract (§14.8.3) says `invalid`. mhai-web must map `validation_failed`.
+- **`AcrossRows` may hide `all` cells (rule 4):** it prefers hiding hospital cells, but as a last resort (no hospital cell left to hide in a line, or to close a cycle) it hides an `all` cell. That is stricter than rule 4's "`all` is still shown".
+- **Figures are whole UTC days:** guardrail figures cover whole UTC days with one stored snapshot per day and a 15-minute grace period (R42, R43). The earlier "cached 60 s" wording (§6.3, P17) is replaced.

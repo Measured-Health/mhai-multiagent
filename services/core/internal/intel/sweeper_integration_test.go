@@ -442,3 +442,41 @@ func TestInFlightCapIgnoresExpired(t *testing.T) {
 		t.Fatalf("rows within their deadline don't count: %v", err)
 	}
 }
+
+// The oldest-wait figure counts from when a row was queued: a retried row
+// (created long ago, queued again just now) is not old.
+func TestQueueStatsCountFromQueueTime(t *testing.T) {
+	ctx := context.Background()
+	// Package tests run one at a time: clear what others left queued.
+	if _, err := super.Exec(ctx, `UPDATE clinical_queries SET status = 'cancelled' WHERE status = 'queued'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := super.Exec(ctx, `UPDATE jobs SET status = 'cancelled' WHERE status = 'queued'`); err != nil {
+		t.Fatal(err)
+	}
+	hid := seedHospital(t, "active")
+	submitter := seedUser(t, hid, true, authz.RoleClinician)
+	decider := seedUser(t, hid, true, authz.RoleClinician)
+	fresh := time.Now().Add(10 * time.Minute)
+	q := seedQuery(t, hid, submitter, 72*time.Hour, &fresh, true)
+	setRow(t, q, "retry_count = 1")
+	j := seedJob(t, hid, seedCorrection(t, hid, submitter, decider), decider, 72*time.Hour, fresh, true)
+	setJob(t, j, "retry_count = 1, queued_at = now()")
+	// The correction's own question (made by seedCorrection) is not under test.
+	if _, err := super.Exec(ctx, `UPDATE clinical_queries SET status = 'cancelled' WHERE status = 'queued' AND id <> $1`, q); err != nil {
+		t.Fatal(err)
+	}
+	depth, oldest, err := QueueStats(ctx, app)
+	if err != nil || depth != 1 || oldest > time.Hour {
+		t.Errorf("questions: depth %d oldest %v err %v, want 1 and about 0", depth, oldest, err)
+	}
+	depth, oldest, err = LearningQueueStats(ctx, app)
+	if err != nil || depth != 1 || oldest > time.Hour {
+		t.Errorf("jobs: depth %d oldest %v err %v, want 1 and about 0", depth, oldest, err)
+	}
+	// Never retried: it counts from created_at.
+	setRow(t, q, "retry_count = 0")
+	if _, oldest, err = QueueStats(ctx, app); err != nil || oldest < 71*time.Hour {
+		t.Errorf("unretried question oldest %v err %v, want about 72h", oldest, err)
+	}
+}

@@ -3,6 +3,7 @@ package intel
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 )
@@ -146,4 +147,69 @@ func Refusal(err error) (string, bool) {
 		return we.Code, true
 	}
 	return "", false
+}
+
+// The platform kinds of a failed job (frontend contract §14.8.2, §14.8.3),
+// in the contract's order.
+const (
+	KindTimeout     = "timeout"
+	KindUnreachable = "unreachable"
+	KindUnreadable  = "unreadable"
+	KindInvalid     = "invalid"
+	KindOther       = "other"
+)
+
+// ErrorKinds are the five kinds, in the contract's order.
+var ErrorKinds = []string{KindTimeout, KindUnreachable, KindUnreadable, KindInvalid, KindOther}
+
+// errorKinds is spec §10.1's "Platform kind" column for the codes a failed
+// job stores (clinical_queries.error, jobs.error): the worker codes. A
+// refusal at the boundary is invalid; a past deadline and a worker at its
+// limit are timeout; a model or database not ready is unreachable.
+// cancelled has no kind (a cancelled job isn't failed): stored on a failed
+// row it is other, as is any code not listed.
+var errorKinds = map[string]string{
+	"unauthorized":      KindInvalid,
+	"forbidden":         KindInvalid,
+	"invalid_request":   KindInvalid,
+	"not_found":         KindOther,
+	"deadline_exceeded": KindTimeout,
+	"overloaded":        KindTimeout,
+	"unavailable":       KindUnreachable,
+	"internal":          KindOther,
+}
+
+// ErrorKind is the platform kind of a failed job's stored error code: one
+// of ErrorKinds, other for an empty or unknown code. It never echoes the
+// code.
+func ErrorKind(code string) string {
+	if k, ok := errorKinds[code]; ok {
+		return k
+	}
+	return KindOther
+}
+
+// KindCodes is how a list filters failed jobs by kind (the platform's
+// failed jobs, spec §6.2): the stored codes of kind, or, for other, the
+// codes of every other kind to leave out (other is every code no other
+// kind names, an empty or unknown one included). Exactly one of the two is
+// non-nil for a known kind; both nil for an unknown kind.
+func KindCodes(kind string) (in, notIn []string) {
+	if !slices.Contains(ErrorKinds, kind) {
+		return nil, nil
+	}
+	for code, k := range errorKinds {
+		switch {
+		case kind == KindOther && k != KindOther:
+			notIn = append(notIn, code)
+		case kind != KindOther && k == kind:
+			in = append(in, code)
+		}
+	}
+	slices.Sort(in)
+	slices.Sort(notIn)
+	if kind == KindOther {
+		return nil, append([]string{}, notIn...)
+	}
+	return append([]string{}, in...), nil
 }

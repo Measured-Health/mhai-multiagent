@@ -163,6 +163,7 @@ func TestDeadLetterExpiredAndTerminal(t *testing.T) {
 	setRow(t, running, "status = 'running', attempts = 1")
 	failed := seedQuery(t, hid, u, 0, &deadline, true)
 	setRow(t, failed, "status = 'failed', error = 'internal'")
+	setRow(t, expired, "deadline_at = now() - interval '1 minute'") // a letter fails only a row past its own deadline
 	for _, id := range []uuid.UUID{expired, cancelled} {
 		sendDead(t, js, deadSubject(hid), &intelpb.DeadLetter{JobId: id.String(), Type: "run_query", SubjectHospital: hid.String(),
 			Code: "deadline_exceeded", Reason: "expired"})
@@ -457,5 +458,57 @@ func TestDeadLetterReplayOnFinishedJobWritesNothing(t *testing.T) {
 	}
 	if c.Metrics.DeadRefused.Load() != 0 || c.Metrics.DeadIgnored.Load() != 3 {
 		t.Fatalf("refused %d ignored %d", c.Metrics.DeadRefused.Load(), c.Metrics.DeadIgnored.Load())
+	}
+}
+
+// A deadline_exceeded letter is about one delivery. A row that expired and
+// was retried (queued again with a fresh deadline) is not failed again by
+// the old letter, and nothing is audited; once the row is past its own
+// deadline the same letter fails it. Questions and jobs rows both.
+func TestStaleDeadLetterAfterRetryIgnored(t *testing.T) {
+	c, _ := newClient(t)
+	c.Metrics = &Metrics{}
+	c.Pool = app
+	ctx := context.Background()
+	hid := seedHospital(t, "active")
+	submitter := seedUser(t, hid, true, authz.RoleClinician)
+	decider := seedUser(t, hid, true, authz.RoleClinician)
+	past := time.Now().Add(-time.Minute)
+	q := seedQuery(t, hid, submitter, 20*time.Minute, &past, true)
+	j := seedJob(t, hid, seedCorrection(t, hid, submitter, decider), decider, 20*time.Minute, past, true)
+	// Expired, failed and retried: queued again with a fresh deadline.
+	setRow(t, q, "status = 'queued', retry_count = 1, deadline_at = now() + interval '10 minutes'")
+	setJob(t, j, "status = 'queued', retry_count = 1, deadline_at = now() + interval '10 minutes'")
+	letter := func(id uuid.UUID, typ string) {
+		b, err := proto.Marshal(&intelpb.DeadLetter{JobId: id.String(), Type: typ, SubjectHospital: hid.String(),
+			Code: "deadline_exceeded", Reason: "expired"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		HandleDeadLetter(ctx, app, c, "dead.v1."+hid.String()+"."+typ, b)
+	}
+	letter(q, "run_query")
+	letter(j, "approve_correction")
+	if s := stateOf(t, q); s.status != "queued" {
+		t.Fatalf("a retried question was failed by a stale letter: %+v", s)
+	}
+	if s := jobStateOf(t, j); s.status != "queued" {
+		t.Fatalf("a retried job was failed by a stale letter: %+v", s)
+	}
+	for _, id := range []uuid.UUID{q, j} {
+		if n := auditCount(t, id); n != 0 {
+			t.Fatalf("%d audit rows for a stale letter", n)
+		}
+	}
+	// The same letters fail the rows once they are past their own deadline.
+	setRow(t, q, "deadline_at = now() - interval '1 minute'")
+	setJob(t, j, "deadline_at = now() - interval '1 minute'")
+	letter(q, "run_query")
+	letter(j, "approve_correction")
+	if s := stateOf(t, q); s.status != "failed" {
+		t.Fatalf("an expired question was not failed: %+v", s)
+	}
+	if s := jobStateOf(t, j); s.status != "failed" {
+		t.Fatalf("an expired job was not failed: %+v", s)
 	}
 }

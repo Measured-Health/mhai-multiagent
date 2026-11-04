@@ -224,6 +224,11 @@ the test computes), starts `POST /platform/audit/verify` and polls the run
 to `intact`, reads `GET /platform/audit/verify/status` (200 only with the
 stack's synthetic `SECURITY_CONTACT_NAME` and `SECURITY_CONTACT_EMAIL`), and
 finds clinician B's `review_submitted` in the log filtered to `type=review`.
+`TestSmokePlatformOps` (Plan 4c) signs in a synthetic platform admin, waits
+for the sampler's first reading of `GET /platform/health` (fresh, `workers`
+ok), forces a dead letter and finds it in `GET /platform/jobs`, retries it
+with `POST /platform/jobs/retry`, and reads `GET /platform/guardrails?period=7d`
+(the right shape, no shown count of 1 to 4).
 Set
 `POSTGRES_PORT`, `NATS_PORT`, `CORE_PORT` and `SMOKE_PROJECT` when the
 defaults clash.
@@ -405,7 +410,30 @@ hash chain as the frontend's audit events (`internal/platform`,
   an outcome note to a broken check. Auditors can write on these routes only
   (`AuditorWrite`).
 
+## Platform operations (Plan 4, part 4c)
+
+Platform audience, two-step always; none of these reads is audit-recorded.
+
+- `GET /platform/health` serves the reading the sampler stored (one core
+  copy samples every 30 s, others stand by); a poll is one KV get, never a
+  database statement or worker call. 503 `unavailable` when the reading is
+  missing, older than 2 minutes, dated ahead, or the wrong shape.
+- `GET /platform/jobs` lists failed, retrying, retried and cancelled
+  questions and jobs, newest failure first, 30 days. `POST /platform/jobs/retry`
+  (platform admins, 10 calls a minute per session) re-queues each job and
+  publishes it as its creator, after re-checking that the creator is still
+  usable and the second-person rule holds; `POST /platform/jobs/cancel`
+  needs a fresh code, and the note is stored apart and never logged. A bad
+  body is 422 `validation_failed`.
+- `GET /platform/guardrails?period=7d|30d|90d` counts HGA decisions of the
+  active hospitals over whole UTC days ending at the start of today (until
+  00:15 UTC, yesterday's), through `internal/smallgroup`: no count of 1 to 4,
+  no hidden value that the shown ones give away. Each period's day is one
+  stored snapshot (`guardrail_snapshots`), the same on every copy all day.
+  6 reads a minute per session (429).
+
 ## Known limits
+
 
 - **Third-party lockout.** Someone who knows an email can hold any account
   without a trusted device that may stand in for the code (two-step

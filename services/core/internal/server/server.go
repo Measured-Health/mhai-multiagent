@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
@@ -35,6 +36,9 @@ type Deps struct {
 	// AuditWalk runs a started chain check (nil: in the background with
 	// the 10-minute budget); tests hold runs running with it.
 	AuditWalk func(runID uuid.UUID)
+	// Health is the health bucket (bus.OpenHealthBucket), which GET
+	// /platform/health serves; nil answers 503 unavailable.
+	Health jetstream.KeyValue
 }
 
 // Register adds every route to m.
@@ -50,9 +54,12 @@ func Register(m *authz.Mux, d Deps) {
 	// The feedback routes log through the service's logger, whether or not
 	// an intelligence client is set.
 	feedback.Register(m, feedback.Deps{Pool: d.Pool, Intel: d.Intel, Log: a.Log})
-	// The platform app's audit log reads (Plan 4 spec §5.2).
+	// The platform app's audit log reads (Plan 4 spec §5.2), system
+	// health (§6.1), the failed jobs (§6.2) and the guardrail statistics
+	// (§6.3).
 	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log, MasterKey: a.MFAKey,
-		SecurityContact: d.SecurityContact, Walk: d.AuditWalk})
+		SecurityContact: d.SecurityContact, Walk: d.AuditWalk, Health: d.Health, Intel: d.Intel,
+		Auth: a, QueryCap: d.QueryCap})
 	registerFixtures(m, d)
 }
 

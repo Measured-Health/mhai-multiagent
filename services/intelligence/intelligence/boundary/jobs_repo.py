@@ -39,7 +39,7 @@ _CLAIM = """UPDATE clinical_queries SET status = 'running', attempts = attempts 
 WHERE id = %s AND (status = 'queued' OR (status = 'running' AND lease_until < now()))
     AND EXISTS (SELECT 1 FROM hospitals h
                 WHERE h.id = clinical_queries.hospital_id AND h.status = 'active')
-RETURNING clinical_question, patient_data_json, urgency, category, attempts"""
+RETURNING clinical_question, patient_data_json, urgency, category, attempts, retry_count"""
 
 _STATE = """SELECT status,
     greatest(0, extract(epoch FROM (lease_until - now())))::float8
@@ -107,6 +107,10 @@ class Claim:
     urgency: str
     category: str | None
     attempts: int
+    # The platform's retries of this row (Plan 4 spec §6.2, 00016): each
+    # retry gives the job a fresh attempts budget, as attempts itself never
+    # goes down (the same rule as approve_correction).
+    retry_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -192,8 +196,10 @@ async def claim(cur: Cursor, query_id: str, lease_s: float) -> Claim | None:
     row = await cur.fetchone()
     if row is None:
         return None
-    question, patient, urgency, category, attempts = row
-    return Claim(str(question), patient, str(urgency), category, int(attempts))
+    question, patient, urgency, category, attempts, retry_count = row
+    return Claim(
+        str(question), patient, str(urgency), category, int(attempts), int(retry_count or 0)
+    )
 
 
 async def state(cur: Cursor, query_id: str) -> State | None:

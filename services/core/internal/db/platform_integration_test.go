@@ -22,15 +22,20 @@ import (
 
 const uniqueViolation = "23505"
 
-// platformFunctions are the four functions with their final signatures
-// (spec §6.1-§6.3): identity arguments and declared result, as Postgres
-// prints them. Tasks 11-13 fill the bodies; the columns don't change.
+// platformFunctions are the platform's functions with their final
+// signatures (spec §6.1-§6.3): identity arguments and declared result, as
+// Postgres prints them. Tasks 11-13 fill the bodies. 00015 (Task 11)
+// replaced the health window's interval with text (an interval can't tell
+// '60 minutes' from '1 hour') and added mhai_health_guidelines. 00016
+// (Task 12) added p_not_errors to mhai_platform_jobs (the "other" kind is
+// every code that isn't another kind's).
 var platformFunctions = map[string][2]string{
-	"mhai_health_timings": {"time_window interval",
+	"mhai_health_timings": {"p_window text",
 		"TABLE(step text, p50_ms integer, p95_ms integer, samples bigint)"},
+	"mhai_health_guidelines": {"", "boolean"},
 	"mhai_health_failures": {"",
 		"TABLE(job_type text, error text, failed_now bigint, failed_last_hour bigint, failed_last_24h bigint)"},
-	"mhai_platform_jobs": {"p_status text, p_type text, p_hospital uuid, p_errors text[], p_after_failed_at timestamp with time zone, p_after_id uuid, p_limit integer",
+	"mhai_platform_jobs": {"p_status text, p_type text, p_hospital uuid, p_errors text[], p_not_errors text[], p_after_failed_at timestamp with time zone, p_after_id uuid, p_limit integer",
 		"TABLE(id uuid, type text, hospital_id uuid, created_at timestamp with time zone, failed_at timestamp with time zone, attempts integer, error text, status text, retry_count integer, cancelled_by uuid, cancelled_at timestamp with time zone)"},
 	"mhai_guardrail_counts": {"p_from timestamp with time zone, p_to timestamp with time zone",
 		"TABLE(hospital_id uuid, answers bigint, pass bigint, regenerate bigint, escalate bigint, degraded bigint)"},
@@ -76,15 +81,16 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 	// its reason. A new grant to the platform fails here until it is
 	// justified in this list.
 	wantRelations := map[string]string{
-		"hospitals":         "00003: names and status for the platform screens",
-		"users":             "00003: column SELECT without password_hash (the audit's actor, people search)",
-		"platform_users":    "00003: security_invoker view over users' granted columns",
-		"user_roles":        "00003: roles of the audit's actors",
-		"sessions":          "00003: session metadata (no tokens: those are refresh_tokens)",
-		"audit_log":         "00003: read the chain; append its eight actions (00014 platform_append)",
-		"audit_checkpoints": "00003: the chain's checkpoints, for verification",
-		"idempotency_keys":  "00003: Idempotency-Key replies of platform writes, null-hospital rows only",
-		"audit_verify_runs": "00014: the chain checks",
+		"hospitals":           "00003: names and status for the platform screens",
+		"users":               "00003: column SELECT without password_hash (the audit's actor, people search)",
+		"platform_users":      "00003: security_invoker view over users' granted columns",
+		"user_roles":          "00003: roles of the audit's actors",
+		"sessions":            "00003: session metadata (no tokens: those are refresh_tokens)",
+		"audit_log":           "00003: read the chain; append its eight actions (00014 platform_append)",
+		"audit_checkpoints":   "00003: the chain's checkpoints, for verification",
+		"idempotency_keys":    "00003: Idempotency-Key replies of platform writes, null-hospital rows only",
+		"audit_verify_runs":   "00014: the chain checks",
+		"guardrail_snapshots": "00017: the guarded guardrail statistics, one per period and day (SELECT, INSERT)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `
@@ -129,7 +135,8 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 
 	// The exact set of SECURITY DEFINER functions it may run, PUBLIC's
 	// EXECUTE included, each with its full arguments and result: the four
-	// of 00014, the buffer count (00013) and the chain head (00003).
+	// of 00014 (one replaced by 00015), 00015's guidelines check, the
+	// buffer count (00013) and the chain head (00003).
 	wantFuncs := map[string][2]string{
 		"audit_chain_head":             {"OUT id bigint, OUT hash text", "record"},
 		"mhai_feedback_buffer_waiting": {"", "bigint"},
@@ -201,8 +208,21 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		if args != sig[0] || result != sig[1] {
 			t.Errorf("%s(%s) RETURNS %s\nwant (%s) RETURNS %s", name, args, result, sig[0], sig[1])
 		}
-		if owner != "mhai_migrate" || !definer {
-			t.Errorf("%s: owner %s, security definer %v", name, owner, definer)
+		// The health functions are owned by their own column-limited reader
+		// (00015); the rest by mhai_migrate.
+		wantOwner := "mhai_migrate"
+		switch {
+		case strings.HasPrefix(name, "mhai_health_"):
+			wantOwner = "mhai_health_reader"
+		case name == "mhai_platform_jobs":
+			// 00016 (Task 12): the failed-jobs list's own reader.
+			wantOwner = "mhai_jobs_reader"
+		case name == "mhai_guardrail_counts":
+			// 00017 (Task 13): the guardrail statistics' own reader.
+			wantOwner = "mhai_guardrail_reader"
+		}
+		if owner != wantOwner || !definer {
+			t.Errorf("%s: owner %s (want %s), security definer %v", name, owner, wantOwner, definer)
 		}
 		if len(config) != 1 || config[0] != "search_path=pg_catalog, pg_temp" {
 			t.Errorf("%s: config %v, want the fixed search_path", name, config)
@@ -213,29 +233,58 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		}
 	}
 
-	// The platform may call them (the bodies come with Tasks 11-13), and
-	// the timing window is checked first; nobody else may call them.
+	// The platform may call them: the health bodies are built (00015), the
+	// jobs list (00016) and the guardrail counts (00017); nobody else may
+	// call any.
 	call := map[string]string{
-		"mhai_health_timings":   `SELECT * FROM mhai_health_timings(interval '1 hour')`,
-		"mhai_health_failures":  `SELECT * FROM mhai_health_failures()`,
-		"mhai_platform_jobs":    `SELECT * FROM mhai_platform_jobs('failed', NULL, NULL, NULL, NULL, NULL, 50)`,
-		"mhai_guardrail_counts": `SELECT * FROM mhai_guardrail_counts(now() - interval '7 days', now())`,
+		"mhai_health_timings":    `SELECT * FROM mhai_health_timings('1 hour')`,
+		"mhai_health_failures":   `SELECT * FROM mhai_health_failures()`,
+		"mhai_health_guidelines": `SELECT mhai_health_guidelines()`,
+		"mhai_platform_jobs":     `SELECT * FROM mhai_platform_jobs('failed', NULL, NULL, NULL, NULL, NULL, NULL, 50)`,
+		"mhai_guardrail_counts":  `SELECT * FROM mhai_guardrail_counts(now() - interval '7 days', now())`,
 	}
+	built := map[string]bool{"mhai_health_timings": true, "mhai_health_failures": true, "mhai_health_guidelines": true,
+		"mhai_platform_jobs": true, "mhai_guardrail_counts": true}
 	for name, q := range call {
 		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q); return err })
-		if pgCode(err) != "0A000" {
+		switch {
+		case built[name] && err != nil:
+			t.Errorf("platform calling %s: %v", name, err)
+		case !built[name] && pgCode(err) != "0A000":
 			t.Errorf("platform calling %s: want the not-built-yet refusal (0A000), got %v", name, err)
 		}
 		for _, role := range []string{"mhai_gateway", "mhai_auth", "mhai_worker", "mhai_jobs", "mhai_audit_drain", "mhai_provision"} {
 			requireDenied(t, asRole(ctx, pool, role, q), role+" calling "+name)
 		}
 	}
+	// The window is exactly '1 hour' or '24 hours', compared as text: an
+	// equal interval written another way is refused too.
+	for _, w := range []string{"'1 hour'", "'24 hours'"} {
+		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `SELECT * FROM mhai_health_timings(`+w+`)`)
+			return err
+		})
+		if err != nil {
+			t.Errorf("window %s: %v", w, err)
+		}
+	}
+	for _, w := range []string{"'5 minutes'", "'60 minutes'", "'3600 seconds'", "'1 day'", "'01:00:00'", "'1 hours'",
+		"'1 Hour'", "' 1 hour'", "'24 hour'", "''", "NULL"} {
+		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `SELECT * FROM mhai_health_timings(`+w+`)`)
+			return err
+		})
+		if pgCode(err) != "22023" {
+			t.Errorf("window %s: want 22023, got %v", w, err)
+		}
+	}
+	// The interval form 00014 had is gone.
 	err = db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `SELECT * FROM mhai_health_timings(interval '5 minutes')`)
+		_, err := tx.Exec(ctx, `SELECT * FROM mhai_health_timings(interval '1 hour')`)
 		return err
 	})
-	if pgCode(err) != "22023" {
-		t.Errorf("a window other than 1 hour or 24 hours: want 22023, got %v", err)
+	if err == nil {
+		t.Error("mhai_health_timings(interval) still exists")
 	}
 }
 

@@ -142,3 +142,27 @@ func TestRunQueryTimeoutMatchesMigration(t *testing.T) {
 		t.Fatalf("00007 names the default deadline %d times, want 3", n)
 	}
 }
+
+// Spec §10.1's platform kind column: every worker code has its kind, and
+// any other stored code (or none) is other.
+func TestErrorKind(t *testing.T) {
+	want := map[string]string{
+		"unauthorized": "invalid", "forbidden": "invalid", "invalid_request": "invalid",
+		"not_found": "other", "deadline_exceeded": "timeout", "overloaded": "timeout",
+		"unavailable": "unreachable", "internal": "other", "cancelled": "other",
+		"": "other", "user_deactivated": "other", "SYNTHETIC": "other",
+	}
+	for code, k := range want {
+		if got := ErrorKind(code); got != k {
+			t.Errorf("ErrorKind(%q) = %q, want %q", code, got, k)
+		}
+	}
+	for code := range workerCodes {
+		if _, ok := want[code]; !ok {
+			t.Errorf("worker code %q has no expected kind here", code)
+		}
+	}
+	if strings.Join(ErrorKinds, ",") != "timeout,unreachable,unreadable,invalid,other" {
+		t.Errorf("ErrorKinds %v", ErrorKinds)
+	}
+}
