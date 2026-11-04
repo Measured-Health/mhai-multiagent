@@ -103,7 +103,7 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 
 ## Plan 4c follow-ups (Task 11 review)
 
-- **The non-superuser migrate path and `mhai_health_reader`.** On a CREATEROLE (not superuser) migration login, 00015's `ALTER FUNCTION ... OWNER TO mhai_health_reader` needs the new owner to hold CREATE on schema `public`, which it doesn't (it has USAGE only). Grant it for the hand-over and revoke it after, or run that step as a superuser. The demo migrates as a superuser, so it isn't affected.
+- **The non-superuser migrate path for 00015, 00016 and 00017.** On a CREATEROLE (not superuser) migration login, 00015's `ALTER FUNCTION ... OWNER TO mhai_health_reader` needs the new owner to hold CREATE on schema `public`, which it doesn't (it has USAGE only); 00016 and 00017 hand functions and tables to their reader roles the same way. On PG16 a CREATEROLE runner also gets ADMIN membership of roles it creates automatically, which the hand-over and the temp-grant path must account for. Grant for the hand-over and revoke after, or run these steps as a superuser. The demo migrates as a superuser, so it isn't affected.
 - **Bound the health failures scan with retention.** `mhai_health_failures()` counts every failed question and job, however old (partial indexes on failed rows keep it to those rows). Once the retention plan purges old jobs and questions, the scan is bounded by it; until then it grows with the failed rows kept.
 
 ## Plan 4c follow-ups (Task 12 review)
@@ -123,6 +123,12 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 - **mhai-web: `HealthOut` must accept `clean_up` and `documents` missing** (decision 7); core does not send them until those services exist.
 - **Health `versions` and the evidence part.** `HealthResponse` carries no NLI flag or model versions, so `versions` is `[]` and `evidence` is ok only when `models_ready` (R33). Extend the intelligence boundary's health reply.
 - **Smoke: no check that a retried dead letter completes.** The forced dead letter has no stored patient data, so the pipeline may fail it again; the smoke test checks only that the retry is accepted.
+
+- **Tag dead letters with their retry generation.** A `deadline_exceeded` letter for a retried row is ignored because the row's own deadline hasn't passed (final review fix 1), but a stale letter with another code (`unavailable`, `internal`) can still fail a freshly retried row. Put the row's `retry_count` in the job message and the letter, and ignore a letter whose generation isn't the row's.
+- **Health `overall` timing includes the time before a retry.** A retried question's timings run from its first creation (M2).
+- **One bad row aborts the whole retry batch.** Use a savepoint per row, so one failing row is skipped, not the call (M4).
+- **The two `job.cancelled` shapes accept each other's reasons.** The platform's cancel batch (`job_count`, `reason`) and the system's per-job rows share an action name and validation; separate them (M6).
+- **Test-only mutable globals in production code:** `guardClock`, `skipBridge` (smallgroup) and `jobsTableFault` can be set by any code in the package; move them behind build-tagged files or constructor options (M7).
 
 ## Test follow-ups
 

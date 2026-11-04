@@ -179,7 +179,8 @@ func requeue(ctx context.Context, tx pgx.Tx, rows []JobRow, queryCap int) ([]req
 			}
 			err := tx.QueryRow(ctx, `UPDATE clinical_queries q
 				SET status = 'queued', retry_count = q.retry_count + 1, error = NULL, published_at = NULL,
-				    completed_at = NULL, deadline_at = now() + make_interval(secs => $3)
+				    completed_at = NULL, progress = 0, current_stage = NULL, started_at = NULL, lease_until = NULL,
+				    deadline_at = now() + make_interval(secs => $3)
 				WHERE q.id = $1 AND q.hospital_id = $2 AND q.status = 'failed'
 				  AND NOT EXISTS (SELECT 1 FROM intelligence_audit_outbox o WHERE o.query_id = q.id)
 				RETURNING q.retry_count, q.deadline_at`, r.ID, r.HospitalID, qop.Timeout.Seconds()).Scan(&r.RetryCount, &r.Deadline)

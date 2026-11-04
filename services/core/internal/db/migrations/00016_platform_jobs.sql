@@ -168,7 +168,9 @@ CREATE POLICY jobs_role_update ON jobs FOR UPDATE TO mhai_jobs
 ------------------------------------------------------------------------
 -- mhai_jobs: the retry's columns, and the outbox's parent ids
 ------------------------------------------------------------------------
-GRANT SELECT (retry_count), UPDATE (retry_count, deadline_at) ON clinical_queries TO mhai_jobs;
+-- A retry also clears the failed run's progress fields (fix wave).
+GRANT SELECT (retry_count), UPDATE (retry_count, deadline_at, progress, current_stage, started_at, lease_until)
+    ON clinical_queries TO mhai_jobs;
 GRANT SELECT (queued_at), UPDATE (deadline_at, queued_at) ON jobs TO mhai_jobs;
 GRANT SELECT (query_id, job_id) ON intelligence_audit_outbox TO mhai_jobs;
 CREATE POLICY jobs_facts_read ON intelligence_audit_outbox FOR SELECT TO mhai_jobs USING (true);
@@ -381,7 +383,7 @@ DROP TABLE query_cancellations;
 DROP POLICY jobs_facts_read ON intelligence_audit_outbox;
 REVOKE SELECT (query_id, job_id) ON intelligence_audit_outbox FROM mhai_jobs;
 REVOKE SELECT (queued_at), UPDATE (deadline_at, queued_at) ON jobs FROM mhai_jobs;
-REVOKE SELECT (retry_count), UPDATE (retry_count, deadline_at) ON clinical_queries FROM mhai_jobs;
+REVOKE SELECT (retry_count), UPDATE (retry_count, deadline_at, progress, current_stage, started_at) ON clinical_queries FROM mhai_jobs;
 
 -- 00007's and 00012's update policies, as they were.
 DROP POLICY jobs_role_update ON jobs;

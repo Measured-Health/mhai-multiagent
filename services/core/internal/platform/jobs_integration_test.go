@@ -463,6 +463,33 @@ func TestRetryRequeuesAndPublishes(t *testing.T) {
 	}
 }
 
+// A retried question starts clean: the failed run's progress, stage, start
+// time and lease are cleared.
+func TestRetryClearsRunProgress(t *testing.T) {
+	s := newSite(t)
+	tok := mint(t, platformAdmin(t))
+	q := seedJobQuestion(t, s.hid, s.submitter.id, "failed", "internal")
+	if _, err := super.Exec(context.Background(), `UPDATE clinical_queries
+		SET progress = 0.6, current_stage = 'answer', started_at = now() - interval '5 minutes', lease_until = now() - interval '1 minute'
+		WHERE id = $1`, q); err != nil {
+		t.Fatal(err)
+	}
+	ok(t, "retry", retry(t, tok, qid(q)))
+	var progress float64
+	var stage *string
+	var started, lease *time.Time
+	if err := super.QueryRow(context.Background(), `SELECT progress, current_stage, started_at, lease_until FROM clinical_queries WHERE id = $1`, q).
+		Scan(&progress, &stage, &started, &lease); err != nil {
+		t.Fatal(err)
+	}
+	if st, n, _ := queryState(t, q); st != "queued" || n != 1 {
+		t.Fatalf("question: %s retry_count %d", st, n)
+	}
+	if progress != 0 || stage != nil || started != nil || lease != nil {
+		t.Errorf("progress %v stage %v started %v lease %v, want cleared", progress, stage, started, lease)
+	}
+}
+
 // C27: a creator who was deactivated, or who no longer holds clinician, is
 // never minted as: skipped, the row stays failed, nothing published, and
 // nothing audited.

@@ -627,7 +627,8 @@ func QueueStats(ctx context.Context, pool *pgxpool.Pool) (depth int64, oldest ti
 	defer cancel()
 	err = db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		var secs float64
-		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)::float8
+		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(
+				CASE WHEN retry_count > 0 THEN deadline_at - interval '10 minutes' ELSE created_at END)), 0)::float8
 			FROM clinical_queries WHERE status = 'queued'`).Scan(&depth, &secs); err != nil {
 			return err
 		}
@@ -646,7 +647,7 @@ func LearningQueueStats(ctx context.Context, pool *pgxpool.Pool) (depth int64, o
 	defer cancel()
 	err = db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		var secs float64
-		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)::float8
+		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(queued_at)), 0)::float8
 			FROM jobs WHERE status = 'queued' AND type = 'approve_correction'`).Scan(&depth, &secs); err != nil {
 			return err
 		}
