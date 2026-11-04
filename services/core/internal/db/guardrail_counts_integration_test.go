@@ -99,7 +99,18 @@ func TestGuardrailCountsFunction(t *testing.T) {
 		t.Errorf("90 days: %+v", c)
 	}
 
-	// The window: at most 90 days, within the last 91, not far ahead, and
+	// Fix round 3: 90 days ending yesterday's midnight, as the route asks
+	// in the 15 minutes after midnight UTC (R43), starts just over 91 days
+	// ago and is accepted.
+	if err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT * FROM mhai_guardrail_counts(
+			date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' - interval '91 days',
+			date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' - interval '1 day')`)
+		return err
+	}); err != nil {
+		t.Errorf("90 days to yesterday's midnight: %v", err)
+	}
+	// The window: at most 90 days, within the last 92, not far ahead, and
 	// from before to.
 	for _, w := range []string{
 		`NULL, now()`, `now() - interval '1 day', NULL`, `now(), now()`, `now(), now() - interval '1 day'`,
@@ -117,7 +128,7 @@ func TestGuardrailCountsFunction(t *testing.T) {
 }
 
 // mhai_guardrail_reader: owns only the function; reads only the four
-// decision columns of the last 91 days and active hospitals' id and status;
+// decision columns of the last 92 days and active hospitals' id and status;
 // nobody can log in as it or reach it.
 func TestGuardrailReaderScoped(t *testing.T) {
 	_, pool := shared(t)
@@ -264,6 +275,15 @@ func TestGuardrailSnapshotsScoped(t *testing.T) {
 	})
 	if pgCode(err) != "23514" {
 		t.Errorf("period 1d: want 23514, got %v", err)
+	}
+	// No row for a day that hasn't started.
+	err = db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO guardrail_snapshots (period, day, body)
+			VALUES ('7d', (now() AT TIME ZONE 'UTC')::date + 1, '{}')`)
+		return err
+	})
+	if pgCode(err) != "42501" {
+		t.Errorf("a snapshot for tomorrow: want 42501 (the policy), got %v", err)
 	}
 	var rls, force bool
 	var owner string

@@ -12,9 +12,11 @@
 -- small-group rules are applied in Go (internal/smallgroup) before the
 -- counts are encoded; raw counts never leave core.
 --
--- The window is at most 90 days, starts no earlier than 91 days ago and
+-- The window is at most 90 days, starts no earlier than 92 days ago and
 -- ends no later than a day from now (22023 otherwise), so the scan is
--- bounded whatever the caller passes.
+-- bounded whatever the caller passes. 92, not 91: in the 15 minutes after
+-- midnight UTC the route serves the window ending at yesterday's midnight
+-- (R43), whose 90-day start is just over 91 days ago.
 --
 -- Who reads: mhai_guardrail_reader, a role of its own like 00015's
 -- mhai_health_reader and 00016's mhai_jobs_reader (NOLOGIN, NOINHERIT,
@@ -22,7 +24,7 @@
 -- the columns the body aggregates only (hospital_id, hga_decision,
 -- degraded and created_at of clinical_decisions; id and status of
 -- hospitals), through one policy per table scoped to the rows the body
--- needs: decisions of the last 91 days, active hospitals. The role is
+-- needs: decisions of the last 92 days, active hospitals. The role is
 -- cluster-wide, so it is created only if missing and kept on Down, with
 -- every grant revoked.
 --
@@ -70,7 +72,7 @@ GRANT SELECT (hospital_id, hga_decision, degraded, created_at) ON clinical_decis
 GRANT SELECT (id, status) ON hospitals TO mhai_guardrail_reader;
 
 CREATE POLICY guardrail_read ON clinical_decisions FOR SELECT TO mhai_guardrail_reader
-    USING (created_at >= now() - interval '91 days');
+    USING (created_at >= now() - interval '92 days');
 CREATE POLICY guardrail_read ON hospitals FOR SELECT TO mhai_guardrail_reader
     USING (status = 'active');
 
@@ -88,7 +90,9 @@ ALTER TABLE guardrail_snapshots ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECUR
 REVOKE ALL ON guardrail_snapshots FROM PUBLIC;
 GRANT SELECT, INSERT ON guardrail_snapshots TO mhai_platform;
 CREATE POLICY platform_read ON guardrail_snapshots FOR SELECT TO mhai_platform USING (true);
-CREATE POLICY platform_insert ON guardrail_snapshots FOR INSERT TO mhai_platform WITH CHECK (true);
+-- No row for a day that hasn't started (UTC).
+CREATE POLICY platform_insert ON guardrail_snapshots FOR INSERT TO mhai_platform
+    WITH CHECK (day <= (now() AT TIME ZONE 'UTC')::date);
 
 DROP FUNCTION mhai_guardrail_counts(timestamptz, timestamptz);
 
@@ -101,10 +105,10 @@ CREATE FUNCTION mhai_guardrail_counts(p_from timestamptz, p_to timestamptz)
 BEGIN
     IF p_from IS NULL OR p_to IS NULL OR p_from >= p_to
        OR p_to - p_from > interval '90 days'
-       OR p_from < now() - interval '91 days'
+       OR p_from < now() - interval '92 days'
        OR p_to > now() + interval '1 day' THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-            MESSAGE = 'mhai_guardrail_counts: the window is at most 90 days within the last 91';
+            MESSAGE = 'mhai_guardrail_counts: the window is at most 90 days within the last 92';
     END IF;
     -- Every output column is also a variable here: every column reference
     -- below is qualified.
