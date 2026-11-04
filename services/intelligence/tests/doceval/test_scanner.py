@@ -310,3 +310,41 @@ def test_duplicate_keys_and_special_files_refused(tmp_path: Path) -> None:
     (tmp_path / "dup.json").unlink()
     os.mkfifo(tmp_path / "pipe.json")
     assert any(f.rule == "unexpected_file" for f in scanner.scan_set(tmp_path).findings)
+
+
+def test_file_names_use_strict_digit_rule(tmp_path: Path) -> None:
+    for name in ("0803-123-4567.png", "12345_678901.json", "123-456.json"):
+        (tmp_path / name).write_bytes(b"{}")
+    res = scanner.scan_set(tmp_path)
+    assert sum(f.rule == "filename" for f in res.findings) == 3
+    dump = repr(res)
+    assert "0803" not in dump and "12345" not in dump and "123-456" not in dump
+
+
+@pytest.mark.parametrize(
+    ("path", "text"),
+    [
+        (("observations", 0, "value_text"), "0803 123 4567"),
+        (("observations", 0, "value_text"), "12345678901"),
+        (("observations", 0, "reference_text"), "0803-123-4567"),
+        (("medications", 0, "dose_text"), "0803 123 4567"),
+        (("medications", 0, "dose_text"), "NIN 123 4567 8901"),
+        (("medications", 0, "dose_text"), "12345678901"),
+    ],
+)
+def test_lab_text_fields_still_catch_phone_and_nin(path: tuple[Any, ...], text: str) -> None:
+    doc: dict[str, Any] = {}
+    for p in patients.generate(random.Random(5), 50):
+        for d in p.documents:
+            if d["observations"] and d["medications"] and not doc:
+                doc = dict(d)
+    if not doc:  # fall back: borrow a medication row into a lab document
+        doc = _doc()
+        for p in patients.generate(random.Random(5), 50):
+            for d in p.documents:
+                if d["medications"]:
+                    doc["medications"] = d["medications"]
+    found = scanner.check_document(_set(doc, (*path, "value"), text))
+    where = f"{path[0]}[{path[1]}].{path[2]}.value"
+    assert where in _paths(found)
+    assert text not in repr(found)

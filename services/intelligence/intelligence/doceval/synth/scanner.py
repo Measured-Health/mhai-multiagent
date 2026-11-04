@@ -127,20 +127,25 @@ def _normalise(text: str) -> str:
 
 
 def _digit_rules(rest: str, lab: bool) -> list[str]:
+    """Phone, national-id-like and long digit runs.
+
+    Digits are joined across separators in every field, so a phone or an 11-digit
+    id is caught everywhere. ``lab`` only loosens the long-run threshold, to a
+    single number of 7 or more digits, for fields that hold lab numbers and codes.
+    """
     rules: list[str] = []
-    if lab:
-        runs = [m.group(0).replace(".", "") for m in _TOKEN_NUMBER.finditer(rest)]
-        threshold = 7
-    else:
-        runs = [re.sub(r"[^0-9]", "", m.group(0)) for m in _RUN.finditer(rest)]
-        threshold = 6
-    for digits in runs:
+    for m in _RUN.finditer(rest):
+        digits = re.sub(r"[^0-9]", "", m.group(0))
         if _NG_PHONE_DIGITS.fullmatch(digits):
             rules.append("phone")
         elif len(digits) == 11:
             rules.append("national_id_like")
-        elif len(digits) >= threshold:
+        elif not lab and len(digits) >= 6:
             rules.append("long_digits")
+    if lab:
+        for m in _TOKEN_NUMBER.finditer(rest):
+            if len(m.group(0).replace(".", "")) >= 7:
+                rules.append("long_digits")
     return rules
 
 
@@ -403,7 +408,7 @@ def _safe_rel(rel: str, index: int) -> tuple[str, bool]:
     parts: list[str] = []
     clean = True
     for part in Path(rel).parts:
-        if _SAFE_NAME.fullmatch(part) and not _text_rules(part, lab=True):
+        if _SAFE_NAME.fullmatch(part) and not _text_rules(part):
             parts.append(part)
         else:
             parts.append(f"[name{index}]")
