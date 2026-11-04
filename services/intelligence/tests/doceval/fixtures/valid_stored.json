@@ -1,0 +1,875 @@
+{
+  "schema_version": "1.0.0",
+  "document": {
+    "type": {
+      "value": "lab_report",
+      "raw_text": "lab_report",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "date": {
+      "value": "2026-03-02",
+      "raw_text": "2026-03-02",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "facility_name": {
+      "value": "Synthetic Test Clinic",
+      "raw_text": "Synthetic Test Clinic",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "language": {
+      "value": "en",
+      "raw_text": "en",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "page_count": 1
+  },
+  "patient": {
+    "mrn": {
+      "value": "SYN-000123",
+      "raw_text": "SYN-000123",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "other_ids": [
+      {
+        "kind": {
+          "value": "insurance",
+          "raw_text": "insurance",
+          "page": 1,
+          "bbox": [
+            0.1,
+            0.1,
+            0.4,
+            0.15
+          ],
+          "script": "printed"
+        },
+        "value": {
+          "value": "SYN-INS-77",
+          "raw_text": "SYN-INS-77",
+          "page": 1,
+          "bbox": [
+            0.1,
+            0.1,
+            0.4,
+            0.15
+          ],
+          "script": "printed"
+        }
+      }
+    ],
+    "family_name": {
+      "value": "Testpatient",
+      "raw_text": "Testpatient",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "given_names": {
+      "value": "Sample",
+      "raw_text": "Sample",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "date_of_birth": {
+      "value": "1980-01-31",
+      "raw_text": "1980-01-31",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "sex": {
+      "value": "female",
+      "raw_text": "female",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    }
+  },
+  "encounter": {
+    "kind": {
+      "value": "outpatient",
+      "raw_text": "outpatient",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "start": {
+      "value": "2026-03-02T08:00",
+      "raw_text": "2026-03-02T08:00",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "end": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "location_text": {
+      "value": "Synthetic Ward",
+      "raw_text": "Synthetic Ward",
+      "page": 1,
+      "bbox": [
+        0.1,
+        0.1,
+        0.4,
+        0.15
+      ],
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    },
+    "clinician_text": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed",
+      "confidence": 0.97,
+      "band": "high",
+      "grounded": true,
+      "flags": []
+    }
+  },
+  "observations": [
+    {
+      "category": {
+        "value": "laboratory",
+        "raw_text": "laboratory",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "name_text": {
+        "value": "Serum potassium",
+        "raw_text": "Serum potassium",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "local_code": {
+        "value": null,
+        "raw_text": null,
+        "page": null,
+        "bbox": null,
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "value_text": {
+        "value": "5.9",
+        "raw_text": "5.9",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "value_numeric": {
+        "value": 5.9,
+        "raw_text": "5.9",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.4,
+        "band": "low",
+        "grounded": true,
+        "flags": [
+          "out_of_range"
+        ]
+      },
+      "comparator": {
+        "value": null,
+        "raw_text": null,
+        "page": null,
+        "bbox": null,
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "unit_text": {
+        "value": "mmol/L",
+        "raw_text": "mmol/L",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "reference_text": {
+        "value": "3.5-5.1",
+        "raw_text": "3.5-5.1",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "reference_low": {
+        "value": 3.5,
+        "raw_text": "3.5",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "reference_high": {
+        "value": 5.1,
+        "raw_text": "5.1",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "abnormal_flag": {
+        "value": "H",
+        "raw_text": "H",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "specimen_text": {
+        "value": "Serum",
+        "raw_text": "Serum",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "collected_at": {
+        "value": "2026-03-02T08:15:00",
+        "raw_text": "2026-03-02T08:15:00",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.3,
+          0.9,
+          0.32999999999999996
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "resulted_at": {
+        "value": null,
+        "raw_text": null,
+        "page": null,
+        "bbox": null,
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      }
+    },
+    {
+      "category": {
+        "value": "laboratory",
+        "raw_text": "laboratory",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.35,
+          0.9,
+          0.38
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "name_text": {
+        "value": "Serum sodium",
+        "raw_text": "Serum sodium",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.35,
+          0.9,
+          0.38
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "local_code": {
+        "value": null,
+        "raw_text": null,
+        "page": null,
+        "bbox": null,
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "value_text": {
+        "value": "139",
+        "raw_text": "139",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.35,
+          0.9,
+          0.38
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "value_numeric": {
+        "value": 139,
+        "raw_text": "139",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.35,
+          0.9,
+          0.38
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "comparator": {
+        "value": null,
+        "raw_text": null,
+        "page": null,
+        "bbox": null,
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "unit_text": {
+        "value": "mmol/L",
+        "raw_text": "mmol/L",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.35,
+          0.9,
+          0.38
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "reference_text": {
+        "value": "135-145",
+        "raw_text": "135-145",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.35,
+          0.9,
+          0.38
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "reference_low": {
+        "value": 135,
+        "raw_text": "135",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.35,
+          0.9,
+          0.38
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "reference_high": {
+        "value": 145,
+        "raw_text": "145",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.35,
+          0.9,
+          0.38
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "abnormal_flag": {
+        "value": null,
+        "raw_text": null,
+        "page": null,
+        "bbox": null,
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "specimen_text": {
+        "value": "Serum",
+        "raw_text": "Serum",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.35,
+          0.9,
+          0.38
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "collected_at": {
+        "value": "2026-03-02T08:15:00",
+        "raw_text": "2026-03-02T08:15:00",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.35,
+          0.9,
+          0.38
+        ],
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "resulted_at": {
+        "value": null,
+        "raw_text": null,
+        "page": null,
+        "bbox": null,
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      }
+    }
+  ],
+  "medications": [
+    {
+      "name_text": {
+        "value": "Metformin",
+        "raw_text": "Metformin",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "strength_text": {
+        "value": "500 mg",
+        "raw_text": "500 mg",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "dose_text": {
+        "value": "1 tablet",
+        "raw_text": "1 tablet",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "route_text": {
+        "value": "oral",
+        "raw_text": "oral",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "frequency_text": {
+        "value": "twice daily",
+        "raw_text": "twice daily",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "start": {
+        "value": "2026-01-10",
+        "raw_text": "2026-01-10",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "stop": {
+        "value": null,
+        "raw_text": null,
+        "page": null,
+        "bbox": null,
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      },
+      "status": {
+        "value": "active",
+        "raw_text": "active",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      }
+    }
+  ],
+  "conditions": [
+    {
+      "text": {
+        "value": "Type 2 diabetes mellitus",
+        "raw_text": "Type 2 diabetes mellitus",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "local_code": {
+        "value": "E11.9",
+        "raw_text": "E11.9",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "local_system": {
+        "value": "icd10",
+        "raw_text": "icd10",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "clinical_status": {
+        "value": "active",
+        "raw_text": "active",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "verification": {
+        "value": "confirmed",
+        "raw_text": "confirmed",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "onset": {
+        "value": null,
+        "raw_text": null,
+        "page": null,
+        "bbox": null,
+        "script": "printed",
+        "confidence": 0.97,
+        "band": "high",
+        "grounded": true,
+        "flags": []
+      }
+    }
+  ],
+  "notes": [
+    {
+      "heading": {
+        "value": "Impression",
+        "raw_text": "Impression",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      },
+      "text": {
+        "value": "Synthetic note for tests only.",
+        "raw_text": "Synthetic note for tests only.",
+        "page": 1,
+        "bbox": [
+          0.1,
+          0.1,
+          0.4,
+          0.15
+        ],
+        "script": "printed"
+      }
+    }
+  ]
+}
