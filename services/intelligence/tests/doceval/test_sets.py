@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import re
+import traceback
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,17 @@ def _manifest(m: sets.SetManifest) -> dict[str, Any]:
     assert canonical.is_canonical(raw)
     doc: dict[str, Any] = json.loads(raw)
     return doc
+
+
+def _needles() -> list[bytes]:
+    return [
+        MARKER,
+        MARKER.hex().encode(),
+        MARKER.hex().upper().encode(),
+        str(int.from_bytes(MARKER, "big")).encode(),
+        str(int.from_bytes(MARKER, "little")).encode(),
+        repr(MARKER).encode(),
+    ]
 
 
 def _files(root: Path) -> Iterator[Path]:
@@ -189,13 +201,7 @@ def test_test_seed_not_in_outputs_or_logs(
     caplog.set_level(logging.DEBUG)
     m = _build(tmp_path, "test")
     assert calls == [32]
-    needles = [
-        MARKER,
-        MARKER.hex().encode(),
-        MARKER.hex().upper().encode(),
-        str(int.from_bytes(MARKER, "big")).encode(),
-        str(int.from_bytes(MARKER, "little")).encode(),
-    ]
+    needles = _needles()
     files = list(_files(tmp_path))
     assert files
     for p in files:
@@ -274,30 +280,96 @@ def test_train_builds_with_any_seed(tmp_path: Path) -> None:
     assert scanner.scan_set(a.root).ok
 
 
-def test_document_tripping_the_scanner_is_redrawn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
+def _trip(rules: list[str], times: int) -> Any:
     real = sets._findings
     calls = {"n": 0}
 
-    def every_other(made: Any) -> list[str]:
+    def fake(p: Any) -> list[scanner.Finding]:
         calls["n"] += 1
-        return ["long_digits"] if calls["n"] % 2 else real(made)
+        if calls["n"] <= times:
+            return [scanner.Finding("truth#notes[0].text.value", r) for r in rules]
+        return real(p)
 
-    monkeypatch.setattr(sets, "_findings", every_other)
+    return fake
+
+
+def test_known_false_positive_is_redrawn_and_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(sets, "_findings", _trip(["long_digits"], 1))
     caplog.set_level(logging.INFO)
     m = sets.build("train", 3, tmp_path, 0.01, version="1.0.0")
     assert scanner.scan_set(m.root).ok
-    assert calls["n"] >= 2 * m.documents
-    assert any("redrawn_for_scanner=[('long_digits'" in r.getMessage() for r in caplog.records)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("path=truth#notes[0].text.value rule=long_digits" in x for x in msgs)
+    assert any("redrawn=1 redraw_rules=[('long_digits', 1)]" in x for x in msgs)
 
 
-def test_scanner_refusal_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_other_scanner_rule_fails_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for rule in ("phone", "email", "titled_name", "mrn_pattern", "schema"):
+        monkeypatch.setattr(sets, "_findings", _trip([rule], 1))
+        with pytest.raises(sets.SetError, match="generator_not_synthetic"):
+            sets.build("train", 3, tmp_path, 0.01, version="1.0.0")
+        assert list(tmp_path.iterdir()) == []
+
+
+def test_too_many_redraws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 0.5% of a small set rounds to the floor of one redraw: the second fails the build.
+    monkeypatch.setattr(sets, "_findings", _trip(["mrn_like"], 2))
+    with pytest.raises(sets.SetError, match="too_many_redraws"):
+        sets.build("train", 3, tmp_path, 0.01, version="1.0.0")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_scanner_refusal_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     refused = scanner.ScanResult(False, (scanner.Finding("truth/x.json#patient.mrn", "mrn"),), 1)
     monkeypatch.setattr(sets.synth_scanner, "scan_set", lambda _p: refused)
+    caplog.set_level(logging.ERROR)
     with pytest.raises(sets.SetError, match="scanner_refused"):
         sets.build("train", 3, tmp_path, 0.01, version="1.0.0")
-    assert list(tmp_path.iterdir()) == []  # nothing kept, not even the temporary folder
+    assert list(tmp_path.iterdir()) == []  # nothing kept: not the reserved folder, not the temp
+    assert any("path=truth/x.json#patient.mrn rule=mrn" in r.getMessage() for r in caplog.records)
+
+
+def test_reserved_folder_is_never_taken_over(tmp_path: Path) -> None:
+    (tmp_path / "train").mkdir()
+    with pytest.raises(sets.SetError, match="exists"):
+        sets.build("train", 3, tmp_path, 0.01, version="1.0.0")
+    assert (tmp_path / "train").is_dir()  # someone else's folder is left alone
+
+
+def test_seed_not_in_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(sets.secrets, "token_bytes", lambda n=32: MARKER[:n])
+    real = sets._make
+    calls = {"n": 0}
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("generator crashed")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sets, "_make", boom)
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(sets.SetError) as info:
+        _build(tmp_path, "test")
+    exc = info.value
+    assert str(exc) == "generation_failed"
+    assert exc.__cause__ is None and exc.__context__ is None
+    shown = str(exc) + "".join(
+        traceback.TracebackException.from_exception(exc, capture_locals=True).format()
+    )
+    logs = "".join(r.getMessage() + repr(r.__dict__) for r in caplog.records)
+    for needle in _needles():
+        assert needle.decode("latin-1") not in shown
+        assert needle.decode("latin-1") not in logs
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.slow

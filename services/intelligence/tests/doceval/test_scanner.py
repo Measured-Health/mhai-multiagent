@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import random
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -396,51 +397,127 @@ def test_synthetic_phone_only_as_whole_token() -> None:
         assert scanner.check_document(_note_doc(text)), text
 
 
-def test_computed_values_exempt_only_at_their_path_and_shape() -> None:
-    sha = "0123456789abcdef" * 4
-    commit = "0803123456789abcdef0123456789abcdef01234"
-    good = {
-        "files": [{"path": "truth/x.json", "size": 123456789, "sha256": sha}],
-        "generator": {"commit": commit},
-        "expected": {"regions": [{"bbox": [0.1234, 0.2, 0.9876, 1]}]},
-        "schema": "mhai.evaluation.testset/1",
+SHA = "0123456789abcdef" * 4
+COMMIT = "0803123456789abcdef0123456789abcdef01234"  # a 13-digit run
+TESTSET = "mhai.evaluation.testset/1"
+HOSTILE = "mhai.evaluation.hostile/1"
+
+
+@pytest.fixture
+def at_commit(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("MHAI_GIT_COMMIT", COMMIT)
+    scanner.current_commit.cache_clear()
+    yield
+    scanner.current_commit.cache_clear()
+
+
+def _testset(**extra: Any) -> dict[str, Any]:
+    return {
+        "schema": TESTSET,
+        "files": [{"path": "truth/x.json", "size": 123456789, "sha256": SHA}],
+        "generator": {"commit": COMMIT},
+        **extra,
     }
-    assert scanner.check_metadata(good) == []
+
+
+def test_computed_values_exempt_only_in_their_file_path_and_shape(at_commit: None) -> None:
+    assert scanner.check_metadata(_testset(), context="testset") == []
+    box = {"schema": HOSTILE, "expected": {"regions": [{"bbox": [0.1234, 0.2, 0.9876, 1]}]}}
+    assert scanner.check_metadata(box, context="hostile") == []
+    # The same values in any other kind of file are checked as usual.
+    assert scanner.check_metadata(_testset())  # no context: an ordinary metadata file
+    assert scanner.check_metadata(_testset(), context="hostile")
+    assert scanner.check_metadata({**_testset(), "schema": HOSTILE}, context="testset")
+    # A 4-decimal box never trips the digit rules by itself, so check the exemption directly.
+    where = ("expected", "regions", 0, "bbox", 0)
+    assert scanner._computed_leaf(where, 0.1234, "hostile")
+    assert not scanner._computed_leaf(where, 0.1234, None)
+    assert not scanner._computed_leaf(where, 0.1234, "testset")
+    assert not scanner._computed_leaf(("files", 0, "size"), 123456789, "hostile")
+    assert not scanner._computed_leaf(("generator", "commit"), COMMIT, "hostile")
+    # The hostile exemption needs the hostile schema too: a too-precise box shows it.
+    precise = {"expected": {"regions": [{"bbox": [0.1234567, 0, 0, 0]}]}}
+    assert scanner.check_metadata({**precise, "schema": TESTSET}, context="hostile")
     nin, phone = 12345678901, "08031234567"
     # An exempt key name at a path the set builder does not write is checked as usual.
     for bad in (
         {"size": nin},
-        {"patient": {"size": nin}},
+        {"patient_x": {"size": nin}},
         {"files": {"size": nin}},
         {"files": [{"meta": {"size": nin}}]},
         {"sha256": phone},
         {"files": [{"sha256": phone}]},
         {"commit": phone},
         {"generator": {"commit": phone}},
-        {"note": sha},
-        {"note": commit},
-        {"x": {"generator": {"commit": commit}}},
+        {"note": SHA},
+        {"note": COMMIT},
+        {"x": {"generator": {"commit": COMMIT}}},
         {"regions": [{"bbox": [0.1234567]}]},
         {"bbox": [0.1234567]},
         {"count": 123456789},
         {"schema": "folder/123456"},
-        {"x": {"schema": "mhai.evaluation.testset/1"}},
+        {"x": {"schema": TESTSET}},
     ):
-        assert scanner.check_metadata(bad), bad
-    # The right path with the wrong shape is checked as usual.
-    for bad in (
-        {"files": [{"size": "08031234567"}]},
-        {"files": [{"size": -12345678901}]},
-        {"files": [{"sha256": sha.upper()}]},
-        {"expected": {"regions": [{"bbox": [0.1234567, 0, 0, 0]}]}},  # too precise
-        {"expected": {"regions": [{"bbox": [0, 0, 0, 0, 0.1234567]}]}},  # fifth item
-        {"expected": {"regions": [{"bbox": [12345678.0]}]}},
+        for ctx in ("testset", "hostile", None):
+            assert scanner.check_metadata(
+                {**bad, "schema": bad.get("schema", TESTSET)}, context=ctx
+            ), bad
+    # The right file and path with the wrong shape (or another commit) is checked as usual.
+    for bad_ts in (
+        _testset(files=[{"size": "08031234567"}]),
+        _testset(files=[{"size": -12345678901}]),
+        _testset(files=[{"sha256": SHA.upper()}]),
+        _testset(generator={"commit": "0803123456789abcdef0123456789abcdef09999"}),
     ):
-        assert scanner.check_metadata(bad), bad
+        assert scanner.check_metadata(bad_ts, context="testset"), bad_ts
+    for bad_box in (
+        [0.1234567, 0, 0, 0],  # too precise
+        [0, 0, 0, 0, 0.1234567],  # fifth item
+        [12345678.0],
+    ):
+        rec = {"schema": HOSTILE, "expected": {"regions": [{"bbox": bad_box}]}}
+        assert scanner.check_metadata(rec, context="hostile"), bad_box
+
+
+def test_commit_exempt_only_in_root_testset(tmp_path: Path, at_commit: None) -> None:
+    (tmp_path / "a.json").write_text(json.dumps(_doc()), encoding="utf-8")
+    data = (tmp_path / "a.json").read_bytes()
+    listing = {
+        "schema": TESTSET,
+        "generator": {"commit": COMMIT},
+        "files": [
+            {"path": "a.json", "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        ],
+    }
+    (tmp_path / "testset.json").write_text(json.dumps(listing), encoding="utf-8")
+    assert scanner.scan_set(tmp_path).ok
+    for name in ("other.json", "hostile/x.json", "sub/testset.json"):
+        target = tmp_path / name
+        target.parent.mkdir(exist_ok=True)
+        target.write_text(json.dumps({"schema": HOSTILE, "generator": {"commit": COMMIT}}))
+        res = scanner.scan_set(tmp_path)
+        assert not res.ok, name
+        assert any(f.path.startswith(name) for f in res.findings), name
+        target.unlink()
+
+
+def test_truth_files_are_documents(tmp_path: Path) -> None:
+    (tmp_path / "truth").mkdir()
+    (tmp_path / "truth" / "a.json").write_text(json.dumps({"note": "hello"}), encoding="utf-8")
+    res = scanner.scan_set(tmp_path)
+    assert any(f.rule == "schema" for f in res.findings)
+    doc = _doc()
+    del doc["schema_version"]
+    (tmp_path / "truth" / "a.json").unlink()
+    (tmp_path / "b.json").write_text(json.dumps(doc), encoding="utf-8")
+    res = scanner.scan_set(tmp_path)
+    assert any(f.rule == "schema" and f.path.startswith("b.json") for f in res.findings)
 
 
 def _write_listing(root: Path, entries: list[dict[str, Any]]) -> None:
-    (root / "listing.json").write_text(json.dumps({"files": entries}), encoding="utf-8")
+    (root / "testset.json").write_text(
+        json.dumps({"schema": TESTSET, "files": entries}), encoding="utf-8"
+    )
 
 
 def test_listed_size_and_hash_recomputed(tmp_path: Path) -> None:
@@ -450,7 +527,7 @@ def test_listed_size_and_hash_recomputed(tmp_path: Path) -> None:
     _write_listing(tmp_path, [{"path": "a.json", "size": len(data), "sha256": sha}])
     assert scanner.scan_set(tmp_path).ok
     for entry, rule in (
-        ({"path": "a.json", "size": 12345678901, "sha256": sha}, "listed_size_mismatch"),
+        ({"path": "a.json", "size": 12345, "sha256": sha}, "listed_size_mismatch"),
         ({"path": "a.json", "size": len(data), "sha256": "0" * 64}, "listed_hash_mismatch"),
         ({"path": "missing.json", "size": 1}, "listed_file_missing"),
         ({"path": "../a.json", "size": len(data)}, "listed_file_missing"),
@@ -458,7 +535,7 @@ def test_listed_size_and_hash_recomputed(tmp_path: Path) -> None:
         _write_listing(tmp_path, [entry])
         res = scanner.scan_set(tmp_path)
         assert not res.ok
-        assert any(f.rule == rule and f.path == "listing.json#files[0]" for f in res.findings)
+        assert any(f.rule == rule and f.path == "testset.json#files[0]" for f in res.findings)
 
 
 def test_text_ok() -> None:

@@ -20,8 +20,9 @@ master secret, a label and the document's position; document ids come from anoth
 SHA-256 stream. Nothing a set reveals (ids, pixels, values) is a raw output of a
 generator that other documents share, so no part of the set gives away the seed.
 
-Output, under ``<out_dir>/<purpose>/`` (built in a 0700 temporary folder, scanned by the
-synthetic-data scanner, then renamed into place; an existing set is never overwritten):
+Output, under ``<out_dir>/<purpose>/`` (reserved with ``mkdir``, built in a 0700
+temporary folder, scanned by the synthetic-data scanner, then moved into place with
+``testset.json`` last; an existing set is never overwritten):
 
 * ``pages/<doc_id>/<n>.png``: the pages, ``n`` from 1;
 * ``truth/<doc_id>.json``: the ground truth in the stored view of the schema
@@ -36,7 +37,22 @@ synthetic-data scanner, then renamed into place; an existing set is never overwr
 
 Document ids are 128 random bits in lowercase base32 (26 characters), drawn again until
 the id passes the scanner's text rules and has no run of three digits (file names keep
-every digit run to 5 or fewer). Logs carry the purpose, version, counts and timings only.
+every digit run to 5 or fewer).
+
+What may leave the evaluation area. A test split, ``testset.json`` included (its
+``documents`` list maps every id to its slice), never leaves the model store's evaluation
+area. Only the manifest's SHA-256 and its ``slices`` and ``totals`` blocks (aggregate
+counts) may be exported, for ``models/testsets.lock`` and the reports (Tasks 17 and 19).
+
+Scanner. Each generated document is checked before it is written. A document that trips
+one of :data:`REDRAW_RULES` (a generated number that happens to look like an id) is drawn
+again and logged with the finding's path and rule (never a value); any other rule fails
+the build (``generator_not_synthetic``), and more than 0.5% of the set's documents redrawn
+(at least 1) fails it too (``too_many_redraws``). The whole folder is then scanned again.
+
+Logs carry the purpose, version, counts, timings, the manifest's SHA-256 and scanner
+finding paths and rules only. Building the full test split (717 documents, about 1,400
+pages) takes about 16 minutes on the build server, one document at a time.
 """
 
 import base64
@@ -49,7 +65,6 @@ import os
 import random
 import secrets
 import shutil
-import subprocess
 import tempfile
 import time
 from collections import Counter
@@ -84,7 +99,6 @@ MAX_SCALE = 10
 MAX_ATTEMPTS = 25  # per document: a fresh patient and layout when one cannot be placed
 _PATIENT_TRIES = 500
 _ID_TRIES = 1000
-_ROLES = ("document", "clean_twin")
 
 
 @dataclass(frozen=True)
@@ -348,12 +362,16 @@ class _PageControl:
         self.seen[flow][1] += 10
 
 
+class _NoDocument(Exception):
+    """No patient document of the wanted type came up: draw again."""
+
+
 def _doc_of_type(rng: random.Random, doc_type: str) -> dict[str, Any]:
     for _ in range(_PATIENT_TRIES):
         for d in patients.generate(rng, 1)[0].documents:
             if d["document"]["type"]["value"] == doc_type:
                 return d
-    raise SetError("generation_failed")
+    raise _NoDocument
 
 
 def _layout(rng: random.Random, doc_type: str, purpose: Purpose, paging: bool) -> LayoutSpec:
@@ -376,11 +394,13 @@ class _Made:
     expected: dict[str, Any] | None = None
 
 
+# Failures that mean "this patient and layout do not fit": the document is drawn again.
 _GEN_ERRORS = (
     render.RenderError,
     handwriting.HandwritingError,
     hostile.HostileError,
     degrade.DegradeError,
+    _NoDocument,
 )
 
 
@@ -464,6 +484,62 @@ def _json_bytes(obj: Any) -> bytes:
     ).encode("ascii")
 
 
+@dataclass(frozen=True)
+class _Prepared:
+    """What is written for one document: its stored views, computed once."""
+
+    pages: list[bytes]
+    truth: dict[str, Any]  # stored view
+    twin_pages: list[bytes] | None = None
+    twin_truth: dict[str, Any] | None = None
+    hostile_kind: str | None = None
+    expected: dict[str, Any] | None = None  # as written: boxes rounded outward
+
+
+def _prepare(made: _Made) -> _Prepared:
+    if made.twin is None or made.expected is None:
+        return _Prepared(pages=made.pages, truth=stored_view(made.truth, len(made.pages)))
+    return _Prepared(
+        pages=made.pages,
+        truth=stored_view(made.truth, len(made.pages)),
+        twin_pages=made.twin.pages,
+        twin_truth=stored_view(made.twin.ground_truth, len(made.twin.pages)),
+        hostile_kind=made.hostile_kind,
+        expected=_expected_for_file(made.expected),
+    )
+
+
+def _hostile_record(p: _Prepared, twin_id: str) -> dict[str, Any]:
+    return {
+        "schema": HOSTILE_SCHEMA,
+        "kind": p.hostile_kind,
+        "expected": p.expected,
+        "clean_twin_id": twin_id,
+    }
+
+
+_PLACEHOLDER_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+
+def _findings(p: _Prepared) -> list[synth_scanner.Finding]:
+    """Scanner findings on what would be written for one document (paths and rules only)."""
+    out = [
+        synth_scanner.Finding(f"truth#{f.path}", f.rule)
+        for f in synth_scanner.check_document(p.truth)
+    ]
+    if p.twin_truth is not None:
+        out += [
+            synth_scanner.Finding(f"twin#{f.path}", f.rule)
+            for f in synth_scanner.check_document(p.twin_truth)
+        ]
+        record = _hostile_record(p, _PLACEHOLDER_ID)
+        out += [
+            synth_scanner.Finding(f"hostile#{f.path}", f.rule)
+            for f in synth_scanner.check_metadata(record, context="hostile")
+        ]
+    return out
+
+
 class _Writer:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -483,29 +559,7 @@ class _Writer:
 def _write_doc(w: _Writer, doc_id: str, pages: list[bytes], truth: dict[str, Any]) -> None:
     for n, page in enumerate(pages, start=1):
         w.put(f"pages/{doc_id}/{n}.png", page)
-    w.put(f"truth/{doc_id}.json", _json_bytes(stored_view(truth, len(pages))))
-
-
-def _commit() -> str:
-    for var in ("MHAI_GIT_COMMIT", "GITHUB_SHA"):
-        value = os.environ.get(var, "")
-        if len(value) == 40 and all(c in "0123456789abcdef" for c in value):
-            return value
-    try:
-        res = subprocess.run(  # noqa: S603 - fixed argv, no shell, no input
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).parent,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    out = res.stdout.strip()
-    if res.returncode == 0 and len(out) == 40 and all(c in "0123456789abcdef" for c in out):
-        return out
-    return "unknown"
+    w.put(f"truth/{doc_id}.json", _json_bytes(truth))
 
 
 def _package_version() -> str:
@@ -536,27 +590,28 @@ def _master(purpose: str, seed: int | None) -> bytes:
     raise SetError("bad_purpose")
 
 
-def _hostile_record(made: _Made, twin_id: str) -> dict[str, Any]:
-    return {
-        "schema": HOSTILE_SCHEMA,
-        "kind": made.hostile_kind,
-        "expected": _expected_for_file(made.expected or {}),
-        "clean_twin_id": twin_id,
-    }
+# Scanner rules a generated document can trip by chance (a number that happens to look like
+# an id). A document that trips one of these is drawn again; any other rule is a generator
+# bug and fails the build. Redraws are capped per set.
+REDRAW_RULES = frozenset({"mrn_like", "long_digits"})
+MAX_REDRAW_SHARE = Fraction(5, 1000)
 
 
-_PLACEHOLDER_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaa"
+@dataclass
+class _Redraws:
+    cap: int
+    count: int = 0
+    rules: Counter[str] = field(default_factory=Counter)
 
-
-def _findings(made: _Made) -> list[str]:
-    """Scanner rule names that fire on what would be written for ``made`` (no values)."""
-    rules = [f.rule for f in synth_scanner.check_document(stored_view(made.truth, len(made.pages)))]
-    if made.twin is not None:
-        twin = stored_view(made.twin.ground_truth, len(made.twin.pages))
-        rules += [f.rule for f in synth_scanner.check_document(twin)]
-        record = _hostile_record(made, _PLACEHOLDER_ID)
-        rules += [f.rule for f in synth_scanner.check_metadata(record)]
-    return rules
+    def record(self, slice_name: str, found: list[synth_scanner.Finding]) -> None:
+        for f in found:  # a finding carries a field path and a rule name, never a value
+            log.warning("document redrawn: slice=%s path=%s rule=%s", slice_name, f.path, f.rule)
+        if any(f.rule not in REDRAW_RULES for f in found):
+            raise SetError("generator_not_synthetic")
+        self.count += 1
+        self.rules.update(f.rule for f in found)
+        if self.count > self.cap:
+            raise SetError("too_many_redraws")
 
 
 def _generate_slice(
@@ -567,7 +622,7 @@ def _generate_slice(
     streams: _Streams,
     ids: _IdSource,
     w: _Writer,
-    discarded: Counter[str],
+    redraws: _Redraws,
 ) -> tuple[dict[str, int], list[dict[str, Any]]]:
     ctl = _PageControl(target=target, documents=max(1, count))
     kinds: list[str] = []
@@ -582,19 +637,16 @@ def _generate_slice(
     for i in range(count):
         kind = kinds[i] if s.hostile else None
         paging = False if kind == "blank" else ctl.paging()
-        made: _Made | None = None
+        made: _Prepared | None = None
         for attempt in range(MAX_ATTEMPTS):
             rng = streams.rng(purpose, s.name, str(i), str(attempt))
             try:
-                cand = _make(s, rng, purpose, paging, kind)
+                cand = _prepare(_make(s, rng, purpose, paging, kind))
             except _GEN_ERRORS:
                 continue
-            # Every document is synthetic by construction, so a scanner finding here is a
-            # false positive (a generated number that looks like an id): draw again. The
-            # whole set is still scanned before it is kept.
-            rules = _findings(cand)
-            if rules:
-                discarded.update(rules)
+            found = _findings(cand)
+            if found:
+                redraws.record(s.name, found)
                 continue
             made = cand
             break
@@ -606,22 +658,28 @@ def _generate_slice(
         counts["documents"] += 1
         counts["pages"] += len(made.pages)
         docs.append({"id": doc_id, "slice": s.name, "role": "document", "pages": len(made.pages)})
-        if made.twin is not None and made.expected is not None:
+        if made.twin_pages is not None and made.twin_truth is not None:
             twin_id = ids.next()
-            _write_doc(w, twin_id, made.twin.pages, made.twin.ground_truth)
+            _write_doc(w, twin_id, made.twin_pages, made.twin_truth)
             counts["clean_twins"] += 1
-            counts["clean_twin_pages"] += len(made.twin.pages)
+            counts["clean_twin_pages"] += len(made.twin_pages)
             docs.append(
                 {
                     "id": twin_id,
                     "slice": s.name,
                     "role": "clean_twin",
-                    "pages": len(made.twin.pages),
+                    "pages": len(made.twin_pages),
                     "twin_of": doc_id,
                 }
             )
             w.put(f"hostile/{doc_id}.json", _json_bytes(_hostile_record(made, twin_id)))
     return counts, docs
+
+
+def _put_file(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
 
 
 def build(
@@ -636,61 +694,78 @@ def build(
 
     ``seed``: ``None`` for ``test`` (anything else is refused, ``seed_not_allowed``);
     ``None`` or :data:`DEV_SEED_V1` for ``dev``; any non-negative integer for ``train``.
-    Raises :class:`SetError` with a fixed code. Never overwrites an existing set.
+    Raises :class:`SetError` with a fixed code and no chained exception (nothing from
+    inside the build, where the seed lives, travels with the error). Never overwrites.
+
+    ``<out_dir>/<purpose>`` is reserved first with ``mkdir`` (so two builds cannot race
+    for it); the set is generated and scanned in a temporary folder next to it, then its
+    files are moved in, ``testset.json`` last. On any failure the reserved folder and the
+    temporary one are removed. A folder without ``testset.json`` is not a set.
     """
     if purpose not in ("dev", "test", "train"):
         raise SetError("bad_purpose")
     try:
         check_version(version)
-    except (Refused, TypeError) as e:
-        raise SetError("bad_version") from e
+    except (Refused, TypeError):
+        raise SetError("bad_version") from None
     sc = _scale(scale)
     streams = _Streams(_master(purpose, seed))
     started = time.monotonic()
     base = Path(out_dir)
     final = base / purpose
     tmp: Path | None = None
+    reserved = False
+    done = False
+    error: str | None = None
     try:
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if os.path.lexists(final):
-            raise SetError("exists")
+        try:
+            os.mkdir(final, 0o700)
+        except FileExistsError:
+            raise SetError("exists") from None
+        reserved = True
         tmp = Path(tempfile.mkdtemp(prefix=f".{purpose}-", dir=base))
         w = _Writer(tmp)
         ids = _IdSource(streams)
         slices: dict[str, dict[str, int]] = {}
         documents: list[dict[str, Any]] = []
-        discarded: Counter[str] = Counter()
+        total = sum(split_documents(s, scale, purpose) for s in COMPOSITION_V1)
+        redraws = _Redraws(cap=max(1, math.floor(total * MAX_REDRAW_SHARE)))
         for s in COMPOSITION_V1:
             count = split_documents(s, scale, purpose)
-            total = slice_documents(s, scale)
-            target = s.pages * sc * count / total
-            counts, docs = _generate_slice(s, purpose, count, target, streams, ids, w, discarded)
+            target = s.pages * sc * count / slice_documents(s, scale)
+            counts, docs = _generate_slice(s, purpose, count, target, streams, ids, w, redraws)
             slices[s.name] = counts
             documents.extend(docs)
         streams.forget()
         manifest = _manifest(purpose, version, slices, documents, w.files)
         raw = canonical.dumps(manifest)
-        fd = os.open(tmp / "testset.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(raw)
+        _put_file(tmp / "testset.json", raw)
         scan = synth_scanner.scan_set(tmp)
         if not scan.ok:
-            # Rule names and the folder only: a finding's path holds a document id.
-            where = Counter((f.path.split("/")[0], f.rule) for f in scan.findings)
-            log.error(
-                "set refused by the scanner: purpose=%s findings=%s", purpose, sorted(where.items())
-            )
+            for f in scan.findings:  # paths (document ids, field paths) and rules, no values
+                log.error("set refused by the scanner: path=%s rule=%s", f.path, f.rule)
             raise SetError("scanner_refused")
-        if os.path.lexists(final):
-            raise SetError("exists")
-        os.rename(tmp, final)
+        names = sorted(os.listdir(tmp), key=lambda n: n == "testset.json")
+        for name in names:
+            os.rename(tmp / name, final / name)
+        os.rmdir(tmp)
         tmp = None
-    except OSError as e:
-        raise SetError("write_failed") from e
+        done = True
+    except SetError as e:
+        error = str(e)
+    except OSError:
+        error = "write_failed"
+    except Exception:  # noqa: BLE001 - a fixed code only: nothing from inside goes out
+        error = "generation_failed"
     finally:
         streams.forget()
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
+        if reserved and not done:
+            shutil.rmtree(final, ignore_errors=True)
+    if error is not None:
+        raise SetError(error)  # raised here, outside the handler: no chained context
     result = SetManifest(
         purpose=purpose,
         version=version,
@@ -702,14 +777,15 @@ def build(
     )
     log.info(
         "set built: purpose=%s version=%s documents=%d pages=%d files=%d seconds=%.1f "
-        "redrawn_for_scanner=%s sha256=%s",
+        "redrawn=%d redraw_rules=%s sha256=%s",
         purpose,
         version,
         result.documents,
         result.pages,
         len(manifest["files"]),
         time.monotonic() - started,
-        sorted(discarded.items()),
+        redraws.count,
+        sorted(redraws.rules.items()),
         result.sha256,
     )
     return result
@@ -728,7 +804,7 @@ def _manifest(
         "version": version,
         "purpose": purpose,
         "extraction_schema_version": schema.SCHEMA_VERSION,
-        "generator": {"package": _package_version(), "commit": _commit()},
+        "generator": {"package": _package_version(), "commit": synth_scanner.current_commit()},
         "slices": slices,
         "totals": {
             "documents": sum(c["documents"] for c in slices.values()),

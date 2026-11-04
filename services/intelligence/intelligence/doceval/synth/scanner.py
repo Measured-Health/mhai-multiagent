@@ -20,11 +20,13 @@ import math
 import os
 import re
 import stat
+import subprocess
 import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from intelligence.doceval import schema
 from intelligence.doceval.synth import terminology
@@ -399,24 +401,54 @@ def _metadata_leaves(meta: Any) -> Iterator[tuple[str, str | None, Any, bool, Ra
             yield where, key, cur, False, raw
 
 
-# Values the set builder computes rather than copies from a document: a file's size and
-# SHA-256 in a test-set manifest, the generator's git commit, and a hostile region's box.
-# Exempt only at exactly these paths (``*`` is a list index) and only in exactly this shape.
-# ``scan_set`` also recomputes every manifest ``size`` and ``sha256`` from the file on disk.
+# Values the set builder computes rather than copies from a document. Each is exempt only
+# in its own kind of file, at exactly its path (``*`` is a list index) and in exactly its
+# shape; anywhere else it goes through the usual rules.
+#
+# * In the scan root's ``testset.json`` (top-level ``schema`` mhai.evaluation.testset/1):
+#   ``files[*].size`` and ``files[*].sha256``, which ``scan_set`` recomputes from the file
+#   on disk, and ``generator.commit``, which must equal :func:`current_commit`.
+# * In ``hostile/<name>.json`` (mhai.evaluation.hostile/1): ``expected.regions[*].bbox[i]``,
+#   a number in [0, 1] with at most 4 fractional digits.
+# * In any metadata file: a top-level ``schema`` naming one of :data:`SCHEMA_IDS`.
+Context = Literal["testset", "hostile"]
+TESTSET_SCHEMA_ID = "mhai.evaluation.testset/1"
+HOSTILE_SCHEMA_ID = "mhai.evaluation.hostile/1"
+SCHEMA_IDS = frozenset({TESTSET_SCHEMA_ID, HOSTILE_SCHEMA_ID})
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _COMMIT_HEX = re.compile(r"[0-9a-f]{40}")
 _BBOX_NUMBER = re.compile(r"(?:0|1)(?:\.[0-9]{1,4})?")
 _MAX_SIZE = 1 << 40
-# Format names the set builder writes as a file's top-level ``schema`` (``testset/1`` would
-# otherwise read as a slashed id).
-SCHEMA_IDS = frozenset({"mhai.evaluation.testset/1", "mhai.evaluation.hostile/1"})
-_COMPUTED: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("files", "*", "size"), "size"),
-    (("files", "*", "sha256"), "sha256"),
-    (("generator", "commit"), "commit"),
-    (("expected", "regions", "*", "bbox", "*"), "bbox"),
-    (("schema",), "schema_id"),
+_COMPUTED: tuple[tuple[Context | None, tuple[str, ...], str], ...] = (
+    ("testset", ("files", "*", "size"), "size"),
+    ("testset", ("files", "*", "sha256"), "sha256"),
+    ("testset", ("generator", "commit"), "commit"),
+    ("hostile", ("expected", "regions", "*", "bbox", "*"), "bbox"),
+    (None, ("schema",), "schema_id"),
 )
+
+
+@lru_cache(maxsize=1)
+def current_commit() -> str:
+    """The checkout's commit: ``MHAI_GIT_COMMIT`` or ``GITHUB_SHA`` if set (40 lowercase hex),
+    else ``git rev-parse HEAD`` next to this file, else ``unknown``."""
+    for var in ("MHAI_GIT_COMMIT", "GITHUB_SHA"):
+        value = os.environ.get(var, "")
+        if _COMMIT_HEX.fullmatch(value):
+            return value
+    try:
+        res = subprocess.run(  # noqa: S603 - fixed argv, no shell, no input
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    out = res.stdout.strip()
+    return out if res.returncode == 0 and _COMMIT_HEX.fullmatch(out) else "unknown"
 
 
 def _path_matches(raw: RawPath, pattern: tuple[str, ...]) -> bool:
@@ -431,16 +463,21 @@ def _path_matches(raw: RawPath, pattern: tuple[str, ...]) -> bool:
     return True
 
 
-def _computed_leaf(raw: RawPath, leaf: Any) -> bool:
+def _computed_leaf(raw: RawPath, leaf: Any, context: Context | None) -> bool:
     if isinstance(leaf, bool):
         return False
-    kind = next((k for pat, k in _COMPUTED if _path_matches(raw, pat)), None)
+    kind = next(
+        (k for ctx, pat, k in _COMPUTED if ctx in (None, context) and _path_matches(raw, pat)),
+        None,
+    )
     if kind == "sha256":
         return isinstance(leaf, str) and _SHA256_HEX.fullmatch(leaf) is not None
     if kind == "schema_id":
         return isinstance(leaf, str) and leaf in SCHEMA_IDS
     if kind == "commit":
-        return isinstance(leaf, str) and _COMMIT_HEX.fullmatch(leaf) is not None
+        return (
+            isinstance(leaf, str) and leaf == current_commit() and bool(_COMMIT_HEX.fullmatch(leaf))
+        )
     if kind == "size":
         return isinstance(leaf, int) and 0 <= leaf <= _MAX_SIZE
     if kind == "bbox":
@@ -455,20 +492,24 @@ def _computed_leaf(raw: RawPath, leaf: Any) -> bool:
     return False
 
 
-def check_metadata(meta: Any) -> list[Finding]:
+def check_metadata(meta: Any, *, context: Context | None = None) -> list[Finding]:
     """Check intake metadata (any JSON). Known keys use their list or pattern.
 
     Every key and every string or number leaf goes through the text rules, except a
-    computed value at its own path (``files[*].size``, ``files[*].sha256``,
-    ``generator.commit``, ``expected.regions[*].bbox[0..3]``, a known top-level
-    ``schema`` name) in its own shape.
+    computed value in its own kind of file (``context``, which ``scan_set`` sets from the
+    file's place and ``schema``), at its own path and in its own shape (see ``_COMPUTED``).
     """
+    if context is not None and not (
+        isinstance(meta, dict)
+        and meta.get("schema") == (TESTSET_SCHEMA_ID if context == "testset" else HOSTILE_SCHEMA_ID)
+    ):
+        context = None
     found: dict[tuple[str, str], Finding] = {}
     for path, key, leaf, is_key, raw in _metadata_leaves(meta):
         rules: list[str]
         if is_key:
             rules = [f"key_{r}" for r in _text_rules(str(leaf))]
-        elif isinstance(leaf, bool) or leaf is None or _computed_leaf(raw, leaf):
+        elif isinstance(leaf, bool) or leaf is None or _computed_leaf(raw, leaf, context):
             continue
         elif isinstance(leaf, int | float):
             rules = _digit_rules(_normalise(str(leaf)), False)
@@ -524,13 +565,23 @@ def _check_json_text(
         except (ValueError, RecursionError):
             out.append(Finding(label, "unreadable"))
             continue
-        is_doc = isinstance(obj, dict) and "schema_version" in obj
+        parts = Path(rel).parts
+        # A ground-truth document: it says so, it looks like one, or it is under truth/
+        # (which then must validate as one: a file there without schema_version is refused).
+        is_doc = (
+            isinstance(obj, dict) and bool({"schema_version", "patient", "document"} & obj.keys())
+        ) or ("truth" in parts[:-1])
         if is_doc:
             sub = check_document(obj)
         else:
-            sub = check_metadata(obj)
+            context: Context | None = None
+            if not jsonl and parts == ("testset.json",):
+                context = "testset"
+            elif not jsonl and len(parts) == 2 and parts[0] == "hostile":
+                context = "hostile"
+            sub = check_metadata(obj, context=context)
             files = obj.get("files") if isinstance(obj, dict) else None
-            if listed is not None and isinstance(files, list):
+            if listed is not None and context == "testset" and isinstance(files, list):
                 base = str(Path(rel).parent)
                 listed.extend(_Listed(f"{label}#files[{i}]", base, e) for i, e in enumerate(files))
             for _, _key, leaf, is_key, _raw in _metadata_leaves(obj):

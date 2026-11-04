@@ -220,12 +220,43 @@ def test_wrong_label_accepts_both_mrns_or_refusal() -> None:
 
 @pytest.mark.parametrize("kind", ["two_patients", "wrong_patient_label"])
 def test_text_drawn_outside_the_ground_truth_passes_the_scanner(kind: str) -> None:
+    # Metadata strings get the strict (not the lab) rules: that is how a set's hostile
+    # files are scanned (sets.py writes expected, drawn_text included).
     for seed in range(4):
         (region,) = _make(kind, seed).expected["regions"]
         assert region["drawn_text"]
         for line in region["drawn_text"]:
-            rules = scanner._text_rules(line, lab=True)
+            rules = scanner._text_rules(line)
             assert rules == [], (kind, line, rules)
+        assert (
+            scanner.check_metadata(
+                {"schema": "mhai.evaluation.hostile/1", "expected": {"drawn": region["drawn_text"]}}
+            )
+            == []
+        )
+
+
+def test_second_patient_block_leaves_out_id_like_result_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: "TSH 156.96" (letters, then five digits) tripped the scanner's mrn_like
+    # rule in a built test split. Every second patient gets such a result first.
+    real = patients.generate
+
+    def with_tsh(rng: random.Random, n: int, **kw: Any) -> list[patients.SynthPatient]:
+        out = real(rng, n, **kw)
+        for p in out:
+            for d in p.documents:
+                for row in d["observations"][:1]:
+                    row["name_text"]["raw_text"] = "TSH"
+                    row["value_text"]["raw_text"] = "156.96"
+        return out
+
+    monkeypatch.setattr(hostile.patients, "generate", with_tsh)
+    for seed in range(6):
+        (region,) = _make("two_patients", seed).expected["regions"]
+        assert "TSH 156.96" not in region["drawn_text"]
+        assert all(scanner.text_ok(line) for line in region["drawn_text"])
 
 
 def test_cell_as_note_heading_has_a_box() -> None:

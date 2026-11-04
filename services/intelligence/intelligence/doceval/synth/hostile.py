@@ -34,7 +34,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from intelligence.doceval import schema
-from intelligence.doceval.synth import patients
+from intelligence.doceval.synth import patients, scanner
 from intelligence.doceval.synth.layouts import LayoutSpec
 from intelligence.doceval.synth.render import Box, RenderedDocument, render
 
@@ -466,9 +466,18 @@ def _two_patients(
         f"Record: {other.mrn}",
         f"DOB: {other.date_of_birth.isoformat()}   Sex: {other.sex}",
     ]
-    for row in doc_b["observations"][:3]:
+    # Up to three result lines. The block is written to the set's metadata (drawn_text),
+    # which the scanner reads as free text, not as lab fields: a line such as "TSH 156.96"
+    # reads as an id there (letters, then five digits), so such lines are left out.
+    shown = 0
+    for row in doc_b["observations"]:
         name, val = (row[k]["raw_text"] for k in ("name_text", "value_text"))
-        lines.append(" ".join(str(x) for x in (name, val) if x))
+        line = " ".join(str(x) for x in (name, val) if x)
+        if line and scanner.text_ok(line):
+            lines.append(line)
+            shown += 1
+            if shown == 3:
+                break
     body_px = max(12, round(layout.body_pt * dpi / 72))
     for scale in (1.0, 0.8, 0.65):
         font = _font(layout, False, round(body_px * scale))
