@@ -153,7 +153,7 @@ func recovered(nCells int, eqs [][][2]int, hide []bool) []int {
 // each hospital (4), then degraded's all, then each hospital's degraded.
 func guard(t table) ([]int64, []Guarded) {
 	all := sums(t.rows)
-	o := Table(t.rows, t.degraded)
+	o := Table(4, t.rows, t.degraded)
 	var dAll int64
 	for _, d := range t.degraded {
 		dAll += d

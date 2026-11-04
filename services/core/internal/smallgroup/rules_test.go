@@ -200,7 +200,7 @@ func TestAcrossRowsInconsistentHidesAll(t *testing.T) {
 // non-degraded decisions) must not be a shown 1 to 4. [7, 5, 1, 1] with
 // degraded 5: 2 non-degraded, so degraded is hidden, in the row and in all.
 func TestDegradedWithinAnswers(t *testing.T) {
-	o := Table([][]int64{{7, 5, 1, 1}}, []int64{5})
+	o := Table(4, [][]int64{{7, 5, 1, 1}}, []int64{5})
 	if o.Rows[0][0].Shown() && o.Subset[1].Shown() {
 		t.Errorf("answers %+v and degraded %+v both shown", o.Rows[0][0], o.Subset[1])
 	}
@@ -208,12 +208,12 @@ func TestDegradedWithinAnswers(t *testing.T) {
 		t.Errorf("all answers %+v and all degraded %+v both shown", o.All[0], o.Subset[0])
 	}
 	// Degraded under a hidden answers is hidden.
-	o = Table([][]int64{{3, 3, 0, 0}, {40, 20, 10, 10}, {40, 20, 10, 10}}, []int64{0, 5, 6})
+	o = Table(4, [][]int64{{3, 3, 0, 0}, {40, 20, 10, 10}, {40, 20, 10, 10}}, []int64{0, 5, 6})
 	if !o.Subset[1].Suppressed {
 		t.Errorf("degraded 0 under hidden answers 3: %+v", o.Subset[1])
 	}
 	// Large and far apart: shown.
-	o = Table([][]int64{{40, 20, 10, 10}, {40, 20, 10, 10}}, []int64{10, 20})
+	o = Table(4, [][]int64{{40, 20, 10, 10}, {40, 20, 10, 10}}, []int64{10, 20})
 	for i, g := range o.Subset {
 		if !g.Shown() {
 			t.Errorf("degraded %d hidden: %+v", i, g)
@@ -222,5 +222,72 @@ func TestDegradedWithinAnswers(t *testing.T) {
 	// A container that doesn't hold the member hides it.
 	if g := Within(9, []int64{9}, []int64{9, 8}, []Guarded{Count(9), Count(8)}); !g[1].Suppressed {
 		t.Errorf("a member over its container: %+v", g)
+	}
+}
+
+// Fix round 2: no rows (no active hospital) and one row give a full all
+// row of the given width, one row each and len(rows)+1 subset cells.
+func TestTableEmptyAndOne(t *testing.T) {
+	o := Table(4, nil, nil)
+	if len(o.All) != 4 || len(o.Rows) != 0 || len(o.Subset) != 1 {
+		t.Fatalf("no rows: all %d, rows %d, subset %d", len(o.All), len(o.Rows), len(o.Subset))
+	}
+	for _, g := range append(o.All, o.Subset...) {
+		if !g.Shown() || *g.Value != 0 {
+			t.Errorf("no rows: %+v, want a shown 0", g)
+		}
+	}
+	o = Table(4, [][]int64{{12, 5, 7, 0}}, []int64{6})
+	if len(o.All) != 4 || len(o.Rows) != 1 || len(o.Rows[0]) != 4 || len(o.Subset) != 2 {
+		t.Fatalf("one row: %+v", o)
+	}
+	// A row of another width, or a sub of another length, hides everything.
+	o = Table(4, [][]int64{{12, 5, 7}}, []int64{6})
+	if len(o.All) != 4 || !o.All[0].Suppressed {
+		t.Errorf("short row: %+v", o.All)
+	}
+	o = Table(4, [][]int64{{12, 5, 7, 0}}, nil)
+	if len(o.Subset) != 2 || !o.Subset[0].Suppressed || !o.Subset[1].Suppressed {
+		t.Errorf("missing sub: %+v", o.Subset)
+	}
+}
+
+// A stored body read back is held to rule 1: a shown 1 to 4, a hidden value
+// with a number, or a share over 1 is refused.
+func TestGuardedDecodeStrict(t *testing.T) {
+	for _, b := range []string{`{"value":3,"suppressed":false}`, `{"value":-1,"suppressed":false}`, `{"value":7,"suppressed":true}`,
+		`{"value":null,"suppressed":false}`, `{"value":7}`, `{"value":7,"suppressed":false,"x":1}`, `7`} {
+		var g Guarded
+		if err := json.Unmarshal([]byte(b), &g); err == nil {
+			t.Errorf("count %s accepted: %+v", b, g)
+		}
+	}
+	for _, b := range []string{`{"value":1.5,"suppressed":false}`, `{"value":0.5,"suppressed":true}`, `{"value":-0.1,"suppressed":false}`, `{"value":0.5}`} {
+		var g GuardedShare
+		if err := json.Unmarshal([]byte(b), &g); err == nil {
+			t.Errorf("share %s accepted: %+v", b, g)
+		}
+	}
+	for _, g := range []Guarded{Count(0), Count(3), Count(12)} {
+		b, _ := json.Marshal(g)
+		var back Guarded
+		if err := json.Unmarshal(b, &back); err != nil {
+			t.Errorf("round trip %s: %v", b, err)
+		}
+		b2, _ := json.Marshal(back)
+		if string(b) != string(b2) {
+			t.Errorf("round trip %s → %s", b, b2)
+		}
+	}
+	for _, g := range []GuardedShare{Share(5, 15), Share(0, 0), Share(2, 10), Share(10, 10)} {
+		b, _ := json.Marshal(g)
+		var back GuardedShare
+		if err := json.Unmarshal(b, &back); err != nil {
+			t.Errorf("round trip %s: %v", b, err)
+		}
+		b2, _ := json.Marshal(back)
+		if string(b) != string(b2) {
+			t.Errorf("round trip %s → %s", b, b2)
+		}
 	}
 }

@@ -31,7 +31,9 @@
 package smallgroup
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"math"
 	"strconv"
 )
@@ -59,6 +61,31 @@ func (g Guarded) MarshalJSON() ([]byte, error) {
 	return []byte(`{"value":` + strconv.FormatInt(*g.Value, 10) + `,"suppressed":false}`), nil
 }
 
+// UnmarshalJSON reads {value, suppressed} strictly, for a stored response
+// read back: a shown count of 1 to 4 (or below 0), a hidden one with a
+// value, or a count with nothing to show is refused, so a stored body that
+// breaks rule 1 is never served.
+func (g *Guarded) UnmarshalJSON(b []byte) error {
+	var v struct {
+		Value      *int64 `json:"value"`
+		Suppressed *bool  `json:"suppressed"`
+	}
+	if err := strictDecode(b, &v); err != nil {
+		return err
+	}
+	switch {
+	case v.Suppressed == nil:
+		return errGuarded
+	case *v.Suppressed && v.Value == nil:
+		*g = hidden
+	case !*v.Suppressed && v.Value != nil && *v.Value >= 0 && !small(*v.Value):
+		*g = shown(*v.Value)
+	default:
+		return errGuarded
+	}
+	return nil
+}
+
 // Shown reports whether the value is sent.
 func (g Guarded) Shown() bool { return !g.Suppressed && g.Value != nil }
 
@@ -82,6 +109,41 @@ func (g GuardedShare) MarshalJSON() ([]byte, error) {
 		}{nil, g.Suppressed || g.Share != nil})
 	}
 	return []byte(`{"value":` + strconv.FormatFloat(*g.Share, 'f', ShareDigits, 64) + `,"suppressed":false}`), nil
+}
+
+// UnmarshalJSON reads {value, suppressed} strictly: a shown share is 0 to
+// 1, a hidden one has no value.
+func (g *GuardedShare) UnmarshalJSON(b []byte) error {
+	var v struct {
+		Value      *float64 `json:"value"`
+		Suppressed *bool    `json:"suppressed"`
+	}
+	if err := strictDecode(b, &v); err != nil {
+		return err
+	}
+	switch {
+	case v.Suppressed == nil:
+		return errGuarded
+	case v.Value == nil:
+		*g = GuardedShare{Suppressed: *v.Suppressed}
+	case !*v.Suppressed && *v.Value >= 0 && *v.Value <= 1:
+		x := *v.Value
+		*g = GuardedShare{Share: &x}
+	default:
+		return errGuarded
+	}
+	return nil
+}
+
+var errGuarded = errors.New("smallgroup: not a guarded value")
+
+func strictDecode(b []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil || dec.More() {
+		return errGuarded
+	}
+	return nil
 }
 
 // Shown reports whether the share is sent.
@@ -516,17 +578,20 @@ type TableOut struct {
 	Subset []Guarded
 }
 
-// Table guards a table of rows [total, part1, …] with the all row their
-// column sums (AcrossRows), and a subset count per row (sub[i] is within
-// rows[i][0], as degraded is within answers), whose column is a set that
-// adds up of its own (Within). The route and the property test both run
-// this.
-func Table(rows [][]int64, sub []int64) TableOut {
-	w := 0
-	if len(rows) > 0 {
-		w = len(rows[0])
+// Table guards a table of rows [total, part1, …], each width wide, with
+// the all row their column sums (AcrossRows), and a subset count per row
+// (sub[i] is within rows[i][0], as degraded is within answers), whose
+// column is a set that adds up of its own (Within). The route and the
+// property test both run this. The width is the caller's, never taken from
+// the rows, so a table with no rows still has a full all row; a row of
+// another width, or a sub of another length, hides everything (AcrossRows
+// and Within fail closed). The result always has an all row of width
+// cells, one row per row, and len(rows)+1 subset cells.
+func Table(width int, rows [][]int64, sub []int64) TableOut {
+	if width < 2 {
+		width = 2
 	}
-	all := make([]int64, max(w, 2))
+	all := make([]int64, width)
 	for _, r := range rows {
 		for j, v := range r {
 			if j < len(all) {
@@ -542,10 +607,17 @@ func Table(rows [][]int64, sub []int64) TableOut {
 	within := []int64{all[0]}
 	withinG := []Guarded{ga[0]}
 	for i := range sub {
-		if i < len(rows) && len(rows[i]) > 0 {
+		if i < len(rows) && len(rows[i]) > 0 && len(gr[i]) > 0 {
 			within = append(within, rows[i][0])
 			withinG = append(withinG, gr[i][0])
 		}
 	}
-	return TableOut{All: ga, Rows: gr, Subset: Within(subAll, sub, within, withinG)}
+	subG := Within(subAll, sub, within, withinG)
+	if len(sub) != len(rows) {
+		subG = make([]Guarded, len(rows)+1)
+		for i := range subG {
+			subG[i] = hidden
+		}
+	}
+	return TableOut{All: ga, Rows: gr, Subset: subG}
 }
