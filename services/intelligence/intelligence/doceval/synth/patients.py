@@ -23,6 +23,7 @@ CRITICAL_RATE = 0.03  # share of observations at a critical value
 
 _EARLIEST_ENCOUNTER = datetime.date(2015, 1, 1)
 _LATEST_ENCOUNTER = datetime.date(2026, 10, 31)
+_END_OF_LATEST = datetime.datetime.combine(_LATEST_ENCOUNTER, datetime.time(23, 59, 59))
 _DOB_FIRST = datetime.date(1925, 1, 1)
 _DOB_LAST = datetime.date(2024, 12, 31)
 
@@ -274,6 +275,11 @@ def _document(p: SynthPatient, enc: SynthEncounter) -> dict[str, Any]:
     }
 
 
+def _day_between(rng: random.Random, low: datetime.date, high: datetime.date) -> datetime.date:
+    """A date in ``[low, high]``; never after ``high``, so never in the future."""
+    return low + datetime.timedelta(days=rng.randint(0, max(0, (high - low).days)))
+
+
 def _make_encounters(
     rng: random.Random, dob: datetime.date, abnormal: float, critical: float
 ) -> tuple[SynthEncounter, ...]:
@@ -295,6 +301,7 @@ def _make_encounters(
         else:
             kind = _pick(rng, ("outpatient", "emergency"))
             end = start + datetime.timedelta(minutes=rng.randint(15, 240))
+        end = min(end, _END_OF_LATEST)
         if doc_type == "lab_report":
             chosen = rng.sample(labs, rng.randint(4, 10))
         elif doc_type == "vitals_chart":
@@ -308,7 +315,7 @@ def _make_encounters(
             flag = _wanted_flag(rng, a, abnormal, critical)
             value = _draw(rng, a, flag)
             collected = start + datetime.timedelta(minutes=rng.randint(0, 10))
-            resulted = collected + datetime.timedelta(minutes=rng.randint(5, 120))
+            resulted = min(collected + datetime.timedelta(minutes=rng.randint(5, 120)), end)
             obs.append(SynthObservation(a, value, a.classify(value), collected, resulted))
         out.append(
             SynthEncounter(
@@ -324,13 +331,15 @@ def _make_encounters(
     return tuple(sorted(out, key=lambda e: e.start))
 
 
-def _make_medications(rng: random.Random, dob: datetime.date) -> tuple[SynthMedication, ...]:
+def _make_medications(
+    rng: random.Random, dob: datetime.date, listed_from: datetime.date
+) -> tuple[SynthMedication, ...]:
     pool: tuple[Medication, ...] = terminology.rxnorm()
     out = []
     for m in rng.sample(pool, rng.randint(0, 3)):
-        begin = max(dob, _EARLIEST_ENCOUNTER) + datetime.timedelta(days=rng.randint(0, 900))
+        begin = _day_between(rng, max(dob, _EARLIEST_ENCOUNTER), listed_from)
         status = _pick(rng, ("active", "stopped", "completed"))
-        stop = None if status == "active" else begin + datetime.timedelta(days=rng.randint(7, 700))
+        stop = None if status == "active" else _day_between(rng, begin, listed_from)
         out.append(
             SynthMedication(
                 m.code, m.name, m.strength, m.dose, m.route, m.frequency, begin, stop, status
@@ -339,11 +348,13 @@ def _make_medications(rng: random.Random, dob: datetime.date) -> tuple[SynthMedi
     return tuple(out)
 
 
-def _make_conditions(rng: random.Random, dob: datetime.date) -> tuple[SynthCondition, ...]:
+def _make_conditions(
+    rng: random.Random, dob: datetime.date, listed_from: datetime.date
+) -> tuple[SynthCondition, ...]:
     pool: tuple[Condition, ...] = terminology.icd10()
     out = []
     for c in rng.sample(pool, rng.randint(0, 3)):
-        onset = max(dob, _EARLIEST_ENCOUNTER) + datetime.timedelta(days=rng.randint(0, 900))
+        onset = _day_between(rng, max(dob, _EARLIEST_ENCOUNTER), listed_from)
         status = _pick(rng, ("active", "resolved", "history"))
         verification = _pick(rng, ("confirmed", "provisional"))
         out.append(SynthCondition(c.code, c.display, status, verification, onset))
@@ -374,6 +385,9 @@ def generate(
         given = _pick(rng, given_names)
         if rng.random() < 0.25:
             given = f"{given} {_pick(rng, given_names)}"
+        encounters = _make_encounters(rng, dob, abnormal_rate, critical_rate)
+        # Medications and conditions start no later than the earliest document that lists them.
+        listed_from = min(e.start.date() for e in encounters)
         base = SynthPatient(
             mrn="SYN-" + _digits(rng, 8),
             national_id="SYNID-" + _digits(rng, 8),
@@ -383,9 +397,9 @@ def generate(
             sex=_pick(rng, ("female", "male")),
             phone=f"555-01{rng.randrange(100):02d}",
             street_address=f"{rng.randint(1, 240)} {_pick(rng, streets)}",
-            conditions=_make_conditions(rng, dob),
-            medications=_make_medications(rng, dob),
-            encounters=_make_encounters(rng, dob, abnormal_rate, critical_rate),
+            conditions=_make_conditions(rng, dob, listed_from),
+            medications=_make_medications(rng, dob, listed_from),
+            encounters=encounters,
             documents=(),
         )
         docs = tuple(_document(base, enc) for enc in base.encounters)

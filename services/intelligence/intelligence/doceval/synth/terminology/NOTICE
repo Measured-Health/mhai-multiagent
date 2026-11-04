@@ -3,7 +3,7 @@ synthetic test documents. No patient data is in it.
 
 LOINC
 This material contains content from LOINC (http://loinc.org). LOINC is
-copyright (c) 1995-2025, Regenstrief Institute, Inc. and the Logical
+copyright (c) 1995-2026, Regenstrief Institute, Inc. and the Logical
 Observation Identifiers Names and Codes (LOINC) Committee and is available at
 no cost under the license at http://loinc.org/license. LOINC(R) is a
 registered United States trademark of Regenstrief Institute, Inc.
@@ -16,5 +16,11 @@ RxNorm
 Identifiers (RXCUI) are from RxNorm, a product of the U.S. National Library of
 Medicine. This is a small subset; it is not a substitute for the RxNorm
 release and is not endorsed by the NLM.
+
+Verification (4 November 2026): every RxNorm code and name was checked against
+the NLM RxNav API (RxNorm release 02-Nov-2026, shown as "RxNorm version" by
+RxNav). Every LOINC code and long common name was checked against the NLM
+Clinical Table Search Service for LOINC, which does not report a LOINC release
+number, so the LOINC version is not pinned here.
 
 No SNOMED CT content is included.

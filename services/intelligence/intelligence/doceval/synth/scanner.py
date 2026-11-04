@@ -6,6 +6,10 @@ synthetic patterns or the committed lists. Anything that looks like a real
 identifier is refused: a Nigerian phone, a national id or BVN (11 digits), a
 real-format MRN, an email, a URL, a street address that isn't in the list.
 
+Free-text names are covered only when titled ("Dr", "Chief", "Alhaji", ...): a
+bare name in a note with no title and no other pattern is not detected, so
+generated notes hold only keyed fields and the fixed contact line.
+
 A finding carries the location (a field path), the reason ``not_synthetic`` and
 a fixed rule name. It never carries the offending value.
 """
@@ -13,6 +17,8 @@ a fixed rule name. It never carries the offending value.
 import json
 import os
 import re
+import stat
+import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,31 +34,71 @@ JSON_SUFFIXES = frozenset({".json", ".jsonl"})
 
 MRN_RE = re.compile(r"SYN-[0-9]{8}")
 OTHER_ID_RE = re.compile(r"SYN(?:ID|INS)-[0-9]{8}")
-_ALLOWED_TOKEN = re.compile(r"\bSYN(?:ID|INS)?-[0-9]{8}\b")
+_ALLOWED_TOKEN = re.compile(r"(?<![A-Za-z0-9])SYN(?:ID|INS)?-[0-9]{8}(?![0-9])")
 _ALLOWED_PHONE = re.compile(r"(?<![0-9])555-01[0-9]{2}(?![0-9])")
 _ISO = re.compile(
-    r"(?<![0-9])[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[Tt ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?"
+    r"(?<![0-9])[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[Tt ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?"
     r"(?:[Zz]|[+-][0-9]{2}:[0-9]{2})?)?(?![0-9])"
 )
-_NG_PHONE = re.compile(
-    r"(?<![0-9])(?:\+?234|0)[\s.-]?[789][01][0-9][\s.-]?[0-9]{3}[\s.-]?[0-9]{4}(?![0-9])"
+# Printed dates (the renderer prints them): 12-03-2026, 12.03.2026, 12/03/2026, 2026/03/12.
+_PRINTED_DATE = re.compile(
+    r"(?<![0-9])(?:[0-9]{1,2}[-./][0-9]{1,2}[-./](?:[0-9]{4}|[0-9]{2})"
+    r"|[0-9]{4}[-./][0-9]{1,2}[-./][0-9]{1,2})(?![0-9])"
 )
-_DIGITS = re.compile(r"(?<![0-9])[0-9](?:[ .()-]?[0-9]){6,}(?![0-9])")
+_RUN = re.compile(r"\+?[0-9](?:[\s().\-/]{0,2}[0-9])*")
+_TOKEN_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_NG_PHONE_DIGITS = re.compile(r"(?:234|0)?[789][01][0-9]{8}")
 _EMAIL = re.compile(r"@")
 _URL = re.compile(r"(?:https?://|www\.|ftp://)", re.IGNORECASE)
 _MRN_WORD = re.compile(
-    r"\b(?:MRN|HOSP(?:ITAL)?\s*(?:NO|NUMBER)|PATIENT\s*ID|FOLDER\s*(?:NO|NUMBER))\b[\s:#.-]*\S",
+    r"\b(?:MRN|HOSP(?:ITAL)?\.?\s*(?:NO|NUMBER|NUM|#)|PATIENT\s*ID|"
+    r"(?:FOLDER|CARD|FILE|REG(?:ISTRATION)?|UNIT)\.?\s*(?:NO|NUMBER|NUM|#)|NHIS|NIN|BVN)"
+    r"(?![^\W\d_])[\s:#.\-]*\S",
     re.IGNORECASE,
 )
 _PREFIXED_ID = re.compile(r"\b[A-Z]{2,6}[-/ ]?[0-9]{5,}\b")
-_TITLED = re.compile(
-    r"\b(?:Dr|Mr|Mrs|Ms|Miss|Prof|Nurse|Sister)\b\.?\s+((?:[A-Z][A-Za-z'-]*)(?:\s+[A-Z][A-Za-z'-]*)*)"
+_SLASHED_ID = re.compile(r"\b[^\W\d_]{2,8}(?:[/\-][0-9]{1,6}){1,4}\b")
+_TITLES = (
+    "Dr|Mr|Mrs|Ms|Miss|Prof|Nurse|Sister|Chief|Alhaji|Alhaja|Pastor|Engr|Barr|Rev|Hon|Mallam|Madam"
 )
+_WORD = r"[^\W\d_][^\W\d_'\-]*"
+_TITLED = re.compile(rf"\b(?:{_TITLES})\b\.?\s+({_WORD})((?:\s+{_WORD}){{0,2}})", re.IGNORECASE)
 _ADDRESS = re.compile(
-    r"\b[0-9]{1,5}[A-Za-z]?\s+((?:[A-Z][a-z]+\s+){1,3}"
-    r"(?:Street|St|Road|Rd|Avenue|Ave|Lane|Close|Crescent|Drive|Way|Estate|Layout|Court|Place))\b"
+    r"(?<![0-9])[0-9]{1,5}[A-Za-z]?[,\s]+((?:[^\W\d_]+\s+){1,3}"
+    r"(?:Street|St|Str|Road|Rd|Avenue|Ave|Lane|Close|Crescent|Drive|Way|Estate|Layout|Court|"
+    r"Place|Boulevard|Blvd|Expressway|Highway))\b",
+    re.IGNORECASE,
+)
+# Ordinary clinical phrases that begin with a title word.
+_CLINICAL_PHRASES = frozenset(
+    {("chief", "complaint"), ("nurse", "practitioner"), ("nurse", "notes"), ("nurse", "note")}
 )
 _CONTACT = re.compile(r"Tel 555-01[0-9]{2}; [0-9]{1,5} (.+)")
+_SAFE_NAME = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+# Fields that legitimately hold numbers and codes: free-text digit rules are looser there
+# (a single number of 7+ digits is still refused).
+_LAB_TEXT = frozenset(
+    {
+        "observations[].value_text",
+        "observations[].reference_text",
+        "observations[].value_numeric",
+        "observations[].reference_low",
+        "observations[].reference_high",
+        "observations[].local_code",
+        "observations[].unit_text",
+        "conditions[].local_code",
+        "medications[].strength_text",
+        "medications[].dose_text",
+    }
+)
+_NUMERIC_LAB = frozenset(
+    {
+        "observations[].value_numeric",
+        "observations[].reference_low",
+        "observations[].reference_high",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -74,31 +120,62 @@ class ScanResult:
     scanned: int
 
 
-def _text_rules(text: str) -> list[str]:
-    """Rule names that fire on free text. Synthetic tokens, ISO dates and times are removed first."""
+def _normalise(text: str) -> str:
+    """NFKC, then every Unicode decimal digit becomes an ASCII digit."""
+    text = unicodedata.normalize("NFKC", text)
+    return "".join(str(unicodedata.decimal(c)) if c.isdecimal() else c for c in text)
+
+
+def _digit_rules(rest: str, lab: bool) -> list[str]:
+    rules: list[str] = []
+    if lab:
+        runs = [m.group(0).replace(".", "") for m in _TOKEN_NUMBER.finditer(rest)]
+        threshold = 7
+    else:
+        runs = [re.sub(r"[^0-9]", "", m.group(0)) for m in _RUN.finditer(rest)]
+        threshold = 6
+    for digits in runs:
+        if _NG_PHONE_DIGITS.fullmatch(digits):
+            rules.append("phone")
+        elif len(digits) == 11:
+            rules.append("national_id_like")
+        elif len(digits) >= threshold:
+            rules.append("long_digits")
+    return rules
+
+
+def _text_rules(text: str, lab: bool = False) -> list[str]:
+    """Rule names that fire on free text.
+
+    Synthetic tokens, ISO and printed dates and ``555-01NN`` are removed first.
+    ``lab`` loosens the digit rule for fields that hold lab numbers and codes.
+    """
+    text = _normalise(text)
     rules: list[str] = []
     if _EMAIL.search(text):
         rules.append("email")
     if _URL.search(text):
         rules.append("url")
     rest = _ALLOWED_TOKEN.sub(" ", text)
-    rest = _ISO.sub(" ", rest)
-    rest = _ALLOWED_PHONE.sub(" ", rest)
-    if _NG_PHONE.search(rest):
-        rules.append("phone")
-    for m in _DIGITS.finditer(rest):
-        count = sum(c.isdigit() for c in m.group(0))
-        rules.append("national_id_like" if count == 11 else "long_digits")
-    if _MRN_WORD.search(rest) or _PREFIXED_ID.search(rest):
+    for pattern in (_ISO, _PRINTED_DATE, _ALLOWED_PHONE):
+        rest = pattern.sub(" <> ", rest)
+    rules.extend(_digit_rules(rest, lab))
+    if _MRN_WORD.search(rest) or _PREFIXED_ID.search(rest) or _SLASHED_ID.search(rest):
         rules.append("mrn_like")
-    tokens = terminology.all_name_tokens()
+    tokens = {t.casefold() for t in terminology.all_name_tokens()}
     for m in _TITLED.finditer(rest):
-        if any(w not in tokens for w in m.group(1).split()):
+        if (
+            m.group(0).split()[0].rstrip(".").casefold(),
+            m.group(1).casefold(),
+        ) in _CLINICAL_PHRASES:
+            continue
+        extra = [w for w in m.group(2).split() if w[:1].isupper()]
+        if m.group(1).casefold() not in tokens or any(w.casefold() not in tokens for w in extra):
             rules.append("titled_name")
             break
-    streets = terminology.name_set("streets")
+    streets = {s.casefold() for s in terminology.name_set("streets")}
     for m in _ADDRESS.finditer(rest):
-        if m.group(1) not in streets:
+        if " ".join(m.group(1).split()).casefold() not in streets:
             rules.append("address")
             break
     return sorted(set(rules))
@@ -143,6 +220,7 @@ def _typed_rule(pattern: str, text: str) -> str | None:
 
 
 def _walk(node: Any, path: str) -> Iterator[tuple[str, Any]]:
+    """Leaves of a schema-valid document (its keys are schema names, safe to show)."""
     stack: list[tuple[str, Any]] = [(path, node)]
     while stack:
         where, cur = stack.pop()
@@ -163,30 +241,47 @@ def _field_pattern(path: str) -> str | None:
     return None
 
 
+def _numeric_exempt(path: str, pattern: str | None) -> bool:
+    """Numbers the schema defines: lab values and ranges, pages, boxes, confidence."""
+    return (
+        (pattern in _NUMERIC_LAB and path.endswith(".value"))
+        or ".bbox[" in path
+        or path.endswith((".page", ".confidence"))
+        or path == "document.page_count"
+    )
+
+
 def check_document(gt: Any) -> list[Finding]:
     """Check one ground-truth document. An empty list means every value is synthetic."""
     if not isinstance(gt, dict):
         return [Finding("", "schema")]
     try:
-        try:
-            if isinstance(gt.get("document"), dict) and "page_count" in gt["document"]:
-                schema.validate_stored(gt)
-            else:
-                schema.validate_model_output(gt)
-        except schema.SchemaError as exc:
-            return [Finding(_dotted(exc.pointer), "schema")]
+        if isinstance(gt.get("document"), dict) and "page_count" in gt["document"]:
+            schema.validate_stored(gt)
+        else:
+            schema.validate_model_output(gt)
+    except schema.SchemaError as exc:
+        return [Finding(_dotted(exc.pointer), "schema")]
     except RecursionError:
         return [Finding("", "schema")]
     found: dict[tuple[str, str], Finding] = {}
     for path, leaf in _walk(gt, ""):
-        if not isinstance(leaf, str):
-            continue
-        rules = _text_rules(leaf)
         pattern = _field_pattern(path)
-        if pattern is not None:
-            typed = _typed_rule(pattern, leaf)
-            if typed is not None:
-                rules.append(typed)
+        lab = pattern in _LAB_TEXT
+        if isinstance(leaf, bool) or leaf is None:
+            continue
+        if isinstance(leaf, int | float):
+            if _numeric_exempt(path, pattern):
+                continue
+            rules = _digit_rules(_normalise(str(leaf)), lab)
+        elif isinstance(leaf, str):
+            rules = _text_rules(leaf, lab)
+            if pattern is not None:
+                typed = _typed_rule(pattern, leaf)
+                if typed is not None:
+                    rules.append(typed)
+        else:
+            continue
         for rule in rules:
             found[(path, rule)] = Finding(path, rule)
     return list(found.values())
@@ -211,23 +306,55 @@ _META_KEYS: dict[str, str] = {
 }
 
 
+def _metadata_leaves(meta: Any) -> Iterator[tuple[str, str | None, Any, bool]]:
+    """Yield ``(display_path, key, leaf, False)`` for leaves, and ``(path, None, key, True)`` for keys.
+
+    Only known metadata key names and list indexes appear in a display path; any other
+    key is shown as ``[k<position>]``, because a key may itself be a real value.
+    """
+    stack: list[tuple[str, str | None, Any]] = [("", None, meta)]
+    while stack:
+        where, key, cur = stack.pop()
+        if isinstance(cur, dict):
+            for i, (k, child) in enumerate(cur.items()):
+                shown = k if k in _META_KEYS else f"[k{i}]"
+                here = f"{where}.{shown}" if where else shown
+                yield here, None, k, True
+                stack.append((here, k, child))
+        elif isinstance(cur, list):
+            for i, child in enumerate(cur):
+                stack.append((f"{where}[{i}]", key, child))
+        else:
+            yield where, key, cur, False
+
+
 def check_metadata(meta: Any) -> list[Finding]:
-    """Check intake metadata (any JSON). Known keys use their list or pattern."""
+    """Check intake metadata (any JSON). Known keys use their list or pattern.
+
+    Every key and every string or number leaf goes through the text rules.
+    """
     found: dict[tuple[str, str], Finding] = {}
-    for path, leaf in _walk(meta, ""):
-        if not isinstance(leaf, str):
+    for path, key, leaf, is_key in _metadata_leaves(meta):
+        rules: list[str]
+        if is_key:
+            rules = [f"key_{r}" for r in _text_rules(str(leaf))]
+        elif isinstance(leaf, bool) or leaf is None:
             continue
-        rules = _text_rules(leaf)
-        key = re.sub(r"\[[0-9]+\]", "", path).rsplit(".", 1)[-1]
-        kind = _META_KEYS.get(key)
-        if kind == "mrn" and not MRN_RE.fullmatch(leaf):
-            rules.append("mrn_pattern")
-        elif kind in ("family", "given") and not _is_name(leaf, kind):
-            rules.append("name")
-        elif kind == "facilities" and leaf not in terminology.name_set("facilities"):
-            rules.append("facility")
-        elif kind == "clinicians" and not _is_clinician(leaf):
-            rules.append("clinician")
+        elif isinstance(leaf, int | float):
+            rules = _digit_rules(_normalise(str(leaf)), False)
+        elif isinstance(leaf, str):
+            rules = _text_rules(leaf)
+            kind = _META_KEYS.get(key or "")
+            if kind == "mrn" and not MRN_RE.fullmatch(leaf):
+                rules.append("mrn_pattern")
+            elif kind in ("family", "given") and not _is_name(leaf, kind):
+                rules.append("name")
+            elif kind == "facilities" and leaf not in terminology.name_set("facilities"):
+                rules.append("facility")
+            elif kind == "clinicians" and not _is_clinician(leaf):
+                rules.append("clinician")
+        else:
+            continue
         for rule in rules:
             found[(path, rule)] = Finding(path, rule)
     return list(found.values())
@@ -237,7 +364,16 @@ def _no_constant(_name: str) -> Any:
     raise ValueError("non-finite number")
 
 
-def _check_json_text(text: str, rel: str, jsonl: bool) -> list[Finding]:
+def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate key")
+        out[key] = value
+    return out
+
+
+def _check_json_text(text: str, rel: str, jsonl: bool, referenced: set[str]) -> list[Finding]:
     out: list[Finding] = []
     lines = text.splitlines() if jsonl else [text]
     for number, line in enumerate(lines, start=1):
@@ -245,60 +381,107 @@ def _check_json_text(text: str, rel: str, jsonl: bool) -> list[Finding]:
         if jsonl and not line.strip():
             continue
         try:
-            obj = json.loads(line, parse_constant=_no_constant)
+            obj = json.loads(line, parse_constant=_no_constant, object_pairs_hook=_no_duplicates)
         except (ValueError, RecursionError):
             out.append(Finding(label, "unreadable"))
             continue
         is_doc = isinstance(obj, dict) and "schema_version" in obj
-        sub = check_document(obj) if is_doc else check_metadata(obj)
+        if is_doc:
+            sub = check_document(obj)
+        else:
+            sub = check_metadata(obj)
+            for _, _key, leaf, is_key in _metadata_leaves(obj):
+                if not is_key and isinstance(leaf, str):
+                    referenced.add(leaf)
+                    referenced.add(Path(leaf).name)
         out.extend(Finding(f"{label}#{f.path}", f.rule) for f in sub)
     return out
+
+
+def _safe_rel(rel: str, index: int) -> tuple[str, bool]:
+    """A displayable path: any component that is odd or looks like a real value is replaced."""
+    parts: list[str] = []
+    clean = True
+    for part in Path(rel).parts:
+        if _SAFE_NAME.fullmatch(part) and not _text_rules(part, lab=True):
+            parts.append(part)
+        else:
+            parts.append(f"[name{index}]")
+            clean = False
+    return "/".join(parts), clean
 
 
 def scan_set(path: str | Path) -> ScanResult:
     """Scan a directory (or one file) of ground truth and intake metadata.
 
     ``.json`` holding a ``schema_version`` is a document; any other JSON is
-    metadata. Images are not read (their ground truth is). Symlinks, other file types,
-    unreadable or oversized files, and an empty set are refused.
+    metadata. Images are not read (their ground truth is) but each needs a
+    sibling ``.json`` of the same stem or a metadata record naming it, else
+    ``orphan_image``. Symlinks, special files, other file types, odd or
+    value-like file names, duplicate JSON keys, unreadable or oversized files,
+    and an empty set are refused.
     """
     root = Path(path)
     findings: list[Finding] = []
     scanned = 0
     if root.is_symlink() or not root.exists():
-        return ScanResult(False, (Finding(root.name, "unreadable"),), 0)
+        shown, _ = _safe_rel(root.name, 0)
+        return ScanResult(False, (Finding(shown or ".", "unreadable"),), 0)
+    entries: list[tuple[Path, str]] = []
     if root.is_file():
-        files = [(root, root.name)]
+        entries.append((root, root.name))
     else:
-        files = []
         for base, dirs, names in os.walk(root, followlinks=False):
             dirs.sort()
             for name in sorted(names):
                 full = Path(base) / name
-                files.append((full, str(full.relative_to(root))))
+                entries.append((full, str(full.relative_to(root))))
             for d in dirs:
                 if (Path(base) / d).is_symlink():
-                    findings.append(Finding(str((Path(base) / d).relative_to(root)), "symlink"))
-    for full, rel in files:
-        suffix = full.suffix.lower()
-        if full.is_symlink():
-            findings.append(Finding(rel, "symlink"))
+                    entries.append((Path(base) / d, str((Path(base) / d).relative_to(root))))
+    referenced: set[str] = set()
+    images: list[tuple[Path, str, str]] = []
+    json_files: set[Path] = set()
+    for index, (full, rel) in enumerate(entries):
+        shown, clean = _safe_rel(rel, index)
+        if not clean:
+            findings.append(Finding(shown, "filename"))
+        try:
+            mode = os.lstat(full).st_mode
+        except OSError:
+            findings.append(Finding(shown, "unreadable"))
             continue
+        if stat.S_ISLNK(mode):
+            findings.append(Finding(shown, "symlink"))
+            continue
+        if not stat.S_ISREG(mode):
+            findings.append(Finding(shown, "unexpected_file"))
+            continue
+        suffix = full.suffix.lower()
         if suffix in IMAGE_SUFFIXES:
+            images.append((full, shown, rel))
             continue
         if suffix not in JSON_SUFFIXES:
-            findings.append(Finding(rel, "unexpected_file"))
+            findings.append(Finding(shown, "unexpected_file"))
             continue
         try:
-            if full.stat().st_size > MAX_FILE_BYTES:
-                findings.append(Finding(rel, "too_large"))
+            if os.lstat(full).st_size > MAX_FILE_BYTES:
+                findings.append(Finding(shown, "too_large"))
                 continue
             text = full.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
-            findings.append(Finding(rel, "unreadable"))
+            findings.append(Finding(shown, "unreadable"))
             continue
         scanned += 1
-        findings.extend(_check_json_text(text, rel, suffix == ".jsonl"))
+        if suffix == ".json":
+            json_files.add(full)
+        findings.extend(_check_json_text(text, shown, suffix == ".jsonl", referenced))
+    for full, shown, rel in images:
+        sibling = full.with_suffix(".json")
+        if sibling in json_files or rel in referenced or full.name in referenced:
+            continue
+        findings.append(Finding(shown, "orphan_image"))
     if scanned == 0 and not findings:
-        findings.append(Finding(root.name, "empty"))
+        shown, _ = _safe_rel(root.name, 0)
+        findings.append(Finding(shown or ".", "empty"))
     return ScanResult(not findings, tuple(findings), scanned)

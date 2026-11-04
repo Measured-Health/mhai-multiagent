@@ -9,7 +9,7 @@
    "route": "oral",
    "dose": "500 mg",
    "frequency": "twice daily",
-   "display": "Metformin 500 mg tablet"
+   "display": "metformin hydrochloride 500 MG Oral Tablet"
   },
   {
    "code": "314076",
@@ -19,7 +19,7 @@
    "route": "oral",
    "dose": "10 mg",
    "frequency": "once daily",
-   "display": "Lisinopril 10 mg tablet"
+   "display": "lisinopril 10 MG Oral Tablet"
   },
   {
    "code": "197361",
@@ -29,7 +29,7 @@
    "route": "oral",
    "dose": "5 mg",
    "frequency": "once daily",
-   "display": "Amlodipine 5 mg tablet"
+   "display": "amlodipine 5 MG Oral Tablet"
   },
   {
    "code": "617310",
@@ -39,17 +39,17 @@
    "route": "oral",
    "dose": "20 mg",
    "frequency": "once daily at night",
-   "display": "Atorvastatin 20 mg tablet"
+   "display": "atorvastatin 20 MG Oral Tablet"
   },
   {
-   "code": "198053",
+   "code": "198051",
    "name": "Omeprazole",
    "strength": "20 mg",
    "form": "capsule",
    "route": "oral",
    "dose": "20 mg",
    "frequency": "once daily",
-   "display": "Omeprazole 20 mg capsule"
+   "display": "omeprazole 20 MG Delayed Release Oral Capsule"
   },
   {
    "code": "198440",
@@ -59,7 +59,7 @@
    "route": "oral",
    "dose": "1000 mg",
    "frequency": "every 6 hours",
-   "display": "Acetaminophen 500 mg tablet"
+   "display": "acetaminophen 500 MG Oral Tablet"
   },
   {
    "code": "308191",
@@ -69,57 +69,57 @@
    "route": "oral",
    "dose": "500 mg",
    "frequency": "three times daily",
-   "display": "Amoxicillin 500 mg capsule"
+   "display": "amoxicillin 500 MG Oral Capsule"
   },
   {
-   "code": "197806",
+   "code": "197805",
    "name": "Ibuprofen",
    "strength": "400 mg",
    "form": "tablet",
    "route": "oral",
    "dose": "400 mg",
    "frequency": "three times daily",
-   "display": "Ibuprofen 400 mg tablet"
+   "display": "ibuprofen 400 MG Oral Tablet"
   },
   {
-   "code": "310429",
+   "code": "313988",
    "name": "Furosemide",
    "strength": "40 mg",
    "form": "tablet",
    "route": "oral",
    "dose": "40 mg",
    "frequency": "once daily",
-   "display": "Furosemide 40 mg tablet"
+   "display": "furosemide 40 MG Oral Tablet"
   },
   {
-   "code": "866427",
+   "code": "866514",
    "name": "Metoprolol tartrate",
    "strength": "50 mg",
    "form": "tablet",
    "route": "oral",
    "dose": "50 mg",
    "frequency": "twice daily",
-   "display": "Metoprolol tartrate 50 mg tablet"
+   "display": "metoprolol tartrate 50 MG Oral Tablet"
   },
   {
-   "code": "310534",
+   "code": "310537",
    "name": "Glyburide",
    "strength": "5 mg",
    "form": "tablet",
    "route": "oral",
    "dose": "5 mg",
    "frequency": "once daily",
-   "display": "Glyburide 5 mg tablet"
+   "display": "glyburide 5 MG Oral Tablet"
   },
   {
-   "code": "197511",
+   "code": "309309",
    "name": "Ciprofloxacin",
    "strength": "500 mg",
    "form": "tablet",
    "route": "oral",
    "dose": "500 mg",
    "frequency": "twice daily",
-   "display": "Ciprofloxacin 500 mg tablet"
+   "display": "ciprofloxacin 500 MG Oral Tablet"
   }
  ]
 }

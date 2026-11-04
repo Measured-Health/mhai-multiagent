@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import random
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,8 @@ from typing import Any
 import pytest
 
 from intelligence.doceval.synth import patients, scanner
+
+from .test_patients import forbid_global_random_and_clock
 
 
 def _doc(seed: int = 1) -> dict[str, Any]:
@@ -139,7 +142,7 @@ def test_schema_invalid_is_refused() -> None:
 def test_scan_set_directory(tmp_path: Path) -> None:
     for i, p in enumerate(patients.generate(random.Random(3), 5)):
         (tmp_path / f"d{i}.json").write_text(json.dumps(p.documents[0]), encoding="utf-8")
-    (tmp_path / "page.png").write_bytes(b"\x89PNG")
+    (tmp_path / "d0.png").write_bytes(b"\x89PNG")
     res = scanner.scan_set(tmp_path)
     assert res.ok and res.findings == () and res.scanned == 5
 
@@ -182,7 +185,7 @@ def test_intake_metadata(tmp_path: Path) -> None:
     assert scanner.check_metadata(good) == []
     bad = {"page_id": "p1", "mrn": "00000001", "facility": "Real Hospital", "note": "a@b.co"}
     found = scanner.check_metadata(bad)
-    assert _paths(found) == {"mrn", "facility", "note"}
+    assert _paths(found) == {"mrn", "facility", "[k3]"}
     (tmp_path / "intake.jsonl").write_text(
         json.dumps(good) + "\n" + json.dumps(bad) + "\n", encoding="utf-8"
     )
@@ -193,13 +196,117 @@ def test_intake_metadata(tmp_path: Path) -> None:
 
 
 def test_no_global_random_or_clock_in_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
-    import time
-
     doc = _doc()
-
-    def boom(*_a: object, **_k: object) -> float:
-        raise AssertionError("clock or randomness used")
-
-    monkeypatch.setattr(random, "random", boom)
-    monkeypatch.setattr(time, "time", boom)
+    forbid_global_random_and_clock(monkeypatch)
     assert scanner.check_document(doc) == []
+    assert scanner.check_metadata({"mrn": "SYN-00000001"}) == []
+
+
+def _note_doc(text: str) -> dict[str, Any]:
+    doc = _doc()
+    note = {
+        "heading": copy.deepcopy(doc["document"]["language"]),
+        "text": copy.deepcopy(doc["document"]["language"]),
+    }
+    note["text"]["value"] = text
+    note["text"]["raw_text"] = None
+    doc["notes"] = [note]
+    return doc
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "call 0803 123 4567",
+        "call 0803.123.4567",
+        "call (0803) 123-4567",
+        "call \uff10\uff18\uff10\uff13\uff11\uff12\uff13\uff14\uff15\uff16\uff17",
+        "id 123456",
+        "LUTH/2019/12345",
+        "UCH/12/345",
+        "Hosp. No. 4455",
+        "Card No 88",
+        "File No: A9",
+        "Reg No 7",
+        "Unit No 2",
+        "NHIS 12",
+        "NIN 1",
+        "BVN 1",
+        "seen by dr adebayo",
+        "seen by CHIEF Okonkwo",
+        "Alhaji Musa came",
+        "Pastor John",
+        "Engr Bello",
+        "Barr Eze",
+        "Rev Ade",
+        "Hon Danjuma",
+        "Mallam Sani",
+        "Madam Ngozi",
+        "at No. 5, Aminu Boulevard",
+        "at 5 Aminu Str",
+        "at 5 aminu road",
+        "at 7 Lekki Expressway",
+        "at 7 Kano Highway",
+        ", 12 Awolowo Road",
+    ],
+)
+def test_more_free_text_refused(text: str) -> None:
+    found = scanner.check_document(_note_doc(text))
+    assert "notes[0].text.value" in _paths(found)
+
+
+def test_printed_dates_and_clinical_phrases_allowed() -> None:
+    for text in (
+        "seen 12-03-2026, again 12.03.2026 and 12/03/2026 or 2026/03/12",
+        "Chief complaint: cough. Nurse practitioner reviewed.",
+        "at 14 Kestrel Lane",
+    ):
+        assert scanner.check_document(_note_doc(text)) == []
+
+
+def test_metadata_keys_are_scanned_and_hidden() -> None:
+    for key in ("08031234567", "jane.doe@example.com", "Dr Adebayo", "NIN 12345678901"):
+        found = scanner.check_metadata({"ok": 1, key: "x"})
+        assert found, key
+        assert all(key not in str(f) for f in found)
+        assert {f.path for f in found} == {"[k1]"}
+    nested = scanner.check_metadata({"a": [{"08031234567": 1}]})
+    assert nested and all("0803" not in str(f) for f in nested)
+
+
+def test_numeric_leaves_scanned() -> None:
+    assert scanner.check_metadata({"x": 12345678901})
+    assert scanner.check_metadata({"x": 8031234567})
+    assert scanner.check_metadata({"x": [1234567.0]})
+    assert scanner.check_metadata({"x": 5, "y": True}) == []
+    doc = _doc()
+    assert scanner.check_document(doc) == []  # numeric lab fields and boxes are exempt
+
+
+def test_orphan_image_refused(tmp_path: Path) -> None:
+    (tmp_path / "a.png").write_bytes(b"\x89PNG")
+    (tmp_path / "ok.json").write_text(json.dumps(_doc()), encoding="utf-8")
+    res = scanner.scan_set(tmp_path)
+    assert any(f.rule == "orphan_image" and f.path == "a.png" for f in res.findings)
+    (tmp_path / "a.json").write_text(json.dumps(_doc(2)), encoding="utf-8")
+    assert scanner.scan_set(tmp_path).ok
+    (tmp_path / "b.png").write_bytes(b"\x89PNG")
+    (tmp_path / "meta.jsonl").write_text(json.dumps({"image": "b.png"}) + "\n", encoding="utf-8")
+    assert scanner.scan_set(tmp_path).ok
+
+
+def test_file_names_scanned(tmp_path: Path) -> None:
+    (tmp_path / "08031234567.json").write_text(json.dumps(_doc()), encoding="utf-8")
+    (tmp_path / "Dr Adebayo.json").write_text(json.dumps(_doc()), encoding="utf-8")
+    res = scanner.scan_set(tmp_path)
+    assert any(f.rule == "filename" for f in res.findings)
+    dump = repr(res)
+    assert "0803" not in dump and "Adebayo" not in dump
+
+
+def test_duplicate_keys_and_special_files_refused(tmp_path: Path) -> None:
+    (tmp_path / "dup.json").write_text('{"a": 1, "a": 2}', encoding="utf-8")
+    assert any(f.rule == "unreadable" for f in scanner.scan_set(tmp_path).findings)
+    (tmp_path / "dup.json").unlink()
+    os.mkfifo(tmp_path / "pipe.json")
+    assert any(f.rule == "unexpected_file" for f in scanner.scan_set(tmp_path).findings)

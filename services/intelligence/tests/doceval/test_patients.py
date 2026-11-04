@@ -1,3 +1,5 @@
+import datetime
+import json
 import random
 import time
 from pathlib import Path
@@ -120,16 +122,75 @@ def test_name_lists_headed_synthetic() -> None:
     )
 
 
-def test_no_global_random_or_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(*_a: object, **_k: object) -> float:
+def test_rxnorm_pinned_to_fixture() -> None:
+    pins = json.loads((Path(__file__).parent / "fixtures" / "rxnorm_pins.json").read_text())
+    actual = {m.code: m.display for m in terminology.rxnorm()}
+    assert actual == pins
+    assert (
+        "02-Nov-2026" in (Path(terminology.__file__).parent / "terminology" / "NOTICE").read_text()
+    )
+
+
+def _day(text: str) -> datetime.date:
+    return datetime.date.fromisoformat(text[:10])
+
+
+def test_dates_never_future_or_out_of_order() -> None:
+    latest = patients._LATEST_ENCOUNTER
+    for p in _gen(12, 1500):
+        for doc in p.documents:
+            doc_date = _day(doc["document"]["date"]["value"])
+            assert doc_date <= latest
+            enc = doc["encounter"]
+            assert enc["start"]["value"] <= enc["end"]["value"]
+            assert _day(enc["start"]["value"]) <= doc_date
+            assert p.date_of_birth <= doc_date
+            for o in doc["observations"]:
+                collected, resulted = o["collected_at"]["value"], o["resulted_at"]["value"]
+                assert enc["start"]["value"] <= collected <= resulted <= enc["end"]["value"]
+            for m in doc["medications"]:
+                start = _day(m["start"]["value"])
+                assert start <= doc_date
+                if m["stop"]["value"] is not None:
+                    assert start <= _day(m["stop"]["value"]) <= doc_date
+            for c in doc["conditions"]:
+                assert _day(c["onset"]["value"]) <= doc_date
+
+
+class _NoNow(datetime.datetime):
+    @classmethod
+    def now(cls, tz: Any = None) -> Any:
+        raise AssertionError("clock used")
+
+    @classmethod
+    def utcnow(cls) -> Any:
+        raise AssertionError("clock used")
+
+    @classmethod
+    def today(cls) -> Any:
+        raise AssertionError("clock used")
+
+
+class _NoToday(datetime.date):
+    @classmethod
+    def today(cls) -> Any:
+        raise AssertionError("clock used")
+
+
+def forbid_global_random_and_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_a: object, **_k: object) -> Any:
         raise AssertionError("global randomness or clock used")
 
-    monkeypatch.setattr(random, "random", boom)
-    monkeypatch.setattr(random, "randint", boom)
-    monkeypatch.setattr(random, "choice", boom)
-    monkeypatch.setattr(time, "time", boom)
-    monkeypatch.setattr(time, "time_ns", boom)
-    monkeypatch.setattr(time, "monotonic", boom)
+    for name in ("random", "randint", "choice", "sample", "randrange", "shuffle", "uniform"):
+        monkeypatch.setattr(random, name, boom)
+    for name in ("time", "time_ns", "monotonic"):
+        monkeypatch.setattr(time, name, boom)
+    monkeypatch.setattr(datetime, "datetime", _NoNow)
+    monkeypatch.setattr(datetime, "date", _NoToday)
+
+
+def test_no_global_random_or_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    forbid_global_random_and_clock(monkeypatch)
     assert len(patients.generate(random.Random(9), 20)) == 20
 
 
