@@ -1,0 +1,346 @@
+{
+ "description": "Silent errors over high-band fields; confidence pairs for calibration.",
+ "truth": {
+  "document": {
+   "type": {
+    "value": "lab_report",
+    "raw_text": "lab_report",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "date": {
+    "value": "2026-03-04",
+    "raw_text": "2026-03-04",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "facility_name": {
+    "value": "Eastmere Synthetic Hospital",
+    "raw_text": "Eastmere Synthetic Hospital",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   }
+  },
+  "patient": {
+   "mrn": {
+    "value": "SYN-00000001",
+    "raw_text": "SYN-00000001",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "family_name": {
+    "value": "Ashbrenner",
+    "raw_text": "Ashbrenner",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "given_names": {
+    "value": null,
+    "raw_text": null,
+    "page": null,
+    "bbox": null
+   },
+   "date_of_birth": {
+    "value": "1980-01-02",
+    "raw_text": "1980-01-02",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "sex": {
+    "value": "female",
+    "raw_text": "female",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   }
+  },
+  "encounter": {
+   "kind": {
+    "value": null,
+    "raw_text": null,
+    "page": null,
+    "bbox": null
+   },
+   "location_text": {
+    "value": "Northvale Synthetic Clinic",
+    "raw_text": "Northvale Synthetic Clinic",
+    "page": null,
+    "bbox": null,
+    "script": "printed"
+   },
+   "clinician_text": {
+    "value": "Dr Arvendal Pemberlyn",
+    "raw_text": "Dr Arvendal Pemberlyn",
+    "page": null,
+    "bbox": null,
+    "script": "printed"
+   }
+  }
+ },
+ "pred": {
+  "document": {
+   "type": {
+    "value": "lab_report",
+    "raw_text": "lab_report",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.99,
+    "band": "high",
+    "grounded": true,
+    "flags": []
+   },
+   "date": {
+    "value": "2026-03-05",
+    "raw_text": "2026-03-05",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.98,
+    "band": "high",
+    "grounded": true,
+    "flags": []
+   },
+   "facility_name": {
+    "value": "Northvale Synthetic Clinic",
+    "raw_text": "Northvale Synthetic Clinic",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.97,
+    "band": "high",
+    "grounded": true,
+    "flags": [
+     "ungrounded"
+    ]
+   }
+  },
+  "patient": {
+   "mrn": {
+    "value": "SYN-00000001",
+    "raw_text": "SYN-00000001",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.96,
+    "band": "high",
+    "grounded": true,
+    "flags": []
+   },
+   "family_name": {
+    "value": null,
+    "raw_text": null,
+    "page": null,
+    "bbox": null,
+    "script": "printed",
+    "confidence": 0.95,
+    "band": "high",
+    "grounded": false,
+    "flags": []
+   },
+   "given_names": {
+    "value": "Sam",
+    "raw_text": "Sam",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.951,
+    "band": "high",
+    "grounded": true,
+    "flags": []
+   },
+   "date_of_birth": {
+    "value": "1980-01-02",
+    "raw_text": "1980-01-02",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.952,
+    "band": "high",
+    "grounded": true,
+    "flags": []
+   },
+   "sex": {
+    "value": "male",
+    "raw_text": "male",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.85,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   }
+  },
+  "encounter": {
+   "kind": {
+    "value": null,
+    "raw_text": null,
+    "page": null,
+    "bbox": null,
+    "script": "printed",
+    "confidence": 0.99,
+    "band": "high",
+    "grounded": false,
+    "flags": []
+   },
+   "location_text": {
+    "value": "Northvale Synthetic Clinic",
+    "raw_text": "Northvale Synthetic Clinic",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.99,
+    "band": "high",
+    "grounded": true,
+    "flags": []
+   },
+   "clinician_text": {
+    "value": "Dr Brisolt Kavanore",
+    "raw_text": "Dr Brisolt Kavanore",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.953,
+    "band": "high",
+    "grounded": true,
+    "flags": []
+   }
+  }
+ },
+ "working": [
+  "high band, counted: type (right), date (wrong, no flag), facility (wrong, flagged), record number (right), family_name (missed, no flag), given_names (not in truth, no flag), date_of_birth (right), clinician_text (not visible in truth, predicted differently, no flag) = 8",
+  "left out: sex (medium band), kind (empty both sides), location_text (not visible, predicted equal)",
+  "errors: date, family_name, given_names, clinician_text = 4; rate 4/8",
+  "confidence pairs: every counted field in any band, so the 8 above plus sex (wrong)"
+ ],
+ "expected": {
+  "errors": 4,
+  "high_band": 8,
+  "rate": "1/2"
+ },
+ "expected_confidence_pairs": [
+  [
+   0.99,
+   true
+  ],
+  [
+   0.98,
+   false
+  ],
+  [
+   0.97,
+   false
+  ],
+  [
+   0.96,
+   true
+  ],
+  [
+   0.95,
+   false
+  ],
+  [
+   0.951,
+   false
+  ],
+  [
+   0.952,
+   true
+  ],
+  [
+   0.85,
+   false
+  ],
+  [
+   0.953,
+   false
+  ]
+ ]
+}

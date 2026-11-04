@@ -1,0 +1,84 @@
+{
+ "description": "Expected calibration error, worked by hand.",
+ "cases": [
+  {
+   "name": "two_bins_of_fifteen",
+   "bins": 15,
+   "confidences": [
+    0.9,
+    0.9,
+    0.92,
+    0.93,
+    0.3,
+    0.32
+   ],
+   "correct": [
+    true,
+    true,
+    true,
+    false,
+    true,
+    false
+   ],
+   "working": "the first four fall in bin 13 with confidence sum 3.65 and 3 right, gap 0.65; the last two fall in bin 4 with sum 0.62 and 1 right, gap 0.38; ECE is the gaps summed over 6 items",
+   "expected": [
+    103,
+    600
+   ]
+  },
+  {
+   "name": "two_bins_of_two",
+   "bins": 2,
+   "confidences": [
+    0.2,
+    0.4,
+    0.6,
+    0.8
+   ],
+   "correct": [
+    false,
+    true,
+    true,
+    true
+   ],
+   "working": "bin 0: sum 0.6, 1 right -> 0.4; bin 1: sum 1.4, 2 right -> 0.6; ECE = 1.0/4",
+   "expected": "1/4"
+  },
+  {
+   "name": "boundary_goes_up",
+   "bins": 2,
+   "confidences": [
+    0.5,
+    1.0,
+    0.0
+   ],
+   "correct": [
+    false,
+    true,
+    false
+   ],
+   "working": "0.5 is in bin 1 with 1.0: sum 1.5, 1 right -> 0.5; 0.0 in bin 0: 0; ECE = 0.5/3",
+   "expected": "1/6"
+  },
+  {
+   "name": "perfectly_calibrated",
+   "bins": 15,
+   "confidences": [
+    1.0,
+    1.0,
+    1.0,
+    0.5,
+    0.5
+   ],
+   "correct": [
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "working": "bin 14: 3 at 1.0, 3 right; bin 7: 2 at 0.5, 1 right -> 0",
+   "expected": "0"
+  }
+ ]
+}
