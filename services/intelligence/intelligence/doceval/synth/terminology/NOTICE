@@ -1,0 +1,20 @@
+This directory holds small subsets of public terminologies, used only to build
+synthetic test documents. No patient data is in it.
+
+LOINC
+This material contains content from LOINC (http://loinc.org). LOINC is
+copyright (c) 1995-2025, Regenstrief Institute, Inc. and the Logical
+Observation Identifiers Names and Codes (LOINC) Committee and is available at
+no cost under the license at http://loinc.org/license. LOINC(R) is a
+registered United States trademark of Regenstrief Institute, Inc.
+
+ICD-10
+Codes and titles follow the WHO International Statistical Classification of
+Diseases and Related Health Problems, 10th Revision (public identifiers).
+
+RxNorm
+Identifiers (RXCUI) are from RxNorm, a product of the U.S. National Library of
+Medicine. This is a small subset; it is not a substitute for the RxNorm
+release and is not endorsed by the NLM.
+
+No SNOMED CT content is included.

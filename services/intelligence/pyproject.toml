@@ -119,6 +119,7 @@ intelligence = [
     "schemas/extraction/clinical_document/*.json",
     "doceval/thresholds/*.json",
     "doceval/synth/terminology/*.json",
+    "doceval/synth/terminology/NOTICE",
     "doceval/synth/names/*.txt",
     "doceval/synth/fonts/*",
 ]
