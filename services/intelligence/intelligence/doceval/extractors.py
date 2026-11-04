@@ -22,6 +22,10 @@ The stubs:
 * :class:`SlowExtractor` sleeps, to exercise the runner's deadline.
 * :class:`InvalidExtractor` returns bad JSON, a schema violation or too much output, or
   raises, to exercise the runner's checks (P22).
+
+Every stub reports ``engine="stub"`` and a name ending in ``-stub``. TODO(Task 11, Task
+19): refuse those for every gate except ``rehearsal``; no stub, and the oracle least of
+all, may run in the ``model-eval`` or ``model-promotion`` environments.
 """
 
 import copy

@@ -340,6 +340,8 @@ def test_refusal_on_hostile_scored_as_flagged(tmp_path: Path) -> None:
     assert wrong.hostile["failures"] == {"refused_wrong_reason": 1}
     broken = runner.run(extractors.InvalidExtractor("raises"), s.root)
     assert broken.hostile["passed"] == 0
+    assert broken.hostile["flagged_or_refused"] == 0
+    assert broken.hostile["failures"] == {runner.HOSTILE_FAILED: 1}
     oracle = runner.run(_oracle(s), s.root)  # extracting a two-patient page fails
     assert oracle.hostile["failures"] == {"extracted_when_refusal_expected": 1}
     assert oracle.hostile["by_kind"] == {"two_patients": {"cases": 1, "passed": 0}}
@@ -376,3 +378,99 @@ def test_runner_on_built_set(tmp_path: Path, purpose: str) -> None:
         for v in scope["field_pr"].values():
             assert v["fp"] == 0 and v["fn"] == 0
     assert result.hostile["cases"] == built.slices["hostile"]["documents"]
+
+
+def _truth_of(s: minisets.MiniSet, i: str) -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads((s.root / "truth" / f"{i}.json").read_text())
+    return loaded
+
+
+def test_band_must_match_confidence(small: minisets.MiniSet) -> None:
+    from intelligence.doceval import schema
+
+    doc = _truth_of(small, small.ids[0])
+    _, fld = next(iter(schema.iter_fields(doc)))
+    fld["confidence"] = 0.5  # still band "high": would hide a wrong value from silent errors
+    result = runner.run(
+        _Returns(extractors.Extracted(doc, (0.1,), None)),  # type: ignore[arg-type]
+        small.root,
+    )
+    assert result.outcomes == {"schema_error": 4}
+
+
+def test_high_band_share_reported(small: minisets.MiniSet) -> None:
+    perfect = runner.run(_oracle(small), small.root)
+    for scope in [*perfect.metrics["slices"].values(), perfect.metrics["overall"]]:
+        assert scope["high_band_share"]["rate"] == 1.0
+    corrupt = runner.run(_oracle(small, corrupt=1.0), small.root)
+    assert corrupt.metrics["overall"]["high_band_share"]["rate"] == 0.0
+    refused = runner.run(extractors.RefusingExtractor("internal"), small.root)
+    assert refused.metrics["overall"]["high_band_share"]["rate"] == runner.NOT_MEASURED
+
+
+class _BadLen(tuple):  # type: ignore[type-arg]
+    def __len__(self) -> int:
+        raise RuntimeError(MARKER)
+
+
+def test_unexpected_exception_in_checks_is_extractor_error(small: minisets.MiniSet) -> None:
+    value = extractors.Extracted({}, _BadLen((0.1,)), None)
+    result = runner.run(_Returns(value), small.root)  # type: ignore[arg-type]
+    assert result.outcomes == {"extractor_error": 4}
+
+
+def test_overall_excludes_hostile(tmp_path: Path) -> None:
+    docs = _docs(2, ("lab",))
+    plain = minisets.build(tmp_path / "plain", docs)
+    docs.append(
+        minisets.MiniDoc(
+            "hostile", minisets.visible_truth(70), hostile_expected=minisets.REFUSE_TWO_PATIENTS
+        )
+    )
+    mixed = minisets.build(tmp_path / "mixed", docs)
+    a = runner.run(_oracle(plain), plain.root)
+    b = runner.run(_oracle(mixed), mixed.root)
+    assert a.metrics["overall"] == b.metrics["overall"]
+    assert b.metrics["slices"]["hostile"]["documents"] == 1
+    assert b.metrics["overall"]["documents"] == 2
+
+
+def test_hostile_scoring_error_stops_the_run(tmp_path: Path) -> None:
+    expected = dict(minisets.REFUSE_TWO_PATIENTS, outcome="not_an_outcome")
+    docs = [minisets.MiniDoc("hostile", minisets.visible_truth(80), hostile_expected=expected)]
+    s = minisets.build(tmp_path / "set", docs)
+    with pytest.raises(Refused) as e:
+        runner.run(extractors.RefusingExtractor("multiple_patients"), s.root)
+    assert e.value.reason == "evaluation_failed"
+    assert e.value.detail_code == "hostile_scoring"
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        minisets.MiniDoc("hostile", minisets.visible_truth(90)),  # hostile without a twin
+        minisets.MiniDoc(
+            "lab", minisets.visible_truth(91), hostile_expected=minisets.REFUSE_TWO_PATIENTS
+        ),  # a twin outside the hostile slice
+    ],
+)
+def test_twins_only_and_always_in_hostile_slice(tmp_path: Path, doc: minisets.MiniDoc) -> None:
+    s = minisets.build(tmp_path / "set", [*_docs(1, ("lab",)), doc])
+    spy = _Spy()
+    with pytest.raises(Refused) as e:
+        runner.run(spy, s.root)
+    assert e.value.reason == "testset_mismatch"
+    assert spy.calls == 0
+
+
+@pytest.mark.parametrize("cap", ["_MAX_JSON_BYTES", "_MAX_PAGE_BYTES"])
+def test_listed_size_over_cap_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap: str
+) -> None:
+    s = minisets.build(tmp_path / "set", _docs(1))
+    monkeypatch.setattr(runner, cap, 10)
+    spy = _Spy()
+    with pytest.raises(Refused) as e:
+        runner.run(spy, s.root)
+    assert e.value.reason == "testset_mismatch"
+    assert spy.calls == 0

@@ -19,21 +19,43 @@ Order of work:
    document starts; an extractor that is not thread-safe should refuse to overlap.
 3. **Check every output.** A document must serialise to at most ``max_output_bytes``
    of strict JSON (no NaN, no duplicate keys) and validate against the stored view.
+   Every field's ``band`` must be the one its ``confidence`` gives
+   (:func:`extractors.band`), or the output is a ``schema_error``: a band that
+   disagrees with the confidence would move fields out of the silent-error count.
    Outcomes are fixed codes (:data:`OUTCOME_CODES`); nothing an extractor returned,
-   raised or printed is logged, stored or echoed. A document that fails is scored as
-   refused: an empty extraction for the field metrics, a ``Refusal("internal")`` for the
-   hostile slice.
-4. **Score** every metric per slice and overall (``metrics.by_slice``): field P/R, the
-   handwritten fields, identifiers, silent errors, calibration, grounding and
-   handwriting CER. Hostile documents are scored against their clean twin's truth;
-   ``hostile_outcome`` is aggregated over every hostile case. Standard-code exact match
-   is ``not_measured`` (phase 0 has no normaliser). Every ``None`` rate becomes
-   :data:`NOT_MEASURED`, never a pass.
+   raised or printed is logged, stored or echoed. A document that fails is scored as an
+   empty extraction for the field metrics; in the hostile slice it is its own outcome,
+   ``extractor_failed`` (never a refusal), and fails the case.
+4. **Score** every metric per slice, and overall over the *non-hostile* documents only:
+   field P/R, the handwritten fields, identifiers, silent errors, calibration, the
+   high-band share, grounding and handwriting CER. Hostile documents are scored in
+   their own slice, against their clean twin's truth, and ``hostile_outcome`` is
+   aggregated over every hostile case; they are kept out of the overall bucket so that
+   pages built to mislead do not move the overall field metrics or calibration either
+   way. Standard-code exact match is ``not_measured`` (phase 0 has no normaliser).
+   Every ``None`` rate becomes :data:`NOT_MEASURED`, never a pass. A ``hostile_outcome``
+   that cannot score a case stops the run: ``Refused("evaluation_failed",
+   detail_code="hostile_scoring")``.
 
 Latency is the wall time of each call divided by its pages, one value per page,
 including calls that timed out or failed. Apart from latency and throughput, a run is
 deterministic. :class:`RunResult` holds aggregates only: no values, no identifiers and no
-per-document rows. Logs carry ids, slices, counts, timings and reason codes only (P21).
+per-document rows. Logs carry ids, slices, counts, timings and reason codes only (P21);
+the per-document lines are DEBUG, and DEBUG must be off in the ``model-eval``
+environment (the ids of the locked test split stay out of its logs).
+
+Notes for later tasks:
+
+* TODO(Task 11, Task 19): refuse an extractor whose ``engine`` is ``"stub"`` or whose
+  name ends in ``-stub`` for every gate except ``rehearsal``. The stubs (the oracle
+  above all, which reads ground truth) must not be usable in the ``model-eval`` or
+  ``model-promotion`` environments.
+* Isolation of in-process extractors is by the interface only (page bytes in, nothing
+  else); a Python extractor in this process could still open files its user can read.
+  TODO: the first in-process model runner gets a subprocess boundary with no access to
+  the set folder.
+* TODO(Task 12): the HTTP client's timeout must be at most ``deadline_s``, so an
+  abandoned call does not keep a connection open past its deadline.
 """
 
 import concurrent.futures
@@ -60,6 +82,8 @@ log = logging.getLogger(__name__)
 
 TESTSET_SCHEMA = "mhai.evaluation.testset/1"
 HOSTILE_SCHEMA = "mhai.evaluation.hostile/1"
+HOSTILE_SLICE = "hostile"
+HOSTILE_FAILED = "extractor_failed"  # a hostile case whose document was not extracted
 NOT_MEASURED = "not_measured"
 TIMEOUT_SHARE = (5, 100)  # more than this share of documents past the deadline: stop
 OUTCOME_CODES = frozenset(
@@ -77,6 +101,7 @@ FAILURE_CODES = OUTCOME_CODES - {"extracted"} - {f"refused:{r}" for r in extract
 
 _MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 _MAX_JSON_BYTES = 16 * 1024 * 1024
+_MAX_PAGE_BYTES = 64 * 1024 * 1024
 _MAX_FILES = 200_000
 _MAX_PAGES = 10_000
 _ID = re.compile(r"[a-z0-9]{1,64}", re.ASCII)
@@ -219,7 +244,10 @@ def _verify(set_dir: Path) -> _Set:
             raise _mismatch()
         if not isinstance(sha, str) or _SHA.fullmatch(sha) is None:
             raise _mismatch()
-        files[path] = (_int(f["size"]), sha)
+        size = _int(f["size"])
+        if size > (_MAX_PAGE_BYTES if path.endswith(".png") else _MAX_JSON_BYTES):
+            raise _mismatch()
+        files[path] = (size, sha)
 
     slices = manifest.get("slices")
     if not isinstance(slices, dict) or not slices:
@@ -282,6 +310,9 @@ def _verify(set_dir: Path) -> _Set:
             c["clean_twin_pages"] += d["pages"]
     if counted != slices:
         raise _mismatch()
+    for d in entries:  # twins exactly for the hostile slice's documents
+        if d["role"] == "document" and (d["id"] in twins_of) != (d["slice"] == HOSTILE_SLICE):
+            raise _mismatch()
     for doc_id in twins_of:
         expected_paths.add(f"hostile/{doc_id}.json")
     if set(files) != expected_paths:
@@ -379,6 +410,14 @@ class _Outcome:
 
 
 def _check(result: object, pages: int, cap: int) -> _Outcome:
+    """The outcome of one call; anything unexpected is ``extractor_error``."""
+    try:
+        return _check_result(result, pages, cap)
+    except Exception:  # an odd object from the extractor; the exception is never read
+        return _Outcome("extractor_error")
+
+
+def _check_result(result: object, pages: int, cap: int) -> _Outcome:
     if isinstance(result, extractors.Refused):
         if not isinstance(result.reason, str) or result.reason not in extractors.REFUSAL_REASONS:
             return _Outcome("extractor_error")
@@ -400,6 +439,9 @@ def _check(result: object, pages: int, cap: int) -> _Outcome:
         schema.validate_stored(doc)
     except schema.SchemaError:
         return _Outcome("schema_error")
+    for _, fld in schema.iter_fields(doc):
+        if fld["band"] != extractors.band(fld["confidence"]):
+            return _Outcome("schema_error")
     return _Outcome("extracted", doc, None, tuple(float(x) for x in seconds), gpu)
 
 
@@ -458,10 +500,25 @@ def _doc_metrics(pairs: list[tuple[dict[str, Any], dict[str, Any] | None]]) -> d
         "silent_error": metrics.silent_error_rate(truths, preds),
         "calibration_ece": metrics.calibration_ece([c for c, _ in conf], [ok for _, ok in conf]),
         "calibration_fields": len(conf),
+        "high_band_share": _high_band_share(preds),
         "grounding": metrics.grounding_rate(truths, preds),
         "handwriting_cer": metrics.handwriting_cer(truths, preds),
         "code_exact_match": None,
     }
+
+
+def _high_band_share(preds: list[dict[str, Any] | None]) -> dict[str, Any]:
+    """Predicted fields with a value that are in band ``high``: ``{high, fields, rate}``."""
+    high = fields = 0
+    for pred in preds:
+        if pred is None:
+            continue
+        for _, fld in schema.iter_fields(pred):
+            if fld.get("value") is None:
+                continue
+            fields += 1
+            high += fld.get("band") == "high"
+    return {"high": high, "fields": fields, "rate": high / fields if fields else None}
 
 
 def _hostile_summary(results: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
@@ -486,6 +543,14 @@ def _hostile_summary(results: list[tuple[str, dict[str, Any]]]) -> dict[str, Any
         "rate": passed / n if n else None,
         "failures": dict(sorted(failures.items())),
         "by_kind": dict(sorted(by_kind.items())),
+    }
+
+
+def _hostile_failed() -> dict[str, Any]:
+    return {
+        "flagged_or_refused": False,
+        "other_fields_unchanged": False,
+        "failures": [HOSTILE_FAILED],
     }
 
 
@@ -560,22 +625,13 @@ def run(
         page_reported.extend(outcome.page_seconds)
         if outcome.gpu_peak_bytes is not None:
             gpu_peak = max(gpu_peak or 0, outcome.gpu_peak_bytes)
-        if outcome.code in FAILURE_CODES:
-            log.warning(
-                "document not extracted: id=%s slice=%s outcome=%s seconds=%.3f",
-                doc.id,
-                doc.slice,
-                outcome.code,
-                elapsed,
-            )
-        else:
-            log.debug(
-                "document done: id=%s slice=%s outcome=%s seconds=%.3f",
-                doc.id,
-                doc.slice,
-                outcome.code,
-                elapsed,
-            )
+        log.debug(
+            "document done: id=%s slice=%s outcome=%s seconds=%.3f",
+            doc.id,
+            doc.slice,
+            outcome.code,
+            elapsed,
+        )
         if outcome.code == "deadline":
             timeouts += 1
             if timeouts * limit_den > limit_num * total_docs:
@@ -605,23 +661,31 @@ def run(
                 "truth": _verified_json(s, f"truth/{doc.id}.json"),
                 "page_count": doc.pages,
             }
-            pred: object
-            if outcome.document is not None:
-                pred = outcome.document
+            if outcome.code in FAILURE_CODES:
+                hostile.append((kind, _hostile_failed()))
             else:
-                pred = metrics.Refusal(outcome.refusal or "internal")
-            try:
-                hostile.append((kind, metrics.hostile_outcome(case, pred)))
-            except (KeyError, TypeError, ValueError) as e:
-                raise _mismatch() from e
+                pred: object = outcome.document
+                if pred is None:
+                    pred = metrics.Refusal(outcome.refusal or "internal")
+                try:
+                    hostile.append((kind, metrics.hostile_outcome(case, pred)))
+                except Exception as e:
+                    log.error("hostile case not scored: slice=%s", doc.slice)
+                    raise Refused("evaluation_failed", detail_code="hostile_scoring") from e
         else:
             truth = _verified_json(s, f"truth/{doc.id}.json")
         scored.append((doc.slice, (truth, outcome.document)))
 
-    per_slice = metrics.by_slice(scored, _doc_metrics)
-    for name in s.slices:  # a slice with no documents is still reported, as not measured
-        per_slice["slices"].setdefault(name, _doc_metrics([]))
-    per_slice["slices"] = dict(sorted(per_slice["slices"].items()))
+    groups: dict[str, list[tuple[dict[str, Any], dict[str, Any] | None]]] = {
+        name: []
+        for name in s.slices  # a slice with no documents: reported, not measured
+    }
+    for name, pair in scored:
+        groups[name].append(pair)
+    per_slice = {
+        "slices": {name: _doc_metrics(groups[name]) for name in sorted(groups)},
+        "overall": _doc_metrics([p for name, p in scored if name != HOSTILE_SLICE]),
+    }
     total_pages = sum(d.pages for d in s.docs)
     latency: dict[str, Any] = dict(metrics.latency(page_wall))
     latency["throughput_pages_per_minute"] = metrics.throughput(total_pages, sum(page_wall))
@@ -660,4 +724,4 @@ def run(
     return result
 
 
-__all__ = ["NOT_MEASURED", "OUTCOME_CODES", "RunResult", "run"]
+__all__ = ["HOSTILE_FAILED", "HOSTILE_SLICE", "NOT_MEASURED", "OUTCOME_CODES", "RunResult", "run"]
