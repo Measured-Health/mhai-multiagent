@@ -72,8 +72,6 @@ _KEYS = frozenset(
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _COMMIT = re.compile(r"[0-9a-f]{40}", re.ASCII)
-# S3 version ids are opaque, URL-safe and at most 1,024 bytes; MinIO's are UUIDs.
-_STORE_VERSION = re.compile(r"[A-Za-z0-9._+/=-]{1,1024}", re.ASCII)
 _DRIVE_ID = re.compile(r"[A-Za-z0-9_-]{10,128}", re.ASCII)
 _REPO_PART = r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}"
 _HF_REF = re.compile(rf"(?:{_REPO_PART}/)?{_REPO_PART}@[0-9a-f]{{40}}", re.ASCII)
@@ -175,7 +173,7 @@ class FileRecord:
         _require(not failed, "file_path")
         _require(_is_int(self.size) and 0 <= self.size <= 2**63 - 1, "file_size")
         _require(_match(self.sha256, _SHA256), "file_sha256")
-        _require(_match(self.store_version_id, _STORE_VERSION), "file_store_version")
+        _named(names.check_store_version_id, self.store_version_id, "file_store_version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +183,7 @@ class DocumentRecord:
 
     def __post_init__(self) -> None:
         _require(_match(self.sha256, _SHA256), "document_sha256")
-        _require(_match(self.store_version_id, _STORE_VERSION), "document_store_version")
+        _named(names.check_store_version_id, self.store_version_id, "document_store_version")
 
 
 @dataclass(frozen=True, slots=True)

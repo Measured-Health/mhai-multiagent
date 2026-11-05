@@ -27,6 +27,7 @@ import binascii
 import hashlib
 import os
 import re
+import secrets
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -361,7 +362,12 @@ def _verify_raw(key: TrustedKey, signature: bytes, msg: bytes) -> bool:
         pub_ec = key.public_key
         if not isinstance(pub_ec, ec.EllipticCurvePublicKey):
             return False
-        # DER only: it must decode, and re-encode to exactly the same bytes.
+        # DER only: it must decode, and re-encode to exactly the same bytes. High-S is
+        # accepted on purpose: (r, n - s) also verifies, and cloud KMS ECDSA signers
+        # (Task 26) don't normalise S, so requiring low S would refuse about half of
+        # their valid signatures. A signature is therefore malleable and must never be
+        # used as an identifier or a deduplication key; pins and locks name the signed
+        # payload's SHA-256 instead.
         r, s = decode_dss_signature(signature)
         if encode_dss_signature(r, s) != signature:
             return False
@@ -483,17 +489,18 @@ class FileSigner:
         raise TypeError("FileSigner cannot be pickled")
 
 
-def generate_dev_key(out_dir: Path | str) -> tuple[str, str]:
-    """Make a development Ed25519 key pair in ``out_dir`` (created with mode 0700 if
-    missing): :data:`DEV_KEY_FILE` (mode 0600) and :data:`DEV_PUBLIC_KEY_FILE`. Never
-    overwrites: an existing key file is ``key_exists``. Returns the key id and the public
-    key PEM, never the private key."""
-    _require_development()
-    out = Path(out_dir)
+def _open_out_dir(out: Path) -> int:
+    """Open ``out`` (made with mode 0700 if missing) without following a link. An existing
+    directory must belong to this user and be writable by nobody else: ``key_invalid``."""
+    failed = False
     try:
         os.mkdir(out, 0o700)
     except FileExistsError:
         pass
+    except OSError:
+        failed = True
+    if failed:
+        raise _key_invalid("out_dir")
     dfd = -1
     try:
         dfd = os.open(out, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC)
@@ -501,6 +508,24 @@ def generate_dev_key(out_dir: Path | str) -> tuple[str, str]:
         pass
     if dfd < 0:
         raise _key_invalid("out_dir")
+    st = os.fstat(dfd)
+    if st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) & 0o022:
+        os.close(dfd)
+        raise _key_invalid("out_dir_unsafe")
+    return dfd
+
+
+def generate_dev_key(out_dir: Path | str) -> tuple[str, str]:
+    """Make a development Ed25519 key pair in ``out_dir``: :data:`DEV_KEY_FILE` (mode
+    0600) and :data:`DEV_PUBLIC_KEY_FILE` (0644). Both files appear, or neither: each is
+    written to a fresh temporary name (``O_EXCL``, mode 0600) and then linked into place
+    without replacing anything, and if the second fails the first is removed. Never
+    overwrites: an existing key file is ``key_exists``. ``out_dir`` is created with mode
+    0700 if missing; an existing one owned by someone else, or writable by group or
+    others, is ``key_invalid``. Returns the key id and the public key PEM, never the
+    private key."""
+    _require_development()
+    dfd = _open_out_dir(Path(out_dir))
     try:
         for name in (DEV_KEY_FILE, DEV_PUBLIC_KEY_FILE):
             try:
@@ -510,8 +535,13 @@ def generate_dev_key(out_dir: Path | str) -> tuple[str, str]:
             raise Refused("key_exists")
         key = ed25519.Ed25519PrivateKey.generate()
         pub_pem = _public_pem(key.public_key())
-        _write_new(dfd, DEV_KEY_FILE, 0o600, _private_pem(key))
-        _write_new(dfd, DEV_PUBLIC_KEY_FILE, 0o644, pub_pem.encode("ascii"))
+        _write_pair(
+            dfd,
+            [
+                (DEV_KEY_FILE, 0o600, _private_pem(key)),
+                (DEV_PUBLIC_KEY_FILE, 0o644, pub_pem.encode()),
+            ],
+        )
     finally:
         os.close(dfd)
     return key_id(key.public_key()), pub_pem
@@ -525,22 +555,65 @@ def _private_pem(key: ed25519.Ed25519PrivateKey) -> bytes:
     )
 
 
-def _write_new(dfd: int, name: str, mode: int, content: bytes) -> None:
+def _unlink_quietly(name: str, dfd: int) -> None:
+    try:
+        os.unlink(name, dir_fd=dfd)
+    except OSError:
+        pass
+
+
+def _write_pair(dfd: int, items: list[tuple[str, int, bytes]]) -> None:
+    """Write every ``(name, mode, content)`` to a temporary name, then link each into
+    place (``link`` never replaces an existing name). All the names appear, or none."""
+    temps: list[str] = []
+    placed: list[str] = []
+    ok = False
+    try:
+        for name, mode, content in items:
+            temp = f".{name}.{secrets.token_hex(8)}.tmp"
+            temps.append(temp)
+            _write_new(dfd, temp, content, mode)
+        for (name, _, _), temp in zip(items, temps, strict=True):
+            _link_new(dfd, temp, name)
+            placed.append(name)
+        ok = True
+    finally:
+        for temp in temps:
+            _unlink_quietly(temp, dfd)
+        if not ok:
+            for name in placed:
+                _unlink_quietly(name, dfd)
+
+
+def _link_new(dfd: int, temp: str, name: str) -> None:
+    exists = False
+    try:
+        os.link(temp, name, src_dir_fd=dfd, dst_dir_fd=dfd, follow_symlinks=False)
+    except FileExistsError:
+        exists = True
+    if exists:
+        raise Refused("key_exists")
+
+
+def _write_new(dfd: int, name: str, content: bytes, final_mode: int) -> None:
+    """Create ``name`` (``O_EXCL``, mode 0600), write and sync it, then set
+    ``final_mode``."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _CLOEXEC
     fd = -1
     exists = False
     try:
-        fd = os.open(name, flags, mode, dir_fd=dfd)
+        fd = os.open(name, flags, 0o600, dir_fd=dfd)
     except FileExistsError:
         exists = True
     if exists:
         raise Refused("key_exists")
     try:
-        os.fchmod(fd, mode)
+        os.fchmod(fd, 0o600)
         with os.fdopen(os.dup(fd), "wb") as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
+        os.fchmod(fd, final_mode)
     finally:
         os.close(fd)
 

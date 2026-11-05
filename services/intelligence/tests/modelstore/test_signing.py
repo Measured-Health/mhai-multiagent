@@ -387,3 +387,78 @@ def test_dev_keygen_permissions_and_output(
     assert cli.main(["dev-keygen", str(out)]) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": "key_exists"}
     assert private.read_bytes() == secret
+
+
+def test_dev_keygen_writes_both_files_or_neither(
+    tmp_path: Path, dev_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "keys"
+    real_link = signing._link_new
+    calls: list[str] = []
+
+    def fail_second(dfd: int, temp: str, name: str) -> None:
+        calls.append(name)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real_link(dfd, temp, name)
+
+    monkeypatch.setattr(signing, "_link_new", fail_second)
+    with pytest.raises(OSError):
+        signing.generate_dev_key(out)
+    assert len(calls) == 2
+    assert sorted(p.name for p in out.iterdir()) == []  # no key, no temporary file
+
+    real_write = signing._write_new
+    writes: list[str] = []
+
+    def fail_second_write(dfd: int, name: str, content: bytes, mode: int) -> None:
+        writes.append(name)
+        if len(writes) == 2:
+            raise OSError("disk full")
+        real_write(dfd, name, content, mode)
+
+    monkeypatch.setattr(signing, "_link_new", real_link)
+    monkeypatch.setattr(signing, "_write_new", fail_second_write)
+    with pytest.raises(OSError):
+        signing.generate_dev_key(out)
+    assert sorted(p.name for p in out.iterdir()) == []
+
+    monkeypatch.setattr(signing, "_write_new", real_write)
+    signing.generate_dev_key(out)
+    assert sorted(p.name for p in out.iterdir()) == sorted(
+        [signing.DEV_KEY_FILE, signing.DEV_PUBLIC_KEY_FILE]
+    )
+    assert stat.S_IMODE((out / signing.DEV_PUBLIC_KEY_FILE).stat().st_mode) == 0o644
+    assert (out / signing.DEV_KEY_FILE).stat().st_nlink == 1
+
+
+def test_dev_keygen_refuses_an_unsafe_out_dir(tmp_path: Path, dev_env: None) -> None:
+    created = tmp_path / "new"
+    signing.generate_dev_key(created)
+    assert stat.S_IMODE(created.stat().st_mode) == 0o700
+
+    for mode in (0o777, 0o770, 0o702, 0o720):
+        loose = tmp_path / f"loose-{mode:o}"
+        loose.mkdir()
+        loose.chmod(mode)
+        with pytest.raises(Refused) as e:
+            signing.generate_dev_key(loose)
+        assert e.value.reason == "key_invalid"
+        assert list(loose.iterdir()) == []
+
+    link = tmp_path / "link"
+    link.symlink_to(created)
+    with pytest.raises(Refused) as e:
+        signing.generate_dev_key(link)
+    assert e.value.reason == "key_invalid"
+
+    other = tmp_path / "other"
+    other.mkdir(mode=0o700)
+    try:
+        os.chown(other, os.geteuid() + 4242, -1)
+    except PermissionError:
+        pytest.skip("chown to another user needs root")
+    with pytest.raises(Refused) as e:
+        signing.generate_dev_key(other)
+    assert e.value.reason == "key_invalid"
+    assert list(other.iterdir()) == []
