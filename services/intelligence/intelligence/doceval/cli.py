@@ -29,7 +29,6 @@ What is refused here:
 """
 
 import argparse
-import importlib
 import json
 import logging
 import math
@@ -111,13 +110,6 @@ def _scan(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- run
 
 
-def _module(name: str) -> Any:
-    try:
-        return importlib.import_module(f"intelligence.doceval.{name}")
-    except ImportError as e:
-        raise Refused("no_runtime") from e
-
-
 def _model_versions(pairs: Sequence[str] | None) -> dict[str, str]:
     """``ROLE=VERSION`` pairs, from the caller (the verified pin), never from the model:
     roles as ``names.check_role``, versions as semver."""
@@ -184,7 +176,8 @@ def _extractor(args: argparse.Namespace, meta: dict[str, Any]) -> extractors.Ext
         except (OSError, ValueError) as e:
             raise Refused("testset_mismatch") from e
     if kind == "tiny":
-        tiny = _module("tiny")
+        from intelligence.doceval import tiny  # numpy and safetensors: loaded only here
+
         if not args.model:
             raise Refused("not_found", detail_code="model")
         try:
@@ -197,7 +190,8 @@ def _extractor(args: argparse.Namespace, meta: dict[str, Any]) -> extractors.Ext
             raise Refused("not_found", detail_code="model") from e
         return ex
     if kind == "openai":
-        mod = _module("openai_compat")
+        from intelligence.doceval import openai_compat as mod
+
         if not args.base_url or not args.model_name:
             raise Refused("no_runtime", detail_code="endpoint")
         try:
