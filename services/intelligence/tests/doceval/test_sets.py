@@ -176,13 +176,25 @@ def test_bad_arguments_refused(tmp_path: Path) -> None:
         sets.build("dev", None, tmp_path, SCALE, version="1.0")
 
 
+def _valued_truths(m: sets.SetManifest) -> set[bytes]:
+    out = set()
+    for p in (m.root / "truth").iterdir():
+        raw = p.read_bytes()
+        if any(f.get("value") is not None for _, f in schema.iter_fields(json.loads(raw))):
+            out.add(raw)
+    return out
+
+
 def test_two_test_builds_differ(test_a: sets.SetManifest, test_b: sets.SetManifest) -> None:
     assert test_a.sha256 != test_b.sha256
     ids_a = {d["id"] for d in _manifest(test_a)["documents"]}
     ids_b = {d["id"] for d in _manifest(test_b)["documents"]}
     assert not ids_a & ids_b
-    truth_a = {p.read_bytes() for p in (test_a.root / "truth").iterdir()}
-    truth_b = {p.read_bytes() for p in (test_b.root / "truth").iterdir()}
+    # A blank hostile page's truth has every value null, so two builds can share it by
+    # chance; every truth that carries a value must differ.
+    truth_a = _valued_truths(test_a)
+    truth_b = _valued_truths(test_b)
+    assert truth_a and truth_b
     assert not truth_a & truth_b
     # Same shape: the composition, not the content, is fixed.
     assert _manifest(test_a)["slices"].keys() == _manifest(test_b)["slices"].keys()
