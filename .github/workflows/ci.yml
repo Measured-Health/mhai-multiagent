@@ -67,7 +67,6 @@ jobs:
       # store (MinIO) and slow (a full-size synthetic set, several GB) run on
       # the build server. The coverage job combines both runs before
       # diff-cover (F17).
-      # the coverage job combines both runs before diff-cover (F17).
       - name: Test
         env:
           COVERAGE_FILE: coverage.checks
