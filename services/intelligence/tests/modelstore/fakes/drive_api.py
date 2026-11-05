@@ -30,6 +30,11 @@ READ_ONLY = {
 }
 FILE_FIELDS = "id,name,mimeType,size,sha256Checksum,md5Checksum,capabilities,trashed"
 LIST_FIELDS = f"nextPageToken,files({FILE_FIELDS})"
+ALL_DRIVES = {
+    "corpora": "allDrives",
+    "includeItemsFromAllDrives": "true",
+    "supportsAllDrives": "true",
+}
 _PARENTS = re.compile(r"'([A-Za-z0-9_-]+)' in parents")
 
 
@@ -50,6 +55,7 @@ class Item:
     md5: str | None = None
     size: str | None = None
     with_sha256: bool = True
+    with_md5: bool = True
 
     def resource(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -61,7 +67,8 @@ class Item:
         }
         if self.mime != FOLDER and not self.mime.startswith("application/vnd.google-apps."):
             out["size"] = self.size if self.size is not None else str(len(self.content))
-            out["md5Checksum"] = self.md5 or hashlib.md5(self.content).hexdigest()
+            if self.with_md5:
+                out["md5Checksum"] = self.md5 or hashlib.md5(self.content).hexdigest()
             if self.with_sha256:
                 out["sha256Checksum"] = self.sha256 or hashlib.sha256(self.content).hexdigest()
         return out
@@ -95,6 +102,9 @@ class FakeDriveSession:
         self.headers = {"Authorization": f"Bearer {self.token}"}
         self.items: dict[str, Item] = {}
         self.top_level: list[str] = []
+        # Items shared with the account that live in a shared drive (file-level shares,
+        # no membership): Drive lists them only with ALL_DRIVES.
+        self.shared_drive_top_level: list[str] = []
         self.drives: list[str] = []
         self.page_size = page_size
         self.requests: list[Request] = []
@@ -148,6 +158,7 @@ class FakeDriveSession:
             return FakeResponse(
                 self.status[fid], f'{{"error": "denied for {self.token}"}}'.encode()
             )
+        assert params.get("supportsAllDrives") == "true", "every get sends supportsAllDrives"
         item = self.items.get(fid)
         if item is None:
             return FakeResponse(404, b'{"error": {"code": 404}}')
@@ -161,9 +172,11 @@ class FakeDriveSession:
 
     def _list(self, params: dict[str, str]) -> FakeResponse:
         assert params["fields"] == LIST_FIELDS, "fields must be exactly the plan's list"
+        for key, value in ALL_DRIVES.items():  # else Drive leaves out shared-drive items
+            assert params.get(key) == value, f"a listing without {key}={value}"
         q = params["q"]
         if q == "sharedWithMe = true or 'me' in owners":
-            found = [self.items[i] for i in self.top_level]
+            found = [self.items[i] for i in self.top_level + self.shared_drive_top_level]
         else:
             m = _PARENTS.fullmatch(q)
             assert m is not None, "only by parent id"

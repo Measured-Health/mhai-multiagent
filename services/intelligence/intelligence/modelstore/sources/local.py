@@ -1,8 +1,9 @@
 """A run in a local folder: ``root/models/<name>/<run>/``, the same layout as the Drive
 folder. For the intelligence lead's own dry runs and CI.
 
-Every level below ``root`` is opened relative to its parent's descriptor with
-``O_NOFOLLOW``, so a symlink anywhere (``models``, the model, the run, a file) is refused,
+``root`` itself is the operator's choice and is resolved once (it may be a link). Every
+level below it is opened relative to its parent's descriptor with ``O_NOFOLLOW``, so a
+symlink anywhere below ``root`` (``models``, the model, the run, a file) is refused,
 and the run's real path must be exactly ``root``'s real path plus those three names (P1).
 Files must be regular and singly linked; a subfolder is refused. ``files.check_run`` still
 runs on the scratch copy afterwards (Task 19).

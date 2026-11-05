@@ -7,11 +7,17 @@
   which are ignored and never fetched. Anything else (a ``.bin``, code, a subfolder)
   refuses the whole repo (``source_invalid``).
 * Files are downloaded one by one with ``hf_hub_download(..., revision=revision)`` into a
-  cache directory the caller gives (inside the scratch dir, never ``~/.cache``), with no
-  token (``token=False``) and with ``HF_HUB_DISABLE_TELEMETRY=1`` and
-  ``HF_HUB_DISABLE_IMPLICIT_TOKEN=1`` set for the call only. The cached file is then
-  copied into the scratch run directory with a byte cap and checked against the
-  listing: an LFS file's SHA-256, else the git blob id. The cached copy is removed.
+  cache directory inside the caller's :class:`~intelligence.modelstore.sources.Scratch`
+  (never ``~/.cache``; a cache dir outside the scratch root, or inside its run dir, is
+  refused), with no token (``token=False``). For the call only, :func:`hub_settings`
+  turns off telemetry, implicit tokens and Xet (``HF_HUB_DISABLE_XET``: Xet keeps its own
+  chunk cache, by default under ``HF_HOME``), and points ``HF_HOME`` and ``HF_XET_CACHE``
+  inside the scratch cache as well, should anything still read them.
+* The endpoint is pinned: both calls go to :data:`ENDPOINT` (``https://huggingface.co``),
+  whatever ``HF_ENDPOINT`` says; a mirror is never used.
+* The cached file is copied into the scratch run directory with a byte cap and checked
+  against this source's own last listing (the caller's :class:`RemoteFile` must equal the
+  listed one): an LFS file's SHA-256, else the git blob id. The cached copy is removed.
 
 ``files.check_run`` still runs on the scratch run directory afterwards (Task 19).
 The environment change is process-wide while a call runs: don't fetch from two threads.
@@ -36,6 +42,7 @@ from intelligence.modelstore import files, names
 from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.sources import (
     RemoteFile,
+    Scratch,
     allowed_name,
     check_listing,
     invalid,
@@ -64,7 +71,9 @@ IGNORED: frozenset[str] = frozenset(
         "licence.txt",
     }
 )
-_ENV = {"HF_HUB_DISABLE_TELEMETRY": "1", "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1"}
+ENDPOINT = "https://huggingface.co"
+_FLAGS = ("HF_HUB_DISABLE_TELEMETRY", "HF_HUB_DISABLE_IMPLICIT_TOKEN", "HF_HUB_DISABLE_XET")
+_DIRS = ("HF_HOME", "HF_XET_CACHE")
 _NOT_FOUND = (
     hf_errors.RepositoryNotFoundError,
     hf_errors.RevisionNotFoundError,
@@ -74,15 +83,28 @@ _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
 
 @contextmanager
-def hub_settings() -> Iterator[None]:
-    """Telemetry and implicit tokens off for one call, then put back as they were.
+def hub_settings(cache: str) -> Iterator[None]:
+    """For one call: telemetry, implicit tokens and Xet off, and ``HF_HOME`` and
+    ``HF_XET_CACHE`` inside ``cache``; then everything put back as it was.
     ``huggingface_hub`` reads these at import, so its constants are set too."""
-    saved_env = {k: os.environ.get(k) for k in _ENV}
-    telemetry = hf_constants.HF_HUB_DISABLE_TELEMETRY
-    implicit = hf_constants.HF_HUB_DISABLE_IMPLICIT_TOKEN
-    os.environ.update(_ENV)
+    saved_env = {k: os.environ.get(k) for k in _FLAGS + _DIRS}
+    saved = (
+        hf_constants.HF_HUB_DISABLE_TELEMETRY,
+        hf_constants.HF_HUB_DISABLE_IMPLICIT_TOKEN,
+        hf_constants.HF_HUB_DISABLE_XET,
+        hf_constants.HF_HOME,
+        hf_constants.HF_XET_CACHE,
+    )
+    home = os.path.join(cache, "home")
+    xet = os.path.join(cache, "xet")
+    os.environ.update({k: "1" for k in _FLAGS})
+    os.environ["HF_HOME"] = home
+    os.environ["HF_XET_CACHE"] = xet
     hf_constants.HF_HUB_DISABLE_TELEMETRY = True
     hf_constants.HF_HUB_DISABLE_IMPLICIT_TOKEN = True
+    hf_constants.HF_HUB_DISABLE_XET = True
+    hf_constants.HF_HOME = home
+    hf_constants.HF_XET_CACHE = xet
     try:
         yield
     finally:
@@ -91,14 +113,44 @@ def hub_settings() -> Iterator[None]:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        hf_constants.HF_HUB_DISABLE_TELEMETRY = telemetry
-        hf_constants.HF_HUB_DISABLE_IMPLICIT_TOKEN = implicit
+        (
+            hf_constants.HF_HUB_DISABLE_TELEMETRY,
+            hf_constants.HF_HUB_DISABLE_IMPLICIT_TOKEN,
+            hf_constants.HF_HUB_DISABLE_XET,
+            hf_constants.HF_HOME,
+            hf_constants.HF_XET_CACHE,
+        ) = saved
 
 
 def check_revision(revision: object) -> str:
     if not isinstance(revision, str) or _REVISION.fullmatch(revision) is None:
         raise Refused("revision_unpinned")
     return revision
+
+
+def _check_cache(scratch: Scratch, cache_dir: Path | str) -> str:
+    """The real path of ``cache_dir``, which must be a folder inside ``scratch.root`` (a
+    0700 folder, not a link) and not the run folder or anything in it."""
+    if not isinstance(scratch, Scratch):
+        raise invalid("cache")
+    root = os.path.realpath(scratch.root)
+    run = os.path.realpath(scratch.run)
+    cache = os.path.realpath(cache_dir)
+    try:
+        st = os.lstat(scratch.root)
+    except OSError:
+        st = None
+    if (
+        st is None
+        or not stat.S_ISDIR(st.st_mode)
+        or stat.S_IMODE(st.st_mode) != 0o700
+        or not os.path.isdir(cache)
+        or cache == root
+        or not within(cache, root)
+        or within(cache, run)
+    ):
+        raise invalid("cache")
+    return cache
 
 
 def _ignored(path: str) -> bool:
@@ -111,18 +163,18 @@ class HFSource:
         repo: str,
         revision: str,
         *,
-        cache_dir: Path | str,
+        scratch: Scratch,
+        cache_dir: Path | str | None = None,
         limits: files.Limits | None = None,
     ) -> None:
         self._revision = check_revision(revision)
         if not isinstance(repo, str) or _REPO.fullmatch(repo) is None or ".." in repo:
             raise invalid("repo")
         self._repo = repo
-        self._cache = os.path.realpath(cache_dir)
-        if not os.path.isdir(self._cache):
-            raise invalid("cache")
+        self._cache = _check_cache(scratch, scratch.cache if cache_dir is None else cache_dir)
         self._limits = limits or files.Limits()
         self._oids: dict[str, str] = {}
+        self._listed: dict[str, RemoteFile] = {}
 
     def list_run(self, name: str, run: str) -> list[RemoteFile]:
         """The repo's files at the pinned commit. ``name`` and ``run`` are the promote
@@ -132,8 +184,9 @@ class HFSource:
         listed: list[Any] = []
         refusal: Refused | None = None
         try:
-            with hub_settings():
-                for item in huggingface_hub.list_repo_tree(
+            with hub_settings(self._cache):
+                api = huggingface_hub.HfApi(endpoint=ENDPOINT, token=False)
+                for item in api.list_repo_tree(
                     self._repo,
                     recursive=True,
                     revision=self._revision,
@@ -182,21 +235,27 @@ class HFSource:
             found.append(RemoteFile(path, size, sha, None, path))
         out = check_listing(found, self._limits)
         self._oids = oids
+        self._listed = {f.name: f for f in out}
         return out
 
     def fetch(self, file: RemoteFile, dest: Path, max_bytes: int) -> str:
         allowed_name(file.name)
         if file.ref != file.name:
             raise invalid("ref")
+        listed = self._listed.get(file.name)
+        if listed is None:
+            raise invalid("no_checksum")  # not from this source's last listing
+        if file != listed:
+            raise invalid("changed")
         oid = self._oids.get(file.name)
-        if file.checksum_sha256 is None and oid is None:
-            raise invalid("no_checksum")  # not from this source's listing
+        if listed.checksum_sha256 is None and oid is None:
+            raise invalid("no_checksum")
         if not isinstance(max_bytes, int) or file.size > max_bytes:
             raise invalid("size")
         got: Any = None
         refusal: Refused | None = None
         try:
-            with hub_settings():
+            with hub_settings(self._cache):
                 got = huggingface_hub.hf_hub_download(
                     self._repo,
                     file.name,
@@ -204,6 +263,7 @@ class HFSource:
                     repo_type="model",
                     cache_dir=self._cache,
                     token=False,
+                    endpoint=ENDPOINT,
                 )
         except _NOT_FOUND:
             refusal = invalid("not_found")
@@ -251,4 +311,4 @@ def _remove(path: str) -> None:
         pass
 
 
-__all__ = ["HFSource", "IGNORED", "check_revision", "hub_settings"]
+__all__ = ["ENDPOINT", "HFSource", "IGNORED", "check_revision", "hub_settings"]

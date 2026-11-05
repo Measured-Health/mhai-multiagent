@@ -330,7 +330,7 @@ def test_drive_checksum_mismatch_refused(work: Scratch) -> None:
     del m.fake.serve[m.weights.id]
     assert m.source.fetch(mw, work.run / mw.name, mw.size) == hashlib.sha256(WEIGHTS).hexdigest()
 
-    # No checksum at all is refused.
+    # A malformed checksum is refused.
     n = DriveRun()
     n.weights.with_sha256 = False
     n.weights.md5 = "not-hex"
@@ -338,6 +338,15 @@ def test_drive_checksum_mismatch_refused(work: Scratch) -> None:
         "source_invalid",
         "checksum_format",
     )
+    # No checksum at all is refused, before anything is downloaded.
+    none = DriveRun()
+    none.weights.with_sha256 = False
+    none.weights.with_md5 = False
+    assert _code(_refused(none.source.list_run, "mhai-tiny", "run-1")) == (
+        "source_invalid",
+        "no_checksum",
+    )
+    assert none.media_requests() == 0
 
 
 def test_drive_item_changed_after_listing(work: Scratch) -> None:
@@ -394,6 +403,15 @@ def test_drive_check_one_folder_read_only() -> None:
     stray = direct.fake.file("config.json", None, CONFIG)
     direct.fake.top_level.append(stray.id)
     assert _refused(drive_check, direct.api, direct.root.id).reason == "drive_scope"
+    # A file in a shared drive, shared with the account file by file (no membership): only
+    # a listing across all drives sees it, and the fake refuses any listing that isn't.
+    in_drive = DriveRun()
+    shared = in_drive.fake.file("config.json", None, CONFIG)
+    in_drive.fake.shared_drive_top_level.append(shared.id)
+    assert _code(_refused(drive_check, in_drive.api, in_drive.root.id)) == (
+        "drive_scope",
+        "top_level_count",
+    )
     # Membership of a shared drive.
     member = DriveRun()
     member.fake.drives.append("0AsharedDriveId123")
@@ -418,6 +436,25 @@ def test_drive_check_one_folder_read_only() -> None:
 # ---------------------------------------------------------------- Hugging Face
 
 
+HF_VARS = (
+    "HF_HUB_DISABLE_TELEMETRY",
+    "HF_HUB_DISABLE_IMPLICIT_TOKEN",
+    "HF_HUB_DISABLE_XET",
+    "HF_HOME",
+    "HF_XET_CACHE",
+)
+
+
+def _hf_constants() -> tuple[Any, ...]:
+    return (
+        hf_constants.HF_HUB_DISABLE_TELEMETRY,
+        hf_constants.HF_HUB_DISABLE_IMPLICIT_TOKEN,
+        hf_constants.HF_HUB_DISABLE_XET,
+        hf_constants.HF_HOME,
+        hf_constants.HF_XET_CACHE,
+    )
+
+
 def _git_oid(content: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest()
 
@@ -431,19 +468,24 @@ class FakeHub:
         self.downloads: list[str] = []
         self.calls: list[dict[str, Any]] = []
         self.serve: dict[str, bytes] = {}
+        hub = self
+
+        class FakeApi:
+            def __init__(self, *, endpoint: str | None = None, token: Any = None) -> None:
+                hub.apis.append({"endpoint": endpoint, "token": token})
+
+            def list_repo_tree(self, repo_id: str, **kw: Any) -> Iterator[Any]:
+                return hub.list_repo_tree(repo_id, **kw)
+
+        self.apis: list[dict[str, Any]] = []
+        monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
         monkeypatch.setattr(huggingface_hub, "list_repo_tree", self.list_repo_tree)
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", self.hf_hub_download)
 
     def _settings(self) -> dict[str, Any]:
         return {
-            "env": {
-                k: os.environ.get(k)
-                for k in ("HF_HUB_DISABLE_TELEMETRY", "HF_HUB_DISABLE_IMPLICIT_TOKEN")
-            },
-            "const": (
-                hf_constants.HF_HUB_DISABLE_TELEMETRY,
-                hf_constants.HF_HUB_DISABLE_IMPLICIT_TOKEN,
-            ),
+            "env": {k: os.environ.get(k) for k in HF_VARS},
+            "const": _hf_constants(),
         }
 
     def list_repo_tree(self, repo_id: str, **kw: Any) -> Iterator[Any]:
@@ -479,11 +521,11 @@ class FakeHub:
 
 def test_hf_revision_must_be_commit(work: Scratch) -> None:
     for rev in ("main", "v1.0.0", REV[:-1], REV.upper(), REV + "\n", "refs/pr/1", REV[:-1] + "g"):
-        assert _refused(HFSource, "synthetic/tiny", rev, cache_dir=work.cache).reason == (
+        assert _refused(HFSource, "synthetic/tiny", rev, scratch=work).reason == (
             "revision_unpinned"
         )
     for repo in ("../tiny", "synthetic", "a/b/c", "synthetic/../x"):
-        assert _code(_refused(HFSource, repo, REV, cache_dir=work.cache)) == (
+        assert _code(_refused(HFSource, repo, REV, scratch=work)) == (
             "source_invalid",
             "repo",
         )
@@ -492,9 +534,12 @@ def test_hf_revision_must_be_commit(work: Scratch) -> None:
 def test_hf_only_allowed_files_fetched(
     monkeypatch: pytest.MonkeyPatch, work: Scratch, tmp_path: Path
 ) -> None:
-    monkeypatch.delenv("HF_HUB_DISABLE_TELEMETRY", raising=False)
-    monkeypatch.delenv("HF_HUB_DISABLE_IMPLICIT_TOKEN", raising=False)
-    before = (hf_constants.HF_HUB_DISABLE_TELEMETRY, hf_constants.HF_HUB_DISABLE_IMPLICIT_TOKEN)
+    for k in HF_VARS:
+        monkeypatch.delenv(k, raising=False)
+    # A mirror in the environment (and in the library's constant) is ignored: pinned.
+    monkeypatch.setenv("HF_ENDPOINT", "https://mirror.invalid")
+    monkeypatch.setattr(hf_constants, "ENDPOINT", "https://mirror.invalid")
+    before = _hf_constants()
     hub = FakeHub(
         monkeypatch,
         {
@@ -505,7 +550,7 @@ def test_hf_only_allowed_files_fetched(
             "model.safetensors": WEIGHTS,
         },
     )
-    src = HFSource("synthetic/tiny", REV, cache_dir=work.cache)
+    src = HFSource("synthetic/tiny", REV, scratch=work)
     listed = src.list_run("mhai-tiny", "run-1")
     assert [f.name for f in listed] == ["config.json", "model.safetensors"]
     for f in listed:
@@ -513,23 +558,27 @@ def test_hf_only_allowed_files_fetched(
     assert hub.downloads == ["config.json", "model.safetensors"]
     assert sorted(p.name for p in work.run.iterdir()) == ["config.json", "model.safetensors"]
     assert (work.run / "model.safetensors").read_bytes() == WEIGHTS
+    cache = str(work.cache.resolve())
+    home, xet = os.path.join(cache, "home"), os.path.join(cache, "xet")
+    assert hub.apis == [{"endpoint": "https://huggingface.co", "token": False}]
     for call in hub.calls:
         assert call["revision"] == REV and call["token"] is False
         assert call["env"] == {
             "HF_HUB_DISABLE_TELEMETRY": "1",
             "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+            "HF_HUB_DISABLE_XET": "1",
+            "HF_HOME": home,
+            "HF_XET_CACHE": xet,
         }
-        assert call["const"] == (True, True)
+        assert call["const"] == (True, True, True, home, xet)
         if call["fn"] == "download":
-            assert Path(call["cache_dir"]) == work.cache.resolve()
+            assert call["cache_dir"] == cache
+            assert call["endpoint"] == "https://huggingface.co"
     # Put back after the call, not left in the process.
-    assert "HF_HUB_DISABLE_TELEMETRY" not in os.environ
-    assert "HF_HUB_DISABLE_IMPLICIT_TOKEN" not in os.environ
-    assert (
-        hf_constants.HF_HUB_DISABLE_TELEMETRY,
-        hf_constants.HF_HUB_DISABLE_IMPLICIT_TOKEN,
-    ) == before
-    # The cached copies are gone; nothing went to ~/.cache.
+    for k in HF_VARS:
+        assert k not in os.environ
+    assert _hf_constants() == before
+    # The cached copies are gone; every cache the hub uses was inside the scratch.
     assert not any(p.is_file() and not p.is_symlink() for p in work.cache.rglob("*"))
 
 
@@ -547,14 +596,14 @@ def test_hf_repo_with_other_files_refused(
     monkeypatch: pytest.MonkeyPatch, work: Scratch, extra: dict[str, bytes | None]
 ) -> None:
     hub = FakeHub(monkeypatch, {"config.json": CONFIG, "model.safetensors": WEIGHTS, **extra})
-    src = HFSource("synthetic/tiny", REV, cache_dir=work.cache)
+    src = HFSource("synthetic/tiny", REV, scratch=work)
     assert _refused(src.list_run, "mhai-tiny", "run-1").reason == "source_invalid"
     assert hub.downloads == []
 
 
 def test_hf_checksum_mismatch_refused(monkeypatch: pytest.MonkeyPatch, work: Scratch) -> None:
     hub = FakeHub(monkeypatch, {"config.json": CONFIG, "model.safetensors": WEIGHTS})
-    src = HFSource("synthetic/tiny", REV, cache_dir=work.cache)
+    src = HFSource("synthetic/tiny", REV, scratch=work)
     listed = {f.name: f for f in src.list_run("mhai-tiny", "run-1")}
     hub.serve = {
         "config.json": b'{"model_type": "synthetiX"}',
@@ -630,3 +679,49 @@ def test_no_tokens_in_logs(caplog: pytest.LogCaptureFixture, work: Scratch) -> N
     assert token not in caplog.text
     assert "googleapis" not in caplog.text
     assert "Authorization" not in caplog.text
+
+
+def test_hf_cache_must_be_inside_scratch(tmp_path: Path, work: Scratch) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for cache in (elsewhere, work.run, work.root, work.run.parent.parent):
+        assert _code(_refused(HFSource, "synthetic/tiny", REV, scratch=work, cache_dir=cache)) == (
+            "source_invalid",
+            "cache",
+        )
+    # A "scratch" that isn't one: an ordinary folder, not 0700.
+    loose = tmp_path / "loose"
+    (loose / "cache").mkdir(parents=True)
+    loose.chmod(0o755)
+    fake = Scratch(loose, loose / "run", loose / "cache")
+    assert _code(_refused(HFSource, "synthetic/tiny", REV, scratch=fake)) == (
+        "source_invalid",
+        "cache",
+    )
+    inner = work.cache / "hub"
+    inner.mkdir()
+    HFSource("synthetic/tiny", REV, scratch=work, cache_dir=inner)
+
+
+def test_hf_fetch_needs_this_sources_listing(
+    monkeypatch: pytest.MonkeyPatch, work: Scratch
+) -> None:
+    hub = FakeHub(monkeypatch, {"config.json": CONFIG, "model.safetensors": WEIGHTS})
+    listed = {f.name: f for f in HFSource("synthetic/tiny", REV, scratch=work).list_run("m-1", "r")}
+    # A fresh instance never listed: refused for both kinds of file, nothing downloaded.
+    fresh = HFSource("synthetic/tiny", REV, scratch=work)
+    for f in listed.values():
+        assert _code(_refused(fresh.fetch, f, work.run / f.name, f.size)) == (
+            "source_invalid",
+            "no_checksum",
+        )
+    # The caller's RemoteFile must be the listed one: a swapped LFS hash is refused.
+    src = HFSource("synthetic/tiny", REV, scratch=work)
+    src.list_run("m-1", "r")
+    w = listed["model.safetensors"]
+    forged = RemoteFile(w.name, w.size, "0" * 64, None, w.ref)
+    assert _code(_refused(src.fetch, forged, work.run / w.name, w.size)) == (
+        "source_invalid",
+        "changed",
+    )
+    assert hub.downloads == []

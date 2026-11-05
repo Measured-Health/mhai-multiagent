@@ -17,7 +17,19 @@ It refuses, with ``source_invalid`` and a detail code:
 
 :func:`drive_check` (B22) runs first in every promote job: the account sees exactly one
 top-level item, the shared folder, and it can't edit, add to, delete or share it or
-anything in it.
+anything in it. Every listing asks across all corpora (:data:`ALL_DRIVES`), so items in
+shared drives are seen too; every get and download sends ``supportsAllDrives``.
+
+Residual risk: B22 is checked by listing, and some access never shows up in a listing:
+
+* files shared "anyone with the link" or with the whole domain, which the account can
+  open but never lists;
+* access the credential has through domain-wide delegation or impersonation;
+* shares removed from "Shared with me" while the access remains.
+
+TODO(Task 28): the service account must have no domain-wide delegation and only the
+``drive.readonly`` scope; check both by hand in the admin console (and record it) when the
+credential is set up, since no API call this module makes can prove them.
 
 :class:`HttpDriveApi` is the REST client over a session it is handed (Task 28 makes the
 session and its short-lived credentials). It asks only for :data:`FIELDS`. It never logs
@@ -65,6 +77,13 @@ MAX_CHECK_DEPTH = 6
 NO_WRITE = ("canEdit", "canAddChildren", "canDelete", "canShare")
 # What the account sees at the top: items shared with it directly, and anything it owns.
 TOP_LEVEL_QUERY = "sharedWithMe = true or 'me' in owners"
+# Sent on every listing: without them Drive lists only the user corpus and leaves out
+# items that live in shared drives (B22, review I1).
+ALL_DRIVES: dict[str, str] = {
+    "corpora": "allDrives",
+    "includeItemsFromAllDrives": "true",
+    "supportsAllDrives": "true",
+}
 
 # Drive ids are URL-safe base64-like strings. Checked before one is put in a query or a URL.
 _ID = re.compile(r"[A-Za-z0-9_-]{10,128}", re.ASCII)
@@ -208,8 +227,7 @@ class HttpDriveApi:
         return self._list(
             {
                 "q": f"'{folder_id}' in parents",
-                "supportsAllDrives": "true",
-                "includeItemsFromAllDrives": "true",
+                **ALL_DRIVES,
             }
         )
 
@@ -239,7 +257,7 @@ class HttpDriveApi:
             raise failed
 
     def about(self) -> list[dict[str, Any]]:
-        top = self._list({"q": TOP_LEVEL_QUERY})
+        top = self._list({"q": TOP_LEVEL_QUERY, **ALL_DRIVES})
         drives = self._list({}, key="drives", fields=DRIVES_FIELDS, page_size=100)
         return top + [{"id": d.get("id"), "kind": "drive#drive"} for d in drives]
 
