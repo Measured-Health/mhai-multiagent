@@ -92,6 +92,9 @@ def loads_strict(b: bytes, max_bytes: int, *, allow_floats: bool = False) -> Any
         raise Refused("too_large")
     if b.startswith(b"\xef\xbb\xbf"):
         raise Refused("json_invalid")
+    # The refusal is raised outside the ``except`` block, so no exception in its chain
+    # (a JSONDecodeError's ``doc``, a UnicodeDecodeError's ``object``) holds the input.
+    failed = False
     try:
         text = bytes(b).decode("utf-8")
         decoder = json.JSONDecoder(
@@ -101,9 +104,11 @@ def loads_strict(b: bytes, max_bytes: int, *, allow_floats: bool = False) -> Any
         )
         obj, end = decoder.raw_decode(text, 0)
     except Refused:
-        raise
-    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-        raise Refused("json_invalid") from exc
+        failed = True
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        failed = True
+    if failed:
+        raise Refused("json_invalid")
     if end != len(text):
         raise Refused("json_invalid")
     _check_depth(obj)

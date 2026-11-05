@@ -7,7 +7,8 @@
 * :func:`check_safetensors`: our own header parser (not the library), with bounded
   reads. It never maps or loads tensor data.
 * :func:`check_run`: every file of a run directory: names, links, special files,
-  caps, contents, and a SHA-256 streamed in 8 MB blocks.
+  caps, contents, and a SHA-256 streamed in 8 MB blocks over the same open file and
+  in the same pass as the checks, so the hash covers exactly the checked bytes.
 
 Every refusal is a :class:`FileRefused`: ``str()`` is the reason code, ``file`` is
 the file's name (only when the name passed the allow-list alphabet, so it is safe to
@@ -15,6 +16,7 @@ log) and ``detail_code`` a short fixed code. No file contents are ever included.
 """
 
 import hashlib
+import io
 import os
 import re
 import stat
@@ -23,13 +25,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 from intelligence.modelstore import canonical
 from intelligence.modelstore.reasons import Refused
 
 BLOCK_SIZE = 8 * 1024 * 1024
-MAX_HEADER_BYTES = 100 * 1024 * 1024
+MAX_HEADER_BYTES = 100 * 1024 * 1024  # the format ceiling
+DEFAULT_HEADER_BYTES = 16 * 1024 * 1024  # the operational cap (see Limits)
 JSON_CAP = 16 * 1024 * 1024
 TOKENIZER_JSON_CAP = 64 * 1024 * 1024
 
@@ -80,10 +83,21 @@ _CODE_CHECKED: frozenset[str] = JSON_FILES - {
     INDEX_JSON,
     "training_manifest.json",
 }
-_CODE_KEYS = frozenset({"auto_map", "auto_mapping", "trust_remote_code"})
+# Keys that make transformers fetch or run code from the model's files or hub repo.
+_CODE_KEYS = frozenset(
+    {
+        "auto_map",
+        "auto_mapping",
+        "trust_remote_code",
+        "custom_pipelines",
+        "custom_generate",
+        "remote_code",
+    }
+)
 _NAME = re.compile(r"[A-Za-z0-9._-]{1,128}", re.ASCII)
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}", re.ASCII)
 _TENSOR_KEYS = frozenset({"dtype", "shape", "data_offsets"})
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
 
 class FileRefused(Refused):
@@ -105,9 +119,20 @@ class FileEntry:
 
 @dataclass(frozen=True, slots=True)
 class Limits:
+    """Caps for one run. ``max_header_bytes`` bounds the memory one safetensors header
+    can take (its bytes, the decoded text and the parsed tree): real headers are well
+    under 1 MB even for 70B-parameter shards, so 16 MB leaves a wide margin while
+    keeping a worker's peak small. It may be raised up to the format ceiling,
+    :data:`MAX_HEADER_BYTES` (100 MB)."""
+
     max_file_bytes: int = 40 * 1024**3
     max_files: int = 256
     max_total_bytes: int = 200 * 1024**3
+    max_header_bytes: int = DEFAULT_HEADER_BYTES
+
+    def __post_init__(self) -> None:
+        if not 8 <= self.max_header_bytes <= MAX_HEADER_BYTES:
+            raise ValueError("max_header_bytes out of range")
 
 
 def _suffix(name: str) -> str:
@@ -136,6 +161,9 @@ def _json_cap(kind: str) -> int:
 
 
 # --- opening files safely ----------------------------------------------------
+#
+# Every OSError becomes a FileRefused with a fixed code, raised outside the
+# ``except`` block so no exception in the chain carries a path.
 
 
 def _check_stat(st: os.stat_result, name: str | None) -> None:
@@ -147,28 +175,44 @@ def _check_stat(st: os.stat_result, name: str | None) -> None:
         raise FileRefused("file_not_allowed", name, "hardlink")
 
 
-_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+def _os_refusal(exc: OSError, name: str | None, detail: str) -> FileRefused:
+    reason = "missing_file" if isinstance(exc, FileNotFoundError) else "file_not_allowed"
+    return FileRefused(reason, name, detail)
+
+
+def _lstat(name: str, dir_fd: int) -> os.stat_result:
+    try:
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError as exc:
+        refusal = _os_refusal(exc, name, "stat")
+    raise refusal
+
+
+_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | _CLOEXEC
 
 
 @contextmanager
 def _open(
-    name: str, dir_fd: int | None, expect: os.stat_result | None = None
-) -> Iterator[tuple[BinaryIO, int]]:
-    """Open a regular, singly linked file without following links; yield it and its size."""
+    name: str, dir_fd: int, expect: os.stat_result | None = None
+) -> Iterator[tuple[io.FileIO, int]]:
+    """Open a regular, singly linked file without following links; yield it and its size.
+
+    The type is checked with ``lstat`` before the open (so no device or FIFO is ever
+    opened) and again with ``fstat`` after it, against the same inode and size.
+    """
+    before = expect if expect is not None else _lstat(name, dir_fd)
+    _check_stat(before, name)
+    refusal: FileRefused | None = None
     try:
         fd = os.open(name, _OPEN_FLAGS, dir_fd=dir_fd)
-    except FileNotFoundError as exc:
-        raise FileRefused("missing_file", name) from exc
-    except OSError as exc:  # ELOOP for a symlink, among others
-        raise FileRefused("file_not_allowed", name, "open") from exc
+    except OSError as exc:  # ELOOP for a symlink swapped in, among others
+        refusal = _os_refusal(exc, name, "open")
+    if refusal is not None:
+        raise refusal
     try:
         st = os.fstat(fd)
         _check_stat(st, name)
-        if expect is not None and (st.st_ino, st.st_dev, st.st_size) != (
-            expect.st_ino,
-            expect.st_dev,
-            expect.st_size,
-        ):
+        if (st.st_ino, st.st_dev, st.st_size) != (before.st_ino, before.st_dev, before.st_size):
             raise FileRefused("size_mismatch", name, "changed")
         f = os.fdopen(fd, "rb", buffering=0)
     except BaseException:
@@ -178,23 +222,48 @@ def _open(
         yield f, st.st_size
 
 
-def _read_exact(f: BinaryIO, n: int, name: str | None, reason: str) -> bytes:
-    chunks: list[bytes] = []
-    left = n
-    while left > 0:
-        chunk = f.read(min(left, BLOCK_SIZE))
-        if not chunk:
-            raise FileRefused(reason, name, "short_read")
-        chunks.append(chunk)
-        left -= len(chunk)
-    return b"".join(chunks)
+def _read_exact(f: io.FileIO, n: int, name: str | None, reason: str) -> bytes:
+    """Read exactly ``n`` bytes into one preallocated buffer."""
+    buf = bytearray(n)
+    view = memoryview(buf)
+    got = 0
+    failed = False
+    try:
+        while got < n:
+            k = f.readinto(view[got : got + BLOCK_SIZE])
+            if not k:
+                raise FileRefused(reason, name, "short_read")
+            got += k
+    except OSError:
+        failed = True
+    finally:
+        view.release()
+    if failed:
+        raise FileRefused("file_not_allowed", name, "read")
+    return bytes(buf)
+
+
+def _read_block(f: io.FileIO, name: str) -> bytes:
+    try:
+        return f.read(BLOCK_SIZE) or b""
+    except OSError:
+        pass
+    raise FileRefused("file_not_allowed", name, "read")
 
 
 @contextmanager
 def _parent(path: Path) -> Iterator[tuple[int, str]]:
-    dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    """The directory of ``path`` (its last component must not be a link) and the name."""
+    name = path.name
+    refusal: FileRefused | None = None
     try:
-        yield dfd, path.name
+        dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC)
+    except OSError as exc:
+        refusal = _os_refusal(exc, name, "parent")
+    if refusal is not None:
+        raise refusal
+    try:
+        yield dfd, name
     finally:
         os.close(dfd)
 
@@ -242,10 +311,13 @@ def _check_index(obj: dict[str, Any], name: str, present: frozenset[str]) -> Non
 
 
 def _check_json_bytes(raw: bytes, kind: str, name: str, present: frozenset[str]) -> None:
+    reason: str | None = None
     try:
         obj = canonical.loads_strict(raw, _json_cap(kind), allow_floats=True)
     except Refused as exc:
-        raise FileRefused(exc.reason, name, "parse") from None
+        reason = exc.reason
+    if reason is not None:
+        raise FileRefused(reason, name, "parse")
     if not isinstance(obj, dict):
         raise FileRefused("json_invalid", name, "not_object")
     if kind in _CODE_CHECKED:
@@ -254,25 +326,31 @@ def _check_json_bytes(raw: bytes, kind: str, name: str, present: frozenset[str])
         _check_index(obj, name, present)
 
 
-def _listing(dfd: int) -> frozenset[str]:
-    return frozenset(os.listdir(dfd))
+def _listing(dfd: int, name: str) -> frozenset[str]:
+    try:
+        return frozenset(os.listdir(dfd))
+    except OSError as exc:
+        refusal = _os_refusal(exc, name, "list")
+    raise refusal
 
 
 def check_json(path: Path | str, kind: str, *, present: frozenset[str] | None = None) -> None:
-    """Check one JSON file of kind ``kind`` (its allow-listed name).
+    """Check one JSON file; ``kind`` is its allow-listed name and must be the file's name.
 
     For ``model.safetensors.index.json`` the shards it names must be in ``present``
-    (default: the names in the file's directory).
+    (default: the names in the file's directory). This is a helper and test entry
+    point: :func:`check_run` is what the promotion flow calls.
     """
-    if kind not in JSON_FILES:
+    path = Path(path)
+    if kind not in JSON_FILES or path.name != kind:
         raise FileRefused("file_not_allowed", kind, "json_kind")
-    with _parent(Path(path)) as (dfd, name), _open(name, dfd) as (f, size):
+    with _parent(path) as (dfd, name), _open(name, dfd) as (f, size):
         if size > _json_cap(kind):
             raise FileRefused("too_large", name)
         raw = _read_exact(f, size, name, "json_invalid")
-        if f.read(1):
+        if _read_block(f, name):
             raise FileRefused("size_mismatch", name, "grew")
-        _check_json_bytes(raw, kind, name, _listing(dfd) if present is None else present)
+        _check_json_bytes(raw, kind, name, _listing(dfd, name) if present is None else present)
 
 
 # --- safetensors -----------------------------------------------------------
@@ -336,43 +414,93 @@ def _check_header(header: Any, data_len: int, name: str | None) -> None:
         raise _bad(name, "offsets")
 
 
-def _check_safetensors_file(f: BinaryIO, size: int, name: str | None) -> None:
+def _check_safetensors_file(
+    f: io.FileIO, size: int, name: str | None, max_header: int, digest: Any = None
+) -> None:
+    """Validate the header read from ``f``'s current position (0).
+
+    Each byte read is fed to ``digest`` (when given) as it is read, so the bytes
+    validated are exactly the bytes hashed; the caller then streams the data region
+    into the same digest from where this stopped, without seeking.
+    """
     if size < 8:
         raise _bad(name, "header_length")
-    (n,) = struct.unpack("<Q", _read_exact(f, 8, name, "safetensors_invalid"))
-    if n == 0 or n > MAX_HEADER_BYTES or n > size - 8:
+    prefix = _read_exact(f, 8, name, "safetensors_invalid")
+    if digest is not None:
+        digest.update(prefix)
+    (n,) = struct.unpack("<Q", prefix)
+    if n == 0 or n > max_header or n > size - 8:
         raise _bad(name, "header_length")
-    raw = _read_exact(f, n, name, "safetensors_invalid").rstrip(b" ")
+    raw = _read_exact(f, n, name, "safetensors_invalid")
+    if digest is not None:
+        digest.update(raw)
+    raw = raw.rstrip(b" ")
     if not raw.startswith(b"{"):
         raise _bad(name, "header_json")
+    header: Any = None
+    failed = False
     try:
-        header = canonical.loads_strict(raw, MAX_HEADER_BYTES)
+        header = canonical.loads_strict(raw, max_header)
     except Refused:
-        raise _bad(name, "header_json") from None
+        failed = True
+    del raw
+    if failed:
+        raise _bad(name, "header_json")
     _check_header(header, size - 8 - n, name)
 
 
-def check_safetensors(path: Path | str) -> None:
+def check_safetensors(path: Path | str, limits: Limits | None = None) -> None:
     """Validate a safetensors file's header and layout; tensor data is never read."""
+    max_header = (limits or Limits()).max_header_bytes
     with _parent(Path(path)) as (dfd, name), _open(name, dfd) as (f, size):
-        _check_safetensors_file(f, size, name)
+        _check_safetensors_file(f, size, name, max_header)
 
 
 # --- the whole run ---------------------------------------------------------
 
 
-def _hash(f: BinaryIO, size: int, name: str) -> str:
-    f.seek(0)
-    digest = hashlib.sha256()
-    total = 0
-    while chunk := f.read(BLOCK_SIZE):
+def _stream_rest(f: io.FileIO, size: int, done: int, digest: Any, name: str) -> str:
+    """Stream from the current position to the end into ``digest``; ``done`` bytes
+    were already fed. The total must equal ``size``."""
+    total = done
+    while chunk := _read_block(f, name):
         total += len(chunk)
         if total > size:
             raise FileRefused("size_mismatch", name, "grew")
         digest.update(chunk)
     if total != size:
         raise FileRefused("size_mismatch", name, "shrank")
-    return digest.hexdigest()
+    hexdigest: str = digest.hexdigest()
+    return hexdigest
+
+
+def _open_run_dir(root: Path) -> int:
+    refusal: Refused
+    try:
+        return os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC)
+    except FileNotFoundError:
+        refusal = Refused("not_found")
+    except OSError:
+        refusal = Refused("file_not_allowed", "run_dir")
+    raise refusal
+
+
+def _list_run(dfd: int, max_files: int) -> list[str]:
+    names: list[str] = []
+    failed = False
+    try:
+        with os.scandir(dfd) as it:
+            for entry in it:
+                names.append(entry.name)
+                if len(names) > max_files:
+                    break
+    except OSError:
+        failed = True
+    if failed:
+        raise FileRefused("file_not_allowed", None, "list")
+    if len(names) > max_files:
+        raise FileRefused("too_many_files")
+    return sorted(names)
 
 
 def check_run(dir: Path | str, limits: Limits | None = None) -> list[FileEntry]:
@@ -381,32 +509,21 @@ def check_run(dir: Path | str, limits: Limits | None = None) -> list[FileEntry]:
     Refuses (fail closed) a missing or linked directory, an entry that isn't on the
     allow-list, a symlink, hard link, directory or special file, more than
     ``max_files`` files, a file over ``max_file_bytes``, a total over
-    ``max_total_bytes``, and any JSON or safetensors file that fails its check.
+    ``max_total_bytes``, a run without a ``*.safetensors`` file or without
+    ``config.json`` or ``adapter_config.json`` (``missing_file``), and any JSON or
+    safetensors file that fails its check. Each file is checked and hashed in one
+    pass over one open file: the digest covers exactly the bytes that were checked.
     """
     limits = limits or Limits()
-    root = Path(dir)
+    dfd = _open_run_dir(Path(dir))
     try:
-        dfd = os.open(
-            root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        )
-    except FileNotFoundError as exc:
-        raise Refused("not_found") from exc
-    except OSError as exc:
-        raise Refused("file_not_allowed", "run_dir") from exc
-    try:
-        names: list[str] = []
-        with os.scandir(dfd) as it:
-            for entry in it:
-                names.append(entry.name)
-                if len(names) > limits.max_files:
-                    raise FileRefused("too_many_files")
-        names.sort()
+        names = _list_run(dfd, limits.max_files)
 
         stats: dict[str, os.stat_result] = {}
         total = 0
         for name in names:
             check_file_name(name)
-            st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            st = _lstat(name, dfd)
             _check_stat(st, name)
             if st.st_size > limits.max_file_bytes:
                 raise FileRefused("too_large", name)
@@ -414,6 +531,10 @@ def check_run(dir: Path | str, limits: Limits | None = None) -> list[FileEntry]:
             if total > limits.max_total_bytes:
                 raise FileRefused("too_large", name, "total")
             stats[name] = st
+        if not any(n.endswith(SAFETENSORS_SUFFIX) for n in names):
+            raise FileRefused("missing_file", None, "no_weights")
+        if not {"config.json", "adapter_config.json"} & set(names):
+            raise FileRefused("missing_file", None, "no_config")
 
         present = frozenset(names)
         out: list[FileEntry] = []
@@ -424,14 +545,16 @@ def check_run(dir: Path | str, limits: Limits | None = None) -> list[FileEntry]:
                         raise FileRefused("too_large", name)
                     # One read: the bytes checked are the bytes hashed.
                     raw = _read_exact(f, size, name, "size_mismatch")
-                    if f.read(1):
+                    if _read_block(f, name):
                         raise FileRefused("size_mismatch", name, "grew")
                     _check_json_bytes(raw, name, name, present)
-                    digest = hashlib.sha256(raw).hexdigest()
+                    sha = hashlib.sha256(raw).hexdigest()
                 else:
-                    _check_safetensors_file(f, size, name)
-                    digest = _hash(f, size, name)
-                out.append(FileEntry(name, size, digest))
+                    digest = hashlib.sha256()
+                    _check_safetensors_file(f, size, name, limits.max_header_bytes, digest)
+                    done = f.tell()
+                    sha = _stream_rest(f, size, done, digest, name)
+                out.append(FileEntry(name, size, sha))
         return out
     finally:
         os.close(dfd)
@@ -441,6 +564,7 @@ __all__ = [
     "ALLOWED",
     "BLOCK_SIZE",
     "CODE_SUFFIXES",
+    "DEFAULT_HEADER_BYTES",
     "DTYPE_SIZES",
     "JSON_FILES",
     "MAX_HEADER_BYTES",
