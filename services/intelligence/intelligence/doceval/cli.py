@@ -41,12 +41,14 @@ from pathlib import Path
 from typing import Any
 
 from intelligence.doceval import extractors, report, runner
-from intelligence.modelstore import canonical
+from intelligence.modelstore import canonical, names
 from intelligence.modelstore.reasons import Refused
 
 PRINTED_SCHEMA = "mhai.evaluation.printed/1"
 EVAL_ROLE_ENV = "MHAI_EVAL_ROLE"
 EXTRACTORS = ("tiny", "openai", "oracle")
+TESTSET_SIGNATURE = "testset.sig"
+_MAX_MODEL_VERSIONS = 16
 _MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 _MAX_TRAINING_MANIFEST_BYTES = 1024 * 1024
 
@@ -117,22 +119,60 @@ def _module(name: str) -> Any:
 
 
 def _model_versions(pairs: Sequence[str] | None) -> dict[str, str]:
-    """``ROLE=VERSION`` pairs, from the caller (the verified pin), never from the model."""
+    """``ROLE=VERSION`` pairs, from the caller (the verified pin), never from the model:
+    roles as ``names.check_role``, versions as semver."""
     out: dict[str, str] = {}
     for pair in pairs or ():
         role, sep, version = pair.partition("=")
         if not sep or role in out:
             raise Refused("invalid_name")
-        out[role] = version
+        out[names.check_role(role)] = names.check_version(version)
+    if len(out) > _MAX_MODEL_VERSIONS:
+        raise Refused("invalid_name")
     return out
+
+
+def _number(x: object, low: float, high: float, *, low_open: bool = False) -> None:
+    if isinstance(x, bool) or not isinstance(x, int | float) or not math.isfinite(x):
+        raise Refused("invalid_name")
+    if (x <= low if low_open else x < low) or x > high:
+        raise Refused("invalid_name")
+
+
+def _check_run_args(args: argparse.Namespace) -> None:
+    """Every name and number of ``run``, before any file is opened or extractor built."""
+    if args.extractor not in EXTRACTORS:
+        raise Refused("no_runtime")
+    for g in args.gate or ():
+        if g not in report.GATES:
+            raise Refused("invalid_name")
+    _model_versions(args.model_version)
+    for token in (args.engine, args.hardware):
+        if not report.is_token(token):
+            raise Refused("invalid_name")
+    if args.engine_version is not None and not report.is_token(args.engine_version):
+        raise Refused("invalid_name")
+    _number(args.deadline, 0, 86_400, low_open=True)
+    _number(args.timeout, 0, 86_400, low_open=True)
+    _number(args.oracle_drop, 0, 1)
+    _number(args.oracle_corrupt, 0, 1)
+
+
+def _locked(set_dir: Path, meta: dict[str, Any]) -> bool:
+    """A set that is (or may be) a locked split: signed, or marked locked.
+
+    TODO(Task 17): once the locked split's layout is fixed, check its exact markers here
+    (the signature file next to ``testset.json``, any ``locked`` field).
+    """
+    return os.path.lexists(set_dir / TESTSET_SIGNATURE) or bool(meta.get("locked"))
 
 
 def _extractor(args: argparse.Namespace, meta: dict[str, Any]) -> extractors.Extractor:
     kind = args.extractor
     if kind == "oracle":
-        if not args.test_only_oracle or os.environ.get(EVAL_ROLE_ENV):
+        if not args.test_only_oracle or EVAL_ROLE_ENV in os.environ:
             raise Refused("not_allowed_here", detail_code="oracle")
-        if meta.get("purpose") != "dev":
+        if meta.get("purpose") != "dev" or _locked(Path(args.set), meta):
             raise Refused("not_allowed_here", detail_code="oracle")
         try:
             return extractors.OracleExtractor(
@@ -183,10 +223,7 @@ def _extractor(args: argparse.Namespace, meta: dict[str, Any]) -> extractors.Ext
 def _notebook_metrics(path: str | None) -> dict[str, Any] | None:
     if path is None:
         return None
-    try:
-        raw = Path(path).read_bytes()
-    except OSError as e:
-        raise Refused("training_manifest_missing") from e
+    raw = report.read_regular(Path(path), _MAX_TRAINING_MANIFEST_BYTES, "training_manifest_missing")
     doc = canonical.loads_strict(raw, _MAX_TRAINING_MANIFEST_BYTES)
     if not isinstance(doc, dict):
         raise Refused("manifest_invalid")
@@ -202,12 +239,8 @@ def _write_new(folder: Path, name: str, data: bytes) -> None:
 
 
 def _run(args: argparse.Namespace) -> int:
-    for g in args.gate or ():
-        if g not in report.GATES:
-            raise Refused("invalid_name")
+    _check_run_args(args)
     deadline = args.deadline
-    if not math.isfinite(deadline) or deadline <= 0:
-        raise Refused("invalid_name", detail_code="deadline")
     meta = report.testset_meta(Path(args.set))
     extractor = _extractor(args, meta)
     try:
@@ -230,7 +263,7 @@ def _run(args: argparse.Namespace) -> int:
         try:
             result = runner.run(extractor, Path(args.set), per_page_deadline_s=deadline)
         except Refused as e:
-            stop = {"internal": "timeouts", "hostile_scoring": "hostile_scoring"}
+            stop = {"timeouts": "timeouts", "hostile_scoring": "hostile_scoring"}
             if e.reason != "evaluation_failed" or e.detail_code not in stop:
                 raise
             rep = report.stopped_report(
@@ -466,6 +499,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except OSError:
         _print({"error": "io"})
         return 3
+    except Exception:  # noqa: BLE001 - a fixed code, never a traceback or a message
+        return _refuse("internal_error")
     return code
 
 

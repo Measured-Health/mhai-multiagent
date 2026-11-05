@@ -147,17 +147,21 @@ RUN_METRICS: dict[str, str] = {
     "timeout_share": LOWER,
 }
 ALL_METRICS: dict[str, str] = {**DOC_METRICS, **HOSTILE_METRICS, **RUN_METRICS}
+SCOPE_DOCUMENTS = "scope_documents"  # the check that a gated scope has enough documents
+CHECK_NAMES = frozenset(ALL_METRICS) | {SCOPE_DOCUMENTS}
+MAX_MIN_DOCUMENTS = 100_000
 
 _INVALID_OUTPUTS = ("bad_json", "schema_error", "oversize", "extractor_error")
 _SCHEMA_ERRORS = ("bad_json", "schema_error", "oversize")
 _SCOPE = re.compile(r"run|overall|slices\.[a-z][a-z0-9_]{0,63}", re.ASCII)
 _SLICE = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
 _THRESHOLD = re.compile(r"(0|[1-9][0-9]{0,15})(\.[0-9]{1,6})?", re.ASCII)
-_DECIMAL = re.compile(r"-?(0|[1-9][0-9]{0,15})\.[0-9]{6}", re.ASCII)
+_DECIMAL = re.compile(r"(0|[1-9][0-9]{0,15})\.[0-9]{6}", re.ASCII)
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@#:+/-]{0,127}", re.ASCII)
 _KEY = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,63}", re.ASCII)
 _SHA = re.compile(r"[0-9a-f]{64}", re.ASCII)
-_SAFE_TEXT = re.compile(r"[A-Za-z0-9 ._:@#+/<>,=%-]{0,200}", re.ASCII)
+_SAFE_TEXT = re.compile(r"[A-Za-z0-9 ._:@#+/,%-]{0,200}", re.ASCII)  # no < > = ` | * [ ]
+_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,62}", re.ASCII)  # extractors.ExtractorInfo.name
 _MAX_THRESHOLDS_BYTES = 256 * 1024
 _MAX_REPORT_BYTES = 8 * 1024 * 1024
 _MAX_TESTSET_BYTES = 64 * 1024 * 1024
@@ -192,9 +196,11 @@ class Thresholds:
     file: str  # shown in the report: thresholds/<gate>.json for the packaged files
     sha256: str  # of the file's bytes
     scopes: dict[str, tuple[Rule, ...]]
+    min_documents: dict[str, int]  # per gated scope: fewer documents fails the gate
 
 
-def _read_regular(path: Path, cap: int, reason: str) -> bytes:
+def read_regular(path: Path, cap: int, reason: str) -> bytes:
+    """A regular file (never through a symlink) of at most ``cap`` bytes, or ``reason``."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as e:
@@ -255,7 +261,7 @@ def _rule(obj: Any, scope: str) -> Rule:
 def load_thresholds(path: str | Path, *, file: str | None = None) -> Thresholds:
     """Load and check one thresholds file; anything unexpected is ``policy_invalid``."""
     p = Path(path)
-    raw = _read_regular(p, _MAX_THRESHOLDS_BYTES, "policy_invalid")
+    raw = read_regular(p, _MAX_THRESHOLDS_BYTES, "policy_invalid")
     obj = _canonical_doc(raw, _MAX_THRESHOLDS_BYTES)
     if not isinstance(obj, dict) or set(obj) != {
         "schema",
@@ -275,19 +281,27 @@ def load_thresholds(path: str | Path, *, file: str | None = None) -> Thresholds:
     if not isinstance(scopes, dict):
         raise _policy()
     out: dict[str, tuple[Rule, ...]] = {}
-    for scope, rules in scopes.items():
-        if _SCOPE.fullmatch(scope) is None or not isinstance(rules, list):
+    minimum: dict[str, int] = {}
+    for scope, block in scopes.items():
+        if _SCOPE.fullmatch(scope) is None or not isinstance(block, dict):
             raise _policy()
-        parsed = tuple(_rule(r, scope) for r in rules)
+        if set(block) != {"min_documents", "rules"} or not isinstance(block["rules"], list):
+            raise _policy()
+        n = block["min_documents"]
+        if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_MIN_DOCUMENTS:
+            raise _policy()
+        parsed = tuple(_rule(r, scope) for r in block["rules"])
         if len({r.metric for r in parsed}) != len(parsed):
             raise _policy()
         out[scope] = parsed
+        minimum[scope] = n
     return Thresholds(
         gate=gate,
         production=production,
         file=file if file is not None else p.name,
         sha256=hashlib.sha256(raw).hexdigest(),
         scopes=out,
+        min_documents=minimum,
     )
 
 
@@ -483,6 +497,7 @@ def _share(outcomes: dict[str, int], codes: Iterable[str], documents: int) -> Fr
 class _Scopes:
     values: dict[str, dict[str, Value]]  # exact, for the gates
     shown: dict[str, dict[str, Any]]  # what the report shows
+    documents: dict[str, int]  # per scope
 
 
 def _scopes(result: runner.RunResult) -> _Scopes:
@@ -555,7 +570,7 @@ def _scopes(result: runner.RunResult) -> _Scopes:
     _secondary(shown, "overall", [k for k in slices if k != f"slices.{runner.HOSTILE_SLICE}"])
     _secondary(shown, "run", slices)
     _suppress_shares(shown["run"])
-    return _Scopes(values, shown)
+    return _Scopes(values, shown, {k: v["documents"] for k, v in shown.items()})
 
 
 def _secondary(shown: dict[str, dict[str, Any]], combined: str, parts: Sequence[str]) -> None:
@@ -657,12 +672,17 @@ def _hostile_block(h: Any) -> dict[str, Any]:
 
 
 def _evaluate(
-    th: Thresholds, values: Mapping[str, Mapping[str, Value]], hardware: str
+    th: Thresholds,
+    values: Mapping[str, Mapping[str, Value]],
+    documents: Mapping[str, int],
+    hardware: str,
 ) -> dict[str, Any]:
     results: dict[str, dict[str, str]] = {}
     for scope, rules in sorted(th.scopes.items()):
         scope_values = values.get(scope)
         out: dict[str, str] = {}
+        enough = documents.get(scope, 0) >= th.min_documents[scope]
+        out[SCOPE_DOCUMENTS] = "pass" if enough else "fail"
         for r in rules:
             if r.op == "not_applicable":
                 out[r.metric] = "not_applicable"
@@ -698,6 +718,11 @@ def _split(purpose: object) -> dict[str, Any]:
     if purpose == "dev":
         return {"name": "dev", "label": DEV_LABEL}
     raise Refused("not_allowed_here", detail_code="split")
+
+
+def is_token(x: object) -> bool:
+    """A short plain name (versions, engines, hardware): letters, digits and ``._@#:+/-``."""
+    return isinstance(x, str) and _TOKEN.fullmatch(x) is not None
 
 
 def _token(x: object) -> str:
@@ -800,7 +825,7 @@ def build_report(
         "scopes": dict(sorted(scopes.shown.items())),
         "hostile": hostile_block,
         "verdicts": {
-            g.gate: _evaluate(g, scopes.values, result.extractor.hardware)
+            g.gate: _evaluate(g, scopes.values, scopes.documents, result.extractor.hardware)
             for g in sorted(gates, key=lambda g: g.gate)
         },
         "notebook_metrics": _notebook(notebook_metrics),
@@ -812,7 +837,7 @@ def build_report(
 def testset_meta(set_dir: str | Path) -> dict[str, Any]:
     """What a report may say about a set: name, version, purpose, schema version, totals
     and the SHA-256 of ``testset.json`` (never its document list)."""
-    raw = _read_regular(Path(set_dir) / "testset.json", _MAX_TESTSET_BYTES, "testset_mismatch")
+    raw = read_regular(Path(set_dir) / "testset.json", _MAX_TESTSET_BYTES, "testset_mismatch")
     try:
         manifest = _canonical_doc(raw, _MAX_TESTSET_BYTES)
     except Refused as e:
@@ -830,6 +855,7 @@ def testset_meta(set_dir: str | Path) -> dict[str, Any]:
         "documents": totals.get("documents"),
         "pages": totals.get("pages"),
         "sha256": hashlib.sha256(raw).hexdigest(),
+        "locked": "locked" in manifest,  # never shown; refuses the oracle (cli)
     }
 
 
@@ -908,64 +934,204 @@ def _policy_report() -> Refused:
     return Refused("manifest_invalid", detail_code="report")
 
 
-def _check_value(v: Any) -> None:
-    if v is None or v == SUPPRESSED:
-        return
-    if isinstance(v, bool):
+def _req(ok: bool) -> None:
+    if not ok:
         raise _policy_report()
-    if isinstance(v, int):
+
+
+def _is_count(x: Any, suppressed: bool = True) -> bool:
+    if suppressed and x == SUPPRESSED:
+        return True
+    return isinstance(x, int) and not isinstance(x, bool) and x >= 0
+
+
+def _is_value(x: Any) -> bool:
+    """A metric as shown: null, a count, a six-place decimal, or suppressed."""
+    if x is None or _is_count(x):
+        return True
+    return isinstance(x, str) and _DECIMAL.fullmatch(x) is not None
+
+
+def _is_token(x: Any, pattern: re.Pattern[str] = _TOKEN) -> bool:
+    return isinstance(x, str) and pattern.fullmatch(x) is not None
+
+
+def _exact(d: Any, keys: Iterable[str]) -> bool:
+    return isinstance(d, dict) and set(d) == set(keys)
+
+
+def _counts_map(d: Any, keys: Iterable[str]) -> None:
+    _req(_exact(d, keys) and all(_is_count(v, False) for v in d.values()))
+
+
+_PR_KEYS = ("tp", "fp", "fn")
+_COUNT_BLOCKS = {
+    "grounding": ("grounded", "total"),
+    "handwriting_cer": ("chars", "edits"),
+    "handwritten_pr": _PR_KEYS,
+    "high_band": ("fields", "high"),
+    "identifier_precision": _PR_KEYS,
+    "silent_error": ("errors", "high_band"),
+}
+_HOSTILE_KEYS = (
+    "cases",
+    "flagged_or_refused",
+    "other_fields_unchanged",
+    "passed",
+    "rate",
+    "failures",
+    "by_kind",
+)
+
+
+def _check_field_counts(c: Any) -> None:
+    if c == SUPPRESSED:
         return
-    if not isinstance(v, str) or _DECIMAL.fullmatch(v) is None:
-        raise _policy_report()
+    _req(_exact(c, {"calibration_fields", "field_pr", *_COUNT_BLOCKS}))
+    _req(_is_count(c["calibration_fields"], False))
+    _req(_exact(c["field_pr"], _FIELD_TYPES))
+    for v in c["field_pr"].values():
+        _counts_map(v, _PR_KEYS)
+    for key, keys in _COUNT_BLOCKS.items():
+        _counts_map(c[key], keys)
+
+
+def _check_cells(d: Any, allowed: Iterable[str]) -> None:
+    if d == SUPPRESSED:
+        return
+    allowed = set(allowed)
+    _req(isinstance(d, dict) and set(d) <= allowed and all(_is_count(v) for v in d.values()))
+
+
+def _check_scope(scope: str, b: Any) -> None:
+    _req(_SCOPE.fullmatch(scope) is not None)
+    run = scope == "run"
+    keys = {"documents", "metrics", "outcomes", "refusals", "schema_errors", "extractor_errors"}
+    keys |= {"timeouts", "pages" if run else "counts"}
+    _req(_exact(b, keys))
+    _req(_is_count(b["documents"], False))
+    if run:
+        _req(_is_count(b["pages"], False))
+    else:
+        _check_field_counts(b["counts"])
+    m = b["metrics"]
+    if m != SUPPRESSED:
+        allowed = _allowed_metrics(scope)
+        _req(isinstance(m, dict) and set(m) <= set(allowed))
+        _req(all(_is_value(v) for v in m.values()))
+    for key in ("schema_errors", "extractor_errors", "timeouts"):
+        _req(_is_count(b[key]))
+    _check_cells(b["outcomes"], runner.OUTCOME_CODES)
+    _check_cells(b["refusals"], extractors.REFUSAL_REASONS)
+
+
+def _check_hostile(h: Any) -> None:
+    _req(_exact(h, _HOSTILE_KEYS))
+    for key in ("cases", "flagged_or_refused", "other_fields_unchanged", "passed"):
+        _req(_is_count(h[key]))
+    _req(_is_value(h["rate"]))
+    _check_cells(h["failures"], HOSTILE_FAILURE_CODES | {"other"})
+    kinds = h["by_kind"]
+    _req(isinstance(kinds, dict) and set(kinds) <= set(HOSTILE_KINDS) | {"other"})
+    for v in kinds.values():
+        _req(v == SUPPRESSED or (_exact(v, ("all_passed",)) and isinstance(v["all_passed"], bool)))
+
+
+def _check_verdict(gate: str, v: Any, stopped: bool) -> None:
+    _req(gate in GATES and _exact(v, ("verdict", "results", "failed")))
+    _req(v["verdict"] in ("pass", "fail"))
+    results = v["results"]
+    _req(isinstance(results, dict))
+    for scope, out in results.items():
+        _req(_SCOPE.fullmatch(scope) is not None and isinstance(out, dict))
+        _req(set(out) <= CHECK_NAMES and all(x in VERDICTS for x in out.values()))
+    expected = sorted(
+        f"{scope}.{metric}"
+        for scope, out in results.items()
+        for metric, verdict in out.items()
+        if verdict in ("fail", "not_measured")
+    )
+    if stopped:
+        _req(results == {} and v["failed"] == ["run.stopped"] and v["verdict"] == "fail")
+    else:
+        _req(v["failed"] == expected)
+        _req(v["verdict"] == "fail" or not expected)
+
+
+def _check_header(obj: dict[str, Any]) -> None:
+    _req(_exact(obj["extractor"], ("name",)) and _is_token(obj["extractor"]["name"], _NAME))
+    mv = obj["model_versions"]
+    _req(isinstance(mv, dict) and len(mv) <= 16)
+    _req(all(_is_token(k) and _is_token(v) for k, v in mv.items()))
+    engine = obj["engine"]
+    _req(_exact(engine, ("name", "version")) and _is_token(engine["name"]))
+    _req(engine["version"] is None or _is_token(engine["version"]))
+    _req(_is_token(obj["hardware"]))
+    ts = obj["testset"]
+    keys = ("name", "version", "sha256", "extraction_schema_version", "documents", "pages")
+    _req(_exact(ts, keys))
+    _req(all(_is_token(ts[k]) for k in ("name", "version", "extraction_schema_version")))
+    _req(_is_token(ts["sha256"], _SHA))
+    _req(_is_count(ts["documents"], False) and _is_count(ts["pages"], False))
+    split = obj["split"]
+    _req(_exact(split, ("name", "label")) and split["name"] in ("dev", "test"))
+    _req(split["label"] == (DEV_LABEL if split["name"] == "dev" else None))
+    th = obj["thresholds"]
+    _req(isinstance(th, dict) and bool(th) and set(th) == set(obj["verdicts"]))
+    for gate, t in th.items():
+        _req(gate in GATES and _exact(t, ("file", "sha256", "production")))
+        _req(t["file"] == f"thresholds/{gate}.json" and _is_token(t["sha256"], _SHA))
+        _req(t["production"] is (gate in PRODUCTION_GATES))
+
+
+def _check_notebook(nb: Any) -> None:
+    if nb is None:
+        return
+    _req(_exact(nb, ("informational", "metrics")) and nb["informational"] is True)
+    m = nb["metrics"]
+    _req(isinstance(m, dict) and len(m) <= _MAX_NOTEBOOK_METRICS)
+    for k, v in m.items():
+        _req(_is_token(k, _KEY))
+        _req(_is_count(v, False) or _is_token(v))
 
 
 def read_report(path: str | Path) -> dict[str, Any]:
     """:func:`parse_report` of a file (a regular file, never followed through a symlink)."""
-    return parse_report(_read_regular(Path(path), _MAX_REPORT_BYTES, "not_found"))
+    return parse_report(read_regular(Path(path), _MAX_REPORT_BYTES, "not_found"))
 
 
 def parse_report(raw: bytes) -> dict[str, Any]:
-    """A report read back (``report``, ``compare``): canonical, the right schema, scope and
-    metric names from the closed sets, values that are decimals, integers or null, and no
-    text that could carry markup into the Markdown."""
+    """A report read back (``report``, ``compare``). Everything that reaches the Markdown is
+    checked against the pattern or closed set it was built from (names, tokens, hashes,
+    scope, metric, outcome, refusal, failure and kind names, counts and decimals), the
+    thresholds files are the packaged ones, the failed lists agree with the results, and
+    no string anywhere can carry markup."""
     obj = _canonical_doc(raw, _MAX_REPORT_BYTES)
-    if not isinstance(obj, dict) or set(obj) != _TOP or obj["schema"] != REPORT_SCHEMA:
-        raise _policy_report()
+    _req(isinstance(obj, dict) and set(obj) == _TOP and obj["schema"] == REPORT_SCHEMA)
     _walk_safe(obj)
-    scopes, verdicts = obj["scopes"], obj["verdicts"]
-    if not isinstance(scopes, dict) or not isinstance(verdicts, dict):
-        raise _policy_report()
-    if obj["stopped"] is not None and obj["stopped"] not in STOP_REASONS:
-        raise _policy_report()
-    for scope, block in scopes.items():
-        if _SCOPE.fullmatch(scope) is None or not isinstance(block, dict):
-            raise _policy_report()
-        m = block.get("metrics")
-        if m != SUPPRESSED:
-            if not isinstance(m, dict):
-                raise _policy_report()
-            for metric, v in m.items():
-                if metric not in ALL_METRICS:
-                    raise _policy_report()
-                _check_value(v)
-    for gate, v in verdicts.items():
-        if gate not in GATES or not isinstance(v, dict) or v.get("verdict") not in ("pass", "fail"):
-            raise _policy_report()
-        results = v.get("results")
-        if not isinstance(results, dict) or not isinstance(v.get("failed"), list):
-            raise _policy_report()
-        for scope, out in results.items():
-            if _SCOPE.fullmatch(scope) is None or not isinstance(out, dict):
-                raise _policy_report()
-            for metric, verdict in out.items():
-                if metric not in ALL_METRICS or verdict not in VERDICTS:
-                    raise _policy_report()
-    split = obj["split"]
-    if not isinstance(split, dict) or split.get("name") not in ("dev", "test"):
-        raise _policy_report()
-    if (split["name"] == "dev") != (split.get("label") == DEV_LABEL):
-        raise _policy_report()
-    return obj
+    stopped = obj["stopped"]
+    _req(stopped is None or stopped in STOP_REASONS)
+    _req(isinstance(obj["verdicts"], dict) and bool(obj["verdicts"]))
+    _check_header(obj)
+    for gate, v in obj["verdicts"].items():
+        _check_verdict(gate, v, stopped is not None)
+    scopes = obj["scopes"]
+    _req(isinstance(scopes, dict))
+    if stopped is not None:
+        _req(scopes == {} and obj["run"] is None and obj["hostile"] is None)
+        _req(obj["notebook_metrics"] is None)
+    else:
+        run = obj["run"]
+        _req(_exact(run, ("per_page_deadline_s", "max_output_bytes")))
+        _req(_is_token(run["per_page_deadline_s"], _DECIMAL))
+        _req(_is_count(run["max_output_bytes"], False))
+        _req("run" in scopes and "overall" in scopes)
+        for scope, block in scopes.items():
+            _check_scope(scope, block)
+        _check_hostile(obj["hostile"])
+        _check_notebook(obj["notebook_metrics"])
+    checked: dict[str, Any] = obj
+    return checked
 
 
 # ---------------------------------------------------------------- Markdown
@@ -1071,7 +1237,10 @@ def render_markdown(rep: Mapping[str, Any]) -> str:
             names |= set(rep["verdicts"][g]["results"].get(scope, {}))
         rows = []
         for name in sorted(names):
-            value = SUPPRESSED if metrics == SUPPRESSED else _show(metrics.get(name))
+            if name == SCOPE_DOCUMENTS:
+                value = str(block["documents"])
+            else:
+                value = SUPPRESSED if metrics == SUPPRESSED else _show(metrics.get(name))
             row = [name, value]
             for g in gates:
                 row.append(rep["verdicts"][g]["results"].get(scope, {}).get(name, "recorded"))
@@ -1182,7 +1351,11 @@ def compare(before: Mapping[str, Any], after: Mapping[str, Any]) -> str:
                 a = ar.get(scope, {}).get(metric, "absent")
                 if a == b:
                     continue
-                worse = _RANK.get(a, 0) < _RANK.get(b, 0) or (a == "absent" and b != "absent")
+                worse = (
+                    _RANK.get(a, 0) < _RANK.get(b, 0)
+                    or (a == "absent" and b != "absent")
+                    or a == "not_applicable"  # a check that stopped being checked
+                )
                 if worse:
                     regressions.append(f"{g} {scope}.{metric}: {b} to {a}")
                 check_rows.append(
@@ -1201,12 +1374,16 @@ def compare(before: Mapping[str, Any], after: Mapping[str, Any]) -> str:
                 scope_sections[-1] += " regression"
             continue
         bm, am = bs["metrics"], as_["metrics"]
-        if bm == SUPPRESSED or am == SUPPRESSED:
+        if bm != SUPPRESSED and am == SUPPRESSED:
+            regressions.append(f"{scope}: values suppressed after")
+            scope_sections += ["", f"### {scope}", "", "Values suppressed after. regression"]
+            continue
+        if bm == SUPPRESSED:
             scope_sections += [
                 "",
                 f"### {scope}",
                 "",
-                "Values suppressed (fewer than 5 documents); compare the verdicts.",
+                "Values suppressed before (fewer than 5 documents); compare the verdicts.",
             ]
             continue
         rows = []
@@ -1277,9 +1454,11 @@ __all__ = [
     "compare",
     "dumps",
     "is_stub",
+    "is_token",
     "load_thresholds",
     "packaged_thresholds",
     "parse_report",
+    "read_regular",
     "read_report",
     "render_markdown",
     "stopped_report",

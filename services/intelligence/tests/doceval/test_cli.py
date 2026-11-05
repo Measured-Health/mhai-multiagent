@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -182,3 +183,124 @@ def test_cli_logs_and_prints_no_values(
         assert marker not in text
         for doc_id in s.ids:
             assert doc_id not in text
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--extractor", "tiny", "--model-version", "Extract=0.1.0"],
+        ["--extractor", "tiny", "--model-version", "extract=0.1"],
+        ["--extractor", "tiny", "--model-version", "extract"],
+        ["--extractor", "openai", "--engine", "<details>"],
+        ["--extractor", "openai", "--hardware", "nvidia l40s"],
+        ["--extractor", "tiny", "--engine-version", "1|2"],
+        ["--extractor", "tiny", "--deadline", "nan"],
+        ["--extractor", "tiny", "--deadline", "0"],
+        ["--extractor", "openai", "--timeout", "-1"],
+        ["--extractor", "oracle", "--oracle-drop", "2"],
+        ["--extractor", "tiny", "--gate", "phase9"],
+    ],
+)
+def test_cli_run_checks_inputs_before_any_io(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], extra: list[str]
+) -> None:
+    # the set does not exist: a check that ran after I/O would say testset_mismatch
+    args = ["run", "--set", str(tmp_path / "nowhere"), "--out", str(tmp_path / "r"), *extra]
+    assert cli.main(args) == 2
+    assert json.loads(_out(capsys)) == {"refused": "invalid_name"}
+    assert not (tmp_path / "r").exists()
+
+
+def test_cli_oracle_refused_when_eval_role_set_even_empty(
+    tmp_path: Path,
+    dev_set: minisets.MiniSet,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MHAI_EVAL_ROLE", "")
+    args = ["run", "--extractor", "oracle", "--test-only-oracle", "--set", str(dev_set.root)]
+    assert cli.main([*args, "--out", str(tmp_path / "r")]) == 2
+    assert json.loads(_out(capsys)) == {"refused": "not_allowed_here"}
+
+
+def test_cli_oracle_refused_on_a_signed_or_locked_set(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    signed = _set(tmp_path / "signed")
+    (signed.root / "testset.sig").write_bytes(b"sig")
+    locked = _set(tmp_path / "locked")
+    path = locked.root / "testset.json"
+    manifest = json.loads(path.read_bytes())
+    manifest["locked"] = True
+    path.write_bytes(canonical.dumps(manifest))
+    for s in (signed, locked):
+        args = ["run", "--extractor", "oracle", "--test-only-oracle", "--set", str(s.root)]
+        assert cli.main([*args, "--out", str(tmp_path / "r")]) == 2
+        assert json.loads(_out(capsys)) == {"refused": "not_allowed_here"}
+    assert not (tmp_path / "r").exists()
+
+
+def test_cli_timeout_stop_written_other_failures_refused(
+    tmp_path: Path,
+    dev_set: minisets.MiniSet,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from intelligence.doceval import runner
+    from intelligence.modelstore.reasons import Refused
+
+    def stop(detail: str) -> Any:
+        def run(*a: Any, **k: Any) -> Any:
+            raise Refused("evaluation_failed", detail_code=detail)
+
+        return run
+
+    base = ["run", "--extractor", "oracle", "--test-only-oracle", "--set", str(dev_set.root)]
+    monkeypatch.setattr(runner, "run", stop("timeouts"))
+    assert cli.main([*base, "--out", str(tmp_path / "t")]) == 0
+    assert json.loads(_out(capsys))["stopped"] == "timeouts"
+    rep = report.read_report(tmp_path / "t" / "evaluation.json")
+    assert rep["verdicts"]["rehearsal"]["verdict"] == "fail"
+    monkeypatch.setattr(runner, "run", stop("internal"))
+    assert cli.main([*base, "--out", str(tmp_path / "i")]) == 2
+    assert json.loads(_out(capsys)) == {"refused": "evaluation_failed"}
+    assert not (tmp_path / "i").exists()
+
+
+def test_cli_unexpected_error_is_a_fixed_code(
+    tmp_path: Path,
+    dev_set: minisets.MiniSet,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("secret Zqxmarkerwv")
+
+    monkeypatch.setattr(report, "build_report", boom)
+    args = ["run", "--extractor", "oracle", "--test-only-oracle", "--set", str(dev_set.root)]
+    assert cli.main([*args, "--out", str(tmp_path / "r")]) == 2
+    out = capsys.readouterr()
+    assert json.loads(out.out) == {"refused": "internal_error"}
+    assert "Zqxmarkerwv" not in out.out + out.err and "Traceback" not in out.err
+    assert not (tmp_path / "r").exists()
+
+
+def test_cli_training_manifest_read_safely(
+    tmp_path: Path, dev_set: minisets.MiniSet, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "tm.json"
+    target.write_bytes(canonical.dumps({"notebook_metrics": {"val_f1": "0.8"}}))
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+    big = tmp_path / "big.json"
+    big.write_bytes(b" " * (2 * 1024 * 1024))
+    base = ["run", "--extractor", "oracle", "--test-only-oracle", "--set", str(dev_set.root)]
+    for path, code in ((link, "training_manifest_missing"), (big, "too_large")):
+        args = [*base, "--out", str(tmp_path / "r"), "--training-manifest", str(path)]
+        assert cli.main(args) == 2
+        assert json.loads(_out(capsys)) == {"refused": code}
+    args = [*base, "--out", str(tmp_path / "ok"), "--training-manifest", str(target)]
+    assert cli.main(args) == 0
+    _out(capsys)
+    rep = report.read_report(tmp_path / "ok" / "evaluation.json")
+    assert rep["notebook_metrics"] == {"informational": True, "metrics": {"val_f1": "0.8"}}

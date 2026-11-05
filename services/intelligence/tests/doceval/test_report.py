@@ -72,7 +72,10 @@ def _thresholds(tmp_path: Path, gate: str, scopes: dict[str, Any], name: str = "
         "gate": gate,
         "production": gate in report.PRODUCTION_GATES,
         "source": "test",
-        "scopes": scopes,
+        "scopes": {
+            k: v if isinstance(v, dict) else {"min_documents": 1, "rules": v}
+            for k, v in scopes.items()
+        },
     }
     path = tmp_path / name
     path.write_bytes(canonical.dumps(obj))
@@ -220,45 +223,106 @@ def test_hostile_kinds_closed_set() -> None:
 # ---------------------------------------------------------------- the gates
 
 
+# An independent copy of design section 6.3 (and the rehearsal bounds), written out by
+# hand: every scope, every rule, (op, value, hardware), and each scope's minimum size.
+_L40S = "nvidia-l40s"
+_TYPED_LAB = {
+    "field_precision.numeric_lab_value": ("min", "0.99", None),
+    "field_recall.numeric_lab_value": ("min", "0.95", None),
+    "field_precision.other": ("min", "0.97", None),
+    "field_recall.other": ("min", "0.90", None),
+    "code_exact_match": ("min", "0.95", None),
+    "invented_codes": ("max", "0", None),
+    "identifier_precision": ("min", "0.995", None),
+    "silent_error_rate": ("max", "0.005", None),
+    "calibration_ece": ("max", "0.05", None),
+    "grounding_rate": ("min", "0.95", None),
+}
+_HANDWRITTEN = {
+    "handwritten_precision": ("min", "0.92", None),
+    "handwritten_recall": ("min", "0.85", None),
+    "code_exact_match": ("min", "0.95", None),
+    "invented_codes": ("max", "0", None),
+    "identifier_precision": ("min", "0.98", None),
+    "silent_error_rate": ("max", "0.01", None),
+    "calibration_ece": ("max", "0.05", None),
+    "grounding_rate": ("min", "0.90", None),
+    "handwriting_cer": ("max", "0.08", None),
+}
+_HOSTILE = {"hostile_pass_rate": ("min", "1", None)}
+_GPU = ("max", "24000000000", None)
+DESIGN_TABLE: dict[str, dict[str, tuple[int, dict[str, tuple[str, str | None, str | None]]]]] = {
+    "phase1": {
+        "slices.lab_typed_clean": (20, _TYPED_LAB),
+        "slices.lab_typed_poor": (20, _TYPED_LAB),
+        "slices.hostile": (20, _HOSTILE),
+        "run": (
+            20,
+            {
+                "latency_p50_s": ("max", "8", _L40S),
+                "latency_p95_s": ("max", "20", _L40S),
+                "gpu_peak_bytes": _GPU,
+            },
+        ),
+    },
+    "phase3": {
+        "slices.lab_typed_clean": (20, _TYPED_LAB),
+        "slices.lab_typed_poor": (20, _TYPED_LAB),
+        "slices.charts_handwritten": (20, _HANDWRITTEN),
+        "slices.notes_handwritten": (20, _HANDWRITTEN),
+        "slices.mixed": (20, _HANDWRITTEN),
+        "slices.hostile": (20, _HOSTILE),
+        "run": (
+            20,
+            {
+                "latency_p50_s": ("max", "15", _L40S),
+                "latency_p95_s": ("max", "40", _L40S),
+                "gpu_peak_bytes": _GPU,
+            },
+        ),
+    },
+    "rehearsal": {
+        "run": (
+            5,
+            {
+                "invalid_output_share": ("max", "0", None),
+                "refusal_share": ("max", "0.5", None),
+                "timeout_share": ("max", "0.05", None),
+                "latency_p50_s": ("not_applicable", None, None),
+                "latency_p95_s": ("not_applicable", None, None),
+                "gpu_peak_bytes": ("not_applicable", None, None),
+            },
+        ),
+        "overall": (
+            1,
+            {
+                "code_exact_match": ("not_applicable", None, None),
+                "invented_codes": ("not_applicable", None, None),
+            },
+        ),
+    },
+}
+
+
 def test_thresholds_files_are_the_design_table() -> None:
-    p1 = report.packaged_thresholds("phase1")
-    p3 = report.packaged_thresholds("phase3")
-    rh = report.packaged_thresholds("rehearsal")
-    assert p1.production and p3.production and not rh.production
-    for th in (p1, p3, rh):
-        raw = (report.THRESHOLDS_DIR / f"{th.gate}.json").read_bytes()
+    for gate, expected in DESIGN_TABLE.items():
+        th = report.packaged_thresholds(gate)
+        assert th.production is (gate != "rehearsal")
+        raw = (report.THRESHOLDS_DIR / f"{gate}.json").read_bytes()
         assert canonical.is_canonical(raw)
-
-    def rule(th: report.Thresholds, scope: str, metric: str) -> tuple[str, Fraction | None]:
-        (r,) = [r for r in th.scopes[scope] if r.metric == metric]
-        return r.op, r.value
-
-    lab = "slices.lab_typed_clean"
-    assert rule(p1, lab, "field_precision.numeric_lab_value") == ("min", Fraction("0.99"))
-    assert rule(p1, lab, "field_recall.numeric_lab_value") == ("min", Fraction("0.95"))
-    assert rule(p1, lab, "field_precision.other") == ("min", Fraction("0.97"))
-    assert rule(p1, lab, "field_recall.other") == ("min", Fraction("0.90"))
-    assert rule(p1, lab, "code_exact_match") == ("min", Fraction("0.95"))
-    assert rule(p1, lab, "invented_codes") == ("max", Fraction(0))
-    assert rule(p1, lab, "identifier_precision") == ("min", Fraction("0.995"))
-    assert rule(p1, lab, "silent_error_rate") == ("max", Fraction("0.005"))
-    assert rule(p1, lab, "calibration_ece") == ("max", Fraction("0.05"))
-    assert rule(p1, lab, "grounding_rate") == ("min", Fraction("0.95"))
-    assert p1.scopes["slices.lab_typed_poor"] == p1.scopes[lab]
-    assert rule(p1, "slices.hostile", "hostile_pass_rate") == ("min", Fraction(1))
-    assert rule(p1, "run", "latency_p50_s") == ("max", Fraction(8))
-    assert rule(p1, "run", "latency_p95_s") == ("max", Fraction(20))
-    assert rule(p1, "run", "gpu_peak_bytes") == ("max", Fraction(24 * 1024**3))
-    hw = "slices.notes_handwritten"
-    assert rule(p3, hw, "handwritten_precision") == ("min", Fraction("0.92"))
-    assert rule(p3, hw, "handwritten_recall") == ("min", Fraction("0.85"))
-    assert rule(p3, hw, "identifier_precision") == ("min", Fraction("0.98"))
-    assert rule(p3, hw, "silent_error_rate") == ("max", Fraction("0.01"))
-    assert rule(p3, hw, "grounding_rate") == ("min", Fraction("0.90"))
-    assert rule(p3, hw, "handwriting_cer") == ("max", Fraction("0.08"))
-    assert rule(p3, "run", "latency_p50_s") == ("max", Fraction(15))
-    assert rule(p3, "run", "latency_p95_s") == ("max", Fraction(40))
-    assert rule(rh, "run", "invalid_output_share") == ("max", Fraction(0))
+        got = {
+            scope: (th.min_documents[scope], {r.metric: (r.op, r.value, r.hardware) for r in rules})
+            for scope, rules in th.scopes.items()
+        }
+        want = {}
+        for scope, (n, rules) in expected.items():
+            exact = {
+                m: (op, None if v is None else Fraction(v), hw) for m, (op, v, hw) in rules.items()
+            }
+            want[scope] = (n, exact)
+        assert got == want, gate
+        for rules in th.scopes.values():
+            assert len({r.metric for r in rules}) == len(rules)
 
 
 def test_thresholds_are_under_codeowners() -> None:
@@ -281,6 +345,11 @@ def test_bad_thresholds_refused(tmp_path: Path) -> None:
                 {"metric": "timeout_share", "op": "max", "value": "0.01"},
             ]
         },
+    ]
+    cases += [
+        {"run": {"min_documents": 0, "rules": good["run"]}},
+        {"run": {"min_documents": True, "rules": good["run"]}},
+        {"run": {"rules": good["run"]}},
     ]
     for i, scopes in enumerate(cases):
         with pytest.raises(Refused):
@@ -329,7 +398,8 @@ def test_failing_slice_fails_gate_even_if_overall_passes(
     path = _thresholds(tmp_path, "phase1", {"slices.mixed": rule}, "m.json")
     gone = report.build_report(perfect, [report.load_thresholds(path)])
     assert gone["verdicts"]["phase1"]["results"]["slices.mixed"] == {
-        "field_precision.other": "not_measured"
+        "field_precision.other": "not_measured",
+        report.SCOPE_DOCUMENTS: "fail",
     }
     assert gone["verdicts"]["phase1"]["verdict"] == "fail"
 
@@ -347,6 +417,7 @@ def test_not_measured_fails_required_metric(tmp_path: Path, perfect: runner.RunR
         "gpu_peak_bytes": "not_measured",
         "latency_p50_s": "not_measured",
         "latency_p95_s": "not_measured",
+        report.SCOPE_DOCUMENTS: "fail",  # 13 documents, the gate wants 20
     }
     assert p1["verdict"] == "fail"
     assert "slices.lab_typed_clean.code_exact_match" in p1["failed"]
@@ -377,6 +448,7 @@ def test_not_measured_fails_required_metric(tmp_path: Path, perfect: runner.RunR
     assert out["verdicts"]["phase1"]["results"]["overall"] == {
         "code_exact_match": "not_applicable",
         "grounding_rate": "pass",
+        report.SCOPE_DOCUMENTS: "pass",
     }
     assert out["verdicts"]["phase1"]["verdict"] == "pass"
     # a gate whose rules are all not_applicable checks nothing, and does not pass
@@ -399,7 +471,23 @@ def test_latency_measured_only_on_the_named_hardware(perfect: runner.RunResult) 
         "gpu_peak_bytes": "pass",
         "latency_p50_s": "pass",
         "latency_p95_s": "pass",
+        report.SCOPE_DOCUMENTS: "fail",
     }
+    over = dataclasses.replace(l40s, gpu_peak_bytes=24_000_000_001)
+    rep = report.build_report(over, [report.packaged_thresholds("phase1")])
+    assert rep["verdicts"]["phase1"]["results"]["run"]["gpu_peak_bytes"] == "fail"
+
+
+def test_gated_scope_needs_enough_documents(tmp_path: Path, perfect: runner.RunResult) -> None:
+    rules = [{"metric": "field_precision.other", "op": "min", "value": "0.9"}]
+    for minimum, verdict in ((5, "pass"), (6, "fail")):
+        scopes = {"slices.lab_typed_clean": {"min_documents": minimum, "rules": rules}}
+        th = report.load_thresholds(_thresholds(tmp_path, "phase1", scopes, f"m{minimum}.json"))
+        v = report.build_report(perfect, [th])["verdicts"]["phase1"]
+        res = v["results"]["slices.lab_typed_clean"]
+        assert res["field_precision.other"] == "pass"  # perfect, but only five documents
+        assert res[report.SCOPE_DOCUMENTS] == verdict
+        assert v["verdict"] == verdict
 
 
 def test_rehearsal_gate(perfect: runner.RunResult, mini: minisets.MiniSet) -> None:
@@ -546,3 +634,103 @@ def test_compare_never_hides_a_regression(
     other = copy.deepcopy(before)
     other["testset"]["sha256"] = "0" * 64
     assert "different test sets" in report.compare(before, other)
+
+
+_MARKUP = ("<details>", '<a href="https://example.invalid/x">x</a>', "a|b", "**x**", "`x`")
+
+
+def _set_key(d: dict[str, Any], old: str, new: str) -> None:
+    d[new] = d.pop(old)
+
+
+def _mutations(rep: dict[str, Any], bad: str) -> list[tuple[str, dict[str, Any]]]:
+    """Every field render_markdown or compare interpolates, set to ``bad``."""
+    out: list[tuple[str, dict[str, Any]]] = []
+
+    def m(name: str, fn: Any) -> None:
+        r = copy.deepcopy(rep)
+        fn(r)
+        out.append((name, r))
+
+    m("extractor.name", lambda r: r["extractor"].__setitem__("name", bad))
+    m("model_versions key", lambda r: r["model_versions"].__setitem__(bad, "0.1.0"))
+    m("model_versions value", lambda r: r["model_versions"].__setitem__("extract", bad))
+    m("engine.name", lambda r: r["engine"].__setitem__("name", bad))
+    m("engine.version", lambda r: r["engine"].__setitem__("version", bad))
+    m("hardware", lambda r: r.__setitem__("hardware", bad))
+    for k in ("name", "version", "sha256", "extraction_schema_version"):
+        m(f"testset.{k}", lambda r, k=k: r["testset"].__setitem__(k, bad))
+    m("split.label", lambda r: r["split"].__setitem__("label", bad))
+    m("thresholds.file", lambda r: r["thresholds"]["phase1"].__setitem__("file", bad))
+    m("thresholds.sha256", lambda r: r["thresholds"]["phase1"].__setitem__("sha256", bad))
+    m("scope key", lambda r: _set_key(r["scopes"], "overall", f"slices.{bad}"))
+    m(
+        "metric key",
+        lambda r: _set_key(r["scopes"]["overall"]["metrics"], "grounding_rate", bad),
+    )
+    m(
+        "metric value",
+        lambda r: r["scopes"]["overall"]["metrics"].__setitem__("grounding_rate", bad),
+    )
+    m(
+        "outcome key",
+        lambda r: _set_key(r["scopes"]["slices.lab_typed_clean"]["outcomes"], "extracted", bad),
+    )
+    m(
+        "outcome count",
+        lambda r: r["scopes"]["slices.lab_typed_clean"]["outcomes"].__setitem__("extracted", bad),
+    )
+    m(
+        "refusal key",
+        lambda r: r["scopes"]["slices.lab_typed_clean"]["refusals"].__setitem__(bad, 0),
+    )
+    m("timeouts", lambda r: r["scopes"]["slices.lab_typed_clean"].__setitem__("timeouts", bad))
+    m("hostile failure key", lambda r: r["hostile"].__setitem__("failures", {bad: 0}))
+    m("hostile kind key", lambda r: _set_key(r["hostile"]["by_kind"], "two_patients", bad))
+    m("hostile cases", lambda r: r["hostile"].__setitem__("cases", bad))
+    m("verdict failed", lambda r: r["verdicts"]["phase1"]["failed"].append(bad))
+    m(
+        "verdict result key",
+        lambda r: r["verdicts"]["phase1"]["results"]["run"].__setitem__(bad, "fail"),
+    )
+    m("notebook key", lambda r: r["notebook_metrics"]["metrics"].__setitem__(bad, 1))
+    m("notebook value", lambda r: r["notebook_metrics"]["metrics"].__setitem__("val_f1", bad))
+    m("stopped", lambda r: r.__setitem__("stopped", bad))
+    m("run deadline", lambda r: r["run"].__setitem__("per_page_deadline_s", bad))
+    return out
+
+
+def test_crafted_report_with_markup_refused(perfect: runner.RunResult) -> None:
+    rep = report.build_report(perfect, _gates(), notebook_metrics={"val_f1": "0.81"})
+    assert report.parse_report(report.dumps(rep)) == rep
+    for bad in _MARKUP:
+        for name, crafted in _mutations(rep, bad):
+            with pytest.raises(Refused):
+                report.parse_report(canonical.dumps(crafted))
+            assert name  # each interpolated field refused on its own
+    # a thresholds file other than the packaged one for that gate is refused too
+    crafted = copy.deepcopy(rep)
+    crafted["thresholds"]["phase1"]["file"] = "thresholds/phase3.json"
+    with pytest.raises(Refused):
+        report.parse_report(canonical.dumps(crafted))
+    # a failed list that disagrees with the results is refused
+    crafted = copy.deepcopy(rep)
+    crafted["verdicts"]["phase1"]["failed"] = []
+    with pytest.raises(Refused):
+        report.parse_report(canonical.dumps(crafted))
+
+
+def test_compare_flags_suppression_and_not_applicable(perfect: runner.RunResult) -> None:
+    before = report.build_report(perfect, _gates())
+    after = copy.deepcopy(before)
+    after["scopes"]["slices.lab_typed_poor"]["metrics"] = report.SUPPRESSED
+    res = after["verdicts"]["phase1"]["results"]["slices.lab_typed_clean"]
+    res["code_exact_match"] = "not_applicable"
+    md = report.compare(before, after)
+    reg = md.split("Regressions:", 1)[1].split("\n\n", 1)[0]
+    assert "slices.lab_typed_poor: values suppressed after" in reg
+    assert "slices.lab_typed_clean.code_exact_match: not_measured to not_applicable" in reg
+    # shown after, suppressed before: not a regression by itself
+    back = report.compare(after, before)
+    reg = back.split("Regressions:", 1)[1].split("\n\n", 1)[0]
+    assert "values suppressed" not in reg
