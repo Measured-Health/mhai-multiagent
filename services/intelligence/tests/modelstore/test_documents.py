@@ -202,3 +202,9 @@ def test_documents_have_no_free_text(
         assert MARKER not in text
         for fixed in ("<", ">", "](", "<!--"):
             assert fixed not in text
+
+
+@pytest.mark.parametrize("value", ["a|b", "a<b", "a>b", "a`b", "a\nb", "a\rb"])
+def test_code_spans_refuse_markup(value: str) -> None:
+    with pytest.raises(Refused):
+        documents._code(value)

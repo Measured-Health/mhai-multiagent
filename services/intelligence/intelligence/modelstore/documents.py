@@ -40,8 +40,9 @@ _FAILED = re.compile(
 
 
 def _code(value: str) -> str:
-    """A code span; every value reaching here matched an id pattern (no backticks)."""
-    if "`" in value or "\n" in value:
+    """A code span; every value reaching here matched an id pattern. Refuses anything that
+    could end the span, split a table cell or open markup."""
+    if not isinstance(value, str) or any(c in value for c in "`|<>\n\r"):
         raise Refused("manifest_invalid", detail_code="document_value")
     return f"`{value}`"
 

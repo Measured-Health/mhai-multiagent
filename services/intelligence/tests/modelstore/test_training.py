@@ -374,3 +374,102 @@ def test_bad_licences_refused(tmp_path: Path, body: dict[str, Any]) -> None:
 def test_missing_registry_refused(tmp_path: Path) -> None:
     assert _reason(lambda: training.load_registry(tmp_path / "nope.json")) == "policy_invalid"
     assert _reason(lambda: training.load_licences(tmp_path / "nope.json")) == "policy_invalid"
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "patient-jane-doe-mrn-4417",
+        "patient_jane_doe_mrn_4417",
+        "mrn_441",
+        "dob_19800101",
+        "see:cell-12:ignore-the-gate",
+        "eval.f1",
+        "Loss",
+        "_loss",
+        "loss_",
+        "loss__x",
+        "a" * 41,
+    ],
+)
+def test_identifying_metric_names_refused(tmp_path: Path, key: str) -> None:
+    obj = _tm_obj(tmp_path)
+    obj["notebook_metrics"] = {key: 1}
+    assert _reason(lambda: training.load(_write(tmp_path, obj))) == "manifest_invalid"
+
+
+@pytest.mark.parametrize("key", ["eval_field_f1", "epoch_12", "train_loss", "a" * 40])
+def test_metric_names_accepted(tmp_path: Path, key: str) -> None:
+    obj = _tm_obj(tmp_path)
+    obj["notebook_metrics"] = {key: 0.5}
+    assert training.load(_write(tmp_path, obj)).notebook_metrics == ((key, 0.5),)
+
+
+@pytest.mark.parametrize(
+    "name,version",
+    [
+        ("jane-doe", "1.0"),
+        ("patient_4417", "1.0"),
+        ("Torch", "2.5.1"),
+        ("torch", "2.5 jane"),
+        ("torch", "jane"),
+        ("torch", "1.0.0-patient-doe"),
+        ("torch", "2.5.1+Jane"),
+        ("torch", "12345.0"),
+    ],
+)
+def test_framework_names_closed(tmp_path: Path, name: str, version: str) -> None:
+    obj = _tm_obj(tmp_path)
+    obj["framework"] = {name: version}
+    assert _reason(lambda: training.load(_write(tmp_path, obj))) == "manifest_invalid"
+
+
+@pytest.mark.parametrize("version", ["2", "2.5.1", "4.57.0.dev0", "2.5.1+cu121", "1.0rc1"])
+def test_framework_versions_accepted(tmp_path: Path, version: str) -> None:
+    obj = _tm_obj(tmp_path)
+    obj["framework"] = {"torch": version, "transformers": "4.57.1"}
+    assert dict(training.load(_write(tmp_path, obj)).framework)["torch"] == version
+
+
+@pytest.mark.parametrize(
+    "licence,reason",
+    [
+        ("mit", "licence_not_allowed"),  # SPDX-shaped, but the allow-list is exact
+        ("MIT ", "manifest_invalid"),  # not SPDX-shaped: refused at parse
+        ("MIT OR GPL-3.0", "manifest_invalid"),
+        ("Apache 2.0", "manifest_invalid"),
+    ],
+)
+def test_licence_shaped_mistakes(tmp_path: Path, licence: str, reason: str) -> None:
+    registry, licences = _committed()
+    obj = _tm_obj(tmp_path)
+    obj["base_model"]["licence"] = licence
+
+    def run() -> object:
+        return training.check(training.load(_write(tmp_path, obj)), registry, licences)
+
+    assert _reason(run) == reason
+
+
+def test_registry_values_checked_when_built() -> None:
+    good = training.Dataset("x@1.0.0", "synthetic", training.SYNTHETIC_GENERATOR, "1.0.0", True, 1)
+    for args in (
+        ("x@1.0.0", "synthetic", "a | <b>", "1.0.0", True, 1),
+        ("x | y@1.0.0", "synthetic", training.SYNTHETIC_GENERATOR, "1.0.0", True, 1),
+        ("x@1.0.0", "public", None, "1.0.0", True, 1),
+        ("x@1.0.0", "synthetic", training.SYNTHETIC_GENERATOR, "2.0.0", True, 1),
+        ("x@1.0.0", "synthetic", training.SYNTHETIC_GENERATOR, "1.0.0", False, 1),
+        ("x@1.0.0", "synthetic", training.SYNTHETIC_GENERATOR, "1.0.0", True, 0),
+        ("x@1.0.0", "deidentified", "a.b", "1.0.0", True, 1),
+    ):
+        with pytest.raises(Refused) as exc:
+            training.Dataset(*args)  # type: ignore[arg-type]
+        assert exc.value.reason == "policy_invalid", args
+    assert training.Registry({"x@1.0.0": good}).datasets["x@1.0.0"] is good
+    for bad in ({"y@1.0.0": good}, {"x@1.0.0": "not a dataset"}, [good]):
+        with pytest.raises(Refused) as exc:
+            training.Registry(bad)  # type: ignore[arg-type]
+        assert exc.value.reason == "policy_invalid"

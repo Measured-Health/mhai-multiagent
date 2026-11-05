@@ -13,9 +13,11 @@ Strict: exactly these keys, each held to a pattern, so no notebook free text get
 * ``base_model``: ``{"promoted": "<name>@<version>#<manifest sha256>"}``, or for an upstream
   base being promoted itself, ``{"upstream": "<hub repo>", "revision": "<commit>",
   "licence": "<SPDX id>"}``;
-* ``framework``: 1 to 32 package names mapped to version tokens;
-* ``notebook_metrics``: up to 64 metric names mapped to numbers (integers or finite
-  floats; informational only);
+* ``framework``: 1 to 32 packages from the closed set :data:`FRAMEWORKS`, each mapped to
+  a PEP 440-style version (``2.5.1``, ``4.57.0.dev0``, ``2.5.1+cu121``);
+* ``notebook_metrics``: up to 64 metric names (snake_case, at most 40 characters, no run
+  of three or more digits) mapped to numbers (integers or finite floats; informational
+  only);
 * ``created_at``: ``YYYY-MM-DDTHH:MM:SSZ``.
 
 A shape or pattern failure is ``manifest_invalid``; a missing file is
@@ -87,9 +89,31 @@ _REVISION_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}", re.ASCII)
 _COMMIT = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _SPDX = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]{0,63}", re.ASCII)
 _SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
-_PACKAGE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}", re.ASCII)
-_PACKAGE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}", re.ASCII)
-_METRIC = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,63}", re.ASCII)
+# Framework names are a closed set and versions a PEP 440 subset, so the card's framework
+# list carries no text of the notebook's choosing.
+FRAMEWORKS = frozenset(
+    {
+        "accelerate",
+        "datasets",
+        "numpy",  # the tiny model's only runtime (doceval.tiny)
+        "peft",
+        "safetensors",
+        "tokenizers",
+        "torch",
+        "transformers",
+        "trl",
+        "vllm",
+    }
+)
+_PACKAGE_VERSION = re.compile(
+    r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}(?:(?:a|b|rc|\.post|\.dev)[0-9]{1,4})?(?:\+[a-z0-9]{1,16})?",
+    re.ASCII,
+)
+# Metric names: snake_case words, at most 40 characters, no run of three or more digits
+# (so no identifier, date or record number fits in one).
+MAX_METRIC_NAME = 40
+_METRIC = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", re.ASCII)
+_DIGIT_RUN = re.compile(r"[0-9]{3}", re.ASCII)
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.ASCII)
 _MODULE = re.compile(r"[a-z_][a-z0-9_]{0,63}(?:\.[a-z_][a-z0-9_]{0,63}){0,7}", re.ASCII)
 
@@ -145,6 +169,14 @@ def is_licence_id(value: object) -> bool:
 
 def is_commit(value: object) -> bool:
     return _match(value, _COMMIT)
+
+
+def is_metric_name(value: object) -> bool:
+    return (
+        _match(value, _METRIC)
+        and len(str(value)) <= MAX_METRIC_NAME
+        and _DIGIT_RUN.search(str(value)) is None
+    )
 
 
 # ---------------------------------------------------------------- the manifest
@@ -218,7 +250,7 @@ class TrainingManifest:
             and all(
                 isinstance(p, tuple)
                 and len(p) == 2
-                and _match(p[0], _PACKAGE)
+                and p[0] in FRAMEWORKS
                 and _match(p[1], _PACKAGE_VERSION)
                 for p in self.framework
             )
@@ -229,7 +261,7 @@ class TrainingManifest:
             isinstance(self.notebook_metrics, tuple)
             and len(self.notebook_metrics) <= MAX_METRICS
             and all(
-                isinstance(p, tuple) and len(p) == 2 and _match(p[0], _METRIC) and _is_metric(p[1])
+                isinstance(p, tuple) and len(p) == 2 and is_metric_name(p[0]) and _is_metric(p[1])
                 for p in self.notebook_metrics
             )
             and len({p[0] for p in self.notebook_metrics}) == len(self.notebook_metrics),
@@ -316,6 +348,9 @@ def load_run(run_dir: Path | str) -> TrainingManifest:
 
 @dataclass(frozen=True, slots=True)
 class Dataset:
+    """One registry entry. Construction checks every value (``policy_invalid``), so an
+    entry built in process is held to the same rules as one read from the file."""
+
     id: str
     kind: Literal["synthetic", "deidentified"]
     generator: str | None
@@ -323,10 +358,35 @@ class Dataset:
     testset_disjoint: bool
     approved_by_pr: int
 
+    def __post_init__(self) -> None:
+        if not is_dataset_id(self.id) or self.kind not in KINDS:
+            raise _policy("dataset_id")
+        if self.version != self.id.split("@")[1]:
+            raise _policy("dataset_version")
+        if self.testset_disjoint is not True:
+            raise _policy("dataset_not_disjoint")
+        pr = self.approved_by_pr
+        if isinstance(pr, bool) or not isinstance(pr, int) or not 1 <= pr <= 10**9:
+            raise _policy("dataset_approval")
+        if self.kind == "synthetic":
+            if not _match(self.generator, _MODULE):
+                raise _policy("dataset_generator")
+        elif self.generator is not None:
+            raise _policy("dataset_generator")
+
 
 @dataclass(frozen=True, slots=True)
 class Registry:
+    """The approved datasets by id; construction checks each entry and its key."""
+
     datasets: Mapping[str, Dataset]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.datasets, Mapping) or len(self.datasets) > MAX_REGISTRY_ENTRIES:
+            raise _policy("registry_entries")
+        for key, d in self.datasets.items():
+            if not isinstance(d, Dataset) or key != d.id:
+                raise _policy("registry_entries")
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,22 +409,14 @@ def _read_policy(path: Path | str) -> Any:
 def _dataset(obj: object) -> Dataset:
     if not isinstance(obj, dict) or set(obj) != _DATASET_KEYS:
         raise _policy("dataset_keys")
-    ident, kind, generator = obj["id"], obj["kind"], obj["generator"]
-    if not is_dataset_id(ident) or kind not in KINDS:
-        raise _policy("dataset_id")
-    if obj["version"] != ident.split("@")[1]:
-        raise _policy("dataset_version")
-    if obj["testset_disjoint"] is not True:
-        raise _policy("dataset_not_disjoint")
-    pr = obj["approved_by_pr"]
-    if isinstance(pr, bool) or not isinstance(pr, int) or not 1 <= pr <= 10**9:
-        raise _policy("dataset_approval")
-    if kind == "synthetic":
-        if not _match(generator, _MODULE):
-            raise _policy("dataset_generator")
-    elif generator is not None:
-        raise _policy("dataset_generator")
-    return Dataset(ident, kind, generator, obj["version"], True, pr)
+    return Dataset(
+        obj["id"],
+        obj["kind"],
+        obj["generator"],
+        obj["version"],
+        obj["testset_disjoint"],
+        obj["approved_by_pr"],
+    )
 
 
 def parse_registry(obj: object) -> Registry:
@@ -478,6 +530,7 @@ def check(
 __all__ = [
     "ALLOWED_KINDS",
     "FILE_NAME",
+    "FRAMEWORKS",
     "KINDS",
     "LICENCES_SCHEMA",
     "REGISTRY_SCHEMA",
@@ -494,6 +547,7 @@ __all__ = [
     "is_commit",
     "is_dataset_id",
     "is_licence_id",
+    "is_metric_name",
     "is_pin",
     "load",
     "load_licences",

@@ -153,6 +153,11 @@ class _Scanner(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        # ``y = yaml`` (or ``y = torch``) makes ``y`` an alias for the scan
+        if isinstance(node.value, ast.Name):
+            for names in (self.yaml_names, self.torch_names):
+                if node.value.id in names:
+                    names.update(t.id for t in node.targets if isinstance(t, ast.Name))
         for target in node.targets:
             if (
                 isinstance(target, ast.Subscript)
@@ -177,7 +182,8 @@ _TEXT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(allow_pickle|trust_remote_code)[\"']?\s*[=:]\s*(True|1)\b",
         r"\b(unsafe_load|full_load)(_all)?\s*\(",
         r"\b(UnsafeLoader|FullLoader)\b",
-        r"\byaml\.load(_all)?\s*\((?!.*\bLoader\s*=\s*(yaml\.)?C?SafeLoader\b)",
+        # the safe loader must be inside the call's own parentheses, not in a comment
+        r"\byaml\.load(_all)?\s*\((?![^)]*\bLoader\s*=\s*(yaml\.)?C?SafeLoader\b[^)]*\))",
     )
 )
 
@@ -284,6 +290,9 @@ _PLANTED = [
     "import yaml\nf = getattr(yaml, 'unsafe_load')",
     "import yaml\nf = getattr(yaml, 'load')",
     "import yaml\nf = yaml.load",
+    "import yaml\ny = yaml\nx = y.load(f)",
+    "import yaml as Y\ny = z = Y\nx = z.full_load(f)",
+    "import yaml\ny = yaml\nx = y.load_all(f, Loader=y.Loader)",
 ]
 
 
@@ -311,6 +320,8 @@ def test_scanner_catches_a_planted_use(tmp_path: Path, snippet: str) -> None:
         "x = yaml.unsafe_load(f)",
         "x = yaml.full_load(f)",
         "x = yaml.load(f, Loader=yaml.FullLoader)",
+        "x = yaml.load(f)  # Loader=SafeLoader",
+        "x = yaml.load(f, Loader=yaml.Loader); Loader=SafeLoader",
     ],
 )
 def test_text_backstop_catches_a_planted_use(tmp_path: Path, line: str) -> None:
