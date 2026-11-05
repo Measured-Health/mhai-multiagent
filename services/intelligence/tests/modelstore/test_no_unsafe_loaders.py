@@ -22,6 +22,13 @@ UNSAFE_MODULES = frozenset(
 UNSAFE_NAMES = frozenset({"read_pickle"})
 UNSAFE_FLAGS = frozenset({"allow_pickle", "trust_remote_code"})
 DYNAMIC_IMPORTS = frozenset({"__import__", "import_module"})
+# yaml: these always build arbitrary Python objects (or can, with the default loader).
+YAML_UNSAFE = frozenset(
+    {"unsafe_load", "unsafe_load_all", "full_load", "full_load_all", "UnsafeLoader", "FullLoader"}
+)
+# yaml.load and yaml.load_all are safe only with an explicit safe loader.
+YAML_LOADS = frozenset({"load", "load_all"})
+YAML_SAFE_LOADERS = frozenset({"SafeLoader", "CSafeLoader"})
 
 
 def _root(node: ast.expr) -> str | None:
@@ -42,6 +49,10 @@ class _Scanner(ast.NodeVisitor):
     def __init__(self) -> None:
         self.hits: list[tuple[int, str]] = []
         self.torch_names: set[str] = {"torch"}
+        self.yaml_names: set[str] = {"yaml"}
+        self.yaml_load_names: set[str] = set()
+        self.safe_loader_names: set[str] = set()
+        self.safe_calls: set[int] = set()  # ids of yaml.load nodes called with a safe loader
 
     def _hit(self, node: ast.AST, why: str) -> None:
         self.hits.append((getattr(node, "lineno", 0), why))
@@ -53,6 +64,8 @@ class _Scanner(ast.NodeVisitor):
                 self._hit(node, f"import {alias.name}")
             if root == "torch":
                 self.torch_names.add(alias.asname or "torch")
+            if alias.name == "yaml":
+                self.yaml_names.add(alias.asname or "yaml")
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
@@ -66,7 +79,27 @@ class _Scanner(ast.NodeVisitor):
                 if alias.name == "load" or alias.name == "*":
                     self._hit(node, "from torch import load")
                 self.torch_names.add(alias.asname or alias.name)
+            if node.module == "yaml":
+                if alias.name in YAML_UNSAFE or alias.name in ("*", "Loader"):
+                    self._hit(node, f"from yaml import {alias.name}")
+                elif alias.name in YAML_LOADS:
+                    self.yaml_load_names.add(alias.asname or alias.name)
+                elif alias.name in YAML_SAFE_LOADERS:
+                    self.safe_loader_names.add(alias.asname or alias.name)
         self.generic_visit(node)
+
+    def _is_yaml(self, node: ast.expr) -> bool:
+        return isinstance(node, ast.Name) and node.id in self.yaml_names
+
+    def _is_yaml_load(self, node: ast.expr) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr in YAML_LOADS and self._is_yaml(node.value)
+        return isinstance(node, ast.Name) and node.id in self.yaml_load_names
+
+    def _is_safe_loader(self, node: ast.expr) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr in YAML_SAFE_LOADERS and self._is_yaml(node.value)
+        return isinstance(node, ast.Name) and node.id in self.safe_loader_names
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr in UNSAFE_NAMES:
@@ -77,14 +110,24 @@ class _Scanner(ast.NodeVisitor):
             self._hit(node, "torch load")
         if node.attr in DYNAMIC_IMPORTS:
             self._hit(node, node.attr)
+        if node.attr in YAML_UNSAFE or (node.attr == "Loader" and self._is_yaml(node.value)):
+            self._hit(node, f"yaml {node.attr}")
+        if self._is_yaml_load(node) and id(node) not in self.safe_calls:
+            self._hit(node, "yaml load without SafeLoader")
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
         if node.id in DYNAMIC_IMPORTS or node.id in UNSAFE_NAMES:
             self._hit(node, node.id)
+        if self._is_yaml_load(node) and id(node) not in self.safe_calls:
+            self._hit(node, "yaml load without SafeLoader")
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
+        if self._is_yaml_load(node.func):
+            loaders = [kw.value for kw in node.keywords if kw.arg == "Loader"] + node.args[1:2]
+            if len(loaders) == 1 and self._is_safe_loader(loaders[0]):
+                self.safe_calls.add(id(node.func))
         for kw in node.keywords:
             if kw.arg in UNSAFE_FLAGS and not _is_false(kw.value):
                 self._hit(node, f"{kw.arg}=")
@@ -95,7 +138,9 @@ class _Scanner(ast.NodeVisitor):
             and isinstance(node.args[1], ast.Constant)
             and (
                 node.args[1].value in UNSAFE_NAMES
+                or node.args[1].value in YAML_UNSAFE
                 or (node.args[1].value == "load" and _root(node.args[0]) in self.torch_names)
+                or (node.args[1].value in YAML_LOADS and _root(node.args[0]) in self.yaml_names)
             )
         ):
             self._hit(node, "getattr load")
@@ -130,6 +175,9 @@ _TEXT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\btorch(\.\w+)*\.load\s*\(",
         r"\b(pickle|_pickle|cPickle|dill|cloudpickle|joblib|marshal|shelve)\.\w+\s*\(",
         r"\b(allow_pickle|trust_remote_code)[\"']?\s*[=:]\s*(True|1)\b",
+        r"\b(unsafe_load|full_load)(_all)?\s*\(",
+        r"\b(UnsafeLoader|FullLoader)\b",
+        r"\byaml\.load(_all)?\s*\((?!.*\bLoader\s*=\s*(yaml\.)?C?SafeLoader\b)",
     )
 )
 
@@ -214,6 +262,28 @@ _PLANTED = [
     "f(**{'allow_pickle': True})",
     "kw['trust_remote_code'] = True",
     "def f(:\n",
+    # yaml: only yaml.load(..., Loader=yaml.SafeLoader) and yaml.safe_load are safe
+    "import yaml\nx = yaml.load(f)",
+    "import yaml\nx = yaml.load(f, Loader=yaml.Loader)",
+    "import yaml\nx = yaml.load(f, Loader=yaml.FullLoader)",
+    "import yaml\nx = yaml.load(f, Loader=yaml.UnsafeLoader)",
+    "import yaml\nx = yaml.load(f, yaml.Loader)",
+    "import yaml\nx = yaml.load(f, Loader=loader)",
+    "import yaml\nx = yaml.load_all(f)",
+    "import yaml\nx = yaml.unsafe_load(f)",
+    "import yaml\nx = yaml.full_load(f)",
+    "import yaml\nx = yaml.unsafe_load_all(f)",
+    "import yaml\nx = yaml.full_load_all(f)",
+    "import yaml as Y\nx = Y.load(f)",
+    "import yaml as Y\nx = Y.unsafe_load(f)",
+    "from yaml import load\nx = load(f)",
+    "from yaml import load as L\nx = L(f)",
+    "from yaml import unsafe_load",
+    "from yaml import full_load as fl",
+    "from yaml import *",
+    "import yaml\nf = getattr(yaml, 'unsafe_load')",
+    "import yaml\nf = getattr(yaml, 'load')",
+    "import yaml\nf = yaml.load",
 ]
 
 
@@ -237,6 +307,10 @@ def test_scanner_catches_a_planted_use(tmp_path: Path, snippet: str) -> None:
         "x = pd.read_pickle(p)",
         '"trust_remote_code": true, "allow_pickle": 1',
         "trust_remote_code = True",
+        "x = yaml.load(f)",
+        "x = yaml.unsafe_load(f)",
+        "x = yaml.full_load(f)",
+        "x = yaml.load(f, Loader=yaml.FullLoader)",
     ],
 )
 def test_text_backstop_catches_a_planted_use(tmp_path: Path, line: str) -> None:
@@ -266,8 +340,20 @@ def test_scanner_ignores_the_bare_word_and_refusal_codes(tmp_path: Path) -> None
         "a = np.load(p)\n"
         "b = json.load(f)\n"
         "c = f(trust_remote_code=False, allow_pickle=None)\n"
-        'd = {"trust_remote_code": False}\n',
+        'd = {"trust_remote_code": False}\n'
+        "import yaml\n"
+        "e = yaml.safe_load(f)\n"
+        "g = yaml.load(f, Loader=yaml.SafeLoader)\n"
+        "h = yaml.load(f, Loader=yaml.CSafeLoader)\n"
+        "i = yaml.load_all(f, Loader=yaml.SafeLoader)\n"
+        "j = yaml.safe_load_all(f)\n"
+        "from yaml import SafeLoader\n"
+        "k = yaml.load(f, Loader=SafeLoader)\n"
+        'REFUSED = ("unsafe_load", "full_load")\n',
         encoding="utf-8",
+    )
+    (pkg / "safe.yaml.txt").write_text(
+        "x = yaml.safe_load(f)\ny = yaml.load(f, Loader=yaml.SafeLoader)\n", encoding="utf-8"
     )
     (pkg / "names.txt").write_text("Marshall\nPickles\nShelvey\n", encoding="utf-8")
     assert find_unsafe(pkg) == []

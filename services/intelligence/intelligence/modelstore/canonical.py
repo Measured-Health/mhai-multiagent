@@ -81,10 +81,14 @@ def dumps(obj: Any) -> bytes:
     return text.encode("ascii")
 
 
-def loads_strict(b: bytes, max_bytes: int, *, allow_floats: bool = False) -> Any:
-    """Parse ``b`` strictly. ``allow_floats`` admits finite floats, for third-party
-    model files (``config.json`` and the like) that are checked but never hashed as
-    canonical JSON; anything hashed or signed keeps the default.
+def loads_strict(
+    b: bytes, max_bytes: int, *, allow_floats: bool = False, trailing_whitespace: bool = False
+) -> Any:
+    """Parse ``b`` strictly. ``allow_floats`` admits finite floats, and
+    ``trailing_whitespace`` JSON whitespace after the value (the newline that
+    ``transformers`` and editors write at the end of a file), for files that are checked
+    but never hashed as canonical JSON (``config.json`` and the like, hand-edited
+    registries); anything hashed or signed keeps the defaults.
     """
     if not isinstance(b, (bytes, bytearray)):
         raise Refused("json_invalid")
@@ -109,7 +113,7 @@ def loads_strict(b: bytes, max_bytes: int, *, allow_floats: bool = False) -> Any
         failed = True
     if failed:
         raise Refused("json_invalid")
-    if end != len(text):
+    if end != len(text) and not (trailing_whitespace and text[end:].strip(" \t\n\r") == ""):
         raise Refused("json_invalid")
     _check_depth(obj)
     return obj

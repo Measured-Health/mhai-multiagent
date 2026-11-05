@@ -310,10 +310,12 @@ def _check_index(obj: dict[str, Any], name: str, present: frozenset[str]) -> Non
             raise FileRefused("missing_file", name, "index_shard")
 
 
-def _check_json_bytes(raw: bytes, kind: str, name: str, present: frozenset[str]) -> None:
+def _check_json_bytes(raw: bytes, kind: str, name: str, present: frozenset[str]) -> Any:
     reason: str | None = None
     try:
-        obj = canonical.loads_strict(raw, _json_cap(kind), allow_floats=True)
+        obj = canonical.loads_strict(
+            raw, _json_cap(kind), allow_floats=True, trailing_whitespace=True
+        )
     except Refused as exc:
         reason = exc.reason
     if reason is not None:
@@ -324,6 +326,7 @@ def _check_json_bytes(raw: bytes, kind: str, name: str, present: frozenset[str])
         _code_refs(obj, name)
     if kind == INDEX_JSON:
         _check_index(obj, name, present)
+    return obj
 
 
 def _listing(dfd: int, name: str) -> frozenset[str]:
@@ -334,8 +337,23 @@ def _listing(dfd: int, name: str) -> frozenset[str]:
     raise refusal
 
 
-def check_json(path: Path | str, kind: str, *, present: frozenset[str] | None = None) -> None:
-    """Check one JSON file; ``kind`` is its allow-listed name and must be the file's name.
+def read_regular(path: Path | str, cap: int) -> bytes:
+    """The bytes of one regular, singly linked file of at most ``cap`` bytes, read without
+    following a link (a registry or other small policy file). Refusals as for
+    :func:`check_json`: ``missing_file``, ``file_not_allowed``, ``too_large``."""
+    path = Path(path)
+    with _parent(path) as (dfd, name), _open(name, dfd) as (f, size):
+        if size > cap:
+            raise FileRefused("too_large", name)
+        raw = _read_exact(f, size, name, "json_invalid")
+        if _read_block(f, name):
+            raise FileRefused("size_mismatch", name, "grew")
+        return raw
+
+
+def check_json(path: Path | str, kind: str, *, present: frozenset[str] | None = None) -> Any:
+    """Check one JSON file and return its parse; ``kind`` is its allow-listed name and must
+    be the file's name.
 
     For ``model.safetensors.index.json`` the shards it names must be in ``present``
     (default: the names in the file's directory). This is a helper and test entry
@@ -350,7 +368,9 @@ def check_json(path: Path | str, kind: str, *, present: frozenset[str] | None = 
         raw = _read_exact(f, size, name, "json_invalid")
         if _read_block(f, name):
             raise FileRefused("size_mismatch", name, "grew")
-        _check_json_bytes(raw, kind, name, _listing(dfd, name) if present is None else present)
+        return _check_json_bytes(
+            raw, kind, name, _listing(dfd, name) if present is None else present
+        )
 
 
 # --- safetensors -----------------------------------------------------------
@@ -576,4 +596,5 @@ __all__ = [
     "check_json",
     "check_run",
     "check_safetensors",
+    "read_regular",
 ]

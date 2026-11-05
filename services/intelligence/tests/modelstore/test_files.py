@@ -172,6 +172,17 @@ def test_json_strict(tmp_path: Path, raw: bytes) -> None:
     _refused("json_invalid", files.check_json, _write(tmp_path / "config.json", raw), "config.json")
 
 
+def test_json_trailing_newline_passes(tmp_path: Path) -> None:
+    # transformers' save_pretrained ends config.json with a newline; still one value only
+    files.check_json(_write(tmp_path / "config.json", b'{"a": 1.5}\n'), "config.json")
+    path = _write(tmp_path / "generation_config.json", b'{"a": 1}\r\n  \t\n')
+    files.check_json(path, "generation_config.json")
+    for raw in (b'{"a":1}\n{"b":2}', b'{"a":1}\nx', b'\n{"a":1}', b'{"a":1}\n\x00'):
+        _refused(
+            "json_invalid", files.check_json, _write(tmp_path / "config.json", raw), "config.json"
+        )
+
+
 def test_json_unknown_kind_refused(tmp_path: Path) -> None:
     _refused("file_not_allowed", files.check_json, _write(tmp_path / "x.json", b"{}"), "vocab.json")
 

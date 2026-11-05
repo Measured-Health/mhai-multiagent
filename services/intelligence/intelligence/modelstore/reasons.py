@@ -47,6 +47,7 @@ REASONS: frozenset[str] = frozenset(
         "store_unavailable",
         "not_allowed_here",
         "invalid_name",
+        "base_unverified",
     }
 )
 
