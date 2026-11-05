@@ -389,14 +389,20 @@ class MemoryStore:
         raise AssertionError("not used")
 
 
-def _fake_build(seen: list[Path], fail: str | None = None) -> Any:
+def _fake_build(
+    seen: list[Path], fail: str | None = None, doc_id: str = "docaa", link: bool = False
+) -> Any:
     def build(purpose: str, seed: Any, out_dir: Path, scale: float, *, version: str) -> Any:
         assert purpose == "test" and seed is None
         seen.append(Path(out_dir))
         root = Path(out_dir) / "test"
-        (root / "pages" / "docaa").mkdir(parents=True)
+        (root / "pages" / doc_id).mkdir(parents=True)
         page = b"synthetic page"
-        (root / "pages" / "docaa" / "1.png").write_bytes(page)
+        if link:  # the listed page is a link: the build's own read refuses it
+            (root / "real.png").write_bytes(page)
+            (root / "pages" / doc_id / "1.png").symlink_to(root / "real.png")
+        else:
+            (root / "pages" / doc_id / "1.png").write_bytes(page)
         if fail is not None:
             raise sets.SetError(fail)
         manifest = {
@@ -410,7 +416,7 @@ def _fake_build(seen: list[Path], fail: str | None = None) -> Any:
             "documents": [],
             "files": [
                 {
-                    "path": "pages/docaa/1.png",
+                    "path": f"pages/{doc_id}/1.png",
                     "size": len(page),
                     "sha256": hashlib.sha256(page).hexdigest(),
                 }
@@ -462,7 +468,7 @@ def test_scanner_refusal_uploads_nothing(
     scratch.mkdir()
     seen: list[Path] = []
     monkeypatch.setattr(testsets.sets, "build", _fake_build(seen))
-    finding = synth_scanner.Finding("truth/x.json#/patient/mrn", "not_synthetic", "mrn_like")
+    finding = synth_scanner.Finding("truth/x.json#/patient/mrn", "mrn_like")
     monkeypatch.setattr(
         testsets.synth_scanner,
         "scan_set",
@@ -782,10 +788,8 @@ def test_testset_lock_mismatch_refused(
     assert list(tmp_path.iterdir()) == []
     # A version that was never built.
     missing = testsets.LockEntry(SUITE, _version(), locked.entry.sha256)
-    assert _refused(testsets.fetch, reader, missing, locked.keys.policy, tmp_path).reason in (
-        "testset_mismatch",
-        "not_found",
-    )
+    err = _refused(testsets.fetch, reader, missing, locked.keys.policy, tmp_path)
+    assert (err.reason, err.detail_code) == ("testset_mismatch", "missing")
     assert list(tmp_path.iterdir()) == []
     # A trust policy that doesn't trust the signer for testset.
     err = _refused(testsets.fetch, reader, locked.entry, locked.keys.empty_policy, tmp_path)
@@ -903,3 +907,312 @@ def test_policies_cover_the_eval_claim_and_scope_version_listing() -> None:
                 "Condition": {"StringLike": {"s3:prefix": ["eval/*"]}},
             }
         ]
+
+
+# ---------------------------------------------------------------- fix round 1
+
+
+PLANTED = "plantedtestsplitidbbbbbbbb"  # stands in for a test-split document id
+
+
+def _no_planted(err: BaseException) -> None:
+    """Neither the refusal, its attributes nor its exception chain carries the id."""
+    seen: list[BaseException] = []
+    e: BaseException | None = err
+    while e is not None and e not in seen:
+        seen.append(e)
+        e = e.__cause__ or e.__context__
+    for x in seen:
+        for text in (str(x), repr(x), repr(vars(x)) if hasattr(x, "__dict__") else ""):
+            assert PLANTED not in text
+        assert PLANTED not in repr(getattr(x, "args", ()))
+        assert PLANTED not in str(getattr(x, "filename", ""))
+
+
+def _memory_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, doc_id: str = "docaa"
+) -> tuple[MemoryStore, Keys, Any]:
+    keys = _make_keys(tmp_path / "k")
+    monkeypatch.setattr(testsets.sets, "build", _fake_build([], doc_id=doc_id))
+    monkeypatch.setattr(testsets.synth_scanner, "scan_set", _ok_scan)
+    s = MemoryStore()
+    built = testsets.build_and_lock(
+        s,
+        keys.signer,
+        keys.policy,
+        suite=SUITE,
+        version="1.0.0",
+        scale=SCALE,
+        retention_days=DAY,
+        scratch_parent=tmp_path,
+    )
+    return s, keys, built
+
+
+def _add_version(s: MemoryStore, key: str, body: bytes) -> None:
+    s.objects[key].append((str(uuid.uuid4()), body))
+
+
+def test_same_bytes_and_junk_versions_still_fetch(
+    tmp_path: Path, dev_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s, keys, built = _memory_locked(tmp_path, monkeypatch)
+    entry = testsets.LockEntry.parse(built.entry.text)
+    tkey, skey = store.testset_key(SUITE, "1.0.0"), store.testset_sig_key(SUITE, "1.0.0")
+    raw, sig = s.objects[tkey][0][1], s.objects[skey][0][1]
+    # Identical re-uploads of both, and junk shadows (more of them than MAX_VERSIONS).
+    for _ in range(3):
+        _add_version(s, tkey, raw)
+        _add_version(s, skey, sig)
+    for n in range(testsets.MAX_VERSIONS + 2):
+        _add_version(s, tkey, b"junk %d" % n)
+        _add_version(s, skey, b"junk %d" % n)
+    out = testsets.fetch(s, entry, keys.policy, tmp_path / "f")
+    assert (out / "testset.json").read_bytes() == raw
+
+
+def test_manifest_purpose_signature_refused_at_fetch(
+    tmp_path: Path, dev_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s, keys, built = _memory_locked(tmp_path, monkeypatch)
+    entry = testsets.LockEntry.parse(built.entry.text)
+    tkey, skey = store.testset_key(SUITE, "1.0.0"), store.testset_sig_key(SUITE, "1.0.0")
+    raw = s.objects[tkey][0][1]
+    # A policy that trusts the same key for manifests too (the KMS plan shares one key).
+    both = signing.parse_policy(
+        {
+            "schema": signing.TRUST_SCHEMA,
+            "signers": {
+                "manifest": [_entry_for(keys.signer)],
+                "signoff": [],
+                "testset": [_entry_for(keys.signer)],
+            },
+        },
+        environment="development",
+    )
+    doc = keys.signer.sign("manifest", raw)
+    relabelled = signing.SignatureDoc("testset", doc.alg, doc.key_id, doc.signature)
+    for forged in (doc.to_bytes(), relabelled.to_bytes()):
+        s.objects[skey] = [(str(uuid.uuid4()), forged)]
+        err = _refused(testsets.fetch, s, entry, both, tmp_path / "f")
+        assert (err.reason, err.detail_code) == ("testset_mismatch", "signature")
+        assert not (tmp_path / "f").exists() or list((tmp_path / "f").iterdir()) == []
+
+
+@pytest.mark.parametrize("call", ["open", "mkdir"])
+def test_fetch_write_errors_carry_no_path(
+    tmp_path: Path, dev_env: None, monkeypatch: pytest.MonkeyPatch, call: str
+) -> None:
+    s, keys, built = _memory_locked(tmp_path, monkeypatch, doc_id=PLANTED)
+    entry = testsets.LockEntry.parse(built.entry.text)
+    real = getattr(os, call)
+
+    def fail(path: Any, *a: Any, **kw: Any) -> Any:
+        # Only fetch's own writes fail (mkdir, or an open that creates), not the clean-up.
+        creating = call == "mkdir" or bool(a and isinstance(a[0], int) and a[0] & os.O_CREAT)
+        if creating and PLANTED in str(path):
+            raise OSError(28, "No space left on device", str(path))
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(testsets.os, call, fail)
+    err = _refused(testsets.fetch, s, entry, keys.policy, tmp_path / "f")
+    assert (err.reason, err.detail_code) == ("file_not_allowed", "write")
+    _no_planted(err)
+    monkeypatch.setattr(testsets.os, call, real)
+    assert list((tmp_path / "f").iterdir()) == []
+
+
+def test_build_read_refusal_carries_no_document_id(
+    tmp_path: Path, dev_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keys = _make_keys(tmp_path / "k")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(testsets.sets, "build", _fake_build([], doc_id=PLANTED, link=True))
+    monkeypatch.setattr(testsets.synth_scanner, "scan_set", _ok_scan)
+    err = _refused(
+        testsets.build_and_lock,
+        MemoryStore(),
+        keys.signer,
+        keys.policy,
+        suite=SUITE,
+        version="1.0.0",
+        scale=SCALE,
+        retention_days=DAY,
+        scratch_parent=scratch,
+    )
+    assert err.detail_code == "scratch"
+    assert type(err) is Refused
+    _no_planted(err)
+    assert list(scratch.iterdir()) == []
+
+
+def test_bad_scratch_or_wrong_key_never_takes_the_claim(
+    tmp_path: Path, dev_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keys = _make_keys(tmp_path / "k")
+    monkeypatch.setattr(testsets.sets, "build", _fake_build([]))
+    s = MemoryStore()
+    kw: dict[str, Any] = {
+        "suite": SUITE,
+        "version": "1.0.0",
+        "scale": SCALE,
+        "retention_days": DAY,
+    }
+    # A scratch root that doesn't exist.
+    err = _refused(
+        testsets.build_and_lock,
+        s,
+        keys.signer,
+        keys.policy,
+        scratch_parent=tmp_path / "missing",
+        **kw,
+    )
+    assert (err.reason, err.detail_code) == ("not_allowed_here", "scratch")
+    assert s.objects == {}
+    # A signer that names the trusted key but holds another private key.
+    other = _make_keys(tmp_path / "other")
+
+    class Impostor:
+        key_id = keys.signer.key_id
+        alg = keys.signer.alg
+
+        def sign(self, purpose: str, payload: bytes) -> signing.SignatureDoc:
+            doc = other.signer.sign(purpose, payload)
+            return signing.SignatureDoc(purpose, doc.alg, keys.signer.key_id, doc.signature)
+
+    err = _refused(
+        testsets.build_and_lock, s, Impostor(), keys.policy, scratch_parent=tmp_path, **kw
+    )
+    assert err.reason == "signature_invalid"
+    assert s.objects == {}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["k", "other"]
+
+
+def test_scratch_not_removed_is_reported(
+    tmp_path: Path,
+    dev_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(testsets.shutil, "rmtree", lambda *_a, **_kw: None)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    keys = _make_keys(tmp_path / "k")
+    monkeypatch.setattr(testsets.sets, "build", _fake_build([], doc_id=PLANTED))
+    monkeypatch.setattr(testsets.synth_scanner, "scan_set", _ok_scan)
+    built = testsets.build_and_lock(
+        MemoryStore(),
+        keys.signer,
+        keys.policy,
+        suite=SUITE,
+        version="1.0.0",
+        scale=SCALE,
+        retention_days=DAY,
+        scratch_parent=scratch,
+    )
+    assert built.scratch_removed is False
+    assert "code=scratch_not_removed" in caplog.text
+    assert PLANTED not in caplog.text
+    assert str(scratch) not in caplog.text
+
+
+def _memory_cli_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, keys: Keys, s: MemoryStore
+) -> None:
+    _cli_env(
+        monkeypatch,
+        tmp_path,
+        MHAI_MODELS_SIGNER=str(keys.key_path),
+        MHAI_MODELS_TRUST_POLICY=str(keys.policy_path),
+        MHAI_MODELS_SCRATCH=str(tmp_path / "scratch"),
+    )
+    (tmp_path / "scratch").mkdir(exist_ok=True)
+    monkeypatch.setattr(cli.store, "S3Store", lambda *_a, **_kw: s)
+
+
+def test_cli_exit_4_when_scratch_not_removed(
+    tmp_path: Path,
+    dev_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    keys = _make_keys(tmp_path / "k")
+    _memory_cli_env(monkeypatch, tmp_path, keys, MemoryStore())
+    monkeypatch.setattr(testsets.sets, "build", _fake_build([]))
+    monkeypatch.setattr(testsets.synth_scanner, "scan_set", _ok_scan)
+    monkeypatch.setattr(testsets.shutil, "rmtree", lambda *_a, **_kw: None)
+    assert cli.main(_build_argv()) == 4
+    out = capsys.readouterr()
+    assert LOCK_LINE.fullmatch(out.out.strip())
+    assert json.loads(out.err) == {"warning": "scratch_not_removed"}
+
+
+def test_scanner_failure_logs_no_document_id(
+    tmp_path: Path,
+    dev_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The real build of a small test split, refused by the scanner inside sets.build
+    with findings that name a (planted) document id: neither the logs nor the CLI's
+    output carry it."""
+    caplog.set_level(logging.DEBUG)
+    keys = _make_keys(tmp_path / "k")
+    s = MemoryStore()
+    _memory_cli_env(monkeypatch, tmp_path, keys, s)
+    findings = (
+        synth_scanner.Finding(f"truth/{PLANTED}.json#patient.mrn", "mrn_like"),
+        synth_scanner.Finding(f"pages/{PLANTED}/1.png", "orphan_image"),
+    )
+    monkeypatch.setattr(
+        sets.synth_scanner, "scan_set", lambda _p: synth_scanner.ScanResult(False, findings, 2)
+    )
+    assert cli.main(_build_argv("1.0.0", "--scale", str(SCALE))) == 2
+    out = capsys.readouterr()
+    assert json.loads(out.out) == {"refused": "evaluation_failed"}
+    assert "findings=2" in caplog.text
+    for text in (caplog.text, out.out, out.err):
+        assert PLANTED not in text
+        assert "truth/" not in text and "pages/" not in text
+    assert list((tmp_path / "scratch").iterdir()) == []
+    assert list(s.objects) == [store.testset_claim_key(SUITE, "1.0.0")]
+
+
+@pytest.mark.store
+@pytest.mark.parametrize(
+    "prefix", ["eval/../models/", "eval/%2e%2e/models/", "eval/./../models/", "eval/..%2fmodels/"]
+)
+def test_eval_reader_listing_cannot_climb_out_of_eval(
+    minio_store: MinioStore, locked: Locked, prefix: str
+) -> None:
+    from botocore.exceptions import ClientError
+
+    raw = minio_store.client("eval-reader")
+    try:
+        resp = raw.list_object_versions(Bucket=minio_store.bucket, Prefix=prefix)
+    except ClientError:
+        return  # refused outright
+    keys = [v["Key"] for v in resp.get("Versions", []) + resp.get("DeleteMarkers", [])]
+    keys += [p["Prefix"] for p in resp.get("CommonPrefixes", [])]
+    assert not [k for k in keys if not k.startswith("eval/")]
+
+
+@pytest.mark.store
+def test_same_bytes_and_junk_versions_in_minio(
+    minio_store: MinioStore, locked: Locked, tmp_path: Path, dev_env: None
+) -> None:
+    raw, _ = _locked_manifest(minio_store, locked)
+    r = minio_store.store("eval-reader")
+    tkey = store.testset_key(SUITE, locked.version)
+    skey = store.testset_sig_key(SUITE, locked.version)
+    sig_vid = r.versions(skey)[-1]  # the oldest: the build's own
+    sig = r.get(skey, sig_vid, max_bytes=4096)
+    for body in (raw, b"junk manifest"):
+        _raw_put(minio_store, "eval-writer", tkey, body)
+    for body in (sig, b"junk signature"):
+        _raw_put(minio_store, "eval-writer", skey, body)
+    out = testsets.fetch(r, locked.entry, locked.keys.policy, tmp_path)
+    assert (out / "testset.json").read_bytes() == raw

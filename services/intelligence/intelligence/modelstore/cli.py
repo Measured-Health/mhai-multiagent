@@ -25,7 +25,9 @@ only), ``MHAI_MODELS_TRUST_POLICY`` (the signer must be trusted for ``testset``)
 ``MHAI_MODELS_SCRATCH`` (optional: where the 0700 scratch folder is made).
 
 Exit codes: 0 done, 2 refused (one JSON line ``{"refused": "<code>"}`` on stdout), 3 a file
-could not be read or written.
+could not be read or written, 4 (``testset-build`` only) the split is locked and its lock
+line printed, but the scratch copy could not be removed (``{"warning":
+"scratch_not_removed"}`` on stderr, no path): remove the scratch root by hand.
 """
 
 import argparse
@@ -119,6 +121,10 @@ def _testset_build(args: argparse.Namespace) -> int:
         scratch_parent=os.environ.get(SCRATCH_ENV) or None,
     )
     sys.stdout.write(built.entry.text + "\n")
+    if not built.scratch_removed:
+        # The split is locked, but its plaintext scratch copy is still on this disk.
+        sys.stderr.write(canonical.dumps({"warning": "scratch_not_removed"}).decode() + "\n")
+        return 4
     return 0
 
 

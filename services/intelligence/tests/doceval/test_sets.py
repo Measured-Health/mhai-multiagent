@@ -335,16 +335,35 @@ def test_too_many_redraws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("purpose", ["train", "test"])
 def test_scanner_refusal_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+    purpose: str,
 ) -> None:
-    refused = scanner.ScanResult(False, (scanner.Finding("truth/x.json#patient.mrn", "mrn"),), 1)
+    planted = "plantedtestsplitidaaaaaaaa"  # stands in for a test-split document id
+    refused = scanner.ScanResult(
+        False,
+        (
+            scanner.Finding(f"truth/{planted}.json#patient.mrn", "mrn"),
+            scanner.Finding(f"pages/{planted}/1.png", "orphan_image"),
+        ),
+        1,
+    )
     monkeypatch.setattr(sets.synth_scanner, "scan_set", lambda _p: refused)
-    caplog.set_level(logging.ERROR)
-    with pytest.raises(sets.SetError, match="scanner_refused"):
-        sets.build("train", 3, tmp_path, 0.01, version="1.0.0")
+    caplog.set_level(logging.DEBUG)
+    seed = 3 if purpose == "train" else None
+    with pytest.raises(sets.SetError, match="scanner_refused") as e:
+        sets.build(purpose, seed, tmp_path, 0.01, version="1.0.0")  # type: ignore[arg-type]
     assert list(tmp_path.iterdir()) == []  # nothing kept: not the reserved folder, not the temp
-    assert any("path=truth/x.json#patient.mrn rule=mrn" in r.getMessage() for r in caplog.records)
+    # The count and the rules only; never a path, which would carry a document id.
+    assert any("findings=2 rules=['mrn', 'orphan_image']" in r.getMessage() for r in caplog.records)
+    out = capsys.readouterr()
+    for text in (caplog.text, out.out, out.err, str(e.value), repr(e.value)):
+        assert planted not in text
+        assert "truth/" not in text
 
 
 def test_reserved_folder_is_never_taken_over(tmp_path: Path) -> None:

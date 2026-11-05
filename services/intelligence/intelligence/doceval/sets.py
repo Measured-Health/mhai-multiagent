@@ -50,9 +50,11 @@ again and logged with the finding's path and rule (never a value); any other rul
 the build (``generator_not_synthetic``), and more than 0.5% of the set's documents redrawn
 (at least 1) fails it too (``too_many_redraws``). The whole folder is then scanned again.
 
-Logs carry the purpose, version, counts, timings, the manifest's SHA-256 and scanner
-finding paths and rules only. Building the full test split (717 documents, about 1,400
-pages) takes about 16 minutes on the build server, one document at a time.
+Logs carry the purpose, version, counts, timings, the manifest's SHA-256, scanner rules
+and the field paths of redrawn documents (logged before the document has an id) only; a
+whole-set scanner refusal logs the finding count and rules, never a path. Building the
+full test split (717 documents, about 1,400 pages) takes about 16 minutes on the build
+server, one document at a time.
 """
 
 import base64
@@ -743,8 +745,13 @@ def build(
         _put_file(tmp / "testset.json", raw)
         scan = synth_scanner.scan_set(tmp)
         if not scan.ok:
-            for f in scan.findings:  # paths (document ids, field paths) and rules, no values
-                log.error("set refused by the scanner: path=%s rule=%s", f.path, f.rule)
+            # The count and the rules only: a finding's path names a file, and file names
+            # carry document ids (never logged for any purpose, the test split above all).
+            log.error(
+                "set refused by the scanner: findings=%d rules=%s",
+                len(scan.findings),
+                sorted({f.rule for f in scan.findings}),
+            )
             raise SetError("scanner_refused")
         names = sorted(os.listdir(tmp), key=lambda n: n == "testset.json")
         for name in names:
