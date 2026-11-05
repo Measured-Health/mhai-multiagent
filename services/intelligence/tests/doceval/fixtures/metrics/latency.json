@@ -1,0 +1,86 @@
+{
+ "description": "Nearest-rank percentiles: rank = ceil(p/100 * n) of the sorted values.",
+ "cases": [
+  {
+   "seconds": [
+    3,
+    1,
+    2,
+    5,
+    4
+   ],
+   "working": "n=5: p50 rank 3, p95 rank 5",
+   "p50": 3,
+   "p95": 5
+  },
+  {
+   "seconds": [
+    20,
+    19,
+    18,
+    17,
+    16,
+    15,
+    14,
+    13,
+    12,
+    11,
+    10,
+    9,
+    8,
+    7,
+    6,
+    5,
+    4,
+    3,
+    2,
+    1
+   ],
+   "working": "n=20: p50 rank 10, p95 rank 19",
+   "p50": 10,
+   "p95": 19
+  },
+  {
+   "seconds": [
+    7.5
+   ],
+   "working": "n=1: both rank 1",
+   "p50": 7.5,
+   "p95": 7.5
+  },
+  {
+   "seconds": [
+    1,
+    2,
+    3,
+    4,
+    100
+   ],
+   "working": "n=5: p95 rank ceil(4.75)=5, the outlier",
+   "p50": 3,
+   "p95": 100
+  }
+ ],
+ "throughput": [
+  {
+   "pages": 120,
+   "seconds": 600,
+   "expected": "12"
+  },
+  {
+   "pages": 1,
+   "seconds": 7.5,
+   "expected": "8"
+  },
+  {
+   "pages": 0,
+   "seconds": 10,
+   "expected": null
+  },
+  {
+   "pages": 5,
+   "seconds": 0,
+   "expected": null
+  }
+ ]
+}

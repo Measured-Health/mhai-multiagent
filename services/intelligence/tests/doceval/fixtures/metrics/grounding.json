@@ -1,0 +1,267 @@
+{
+ "description": "Grounding: IoU >= 0.5 on the same page, over matched fields.",
+ "truth": {
+  "document": {
+   "type": {
+    "value": "lab_report",
+    "raw_text": "lab_report",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.2
+    ],
+    "script": "printed"
+   },
+   "date": {
+    "value": "2026-03-04",
+    "raw_text": "2026-03-04",
+    "page": 1,
+    "bbox": [
+     0.0,
+     0.0,
+     0.4,
+     0.1
+    ],
+    "script": "printed"
+   }
+  },
+  "patient": {
+   "mrn": {
+    "value": "SYN-00000001",
+    "raw_text": "SYN-00000001",
+    "page": 1,
+    "bbox": [
+     0.0,
+     0.0,
+     0.2,
+     0.1
+    ],
+    "script": "printed"
+   },
+   "family_name": {
+    "value": "Ashbrenner",
+    "raw_text": "Ashbrenner",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.2
+    ],
+    "script": "printed"
+   },
+   "given_names": {
+    "value": "Avelor",
+    "raw_text": "Avelor",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.2
+    ],
+    "script": "printed"
+   },
+   "date_of_birth": {
+    "value": "1980-01-02",
+    "raw_text": "1980-01-02",
+    "page": null,
+    "bbox": null,
+    "script": "printed"
+   },
+   "sex": {
+    "value": "female",
+    "raw_text": "female",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.2
+    ],
+    "script": "printed"
+   }
+  },
+  "encounter": {
+   "kind": {
+    "value": null,
+    "raw_text": null,
+    "page": null,
+    "bbox": null
+   },
+   "clinician_text": {
+    "value": "Dr Arvendal Pemberlyn",
+    "raw_text": "Dr Arvendal Pemberlyn",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.2
+    ],
+    "script": "printed"
+   }
+  }
+ },
+ "pred": {
+  "document": {
+   "type": {
+    "value": "lab_report",
+    "raw_text": "lab_report",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.2
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "date": {
+    "value": "2026-03-04",
+    "raw_text": "2026-03-04",
+    "page": 1,
+    "bbox": [
+     0.2,
+     0.0,
+     0.6,
+     0.1
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   }
+  },
+  "patient": {
+   "mrn": {
+    "value": "SYN-00000001",
+    "raw_text": "SYN-00000001",
+    "page": 1,
+    "bbox": [
+     0.0,
+     0.0,
+     0.2,
+     0.2
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "family_name": {
+    "value": "Ashbrenner",
+    "raw_text": "Ashbrenner",
+    "page": 2,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.2
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "given_names": {
+    "value": "Avelor",
+    "raw_text": "Avelor",
+    "page": 1,
+    "bbox": null,
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "date_of_birth": {
+    "value": "1980-01-02",
+    "raw_text": "1980-01-02",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.2
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "sex": {
+    "value": null,
+    "raw_text": null,
+    "page": null,
+    "bbox": null,
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": false,
+    "flags": []
+   }
+  },
+  "encounter": {
+   "kind": {
+    "value": "outpatient",
+    "raw_text": "outpatient",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.2
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "clinician_text": {
+    "value": "Dr Daravel Ostrick",
+    "raw_text": "Dr Daravel Ostrick",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.2
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   }
+  }
+ },
+ "working": [
+  "type: same box, IoU 1 -> grounded",
+  "date: overlap 0.2x0.1 = 0.02, union 0.06, IoU 1/3 -> not",
+  "record number: 0.02 / 0.04 = exactly 1/2 -> grounded (>=)",
+  "family_name: right box, wrong page -> not",
+  "given_names: no box -> not",
+  "date_of_birth: not visible in truth -> left out",
+  "sex: predicted null -> not matched, left out",
+  "kind: not in truth -> left out",
+  "clinician_text: wrong value, right box -> grounded (matched fields count right or wrong)",
+  "total 6, grounded 3"
+ ],
+ "expected": {
+  "grounded": 3,
+  "total": 6,
+  "rate": "1/2"
+ }
+}

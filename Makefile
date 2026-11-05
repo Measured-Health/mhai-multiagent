@@ -28,7 +28,7 @@ typecheck: ## Run mypy
 	$(PY) uv run mypy
 
 test: ## Run test suite (no models, no Docker)
-	$(PY) uv run pytest -m "not models and not boundary"
+	$(PY) uv run pytest -m "not models and not boundary and not store and not slow"
 
 test-boundary: ## Boundary tests: Postgres 16 + NATS 2.10 in Docker (build host only)
 	docker build -t mhai-core:test services/core

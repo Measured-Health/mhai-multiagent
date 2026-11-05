@@ -1,0 +1,53 @@
+{
+ "system": "ICD-10",
+ "entries": [
+  {
+   "code": "E11.9",
+   "display": "Type 2 diabetes mellitus without complications"
+  },
+  {
+   "code": "I10",
+   "display": "Essential (primary) hypertension"
+  },
+  {
+   "code": "J45.9",
+   "display": "Asthma, unspecified"
+  },
+  {
+   "code": "B50.9",
+   "display": "Plasmodium falciparum malaria, unspecified"
+  },
+  {
+   "code": "N18.9",
+   "display": "Chronic kidney disease, unspecified"
+  },
+  {
+   "code": "D64.9",
+   "display": "Anaemia, unspecified"
+  },
+  {
+   "code": "E78.5",
+   "display": "Hyperlipidaemia, unspecified"
+  },
+  {
+   "code": "K21.9",
+   "display": "Gastro-oesophageal reflux disease without oesophagitis"
+  },
+  {
+   "code": "J18.9",
+   "display": "Pneumonia, unspecified"
+  },
+  {
+   "code": "A01.0",
+   "display": "Typhoid fever"
+  },
+  {
+   "code": "E03.9",
+   "display": "Hypothyroidism, unspecified"
+  },
+  {
+   "code": "I50.9",
+   "display": "Heart failure, unspecified"
+  }
+ ]
+}

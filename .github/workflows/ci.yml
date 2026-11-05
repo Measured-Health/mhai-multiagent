@@ -63,13 +63,14 @@ jobs:
 
       - name: Type-check
         run: uv run mypy
-
       # Tests marked boundary need Docker and run in intelligence-boundary;
-      # the coverage job combines both runs before diff-cover (F17).
+      # store (MinIO) and slow (a full-size synthetic set, several GB) run on
+      # the build server. The coverage job combines both runs before
+      # diff-cover (F17).
       - name: Test
         env:
           COVERAGE_FILE: coverage.checks
-        run: uv run pytest -m "not models and not boundary" --cov=intelligence --cov-report=
+        run: uv run pytest -m "not models and not boundary and not store and not slow" --cov=intelligence --cov-report=
 
       - name: Keep the coverage data
         uses: actions/upload-artifact@v4

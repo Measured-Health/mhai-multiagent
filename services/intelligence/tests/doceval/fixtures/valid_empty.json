@@ -1,0 +1,112 @@
+{
+  "schema_version": "1.0.0",
+  "document": {
+    "type": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "date": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "facility_name": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "language": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    }
+  },
+  "patient": {
+    "mrn": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "other_ids": [],
+    "family_name": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "given_names": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "date_of_birth": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "sex": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    }
+  },
+  "encounter": {
+    "kind": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "start": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "end": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "location_text": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    },
+    "clinician_text": {
+      "value": null,
+      "raw_text": null,
+      "page": null,
+      "bbox": null,
+      "script": "printed"
+    }
+  },
+  "observations": [],
+  "medications": [],
+  "conditions": [],
+  "notes": []
+}

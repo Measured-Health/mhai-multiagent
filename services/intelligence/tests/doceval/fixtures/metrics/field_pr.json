@@ -1,0 +1,750 @@
+{
+ "description": "One lab report: reordered, missing, extra and wrong rows; unreadable fields.",
+ "truth": {
+  "document": {
+   "type": {
+    "value": "lab_report",
+    "raw_text": "lab_report",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "date": {
+    "value": "2026-03-04",
+    "raw_text": "2026-03-04",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "facility_name": {
+    "value": "Eastmere Synthetic Hospital",
+    "raw_text": "Eastmere Synthetic Hospital",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "language": {
+    "value": "en",
+    "raw_text": "en",
+    "page": null,
+    "bbox": null,
+    "script": "printed"
+   }
+  },
+  "patient": {
+   "mrn": {
+    "value": "SYN-00000001",
+    "raw_text": "SYN-00000001",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "family_name": {
+    "value": "Ashbrenner",
+    "raw_text": "Ashbrenner",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "given_names": {
+    "value": "Avelor",
+    "raw_text": "Avelor",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "date_of_birth": {
+    "value": "1980-01-02",
+    "raw_text": "1980-01-02",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "sex": {
+    "value": "female",
+    "raw_text": "female",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   }
+  },
+  "encounter": {
+   "start": {
+    "value": "2026-03-04T09:30:00",
+    "raw_text": "2026-03-04T09:30:00",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "location_text": {
+    "value": "Northvale Synthetic Clinic",
+    "raw_text": "Northvale Synthetic Clinic",
+    "page": null,
+    "bbox": null,
+    "script": "printed"
+   },
+   "clinician_text": {
+    "value": "Dr Arvendal Pemberlyn",
+    "raw_text": "Dr Arvendal Pemberlyn",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   }
+  },
+  "observations": [
+   {
+    "name_text": {
+     "value": "Glucose",
+     "raw_text": "Glucose",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    },
+    "value_numeric": {
+     "value": 105,
+     "raw_text": "105",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    },
+    "unit_text": {
+     "value": "mg/dL",
+     "raw_text": "mg/dL",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    },
+    "abnormal_flag": {
+     "value": "H",
+     "raw_text": "H",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    }
+   },
+   {
+    "name_text": {
+     "value": "Sodium",
+     "raw_text": "Sodium",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    },
+    "value_numeric": {
+     "value": 140,
+     "raw_text": "140",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    },
+    "unit_text": {
+     "value": "mmol/L",
+     "raw_text": "mmol/L",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    },
+    "abnormal_flag": {
+     "value": "N",
+     "raw_text": "N",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    }
+   },
+   {
+    "name_text": {
+     "value": "Potassium",
+     "raw_text": "Potassium",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    },
+    "value_numeric": {
+     "value": 5.8,
+     "raw_text": "5.8",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    },
+    "unit_text": {
+     "value": "mmol/L",
+     "raw_text": "mmol/L",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    },
+    "abnormal_flag": {
+     "value": "H",
+     "raw_text": "H",
+     "page": 1,
+     "bbox": [
+      0.1,
+      0.1,
+      0.3,
+      0.12
+     ],
+     "script": "printed"
+    }
+   }
+  ],
+  "notes": [
+   {
+    "heading": {
+     "value": "Contact",
+     "raw_text": "Contact",
+     "page": null,
+     "bbox": null,
+     "script": "printed"
+    },
+    "text": {
+     "value": "Ward phone",
+     "raw_text": "Ward phone",
+     "page": null,
+     "bbox": null,
+     "script": "printed"
+    }
+   }
+  ]
+ },
+ "pred": {
+  "document": {
+   "type": {
+    "value": "lab_report",
+    "raw_text": "lab_report",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "date": {
+    "value": "2026-03-05",
+    "raw_text": "2026-03-05",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "facility_name": {
+    "value": "eastmere  synthetic HOSPITAL.",
+    "raw_text": "eastmere  synthetic HOSPITAL.",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "language": {
+    "value": "fr",
+    "raw_text": "fr",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   }
+  },
+  "patient": {
+   "mrn": {
+    "value": "SYN-00000001",
+    "raw_text": "SYN-00000001",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "family_name": {
+    "value": "Ashbrenner",
+    "raw_text": "Ashbrenner",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "given_names": {
+    "value": null,
+    "raw_text": null,
+    "page": null,
+    "bbox": null,
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": false,
+    "flags": []
+   },
+   "date_of_birth": {
+    "value": "1980-01-02",
+    "raw_text": "1980-01-02",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "sex": {
+    "value": "male",
+    "raw_text": "male",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   }
+  },
+  "encounter": {
+   "start": {
+    "value": "2026-03-04 09:30",
+    "raw_text": "2026-03-04 09:30",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "end": {
+    "value": "2026-03-04T10:00",
+    "raw_text": "2026-03-04T10:00",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "location_text": {
+    "value": "Northvale Synthetic Clinic",
+    "raw_text": "Northvale Synthetic Clinic",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "clinician_text": {
+    "value": "Dr Arvendal Pemberlyn",
+    "raw_text": "Dr Arvendal Pemberlyn",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   }
+  },
+  "observations": [
+   {
+    "name_text": {
+     "value": "Potassium",
+     "raw_text": "Potassium",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    },
+    "value_numeric": {
+     "value": 5.8,
+     "raw_text": "5.8",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    },
+    "unit_text": {
+     "value": "mmol/l",
+     "raw_text": "mmol/l",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    },
+    "abnormal_flag": {
+     "value": "H",
+     "raw_text": "H",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    }
+   },
+   {
+    "name_text": {
+     "value": "Glucose",
+     "raw_text": "Glucose",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    },
+    "value_numeric": {
+     "value": 105,
+     "raw_text": "105",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    },
+    "unit_text": {
+     "value": "mmol/L",
+     "raw_text": "mmol/L",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    },
+    "abnormal_flag": {
+     "value": "H",
+     "raw_text": "H",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    }
+   },
+   {
+    "name_text": {
+     "value": "Chloride",
+     "raw_text": "Chloride",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    },
+    "value_numeric": {
+     "value": 101,
+     "raw_text": "101",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    },
+    "unit_text": {
+     "value": "mmol/L",
+     "raw_text": "mmol/L",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    },
+    "abnormal_flag": {
+     "value": "N",
+     "raw_text": "N",
+     "page": 1,
+     "bbox": null,
+     "script": "printed",
+     "confidence": 0.9,
+     "band": "medium",
+     "grounded": true,
+     "flags": []
+    }
+   }
+  ],
+  "notes": []
+ },
+ "working": [
+  "enum: TP type, Potassium H, Glucose H = 3; FP sex(wrong), Chloride N(extra) = 2; FN sex(wrong), Sodium N(missed) = 2",
+  "date: TP date_of_birth; date wrong = 1 FP + 1 FN",
+  "datetime: TP start ('T' vs space, seconds dropped); FP end (not in truth)",
+  "text: TP facility (case, spaces, trailing dot), clinician, Potassium, Glucose = 4; FP language (unreadable in truth, predicted differently), Chloride = 2; FN Sodium = 1; location_text unreadable and predicted equal: not counted; unreadable notes left out: not counted",
+  "identifier: TP record number",
+  "name: TP family_name; FN given_names (null)",
+  "numeric_lab_value: TP Potassium (mmol/l = mmol/L); Glucose value right but unit wrong = FP + FN; Sodium FN; Chloride FP",
+  "unit: TP Potassium; Glucose wrong = FP + FN; Sodium FN; Chloride FP",
+  "code: nothing to count"
+ ],
+ "expected": {
+  "enum": {
+   "tp": 3,
+   "fp": 2,
+   "fn": 2,
+   "precision": "3/5",
+   "recall": "3/5"
+  },
+  "date": {
+   "tp": 1,
+   "fp": 1,
+   "fn": 1,
+   "precision": "1/2",
+   "recall": "1/2"
+  },
+  "datetime": {
+   "tp": 1,
+   "fp": 1,
+   "fn": 0,
+   "precision": "1/2",
+   "recall": "1"
+  },
+  "text": {
+   "tp": 4,
+   "fp": 2,
+   "fn": 1,
+   "precision": "2/3",
+   "recall": "4/5"
+  },
+  "identifier": {
+   "tp": 1,
+   "fp": 0,
+   "fn": 0,
+   "precision": "1",
+   "recall": "1"
+  },
+  "name": {
+   "tp": 1,
+   "fp": 0,
+   "fn": 1,
+   "precision": "1",
+   "recall": "1/2"
+  },
+  "numeric_lab_value": {
+   "tp": 1,
+   "fp": 2,
+   "fn": 2,
+   "precision": "1/3",
+   "recall": "1/3"
+  },
+  "unit": {
+   "tp": 1,
+   "fp": 2,
+   "fn": 2,
+   "precision": "1/3",
+   "recall": "1/3"
+  },
+  "code": {
+   "tp": 0,
+   "fp": 0,
+   "fn": 0,
+   "precision": null,
+   "recall": null
+  }
+ },
+ "expected_identifiers": {
+  "tp": 3,
+  "fp": 0,
+  "fn": 1,
+  "precision": "1",
+  "recall": "3/4"
+ }
+}

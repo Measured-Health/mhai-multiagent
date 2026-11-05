@@ -1,0 +1,24 @@
+# synthetic: invented list for tests. Not real people, places or organisations.
+Kestrel Lane
+Marrow Close
+Alder Crescent
+Fennel Way
+Quarry Drive
+Tansy Avenue
+Sedge Road
+Heron Street
+Bracken Lane
+Cobble Close
+Dovecote Way
+Elder Crescent
+Foxglove Road
+Gorse Avenue
+Hazel Drive
+Ivy Street
+Juniper Lane
+Kiln Close
+Lupin Way
+Nettle Road
+Orchard Drive
+Poppy Street
+Rowan Avenue

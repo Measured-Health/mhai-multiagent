@@ -52,6 +52,10 @@ dependencies = [
     # constructor is SDK-internal; review it on a bump.
     "opentelemetry-sdk==1.45.2",
     "opentelemetry-exporter-otlp==1.45.2",
+    "boto3>=1.43.123",
+    "jsonschema>=4.26.0",
+    "safetensors>=0.8.0",
+    "pillow>=12.3.0,<13",
 ]
 
 [dependency-groups]
@@ -67,7 +71,8 @@ dev = [
     "mypy-protobuf>=3.6",
     "pytest-asyncio>=1.2",
     # Postgres 16 and NATS 2.10 for the tests marked boundary (spec section 12).
-    "testcontainers>=4.15,<5",
+    "testcontainers[minio]>=4.15,<5",
+    "zizmor>=1.32.0",
 ]
 # PyTorch build. CPU is the default; for a CUDA machine use
 # `uv sync --no-group cpu --group cu128`.
@@ -96,6 +101,7 @@ explicit = true
 
 [project.scripts]
 intelligence = "intelligence.cli:main"
+mhai-doceval = "intelligence.doceval.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/promit-ghosal/mhai"
@@ -105,7 +111,17 @@ where = ["."]
 include = ["intelligence*"]
 
 [tool.setuptools.package-data]
-intelligence = ["py.typed", "boundary/operations.json", "boundary/catalogue.json"]
+intelligence = [
+    "py.typed",
+    "boundary/operations.json",
+    "boundary/catalogue.json",
+    "schemas/extraction/clinical_document/*.json",
+    "doceval/thresholds/*.json",
+    "doceval/synth/terminology/*.json",
+    "doceval/synth/terminology/NOTICE",
+    "doceval/synth/names/*.txt",
+    "doceval/synth/fonts/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -115,6 +131,7 @@ markers = [
     "models: needs real ML models (downloads weights; run scripts/e2e_models.py)",
     "slow: takes more than a few seconds",
     "boundary: needs Docker (testcontainers), never loads models",
+    "store: needs Docker (MinIO via testcontainers), never loads real models",
 ]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
@@ -242,3 +259,20 @@ module = [
     "intelligence.guardrails.l4_trust_escalation",
 ]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+# The new packages are strict (the flags `strict = true` sets, which mypy only
+# accepts globally).
+module = ["intelligence.doceval", "intelligence.doceval.*", "intelligence.modelstore", "intelligence.modelstore.*"]
+check_untyped_defs = true
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+no_implicit_reexport = true
+strict_equality = true
+warn_return_any = true
+warn_unused_ignores = true

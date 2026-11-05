@@ -9,6 +9,18 @@ Open work and decisions for mhai-multiagent. Remove an entry once it's done or d
 - **Frontend ingress over NATS (product owner, 28 Oct).** The BFF talks to core over NATS (`api.v1.<audience>`), its NATS identity replaces the `X-MHAI-Service` key, and the BFF may call intelligence operations marked `bff_direct`, which intelligence serves only after core grants them (`authz.v1.grant.<service>`). See [ADR 0011](docs/adr/0011-frontend-ingress-over-nats.md) and the design §17; built in Plan 3.
 - **Plan 4: feedback and corrections, the audit log, platform operations (product owner, 3 Nov).** Built in three parts (4a, 4b and 4c, all built). Corrections are approved by a second clinician, with the rule enforced in core and in the database; approved corrections only fill a per-hospital buffer, which nothing applies to the live guardrails; the audit log is served as `/platform/audit`; platform operations (health, failed jobs, guardrail statistics) are served as `/platform/health`, `/platform/jobs` and `/platform/guardrails`. See the [design](docs/specs/2026-10-31-plan-4-feedback-audit-documents-admin-design.md) §15 and [Plan 4](docs/plans/2026-11-03-plan-4-feedback-audit-admin.md).
 
+## Document pipeline phase 0: notes for later tasks
+
+- **Layout separation is by seed only (ruling D7).** An eval layout can look like a training one, so the eval score does not measure unseen template families. Held-out layout families (unseen templates) come with set v1.1.
+- **File names (ruling D6).** Generated file names must keep digit runs to 5 or fewer: the scanner refuses 6 or more as `filename`. Task 8 names files and must follow this. The renderer itself generates no file names.
+
+- **Volunteer handwriting is not machine-checked (H5).** The intake registers a filled form and records its consent id and role, but nothing reads or verifies what was written. A person must look at each filled sheet (or sign it off) before it joins set v1.1.
+- **Consent ids are checked for format only (H5).** Intake accepts `CN-<base32>` and a role from a closed set; it does not look the id up in any consent register. The register itself is a human process outside this repo.
+- **Scanner false positive on second-patient result lines.** On `two_patients` pages the second patient's block drops the unit from each result line and labels the MRN `Record:` rather than `MRN:`, because the scanner reads the drawn text as free text: a UCUM-style unit gives a false positive, and a line such as `TSH 156.96` reads as an id (letters, then five digits), so such lines are left out. Teach the scanner lab-line and UCUM unit shapes in drawn text, then restore the units, the left-out lines and the `MRN:` label (Task 6 minor).
+- **Twin-prediction delta for hostile pages (ruling D11).** "Other fields unchanged" compares the prediction on the hostile page with the clean twin's truth. A stricter metric compares it with the extractor's own prediction on the clean twin, so only the change the hostile part caused is counted. Add it as a second hostile metric.
+- **VLM refusals and flags (ruling D13).** The OpenAI-compatible extractor cannot refuse or flag today. The response contract becomes `anyOf[MODEL_OUTPUT, {refusal: {reason}}]` mapped to `extractors.Refused`, and phase 1's evaluation wraps the VLM in the pipeline's validation, flagging and confidence step. Until then a raw VLM cannot pass the hostile gate (GPU task / Task 19).
+- **Printable pages need a margin of 22 mm.** Only `layouts.printable(...)` layouts carry registration marks; the blank form and record sheet are in `synth/forms.py`.
+
 ## Open items for the core service
 
 From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md):

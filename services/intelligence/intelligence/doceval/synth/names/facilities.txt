@@ -1,0 +1,17 @@
+# synthetic: invented list for tests. Not real people, places or organisations.
+Northvale Synthetic Clinic
+Eastmere Synthetic Hospital
+Brackenholt Synthetic Health Centre
+Southwick Synthetic Clinic
+Larkfield Synthetic Hospital
+Westmarrow Synthetic Health Centre
+Ironbridge Synthetic Clinic
+Mossgate Synthetic Hospital
+Tansyvale Synthetic Health Centre
+Quarryhill Synthetic Clinic
+Fenwater Synthetic Hospital
+Alderbank Synthetic Health Centre
+Kestrelton Synthetic Clinic
+Hollowmere Synthetic Hospital
+Ravenscar Synthetic Health Centre
+Willowgate Synthetic Clinic

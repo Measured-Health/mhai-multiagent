@@ -1,0 +1,261 @@
+{
+ "description": "Identifier precision uses patient.* paths only, other ids matched by value.",
+ "truth": {
+  "patient": {
+   "mrn": {
+    "value": "SYN-00000001",
+    "raw_text": "SYN-00000001",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "other_ids": [
+    {
+     "kind": {
+      "value": "national_id",
+      "raw_text": "national_id",
+      "page": 1,
+      "bbox": [
+       0.1,
+       0.1,
+       0.3,
+       0.12
+      ],
+      "script": "printed"
+     },
+     "value": {
+      "value": "SYNID-10000001",
+      "raw_text": "SYNID-10000001",
+      "page": 1,
+      "bbox": [
+       0.1,
+       0.1,
+       0.3,
+       0.12
+      ],
+      "script": "printed"
+     }
+    }
+   ],
+   "family_name": {
+    "value": "Ashbrenner",
+    "raw_text": "Ashbrenner",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "given_names": {
+    "value": "Avelor",
+    "raw_text": "Avelor",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   },
+   "date_of_birth": {
+    "value": "1980-01-02",
+    "raw_text": "1980-01-02",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   }
+  },
+  "encounter": {
+   "clinician_text": {
+    "value": "Dr Arvendal Pemberlyn",
+    "raw_text": "Dr Arvendal Pemberlyn",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed"
+   }
+  }
+ },
+ "pred": {
+  "patient": {
+   "mrn": {
+    "value": "SYN-00000001",
+    "raw_text": "SYN-00000001",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "other_ids": [
+    {
+     "kind": {
+      "value": "national_id",
+      "raw_text": "national_id",
+      "page": 1,
+      "bbox": [
+       0.1,
+       0.1,
+       0.3,
+       0.12
+      ],
+      "script": "printed",
+      "confidence": 0.9,
+      "band": "medium",
+      "grounded": true,
+      "flags": []
+     },
+     "value": {
+      "value": "SYNID-10000002",
+      "raw_text": "SYNID-10000002",
+      "page": 1,
+      "bbox": [
+       0.1,
+       0.1,
+       0.3,
+       0.12
+      ],
+      "script": "printed",
+      "confidence": 0.9,
+      "band": "medium",
+      "grounded": true,
+      "flags": []
+     }
+    },
+    {
+     "kind": {
+      "value": "insurance",
+      "raw_text": "insurance",
+      "page": 1,
+      "bbox": [
+       0.1,
+       0.1,
+       0.3,
+       0.12
+      ],
+      "script": "printed",
+      "confidence": 0.9,
+      "band": "medium",
+      "grounded": true,
+      "flags": []
+     },
+     "value": {
+      "value": "SYNINS-20000001",
+      "raw_text": "SYNINS-20000001",
+      "page": 1,
+      "bbox": [
+       0.1,
+       0.1,
+       0.3,
+       0.12
+      ],
+      "script": "printed",
+      "confidence": 0.9,
+      "band": "medium",
+      "grounded": true,
+      "flags": []
+     }
+    }
+   ],
+   "family_name": {
+    "value": "Ashbrenner",
+    "raw_text": "Ashbrenner",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "given_names": {
+    "value": "Avelar",
+    "raw_text": "Avelar",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   },
+   "date_of_birth": {
+    "value": null,
+    "raw_text": null,
+    "page": null,
+    "bbox": null,
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": false,
+    "flags": []
+   }
+  },
+  "encounter": {
+   "clinician_text": {
+    "value": "Dr Corliss Wenhaven",
+    "raw_text": "Dr Corliss Wenhaven",
+    "page": 1,
+    "bbox": [
+     0.1,
+     0.1,
+     0.3,
+     0.12
+    ],
+    "script": "printed",
+    "confidence": 0.9,
+    "band": "medium",
+    "grounded": true,
+    "flags": []
+   }
+  }
+ },
+ "working": [
+  "TP record number, family_name = 2",
+  "FP other id value wrong, given_names wrong, extra insurance id value = 3",
+  "FN other id value wrong, given_names wrong, date_of_birth missing = 3",
+  "clinician_text is not a patient identifier and is ignored"
+ ],
+ "expected": {
+  "tp": 2,
+  "fp": 3,
+  "fn": 3,
+  "precision": "2/5",
+  "recall": "2/5"
+ }
+}
