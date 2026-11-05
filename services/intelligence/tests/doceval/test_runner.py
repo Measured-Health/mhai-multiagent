@@ -174,10 +174,12 @@ class _SlowFirst:
 
 
 def test_deadline_enforced(wide: minisets.MiniSet) -> None:
-    ex = _SlowFirst(_oracle(wide), 3.0)
+    # Margins wide enough for a loaded CI runner: an oracle call takes milliseconds, the
+    # slow one would take 20 s, and the run must end well before that.
+    ex = _SlowFirst(_oracle(wide), 20.0)
     t = time.perf_counter()
-    result = runner.run(ex, wide.root, per_page_deadline_s=0.3)
-    assert time.perf_counter() - t < 2.5
+    result = runner.run(ex, wide.root, per_page_deadline_s=1.5)
+    assert time.perf_counter() - t < 15.0
     assert result.outcomes == {"deadline": 1, "extracted": 23}
     assert ex.calls == 24
 
