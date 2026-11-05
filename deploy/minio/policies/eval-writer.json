@@ -1,0 +1,74 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WriteEval",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@BUCKET@/eval/*"
+      ]
+    },
+    {
+      "Sid": "LockNewEvalObjectsInComplianceMode",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObjectRetention"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@BUCKET@/eval/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "s3:object-lock-mode": [
+            "COMPLIANCE"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "NoModels",
+      "Effect": "Deny",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectRetention",
+        "s3:GetObject",
+        "s3:GetObjectVersion"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@BUCKET@/models/*"
+      ]
+    },
+    {
+      "Sid": "NeverDeleteOrUnlock",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
+        "s3:BypassGovernanceRetention",
+        "s3:PutObjectLegalHold"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@BUCKET@/*"
+      ]
+    },
+    {
+      "Sid": "NeverChangeTheBucket",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteBucket",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketObjectLockConfiguration",
+        "s3:PutBucketVersioning",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutReplicationConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@BUCKET@"
+      ]
+    }
+  ]
+}
