@@ -48,6 +48,8 @@ REASONS: frozenset[str] = frozenset(
         "not_allowed_here",
         "invalid_name",
         "base_unverified",
+        "key_invalid",
+        "key_exists",
     }
 )
 

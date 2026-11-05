@@ -102,6 +102,7 @@ explicit = true
 [project.scripts]
 intelligence = "intelligence.cli:main"
 mhai-doceval = "intelligence.doceval.cli:main"
+mhai-models = "intelligence.modelstore.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/promit-ghosal/mhai"
