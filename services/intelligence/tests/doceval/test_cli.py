@@ -233,7 +233,13 @@ def test_cli_oracle_refused_on_a_signed_or_locked_set(
     manifest = json.loads(path.read_bytes())
     manifest["locked"] = True
     path.write_bytes(canonical.dumps(manifest))
-    for s in (signed, locked):
+    # The other field of a locked split (modelstore.testsets), even without ``locked``.
+    pinned = _set(tmp_path / "pinned")
+    path = pinned.root / "testset.json"
+    manifest = json.loads(path.read_bytes())
+    manifest["store_version_ids"] = {}
+    path.write_bytes(canonical.dumps(manifest))
+    for s in (signed, locked, pinned):
         args = ["run", "--extractor", "oracle", "--test-only-oracle", "--set", str(s.root)]
         assert cli.main([*args, "--out", str(tmp_path / "r")]) == 2
         assert json.loads(_out(capsys)) == {"refused": "not_allowed_here"}

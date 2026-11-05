@@ -8,6 +8,7 @@
     models/<name>/<version>/manifest.sig                     signature (purpose manifest)
     models/<name>/<version>/manifest.json                    written last: the version exists once this does
     models/<name>/<version>/signoff.json, signoff.sig        written by the sign-off workflow only
+    eval/<suite>/<set_version>/claim.json                    reserved first (conditional create)
     eval/<suite>/<set_version>/files/<path>, testset.json, testset.sig   the locked test split
 
 Keys are only ever built by the layout functions below, from checked names; a key or a
@@ -180,6 +181,12 @@ def eval_file_key(suite: str, set_version: str, path: str) -> str:
     if len(parts) > MAX_EVAL_PATH_PARTS:
         raise Refused("invalid_name")
     return _check_key(f"{_eval_dir(suite, set_version)}/files/{path}")
+
+
+def testset_claim_key(suite: str, set_version: str) -> str:
+    """Reserved before a test split is built, so a second build of the same suite and
+    version stops before it generates or uploads anything."""
+    return f"{_eval_dir(suite, set_version)}/claim.json"
 
 
 def testset_key(suite: str, set_version: str) -> str:
@@ -651,6 +658,7 @@ __all__ = [
     "run_file_key",
     "signoff_key",
     "signoff_sig_key",
+    "testset_claim_key",
     "testset_key",
     "testset_sig_key",
 ]

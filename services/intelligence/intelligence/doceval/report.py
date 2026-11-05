@@ -878,7 +878,9 @@ def testset_meta(set_dir: str | Path) -> dict[str, Any]:
         "documents": totals.get("documents"),
         "pages": totals.get("pages"),
         "sha256": hashlib.sha256(raw).hexdigest(),
-        "locked": "locked" in manifest,  # never shown; refuses the oracle (cli)
+        # Never shown; refuses the oracle (cli). The two fields of a locked split
+        # (modelstore.testsets), whatever their value.
+        "locked": "locked" in manifest or "store_version_ids" in manifest,
     }
 
 

@@ -111,6 +111,7 @@
         "arn:aws:s3:::@BUCKET@/models/*/manifest.sig/*",
         "arn:aws:s3:::@BUCKET@/models/*/signoff.json/*",
         "arn:aws:s3:::@BUCKET@/models/*/signoff.sig/*",
+        "arn:aws:s3:::@BUCKET@/eval/*/claim.json/*",
         "arn:aws:s3:::@BUCKET@/eval/*/testset.json/*",
         "arn:aws:s3:::@BUCKET@/eval/*/testset.sig/*"
       ]

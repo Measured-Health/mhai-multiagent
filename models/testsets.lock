@@ -1,0 +1,6 @@
+# The locked test split per suite and version: <suite>@<version>#<sha256 of testset.json>.
+# One entry per line, added by PR from the output of `mhai-models testset-build` (run in the
+# model-eval environment). No entries yet: the first split is built once the production
+# store exists (Task 27). Rehearsal jobs build their own split and never commit its entry.
+# Parsed strictly (intelligence/modelstore/testsets.py): ASCII, comment lines start with #,
+# no blank lines.

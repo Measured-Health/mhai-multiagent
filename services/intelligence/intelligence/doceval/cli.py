@@ -151,12 +151,11 @@ def _check_run_args(args: argparse.Namespace) -> None:
 
 
 def _locked(set_dir: Path, meta: dict[str, Any]) -> bool:
-    """A set that is (or may be) a locked split: signed, or marked locked.
-
-    TODO(Task 17): once the locked split's layout is fixed, check its exact markers here
-    (the signature file next to ``testset.json``, any ``locked`` field).
-    """
-    return os.path.lexists(set_dir / TESTSET_SIGNATURE) or bool(meta.get("locked"))
+    """A set that is (or may be) a locked split: a signature next to ``testset.json``, or
+    either of the fields a locked ``testset.json`` carries (``locked``,
+    ``store_version_ids``; modelstore.testsets), whatever their value
+    (``report.testset_meta`` sets ``locked``; anything but ``False`` counts as locked)."""
+    return os.path.lexists(set_dir / TESTSET_SIGNATURE) or meta.get("locked") is not False
 
 
 def _extractor(args: argparse.Namespace, meta: dict[str, Any]) -> extractors.Extractor:
