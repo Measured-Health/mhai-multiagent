@@ -40,6 +40,10 @@ MC_IMAGE = (
 BUCKET = "mhai-models-test"
 ROLES = ("promoter", "signoff", "reader", "eval-reader", "eval-writer")
 RETENTION_DAYS = 1
+# The policies' cap on remaining lock days. Small here so a test can go past it; the
+# stores built below don't share it (they use the default), so the store's own refusal is
+# what the tests see.
+MAX_RETENTION_DAYS = 30
 LABEL = "mhai.test"
 MC_UID = 1001  # the client image's user
 
@@ -186,6 +190,7 @@ def minio_store() -> Iterator[MinioStore]:
             "MINIO_ROOT_PASSWORD": root.secret_key,
             "MODEL_STORE_BUCKET": BUCKET,
             "MODEL_STORE_DEFAULT_RETENTION_DAYS": str(RETENTION_DAYS),
+            "MODEL_STORE_MAX_RETENTION_DAYS": str(MAX_RETENTION_DAYS),
             "MODEL_STORE_SECRETS_DIR": "/tmp/secrets",
         }
         init = run_init(env)

@@ -21,7 +21,7 @@ from botocore.exceptions import ClientError
 from intelligence.modelstore import store
 from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.store import Credentials, S3Store
-from tests.modelstore.conftest import RETENTION_DAYS, ROLES, MinioStore
+from tests.modelstore.conftest import MAX_RETENTION_DAYS, RETENTION_DAYS, ROLES, MinioStore
 
 REPO = Path(__file__).resolve().parents[4]
 POLICY_DIR = REPO / "deploy" / "minio" / "policies"
@@ -179,12 +179,17 @@ def test_tls_required_for_remote_endpoint() -> None:
         "http://localhost.:9000",
         "http://10.0.0.5:9000",
         "http://localhost.example.org",
+        "http://127.0.0.1.evil.com",
+        "http://[::ffff:127.0.0.1]:9000",
+        "http://[0:0:0:0:0:0:0:1]:9000",
     ):
         err = _refused(S3Store, plain, "mhai-models", CREDS)
         assert (err.reason, err.detail_code) == ("store_unavailable", "tls_required")
     for bad in (
         "ftp://store.example.org",
         "https://user:pw@store.example.org",
+        "http://localhost@evil.example.org",
+        "http://evil@localhost:9000",
         "https://store.example.org/bucket",
         "https://store.example.org?x=1",
         "https://store.example.org:99999",
@@ -275,11 +280,33 @@ def test_policies_load_and_deny_deletes() -> None:
                     assert st["Condition"] == {
                         "StringEquals": {"s3:object-lock-mode": ["COMPLIANCE"]}
                     }
+                    cap = [x for x in statements if x.get("Sid") == "RetentionCap"]
+                    assert cap == [
+                        {
+                            "Sid": "RetentionCap",
+                            "Effect": "Deny",
+                            "Action": ["s3:PutObjectRetention"],
+                            "Resource": ["arn:aws:s3:::@BUCKET@/*"],
+                            "Condition": {
+                                "NumericGreaterThan": {
+                                    "s3:object-lock-remaining-retention-days": [
+                                        "@MAX_RETENTION_DAYS@"
+                                    ]
+                                }
+                            },
+                        }
+                    ]
         denied = {a for st in statements if st["Effect"] == "Deny" for a in st["Action"]}
         assert {"s3:DeleteObject", "s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"} <= (
             denied
         )
         assert {"s3:PutBucketObjectLockConfiguration", "s3:PutBucketVersioning"} <= denied
+        # Nothing may be written "under" a fixed name (MinIO would then refuse the name).
+        fixed = [st for st in statements if st.get("Sid") == "NothingUnderFixedNames"]
+        assert len(fixed) == 1 and fixed[0]["Effect"] == "Deny"
+        assert "s3:PutObject" in fixed[0]["Action"]
+        for name in ("claim.json", "manifest.json", "manifest.sig", "signoff.json", "signoff.sig"):
+            assert f"arn:aws:s3:::@BUCKET@/models/*/{name}/*" in fixed[0]["Resource"]
     promoter = json.loads((POLICY_DIR / "promoter.json").read_text())
     assert any(
         st["Effect"] == "Deny"
@@ -590,3 +617,262 @@ def test_errors_have_no_url_or_credentials(
         assert err.reason == reason
         _assert_clean(err, forbidden)
     _assert_logs_clean(caplog, forbidden)
+
+
+# ---------------------------------------------------------------- fix round 1
+
+
+def test_retention_cap_checked_by_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = S3Store("http://127.0.0.1:1", "mhai-models", CREDS, max_retention_days=30)
+    key = "models/a/1.0.0/claim.json"
+    vid = "6d2f9c1e-3b4a-4f5e-9a8b-7c6d5e4f3a2b"
+    for call in (lambda: s.put_new(key, b"x", 31), lambda: s.extend_retention(key, vid, 31)):
+        err = _refused(call)  # refused before any call: nothing listens on port 1
+        assert (err.reason, err.detail_code) == ("not_allowed_here", "retention_days")
+    monkeypatch.delenv(store.MAX_RETENTION_DAYS_ENV, raising=False)
+    assert store.retention_cap_from_env() == store.DEFAULT_MAX_RETENTION_DAYS == 3650
+    monkeypatch.setenv(store.MAX_RETENTION_DAYS_ENV, "90")
+    assert store.retention_cap_from_env() == 90
+    s = S3Store("http://127.0.0.1:1", "mhai-models", CREDS)
+    assert _refused(s.put_new, key, b"x", 91).detail_code == "retention_days"
+    for bad in ("0", "-1", "36501", "1e3", "90 ", "abc"):
+        monkeypatch.setenv(store.MAX_RETENTION_DAYS_ENV, bad)
+        assert _refused(S3Store, "http://127.0.0.1:1", "mhai-models", CREDS).reason == (
+            "not_allowed_here"
+        )
+
+
+def test_sdk_loggers_clamped_at_construction() -> None:
+    saved = {n: logging.getLogger(n).level for n in ("boto3", "botocore", "s3transfer", "urllib3")}
+    try:
+        for n in saved:
+            logging.getLogger(n).setLevel(logging.DEBUG)
+        logging.getLogger("urllib3").setLevel(logging.CRITICAL)  # stricter: left alone
+        S3Store("https://store.example.org", "mhai-models", CREDS)
+        assert logging.getLogger("boto3").level == logging.ERROR
+        assert logging.getLogger("botocore").level == logging.ERROR
+        assert logging.getLogger("s3transfer").level == logging.ERROR
+        assert logging.getLogger("urllib3").level == logging.CRITICAL
+        # Process-wide: a child logger inherits it.
+        assert logging.getLogger("botocore.endpoint").getEffectiveLevel() == logging.ERROR
+    finally:
+        for n, level in saved.items():
+            logging.getLogger(n).setLevel(level)
+
+
+def test_no_proxy_for_loopback_only() -> None:
+    local = S3Store("http://127.0.0.1:9000", "mhai-models", CREDS)
+    remote = S3Store("https://store.example.org", "mhai-models", CREDS)
+    assert local._client.meta.config.proxies == {}
+    assert remote._client.meta.config.proxies is None  # the environment's, as usual
+
+
+@pytest.mark.store
+def test_loopback_ignores_proxy_environment(
+    minio_store: MinioStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A proxy that doesn't exist: a request sent through it would fail.
+    for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(var, "http://127.0.0.1:9")
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    s = minio_store.store("promoter")
+    key = store.claim_key(_name(), "1.0.0")
+    vid = s.put_new(key, b"no proxy", DAY)
+    assert s.get(key, vid, max_bytes=100) == b"no proxy"
+
+
+@pytest.mark.store
+def test_retention_capped_by_policy(minio_store: MinioStore) -> None:
+    over = MAX_RETENTION_DAYS + 10
+    ids = _promote(minio_store, _name())
+    for days, role in ((5, "promoter"), (6, "signoff")):
+        # Through S3Store (whose own cap is the default 3650): the store refuses the
+        # extension past its cap, and allows one within it.
+        _denied(minio_store.store(role).extend_retention, ids["file_key"], ids["file"], over)
+        minio_store.store(role).extend_retention(ids["file_key"], ids["file"], days)
+    ev = minio_store.store("eval-writer")
+    ekey = store.eval_file_key("clinical_document", "1.0.0", f"{_name()}.png")
+    evid = ev.put_new(ekey, b"x", DAY)
+    _denied(minio_store.store("eval-writer").extend_retention, ekey, evid, over)
+    # Known gap, pinned (TODO.md): the pinned MinIO doesn't evaluate
+    # s3:object-lock-remaining-retention-days for the lock headers of a new PUT (a
+    # condition on it never matches there), so only S3Store's own cap stops an over-long
+    # lock on a new object. AWS evaluates the key on PutObject too (Task 27). If this
+    # starts failing, MinIO enforces it: tighten the test.
+    raw = minio_store.client("promoter")
+    raw.put_object(
+        Bucket=minio_store.bucket,
+        Key=store.claim_key(_name(), "1.0.0"),
+        Body=b"x",
+        ObjectLockMode="COMPLIANCE",
+        ObjectLockRetainUntilDate=datetime.now(UTC) + timedelta(days=over),
+    )
+    capped = S3Store(
+        minio_store.endpoint,
+        minio_store.bucket,
+        minio_store.users["promoter"],
+        max_attempts=1,
+        max_retention_days=MAX_RETENTION_DAYS,
+    )
+    err = _refused(capped.put_new, store.claim_key(_name(), "1.0.0"), b"x", over)
+    assert (err.reason, err.detail_code) == ("not_allowed_here", "retention_days")
+
+
+@pytest.mark.store
+def test_nothing_under_fixed_names(minio_store: MinioStore) -> None:
+    name = _name()
+    bucket = minio_store.bucket
+    signoff = minio_store.client("signoff")
+    for fixed in ("claim.json", "manifest.json", "manifest.sig", "signoff.json", "signoff.sig"):
+        _raw_denied(
+            signoff.put_object,
+            Bucket=bucket,
+            Key=f"models/{name}/2.0.0/{fixed}/signoff.json",
+            Body=b"x",
+        )
+    promoter = minio_store.client("promoter")
+    for fixed in ("claim.json", "manifest.json", "manifest.sig"):
+        _raw_denied(
+            promoter.put_object, Bucket=bucket, Key=f"models/{name}/2.0.0/{fixed}/x", Body=b"x"
+        )
+    _raw_denied(
+        minio_store.client("eval-writer").put_object,
+        Bucket=bucket,
+        Key=f"eval/clinical_document/9.{secrets.randbelow(10**6)}.0/testset.json/x",
+        Body=b"x",
+    )
+    # So the version can still be claimed.
+    minio_store.store("promoter").put_new(store.claim_key(name, "2.0.0"), b"claim", DAY)
+
+
+@pytest.mark.store
+def test_odd_keys_never_reach_the_signoff_key(minio_store: MinioStore) -> None:
+    name = _name()
+    _promote(minio_store, name)
+    raw = minio_store.client("promoter")
+    bucket = minio_store.bucket
+    base = f"models/{name}/1.0.0"
+    for key in (
+        f"{base}/runs/r/files/../../signoff.json",
+        f"{base}//signoff.json",
+        f"{base}/signoff.json/x",
+        f"models/{name}/../{name}/1.0.0/signoff.json",
+    ):
+        with pytest.raises(ClientError):  # denied by the policy, or refused as a name
+            raw.put_object(Bucket=bucket, Key=key, Body=b"forged")
+    # Literal keys that only look like the sign-off may be stored; they are inert.
+    for key in (f"{base}/runs/r/files/%2e%2e%2fsignoff.json", f"{base}/SIGNOFF.json"):
+        try:
+            raw.put_object(Bucket=bucket, Key=key, Body=b"inert")
+        except ClientError:
+            pass
+    reader = minio_store.store("reader")
+    assert reader.versions(store.signoff_key(name, "1.0.0")) == []
+    assert _refused(reader.get, store.signoff_key(name, "1.0.0"), max_bytes=10).reason == (
+        "not_found"
+    )
+
+
+@pytest.mark.store
+def test_legal_hold_denied(minio_store: MinioStore) -> None:
+    ids = _promote(minio_store, _name())
+    bucket = minio_store.bucket
+    for role, key in (
+        ("promoter", store.claim_key(_name(), "1.0.0")),
+        ("eval-writer", store.eval_file_key("clinical_document", "1.0.0", f"{_name()}.png")),
+        ("signoff", store.signoff_key(_name(), "1.0.0")),
+    ):
+        raw = minio_store.client(role)
+        # Known gap, pinned (TODO.md): the pinned MinIO applies a legal hold sent as a PUT
+        # header without checking s3:PutObjectLegalHold, so the explicit Deny doesn't stop
+        # it there. A legal hold, unlike a compliance lock, can be cleared by the root
+        # user. If this starts failing, MinIO enforces the Deny: tighten the test.
+        raw.put_object(Bucket=bucket, Key=key, Body=b"x", ObjectLockLegalHoldStatus="ON")
+        root = minio_store.client()
+        root.put_object_legal_hold(Bucket=bucket, Key=key, LegalHold={"Status": "OFF"})
+        assert root.get_object_legal_hold(Bucket=bucket, Key=key)["LegalHold"]["Status"] == "OFF"
+        # The legal hold call itself is denied.
+        _raw_denied(
+            raw.put_object_legal_hold,
+            Bucket=bucket,
+            Key=ids["file_key"],
+            VersionId=ids["file"],
+            LegalHold={"Status": "ON"},
+        )
+
+
+@pytest.mark.store
+def test_listing_scoped_per_role(minio_store: MinioStore) -> None:
+    bucket = minio_store.bucket
+    for role in ("promoter", "signoff", "reader"):
+        raw = minio_store.client(role)
+        _raw_denied(raw.list_object_versions, Bucket=bucket, Prefix="eval/")
+        _raw_denied(raw.list_object_versions, Bucket=bucket)
+        _raw_denied(raw.list_objects_v2, Bucket=bucket)
+        _raw_denied(raw.list_objects_v2, Bucket=bucket, Prefix="eval/")
+    for role in ("eval-writer", "eval-reader"):
+        raw = minio_store.client(role)
+        _raw_denied(raw.list_object_versions, Bucket=bucket, Prefix="models/")
+        _raw_denied(raw.list_objects_v2, Bucket=bucket, Prefix="models/")
+
+
+def _multipart(raw: Any, bucket: str, key: str, **complete: Any) -> Any:
+    lock = {
+        "ObjectLockMode": "COMPLIANCE",
+        "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=DAY),
+        "ChecksumAlgorithm": "SHA256",
+    }
+    up = raw.create_multipart_upload(Bucket=bucket, Key=key, **lock)
+    part = raw.upload_part(
+        Bucket=bucket,
+        Key=key,
+        UploadId=up["UploadId"],
+        PartNumber=1,
+        Body=b"multipart",
+        ChecksumAlgorithm="SHA256",
+    )
+    return raw.complete_multipart_upload(
+        Bucket=bucket,
+        Key=key,
+        UploadId=up["UploadId"],
+        MultipartUpload={
+            "Parts": [
+                {"PartNumber": 1, "ETag": part["ETag"], "ChecksumSHA256": part["ChecksumSHA256"]}
+            ]
+        },
+        **complete,
+    )
+
+
+@pytest.mark.store
+def test_multipart_only_for_uploaders_and_never_past_if_none_match(
+    minio_store: MinioStore,
+) -> None:
+    name = _name()
+    ids = _promote(minio_store, name)
+    bucket = minio_store.bucket
+    lock = {
+        "ObjectLockMode": "COMPLIANCE",
+        "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=DAY),
+    }
+    for role, key in (
+        ("reader", store.claim_key(_name(), "1.0.0")),
+        ("eval-reader", store.eval_file_key("clinical_document", "1.0.0", f"{_name()}.png")),
+        ("eval-writer", store.claim_key(_name(), "1.0.0")),
+        ("promoter", store.signoff_key(name, "1.0.0")),
+        ("promoter", store.eval_file_key("clinical_document", "1.0.0", f"{_name()}.png")),
+        ("signoff", store.manifest_key(_name(), "1.0.0")),
+        ("signoff", store.run_file_key(name, "1.0.0", "run_1", "model.safetensors")),
+    ):
+        raw = minio_store.client(role)
+        _raw_denied(raw.create_multipart_upload, Bucket=bucket, Key=key, **lock)
+    # The uploader can use multipart, but a conditional completion on an existing key is
+    # refused: multipart is no way round If-None-Match.
+    raw = minio_store.client("promoter")
+    new_key = store.run_file_key(name, "1.0.0", "run_2", "model.safetensors")
+    done = _multipart(raw, bucket, new_key, IfNoneMatch="*")
+    assert done["VersionId"]
+    code = _raw_denied(_multipart, raw=raw, bucket=bucket, key=ids["claim_key"], IfNoneMatch="*")
+    assert code == "PreconditionFailed"
+    assert minio_store.store("reader").versions(ids["claim_key"]) == [ids["claim"]]

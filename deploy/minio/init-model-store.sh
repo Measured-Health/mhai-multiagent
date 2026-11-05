@@ -6,11 +6,15 @@
 #     and default retention COMPLIANCE for MODEL_STORE_DEFAULT_RETENTION_DAYS days (1);
 #   - five users, promoter, signoff, reader, eval-reader and eval-writer, each with the
 #     policy of the same name from policies/ (the bucket name filled in);
+#   - every lock a role may set or lengthen capped at MODEL_STORE_MAX_RETENTION_DAYS (3650)
+#     remaining days, by a policy condition (a compliance lock can't be undone, so an
+#     uncapped one could keep junk forever; the compliance lead sets the real period);
 #   - each user's random password, written to MODEL_STORE_SECRETS_DIR/<user> with mode
 #     0600. A password already there is kept, so a re-run changes nothing.
 #
 # Environment: MINIO_URL, MINIO_ROOT_USER and MINIO_ROOT_PASSWORD (required);
 # MODEL_STORE_BUCKET (mhai-models), MODEL_STORE_DEFAULT_RETENTION_DAYS (1),
+# MODEL_STORE_MAX_RETENTION_DAYS (3650),
 # MODEL_STORE_SECRETS_DIR (/secrets), MODEL_STORE_POLICY_DIR (policies/ next to this file).
 #
 # No password or key is ever echoed or put on a command line: they reach mc on stdin.
@@ -22,6 +26,7 @@ umask 077
 : "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}"
 BUCKET="${MODEL_STORE_BUCKET:-mhai-models}"
 DAYS="${MODEL_STORE_DEFAULT_RETENTION_DAYS:-1}"
+MAX_DAYS="${MODEL_STORE_MAX_RETENTION_DAYS:-3650}"
 SECRETS="${MODEL_STORE_SECRETS_DIR:-/secrets}"
 POLICIES="${MODEL_STORE_POLICY_DIR:-$(dirname "$0")/policies}"
 ROLES="promoter signoff reader eval-reader eval-writer"
@@ -33,6 +38,8 @@ fail() {
 
 printf '%s' "$BUCKET" | grep -Eqx '[a-z0-9][a-z0-9-]{1,61}[a-z0-9]' || fail "bad MODEL_STORE_BUCKET"
 printf '%s' "$DAYS" | grep -Eqx '[1-9][0-9]{0,4}' || fail "bad MODEL_STORE_DEFAULT_RETENTION_DAYS"
+printf '%s' "$MAX_DAYS" | grep -Eqx '[1-9][0-9]{0,4}' || fail "bad MODEL_STORE_MAX_RETENTION_DAYS"
+[ "$DAYS" -le "$MAX_DAYS" ] || fail "default retention longer than the cap"
 printf '%s' "$MINIO_URL" | grep -Eqx 'https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?' || fail "bad MINIO_URL"
 [ -d "$POLICIES" ] || fail "no policy directory"
 
@@ -76,7 +83,7 @@ for role in $ROLES; do
   printf '%s\n' "$pw" | mc admin user add store "$role" >/dev/null || fail "cannot add user $role"
   pw=""
 
-  sed "s/@BUCKET@/$BUCKET/g" "$POLICIES/$role.json" >"$WORK/policies/$role.json"
+  sed -e "s/@BUCKET@/$BUCKET/g" -e "s/@MAX_RETENTION_DAYS@/$MAX_DAYS/g" "$POLICIES/$role.json" >"$WORK/policies/$role.json"
   mc admin policy create store "mhai-$role" "$WORK/policies/$role.json" >/dev/null ||
     fail "cannot create policy $role"
   mc admin policy attach store "mhai-$role" --user "$role" >/dev/null 2>&1 ||

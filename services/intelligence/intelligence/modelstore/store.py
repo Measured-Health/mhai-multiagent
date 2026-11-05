@@ -56,7 +56,13 @@ from intelligence.modelstore.reasons import Refused
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 LOCK_MODE = "COMPLIANCE"
-MAX_RETENTION_DAYS = 36500
+# The longest lock any call may set or reach, in days: MODEL_STORE_MAX_RETENTION_DAYS, the
+# same cap the store's policies enforce (deploy/minio/policies). The design states no
+# period; the compliance lead sets it (TODO.md). A compliance lock can never be undone, so
+# an uncapped one could keep junk forever.
+DEFAULT_MAX_RETENTION_DAYS = 3650
+MAX_RETENTION_DAYS_ENV = "MODEL_STORE_MAX_RETENTION_DAYS"
+_RETENTION_CEILING = 36500
 MAX_PUT_BYTES = 5 * 1024**3  # one S3 PUT; larger objects need multipart (not in phase 0)
 MAX_KEY_CHARS = 1024
 MAX_LIST = 10_000
@@ -263,6 +269,10 @@ def check_endpoint(endpoint: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
+def _is_loopback(url: str) -> bool:
+    return urlsplit(url).hostname in LOOPBACK_HOSTS
+
+
 def _quiet_sdk_loggers() -> None:
     """Hold the SDK's loggers at ``ERROR``: their debug and warning output carries
     endpoints, keys and signed request details."""
@@ -272,10 +282,21 @@ def _quiet_sdk_loggers() -> None:
             logger.setLevel(logging.ERROR)
 
 
-def _check_days(days: object) -> int:
-    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_RETENTION_DAYS:
+def _check_days(days: object, cap: int) -> int:
+    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= cap:
         raise Refused("not_allowed_here", detail_code="retention_days")
     return days
+
+
+def retention_cap_from_env() -> int:
+    """``MODEL_STORE_MAX_RETENTION_DAYS`` (default :data:`DEFAULT_MAX_RETENTION_DAYS`), a
+    whole number of days from 1 to 36,500; anything else is ``not_allowed_here``."""
+    raw = os.environ.get(MAX_RETENTION_DAYS_ENV)
+    if raw is None:
+        return DEFAULT_MAX_RETENTION_DAYS
+    if re.fullmatch(r"[1-9][0-9]{0,4}", raw, re.ASCII) is None or int(raw) > _RETENTION_CEILING:
+        raise Refused("not_allowed_here", detail_code="max_retention_days")
+    return int(raw)
 
 
 def _check_version_id(version_id: object) -> str:
@@ -338,7 +359,7 @@ class S3Store:
     """:class:`ObjectStore` over the S3 API (boto3): MinIO in tests and compose, the
     cloud store in production (Task 27)."""
 
-    __slots__ = ("_bucket", "_client")
+    __slots__ = ("_bucket", "_client", "_max_days")
 
     def __init__(
         self,
@@ -350,14 +371,21 @@ class S3Store:
         connect_timeout: float = 10.0,
         read_timeout: float = 120.0,
         max_attempts: int = 5,
+        max_retention_days: int | None = None,
     ) -> None:
         url = check_endpoint(endpoint)
+        cap = retention_cap_from_env() if max_retention_days is None else max_retention_days
+        if not isinstance(cap, int) or isinstance(cap, bool) or not 1 <= cap <= _RETENTION_CEILING:
+            raise Refused("not_allowed_here", detail_code="max_retention_days")
         if not isinstance(bucket, str) or _BUCKET.fullmatch(bucket) is None:
             raise _unavailable("bucket")
         if not isinstance(region, str) or _REGION.fullmatch(region) is None:
             raise _unavailable("region")
         if not isinstance(credentials, Credentials):
             raise _unavailable("credentials")
+        # The SDK loggers are clamped here, when a store is built, and process-wide (the
+        # four parent loggers; their children inherit the level). Pinned by
+        # test_sdk_loggers_clamped_at_construction.
         _quiet_sdk_loggers()
         import boto3
         from botocore.config import Config
@@ -370,6 +398,11 @@ class S3Store:
             read_timeout=read_timeout,
             request_checksum_calculation="when_required",
             response_checksum_validation="when_supported",
+            # A loopback endpoint never goes through a proxy: HTTP_PROXY would otherwise
+            # carry its plain-HTTP, signed requests off the machine. For a remote (TLS)
+            # endpoint botocore honours HTTPS_PROXY and NO_PROXY as usual; the proxy only
+            # sees a CONNECT tunnel, and the certificate is still verified end to end.
+            proxies={} if _is_loopback(url) else None,
         )
         failed = False
         try:
@@ -388,6 +421,7 @@ class S3Store:
         if failed:
             raise _unavailable("client")
         self._bucket = bucket
+        self._max_days = cap
 
     def __repr__(self) -> str:
         return "S3Store()"
@@ -433,7 +467,7 @@ class S3Store:
         without following a link and streamed; if it changes between hashing and upload,
         the store refuses it (``hash_mismatch``)."""
         _check_key(key)
-        days = _check_days(retention_days)
+        days = _check_days(retention_days, self._max_days)
         until = datetime.now(UTC).replace(microsecond=0) + timedelta(days=days)
         if isinstance(data, (bytes, bytearray)):
             body = bytes(data)
@@ -575,10 +609,12 @@ class S3Store:
     def extend_retention(self, key: str, version_id: str, days: int) -> datetime:
         """Keep ``version_id`` of ``key`` locked until ``days`` from now. It only ever
         lengthens: a date not later than the current one is ``not_allowed_here`` and no
-        call is made (compliance mode would refuse it anyway). Returns the new date."""
+        call is made (compliance mode would refuse it anyway). ``days`` over this store's
+        cap (``MODEL_STORE_MAX_RETENTION_DAYS``) is ``not_allowed_here`` too; the store's
+        policies enforce the same cap. Returns the new date."""
         _check_key(key)
         vid = _check_version_id(version_id)
-        n = _check_days(days)
+        n = _check_days(days, self._max_days)
         until = datetime.now(UTC).replace(microsecond=0) + timedelta(days=n)
         current = self._call(self._client.get_object_retention, Key=key, VersionId=vid)
         retention = current.get("Retention") or {}
@@ -598,6 +634,7 @@ class S3Store:
 
 
 __all__ = [
+    "DEFAULT_MAX_RETENTION_DAYS",
     "LOCK_MODE",
     "LOOPBACK_HOSTS",
     "Credentials",
@@ -605,6 +642,7 @@ __all__ = [
     "ObjectStore",
     "S3Store",
     "check_endpoint",
+    "retention_cap_from_env",
     "claim_key",
     "eval_file_key",
     "manifest_key",
