@@ -42,6 +42,7 @@ REASONS: frozenset[str] = frozenset(
         "label_missing",
         "fixture_name",
         "source_invalid",
+        "source_unavailable",
         "drive_scope",
         "warmup_mismatch",
         "store_unavailable",
