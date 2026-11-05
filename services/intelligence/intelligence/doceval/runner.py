@@ -54,8 +54,6 @@ Notes for later tasks:
   else); a Python extractor in this process could still open files its user can read.
   TODO: the first in-process model runner gets a subprocess boundary with no access to
   the set folder.
-* TODO(Task 12): the HTTP client's timeout must be at most ``deadline_s``, so an
-  abandoned call does not keep a connection open past its deadline.
 """
 
 import concurrent.futures

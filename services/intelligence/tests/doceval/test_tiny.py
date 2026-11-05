@@ -109,3 +109,16 @@ def test_tiny_info_versions_from_caller(tmp_path: Path) -> None:
     assert info.name == "mhai-tiny-extractor"
     assert info.model_versions == {"extract": "mhai-tiny-extractor@0.1.0#abc"}
     assert info.engine == "numpy"
+
+
+def test_tiny_schema_fault_is_not_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    x = tiny.TinyExtractor(fixtures.make_run(tmp_path / "a", "good", 2))
+
+    def broken(doc: object) -> None:
+        raise schema.SchemaError("/document")
+
+    monkeypatch.setattr(tiny.schema, "validate_stored", broken)
+    with pytest.raises(schema.SchemaError):
+        x.extract([minisets.png(1)], deadline_s=10)

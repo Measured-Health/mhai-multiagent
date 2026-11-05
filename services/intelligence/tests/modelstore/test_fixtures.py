@@ -131,3 +131,15 @@ def test_existing_dir_not_overwritten(tmp_path: Path) -> None:
     fixtures.make_run(tmp_path / "a", "good", 1)
     with pytest.raises(FileExistsError):
         fixtures.make_run(tmp_path / "a", "good_v2", 1)
+
+
+def test_name_and_role_go_into_the_training_manifest(tmp_path: Path) -> None:
+    run = fixtures.make_run(tmp_path / "a", "good", 1, name="other-model", role="ocr")
+    tm = _tm(run)
+    assert (tm["name"], tm["role"]) == ("other-model", "ocr")
+    assert _tm(fixtures.make_run(tmp_path / "b", "good", 1))["name"] == fixtures.MODEL_NAME
+    for kw in ({"name": "../x"}, {"role": "Bad Role"}):
+        with pytest.raises(Refused) as err:
+            fixtures.make_run(tmp_path / "c", "good", 1, **kw)
+        assert err.value.reason == "invalid_name"
+    assert not (tmp_path / "c").exists()

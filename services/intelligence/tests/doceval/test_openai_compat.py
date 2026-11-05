@@ -412,3 +412,52 @@ def test_openai_compat_mutual_tls(tmp_path: Path) -> None:
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# ---------------------------------------------------------------- trickling servers
+
+
+def _trickle_handler(closed: threading.Event, *, chunked: bool) -> type[BaseHTTPRequestHandler]:
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1" if chunked else "HTTP/1.0"
+
+        def do_POST(self) -> None:  # noqa: N802 - http.server's naming
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            if chunked:
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            try:
+                for _ in range(200):  # 10 s of one byte every 50 ms
+                    self.wfile.write(b"1\r\n \r\n" if chunked else b" ")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except OSError:
+                closed.set()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    return H
+
+
+@pytest.mark.parametrize("chunked", [False, True], ids=["http10_close", "http11_chunked"])
+def test_openai_compat_trickling_body_stops_at_deadline(chunked: bool) -> None:
+    closed = threading.Event()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _trickle_handler(closed, chunked=chunked))
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        x = _extractor(f"http://127.0.0.1:{httpd.server_address[1]}/v1", timeout=60)
+        started = time.monotonic()
+        with pytest.raises(openai_compat.EndpointError) as err:
+            x.extract([minisets.png(1)], deadline_s=0.5)
+        took = time.monotonic() - started
+        assert str(err.value) == "timeout"
+        assert took < 0.5 + 0.5, took
+        assert closed.wait(3.0), "the server never saw the connection closed"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

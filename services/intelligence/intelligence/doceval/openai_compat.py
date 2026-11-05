@@ -34,6 +34,20 @@ confidence, every field gets :data:`UNSCORED_CONFIDENCE` (0), so its band is
 extractor returns counts as high confidence. ``document.page_count`` is the number of
 pages sent.
 
+TODO(Task 11, Task 19): this extractor's confidence is unscored
+(:data:`CONFIDENCE_SCORED` is false), so the report must mark ``calibration_ece``,
+``silent_error_rate`` and ``high_band_share`` as ``not_measured`` for it, never as a
+pass or a measured value.
+
+TODO(GPU task): refusals. The response contract becomes
+``anyOf[MODEL_OUTPUT, {"refusal": {"reason": enum(REFUSAL_REASONS - {"internal"})}}]``,
+mapped to :class:`extractors.Refused`; an OpenAI ``message.refusal`` stays a failure
+(``response_shape``). Today a model cannot refuse: it returns a document or fails.
+
+TODO(phase 1 evaluation): wrap this extractor in the pipeline's validation, flagging and
+confidence step, so flags (``ungrounded``, ``suspicious_text``, ...) and confidence are
+set the way production sets them; this class sets neither.
+
 **Versions** come from the caller (the verified pin) through ``model_versions``; the
 ``model`` name in the server's reply is ignored.
 
@@ -62,6 +76,7 @@ from intelligence.doceval import extractors, schema
 log = logging.getLogger(__name__)
 
 UNSCORED_CONFIDENCE = 0.0
+CONFIDENCE_SCORED = False  # see the TODO in the module docstring
 DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = 2_000_000
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
@@ -289,24 +304,48 @@ class OpenAICompatExtractor:
             )
         return http.client.HTTPConnection(self._host, self._port, timeout=budget)
 
-    def _post(self, body: bytes, budget: float) -> bytes:
-        end = time.monotonic() + budget
-        conn = self._connection(budget)
+    def _post(self, body: bytes, end: float) -> bytes:
+        """POST ``body``; the whole exchange ends by ``end`` (``time.monotonic()``)."""
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise EndpointError("timeout")
+        conn = self._connection(remaining)
         expired = threading.Event()
+        lock = threading.Lock()
+        held: list[socket.socket] = []  # the connected socket, captured once
 
         def kill() -> None:
-            expired.set()
-            sock = conn.sock
-            if sock is not None:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
+            # http.client drops conn.sock once a response will close the connection
+            # (HTTP/1.0, Connection: close), so the captured socket is the one shut.
+            with lock:
+                expired.set()
+                for sock in held:
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
 
-        watchdog = threading.Timer(budget, kill)
+        watchdog = threading.Timer(remaining, kill)
         watchdog.daemon = True
         watchdog.start()
+        resp: http.client.HTTPResponse | None = None
         try:
+            conn.connect()
+            sock = conn.sock
+            if sock is None:
+                raise EndpointError("transport")
+            with lock:
+                held.append(sock)
+                if expired.is_set():
+                    raise EndpointError("timeout")
+
+            def tick() -> None:
+                left = end - time.monotonic()
+                if left <= 0 or expired.is_set():
+                    raise EndpointError("timeout")
+                sock.settimeout(left)
+
+            tick()
             conn.request(
                 "POST",
                 self._path,
@@ -317,6 +356,7 @@ class OpenAICompatExtractor:
                     "Content-Length": str(len(body)),
                 },
             )
+            tick()
             resp = conn.getresponse()
             if resp.status != 200:
                 raise EndpointError("response_status")
@@ -331,13 +371,9 @@ class OpenAICompatExtractor:
                     raise EndpointError("response_too_large")
             chunks: list[bytes] = []
             size = 0
-            while True:
-                remaining = end - time.monotonic()
-                if remaining <= 0:
-                    raise EndpointError("timeout")
-                if conn.sock is not None:
-                    conn.sock.settimeout(remaining)
-                chunk = resp.read(min(_CHUNK, self._max_response_bytes + 1 - size))
+            while not resp.isclosed():  # closed: the declared length has been read
+                tick()
+                chunk = resp.read1(min(_CHUNK, self._max_response_bytes + 1 - size))
                 if not chunk:
                     break
                 size += len(chunk)
@@ -355,6 +391,18 @@ class OpenAICompatExtractor:
             raise EndpointError("transport") from None
         finally:
             watchdog.cancel()
+            with lock:
+                expired.set()  # a late watchdog has nothing left to do
+                for sock in held:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+            if resp is not None:
+                try:
+                    resp.close()
+                except OSError:
+                    pass
             conn.close()
 
     # ------------------------------------------------------------ response
@@ -400,6 +448,7 @@ class OpenAICompatExtractor:
     ) -> extractors.ExtractionResult:
         """Raises :class:`EndpointError` (a fixed code) on any failure."""
         started = time.perf_counter()
+        clock = time.monotonic()  # the budget covers encoding, the call and the checks
         if isinstance(deadline_s, bool) or not isinstance(deadline_s, int | float):
             raise EndpointError("bad_deadline")
         if not math.isfinite(deadline_s) or deadline_s <= 0:
@@ -410,13 +459,13 @@ class OpenAICompatExtractor:
             raise EndpointError("bad_pages")
         if ocr_text is not None and len(ocr_text) != len(pages):
             raise EndpointError("bad_pages")
-        budget = min(self._timeout, float(deadline_s))
+        end = clock + min(self._timeout, float(deadline_s))
         code = "ok"
         request_bytes = response_bytes = 0
         try:
             body = self._body(pages, ocr_text)
             request_bytes = len(body)
-            raw = self._post(body, budget)
+            raw = self._post(body, end)
             response_bytes = len(raw)
             doc = self._document(raw, len(pages))
         except EndpointError as exc:
@@ -440,6 +489,7 @@ class OpenAICompatExtractor:
 
 
 __all__ = [
+    "CONFIDENCE_SCORED",
     "CONFIG_CODES",
     "ERROR_CODES",
     "SYSTEM_PROMPT",

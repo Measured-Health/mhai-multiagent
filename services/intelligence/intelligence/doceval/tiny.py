@@ -9,7 +9,7 @@ A run directory in Hugging Face layout (see :mod:`intelligence.modelstore.fixtur
 ``model.safetensors`` (the float32 tensors in :data:`TENSOR_SHAPES`, well under a
 kilobyte of data), tokenizer, preprocessor and generation configs, and
 ``training_manifest.json``. :class:`TinyExtractor` reads only ``config.json`` and
-``model.safetensors``, with :func:`safetensors.numpy.load_file` (no torch, no other
+``model.safetensors``, with :func:`safetensors.numpy.load` on the bytes already read and capped (no torch, no other
 loader).
 
 What it computes, from page pixels only (it never sees a path, an id or ground truth):
@@ -35,7 +35,7 @@ from typing import Any
 
 import numpy as np
 from PIL import Image
-from safetensors.numpy import load_file
+from safetensors.numpy import load as load_safetensors
 
 from intelligence.doceval import extractors, schema
 from intelligence.modelstore import canonical
@@ -97,8 +97,8 @@ def _load(run_dir: Path) -> dict[str, list[list[float]]]:
             _read_capped(run_dir / "config.json", _MAX_CONFIG_BYTES), _MAX_CONFIG_BYTES
         )
         weights_path = run_dir / "model.safetensors"
-        _read_capped(weights_path, _MAX_WEIGHTS_BYTES)  # type, size and symlink checks
-        tensors = load_file(str(weights_path))
+        # Type, size and symlink checks, then parse exactly the bytes that were checked.
+        tensors = load_safetensors(_read_capped(weights_path, _MAX_WEIGHTS_BYTES))
     except (OSError, Refused, ValueError) as exc:
         raise TinyInvalid() from exc
     except Exception as exc:  # the safetensors library's own error types
@@ -119,27 +119,40 @@ def _load(run_dir: Path) -> dict[str, list[list[float]]]:
     return out
 
 
+class Unreadable(ValueError):
+    """A page (or page list) the tiny model cannot read. ``str()`` is ``unreadable``."""
+
+    def __init__(self) -> None:
+        super().__init__("unreadable")
+
+
+def _mean(values: Any) -> float:
+    flat = [float(x) for x in np.asarray(values, dtype=np.float64).ravel().tolist()]
+    return math.fsum(flat) / len(flat)
+
+
 def page_features(page: bytes) -> list[float]:
-    """Eight statistics of one page, or ``ValueError("unreadable")``."""
+    """Eight statistics of one page (sums by :func:`math.fsum`), or :class:`Unreadable`."""
     try:
         with Image.open(io.BytesIO(page), formats=["PNG"]) as img:
             w, h = img.size
             if w < 1 or h < 1 or w * h > _MAX_PIXELS:
-                raise ValueError("unreadable")
+                raise Unreadable()
             grey = img.convert("L").resize((IMAGE_SIDE, IMAGE_SIDE), Image.Resampling.BOX)
     except Exception as exc:  # Pillow raises many types for a bad image
-        raise ValueError("unreadable") from exc
+        raise Unreadable() from exc
     a = np.asarray(grey, dtype=np.float64) / 255.0
     half = IMAGE_SIDE // 2
+    mean = _mean(a)
     stats = [
-        a.mean(),
-        a.std(),
-        (a < 0.5).mean(),
-        a[:half].mean(),
-        a[half:].mean(),
-        a[:, :half].mean(),
-        a[:, half:].mean(),
-        np.abs(np.diff(a, axis=1)).mean(),
+        mean,
+        math.sqrt(_mean((a - mean) ** 2)),
+        _mean(a < 0.5),
+        _mean(a[:half]),
+        _mean(a[half:]),
+        _mean(a[:, :half]),
+        _mean(a[:, half:]),
+        _mean(np.abs(np.diff(a, axis=1))),
     ]
     return [round(float(x), 9) for x in stats]
 
@@ -213,9 +226,9 @@ class TinyExtractor:
         return self._info
 
     def predict(self, pages: Sequence[bytes]) -> dict[str, Any]:
-        """The stored-view document for ``pages`` (raises ``ValueError("unreadable")``)."""
+        """The stored-view document for ``pages`` (raises :class:`Unreadable`)."""
         if not 1 <= len(pages) <= _MAX_PAGES:
-            raise ValueError("unreadable")
+            raise Unreadable()
         per_page = [page_features(p) for p in pages]
         mean = [math.fsum(col) / len(per_page) for col in zip(*per_page, strict=True)]
         z = [a * b for a, b in zip(mean, self._w["features.scale"][0], strict=True)]
@@ -243,7 +256,7 @@ class TinyExtractor:
         started = time.perf_counter()
         try:
             doc = self.predict(pages)
-        except ValueError:
+        except Unreadable:  # only unreadable input; a schema fault is a bug and raises
             return extractors.Refused("unreadable")
         n = len(pages)
         per_page = (time.perf_counter() - started) / n
@@ -260,5 +273,6 @@ __all__ = [
     "TENSOR_SHAPES",
     "TinyExtractor",
     "TinyInvalid",
+    "Unreadable",
     "page_features",
 ]

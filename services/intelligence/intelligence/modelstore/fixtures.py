@@ -37,7 +37,7 @@ import numpy as np
 from safetensors.numpy import save_file
 
 from intelligence.doceval import tiny
-from intelligence.modelstore import canonical
+from intelligence.modelstore import canonical, names
 from intelligence.modelstore.reasons import Refused
 
 TRAINING_SCHEMA = "mhai.models.training/1"
@@ -133,13 +133,13 @@ def _corrupt_safetensors(path: Path, variant: str) -> None:
     path.write_bytes(_pack(header, data))
 
 
-def _training_manifest(variant: str, seed: int) -> dict[str, Any]:
+def _training_manifest(variant: str, seed: int, name: str, role: str) -> dict[str, Any]:
     revision = hashlib.sha256(f"mhai-fixture-base-{seed}".encode("ascii")).hexdigest()[:40]
     dataset = {"unknown_dataset": UNKNOWN_DATASET, "non_synthetic_dataset": NON_SYNTHETIC_DATASET}
     return {
         "schema": TRAINING_SCHEMA,
-        "name": MODEL_NAME,
-        "role": ROLE,
+        "name": name,
+        "role": role,
         "trained_by": TRAINED_BY,
         "datasets": [dataset.get(variant, TRAIN_DATASET)],
         "base_model": {
@@ -153,14 +153,24 @@ def _training_manifest(variant: str, seed: int) -> dict[str, Any]:
     }
 
 
-def make_run(dir: Path | str, variant: str, seed: int) -> Path:
+def make_run(
+    dir: Path | str,
+    variant: str,
+    seed: int,
+    *,
+    name: str = MODEL_NAME,
+    role: str = ROLE,
+) -> Path:
     """Write the run for ``variant`` and ``seed`` into ``dir`` (created; must not exist).
 
-    Raises ``Refused("fixture_name")`` for an unknown variant or a bad seed, before
-    anything is written.
+    ``name`` and ``role`` go into ``training_manifest.json``. Raises
+    ``Refused("fixture_name")`` for an unknown variant or a bad seed, and
+    ``Refused("invalid_name")`` for a bad name or role, before anything is written.
     """
     if variant not in EXPECTED_REASONS:
         raise Refused("fixture_name")
+    names.check_name(name)
+    names.check_role(role)
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= _MAX_SEED:
         raise Refused("fixture_name")
     root = Path(dir)
@@ -213,7 +223,7 @@ def make_run(dir: Path | str, variant: str, seed: int) -> Path:
         _corrupt_safetensors(weights_path, variant)
 
     if variant != "no_training_manifest":
-        _json(root / "training_manifest.json", _training_manifest(variant, seed))
+        _json(root / "training_manifest.json", _training_manifest(variant, seed, name, role))
     if variant == "pickle":
         (root / "pytorch_model.bin").write_bytes(_BIN_BYTES)
     elif variant == "pkl":
