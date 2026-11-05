@@ -7,6 +7,7 @@ trailing bytes, and oversized input are all refused.
 """
 
 import json
+import math
 from typing import Any
 
 from intelligence.modelstore.reasons import Refused
@@ -20,6 +21,13 @@ def _no_float(_: str) -> Any:
 
 def _no_constant(_: str) -> Any:
     raise Refused("json_invalid")
+
+
+def _finite_float(s: str) -> float:
+    value = float(s)
+    if not math.isfinite(value):
+        raise Refused("json_invalid")
+    return value
 
 
 def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -73,7 +81,11 @@ def dumps(obj: Any) -> bytes:
     return text.encode("ascii")
 
 
-def loads_strict(b: bytes, max_bytes: int) -> Any:
+def loads_strict(b: bytes, max_bytes: int, *, allow_floats: bool = False) -> Any:
+    """Parse ``b`` strictly. ``allow_floats`` admits finite floats, for third-party
+    model files (``config.json`` and the like) that are checked but never hashed as
+    canonical JSON; anything hashed or signed keeps the default.
+    """
     if not isinstance(b, (bytes, bytearray)):
         raise Refused("json_invalid")
     if len(b) > max_bytes:
@@ -83,7 +95,7 @@ def loads_strict(b: bytes, max_bytes: int) -> Any:
     try:
         text = bytes(b).decode("utf-8")
         decoder = json.JSONDecoder(
-            parse_float=_no_float,
+            parse_float=_finite_float if allow_floats else _no_float,
             parse_constant=_no_constant,
             object_pairs_hook=_no_duplicates,
         )
