@@ -42,7 +42,7 @@ and ``totals``. Never a document id, path, page or value of the split.
 * ``testset.sig`` likewise by recorded id, else the oldest stored version that verifies
   over those bytes under the trust policy. Signatures are deduplicated by their bytes and
   one that doesn't verify (junk, another purpose, an untrusted key) is ignored; at most
-  :data:`MAX_VERSIONS` distinct signatures are tried. The build writes ``testset.sig``
+  :data:`MAX_VERSIONS` distinct signatures or failed reads are tried. The build writes ``testset.sig``
   with a conditional create, so the real one is always the oldest version;
 * every file is fetched by the ``store_version_id`` recorded in the signed manifest and its
   size and SHA-256 checked. Only the files the signed manifest lists are read: other
@@ -326,6 +326,8 @@ def _read_scratch(path: Path, cap: int) -> bytes:
         return files.read_regular(path, cap)
     except Refused as e:
         reason = e.reason
+    if reason is None:  # unreachable; an explicit check, since ``assert`` is stripped by -O
+        raise Refused("file_not_allowed", detail_code="scratch")
     raise Refused(reason, detail_code="scratch")
 
 
@@ -502,7 +504,7 @@ def _check_signature(
     """A ``testset.sig`` version that verifies over ``raw`` under ``policy``: the recorded
     one, else the oldest that does. Versions are deduplicated by their bytes, and a
     version that doesn't verify (junk, another purpose, an untrusted key) is ignored; at
-    most :data:`MAX_VERSIONS` distinct signatures are tried. None is
+    most :data:`MAX_VERSIONS` distinct signatures or failed reads are tried. None is
     ``testset_mismatch`` (detail ``signer_untrusted`` when every one was by an untrusted
     key)."""
     if not isinstance(policy, signing.TrustPolicy):
@@ -512,9 +514,10 @@ def _check_signature(
     )
     reasons: set[str] = set()
     seen: set[bytes] = set()
+    failed = 0  # reads that failed count toward the cap too, so gets stay bounded
     verifier = signing.Verifier()
     for vid in vids:
-        if len(seen) >= MAX_VERSIONS:
+        if len(seen) + failed >= MAX_VERSIONS:
             break
         try:
             sig = source.get(key, vid, max_bytes=signing.MAX_SIGNATURE_DOC_BYTES)
@@ -522,6 +525,7 @@ def _check_signature(
             if _store_refusal(e):
                 raise
             reasons.add(e.reason)
+            failed += 1
             continue
         if sig in seen:
             continue

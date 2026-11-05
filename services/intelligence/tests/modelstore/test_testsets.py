@@ -971,6 +971,36 @@ def test_same_bytes_and_junk_versions_still_fetch(
     assert (out / "testset.json").read_bytes() == raw
 
 
+def test_failed_signature_reads_count_toward_the_cap(
+    tmp_path: Path, dev_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s, keys, built = _memory_locked(tmp_path, monkeypatch)
+    entry = testsets.LockEntry.parse(built.entry.text)
+    assert entry.sig_version_id is None
+    skey = store.testset_sig_key(SUITE, "1.0.0")
+    # Only oversized junk: every read fails, and the reads must stop at the cap.
+    big = b"x" * (signing.MAX_SIGNATURE_DOC_BYTES + 1)
+    s.objects[skey] = [(str(uuid.uuid4()), big) for _ in range(testsets.MAX_VERSIONS * 3)]
+    gets: list[str] = []
+    real_get = s.get
+
+    def counting_get(key: str, version_id: str | None = None, *, max_bytes: int) -> bytes:
+        if key == skey:
+            gets.append(key)
+        return real_get(key, version_id, max_bytes=max_bytes)
+
+    monkeypatch.setattr(s, "get", counting_get)
+    err = _refused(testsets.fetch, s, entry, keys.policy, tmp_path / "f")
+    assert (err.reason, err.detail_code) == ("testset_mismatch", "signature")
+    assert len(gets) == testsets.MAX_VERSIONS
+
+
+def test_read_scratch_refusal_is_fixed(tmp_path: Path) -> None:
+    err = _refused(testsets._read_scratch, tmp_path / "missing", 10)
+    assert (err.reason, err.detail_code) == ("missing_file", "scratch")
+    assert err.__cause__ is None and err.__context__ is None
+
+
 def test_manifest_purpose_signature_refused_at_fetch(
     tmp_path: Path, dev_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
