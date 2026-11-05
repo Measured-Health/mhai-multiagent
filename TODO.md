@@ -2,6 +2,21 @@
 
 Open work and decisions for mhai-multiagent. Remove an entry once it's done or decided.
 
+## What's left (5 Nov 2026)
+
+Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline phase 0 part A (PR #91). What remains:
+
+- **Document pipeline phase 0, part B (Tasks 13–25), in progress.** Model file checks, training manifest and registries, signed manifests, the object-locked model store, run sources, `mhai-models promote`, `models.lock`, sign-off and rollback, load-time verification, the intelligence service's pinned roles, the model workflows and the end-to-end tests. See the [plan](docs/plans/2026-11-03-document-pipeline-phase0.md).
+- **Document pipeline Tasks 26–28: waiting on people.** The production signing backend (H1), the production model store (H2) and real Google Drive access (H3).
+- **Cloud models.** The design is approved (PR #85, 4 Nov). The plan isn't written yet (about 11 tasks, migrations from 00018). Masked text only, off by default per hospital.
+- **EHR/EMR integration.** The EMR integration service (`services/emr/`): a connector per EMR type, mapping to the canonical model, the patient index and abnormality flags. The design was started on 23 Oct and isn't finished.
+- **Patient analysis (§10 Analysis, Plan 6).** The backend for the Analysis page that mhai-web built on sample data. It needs a privacy design first.
+- **Platform admin 7c: analytics.** Waiting on decision R41a (cross-period differencing in guardrail statistics).
+- **The notifications service and the documents service.** Both are planned (see "Backend contracts the frontend uses on sample data" below) and need designs.
+- **Trained model weights.** These come from the AI researcher and are the one thing we don't build. Until they arrive, the demo has no AI pipeline: a question waits in the queue and fails at its deadline.
+- **Demo settings.** `SECURITY_CONTACT_*` isn't set, so the audit integrity status returns 503. We need a name and an email from the product owner.
+- **Dependabot backlog.** 21 open PRs (Go modules, Python groups, GitHub Actions, NATS 2.15); each needs CI and a merge.
+
 ## Decided
 
 - **Go alongside Python.** The core service (Go, `services/core/`) owns the API, auth, tenancy, audit and EMR plumbing. The Python services (`services/intelligence/`) keep the models and are reached only over NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md).
