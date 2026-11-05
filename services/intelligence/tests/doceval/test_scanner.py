@@ -297,6 +297,41 @@ def test_orphan_image_refused(tmp_path: Path) -> None:
     assert scanner.scan_set(tmp_path).ok
 
 
+def test_orphan_image_matched_by_relative_path(tmp_path: Path) -> None:
+    (tmp_path / "ok.json").write_text(json.dumps(_doc()), encoding="utf-8")
+    (tmp_path / "x").mkdir()
+    (tmp_path / "x" / "b.png").write_bytes(b"\x89PNG")
+    # a listing at the root naming "b.png" means the root's b.png, not x/b.png
+    (tmp_path / "meta.jsonl").write_text(json.dumps({"image": "b.png"}) + "\n", encoding="utf-8")
+    res = scanner.scan_set(tmp_path)
+    assert any(f.rule == "orphan_image" and f.path == "x/b.png" for f in res.findings)
+    # by its path from the listing's folder, it is referenced
+    (tmp_path / "meta.jsonl").write_text(json.dumps({"image": "x/b.png"}) + "\n", encoding="utf-8")
+    assert scanner.scan_set(tmp_path).ok
+    (tmp_path / "meta.jsonl").unlink()
+    (tmp_path / "x" / "m.jsonl").write_text(json.dumps({"image": "b.png"}) + "\n", encoding="utf-8")
+    assert scanner.scan_set(tmp_path).ok
+
+
+def test_numeric_exemptions_are_bounded() -> None:
+    doc = _doc()
+    rows = doc["observations"]
+    assert rows, "the fixture document has lab rows"
+    row = rows[0]
+    row["value_numeric"]["value"] = 123456789  # nine integer digits: a lab number
+    assert scanner.check_document(doc) == []
+    row["value_numeric"]["value"] = 1234567890  # ten: checked like any number
+    assert any(
+        f.path.startswith("observations[0].value_numeric") for f in scanner.check_document(doc)
+    )
+    doc = _doc()
+    fld = doc["observations"][0]["name_text"]
+    fld["page"], fld["bbox"] = 1, [0.123456, 0.1, 1, 0.000001]
+    assert scanner.check_document(doc) == []
+    fld["bbox"] = [0.1234567, 0.1, 1, 0.2]  # seven decimals: no longer exempt
+    assert any(".bbox[0]" in f.path for f in scanner.check_document(doc))
+
+
 def test_file_names_scanned(tmp_path: Path) -> None:
     (tmp_path / "08031234567.json").write_text(json.dumps(_doc()), encoding="utf-8")
     (tmp_path / "Dr Adebayo.json").write_text(json.dumps(_doc()), encoding="utf-8")

@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Document pipeline phase 0, part A: the extraction schema
+  `mhai.extraction.clinical_document` 1.0.0 and the evaluation harness
+  (`services/intelligence/intelligence/doceval/`). Synthetic patients and
+  documents rendered from 15+ layouts per type, scan and phone-photo
+  degradation, handwriting-like and hostile pages, intake for real scans,
+  the synthetic-data scanner, set v1 with its 30/70 split, every design §6.3
+  metric, a runner over any extractor (stubs, a tiny safetensors model, an
+  OpenAI-compatible endpoint), the evaluation report with pass thresholds per
+  gate and slice (clinical change control), and the `mhai-doceval` CLI.
+  Synthetic data only; no model is promoted yet (part B).
 - Platform operations for platform admins and auditors (Plan 4, part 4c;
   OpenAPI 1.9.0, additive). `GET /platform/health` (the sampler's stored
   reading, one KV get per poll, 503 when none is fresh), `GET

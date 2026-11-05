@@ -34,10 +34,10 @@ confidence, every field gets :data:`UNSCORED_CONFIDENCE` (0), so its band is
 extractor returns counts as high confidence. ``document.page_count`` is the number of
 pages sent.
 
-TODO(Task 11, Task 19): this extractor's confidence is unscored
-(:data:`CONFIDENCE_SCORED` is false), so the report must mark ``calibration_ece``,
-``silent_error_rate`` and ``high_band_share`` as ``not_measured`` for it, never as a
-pass or a measured value.
+Its :class:`extractors.ExtractorInfo` says ``confidence_scored=False``
+(:data:`CONFIDENCE_SCORED`), so the report shows ``calibration_ece``,
+``silent_error_rate`` and ``high_band_share`` as ``not_measured`` for it: never a pass or
+a measured value.
 
 TODO(GPU task): refusals. The response contract becomes
 ``anyOf[MODEL_OUTPUT, {"refusal": {"reason": enum(REFUSAL_REASONS - {"internal"})}}]``,
@@ -76,7 +76,7 @@ from intelligence.doceval import extractors, schema
 log = logging.getLogger(__name__)
 
 UNSCORED_CONFIDENCE = 0.0
-CONFIDENCE_SCORED = False  # see the TODO in the module docstring
+CONFIDENCE_SCORED = False  # see Confidence in the module docstring
 DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = 2_000_000
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
@@ -241,7 +241,13 @@ class OpenAICompatExtractor:
             self._ssl = ctx
         try:
             self._info = extractors.check_info(
-                extractors.ExtractorInfo(name, dict(model_versions or {}), engine, hardware)
+                extractors.ExtractorInfo(
+                    name,
+                    dict(model_versions or {}),
+                    engine,
+                    hardware,
+                    confidence_scored=CONFIDENCE_SCORED,
+                )
             )
         except ValueError:
             raise _config_error("bad_config") from None

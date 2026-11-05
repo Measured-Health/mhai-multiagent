@@ -46,10 +46,11 @@ environment (the ids of the locked test split stay out of its logs).
 
 Notes for later tasks:
 
-* TODO(Task 11, Task 19): refuse an extractor whose ``engine`` is ``"stub"`` or whose
-  name ends in ``-stub`` for every gate except ``rehearsal``. The stubs (the oracle
-  above all, which reads ground truth) must not be usable in the ``model-eval`` or
-  ``model-promotion`` environments.
+* Stubs (``engine == "stub"`` or a name ending ``-stub``) pass only the ``rehearsal``
+  gate: the report refuses them for any other (Task 11). Note for Task 19: the promote
+  flow chooses the extractor from the run's ``config.json``, so a stub (the oracle above
+  all, which reads ground truth) is never what runs in ``model-eval`` or
+  ``model-promotion``.
 * Isolation of in-process extractors is by the interface only (page bytes in, nothing
   else); a Python extractor in this process could still open files its user can read.
   TODO: the first in-process model runner gets a subprocess boundary with no access to
@@ -486,21 +487,26 @@ def _not_measured(obj: Any) -> Any:
     return obj
 
 
-def _doc_metrics(pairs: list[tuple[dict[str, Any], dict[str, Any] | None]]) -> dict[str, Any]:
-    truths = [t for t, _ in pairs]
-    preds = [p for _, p in pairs]
-    conf = metrics.confidence_pairs(truths, preds)
+_Scored = tuple[dict[str, Any] | None, metrics.Aligned]  # a prediction, aligned once
+
+
+def _doc_metrics(docs: list[_Scored]) -> dict[str, Any]:
+    """The metrics of a group of documents, each aligned once (shared by its slice and the
+    overall bucket)."""
+    preds = [p for p, _ in docs]
+    sc = metrics.scores_of(metrics.Aligned(tuple(d for _, a in docs for d in a.docs)))
+    conf = sc["confidence_pairs"]
     return {
-        "documents": len(pairs),
-        "field_pr": metrics.field_pr(truths, preds),
-        "handwritten_pr": metrics.handwritten_pr(truths, preds),
-        "identifier_precision": metrics.identifier_precision(truths, preds),
-        "silent_error": metrics.silent_error_rate(truths, preds),
+        "documents": len(docs),
+        "field_pr": sc["field_pr"],
+        "handwritten_pr": sc["handwritten_pr"],
+        "identifier_precision": sc["identifier_precision"],
+        "silent_error": sc["silent_error"],
         "calibration_ece": metrics.calibration_ece([c for c, _ in conf], [ok for _, ok in conf]),
         "calibration_fields": len(conf),
         "high_band_share": _high_band_share(preds),
-        "grounding": metrics.grounding_rate(truths, preds),
-        "handwriting_cer": metrics.handwriting_cer(truths, preds),
+        "grounding": sc["grounding"],
+        "handwriting_cer": sc["handwriting_cer"],
         "code_exact_match": None,
     }
 
@@ -674,15 +680,16 @@ def run(
             truth = _verified_json(s, f"truth/{doc.id}.json")
         scored.append((doc.slice, (truth, outcome.document)))
 
-    groups: dict[str, list[tuple[dict[str, Any], dict[str, Any] | None]]] = {
+    aligned = [(name, (pred, metrics.align(truth, pred))) for name, (truth, pred) in scored]
+    groups: dict[str, list[_Scored]] = {
         name: []
         for name in s.slices  # a slice with no documents: reported, not measured
     }
-    for name, pair in scored:
-        groups[name].append(pair)
+    for name, entry in aligned:
+        groups[name].append(entry)
     per_slice = {
         "slices": {name: _doc_metrics(groups[name]) for name in sorted(groups)},
-        "overall": _doc_metrics([p for name, p in scored if name != HOSTILE_SLICE]),
+        "overall": _doc_metrics([d for name, d in aligned if name != HOSTILE_SLICE]),
     }
     total_pages = sum(d.pages for d in s.docs)
     latency: dict[str, Any] = dict(metrics.latency(page_wall))

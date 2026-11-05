@@ -566,11 +566,28 @@ def _scopes(result: runner.RunResult) -> _Scopes:
         "metrics": SUPPRESSED if small else {k: _fmt(v) for k, v in sorted(run_vals.items())},
         **_outcome_block(outcomes, documents),
     }
+    if not result.extractor.confidence_scored:
+        _unscored(values, shown)
     slices = [k for k in shown if k.startswith("slices.")]
     _secondary(shown, "overall", [k for k in slices if k != f"slices.{runner.HOSTILE_SLICE}"])
     _secondary(shown, "run", slices)
     _suppress_shares(shown["run"])
     return _Scopes(values, shown, {k: v["documents"] for k, v in shown.items()})
+
+
+_CONFIDENCE_METRICS = ("calibration_ece", "silent_error_rate", "high_band_share")
+
+
+def _unscored(values: dict[str, dict[str, Value]], shown: dict[str, dict[str, Any]]) -> None:
+    """An extractor whose confidences are placeholders: the metrics built on confidence
+    are not measured (never a pass, never a number)."""
+    for scope, vals in values.items():
+        if scope == "run":
+            continue
+        for k in _CONFIDENCE_METRICS:
+            vals[k] = None
+            if isinstance(shown[scope]["metrics"], dict):
+                shown[scope]["metrics"][k] = None
 
 
 def _secondary(shown: dict[str, dict[str, Any]], combined: str, parts: Sequence[str]) -> None:
@@ -712,6 +729,12 @@ def _evaluate(
 # ---------------------------------------------------------------- building the report
 
 
+def check_split(purpose: object) -> dict[str, Any]:
+    """The report's split for a set's purpose: ``dev`` (labelled) or ``test``; anything
+    else is refused (``not_allowed_here``). Call it before a run, not only after."""
+    return _split(purpose)
+
+
 def _split(purpose: object) -> dict[str, Any]:
     if purpose == "test":
         return {"name": "test", "label": None}
@@ -830,7 +853,7 @@ def build_report(
         },
         "notebook_metrics": _notebook(notebook_metrics),
     }
-    dumps(rep)  # canonical, or refuse now
+    _parse(dumps(rep), any_thresholds_file=True)  # what we write must read back
     return rep
 
 
@@ -884,7 +907,7 @@ def stopped_report(
         },
         "notebook_metrics": None,
     }
-    dumps(rep)
+    _parse(dumps(rep), any_thresholds_file=True)
     return rep
 
 
@@ -1058,7 +1081,7 @@ def _check_verdict(gate: str, v: Any, stopped: bool) -> None:
         _req(v["verdict"] == "fail" or not expected)
 
 
-def _check_header(obj: dict[str, Any]) -> None:
+def _check_header(obj: dict[str, Any], any_thresholds_file: bool = False) -> None:
     _req(_exact(obj["extractor"], ("name",)) and _is_token(obj["extractor"]["name"], _NAME))
     mv = obj["model_versions"]
     _req(isinstance(mv, dict) and len(mv) <= 16)
@@ -1080,7 +1103,10 @@ def _check_header(obj: dict[str, Any]) -> None:
     _req(isinstance(th, dict) and bool(th) and set(th) == set(obj["verdicts"]))
     for gate, t in th.items():
         _req(gate in GATES and _exact(t, ("file", "sha256", "production")))
-        _req(t["file"] == f"thresholds/{gate}.json" and _is_token(t["sha256"], _SHA))
+        packaged = t["file"] == f"thresholds/{gate}.json"
+        # building a report, a test's own thresholds file may be named plainly
+        _req(packaged or (any_thresholds_file and _is_token(t["file"], _KEY)))
+        _req(_is_token(t["sha256"], _SHA))
         _req(t["production"] is (gate in PRODUCTION_GATES))
 
 
@@ -1103,16 +1129,21 @@ def read_report(path: str | Path) -> dict[str, Any]:
 def parse_report(raw: bytes) -> dict[str, Any]:
     """A report read back (``report``, ``compare``). Everything that reaches the Markdown is
     checked against the pattern or closed set it was built from (names, tokens, hashes,
-    scope, metric, outcome, refusal, failure and kind names, counts and decimals), the
-    thresholds files are the packaged ones, the failed lists agree with the results, and
-    no string anywhere can carry markup."""
+    scope, metric, outcome, refusal, failure and kind names, counts and decimals), each
+    thresholds file is named as the packaged file for its gate (the name only: its
+    contents and hash are not compared with the packaged file here), the failed lists
+    agree with the results, and no string anywhere can carry markup."""
+    return _parse(raw)
+
+
+def _parse(raw: bytes, *, any_thresholds_file: bool = False) -> dict[str, Any]:
     obj = _canonical_doc(raw, _MAX_REPORT_BYTES)
     _req(isinstance(obj, dict) and set(obj) == _TOP and obj["schema"] == REPORT_SCHEMA)
     _walk_safe(obj)
     stopped = obj["stopped"]
     _req(stopped is None or stopped in STOP_REASONS)
     _req(isinstance(obj["verdicts"], dict) and bool(obj["verdicts"]))
-    _check_header(obj)
+    _check_header(obj, any_thresholds_file)
     for gate, v in obj["verdicts"].items():
         _check_verdict(gate, v, stopped is not None)
     scopes = obj["scopes"]
@@ -1451,6 +1482,7 @@ __all__ = [
     "build_report",
     "cell",
     "check_gates",
+    "check_split",
     "compare",
     "dumps",
     "is_stub",

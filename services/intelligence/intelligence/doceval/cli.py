@@ -242,6 +242,7 @@ def _run(args: argparse.Namespace) -> int:
     _check_run_args(args)
     deadline = args.deadline
     meta = report.testset_meta(Path(args.set))
+    report.check_split(meta["purpose"])  # dev or test, before anything runs
     extractor = _extractor(args, meta)
     try:
         info = extractors.check_info(extractor.info())
@@ -274,6 +275,8 @@ def _run(args: argparse.Namespace) -> int:
                 engine_version=args.engine_version,
             )
         else:
+            if result.testset_sha256 != meta["sha256"] or result.purpose != meta["purpose"]:
+                raise Refused("testset_mismatch")  # the set changed under the run
             rep = report.build_report(
                 result,
                 gates,
@@ -342,11 +345,12 @@ def _printed_manifest(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     from intelligence.doceval.synth import intake
 
     try:
-        raw = path.read_bytes()
-        if len(raw) > _MAX_MANIFEST_BYTES:
-            raise _Stop("manifest_invalid")
+        raw = report.read_regular(path, _MAX_MANIFEST_BYTES, "manifest_invalid")
+    except Refused as e:
+        raise _Stop("manifest_invalid") from e
+    try:
         doc = json.loads(raw, object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
-    except (OSError, ValueError, RecursionError) as e:
+    except (ValueError, RecursionError) as e:
         raise _Stop("manifest_invalid") from e
     if not isinstance(doc, dict) or set(doc) != {"schema", "pages", "volunteers"}:
         raise _Stop("manifest_invalid")

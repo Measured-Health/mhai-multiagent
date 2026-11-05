@@ -18,12 +18,14 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import re
 import stat
 import subprocess
 import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -310,11 +312,30 @@ def _field_pattern(path: str) -> str | None:
     return None
 
 
-def _numeric_exempt(path: str, pattern: str | None) -> bool:
-    """Numbers the schema defines: lab values and ranges, pages, boxes, confidence."""
+MAX_LAB_INT_DIGITS = 9  # a numeric lab value has at most this many integer digits
+MAX_BOX_DECIMALS = 6  # the renderer rounds box coordinates to 6 places
+
+
+def _lab_number_ok(leaf: int | float) -> bool:
+    if not math.isfinite(leaf):
+        return False
+    return len(str(int(abs(leaf)))) <= MAX_LAB_INT_DIGITS
+
+
+def _box_number_ok(leaf: int | float) -> bool:
+    """A box coordinate: in [0, 1] with at most six decimals (anything else is checked)."""
+    if not math.isfinite(leaf) or not 0 <= leaf <= 1:
+        return False
+    exponent = Decimal(repr(leaf)).as_tuple().exponent
+    return isinstance(exponent, int) and exponent >= -MAX_BOX_DECIMALS
+
+
+def _numeric_exempt(path: str, pattern: str | None, leaf: int | float) -> bool:
+    """Numbers the schema defines: lab values and ranges (up to 9 integer digits), pages,
+    boxes (in [0, 1], up to 6 decimals), confidence."""
     return (
-        (pattern in _NUMERIC_LAB and path.endswith(".value"))
-        or ".bbox[" in path
+        (pattern in _NUMERIC_LAB and path.endswith(".value") and _lab_number_ok(leaf))
+        or (".bbox[" in path and _box_number_ok(leaf))
         or path.endswith((".page", ".confidence"))
         or path == "document.page_count"
     )
@@ -340,7 +361,7 @@ def check_document(gt: Any) -> list[Finding]:
         if isinstance(leaf, bool) or leaf is None:
             continue
         if isinstance(leaf, int | float):
-            if _numeric_exempt(path, pattern):
+            if _numeric_exempt(path, pattern, leaf):
                 continue
             rules = _digit_rules(_normalise(str(leaf)), lab, pattern in _NUMERIC_LAB)
         elif isinstance(leaf, str):
@@ -584,10 +605,12 @@ def _check_json_text(
             if listed is not None and context == "testset" and isinstance(files, list):
                 base = str(Path(rel).parent)
                 listed.extend(_Listed(f"{label}#files[{i}]", base, e) for i, e in enumerate(files))
+            # A name in a listing refers to a file relative to the listing's folder, by
+            # its path: a bare name never vouches for an image in another folder.
+            folder = posixpath.dirname(rel)
             for _, _key, leaf, is_key, _raw in _metadata_leaves(obj):
                 if not is_key and isinstance(leaf, str):
-                    referenced.add(leaf)
-                    referenced.add(Path(leaf).name)
+                    referenced.add(posixpath.normpath(posixpath.join(folder, leaf)))
         out.extend(Finding(f"{label}#{f.path}", f.rule) for f in sub)
     return out
 
@@ -713,7 +736,7 @@ def scan_set(path: str | Path) -> ScanResult:
     findings.extend(_check_listed(listed, by_rel))
     for full, shown, rel in images:
         sibling = full.with_suffix(".json")
-        if sibling in json_files or rel in referenced or full.name in referenced:
+        if sibling in json_files or posixpath.normpath(rel) in referenced:
             continue
         findings.append(Finding(shown, "orphan_image"))
     if scanned == 0 and not findings:

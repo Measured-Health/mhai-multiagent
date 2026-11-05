@@ -304,3 +304,41 @@ def test_cli_training_manifest_read_safely(
     _out(capsys)
     rep = report.read_report(tmp_path / "ok" / "evaluation.json")
     assert rep["notebook_metrics"] == {"informational": True, "metrics": {"val_f1": "0.8"}}
+
+
+def test_cli_split_checked_before_the_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from intelligence.doceval import runner
+
+    train = _set(tmp_path / "train", purpose="train")
+    called: list[bool] = []
+    monkeypatch.setattr(runner, "run", lambda *a, **k: called.append(True))
+    args = ["run", "--extractor", "tiny", "--model", str(tmp_path), "--set", str(train.root)]
+    assert cli.main([*args, "--out", str(tmp_path / "r")]) == 2
+    assert json.loads(_out(capsys)) == {"refused": "not_allowed_here"}
+    assert not called and not (tmp_path / "r").exists()
+
+
+def test_cli_result_must_be_the_set_that_was_checked(
+    tmp_path: Path,
+    dev_set: minisets.MiniSet,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dataclasses
+
+    from intelligence.doceval import runner
+
+    real = runner.run
+    base = ["run", "--extractor", "oracle", "--test-only-oracle", "--set", str(dev_set.root)]
+    for change in ({"testset_sha256": "0" * 64}, {"purpose": "test"}):
+        monkeypatch.setattr(
+            runner,
+            "run",
+            lambda *a, change=change, **k: dataclasses.replace(real(*a, **k), **change),
+        )
+        out = tmp_path / f"r{len(change)}{sorted(change)[0]}"
+        assert cli.main([*base, "--out", str(out)]) == 2
+        assert json.loads(_out(capsys)) == {"refused": "testset_mismatch"}
+        assert not out.exists()

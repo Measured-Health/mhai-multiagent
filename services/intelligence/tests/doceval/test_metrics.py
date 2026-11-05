@@ -544,3 +544,36 @@ def test_fixture_truths_pass_the_synthetic_data_scanner() -> None:
             assert scanner.check_document(doc) == [], path.name
             n += 1
     assert n > 40
+
+
+def test_scores_from_one_alignment_equal_each_metric() -> None:
+    from intelligence.doceval import extractors
+    from intelligence.doceval import sets as _sets
+    from tests.doceval import minisets
+
+    truths = [_sets.stored_view(minisets.visible_truth(k), 1) for k in range(4)]
+    preds: list[Any] = [copy.deepcopy(t) for t in truths]
+    rng = random.Random(3)
+    for p in preds[:3]:
+        for _, fld in schema.iter_fields(p):
+            r = rng.random()
+            if fld.get("value") is not None and r < 0.2:
+                fld["value"] = None
+            elif isinstance(fld.get("value"), str) and r < 0.4:
+                fld["value"] = "Q" + fld["value"]
+            fld["confidence"] = rng.choice([0.5, 0.9, 1.0])
+            fld["band"] = extractors.band(fld["confidence"])
+    preds[3] = None
+    sc = metrics.scores(truths, preds)
+    assert sc["field_pr"] == metrics.field_pr(truths, preds)
+    assert sc["handwritten_pr"] == metrics.handwritten_pr(truths, preds)
+    assert sc["identifier_precision"] == metrics.identifier_precision(truths, preds)
+    assert sc["silent_error"] == metrics.silent_error_rate(truths, preds)
+    assert sc["confidence_pairs"] == metrics.confidence_pairs(truths, preds)
+    assert sc["grounding"] == metrics.grounding_rate(truths, preds)
+    assert sc["handwriting_cer"] == metrics.handwriting_cer(truths, preds)
+    # joining per-document alignments gives the same as aligning the group
+    joined = metrics.Aligned(
+        tuple(d for t, p in zip(truths, preds, strict=True) for d in metrics.align(t, p).docs)
+    )
+    assert metrics.scores_of(joined) == sc

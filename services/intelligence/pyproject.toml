@@ -101,7 +101,6 @@ explicit = true
 
 [project.scripts]
 intelligence = "intelligence.cli:main"
-mhai-models = "intelligence.modelstore.cli:main"
 mhai-doceval = "intelligence.doceval.cli:main"
 
 [project.urls]

@@ -734,3 +734,32 @@ def test_compare_flags_suppression_and_not_applicable(perfect: runner.RunResult)
     back = report.compare(after, before)
     reg = back.split("Regressions:", 1)[1].split("\n\n", 1)[0]
     assert "values suppressed" not in reg
+
+
+def test_unscored_confidence_is_not_measured(tmp_path: Path, perfect: runner.RunResult) -> None:
+    from intelligence.doceval import openai_compat
+
+    info = openai_compat.OpenAICompatExtractor("http://127.0.0.1:9", "m").info()
+    assert info.confidence_scored is False
+    unscored = dataclasses.replace(perfect, extractor=info)
+    rules = [
+        {"metric": "calibration_ece", "op": "max", "value": "0.05"},
+        {"metric": "silent_error_rate", "op": "max", "value": "0.005"},
+        {"metric": "grounding_rate", "op": "min", "value": "0.5"},
+    ]
+    th = report.load_thresholds(_thresholds(tmp_path, "phase1", {"overall": rules}))
+    rep = report.build_report(unscored, [th])
+    res = rep["verdicts"]["phase1"]["results"]["overall"]
+    assert res["calibration_ece"] == "not_measured"
+    assert res["silent_error_rate"] == "not_measured"
+    assert res["grounding_rate"] == "pass"
+    assert rep["verdicts"]["phase1"]["verdict"] == "fail"
+    for scope in ("overall", "slices.lab_typed_clean"):
+        m = rep["scopes"][scope]["metrics"]
+        assert m["calibration_ece"] is None and m["high_band_share"] is None
+    # the same run with scored confidence measures them
+    scored = report.build_report(perfect, [th])["verdicts"]["phase1"]["results"]["overall"]
+    assert scored["calibration_ece"] == "pass"
+    bad = dataclasses.replace(info, confidence_scored="no")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        extractors.check_info(bad)

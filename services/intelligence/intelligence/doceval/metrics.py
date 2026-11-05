@@ -559,9 +559,28 @@ def _align(truth: Doc, pred: Doc | None) -> list[_Pair]:
     return out
 
 
-def _all_pairs(truth: DocInput, pred: PredInput) -> Iterator[_Pair]:
+@dataclass(frozen=True)
+class Aligned:
+    """Every document's field pairs, aligned once (the row matching is the costly part).
+
+    ``docs`` holds, per document in order, whether any true field is handwritten or mixed
+    (for :func:`handwritten_pr`) and the document's pairs.
+    """
+
+    docs: tuple[tuple[bool, tuple[_Pair, ...]], ...]
+
+    def pairs(self) -> Iterator[_Pair]:
+        for _, pairs in self.docs:
+            yield from pairs
+
+
+def align(truth: DocInput, pred: PredInput) -> Aligned:
+    """Align predictions with the truth, one document at a time, for :func:`scores`."""
+    out: list[tuple[bool, tuple[_Pair, ...]]] = []
     for t, p in _as_docs(truth, pred):
-        yield from _align(t, p)
+        hand = any(f.get("script") in HANDWRITTEN_SCRIPTS for _, f in schema.iter_fields(dict(t)))
+        out.append((hand, tuple(_align(t, p))))
+    return Aligned(tuple(out))
 
 
 def _count(pairs: Iterable[_Pair]) -> dict[str, Any]:
@@ -589,7 +608,11 @@ def field_pr(truth: DocInput, pred: PredInput) -> dict[str, dict[str, Any]]:
     A wrong value is one false positive and one false negative. A numeric lab value
     counts as correct only with its row's unit.
     """
-    pairs = list(_all_pairs(truth, pred))
+    return _field_pr(align(truth, pred))
+
+
+def _field_pr(a: Aligned) -> dict[str, dict[str, Any]]:
+    pairs = list(a.pairs())
     return {ft: _count(p for p in pairs if p.ftype == ft) for ft in FIELD_TYPE_NAMES}
 
 
@@ -611,16 +634,23 @@ def handwritten_pr(truth: DocInput, pred: PredInput) -> dict[str, Any]:
     row or field with no true counterpart, the document's (handwritten if any true field
     is). A model cannot move its own errors out of the handwritten count.
     """
+    return _handwritten_pr(align(truth, pred))
+
+
+def _handwritten_pr(a: Aligned) -> dict[str, Any]:
     pairs: list[_Pair] = []
-    for t, p in _as_docs(truth, pred):
-        hand = any(f.get("script") in HANDWRITTEN_SCRIPTS for _, f in schema.iter_fields(dict(t)))
-        pairs.extend(x for x in _align(t, p) if _handwritten(x, hand))
+    for hand, doc_pairs in a.docs:
+        pairs.extend(x for x in doc_pairs if _handwritten(x, hand))
     return _count(pairs)
 
 
 def identifier_precision(truth: DocInput, pred: PredInput) -> dict[str, Any]:
     """Patient identifiers (MRN, other ids, date of birth, names) by ``patient.*`` path."""
-    return _count(p for p in _all_pairs(truth, pred) if p.pattern in IDENTIFIER_PATHS)
+    return _identifier_precision(align(truth, pred))
+
+
+def _identifier_precision(a: Aligned) -> dict[str, Any]:
+    return _count(p for p in a.pairs() if p.pattern in IDENTIFIER_PATHS)
 
 
 def code_exact_match(
@@ -680,8 +710,12 @@ def silent_error_rate(truth: DocInput, pred: PredInput) -> dict[str, Any]:
     and fields the truth has but are not visible (unless the prediction differs), are left
     out, so empty fields cannot dilute the rate.
     """
+    return _silent_error_rate(align(truth, pred))
+
+
+def _silent_error_rate(a: Aligned) -> dict[str, Any]:
     errors = high = 0
-    for pair in _all_pairs(truth, pred):
+    for pair in a.pairs():
         if not isinstance(pair.pred, Mapping) or pair.pred.get("band") != "high":
             continue
         if pair.status in ("empty", "unseen_skipped"):
@@ -696,8 +730,12 @@ def confidence_pairs(truth: DocInput, pred: PredInput) -> list[tuple[float, bool
 
     The same fields as :func:`silent_error_rate`'s denominator, in every band.
     """
+    return _confidence_pairs(align(truth, pred))
+
+
+def _confidence_pairs(a: Aligned) -> list[tuple[float, bool]]:
     out: list[tuple[float, bool]] = []
-    for pair in _all_pairs(truth, pred):
+    for pair in a.pairs():
         if not isinstance(pair.pred, Mapping) or pair.status in ("empty", "unseen_skipped"):
             continue
         c = pair.pred.get("confidence")
@@ -744,8 +782,12 @@ def grounding_rate(truth: DocInput, pred: PredInput) -> dict[str, Any]:
     Matched fields: the truth has a visible value and the prediction has a value (right or
     wrong). ``{grounded, total, rate}``.
     """
+    return _grounding_rate(align(truth, pred))
+
+
+def _grounding_rate(a: Aligned) -> dict[str, Any]:
     grounded = total = 0
-    for pair in _all_pairs(truth, pred):
+    for pair in a.pairs():
         if pair.status not in ("tp", "wrong"):
             continue
         total += 1
@@ -797,8 +839,12 @@ def handwriting_cer(truth: DocInput, pred: PredInput) -> dict[str, Any]:
     Text read is ``raw_text`` (else the value); a field the prediction leaves out counts
     every character as an error.
     """
+    return _handwriting_cer(align(truth, pred))
+
+
+def _handwriting_cer(a: Aligned) -> dict[str, Any]:
     edits = chars = 0
-    for pair in _all_pairs(truth, pred):
+    for pair in a.pairs():
         t = pair.truth
         if not isinstance(t, Mapping) or t.get("script") not in HANDWRITTEN_SCRIPTS:
             continue
@@ -811,6 +857,28 @@ def handwriting_cer(truth: DocInput, pred: PredInput) -> dict[str, Any]:
         edits += e
         chars += c
     return {"edits": edits, "chars": chars, "cer": _ratio(edits, chars)}
+
+
+def scores(truth: DocInput, pred: PredInput) -> dict[str, Any]:
+    """Every field-level metric from one alignment: the same results as calling
+    :func:`field_pr`, :func:`handwritten_pr`, :func:`identifier_precision`,
+    :func:`silent_error_rate`, :func:`confidence_pairs`, :func:`grounding_rate` and
+    :func:`handwriting_cer` one by one, with the rows matched once per document."""
+    return scores_of(align(truth, pred))
+
+
+def scores_of(a: Aligned) -> dict[str, Any]:
+    """:func:`scores` of documents already aligned (several :func:`align` results can be
+    joined: ``Aligned(a.docs + b.docs)``)."""
+    return {
+        "field_pr": _field_pr(a),
+        "handwritten_pr": _handwritten_pr(a),
+        "identifier_precision": _identifier_precision(a),
+        "silent_error": _silent_error_rate(a),
+        "confidence_pairs": _confidence_pairs(a),
+        "grounding": _grounding_rate(a),
+        "handwriting_cer": _handwriting_cer(a),
+    }
 
 
 def latency(per_page_seconds: Sequence[float]) -> dict[str, float | None]:

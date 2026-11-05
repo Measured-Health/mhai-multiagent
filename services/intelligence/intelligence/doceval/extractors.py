@@ -23,9 +23,12 @@ The stubs:
 * :class:`InvalidExtractor` returns bad JSON, a schema violation or too much output, or
   raises, to exercise the runner's checks (P22).
 
-Every stub reports ``engine="stub"`` and a name ending in ``-stub``. TODO(Task 11, Task
-19): refuse those for every gate except ``rehearsal``; no stub, and the oracle least of
-all, may run in the ``model-eval`` or ``model-promotion`` environments.
+Every stub reports ``engine="stub"`` and a name ending in ``-stub``. The report refuses
+those for every gate except ``rehearsal`` (Task 11, ``report.check_gates``), and
+``mhai-doceval run`` refuses the oracle outside tests. Note for Task 19: the promote flow
+picks the extractor itself (from ``config.json``, never by a self-declared engine name),
+so no stub, and the oracle least of all, can run in the ``model-eval`` or
+``model-promotion`` environments.
 """
 
 import copy
@@ -68,6 +71,10 @@ class ExtractorInfo:
     model_versions: dict[str, str]
     engine: str
     hardware: str
+    # False when the extractor's confidences are placeholders (not scored by a confidence
+    # model): the report then shows calibration, silent errors and the high-band share as
+    # not measured.
+    confidence_scored: bool = True
 
 
 def check_info(info: object) -> ExtractorInfo:
@@ -80,6 +87,7 @@ def check_info(info: object) -> ExtractorInfo:
         ok = ok and all(isinstance(x, str) and _TOKEN.fullmatch(x) is not None for x in (k, v))
     for x in (info.engine, info.hardware):
         ok = ok and isinstance(x, str) and _TOKEN.fullmatch(x) is not None
+    ok = ok and isinstance(info.confidence_scored, bool)
     if not ok:
         raise ValueError("bad_extractor_info")
     return info
