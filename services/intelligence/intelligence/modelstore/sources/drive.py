@@ -14,6 +14,8 @@ It refuses, with ``source_invalid`` and a detail code:
   anything is downloaded), or a download that runs past its reported size (P4);
 * a file with no checksum, or whose bytes don't match Drive's ``sha256Checksum``, or
   ``md5Checksum`` when Drive has no SHA-256 (P5).
+* a listing page that doesn't say ``incompleteSearch: false`` (``incomplete``; for
+  :func:`drive_check` it is ``drive_scope/incomplete``).
 
 :func:`drive_check` (B22) runs first in every promote job: the account sees exactly one
 top-level item, the shared folder, and it can't edit, add to, delete or share it or
@@ -42,7 +44,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 
@@ -60,7 +62,10 @@ from intelligence.modelstore.sources import (
 
 BASE_URL = "https://www.googleapis.com/drive/v3"
 FIELDS = "id,name,mimeType,size,sha256Checksum,md5Checksum,capabilities,trashed"
-LIST_FIELDS = f"nextPageToken,files({FIELDS})"
+# ``incompleteSearch`` is a list-level field (the plan's per-file FIELDS are unchanged):
+# with ``corpora=allDrives`` Drive may skip some drives and say so only there. Every page
+# must carry it, false (review R1).
+LIST_FIELDS = f"nextPageToken,incompleteSearch,files({FIELDS})"
 DRIVES_FIELDS = "nextPageToken,drives(id)"
 FOLDER = "application/vnd.google-apps.folder"
 SHORTCUT = "application/vnd.google-apps.shortcut"
@@ -210,6 +215,8 @@ class HttpDriveApi:
             if token is not None:
                 page["pageToken"] = token
             obj = self._json("/files" if key == "files" else f"/{key}", page)
+            if key == "files" and obj.get("incompleteSearch") is not False:
+                raise invalid("incomplete")  # a partial view is no view: missing or true
             items = obj.get(key, [])
             if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
                 raise invalid("response")
@@ -369,12 +376,23 @@ def _read_only(item: Mapping[str, Any]) -> None:
             raise Refused("drive_scope", detail_code="writable")
 
 
+def _scoped[T](fn: Callable[..., T], *args: Any) -> T:
+    """``fn(*args)``, with an incomplete listing turned into ``drive_scope/incomplete``: for
+    B22 a partial view of what the account sees is a failed check."""
+    try:
+        return fn(*args)
+    except Refused as e:
+        if (e.reason, e.detail_code) != ("source_invalid", "incomplete"):
+            raise
+    raise Refused("drive_scope", detail_code="incomplete")  # outside the handler: no chain
+
+
 def drive_check(api: DriveApi, folder_id: str) -> None:
     """B22: the account sees exactly one top-level item, ``folder_id``, a folder; and
     ``canEdit``, ``canAddChildren``, ``canDelete`` and ``canShare`` are all false on it and
     on every item under it. Anything else is ``drive_scope``."""
     check_id(folder_id)
-    top = api.about()
+    top = _scoped(api.about)
     if len(top) != 1:
         raise Refused("drive_scope", detail_code="top_level_count")
     root = top[0]
@@ -385,13 +403,13 @@ def drive_check(api: DriveApi, folder_id: str) -> None:
     ):
         raise Refused("drive_scope", detail_code="top_level")
     _read_only(root)
-    _read_only(api.get_meta(folder_id))
+    _read_only(_scoped(api.get_meta, folder_id))
     seen = 0
     level = [folder_id]
     for _ in range(MAX_CHECK_DEPTH + 1):
         nxt: list[str] = []
         for fid in level:
-            for item in api.list_children(fid):
+            for item in _scoped(api.list_children, fid):
                 seen += 1
                 if seen > MAX_CHECK_ITEMS:
                     raise Refused("drive_scope", detail_code="too_many")

@@ -14,7 +14,11 @@
   chunk cache, by default under ``HF_HOME``), and points ``HF_HOME`` and ``HF_XET_CACHE``
   inside the scratch cache as well, should anything still read them.
 * The endpoint is pinned: both calls go to :data:`ENDPOINT` (``https://huggingface.co``),
-  whatever ``HF_ENDPOINT`` says; a mirror is never used.
+  whatever ``HF_ENDPOINT`` says; a mirror is never used. Before each download the URL
+  ``huggingface_hub`` will use (its own ``hf_hub_url``, which ``hf_hub_download`` calls) must
+  be exactly ``ENDPOINT/<repo>/resolve/<revision>/<name>``, else ``source_invalid/endpoint``:
+  the library swaps in ``endpoint=`` only when its URL template still agrees with
+  ``constants.ENDPOINT``.
 * The cached file is copied into the scratch run directory with a byte cap and checked
   against this source's own last listing (the caller's :class:`RemoteFile` must equal the
   listed one): an LFS file's SHA-256, else the git blob id. The cached copy is removed.
@@ -252,6 +256,7 @@ class HFSource:
             raise invalid("no_checksum")
         if not isinstance(max_bytes, int) or file.size > max_bytes:
             raise invalid("size")
+        self._check_url(file.name)
         got: Any = None
         refusal: Refused | None = None
         try:
@@ -282,6 +287,18 @@ class HFSource:
             _remove(real)
             if os.path.lexists(got) and os.path.islink(got):
                 _remove(os.fspath(got))
+
+    def _check_url(self, name: str) -> None:
+        expected = f"{ENDPOINT}/{self._repo}/resolve/{self._revision}/{name}"
+        url: Any = None
+        try:
+            url = huggingface_hub.hf_hub_url(
+                self._repo, name, revision=self._revision, repo_type="model", endpoint=ENDPOINT
+            )
+        except Exception:
+            pass
+        if url != expected:
+            raise invalid("endpoint")
 
     def _copy(
         self, file: RemoteFile, real: str, dest: Path, max_bytes: int, oid: str | None

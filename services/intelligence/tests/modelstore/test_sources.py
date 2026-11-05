@@ -26,10 +26,10 @@ from huggingface_hub import hf_api
 from intelligence.modelstore import files
 from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.sources import RemoteFile, Scratch, scratch
-from intelligence.modelstore.sources.drive import DriveSource, HttpDriveApi, drive_check
+from intelligence.modelstore.sources.drive import FIELDS, DriveSource, HttpDriveApi, drive_check
 from intelligence.modelstore.sources.hf import HFSource
 from intelligence.modelstore.sources.local import LocalSource
-from tests.modelstore.fakes.drive_api import FakeDriveSession
+from tests.modelstore.fakes.drive_api import FakeDriveSession, FakeParamError
 
 WEIGHTS = b"synthetic weights " * 50
 CONFIG = b'{"model_type": "synthetic"}'
@@ -468,6 +468,8 @@ class FakeHub:
         self.downloads: list[str] = []
         self.calls: list[dict[str, Any]] = []
         self.serve: dict[str, bytes] = {}
+        self.fail_list = False
+        self.fail_download = False
         hub = self
 
         class FakeApi:
@@ -490,6 +492,8 @@ class FakeHub:
 
     def list_repo_tree(self, repo_id: str, **kw: Any) -> Iterator[Any]:
         self.calls.append({"fn": "list", "repo": repo_id, **kw, **self._settings()})
+        if self.fail_list:
+            raise RuntimeError("synthetic hub failure")
         for path, content in self.entries.items():
             if content is None:
                 yield hf_api.RepoFolder(path=path, oid="f" * 40)
@@ -508,6 +512,8 @@ class FakeHub:
             {"fn": "download", "repo": repo_id, "file": filename, **kw, **self._settings()}
         )
         self.downloads.append(filename)
+        if self.fail_download:
+            raise RuntimeError("synthetic hub failure")
         content = self.serve.get(filename, self.entries[filename] or b"")
         cache = Path(kw["cache_dir"])
         blob = cache / "blobs" / hashlib.sha256(content).hexdigest()
@@ -725,3 +731,115 @@ def test_hf_fetch_needs_this_sources_listing(
         "changed",
     )
     assert hub.downloads == []
+
+
+# ---------------------------------------------------------------- re-review 1
+
+
+def test_drive_incomplete_search_refused() -> None:
+    # A run listing: incompleteSearch true, left out, or true from the second page on.
+    for flag, from_page in ((True, 0), (None, 0), (True, 1)):
+        d = DriveRun()
+        for i in range(3):
+            d.fake.file(f"s{i}.safetensors", d.run.id, WEIGHTS)
+        d.fake.incomplete, d.fake.incomplete_from = flag, from_page
+        assert _code(_refused(d.source.list_run, "mhai-tiny", "run-1")) == (
+            "source_invalid",
+            "incomplete",
+        )
+        assert d.media_requests() == 0
+    # drive_check: the top-level view, or any folder under it, incomplete.
+    for flag in (True, None):
+        c = DriveRun()
+        c.fake.incomplete = flag
+        assert _code(_refused(drive_check, c.api, c.root.id)) == ("drive_scope", "incomplete")
+    deep = DriveRun()
+    for i in range(3):
+        deep.fake.file(f"s{i}.safetensors", deep.run.id, WEIGHTS)
+    deep.fake.incomplete, deep.fake.incomplete_from = True, 1  # only on later pages
+    assert _code(_refused(drive_check, deep.api, deep.root.id)) == ("drive_scope", "incomplete")
+
+
+def test_fake_param_failures_are_their_own_error() -> None:
+    d = DriveRun()
+    # A get without supportsAllDrives is refused by the fake, on the error paths too, and
+    # the failure is not swallowed into ``network``.
+    for setup in (lambda: None, lambda: d.fake.status.update({d.weights.id: 500})):
+        setup()
+        with pytest.raises(FakeParamError):
+            d.api._json(f"/files/{d.weights.id}", {"fields": FIELDS})
+    d.fake.status.clear()
+    d.fake.raise_on.add(d.weights.id)
+    with pytest.raises(FakeParamError):
+        d.api._json(f"/files/{d.weights.id}", {"fields": FIELDS})
+    with pytest.raises(FakeParamError):  # a listing without the all-drives parameters
+        d.api._json("/files", {"q": f"'{d.run.id}' in parents"})
+
+
+def test_hf_download_url_must_be_pinned(monkeypatch: pytest.MonkeyPatch, work: Scratch) -> None:
+    built: list[str] = []
+    real_url = huggingface_hub.hf_hub_url
+
+    def spy(*a: Any, **kw: Any) -> str:
+        url = real_url(*a, **kw)  # the library's own URL, not a fake one
+        built.append(url)
+        return url
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_url", spy)
+    expected = f"https://huggingface.co/synthetic/tiny/resolve/{REV}/model.safetensors"
+    template = hf_constants.HUGGINGFACE_CO_URL_TEMPLATE
+    mirror = "https://mirror.invalid"
+
+    def fetch_weights() -> Any:
+        hub = FakeHub(monkeypatch, {"config.json": CONFIG, "model.safetensors": WEIGHTS})
+        src = HFSource("synthetic/tiny", REV, scratch=work)
+        w = next(f for f in src.list_run("m-1", "r") if f.name == "model.safetensors")
+        dest = work.run / w.name
+        if dest.exists():
+            dest.unlink()
+        return hub, src, w, dest
+
+    # constants.ENDPOINT changed after import, the template not: the URL stays pinned.
+    monkeypatch.setattr(hf_constants, "ENDPOINT", mirror)
+    hub, src, w, dest = fetch_weights()
+    src.fetch(w, dest, w.size)
+    assert built[-1] == expected and hub.downloads == ["model.safetensors"]
+    # HF_ENDPOINT set before import (template and ENDPOINT agree): endpoint= swaps it back.
+    monkeypatch.setattr(
+        hf_constants,
+        "HUGGINGFACE_CO_URL_TEMPLATE",
+        template.replace("https://huggingface.co", mirror),
+    )
+    hub, src, w, dest = fetch_weights()
+    src.fetch(w, dest, w.size)
+    assert built[-1] == expected
+    # The template points elsewhere but ENDPOINT doesn't: no swap, so refused, no download.
+    monkeypatch.setattr(hf_constants, "ENDPOINT", "https://huggingface.co")
+    hub, src, w, dest = fetch_weights()
+    assert _code(_refused(src.fetch, w, dest, w.size)) == ("source_invalid", "endpoint")
+    assert built[-1].startswith(mirror) and hub.downloads == []
+    assert not dest.exists()
+
+
+def test_hf_settings_restored_after_a_failed_call(
+    monkeypatch: pytest.MonkeyPatch, work: Scratch
+) -> None:
+    for k in HF_VARS:
+        monkeypatch.delenv(k, raising=False)
+    before = _hf_constants()
+    hub = FakeHub(monkeypatch, {"config.json": CONFIG, "model.safetensors": WEIGHTS})
+    src = HFSource("synthetic/tiny", REV, scratch=work)
+    listed = src.list_run("m-1", "r")
+    hub.fail_download = True
+    f = listed[0]
+    assert _code(_refused(src.fetch, f, work.run / f.name, f.size)) == (
+        "source_unavailable",
+        "download",
+    )
+    assert hub.calls[-1]["env"]["HF_HUB_DISABLE_XET"] == "1"  # set during the failed call
+    hub.fail_list = True
+    assert _code(_refused(src.list_run, "m-1", "r")) == ("source_unavailable", "list")
+    for k in HF_VARS:
+        assert k not in os.environ
+    assert _hf_constants() == before
+    assert not (work.run / f.name).exists()

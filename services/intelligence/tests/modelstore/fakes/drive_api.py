@@ -29,13 +29,24 @@ READ_ONLY = {
     "canDownload": True,
 }
 FILE_FIELDS = "id,name,mimeType,size,sha256Checksum,md5Checksum,capabilities,trashed"
-LIST_FIELDS = f"nextPageToken,files({FILE_FIELDS})"
+LIST_FIELDS = f"nextPageToken,incompleteSearch,files({FILE_FIELDS})"
 ALL_DRIVES = {
     "corpora": "allDrives",
     "includeItemsFromAllDrives": "true",
     "supportsAllDrives": "true",
 }
 _PARENTS = re.compile(r"'([A-Za-z0-9_-]+)' in parents")
+
+
+class FakeParamError(BaseException):
+    """A request the fake refuses to serve (a missing or wrong parameter). A BaseException,
+    so ``HttpDriveApi``'s ``except Exception`` can't turn it into ``network``: the test fails
+    with this message instead."""
+
+
+def _require(ok: bool, message: str) -> None:
+    if not ok:
+        raise FakeParamError(message)
 
 
 def new_id() -> str:
@@ -112,6 +123,10 @@ class FakeDriveSession:
         self.serve: dict[str, bytes] = {}  # file id -> bytes served instead of its content
         self.raise_on: set[str] = set()  # file ids whose request raises (a network error)
         self.endless_pages = False
+        # incompleteSearch on listing pages: False (complete), True (Drive skipped some
+        # drives), or None (left out); ``incomplete_from`` sets it from that page on.
+        self.incomplete: bool | None = False
+        self.incomplete_from = 0
 
     # --- building the tree
 
@@ -138,48 +153,55 @@ class FakeDriveSession:
     def get(
         self, url: str, *, params: Mapping[str, str], stream: bool, timeout: Any
     ) -> FakeResponse:
-        assert url.startswith(BASE + "/"), "only Drive v3 is served"
-        assert stream is True and timeout is not None
+        _require(url.startswith(BASE + "/"), "only Drive v3 is served")
+        _require(stream is True and timeout is not None, "stream and a timeout")
         self.requests.append(Request(url, dict(params)))
         path = url[len(BASE) :]
         if path == "/files":
             return self._list(dict(params))
         if path == "/drives":
-            assert params["fields"] == "nextPageToken,drives(id)"
+            _require(params.get("fields") == "nextPageToken,drives(id)", "drives fields")
             return self._json(
                 {"kind": "drive#driveList", "drives": [{"id": d} for d in self.drives]}
             )
         m = re.fullmatch(r"/files/([A-Za-z0-9_-]+)", path)
-        assert m is not None, "unexpected path"
+        _require(m is not None, "unexpected path")
+        assert m is not None
         fid = m.group(1)
+        # Parameters first, on every get, error paths included.
+        _require(params.get("supportsAllDrives") == "true", "every get sends supportsAllDrives")
+        media = params.get("alt") == "media"
+        if media:
+            _require("fields" not in params, "a media get asks for no fields")
+        else:
+            _require(params.get("fields") == FILE_FIELDS, "fields must be exactly the plan's list")
         if fid in self.raise_on:
             raise ConnectionError(f"connection failed for {url} with {self.headers}")
         if fid in self.status:
             return FakeResponse(
                 self.status[fid], f'{{"error": "denied for {self.token}"}}'.encode()
             )
-        assert params.get("supportsAllDrives") == "true", "every get sends supportsAllDrives"
         item = self.items.get(fid)
         if item is None:
             return FakeResponse(404, b'{"error": {"code": 404}}')
-        if params.get("alt") == "media":
+        if media:
             return FakeResponse(200, self.serve.get(fid, item.content), chunk=7)
-        assert params["fields"] == FILE_FIELDS, "fields must be exactly the plan's list"
         return self._json(item.resource())
 
     def _json(self, obj: Any) -> FakeResponse:
         return FakeResponse(200, json.dumps(obj).encode())
 
     def _list(self, params: dict[str, str]) -> FakeResponse:
-        assert params["fields"] == LIST_FIELDS, "fields must be exactly the plan's list"
+        _require(params.get("fields") == LIST_FIELDS, "fields must be exactly the plan's list")
         for key, value in ALL_DRIVES.items():  # else Drive leaves out shared-drive items
-            assert params.get(key) == value, f"a listing without {key}={value}"
-        q = params["q"]
+            _require(params.get(key) == value, f"a listing without {key}={value}")
+        q = params.get("q", "")
         if q == "sharedWithMe = true or 'me' in owners":
             found = [self.items[i] for i in self.top_level + self.shared_drive_top_level]
         else:
             m = _PARENTS.fullmatch(q)
-            assert m is not None, "only by parent id"
+            _require(m is not None, "only by parent id")
+            assert m is not None
             parent = m.group(1)
             if parent in self.status:
                 return FakeResponse(self.status[parent], f"denied {self.token}".encode())
@@ -187,6 +209,9 @@ class FakeDriveSession:
         start = int(params.get("pageToken", "0").removeprefix("p")) if "pageToken" in params else 0
         page = found[start : start + self.page_size]
         body: dict[str, Any] = {"kind": "drive#fileList", "files": [i.resource() for i in page]}
+        flag = self.incomplete if start >= self.incomplete_from * self.page_size else False
+        if flag is not None:
+            body["incompleteSearch"] = flag
         if start + self.page_size < len(found) or self.endless_pages:
             body["nextPageToken"] = f"p{start + self.page_size}"
         return self._json(body)
