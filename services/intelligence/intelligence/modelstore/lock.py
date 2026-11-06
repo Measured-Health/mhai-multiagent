@@ -63,7 +63,7 @@ Every head entry must pass :func:`check_production`. For each changed role:
 * **rollback** (the version already has a valid sign-off for this role, P16): verified,
   no new evaluation; the label, one platform approval (not the restored version's
   promoter or trainer, nor the author) and a clinical note: a line of the PR body that
-  starts with ``Clinical note:`` followed by at least 20 non-space characters, outside
+  starts with ``Clinical note:`` followed by at least 20 letters or digits, outside
   fenced code blocks and HTML comments (:func:`has_clinical_note`). A version older than the base's pin of the same name without a sign-off is
   ``not_approved``/``never_approved``;
 * **removed role:** one platform approval.
@@ -81,7 +81,9 @@ The GitHub API
 --------------
 :class:`GitHubClient` makes two GET calls with the job's ``GITHUB_TOKEN``
 (``pull-requests: read``): the pull request and its reviews, following the ``Link``
-header's ``rel="next"`` (only to the same API host and this PR's reviews), at most
+header's ``rel="next"`` only when it is the page just requested with ``page`` one
+higher (the same path, or GitHub's ``/repositories/<id>`` form with this repository's id;
+anything else is ``github_unavailable``/``pagination``), at most
 :data:`MAX_REVIEW_PAGES` pages: a next page past the cap is a refusal. No redirect is
 followed. The token is never in a log, an
 error or a reason; failures are ``github_unavailable`` with no exception chained.
@@ -101,6 +103,7 @@ import json
 import os
 import re
 import secrets
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -534,7 +537,6 @@ _API = re.compile(
 _COMMIT = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", re.ASCII)
 _NEXT = re.compile(r'<([^<>\s]{1,2048})>\s*;(?:[^,]*;)?\s*rel="next"', re.ASCII)
-_PAGE_PARAMS = frozenset({"per_page", "page"})
 _CHUNK = 64 * 1024
 TOKEN_ENV = "GITHUB_TOKEN"
 REPOSITORY_ENV = "GITHUB_REPOSITORY"
@@ -656,10 +658,15 @@ class GitHubClient:
             raise _unavailable("response")
         return obj, link
 
-    def _next(self, link: str | None, number: int) -> tuple[str, dict[str, str]] | None:
-        """The ``rel="next"`` page of this PR's reviews, as (URL, params), or None. A next
-        link anywhere else (another host, another path, other parameters) is refused: the
-        token never leaves for a URL we didn't expect."""
+    def _next(
+        self, link: str | None, path: str, page: int, number: int, repo_id: int | None
+    ) -> tuple[str, dict[str, str]] | None:
+        """The ``rel="next"`` page after ``page`` of this PR's reviews, as (URL, params), or
+        None. The next link must be the path just requested (or GitHub's
+        ``/repositories/<id>/...`` form of it, with the id of this repository from the pull
+        request), on the same scheme and host, with ``per_page`` unchanged and ``page``
+        exactly one more; anything else is ``github_unavailable``/``pagination``: no page is
+        skipped and the token never leaves for a URL we didn't expect."""
         if link is None:
             return None
         found = _NEXT.search(link)
@@ -672,30 +679,27 @@ class GitHubClient:
         except ValueError:
             failed = True
         if failed:
-            raise _unavailable("link")
+            raise _unavailable("pagination")
         api_path = ours.path[: -len(self._repo_path)]
-        allowed = re.compile(
-            rf"{re.escape(api_path)}/(?:{re.escape(self._repo_path[1:])}|repositories/[0-9]{{1,20}})"
-            rf"/pulls/{number}/reviews",
-            re.ASCII,
-        )
-        params = dict(query)
+        allowed = {path}
+        if repo_id is not None:
+            allowed.add(f"{api_path}/repositories/{repo_id}/pulls/{number}/reviews")
+        expected = {"per_page": str(PER_PAGE), "page": str(page + 1)}
         if (
             nxt.scheme != ours.scheme
             or nxt.netloc != ours.netloc
             or nxt.fragment
-            or allowed.fullmatch(nxt.path) is None
-            or len(params) != len(query)
-            or not set(params) <= _PAGE_PARAMS
-            or not all(re.fullmatch(r"[1-9][0-9]{0,5}", v, re.ASCII) for v in params.values())
+            or nxt.path not in allowed
+            or sorted(query) != sorted(expected.items())
         ):
-            raise _unavailable("link")
-        return f"{nxt.scheme}://{nxt.netloc}{nxt.path}", params
+            raise _unavailable("pagination")
+        return f"{nxt.scheme}://{nxt.netloc}{nxt.path}", expected
 
-    def _reviews(self, number: int) -> tuple[Review, ...]:
+    def _reviews(self, number: int, repo_id: int | None) -> tuple[Review, ...]:
         out: list[Review] = []
         url = f"{self._base}/pulls/{number}/reviews"
-        params = {"per_page": str(PER_PAGE), "page": "1"}
+        page = 1
+        params = {"per_page": str(PER_PAGE), "page": str(page)}
         for _ in range(MAX_REVIEW_PAGES):
             items, link = self._get(url, params)
             if not isinstance(items, list) or len(items) > PER_PAGE:
@@ -704,10 +708,11 @@ class GitHubClient:
                 review = _review(item)
                 if review is not None:
                     out.append(review)
-            nxt = self._next(link, number)
+            nxt = self._next(link, urlsplit(url).path, page, number, repo_id)
             if nxt is None:
                 return tuple(out)
             url, params = nxt
+            page += 1
         raise Refused("not_approved", detail_code="too_many_reviews")
 
     def pull_request(self, number: int) -> PullRequest:
@@ -737,7 +742,10 @@ class GitHubClient:
         base_ref = base.get("ref") if isinstance(base, dict) else None
         if not isinstance(base_ref, str) or _REF.fullmatch(base_ref) is None:
             raise _unavailable("response")
-        reviews = self._reviews(number)
+        repo = base.get("repo") if isinstance(base, dict) else None
+        rid = repo.get("id") if isinstance(repo, dict) else None
+        repo_id = rid if isinstance(rid, int) and not isinstance(rid, bool) and rid > 0 else None
+        reviews = self._reviews(number, repo_id)
         return PullRequest(number, author, sha, labels, body, reviews, base_ref)
 
 
@@ -792,29 +800,37 @@ def _pair(clinical: Iterable[str], platform: Iterable[str]) -> bool:
 
 _COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+# CommonMark: a closing fence carries no info string, only trailing spaces or tabs.
+_CLOSER = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
 
 
 def has_clinical_note(body: str) -> bool:
     """A line that starts with ``Clinical note:`` and has at least
-    :data:`CLINICAL_NOTE_MIN_CHARS` non-space characters after it on that line, outside
-    HTML comments (an unclosed one runs to the end) and fenced code blocks (an unclosed
-    one too). Indented, quoted or inline mentions don't count."""
+    :data:`CLINICAL_NOTE_MIN_CHARS` letters or digits (Unicode categories L and N) after it
+    on that line, outside HTML comments (an unclosed one runs to the end) and fenced code
+    blocks (an unclosed one too; a closing fence carries no info string, as in
+    CommonMark). Format characters (category Cf: zero-width spaces and joiners, BOMs) are
+    removed first, so they neither count nor hide anything. Indented, quoted or inline
+    mentions don't count."""
     if not isinstance(body, str):
         return False
-    text = _COMMENT.sub("", body)
+    text = "".join(ch for ch in body if unicodedata.category(ch) != "Cf")
+    text = _COMMENT.sub("", text)
     fence: str | None = None
     for line in text.splitlines():
         m = _FENCE.match(line)
         if fence is not None:
-            if m is not None and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+            c = _CLOSER.fullmatch(line)
+            if c is not None and c.group(1)[0] == fence[0] and len(c.group(1)) >= len(fence):
                 fence = None
             continue
         if m is not None:
             fence = m.group(1)
             continue
         if line.startswith(CLINICAL_NOTE):
-            rest = "".join(line[len(CLINICAL_NOTE) :].split())
-            if len(rest) >= CLINICAL_NOTE_MIN_CHARS:
+            rest = line[len(CLINICAL_NOTE) :]
+            alnum = sum(1 for ch in rest if unicodedata.category(ch)[0] in "LN")
+            if alnum >= CLINICAL_NOTE_MIN_CHARS:
                 return True
     return False
 

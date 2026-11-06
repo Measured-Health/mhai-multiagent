@@ -849,15 +849,88 @@ def test_pr_cannot_lower_a_threshold_or_add_a_testset_with_its_pin(
             testsets.read_lock(head_dir / "models" / "testsets.lock"),
             head_dir / THRESHOLDS_REL,
         )
-    # inputs outside main's checkout are refused
+    # inputs outside main's checkout are refused: an absolute path, a ".." path, and a
+    # symlink inside the checkout that points out of it
     head_dir = tmp_path / "head-threshold"
-    args = _lock_check_args(main, head_dir / "models.lock")
-    args[args.index("--thresholds-dir") + 1] = str(head_dir / THRESHOLDS_REL)
-    assert cli.main(args) == 2
-    assert json.loads(capsys.readouterr().out) == {
-        "refused": "not_allowed_here",
-        "detail": "outside_base_dir",
+    link = main / "models" / "escape"
+    link.symlink_to(head_dir / THRESHOLDS_REL, target_is_directory=True)
+    (main / "models" / "testsets-link.lock").symlink_to(head_dir / "models" / "testsets.lock")
+    for flag, value in (
+        ("--thresholds-dir", str(head_dir / THRESHOLDS_REL)),
+        ("--thresholds-dir", f"{main}/../head-threshold/{THRESHOLDS_REL}"),
+        ("--thresholds-dir", str(link)),
+        ("--testsets", f"{main}/models/../../head-threshold/models/testsets.lock"),
+        ("--testsets", str(main / "models" / "testsets-link.lock")),
+    ):
+        args = _lock_check_args(main, head_dir / "models.lock")
+        args[args.index(flag) + 1] = value
+        assert cli.main(args) == 2
+        assert json.loads(capsys.readouterr().out) == {
+            "refused": "not_allowed_here",
+            "detail": "outside_base_dir",
+        }
+
+
+def _policy_obj(manifest_signers: list[MemSigner], signoff_signers: list[MemSigner]) -> bytes:
+    def entry(k: MemSigner) -> dict[str, Any]:
+        return {
+            "kind": "public_key",
+            "alg": "ed25519",
+            "key_id": k.key_id,
+            "public_key_pem": k.pem(),
+            "development": False,
+        }
+
+    obj = {
+        "schema": "mhai.models.trust/1",
+        "signers": {
+            "manifest": [entry(k) for k in manifest_signers],
+            "signoff": [entry(k) for k in signoff_signers],
+            "testset": [],
+        },
     }
+    return canonical.dumps(obj)
+
+
+def test_lock_check_trust_policy_only_from_main(
+    tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """The PR adds its own signer to trust-policy.json and pins a manifest it signed.
+    lock-check reads main's policy only; pointing MHAI_MODELS_TRUST_POLICY at the PR's
+    copy is refused."""
+    st = MemoryStore()
+    evil = MemSigner()
+    pub = publish(st, tmp_path, keys, signer=evil)
+    main = _main_checkout(tmp_path / "main")
+    (main / "models" / "trust-policy.json").write_bytes(
+        _policy_obj([keys.manifest], [keys.signoff])
+    )
+    head_dir = _main_checkout(tmp_path / "head", base=lock.Lock({ROLE: pub.pin()}))
+    head_policy = head_dir / "models" / "trust-policy.json"
+    head_policy.write_bytes(_policy_obj([keys.manifest, evil], [keys.signoff]))
+    session = FakeGitHubSession()
+    session.add(_approved_pr())
+    real_policy = cli._trust_policy
+    _cli_env(monkeypatch, st, keys, session, tmp_path)
+    monkeypatch.setattr(cli, "_trust_policy", real_policy)  # the real loader here
+    args = _lock_check_args(main, head_dir / "models.lock")
+
+    monkeypatch.setenv(cli.TRUST_POLICY_ENV, str(head_policy))
+    calls = len(st.calls)
+    assert cli.main(args) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"refused": "not_allowed_here", "detail": "trust_policy_outside_base_dir"}
+    assert len(st.calls) == calls  # refused before any store read
+    for env in (None, str(main / "models" / "trust-policy.json")):
+        if env is None:
+            monkeypatch.delenv(cli.TRUST_POLICY_ENV, raising=False)
+        else:
+            monkeypatch.setenv(cli.TRUST_POLICY_ENV, env)
+        assert cli.main(args) == 2
+        assert json.loads(capsys.readouterr().out) == {"refused": "signer_untrusted"}
+    # the PR's policy would have trusted it: main's is what refuses
+    head_trust = signing.load_policy(head_policy)
+    lock.find_signed_manifest(st, NAME, "1.0.0", head_trust)
 
 
 def test_lock_check_refuses_a_pr_not_into_main(tmp_path: Path, keys: Keys, cache: Path) -> None:
@@ -909,6 +982,16 @@ def test_approval_with_null_commit_does_not_count(tmp_path: Path, keys: Keys, ca
         "~~~~\nClinical note: inside a tilde fence, long enough to count.\n~~~~",
         "```\nClinical note: inside an unclosed fence, long enough to count.",
         "Clinical note:" + " " * 40 + "a b c",
+        "Clinical note: " + "\u200b" * 30,  # zero-width spaces
+        "Clinical note: " + "\u2060\ufeff" * 15,  # word joiners and BOMs
+        "Clinical note: " + "-" * 40,  # punctuation only
+        "Clinical note: " + "!? .,;:" * 10 + "abc",
+        "Clinical note: short\u200bbut\u200bpadded\u200b\u200b\u200b\u200b\u200b\u200b",
+        # a closer with an info string doesn't close the fence (CommonMark)
+        "```\n```js\nClinical note: still inside the fenced block here.\n```",
+        "~~~\n~~~ x\nClinical note: still inside the tilde fenced block.\n~~~",
+        # a shorter closer doesn't close a longer fence
+        "````\n```\nClinical note: still inside the four-backtick fence.\n````",
     ],
 )
 def test_clinical_note_bypasses_refused(body: str | None) -> None:
@@ -921,6 +1004,9 @@ def test_clinical_note_bypasses_refused(body: str | None) -> None:
         "Clinical note: back to 1.0.0 after a synthetic issue in 1.1.0.",
         "Summary.\n\n```\ncode\n```\nClinical note: restoring the signed-off synthetic version.",
         "<!-- template -->\r\nClinical note: restoring the signed-off synthetic version.",
+        "```js\ncode\n```   \nClinical note: restoring the signed-off synthetic version.",
+        "Clinical note: Rückkehr zur freigegebenen Version 1.0.0 wegen Fehler",
+        "Clinical\u200b note: zero-width in the marker is removed before parsing it.",
     ],
 )
 def test_clinical_note_accepted(body: str) -> None:
@@ -1093,6 +1179,7 @@ def test_github_changes_requested_on_page_two_cancels() -> None:
         "http://api.github.com/repositories/424242",
         "https://api.github.com/repos/other-org/other-repo",
         "https://api.github.com/repositories/424242/../../x",
+        "https://api.github.com/repositories/999999",  # another repository's id
     ],
 )
 def test_github_next_link_elsewhere_refused(next_base: str) -> None:
@@ -1100,8 +1187,42 @@ def test_github_next_link_elsewhere_refused(next_base: str) -> None:
     session.next_base = next_base
     session.add(_pr(reviews=[(f"syn-c{i}", "COMMENTED", None) for i in range(150)]))
     r = _reason(lambda: lock.GitHubClient(session, GH_REPO).pull_request(7))
-    assert (r.reason, r.detail_code) == ("github_unavailable", "link")
+    assert (r.reason, r.detail_code) == ("github_unavailable", "pagination")
     assert all(req.url.startswith("https://api.github.com/repos/") for req in session.requests)
+
+
+@pytest.mark.parametrize(("step", "per_page"), [(2, None), (0, None), (1, "50"), (1, "")])
+def test_github_next_link_must_be_the_next_page(step: int, per_page: str | None) -> None:
+    """A skipped or repeated page, or a changed per_page, is refused."""
+    session = FakeGitHubSession()
+    session.link_page_step = step
+    session.link_per_page = per_page
+    session.add(_pr(reviews=[(f"syn-c{i}", "COMMENTED", None) for i in range(150)]))
+    r = _reason(lambda: lock.GitHubClient(session, GH_REPO).pull_request(7))
+    assert (r.reason, r.detail_code) == ("github_unavailable", "pagination")
+
+
+def test_github_repositories_form_needs_the_repository_id() -> None:
+    """Without this repository's id from the pull request, the /repositories/<id> form of a
+    next link can't be bound to it, and is refused."""
+
+    class NoRepoId(FakePR):
+        def resource(self) -> dict[str, Any]:
+            obj = super().resource()
+            del obj["base"]["repo"]
+            return obj
+
+    session = FakeGitHubSession()
+    pr = NoRepoId(7, "Syn-Author", HEAD, labels=["clinical-review"])
+    for i in range(150):
+        pr.review(f"syn-c{i}", "COMMENTED")
+    session.add(pr)
+    r = _reason(lambda: lock.GitHubClient(session, GH_REPO).pull_request(7))
+    assert (r.reason, r.detail_code) == ("github_unavailable", "pagination")
+    # the same path form (/repos/<owner>/<name>/...) is still followed
+    session.requests.clear()
+    session.next_base = f"https://api.github.com/repos/{GH_REPO}"
+    assert len(lock.GitHubClient(session, GH_REPO).pull_request(7).reviews) == 150
 
 
 def test_github_review_by_deleted_user_skipped() -> None:
@@ -1220,7 +1341,7 @@ def _cli_env(
     testsets_lock.write_text(f"{TESTSET}\n")
     monkeypatch.setenv(cli.TESTSETS_LOCK_ENV, str(testsets_lock))
     monkeypatch.setattr(cli, "_reader_store", lambda: st)
-    monkeypatch.setattr(cli, "_trust_policy", lambda: keys.policy)
+    monkeypatch.setattr(cli, "_trust_policy", lambda path=None: keys.policy)
     monkeypatch.setattr(cli, "_github", lambda: lock.GitHubClient(session, GH_REPO))
 
 
@@ -1249,6 +1370,13 @@ def test_cli_pin_and_lock_check(
     assert cli.main([*rehearsal, "--lock", str(path)]) == 2
     out = json.loads(capsys.readouterr().out)
     assert out == {"refused": "not_allowed_here", "detail": "rehearsal"}
+    with monkeypatch.context() as dev:  # development, but no explicit --lock
+        dev.setenv(signing.ENV_VAR, "development")
+        dev.setenv(verify.APP_ENV, "development")
+        assert verify.is_development()
+        assert cli.main(rehearsal) == 2
+        out = json.loads(capsys.readouterr().out)
+        assert out == {"refused": "not_allowed_here", "detail": "rehearsal"}
 
     main = _main_checkout(tmp_path / "main")
     args = _lock_check_args(main, path)

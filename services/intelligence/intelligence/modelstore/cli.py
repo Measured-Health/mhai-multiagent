@@ -73,7 +73,9 @@ reader's credentials (``MODEL_STORE_ENDPOINT``, ``MODEL_STORE_BUCKET``,
 (no ``fixture-`` name, no ``rehearsal`` gate, a known role) always apply unless
 ``--rehearsal`` is passed, which needs development (both switches) and an explicit
 ``--lock`` (``not_allowed_here`` otherwise): the decision is the flag, never a path
-comparison. It opens no PR.
+comparison. It opens no PR. Its trust policy is ``MHAI_MODELS_TRUST_POLICY``, any path:
+``pin`` runs from a checkout of main (a person's or the rehearsal's), and whatever it
+writes is judged again by ``lock-check`` against main's own policy.
 
 ``lock-check`` (:func:`intelligence.modelstore.lock.lock_check`, in ``model-lock.yml``)
 trusts the PR for one thing only, the head lock:
@@ -88,6 +90,9 @@ trusts the PR for one thing only, the head lock:
   ``models/reviewers.json`` are read from it; ``--testsets`` and ``--thresholds-dir`` are
   required and must be inside it (``not_allowed_here`` otherwise). A reviewer removed on
   main stops counting at once.
+* The trust policy (who may sign manifests and sign-offs) is ``models/trust-policy.json``
+  in ``--base-dir``, never the PR's: an ``MHAI_MODELS_TRUST_POLICY`` naming any other file
+  is ``not_allowed_here``/``trust_policy_outside_base_dir``.
 * The workflow runs this command from that same main checkout (its code as well as its
   data), so a PR can't change the checker that judges it.
 
@@ -171,6 +176,7 @@ PRODUCTION_LOCK = promote.REPO / "models.lock"
 # Inside a checkout of main's tip (lock-check's --base-dir).
 BASE_LOCK_PATH = "models.lock"
 BASE_REVIEWERS_PATH = "models/reviewers.json"
+BASE_TRUST_POLICY_PATH = "models/trust-policy.json"
 INIT_SCRIPT = promote.REPO / "deploy" / "minio" / "init-model-store.sh"
 UNAVAILABLE = frozenset({"store_unavailable", "source_unavailable", "github_unavailable"})
 # store-init: loopback IP literals only (a name such as localhost can resolve anywhere).
@@ -343,8 +349,20 @@ def _reader_store() -> verify.ReadStore:
     return reader
 
 
-def _trust_policy() -> signing.TrustPolicy:
-    return signing.load_policy(_env(TRUST_POLICY_ENV, "policy_invalid"))
+def _trust_policy(path: Path | None = None) -> signing.TrustPolicy:
+    """``MHAI_MODELS_TRUST_POLICY``, or (lock-check) the given file in main's checkout."""
+    if path is None:
+        return signing.load_policy(_env(TRUST_POLICY_ENV, "policy_invalid"))
+    return signing.load_policy(path)
+
+
+def _check_policy_env(path: Path) -> None:
+    """lock-check reads the trust policy from main's checkout only. An
+    ``MHAI_MODELS_TRUST_POLICY`` that names any other file (the PR's copy, which could add
+    its own signer) is refused, not silently ignored."""
+    given = os.environ.get(TRUST_POLICY_ENV)
+    if given and Path(given).resolve() != path.resolve():
+        raise Refused("not_allowed_here", detail_code="trust_policy_outside_base_dir")
 
 
 def _github() -> lock.GitHubApi:
@@ -428,6 +446,8 @@ def _lock_check(args: argparse.Namespace) -> int:
         raise Refused("not_allowed_here", detail_code="base_dir")
     testsets_path = _inside(args.testsets, base_dir)
     thresholds_dir = _inside(args.thresholds_dir, base_dir)
+    policy_path = base_dir / BASE_TRUST_POLICY_PATH
+    _check_policy_env(policy_path)
     base, head = lock.read(base_dir / BASE_LOCK_PATH), lock.read(args.head)
     reviewers = lock.read_reviewers(base_dir / BASE_REVIEWERS_PATH)
     locked = testsets.read_lock(testsets_path)
@@ -437,7 +457,7 @@ def _lock_check(args: argparse.Namespace) -> int:
         _print({"lock_check": "pass", "roles": {}})
         return 0
     source = _reader_store()
-    policy = _trust_policy()
+    policy = _trust_policy(policy_path)
     github = _github()
     with _cache() as cache_dir:
         roles = lock.lock_check(

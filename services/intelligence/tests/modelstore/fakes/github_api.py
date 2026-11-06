@@ -48,7 +48,7 @@ class FakePR:
             "state": "open",
             "user": {"login": self.author, "type": "User"},
             "head": {"sha": self.head_sha, "ref": "agent/synthetic"},
-            "base": {"sha": "0" * 40, "ref": self.base_ref},
+            "base": {"sha": "0" * 40, "ref": self.base_ref, "repo": {"id": REPO_ID}},
             "labels": [{"name": n, "color": "ededed"} for n in self.labels],
             "body": self.body,
         }
@@ -87,6 +87,8 @@ class FakeGitHubSession:
         self.raise_error = False  # every request raises, its message holding the token
         self.max_per_page = 100
         self.next_base: str | None = None  # serve next links on another base URL
+        self.link_page_step = 1  # the next link's page: this page plus this step
+        self.link_per_page: str | None = None  # the next link's per_page, if not the asked
 
     def add(self, pr: FakePR) -> FakePR:
         self.prs[pr.number] = pr
@@ -110,13 +112,17 @@ class FakeGitHubSession:
         if len(rest) == 1:
             return FakeResponse(200, json.dumps(pr.resource()).encode())
         if rest[1:] == ["reviews"]:
-            per_page = min(int(params.get("per_page", "30")), self.max_per_page)
+            asked = params.get("per_page", "30")
+            per_page = min(int(asked), self.max_per_page)
             page = int(params.get("page", "1"))
             items = pr.reviews[(page - 1) * per_page : page * per_page]
             headers = {}
             if len(pr.reviews) > page * per_page:
+                # GitHub echoes the asked per_page in its links, whatever it served
                 base = self.next_base or f"{API}/repositories/{REPO_ID}"
-                nxt = f"{base}/pulls/{pr.number}/reviews?per_page={per_page}&page={page + 1}"
+                pp = asked if self.link_per_page is None else self.link_per_page
+                nxt_page = page + self.link_page_step
+                nxt = f"{base}/pulls/{pr.number}/reviews?per_page={pp}&page={nxt_page}"
                 last = f"{API}/repositories/{REPO_ID}/pulls/{pr.number}/reviews?page=999"
                 headers["Link"] = f'<{nxt}>; rel="next", <{last}>; rel="last"'
             return FakeResponse(200, json.dumps(items).encode(), headers)
