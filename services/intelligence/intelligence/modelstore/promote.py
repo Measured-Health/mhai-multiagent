@@ -41,11 +41,12 @@ A dry run never builds a manifest and never touches the store, even when one is 
 Promotion stores a candidate whether or not it passes its gates; the gates are enforced at
 pin time (Task 20), and the summary says which failed.
 
-**The split a promotion is measured on.** Outside development a promotion (not a dry
-run) needs the locked split (``MHAI_EVAL_ROLE=locked`` with the eval reader's credentials)
-and ``--expect-files``, or it is ``not_allowed_here`` before the claim. A development
-rehearsal may promote on the dev split; the manifest's ``evaluation.split`` and the summary
-then say ``dev``, and pin (Task 20) refuses it.
+**The split a promotion is measured on.** Outside development (both switches, as for
+lock, sign-off and load: :func:`intelligence.modelstore.verify.is_development`) a
+promotion (not a dry run) needs the locked split (``MHAI_EVAL_ROLE=locked`` with the eval
+reader's credentials) and ``--expect-files``, or it is ``not_allowed_here`` before the
+claim. A development rehearsal may promote on the dev split; the manifest's
+``evaluation.split`` and the summary then say ``dev``, and pin (Task 20) refuses it.
 
 **Every PUT is read back** (:func:`put_once`): each scratch file is streamed again and must
 still have the size and SHA-256 Task 13 recorded, and after the PUT the store's own
@@ -97,6 +98,7 @@ from intelligence.modelstore import (
     store,
     testsets,
     training,
+    verify,
 )
 from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.store import ObjectStore
@@ -326,7 +328,7 @@ def check_inputs(req: Request, ctx: Context) -> None:
         raise Refused("not_allowed_here", detail_code="context")
     if req.dry_run:
         return
-    rehearsal = signing.is_development()
+    rehearsal = verify.is_development()  # both switches, as lock, sign-off and load
     if not rehearsal and report.REHEARSAL_GATE in req.gates:
         # P14: nothing measured only against the rehearsal bar is signed outside a
         # development rehearsal, so no such version exists in a production store.
@@ -732,7 +734,7 @@ def promotion_gates(req: Request) -> tuple[str, ...]:
     promotion outside development is measured on the production gates only (P14)."""
     if req.gates:
         return tuple(req.gates)
-    if not req.dry_run and not signing.is_development():
+    if not req.dry_run and not verify.is_development():
         return tuple(g for g in report.GATES if g in report.PRODUCTION_GATES)
     return tuple(report.GATES)
 
@@ -1032,7 +1034,7 @@ def promote(req: Request, ctx: Context) -> Summary:
             # TODO(GPU task): the runtime reports its version in the hash handshake.
             raise Refused("no_runtime", detail_code="runtime_unverified")
         split = prepare_split(ctx.split, sc.root)
-        if target is not None and split.name != "test" and not signing.is_development():
+        if target is not None and split.name != "test" and not verify.is_development():
             raise Refused("not_allowed_here", detail_code="locked_split_required")
         notebook = training.report_metrics(checked.manifest)
         rep = evaluate(chosen, split.path, gates, notebook, deadline_s=ctx.deadline_s)

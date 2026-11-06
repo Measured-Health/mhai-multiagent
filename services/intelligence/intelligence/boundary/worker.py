@@ -42,7 +42,8 @@ Msg.respond: nats-py's respond() sends the request's own headers back,
 which would echo the request token or the access token to the caller.
 
 Pinned models (plan Task 23): with INTELLIGENCE_MODEL_ROLES the pipeline
-reads models.lock once at start-up and verifies every required role
+refuses to start on a role no lock may pin (one outside lock.ROLES, today
+extract only), reads models.lock once at start-up and verifies every required role
 (PinnedModelGate, modelstore.loader) before it is ready. Until then health
 answers models_ready false and jobs stay paused (the jobs_ready gate). A
 refusal logs model.verify_failed role=<role> reason=<reason> and counts
@@ -1236,16 +1237,26 @@ def pipeline_readiness(
 
 def build_model_gate(settings: WorkerSettings) -> PinnedModelGate | None:
     """The gate for settings.model_roles, or None without roles. The lock,
-    the trust policy and the store client are set up here, once: a lock that
-    doesn't pin a required role, a policy that doesn't load or a store
-    setting the client refuses stops the start (ConfigError)."""
+    the trust policy and the store client are set up here, once: a role that
+    isn't pinnable (not in lock.ROLES), a lock that doesn't pin a required
+    role, a policy that doesn't load or a store setting the client refuses
+    stops the start (ConfigError)."""
     if not settings.model_roles:
         return None
-    from intelligence.modelstore import loader, promote, signing, store, verify
+    from intelligence.modelstore import loader, lock, promote, signing, store, verify
     from intelligence.modelstore.reasons import Refused
 
     if settings.service != "pipeline":
         raise ConfigError("INTELLIGENCE_MODEL_ROLES is for the pipeline service only")
+    # Only a role with an evaluation suite can be pinned (lock.ROLES); any other could
+    # never verify, so it stops the start rather than leaving a pipeline never ready.
+    # TODO(TODO.md "Pinnable roles"): nli, ocr and cca join when their suites exist.
+    unpinnable = sorted(set(settings.model_roles) - lock.ROLES)
+    if unpinnable:
+        raise ConfigError(
+            f"INTELLIGENCE_MODEL_ROLES: {','.join(unpinnable)} is not a pinnable role "
+            f"(pinnable: {','.join(sorted(lock.ROLES))})"
+        )
     lock_path, cache = settings.models_lock_path, settings.model_cache_dir
     policy_path = settings.models_trust_policy_path
     endpoint, bucket = settings.model_store_endpoint, settings.model_store_bucket

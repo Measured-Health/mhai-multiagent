@@ -160,18 +160,20 @@ def test_signature_by_untrusted_key_refused(tmp_path: Path, dev_env: None) -> No
 
 def test_purpose_confusion_refused(tmp_path: Path, dev_env: None) -> None:
     signer, key = _signer(tmp_path)
-    # The same key is trusted for test sets and sign-offs, but the domain separates them.
-    policy = _policy(signoff=[_entry(key)], testset=[_entry(key)])
-    doc = signer.sign("signoff", PAYLOAD)
-    assert signing.Verifier().verify("signoff", PAYLOAD, doc, policy).purpose == "signoff"
+    # The same key is trusted for manifests and test sets (H1: one key for both), but
+    # the domain separates them.
+    policy = _policy(manifest=[_entry(key)], testset=[_entry(key)])
+    tdoc = signer.sign("testset", PAYLOAD)
+    assert signing.Verifier().verify("testset", PAYLOAD, tdoc, policy).purpose == "testset"
     with pytest.raises(Refused) as e:
-        signing.Verifier().verify("testset", PAYLOAD, doc, policy)
+        signing.Verifier().verify("manifest", PAYLOAD, tdoc, policy)
     assert e.value.reason == "signature_invalid"
     # Relabelling the document doesn't help: the signed message names the purpose.
-    relabelled = signing.SignatureDoc("testset", doc.alg, doc.key_id, doc.signature)
+    relabelled = signing.SignatureDoc("manifest", tdoc.alg, tdoc.key_id, tdoc.signature)
     with pytest.raises(Refused) as e:
-        signing.Verifier().verify("testset", PAYLOAD, relabelled, policy)
+        signing.Verifier().verify("manifest", PAYLOAD, relabelled, policy)
     assert e.value.reason == "signature_invalid"
+    doc = signer.sign("signoff", PAYLOAD)
     # A signoff signature over the same bytes never verifies as a manifest signature.
     other, okey = _signer(tmp_path, "m.pem")
     mpolicy = _policy(manifest=[_entry(okey)], signoff=[_entry(key)])
@@ -324,6 +326,16 @@ def test_manifest_and_signoff_signers_disjoint() -> None:
         _policy(manifest=[_entry(key)], signoff=[_entry(key)])
     assert e.value.reason == "policy_invalid"
     assert _policy(manifest=[_entry(key)], signoff=[_entry(other)], testset=[_entry(key)])
+
+
+def test_testset_and_signoff_signers_disjoint() -> None:
+    """A test-split key also trusted for sign-offs would let the model-promotion identity
+    sign sign-offs: the policy refuses it."""
+    key = ed25519.Ed25519PrivateKey.generate()
+    other = ed25519.Ed25519PrivateKey.generate()
+    with pytest.raises(Refused) as e:
+        _policy(manifest=[_entry(other)], signoff=[_entry(key)], testset=[_entry(key)])
+    assert (e.value.reason, e.value.detail_code) == ("policy_invalid", "testset_signoff_shared")
 
 
 def test_policy_shape_checked() -> None:

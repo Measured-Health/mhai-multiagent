@@ -528,8 +528,11 @@ def test_malformed_store_setting_refused_without_roles(tmp_path: Path) -> None:
         WorkerSettings.from_env(env)
 
 
-def test_model_gate_set_up_once_at_start(tmp_path: Path, keys: Keys) -> None:
+def test_model_gate_set_up_once_at_start(
+    tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from intelligence.boundary.worker import build_model_gate
+    from intelligence.modelstore import lock
     from tests.modelstore.conftest import REPO
 
     assert build_model_gate(WorkerSettings.from_env(dict(BASE))) is None
@@ -549,11 +552,33 @@ def test_model_gate_set_up_once_at_start(tmp_path: Path, keys: Keys) -> None:
         INTELLIGENCE_MODELS_LOCK=env["INTELLIGENCE_MODELS_LOCK"],
         MHAI_MODELS_TRUST_POLICY=env["MHAI_MODELS_TRUST_POLICY"],
     )
-    with pytest.raises(ConfigError, match="lock_invalid"):
+    # (with nli made pinnable: a role outside lock.ROLES stops the start earlier)
+    with monkeypatch.context() as mp, pytest.raises(ConfigError, match="lock_invalid"):
+        mp.setattr(lock, "ROLES", frozenset({ROLE, "nli"}))
         build_model_gate(WorkerSettings.from_env(missing))
     bad_policy = {**env, "MHAI_MODELS_TRUST_POLICY": str(tmp_path / "missing.json")}
     with pytest.raises(ConfigError, match="policy_invalid"):
         build_model_gate(WorkerSettings.from_env(bad_policy))
+
+
+@pytest.mark.parametrize("roles", ["nli", "extract,nli", "ocr"])
+def test_unpinnable_role_refused_at_start(tmp_path: Path, keys: Keys, roles: str) -> None:
+    """A role no lock may pin (not in lock.ROLES) stops the start with a clear error,
+    before the lock, the policy or the store is read: never a pipeline that is silently
+    never ready."""
+    from intelligence.boundary.worker import build_model_gate
+    from intelligence.modelstore import lock
+
+    assert "nli" not in lock.ROLES and "ocr" not in lock.ROLES
+    env = _store_env(
+        tmp_path,
+        INTELLIGENCE_MODEL_ROLES=roles,
+        INTELLIGENCE_MODELS_LOCK=str(tmp_path / "missing.lock"),
+        MHAI_MODELS_TRUST_POLICY=str(tmp_path / "missing.json"),
+    )
+    with pytest.raises(ConfigError, match="not a pinnable role") as e:
+        build_model_gate(WorkerSettings.from_env(env))
+    assert "lock_invalid" not in str(e.value) and "policy_invalid" not in str(e.value)
 
 
 # ---------------------------------------------------------------- review fixes

@@ -35,6 +35,7 @@ from intelligence.modelstore import (
     store,
     testsets,
     training,
+    verify,
 )
 from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.sources.local import LocalSource
@@ -74,6 +75,7 @@ def _version() -> str:
 @pytest.fixture(autouse=True)
 def _development(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(signing.ENV_VAR, "development")
+    monkeypatch.setenv(verify.APP_ENV, "development")
     monkeypatch.delenv(promote.EVAL_ROLE_ENV, raising=False)
 
 
@@ -1394,3 +1396,46 @@ def test_production_promotion_refuses_rehearsal_gate_and_fixture_names(
     monkeypatch.setenv(signing.ENV_VAR, "development")
     promote.check_inputs(bad, ctx)
     assert promote.promotion_gates(replace(good, gates=())) == report.GATES
+
+
+@pytest.mark.parametrize("app_env", [None, "production"])
+def test_promotion_development_needs_both_switches(
+    app_env: str | None,
+    tmp_path: Path,
+    keys: Keys,
+    registry: training.Registry,
+    licences: training.Licences,
+    dev_set: minisets.MiniSet,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Promote decides development as lock, sign-off and load do: MHAI_MODELS_ENV and
+    APP_ENV must both say so. With MHAI_MODELS_ENV=development alone, the rehearsal gate,
+    a fixture- name and the dev set are refused, and the production gates are used."""
+    entry = testsets.LockEntry("clinical_document", "1.0.0", "ab" * 32)
+    locked = promote.LockedSplit(MemoryStore(), entry, keys.policy)
+    mem = MemoryStore()
+    root = _source_root(tmp_path)
+    ctx = replace(
+        _write_ctx(_ctx(root, registry, licences, dev_set), mem, keys),
+        split=locked,
+    )
+    monkeypatch.setenv(signing.ENV_VAR, "development")
+    if app_env is None:
+        monkeypatch.delenv(verify.APP_ENV, raising=False)
+    else:
+        monkeypatch.setenv(verify.APP_ENV, app_env)
+    good = _request("3.0.3", dry_run=False, expect_files="0" * 64, gates=("phase1",))
+    err = _refused(promote.check_inputs, replace(good, gates=("phase1", "rehearsal")), ctx)
+    assert (err.reason, err.detail_code) == ("not_allowed_here", "rehearsal_gate")
+    err = _refused(promote.check_inputs, replace(good, name="fixture-tiny"), ctx)
+    assert err.reason == "fixture_name"
+    err = _refused(promote.check_inputs, replace(good, expect_files=None), ctx)
+    assert (err.reason, err.detail_code) == ("not_allowed_here", "expect_files_required")
+    assert mem.calls == []
+    assert promote.promotion_gates(replace(good, gates=())) == ("phase1", "phase3")
+    monkeypatch.setenv(cli.LOCAL_ROOT_ENV, str(root))
+    argv = ["promote", NAME, "1.0.0", "--source", "local", "--run", RUN]
+    code, out = _cli([*argv, "--expect-files", "0" * 64, "--dev-set", str(dev_set.root)], capsys)
+    assert code == 2
+    assert json.loads(out) == {"refused": "not_allowed_here", "detail": "dev_set_promotion"}

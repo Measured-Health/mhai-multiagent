@@ -26,10 +26,13 @@ Pinned models (plan Task 23): model_versions() is the legacy entries (cca,
 dense, nli, as configured) overlaid by the roles the worker verified from
 models.lock, each "<name>@<version>#<first 12 hex of the manifest SHA-256>"
 (_SAFE_VERSION allows '#' in that form only; core's modelVersionPattern
-matches it). When nli is a pinned role, the NLI model is loaded from its
+matches it). nli is not a pinnable role yet (lock.ROLES has no suite for it;
+TODO.md "Pinnable roles"), so the worker refuses INTELLIGENCE_MODEL_ROLES=nli
+at start-up and the NLI model today is always the configured one. The pinned
+branch of nli_factory is the path it will take once nli is pinnable: from the
 verified directory only, with local_files_only=True and use_safetensors=True,
-after HF_HUB_OFFLINE=1 is set; until the pin is verified it is not loaded at
-all (the job escalates), never the configured hub model instead.
+after HF_HUB_OFFLINE=1 is set, and not at all until the pin is verified (the
+job escalates), never the configured hub model instead.
 
 Nothing here logs question text, patient data or model output; Generation
 and Verification keep text out of their repr.
@@ -354,10 +357,13 @@ def set_hub_offline() -> None:
 
 
 def nli_factory(model_name: str, pinned: PinnedSource, *, pinned_nli: bool) -> Callable[[], Any]:
-    """The shared NLI verifier, made on first use. With nli pinned: from the
+    """The shared NLI verifier, made on first use: the configured model.
+    pinned_nli is the path for when nli becomes pinnable; until its suite
+    exists the worker refuses an nli role at start-up. With it: from the
     verified directory only (local_files_only, use_safetensors, offline),
     and not at all until the pin is verified (RuntimeError: the job
-    escalates). Otherwise the configured model, as before."""
+    escalates).
+    TODO(TODO.md "Pinnable roles"): reachable once nli is in lock.ROLES."""
     lock = threading.Lock()
     shared: dict[str, Any] = {}
 

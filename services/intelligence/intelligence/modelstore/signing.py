@@ -244,8 +244,8 @@ class TrustedKey:
 @dataclass(frozen=True, slots=True)
 class TrustPolicy:
     """The accepted signers per purpose. Construction requires every purpose, at most
-    :data:`MAX_SIGNERS` distinct keys each, and no key shared by ``manifest`` and
-    ``signoff``."""
+    :data:`MAX_SIGNERS` distinct keys each, and no ``signoff`` key that is also a
+    ``manifest`` or ``testset`` key."""
 
     signers: Mapping[str, tuple[TrustedKey, ...]]
 
@@ -260,9 +260,13 @@ class TrustPolicy:
                 or len({k.key_id for k in keys}) != len(keys)
             ):
                 raise _policy("signers")
-        manifest_ids = {k.key_id for k in self.signers["manifest"]}
-        if manifest_ids & {k.key_id for k in self.signers["signoff"]}:
+        signoff_ids = {k.key_id for k in self.signers["signoff"]}
+        if signoff_ids & {k.key_id for k in self.signers["manifest"]}:
             raise _policy("manifest_signoff_shared")
+        # The test-split signer lives in model-promotion; a shared key would let that
+        # identity sign sign-offs (domain separation can't help the key's holder).
+        if signoff_ids & {k.key_id for k in self.signers["testset"]}:
+            raise _policy("testset_signoff_shared")
         object.__setattr__(self, "signers", MappingProxyType(dict(self.signers)))
 
     def has_development_signer(self) -> bool:

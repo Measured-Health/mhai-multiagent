@@ -695,6 +695,26 @@ def test_no_signoff_refused_in_production_allowed_in_development(
     assert _pin_dirs(cache, pub) == []
 
 
+def test_missing_signoff_fetches_no_weights(tmp_path: Path, keys: Keys) -> None:
+    """The sign-off needs only the manifest, so it is checked before any file is
+    downloaded: a pin waiting for its sign-off costs a few small reads per gate retry,
+    never the weights again."""
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys, with_signoff=False)
+    cache = _cache(tmp_path)
+    spy = Spy(mem)
+    for _ in range(3):  # gate retries
+        err = _refused(_verify, spy, pub, keys, cache, require_signoff=True)
+        assert (err.reason, err.detail_code) == ("not_approved", "missing")
+    assert spy.downloads == 0
+    assert [r for r in spy.reads if r[0] == "download"] == []
+    assert _pin_dirs(cache, pub) == []
+    # With the sign-off written, the same pin downloads and verifies.
+    write_signoff(mem, pub, keys.signoff)
+    assert _verify(spy, pub, keys, cache).path.is_dir()
+    assert spy.downloads == len(pub.m.files)
+
+
 @pytest.mark.parametrize(
     "case",
     [

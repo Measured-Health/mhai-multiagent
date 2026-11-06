@@ -32,8 +32,6 @@ gate (:func:`intelligence.modelstore.lock.check_production`), and
 before any store or GitHub access; the production workflows set neither, and
 ``test_workflows.py`` checks it. ``make-fixture --name`` names the fixture's model.
 
-TODO(Task 22): verify and drive-check.
-
 ``dev-keygen`` makes a development Ed25519 key pair in ``OUT_DIR`` (the private key with
 mode 0600) and prints one JSON line with the key id and the public key PEM, never the
 private key. It refuses outside ``MHAI_MODELS_ENV=development`` (``not_allowed_here``)
@@ -800,7 +798,7 @@ def _promote(args: argparse.Namespace) -> int:
     )
     promote.check_request(req)  # names first, before any environment, file or network
     report_dir = _check_report_dir(args.report_dir, req.dry_run)
-    if args.dev_set and not req.dry_run and not signing.is_development():
+    if args.dev_set and not req.dry_run and not verify.is_development():
         # A promotion is measured on the locked split, never on a set the caller picks.
         raise Refused("not_allowed_here", detail_code="dev_set_promotion")
     registry, licences = _registries()

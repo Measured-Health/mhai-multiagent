@@ -51,6 +51,9 @@ each failure a fixed reason with no fallback:
    clinical and the platform reviewer (P15 again at load), with a ``signoff.sig``
    version that verifies for purpose ``signoff`` over it.
    Both are picked by verification, never by "latest". None is ``not_approved`` (P17).
+   It needs only the manifest, so it runs right after step 4, before step 5 fetches any
+   file: a pin still waiting for its sign-off costs a few small reads per retry, never
+   the weights.
 8. **Seal.** Files 0400, then the ``.partial`` directory is renamed to the final one,
    which becomes 0500.
 
@@ -928,6 +931,10 @@ def _verify(
         if require_gate:
             check_gate(entry, m)
         check_manifest_signature(source, name, version, raw, policy)  # 4
+        if require_signoff:
+            # Step 7 needs only the manifest, so it runs before any file is fetched: a
+            # pin waiting for its sign-off never downloads the weights on a gate retry.
+            check_signoff(source, role, entry, m, policy)  # 7
     except Refused as e:
         definitive = e.reason if e.reason in DEFINITIVE else None
         raise
@@ -961,8 +968,6 @@ def _verify(
                 if not cached:
                     _download(source, m, name_fd, partial)  # 5a
                     check_dir(cache_dir / name / partial, m, sealed=False)  # 5b, 6
-                if require_signoff:
-                    check_signoff(source, role, entry, m, policy)  # 7
                 if not cached:
                     _seal(name_fd, partial, final)  # 8
                     check_dir(final_path, m, sealed=True)
