@@ -491,12 +491,10 @@ def load_licences(path: Path | str) -> Licences:
 
 
 def unverified_pin(pin: str) -> None:
-    """The default pin verifier: refuses every promoted base (fail closed)."""
-    # TODO(Task 20): verify a promoted base with verify.verify_pin and pass it from
-    # promote.py. Not wired in Task 22: verify_pin needs the base's role and gate, which a
-    # base pin (name@version#sha256) doesn't carry, plus a reader store and a cache in
-    # promote's context; Task 20's models.lock entries are where a base's role and gate
-    # come from.
+    """The default pin verifier: refuses every promoted base (fail closed). The real one
+    is :func:`intelligence.modelstore.lock.base_verifier` (Task 22's verifier, the role
+    from the base's own manifest, no gate), which ``mhai-models promote`` passes in
+    through ``promote.Context.base_verifier`` when it has the reader's credentials."""
     raise Refused("base_unverified")
 
 

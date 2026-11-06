@@ -718,19 +718,33 @@ def verify_pin(
     cache_dir: Path | str,
     *,
     require_signoff: bool,
+    require_gate: bool = True,
 ) -> VerifiedModel:
     """Verify ``entry`` for ``role`` into ``cache_dir``; see the module docstring.
     Raises :class:`Refused` with a fixed code on any failure.
 
     ``require_signoff=False`` is for ``mhai-models pin`` (Task 20), which checks a version
-    before it has a sign-off. Loading a model never calls this directly: it calls
-    :func:`verify_for_load`, which has no such switch."""
+    before it has a sign-off. ``require_gate=False`` is only for a promoted base model
+    (:func:`intelligence.modelstore.lock.base_verifier`), which is named by its pin and
+    passes no gate of its own. Loading a model never calls this directly: it calls
+    :func:`verify_for_load`, which has neither switch."""
     if not isinstance(require_signoff, bool):
         raise Refused("not_allowed_here", detail_code="require_signoff")
+    if not isinstance(require_gate, bool):
+        raise Refused("not_allowed_here", detail_code="require_gate")
     role, name, version, sha = _check_inputs(role, entry)
     try:
         out = _verify(
-            source, role, entry, name, version, sha, policy, Path(cache_dir), require_signoff
+            source,
+            role,
+            entry,
+            name,
+            version,
+            sha,
+            policy,
+            Path(cache_dir),
+            require_signoff,
+            require_gate,
         )
     except Refused as e:
         log.warning(
@@ -810,6 +824,7 @@ def _verify(
     policy: signing.TrustPolicy,
     cache_dir: Path,
     require_signoff: bool,
+    require_gate: bool,
 ) -> VerifiedModel:
     final = f"{version}-{sha[:HASH12]}"
     partial = final + PARTIAL_SUFFIX
@@ -820,7 +835,8 @@ def _verify(
         m = manifest.parse(raw)  # 3
         if (m.name, m.version, m.role) != (name, version, role):
             raise Refused("identity_mismatch")
-        check_gate(entry, m)
+        if require_gate:
+            check_gate(entry, m)
         check_manifest_signature(source, name, version, raw, policy)  # 4
     except Refused as e:
         definitive = e.reason if e.reason in DEFINITIVE else None

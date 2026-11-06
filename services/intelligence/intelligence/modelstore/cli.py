@@ -10,8 +10,11 @@ Commands::
     mhai-models check DIR
     mhai-models make-fixture DIR [--variant V] [--seed N]
     mhai-models store-init
+    mhai-models pin ROLE NAME VERSION --gate phase1|phase3 [--lock PATH]
+    mhai-models lock-check --base BASE_LOCK --head HEAD_LOCK --pr N
+        --reviewers BASE_REVIEWERS [--testsets BASE_TESTSETS_LOCK] [--head-sha SHA]
 
-TODO(Task 20/21/22): verify, pin, lock-check, signoff, rollback and drive-check.
+TODO(Task 21/22): verify, signoff, rollback and drive-check.
 
 ``dev-keygen`` makes a development Ed25519 key pair in ``OUT_DIR`` (the private key with
 mode 0600) and prints one JSON line with the key id and the public key PEM, never the
@@ -53,14 +56,39 @@ and prints its files hash. ``make-fixture`` writes a tiny synthetic run
 runs ``deploy/minio/init-model-store.sh`` (which needs ``mc``) and refuses unless
 ``MHAI_MODELS_ENV=development`` and ``MINIO_URL``'s host is ``127.0.0.1`` or ``::1``.
 
+With ``MODEL_STORE_READER_ACCESS_KEY`` and ``MODEL_STORE_READER_SECRET_KEY`` and a trust
+policy, ``promote`` verifies a promoted base model's pin
+(:func:`intelligence.modelstore.lock.base_verifier`); without them such a base is
+``base_unverified``.
+
+``pin`` (:func:`intelligence.modelstore.lock.pin`) verifies ``NAME@VERSION`` with the
+reader's credentials (``MODEL_STORE_ENDPOINT``, ``MODEL_STORE_BUCKET``,
+``MODEL_STORE_READER_ACCESS_KEY``, ``MODEL_STORE_READER_SECRET_KEY``) and
+``MHAI_MODELS_TRUST_POLICY``, checks its evaluation against ``models/testsets.lock``
+(``MHAI_MODELS_TESTSETS_LOCK``) and writes ``models.lock`` (or ``--lock``). It prints
+``{"pinned": {role, name, version, manifest_sha256, gate}}``. The production lock refuses
+``fixture-`` names and the ``rehearsal`` gate; only in development may another ``--lock``
+take them. It opens no PR.
+
+``lock-check`` (:func:`intelligence.modelstore.lock.lock_check`, in ``model-lock.yml``)
+compares two lock files. ``--reviewers`` and ``--testsets`` must be the PR's **base** ref
+copies (the workflow writes them with ``git show <base sha>:<path>``), never the PR's own.
+It reads the store as ``pin`` does and the PR with ``GITHUB_TOKEN`` and
+``GITHUB_REPOSITORY`` (``GITHUB_API_URL`` optional). It prints ``{"lock_check": "pass",
+"roles": {role: new|rollback|removed}}``; a lock with no changed role needs no store or
+GitHub access. Verified files go to ``MHAI_MODELS_CACHE`` when set, else to a private
+temporary folder removed afterwards. ``--head-sha`` (the workflow's PR head commit) makes
+a PR whose head moved since the checkout ``not_approved``.
+
 A promotion (not ``--dry-run``) outside ``MHAI_MODELS_ENV=development`` must run with
 ``MHAI_EVAL_ROLE=locked`` (the locked split), must pass ``--expect-files`` and may not pass
 ``--dev-set``; each is ``not_allowed_here`` otherwise.
 
 Exit codes: 0 done, 2 refused (one JSON line ``{"refused": "<code>"}`` on stdout; for
-``promote``, ``check``, ``make-fixture`` and ``store-init`` with ``"detail"``, a fixed code,
-when there is one), 3 a file could not be read or written, or (``promote``, ``check``,
-``store-init``) the store or the source is unavailable, 4 (``testset-build`` only) the split
+``promote``, ``check``, ``make-fixture``, ``store-init``, ``pin`` and ``lock-check`` with
+``"detail"``, a fixed code, when there is one), 3 a file could not be read or written, or
+(``promote``, ``check``, ``store-init``, ``pin``, ``lock-check``) the store, the source or
+GitHub is unavailable, 4 (``testset-build`` only) the split
 is locked and its lock line printed, but the scratch copy could not be removed
 (``{"warning": "scratch_not_removed"}`` on stderr, no path): remove the scratch root by hand.
 An unexpected error is ``{"error": "internal"}`` and exit 3, with no traceback (unless
@@ -68,6 +96,7 @@ An unexpected error is ``{"error": "internal"}`` and exit 3, with no traceback (
 """
 
 import argparse
+import contextlib
 import dataclasses
 import math
 import os
@@ -75,13 +104,15 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
+import tempfile
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from intelligence.modelstore import (
     canonical,
+    lock,
     names,
     promote,
     signing,
@@ -89,6 +120,7 @@ from intelligence.modelstore import (
     store,
     testsets,
     training,
+    verify,
 )
 from intelligence.modelstore.reasons import Refused
 
@@ -105,6 +137,9 @@ PROMOTER_ACCESS_ENV = "MODEL_STORE_PROMOTER_ACCESS_KEY"
 PROMOTER_SECRET_ENV = "MODEL_STORE_PROMOTER_SECRET_KEY"
 EVAL_READER_ACCESS_ENV = "MODEL_STORE_EVAL_READER_ACCESS_KEY"
 EVAL_READER_SECRET_ENV = "MODEL_STORE_EVAL_READER_SECRET_KEY"
+READER_ACCESS_ENV = "MODEL_STORE_READER_ACCESS_KEY"
+READER_SECRET_ENV = "MODEL_STORE_READER_SECRET_KEY"
+CACHE_ENV = "MHAI_MODELS_CACHE"
 CANDIDATE_RETENTION_ENV = "MODEL_STORE_CANDIDATE_RETENTION_DAYS"
 LOCAL_ROOT_ENV = "MHAI_MODELS_LOCAL_ROOT"
 DRIVE_FOLDER_ENV = "MHAI_MODELS_DRIVE_FOLDER_ID"
@@ -115,14 +150,15 @@ MINIO_URL_ENV = "MINIO_URL"
 WORKFLOW_ENVS = ("GITHUB_RUN_ID", "GITHUB_WORKFLOW_REF", "GITHUB_SHA", "GITHUB_ACTOR")
 MAX_SCALE = 10.0
 MODELS_DIR = promote.REPO / "models"
+PRODUCTION_LOCK = promote.REPO / "models.lock"
 INIT_SCRIPT = promote.REPO / "deploy" / "minio" / "init-model-store.sh"
-UNAVAILABLE = frozenset({"store_unavailable", "source_unavailable"})
+UNAVAILABLE = frozenset({"store_unavailable", "source_unavailable", "github_unavailable"})
 # store-init: loopback IP literals only (a name such as localhost can resolve anywhere).
 STORE_INIT_HOSTS = frozenset({"127.0.0.1", "::1"})
 DEBUG_ENV = "MHAI_MODELS_DEBUG"
 # Commands whose refusals carry the fixed detail code, and whose store or source being
 # unavailable is exit 3.
-_DETAILED = frozenset({"promote", "check", "make-fixture", "store-init"})
+_DETAILED = frozenset({"promote", "check", "make-fixture", "store-init", "pin", "lock-check"})
 
 
 def _print(obj: dict[str, Any]) -> None:
@@ -279,6 +315,121 @@ def _source_for(req: promote.Request) -> Any:
     return make
 
 
+def _reader_store() -> verify.ReadStore:
+    """The store with the reader's credentials (``not_allowed_here`` without them)."""
+    reader = _s3(READER_ACCESS_ENV, READER_SECRET_ENV)
+    if reader is None:
+        raise Refused("not_allowed_here", detail_code="reader_credentials")
+    return reader
+
+
+def _trust_policy() -> signing.TrustPolicy:
+    return signing.load_policy(_env(TRUST_POLICY_ENV, "policy_invalid"))
+
+
+def _github() -> lock.GitHubApi:
+    return lock.GitHubClient.from_env()
+
+
+def _testsets_lock(path: str | None = None) -> dict[tuple[str, str], testsets.LockEntry]:
+    path = path or os.environ.get(TESTSETS_LOCK_ENV) or str(MODELS_DIR / "testsets.lock")
+    return testsets.read_lock(path)
+
+
+def _remove_cache(root: Path) -> None:
+    """Remove a temporary cache (verified directories are read-only: give write back)."""
+    for dirpath, dirnames, _ in os.walk(root):
+        for d in dirnames:
+            p = os.path.join(dirpath, d)
+            if not os.path.islink(p):
+                os.chmod(p, 0o700)
+    shutil.rmtree(root, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def _cache() -> Iterator[Path]:
+    """``MHAI_MODELS_CACHE``, or a private temporary folder removed afterwards."""
+    given = os.environ.get(CACHE_ENV)
+    if given:
+        yield Path(given)
+        return
+    tmp = Path(tempfile.mkdtemp(prefix="mhai-models-cache-", dir=os.environ.get(SCRATCH_ENV)))
+    try:
+        yield tmp
+    finally:
+        _remove_cache(tmp)
+
+
+def _pin(args: argparse.Namespace) -> int:
+    role, name, version, gate = args.role, args.name, args.version, args.gate
+    names.check_role(role)  # names first, before any environment, file or store access
+    names.check_name(name)
+    names.check_version(version)
+    lock_path = Path(args.lock) if args.lock else PRODUCTION_LOCK
+    # Only a development rehearsal may write a lock other than the repository's without
+    # the production rules (P14).
+    production = not (verify.is_development() and lock_path.resolve() != PRODUCTION_LOCK.resolve())
+    source = _reader_store()
+    policy = _trust_policy()
+    locked = _testsets_lock()
+    with _cache() as cache_dir:
+        entry = lock.pin(
+            role,
+            name,
+            version,
+            gate,
+            source=source,
+            policy=policy,
+            cache_dir=cache_dir,
+            lock_path=lock_path,
+            testsets_lock=locked,
+            production=production,
+        )
+    _print({"pinned": {"role": role, **entry.to_obj()}})
+    return 0
+
+
+def _lock_check(args: argparse.Namespace) -> int:
+    number = lock.check_pr_number(args.pr)
+    base, head = lock.read(args.base), lock.read(args.head)
+    reviewers = lock.read_reviewers(args.reviewers)
+    locked = _testsets_lock(args.testsets)
+    for role, entry in head.models.items():
+        lock.check_production(role, entry)
+    if not lock.changed_roles(base, head):
+        _print({"lock_check": "pass", "roles": {}})
+        return 0
+    source = _reader_store()
+    policy = _trust_policy()
+    github = _github()
+    with _cache() as cache_dir:
+        roles = lock.lock_check(
+            lock.to_bytes(base),
+            lock.to_bytes(head),
+            number,
+            github=github,
+            reviewers=reviewers,
+            source=source,
+            policy=policy,
+            cache_dir=cache_dir,
+            testsets_lock=locked,
+            head_sha=args.head_sha,
+        )
+    _print({"lock_check": "pass", "roles": roles})
+    return 0
+
+
+def _base_verifier(stack: contextlib.ExitStack) -> Callable[[str], None] | None:
+    """The promoted-base verifier, when the reader's credentials and a policy are here."""
+    if not (os.environ.get(READER_ACCESS_ENV) and os.environ.get(READER_SECRET_ENV)):
+        return None
+    if not os.environ.get(TRUST_POLICY_ENV):
+        return None
+    source = _reader_store()
+    policy = _trust_policy()
+    return lock.base_verifier(source, policy, stack.enter_context(_cache()))
+
+
 def _promote(args: argparse.Namespace) -> int:
     req = promote.Request(
         name=args.name,
@@ -298,13 +449,19 @@ def _promote(args: argparse.Namespace) -> int:
         # A promotion is measured on the locked split, never on a set the caller picks.
         raise Refused("not_allowed_here", detail_code="dev_set_promotion")
     registry, licences = _registries()
-    ctx = promote.Context(
-        registry=registry,
-        licences=licences,
-        source_for=_source_for(req),
-        split=_split(args.dev_set),
-        scratch_parent=Path(os.environ[SCRATCH_ENV]) if os.environ.get(SCRATCH_ENV) else None,
-    )
+    with contextlib.ExitStack() as stack:
+        ctx = promote.Context(
+            registry=registry,
+            licences=licences,
+            source_for=_source_for(req),
+            split=_split(args.dev_set),
+            scratch_parent=Path(os.environ[SCRATCH_ENV]) if os.environ.get(SCRATCH_ENV) else None,
+            base_verifier=_base_verifier(stack),
+        )
+        return _run_promote(req, ctx)
+
+
+def _run_promote(req: promote.Request, ctx: promote.Context) -> int:
     if not req.dry_run:
         # A dry run never reads store write credentials or the signer.
         signer = _signer() if os.environ.get(SIGNER_ENV) else None
@@ -428,6 +585,21 @@ def _parser() -> argparse.ArgumentParser:
     mf.set_defaults(func=_make_fixture)
     si = sub.add_parser("store-init", help="provision a loopback MinIO (rehearsal only)")
     si.set_defaults(func=_store_init)
+    pn = sub.add_parser("pin", help="verify a promoted version and pin it in models.lock")
+    pn.add_argument("role")
+    pn.add_argument("name")
+    pn.add_argument("version")
+    pn.add_argument("--gate", required=True)
+    pn.add_argument("--lock", default=None)
+    pn.set_defaults(func=_pin)
+    lc = sub.add_parser("lock-check", help="check a PR's change to models.lock")
+    lc.add_argument("--base", required=True)
+    lc.add_argument("--head", required=True)
+    lc.add_argument("--pr", required=True)
+    lc.add_argument("--reviewers", required=True)
+    lc.add_argument("--testsets", default=None)
+    lc.add_argument("--head-sha", default=None)
+    lc.set_defaults(func=_lock_check)
     return parser
 
 

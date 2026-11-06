@@ -52,6 +52,7 @@ REASONS: frozenset[str] = frozenset(
         "key_invalid",
         "key_exists",
         "gate_failed",
+        "github_unavailable",
     }
 )
 

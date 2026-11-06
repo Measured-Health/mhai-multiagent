@@ -201,7 +201,10 @@ class Context:
 
     ``source_for`` makes the run's source once the scratch folder exists (an HF source
     keeps its cache there). ``store``, ``signer``, ``policy``, ``workflow`` and
-    ``retention_days`` are for a promotion only; a dry run never reads them."""
+    ``retention_days`` are for a promotion only; a dry run never reads them.
+    ``base_verifier`` verifies a promoted base model's pin
+    (:func:`intelligence.modelstore.lock.base_verifier`); without one a promoted base is
+    refused (``base_unverified``)."""
 
     registry: training.Registry
     licences: training.Licences
@@ -215,6 +218,7 @@ class Context:
     scratch_parent: Path | None = None
     warmup_page: Path = WARMUP_PAGE
     deadline_s: float = DEFAULT_DEADLINE_S
+    base_verifier: Callable[[str], None] | None = field(default=None, repr=False)
 
 
 def _is_loopback_literal(host: str) -> bool:
@@ -481,14 +485,20 @@ def check_files(
 
 
 def check_training(
-    run_dir: Path, name: str, registry: training.Registry, licences: training.Licences
+    run_dir: Path,
+    name: str,
+    registry: training.Registry,
+    licences: training.Licences,
+    *,
+    verify_base: Callable[[str], None] = training.unverified_pin,
 ) -> training.TrainingCheck:
     """Step 4b: the training manifest, through ``training.load`` and ``training.check``;
-    it must name the model being promoted (``identity_mismatch``)."""
+    it must name the model being promoted (``identity_mismatch``). A promoted base is
+    checked by ``verify_base`` (by default refused)."""
     tm = training.load_run(run_dir)
     if tm.name != name:
         raise Refused("identity_mismatch", detail_code="training_manifest_name")
-    return training.check(tm, registry, licences)
+    return training.check(tm, registry, licences, verify_pin=verify_base)
 
 
 @dataclass(frozen=True, slots=True)
@@ -990,7 +1000,13 @@ def promote(req: Request, ctx: Context) -> Summary:
         fetched = fetch_run(source, req.name, req.run, sc.run)
         files_sha = check_expected(fetched, req.expect_files)
         entries = check_files(sc.run, fetched)  # 4
-        checked = check_training(sc.run, req.name, ctx.registry, ctx.licences)
+        checked = check_training(
+            sc.run,
+            req.name,
+            ctx.registry,
+            ctx.licences,
+            verify_base=ctx.base_verifier or training.unverified_pin,
+        )
         role = checked.manifest.role
         suite_for(role)  # 5
         chosen = choose_extractor(sc.run, req.name, role, req.version, req.runtime_url)
