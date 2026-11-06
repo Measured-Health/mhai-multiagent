@@ -492,13 +492,37 @@ def test_report_metrics_are_fixed_decimals(tmp_path: Path) -> None:
     }
 
 
-@pytest.mark.parametrize("value", [-0.5, -3])
-def test_report_metrics_refuse_negative_values(tmp_path: Path, value: float) -> None:
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        (-0.03, "-0.030000"),
+        (-5, "-5.000000"),
+        (-1e-9, "0.000000"),  # rounds to zero: never "-0.000000"
+        (-0.0, "0.000000"),
+        (-0.0000004, "0.000000"),
+        (-0.0000005, "0.000000"),  # half-even: 0.0000005 quantizes to 0.000000
+        (-0.0000015, "-0.000002"),
+        (-(10**18), "-1000000000000000000.000000"),
+    ],
+)
+def test_report_metrics_signed_decimals(tmp_path: Path, value: float, shown: str) -> None:
+    # Ruling D26: negative metrics are signed fixed decimals; the report reads them back.
     run = fixtures.make_run(tmp_path / "run", "good", 3)
     path = run / "training_manifest.json"
     obj = json.loads(path.read_bytes())
     obj["notebook_metrics"] = {"delta": value}
-    path.write_bytes(canonical.dumps(obj) if isinstance(value, int) else json.dumps(obj).encode())
+    raw = canonical.dumps(obj) if isinstance(value, int) else json.dumps(obj).encode()
+    path.write_bytes(raw)
     tm = training.load(path)
-    err = pytest.raises(Refused, training.report_metrics, tm)
-    assert err.value.reason == "manifest_invalid"
+    assert training.report_metrics(tm) == {"delta": shown}
+
+
+def test_negative_zero_is_never_shown(tmp_path: Path) -> None:
+    run = fixtures.make_run(tmp_path / "run", "good", 3)
+    path = run / "training_manifest.json"
+    obj = json.loads(path.read_bytes())
+    obj["notebook_metrics"] = {"a": -1e-12, "b": -0.0, "c": -0.00000049}
+    path.write_bytes(json.dumps(obj).encode())
+    shown = training.report_metrics(training.load(path))
+    assert shown == {"a": "0.000000", "b": "0.000000", "c": "0.000000"}
+    assert all(not str(v).startswith("-") for v in shown.values())

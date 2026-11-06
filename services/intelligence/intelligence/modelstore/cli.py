@@ -51,7 +51,11 @@ by ``models/testsets.lock`` (``MHAI_MODELS_TESTSETS_LOCK``), read with
 and prints its files hash. ``make-fixture`` writes a tiny synthetic run
 (:func:`intelligence.modelstore.fixtures.make_run`). ``store-init`` is for rehearsal only: it
 runs ``deploy/minio/init-model-store.sh`` (which needs ``mc``) and refuses unless
-``MHAI_MODELS_ENV=development`` and ``MINIO_URL`` is a loopback endpoint.
+``MHAI_MODELS_ENV=development`` and ``MINIO_URL``'s host is ``127.0.0.1`` or ``::1``.
+
+A promotion (not ``--dry-run``) outside ``MHAI_MODELS_ENV=development`` must run with
+``MHAI_EVAL_ROLE=locked`` (the locked split), must pass ``--expect-files`` and may not pass
+``--dev-set``; each is ``not_allowed_here`` otherwise.
 
 Exit codes: 0 done, 2 refused (one JSON line ``{"refused": "<code>"}`` on stdout; for
 ``promote``, ``check``, ``make-fixture`` and ``store-init`` with ``"detail"``, a fixed code,
@@ -59,6 +63,8 @@ when there is one), 3 a file could not be read or written, or (``promote``, ``ch
 ``store-init``) the store or the source is unavailable, 4 (``testset-build`` only) the split
 is locked and its lock line printed, but the scratch copy could not be removed
 (``{"warning": "scratch_not_removed"}`` on stderr, no path): remove the scratch root by hand.
+An unexpected error is ``{"error": "internal"}`` and exit 3, with no traceback (unless
+``MHAI_MODELS_DEBUG=1`` in development, to stderr).
 """
 
 import argparse
@@ -111,6 +117,9 @@ MAX_SCALE = 10.0
 MODELS_DIR = promote.REPO / "models"
 INIT_SCRIPT = promote.REPO / "deploy" / "minio" / "init-model-store.sh"
 UNAVAILABLE = frozenset({"store_unavailable", "source_unavailable"})
+# store-init: loopback IP literals only (a name such as localhost can resolve anywhere).
+STORE_INIT_HOSTS = frozenset({"127.0.0.1", "::1"})
+DEBUG_ENV = "MHAI_MODELS_DEBUG"
 # Commands whose refusals carry the fixed detail code, and whose store or source being
 # unavailable is exit 3.
 _DETAILED = frozenset({"promote", "check", "make-fixture", "store-init"})
@@ -283,6 +292,9 @@ def _promote(args: argparse.Namespace) -> int:
         gates=tuple(args.gate or ()),
     )
     promote.check_request(req)  # names first, before any environment, file or network
+    if args.dev_set and not req.dry_run and not signing.is_development():
+        # A promotion is measured on the locked split, never on a set the caller picks.
+        raise Refused("not_allowed_here", detail_code="dev_set_promotion")
     registry, licences = _registries()
     ctx = promote.Context(
         registry=registry,
@@ -354,7 +366,7 @@ def _store_init(args: argparse.Namespace) -> int:
     if (
         failed
         or parts.scheme not in ("http", "https")
-        or host not in store.LOOPBACK_HOSTS
+        or host not in STORE_INIT_HOSTS
         or parts.username is not None
         or parts.path not in ("", "/")
         or parts.query
@@ -418,23 +430,34 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run one command. Every failure is a fixed code on stdout and an exit code (2 refused,
+    3 unavailable, unreadable or unexpected); no traceback or exception text is printed,
+    except with ``MHAI_MODELS_DEBUG=1`` in development, where an unexpected error's
+    traceback goes to stderr."""
     args = _parser().parse_args(argv)
     detailed = args.command in _DETAILED
     refusal: Refused | None = None
+    error: str | None = None
     try:
         result: int = args.func(args)
         return result
     except Refused as exc:
         refusal = exc
     except OSError:
-        refusal = None
+        error = "io"
+    except Exception:
+        error = "internal"
+        if os.environ.get(DEBUG_ENV) == "1" and signing.is_development():
+            import traceback
+
+            traceback.print_exc(file=sys.stderr)
     if refusal is not None:
         out: dict[str, Any] = {"refused": refusal.reason}
         if detailed and refusal.detail_code is not None:
             out["detail"] = refusal.detail_code
         _print(out)
         return 3 if detailed and refusal.reason in UNAVAILABLE else 2
-    _print({"error": "io"})
+    _print({"error": error or "internal"})
     return 3
 
 

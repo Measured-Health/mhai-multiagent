@@ -15,6 +15,7 @@ import logging
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -710,6 +711,8 @@ def test_promote_writes_in_order_and_the_manifest_last(
     m = manifest.parse(raw)  # it is manifest.build output: canonical and strict
     assert (m.run.id, m.run.source, m.run.source_ref) == (RUN, "local", "fixture")
     assert m.promotion.actor == WORKFLOW.actor
+    # a development rehearsal on the dev split says so, in the manifest and the summary
+    assert m.evaluation.split == "dev" and summary.split == "dev"
     assert set(m.evaluation.gates) == set(report.GATES)
     sig = mem.get(store.manifest_sig_key(NAME, version), max_bytes=4096)
     signer = signing.Verifier().verify("manifest", raw, sig, keys.policy)
@@ -863,9 +866,17 @@ def test_promote_good_fixture(
     for doc, d in m.documents.items():
         info = reader.head(store.run_doc_key(NAME, version, RUN, doc), d.store_version_id)
         assert info.sha256 == d.sha256
-    # the manifest is the newest object of the version: written last
     claim = reader.head(store.claim_key(NAME, version))
     assert claim.lock_mode == "COMPLIANCE"
+    # the manifest is the newest object of the version: written last
+    raw_client = minio_store.client("root")
+    listed = raw_client.list_object_versions(
+        Bucket=minio_store.bucket, Prefix=f"models/{NAME}/{version}/"
+    )["Versions"]
+    stamps = {v["Key"]: v["LastModified"] for v in listed}
+    assert len(stamps) == len(listed)  # one version per key
+    newest = stamps.pop(mkey)
+    assert stamps and all(t <= newest for t in stamps.values())
     assert summary.files_sha256 == promote.files_hash(
         [files.FileEntry(f.path, f.size, f.sha256) for f in m.files]
     )
@@ -999,6 +1010,7 @@ def test_cli_make_fixture_and_check(
     [
         ("production", "http://127.0.0.1:9000"),
         ("development", "http://minio.example.org:9000"),
+        ("development", "http://localhost:9000"),  # loopback literals only
         ("development", "https://10.1.2.3:9000"),
     ],
 )
@@ -1009,3 +1021,244 @@ def test_cli_store_init_rehearsal_only(
     monkeypatch.setenv(cli.MINIO_URL_ENV, url)
     code, out = _cli(["store-init"], capsys)
     assert code == 2 and json.loads(out)["refused"] == "not_allowed_here"
+
+
+# ---------------------------------------------------------------- fix round 1
+
+
+def test_promotion_outside_development_needs_locked_split(
+    tmp_path: Path,
+    keys: Keys,
+    registry: training.Registry,
+    licences: training.Licences,
+    dev_set: minisets.MiniSet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # I1: gates signed into a manifest are measured on the locked split.
+    mem = MemoryStore()
+    seen: list[Recording] = []
+    ctx = _write_ctx(
+        _ctx(_source_root(tmp_path), registry, licences, dev_set, recording=seen), mem, keys
+    )
+    monkeypatch.setenv(signing.ENV_VAR, "production")
+    err = _refused(promote.promote, _request("3.0.0", dry_run=False, expect_files="0" * 64), ctx)
+    assert (err.reason, err.detail_code) == ("not_allowed_here", "locked_split_required")
+    assert mem.calls == [] and seen == []  # before the claim and the source
+    # a dry run on the dev split is still fine outside development
+    assert promote.promote(_request(), ctx).split == "dev"
+
+
+def test_promotion_outside_development_needs_expect_files(
+    tmp_path: Path,
+    keys: Keys,
+    registry: training.Registry,
+    licences: training.Licences,
+    dev_set: minisets.MiniSet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = testsets.LockEntry("clinical_document", "1.0.0", "ab" * 32)
+    locked = promote.LockedSplit(MemoryStore(), entry, keys.policy)
+    mem = MemoryStore()
+    ctx = replace(
+        _write_ctx(_ctx(_source_root(tmp_path), registry, licences, dev_set), mem, keys),
+        split=locked,
+    )
+    monkeypatch.setenv(signing.ENV_VAR, "production")
+    err = _refused(promote.check_inputs, _request("3.0.1", dry_run=False), ctx)
+    assert (err.reason, err.detail_code) == ("not_allowed_here", "expect_files_required")
+    # with the locked split and the dry run's hash, the inputs pass
+    promote.check_inputs(_request("3.0.1", dry_run=False, expect_files="0" * 64), ctx)
+    assert mem.calls == []
+
+
+def test_cli_dev_set_only_for_a_dry_run_outside_development(
+    tmp_path: Path,
+    dev_set: minisets.MiniSet,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(cli.LOCAL_ROOT_ENV, str(_source_root(tmp_path)))
+    monkeypatch.setenv(signing.ENV_VAR, "production")
+    argv = ["promote", NAME, "1.0.0", "--source", "local", "--run", RUN]
+    code, out = _cli([*argv, "--expect-files", "0" * 64, "--dev-set", str(dev_set.root)], capsys)
+    assert code == 2
+    assert json.loads(out) == {"refused": "not_allowed_here", "detail": "dev_set_promotion"}
+    code, out = _cli([*argv, "--dry-run", "--dev-set", str(dev_set.root)], capsys)
+    assert code == 0, out
+
+
+def test_put_once_adopts_only_a_locked_object(keys: Keys) -> None:
+    body = b"ours"
+    sha = hashlib.sha256(body).hexdigest()
+    later = datetime.now(UTC) + timedelta(days=30)
+    cases = [
+        (None, None),  # not locked at all
+        ("GOVERNANCE", later),  # a lock that can be lifted
+        ("COMPLIANCE", datetime.now(UTC) + timedelta(hours=1)),  # shorter than asked
+        ("COMPLIANCE", None),
+    ]
+    for n, (mode, until) in enumerate(cases):
+        mem = MemoryStore()
+        key = store.claim_key(NAME, f"4.0.{n}")
+        mem.shadow(key, body, lock_mode=mode, retain_until=until)
+        err = _refused(promote.put_once, mem, key, body, len(body), sha, 5)
+        assert (err.reason, err.detail_code) == ("version_exists", "not_ours"), mode
+    mem = MemoryStore()
+    key = store.claim_key(NAME, "4.1.0")
+    vid = mem.shadow(key, body, lock_mode="COMPLIANCE", retain_until=later)
+    assert promote.put_once(mem, key, body, len(body), sha, 5) == vid
+
+
+def _changing(mem: MemoryStore, when: str, target: str) -> None:
+    """Change the scratch file ``target`` when the PUT of ``.../files/<when>`` arrives."""
+
+    def hook(key: str, data: bytes | Path) -> None:
+        if key.endswith(f"/files/{when}") and isinstance(data, Path):
+            with open(data.parent / target, "ab") as fh:
+                fh.write(b"\x00changed")
+
+    mem.before_put = hook
+
+
+@pytest.mark.parametrize(
+    ("when", "target", "detail"),
+    [
+        ("config.json", "model.safetensors", "scratch_changed"),  # caught before its PUT
+        ("model.safetensors", "model.safetensors", "stored"),  # caught by the read-back
+    ],
+)
+def test_upload_rehashes_against_the_checked_files(
+    tmp_path: Path,
+    keys: Keys,
+    registry: training.Registry,
+    licences: training.Licences,
+    dev_set: minisets.MiniSet,
+    when: str,
+    target: str,
+    detail: str,
+) -> None:
+    mem = MemoryStore()
+    _changing(mem, when, target)
+    version = "5.0.0"
+    ctx = _write_ctx(_ctx(_source_root(tmp_path), registry, licences, dev_set), mem, keys)
+    err = _refused(promote.promote, _request(version, dry_run=False), ctx)
+    assert (err.reason, err.detail_code) == ("hash_mismatch", detail)
+    assert store.manifest_key(NAME, version) not in mem.puts
+    assert store.manifest_sig_key(NAME, version) not in mem.puts
+
+
+class _Capture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def test_doceval_subtree_quiet_below_warning(
+    tmp_path: Path,
+    registry: training.Registry,
+    licences: training.Licences,
+    dev_set: minisets.MiniSet,
+) -> None:
+    # A child logger with its own DEBUG level and handler (as a deployment's logging
+    # config might set) still emits nothing below WARNING during promote.
+    runner_log = logging.getLogger("intelligence.doceval.runner")
+    child = logging.getLogger("intelligence.doceval.zz_promote_test_child")
+    seen = _Capture()
+    saved = [(lg, lg.level, lg.propagate) for lg in (runner_log, child)]
+    try:
+        for lg in (runner_log, child):
+            lg.setLevel(logging.DEBUG)
+            lg.propagate = False
+            lg.addHandler(seen)
+        with promote._quiet_doceval():
+            child.debug("debug %s", MARKER)
+            child.info("info %s", MARKER)
+            child.warning("warning kept")
+        ctx = _ctx(_source_root(tmp_path), registry, licences, dev_set)
+        promote.promote(_request(), ctx)
+        runner_log.debug("after promote: the filter is gone")
+    finally:
+        for lg, level, propagate in saved:
+            lg.removeHandler(seen)
+            lg.setLevel(level)
+            lg.propagate = propagate
+    during = seen.records[:-1]
+    assert [r.getMessage() for r in during] == ["warning kept"]
+    assert all(r.levelno >= logging.WARNING for r in during)
+    assert seen.records[-1].levelno == logging.DEBUG  # restored after the run
+
+
+def test_cli_dry_run_never_builds_the_promoter_store_or_signer(
+    tmp_path: Path,
+    keys: Keys,
+    dev_set: minisets.MiniSet,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[str] = []
+
+    def spy(name: str) -> Callable[..., Any]:
+        def make(*a: Any, **k: Any) -> Any:
+            built.append(name)
+            raise AssertionError(name)
+
+        return make
+
+    monkeypatch.setattr(store, "S3Store", spy("S3Store"))
+    monkeypatch.setattr(signing, "FileSigner", spy("FileSigner"))
+    monkeypatch.setenv(cli.LOCAL_ROOT_ENV, str(_source_root(tmp_path)))
+    for k, v in {
+        cli.ENDPOINT_ENV: "http://127.0.0.1:9",
+        cli.BUCKET_ENV: "mhai-models",
+        cli.PROMOTER_ACCESS_ENV: "promoter",
+        cli.PROMOTER_SECRET_ENV: "s3cr3t-" + secrets.token_hex(8),
+        cli.SIGNER_ENV: str(keys.key_path),
+        cli.TRUST_POLICY_ENV: str(keys.policy_path),
+    }.items():
+        monkeypatch.setenv(k, v)
+    argv = ["promote", NAME, "1.0.0", "--source", "local", "--run", RUN, "--dry-run"]
+    code, out = _cli([*argv, "--dev-set", str(dev_set.root)], capsys)
+    assert code == 0, out
+    assert built == []
+
+
+@pytest.mark.parametrize(("env", "debug"), [("development", "0"), ("production", "1")])
+def test_cli_unexpected_error_is_a_fixed_code(
+    env: str,
+    debug: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "Zqx/tmp/secret-path"
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(promote, "promote", boom)
+    monkeypatch.setattr(cli, "_registries", lambda: (None, None))
+    monkeypatch.setattr(cli, "_split", lambda dev_set: promote.DevSplit())
+    monkeypatch.setenv(signing.ENV_VAR, env)
+    monkeypatch.setenv(cli.DEBUG_ENV, debug)
+    code = cli.main(["promote", NAME, "1.0.0", "--source", "local", "--run", RUN, "--dry-run"])
+    out = capsys.readouterr()
+    assert code == 3
+    assert json.loads(out.out) == {"error": "internal"}
+    assert secret not in out.out + out.err and "Traceback" not in out.err
+
+
+def test_cli_debug_traceback_only_in_development(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(promote, "promote", boom)
+    monkeypatch.setattr(cli, "_registries", lambda: (None, None))
+    monkeypatch.setattr(cli, "_split", lambda dev_set: promote.DevSplit())
+    monkeypatch.setenv(cli.DEBUG_ENV, "1")
+    code = cli.main(["promote", NAME, "1.0.0", "--source", "local", "--run", RUN, "--dry-run"])
+    out = capsys.readouterr()
+    assert code == 3 and "Traceback" in out.err

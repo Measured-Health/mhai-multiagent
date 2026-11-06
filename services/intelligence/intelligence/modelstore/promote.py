@@ -41,11 +41,21 @@ A dry run never builds a manifest and never touches the store, even when one is 
 Promotion stores a candidate whether or not it passes its gates; the gates are enforced at
 pin time (Task 20), and the summary says which failed.
 
-**A retried PUT** (:func:`put_once`): a PUT that succeeded on the server whose reply was
-lost is retried by the SDK and then reports ``version_exists``. The object is ours if the
-key has exactly one version with our size and SHA-256 (for the claim, the same bytes: the
-same run id, actor and a fresh nonce); then we carry on with its version id. Anything else
-is ``version_exists``.
+**The split a promotion is measured on.** Outside development a promotion (not a dry
+run) needs the locked split (``MHAI_EVAL_ROLE=locked`` with the eval reader's credentials)
+and ``--expect-files``, or it is ``not_allowed_here`` before the claim. A development
+rehearsal may promote on the dev split; the manifest's ``evaluation.split`` and the summary
+then say ``dev``, and pin (Task 20) refuses it.
+
+**Every PUT is read back** (:func:`put_once`): each scratch file is streamed again and must
+still have the size and SHA-256 Task 13 recorded, and after the PUT the store's own
+checksum and size of the stored version must match too (``hash_mismatch``), so nothing that
+changed between the check and the upload is ever named by a manifest. A PUT that succeeded
+on the server whose reply was lost is retried by the SDK and then reports
+``version_exists``. The object is ours if the key has exactly one version with our size and
+SHA-256 (for the claim, the same bytes: the same run id, actor and a fresh nonce), locked in
+compliance mode at least as long as we asked; then we carry on with its version id.
+Anything else is ``version_exists``.
 
 **The VLM runtime** (phase 0 contract): ``--runtime-url`` must be a loopback IP literal
 (``127.0.0.0/8`` or ``::1``), where the workflow has started vLLM itself from the verified
@@ -64,12 +74,13 @@ import hashlib
 import ipaddress
 import json
 import logging
+import os
 import re
 import secrets
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -309,6 +320,14 @@ def check_inputs(req: Request, ctx: Context) -> None:
         raise Refused("not_allowed_here", detail_code="context")
     if req.dry_run:
         return
+    rehearsal = signing.is_development()
+    if not rehearsal and not isinstance(ctx.split, LockedSplit):
+        # The gates signed into a manifest are measured on the locked split; only a
+        # development rehearsal may promote on the dev split (recorded as such).
+        raise Refused("not_allowed_here", detail_code="locked_split_required")
+    if not rehearsal and req.expect_files is None:
+        # P26: the files promoted are the files the approver saw in the dry run.
+        raise Refused("not_allowed_here", detail_code="expect_files_required")
     for value, detail in (
         (ctx.store, "store"),
         (ctx.signer, "signer"),
@@ -334,25 +353,52 @@ class Claim:
     version_id: str
 
 
+def _check_stored(
+    info: store.ObjectInfo, version_id: str, size: int, sha256: str, until: datetime
+) -> bool:
+    """The stored version is exactly ours: its id, size and SHA-256 (the store's own
+    checksum of what it received), locked in compliance mode at least until ``until``."""
+    held = info.retain_until
+    return (
+        info.version_id == version_id
+        and info.size == size
+        and secrets.compare_digest(info.sha256, sha256)
+        and info.lock_mode == store.LOCK_MODE
+        and isinstance(held, datetime)
+        and held.tzinfo is not None
+        and held >= until
+    )
+
+
 def put_once(
     target: ObjectStore, key: str, data: bytes | Path, size: int, sha256: str, days: int
 ) -> str:
-    """``put_new``, and if it reports ``version_exists``, whether the object there is ours
-    (a retried PUT whose first attempt succeeded): exactly one version, with our size and
-    SHA-256. Ours: its version id. Anything else: ``version_exists``."""
+    """``put_new``, then the stored version read back: the store's SHA-256 and size must be
+    the ones checked (``hash_mismatch`` otherwise: bytes changed between the check and the
+    upload) and it must be locked in compliance mode for at least ``days``.
+
+    If ``put_new`` reports ``version_exists``, the object there may be ours (a retried PUT
+    whose first attempt succeeded): it is adopted only if it is the key's one version, with
+    our size and SHA-256, compliance-locked at least as long as we asked. Anything else is
+    ``version_exists``."""
+    until = datetime.now(UTC).replace(microsecond=0) + timedelta(days=days)
+    vid: str | None = None
     try:
-        return target.put_new(key, data, days)
+        vid = target.put_new(key, data, days)
     except Refused as exc:
         if exc.reason != "version_exists":
             raise
+    if vid is not None:
+        if not _check_stored(target.head(key, vid), vid, size, sha256, until):
+            raise Refused("hash_mismatch", detail_code="stored")
+        return vid
     found = target.versions(key)
     if len(found) != 1:
         raise Refused("version_exists", detail_code="not_ours")
-    info = target.head(key, found[0])
-    if info.version_id != found[0] or info.size != size or info.sha256 != sha256:
+    if not _check_stored(target.head(key, found[0]), found[0], size, sha256, until):
         raise Refused("version_exists", detail_code="not_ours")
     log.info("promote put retried and found ours: versions=1 sha256=%s", sha256)
-    return info.version_id
+    return found[0]
 
 
 def claim_bytes(run_id: str, actor: str) -> bytes:
@@ -626,17 +672,35 @@ def prepare_split(split: Split, scratch_root: Path) -> SplitDir:
     return SplitDir(path, "dev")
 
 
+DOCEVAL_LOGGER = "intelligence.doceval"
+
+
+class _WarningsOnly(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= logging.WARNING
+
+
 @contextmanager
 def _quiet_doceval() -> Iterator[None]:
-    """The runner's DEBUG lines carry document ids: never from a promotion."""
-    lg = logging.getLogger("intelligence.doceval")
-    old = lg.level
-    if old == logging.NOTSET or old < logging.INFO:
-        lg.setLevel(logging.INFO)
+    """No ``intelligence.doceval`` logger, nor any logger below it (whatever its own level
+    or handlers), emits below WARNING while this is held: the runner's DEBUG and INFO
+    lines carry document ids (of the locked split, in an eval environment). A logger's
+    filter applies to every record made on that logger, before any handler sees it, so
+    one is put on each logger of the subtree."""
+    quiet = _WarningsOnly()
+    names_now = [
+        n
+        for n in list(logging.root.manager.loggerDict)
+        if n == DOCEVAL_LOGGER or n.startswith(DOCEVAL_LOGGER + ".")
+    ]
+    loggers = [logging.getLogger(n) for n in {DOCEVAL_LOGGER, *names_now}]
+    for lg in loggers:
+        lg.addFilter(quiet)
     try:
         yield
     finally:
-        lg.setLevel(old)
+        for lg in loggers:
+            lg.removeFilter(quiet)
 
 
 def gate_thresholds(gates: Sequence[str]) -> tuple[report.Thresholds, ...]:
@@ -769,6 +833,30 @@ def _training_bytes(run_dir: Path, entries: Sequence[files.FileEntry]) -> bytes:
 # ---------------------------------------------------------------- step 8: write
 
 
+def _rehash(run_dir: Path, entry: files.FileEntry) -> None:
+    """Stream the scratch file again: its size and SHA-256 must still be what Task 13's
+    check recorded, or nothing more is uploaded (``hash_mismatch``). ``put_once`` then
+    compares the store's own checksum of what it received."""
+    failed = False
+    digest = hashlib.sha256()
+    n = 0
+    try:
+        with open(run_dir / entry.path, "rb", opener=_nofollow) as fh:
+            while block := fh.read(files.BLOCK_SIZE):
+                digest.update(block)
+                n += len(block)
+    except OSError:
+        failed = True
+    if failed:
+        raise Refused("hash_mismatch", detail_code="scratch_changed")
+    if n != entry.size or not secrets.compare_digest(digest.hexdigest(), entry.sha256):
+        raise Refused("hash_mismatch", detail_code="scratch_changed")
+
+
+def _nofollow(path: str, flags: int) -> int:
+    return os.open(path, flags | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+
+
 def upload_run(
     target: ObjectStore,
     name: str,
@@ -782,6 +870,7 @@ def upload_run(
     """Step 8a: every file and document under ``runs/<run_id>/``, each with ``put_new``."""
     records: list[manifest.FileRecord] = []
     for e in sorted(entries, key=lambda e: e.path):
+        _rehash(run_dir, e)
         key = store.run_file_key(name, version, run_id, e.path)
         vid = put_once(target, key, run_dir / e.path, e.size, e.sha256, days)
         records.append(manifest.FileRecord(e.path, e.size, e.sha256, vid))
@@ -903,6 +992,8 @@ def promote(req: Request, ctx: Context) -> Summary:
             # TODO(GPU task): the runtime reports its version in the hash handshake.
             raise Refused("no_runtime", detail_code="runtime_unverified")
         split = prepare_split(ctx.split, sc.root)
+        if target is not None and split.name != "test" and not signing.is_development():
+            raise Refused("not_allowed_here", detail_code="locked_split_required")
         notebook = training.report_metrics(checked.manifest)
         rep = evaluate(chosen, split.path, gates, notebook, deadline_s=ctx.deadline_s)
         warm = warmup(chosen, ctx.warmup_page, deadline_s=ctx.deadline_s)  # 6
@@ -938,6 +1029,7 @@ def promote(req: Request, ctx: Context) -> Summary:
                     hashlib.sha256(docs["evaluation.json"]).hexdigest(),
                     testset,
                     {g: "pass" if v == "pass" else "fail" for g, v in verdicts.items()},
+                    split.name,
                 ),
                 runtime=manifest.Runtime(chosen.engine, str(chosen.engine_version), None),
                 promotion=ctx.workflow.promotion(_now()),

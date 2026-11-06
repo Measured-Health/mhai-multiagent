@@ -157,6 +157,10 @@ _SCOPE = re.compile(r"run|overall|slices\.[a-z][a-z0-9_]{0,63}", re.ASCII)
 _SLICE = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
 _THRESHOLD = re.compile(r"(0|[1-9][0-9]{0,15})(\.[0-9]{1,6})?", re.ASCII)
 _DECIMAL = re.compile(r"(0|[1-9][0-9]{0,15})\.[0-9]{6}", re.ASCII)
+# A notebook metric as a signed fixed decimal (ruling D26): anchored, ASCII, six places,
+# at most 19 integer digits (training.MAX_METRIC_ABS is 10**18). Never "-0.000000".
+_SIGNED_DECIMAL = re.compile(r"-?(0|[1-9][0-9]{0,18})\.[0-9]{6}", re.ASCII)
+_NEGATIVE_ZERO = "-0.000000"
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@#:+/-]{0,127}", re.ASCII)
 _KEY = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,63}", re.ASCII)
 _SHA = re.compile(r"[0-9a-f]{64}", re.ASCII)
@@ -763,12 +767,22 @@ def _notebook(metrics: Mapping[str, Any] | None) -> dict[str, Any] | None:
     for k, v in metrics.items():
         if not isinstance(k, str) or _KEY.fullmatch(k) is None:
             raise _bad_input()
-        if isinstance(v, bool) or not isinstance(v, int | str):
-            raise _bad_input()
-        if isinstance(v, str) and _TOKEN.fullmatch(v) is None:
+        if not _is_notebook_value(v):
             raise _bad_input()
         out[k] = v
     return {"informational": True, "metrics": dict(sorted(out.items()))}
+
+
+def _is_notebook_value(v: object) -> bool:
+    """A notebook metric as the report holds it: a count, a plain token, or a signed
+    fixed decimal (``-0.000000`` is never one)."""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return v >= 0
+    if not isinstance(v, str) or v == _NEGATIVE_ZERO:
+        return False
+    return _SIGNED_DECIMAL.fullmatch(v) is not None or _TOKEN.fullmatch(v) is not None
 
 
 def _header(
@@ -1120,7 +1134,7 @@ def _check_notebook(nb: Any) -> None:
     _req(isinstance(m, dict) and len(m) <= _MAX_NOTEBOOK_METRICS)
     for k, v in m.items():
         _req(_is_token(k, _KEY))
-        _req(_is_count(v, False) or _is_token(v))
+        _req(_is_notebook_value(v))
 
 
 def read_report(path: str | Path) -> dict[str, Any]:

@@ -14,7 +14,8 @@ The shape::
     documents: {<the six DOCUMENTS>: {sha256, store_version_id}}
     base_model: {promoted} | {upstream, revision, licence}   as the training manifest
     dependencies: [{name, version, manifest_sha256}]          sorted by name
-    evaluation: {report_sha256, testset: "<set>@<version>#<sha256>", gates: {gate: pass|fail}}
+    evaluation: {report_sha256, testset: "<set>@<version>#<sha256>", split: dev|test,
+                 gates: {gate: pass|fail}}
     runtime: {engine, engine_version, image_digest | null}
     promotion: {workflow_run_id, workflow_ref, commit, actor, at}
     trained_by
@@ -44,6 +45,9 @@ MAX_DEPENDENCIES = 16
 SOURCES = ("drive", "hf", "local")
 LOCAL_SOURCE_REF = "fixture"
 GATE_RESULTS = ("pass", "fail")
+# The split the gates were measured on. ``test`` is the locked split; ``dev`` only ever
+# comes from a development rehearsal, and pin (Task 20) refuses it.
+SPLITS = ("dev", "test")
 DOCUMENTS: tuple[str, ...] = (
     "data_statement.md",
     "evaluation.json",
@@ -202,17 +206,20 @@ class Dependency:
 
 @dataclass(frozen=True, slots=True)
 class Evaluation:
-    """The evaluation report's hash, the locked test set and each gate's result.
+    """The evaluation report's hash, the test set, the split it was (``dev`` or ``test``)
+    and each gate's result.
 
     ``gates`` names gates from :data:`intelligence.doceval.report.GATES` only."""
 
     report_sha256: str
     testset: str
     gates: Mapping[str, str]
+    split: str
 
     def __post_init__(self) -> None:
         _require(_match(self.report_sha256, _SHA256), "evaluation_report")
         _require(_match(self.testset, _TESTSET), "evaluation_testset")
+        _require(self.split in SPLITS, "evaluation_split")
         _require(isinstance(self.gates, Mapping) and len(self.gates) >= 1, "evaluation_gates")
         for gate, result in self.gates.items():
             _require(gate in GATES and result in GATE_RESULTS, "evaluation_gates")
@@ -353,6 +360,7 @@ def to_obj(m: Manifest) -> dict[str, Any]:
         "evaluation": {
             "report_sha256": m.evaluation.report_sha256,
             "testset": m.evaluation.testset,
+            "split": m.evaluation.split,
             "gates": dict(m.evaluation.gates),
         },
         "runtime": {
@@ -448,7 +456,7 @@ _RUN_KEYS = frozenset({"id", "source", "source_ref"})
 _FILE_KEYS = frozenset({"path", "size", "sha256", "store_version_id"})
 _DOC_KEYS = frozenset({"sha256", "store_version_id"})
 _DEP_KEYS = frozenset({"name", "version", "manifest_sha256"})
-_EVAL_KEYS = frozenset({"report_sha256", "testset", "gates"})
+_EVAL_KEYS = frozenset({"report_sha256", "testset", "split", "gates"})
 _RUNTIME_KEYS = frozenset({"engine", "engine_version", "image_digest"})
 _PROMOTION_KEYS = frozenset({"workflow_run_id", "workflow_ref", "commit", "actor", "at"})
 
@@ -491,7 +499,7 @@ def from_obj(obj: object) -> Manifest:
         dependencies=tuple(
             Dependency(d["name"], d["version"], d["manifest_sha256"]) for d in dep_objs
         ),
-        evaluation=Evaluation(ev["report_sha256"], ev["testset"], ev["gates"]),
+        evaluation=Evaluation(ev["report_sha256"], ev["testset"], ev["gates"], ev["split"]),
         runtime=Runtime(rt["engine"], rt["engine_version"], rt["image_digest"]),
         promotion=Promotion(
             pr["workflow_run_id"], pr["workflow_ref"], pr["commit"], pr["actor"], pr["at"]
@@ -526,6 +534,7 @@ __all__ = [
     "MAX_FILES",
     "SCHEMA",
     "SOURCES",
+    "SPLITS",
     "Dependency",
     "DocumentRecord",
     "Evaluation",

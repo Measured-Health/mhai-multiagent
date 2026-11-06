@@ -36,6 +36,7 @@ def _kwargs(**overrides: Any) -> dict[str, Any]:
             report_sha256="e" * 64,
             testset=f"clinical_document@1.0.0#{'f' * 64}",
             gates={"rehearsal": "pass", "phase1": "fail"},
+            split="test",
         ),
         "runtime": manifest.Runtime("numpy", "2.1.0", None),
         "promotion": manifest.Promotion(
@@ -177,9 +178,13 @@ def test_manifest_fields_held_to_patterns() -> None:
         },
         lambda: {"dependencies": [manifest.Dependency("x y", "1.0.0", SHA)]},
         lambda: {
-            "evaluation": manifest.Evaluation(SHA, "clinical_document@1.0.0", {"phase1": "pass"})
+            "evaluation": manifest.Evaluation(
+                SHA, "clinical_document@1.0.0", {"phase1": "pass"}, "test"
+            )
         },
-        lambda: {"evaluation": manifest.Evaluation(SHA, f"clinical_document@1.0.0#{SHA}", {})},
+        lambda: {
+            "evaluation": manifest.Evaluation(SHA, f"clinical_document@1.0.0#{SHA}", {}, "test")
+        },
         lambda: {"runtime": manifest.Runtime("numpy", "2.1.0", "latest")},
         lambda: {
             "promotion": manifest.Promotion(
@@ -199,7 +204,7 @@ def test_manifest_fields_held_to_patterns() -> None:
         assert e.value.reason == "manifest_invalid", override
     # A gate name that is not in report.GATES is refused; every real one is accepted.
     gates = {g: "pass" for g in report.GATES}
-    ev = manifest.Evaluation(SHA, f"clinical_document@1.0.0#{SHA}", gates)
+    ev = manifest.Evaluation(SHA, f"clinical_document@1.0.0#{SHA}", gates, "test")
     assert dict(manifest.parse(manifest.build(**_kwargs(evaluation=ev))).evaluation.gates) == gates
 
 
@@ -217,3 +222,21 @@ def test_parse_refuses_wrong_types_and_order() -> None:
     with pytest.raises(Refused) as e:
         manifest.parse(b"x" * (manifest.MAX_BYTES + 1))
     assert e.value.reason == "too_large"
+
+
+@pytest.mark.parametrize("split", ["dev", "test"])
+def test_evaluation_split_recorded(split: str) -> None:
+    ev = manifest.Evaluation(SHA, f"clinical_document@1.0.0#{SHA}", {"phase1": "pass"}, split)
+    m = manifest.parse(manifest.build(**_kwargs(evaluation=ev)))
+    assert m.evaluation.split == split
+
+
+@pytest.mark.parametrize("split", ["locked", "", "Test", None])
+def test_evaluation_split_closed(split: Any) -> None:
+    with pytest.raises(Refused) as e:
+        manifest.Evaluation(SHA, f"clinical_document@1.0.0#{SHA}", {"phase1": "pass"}, split)
+    assert e.value.reason == "manifest_invalid"
+    obj = _obj()
+    obj["evaluation"]["split"] = split
+    with pytest.raises(Refused):
+        manifest.parse(canonical.dumps(obj))
