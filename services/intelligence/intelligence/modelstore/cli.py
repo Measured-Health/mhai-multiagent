@@ -114,8 +114,10 @@ it changed is ``--head-lock``'s entry (the lock at the head), re-checks the PR's
 approvals, extends retention and then writes ``signoff.json`` and ``signoff.sig``
 (D32, D33; the full contract for ``model-signoff.yml`` is in
 :mod:`intelligence.modelstore.signoff`). ``--base-dir`` is a checkout of ``--base-sha``
-(its ``HEAD`` is checked with ``git rev-parse``: ``not_allowed_here``/
-``base_dir_not_base_sha``), from which the command also runs; its ``models.lock`` must be
+(it must be the repository's top level, ``base_dir_not_toplevel``, and its ``HEAD``
+``--base-sha``, ``base_dir_not_base_sha``, both checked with ``git rev-parse``), from which
+the command also runs. Its data files are read with ``git show <base-sha>:<path>``, never
+from the working tree, so a dirty checkout changes nothing: its ``models.lock`` must be
 ``--before`` (``lock_invalid``/``before_mismatch``), and ``models/reviewers.json``,
 ``models/trust-policy.json``, ``--testsets`` and ``--thresholds-dir`` are read from it
 (an ``MHAI_MODELS_TRUST_POLICY`` naming another file is ``not_allowed_here``). ``--after``
@@ -165,6 +167,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from intelligence.doceval.report import GATES
 from intelligence.modelstore import (
     canonical,
     lock,
@@ -531,22 +534,61 @@ def _signoff_signer() -> signing.Signer:
     return _signer()
 
 
-def _checkout_head(path: Path) -> str | None:
-    """The commit checked out at ``path`` (``git rev-parse``, no shell), or None."""
+MAX_BASE_FILE_BYTES = 16 * 1024 * 1024
+
+
+def _git(path: Path, *args: str) -> bytes | None:
+    """``git -C path args`` (no shell, no stdin), its stdout, or None on any failure or
+    more than :data:`MAX_BASE_FILE_BYTES`."""
     try:
         done = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--verify", "HEAD^{commit}"],
+            ["git", "-C", str(path), *args],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             check=False,
-            timeout=30,
+            timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    out = done.stdout.decode("ascii", "replace").strip()
-    if done.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", out) is None:
+    if done.returncode != 0 or len(done.stdout) > MAX_BASE_FILE_BYTES:
         return None
-    return out
+    return bytes(done.stdout)
+
+
+def _checkout_head(path: Path) -> str | None:
+    """The commit checked out at ``path`` (``git rev-parse``, no shell), or None."""
+    raw = _git(path, "rev-parse", "--verify", "HEAD^{commit}")
+    out = raw.decode("ascii", "replace").strip() if raw is not None else ""
+    return out if re.fullmatch(r"[0-9a-f]{40}", out) else None
+
+
+def _checkout_root(path: Path) -> Path | None:
+    raw = _git(path, "rev-parse", "--show-toplevel")
+    if raw is None:
+        return None
+    return Path(raw.decode("utf-8", "replace").strip()).resolve()
+
+
+@contextlib.contextmanager
+def _base_snapshot(base_dir: Path, base_sha: str, rels: Sequence[str]) -> Iterator[Path]:
+    """The base data files at ``base_sha``, read with ``git show <sha>:<path>`` from the
+    repository at ``base_dir`` (never its working tree, which may be dirty), written into
+    a private temporary folder with the same layout, removed afterwards. A file missing at
+    that commit is left out, so its reader refuses as for any missing file."""
+    tmp = Path(tempfile.mkdtemp(prefix="mhai-models-base-", dir=os.environ.get(SCRATCH_ENV)))
+    try:
+        for rel in rels:
+            if Path(rel).is_absolute() or ".." in Path(rel).parts:
+                raise Refused("not_allowed_here", detail_code="outside_base_dir")
+            raw = _git(base_dir, "show", f"{base_sha}:{rel}")
+            if raw is None:
+                continue
+            out = tmp / rel
+            out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            out.write_bytes(raw)
+        yield tmp
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _signoff(args: argparse.Namespace) -> int:
@@ -557,19 +599,40 @@ def _signoff(args: argparse.Namespace) -> int:
     base_dir = Path(args.base_dir).resolve()
     if not base_dir.is_dir():
         raise Refused("not_allowed_here", detail_code="base_dir")
-    # D33: the data that judges the merge is main's before the push, at --base-sha.
+    # D33: the data that judges the merge is main's before the push, at --base-sha, read
+    # from git at that commit (N1): a dirty working tree changes nothing.
+    if _checkout_root(base_dir) != base_dir:
+        raise Refused("not_allowed_here", detail_code="base_dir_not_toplevel")
     if _checkout_head(base_dir) != base_sha:
         raise Refused("not_allowed_here", detail_code="base_dir_not_base_sha")
-    testsets_path = _inside(args.testsets, base_dir)
-    thresholds_dir = _inside(args.thresholds_dir, base_dir)
-    policy_path = base_dir / BASE_TRUST_POLICY_PATH
-    _check_policy_env(policy_path)
+    testsets_rel = _inside(args.testsets, base_dir).relative_to(base_dir).as_posix()
+    thresholds_rel = _inside(args.thresholds_dir, base_dir).relative_to(base_dir).as_posix()
+    _check_policy_env(base_dir / BASE_TRUST_POLICY_PATH)
     before, after = lock.read(args.before), lock.read(args.after)
     head = lock.read(args.head_lock)
-    if lock.read(base_dir / BASE_LOCK_PATH) != before:
+    rels = [BASE_LOCK_PATH, BASE_REVIEWERS_PATH, BASE_TRUST_POLICY_PATH, testsets_rel]
+    rels += [f"{thresholds_rel}/{gate}.json" for gate in sorted(GATES)]
+    with _base_snapshot(base_dir, base_sha, rels) as snap:
+        return _signoff_from(args, snap, before, after, head, testsets_rel, thresholds_rel)
+
+
+def _signoff_from(
+    args: argparse.Namespace,
+    snap: Path,
+    before: lock.Lock,
+    after: lock.Lock,
+    head: lock.Lock,
+    testsets_rel: str,
+    thresholds_rel: str,
+) -> int:
+    """The sign-off over the base data in ``snap`` (see :func:`_base_snapshot`)."""
+    commit, head_sha, base_sha = args.commit, args.head_sha, args.base_sha
+    if lock.read(snap / BASE_LOCK_PATH) != before:
         raise Refused("lock_invalid", detail_code="before_mismatch")
-    reviewers = lock.read_reviewers(base_dir / BASE_REVIEWERS_PATH)
-    locked = testsets.read_lock(testsets_path)
+    reviewers = lock.read_reviewers(snap / BASE_REVIEWERS_PATH)
+    locked = testsets.read_lock(snap / testsets_rel)
+    thresholds_dir = snap / thresholds_rel
+    policy_path = snap / BASE_TRUST_POLICY_PATH
     days = _retention_days(APPROVED_RETENTION_ENV)
     for role, entry in after.models.items():
         lock.check_production(role, entry)

@@ -262,6 +262,19 @@ def test_signoff_written_and_signed_by_signoff_key(tmp_path: Path, keys: Keys, c
     verify.verify_pin(st, ROLE, pub.pin(), keys.policy, cache, require_signoff=True)
 
 
+def test_signoff_parents_from_the_git_commit_object(
+    tmp_path: Path, keys: Keys, cache: Path
+) -> None:
+    """N2: the parents come from ``/git/commits/{sha}`` (no diff, so no size cap is hit
+    by a large merge), never from ``/commits/{sha}``."""
+    st, _, after = _new(tmp_path, keys)
+    session = _session(_merged(_approved_pr()))
+    _sign_off(st, keys, cache, lock.empty(), after, session)
+    urls = [r.url for r in session.requests]
+    assert any(u.endswith(f"/git/commits/{COMMIT}") for u in urls)
+    assert not any(u.endswith(f"/repos/{GH_REPO}/commits/{COMMIT}") for u in urls)
+
+
 @pytest.mark.parametrize("which", ["manifest", "stranger"])
 def test_signoff_signer_must_be_a_signoff_key(
     which: str, tmp_path: Path, keys: Keys, cache: Path
@@ -718,6 +731,11 @@ def test_cli_signoff(
         cli.main([a for a in args if a not in ("--head-lock", str(c.head))])
     capsys.readouterr()
 
+    # the base checkout is a repository's top level, not a folder inside one
+    sub = _signoff_args(c, **{"--base-dir": str(c.base / "models")})
+    assert cli.main(sub) == 2
+    assert _out(capsys) == {"refused": "not_allowed_here", "detail": "base_dir_not_toplevel"}
+
     # the trust policy is base-dir's own file: nothing here mocks it
     assert cli.main(args) == 0
     out = _out(capsys)
@@ -763,6 +781,37 @@ def test_cli_signoff_reads_policy_and_data_from_base_dir_only(
     assert cli.main(_signoff_args(c, **{"--base-sha": "f6" * 20})) == 2
     assert _out(capsys) == {"refused": "not_allowed_here", "detail": "base_dir_not_base_sha"}
     assert c.st.puts == puts
+
+
+def test_cli_signoff_reads_base_data_from_git_not_the_working_tree(
+    tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """N1: the base data are ``git show <base-sha>:<path>``. A dirty working tree (here a
+    reviewers.json that names only an outsider, and a trust policy that trusts nobody)
+    is ignored, and so is a file that exists only in the working tree."""
+    c = _cli_setup(tmp_path, keys, monkeypatch)
+    (c.base / "models" / "reviewers.json").write_text(
+        json.dumps({"clinical": ["syn-outsider"], "platform": ["syn-outsider"]})
+    )
+    (c.base / "models" / "trust-policy.json").write_bytes(_policy_obj([keys.manifest], []))
+    assert _git_status(c.base)  # the tree really is dirty
+    assert cli.main(_signoff_args(c)) == 0
+    out = _out(capsys)
+    assert out["signoff"] == {ROLE: "signed_off"}
+    s = signoff.parse(c.st.get(store.signoff_key(NAME, "1.0.0"), max_bytes=signoff.MAX_BYTES))
+    assert (s.clinical_reviewers, s.platform_reviewers) == ((CLINICAL,), (PLATFORM,))
+    # a test set lock present only in the working tree is not at the base sha: refused
+    (c.base / "models" / "extra.lock").write_text("")
+    extra = _signoff_args(c, **{"--testsets": str(c.base / "models" / "extra.lock")})
+    assert cli.main(extra) == 2
+    assert _out(capsys) == {"refused": "lock_invalid"}
+
+
+def _git_status(root: Path) -> str:
+    done = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain"], check=True, capture_output=True
+    )
+    return done.stdout.decode()
 
 
 def test_cli_signoff_retention_over_the_cap_refused(

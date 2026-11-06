@@ -7,7 +7,7 @@ response shapes: ``/repos/{repo}/pulls/{n}`` (a pull request: ``number``, ``user
 ``per_page`` and ``page`` with a ``Link: <...>; rel="next"`` header that names the
 ``/repositories/<id>/...`` form, as GitHub does; and ``/repos/{repo}/commits/{sha}/pulls``
 (the pull requests associated with a commit, for the sign-off) and
-``/repos/{repo}/commits/{sha}`` (a commit's parents), with a PR's ``merged``,
+``/repos/{repo}/git/commits/{sha}`` (a commit's parents, the git object only), with a PR's ``merged``,
 ``merge_commit_sha`` and ``merged_at``. ``max_per_page`` serves fewer per page
 than asked (as a server setting may). Logins are served in display case, as GitHub does. It carries a bearer token in
 its headers, as the real session does, so a test can check that the token never reaches
@@ -123,10 +123,22 @@ class FakeGitHubSession:
             if self.commit_pulls_next:
                 headers["Link"] = f'<{url}?per_page=100&page=2>; rel="next"'
             return FakeResponse(200, json.dumps(items).encode(), headers)
-        if url.startswith(commits) and url[len(commits) :] in self.commit_parents:
-            sha = url[len(commits) :]
-            parents = [{"sha": p, "url": f"{commits}{p}"} for p in self.commit_parents[sha]]
-            return FakeResponse(200, json.dumps({"sha": sha, "parents": parents}).encode())
+        git_commits = f"{API}/repos/{self.repo}/git/commits/"
+        if url.startswith(git_commits):
+            sha = url[len(git_commits) :]
+            if sha not in self.commit_parents:
+                return FakeResponse(404, b'{"message":"Not Found"}')
+            parents = [
+                {"sha": p, "url": f"{git_commits}{p}", "html_url": f"https://github.invalid/{p}"}
+                for p in self.commit_parents[sha]
+            ]
+            obj = {
+                "sha": sha,
+                "tree": {"sha": "0" * 40},
+                "message": "synthetic",
+                "parents": parents,
+            }
+            return FakeResponse(200, json.dumps(obj).encode())
         if url.startswith(commits):
             return FakeResponse(404, b'{"message":"Not Found"}')
         prefixes = (f"{API}/repos/{self.repo}/pulls/", f"{API}/repositories/{REPO_ID}/pulls/")

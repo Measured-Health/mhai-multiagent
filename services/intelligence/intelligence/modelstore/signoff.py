@@ -35,7 +35,7 @@ passed for every role and every object's retention is extended:
    ``FileSigner``, which refuses outside ``MHAI_MODELS_ENV=development``. A push that
    changes no role stops here (exit 0): there is nothing to sign.
 2. **The merge commit** (D33, :func:`check_merge`). ``--commit`` must have exactly two
-   parents as GitHub reports them (``GET /commits/{sha}``), else
+   parents as GitHub reports them (``GET /git/commits/{sha}``), else
    ``not_approved``/``not_a_merge_commit``: a squash or rebase merge, a direct push or a
    batched push has one parent, and its first parent could be one of the PR's own
    commits, whose ``reviewers.json`` or trust policy the PR controls. The first parent

@@ -1019,6 +1019,13 @@ def test_approval_with_null_commit_does_not_count(tmp_path: Path, keys: Keys, ca
         "Clinical note: " + "\uffa0" * 25,
         "Clinical note: " + "\u115f\u1160" * 13,
         "Clinical note: abc " + "\u3164" * 25,
+        # D34: a link reference definition is never rendered; anywhere in the body, it
+        # voids the note
+        f'[a]: https://example.invalid "\nClinical note: {LETTERS}\n"',
+        f"[Clinical note: {LETTERS}]: https://example.invalid",
+        f"Clinical note: {LETTERS}\n\n[ref]: https://example.invalid",
+        f"Clinical note: {LETTERS}\n   [ref]: https://example.invalid",
+        f"Clinical note: {LETTERS}\n\u200b[ref]: https://example.invalid",
     ],
 )
 def test_clinical_note_bypasses_refused(body: str | None) -> None:

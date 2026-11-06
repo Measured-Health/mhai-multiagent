@@ -786,11 +786,13 @@ class GitHubClient:
         )
 
     def commit_parents(self, sha: str) -> tuple[str, ...]:
-        """The parents of commit ``sha`` in order (``GET /commits/{sha}``): the first is
-        the branch the commit was made on, the second (for a merge) the merged head."""
+        """The parents of commit ``sha`` in order (``GET /git/commits/{sha}``, the git
+        object only, never the diff, so a large merge isn't refused for its size): the
+        first is the branch the commit was made on, the second (for a merge) the merged
+        head."""
         if not isinstance(sha, str) or _COMMIT.fullmatch(sha) is None:
             raise Refused("invalid_name", detail_code="commit")
-        obj = self._json(f"/commits/{sha}")
+        obj = self._json(f"/git/commits/{sha}")
         parents = obj.get("parents") if isinstance(obj, dict) else None
         if not isinstance(obj, dict) or obj.get("sha") != sha or not isinstance(parents, list):
             raise _unavailable("response")
@@ -882,6 +884,9 @@ _COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _RAW_HTML = re.compile(r"<[A-Za-z?!/]")
 # CommonMark's line endings only: never str.splitlines' \v, \f, \x1c-\x1e, \x85, U+2028/9.
 _LINES = re.compile(r"\r\n|\r|\n")
+# A link reference definition, ``[label]: url "title"``: never rendered, so text in it is
+# hidden (D34).
+_LINK_DEFINITION = re.compile(r" {0,3}\[[^\]]*\]:")
 _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)", re.DOTALL)
 # CommonMark: a closing fence carries no info string, only trailing spaces or tabs.
 _CLOSER = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
@@ -911,13 +916,23 @@ def has_clinical_note(body: str) -> bool:
       attribute) means no note;
     * a backtick fence whose info string contains a backtick isn't a fence in
       CommonMark: no note;
+    * a link reference definition (``[label]: ...``, at most three spaces in, after Cf
+      removal) anywhere in the body hides its text: no note (D34);
     * each candidate line has its Cf characters removed before the prefix check, and only
       letters and digits (categories L and N) count, never the Hangul fillers, which
       render as nothing.
 
-    Indented, quoted or inline mentions don't count."""
+    Indented, quoted or inline mentions don't count.
+
+    Residual risk: this is not a full GFM renderer, so some markup may still hide text
+    that is counted here. The note is a human attestation, shown on the PR to the
+    platform approver whose approval the rollback also needs; this check makes it
+    present, not true."""
     if not isinstance(body, str):
         return False
+    for line in _LINES.split(body):
+        if _LINK_DEFINITION.match("".join(ch for ch in line if unicodedata.category(ch) != "Cf")):
+            return False
     text = _COMMENT.sub("", body)
     if _RAW_HTML.search(text):
         return False
