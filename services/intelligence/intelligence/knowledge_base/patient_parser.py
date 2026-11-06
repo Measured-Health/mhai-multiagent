@@ -641,7 +641,8 @@ def setup_model_and_tokenizer(
         quantization_config=bnb_config,
         device_map="auto",
         trust_remote_code=True,
-        torch_dtype="auto"
+        torch_dtype="auto",
+        use_safetensors=True,
     )
 
     if load_in_4bit:

@@ -22,6 +22,15 @@ an event is set). It is for tests and the CI smoke test: the settings
 refuse INTELLIGENCE_MODEL_CLIENT=stub outside APP_ENV=development, and
 build_model_client refuses it again.
 
+Pinned models (plan Task 23): model_versions() is the legacy entries (cca,
+dense, nli, as configured) overlaid by the roles the worker verified from
+models.lock, each "<name>@<version>#<first 12 hex of the manifest SHA-256>"
+(_SAFE_VERSION allows '#' in that form only; core's modelVersionPattern
+matches it). When nli is a pinned role, the NLI model is loaded from its
+verified directory only, with local_files_only=True and use_safetensors=True,
+after HF_HUB_OFFLINE=1 is set; until the pin is verified it is not loaded at
+all (the job escalates), never the configured hub model instead.
+
 Nothing here logs question text, patient data or model output; Generation
 and Verification keep text out of their repr.
 """
@@ -29,11 +38,14 @@ and Verification keep text out of their repr.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import sys
 import threading
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from intelligence.boundary.config import ConfigError, WorkerSettings
@@ -50,7 +62,13 @@ DECISIONS = ("PASS", "REGENERATE", "ESCALATE")
 _RETRYABLE = frozenset({"unavailable", "internal", "overloaded"})
 _MODEL_CODES = frozenset({"unavailable", "internal", "overloaded", "invalid_request"})
 _SAFE_KEY = re.compile(r"[A-Za-z0-9_.:\-]{1,64}")
-_SAFE_VERSION = re.compile(r"[A-Za-z0-9_.:/@+\-]{1,128}")
+# A version with no '#', or a pinned role's "<name>@<version>#<hash12>"
+# (modelstore.verify.version_string): '#' is allowed in that form only.
+_PINNED_VERSION = (
+    r"[a-z0-9][a-z0-9-]{1,62}@(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})"
+    r"\.(?:0|[1-9][0-9]{0,8})#[0-9a-f]{12}"
+)
+_SAFE_VERSION = re.compile(r"[A-Za-z0-9_.:/@+\-]{1,128}|" + _PINNED_VERSION, re.ASCII)
 _CHUNK_ID = re.compile(r"[A-Za-z0-9#_.:\-]{1,16}")
 MAX_CITED = 50
 
@@ -128,6 +146,17 @@ class ModelClient(Protocol):
     def model_versions(self) -> dict[str, str]: ...
 
 
+class Pinned(Protocol):
+    """What the worker verified (modelstore.loader.PinnedModels)."""
+
+    def versions(self) -> dict[str, str]: ...
+
+    def path(self, role: str) -> Path: ...
+
+
+PinnedSource = Callable[[], Pinned | None]
+
+
 def _escalated(failed: Sequence[str]) -> Verification:
     """Fail closed: unverified or missing goes to a human, with no score."""
     return Verification(
@@ -172,6 +201,7 @@ class OrchestratorModelClient:
         build: Builder,
         masker: Any = None,
         versions: Mapping[str, str] | None = None,
+        pinned: PinnedSource | None = None,
     ) -> None:
         if masker is None:
             from intelligence.security.hipaa import PIIMasker
@@ -181,6 +211,7 @@ class OrchestratorModelClient:
         self._masker = masker
         self._mask_lock = threading.Lock()  # PIIMasker counts detections
         self._versions = _clean_versions(versions or {})
+        self._pinned = pinned
 
     def mask(self, text: str) -> str:
         with self._mask_lock:
@@ -301,19 +332,78 @@ class OrchestratorModelClient:
         )
 
     def model_versions(self) -> dict[str, str]:
-        return dict(self._versions)
+        """The legacy entries overlaid by the verified pinned roles' strings."""
+        out = dict(self._versions)
+        pinned = self._pinned() if self._pinned is not None else None
+        if pinned is not None:
+            out.update(_clean_versions(pinned.versions()))
+        return out
 
 
-def default_orchestrator() -> OrchestratorModelClient:
+def set_hub_offline() -> None:
+    """HF_HUB_OFFLINE=1 (and TRANSFORMERS_OFFLINE=1) for this process.
+    huggingface_hub reads it when first imported, so this runs before any
+    transformers or huggingface_hub import a pinned model's loading makes; if
+    one was imported earlier, its flag is set too. local_files_only=True on
+    every pinned load is the second wall."""
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    constants = sys.modules.get("huggingface_hub.constants")
+    if constants is not None:
+        constants.HF_HUB_OFFLINE = True  # type: ignore[attr-defined]
+
+
+def nli_factory(model_name: str, pinned: PinnedSource, *, pinned_nli: bool) -> Callable[[], Any]:
+    """The shared NLI verifier, made on first use. With nli pinned: from the
+    verified directory only (local_files_only, use_safetensors, offline),
+    and not at all until the pin is verified (RuntimeError: the job
+    escalates). Otherwise the configured model, as before."""
+    lock = threading.Lock()
+    shared: dict[str, Any] = {}
+
+    def nli() -> Any:
+        with lock:
+            if "nli" not in shared:
+                if pinned_nli:
+                    p = pinned()
+                    if p is None:
+                        raise RuntimeError("the pinned nli model is not verified")
+                    set_hub_offline()
+                    from intelligence.agents import hga_nli
+
+                    shared["nli"] = hga_nli.NLIEntailmentVerifier(
+                        model_name=str(p.path("nli")),
+                        device="cpu",
+                        local_files_only=True,
+                        require_model=True,
+                    )
+                else:
+                    from intelligence.agents import hga_nli
+
+                    shared["nli"] = hga_nli.NLIEntailmentVerifier(
+                        model_name=model_name, device="cpu"
+                    )
+            return shared["nli"]
+
+    return nli
+
+
+def default_orchestrator(
+    pinned: PinnedSource | None = None, pinned_roles: Sequence[str] = ()
+) -> OrchestratorModelClient:
     """The production client: each job gets its own knowledge base,
     retriever, CCA and HGA over that job's chunks (departure 10: indexing
     per job; a cached index is performance-plan work). The NLI model and
     the Ollama generator are shared: they hold no per-request state. Loads
-    the models on first use, on the job's thread."""
+    the models on first use, on the job's thread. pinned gives what the
+    worker verified (None until then); pinned_roles are the roles it needs."""
+    pinned_nli = "nli" in pinned_roles
+    if pinned_nli:
+        set_hub_offline()  # before the imports below can import transformers
+    source: PinnedSource = pinned if pinned is not None else (lambda: None)
     from intelligence.agents.hga_nli import (
         CitationVerificationPipeline,
         NLIBackedHGA,
-        NLIEntailmentVerifier,
     )
     from intelligence.agents.orchestrator import DynamicOrchestratorAgent
     from intelligence.config.settings import get_config
@@ -326,14 +416,7 @@ def default_orchestrator() -> OrchestratorModelClient:
 
     cfg = get_config()
     generator = OllamaGenerator()
-    lock = threading.Lock()
-    shared: dict[str, Any] = {}
-
-    def nli() -> Any:
-        with lock:
-            if "nli" not in shared:
-                shared["nli"] = NLIEntailmentVerifier(model_name=cfg.NLI_MODEL, device="cpu")
-            return shared["nli"]
+    nli = nli_factory(str(cfg.NLI_MODEL), source, pinned_nli=pinned_nli)
 
     def build(chunks: Sequence[KBChunk]) -> DynamicOrchestratorAgent:
         kb = MedicalKnowledgeBase()
@@ -356,6 +439,7 @@ def default_orchestrator() -> OrchestratorModelClient:
             "dense": str(cfg.DENSE_MODEL),
             "nli": str(cfg.NLI_MODEL),
         },
+        pinned=source,
     )
 
 
@@ -459,14 +543,15 @@ class StubModelClient:
         return {"stub": "1"}
 
 
-def build_model_client(settings: WorkerSettings) -> ModelClient:
+def build_model_client(settings: WorkerSettings, pinned: PinnedSource | None = None) -> ModelClient:
     """The client INTELLIGENCE_MODEL_CLIENT names. The stub only in
-    development (checked again here, not only in the settings: F14)."""
+    development (checked again here, not only in the settings: F14).
+    pinned gives the verified pinned models (settings.model_roles)."""
     if settings.model_client == "stub":
         if not settings.development:
             raise ConfigError("INTELLIGENCE_MODEL_CLIENT=stub runs only with APP_ENV=development")
         log.warning("model client is the stub: synthetic answers only")
         return StubModelClient()
     if settings.model_client == "orchestrator":
-        return default_orchestrator()
+        return default_orchestrator(pinned, settings.model_roles)
     raise ConfigError("INTELLIGENCE_MODEL_CLIENT must be orchestrator or stub")

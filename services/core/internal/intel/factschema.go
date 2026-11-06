@@ -27,12 +27,21 @@ const (
 	maxAttempts = 1 << 16
 )
 
+// pinnedModelVersion is modelstore.verify.version_string's form: the
+// model name (^[a-z0-9][a-z0-9-]{1,62}$), '@', a semver with no leading
+// zeros (each part at most 9 digits), '#' and 12 lowercase hex digits. At
+// most 106 characters.
+const pinnedModelVersion = `[a-z0-9][a-z0-9-]{1,62}@(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})#[0-9a-f]{12}`
+
 var (
 	// The worker's chunk ids are "KB#0001" and the like (its _CHUNK_ID
 	// allows '#'); nothing else outside [A-Za-z0-9_.:-].
 	chunkIDPattern      = regexp.MustCompile(`^[A-Za-z0-9#_.:-]{1,128}$`)
 	modelNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,64}$`)
-	modelVersionPattern = regexp.MustCompile(`^[A-Za-z0-9_.:/@+-]{1,128}$`) // the worker's _SAFE_VERSION
+	// The worker's _SAFE_VERSION: a version with no '#', or a pinned
+	// model's "<name>@<version>#<first 12 hex of its manifest SHA-256>"
+	// (design §7.5). '#' is allowed in that form only.
+	modelVersionPattern = regexp.MustCompile(`^(?:[A-Za-z0-9_.:/@+-]{1,128}|` + pinnedModelVersion + `)$`)
 	factEntityIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 
 	decisions      = map[string]bool{"PASS": true, "REGENERATE": true, "ESCALATE": true}

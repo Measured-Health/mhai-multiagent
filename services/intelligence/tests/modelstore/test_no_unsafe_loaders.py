@@ -368,3 +368,110 @@ def test_scanner_ignores_the_bare_word_and_refusal_codes(tmp_path: Path) -> None
     )
     (pkg / "names.txt").write_text("Marshall\nPickles\nShelvey\n", encoding="utf-8")
     assert find_unsafe(pkg) == []
+
+
+# ---------------------------------------------------------------- from_pretrained
+#
+# Task 13 review carry: ``from_pretrained`` without ``use_safetensors=True`` falls back
+# to a pickled ``pytorch_model.bin`` when a repository or directory has no safetensors
+# file. So every ``from_pretrained(`` call in the service (the package and its scripts)
+# passes ``use_safetensors=True`` as a literal, or is listed below with why.
+
+_SERVICE = Path(__file__).resolve().parents[2]
+_FROM_PRETRAINED_ROOTS = ("intelligence", "scripts")
+# Tokenizers and processors load vocabularies and JSON, never weights, and
+# ``use_safetensors`` is not one of their arguments: a receiver whose last name ends in
+# one of these is not a weights loader.
+_NOT_WEIGHTS = ("Tokenizer", "TokenizerFast", "Processor", "Config")
+# (file, receiver) -> why the call may go without ``use_safetensors=True``.
+FROM_PRETRAINED_ALLOWED: dict[tuple[str, str], str] = {
+    (
+        "intelligence/agents/cca.py",
+        "PeftModel",
+    ): (
+        "PEFT's from_pretrained takes no use_safetensors argument (an unknown keyword "
+        "reaches hf_hub_download and fails). It loads adapter_model.safetensors when the "
+        "adapter has one and otherwise torch.load with weights_only=True. The legacy CCA's "
+        "local LoRA adapter is not a pinned model; a pinned adapter goes through the model "
+        "store, which admits safetensors files only."
+    ),
+}
+
+
+def _receiver(node: ast.expr) -> str:
+    return ast.unparse(node)
+
+
+def _passes_safetensors(call: ast.Call) -> bool:
+    return any(
+        kw.arg == "use_safetensors"
+        and isinstance(kw.value, ast.Constant)
+        and kw.value.value is True
+        for kw in call.keywords
+    )
+
+
+def scan_from_pretrained(source: str) -> list[tuple[int, str]]:
+    """``(line, receiver)`` of every ``X.from_pretrained(...)`` weights loader that does
+    not pass ``use_safetensors=True``. A file that doesn't parse is a hit."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return [(0, "does not parse")]
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "from_pretrained"
+        ):
+            continue
+        receiver = _receiver(node.func.value)
+        if receiver.rsplit(".", 1)[-1].endswith(_NOT_WEIGHTS):
+            continue
+        if not _passes_safetensors(node):
+            hits.append((node.lineno, receiver))
+    return hits
+
+
+def find_from_pretrained(root: Path, rel_to: Path) -> list[tuple[str, int, str]]:
+    hits: list[tuple[str, int, str]] = []
+    for path in sorted(root.rglob("*.py")):
+        rel = str(path.relative_to(rel_to))
+        for lineno, receiver in scan_from_pretrained(path.read_text(encoding="utf-8")):
+            if (rel, receiver) not in FROM_PRETRAINED_ALLOWED:
+                hits.append((rel, lineno, receiver))
+    return hits
+
+
+def test_from_pretrained_uses_safetensors_everywhere() -> None:
+    hits = [h for r in _FROM_PRETRAINED_ROOTS for h in find_from_pretrained(_SERVICE / r, _SERVICE)]
+    assert hits == []
+
+
+def test_from_pretrained_allow_list_is_live() -> None:
+    """Every allowed call still exists: a stale entry can't hide a new one."""
+    for rel, receiver in FROM_PRETRAINED_ALLOWED:
+        found = scan_from_pretrained((_SERVICE / rel).read_text(encoding="utf-8"))
+        assert receiver in {r for _, r in found}, (rel, receiver)
+
+
+@pytest.mark.parametrize(
+    "snippet,flagged",
+    [
+        ("m = AutoModel.from_pretrained(p)", True),
+        ("m = AutoModelForSequenceClassification.from_pretrained(p, use_safetensors=False)", True),
+        ("m = AutoModel.from_pretrained(p, use_safetensors=flag)", True),
+        ("m = AutoModel.from_pretrained(p, use_safetensors=1)", True),
+        ("m = AutoModel.from_pretrained(p, **{'use_safetensors': True})", True),
+        ("m = transformers.AutoModel.from_pretrained(p)", True),
+        ("m = PeftModel.from_pretrained(base, p)", True),
+        ("m = AutoModel.from_pretrained(p, local_files_only=True, use_safetensors=True)", False),
+        ("t = AutoTokenizer.from_pretrained(p)", False),
+        ("t = transformers.AutoTokenizer.from_pretrained(p)", False),
+        ("t = PreTrainedTokenizerFast.from_pretrained(p)", False),
+        ("c = AutoConfig.from_pretrained(p)", False),
+    ],
+)
+def test_from_pretrained_scan_catches_a_planted_use(snippet: str, flagged: bool) -> None:
+    assert bool(scan_from_pretrained(snippet)) is flagged

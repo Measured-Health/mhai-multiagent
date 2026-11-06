@@ -116,3 +116,56 @@ func TestDrainedFactsFitAuditSchemas(t *testing.T) {
 		}
 	}
 }
+
+// pinnedVersionExamples are the strings tests/boundary/test_model_versions_pinned.py
+// uses too: a pinned role's "<name>@<version>#<first 12 hex of the manifest
+// SHA-256>" (design §7.5) passes; '#' in any other form does not.
+var pinnedVersionExamples = struct{ good, bad []string }{
+	good: []string{
+		"doc-extract-tiny@0.1.0#3f9a1c2b4d5e",
+		"mhai-tiny-extractor@12.0.345#0123456789ab",
+		"cross-encoder/nli-deberta-v3-base", // the legacy forms still pass
+		"v1.2@sha+x/y",
+	},
+	bad: []string{
+		"doc-extract-tiny@0.1.0#3f9a1c2b4d5",   // 11 hex
+		"doc-extract-tiny@0.1.0#3f9a1c2b4d5e0", // 13 hex
+		"doc-extract-tiny@0.1.0#3F9A1C2B4D5E",  // upper case
+		"doc-extract-tiny#3f9a1c2b4d5e",        // no version
+		"doc-extract-tiny@0.1#3f9a1c2b4d5e",    // not semver
+		"doc-extract-tiny@01.1.0#3f9a1c2b4d5e", // leading zero
+		"Doc-Extract@0.1.0#3f9a1c2b4d5e",       // not a model name
+		"doc-extract-tiny@0.1.0#3f9a1c2b4d5e#",
+		"x#y",
+		"#3f9a1c2b4d5e",
+		"doc-extract-tiny@0.1.0 #3f9a1c2b4d5e",
+	},
+}
+
+// TestModelVersionAllowsHash: a pinned model's version string survives intel's
+// fact check and audit's schema; '#' anywhere else is refused by both.
+func TestModelVersionAllowsHash(t *testing.T) {
+	completed := jobFactSchemas["query.completed"].schema
+	payload := func(v string) map[string]any {
+		return map[string]any{
+			"decision": "PASS", "attempts": float64(1),
+			"model_versions": map[string]any{"extract": v},
+		}
+	}
+	for _, v := range pinnedVersionExamples.good {
+		if !modelVersionPattern.MatchString(v) || !completed.check(payload(v), uuid.Nil) {
+			t.Errorf("intel refused %q", v)
+		}
+		if err := audit.CheckActionPayload("query.completed", payload(v)); err != nil {
+			t.Errorf("audit refused %q: %v", v, err)
+		}
+	}
+	for _, v := range pinnedVersionExamples.bad {
+		if modelVersionPattern.MatchString(v) || completed.check(payload(v), uuid.Nil) {
+			t.Errorf("intel accepted %q", v)
+		}
+		if err := audit.CheckActionPayload("query.completed", payload(v)); err == nil {
+			t.Errorf("audit accepted %q", v)
+		}
+	}
+}

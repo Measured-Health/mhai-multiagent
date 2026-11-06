@@ -281,6 +281,21 @@ def check_endpoint(endpoint: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
+def check_bucket(bucket: object) -> str:
+    """An S3 bucket name (lowercase, digits, inner hyphens; 3-63), else
+    ``store_unavailable``."""
+    if not isinstance(bucket, str) or _BUCKET.fullmatch(bucket) is None:
+        raise _unavailable("bucket")
+    return bucket
+
+
+def check_region(region: object) -> str:
+    """An S3 region name such as ``us-east-1``, else ``store_unavailable``."""
+    if not isinstance(region, str) or _REGION.fullmatch(region) is None:
+        raise _unavailable("region")
+    return region
+
+
 def _is_loopback(url: str) -> bool:
     return urlsplit(url).hostname in LOOPBACK_HOSTS
 
@@ -389,10 +404,8 @@ class S3Store:
         cap = retention_cap_from_env() if max_retention_days is None else max_retention_days
         if not isinstance(cap, int) or isinstance(cap, bool) or not 1 <= cap <= _RETENTION_CEILING:
             raise Refused("not_allowed_here", detail_code="max_retention_days")
-        if not isinstance(bucket, str) or _BUCKET.fullmatch(bucket) is None:
-            raise _unavailable("bucket")
-        if not isinstance(region, str) or _REGION.fullmatch(region) is None:
-            raise _unavailable("region")
+        check_bucket(bucket)
+        check_region(region)
         if not isinstance(credentials, Credentials):
             raise _unavailable("credentials")
         # The SDK loggers are clamped here, when a store is built, and process-wide (the
@@ -710,7 +723,9 @@ __all__ = [
     "ObjectInfo",
     "ObjectStore",
     "S3Store",
+    "check_bucket",
     "check_endpoint",
+    "check_region",
     "retention_cap_from_env",
     "claim_key",
     "eval_file_key",
