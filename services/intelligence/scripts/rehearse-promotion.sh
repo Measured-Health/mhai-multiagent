@@ -202,6 +202,9 @@ prepare() {
   local dir="$1" name="$2" run="$3" envfile="$4"
   [ -n "$dir" ] && [ -n "$name" ] && [ -n "$run" ] && [ -n "$envfile" ] ||
     fail "prepare needs DIR NAME RUN ENV_FILE"
+  # The CLI's own name rules, checked before NAME and RUN become part of a path.
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]{1,62}$ ]] || fail "bad NAME"
+  [[ "$run" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || fail "bad RUN"
   need_store EVAL_WRITER
   keys "$dir" "$envfile"
   dir="$(cd "$dir" && pwd -P)"
@@ -241,6 +244,7 @@ esac
 
 need_store PROMOTER SIGNOFF READER EVAL_READER EVAL_WRITER
 NAME="${REHEARSAL_NAME:-fixture-tiny}"
+[[ "$NAME" =~ ^[a-z0-9][a-z0-9-]{1,62}$ ]] || fail "bad REHEARSAL_NAME"
 case "$NAME" in
   fixture-*) ;;
   *) fail "REHEARSAL_NAME must start with fixture-" ;;

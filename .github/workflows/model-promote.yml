@@ -10,12 +10,16 @@ name: Model promotion
 # again before any I/O (P18). Only the promote job, in model-promotion, gets the store's
 # promoter credentials.
 #
-# Rehearsal mode: while vars.MODEL_STORE_ENDPOINT is empty (until Task 27), each job starts
+# Rehearsal mode: while the repository variable MODEL_STORE_ENDPOINT is empty (until Task
+# 27), decided once by the mode job and passed to the others as a checked true/false; each
+# job then starts
 # MinIO from docker-compose.models.yml, provisions it, builds a small test split with an
 # in-job development key, and forces source local-fixture and the rehearsal gate, in
 # development (both switches). The job summary says "rehearsal". So the dispatch ->
 # approval -> promote path, environments included, can run before any credential exists.
-# Outside rehearsal mode both switches are production.
+# Outside rehearsal mode both switches are production, and production secrets reach a
+# step only then. Both jobs refuse to run on any ref but main (the environments allow main
+# only, H4). D37: this file is the dispatched ref's own; see TODO(H4) in TODO.md.
 #
 # Runs on ubuntu-latest in phase 0; it moves to the self-hosted model-promote runner with
 # the GPU host. TODO(Task 26): the production manifest signer (MHAI_MODELS_SIGNER).
@@ -62,7 +66,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Rehearsal or production, decided once from the repository variable (never from an
+  # input), so both jobs run in the same mode.
+  mode:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      rehearsal: ${{ steps.mode.outputs.rehearsal }}
+    steps:
+      - id: mode
+        env:
+          ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT }}
+        run: |
+          if [ -z "$ENDPOINT" ]; then echo rehearsal=true; else echo rehearsal=false; fi >>"$GITHUB_OUTPUT"
+
   dry-run:
+    needs: mode
     runs-on: ubuntu-latest
     environment: model-eval
     permissions:
@@ -74,7 +93,7 @@ jobs:
       run:
         shell: bash
     env:
-      REHEARSAL: ${{ vars.MODEL_STORE_ENDPOINT == '' }}
+      REHEARSAL: ${{ needs.mode.outputs.rehearsal }}
       NAME: ${{ inputs.name }}
       VERSION: ${{ inputs.version }}
       RUN: ${{ inputs.run }}
@@ -83,6 +102,14 @@ jobs:
       HF_REPO: ${{ inputs.hf_repo }}
       HF_REVISION: ${{ inputs.hf_revision }}
     steps:
+      # The environment allows main only (H4); this says so plainly if it doesn't.
+      - name: Main only
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          [ "$REF" = refs/heads/main ] ||
+            { echo "::error::this job runs on main only (ref $REF refused)"; exit 1; }
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
@@ -99,6 +126,11 @@ jobs:
 
       - name: Mode
         run: |
+          case "$REHEARSAL" in true | false) ;; *) echo "::error::bad mode"; exit 1 ;; esac
+          # The names the CLI checks again; RUN also names a folder in rehearsal mode.
+          [[ "$NAME" =~ ^[a-z0-9][a-z0-9-]{1,62}$ ]] || { echo "::error::bad name"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version"; exit 1; }
+          [[ "$RUN" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "::error::bad run id"; exit 1; }
           if [ "$REHEARSAL" = true ]; then
             {
               echo MHAI_MODELS_ENV=development
@@ -125,12 +157,12 @@ jobs:
 
       # The store's settings and these roles' throwaway passwords go to $GITHUB_ENV, masked.
       - name: Rehearsal store
-        if: env.REHEARSAL == 'true'
+        if: needs.mode.outputs.rehearsal == 'true'
         working-directory: services/intelligence
         run: uv run --no-sync scripts/rehearse-promotion.sh store-up "$GITHUB_ENV" eval-reader eval-writer
 
       - name: Rehearsal keys, test split and fixture run
-        if: env.REHEARSAL == 'true'
+        if: needs.mode.outputs.rehearsal == 'true'
         working-directory: services/intelligence
         run: |
           uv run --no-sync scripts/rehearse-promotion.sh prepare "$RUNNER_TEMP/rehearsal" "$NAME" "$RUN" "$GITHUB_ENV"
@@ -139,12 +171,12 @@ jobs:
         id: dry
         working-directory: services/intelligence
         env:
-          P_ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT }}
-          P_BUCKET: ${{ vars.MODEL_STORE_BUCKET }}
-          P_REGION: ${{ vars.MODEL_STORE_REGION }}
-          P_DRIVE_FOLDER: ${{ vars.MODEL_DRIVE_FOLDER_ID }}
-          P_EVAL_READER_ACCESS: ${{ secrets.MODEL_STORE_EVAL_READER_ACCESS_KEY }}
-          P_EVAL_READER_SECRET: ${{ secrets.MODEL_STORE_EVAL_READER_SECRET_KEY }}
+          P_ENDPOINT: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_ENDPOINT || '' }}
+          P_BUCKET: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_BUCKET || '' }}
+          P_REGION: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_REGION || '' }}
+          P_DRIVE_FOLDER: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_DRIVE_FOLDER_ID || '' }}
+          P_EVAL_READER_ACCESS: ${{ needs.mode.outputs.rehearsal == 'false' && secrets.MODEL_STORE_EVAL_READER_ACCESS_KEY || '' }}
+          P_EVAL_READER_SECRET: ${{ needs.mode.outputs.rehearsal == 'false' && secrets.MODEL_STORE_EVAL_READER_SECRET_KEY || '' }}
         run: |
           if [ "$REHEARSAL" != true ]; then
             export MODEL_STORE_ENDPOINT="$P_ENDPOINT" MODEL_STORE_BUCKET="$P_BUCKET"
@@ -177,7 +209,7 @@ jobs:
           retention-days: 30
 
   promote:
-    needs: dry-run
+    needs: [mode, dry-run]
     runs-on: ubuntu-latest
     environment: model-promotion
     permissions:
@@ -187,7 +219,7 @@ jobs:
       run:
         shell: bash
     env:
-      REHEARSAL: ${{ vars.MODEL_STORE_ENDPOINT == '' }}
+      REHEARSAL: ${{ needs.mode.outputs.rehearsal }}
       NAME: ${{ inputs.name }}
       VERSION: ${{ inputs.version }}
       RUN: ${{ inputs.run }}
@@ -197,6 +229,14 @@ jobs:
       HF_REVISION: ${{ inputs.hf_revision }}
       EXPECT_FILES: ${{ needs.dry-run.outputs.files_hash }}
     steps:
+      # The environment allows main only (H4); this says so plainly if it doesn't.
+      - name: Main only
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          [ "$REF" = refs/heads/main ] ||
+            { echo "::error::this job runs on main only (ref $REF refused)"; exit 1; }
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
@@ -213,6 +253,10 @@ jobs:
 
       - name: Mode
         run: |
+          case "$REHEARSAL" in true | false) ;; *) echo "::error::bad mode"; exit 1 ;; esac
+          [[ "$NAME" =~ ^[a-z0-9][a-z0-9-]{1,62}$ ]] || { echo "::error::bad name"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version"; exit 1; }
+          [[ "$RUN" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "::error::bad run id"; exit 1; }
           [[ "$EXPECT_FILES" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bad files hash from the dry run"; exit 1; }
           if [ "$REHEARSAL" = true ]; then
             {
@@ -240,12 +284,12 @@ jobs:
 
       # The store's settings and these roles' throwaway passwords go to $GITHUB_ENV, masked.
       - name: Rehearsal store
-        if: env.REHEARSAL == 'true'
+        if: needs.mode.outputs.rehearsal == 'true'
         working-directory: services/intelligence
         run: uv run --no-sync scripts/rehearse-promotion.sh store-up "$GITHUB_ENV" promoter eval-reader eval-writer
 
       - name: Rehearsal keys, test split and fixture run
-        if: env.REHEARSAL == 'true'
+        if: needs.mode.outputs.rehearsal == 'true'
         working-directory: services/intelligence
         run: |
           uv run --no-sync scripts/rehearse-promotion.sh prepare "$RUNNER_TEMP/rehearsal" "$NAME" "$RUN" "$GITHUB_ENV"
@@ -254,15 +298,15 @@ jobs:
       - name: Promote
         working-directory: services/intelligence
         env:
-          P_ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT }}
-          P_BUCKET: ${{ vars.MODEL_STORE_BUCKET }}
-          P_REGION: ${{ vars.MODEL_STORE_REGION }}
-          P_DRIVE_FOLDER: ${{ vars.MODEL_DRIVE_FOLDER_ID }}
-          P_RETENTION: ${{ vars.MODEL_STORE_CANDIDATE_RETENTION_DAYS }}
-          P_EVAL_READER_ACCESS: ${{ secrets.MODEL_STORE_EVAL_READER_ACCESS_KEY }}
-          P_EVAL_READER_SECRET: ${{ secrets.MODEL_STORE_EVAL_READER_SECRET_KEY }}
-          P_PROMOTER_ACCESS: ${{ secrets.MODEL_STORE_PROMOTER_ACCESS_KEY }}
-          P_PROMOTER_SECRET: ${{ secrets.MODEL_STORE_PROMOTER_SECRET_KEY }}
+          P_ENDPOINT: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_ENDPOINT || '' }}
+          P_BUCKET: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_BUCKET || '' }}
+          P_REGION: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_REGION || '' }}
+          P_DRIVE_FOLDER: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_DRIVE_FOLDER_ID || '' }}
+          P_RETENTION: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_CANDIDATE_RETENTION_DAYS || '' }}
+          P_EVAL_READER_ACCESS: ${{ needs.mode.outputs.rehearsal == 'false' && secrets.MODEL_STORE_EVAL_READER_ACCESS_KEY || '' }}
+          P_EVAL_READER_SECRET: ${{ needs.mode.outputs.rehearsal == 'false' && secrets.MODEL_STORE_EVAL_READER_SECRET_KEY || '' }}
+          P_PROMOTER_ACCESS: ${{ needs.mode.outputs.rehearsal == 'false' && secrets.MODEL_STORE_PROMOTER_ACCESS_KEY || '' }}
+          P_PROMOTER_SECRET: ${{ needs.mode.outputs.rehearsal == 'false' && secrets.MODEL_STORE_PROMOTER_SECRET_KEY || '' }}
         run: |
           if [ "$REHEARSAL" != true ]; then
             export MODEL_STORE_ENDPOINT="$P_ENDPOINT" MODEL_STORE_BUCKET="$P_BUCKET"

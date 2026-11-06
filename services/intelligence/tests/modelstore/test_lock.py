@@ -1752,3 +1752,32 @@ def test_cli_make_fixture_takes_a_name(tmp_path: Path, capsys: Any) -> None:
     assert cli.main(["make-fixture", str(tmp_path / "b"), "--name", "../x"]) == 2
     assert json.loads(capsys.readouterr().out)["refused"] == "invalid_name"
     assert not (tmp_path / "b").exists()
+
+
+def test_lock_check_passes_a_pr_without_a_lock_change_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """model-lock.yml has no path filter (a required check must report on every PR), so
+    lock-check runs on PRs that change neither models.lock nor models/: it passes them at
+    once, from git alone, with no store, GitHub or trust-policy access."""
+    main, _ = _git_main(tmp_path / "main")
+    code_only = _git_branch(
+        main,
+        "pr-code-only",
+        {
+            "services/core/internal/x.go": "package x\n",
+            ".github/workflows/ci.yml": "name: synthetic\n",
+            "services/intelligence/intelligence/modelstore/lock.py": "# synthetic\n",
+        },
+    )
+
+    def forbidden(*a: Any, **k: Any) -> Any:
+        raise AssertionError("no store or GitHub access for a PR without a lock change")
+
+    monkeypatch.setattr(cli, "_reader_store", forbidden)
+    monkeypatch.setattr(cli, "_github", forbidden)
+    monkeypatch.setattr(cli, "_trust_policy", forbidden)
+    head_file = tmp_path / "head.lock"
+    head_file.write_text(git(main, "show", f"{code_only}:models.lock") + "\n")
+    assert cli.main(_lock_check_args(main, head_file, code_only)) == 0
+    assert json.loads(capsys.readouterr().out) == {"lock_check": "pass", "roles": {}}

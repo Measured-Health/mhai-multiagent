@@ -6,10 +6,12 @@ name: Model test split
 # only, and no artifact is uploaded.
 #
 # Every input reaches the shell only through env:, quoted; the CLI checks the suite and
-# version again before any I/O. Rehearsal mode (vars.MODEL_STORE_ENDPOINT empty, until
-# Task 27): MinIO from docker-compose.models.yml and an in-job development key, in
+# version again before any I/O. Rehearsal mode (the repository variable
+# MODEL_STORE_ENDPOINT empty, until Task 27; decided by the mode job): MinIO from docker-compose.models.yml and an in-job development key, in
 # development, and a small split; the summary says "rehearsal". Outside it both switches
-# are production. TODO(Task 26): the production test-split signer (MHAI_MODELS_SIGNER).
+# are production, and production secrets reach a step only then. The job refuses any ref
+# but main (the environment allows main only, H4). D37: this file is the dispatched ref's
+# own; see TODO(H4) in TODO.md. TODO(Task 26): the production test-split signer (MHAI_MODELS_SIGNER).
 
 on:
   workflow_dispatch:
@@ -31,7 +33,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Rehearsal or production, decided from the repository variable (never from an input).
+  mode:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      rehearsal: ${{ steps.mode.outputs.rehearsal }}
+    steps:
+      - id: mode
+        env:
+          ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT }}
+        run: |
+          if [ -z "$ENDPOINT" ]; then echo rehearsal=true; else echo rehearsal=false; fi >>"$GITHUB_OUTPUT"
+
   testset-build:
+    needs: mode
     runs-on: ubuntu-latest
     environment: model-promotion
     permissions:
@@ -41,10 +57,18 @@ jobs:
       run:
         shell: bash
     env:
-      REHEARSAL: ${{ vars.MODEL_STORE_ENDPOINT == '' }}
+      REHEARSAL: ${{ needs.mode.outputs.rehearsal }}
       SUITE: ${{ inputs.suite }}
       VERSION: ${{ inputs.version }}
     steps:
+      # The environment allows main only (H4); this says so plainly if it doesn't.
+      - name: Main only
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          [ "$REF" = refs/heads/main ] ||
+            { echo "::error::this job runs on main only (ref $REF refused)"; exit 1; }
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
@@ -61,6 +85,8 @@ jobs:
 
       - name: Mode
         run: |
+          case "$REHEARSAL" in true | false) ;; *) echo "::error::bad mode"; exit 1 ;; esac
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version"; exit 1; }
           if [ "$REHEARSAL" = true ]; then
             {
               echo MHAI_MODELS_ENV=development
@@ -80,24 +106,24 @@ jobs:
 
       # The store's settings and the eval writer's throwaway password go to $GITHUB_ENV, masked.
       - name: Rehearsal store
-        if: env.REHEARSAL == 'true'
+        if: needs.mode.outputs.rehearsal == 'true'
         working-directory: services/intelligence
         run: uv run --no-sync scripts/rehearse-promotion.sh store-up "$GITHUB_ENV" eval-writer
 
       - name: Rehearsal keys
-        if: env.REHEARSAL == 'true'
+        if: needs.mode.outputs.rehearsal == 'true'
         working-directory: services/intelligence
         run: uv run --no-sync scripts/rehearse-promotion.sh keys "$RUNNER_TEMP/rehearsal" "$GITHUB_ENV"
 
       - name: Build and lock the split
         working-directory: services/intelligence
         env:
-          P_ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT }}
-          P_BUCKET: ${{ vars.MODEL_STORE_BUCKET }}
-          P_REGION: ${{ vars.MODEL_STORE_REGION }}
-          P_RETENTION: ${{ vars.MODEL_STORE_TESTSET_RETENTION_DAYS }}
-          P_EVAL_WRITER_ACCESS: ${{ secrets.MODEL_STORE_EVAL_WRITER_ACCESS_KEY }}
-          P_EVAL_WRITER_SECRET: ${{ secrets.MODEL_STORE_EVAL_WRITER_SECRET_KEY }}
+          P_ENDPOINT: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_ENDPOINT || '' }}
+          P_BUCKET: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_BUCKET || '' }}
+          P_REGION: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_REGION || '' }}
+          P_RETENTION: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_TESTSET_RETENTION_DAYS || '' }}
+          P_EVAL_WRITER_ACCESS: ${{ needs.mode.outputs.rehearsal == 'false' && secrets.MODEL_STORE_EVAL_WRITER_ACCESS_KEY || '' }}
+          P_EVAL_WRITER_SECRET: ${{ needs.mode.outputs.rehearsal == 'false' && secrets.MODEL_STORE_EVAL_WRITER_SECRET_KEY || '' }}
         run: |
           if [ "$REHEARSAL" != true ]; then
             export MODEL_STORE_ENDPOINT="$P_ENDPOINT" MODEL_STORE_BUCKET="$P_BUCKET"

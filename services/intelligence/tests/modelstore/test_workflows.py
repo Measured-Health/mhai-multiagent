@@ -25,7 +25,9 @@ CHECKED = (*MODEL_WORKFLOWS, "ci.yml")
 WRITING_ENVIRONMENTS = frozenset({"model-promotion", "model-signoff"})
 SHA_PIN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}")
 WRITE_VARIABLES = re.compile(r"MODEL_STORE_(PROMOTER|SIGNOFF)_")
-REHEARSAL_SWITCH = "${{ vars.MODEL_STORE_ENDPOINT == '' }}"
+REHEARSAL_SWITCH = "${{ needs.mode.outputs.rehearsal }}"
+REHEARSAL_STEP_IF = "needs.mode.outputs.rehearsal == 'true'"
+PROMOTE_CALL = re.compile(r"(\(|mhai-models\s+)promote\b")
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -70,11 +72,14 @@ def _all_jobs() -> list[tuple[str, str, dict[str, Any]]]:
 
 
 def _writes_to_store(job: dict[str, Any]) -> bool:
-    """A job that promotes (not a dry run), signs off or builds a test split itself."""
+    """A job that promotes (any promote invocation without --dry-run on its own line, so a
+    real promotion beside a dry run still counts), signs off or builds a test split."""
     runs = _runs(job)
-    promotes = re.search(r"(\(|mhai-models\s+)promote\b", runs) is not None
+    promotes = any(
+        PROMOTE_CALL.search(line) and "--dry-run" not in line for line in runs.splitlines()
+    )
     return (
-        (promotes and "--dry-run" not in runs)
+        promotes
         or re.search(r"mhai-models\s+signoff\b", runs) is not None
         or re.search(r"mhai-models\s+testset-build\b", runs) is not None
     )
@@ -143,8 +148,12 @@ def test_no_pull_request_target() -> None:
 
 def test_write_variables_scoped() -> None:
     """The store's promoter and sign-off credentials are named only in jobs inside
-    model-promotion or model-signoff; never at the workflow level."""
-    for name in CHECKED:
+    model-promotion or model-signoff, in every workflow; never at the workflow level, and
+    no workflow passes secrets on wholesale or by a computed name."""
+    for path in sorted(WORKFLOWS.glob("*.y*ml")):
+        raw = path.read_text(encoding="utf-8")
+        assert "secrets: inherit" not in raw and "secrets[" not in raw, path.name
+    for name in sorted(p.name for p in WORKFLOWS.glob("*.y*ml")):
         wf = _load(name)
         assert not WRITE_VARIABLES.search(yaml.safe_dump(wf.get("env") or {})), name
         for j, job in wf["jobs"].items():
@@ -176,11 +185,16 @@ def test_no_production_job_runs_in_development(name: str) -> None:
             assert "development" not in runs and "--rehearsal" not in runs, j
             assert "MHAI_MODELS_GITHUB_FAKE" not in yaml.safe_dump(wf), j
             continue
+        if j == "mode":
+            continue
         assert job["env"]["REHEARSAL"] == REHEARSAL_SWITCH, (name, j)
         mode = [s for s in _steps(job) if s.get("name") == "Mode"]
         assert len(mode) == 1, (name, j)
         text = str(mode[0]["run"])
-        rehearsal, _, production = text.partition("else")
+        assert 'case "$REHEARSAL" in true | false) ;;' in text  # checked, never trusted
+        parts = re.split(r"\n\s*else\n", text)
+        assert len(parts) == 2, (name, j)
+        rehearsal, production = parts
         assert 'if [ "$REHEARSAL" = true ]' in rehearsal
         assert "MHAI_MODELS_ENV=development" in rehearsal and "APP_ENV=development" in rehearsal
         assert "MHAI_MODELS_ENV=production" in production and "APP_ENV=production" in production
@@ -190,7 +204,7 @@ def test_no_production_job_runs_in_development(name: str) -> None:
             if step is not mode[0]:
                 assert "=development" not in str(step.get("run", "")), (name, j, step.get("name"))
             if "rehearse-promotion.sh" in str(step.get("run", "")):
-                assert step.get("if") == "env.REHEARSAL == 'true'", (name, j, step.get("name"))
+                assert step.get("if") == REHEARSAL_STEP_IF, (name, j, step.get("name"))
 
 
 @pytest.mark.parametrize("name", MODEL_WORKFLOWS)
@@ -205,7 +219,8 @@ def test_lock_check_runs_mains_code_on_the_head_lock_from_git() -> None:
     wf = _load("model-lock.yml")
     on = _on(wf)
     assert set(on) == {"pull_request", "pull_request_review"}
-    assert set(on["pull_request"]["paths"]) == {"models.lock", "models/**"}
+    # A required check reports on every PR: no path filter (a skipped one stays pending).
+    assert "paths" not in on["pull_request"] and "paths-ignore" not in on["pull_request"]
     job = wf["jobs"]["lock-check"]
     assert _permissions(job) == {"contents": "read", "pull-requests": "read"}
     checkouts = [s for s in _steps(job) if str(s.get("uses", "")).startswith("actions/checkout@")]
@@ -223,6 +238,12 @@ def test_lock_check_runs_mains_code_on_the_head_lock_from_git() -> None:
             assert str(step.get("working-directory", "")).startswith("main/"), step.get("name")
     # never the PR's trust policy
     assert "MHAI_MODELS_TRUST_POLICY" not in yaml.safe_dump(wf)
+    # the PR's checkout is only ever fetched from as git data: nothing runs in it
+    assert runs.count('"$GITHUB_WORKSPACE/head"') == 1
+    assert 'git -C main fetch --no-tags --quiet "$GITHUB_WORKSPACE/head" HEAD' in runs
+    for step in _steps(job):
+        assert "head/" not in str(step.get("run", "")), step.get("name")
+        assert not str(step.get("working-directory", "")).startswith("head"), step.get("name")
 
 
 def test_signoff_reads_three_locks_from_three_commits() -> None:
@@ -232,7 +253,8 @@ def test_signoff_reads_three_locks_from_three_commits() -> None:
     assert _environment(job) == "model-signoff"
     assert _permissions(job) == {"contents": "read", "pull-requests": "read", "id-token": "write"}
     assert job["env"]["BASE_SHA"] == "${{ github.event.before }}"
-    checkout = _steps(job)[0]
+    checkouts = [x for x in _steps(job) if str(x.get("uses", "")).startswith("actions/checkout@")]
+    checkout = checkouts[0]
     assert checkout["with"]["ref"] == "${{ github.event.before }}"
     runs = _runs(job)
     assert 'git -C base show "$BASE_SHA:models.lock" >"$RUNNER_TEMP/before.lock"' in runs
@@ -257,10 +279,10 @@ def test_signoff_reads_three_locks_from_three_commits() -> None:
 
 def test_promotion_expects_the_dry_runs_files() -> None:
     jobs = _jobs("model-promote.yml")
-    assert set(jobs) == {"dry-run", "promote"}
+    assert set(jobs) == {"mode", "dry-run", "promote"}
     dry, promote = jobs["dry-run"], jobs["promote"]
     assert _environment(dry) == "model-eval" and _environment(promote) == "model-promotion"
-    assert promote["needs"] == "dry-run"
+    assert promote["needs"] == ["mode", "dry-run"]
     assert promote["env"]["EXPECT_FILES"] == "${{ needs.dry-run.outputs.files_hash }}"
     assert '[[ "$EXPECT_FILES" =~ ^[0-9a-f]{64}$ ]]' in _runs(promote)
     assert '--expect-files "$EXPECT_FILES"' in _runs(promote)
@@ -314,3 +336,69 @@ def test_image_ships_the_warm_up_page() -> None:
     assert "COPY warmup/page.png /app/warmup/page.png" in dockerfile
     env = (REPO / ".env.example").read_text(encoding="utf-8")
     assert "# INTELLIGENCE_WARMUP_PAGE=/app/warmup/page.png" in env
+
+
+@pytest.mark.parametrize("name", MODEL_WORKFLOWS)
+def test_concurrency_set(name: str) -> None:
+    conc = _load(name)["concurrency"]
+    assert conc["group"].startswith(name.removesuffix(".yml"))
+    # a promotion, a sign-off or a test split is never cancelled half-way
+    assert conc["cancel-in-progress"] is (name == "model-lock.yml")
+
+
+@pytest.mark.parametrize("name", CHECKED)
+def test_environment_jobs_refuse_any_ref_but_main(name: str) -> None:
+    for j, job in _jobs(name).items():
+        if _environment(job) is None:
+            continue
+        first = _steps(job)[0]
+        assert first["name"] == "Main only", (name, j)
+        assert first["env"] == {"REF": "${{ github.ref }}"}
+        assert '[ "$REF" = refs/heads/main ] ||' in first["run"]
+        assert "exit 1" in first["run"]
+
+
+@pytest.mark.parametrize("name", ["model-promote.yml", "model-testset.yml"])
+def test_rehearsal_decided_once_and_production_secrets_only_in_production(name: str) -> None:
+    jobs = _jobs(name)
+    mode = jobs["mode"]
+    assert _environment(mode) is None and _permissions(mode) == {}
+    assert mode["outputs"] == {"rehearsal": "${{ steps.mode.outputs.rehearsal }}"}
+    assert mode["steps"][0]["env"] == {"ENDPOINT": "${{ vars.MODEL_STORE_ENDPOINT }}"}
+    for j, job in jobs.items():
+        if j == "mode":
+            continue
+        needs = job["needs"] if isinstance(job["needs"], list) else [job["needs"]]
+        assert "mode" in needs, j
+        assert "vars.MODEL_STORE_ENDPOINT ==" not in yaml.safe_dump(job), j
+        for step in _steps(job):
+            for var, value in (step.get("env") or {}).items():
+                if "secrets." in str(value) or "vars." in str(value):
+                    prefix = "${{ needs.mode.outputs.rehearsal == 'false' && "
+                    assert str(value).startswith(prefix), (j, var)
+
+
+def test_promotion_checks_names_before_they_name_a_folder() -> None:
+    for j, job in _jobs("model-promote.yml").items():
+        if j == "mode":
+            continue
+        mode = next(s for s in _steps(job) if s.get("name") == "Mode")
+        assert '[[ "$RUN" =~ ^[A-Za-z0-9_-]{1,64}$ ]]' in mode["run"], j
+        assert '[[ "$NAME" =~ ^[a-z0-9][a-z0-9-]{1,62}$ ]]' in mode["run"], j
+    script = (REPO / "services/intelligence/scripts/rehearse-promotion.sh").read_text()
+    assert '[[ "$run" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || fail "bad RUN"' in script
+
+
+def test_signoff_refuses_a_push_that_is_not_a_merge() -> None:
+    runs = _runs(_jobs("model-signoff.yml")["signoff"])
+    assert runs.count("refuse not_approved not_a_merge_commit 2") == 2
+    assert "refuse() {" in runs and '>>"$GITHUB_STEP_SUMMARY"' in runs
+
+
+def test_compose_sets_the_warm_up_page() -> None:
+    assert "INTELLIGENCE_WARMUP_PAGE: /app/warmup/page.png" in (
+        REPO / "docker-compose.yml"
+    ).read_text(encoding="utf-8")
+    assert "INTELLIGENCE_WARMUP_PAGE: /app/warmup/page.png" in (
+        REPO / "deploy" / "compose.yml"
+    ).read_text(encoding="utf-8")

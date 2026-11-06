@@ -60,9 +60,17 @@ is the whole point, so:
   ``--base-dir``'s repository (``git diff --no-renames <main tip>...<head sha>``: from the
   merge base to the head; a rename counts both paths), never from a list the PR
   supplies. The sign-off applies the same rule to the merge (``git diff <base sha>
-  <merge commit>``). This does not stop a PR that rewrites ``model-lock.yml`` and leaves
-  the lock alone, or one that changes the workflow first and the lock later; that needs
-  CODEOWNERS on those paths with code-owner review required (TODO(H4)).
+  <merge commit>``).
+
+  **What this can't do (D37).** Main's *code* runs, but the *workflow file* is the PR's:
+  ``pull_request`` runs ``model-lock.yml`` from the PR's merge ref and ``push`` runs
+  ``model-signoff.yml`` from the merge commit. A PR that edits ``model-lock.yml`` (in the
+  same PR as the lock change, or in an earlier one) can skip this check and still report
+  a green ``lock-check``; the sign-off is the backstop only while ``model-signoff.yml`` is
+  unedited, and a PR that edits it too gets its own copy run with the sign-off identity.
+  The controls for that are people and settings, not code: code-owner review of
+  ``.github/``, approval of the most recent push, and a required reviewer on the
+  ``model-signoff`` environment (TODO(H4) in ``TODO.md``).
 
 Every head entry must pass :func:`check_production`. For each changed role:
 

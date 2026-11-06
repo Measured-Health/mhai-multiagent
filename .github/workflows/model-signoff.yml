@@ -13,7 +13,13 @@ name: Model sign-off
 # TODO(Task 26): the production sign-off signer. Until then MHAI_MODELS_SIGNER has only the
 # development FileSigner, which refuses outside development, so a real sign-off is refused
 # here (exit 2) and the loader keeps refusing the pin.
-# TODO(H4): main allows merge commits only and requires branches to be up to date.
+# What it can't do (D37): main's code runs, but this workflow file is the merge commit's,
+# so a merged PR that edited it runs its own copy. The model-signoff environment must
+# therefore have a required reviewer from the platform team ("prevent self-review" on),
+# deployment branches main only, and the sign-off secrets as environment secrets only:
+# no secret or id-token reaches this job without a person approving the run. TODO(H4) in
+# TODO.md lists every setting; main allows merge commits only and requires branches to be
+# up to date. A push that isn't a merge of a PR is refused (exit 2, summary written).
 
 on:
   push:
@@ -44,6 +50,14 @@ jobs:
       APP_ENV: production
       BASE_SHA: ${{ github.event.before }}
     steps:
+      # The environment allows main only (H4); this says so plainly if it doesn't.
+      - name: Main only
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          [ "$REF" = refs/heads/main ] ||
+            { echo "::error::this job runs on main only (ref $REF refused)"; exit 1; }
+
       - name: Check out main before the push (code and data)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -69,15 +83,24 @@ jobs:
           for sha in "$BASE_SHA" "$GITHUB_SHA"; do
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad commit sha"; exit 1; }
           done
+          # A push that isn't the merge commit of a PR is refused as the CLI would refuse
+          # it: one JSON line on stdout and in the summary, exit 2 (3 if GitHub is down).
+          refuse() {
+            local out="{\"refused\":\"$1\",\"detail\":\"$2\"}"
+            printf '%s\n' "$out"
+            { echo '### sign-off'; echo '```json'; printf '%s\n' "$out"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+            exit "$3"
+          }
           # The merged PR's head, from GitHub (the CLI checks it is the merge's second
           # parent and the PR's head).
-          head="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].head.sha')"
-          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no merged PR head"; exit 1; }
-          echo "HEAD_SHA=$head" >>"$GITHUB_ENV"
-          # Main's full history has it (the merge's second parent); never fetched from
-          # anywhere else.
+          head="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].head.sha // ""')" ||
+            refuse github_unavailable http 3
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || refuse not_approved not_a_merge_commit 2
+          # Main's full history has it (the merge's second parent; a squash or rebase
+          # merge doesn't); never fetched from anywhere else.
           git -C base rev-parse --verify --quiet "$head^{commit}" >/dev/null ||
-            { echo "::error::the merged PR's head is not in main's history"; exit 1; }
+            refuse not_approved not_a_merge_commit 2
+          echo "HEAD_SHA=$head" >>"$GITHUB_ENV"
           # Each from its own commit; a missing models.lock fails the job.
           git -C base show "$BASE_SHA:models.lock" >"$RUNNER_TEMP/before.lock"
           git -C base show "$GITHUB_SHA:models.lock" >"$RUNNER_TEMP/after.lock"

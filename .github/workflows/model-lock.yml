@@ -1,21 +1,24 @@
 name: Model lock check
 
-# lock-check on every PR that changes models.lock or models/, and again on every review
-# (an approval or a dismissal changes the result). A required status check (H4).
+# lock-check on every PR and again on every review (an approval or a dismissal changes the
+# result). A required status check (H4), so it has no path filter: a PR that changes
+# neither models.lock nor models/ passes at once, before any store or GitHub access.
 #
-# What it trusts (D31, Task 20 and 21 reviews): main's tip for everything (the code that
-# runs, reviewers.json, the trust policy, testsets.lock, the thresholds) and, from the PR,
-# only the lock at its head commit, read with git from that exact commit. The PR's code is
-# checked out only as git data and never installed or run. D35: a PR changing the lock may
-# change nothing but models.lock, models/, docs/ and CHANGELOG.md; lock-check works that
-# out from git itself. That can't stop a PR that rewrites this file and leaves the lock
-# alone: CODEOWNERS with code-owner review covers that (TODO(H4)).
+# What it trusts (D31, Task 20 and 21 reviews): main's tip for everything the check reads
+# and runs (the code, reviewers.json, the trust policy, testsets.lock, the thresholds)
+# and, from the PR, only the lock at its head commit, read with git from that exact
+# commit. The PR's code is checked out only as git data and never installed or run. D35b:
+# a PR changing the lock may change nothing but models.lock, models/, docs/ and
+# CHANGELOG.md; lock-check works that out from git itself.
+#
+# What it can't do (D37): main's code runs, but this workflow file is the PR's
+# (pull_request runs the PR's copy). A PR that edits this file, in the same PR as a lock
+# change or an earlier one, can skip the check and still report a green lock-check. Only
+# people and settings stop that: code-owner review of .github/, approval of the most
+# recent push, and the required reviewer on model-signoff (TODO(H4) in TODO.md).
 
 on:
   pull_request:
-    paths:
-      - models.lock
-      - models/**
     types: [opened, synchronize, reopened, edited, labeled, unlabeled]
   pull_request_review:
     types: [submitted, edited, dismissed]
