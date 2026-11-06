@@ -81,8 +81,6 @@ _DATASET_KEYS = frozenset(
     {"id", "kind", "generator", "version", "testset_disjoint", "approved_by_pr"}
 )
 
-# GitHub logins: alphanumerics and single hyphens, not at either end, at most 39.
-_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}", re.ASCII)
 _DATASET_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}", re.ASCII)
 _REPO_PART = r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}"
 _HUB_REPO = re.compile(rf"(?:{_REPO_PART}/)?{_REPO_PART}", re.ASCII)
@@ -236,7 +234,9 @@ class TrainingManifest:
                 check(value)
             except Refused:
                 raise _invalid(detail) from None
-        _require(_match(self.trained_by, _LOGIN), "trained_by")
+        # Lowercase only (names.check_login, ruling D30): GitHub logins are
+        # case-insensitive, and the sign-off compares this one exactly.
+        _require(names.is_login(self.trained_by), "trained_by")
         _require(
             isinstance(self.datasets, tuple)
             and 1 <= len(self.datasets) <= MAX_DATASETS

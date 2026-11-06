@@ -68,8 +68,9 @@ process may be reading. Nothing is removed outside the pin's lock.
 
 The cache directory must be a real directory (not a link) owned by this user and not
 writable by group or others; it is made 0700 if missing. Every directory above it, up to
-``/``, must be owned by root or this user, and none that others can write may lack the
-sticky bit (``cache_parent_unsafe``). Deletion only ever happens
+``/``, taken as given (never resolved), must be a real directory and not a link
+(``cache_parent_link``), owned by root or this user, and none that others can write may
+lack the sticky bit (``cache_parent_unsafe``). Deletion only ever happens
 under it, through directory descriptors opened without following links, and puts a
 directory's write bit back before emptying it. Two processes verifying the same pin
 into the same cache take turns on an exclusive lock file per ``<name>/<version>-<hash12>``.
@@ -106,6 +107,9 @@ from intelligence.modelstore.store import ObjectInfo
 log = logging.getLogger(__name__)
 
 MAX_VERSIONS = 32
+# Versions read at all (usable or not) per key: a flood of unreadable versions is bounded
+# too, not just the usable ones (ruling D30).
+MAX_VERSION_READS = MAX_VERSIONS * 4
 HASH12 = 12
 DIR_MODE = 0o500
 FILE_MODE = 0o400
@@ -212,11 +216,14 @@ def _store_refusal(e: Refused) -> bool:
 def _usable[T](vids: list[str], read: Callable[[str], T | None], reason: str) -> Iterator[T]:
     """Each usable version of ``key``, oldest first, as ``read`` returns it. A version
     ``read`` finds unusable (None: no stored checksum, gone, too large) is skipped and not
-    counted; past :data:`MAX_VERSIONS` usable versions the walk stops with ``reason`` and
-    the detail ``too_many_versions`` (a flood of junk versions, not a wrong lock).
-    ``vids`` is the store's listing, newest first; its own cap bounds the walk."""
+    counted; past :data:`MAX_VERSIONS` usable versions, or :data:`MAX_VERSION_READS`
+    versions read at all, the walk stops with ``reason`` and the detail
+    ``too_many_versions`` (a flood of junk versions, not a wrong lock). ``vids`` is the
+    store's listing, newest first."""
     used = 0
-    for vid in reversed(vids):
+    for reads, vid in enumerate(reversed(vids)):
+        if reads >= MAX_VERSION_READS:
+            raise Refused(reason, detail_code="too_many_versions")
         got = read(vid)
         if got is None:
             continue
@@ -257,10 +264,43 @@ def find_manifest(source: ReadStore, name: str, version: str, sha256: str) -> by
     for vid, info in _usable(vids, lambda v: _head_version(source, key, v), "lock_mismatch"):
         if info.size > manifest.MAX_BYTES or not secrets.compare_digest(info.sha256, sha256):
             continue
+        # The store says this version is the lock's. Failing to read it now is the
+        # store's trouble, not a verdict on the pin: transient, so the cache is kept.
         raw = _get_version(source, key, version_id=vid, max_bytes=manifest.MAX_BYTES)
-        if raw is not None and secrets.compare_digest(hashlib.sha256(raw).hexdigest(), sha256):
-            return raw
+        if raw is None or not secrets.compare_digest(hashlib.sha256(raw).hexdigest(), sha256):
+            raise Refused("store_unavailable", detail_code="manifest_read")
+        return raw
     raise Refused("lock_mismatch")
+
+
+def _distinct_docs(source: ReadStore, key: str, max_bytes: int, reason: str) -> list[bytes]:
+    """The distinct readable versions of ``key``, oldest first (capped as :func:`_usable`)."""
+    docs: list[bytes] = []
+    for doc in _usable(
+        source.versions(key),
+        lambda v: _get_version(source, key, version_id=v, max_bytes=max_bytes),
+        reason,
+    ):
+        if doc not in docs:
+            docs.append(doc)
+    return docs
+
+
+def _verified_by_one(
+    purpose: str, payload: bytes, docs: list[bytes], policy: signing.TrustPolicy
+) -> bool:
+    """Whether one of ``docs`` verifies for ``purpose`` over ``payload``. A development
+    signer outside development propagates."""
+    verifier = signing.Verifier()
+    for doc in docs:
+        try:
+            verifier.verify(purpose, payload, doc, policy)
+        except Refused as e:
+            if e.reason == "policy_invalid":
+                raise
+            continue
+        return True
+    return False
 
 
 def _first_verified(
@@ -329,30 +369,30 @@ def check_signoff(
     """Step 7: a sign-off for exactly this pin, signed for purpose ``signoff``, whose
     reviewers are neither the promoter nor the trainer and not both kinds at once."""
     key = store.signoff_key(m.name, m.version)
-    sig_key = store.signoff_sig_key(m.name, m.version)
-    tried: list[bytes] = []
-    detail = "missing"
-    for raw in _usable(
-        source.versions(key),
-        lambda v: _get_version(source, key, version_id=v, max_bytes=signoff.MAX_BYTES),
-        "not_approved",
-    ):
-        if raw in tried:
-            continue
-        tried.append(raw)
+    docs = _distinct_docs(source, key, signoff.MAX_BYTES, "not_approved")
+    if not docs:
+        raise Refused("not_approved", detail_code="missing")
+    sigs: list[bytes] | None = None  # read once, when a sign-off first needs them
+    detail = "mismatch"
+    for raw in docs:
         parsed: signoff.Signoff | None = None
         try:
             parsed = signoff.parse(raw)
         except Refused:
             parsed = None
         if parsed is None or not _signoff_matches(parsed, role, entry, m):
-            if detail == "missing":
-                detail = "mismatch"
             continue
         if not _separated(parsed):
             detail = "separation"
             continue
-        if _first_verified(source, sig_key, "signoff", raw, policy, "not_approved") is None:
+        if sigs is None:
+            sigs = _distinct_docs(
+                source,
+                store.signoff_sig_key(m.name, m.version),
+                signing.MAX_SIGNATURE_DOC_BYTES,
+                "not_approved",
+            )
+        if _verified_by_one("signoff", raw, sigs, policy):
             return
         detail = "signature"
     raise Refused("not_approved", detail_code=detail)
@@ -418,26 +458,37 @@ def _open_dir(path: Path | str, *, dir_fd: int | None = None, create: bool) -> i
 
 
 def _check_ancestors(cache_dir: Path) -> None:
-    """Every directory above ``cache_dir`` (resolved) up to ``/`` is owned by root or this
-    user, and none that others can write lacks the sticky bit; otherwise someone else
-    could swap the tree after the checks (``cache_parent_unsafe``)."""
-    unsafe = False
+    """Every directory above ``cache_dir``, taken as given (made absolute, never
+    resolved), component by component from ``/`` down: each is a real directory, not a
+    symbolic link (``cache_parent_link``), owned by root or this user, and none that others
+    can write lacks the sticky bit (``cache_parent_unsafe``). Otherwise someone else could
+    swap the tree after the checks. A link anywhere in the path is refused rather than
+    followed and checked: the simpler rule, and a deployment can always name the real
+    path."""
+    path = cache_dir.absolute()
+    if any(part in (".", "..") for part in path.parts):
+        raise _cache_refused("cache_dir")
+    detail: str | None = None
     failed = False
     try:
-        parent = Path(os.path.realpath(cache_dir.absolute().parent))
-        for d in (parent, *parent.parents):
-            st = os.stat(d)
-            if st.st_uid not in (0, os.geteuid()) or (
+        for d in reversed(path.parents):  # "/" first
+            st = os.lstat(d)
+            if stat.S_ISLNK(st.st_mode):
+                detail = "cache_parent_link"
+            elif not stat.S_ISDIR(st.st_mode):
+                detail = "cache_dir"
+            elif st.st_uid not in (0, os.geteuid()) or (
                 st.st_mode & stat.S_IWOTH and not st.st_mode & stat.S_ISVTX
             ):
-                unsafe = True
+                detail = "cache_parent_unsafe"
+            if detail is not None:
                 break
     except (OSError, ValueError):
         failed = True
     if failed:
         raise _cache_refused("cache_dir")
-    if unsafe:
-        raise _cache_refused("cache_parent_unsafe")
+    if detail is not None:
+        raise _cache_refused(detail)
 
 
 def _open_cache(cache_dir: Path, name: str, *, create: bool) -> int:
@@ -783,11 +834,13 @@ def _verify(
     cached = False
     try:
         with _pin_lock(name_fd, final):
+            # A stale .partial that can't be removed stops here, before the cleanup below
+            # could touch a good final directory.
+            if not _remove(name_fd, partial):
+                raise _cache_refused("cache_not_removed")
             done = False
             refused: str | None = None
             try:
-                if not _remove(name_fd, partial):
-                    raise _cache_refused("cache_not_removed")
                 if _lstat(final, name_fd) is not None:
                     cached = _cached_ok(final_path, m)
                     if not cached:
@@ -847,6 +900,7 @@ __all__ = [
     "DIR_MODE",
     "FILE_MODE",
     "MAX_VERSIONS",
+    "MAX_VERSION_READS",
     "PinEntry",
     "ReadStore",
     "VerifiedModel",

@@ -10,6 +10,9 @@ The shape (canonical JSON, integers and strings only, exactly these keys)::
     manifest_sha256, evaluation_sha256,
     pr, merge_commit,
     clinical_reviewers: [login, ...], platform_reviewers: [login, ...]   sorted, distinct
+
+Every login is lowercase only (:func:`intelligence.modelstore.names.check_login`): GitHub
+logins are case-insensitive, so ``Alice`` would be the same person as ``alice``.
     promotion_actor, trained_by, at
 
 Anything else is ``not_approved``: a sign-off that can't be read is no sign-off.
@@ -48,7 +51,6 @@ _KEYS = frozenset(
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _COMMIT = re.compile(r"[0-9a-f]{40}", re.ASCII)
-_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}", re.ASCII)
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.ASCII)
 _MAX_PR = 2**31 - 1
 
@@ -75,7 +77,7 @@ def _logins(value: object, detail: str) -> tuple[str, ...]:
     if (
         not isinstance(value, list)
         or not 1 <= len(value) <= MAX_REVIEWERS
-        or not all(_match(v, _LOGIN) for v in value)
+        or not all(names.is_login(v) for v in value)
         or any(a >= b for a, b in zip(value, value[1:], strict=False))
     ):
         raise _invalid(detail)
@@ -142,7 +144,7 @@ def parse(b: bytes) -> Signoff:
     if not _match(obj["merge_commit"], _COMMIT):
         raise _invalid("merge_commit")
     for key in ("promotion_actor", "trained_by"):
-        if not _match(obj[key], _LOGIN):
+        if not names.is_login(obj[key]):
             raise _invalid(key)
     return Signoff(
         name=obj["name"],

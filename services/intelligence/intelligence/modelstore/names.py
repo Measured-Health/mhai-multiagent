@@ -19,6 +19,11 @@ _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}", re.ASCII)
 # version id is only ever passed as the ``VersionId`` parameter, never joined into a key,
 # a path or a URL.
 _STORE_VERSION_ID = re.compile(r"[A-Za-z0-9._-]{1,1024}", re.ASCII)
+# A GitHub login, lowercase only. GitHub logins are case-insensitive (``Alice`` and
+# ``alice`` are one account), so every login we store or compare is the lowercase
+# spelling and anything else is refused: then exact comparison means "same person"
+# (ruling D30). Alphanumerics and single inner hyphens, at most 39 characters.
+_LOGIN = re.compile(r"[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}", re.ASCII)
 
 
 def _check(value: str, pattern: re.Pattern[str]) -> str:
@@ -41,6 +46,19 @@ def check_role(s: str) -> str:
 
 def check_run_id(s: str) -> str:
     return _check(s, _RUN_ID)
+
+
+def is_login(value: object) -> bool:
+    """A lowercase GitHub login (see :data:`_LOGIN`)."""
+    return isinstance(value, str) and _LOGIN.fullmatch(value) is not None
+
+
+def check_login(s: str) -> str:
+    """A lowercase GitHub login, or ``invalid_name``. Upper case is refused, not folded:
+    the writer must store the lowercase spelling."""
+    if not is_login(s):
+        raise Refused("invalid_name")
+    return s
 
 
 def check_store_version_id(s: str) -> str:

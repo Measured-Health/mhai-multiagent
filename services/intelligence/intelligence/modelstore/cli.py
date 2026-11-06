@@ -226,7 +226,9 @@ def _workflow() -> promote.WorkflowRun | None:
     if not all(values):
         return None
     run_id, ref, commit, actor = (str(v) for v in values)
-    return promote.WorkflowRun(run_id, ref, commit, actor)
+    # GITHUB_ACTOR keeps the account's display case; logins are case-insensitive, and the
+    # manifest stores the lowercase spelling (names.check_login, ruling D30).
+    return promote.WorkflowRun(run_id, ref, commit, actor.lower())
 
 
 def _lock_entry() -> testsets.LockEntry | None:

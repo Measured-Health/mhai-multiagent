@@ -8,6 +8,7 @@ in memory; the store is the in-memory fake, and MinIO for the ``store`` test.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import stat
@@ -1212,3 +1213,151 @@ def test_concurrent_verifies_in_processes(tmp_path: Path, keys: Keys) -> None:
     assert [p.exitcode for p in procs] == [0, 0, 0]
     assert _pin_dirs(cache, pub) == [_final(cache, pub).name]
     assert _verify(mem, pub, keys, cache).path == _final(cache, pub)
+
+
+# ---------------------------------------------------------------- round 2 (D30)
+
+
+def test_logins_are_lowercase_only(tmp_path: Path, keys: Keys) -> None:
+    from intelligence.modelstore import names
+
+    assert names.check_login("alice") == "alice"
+    for bad in ("Alice", "ALICE", "alice-", "-alice", "al--ice", "", "a" * 40):
+        assert _refused(names.check_login, bad).reason == "invalid_name"
+    # The trainer "alice" and a reviewer "Alice" are one GitHub account: the mixed-case
+    # spelling is refused when the sign-off is parsed, so it can never slip past the
+    # exact comparison of separation of duties.
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys, with_signoff=False)
+    for field in ("clinical_reviewers", "platform_reviewers"):
+        obj = canonical.loads_strict(signoff_bytes(pub), signoff.MAX_BYTES)
+        obj[field] = [TRAINER.upper()]
+        err = _refused(signoff.parse, canonical.dumps(obj))
+        assert (err.reason, err.detail_code) == ("not_approved", field)
+    for field in ("promotion_actor", "trained_by"):
+        obj = canonical.loads_strict(signoff_bytes(pub), signoff.MAX_BYTES)
+        obj[field] = "Alice"
+        assert _refused(signoff.parse, canonical.dumps(obj)).reason == "not_approved"
+    # The training manifest's trainer and the manifest's promoter and trainer too.
+    tm = json.loads((pub.run_dir / training.FILE_NAME).read_text(encoding="utf-8"))
+    tm["trained_by"] = "Alice"
+    err = _refused(training.parse, tm)
+    assert (err.reason, err.detail_code) == ("manifest_invalid", "trained_by")
+    obj = manifest.to_obj(pub.m)
+    for path, value in ((("promotion", "actor"), "Promoter-Bot"), (("trained_by",), "Alice")):
+        o = canonical.loads_strict(canonical.dumps(obj), manifest.MAX_BYTES)
+        target = o
+        for k in path[:-1]:
+            target = target[k]
+        target[path[-1]] = value
+        assert _refused(manifest.parse, canonical.dumps(o)).reason == "manifest_invalid"
+    # The fixtures and the committed example are lowercase.
+    assert names.is_login(fixtures.TRAINED_BY)
+    example = Path(__file__).resolve().parents[4] / "docs/models/training_manifest.example.json"
+    assert names.is_login(json.loads(example.read_text(encoding="utf-8"))["trained_by"])
+
+
+def test_workflow_actor_is_stored_lowercase(monkeypatch: pytest.MonkeyPatch) -> None:
+    from intelligence.modelstore import cli
+
+    for name, value in zip(
+        cli.WORKFLOW_ENVS,
+        (
+            "4242",
+            "o/r/.github/workflows/model-promote.yml@refs/heads/main",
+            "ab" * 20,
+            "Promoter-Bot",
+        ),
+        strict=True,
+    ):
+        monkeypatch.setenv(name, value)
+    run = cli._workflow()
+    assert run is not None and run.actor == "promoter-bot"
+
+
+def test_flood_of_unreadable_versions_is_capped(tmp_path: Path, keys: Keys) -> None:
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    spy = Spy(mem)
+    junk = _junk_versions(mem, store.manifest_key(NAME, VERSION), verify.MAX_VERSION_READS + 10)
+    spy.no_checksum.update(junk)
+    err = _refused(_verify, spy, pub, keys, _cache(tmp_path))
+    assert (err.reason, err.detail_code) == ("lock_mismatch", "too_many_versions")
+    heads = [r for r in spy.reads if r[0] == "head"]
+    assert len(heads) == verify.MAX_VERSION_READS  # reading stopped at the cap
+
+
+def test_signoff_signatures_read_once(tmp_path: Path, keys: Keys) -> None:
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys, with_signoff=False)
+    # Many matching but unsigned sign-off versions, then the signed one.
+    for i in range(5):
+        mem.shadow(store.signoff_key(NAME, VERSION), signoff_bytes(pub, pr=100 + i))
+    write_signoff_key = store.signoff_key(NAME, VERSION)
+    body = signoff_bytes(pub)
+    mem.shadow(write_signoff_key, body)
+    mem.shadow(store.signoff_sig_key(NAME, VERSION), keys.signoff.sign("signoff", body))
+    spy = Spy(mem)
+    _verify(spy, pub, keys, _cache(tmp_path))
+    sig_key = store.signoff_sig_key(NAME, VERSION)
+    assert [r for r in spy.reads if r[0] == "versions" and r[1] == sig_key] == [
+        ("versions", sig_key, None)
+    ]
+
+
+@pytest.mark.parametrize("failure", ["checksum", "hash_mismatch", "not_found", "transport"])
+def test_transient_read_of_the_lock_version_keeps_the_cache(
+    tmp_path: Path, keys: Keys, failure: str
+) -> None:
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    cache = _cache(tmp_path)
+    v = _verify(mem, pub, keys, cache)
+    key = store.manifest_key(NAME, VERSION)
+
+    class Flaky(Spy):
+        def get(self, k: str, version_id: str | None = None, *, max_bytes: int) -> bytes:
+            if k == key:
+                if failure in ("checksum", "transport"):
+                    raise Refused("store_unavailable", detail_code=failure)
+                raise Refused(failure)
+            return super().get(k, version_id, max_bytes=max_bytes)
+
+    err = _refused(_verify, Flaky(mem), pub, keys, cache)
+    assert err.reason == "store_unavailable"
+    assert _pin_dirs(cache, pub) == [v.path.name]  # not purged
+
+
+def test_cache_path_with_a_link_is_refused(tmp_path: Path, keys: Keys) -> None:
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    link = tmp_path / "via-link"
+    os.symlink(real, link)
+    err = _refused(_verify, mem, pub, keys, link / "cache")
+    assert (err.reason, err.detail_code) == ("not_allowed_here", "cache_parent_link")
+    err = _refused(_verify, mem, pub, keys, real / ".." / "real" / "cache")
+    assert (err.reason, err.detail_code) == ("not_allowed_here", "cache_dir")
+    assert _verify(mem, pub, keys, real / "cache").path.is_dir()
+
+
+def test_stale_partial_that_cannot_be_removed_keeps_the_final(
+    tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    cache = _cache(tmp_path)
+    v = _verify(mem, pub, keys, cache)
+    before = {f.path: (v.path / f.path).read_bytes() for f in pub.m.files}
+    real = verify._remove
+
+    def stuck(parent_fd: int, name: str) -> bool:
+        if name.endswith(verify.PARTIAL_SUFFIX):
+            return False
+        return real(parent_fd, name)
+
+    monkeypatch.setattr(verify, "_remove", stuck)
+    err = _refused(_verify, mem, pub, keys, cache)
+    assert (err.reason, err.detail_code) == ("not_allowed_here", "cache_not_removed")
+    assert {p: (v.path / p).read_bytes() for p in before} == before

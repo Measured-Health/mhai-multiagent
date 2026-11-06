@@ -95,8 +95,6 @@ _WORKFLOW_REF = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}@refs/(?:heads|tags)/[A-Za-z0-9][A-Za-z0-9._/-]{0,199}",
     re.ASCII,
 )
-# GitHub logins: alphanumerics and single hyphens, not at either end, at most 39.
-_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}", re.ASCII)
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.ASCII)
 
 
@@ -258,7 +256,7 @@ class Promotion:
             "promotion_ref",
         )
         _require(_match(self.commit, _COMMIT), "promotion_commit")
-        _require(_match(self.actor, _LOGIN), "promotion_actor")
+        _require(names.is_login(self.actor), "promotion_actor")
         _require(_is_timestamp(self.at), "promotion_at")
 
 
@@ -320,7 +318,7 @@ class Manifest:
         _require(isinstance(self.evaluation, Evaluation), "evaluation")
         _require(isinstance(self.runtime, Runtime), "runtime")
         _require(isinstance(self.promotion, Promotion), "promotion")
-        _require(_match(self.trained_by, _LOGIN), "trained_by")
+        _require(names.is_login(self.trained_by), "trained_by")
 
 
 # ---------------------------------------------------------------- build and dump
