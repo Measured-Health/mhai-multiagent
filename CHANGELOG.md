@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Document pipeline phase 0, part B: model promotion
+  (`services/intelligence/intelligence/modelstore/`, the `mhai-models` CLI).
+  File checks for a trained run (safetensors only, a fixed list of JSON
+  files, header validation, size caps, SHA-256), the training manifest with
+  the approved-dataset and licence registries, canonical signed manifests
+  (development Ed25519 keys; the production KMS signer is Task 26), the
+  model store with versioning and object lock (MinIO for tests and
+  rehearsal), the locked evaluation test split, run sources (a local
+  folder, Google Drive behind a fake until Task 28, pinned Hugging Face
+  revisions), `promote` with a dry run, `models.lock` with `pin`,
+  `lock-check`, sign-off and rollback, load-time verification and the
+  pipeline's pinned roles (not ready until every pinned role verifies;
+  `model_versions` now carries `name@version#hash`). Four workflows
+  (`model-promote`, `model-lock`, `model-signoff`, `model-testset`); the
+  dry run uploads its JSON summary and the aggregate `evaluation.md`. CI
+  rehearses the whole flow on MinIO (`model-promotion-e2e`), and
+  `tests/modelstore/test_e2e.py` runs it in Python and checks that every
+  abuse case in the plan has its test. Production pins wait on H1–H4 and
+  Tasks 26–28 (TODO.md); until then the system fails closed.
 - Document pipeline phase 0, part A: the extraction schema
   `mhai.extraction.clinical_document` 1.0.0 and the evaluation harness
   (`services/intelligence/intelligence/doceval/`). Synthetic patients and

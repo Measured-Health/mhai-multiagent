@@ -77,6 +77,10 @@ code review:
 - guardrail thresholds and trust weights;
 - prompts;
 - the NLI, embedding or LLM models (including version bumps);
+- the OCR and extraction models and their versions in `models.lock`;
+- the evaluation pass marks (`services/intelligence/intelligence/doceval/thresholds/`);
+- the extraction schema's major versions
+  (`services/intelligence/intelligence/schemas/extraction/`);
 - decision mapping;
 - PII rules.
 
@@ -85,9 +89,20 @@ The process:
 1. Label the PR `clinical-review`.
 2. Attach the `services/intelligence/scripts/e2e_models.py` report from before **and** after the
    change, and say which numbers moved and why that's acceptable.
+   For a document model, attach the promotion's `evaluation.md` for the
+   current and the new version instead (`mhai-doceval compare` puts them
+   side by side).
 3. A clinically qualified reviewer approves it in addition to the code
    review.
 4. Record significant changes as an ADR (see below).
+
+**The person who trained a model can't be its only approver.** For
+`models.lock`, `lock-check` enforces this: a new pin needs a clinical and a
+platform reviewer from `models/reviewers.json`, two different people, and
+neither may be the PR's author, the person who promoted the model or the
+person who trained it. A `models.lock` PR changes nothing but `models.lock`,
+`models/`, `docs/` and `CHANGELOG.md`. See "Promoting a model" in
+`services/intelligence/README.md`.
 
 ## Testing
 
@@ -108,6 +123,10 @@ Python paths here are relative to `services/intelligence/`.
 - **Synthetic or properly anonymised data only, everywhere outside
   production:** tests, fixtures, notebooks, issues, PRs, screenshots, logs
   and bug reports.
+- **Drive and notebooks hold synthetic data, or de-identified data with an
+  approval record; nothing else, ever.** A training run may name only
+  datasets in `models/approved-datasets.json`, and the promotion refuses
+  any other.
 - Never commit `.env` files, keys, credentials, patient exports or model
   weights. `.gitignore`, pre-commit (gitleaks, private-key detection) and CI
   enforce this. If something slips through, treat it as compromised: rotate

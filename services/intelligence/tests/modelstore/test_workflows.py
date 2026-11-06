@@ -296,14 +296,43 @@ def test_promotion_expects_the_dry_runs_files() -> None:
     }
 
 
+ARTIFACT_PATH = re.compile(r"\$\{\{ runner\.temp \}\}/summary/([a-z-]+\.json|evaluation\.md)")
+
+
 @pytest.mark.parametrize("name", MODEL_WORKFLOWS)
 def test_artifacts_carry_summaries_only(name: str) -> None:
+    """The CLI's JSON summaries and the aggregate evaluation.md; never weights, pages,
+    evaluation.json's folder or keys."""
     for job in _jobs(name).values():
         for step in _steps(job):
             if str(step.get("uses", "")).startswith("actions/upload-artifact@"):
-                assert re.fullmatch(
-                    r"\$\{\{ runner\.temp \}\}/summary/[a-z-]+\.json", step["with"]["path"]
-                )
+                paths = str(step["with"]["path"]).strip().splitlines()
+                assert paths
+                for path in paths:
+                    assert ARTIFACT_PATH.fullmatch(path), path
+
+
+def test_dry_run_uploads_the_aggregate_report() -> None:
+    """The dry run keeps evaluation.json outside the summary folder, renders evaluation.md
+    from it with mhai-doceval report (the aggregate-only renderer), and uploads the
+    Markdown with its summary. The promotion's own report goes to the store, not here."""
+    jobs = _jobs("model-promote.yml")
+    dry, promote = jobs["dry-run"], jobs["promote"]
+    runs = _runs(dry)
+    assert '--report-dir "$RUNNER_TEMP/report"' in runs
+    assert (
+        'uv run --no-sync mhai-doceval report "$RUNNER_TEMP/report/evaluation.json"'
+        ' >"$RUNNER_TEMP/summary/evaluation.md"'
+    ) in runs
+    uploads = [
+        s for s in _steps(dry) if str(s.get("uses", "")).startswith("actions/upload-artifact@")
+    ]
+    assert len(uploads) == 1
+    assert str(uploads[0]["with"]["path"]).strip().splitlines() == [
+        "${{ runner.temp }}/summary/dry-run.json",
+        "${{ runner.temp }}/summary/evaluation.md",
+    ]
+    assert "--report-dir" not in _runs(promote) and "mhai-doceval" not in _runs(promote)
 
 
 def test_testset_build_exit_4_is_a_warning_from_the_last_stderr_line() -> None:

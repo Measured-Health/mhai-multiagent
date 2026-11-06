@@ -188,23 +188,30 @@ jobs:
           if [ "$SOURCE" = hf ]; then
             args+=(--hf-repo "$HF_REPO" --hf-revision "$HF_REVISION")
           fi
+          # evaluation.json stays out of the summary folder; only its Markdown is kept.
+          mkdir -p -m 700 "$RUNNER_TEMP/report" "$RUNNER_TEMP/summary"
           code=0
-          out="$(uv run --no-sync mhai-models "${args[@]}")" || code=$?
-          mkdir -p "$RUNNER_TEMP/summary"
+          out="$(uv run --no-sync mhai-models "${args[@]}" --report-dir "$RUNNER_TEMP/report")" || code=$?
           printf '%s\n' "$out" | tee "$RUNNER_TEMP/summary/dry-run.json"
           { echo '### dry run'; echo '```json'; printf '%s\n' "$out"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           [ "$code" -eq 0 ] || exit "$code"
+          # The aggregate-only renderer: metrics per field and gate verdicts, no document rows.
+          uv run --no-sync mhai-doceval report "$RUNNER_TEMP/report/evaluation.json" >"$RUNNER_TEMP/summary/evaluation.md"
+          cat "$RUNNER_TEMP/summary/evaluation.md" >>"$GITHUB_STEP_SUMMARY"
           files="$(printf '%s' "$out" | jq -r .files_sha256)"
           [[ "$files" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no files hash"; exit 1; }
           echo "files_hash=$files" >>"$GITHUB_OUTPUT"
 
-      # The CLI's JSON summary only: names, hashes, verdicts. Never weights, pages or keys.
-      - name: Keep the summary
+      # The CLI's JSON summary (names, hashes, verdicts) and the aggregate evaluation.md.
+      # Never weights, pages, evaluation.json or keys.
+      - name: Keep the summary and the report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dry-run-summary
-          path: ${{ runner.temp }}/summary/dry-run.json
+          path: |
+            ${{ runner.temp }}/summary/dry-run.json
+            ${{ runner.temp }}/summary/evaluation.md
           if-no-files-found: ignore
           retention-days: 30
 

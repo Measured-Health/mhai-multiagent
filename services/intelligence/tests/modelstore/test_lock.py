@@ -797,10 +797,11 @@ def _lock_check_args(main: Path, head_file: Path, head_sha: str = HEAD) -> list[
     ]
 
 
-def test_reviewers_read_from_main_not_head(
+def test_reviewers_read_from_base_not_head(
     tmp_path: Path, keys: Keys, cache: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
-    """The PR adds its own approver to reviewers.json; lock-check reads main's copy."""
+    """The PR adds its own approver to reviewers.json; lock-check reads the base (main's
+    tip, D31) copy."""
     st, _, head = _new(tmp_path, keys)
     main = _main_checkout(tmp_path / "main", reviewers={"clinical": [CLINICAL], "platform": []})
     head_dir = _main_checkout(

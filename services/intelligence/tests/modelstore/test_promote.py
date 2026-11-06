@@ -1287,3 +1287,67 @@ def test_cli_debug_traceback_only_in_development(
     code = cli.main(["promote", NAME, "1.0.0", "--source", "local", "--run", RUN, "--dry-run"])
     out = capsys.readouterr()
     assert code == 3 and "Traceback" in out.err
+
+
+# ---------------------------------------------------------------- the dry run's report
+
+
+def test_cli_dry_run_writes_the_aggregate_report_when_asked(
+    tmp_path: Path,
+    dev_set: minisets.MiniSet,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--report-dir`` keeps the dry run's evaluation.json (the bytes a promotion would
+    upload: aggregates only) for the workflow's evaluation.md artifact."""
+    monkeypatch.setenv(cli.LOCAL_ROOT_ENV, str(_source_root(tmp_path)))
+    out_dir = tmp_path / "report"
+    out_dir.mkdir()
+    argv = ["promote", NAME, "1.0.0", "--source", "local", "--run", RUN, "--dry-run"]
+    code, out = _cli([*argv, "--dev-set", str(dev_set.root), "--report-dir", str(out_dir)], capsys)
+    assert code == 0, out
+    summary = json.loads(out)
+    assert [p.name for p in out_dir.iterdir()] == ["evaluation.json"]
+    path = out_dir / "evaluation.json"
+    assert path.stat().st_mode & 0o077 == 0
+    rep = report.read_report(path)
+    ts = rep["testset"]
+    assert f"{ts['name']}@{ts['version']}#{ts['sha256']}" == summary["testset"]
+    assert {g: v["verdict"] for g, v in rep["verdicts"].items()} == summary["verdicts"]
+    assert report.render_markdown(rep)
+    assert MARKER not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("case", ["promotion", "missing", "exists", "symlink", "file"])
+def test_cli_report_dir_checked_before_anything_runs(
+    case: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dry run only; an existing, real folder; never an existing report overwritten.
+    Refused before the source, the split or the store is touched."""
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("ran")
+
+    monkeypatch.setattr(promote, "promote", boom)
+    monkeypatch.setattr(cli, "_registries", boom)
+    out_dir = tmp_path / "report"
+    argv = ["promote", NAME, "1.0.0", "--source", "local", "--run", RUN, "--dry-run"]
+    if case == "promotion":
+        argv.remove("--dry-run")
+        out_dir.mkdir()
+    elif case == "exists":
+        out_dir.mkdir()
+        (out_dir / "evaluation.json").write_bytes(b"kept")
+    elif case == "symlink":
+        (tmp_path / "real").mkdir()
+        out_dir.symlink_to(tmp_path / "real")
+    elif case == "file":
+        out_dir.write_bytes(b"")
+    code, out = _cli([*argv, "--report-dir", str(out_dir)], capsys)
+    assert code == 2
+    assert json.loads(out) == {"refused": "not_allowed_here", "detail": "report_dir"}
+    if case == "exists":
+        assert (out_dir / "evaluation.json").read_bytes() == b"kept"

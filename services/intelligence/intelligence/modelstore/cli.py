@@ -7,6 +7,7 @@ Commands::
     mhai-models promote NAME VERSION --source drive|local|hf --run RUN
         [--hf-repo R --hf-revision SHA] [--dry-run] [--expect-files SHA256]
         [--runtime-url URL] [--gate phase1|phase3|rehearsal ...] [--dev-set DIR]
+        [--report-dir DIR]
     mhai-models check DIR
     mhai-models make-fixture DIR [--variant V] [--seed N] [--name NAME]
     mhai-models store-init
@@ -52,7 +53,11 @@ only), ``MHAI_MODELS_TRUST_POLICY`` (the signer must be trusted for ``testset``)
 ``promote`` runs :func:`intelligence.modelstore.promote.promote` and prints one JSON summary
 (name, version, run, files hash, split, test set, verdicts, failed gates, and the manifest's
 SHA-256 when promoted). Its names are checked before any I/O. A dry run reads no store
-credentials and writes nothing. A promotion reads ``MODEL_STORE_ENDPOINT``,
+credentials and writes nothing to the store; with ``--report-dir DIR`` (a dry run only: an
+existing folder, not a symlink, holding no ``evaluation.json``, checked before anything
+runs) it also writes the run's ``evaluation.json`` there (mode 0600, never overwritten),
+the aggregate-only report a promotion would upload, for the workflow's ``evaluation.md``
+(``mhai-doceval report``). A promotion reads ``MODEL_STORE_ENDPOINT``,
 ``MODEL_STORE_BUCKET``, ``MODEL_STORE_REGION``, ``MODEL_STORE_PROMOTER_ACCESS_KEY`` and
 ``MODEL_STORE_PROMOTER_SECRET_KEY``, ``MODEL_STORE_CANDIDATE_RETENTION_DAYS``,
 ``MHAI_MODELS_SIGNER``, ``MHAI_MODELS_TRUST_POLICY`` and the workflow run (``GITHUB_RUN_ID``,
@@ -794,6 +799,7 @@ def _promote(args: argparse.Namespace) -> int:
         gates=tuple(args.gate or ()),
     )
     promote.check_request(req)  # names first, before any environment, file or network
+    report_dir = _check_report_dir(args.report_dir, req.dry_run)
     if args.dev_set and not req.dry_run and not signing.is_development():
         # A promotion is measured on the locked split, never on a set the caller picks.
         raise Refused("not_allowed_here", detail_code="dev_set_promotion")
@@ -807,10 +813,40 @@ def _promote(args: argparse.Namespace) -> int:
             scratch_parent=Path(os.environ[SCRATCH_ENV]) if os.environ.get(SCRATCH_ENV) else None,
             base_verifier=_base_verifier(stack),
         )
-        return _run_promote(req, ctx)
+        return _run_promote(req, ctx, report_dir)
 
 
-def _run_promote(req: promote.Request, ctx: promote.Context) -> int:
+REPORT_FILE = "evaluation.json"
+
+
+def _check_report_dir(given: str | None, dry_run: bool) -> Path | None:
+    """``--report-dir``: a dry run only, an existing real folder (not a symlink) with no
+    ``evaluation.json`` in it yet. Refused (``not_allowed_here``/``report_dir``) before
+    anything runs."""
+    if given is None:
+        return None
+    path = Path(given)
+    ok = (
+        dry_run
+        and path.is_dir()
+        and not path.is_symlink()
+        and not os.path.lexists(path / REPORT_FILE)
+    )
+    if not ok:
+        raise Refused("not_allowed_here", detail_code="report_dir")
+    return path
+
+
+def _write_report(folder: Path, raw: bytes) -> None:
+    """The dry run's evaluation.json: created new (never overwritten, never through a
+    symlink), mode 0600."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(folder / REPORT_FILE, flags, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(raw)
+
+
+def _run_promote(req: promote.Request, ctx: promote.Context, report_dir: Path | None = None) -> int:
     if not req.dry_run:
         # A dry run never reads store write credentials or the signer.
         signer = _signer() if os.environ.get(SIGNER_ENV) else None
@@ -828,6 +864,8 @@ def _run_promote(req: promote.Request, ctx: promote.Context) -> int:
             ),
         )
     summary = promote.promote(req, ctx)
+    if report_dir is not None:
+        _write_report(report_dir, summary.documents["evaluation.json"])
     _print(summary.to_obj())
     return 0
 
@@ -924,6 +962,7 @@ def _parser() -> argparse.ArgumentParser:
     pr.add_argument("--runtime-url", default=None)
     pr.add_argument("--gate", action="append", default=None)
     pr.add_argument("--dev-set", default=None)
+    pr.add_argument("--report-dir", default=None)
     pr.set_defaults(func=_promote)
     ck = sub.add_parser("check", help="file and training manifest checks on a run folder")
     ck.add_argument("dir")

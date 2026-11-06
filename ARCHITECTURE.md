@@ -55,6 +55,7 @@ hospital endpoints.
 | **PostgreSQL** | One database for all hospitals. Row-level security (RLS) keeps each hospital's rows apart. |
 | **Notifications service** (planned, `services/notifications/`) | Handles every alert and notification: EMR abnormality alerts, decisions on clinicians' corrections, job and system updates. Delivers them in the app (the bell and pop-ups) and by opt-in email. Core decides who is told and publishes the event over NATS; the notifications service only delivers it, and never reads patient records itself. Intelligence never notifies anyone directly. |
 | **Object storage** (planned) | Documents, letters and exports. |
+| **Model store** (phase 0 built and tested on MinIO; the production bucket comes with Task 27) | Every promoted model version: its weights, signed manifest, evaluation report, model card and sign-off, in one bucket with versioning and object lock in compliance mode, so nothing can be changed or deleted while it is retained. Only the promotion workflow writes versions and only the sign-off workflow writes sign-offs; the pipeline reads. Also holds the locked evaluation test split, readable only by the evaluation jobs. |
 
 ```
 browser → BFF (Next.js) → NATS ─┬→ core service ──→ PostgreSQL (RLS per hospital)
@@ -70,6 +71,20 @@ decisions (a signed request token, or an event core published).
 
 Security rules are written once, in Go. Python never takes a hospital or
 user from a payload; it takes them only from the verified token.
+
+### Which model versions run: `models.lock`
+
+`models.lock`, at the repository root, names the exact model version each
+pipeline role uses (name, version, gate and the SHA-256 of its signed
+manifest). It changes only by a reviewed PR: `lock-check` verifies each new
+pin and its approvals, and after the merge the sign-off workflow writes a
+signed sign-off into the model store. At start-up the pipeline verifies every
+pinned role (signature, lock hash, every file, sign-off in production, a
+warm-up page) and takes no jobs until all pass; it never falls back to
+another version. Each answer's `model_versions` names the weights used
+(`name@version#hash`). See "Promoting a model" in
+`services/intelligence/README.md` and the design,
+`docs/specs/2026-10-28-document-pipeline-and-model-promotion-design.md`.
 
 ## Services and systems flow
 
