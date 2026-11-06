@@ -650,6 +650,7 @@ def sign_off(
     thresholds_dir: Path | str,
     retention_days: int,
     changed_paths: Iterable[str],
+    rehearsal: bool = False,
 ) -> Result:
     """Sign off every version newly pinned by the merge ``commit`` (see the module
     docstring). ``before_raw`` is the lock at ``base_sha`` (``main`` before the push,
@@ -666,6 +667,7 @@ def sign_off(
         if not isinstance(value, str) or _COMMIT_SHA.fullmatch(value) is None:
             raise Refused("invalid_name", detail_code=detail)
     lock.check_lock_change_alone(changed_paths)
+    lock.check_rehearsal(rehearsal)
     days = _check_days(retention_days)
     if not isinstance(reviewers, lock.Reviewers):
         raise Refused("policy_invalid", detail_code="reviewers")
@@ -673,7 +675,7 @@ def sign_off(
     check_signer(signer, policy)
     before, after, head = lock.parse(before_raw), lock.parse(after_raw), lock.parse(head_raw)
     for role, pinned in after.models.items():
-        lock.check_production(role, pinned)
+        lock.check_production(role, pinned, rehearsal=rehearsal)
     changed = lock.changed_roles(before, after)
     if not changed:
         return Result({}, None, 0)
@@ -693,6 +695,7 @@ def sign_off(
         testsets_lock=testsets_lock,
         thresholds_dir=thresholds_dir,
         is_own=is_own,
+        rehearsal=rehearsal,
     )
     lock.check_approvals(pr, reviewers, changes)
 

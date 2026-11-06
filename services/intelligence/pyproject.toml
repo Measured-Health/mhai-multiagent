@@ -76,6 +76,8 @@ dev = [
     # Postgres 16 and NATS 2.10 for the tests marked boundary (spec section 12).
     "testcontainers[minio]>=4.15,<5",
     "zizmor>=1.32.0",
+    # test_workflows.py parses the workflow files (also a transitive dependency today).
+    "pyyaml>=6.0",
 ]
 # PyTorch build. CPU is the default; for a CUDA machine use
 # `uv sync --no-group cpu --group cu128`.

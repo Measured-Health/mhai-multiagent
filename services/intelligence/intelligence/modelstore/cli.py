@@ -8,17 +8,28 @@ Commands::
         [--hf-repo R --hf-revision SHA] [--dry-run] [--expect-files SHA256]
         [--runtime-url URL] [--gate phase1|phase3|rehearsal ...] [--dev-set DIR]
     mhai-models check DIR
-    mhai-models make-fixture DIR [--variant V] [--seed N]
+    mhai-models make-fixture DIR [--variant V] [--seed N] [--name NAME]
     mhai-models store-init
     mhai-models pin ROLE NAME VERSION --gate phase1|phase3 [--lock PATH [--rehearsal]]
     mhai-models lock-check --base-dir MAIN_CHECKOUT --head HEAD_LOCK --head-sha SHA --pr N
         --testsets MAIN_CHECKOUT/models/testsets.lock
         --thresholds-dir MAIN_CHECKOUT/services/intelligence/intelligence/doceval/thresholds
+        [--rehearsal]
     mhai-models signoff --base-dir BASE_CHECKOUT --base-sha BASE_SHA --before OLD_LOCK
         --after NEW_LOCK --commit SHA --head-sha HEAD_SHA --head-lock HEAD_LOCK
         --testsets BASE_CHECKOUT/models/testsets.lock
         --thresholds-dir BASE_CHECKOUT/services/intelligence/intelligence/doceval/thresholds
-    mhai-models rollback ROLE [--to VERSION] [--lock PATH]
+        [--rehearsal]
+    mhai-models rollback ROLE [--to VERSION] [--lock PATH] [--rehearsal]
+
+The CI rehearsal (Task 24, ``scripts/rehearse-promotion.sh``): ``--rehearsal`` on
+``lock-check``, ``signoff`` and ``rollback`` allows a ``fixture-`` name and the ``rehearsal``
+gate (:func:`intelligence.modelstore.lock.check_production`), and
+``MHAI_MODELS_GITHUB_FAKE`` names a file of GitHub's answers
+(:class:`intelligence.modelstore.lock.FileSession`) in place of the API. Both are
+``not_allowed_here`` (``rehearsal``, ``github_fake``) outside development (both switches),
+before any store or GitHub access; the production workflows set neither, and
+``test_workflows.py`` checks it. ``make-fixture --name`` names the fixture's model.
 
 TODO(Task 22): verify and drive-check.
 
@@ -216,6 +227,7 @@ DATASETS_ENV = "MHAI_MODELS_DATASETS"
 LICENCES_ENV = "MHAI_MODELS_LICENCES"
 TESTSETS_LOCK_ENV = "MHAI_MODELS_TESTSETS_LOCK"
 MINIO_URL_ENV = "MINIO_URL"
+GITHUB_FAKE_ENV = "MHAI_MODELS_GITHUB_FAKE"
 WORKFLOW_ENVS = ("GITHUB_RUN_ID", "GITHUB_WORKFLOW_REF", "GITHUB_SHA", "GITHUB_ACTOR")
 MAX_SCALE = 10.0
 MODELS_DIR = promote.REPO / "models"
@@ -415,6 +427,14 @@ def _check_policy_env(path: Path) -> None:
 
 
 def _github() -> lock.MergedPullRequests:
+    """GitHub with the job's token; or, for the CI rehearsal only, the canned answers in
+    ``MHAI_MODELS_GITHUB_FAKE`` (:class:`intelligence.modelstore.lock.FileSession`),
+    which is ``not_allowed_here``/``github_fake`` outside development (both switches)."""
+    fake = os.environ.get(GITHUB_FAKE_ENV)
+    if fake:
+        if not verify.is_development():
+            raise Refused("not_allowed_here", detail_code="github_fake")
+        return lock.FileSession.client(fake)
     return lock.GitHubClient.from_env()
 
 
@@ -497,13 +517,15 @@ def _lock_check(args: argparse.Namespace) -> int:
     thresholds_dir = _inside(args.thresholds_dir, base_dir)
     policy_path = base_dir / BASE_TRUST_POLICY_PATH
     _check_policy_env(policy_path)
+    rehearsal = bool(args.rehearsal)
+    lock.check_rehearsal(rehearsal)
     changed = _pr_changed_files(base_dir, args.head_sha)
     lock.check_lock_change_alone(changed)
     base, head = lock.read(base_dir / BASE_LOCK_PATH), lock.read(args.head)
     reviewers = lock.read_reviewers(base_dir / BASE_REVIEWERS_PATH)
     locked = testsets.read_lock(testsets_path)
     for role, entry in head.models.items():
-        lock.check_production(role, entry)
+        lock.check_production(role, entry, rehearsal=rehearsal)
     if not lock.changed_roles(base, head):
         _print({"lock_check": "pass", "roles": {}})
         return 0
@@ -524,6 +546,7 @@ def _lock_check(args: argparse.Namespace) -> int:
             thresholds_dir=thresholds_dir,
             head_sha=args.head_sha,
             changed_paths=changed,
+            rehearsal=rehearsal,
         )
     _print({"lock_check": "pass", "roles": roles})
     return 0
@@ -638,6 +661,7 @@ def _signoff(args: argparse.Namespace) -> int:
     for value, detail in ((commit, "commit"), (head_sha, "head_sha"), (base_sha, "base_sha")):
         if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
             raise Refused("invalid_name", detail_code=detail)
+    lock.check_rehearsal(bool(args.rehearsal))
     base_dir = Path(args.base_dir).resolve()
     if not base_dir.is_dir():
         raise Refused("not_allowed_here", detail_code="base_dir")
@@ -679,8 +703,9 @@ def _signoff_from(
     thresholds_dir = snap / thresholds_rel
     policy_path = snap / BASE_TRUST_POLICY_PATH
     days = _retention_days(APPROVED_RETENTION_ENV)
+    rehearsal = bool(args.rehearsal)
     for role, entry in after.models.items():
-        lock.check_production(role, entry)
+        lock.check_production(role, entry, rehearsal=rehearsal)
     if not lock.changed_roles(before, after):
         _print(signoff.Result({}, None, 0).to_obj())
         return 0
@@ -706,6 +731,7 @@ def _signoff_from(
             thresholds_dir=thresholds_dir,
             retention_days=days,
             changed_paths=changed,
+            rehearsal=rehearsal,
         )
     _print(result.to_obj())
     return 0
@@ -715,6 +741,7 @@ def _rollback(args: argparse.Namespace) -> int:
     names.check_role(args.role)  # names first, before any environment, file or store access
     if args.to is not None:
         names.check_version(args.to)
+    lock.check_rehearsal(bool(args.rehearsal))
     lock_path = Path(args.lock) if args.lock else PRODUCTION_LOCK
     source = _reader_store()
     policy = _trust_policy()
@@ -726,6 +753,7 @@ def _rollback(args: argparse.Namespace) -> int:
             cache_dir=cache_dir,
             lock_path=lock_path,
             to=args.to,
+            rehearsal=bool(args.rehearsal),
         )
     out = {"role": done.role, "from": done.previous.to_obj(), "to": done.entry.to_obj()}
     _print({"rollback": out})
@@ -822,11 +850,12 @@ def _check(args: argparse.Namespace) -> int:
 def _make_fixture(args: argparse.Namespace) -> int:
     from intelligence.modelstore import fixtures
 
+    name = fixtures.MODEL_NAME if args.name is None else names.check_name(args.name)
     if args.variant not in fixtures.EXPECTED_REASONS:
         raise Refused("fixture_name")
     if re.fullmatch(r"[0-9]{1,10}", args.seed, re.ASCII) is None:
         raise Refused("fixture_name", detail_code="seed")
-    fixtures.make_run(Path(args.dir), args.variant, int(args.seed))
+    fixtures.make_run(Path(args.dir), args.variant, int(args.seed), name=name)
     _print({"fixture": args.variant})
     return 0
 
@@ -903,6 +932,7 @@ def _parser() -> argparse.ArgumentParser:
     mf.add_argument("dir")
     mf.add_argument("--variant", default="good")
     mf.add_argument("--seed", default="0")
+    mf.add_argument("--name", default=None)
     mf.set_defaults(func=_make_fixture)
     si = sub.add_parser("store-init", help="provision a loopback MinIO (rehearsal only)")
     si.set_defaults(func=_store_init)
@@ -921,6 +951,7 @@ def _parser() -> argparse.ArgumentParser:
     lc.add_argument("--pr", required=True)
     lc.add_argument("--testsets", required=True)
     lc.add_argument("--thresholds-dir", required=True)
+    lc.add_argument("--rehearsal", action="store_true")
     lc.set_defaults(func=_lock_check)
     so = sub.add_parser("signoff", help="sign off the versions a merge to main pinned")
     so.add_argument("--base-dir", required=True)
@@ -932,11 +963,13 @@ def _parser() -> argparse.ArgumentParser:
     so.add_argument("--head-lock", required=True)
     so.add_argument("--testsets", required=True)
     so.add_argument("--thresholds-dir", required=True)
+    so.add_argument("--rehearsal", action="store_true")
     so.set_defaults(func=_signoff)
     rb = sub.add_parser("rollback", help="pin a role back to an older signed-off version")
     rb.add_argument("role")
     rb.add_argument("--to", default=None)
     rb.add_argument("--lock", default=None)
+    rb.add_argument("--rehearsal", action="store_true")
     rb.set_defaults(func=_rollback)
     return parser
 

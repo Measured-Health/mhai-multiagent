@@ -1,0 +1,294 @@
+name: Model promotion
+
+# Promote a trained run into the model store (plan Task 24, design section 7.3): a dry run
+# in the model-eval environment, then, after a platform reviewer approves the
+# model-promotion environment (H4: required reviewers, self-review prevented), the real
+# promotion with --expect-files set to the dry run's files hash, so what was reviewed is
+# what is promoted.
+#
+# Every input reaches the shell only through env:, quoted, and the CLI checks every name
+# again before any I/O (P18). Only the promote job, in model-promotion, gets the store's
+# promoter credentials.
+#
+# Rehearsal mode: while vars.MODEL_STORE_ENDPOINT is empty (until Task 27), each job starts
+# MinIO from docker-compose.models.yml, provisions it, builds a small test split with an
+# in-job development key, and forces source local-fixture and the rehearsal gate, in
+# development (both switches). The job summary says "rehearsal". So the dispatch ->
+# approval -> promote path, environments included, can run before any credential exists.
+# Outside rehearsal mode both switches are production.
+#
+# Runs on ubuntu-latest in phase 0; it moves to the self-hosted model-promote runner with
+# the GPU host. TODO(Task 26): the production manifest signer (MHAI_MODELS_SIGNER).
+# TODO(Task 28): the Drive source.
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: Model name (^[a-z0-9][a-z0-9-]{1,62}$)
+        required: true
+        type: string
+      version:
+        description: Version to promote (semver)
+        required: true
+        type: string
+      run:
+        description: Run id (^[A-Za-z0-9_-]{1,64}$)
+        required: true
+        type: string
+      source:
+        description: Where the run is
+        required: true
+        type: choice
+        options: [drive, hf, local-fixture]
+      hf_repo:
+        description: Hugging Face repo (source hf)
+        required: false
+        type: string
+      hf_revision:
+        description: Hugging Face commit sha (source hf)
+        required: false
+        type: string
+      gate:
+        description: Gate the promotion is measured against
+        required: true
+        type: choice
+        options: [phase1, phase3, rehearsal]
+
+permissions: {}
+
+concurrency:
+  group: model-promote-${{ inputs.name }}
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    environment: model-eval
+    permissions:
+      contents: read
+      id-token: write  # the store's federated identity (Task 27)
+    outputs:
+      files_hash: ${{ steps.dry.outputs.files_hash }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      REHEARSAL: ${{ vars.MODEL_STORE_ENDPOINT == '' }}
+      NAME: ${{ inputs.name }}
+      VERSION: ${{ inputs.version }}
+      RUN: ${{ inputs.run }}
+      SOURCE_INPUT: ${{ inputs.source }}
+      GATE_INPUT: ${{ inputs.gate }}
+      HF_REPO: ${{ inputs.hf_repo }}
+      HF_REVISION: ${{ inputs.hf_revision }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.12.23"
+          enable-cache: false
+
+      - name: Install
+        working-directory: services/intelligence
+        run: uv sync --locked
+
+      - name: Mode
+        run: |
+          if [ "$REHEARSAL" = true ]; then
+            {
+              echo MHAI_MODELS_ENV=development
+              echo APP_ENV=development
+              echo SOURCE=local
+              echo GATE=rehearsal
+            } >>"$GITHUB_ENV"
+            echo '## rehearsal: no production store; source local-fixture, gate rehearsal, development keys' >>"$GITHUB_STEP_SUMMARY"
+          else
+            case "$SOURCE_INPUT" in
+              drive | hf) source="$SOURCE_INPUT" ;;
+              *) echo "::error::local-fixture is for rehearsal only"; exit 1 ;;
+            esac
+            {
+              echo MHAI_MODELS_ENV=production
+              echo APP_ENV=production
+              echo "SOURCE=$source"
+              echo "GATE=$GATE_INPUT"
+              echo MHAI_EVAL_ROLE=locked
+              echo "MHAI_MODELS_TESTSETS_LOCK=$GITHUB_WORKSPACE/models/testsets.lock"
+              echo "MHAI_MODELS_TRUST_POLICY=$GITHUB_WORKSPACE/models/trust-policy.json"
+            } >>"$GITHUB_ENV"
+          fi
+
+      # The store's settings and these roles' throwaway passwords go to $GITHUB_ENV, masked.
+      - name: Rehearsal store
+        if: env.REHEARSAL == 'true'
+        working-directory: services/intelligence
+        run: uv run --no-sync scripts/rehearse-promotion.sh store-up "$GITHUB_ENV" eval-reader eval-writer
+
+      - name: Rehearsal keys, test split and fixture run
+        if: env.REHEARSAL == 'true'
+        working-directory: services/intelligence
+        run: |
+          uv run --no-sync scripts/rehearse-promotion.sh prepare "$RUNNER_TEMP/rehearsal" "$NAME" "$RUN" "$GITHUB_ENV"
+
+      - name: Dry run
+        id: dry
+        working-directory: services/intelligence
+        env:
+          P_ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT }}
+          P_BUCKET: ${{ vars.MODEL_STORE_BUCKET }}
+          P_REGION: ${{ vars.MODEL_STORE_REGION }}
+          P_DRIVE_FOLDER: ${{ vars.MODEL_DRIVE_FOLDER_ID }}
+          P_EVAL_READER_ACCESS: ${{ secrets.MODEL_STORE_EVAL_READER_ACCESS_KEY }}
+          P_EVAL_READER_SECRET: ${{ secrets.MODEL_STORE_EVAL_READER_SECRET_KEY }}
+        run: |
+          if [ "$REHEARSAL" != true ]; then
+            export MODEL_STORE_ENDPOINT="$P_ENDPOINT" MODEL_STORE_BUCKET="$P_BUCKET"
+            export MODEL_STORE_REGION="$P_REGION" MHAI_MODELS_DRIVE_FOLDER_ID="$P_DRIVE_FOLDER"
+            export MODEL_STORE_EVAL_READER_ACCESS_KEY="$P_EVAL_READER_ACCESS"
+            export MODEL_STORE_EVAL_READER_SECRET_KEY="$P_EVAL_READER_SECRET"
+          fi
+          args=(promote "$NAME" "$VERSION" --source "$SOURCE" --run "$RUN" --gate "$GATE" --dry-run)
+          if [ "$SOURCE" = hf ]; then
+            args+=(--hf-repo "$HF_REPO" --hf-revision "$HF_REVISION")
+          fi
+          code=0
+          out="$(uv run --no-sync mhai-models "${args[@]}")" || code=$?
+          mkdir -p "$RUNNER_TEMP/summary"
+          printf '%s\n' "$out" | tee "$RUNNER_TEMP/summary/dry-run.json"
+          { echo '### dry run'; echo '```json'; printf '%s\n' "$out"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          [ "$code" -eq 0 ] || exit "$code"
+          files="$(printf '%s' "$out" | jq -r .files_sha256)"
+          [[ "$files" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no files hash"; exit 1; }
+          echo "files_hash=$files" >>"$GITHUB_OUTPUT"
+
+      # The CLI's JSON summary only: names, hashes, verdicts. Never weights, pages or keys.
+      - name: Keep the summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dry-run-summary
+          path: ${{ runner.temp }}/summary/dry-run.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  promote:
+    needs: dry-run
+    runs-on: ubuntu-latest
+    environment: model-promotion
+    permissions:
+      contents: read
+      id-token: write  # the store's federated identity and the signer (Tasks 26, 27)
+    defaults:
+      run:
+        shell: bash
+    env:
+      REHEARSAL: ${{ vars.MODEL_STORE_ENDPOINT == '' }}
+      NAME: ${{ inputs.name }}
+      VERSION: ${{ inputs.version }}
+      RUN: ${{ inputs.run }}
+      SOURCE_INPUT: ${{ inputs.source }}
+      GATE_INPUT: ${{ inputs.gate }}
+      HF_REPO: ${{ inputs.hf_repo }}
+      HF_REVISION: ${{ inputs.hf_revision }}
+      EXPECT_FILES: ${{ needs.dry-run.outputs.files_hash }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.12.23"
+          enable-cache: false
+
+      - name: Install
+        working-directory: services/intelligence
+        run: uv sync --locked
+
+      - name: Mode
+        run: |
+          [[ "$EXPECT_FILES" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bad files hash from the dry run"; exit 1; }
+          if [ "$REHEARSAL" = true ]; then
+            {
+              echo MHAI_MODELS_ENV=development
+              echo APP_ENV=development
+              echo SOURCE=local
+              echo GATE=rehearsal
+            } >>"$GITHUB_ENV"
+            echo '## rehearsal: no production store; source local-fixture, gate rehearsal, development keys' >>"$GITHUB_STEP_SUMMARY"
+          else
+            case "$SOURCE_INPUT" in
+              drive | hf) source="$SOURCE_INPUT" ;;
+              *) echo "::error::local-fixture is for rehearsal only"; exit 1 ;;
+            esac
+            {
+              echo MHAI_MODELS_ENV=production
+              echo APP_ENV=production
+              echo "SOURCE=$source"
+              echo "GATE=$GATE_INPUT"
+              echo MHAI_EVAL_ROLE=locked
+              echo "MHAI_MODELS_TESTSETS_LOCK=$GITHUB_WORKSPACE/models/testsets.lock"
+              echo "MHAI_MODELS_TRUST_POLICY=$GITHUB_WORKSPACE/models/trust-policy.json"
+            } >>"$GITHUB_ENV"
+          fi
+
+      # The store's settings and these roles' throwaway passwords go to $GITHUB_ENV, masked.
+      - name: Rehearsal store
+        if: env.REHEARSAL == 'true'
+        working-directory: services/intelligence
+        run: uv run --no-sync scripts/rehearse-promotion.sh store-up "$GITHUB_ENV" promoter eval-reader eval-writer
+
+      - name: Rehearsal keys, test split and fixture run
+        if: env.REHEARSAL == 'true'
+        working-directory: services/intelligence
+        run: |
+          uv run --no-sync scripts/rehearse-promotion.sh prepare "$RUNNER_TEMP/rehearsal" "$NAME" "$RUN" "$GITHUB_ENV"
+          echo MODEL_STORE_CANDIDATE_RETENTION_DAYS=1 >>"$GITHUB_ENV"
+
+      - name: Promote
+        working-directory: services/intelligence
+        env:
+          P_ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT }}
+          P_BUCKET: ${{ vars.MODEL_STORE_BUCKET }}
+          P_REGION: ${{ vars.MODEL_STORE_REGION }}
+          P_DRIVE_FOLDER: ${{ vars.MODEL_DRIVE_FOLDER_ID }}
+          P_RETENTION: ${{ vars.MODEL_STORE_CANDIDATE_RETENTION_DAYS }}
+          P_EVAL_READER_ACCESS: ${{ secrets.MODEL_STORE_EVAL_READER_ACCESS_KEY }}
+          P_EVAL_READER_SECRET: ${{ secrets.MODEL_STORE_EVAL_READER_SECRET_KEY }}
+          P_PROMOTER_ACCESS: ${{ secrets.MODEL_STORE_PROMOTER_ACCESS_KEY }}
+          P_PROMOTER_SECRET: ${{ secrets.MODEL_STORE_PROMOTER_SECRET_KEY }}
+        run: |
+          if [ "$REHEARSAL" != true ]; then
+            export MODEL_STORE_ENDPOINT="$P_ENDPOINT" MODEL_STORE_BUCKET="$P_BUCKET"
+            export MODEL_STORE_REGION="$P_REGION" MHAI_MODELS_DRIVE_FOLDER_ID="$P_DRIVE_FOLDER"
+            export MODEL_STORE_CANDIDATE_RETENTION_DAYS="$P_RETENTION"
+            export MODEL_STORE_EVAL_READER_ACCESS_KEY="$P_EVAL_READER_ACCESS"
+            export MODEL_STORE_EVAL_READER_SECRET_KEY="$P_EVAL_READER_SECRET"
+            export MODEL_STORE_PROMOTER_ACCESS_KEY="$P_PROMOTER_ACCESS"
+            export MODEL_STORE_PROMOTER_SECRET_KEY="$P_PROMOTER_SECRET"
+          fi
+          args=(promote "$NAME" "$VERSION" --source "$SOURCE" --run "$RUN" --gate "$GATE")
+          if [ "$SOURCE" = hf ]; then
+            args+=(--hf-repo "$HF_REPO" --hf-revision "$HF_REVISION")
+          fi
+          code=0
+          out="$(uv run --no-sync mhai-models "${args[@]}" --expect-files "$EXPECT_FILES")" || code=$?
+          mkdir -p "$RUNNER_TEMP/summary"
+          printf '%s\n' "$out" | tee "$RUNNER_TEMP/summary/promote.json"
+          { echo '### promotion'; echo '```json'; printf '%s\n' "$out"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit "$code"
+
+      - name: Keep the summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: promote-summary
+          path: ${{ runner.temp }}/summary/promote.json
+          if-no-files-found: ignore
+          retention-days: 30

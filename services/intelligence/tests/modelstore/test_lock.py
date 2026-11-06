@@ -1635,3 +1635,120 @@ def test_lock_check_refuses_lock_with_code_from_git(
     assert cli.main(_lock_check_args(plain, head_file, alone)) == 2
     out = json.loads(capsys.readouterr().out)
     assert out == {"refused": "not_allowed_here", "detail": "changed_files_unknown"}
+
+
+# ---------------------------------------------------------------- the rehearsal (Task 24)
+
+
+def _dev(monkeypatch: pytest.MonkeyPatch, on: bool) -> None:
+    for var in (signing.ENV_VAR, verify.APP_ENV):
+        if on:
+            monkeypatch.setenv(var, "development")
+        else:
+            monkeypatch.delenv(var, raising=False)
+
+
+@pytest.mark.parametrize(
+    ("models_env", "app_env"),
+    [(None, None), ("development", None), (None, "development"), ("development", "production")],
+)
+def test_rehearsal_only_in_development(
+    models_env: str | None, app_env: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for var, value in ((signing.ENV_VAR, models_env), (verify.APP_ENV, app_env)):
+        if value is None:
+            monkeypatch.delenv(var, raising=False)
+        else:
+            monkeypatch.setenv(var, value)
+    fixture = lock.Pin("fixture-tiny", "0.1.0", "ab" * 32, "rehearsal")
+    r = _reason(lambda: lock.check_production(ROLE, fixture, rehearsal=True))
+    assert (r.reason, r.detail_code) == ("not_allowed_here", "rehearsal")
+    assert _reason(lambda: lock.check_production(ROLE, fixture)).reason == "fixture_name"
+
+
+def test_rehearsal_allows_fixture_and_rehearsal_gate_but_not_unknown_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _dev(monkeypatch, True)
+    fixture = lock.Pin("fixture-tiny", "0.1.0", "ab" * 32, "rehearsal")
+    lock.check_production(ROLE, fixture, rehearsal=True)
+    r = _reason(lambda: lock.check_production("ocr", fixture, rehearsal=True))
+    assert (r.reason, r.detail_code) == ("lock_invalid", "role")
+    # production stays the default, in development too
+    assert _reason(lambda: lock.check_production(ROLE, fixture)).reason == "fixture_name"
+    with pytest.raises(Refused):
+        lock.check_rehearsal(1)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("command", ["lock-check", "signoff", "rollback"])
+def test_cli_rehearsal_flag_refused_outside_development(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    _dev(monkeypatch, False)
+    main = _main_checkout(tmp_path / "main")
+    head = _lock_file(tmp_path)
+    called: list[str] = []
+    monkeypatch.setattr(cli, "_reader_store", lambda: called.append("store"))
+    monkeypatch.setattr(cli, "_pr_changed_files", lambda base_dir, head_sha: list(LOCK_ONLY))
+    monkeypatch.setattr(cli, "_checkout_root", lambda path: path)
+    monkeypatch.setattr(cli, "_checkout_head", lambda path: "e5" * 20)
+    monkeypatch.setattr(cli, "_merge_changed_files", lambda b, s, c: list(LOCK_ONLY))
+    monkeypatch.setenv(cli.APPROVED_RETENTION_ENV, "1")
+    if command == "lock-check":
+        args = [*_lock_check_args(main, head), "--rehearsal"]
+    elif command == "signoff":
+        args = ["signoff", "--base-dir", str(main), "--base-sha", "e5" * 20]
+        args += ["--before", str(head), "--after", str(head), "--commit", "c3" * 20]
+        args += ["--head-sha", HEAD, "--head-lock", str(head)]
+        args += ["--testsets", str(main / "models" / "testsets.lock")]
+        args += ["--thresholds-dir", str(main / THRESHOLDS_REL), "--rehearsal"]
+    else:
+        args = ["rollback", ROLE, "--lock", str(head), "--rehearsal"]
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "refused": "not_allowed_here",
+        "detail": "rehearsal",
+    }
+    assert called == []
+
+
+def _fake_github(tmp_path: Path, pr: FakePR) -> Path:
+    path = tmp_path / "github.json"
+    responses = {f"/pulls/{pr.number}": pr.resource(), f"/pulls/{pr.number}/reviews": pr.reviews}
+    path.write_text(json.dumps({"repository": GH_REPO, "responses": responses}))
+    return path
+
+
+def test_fake_github_only_in_development(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _fake_github(tmp_path, _approved_pr())
+    monkeypatch.setenv(cli.GITHUB_FAKE_ENV, str(path))
+    monkeypatch.setenv(lock.TOKEN_ENV, "synthetic-token-never-used")
+    monkeypatch.setenv(lock.REPOSITORY_ENV, GH_REPO)
+    for models_env, app_env in ((None, None), ("development", None), (None, "development")):
+        for var, value in ((signing.ENV_VAR, models_env), (verify.APP_ENV, app_env)):
+            if value is None:
+                monkeypatch.delenv(var, raising=False)
+            else:
+                monkeypatch.setenv(var, value)
+        r = _reason(cli._github)
+        assert (r.reason, r.detail_code) == ("not_allowed_here", "github_fake")
+    _dev(monkeypatch, True)
+    pr = cli._github().pull_request(7)
+    assert pr.head_sha == HEAD and pr.base_ref == "main"
+    assert lock.approvals(pr) == {CLINICAL, PLATFORM}
+    # anything not in the file is GitHub's 404; a bad file is refused
+    assert _reason(lambda: cli._github().pull_request(8)).reason == "not_found"
+    path.write_text("{")
+    assert _reason(cli._github).detail_code == "github_fake"
+    path.write_text(json.dumps({"repository": "../x", "responses": {}}))
+    assert _reason(cli._github).detail_code == "github_fake"
+
+
+def test_cli_make_fixture_takes_a_name(tmp_path: Path, capsys: Any) -> None:
+    assert cli.main(["make-fixture", str(tmp_path / "a"), "--name", "fixture-tiny"]) == 0
+    capsys.readouterr()
+    tm = json.loads((tmp_path / "a" / "training_manifest.json").read_text())
+    assert tm["name"] == "fixture-tiny"
+    assert cli.main(["make-fixture", str(tmp_path / "b"), "--name", "../x"]) == 2
+    assert json.loads(capsys.readouterr().out)["refused"] == "invalid_name"
+    assert not (tmp_path / "b").exists()

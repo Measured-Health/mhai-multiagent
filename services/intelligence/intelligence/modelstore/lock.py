@@ -130,7 +130,7 @@ import os
 import re
 import secrets
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -302,10 +302,24 @@ def write(path: Path | str, lock: Lock) -> None:
         raise
 
 
-def check_production(role: str, entry: Pin) -> None:
-    """P14: a production pin names a known role, a production gate and no fixture."""
+def check_rehearsal(rehearsal: bool) -> None:
+    """A rehearsal (``--rehearsal``: fixture names and the ``rehearsal`` gate allowed) runs
+    in development only, both switches (:func:`intelligence.modelstore.verify.
+    is_development`); anywhere else it is ``not_allowed_here``/``rehearsal``. Production
+    is the default and needs no flag."""
+    if rehearsal is not False and (rehearsal is not True or not verify.is_development()):
+        raise Refused("not_allowed_here", detail_code="rehearsal")
+
+
+def check_production(role: str, entry: Pin, *, rehearsal: bool = False) -> None:
+    """P14: a production pin names a known role, a production gate and no fixture. A
+    rehearsal (development only, :func:`check_rehearsal`) still needs a known role, and
+    allows a ``fixture-`` name and the ``rehearsal`` gate (Task 24's CI rehearsal)."""
+    check_rehearsal(rehearsal)
     if role not in ROLES:
         raise _invalid("role")
+    if rehearsal:
+        return
     if entry.name.startswith(FIXTURE_PREFIX):
         raise Refused("fixture_name")
     if entry.gate not in PRODUCTION_GATES:
@@ -841,6 +855,70 @@ class GitHubClient:
         return tuple(out)
 
 
+# ---------------------------------------------------------------- the rehearsal's GitHub
+
+FAKE_MAX_BYTES = 1024 * 1024
+
+
+class _FileResponse:
+    def __init__(self, status_code: int, body: bytes) -> None:
+        self.status_code = status_code
+        self.headers: dict[str, str] = {}
+        self._body = body
+
+    def iter_content(self, size: int) -> Iterator[bytes]:
+        for i in range(0, len(self._body), size):
+            yield self._body[i : i + size]
+
+    def close(self) -> None:
+        return None
+
+
+class FileSession:
+    """GitHub's answers from a file, for Task 24's CI rehearsal only (``mhai-models``
+    takes it from ``MHAI_MODELS_GITHUB_FAKE``, in development only, both switches). The
+    file is ``{"repository": "<owner>/<repo>", "responses": {"<path>": <JSON body>}}``,
+    each path the part after ``/repos/<owner>/<repo>`` (``/pulls/1``,
+    ``/pulls/1/reviews``, ``/commits/<sha>/pulls``, ``/git/commits/<sha>``); anything
+    else is a 404. No network, no token: :class:`GitHubClient` parses these answers as it
+    parses GitHub's, so the rehearsal runs the same checks."""
+
+    def __init__(self, responses: Mapping[str, Any], repository: str) -> None:
+        self._responses = dict(responses)
+        self._prefix = f"{API_URL}/repos/{repository}"
+
+    @classmethod
+    def client(cls, path: Path | str) -> GitHubClient:
+        failed = False
+        obj: Any = None
+        try:
+            obj = json.loads(files.read_regular(path, FAKE_MAX_BYTES))
+        except (Refused, ValueError):
+            failed = True
+        if failed or not isinstance(obj, dict) or not isinstance(obj.get("responses"), dict):
+            raise Refused("not_allowed_here", detail_code="github_fake")
+        repository = obj.get("repository")
+        if not isinstance(repository, str) or _REPO.fullmatch(repository) is None:
+            raise Refused("not_allowed_here", detail_code="github_fake")
+        return GitHubClient(cls(obj["responses"], repository), repository)
+
+    def get(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, str],
+        timeout: Any,
+        stream: bool,
+        allow_redirects: bool,
+    ) -> _FileResponse:
+        if not url.startswith(self._prefix):
+            return _FileResponse(404, b"")
+        found = self._responses.get(url[len(self._prefix) :])
+        if found is None:
+            return _FileResponse(404, b"")
+        return _FileResponse(200, json.dumps(found).encode())
+
+
 def _review(item: object) -> Review | None:
     """One review, or None for one that can't count (a deleted user, an odd shape)."""
     if not isinstance(item, dict):
@@ -1076,6 +1154,7 @@ def assess_changes(
     testsets_lock: Mapping[tuple[str, str], TestsetEntry],
     thresholds_dir: Path | str,
     is_own: Callable[[signoff_record.Signoff], bool] | None = None,
+    rehearsal: bool = False,
 ) -> tuple[list[Change], dict[str, manifest.Manifest]]:
     """The store half of ``lock-check`` (and of the sign-off, Task 21): every head entry
     passes :func:`check_production`; each changed role is verified and classified as
@@ -1085,9 +1164,9 @@ def assess_changes(
 
     ``is_own`` is the sign-off's: a valid sign-off it accepts (the one this very merge
     already wrote, on a re-run) keeps the version ``new`` instead of making it a
-    rollback."""
+    rollback. ``rehearsal`` relaxes :func:`check_production` (development only)."""
     for role, pinned in head.models.items():
-        check_production(role, pinned)
+        check_production(role, pinned, rehearsal=rehearsal)
     changes: list[Change] = []
     manifests: dict[str, manifest.Manifest] = {}
     for role in changed_roles(base, head):
@@ -1141,6 +1220,7 @@ def lock_check(
     thresholds_dir: Path | str,
     head_sha: str,
     changed_paths: Iterable[str],
+    rehearsal: bool = False,
 ) -> dict[str, str]:
     """Check a PR's change to ``models.lock``; returns ``{role: new|rollback|removed}``.
 
@@ -1149,16 +1229,19 @@ def lock_check(
     ``head_sha``; a PR whose head is no longer ``head_sha`` is ``not_approved``/
     ``head_moved`` (the new head gets its own check), and one whose base branch isn't
     ``main`` is ``base_not_main``. ``changed_paths`` are the files the PR changes, from git
-    (:func:`check_lock_change_alone`, D35). Raises :class:`Refused` on any failure."""
+    (:func:`check_lock_change_alone`, D35). ``rehearsal`` (development only) allows
+    fixture names and the rehearsal gate (:func:`check_production`). Raises
+    :class:`Refused` on any failure."""
     number = check_pr_number(number)
     if not isinstance(head_sha, str) or _COMMIT.fullmatch(head_sha) is None:
         raise Refused("invalid_name", detail_code="head_sha")
     check_lock_change_alone(changed_paths)
+    check_rehearsal(rehearsal)
     if not isinstance(reviewers, Reviewers):
         raise Refused("policy_invalid", detail_code="reviewers")
     base, head = parse(base_raw), parse(head_raw)
     for role, pinned in head.models.items():
-        check_production(role, pinned)
+        check_production(role, pinned, rehearsal=rehearsal)
     if not changed_roles(base, head):
         return {}
     changes, _ = assess_changes(
@@ -1169,6 +1252,7 @@ def lock_check(
         cache_dir=cache_dir,
         testsets_lock=testsets_lock,
         thresholds_dir=thresholds_dir,
+        rehearsal=rehearsal,
     )
     pr = github.pull_request(number)
     if pr.base_ref != MAIN_BRANCH:
@@ -1204,6 +1288,7 @@ def rollback_candidates(
     cache_dir: Path | str,
     only: str | None = None,
     first: bool = False,
+    rehearsal: bool = False,
 ) -> list[Pin]:
     """The versions ``role`` may roll back to, latest first: versions of the pinned name
     older than ``current`` (semver order, never string order) whose sign-off for this
@@ -1211,8 +1296,10 @@ def rollback_candidates(
     ``require_signoff=True``, and passes :func:`check_production`. Being in the store, or
     having a ``signoff.json``, is not enough (P16). The entry's hash and gate are the
     sign-off's. ``only`` looks at that one version, ``first`` stops at the latest
-    candidate (each check downloads and hashes a whole version)."""
+    candidate (each check downloads and hashes a whole version). ``rehearsal``
+    (development only) relaxes :func:`check_production`."""
     names.check_role(role)
+    check_rehearsal(rehearsal)
     verify.check_environment(policy)
     name = current.name
     now = names.Version.parse(current.version)
@@ -1231,7 +1318,7 @@ def rollback_candidates(
     for version in older:
         if only is not None and version != only:
             continue
-        entry = _signed_off_entry(source, role, name, version, policy, cache_dir)
+        entry = _signed_off_entry(source, role, name, version, policy, cache_dir, rehearsal)
         if entry is not None:
             out.append(entry)
             if first:
@@ -1246,6 +1333,7 @@ def _signed_off_entry(
     version: str,
     policy: signing.TrustPolicy,
     cache_dir: Path | str,
+    rehearsal: bool = False,
 ) -> Pin | None:
     """The pin a verified sign-off of ``name@version`` for ``role`` names, or None. A
     store outage propagates; any other refusal means "not a candidate"."""
@@ -1259,7 +1347,7 @@ def _signed_off_entry(
             if s.role != role or (s.name, s.version) != (name, version):
                 continue
             entry = Pin(name, version, s.manifest_sha256, s.gate)
-            check_production(role, entry)
+            check_production(role, entry, rehearsal=rehearsal)
             verify.verify_pin(source, role, entry, policy, cache_dir, require_signoff=True)
         except Refused as e:
             if e.reason == "store_unavailable":
@@ -1277,22 +1365,31 @@ def rollback(
     cache_dir: Path | str,
     lock_path: Path | str,
     to: str | None = None,
+    rehearsal: bool = False,
 ) -> RollbackResult:
     """``mhai-models rollback ROLE [--to VERSION]``: pin ``role`` to the latest of
     :func:`rollback_candidates` (or ``to``, which must be one of them: ``not_approved``/
     ``not_a_candidate`` otherwise, P16) and write the lock with :func:`write`. A role
     the lock doesn't pin is ``lock_invalid``/``role``; no candidate at all is
     ``not_approved``/``no_candidate``. The PR it goes in follows ``lock-check``'s rollback
-    rule."""
+    rule. ``rehearsal`` (development only) relaxes :func:`check_production`."""
     names.check_role(role)
     if to is not None:
         names.check_version(to)
+    check_rehearsal(rehearsal)
     current_lock = read(lock_path)
     current = current_lock.models.get(role)
     if current is None:
         raise _invalid("role")
     candidates = rollback_candidates(
-        source, role, current, policy=policy, cache_dir=cache_dir, only=to, first=True
+        source,
+        role,
+        current,
+        policy=policy,
+        cache_dir=cache_dir,
+        only=to,
+        first=True,
+        rehearsal=rehearsal,
     )
     if not candidates:
         detail = "no_candidate" if to is None else "not_a_candidate"
@@ -1387,6 +1484,7 @@ __all__ = [
     "check_evaluation",
     "check_pr_number",
     "check_production",
+    "check_rehearsal",
     "has_clinical_note",
     "empty",
     "find_signed_manifest",
