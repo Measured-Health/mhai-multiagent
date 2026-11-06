@@ -32,8 +32,12 @@ passed for every role and every object's retention is extended:
    :func:`intelligence.modelstore.verify.check_environment`; the signer's key is in the
    policy's ``signoff`` set and not in its ``manifest`` set (``signer_untrusted``).
    TODO(Task 26): the production signer; phase 0 has only the development
-   ``FileSigner``, which refuses outside ``MHAI_MODELS_ENV=development``. A push that
-   changes no role stops here (exit 0): there is nothing to sign.
+   ``FileSigner``, which refuses outside ``MHAI_MODELS_ENV=development``. The files the
+   merge changed (``git diff <base sha> <commit>``, worked out by the CLI from git) may
+   not change ``models.lock`` or ``models/**`` together with the code or workflows that
+   check them (D35, :func:`intelligence.modelstore.lock.check_lock_change_alone`:
+   ``not_allowed_here``/``code_changed_with_lock``). A push that changes no role stops
+   here (exit 0): there is nothing to sign.
 2. **The merge commit** (D33, :func:`check_merge`). ``--commit`` must have exactly two
    parents as GitHub reports them (``GET /git/commits/{sha}``), else
    ``not_approved``/``not_a_merge_commit``: a squash or rebase merge, a direct push or a
@@ -100,7 +104,8 @@ and needs a person.
 
 What Task 24's ``model-signoff.yml`` passes (D32, D33):
 
-* ``--commit "$GITHUB_SHA"`` (the push's ``after``);
+* ``--commit "$GITHUB_SHA"`` (the push's ``after``), fetched into ``--base-dir``'s
+  repository: the CLI diffs ``--base-sha`` against it there (D35);
 * ``--base-sha`` = the push event's ``before`` (``github.event.before``): ``main`` before
   the push, which must be the merge commit's first parent;
 * ``--base-dir``: a checkout of ``--base-sha``, from which the command also runs (its
@@ -643,12 +648,15 @@ def sign_off(
     testsets_lock: Mapping[tuple[str, str], TestsetEntry],
     thresholds_dir: Path | str,
     retention_days: int,
+    changed_paths: Iterable[str],
 ) -> Result:
     """Sign off every version newly pinned by the merge ``commit`` (see the module
     docstring). ``before_raw`` is the lock at ``base_sha`` (``main`` before the push,
     which must be the commit's first parent), ``after_raw`` at the commit, ``head_raw`` at
     ``head_sha`` (the merged PR's head, which the reviewers approved); ``reviewers``,
     ``testsets_lock``, ``thresholds_dir`` and ``policy`` are ``main``'s at ``base_sha``.
+    ``changed_paths`` are the files the merge changed (``git diff <base sha> <commit>``),
+    checked by :func:`intelligence.modelstore.lock.check_lock_change_alone` (D35).
     Raises :class:`Refused`; no sign-off is written unless every role passed every check
     and every object's retention was extended."""
     from intelligence.modelstore import lock
@@ -656,6 +664,7 @@ def sign_off(
     for value, detail in ((commit, "commit"), (head_sha, "head_sha"), (base_sha, "base_sha")):
         if not isinstance(value, str) or _COMMIT_SHA.fullmatch(value) is None:
             raise Refused("invalid_name", detail_code=detail)
+    lock.check_lock_change_alone(changed_paths)
     days = _check_days(retention_days)
     if not isinstance(reviewers, lock.Reviewers):
         raise Refused("policy_invalid", detail_code="reviewers")

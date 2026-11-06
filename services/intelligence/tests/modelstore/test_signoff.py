@@ -30,6 +30,7 @@ from tests.modelstore.test_lock import (
     ACTOR,
     CLINICAL,
     HEAD,
+    LOCK_ONLY,
     NAME,
     PLATFORM,
     REVIEWERS,
@@ -42,6 +43,8 @@ from tests.modelstore.test_lock import (
     _main_checkout,
     _policy_obj,
     _pr,
+    git,
+    git_commit,
     publish,
     write_signoff,
 )
@@ -54,6 +57,7 @@ OTHER_COMMIT = "d4" * 20
 MERGED_AT = "2026-11-06T02:00:00Z"
 DAYS = 5
 REAL_SIGNOFF_SIGNER = cli._signoff_signer
+REAL_MERGE_CHANGED_FILES = cli._merge_changed_files
 THRESHOLDS_REL = Path("services/intelligence/intelligence/doceval/thresholds")
 
 
@@ -173,6 +177,7 @@ def _sign_off(
         testsets_lock=TESTSETS,
         thresholds_dir=report.THRESHOLDS_DIR,
         retention_days=days,
+        changed_paths=LOCK_ONLY,
     )
 
 
@@ -687,6 +692,9 @@ def _cli_setup(
     monkeypatch.setattr(cli, "_github", lambda: lock.GitHubClient(session, GH_REPO))
     monkeypatch.setattr(cli, "_signoff_signer", lambda: DocSigner(keys.signoff))
     monkeypatch.setenv(cli.APPROVED_RETENTION_ENV, str(DAYS))
+    # COMMIT is GitHub's (fake) merge, not in this repository: the files the merge changed
+    # come from this stand-in (the real git diff: test_cli_signoff_refuses_lock_with_code)
+    monkeypatch.setattr(cli, "_merge_changed_files", lambda base_dir, base, commit: list(LOCK_ONLY))
     return CliSetup(st, session, base, base_sha, before, after, head)
 
 
@@ -805,6 +813,89 @@ def test_cli_signoff_reads_base_data_from_git_not_the_working_tree(
     extra = _signoff_args(c, **{"--testsets": str(c.base / "models" / "extra.lock")})
     assert cli.main(extra) == 2
     assert _out(capsys) == {"refused": "lock_invalid"}
+
+
+def _real_merge(c: CliSetup, changes: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> str:
+    """A real merge commit in the base checkout's repository: ``--no-ff`` of a PR branch
+    with ``changes`` (plus the new lock) into ``base_sha``; the checkout is left at
+    ``base_sha``, as model-signoff.yml leaves it, with the merge fetched. GitHub's fake then
+    reports that merge as the PR's, with the parents base_sha and the PR head."""
+    git(c.base, "checkout", "-q", "-b", "pr", c.base_sha)
+    (c.base / "models.lock").write_bytes(c.after.read_bytes())
+    for rel, text in changes.items():
+        path = c.base / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    git_commit(c.base, "pr")
+    git(c.base, "checkout", "-q", "--detach", c.base_sha)
+    git(c.base, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+    merge = git(c.base, "rev-parse", "HEAD")
+    git(c.base, "checkout", "-q", "--detach", c.base_sha)
+    c.session = _session(_merged(_approved_pr(), commit=merge), commit=merge)
+    c.session.commit_parents[merge] = [c.base_sha, HEAD]
+    session = c.session
+    monkeypatch.setattr(cli, "_github", lambda: lock.GitHubClient(session, GH_REPO))
+    monkeypatch.setattr(cli, "_merge_changed_files", REAL_MERGE_CHANGED_FILES)
+    return merge
+
+
+def test_cli_signoff_refuses_lock_with_code(
+    tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """D35 through the command line, with a real merge commit: the files the merge changed
+    are git's diff from --base-sha to --commit. A lock change riding with a change to the
+    modelstore code or a model workflow is refused before any store write or GitHub call;
+    the lock alone is signed off."""
+    for i, code in enumerate(
+        (
+            "services/intelligence/intelligence/modelstore/signoff.py",
+            ".github/workflows/model-signoff.yml",
+        )
+    ):
+        c = _cli_setup(tmp_path / f"refused-{i}", keys, monkeypatch)
+        merge = _real_merge(c, {code: "# synthetic\n"}, monkeypatch)
+        puts = list(c.st.puts)
+        assert cli.main(_signoff_args(c, **{"--commit": merge})) == 2
+        assert _out(capsys) == {"refused": "not_allowed_here", "detail": "code_changed_with_lock"}
+        assert c.st.puts == puts and c.session.requests == []
+
+    c = _cli_setup(tmp_path / "alone", keys, monkeypatch)
+    merge = _real_merge(c, {"docs/models/note.md": "synthetic\n"}, monkeypatch)
+    assert cli.main(_signoff_args(c, **{"--commit": merge})) == 0
+    assert _out(capsys)["signoff"] == {ROLE: "signed_off"}
+    # a merge commit that isn't in the repository (not fetched): fail closed
+    assert cli.main(_signoff_args(c, **{"--commit": "d4" * 20})) == 2
+    assert _out(capsys) == {"refused": "not_allowed_here", "detail": "changed_files_unknown"}
+
+
+def test_sign_off_refuses_code_with_lock_before_any_io(
+    tmp_path: Path, keys: Keys, cache: Path
+) -> None:
+    st, _, after = _new(tmp_path, keys)
+    session = _session(_merged(_approved_pr()))
+    calls = len(st.calls)
+    r = _reason(
+        lambda: signoff.sign_off(
+            lock.to_bytes(lock.empty()),
+            lock.to_bytes(after),
+            COMMIT,
+            head_raw=lock.to_bytes(after),
+            head_sha=HEAD,
+            base_sha=BASE,
+            github=lock.GitHubClient(session, GH_REPO),
+            reviewers=REVIEWERS,
+            target=st,
+            policy=keys.policy,
+            signer=DocSigner(keys.signoff),
+            cache_dir=cache,
+            testsets_lock=TESTSETS,
+            thresholds_dir=report.THRESHOLDS_DIR,
+            retention_days=DAYS,
+            changed_paths=["models.lock", "services/intelligence/uv.lock"],
+        )
+    )
+    assert (r.reason, r.detail_code) == ("not_allowed_here", "code_changed_with_lock")
+    assert len(st.calls) == calls and session.requests == []
 
 
 def _git_status(root: Path) -> str:
@@ -985,6 +1076,7 @@ def test_signoff_retention_extended(
         testsets_lock=TESTSETS,
         thresholds_dir=report.THRESHOLDS_DIR,
         retention_days=DAYS,
+        changed_paths=LOCK_ONLY,
     )
     assert result.roles == {ROLE: "signed_off"}
     m = pub.m
@@ -1029,6 +1121,7 @@ def test_signoff_retention_extended(
         testsets_lock=TESTSETS,
         thresholds_dir=report.THRESHOLDS_DIR,
         retention_days=1,
+        changed_paths=LOCK_ONLY,
     )
     assert again.roles == {ROLE: "already_signed_off"} and again.retention_extended == 0
     assert len(root.versions(store.signoff_key(name, "1.0.0"))) == 1

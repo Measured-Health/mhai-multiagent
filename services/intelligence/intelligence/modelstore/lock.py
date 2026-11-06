@@ -51,6 +51,17 @@ is the whole point, so:
   the head lock from the PR.
 * **The PR's base branch must be** ``main`` (``base_not_main``): a PR into another branch
   could carry a reviewer list nobody reviewed.
+* **The lock travels alone** (D35, :func:`check_lock_change_alone`). ``pull_request`` and
+  ``push`` workflows run the workflow file from the PR or the merge commit, so a PR that
+  changes ``models.lock`` or ``models/**`` may not also change
+  ``.github/workflows/model-*.yml``, ``ci.yml``, ``rehearse-promotion.sh``, the
+  ``modelstore`` package, ``pyproject.toml`` or ``uv.lock``
+  (``not_allowed_here``/``code_changed_with_lock``). The changed files come from git in
+  ``--base-dir``'s repository (``git diff <main tip>...<head sha>``: from the merge base
+  to the head), never from a list the PR supplies. The sign-off applies the same rule to
+  the merge (``git diff <base sha> <merge commit>``). This does not stop a PR that
+  rewrites ``model-lock.yml`` to skip the check altogether; that needs CODEOWNERS on
+  those paths with code-owner review required (TODO(H4)).
 
 Every head entry must pass :func:`check_production`. For each changed role:
 
@@ -987,6 +998,51 @@ def check_approvals(pr: PullRequest, reviewers: Reviewers, changes: Iterable[Cha
 
 # ---------------------------------------------------------------- lock-check
 
+# D35: ``pull_request`` and ``push`` workflows run the workflow file of the PR or of the
+# merge commit, so a PR that changes the lock could also change the checks that judge it.
+# Paths are relative to the repository's top level, as ``git diff --name-only`` prints them.
+LOCK_FILES: frozenset[str] = frozenset({"models.lock"})
+LOCK_PREFIXES: tuple[str, ...] = ("models/",)
+GUARDED_FILES: frozenset[str] = frozenset(
+    {
+        ".github/workflows/ci.yml",
+        "services/intelligence/scripts/rehearse-promotion.sh",
+        "services/intelligence/pyproject.toml",
+        "services/intelligence/uv.lock",
+    }
+)
+GUARDED_PREFIXES: tuple[str, ...] = ("services/intelligence/intelligence/modelstore/",)
+_GUARDED_WORKFLOW = re.compile(r"\.github/workflows/model-[^/]*\.ya?ml", re.ASCII)
+
+
+def _is_lock_path(path: str) -> bool:
+    return path in LOCK_FILES or path.startswith(LOCK_PREFIXES)
+
+
+def _is_guarded_path(path: str) -> bool:
+    return (
+        path in GUARDED_FILES
+        or path.startswith(GUARDED_PREFIXES)
+        or _GUARDED_WORKFLOW.fullmatch(path) is not None
+    )
+
+
+def check_lock_change_alone(changed_paths: Iterable[str]) -> None:
+    """D35: a change to ``models.lock`` or ``models/**`` may not ride with a change to the
+    code or workflows that check it (``.github/workflows/model-*.yml``, ``ci.yml``,
+    ``rehearse-promotion.sh``, the ``modelstore`` package, ``pyproject.toml``,
+    ``uv.lock``): ``not_allowed_here``/``code_changed_with_lock``.
+
+    ``changed_paths`` is the list of changed files the caller worked out from git (never
+    a list the PR supplies); a bare string is a programming error, not a list of paths."""
+    if isinstance(changed_paths, (str, bytes)):
+        raise TypeError("changed_paths must be a collection of paths, not one string")
+    paths = list(changed_paths)
+    if not all(isinstance(p, str) for p in paths):
+        raise TypeError("changed_paths must hold strings")
+    if any(_is_lock_path(p) for p in paths) and any(_is_guarded_path(p) for p in paths):
+        raise Refused("not_allowed_here", detail_code="code_changed_with_lock")
+
 
 def changed_roles(base: Lock, head: Lock) -> list[str]:
     roles = set(base.models) | set(head.models)
@@ -1083,6 +1139,7 @@ def lock_check(
     testsets_lock: Mapping[tuple[str, str], TestsetEntry],
     thresholds_dir: Path | str,
     head_sha: str,
+    changed_paths: Iterable[str],
 ) -> dict[str, str]:
     """Check a PR's change to ``models.lock``; returns ``{role: new|rollback|removed}``.
 
@@ -1090,10 +1147,12 @@ def lock_check(
     current copies, never the PR's (see the module docstring). ``head_raw`` is the lock at
     ``head_sha``; a PR whose head is no longer ``head_sha`` is ``not_approved``/
     ``head_moved`` (the new head gets its own check), and one whose base branch isn't
-    ``main`` is ``base_not_main``. Raises :class:`Refused` on any failure."""
+    ``main`` is ``base_not_main``. ``changed_paths`` are the files the PR changes, from git
+    (:func:`check_lock_change_alone`, D35). Raises :class:`Refused` on any failure."""
     number = check_pr_number(number)
     if not isinstance(head_sha, str) or _COMMIT.fullmatch(head_sha) is None:
         raise Refused("invalid_name", detail_code="head_sha")
+    check_lock_change_alone(changed_paths)
     if not isinstance(reviewers, Reviewers):
         raise Refused("policy_invalid", detail_code="reviewers")
     base, head = parse(base_raw), parse(head_raw)

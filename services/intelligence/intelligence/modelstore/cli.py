@@ -100,6 +100,12 @@ trusts the PR for one thing only, the head lock:
   is ``not_allowed_here``/``trust_policy_outside_base_dir``.
 * The workflow runs this command from that same main checkout (its code as well as its
   data), so a PR can't change the checker that judges it.
+* The PR's head commit must be fetched into that checkout's repository: the files the PR
+  changes are ``git diff <main tip>...<head sha>`` there (D35), and a lock change may not
+  ride with a change to the model workflows, ``ci.yml``, ``rehearse-promotion.sh``, the
+  ``modelstore`` package, ``pyproject.toml`` or ``uv.lock``
+  (``not_allowed_here``/``code_changed_with_lock``; git failing is
+  ``changed_files_unknown``).
 
 It reads the store as ``pin`` does and the PR with ``GITHUB_TOKEN`` and
 ``GITHUB_REPOSITORY`` (``GITHUB_API_URL`` optional). It prints ``{"lock_check": "pass",
@@ -116,7 +122,9 @@ approvals, extends retention and then writes ``signoff.json`` and ``signoff.sig`
 :mod:`intelligence.modelstore.signoff`). ``--base-dir`` is a checkout of ``--base-sha``
 (it must be the repository's top level, ``base_dir_not_toplevel``, and its ``HEAD``
 ``--base-sha``, ``base_dir_not_base_sha``, both checked with ``git rev-parse``), from which
-the command also runs. Its data files are read with ``git show <base-sha>:<path>``, never
+the command also runs; ``--commit`` must be fetched into that repository, since the
+files the merge changed are ``git diff <base-sha> <commit>`` there (D35, as for
+``lock-check``). Its data files are read with ``git show <base-sha>:<path>``, never
 from the working tree, so a dirty checkout changes nothing: its ``models.lock`` must be
 ``--before`` (``lock_invalid``/``before_mismatch``), and ``models/reviewers.json``,
 ``models/trust-policy.json``, ``--testsets`` and ``--thresholds-dir`` are read from it
@@ -490,6 +498,8 @@ def _lock_check(args: argparse.Namespace) -> int:
     thresholds_dir = _inside(args.thresholds_dir, base_dir)
     policy_path = base_dir / BASE_TRUST_POLICY_PATH
     _check_policy_env(policy_path)
+    changed = _pr_changed_files(base_dir, args.head_sha)
+    lock.check_lock_change_alone(changed)
     base, head = lock.read(base_dir / BASE_LOCK_PATH), lock.read(args.head)
     reviewers = lock.read_reviewers(base_dir / BASE_REVIEWERS_PATH)
     locked = testsets.read_lock(testsets_path)
@@ -514,6 +524,7 @@ def _lock_check(args: argparse.Namespace) -> int:
             testsets_lock=locked,
             thresholds_dir=thresholds_dir,
             head_sha=args.head_sha,
+            changed_paths=changed,
         )
     _print({"lock_check": "pass", "roles": roles})
     return 0
@@ -569,6 +580,38 @@ def _checkout_root(path: Path) -> Path | None:
     return Path(raw.decode("utf-8", "replace").strip()).resolve()
 
 
+def _changed_files(repo: Path, base: str, head: str, *, from_merge_base: bool) -> list[str]:
+    """The files changed between two commits in the repository at ``repo``, from git
+    (D35), never from the PR: ``git diff --name-only -z --no-renames`` (a rename lists
+    both paths), ``base...head`` (from their merge base to ``head``: what a PR changes)
+    when ``from_merge_base``, else ``base head`` (what a merge commit changed). Paths are
+    relative to the repository's top level. Any git failure, such as a commit that was
+    not fetched, is ``not_allowed_here``/``changed_files_unknown``: fail closed."""
+    for value in (base, head):
+        if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+            raise Refused("invalid_name", detail_code="commit")
+    spec = [f"{base}...{head}"] if from_merge_base else [base, head]
+    raw = _git(repo, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", *spec, "--")
+    if raw is None:
+        raise Refused("not_allowed_here", detail_code="changed_files_unknown")
+    return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p]
+
+
+def _pr_changed_files(base_dir: Path, head_sha: str) -> list[str]:
+    """D35, lock-check: what the PR changes, ``git diff <main tip>...<head sha>`` in main's
+    checkout (``HEAD`` is main's tip; the head commit must have been fetched)."""
+    main_tip = _checkout_head(base_dir)
+    if main_tip is None:
+        raise Refused("not_allowed_here", detail_code="changed_files_unknown")
+    return _changed_files(base_dir, main_tip, head_sha, from_merge_base=True)
+
+
+def _merge_changed_files(base_dir: Path, base_sha: str, commit: str) -> list[str]:
+    """D35, sign-off: what the merge changed on main, ``git diff <base sha> <commit>`` in
+    the base checkout's repository (the merge commit must have been fetched)."""
+    return _changed_files(base_dir, base_sha, commit, from_merge_base=False)
+
+
 @contextlib.contextmanager
 def _base_snapshot(base_dir: Path, base_sha: str, rels: Sequence[str]) -> Iterator[Path]:
     """The base data files at ``base_sha``, read with ``git show <sha>:<path>`` from the
@@ -605,6 +648,8 @@ def _signoff(args: argparse.Namespace) -> int:
         raise Refused("not_allowed_here", detail_code="base_dir_not_toplevel")
     if _checkout_head(base_dir) != base_sha:
         raise Refused("not_allowed_here", detail_code="base_dir_not_base_sha")
+    changed = _merge_changed_files(base_dir, base_sha, commit)
+    lock.check_lock_change_alone(changed)
     testsets_rel = _inside(args.testsets, base_dir).relative_to(base_dir).as_posix()
     thresholds_rel = _inside(args.thresholds_dir, base_dir).relative_to(base_dir).as_posix()
     _check_policy_env(base_dir / BASE_TRUST_POLICY_PATH)
@@ -613,7 +658,7 @@ def _signoff(args: argparse.Namespace) -> int:
     rels = [BASE_LOCK_PATH, BASE_REVIEWERS_PATH, BASE_TRUST_POLICY_PATH, testsets_rel]
     rels += [f"{thresholds_rel}/{gate}.json" for gate in sorted(GATES)]
     with _base_snapshot(base_dir, base_sha, rels) as snap:
-        return _signoff_from(args, snap, before, after, head, testsets_rel, thresholds_rel)
+        return _signoff_from(args, snap, before, after, head, testsets_rel, thresholds_rel, changed)
 
 
 def _signoff_from(
@@ -624,6 +669,7 @@ def _signoff_from(
     head: lock.Lock,
     testsets_rel: str,
     thresholds_rel: str,
+    changed: Sequence[str],
 ) -> int:
     """The sign-off over the base data in ``snap`` (see :func:`_base_snapshot`)."""
     commit, head_sha, base_sha = args.commit, args.head_sha, args.base_sha
@@ -660,6 +706,7 @@ def _signoff_from(
             testsets_lock=locked,
             thresholds_dir=thresholds_dir,
             retention_days=days,
+            changed_paths=changed,
         )
     _print(result.to_obj())
     return 0

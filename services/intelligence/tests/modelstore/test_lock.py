@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +59,8 @@ TESTSET = f"clinical_document@1.0.0#{TESTSET_SHA}"
 LETTERS = "restoring the signed off synthetic version"
 TESTSETS = testsets.parse_lock(f"{TESTSET}\n".encode())
 REVIEWERS = lock.Reviewers(frozenset({CLINICAL}), frozenset({PLATFORM}))
+# D35: what a PR or merge that changes only the lock looks like from git.
+LOCK_ONLY = ("models.lock",)
 
 
 # ---------------------------------------------------------------- keys
@@ -363,6 +367,7 @@ def test_malformed_lock_refused(raw: bytes, tmp_path: Path, keys: Keys, cache: P
                 testsets_lock=TESTSETS,
                 thresholds_dir=report.THRESHOLDS_DIR,
                 head_sha=HEAD,
+                changed_paths=LOCK_ONLY,
             )
         assert e.value.reason == "lock_invalid"
     assert st.calls == [] and session.requests == []  # refused before any I/O
@@ -393,6 +398,7 @@ def test_lock_check_refuses_fixture_and_rehearsal(
             testsets_lock=TESTSETS,
             thresholds_dir=report.THRESHOLDS_DIR,
             head_sha=HEAD,
+            changed_paths=LOCK_ONLY,
         )
     )
     assert refused.reason == reason
@@ -414,6 +420,7 @@ def test_lock_check_refuses_unknown_role(keys: Keys, cache: Path) -> None:
             testsets_lock=TESTSETS,
             thresholds_dir=report.THRESHOLDS_DIR,
             head_sha=HEAD,
+            changed_paths=LOCK_ONLY,
         )
     )
     assert (refused.reason, refused.detail_code) == ("lock_invalid", "role")
@@ -592,6 +599,7 @@ def _check(
         testsets_lock=TESTSETS,
         thresholds_dir=report.THRESHOLDS_DIR,
         head_sha=HEAD,
+        changed_paths=LOCK_ONLY,
     )
 
 
@@ -627,6 +635,7 @@ def test_lock_check_refuses_a_moved_head(tmp_path: Path, keys: Keys, cache: Path
             testsets_lock=TESTSETS,
             thresholds_dir=report.THRESHOLDS_DIR,
             head_sha=head_sha,
+            changed_paths=LOCK_ONLY,
         )
 
     assert run(HEAD) == {ROLE: "new"}
@@ -1394,6 +1403,9 @@ def _cli_env(
     monkeypatch.setattr(cli, "_reader_store", lambda: st)
     monkeypatch.setattr(cli, "_trust_policy", lambda path=None: keys.policy)
     monkeypatch.setattr(cli, "_github", lambda: lock.GitHubClient(session, GH_REPO))
+    # these checkouts are plain folders: the files the PR changes come from this stand-in
+    # (the real git diff is tested in test_lock_check_refuses_lock_with_code_from_git)
+    monkeypatch.setattr(cli, "_pr_changed_files", lambda base_dir, head_sha: list(LOCK_ONLY))
 
 
 def test_cli_pin_and_lock_check(
@@ -1443,3 +1455,161 @@ def test_cli_pin_and_lock_check(
     out = capsys.readouterr().out
     assert json.loads(out) == {"refused": "github_unavailable", "detail": "http"}
     assert session.token not in out
+
+
+# ---------------------------------------------------------------- D35: the lock travels alone
+
+_GUARDED = [
+    ".github/workflows/model-lock.yml",
+    ".github/workflows/model-promote.yml",
+    ".github/workflows/model-signoff.yaml",
+    ".github/workflows/ci.yml",
+    "services/intelligence/scripts/rehearse-promotion.sh",
+    "services/intelligence/intelligence/modelstore/lock.py",
+    "services/intelligence/intelligence/modelstore/sources/local.py",
+    "services/intelligence/pyproject.toml",
+    "services/intelligence/uv.lock",
+]
+
+
+@pytest.mark.parametrize("code", _GUARDED)
+@pytest.mark.parametrize("lock_path", ["models.lock", "models/reviewers.json"])
+def test_lock_change_with_code_refused(lock_path: str, code: str) -> None:
+    r = _reason(lambda: lock.check_lock_change_alone(["README.md", lock_path, code]))
+    assert (r.reason, r.detail_code) == ("not_allowed_here", "code_changed_with_lock")
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        [],
+        ["models.lock"],
+        ["models.lock", "models/testsets.lock", "docs/models/notes.md"],
+        ["models.lock", ".github/workflows/deploy.yml", "services/core/main.go"],
+        ["models.lock", ".github/workflows/sub/model-x.yml"],
+        ["models.lock", "services/intelligence/intelligence/modelstorex/a.py"],
+        ["models.lock", "services/intelligence/scripts/run_pipeline.py"],
+        # code alone, or something that only looks like the lock, is not a lock change
+        _GUARDED,
+        ["models.lock.bak", "xmodels/a.json", *_GUARDED],
+    ],
+)
+def test_lock_change_alone_allowed(paths: list[str]) -> None:
+    lock.check_lock_change_alone(paths)
+
+
+def test_lock_change_alone_needs_a_list_of_paths() -> None:
+    with pytest.raises(TypeError):
+        lock.check_lock_change_alone("models.lock")
+
+
+def test_lock_check_refuses_code_with_lock_before_any_io(
+    tmp_path: Path, keys: Keys, cache: Path
+) -> None:
+    st, _, head = _new(tmp_path, keys)
+    session = FakeGitHubSession()
+    session.add(_approved_pr())
+    calls = len(st.calls)
+    r = _reason(
+        lambda: lock.lock_check(
+            lock.to_bytes(lock.empty()),
+            lock.to_bytes(head),
+            7,
+            github=lock.GitHubClient(session, GH_REPO),
+            reviewers=REVIEWERS,
+            source=st,
+            policy=keys.policy,
+            cache_dir=cache,
+            testsets_lock=TESTSETS,
+            thresholds_dir=report.THRESHOLDS_DIR,
+            head_sha=HEAD,
+            changed_paths=["models.lock", ".github/workflows/model-lock.yml"],
+        )
+    )
+    assert (r.reason, r.detail_code) == ("not_allowed_here", "code_changed_with_lock")
+    assert len(st.calls) == calls and session.requests == []
+
+
+_GIT_ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "syn", "GIT_COMMITTER_NAME": "syn"}
+
+
+def git(root: Path, *args: str) -> str:
+    """Run git in ``root`` with no user or system configuration; its stdout."""
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(root),
+        "GIT_AUTHOR_EMAIL": "syn@example.invalid",
+        "GIT_COMMITTER_EMAIL": "syn@example.invalid",
+        **_GIT_ENV,
+    }
+    done = subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, env=env)
+    return done.stdout.decode().strip()
+
+
+def git_commit(root: Path, message: str) -> str:
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", message)
+    return git(root, "rev-parse", "HEAD")
+
+
+def _git_main(root: Path) -> tuple[Path, str]:
+    """A repository on ``main`` with one commit (a main checkout as model-lock.yml makes it)."""
+    main = _main_checkout(root)
+    (main / ".github" / "workflows").mkdir(parents=True)
+    (main / ".github" / "workflows" / "model-lock.yml").write_text("name: synthetic\n")
+    git(main, "init", "-q", "-b", "main")
+    return main, git_commit(main, "base")
+
+
+def _git_branch(main: Path, name: str, changes: dict[str, str]) -> str:
+    """A PR head: a branch off main's current tip with ``changes``; main is checked out again."""
+    git(main, "checkout", "-q", "-b", name)
+    for rel, text in changes.items():
+        path = main / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    sha = git_commit(main, name)
+    git(main, "checkout", "-q", "main")
+    return sha
+
+
+def test_lock_check_refuses_lock_with_code_from_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """D35 through the command line, with a real repository: the changed files are git's
+    diff from the merge base to the head sha, never a list the PR supplies."""
+    main, _ = _git_main(tmp_path / "main")
+    reviewers_change = {"models/reviewers.json": json.dumps({"clinical": [], "platform": []})}
+    workflow = {".github/workflows/model-lock.yml": "name: rewritten\n"}
+    code = {"services/intelligence/intelligence/modelstore/lock.py": "# synthetic\n"}
+    with_workflow = _git_branch(main, "pr-workflow", {**reviewers_change, **workflow})
+    with_code = _git_branch(main, "pr-code", {**reviewers_change, **code})
+    alone = _git_branch(main, "pr-alone", reviewers_change)
+    workflow_only = _git_branch(main, "pr-workflow-only", workflow)
+    # main moves on after the PRs branched: its own modelstore change is not the PR's
+    (main / "services/intelligence/intelligence/modelstore").mkdir(parents=True)
+    (main / "services/intelligence/intelligence/modelstore/later.py").write_text("# syn\n")
+    git_commit(main, "main moves on")
+    st = MemoryStore()
+    monkeypatch.setattr(cli, "_reader_store", lambda: st)
+    head_file = tmp_path / "head.lock"
+    head_file.write_bytes(lock.to_bytes(lock.empty()))
+
+    for sha in (with_workflow, with_code):
+        assert cli.main(_lock_check_args(main, head_file, sha)) == 2
+        out = json.loads(capsys.readouterr().out)
+        assert out == {"refused": "not_allowed_here", "detail": "code_changed_with_lock"}
+    assert st.calls == []
+    # the lock data alone, or the workflow alone, is not refused by this rule
+    for sha in (alone, workflow_only):
+        assert cli.main(_lock_check_args(main, head_file, sha)) == 0
+        assert json.loads(capsys.readouterr().out) == {"lock_check": "pass", "roles": {}}
+    # a head that isn't in main's repository (not fetched): fail closed
+    assert cli.main(_lock_check_args(main, head_file, "c3" * 20)) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"refused": "not_allowed_here", "detail": "changed_files_unknown"}
+    # a base dir that isn't a repository at all
+    plain = _main_checkout(tmp_path / "plain")
+    assert cli.main(_lock_check_args(plain, head_file, alone)) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"refused": "not_allowed_here", "detail": "changed_files_unknown"}
