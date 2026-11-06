@@ -686,19 +686,25 @@ def _quiet_doceval() -> Iterator[None]:
     or handlers), emits below WARNING while this is held: the runner's DEBUG and INFO
     lines carry document ids (of the locked split, in an eval environment). A logger's
     filter applies to every record made on that logger, before any handler sees it, so
-    one is put on each logger of the subtree."""
+    one is put on each logger of the subtree. A logger created while this is held (a
+    doceval module imported during the run) has no filter, so the parent's level is also
+    held at WARNING: such a logger inherits it unless it sets a level of its own."""
     quiet = _WarningsOnly()
     names_now = [
         n
         for n in list(logging.root.manager.loggerDict)
         if n == DOCEVAL_LOGGER or n.startswith(DOCEVAL_LOGGER + ".")
     ]
+    parent = logging.getLogger(DOCEVAL_LOGGER)
+    saved_level = parent.level
     loggers = [logging.getLogger(n) for n in {DOCEVAL_LOGGER, *names_now}]
     for lg in loggers:
         lg.addFilter(quiet)
+    parent.setLevel(logging.WARNING)
     try:
         yield
     finally:
+        parent.setLevel(saved_level)
         for lg in loggers:
             lg.removeFilter(quiet)
 

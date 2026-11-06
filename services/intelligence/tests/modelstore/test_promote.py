@@ -1191,6 +1191,31 @@ def test_doceval_subtree_quiet_below_warning(
     assert seen.records[-1].levelno == logging.DEBUG  # restored after the run
 
 
+def test_doceval_logger_created_during_quiet_is_quiet() -> None:
+    # A doceval module imported mid-run makes its logger after the filters went on.
+    parent = logging.getLogger(promote.DOCEVAL_LOGGER)
+    seen = _Capture()
+    saved = (parent.level, parent.propagate)
+    late_name = f"intelligence.doceval.zz_late_{secrets.token_hex(4)}"
+    assert late_name not in logging.root.manager.loggerDict
+    try:
+        parent.setLevel(logging.DEBUG)
+        parent.propagate = False
+        parent.addHandler(seen)
+        with promote._quiet_doceval():
+            late = logging.getLogger(late_name)
+            late.debug("debug %s", MARKER)
+            late.info("info %s", MARKER)
+            late.warning("late warning kept")
+        assert parent.level == logging.DEBUG  # restored
+        late.debug("after: debug again")
+    finally:
+        parent.removeHandler(seen)
+        parent.setLevel(saved[0])
+        parent.propagate = saved[1]
+    assert [r.getMessage() for r in seen.records] == ["late warning kept", "after: debug again"]
+
+
 def test_cli_dry_run_never_builds_the_promoter_store_or_signer(
     tmp_path: Path,
     keys: Keys,
