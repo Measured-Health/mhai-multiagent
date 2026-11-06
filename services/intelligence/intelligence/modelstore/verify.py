@@ -257,6 +257,14 @@ def _head_version(source: ReadStore, key: str, version_id: str) -> tuple[str, Ob
 def find_manifest(source: ReadStore, name: str, version: str, sha256: str) -> bytes:
     """Step 2: the bytes of the oldest stored manifest version whose SHA-256 is
     ``sha256``."""
+    return find_manifest_version(source, name, version, sha256)[1]
+
+
+def find_manifest_version(
+    source: ReadStore, name: str, version: str, sha256: str
+) -> tuple[str, bytes]:
+    """:func:`find_manifest`, with the store version id of the version it picked (the
+    sign-off extends retention on exactly that version, Task 21)."""
     key = store.manifest_key(name, version)
     vids = source.versions(key)
     if not vids:
@@ -269,38 +277,46 @@ def find_manifest(source: ReadStore, name: str, version: str, sha256: str) -> by
         raw = _get_version(source, key, version_id=vid, max_bytes=manifest.MAX_BYTES)
         if raw is None or not secrets.compare_digest(hashlib.sha256(raw).hexdigest(), sha256):
             raise Refused("store_unavailable", detail_code="manifest_read")
-        return raw
+        return vid, raw
     raise Refused("lock_mismatch")
 
 
 def _distinct_docs(source: ReadStore, key: str, max_bytes: int, reason: str) -> list[bytes]:
     """The distinct readable versions of ``key``, oldest first (capped as :func:`_usable`)."""
-    docs: list[bytes] = []
-    for doc in _usable(
-        source.versions(key),
-        lambda v: _get_version(source, key, version_id=v, max_bytes=max_bytes),
-        reason,
-    ):
-        if doc not in docs:
-            docs.append(doc)
-    return docs
+    return [doc for _, doc in _distinct_versions(source, key, max_bytes, reason)]
 
 
-def _verified_by_one(
-    purpose: str, payload: bytes, docs: list[bytes], policy: signing.TrustPolicy
-) -> bool:
-    """Whether one of ``docs`` verifies for ``purpose`` over ``payload``. A development
-    signer outside development propagates."""
+def _distinct_versions(
+    source: ReadStore, key: str, max_bytes: int, reason: str
+) -> list[tuple[str, bytes]]:
+    """As :func:`_distinct_docs`, each with the id of its oldest version."""
+    out: list[tuple[str, bytes]] = []
+
+    def read(v: str) -> tuple[str, bytes] | None:
+        doc = _get_version(source, key, version_id=v, max_bytes=max_bytes)
+        return None if doc is None else (v, doc)
+
+    for vid, doc in _usable(source.versions(key), read, reason):
+        if all(doc != seen for _, seen in out):
+            out.append((vid, doc))
+    return out
+
+
+def _verifying_version(
+    purpose: str, payload: bytes, docs: list[tuple[str, bytes]], policy: signing.TrustPolicy
+) -> str | None:
+    """The version id of the first of ``docs`` that verifies for ``purpose`` over
+    ``payload``, or None. A development signer outside development propagates."""
     verifier = signing.Verifier()
-    for doc in docs:
+    for vid, doc in docs:
         try:
             verifier.verify(purpose, payload, doc, policy)
         except Refused as e:
             if e.reason == "policy_invalid":
                 raise
             continue
-        return True
-    return False
+        return vid
+    return None
 
 
 def _first_verified(
@@ -350,6 +366,20 @@ def check_manifest_signature(
     raise Refused("signature_invalid", detail_code="manifest" if reasons else "missing")
 
 
+def manifest_signature_version(
+    source: ReadStore, name: str, version: str, raw: bytes, policy: signing.TrustPolicy
+) -> str:
+    """The store version id of the oldest ``manifest.sig`` version that verifies for
+    purpose ``manifest`` over ``raw`` (``signature_invalid`` if none): the one the
+    sign-off extends retention on (Task 21)."""
+    key = store.manifest_sig_key(name, version)
+    docs = _distinct_versions(source, key, signing.MAX_SIGNATURE_DOC_BYTES, "signature_invalid")
+    vid = _verifying_version("manifest", raw, docs, policy)
+    if vid is None:
+        raise Refused("signature_invalid", detail_code="manifest" if docs else "missing")
+    return vid
+
+
 def check_gate(entry: PinEntry, m: manifest.Manifest) -> None:
     """The manifest's own result for the pinned gate must be ``pass`` (``gate_failed``)."""
     gate = entry.gate
@@ -357,6 +387,16 @@ def check_gate(entry: PinEntry, m: manifest.Manifest) -> None:
         raise Refused("lock_invalid", detail_code="gate")
     if m.evaluation.gates.get(gate) != "pass":
         raise Refused("gate_failed")
+
+
+@dataclass(frozen=True, slots=True)
+class FoundSignoff:
+    """A sign-off that verified for a pin, and the store versions it was read from."""
+
+    record: signoff.Signoff
+    raw: bytes
+    version_id: str
+    sig_version_id: str
 
 
 def check_signoff(
@@ -368,13 +408,25 @@ def check_signoff(
 ) -> None:
     """Step 7: a sign-off for exactly this pin, signed for purpose ``signoff``, whose
     reviewers are neither the promoter nor the trainer and not both kinds at once."""
+    find_signoff(source, role, entry, m, policy)
+
+
+def find_signoff(
+    source: ReadStore,
+    role: str,
+    entry: PinEntry,
+    m: manifest.Manifest,
+    policy: signing.TrustPolicy,
+) -> FoundSignoff:
+    """:func:`check_signoff`, returning the sign-off that verified and its version ids
+    (oldest first, as the check picks it); ``not_approved`` when there is none."""
     key = store.signoff_key(m.name, m.version)
-    docs = _distinct_docs(source, key, signoff.MAX_BYTES, "not_approved")
+    docs = _distinct_versions(source, key, signoff.MAX_BYTES, "not_approved")
     if not docs:
         raise Refused("not_approved", detail_code="missing")
-    sigs: list[bytes] | None = None  # read once, when a sign-off first needs them
+    sigs: list[tuple[str, bytes]] | None = None  # read once, when a sign-off first needs them
     detail = "mismatch"
-    for raw in docs:
+    for vid, raw in docs:
         parsed: signoff.Signoff | None = None
         try:
             parsed = signoff.parse(raw)
@@ -386,14 +438,15 @@ def check_signoff(
             detail = "separation"
             continue
         if sigs is None:
-            sigs = _distinct_docs(
+            sigs = _distinct_versions(
                 source,
                 store.signoff_sig_key(m.name, m.version),
                 signing.MAX_SIGNATURE_DOC_BYTES,
                 "not_approved",
             )
-        if _verified_by_one("signoff", raw, sigs, policy):
-            return
+        sig_vid = _verifying_version("signoff", raw, sigs, policy)
+        if sig_vid is not None:
+            return FoundSignoff(parsed, raw, vid, sig_vid)
         detail = "signature"
     raise Refused("not_approved", detail_code=detail)
 
@@ -915,6 +968,7 @@ __all__ = [
     "DEFINITIVE",
     "DIR_MODE",
     "FILE_MODE",
+    "FoundSignoff",
     "MAX_VERSIONS",
     "MAX_VERSION_READS",
     "PinEntry",
@@ -927,6 +981,9 @@ __all__ = [
     "check_signoff",
     "declares_production",
     "find_manifest",
+    "find_manifest_version",
+    "find_signoff",
+    "manifest_signature_version",
     "is_development",
     "requires_signoff",
     "verify_for_load",

@@ -88,6 +88,20 @@ anything else is ``github_unavailable``/``pagination``), at most
 followed. The token is never in a log, an
 error or a reason; failures are ``github_unavailable`` with no exception chained.
 
+Shared with the sign-off
+------------------------
+:func:`assess_changes` is the store half of ``lock-check`` (production rules, verify,
+classify, evaluation, dependencies) and :func:`check_approvals` the approval half; the
+sign-off (:mod:`intelligence.modelstore.signoff`, Task 21) re-runs both on the merged PR,
+never a copy of their rules. :meth:`GitHubClient.pulls_for_commit` finds that PR.
+
+``rollback``
+------------
+:func:`rollback` pins a role back to the latest older version of its pinned name (semver
+order) whose sign-off for this role verifies through the loader's own check
+(:func:`intelligence.modelstore.verify.verify_pin` with ``require_signoff=True``), or to
+``--to``, which must be one of those (P16); the lock is written with :func:`write`.
+
 A promoted base model
 ---------------------
 :func:`base_verifier` is what ``training.check`` calls for a base named by its pin
@@ -115,6 +129,7 @@ from intelligence.doceval.report import GATES, PRODUCTION_GATES, THRESHOLDS_DIR
 from intelligence.doceval.report import load_thresholds as _load_thresholds
 from intelligence.doceval.report import parse_report as _parse_report
 from intelligence.modelstore import canonical, files, manifest, names, signing, store, verify
+from intelligence.modelstore import signoff as signoff_record
 from intelligence.modelstore.promote import SUITES
 from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.testsets import LockEntry as TestsetEntry
@@ -503,10 +518,21 @@ class PullRequest:
     body: str
     reviews: tuple[Review, ...]
     base_ref: str
+    # Set when the PR is merged (the sign-off, Task 21): ``merge_commit_sha`` is the commit
+    # on the base branch, ``merged_at`` GitHub's ``YYYY-MM-DDTHH:MM:SSZ``.
+    merged: bool = False
+    merge_commit_sha: str | None = None
+    merged_at: str | None = None
 
 
 class GitHubApi(Protocol):
     def pull_request(self, number: int) -> PullRequest: ...
+
+
+class MergedPullRequests(GitHubApi, Protocol):
+    """What the sign-off needs too: the pull requests GitHub associates with a commit."""
+
+    def pulls_for_commit(self, sha: str) -> tuple[int, ...]: ...
 
 
 class Session(Protocol):
@@ -536,6 +562,7 @@ _API = re.compile(
 )
 _COMMIT = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", re.ASCII)
+_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.ASCII)
 _NEXT = re.compile(r'<([^<>\s]{1,2048})>\s*;(?:[^,]*;)?\s*rel="next"', re.ASCII)
 _CHUNK = 64 * 1024
 TOKEN_ENV = "GITHUB_TOKEN"
@@ -746,7 +773,36 @@ class GitHubClient:
         rid = repo.get("id") if isinstance(repo, dict) else None
         repo_id = rid if isinstance(rid, int) and not isinstance(rid, bool) and rid > 0 else None
         reviews = self._reviews(number, repo_id)
-        return PullRequest(number, author, sha, labels, body, reviews, base_ref)
+        merged = obj.get("merged") is True
+        mc = obj.get("merge_commit_sha")
+        merge_commit = mc if isinstance(mc, str) and _COMMIT.fullmatch(mc) is not None else None
+        at = obj.get("merged_at")
+        merged_at = at if isinstance(at, str) and _TIMESTAMP.fullmatch(at) is not None else None
+        return PullRequest(
+            number, author, sha, labels, body, reviews, base_ref, merged, merge_commit, merged_at
+        )
+
+    def pulls_for_commit(self, sha: str) -> tuple[int, ...]:
+        """The numbers of the pull requests GitHub associates with commit ``sha``
+        (``GET /commits/{sha}/pulls``), one page of at most :data:`PER_PAGE`. A second page
+        means more than one, which the sign-off refuses anyway: it is
+        ``not_approved``/``many_prs`` here."""
+        if not isinstance(sha, str) or _COMMIT.fullmatch(sha) is None:
+            raise Refused("invalid_name", detail_code="commit")
+        items, link = self._get(
+            f"{self._base}/commits/{sha}/pulls", {"per_page": str(PER_PAGE), "page": "1"}
+        )
+        if not isinstance(items, list) or len(items) > PER_PAGE:
+            raise _unavailable("response")
+        if link is not None and _NEXT.search(link) is not None:
+            raise Refused("not_approved", detail_code="many_prs")
+        out: list[int] = []
+        for item in items:
+            n = item.get("number") if isinstance(item, dict) else None
+            if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= MAX_PR:
+                raise _unavailable("response")
+            out.append(n)
+        return tuple(out)
 
 
 def _review(item: object) -> Review | None:
@@ -890,6 +946,67 @@ def check_dependencies(head: Lock, manifests: Mapping[str, manifest.Manifest]) -
             note(d.name, d.version, d.manifest_sha256)
 
 
+def assess_changes(
+    base: Lock,
+    head: Lock,
+    *,
+    source: verify.ReadStore,
+    policy: signing.TrustPolicy,
+    cache_dir: Path | str,
+    testsets_lock: Mapping[tuple[str, str], TestsetEntry],
+    thresholds_dir: Path | str,
+    is_own: Callable[[signoff_record.Signoff], bool] | None = None,
+) -> tuple[list[Change], dict[str, manifest.Manifest]]:
+    """The store half of ``lock-check`` (and of the sign-off, Task 21): every head entry
+    passes :func:`check_production`; each changed role is verified and classified as
+    ``new``, ``rollback`` or ``removed`` (see the module docstring), a new one with its
+    evaluation checked; the dependencies agree. Returns the changes and every head role's
+    manifest.
+
+    ``is_own`` is the sign-off's: a valid sign-off it accepts (the one this very merge
+    already wrote, on a re-run) keeps the version ``new`` instead of making it a
+    rollback."""
+    for role, pinned in head.models.items():
+        check_production(role, pinned)
+    changes: list[Change] = []
+    manifests: dict[str, manifest.Manifest] = {}
+    for role in changed_roles(base, head):
+        entry = head.models.get(role)
+        if entry is None:
+            changes.append(Change(role, "removed"))
+            continue
+        m = verify.verify_pin(
+            source, role, entry, policy, cache_dir, require_signoff=False
+        ).manifest
+        manifests[role] = m
+        kind = "rollback"
+        try:
+            found = verify.find_signoff(source, role, entry, m, policy)
+        except Refused as e:
+            if e.reason != "not_approved":
+                raise
+            kind = "new"
+        else:
+            if is_own is not None and is_own(found.record):
+                kind = "new"
+        if kind == "new":
+            old = base.models.get(role)
+            if (
+                old is not None
+                and old.name == entry.name
+                and names.Version.parse(entry.version) < names.Version.parse(old.version)
+            ):
+                raise Refused("not_approved", detail_code="never_approved")
+            check_evaluation(source, m, entry.gate, testsets_lock, thresholds_dir)
+        changes.append(Change(role, kind, m))
+    for role, pinned in head.models.items():
+        if role not in manifests:
+            raw = verify.find_manifest(source, pinned.name, pinned.version, pinned.manifest_sha256)
+            manifests[role] = manifest.parse(raw)
+    check_dependencies(head, manifests)
+    return changes, manifests
+
+
 def lock_check(
     base_raw: bytes,
     head_raw: bytes,
@@ -919,42 +1036,17 @@ def lock_check(
     base, head = parse(base_raw), parse(head_raw)
     for role, pinned in head.models.items():
         check_production(role, pinned)
-    roles = changed_roles(base, head)
-    if not roles:
+    if not changed_roles(base, head):
         return {}
-    changes: list[Change] = []
-    manifests: dict[str, manifest.Manifest] = {}
-    for role in roles:
-        entry = head.models.get(role)
-        if entry is None:
-            changes.append(Change(role, "removed"))
-            continue
-        m = verify.verify_pin(
-            source, role, entry, policy, cache_dir, require_signoff=False
-        ).manifest
-        manifests[role] = m
-        kind = "rollback"
-        try:
-            verify.check_signoff(source, role, entry, m, policy)
-        except Refused as e:
-            if e.reason != "not_approved":
-                raise
-            kind = "new"
-        if kind == "new":
-            old = base.models.get(role)
-            if (
-                old is not None
-                and old.name == entry.name
-                and names.Version.parse(entry.version) < names.Version.parse(old.version)
-            ):
-                raise Refused("not_approved", detail_code="never_approved")
-            check_evaluation(source, m, entry.gate, testsets_lock, thresholds_dir)
-        changes.append(Change(role, kind, m))
-    for role, pinned in head.models.items():
-        if role not in manifests:
-            raw = verify.find_manifest(source, pinned.name, pinned.version, pinned.manifest_sha256)
-            manifests[role] = manifest.parse(raw)
-    check_dependencies(head, manifests)
+    changes, _ = assess_changes(
+        base,
+        head,
+        source=source,
+        policy=policy,
+        cache_dir=cache_dir,
+        testsets_lock=testsets_lock,
+        thresholds_dir=thresholds_dir,
+    )
     pr = github.pull_request(number)
     if pr.base_ref != MAIN_BRANCH:
         raise Refused("base_not_main")
@@ -962,6 +1054,129 @@ def lock_check(
         raise Refused("not_approved", detail_code="head_moved")
     check_approvals(pr, reviewers, changes)
     return {c.role: c.kind for c in changes}
+
+
+# ---------------------------------------------------------------- rollback
+
+
+class ListStore(verify.ReadStore, Protocol):
+    """The reads ``rollback`` makes: the verifier's, and listing a model's prefix."""
+
+    def list(self, prefix: str) -> list[str]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackResult:
+    role: str
+    previous: Pin
+    entry: Pin
+
+
+def rollback_candidates(
+    source: ListStore,
+    role: str,
+    current: Pin,
+    *,
+    policy: signing.TrustPolicy,
+    cache_dir: Path | str,
+    only: str | None = None,
+    first: bool = False,
+) -> list[Pin]:
+    """The versions ``role`` may roll back to, latest first: versions of the pinned name
+    older than ``current`` (semver order, never string order) whose sign-off for this
+    role verifies through the loader's own check, :func:`verify.verify_pin` with
+    ``require_signoff=True``, and passes :func:`check_production`. Being in the store, or
+    having a ``signoff.json``, is not enough (P16). The entry's hash and gate are the
+    sign-off's. ``only`` looks at that one version, ``first`` stops at the latest
+    candidate (each check downloads and hashes a whole version)."""
+    names.check_role(role)
+    verify.check_environment(policy)
+    name = current.name
+    now = names.Version.parse(current.version)
+    prefix = f"models/{name}/"
+    versions: set[str] = set()
+    for key in source.list(prefix):
+        parts = key[len(prefix) :].split("/")
+        if len(parts) == 2 and parts[1] == "signoff.json" and _ok(names.check_version, parts[0]):
+            versions.add(parts[0])
+    older = sorted(
+        (v for v in versions if names.Version.parse(v) < now),
+        key=names.Version.parse,
+        reverse=True,
+    )
+    out: list[Pin] = []
+    for version in older:
+        if only is not None and version != only:
+            continue
+        entry = _signed_off_entry(source, role, name, version, policy, cache_dir)
+        if entry is not None:
+            out.append(entry)
+            if first:
+                break
+    return out
+
+
+def _signed_off_entry(
+    source: ListStore,
+    role: str,
+    name: str,
+    version: str,
+    policy: signing.TrustPolicy,
+    cache_dir: Path | str,
+) -> Pin | None:
+    """The pin a verified sign-off of ``name@version`` for ``role`` names, or None. A
+    store outage propagates; any other refusal means "not a candidate"."""
+    key = store.signoff_key(name, version)
+    for vid in list(reversed(source.versions(key)))[: verify.MAX_VERSIONS]:
+        raw = _read_version(source, key, vid, signoff_record.MAX_BYTES)
+        if raw is None:
+            continue
+        try:
+            s = signoff_record.parse(raw)
+            if s.role != role or (s.name, s.version) != (name, version):
+                continue
+            entry = Pin(name, version, s.manifest_sha256, s.gate)
+            check_production(role, entry)
+            verify.verify_pin(source, role, entry, policy, cache_dir, require_signoff=True)
+        except Refused as e:
+            if e.reason == "store_unavailable":
+                raise
+            continue
+        return entry
+    return None
+
+
+def rollback(
+    role: str,
+    *,
+    source: ListStore,
+    policy: signing.TrustPolicy,
+    cache_dir: Path | str,
+    lock_path: Path | str,
+    to: str | None = None,
+) -> RollbackResult:
+    """``mhai-models rollback ROLE [--to VERSION]``: pin ``role`` to the latest of
+    :func:`rollback_candidates` (or ``to``, which must be one of them: ``not_approved``/
+    ``not_a_candidate`` otherwise, P16) and write the lock with :func:`write`. A role
+    the lock doesn't pin is ``lock_invalid``/``role``; no candidate at all is
+    ``not_approved``/``no_candidate``. The PR it goes in follows ``lock-check``'s rollback
+    rule."""
+    names.check_role(role)
+    if to is not None:
+        names.check_version(to)
+    current_lock = read(lock_path)
+    current = current_lock.models.get(role)
+    if current is None:
+        raise _invalid("role")
+    candidates = rollback_candidates(
+        source, role, current, policy=policy, cache_dir=cache_dir, only=to, first=True
+    )
+    if not candidates:
+        detail = "no_candidate" if to is None else "not_a_candidate"
+        raise Refused("not_approved", detail_code=detail)
+    chosen = candidates[0]
+    write(lock_path, current_lock.with_pin(role, chosen))
+    return RollbackResult(role, current, chosen)
 
 
 # ---------------------------------------------------------------- a promoted base
@@ -1026,6 +1241,9 @@ __all__ = [
     "FIXTURE_PREFIX",
     "LABEL",
     "MAIN_BRANCH",
+    "ListStore",
+    "MergedPullRequests",
+    "RollbackResult",
     "MAX_REVIEW_PAGES",
     "ROLES",
     "SCHEMA",
@@ -1038,6 +1256,7 @@ __all__ = [
     "Review",
     "Reviewers",
     "approvals",
+    "assess_changes",
     "base_verifier",
     "changed_roles",
     "check_approvals",
@@ -1055,6 +1274,8 @@ __all__ = [
     "pin",
     "read",
     "read_reviewers",
+    "rollback",
+    "rollback_candidates",
     "thresholds_sha256",
     "to_bytes",
     "write",

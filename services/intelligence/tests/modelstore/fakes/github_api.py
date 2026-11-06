@@ -5,7 +5,9 @@ response shapes: ``/repos/{repo}/pulls/{n}`` (a pull request: ``number``, ``user
 ``head.sha``, ``base.ref``, ``labels``, ``body``) and ``/repos/{repo}/pulls/{n}/reviews``
 (a page of reviews: ``id``, ``user.login``, ``state``, ``commit_id``), paged by
 ``per_page`` and ``page`` with a ``Link: <...>; rel="next"`` header that names the
-``/repositories/<id>/...`` form, as GitHub does. ``max_per_page`` serves fewer per page
+``/repositories/<id>/...`` form, as GitHub does; and ``/repos/{repo}/commits/{sha}/pulls``
+(the pull requests associated with a commit, for the sign-off), with a PR's ``merged``,
+``merge_commit_sha`` and ``merged_at``. ``max_per_page`` serves fewer per page
 than asked (as a server setting may). Logins are served in display case, as GitHub does. It carries a bearer token in
 its headers, as the real session does, so a test can check that the token never reaches
 a log or an error. Nothing here opens a socket. Every login and body is synthetic.
@@ -41,11 +43,17 @@ class FakePR:
     body: str | None = None
     reviews: list[dict[str, Any]] = field(default_factory=list)
     base_ref: str = "main"
+    merged: bool = False
+    merge_commit_sha: str | None = None
+    merged_at: str | None = None
 
     def resource(self) -> dict[str, Any]:
         return {
             "number": self.number,
-            "state": "open",
+            "state": "closed" if self.merged else "open",
+            "merged": self.merged,
+            "merge_commit_sha": self.merge_commit_sha,
+            "merged_at": self.merged_at,
             "user": {"login": self.author, "type": "User"},
             "head": {"sha": self.head_sha, "ref": "agent/synthetic"},
             "base": {"sha": "0" * 40, "ref": self.base_ref, "repo": {"id": REPO_ID}},
@@ -89,6 +97,9 @@ class FakeGitHubSession:
         self.next_base: str | None = None  # serve next links on another base URL
         self.link_page_step = 1  # the next link's page: this page plus this step
         self.link_per_page: str | None = None  # the next link's per_page, if not the asked
+        # GET /repos/{repo}/commits/{sha}/pulls: the PR numbers GitHub associates with sha
+        self.commit_pulls: dict[str, list[int]] = {}
+        self.commit_pulls_next = False  # serve a rel="next" link on that listing
 
     def add(self, pr: FakePR) -> FakePR:
         self.prs[pr.number] = pr
@@ -101,6 +112,14 @@ class FakeGitHubSession:
             raise ConnectionError(f"failed {url} with {self.headers['Authorization']}")
         if self.status is not None:
             return FakeResponse(self.status, b'{"message":"synthetic"}')
+        commits = f"{API}/repos/{self.repo}/commits/"
+        if url.startswith(commits) and url.endswith("/pulls"):
+            sha = url[len(commits) : -len("/pulls")]
+            items = [self.prs[n].resource() for n in self.commit_pulls.get(sha, [])]
+            headers = {}
+            if self.commit_pulls_next:
+                headers["Link"] = f'<{url}?per_page=100&page=2>; rel="next"'
+            return FakeResponse(200, json.dumps(items).encode(), headers)
         prefixes = (f"{API}/repos/{self.repo}/pulls/", f"{API}/repositories/{REPO_ID}/pulls/")
         prefix = next((p for p in prefixes if url.startswith(p)), None)
         if prefix is None:

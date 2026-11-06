@@ -14,8 +14,12 @@ Commands::
     mhai-models lock-check --base-dir MAIN_CHECKOUT --head HEAD_LOCK --head-sha SHA --pr N
         --testsets MAIN_CHECKOUT/models/testsets.lock
         --thresholds-dir MAIN_CHECKOUT/services/intelligence/intelligence/doceval/thresholds
+    mhai-models signoff --base-dir PARENT_CHECKOUT --before OLD_LOCK --after NEW_LOCK
+        --commit SHA --testsets PARENT_CHECKOUT/models/testsets.lock
+        --thresholds-dir PARENT_CHECKOUT/services/intelligence/intelligence/doceval/thresholds
+    mhai-models rollback ROLE [--to VERSION] [--lock PATH]
 
-TODO(Task 21/22): verify, signoff, rollback and drive-check.
+TODO(Task 22): verify and drive-check.
 
 ``dev-keygen`` makes a development Ed25519 key pair in ``OUT_DIR`` (the private key with
 mode 0600) and prints one JSON line with the key id and the public key PEM, never the
@@ -102,14 +106,37 @@ It reads the store as ``pin`` does and the PR with ``GITHUB_TOKEN`` and
 GitHub access. Verified files go to ``MHAI_MODELS_CACHE`` when set, else to a private
 temporary folder removed afterwards.
 
+``signoff`` (:func:`intelligence.modelstore.signoff.sign_off`, in ``model-signoff.yml``
+after a push to main) re-checks the merged PR's approvals and writes ``signoff.json`` and
+``signoff.sig``, then extends retention. ``--base-dir`` is a checkout of the merge commit's
+first parent (``$GITHUB_SHA^1``), from which the command also runs; its ``models.lock``
+must be ``--before`` (``lock_invalid``/``before_mismatch``), and ``models/reviewers.json``,
+``models/trust-policy.json``, ``--testsets`` and ``--thresholds-dir`` are read from it
+(an ``MHAI_MODELS_TRUST_POLICY`` naming another file is ``not_allowed_here``). ``--after``
+is the lock at ``--commit``. It reads ``MODEL_STORE_APPROVED_RETENTION_DAYS`` (required, no
+default, pending H2; at most ``MODEL_STORE_MAX_RETENTION_DAYS``), the store as the
+``signoff`` role (``MODEL_STORE_SIGNOFF_ACCESS_KEY``, ``MODEL_STORE_SIGNOFF_SECRET_KEY``),
+the sign-off signer (``MHAI_MODELS_SIGNER``; TODO(Task 26): the production signer, the
+development ``FileSigner`` refuses outside development) and GitHub as ``lock-check``
+does. It prints ``{"signoff": {role: signed_off|already_signed_off|removed}, "pr": N,
+"retention_extended": N}``; a push that changes no role needs no store, signer or GitHub.
+
+``rollback ROLE`` (:func:`intelligence.modelstore.lock.rollback`) pins ``ROLE`` to the latest
+older version of its pinned name with a sign-off for this role that verifies (or
+``--to VERSION``, which must be such a version: P16), reading the store as ``pin`` does,
+and writes ``models.lock`` (or ``--lock``). It prints ``{"rollback": {"role", "from",
+"to"}}``. The PR it goes in follows ``lock-check``'s rollback rule.
+
 A promotion (not ``--dry-run``) outside ``MHAI_MODELS_ENV=development`` must run with
 ``MHAI_EVAL_ROLE=locked`` (the locked split), must pass ``--expect-files`` and may not pass
 ``--dev-set``; each is ``not_allowed_here`` otherwise.
 
 Exit codes: 0 done, 2 refused (one JSON line ``{"refused": "<code>"}`` on stdout; for
-``promote``, ``check``, ``make-fixture``, ``store-init``, ``pin`` and ``lock-check`` with
+``promote``, ``check``, ``make-fixture``, ``store-init``, ``pin``, ``lock-check``,
+``signoff`` and ``rollback`` with
 ``"detail"``, a fixed code, when there is one), 3 a file could not be read or written, or
-(``promote``, ``check``, ``store-init``, ``pin``, ``lock-check``) the store, the source or
+(``promote``, ``check``, ``store-init``, ``pin``, ``lock-check``, ``signoff``, ``rollback``)
+the store, the source or
 GitHub is unavailable, 4 (``testset-build`` only) the split
 is locked and its lock line printed, but the scratch copy could not be removed
 (``{"warning": "scratch_not_removed"}`` on stderr, no path): remove the scratch root by hand.
@@ -138,6 +165,7 @@ from intelligence.modelstore import (
     names,
     promote,
     signing,
+    signoff,
     sources,
     store,
     testsets,
@@ -161,6 +189,9 @@ EVAL_READER_ACCESS_ENV = "MODEL_STORE_EVAL_READER_ACCESS_KEY"
 EVAL_READER_SECRET_ENV = "MODEL_STORE_EVAL_READER_SECRET_KEY"
 READER_ACCESS_ENV = "MODEL_STORE_READER_ACCESS_KEY"
 READER_SECRET_ENV = "MODEL_STORE_READER_SECRET_KEY"
+SIGNOFF_ACCESS_ENV = "MODEL_STORE_SIGNOFF_ACCESS_KEY"
+SIGNOFF_SECRET_ENV = "MODEL_STORE_SIGNOFF_SECRET_KEY"
+APPROVED_RETENTION_ENV = "MODEL_STORE_APPROVED_RETENTION_DAYS"
 CACHE_ENV = "MHAI_MODELS_CACHE"
 CANDIDATE_RETENTION_ENV = "MODEL_STORE_CANDIDATE_RETENTION_DAYS"
 LOCAL_ROOT_ENV = "MHAI_MODELS_LOCAL_ROOT"
@@ -184,7 +215,9 @@ STORE_INIT_HOSTS = frozenset({"127.0.0.1", "::1"})
 DEBUG_ENV = "MHAI_MODELS_DEBUG"
 # Commands whose refusals carry the fixed detail code, and whose store or source being
 # unavailable is exit 3.
-_DETAILED = frozenset({"promote", "check", "make-fixture", "store-init", "pin", "lock-check"})
+_DETAILED = frozenset(
+    {"promote", "check", "make-fixture", "store-init", "pin", "lock-check", "signoff", "rollback"}
+)
 
 
 def _print(obj: dict[str, Any]) -> None:
@@ -341,7 +374,7 @@ def _source_for(req: promote.Request) -> Any:
     return make
 
 
-def _reader_store() -> verify.ReadStore:
+def _reader_store() -> lock.ListStore:
     """The store with the reader's credentials (``not_allowed_here`` without them)."""
     reader = _s3(READER_ACCESS_ENV, READER_SECRET_ENV)
     if reader is None:
@@ -365,7 +398,7 @@ def _check_policy_env(path: Path) -> None:
         raise Refused("not_allowed_here", detail_code="trust_policy_outside_base_dir")
 
 
-def _github() -> lock.GitHubApi:
+def _github() -> lock.MergedPullRequests:
     return lock.GitHubClient.from_env()
 
 
@@ -474,6 +507,87 @@ def _lock_check(args: argparse.Namespace) -> int:
             head_sha=args.head_sha,
         )
     _print({"lock_check": "pass", "roles": roles})
+    return 0
+
+
+def _signoff_store() -> signoff.SignoffStore:
+    """The store as the ``signoff`` role (``not_allowed_here`` without its credentials)."""
+    target = _s3(SIGNOFF_ACCESS_ENV, SIGNOFF_SECRET_ENV)
+    if target is None:
+        raise Refused("not_allowed_here", detail_code="signoff_credentials")
+    return target
+
+
+def _signoff_signer() -> signing.Signer:
+    # TODO(Task 26): the production sign-off signer (a key separate from the promotion
+    # one). Phase 0 has only the development FileSigner, which refuses to load or sign
+    # outside MHAI_MODELS_ENV=development.
+    return _signer()
+
+
+def _signoff(args: argparse.Namespace) -> int:
+    commit = args.commit
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise Refused("invalid_name", detail_code="commit")
+    base_dir = Path(args.base_dir).resolve()
+    if not base_dir.is_dir():
+        raise Refused("not_allowed_here", detail_code="base_dir")
+    testsets_path = _inside(args.testsets, base_dir)
+    thresholds_dir = _inside(args.thresholds_dir, base_dir)
+    policy_path = base_dir / BASE_TRUST_POLICY_PATH
+    _check_policy_env(policy_path)
+    before, after = lock.read(args.before), lock.read(args.after)
+    if lock.read(base_dir / BASE_LOCK_PATH) != before:
+        raise Refused("lock_invalid", detail_code="before_mismatch")
+    reviewers = lock.read_reviewers(base_dir / BASE_REVIEWERS_PATH)
+    locked = testsets.read_lock(testsets_path)
+    days = _retention_days(APPROVED_RETENTION_ENV)
+    for role, entry in after.models.items():
+        lock.check_production(role, entry)
+    if not lock.changed_roles(before, after):
+        _print(signoff.Result({}, None, 0).to_obj())
+        return 0
+    target = _signoff_store()
+    policy = _trust_policy(policy_path)
+    signer = _signoff_signer()
+    github = _github()
+    with _cache() as cache_dir:
+        result = signoff.sign_off(
+            lock.to_bytes(before),
+            lock.to_bytes(after),
+            commit,
+            github=github,
+            reviewers=reviewers,
+            target=target,
+            policy=policy,
+            signer=signer,
+            cache_dir=cache_dir,
+            testsets_lock=locked,
+            thresholds_dir=thresholds_dir,
+            retention_days=days,
+        )
+    _print(result.to_obj())
+    return 0
+
+
+def _rollback(args: argparse.Namespace) -> int:
+    names.check_role(args.role)  # names first, before any environment, file or store access
+    if args.to is not None:
+        names.check_version(args.to)
+    lock_path = Path(args.lock) if args.lock else PRODUCTION_LOCK
+    source = _reader_store()
+    policy = _trust_policy()
+    with _cache() as cache_dir:
+        done = lock.rollback(
+            args.role,
+            source=source,
+            policy=policy,
+            cache_dir=cache_dir,
+            lock_path=lock_path,
+            to=args.to,
+        )
+    out = {"role": done.role, "from": done.previous.to_obj(), "to": done.entry.to_obj()}
+    _print({"rollback": out})
     return 0
 
 
@@ -667,6 +781,19 @@ def _parser() -> argparse.ArgumentParser:
     lc.add_argument("--testsets", required=True)
     lc.add_argument("--thresholds-dir", required=True)
     lc.set_defaults(func=_lock_check)
+    so = sub.add_parser("signoff", help="sign off the versions a merge to main pinned")
+    so.add_argument("--base-dir", required=True)
+    so.add_argument("--before", required=True)
+    so.add_argument("--after", required=True)
+    so.add_argument("--commit", required=True)
+    so.add_argument("--testsets", required=True)
+    so.add_argument("--thresholds-dir", required=True)
+    so.set_defaults(func=_signoff)
+    rb = sub.add_parser("rollback", help="pin a role back to an older signed-off version")
+    rb.add_argument("role")
+    rb.add_argument("--to", default=None)
+    rb.add_argument("--lock", default=None)
+    rb.set_defaults(func=_rollback)
     return parser
 
 
