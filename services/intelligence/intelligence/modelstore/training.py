@@ -39,6 +39,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -268,6 +269,30 @@ class TrainingManifest:
             "notebook_metrics",
         )
         _require(_is_timestamp(self.created_at), "created_at")
+
+
+REPORT_DECIMALS = Decimal("0.000001")
+
+
+def report_metrics(tm: TrainingManifest) -> dict[str, int | str]:
+    """``notebook_metrics`` as the evaluation report takes them (integers and strings
+    only): integers as they are, floats as fixed six-place decimal strings (half-even).
+
+    The report's checks stay strict: a negative value has no form there (a decimal string
+    there starts with a digit, a count is never negative), so it is ``manifest_invalid``.
+    A non-finite float never parses in the first place."""
+    if not isinstance(tm, TrainingManifest):
+        raise _invalid("type")
+    out: dict[str, int | str] = {}
+    for name, value in tm.notebook_metrics:
+        _require(_is_metric(value), "notebook_metrics")
+        _require(value >= 0, "notebook_metric_negative")
+        if isinstance(value, float):
+            exact = Decimal(repr(abs(value)))  # abs: -0.0 is 0
+            out[name] = format(exact.quantize(REPORT_DECIMALS, ROUND_HALF_EVEN), "f")
+        else:
+            out[name] = value
+    return out
 
 
 def _is_metric(v: object) -> bool:
@@ -556,5 +581,6 @@ __all__ = [
     "parse",
     "parse_licences",
     "parse_registry",
+    "report_metrics",
     "unverified_pin",
 ]

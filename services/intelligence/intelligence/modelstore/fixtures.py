@@ -24,11 +24,19 @@ Variants and the refusal each is meant to trigger (:data:`EXPECTED_REASONS`):
   with a non-synthetic kind): ``dataset_not_synthetic``; ``no_training_manifest``:
   ``training_manifest_missing``; ``bad_licence`` (:data:`BAD_LICENCE`):
   ``licence_not_allowed``; ``unpinned_base`` (revision ``main``): ``revision_unpinned``.
+
+:func:`warmup_page` renders the fixed warm-up page (``testdata/models/warmup/page.png``
+and its truth, ``page.json``) with the synthetic renderer: one synthetic patient's first
+document that fits on one page, from a fixed seed, at a low resolution so the PNG is small.
+The committed files are its output; a test renders it again and compares. The names have
+no digits: the synthetic-data scanner reads ``page-1`` as an identifier (letters, a hyphen,
+digits) and refuses it.
 """
 
 import hashlib
 import json
 import os
+import random
 import struct
 from pathlib import Path
 from typing import Any
@@ -72,6 +80,10 @@ EXPECTED_REASONS: dict[str, str | None] = {
     "unpinned_base": "revision_unpinned",
 }
 VARIANTS: tuple[str, ...] = tuple(EXPECTED_REASONS)
+
+WARMUP_SEED = 20261105
+WARMUP_DPI = 72
+_WARMUP_TRIES = 64
 
 _MAX_SEED = 2**32 - 1
 # Inert stand-ins: never deserialised by anything, only named and refused.
@@ -233,6 +245,35 @@ def make_run(
     return root
 
 
+def warmup_page() -> tuple[bytes, dict[str, Any]]:
+    """The warm-up page (PNG bytes) and its ground truth (model-output view, with page and
+    box filled in). Deterministic: a fixed seed, the first eval template seed's first
+    layout, and the first document that renders to exactly one page."""
+    from intelligence.doceval.synth import layouts, patients, render
+
+    rng = random.Random(WARMUP_SEED)
+    template_seed = layouts.EVAL_TEMPLATE_SEEDS.start
+    for _ in range(_WARMUP_TRIES):
+        for gt in patients.generate(rng, 1)[0].documents:
+            doc_type = gt["document"]["type"]["value"]
+            if doc_type not in layouts.DOC_TYPES:
+                continue
+            layout = layouts.for_type(doc_type, template_seed, purpose="dev")[0]
+            try:
+                rendered = render.render(gt, layout, WARMUP_DPI)
+            except render.RenderError:
+                continue
+            if len(rendered.pages) == 1:
+                return rendered.pages[0], rendered.ground_truth
+    raise Refused("fixture_name")
+
+
+def warmup_truth_bytes(truth: dict[str, Any]) -> bytes:
+    """The committed form of the warm-up truth: sorted keys, compact, ASCII."""
+    text = json.dumps(truth, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return text.encode("ascii") + b"\n"
+
+
 __all__ = [
     "BAD_LICENCE",
     "EXPECTED_REASONS",
@@ -244,6 +285,10 @@ __all__ = [
     "TRAINING_SCHEMA",
     "UNKNOWN_DATASET",
     "VARIANTS",
+    "WARMUP_DPI",
+    "WARMUP_SEED",
     "make_run",
+    "warmup_page",
+    "warmup_truth_bytes",
     "weights",
 ]

@@ -62,13 +62,28 @@ def registry() -> training.Registry:
     return training.load_registry(REPO / "models" / "approved-datasets.json")
 
 
+@pytest.fixture
+def licences() -> training.Licences:
+    return training.load_licences(REPO / "models" / "licences.json")
+
+
+@pytest.fixture
+def tc(
+    tm: training.TrainingManifest, registry: training.Registry, licences: training.Licences
+) -> training.TrainingCheck:
+    return training.check(tm, registry, licences)
+
+
 def test_model_card_lists_failing_slices(
-    tm: training.TrainingManifest, evaluation: dict[str, Any]
+    tm: training.TrainingManifest,
+    tc: training.TrainingCheck,
+    licences: training.Licences,
+    evaluation: dict[str, Any],
 ) -> None:
     failed = evaluation["verdicts"]["phase1"]["failed"]
     slices = {f.split(".")[1] for f in failed if f.startswith("slices.")}
     assert "lab_typed_poor" in slices
-    card = documents.model_card(tm, evaluation, fixtures.LICENCE)
+    card = documents.model_card(tc, evaluation, licences)
     for heading in (
         "## Intended use",
         "## Out-of-scope uses",
@@ -93,11 +108,11 @@ def test_model_card_lists_failing_slices(
 
 
 def test_model_card_with_no_failures(
-    tm: training.TrainingManifest, result: runner.RunResult
+    tc: training.TrainingCheck, licences: training.Licences, result: runner.RunResult
 ) -> None:
     rep = report.build_report(result, [report.packaged_thresholds("rehearsal")])
     assert rep["verdicts"]["rehearsal"]["failed"] == []
-    card = documents.model_card(tm, rep, fixtures.LICENCE)
+    card = documents.model_card(tc, rep, licences)
     section = card.split("## Known failure slices", 1)[1].split("\n## ", 1)[0]
     assert "None" in section
     assert "`slices." not in section
@@ -140,10 +155,33 @@ def _set(obj: Any, path: tuple[str, ...], value: Any) -> None:
         obj[last] = value
 
 
+def test_model_card_takes_a_training_check(
+    tm: training.TrainingManifest,
+    tc: training.TrainingCheck,
+    licences: training.Licences,
+    evaluation: dict[str, Any],
+) -> None:
+    # Task 14 M3: the card is made from a TrainingCheck, never a raw manifest, and its
+    # licence must be in models/licences.json.
+    with pytest.raises(Refused):
+        documents.model_card(tm, evaluation, licences)
+    other = dataclasses.replace(tc, licence=fixtures.BAD_LICENCE)
+    with pytest.raises(Refused) as exc:
+        documents.model_card(other, evaluation, licences)
+    assert exc.value.reason == "licence_not_allowed"
+    promoted = dataclasses.replace(tc, licence=None)
+    with pytest.raises(Refused) as exc:
+        documents.model_card(promoted, evaluation, licences)  # a promoted base, no licence
+    assert exc.value.reason == "manifest_invalid"
+    card = documents.model_card(promoted, evaluation, licences, base_licence="MIT")
+    assert "`MIT`" in card
+
+
 def test_documents_have_no_free_text(
     tmp_path: Path,
     evaluation: dict[str, Any],
     registry: training.Registry,
+    licences: training.Licences,
 ) -> None:
     run = fixtures.make_run(tmp_path / "run", "good", 3)
     good: dict[str, Any] = canonical.loads_strict(
@@ -173,30 +211,35 @@ def test_documents_have_no_free_text(
         (folder / "training_manifest.json").write_bytes(json.dumps(obj).encode("utf-8"))
         with pytest.raises(Refused) as exc:
             tm = training.load_run(folder)
-            documents.model_card(tm, evaluation, fixtures.LICENCE)  # never reached
+            documents.model_card(training.check(tm, registry, licences), evaluation, licences)
         assert exc.value.reason == "manifest_invalid", label
 
     tm = training.load_run(run)
+    tc = training.check(tm, registry, licences)
     # a dict is not a checked manifest
     with pytest.raises(Refused):
-        documents.model_card(good, evaluation, fixtures.LICENCE)
+        documents.model_card(good, evaluation, licences)
     with pytest.raises(Refused):
         documents.data_statement(good, registry)
-    # the licence argument and the evaluation are held to the same rule
+    # the licence and the evaluation are held to the same rule
     with pytest.raises(Refused):
-        documents.model_card(tm, evaluation, free_text)
+        documents.model_card(dataclasses.replace(tc, licence=free_text), evaluation, licences)
+    with pytest.raises(Refused):
+        documents.model_card(
+            dataclasses.replace(tc, licence=None), evaluation, licences, base_licence=free_text
+        )
     bad = copy.deepcopy(evaluation)
     bad["extractor"]["name"] = free_text
     with pytest.raises(Refused):
-        documents.model_card(tm, bad, fixtures.LICENCE)
+        documents.model_card(tc, bad, licences)
     bad = copy.deepcopy(evaluation)
     bad["verdicts"]["phase1"]["failed"].append(f"slices.{MARKER} x")
     with pytest.raises(Refused):
-        documents.model_card(tm, bad, fixtures.LICENCE)
+        documents.model_card(tc, bad, licences)
 
     # what is generated carries only ids, enums and numbers
     for text in (
-        documents.model_card(tm, evaluation, fixtures.LICENCE),
+        documents.model_card(tc, evaluation, licences),
         documents.data_statement(tm, registry),
     ):
         assert MARKER not in text

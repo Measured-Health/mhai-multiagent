@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from intelligence.doceval import extractors, report, runner
-from intelligence.modelstore import canonical, names
+from intelligence.modelstore import names
 from intelligence.modelstore.reasons import Refused
 
 PRINTED_SCHEMA = "mhai.evaluation.printed/1"
@@ -49,7 +49,6 @@ EXTRACTORS = ("tiny", "openai", "oracle")
 TESTSET_SIGNATURE = "testset.sig"
 _MAX_MODEL_VERSIONS = 16
 _MAX_MANIFEST_BYTES = 64 * 1024 * 1024
-_MAX_TRAINING_MANIFEST_BYTES = 1024 * 1024
 
 
 class _Stop(Exception):
@@ -214,16 +213,15 @@ def _extractor(args: argparse.Namespace, meta: dict[str, Any]) -> extractors.Ext
 
 
 def _notebook_metrics(path: str | None) -> dict[str, Any] | None:
+    """The training manifest's ``notebook_metrics`` for the report, read through
+    :func:`intelligence.modelstore.training.load` (the file must be named
+    ``training_manifest.json``; the whole manifest is checked; floats become fixed
+    decimal strings)."""
     if path is None:
         return None
-    raw = report.read_regular(Path(path), _MAX_TRAINING_MANIFEST_BYTES, "training_manifest_missing")
-    doc = canonical.loads_strict(raw, _MAX_TRAINING_MANIFEST_BYTES)
-    if not isinstance(doc, dict):
-        raise Refused("manifest_invalid")
-    nb = doc.get("notebook_metrics")
-    if nb is not None and not isinstance(nb, dict):
-        raise Refused("manifest_invalid")
-    return nb
+    from intelligence.modelstore import training
+
+    return dict(training.report_metrics(training.load(Path(path))))
 
 
 def _write_new(folder: Path, name: str, data: bytes) -> None:

@@ -2,7 +2,9 @@
 
 Both are generated, never written by hand, and only from ids, enums and numbers: the
 parsed training manifest (:class:`~intelligence.modelstore.training.TrainingManifest`,
-which cannot hold free text), the dataset registry, and an evaluation report that is read
+which cannot hold free text; the model card takes it only as a
+:class:`~intelligence.modelstore.training.TrainingCheck`, the result of holding it to the
+registries), the dataset registry, and an evaluation report that is read
 back through :func:`intelligence.doceval.report.parse_report` (every string in it held to
 its pattern). The prose is fixed text from this module. Every id is shown in a code span,
 and no id can contain a backtick, so nothing from the inputs is read as Markdown.
@@ -85,14 +87,40 @@ def _base_lines(tm: training.TrainingManifest) -> list[str]:
     ]
 
 
-def model_card(tm: training.TrainingManifest, evaluation: Mapping[str, Any], licence: str) -> str:
-    """``model_card.md``: intended use, out-of-scope uses, failing slices from the
-    evaluation, licence and base model. ``licence`` is the version's licence (the
-    upstream base's, or the promoted base's from its verified manifest)."""
-    tm = _manifest(tm)
-    rep = _evaluation(evaluation)
+def _licence(
+    checked: training.TrainingCheck, licences: training.Licences, base_licence: str | None
+) -> str:
+    """The version's licence: the upstream base's, from the check, or for a promoted base
+    ``base_licence`` (from that base's verified manifest). Either way it must be in
+    ``models/licences.json`` (Task 14 M3)."""
+    if not isinstance(licences, training.Licences):
+        raise Refused("policy_invalid", detail_code="document_licences")
+    licence = checked.licence if checked.licence is not None else base_licence
+    if checked.licence is not None and base_licence is not None:
+        raise Refused("manifest_invalid", detail_code="document_licence")
     if not training.is_licence_id(licence):
         raise Refused("manifest_invalid", detail_code="document_licence")
+    assert isinstance(licence, str)
+    if licence not in licences.allowed:
+        raise Refused("licence_not_allowed")
+    return licence
+
+
+def model_card(
+    checked: training.TrainingCheck,
+    evaluation: Mapping[str, Any],
+    licences: training.Licences,
+    *,
+    base_licence: str | None = None,
+) -> str:
+    """``model_card.md``: intended use, out-of-scope uses, failing slices from the
+    evaluation, licence and base model, from a manifest that passed
+    :func:`intelligence.modelstore.training.check` (never a raw manifest)."""
+    if not isinstance(checked, training.TrainingCheck):
+        raise Refused("manifest_invalid", detail_code="document_manifest")
+    tm = _manifest(checked.manifest)
+    rep = _evaluation(evaluation)
+    licence = _licence(checked, licences, base_licence)
     ts = rep["testset"]
     split = rep["split"]
 

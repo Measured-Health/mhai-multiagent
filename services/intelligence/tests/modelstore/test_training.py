@@ -473,3 +473,32 @@ def test_registry_values_checked_when_built() -> None:
         with pytest.raises(Refused) as exc:
             training.Registry(bad)  # type: ignore[arg-type]
         assert exc.value.reason == "policy_invalid"
+
+
+def test_report_metrics_are_fixed_decimals(tmp_path: Path) -> None:
+    # Task 19 carry: floats become six-place decimal strings for the evaluation report,
+    # which itself stays integers and strings only. The file may end with a newline.
+    run = fixtures.make_run(tmp_path / "run", "good", 3)
+    path = run / "training_manifest.json"
+    obj = json.loads(path.read_bytes())
+    obj["notebook_metrics"] = {"val_f1": 0.8123456789, "steps": 900, "loss": 1e-7, "big": 12.5}
+    path.write_text(json.dumps(obj) + "\n", encoding="utf-8")
+    tm = training.load(path)
+    assert training.report_metrics(tm) == {
+        "big": "12.500000",
+        "loss": "0.000000",
+        "steps": 900,
+        "val_f1": "0.812346",
+    }
+
+
+@pytest.mark.parametrize("value", [-0.5, -3])
+def test_report_metrics_refuse_negative_values(tmp_path: Path, value: float) -> None:
+    run = fixtures.make_run(tmp_path / "run", "good", 3)
+    path = run / "training_manifest.json"
+    obj = json.loads(path.read_bytes())
+    obj["notebook_metrics"] = {"delta": value}
+    path.write_bytes(canonical.dumps(obj) if isinstance(value, int) else json.dumps(obj).encode())
+    tm = training.load(path)
+    err = pytest.raises(Refused, training.report_metrics, tm)
+    assert err.value.reason == "manifest_invalid"
