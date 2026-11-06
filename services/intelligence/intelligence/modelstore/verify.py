@@ -831,8 +831,35 @@ def verify_for_load(
 ) -> VerifiedModel:
     """The only entry point for loading a pinned model (Task 23's loader): as
     :func:`verify_pin`, with the sign-off required unless both ``MHAI_MODELS_ENV`` and
-    ``APP_ENV`` say development (:func:`requires_signoff`). It cannot be turned off."""
-    return verify_pin(source, role, entry, policy, cache_dir, require_signoff=requires_signoff())
+    ``APP_ENV`` say development (:func:`requires_signoff`). It cannot be turned off.
+
+    Wherever the sign-off is required, the pin must also be one the production lock may
+    hold (:func:`intelligence.modelstore.lock.check_production`, P14: a known role, a
+    production gate, no ``fixture-`` name), checked before anything is fetched. The
+    sign-off's writer checks the same; this keeps the rule at load as well."""
+    signed = requires_signoff()
+    if signed:
+        _check_production_pin(role, entry)
+    return verify_pin(source, role, entry, policy, cache_dir, require_signoff=signed)
+
+
+def _check_production_pin(role: str, entry: PinEntry) -> None:
+    # lock imports this module: imported here, at the call.
+    from intelligence.modelstore import lock
+
+    try:
+        if not isinstance(role, str):
+            raise Refused("lock_invalid", detail_code="role")
+        pin = lock.Pin(entry.name, entry.version, entry.manifest_sha256, entry.gate)
+        lock.check_production(role, pin)
+    except Refused as e:
+        # Codes only: the role and the entry are not trusted to be clean names yet.
+        log.warning(
+            "model.verify_refused reason=%s detail=%s check=production_pin",
+            e.reason,
+            e.detail_code,
+        )
+        raise
 
 
 # Refusals that decide a pin is bad (not a passing store or disk problem): the pin's

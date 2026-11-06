@@ -615,5 +615,6 @@ Phase 0 was built by [the phase 0 plan](../plans/2026-11-03-document-pipeline-ph
 - **A clinical note hidden in a link definition voids it** (D34).
 - **A lock change travels alone**: it may touch only `models.lock`, `models/**`, `docs/**` and `CHANGELOG.md`, checked from git in lock-check and the sign-off (D35, D35b).
 - **The workflows' own files are protected by settings, not code**: CODEOWNERS, latest-push approval, required reviewers on `model-signoff`, main-only environments (H4, D37).
+- **The rehearsal gate and `fixture-` names never reach production**: a promotion outside development refuses them (and measures only `phase1` and `phase3` by default), and so does the load wherever a sign-off is required, not only lock-check and the sign-off (Task 25 review).
 - **The dry run keeps `evaluation.md`**: `promote --dry-run --report-dir` writes `evaluation.json`, the workflow renders it with `mhai-doceval report` and uploads the Markdown with the summary (Task 25).
 - **Rehearsal switches**: `--rehearsal` and `MHAI_MODELS_GITHUB_FAKE` let the CI rehearsal pin a fixture and fake GitHub, and are refused outside development (Task 24).

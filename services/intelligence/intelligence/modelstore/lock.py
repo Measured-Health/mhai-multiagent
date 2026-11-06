@@ -150,7 +150,7 @@ from intelligence.doceval.report import load_thresholds as _load_thresholds
 from intelligence.doceval.report import parse_report as _parse_report
 from intelligence.modelstore import canonical, files, manifest, names, signing, store, verify
 from intelligence.modelstore import signoff as signoff_record
-from intelligence.modelstore.promote import SUITES
+from intelligence.modelstore.promote import FIXTURE_PREFIX, SUITES
 from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.testsets import LockEntry as TestsetEntry
 
@@ -160,7 +160,6 @@ MAX_ROLES = 16
 # The roles a production lock may pin: those with an evaluation suite (promote's
 # ``SUITES``), since only they can pass a gate.
 ROLES: frozenset[str] = frozenset(SUITES)
-FIXTURE_PREFIX = "fixture-"
 LABEL = "clinical-review"
 CLINICAL_NOTE = "Clinical note:"
 CLINICAL_NOTE_MIN_CHARS = 20

@@ -36,7 +36,9 @@ import pytest
 from intelligence.boundary.config import WorkerSettings
 from intelligence.boundary.worker import build_model_gate
 from intelligence.doceval import cli as doceval_cli
-from intelligence.modelstore import cli
+from intelligence.modelstore import cli, signing, verify
+from intelligence.modelstore.lock import Pin
+from intelligence.modelstore.reasons import Refused
 from tests.modelstore.conftest import MinioStore
 
 SERVICE = Path(__file__).resolve().parents[2]
@@ -291,6 +293,22 @@ class Flow:
             str(pr),
         ]
 
+    def signed_off(self, version: str, manifest_sha256: str) -> str:
+        """The verifier with the sign-off required, as a production load runs it (the
+        development keys are trusted here because this is development): ``verified``,
+        or ``<reason>:<detail>``."""
+        cache = self.root / "verify-cache"
+        cache.mkdir(mode=0o700, exist_ok=True)
+        policy = signing.load_policy(self.repo / "models" / "trust-policy.json")
+        pin = Pin(self.name, version, manifest_sha256, GATE)
+        try:
+            verify.verify_pin(
+                self.minio.store("reader"), ROLE, pin, policy, cache, require_signoff=True
+            )
+        except Refused as e:
+            return f"{e.reason}:{e.detail_code}"
+        return "verified"
+
     def load(self, lock: Path, endpoint: str | None = None) -> dict[str, Any]:
         """One start of the pipeline's model gate: its own settings and build_model_gate."""
         creds = self.root / "creds"
@@ -373,8 +391,9 @@ def flow(
         cred.chmod(0o600)
     yield f
     # Verified copies are read-only: give write back so tmp_path can be removed.
-    for p in (tmp_path / "cache").rglob("*"):
-        p.chmod(0o700 if p.is_dir() else 0o600)
+    for d in ("cache", "verify-cache"):
+        for p in (tmp_path / d).rglob("*"):
+            p.chmod(0o700 if p.is_dir() else 0o600)
 
 
 def _keys(f: Flow) -> dict[str, str]:
@@ -474,6 +493,10 @@ def _release(
     f.github(pr, head, body)
     out["lock-check"] = f.json(f.lock_check_args(pr, head, head_lock), ("reader",))
 
+    # Before the merge's sign-off exists, the version doesn't verify with it required.
+    sha = out["promote"]["manifest_sha256"]
+    out["verify-before-signoff"] = f.signed_off(version, sha)
+
     base = f.git("rev-parse", "HEAD").strip()
     f.git("merge", "-q", "--no-ff", "-m", f"merge pr-{pr}", f"pr-{pr}")
     merge = f.git("rev-parse", "HEAD").strip()
@@ -498,6 +521,8 @@ def _release(
         ("signoff",),
         MHAI_MODELS_SIGNER=f.key("signoff"),
     )
+    # The sign-off just written is the one the verifier finds and accepts.
+    out["verify-after-signoff"] = f.signed_off(version, sha)
     f.git("checkout", "-q", "main")
     return out
 
@@ -578,6 +603,8 @@ def test_e2e_promotion_flow(flow: Flow, caplog: pytest.LogCaptureFixture) -> Non
         assert r["signoff"]["signoff"] == {ROLE: "signed_off"}
         assert r["signoff"]["pr"] == pr
         assert r["signoff"]["retention_extended"] > 0
+        assert r["verify-before-signoff"] == "not_approved:missing"
+        assert r["verify-after-signoff"] == "verified"
     assert v1["dry-run"]["files_sha256"] != v2["dry-run"]["files_sha256"]
 
     def loaded(version: str) -> dict[str, Any]:

@@ -144,6 +144,8 @@ jobs:
               drive | hf) source="$SOURCE_INPUT" ;;
               *) echo "::error::local-fixture is for rehearsal only"; exit 1 ;;
             esac
+            # P14: production promotions are measured against a production gate only.
+            case "$GATE_INPUT" in phase1 | phase3) ;; *) echo "::error::the rehearsal gate is for rehearsal mode only"; exit 1 ;; esac
             {
               echo MHAI_MODELS_ENV=production
               echo APP_ENV=production
@@ -278,6 +280,8 @@ jobs:
               drive | hf) source="$SOURCE_INPUT" ;;
               *) echo "::error::local-fixture is for rehearsal only"; exit 1 ;;
             esac
+            # P14: production promotions are measured against a production gate only.
+            case "$GATE_INPUT" in phase1 | phase3) ;; *) echo "::error::the rehearsal gate is for rehearsal mode only"; exit 1 ;; esac
             {
               echo MHAI_MODELS_ENV=production
               echo APP_ENV=production

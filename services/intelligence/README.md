@@ -113,8 +113,13 @@ data, or de-identified data with an approval record; nothing else, ever.
 
 ```bash
 uv run mhai-models check RUN_DIR    # file and training-manifest checks; prints the files hash
-uv run mhai-models promote NAME VERSION --source local --run RUN --dry-run
+MHAI_MODELS_LOCAL_ROOT=/path/to/root \
+  uv run mhai-models promote NAME VERSION --source local --run RUN --dry-run
 ```
+
+For `--source local`, `MHAI_MODELS_LOCAL_ROOT` names a folder laid out like
+the Drive one: the run must be at `$MHAI_MODELS_LOCAL_ROOT/models/NAME/RUN/`.
+Without it the dry run is refused.
 
 `check` runs the same file checks as the promotion. A dry run on your own
 machine also runs the evaluation, but on the development split only, and
@@ -146,9 +151,15 @@ throwaway store with test keys, and say so in their summary.
 ### 4. Reading the report
 
 `evaluation.md` starts with what was measured: the model, the test set and
-its SHA-256, and the split (`test` for a real promotion). Then come the
-gates, each `pass` or `fail`, with the failing checks listed first, then the
-scores per field and per slice, and the timings. The summary's
+its SHA-256, and the split (`test` for a real promotion). Then comes the
+gates table: one row per gate with its verdict, `PASS` or `FAIL`, a
+**Production** column, the thresholds file and its SHA-256. Production is
+`yes` for `phase1` and `phase3`. The `rehearsal` gate shows
+`no (rehearsal only)`: it is the tiny test model's bar, and outside a
+rehearsal a promotion refuses it and the service never loads a version
+pinned on it. Under the table, each failing gate lists the checks that
+failed or weren't measured. Then come the scores per field and per slice,
+and the timings. The summary's
 `gates_failed` lists any gate that failed. A version can be promoted with a
 failed gate, but it can't be pinned for that gate.
 

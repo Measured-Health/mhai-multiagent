@@ -1351,3 +1351,46 @@ def test_cli_report_dir_checked_before_anything_runs(
     assert json.loads(out) == {"refused": "not_allowed_here", "detail": "report_dir"}
     if case == "exists":
         assert (out_dir / "evaluation.json").read_bytes() == b"kept"
+
+
+# ---------------------------------------------------------------- P14 at promotion
+
+
+@pytest.mark.parametrize("case", ["rehearsal_gate", "fixture_name"])
+def test_production_promotion_refuses_rehearsal_gate_and_fixture_names(
+    case: str,
+    tmp_path: Path,
+    keys: Keys,
+    registry: training.Registry,
+    licences: training.Licences,
+    dev_set: minisets.MiniSet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outside development a promotion never signs a version measured against the
+    rehearsal bar, or one named fixture-, so none can exist in a production store."""
+    entry = testsets.LockEntry("clinical_document", "1.0.0", "ab" * 32)
+    locked = promote.LockedSplit(MemoryStore(), entry, keys.policy)
+    mem = MemoryStore()
+    ctx = replace(
+        _write_ctx(_ctx(_source_root(tmp_path), registry, licences, dev_set), mem, keys),
+        split=locked,
+    )
+    monkeypatch.setenv(signing.ENV_VAR, "production")
+    good = _request("3.0.2", dry_run=False, expect_files="0" * 64, gates=("phase1",))
+    promote.check_inputs(good, ctx)
+    if case == "rehearsal_gate":
+        bad = replace(good, gates=("phase1", "rehearsal"))
+        expected: tuple[str, str | None] = ("not_allowed_here", "rehearsal_gate")
+    else:
+        bad = replace(good, name="fixture-tiny")
+        expected = ("fixture_name", None)
+    err = _refused(promote.check_inputs, bad, ctx)
+    assert (err.reason, err.detail_code) == expected
+    assert mem.calls == []
+    # With no --gate, a production promotion is measured on the production gates only.
+    assert promote.promotion_gates(replace(good, gates=())) == ("phase1", "phase3")
+    assert promote.promotion_gates(replace(good, gates=(), dry_run=True)) == report.GATES
+    # A development rehearsal may do both.
+    monkeypatch.setenv(signing.ENV_VAR, "development")
+    promote.check_inputs(bad, ctx)
+    assert promote.promotion_gates(replace(good, gates=())) == report.GATES

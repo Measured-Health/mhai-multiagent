@@ -431,3 +431,16 @@ def test_compose_sets_the_warm_up_page() -> None:
     assert "INTELLIGENCE_WARMUP_PAGE: /app/warmup/page.png" in (
         REPO / "deploy" / "compose.yml"
     ).read_text(encoding="utf-8")
+
+
+def test_production_promotion_refuses_the_rehearsal_gate() -> None:
+    """Outside rehearsal mode both promote jobs refuse gate rehearsal before anything runs
+    (P14: nothing measured only against the rehearsal bar is signed in production)."""
+    for j in ("dry-run", "promote"):
+        job = _jobs("model-promote.yml")[j]
+        mode = [s for s in _steps(job) if s.get("name") == "Mode"]
+        assert len(mode) == 1, j
+        _, production = re.split(r"\n\s*else\n", str(mode[0]["run"]))
+        refuse = 'case "$GATE_INPUT" in phase1 | phase3) ;; *) echo "::error::'
+        assert refuse in production, j
+        assert production.index(refuse) < production.index('echo "GATE=$GATE_INPUT"'), j

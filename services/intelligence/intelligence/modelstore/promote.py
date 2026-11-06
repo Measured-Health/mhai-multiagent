@@ -124,6 +124,8 @@ KNOWN_VLM_ARCHITECTURES: frozenset[str] = frozenset(
     }
 )
 VLM_ENGINE = "vllm"
+# A fixture or rehearsal model's name; never promoted or pinned outside development (P14).
+FIXTURE_PREFIX = "fixture-"
 VLM_HARDWARE = "unknown"  # TODO(GPU task): the runner reports the GPU it ran on
 MAX_WARMUP_PAGE_BYTES = 8 * 1024 * 1024
 MAX_SIGNATURE_BYTES = signing.MAX_SIGNATURE_DOC_BYTES
@@ -325,6 +327,12 @@ def check_inputs(req: Request, ctx: Context) -> None:
     if req.dry_run:
         return
     rehearsal = signing.is_development()
+    if not rehearsal and report.REHEARSAL_GATE in req.gates:
+        # P14: nothing measured only against the rehearsal bar is signed outside a
+        # development rehearsal, so no such version exists in a production store.
+        raise Refused("not_allowed_here", detail_code="rehearsal_gate")
+    if not rehearsal and req.name.startswith(FIXTURE_PREFIX):
+        raise Refused("fixture_name")
     if not rehearsal and not isinstance(ctx.split, LockedSplit):
         # The gates signed into a manifest are measured on the locked split; only a
         # development rehearsal may promote on the dev split (recorded as such).
@@ -719,6 +727,16 @@ def _quiet_doceval() -> Iterator[None]:
             lg.removeFilter(quiet)
 
 
+def promotion_gates(req: Request) -> tuple[str, ...]:
+    """The gates to measure: those asked for; with none, every gate, except that a
+    promotion outside development is measured on the production gates only (P14)."""
+    if req.gates:
+        return tuple(req.gates)
+    if not req.dry_run and not signing.is_development():
+        return tuple(g for g in report.GATES if g in report.PRODUCTION_GATES)
+    return tuple(report.GATES)
+
+
 def gate_thresholds(gates: Sequence[str]) -> tuple[report.Thresholds, ...]:
     return tuple(report.packaged_thresholds(g) for g in (gates or report.GATES))
 
@@ -994,7 +1012,7 @@ def promote(req: Request, ctx: Context) -> Summary:
     if target is not None:  # 2
         assert ctx.workflow is not None and ctx.retention_days is not None
         reserve(target, req.name, req.version, req.run, ctx.workflow.actor, ctx.retention_days)
-    gates = gate_thresholds(req.gates)
+    gates = gate_thresholds(promotion_gates(req))
     with sources.scratch(ctx.scratch_parent) as sc:
         source = ctx.source_for(sc)  # 3
         fetched = fetch_run(source, req.name, req.run, sc.run)

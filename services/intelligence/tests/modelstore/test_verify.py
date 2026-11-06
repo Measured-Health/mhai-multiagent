@@ -42,7 +42,7 @@ NAME = fixtures.MODEL_NAME
 ROLE = fixtures.ROLE
 VERSION = "0.1.0"
 RUN = "run-verify-1"
-GATE = "rehearsal"
+GATE = "phase1"  # a production gate: production loads refuse the rehearsal gate (P14)
 ACTOR = "promoter-bot"
 TRAINER = fixtures.TRAINED_BY
 MARKER = "Zqxverifymarkerwv"
@@ -744,7 +744,7 @@ def test_signoff_must_match_and_verify(
     elif case == "other_hash":
         write_signoff(mem, pub, keys.signoff, manifest_sha256=_hex("x"))
     elif case == "other_gate":
-        write_signoff(mem, pub, keys.signoff, gate="phase1")
+        write_signoff(mem, pub, keys.signoff, gate="phase3")
     elif case == "other_actor":
         write_signoff(mem, pub, keys.signoff, promotion_actor="someone-else")
     elif case == "wrong_purpose":
@@ -1013,7 +1013,7 @@ def test_gate_must_pass_in_the_manifest(
 ) -> None:
     mem = MemoryStore()
     records, docs, _ = _upload(mem, tmp_path)
-    raw = _manifest_bytes(records, docs, gates={GATE: "fail", "phase1": "pass"})
+    raw = _manifest_bytes(records, docs, gates={"rehearsal": "fail", "phase1": "pass"})
     _put(mem, store.manifest_sig_key(NAME, VERSION), keys.manifest.sign("manifest", raw))
     _put(mem, store.manifest_key(NAME, VERSION), raw)
     sha = manifest.sha256(raw)
@@ -1021,7 +1021,7 @@ def test_gate_must_pass_in_the_manifest(
     # Development (no sign-off) still refuses a pin whose own gate result is not pass.
     monkeypatch.setenv(signing.ENV_VAR, "development")
     monkeypatch.setenv(verify.APP_ENV, "development")
-    for gate in (GATE, "phase3"):
+    for gate in ("rehearsal", "phase3"):
         err = _refused(
             verify.verify_for_load, mem, ROLE, Pin(NAME, VERSION, sha, gate), keys.policy, cache
         )
@@ -1361,3 +1361,41 @@ def test_stale_partial_that_cannot_be_removed_keeps_the_final(
     err = _refused(_verify, mem, pub, keys, cache)
     assert (err.reason, err.detail_code) == ("not_allowed_here", "cache_not_removed")
     assert {p: (v.path / p).read_bytes() for p in before} == before
+
+
+# ---------------------------------------------------------------- P14 at load
+
+
+@pytest.mark.parametrize("case", ["rehearsal_gate", "fixture_name"])
+def test_production_load_refuses_rehearsal_gate_and_fixture_names(
+    case: str, tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside development the load refuses a pin that lock.check_production refuses (the
+    rehearsal gate, a fixture- name), before anything is fetched, even with a trusted
+    signature and a matching sign-off: the sign-off is not the only P14 control at load."""
+    mem = MemoryStore()
+    name, gate = ("fixture-tiny", GATE) if case == "fixture_name" else (NAME, "rehearsal")
+    records, docs, run_dir = _upload(mem, tmp_path, name=name)
+    raw = _manifest_bytes(records, docs, name=name, gates={gate: "pass"})
+    _put(mem, store.manifest_sig_key(name, VERSION), keys.manifest.sign("manifest", raw))
+    _put(mem, store.manifest_key(name, VERSION), raw)
+    pub = Published(raw, manifest.sha256(raw), manifest.parse(raw), run_dir)
+    write_signoff(mem, pub, keys.signoff, gate=gate)
+    pin = Pin(name, VERSION, pub.sha, gate)
+    # The verifier itself accepts it (signed, signed off): only the production rule refuses.
+    assert verify.verify_pin(
+        mem, ROLE, pin, keys.policy, _cache(tmp_path / "p"), require_signoff=True
+    ).path.is_dir()
+    cache = _cache(tmp_path / "load")
+    spy = Spy(mem)
+    assert verify.requires_signoff() is True
+    err = _refused(verify.verify_for_load, spy, ROLE, pin, keys.policy, cache)
+    if case == "fixture_name":
+        assert (err.reason, err.detail_code) == ("fixture_name", None)
+    else:
+        assert (err.reason, err.detail_code) == ("gate_failed", "not_production")
+    assert spy.reads == [] and spy.downloads == 0 and os.listdir(cache) == []
+    # In development (both switches) the same pin loads, as the CI rehearsal needs.
+    monkeypatch.setenv(signing.ENV_VAR, "development")
+    monkeypatch.setenv(verify.APP_ENV, "development")
+    assert verify.verify_for_load(mem, ROLE, pin, keys.policy, cache).path.is_dir()
