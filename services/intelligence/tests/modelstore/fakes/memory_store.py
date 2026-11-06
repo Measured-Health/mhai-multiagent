@@ -20,6 +20,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import BinaryIO
 
 from intelligence.modelstore import store
 from intelligence.modelstore.reasons import Refused
@@ -99,6 +100,20 @@ class MemoryStore:
         if len(body) > max_bytes:
             raise Refused("too_large")
         return body
+
+    def download(
+        self, key: str, *, version_id: str, out: BinaryIO, max_bytes: int
+    ) -> tuple[int, str]:
+        """As :meth:`S3Store.download`: exactly ``version_id``, at most ``max_bytes``."""
+        store._check_key(key)
+        self.calls.append(("download", key))
+        if not isinstance(version_id, str):
+            raise Refused("invalid_name")
+        _, body = self._find(key, version_id)
+        if len(body) > max_bytes:
+            raise Refused("too_large")
+        out.write(body)
+        return len(body), hashlib.sha256(body).hexdigest()
 
     def versions(self, key: str) -> list[str]:
         self.calls.append(("versions", key))

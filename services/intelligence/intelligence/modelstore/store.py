@@ -27,6 +27,11 @@ write credentials outside this code) makes a newer version that object lock does
 So readers never trust "latest": the manifest records each object's ``store_version_id``
 and the verifier asks for that version (Task 22).
 
+``version_id=None`` ("latest") on :meth:`ObjectStore.get` and :meth:`ObjectStore.head` is
+for tests and operators' checks only: promote, the test-split fetch and the load-time
+verifier (:mod:`intelligence.modelstore.verify`) always name a version, and
+:meth:`S3Store.download` has no "latest" at all (Task 16 M4).
+
 **Transport and errors.** TLS is required unless the endpoint host is exactly
 ``127.0.0.1``, ``::1`` or ``localhost``. Every failure is a :class:`Refused` with a fixed
 code (``store_unavailable``, ``not_found``, ``version_exists``, ``hash_mismatch``,
@@ -536,6 +541,57 @@ class S3Store:
         if hashlib.sha256(data).hexdigest() != expected:
             raise Refused("hash_mismatch")
         return data
+
+    def download(
+        self, key: str, *, version_id: str, out: BinaryIO, max_bytes: int
+    ) -> tuple[int, str]:
+        """Stream exactly ``version_id`` of ``key`` into ``out`` in 8 MB blocks and return
+        its size and SHA-256 (lowercase hex). There is no "latest": ``version_id`` is
+        required. More than ``max_bytes`` (announced or read) is ``too_large`` and reading
+        stops there; a short body is ``size_mismatch``; a body that isn't the SHA-256 the
+        store keeps with it is ``hash_mismatch``. The caller compares the result with what
+        the manifest recorded."""
+        _check_key(key)
+        vid = _check_version_id(version_id)
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 0:
+            raise Refused("too_large", detail_code="max_bytes")
+        resp = self._call(self._client.get_object, Key=key, VersionId=vid, ChecksumMode="ENABLED")
+        stream = resp.get("Body")
+        try:
+            length = resp.get("ContentLength")
+            if not isinstance(length, int) or length > max_bytes:
+                raise Refused("too_large")
+            expected = _hex_from_b64(resp.get("ChecksumSHA256"))
+            digest = hashlib.sha256()
+            n = 0
+            while n <= max_bytes:
+                block = self._read(stream, min(_BLOCK, max_bytes + 1 - n))
+                if not block:
+                    break
+                n += len(block)
+                if n > max_bytes:
+                    raise Refused("too_large")
+                digest.update(block)
+                self._write(out, block)
+        finally:
+            if stream is not None:
+                stream.close()
+        if n != length:
+            raise Refused("size_mismatch")
+        sha = digest.hexdigest()
+        if sha != expected:
+            raise Refused("hash_mismatch")
+        return n, sha
+
+    @staticmethod
+    def _write(out: BinaryIO, block: bytes) -> None:
+        failed = False
+        try:
+            out.write(block)
+        except (OSError, ValueError):
+            failed = True
+        if failed:
+            raise Refused("file_not_allowed", detail_code="write")
 
     def _read(self, stream: Any, limit: int) -> bytes:
         from botocore.exceptions import BotoCoreError
