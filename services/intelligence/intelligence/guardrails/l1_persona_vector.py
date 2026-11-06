@@ -139,7 +139,8 @@ class ActivationExtractor:
             model_name,
             torch_dtype=torch.float16 if device == "cuda" else torch.float32,
             device_map="auto" if device == "cuda" else None,
-            output_hidden_states=True
+            output_hidden_states=True,
+            use_safetensors=True
         )
         self.model.eval()
 

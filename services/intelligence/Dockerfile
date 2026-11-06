@@ -37,6 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
+# The fixed warm-up page each pinned in-process role must reproduce before the pipeline is
+# ready (plan Tasks 23, 24): a copy of testdata/models/warmup/page.png, which
+# tests/modelstore/test_workflows.py keeps byte-identical. INTELLIGENCE_WARMUP_PAGE names it.
+COPY warmup/page.png /app/warmup/page.png
 
 # The venv stays root-owned and read-only; the app only writes here.
 RUN mkdir -p /app/data /app/artifacts /home/appuser/.cache/huggingface \

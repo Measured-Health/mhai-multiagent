@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from intelligence.doceval import cli, report
-from intelligence.modelstore import canonical
+from intelligence.modelstore import canonical, fixtures
 from tests.doceval import minisets
 
 
@@ -233,7 +233,13 @@ def test_cli_oracle_refused_on_a_signed_or_locked_set(
     manifest = json.loads(path.read_bytes())
     manifest["locked"] = True
     path.write_bytes(canonical.dumps(manifest))
-    for s in (signed, locked):
+    # The other field of a locked split (modelstore.testsets), even without ``locked``.
+    pinned = _set(tmp_path / "pinned")
+    path = pinned.root / "testset.json"
+    manifest = json.loads(path.read_bytes())
+    manifest["store_version_ids"] = {}
+    path.write_bytes(canonical.dumps(manifest))
+    for s in (signed, locked, pinned):
         args = ["run", "--extractor", "oracle", "--test-only-oracle", "--set", str(s.root)]
         assert cli.main([*args, "--out", str(tmp_path / "r")]) == 2
         assert json.loads(_out(capsys)) == {"refused": "not_allowed_here"}
@@ -288,22 +294,43 @@ def test_cli_unexpected_error_is_a_fixed_code(
 def test_cli_training_manifest_read_safely(
     tmp_path: Path, dev_set: minisets.MiniSet, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    target = tmp_path / "tm.json"
-    target.write_bytes(canonical.dumps({"notebook_metrics": {"val_f1": "0.8"}}))
-    link = tmp_path / "link.json"
+    # Through training.load (Task 14): the whole manifest is checked, floats and a final
+    # newline are accepted, and floats reach the report as fixed decimals.
+    run = fixtures.make_run(tmp_path / "run", "good", 3)
+    target = run / "training_manifest.json"
+    obj = json.loads(target.read_bytes())
+    obj["notebook_metrics"] = {"val_f1": 0.8, "steps": 900}
+    target.write_text(json.dumps(obj) + "\n", encoding="utf-8")
+    (tmp_path / "linked").mkdir()
+    link = tmp_path / "linked" / "training_manifest.json"
     link.symlink_to(target)
-    big = tmp_path / "big.json"
-    big.write_bytes(b" " * (2 * 1024 * 1024))
+    (tmp_path / "big").mkdir()
+    big = tmp_path / "big" / "training_manifest.json"
+    big.write_bytes(b" " * (17 * 1024 * 1024))
+    (tmp_path / "bad").mkdir()
+    bad = tmp_path / "bad" / "training_manifest.json"
+    bad.write_bytes(canonical.dumps({"notebook_metrics": {"val_f1": "0.8"}}))
+    misnamed = tmp_path / "tm.json"
+    misnamed.write_bytes(target.read_bytes())
     base = ["run", "--extractor", "oracle", "--test-only-oracle", "--set", str(dev_set.root)]
-    for path, code in ((link, "training_manifest_missing"), (big, "too_large")):
+    for path, code in (
+        (link, "file_not_allowed"),
+        (big, "too_large"),
+        (bad, "manifest_invalid"),
+        (misnamed, "file_not_allowed"),
+        (tmp_path / "missing" / "training_manifest.json", "training_manifest_missing"),
+    ):
         args = [*base, "--out", str(tmp_path / "r"), "--training-manifest", str(path)]
-        assert cli.main(args) == 2
-        assert json.loads(_out(capsys)) == {"refused": code}
+        assert cli.main(args) == 2, path
+        assert json.loads(_out(capsys)) == {"refused": code}, path
     args = [*base, "--out", str(tmp_path / "ok"), "--training-manifest", str(target)]
     assert cli.main(args) == 0
     _out(capsys)
     rep = report.read_report(tmp_path / "ok" / "evaluation.json")
-    assert rep["notebook_metrics"] == {"informational": True, "metrics": {"val_f1": "0.8"}}
+    assert rep["notebook_metrics"] == {
+        "informational": True,
+        "metrics": {"steps": 900, "val_f1": "0.800000"},
+    }
 
 
 def test_cli_split_checked_before_the_run(

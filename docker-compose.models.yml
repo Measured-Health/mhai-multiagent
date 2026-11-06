@@ -1,0 +1,67 @@
+# The model store for local and CI rehearsal (document pipeline phase 0, Task 16):
+# MinIO with object lock, and a one-shot init that makes the bucket, the five users and
+# their policies (deploy/minio/init-model-store.sh). No app service uses it in phase 0.
+#
+#   mkdir -m 700 .model-store-secrets
+#   MINIO_ROOT_USER=... MINIO_ROOT_PASSWORD=... \
+#     docker compose -f docker-compose.models.yml up -d --wait
+#
+# The users' passwords land in .model-store-secrets/<user> (mode 0600), owned by
+# MODEL_STORE_SECRETS_UID (default 1000). The root user is for provisioning only.
+#
+# Test-only: the MinIO server and client are AGPL and are never shipped. The images are
+# the last community builds still published (bitnamilegacy, frozen in August 2025; the
+# minio/minio and minio/mc repositories are no longer available), pinned by digest.
+# Synthetic data only.
+
+services:
+  minio:
+    image: bitnamilegacy/minio@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20
+    entrypoint: ["minio"]
+    command: ["server", "/bitnami/minio/data", "--address", ":9000", "--certs-dir", "/tmp/certs"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - model-store:/bitnami/minio/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+  minio-init:
+    image: bitnamilegacy/minio-client@sha256:73bd39f7899a0cef12b8dd5df13aa93a3ed1aaa44236542442e9ac76819ac158
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/init/init-model-store.sh"]
+    user: "${MODEL_STORE_SECRETS_UID:-1000}:${MODEL_STORE_SECRETS_GID:-1000}"
+    environment:
+      MINIO_URL: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+      MODEL_STORE_BUCKET: ${MODEL_STORE_BUCKET:-mhai-models}
+      MODEL_STORE_DEFAULT_RETENTION_DAYS: ${MODEL_STORE_DEFAULT_RETENTION_DAYS:-1}
+      MODEL_STORE_MAX_RETENTION_DAYS: ${MODEL_STORE_MAX_RETENTION_DAYS:-3650}
+      MODEL_STORE_SECRETS_DIR: /secrets
+    volumes:
+      - ./deploy/minio:/init:ro
+      - ${MODEL_STORE_SECRETS_DIR:-./.model-store-secrets}:/secrets
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    restart: "no"
+
+volumes:
+  model-store:

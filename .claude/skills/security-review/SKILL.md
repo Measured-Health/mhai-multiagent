@@ -29,6 +29,7 @@ Review as an attacker would, not as the author. Every finding needs a concrete w
 - **Logs and audit leaking PII:** values under nested keys, `slog.Any` maps or structs, groups named after a secret.
 - **Over-broad deny lists:** a credential filter that matches exact names only, so `session_token` slips through. Or the opposite: so broad it breaks real behaviour.
 - **Account enumeration:** different status, body, headers or timing for unknown, locked and wrong-password attempts.
+- **A rule checked only where a record is written:** the reader trusts whatever was written, so a write path that skips the check (an admin merge, an edited workflow) gets past it. Re-check the rule where the record is used (P14: production gate and no fixture name, at promote, sign-off and load).
 - **Small-group subtraction leaks:** shown totals or pairs that differ by 1–4, within one reply or across scopes.
 
 ## Also check

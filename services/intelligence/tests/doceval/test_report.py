@@ -588,6 +588,22 @@ def test_notebook_metrics_informational(perfect: runner.RunResult) -> None:
             report.build_report(perfect, _gates(), notebook_metrics=bad)
 
 
+def test_notebook_metrics_signed_decimals(perfect: runner.RunResult) -> None:
+    # Ruling D26: a negative metric is a signed fixed decimal, read back strictly.
+    metrics = {"delta": "-0.030000", "loss": "12.500000", "big": "-1000000000000000000.000000"}
+    rep = report.build_report(perfect, _gates(), notebook_metrics=metrics)
+    back = report.parse_report(report.dumps(rep))
+    assert back["notebook_metrics"]["metrics"] == metrics
+    assert "-0.030000" in report.render_markdown(back)
+    for bad in ("-0.000000", "--1.000000", "-1.5", "-01.000000", "-1.0000001", -3):
+        with pytest.raises(Refused):
+            report.build_report(perfect, _gates(), notebook_metrics={"delta": bad})
+    obj = json.loads(report.dumps(rep))
+    obj["notebook_metrics"]["metrics"]["delta"] = "-0.000000"
+    with pytest.raises(Refused):
+        report.parse_report(canonical.dumps(obj))
+
+
 # ---------------------------------------------------------------- compare
 
 

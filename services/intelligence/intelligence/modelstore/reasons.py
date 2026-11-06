@@ -42,11 +42,19 @@ REASONS: frozenset[str] = frozenset(
         "label_missing",
         "fixture_name",
         "source_invalid",
+        "source_unavailable",
         "drive_scope",
         "warmup_mismatch",
+        "warmup_page_missing",
         "store_unavailable",
         "not_allowed_here",
         "invalid_name",
+        "base_unverified",
+        "key_invalid",
+        "key_exists",
+        "gate_failed",
+        "github_unavailable",
+        "base_not_main",
     }
 )
 

@@ -291,9 +291,11 @@ var (
 	// An audit event id as core sends it: the entry's sequence number.
 	eventIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 	// intelligence's facts, as intel/factschema.go checks them first.
-	chunkIDPattern      = regexp.MustCompile(`^[A-Za-z0-9#_.:-]{1,128}$`)
-	modelNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,64}$`)
-	modelVersionPattern = regexp.MustCompile(`^[A-Za-z0-9_.:/@+-]{1,128}$`)
+	chunkIDPattern   = regexp.MustCompile(`^[A-Za-z0-9#_.:-]{1,128}$`)
+	modelNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,64}$`)
+	// A version with no '#', or a pinned model's
+	// "<name>@<version>#<12 hex>" (intel's pinnedModelVersion, the same form).
+	modelVersionPattern = regexp.MustCompile(`^(?:[A-Za-z0-9_.:/@+-]{1,128}|[a-z0-9][a-z0-9-]{1,62}@(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})#[0-9a-f]{12})$`)
 	factEntityPattern   = regexp.MustCompile(`^[a-z0-9_.]{0,64}$`)
 	factEntityIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 )

@@ -10,10 +10,10 @@
 /services/intelligence/intelligence/security/       @ojies
 /services/intelligence/intelligence/knowledge_base/ @ojies
 /services/intelligence/intelligence/guardrails/     @ojies
-/services/intelligence/intelligence/agents/orchestrator.py@ojies
-/services/intelligence/intelligence/agents/hga_nli.py@ojies
+/services/intelligence/intelligence/agents/orchestrator.py @ojies
+/services/intelligence/intelligence/agents/hga_nli.py @ojies
 /services/intelligence/intelligence/utils/nli.py    @ojies
-/services/intelligence/intelligence/config/settings.py@ojies
+/services/intelligence/intelligence/config/settings.py @ojies
 /services/intelligence/tests/security/              @ojies
 /SKILLS.md                                          @ojies
 

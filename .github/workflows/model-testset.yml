@@ -1,0 +1,154 @@
+name: Model test split
+
+# Build, sign and lock a test split in the store's evaluation area (mhai-models
+# testset-build; plan Task 17) and print its line for models/testsets.lock, which goes in
+# by PR. Nothing else of the split leaves the store: the job summary has the lock line
+# only, and no artifact is uploaded.
+#
+# Every input reaches the shell only through env:, quoted; the CLI checks the suite and
+# version again before any I/O. Rehearsal mode (the repository variable
+# MODEL_STORE_ENDPOINT empty, until Task 27; decided by the mode job): MinIO from docker-compose.models.yml and an in-job development key, in
+# development, and a small split; the summary says "rehearsal". Outside it both switches
+# are production, and production secrets reach a step only then. The job refuses any ref
+# but main (the environment allows main only, H4). D37: this file is the dispatched ref's
+# own; see TODO(H4) in TODO.md. TODO(Task 26): the production test-split signer (MHAI_MODELS_SIGNER).
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Evaluation suite
+        required: true
+        type: choice
+        options: [clinical_document]
+      version:
+        description: Split version (semver; five digits or fewer in all)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: model-testset
+  cancel-in-progress: false
+
+jobs:
+  # Rehearsal or production, decided from the repository variable (never from an input).
+  mode:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      rehearsal: ${{ steps.mode.outputs.rehearsal }}
+    steps:
+      - id: mode
+        env:
+          ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT }}
+        run: |
+          if [ -z "$ENDPOINT" ]; then echo rehearsal=true; else echo rehearsal=false; fi >>"$GITHUB_OUTPUT"
+
+  testset-build:
+    needs: mode
+    runs-on: ubuntu-latest
+    environment: model-promotion
+    permissions:
+      contents: read
+      id-token: write  # the store's federated identity and the signer (Tasks 26, 27)
+    defaults:
+      run:
+        shell: bash
+    env:
+      REHEARSAL: ${{ needs.mode.outputs.rehearsal }}
+      SUITE: ${{ inputs.suite }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      # The environment allows main only (H4); this says so plainly if it doesn't.
+      - name: Main only
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          [ "$REF" = refs/heads/main ] ||
+            { echo "::error::this job runs on main only (ref $REF refused)"; exit 1; }
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.12.23"
+          enable-cache: false
+
+      - name: Install
+        working-directory: services/intelligence
+        run: uv sync --locked
+
+      - name: Mode
+        run: |
+          case "$REHEARSAL" in true | false) ;; *) echo "::error::bad mode"; exit 1 ;; esac
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version"; exit 1; }
+          if [ "$REHEARSAL" = true ]; then
+            {
+              echo MHAI_MODELS_ENV=development
+              echo APP_ENV=development
+              echo SCALE=0.02
+              echo MODEL_STORE_TESTSET_RETENTION_DAYS=1
+            } >>"$GITHUB_ENV"
+            echo '## rehearsal: no production store; development key, small split' >>"$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo MHAI_MODELS_ENV=production
+              echo APP_ENV=production
+              echo SCALE=1.0
+              echo "MHAI_MODELS_TRUST_POLICY=$GITHUB_WORKSPACE/models/trust-policy.json"
+            } >>"$GITHUB_ENV"
+          fi
+
+      # The store's settings and the eval writer's throwaway password go to $GITHUB_ENV, masked.
+      - name: Rehearsal store
+        if: needs.mode.outputs.rehearsal == 'true'
+        working-directory: services/intelligence
+        run: uv run --no-sync scripts/rehearse-promotion.sh store-up "$GITHUB_ENV" eval-writer
+
+      - name: Rehearsal keys
+        if: needs.mode.outputs.rehearsal == 'true'
+        working-directory: services/intelligence
+        run: uv run --no-sync scripts/rehearse-promotion.sh keys "$RUNNER_TEMP/rehearsal" "$GITHUB_ENV"
+
+      - name: Build and lock the split
+        working-directory: services/intelligence
+        env:
+          P_ENDPOINT: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_ENDPOINT || '' }}
+          P_BUCKET: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_BUCKET || '' }}
+          P_REGION: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_REGION || '' }}
+          P_RETENTION: ${{ needs.mode.outputs.rehearsal == 'false' && vars.MODEL_STORE_TESTSET_RETENTION_DAYS || '' }}
+          P_EVAL_WRITER_ACCESS: ${{ needs.mode.outputs.rehearsal == 'false' && secrets.MODEL_STORE_EVAL_WRITER_ACCESS_KEY || '' }}
+          P_EVAL_WRITER_SECRET: ${{ needs.mode.outputs.rehearsal == 'false' && secrets.MODEL_STORE_EVAL_WRITER_SECRET_KEY || '' }}
+        run: |
+          if [ "$REHEARSAL" != true ]; then
+            export MODEL_STORE_ENDPOINT="$P_ENDPOINT" MODEL_STORE_BUCKET="$P_BUCKET"
+            export MODEL_STORE_REGION="$P_REGION" MODEL_STORE_TESTSET_RETENTION_DAYS="$P_RETENTION"
+            export MODEL_STORE_EVAL_WRITER_ACCESS_KEY="$P_EVAL_WRITER_ACCESS"
+            export MODEL_STORE_EVAL_WRITER_SECRET_KEY="$P_EVAL_WRITER_SECRET"
+          fi
+          # A private scratch folder on the runner's disk for the plaintext split.
+          export MHAI_MODELS_SCRATCH="$RUNNER_TEMP/testset-scratch"
+          mkdir -m 700 "$MHAI_MODELS_SCRATCH"
+          code=0
+          line="$(uv run --no-sync mhai-models testset-build --suite "$SUITE" --version "$VERSION" \
+            --scale "$SCALE" 2>"$RUNNER_TEMP/testset.err")" || code=$?
+          if [ "$code" -eq 4 ]; then
+            # Locked, but the scratch copy stayed. stderr then has two lines: parse the
+            # last (Task 17 N1). Success with a warning, for testset-build only.
+            if tail -n 1 "$RUNNER_TEMP/testset.err" | jq -e '.warning == "scratch_not_removed"' >/dev/null; then
+              echo "::warning::the split is locked, but its scratch copy could not be removed"
+              code=0
+            fi
+          fi
+          if [ "$code" -ne 0 ]; then
+            printf '%s\n' "$line"
+            exit "$code"
+          fi
+          [[ "$line" =~ ^[a-z_]+@[0-9.]+#[0-9a-f]{64}$ ]] || { echo "::error::no lock line"; exit 1; }
+          printf 'models/testsets.lock line: %s\n' "$line"
+          { echo '### models/testsets.lock'; echo '```'; printf '%s\n' "$line"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"

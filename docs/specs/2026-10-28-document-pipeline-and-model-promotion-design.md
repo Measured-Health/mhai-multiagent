@@ -1,6 +1,6 @@
 # Document structuring pipeline and model promotion: design
 
-- **Status:** Approved by the product owner, 2026-10-28: every open question in §11 decided as recommended. Design only; no code yet.
+- **Status:** Approved by the product owner, 2026-10-28: every open question in §11 decided as recommended. Phase 0 is built; §13 lists where it departs from this design.
 - **Date:** 2026-10-28
 - **Context:** [intelligence meeting notes, 28 Oct](../meetings/2026-10-28-intelligence-meeting.md). The product owner approved writing this design and adding the TODO and tracker entries.
 - **Amended 2026-11-03 (ADR 0013):** [ADR 0013](../adr/0013-allow-masked-text-to-cloud-language-models.md) lets masked text from clinical questions go to a cloud language model for opted-in hospitals. **It does not change this design:** documents, page images, OCR text and extraction stay self-hosted, and the model rules in §2 and §6.1 stand for documents.
@@ -584,3 +584,38 @@ The product owner approved every recommendation below on 28 Oct, including the s
 - Evaluation compares three pipelines, not single models (§6.1).
 - Sigstore keyless signing with the CI identity (§7.4).
 - The worker reads `pages/` directly with a prefix check, rather than asking the documents service for each page (§3.3). Asking the documents service would remove the worker's storage access but adds a hop per page; revisit if the security review prefers it.
+
+## 13. Phase 0 as built
+
+Phase 0 was built by [the phase 0 plan](../plans/2026-11-03-document-pipeline-phase0.md) (part A in PR #91, part B in PR-B). Where it departs from this design, and every ruling that changed an interface:
+
+- **No GPU host** (plan departure 1). A VLM is evaluated through the OpenAI-compatible extractor once the GPU arrives (H6); until the runtime reports its version and weights hash, a VLM promotion is refused and only a dry run is allowed (D26).
+- **Signing is KMS, not Sigstore** (plan departure 2, decided 3 Nov). Phase 0 signs with development Ed25519 keys only; the KMS signer is Task 26 (H1).
+- **A dry run outside the evaluation environments uses the development split**, labelled as such (plan departure 3). Promotion outside development needs the locked split and `--expect-files` (D27).
+- **The loader requires a signed sign-off in production** (plan departure 4); unset `APP_ENV` counts as production (D29).
+- **A per-version claim and a per-run prefix** in the store (plan departure 5).
+- **The extraction schema lives in the package** (plan departure 6).
+- **`model_versions` strings carry `#`**: `name@version#hash12`, in Python and Go (plan departure 7).
+- **`model.loaded` is a log line and a metric, not an audit fact**, until the model host (plan departure 8).
+- **Set v1.0 is fully generated**; v1.1 adds real scans, photos and handwriting before the phase 1 gate (plan departure 9, H5).
+- **Non-synthetic datasets are refused outright**; no memorisation probe yet (plan departure 10).
+- **No SNOMED CT** in ground truth; ICD-10 for conditions (plan departure 11).
+- **No emergency stop yet**: it comes with `ingest_document` in phase 1 (plan departure 12).
+- **Safetensors header cap is 16 MB** by default, not 100 MB (configurable; D17 fix round).
+- **Third-party model JSON may hold finite floats**; anything hashed or signed stays float-free (D16, D18).
+- **MinIO is test and rehearsal only**, pinned to the frozen `bitnamilegacy` images by digest (D21).
+- **The promoter and eval writer hold `s3:PutObjectRetention`** (compliance mode, extend only), which MinIO needs for a locked PUT (D22).
+- **The eval reader may list versions under `eval/`**, to find the locked split by hash (D24); extra versions are deduplicated by content, never fatal (D25).
+- **The warm-up page is `page.png`**, not `page-1.png` (the scanner refuses the digit run; D26); it ships in the image, named by `INTELLIGENCE_WARMUP_PAGE`.
+- **The manifest records `evaluation.split`**, and pin refuses anything but the `test` split named in `models/testsets.lock` (D27).
+- **Load-time verification was built before pin** (Task 22 before Task 20), because pin and lock-check call the verifier (D28).
+- **GitHub logins are lowercase everywhere** (training manifest, manifest, sign-off, `reviewers.json`); anything else is refused (D30).
+- **lock-check takes only the head lock from the PR**, at a required `--head-sha`; reviewers, trust policy, test-set lock, thresholds and the base lock come from main's tip, and the base branch must be `main` (D31).
+- **The sign-off is bound to the approved head and the merge's first parent**: it takes the head lock and `--base-sha`, refuses any role entry the merge changed from the head, and accepts merge commits only (D32, D33).
+- **A clinical note hidden in a link definition voids it** (D34).
+- **A lock change travels alone**: it may touch only `models.lock`, `models/**`, `docs/**` and `CHANGELOG.md`, checked from git in lock-check and the sign-off (D35, D35b).
+- **The first lock-check and sign-off are a bootstrap**: while main has no `modelstore/lock.py`, lock-check passes only a head lock that is byte for byte the empty `mhai.models.lock/1` lock, and the sign-off of that merge does the same (no base lock, empty merged lock); anything else fails (D38).
+- **The workflows' own files are protected by settings, not code**: CODEOWNERS, latest-push approval, required reviewers on `model-signoff`, main-only environments (H4, D37).
+- **The rehearsal gate and `fixture-` names never reach production**: a promotion outside development refuses them (and measures only `phase1` and `phase3` by default), and so does the load wherever a sign-off is required, not only lock-check and the sign-off (Task 25 review).
+- **The dry run keeps `evaluation.md`**: `promote --dry-run --report-dir` writes `evaluation.json`, the workflow renders it with `mhai-doceval report` and uploads the Markdown with the summary (Task 25).
+- **Rehearsal switches**: `--rehearsal` and `MHAI_MODELS_GITHUB_FAKE` let the CI rehearsal pin a fixture and fake GitHub, and are refused outside development (Task 24).

@@ -27,3 +27,6 @@ coverage.xml
 
 # Local agent workspace (plans, ledgers, review notes)
 .superpowers/
+
+# The model store's local secrets (docker-compose.models.yml)
+.model-store-secrets/

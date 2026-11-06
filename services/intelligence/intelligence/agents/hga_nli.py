@@ -128,27 +128,42 @@ class NLIEntailmentVerifier:
         self,
         model_name: str = DEFAULT_NLI_MODEL,
         device: str = "auto",
-        confidence_threshold: float = 0.7
+        confidence_threshold: float = 0.7,
+        local_files_only: bool = False,
+        require_model: bool = False,
     ):
+        """local_files_only: model_name is a directory (a verified pin), and
+        nothing is fetched. require_model: a model that fails to load raises
+        RuntimeError instead of falling back to the rule-based checks (a
+        pinned model never silently becomes something else)."""
         self.model_name = model_name
         self.confidence_threshold = confidence_threshold
         self.model = None
         self.tokenizer = None
         self._loaded = False
         self.label_map: Dict[int, str] = {}
+        self._local_files_only = bool(local_files_only)
 
         self._try_load_model(device)
+        if require_model and not self._loaded:
+            raise RuntimeError("the NLI model did not load")
 
     def _try_load_model(self, device: str):
-        """Load DeBERTa-v3-large for NLI."""
+        """Load the NLI model: safetensors weights only (never a pickled
+        pytorch_model.bin)."""
         try:
             import torch
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-            logger.info(f"Loading NLI model: {self.model_name}")
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            # The name only: a pinned model's name is its cache path.
+            logger.info("Loading NLI model (local_files_only=%s)", self._local_files_only)
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name, local_files_only=self._local_files_only
+            )
             self.model = AutoModelForSequenceClassification.from_pretrained(
-                self.model_name
+                self.model_name,
+                local_files_only=self._local_files_only,
+                use_safetensors=True,
             )
 
             if device == "auto":
@@ -163,7 +178,8 @@ class NLIEntailmentVerifier:
             logger.info(f"NLI model loaded on {self.device}")
 
         except Exception as e:
-            logger.warning(f"NLI model loading failed: {e}")
+            # The type only: an error's text can carry a path.
+            logger.warning("NLI model loading failed: %s", type(e).__name__)
             logger.info("Using rule-based NLI fallback")
             self._loaded = False
 

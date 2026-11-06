@@ -20,12 +20,13 @@ jobs:
       run:
         working-directory: services/intelligence
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          persist-credentials: false
           fetch-depth: 0  # diff-cover compares against the base branch
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           version: "0.12.23"
           enable-cache: true
@@ -41,7 +42,7 @@ jobs:
       # origin/main (fetch-depth 0 above; skipped only while main has no
       # proto/), and the committed generated code matches a fresh
       # `make proto`. Runs from the repository root.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.24"
           cache: false
@@ -54,6 +55,16 @@ jobs:
       - name: Protobuf lint, breaking and generated code
         working-directory: .
         run: make proto-check
+
+      # The workflows: actionlint (syntax, expressions, shellcheck of run: blocks) and
+      # zizmor (template injection, unpinned actions, excessive permissions, ...).
+      - name: Workflow lint
+        working-directory: .
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint" .github/workflows/*.yml
+      - name: Workflow security (zizmor)
+        run: uv run zizmor --offline ../../.github/workflows
 
       - name: Lint
         run: uv run ruff check .
@@ -73,7 +84,7 @@ jobs:
         run: uv run pytest -m "not models and not boundary and not store and not slow" --cov=intelligence --cov-report=
 
       - name: Keep the coverage data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-checks
           path: services/intelligence/coverage.checks
@@ -88,9 +99,11 @@ jobs:
       run:
         working-directory: services/intelligence
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           version: "0.12.23"
           enable-cache: true
@@ -105,7 +118,7 @@ jobs:
           COVERAGE_FILE: coverage.boundary
         run: uv run pytest -m boundary tests/boundary --cov=intelligence --cov-report=
       - name: Keep the coverage data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-boundary
           path: services/intelligence/coverage.boundary
@@ -121,18 +134,19 @@ jobs:
       run:
         working-directory: services/intelligence
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          persist-credentials: false
           fetch-depth: 0  # diff-cover compares against the base branch
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           version: "0.12.23"
           enable-cache: true
           cache-dependency-glob: services/intelligence/uv.lock
       - name: Install
         run: uv sync --locked --no-default-groups --group dev
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: coverage-*
           merge-multiple: true
@@ -142,10 +156,39 @@ jobs:
           uv run coverage combine coverage.checks coverage.boundary
           uv run coverage xml
       - name: Coverage of changed lines
-        run: >
-          uv run diff-cover coverage.xml
-          --compare-branch=origin/${{ github.base_ref }}
-          --fail-under=80
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: uv run diff-cover coverage.xml --compare-branch="origin/$BASE_REF" --fail-under=80
+
+  # Plan Task 24: the whole model promotion flow on MinIO from docker-compose.models.yml,
+  # with development keys made in $RUNNER_TEMP and GitHub's answers from a file
+  # (services/intelligence/scripts/rehearse-promotion.sh), then the store tests. Synthetic
+  # data only; no credential outside this job's throwaway MinIO.
+  model-promotion-e2e:
+    runs-on: ubuntu-latest  # ships Docker and Compose
+    defaults:
+      run:
+        working-directory: services/intelligence
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.12.23"
+          enable-cache: true
+          cache-dependency-glob: services/intelligence/uv.lock
+      - name: Install
+        run: uv sync --locked
+      # The store's settings and the five roles' throwaway passwords go to $GITHUB_ENV, masked.
+      - name: Rehearsal store
+        run: uv run --no-sync scripts/rehearse-promotion.sh store-up "$GITHUB_ENV" promoter signoff reader eval-reader eval-writer
+      - name: Rehearse the promotion flow
+        run: uv run --no-sync scripts/rehearse-promotion.sh run
+      - name: Store tests (MinIO with testcontainers)
+        run: uv run --no-sync pytest -q -m store tests/modelstore
 
   core:
     runs-on: ubuntu-latest  # ships Docker, which the integration tests use
@@ -153,8 +196,10 @@ jobs:
       run:
         working-directory: services/core
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.24"
           cache-dependency-path: services/core/go.mod
@@ -182,10 +227,13 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: No breaking change against the base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git show "origin/${{ github.base_ref }}:services/core/openapi.yaml" > "$RUNNER_TEMP/base-openapi.yaml" || : > "$RUNNER_TEMP/base-openapi.yaml"
+          git show "origin/$BASE_REF:services/core/openapi.yaml" > "$RUNNER_TEMP/base-openapi.yaml" || : > "$RUNNER_TEMP/base-openapi.yaml"
           .github/scripts/openapi-breaking.sh "$RUNNER_TEMP/base-openapi.yaml" services/core/openapi.yaml
 
   # Build the image when anything that goes into it changes, so a bad base
@@ -196,8 +244,10 @@ jobs:
       contents: read
       pull-requests: read  # paths-filter lists the PR's changed files
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
         id: changes
         with:
           filters: |
@@ -209,12 +259,13 @@ jobs:
               - services/intelligence/pyproject.toml
               - services/intelligence/uv.lock
               - services/intelligence/intelligence/**
-      - uses: docker/setup-buildx-action@v3
+              - services/intelligence/warmup/**
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
         if: steps.changes.outputs.image == 'true'
       # Layers are cached between runs, so only changed layers rebuild.
       - name: Build CPU image
         if: steps.changes.outputs.image == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: services/intelligence
           build-args: TORCH=cpu
@@ -229,6 +280,9 @@ jobs:
           docker run --rm --entrypoint python mhai-intelligence:ci -c "import intelligence.agents, intelligence.security.hipaa"
       # F13: the generated operations table and catalogue are package data,
       # so the installed (not editable) image loads them without a mount.
+      - name: The image ships the warm-up page
+        if: steps.changes.outputs.image == 'true'
+        run: docker run --rm --entrypoint test mhai-intelligence:ci -s /app/warmup/page.png
       - name: The image ships operations.json and catalogue.json
         if: steps.changes.outputs.image == 'true'
         run: |
@@ -251,10 +305,12 @@ jobs:
     runs-on: ubuntu-latest  # ships Docker and Compose
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-go@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.24"
-          cache-dependency-path: services/core/go.mod
+          cache: false  # this job builds the images the smoke test runs (zizmor cache-poisoning)
       # Every compose file parses with the example settings (never run
       # before Task 15), the test profile included.
       - name: Compose files are valid
@@ -267,10 +323,10 @@ jobs:
           env POSTGRES_PASSWORD=x CORE_DB_PASSWORD=x PROVISION_DB_PASSWORD=x MFA_ENCRYPTION_KEY=x \
             BFF_SERVICE_KEYS=x NATS_GATEWAY_NKEY=x NATS_BFF_NKEY=x NATS_BFF_PLATFORM_NKEY=x \
             docker compose -f deploy/compose.yml config -q
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       # The same layers as the image job, from the GitHub Actions cache.
       - name: Build the intelligence image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: services/intelligence
           build-args: TORCH=cpu
@@ -289,8 +345,9 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Scan history for secrets
         env:

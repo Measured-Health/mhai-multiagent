@@ -8,6 +8,6 @@ def load_hf_model(name: str, task: str = "text-classification", device: str = "c
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
     log.info(f"Loading {name} for {task} on {device}")
     tokenizer = AutoTokenizer.from_pretrained(name)
-    model = AutoModelForSequenceClassification.from_pretrained(name).to(device)
+    model = AutoModelForSequenceClassification.from_pretrained(name, use_safetensors=True).to(device)
     model.eval()
     return model, tokenizer

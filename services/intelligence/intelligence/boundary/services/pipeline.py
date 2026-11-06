@@ -4,7 +4,9 @@ database_ready comes from an injected readiness check (F28):
 worker.run_service passes boundary.db.Database.ready when
 INTELLIGENCE_DB_URL is set. Without one the default is "not ready", and a
 check that raises is "not ready" too. models_ready is true once the model
-client INTELLIGENCE_MODEL_CLIENT names was built.
+client INTELLIGENCE_MODEL_CLIENT names was built and, with
+INTELLIGENCE_MODEL_ROLES, every pinned role was verified (worker.
+PinnedModelGate); jobs wait for the same.
 
 run_query (jobs/run_query.py) and approve_correction
 (jobs/approve_correction.py, Plan 4 §4.7) run only with a database:
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
     from intelligence.boundary.db import Database
     from intelligence.boundary.jobs import JobHandler
     from intelligence.boundary.jobs.run_query import RunQuery
+    from intelligence.boundary.models import PinnedSource
 
 log = logging.getLogger("intelligence.boundary.pipeline")
 
@@ -79,12 +82,14 @@ def job_handlers(
     database: Database | None,
     *,
     clock: Callable[[], float] = time.time,
+    pinned: PinnedSource | None = None,
 ) -> tuple[dict[str, JobHandler] | None, RunQuery | None]:
     """The pipeline's job handlers and the run_query runner (whose
     readiness gates every job, and which the caller closes), or (None,
     None) without a database: no job is taken then. The model client is
     the one INTELLIGENCE_MODEL_CLIENT names, the learning client the one
-    INTELLIGENCE_LEARNING_CLIENT names (each stub only in development)."""
+    INTELLIGENCE_LEARNING_CLIENT names (each stub only in development).
+    pinned gives the verified pinned models (None until verified)."""
     if database is None:
         return None, None
     from intelligence.boundary.jobs.approve_correction import ApproveCorrection
@@ -95,7 +100,7 @@ def job_handlers(
     learning_client = build_learning_client(settings)  # refuses a bad one before any thread
     runner = RunQuery(
         database,
-        build_model_client(settings),
+        build_model_client(settings, pinned),
         clock=clock,
         max_concurrency=settings.max_concurrency,
     )

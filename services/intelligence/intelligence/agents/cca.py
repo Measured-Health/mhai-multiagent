@@ -223,7 +223,8 @@ class ClinicalContextAgent:
                     self.model_name,
                     quantization_config=bnb_config,
                     device_map=device,
-                    trust_remote_code=True
+                    trust_remote_code=True,
+                    use_safetensors=True,
                 )
                 self.model = PeftModel.from_pretrained(
                     base_model, self.adapter_path
@@ -235,7 +236,8 @@ class ClinicalContextAgent:
                     self.model_name,
                     device_map=device,
                     trust_remote_code=True,
-                    torch_dtype=torch.float16
+                    torch_dtype=torch.float16,
+                    use_safetensors=True,
                 )
 
             self.model.eval()
