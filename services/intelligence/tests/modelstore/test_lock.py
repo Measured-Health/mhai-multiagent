@@ -992,6 +992,12 @@ def test_approval_with_null_commit_does_not_count(tmp_path: Path, keys: Keys, ca
         "~~~\n~~~ x\nClinical note: still inside the tilde fenced block.\n~~~",
         # a shorter closer doesn't close a longer fence
         "````\n```\nClinical note: still inside the four-backtick fence.\n````",
+        # boundaries are found on the original text: a Cf character breaks a marker, so
+        # it neither closes a comment nor a fence early
+        "<!-- hidden -\u200b->\nClinical note: hidden in the comment GitHub keeps hidden.\n-->",
+        "<!-- a -\u2060-> b\nClinical note: still hidden, the comment never closed here.",
+        "```\n``\u200b`\nClinical note: still inside the fenced block after all.\n```",
+        "~~~\n~\ufeff~~\nClinical note: still inside the tilde fence after all.\n~~~",
     ],
 )
 def test_clinical_note_bypasses_refused(body: str | None) -> None:
@@ -1011,6 +1017,20 @@ def test_clinical_note_bypasses_refused(body: str | None) -> None:
 )
 def test_clinical_note_accepted(body: str) -> None:
     assert lock.has_clinical_note(body)
+
+
+def test_cf_dash_does_not_close_comment() -> None:
+    """``-\u200b->`` is not ``-->``: the comment stays open, and a real ``-->`` after it
+    closes it, so a note after that does count."""
+    hidden = "<!-- x -\u200b->\nClinical note: hidden inside the still open comment.\n"
+    assert not lock.has_clinical_note(hidden)
+    assert lock.has_clinical_note(hidden + "-->\nClinical note: visible after the real close.")
+
+
+def test_cf_in_fence_marker_does_not_close_fence() -> None:
+    inside = "```\n`\u200b``\nClinical note: inside the fence that never closed.\n"
+    assert not lock.has_clinical_note(inside)
+    assert lock.has_clinical_note(inside + "```\nClinical note: after the real closing fence.")
 
 
 def _rollback_setup(

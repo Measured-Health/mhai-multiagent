@@ -809,13 +809,15 @@ def has_clinical_note(body: str) -> bool:
     :data:`CLINICAL_NOTE_MIN_CHARS` letters or digits (Unicode categories L and N) after it
     on that line, outside HTML comments (an unclosed one runs to the end) and fenced code
     blocks (an unclosed one too; a closing fence carries no info string, as in
-    CommonMark). Format characters (category Cf: zero-width spaces and joiners, BOMs) are
-    removed first, so they neither count nor hide anything. Indented, quoted or inline
-    mentions don't count."""
+    CommonMark). Comment and fence boundaries are found on the original text, as GitHub
+    renders it: a format character (category Cf: zero-width spaces and joiners, BOMs)
+    inside ``-->`` or a fence marker breaks that marker, so it can't close a comment or a
+    fence early and expose hidden text. Only then is each candidate line normalised by
+    removing its Cf characters, so they neither count nor hide the marker. Indented,
+    quoted or inline mentions don't count."""
     if not isinstance(body, str):
         return False
-    text = "".join(ch for ch in body if unicodedata.category(ch) != "Cf")
-    text = _COMMENT.sub("", text)
+    text = _COMMENT.sub("", body)
     fence: str | None = None
     for line in text.splitlines():
         m = _FENCE.match(line)
@@ -827,6 +829,7 @@ def has_clinical_note(body: str) -> bool:
         if m is not None:
             fence = m.group(1)
             continue
+        line = "".join(ch for ch in line if unicodedata.category(ch) != "Cf")
         if line.startswith(CLINICAL_NOTE):
             rest = line[len(CLINICAL_NOTE) :]
             alnum = sum(1 for ch in rest if unicodedata.category(ch)[0] in "LN")
