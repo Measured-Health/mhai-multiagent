@@ -1459,23 +1459,45 @@ def test_cli_pin_and_lock_check(
 
 # ---------------------------------------------------------------- D35: the lock travels alone
 
-_GUARDED = [
+# Anything but models.lock, models/**, docs/** and CHANGELOG.md (D35b: an allow-list).
+_OUTSIDE = [
     ".github/workflows/model-lock.yml",
-    ".github/workflows/model-promote.yml",
     ".github/workflows/model-signoff.yaml",
     ".github/workflows/ci.yml",
+    ".github/workflows/deploy.yml",
+    ".github/actions/x/action.yml",
+    ".github/scripts/boundary-smoke.sh",
+    ".github/CODEOWNERS",
     "services/intelligence/scripts/rehearse-promotion.sh",
     "services/intelligence/intelligence/modelstore/lock.py",
-    "services/intelligence/intelligence/modelstore/sources/local.py",
+    "services/intelligence/intelligence/doceval/report.py",
+    "services/intelligence/intelligence/doceval/thresholds/phase1.json",
+    "services/intelligence/intelligence/boundary/worker.py",
     "services/intelligence/pyproject.toml",
     "services/intelligence/uv.lock",
+    "services/core/main.go",
+    "README.md",
+    "models.lock.bak",
+    "xmodels/a.json",
+    "documentation/x.md",
+    "docs/../services/intelligence/pyproject.toml",  # not a path git prints: refused
+    "models/./x.json",
+    "docs\\..\\x",
 ]
 
 
-@pytest.mark.parametrize("code", _GUARDED)
+@pytest.mark.parametrize("other", _OUTSIDE)
 @pytest.mark.parametrize("lock_path", ["models.lock", "models/reviewers.json"])
-def test_lock_change_with_code_refused(lock_path: str, code: str) -> None:
-    r = _reason(lambda: lock.check_lock_change_alone(["README.md", lock_path, code]))
+def test_lock_change_with_anything_else_refused(lock_path: str, other: str) -> None:
+    r = _reason(lambda: lock.check_lock_change_alone(["docs/a.md", lock_path, other]))
+    assert (r.reason, r.detail_code) == ("not_allowed_here", "code_changed_with_lock")
+
+
+def test_lock_change_rename_out_of_models_refused() -> None:
+    """git diff --no-renames lists a rename as its old and its new path: one outside the
+    list is enough."""
+    renamed = ["models/x.json", "services/intelligence/intelligence/modelstore/x.json"]
+    r = _reason(lambda: lock.check_lock_change_alone(renamed))
     assert (r.reason, r.detail_code) == ("not_allowed_here", "code_changed_with_lock")
 
 
@@ -1484,14 +1506,10 @@ def test_lock_change_with_code_refused(lock_path: str, code: str) -> None:
     [
         [],
         ["models.lock"],
-        ["models.lock", "models/testsets.lock", "docs/models/notes.md"],
-        ["models.lock", ".github/workflows/deploy.yml", "services/core/main.go"],
-        ["models.lock", ".github/workflows/sub/model-x.yml"],
-        ["models.lock", "services/intelligence/intelligence/modelstorex/a.py"],
-        ["models.lock", "services/intelligence/scripts/run_pipeline.py"],
-        # code alone, or something that only looks like the lock, is not a lock change
-        _GUARDED,
-        ["models.lock.bak", "xmodels/a.json", *_GUARDED],
+        ["models/reviewers.json"],
+        ["models.lock", "models/testsets.lock", "docs/models/notes.md", "CHANGELOG.md"],
+        # code alone, with no lock change, is not this rule's business
+        [p for p in _OUTSIDE if not p.startswith(("models", "docs"))],
     ],
 )
 def test_lock_change_alone_allowed(paths: list[str]) -> None:
@@ -1586,6 +1604,10 @@ def test_lock_check_refuses_lock_with_code_from_git(
     with_code = _git_branch(main, "pr-code", {**reviewers_change, **code})
     alone = _git_branch(main, "pr-alone", reviewers_change)
     workflow_only = _git_branch(main, "pr-workflow-only", workflow)
+    git(main, "checkout", "-q", "-b", "pr-rename")  # a rename out of models/: both paths
+    git(main, "mv", "models/testsets.lock", "services/testsets.lock")
+    renamed = git_commit(main, "pr-rename")
+    git(main, "checkout", "-q", "main")
     # main moves on after the PRs branched: its own modelstore change is not the PR's
     (main / "services/intelligence/intelligence/modelstore").mkdir(parents=True)
     (main / "services/intelligence/intelligence/modelstore/later.py").write_text("# syn\n")
@@ -1595,7 +1617,7 @@ def test_lock_check_refuses_lock_with_code_from_git(
     head_file = tmp_path / "head.lock"
     head_file.write_bytes(lock.to_bytes(lock.empty()))
 
-    for sha in (with_workflow, with_code):
+    for sha in (with_workflow, with_code, renamed):
         assert cli.main(_lock_check_args(main, head_file, sha)) == 2
         out = json.loads(capsys.readouterr().out)
         assert out == {"refused": "not_allowed_here", "detail": "code_changed_with_lock"}

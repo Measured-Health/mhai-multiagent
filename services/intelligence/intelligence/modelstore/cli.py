@@ -101,10 +101,9 @@ trusts the PR for one thing only, the head lock:
 * The workflow runs this command from that same main checkout (its code as well as its
   data), so a PR can't change the checker that judges it.
 * The PR's head commit must be fetched into that checkout's repository: the files the PR
-  changes are ``git diff <main tip>...<head sha>`` there (D35), and a lock change may not
-  ride with a change to the model workflows, ``ci.yml``, ``rehearse-promotion.sh``, the
-  ``modelstore`` package, ``pyproject.toml`` or ``uv.lock``
-  (``not_allowed_here``/``code_changed_with_lock``; git failing is
+  changes are ``git diff --no-renames <main tip>...<head sha>`` there (D35), and a PR
+  that changes ``models.lock`` or ``models/**`` may change only those, ``docs/**`` and
+  ``CHANGELOG.md`` (D35b; ``not_allowed_here``/``code_changed_with_lock``; git failing is
   ``changed_files_unknown``).
 
 It reads the store as ``pin`` does and the PR with ``GITHUB_TOKEN`` and

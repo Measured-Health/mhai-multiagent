@@ -33,9 +33,10 @@ passed for every role and every object's retention is extended:
    policy's ``signoff`` set and not in its ``manifest`` set (``signer_untrusted``).
    TODO(Task 26): the production signer; phase 0 has only the development
    ``FileSigner``, which refuses outside ``MHAI_MODELS_ENV=development``. The files the
-   merge changed (``git diff <base sha> <commit>``, worked out by the CLI from git) may
-   not change ``models.lock`` or ``models/**`` together with the code or workflows that
-   check them (D35, :func:`intelligence.modelstore.lock.check_lock_change_alone`:
+   merge changed (``git diff --no-renames <base sha> <commit>``, worked out by the CLI
+   from git) may, when they include ``models.lock`` or ``models/**``, be only those,
+   ``docs/**`` and ``CHANGELOG.md`` (D35, D35b,
+   :func:`intelligence.modelstore.lock.check_lock_change_alone`:
    ``not_allowed_here``/``code_changed_with_lock``). A push that changes no role stops
    here (exit 0): there is nothing to sign.
 2. **The merge commit** (D33, :func:`check_merge`). ``--commit`` must have exactly two

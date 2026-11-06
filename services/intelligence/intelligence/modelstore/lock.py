@@ -51,17 +51,18 @@ is the whole point, so:
   the head lock from the PR.
 * **The PR's base branch must be** ``main`` (``base_not_main``): a PR into another branch
   could carry a reviewer list nobody reviewed.
-* **The lock travels alone** (D35, :func:`check_lock_change_alone`). ``pull_request`` and
-  ``push`` workflows run the workflow file from the PR or the merge commit, so a PR that
-  changes ``models.lock`` or ``models/**`` may not also change
-  ``.github/workflows/model-*.yml``, ``ci.yml``, ``rehearse-promotion.sh``, the
-  ``modelstore`` package, ``pyproject.toml`` or ``uv.lock``
-  (``not_allowed_here``/``code_changed_with_lock``). The changed files come from git in
-  ``--base-dir``'s repository (``git diff <main tip>...<head sha>``: from the merge base
-  to the head), never from a list the PR supplies. The sign-off applies the same rule to
-  the merge (``git diff <base sha> <merge commit>``). This does not stop a PR that
-  rewrites ``model-lock.yml`` to skip the check altogether; that needs CODEOWNERS on
-  those paths with code-owner review required (TODO(H4)).
+* **The lock travels alone** (D35, D35b, :func:`check_lock_change_alone`).
+  ``pull_request`` and ``push`` workflows run the workflow file from the PR or the merge
+  commit, and the lock is judged by code all over the repository, so a PR that changes
+  ``models.lock`` or ``models/**`` may change only ``models.lock``, ``models/**``,
+  ``docs/**`` and ``CHANGELOG.md`` (an allow-list); anything else is
+  ``not_allowed_here``/``code_changed_with_lock``. The changed files come from git in
+  ``--base-dir``'s repository (``git diff --no-renames <main tip>...<head sha>``: from the
+  merge base to the head; a rename counts both paths), never from a list the PR
+  supplies. The sign-off applies the same rule to the merge (``git diff <base sha>
+  <merge commit>``). This does not stop a PR that rewrites ``model-lock.yml`` and leaves
+  the lock alone, or one that changes the workflow first and the lock later; that needs
+  CODEOWNERS on those paths with code-owner review required (TODO(H4)).
 
 Every head entry must pass :func:`check_production`. For each changed role:
 
@@ -998,49 +999,49 @@ def check_approvals(pr: PullRequest, reviewers: Reviewers, changes: Iterable[Cha
 
 # ---------------------------------------------------------------- lock-check
 
-# D35: ``pull_request`` and ``push`` workflows run the workflow file of the PR or of the
-# merge commit, so a PR that changes the lock could also change the checks that judge it.
-# Paths are relative to the repository's top level, as ``git diff --name-only`` prints them.
+# D35, D35b: ``pull_request`` and ``push`` workflows run the workflow file of the PR or of
+# the merge commit, and a lock is judged by code all over the repository (the model store,
+# doceval's reports and thresholds, the boundary, CI's scripts and actions), so a change to
+# the lock may change nothing but the lock data and documentation: an allow-list, not a
+# list of what to guard. Paths are relative to the repository's top level, exactly as
+# ``git diff --name-only --no-renames`` prints them (a rename lists both of its paths).
 LOCK_FILES: frozenset[str] = frozenset({"models.lock"})
 LOCK_PREFIXES: tuple[str, ...] = ("models/",)
-GUARDED_FILES: frozenset[str] = frozenset(
-    {
-        ".github/workflows/ci.yml",
-        "services/intelligence/scripts/rehearse-promotion.sh",
-        "services/intelligence/pyproject.toml",
-        "services/intelligence/uv.lock",
-    }
-)
-GUARDED_PREFIXES: tuple[str, ...] = ("services/intelligence/intelligence/modelstore/",)
-_GUARDED_WORKFLOW = re.compile(r"\.github/workflows/model-[^/]*\.ya?ml", re.ASCII)
+ALLOWED_WITH_LOCK_FILES: frozenset[str] = frozenset({"models.lock", "CHANGELOG.md"})
+ALLOWED_WITH_LOCK_PREFIXES: tuple[str, ...] = ("models/", "docs/")
 
 
 def _is_lock_path(path: str) -> bool:
     return path in LOCK_FILES or path.startswith(LOCK_PREFIXES)
 
 
-def _is_guarded_path(path: str) -> bool:
-    return (
-        path in GUARDED_FILES
-        or path.startswith(GUARDED_PREFIXES)
-        or _GUARDED_WORKFLOW.fullmatch(path) is not None
-    )
+def _allowed_with_lock(path: str) -> bool:
+    if path in ALLOWED_WITH_LOCK_FILES:
+        return True
+    if not path.startswith(ALLOWED_WITH_LOCK_PREFIXES):
+        return False
+    # git prints normalised paths; anything else (``..``, ``.``, empty parts, a
+    # backslash) is not one, and is refused rather than interpreted.
+    parts = path.split("/")
+    return "\\" not in path and all(p not in ("", ".", "..") for p in parts)
 
 
 def check_lock_change_alone(changed_paths: Iterable[str]) -> None:
-    """D35: a change to ``models.lock`` or ``models/**`` may not ride with a change to the
-    code or workflows that check it (``.github/workflows/model-*.yml``, ``ci.yml``,
-    ``rehearse-promotion.sh``, the ``modelstore`` package, ``pyproject.toml``,
-    ``uv.lock``): ``not_allowed_here``/``code_changed_with_lock``.
+    """D35, D35b: a change to ``models.lock`` or ``models/**`` may change only
+    ``models.lock``, ``models/**``, ``docs/**`` and ``CHANGELOG.md``; any other changed
+    path (code, workflows, CI scripts and actions, dependencies) is
+    ``not_allowed_here``/``code_changed_with_lock``. ``lock-check`` and the sign-off both
+    call this, never a copy of it.
 
     ``changed_paths`` is the list of changed files the caller worked out from git (never
-    a list the PR supplies); a bare string is a programming error, not a list of paths."""
+    a list the PR supplies), with renames as both paths; a bare string is a programming
+    error, not a list of paths."""
     if isinstance(changed_paths, (str, bytes)):
         raise TypeError("changed_paths must be a collection of paths, not one string")
     paths = list(changed_paths)
     if not all(isinstance(p, str) for p in paths):
         raise TypeError("changed_paths must hold strings")
-    if any(_is_lock_path(p) for p in paths) and any(_is_guarded_path(p) for p in paths):
+    if any(_is_lock_path(p) for p in paths) and not all(_allowed_with_lock(p) for p in paths):
         raise Refused("not_allowed_here", detail_code="code_changed_with_lock")
 
 
