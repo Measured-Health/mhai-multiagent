@@ -77,6 +77,7 @@ jobs:
         run: uv sync --locked
 
       - name: The merged PR's head, and the three locks from git
+        id: locks
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -101,12 +102,34 @@ jobs:
           git -C base rev-parse --verify --quiet "$head^{commit}" >/dev/null ||
             refuse not_approved not_a_merge_commit 2
           echo "HEAD_SHA=$head" >>"$GITHUB_ENV"
+          # D38, the bootstrap: the merge that adds sign-off to main runs on a base that
+          # has neither sign-off nor models.lock. Only then, and only if the merged lock is
+          # byte for byte the empty mhai.models.lock/1 lock (nothing to sign off), is
+          # there nothing to do; cmp is a runner tool, nothing from the merge runs. A base
+          # without sign-off and any other case is refused; a base with it always runs it.
+          base_lock_py="$GITHUB_WORKSPACE/base/services/intelligence/intelligence/modelstore/lock.py"
+          if [ ! -e "$base_lock_py" ] && [ ! -L "$base_lock_py" ]; then
+            git -C base cat-file -e "$BASE_SHA:models.lock" 2>/dev/null &&
+              refuse not_approved bootstrap_base_has_a_lock 2
+            git -C base show "$GITHUB_SHA:models.lock" >"$RUNNER_TEMP/after.lock"
+            printf '%s\n' '{"models":{},"schema":"mhai.models.lock/1"}' |
+              cmp -s - "$RUNNER_TEMP/after.lock" ||
+              refuse not_approved bootstrap_lock_not_empty 2
+            out='{"bootstrap":true,"detail":"base_has_no_signoff_and_the_lock_pins_nothing"}'
+            printf '%s\n' "$out"
+            { echo '### sign-off: bootstrap pass (D38)'
+              echo "The base has no sign-off yet, and the merged lock is the empty \`mhai.models.lock/1\` lock, so there is nothing to sign off."
+              echo '```json'; printf '%s\n' "$out"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+            echo "bootstrap=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Each from its own commit; a missing models.lock fails the job.
           git -C base show "$BASE_SHA:models.lock" >"$RUNNER_TEMP/before.lock"
           git -C base show "$GITHUB_SHA:models.lock" >"$RUNNER_TEMP/after.lock"
           git -C base show "$head:models.lock" >"$RUNNER_TEMP/head.lock"
 
       - name: Sign off
+        if: steps.locks.outputs.bootstrap != 'true'
         working-directory: base/services/intelligence
         env:
           GITHUB_TOKEN: ${{ github.token }}

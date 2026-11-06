@@ -12,6 +12,7 @@ commit.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,8 @@ WRITE_VARIABLES = re.compile(r"MODEL_STORE_(PROMOTER|SIGNOFF)_")
 REHEARSAL_SWITCH = "${{ needs.mode.outputs.rehearsal }}"
 REHEARSAL_STEP_IF = "needs.mode.outputs.rehearsal == 'true'"
 PROMOTE_CALL = re.compile(r"(\(|mhai-models\s+)promote\b")
+EMPTY_LOCK = '{"models":{},"schema":"mhai.models.lock/1"}\n'
+LOCK_PY = "services/intelligence/intelligence/modelstore/lock.py"
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -444,3 +447,101 @@ def test_production_promotion_refuses_the_rehearsal_gate() -> None:
         refuse = 'case "$GATE_INPUT" in phase1 | phase3) ;; *) echo "::error::'
         assert refuse in production, j
         assert production.index(refuse) < production.index('echo "GATE=$GATE_INPUT"'), j
+
+
+def _lock_check_step() -> dict[str, Any]:
+    job = _jobs("model-lock.yml")["lock-check"]
+    return next(s for s in _steps(job) if s.get("name") == "lock-check")
+
+
+def _run_lock_check(tmp_path: Path, head_lock: str, main_lock_py: str | None) -> tuple[int, str]:
+    """Run the lock-check step's own script with bash, as Actions does, against a fake main
+    checkout and a fake ``uv`` that records its call and fails as a missing CLI would."""
+    ws = tmp_path / "ws"
+    lock_py = ws / "main" / LOCK_PY
+    lock_py.parent.mkdir(parents=True)
+    if main_lock_py == "file":
+        lock_py.write_text("", encoding="utf-8")
+    elif main_lock_py == "symlink":
+        lock_py.symlink_to(tmp_path / "nowhere.py")
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    (temp / "head.lock").write_text(head_lock, encoding="utf-8")
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    uv = fakebin / "uv"
+    uv.write_text(f'#!/bin/sh\necho called >"{tmp_path}/uv-called"\nexit 2\n', encoding="utf-8")
+    uv.chmod(0o755)
+    summary = tmp_path / "summary.md"
+    env = {
+        "PATH": f"{fakebin}:/usr/bin:/bin",
+        "GITHUB_WORKSPACE": str(ws),
+        "RUNNER_TEMP": str(temp),
+        "GITHUB_STEP_SUMMARY": str(summary),
+        "HEAD_SHA": "0" * 40,
+        "PR_NUMBER": "94",
+    }
+    done = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", _lock_check_step()["run"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+    called = (tmp_path / "uv-called").exists()
+    text = summary.read_text(encoding="utf-8") if summary.exists() else ""
+    return done.returncode, ("uv " if called else "") + text
+
+
+def test_lock_check_bootstrap_passes_only_an_empty_lock_while_main_has_no_lock_check(
+    tmp_path: Path,
+) -> None:
+    """D38: before the PR adding lock-check merges, main has no CLI to run. lock-check then
+    passes only a head lock that is byte for byte the empty mhai.models.lock/1 lock, checked
+    with cmp (a runner tool, never the PR's code); anything else fails, and a main that has
+    lock.py always runs its CLI (here a fake uv that fails, so the job fails)."""
+    code, out = _run_lock_check(tmp_path, EMPTY_LOCK, None)
+    assert code == 0 and not out.startswith("uv ")
+    assert "bootstrap pass (D38)" in out and '"bootstrap":true' in out
+
+
+@pytest.mark.parametrize(
+    "head_lock",
+    [
+        '{"models":{"x":"x@1.0.0#sha256:00"},"schema":"mhai.models.lock/1"}\n',
+        '{"models":{},"schema":"mhai.models.lock/2"}\n',
+        '{"models": {}, "schema": "mhai.models.lock/1"}\n',
+        '{"models":{},"schema":"mhai.models.lock/1"}',
+        "",
+    ],
+)
+def test_lock_check_bootstrap_refuses_any_other_head_lock(tmp_path: Path, head_lock: str) -> None:
+    code, out = _run_lock_check(tmp_path, head_lock, None)
+    assert code == 1 and not out.startswith("uv ") and "bootstrap" not in out
+
+
+@pytest.mark.parametrize("main_lock_py", ["file", "symlink"])
+def test_lock_check_runs_mains_cli_once_main_has_it(tmp_path: Path, main_lock_py: str) -> None:
+    code, out = _run_lock_check(tmp_path, EMPTY_LOCK, main_lock_py)
+    assert code == 2 and out.startswith("uv ") and "bootstrap" not in out
+
+
+def test_signoff_bootstrap_only_on_a_base_without_signoff_or_lock() -> None:
+    """D38 for the sign-off: the merge adding it runs on a base with neither the CLI nor
+    models.lock; only then, and only for the empty lock, is the sign-off step skipped."""
+    job = _jobs("model-signoff.yml")["signoff"]
+    locks = next(s for s in _steps(job) if s.get("id") == "locks")
+    run = str(locks["run"])
+    gate = 'if [ ! -e "$base_lock_py" ] && [ ! -L "$base_lock_py" ]; then'
+    assert f'base_lock_py="$GITHUB_WORKSPACE/base/{LOCK_PY}"' in run and gate in run
+    bootstrap = run[run.index(gate) : run.index("\nfi\n", run.index(gate))]
+    assert "refuse not_approved bootstrap_base_has_a_lock 2" in bootstrap
+    assert "refuse not_approved bootstrap_lock_not_empty 2" in bootstrap
+    assert """printf '%s\\n' '{"models":{},"schema":"mhai.models.lock/1"}' |""" in bootstrap
+    assert 'cmp -s - "$RUNNER_TEMP/after.lock" ||' in bootstrap
+    assert 'echo "bootstrap=true" >>"$GITHUB_OUTPUT"' in bootstrap
+    assert "bootstrap pass (D38)" in bootstrap and "uv " not in bootstrap
+    # after the merge check (a non-merge push is still refused first)
+    assert run.index("not_a_merge_commit") < run.index(gate)
+    signoff = next(s for s in _steps(job) if s.get("name") == "Sign off")
+    assert signoff["if"] == "steps.locks.outputs.bootstrap != 'true'"

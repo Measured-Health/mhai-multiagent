@@ -36,8 +36,8 @@ const pinnedModelVersion = `[a-z0-9][a-z0-9-]{1,62}@(?:0|[1-9][0-9]{0,8})\.(?:0|
 var (
 	// The worker's chunk ids are "KB#0001" and the like (its _CHUNK_ID
 	// allows '#'); nothing else outside [A-Za-z0-9_.:-].
-	chunkIDPattern      = regexp.MustCompile(`^[A-Za-z0-9#_.:-]{1,128}$`)
-	modelNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,64}$`)
+	chunkIDPattern   = regexp.MustCompile(`^[A-Za-z0-9#_.:-]{1,128}$`)
+	modelNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,64}$`)
 	// The worker's _SAFE_VERSION: a version with no '#', or a pinned
 	// model's "<name>@<version>#<first 12 hex of its manifest SHA-256>"
 	// (design §7.5). '#' is allowed in that form only.

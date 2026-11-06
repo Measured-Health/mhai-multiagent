@@ -10,6 +10,7 @@ name: Model lock check
 # commit. The PR's code is checked out only as git data and never installed or run. D35b:
 # a PR changing the lock may change nothing but models.lock, models/, docs/ and
 # CHANGELOG.md; lock-check works that out from git itself.
+# D38: while main has no lock-check (the PR adding it), only the empty lock passes.
 #
 # What it can't do (D37): main's code runs, but this workflow file is the PR's
 # (pull_request runs the PR's copy). A PR that edits this file, in the same PR as a lock
@@ -95,6 +96,23 @@ jobs:
         run: |
           [[ "$PR_NUMBER" =~ ^[0-9]{1,10}$ ]] || { echo "::error::bad PR number"; exit 1; }
           main="$GITHUB_WORKSPACE/main"
+          # D38, the bootstrap: until the PR that adds lock-check merges, main has no
+          # lock-check to run. Only then, and only if the head lock is byte for byte the
+          # empty mhai.models.lock/1 lock (nothing pinned), does the check pass without it.
+          # Compared with cmp, a runner tool: nothing from the PR runs. Main without
+          # lock-check and any other head lock fails; main with it always runs it.
+          if [ ! -e "$main/services/intelligence/intelligence/modelstore/lock.py" ] &&
+            [ ! -L "$main/services/intelligence/intelligence/modelstore/lock.py" ]; then
+            printf '%s\n' '{"models":{},"schema":"mhai.models.lock/1"}' |
+              cmp -s - "$RUNNER_TEMP/head.lock" ||
+              { echo "::error::main has no lock-check yet, and the head lock is not the empty mhai.models.lock/1 lock"; exit 1; }
+            out='{"bootstrap":true,"detail":"main_has_no_lock_check_and_the_head_lock_pins_nothing"}'
+            printf '%s\n' "$out"
+            { echo '### lock-check: bootstrap pass (D38)'
+              echo "Main has no lock-check yet, and the head lock is the empty \`mhai.models.lock/1\` lock, so nothing is pinned. Every later PR runs main's lock-check."
+              echo '```json'; printf '%s\n' "$out"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           code=0
           out="$(uv run --no-sync mhai-models lock-check \
             --base-dir "$main" \

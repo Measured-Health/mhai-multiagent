@@ -191,7 +191,8 @@ jobs:
             args+=(--hf-repo "$HF_REPO" --hf-revision "$HF_REVISION")
           fi
           # evaluation.json stays out of the summary folder; only its Markdown is kept.
-          mkdir -p -m 700 "$RUNNER_TEMP/report" "$RUNNER_TEMP/summary"
+          # install -d gives every directory it names mode 700 (mkdir -p -m sets only the last).
+          install -d -m 700 "$RUNNER_TEMP/report" "$RUNNER_TEMP/summary"
           code=0
           out="$(uv run --no-sync mhai-models "${args[@]}" --report-dir "$RUNNER_TEMP/report")" || code=$?
           printf '%s\n' "$out" | tee "$RUNNER_TEMP/summary/dry-run.json"
