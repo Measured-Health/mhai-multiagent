@@ -35,8 +35,8 @@ from intelligence.modelstore import (
     verify,
 )
 from intelligence.modelstore.reasons import Refused
+from tests.modelstore.fakes.github_api import NULL, FakeGitHubSession, FakePR
 from tests.modelstore.fakes.github_api import REPO as GH_REPO
-from tests.modelstore.fakes.github_api import FakeGitHubSession, FakePR
 from tests.modelstore.fakes.memory_store import MemoryStore
 from tests.modelstore.test_sources import no_network  # noqa: F401  (autouse: no network)
 from tests.modelstore.test_verify import MemSigner, _put
@@ -99,6 +99,7 @@ def report_bytes(
     split: str = "test",
     ts_sha: str = TESTSET_SHA,
     thresholds_sha: str | None = None,
+    ts_version: str = "1.0.0",
 ) -> bytes:
     """A minimal ``evaluation.json`` that ``report.parse_report`` accepts."""
 
@@ -129,7 +130,7 @@ def report_bytes(
         "hardware": "cpu",
         "testset": {
             "name": "clinical_document",
-            "version": "1.0.0",
+            "version": ts_version,
             "sha256": ts_sha,
             "extraction_schema_version": "1.0.0",
             "documents": 0,
@@ -359,6 +360,8 @@ def test_malformed_lock_refused(raw: bytes, tmp_path: Path, keys: Keys, cache: P
                 policy=keys.policy,
                 cache_dir=cache,
                 testsets_lock=TESTSETS,
+                thresholds_dir=report.THRESHOLDS_DIR,
+                head_sha=HEAD,
             )
         assert e.value.reason == "lock_invalid"
     assert st.calls == [] and session.requests == []  # refused before any I/O
@@ -387,6 +390,8 @@ def test_lock_check_refuses_fixture_and_rehearsal(
             policy=keys.policy,
             cache_dir=cache,
             testsets_lock=TESTSETS,
+            thresholds_dir=report.THRESHOLDS_DIR,
+            head_sha=HEAD,
         )
     )
     assert refused.reason == reason
@@ -406,6 +411,8 @@ def test_lock_check_refuses_unknown_role(keys: Keys, cache: Path) -> None:
             policy=keys.policy,
             cache_dir=cache,
             testsets_lock=TESTSETS,
+            thresholds_dir=report.THRESHOLDS_DIR,
+            head_sha=HEAD,
         )
     )
     assert (refused.reason, refused.detail_code) == ("lock_invalid", "role")
@@ -582,6 +589,8 @@ def _check(
         policy=keys.policy,
         cache_dir=cache,
         testsets_lock=TESTSETS,
+        thresholds_dir=report.THRESHOLDS_DIR,
+        head_sha=HEAD,
     )
 
 
@@ -615,6 +624,7 @@ def test_lock_check_refuses_a_moved_head(tmp_path: Path, keys: Keys, cache: Path
             policy=keys.policy,
             cache_dir=cache,
             testsets_lock=TESTSETS,
+            thresholds_dir=report.THRESHOLDS_DIR,
             head_sha=head_sha,
         )
 
@@ -733,41 +743,188 @@ def test_promoter_or_trainer_cannot_be_the_approver(
     assert r.reason == "separation_of_duties"
 
 
-def test_reviewers_read_from_base_not_head(
+THRESHOLDS_REL = "services/intelligence/intelligence/doceval/thresholds"
+
+
+def _main_checkout(
+    root: Path,
+    *,
+    base: lock.Lock | None = None,
+    reviewers: dict[str, list[str]] | None = None,
+    testsets_text: str = f"{TESTSET}\n",
+    thresholds: dict[str, bytes] | None = None,
+) -> Path:
+    """A checkout of main's tip, as model-lock.yml makes it (``--base-dir``)."""
+    (root / "models").mkdir(parents=True)
+    (root / "models.lock").write_bytes(lock.to_bytes(base or lock.empty()))
+    default = {"clinical": [CLINICAL], "platform": [PLATFORM]}
+    (root / "models" / "reviewers.json").write_text(json.dumps(reviewers or default))
+    (root / "models" / "testsets.lock").write_text(testsets_text)
+    th = root / THRESHOLDS_REL
+    th.mkdir(parents=True)
+    for g in report.GATES:
+        (th / f"{g}.json").write_bytes((report.THRESHOLDS_DIR / f"{g}.json").read_bytes())
+    for name, raw in (thresholds or {}).items():
+        (th / name).write_bytes(raw)
+    return root
+
+
+def _lock_check_args(main: Path, head_file: Path, head_sha: str = HEAD) -> list[str]:
+    return [
+        "lock-check",
+        "--base-dir",
+        str(main),
+        "--head",
+        str(head_file),
+        "--head-sha",
+        head_sha,
+        "--pr",
+        "7",
+        "--testsets",
+        str(main / "models" / "testsets.lock"),
+        "--thresholds-dir",
+        str(main / THRESHOLDS_REL),
+    ]
+
+
+def test_reviewers_read_from_main_not_head(
     tmp_path: Path, keys: Keys, cache: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
-    """The PR adds its own approver to reviewers.json; lock-check reads the base copy."""
+    """The PR adds its own approver to reviewers.json; lock-check reads main's copy."""
     st, _, head = _new(tmp_path, keys)
-    base_dir, head_dir = tmp_path / "base", tmp_path / "head"
-    base_dir.mkdir()
-    head_dir.mkdir()
-    (base_dir / "reviewers.json").write_text(json.dumps({"clinical": [CLINICAL], "platform": []}))
-    (head_dir / "reviewers.json").write_text(
-        json.dumps({"clinical": [CLINICAL], "platform": ["syn-newcomer"]})
+    main = _main_checkout(tmp_path / "main", reviewers={"clinical": [CLINICAL], "platform": []})
+    head_dir = _main_checkout(
+        tmp_path / "head",
+        base=head,
+        reviewers={"clinical": [CLINICAL], "platform": ["syn-newcomer"]},
     )
-    (base_dir / "models.lock").write_bytes(lock.to_bytes(lock.empty()))
-    (head_dir / "models.lock").write_bytes(lock.to_bytes(head))
     pr = _pr(reviews=[(CLINICAL, "APPROVED", None), ("syn-newcomer", "APPROVED", None)])
     session = FakeGitHubSession()
     session.add(pr)
     _cli_env(monkeypatch, st, keys, session, tmp_path)
-    args = [
-        "lock-check",
-        "--base",
-        str(base_dir / "models.lock"),
-        "--head",
-        str(head_dir / "models.lock"),
-        "--pr",
-        "7",
-        "--reviewers",
-        str(base_dir / "reviewers.json"),
-    ]
-    assert cli.main(args) == 2
+    assert cli.main(_lock_check_args(main, head_dir / "models.lock")) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": "not_approved", "detail": "approvals"}
-    # with the head copy it would have passed: the base is what makes the difference
-    reviewers = lock.read_reviewers(head_dir / "reviewers.json")
+    # with the head copy it would have passed: main's copy is what makes the difference
+    reviewers = lock.read_reviewers(head_dir / "models" / "reviewers.json")
     again = _pr(reviews=[(CLINICAL, "APPROVED", None), ("syn-newcomer", "APPROVED", None)])
     assert _check(st, keys, cache, lock.empty(), head, again, reviewers) == {ROLE: "new"}
+
+
+def test_pr_cannot_lower_a_threshold_or_add_a_testset_with_its_pin(
+    tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """In one PR: a lowered phase1 threshold, or a new testsets.lock entry, plus a pin of a
+    version measured against them. lock-check reads main's copies only, and refuses."""
+    st = MemoryStore()
+    lowered_obj = json.loads((report.THRESHOLDS_DIR / "phase1.json").read_bytes())
+    lowered_obj["source"] = "synthetic lowered bar"
+    lowered = canonical.dumps(lowered_obj)
+    rep = report_bytes({"phase1": "pass"}, thresholds_sha=hashlib.sha256(lowered).hexdigest())
+    v1 = publish(st, tmp_path, keys, version="1.0.0", report_raw=rep)
+    new_set = f"clinical_document@1.1.0#{'ee' * 32}"
+    rep2 = report_bytes({"phase1": "pass"}, ts_sha="ee" * 32, ts_version="1.1.0")
+    v2 = publish(st, tmp_path, keys, version="1.1.0", seed=8, testset=new_set, report_raw=rep2)
+    main = _main_checkout(tmp_path / "main")
+    session = FakeGitHubSession()
+    session.add(_approved_pr())
+    _cli_env(monkeypatch, st, keys, session, tmp_path)
+    for pub, kind, detail in (
+        (v1, "threshold", ("gate_failed", "thresholds")),
+        (v2, "testset", ("testset_mismatch", "not_locked")),
+    ):
+        head_dir = _main_checkout(
+            tmp_path / f"head-{kind}",
+            base=lock.Lock({ROLE: pub.pin()}),
+            testsets_text=f"{TESTSET}\n{new_set}\n",
+            thresholds={"phase1.json": lowered} if kind == "threshold" else None,
+        )
+        assert cli.main(_lock_check_args(main, head_dir / "models.lock")) == 2
+        out = json.loads(capsys.readouterr().out)
+        assert (out["refused"], out["detail"]) == detail
+        # the head's own copies would have accepted it: they are never read
+        lock.check_evaluation(
+            st,
+            pub.m,
+            "phase1",
+            testsets.read_lock(head_dir / "models" / "testsets.lock"),
+            head_dir / THRESHOLDS_REL,
+        )
+    # inputs outside main's checkout are refused
+    head_dir = tmp_path / "head-threshold"
+    args = _lock_check_args(main, head_dir / "models.lock")
+    args[args.index("--thresholds-dir") + 1] = str(head_dir / THRESHOLDS_REL)
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "refused": "not_allowed_here",
+        "detail": "outside_base_dir",
+    }
+
+
+def test_lock_check_refuses_a_pr_not_into_main(tmp_path: Path, keys: Keys, cache: Path) -> None:
+    st, _, head = _new(tmp_path, keys)
+    pr = _approved_pr()
+    pr.base_ref = "side-branch"
+    r = _reason(lambda: _check(st, keys, cache, lock.empty(), head, pr))
+    assert r.reason == "base_not_main"
+
+
+def test_lock_check_evaluation_refusals(tmp_path: Path, keys: Keys, cache: Path) -> None:
+    st = MemoryStore()
+    rep = report_bytes({"phase1": "pass"}, thresholds_sha="0" * 64)
+    a = publish(st, tmp_path, keys, version="1.0.0", report_raw=rep)
+    b = publish(
+        st, tmp_path, keys, version="1.1.0", seed=8, testset=f"clinical_document@1.0.0#{'ee' * 32}"
+    )
+    for pub, detail in (
+        (a, ("gate_failed", "thresholds")),
+        (b, ("testset_mismatch", "not_locked")),
+    ):
+        head = lock.Lock({ROLE: pub.pin()})
+        r = _reason(lambda h=head: _check(st, keys, cache, lock.empty(), h, _approved_pr()))
+        assert (r.reason, r.detail_code) == detail
+
+
+def test_approval_with_null_commit_does_not_count(tmp_path: Path, keys: Keys, cache: Path) -> None:
+    st, _, head = _new(tmp_path, keys)
+    pr = _pr(reviews=[(CLINICAL, "APPROVED", None), (PLATFORM, "APPROVED", NULL)])
+    r = _reason(lambda: _check(st, keys, cache, lock.empty(), head, pr))
+    assert r.reason == "not_approved"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        "",
+        "Clinical note:",
+        "Clinical note: too short",
+        "No Clinical note: needed for this synthetic rollback at all.",
+        "  Clinical note: indented text that is long enough to count.",
+        "> Clinical note: quoted text that is long enough to count here.",
+        "`Clinical note:` inline text that is long enough to count here.",
+        "<!-- Clinical note: hidden in a comment, long enough to count. -->",
+        "<!--\nClinical note: hidden in a multi-line comment, long enough.\n-->",
+        "<!-- unclosed\nClinical note: after an unclosed comment, long enough.",
+        "```\nClinical note: inside a fenced block, long enough to count.\n```",
+        "~~~~\nClinical note: inside a tilde fence, long enough to count.\n~~~~",
+        "```\nClinical note: inside an unclosed fence, long enough to count.",
+        "Clinical note:" + " " * 40 + "a b c",
+    ],
+)
+def test_clinical_note_bypasses_refused(body: str | None) -> None:
+    assert not lock.has_clinical_note(body)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Clinical note: back to 1.0.0 after a synthetic issue in 1.1.0.",
+        "Summary.\n\n```\ncode\n```\nClinical note: restoring the signed-off synthetic version.",
+        "<!-- template -->\r\nClinical note: restoring the signed-off synthetic version.",
+    ],
+)
+def test_clinical_note_accepted(body: str) -> None:
+    assert lock.has_clinical_note(body)
 
 
 def _rollback_setup(
@@ -788,20 +945,49 @@ def test_rollback_to_signed_off_version_needs_no_eval(
 ) -> None:
     st, base, head = _rollback_setup(tmp_path, keys, signed_off=True)
     platform_only = [(PLATFORM, "APPROVED", None)]
-    pr = _pr(reviews=platform_only, body="Clinical note: back to 1.0.0 after a synthetic issue.")
+    note = "Clinical note: back to 1.0.0 after a synthetic issue."
+    pr = _pr(reviews=platform_only, body=note)
     assert _check(st, keys, cache, base, head, pr) == {ROLE: "rollback"}
     # still the label, the note and a platform approval
-    no_label = _pr(reviews=platform_only, labels=[], body="Clinical note: x")
+    no_label = _pr(reviews=platform_only, labels=[], body=note)
     assert _reason(lambda: _check(st, keys, cache, base, head, no_label)).reason == (
         "label_missing"
     )
     no_note = _pr(reviews=platform_only, body="Rolling back.")
     r = _reason(lambda: _check(st, keys, cache, base, head, no_note))
     assert (r.reason, r.detail_code) == ("not_approved", "clinical_note")
-    no_platform = _pr(reviews=[(CLINICAL, "APPROVED", None)], body="Clinical note: x")
+    hidden = _pr(reviews=platform_only, body=f"<!-- {note} -->")
+    r = _reason(lambda: _check(st, keys, cache, base, head, hidden))
+    assert (r.reason, r.detail_code) == ("not_approved", "clinical_note")
+    no_platform = _pr(reviews=[(CLINICAL, "APPROVED", None)], body=note)
     assert _reason(lambda: _check(st, keys, cache, base, head, no_platform)).reason == (
         "not_approved"
     )
+
+
+@pytest.mark.parametrize("who", [ACTOR, TRAINER])
+def test_rollback_approver_cannot_be_its_promoter_or_trainer(
+    who: str, tmp_path: Path, keys: Keys, cache: Path
+) -> None:
+    st, base, head = _rollback_setup(tmp_path, keys, signed_off=True)
+    reviewers = lock.Reviewers(frozenset({CLINICAL}), frozenset({who}))
+    note = "Clinical note: back to 1.0.0 after a synthetic issue."
+    pr = _pr(reviews=[(who, "APPROVED", None)], body=note)
+    r = _reason(lambda: _check(st, keys, cache, base, head, pr, reviewers))
+    assert r.reason == "separation_of_duties"
+
+
+def test_signoff_for_another_role_is_not_a_rollback(
+    tmp_path: Path, keys: Keys, cache: Path
+) -> None:
+    st, base, head = _rollback_setup(tmp_path, keys, signed_off=False)
+    old = head.models[ROLE]
+    raw = verify.find_manifest(st, old.name, old.version, old.manifest_sha256)
+    write_signoff(st, Pub(raw, old.manifest_sha256, manifest.parse(raw)), keys, role="ocr")
+    note = "Clinical note: back to 1.0.0 after a synthetic issue."
+    pr = _pr(reviews=[(PLATFORM, "APPROVED", None)], body=note)
+    r = _reason(lambda: _check(st, keys, cache, base, head, pr))
+    assert (r.reason, r.detail_code) == ("not_approved", "never_approved")
 
 
 def test_rollback_to_never_approved_refused(tmp_path: Path, keys: Keys, cache: Path) -> None:
@@ -865,11 +1051,57 @@ def test_github_reviews_paginated_and_logins_lowercased() -> None:
 
 def test_github_reviews_capped(tmp_path: Path) -> None:
     session = FakeGitHubSession()
-    n = lock.MAX_REVIEW_PAGES * 100
+    n = lock.MAX_REVIEW_PAGES * 100 + 1  # one more than the cap holds: a next page remains
     session.add(_pr(reviews=[(f"syn-c{i}", "COMMENTED", None) for i in range(n)]))
     r = _reason(lambda: lock.GitHubClient(session, GH_REPO).pull_request(7))
     assert (r.reason, r.detail_code) == ("not_approved", "too_many_reviews")
     assert len(session.requests) == 1 + lock.MAX_REVIEW_PAGES
+
+
+def test_github_reviews_follow_link_when_pages_are_short() -> None:
+    """The server serves 30 per page (not the 100 asked): the Link header is followed,
+    and a "changes requested" on a later page cancels a page-1 approval."""
+    session = FakeGitHubSession()
+    session.max_per_page = 30
+    pr = _pr(reviews=[(PLATFORM, "APPROVED", None)])
+    for i in range(70):
+        pr.review(f"syn-commenter-{i}", "COMMENTED")
+    pr.review(PLATFORM, "CHANGES_REQUESTED")
+    session.add(pr)
+    got = lock.GitHubClient(session, GH_REPO).pull_request(7)
+    assert len(got.reviews) == 72
+    assert lock.approvals(got) == frozenset()
+    urls = [r.url for r in session.requests if r.url.endswith("/reviews")]
+    assert len(urls) == 3 and all(u.startswith("https://api.github.com/") for u in urls)
+
+
+def test_github_changes_requested_on_page_two_cancels() -> None:
+    session = FakeGitHubSession()
+    pr = _pr(reviews=[(PLATFORM, "APPROVED", None)])
+    for i in range(120):
+        pr.review(f"syn-commenter-{i}", "COMMENTED")
+    pr.review(PLATFORM, "CHANGES_REQUESTED")
+    session.add(pr)
+    got = lock.GitHubClient(session, GH_REPO).pull_request(7)
+    assert PLATFORM not in lock.approvals(got)
+
+
+@pytest.mark.parametrize(
+    "next_base",
+    [
+        "https://evil.example/repositories/424242",
+        "http://api.github.com/repositories/424242",
+        "https://api.github.com/repos/other-org/other-repo",
+        "https://api.github.com/repositories/424242/../../x",
+    ],
+)
+def test_github_next_link_elsewhere_refused(next_base: str) -> None:
+    session = FakeGitHubSession()
+    session.next_base = next_base
+    session.add(_pr(reviews=[(f"syn-c{i}", "COMMENTED", None) for i in range(150)]))
+    r = _reason(lambda: lock.GitHubClient(session, GH_REPO).pull_request(7))
+    assert (r.reason, r.detail_code) == ("github_unavailable", "link")
+    assert all(req.url.startswith("https://api.github.com/repos/") for req in session.requests)
 
 
 def test_github_review_by_deleted_user_skipped() -> None:
@@ -924,10 +1156,10 @@ def test_promoted_base_verified_by_pin(tmp_path: Path, keys: Keys, cache: Path) 
     check = lock.base_verifier(st, keys.policy, cache)
     check(f"syn-base-model@1.0.0#{base.sha}")
     r = _reason(lambda: check(f"syn-base-model@1.0.0#{'00' * 32}"))
-    assert r.reason == "lock_mismatch"
+    assert (r.reason, r.detail_code) == ("base_unverified", "lock_mismatch")
     unsigned = publish(st, tmp_path, keys, name="syn-base-model", version="1.1.0", sign=False)
     r = _reason(lambda: check(f"syn-base-model@1.1.0#{unsigned.sha}"))
-    assert r.reason == "signature_invalid"
+    assert (r.reason, r.detail_code) == ("base_unverified", "signature_invalid")
     assert _reason(lambda: check("not a pin")).reason == "base_unverified"
 
 
@@ -954,7 +1186,24 @@ def test_promote_check_training_uses_the_base_verifier(
     r = _reason(
         lambda: promote.check_training(run_dir, NAME, registry, licences, verify_base=verifier)
     )
-    assert r.reason == "lock_mismatch"
+    assert (r.reason, r.detail_code) == ("base_unverified", "lock_mismatch")
+
+
+def test_cli_base_verifier_built_only_when_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Making the verifier reads nothing; calling it without the reader's credentials is
+    base_unverified (a promoted base is verified on a dry run too)."""
+    import contextlib
+
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "_reader_store", lambda: calls.append("store"))
+    monkeypatch.setattr(cli, "_trust_policy", lambda: calls.append("policy"))
+    monkeypatch.delenv(cli.READER_ACCESS_ENV, raising=False)
+    with contextlib.ExitStack() as stack:
+        verifier = cli._base_verifier(stack)
+        assert calls == []
+        r = _reason(lambda: verifier(f"syn-base-model@1.0.0#{'ab' * 32}"))
+        assert (r.reason, r.detail_code) == ("base_unverified", "reader_credentials")
+        assert calls == []
 
 
 # ---------------------------------------------------------------- the command line
@@ -984,8 +1233,6 @@ def test_cli_pin_and_lock_check(
     session = FakeGitHubSession()
     _cli_env(monkeypatch, st, keys, session, tmp_path)
     path = _lock_file(tmp_path)
-    base = tmp_path / "base.lock"
-    base.write_bytes(path.read_bytes())
 
     assert cli.main(["pin", ROLE, NAME, "1.0.0", "--gate", "phase1", "--lock", str(path)]) == 0
     out = json.loads(capsys.readouterr().out)
@@ -997,10 +1244,17 @@ def test_cli_pin_and_lock_check(
     assert cli.main(["pin", ROLE, "../x", "1.0.0", "--gate", "phase1", "--lock", str(path)]) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": "invalid_name"}
 
-    reviewers = tmp_path / "reviewers.json"
-    reviewers.write_text(json.dumps({"clinical": [CLINICAL], "platform": [PLATFORM]}))
-    args = ["lock-check", "--base", str(base), "--head", str(path), "--pr", "7"]
-    args += ["--reviewers", str(reviewers)]
+    # a rehearsal lock: only with --rehearsal, only in development, only with --lock
+    rehearsal = ["pin", ROLE, NAME, "1.0.0", "--gate", "phase1", "--rehearsal"]
+    assert cli.main([*rehearsal, "--lock", str(path)]) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"refused": "not_allowed_here", "detail": "rehearsal"}
+
+    main = _main_checkout(tmp_path / "main")
+    args = _lock_check_args(main, path)
+    with pytest.raises(SystemExit):  # --head-sha is required
+        cli.main([a for i, a in enumerate(args) if i not in (5, 6)])
+    capsys.readouterr()
     session.add(_approved_pr())
     assert cli.main(args) == 0
     assert json.loads(capsys.readouterr().out) == {"lock_check": "pass", "roles": {ROLE: "new"}}

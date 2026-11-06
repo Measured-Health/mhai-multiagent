@@ -10,9 +10,10 @@ Commands::
     mhai-models check DIR
     mhai-models make-fixture DIR [--variant V] [--seed N]
     mhai-models store-init
-    mhai-models pin ROLE NAME VERSION --gate phase1|phase3 [--lock PATH]
-    mhai-models lock-check --base BASE_LOCK --head HEAD_LOCK --pr N
-        --reviewers BASE_REVIEWERS [--testsets BASE_TESTSETS_LOCK] [--head-sha SHA]
+    mhai-models pin ROLE NAME VERSION --gate phase1|phase3 [--lock PATH [--rehearsal]]
+    mhai-models lock-check --base-dir MAIN_CHECKOUT --head HEAD_LOCK --head-sha SHA --pr N
+        --testsets MAIN_CHECKOUT/models/testsets.lock
+        --thresholds-dir MAIN_CHECKOUT/services/intelligence/intelligence/doceval/thresholds
 
 TODO(Task 21/22): verify, signoff, rollback and drive-check.
 
@@ -56,29 +57,45 @@ and prints its files hash. ``make-fixture`` writes a tiny synthetic run
 runs ``deploy/minio/init-model-store.sh`` (which needs ``mc``) and refuses unless
 ``MHAI_MODELS_ENV=development`` and ``MINIO_URL``'s host is ``127.0.0.1`` or ``::1``.
 
-With ``MODEL_STORE_READER_ACCESS_KEY`` and ``MODEL_STORE_READER_SECRET_KEY`` and a trust
-policy, ``promote`` verifies a promoted base model's pin
-(:func:`intelligence.modelstore.lock.base_verifier`); without them such a base is
-``base_unverified``.
+A run whose training manifest names a promoted base model has that base verified
+(:func:`intelligence.modelstore.lock.base_verifier`), on a dry run as on a promotion: the
+verifier is built on first use only, so a run with an upstream base reads no reader
+credentials or trust policy for it. It needs ``MODEL_STORE_READER_ACCESS_KEY``,
+``MODEL_STORE_READER_SECRET_KEY`` and ``MHAI_MODELS_TRUST_POLICY``; without them, or when
+the base fails, the run is ``base_unverified`` (the inner reason as the detail).
 
 ``pin`` (:func:`intelligence.modelstore.lock.pin`) verifies ``NAME@VERSION`` with the
 reader's credentials (``MODEL_STORE_ENDPOINT``, ``MODEL_STORE_BUCKET``,
 ``MODEL_STORE_READER_ACCESS_KEY``, ``MODEL_STORE_READER_SECRET_KEY``) and
 ``MHAI_MODELS_TRUST_POLICY``, checks its evaluation against ``models/testsets.lock``
 (``MHAI_MODELS_TESTSETS_LOCK``) and writes ``models.lock`` (or ``--lock``). It prints
-``{"pinned": {role, name, version, manifest_sha256, gate}}``. The production lock refuses
-``fixture-`` names and the ``rehearsal`` gate; only in development may another ``--lock``
-take them. It opens no PR.
+``{"pinned": {role, name, version, manifest_sha256, gate}}``. The production rules
+(no ``fixture-`` name, no ``rehearsal`` gate, a known role) always apply unless
+``--rehearsal`` is passed, which needs development (both switches) and an explicit
+``--lock`` (``not_allowed_here`` otherwise): the decision is the flag, never a path
+comparison. It opens no PR.
 
 ``lock-check`` (:func:`intelligence.modelstore.lock.lock_check`, in ``model-lock.yml``)
-compares two lock files. ``--reviewers`` and ``--testsets`` must be the PR's **base** ref
-copies (the workflow writes them with ``git show <base sha>:<path>``), never the PR's own.
+trusts the PR for one thing only, the head lock:
+
+* ``--head`` is a file holding ``models.lock`` at the PR's head commit, written by the
+  workflow with ``git show "$HEAD_SHA":models.lock``, and ``--head-sha`` is that commit
+  (``github.event.pull_request.head.sha``); both are required, and the check refuses if
+  the PR's head has moved since.
+* ``--base-dir`` is a checkout of the **current tip of main**, made at check time (for
+  example ``git fetch origin main && git worktree add main-tip origin/main``), never the
+  PR's base commit or its merge checkout. The base lock (``models.lock``) and
+  ``models/reviewers.json`` are read from it; ``--testsets`` and ``--thresholds-dir`` are
+  required and must be inside it (``not_allowed_here`` otherwise). A reviewer removed on
+  main stops counting at once.
+* The workflow runs this command from that same main checkout (its code as well as its
+  data), so a PR can't change the checker that judges it.
+
 It reads the store as ``pin`` does and the PR with ``GITHUB_TOKEN`` and
 ``GITHUB_REPOSITORY`` (``GITHUB_API_URL`` optional). It prints ``{"lock_check": "pass",
 "roles": {role: new|rollback|removed}}``; a lock with no changed role needs no store or
 GitHub access. Verified files go to ``MHAI_MODELS_CACHE`` when set, else to a private
-temporary folder removed afterwards. ``--head-sha`` (the workflow's PR head commit) makes
-a PR whose head moved since the checkout ``not_approved``.
+temporary folder removed afterwards.
 
 A promotion (not ``--dry-run``) outside ``MHAI_MODELS_ENV=development`` must run with
 ``MHAI_EVAL_ROLE=locked`` (the locked split), must pass ``--expect-files`` and may not pass
@@ -151,6 +168,9 @@ WORKFLOW_ENVS = ("GITHUB_RUN_ID", "GITHUB_WORKFLOW_REF", "GITHUB_SHA", "GITHUB_A
 MAX_SCALE = 10.0
 MODELS_DIR = promote.REPO / "models"
 PRODUCTION_LOCK = promote.REPO / "models.lock"
+# Inside a checkout of main's tip (lock-check's --base-dir).
+BASE_LOCK_PATH = "models.lock"
+BASE_REVIEWERS_PATH = "models/reviewers.json"
 INIT_SCRIPT = promote.REPO / "deploy" / "minio" / "init-model-store.sh"
 UNAVAILABLE = frozenset({"store_unavailable", "source_unavailable", "github_unavailable"})
 # store-init: loopback IP literals only (a name such as localhost can resolve anywhere).
@@ -365,10 +385,12 @@ def _pin(args: argparse.Namespace) -> int:
     names.check_role(role)  # names first, before any environment, file or store access
     names.check_name(name)
     names.check_version(version)
+    # P14: the production rules unless an explicit rehearsal, in development, into a lock
+    # named explicitly.
+    if args.rehearsal and (not verify.is_development() or not args.lock):
+        raise Refused("not_allowed_here", detail_code="rehearsal")
+    production = not args.rehearsal
     lock_path = Path(args.lock) if args.lock else PRODUCTION_LOCK
-    # Only a development rehearsal may write a lock other than the repository's without
-    # the production rules (P14).
-    production = not (verify.is_development() and lock_path.resolve() != PRODUCTION_LOCK.resolve())
     source = _reader_store()
     policy = _trust_policy()
     locked = _testsets_lock()
@@ -389,11 +411,26 @@ def _pin(args: argparse.Namespace) -> int:
     return 0
 
 
+def _inside(path: str, base_dir: Path) -> Path:
+    """``path``, which must be inside ``base_dir`` (main's checkout), never elsewhere."""
+    resolved = Path(path).resolve()
+    if not resolved.is_relative_to(base_dir):
+        raise Refused("not_allowed_here", detail_code="outside_base_dir")
+    return resolved
+
+
 def _lock_check(args: argparse.Namespace) -> int:
     number = lock.check_pr_number(args.pr)
-    base, head = lock.read(args.base), lock.read(args.head)
-    reviewers = lock.read_reviewers(args.reviewers)
-    locked = _testsets_lock(args.testsets)
+    if not isinstance(args.head_sha, str) or re.fullmatch(r"[0-9a-f]{40}", args.head_sha) is None:
+        raise Refused("invalid_name", detail_code="head_sha")
+    base_dir = Path(args.base_dir).resolve()
+    if not base_dir.is_dir():
+        raise Refused("not_allowed_here", detail_code="base_dir")
+    testsets_path = _inside(args.testsets, base_dir)
+    thresholds_dir = _inside(args.thresholds_dir, base_dir)
+    base, head = lock.read(base_dir / BASE_LOCK_PATH), lock.read(args.head)
+    reviewers = lock.read_reviewers(base_dir / BASE_REVIEWERS_PATH)
+    locked = testsets.read_lock(testsets_path)
     for role, entry in head.models.items():
         lock.check_production(role, entry)
     if not lock.changed_roles(base, head):
@@ -413,21 +450,30 @@ def _lock_check(args: argparse.Namespace) -> int:
             policy=policy,
             cache_dir=cache_dir,
             testsets_lock=locked,
+            thresholds_dir=thresholds_dir,
             head_sha=args.head_sha,
         )
     _print({"lock_check": "pass", "roles": roles})
     return 0
 
 
-def _base_verifier(stack: contextlib.ExitStack) -> Callable[[str], None] | None:
-    """The promoted-base verifier, when the reader's credentials and a policy are here."""
-    if not (os.environ.get(READER_ACCESS_ENV) and os.environ.get(READER_SECRET_ENV)):
-        return None
-    if not os.environ.get(TRUST_POLICY_ENV):
-        return None
-    source = _reader_store()
-    policy = _trust_policy()
-    return lock.base_verifier(source, policy, stack.enter_context(_cache()))
+def _base_verifier(stack: contextlib.ExitStack) -> Callable[[str], None]:
+    """The promoted-base verifier, built on its first call only (a run whose base is
+    upstream never reads the reader's credentials or the trust policy for it). A dry run
+    with a promoted base verifies it too: a base is checked before anything is evaluated."""
+    built: list[Callable[[str], None]] = []
+
+    def verify_base(pin: str) -> None:
+        if not built:
+            if not (os.environ.get(READER_ACCESS_ENV) and os.environ.get(READER_SECRET_ENV)):
+                raise Refused("base_unverified", detail_code="reader_credentials")
+            if not os.environ.get(TRUST_POLICY_ENV):
+                raise Refused("base_unverified", detail_code="policy")
+            source, policy = _reader_store(), _trust_policy()
+            built.append(lock.base_verifier(source, policy, stack.enter_context(_cache())))
+        built[0](pin)
+
+    return verify_base
 
 
 def _promote(args: argparse.Namespace) -> int:
@@ -591,14 +637,15 @@ def _parser() -> argparse.ArgumentParser:
     pn.add_argument("version")
     pn.add_argument("--gate", required=True)
     pn.add_argument("--lock", default=None)
+    pn.add_argument("--rehearsal", action="store_true")
     pn.set_defaults(func=_pin)
     lc = sub.add_parser("lock-check", help="check a PR's change to models.lock")
-    lc.add_argument("--base", required=True)
+    lc.add_argument("--base-dir", required=True)
     lc.add_argument("--head", required=True)
+    lc.add_argument("--head-sha", required=True)
     lc.add_argument("--pr", required=True)
-    lc.add_argument("--reviewers", required=True)
-    lc.add_argument("--testsets", default=None)
-    lc.add_argument("--head-sha", default=None)
+    lc.add_argument("--testsets", required=True)
+    lc.add_argument("--thresholds-dir", required=True)
     lc.set_defaults(func=_lock_check)
     return parser
 

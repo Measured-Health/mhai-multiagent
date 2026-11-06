@@ -33,8 +33,26 @@ and no ``fixture-`` name (:func:`check_production`, P14). It is changed only by 
 
 ``lock-check``
 --------------
-:func:`lock_check` compares the PR's base and head locks. Every head entry must pass
-:func:`check_production`. For each changed role:
+:func:`lock_check` compares the lock on ``main`` with the PR's lock. Which data it trusts
+is the whole point, so:
+
+* **Only the head lock is data from the PR.** It is the bytes of ``models.lock`` at the
+  PR's head commit ``head_sha`` (the workflow writes them with ``git show
+  <head sha>:models.lock``, never from a merge checkout), and the check refuses
+  (``not_approved``/``head_moved``) unless the PR's current head is that commit, so the
+  content checked and the approvals counted belong to one commit.
+* **Everything else comes from the current tip of ``main``**, read at check time, never
+  from the PR's base commit and never from the PR's own copies: the base lock,
+  ``reviewers.json``, ``models/testsets.lock`` and the thresholds files. A reviewer
+  removed from ``main`` stops counting at once, also for PRs opened before; a PR that
+  lowers a threshold or adds a test set in the same change as a pin is checked against
+  ``main``'s, and refused. Task 24's ``model-lock.yml`` runs ``mhai-models lock-check``
+  from a checkout of ``main``'s tip (its code and its data, ``--base-dir``) and takes only
+  the head lock from the PR.
+* **The PR's base branch must be** ``main`` (``base_not_main``): a PR into another branch
+  could carry a reviewer list nobody reviewed.
+
+Every head entry must pass :func:`check_production`. For each changed role:
 
 * **new version:** verified as for ``pin`` (signature, hashes, gate, evaluation); the PR
   carries the ``clinical-review`` label (``label_missing``); its approvals on the head
@@ -43,8 +61,10 @@ and no ``fixture-`` name (:func:`check_production`, P14). It is changed only by 
   ``trained_by`` (``separation_of_duties`` when only those rules stand in the way,
   ``not_approved`` otherwise; P15);
 * **rollback** (the version already has a valid sign-off for this role, P16): verified,
-  no new evaluation; the label, one platform approval and ``Clinical note:`` in the PR
-  body. A version older than the base's pin of the same name without a sign-off is
+  no new evaluation; the label, one platform approval (not the restored version's
+  promoter or trainer, nor the author) and a clinical note: a line of the PR body that
+  starts with ``Clinical note:`` followed by at least 20 non-space characters, outside
+  fenced code blocks and HTML comments (:func:`has_clinical_note`). A version older than the base's pin of the same name without a sign-off is
   ``not_approved``/``never_approved``;
 * **removed role:** one platform approval.
 
@@ -60,15 +80,18 @@ lowercased on reading, then compared exactly (ruling D30).
 The GitHub API
 --------------
 :class:`GitHubClient` makes two GET calls with the job's ``GITHUB_TOKEN``
-(``pull-requests: read``): the pull request and its reviews (paginated, at most
-:data:`MAX_REVIEW_PAGES` pages). No redirect is followed. The token is never in a log, an
+(``pull-requests: read``): the pull request and its reviews, following the ``Link``
+header's ``rel="next"`` (only to the same API host and this PR's reviews), at most
+:data:`MAX_REVIEW_PAGES` pages: a next page past the cap is a refusal. No redirect is
+followed. The token is never in a log, an
 error or a reason; failures are ``github_unavailable`` with no exception chained.
 
 A promoted base model
 ---------------------
 :func:`base_verifier` is what ``training.check`` calls for a base named by its pin
 ``<name>@<version>#<manifest sha256>``: Task 22's verifier, the role taken from that
-manifest, no gate and no sign-off required.
+manifest, no gate and no sign-off required. A base that fails is ``base_unverified``, the
+inner reason as its detail code (a store outage stays ``store_unavailable``).
 """
 
 from __future__ import annotations
@@ -83,9 +106,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
+from urllib.parse import parse_qsl, urlsplit
 
-from intelligence.doceval.report import GATES, PRODUCTION_GATES
-from intelligence.doceval.report import packaged_thresholds as _packaged_thresholds
+from intelligence.doceval.report import GATES, PRODUCTION_GATES, THRESHOLDS_DIR
+from intelligence.doceval.report import load_thresholds as _load_thresholds
 from intelligence.doceval.report import parse_report as _parse_report
 from intelligence.modelstore import canonical, files, manifest, names, signing, store, verify
 from intelligence.modelstore.promote import SUITES
@@ -101,6 +125,8 @@ ROLES: frozenset[str] = frozenset(SUITES)
 FIXTURE_PREFIX = "fixture-"
 LABEL = "clinical-review"
 CLINICAL_NOTE = "Clinical note:"
+CLINICAL_NOTE_MIN_CHARS = 20
+MAIN_BRANCH = "main"
 EVALUATION = "evaluation.json"
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 REVIEWERS_MAX_BYTES = 64 * 1024
@@ -311,8 +337,10 @@ def check_evaluation(
     m: manifest.Manifest,
     gate: str,
     testsets_lock: Mapping[tuple[str, str], TestsetEntry],
+    thresholds_dir: Path | str = THRESHOLDS_DIR,
 ) -> None:
-    """The evaluation behind a new pin (see the module docstring)."""
+    """The evaluation behind a new pin (see the module docstring). ``testsets_lock`` and
+    ``thresholds_dir`` are the trusted copies (``main``'s for ``lock-check``)."""
     ev = m.evaluation
     if ev.split != "test":
         raise Refused("testset_mismatch", detail_code="split")
@@ -347,8 +375,19 @@ def check_evaluation(
         raise Refused("gate_failed", detail_code="disagree")
     if verdicts.get(gate) != "pass":
         raise Refused("gate_failed")
-    if rep["thresholds"][gate]["sha256"] != _packaged_thresholds(gate).sha256:
+    if rep["thresholds"][gate]["sha256"] != thresholds_sha256(thresholds_dir, gate):
         raise Refused("gate_failed", detail_code="thresholds")
+
+
+def thresholds_sha256(thresholds_dir: Path | str, gate: str) -> str:
+    """The SHA-256 of ``<thresholds_dir>/<gate>.json``, checked as a thresholds file for
+    that gate (``policy_invalid`` otherwise)."""
+    if gate not in GATES:
+        raise _invalid("gate")
+    t = _load_thresholds(Path(thresholds_dir) / f"{gate}.json")
+    if t.gate != gate:
+        raise Refused("policy_invalid", detail_code="thresholds")
+    return t.sha256
 
 
 # ---------------------------------------------------------------- pin
@@ -374,6 +413,7 @@ def pin(
     lock_path: Path | str,
     testsets_lock: Mapping[tuple[str, str], TestsetEntry],
     production: bool = True,
+    thresholds_dir: Path | str = THRESHOLDS_DIR,
 ) -> Pin:
     """Verify ``name@version`` for ``role`` and ``gate`` and write it into the lock at
     ``lock_path``; returns the entry written. Raises :class:`Refused` on any failure, and
@@ -390,7 +430,7 @@ def pin(
     sha = find_signed_manifest(source, name, version, policy)
     entry = Pin(name, version, sha, gate)
     verified = verify.verify_pin(source, role, entry, policy, cache_dir, require_signoff=False)
-    check_evaluation(source, verified.manifest, gate, testsets_lock)
+    check_evaluation(source, verified.manifest, gate, testsets_lock, thresholds_dir)
     write(lock_path, current.with_pin(role, entry))
     return entry
 
@@ -459,6 +499,7 @@ class PullRequest:
     labels: frozenset[str]
     body: str
     reviews: tuple[Review, ...]
+    base_ref: str
 
 
 class GitHubApi(Protocol):
@@ -491,6 +532,9 @@ _API = re.compile(
     r"https://[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?(?:/[A-Za-z0-9._/-]{0,200})?", re.ASCII
 )
 _COMMIT = re.compile(r"[0-9a-f]{40}", re.ASCII)
+_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", re.ASCII)
+_NEXT = re.compile(r'<([^<>\s]{1,2048})>\s*;(?:[^,]*;)?\s*rel="next"', re.ASCII)
+_PAGE_PARAMS = frozenset({"per_page", "page"})
 _CHUNK = 64 * 1024
 TOKEN_ENV = "GITHUB_TOKEN"
 REPOSITORY_ENV = "GITHUB_REPOSITORY"
@@ -532,7 +576,8 @@ class GitHubClient:
         if not isinstance(api_url, str) or _API.fullmatch(api_url) is None or ".." in api_url:
             raise Refused("not_allowed_here", detail_code="api_url")
         self._session = session
-        self._base = f"{api_url.rstrip('/')}/repos/{repository}"
+        self._repo_path = f"/repos/{repository}"
+        self._base = f"{api_url.rstrip('/')}{self._repo_path}"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> GitHubClient:
@@ -555,10 +600,14 @@ class GitHubClient:
         return cls(session, repository, env.get(API_URL_ENV) or API_URL)
 
     def _json(self, path: str, params: Mapping[str, str] | None = None) -> Any:
+        return self._get(f"{self._base}{path}", params)[0]
+
+    def _get(self, url: str, params: Mapping[str, str] | None = None) -> tuple[Any, str | None]:
+        """The parsed JSON at ``url`` and the response's ``Link`` header (or None)."""
         resp: Any = None
         try:
             resp = self._session.get(
-                f"{self._base}{path}",
+                url,
                 params=dict(params or {}),
                 timeout=TIMEOUT,
                 stream=True,
@@ -591,6 +640,12 @@ class GitHubClient:
                 pass
         if failed is not None:
             raise failed
+        link: str | None = None
+        try:
+            got = resp.headers.get("Link")
+            link = got if isinstance(got, str) else None
+        except Exception:
+            link = None
         obj: Any = None
         bad = False
         try:
@@ -599,22 +654,60 @@ class GitHubClient:
             bad = True
         if bad:
             raise _unavailable("response")
-        return obj
+        return obj, link
+
+    def _next(self, link: str | None, number: int) -> tuple[str, dict[str, str]] | None:
+        """The ``rel="next"`` page of this PR's reviews, as (URL, params), or None. A next
+        link anywhere else (another host, another path, other parameters) is refused: the
+        token never leaves for a URL we didn't expect."""
+        if link is None:
+            return None
+        found = _NEXT.search(link)
+        if found is None:
+            return None
+        failed = False
+        try:
+            nxt, ours = urlsplit(found.group(1)), urlsplit(self._base)
+            query = parse_qsl(nxt.query, keep_blank_values=True, strict_parsing=True)
+        except ValueError:
+            failed = True
+        if failed:
+            raise _unavailable("link")
+        api_path = ours.path[: -len(self._repo_path)]
+        allowed = re.compile(
+            rf"{re.escape(api_path)}/(?:{re.escape(self._repo_path[1:])}|repositories/[0-9]{{1,20}})"
+            rf"/pulls/{number}/reviews",
+            re.ASCII,
+        )
+        params = dict(query)
+        if (
+            nxt.scheme != ours.scheme
+            or nxt.netloc != ours.netloc
+            or nxt.fragment
+            or allowed.fullmatch(nxt.path) is None
+            or len(params) != len(query)
+            or not set(params) <= _PAGE_PARAMS
+            or not all(re.fullmatch(r"[1-9][0-9]{0,5}", v, re.ASCII) for v in params.values())
+        ):
+            raise _unavailable("link")
+        return f"{nxt.scheme}://{nxt.netloc}{nxt.path}", params
 
     def _reviews(self, number: int) -> tuple[Review, ...]:
         out: list[Review] = []
-        for page in range(1, MAX_REVIEW_PAGES + 1):
-            items = self._json(
-                f"/pulls/{number}/reviews", {"per_page": str(PER_PAGE), "page": str(page)}
-            )
+        url = f"{self._base}/pulls/{number}/reviews"
+        params = {"per_page": str(PER_PAGE), "page": "1"}
+        for _ in range(MAX_REVIEW_PAGES):
+            items, link = self._get(url, params)
             if not isinstance(items, list) or len(items) > PER_PAGE:
                 raise _unavailable("response")
             for item in items:
                 review = _review(item)
                 if review is not None:
                     out.append(review)
-            if len(items) < PER_PAGE:
+            nxt = self._next(link, number)
+            if nxt is None:
                 return tuple(out)
+            url, params = nxt
         raise Refused("not_approved", detail_code="too_many_reviews")
 
     def pull_request(self, number: int) -> PullRequest:
@@ -640,7 +733,12 @@ class GitHubClient:
             body = ""
         if not isinstance(body, str) or len(body) > MAX_BODY:
             raise _unavailable("response")
-        return PullRequest(number, author, sha, labels, body, self._reviews(number))
+        base = obj.get("base")
+        base_ref = base.get("ref") if isinstance(base, dict) else None
+        if not isinstance(base_ref, str) or _REF.fullmatch(base_ref) is None:
+            raise _unavailable("response")
+        reviews = self._reviews(number)
+        return PullRequest(number, author, sha, labels, body, reviews, base_ref)
 
 
 def _review(item: object) -> Review | None:
@@ -692,16 +790,46 @@ def _pair(clinical: Iterable[str], platform: Iterable[str]) -> bool:
     return any(platform - {c} for c in clinical)
 
 
+_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+
+
+def has_clinical_note(body: str) -> bool:
+    """A line that starts with ``Clinical note:`` and has at least
+    :data:`CLINICAL_NOTE_MIN_CHARS` non-space characters after it on that line, outside
+    HTML comments (an unclosed one runs to the end) and fenced code blocks (an unclosed
+    one too). Indented, quoted or inline mentions don't count."""
+    if not isinstance(body, str):
+        return False
+    text = _COMMENT.sub("", body)
+    fence: str | None = None
+    for line in text.splitlines():
+        m = _FENCE.match(line)
+        if fence is not None:
+            if m is not None and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                fence = None
+            continue
+        if m is not None:
+            fence = m.group(1)
+            continue
+        if line.startswith(CLINICAL_NOTE):
+            rest = "".join(line[len(CLINICAL_NOTE) :].split())
+            if len(rest) >= CLINICAL_NOTE_MIN_CHARS:
+                return True
+    return False
+
+
 def check_approvals(pr: PullRequest, reviewers: Reviewers, changes: Iterable[Change]) -> None:
     changes = list(changes)
     kinds = {c.kind for c in changes}
     if kinds & {"new", "rollback"} and LABEL not in pr.labels:
         raise Refused("label_missing")
-    if "rollback" in kinds and CLINICAL_NOTE not in pr.body:
+    if "rollback" in kinds and not has_clinical_note(pr.body):
         raise Refused("not_approved", detail_code="clinical_note")
     excluded = {pr.author}
     for c in changes:
-        if c.kind == "new" and c.manifest is not None:
+        # P15: nobody approves a version they promoted or trained, new or restored
+        if c.manifest is not None:
             excluded |= {c.manifest.promotion.actor, c.manifest.trained_by}
     strict = approvals(pr) - excluded
     loose = approvals(pr, include_author=True)
@@ -754,15 +882,18 @@ def lock_check(
     policy: signing.TrustPolicy,
     cache_dir: Path | str,
     testsets_lock: Mapping[tuple[str, str], TestsetEntry],
-    head_sha: str | None = None,
+    thresholds_dir: Path | str,
+    head_sha: str,
 ) -> dict[str, str]:
     """Check a PR's change to ``models.lock``; returns ``{role: new|rollback|removed}``.
-    ``reviewers`` and ``testsets_lock`` are the **base** ref's copies. ``head_sha``, when
-    given, is the commit ``head_raw`` was read from: a PR whose head has moved since is
-    ``not_approved``/``head_moved`` (the new head gets its own check). Raises
-    :class:`Refused` on any failure."""
+
+    ``base_raw``, ``reviewers``, ``testsets_lock`` and ``thresholds_dir`` are ``main``'s
+    current copies, never the PR's (see the module docstring). ``head_raw`` is the lock at
+    ``head_sha``; a PR whose head is no longer ``head_sha`` is ``not_approved``/
+    ``head_moved`` (the new head gets its own check), and one whose base branch isn't
+    ``main`` is ``base_not_main``. Raises :class:`Refused` on any failure."""
     number = check_pr_number(number)
-    if head_sha is not None and (not isinstance(head_sha, str) or not _COMMIT.fullmatch(head_sha)):
+    if not isinstance(head_sha, str) or _COMMIT.fullmatch(head_sha) is None:
         raise Refused("invalid_name", detail_code="head_sha")
     if not isinstance(reviewers, Reviewers):
         raise Refused("policy_invalid", detail_code="reviewers")
@@ -798,7 +929,7 @@ def lock_check(
                 and names.Version.parse(entry.version) < names.Version.parse(old.version)
             ):
                 raise Refused("not_approved", detail_code="never_approved")
-            check_evaluation(source, m, entry.gate, testsets_lock)
+            check_evaluation(source, m, entry.gate, testsets_lock, thresholds_dir)
         changes.append(Change(role, kind, m))
     for role, pinned in head.models.items():
         if role not in manifests:
@@ -806,7 +937,9 @@ def lock_check(
             manifests[role] = manifest.parse(raw)
     check_dependencies(head, manifests)
     pr = github.pull_request(number)
-    if head_sha is not None and not secrets.compare_digest(head_sha, pr.head_sha):
+    if pr.base_ref != MAIN_BRANCH:
+        raise Refused("base_not_main")
+    if not secrets.compare_digest(head_sha, pr.head_sha):
         raise Refused("not_approved", detail_code="head_moved")
     check_approvals(pr, reviewers, changes)
     return {c.role: c.kind for c in changes}
@@ -845,17 +978,26 @@ def base_verifier(
 
     def verify_base(text: str) -> None:
         name, version, sha = parse_base_pin(text)
-        verify.check_environment(policy)
-        m = manifest.parse(verify.find_manifest(source, name, version, sha))
-        verify.verify_pin(
-            source,
-            m.role,
-            _BasePin(name, version, sha),
-            policy,
-            cache_dir,
-            require_signoff=False,
-            require_gate=False,
-        )
+        inner: str | None = None
+        try:
+            verify.check_environment(policy)
+            m = manifest.parse(verify.find_manifest(source, name, version, sha))
+            verify.verify_pin(
+                source,
+                m.role,
+                _BasePin(name, version, sha),
+                policy,
+                cache_dir,
+                require_signoff=False,
+                require_gate=False,
+            )
+        except Refused as e:
+            if e.reason == "store_unavailable":
+                raise
+            inner = e.reason
+        if inner is not None:
+            # The inner reason is a fixed code from REASONS: no name, path or content.
+            raise Refused("base_unverified", detail_code=inner)
 
     return verify_base
 
@@ -864,6 +1006,7 @@ __all__ = [
     "CLINICAL_NOTE",
     "FIXTURE_PREFIX",
     "LABEL",
+    "MAIN_BRANCH",
     "MAX_REVIEW_PAGES",
     "ROLES",
     "SCHEMA",
@@ -883,6 +1026,7 @@ __all__ = [
     "check_evaluation",
     "check_pr_number",
     "check_production",
+    "has_clinical_note",
     "empty",
     "find_signed_manifest",
     "lock_check",
@@ -892,6 +1036,7 @@ __all__ = [
     "pin",
     "read",
     "read_reviewers",
+    "thresholds_sha256",
     "to_bytes",
     "write",
 ]
