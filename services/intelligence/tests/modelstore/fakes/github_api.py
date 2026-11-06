@@ -6,7 +6,8 @@ response shapes: ``/repos/{repo}/pulls/{n}`` (a pull request: ``number``, ``user
 (a page of reviews: ``id``, ``user.login``, ``state``, ``commit_id``), paged by
 ``per_page`` and ``page`` with a ``Link: <...>; rel="next"`` header that names the
 ``/repositories/<id>/...`` form, as GitHub does; and ``/repos/{repo}/commits/{sha}/pulls``
-(the pull requests associated with a commit, for the sign-off), with a PR's ``merged``,
+(the pull requests associated with a commit, for the sign-off) and
+``/repos/{repo}/commits/{sha}`` (a commit's parents), with a PR's ``merged``,
 ``merge_commit_sha`` and ``merged_at``. ``max_per_page`` serves fewer per page
 than asked (as a server setting may). Logins are served in display case, as GitHub does. It carries a bearer token in
 its headers, as the real session does, so a test can check that the token never reaches
@@ -100,6 +101,8 @@ class FakeGitHubSession:
         # GET /repos/{repo}/commits/{sha}/pulls: the PR numbers GitHub associates with sha
         self.commit_pulls: dict[str, list[int]] = {}
         self.commit_pulls_next = False  # serve a rel="next" link on that listing
+        # GET /repos/{repo}/commits/{sha}: each commit's parents, in order
+        self.commit_parents: dict[str, list[str]] = {}
 
     def add(self, pr: FakePR) -> FakePR:
         self.prs[pr.number] = pr
@@ -120,6 +123,12 @@ class FakeGitHubSession:
             if self.commit_pulls_next:
                 headers["Link"] = f'<{url}?per_page=100&page=2>; rel="next"'
             return FakeResponse(200, json.dumps(items).encode(), headers)
+        if url.startswith(commits) and url[len(commits) :] in self.commit_parents:
+            sha = url[len(commits) :]
+            parents = [{"sha": p, "url": f"{commits}{p}"} for p in self.commit_parents[sha]]
+            return FakeResponse(200, json.dumps({"sha": sha, "parents": parents}).encode())
+        if url.startswith(commits):
+            return FakeResponse(404, b'{"message":"Not Found"}')
         prefixes = (f"{API}/repos/{self.repo}/pulls/", f"{API}/repositories/{REPO_ID}/pulls/")
         prefix = next((p for p in prefixes if url.startswith(p)), None)
         if prefix is None:

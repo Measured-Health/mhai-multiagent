@@ -22,28 +22,45 @@ person is both the clinical and the platform reviewer (the verifier's own rule).
 
 The sign-off
 ------------
-:func:`sign_off` is ``mhai-models signoff --before OLD --after NEW --commit SHA`` (in
-``model-signoff.yml``, after a push to ``main``). P17: a lock that reached ``main``
-without its approvals (an admin merge, a direct push) gets no sign-off. In order, nothing
-written until every check has passed for every role:
+:func:`sign_off` is ``mhai-models signoff`` (in ``model-signoff.yml``, after a push to
+``main``). P17: a lock that reached ``main`` without its approvals (an admin merge, a
+direct push) gets no sign-off. In order; no sign-off is written until every check has
+passed for every role and every object's retention is extended:
 
-1. **Inputs.** The commit is 40 hex; the retention is a whole number of days; the
-   environment and policy pass :func:`intelligence.modelstore.verify.check_environment`;
-   the signer's key is in the policy's ``signoff`` set and not in its ``manifest`` set
-   (``signer_untrusted``). TODO(Task 26): the production signer; phase 0 has only the
-   development ``FileSigner``, which refuses outside ``MHAI_MODELS_ENV=development``.
-2. **The merged PR.** GitHub's pull requests for ``--commit`` (``GET
+1. **Inputs.** The commit, head and base shas are 40 hex; the retention is a whole number
+   of days; the environment and policy pass
+   :func:`intelligence.modelstore.verify.check_environment`; the signer's key is in the
+   policy's ``signoff`` set and not in its ``manifest`` set (``signer_untrusted``).
+   TODO(Task 26): the production signer; phase 0 has only the development
+   ``FileSigner``, which refuses outside ``MHAI_MODELS_ENV=development``. A push that
+   changes no role stops here (exit 0): there is nothing to sign.
+2. **The merge commit** (D33, :func:`check_merge`). ``--commit`` must have exactly two
+   parents as GitHub reports them (``GET /commits/{sha}``), else
+   ``not_approved``/``not_a_merge_commit``: a squash or rebase merge, a direct push or a
+   batched push has one parent, and its first parent could be one of the PR's own
+   commits, whose ``reviewers.json`` or trust policy the PR controls. The first parent
+   must be ``--base-sha`` (``base_mismatch``), which is ``main`` before the push; the
+   second must be ``--head-sha`` (``head_mismatch``). TODO(H4): branch protection on
+   ``main`` allows merge commits only (no squash, no rebase, no merge queue batching)
+   and requires branches to be up to date; otherwise a model change can't be signed off.
+3. **The merged PR.** GitHub's pull requests for ``--commit`` (``GET
    /commits/{sha}/pulls``): none, or more than one, is ``not_approved`` (``no_pr``,
    ``many_prs``); the one must be merged, into ``main``, with ``merge_commit_sha`` exactly
-   ``--commit`` (``not_merged``, ``not_main``).
-3. **The store half of lock-check**, :func:`intelligence.modelstore.lock.assess_changes`:
+   ``--commit`` (``not_merged``, ``not_main``), and its head must be ``--head-sha``
+   (``head_mismatch``).
+4. **The merge is what was approved** (D32, :func:`check_merge_matches_head`): every
+   role the merge changed holds exactly the entry of ``--head-lock``, the lock at the
+   PR's head, which is what the reviewers approved; otherwise
+   ``not_approved``/``merge_differs_from_head`` (a hand-edited merge). Checked before any
+   store read.
+5. **The store half of lock-check**, :func:`intelligence.modelstore.lock.assess_changes`:
    each changed role verified and classified ``new``, ``rollback`` or ``removed``, a new
-   one with its evaluation re-checked against the thresholds and ``testsets.lock`` of the
-   first parent. A version this very merge already signed off (a re-run) stays ``new``.
-4. **The approvals**, :func:`intelligence.modelstore.lock.check_approvals` on that PR,
-   with ``reviewers.json`` from ``main`` as of the merge commit's first parent: the same
-   function ``lock-check`` runs, never a copy of its rules.
-5. **The records.** For each new version: the approving reviewers on the PR's head
+   one with its evaluation re-checked against the thresholds and ``testsets.lock`` at
+   ``--base-sha``. A version this very merge already signed off (a re-run) stays ``new``.
+6. **The approvals**, :func:`intelligence.modelstore.lock.check_approvals` on that PR,
+   with ``reviewers.json`` at ``--base-sha``: the same function ``lock-check`` runs,
+   never a copy of its rules.
+7. **The records.** For each new version: the approving reviewers on the PR's head
    commit, lowercase, minus the PR's author, the promoter and the trainer, a person who
    is on both lists counted once (:func:`choose_reviewers`); the record built and signed
    (purpose ``signoff``), the signature verified against the policy. Then the state of
@@ -60,32 +77,47 @@ written until every check has passed for every role:
      check;
    * anything else (another record, a second version, a signature that doesn't verify):
      ``not_approved``/``signoff_conflict``.
-6. **Writes**, with the ``signoff`` store role: ``signoff.json`` then ``signoff.sig``,
+
+   A changed role that ends up neither signed off nor removed is
+   ``not_approved``/``not_signed_off``: never a silent exit 0.
+8. **Retention first.** Every object of each pinned version (new or rollback), by its
+   recorded version id, never "latest": each file, each document, ``manifest.json``,
+   ``manifest.sig`` and whichever of ``signoff.json`` and ``signoff.sig`` already exist,
+   extended to ``MODEL_STORE_APPROVED_RETENTION_DAYS`` from now (no default, pending H2;
+   at most ``MODEL_STORE_MAX_RETENTION_DAYS``). Only ever longer: an object already
+   locked longer is left as it is. A failure part-way (exit 3) leaves no new sign-off, so
+   "a sign-off exists" always means "its version is retained"; a re-run starts again.
+9. **Writes**, with the ``signoff`` store role: ``signoff.json`` then ``signoff.sig``,
    each a conditional create (:func:`intelligence.modelstore.promote.put_once`), locked
-   for the approved retention.
-7. **Retention.** Every object of each pinned version (new or rollback), by its recorded
-   version id, never "latest": each file, each document, ``manifest.json``,
-   ``manifest.sig``, ``signoff.json`` and ``signoff.sig``, extended to
-   ``MODEL_STORE_APPROVED_RETENTION_DAYS`` from now (no default, pending H2; at most
-   ``MODEL_STORE_MAX_RETENTION_DAYS``). Only ever longer: an object already locked longer
-   is left as it is. It runs on a re-run too, so a crash after the writes is finished by
-   the next run.
+   for the approved retention as they are created.
 
 A refusal raises :class:`~intelligence.modelstore.reasons.Refused`; the CLI prints one
-JSON summary and exits 2, and the workflow writes it to the job summary (Task 24). The
-loader then refuses that pin (Task 22) and the service stays not ready on it.
+JSON summary and exits 2 (3 when the store or GitHub is unavailable), and the workflow
+writes it to the job summary (Task 24). The loader then refuses that pin (Task 22) and
+the service stays not ready on it. A record adopted or found that isn't locked in
+compliance mode fails the retention step (``store_unavailable``/``not_locked``, exit 3)
+and needs a person.
 
-What Task 24's ``model-signoff.yml`` passes: ``--commit "$GITHUB_SHA"`` (the push's
-``after``); ``--before`` = ``git show "$GITHUB_SHA^1":models.lock`` and ``--after`` =
-``git show "$GITHUB_SHA":models.lock``, written to files; ``--base-dir`` a checkout of
-``$GITHUB_SHA^1`` (main as of the merge commit's first parent; the command runs from that
-checkout's code too, as lock-check does, D31) whose ``models.lock`` must equal
-``--before``, and from which ``models/reviewers.json``, ``models/trust-policy.json``,
-``--testsets`` and ``--thresholds-dir`` are read. The environment: ``GITHUB_TOKEN``
-(``pull-requests: read``), ``GITHUB_REPOSITORY``, the store as the ``signoff`` role
-(``MODEL_STORE_ENDPOINT``, ``MODEL_STORE_BUCKET``, ``MODEL_STORE_SIGNOFF_ACCESS_KEY``,
-``MODEL_STORE_SIGNOFF_SECRET_KEY``), ``MODEL_STORE_APPROVED_RETENTION_DAYS`` and the
-sign-off signer (``MHAI_MODELS_SIGNER`` until Task 26).
+What Task 24's ``model-signoff.yml`` passes (D32, D33):
+
+* ``--commit "$GITHUB_SHA"`` (the push's ``after``);
+* ``--base-sha`` = the push event's ``before`` (``github.event.before``): ``main`` before
+  the push, which must be the merge commit's first parent;
+* ``--base-dir``: a checkout of ``--base-sha``, from which the command also runs (its
+  code and data, as lock-check does, D31); the CLI checks that its ``HEAD`` is
+  ``--base-sha``. ``models/reviewers.json``, ``models/trust-policy.json``,
+  ``--testsets`` and ``--thresholds-dir`` are read from it;
+* ``--before`` = ``git show "$BASE_SHA":models.lock`` (must equal ``--base-dir``'s) and
+  ``--after`` = ``git show "$GITHUB_SHA":models.lock``, written to files;
+* ``--head-sha``: the merged PR's head (``.[0].head.sha`` of ``GET
+  /commits/$GITHUB_SHA/pulls``, which is also the merge commit's second parent), and
+  ``--head-lock`` = ``git show "$HEAD_SHA":models.lock`` after ``git fetch origin
+  "refs/pull/$N/head"`` (the branch may be deleted); a missing file fails the job;
+* the environment: ``GITHUB_TOKEN`` (``contents: read``, ``pull-requests: read``),
+  ``GITHUB_REPOSITORY``, the store as the ``signoff`` role (``MODEL_STORE_ENDPOINT``,
+  ``MODEL_STORE_BUCKET``, ``MODEL_STORE_SIGNOFF_ACCESS_KEY``,
+  ``MODEL_STORE_SIGNOFF_SECRET_KEY``), ``MODEL_STORE_APPROVED_RETENTION_DAYS`` and the
+  sign-off signer (``MHAI_MODELS_SIGNER`` until Task 26).
 """
 
 from __future__ import annotations
@@ -516,11 +548,12 @@ def version_objects(
     m: manifest.Manifest,
     manifest_sha256: str,
     policy: signing.TrustPolicy,
-    signoff_vids: tuple[str, str],
+    signoff_vids: tuple[str | None, str | None] = (None, None),
 ) -> list[tuple[str, str]]:
     """Every object of the version as ``(key, version id)``: each file and document by
     its recorded id, the manifest version with the pinned hash, the ``manifest.sig``
-    version that verifies over it, and the sign-off's two versions."""
+    version that verifies over it, and those of the sign-off's two versions that already
+    exist (``None``: not written yet)."""
     out = [
         (store.run_file_key(m.name, m.version, m.run.id, f.path), f.store_version_id)
         for f in m.files
@@ -533,8 +566,12 @@ def version_objects(
     sig_vid = verify.manifest_signature_version(source, m.name, m.version, raw, policy)
     out.append((store.manifest_key(m.name, m.version), manifest_vid))
     out.append((store.manifest_sig_key(m.name, m.version), sig_vid))
-    out.append((store.signoff_key(m.name, m.version), signoff_vids[0]))
-    out.append((store.signoff_sig_key(m.name, m.version), signoff_vids[1]))
+    for key, vid in (
+        (store.signoff_key(m.name, m.version), signoff_vids[0]),
+        (store.signoff_sig_key(m.name, m.version), signoff_vids[1]),
+    ):
+        if vid is not None:
+            out.append((key, vid))
     return out
 
 
@@ -559,11 +596,44 @@ def _check_days(days: object) -> int:
     return days
 
 
+def check_merge(
+    github: lock.MergedPullRequests, commit: str, base_sha: str, head_sha: str
+) -> lock.PullRequest:
+    """Steps 2 and 3: ``commit`` is a merge commit with exactly two parents, the first
+    ``base_sha`` (``main`` before the push) and the second ``head_sha``; it is the merge
+    of exactly one PR into ``main`` (:func:`merged_pr`), whose head is ``head_sha``.
+    Anything else is ``not_approved``."""
+    parents = github.commit_parents(commit)
+    if len(parents) != 2:
+        raise _invalid("not_a_merge_commit")
+    if not secrets.compare_digest(parents[0], base_sha):
+        raise _invalid("base_mismatch")
+    pr = merged_pr(github, commit)
+    if not secrets.compare_digest(pr.head_sha, head_sha) or not secrets.compare_digest(
+        parents[1], head_sha
+    ):
+        raise _invalid("head_mismatch")
+    return pr
+
+
+def check_merge_matches_head(before: lock.Lock, after: lock.Lock, head: lock.Lock) -> None:
+    """D32: every role the merge changed holds exactly the head lock's entry (the lock the
+    reviewers approved), or ``not_approved``/``merge_differs_from_head``."""
+    from intelligence.modelstore import lock
+
+    for role in lock.changed_roles(before, after):
+        if after.models.get(role) != head.models.get(role):
+            raise _invalid("merge_differs_from_head")
+
+
 def sign_off(
     before_raw: bytes,
     after_raw: bytes,
     commit: str,
     *,
+    head_raw: bytes,
+    head_sha: str,
+    base_sha: str,
     github: lock.MergedPullRequests,
     reviewers: lock.Reviewers,
     target: SignoffStore,
@@ -575,26 +645,31 @@ def sign_off(
     retention_days: int,
 ) -> Result:
     """Sign off every version newly pinned by the merge ``commit`` (see the module
-    docstring). ``before_raw`` is the lock at the commit's first parent, ``after_raw`` at
-    the commit; ``reviewers``, ``testsets_lock``, ``thresholds_dir`` and ``policy`` are
-    ``main``'s as of the first parent. Raises :class:`Refused`; nothing is written unless
-    every role passed every check."""
+    docstring). ``before_raw`` is the lock at ``base_sha`` (``main`` before the push,
+    which must be the commit's first parent), ``after_raw`` at the commit, ``head_raw`` at
+    ``head_sha`` (the merged PR's head, which the reviewers approved); ``reviewers``,
+    ``testsets_lock``, ``thresholds_dir`` and ``policy`` are ``main``'s at ``base_sha``.
+    Raises :class:`Refused`; no sign-off is written unless every role passed every check
+    and every object's retention was extended."""
     from intelligence.modelstore import lock
 
-    if not isinstance(commit, str) or _COMMIT_SHA.fullmatch(commit) is None:
-        raise Refused("invalid_name", detail_code="commit")
+    for value, detail in ((commit, "commit"), (head_sha, "head_sha"), (base_sha, "base_sha")):
+        if not isinstance(value, str) or _COMMIT_SHA.fullmatch(value) is None:
+            raise Refused("invalid_name", detail_code=detail)
     days = _check_days(retention_days)
     if not isinstance(reviewers, lock.Reviewers):
         raise Refused("policy_invalid", detail_code="reviewers")
     verify.check_environment(policy)
     check_signer(signer, policy)
-    before, after = lock.parse(before_raw), lock.parse(after_raw)
+    before, after, head = lock.parse(before_raw), lock.parse(after_raw), lock.parse(head_raw)
     for role, pinned in after.models.items():
         lock.check_production(role, pinned)
-    if not lock.changed_roles(before, after):
+    changed = lock.changed_roles(before, after)
+    if not changed:
         return Result({}, None, 0)
-    pr = merged_pr(github, commit)
+    pr = check_merge(github, commit, base_sha, head_sha)
     assert pr.merged_at is not None
+    check_merge_matches_head(before, after, head)  # before any store read
 
     def is_own(s: Signoff) -> bool:
         return s.pr == pr.number and secrets.compare_digest(s.merge_commit, commit)
@@ -612,7 +687,8 @@ def sign_off(
     lock.check_approvals(pr, reviewers, changes)
 
     plans: list[_Plan] = []
-    rollbacks: list[tuple[str, lock.Pin, manifest.Manifest, verify.FoundSignoff]] = []
+    roles: dict[str, str] = {c.role: "removed" for c in changes if c.kind == "removed"}
+    retained: list[tuple[str, str]] = []
     for c in changes:
         if c.kind == "removed":
             continue
@@ -621,7 +697,10 @@ def sign_off(
         m = c.manifest
         if c.kind == "rollback":
             found = verify.find_signoff(target, c.role, entry, m, policy)
-            rollbacks.append((c.role, entry, m, found))
+            roles[c.role] = "already_signed_off"
+            retained += version_objects(
+                target, m, entry.manifest_sha256, policy, (found.version_id, found.sig_version_id)
+            )
             continue
         clinical, platform = choose_reviewers(pr, reviewers, m)
         body = build(
@@ -639,25 +718,23 @@ def sign_off(
             trained_by=m.trained_by,
             at=pr.merged_at,
         )
-        plans.append(_plan_new(target, c.role, entry, m, body, signer, policy))
+        plan = _plan_new(target, c.role, entry, m, body, signer, policy)
+        plans.append(plan)
+        retained += version_objects(
+            target, m, entry.manifest_sha256, policy, (plan.json_vid, plan.sig_vid)
+        )
+    if set(roles) | {p.role for p in plans} != set(changed):  # never a silent success
+        raise _invalid("not_signed_off")
 
-    # Every check passed for every role: only now is anything written.
-    roles: dict[str, str] = {c.role: "removed" for c in changes if c.kind == "removed"}
-    retained: list[tuple[str, str]] = []
+    # Every check passed for every role. Retention first (M2): a sign-off that exists
+    # always means its version is kept; a failure here (exit 3) writes no record, and a
+    # re-run starts again from the top.
+    extended = extend_retention(target, retained, days)
     for plan in plans:
         done = plan.json_vid is not None and plan.sig_vid is not None
-        vids = (plan.json_vid, plan.sig_vid) if done else _write(target, plan, days)
-        assert vids[0] is not None and vids[1] is not None
+        if not done:
+            _write(target, plan, days)  # created with the approved retention
         roles[plan.role] = "already_signed_off" if done else "signed_off"
-        retained += version_objects(
-            target, plan.m, plan.entry.manifest_sha256, policy, (vids[0], vids[1])
-        )
-    for role, entry, m, found in rollbacks:
-        roles[role] = "already_signed_off"
-        retained += version_objects(
-            target, m, entry.manifest_sha256, policy, (found.version_id, found.sig_version_id)
-        )
-    extended = extend_retention(target, retained, days)
     log.info(
         "signoff done: pr=%d roles=%d objects=%d extended=%d",
         pr.number,
@@ -675,6 +752,8 @@ __all__ = [
     "Signoff",
     "SignoffStore",
     "build",
+    "check_merge",
+    "check_merge_matches_head",
     "check_signer",
     "choose_reviewers",
     "extend_retention",

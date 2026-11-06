@@ -54,6 +54,7 @@ HEAD = "a1" * 20
 OLD_COMMIT = "b2" * 20
 TESTSET_SHA = hashlib.sha256(b"synthetic locked split").hexdigest()
 TESTSET = f"clinical_document@1.0.0#{TESTSET_SHA}"
+LETTERS = "restoring the signed off synthetic version"
 TESTSETS = testsets.parse_lock(f"{TESTSET}\n".encode())
 REVIEWERS = lock.Reviewers(frozenset({CLINICAL}), frozenset({PLATFORM}))
 
@@ -998,6 +999,26 @@ def test_approval_with_null_commit_does_not_count(tmp_path: Path, keys: Keys, ca
         "<!-- a -\u2060-> b\nClinical note: still hidden, the comment never closed here.",
         "```\n``\u200b`\nClinical note: still inside the fenced block after all.\n```",
         "~~~\n~\ufeff~~\nClinical note: still inside the tilde fence after all.\n~~~",
+        # M1: lines end only at \n, \r\n or \r, as in CommonMark; these stay in the fence
+        *(
+            f"```\nx{sep}```\nClinical note: {LETTERS}\n```"
+            for sep in ("\v", "\f", "\x1c", "\x85", "\u2028", "\u2029")
+        ),
+        # a backtick fence whose info string has a backtick isn't a fence: fail closed
+        f"``` a`b\n```\nClinical note: {LETTERS}",
+        # raw HTML other than a complete comment hides text: fail closed
+        f"<?php x\nClinical note: {LETTERS}\n?>",
+        f"<![CDATA[\nClinical note: {LETTERS}\n]]>",
+        f"<!X\nClinical note: {LETTERS}\n>",
+        f'<a title="\nClinical note: {LETTERS}\n">x</a>',
+        f"<script>\nClinical note: {LETTERS}\n</script>",
+        f"Clinical note: {LETTERS}\n</div>",
+        f"<!-- unclosed\nClinical note: {LETTERS}",
+        # letters that render as nothing don't count
+        "Clinical note: " + "\u3164" * 25,
+        "Clinical note: " + "\uffa0" * 25,
+        "Clinical note: " + "\u115f\u1160" * 13,
+        "Clinical note: abc " + "\u3164" * 25,
     ],
 )
 def test_clinical_note_bypasses_refused(body: str | None) -> None:
@@ -1013,6 +1034,9 @@ def test_clinical_note_bypasses_refused(body: str | None) -> None:
         "```js\ncode\n```   \nClinical note: restoring the signed-off synthetic version.",
         "Clinical note: Rückkehr zur freigegebenen Version 1.0.0 wegen Fehler",
         "Clinical\u200b note: zero-width in the marker is removed before parsing it.",
+        "Summary.\rClinical note: a lone carriage return ends a line as in CommonMark.",
+        "Summary.\r\n\r\nClinical note: restoring the signed-off synthetic version.",
+        "Version <2 was fine.\nClinical note: restoring the signed-off synthetic version.",
     ],
 )
 def test_clinical_note_accepted(body: str) -> None:

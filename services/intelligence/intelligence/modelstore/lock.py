@@ -530,9 +530,12 @@ class GitHubApi(Protocol):
 
 
 class MergedPullRequests(GitHubApi, Protocol):
-    """What the sign-off needs too: the pull requests GitHub associates with a commit."""
+    """What the sign-off needs too: the pull requests GitHub associates with a commit, and
+    a commit's parents."""
 
     def pulls_for_commit(self, sha: str) -> tuple[int, ...]: ...
+
+    def commit_parents(self, sha: str) -> tuple[str, ...]: ...
 
 
 class Session(Protocol):
@@ -782,6 +785,25 @@ class GitHubClient:
             number, author, sha, labels, body, reviews, base_ref, merged, merge_commit, merged_at
         )
 
+    def commit_parents(self, sha: str) -> tuple[str, ...]:
+        """The parents of commit ``sha`` in order (``GET /commits/{sha}``): the first is
+        the branch the commit was made on, the second (for a merge) the merged head."""
+        if not isinstance(sha, str) or _COMMIT.fullmatch(sha) is None:
+            raise Refused("invalid_name", detail_code="commit")
+        obj = self._json(f"/commits/{sha}")
+        parents = obj.get("parents") if isinstance(obj, dict) else None
+        if not isinstance(obj, dict) or obj.get("sha") != sha or not isinstance(parents, list):
+            raise _unavailable("response")
+        if len(parents) > 8:
+            raise _unavailable("response")
+        out: list[str] = []
+        for p in parents:
+            psha = p.get("sha") if isinstance(p, dict) else None
+            if not isinstance(psha, str) or _COMMIT.fullmatch(psha) is None:
+                raise _unavailable("response")
+            out.append(psha)
+        return tuple(out)
+
     def pulls_for_commit(self, sha: str) -> tuple[int, ...]:
         """The numbers of the pull requests GitHub associates with commit ``sha``
         (``GET /commits/{sha}/pulls``), one page of at most :data:`PER_PAGE`. A second page
@@ -854,42 +876,68 @@ def _pair(clinical: Iterable[str], platform: Iterable[str]) -> bool:
     return any(platform - {c} for c in clinical)
 
 
-_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
-_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+# Only complete comments are removed; anything else that starts raw HTML makes the body
+# fail closed (see has_clinical_note).
+_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_RAW_HTML = re.compile(r"<[A-Za-z?!/]")
+# CommonMark's line endings only: never str.splitlines' \v, \f, \x1c-\x1e, \x85, U+2028/9.
+_LINES = re.compile(r"\r\n|\r|\n")
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)", re.DOTALL)
 # CommonMark: a closing fence carries no info string, only trailing spaces or tabs.
 _CLOSER = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
+# Letters that render as nothing: the Hangul fillers (category Lo). They are the only
+# default-ignorable code points in categories L and N; the rest are Cf or Mn, never counted.
+_FILLERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0"})
+
+
+def _counts(ch: str) -> bool:
+    return unicodedata.category(ch)[0] in "LN" and ch not in _FILLERS
 
 
 def has_clinical_note(body: str) -> bool:
     """A line that starts with ``Clinical note:`` and has at least
-    :data:`CLINICAL_NOTE_MIN_CHARS` letters or digits (Unicode categories L and N) after it
-    on that line, outside HTML comments (an unclosed one runs to the end) and fenced code
-    blocks (an unclosed one too; a closing fence carries no info string, as in
-    CommonMark). Comment and fence boundaries are found on the original text, as GitHub
-    renders it: a format character (category Cf: zero-width spaces and joiners, BOMs)
-    inside ``-->`` or a fence marker breaks that marker, so it can't close a comment or a
-    fence early and expose hidden text. Only then is each candidate line normalised by
-    removing its Cf characters, so they neither count nor hide the marker. Indented,
-    quoted or inline mentions don't count."""
+    :data:`CLINICAL_NOTE_MIN_CHARS` letters or digits after it on that line, outside HTML
+    comments and fenced code blocks (an unclosed fence runs to the end; a closing fence
+    carries no info string, as in CommonMark).
+
+    It is read as GitHub renders it, and fails closed wherever the two could differ:
+
+    * lines end only at ``\n``, ``\r\n`` or a lone ``\r`` (never at ``\v``, ``\f``,
+      ``\x85`` or the Unicode separators, which CommonMark keeps inside a line);
+    * comment and fence boundaries are found on the original text, so a format character
+      (category Cf) inside ``-->`` or a fence marker breaks that marker;
+    * only complete ``<!-- -->`` comments are removed; any other raw HTML left anywhere
+      (``<?``, ``<!``, CDATA, an unclosed comment, a tag, which may hide text in an
+      attribute) means no note;
+    * a backtick fence whose info string contains a backtick isn't a fence in
+      CommonMark: no note;
+    * each candidate line has its Cf characters removed before the prefix check, and only
+      letters and digits (categories L and N) count, never the Hangul fillers, which
+      render as nothing.
+
+    Indented, quoted or inline mentions don't count."""
     if not isinstance(body, str):
         return False
     text = _COMMENT.sub("", body)
+    if _RAW_HTML.search(text):
+        return False
     fence: str | None = None
-    for line in text.splitlines():
-        m = _FENCE.match(line)
+    for line in _LINES.split(text):
         if fence is not None:
             c = _CLOSER.fullmatch(line)
             if c is not None and c.group(1)[0] == fence[0] and len(c.group(1)) >= len(fence):
                 fence = None
             continue
+        m = _FENCE.match(line)
         if m is not None:
+            if m.group(1)[0] == "`" and "`" in m.group(2):
+                return False
             fence = m.group(1)
             continue
         line = "".join(ch for ch in line if unicodedata.category(ch) != "Cf")
         if line.startswith(CLINICAL_NOTE):
             rest = line[len(CLINICAL_NOTE) :]
-            alnum = sum(1 for ch in rest if unicodedata.category(ch)[0] in "LN")
-            if alnum >= CLINICAL_NOTE_MIN_CHARS:
+            if sum(1 for ch in rest if _counts(ch)) >= CLINICAL_NOTE_MIN_CHARS:
                 return True
     return False
 

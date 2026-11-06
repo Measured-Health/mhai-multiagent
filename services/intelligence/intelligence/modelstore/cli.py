@@ -14,9 +14,10 @@ Commands::
     mhai-models lock-check --base-dir MAIN_CHECKOUT --head HEAD_LOCK --head-sha SHA --pr N
         --testsets MAIN_CHECKOUT/models/testsets.lock
         --thresholds-dir MAIN_CHECKOUT/services/intelligence/intelligence/doceval/thresholds
-    mhai-models signoff --base-dir PARENT_CHECKOUT --before OLD_LOCK --after NEW_LOCK
-        --commit SHA --testsets PARENT_CHECKOUT/models/testsets.lock
-        --thresholds-dir PARENT_CHECKOUT/services/intelligence/intelligence/doceval/thresholds
+    mhai-models signoff --base-dir BASE_CHECKOUT --base-sha BASE_SHA --before OLD_LOCK
+        --after NEW_LOCK --commit SHA --head-sha HEAD_SHA --head-lock HEAD_LOCK
+        --testsets BASE_CHECKOUT/models/testsets.lock
+        --thresholds-dir BASE_CHECKOUT/services/intelligence/intelligence/doceval/thresholds
     mhai-models rollback ROLE [--to VERSION] [--lock PATH]
 
 TODO(Task 22): verify and drive-check.
@@ -107,10 +108,15 @@ GitHub access. Verified files go to ``MHAI_MODELS_CACHE`` when set, else to a pr
 temporary folder removed afterwards.
 
 ``signoff`` (:func:`intelligence.modelstore.signoff.sign_off`, in ``model-signoff.yml``
-after a push to main) re-checks the merged PR's approvals and writes ``signoff.json`` and
-``signoff.sig``, then extends retention. ``--base-dir`` is a checkout of the merge commit's
-first parent (``$GITHUB_SHA^1``), from which the command also runs; its ``models.lock``
-must be ``--before`` (``lock_invalid``/``before_mismatch``), and ``models/reviewers.json``,
+after a push to main) checks that ``--commit`` is a two-parent merge of ``--base-sha``
+(the push event's ``before``) and ``--head-sha`` (the merged PR's head), that every role
+it changed is ``--head-lock``'s entry (the lock at the head), re-checks the PR's
+approvals, extends retention and then writes ``signoff.json`` and ``signoff.sig``
+(D32, D33; the full contract for ``model-signoff.yml`` is in
+:mod:`intelligence.modelstore.signoff`). ``--base-dir`` is a checkout of ``--base-sha``
+(its ``HEAD`` is checked with ``git rev-parse``: ``not_allowed_here``/
+``base_dir_not_base_sha``), from which the command also runs; its ``models.lock`` must be
+``--before`` (``lock_invalid``/``before_mismatch``), and ``models/reviewers.json``,
 ``models/trust-policy.json``, ``--testsets`` and ``--thresholds-dir`` are read from it
 (an ``MHAI_MODELS_TRUST_POLICY`` naming another file is ``not_allowed_here``). ``--after``
 is the lock at ``--commit``. It reads ``MODEL_STORE_APPROVED_RETENTION_DAYS`` (required, no
@@ -525,18 +531,41 @@ def _signoff_signer() -> signing.Signer:
     return _signer()
 
 
+def _checkout_head(path: Path) -> str | None:
+    """The commit checked out at ``path`` (``git rev-parse``, no shell), or None."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--verify", "HEAD^{commit}"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = done.stdout.decode("ascii", "replace").strip()
+    if done.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", out) is None:
+        return None
+    return out
+
+
 def _signoff(args: argparse.Namespace) -> int:
-    commit = args.commit
-    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
-        raise Refused("invalid_name", detail_code="commit")
+    commit, head_sha, base_sha = args.commit, args.head_sha, args.base_sha
+    for value, detail in ((commit, "commit"), (head_sha, "head_sha"), (base_sha, "base_sha")):
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+            raise Refused("invalid_name", detail_code=detail)
     base_dir = Path(args.base_dir).resolve()
     if not base_dir.is_dir():
         raise Refused("not_allowed_here", detail_code="base_dir")
+    # D33: the data that judges the merge is main's before the push, at --base-sha.
+    if _checkout_head(base_dir) != base_sha:
+        raise Refused("not_allowed_here", detail_code="base_dir_not_base_sha")
     testsets_path = _inside(args.testsets, base_dir)
     thresholds_dir = _inside(args.thresholds_dir, base_dir)
     policy_path = base_dir / BASE_TRUST_POLICY_PATH
     _check_policy_env(policy_path)
     before, after = lock.read(args.before), lock.read(args.after)
+    head = lock.read(args.head_lock)
     if lock.read(base_dir / BASE_LOCK_PATH) != before:
         raise Refused("lock_invalid", detail_code="before_mismatch")
     reviewers = lock.read_reviewers(base_dir / BASE_REVIEWERS_PATH)
@@ -556,6 +585,9 @@ def _signoff(args: argparse.Namespace) -> int:
             lock.to_bytes(before),
             lock.to_bytes(after),
             commit,
+            head_raw=lock.to_bytes(head),
+            head_sha=head_sha,
+            base_sha=base_sha,
             github=github,
             reviewers=reviewers,
             target=target,
@@ -786,6 +818,9 @@ def _parser() -> argparse.ArgumentParser:
     so.add_argument("--before", required=True)
     so.add_argument("--after", required=True)
     so.add_argument("--commit", required=True)
+    so.add_argument("--base-sha", required=True)
+    so.add_argument("--head-sha", required=True)
+    so.add_argument("--head-lock", required=True)
     so.add_argument("--testsets", required=True)
     so.add_argument("--thresholds-dir", required=True)
     so.set_defaults(func=_signoff)

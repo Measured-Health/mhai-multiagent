@@ -8,8 +8,11 @@ memory. No test opens a socket outside loopback. Every login and model is synthe
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,7 @@ from tests.modelstore.fakes.memory_store import MemoryStore
 from tests.modelstore.test_lock import (
     ACTOR,
     CLINICAL,
+    HEAD,
     NAME,
     PLATFORM,
     REVIEWERS,
@@ -36,6 +40,7 @@ from tests.modelstore.test_lock import (
     Pub,
     _approved_pr,
     _main_checkout,
+    _policy_obj,
     _pr,
     publish,
     write_signoff,
@@ -44,9 +49,11 @@ from tests.modelstore.test_sources import no_network  # noqa: F401  (autouse: no
 from tests.modelstore.test_verify import MemSigner
 
 COMMIT = "c3" * 20
+BASE = "e5" * 20  # main before the push: the merge commit's first parent
 OTHER_COMMIT = "d4" * 20
 MERGED_AT = "2026-11-06T02:00:00Z"
 DAYS = 5
+REAL_SIGNOFF_SIGNER = cli._signoff_signer
 THRESHOLDS_REL = Path("services/intelligence/intelligence/doceval/thresholds")
 
 
@@ -123,11 +130,16 @@ def _merged(pr: FakePR, *, commit: str = COMMIT, base_ref: str = "main") -> Fake
     return pr
 
 
-def _session(*prs: FakePR, commit: str = COMMIT) -> FakeGitHubSession:
+def _session(
+    *prs: FakePR, commit: str = COMMIT, parents: list[str] | None = None
+) -> FakeGitHubSession:
+    """GitHub after a merge: ``COMMIT`` has the parents ``BASE`` and the PR head, and is
+    associated with ``prs``."""
     session = FakeGitHubSession()
     for pr in prs:
         session.add(pr)
     session.commit_pulls[commit] = [pr.number for pr in prs]
+    session.commit_parents[COMMIT] = [BASE, HEAD] if parents is None else parents
     return session
 
 
@@ -142,11 +154,16 @@ def _sign_off(
     signer: Any = None,
     reviewers: lock.Reviewers = REVIEWERS,
     days: int = DAYS,
+    head: lock.Lock | None = None,
+    head_sha: str = HEAD,
 ) -> signoff.Result:
     return signoff.sign_off(
         lock.to_bytes(before),
         lock.to_bytes(after),
         COMMIT,
+        head_raw=lock.to_bytes(after if head is None else head),
+        head_sha=head_sha,
+        base_sha=BASE,
         github=lock.GitHubClient(session, GH_REPO),
         reviewers=reviewers,
         target=st,
@@ -271,8 +288,8 @@ def _pr_scenarios() -> dict[str, tuple[Callable[[], FakeGitHubSession], tuple[st
         return s
 
     def no_pr() -> FakeGitHubSession:
-        s = FakeGitHubSession()
-        s.add(_merged(_approved_pr()))
+        s = _session(_merged(_approved_pr()))
+        s.commit_pulls[COMMIT] = []
         return s
 
     def admin_merge() -> FakeGitHubSession:  # merged with only one approval
@@ -383,7 +400,6 @@ def test_signoff_crash_between_puts_adopts_identical_record(
         _sign_off(st, keys, cache, lock.empty(), after, session)
     json_key = store.signoff_key(NAME, "1.0.0")
     assert len(st.versions(json_key)) == 1 and st.versions(sig_key) == []
-    assert st.extended == []
     result = _sign_off(st, keys, cache, lock.empty(), after, session)
     assert result.roles == {ROLE: "signed_off"}
     assert len(st.versions(json_key)) == 1 and len(st.versions(sig_key)) == 1
@@ -483,13 +499,16 @@ def test_signoff_extends_every_object_by_version_id(
     }
     for key in (store.manifest_key(NAME, "1.0.0"), store.manifest_sig_key(NAME, "1.0.0")):
         expected.add((key, st.objects[key][0][0]))  # the first (recorded) version
-    # signoff.json and .sig were written with the approved retention a moment ago: within
-    # the same second extending them is "not longer", so they may or may not be listed
+    # retention first, then the record: signoff.json and .sig are created afterwards,
+    # already locked for the approved retention, and are not in the extension list
     just_written = {
         (key, st.objects[key][0][0])
         for key in (store.signoff_key(NAME, "1.0.0"), store.signoff_sig_key(NAME, "1.0.0"))
     }
-    assert expected <= got <= expected | just_written
+    assert got == expected
+    retain_at = max(i for i, (op, _) in enumerate(st.calls) if op == "retain")
+    first_signoff_put = st.calls.index(("put", store.signoff_key(NAME, "1.0.0")))
+    assert retain_at < first_signoff_put
     soon = datetime.now(UTC) + timedelta(days=DAYS) - timedelta(minutes=1)
     for _, vid in just_written:
         held = st.locks[vid][1]
@@ -525,87 +544,256 @@ def test_signoff_conflict_writes_nothing(tmp_path: Path, keys: Keys, cache: Path
     assert st.puts == puts and st.extended == []
 
 
+# ---------------------------------------------------------------- the merge (D32, D33)
+
+
+def test_signoff_refuses_a_hand_made_merge(tmp_path: Path, keys: Keys, cache: Path) -> None:
+    """D32: the reviewers approved the PR head, which pins 1.0.0; an admin's hand-made
+    merge pins 1.1.0 (promoted, signed, passing its gate) and is pushed to main. GitHub
+    marks the PR merged at that commit, but the merge isn't what was approved."""
+    st = RetainingStore()
+    approved = publish(st, tmp_path, keys, version="1.0.0")
+    smuggled = publish(st, tmp_path, keys, version="1.1.0", seed=8)
+    head = lock.Lock({ROLE: approved.pin()})
+    after = lock.Lock({ROLE: smuggled.pin()})
+    puts, calls = list(st.puts), len(st.calls)
+    session = _session(_merged(_approved_pr()))
+    r = _reason(lambda: _sign_off(st, keys, cache, lock.empty(), after, session, head=head))
+    assert (r.reason, r.detail_code) == ("not_approved", "merge_differs_from_head")
+    assert st.puts == puts and st.extended == []
+    assert len(st.calls) == calls  # refused before any store read
+    # a role the head never touched, changed only in the merge, is refused too
+    other = lock.Lock({ROLE: approved.pin(), "ocr": smuggled.pin()})
+    assert lock.changed_roles(lock.empty(), other)
+    r = _reason(lambda: signoff.check_merge_matches_head(lock.empty(), other, head))
+    assert r.detail_code == "merge_differs_from_head"
+
+
+@pytest.mark.parametrize(
+    ("parents", "head_sha", "detail"),
+    [
+        ([BASE], HEAD, "not_a_merge_commit"),  # squash, rebase or a direct push
+        ([BASE, HEAD, "f6" * 20], HEAD, "not_a_merge_commit"),  # an octopus merge
+        (["b2" * 20, HEAD], HEAD, "base_mismatch"),  # first parent isn't main before
+        ([BASE, "f6" * 20], HEAD, "head_mismatch"),  # second parent isn't the PR head
+        ([BASE, HEAD], "f6" * 20, "head_mismatch"),  # --head-sha isn't the PR's head
+    ],
+)
+def test_signoff_needs_a_two_parent_merge_of_base_and_head(
+    parents: list[str], head_sha: str, detail: str, tmp_path: Path, keys: Keys, cache: Path
+) -> None:
+    """D33: a rebase merge's first parent is one of the PR's own commits, whose
+    reviewers.json or trust policy the PR controls; only a true merge commit of main
+    before the push and the approved head is signed off."""
+    st, _, after = _new(tmp_path, keys)
+    puts = list(st.puts)
+    session = _session(_merged(_approved_pr()), parents=parents)
+    r = _reason(lambda: _sign_off(st, keys, cache, lock.empty(), after, session, head_sha=head_sha))
+    assert (r.reason, r.detail_code) == ("not_approved", detail)
+    assert st.puts == puts and st.extended == []
+
+
+def test_signoff_retention_failure_writes_no_signoff(
+    tmp_path: Path, keys: Keys, cache: Path
+) -> None:
+    """M2: retention is extended first; a store failure part-way leaves no sign-off (so
+    a sign-off always means a retained version), and a re-run completes everything."""
+    st, pub, after = _new(tmp_path, keys)
+    real = st.extend_retention
+    seen: list[str] = []
+
+    def flaky(key: str, version_id: str, days: int) -> datetime:
+        seen.append(key)
+        if len(seen) == 3:
+            raise Refused("store_unavailable", detail_code="error")
+        return real(key, version_id, days)
+
+    st.extend_retention = flaky  # type: ignore[method-assign]
+    puts = list(st.puts)
+    session = _session(_merged(_approved_pr()))
+    r = _reason(lambda: _sign_off(st, keys, cache, lock.empty(), after, session))
+    assert r.reason == "store_unavailable"
+    assert st.puts == puts  # no signoff.json, no signoff.sig
+    json_key, _ = _signoff_keys(pub)
+    assert st.versions(json_key) == []
+    result = _sign_off(st, keys, cache, lock.empty(), after, session)
+    assert result.roles == {ROLE: "signed_off"}
+    verify.verify_pin(st, ROLE, pub.pin(), keys.policy, cache, require_signoff=True)
+
+
 # ---------------------------------------------------------------- the command line
 
 
-def _signoff_args(base: Path, before: Path, after: Path, commit: str = COMMIT) -> list[str]:
-    return [
-        "signoff",
-        "--base-dir",
-        str(base),
-        "--before",
-        str(before),
-        "--after",
-        str(after),
-        "--commit",
-        commit,
-        "--testsets",
-        str(base / "models" / "testsets.lock"),
-        "--thresholds-dir",
-        str(base / THRESHOLDS_REL),
-    ]
+def _git_commit(root: Path) -> str:
+    """Make ``root`` a git checkout with one commit (synthetic files only); its sha."""
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(root), "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def git(*args: str) -> str:
+        done = subprocess.run(
+            ["git", "-C", str(root), *args], check=True, capture_output=True, env=env
+        )
+        return done.stdout.decode().strip()
+
+    git("init", "-q")
+    git("add", "-A")
+    git("-c", "user.name=syn", "-c", "user.email=syn@example.invalid", "commit", "-qm", "base")
+    return git("rev-parse", "HEAD")
+
+
+@dataclass
+class CliSetup:
+    st: RetainingStore
+    session: FakeGitHubSession
+    base: Path
+    base_sha: str
+    before: Path
+    after: Path
+    head: Path
+
+
+def _cli_setup(
+    tmp_path: Path,
+    keys: Keys,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    signoff_signers: list[MemSigner] | None = None,
+) -> CliSetup:
+    """A base checkout at ``base_sha`` with a real trust policy (never mocked), the three
+    lock files, and GitHub reporting ``COMMIT`` as the merge of ``base_sha`` and the head."""
+    st, _, after_lock = _new(tmp_path, keys)
+    base = _main_checkout(tmp_path / "base")
+    signers = [keys.signoff] if signoff_signers is None else signoff_signers
+    (base / "models" / "trust-policy.json").write_bytes(_policy_obj([keys.manifest], signers))
+    base_sha = _git_commit(base)
+    before, after, head = (tmp_path / f"{n}.lock" for n in ("before", "after", "head"))
+    before.write_bytes(lock.to_bytes(lock.empty()))
+    after.write_bytes(lock.to_bytes(after_lock))
+    head.write_bytes(lock.to_bytes(after_lock))
+    session = _session(_merged(_approved_pr()), parents=[base_sha, HEAD])
+    monkeypatch.setattr(cli, "_signoff_store", lambda: st)
+    monkeypatch.setattr(cli, "_github", lambda: lock.GitHubClient(session, GH_REPO))
+    monkeypatch.setattr(cli, "_signoff_signer", lambda: DocSigner(keys.signoff))
+    monkeypatch.setenv(cli.APPROVED_RETENTION_ENV, str(DAYS))
+    return CliSetup(st, session, base, base_sha, before, after, head)
+
+
+def _signoff_args(c: CliSetup, **over: str) -> list[str]:
+    opts = {
+        "--base-dir": str(c.base),
+        "--base-sha": c.base_sha,
+        "--before": str(c.before),
+        "--after": str(c.after),
+        "--commit": COMMIT,
+        "--head-sha": HEAD,
+        "--head-lock": str(c.head),
+        "--testsets": str(c.base / "models" / "testsets.lock"),
+        "--thresholds-dir": str(c.base / THRESHOLDS_REL),
+        **over,
+    }
+    return ["signoff", *(x for kv in opts.items() for x in kv)]
+
+
+def _out(capsys: Any) -> dict[str, Any]:
+    out: dict[str, Any] = json.loads(capsys.readouterr().out)
+    return out
 
 
 def test_cli_signoff(
     tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
-    st, _, after_lock = _new(tmp_path, keys)
-    session = _session(_merged(_approved_pr()))
-    base = _main_checkout(tmp_path / "parent")
-    before, after = tmp_path / "before.lock", tmp_path / "after.lock"
-    before.write_bytes(lock.to_bytes(lock.empty()))
-    after.write_bytes(lock.to_bytes(after_lock))
-    monkeypatch.setattr(cli, "_signoff_store", lambda: st)
-    monkeypatch.setattr(cli, "_trust_policy", lambda path=None: keys.policy)
-    monkeypatch.setattr(cli, "_github", lambda: lock.GitHubClient(session, GH_REPO))
-    monkeypatch.setattr(cli, "_signoff_signer", lambda: DocSigner(keys.signoff))
-    monkeypatch.delenv(cli.APPROVED_RETENTION_ENV, raising=False)
-    args = _signoff_args(base, before, after)
-
+    c = _cli_setup(tmp_path, keys, monkeypatch)
+    args = _signoff_args(c)
     # the approved retention is required, with no default
+    monkeypatch.delenv(cli.APPROVED_RETENTION_ENV)
     assert cli.main(args) == 2
-    assert json.loads(capsys.readouterr().out) == {"refused": "not_allowed_here", "detail": "env"}
+    assert _out(capsys) == {"refused": "not_allowed_here", "detail": "env"}
     monkeypatch.setenv(cli.APPROVED_RETENTION_ENV, str(DAYS))
-    # --before must be the parent checkout's lock
-    assert cli.main(_signoff_args(base, after, after)) == 2
-    out = json.loads(capsys.readouterr().out)
-    assert out == {"refused": "lock_invalid", "detail": "before_mismatch"}
-    assert cli.main(_signoff_args(base, before, after, "C3" * 20)) == 2
-    assert json.loads(capsys.readouterr().out) == {"refused": "invalid_name", "detail": "commit"}
+    # --before must be the base checkout's lock
+    assert cli.main(_signoff_args(c, **{"--before": str(c.after)})) == 2
+    assert _out(capsys) == {"refused": "lock_invalid", "detail": "before_mismatch"}
+    assert cli.main(_signoff_args(c, **{"--commit": "C3" * 20})) == 2
+    assert _out(capsys) == {"refused": "invalid_name", "detail": "commit"}
+    # --head-lock is required
+    with pytest.raises(SystemExit):
+        cli.main([a for a in args if a not in ("--head-lock", str(c.head))])
+    capsys.readouterr()
 
+    # the trust policy is base-dir's own file: nothing here mocks it
     assert cli.main(args) == 0
-    out = json.loads(capsys.readouterr().out)
+    out = _out(capsys)
     assert out["signoff"] == {ROLE: "signed_off"} and out["pr"] == 7
     assert cli.main(args) == 0
-    assert json.loads(capsys.readouterr().out)["signoff"] == {ROLE: "already_signed_off"}
+    assert _out(capsys)["signoff"] == {ROLE: "already_signed_off"}
 
-    session.status = 502
+    c.session.status = 502
     assert cli.main(args) == 3
     out_text = capsys.readouterr().out
     assert json.loads(out_text) == {"refused": "github_unavailable", "detail": "http"}
-    assert session.token not in out_text
+    assert c.session.token not in out_text
+
+
+def test_cli_signoff_reads_policy_and_data_from_base_dir_only(
+    tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """The trust policy, test sets and thresholds come from the checkout at --base-sha."""
+    # base-dir's policy doesn't trust this signer: refused, so that policy is the one read
+    c = _cli_setup(tmp_path, keys, monkeypatch, signoff_signers=[MemSigner()])
+    puts = list(c.st.puts)
+    assert cli.main(_signoff_args(c)) == 2
+    assert _out(capsys) == {"refused": "signer_untrusted", "detail": "signoff"}
+    # a PR's copy that does trust it is refused outright
+    pr_copy = tmp_path / "pr-trust-policy.json"
+    pr_copy.write_bytes(_policy_obj([keys.manifest], [keys.signoff]))
+    with monkeypatch.context() as m:
+        m.setenv(cli.TRUST_POLICY_ENV, str(pr_copy))
+        assert cli.main(_signoff_args(c)) == 2
+        out = _out(capsys)
+        assert out == {"refused": "not_allowed_here", "detail": "trust_policy_outside_base_dir"}
+    # test sets and thresholds outside the base checkout
+    elsewhere = tmp_path / "pr"
+    elsewhere.mkdir()
+    (elsewhere / "testsets.lock").write_text("")
+    for flag, value in (
+        ("--testsets", elsewhere / "testsets.lock"),
+        ("--thresholds-dir", elsewhere),
+    ):
+        assert cli.main(_signoff_args(c, **{flag: str(value)})) == 2
+        assert _out(capsys) == {"refused": "not_allowed_here", "detail": "outside_base_dir"}
+    # the checkout must be at --base-sha
+    assert cli.main(_signoff_args(c, **{"--base-sha": "f6" * 20})) == 2
+    assert _out(capsys) == {"refused": "not_allowed_here", "detail": "base_dir_not_base_sha"}
+    assert c.st.puts == puts
+
+
+def test_cli_signoff_retention_over_the_cap_refused(
+    tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    c = _cli_setup(tmp_path, keys, monkeypatch)
+    monkeypatch.setenv(store.MAX_RETENTION_DAYS_ENV, "10")
+    monkeypatch.setenv(cli.APPROVED_RETENTION_ENV, "11")
+    puts = list(c.st.puts)
+    assert cli.main(_signoff_args(c)) == 2
+    assert _out(capsys) == {"refused": "not_allowed_here", "detail": "retention_days"}
+    assert c.st.puts == puts and c.st.extended == []
+    monkeypatch.setenv(cli.APPROVED_RETENTION_ENV, "10")  # at the cap is allowed
+    assert cli.main(_signoff_args(c)) == 0
+    assert _out(capsys)["signoff"] == {ROLE: "signed_off"}
+    assert {d for _, _, d in c.st.extended} == {10}
 
 
 def test_cli_signoff_signer_is_development_only(
     tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
     """Phase 0 has only the development FileSigner: outside development it refuses."""
-    st, _, after_lock = _new(tmp_path, keys)
-    base = _main_checkout(tmp_path / "parent")
-    before, after = tmp_path / "before.lock", tmp_path / "after.lock"
-    before.write_bytes(lock.to_bytes(lock.empty()))
-    after.write_bytes(lock.to_bytes(after_lock))
+    c = _cli_setup(tmp_path, keys, monkeypatch)
+    monkeypatch.setattr(cli, "_signoff_signer", REAL_SIGNOFF_SIGNER)  # the real one again
     key = tmp_path / "dev-signing-key.pem"
     key.write_bytes(b"synthetic, never read")
     monkeypatch.setenv(cli.SIGNER_ENV, str(key))
-    monkeypatch.setenv(cli.APPROVED_RETENTION_ENV, str(DAYS))
-    monkeypatch.setattr(cli, "_signoff_store", lambda: st)
-    monkeypatch.setattr(cli, "_trust_policy", lambda path=None: keys.policy)
-    puts = list(st.puts)
-    assert cli.main(_signoff_args(base, before, after)) == 2
-    out = json.loads(capsys.readouterr().out)
-    assert out == {"refused": "not_allowed_here", "detail": "not_development"}
-    assert st.puts == puts
+    puts = list(c.st.puts)
+    assert cli.main(_signoff_args(c)) == 2
+    assert _out(capsys) == {"refused": "not_allowed_here", "detail": "not_development"}
+    assert c.st.puts == puts
 
 
 # ---------------------------------------------------------------- rollback
@@ -652,7 +840,8 @@ def test_rollback_picks_previous_signed_off(tmp_path: Path, keys: Keys, cache: P
 
 def test_rollback_refuses_never_approved(tmp_path: Path, keys: Keys, cache: Path) -> None:
     """P16: only a version with a verifying sign-off for this role; present isn't enough."""
-    st, pubs = _versions_store(tmp_path, keys, signed=["2.0.0"], unsigned=["1.0.0"])
+    # 3.0.0 is signed off and in the store: only "newer than the pin" keeps it out
+    st, pubs = _versions_store(tmp_path, keys, signed=["2.0.0", "3.0.0"], unsigned=["1.0.0"])
     # 1.1.0: a signoff.json signed with the manifest key (not a sign-off signer)
     forged = publish(st, tmp_path, keys, version="1.1.0", seed=40)
     body = signoff.build(
@@ -735,6 +924,9 @@ def test_signoff_retention_extended(
         lock.to_bytes(lock.empty()),
         lock.to_bytes(after),
         COMMIT,
+        head_raw=lock.to_bytes(after),
+        head_sha=HEAD,
+        base_sha=BASE,
         github=lock.GitHubClient(_session(_merged(_approved_pr())), GH_REPO),
         reviewers=REVIEWERS,
         target=target,
@@ -763,9 +955,8 @@ def test_signoff_retention_extended(
         vids = root.versions(key)
         assert len(vids) == 1
         objects.append((key, vids[0]))
-    # signoff.json and .sig were just written with the approved retention: extending
-    # them within the same second is "not longer" and leaves them as they are
-    assert len(objects) - 2 <= result.retention_extended <= len(objects)
+    # signoff.json and .sig are written after the extension, with the approved retention
+    assert result.retention_extended == len(objects) - 2
     for key, vid in objects:
         info = root.head(key, vid)
         assert info.lock_mode == "COMPLIANCE"
@@ -777,6 +968,9 @@ def test_signoff_retention_extended(
         lock.to_bytes(lock.empty()),
         lock.to_bytes(after),
         COMMIT,
+        head_raw=lock.to_bytes(after),
+        head_sha=HEAD,
+        base_sha=BASE,
         github=lock.GitHubClient(_session(_merged(_approved_pr())), GH_REPO),
         reviewers=REVIEWERS,
         target=target,
