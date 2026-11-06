@@ -51,6 +51,7 @@ REASONS: frozenset[str] = frozenset(
         "base_unverified",
         "key_invalid",
         "key_exists",
+        "gate_failed",
     }
 )
 

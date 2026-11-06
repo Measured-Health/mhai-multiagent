@@ -5,7 +5,9 @@ The tests marked ``store`` run against MinIO provisioned by deploy/minio/init-mo
 model name per test, since nothing can be deleted.
 """
 
+import base64
 import hashlib
+import io
 import json
 import logging
 import os
@@ -258,6 +260,83 @@ def _assert_logs_clean(caplog: pytest.LogCaptureFixture, forbidden: list[Any]) -
     logged = "\n".join(r.getMessage() + str(r.args) + str(r.exc_text or "") for r in caplog.records)
     for value in _secrets_of(forbidden):
         assert value not in logged
+
+
+class _Body:
+    """A response body that serves ``data`` and counts what was read."""
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.read_total = 0
+        self.closed = False
+
+    def read(self, n: int = -1) -> bytes:
+        rest = self.data[self.read_total :]
+        chunk = rest if n < 0 else rest[:n]
+        self.read_total += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _Client:
+    def __init__(self, body: _Body, length: int, sha_of: bytes) -> None:
+        self.body, self.length, self.sha_of = body, length, sha_of
+        self.calls: list[dict[str, Any]] = []
+
+    def get_object(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append(kw)
+        digest = hashlib.sha256(self.sha_of).digest()
+        return {
+            "Body": self.body,
+            "ContentLength": self.length,
+            "ChecksumSHA256": base64.b64encode(digest).decode("ascii"),
+        }
+
+
+def _fake_s3(client: _Client) -> S3Store:
+    s = object.__new__(S3Store)
+    object.__setattr__(s, "_client", client)
+    object.__setattr__(s, "_bucket", "mhai-models-test")
+    object.__setattr__(s, "_max_days", 30)
+    return s
+
+
+def _download(data: bytes, length: int, max_bytes: int, sha_of: bytes | None = None) -> Any:
+    body = _Body(data)
+    client = _Client(body, length, data if sha_of is None else sha_of)
+    out = io.BytesIO()
+    key = store.manifest_key("fixture-model", "1.0.0")
+    try:
+        result: Any = _fake_s3(client).download(key, version_id="v-1", out=out, max_bytes=max_bytes)
+    except Refused as e:
+        result = e
+    return result, out.getvalue(), body, client
+
+
+def test_download_names_the_version_and_stops_at_max_bytes() -> None:
+    data = b"0123456789" * 3
+    (n, sha), written, body, client = _download(data, len(data), len(data))
+    assert (n, sha, written) == (len(data), hashlib.sha256(data).hexdigest(), data)
+    assert client.calls[0]["VersionId"] == "v-1" and body.closed
+    # The store announces more than allowed: refused before any byte is read.
+    err, written, body, _ = _download(data, len(data), 10)
+    assert err.reason == "too_large" and written == b"" and body.read_total == 0
+    # The store announces an allowed size but sends more: reading stops one byte past the
+    # cap, and no more than the cap reaches the file.
+    err, written, body, _ = _download(data, 10, 10)
+    assert err.reason == "too_large"
+    assert len(written) <= 10 and body.read_total <= 11 and body.closed
+    # A short body, and a body that isn't the stored checksum.
+    err, *_ = _download(data[:5], 10, 10)
+    assert err.reason == "size_mismatch"
+    err, *_ = _download(data, len(data), len(data), sha_of=b"other bytes")
+    assert err.reason == "hash_mismatch"
+    with pytest.raises(TypeError):
+        _fake_s3(client).download(  # type: ignore[call-arg]
+            store.manifest_key("fixture-model", "1.0.0"), out=io.BytesIO(), max_bytes=1
+        )
 
 
 def test_policies_load_and_deny_deletes() -> None:

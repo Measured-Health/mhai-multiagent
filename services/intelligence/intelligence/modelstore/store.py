@@ -586,8 +586,14 @@ class S3Store:
     @staticmethod
     def _write(out: BinaryIO, block: bytes) -> None:
         failed = False
+        view = memoryview(block)
         try:
-            out.write(block)
+            while view:  # an unbuffered file may take part of a block
+                n = out.write(view)
+                if not n:
+                    failed = True
+                    break
+                view = view[n:]
         except (OSError, ValueError):
             failed = True
         if failed:

@@ -4,14 +4,13 @@
 a read-only directory holding exactly the manifest's files, each checked. In this order,
 each failure a fixed reason with no fallback:
 
-1. **The environment and the trust policy.** Outside development (``MHAI_MODELS_ENV``
-   not exactly ``development``) the policy has no development signer (``policy_invalid``,
-   P12). ``MHAI_MODELS_ENV=development`` in a process that declares itself production is
-   ``not_allowed_here``: the declaration is ``APP_ENV``, the variable the intelligence
-   service's settings already use (:func:`intelligence.boundary.config.is_development`),
-   and a process declares production when ``APP_ENV`` is set to anything but
-   development. (The service itself counts an unset ``APP_ENV`` as production too; the
-   loader in Task 23 refuses ``MHAI_MODELS_ENV=development`` there on that basis.)
+1. **The environment and the trust policy.** Development needs both switches:
+   ``MHAI_MODELS_ENV=development`` *and* ``APP_ENV=development``. ``APP_ENV`` is the
+   variable the intelligence service's settings already use, and unset means production
+   there (:func:`intelligence.boundary.config.is_development`), so it does here too.
+   Outside development the policy has no development signer (``policy_invalid``, P12),
+   and ``MHAI_MODELS_ENV=development`` in a production process (``APP_ENV`` unset or
+   anything but development) is ``not_allowed_here``.
 2. **The lock's hash.** Among the stored versions of ``models/<name>/<version>/
    manifest.json`` the oldest whose SHA-256 is the lock's is taken; none is
    ``lock_mismatch`` (B19), no manifest at all is ``not_found`` (P8: a promotion that
@@ -19,9 +18,13 @@ each failure a fixed reason with no fallback:
    version is picked without an id, and it picks only by the lock's hash: a shadow with
    other bytes is ignored, copies with the same bytes are one candidate, and a version
    the store can't vouch for (a shadow PUT without a checksum: ``store_unavailable``/
-   ``checksum``) is skipped.
+   ``checksum``) is skipped and not counted. More than :data:`MAX_VERSIONS` usable
+   versions before the match is ``lock_mismatch``/``too_many_versions`` (a flood, told
+   apart from a wrong lock); the same cap holds for ``manifest.sig``, ``signoff.json``
+   and ``signoff.sig``.
 3. **Identity.** Strict canonical parse; ``name``, ``version`` and ``role`` must be the
-   lock entry's (``identity_mismatch``, P9).
+   lock entry's (``identity_mismatch``, P9), and the manifest's own result for the
+   pinned gate must be ``pass`` (``gate_failed``, P14 at load).
 4. **The manifest's signature.** The manifest cannot record its own signature's version
    (it is signed after it is built), so the versions of ``manifest.sig`` are tried
    oldest first, identical bytes once, at most :data:`MAX_VERSIONS`: the first that
@@ -40,10 +43,13 @@ each failure a fixed reason with no fallback:
    never listed, so a stray key under a run's prefix doesn't matter. Neither the
    manifest nor the documents are written into the directory; the parsed manifest is
    returned in :class:`VerifiedModel`.
-7. **The sign-off** (``require_signoff``; the loader passes true outside development,
-   ``pin`` passes false): a ``signoff.json`` version that parses strictly and names this
+7. **The sign-off.** :func:`verify_for_load`, the loader's only entry point, requires it
+   everywhere but development and has no switch; ``pin`` calls :func:`verify_pin` with
+   ``require_signoff=False``. It needs a ``signoff.json`` version that parses strictly and names this
    name, version, role, manifest hash, evaluation report hash, gate, promoter and
-   trainer, with a ``signoff.sig`` version that verifies for purpose ``signoff`` over it.
+   trainer, whose reviewers are neither the promoter nor the trainer and not both the
+   clinical and the platform reviewer (P15 again at load), with a ``signoff.sig``
+   version that verifies for purpose ``signoff`` over it.
    Both are picked by verification, never by "latest". None is ``not_approved`` (P17).
 8. **Seal.** Files 0400, then the ``.partial`` directory is renamed to the final one,
    which becomes 0500.
@@ -51,12 +57,19 @@ each failure a fixed reason with no fallback:
 **The cache is never trusted** (P11). Steps 1-4 and 7 always run against the store. An
 existing final directory is re-checked in full (``check_run``, the exact set, every
 file's size and SHA-256 against the manifest, and the modes); on any difference it is
-deleted and downloaded once more, and a second difference is refused. On any refusal the
-``.partial`` directory and the final directory of that pin are removed, so nothing
-half-verified stays readable.
+deleted and downloaded once more, and a second difference is refused.
+
+**What a refusal removes** (ruling D29). The ``.partial`` directory always goes. The
+final directory goes when this call built it, when it differs from the manifest, and on a
+definitive refusal (:data:`DEFINITIVE`: lock, identity, signature, policy, gate or
+sign-off), including one in steps 1-4, which takes the pin's lock to remove it. A passing
+store or disk error (``store_unavailable``) keeps a verified directory, which another
+process may be reading. Nothing is removed outside the pin's lock.
 
 The cache directory must be a real directory (not a link) owned by this user and not
-writable by group or others; it is made 0700 if missing. Deletion only ever happens
+writable by group or others; it is made 0700 if missing. Every directory above it, up to
+``/``, must be owned by root or this user, and none that others can write may lack the
+sticky bit (``cache_parent_unsafe``). Deletion only ever happens
 under it, through directory descriptors opened without following links, and puts a
 directory's write bit back before emptying it. Two processes verifying the same pin
 into the same cache take turns on an exclusive lock file per ``<name>/<version>-<hash12>``.
@@ -78,13 +91,14 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
 from intelligence.boundary import config as service_config
+from intelligence.doceval.report import GATES
 from intelligence.modelstore import files, manifest, names, signing, signoff, store
 from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.store import ObjectInfo
@@ -155,30 +169,34 @@ def version_string(name: str, version: str, manifest_sha256: str) -> str:
     return f"{name}@{version}#{manifest_sha256[:HASH12]}"
 
 
+def is_development() -> bool:
+    """Development only when both switches say so: ``MHAI_MODELS_ENV=development`` and
+    ``APP_ENV=development``. An unset ``APP_ENV`` is production, as it is for the service
+    (:func:`intelligence.boundary.config.is_development`)."""
+    return signing.is_development() and service_config.is_development()
+
+
 def requires_signoff() -> bool:
-    """What the loader passes as ``require_signoff``: true everywhere but development."""
-    return not signing.is_development()
+    """The sign-off rule at load: required everywhere but development (both switches)."""
+    return not is_development()
 
 
 # ---------------------------------------------------------------- step 1
 
 
 def declares_production() -> bool:
-    """True when ``APP_ENV`` is set to anything but development (the service's own rule,
-    :func:`intelligence.boundary.config.is_development`)."""
-    raw = os.environ.get(APP_ENV)
-    return raw is not None and not service_config.is_development({APP_ENV: raw})
+    """True unless ``APP_ENV`` names development; unset is production (the service's own
+    rule, :func:`intelligence.boundary.config.is_development`)."""
+    return not service_config.is_development()
 
 
 def check_environment(policy: signing.TrustPolicy) -> None:
     """Step 1: see the module docstring."""
     if not isinstance(policy, signing.TrustPolicy):
         raise Refused("policy_invalid", detail_code="type")
-    if signing.is_development():
-        if declares_production():
-            raise Refused("not_allowed_here", detail_code="development_in_production")
-        return
-    if policy.has_development_signer():
+    if signing.is_development() and declares_production():
+        raise Refused("not_allowed_here", detail_code="development_in_production")
+    if not is_development() and policy.has_development_signer():
         raise Refused("policy_invalid", detail_code="development_signer_in_production")
 
 
@@ -191,9 +209,21 @@ def _store_refusal(e: Refused) -> bool:
     return e.reason == "store_unavailable" and e.detail_code != "checksum"
 
 
-def _oldest_first(source: ReadStore, key: str) -> list[str]:
-    vids = source.versions(key)
-    return list(reversed(vids))[:MAX_VERSIONS]
+def _usable[T](vids: list[str], read: Callable[[str], T | None], reason: str) -> Iterator[T]:
+    """Each usable version of ``key``, oldest first, as ``read`` returns it. A version
+    ``read`` finds unusable (None: no stored checksum, gone, too large) is skipped and not
+    counted; past :data:`MAX_VERSIONS` usable versions the walk stops with ``reason`` and
+    the detail ``too_many_versions`` (a flood of junk versions, not a wrong lock).
+    ``vids`` is the store's listing, newest first; its own cap bounds the walk."""
+    used = 0
+    for vid in reversed(vids):
+        got = read(vid)
+        if got is None:
+            continue
+        if used >= MAX_VERSIONS:
+            raise Refused(reason, detail_code="too_many_versions")
+        used += 1
+        yield got
 
 
 def _get_version(source: ReadStore, key: str, *, version_id: str, max_bytes: int) -> bytes | None:
@@ -208,24 +238,24 @@ def _get_version(source: ReadStore, key: str, *, version_id: str, max_bytes: int
     return None
 
 
+def _head_version(source: ReadStore, key: str, version_id: str) -> tuple[str, ObjectInfo] | None:
+    try:
+        return version_id, source.head(key, version_id)
+    except Refused as e:
+        if _store_refusal(e):
+            raise
+    return None
+
+
 def find_manifest(source: ReadStore, name: str, version: str, sha256: str) -> bytes:
     """Step 2: the bytes of the oldest stored manifest version whose SHA-256 is
     ``sha256``."""
     key = store.manifest_key(name, version)
-    vids = _oldest_first(source, key)
+    vids = source.versions(key)
     if not vids:
         raise Refused("not_found", detail_code="manifest")
-    for vid in vids:
-        skip = False
-        try:
-            info = source.head(key, vid)
-        except Refused as e:
-            if _store_refusal(e):
-                raise
-            skip = True
-        if skip or info.size > manifest.MAX_BYTES:
-            continue
-        if not secrets.compare_digest(info.sha256, sha256):
+    for vid, info in _usable(vids, lambda v: _head_version(source, key, v), "lock_mismatch"):
+        if info.size > manifest.MAX_BYTES or not secrets.compare_digest(info.sha256, sha256):
             continue
         raw = _get_version(source, key, version_id=vid, max_bytes=manifest.MAX_BYTES)
         if raw is not None and secrets.compare_digest(hashlib.sha256(raw).hexdigest(), sha256):
@@ -233,24 +263,29 @@ def find_manifest(source: ReadStore, name: str, version: str, sha256: str) -> by
     raise Refused("lock_mismatch")
 
 
-def _signature_docs(source: ReadStore, key: str) -> list[bytes]:
-    """The distinct readable versions of a signature key, oldest first."""
-    out: list[bytes] = []
-    for vid in _oldest_first(source, key):
-        doc = _get_version(source, key, version_id=vid, max_bytes=signing.MAX_SIGNATURE_DOC_BYTES)
-        if doc is not None and doc not in out:
-            out.append(doc)
-    return out
-
-
-def _verified_by_one(
-    purpose: str, payload: bytes, docs: list[bytes], policy: signing.TrustPolicy
+def _first_verified(
+    source: ReadStore,
+    key: str,
+    purpose: str,
+    payload: bytes,
+    policy: signing.TrustPolicy,
+    reason: str,
 ) -> set[str] | None:
-    """None if one of ``docs`` verifies for ``purpose`` over ``payload``; else the reasons
-    each failed with. A development signer outside development propagates."""
+    """None as soon as one version of the signature ``key`` verifies for ``purpose`` over
+    ``payload``; else the reasons the distinct versions failed with (empty: none at all).
+    A development signer outside development propagates."""
     verifier = signing.Verifier()
     reasons: set[str] = set()
-    for doc in docs:
+    tried: list[bytes] = []
+    max_bytes = signing.MAX_SIGNATURE_DOC_BYTES
+    for doc in _usable(
+        source.versions(key),
+        lambda v: _get_version(source, key, version_id=v, max_bytes=max_bytes),
+        reason,
+    ):
+        if doc in tried:
+            continue
+        tried.append(doc)
         try:
             verifier.verify(purpose, payload, doc, policy)
         except Refused as e:
@@ -266,13 +301,22 @@ def check_manifest_signature(
     source: ReadStore, name: str, version: str, raw: bytes, policy: signing.TrustPolicy
 ) -> None:
     """Step 4: see the module docstring."""
-    docs = _signature_docs(source, store.manifest_sig_key(name, version))
-    reasons = _verified_by_one("manifest", raw, docs, policy)
+    key = store.manifest_sig_key(name, version)
+    reasons = _first_verified(source, key, "manifest", raw, policy, "signature_invalid")
     if reasons is None:
         return
     if reasons == {"signer_untrusted"}:
         raise Refused("signer_untrusted")
-    raise Refused("signature_invalid", detail_code="manifest" if docs else "missing")
+    raise Refused("signature_invalid", detail_code="manifest" if reasons else "missing")
+
+
+def check_gate(entry: PinEntry, m: manifest.Manifest) -> None:
+    """The manifest's own result for the pinned gate must be ``pass`` (``gate_failed``)."""
+    gate = entry.gate
+    if not isinstance(gate, str) or gate not in GATES:
+        raise Refused("lock_invalid", detail_code="gate")
+    if m.evaluation.gates.get(gate) != "pass":
+        raise Refused("gate_failed")
 
 
 def check_signoff(
@@ -282,26 +326,33 @@ def check_signoff(
     m: manifest.Manifest,
     policy: signing.TrustPolicy,
 ) -> None:
-    """Step 7: a sign-off for exactly this pin, signed for purpose ``signoff``."""
+    """Step 7: a sign-off for exactly this pin, signed for purpose ``signoff``, whose
+    reviewers are neither the promoter nor the trainer and not both kinds at once."""
     key = store.signoff_key(m.name, m.version)
-    docs: list[bytes] = []
-    for vid in _oldest_first(source, key):
-        raw = _get_version(source, key, version_id=vid, max_bytes=signoff.MAX_BYTES)
-        if raw is not None and raw not in docs:
-            docs.append(raw)
-    if not docs:
-        raise Refused("not_approved", detail_code="missing")
-    sigs = _signature_docs(source, store.signoff_sig_key(m.name, m.version))
-    detail = "mismatch"
-    for raw in docs:
+    sig_key = store.signoff_sig_key(m.name, m.version)
+    tried: list[bytes] = []
+    detail = "missing"
+    for raw in _usable(
+        source.versions(key),
+        lambda v: _get_version(source, key, version_id=v, max_bytes=signoff.MAX_BYTES),
+        "not_approved",
+    ):
+        if raw in tried:
+            continue
+        tried.append(raw)
         parsed: signoff.Signoff | None = None
         try:
             parsed = signoff.parse(raw)
         except Refused:
             parsed = None
         if parsed is None or not _signoff_matches(parsed, role, entry, m):
+            if detail == "missing":
+                detail = "mismatch"
             continue
-        if _verified_by_one("signoff", raw, sigs, policy) is None:
+        if not _separated(parsed):
+            detail = "separation"
+            continue
+        if _first_verified(source, sig_key, "signoff", raw, policy, "not_approved") is None:
             return
         detail = "signature"
     raise Refused("not_approved", detail_code=detail)
@@ -317,6 +368,15 @@ def _signoff_matches(s: signoff.Signoff, role: str, entry: PinEntry, m: manifest
         and s.gate == entry.gate
         and s.promotion_actor == m.promotion.actor
         and s.trained_by == m.trained_by
+    )
+
+
+def _separated(s: signoff.Signoff) -> bool:
+    """P15 again at load: no reviewer promoted or trained the model, and no one is both
+    the clinical and the platform reviewer."""
+    clinical, platform = set(s.clinical_reviewers), set(s.platform_reviewers)
+    return not (clinical & platform) and not (
+        (clinical | platform) & {s.promotion_actor, s.trained_by}
     )
 
 
@@ -355,6 +415,39 @@ def _open_dir(path: Path | str, *, dir_fd: int | None = None, create: bool) -> i
         os.close(fd)
         raise _cache_refused("cache_dir_unsafe")
     return fd
+
+
+def _check_ancestors(cache_dir: Path) -> None:
+    """Every directory above ``cache_dir`` (resolved) up to ``/`` is owned by root or this
+    user, and none that others can write lacks the sticky bit; otherwise someone else
+    could swap the tree after the checks (``cache_parent_unsafe``)."""
+    unsafe = False
+    failed = False
+    try:
+        parent = Path(os.path.realpath(cache_dir.absolute().parent))
+        for d in (parent, *parent.parents):
+            st = os.stat(d)
+            if st.st_uid not in (0, os.geteuid()) or (
+                st.st_mode & stat.S_IWOTH and not st.st_mode & stat.S_ISVTX
+            ):
+                unsafe = True
+                break
+    except (OSError, ValueError):
+        failed = True
+    if failed:
+        raise _cache_refused("cache_dir")
+    if unsafe:
+        raise _cache_refused("cache_parent_unsafe")
+
+
+def _open_cache(cache_dir: Path, name: str, *, create: bool) -> int:
+    """The pin's ``<cache>/<name>`` directory, every level checked; the caller closes it."""
+    _check_ancestors(cache_dir)
+    root_fd = _open_dir(cache_dir, create=create)
+    try:
+        return _open_dir(name, dir_fd=root_fd, create=create)
+    finally:
+        os.close(root_fd)
 
 
 def _lstat(name: str, dir_fd: int) -> os.stat_result | None:
@@ -460,7 +553,11 @@ def _download_one(
         raise _cache_refused("partial_file")
     reason: str | None = None
     detail: str | None = None
-    with os.fdopen(fd, "wb") as out:
+    n, sha = -1, ""
+    # Unbuffered, so nothing is left to flush at close; a close that still fails (an
+    # I/O error) becomes the fixed refusal, never a bare OSError.
+    out = os.fdopen(fd, "wb", buffering=0)
+    try:
         try:
             n, sha = source.download(key, version_id=f.store_version_id, out=out, max_bytes=f.size)
         except Refused as e:
@@ -473,13 +570,20 @@ def _download_one(
         if reason is None:
             sync_failed = False
             try:
-                out.flush()
                 os.fsync(out.fileno())
                 os.fchmod(out.fileno(), FILE_MODE)
             except OSError:
                 sync_failed = True
             if sync_failed:
                 reason, detail = "file_not_allowed", "partial_write"
+    finally:
+        close_failed = False
+        try:
+            out.close()
+        except OSError:
+            close_failed = True
+        if close_failed and reason is None:
+            reason, detail = "file_not_allowed", "partial_close"
     if reason is not None:
         raise Refused(reason, detail_code=detail)
     if n != f.size:
@@ -565,7 +669,11 @@ def verify_pin(
     require_signoff: bool,
 ) -> VerifiedModel:
     """Verify ``entry`` for ``role`` into ``cache_dir``; see the module docstring.
-    Raises :class:`Refused` with a fixed code on any failure."""
+    Raises :class:`Refused` with a fixed code on any failure.
+
+    ``require_signoff=False`` is for ``mhai-models pin`` (Task 20), which checks a version
+    before it has a sign-off. Loading a model never calls this directly: it calls
+    :func:`verify_for_load`, which has no such switch."""
     if not isinstance(require_signoff, bool):
         raise Refused("not_allowed_here", detail_code="require_signoff")
     role, name, version, sha = _check_inputs(role, entry)
@@ -586,6 +694,61 @@ def verify_pin(
     return out
 
 
+def verify_for_load(
+    source: ReadStore,
+    role: str,
+    entry: PinEntry,
+    policy: signing.TrustPolicy,
+    cache_dir: Path | str,
+) -> VerifiedModel:
+    """The only entry point for loading a pinned model (Task 23's loader): as
+    :func:`verify_pin`, with the sign-off required unless both ``MHAI_MODELS_ENV`` and
+    ``APP_ENV`` say development (:func:`requires_signoff`). It cannot be turned off."""
+    return verify_pin(source, role, entry, policy, cache_dir, require_signoff=requires_signoff())
+
+
+# Refusals that decide a pin is bad (not a passing store or disk problem): the pin's
+# cached directory is removed (ruling D29). Store and transport errors keep it.
+DEFINITIVE = frozenset(
+    {
+        "lock_mismatch",
+        "identity_mismatch",
+        "signature_invalid",
+        "signer_untrusted",
+        "policy_invalid",
+        "not_approved",
+        "gate_failed",
+        "not_canonical",
+        "manifest_invalid",
+        "json_invalid",
+    }
+)
+# The local copy differs from the manifest.
+MISMATCH = frozenset(
+    {"hash_mismatch", "size_mismatch", "missing_file", "extra_file", "file_not_allowed"}
+)
+
+
+def _purge(cache_dir: Path, name: str, final: str) -> None:
+    """After a definitive refusal in steps 1-4: remove the pin's final and ``.partial``
+    directories, under the pin's lock. A cache that is missing or unsafe is left alone
+    (nothing in it is ever handed out without a full verification)."""
+    name_fd = -1
+    try:
+        name_fd = _open_cache(cache_dir, name, create=False)
+    except Refused:
+        return
+    try:
+        with _pin_lock(name_fd, final):
+            gone = _remove(name_fd, final + PARTIAL_SUFFIX) and _remove(name_fd, final)
+        if gone:
+            log.info("model.cache_removed name=%s dir=%s", name, final)
+    except Refused:
+        pass
+    finally:
+        os.close(name_fd)
+
+
 def _verify(
     source: ReadStore,
     role: str,
@@ -597,25 +760,31 @@ def _verify(
     cache_dir: Path,
     require_signoff: bool,
 ) -> VerifiedModel:
-    check_environment(policy)  # 1
-    raw = find_manifest(source, name, version, sha)  # 2
-    m = manifest.parse(raw)  # 3
-    if (m.name, m.version, m.role) != (name, version, role):
-        raise Refused("identity_mismatch")
-    check_manifest_signature(source, name, version, raw, policy)  # 4
-
     final = f"{version}-{sha[:HASH12]}"
     partial = final + PARTIAL_SUFFIX
-    root_fd = _open_dir(cache_dir, create=True)
+    definitive: str | None = None
     try:
-        name_fd = _open_dir(name, dir_fd=root_fd, create=True)
+        check_environment(policy)  # 1
+        raw = find_manifest(source, name, version, sha)  # 2
+        m = manifest.parse(raw)  # 3
+        if (m.name, m.version, m.role) != (name, version, role):
+            raise Refused("identity_mismatch")
+        check_gate(entry, m)
+        check_manifest_signature(source, name, version, raw, policy)  # 4
+    except Refused as e:
+        definitive = e.reason if e.reason in DEFINITIVE else None
+        raise
     finally:
-        os.close(root_fd)
+        if definitive is not None:
+            _purge(cache_dir, name, final)
+
+    name_fd = _open_cache(cache_dir, name, create=True)
     final_path = cache_dir / name / final
     cached = False
     try:
         with _pin_lock(name_fd, final):
             done = False
+            refused: str | None = None
             try:
                 if not _remove(name_fd, partial):
                     raise _cache_refused("cache_not_removed")
@@ -639,10 +808,17 @@ def _verify(
                     _seal(name_fd, partial, final)  # 8
                     check_dir(final_path, m, sealed=True)
                 done = True
+            except Refused as e:
+                refused = e.reason
+                raise
             finally:
                 if not done:
                     _remove(name_fd, partial)
-                    _remove(name_fd, final)
+                    # A directory this call built (or found wrong) goes; a verified one
+                    # another process may be using stays on a passing store or disk
+                    # error (M6), and goes on a definitive refusal (D29).
+                    if not cached or refused in DEFINITIVE | MISMATCH:
+                        _remove(name_fd, final)
     finally:
         os.close(name_fd)
     log.info(
@@ -667,6 +843,7 @@ def _verify(
 
 
 __all__ = [
+    "DEFINITIVE",
     "DIR_MODE",
     "FILE_MODE",
     "MAX_VERSIONS",
@@ -675,11 +852,14 @@ __all__ = [
     "VerifiedModel",
     "check_dir",
     "check_environment",
+    "check_gate",
     "check_manifest_signature",
     "check_signoff",
     "declares_production",
     "find_manifest",
+    "is_development",
     "requires_signoff",
+    "verify_for_load",
     "verify_pin",
     "version_string",
 ]
