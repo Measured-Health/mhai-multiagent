@@ -6,7 +6,7 @@ Open work and decisions for mhai-multiagent. Remove an entry once it's done or d
 
 Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline phase 0 part A (PR #91). What remains:
 
-- **Document pipeline phase 0, part B (Tasks 13–25), in progress.** Model file checks, training manifest and registries, signed manifests, the object-locked model store, run sources, `mhai-models promote`, `models.lock`, sign-off and rollback, load-time verification, the intelligence service's pinned roles, the model workflows and the end-to-end tests. See the [plan](docs/plans/2026-11-03-document-pipeline-phase0.md).
+- **Document pipeline phase 0, part B (Tasks 13–25), built and in review (PR-B); it merges after the H4 GitHub settings below.** Model file checks, training manifest and registries, signed manifests, the object-locked model store, run sources, `mhai-models promote`, `models.lock`, sign-off and rollback, load-time verification, the intelligence service's pinned roles, the model workflows and the end-to-end tests. See the [plan](docs/plans/2026-11-03-document-pipeline-phase0.md).
 - **Document pipeline Tasks 26–28: waiting on people.** The production signing backend (H1), the production model store (H2) and real Google Drive access (H3).
 - **Cloud models.** The design is approved (PR #85, 4 Nov). The plan isn't written yet (about 11 tasks, migrations from 00018). Masked text only, off by default per hospital.
 - **EHR/EMR integration.** The EMR integration service (`services/emr/`): a connector per EMR type, mapping to the canonical model, the patient index and abnormality flags. The design was started on 23 Oct and isn't finished.
