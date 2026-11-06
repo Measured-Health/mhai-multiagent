@@ -544,6 +544,16 @@ def _check_ancestors(cache_dir: Path) -> None:
         raise _cache_refused(detail)
 
 
+def check_cache_dir(cache_dir: Path | str) -> None:
+    """The cache directory's own rules (the module docstring), checked once at a
+    service's start-up: every directory above it real and safe, and it a real directory
+    of this user's that nobody else can write (made 0700 if missing). Refusals as for a
+    verification: ``not_allowed_here`` with a ``cache_*`` detail."""
+    path = Path(cache_dir)
+    _check_ancestors(path)
+    os.close(_open_dir(path, create=True))
+
+
 def _open_cache(cache_dir: Path, name: str, *, create: bool) -> int:
     """The pin's ``<cache>/<name>`` directory, every level checked; the caller closes it."""
     _check_ancestors(cache_dir)
@@ -974,6 +984,7 @@ __all__ = [
     "PinEntry",
     "ReadStore",
     "VerifiedModel",
+    "check_cache_dir",
     "check_dir",
     "check_environment",
     "check_gate",

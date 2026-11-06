@@ -420,6 +420,20 @@ def scan_from_pretrained(source: str) -> list[tuple[int, str]]:
         return [(0, "does not parse")]
     hits: list[tuple[int, str]] = []
     for node in ast.walk(tree):
+        # getattr(X, "from_pretrained"): the bound loader taken by name, whose call can't
+        # be followed; flagged unless X is not a weights loader.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "from_pretrained"
+        ):
+            receiver = _receiver(node.args[0])
+            if not receiver.rsplit(".", 1)[-1].endswith(_NOT_WEIGHTS):
+                hits.append((node.lineno, receiver))
+            continue
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -471,6 +485,9 @@ def test_from_pretrained_allow_list_is_live() -> None:
         ("t = transformers.AutoTokenizer.from_pretrained(p)", False),
         ("t = PreTrainedTokenizerFast.from_pretrained(p)", False),
         ("c = AutoConfig.from_pretrained(p)", False),
+        ("m = getattr(AutoModel, 'from_pretrained')(p, use_safetensors=True)", True),
+        ("load = getattr(transformers.AutoModel, 'from_pretrained')", True),
+        ("t = getattr(AutoTokenizer, 'from_pretrained')(p)", False),
     ],
 )
 def test_from_pretrained_scan_catches_a_planted_use(snippet: str, flagged: bool) -> None:

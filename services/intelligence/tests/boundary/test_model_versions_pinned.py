@@ -554,3 +554,183 @@ def test_model_gate_set_up_once_at_start(tmp_path: Path, keys: Keys) -> None:
     bad_policy = {**env, "MHAI_MODELS_TRUST_POLICY": str(tmp_path / "missing.json")}
     with pytest.raises(ConfigError, match="policy_invalid"):
         build_model_gate(WorkerSettings.from_env(bad_policy))
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+class ReadyRunner:
+    """A run_query runner whose database answers."""
+
+    async def ready(self) -> bool:
+        return True
+
+
+def _not_ready_gate() -> PinnedModelGate:
+    def load() -> Any:
+        raise loader.PinRefused(ROLE, "hash_mismatch")
+
+    gate = PinnedModelGate(load, (ROLE,))
+    assert gate.attempt() is False
+    return gate
+
+
+def test_pipeline_readiness_waits_for_the_gate() -> None:
+    """I1: run_service's wiring. With a runner whose database answers and a gate that
+    hasn't verified, neither health nor jobs is ready, and the job consumer built with
+    run_service's own jobs_ready never fetches. (runner.ready alone would be True.)"""
+    from intelligence.boundary.worker import pipeline_readiness
+
+    runner = ReadyRunner()
+    gate = _not_ready_gate()
+
+    async def go() -> None:
+        models_ready, jobs_ready = pipeline_readiness(runner, gate)  # type: ignore[arg-type]
+        assert jobs_ready is not None
+        assert await all_ready(models_ready)() is False
+        assert await all_ready(jobs_ready)() is False
+        w = _pipeline_worker(jobs_ready)
+        psub = FakePsub()
+        task = asyncio.get_running_loop().create_task(
+            w._consume("pipeline", psub, asyncio.Semaphore(1))
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert psub.fetches == 0
+
+        gate._models = loader.PinnedModels({})  # verified
+        assert await all_ready(models_ready)() is True
+        assert await all_ready(jobs_ready)() is True
+
+        # No roles: as before Task 23 (the client built; jobs follow the runner).
+        m0, j0 = pipeline_readiness(runner, None)  # type: ignore[arg-type]
+        assert await all_ready(m0)() is True and j0 == runner.ready
+        m1, j1 = pipeline_readiness(None, None)
+        assert await all_ready(m1)() is False and j1 is None
+
+    asyncio.run(go())
+
+
+def test_run_service_uses_pipeline_readiness() -> None:
+    """run_service builds the Worker's readiness with pipeline_readiness (and nothing
+    else), so the test above covers production's wiring."""
+    import inspect
+
+    from intelligence.boundary import worker
+
+    src = inspect.getsource(worker.run_service)
+    assert "pipeline_readiness(runner, gate)" in src
+    assert "jobs_ready=jobs_ready" in src and "runner.ready" not in src
+
+
+def test_offline_set_before_network_capable_imports(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M8: with nli pinned, HF_HUB_OFFLINE is already 1 when default_orchestrator's first
+    model import (hga_nli, which imports the knowledge base) runs."""
+    import importlib.abc
+
+    import intelligence.agents as agents
+
+    seen: dict[str, str | None] = {}
+    watched = "intelligence.agents.hga_nli"
+
+    class Watch(importlib.abc.MetaPathFinder):
+        def find_spec(self, name: str, path: Any, target: Any = None) -> None:
+            if name == watched and name not in seen:
+                seen[name] = os.environ.get("HF_HUB_OFFLINE")
+            return None
+
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+    monkeypatch.delitem(sys.modules, watched, raising=False)
+    monkeypatch.setattr(agents, "hga_nli", getattr(agents, "hga_nli", None), raising=False)
+    monkeypatch.setattr(sys, "meta_path", [Watch(), *sys.meta_path])
+    models.default_orchestrator(lambda: None, ("nli",))
+    assert seen == {watched: "1"}
+
+
+def test_gate_run_does_not_block_shutdown() -> None:
+    """M6: cancelling run() returns at once while a verification is still running; the
+    verification runs on a daemon thread, which never holds the interpreter's exit."""
+    import threading
+    import time
+
+    started, release = threading.Event(), threading.Event()
+    threads: list[threading.Thread] = []
+
+    def load() -> Any:
+        threads.append(threading.current_thread())
+        started.set()
+        release.wait(10)
+        raise loader.PinRefused(ROLE, "store_unavailable")
+
+    gate = PinnedModelGate(load, (ROLE,))
+
+    async def go() -> float:
+        task = asyncio.get_running_loop().create_task(gate.run())
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        t0 = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return time.monotonic() - t0
+
+    try:
+        assert asyncio.run(go()) < 1.0
+        assert threads and threads[0].daemon
+    finally:
+        release.set()
+
+
+def test_warmup_page_setting(tmp_path: Path, keys: Keys) -> None:
+    """The warm-up page is INTELLIGENCE_WARMUP_PAGE (absolute; the repository's page by
+    default), checked at start-up when a role is required: missing is
+    warmup_page_missing and the worker doesn't start."""
+    from intelligence.boundary.worker import build_model_gate
+    from tests.modelstore.conftest import REPO
+
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    env = _store_env(
+        tmp_path,
+        INTELLIGENCE_MODELS_LOCK=str(_lock_file(tmp_path, {ROLE: pub})),
+        MHAI_MODELS_TRUST_POLICY=str(REPO / "models" / "trust-policy.json"),
+    )
+    page = REPO / "testdata" / "models" / "warmup" / "page.png"
+    s = WorkerSettings.from_env({**env, "INTELLIGENCE_WARMUP_PAGE": str(page)})
+    assert s.model_warmup_page == str(page)
+    assert build_model_gate(s) is not None
+    with pytest.raises(ConfigError, match="INTELLIGENCE_WARMUP_PAGE"):
+        WorkerSettings.from_env({**env, "INTELLIGENCE_WARMUP_PAGE": "relative/page.png"})
+    for bad in (tmp_path / "missing.png", tmp_path):
+        s = WorkerSettings.from_env({**env, "INTELLIGENCE_WARMUP_PAGE": str(bad)})
+        with pytest.raises(ConfigError, match="warmup_page_missing"):
+            build_model_gate(s)
+
+
+def test_cache_dir_checked_at_start(tmp_path: Path, keys: Keys) -> None:
+    """M5: Task 22's cache rules at start-up: a link or a directory others can write
+    stops the start."""
+    from intelligence.boundary.worker import build_model_gate
+    from tests.modelstore.conftest import REPO
+
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    base = _store_env(
+        tmp_path,
+        INTELLIGENCE_MODELS_LOCK=str(_lock_file(tmp_path, {ROLE: pub})),
+        MHAI_MODELS_TRUST_POLICY=str(REPO / "models" / "trust-policy.json"),
+    )
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    os.chmod(loose, 0o777)
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    for bad in (loose, link):
+        s = WorkerSettings.from_env({**base, "INTELLIGENCE_MODEL_CACHE": str(bad)})
+        with pytest.raises(ConfigError, match="not_allowed_here"):
+            build_model_gate(s)

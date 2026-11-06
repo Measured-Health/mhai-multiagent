@@ -298,3 +298,25 @@ def test_pinned_models_load_from_minio(tmp_path: Path, keys: Keys, minio_store: 
     reader = minio_store.store("reader")
     pinned = loader.PinnedModels.load(_settings(tmp_path, {ROLE: pub}), reader, keys.policy)
     assert pinned.versions() == {ROLE: f"{NAME}@{version}#{pub.sha[:12]}"}
+
+
+def test_warmup_engine_version_compared(tmp_path: Path, keys: Keys) -> None:
+    mem = MemoryStore()
+    run_dir = fixtures.make_run(tmp_path / "probe", "good", 7, name=NAME)
+    good = json.loads(_warmup_doc(run_dir, VERSION))
+    assert good["engine_version"]  # promote records numpy's version
+    pub = publish(mem, tmp_path, keys, warmup=canonical.dumps({**good, "engine_version": "0.0.1"}))
+    e = _refused(_settings(tmp_path, {ROLE: pub}), mem, keys.policy)
+    assert (e.reason, e.detail_code) == ("warmup_mismatch", "engine_version")
+
+
+def test_missing_warmup_page_has_its_own_code(tmp_path: Path, keys: Keys) -> None:
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+    settings = loader.LoadSettings.from_lock(
+        (ROLE,), _lock_file(tmp_path, {ROLE: pub}), cache, warmup_page=tmp_path / "none.png"
+    )
+    e = _refused(settings, mem, keys.policy)
+    assert e.reason == "warmup_page_missing"

@@ -19,7 +19,8 @@ def test_refused_str_has_no_detail() -> None:
 
 def test_reason_set_is_closed() -> None:
     assert isinstance(REASONS, frozenset)
-    assert len(REASONS) == 47
+    assert len(REASONS) == 48
+    assert "warmup_page_missing" in REASONS  # Task 23: the service's warm-up page is absent
     assert "invalid_name" in REASONS
     assert "base_unverified" in REASONS  # Task 14: a promoted base not yet verified
     assert "key_invalid" in REASONS  # Task 15: a signing key file refused

@@ -28,6 +28,11 @@ roles it needs from the model store before it is ready:
                              placeholder, minioadmin, example). The variables
                              without _FILE are refused
   MHAI_MODELS_TRUST_POLICY   the trust policy for signatures
+  INTELLIGENCE_WARMUP_PAGE   an absolute path: the fixed warm-up page each
+                             in-process role must reproduce (default: the
+                             repository's testdata/models/warmup/page.png;
+                             the image must ship it). Checked at start-up:
+                             missing is warmup_page_missing
   MHAI_MODELS_ENV            ``development`` relaxes the sign-off rule only
                              together with APP_ENV=development; with any other
                              APP_ENV (or none) it is refused at start-up
@@ -199,6 +204,7 @@ class WorkerSettings:
     model_store_access_key: str | None = field(default=None, repr=False)
     model_store_secret_key: str | None = field(default=None, repr=False)
     models_trust_policy_path: str | None = None
+    model_warmup_page: str | None = None
 
     @classmethod
     def from_env(
@@ -464,6 +470,9 @@ def _model_settings(
     if cache is not None and not os.path.isabs(cache):
         errs.append("INTELLIGENCE_MODEL_CACHE must be an absolute path")
     policy = required("MHAI_MODELS_TRUST_POLICY")
+    warmup_page = get("INTELLIGENCE_WARMUP_PAGE")
+    if warmup_page is not None and not os.path.isabs(warmup_page):
+        errs.append("INTELLIGENCE_WARMUP_PAGE must be an absolute path")
     endpoint = required("MODEL_STORE_ENDPOINT")
     bucket = required("MODEL_STORE_BUCKET")
     region = get("MODEL_STORE_REGION")
@@ -498,6 +507,7 @@ def _model_settings(
             model_store_access_key=credentials[0],
             model_store_secret_key=credentials[1],
             models_trust_policy_path=policy,
+            model_warmup_page=warmup_page,
         )
     return out
 

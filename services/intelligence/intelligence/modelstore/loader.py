@@ -22,7 +22,11 @@ is ``lock_invalid``. A change to the lock file afterwards changes nothing until 
    ``no_runtime``, so it is never ready. TODO(GPU task): load a VLM role once its runtime
    can prove it serves the verified files. The extractor runs on the fixed warm-up page
    (whose SHA-256 must be the document's ``page_sha256``), and its output's SHA-256 must
-   be ``output_sha256`` (``warmup_mismatch``).
+   be ``output_sha256`` (``warmup_mismatch``). When the document records the engine's
+   version, the runtime's must be the same (``warmup_mismatch``/``engine_version``).
+   The page is ``INTELLIGENCE_WARMUP_PAGE`` in the service (the repository's
+   ``testdata/models/warmup/page.png`` by default); a page that isn't there is
+   ``warmup_page_missing``, told apart from a model that doesn't reproduce.
 
 Any refusal is a :class:`PinRefused` naming the role and a fixed reason; nothing falls
 back to another version, an unverified cache or the internet. :meth:`PinnedModels.
@@ -45,13 +49,23 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from intelligence.modelstore import canonical, lock, names, promote, signing, store, verify
+from intelligence.modelstore import (
+    canonical,
+    files,
+    lock,
+    names,
+    promote,
+    signing,
+    store,
+    verify,
+)
 from intelligence.modelstore.reasons import REASONS, Refused
 
 log = logging.getLogger(__name__)
 
 WARMUP_DOC = "warmup.json"
 MAX_WARMUP_BYTES = 4 * 1024
+MAX_WARMUP_PAGE_BYTES = promote.MAX_WARMUP_PAGE_BYTES
 WARMUP_KEYS = frozenset({"page_sha256", "output_sha256", "engine", "engine_version"})
 # A refusal that isn't a model store reason (an unexpected error): the one code outside
 # REASONS a PinRefused may carry.
@@ -218,6 +232,20 @@ def _warmup_doc(source: verify.ReadStore, m: Any) -> dict[str, Any]:
     return doc
 
 
+def check_warmup_page(page: Path | str) -> bytes:
+    """The warm-up page's bytes: a regular file (never through a link) of at most
+    :data:`MAX_WARMUP_PAGE_BYTES`, else ``warmup_page_missing``."""
+    failed = False
+    raw = b""
+    try:
+        raw = files.read_regular(page, MAX_WARMUP_PAGE_BYTES)
+    except (Refused, OSError):
+        failed = True
+    if failed or not raw:
+        raise Refused("warmup_page_missing")
+    return raw
+
+
 def warm_up(
     source: verify.ReadStore,
     vm: verify.VerifiedModel,
@@ -227,12 +255,17 @@ def warm_up(
 ) -> None:
     """Run the role's in-process runtime on the warm-up page and compare with the
     verified manifest's ``warmup.json``; see the module docstring."""
+    check_warmup_page(page)
     expected = _warmup_doc(source, vm.manifest)
     # The runtime from config.json's architecture only; no runtime URL in-process, so a
     # VLM is no_runtime here. TODO(GPU task): a VLM role's runtime and its warm-up.
     chosen = promote.choose_extractor(vm.path, vm.name, vm.role, vm.version, None)
     if chosen.engine != expected["engine"]:
         raise Refused("warmup_mismatch", detail_code="engine")
+    if expected["engine_version"] is not None and (
+        chosen.engine_version != expected["engine_version"]
+    ):
+        raise Refused("warmup_mismatch", detail_code="engine_version")
     got = canonical.loads_strict(promote.warmup(chosen, page, deadline_s=deadline_s), 4096)
     if got["page_sha256"] != expected["page_sha256"]:
         raise Refused("warmup_mismatch", detail_code="page")
@@ -253,5 +286,6 @@ __all__ = [
     "LoadSettings",
     "PinRefused",
     "PinnedModels",
+    "check_warmup_page",
     "warm_up",
 ]

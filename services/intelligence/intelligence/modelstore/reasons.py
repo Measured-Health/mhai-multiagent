@@ -45,6 +45,7 @@ REASONS: frozenset[str] = frozenset(
         "source_unavailable",
         "drive_scope",
         "warmup_mismatch",
+        "warmup_page_missing",
         "store_unavailable",
         "not_allowed_here",
         "invalid_name",

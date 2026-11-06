@@ -61,6 +61,7 @@ import logging
 import re
 import signal
 import ssl
+import threading
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
@@ -104,6 +105,7 @@ from intelligence.boundary.verify import (
 
 if TYPE_CHECKING:
     from intelligence.boundary.db import Database
+    from intelligence.boundary.jobs.run_query import RunQuery
     from intelligence.modelstore.loader import PinnedModels
 
 log = logging.getLogger("intelligence.boundary.worker")
@@ -1048,17 +1050,8 @@ async def run_service(settings: WorkerSettings) -> None:
                 log.warning(
                     "no INTELLIGENCE_DB_URL: run_query and approve_correction jobs are not taken"
                 )
-        built = runner is not None
-
-        def client_built() -> bool:
-            return built
-
-        models_ready: Readiness = client_built
-        jobs_ready: Readiness | None = runner.ready if runner is not None else None
+        models_ready, jobs_ready = pipeline_readiness(runner, gate)
         if gate is not None:
-            models_ready = all_ready(client_built, gate.ready)
-            if runner is not None:
-                jobs_ready = all_ready(runner.ready, gate.ready)
             gate_task = asyncio.get_running_loop().create_task(gate.run())
         w = Worker(
             settings,
@@ -1185,11 +1178,60 @@ class PinnedModelGate:
         return False
 
     async def run(self) -> None:
-        """Attempt (in a thread: verification hashes and downloads) until ready."""
+        """Attempt until ready. Each attempt runs on a daemon thread (verification
+        hashes and downloads): cancelling run() returns at once, and a verification
+        still running never holds the process's exit (it is abandoned; the pin's
+        lock and partial directory are the verifier's to clean up next time)."""
         delay = self._first
-        while not await asyncio.to_thread(self.attempt, delay):
+        while not await self._attempt_in_thread(delay):
             await self._sleep(delay)
             delay = min(delay * 2, self._max)
+
+    async def _attempt_in_thread(self, delay: float) -> bool:
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[bool] = loop.create_future()
+
+        def finish(ok: bool) -> None:
+            if not done.done():
+                done.set_result(ok)
+
+        def work() -> None:
+            ok = False
+            try:
+                ok = self.attempt(delay)
+            except BaseException as e:  # attempt() catches everything; fail closed anyway
+                log.warning("model.load_error error=%s", type(e).__name__)
+            with contextlib.suppress(RuntimeError):  # the loop closed: shutting down
+                loop.call_soon_threadsafe(finish, ok)
+
+        threading.Thread(target=work, name="model-verify", daemon=True).start()
+        return await done
+
+
+def pipeline_readiness(
+    runner: RunQuery | None, gate: PinnedModelGate | None
+) -> tuple[Readiness, Readiness | None]:
+    """The pipeline's (models_ready, jobs_ready), as run_service wires them.
+
+    models_ready: the model client was built (a runner exists) and, with pinned
+    roles, every role verified. jobs_ready: the runner's own check (its
+    database answers) and, with pinned roles, the gate: no job is fetched
+    before the pins verify (B18). Without a runner there is no job consumer
+    (None). TODO(GPU task): the worker has one jobs_ready for every durable,
+    so approve_correction (which uses no pinned model) waits for the gate too;
+    give each consumer its own readiness before a long-running pin (a VLM) can
+    hold learning jobs up, and check the JOBS stream's max age then."""
+    built = runner is not None
+
+    def client_built() -> bool:
+        return built
+
+    if gate is None:
+        return client_built, (runner.ready if runner is not None else None)
+    return (
+        all_ready(client_built, gate.ready),
+        all_ready(runner.ready, gate.ready) if runner is not None else None,
+    )
 
 
 def build_model_gate(settings: WorkerSettings) -> PinnedModelGate | None:
@@ -1199,7 +1241,7 @@ def build_model_gate(settings: WorkerSettings) -> PinnedModelGate | None:
     setting the client refuses stops the start (ConfigError)."""
     if not settings.model_roles:
         return None
-    from intelligence.modelstore import loader, signing, store
+    from intelligence.modelstore import loader, promote, signing, store, verify
     from intelligence.modelstore.reasons import Refused
 
     if settings.service != "pipeline":
@@ -1211,7 +1253,14 @@ def build_model_gate(settings: WorkerSettings) -> PinnedModelGate | None:
         raise ConfigError("INTELLIGENCE_MODEL_ROLES needs the model store settings")
     failed: str | None = None
     try:
-        load_settings = loader.LoadSettings.from_lock(settings.model_roles, lock_path, cache)
+        # Every role loadable in phase 0 runs in-process and is warmed up, so the
+        # page is needed whenever there are roles.
+        page = settings.model_warmup_page or str(promote.WARMUP_PAGE)
+        loader.check_warmup_page(page)
+        verify.check_cache_dir(cache)  # Task 22's rules, once at start-up
+        load_settings = loader.LoadSettings.from_lock(
+            settings.model_roles, lock_path, cache, warmup_page=page
+        )
         policy = signing.load_policy(policy_path)
         source = store.S3Store(
             endpoint,
