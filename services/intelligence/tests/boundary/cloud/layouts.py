@@ -5,7 +5,7 @@ these stand in for them with each provider's documented shape and the fixed
 block order of CloudPrompt.blocks() (ruling R-1): block 0 the question,
 block 1 the context, blocks 2 to 6 the chunks. Each layout's Shape is made
 the way an adapter makes its own: scan.shape_for with the fixed scalar
-pointers and the schema's leaf pointers (scan.leaf_pointers), so a schema
+values and the schema's leaf values (scan.leaf_values), so a schema
 change can't drift from the shape.
 
 sdk_body() encodes the same request with the provider's own SDK, through an
@@ -136,10 +136,12 @@ def _fixed(provider: str) -> frozenset[str]:
 
 
 def shape(provider: str, schema: dict[str, Any] | None = None) -> scan.Shape:
+    """Every leaf outside the blocks, with the value the layout gives it."""
     schema = SCHEMA if schema is None else schema
-    return scan.shape_for(
-        provider, _fixed(provider) | scan.leaf_pointers(schema, _SCHEMA_PREFIX[provider])
-    )
+    rendered = dict(scan.walk(render(provider, [], schema)))
+    fixed = {p: rendered[p] for p in _fixed(provider)}
+    fixed.update(scan.leaf_values(schema, _SCHEMA_PREFIX[provider]))
+    return scan.shape_for(provider, fixed)
 
 
 def body(provider: str, blocks: Sequence[str], *, ensure_ascii: bool = True) -> bytes:
@@ -227,15 +229,26 @@ def sdk_body(provider: str, blocks: Sequence[str]) -> bytes:
 
 def sdk_shape(provider: str) -> scan.Shape:
     """The shape of sdk_body's requests (no schema)."""
-    fixed = {
-        "anthropic": {"/model", "/max_tokens", "/system", "/messages/0/role"},
-        "openai": {"/model", "/max_output_tokens", "/store", "/instructions", "/input/0/role"},
-        "xai": {
-            "/model",
-            "/max_tokens",
-            "/messages/0/role",
-            "/messages/0/content",
-            "/messages/1/role",
+    fixed: dict[str, dict[str, Any]] = {
+        "anthropic": {
+            "/model": MODEL,
+            "/max_tokens": MAX_TOKENS,
+            "/system": SYSTEM_PROMPT,
+            "/messages/0/role": "user",
         },
-    }[provider]
-    return scan.shape_for(provider, frozenset(fixed))
+        "openai": {
+            "/model": MODEL,
+            "/max_output_tokens": MAX_TOKENS,
+            "/store": False,
+            "/instructions": SYSTEM_PROMPT,
+            "/input/0/role": "user",
+        },
+        "xai": {
+            "/model": MODEL,
+            "/max_tokens": MAX_TOKENS,
+            "/messages/0/role": "system",
+            "/messages/0/content": SYSTEM_PROMPT,
+            "/messages/1/role": "user",
+        },
+    }
+    return scan.shape_for(provider, fixed[provider])

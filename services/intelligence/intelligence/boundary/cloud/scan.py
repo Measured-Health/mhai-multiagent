@@ -33,10 +33,11 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, final
+from urllib.parse import unquote
 
 from intelligence.boundary import _strictjson
 from intelligence.boundary.cloud.gate import MAX_CHUNKS, EgressRefused
@@ -63,6 +64,7 @@ RULES: Final = (
     "date",
     "long_digits",
     "mrn_prefix",
+    "pii_detected",
     "scan_error",
 )
 
@@ -115,6 +117,7 @@ _IGNORABLE_RANGES: Final = (
     (0x3164, 0x3164),
     (0xFE00, 0xFE0F),
     (0xFFA0, 0xFFA0),
+    (0x2800, 0x2800),  # the braille blank renders as nothing (review I5)
     (0xE0100, 0xE01EF),
 )
 
@@ -129,9 +132,84 @@ def _invisible(c: str) -> bool:
     return any(lo <= o <= hi for lo, hi in _IGNORABLE_RANGES)
 
 
-def _clean(s: str) -> str:
+# Letters from Cyrillic, Greek and Armenian that look like Latin ones,
+# mapped to the Latin letter (a confusables skeleton, review I5). The map only
+# adds matches; a Greek mu (from the micro sign) and beta are left alone.
+_SKELETON: Final = MappingProxyType(
+    {
+        # Cyrillic
+        "\u0430": "a",
+        "\u0435": "e",
+        "\u043e": "o",
+        "\u0440": "p",
+        "\u0441": "c",
+        "\u0443": "y",
+        "\u0445": "x",
+        "\u0456": "i",
+        "\u0458": "j",
+        "\u0455": "s",
+        "\u04bb": "h",
+        "\u0501": "d",
+        "\u04cf": "l",
+        "\u051b": "q",
+        "\u051d": "w",
+        "\u043a": "k",
+        "\u0410": "A",
+        "\u0412": "B",
+        "\u0415": "E",
+        "\u041a": "K",
+        "\u041c": "M",
+        "\u041d": "H",
+        "\u041e": "O",
+        "\u0420": "P",
+        "\u0421": "C",
+        "\u0422": "T",
+        "\u0423": "Y",
+        "\u0425": "X",
+        "\u0406": "I",
+        "\u0408": "J",
+        "\u0405": "S",
+        "\u04ae": "Y",
+        # Greek
+        "\u03b1": "a",
+        "\u03bf": "o",
+        "\u03c1": "p",
+        "\u03bd": "v",
+        "\u03b9": "i",
+        "\u03ba": "k",
+        "\u03c5": "u",
+        "\u03c7": "x",
+        "\u0391": "A",
+        "\u0392": "B",
+        "\u0395": "E",
+        "\u0396": "Z",
+        "\u0397": "H",
+        "\u0399": "I",
+        "\u039a": "K",
+        "\u039c": "M",
+        "\u039d": "N",
+        "\u039f": "O",
+        "\u03a1": "P",
+        "\u03a4": "T",
+        "\u03a5": "Y",
+        "\u03a7": "X",
+        # Armenian
+        "\u0585": "o",
+        "\u057d": "u",
+        "\u0581": "g",
+        "\u0570": "h",
+        "\u0578": "n",
+        "\u0566": "q",
+    }
+)
+# Hyphens, dashes and the minus sign, as "-" (review I2: an en dash in a
+# phone number, as phone autocorrect writes it).
+_DASHES: Final = frozenset("\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d")
+
+
+def _clean(s: str, fold: bool = True) -> str:
     """NFKC, invisible characters removed, every decimal digit as ASCII,
-    case-folded."""
+    confusable letters as Latin, dashes as "-", and (with fold) case-folded."""
     t = unicodedata.normalize("NFKC", s)
     out = []
     for c in t:
@@ -139,9 +217,12 @@ def _clean(s: str) -> str:
             continue
         if unicodedata.category(c) == "Nd":
             out.append(str(unicodedata.digit(c)))
+        elif c in _DASHES:
+            out.append("-")
         else:
-            out.append(c)
-    return "".join(out).casefold()
+            out.append(_SKELETON.get(c, c))
+    joined = "".join(out)
+    return joined.casefold() if fold else joined
 
 
 def norm_words(s: str) -> str:
@@ -150,8 +231,9 @@ def norm_words(s: str) -> str:
     space. "Adaeze\\nOkafor", "ADAEZE\\u200b OKAFOR" and "adaeze-okafor" all
     give "adaeze okafor"."""
     t = unicodedata.normalize("NFKD", _clean(s))
-    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
-    t = "".join(c if unicodedata.category(c)[0] in "LNM" else " " for c in t)
+    # Every combining mark goes (Mn, and Mc and Me too: review I5).
+    t = "".join(c for c in t if unicodedata.category(c)[0] != "M")
+    t = "".join(c if unicodedata.category(c)[0] in "LN" else " " for c in t)
     return " ".join(t.split())
 
 
@@ -164,17 +246,32 @@ def norm_text(s: str) -> str:
 
 
 _DIGITS = re.compile(r"[0-9]+")
-_HYPHEN_RUN = re.compile(r"[0-9]+(?:-[0-9]+)*")
+# The widest gap of non-alphanumerics between two digit groups that still
+# joins them (review I2): "(0803) 123 4567", "0803 - 123 - 4567", "284,817".
+MAX_DIGIT_GAP: Final = 3
 
 
 def _digit_runs(t: str) -> list[str]:
-    return [m.group().replace("-", "") for m in _HYPHEN_RUN.finditer(t)]
+    return _DIGITS.findall(t)
 
 
 def digit_runs(s: str) -> list[str]:
-    """Digit runs of norm_text(s), joined across a single "-" only: a space,
-    "." or "/" ends a run, so "T 38.5 101.3" gives 38, 5, 101, 3."""
+    """Plain digit runs of norm_text(s): any non-digit ends a run, so
+    "T 38.5 101.3" gives 38, 5, 101, 3 and "HR 100-120" gives 100, 120 (fix
+    round: a hyphen no longer joins, so ranges are sent)."""
     return _digit_runs(norm_text(s))
+
+
+# What a person puts between the groups of one number. Not "<", ">", "#" or
+# ":": the chunk delimiters ("<<chunk KB#0001>>\n15 mg") must never join two
+# numbers into an identifier (plan Review Focus 1).
+_GAP_CHARS: Final = frozenset(" ()-.,/+")
+
+
+def _gap_ok(t: str, start: int, end: int) -> bool:
+    """A short gap of 1 to MAX_DIGIT_GAP characters, each a space or one of
+    ( ) - . , / + (dashes are "-" after norm_text)."""
+    return 1 <= end - start <= MAX_DIGIT_GAP and all(c in _GAP_CHARS for c in t[start:end])
 
 
 def _fits_id(run: str) -> bool:
@@ -224,15 +321,48 @@ def grouped_runs(s: str) -> list[str]:
     return _grouped_runs(norm_text(s))
 
 
+def _phone_runs(t: str) -> list[str]:
+    """For ng_phone (review I2): groups of 2 to 4 digits joined across any
+    short gap (_gap_ok), kept where the joined run is a Nigerian phone number.
+    A lone "0" right after "234" is the trunk prefix ("+234 (0) 803 ...") and
+    is skipped. The 0[789][01] and 234[789][01] prefixes keep vitals out."""
+    chains: list[list[str]] = []
+    prev_end = -1
+    prev = ""
+    for m in _DIGITS.finditer(t):
+        g = m.group()
+        trunk = g == "0" and prev == "234"
+        if not (2 <= len(g) <= 4 or trunk):
+            prev_end, prev = -1, ""
+            continue
+        if chains and prev_end >= 0 and _gap_ok(t, prev_end, m.start()):
+            chains[-1].append("" if trunk else g)
+        else:
+            chains.append([g])
+        prev_end, prev = m.end(), g
+    out: list[str] = []
+    for chain in chains:
+        for i in range(len(chain)):
+            run = chain[i]
+            for j in range(i + 1, len(chain)):
+                run += chain[j]
+                if len(run) > 13:
+                    break
+                if _is_phone(run):
+                    out.append(run)
+    return out
+
+
 def _chains(t: str) -> list[tuple[str, frozenset[int]]]:
-    """For the identifier rule: digit groups of norm_text joined across a
-    single space, "-", "." or "/", with the offsets where groups meet."""
+    """For the identifier rule: the digits-only projection of norm_text,
+    groups joined across any short gap (_gap_ok, review I2), with the offsets
+    where groups meet."""
     out: list[tuple[str, frozenset[int]]] = []
     digits = ""
     bounds: set[int] = set()
     prev_end = -2
     for m in _DIGITS.finditer(t):
-        if digits and m.start() - prev_end == 1 and t[prev_end] in " -./":
+        if digits and _gap_ok(t, prev_end, m.start()):
             digits += m.group()
         else:
             if digits:
@@ -256,9 +386,13 @@ def _placeholders() -> frozenset[str]:
 
 _PLACEHOLDERS: Final = _placeholders()
 _PLACEHOLDER_WORDS: Final = frozenset(norm_words(p) for p in _PLACEHOLDERS)
-_PLACEHOLDER_RE: Final = re.compile(
-    "|".join(re.escape(norm_text(p)) for p in sorted(_PLACEHOLDERS, key=len, reverse=True))
+_PLACEHOLDER_ALT: Final = "|".join(
+    re.escape(norm_text(p)) for p in sorted(_PLACEHOLDERS, key=len, reverse=True)
 )
+_PLACEHOLDER_RE: Final = re.compile(_PLACEHOLDER_ALT)
+# A placeholder between two digits joins them (review M1): only the writer
+# puts a placeholder literal there, to split a number.
+_PLACEHOLDER_IN_DIGITS: Final = re.compile(rf"(?<=[0-9])(?:{_PLACEHOLDER_ALT})+(?=[0-9])")
 
 
 @final
@@ -300,13 +434,19 @@ class Identifiers:
         return f"Identifiers(<{len(self.values)} values>)"
 
     def hit(self, s: str) -> bool:
-        """Whether s holds one of these identifiers."""
+        """Whether s holds one of these identifiers, as written or with the
+        masker's placeholders taken out (review M1)."""
+        t = norm_text(s)
+        stripped = _PLACEHOLDER_RE.sub("", t)
+        return self._hit(s, t) or (stripped != t and self._hit(stripped, stripped))
+
+    def _hit(self, s: str, t: str) -> bool:
         if self._phrases:
             padded = f" {norm_words(s)} "
             if any(f" {p} " in padded for p in self._phrases):
                 return True
         if self._numbers:
-            for digits, bounds in _chains(norm_text(s)):
+            for digits, bounds in _chains(t):
                 for n in self._numbers:
                     i = digits.find(n)
                     while i != -1:
@@ -406,6 +546,17 @@ def leaf_pointers(doc: Any, prefix: str = "") -> frozenset[str]:
     return frozenset(prefix + p for p, _ in walk(doc))
 
 
+def leaf_values(doc: Any, prefix: str = "") -> dict[str, Any]:
+    """Every leaf of doc with its value, under prefix: how an adapter pins
+    its schema's values (Shape.fixed_values)."""
+    return {prefix + p: v for p, v in walk(doc)}
+
+
+def _same(a: object, b: object) -> bool:
+    # Exact type, so True can't stand in for 1, nor 1.0 for 1.
+    return type(a) is type(b) and a == b
+
+
 def _pointer_ok(p: object) -> bool:
     return isinstance(p, str) and p.startswith("/") and "*" not in p
 
@@ -416,11 +567,15 @@ class Shape:
     """An adapter's declaration of its request: exact JSON pointers, no
     wildcards. patient_paths are the two patient-derived blocks (the
     question and the context); allowed_paths are every leaf the adapter
-    emits (the system prompt, the seven block pointers, its fixed scalars and
-    its schema's leaves)."""
+    emits. fixed_values pins the value of every leaf that isn't free text
+    (the system prompt, the model, scalars, roles, block types and the
+    schema's leaves: review M6), so only the blocks carry free text."""
 
     patient_paths: frozenset[str]
     allowed_paths: frozenset[str]
+    fixed_values: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({}), compare=False, hash=False
+    )
 
     def __post_init__(self) -> None:
         for paths in (self.patient_paths, self.allowed_paths):
@@ -428,6 +583,12 @@ class Shape:
                 raise ValueError("a Shape takes frozensets of exact JSON pointers")
         if len(self.patient_paths) != 2 or not self.patient_paths <= self.allowed_paths:
             raise ValueError("a Shape has exactly two patient paths, both allowed")
+        if not isinstance(self.fixed_values, Mapping):
+            raise ValueError("fixed_values is a mapping")
+        fixed = dict(self.fixed_values)
+        if not set(fixed) <= self.allowed_paths or set(fixed) & self.patient_paths:
+            raise ValueError("a fixed pointer is allowed and not a patient path")
+        object.__setattr__(self, "fixed_values", MappingProxyType(fixed))
 
 
 def block_pointers(provider: str) -> tuple[str, ...]:
@@ -438,14 +599,21 @@ def block_pointers(provider: str) -> tuple[str, ...]:
     return tuple(f"{base}/{i}/text" for i in range(MAX_BLOCKS))
 
 
-def shape_for(provider: str, fixed: Iterable[str]) -> Shape:
-    """The provider's Shape: blocks 0 and 1 are the patient paths; allowed
-    are the seven blocks (text and type) plus the adapter's fixed pointers
-    (the system prompt, scalars, roles and the schema's leaves)."""
+BLOCK_TYPES: Final = MappingProxyType({"anthropic": "text", "openai": "input_text", "xai": "text"})
+
+
+def shape_for(provider: str, fixed: Mapping[str, Any]) -> Shape:
+    """The provider's Shape: blocks 0 and 1 are the patient paths; the seven
+    block texts are the only free text; every other leaf is fixed, with its
+    value: the block types, plus the adapter's own (the system prompt,
+    scalars, roles and the schema's leaves, from leaf_values)."""
     texts = block_pointers(provider)
     base = BLOCK_ARRAYS[provider]
-    types = (f"{base}/{i}/type" for i in range(MAX_BLOCKS))
-    return Shape(frozenset(texts[:2]), frozenset(fixed) | frozenset(texts) | frozenset(types))
+    values = {f"{base}/{i}/type": BLOCK_TYPES[provider] for i in range(MAX_BLOCKS)}
+    values.update(fixed)
+    if set(values) & set(texts):
+        raise ValueError("a block's text is never fixed")
+    return Shape(frozenset(texts[:2]), frozenset(texts) | frozenset(values), values)
 
 
 # --- the rules -------------------------------------------------------------------------------
@@ -456,27 +624,38 @@ _MONTH: Final = (
     r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?![a-z])"
 )
 _DATES: Final = (
-    re.compile(r"(?<![0-9])[0-9]{1,2}[/.-][0-9]{1,2}[/.-][0-9]{2,4}(?![0-9])"),
-    re.compile(r"(?<![0-9])[0-9]{4}[/.-][0-9]{1,2}[/.-][0-9]{1,2}(?![0-9])"),
+    # A space either side of the separator too (review I3): "12 / 03 / 1984".
+    re.compile(r"(?<![0-9])[0-9]{1,2} ?[/.-] ?[0-9]{1,2} ?[/.-] ?[0-9]{2,4}(?![0-9])"),
+    re.compile(r"(?<![0-9])[0-9]{4} ?[/.-] ?[0-9]{1,2} ?[/.-] ?[0-9]{1,2}(?![0-9])"),
+    # Spaces only, with a 4-digit year from 1900 to 2099: "12 03 1984".
+    re.compile(r"(?<![0-9.])[0-9]{1,2} [0-9]{1,2} (?:19|20)[0-9]{2}(?![0-9])"),
+    # "12 March 1984", "12th of March, 1984", "12-mar-1984".
     re.compile(
-        r"(?<![0-9])[0-9]{1,2}(?:st|nd|rd|th)?[ ./-]?" + _MONTH + r"\.?[ ,./-]*[0-9]{4}(?![0-9])"
+        r"(?<![0-9])[0-9]{1,2}(?:st|nd|rd|th)?[ ./-]?(?:of )?"
+        + _MONTH
+        + r"\.?[ ,./-]*[0-9]{4}(?![0-9])"
     ),
     re.compile(
         r"(?<![a-z])" + _MONTH + r"\.?[ ./-]?[0-9]{1,2}(?:st|nd|rd|th)?,?[ ./-]?[0-9]{4}(?![0-9])"
     ),
 )
+# A record-number label, then a number or code (review I4). The label must
+# end on a word boundary ("hospital notes" is not one), and the code starts
+# with a letter or digit, never "_" (so "[mrn_redacted]" is not one).
 _MRN: Final = re.compile(
-    r"\b(?:mrn(?![a-z])|hospital no(?![a-z])\.?|hosp\.? no(?![a-z])\.?)\s*[:#]?\s*[^\W_]"
+    r"\b(?:m\.?r\.?n|(?:hospital|hosp\.?|folder|card|file) ?(?:number|no))(?![a-z])"
+    r"[\s:#=.\-]*[^\W_]"
 )
 # A JSON object key in the raw text (the body has already parsed strictly).
 _JSON_KEY: Final = re.compile(r'"(?:[^"\\]|\\.)*"\s*:')
 
 
 def _pattern(s: str) -> str | None:
-    t = _PLACEHOLDER_RE.sub(" ", norm_text(s))
+    t = _PLACEHOLDER_IN_DIGITS.sub("", norm_text(s))
+    t = _PLACEHOLDER_RE.sub(" ", t)
     runs = _digit_runs(t)
     candidates = runs + _grouped_runs(t)
-    if any(_is_phone(r) for r in candidates):
+    if any(_is_phone(r) for r in candidates + _phone_runs(t)):
         return "ng_phone"
     if any(len(r) == 11 for r in candidates):
         return "nin"
@@ -501,8 +680,11 @@ def _scan(body: bytes, ids: Identifiers, shape: Shape) -> str | None:
     if not isinstance(doc, dict):
         return "shape"
     strings: dict[str, str] = {}
+    fixed = shape.fixed_values
     for ptr, leaf in walk(doc):
         if ptr not in shape.allowed_paths:
+            return "shape"
+        if ptr in fixed and not _same(leaf, fixed[ptr]):
             return "shape"
         if isinstance(leaf, str):
             strings[ptr] = leaf
@@ -514,11 +696,26 @@ def _scan(body: bytes, ids: Identifiers, shape: Shape) -> str | None:
     # a value outside a JSON string would be caught here.
     if ids.hit(_JSON_KEY.sub(" ", body.decode("utf-8"))):
         return "known_identifier"
-    for p in sorted(shape.patient_paths):
-        rule = _pattern(strings[p])
+    patient = [strings[p] for p in sorted(shape.patient_paths)]
+    for s in patient:
+        rule = _pattern(s)
         if rule is not None:
             return rule
+    # Ruling C5: the masker's own detector over the two patient blocks; any
+    # detection refuses (the blocks should already be masked output).
+    if any(_masker_detects(s) for s in patient):
+        return "pii_detected"
     return None
+
+
+def _masker_detects(s: str) -> bool:
+    """Whether PIIMasker (the local masker, a fresh instance) finds anything
+    in s, read with invisible characters removed and confusables mapped, case
+    kept (its name rules need capitals)."""
+    from intelligence.security.hipaa import PIIMasker
+
+    _, detections = PIIMasker().mask(_clean(s, fold=False))
+    return bool(detections)
 
 
 def scan_body(body: bytes, ids: Identifiers, shape: Shape) -> str | None:
@@ -563,6 +760,12 @@ class ScanHook:
         try:
             if any(h in request.headers for h in TRACE_HEADERS):
                 return "trace_header"
+            # The URL (decoded) and every header value carry no identifier
+            # of this patient either (review M5).
+            if self._ids.hit(unquote(str(request.url))) or any(
+                self._ids.hit(v) for v in request.headers.values()
+            ):
+                return "known_identifier"
         except Exception:
             return "scan_error"
         try:

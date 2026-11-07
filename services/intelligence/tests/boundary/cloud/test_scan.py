@@ -219,7 +219,6 @@ def test_nigerian_phone_and_nin_blocked_without_record(question: str, rule: str)
         ("Hospital No. 77A", "mrn_prefix"),
         ("hosp no 12", "mrn_prefix"),
         ("ref 4471982 attached", "long_digits"),
-        ("ref 123-456 attached", "long_digits"),
     ],
 )
 def test_patterns_keep_their_punctuation(question: str, rule: str) -> None:
@@ -289,6 +288,12 @@ TYPICAL_QUESTIONS = [
     "fever for 3-5 days, cough, CRP 96 mg/L: chest x-ray?",
     "peak flow 220 L/min, predicted 450: severity?",
     "TSH 0.01 mU/L, free T4 38 pmol/L: treatment?",
+    "BP 120/80, HR 96, T 38.5, RR 18, SpO2 97: discharge?",
+    "BP 120/80 HR 88, Hb 11.2 WBC 7.5: anaemia work-up?",
+    "noradrenaline 0.1 \u00b5g/kg/min, MAP 62: add vasopressin?",
+    "\u03b2-hCG 1500 IU/L, no intrauterine sac: ectopic?",
+    "BP 120 / 80 after 10 min rest: hypertension?",
+    "lab values 1100, 120, 1300 over 3 days: trend?",
 ]
 
 
@@ -317,16 +322,16 @@ def test_common_word_given_name_blocks_today(given_name: str) -> None:
     assert _scan("follow-up interval?", ids, chunk) == "known_identifier"
 
 
-def test_hyphenated_six_digit_range_blocks_today() -> None:
-    """A measured over-block, pinned as current behaviour.
-
-    digit_runs joins across a single hyphen (so "123-456" is caught), which
-    makes a range such as "HR 100-120" the run 100120, and long_digits
-    refuses it. Fails closed; measured in the H2 evaluation with the other
-    false refusals. "BP 120/80" and "3-5 days" are not affected.
-    """
-    assert _scan("HR 100-120 at rest: rate control?") == "long_digits"
+def test_hyphenated_range_is_sent() -> None:
+    """Fix round I2: a range such as "HR 100-120" is sent (digit_runs no
+    longer joins across a hyphen). The cost, recorded as a residual with the
+    spaced-number one ("445 812") and measured in H2: a 6-digit number that
+    is not in this patient's record, written "123-456", passes long_digits.
+    A number in the record is still caught however it is split."""
+    assert _scan("HR 100-120 at rest: rate control?") is None
     assert _scan("HR 100 to 120 at rest: rate control?") is None
+    assert _scan("ref 123-456 attached") is None  # the residual, pinned
+    assert _scan("ref 123-456 attached", _ids({"mrn": "123456"})) == "known_identifier"
 
 
 def test_redacted_placeholders_pass() -> None:
@@ -401,7 +406,7 @@ def test_shape_needs_exact_pointers() -> None:
     with pytest.raises(ValueError):
         scan.Shape(frozenset({"/a"}), frozenset({"/a"}))  # exactly two
     with pytest.raises(ValueError):
-        scan.shape_for("gemini", frozenset())
+        scan.shape_for("gemini", {})
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
@@ -641,7 +646,7 @@ def test_norm_words_and_norm_text() -> None:
 
 
 def test_digit_runs_and_grouped_runs() -> None:
-    assert digit_runs("123-456") == ["123456"]
+    assert digit_runs("123-456") == ["123", "456"]
     assert digit_runs("T 38.5 101.3") == ["38", "5", "101", "3"]
     assert digit_runs("platelets 250 000") == ["250", "000"]
     assert digit_runs("12/03") == ["12", "03"]
@@ -650,3 +655,253 @@ def test_digit_runs_and_grouped_runs() -> None:
     assert "2348031234567" in grouped_runs("+234 803 123 4567")
     assert grouped_runs("38.5 101.3 120 80") == []
     assert grouped_runs("platelets 250 000") == []
+
+
+# --- fix round (task-6-review.md; ruling C5) ------------------------------------------
+
+# core's PatientData (services/core/internal/queries/shapes.go): these four
+# keys only; core refuses any other with a 422.
+CORE_PATIENT: dict[str, Any] = {
+    "age": 34,
+    "sex": "female",
+    "symptoms": ["chest pain"],
+    "medical_history": "Seen by Dr. Emeka Obi in clinic; platelets 15000 last year",
+}
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Dr. Emeka Obi referred her with chest pain",
+        "Patient: Ngozi Eze has chest pain",
+        "call 555-123-4567 about chest pain",
+        "Dr. \u0415meka Obi referred her",  # a Cyrillic E: the skeleton maps it back
+    ],
+)
+def test_masker_detection_in_the_question_refuses(question: str) -> None:
+    # C5: the masker's own detector runs over blocks 0 and 1; any detection
+    # refuses, with no record at all.
+    assert _scan(question) == "pii_detected"
+
+
+def test_masker_detection_in_the_context_refuses() -> None:
+    ctx = "Category: Patient: Ngozi Eze\nRisk: none"
+    assert _scan("chest pain", NO_IDS, context=ctx) == "pii_detected"
+
+
+def test_masker_detection_not_run_on_chunks() -> None:
+    assert _scan("chest pain", NO_IDS, "Guideline by Dr. Emeka Obi, 2019.") is None
+
+
+def test_core_patient_data_feeds_known_identifiers() -> None:
+    # A titled name in medical_history is detected by the masker at collect
+    # time, so the bare name in the question is then this patient's.
+    ids = collect_identifiers("chest pain for 2 days", CORE_PATIENT)
+    assert {"emeka obi", "15000"} <= ids.values
+    assert _scan("Emeka Obi asked about chest pain", ids) == "known_identifier"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="NEEDS_CONTEXT (I1): PIIMasker finds names only after a title "
+    "(Dr, Mr, Mrs, Ms, Miss, Prof, Patient), so an untitled name on core's "
+    "real patient_data reaches the body. Needs a name detector or core's "
+    "keyed name hashes (ruling C5's H2 prerequisite).",
+)
+@pytest.mark.parametrize("where", ["question", "history"])
+def test_untitled_name_on_core_shape_refused(where: str) -> None:
+    patient = dict(CORE_PATIENT)
+    question = "Adaeze Okafor has chest pain"
+    if where == "history":
+        patient["medical_history"] = "Seen by Adaeze Okafor's GP"
+    ids = collect_identifiers(question if where == "question" else "", patient)
+    assert _scan(question, ids) is not None
+
+
+def test_zip_rule_over_block_pinned() -> None:
+    """C4: a measured over-block, pinned. PIIMasker's ZIP rule makes a
+    5-digit lab value in medical_history an identifier, so a chunk with the
+    same number is refused (H2)."""
+    ids = collect_identifiers("", CORE_PATIENT)
+    assert _scan("platelets?", ids, "Transfuse below 15000 per microlitre.") == "known_identifier"
+
+
+def test_name_key_over_block_pinned() -> None:
+    """C4: a measured over-block, pinned. A value under any "name" key is
+    an identifier, so a diagnosis stored as {"name": "Malaria"} refuses every
+    malaria chunk (H2; core's PatientData has no such key today)."""
+    ids = collect_identifiers("", {"diagnosis": [{"name": "Malaria"}]})
+    assert _scan("fever", ids, "Malaria: give artesunate.") == "known_identifier"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "call (0803) 123 4567 now",
+        "call 0803 - 123 - 4567 now",
+        "call 0803\u2013123\u20134567 now",
+        "call 0803\u2014123\u20144567 now",
+        "call 0803,123,4567 now",
+        "call +234 (0) 803 123 4567 now",
+        "call (+234) 803-123-4567 now",
+    ],
+)
+def test_phone_with_any_short_gap_blocked_without_record(question: str) -> None:
+    # I2: no record; the gap between groups is 1 to 3 non-alphanumerics.
+    assert _scan(question) == "ng_phone"
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        "(0803) 123 4567",
+        "0803 - 123 - 4567",
+        "0803\u2013123\u20134567",
+        "0803,123,4567",
+    ],
+)
+def test_known_phone_with_any_short_gap_blocked(written: str) -> None:
+    ids = _ids({"phone": "08031234567"})
+    assert _scan("fever", ids, f"call {written}") == "known_identifier"
+
+
+@pytest.mark.parametrize("written", ["284,817", "284 \u2013 817", "(284) 817", "284 / 817"])
+def test_known_mrn_with_any_short_gap_blocked(written: str) -> None:
+    assert _scan(f"record {written}", _ids({"mrn": "284817"})) == "known_identifier"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "38.5 101.3",
+        "BP 120/80 HR 88",
+        "HR 100-120",
+        "Hb 11.2 WBC 7.5",
+        "BP 120/80, HR 96, T 38.5, RR 18, SpO2 97",
+        "values 1100, 120, 1300",
+    ],
+)
+def test_vitals_still_sent(question: str) -> None:
+    assert _scan(question, _ids()) is None
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "DOB 12 / 03 / 1984",
+        "born 12 of March 1984",
+        "born the 12th of March, 1984",
+        "born 12 03 1984",
+        "seen 3 . 4 . 2024",
+    ],
+)
+def test_spaced_and_worded_dates_blocked(question: str) -> None:
+    # I3.
+    assert _scan(question) == "date"
+
+
+def test_decimal_range_reads_as_a_date_today() -> None:
+    """C4: a measured over-block, pinned (it predates the fix round). A dose
+    range such as "0.5-1.25 mg/kg" has a date's shape (d.d-d.dd) and is
+    refused in the question; in a chunk it is sent (H2)."""
+    assert _scan("dose 0.5-1.25 mg/kg?") == "date"
+    assert _scan("dose?", NO_IDS, "Give 0.5-1.25 mg/kg.") is None
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "MRN-4471",
+        "MRN=4471",
+        "M.R.N. 4471",
+        "hospital number 4471",
+        "folder no 4471",
+        "folder number 4471",
+        "card no. 4471",
+        "file no 4471",
+    ],
+)
+def test_more_mrn_phrasings_blocked(question: str) -> None:
+    # I4.
+    assert _scan(f"{question} has fever") == "mrn_prefix"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "\u0410daeze \u041ekafor has chest pain",  # Cyrillic A and O
+        "\u0430d\u0430eze Ok\u0430for has chest pain",  # Cyrillic a
+        "Ad\u03b1eze \u039fkafor has chest pain",  # Greek alpha and Omicron
+        "Ada\u20ddeze Oka\u20ddfor has chest pain",  # Me
+        "Ada\u0903eze Oka\u0903for has chest pain",  # Mc
+        "Ada\u2800eze Oka\u2800for has chest pain",  # braille blank
+    ],
+)
+def test_confusables_and_marks_blocked(text: str) -> None:
+    # I5.
+    assert _scan(text, _ids()) == "known_identifier"
+
+
+def test_placeholder_between_digits_does_not_split_a_number() -> None:
+    # M1.
+    assert _scan("NIN 12345[NAME_REDACTED]67[NAME_REDACTED]8901") == "nin"
+    ids = _ids({"mrn": "284817"})
+    assert _scan("record 284[DATE_REDACTED]817", ids) == "known_identifier"
+
+
+def test_hook_scans_url_and_headers() -> None:
+    # M5.
+    raw = body("anthropic", blocks("fever"))
+    hook = ScanHook(_ids(), shape("anthropic"))
+    with pytest.raises(EgressRefused) as e:
+        hook(
+            httpx2.Request(
+                "POST", "https://api.anthropic.com/v1/messages?q=Adaeze%20Okafor", content=raw
+            )
+        )
+    assert str(e.value) == "known_identifier"
+    hook = ScanHook(_ids(), shape("anthropic"))
+    req = httpx2.Request("POST", "https://api.anthropic.com/v1/messages", content=raw)
+    req.headers["x-note"] = "Adaeze Okafor"
+    with pytest.raises(EgressRefused) as e:
+        hook(req)
+    assert str(e.value) == "known_identifier"
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_shape_pins_fixed_values(provider: str) -> None:
+    # M6: every leaf outside the blocks has a fixed value; only blocks carry
+    # free text.
+    shp = shape(provider)
+
+    def verdict(doc: dict[str, Any]) -> str | None:
+        return scan_body(json.dumps(doc).encode(), NO_IDS, shp)
+
+    doc = render(provider, blocks("fever"))
+    assert verdict(doc) is None
+    changed = json.loads(json.dumps(doc))
+    changed["model"] = "another-model"
+    assert verdict(changed) == "shape"
+    sys_ptr = {"anthropic": "system", "openai": "instructions"}.get(provider)
+    changed = json.loads(json.dumps(doc))
+    if sys_ptr:
+        changed[sys_ptr] += " Seen by Adaeze Okafor."
+    else:
+        changed["messages"][0]["content"] += " extra"
+    assert verdict(changed) == "shape"
+    widened = json.loads(json.dumps(layouts.SCHEMA))
+    widened["properties"]["answer"]["description"] = "Free text."
+    assert verdict(render(provider, blocks("fever"), widened)) == "shape"
+    # The block type is pinned too, and a bool can't stand in for an int.
+    changed = json.loads(json.dumps(doc))
+    arr = (
+        changed["messages"][0]
+        if provider == "anthropic"
+        else (changed["input"][0] if provider == "openai" else changed["messages"][1])
+    )
+    arr["content"][0]["type"] = "image"
+    assert verdict(changed) == "shape"
+    with pytest.raises(ValueError):
+        scan.Shape(
+            frozenset({"/a", "/b"}), frozenset({"/a", "/b"}), {"/c": 1}
+        )  # a fixed pointer must be allowed
