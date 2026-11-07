@@ -14,11 +14,15 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/config"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/stub"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/ctl"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/secrets"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/replay"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/seal"
 )
 
 var errUsage = errors.New("usage")
@@ -35,21 +39,53 @@ type pinger interface {
 	Ping(ctx context.Context) error
 }
 
+// readier is what health needs of the secret store.
+type readier interface {
+	Ready(ctx context.Context) error
+}
+
 // healthHandler answers emr.v1.ctl.health: readiness flags only, no
-// counts of anyone's data. Nothing is stored or connected yet in this
-// skeleton, so the secret store and the rule set are reported as absent
-// and the proxy allow-list as never written.
-func healthHandler(db pinger) ctl.Handler {
+// counts of anyone's data. No rule set is active and no proxy allow-list
+// is written yet, so they are reported as absent and never written.
+func healthHandler(db pinger, store readier) ctl.Handler {
 	return func(ctx context.Context, _ reqtoken.Claims, _ proto.Message) (proto.Message, error) {
-		ready := false
+		ready, storeReady := false, false
+		c, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
 		if db != nil {
-			c, cancel := context.WithTimeout(ctx, 2*time.Second)
 			ready = db.Ping(c) == nil
-			cancel()
 		}
-		return &emrpb.HealthReply{DatabaseReady: ready, SecretStoreReady: false, RuleSetVersion: "",
+		if store != nil {
+			storeReady = store.Ready(c) == nil
+		}
+		return &emrpb.HealthReply{DatabaseReady: ready, SecretStoreReady: storeReady, RuleSetVersion: "",
 			ProxyAllowListAgeS: -1}, nil
 	}
+}
+
+// loadSealKeys reads the sealing private keys (EMR_SEAL_KEY_PATH): the
+// service refuses to start without one (design §17.4).
+func loadSealKeys(dir string) (seal.Keys, error) {
+	keys, err := seal.LoadPrivateDir(dir)
+	if err != nil {
+		return nil, errors.New("EMR_SEAL_KEY_PATH: no usable sealing key (emr keys seal-init)")
+	}
+	return keys, nil
+}
+
+// openStore opens the secret store: the file store at EMR_SECRETS_DIR, never
+// in production (the managed store, plan Task 12, waits on H3). With no
+// directory there is no store: the credential ops answer nothing (core
+// shows not_ready) and health reports the store not ready.
+func openStore(dir, env string) (*secrets.FileStore, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	s, err := secrets.NewFileStore(dir, env)
+	if err != nil {
+		return nil, errors.New("EMR_SECRETS_DIR: the file store is for development and staging, in a 0700 directory of this user")
+	}
+	return s, nil
 }
 
 func serve(getenv func(string) string) error {
@@ -61,6 +97,14 @@ func serve(getenv func(string) string) error {
 	keys, err := reqtoken.ReadTrusted(s.TrustedKeysPath)
 	if err != nil {
 		return errors.New("EMR_TRUSTED_KEYS_PATH: the trusted request-keys file is missing or not valid")
+	}
+	sealKeys, err := loadSealKeys(s.SealKeyPath)
+	if err != nil {
+		return err
+	}
+	store, err := openStore(s.SecretsDir, s.Env)
+	if err != nil {
+		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -93,10 +137,19 @@ func serve(getenv func(string) string) error {
 	}
 	defer nc.Close()
 
+	handlers := map[string]ctl.Handler{}
+	if store != nil {
+		creds := &ctl.Credentials{Pool: pool, Store: store, Keys: sealKeys, Env: s.Env,
+			Connectors: connector.NewRegistry(s.Development(), stub.New())}
+		handlers = creds.Handlers()
+		handlers["health"] = healthHandler(pool, store)
+	} else {
+		handlers["health"] = healthHandler(pool, nil)
+	}
 	r := &ctl.Responder{
 		Keys:     func() map[string]ed25519.PublicKey { return keys },
 		Replay:   replay.New(ctl.ReplayWindow, ctl.MaxReplayIDs),
-		Handlers: map[string]ctl.Handler{"health": healthHandler(pool)},
+		Handlers: handlers,
 		Log:      log,
 		Metrics:  &ctl.Metrics{},
 	}
@@ -105,7 +158,8 @@ func serve(getenv func(string) string) error {
 		return err
 	}
 	defer stopCtl()
-	log.Info("emr serving", "env", s.Env, "subjects", ctl.Subjects, "rule_set_active", s.RuleSetActive != "")
+	log.Info("emr serving", "env", s.Env, "subjects", ctl.Subjects, "rule_set_active", s.RuleSetActive != "",
+		"secret_store", store != nil, "sealing_keys", len(sealKeys))
 	<-ctx.Done()
 	return nil
 }

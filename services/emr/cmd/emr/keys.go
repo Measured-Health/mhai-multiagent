@@ -3,22 +3,19 @@ package main
 import (
 	"crypto/ecdh"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/seal"
 )
 
 // SealKeyID is a sealing public key's id: the first 16 hex characters of
 // sha256(public key), the rule the request-token keys use.
-func SealKeyID(pub []byte) string {
-	sum := sha256.Sum256(pub)
-	return hex.EncodeToString(sum[:8])
-}
+func SealKeyID(pub []byte) string { return seal.KeyID(pub) }
 
 // sealInit is "emr keys seal-init --out <dir>" (EMR design §6.2): an X25519
 // key pair for the credential boxes core seals, as seal-<kid>.key (0400,

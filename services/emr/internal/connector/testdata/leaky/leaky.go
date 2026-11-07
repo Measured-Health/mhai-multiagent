@@ -13,13 +13,13 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/seal"
 )
 
-// Leak logs credentials five ways.
+// Leak logs credentials six ways.
 func Leak(c connector.Creds, s seal.Secret, l *slog.Logger) error {
-	log.Println("creds", c)                                 // 1
-	slog.Info("x", "c", &c)                                 // 2
-	fmt.Printf("%v\n", s)                                   // 3
-	l.Info("x", "k", c.Get("api_key").Bytes())              // 4
-	fmt.Fprintln(os.Stderr, string(s.Bytes()))              // 5
+	log.Println("creds", c)                                // 1
+	slog.Info("x", "c", &c)                                // 2
+	fmt.Printf("%v\n", s)                                  // 3
+	l.Info("x", "k", c.Get("api_key").Bytes())             // 4
+	fmt.Fprintln(os.Stderr, string(s.Bytes()))             // 5
 	return fmt.Errorf("refused with %s", c.Get("api_key")) // 6
 }
 
