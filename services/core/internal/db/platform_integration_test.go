@@ -37,8 +37,9 @@ var platformFunctions = map[string][2]string{
 		"TABLE(job_type text, error text, failed_now bigint, failed_last_hour bigint, failed_last_24h bigint)"},
 	"mhai_platform_jobs": {"p_status text, p_type text, p_hospital uuid, p_errors text[], p_not_errors text[], p_after_failed_at timestamp with time zone, p_after_id uuid, p_limit integer",
 		"TABLE(id uuid, type text, hospital_id uuid, created_at timestamp with time zone, failed_at timestamp with time zone, attempts integer, error text, status text, retry_count integer, cancelled_by uuid, cancelled_at timestamp with time zone)"},
-	"mhai_guardrail_counts": {"p_from timestamp with time zone, p_to timestamp with time zone",
-		"TABLE(hospital_id uuid, answers bigint, pass bigint, regenerate bigint, escalate bigint, degraded bigint)"},
+	// mhai_guardrail_counts (00017) left this list in 00019 (Plan 7c, A30):
+	// it returns unguarded counts for any window, and the platform no longer
+	// runs it.
 }
 
 // TestPlatformRoleHasNoClinicalRows (C17): mhai_platform holds no grant at
@@ -92,6 +93,8 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"audit_verify_runs":     "00014: the chain checks",
 		"guardrail_snapshots":   "00017: the guarded guardrail statistics, one per period and day (SELECT, INSERT)",
 		"hospital_model_policy": "00018: the per-hospital cloud model policy the platform sets (SELECT, INSERT, column UPDATE)",
+		"analytics_snapshots":   "00019: the guarded analytics snapshots, one per finished period (SELECT)",
+		"analytics_epoch":       "00019: the release epoch, for the not-yet answer (SELECT)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `
@@ -220,9 +223,6 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		case name == "mhai_platform_jobs":
 			// 00016 (Task 12): the failed-jobs list's own reader.
 			wantOwner = "mhai_jobs_reader"
-		case name == "mhai_guardrail_counts":
-			// 00017 (Task 13): the guardrail statistics' own reader.
-			wantOwner = "mhai_guardrail_reader"
 		}
 		if owner != wantOwner || !definer {
 			t.Errorf("%s: owner %s (want %s), security definer %v", name, owner, wantOwner, definer)
@@ -244,10 +244,9 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"mhai_health_failures":   `SELECT * FROM mhai_health_failures()`,
 		"mhai_health_guidelines": `SELECT mhai_health_guidelines()`,
 		"mhai_platform_jobs":     `SELECT * FROM mhai_platform_jobs('failed', NULL, NULL, NULL, NULL, NULL, NULL, 50)`,
-		"mhai_guardrail_counts":  `SELECT * FROM mhai_guardrail_counts(now() - interval '7 days', now())`,
 	}
 	built := map[string]bool{"mhai_health_timings": true, "mhai_health_failures": true, "mhai_health_guidelines": true,
-		"mhai_platform_jobs": true, "mhai_guardrail_counts": true}
+		"mhai_platform_jobs": true}
 	for name, q := range call {
 		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q); return err })
 		switch {
