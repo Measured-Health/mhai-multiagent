@@ -1,0 +1,9 @@
+{
+  "status": 301,
+  "headers": {
+    "content-type": "application/json",
+    "x-request-id": "req_SYNTHETIC0001",
+    "location": "https://redirect.invalid/v1/responses"
+  },
+  "body": {}
+}

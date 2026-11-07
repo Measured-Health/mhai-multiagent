@@ -573,7 +573,13 @@ def _anthropic(model: str) -> Adapter:
     return AnthropicAdapter(model)
 
 
-ADAPTERS: dict[str, Callable[[str], Adapter]] = {"anthropic": _anthropic}
+def _openai(model: str) -> Adapter:
+    from intelligence.boundary.cloud.openai_adapter import OpenAIAdapter
+
+    return OpenAIAdapter(model)
+
+
+ADAPTERS: dict[str, Callable[[str], Adapter]] = {"anthropic": _anthropic, "openai": _openai}
 
 
 def build_cloud_clients(

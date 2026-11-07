@@ -1,0 +1,15 @@
+{
+  "status": 401,
+  "headers": {
+    "content-type": "application/json",
+    "x-request-id": "req_SYNTHETIC0001"
+  },
+  "body": {
+    "error": {
+      "message": "Synthetic invalid key",
+      "type": "invalid_request_error",
+      "param": null,
+      "code": "invalid_api_key"
+    }
+  }
+}

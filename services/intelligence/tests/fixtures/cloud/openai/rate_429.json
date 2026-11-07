@@ -1,0 +1,16 @@
+{
+  "status": 429,
+  "headers": {
+    "content-type": "application/json",
+    "x-request-id": "req_SYNTHETIC0001",
+    "retry-after": "1"
+  },
+  "body": {
+    "error": {
+      "message": "Synthetic rate limit reached",
+      "type": "requests",
+      "param": null,
+      "code": "rate_limit_exceeded"
+    }
+  }
+}

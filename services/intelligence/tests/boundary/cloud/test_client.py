@@ -834,4 +834,4 @@ def test_adapters_turn_sdk_retries_off() -> None:
 
 
 # The adapters registered so far (plan Tasks 11 to 13).
-REGISTERED = frozenset({"anthropic"})
+REGISTERED = frozenset({"anthropic", "openai"})
