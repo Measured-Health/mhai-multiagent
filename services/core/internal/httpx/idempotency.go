@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 )
 
 // Principal is who a request acts for. The token middleware sets it with

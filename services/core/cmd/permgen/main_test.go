@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // render reads proto/ with paths from services/core, so the tests run there.

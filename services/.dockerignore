@@ -1,0 +1,14 @@
+# The Go images (core, emr) build from services/, because both require
+# services/gokit (ADR 0014). Only the Go modules go into the context.
+intelligence
+nats
+**/*_test.go
+**/Dockerfile
+**/.dockerignore
+# Never send local secrets into the build context.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.nk
+**/secrets

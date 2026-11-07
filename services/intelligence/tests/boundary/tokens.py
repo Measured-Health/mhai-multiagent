@@ -1,7 +1,7 @@
 """TEST-ONLY request-token minting for the boundary tests.
 
 It signs with the same test-only seed as core's shared vectors
-(services/core/internal/reqtoken/vectors_test.go), so a token minted here
+(services/gokit/reqtoken/vectors_test.go), so a token minted here
 can be checked byte for byte against a Go vector. Every id is synthetic.
 Nothing outside tests may import this module.
 """

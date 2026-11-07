@@ -194,6 +194,10 @@ func TestComposeNATSGetsEveryUserSecret(t *testing.T) {
 				if k == "NATS_URL" && workerPasswords[name] == s {
 					continue
 				}
+				// The emr service's own password, in its own variable.
+				if name == "emr" && k == "EMR_NATS_PASSWORD" && s == "NATS_EMR_PASSWORD" {
+					continue
+				}
 				if k == s || strings.Contains(v, s) {
 					t.Errorf("%s env %s carries %s", name, k, s)
 				}
@@ -519,6 +523,221 @@ func TestComposeSmokeOverride(t *testing.T) {
 			if strings.Contains(k, "PASSWORD") || strings.Contains(k, "KEY") {
 				t.Errorf("%s: the smoke override sets %s; secrets come from the generated env file", name, k)
 			}
+		}
+	}
+}
+
+// Plan departure 5: core requires services/gokit (replace ../gokit), so
+// its image builds from services/ with core/Dockerfile, the same way in
+// dev compose, CI, the deploy workflow and the Makefile. A build from
+// services/core would fail at go mod download, so a stale context anywhere
+// is a broken image there.
+func TestCoreBuildsFromServices(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "..")
+	read := func(rel string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	var c struct {
+		Services map[string]struct {
+			Build any    `yaml:"build"`
+			Image string `yaml:"image"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(read("docker-compose.yml")), &c); err != nil {
+		t.Fatal(err)
+	}
+	builds := 0
+	for name, s := range c.Services {
+		if s.Image != "mhai-core:local" || s.Build == nil {
+			continue
+		}
+		builds++
+		b, ok := s.Build.(map[string]any)
+		if !ok || b["context"] != "./services" || b["dockerfile"] != "core/Dockerfile" {
+			t.Errorf("%s builds core with %v, want context ./services and dockerfile core/Dockerfile", name, s.Build)
+		}
+	}
+	if builds != 1 {
+		t.Errorf("%d services build mhai-core:local, want 1", builds)
+	}
+	// Every docker build of core in CI and the Makefile.
+	for _, rel := range []string{".github/workflows/ci.yml", "Makefile"} {
+		n := 0
+		for _, line := range strings.Split(read(rel), "\n") {
+			if !strings.Contains(line, "docker build") || !strings.Contains(line, "mhai-core:") {
+				continue
+			}
+			n++
+			if !strings.HasSuffix(strings.TrimSpace(line), "-f services/core/Dockerfile services") {
+				t.Errorf("%s: %q must build with -f services/core/Dockerfile services", rel, strings.TrimSpace(line))
+			}
+		}
+		if n == 0 {
+			t.Errorf("%s builds no core image", rel)
+		}
+	}
+	deploy := read(".github/workflows/deploy.yml")
+	if !strings.Contains(deploy, "context: services\n") || !strings.Contains(deploy, "file: services/core/Dockerfile\n") ||
+		strings.Contains(deploy, "context: services/core") {
+		t.Error("deploy.yml must build core with context services and file services/core/Dockerfile")
+	}
+	// The context is all of services/: the Python project and test files
+	// stay out of it.
+	ignore := read("services/.dockerignore")
+	for _, want := range []string{"intelligence", "**/*_test.go"} {
+		if !strings.Contains(ignore, want+"\n") {
+			t.Errorf("services/.dockerignore lacks %s", want)
+		}
+	}
+	if !strings.Contains(read("services/core/Dockerfile"), "COPY gokit/") {
+		t.Error("services/core/Dockerfile doesn't copy gokit")
+	}
+}
+
+// EMR off by default (plan Task 5): the emr service, its key one-shot and
+// their volumes exist only under the profile emr; only they mount the emr
+// volumes (core never sees a private key or a secret); they publish no
+// port (any port would be on 127.0.0.1); the emr service gets its own NATS
+// password and nothing of core's.
+func TestComposeEMRProfile(t *testing.T) {
+	svcs := loadCompose(t)
+	emrNames := []string{"emr", "emr-keys"}
+	for _, name := range emrNames {
+		s, ok := svcs[name]
+		if !ok {
+			t.Fatalf("no %s service", name)
+		}
+		if !slices.Equal(s.Profiles, []string{"emr"}) {
+			t.Errorf("%s profiles %v, want [emr]", name, s.Profiles)
+		}
+		for _, p := range s.Ports {
+			if !strings.HasPrefix(p, "127.0.0.1:") {
+				t.Errorf("%s publishes %s", name, p)
+			}
+		}
+		if s.EnvFile != nil {
+			t.Errorf("%s uses env_file", name)
+		}
+	}
+	for name, s := range svcs {
+		for _, v := range s.Volumes {
+			vol := strings.SplitN(v, ":", 2)[0]
+			if (vol == "emr-secrets" || vol == "emr-keys") && !slices.Contains(emrNames, name) {
+				t.Errorf("%s mounts %s", name, vol)
+			}
+			if vol == "emr-secrets" && name != "emr" {
+				t.Errorf("%s mounts emr-secrets", name)
+			}
+		}
+		if !slices.Contains(emrNames, name) && slices.Contains(s.Profiles, "emr") {
+			t.Errorf("%s is in the emr profile", name)
+		}
+	}
+	e := svcs["emr"]
+	if !strings.Contains(e.Environment["EMR_NATS_PASSWORD"], "NATS_EMR_PASSWORD") || strings.Contains(e.Environment["EMR_NATS_URL"], "@") {
+		t.Errorf("emr NATS settings: %v", e.Environment)
+	}
+	for k, v := range e.Environment {
+		for _, bad := range []string{"NATS_GATEWAY_PASSWORD", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "CORE_DB_PASSWORD",
+			"POSTGRES_PASSWORD", "PROVISION_DB_PASSWORD", "INTELLIGENCE_DB_PASSWORD", "NATS_JS_KEY"} {
+			if strings.Contains(v, bad) {
+				t.Errorf("emr env %s carries %s", k, bad)
+			}
+		}
+	}
+	if svcs["core"].Environment["CORE_EMR_ENABLED"] != "" && !strings.Contains(svcs["core"].Environment["CORE_EMR_ENABLED"], "false") {
+		t.Errorf("core CORE_EMR_ENABLED defaults on: %q", svcs["core"].Environment["CORE_EMR_ENABLED"])
+	}
+	var c struct {
+		Volumes map[string]any `yaml:"volumes"`
+	}
+	raw, _ := os.ReadFile(filepath.Join("..", "..", "..", "..", "docker-compose.yml"))
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"emr-secrets", "emr-keys"} {
+		if _, ok := c.Volumes[v]; !ok {
+			t.Errorf("no volume %s", v)
+		}
+	}
+}
+
+// Today's dev setups keep working: the emr NATS user is off unless
+// NATS_EMR_CONF=emr.conf, NATS needs no NATS_EMR_PASSWORD while it is off,
+// and only nats and the emr service ever see that password.
+func TestComposeEMRNATSUserOffByDefault(t *testing.T) {
+	svcs := loadCompose(t)
+	n := svcs["nats"]
+	if n.Environment["NATS_EMR_CONF"] != "${NATS_EMR_CONF:-emr-off.conf}" {
+		t.Errorf("NATS_EMR_CONF = %q, want the emr-off.conf default", n.Environment["NATS_EMR_CONF"])
+	}
+	if pw := n.Environment["NATS_EMR_PASSWORD"]; pw != "${NATS_EMR_PASSWORD:-}" {
+		t.Errorf("NATS_EMR_PASSWORD = %q, want optional", pw)
+	}
+	if !slices.Contains(n.Volumes, "./services/nats/${NATS_EMR_CONF:-emr-off.conf}:/etc/nats/emr.conf:ro") {
+		t.Errorf("nats doesn't mount the emr fragment as /etc/nats/emr.conf: %v", n.Volumes)
+	}
+	for name, s := range svcs {
+		if name == "nats" || name == "emr" {
+			continue
+		}
+		for k, v := range s.Environment {
+			if strings.Contains(k+v, "NATS_EMR_PASSWORD") {
+				t.Errorf("%s env %s carries NATS_EMR_PASSWORD", name, k)
+			}
+		}
+	}
+
+	// The guard, as compose runs it: off needs nothing; on needs a real
+	// password; nothing else is a valid fragment.
+	const execLine = "exec nats-server -c /etc/nats/nats.conf"
+	script := strings.Replace(strings.ReplaceAll(n.Command[0], "$$", "$"), execLine, "echo started", 1)
+	base := map[string]string{}
+	for _, k := range natsUserSecrets {
+		base[k] = "synthetic" + strings.ReplaceAll(strings.ToLower(k), "_", "") + "0123456789"
+	}
+	base["NATS_JS_KEY"] = "ksynthetic0123456789abcdef0123456789abcdef"
+	run := func(extra map[string]string) bool {
+		cmd := exec.Command("/bin/sh", "-c", script)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+		for k, v := range base {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		for k, v := range extra {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		out, err := cmd.CombinedOutput()
+		return err == nil && strings.Contains(string(out), "started")
+	}
+	for _, tc := range []struct {
+		env   map[string]string
+		start bool
+	}{
+		{map[string]string{"NATS_EMR_CONF": "emr-off.conf"}, true},
+		{map[string]string{"NATS_EMR_CONF": "emr-off.conf", "NATS_EMR_PASSWORD": ""}, true},
+		{map[string]string{"NATS_EMR_CONF": "emr.conf", "NATS_EMR_PASSWORD": "syntheticEmrPassword0123456789"}, true},
+		{map[string]string{"NATS_EMR_CONF": "emr.conf"}, false},
+		{map[string]string{"NATS_EMR_CONF": "emr.conf", "NATS_EMR_PASSWORD": "changemeReplaceWithLettersAndDigits"}, false},
+		{map[string]string{"NATS_EMR_CONF": "../../etc/passwd"}, false},
+		{map[string]string{}, true}, // unset is off
+	} {
+		if got := run(tc.env); got != tc.start {
+			t.Errorf("%v: started %v, want %v", tc.env, got, tc.start)
+		}
+	}
+	// .env.example leaves the emr user off.
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", ".env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "NATS_EMR_") {
+			t.Errorf(".env.example sets %s", line)
 		}
 	}
 }

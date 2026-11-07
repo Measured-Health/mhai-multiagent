@@ -18,6 +18,16 @@ updates:
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
 
+  - package-ecosystem: gomod
+    directory: /services/gokit
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: gomod
+    directory: /services/emr
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }

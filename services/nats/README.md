@@ -9,6 +9,8 @@ Configuration for the NATS server, the only link between the core service
 |---|---|
 | `nats.conf` | dev compose (mounted read-only at `/etc/nats/nats.conf`) and every integration test (`services/core/internal/testutil/nats.go` copies it into the test container), so the tests exercise the real permissions |
 | `bff-clinical.test.conf` | included by `nats.conf`: the whole `bff_clinical` user, with the test-only `bff_direct` subject `inference.v1.echo.ping` |
+| `emr.conf` | the emr service's user (ADR 0014), mounted as `/etc/nats/emr.conf` only when `NATS_EMR_CONF=emr.conf` (needs `NATS_EMR_PASSWORD`; the compose profile `emr`) |
+| `emr-off.conf` | the default for `/etc/nats/emr.conf`: a user nobody can sign in as, with no rights, needing no variable. The demo's `deploy/nats/nats.conf` has no emr user until ops provision `NATS_EMR_NKEY` (TODO.md) |
 
 The production-shaped config is [`deploy/nats/nats.conf`](../../deploy/nats/nats.conf)
 (the demo server): NKeys only, and it never includes a `*.test.conf` file.

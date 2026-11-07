@@ -99,7 +99,7 @@ jobs:
         run: uv sync --locked
       - name: Build the core image (migrations)
         working-directory: .
-        run: docker build -t mhai-core:test services/core
+        run: docker build -t mhai-core:test -f services/core/Dockerfile services
       - name: Boundary tests
         env:
           COVERAGE_FILE: coverage.boundary
@@ -174,6 +174,58 @@ jobs:
       - name: Vet the smoke test
         run: go vet -tags smoke ./internal/smoke/...
 
+  # The Go module core and the emr service share (ADR 0014): a defect here
+  # reaches both.
+  gokit:
+    runs-on: ubuntu-latest  # ships Docker, which the integration tests use
+    defaults:
+      run:
+        working-directory: services/gokit
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: services/gokit/go.sum
+      - name: Formatted (gofmt)
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+      - name: Test
+        run: go test -race ./...
+      - name: Integration tests
+        run: go test -race -tags integration ./...
+
+  # The emr service (ADR 0014). Its integration tests run on core's
+  # migrations (internal/testpg).
+  emr:
+    runs-on: ubuntu-latest  # ships Docker, which the integration tests use
+    defaults:
+      run:
+        working-directory: services/emr
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: services/emr/go.sum
+      - name: Formatted (gofmt)
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+      - name: Test
+        run: go test -race ./...
+      - name: Integration tests
+        run: go test -race -tags integration ./...
+
   # ADR 0012: a breaking change to the HTTP contract needs a new major
   # version (/api/v2), so it may not change /api/v1 in place.
   openapi-breaking:
@@ -209,6 +261,12 @@ jobs:
               - services/intelligence/pyproject.toml
               - services/intelligence/uv.lock
               - services/intelligence/intelligence/**
+            go_image:
+              - .github/workflows/ci.yml
+              - services/.dockerignore
+              - services/core/**
+              - services/gokit/**
+              - services/emr/**
       - uses: docker/setup-buildx-action@v3
         if: steps.changes.outputs.image == 'true'
       # Layers are cached between runs, so only changed layers rebuild.
@@ -240,6 +298,21 @@ jobs:
           assert clinical_roles()
           print('operations.json and catalogue.json load from the installed package')
           "
+
+      # The Go images build from services/ (they require services/gokit,
+      # ADR 0014), as the deploy workflow builds core.
+      - name: Build the core image from services/
+        if: steps.changes.outputs.go_image == 'true'
+        run: |
+          docker build -t mhai-core:ci -f services/core/Dockerfile services
+          out=$(docker run --rm mhai-core:ci help 2>&1 || true)
+          case "$out" in "usage: core"*) echo "the core image runs" ;; *) echo "::error::the core image doesn't run"; exit 1 ;; esac
+      - name: Build the emr image from services/
+        if: steps.changes.outputs.go_image == 'true'
+        run: |
+          docker build -t mhai-emr:ci -f services/emr/Dockerfile services
+          out=$(docker run --rm mhai-emr:ci help 2>&1 || true)
+          case "$out" in "usage: emr"*) echo "the emr image runs" ;; *) echo "::error::the emr image doesn't run"; exit 1 ;; esac
 
   # Spec section 12: the whole boundary end to end. The smoke stack
   # (docker-compose.yml + docker-compose.smoke.yml: core, NATS, Postgres,
@@ -278,7 +351,7 @@ jobs:
           tags: mhai-intelligence:cpu
           cache-from: type=gha
       - name: Build the core image
-        run: docker build -t mhai-core:local services/core
+        run: docker build -t mhai-core:local -f services/core/Dockerfile services
       # The demo deploy's pre-migration check, against a throwaway Postgres
       # with core's migrations (fails closed on every error).
       - name: Pre-migration check tests

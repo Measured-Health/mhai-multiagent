@@ -16,16 +16,14 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/protobuf/proto"
-
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 var update = flag.Bool("update", false, "rewrite the shared request-token vectors in testdata/request-tokens")
 
 // vectorDir is the repository's testdata/request-tokens, which the Python
 // verifier's test_token_vectors.py also reads.
-var vectorDir = filepath.Join("..", "..", "..", "..", "testdata", "request-tokens")
+var vectorDir = filepath.Join("..", "..", "..", "testdata", "request-tokens")
 
 // testOnlyVectorSeed is a TEST-ONLY Ed25519 seed. It signs the shared
 // vectors and nothing else: no key file is ever written from it, so core
@@ -65,11 +63,20 @@ func vectorSigner(name string) Signer {
 		Now: func() time.Time { return vectorMint }, rand: bytes.NewReader(jti[:16])}
 }
 
-func pb(t *testing.T, m proto.Message) []byte {
-	t.Helper()
-	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(m)
-	if err != nil {
-		t.Fatal(err)
+// pbStrings encodes a protobuf message whose fields are strings, in field
+// order, exactly as deterministic proto.Marshal does (empty strings are
+// left out, as proto3 does). gokit can't import core's generated
+// intelpb, so the shared vector bodies are encoded here: PingRequest is
+// {1: text, 2: hospital_id}, RunQueryJob {1: query_id}, and emr's
+// TestRequest {1: connection_id}.
+func pbStrings(fields ...string) []byte {
+	var b []byte
+	for i, f := range fields {
+		if f == "" {
+			continue
+		}
+		b = protowire.AppendTag(b, protowire.Number(i+1), protowire.BytesType)
+		b = protowire.AppendString(b, f)
 	}
 	return b
 }
@@ -91,8 +98,8 @@ func buildVectors(t *testing.T) []vector {
 	pub := priv.Public().(ed25519.PublicKey)
 	kid := KeyID(pub)
 	keySet := map[string]string{kid: b64.EncodeToString(pub)}
-	ping := pb(t, &intelpb.PingRequest{Text: "synthetic ping", HospitalId: testHospital})
-	jobBody := pb(t, &intelpb.RunQueryJob{QueryId: queryID})
+	ping := pbStrings("synthetic ping", testHospital)
+	jobBody := pbStrings(queryID)
 	jobSubject := "jobs.v1." + testHospital + ".run_query"
 	after := vectorMint.Add(time.Second).Unix()
 
@@ -202,7 +209,7 @@ func buildVectors(t *testing.T) []vector {
 		}(),
 		func() vector {
 			v := req("wrong_bh", "the body differs from the one signed", reqTok("wrong_bh"), "binding")
-			v.Body = base64.StdEncoding.EncodeToString(pb(t, &intelpb.PingRequest{Text: "synthetic pinG", HospitalId: testHospital}))
+			v.Body = base64.StdEncoding.EncodeToString(pbStrings("synthetic pinG", testHospital))
 			return v
 		}(),
 		func() vector {
@@ -310,6 +317,39 @@ func buildVectors(t *testing.T) []vector {
 			return v
 		}(),
 	)
+	// The emr service's control subjects (EMR design §3.2, plan departure
+	// 4): verified by the emr service (aud emr). A worker refuses each by
+	// audience (test_token_vectors.py).
+	const (
+		emrSchema     = "mhai.emr.v1.TestRequest"
+		emrConnection = "88888888-8888-4888-8888-888888888888"
+	)
+	emrBody := pbStrings(emrConnection)
+	emrC := Claims{Aud: "emr", Sub: testUser, Hid: testHospital, Roles: []string{"platform_admin"}, Rid: testRid,
+		Kind: KindReq, Subject: "emr.v1.ctl.test", ReplyPrefix: ReplyCore, Via: ViaCore}
+	emr := func(name, note, tok, verdict string) vector {
+		return vector{Name: name, Note: note, Token: tok, Keys: keySet, Body: base64.StdEncoding.EncodeToString(emrBody),
+			Subject: emrC.Subject, Reply: coreReply, RequestID: testRid, Schema: emrSchema, Knd: "req",
+			Service: "emr", Now: after, Verdict: verdict}
+	}
+	emrTok := func(name string) string { return mintV(name, emrC, emrBody, 5*time.Second) }
+	emrShape := func(name, note, subject string) vector {
+		v := emr(name, note, resignV(name, emrC, emrBody, 5*time.Second, func(_, p map[string]any) { p["nsub"] = subject }), "binding")
+		v.Subject = subject
+		return v
+	}
+	vs = append(vs,
+		emr("valid_emr_ctl", "core's control call to the emr service", emrTok("valid_emr_ctl"), "ok"),
+		func() vector {
+			v := emr("wrong_aud_emr_ctl", "an emr control token verified by the pipeline worker", emrTok("wrong_aud_emr_ctl"), "claims")
+			v.Service = "pipeline"
+			return v
+		}(),
+		emr("emr_ctl_inference_aud", "aud pipeline on an emr control subject, validly signed",
+			resignV("emr_ctl_inference_aud", emrC, emrBody, 5*time.Second, func(_, p map[string]any) { p["aud"] = "pipeline" }), "claims"),
+		emrShape("emr_ctl_three_segments", "emr.v1.ctl with no operation", "emr.v1.ctl"),
+		emrShape("emr_ctl_wrong_shape", "emr.v1.ctl.test.x: a fifth segment", "emr.v1.ctl.test.x"),
+	)
 	sort.Slice(vs, func(i, j int) bool { return vs[i].Name < vs[j].Name })
 	return vs
 }
@@ -377,7 +417,7 @@ func TestRequestTokenVectorsUpToDate(t *testing.T) {
 	for name, raw := range want {
 		got, err := os.ReadFile(filepath.Join(vectorDir, name))
 		if err != nil || !bytes.Equal(got, raw) {
-			t.Errorf("%s is stale or missing (run go test ./internal/reqtoken -run TestRequestTokenVectorsUpToDate -update)", name)
+			t.Errorf("%s is stale or missing (run go test ./reqtoken -run TestRequestTokenVectorsUpToDate -update in services/gokit)", name)
 		}
 	}
 	// Every required kind of case is covered.
@@ -386,7 +426,8 @@ func TestRequestTokenVectorsUpToDate(t *testing.T) {
 		"reply_outside_rpl", "grant_in_message", "alg_none", "alg_hs256", "wrong_iss", "missing_rid",
 		"unknown_claim", "oversize", "dup_payload_key", "case_folded_claim", "null_claim", "float_iat", "bool_iat",
 		"null_in_roles", "padded_segment", "four_parts", "newline_in_segment", "iat_overflow", "iat_at_skew",
-		"exp_iat_60s", "empty_hid_hospital_subject", "rpl_on_job", "oversize_body"} {
+		"exp_iat_60s", "empty_hid_hospital_subject", "rpl_on_job", "oversize_body",
+		"valid_emr_ctl", "wrong_aud_emr_ctl", "emr_ctl_inference_aud", "emr_ctl_three_segments", "emr_ctl_wrong_shape"} {
 		if _, ok := want[name+".json"]; !ok {
 			t.Errorf("no %s vector", name)
 		}

@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+// The emr service's control operations, emr.v1.ctl.<op> (EMR integration
+// design §3.2). Core is the only caller; every request carries a request
+// token (aud emr) in its headers. Ids, closed codes and counts only: never
+// a name, an MRN, an address, a value or a credential in clear. The
+// put_credentials boxes are sealed to the emr service's key (design §6.2).
+package mhai.emr.v1;
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb;emrpb";
+
+// emr.v1.ctl.health, as svc:core (the platform health sampler).
+message HealthRequest {}
+
+message HealthReply {
+  bool database_ready = 1;
+  bool secret_store_ready = 2;
+  // The active rule set's version; empty when none is active (every
+  // finding is shadow).
+  string rule_set_version = 3;
+  // Seconds since the proxy allow-list was written; -1 when never.
+  int64 proxy_allow_list_age_s = 4;
+}
+
+// emr.v1.ctl.test, as a platform admin: try the saved settings (PR 3).
+message TestRequest {
+  string connection_id = 1;
+}
+
+message TestReply {
+  bool ok = 1;
+  // A closed outcome code: ok, unreachable, sign_in_refused, timed_out,
+  // unreadable_data, unmapped_codes, too_many_requests.
+  string code = 2;
+}
+
+// One credential field, sealed to the emr service's public key (PR 3).
+message SealedField {
+  string field = 1;
+  string kid = 2;
+  bytes box = 3;
+}
+
+// emr.v1.ctl.put_credentials, as a platform admin with step-up (PR 3).
+message PutCredentialsRequest {
+  string connection_id = 1;
+  repeated SealedField fields = 2;
+}
+
+message FieldSetAt {
+  string field = 1;
+  // RFC 3339, UTC.
+  string set_at = 2;
+}
+
+message PutCredentialsReply {
+  repeated FieldSetAt fields = 1;
+}
+
+// emr.v1.ctl.wipe_credentials, as a platform admin (PR 3).
+message WipeCredentialsRequest {
+  string connection_id = 1;
+}
+
+message WipeCredentialsReply {
+  bool wiped = 1;
+}
+
+// emr.v1.ctl.sync_now, as svc:core (PR 6).
+message SyncNowRequest {
+  string connection_id = 1;
+}
+
+message SyncNowReply {
+  bool queued = 1;
+}
+
+// emr.v1.ctl.redrive, as a platform admin with step-up (PR 8b).
+message RedriveRequest {
+  // emr_normalise or emr_rules.
+  string stage = 1;
+  string batch_id = 2;
+}
+
+message RedriveReply {
+  bool queued = 1;
+}

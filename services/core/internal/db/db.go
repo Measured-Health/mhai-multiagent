@@ -22,6 +22,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/dbx"
 )
 
 //go:embed migrations/*.sql
@@ -29,18 +31,18 @@ var migrations embed.FS
 
 // The database roles a transaction can run as (design §7.4).
 const (
-	roleGateway  = "mhai_gateway"
 	rolePlatform = "mhai_platform"
 	roleAuth     = "mhai_auth"
 	roleJobs     = "mhai_jobs"
 	roleDrain    = "mhai_audit_drain"
 )
 
-// ErrNoHospital is returned by WithHospital for the nil hospital id.
-var ErrNoHospital = errors.New("db: no hospital id")
+// ErrNoHospital is returned by WithHospital for the nil hospital id (the
+// shared dbx value, so errors.Is holds across both).
+var ErrNoHospital = dbx.ErrNoHospital
 
 // ErrNoUser is returned by WithHospitalUser for the nil user id.
-var ErrNoUser = errors.New("db: no user id")
+var ErrNoUser = dbx.ErrNoUser
 
 // Open connects a pool and checks it with a ping.
 func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
@@ -62,11 +64,10 @@ func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 // WithHospital runs fn in a transaction as mhai_gateway, with
 // mhai.hospital_id set so row-level security shows only that hospital's
 // rows. The transaction commits if fn returns nil and rolls back otherwise.
+//
+// It is gokit's dbx.WithHospital as mhai_gateway (plan departure 6).
 func WithHospital(ctx context.Context, pool *pgxpool.Pool, hospitalID uuid.UUID, fn func(pgx.Tx) error) error {
-	if hospitalID == uuid.Nil {
-		return ErrNoHospital
-	}
-	return inRole(ctx, pool, roleGateway, hospitalID.String(), nil, fn)
+	return dbx.WithHospital(ctx, pool, dbx.Gateway, hospitalID, fn)
 }
 
 // WithHospitalUser is WithHospital plus mhai.user_id set (transaction-local)
@@ -75,13 +76,7 @@ func WithHospital(ctx context.Context, pool *pgxpool.Pool, hospitalID uuid.UUID,
 // through mhai_current_user(). RLS stays hospital-only. The id comes from
 // the verified token, never from a request body.
 func WithHospitalUser(ctx context.Context, pool *pgxpool.Pool, hospitalID, userID uuid.UUID, fn func(pgx.Tx) error) error {
-	if hospitalID == uuid.Nil {
-		return ErrNoHospital
-	}
-	if userID == uuid.Nil {
-		return ErrNoUser
-	}
-	return inRole(ctx, pool, roleGateway, hospitalID.String(), &userID, fn)
+	return dbx.WithHospitalUser(ctx, pool, dbx.Gateway, hospitalID, userID, fn)
 }
 
 // WithPlatform runs fn in a transaction as mhai_platform: metadata across

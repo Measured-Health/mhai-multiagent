@@ -77,6 +77,8 @@ def start_nats() -> Iterator[NatsServer]:
         .with_copy_into_container(
             NATS_DIR / "bff-clinical.test.conf", "/etc/nats/bff-clinical.test.conf"
         )
+        # The emr user off (the default): no NATS_EMR_PASSWORD needed.
+        .with_copy_into_container(NATS_DIR / "emr-off.conf", "/etc/nats/emr.conf")
         .waiting_for(LogMessageWaitStrategy("Server is ready"))
     )
     c.start()

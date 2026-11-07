@@ -769,6 +769,40 @@ frontend:
   **New**); connection setup in the platform admin app, driven by the
   fields each connector declares (shape: **New**).
 
+### 12.1 Alert settings, routing and evidence (hospital side; Plan 13, filed 7 Nov)
+
+Additive requirements from mhai-web Plan 13 and the
+[EMR integration design](2026-11-07-emr-integration-design.md) §12 and §16.
+The shapes are the design's §16.2 and §16.3.
+
+- **Alert settings** (`GET`/`PATCH /hospital/alert-settings`, hospital
+  admin): units covered, which levels to receive (`critical`, `urgent`,
+  `info`; never a threshold), recipients (the queue and named clinicians,
+  active clinicians of the same hospital only; 422 `no_recipients` when
+  none), connection status by source label only (no address, type or error
+  code), `version` for conflicts.
+- **Routing is fixed at creation:** an alert's recipients are recorded when
+  it is raised and never recomputed from later settings. A recipient who
+  is deactivated or loses `clinician` has their open alerts moved to the
+  queue.
+- **Evidence on every alert:** the finding (name, value as recorded, unit,
+  flag, reference range as given, `recorded_at`, `code_system`,
+  `standardised`), likely causes with a confidence word (`caution` or
+  `review`; `high` is never sent in v1), the patient's name, MRN and
+  location, `source_label` and `emr_link`.
+- **Fields the app must show before live use** (design §16.4):
+  `sources_status` on every alert page (an empty list says "no alerts"
+  only when every source is current), `arrived_late`, `preliminary`,
+  `amended`, `withdrawn` (`source_amended`, `source_retracted`,
+  `excluded`), grouped mode (`grouped {since, count}`), and a nullable
+  `mrn` ("No MRN recorded").
+- **Possible duplicates** (`/hospital/patient-matches`, confirm or reject,
+  step-up): the hospital admin decides every merge; nothing merges by
+  itself.
+- **Exclusions** (`POST /hospital/patient-exclusions`, step-up): a patient
+  who objects is excluded; open alerts are withdrawn at once and their data
+  purged within 24 hours (`purge_by`).
+
 ## 13. Conflicts with the gateway design
 
 Each needs a decision, then an update to the gateway spec or this list.
@@ -1382,3 +1416,29 @@ reason}`, `kind` one of `retention` or `re_anchor`.
   audience.
 - Daily check at 06:00 UTC (a suggestion), each run its own entry; one run at
   a time.
+
+### 14.11 Record connections (platform admin; Plan 13, filed 7 Nov)
+
+The platform app's record connections screens. Shapes: the
+[EMR integration design](2026-11-07-emr-integration-design.md) §16.1.
+(§14.10, platform clearances, is mhai-web Plan 11b's contract.)
+
+- **Connector types** come from the backend (`GET
+  /platform/emr/connector-types`), with the fields each declares; only
+  built types are listed, and none while EMR is off.
+- **Connections** are listed by hospital and state (`all`,
+  `needs_attention`, `off`, `not_connected`), created **off**, changed with
+  step-up and a `version`, and switched on only after a passing test of
+  the saved settings (409 `not_tested`).
+- **Credentials are write-only:** the app sends them; the backend returns
+  only `credentials: [{key, set_at}]`, never a value. Changing the base
+  address or token address wipes them and switches the connection off.
+- **Health:** `never`, `ok` or `errors`; `last_sync`; at most five recent
+  errors from a closed list (`unreachable`, `sign_in_refused`,
+  `timed_out`, `unreadable_data`, `unmapped_codes`, `too_many_requests`);
+  `paused` when the source's breaker tripped, with `resume` (step-up).
+- **No vendor names:** `source_label` is 1 to 40 characters and never a
+  vendor or product name; `type_label` is the type's own label.
+- **Before the first real hospital's credentials,** the platform BFF seals
+  them before they leave the Node server (`credentials_sealed`), so core
+  never sees plaintext (design §6.2, §17.6).

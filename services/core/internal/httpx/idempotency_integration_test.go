@@ -22,8 +22,8 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 )
 
 // super is a superuser pool for setup and inspection; app connects as a

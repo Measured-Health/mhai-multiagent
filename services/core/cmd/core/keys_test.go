@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // core keys ensure --kind request writes the private key (0600) and adds

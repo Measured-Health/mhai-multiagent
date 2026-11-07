@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- EMR integration, PR 2 (skeleton; off by default): `services/gokit/`, a Go
+  module core and the emr service share, with the request-token package
+  (moved from core; its subject rule is now a table that adds
+  `emr.v1.ctl.<op>` with audience `emr`, and new shared vectors), a
+  bounded replay set, `dbx.WithHospital` over a closed role set, the log
+  redactor (moved), the emr control-operations table and the generated
+  `mhai.emr.v1` contract. `services/emr/`: `emr serve` answers
+  `emr.v1.ctl.health` after verifying every request (token, reply subject,
+  replay, caller rule, request id, strict schema); `emr keys seal-init`.
+  The `emr` NATS user (dev config), core's rights on `emr.v1.ctl.>` and the
+  `EMR` stream, created only when `CORE_EMR_ENABLED=true`; the compose
+  profile `emr`. Core's Docker build context is now `services/` (`-f
+  services/core/Dockerfile services`) in compose, CI, the deploy workflow
+  and the Makefile.
+- EMR integration, PR 1 (docs): ADR 0009 accepted; ADR 0014 records the
+  separate `services/emr/` with its own credentials and egress, and the
+  reviewed route for scanned records; the document pipeline design is
+  amended (normalisation by the emr service, `emr.v1.<hid>.fetched`);
+  frontend requirements §12.1 and §14.11 filed; TODO lists the people items
+  H1–H9 and the live-use gates.
 - Cloud model providers, part A: the per-hospital model policy (OpenAPI
   1.10.0, additive). Migration 00018 adds `hospital_model_policy` (off by
   default; no row means local), the model route set by core on each new

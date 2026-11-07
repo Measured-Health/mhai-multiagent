@@ -66,7 +66,9 @@ token for every call and job, and the workers verify it before any work
 (services/intelligence/README.md).
 
 ```
-services/core/        the core service (Go): API, auth, tenancy, audit, EMR
+services/core/        the core service (Go): API, auth, tenancy, audit, alert routing
+services/emr/         the EMR integration service (Go): connectors, credentials, egress, normaliser, rules (ADR 0014)
+services/gokit/       Go shared by core and emr: request tokens, replay set, WithHospital, log redaction
 services/nats/        NATS config: the only link from Go to Python
 services/intelligence/  the Python project (uv)
   intelligence/boundary/        the NATS workers: token checks, operations.json, jobs, RLS database access
@@ -81,7 +83,12 @@ services/intelligence/  the Python project (uv)
 ## Where a change goes
 
 - **Go (`services/core/`):** the API, authentication, permissions, tenancy,
-  audit and EMR plumbing.
+  audit, and who sees an EMR alert.
+- **Go (`services/emr/`):** EMR plumbing: connectors, outside credentials,
+  egress, normalisation, the patient index and the rules. It never imports
+  `services/core/` (ADR 0014).
+- **Go (`services/gokit/`):** code core and emr share. A defect here reaches
+  both: review it as security code.
 - **Python (`services/intelligence/intelligence/`):** models and the
   pipeline: agents, retrieval, guardrails, PII masking.
 

@@ -9,7 +9,7 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
 - **Document pipeline phase 0, part B (Tasks 13–25), in progress.** Model file checks, training manifest and registries, signed manifests, the object-locked model store, run sources, `mhai-models promote`, `models.lock`, sign-off and rollback, load-time verification, the intelligence service's pinned roles, the model workflows and the end-to-end tests. See the [plan](docs/plans/2026-11-03-document-pipeline-phase0.md).
 - **Document pipeline Tasks 26–28: waiting on people.** The production signing backend (H1), the production model store (H2) and real Google Drive access (H3).
 - **Cloud models.** The design is approved (PR #85, 4 Nov). The plan isn't written yet (about 11 tasks, migrations from 00018). Masked text only, off by default per hospital.
-- **EHR/EMR integration.** The EMR integration service (`services/emr/`): a connector per EMR type, mapping to the canonical model, the patient index and abnormality flags. The design was started on 23 Oct and isn't finished.
+- **EHR/EMR integration: designed and planned.** The [design](docs/specs/2026-11-07-emr-integration-design.md) is approved (7 Nov), with [ADR 0009](docs/adr/0009-integrate-many-emr-systems.md) accepted and [ADR 0014](docs/adr/0014-separate-emr-service-and-document-route.md) added; the [plan](docs/plans/2026-11-07-emr-integration.md) is thirteen PRs, off by default. Live use waits on the people items under "EMR integration: people items and live-use gates" below.
 - **Patient analysis (§10 Analysis, Plan 6).** Designed and planned: see the [plan](docs/plans/2026-11-07-analysis-backend.md) (ten PRs) and [ADR 0015](docs/adr/0015-population-analysis-under-disclosure-control.md). Off by default; phases 2–6 run on the synthetic demo hospital only.
 - **Analysis: no live hospital until H1–H3 are signed.** These are people's gates; nothing in the build opens them ([design](docs/specs/2026-11-07-analysis-backend-design.md) §15):
   - **H1 (privacy lead):** confirm the approach (exact counts, no noise; drill users see pseudonymous microdata under role, audit and caps, R-A4), the nested periods, the constants, and the residuals R-A1 and R-A2 with the numbers P2 and P5 report. The constants at the PR 3 review; sign-off before any live hospital.
@@ -23,6 +23,33 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
 - **Trained model weights.** These come from the AI researcher and are the one thing we don't build. Until they arrive, the demo has no AI pipeline: a question waits in the queue and fails at its deadline.
 - **Demo settings.** `SECURITY_CONTACT_*` isn't set, so the audit integrity status returns 503. We need a name and an email from the product owner.
 - **Dependabot backlog.** 21 open PRs (Go modules, Python groups, GitHub Actions, NATS 2.15); each needs CI and a merge.
+
+- **EMR control: enforce `Op.StepUp` (EMR PR 2 review).** `services/emr/internal/ctl/responder.go` records `Op.StepUp` but doesn't enforce it yet. It must be enforced before the `put_credentials` or `redrive` handlers land (EMR PRs 3 and 8).
+## EMR integration: people items and live-use gates
+
+**These are people's items. An agent never marks one done**; the named owner closes it. From the [plan](docs/plans/2026-11-07-emr-integration.md) ("What's needed from people") and the [design](docs/specs/2026-11-07-emr-integration-design.md) §17.6 and §20.
+
+People items:
+- [ ] **H1** (product owner with Havana): a structured source for labs, then vitals and medications (export or FHIR), its frequency, and a synthetic or de-identified layout sample. Blocks PR 11 and real alerts for Havana.
+- [ ] **H2** (our team, with Havana's agreement): the archive's JSON "files added since" listing, a per-integration read-only key, a removed-files listing. Blocks PR 12.
+- [ ] **H3** (product owner, ops): choose and provision the managed secret store (in-region) and the emr service's identity. Blocks Task 12 and any production use of PR 3.
+- [ ] **H4** (a named clinical lead and a second clinician): rule set v1, breaker and grouped-mode values, the paused-source wording, map review, the shadow review, names and MRNs in alerts, and the clinical reviewers for `CODEOWNERS`. Blocks Task 30, activation and live use.
+- [ ] **H5** (privacy lead and a Nigerian data protection lawyer): DPIA, processing agreement addendum, the hospital's written confirmation that its call process stays primary, NDPA basis, data location, retention values. Blocks any real data.
+- [ ] **H6** (product owner): licences for LOINC and WHO ATC/DDD. Blocks Task 21 and any real data.
+- [ ] **H7** (Havana IT): network path, SFTP host key fingerprint, rotation contact. Blocks PR 11 going live.
+- [x] **H8** (product owner): the design's §21 answers. Approved as recommended, 7 Nov.
+- [ ] **H9** (product owner, ops): an on-call owner for stale feeds, rule errors, breaker pages, link conflicts, `reconciled_late` and grouped mode. Blocks live use.
+
+Ops items for the demo (people's items; an agent never closes them):
+- [ ] **Provision `NATS_EMR_NKEY` on the demo host** (ops). Until then the demo's NATS config (`deploy/nats/nats.conf`) has no emr user and `deploy/compose.yml` has no emr service: an undefined NKey variable stops NATS, and the demo auto-deploys from main. Both come in a later PR, after this item. In dev the emr user is opt-in too (`NATS_EMR_CONF=emr.conf` with `NATS_EMR_PASSWORD`, the profile `emr`); without them NATS runs as before.
+
+Gates before live use (design §17.6; all of them):
+- [ ] mhai-web PR 10 shipped (`sources_status`, `arrived_late`, `preliminary`, `amended`, `withdrawn`, grouped mode, nullable MRN). Owner: frontend lead.
+- [ ] PR 9 (retention and the exclusion purge) deployed. Owner: release owner.
+- [ ] BFF-side credential sealing before the first real hospital's credentials. Owner: frontend lead.
+- [ ] Rule set v1 run in shadow with every critical finding reviewed (H4). Owner: clinical lead.
+- [ ] The on-call owner named (H9). Owner: product owner.
+- [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
 
 ## Decided
 
@@ -166,6 +193,7 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 
 ## Test follow-ups
 
+- **`TestTwoCoreCopiesShareGrants` flakes** (`services/core/internal/grant`, `-tags "integration test"`): 99 of 100 grants answered now and then, on other branches too (seen 7 Nov on the EMR build; 10 reruns passed). Find what varies (likely a grant lost between the two copies' queue subscriptions under `-race`) and fix it; no retries.
 - **Interop test of the health probe against the real Python worker.** The sampler's `pipeline.health` token (svc:core, no roles, the fixed probe hospital id) is tested only against a Go fake. Add a test, in the smoke run or the boundary tests, that the Python `pipeline.health` handler accepts it and answers `models_ready` and `database_ready`.
 
 - **`TestTwoCoreCopiesShareGrants` (`internal/grant`) is flaky.** Seen once in CI during Plan 4b; it passed on a re-run. Find the race (two core copies sharing the grants KV) before it hides a real fault.
@@ -186,7 +214,7 @@ mhai-web has built these screens against contracts that are marked **Assumed** o
 
 - **Notifications service** (planned, `services/notifications/`): one service for every alert and notification (EMR abnormality alerts, correction decisions, job and system updates), delivered in the app (bell, pop-ups) and by opt-in email. Needs a design: event subjects from core, delivery and read state, email provider (open), per-user settings (`/me/notification-settings`, frontend contract §9), and rate limits. Core decides recipients; the service only delivers.
 
-- **EMR integration service** (planned, `services/emr/`): connectors per EMR type, mapping, normalisation, patient index (ADR 0009). Its own service, isolated from core because it holds outside credentials. Needs a design (the EMR design work).
+- **EMR integration service** (`services/emr/`): connectors per EMR type, mapping, normalisation, patient index (ADR 0009, ADR 0014). Its own service, isolated from core because it holds outside credentials. Designed and planned (see "What's left").
 - **Documents service** (planned, `services/documents/`): uploads, letters, exports, virus scanning, object storage, signed links, DIA jobs. Needs a design.
 - **Model serving** (planned): GPU model hosts, from the parked performance plan.
 

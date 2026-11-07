@@ -34,12 +34,15 @@ const (
 	natsEchoPassword        = "test-only-echo-pw"
 	natsBFFClinicalPassword = "test-only-bff-clinical-pw"
 	natsBFFPlatformPassword = "test-only-bff-platform-pw"
+	natsEMRPassword         = "test-only-emr-pw"
 	natsJSKey               = "testOnlyJetStreamKeyNotForAnyRealServer0123"
 )
 
-// NATSEnv is the environment the real nats.conf needs: every user's
-// password and the JetStream encryption key. Exported so other packages'
-// tests (and a Python fixture's documentation) use the same names.
+// NATSEnv is the environment the real nats.conf needs with the emr user on
+// (emr.conf): every user's password and the JetStream encryption key.
+// Exported so other packages' tests (and a Python fixture's documentation)
+// use the same names. With the emr user off (emr-off.conf, the dev default)
+// NATS_EMR_PASSWORD isn't needed.
 func NATSEnv() map[string]string {
 	return map[string]string{
 		"NATS_GATEWAY_PASSWORD":      natsGatewayPassword,
@@ -47,6 +50,7 @@ func NATSEnv() map[string]string {
 		"NATS_ECHO_PASSWORD":         natsEchoPassword,
 		"NATS_BFF_CLINICAL_PASSWORD": natsBFFClinicalPassword,
 		"NATS_BFF_PLATFORM_PASSWORD": natsBFFPlatformPassword,
+		"NATS_EMR_PASSWORD":          natsEMRPassword,
 		"NATS_JS_KEY":                natsJSKey,
 	}
 }
@@ -61,6 +65,7 @@ type NATS struct {
 	EchoURL        string // the echo worker
 	BFFClinicalURL string // the clinical app's BFF
 	BFFPlatformURL string // the platform app's BFF
+	EMRURL         string // the emr service
 
 	c testcontainers.Container
 }
@@ -73,10 +78,23 @@ func NATSConfDir() string {
 
 // NewNATS starts the container. The config is copied in rather than
 // bind-mounted, so it works when the tests themselves run in a container.
+// The emr user is on (emr.conf), so its rights can be tested.
 func NewNATS(ctx context.Context) (n *NATS, stop func(), err error) {
 	dir := NATSConfDir()
 	return startNATS(ctx, filepath.Join(dir, "nats.conf"), NATSEnv(),
-		map[string]string{filepath.Join(dir, "bff-clinical.test.conf"): "/etc/nats/bff-clinical.test.conf"})
+		map[string]string{filepath.Join(dir, "bff-clinical.test.conf"): "/etc/nats/bff-clinical.test.conf",
+			filepath.Join(dir, "emr.conf"): "/etc/nats/emr.conf"})
+}
+
+// NewNATSEMROff is NewNATS as dev compose runs it by default: the emr user
+// off (emr-off.conf) and no NATS_EMR_PASSWORD in the environment.
+func NewNATSEMROff(ctx context.Context) (n *NATS, stop func(), err error) {
+	dir := NATSConfDir()
+	env := NATSEnv()
+	delete(env, "NATS_EMR_PASSWORD")
+	return startNATS(ctx, filepath.Join(dir, "nats.conf"), env,
+		map[string]string{filepath.Join(dir, "bff-clinical.test.conf"): "/etc/nats/bff-clinical.test.conf",
+			filepath.Join(dir, "emr-off.conf"): "/etc/nats/emr.conf"})
 }
 
 // StoreContains reports whether any file under the server's JetStream
@@ -318,6 +336,7 @@ func startNATS(ctx context.Context, conf string, env map[string]string, extra ma
 		EchoURL:        u("echo", natsEchoPassword),
 		BFFClinicalURL: u("bff_clinical", natsBFFClinicalPassword),
 		BFFPlatformURL: u("bff_platform", natsBFFPlatformPassword),
+		EMRURL:         u("emr", natsEMRPassword),
 		c:              c,
 	}, stop, nil
 }

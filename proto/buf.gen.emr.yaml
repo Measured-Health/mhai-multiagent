@@ -1,0 +1,11 @@
+version: v2
+# Run from proto/ (make proto): the emr contract, mhai/emr/v1, into
+# services/gokit/emrpb, which core and the emr service share (ADR 0014).
+inputs:
+  - directory: .
+    paths:
+      - mhai/emr
+plugins:
+  - local: protoc-gen-go
+    out: ../services/gokit
+    opt: module=github.com/Measured-Health/mhai-multiagent/services/gokit

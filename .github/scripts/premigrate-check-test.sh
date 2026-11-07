@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for deploy/premigrate-check.sh (Plan 3 T15). Needs Docker and the
-# core image (mhai-core:local, `docker build -t mhai-core:local services/core`).
+# core image (mhai-core:local, `docker build -t mhai-core:local -f services/core/Dockerfile services`).
 # Synthetic data only; the throwaway Postgres is removed at the end.
 #
 #   .github/scripts/premigrate-check-test.sh

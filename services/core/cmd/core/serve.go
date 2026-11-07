@@ -25,14 +25,14 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/grant"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/natsapi"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // SweepEvery is how often serve deletes expired Idempotency-Key rows.
@@ -131,6 +131,10 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
+	if err := ensureEMR(ctx, cfg, js); err != nil {
+		a.close()
+		return nil, err
+	}
 	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log, Metrics: &intel.Metrics{}, Pool: a.pool}
 	a.js = js
 	if cfg.RequestTrustedKeysPath != "" {
@@ -187,6 +191,16 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	// NATS (see internal/apidocs): only this HTTP handler carries them.
 	a.handler = apidocs.Wrap(cfg.APIDocs, core.OpenAPI, m.Handler(cfg.BFFServiceKeys))
 	return a, nil
+}
+
+// ensureEMR creates the EMR stream and its durables only when
+// CORE_EMR_ENABLED is on (K4: off by default, no stream exists). Off, it
+// doesn't touch JetStream.
+func ensureEMR(ctx context.Context, cfg config.Config, js jetstream.JetStream) error {
+	if !cfg.EMREnabled {
+		return nil
+	}
+	return bus.EnsureEMRStream(ctx, js, cfg.NATSJSReplicas)
 }
 
 // checkSigningKeys refuses one key for both token kinds (spec §7.2): the

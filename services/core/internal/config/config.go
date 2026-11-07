@@ -75,6 +75,14 @@ type Config struct {
 	// most once; empty by default). A hospital's policy may name only one of
 	// these (cloud model providers plan, Task 2). Sorted.
 	CloudProviders []string
+	// EMREnabled (CORE_EMR_ENABLED=true) switches the EMR integration on:
+	// the EMR stream and its durables, and later the connection routes and
+	// the finding consumer. Off by default (EMR plan, Global Constraints).
+	EMREnabled bool
+	// EMRSealPublicKeyPath is the emr service's sealing public key
+	// (CORE_EMR_SEAL_PUBLIC_KEY_PATH; EMR design §6.2), required when
+	// EMREnabled. A public key: core never holds the private one.
+	EMRSealPublicKeyPath string
 }
 
 // CloudProviderNames are the cloud model providers core knows (the closed
@@ -140,6 +148,7 @@ func Load() (Config, error) {
 		OTLPInsecure:           strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")), "true"),
 		SecurityContactName:    strings.TrimSpace(os.Getenv("SECURITY_CONTACT_NAME")),
 		SecurityContactEmail:   strings.TrimSpace(os.Getenv("SECURITY_CONTACT_EMAIL")),
+		EMRSealPublicKeyPath:   strings.TrimSpace(os.Getenv("CORE_EMR_SEAL_PUBLIC_KEY_PATH")),
 		NATSTLS: NATSTLS{
 			CAPath:   os.Getenv("NATS_TLS_CA_PATH"),
 			CertPath: os.Getenv("NATS_TLS_CERT_PATH"),
@@ -165,6 +174,14 @@ func Load() (Config, error) {
 		c.AllowSingleNode = true
 	default:
 		errs = append(errs, errors.New("CORE_ALLOW_SINGLE_NODE must be true or false"))
+	}
+
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_EMR_ENABLED"))) {
+	case "", "false":
+	case "true":
+		c.EMREnabled = true
+	default:
+		errs = append(errs, errors.New("CORE_EMR_ENABLED must be true or false"))
 	}
 
 	if c.CloudProviders, err = ParseCloudProviders(os.Getenv("CORE_CLOUD_PROVIDERS")); err != nil {
@@ -339,6 +356,9 @@ func (c Config) ValidateServe() error {
 		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH must be set together"))
 	case !allTLS && !c.Development():
 		errs = append(errs, errors.New("NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH are required outside development"))
+	}
+	if c.EMREnabled && c.EMRSealPublicKeyPath == "" {
+		errs = append(errs, errors.New("CORE_EMR_SEAL_PUBLIC_KEY_PATH is required when CORE_EMR_ENABLED is true"))
 	}
 	// The audit integrity page names a security contact (Plan 4 §5.2):
 	// required outside development, and always well formed when set.
