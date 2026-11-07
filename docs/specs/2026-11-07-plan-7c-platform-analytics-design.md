@@ -1,6 +1,6 @@
 # Plan 7c: platform analytics across hospitals (backend): design
 
-- **Status:** Draft for the product owner's review (7 Nov 2026). Rulings R41a, R41a-2 (nested periods) and R41a-3 (the rolling windows hidden at once) are decided (§2); Q3 and Q4 in §16 are open. Revised the same day after the design review (§17).
+- **Status:** Approved (product owner, 2026-11-07), after three design reviews (§17). Rulings R41a, R41a-2 (nested periods) and R41a-3 (the rolling windows hidden at once) are decided (§2). Q3 is decided (§16: counts flag at a change of at least 50% with at least 10 on both sides; the rate and review-time rows keep their minimums); Q4 is open for the privacy lead.
 - **Date:** 2026-11-07
 - **Plan:** `docs/plans/2026-11-07-plan-7c-platform-analytics.md`, built from the task breakdown in §15.
 - **Builds on (and must stay consistent with):**
@@ -169,7 +169,7 @@ A block has at most 12 + 3 + 1 = 16 snapshots. With 50 hospitals the QG family h
 
   | Measure | Kind | Flagged when (design call; one Go table, the product owner may change it) |
   |---|---|---|
-  | `questions`, `active_clinicians` | rising / falling | both sides ≥ 20 and the change ≥ 50% |
+  | `questions`, `active_clinicians` | rising / falling | both sides ≥ 10 and the change ≥ 50% (Q3, decided 7 Nov) |
   | `questions_per_clinician` | rising / falling | active clinicians ≥ 5 on both sides and the change ≥ 50% |
   | `needs_review_share`, `agreement_rate` | worse / better | denominators ≥ 20 on both sides and the change ≥ 15 points |
   | `median_review_hours` | worse / better | at least 10 decided on both sides and the ratio ≥ 2 or ≤ 0.5 |
@@ -417,7 +417,7 @@ The contract file `docs/specs/2026-10-17-frontend-requirements.md` §14.7 is upd
 
 Q1 (which weeks) was decided as R41a-2: month-aligned weeks. Q2 (the rolling windows during the notice) was decided as R41a-3: option B, fully hidden.
 
-3. **Q3, product owner: the change thresholds** in §7.3 (minimums 20, changes of 50% or 15 points, review times 2×). They are a design call held in one Go table. Anti-goal 1 (false alarms at small hospitals) depends on them.
+3. **Q3, product owner: the change thresholds. Decided 7 Nov 2026:** flag a change only when the rate moves by at least 50% and by at least 10 items (§7.3: counts need at least 10 on both sides and a 50% change; the rate rows keep 20 and 15 points, review times 2×). Held in one Go table. Anti-goal 1 (false alarms at small hospitals) depends on them.
 4. **Q4, privacy lead: the staff count as a plain number,** and the median review time shown for 5 or more decisions. The frontend contract has both; they are flagged here because a median of five is a real person's review time.
 
 
