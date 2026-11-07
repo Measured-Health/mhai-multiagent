@@ -34,7 +34,7 @@ rules come in PRs 3 to 9.
 | `EMR_NATS_NKEY_FILE` / `EMR_NATS_PASSWORD` | one of them; the password in development only |
 | `EMR_DATABASE_URL` | the `emr_app` login (migration 00021, PR 3); `sslmode=verify-full` outside development |
 | `EMR_TRUSTED_KEYS_PATH` | the request-token trusted-keys file core writes (public keys) |
-| `EMR_SEAL_KEY_PATH` | the sealing private key |
+| `EMR_SEAL_KEY_PATH` | the directory of the sealing private keys (`seal-<kid>.key`) |
 | `EMR_SECRETS_DIR`, `EMR_PROXY_URL`, `EMR_PROXY_KEY_PATH`, `EMR_RULE_SET_ACTIVE` | later PRs; empty by default |
 
 Errors name the variable, never its value.

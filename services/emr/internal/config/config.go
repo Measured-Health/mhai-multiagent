@@ -29,8 +29,9 @@ type Settings struct {
 	// TrustedKeysPath is EMR_TRUSTED_KEYS_PATH, the request-token
 	// trusted-keys file core writes (public keys only).
 	TrustedKeysPath string
-	// SealKeyPath is EMR_SEAL_KEY_PATH, the sealing private key
-	// (emr keys seal-init).
+	// SealKeyPath is EMR_SEAL_KEY_PATH, the directory of the sealing
+	// private keys (seal-<kid>.key, from emr keys seal-init; two during a
+	// rotation, design §6.3).
 	SealKeyPath string
 	// SecretsDir is EMR_SECRETS_DIR, the file secret store (PR 3).
 	SecretsDir string

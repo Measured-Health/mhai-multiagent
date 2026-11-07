@@ -31,7 +31,7 @@ var workerPasswords = map[string]string{"pipeline": "NATS_PIPELINE_PASSWORD", "e
 // core holds its own (gateway) password, inside NATS_URL, and each worker
 // its own (workerPasswords).
 var natsUserSecrets = []string{"NATS_GATEWAY_PASSWORD", "NATS_PIPELINE_PASSWORD", "NATS_ECHO_PASSWORD",
-	"NATS_BFF_CLINICAL_PASSWORD", "NATS_BFF_PLATFORM_PASSWORD", "NATS_JS_KEY"}
+	"NATS_BFF_CLINICAL_PASSWORD", "NATS_BFF_PLATFORM_PASSWORD", "NATS_EMR_PASSWORD", "NATS_JS_KEY"}
 
 func loadCompose(t *testing.T) map[string]composeService {
 	t.Helper()
@@ -192,6 +192,10 @@ func TestComposeNATSGetsEveryUserSecret(t *testing.T) {
 					continue
 				}
 				if k == "NATS_URL" && workerPasswords[name] == s {
+					continue
+				}
+				// The emr service's own password, in its own variable.
+				if name == "emr" && k == "EMR_NATS_PASSWORD" && s == "NATS_EMR_PASSWORD" {
 					continue
 				}
 				if k == s || strings.Contains(v, s) {
@@ -592,5 +596,73 @@ func TestCoreBuildsFromServices(t *testing.T) {
 	}
 	if !strings.Contains(read("services/core/Dockerfile"), "COPY gokit/") {
 		t.Error("services/core/Dockerfile doesn't copy gokit")
+	}
+}
+
+// EMR off by default (plan Task 5): the emr service, its key one-shot and
+// their volumes exist only under the profile emr; only they mount the emr
+// volumes (core never sees a private key or a secret); they publish no
+// port (any port would be on 127.0.0.1); the emr service gets its own NATS
+// password and nothing of core's.
+func TestComposeEMRProfile(t *testing.T) {
+	svcs := loadCompose(t)
+	emrNames := []string{"emr", "emr-keys"}
+	for _, name := range emrNames {
+		s, ok := svcs[name]
+		if !ok {
+			t.Fatalf("no %s service", name)
+		}
+		if !slices.Equal(s.Profiles, []string{"emr"}) {
+			t.Errorf("%s profiles %v, want [emr]", name, s.Profiles)
+		}
+		for _, p := range s.Ports {
+			if !strings.HasPrefix(p, "127.0.0.1:") {
+				t.Errorf("%s publishes %s", name, p)
+			}
+		}
+		if s.EnvFile != nil {
+			t.Errorf("%s uses env_file", name)
+		}
+	}
+	for name, s := range svcs {
+		for _, v := range s.Volumes {
+			vol := strings.SplitN(v, ":", 2)[0]
+			if (vol == "emr-secrets" || vol == "emr-keys") && !slices.Contains(emrNames, name) {
+				t.Errorf("%s mounts %s", name, vol)
+			}
+			if vol == "emr-secrets" && name != "emr" {
+				t.Errorf("%s mounts emr-secrets", name)
+			}
+		}
+		if !slices.Contains(emrNames, name) && slices.Contains(s.Profiles, "emr") {
+			t.Errorf("%s is in the emr profile", name)
+		}
+	}
+	e := svcs["emr"]
+	if !strings.Contains(e.Environment["EMR_NATS_PASSWORD"], "NATS_EMR_PASSWORD") || strings.Contains(e.Environment["EMR_NATS_URL"], "@") {
+		t.Errorf("emr NATS settings: %v", e.Environment)
+	}
+	for k, v := range e.Environment {
+		for _, bad := range []string{"NATS_GATEWAY_PASSWORD", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "CORE_DB_PASSWORD",
+			"POSTGRES_PASSWORD", "PROVISION_DB_PASSWORD", "INTELLIGENCE_DB_PASSWORD", "NATS_JS_KEY"} {
+			if strings.Contains(v, bad) {
+				t.Errorf("emr env %s carries %s", k, bad)
+			}
+		}
+	}
+	if svcs["core"].Environment["CORE_EMR_ENABLED"] != "" && !strings.Contains(svcs["core"].Environment["CORE_EMR_ENABLED"], "false") {
+		t.Errorf("core CORE_EMR_ENABLED defaults on: %q", svcs["core"].Environment["CORE_EMR_ENABLED"])
+	}
+	var c struct {
+		Volumes map[string]any `yaml:"volumes"`
+	}
+	raw, _ := os.ReadFile(filepath.Join("..", "..", "..", "..", "docker-compose.yml"))
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"emr-secrets", "emr-keys"} {
+		if _, ok := c.Volumes[v]; !ok {
+			t.Errorf("no volume %s", v)
+		}
 	}
 }

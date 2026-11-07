@@ -10,9 +10,15 @@ RUN go mod download
 COPY gokit/ /src/gokit/
 COPY emr/ /src/emr/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/emr ./cmd/emr
+# /emr-keys holds the sealing key pair (volume emr-keys), /emr-secrets the
+# file secret store (volume emr-secrets): owned by the nonroot user so a
+# fresh volume takes the ownership on first mount.
+RUN mkdir -p /out/emr-keys /out/emr-secrets
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/emr /emr
+COPY --from=build --chown=65532:65532 /out/emr-keys /emr-keys
+COPY --from=build --chown=65532:65532 /out/emr-secrets /emr-secrets
 USER nonroot:nonroot
 ENTRYPOINT ["/emr"]
 CMD ["serve"]

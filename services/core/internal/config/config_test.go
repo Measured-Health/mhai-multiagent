@@ -13,7 +13,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS",
 		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING",
 		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY", "CORE_ALLOW_SINGLE_NODE",
-		"CORE_CLOUD_PROVIDERS"} {
+		"CORE_CLOUD_PROVIDERS", "CORE_EMR_ENABLED", "CORE_EMR_SEAL_PUBLIC_KEY_PATH"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -584,5 +584,50 @@ func TestConfigCloudProviders(t *testing.T) {
 	}
 	if _, err := ParseCloudProviders("openai,openai"); err == nil {
 		t.Error("ParseCloudProviders took a duplicate")
+	}
+}
+
+// K4: EMR is off unless CORE_EMR_ENABLED says true; on, serve needs the
+// emr service's sealing public key (EMR design §6.2).
+func TestConfigEMREnabled(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	c, err := Load()
+	if err != nil || c.EMREnabled || c.EMRSealPublicKeyPath != "" {
+		t.Fatalf("default: %+v %v", c, err)
+	}
+	for raw, want := range map[string]bool{"true": true, "TRUE": true, " false ": false, "": false} {
+		m := map[string]string{"CORE_EMR_ENABLED": raw}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if c, err := Load(); err != nil || c.EMREnabled != want {
+			t.Errorf("%q: %v %v", raw, c.EMREnabled, err)
+		}
+	}
+	for _, bad := range []string{"yes", "1", "on", "maybe"} {
+		m := map[string]string{"CORE_EMR_ENABLED": bad}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_EMR_ENABLED") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	ok := Config{Env: "development", DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem",
+		RequestKeyPath: "/r.pem", EMREnabled: true}
+	if err := ok.ValidateServe(); err == nil || !strings.Contains(err.Error(), "CORE_EMR_SEAL_PUBLIC_KEY_PATH") {
+		t.Fatalf("enabled without the seal key: %v", err)
+	}
+	ok.EMRSealPublicKeyPath = "/emr-seal/seal.pub"
+	if err := ok.ValidateServe(); err != nil {
+		t.Fatal(err)
+	}
+	ok.EMREnabled = false
+	ok.EMRSealPublicKeyPath = ""
+	if err := ok.ValidateServe(); err != nil {
+		t.Fatalf("off needs nothing: %v", err)
 	}
 }

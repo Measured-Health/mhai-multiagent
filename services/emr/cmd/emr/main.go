@@ -28,6 +28,8 @@ func run(args []string, getenv func(string) string, out io.Writer) error {
 	switch {
 	case len(args) == 1 && args[0] == "serve":
 		return serve(getenv)
+	case len(args) == 4 && args[0] == "keys" && args[1] == "seal-init" && args[2] == "--out" && args[3] != "":
+		return sealInit(args[3], out)
 	default:
 		return errUsage
 	}

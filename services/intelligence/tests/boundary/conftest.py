@@ -35,6 +35,7 @@ NATS_ENV = {
     "NATS_ECHO_PASSWORD": "test-only-echo-pw",
     "NATS_BFF_CLINICAL_PASSWORD": "test-only-bff-clinical-pw",
     "NATS_BFF_PLATFORM_PASSWORD": "test-only-bff-platform-pw",
+    "NATS_EMR_PASSWORD": "test-only-emr-pw",
     "NATS_JS_KEY": "testOnlyJetStreamKeyNotForAnyRealServer0123",
 }
 _USERS = {

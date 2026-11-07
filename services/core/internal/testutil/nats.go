@@ -34,6 +34,7 @@ const (
 	natsEchoPassword        = "test-only-echo-pw"
 	natsBFFClinicalPassword = "test-only-bff-clinical-pw"
 	natsBFFPlatformPassword = "test-only-bff-platform-pw"
+	natsEMRPassword         = "test-only-emr-pw"
 	natsJSKey               = "testOnlyJetStreamKeyNotForAnyRealServer0123"
 )
 
@@ -47,6 +48,7 @@ func NATSEnv() map[string]string {
 		"NATS_ECHO_PASSWORD":         natsEchoPassword,
 		"NATS_BFF_CLINICAL_PASSWORD": natsBFFClinicalPassword,
 		"NATS_BFF_PLATFORM_PASSWORD": natsBFFPlatformPassword,
+		"NATS_EMR_PASSWORD":          natsEMRPassword,
 		"NATS_JS_KEY":                natsJSKey,
 	}
 }
@@ -61,6 +63,7 @@ type NATS struct {
 	EchoURL        string // the echo worker
 	BFFClinicalURL string // the clinical app's BFF
 	BFFPlatformURL string // the platform app's BFF
+	EMRURL         string // the emr service
 
 	c testcontainers.Container
 }
@@ -318,6 +321,7 @@ func startNATS(ctx context.Context, conf string, env map[string]string, extra ma
 		EchoURL:        u("echo", natsEchoPassword),
 		BFFClinicalURL: u("bff_clinical", natsBFFClinicalPassword),
 		BFFPlatformURL: u("bff_platform", natsBFFPlatformPassword),
+		EMRURL:         u("emr", natsEMRPassword),
 		c:              c,
 	}, stop, nil
 }

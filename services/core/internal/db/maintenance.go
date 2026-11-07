@@ -64,9 +64,10 @@ var testPasswordSQL func(string) string
 
 // loginRoles are the roles a deployment login may be made a member of:
 // mhai_app (the core service), mhai_provision (the seed CLI) and
-// mhai_worker_app (the pipeline, 00008_intelligence_worker.sql). Each holds
-// no privilege of its own and inherits none.
-var loginRoles = map[string]bool{"mhai_app": true, "mhai_provision": true, "mhai_worker_app": true}
+// mhai_worker_app (the pipeline, 00008_intelligence_worker.sql) and
+// mhai_emr_app (the emr service, from the EMR connections migration). Each
+// holds no privilege of its own and inherits none.
+var loginRoles = map[string]bool{"mhai_app": true, "mhai_provision": true, "mhai_worker_app": true, "mhai_emr_app": true}
 
 var loginName = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 
@@ -74,7 +75,7 @@ var loginName = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 const MinLoginPasswordLen = 16
 
 // EnsureLogin creates the login role name with password, a member of
-// exactly role (mhai_app, mhai_provision or mhai_worker_app), or brings an existing one back
+// exactly role (mhai_app, mhai_provision, mhai_worker_app or mhai_emr_app), or brings an existing one back
 // to that: LOGIN, no superuser, BYPASSRLS, CREATEDB or CREATEROLE, no
 // session defaults (ALTER ROLE ... RESET ALL, role-wide and for this
 // database), the new password, and every other membership revoked. pool must be able to
@@ -84,7 +85,7 @@ const MinLoginPasswordLen = 16
 // Postgres stores as it is.
 func EnsureLogin(ctx context.Context, pool *pgxpool.Pool, name, password, role string) error {
 	if !loginRoles[role] {
-		return fmt.Errorf("db: a login may only be a member of mhai_app, mhai_provision or mhai_worker_app, not %q", role)
+		return fmt.Errorf("db: a login may only be a member of mhai_app, mhai_provision, mhai_worker_app or mhai_emr_app, not %q", role)
 	}
 	if !loginName.MatchString(name) || strings.HasPrefix(name, "mhai_") || strings.HasPrefix(name, "pg_") {
 		return errors.New("db: login name must be lower-case letters, digits and _, and not start with mhai_ or pg_")

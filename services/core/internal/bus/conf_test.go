@@ -243,3 +243,11 @@ func TestHealthBucketIsTheGatewaysOnly(t *testing.T) {
 		t.Errorf("health bucket %q, ttl %v", bus.HealthBucket, bus.HealthTTL)
 	}
 }
+
+// With EMR on, JOBS, DEAD and EMR together still leave the KV buckets at
+// least 128 MiB of the demo's 512 MB store.
+func TestEMRStreamFitsTheDemoStore(t *testing.T) {
+	if bus.StreamsMaxBytes+bus.EMRMaxBytes > 512<<20-128<<20 {
+		t.Fatalf("JOBS+DEAD+EMR reserve %d bytes", bus.StreamsMaxBytes+bus.EMRMaxBytes)
+	}
+}

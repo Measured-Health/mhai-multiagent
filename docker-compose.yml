@@ -57,6 +57,9 @@ services:
       PROVISION_DB_PASSWORD: ${PROVISION_DB_PASSWORD:?set PROVISION_DB_PASSWORD in .env}
       INTELLIGENCE_DB_USER: ${INTELLIGENCE_DB_USER:-intelligence_app}
       INTELLIGENCE_DB_PASSWORD: ${INTELLIGENCE_DB_PASSWORD:?set INTELLIGENCE_DB_PASSWORD in .env}
+      # The emr service's login (profile emr), optional: skipped while empty
+      # and until its role exists (the EMR connections migration).
+      EMR_DB_PASSWORD: ${EMR_DB_PASSWORD:-}
     depends_on:
       postgres: { condition: service_healthy }
 
@@ -117,6 +120,9 @@ services:
       # Who the audit integrity page names; unset, its status answers 503.
       SECURITY_CONTACT_NAME: ${SECURITY_CONTACT_NAME:-}
       SECURITY_CONTACT_EMAIL: ${SECURITY_CONTACT_EMAIL:-}
+      # The EMR integration (ADR 0014), off by default: no EMR stream, no
+      # emr calls. On, it needs the emr service's sealing public key.
+      CORE_EMR_ENABLED: ${CORE_EMR_ENABLED:-false}
     ports: ["127.0.0.1:${CORE_PORT:-8080}:8080"]
     volumes:
       - corekeys:/keys:ro
@@ -159,7 +165,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        for v in "$$NATS_GATEWAY_PASSWORD" "$$NATS_PIPELINE_PASSWORD" "$$NATS_ECHO_PASSWORD" "$$NATS_BFF_CLINICAL_PASSWORD" "$$NATS_BFF_PLATFORM_PASSWORD" "$$NATS_JS_KEY"; do
+        for v in "$$NATS_GATEWAY_PASSWORD" "$$NATS_PIPELINE_PASSWORD" "$$NATS_ECHO_PASSWORD" "$$NATS_BFF_CLINICAL_PASSWORD" "$$NATS_BFF_PLATFORM_PASSWORD" "$$NATS_EMR_PASSWORD" "$$NATS_JS_KEY"; do
           case "$$v" in
             ""|*[Cc][Hh][Aa][Nn][Gg][Ee][Mm][Ee]*|*[Cc][Hh][Aa][Nn][Gg][Ee]-[Mm][Ee]*|*[Pp][Ll][Aa][Cc][Ee][Hh][Oo][Ll][Dd][Ee][Rr]*) echo "NATS secrets are missing or placeholders" >&2; exit 1;;
           esac
@@ -173,6 +179,7 @@ services:
       NATS_ECHO_PASSWORD: ${NATS_ECHO_PASSWORD:?set NATS_ECHO_PASSWORD in .env}
       NATS_BFF_CLINICAL_PASSWORD: ${NATS_BFF_CLINICAL_PASSWORD:?set NATS_BFF_CLINICAL_PASSWORD in .env}
       NATS_BFF_PLATFORM_PASSWORD: ${NATS_BFF_PLATFORM_PASSWORD:?set NATS_BFF_PLATFORM_PASSWORD in .env}
+      NATS_EMR_PASSWORD: ${NATS_EMR_PASSWORD:?set NATS_EMR_PASSWORD in .env}
       NATS_JS_KEY: ${NATS_JS_KEY:?set NATS_JS_KEY in .env}
     ports: ["127.0.0.1:${NATS_PORT:-4222}:4222"]
     volumes:
@@ -182,6 +189,52 @@ services:
     healthcheck:
       <<: *healthcheck-defaults
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
+
+  # The emr service (ADR 0014; services/emr). Off by default: only with
+  #   docker compose --profile emr up -d
+  # One-shot first: the X25519 sealing key pair in the emr-keys volume
+  # (emr keys seal-init; an existing pair is kept). Only the emr services
+  # mount it, and only the emr service mounts emr-secrets (the file secret
+  # store). Its own NATS user and password, the request-token trusted keys
+  # (public, read-only) and its own database login; nothing of core's.
+  emr-keys:
+    build:
+      # The emr service requires services/gokit, so the context is services/.
+      context: ./services
+      dockerfile: emr/Dockerfile
+    image: mhai-emr:local
+    profiles: ["emr"]
+    restart: "no"
+    command: ["keys", "seal-init", "--out", "/emr-keys"]
+    volumes:
+      - emr-keys:/emr-keys
+
+  emr:
+    image: mhai-emr:local
+    profiles: ["emr"]
+    restart: unless-stopped
+    command: ["serve"]
+    environment:
+      APP_ENV: development
+      EMR_NATS_URL: nats://nats:4222
+      EMR_NATS_PASSWORD: ${NATS_EMR_PASSWORD:?set NATS_EMR_PASSWORD in .env}
+      EMR_DATABASE_URL: postgres://${EMR_DB_USER:-emr_app}:${EMR_DB_PASSWORD:-}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
+      EMR_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+      EMR_SEAL_KEY_PATH: /emr-keys
+      EMR_SECRETS_DIR: /emr-secrets
+      # Empty: no rule set is active, every finding is shadow.
+      EMR_RULE_SET_ACTIVE: ""
+    volumes:
+      - trustedkeys:/trusted:ro
+      - emr-keys:/emr-keys:ro
+      - emr-secrets:/emr-secrets
+    depends_on:
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
+      emr-keys: { condition: service_completed_successfully }
+    healthcheck:
+      disable: true
 
   # Serves the CCA LLM (CCA_BACKEND=ollama).
   ollama:
@@ -317,5 +370,7 @@ volumes:
   natsdata:
   corekeys:
   trustedkeys:
+  emr-keys:      # the emr service's sealing key pair (profile emr)
+  emr-secrets:   # the emr service's file secret store (profile emr)
   ollama:
   hf-cache:

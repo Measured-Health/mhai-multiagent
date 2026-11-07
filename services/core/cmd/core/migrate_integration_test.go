@@ -70,3 +70,30 @@ func TestMigrateUpProvisionsIntelligenceLogin(t *testing.T) {
 		t.Fatalf("intelligence_app: member of mhai_worker_app %v, uses mhai_worker %v", member, usesWorker)
 	}
 }
+
+// Until the EMR connections migration makes mhai_emr_app, migrate up skips
+// the emr login with a line saying so, and creates nothing.
+func TestMigrateUpSkipsEMRLoginUntilItsRoleExists(t *testing.T) {
+	pg := testutil.StartPostgres(t)
+	ctx := context.Background()
+	env := map[string]string{"EMR_DB_PASSWORD": "test-only-emr-db-password"}
+	var out bytes.Buffer
+	if err := migrateWithLogins(ctx, []string{"up"}, pg.URL, func(k string) string { return env[k] }, &out); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	if !strings.Contains(out.String(), "login emr_app skipped: role mhai_emr_app doesn't exist yet") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), env["EMR_DB_PASSWORD"]) {
+		t.Fatal("output carries the password")
+	}
+	pool, err := pgxpool.New(ctx, pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname = 'emr_app'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("emr_app made: %d %v", n, err)
+	}
+}
