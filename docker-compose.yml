@@ -165,13 +165,23 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        for v in "$$NATS_GATEWAY_PASSWORD" "$$NATS_PIPELINE_PASSWORD" "$$NATS_ECHO_PASSWORD" "$$NATS_BFF_CLINICAL_PASSWORD" "$$NATS_BFF_PLATFORM_PASSWORD" "$$NATS_EMR_PASSWORD" "$$NATS_JS_KEY"; do
+        for v in "$$NATS_GATEWAY_PASSWORD" "$$NATS_PIPELINE_PASSWORD" "$$NATS_ECHO_PASSWORD" "$$NATS_BFF_CLINICAL_PASSWORD" "$$NATS_BFF_PLATFORM_PASSWORD" "$$NATS_JS_KEY"; do
           case "$$v" in
             ""|*[Cc][Hh][Aa][Nn][Gg][Ee][Mm][Ee]*|*[Cc][Hh][Aa][Nn][Gg][Ee]-[Mm][Ee]*|*[Pp][Ll][Aa][Cc][Ee][Hh][Oo][Ll][Dd][Ee][Rr]*) echo "NATS secrets are missing or placeholders" >&2; exit 1;;
           esac
         done
         case "$$NATS_JS_KEY" in [0-9]*) echo "NATS_JS_KEY must start with a letter" >&2; exit 1;; esac
         [ "$${#NATS_JS_KEY}" -ge 32 ] || { echo "NATS_JS_KEY must be at least 32 characters" >&2; exit 1; }
+        # The emr user (ADR 0014) is off unless NATS_EMR_CONF=emr.conf (unset
+        # is off); only then is NATS_EMR_PASSWORD needed, and checked.
+        case "$$NATS_EMR_CONF" in
+          ""|emr-off.conf) ;;
+          emr.conf)
+            case "$$NATS_EMR_PASSWORD" in
+              ""|*[Cc][Hh][Aa][Nn][Gg][Ee][Mm][Ee]*|*[Cc][Hh][Aa][Nn][Gg][Ee]-[Mm][Ee]*|*[Pp][Ll][Aa][Cc][Ee][Hh][Oo][Ll][Dd][Ee][Rr]*) echo "NATS_EMR_PASSWORD is missing or a placeholder" >&2; exit 1;;
+            esac;;
+          *) echo "NATS_EMR_CONF must be emr-off.conf or emr.conf" >&2; exit 1;;
+        esac
         exec nats-server -c /etc/nats/nats.conf
     environment:
       NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}
@@ -179,19 +189,24 @@ services:
       NATS_ECHO_PASSWORD: ${NATS_ECHO_PASSWORD:?set NATS_ECHO_PASSWORD in .env}
       NATS_BFF_CLINICAL_PASSWORD: ${NATS_BFF_CLINICAL_PASSWORD:?set NATS_BFF_CLINICAL_PASSWORD in .env}
       NATS_BFF_PLATFORM_PASSWORD: ${NATS_BFF_PLATFORM_PASSWORD:?set NATS_BFF_PLATFORM_PASSWORD in .env}
-      NATS_EMR_PASSWORD: ${NATS_EMR_PASSWORD:?set NATS_EMR_PASSWORD in .env}
+      # Off by default; NATS_EMR_CONF=emr.conf and NATS_EMR_PASSWORD turn the
+      # emr NATS user on (with the profile emr).
+      NATS_EMR_CONF: ${NATS_EMR_CONF:-emr-off.conf}
+      NATS_EMR_PASSWORD: ${NATS_EMR_PASSWORD:-}
       NATS_JS_KEY: ${NATS_JS_KEY:?set NATS_JS_KEY in .env}
     ports: ["127.0.0.1:${NATS_PORT:-4222}:4222"]
     volumes:
       - ./services/nats/nats.conf:/etc/nats/nats.conf:ro
       - ./services/nats/bff-clinical.test.conf:/etc/nats/bff-clinical.test.conf:ro
+      - ./services/nats/${NATS_EMR_CONF:-emr-off.conf}:/etc/nats/emr.conf:ro
       - natsdata:/data
     healthcheck:
       <<: *healthcheck-defaults
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
 
   # The emr service (ADR 0014; services/emr). Off by default: only with
-  #   docker compose --profile emr up -d
+  #   NATS_EMR_CONF=emr.conf NATS_EMR_PASSWORD=... docker compose --profile emr up -d
+  # (the first two switch its NATS user on; without them NATS runs as before).
   # One-shot first: the X25519 sealing key pair in the emr-keys volume
   # (emr keys seal-init; an existing pair is kept). Only the emr services
   # mount it, and only the emr service mounts emr-secrets (the file secret
@@ -217,7 +232,8 @@ services:
     environment:
       APP_ENV: development
       EMR_NATS_URL: nats://nats:4222
-      EMR_NATS_PASSWORD: ${NATS_EMR_PASSWORD:?set NATS_EMR_PASSWORD in .env}
+      # Empty unless EMR is on (the emr service then refuses to start).
+      EMR_NATS_PASSWORD: ${NATS_EMR_PASSWORD:-}
       EMR_DATABASE_URL: postgres://${EMR_DB_USER:-emr_app}:${EMR_DB_PASSWORD:-}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
       EMR_TRUSTED_KEYS_PATH: /trusted/request-keys.json
       EMR_SEAL_KEY_PATH: /emr-keys

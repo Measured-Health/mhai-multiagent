@@ -6,9 +6,19 @@ The EMR integration service ([ADR 0014](../../docs/adr/0014-separate-emr-service
 process that holds hospital record-system credentials and the only route
 out to hospital systems. Core holds neither.
 
-**Off by default.** It runs only under the compose profile `emr`
-(`docker compose --profile emr up`), and core talks to it only when
-`CORE_EMR_ENABLED=true`.
+**Off by default.** It runs only under the compose profile `emr`, with its
+NATS user switched on, and core talks to it only when `CORE_EMR_ENABLED=true`:
+
+```bash
+NATS_EMR_CONF=emr.conf NATS_EMR_PASSWORD=<letters and digits> docker compose --profile emr up -d
+```
+
+Without `NATS_EMR_CONF` NATS includes `services/nats/emr-off.conf` (no
+variable needed, nobody signs in as emr), so today's dev setups run as
+before. **The demo has neither the emr NATS user nor the emr service yet:**
+both come in a later PR, once ops provision `NATS_EMR_NKEY` on the host
+(TODO.md, people/ops item); an undefined NKey variable would stop the demo's
+NATS.
 
 ## What is built (PR 2: the skeleton)
 

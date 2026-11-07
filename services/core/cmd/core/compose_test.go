@@ -31,7 +31,7 @@ var workerPasswords = map[string]string{"pipeline": "NATS_PIPELINE_PASSWORD", "e
 // core holds its own (gateway) password, inside NATS_URL, and each worker
 // its own (workerPasswords).
 var natsUserSecrets = []string{"NATS_GATEWAY_PASSWORD", "NATS_PIPELINE_PASSWORD", "NATS_ECHO_PASSWORD",
-	"NATS_BFF_CLINICAL_PASSWORD", "NATS_BFF_PLATFORM_PASSWORD", "NATS_EMR_PASSWORD", "NATS_JS_KEY"}
+	"NATS_BFF_CLINICAL_PASSWORD", "NATS_BFF_PLATFORM_PASSWORD", "NATS_JS_KEY"}
 
 func loadCompose(t *testing.T) map[string]composeService {
 	t.Helper()
@@ -663,6 +663,81 @@ func TestComposeEMRProfile(t *testing.T) {
 	for _, v := range []string{"emr-secrets", "emr-keys"} {
 		if _, ok := c.Volumes[v]; !ok {
 			t.Errorf("no volume %s", v)
+		}
+	}
+}
+
+// Today's dev setups keep working: the emr NATS user is off unless
+// NATS_EMR_CONF=emr.conf, NATS needs no NATS_EMR_PASSWORD while it is off,
+// and only nats and the emr service ever see that password.
+func TestComposeEMRNATSUserOffByDefault(t *testing.T) {
+	svcs := loadCompose(t)
+	n := svcs["nats"]
+	if n.Environment["NATS_EMR_CONF"] != "${NATS_EMR_CONF:-emr-off.conf}" {
+		t.Errorf("NATS_EMR_CONF = %q, want the emr-off.conf default", n.Environment["NATS_EMR_CONF"])
+	}
+	if pw := n.Environment["NATS_EMR_PASSWORD"]; pw != "${NATS_EMR_PASSWORD:-}" {
+		t.Errorf("NATS_EMR_PASSWORD = %q, want optional", pw)
+	}
+	if !slices.Contains(n.Volumes, "./services/nats/${NATS_EMR_CONF:-emr-off.conf}:/etc/nats/emr.conf:ro") {
+		t.Errorf("nats doesn't mount the emr fragment as /etc/nats/emr.conf: %v", n.Volumes)
+	}
+	for name, s := range svcs {
+		if name == "nats" || name == "emr" {
+			continue
+		}
+		for k, v := range s.Environment {
+			if strings.Contains(k+v, "NATS_EMR_PASSWORD") {
+				t.Errorf("%s env %s carries NATS_EMR_PASSWORD", name, k)
+			}
+		}
+	}
+
+	// The guard, as compose runs it: off needs nothing; on needs a real
+	// password; nothing else is a valid fragment.
+	const execLine = "exec nats-server -c /etc/nats/nats.conf"
+	script := strings.Replace(strings.ReplaceAll(n.Command[0], "$$", "$"), execLine, "echo started", 1)
+	base := map[string]string{}
+	for _, k := range natsUserSecrets {
+		base[k] = "synthetic" + strings.ReplaceAll(strings.ToLower(k), "_", "") + "0123456789"
+	}
+	base["NATS_JS_KEY"] = "ksynthetic0123456789abcdef0123456789abcdef"
+	run := func(extra map[string]string) bool {
+		cmd := exec.Command("/bin/sh", "-c", script)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+		for k, v := range base {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		for k, v := range extra {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		out, err := cmd.CombinedOutput()
+		return err == nil && strings.Contains(string(out), "started")
+	}
+	for _, tc := range []struct {
+		env   map[string]string
+		start bool
+	}{
+		{map[string]string{"NATS_EMR_CONF": "emr-off.conf"}, true},
+		{map[string]string{"NATS_EMR_CONF": "emr-off.conf", "NATS_EMR_PASSWORD": ""}, true},
+		{map[string]string{"NATS_EMR_CONF": "emr.conf", "NATS_EMR_PASSWORD": "syntheticEmrPassword0123456789"}, true},
+		{map[string]string{"NATS_EMR_CONF": "emr.conf"}, false},
+		{map[string]string{"NATS_EMR_CONF": "emr.conf", "NATS_EMR_PASSWORD": "changemeReplaceWithLettersAndDigits"}, false},
+		{map[string]string{"NATS_EMR_CONF": "../../etc/passwd"}, false},
+		{map[string]string{}, true}, // unset is off
+	} {
+		if got := run(tc.env); got != tc.start {
+			t.Errorf("%v: started %v, want %v", tc.env, got, tc.start)
+		}
+	}
+	// .env.example leaves the emr user off.
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", ".env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "NATS_EMR_") {
+			t.Errorf(".env.example sets %s", line)
 		}
 	}
 }

@@ -251,3 +251,25 @@ func TestEMRStreamFitsTheDemoStore(t *testing.T) {
 		t.Fatalf("JOBS+DEAD+EMR reserve %d bytes", bus.StreamsMaxBytes+bus.EMRMaxBytes)
 	}
 }
+
+// The emr NATS user is an include: emr.conf (on) or emr-off.conf (the dev
+// default), which needs no variable and lets no one in or do anything.
+func TestEMRUserIsAnOptInInclude(t *testing.T) {
+	dev := readConf(t, "services/nats/nats.conf")
+	if !strings.Contains(dev, `{ include "emr.conf" }`) || strings.Contains(stripComments(dev), "NATS_EMR_PASSWORD") ||
+		strings.Contains(stripComments(dev), "user:emr") {
+		t.Fatal("services/nats/nats.conf must take the emr user from the emr.conf include only")
+	}
+	off := stripComments(readConf(t, "services/nats/emr-off.conf"))
+	if strings.Contains(off, "$") || strings.Contains(off, "password") || !strings.Contains(off, `publish:{deny:[">"]}`) ||
+		!strings.Contains(off, `subscribe:{deny:[">"]}`) || strings.Contains(off, "allow") {
+		t.Fatalf("emr-off.conf must need no variable and deny everything: %s", off)
+	}
+	on := stripComments(readConf(t, "services/nats/emr.conf"))
+	if !strings.Contains(on, "user:emr") || !strings.Contains(on, "password:$NATS_EMR_PASSWORD") {
+		t.Fatal("emr.conf must define the emr user with NATS_EMR_PASSWORD")
+	}
+	if strings.Contains(readConf(t, "deploy/nats/nats.conf"), "emr.conf") {
+		t.Fatal("the deploy config must not include an emr user yet (NATS_EMR_NKEY isn't provisioned)")
+	}
+}

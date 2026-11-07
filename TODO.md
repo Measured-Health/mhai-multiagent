@@ -39,6 +39,9 @@ People items:
 - [x] **H8** (product owner): the design's §21 answers. Approved as recommended, 7 Nov.
 - [ ] **H9** (product owner, ops): an on-call owner for stale feeds, rule errors, breaker pages, link conflicts, `reconciled_late` and grouped mode. Blocks live use.
 
+Ops items for the demo (people's items; an agent never closes them):
+- [ ] **Provision `NATS_EMR_NKEY` on the demo host** (ops). Until then the demo's NATS config (`deploy/nats/nats.conf`) has no emr user and `deploy/compose.yml` has no emr service: an undefined NKey variable stops NATS, and the demo auto-deploys from main. Both come in a later PR, after this item. In dev the emr user is opt-in too (`NATS_EMR_CONF=emr.conf` with `NATS_EMR_PASSWORD`, the profile `emr`); without them NATS runs as before.
+
 Gates before live use (design §17.6; all of them):
 - [ ] mhai-web PR 10 shipped (`sources_status`, `arrived_late`, `preliminary`, `amended`, `withdrawn`, grouped mode, nullable MRN). Owner: frontend lead.
 - [ ] PR 9 (retention and the exclusion purge) deployed. Owner: release owner.
@@ -189,6 +192,7 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 
 ## Test follow-ups
 
+- **`TestTwoCoreCopiesShareGrants` flakes** (`services/core/internal/grant`, `-tags "integration test"`): 99 of 100 grants answered now and then, on other branches too (seen 7 Nov on the EMR build; 10 reruns passed). Find what varies (likely a grant lost between the two copies' queue subscriptions under `-race`) and fix it; no retries.
 - **Interop test of the health probe against the real Python worker.** The sampler's `pipeline.health` token (svc:core, no roles, the fixed probe hospital id) is tested only against a Go fake. Add a test, in the smoke run or the boundary tests, that the Python `pipeline.health` handler accepts it and answers `models_ready` and `database_ready`.
 
 - **`TestTwoCoreCopiesShareGrants` (`internal/grant`) is flaky.** Seen once in CI during Plan 4b; it passed on a re-run. Find the race (two core copies sharing the grants KV) before it hides a real fault.

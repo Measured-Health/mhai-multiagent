@@ -60,7 +60,6 @@ NATS_PIPELINE_PASSWORD=$(secret)
 NATS_ECHO_PASSWORD=$(secret)
 NATS_BFF_CLINICAL_PASSWORD=$bff_clinical_pw
 NATS_BFF_PLATFORM_PASSWORD=$bff_platform_pw
-NATS_EMR_PASSWORD=$(secret)
 SECURITY_CONTACT_NAME=Synthetic Smoke Security
 SECURITY_CONTACT_EMAIL=security@smoke.example.test
 NATS_JS_KEY=$(secret)$(secret)

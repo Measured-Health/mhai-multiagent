@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
 func emrSvc(t *testing.T) *svc { return raw(t, sharedNATS.EMRURL, bus.WorkerInbox("emr")) }
@@ -140,4 +141,27 @@ func TestEMRStreamConfig(t *testing.T) {
 		}
 	}
 	e.noViolation(t)
+}
+
+// Dev's default: nats.conf with the emr user off (emr-off.conf) starts with
+// no NATS_EMR_PASSWORD, every other user works, and no one signs in as emr.
+func TestNATSStartsWithEMRUserOff(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	n, stop, err := testutil.NewNATSEMROff(ctx)
+	if err != nil {
+		t.Fatalf("nats with the emr user off: %v", err)
+	}
+	defer stop()
+	for _, url := range []string{n.GatewayURL, n.PipelineURL, n.BFFPlatformURL} {
+		nc, err := nats.Connect(url)
+		if err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+		nc.Close()
+	}
+	if nc, err := nats.Connect(n.EMRURL, nats.Timeout(3*time.Second)); err == nil {
+		nc.Close()
+		t.Fatal("signed in as emr with the emr user off")
+	}
 }
