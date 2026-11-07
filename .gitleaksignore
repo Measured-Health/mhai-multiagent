@@ -12,3 +12,6 @@ e7349aa8cb6934f97c66bb31caaaf212277e5002:services/core/internal/grant/grant_inte
 # id for a version that doesn't exist, and the IfNoneMatch= keyword argument name.
 8d647205580afd67137724e50df3e5935a433f86:services/intelligence/tests/modelstore/test_store.py:generic-api-key:372
 a5ccb6d6f10243ca1e783cc3819d961dc76f8544:services/intelligence/tests/modelstore/test_store.py:generic-api-key:874
+# services/nats/emr-off.conf: the deny-all emr user's NKey *public* key (its seed
+# was never kept). A public key is not a secret.
+ef70aa976617c60b19381d92c58b482e9f17ba0a:services/nats/emr-off.conf:generic-api-key:5
