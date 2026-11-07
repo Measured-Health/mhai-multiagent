@@ -1,10 +1,14 @@
 package queries
 
 import (
+	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 )
 
 // The frontend contract's shapes (mhai-web apps/clinical/lib/api/contract.ts,
@@ -193,8 +197,9 @@ type GuardrailDetails struct {
 }
 
 // ClinicalResultOut is GET /queries/{id}/result. trust_band (low, mid,
-// high or null when unverified) and cited_chunk_ids are additions to the
-// contract (clients ignore unknown fields, ADR 0012).
+// high or null when unverified), cited_chunk_ids and generated_by (absent
+// when unknown) are additions to the contract (clients ignore unknown
+// fields, ADR 0012).
 type ClinicalResultOut struct {
 	QueryID           string           `json:"query_id"`
 	Decision          string           `json:"decision"`
@@ -212,4 +217,52 @@ type ClinicalResultOut struct {
 	GuardrailDetails  GuardrailDetails `json:"guardrail_details"`
 	RetrievalMS       float64          `json:"retrieval_ms"`
 	GenerationMS      float64          `json:"generation_ms"`
+	GeneratedBy       *GeneratedBy     `json:"generated_by,omitempty"`
+}
+
+// GeneratedBy is ClinicalResultOut.generated_by: the route that drafted the
+// answer, and the cloud provider when it was a cloud model.
+type GeneratedBy struct {
+	Route    string  `json:"route"`    // "local" or "cloud"
+	Provider *string `json:"provider"` // null on a local answer
+}
+
+// generatedBy reads where the answer was drafted from the decision's own
+// model_versions (cloud model providers plan, departure 15): never from the
+// route the row was inserted with, nor from the hospital's policy now, so a
+// question run local after the policy was switched off says local, and a
+// cloud answer keeps its provider after the policy changes. cca_route
+// "local" gives {local, null}; "cloud" gives {cloud, <provider>}, where the
+// provider is the cca value's prefix before "/" and must be one of
+// config.CloudProviderNames. Anything else (no cca_route: an older worker,
+// or a cloud failure with no draft; an unknown route or provider; a
+// malformed cca) gives nil, and the field is omitted.
+func generatedBy(modelVersions map[string]string) *GeneratedBy {
+	switch modelVersions["cca_route"] {
+	case "local":
+		return &GeneratedBy{Route: "local"}
+	case "cloud":
+		provider, _, ok := strings.Cut(modelVersions["cca"], "/")
+		if !ok || !slices.Contains(config.CloudProviderNames, provider) {
+			return nil
+		}
+		return &GeneratedBy{Route: "cloud", Provider: &provider}
+	}
+	return nil
+}
+
+// stringVersions decodes a decision's model_versions (jsonb) and keeps its
+// string values; anything that isn't a JSON object gives nil.
+func stringVersions(raw []byte) map[string]string {
+	var m map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
 }

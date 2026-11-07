@@ -264,15 +264,17 @@ func (d Deps) result(w http.ResponseWriter, r *http.Request) {
 		citations                 []byte
 		retrievalMS, generationMS *float64
 		flagPenalty               *float64
+		modelVersions             []byte
 	)
 	err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT d.hga_decision, d.verified, d.degraded, d.failed_agents, d.diagnosis, d.icd10_code,
 			       d.response_text, d.trust_score::float8, d.trust_band, d.citations_json, d.retrieval_ms::float8, d.generation_ms::float8,
-			       (SELECT e.flag_penalty::float8 FROM hga_evaluations e WHERE e.query_id = q.id ORDER BY e.id DESC LIMIT 1)
+			       (SELECT e.flag_penalty::float8 FROM hga_evaluations e WHERE e.query_id = q.id ORDER BY e.id DESC LIMIT 1),
+			       d.model_versions
 			FROM clinical_queries q JOIN clinical_decisions d ON d.query_id = q.id AND d.hospital_id = q.hospital_id
 			WHERE q.id = $1 AND q.created_by = $2 AND q.status = 'completed'`, id, p.UserID).
 			Scan(&decision, &verified, &degraded, &failed, &out.Diagnosis, &out.ICD10Code, &responseText, &out.TrustScore,
-				&band, &citations, &retrievalMS, &generationMS, &flagPenalty)
+				&band, &citations, &retrievalMS, &generationMS, &flagPenalty, &modelVersions)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, r, "not_found")
@@ -330,5 +332,8 @@ func (d Deps) result(w http.ResponseWriter, r *http.Request) {
 		out.GuardrailDetails.L4Trust = &L4Trust{TrustScore: *out.TrustScore, BaseTrust: *out.TrustScore + fp, FlagPenalty: fp}
 	}
 	out.GuardrailDetails.CascadePass = out.Verified && out.Decision == "PASS"
+	// Where the answer was drafted, from this decision's model_versions
+	// (never the row's inserted route or today's policy).
+	out.GeneratedBy = generatedBy(stringVersions(modelVersions))
 	httpx.JSON(w, http.StatusOK, out)
 }

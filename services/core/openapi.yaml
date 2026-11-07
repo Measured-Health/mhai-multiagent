@@ -1802,6 +1802,22 @@ components:
             cascade_pass: { type: boolean }
         retrieval_ms: { type: number }
         generation_ms: { type: number }
+        generated_by:
+          type: object
+          description: >-
+            Where the answer was drafted, from the decision's own model versions:
+            `local`, or `cloud` with the provider. It names the route that produced
+            this answer and doesn't change when the hospital's model policy changes
+            later. Absent when unknown (an answer from an older pipeline, or a cloud
+            failure that produced no draft). Added in 1.10.0.
+          required: [route, provider]
+          properties:
+            route: { type: string, enum: [local, cloud] }
+            provider:
+              type: string
+              nullable: true
+              enum: [anthropic, openai, xai, null]
+              description: The cloud provider; null on a local answer.
 
     FeedbackIn:
       type: object

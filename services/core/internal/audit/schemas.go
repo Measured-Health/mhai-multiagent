@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 )
 
 // The closed payload schemas of every action core writes (Plan 4 spec §9).
@@ -413,7 +414,11 @@ func init() {
 		"trust_band", Nullable(OneOf("low", "mid", "high")),
 		"chunk_ids", List(50, Pattern(chunkIDPattern)),
 		"model_versions", StringMap(16, modelNamePattern, Pattern(modelVersionPattern)),
-		"attempts", count)})
+		"attempts", count,
+		// Cloud model providers (plan Task 3): where the answer's text went
+		// and the cloud outcome code; optional (older workers send neither).
+		"egress", OneOf(config.EgressValues()...),
+		"cloud_outcome", OneOf(config.CloudOutcomes...))})
 	Register("query.failed", Schema{Fields: drained("error", errorCode, "attempts", count)})
 	Register("query.cancelled", Schema{Fields: drained("reason", OneOf("user_deactivated", "hospital_deactivated", "account_unusable"))})
 	Register("job.dead_lettered", Schema{Fields: fields(

@@ -81,6 +81,16 @@ type Config struct {
 // vocabulary of the design; Python holds the same list).
 var CloudProviderNames = []string{"anthropic", "openai", "xai"}
 
+// CloudOutcomes are the cloud call's outcome codes (design §11), the closed
+// set of query.completed's cloud_outcome. The worker holds the same list
+// (boundary/cloud/vocab.py OUTCOMES; TestOutcomeVocabularyMatchesWorker).
+var CloudOutcomes = []string{"ok", "egress_blocked", "budget_exhausted", "unconfigured", "unavailable", "timeout",
+	"auth_failed", "refused", "truncated", "malformed", "insufficient", "retention_unconfirmed"}
+
+// EgressValues are query.completed's egress codes: where an answer's text
+// went, "none" or one of CloudProviderNames. A fresh slice each call.
+func EgressValues() []string { return append([]string{"none"}, CloudProviderNames...) }
+
 // errCloudProviders names the variable only, never its value.
 var errCloudProviders = errors.New("CORE_CLOUD_PROVIDERS must list each of anthropic openai xai at most once, comma separated")
 
