@@ -248,12 +248,14 @@ class _State:
         verify: Any,
         settle_failures: Any = None,
         budget_alerts: Any = None,
+        settle_clamped: Any = None,
     ) -> None:
         self.tracer = tracer
         self.refusals = refusals
         self.verify = verify
         self.settle_failures = settle_failures
         self.budget_alerts = budget_alerts
+        self.settle_clamped = settle_clamped
 
 
 _NOOP = _State(trace.NoOpTracer(), None, None)
@@ -324,7 +326,13 @@ def setup(
         "mhai_cloud_budget_alerts_total",
         description="Cloud calls that found their hospital at 80% or more of its budget.",
     )
-    state = _State(tp.get_tracer(SCOPE), refusals, verify, settle_failures, budget_alerts)
+    settle_clamped = meter.create_counter(
+        "mhai_cloud_settle_clamped_total",
+        description="Cloud settles whose reported use was out of range, settled as all reserved.",
+    )
+    state = _State(
+        tp.get_tracer(SCOPE), refusals, verify, settle_failures, budget_alerts, settle_clamped
+    )
     _state = state
 
     def shutdown() -> None:
@@ -500,6 +508,12 @@ def record_refusal(service: str, reason: str, n: int = 1) -> None:
 
 def record_cloud_settle_failure() -> None:
     c = _state.settle_failures
+    if c is not None:
+        c.add(1)
+
+
+def record_cloud_settle_clamped() -> None:
+    c = _state.settle_clamped
     if c is not None:
         c.add(1)
 

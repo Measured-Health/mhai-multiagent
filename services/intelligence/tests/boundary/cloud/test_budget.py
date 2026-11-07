@@ -11,6 +11,7 @@ loads a model or calls a provider.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
@@ -77,13 +78,19 @@ async def _ledger(pg: Postgres, hid: str) -> tuple[int, int, int]:
     return int(row[0]), int(row[1]), int(n[0])
 
 
+# As many connections as racing threads, so all 20 transactions can be in
+# core's reservation at once (the pool doesn't serialise the race).
+RACERS = 20
+
+
 @pytest.fixture
 async def database(postgres: Postgres) -> AsyncIterator[Database]:
     db = Database(
         postgres.intelligence_url,
         user=INTELLIGENCE_DB_USER,
         password=INTELLIGENCE_DB_PASSWORD,
-        max_size=4,
+        min_size=RACERS,
+        max_size=RACERS,
     )
     await db.open()
     try:
@@ -100,15 +107,22 @@ async def _in_thread(fn: Any, *args: Any) -> Any:
     return await asyncio.to_thread(fn, *args)
 
 
-async def test_budget_race_through_the_port(postgres: Postgres, database: Database) -> None:
-    """A11: 20 threads against a budget for 5 reservations: exactly 5."""
+async def test_budget_race_through_the_port(
+    postgres: Postgres, database: Database, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A11: 20 threads, on 20 pooled connections, against a budget for 5
+    reservations: exactly 5. The port alerts once, though many threads see
+    80% and more."""
     hid = await _hospital(postgres, "anthropic", 5 * TOKENS)
     port = _port(database, hid)
     loop = asyncio.get_running_loop()
-    with ThreadPoolExecutor(max_workers=20) as pool:
+    caplog.set_level(logging.INFO, logger="intelligence.boundary.cloud.budget")
+    with ThreadPoolExecutor(max_workers=RACERS) as pool:
         got = await asyncio.gather(
-            *(loop.run_in_executor(pool, port.reserve, "anthropic", TOKENS) for _ in range(20))
+            *(loop.run_in_executor(pool, port.reserve, "anthropic", TOKENS) for _ in range(RACERS))
         )
+    alerts = [r for r in caplog.records if "cloud.budget_high" in r.getMessage()]
+    assert len(alerts) == 1
     won = [r for r in got if r is not None]
     assert len(won) == 5
     assert len({r.id for r in won}) == 5

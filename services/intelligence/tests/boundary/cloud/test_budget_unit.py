@@ -2,8 +2,9 @@
 
 DbBudget is driven from the test's thread against a job loop running in
 a thread of its own, as a generation thread drives it, with a stand-in
-Database and cloud_repo. The loop's self-pipe is a Unix socket pair, so
-the job_loop fixture allows Unix sockets; TCP stays blocked. The rules themselves (the atomic reservation, the
+Database and cloud_repo. The loop's self-pipe is a Unix socket pair, made
+while job_loop lifts the guard for that one constructor; every other
+socket stays blocked. The rules themselves (the atomic reservation, the
 provider check, the once-only settle) are core's SQL and are proven
 against Postgres in test_budget.py. Every id here is synthetic.
 """
@@ -13,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import socket
+import sys
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
@@ -20,15 +23,20 @@ from typing import Any
 
 import pytest
 import pytest_socket
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from intelligence.boundary import cloud_repo, telemetry
 from intelligence.boundary.cloud.budget import (
+    CORE_MAX_TOKENS,
+    MAX_OUTPUT_TOKENS,
     BudgetPort,
     DbBudget,
     Reservation,
     estimate_tokens,
 )
+from intelligence.boundary.cloud.scan import MAX_BODY_BYTES
 from tests.boundary.test_db import bent
 
 pytestmark = pytest.mark.disable_socket
@@ -75,12 +83,14 @@ def points(reader: InMemoryMetricReader, name: str) -> list[Any]:
 
 @pytest.fixture
 def job_loop() -> Iterator[asyncio.AbstractEventLoop]:
-    """The job's event loop, running in its own thread."""
-    # The module's guard, again, with Unix sockets let through (a new guard
-    # wraps the current socket class, so the old guard is lifted first).
+    """The job's event loop, running in its own thread. The guard is lifted
+    only while the loop makes its self-pipe (a Unix socket pair), then put
+    back whole: no other socket of any family may be opened."""
     pytest_socket.enable_socket()
-    pytest_socket.disable_socket(allow_unix_socket=True)
-    loop = asyncio.new_event_loop()
+    try:
+        loop = asyncio.new_event_loop()
+    finally:
+        pytest_socket.disable_socket()
     t = threading.Thread(target=loop.run_forever, daemon=True)
     t.start()
     try:
@@ -99,14 +109,83 @@ def port(job_loop: asyncio.AbstractEventLoop) -> Make:
     return make
 
 
-def test_estimate_is_an_upper_bound() -> None:
-    for n in (0, 1, 2, 3, 4, 299, 300, 301, 9_999, 123_457):
-        est = estimate_tokens(n)
-        assert est >= n / 3 + 1500
-        assert est == -(-n // 3) + 1500  # ceil(n / 3) + 1500, exactly
-    assert estimate_tokens(10, max_output=100) == 4 + 100
+# Text that tokenises badly: emoji (with ZWJ and skin tones), Yoruba tone
+# marks as combining characters, CJK, Devanagari, Arabic, mixed scripts,
+# digit and base64-like runs. The providers' tokenizers are byte-level BPE,
+# so every token covers at least one UTF-8 byte: one token per byte is an
+# upper bound whatever the text.
+ADVERSARIAL = [
+    "",
+    "a",
+    "\U0001f469\U0001f3fd\u200d\u2695\ufe0f" * 300,
+    "O\u0300ko\u0301 a\u0300ti\u0300 e\u0323\u0300we\u0323\u0300 " * 200,
+    "\u75c5\u4eba\u53d1\u70ed\u4e09\u5929" * 500,
+    "\u0930\u094b\u0917\u0940 \u0645\u0631\u064a\u0636 \u0416\u0430\u0440 fever " * 300,
+    "0812345678901234567890" * 400,
+    "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=" * 300,
+]
+
+
+def _bytes(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+@pytest.mark.parametrize("text", ADVERSARIAL)
+def test_estimate_is_an_upper_bound(text: str) -> None:
+    """Ruling C7: at least one token per UTF-8 byte of the body, plus the
+    output cap; and at least one per character (a byte count is never
+    under a character count)."""
+    n = _bytes(text)
+    est = estimate_tokens(n)
+    assert est >= n + MAX_OUTPUT_TOKENS
+    assert est >= len(text) + MAX_OUTPUT_TOKENS
+    assert estimate_tokens(n, max_output=100) >= n + 100
+
+
+@settings(max_examples=300, deadline=None)
+@given(st.text(max_size=4000))
+def test_estimate_bounds_any_text(text: str) -> None:
+    n = _bytes(text)
+    assert estimate_tokens(n) >= n + MAX_OUTPUT_TOKENS >= len(text) + MAX_OUTPUT_TOKENS
+
+
+def test_largest_estimate_stays_under_cores_limit() -> None:
+    """The biggest body the scan lets through, with the output cap, still
+    fits one reservation (core refuses more than 100,000 tokens)."""
+    assert CORE_MAX_TOKENS == 100_000
+    assert estimate_tokens(MAX_BODY_BYTES) <= CORE_MAX_TOKENS
+    with pytest.raises(ValueError):
+        estimate_tokens(CORE_MAX_TOKENS)  # plus the cap: over
     with pytest.raises(ValueError):
         estimate_tokens(-1)
+    with pytest.raises(ValueError):
+        estimate_tokens(10, max_output=-1)
+
+
+def test_reserve_refuses_over_cores_limit_before_reserving(
+    monkeypatch: pytest.MonkeyPatch, port: Make
+) -> None:
+    calls: list[int] = []
+
+    async def rec(cur: Any, provider: str, tokens: int) -> tuple[str, int] | None:
+        calls.append(tokens)
+        return RES_ID, 1
+
+    monkeypatch.setattr(cloud_repo, "reserve", rec)
+    p = port(FakeDb())
+    assert p.reserve("anthropic", CORE_MAX_TOKENS + 1) is None
+    assert p.reserve("anthropic", 0) is None
+    assert p.reserve("anthropic", CORE_MAX_TOKENS) is not None
+    assert calls == [CORE_MAX_TOKENS]
+
+
+@pytest.mark.filterwarnings("ignore:A test tried to use socket.socket")
+@pytest.mark.parametrize("family", [socket.AF_UNIX, socket.AF_INET])
+def test_job_loop_allows_no_other_socket(
+    job_loop: asyncio.AbstractEventLoop, family: socket.AddressFamily
+) -> None:
+    with pytest.raises(pytest_socket.SocketBlockedError):
+        socket.socket(family, socket.SOCK_STREAM)
 
 
 def test_port_has_no_hospital_parameter() -> None:
@@ -273,3 +352,63 @@ def test_alert_at_80_percent_once(
 
 def test_repr_names_nothing(port: Make) -> None:
     assert HOSPITAL not in repr(port(FakeDb()))
+
+
+@pytest.mark.parametrize("used", [2**63, 2**80, -1])
+def test_settle_out_of_range_use_settles_the_reservation_and_counts(
+    monkeypatch: pytest.MonkeyPatch, port: Make, metrics: InMemoryMetricReader, used: int
+) -> None:
+    """A use outside 0..2^63-1 can't reach core's bigint: it would fail the
+    settle and hold the reservation all month. It settles as all of it."""
+    seen: list[int | None] = []
+
+    async def rec(cur: Any, reservation: str, n: int | None) -> bool:
+        seen.append(n)
+        return True
+
+    monkeypatch.setattr(cloud_repo, "settle", rec)
+    port(FakeDb()).settle(Reservation(RES_ID, 2500, 10), used)
+    assert seen == [2500]
+    (pt,) = points(metrics, "mhai_cloud_settle_clamped_total")
+    assert pt.value == 1
+    assert points(metrics, "mhai_cloud_settle_failures_total") == []
+
+
+def test_settle_of_a_non_reservation_never_raises(
+    port: Make, metrics: InMemoryMetricReader
+) -> None:
+    port(FakeDb()).settle(object(), 10)  # type: ignore[arg-type]
+    (pt,) = points(metrics, "mhai_cloud_settle_failures_total")
+    assert pt.value == 1
+
+
+def test_alert_once_holds_across_threads(
+    monkeypatch: pytest.MonkeyPatch, port: Make, metrics: InMemoryMetricReader
+) -> None:
+    """Many threads on one port, all at 90%: exactly one alert per port."""
+
+    async def rec(cur: Any, provider: str, tokens: int) -> tuple[str, int] | None:
+        return RES_ID, 90
+
+    monkeypatch.setattr(cloud_repo, "reserve", rec)
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    ports = 30
+    try:
+        for _ in range(ports):
+            p = port(FakeDb())
+            gate = threading.Barrier(16)
+
+            def hit(p: DbBudget = p, gate: threading.Barrier = gate) -> None:
+                gate.wait()
+                p.reserve("openai", 10)
+
+            ts = [threading.Thread(target=hit) for _ in range(16)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+    finally:
+        sys.setswitchinterval(old)
+    (pt,) = points(metrics, "mhai_cloud_budget_alerts_total")
+    assert pt.value == ports

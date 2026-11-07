@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, TypeVar
@@ -35,15 +36,35 @@ log = logging.getLogger("intelligence.boundary.cloud.budget")
 # budget or more logs and counts one alert (once per call).
 ALERT_PERCENT: Final = 80
 
+# The output cap a call reserves for, and must send as the provider's
+# max_tokens / max_output_tokens (Task 9).
+MAX_OUTPUT_TOKENS: Final = 1500
+
+# Core's limit on one reservation (mhai_cloud_reserve refuses more; migration
+# 00018). Named here so an estimate over it is refused before reserving;
+# core stays the authority.
+CORE_MAX_TOKENS: Final = 100_000
+
+# A settle's use must fit core's bigint.
+_BIGINT_MAX: Final = 2**63 - 1
+
 _T = TypeVar("_T")
 
 
-def estimate_tokens(body_len: int, max_output: int = 1500) -> int:
-    """An upper bound of one attempt's tokens: input at one token per three
-    bytes of the body, rounded up, plus the output cap."""
+def estimate_tokens(body_len: int, max_output: int = MAX_OUTPUT_TOKENS) -> int:
+    """An upper bound of one attempt's tokens (ruling C7): one token per
+    UTF-8 byte of the whole request body, plus the output cap. The
+    providers' tokenizers are byte-level, so no token covers less than a
+    byte, whatever the script, emoji or digits. body_len is the length of
+    the encoded bytes, never of a str. Raises ValueError for a negative
+    length or an estimate over CORE_MAX_TOKENS: the call must not reserve
+    (and so must not send)."""
     if body_len < 0 or max_output < 0:
         raise ValueError("estimate_tokens: lengths are never negative")
-    return -(-body_len // 3) + max_output
+    est = body_len + max_output
+    if est > CORE_MAX_TOKENS:
+        raise ValueError("estimate_tokens: over core's limit for one reservation")
+    return est
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +102,7 @@ class DbBudget:
         self._loop = loop
         self._timeout = timeout
         self._alerted = False
+        self._alert_lock = threading.Lock()
 
     def __repr__(self) -> str:
         return "DbBudget()"
@@ -118,6 +140,9 @@ class DbBudget:
         (budget, policy or hospital) or anything went wrong."""
         if provider not in PROVIDERS or type(tokens) is not int:
             return None
+        if not 0 < tokens <= CORE_MAX_TOKENS:
+            # Core refuses it too; refused here before any transaction.
+            return None
         try:
             row = self._run(lambda: self._reserve(provider, tokens))
         except Exception as e:
@@ -128,16 +153,34 @@ class DbBudget:
         if row is None:
             return None
         rid, percent = row
-        if percent >= ALERT_PERCENT and not self._alerted:
-            self._alerted = True
+        if percent >= ALERT_PERCENT and self._first_alert():
             log.warning("cloud.budget_high hospital=%s percent=%d", self._verified.hid, percent)
             telemetry.record_cloud_budget_alert(provider)
         return Reservation(rid, tokens, percent)
 
+    def _first_alert(self) -> bool:
+        with self._alert_lock:
+            first = not self._alerted
+            self._alerted = True
+            return first
+
     def settle(self, r: Reservation, used: int | None) -> None:
         """Settle r with the reported use; an unknown use (None) counts all
-        of r. Never raises: a failure is logged and counted."""
-        n = used if type(used) is int else r.tokens
+        of r. A use outside 0..2^63-1 can't reach core's bigint (that settle
+        would fail and hold r all month), so it counts all of r too, and is
+        counted. Never raises: a failure is logged and counted."""
+        if type(r) is not Reservation:
+            log.warning("cloud.settle_failed hospital=%s error=NotAReservation", self._verified.hid)
+            telemetry.record_cloud_settle_failure()
+            return
+        if type(used) is not int:
+            n = r.tokens
+        elif 0 <= used <= _BIGINT_MAX:
+            n = used
+        else:
+            log.warning("cloud.settle_clamped hospital=%s reservation=%s", self._verified.hid, r.id)
+            telemetry.record_cloud_settle_clamped()
+            n = r.tokens
         try:
             done = self._run(lambda: self._settle(r.id, n))
         except Exception as e:
