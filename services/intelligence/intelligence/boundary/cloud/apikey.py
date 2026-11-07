@@ -91,21 +91,28 @@ def load_api_key(path: str, name: str, development: bool, errs: list[str]) -> Ap
     )
     if raw is None:
         return None
-    problem = None
-    if not raw:
-        problem = "is empty"
-    elif config.is_placeholder(raw):
-        problem = "is a placeholder"
-    elif any(c.isspace() for c in raw):
-        problem = "contains whitespace"
-    elif not (raw.isascii() and raw.isprintable()):
-        problem = "contains a character a key can't have"
-    elif len(raw) < MIN_KEY_LEN:
-        problem = f"is too short (at least {MIN_KEY_LEN} characters)"
+    problem = key_problem(raw)
     if problem is not None:
         errs.append(f"{name} {problem}")
         return None
     return ApiKey(raw)
+
+
+def key_problem(raw: str) -> str | None:
+    """Why raw can't be a key (a phrase that never quotes it), or None. The
+    checks load_api_key makes on a file's contents; the live smoke makes
+    them on a key read from standard input."""
+    if not raw:
+        return "is empty"
+    if config.is_placeholder(raw):
+        return "is a placeholder"
+    if any(c.isspace() for c in raw):
+        return "contains whitespace"
+    if not (raw.isascii() and raw.isprintable()):
+        return "contains a character a key can't have"
+    if len(raw) < MIN_KEY_LEN:
+        return f"is too short (at least {MIN_KEY_LEN} characters)"
+    return None
 
 
 class RedactingFilter(logging.Filter):

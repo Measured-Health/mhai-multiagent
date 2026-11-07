@@ -171,6 +171,16 @@ class CloudSettings:
         return cls(providers=tuple(providers), proxy_url=proxy, demo=demo)
 
 
+def model_problem(provider: str, model: str) -> str | None:
+    """Why model can't be configured for provider (never quoting it), or
+    None. The worker's settings and the live smoke both check this."""
+    if not _MODEL.fullmatch(model):
+        return "must be 1 to 64 of A-Z a-z 0-9 . _ : -"
+    if provider == "anthropic" and any(m in model.casefold() for m in _RETAINED_ANTHROPIC):
+        return "names a model that needs 30-day retention (Fable, Mythos); not allowed"
+    return None
+
+
 def openssl_ca_paths() -> tuple[str | None, str | None]:
     """OpenSSL's compiled-in CA file and CA directory, each only when it is
     there and not empty. The cloud TLS context trusts these and nothing
@@ -228,12 +238,8 @@ def _provider(
     model = get("MODEL")
     if model is None:
         errs.append(f"{prefix}MODEL is required")
-    elif not _MODEL.fullmatch(model):
-        errs.append(f"{prefix}MODEL must be 1 to 64 of A-Z a-z 0-9 . _ : -")
-    elif p == "anthropic" and any(m in model.casefold() for m in _RETAINED_ANTHROPIC):
-        errs.append(
-            f"{prefix}MODEL names a model that needs 30-day retention (Fable, Mythos); not allowed"
-        )
+    elif (problem := model_problem(p, model)) is not None:
+        errs.append(f"{prefix}MODEL {problem}")
 
     key: ApiKey | None = None
     key_file = get("KEY_FILE")

@@ -632,6 +632,7 @@ The key must never be on the shared build server. steven-reid and mt5-lab run ag
   5. Commit the scrubbed fixtures by PR. CI runs the adapter suite against them, and the printed summary (no text) is pasted in the PR.
 
   Without H1 and H7, the PR says the live run is pending and merges with the synthetic fixtures.
+- **As built (PR E):** `main(argv, *, stdin, transport, env, markers)`: the last four are for the tests only; the command line can't set them. Before the key it also refuses a bad model (`settings.model_problem`, shared with the worker) and, with the real transport, a missing CA bundle (`settings.openssl_ca_paths`). The key is checked by `apikey.key_problem` (shared with `load_api_key`). It also prints the reply's numeric `usage.*` fields and, for xAI, `over_cap` (output over `MAX_OUTPUT_TOKENS`), for step 4's check. Exit 0 for `ok`, 1 for another outcome, 2 when refused. `--record` writes `<outcome>-<model>.json`, never overwrites, and writes nothing that fails the scrubber's check; `test_recorded_fixtures_pass_the_adapter_parsers` runs every recorded file through the client and adapter.
 - [ ] **Step 5:** Commit: "A manual live smoke run by a person off the build server, key from stdin, and a fixture scrubber".
 
 ### Task 16: Docs, the human gates in TODO, and the abuse-case check
