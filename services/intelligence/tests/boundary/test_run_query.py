@@ -30,6 +30,7 @@ from nats.aio.client import Client
 from nats.js import api
 
 from intelligence.boundary import envelope, jobs_repo
+from intelligence.boundary.cloud import vocab
 from intelligence.boundary.cloud.apikey import ApiKey
 from intelligence.boundary.cloud.client import CloudModelClient
 from intelligence.boundary.cloud.settings import ProviderSettings
@@ -514,14 +515,23 @@ class CloudFake:
     controls: StubModelClient
 
 
-def cloud_fake(adapter: FakeAdapter | None = None, **controls: Any) -> CloudFake:
+def cloud_fake(
+    adapter: Any = None,
+    *,
+    provider: str = "anthropic",
+    transport: CapturingTransport | None = None,
+    **controls: Any,
+) -> CloudFake:
+    """FakeAdapter by default; a real adapter (PR D) with the transport
+    that answers for it."""
     build, versions = stub_parts()
     adapter = adapter or FakeAdapter()
-    transport = CapturingTransport()
-    provider = ProviderSettings("anthropic", MODEL, ApiKey(FAKE_KEY), None, BASE_URL)
-    cloud = CloudModelClient(provider, adapter, build, versions, transport, sleep=lambda s: None)
+    transport = transport or CapturingTransport()
+    base = BASE_URL if provider == "anthropic" else vocab.BASE_URLS[provider]
+    settings = ProviderSettings(provider, MODEL, ApiKey(FAKE_KEY), None, base)
+    cloud = CloudModelClient(settings, adapter, build, versions, transport, sleep=lambda s: None)
     ctl = StubModelClient(**controls)
-    router = ModelRouter(StubModelClient(), {"anthropic": Controlled(cloud, ctl)})
+    router = ModelRouter(StubModelClient(), {provider: Controlled(cloud, ctl)})
     return CloudFake(router, cloud, adapter, transport, ctl)
 
 

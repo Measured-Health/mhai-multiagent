@@ -561,8 +561,19 @@ class CloudModelClient:
 
 # --- building the clients -------------------------------------------------------------
 
-# Adapters by provider name; Tasks 11 to 13 register theirs.
-ADAPTERS: dict[str, Callable[[], Adapter]] = {}
+# Adapters by provider name (plan Tasks 11 to 13), each made for the
+# provider's configured model: the model is a fixed leaf of the adapter's
+# Shape, so a request for any other model is refused by the scan. Imported
+# when called: the adapter modules import this one.
+
+
+def _anthropic(model: str) -> Adapter:
+    from intelligence.boundary.cloud.anthropic_adapter import AnthropicAdapter
+
+    return AnthropicAdapter(model)
+
+
+ADAPTERS: dict[str, Callable[[str], Adapter]] = {"anthropic": _anthropic}
 
 
 def build_cloud_clients(
@@ -580,6 +591,6 @@ def build_cloud_clients(
         proxy=settings.proxy_url, verify=tls_context(), trust_env=False, retries=0
     )
     return {
-        p.name: CloudModelClient(p, ADAPTERS[p.name](), build, local_versions, transport)
+        p.name: CloudModelClient(p, ADAPTERS[p.name](p.model), build, local_versions, transport)
         for p in settings.providers
     }

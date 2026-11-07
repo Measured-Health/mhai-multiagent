@@ -1,0 +1,16 @@
+{
+  "status": 529,
+  "headers": {
+    "content-type": "application/json",
+    "request-id": "req_SYNTHETIC0001",
+    "retry-after": "1"
+  },
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "overloaded_error",
+      "message": "Overloaded"
+    },
+    "request_id": "req_SYNTHETIC0001"
+  }
+}

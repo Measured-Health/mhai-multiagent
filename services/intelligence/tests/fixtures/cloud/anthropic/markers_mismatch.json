@@ -1,0 +1,25 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "request-id": "req_SYNTHETIC0001"
+  },
+  "body": {
+    "id": "msg_SYNTHETIC0001",
+    "type": "message",
+    "role": "assistant",
+    "model": "synthetic-model-1",
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"answer\": \"Synthetic answer [KB#0002].\", \"citations\": [\"KB#0001\"], \"insufficient_evidence\": false}"
+      }
+    ],
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 812,
+      "output_tokens": 64
+    }
+  }
+}

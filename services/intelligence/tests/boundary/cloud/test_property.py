@@ -10,7 +10,9 @@ title, never bare in a free-text field: an untitled name there is the C8
 residual (pinned in test_scan.py), which this test doesn't claim to cover.
 
 Each job runs through FakeAdapter, which POSTs the real rendering into a
-CapturingTransport. No raw identifier value (normalised by norm_words)
+CapturingTransport, and again through each real adapter (PR D: its SDK
+encodes the body, and a transport answers ok citing the first chunk it was
+sent). No raw identifier value (normalised by norm_words)
 appears in any captured body, decoded as the scan decodes it, and each
 job either sent a clean body or ended egress_blocked. Two checks keep it
 from passing vacuously: at least 10 bodies are captured, and CLEAN_RECORD
@@ -29,6 +31,7 @@ from hypothesis import strategies as st
 from intelligence.boundary.cloud.scan import IDENTIFYING_KEYS, norm_words, walk
 from tests.boundary import test_run_query as rq
 from tests.boundary import test_worker as tw
+from tests.boundary.cloud import adapter_kit as kit
 
 pytestmark = pytest.mark.boundary
 
@@ -145,6 +148,24 @@ def _leaks(body: bytes, values: list[Any]) -> list[str]:
     return out
 
 
+# The real adapters (plan Tasks 11 to 13): provider -> its adapter class.
+def _adapters() -> dict[str, Any]:
+    from intelligence.boundary.cloud.anthropic_adapter import AnthropicAdapter
+
+    return {"anthropic": AnthropicAdapter}
+
+
+KINDS = ("fake", "anthropic")
+
+
+def _cloud(kind: str) -> tuple[rq.CloudFake, str]:
+    if kind == "fake":
+        return rq.cloud_fake(), "anthropic"
+    adapter = _adapters()[kind](rq.MODEL)
+    return rq.cloud_fake(adapter, provider=kind, transport=kit.ReplyingTransport(kind)), kind
+
+
+@pytest.mark.parametrize("kind", KINDS)
 @settings(
     max_examples=1,
     derandomize=True,
@@ -153,7 +174,7 @@ def _leaks(body: bytes, values: list[Any]) -> list[str]:
 )
 @given(data=st.data())
 async def test_property_no_identifier_reaches_a_body(
-    make_env: rq.MakeEnv, postgres: rq.Postgres, data: st.DataObject
+    make_env: rq.MakeEnv, postgres: rq.Postgres, kind: str, data: st.DataObject
 ) -> None:
     env = await make_env()
     async with await rq.su(postgres) as conn:
@@ -162,7 +183,7 @@ async def test_property_no_identifier_reaches_a_body(
             "VALUES ('KB#0888', NULL, %s, 'guideline') ON CONFLICT DO NOTHING",
             (GRACE_CHUNK,),
         )
-    f = rq.cloud_fake()
+    f, provider = _cloud(kind)
     await env.start(f.router, max_concurrency=4)
     try:
         cases = [(CLEAN_QUESTION, CLEAN_RECORD, [])]
@@ -171,7 +192,7 @@ async def test_property_no_identifier_reaches_a_body(
         for question, patient, values in cases:
             before = len(f.transport.bodies)
             qid = await rq.seed_query(
-                postgres, provider="anthropic", question=question, patient=patient
+                postgres, provider=provider, question=question, patient=patient
             )
             await env.publish(qid)
             assert await rq.until(lambda q=qid: rq.status_is(postgres, q, "completed"), 30)

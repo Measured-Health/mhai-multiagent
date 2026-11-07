@@ -629,7 +629,7 @@ def test_tls_context_ignores_ssl_cert_env(monkeypatch: pytest.MonkeyPatch) -> No
         return real(**kw)
 
     monkeypatch.setattr(client_mod.httpx2, "HTTPTransport", spy)
-    monkeypatch.setitem(client_mod.ADAPTERS, "anthropic", FakeAdapter)
+    monkeypatch.setitem(client_mod.ADAPTERS, "anthropic", lambda model: FakeAdapter())
     settings = CloudSettings(providers=(provider(),), proxy_url="http://egress-proxy:3128")
     clients = build_cloud_clients(settings, Builder(), {"cca": "x", "nli": "n"})
     assert set(clients) == {"anthropic"}
@@ -822,8 +822,16 @@ def test_adapters_turn_sdk_retries_off() -> None:
     # Tasks 11 to 13: retrying is the client's (RetryPolicy, under the
     # budget and the stage deadline); an SDK's own retries would resend a
     # body with no reservation. Every registered adapter's SDK client must
-    # have max_retries == 0.
+    # have max_retries == 0, and the registry really holds the adapters, so
+    # this is not vacuous.
+    assert set(client_mod.ADAPTERS) >= REGISTERED
     with httpx2.Client(transport=CapturingTransport()) as http:
         for name, factory in client_mod.ADAPTERS.items():
-            sdk = factory().make_sdk(http, ApiKey(FAKE_KEY), BASE_URL)
+            adapter = factory(MODEL)
+            assert adapter.name == name
+            sdk = adapter.make_sdk(http, ApiKey(FAKE_KEY), vocab.BASE_URLS[name])
             assert getattr(sdk, "max_retries", None) == 0, name
+
+
+# The adapters registered so far (plan Tasks 11 to 13).
+REGISTERED = frozenset({"anthropic"})
