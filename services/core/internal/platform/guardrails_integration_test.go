@@ -21,9 +21,10 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 )
 
-// GET /platform/guardrails through core's whole chain: calendar periods
-// from stored snapshots (Plan 7c Task 5, spec §9), and the deprecated
-// rolling windows, fully hidden (R41a-3). Every name, id and count here is
+// The guardrail statistics through core's whole chain: calendar periods
+// from stored snapshots on GET /platform/guardrails/periods (Plan 7c Task
+// 5, spec §9, R41a-4), and the deprecated GET /platform/guardrails, its
+// rolling windows fully hidden (R41a-3). Every name, id and count here is
 // synthetic.
 
 // rawSmall is a count of 1 to 4 sent as a value.
@@ -90,6 +91,12 @@ func publish(t *testing.T) {
 func guardrails(t *testing.T, tok, query string) resp {
 	t.Helper()
 	return get(t, "/platform/guardrails"+query, tok)
+}
+
+// periods is GET /platform/guardrails/periods.
+func periods(t *testing.T, tok, query string) resp {
+	t.Helper()
+	return get(t, "/platform/guardrails/periods"+query, tok)
 }
 
 // stored is the stored body of the latest period of kind k, and its period.
@@ -173,7 +180,7 @@ func TestGuardrailsShape(t *testing.T) {
 	publish(t)
 	for _, role := range []string{authz.RolePlatformAdmin, authz.RoleAuditor} {
 		for _, k := range []calendar.Kind{calendar.Week, calendar.Month} {
-			r := guardrails(t, mint(t, seedUser(t, uuid.Nil, "", role)), "?period="+string(k))
+			r := periods(t, mint(t, seedUser(t, uuid.Nil, "", role)), "?period="+string(k))
 			ok(t, role+" "+string(k), r)
 			top := requireKeys(t, string(k), r.body, "period", "from", "to", "updated_at", "all", "hospitals")
 			_, p, computed := stored(t, k)
@@ -196,21 +203,27 @@ func TestGuardrailsShape(t *testing.T) {
 			}
 		}
 	}
-	// The query: period, and nothing else.
+	// The query: period, and nothing else; each route its own values
+	// (R41a-4: the old route keeps its enum).
 	tok := mint(t, platformAdmin(t))
 	for _, q := range []string{"", "?period=", "?period=1d", "?period=7D", "?period=Week", "?period=year", "?period=week&period=month",
-		"?period=week&hospital=x", "?x=1", "?period=7d&x=1"} {
-		problem(t, "query "+q, guardrails(t, tok, q), 422, "validation_failed")
+		"?period=week&hospital=x", "?x=1", "?period=7d", "?period=30d"} {
+		problem(t, "periods query "+q, periods(t, tok, q), 422, "validation_failed")
 	}
-	// Platform accounts only, two-step always.
+	for _, q := range []string{"", "?period=", "?period=week", "?period=month", "?period=quarter", "?period=7d&x=1", "?period=7d&period=30d"} {
+		problem(t, "guardrails query "+q, guardrails(t, tok, q), 422, "validation_failed")
+	}
+	// Platform accounts only, two-step always, on both routes.
 	h := calFixture.hosp[0]
-	problem(t, "clinician", guardrails(t, mint(t, seedUser(t, h, "", authz.RoleClinician)), "?period=week"), 403, "not_platform")
-	problem(t, "hospital admin", guardrails(t, mint(t, seedUser(t, h, "", authz.RoleHospitalAdmin)), "?period=month"), 403, "not_platform")
-	problem(t, "no two-step", guardrails(t, signIn(t, platformAdmin(t), false).tok, "?period=week"), 403, "mfa_required")
-	problem(t, "anonymous", guardrails(t, "", "?period=week"), 401, "unauthenticated")
-	problem(t, "auditor on the clinical audience", do(t, "GET", "/platform/guardrails?period=week", mint(t, auditor(t)), false), 403, "not_platform")
-	if got := do(t, "POST", "/platform/guardrails?period=week", tok, true); got.code < 400 {
-		t.Errorf("POST: %d", got.code)
+	for _, c := range []struct{ path, q string }{{"/platform/guardrails/periods", "?period=week"}, {"/platform/guardrails", "?period=7d"}} {
+		problem(t, "clinician", get(t, c.path+c.q, mint(t, seedUser(t, h, "", authz.RoleClinician))), 403, "not_platform")
+		problem(t, "hospital admin", get(t, c.path+c.q, mint(t, seedUser(t, h, "", authz.RoleHospitalAdmin))), 403, "not_platform")
+		problem(t, "no two-step", get(t, c.path+c.q, signIn(t, platformAdmin(t), false).tok), 403, "mfa_required")
+		problem(t, "anonymous", get(t, c.path+c.q, ""), 401, "unauthenticated")
+		problem(t, "auditor on the clinical audience", do(t, "GET", c.path+c.q, mint(t, auditor(t)), false), 403, "not_platform")
+		if got := do(t, "POST", c.path+c.q, tok, true); got.code < 400 {
+			t.Errorf("POST %s: %d", c.path, got.code)
+		}
 	}
 }
 
@@ -226,7 +239,7 @@ func TestGuardrailsCalendarPeriods(t *testing.T) {
 		t.Fatal(err)
 	}
 	if quarters == 0 {
-		problem(t, "no quarter published", guardrails(t, tok, "?period=quarter"), 503, "not_ready")
+		problem(t, "no quarter published", periods(t, tok, "?period=quarter"), 503, "not_ready")
 	}
 	// A quarter, stored by hand (the superuser passes the insert policy):
 	// the month's body, relabelled.
@@ -241,7 +254,7 @@ func TestGuardrailsCalendarPeriods(t *testing.T) {
 	defer func() {
 		_, _ = super.Exec(ctx, `DELETE FROM analytics_snapshots WHERE kind = 'quarter' AND period_from = $1::date`, q.From.Format(time.DateOnly))
 	}()
-	r := guardrails(t, tok, "?period=quarter")
+	r := periods(t, tok, "?period=quarter")
 	ok(t, "quarter", r)
 	if r.body["from"] != stampOf(q.From) || r.body["to"] != stampOf(q.To) {
 		t.Errorf("quarter %v–%v, want %v", r.body["from"], r.body["to"], q)
@@ -251,7 +264,7 @@ func TestGuardrailsCalendarPeriods(t *testing.T) {
 		WHERE kind = 'quarter' AND period_from = $1::date`, q.From.Format(time.DateOnly)); err != nil {
 		t.Fatal(err)
 	}
-	bad := guardrails(t, mint(t, platformAdmin(t)), "?period=quarter")
+	bad := periods(t, mint(t, platformAdmin(t)), "?period=quarter")
 	problem(t, "a stored small count", bad, 500, "internal_error")
 	if rawSmall.MatchString(bad.raw) {
 		t.Errorf("the small count was sent: %s", bad.raw)
@@ -261,7 +274,7 @@ func TestGuardrailsCalendarPeriods(t *testing.T) {
 		q.From.Format(time.DateOnly)); err != nil {
 		t.Fatal(err)
 	}
-	problem(t, "an unavailable quarter", guardrails(t, mint(t, platformAdmin(t)), "?period=quarter"), 503, "not_ready")
+	problem(t, "an unavailable quarter", periods(t, mint(t, platformAdmin(t)), "?period=quarter"), 503, "not_ready")
 }
 
 // A9: for the same period, the route shows the stored body's QG cells, the
@@ -270,7 +283,7 @@ func TestGuardrailsMatchesQuality(t *testing.T) {
 	publish(t)
 	for _, k := range []calendar.Kind{calendar.Week, calendar.Month} {
 		body, _, _ := stored(t, k)
-		r := guardrails(t, mint(t, auditor(t)), "?period="+string(k))
+		r := periods(t, mint(t, auditor(t)), "?period="+string(k))
 		ok(t, string(k), r)
 		same := func(what string, got, want map[string]any) {
 			for _, key := range rateKeys {
@@ -345,11 +358,16 @@ func TestGuardrailsRollingDeprecated(t *testing.T) {
 	limited := guardrails(t, tok, "?period=7d")
 	problem(t, "past the limit", limited, 429, "rate_limited")
 	deprecated("429", limited)
-	cal := guardrails(t, mint(t, u), "?period=month")
+	cal := periods(t, mint(t, u), "?period=month")
 	ok(t, "month", cal)
 	if cal.hdr.Get("Deprecation") != "" || cal.hdr.Get("Sunset") != "" {
-		t.Errorf("a calendar value is marked deprecated: %v", cal.hdr)
+		t.Errorf("the periods route is marked deprecated: %v", cal.hdr)
 	}
+	// The old route is deprecated whole: a calendar value there is 422, with
+	// the headers.
+	wrong := guardrails(t, mint(t, u), "?period=month")
+	problem(t, "a calendar value on the old route", wrong, 422, "validation_failed")
+	deprecated("422", wrong)
 	if d := callsLike(t, "%guardrail_snapshots%") - before; d != 0 {
 		t.Errorf("%d statements on guardrail_snapshots", d)
 	}
@@ -361,7 +379,7 @@ func TestGuardrailsRollingDeprecated(t *testing.T) {
 	defer restore()
 	gone := guardrails(t, mint(t, u), "?period=30d")
 	problem(t, "after the sunset", gone, 422, "validation_failed")
-	ok(t, "month after the sunset", guardrails(t, mint(t, u), "?period=month"))
+	ok(t, "month after the sunset", periods(t, mint(t, u), "?period=month"))
 }
 
 // A23 for guardrails: a calendar read runs no statement on a clinical
@@ -370,7 +388,7 @@ func TestGuardrailsCalendarNoComputation(t *testing.T) {
 	publish(t)
 	before := callsLike(t, "%clinical_decisions%") + callsLike(t, "%clinical_queries%")
 	for _, k := range []string{"week", "month", "week", "month"} {
-		ok(t, k, guardrails(t, mint(t, auditor(t)), "?period="+k))
+		ok(t, k, periods(t, mint(t, auditor(t)), "?period="+k))
 	}
 	if d := callsLike(t, "%clinical_decisions%") + callsLike(t, "%clinical_queries%") - before; d != 0 {
 		t.Errorf("%d statements on a clinical table", d)
@@ -382,7 +400,7 @@ func TestGuardrailsCalendarNoComputation(t *testing.T) {
 func TestGuardrailsNoRawSmallCount(t *testing.T) {
 	publish(t)
 	for _, k := range []string{"week", "month"} {
-		r := guardrails(t, mint(t, platformAdmin(t)), "?period="+k)
+		r := periods(t, mint(t, platformAdmin(t)), "?period="+k)
 		ok(t, k, r)
 		if m := rawSmall.FindString(r.raw); m != "" {
 			t.Errorf("%s: a small count was sent (%s)", k, m)
@@ -408,9 +426,9 @@ func TestGuardrailsRateLimited(t *testing.T) {
 	u := platformAdmin(t)
 	tok := mint(t, u)
 	for i := 0; i < platform.GuardrailsPerMinute; i++ {
-		ok(t, fmt.Sprintf("read %d", i+1), guardrails(t, tok, "?period=month"))
+		ok(t, fmt.Sprintf("read %d", i+1), periods(t, tok, "?period=month"))
 	}
-	problem(t, "7th read", guardrails(t, tok, "?period=month"), 429, "rate_limited")
-	problem(t, "8th read, another period", guardrails(t, tok, "?period=week"), 429, "rate_limited")
-	ok(t, "another session", guardrails(t, mint(t, u), "?period=month"))
+	problem(t, "7th read", periods(t, tok, "?period=month"), 429, "rate_limited")
+	problem(t, "8th read, the other route", guardrails(t, tok, "?period=7d"), 429, "rate_limited")
+	ok(t, "another session", periods(t, mint(t, u), "?period=month"))
 }

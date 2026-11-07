@@ -1156,11 +1156,66 @@ paths:
   /platform/guardrails:
     get:
       operationId: getPlatformGuardrails
+      summary: Deprecated. Rolling guardrail windows, every figure hidden since Plan 7c; use /platform/guardrails/periods.
+      deprecated: true
+      x-sunset: "2027-02-14"
+      description: |
+        **Deprecated** (Plan 7c spec §9, rulings R41a-3 and R41a-4; ADR
+        0012). Platform admins and auditors, platform audience, two-step
+        always. Use `GET /platform/guardrails/periods` (`week`, `month`,
+        `quarter`) instead.
+
+        From the 7c-1 release every response of this route carries
+        `Deprecation`, `Sunset` and `Link` headers (the notice at
+        `/docs/notices/guardrails-rolling-windows`). `period` (`7d`, `30d` or
+        `90d`, required) still answers in the same shape: `from` and `to` are
+        whole UTC days ending at the start of today (until 00:15 UTC, the
+        start of yesterday), `updated_at` is `to`, and the active hospitals
+        are listed. **Every count and share is hidden**, `all` included
+        (`{value: null, suppressed: true}`): rolling windows can be
+        subtracted from each other and from the calendar periods to reveal a
+        hidden small count. After the sunset (90 days after the release) the
+        values are 422 `validation_failed`. Six reads a minute per session,
+        shared with `/platform/guardrails/periods`, then 429 `rate_limited`.
+        Not recorded in the audit log.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: period, in: query, required: true, schema: { type: string, enum: [7d, 30d, 90d] } }
+      responses:
+        "200":
+          description: The guarded statistics.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+            Deprecation:
+              description: "`@` and the 7c-1 release, in Unix seconds (RFC 9745)."
+              schema: { type: string }
+            Sunset:
+              description: The HTTP-date the rolling values are removed (RFC 8594).
+              schema: { type: string }
+            Link:
+              description: The deprecation notice (`rel="deprecation"`).
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GuardrailsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/guardrails/periods:
+    get:
+      operationId: getPlatformGuardrailPeriods
       summary: Guardrail (HGA) statistics across hospitals for the latest finished calendar period, under the small-group rules.
       description: |
         Platform admins and auditors, platform audience, two-step always.
-        New (Plan 4 spec §6.3; not in the frontend contract yet). Calendar
-        periods since Plan 7c (spec §9, rulings R41a, R41a-2): `period` is
+        New (Plan 7c spec §9, rulings R41a, R41a-2, R41a-4). `period` is
         `week`, `month` or `quarter` (UTC). A week is month-aligned: days
         1–7, 8–14, 15–21 and 22 to the month's end (7 to 10 days); weeks nest
         in months and months in quarters. The response is the latest
@@ -1192,43 +1247,24 @@ paths:
         published so far. A share is 0 to 1 with four decimal places;
         `{value: null, suppressed: false}` is no answers to divide by.
 
-        **Deprecated:** `7d`, `30d` and `90d` (rolling windows). From the
-        7c-1 release they are served in the same shape with every count and
-        share hidden, `all` included, and with `Deprecation`, `Sunset` and
-        `Link` headers (`/docs/notices/guardrails-rolling-windows`); after
-        the sunset (90 days on) they are 422 `validation_failed`. Move to
-        `week`, `month` or `quarter`.
-
-        Six reads a minute per session, then 429 `rate_limited`. Not
-        recorded in the audit log (aggregates about no person).
+        Six reads a minute per session, shared with `/platform/guardrails`,
+        then 429 `rate_limited`. Not recorded in the audit log (aggregates
+        about no person).
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, rate_limited, not_ready, internal_error]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
-        - name: period
-          in: query
-          required: true
-          description: "`week`, `month` or `quarter`; `7d`, `30d` and `90d` are deprecated (fully hidden, then removed at the sunset)."
-          schema: { type: string, enum: [7d, 30d, 90d, week, month, quarter] }
+        - { name: period, in: query, required: true, schema: { type: string, enum: [week, month, quarter] } }
       responses:
         "200":
-          description: The guarded statistics.
+          description: The guarded statistics of the latest published period.
           headers:
             Cache-Control: { schema: { type: string, enum: [no-store] } }
-            Deprecation:
-              description: "On the deprecated rolling values only: `@` and the release, in Unix seconds (RFC 9745)."
-              schema: { type: string }
-            Sunset:
-              description: On the deprecated rolling values only, the HTTP-date they are removed (RFC 8594).
-              schema: { type: string }
-            Link:
-              description: On the deprecated rolling values only, the notice (`rel="deprecation"`).
-              schema: { type: string }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/GuardrailsOut" }
+              schema: { $ref: "#/components/schemas/GuardrailPeriodsOut" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
@@ -2113,13 +2149,33 @@ components:
         pass_share: { $ref: "#/components/schemas/GuardedShare" }
         regenerate_share: { $ref: "#/components/schemas/GuardedShare" }
         escalate_share: { $ref: "#/components/schemas/GuardedShare" }
-    GuardrailsOut:
+    GuardrailPeriodsOut:
       type: object
-      description: Plan 4 spec §6.3 (New); calendar periods since Plan 7c (§9).
+      description: Plan 7c spec §9 (New), the calendar periods.
       required: [period, from, to, updated_at, all, hospitals]
       additionalProperties: false
       properties:
-        period: { type: string, enum: [7d, 30d, 90d, week, month, quarter] }
+        period: { type: string, enum: [week, month, quarter] }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        all: { $ref: "#/components/schemas/GuardrailRates" }
+        hospitals:
+          type: array
+          items:
+            allOf:
+              - $ref: "#/components/schemas/GuardrailRates"
+              - type: object
+                required: [hospital]
+                properties:
+                  hospital: { $ref: "#/components/schemas/PersonRef" }
+    GuardrailsOut:
+      type: object
+      description: Plan 4 spec §6.3 (New).
+      required: [period, from, to, updated_at, all, hospitals]
+      additionalProperties: false
+      properties:
+        period: { type: string, enum: [7d, 30d, 90d] }
         from: { type: string, format: date-time }
         to: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }

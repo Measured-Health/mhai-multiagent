@@ -20,7 +20,9 @@ only finished, nested calendar periods, whose figures never change.
 
 ## What to use instead
 
-`period=week`, `period=month` or `period=quarter` (UTC):
+`GET /api/v1/platform/guardrails/periods` with `period=week`, `period=month`
+or `period=quarter` (UTC). It is a new route with its own schema (ruling
+R41a-4): `/platform/guardrails` keeps its schema and values until the sunset.
 
 - a **week** is month-aligned: days 1–7, 8–14, 15–21 and 22 to the month's
   end (7 to 10 days);

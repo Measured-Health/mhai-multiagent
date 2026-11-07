@@ -22,8 +22,8 @@ import (
 // histories of 1 to 3 years from each hospital's onboarding, the release
 // epoch mid-month inside each, fed to the scheduler through the fake
 // source, a wake at every week's end plus the grace. The JSON every route
-// would send (guardrails on week, month, quarter and the deprecated 7d,
-// 30d, 90d; until 7c-2 builds the analytics routes, the stored bodies stand
+// would send (GET /platform/guardrails/periods on week, month and quarter,
+// GET /platform/guardrails on the deprecated 7d, 30d and 90d; until 7c-2 builds the analytics routes, the stored bodies stand
 // in for them: they hold every cell any analytics route sends) is parsed by
 // this package alone. The exact
 // solver over all of it exposes no hidden cell of 1 to 4 and no
@@ -166,7 +166,7 @@ type response struct {
 }
 
 // routes renders what each route would send for the stored snapshot s:
-// GET /platform/guardrails for its kind (Task 5), and the stored body, which
+// GET /platform/guardrails/periods for its kind (Task 5, R41a-4), and the stored body, which
 // stands in for the analytics routes until 7c-2 (it holds every cell they
 // send).
 var routes = []func(t *testing.T, s scheduler.Stored, at time.Time) []response{

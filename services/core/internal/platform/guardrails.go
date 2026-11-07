@@ -1,26 +1,29 @@
 package platform
 
-// Guardrail statistics, GET /platform/guardrails?period (Plan 4 spec §6.3;
-// Plan 7c spec §9, rulings R41a, R41a-2, R41a-3).
+// Guardrail statistics (Plan 4 spec §6.3; Plan 7c spec §9, rulings R41a,
+// R41a-2, R41a-3 and R41a-4).
 //
-// period=week|month|quarter: the HGA decision counts of the latest published
-// period of that kind (month-aligned weeks, months, quarters, UTC), per
-// hospital and across all of them, rendered from the QG family of the one
-// stored snapshot (analytics_snapshots) that Answer quality reads, so the
-// two routes show the same cells with the same hidden pattern. The route
-// reads that row and nothing else: no request computes a figure or touches a
-// clinical table. A period not published yet, or stored unavailable, is 503
-// not_ready.
+// GET /platform/guardrails/periods?period=week|month|quarter (new, 7c-1):
+// the HGA decision counts of the latest published period of that kind
+// (month-aligned weeks, months, quarters, UTC), per hospital and across all
+// of them, rendered from the QG family of the one stored snapshot
+// (analytics_snapshots) that Answer quality reads, so the two show the
+// same cells with the same hidden pattern. The route reads that row and
+// nothing else: no request computes a figure or touches a clinical table. A
+// period not published yet, or stored unavailable, is 503 not_ready.
 //
-// period=7d|30d|90d are deprecated (ADR 0012): from the 7c-1 release they
-// are served in the same shape with every count and share hidden, all
-// included (R41a-3), with Deprecation, Sunset and Link headers, and after
-// the sunset they are 422 validation_failed. Nothing is read from or written
-// to guardrail_snapshots any more.
+// GET /platform/guardrails?period=7d|30d|90d (Plan 4c) is deprecated (ADR
+// 0012; R41a-4 keeps its schema and enum exactly as they were, so the
+// calendar periods live on the route above): from the 7c-1 release every
+// response carries Deprecation, Sunset and Link headers, the rolling
+// windows are served in the same shape with every count and share hidden,
+// all included (R41a-3), and after the sunset the values are 422
+// validation_failed. Nothing is read from or written to guardrail_snapshots
+// any more.
 //
 // Platform admins and auditors, two-step always; 6 reads a minute per
-// session (429 rate_limited, C31). Not recorded in the audit log (aggregates
-// about no person).
+// session across both routes (429 rate_limited, C31). Not recorded in the
+// audit log (aggregates about no person).
 
 import (
 	"context"
@@ -53,7 +56,10 @@ const (
 const GuardrailsGrace = calendar.Grace
 
 // The deprecated rolling windows (R41a-3), in one place: the release that
-// hid them, and the sunset 90 days on (ADR 0012). Set when 7c-1 merges.
+// hid them, and the sunset 90 days on (ADR 0012).
+//
+// RELEASE: RollingDeprecatedAt is a placeholder; the 7c-1 release sets it to
+// its own date (the sunset follows).
 var (
 	RollingDeprecatedAt = time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
 	RollingSunset       = RollingDeprecatedAt.AddDate(0, 0, 90)
@@ -114,28 +120,34 @@ var errNotPublished = errors.New("platform: no published period")
 
 func registerGuardrails(m *authz.Mux, d Deps) {
 	read := authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin, authz.RoleAuditor}}
-	authz.Route(m, http.MethodGet, "/platform/guardrails", read, http.HandlerFunc(d.guardrails))
+	authz.Route(m, http.MethodGet, "/platform/guardrails", read, rollingDeprecated(http.HandlerFunc(d.guardrails)))
+	authz.Route(m, http.MethodGet, "/platform/guardrails/periods", read, http.HandlerFunc(d.guardrailPeriods))
 }
 
-// guardrails is GET /platform/guardrails?period → GuardrailsOut.
+// guardrails is GET /platform/guardrails?period=7d|30d|90d (deprecated) →
+// GuardrailsOut, every figure hidden.
 func (d Deps) guardrails(w http.ResponseWriter, r *http.Request) {
+	v, err := params(r, []string{"period"})
+	if _, rolling := rollingPeriods[v["period"]]; err != nil || !rolling {
+		httpx.Error(w, r, "validation_failed")
+		return
+	}
+	d.guardrailsRead(w, r, v["period"])
+}
+
+// guardrailPeriods is GET /platform/guardrails/periods?period=week|month|quarter
+// → GuardrailsOut of the latest published period.
+func (d Deps) guardrailPeriods(w http.ResponseWriter, r *http.Request) {
 	v, err := params(r, []string{"period"})
 	if err != nil {
 		httpx.Error(w, r, "validation_failed")
 		return
 	}
-	period := v["period"]
-	if _, rolling := rollingPeriods[period]; rolling {
-		rollingDeprecated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			d.guardrailsRead(w, r, period)
-		})).ServeHTTP(w, r)
-		return
-	}
-	if _, err := calendar.ParseKind(period); err != nil {
+	if _, err := calendar.ParseKind(v["period"]); err != nil {
 		httpx.Error(w, r, "validation_failed")
 		return
 	}
-	d.guardrailsRead(w, r, period)
+	d.guardrailsRead(w, r, v["period"])
 }
 
 func (d Deps) guardrailsRead(w http.ResponseWriter, r *http.Request, period string) {
