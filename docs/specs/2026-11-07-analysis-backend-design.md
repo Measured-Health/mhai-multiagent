@@ -815,7 +815,7 @@ All routes:
 **Other contract changes.**
 
 - `User.features {analysis, named_access}`, additive.
-- New error codes in `authz/errorcodes.go`: `too_many_filters`, `too_small`, `level_not_supported`, `invalid_range`, `not_ready`, `named_access_off`, `not_cleared`, `clearance_ended`, `expired`, `idempotency_mismatch`, `would_empty`, `end_date_too_late`, `not_eligible`, `not_eligible_platform`, `analysis_off`, `analyst_cap`, `above_global` and `signoff_missing`, `already_used` and `too_many_rows`.
+- New error codes in `authz/errorcodes.go`: `too_many_filters`, `too_small`, `level_not_supported`, `invalid_range`, `not_ready`, `named_access_off`, `not_cleared`, `clearance_ended`, `expired`, `idempotency_mismatch`, `would_empty`, `end_date_too_late`, `not_eligible`, `not_eligible_platform`, `analysis_off`, `analyst_cap`, `above_global`, `signoff_missing`, `already_used` and `too_many_rows`.
 - **Nothing logged.** `/analysis/*` query strings are dropped from access logs and traces.
 
 ## 10. Migrations and RLS
