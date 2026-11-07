@@ -241,10 +241,19 @@ def links_from(headers: Mapping[str, str] | None) -> list[Link]:
 
 
 class _State:
-    def __init__(self, tracer: trace.Tracer, refusals: Any, verify: Any) -> None:
+    def __init__(
+        self,
+        tracer: trace.Tracer,
+        refusals: Any,
+        verify: Any,
+        settle_failures: Any = None,
+        budget_alerts: Any = None,
+    ) -> None:
         self.tracer = tracer
         self.refusals = refusals
         self.verify = verify
+        self.settle_failures = settle_failures
+        self.budget_alerts = budget_alerts
 
 
 _NOOP = _State(trace.NoOpTracer(), None, None)
@@ -304,7 +313,18 @@ def setup(
     verify = meter.create_histogram(
         "boundary_verify_seconds", unit="s", description="Time spent verifying a message."
     )
-    state = _State(tp.get_tracer(SCOPE), refusals, verify)
+    # The cloud token budget (plan Task 7): settles that failed (a
+    # reservation then stays held to the month's end), and hospitals past
+    # 80% of their month, by provider.
+    settle_failures = meter.create_counter(
+        "mhai_cloud_settle_failures_total",
+        description="Cloud token reservations whose settle failed.",
+    )
+    budget_alerts = meter.create_counter(
+        "mhai_cloud_budget_alerts_total",
+        description="Cloud calls that found their hospital at 80% or more of its budget.",
+    )
+    state = _State(tp.get_tracer(SCOPE), refusals, verify, settle_failures, budget_alerts)
     _state = state
 
     def shutdown() -> None:
@@ -476,6 +496,18 @@ def record_refusal(service: str, reason: str, n: int = 1) -> None:
     c = _state.refusals
     if c is not None:
         c.add(n, {"service": _label(service), "reason": _label(reason)})
+
+
+def record_cloud_settle_failure() -> None:
+    c = _state.settle_failures
+    if c is not None:
+        c.add(1)
+
+
+def record_cloud_budget_alert(provider: str) -> None:
+    c = _state.budget_alerts
+    if c is not None:
+        c.add(1, {"provider": _label(provider)})
 
 
 class RefusalCounter(Counter[Any]):
