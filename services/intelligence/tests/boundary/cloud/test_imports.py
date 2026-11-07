@@ -78,15 +78,40 @@ def _imports_cloud(tree: ast.AST, module: str, is_package: bool) -> bool:
     )
 
 
-def _seals(tree: ast.AST) -> bool:
+def _names(tree: ast.AST, names: frozenset[str]) -> bool:
+    """Whether tree names any of names: as a variable, an attribute or an
+    imported name."""
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name | ast.alias) and "seal_shared_chunk" in (
-            getattr(node, "id", None),
-            getattr(node, "name", None),
-        ):
+        if isinstance(node, ast.Name) and node.id in names:
             return True
-        if isinstance(node, ast.Attribute) and node.attr == "seal_shared_chunk":
+        if isinstance(node, ast.alias) and node.name.rpartition(".")[2] in names:
             return True
+        if isinstance(node, ast.Attribute) and node.attr in names:
+            return True
+    return False
+
+
+def _seals(tree: ast.AST) -> bool:
+    return _names(tree, frozenset({"seal_shared_chunk"}))
+
+
+# The gate's private ways to make a tag or a seal without its public paths
+# (review M2). Only gate.py may use them.
+FORGERS = frozenset({"_seal", "_SEAL_KEY", "_tag_for", "_MASKERS"})
+
+
+def _forges(tree: ast.AST) -> bool:
+    if _names(tree, FORGERS):
+        return True
+    # A SharedChunk built directly, by name or as gate.SharedChunk.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = (
+                f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+            )
+            if name == "SharedChunk":
+                return True
     return False
 
 
@@ -111,6 +136,17 @@ def test_only_kb_repo_seals_shared_chunks() -> None:
     assert offenders == []
     # kb_repo really is the one that seals (the rule isn't vacuous).
     assert _seals(_parse(PKG / "boundary" / "kb_repo.py"))
+
+
+def test_only_the_gate_uses_its_private_tag_and_seal_parts() -> None:
+    offenders = [
+        str(p.relative_to(ROOT))
+        for p in _modules()
+        if p != CLOUD / "gate.py" and _forges(_parse(p))
+    ]
+    assert offenders == []
+    # gate.py really uses them (the rule isn't vacuous).
+    assert _forges(_parse(CLOUD / "gate.py"))
 
 
 def test_document_and_correction_jobs_never_import_cloud() -> None:
@@ -169,8 +205,26 @@ def test_seal_rule_catches_every_form(source: str) -> None:
     assert _seals(ast.parse(source))
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from intelligence.boundary.cloud import gate\ngate._seal('KB#1', 'x')",
+        "from intelligence.boundary.cloud.gate import _SEAL_KEY",
+        "from intelligence.boundary.cloud import gate\nk = gate._SEAL_KEY",
+        "from intelligence.boundary.cloud.gate import SharedChunk\nSharedChunk('KB#1', 'x', b'')",
+        "from intelligence.boundary.cloud import gate\ngate.SharedChunk('KB#1', 'x', b'')",
+        "tag = masker._tag_for('x')",
+        "from intelligence.boundary.cloud.gate import _MASKERS",
+    ],
+)
+def test_forge_rule_catches_every_form(source: str) -> None:
+    assert _forges(ast.parse(source))
+
+
 def test_rules_pass_clean_code() -> None:
     tree = ast.parse("import httpx\nfrom intelligence.boundary import kb_repo, jobs_repo")
     assert not _imports_sdk(tree, "intelligence.boundary.x", False)
     assert not _imports_cloud(tree, "intelligence.boundary.x", False)
     assert not _seals(tree)
+    # Naming the type (an isinstance check) is not building one.
+    assert not _forges(ast.parse("isinstance(c, SharedChunk)\nx: SharedChunk"))

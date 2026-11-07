@@ -145,6 +145,26 @@ def test_masked_text_only_from_mask(tm: TaggingMasker) -> None:
         m._tag = b"\0" * 32  # type: ignore[misc]
 
 
+def test_masked_text_takes_an_exact_str_only(tm: TaggingMasker) -> None:
+    """Review M3: a str subclass could tag one value and store another; even
+    with a right tag, only an exact str is accepted."""
+
+    class Sneaky(str):
+        def encode(self, *args: Any, **kwargs: Any) -> bytes:
+            return QUESTION.encode()
+
+    with pytest.raises(TypeError):
+        MaskedText(Sneaky("Other text"), _tag=tm._tag_for(QUESTION), _key_id=tm._key_id)
+
+    class Plain(str):
+        pass
+
+    with pytest.raises(TypeError):
+        MaskedText(Plain(QUESTION), _tag=tm._tag_for(QUESTION), _key_id=tm._key_id)
+    # mask() itself takes a str subclass and gives an exact, owned value.
+    assert tm.owns(tm.mask(Plain(QUESTION)))
+
+
 _OPS: list[tuple[str, Callable[[MaskedText], Any]]] = [
     ("str", lambda m: str(m)),
     ("strip", lambda m: m.strip()),
@@ -188,6 +208,21 @@ _ARGS: dict[str, tuple[Any, ...]] = {
     "__mul__": (1,),
     "__rmul__": (1,),
     "__format__": ("",),
+    # Comparison and search: they take a str and give no str back.
+    "__eq__": ("q",),
+    "__ne__": ("q",),
+    "__lt__": ("q",),
+    "__le__": ("q",),
+    "__gt__": ("q",),
+    "__ge__": ("q",),
+    "__contains__": ("q",),
+    "count": ("q",),
+    "find": ("q",),
+    "rfind": ("q",),
+    "index": ("q",),
+    "rindex": ("q",),
+    "startswith": ("q",),
+    "endswith": ("q",),
 }
 _NOT_STR_OPS = frozenset(
     {
@@ -219,19 +254,18 @@ def _keeps_tag(x: object) -> bool:
 
 def test_no_str_method_keeps_the_tag(tm: TaggingMasker) -> None:
     """Every str method and operator, called on a MaskedText, gives plain
-    strs (or non-strs): nothing comes back still tagged."""
+    strs (or non-strs): nothing comes back still tagged. Every method is
+    called and must succeed: a new or changed method that needs arguments
+    fails here until it is added to _ARGS (review M4)."""
     m = tm.mask(QUESTION)
-    called = []
-    for name in sorted(dir(str)):
-        if name in _NOT_STR_OPS or not callable(getattr(str, name)):
-            continue
-        try:
-            out = getattr(m, name)(*_ARGS.get(name, ()))
-        except TypeError:
-            continue
-        called.append(name)
+    names = [n for n in sorted(dir(str)) if n not in _NOT_STR_OPS and callable(getattr(str, n))]
+    for name in names:
+        out = getattr(m, name)(*_ARGS.get(name, ()))
+        if name == "__iter__":
+            out = list(out)
         assert not _keeps_tag(out), name
-    assert {"format", "format_map", "__mod__", "strip", "__getitem__"} <= set(called)
+    assert {"format", "format_map", "__mod__", "strip", "__getitem__", "__iter__"} <= set(names)
+    assert set(_ARGS) <= set(names)
 
 
 def test_unbound_str_calls_keep_only_the_same_value(tm: TaggingMasker) -> None:
@@ -505,6 +539,41 @@ def test_prompt_blocks_in_fixed_order(tm: TaggingMasker) -> None:
         assert all(type(b) is str for b in blocks)
     empty = CloudPrompt(question, CloudContext(), (), tm).blocks()
     assert empty == (QUESTION, "Category: none\nRisk: none")
+
+
+def test_blocks_recheck_every_part(tm: TaggingMasker) -> None:
+    """Review M1: frozen stops plain assignment only. A part swapped or
+    changed after construction (object.__setattr__) is refused when the
+    blocks are rendered, not sent."""
+
+    def fresh() -> CloudPrompt:
+        return CloudPrompt(tm.mask(QUESTION), _context(tm), _shared(2), tm)
+
+    swapped = fresh()
+    object.__setattr__(swapped, "question", QUESTION)
+    _refused(swapped.blocks)
+
+    other = fresh()
+    object.__setattr__(other, "question", TaggingMasker().mask(QUESTION))
+    _refused(other.blocks)
+
+    score = fresh()
+    object.__setattr__(score.context, "risk_score", 8031234567)
+    _refused(score.blocks)
+
+    category = fresh()
+    object.__setattr__(category.context, "disease_category", "Synthetic Name")
+    _refused(category.blocks)
+
+    edited = fresh()
+    object.__setattr__(edited.chunks[0], "content", "Edited after sealing.")
+    _refused(edited.blocks)
+
+    extra = fresh()
+    object.__setattr__(extra, "chunks", extra.chunks + _shared(4))
+    _refused(extra.blocks)
+
+    assert len(fresh().blocks()) == 4
 
 
 def test_system_prompt_rules() -> None:

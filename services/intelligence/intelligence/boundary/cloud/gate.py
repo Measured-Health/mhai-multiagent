@@ -101,7 +101,9 @@ class MaskedText(str):
 
     def __new__(cls, value: str, *, _tag: bytes, _key_id: str) -> MaskedText:
         masker = _MASKERS.get(_key_id) if isinstance(_key_id, str) else None
-        if masker is None or not isinstance(value, str) or not isinstance(_tag, bytes):
+        # An exact str only: a subclass could tag one value and store
+        # another (its own encode, say).
+        if masker is None or type(value) is not str or type(_tag) is not bytes:
             raise TypeError("only TaggingMasker.mask makes a MaskedText")
         if not hmac.compare_digest(_tag, masker._tag_for(value)):
             raise TypeError("only TaggingMasker.mask makes a MaskedText")
@@ -366,5 +368,9 @@ class CloudPrompt:
         """The user content, in the fixed order every adapter sends (R-1):
         block 0 the masked question, block 1 the context, blocks 2 to 6 the
         chunks, each delimited with its id. Plain strs, for rendering."""
+        # Frozen stops plain assignment only; object.__setattr__ can still
+        # swap or change a part after construction, so every check runs
+        # again on what is about to be rendered.
+        self.__post_init__()
         chunks = tuple(f"<<chunk {c.chunk_id}>>\n{c.content}\n<<end>>" for c in self.chunks)
         return (str(self.question), self.context.render(), *chunks)
