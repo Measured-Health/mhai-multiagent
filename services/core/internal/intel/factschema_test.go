@@ -2,10 +2,8 @@ package intel
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -188,9 +186,6 @@ func TestQueryCompletedEgressAndOutcome(t *testing.T) {
 func TestOutcomeVocabularyMatchesWorker(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "intelligence", "intelligence", "boundary", "cloud", "vocab.py")
 	raw, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		t.Skip("vocab.py does not exist yet: cloud model providers plan Task 4 creates it and removes this skip")
-	}
 	if err != nil {
 		t.Fatal(err)
 	}

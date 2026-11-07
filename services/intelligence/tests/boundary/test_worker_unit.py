@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
+import threading
 import time
 import uuid
+import warnings
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import nats.errors
@@ -918,3 +923,89 @@ def test_bad_bff_request_id_refused_before_any_grant(rid: str | None) -> None:
         assert envelope.REQUEST_ID not in hd
 
     run(go())
+
+
+def _logging_state() -> tuple[object, ...]:
+    root = logging.getLogger()
+    return (
+        logging.Logger.makeRecord,
+        sys.excepthook,
+        threading.excepthook,
+        warnings.showwarning,
+        tuple((h, tuple(h.filters)) for h in root.handlers),
+        tuple(logging.lastResort.filters) if logging.lastResort is not None else (),
+    )
+
+
+def test_worker_start_with_cloud_off_leaves_logging_as_it_was() -> None:
+    """With no cloud provider, start-up logging is exactly as before the
+    cloud work: no makeRecord wrapper, no captureWarnings, no excepthooks,
+    no filter, and the SDK and HTTP loggers' levels untouched."""
+    from intelligence.boundary import worker as worker_mod
+    from intelligence.boundary.cloud.apikey import SDK_LOGGERS, uninstall_redaction
+
+    uninstall_redaction()
+    root = logging.getLogger()
+    handler = logging.StreamHandler()
+    root.addHandler(handler)
+    levels = {name: logging.getLogger(name).level for name in SDK_LOGGERS}
+    before = _logging_state()
+    try:
+        for name in SDK_LOGGERS:
+            logging.getLogger(name).setLevel(logging.INFO)
+        settings = WorkerSettings.from_env(BASE)
+        assert settings.cloud.providers == ()
+        worker_mod.secure_logging(settings)
+        assert _logging_state() == before
+        for name in SDK_LOGGERS:
+            assert logging.getLogger(name).level == logging.INFO
+    finally:
+        root.removeHandler(handler)
+        uninstall_redaction()
+        for name, level in levels.items():
+            logging.getLogger(name).setLevel(level)
+
+
+def test_worker_start_with_cloud_on_redacts_logs_and_quiets_sdk_loggers(
+    tmp_path: Path,
+) -> None:
+    """With a cloud provider configured, start-up puts the redacting filter
+    on the root handlers, wraps record creation, and turns SDK debug
+    logging off (cloud model providers, plan Task 4)."""
+    from intelligence.boundary import worker as worker_mod
+    from intelligence.boundary.cloud.apikey import (
+        SDK_LOGGERS,
+        RedactingFilter,
+        uninstall_redaction,
+    )
+
+    key = tmp_path / "key"
+    key.write_text("fake" + "0" * 24 + "\n", encoding="utf-8")
+    os.chmod(key, 0o400)
+    env = {
+        **BASE,
+        "INTELLIGENCE_CLOUD_PROVIDERS": "anthropic",
+        "INTELLIGENCE_CLOUD_ANTHROPIC_MODEL": "synthetic-model-1",
+        "INTELLIGENCE_CLOUD_ANTHROPIC_KEY_FILE": str(key),
+    }
+    uninstall_redaction()
+    make_record = logging.Logger.makeRecord
+    root = logging.getLogger()
+    handler = logging.StreamHandler()
+    root.addHandler(handler)
+    levels = {name: logging.getLogger(name).level for name in SDK_LOGGERS}
+    try:
+        for name in SDK_LOGGERS:
+            logging.getLogger(name).setLevel(logging.DEBUG)
+        settings = WorkerSettings.from_env(env)
+        assert [p.name for p in settings.cloud.providers] == ["anthropic"]
+        worker_mod.secure_logging(settings)
+        assert any(isinstance(f, RedactingFilter) for f in handler.filters)
+        assert logging.Logger.makeRecord is not make_record
+        for name in SDK_LOGGERS:
+            assert logging.getLogger(name).level == logging.WARNING
+    finally:
+        root.removeHandler(handler)
+        uninstall_redaction()
+        for name, level in levels.items():
+            logging.getLogger(name).setLevel(level)
