@@ -361,3 +361,45 @@ async def test_slot_held_until_the_thread_finishes() -> None:
         assert not sem.locked()
     slot.release()  # a second release is a no-op, never an extra slot
     assert sem._value == 1  # type: ignore[attr-defined]
+
+
+# --- the cloud route's seams (plan Task 9) ------------------------------------------------
+
+
+def test_generation_cloud_fields_default_to_local() -> None:
+    g = Generation()
+    assert dict(g.versions) == {}
+    assert g.egress == "none"
+    assert g.cloud_outcome is None
+    assert (g.tokens_in, g.tokens_out) == (0, 0)
+
+
+def test_local_clients_accept_and_ignore_call() -> None:
+    stub = StubModelClient()
+    g = stub.generate(QUESTION, {}, None, [_chunk()], call=object())  # type: ignore[arg-type]
+    assert g.available is True and g.cloud_outcome is None and g.egress == "none"
+    cca = StubCCA()
+    client = _orchestrator_client(cca, PassingHGA())
+    g = client.generate(QUESTION, {}, None, [_chunk()], call=object())  # type: ignore[arg-type]
+    assert g.available is True and g.cloud_outcome is None
+
+
+def test_verify_with_is_the_local_verification() -> None:
+    from intelligence.boundary.models import _verify_with
+
+    hga = PassingHGA()
+    client = _orchestrator_client(StubCCA(), hga)
+    g = client.generate(QUESTION, {}, None, [_chunk()])
+    via_client = client.verify(g)
+    via_function = _verify_with(g.handle, g)
+    assert via_client == via_function
+    assert via_function.verified is True and via_function.trust_score == 0.91
+
+
+def test_local_parts_is_default_orchestrators(monkeypatch: pytest.MonkeyPatch) -> None:
+    from intelligence.boundary import models
+
+    sentinel = (lambda chunks: None, {"cca": "g", "dense": "d", "nli": "n"})
+    monkeypatch.setattr(models, "local_parts", lambda: sentinel)
+    client = models.default_orchestrator()
+    assert client.model_versions() == {"cca": "g", "dense": "d", "nli": "n"}

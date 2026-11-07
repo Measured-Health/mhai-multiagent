@@ -40,6 +40,7 @@ from intelligence.boundary.config import ConfigError, WorkerSettings
 
 if TYPE_CHECKING:
     from intelligence.agents.orchestrator import DynamicOrchestratorAgent
+    from intelligence.boundary.cloud.client import CloudCall
     from intelligence.knowledge_base.kb_builder import KBChunk
 
 log = logging.getLogger("intelligence.boundary.models")
@@ -85,6 +86,15 @@ class Generation:
     patient_id: str | None = field(default=None, repr=False)
     # The client's per-job state for verify() (the orchestrator it built).
     handle: Any = field(default=None, repr=False, compare=False)
+    # The cloud route (plan Task 9): versions this generation adds to the
+    # decision's model_versions (cca, cca_route; none on a failure), where
+    # its text went (vocab.EGRESS), the outcome (vocab.OUTCOMES; None on
+    # the local path) and the provider's reported tokens.
+    versions: Mapping[str, str] = field(default_factory=dict)
+    egress: str = "none"
+    cloud_outcome: str | None = None
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 @dataclass(frozen=True)
@@ -121,6 +131,8 @@ class ModelClient(Protocol):
         patient_context: Mapping[str, Any],
         patient_id: str | None,
         chunks: Sequence[KBChunk],
+        *,
+        call: CloudCall | None = None,
     ) -> Generation: ...
 
     def verify(self, generation: Generation) -> Verification: ...
@@ -150,6 +162,66 @@ def _clean_versions(versions: Mapping[str, Any]) -> dict[str, str]:
 
 def _number(v: Any) -> float | None:
     return float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+
+
+def _verify_with(orch: Any, generation: Generation) -> Verification:
+    """Local verification (NLI and HGA) of an available generation, with
+    the question's own thresholds, as process_query does. The local and the
+    cloud client both use it, so a cloud answer is verified exactly as a
+    local one (design section 9)."""
+    hga = getattr(orch, "hga", None)
+    if hga is None:
+        return _escalated(("HGA",))
+    try:
+        classified = orch.classifier.classify(generation.question)
+        t = orch.threshold_manager.get_thresholds(classified)
+        r = hga.verify(
+            response_text=generation.response,
+            patient_id=generation.patient_id,
+            pass_threshold=t.trust_pass,
+            escalate_threshold=t.trust_escalate,
+            critical_penalty=t.critical_flag_penalty,
+            warning_penalty=t.warning_flag_penalty,
+        )
+        trust = _number(r.get("trust_score"))
+        if trust is None:
+            raise TypeError("no trust score")
+    except Exception as e:
+        log.warning("model stage failed agent=HGA error=%s", type(e).__name__)
+        return _escalated(("HGA",))
+    decision = str(r.get("decision", "")).upper()
+    if decision not in DECISIONS:
+        decision = "ESCALATE"
+    scores = {
+        k: s
+        for k, s in (
+            ("nli", _number(r.get("nli_score"))),
+            ("coherence", _number(r.get("coherence_score"))),
+            ("numerical", _number(r.get("numerical_score"))),
+            ("se", _number(r.get("semantic_entropy_score"))),
+        )
+        if s is not None
+    }
+    weights = {
+        str(k): float(w)
+        for k, w in (r.get("weights") or {}).items()
+        if _number(w) is not None and _SAFE_KEY.fullmatch(str(k))
+    }
+    flags = tuple(
+        (str(f.get("type", ""))[:32], str(f.get("severity", ""))[:16])
+        for f in r.get("flags") or ()
+        if isinstance(f, dict)
+    )
+    return Verification(
+        decision=decision,
+        trust_score=trust,
+        verified=True,
+        degraded=False,
+        scores=scores,
+        flag_penalty=_number(r.get("flag_penalty")),
+        weights=weights,
+        flags=flags,
+    )
 
 
 # --- the orchestrator -------------------------------------------------------------
@@ -193,6 +265,8 @@ class OrchestratorModelClient:
         patient_context: Mapping[str, Any],
         patient_id: str | None,
         chunks: Sequence[KBChunk],
+        *,
+        call: CloudCall | None = None,
     ) -> Generation:
         try:
             # Building loads the models: a failure here escalates like any
@@ -245,60 +319,7 @@ class OrchestratorModelClient:
     def verify(self, generation: Generation) -> Verification:
         if not generation.available:
             return _escalated(generation.failed_agents or ("CCA",))
-        orch = generation.handle
-        hga = getattr(orch, "hga", None)
-        if hga is None:
-            return _escalated(("HGA",))
-        try:
-            classified = orch.classifier.classify(generation.question)
-            t = orch.threshold_manager.get_thresholds(classified)
-            r = hga.verify(
-                response_text=generation.response,
-                patient_id=generation.patient_id,
-                pass_threshold=t.trust_pass,
-                escalate_threshold=t.trust_escalate,
-                critical_penalty=t.critical_flag_penalty,
-                warning_penalty=t.warning_flag_penalty,
-            )
-            trust = _number(r.get("trust_score"))
-            if trust is None:
-                raise TypeError("no trust score")
-        except Exception as e:
-            log.warning("model stage failed agent=HGA error=%s", type(e).__name__)
-            return _escalated(("HGA",))
-        decision = str(r.get("decision", "")).upper()
-        if decision not in DECISIONS:
-            decision = "ESCALATE"
-        scores = {
-            k: s
-            for k, s in (
-                ("nli", _number(r.get("nli_score"))),
-                ("coherence", _number(r.get("coherence_score"))),
-                ("numerical", _number(r.get("numerical_score"))),
-                ("se", _number(r.get("semantic_entropy_score"))),
-            )
-            if s is not None
-        }
-        weights = {
-            str(k): float(w)
-            for k, w in (r.get("weights") or {}).items()
-            if _number(w) is not None and _SAFE_KEY.fullmatch(str(k))
-        }
-        flags = tuple(
-            (str(f.get("type", ""))[:32], str(f.get("severity", ""))[:16])
-            for f in r.get("flags") or ()
-            if isinstance(f, dict)
-        )
-        return Verification(
-            decision=decision,
-            trust_score=trust,
-            verified=True,
-            degraded=False,
-            scores=scores,
-            flag_penalty=_number(r.get("flag_penalty")),
-            weights=weights,
-            flags=flags,
-        )
+        return _verify_with(generation.handle, generation)
 
     def model_versions(self) -> dict[str, str]:
         return dict(self._versions)
@@ -310,6 +331,13 @@ def default_orchestrator() -> OrchestratorModelClient:
     per job; a cached index is performance-plan work). The NLI model and
     the Ollama generator are shared: they hold no per-request state. Loads
     the models on first use, on the job's thread."""
+    build, versions = local_parts()
+    return OrchestratorModelClient(build, versions=versions)
+
+
+def local_parts() -> tuple[Builder, dict[str, str]]:
+    """default_orchestrator's builder and versions, for the cloud clients
+    (plan Task 9): they retrieve and verify with the same local models."""
     from intelligence.agents.hga_nli import (
         CitationVerificationPipeline,
         NLIBackedHGA,
@@ -349,14 +377,11 @@ def default_orchestrator() -> OrchestratorModelClient:
         cca = RAGClinicalContextAgent(retriever, generator=generator)
         return DynamicOrchestratorAgent(rag_cca=cca, hga=hga)
 
-    return OrchestratorModelClient(
-        build,
-        versions={
-            "cca": generator.name,
-            "dense": str(cfg.DENSE_MODEL),
-            "nli": str(cfg.NLI_MODEL),
-        },
-    )
+    return build, {
+        "cca": generator.name,
+        "dense": str(cfg.DENSE_MODEL),
+        "nli": str(cfg.NLI_MODEL),
+    }
 
 
 # --- the stub -----------------------------------------------------------------------
@@ -423,6 +448,8 @@ class StubModelClient:
         patient_context: Mapping[str, Any],
         patient_id: str | None,
         chunks: Sequence[KBChunk],
+        *,
+        call: CloudCall | None = None,
     ) -> Generation:
         self._enter("generate")
         ids = tuple(c.chunk_id for c in chunks if _CHUNK_ID.fullmatch(c.chunk_id))
