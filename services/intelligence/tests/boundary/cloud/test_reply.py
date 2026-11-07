@@ -58,6 +58,9 @@ BAD: list[tuple[str, Any]] = [
     ("link_tel", _raw(answer="Call tel:+15550100 [KB#0001].")),
     ("link_data_upper", _raw(answer="Open DATA:text/plain,x [KB#0001].")),
     ("link_tel_fullwidth", _raw(answer="Call \uff54\uff45\uff4c:+15550100 [KB#0001].")),
+    ("link_data_base64", _raw(answer="See data:image/png;base64,AAAA [KB#0001].")),
+    ("link_mailto_upper", _raw(answer="Write MAILTO:a@b [KB#0001].")),
+    ("link_data_fullwidth", _raw(answer="See \uff44\uff41\uff54\uff41:x [KB#0001].")),
     ("markdown_link", _raw(answer="See [guide](x) [KB#0001].")),
     ("markdown_image", _raw(answer="![x](y) [KB#0001].")),
     # Reference-style links and link definitions (security review of Task 8).
@@ -156,6 +159,9 @@ EXPECT = {
     "link_tel": "link",
     "link_data_upper": "link",
     "link_tel_fullwidth": "link",
+    "link_data_base64": "link",
+    "link_mailto_upper": "link",
+    "link_data_fullwidth": "link",
     "markdown_link": "markdown",
     "markdown_image": "markdown",
     "code_fence": "code_fence",
@@ -288,6 +294,16 @@ def test_good_answer_passes() -> None:
     # str and Mapping inputs give the same Answer.
     assert validate_answer(_raw().decode(), SENT) == a
     assert validate_answer(_doc(), SENT) == a
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Lab data: Hb 9 [KB#0001].", "Tel: ask the ward [KB#0001].", "File: see notes [KB#0001]."],
+)
+def test_scheme_word_then_a_space_is_prose(text: str) -> None:
+    # data:, mailto:, file: and tel: are refused only when a non-space
+    # follows the colon straight away; a label then a space is prose.
+    assert validate_answer(_raw(answer=text), SENT).answer == text
 
 
 def test_duplicate_citations_kept_once_in_order() -> None:

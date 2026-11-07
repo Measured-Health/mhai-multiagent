@@ -11,7 +11,8 @@ reply is parsed again here and every check fails closed:
   MAX_REPLY_BYTES, exactly the three keys of ANSWER_SCHEMA, each of its
   JSON type (no coercion: "false" and 0 are not false);
 - answer: 1 to 6,000 characters, no control or format characters, no URL
-  (protocol-relative "//host" and backslash forms included), HTML tag,
+  (protocol-relative "//host" and backslash forms included, and data:,
+  mailto:, file: or tel: with no space after the colon), HTML tag,
   "[" or "]" outside an exact [KB#nnnn] marker (so no Markdown link,
   reference, definition or image), a marker followed by ":", code fence,
   or chunk delimiter;
@@ -135,18 +136,22 @@ class Answer(BaseModel):
 _CITATION = re.compile(r"KB#[0-9]{4}")
 _MARKER = re.compile(r"\[(KB#[0-9]{4})\]")
 _DELIMITERS = ("<<chunk", "<<end")
-# A scheme URL, www., a script scheme, a data:, mailto:, file: or tel:
-# scheme (none needs "//"), a protocol-relative "//host", or a backslash
-# form of one (a backslash next to a slash, or two backslashes). The
-# schemes refuse prose like "lab data: Hb 9" too: fails closed (for H2).
+# A scheme URL, www., a script scheme, a protocol-relative "//host", or a
+# backslash form of one (a backslash next to a slash, or two backslashes).
 _LINK = re.compile(
     r"[a-z][a-z0-9+.\-]*://|www\.|javascript:|vbscript:|//[^\s/]"
-    r"|\b(?:data|mailto|file|tel):"
     # Backslash-slash forms browsers and renderers read as a slash.
     r"|\\/|/\\|\\\\"
 )
 # "<" then a letter, "/", "!" or "?": a tag, a closing tag, a comment or a
 # processing instruction. "BP <90" and "a < b" are not.
+# The data:, mailto:, file: and tel: schemes (none needs "//"), only when
+# a non-space follows the colon straight away: "data:text/html" and
+# "tel:+234" are refused, "lab data: Hb 9" and "Tel: ask the ward" are
+# prose. Checked on the normalised text only (case-folded, NFKC, so
+# full-width forms are caught), never the space-stripped copy, which
+# would join "tel: ask" into "tel:ask".
+_SCHEME = re.compile(r"\b(?:data|mailto|file|tel):\S")
 _HTML = re.compile(r"<[a-z/!?]")
 _MARKDOWN = re.compile(r"!\[|\]\(")
 # A marker followed by a colon: "[KB#0001]: x" is a link definition that
@@ -227,7 +232,7 @@ def validate_answer(raw: bytes | str | Mapping[str, Any], sent_ids: frozenset[st
     compact = "".join(norm.split())
     if any(d in compact for d in _DELIMITERS):
         _bad("delimiter")
-    if _LINK.search(norm) or _LINK.search(compact):
+    if _LINK.search(norm) or _LINK.search(compact) or _SCHEME.search(norm):
         _bad("link")
     if _HTML.search(norm):
         _bad("html")
