@@ -183,6 +183,8 @@ jobs:
         working-directory: services/gokit
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
@@ -207,6 +209,8 @@ jobs:
         working-directory: services/emr
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"

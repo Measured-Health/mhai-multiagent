@@ -90,12 +90,16 @@ def test_shared_token_vectors() -> None:
         if v["subject"].startswith("emr."):
             # The emr service's control vectors (EMR design §3.2): its Go
             # responder gives the verdict. A worker (aud pipeline) refuses
-            # every one of them by audience.
+            # every one of them.
             got = _verifier({**v, "service": "pipeline"}, ops).check_token(
                 v["token"], v["subject"], v["reply"], v["knd"], body, granted=v["granted"]
             )
-            if got != "claims":
-                mismatches.append(f"{v['name']}: a worker gives {got!r}, want 'claims'")
+            # aud emr: refused by audience. A forged aud pipeline on an emr
+            # subject passes that check and is refused by the subject's shape.
+            aud = json.loads(base64.urlsafe_b64decode(v["token"].split(".")[1] + "=="))["aud"]
+            want = "binding" if aud == "pipeline" else "claims"
+            if got != want:
+                mismatches.append(f"{v['name']}: a worker gives {got!r}, want {want!r}")
             emr += 1
             checked += 1
             continue
