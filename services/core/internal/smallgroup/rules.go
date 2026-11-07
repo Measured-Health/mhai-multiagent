@@ -209,7 +209,11 @@ type grid struct {
 	val  []int64
 	hide []bool
 	pri  []int
+	// frozen cells are published already: never newly hidden (nil: none).
+	frozen []bool
 }
+
+func (g *grid) isFrozen(c int) bool { return g.frozen != nil && g.frozen[c] }
 
 func newGrid(vals []int64) *grid {
 	g := &grid{val: vals, hide: make([]bool, len(vals)), pri: make([]int, len(vals))}
@@ -239,7 +243,7 @@ func (g *grid) better(a, b int) bool {
 func (g *grid) pick(cells []int) int {
 	best := -1
 	for _, c := range cells {
-		if !g.hide[c] && (best < 0 || g.better(c, best)) {
+		if !g.hide[c] && !g.isFrozen(c) && (best < 0 || g.better(c, best)) {
 			best = c
 		}
 	}
@@ -280,6 +284,9 @@ func (g *grid) enforce(l line) bool {
 		}
 		c := g.pick(l.parts)
 		if c < 0 {
+			if g.isFrozen(l.total) {
+				return changed // only frozen cells left: the caller's history check decides
+			}
 			c = l.total
 		}
 		g.hide[c], changed = true, true
@@ -288,9 +295,17 @@ func (g *grid) enforce(l line) bool {
 
 // Set is rules 1 and 2 over one set: total = Σ parts. It returns the
 // guarded total first, then each part in order.
-func Set(total int64, parts ...int64) []Guarded {
+func Set(total int64, parts ...int64) []Guarded { return setForced(total, parts, nil) }
+
+// setForced is Set with the cells in forced (total first) hidden first.
+func setForced(total int64, parts []int64, forced []bool) []Guarded {
 	vals := append([]int64{total}, parts...)
 	g := newGrid(vals)
+	if len(forced) == len(vals) {
+		for i, x := range forced {
+			g.hide[i] = g.hide[i] || x
+		}
+	}
 	l := line{total: 0}
 	for i := range parts {
 		l.parts = append(l.parts, i+1)
@@ -322,45 +337,73 @@ func (g *grid) out() []Guarded {
 // table entirely hidden has no bridge. Rows of the wrong width, or an all
 // row that isn't the column sums, hide everything (fail closed).
 func AcrossRows(all []int64, rows [][]int64) ([]Guarded, [][]Guarded) {
+	hide := acrossRows(all, rows, nil, nil)
+	return splitRows(all, rows, hide)
+}
+
+// splitRows turns a hidden pattern over [all, rows...] into guarded rows.
+func splitRows(all []int64, rows [][]int64, hide []bool) ([]Guarded, [][]Guarded) {
 	w := len(all)
-	consistent := w >= 2
-	for j := 0; consistent && j < w; j++ {
+	g := func(v int64, h bool) Guarded {
+		if h {
+			return hidden
+		}
+		return shown(v)
+	}
+	a := make([]Guarded, w)
+	for j := range a {
+		a[j] = g(all[j], hide == nil || hide[j])
+	}
+	out := make([][]Guarded, len(rows))
+	for i, r := range rows {
+		out[i] = make([]Guarded, len(r))
+		for j := range r {
+			out[i][j] = g(r[j], hide == nil || len(r) != w || hide[(i+1)*w+j])
+		}
+	}
+	return a, out
+}
+
+// consistentTable reports whether every row is w wide and adds up, and all
+// is the column sums.
+func consistentTable(all []int64, rows [][]int64) bool {
+	w := len(all)
+	if w < 2 {
+		return false
+	}
+	for j := 0; j < w; j++ {
 		var s int64
 		for _, r := range rows {
 			if len(r) != w {
-				consistent = false
-				break
+				return false
 			}
 			s += r[j]
 		}
-		consistent = consistent && s == all[j]
+		if s != all[j] {
+			return false
+		}
 	}
 	for _, r := range append([][]int64{all}, rows...) {
-		if !consistent || len(r) != w {
-			consistent = false
-			break
-		}
 		var s int64
 		for _, v := range r[1:] {
 			s += v
 		}
-		consistent = s == r[0]
-	}
-	if !consistent {
-		a := make([]Guarded, len(all))
-		for j := range a {
-			a[j] = hidden
+		if s != r[0] {
+			return false
 		}
-		out := make([][]Guarded, len(rows))
-		for i, r := range rows {
-			out[i] = make([]Guarded, len(r))
-			for j := range r {
-				out[i][j] = hidden
-			}
-		}
-		return a, out
 	}
+	return true
+}
 
+// acrossRows is AcrossRows's hidden pattern over [all, rows...] (cell i*w +
+// j, row 0 all), with forced cells hidden first and frozen cells never
+// newly hidden (either may be nil). An inconsistent table is nil: hide
+// everything.
+func acrossRows(all []int64, rows [][]int64, forced, frozen []bool) []bool {
+	if !consistentTable(all, rows) {
+		return nil
+	}
+	w := len(all)
 	// Cell (i, j) is i*w + j; row 0 is all, rows 1.. the hospitals.
 	h := len(rows) + 1
 	vals := make([]int64, 0, h*w)
@@ -369,6 +412,21 @@ func AcrossRows(all []int64, rows [][]int64) ([]Guarded, [][]Guarded) {
 		vals = append(vals, r...)
 	}
 	g := newGrid(vals)
+	if len(frozen) == len(vals) {
+		g.frozen = frozen
+		for c := range g.hide {
+			if frozen[c] {
+				g.hide[c] = false // a frozen cell keeps its published state (forced)
+			}
+		}
+	}
+	if len(forced) == len(vals) {
+		for c, x := range forced {
+			if x {
+				g.hide[c] = true
+			}
+		}
+	}
 	for j := 0; j < w; j++ {
 		g.pri[j] = 1 // the all row last
 	}
@@ -399,18 +457,94 @@ func AcrossRows(all []int64, rows [][]int64) ([]Guarded, [][]Guarded) {
 			continue
 		}
 		b, ok := bridge(g.hide, h, w)
+		if g.frozen != nil {
+			// A parent set: only a frozen (child) cell that could be solved
+			// for is repaired here. A parent cell on a bridge is either known
+			// already from shown children (nothing new) or a matter for the
+			// parent's own table and the history check (§6.3 step 3).
+			ok = false
+			for _, c := range bridges(g.hide, h, w, false) {
+				if g.frozen[c] {
+					b, ok = c, true
+					break
+				}
+			}
+		}
 		if !ok || skipBridge {
 			break
 		}
-		g.hide[g.breakBridge(b, h, w)] = true
+		c := g.breakBridge(b, h, w)
+		if c < 0 {
+			break // only frozen cells could close it: the history check decides
+		}
+		g.hide[c] = true
 	}
-	o := g.out()
-	allOut := o[:w]
-	out := make([][]Guarded, len(rows))
-	for i := range rows {
-		out[i] = o[(i+1)*w : (i+2)*w]
+	return g.hide
+}
+
+// AcrossRowsFrozen is the parent set (Plan 7c spec §6.3 step 2, R41a-2):
+// a table whose row 0 is all and rows 1.. the hospitals, and whose columns
+// are a parent period's cell then its children's, each row adding up
+// (parent = Σ children) and each column too (all = Σ hospitals). hidden is
+// the published state of every cell ([row][col], all first): the children's
+// as stored, the parent's as its own guard left it. Rule 2 runs on every
+// row and column and then the bridge check, where only the cells of the
+// columns in newCols (the parent's) may be newly hidden: a bridge that only
+// a child cell could close is closed by hiding parent cells instead. It
+// returns the new hidden pattern. A table that doesn't add up hides every
+// newCols cell (fail closed).
+func AcrossRowsFrozen(all []int64, rows [][]int64, hidden [][]bool, newCols []int) [][]bool {
+	w, h := len(all), len(rows)+1
+	isNew := map[int]bool{}
+	for _, j := range newCols {
+		isNew[j] = true
 	}
-	return allOut, out
+	out := make([][]bool, h)
+	for i := range out {
+		out[i] = make([]bool, w)
+	}
+	ok := consistentTable(all, rows) && len(hidden) == h
+	for i := 0; ok && i < h; i++ {
+		ok = len(hidden[i]) == w
+	}
+	if !ok {
+		for i := range out {
+			for j := range out[i] {
+				out[i][j] = isNew[j] || (i < len(hidden) && j < len(hidden[i]) && hidden[i][j])
+			}
+		}
+		return out
+	}
+	forced := make([]bool, h*w)
+	frozen := make([]bool, h*w)
+	for i := 0; i < h; i++ {
+		for j := 0; j < w; j++ {
+			forced[i*w+j] = hidden[i][j]
+			frozen[i*w+j] = !isNew[j]
+		}
+	}
+	// Rule 1 on the new cells only: a frozen child keeps what was published.
+	vals := append(append([]int64{}, all...), flatten(rows)...)
+	for c, v := range vals {
+		if !frozen[c] && (v < 0 || small(v)) {
+			forced[c] = true
+		}
+	}
+	hide := acrossRows(all, rows, forced, frozen)
+	for i := 0; i < h; i++ {
+		for j := 0; j < w; j++ {
+			out[i][j] = hide[i*w+j]
+		}
+	}
+	return out
+}
+
+func flatten(rows [][]int64) []int64 {
+	var out []int64
+	for _, r := range rows {
+		out = append(out, r...)
+	}
+	return out
 }
 
 // The hidden-cell graph: vertex i (0 ≤ i < h) is row i, vertex h + j is
@@ -419,6 +553,17 @@ func AcrossRows(all []int64, rows [][]int64) ([]Guarded, [][]Guarded) {
 // bridge finds a hidden cell whose edge is a bridge (Tarjan's low-link,
 // iteratively), as its cell index.
 func bridge(hide []bool, h, w int) (int, bool) {
+	bs := bridges(hide, h, w, true)
+	if len(bs) == 0 {
+		return 0, false
+	}
+	return bs[0], true
+}
+
+// bridges lists the hidden cells whose edges are bridges (the first only,
+// when first is set).
+func bridges(hide []bool, h, w int, first bool) []int {
+	var found []int
 	n := h + w
 	adj := make([][][2]int, n) // (neighbour, cell)
 	for c, x := range hide {
@@ -469,11 +614,14 @@ func bridge(hide []bool, h, w int) (int, bool) {
 			p := &stack[len(stack)-1]
 			low[p.v] = min(low[p.v], low[done.v])
 			if low[done.v] > disc[p.v] {
-				return done.viaCell, true
+				found = append(found, done.viaCell)
+				if first {
+					return found
+				}
 			}
 		}
 	}
-	return 0, false
+	return found
 }
 
 // breakBridge is the cell to hide so that bridge cell b lies on a cycle:
@@ -550,8 +698,17 @@ func (g *grid) breakBridge(b, h, w int) int {
 // member is 1 to 4 (the two shown would give a small group away); then
 // rule 2 runs on the set.
 func Within(total int64, parts []int64, within []int64, withinG []Guarded) []Guarded {
+	return withinForced(total, parts, within, withinG, nil)
+}
+
+func withinForced(total int64, parts []int64, within []int64, withinG []Guarded, forced []bool) []Guarded {
 	vals := append([]int64{total}, parts...)
 	g := newGrid(vals)
+	if len(forced) == len(vals) {
+		for i, x := range forced {
+			g.hide[i] = g.hide[i] || x
+		}
+	}
 	if len(within) != len(vals) || len(withinG) != len(vals) {
 		for i := range g.hide {
 			g.hide[i] = true
@@ -589,6 +746,22 @@ type TableOut struct {
 // and Within fail closed). The result always has an all row of width
 // cells, one row per row, and len(rows)+1 subset cells.
 func Table(width int, rows [][]int64, sub []int64) TableOut {
+	return TableForced(width, rows, sub, Mask{})
+}
+
+// Mask marks the cells of a table to hide first: the all row, each row,
+// and the subset column (all first), as TableOut lays them out. A nil or
+// short part forces nothing.
+type Mask struct {
+	All    []bool
+	Rows   [][]bool
+	Subset []bool
+}
+
+// TableForced is Table with the cells in forced hidden first (Plan 7c: a
+// cell the history check or a parent set hid stays hidden while rules 1, 2
+// and 4 run again around it).
+func TableForced(width int, rows [][]int64, sub []int64, forced Mask) TableOut {
 	if width < 2 {
 		width = 2
 	}
@@ -600,7 +773,18 @@ func Table(width int, rows [][]int64, sub []int64) TableOut {
 			}
 		}
 	}
-	ga, gr := AcrossRows(all, rows)
+	var flat []bool
+	if len(forced.All) == width && len(forced.Rows) == len(rows) {
+		flat = append(flat, forced.All...)
+		for _, r := range forced.Rows {
+			if len(r) != width {
+				flat = nil
+				break
+			}
+			flat = append(flat, r...)
+		}
+	}
+	ga, gr := splitRows(all, rows, acrossRows(all, rows, flat, nil))
 	var subAll int64
 	for _, v := range sub {
 		subAll += v
@@ -613,7 +797,11 @@ func Table(width int, rows [][]int64, sub []int64) TableOut {
 			withinG = append(withinG, gr[i][0])
 		}
 	}
-	subG := Within(subAll, sub, within, withinG)
+	var subForced []bool
+	if len(forced.Subset) == len(sub)+1 {
+		subForced = forced.Subset
+	}
+	subG := withinForced(subAll, sub, within, withinG, subForced)
 	if len(sub) != len(rows) {
 		subG = make([]Guarded, len(rows)+1)
 		for i := range subG {
