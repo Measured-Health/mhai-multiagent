@@ -418,7 +418,10 @@ pipeline ──backend (internal)──> egress-proxy ──egress──> CONNEC
 The proxy (`egress-proxy/squid.conf`, Squid pinned by digest, profile
 `cloud`) allows `CONNECT` to port 443 of the hosts in
 `egress-proxy/allowed-hosts`, matched by name with no reverse lookup, and
-refuses IP literals, other ports, other hosts and plain requests. It never
+refuses IP literals, other ports, other hosts and plain requests. A name
+off the list is refused before any DNS lookup (no leaking data in the
+names asked for), and an allowed name that resolves to a loopback, private
+or link-local address is refused. It never
 sees inside the TLS tunnel. Its access log holds time, method, host, port
 and status only. `egress-proxy/test-egress.sh` checks all of this (A15) on
 a Docker host; never run it with a key, and never in CI.

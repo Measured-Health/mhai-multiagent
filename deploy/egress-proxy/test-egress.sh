@@ -17,8 +17,21 @@ work=$(mktemp -d)
 image=$(sed -n 's/^    image: \(ubuntu\/squid[^ ]*\)$/\1/p' "$deploy/compose.yml")
 [ -n "$image" ] || { echo "no egress-proxy image in compose.yml" >&2; exit 1; }
 
-printf 'api.anthropic.com\n' > "$work/allowed-hosts"
-chmod 0644 "$work/allowed-hosts"
+# localhost is listed too, only to show that an allowed name resolving to a
+# private address is refused (private_dst).
+printf 'api.anthropic.com\nlocalhost\n' > "$work/allowed-hosts"
+# The real squid.conf plus DNS and IP-cache debugging (sections 14 and 78)
+# on stderr, so the test can see every name Squid resolves. Nothing else
+# differs: the override mounts it over /etc/squid/squid.conf.
+cp "$here/squid.conf" "$work/squid.conf"
+printf '\ndebug_options ALL,1 14,9 78,9\n' >> "$work/squid.conf"
+cat > "$work/override.yml" <<YML
+services:
+  egress-proxy:
+    volumes:
+      - $work/squid.conf:/etc/squid/squid.conf:ro
+YML
+chmod 0644 "$work/allowed-hosts" "$work/squid.conf" "$work/override.yml"
 chmod 0755 "$work"
 
 # Compose reads the whole file, so the demo's required variables get
@@ -28,7 +41,7 @@ compose() {
     NATS_GATEWAY_NKEY=synthetic NATS_BFF_NKEY=synthetic NATS_BFF_PLATFORM_NKEY=synthetic \
     MFA_ENCRYPTION_KEY=synthetic BFF_SERVICE_KEYS=synthetic \
     EGRESS_ALLOWED_HOSTS="$work/allowed-hosts" \
-    docker compose -p "$project" -f "$deploy/compose.yml" --profile cloud "$@"
+    docker compose -p "$project" -f "$deploy/compose.yml" -f "$work/override.yml" --profile cloud "$@"
 }
 cleanup() {
   compose logs --no-log-prefix egress-proxy > "$work/proxy.log" 2>&1 || true
@@ -84,8 +97,30 @@ expect api.anthropic.com.evil.example:443 4xx
 expect API.ANTHROPIC.COM:80 4xx
 expect evil.api.anthropic.com:443 4xx
 expect 16843009:443 4xx
-expect localhost:443 4xx
+expect localhost:443 403   # allowed by name, resolves to 127.0.0.1: private_dst
 expect api.anthropic.com:443 200
+
+# A name off the list is refused before any DNS lookup, so a compromised
+# pipeline can't leak data in the names it asks for (PR E review). The
+# allowed name above was resolved, which shows the debug log sees lookups.
+nonce="x$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n').invalid"
+expect "$nonce:443" 403
+expect "$nonce:80" 403
+# Squid's stderr only (its cache log); the access log on stdout names
+# every host, refused or not. A name lookup is an ipcache or DNS (idns)
+# entry; parsing a name as a numeric address is not a lookup.
+ctr=$(docker ps -q --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=egress-proxy")
+docker logs "$ctr" 2>"$work/cache.log" >/dev/null
+dnslog() { grep -E 'ipcache_(nb)?gethostbyname|idns[A-Z]' "$work/cache.log"; }
+if ! dnslog | grep -q 'api\.anthropic\.com'; then
+  echo "FAIL the DNS debug log shows no lookup of the allowed name: the check below would prove nothing"
+  fail=1
+elif dnslog | grep -q "$nonce"; then
+  echo "FAIL Squid looked up $nonce, a name off the list"
+  fail=1
+else
+  echo "ok   a name off the list is refused with no DNS lookup"
+fi
 
 # Not CONNECT: a plain request through the proxy is refused too.
 got=$(probe "exec 3<>/dev/tcp/egress-proxy/3128 || exit 9

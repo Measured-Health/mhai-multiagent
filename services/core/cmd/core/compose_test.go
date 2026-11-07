@@ -1006,6 +1006,8 @@ func TestSquidConfAllowsOnlyConnect443ToListedHosts(t *testing.T) {
 		`acl providers dstdomain -n "/etc/squid/allowed-hosts"`,
 		`acl ip_literal dstdom_regex -n ^[0-9.]+$ ^\[?[0-9a-fA-F:]+\]?$`,
 		"acl SSL_port port 443",
+		"acl connect_method method CONNECT",
+		"acl private_dst dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 ::/128 ::1/128 fc00::/7 fe80::/10",
 		"cache deny all",
 		"forwarded_for delete",
 		"via off",
@@ -1020,15 +1022,38 @@ func TestSquidConfAllowsOnlyConnect443ToListedHosts(t *testing.T) {
 			access = append(access, l)
 		}
 	}
-	if len(access) < 3 || access[0] != "http_access deny ip_literal" ||
-		access[len(access)-2] != "http_access allow CONNECT SSL_port providers" ||
-		access[len(access)-1] != "http_access deny all" {
-		t.Errorf("http_access rules %q: deny ip_literal first, the one allow, then deny all", access)
+	// Review of PR E: every name-only refusal comes first, so a name off
+	// the list is refused with no DNS lookup (no exfiltration through
+	// lookups of <data>.attacker.example); only then the address denies
+	// (dst ACLs resolve the name), then the one allow, then deny all.
+	want := []string{
+		"http_access deny !connect_method",
+		"http_access deny !SSL_port",
+		"http_access deny ip_literal",
+		"http_access deny !providers",
+		"http_access deny private_dst",
+		"http_access allow connect_method SSL_port providers",
+		"http_access deny all",
 	}
-	for _, l := range access[:len(access)-2] {
-		if !strings.HasPrefix(l, "http_access deny ") {
-			t.Errorf("an allow before the provider rule: %q", l)
+	if !slices.Equal(access, want) {
+		t.Errorf("http_access rules\n%q\nwant\n%q", access, want)
+	}
+	dstACLs := map[string]bool{"to_localhost": true, "to_linklocal": true}
+	for _, l := range lines {
+		if f := strings.Fields(l); len(f) >= 3 && f[0] == "acl" && (f[2] == "dst" || f[2] == "dstdomain" && !slices.Contains(f, "-n")) {
+			dstACLs[f[1]] = true
 		}
+	}
+	firstDst := len(access)
+	for i, l := range access {
+		for _, w := range strings.Fields(l)[2:] {
+			if dstACLs[strings.TrimPrefix(w, "!")] && i < firstDst {
+				firstDst = i
+			}
+		}
+	}
+	if firstDst <= slices.Index(access, "http_access deny !providers") {
+		t.Errorf("a resolving acl runs before the name allow-list: %q", access[firstDst])
 	}
 	for _, l := range lines {
 		for _, bad := range []string{"ssl_bump", "cache_dir", "sslcrtd", "https_port", "cache_peer", "never_direct", "always_direct", "include "} {
