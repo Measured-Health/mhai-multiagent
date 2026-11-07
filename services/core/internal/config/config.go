@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -69,6 +70,37 @@ type Config struct {
 	// not_ready and serve warns at start-up.
 	SecurityContactName  string
 	SecurityContactEmail string
+	// CloudProviders are the cloud model providers this deployment enables
+	// (CORE_CLOUD_PROVIDERS: a comma list of CloudProviderNames, each at
+	// most once; empty by default). A hospital's policy may name only one of
+	// these (cloud model providers plan, Task 2). Sorted.
+	CloudProviders []string
+}
+
+// CloudProviderNames are the cloud model providers core knows (the closed
+// vocabulary of the design; Python holds the same list).
+var CloudProviderNames = []string{"anthropic", "openai", "xai"}
+
+// errCloudProviders names the variable only, never its value.
+var errCloudProviders = errors.New("CORE_CLOUD_PROVIDERS must list each of anthropic openai xai at most once, comma separated")
+
+// ParseCloudProviders reads CORE_CLOUD_PROVIDERS: blank is none; otherwise
+// each comma-separated name, trimmed, must be one of CloudProviderNames and
+// appear once. The result is sorted. The error never holds the value.
+func ParseCloudProviders(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if !slices.Contains(CloudProviderNames, p) || slices.Contains(out, p) {
+			return nil, errCloudProviders
+		}
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return out, nil
 }
 
 // NATSTLS names the PEM files for TLS to NATS with a client certificate.
@@ -123,6 +155,10 @@ func Load() (Config, error) {
 		c.AllowSingleNode = true
 	default:
 		errs = append(errs, errors.New("CORE_ALLOW_SINGLE_NODE must be true or false"))
+	}
+
+	if c.CloudProviders, err = ParseCloudProviders(os.Getenv("CORE_CLOUD_PROVIDERS")); err != nil {
+		errs = append(errs, err)
 	}
 
 	if c.NATSAPIConcurrency, err = intEnv("CORE_NATS_API_CONCURRENCY", 256, func(n int) bool { return n >= 1 && n <= 100000 }); err != nil {

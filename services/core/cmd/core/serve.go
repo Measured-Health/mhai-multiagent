@@ -161,7 +161,8 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		log.Warn("core: no usable security contact (SECURITY_CONTACT_NAME, SECURITY_CONTACT_EMAIL); the audit integrity status answers 503")
 	}
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.WithLink(server.Readiness(a.pool, nc, buckets.All()), link),
-		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health})
+		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health,
+		CloudProviders: cfg.CloudProviders})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}

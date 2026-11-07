@@ -267,6 +267,9 @@ var Catalogue = map[string]Entry{
 	"hospital.created":   {Type: "hospital_settings", Kind: "hospital_added", Target: entityTarget("hospital", "hospital")},
 	"hospital.activated": withheld(),
 	"user.created":       withheld(),
+	// Cloud model providers (Task 2): mhai-web has no kind for a model
+	// policy change yet; sent bare until it has one.
+	"hospital.model_policy_changed": withheld(),
 
 	// Plan 3: the request-token boundary. No mhai-web kind yet.
 	"intelligence.key_rotated":   withheld(),

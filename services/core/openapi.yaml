@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.9.0"
+  version: "1.10.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1359,6 +1359,88 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/hospitals/{id}/model-policy:
+    get:
+      operationId: getHospitalModelPolicy
+      summary: A hospital's cloud model policy and this month's token usage.
+      description: |
+        Platform admins and auditors. With no policy the hospital is off
+        (local models): `cloud_provider` and `agreement_ref` null, the
+        default budget, `updated_at` null. `usage` is this month's (UTC)
+        token ledger, zeros when nothing was used. An id that is no
+        hospital's, or not a canonical uuid, is 404 `not_found`.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The policy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelPolicy" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    put:
+      operationId: setHospitalModelPolicy
+      summary: Set a hospital's cloud model policy (step-up).
+      description: |
+        Platform admins only (an auditor is 403), with a fresh TOTP code
+        (`mfa_code`) or an unused backup code (`backup_code`): none is 403
+        `mfa_required`, a wrong one 403 `mfa_invalid` (audited).
+        `cloud_provider` is `openai`, `anthropic`, `xai` or null (off: the
+        hospital's questions run on the local models). A provider needs an
+        `agreement_ref`, the reference of the recorded agreement check
+        (3 to 64 of A-Z, 0-9, `_`, `.`, `-`). A provider this deployment
+        hasn't enabled (`CORE_CLOUD_PROVIDERS`) is 409 `conflict`. The body
+        is checked first (422), then the provider (409), the hospital
+        (404), the session's 10 writes a minute (429 `rate_limited`), then
+        the code. One `hospital.model_policy_changed` audit entry per
+        write. Answers as the GET.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cloud_provider, monthly_token_budget]
+              additionalProperties: false
+              properties:
+                cloud_provider: { type: string, enum: [openai, anthropic, xai], nullable: true }
+                agreement_ref: { type: string, pattern: "^[A-Z0-9][A-Z0-9_.-]{2,63}$", nullable: true }
+                monthly_token_budget: { type: integer, format: int64, minimum: 1, maximum: 1000000000 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The policy as written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelPolicy" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
 components:
   securitySchemes:
     ServiceKey:
@@ -1937,6 +2019,25 @@ components:
       properties:
         jobs: { type: array, items: { $ref: "#/components/schemas/Job" } }
         next_cursor: { type: string, nullable: true }
+    ModelPolicy:
+      type: object
+      description: A hospital's cloud model policy (off when `cloud_provider` is null) and this month's token usage.
+      required: [hospital_id, cloud_provider, agreement_ref, monthly_token_budget, updated_at, usage]
+      additionalProperties: false
+      properties:
+        hospital_id: { type: string, format: uuid }
+        cloud_provider: { type: string, enum: [openai, anthropic, xai], nullable: true }
+        agreement_ref: { type: string, pattern: "^[A-Z0-9][A-Z0-9_.-]{2,63}$", nullable: true }
+        monthly_token_budget: { type: integer, format: int64, minimum: 1, maximum: 1000000000 }
+        updated_at: { type: string, format: date-time, nullable: true }
+        usage:
+          type: object
+          required: [month, used, reserved]
+          additionalProperties: false
+          properties:
+            month: { type: string, pattern: "^[0-9]{4}-[0-9]{2}$", description: "The month, UTC, as YYYY-MM." }
+            used: { type: integer, format: int64, minimum: 0 }
+            reserved: { type: integer, format: int64, minimum: 0 }
     GuardedCount:
       type: object
       description: "A count under the small-group rule. Never 1 to 4; hidden is `{value: null, suppressed: true}`."

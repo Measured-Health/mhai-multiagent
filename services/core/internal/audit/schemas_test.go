@@ -209,3 +209,49 @@ func TestRegisterRefusesMistakes(t *testing.T) {
 		}()
 	}
 }
+
+// hospital.model_policy_changed (cloud model providers plan, Task 2): a
+// closed payload of ids, closed codes and a bounded integer; the agreement
+// reference has the id shape, never free text.
+func TestAuditSchemaModelPolicyChanged(t *testing.T) {
+	const action = "hospital.model_policy_changed"
+	hid := uuid.NewString()
+	good := func() map[string]any {
+		return map[string]any{"hospital_id": hid, "provider": "anthropic", "previous": "none",
+			"agreement_ref": "DEMO-SYNTHETIC", "monthly_token_budget": 2000000, "via": "platform"}
+	}
+	if err := audit.CheckActionPayload(action, good()); err != nil {
+		t.Fatalf("good payload: %v", err)
+	}
+	off := good()
+	off["provider"], off["previous"], off["via"] = "none", "xai", "cli"
+	delete(off, "agreement_ref")
+	if err := audit.CheckActionPayload(action, off); err != nil {
+		t.Fatalf("switched off, no reference: %v", err)
+	}
+	for name, change := range map[string]func(m map[string]any){
+		"free text reference":  func(m map[string]any) { m["agreement_ref"] = "signed with Dr Synthetic on Monday" },
+		"lower-case reference": func(m map[string]any) { m["agreement_ref"] = "demo-synthetic" },
+		"short reference":      func(m map[string]any) { m["agreement_ref"] = "AB" },
+		"unknown provider":     func(m map[string]any) { m["provider"] = "gemini" },
+		"unknown previous":     func(m map[string]any) { m["previous"] = "local" },
+		"missing previous":     func(m map[string]any) { delete(m, "previous") },
+		"missing provider":     func(m map[string]any) { delete(m, "provider") },
+		"missing hospital":     func(m map[string]any) { delete(m, "hospital_id") },
+		"missing budget":       func(m map[string]any) { delete(m, "monthly_token_budget") },
+		"missing via":          func(m map[string]any) { delete(m, "via") },
+		"budget 0":             func(m map[string]any) { m["monthly_token_budget"] = 0 },
+		"budget too big":       func(m map[string]any) { m["monthly_token_budget"] = 1000000001 },
+		"budget fraction":      func(m map[string]any) { m["monthly_token_budget"] = 1.5 },
+		"unknown via":          func(m map[string]any) { m["via"] = "api" },
+		"hospital not a uuid":  func(m map[string]any) { m["hospital_id"] = "HAV" },
+		"extra key":            func(m map[string]any) { m["note"] = "synthetic" },
+		"null provider":        func(m map[string]any) { m["provider"] = nil },
+	} {
+		m := good()
+		change(m)
+		if err := audit.CheckActionPayload(action, m); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

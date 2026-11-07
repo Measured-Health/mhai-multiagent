@@ -8,21 +8,27 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	_ "time/tzdata" // IANA zones for --time-zone checks, even in a minimal image
 	"unicode/utf8"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/term"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/account"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 )
 
 const seedUsage = `usage:
   core hospitals create --name N --short-code CODE --time-zone TZ [--require-mfa-for-clinicians] [--allow-trust-device]
   core hospitals activate <hospital id or short code>
+  core hospitals model-policy set <hospital id or short code> --provider openai|anthropic|xai|none [--agreement-ref REF] [--budget TOKENS]
   core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
 
 The password is never an argument: users create prompts for it on a terminal
@@ -42,7 +48,15 @@ of it (the core service refuses to start if it is).
 hospitals activate moves a setup_incomplete hospital to active (POST /queries
 needs an active hospital) and audits hospital.activated. An active hospital
 is left as it is. It refuses any other status: a deactivated hospital is
-reactivated through the platform app.`
+reactivated through the platform app.
+
+hospitals model-policy set sets the hospital's cloud model policy and audits
+hospital.model_policy_changed (via cli, no actor). A provider must be enabled
+in CORE_CLOUD_PROVIDERS and needs --agreement-ref (the recorded agreement
+check's reference, e.g. DEMO-SYNTHETIC for the synthetic demo); none switches
+the hospital back to its local models. --budget is the monthly token budget
+(1 to 1000000000; unchanged when left out, 2000000 for a new policy). It
+prints the hospital id and the provider only.`
 
 var errArgs = errors.New("invalid arguments (run core hospitals|users create -h)")
 
@@ -54,6 +68,9 @@ var errActivateArgs = errors.New("usage: core hospitals activate <hospital id or
 func seed(ctx context.Context, args []string, url string, stdin io.Reader, out io.Writer) error {
 	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "activate" {
 		return hospitalsActivate(ctx, args[2:], url, out)
+	}
+	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "model-policy" {
+		return hospitalsModelPolicy(ctx, args[2:], url, os.Getenv, out)
 	}
 	if len(args) < 2 || args[1] != "create" {
 		return fmt.Errorf("%s", seedUsage)
@@ -127,6 +144,90 @@ func hospitalsActivate(ctx context.Context, args []string, url string, out io.Wr
 		return nil
 	}
 	fmt.Fprintf(out, "activated hospital %s\n", id)
+	return nil
+}
+
+var (
+	errModelPolicyArgs = errors.New("usage: core hospitals model-policy set <hospital id or short code> " +
+		"--provider openai|anthropic|xai|none [--agreement-ref REF] [--budget TOKENS]")
+	errUnknownProvider   = errors.New("--provider must be openai, anthropic, xai or none")
+	errProviderDisabled  = errors.New("that provider is not enabled in CORE_CLOUD_PROVIDERS")
+	errNeedsAgreementRef = errors.New("a provider needs --agreement-ref")
+	errBadAgreementRef   = errors.New("--agreement-ref must be 3 to 64 of A-Z, 0-9, _, . and -, starting with a letter or digit")
+	errBadBudget         = errors.New("--budget must be a whole number from 1 to 1000000000")
+	errModelPolicyWrite  = errors.New("could not set the model policy; nothing was changed")
+)
+
+// hospitalsModelPolicy is "hospitals model-policy set <id or short code>
+// --provider P [--agreement-ref R] [--budget N]" (platform.ApplyModelPolicy
+// as mhai_provision, via cli). Everything is checked before connecting; the
+// provider must be enabled in CORE_CLOUD_PROVIDERS (read with getenv).
+// Errors and output never hold the reference.
+func hospitalsModelPolicy(ctx context.Context, args []string, url string, getenv func(string) string, out io.Writer) error {
+	if len(args) < 2 || args[0] != "set" || strings.HasPrefix(args[1], "-") {
+		return errModelPolicyArgs
+	}
+	ref := args[1]
+	fs := newFlags("hospitals model-policy set")
+	var provider, agreement string
+	var budget int64
+	fs.StringVar(&provider, "provider", "", "")
+	fs.StringVar(&agreement, "agreement-ref", "", "")
+	fs.Int64Var(&budget, "budget", 0, "")
+	if err := fs.Parse(args[2:]); err != nil || fs.NArg() != 0 || provider == "" {
+		return errModelPolicyArgs
+	}
+	budgetSet := false
+	fs.Visit(func(f *flag.Flag) { budgetSet = budgetSet || f.Name == "budget" })
+	if err := account.ValidateHospitalRef(ref); err != nil {
+		return err
+	}
+	c := platform.ModelPolicyChange{Via: platform.ViaCLI, AgreementRef: agreement}
+	switch {
+	case provider == platform.ProviderNone:
+	case slices.Contains(config.CloudProviderNames, provider):
+		c.Provider = provider
+	default:
+		return errUnknownProvider
+	}
+	enabled, err := config.ParseCloudProviders(getenv("CORE_CLOUD_PROVIDERS"))
+	if err != nil {
+		return err
+	}
+	if c.Provider != "" && !slices.Contains(enabled, c.Provider) {
+		return errProviderDisabled
+	}
+	if agreement != "" && !platform.AgreementRefPattern.MatchString(agreement) {
+		return errBadAgreementRef
+	}
+	if c.Provider != "" && agreement == "" {
+		return errNeedsAgreementRef
+	}
+	if budgetSet {
+		if budget < 1 || budget > platform.MaxMonthlyTokenBudget {
+			return errBadBudget
+		}
+		c.Budget = &budget
+	}
+	pool, err := openOwner(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	c.Hospital, err = account.WithHospital(ctx, pool, ref, func(tx pgx.Tx, hospital uuid.UUID) error {
+		c.Hospital = hospital
+		if _, err := platform.ApplyModelPolicy(ctx, tx, c); err != nil {
+			if errors.Is(err, platform.ErrNoSuchHospital) {
+				return account.ErrNoSuchHospital
+			}
+			return errModelPolicyWrite
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "model policy %s %s\n", c.Hospital, provider)
 	return nil
 }
 

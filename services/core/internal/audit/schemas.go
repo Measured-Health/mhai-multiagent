@@ -296,6 +296,8 @@ var (
 	modelVersionPattern = regexp.MustCompile(`^[A-Za-z0-9_.:/@+-]{1,128}$`)
 	factEntityPattern   = regexp.MustCompile(`^[a-z0-9_.]{0,64}$`)
 	factEntityIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
+	// A model policy's agreement reference (00018's CHECK).
+	agreementRefPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9_.-]{2,63}$`)
 )
 
 func fields(kv ...any) map[string]Check {
@@ -346,6 +348,19 @@ func init() {
 	Register("hospital.activated", Schema{Fields: fields("via", OneOf("cli"), "from", OneOf("setup_incomplete")),
 		Required: []string{"via", "from"}})
 	Register("user.created", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})
+
+	// Cloud model providers (plan 2026-11-06 Task 2, design §5.3): a
+	// hospital's model policy set by a platform admin (as mhai_platform)
+	// or the CLI twin (as mhai_provision). The row has no hospital (a
+	// platform action); the hospital is in the payload. The agreement
+	// reference has the id shape and is absent when none was given.
+	provider := OneOf("none", "openai", "anthropic", "xai")
+	Register("hospital.model_policy_changed", Schema{Fields: fields(
+		"hospital_id", id, "provider", provider, "previous", provider,
+		"agreement_ref", Pattern(agreementRefPattern),
+		"monthly_token_budget", Int(1, 1000000000),
+		"via", OneOf("platform", "cli")),
+		Required: []string{"hospital_id", "provider", "previous", "monthly_token_budget", "via"}})
 
 	// Plan 3: the request-token boundary (internal/account, grant, intel).
 	Register("intelligence.key_rotated", Schema{Fields: fields(
