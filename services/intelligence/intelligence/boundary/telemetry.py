@@ -251,6 +251,7 @@ class _State:
         settle_clamped: Any = None,
         cloud_alerts: Any = None,
         context_dropped: Any = None,
+        usage_overrun: Any = None,
     ) -> None:
         self.tracer = tracer
         self.refusals = refusals
@@ -260,6 +261,7 @@ class _State:
         self.settle_clamped = settle_clamped
         self.cloud_alerts = cloud_alerts
         self.context_dropped = context_dropped
+        self.usage_overrun = usage_overrun
 
 
 _NOOP = _State(trace.NoOpTracer(), None, None)
@@ -345,6 +347,12 @@ def setup(
         "mhai_cloud_context_dropped_total",
         description="Patient context keys the cloud allow-list dropped.",
     )
+    # Review I1: replies that reported more tokens than were reserved (core
+    # settles at most the reservation, so the excess is not in the ledger).
+    usage_overrun = meter.create_counter(
+        "mhai_cloud_usage_overrun_total",
+        description="Cloud replies that used more tokens than their reservation.",
+    )
     state = _State(
         tp.get_tracer(SCOPE),
         refusals,
@@ -354,6 +362,7 @@ def setup(
         settle_clamped,
         cloud_alerts,
         context_dropped,
+        usage_overrun,
     )
     _state = state
 
@@ -544,6 +553,12 @@ def record_cloud_alert(provider: str, kind: str) -> None:
     c = _state.cloud_alerts
     if c is not None:
         c.add(1, {"provider": _label(provider), "kind": _label(kind)})
+
+
+def record_cloud_usage_overrun(provider: str) -> None:
+    c = _state.usage_overrun
+    if c is not None:
+        c.add(1, {"provider": _label(provider)})
 
 
 def record_cloud_context_dropped(n: int) -> None:

@@ -629,7 +629,7 @@ def test_tls_context_ignores_ssl_cert_env(monkeypatch: pytest.MonkeyPatch) -> No
         return real(**kw)
 
     monkeypatch.setattr(client_mod.httpx2, "HTTPTransport", spy)
-    monkeypatch.setitem(client_mod.ADAPTERS, "anthropic", FakeAdapter)
+    monkeypatch.setitem(client_mod.ADAPTERS, "anthropic", lambda model: FakeAdapter())
     settings = CloudSettings(providers=(provider(),), proxy_url="http://egress-proxy:3128")
     clients = build_cloud_clients(settings, Builder(), {"cca": "x", "nli": "n"})
     assert set(clients) == {"anthropic"}
@@ -822,8 +822,94 @@ def test_adapters_turn_sdk_retries_off() -> None:
     # Tasks 11 to 13: retrying is the client's (RetryPolicy, under the
     # budget and the stage deadline); an SDK's own retries would resend a
     # body with no reservation. Every registered adapter's SDK client must
-    # have max_retries == 0.
+    # have max_retries == 0, and the registry really holds the adapters, so
+    # this is not vacuous.
+    assert set(client_mod.ADAPTERS) == set(vocab.PROVIDERS)
     with httpx2.Client(transport=CapturingTransport()) as http:
         for name, factory in client_mod.ADAPTERS.items():
-            sdk = factory().make_sdk(http, ApiKey(FAKE_KEY), BASE_URL)
+            adapter = factory(MODEL)
+            assert adapter.name == name
+            sdk = adapter.make_sdk(http, ApiKey(FAKE_KEY), vocab.BASE_URLS[name])
             assert getattr(sdk, "max_retries", None) == 0, name
+
+
+# --- review I1: a reported use above the reservation ------------------------------
+
+
+class FixedBudget(FakeBudget):
+    """Reserves exactly 1,000 tokens, whatever was asked."""
+
+    def reserve(self, provider: str, tokens: int) -> Reservation | None:
+        with self.lock:
+            self.reserved.append((provider, tokens))
+            return Reservation(f"r{len(self.reserved)}", 1000, 10)
+
+
+def _used(tokens_in: int, tokens_out: int, outcome: str = "ok") -> CloudReply:
+    from intelligence.boundary.cloud.reply import validate_answer
+
+    doc = {"answer": "Synthetic answer [KB#0001].", "citations": ["KB#0001"]}
+    answer = validate_answer({**doc, "insufficient_evidence": False}, frozenset({"KB#0001"}))
+    ok = outcome == "ok"
+    return CloudReply(answer if ok else None, "synthetic-1", tokens_in, tokens_out, outcome)
+
+
+@pytest.mark.parametrize(
+    ("tokens_out", "outcome", "counted", "alerted"),
+    [
+        (100, "ok", False, False),  # 900 in + 100 out = 1000: within
+        (150, "ok", True, False),  # 1050: 5% over, counted only
+        (200, "ok", True, False),  # 1100: exactly 10% over, counted only
+        (201, "ok", True, True),  # 1101: above 10%, the provider is flagged
+        (5000, "truncated", True, True),
+    ],
+)
+def test_usage_above_the_reservation_is_logged_counted_and_flagged(
+    caplog: pytest.LogCaptureFixture,
+    metrics: InMemoryMetricReader,
+    tokens_out: int,
+    outcome: str,
+    counted: bool,
+    alerted: bool,
+) -> None:
+    # Core settles at most the reservation (00018: least(used, tokens)), so
+    # the worker must say when a provider reported more: by outcome code and
+    # token counts only.
+    c, _, _, _, _ = make(FakeAdapter([_used(900, tokens_out, outcome)]))
+    call, budget = call_for(FixedBudget())
+    with caplog.at_level(logging.DEBUG):
+        g = run(c, call)
+    assert g.cloud_outcome == outcome
+    assert budget.settled == [("r1", 900 + tokens_out)]
+    over = [r for r in caplog.records if "cloud.usage_overrun" in r.getMessage()]
+    pts = points(metrics, "mhai_cloud_usage_overrun_total")
+    alerts = [
+        p
+        for p in points(metrics, "mhai_cloud_alerts_total")
+        if p.attributes["kind"] == "usage_overrun"
+    ]
+    if not counted:
+        assert over == [] and pts == [] and alerts == []
+        return
+    assert len(over) == 1
+    msg = over[0].getMessage()
+    assert msg == (
+        f"cloud.usage_overrun provider=anthropic outcome={outcome} "
+        f"reserved=1000 used={900 + tokens_out} over={tokens_out - 100}"
+    )
+    assert over[0].levelno == (logging.ERROR if alerted else logging.WARNING)
+    assert [(p.attributes["provider"], p.value) for p in pts] == [("anthropic", 1)]
+    assert [(p.attributes["provider"], p.value) for p in alerts] == (
+        [("anthropic", 1)] if alerted else []
+    )
+    for r in caplog.records:
+        assert QUESTION not in r.getMessage() and "Synthetic answer" not in r.getMessage()
+
+
+def test_unknown_use_is_no_overrun(metrics: InMemoryMetricReader) -> None:
+    # Without both counts the whole reservation is settled: nothing over.
+    c, _, _, _, _ = make(FakeAdapter([CloudReply(None, "", None, 5000, "malformed")]))
+    call, budget = call_for(FixedBudget())
+    assert run(c, call).cloud_outcome == "malformed"
+    assert budget.settled == [("r1", None)]
+    assert points(metrics, "mhai_cloud_usage_overrun_total") == []

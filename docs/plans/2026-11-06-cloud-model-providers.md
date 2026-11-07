@@ -623,8 +623,11 @@ The key must never be on the shared build server. steven-reid and mt5-lab run ag
 - [ ] **Step 4:** Run the tests remotely. **Manual, once H1 and H7 are done:** the smoke-host owner (H7), on their own machine, outside any container, never on steven-reid or mt5-lab and never in CI:
   1. Create a dedicated smoke key in the demo workspace, spend-capped at USD 5, set to expire within a day where the provider allows it.
   2. Run `MHAI_CLOUD_SMOKE=1 APP_ENV=demo uv run python scripts/cloud_smoke.py --provider anthropic --model claude-opus-5-5 --key-stdin --record tests/fixtures/cloud/anthropic/recorded/`, pasting the key from a password manager.
-  3. Revoke the smoke key at the provider straight after.
-  4. Commit the scrubbed fixtures by PR. CI runs the adapter suite against them, and the printed summary (no text) is pasted in the PR.
+  3. Check two things the synthetic fixtures can't (PR D review), and paste the result in the PR:
+     - **Anthropic auth (review M1):** anthropic 2.3.0 sends the key as `Authorization: Bearer <key>`, not `x-api-key`. The anthropic run must return `ok` (not `auth_failed`), which confirms the API accepts it.
+     - **xAI reasoning under the cap (review I1):** run the xai smoke with a reasoning model and record `usage.prompt_tokens`, `completion_tokens`, `completion_tokens_details.reasoning_tokens` and `total_tokens`. If `total_tokens - prompt_tokens` exceeds `max_tokens` (1500), `max_tokens` does not cap reasoning: the worker then logs `cloud.usage_overrun` and counts `mhai_cloud_usage_overrun_total` (an alert above 10% over), and the cap must be revisited before xAI is enabled for a hospital.
+  4. Revoke the smoke key at the provider straight after.
+  5. Commit the scrubbed fixtures by PR. CI runs the adapter suite against them, and the printed summary (no text) is pasted in the PR.
 
   Without H1 and H7, the PR says the live run is pending and merges with the synthetic fixtures.
 - [ ] **Step 5:** Commit: "A manual live smoke run by a person off the build server, key from stdin, and a fixture scrubber".

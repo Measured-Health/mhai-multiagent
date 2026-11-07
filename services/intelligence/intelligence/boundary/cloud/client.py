@@ -63,7 +63,7 @@ from intelligence.boundary.cloud.gate import (
 from intelligence.boundary.cloud.reply import Answer, validate_answer
 from intelligence.boundary.cloud.retry import RETRY, RetryPolicy
 from intelligence.boundary.cloud.scan import Identifiers, ScanHook, Shape, scan_body
-from intelligence.boundary.config import ConfigError
+from intelligence.boundary.config import ConfigError, is_development
 from intelligence.boundary.models import (
     _SAFE_VERSION,
     Builder,
@@ -80,6 +80,9 @@ if TYPE_CHECKING:
 log = logging.getLogger("intelligence.boundary.cloud.client")
 
 TOP_K: Final = MAX_CHUNKS
+# A reported use more than this far above the reservation flags the
+# provider for an operator (mhai_cloud_alerts_total{kind="usage_overrun"}).
+OVERRUN_ALERT_PERCENT: Final = 10
 CONNECT_TIMEOUT: Final = 5.0
 POOL_TIMEOUT: Final = 5.0
 
@@ -552,17 +555,69 @@ class CloudModelClient:
             used = ti + to if ti is not None and to is not None else None
         else:
             used = None
+        if used is not None and reply is not None and used > reservation.tokens:
+            self._overrun(reservation, used, reply.outcome)
         try:
             budget.settle(reservation, used)
         except Exception as e:
             log.warning("cloud.settle_failed error=%s", type(e).__name__)
             telemetry.record_cloud_settle_failure()
 
+    def _overrun(self, reservation: Reservation, used: int, outcome: str) -> None:
+        """Review I1: core settles at most the reservation (00018), so a
+        reply that reports more is logged (outcome code and counts only)
+        and counted; more than OVERRUN_ALERT_PERCENT over the reservation, the provider is
+        flagged for an operator, as an alert."""
+        p = self._provider.name
+        over = used - reservation.tokens
+        alert = over * 100 > reservation.tokens * OVERRUN_ALERT_PERCENT
+        log.log(
+            logging.ERROR if alert else logging.WARNING,
+            "cloud.usage_overrun provider=%s outcome=%s reserved=%d used=%d over=%d",
+            p,
+            retry.final_outcome(outcome),
+            reservation.tokens,
+            used,
+            over,
+        )
+        telemetry.record_cloud_usage_overrun(p)
+        if alert:
+            telemetry.record_cloud_alert(p, "usage_overrun")
+
 
 # --- building the clients -------------------------------------------------------------
 
-# Adapters by provider name; Tasks 11 to 13 register theirs.
-ADAPTERS: dict[str, Callable[[], Adapter]] = {}
+# Adapters by provider name (plan Tasks 11 to 13), each made for the
+# provider's configured model: the model is a fixed leaf of the adapter's
+# Shape, so a request for any other model is refused by the scan. Imported
+# when called: the adapter modules import this one.
+
+
+def _anthropic(model: str) -> Adapter:
+    from intelligence.boundary.cloud.anthropic_adapter import AnthropicAdapter
+
+    return AnthropicAdapter(model)
+
+
+def _openai(model: str) -> Adapter:
+    from intelligence.boundary.cloud.openai_adapter import OpenAIAdapter
+
+    return OpenAIAdapter(model)
+
+
+def _xai(model: str) -> Adapter:
+    # The zero-retention header is relaxed in development only (APP_ENV,
+    # read here: unset is production).
+    from intelligence.boundary.cloud.xai_adapter import XaiAdapter
+
+    return XaiAdapter(model, development=is_development())
+
+
+ADAPTERS: dict[str, Callable[[str], Adapter]] = {
+    "anthropic": _anthropic,
+    "openai": _openai,
+    "xai": _xai,
+}
 
 
 def build_cloud_clients(
@@ -580,6 +635,6 @@ def build_cloud_clients(
         proxy=settings.proxy_url, verify=tls_context(), trust_env=False, retries=0
     )
     return {
-        p.name: CloudModelClient(p, ADAPTERS[p.name](), build, local_versions, transport)
+        p.name: CloudModelClient(p, ADAPTERS[p.name](p.model), build, local_versions, transport)
         for p in settings.providers
     }
