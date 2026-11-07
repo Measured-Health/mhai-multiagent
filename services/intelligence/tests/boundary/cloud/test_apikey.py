@@ -7,18 +7,23 @@ import io
 import logging
 import os
 import pickle
+import sys
+import threading
+import warnings
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 from intelligence.boundary.cloud.apikey import (
+    MAX_KEY_FILE_BYTES,
     SDK_LOGGERS,
     ApiKey,
     RedactingFilter,
     install_redaction,
     load_api_key,
     quiet_sdk_loggers,
+    uninstall_redaction,
 )
 from tests.boundary.cloud.conftest import FAKE_KEY, FAKE_SK_KEY
 
@@ -26,6 +31,15 @@ pytestmark = pytest.mark.disable_socket
 
 NAME = "INTELLIGENCE_CLOUD_OPENAI_KEY_FILE"
 REDACTED = "ApiKey(<redacted>)"
+
+
+@pytest.fixture(autouse=True)
+def _no_global_redaction() -> Iterator[None]:
+    """install_redaction changes process-wide logging: undo it after each
+    test, so no key or hook leaks into the next one."""
+    uninstall_redaction()
+    yield
+    uninstall_redaction()
 
 
 def test_apikey_never_in_repr_str_format_pickle_copy() -> None:
@@ -55,6 +69,8 @@ def test_apikey_never_in_repr_str_format_pickle_copy() -> None:
         copy.deepcopy(k)
     with pytest.raises(TypeError):
         copy.deepcopy({"key": k})
+    with pytest.raises(TypeError):
+        k.__getstate__()
     assert not hasattr(k, "__dict__")
     with pytest.raises(AttributeError):
         k.extra = 1  # type: ignore[attr-defined]
@@ -73,7 +89,7 @@ def _load(path: Path | str, development: bool = False) -> tuple[ApiKey | None, l
     return load_api_key(str(path), NAME, development, errs), errs
 
 
-@pytest.mark.parametrize("mode", [0o400, 0o440, 0o600])
+@pytest.mark.parametrize("mode", [0o400, 0o440])
 def test_key_file_good(key_file: Callable[..., Path], mode: int) -> None:
     key, errs = _load(key_file(mode=mode))
     assert errs == []
@@ -116,6 +132,29 @@ def test_key_file_missing_directory_or_writable_refused(
         assert key is None and len(errs) == 1 and NAME in errs[0]
     key, errs = _load(key_file(mode=0o620))
     assert key is None and "writable" in errs[0]
+    # The database password keeps its rules: 0600 is fine there.
+    from intelligence.boundary import config
+
+    db_errs: list[str] = []
+    assert config._read_secret_file(str(key_file(mode=0o600)), "X", False, db_errs) == FAKE_KEY
+    assert db_errs == []
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o700, 0o420, 0o402])
+def test_writable_key_file_refused(key_file: Callable[..., Path], mode: int) -> None:
+    """Mode 0400 or 0440 only: any write bit, the owner's too, is refused,
+    in development too."""
+    for development in (False, True):
+        key, errs = _load(key_file(mode=mode), development)
+        assert key is None
+        assert errs == [f"{NAME} is writable (use mode 0400 or 0440)"]
+
+
+def test_oversized_key_file_refused(key_file: Callable[..., Path]) -> None:
+    key, errs = _load(key_file("k" * (MAX_KEY_FILE_BYTES + 1)))
+    assert key is None and errs == [f"{NAME} is too long (at most {MAX_KEY_FILE_BYTES} bytes)"]
+    key, errs = _load(key_file("k" * MAX_KEY_FILE_BYTES))
+    assert errs == [] and key is not None
 
 
 @pytest.mark.parametrize("mode", [0o404, 0o444, 0o644, 0o604])
@@ -224,3 +263,79 @@ def test_key_file_is_read_on_the_checked_descriptor(key_file: Callable[..., Path
     os.mkfifo(fifo, 0o400)
     key, errs = _load(fifo)
     assert key is None and errs == [f"{NAME} is not a regular file"]
+
+
+def test_redaction_covers_handlers_added_later_and_own_handlers() -> None:
+    """Installed at record creation, the redaction covers a handler added
+    after start-up, a non-propagating logger with its own handler, a
+    warning routed through logging, and string extras."""
+    install_redaction([ApiKey(FAKE_KEY)])
+    root = logging.getLogger()
+    out, own = io.StringIO(), io.StringIO()
+    late = logging.StreamHandler(out)
+    late.setFormatter(logging.Formatter("%(message)s %(extra_field)s"))
+    root.addHandler(late)
+    lonely = logging.getLogger("tests.cloud.lonely")
+    lonely.propagate = False
+    own_handler = logging.StreamHandler(own)
+    lonely.addHandler(own_handler)
+    try:
+        logging.getLogger("tests.cloud.late").warning(
+            "late %s", FAKE_KEY, extra={"extra_field": "x " + FAKE_KEY}
+        )
+        lonely.warning("own %s", FAKE_KEY)
+        try:
+            raise RuntimeError("Bearer " + FAKE_KEY)
+        except RuntimeError:
+            lonely.exception("failed")
+        late.setFormatter(logging.Formatter("%(message)s"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn("warned " + FAKE_KEY, UserWarning, stacklevel=1)
+    finally:
+        root.removeHandler(late)
+        lonely.removeHandler(own_handler)
+    for text in (out.getvalue(), own.getvalue()):
+        assert FAKE_KEY not in text and "[REDACTED]" in text
+    assert "warned [REDACTED]" in out.getvalue()
+    assert "RuntimeError: Bearer [REDACTED]" in own.getvalue()
+
+
+def test_uncaught_exceptions_are_logged_redacted() -> None:
+    install_redaction([ApiKey(FAKE_KEY)])
+    out = io.StringIO()
+    handler = logging.StreamHandler(out)
+    logging.getLogger().addHandler(handler)
+    try:
+        err = RuntimeError("echoed " + FAKE_KEY)
+        sys.excepthook(RuntimeError, err, None)
+        threading.excepthook(
+            threading.ExceptHookArgs([RuntimeError, err, None, threading.current_thread()])
+        )
+    finally:
+        logging.getLogger().removeHandler(handler)
+    text = out.getvalue()
+    assert FAKE_KEY not in text and text.count("echoed [REDACTED]") == 2
+
+
+def test_uninstall_redaction_restores_logging() -> None:
+    make_record = logging.Logger.makeRecord
+    hooks = (sys.excepthook, threading.excepthook, warnings.showwarning)
+    install_redaction([ApiKey(FAKE_KEY)])
+    assert logging.Logger.makeRecord is not make_record
+    assert logging.lastResort is not None
+    assert any(isinstance(f, RedactingFilter) for f in logging.lastResort.filters)
+    uninstall_redaction()
+    assert logging.Logger.makeRecord is make_record
+    assert (sys.excepthook, threading.excepthook, warnings.showwarning) == hooks
+    assert not any(isinstance(f, RedactingFilter) for f in logging.lastResort.filters)
+    # The old key is forgotten: a fresh install with no key leaves it alone.
+    out = io.StringIO()
+    handler = logging.StreamHandler(out)
+    logging.getLogger().addHandler(handler)
+    try:
+        install_redaction()
+        logging.getLogger("tests.cloud.forgotten").warning("%s", FAKE_KEY)
+    finally:
+        logging.getLogger().removeHandler(handler)
+    assert out.getvalue().strip() == FAKE_KEY

@@ -924,7 +924,11 @@ def test_worker_start_redacts_logs_and_quiets_sdk_loggers() -> None:
     """At start the worker puts the redacting filter on the root handlers
     and turns SDK debug logging off (cloud model providers, Task 4)."""
     from intelligence.boundary import worker as worker_mod
-    from intelligence.boundary.cloud.apikey import SDK_LOGGERS, RedactingFilter
+    from intelligence.boundary.cloud.apikey import (
+        SDK_LOGGERS,
+        RedactingFilter,
+        uninstall_redaction,
+    )
 
     root = logging.getLogger()
     handler = logging.StreamHandler()
@@ -938,3 +942,4 @@ def test_worker_start_redacts_logs_and_quiets_sdk_loggers() -> None:
             assert logging.getLogger(name).level == logging.WARNING
     finally:
         root.removeHandler(handler)
+        uninstall_redaction()

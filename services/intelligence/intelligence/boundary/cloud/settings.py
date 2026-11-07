@@ -7,7 +7,8 @@ needs INTELLIGENCE_CLOUD_<P>_ZDR_REF and HTTPS_PROXY. The base URLs are
 vocab.BASE_URLS; INTELLIGENCE_CLOUD_<P>_BASE_URL overrides one in
 development only. ZDR_REF=DEMO-SYNTHETIC is accepted only with APP_ENV=demo
 (with a warning) or in development. The SDKs' own environment variables are
-refused whether a provider is enabled or not (SDK_ENV_REFUSED).
+refused whether a provider is enabled or not (SDK_ENV_PREFIXES), and a
+custom CA (SSL_CERT_FILE, SSL_CERT_DIR) once one is.
 
 Errors name variables, never their values (design section 7).
 """
@@ -33,20 +34,55 @@ _ZDR_REF = re.compile(r"[A-Z0-9][A-Z0-9_.-]{2,63}")
 # Anthropic models that need 30-day retention: not allowed (design section 14).
 _RETAINED_ANTHROPIC = ("fable", "mythos")
 
-# Variables the SDKs read on their own: a key, a base URL, an organisation or
-# project, or debug logging. Any of them set, even empty, refuses start-up.
+# Every variable under these prefixes refuses start-up, set at all (even
+# empty), cloud enabled or not: the SDKs read a key, a base URL, extra
+# request headers, an organisation, project or workspace, a credential
+# chain, debug logging or trace propagation from them, and a new release
+# adds names. A prefix also refuses those.
+SDK_ENV_PREFIXES = ("OPENAI_", "ANTHROPIC_", "AZURE_OPENAI_", "XAI_")
+
+# Documentation only (the prefixes are the rule): the names openai 3.37.0
+# and anthropic 2.3.0 read for the clients this worker builds, from their
+# sources (cloud model providers, Task 4 fix round). Review on an SDK bump.
 SDK_ENV_REFUSED = (
     "OPENAI_API_KEY",
+    "OPENAI_ADMIN_KEY",
     "OPENAI_BASE_URL",
+    "OPENAI_CUSTOM_HEADERS",
     "OPENAI_ORG_ID",
     "OPENAI_PROJECT_ID",
+    "OPENAI_WEBHOOK_SECRET",
     "OPENAI_LOG",
+    "OPENAI_API_TYPE",
+    "OPENAI_API_VERSION",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_AD_TOKEN",
+    "AZURE_OPENAI_ENDPOINT",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_WEBHOOK_SIGNING_KEY",
     "ANTHROPIC_LOG",
+    "ANTHROPIC_PROFILE",
+    "ANTHROPIC_CONFIG_DIR",
+    "ANTHROPIC_IDENTITY_TOKEN",
+    "ANTHROPIC_IDENTITY_TOKEN_FILE",
+    "ANTHROPIC_FEDERATION_RULE_ID",
+    "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_WORKSPACE_ID",
+    "ANTHROPIC_SERVICE_ACCOUNT_ID",
+    "ANTHROPIC_SCOPE",
+    "ANTHROPIC_OPEN_TELEMETRY",
+    "ANTHROPIC_OPEN_TELEMETRY_PROPAGATION",
+    "ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE",
+    "ANTHROPIC_OPEN_TELEMETRY_TRACES_MAX_CONTENT_BYTES",
     "XAI_API_KEY",
 )
+
+# A custom CA for the provider connections: OpenSSL's default paths and
+# httpcore2's default context read these. Refused once a provider is enabled.
+TLS_ENV_REFUSED = ("SSL_CERT_FILE", "SSL_CERT_DIR")
 
 
 @dataclass(frozen=True)
@@ -76,9 +112,12 @@ class CloudSettings:
         caller refuses to start on any). The result is only meaningful when
         errs gained nothing."""
         demo = is_demo(env)
-        for name in SDK_ENV_REFUSED:
-            if name in env:
-                errs.append(f"{name} must not be set (cloud keys are read from files only)")
+        for name in sorted(env):
+            if name.upper().startswith(SDK_ENV_PREFIXES):
+                errs.append(
+                    f"{name} must not be set "
+                    "(the cloud SDKs' own variables are refused; keys come from files)"
+                )
 
         def get(name: str) -> str | None:
             v = env.get(name, "").strip()
@@ -100,6 +139,9 @@ class CloudSettings:
         names = _parse_providers(get(PROVIDERS_VAR), errs)
         if not names:
             return cls()
+        for name in TLS_ENV_REFUSED:
+            if name in env:
+                errs.append(f"{name} must not be set when a cloud provider is enabled")
         providers = []
         for p in names:
             ps = _provider(env, p, development, demo, base_urls.get(p), errs)

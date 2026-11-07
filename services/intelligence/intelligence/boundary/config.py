@@ -348,14 +348,17 @@ def _read_secret_file(
     development: bool,
     errs: list[str],
     *,
-    refuse_others_read: bool = False,
+    key_file: bool = False,
+    max_bytes: int | None = None,
 ) -> str | None:
     """A password file's contents, without its trailing newline. It must be
     a regular file; outside development, one that neither group nor others
     can write; one others can read (a root-owned 0444 secret mount, say) is
-    allowed with a warning, unless refuse_others_read (a cloud API key):
-    then it is refused, in development too. The mode is checked on the open
-    file, so it is the file that was read."""
+    allowed with a warning. A key_file (a cloud API key) is stricter, in
+    development too: mode 0400 or 0440 only, so one others can read, or
+    anyone (the owner too) can write, is refused. With max_bytes, a file
+    longer than that (its newline counted) is refused. The mode is checked on the open file, so it is the
+    file that was read."""
     try:
         # O_NONBLOCK: a FIFO in place of the file can't hang start-up.
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
@@ -374,8 +377,11 @@ def _read_secret_file(
         errs.append(f"{name} is not a regular file")
         return None
     with os.fdopen(fd, "rb") as f:
-        if refuse_others_read and st.st_mode & stat.S_IROTH:
+        if key_file and st.st_mode & stat.S_IROTH:
             errs.append(f"{name} is readable by others (use mode 0400 or 0440)")
+            return None
+        if key_file and st.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+            errs.append(f"{name} is writable (use mode 0400 or 0440)")
             return None
         if not development:
             if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
@@ -388,7 +394,11 @@ def _read_secret_file(
                     stat.S_IMODE(st.st_mode),
                 )
         try:
-            return f.read().decode("utf-8").rstrip("\r\n")
+            raw = f.read() if max_bytes is None else f.read(max_bytes + 1)
+            if max_bytes is not None and len(raw) > max_bytes:
+                errs.append(f"{name} is too long (at most {max_bytes} bytes)")
+                return None
+            return raw.decode("utf-8").rstrip("\r\n")
         except (OSError, UnicodeDecodeError):
             errs.append(f"{name} can't be read")
             return None

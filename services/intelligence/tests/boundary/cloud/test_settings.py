@@ -16,6 +16,7 @@ from pytest_socket import SocketBlockedError
 from intelligence.boundary.cloud import vocab
 from intelligence.boundary.cloud.apikey import ApiKey
 from intelligence.boundary.cloud.settings import (
+    SDK_ENV_PREFIXES,
     SDK_ENV_REFUSED,
     CloudSettings,
     ProviderSettings,
@@ -231,29 +232,67 @@ def test_base_url_override_only_in_development(key_file: Callable[..., Path]) ->
         assert errs == ["INTELLIGENCE_CLOUD_OPENAI_BASE_URL is invalid"]
 
 
+def _sdk_refusal(name: str) -> str:
+    return (
+        f"{name} must not be set (the cloud SDKs' own variables are refused; keys come from files)"
+    )
+
+
 def test_sdk_environment_variables_refused() -> None:
-    assert SDK_ENV_REFUSED == (
+    """K16: any variable an SDK could read (a key, a base URL, extra headers,
+    a credential chain, debug logging, trace propagation) refuses start-up,
+    by prefix, so a name a later SDK release adds is refused too."""
+    assert SDK_ENV_PREFIXES == ("OPENAI_", "ANTHROPIC_", "AZURE_OPENAI_", "XAI_")
+    # The documented names (read by openai 3.37.0 and anthropic 2.3.0) all
+    # fall under a prefix.
+    assert {
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
-        "OPENAI_ORG_ID",
-        "OPENAI_PROJECT_ID",
-        "OPENAI_LOG",
+        "OPENAI_CUSTOM_HEADERS",
         "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_LOG",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_OPEN_TELEMETRY_PROPAGATION",
         "XAI_API_KEY",
-    )
+    } <= set(SDK_ENV_REFUSED)
+    assert all(n.startswith(SDK_ENV_PREFIXES) for n in SDK_ENV_REFUSED)
     value = "fake" + "9" * 24
-    for name in SDK_ENV_REFUSED:
-        for v in (value, ""):  # set at all, even empty, cloud enabled or not
+    names = (
+        *SDK_ENV_REFUSED,
+        "OPENAI_CUSTOM_HEADERS",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "AZURE_OPENAI_API_KEY",
+        "XAI_ANYTHING_NEW",
+        "ANTHROPIC_A_NAME_A_LATER_SDK_ADDS",
+    )
+    for name in names:
+        for v in (value, "", "anthropic-beta: x"):  # set at all, cloud enabled or not
             _, errs = read({name: v})
-            assert errs == [f"{name} must not be set (cloud keys are read from files only)"]
+            assert errs == [_sdk_refusal(name)]
             _, errs = read({name: v}, development=True)
-            assert len(errs) == 1 and name in errs[0]
+            assert errs == [_sdk_refusal(name)]
             with pytest.raises(ConfigError) as e:
                 WorkerSettings.from_env({**WORKER, name: v})
             assert name in str(e.value) and value not in str(e.value)
+    # Several are each named, in a fixed order.
+    _, errs = read({"XAI_API_KEY": "", "ANTHROPIC_LOG": "debug"})
+    assert errs == [_sdk_refusal("ANTHROPIC_LOG"), _sdk_refusal("XAI_API_KEY")]
+    # Our own variables and look-alikes are not caught.
+    _, errs = read({"INTELLIGENCE_CLOUD_OPENAI_MODEL": "gpt-6.1-sol", "MY_OPENAI_THING": "x"})
+    assert errs == []
+
+
+@pytest.mark.parametrize("name", ["SSL_CERT_FILE", "SSL_CERT_DIR"])
+def test_ssl_cert_overrides_refused_with_a_provider(
+    key_file: Callable[..., Path], name: str
+) -> None:
+    """A custom CA for the provider connections (httpcore2 and OpenSSL read
+    these) is refused once a provider is enabled; without one, unchanged."""
+    _, errs = read({name: "/etc/ssl/custom.pem"})
+    assert errs == []
+    env = {**cloud_env(key_file(), "openai"), name: "/etc/ssl/custom.pem"}
+    for development in (False, True):
+        _, errs = read(env, development)
+        assert errs == [f"{name} must not be set when a cloud provider is enabled"]
 
 
 @pytest.mark.parametrize(
