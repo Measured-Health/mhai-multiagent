@@ -75,16 +75,8 @@ func axpy(a, b rvec, f *big.Rat) rvec {
 func addVec(a, b rvec) rvec { return axpy(a, b, big.NewRat(-1, 1)) }
 
 // rbasis is an echelon form: each row's pivot is its smallest column, with
-// coefficient 1. Rows never change once added (a clone shares them).
+// coefficient 1.
 type rbasis map[int]rvec
-
-func (b rbasis) clone() rbasis {
-	c := make(rbasis, len(b))
-	for k, v := range b {
-		c[k] = v
-	}
-	return c
-}
 
 // residual removes every pivot column from v: the unique part of v on the
 // non-pivot columns, linear in v.

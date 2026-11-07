@@ -21,13 +21,13 @@ import (
 // are month-aligned); a block is three months, twelve weeks.
 
 // historyCount is the number of A7 histories: 500, fewer under -race (CI's
-// go test -race runs 50) or -short.
+// go test -race runs 20, inside its 10-minute package limit) or -short.
 func historyCount() int {
 	switch {
 	case testing.Short():
 		return 40
 	case raceEnabled:
-		return 50
+		return 20
 	}
 	return 500
 }
