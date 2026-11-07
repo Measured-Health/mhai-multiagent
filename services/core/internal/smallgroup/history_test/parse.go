@@ -25,7 +25,7 @@ const (
 	qgCats = 7 // pass, pass degraded, regenerate, regenerate degraded, escalate, escalate degraded, unanswered
 	rCats  = 2 // agreed, corrected
 	// MaxHospitals bounds the hospitals of one history.
-	MaxHospitals = 16
+	MaxHospitals = 24
 )
 
 type measure struct {

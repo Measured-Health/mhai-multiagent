@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -61,9 +62,13 @@ func count(r *rand.Rand) int64 {
 	return int64(r.Intn(60))
 }
 
-func randomWorld(r *rand.Rand) *world {
+func randomWorld(r *rand.Rand) *world { return randomWorldN(r, 1, 8, 12+r.Intn(25), false) }
+
+// randomWorldN is a history of months months with nMin to nMax hospitals;
+// crowded draws counts of 0 to 4 in most weeks, so columns hold 11 or more
+// hidden hospitals and rows many hidden parts (R41a-5).
+func randomWorldN(r *rand.Rand, nMin, nMax, months int, crowded bool) *world {
 	start := time.Date(2024+r.Intn(2), time.Month(1+3*r.Intn(4)), 1, 0, 0, 0, 0, time.UTC)
-	months := 12 + r.Intn(25)
 	end := start.AddDate(0, months, 0)
 	w := &world{onboard: map[string]time.Time{}, truth: map[string]map[string]scheduler.FrozenRow{}}
 	for p := calendar.Of(calendar.Week, start); p.From.Before(end); p = calendar.Next(p) {
@@ -72,8 +77,17 @@ func randomWorld(r *rand.Rand) *world {
 	em := start.AddDate(0, r.Intn(max(1, months/3)), 0)
 	w.epoch = em.AddDate(0, 0, 3+r.Intn(24)).Add(12 * time.Hour) // mid-month
 	w.fake = schedtest.New(start, w.epoch)
-	n := 1 + r.Intn(8)
+	n := nMin + r.Intn(nMax-nMin+1)
 	span := end.Sub(start)
+	draw := count
+	if crowded {
+		draw = func(r *rand.Rand) int64 {
+			if r.Intn(6) == 0 {
+				return count(r)
+			}
+			return int64(r.Intn(5))
+		}
+	}
 	for i := 0; i < n; i++ {
 		id := uuid.New()
 		created := start.Add(-time.Duration(r.Intn(400)) * time.Hour)
@@ -98,7 +112,7 @@ func randomWorld(r *rand.Rand) *world {
 			var row scheduler.FrozenRow
 			if !quiet {
 				for _, c := range []int{0, 2, 4} {
-					n := count(r)
+					n := draw(r)
 					d := int64(0)
 					if r.Intn(3) == 0 && n > 0 {
 						d = int64(r.Intn(int(n) + 1))
@@ -211,7 +225,17 @@ func (w *world) run(t *testing.T) (*Parser, []response) {
 		if _, err := s.Tick(context.Background()); err != nil {
 			t.Fatalf("tick at %v: %v", w.fake.Clock, err)
 		}
-		for _, st := range w.fake.All() {
+		// In publication order: by end, then week, month, quarter.
+		stored := w.fake.All()
+		order := map[calendar.Kind]int{calendar.Week: 0, calendar.Month: 1, calendar.Quarter: 2}
+		sort.SliceStable(stored, func(i, j int) bool {
+			a, b := stored[i].Period, stored[j].Period
+			if !a.To.Equal(b.To) {
+				return a.To.Before(b.To)
+			}
+			return order[a.Kind] < order[b.Kind]
+		})
+		for _, st := range stored {
 			if seen[schedtest.Key(st.Period)] {
 				continue
 			}
@@ -277,4 +301,44 @@ func TestHistoryFromRouteJSON(t *testing.T) {
 	}
 	t.Logf("%d histories: %d published cells, %d hidden, %d hidden cells exposed with 0 or 5 and up (known before they were hidden)",
 		historyCount(), cells, hidden, exposed)
+}
+
+// R41a-5, the whole set: replayed in publication order from the JSON, no
+// published set's hidden members have anything determined since just
+// before it was published but their full sum (no member, no proper union of
+// any size, no other combination); and the cell and sum checks hold. Normal
+// histories, and crowded ones: 15 to 20 hospitals with counts of 0 to 4 in
+// most weeks (columns with 11 or more hidden hospitals, rows with every
+// part hidden).
+func TestHistorySetsFromRouteJSON(t *testing.T) {
+	r := rand.New(rand.NewSource(41))
+	normal, crowded := 6, 6
+	switch {
+	case testing.Short():
+		normal, crowded = 1, 1
+	case raceEnabled:
+		normal, crowded = 2, 2
+	}
+	sets, wide := 0, 0
+	for k := 0; k < normal+crowded; k++ {
+		w := randomWorld(r)
+		if k >= normal {
+			w = randomWorldN(r, 15, 20, 6+r.Intn(7), true)
+		}
+		p, _ := w.run(t)
+		if v := p.CheckSets(); len(v) > 0 {
+			t.Fatalf("history %d (%d hospitals): %d sets with more than their full sum determined; first: %s", k, len(w.onboard), len(v), v[0])
+		}
+		rep := p.Check(w.value(p))
+		if len(rep.SmallCells)+len(rep.SmallSums) > 0 {
+			t.Fatalf("history %d: %s", k, strings.Join(append(rep.SmallCells, rep.SmallSums...), "; "))
+		}
+		s, wd := p.setStats()
+		sets += s
+		wide += wd
+	}
+	if wide == 0 {
+		t.Fatal("no set had 11 or more hidden members: the crowded histories test nothing")
+	}
+	t.Logf("%d histories: %d published sets with 2 or more hidden members checked, %d with 11 or more", normal+crowded, sets, wide)
 }
