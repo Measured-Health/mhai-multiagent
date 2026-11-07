@@ -182,7 +182,7 @@ Everything below is in core's database, under RLS, and written only by core.
 | `analysis_pseudonyms` | `hospital_id`, `subject_id`, `side`, `scope`, `period_id`, `pid` (§4.5) | anything derived from a reference |
 | `analysis_views`, `analysis_view_rows` | One row per drill-down: viewer, level, period, filter codes, drill, count, purpose, clearance id, `named_until`, audit id; plus, in order, the subject ids of the rows sent | names, MRNs, pids (these are derived on reveal) |
 | `named_view_notes` | The purpose note for "Other" (at most 200 characters), encrypted, linked to the view | anything that goes into audit or logs |
-| `clearances`, `clearance_covered`, `clearance_events`, `named_access_switch`, `named_view_keys`, `legal_resolutions` | §8 and §10 | the letter's bytes, which go to object storage |
+| `clearances`, `clearance_covered`, `clearance_events`, `named_access_switch`, `named_view_keys`, `legal_references`, `analysis_patient_budget`, `analysis_patient_opens` | §5.6, §8 and §10 | the letter's bytes, which go to object storage |
 
 **Retention**
 
@@ -211,10 +211,11 @@ No worker changes, and the intelligence boundary is untouched.
 
 **EMR events and alerts (later).** The EMR service publishes coded canonical events, and the same nightly run writes facts from them. Name and MRN stay in the EMR service.
 
-**Late facts.** A fact whose day falls in a period that has already frozen is stored with `period_late = true`.
+**Late facts: lateness is decided at the block.** Only blocks freeze on their own; months and quarters are built from frozen blocks (D2).
 
-- It is never counted in that period, and never in a later one.
-- It still updates `analysis_first_seen`, which affects only periods that have not frozen yet.
+- A fact whose day falls in a block that has already frozen is stored with `period_late = true`.
+- It is never counted: not in its block, not in the month or quarter around it, and not in any later period. A month can never hold a fact its blocks lack, so "month minus its blocks" is always zero.
+- It still updates `analysis_first_seen`, which affects only blocks that have not frozen yet.
 - Late facts are counted in a metric, so lateness is visible to operations.
 
 ### 4.5 Pseudonyms: stable per period
@@ -244,10 +245,10 @@ No worker changes, and the intelligence boundary is untouched.
 | `Min` | 5 | `smallgroup.Min`: a count of 1–4 is hidden |
 | `QuerySetMin` | 10 | a filtered view with fewer patients than this is hidden whole |
 | `FilterCap` | 2 | at most two filters besides the period; a third gets 422 `too_many_filters` |
-| Grace | 3 days | how long after a period closes before it is computed and frozen |
+| Grace | 3 days | how long after a block closes before it is frozen; months and quarters freeze with their last child (D2) |
 | History | 24 months | the oldest answerable period starts within 24 months |
 | `DrillMax` | 200 rows | per list |
-| Distinct-patient cap | 300 (proposed, §16 Q9) | distinct patients one person may open in drill-downs per period |
+| Distinct-patient cap | 300 (proposed, §16 Q9) | distinct patients one person may open in drill-downs (de-identified and named) per calendar quarter, shared by all levels (§5.6) |
 
 ### 5.2 Who the aggregate rules protect, stated plainly
 
@@ -304,8 +305,13 @@ Every number passes through `internal/smallgroup` or through `internal/analysis/
 
 **D2 Freeze after close plus grace.**
 
-- After a period closes, the nightly run waits three days for late facts. At the hospital's next local midnight plus 30 minutes, it marks the period `frozen_at` in `analysis_periods`.
-- From then on, the period's inputs never change: late facts are excluded (§4.4).
+- **Only blocks freeze on their own.** After a block closes, the nightly run waits three days for late facts. At the hospital's next local midnight plus 30 minutes, it marks the block `frozen_at` in `analysis_periods`, and the block's fact set is fixed (§4.4).
+- **Months and quarters are built from frozen children, never recomputed from facts** (as Plan 7c builds its periods).
+  - A month freezes in the same run that freezes its last block; a quarter in the run that freezes its last month.
+  - Its inputs are exactly the union of its children's frozen fact sets. Additive measures (cases, new, consultations, results, alerts, corrections) are the **sums of the children's raw values**, taken from the frozen children, not from a fresh query.
+  - Distinct counts (`patients`, the A3 partitions, pairs) are counted over that same union, so they too can never see a fact a child didn't.
+  - So `month = Σ blocks` and `quarter = Σ months` hold exactly, with no late-fact term, and D3 guards those equations.
+- From then on, a period's inputs never change.
 - Each response body is computed from the frozen inputs. The first time a body is computed, it is stored in `analysis_snapshots`, and from then on it is served unchanged for 25 months. That holds even if the engine changes; a new `engine_version` applies only to periods frozen afterwards.
 - A period that is closed but not yet frozen can't be answered (`409 not_ready`). The period picker offers only frozen periods.
 - Result: every core copy, every day, gives the same answer for a finished period (R42 and R43, generalised).
@@ -319,7 +325,8 @@ Every number passes through `internal/smallgroup` or through `internal/analysis/
   - The parent's own response then runs Layer A again with that cell hidden, until nothing changes.
 - **The quarter rule.** C3's "a quarter guarded together with its three months as one set" is this rule at the top level. The same rule links months to blocks.
 - **Distinct counts don't add.** `patients` and the partitions in A3 aren't additive across levels: a patient seen in two blocks counts once in the month. They have no exact equation, only bounds: the largest child ≤ the parent ≤ the sum of the children. The remaining risk is narrowing by those bounds (R-A2), measured by P5.
-- **No grand totals.** Responses never carry a total across several periods (I2). A trend is the `history` array (§9): earlier periods of the same level, each point identical to that period's own frozen total, with no total over them.
+- **No grand totals.** Responses never carry a total across several periods (I2). A trend is the `history` array (§9): earlier periods of the same level, with no total over them.
+- **History points are stored bodies.** Each `history` point is read from that period's **stored body for the same view and the same filters** (computed and stored first if it doesn't exist yet, children before parents, as for any body). Its `cases`, `new` and `patients` are copied from that body as published. Where that body is hidden whole (A7, or a filtered context hidden by D5), the point is hidden whole: every field `{value: null, suppressed: true}`. A history point therefore never shows anything the period's own response doesn't.
 
 **D4 Filter cap and query-set minimum.**
 
@@ -386,10 +393,22 @@ Every number passes through `internal/smallgroup` or through `internal/analysis/
 | Cap | Limit | Over the limit |
 |---|---|---|
 | De-identified lists | 10 a minute and 50 a day | 429 `rate_limited`, and a flagged entry |
-| Distinct patients opened per period, by one person, across all their lists | 300 (proposed) | 429 `rate_limited`, and a flagged `analysis.patient_cap_reached` entry |
+| Distinct patients opened per calendar quarter, by one person (see below) | 300 (proposed) | 429 `rate_limited`, and a flagged `analysis.patient_cap_reached` entry |
 | Named views | 5 a day; replays count (M7) | 429 `rate_limited`, and a flagged entry |
 
-**Profiling.** Pids last one period only, so the work of linking lists restarts every period. The distinct-patient cap bounds how much of one period a single person can profile. P8 measures both.
+**The distinct-patient cap.**
+
+- **One cap per person per calendar quarter, shared by all three levels.** Blocks and months nest in their quarter, so every list from a block, a month or the quarter itself counts against the quarter that contains it. A subject opened in a block list and again in its month's list counts once.
+- **Both levels of drill-down count.** De-identified lists and named views draw on the same cap. A named view of subjects already opened in that quarter costs nothing extra; a replay of a named view (§8.5) re-checks but costs nothing new. Legal resolutions (§8.9) don't count: they have their own one-time limit.
+- **Reserve, then check, atomically in SQL.** `mhai_analysis_reserve_patients(p_quarter uuid, p_subjects uuid[])` (definer; user and hospital from the session settings) runs in the request's transaction, before the view is recorded:
+  1. `SELECT … FOR UPDATE` on the person's counter row for the quarter (`analysis_patient_budget`, created on first use with `INSERT … ON CONFLICT DO NOTHING`), so parallel requests from the same person queue on one row;
+  2. counts the subjects not already in `analysis_patient_opens (hospital, user, quarter, subject)`;
+  3. if `opened + new > 300`, raises (the route answers 429 and writes the flagged entry in a separate transaction); otherwise inserts the new subjects and adds them to the counter.
+
+  A refusal rolls back the whole request, so no rows are returned. Opens are kept for the quarter plus one month, then swept.
+- **Test T28:** 20 parallel requests by one person, each opening 40 new subjects against a cap of 300, open at most 300 distinct subjects; the counter equals the number of rows in `analysis_patient_opens`.
+
+**Profiling.** Pids last one period only, so the work of linking lists restarts every period. The distinct-patient cap bounds how much of one quarter a single person can profile. P8 measures both.
 
 ### 5.7 Property and abuse tests (the plan writes these first)
 
@@ -607,7 +626,7 @@ If several letters qualify, the one with the latest end date counts.
 
 1. **The idempotency key** (§8.5). The same key from another person, or with another body, gets 422 `idempotency_mismatch`.
 2. **The analysis gate** (404) and **two-step** (403 `mfa_required`).
-3. **The named-view budget** (§5.6). Replays count.
+3. **The named-view budget and the distinct-patient cap** (§5.6). Replays count toward the budget; the cap is reserved atomically (`mhai_analysis_reserve_patients`) once the subjects are known in step 6, before the view is recorded.
 4. **Cover** (`mhai_named_cover`):
    - 403 `named_access_off` when the position is below On;
    - 403 `not_cleared` when no letter covers the person;
@@ -696,6 +715,7 @@ Every entry has a closed schema. No entry carries a name, MRN, pid or free text.
 | `analysis.legal_resolved` | security, **flagged** | `refs.export_id`, `refs.clearance_id`, `rows` (§8.9) |
 | `analyst.granted`, `analyst.removed` | admin | the person, by `display_name` |
 | `clearance.uploaded`, `.refused`, `.verified`, `.rejected`, `.narrowed`, `.revoked`, `.ended`, `.viewed`, `.reminder_sent` | admin. A file refused for `failed_safety_check` is security, flagged | reason codes, `refs.clearance_id`, pages |
+| `legal_reference.created` | security, flagged | `refs.export_id`, the named admins by `display_name` |
 | `named_access.requested`, `.approved`, `.cancelled`, `.changed` | admin | position, scope, sign-off reference codes |
 
 **Purpose notes** live in `named_view_notes`, never in an audit payload.
@@ -721,19 +741,27 @@ Every entry has a closed schema. No entry carries a name, MRN, pid or free text.
 
 **Why a new path.** Pids are random and last one period, so a hospital can't turn an exported pid back into a person from its own records. A legal request that needs names is therefore resolved through MHAI, under the same controls as a named view, plus a legal reference. Legal confirms the path (H3).
 
-**`POST /hospital/legal-resolutions`** takes `{export_id, reference, purpose: "legal_request", mfa_code}` and an `Idempotency-Key`.
+**Step 1: the platform marks an export for one legal reference.** `POST /platform/audit/legal-references {export_id, reference, admins, mfa_code}` (platform admin, step-up, `Idempotency-Key`):
 
-- **Who:** a hospital admin of the hospital the export concerns.
+- the export must be a `named_access` export for **one hospital**, and not already bound to a reference;
+- `reference` is the legal request's reference (at most 60 characters);
+- `admins` are 1–3 hospital admins of that hospital, named by the request (by staff id; 422 `not_eligible` otherwise);
+- it creates a row in `legal_references`: export, hospital, reference, named admins, created by, `used_at` null. Audited as `legal_reference.created` (flagged). An export can be bound once; a reference binds exactly one export.
+
+**Step 2: a named admin resolves it, once.** `POST /hospital/legal-resolutions {legal_reference_id, mfa_code}` and an `Idempotency-Key`.
+
+- **Who:** only a hospital admin named on that reference, at its hospital. Anyone else gets 404 `not_found`.
 - **Conditions:**
   - the admin is covered by a current letter, and the switch is On;
   - step-up is required;
-  - `reference` is the legal request's reference, at most 60 characters.
+  - the export has at most **200 rows** (the row cap per resolution, the same as `DrillMax`). A reference whose export has more is refused at step 1 with 422 `too_many_rows`; a larger legal request is split into several exports and references.
+- **Once only.** In one transaction, `UPDATE legal_references SET used_at = now(), used_by = me WHERE id = $1 AND used_at IS NULL AND me = ANY(admins)` must touch exactly one row; otherwise 409 `already_used`. A second call, by anyone, is refused, including a retry with a new idempotency key. (A retry with the **same** key and body within 15 minutes re-runs the checks and resolves again without a new audit entry, as §8.5; after that the key is spent.)
 - **What it does:**
   - core reads the subject ids behind the export's rows (`analysis_view_rows`, kept for the audit's retention);
-  - it appends the flagged `analysis.legal_resolved` and commits;
+  - it appends the flagged `analysis.legal_resolved` (with `refs.export_id`, `refs.clearance_id`, `rows`) and commits together with `used_at`;
   - it calls `emr.v1.identity.resolve`, and returns the rows with name and MRN **in the app only**, never as a file. Print styles hide them, as for named views.
-- **Its own limit:** 5 a day per hospital.
-- **Platform staff never see the names.** A platform admin or auditor can start the export, not the resolution.
+- **Platform staff never see the names.** They create the export and the reference; only the hospital's named admins resolve.
+- **Tests T29:** a hospital admin not named on the reference gets 404; a second resolution, and two parallel ones, give exactly one success and one 409 `already_used`; a reference for an export of 201 rows is refused at step 1.
 
 ### 8.10 What the hospital side needs from the platform side (Plan 11b, its own design)
 
@@ -764,7 +792,7 @@ All routes:
   - a month's series is its weeks (`week`);
   - a week's series is one point, the week itself (`week`).
 - **Additive: `Meta.period`** is `{level, start}`.
-- **Additive: `history`** lists up to 7 earlier periods of the same level as `{start, cases, new, patients}`. Each value is guarded, and each equals that period's own frozen value. There is no total.
+- **Additive: `history`** lists up to 7 earlier periods of the same level as `{start, cases, new, patients}`. Each point is copied from that period's stored body for the same view and filters, and is hidden whole wherever that body is hidden (D3). There is no total.
 - A period that has closed but not yet frozen gets 409 `not_ready`.
 
 | Method and path | Who | Notes |
@@ -779,14 +807,15 @@ All routes:
 | `POST /hospital/clearances` | hospital admin, with step-up | Multipart, with the refusals in §8.1. 503 until the documents service exists |
 | `GET /hospital/clearances/{id}`, `GET …/pages/{n}` | hospital admin | §8.1 |
 | `POST /hospital/clearances/{id}/revoke` and `…/narrow` | hospital admin, with step-up | §8.1 |
-| `POST /hospital/legal-resolutions` | hospital admin, covered, with step-up | §8.9 |
+| `POST /platform/audit/legal-references` | platform admin, with step-up | §8.9 step 1. Errors: 422 `not_eligible`, `too_many_rows`; 409 `conflict` (export already bound) |
+| `POST /hospital/legal-resolutions` | a hospital admin named on the reference, covered, with step-up | §8.9 step 2. Errors: 404; 409 `already_used` |
 | `PATCH /hospital/staff/{id}` (roles) | hospital admin | Analyst rules in §6. Additive optional `mfa_code` / `backup_code`, required when adding `analyst` |
 | `GET /platform/audit/{id}/patients`, `GET /platform/audit/named-access`, `/platform/audit/exports*` | platform admin, auditor | §8.8 |
 
 **Other contract changes.**
 
 - `User.features {analysis, named_access}`, additive.
-- New error codes in `authz/errorcodes.go`: `too_many_filters`, `too_small`, `level_not_supported`, `invalid_range`, `not_ready`, `named_access_off`, `not_cleared`, `clearance_ended`, `expired`, `idempotency_mismatch`, `would_empty`, `end_date_too_late`, `not_eligible`, `not_eligible_platform`, `analysis_off`, `analyst_cap`, `above_global` and `signoff_missing`.
+- New error codes in `authz/errorcodes.go`: `too_many_filters`, `too_small`, `level_not_supported`, `invalid_range`, `not_ready`, `named_access_off`, `not_cleared`, `clearance_ended`, `expired`, `idempotency_mismatch`, `would_empty`, `end_date_too_late`, `not_eligible`, `not_eligible_platform`, `analysis_off`, `analyst_cap`, `above_global` and `signoff_missing`, `already_used` and `too_many_rows`.
 - **Nothing logged.** `/analysis/*` query strings are dropped from access logs and traces.
 
 ## 10. Migrations and RLS
@@ -812,7 +841,9 @@ Migration numbers are the next free ones at build time: 00019 or later. Cloud mo
 | `mhai_named_cover(p_user uuid)` | §8.2 | `mhai_gateway` |
 | `mhai_grant_analyst(p_user uuid)` and `mhai_remove_analyst(p_user uuid)` | the analyst rules (§6.1). The CLI uses them too | `mhai_gateway`, and the provisioning login |
 | `mhai_audit_view_pseudonyms(p_audit_id bigint)` | the audit reveal | `mhai_platform` |
-| `mhai_legal_subjects(p_export_id uuid)` | subject ids for §8.9, for the caller's hospital only | `mhai_gateway` |
+| `mhai_legal_subjects(p_reference uuid)` | consumes the reference once (§8.9) and returns its subject ids, for the caller's hospital and only for an admin named on it | `mhai_gateway` |
+| `mhai_legal_reference_create(...)` | binds one export to one reference (§8.9 step 1) | `mhai_platform` |
+| `mhai_analysis_reserve_patients(p_quarter uuid, p_subjects uuid[])` | the distinct-patient cap, reserve then check (§5.6) | `mhai_gateway` |
 | `mhai_analysis_ingest(p_hospital uuid, p_until timestamptz)` and `mhai_analysis_freeze(p_hospital uuid)` | ingest and freezing | the scheduler login |
 
 **Tables and policies.** Every table has `ENABLE` and `FORCE ROW LEVEL SECURITY`, and `REVOKE ALL FROM PUBLIC`.
@@ -845,7 +876,7 @@ Migration numbers are the next free ones at build time: 00019 or later. Cloud mo
 1. ingest;
 2. sweep for retention;
 3. end letters whose last day has passed;
-4. **freeze** every period whose grace has run out.
+4. **freeze** every block whose grace has run out, then every month whose last block just froze, then every quarter whose last month just froze (D2).
 
 **Precomputed at freeze.** For each frozen period:
 
@@ -872,7 +903,7 @@ Children are computed before parents (D3).
 | The nightly ingest or freeze fails | the period picker doesn't offer the new period yet | Frozen periods keep being served. Alert `analysis_freeze_failed`. Never a partial period |
 | A body runs over its time budget, or a hospital reaches its body cap | "Couldn't load {view}" | 503. Nothing stored. Metric and alert |
 | The engine sees inconsistent inputs | that view fails | Everything in it is hidden, and an alert is raised |
-| Late facts arrive for a frozen period | nothing changes | Stored with `period_late` and counted in a metric |
+| Late facts arrive for a frozen block | nothing changes, in the block or in its month or quarter | Stored with `period_late`, left out of every period, counted in a metric |
 | A request for a closed period that isn't frozen yet | not offered | 409 `not_ready` |
 | A drill key from another period, hospital or filter set | 422 `too_small` | The HMAC binds all of them |
 | Two pids collide | nothing | The pid is drawn again |
@@ -993,7 +1024,7 @@ Children are computed before parents (D3).
 - **T1** Female 212, male 3, total 215: male and the next-smallest member are hidden.
 - **T2** A month's hidden blocks can't be recovered from the month's total.
 - **T3** A pair with a hidden "both" comes after every shown pair.
-- **T4** A request for any range that isn't exactly one period gets 422. A frozen period's body stays byte-identical after late facts arrive. A quarter whose single hidden month the other two months would give away is hidden.
+- **T4** A request for any range that isn't exactly one period gets 422. A frozen period's body stays byte-identical after late facts arrive. A fact dated in a block that froze before its month did is in neither: the month's additive values equal the sum of its frozen blocks exactly, and the quarter's the sum of its months. A `history` point under filters equals that period's stored body for those filters, and is hidden whole where that body is. A quarter whose single hidden month the other two months would give away is hidden.
 - **T5** Asking for a complementary cell through a filter: the request is answered hidden whole.
 - **T6** A third filter gets 422 `too_many_filters`.
 - **T7** A filter set matching 7 patients: everything is hidden and every list is empty.
@@ -1017,6 +1048,8 @@ Children are computed before parents (D3).
 - **T25** A hospital with the analysis switch Off gets no facts after the nightly run, and calling the ingest function for it fails.
 - **T26** An analyst grant to oneself, across hospitals, without step-up, without `clinician`, or past the cap (10) is refused by the trigger and the route. The puppet account's grant notifies every hospital admin.
 - **T27** The demo identity fixture refuses to start with live configuration.
+- **T28** The distinct-patient cap under 20 parallel requests (§5.6).
+- **T29** The legal path: only named admins, once only, the row cap (§8.9).
 
 ### 13.6 Residual risk and sign-off
 
@@ -1039,7 +1072,7 @@ Each phase is its own PR, reviewed and merged by a person. Phases 2–6 run on t
 | PR | Contents | Depends on |
 |---|---|---|
 | **0** (this one) | this design | none |
-| **1. Decisions on paper** | ADR 0014, "Population analysis under disclosure control", **Proposed until H4**. It changes the "admins see no clinical content" rule for aggregates and pseudonymous rows. It also proposes the SKILLS.md §1 amendment, **Proposed until H4**: the cross-patient exception applies only to `services/core/internal/analysis` (aggregates and drill-down); the rule stays absolute for intelligence, retrieval, prompts, models and every NATS operation; and the review checklist gains "Does any analysis table, function or result reach a worker role or a NATS subject? (T22)". Also: the frontend-requirements §10 updates (H6) and the TODO.md sign-off items | none |
+| **1. Decisions on paper** | ADR 0015, "Population analysis under disclosure control", **Proposed until H4**. It changes the "admins see no clinical content" rule for aggregates and pseudonymous rows. It also proposes the SKILLS.md §1 amendment, **Proposed until H4**: the cross-patient exception applies only to `services/core/internal/analysis` (aggregates and drill-down); the rule stays absolute for intelligence, retrieval, prompts, models and every NATS operation; and the review checklist gains "Does any analysis table, function or result reach a worker role or a NATS subject? (T22)". Also: the frontend-requirements §10 updates (H6) and the TODO.md sign-off items | none |
 | **2. Data foundation** | The migration: subjects, facts, first-seen, periods, dictionaries, pids, the analysis switch, the roles, and the ingest and freeze functions, with the switch-On check. `features`. The scheduler. `core analysis seed-demo`. RLS tests. T22, T24, T25 | none |
 | **3. Disclosure engine** | `internal/analysis/disclose`: Layer A, the period hierarchy (D1–D3), the family fixpoint (D5). P1–P8. Reviewable by the privacy lead | none |
 | **4. Aggregate routes** | `GET /analysis/filters` and `/analysis/{view}` with `period`, freezing and stored bodies, rate limits, `analysis.viewed`, the unusual-query flag, openapi. T1–T7, T21. The time budget measured | 2, 3 |
@@ -1057,7 +1090,7 @@ Each phase is its own PR, reviewed and merged by a person. Phases 2–6 run on t
 | H1 | Privacy lead | **Confirm the approach.** (1) Exact counts, no noise, and the aggregate rules protect against people without drill access, while drill users see pseudonymous microdata under role, audit and caps (§5.2, R-A4). (2) The C3 choice: month-aligned week blocks, months and quarters, nested and guarded across levels (D1–D3). (3) The filter residual R-A1, accepted with the number P2 measures at a cap of 2, and R-A2 with P5's number. (4) The constants: `Min` 5, `QuerySetMin` 10, `FilterCap` 2, 3 days' grace, pids per period, the distinct-patient cap of 300, the list and named-view budgets, retention. | PR 3 review (constants); before any live hospital (sign-off) |
 | H2 | Clinical lead | Sign-off that hospital admins and analysts may see the five views; the definitions ("case", "new", "existing"); the confidence mapping (§4.1); condition grouping. | Before any live hospital |
 | H3 | Legal / compliance lead | NDPA 2023 basis for this secondary use; the clause in hospital agreements; the letter as authority (a template); retention of letters and audit; **the legal resolution path (§8.9)** as the way to answer a request that needs names. | Before any live hospital; the template before PR 7 goes live; §8.9 before PR 9 |
-| H4 | Product owner | Approve this design and the open questions; move ADR 0014 and the SKILLS.md amendment from Proposed to Accepted; name the pilot hospital; confirm Analysis waits for patient references. | PR 1 |
+| H4 | Product owner | Approve this design and the open questions; move ADR 0015 and the SKILLS.md amendment from Proposed to Accepted; name the pilot hospital; confirm Analysis waits for patient references. | PR 1 |
 | H5 | Platform and operations | Object storage and the documents service; the scheduler slot; alerts for `analysis_freeze_failed` and the body cap; `SECURITY_CONTACT_*`. | PR 7 live; PR 9 |
 | H6 | mhai-web team | **Contract changes forced by R41a and C3.** (a) **The period picker replaces the presets and Custom range** in Analysis: choose a level (week, month, quarter) and one finished period from `filters.periods`, and send `period` and `start`; "week" means the month-aligned block, labelled with its dates ("8–14 Mar 2027"). (b) Show `Meta.period`, and draw `history` as a trend with no total. (c) **Plan 12's "Last 3/6/12 months" changes** to the last full month or quarter, plus the last four quarters as history. (d) **Pids become stable per period**, not per hospital: the copy and the Plan 6 and Plan 12 contracts say so, and nothing in the app links pids across periods. (e) Handle 409 `not_ready`, 422 `too_many_filters` (more than 2) and 429 `rate_limited`. (f) Accept empty lists next to a hidden patient count (A7). (g) Send `mfa_code` when adding Analyst in the staff panel. (h) The legal resolution screen (§8.9). (i) Ship the audit kinds in §8.7 and the `analyst` actor role. | Before PR 4, PR 6 and PR 8 go live |
 | H7 | Intelligence lead and the EMR design owner | Consultations carry a hospital-scoped patient reference; canonical EMR events go into core; the `emr.v1.identity.resolve` operation. | PR 10; PR 8 live |
@@ -1072,13 +1105,13 @@ Each phase is its own PR, reviewed and merged by a person. Phases 2–6 run on t
 6. **When are periods computed, and how does the filter list behave?** *Freeze each period three days after it closes, and compute the filter list per frozen period* (D2, M4). Late data never changes a frozen period.
 7. **What does a de-identified row show?** *Conditions and findings within the period only, at most 10 of each.*
 8. **How stable are pids?** *Stable per period* (and per side and scope). Lists can't be linked across periods.
-9. **Drill-down budgets?** *10 lists a minute and 50 a day per person; 300 distinct patients per person per period; 5 named views a day, replays included.*
+9. **Drill-down budgets?** *10 lists a minute and 50 a day per person; 300 distinct patients per person per calendar quarter, shared by all levels and counting named views, reserved atomically; 5 named views a day, replays included.*
 10. **How long does a named view last?** *30 minutes, or until the letter's end if that comes first.*
 11. **Controls on granting Analyst?** *Step-up when adding the role (an optional `mfa_code`, required for this change), every rule enforced in a database trigger and shared with the CLI, a cap of 10 per hospital, and hospital admins notified.*
 12. **A per-hospital switch for aggregates?** *Yes: two people to raise it, with sign-off references.* Ingest follows the switch.
 13. **Audit every aggregate read?** *Yes:* once per session, filter set and period, unflagged.
-14. **How are legal requests that need names answered?** *Through the legal resolution path (§8.9):* a covered hospital admin, with step-up and a legal reference, resolves an export's rows in the app. Flagged and limited. Never a named file. Platform staff never see names. The earlier answer ("the hospital resolves pids itself") doesn't work, because pids are random and per period.
+14. **How are legal requests that need names answered?** *Through the legal resolution path (§8.9):* the platform binds one export (at most 200 rows) to one legal reference and names the hospital admins; one of them, covered and with step-up, resolves it once, in the app. Flagged and limited. Never a named file. Platform staff never see names. The earlier answer ("the hospital resolves pids itself") doesn't work, because pids are random and per period.
 15. **Upload letters before the documents service exists?** *No:* 503 until then.
-16. **How is SKILLS.md §1 amended?** *Through ADR 0014, scoped to `services/core/internal/analysis`.* The rule stays absolute for intelligence and every NATS operation, with a checklist line tied to T22.
+16. **How is SKILLS.md §1 amended?** *Through ADR 0015, scoped to `services/core/internal/analysis`.* The rule stays absolute for intelligence and every NATS operation, with a checklist line tied to T22.
 
 **Relation to R41a.** The product owner's R41a ruling (fixed periods), refined by C3 (nested periods), gives Analysis differencing control over time: finished, frozen periods, guarded together across levels. What remains is differencing across filters within one period (R-A1). It is measured, not closed, and the privacy lead accepts it in H1.
