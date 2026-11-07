@@ -14,6 +14,12 @@ reserved source value on it (say "reference") is mapped to the unassigned
 source, which no patient sees. Until patient ids exist (departure 7)
 patient_id is None, so only shared guidelines come back.
 
+A shared guideline row is also sealed as a SharedChunk (cloud/gate.py) and
+the seal recorded in the chunk's metadata["_shared"], so the egress gate
+can tell a shared guideline from anything else (design section 4.2). The
+local path never reads it. This module is the only caller of
+seal_shared_chunk (tests/boundary/cloud/test_imports.py).
+
 Never opens a connection or cursor (test_no_direct_db). Logs nothing about
 the rows.
 """
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from intelligence.boundary.cloud.gate import SHARED_KEY, seal_shared_chunk
 from intelligence.boundary.db import Cursor
 from intelligence.knowledge_base.kb_builder import (
     REFERENCE_SOURCE,
@@ -50,14 +57,26 @@ def _source(shared: bool, source: str | None) -> str:
 
 def _chunk(row: tuple[Any, ...]) -> KBChunk:
     chunk_id, shared, content, chunk_type, source, subject, metadata = row
-    return KBChunk(
+    meta = dict(metadata) if isinstance(metadata, dict) else {}
+    # Only kb_repo records a seal: a row can't bring its own.
+    meta.pop(SHARED_KEY, None)
+    chunk = KBChunk(
         chunk_id=str(chunk_id),
         content=str(content),
         chunk_type=str(chunk_type),
         source_patient_id=_source(bool(shared), source),
         source_subject_id="" if shared or subject is None else str(subject),
-        metadata=dict(metadata) if isinstance(metadata, dict) else {},
+        metadata=meta,
     )
+    if shared and chunk.chunk_type == "guideline":
+        try:
+            sealed = seal_shared_chunk(chunk.chunk_id, chunk.content, _from_repo=True)
+        except ValueError:
+            # Not a chunk id: usable locally as before, never sent.
+            return chunk
+        chunk = sealed.as_kb_chunk()
+        chunk.metadata = {**meta, SHARED_KEY: sealed}
+    return chunk
 
 
 async def load_chunks(cur: Cursor, patient_id: str | None) -> list[KBChunk]:
