@@ -1,6 +1,6 @@
 # EMR integration service: reading hospital records and flagging abnormal results
 
-- **Status:** Draft for the product owner (2026-11-07), revised the same day after two design reviews (all findings taken; see §22). The questions in §21 need answers before the plan is written. Nothing here is live until the sign-offs in §17.6 are in place: until then everything runs on synthetic data only.
+- **Status:** Approved (product owner, 2026-11-07), after two design reviews (all findings taken; see §22). The recommended answers in §21 stand unless the product owner changes them. Nothing here is live: live use needs the people items (H1–H9) and the gates in the phase plan.
 - **Date:** 2026-11-07
 - **Decision recorded in:** [ADR 0009](../adr/0009-integrate-many-emr-systems.md) (Proposed, 17 Oct). This design is how ADR 0009 is built. PR 1 of §19 moves ADR 0009 to Accepted and adds ADR 0014 for the two decisions this design adds to it: a separate `services/emr/` with its own credentials and egress (§3), and the reviewed document route for sources that hold only scanned records (§5.3).
 - **Builds on (and must stay consistent with):**
