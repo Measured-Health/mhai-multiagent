@@ -422,6 +422,99 @@ func (b *mbasis) reduce(v mvec) mvec {
 	return v
 }
 
+// residual removes every pivot column from v: v's unique part on the
+// non-pivot columns, linear in v.
+func (b *mbasis) residual(v mvec) mvec {
+	for i := 0; i < len(v); {
+		row, ok := b.piv[v[i].c]
+		if !ok {
+			i++
+			continue
+		}
+		v = msub(v, row, v[i].v, b.p)
+	}
+	return v
+}
+
+func madd(a, c mvec, p uint64) mvec { return msub(a, c, p-1, p) }
+
+// addIndependent adds v and reports whether it was independent.
+func (b *mbasis) addIndependent(v mvec) bool {
+	n := len(b.piv)
+	b.add(v)
+	return len(b.piv) > n
+}
+
+// setCheck is a set's hidden members prepared against what was known
+// before S: each member's residual under each prime, and the shape then.
+type setCheck struct {
+	vars []int
+	res  [2][]mvec
+	dimB [2]int
+	sumB [2]bool
+}
+
+func (b *Block) prepSets(sets [][][]int, base pair) []setCheck {
+	out := make([]setCheck, 0, len(sets))
+	for _, hid := range sets {
+		var sc setCheck
+		for _, m := range hid {
+			sc.vars = append(sc.vars, m...)
+		}
+		for i := range base {
+			small := newMBasis(base[i].p)
+			var total mvec
+			rank := 0
+			for _, m := range hid {
+				r := base[i].residual(toM(m, nil, base[i].p))
+				sc.res[i] = append(sc.res[i], r)
+				total = madd(total, r, base[i].p)
+				if small.addIndependent(r) {
+					rank++
+				}
+			}
+			sc.dimB[i], sc.sumB[i] = len(hid)-rank, len(total) == 0
+		}
+		out = append(out, sc)
+	}
+	return out
+}
+
+// violatesAfter is the rule once S's rows are known: sb holds S's rows'
+// residuals against what was known before, so a combination of the members
+// is determined after exactly when its residual reduces to 0 against sb.
+func (sc setCheck) violatesAfter(sb pair) bool {
+	for i := range sb {
+		small := newMBasis(sb[i].p)
+		var total mvec
+		rank := 0
+		for _, r := range sc.res[i] {
+			r2 := sb[i].residual(r)
+			total = madd(total, r2, sb[i].p)
+			if small.addIndependent(r2) {
+				rank++
+			}
+		}
+		if setViolates(sc.dimB[i], sc.sumB[i], len(sc.res[i])-rank, len(total) == 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// setViolates is the whole-set rule (R41a-5): from before to after, nothing
+// about the members may become determined but their full sum
+// (D_after ⊆ D_before + span(sum)).
+func setViolates(dimB int, sumB bool, dimA int, sumA bool) bool {
+	switch {
+	case dimA == dimB:
+		return false
+	case dimA == dimB+1:
+		return !(sumA && !sumB)
+	}
+	return true
+}
+
 func (b *mbasis) add(v mvec) {
 	v = b.reduce(v)
 	if len(v) == 0 {
@@ -530,62 +623,36 @@ func (b *Block) protectedBoxes(all []snap) []protected {
 	}
 	for si := range all {
 		for _, st := range b.sets(all, si) {
-			var hid [][]int
 			var vars []int
 			for _, p := range st.parts {
 				if p.snap < 0 || all[p.snap].hidden[p.cell] {
-					hid = append(hid, p.vars)
 					vars = append(vars, p.vars...)
 				}
 			}
 			if len(vars) > 0 {
 				out = append(out, protected{vars, false, b.value(vars)})
 			}
-			// Review fix 1: every union of two or more hidden members short
-			// of all of them (a parent's hidden weeks or months, a column's
-			// hidden hospitals) is a sum a client could solve for too. At
-			// most 11 per parent row (four weeks); a set with more than
-			// MaxUnionMembers hidden members is bounded to its pairs.
-			out = append(out, b.unions(hid)...)
 		}
 	}
 	return out
 }
 
-// MaxUnionMembers bounds the hidden members whose every union is protected
-// (2^n boxes); a set with more has its pairs protected only.
-const MaxUnionMembers = 10
-
-// unions are the protected sums of every union of two or more of hid short
-// of all of them, kept only when 1 to 4 (the only ones the check fails on).
-func (b *Block) unions(hid [][]int) []protected {
-	n := len(hid)
-	if n < 3 {
-		return nil
-	}
-	var out []protected
-	add := func(mask uint64) {
-		var vs []int
-		for i := 0; i < n; i++ {
-			if mask&(1<<i) != 0 {
-				vs = append(vs, hid[i]...)
+// hiddenMembers is each set's hidden members (virtual parts included), for
+// the whole-set check (R41a-5); sets with fewer than two are left out (the
+// cell check covers one).
+func (b *Block) hiddenMembers(all []snap) [][][]int {
+	var out [][][]int
+	for si := range all {
+		for _, st := range b.sets(all, si) {
+			var hid [][]int
+			for _, p := range st.parts {
+				if p.snap < 0 || all[p.snap].hidden[p.cell] {
+					hid = append(hid, p.vars)
+				}
 			}
-		}
-		if v := b.value(vs); small(v) {
-			out = append(out, protected{vs, false, v})
-		}
-	}
-	if n > MaxUnionMembers {
-		for i := 0; i < n; i++ {
-			for j := i + 1; j < n; j++ {
-				add(1<<i | 1<<j)
+			if len(hid) >= 2 {
+				out = append(out, hid)
 			}
-		}
-		return out
-	}
-	for mask := uint64(1); mask < 1<<n-1; mask++ {
-		if bits.OnesCount64(mask) >= 2 {
-			add(mask)
 		}
 	}
 	return out
@@ -749,13 +816,14 @@ func GuardSnapshot(b *Block, p Pending) ([]bool, error) {
 	copy(forced, p.Forced)
 
 	base := b.before(all, si)
+	earlier := b.prepSets(b.hiddenMembers(all[:si]), base)
 	for {
 		hide, err := b.rules(all, si, vals, forced)
 		if err != nil {
 			return nil, err
 		}
 		all[si].hidden = hide
-		newly := b.newlyExposed(all, si, base)
+		newly := b.newlyExposedWith(all, si, base, earlier)
 		if len(newly) == 0 {
 			return hide, nil
 		}
@@ -787,6 +855,12 @@ func (b *Block) before(all []snap, si int) pair {
 // sum of 1 to 4) exposed once snapshot si is added to base but not before
 // (E1 minus E0).
 func (b *Block) newlyExposed(all []snap, si int, base pair) [][]int {
+	return b.newlyExposedWith(all, si, base, nil)
+}
+
+// newlyExposedWith is newlyExposed with the earlier snapshots' sets
+// prepared once (GuardSnapshot reuses them across its loop).
+func (b *Block) newlyExposedWith(all []snap, si int, base pair, earlier []setCheck) [][]int {
 	after := base.clone()
 	e, z := b.known(all[si])
 	after.addAll(e, z)
@@ -797,6 +871,36 @@ func (b *Block) newlyExposed(all []snap, si int, base pair) [][]int {
 		}
 		if after.exposed(pr.vars, nil) && !base.exposed(pr.vars, nil) {
 			newly = append(newly, pr.vars)
+		}
+	}
+	// R41a-5: the whole set, under either prime.
+	if earlier == nil {
+		earlier = b.prepSets(b.hiddenMembers(all[:si]), base)
+	}
+	sb := pair{newMBasis(primes[0]), newMBasis(primes[1])}
+	for i := range sb {
+		for _, zv := range z {
+			sb[i].add(base[i].residual(toM([]int{zv}, nil, base[i].p)))
+		}
+		for _, row := range e {
+			sb[i].add(base[i].residual(toM(row, nil, base[i].p)))
+		}
+	}
+	var own [][][]int
+	for _, st := range b.sets(all, si) {
+		var hid [][]int
+		for _, p := range st.parts {
+			if p.snap < 0 || all[p.snap].hidden[p.cell] {
+				hid = append(hid, p.vars)
+			}
+		}
+		if len(hid) >= 2 {
+			own = append(own, hid)
+		}
+	}
+	for _, sc := range append(earlier, b.prepSets(own, base)...) {
+		if sc.violatesAfter(sb) {
+			newly = append(newly, sc.vars)
 		}
 	}
 	return newly
