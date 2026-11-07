@@ -1,6 +1,6 @@
 # Plan 7c: platform analytics across hospitals (backend): design
 
-- **Status:** Approved (product owner, 2026-11-07), after three design reviews (§17). Rulings R41a, R41a-2 (nested periods) and R41a-3 (the rolling windows hidden at once) are decided (§2). Q3 is decided (§16: counts flag at a change of at least 50% with at least 10 on both sides; the rate and review-time rows keep their minimums); Q4 is open for the privacy lead.
+- **Status:** Approved (product owner, 2026-11-07), after three design reviews (§17). Part 7c-1 built; R41a-4 decided while building it; departures in §18. Rulings R41a, R41a-2 (nested periods) and R41a-3 (the rolling windows hidden at once) are decided (§2). Q3 is decided (§16: counts flag at a change of at least 50% with at least 10 on both sides; the rate and review-time rows keep their minimums); Q4 is open for the privacy lead.
 - **Date:** 2026-11-07
 - **Plan:** `docs/plans/2026-11-07-plan-7c-platform-analytics.md`, built from the task breakdown in §15.
 - **Builds on (and must stay consistent with):**
@@ -28,6 +28,8 @@ mhai-web built the platform admin app's Analytics page on sample data (Plan 7c, 
 
 **R41a-3, the deprecated windows (decided, 7 Nov 2026, relayed by the coordinator after the design review).** The old Q2, option B. From the 7c-1 release the rolling `7d`, `30d` and `90d` guardrail windows are served **fully hidden** for the whole notice period, because served as before they leak: the 7-day window on the 8th equals week 1, and the 30-day window on 1 Dec equals November. Only periods that **close after the release** are published, and the stored rolling `guardrail_snapshots` are emptied by the release's migration, so no old rolling figure is ever served beside a new period. mhai-web's main branch doesn't call `/platform/guardrails`.
 
+**R41a-4, the route (decided, 7 Nov 2026, relayed by the coordinator during 7c-1).** Widening `/platform/guardrails`'s `period` enum adds values to a response property, which ADR 0012 counts as breaking (a client that checks every enum value would fail), and `oasdiff` agrees. So the calendar periods are a **new additive route, `GET /platform/guardrails/periods?period=week|month|quarter`**, with its own response schema and enum. `GET /platform/guardrails` keeps its schema and enum exactly as on main and serves only the deprecated rolling windows, fully hidden, with `Deprecation` and `Sunset` (R41a-3). Both read the same stored snapshots; A7's parser reads both. No exception is added to `openapi-breaking.sh`.
+
 How this design makes the rulings hold in full:
 
 1. **One stored snapshot per finished period** (R43's approach, generalised): every figure is computed once, after the period ends plus the 15-minute grace, and served unchanged by every core copy. No request computes anything.
@@ -40,7 +42,7 @@ How this design makes the rulings hold in full:
 | Item | Plan 7c? | Why |
 |---|---|---|
 | Calendar periods, stored snapshots, the joint guard | **In** | The ruling, and the base for every figure below |
-| `GET /platform/guardrails?period=week\|month\|quarter`, rolling windows deprecated | **In** | R41a covers it |
+| `GET /platform/guardrails/periods?period=week\|month\|quarter` (new route, R41a-4); `/platform/guardrails`'s rolling windows deprecated | **In** | R41a covers it |
 | `GET /platform/analytics?period` with `changes`, `use`, `quality`, `hospitals` | **In** | The page's main read |
 | `alerts` area | **Sent as `null`** (not switched on) | There are no patient alerts in the backend: the EMR integration and the notifications service don't exist. Frontend change F4 (§13) |
 | The two series routes | **In**, from stored snapshots | The detail panel and the Hospitals tab |
@@ -237,10 +239,10 @@ A core loop under an advisory lock (one copy runs it, as the audit verify schedu
 
 Outside `analytics_period_counts`, raw counts exist only in the loop's memory for one computation. They are never logged or put in an error. A failure logs the period and a fixed reason.
 
-## 9. `GET /platform/guardrails` moves to calendar periods (ADR 0012)
+## 9. Guardrail statistics move to calendar periods (ADR 0012, R41a-4)
 
-- **Added:** `period` accepts `week`, `month` and `quarter` (new enum values on an existing query parameter: additive). The response shape is unchanged: `GuardrailsOut`, rendered from the QG family of the same stored snapshot that Answer quality reads. **The two routes show the same cells, with the same hidden pattern, for a period.** Otherwise two different hiding patterns of one box could be combined.
-- **Deprecated:** `7d`, `30d` and `90d`. From the release, a response for them carries `Deprecation: @<release time>`, `Sunset: <release + 90 days>` and `Link: </docs/notices/guardrails-rolling-windows>; rel="deprecation"`, set by `httpx.Deprecated` for those values only. The notice says to move to `week`, `month` or `quarter`.
+- **Added:** `GET /platform/guardrails/periods?period=week|month|quarter`, a new route with its own schema (`GuardrailPeriodsOut`: `GuardrailsOut`'s shape, with `period` in `week`, `month`, `quarter`), rendered from the QG family of the same stored snapshot that Answer quality reads. `GET /platform/guardrails` keeps `GuardrailsOut` and its `7d|30d|90d` enum unchanged (R41a-4). **The two routes show the same cells, with the same hidden pattern, for a period.** Otherwise two different hiding patterns of one box could be combined.
+- **Deprecated:** `GET /platform/guardrails` (`7d`, `30d` and `90d`). From the release, every response of the route carries `Deprecation: @<release time>`, `Sunset: <release + 90 days>` and `Link: </docs/notices/guardrails-rolling-windows>; rel="deprecation"`, set by `httpx.Deprecated` on the route; the operation is marked `deprecated` with `x-sunset` in `openapi.yaml`. The notice says to move to `/platform/guardrails/periods`.
 - **After the sunset:** the three values are removed. They become 422 `validation_failed`, and a later migration drops `guardrail_snapshots`, `mhai_guardrail_counts` and its reader role.
 - **During the notice (R41a-3):** the rolling values are served in the same shape, with `period`, `from`, `to` and the hospital list as today, and **every count and share hidden**, `all` included. Nothing is read from or written to `guardrail_snapshots`: migration 00019 empties it (its Down can't bring the rows back; they were a cache of guarded figures). The rolling windows therefore add no equation, and A7 parses them to prove it.
 - **The calendar values follow R41a-2 and R41a-3:** a `week` is a month-aligned week; each period is frozen at close; only periods closing after the release are published; answers are counted in their question's week (§5). 00017's `mhai_guardrail_counts` is no longer called, and **00019 revokes `EXECUTE` on it from `mhai_platform`**. It returns unguarded counts for any window up to 90 days, and the hidden rolling values don't need it. Down grants it back exactly as 00017 did, and a test pins both directions (A30).
@@ -253,7 +255,8 @@ Outside `analytics_period_counts`, raw counts exist only in the loop's memory fo
 | `GET /platform/analytics` | platform | `platform_admin`, `auditor` | `Platform`, `NeedsMFA` |
 | `GET /platform/analytics/changes/{id}/series`, `/hospitals/{id}/series` | platform | `platform_admin`, `auditor` | `Platform`, `NeedsMFA` |
 | `PUT`, `DELETE /platform/analytics/changes/{id}/follow-up` | platform | `platform_admin` | `Platform`, `NeedsMFA`, `Write` |
-| `GET /platform/guardrails` (widened) | platform | `platform_admin`, `auditor` | unchanged |
+| `GET /platform/guardrails/periods` (new, R41a-4) | platform | `platform_admin`, `auditor` | `Platform`, `NeedsMFA` |
+| `GET /platform/guardrails` (deprecated, rolling values fully hidden) | platform | `platform_admin`, `auditor` | unchanged |
 
 None is `bff_direct`. Nothing new crosses NATS: the routes come over `api.v1.platform` like every platform route, and no job or operation goes to intelligence. The generated permissions file changes with the routes; `cmd/permgen`'s drift test catches a hand edit. Auditors are refused the writes (no `AuditorWrite`: that stays under `/platform/audit/`).
 
@@ -353,7 +356,7 @@ Actors: platform admins, auditors, hospital roles (who must get nothing), the pl
 - **Bound-based narrowing** (TODO, from Plan 4c) remains: the guard proves no small box is exactly solvable, not that none can be narrowed to a range using non-negativity. The time dimension adds more equations, so more narrowing is possible. A full check needs linear programming over the bounds. Accepted for the same reason as R41: platform admins and auditors only, MFA, counts of AI decisions and staff activity, never patients.
 - **Distinct counts and medians** (`active_clinicians`, `median_review_hours`) aren't linear. Nested periods give only bounds (a month's clinicians are at least the most in any of its weeks). Same acceptance.
 - **The modular exposure test** can miss an exposure only when both 61-bit primes divide the same minor of the equation matrix. That is negligible, and A8 tests the agreement.
-- **Combinations of hidden cells that aren't a set** (for example, weeks 1 and 3 of a month together) are checked only when they are the hidden members of a set (§6.3 step 3). Another combination could be exposed with a small value. The history test measures how often; if it isn't rare, the check widens to every run of weeks.
+- **Combinations of hidden cells that aren't a set** (for example, weeks 1 and 3 of a month together) are checked only when they are the hidden members of a set (§6.3 step 3). Another combination could be exposed with a small value. **Measured in 7c-1** (`TestUnionsOfHiddenWeeksMeasured`, the A7 sample): **10 of 91,380** pairs of hidden weeks of a month row that aren't the whole set are exposed with a value of 1 to 4. Rare, so the check isn't widened; recorded in TODO.md for the privacy lead with Q4/H1, who decides whether every run of weeks becomes a protected box.
 - **Distinct counts and medians at a parent's close** may include rows committed after a child closed (they aren't sums of children). They are non-linear and give bounds only; accepted with them.
 - **Frozen raw counts at rest.** `analytics_period_counts` keeps per-hospital aggregate counts, small ones included. No platform role can select them, and they hold no row, user or text.
 - **Figures recorded before the release.** Someone who saved rolling guardrail figures before the 7c-1 release can set them against the first calendar periods. R41a-3 limits that to periods closing after the release and hides the rolling windows from then on; what was served before can't be withdrawn.
@@ -388,6 +391,7 @@ Actors: platform admins, auditors, hospital roles (who must get nothing), the pl
 | F17 | **A hospital with no previous month** (onboarded since, or before the second published month) gets no change; show "Not enough data to compare yet" for it | §7.3, R41a-3 |
 | F19 | **Not yet:** before the first eligible month or quarter (the next full one after the release), an area is `{not_yet: true, first_from}` and `from`/`to` are null. Show "First figures after {period}", never "Couldn't load" or zeros. The CSV writes the same line. Guardrails on that period value answer 503 `not_ready` until then | §4, §7.1, R41a-3 |
 | F18 | Rolling `7d`/`30d`/`90d` guardrail figures arrive fully hidden with `Deprecation` and `Sunset` headers, if a screen ever calls them | §9, R41a-3 |
+| F20 | **Guardrail statistics on calendar periods are `GET /platform/guardrails/periods?period=week\|month\|quarter`** (its own schema, `GuardrailPeriodsOut`), not new values on `/platform/guardrails` | R41a-4 |
 
 The contract file `docs/specs/2026-10-17-frontend-requirements.md` §14.7 is updated in this repository (Task 10), and these changes go to mhai-web's TODO.
 
@@ -433,3 +437,13 @@ The review returned "Needs fixes". Each fix is folded into the sections above:
 6. **Frontend changes** (§13): F14–F18 added; the plan's references reconciled.
 7. **Re-review (7 Nov):** EXECUTE on the analytics functions is `mhai_analytics_job`'s only (the plan agreed); 00019 revokes `mhai_guardrail_counts` from `mhai_platform` (A30); a parent is published only if all its children are eligible, and the first parents that aren't are absent, not `unavailable` (§4, §7.1, F19, A7).
 8. **Minor:** table ownership (§8.1), deletes only by the retention sweep (§8.1, §12), freezing once per period (§6.2, §8.2), 00020 replacing the audit append policy with a Down that restores 00018's (§7.4).
+
+## 18. Departures while building 7c-1 (rulings and calls made in the code)
+
+1. **The scheduler's role is reached by SET ROLE, not a login of its own.** `mhai_analytics_job` is NOLOGIN, granted to `mhai_app` WITH INHERIT FALSE, exactly as `mhai_jobs` is (the plan's "as Plan 3 added `mhai_jobs`"; `mhai_jobs` has no password file). There is no new password file, pool, compose or deploy entry. The separation from the routes is the database's (only `mhai_analytics_job` executes the functions and inserts snapshots; `mhai_platform` has no grant on them) and a test that walks `internal/platform`'s imports for the scheduler package or `WithAnalyticsJob`.
+2. **The builder and scheduler live in `internal/analytics/scheduler`** (with the test source `schedtest`), not `internal/analytics/builder.go`: `build/` is ignored by the repository's `.gitignore`, and a package of its own lets the import test refuse it outright. `internal/analytics` holds only `Body` and its strict decoder.
+3. **The reader's columns** also include what the functions join and list: `clinical_queries.id`, `clinical_decisions.query_id` (a decision to its question), `hospitals.name` and `created_at` (the onboarding function), and `users (id, hospital_id, is_active)`, `user_roles (user_id, role)` (staff).
+4. **A7's assertion.** No hidden cell and no hidden-member sum **of 1 to 4** is exposed. Some hidden cells (about 2% of them, all 0 or 5 and up) are exposed because they were already sums of shown cells before they were hidden (E0 in §6.3: a hidden month whose weeks are all shown). They reveal nothing new, so the literal "no hidden cell exposed" can't hold and isn't asserted.
+5. **The parent set's bridge repair (§6.3 step 2) repairs child cells only.** A parent cell on a bridge is either known already from shown children (nothing new) or a matter for the parent's own table and the exact check of step 3, which hides more when it is new. `TestParentFullyHiddenHasNoBridge` asserts that no child cell is a bridge.
+6. **`TestHistoryEndToEnd`** runs the latest month (its four weeks and the month) through the real scheduler and database, not two quarters: the freeze reads only the last 118 days, so older periods can't be built in a test. Multi-year histories run through the same builder and a fake source in `TestHistoryFromRouteJSON` (100 histories, 15 under `-race`; the guard-level A7 runs 500, 50 under `-race`).
+7. **The guardrails route serves the newest stored snapshot of a kind**, and is a new route (R41a-4). `RollingDeprecatedAt` is a clearly marked constant the release sets (the sunset follows, 90 days on; `openapi.yaml`'s `x-sunset` matches it).
