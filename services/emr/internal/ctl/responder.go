@@ -10,7 +10,8 @@
 //  4. (the same call) the token's kind is req;
 //  5. reqtoken.CheckReply: the reply goes to _INBOX_gateway. only;
 //  6. the replay set (a jti answered once per process; full fails closed);
-//  7. the op (gokit/emrops) and its caller rule;
+//  7. the op (gokit/emrops) and its caller rule, and for a StepUp op
+//     the token's stp claim (core checked a fresh step-up code);
 //  8. the Mhai-Request-Id header equals the token's rid;
 //  9. the schema: the header names the op's request message and the body
 //     is exactly that message, with no unknown field.
@@ -180,6 +181,11 @@ func (r *Responder) Process(ctx context.Context, m *nats.Msg) (*nats.Msg, string
 	}
 	if !op.Allows(c.Sub, c.Roles) {
 		return r.refuse("caller", c.Rid)
+	}
+	// 7b. Step-up: core's signed word (stp) that it checked a fresh code
+	// for this request. The emr service can't check the code itself.
+	if op.StepUp && !c.StepUp {
+		return r.refuse("step_up", c.Rid)
 	}
 	// 8. The request id header is the token's.
 	if m.Header.Get(HeaderRequestID) != c.Rid {

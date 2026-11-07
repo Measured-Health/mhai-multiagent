@@ -20,6 +20,8 @@ type SubjectRule struct {
 	// CoreOnly: only core calls this subject (via core, reply on
 	// _INBOX_gateway.); no grant (BFF-direct) token is valid on it.
 	CoreOnly bool
+	// StepUp: a token on this subject may carry the stp claim.
+	StepUp bool
 }
 
 // subjectSegments is the length of every allowed subject.
@@ -33,7 +35,7 @@ const subjectSegments = 4
 //   - jobs.v1.<hid|global>.<type>: JetStream jobs, bound to the hospital.
 var SubjectRules = []SubjectRule{
 	{Kind: KindReq, Prefix: "inference.v1.", AudFromSegment: 2, HospitalSegment: -1},
-	{Kind: KindReq, Prefix: "emr.v1.ctl.", AudFromSegment: -1, Aud: "emr", HospitalSegment: -1, CoreOnly: true},
+	{Kind: KindReq, Prefix: "emr.v1.ctl.", AudFromSegment: -1, Aud: "emr", HospitalSegment: -1, CoreOnly: true, StepUp: true},
 	{Kind: KindJob, Prefix: "jobs.v1.", AudFromSegment: -1, HospitalSegment: 2},
 }
 
@@ -105,4 +107,11 @@ func checkSubject(kind Kind, subject, aud, hid string, via Via) bool {
 		return false
 	}
 	return true
+}
+
+// stepUpAllowed reports whether a token of kind on subject may carry the
+// stp claim: only a subject whose rule says so.
+func stepUpAllowed(kind Kind, subject string) bool {
+	r, _, ok := ruleFor(kind, subject)
+	return ok && r.StepUp
 }
