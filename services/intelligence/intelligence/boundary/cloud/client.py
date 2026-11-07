@@ -63,7 +63,7 @@ from intelligence.boundary.cloud.gate import (
 from intelligence.boundary.cloud.reply import Answer, validate_answer
 from intelligence.boundary.cloud.retry import RETRY, RetryPolicy
 from intelligence.boundary.cloud.scan import Identifiers, ScanHook, Shape, scan_body
-from intelligence.boundary.config import ConfigError
+from intelligence.boundary.config import ConfigError, is_development
 from intelligence.boundary.models import (
     _SAFE_VERSION,
     Builder,
@@ -579,7 +579,19 @@ def _openai(model: str) -> Adapter:
     return OpenAIAdapter(model)
 
 
-ADAPTERS: dict[str, Callable[[str], Adapter]] = {"anthropic": _anthropic, "openai": _openai}
+def _xai(model: str) -> Adapter:
+    # The zero-retention header is relaxed in development only (APP_ENV,
+    # read here: unset is production).
+    from intelligence.boundary.cloud.xai_adapter import XaiAdapter
+
+    return XaiAdapter(model, development=is_development())
+
+
+ADAPTERS: dict[str, Callable[[str], Adapter]] = {
+    "anthropic": _anthropic,
+    "openai": _openai,
+    "xai": _xai,
+}
 
 
 def build_cloud_clients(

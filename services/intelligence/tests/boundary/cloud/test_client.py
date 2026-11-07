@@ -824,14 +824,10 @@ def test_adapters_turn_sdk_retries_off() -> None:
     # body with no reservation. Every registered adapter's SDK client must
     # have max_retries == 0, and the registry really holds the adapters, so
     # this is not vacuous.
-    assert set(client_mod.ADAPTERS) >= REGISTERED
+    assert set(client_mod.ADAPTERS) == set(vocab.PROVIDERS)
     with httpx2.Client(transport=CapturingTransport()) as http:
         for name, factory in client_mod.ADAPTERS.items():
             adapter = factory(MODEL)
             assert adapter.name == name
             sdk = adapter.make_sdk(http, ApiKey(FAKE_KEY), vocab.BASE_URLS[name])
             assert getattr(sdk, "max_retries", None) == 0, name
-
-
-# The adapters registered so far (plan Tasks 11 to 13).
-REGISTERED = frozenset({"anthropic", "openai"})

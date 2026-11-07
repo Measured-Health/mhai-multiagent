@@ -107,10 +107,10 @@ class EchoTransport(CapturingTransport):
         fx = load(self.provider, "unauthorized_401")
         echo = request.content.decode("utf-8") + " " + json.dumps(dict(request.headers))
         body = fx["body"]
-        if "error" in body and isinstance(body["error"], dict):
+        if isinstance(body.get("error"), dict):
             body["error"]["message"] = echo
         else:
-            body["message"] = echo
+            body["error"] = echo
         return respond(fx, request)
 
 
