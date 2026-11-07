@@ -48,6 +48,9 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
 
 **These are people's items. An agent never marks one done**; the named owner closes it. From the [plan](docs/plans/2026-11-07-emr-integration.md) ("What's needed from people") and the [design](docs/specs/2026-11-07-emr-integration-design.md) §17.6 and §20.
 
+Ops items:
+- [ ] **Ops, before EMR is switched on anywhere (EMR PR 3):** compose and the deploy don't yet give core its two EMR keys, and core refuses to start with `CORE_EMR_ENABLED=true` without them. Wire `CORE_EMR_SEAL_PUBLIC_KEY_PATH` (the emr service's `seal-<kid>.pub` only, from a volume or file core can read; never the `emr-keys` volume, which holds the private key) and `CORE_IDEMPOTENCY_HMAC_KEY_PATH` (a per-deployment key of at least 32 bytes, generated like the other secrets, readable by core only). Owner: ops.
+
 People items:
 - [ ] **H1** (product owner with Havana): a structured source for labs, then vitals and medications (export or FHIR), its frequency, and a synthetic or de-identified layout sample. Blocks PR 11 and real alerts for Havana.
 - [ ] **H2** (our team, with Havana's agreement): the archive's JSON "files added since" listing, a per-integration read-only key, a removed-files listing. Blocks PR 12.

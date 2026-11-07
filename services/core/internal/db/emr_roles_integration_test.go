@@ -37,8 +37,8 @@ func seedConn(t *testing.T, pool *pgxpool.Pool, hospital uuid.UUID, cidrs ...str
 	}
 	if _, err := pool.Exec(context.Background(), `INSERT INTO emr_connections
 		(id, hospital_id, type, source_label, base_url, settings, credentials_origin, private_network, private_cidrs)
-		VALUES ($1, $2, 'fhir_r4', 'Main record', 'https://fhir.example.org/r4', '{"client_id": "synthetic-client"}',
-		        $3, $4, $5::cidr[])`, id, hospital, emrOrigin, len(cidrs) > 0, cidrs); err != nil {
+		VALUES ($1, $2, 'fhir_r4', $6, 'https://fhir.example.org/r4', '{"client_id": "synthetic-client"}',
+		        $3, $4, $5::cidr[])`, id, hospital, emrOrigin, len(cidrs) > 0, cidrs, "Record "+id.String()[:8]); err != nil {
 		t.Fatalf("seed connection: %v", err)
 	}
 	return id
@@ -613,5 +613,28 @@ func TestMigration00021DownUp(t *testing.T) {
 	}
 	if err := db.MigrateDownTo(ctx, pg.URL, 0); err != nil {
 		t.Fatalf("down to 0: %v", err)
+	}
+}
+
+// Ruling E1: one hospital has each source label once, in any case; another
+// hospital may use it.
+func TestEMRLabelUniquePerHospital(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	a, _ := seedHospital(t, pool, uniqueCode("LA"))
+	b, _ := seedHospital(t, pool, uniqueCode("LB"))
+	insert := func(h uuid.UUID, label string) error {
+		_, err := pool.Exec(ctx, `INSERT INTO emr_connections (hospital_id, type, source_label, base_url)
+			VALUES ($1, 'fhir_r4', $2, 'https://fhir.example.org')`, h, label)
+		return err
+	}
+	if err := insert(a, "Main record"); err != nil {
+		t.Fatal(err)
+	}
+	if err := insert(a, "MAIN RECORD"); pgCode(err) != "23505" || pgConstraint(err) != "emr_connections_label" {
+		t.Fatalf("same label, same hospital: %v", err)
+	}
+	if err := insert(b, "Main record"); err != nil {
+		t.Fatalf("same label, other hospital: %v", err)
 	}
 }

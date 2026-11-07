@@ -1609,7 +1609,7 @@ paths:
       description: |
         Platform admins only, with a fresh code (`mfa_code` or
         `backup_code`). Send only what changes, and `version` (a stale one
-        is 409 `conflict`). `settings` keys are merged (an empty string
+        is 409 `conflict`, as is a label the hospital already has). `settings` keys are merged (an empty string
         removes an optional one); `credentials` are only the ones being
         replaced. A change of the address, settings, credentials or private
         network clears `last_test`; a label or interval change keeps it.
@@ -1739,10 +1739,14 @@ paths:
         the type's text fields; `credentials` its secret fields, each 1 to
         4,000 characters, every required one present. Credentials are
         sealed to the emr service as they arrive and stored there only;
-        if the emr service doesn't confirm them, the connection is saved
-        without them and the answer is 503 `unavailable` (a GET shows
-        `set_at` null). An unknown hospital is 404; one removed or being
-        removed is 409 `hospital_removed`. The request body is never
+        if the emr service doesn't confirm them, the connection is still
+        created (off) and answered with `credentials_missing` true and
+        `set_at` null: re-send them with PATCH on that connection. A retry
+        with the same `Idempotency-Key` answers the same connection; a
+        label the hospital already has (in any case) is 409 `conflict`, so
+        a retry without the key never adds a second connection. An unknown
+        hospital is 404; one removed or being removed is 409
+        `hospital_removed`. The request body is never
         logged or stored; the idempotency store keeps a keyed hash of it.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
@@ -2421,7 +2425,7 @@ components:
       enum: [unreachable, sign_in_refused, timed_out, unreadable_data, unmapped_codes, too_many_requests]
     EmrConnectionSummary:
       type: object
-      required: [id, hospital, type, type_label, source_label, enabled, health, last_test, last_sync, errors_24h, paused]
+      required: [id, hospital, type, type_label, source_label, enabled, health, last_test, last_sync, errors_24h, paused, credentials_missing]
       properties:
         id: { type: string, format: uuid }
         hospital: { $ref: "#/components/schemas/EmrPerson" }
@@ -2450,6 +2454,7 @@ components:
             records: { type: integer, minimum: 0 }
         errors_24h: { type: integer, minimum: 0 }
         paused: { type: boolean, description: "Additive: a source the breaker paused." }
+        credentials_missing: { type: boolean, description: "Additive: a required credential isn't set for the current address; re-send it with PATCH on this connection." }
     EmrConnection:
       allOf:
         - $ref: "#/components/schemas/EmrConnectionSummary"

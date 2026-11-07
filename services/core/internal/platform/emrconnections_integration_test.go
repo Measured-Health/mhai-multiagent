@@ -155,7 +155,7 @@ func (f *fakeEMR) origin(hid, conn string) ([]emrurl.Origin, bool) {
 
 func (f *fakeEMR) put(c reqtoken.Claims, req *emrpb.PutCredentialsRequest) proto.Message {
 	if f.putFails.Load() {
-		return nil
+		return &emrpb.PutCredentialsReply{} // confirms nothing
 	}
 	origin, ok := f.origin(c.Hid, req.GetConnectionId())
 	if !ok {
@@ -555,7 +555,9 @@ func sendKeyed(t *testing.T, method, path, tok, body, key string) resp {
 	r.Header.Set("X-MHAI-Service", serviceKey)
 	r.Header.Set("X-MHAI-Audience", "platform")
 	r.Header.Set("Authorization", "Bearer "+tok)
-	r.Header.Set("Idempotency-Key", key)
+	if key != "" {
+		r.Header.Set("Idempotency-Key", key)
+	}
 	w := &recorder{h: http.Header{}}
 	handler.ServeHTTP(w, r)
 	out := resp{code: w.code, raw: w.buf.String()}
@@ -844,4 +846,71 @@ func TestEMRDisabledAnswersNotReady(t *testing.T) {
 	if after := len(fake.callsFor(uuid.MustParse(id))); after != before {
 		t.Fatalf("EMR off sent %d calls", after-before)
 	}
+}
+
+// Ruling E1: a create whose credentials the emr service doesn't confirm
+// stays created, off, with credentials_missing; a retry with the same
+// Idempotency-Key gets that connection (same id), never a second one; the
+// credentials are re-sent with PATCH on it.
+func TestCreateRetryAfterUnconfirmedCredentials(t *testing.T) {
+	admin := platformAdmin(t)
+	tok := mint(t, admin)
+	hid := seedHospital(t, "active")
+	path := httpx.BasePath + "/platform/hospitals/" + hid.String() + "/emr/connections"
+	body := connBody(t, map[string]any{"backup_code": backupCode(t, admin)})
+	key := "k-" + uniq()
+	fake.putFails.Store(true)
+	first := sendKeyed(t, http.MethodPost, path, tok, body, key)
+	fake.putFails.Store(false)
+	if first.code != 200 || first.body["enabled"] != false || first.body["credentials_missing"] != true ||
+		creds(first)["api_key"] != nil {
+		t.Fatalf("unconfirmed create: %d %s", first.code, first.raw)
+	}
+	again := sendKeyed(t, http.MethodPost, path, tok, body, key)
+	if again.code != 200 || again.body["id"] != first.body["id"] {
+		t.Fatalf("retry: %d %s", again.code, again.raw)
+	}
+	var n int
+	if err := super.QueryRow(context.Background(), `SELECT count(*) FROM emr_connections WHERE hospital_id = $1`, hid).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("%d connections after the retry (%v)", n, err)
+	}
+	id := first.body["id"].(string)
+	list := get(t, "/platform/emr/connections?hospital="+hid.String(), tok)
+	if c := list.body["connections"].([]any)[0].(map[string]any); c["credentials_missing"] != true {
+		t.Fatalf("list: %s", list.raw)
+	}
+	fixed := patchConn(t, tok, id, mustJSONs(map[string]any{"credentials": map[string]string{"api_key": "synthetic-key-e"},
+		"version": 1, "backup_code": backupCode(t, admin)}))
+	ok(t, "re-send", fixed)
+	if fixed.body["credentials_missing"] != false || creds(fixed)["api_key"] == nil || fixed.body["id"] != id {
+		t.Fatalf("after re-sending: %s", fixed.raw)
+	}
+}
+
+// Ruling E1: a create retried without its key (or with another one), naming
+// the same label in the same hospital, is 409 conflict: each hospital has a
+// label once (in any case). Another hospital may use it; a rename onto a
+// taken label is refused too.
+func TestCreateSameLabelRefused(t *testing.T) {
+	admin := platformAdmin(t)
+	tok := mint(t, admin)
+	hid := seedHospital(t, "active")
+	ok(t, "first", createConn(t, tok, hid, connBody(t, map[string]any{"backup_code": backupCode(t, admin)})))
+	problem(t, "same label, new key", createConn(t, tok, hid, connBody(t, map[string]any{"backup_code": backupCode(t, admin)})),
+		409, "conflict")
+	problem(t, "same label, other case", createConn(t, tok, hid, connBody(t, map[string]any{"source_label": "MAIN RECORD",
+		"backup_code": backupCode(t, admin)})), 409, "conflict")
+	r := sendKeyed(t, http.MethodPost, httpx.BasePath+"/platform/hospitals/"+hid.String()+"/emr/connections", tok,
+		connBody(t, map[string]any{"backup_code": backupCode(t, admin)}), "")
+	problem(t, "same label, no key", r, 409, "conflict")
+	var n int
+	if err := super.QueryRow(context.Background(), `SELECT count(*) FROM emr_connections WHERE hospital_id = $1`, hid).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("%d connections (%v)", n, err)
+	}
+	ok(t, "same label, other hospital", createConn(t, tok, seedHospital(t, "active"),
+		connBody(t, map[string]any{"backup_code": backupCode(t, admin)})))
+	second := createConn(t, tok, hid, connBody(t, map[string]any{"source_label": "Results system", "backup_code": backupCode(t, admin)}))
+	ok(t, "second label", second)
+	problem(t, "rename onto a taken label", patchConn(t, tok, second.body["id"].(string), mustJSONs(map[string]any{
+		"source_label": "Main record", "version": 1, "backup_code": backupCode(t, admin)})), 409, "conflict")
 }

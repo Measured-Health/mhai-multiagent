@@ -111,6 +111,10 @@ CREATE TABLE emr_connections (
 ALTER TABLE emr_connections OWNER TO mhai_migrate;
 ALTER TABLE emr_connections ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 CREATE INDEX emr_connections_hospital ON emr_connections (hospital_id);
+-- The label is how the hospital tells its sources apart (design §16.1), so
+-- one hospital has each label once, in any case: a create retried without
+-- its Idempotency-Key can't add a second connection (ruling E1).
+CREATE UNIQUE INDEX emr_connections_label ON emr_connections (hospital_id, lower(source_label));
 
 -- The platform app: every hospital's connections; configuration columns
 -- only on UPDATE (never the id, the hospital or created_at).

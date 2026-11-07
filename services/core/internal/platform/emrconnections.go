@@ -76,6 +76,7 @@ var (
 	errNotTested = errors.New("platform: no passing test of the saved settings")
 	errRemoved   = errors.New("platform: hospital removed or being removed")
 	errEMR       = errors.New("platform: the emr service didn't confirm")
+	errDuplicate = errors.New("platform: the hospital has a connection with that label")
 )
 
 func registerEMRConnections(m *authz.Mux, d Deps) {
@@ -131,6 +132,10 @@ type EMRConnectionSummary struct {
 	Errors24h   int64        `json:"errors_24h"`
 	// Paused is additive: a source the breaker paused (PR 7).
 	Paused bool `json:"paused"`
+	// CredentialsMissing is additive: a required secret isn't set for the
+	// current origin (a create the emr service didn't confirm, or a change
+	// of origin). Re-send them with PATCH on the same connection.
+	CredentialsMissing bool `json:"credentials_missing"`
 }
 
 // EMRCredential is a secret field and when it was set for the current
@@ -318,6 +323,8 @@ func (d Deps) readConnection(ctx context.Context, tx pgx.Tx, id uuid.UUID) (EMRC
 		if at, ok := set[k]; ok {
 			s := stamp(at)
 			cred.SetAt = &s
+		} else if f, _ := ti.Field(k); f.Required {
+			out.CredentialsMissing = true
 		}
 		out.Credentials = append(out.Credentials, cred)
 	}
@@ -456,6 +463,9 @@ func (d Deps) emrList(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, c := range conns {
 			s := d.summary(c, hs[c.id])
+			if s.CredentialsMissing, err = credsMissing(r.Context(), tx, c); err != nil {
+				return err
+			}
 			switch st := connState(s); {
 			case state == "not_connected":
 			case state == "needs_attention" && st != "needs_attention":
@@ -552,7 +562,7 @@ func (d Deps) emrFail(w http.ResponseWriter, r *http.Request, p authz.Principal,
 		code = "no_type"
 	case errors.Is(err, errConnGone), errors.Is(err, ErrNoSuchHospital):
 		code = "not_found"
-	case errors.Is(err, errVersion):
+	case errors.Is(err, errVersion), errors.Is(err, errDuplicate):
 		code = "conflict"
 	case errors.Is(err, errNotTested):
 		code = "not_tested"
@@ -836,7 +846,8 @@ func (d Deps) putCredentials(ctx context.Context, p authz.Principal, hid, conn u
 // path (404), the body (422), the type (422 no_type), the addresses and
 // origin (422), sealing, the rest of the body (422), the hospital (404, 409
 // hospital_removed), the code; then the row and its audit entry, committed;
-// then the credentials. A connection is saved off.
+// then the credentials. A connection is saved off. A label the hospital
+// already has is 409 conflict (ruling E1).
 func (d Deps) emrCreate(w http.ResponseWriter, r *http.Request) {
 	p, ok := caller(w, r)
 	if !ok {
@@ -953,26 +964,52 @@ func (d Deps) emrCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(sealed) > 0 {
 		if err := d.putCredentials(r.Context(), p, hid, id, rid, sealed); err != nil {
-			// Saved off, without credentials: GET shows them not set.
-			d.emrFail(w, r, p, "create credentials", err)
-			return
+			// Ruling E1: the connection stays created, off, with
+			// credentials_missing; the answer is a success, so the
+			// idempotency store keeps it and a retry with the same key gets
+			// this connection, never a second one. The credentials are
+			// re-sent with PATCH on it.
+			d.log().Warn("platform: emr connection created without credentials", "request_id", rid,
+				"connection_id", id.String(), "reason", "credentials_missing")
 		}
 	}
 	d.answer(w, r, p, id)
 }
 
 // mapPG turns the constraint refusals a valid-looking body can still meet
-// (another hospital's overlapping range) into validation_failed.
+// into codes: another hospital's overlapping range is validation_failed; a
+// label the hospital already has (emr_connections_label) is conflict.
 func mapPG(err error) error {
-	var code string
-	if pe := pgError(err); pe != nil {
-		code = pe.Code
-	}
-	switch code {
-	case "23514", "23P01", "23505":
+	pe := pgError(err)
+	switch {
+	case pe == nil:
+		return err
+	case pe.Code == "23505" && pe.ConstraintName == "emr_connections_label":
+		return errDuplicate
+	case pe.Code == "23514", pe.Code == "23P01", pe.Code == "23505":
 		return errBadBody
 	}
 	return err
+}
+
+// credsMissing reports whether a required secret of c's type isn't set for
+// its current origin.
+func credsMissing(ctx context.Context, tx pgx.Tx, c connRow) (bool, error) {
+	ti, _ := emrtypes.Lookup(c.typ)
+	rows, err := tx.Query(ctx, `SELECT field FROM emr_credentials_meta($1)`, c.id)
+	if err != nil {
+		return false, err
+	}
+	set, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return false, err
+	}
+	for _, f := range ti.Fields {
+		if f.Kind == emrtypes.KindSecret && f.Required && !slices.Contains(set, f.Key) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // answer replies with the connection as stored.
