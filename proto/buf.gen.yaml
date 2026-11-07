@@ -1,6 +1,11 @@
 version: v2
 # Run from proto/ (make proto). module= drops the module path from the output
-# path, so the Go package lands in services/core/internal/intelpb.
+# path, so the Go package lands in services/core/internal/intelpb. The emr
+# contract goes to services/gokit (buf.gen.emr.yaml).
+inputs:
+  - directory: .
+    paths:
+      - mhai/intelligence
 plugins:
   - local: protoc-gen-go
     out: ../services/core
