@@ -65,7 +65,7 @@ def test_request_shape() -> None:
     assert str(request.url) == "https://api.openai.com/v1/responses"
     assert request.method == "POST"
     assert request.headers["authorization"] == f"Bearer {FAKE_KEY}"
-    kit.check_headers(request)
+    kit.check_headers(P, request)
     doc = json.loads(request.content)
     assert doc == {
         "model": MODEL,

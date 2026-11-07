@@ -53,7 +53,7 @@ def test_request_shape() -> None:
     assert request.headers["authorization"] == f"Bearer {FAKE_KEY}"
     assert "x-api-key" not in request.headers
     assert "anthropic-version" in request.headers
-    kit.check_headers(request)
+    kit.check_headers(P, request)
     doc = json.loads(request.content)
     assert doc == {
         "model": MODEL,

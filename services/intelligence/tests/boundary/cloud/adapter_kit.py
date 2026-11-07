@@ -50,12 +50,6 @@ NAME = tc.NAME
 IDS = Identifiers(frozenset({"adaeze okafor", "adaeze", "okafor"}))
 Factory = Callable[[str], Any]
 
-# The headers an SDK may send. Anything else (a trace header, a beta flag,
-# a header an SDK update adds) fails the request test.
-ALLOWED_HEADERS = re.compile(
-    r"accept|accept-encoding|connection|content-length|content-type|host|user-agent"
-    r"|x-stainless-[a-z-]+|anthropic-version|x-api-key|authorization"
-)
 CHUNK_IDS = re.compile(r"<<chunk (KB#[0-9]{4})>>")
 
 
@@ -217,9 +211,12 @@ def generate(
 # --- the shared checks ---------------------------------------------------------------------
 
 
-def check_headers(request: httpx2.Request) -> None:
+def check_headers(provider: str, request: httpx2.Request) -> None:
+    """Every header the SDK sends is on the provider's list in the scan
+    hook (review M2), and none is trace context."""
     names = {k.lower() for k in request.headers}
-    assert all(ALLOWED_HEADERS.fullmatch(n) for n in names), sorted(names)
+    allowed = scan.ALLOWED_HEADERS[provider]
+    assert names <= allowed, sorted(names - allowed)
     assert not names & set(scan.TRACE_HEADERS)
 
 
@@ -440,6 +437,11 @@ def check_exact_request_scanned(provider: str, factory: Factory) -> None:
         with pytest.raises(EgressRefused):
             h(r)
         assert h.verdict == "known_identifier"
+    # A header the SDK doesn't send is refused even with nothing in it.
+    h = ScanHook(IDS, adapter.shape)
+    with pytest.raises(EgressRefused):
+        h(rebuilt(str(request.url), {**base, "x-unexpected": "1"}))
+    assert h.verdict == "header"
 
 
 def check_no_trace_context(provider: str, factory: Factory) -> None:
@@ -449,7 +451,7 @@ def check_no_trace_context(provider: str, factory: Factory) -> None:
     tracer = TracerProvider().get_tracer("test")
     with tracer.start_as_current_span("job"):
         request, _ = render(provider, factory, prompt())
-    check_headers(request)
+    check_headers(provider, request)
 
 
 def check_reserved_cap_is_the_sent_cap(provider: str, factory: Factory, cap_key: str) -> None:

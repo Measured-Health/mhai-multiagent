@@ -54,6 +54,7 @@ MIN_NUMBER_DIGITS: Final = 5
 # Every code the scan can give, in the order the rules run.
 RULES: Final = (
     "trace_header",
+    "header",
     "too_large",
     "not_json",
     "shape",
@@ -71,6 +72,41 @@ RULES: Final = (
 # Trace context never leaves with a request: anthropic propagates the
 # current span's unless told not to (plan Task 4), so the hook refuses it.
 TRACE_HEADERS: Final = ("traceparent", "tracestate", "baggage")
+
+# The request headers each provider's SDK sends (anthropic 2.3.0, openai
+# 3.37.0; review M2), lower-case, exact names. Any other header is refused
+# ("header"), so an SDK update that adds one fails closed until it is
+# reviewed here. The values are scanned for identifiers too.
+_SDK_HEADERS: Final = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "authorization",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "user-agent",
+        "x-stainless-arch",
+        "x-stainless-async",
+        "x-stainless-lang",
+        "x-stainless-os",
+        "x-stainless-package-version",
+        "x-stainless-raw-response",
+        "x-stainless-read-timeout",
+        "x-stainless-retry-count",
+        "x-stainless-runtime",
+        "x-stainless-runtime-version",
+        "x-stainless-timeout",
+    }
+)
+ALLOWED_HEADERS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "anthropic": _SDK_HEADERS | {"anthropic-version"},
+        "openai": _SDK_HEADERS,
+        "xai": _SDK_HEADERS,
+    }
+)
 
 # Compared case-folded. Values under these keys, at any depth, are this
 # patient's identifiers (plan deviation 9).
@@ -632,6 +668,14 @@ def block_pointers(provider: str) -> tuple[str, ...]:
 BLOCK_TYPES: Final = MappingProxyType({"anthropic": "text", "openai": "input_text", "xai": "text"})
 
 
+def provider_of(shape: Shape) -> str:
+    """The provider whose block layout shape has (Shape admits exactly one)."""
+    for p in BLOCK_ARRAYS:
+        if shape.patient_paths == frozenset(block_pointers(p)[:2]):
+            return p
+    raise ValueError("a Shape names one provider's layout")
+
+
 def shape_for(provider: str, fixed: Mapping[str, Any]) -> Shape:
     """The provider's Shape: blocks 0 and 1 are the patient paths; the seven
     block texts are the only free text; every other leaf is fixed, with its
@@ -788,13 +832,14 @@ class ScanHook:
     verdict is the last rule (None while every body passed); sent is True
     once a body has passed. Once refused, it refuses every later request."""
 
-    __slots__ = ("_ids", "_shape", "sent", "verdict")
+    __slots__ = ("_headers", "_ids", "_shape", "sent", "verdict")
 
     def __init__(self, ids: Identifiers, shape: Shape) -> None:
         if type(ids) is not Identifiers or type(shape) is not Shape:
             raise TypeError("ScanHook takes Identifiers and a Shape")
         self._ids = ids
         self._shape = shape
+        self._headers = ALLOWED_HEADERS[provider_of(shape)]
         self.verdict: str | None = None
         self.sent = False
 
@@ -815,6 +860,8 @@ class ScanHook:
                 self._ids.hit(v) for v in request.headers.values()
             ):
                 return "known_identifier"
+            if any(k.lower() not in self._headers for k in request.headers):
+                return "header"
         except Exception:
             return "scan_error"
         try:

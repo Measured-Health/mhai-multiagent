@@ -137,7 +137,10 @@ class FakeAdapter:
         with self.lock:
             self.calls += 1
         body = json.dumps(fake_render(prompt, model)).encode("utf-8")
-        headers = {"content-type": "application/json", "x-api-key": sdk.key.reveal()}
+        headers = {
+            "content-type": "application/json",
+            "authorization": f"Bearer {sdk.key.reveal()}",
+        }
         if self.headers is not None:
             headers.update(self.headers())
         try:

@@ -18,7 +18,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from intelligence.boundary.cloud import scan
+from intelligence.boundary.cloud import scan, vocab
 from intelligence.boundary.cloud.gate import (
     CloudContext,
     CloudPrompt,
@@ -563,6 +563,38 @@ def test_trace_headers_refused() -> None:
         assert hook.sent is False
 
 
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_hook_refuses_a_header_not_on_the_providers_list(provider: str) -> None:
+    # Review M2: each provider's request headers are a closed list in the
+    # hook itself; anything else (an SDK update, a debug header) fails
+    # closed with the code "header", before anything is sent.
+    url = vocab.BASE_URLS[provider]
+    raw = body(provider, blocks("fever"))
+    allowed = scan.ALLOWED_HEADERS[provider]
+    ok = httpx2.Request("POST", url, content=raw, headers={h: "1" for h in allowed})
+    hook = ScanHook(NO_IDS, shape(provider))
+    hook(ok)
+    assert hook.sent is True
+    extras = ["x-unexpected", "X-Debug", "openai-organization", "x-api-key"]
+    if provider != "anthropic":
+        extras.append("anthropic-version")
+    for extra in extras:
+        hook = ScanHook(NO_IDS, shape(provider))
+        req = httpx2.Request("POST", url, content=raw, headers={extra: "1"})
+        with pytest.raises(EgressRefused) as e:
+            hook(req)
+        assert str(e.value) == "header" and hook.sent is False, extra
+
+
+def test_header_allow_lists_are_closed_per_provider() -> None:
+    assert set(scan.ALLOWED_HEADERS) == set(PROVIDERS)
+    for names in scan.ALLOWED_HEADERS.values():
+        assert isinstance(names, frozenset)
+        assert all(n == n.lower() and "*" not in n for n in names)
+        assert not names & set(scan.TRACE_HEADERS)
+    assert "header" in scan.RULES
+
+
 def test_hook_sets_verdict_and_sent() -> None:
     url = "https://api.openai.com/v1/responses"
     hook = ScanHook(_ids(), shape("openai"))
@@ -583,6 +615,14 @@ def test_hook_refuses_an_unreadable_body() -> None:
         yield body("anthropic", blocks("fever"))
 
     req = httpx2.Request("POST", "https://api.anthropic.com/v1/messages", content=chunks())
+    # A streamed body carries transfer-encoding, which no SDK sends: refused
+    # by the header list first (review M2).
+    hook = ScanHook(NO_IDS, shape("anthropic"))
+    with pytest.raises(EgressRefused) as e:
+        hook(req)
+    assert str(e.value) == "header" and hook.sent is False
+    # Without that header, the unread body itself is refused.
+    del req.headers["transfer-encoding"]
     hook = ScanHook(NO_IDS, shape("anthropic"))
     with pytest.raises(EgressRefused) as e:
         hook(req)
