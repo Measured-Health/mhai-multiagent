@@ -1,6 +1,6 @@
 # Patient Analysis, named access and clearance letters (hospital side): backend design
 
-- **Status:** Draft, revised after review (2026-11-07). Design only, no code. **Live use needs clinical, privacy and legal sign-off** (§15). This design changes the rule that hospital admins see no clinical content.
+- **Status:** Approved (product owner, 2026-11-07), after three design reviews. Design only, no code. **Live use needs clinical, privacy and legal sign-off** (§15). ADR 0015 and the SKILLS.md §1 amendment move from Proposed to Accepted with build PR 1. This design changes the rule that hospital admins see no clinical content.
 - **Date:** 2026-11-07
 - **Rulings this design follows:**
   - **R41a (product owner, 7 Nov 2026): fixed periods.** Statistics show only finished, non-overlapping calendar periods (the last full week, month or quarter), never rolling windows.
