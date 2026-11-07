@@ -1,6 +1,8 @@
 package smallgroup
 
 import (
+	"fmt"
+	"math/bits"
 	"math/rand"
 	"testing"
 
@@ -225,22 +227,43 @@ func TestHistoryAnchoredAtOnboarding(t *testing.T) {
 		n, published, hiddenCells, exposedCells)
 }
 
-// Spec §11.6: combinations of hidden cells that aren't a set (two hidden
-// week cells of one month row, not all of them) are only measured. The
-// number goes in the PR.
+// Spec §11.6, review fix 1: combinations of hidden cells that aren't a
+// published set are real disclosures if a client's linear algebra on the
+// JSON solves them. Every union of two or more hidden members that isn't
+// the whole set, of a parent's children in one row (weeks of a month,
+// months of a quarter: pairs, triples) and of the hospitals in one column,
+// must stay unexposed at 1 to 4.
 func TestUnionsOfHiddenWeeksMeasured(t *testing.T) {
 	r := rand.New(rand.NewSource(99))
-	pairs, exposedSmall := 0, 0
+	checked, exposedSmall := 0, 0
+	var first string
 	for k := 0; k < historyCount()/5; k++ {
 		for _, b := range randomHistory(r).run(t) {
 			eqs := eqsOf(b, true)
 			var boxes [][]int
+			var kinds []string
 			m := len(b.Family.Measures)
-			for _, p := range b.Published {
-				if len(p.Children) != 4 {
-					continue
+			unions := func(hid [][]int, kind string) {
+				n := len(hid)
+				if n < 3 || n > 10 {
+					return // two hidden: the set's own sum; more than 10: bounded
 				}
-				for row := 0; row <= len(p.Listed); row++ {
+				for mask := 1; mask < 1<<n-1; mask++ {
+					if bits.OnesCount(uint(mask)) < 2 {
+						continue
+					}
+					var vs []int
+					for i := 0; i < n; i++ {
+						if mask&(1<<i) != 0 {
+							vs = append(vs, hid[i]...)
+						}
+					}
+					boxes = append(boxes, vs)
+					kinds = append(kinds, kind)
+				}
+			}
+			for _, p := range b.Published {
+				for row := 0; row <= len(p.Listed) && len(p.Children) > 0; row++ {
 					for k := 0; k < m; k++ {
 						var hid [][]int
 						for _, ci := range p.Children {
@@ -256,25 +279,33 @@ func TestUnionsOfHiddenWeeksMeasured(t *testing.T) {
 								hid = append(hid, cellVars(b, c, cr*m+k))
 							}
 						}
-						for i := 0; i < len(hid); i++ {
-							for j := i + 1; j < len(hid); j++ {
-								if len(hid) == 2 {
-									continue // that is the set's own sum
-								}
-								boxes = append(boxes, append(append([]int{}, hid[i]...), hid[j]...))
-							}
+						unions(hid, fmt.Sprintf("children of a %d-child parent", len(p.Children)))
+					}
+				}
+				for k := 0; k < m; k++ {
+					var hid [][]int
+					for row := 1; row <= len(p.Listed); row++ {
+						if p.Hidden[row*m+k] {
+							hid = append(hid, cellVars(b, p, row*m+k))
 						}
 					}
+					unions(hid, "hospitals of a column")
 				}
 			}
 			ex := solve.Exposed(b.nVars(), eqs, boxes)
 			for i, e := range ex {
-				pairs++
-				if e && small(valueOf(b, boxes[i])) {
+				checked++
+				if v := valueOf(b, boxes[i]); e && small(v) {
 					exposedSmall++
+					if first == "" {
+						first = fmt.Sprintf("%s: a union of %d cells exposed = %d", kinds[i], len(boxes[i]), v)
+					}
 				}
 			}
 		}
 	}
-	t.Logf("pairs of hidden weeks in a month row that aren't the whole set: %d checked, %d exposed with a value of 1 to 4", pairs, exposedSmall)
+	t.Logf("unions of hidden members that aren't the whole set: %d checked, %d exposed with a value of 1 to 4", checked, exposedSmall)
+	if exposedSmall > 0 {
+		t.Errorf("%d unions exposed at 1 to 4 (first: %s)", exposedSmall, first)
+	}
 }

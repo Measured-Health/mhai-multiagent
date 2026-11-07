@@ -530,15 +530,62 @@ func (b *Block) protectedBoxes(all []snap) []protected {
 	}
 	for si := range all {
 		for _, st := range b.sets(all, si) {
+			var hid [][]int
 			var vars []int
 			for _, p := range st.parts {
 				if p.snap < 0 || all[p.snap].hidden[p.cell] {
+					hid = append(hid, p.vars)
 					vars = append(vars, p.vars...)
 				}
 			}
 			if len(vars) > 0 {
 				out = append(out, protected{vars, false, b.value(vars)})
 			}
+			// Review fix 1: every union of two or more hidden members short
+			// of all of them (a parent's hidden weeks or months, a column's
+			// hidden hospitals) is a sum a client could solve for too. At
+			// most 11 per parent row (four weeks); a set with more than
+			// MaxUnionMembers hidden members is bounded to its pairs.
+			out = append(out, b.unions(hid)...)
+		}
+	}
+	return out
+}
+
+// MaxUnionMembers bounds the hidden members whose every union is protected
+// (2^n boxes); a set with more has its pairs protected only.
+const MaxUnionMembers = 10
+
+// unions are the protected sums of every union of two or more of hid short
+// of all of them, kept only when 1 to 4 (the only ones the check fails on).
+func (b *Block) unions(hid [][]int) []protected {
+	n := len(hid)
+	if n < 3 {
+		return nil
+	}
+	var out []protected
+	add := func(mask uint64) {
+		var vs []int
+		for i := 0; i < n; i++ {
+			if mask&(1<<i) != 0 {
+				vs = append(vs, hid[i]...)
+			}
+		}
+		if v := b.value(vs); small(v) {
+			out = append(out, protected{vs, false, v})
+		}
+	}
+	if n > MaxUnionMembers {
+		for i := 0; i < n; i++ {
+			for j := i + 1; j < n; j++ {
+				add(1<<i | 1<<j)
+			}
+		}
+		return out
+	}
+	for mask := uint64(1); mask < 1<<n-1; mask++ {
+		if bits.OnesCount64(mask) >= 2 {
+			add(mask)
 		}
 	}
 	return out
