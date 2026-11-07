@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Cloud model providers, part A: the per-hospital model policy (OpenAPI
+  1.10.0, additive). Migration 00018 adds `hospital_model_policy` (off by
+  default; no row means local), the model route set by core on each new
+  question, and the monthly token ledger reached only through core's
+  `mhai_cloud_reserve`/`mhai_cloud_settle` functions. Platform admins read a
+  hospital's policy with this month's usage and change it (`GET`/`PUT
+  /platform/hospitals/{id}/model-policy`; a change needs step-up MFA and is
+  audited as `hospital.model_policy_changed`), and `core hospitals
+  model-policy set` does the same from the CLI. `agreement_ref`
+  takes only an agreement code (`AGR-`/`DPA-` plus digits, or
+  `DEMO-SYNTHETIC`). `query.completed` gains the closed `egress` and
+  `cloud_outcome` facts, and a result gains `generated_by` (`local` or
+  `cloud` with its provider), read from the decision itself. No cloud call is
+  made yet (parts B to E).
 - Document pipeline phase 0, part A: the extraction schema
   `mhai.extraction.clinical_document` 1.0.0 and the evaluation harness
   (`services/intelligence/intelligence/doceval/`). Synthetic patients and
