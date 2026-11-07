@@ -497,3 +497,161 @@ def build_model_client(settings: WorkerSettings) -> ModelClient:
     if settings.model_client == "orchestrator":
         return default_orchestrator()
     raise ConfigError("INTELLIGENCE_MODEL_CLIENT must be orchestrator or stub")
+
+
+# --- the stub's local parts, for the cloud fake (plan Task 10) -------------------------
+
+
+class _KeywordRetriever:
+    """retrieve() over one job's chunks by shared words: no model, no
+    download. Only what chunk_visible_to allows for patient_id."""
+
+    def __init__(self, chunks: Sequence[KBChunk]) -> None:
+        self._chunks = list(chunks)
+
+    def retrieve(self, query: str, top_k: int = 5, patient_id: str | None = None) -> list[Any]:
+        from intelligence.knowledge_base.kb_builder import RetrievalResult, chunk_visible_to
+
+        words = set(str(query).lower().split())
+        visible = [c for c in self._chunks if chunk_visible_to(c, patient_id)]
+        scored = sorted(
+            ((len(words & set(c.content.lower().split())), i, c) for i, c in enumerate(visible)),
+            key=lambda t: (-t[0], t[1]),
+        )
+        return [
+            RetrievalResult(chunk=c, score=float(s), retrieval_method="keyword", rank=r)
+            for r, (s, _, c) in enumerate(scored[:top_k])
+        ]
+
+
+class _StubCCA:
+    def __init__(self, chunks: Sequence[KBChunk]) -> None:
+        self.retriever = _KeywordRetriever(chunks)
+
+    def generate_with_rag(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the stub's parts never generate locally")
+
+
+class _StubHGA:
+    """The stub client's fixed verification, as an HGA."""
+
+    def verify(self, response_text: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "trust_score": 0.9,
+            "decision": "pass",
+            "nli_score": 0.9,
+            "coherence_score": 1.0,
+            "numerical_score": 0.85,
+            "semantic_entropy_score": 0.7,
+            "flag_penalty": 0.0,
+            "flags": [],
+            "weights": {"alpha": 0.35, "beta": 0.25, "gamma": 0.2, "delta": 0.2},
+        }
+
+
+def stub_parts() -> tuple[Builder, dict[str, str]]:
+    """A builder whose orchestrator has a keyword retriever over the job's
+    chunks and an HGA giving the stub's fixed verification (development
+    only, with the stub client; and the cloud-fake tests)."""
+
+    def build(chunks: Sequence[KBChunk]) -> DynamicOrchestratorAgent:
+        from intelligence.agents.orchestrator import DynamicOrchestratorAgent
+
+        return DynamicOrchestratorAgent(rag_cca=_StubCCA(chunks), hga=_StubHGA())
+
+    return build, {"dense": "stub", "nli": "stub"}
+
+
+# --- the router (plan Task 10) -----------------------------------------------------------
+
+
+class _Unconfigured:
+    """A cloud route whose provider this worker hasn't enabled (core and the
+    worker's settings disagree): masks with the local masker, and every
+    generation escalates as unconfigured, logged and counted. Nothing is
+    sent, and nothing runs locally in its place."""
+
+    def __init__(self, local: ModelClient, provider: str) -> None:
+        self._local = local
+        self._provider = provider
+
+    def mask(self, text: str) -> str:
+        return self._local.mask(text)
+
+    def generate(
+        self,
+        question: str,
+        patient_context: Mapping[str, Any],
+        patient_id: str | None,
+        chunks: Sequence[KBChunk],
+        *,
+        call: CloudCall | None = None,
+    ) -> Generation:
+        from intelligence.boundary import telemetry
+
+        log.error("cloud.unconfigured provider=%s", self._provider)
+        telemetry.record_cloud_alert(self._provider, "unconfigured")
+        return Generation(failed_agents=("CCA",), available=False, cloud_outcome="unconfigured")
+
+    def verify(self, generation: Generation) -> Verification:
+        return _escalated(generation.failed_agents or ("CCA",))
+
+    def model_versions(self) -> dict[str, str]:
+        return {k: v for k, v in self._local.model_versions().items() if k != "cca"}
+
+
+class ModelRouter:
+    """The client for a job's route, decided by core and read from the
+    claimed row (never from the message). local is the local client; cloud
+    maps an enabled provider to its CloudModelClient."""
+
+    def __init__(self, local: ModelClient, cloud: Mapping[str, ModelClient]) -> None:
+        self.local = local
+        self._cloud = dict(cloud)
+
+    def client_for(self, route: str) -> tuple[ModelClient, str]:
+        """(the client, its provider), "local" for the local route. A cloud
+        route with no client here, or any route outside vocab.ROUTES, is
+        unconfigured."""
+        from intelligence.boundary.cloud.vocab import PROVIDERS, ROUTES
+
+        if route == "local":
+            return self.local, "local"
+        provider = route[len("cloud:") :] if route in ROUTES else "unknown"
+        client = self._cloud.get(provider) if provider in PROVIDERS else None
+        if client is None:
+            return _Unconfigured(self.local, provider), provider
+        return client, provider
+
+    def close(self) -> None:
+        """Close each cloud client (its shared transport) once."""
+        seen: set[int] = set()
+        for c in self._cloud.values():
+            transport = getattr(c, "transport", None)
+            if transport is None or id(transport) in seen:
+                continue
+            seen.add(id(transport))
+            try:
+                c.close()  # type: ignore[attr-defined]
+            except Exception as e:
+                log.warning("cloud client close failed error=%s", type(e).__name__)
+
+
+def build_model_router(settings: WorkerSettings) -> ModelRouter:
+    """The local client INTELLIGENCE_MODEL_CLIENT names, and one cloud
+    client per enabled provider (none by default), retrieving and verifying
+    with the same local parts: the orchestrator's, or the stub's in
+    development."""
+    if not settings.cloud.providers:
+        return ModelRouter(build_model_client(settings), {})
+    from intelligence.boundary.cloud.client import build_cloud_clients
+
+    local: ModelClient
+    if settings.model_client == "orchestrator":
+        build, versions = local_parts()
+        local = OrchestratorModelClient(build, versions=versions)
+    else:
+        local = build_model_client(settings)  # the stub, development only
+        build, versions = stub_parts()
+    cloud = build_cloud_clients(settings.cloud, build, versions)
+    return ModelRouter(local, cloud)

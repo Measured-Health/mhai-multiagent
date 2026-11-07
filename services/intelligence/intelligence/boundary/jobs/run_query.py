@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import copy
 import logging
 import math
 import time
@@ -60,7 +59,9 @@ from intelligence.boundary.models import (
     Generation,
     ModelClient,
     ModelError,
+    ModelRouter,
     Verification,
+    _clean_versions,
     trust_band,
 )
 from intelligence.boundary.pb import envelope_pb2, pipeline_pb2
@@ -69,6 +70,7 @@ from intelligence.boundary.verify import Verified
 if TYPE_CHECKING:
     from nats.aio.msg import Msg
 
+    from intelligence.boundary.cloud.client import CloudCall
     from intelligence.boundary.db import Database
 
 log = logging.getLogger("intelligence.boundary.run_query")
@@ -168,6 +170,25 @@ def _mask_tree(mask: Callable[[str], str], value: Any, depth: int = 0) -> Any:
     return None
 
 
+def _plain_tree(value: Any) -> Any:
+    """A deep copy of masked patient data with every MaskedText as a plain
+    str (deviation 8): the reviewer's copy. MaskedText can't be copied, and
+    a plain str can never reach an adapter."""
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _plain_tree(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain_tree(v) for v in value]
+    return value
+
+
+# The cloud generation stage's share of the job (design section 10): at
+# most 120 s, and 90 s kept for verification and the write.
+CLOUD_STAGE_MAX_S = 120.0
+CLOUD_STAGE_RESERVE_S = 90.0
+
+
 def _ms(seconds: float | None) -> int:
     """Whole, non-negative milliseconds."""
     if seconds is None or not math.isfinite(seconds) or seconds < 0:
@@ -197,7 +218,7 @@ class RunQuery:
     def __init__(
         self,
         db: Database | None,
-        models: ModelClient,
+        models: ModelClient | ModelRouter,
         settings: JobSettings | None = None,
         *,
         clock: Callable[[], float] = time.time,
@@ -206,7 +227,8 @@ class RunQuery:
         max_concurrency: int = 4,
     ) -> None:
         self._db = db
-        self._models = models
+        # A plain client is the local route only (existing callers and tests).
+        self._router = models if isinstance(models, ModelRouter) else ModelRouter(models, {})
         self._s = settings or JobSettings()
         self._clock = clock
         self._wip_clock = wip_clock
@@ -220,6 +242,7 @@ class RunQuery:
 
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
+        self._router.close()
 
     async def ready(self) -> bool:
         """Jobs may be taken: there is a database and it answers. Anything
@@ -386,30 +409,58 @@ class RunQuery:
         return True
 
     async def _pipeline(self, job: _Job, claim: jobs_repo.Claim) -> None:
+        # The route is core's, from the claimed row (never the message): one
+        # client runs every stage of this job.
+        client, provider = self._router.client_for(claim.model_route)
         patient = claim.patient_data if isinstance(claim.patient_data, dict) else {}
-        question, context = await self._stage(job, self._mask_all, claim.question, patient)
+        question, context = await self._stage(job, self._mask_all, client, claim.question, patient)
         # The reviewer's copy, taken before any model sees the context: a
         # client that mutates it can't change what the decision stores.
-        masked_patient = copy.deepcopy(context)
+        masked_patient = _plain_tree(context)
         await self._checkpoint(job, 0.25, "generation")
         started = time.monotonic()
         chunks = await self._chunks(job)
         chunks_ms = _ms(time.monotonic() - started)
-        generation = await self._stage(job, self._models.generate, question, context, None, chunks)
+        if provider == "local":
+            generation = await self._stage(job, client.generate, question, context, None, chunks)
+        else:
+            call = self._cloud_call(job, claim, patient)
+
+            def generate(*args: Any) -> Generation:
+                return client.generate(*args, call=call)
+
+            generation = await self._stage(job, generate, question, context, None, chunks)
         await self._checkpoint(job, 0.6, "hga_verification")
-        verification = await self._stage(job, self._models.verify, generation)
+        verification = await self._stage(job, client.verify, generation)
         await self._checkpoint(job, 0.9, "decision")
         decision = replace(
-            self._decision(generation, verification),
-            masked_question=question,
+            self._decision(client, provider, generation, verification),
+            masked_question=str(question),
             masked_patient=masked_patient,
             timings_ms=_timings(job.stage_ms, generation, chunks_ms),
         )
         await self._complete(job, decision)
 
-    def _mask_all(self, question: str, patient: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
-        masked = _mask_tree(self._models.mask, dict(patient))
-        return self._models.mask(question), masked if isinstance(masked, dict) else {}
+    def _cloud_call(self, job: _Job, claim: jobs_repo.Claim, patient: Any) -> CloudCall:
+        """The cloud generation's per-job argument: this patient's
+        identifiers (from the raw row, on the event loop, held only here),
+        the verified hospital's budget, and the stage's deadline. A deadline
+        already past makes the client give timeout with nothing sent."""
+        from intelligence.boundary.cloud.budget import DbBudget
+        from intelligence.boundary.cloud.client import CloudCall
+        from intelligence.boundary.cloud.scan import collect_identifiers
+
+        assert self._db is not None
+        identifiers = collect_identifiers(claim.question, patient)
+        budget = DbBudget(self._db, job.v, asyncio.get_running_loop())
+        left = min(CLOUD_STAGE_MAX_S, job.v.exp - self._clock() - CLOUD_STAGE_RESERVE_S)
+        return CloudCall(identifiers, budget, time.monotonic() + left)
+
+    def _mask_all(
+        self, client: ModelClient, question: str, patient: Mapping[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        masked = _mask_tree(client.mask, dict(patient))
+        return client.mask(question), masked if isinstance(masked, dict) else {}
 
     async def _chunks(self, job: _Job) -> list[Any]:
         assert self._db is not None
@@ -537,18 +588,37 @@ class RunQuery:
 
     # --- outcomes -------------------------------------------------------------------
 
-    def _decision(self, g: Generation, v: Verification) -> jobs_repo.Decision:
+    def _decision(
+        self, client: ModelClient, provider: str, g: Generation, v: Verification
+    ) -> jobs_repo.Decision:
         """The row to write. Fail closed: anything unverified, or without a
-        score, is ESCALATE and degraded; no score is invented."""
+        score, is ESCALATE and degraded; no score is invented. cca_route
+        local is recorded only when the job really ran on the local client;
+        a cloud generation supplies its own versions (cca, cca_route cloud)
+        only when it answered, so an unconfigured or failed cloud route
+        records no route (departure 15)."""
         failed = tuple(dict.fromkeys((*g.failed_agents, *v.failed_agents)))
         verified = bool(v.verified and g.available and v.trust_score is not None)
         decision = v.decision if v.decision in DECISIONS else "ESCALATE"
         if not verified:
             decision = "ESCALATE"
         try:
-            versions = dict(self._models.model_versions())
+            versions = _clean_versions({**client.model_versions(), **g.versions})
         except Exception:
             versions = {}
+        if provider == "local":
+            versions["cca_route"] = "local"
+        report: dict[str, Any] = {
+            "failed_agents": list(failed),
+            "flags": [list(f) for f in v.flags],
+            "model_used": g.model_used,
+        }
+        if provider != "local":
+            report.update(
+                cloud_outcome=g.cloud_outcome,
+                tokens_in=int(g.tokens_in),
+                tokens_out=int(g.tokens_out),
+            )
         return jobs_repo.Decision(
             response_text=g.response if g.available else "",
             citations=g.cited_chunk_ids,
@@ -559,17 +629,15 @@ class RunQuery:
             degraded=bool(v.degraded or failed or not verified),
             failed_agents=failed,
             model_versions=versions,
-            guardrail_report={
-                "failed_agents": list(failed),
-                "flags": [list(f) for f in v.flags],
-                "model_used": g.model_used,
-            },
+            guardrail_report=report,
             retrieval_ms=g.retrieval_ms,
             generation_ms=g.generation_ms,
             scores=dict(v.scores),
             flag_penalty=v.flag_penalty,
             weights=dict(v.weights),
             flags=v.flags,
+            egress=g.egress,
+            cloud_outcome=g.cloud_outcome,
         )
 
     async def _complete(self, job: _Job, d: jobs_repo.Decision) -> None:

@@ -39,7 +39,8 @@ _CLAIM = """UPDATE clinical_queries SET status = 'running', attempts = attempts 
 WHERE id = %s AND (status = 'queued' OR (status = 'running' AND lease_until < now()))
     AND EXISTS (SELECT 1 FROM hospitals h
                 WHERE h.id = clinical_queries.hospital_id AND h.status = 'active')
-RETURNING clinical_question, patient_data_json, urgency, category, attempts, retry_count"""
+RETURNING clinical_question, patient_data_json, urgency, category, attempts, retry_count,
+    mhai_effective_model_route(hospital_id, model_route)"""
 
 _STATE = """SELECT status,
     greatest(0, extract(epoch FROM (lease_until - now())))::float8
@@ -111,6 +112,11 @@ class Claim:
     # retry gives the job a fresh attempts budget, as attempts itself never
     # goes down (the same rule as approve_correction).
     retry_count: int = 0
+    # The route core decided (00018's trigger at insert), re-checked by
+    # core's mhai_effective_model_route at the claim (departure 14): local,
+    # or cloud:<provider> while the hospital's policy still names it. A
+    # value outside vocab.ROUTES is the router's to refuse (unconfigured).
+    model_route: str = "local"
 
 
 @dataclass(frozen=True)
@@ -151,6 +157,11 @@ class Decision:
     masked_patient: Mapping[str, Any] | None = field(default=None, repr=False)
     # Whole milliseconds per step, keys from TIMING_KEYS.
     timings_ms: Mapping[str, int] = field(default_factory=dict)
+    # Where the answer's text went (vocab.EGRESS) and the cloud outcome
+    # (vocab.OUTCOMES; None on the local route): query.completed's closed
+    # keys (plan Task 3).
+    egress: str = "none"
+    cloud_outcome: str | None = None
 
 
 def _masked_question(q: str | None) -> str | None:
@@ -196,9 +207,15 @@ async def claim(cur: Cursor, query_id: str, lease_s: float) -> Claim | None:
     row = await cur.fetchone()
     if row is None:
         return None
-    question, patient, urgency, category, attempts, retry_count = row
+    question, patient, urgency, category, attempts, retry_count, route = row
     return Claim(
-        str(question), patient, str(urgency), category, int(attempts), int(retry_count or 0)
+        str(question),
+        patient,
+        str(urgency),
+        category,
+        int(attempts),
+        int(retry_count or 0),
+        str(route) if isinstance(route, str) else "local",
     )
 
 
@@ -290,7 +307,10 @@ async def complete(cur: Cursor, query_id: str, attempts: int, d: Decision) -> bo
         "chunk_ids": list(d.citations),
         "model_versions": dict(d.model_versions),
         "attempts": int(attempts),
+        "egress": d.egress,
     }
+    if d.cloud_outcome is not None:
+        payload["cloud_outcome"] = d.cloud_outcome
     await cur.execute(_INSERT_FACT, (qid, QUERY_COMPLETED, qid, json.dumps(payload)))
     await cur.execute(_COMPLETE, (qid, int(attempts)))
     if await cur.fetchone() is None:  # can't happen while we hold the row lock
