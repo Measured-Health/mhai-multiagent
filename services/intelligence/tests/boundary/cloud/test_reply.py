@@ -53,6 +53,20 @@ BAD: list[tuple[str, Any]] = [
     ("javascript", _raw(answer="javascript:alert(1) [KB#0001].")),
     ("markdown_link", _raw(answer="See [guide](x) [KB#0001].")),
     ("markdown_image", _raw(answer="![x](y) [KB#0001].")),
+    # Reference-style links and link definitions (security review of Task 8).
+    ("markdown_reference", _raw(answer="See [guide][1] [KB#0001].")),
+    ("markdown_reference_collapsed", _raw(answer="See [guide][] [KB#0001].")),
+    ("markdown_reference_spaced", _raw(answer="See [guide] [1] [KB#0001].")),
+    ("markdown_reference_fullwidth", _raw(answer="See [guide]\uff3b1\uff3d [KB#0001].")),
+    ("markdown_definition", _raw(answer="x [KB#0001].\n[1]: example.invalid/x")),
+    ("markdown_definition_indented", _raw(answer="x [KB#0001].\n   [guide]: example.invalid")),
+    ("markdown_definition_on_marker", _raw(answer="[KB#0001]: example.invalid")),
+    # Protocol-relative URLs.
+    ("link_protocol_relative", _raw(answer="Read //example.invalid/x [KB#0001].")),
+    (
+        "link_protocol_relative_fullwidth",
+        _raw(answer="Read \uff0f\uff0fexample.invalid [KB#0001]."),
+    ),
     ("code_fence", _raw(answer="```\ncode\n``` [KB#0001].")),
     ("tilde_fence", _raw(answer="~~~\ncode\n~~~ [KB#0001].")),
     ("html_tag", _raw(answer="<b>bold</b> [KB#0001].")),
@@ -120,6 +134,15 @@ EXPECT = {
     "markdown_link": "markdown",
     "markdown_image": "markdown",
     "code_fence": "code_fence",
+    "markdown_reference": "markdown",
+    "markdown_reference_collapsed": "markdown",
+    "markdown_reference_spaced": "markdown",
+    "markdown_reference_fullwidth": "markdown",
+    "markdown_definition": "markdown",
+    "markdown_definition_indented": "markdown",
+    "markdown_definition_on_marker": "markdown",
+    "link_protocol_relative": "link",
+    "link_protocol_relative_fullwidth": "link",
     "tilde_fence": "code_fence",
     "html_tag": "html",
     "html_script": "html",
@@ -203,6 +226,16 @@ def test_good_answer_passes() -> None:
         SENT,
     )
     assert two.citations == ("KB#0002", "KB#0001")
+
+    # Adjacent markers are not a reference link; single slashes are not a URL.
+    adj = validate_answer(
+        _raw(
+            answer="Fluids [KB#0001][KB#0002], 20 mL/kg and/or 1/2 dose [KB#0002] [KB#0001].",
+            citations=["KB#0001", "KB#0002"],
+        ),
+        SENT,
+    )
+    assert adj.citations == ("KB#0001", "KB#0002")
 
     # Exactly 6,000 characters, ordinary clinical punctuation and comparisons.
     text = "BP < 90 and HR > 100; temp 38.5 C (fever) [KB#0003]. "
