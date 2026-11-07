@@ -2,6 +2,8 @@ package historytest
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
@@ -9,18 +11,21 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler/schedtest"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 )
 
 // A7, the review's form (Plan 7c spec §6.4, §11.5; Task 4): random
 // histories of 1 to 3 years from each hospital's onboarding, the release
 // epoch mid-month inside each, fed to the scheduler through the fake
 // source, a wake at every week's end plus the grace. The JSON every route
-// would send is parsed by this package alone (Task 5 adds the guardrails
-// route; until 7c-2 builds the analytics routes, the stored bodies stand in
-// for them: they hold every cell any analytics route sends). The exact
+// would send (guardrails on week, month, quarter and the deprecated 7d,
+// 30d, 90d; until 7c-2 builds the analytics routes, the stored bodies stand
+// in for them: they hold every cell any analytics route sends) is parsed by
+// this package alone. The exact
 // solver over all of it exposes no hidden cell of 1 to 4 and no
 // hidden-member sum of 1 to 4; no period is unavailable; ineligible weeks,
 // months and quarters are in no response.
@@ -160,13 +165,40 @@ type response struct {
 	rolling bool
 }
 
-// routes renders what each route would send for the stored snapshot s (Task
-// 5 adds GET /platform/guardrails); stored bodies stand in for the
-// analytics routes until 7c-2.
+// routes renders what each route would send for the stored snapshot s:
+// GET /platform/guardrails for its kind (Task 5), and the stored body, which
+// stands in for the analytics routes until 7c-2 (it holds every cell they
+// send).
 var routes = []func(t *testing.T, s scheduler.Stored, at time.Time) []response{
 	func(t *testing.T, s scheduler.Stored, _ time.Time) []response {
 		return []response{{source: "stored", period: s.Period, raw: s.Body}}
 	},
+	func(t *testing.T, s scheduler.Stored, at time.Time) []response {
+		b, err := analytics.DecodeBody(s.Body, s.Period)
+		if err != nil {
+			t.Fatalf("%v: %v", s.Period, err)
+		}
+		raw, _ := json.Marshal(platform.GuardrailsFromBody(b, s.Period, at))
+		return []response{{source: "guardrails", period: s.Period, raw: raw}}
+	},
+}
+
+// rolling is GET /platform/guardrails?period=7d|30d|90d at a wake: the
+// hospitals listed, every figure hidden (R41a-3).
+func (w *world) rolling(at time.Time) []response {
+	var refs []platform.Ref
+	for _, h := range w.fake.Hosp {
+		if !h.CreatedAt.After(at) {
+			refs = append(refs, platform.Ref{ID: h.ID.String(), Name: h.Name})
+		}
+	}
+	var out []response
+	for _, days := range []int{7, 30, 90} {
+		to := at.Add(-calendar.Grace).Truncate(24 * time.Hour)
+		raw, _ := json.Marshal(platform.RollingGuardrails(fmt.Sprintf("%dd", days), to.AddDate(0, 0, -days), to, refs))
+		out = append(out, response{source: "rolling", raw: raw, rolling: true})
+	}
+	return out
 }
 
 func (w *world) run(t *testing.T) (*Parser, []response) {
@@ -194,6 +226,7 @@ func (w *world) run(t *testing.T) (*Parser, []response) {
 				out = append(out, route(t, st, w.fake.Clock)...)
 			}
 		}
+		out = append(out, w.rolling(w.fake.Clock)...)
 	}
 	// The first published month and quarter are the next full ones.
 	for _, k := range []calendar.Kind{calendar.Month, calendar.Quarter} {

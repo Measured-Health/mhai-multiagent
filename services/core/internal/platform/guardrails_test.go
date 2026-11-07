@@ -2,58 +2,19 @@ package platform
 
 import (
 	"encoding/json"
+	"regexp"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup"
 )
 
-// Fix round 2: no active hospital, and one, give a whole response (the
-// all row is four columns wide whatever the rows are), not a panic; and
-// what is stored decodes back to the same bytes.
-func TestGuardOutEmptyAndOne(t *testing.T) {
-	to := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
-	from := to.AddDate(0, 0, -7)
-	for name, rows := range map[string][]guardRow{
-		"none":  nil,
-		"one":   {{id: uuid.New(), name: "Synthetic General", answers: 12, pass: 5, regenerate: 7, degraded: 6}},
-		"small": {{id: uuid.New(), name: "Synthetic Small", answers: 3, pass: 3, degraded: 1}},
-	} {
-		out, err := Deps{}.guardOut("7d", from, to, rows)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if len(out.Hospitals) != len(rows) || out.Hospitals == nil {
-			t.Errorf("%s: %d hospitals", name, len(out.Hospitals))
-		}
-		b, err := json.Marshal(out)
-		if err != nil {
-			t.Fatal(err)
-		}
-		back, err := decodeSnapshot(b, "7d", from, to)
-		if err != nil {
-			t.Fatalf("%s: stored body refused: %v (%s)", name, err, b)
-		}
-		b2, _ := json.Marshal(back)
-		if string(b) != string(b2) {
-			t.Errorf("%s: round trip\n%s\n%s", name, b, b2)
-		}
-	}
-	// A stored body for another period, day or with an unknown key is refused.
-	out, _ := Deps{}.guardOut("7d", from, to, nil)
-	b, _ := json.Marshal(out)
-	if _, err := decodeSnapshot(b, "30d", from, to); err == nil {
-		t.Error("another period accepted")
-	}
-	if _, err := decodeSnapshot(b, "7d", from.AddDate(0, 0, 1), to.AddDate(0, 0, 1)); err == nil {
-		t.Error("another day accepted")
-	}
-	if _, err := decodeSnapshot([]byte(`{"x":1}`), "7d", from, to); err == nil {
-		t.Error("an unknown key accepted")
-	}
-}
-
-// R43: the window ends at the start of the UTC day 15 minutes before now.
+// R43: a rolling window ends at the start of the UTC day 15 minutes before
+// now.
 func TestGuardWindowGrace(t *testing.T) {
 	day := time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
@@ -69,5 +30,47 @@ func TestGuardWindowGrace(t *testing.T) {
 		if !to.Equal(c.want) || !from.Equal(c.want.AddDate(0, 0, -30)) {
 			t.Errorf("at %v: from %v to %v, want to %v", c.now, from, to, c.want)
 		}
+	}
+}
+
+// A9 (unit): the guardrails render is the body's QG cells as stored, shown
+// and hidden alike; an unnamed (fully hidden) row is left out.
+func TestGuardrailsFromBody(t *testing.T) {
+	p := calendar.Of(calendar.Month, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
+	from, to := analytics.Dates(p)
+	h := smallgroup.Guarded{Suppressed: true}
+	row := analytics.Row{Answers: smallgroup.Count(30), Pass: smallgroup.Count(20), Regenerate: h, Escalate: h, Degraded: smallgroup.Count(0),
+		PassShare: smallgroup.Share(20, 30), RegenerateShare: smallgroup.GuardedShare{Suppressed: true}}
+	b := analytics.Body{Kind: "month", From: from, To: to, All: row, Hospitals: []analytics.HospitalRow{
+		{Hospital: analytics.Ref{ID: uuid.NewString(), Name: "Synthetic North"}, Row: row},
+		{Hospital: analytics.Ref{ID: uuid.NewString(), Name: ""}},
+	}}
+	computed := time.Date(2026, 11, 1, 0, 20, 0, 0, time.UTC)
+	out := GuardrailsFromBody(b, p, computed)
+	if out.Period != "month" || out.From != "2026-10-01T00:00:00.000Z" || out.To != "2026-11-01T00:00:00.000Z" || out.UpdatedAt != "2026-11-01T00:20:00.000Z" {
+		t.Errorf("bounds %+v", out)
+	}
+	if len(out.Hospitals) != 1 {
+		t.Fatalf("%d rows, want the named one", len(out.Hospitals))
+	}
+	for _, r := range []Rates{out.All, out.Hospitals[0].Rates} {
+		if r.Answers != row.Answers || r.Pass != row.Pass || r.Regenerate != row.Regenerate || r.Escalate != row.Escalate ||
+			r.Degraded != row.Degraded || r.PassShare != row.PassShare || r.RegenerateShare != row.RegenerateShare {
+			t.Errorf("cells differ from the body: %+v", r)
+		}
+	}
+	raw, _ := json.Marshal(HiddenRates())
+	if regexp.MustCompile(`"value":[^n]`).Match(raw) || regexp.MustCompile(`"suppressed":false`).Match(raw) {
+		t.Errorf("a hidden row shows something: %s", raw)
+	}
+}
+
+// ADR 0012: the rolling values sunset at least 90 days after their release.
+func TestRollingSunsetNotice(t *testing.T) {
+	if RollingSunset.Sub(RollingDeprecatedAt) < 90*24*time.Hour {
+		t.Errorf("sunset %v is less than 90 days after %v", RollingSunset, RollingDeprecatedAt)
+	}
+	if GuardrailsGrace != 15*time.Minute {
+		t.Errorf("grace %v", GuardrailsGrace)
 	}
 }
