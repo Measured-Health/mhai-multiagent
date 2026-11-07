@@ -80,6 +80,9 @@ if TYPE_CHECKING:
 log = logging.getLogger("intelligence.boundary.cloud.client")
 
 TOP_K: Final = MAX_CHUNKS
+# A reported use more than this far above the reservation flags the
+# provider for an operator (mhai_cloud_alerts_total{kind="usage_overrun"}).
+OVERRUN_ALERT_PERCENT: Final = 10
 CONNECT_TIMEOUT: Final = 5.0
 POOL_TIMEOUT: Final = 5.0
 
@@ -552,11 +555,34 @@ class CloudModelClient:
             used = ti + to if ti is not None and to is not None else None
         else:
             used = None
+        if used is not None and reply is not None and used > reservation.tokens:
+            self._overrun(reservation, used, reply.outcome)
         try:
             budget.settle(reservation, used)
         except Exception as e:
             log.warning("cloud.settle_failed error=%s", type(e).__name__)
             telemetry.record_cloud_settle_failure()
+
+    def _overrun(self, reservation: Reservation, used: int, outcome: str) -> None:
+        """Review I1: core settles at most the reservation (00018), so a
+        reply that reports more is logged (outcome code and counts only)
+        and counted; more than OVERRUN_ALERT_PERCENT over the reservation, the provider is
+        flagged for an operator, as an alert."""
+        p = self._provider.name
+        over = used - reservation.tokens
+        alert = over * 100 > reservation.tokens * OVERRUN_ALERT_PERCENT
+        log.log(
+            logging.ERROR if alert else logging.WARNING,
+            "cloud.usage_overrun provider=%s outcome=%s reserved=%d used=%d over=%d",
+            p,
+            retry.final_outcome(outcome),
+            reservation.tokens,
+            used,
+            over,
+        )
+        telemetry.record_cloud_usage_overrun(p)
+        if alert:
+            telemetry.record_cloud_alert(p, "usage_overrun")
 
 
 # --- building the clients -------------------------------------------------------------
