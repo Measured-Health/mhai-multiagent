@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -738,6 +739,318 @@ func TestComposeEMRNATSUserOffByDefault(t *testing.T) {
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.HasPrefix(line, "NATS_EMR_") {
 			t.Errorf(".env.example sets %s", line)
+		}
+	}
+}
+
+// deployService is a service in deploy/compose.yml with the fields the
+// cloud egress checks read. networks is a list or a map, so it stays a node.
+type deployService struct {
+	Image       string            `yaml:"image"`
+	Environment map[string]string `yaml:"environment"`
+	Networks    yaml.Node         `yaml:"networks"`
+	NetworkMode string            `yaml:"network_mode"`
+	Profiles    []string          `yaml:"profiles"`
+	Ports       []string          `yaml:"ports"`
+	Volumes     []string          `yaml:"volumes"`
+	ReadOnly    bool              `yaml:"read_only"`
+	MemLimit    string            `yaml:"mem_limit"`
+	CapDrop     []string          `yaml:"cap_drop"`
+	User        string            `yaml:"user"`
+}
+
+type deployCompose struct {
+	Services map[string]deployService `yaml:"services"`
+	Networks map[string]struct {
+		Internal bool `yaml:"internal"`
+		External bool `yaml:"external"`
+	} `yaml:"networks"`
+}
+
+func (s deployService) networkNames() []string {
+	var out []string
+	switch s.Networks.Kind {
+	case yaml.SequenceNode:
+		for _, n := range s.Networks.Content {
+			out = append(out, n.Value)
+		}
+	case yaml.MappingNode:
+		for i := 0; i < len(s.Networks.Content); i += 2 {
+			out = append(out, s.Networks.Content[i].Value)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+func readRepoFile(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func loadDeployCompose(t *testing.T) deployCompose {
+	t.Helper()
+	var c deployCompose
+	if err := yaml.Unmarshal([]byte(readRepoFile(t, filepath.Join("deploy", "compose.yml"))), &c); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// commentedPipeline parses deploy/compose.yml's commented-out pipeline
+// block as an operator would uncomment it: every line from "  # pipeline:"
+// to the first line that isn't a comment loses its "  # " prefix. Lines
+// commented twice stay comments.
+func commentedPipeline(t *testing.T) deployService {
+	t.Helper()
+	var block []string
+	in := false
+	for _, line := range strings.Split(readRepoFile(t, filepath.Join("deploy", "compose.yml")), "\n") {
+		if line == "  # pipeline:" {
+			in = true
+		}
+		if !in {
+			continue
+		}
+		if !strings.HasPrefix(line, "  #") {
+			break
+		}
+		block = append(block, strings.TrimPrefix(strings.TrimPrefix(line, "  #"), " "))
+	}
+	if len(block) == 0 {
+		t.Fatal("deploy/compose.yml has no commented pipeline block")
+	}
+	var svcs map[string]deployService
+	if err := yaml.Unmarshal([]byte(strings.Join(block, "\n")), &svcs); err != nil {
+		t.Fatalf("the commented pipeline block isn't valid YAML once uncommented: %v", err)
+	}
+	p, ok := svcs["pipeline"]
+	if !ok {
+		t.Fatal("the commented block has no pipeline service")
+	}
+	return p
+}
+
+// Cloud plan Task 14 (A15): only the egress proxy joins the egress network,
+// which is the only one with a route out besides edge (core's and NATS's
+// loopback ports). The proxy is off by default (profile cloud), publishes
+// no port, runs read-only as a non-root user with no capabilities and a
+// memory cap, and mounts its config and the allowed-hosts list read-only.
+func TestEgressProxyOnlyServiceOnEgressNetwork(t *testing.T) {
+	c := loadDeployCompose(t)
+	p, ok := c.Services["egress-proxy"]
+	if !ok {
+		t.Fatal("no egress-proxy service in deploy/compose.yml")
+	}
+	if !slices.Equal(p.networkNames(), []string{"backend", "egress"}) {
+		t.Errorf("egress-proxy networks %v, want [backend egress]", p.networkNames())
+	}
+	if !slices.Equal(p.Profiles, []string{"cloud"}) {
+		t.Errorf("egress-proxy profiles %v, want [cloud]: off by default", p.Profiles)
+	}
+	if len(p.Ports) != 0 {
+		t.Errorf("egress-proxy publishes %v", p.Ports)
+	}
+	if !p.ReadOnly || p.MemLimit == "" || !slices.Equal(p.CapDrop, []string{"ALL"}) {
+		t.Errorf("egress-proxy: read_only %v, mem_limit %q, cap_drop %v", p.ReadOnly, p.MemLimit, p.CapDrop)
+	}
+	if p.User == "" || strings.HasPrefix(p.User, "0") || strings.HasPrefix(p.User, "root") {
+		t.Errorf("egress-proxy user %q: run squid as its own user", p.User)
+	}
+	mounts := map[string]string{}
+	for _, v := range p.Volumes {
+		// The source may hold a ${VAR:-default}, so read from the right.
+		parts := strings.Split(v, ":")
+		n := len(parts)
+		if n < 3 || parts[n-1] != "ro" {
+			t.Errorf("egress-proxy mount %q must be read-only", v)
+			continue
+		}
+		mounts[parts[n-2]] = strings.Join(parts[:n-2], ":")
+	}
+	for _, target := range []string{"/etc/squid/squid.conf", "/etc/squid/allowed-hosts"} {
+		if mounts[target] == "" {
+			t.Errorf("egress-proxy doesn't mount %s", target)
+		}
+	}
+	if !strings.HasSuffix(mounts["/etc/squid/squid.conf"], "egress-proxy/squid.conf") {
+		t.Errorf("squid.conf comes from %q", mounts["/etc/squid/squid.conf"])
+	}
+	e, ok := c.Networks["egress"]
+	if !ok || e.Internal || e.External {
+		t.Errorf("networks.egress = %+v (present %v): a project network with a route out", e, ok)
+	}
+	if !c.Networks["backend"].Internal {
+		t.Error("networks.backend must stay internal")
+	}
+	all := map[string]deployService{"pipeline (commented)": commentedPipeline(t)}
+	for name, s := range c.Services {
+		all[name] = s
+	}
+	for name, s := range all {
+		if name != "egress-proxy" && slices.Contains(s.networkNames(), "egress") {
+			t.Errorf("%s is on the egress network", name)
+		}
+		if name != "egress-proxy" && slices.Contains(s.Profiles, "cloud") {
+			t.Errorf("%s is in the cloud profile", name)
+		}
+	}
+}
+
+// The pipeline, once uncommented, stays on backend only (no route out) and
+// reaches the providers only through the proxy, named by its own setting:
+// HTTPS_PROXY would send every library's HTTPS through it (plan Task 14
+// check M5), so it is never set. The key is a read-only file mount.
+func TestPipelineNeverOnEgress(t *testing.T) {
+	p := commentedPipeline(t)
+	if !slices.Equal(p.networkNames(), []string{"backend"}) {
+		t.Errorf("pipeline networks %v, want [backend] only", p.networkNames())
+	}
+	if p.NetworkMode != "" || len(p.Ports) != 0 {
+		t.Errorf("pipeline network_mode %q, ports %v", p.NetworkMode, p.Ports)
+	}
+	if got := p.Environment["INTELLIGENCE_CLOUD_PROXY"]; got != "http://egress-proxy:3128" {
+		t.Errorf("INTELLIGENCE_CLOUD_PROXY = %q, want http://egress-proxy:3128", got)
+	}
+	for k := range p.Environment {
+		if l := strings.ToLower(k); l == "https_proxy" || l == "http_proxy" || l == "all_proxy" {
+			t.Errorf("pipeline sets %s: a process-wide proxy reaches every library", k)
+		}
+	}
+	key := false
+	for _, v := range p.Volumes {
+		parts := strings.Split(v, ":")
+		if len(parts) >= 2 && strings.HasPrefix(parts[1], "/run/secrets/") && strings.HasSuffix(parts[1], "-api-key") {
+			key = true
+			if len(parts) != 3 || parts[2] != "ro" {
+				t.Errorf("key mount %q must be read-only", v)
+			}
+		}
+	}
+	if !key {
+		t.Error("the pipeline block shows no key-file mount (/run/secrets/<provider>-api-key)")
+	}
+	raw := readRepoFile(t, filepath.Join("deploy", "compose.yml"))
+	for _, v := range []string{"INTELLIGENCE_CLOUD_PROVIDERS", "INTELLIGENCE_CLOUD_ANTHROPIC_MODEL",
+		"INTELLIGENCE_CLOUD_ANTHROPIC_KEY_FILE", "INTELLIGENCE_CLOUD_ANTHROPIC_ZDR_REF"} {
+		if !strings.Contains(raw, "# "+v+":") {
+			t.Errorf("the pipeline block doesn't show %s, commented out", v)
+		}
+		if _, ok := p.Environment[v]; ok {
+			t.Errorf("%s is set by uncommenting the block once: it must stay commented (off by default)", v)
+		}
+	}
+}
+
+// The proxy's image is pinned by digest, so a re-pushed tag can't change
+// what holds the only route out.
+func TestEgressProxyPinnedByDigest(t *testing.T) {
+	img := loadDeployCompose(t).Services["egress-proxy"].Image
+	if !regexp.MustCompile(`^ubuntu/squid(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$`).MatchString(img) {
+		t.Errorf("egress-proxy image %q is not ubuntu/squid pinned by digest", img)
+	}
+}
+
+// Provider keys are files on the pipeline host only (design §7): no
+// service in either compose file (nor the commented pipeline) has a
+// provider key in its environment, and core has no worker cloud setting.
+func TestNoProviderKeyInAnyEnvironment(t *testing.T) {
+	providerVar := regexp.MustCompile(`(?i)(OPENAI|ANTHROPIC|XAI|INTELLIGENCE_CLOUD_[A-Z]+)_(API_)?KEY$|^(OPENAI|ANTHROPIC|XAI|AZURE_OPENAI)_`)
+	keyValue := regexp.MustCompile(`\b(sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9_-]{8,})`)
+	check := func(file, name string, env map[string]string) {
+		for k, v := range env {
+			if providerVar.MatchString(k) {
+				t.Errorf("%s: %s env sets %s", file, name, k)
+			}
+			if keyValue.MatchString(v) {
+				t.Errorf("%s: %s env %s holds a key-shaped value", file, name, k)
+			}
+			if name == "core" && strings.HasPrefix(k, "INTELLIGENCE_CLOUD_") {
+				t.Errorf("%s: core has the worker's %s", file, k)
+			}
+		}
+	}
+	for name, s := range loadCompose(t) {
+		check("docker-compose.yml", name, s.Environment)
+	}
+	for name, s := range loadDeployCompose(t).Services {
+		check("deploy/compose.yml", name, s.Environment)
+	}
+	check("deploy/compose.yml", "pipeline (commented)", commentedPipeline(t).Environment)
+	// The negative case, so the pattern can't silently match nothing.
+	if !providerVar.MatchString("ANTHROPIC_API_KEY") || !providerVar.MatchString("INTELLIGENCE_CLOUD_XAI_KEY") ||
+		providerVar.MatchString("INTELLIGENCE_CLOUD_XAI_KEY_FILE") || providerVar.MatchString("NATS_JS_KEY") {
+		t.Fatal("providerVar pattern is wrong")
+	}
+}
+
+// squid.conf (plan Task 14): CONNECT to 443 of the listed hosts only,
+// matched by name with no reverse lookup (-n), IP literals refused first,
+// no caching, no TLS interception, no forwarding headers, and an access
+// log of method, host, port and status (no path, no client details).
+func TestSquidConfAllowsOnlyConnect443ToListedHosts(t *testing.T) {
+	conf := readRepoFile(t, filepath.Join("deploy", "egress-proxy", "squid.conf"))
+	var lines []string
+	for _, l := range strings.Split(conf, "\n") {
+		l = strings.TrimSpace(l)
+		if l != "" && !strings.HasPrefix(l, "#") {
+			lines = append(lines, strings.Join(strings.Fields(l), " "))
+		}
+	}
+	for _, want := range []string{
+		"http_port 3128",
+		`acl providers dstdomain -n "/etc/squid/allowed-hosts"`,
+		`acl ip_literal dstdom_regex -n ^[0-9.]+$ ^\[?[0-9a-fA-F:]+\]?$`,
+		"acl SSL_port port 443",
+		"cache deny all",
+		"forwarded_for delete",
+		"via off",
+	} {
+		if !slices.Contains(lines, want) {
+			t.Errorf("squid.conf lacks %q", want)
+		}
+	}
+	var access []string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "http_access ") {
+			access = append(access, l)
+		}
+	}
+	if len(access) < 3 || access[0] != "http_access deny ip_literal" ||
+		access[len(access)-2] != "http_access allow CONNECT SSL_port providers" ||
+		access[len(access)-1] != "http_access deny all" {
+		t.Errorf("http_access rules %q: deny ip_literal first, the one allow, then deny all", access)
+	}
+	for _, l := range access[:len(access)-2] {
+		if !strings.HasPrefix(l, "http_access deny ") {
+			t.Errorf("an allow before the provider rule: %q", l)
+		}
+	}
+	for _, l := range lines {
+		for _, bad := range []string{"ssl_bump", "cache_dir", "sslcrtd", "https_port", "cache_peer", "never_direct", "always_direct", "include "} {
+			if strings.HasPrefix(l, bad) {
+				t.Errorf("squid.conf has %q", l)
+			}
+		}
+		if strings.HasPrefix(l, "acl ") && strings.Contains(l, " dst ") && strings.Contains(strings.Join(access, " "), "allow "+strings.Fields(l)[1]) {
+			t.Errorf("an address acl (resolved from the client's host name) allows: %q", l)
+		}
+		if strings.HasPrefix(l, "logformat ") {
+			for _, code := range []string{"%>ru", "%ru", "%rp", "%>rp", "%>a", "%un", "%>h", "%<h", "%{"} {
+				if strings.Contains(l, code) {
+					t.Errorf("logformat logs %s: %q", code, l)
+				}
+			}
+		}
+	}
+	// The example lists no host: a provider is added when it is enabled.
+	for _, l := range strings.Split(readRepoFile(t, filepath.Join("deploy", "egress-proxy", "allowed-hosts.example")), "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") {
+			t.Errorf("allowed-hosts.example lists %q", l)
 		}
 	}
 }

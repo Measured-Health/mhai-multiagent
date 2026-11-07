@@ -263,9 +263,46 @@ services:
   #     INTELLIGENCE_TRUSTED_KEYS_PATH: /trusted/request-keys.json
   #     INTELLIGENCE_DB_URL: postgres://postgres:5432/mhai?sslmode=verify-full
   #     INTELLIGENCE_DB_PASSWORD_FILE: /run/secrets/intelligence-db-password
-  #   volumes: ["trustedkeys:/trusted:ro"]
+  #     # Cloud models (off by default; deploy/README.md, "Cloud models").
+  #     # The proxy has its own setting: HTTPS_PROXY would send every
+  #     # library's HTTPS through it. Never put a key in the environment.
+  #     INTELLIGENCE_CLOUD_PROXY: http://egress-proxy:3128
+  #     # INTELLIGENCE_CLOUD_PROVIDERS: anthropic
+  #     # INTELLIGENCE_CLOUD_ANTHROPIC_MODEL: claude-opus-5-5
+  #     # INTELLIGENCE_CLOUD_ANTHROPIC_KEY_FILE: /run/secrets/anthropic-api-key
+  #     # INTELLIGENCE_CLOUD_ANTHROPIC_ZDR_REF: <the provider's ZDR reference>
+  #   volumes:
+  #     - trustedkeys:/trusted:ro
+  #     # Mode 0400, owned by the worker's user (deploy/README.md).
+  #     - ./secrets/anthropic-api-key:/run/secrets/anthropic-api-key:ro
+  #   # backend only: the egress proxy (profile cloud) is its only way out.
   #   networks: [backend]
-  #   mem_limit: ...
+  #   mem_limit: 3g
+
+  # The egress proxy for the cloud model providers (design section 6): the
+  # only service on `egress`, the one network here with a route out. It
+  # allows CONNECT to port 443 of the hosts in egress-proxy/allowed-hosts
+  # and nothing else (egress-proxy/squid.conf). Off by default: it starts
+  # only with `--profile cloud`, after the steps in deploy/README.md
+  # ("Cloud models"). The demo never starts it and needs none of its files.
+  egress-proxy:
+    <<: *hardening
+    image: ubuntu/squid:6.6-24.04_edge@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
+    profiles: ["cloud"]
+    restart: unless-stopped
+    # Squid without the image's entrypoint (which writes certificates and
+    # log files): no daemon, our config, as the image's proxy user.
+    entrypoint: ["/usr/sbin/squid"]
+    command: ["-N", "-f", "/etc/squid/squid.conf"]
+    user: "13:13"
+    volumes:
+      - ./egress-proxy/squid.conf:/etc/squid/squid.conf:ro
+      - ${EGRESS_ALLOWED_HOSTS:-./egress-proxy/allowed-hosts}:/etc/squid/allowed-hosts:ro
+    tmpfs:
+      - /tmp
+      - /var/run/squid
+    mem_limit: 128m
+    networks: [backend, egress]
 
 networks:
   # No route out: Postgres and NATS can't reach anything but each other and
@@ -274,6 +311,8 @@ networks:
     internal: true
   # Only for the loopback ports of core and NATS.
   edge: {}
+  # The egress proxy's way out, and only its (profile cloud).
+  egress: {}
   # Shared with the frontend's compose project (mhai-web), made by
   # setup-host.sh with --internal. Only NATS is on it here: the BFF reaches
   # it as mhai-nats:4222 and nothing else in this stack.

@@ -589,6 +589,8 @@ Each adapter task has the same shape: the request test (exact JSON body and head
 - [ ] **Step 3:** Write the config, the compose service and `deploy/README.md`'s "Cloud models" section: enabling a provider (§15 steps 1–5), the key file (mode 0400, owner the worker user), rotation every 90 days and on suspicion (write the new file, rolling restart, revoke the old key), the provider-side spend limit and endpoint scope, and switching off (policy to `none`, then remove the key file and the host from `allowed-hosts`).
 - [ ] **Step 4:** Run both test sets remotely.
 - **Check (Task 4 review M5):** `HTTPS_PROXY` is a process-wide name. In the pipeline worker, `requests`, `boto3` and the Hugging Face hub (anything with `trust_env=True`) would also send HTTPS through the egress proxy, which refuses every other host. That fails closed, but it can break model downloads or the model store when cloud is on. Before this commit, confirm nothing else in the pipeline worker needs HTTPS at run time, or rename the setting to `INTELLIGENCE_CLOUD_PROXY` (Task 4's settings and tests, and this task's compose block).
+  - **As built (PR E):** renamed. The worker reads `INTELLIGENCE_CLOUD_PROXY`; `HTTPS_PROXY` is neither read nor needed (the cloud transport has `trust_env=False`), and the compose block never sets it (`TestPipelineNeverOnEgress`).
+- **Also (PR C, Task 9 concern):** with a provider enabled, start-up refuses when OpenSSL's CA file and CA directory are both missing or empty (`settings.openssl_ca_paths`; `tls_context` refuses too), rather than failing every call on TLS.
 - [ ] **Step 5:** Commit: "An egress proxy that allows only the enabled providers' API hosts on 443".
 
 ### Task 15: The manual live smoke and fixture recording

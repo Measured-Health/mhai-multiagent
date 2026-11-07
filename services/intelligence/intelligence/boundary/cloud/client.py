@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import ssl
 import threading
 import time
@@ -63,6 +62,7 @@ from intelligence.boundary.cloud.gate import (
 from intelligence.boundary.cloud.reply import Answer, validate_answer
 from intelligence.boundary.cloud.retry import RETRY, RetryPolicy
 from intelligence.boundary.cloud.scan import Identifiers, ScanHook, Shape, scan_body
+from intelligence.boundary.cloud.settings import NO_CA_BUNDLE, openssl_ca_paths
 from intelligence.boundary.config import ConfigError, is_development
 from intelligence.boundary.models import (
     _SAFE_VERSION,
@@ -240,16 +240,16 @@ def tls_context() -> ssl.SSLContext:
     """TLS for the providers: hostname checked, a certificate required, TLS
     1.2 or later, trusting the CA paths OpenSSL was built with, never
     SSL_CERT_FILE or SSL_CERT_DIR (which ssl.create_default_context and
-    httpx2's default context both read)."""
+    httpx2's default context both read). No CA there refuses (ConfigError),
+    as start-up does (settings.openssl_ca_paths)."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
-    paths = ssl.get_default_verify_paths()
-    cafile = paths.openssl_cafile if os.path.isfile(paths.openssl_cafile) else None
-    capath = paths.openssl_capath if os.path.isdir(paths.openssl_capath) else None
-    if cafile is not None or capath is not None:
-        ctx.load_verify_locations(cafile=cafile, capath=capath)
+    cafile, capath = openssl_ca_paths()
+    if cafile is None and capath is None:
+        raise ConfigError(NO_CA_BUNDLE)
+    ctx.load_verify_locations(cafile=cafile, capath=capath)
     return ctx
 
 
