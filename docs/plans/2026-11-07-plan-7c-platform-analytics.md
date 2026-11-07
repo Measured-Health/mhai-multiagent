@@ -14,7 +14,7 @@
 
 **The contract:**
 - `docs/specs/2026-10-17-frontend-requirements.md` §14.6 and §14.7.
-- mhai-web's `apps/platform/lib/api/analytics-contract.ts`, with the changes in spec §13 (F1–F18).
+- mhai-web's `apps/platform/lib/api/analytics-contract.ts`, with the changes in spec §13 (F1–F19).
 - `services/core/openapi.yaml` for `GET /platform/guardrails`.
 
 **Phases:** three PRs, each mergeable on its own, in this order (the migration chain is linear):
@@ -36,7 +36,7 @@ In addition:
 - **Guardrails and Answer quality render from the same snapshot.** No second computation of the QG family.
 - **Questions and answers are one family (QG).** Answers are counted in their question's week, and `answers` is guarded within `questions`. Never guard them as independent tables.
 - **Two roles.** Routes run as `mhai_platform` and read guarded rows only; they get no grant on a clinical table, the frozen counts or the analytics functions. The scheduler runs as `mhai_analytics_job` through its own pool, the only role that executes the analytics functions.
-- **R41a-3:** only periods that close after the release epoch are published; the rolling guardrail windows are served fully hidden; `guardrail_snapshots` is emptied and never read again.
+- **R41a-3:** only eligible periods are published: weeks that start at or after the release epoch, and months and quarters whose children all do; the first parents that don't qualify are absent, not `unavailable`; the rolling guardrail windows are served fully hidden; `guardrail_snapshots` is emptied and never read again.
 - **The follow-up note** stays in `analytics_follow_ups`. It is returned only in the changes list on platform routes; never logged, traced, audited or published.
 - **Migrations are 00019 and 00020** (main ends at 00018). If another PR merges a migration first, renumber. Each has a full `Down` that revokes every grant it made. Every new table has `ENABLE` and `FORCE` row-level security, owner `mhai_migrate`, and a row in `TestRLSWithoutHospitalSeesNothing`.
 - **ADR 0012:** additive only. `openapi.yaml` gets a minor bump per PR and `oasdiff breaking` passes. New problem codes: none.
@@ -171,14 +171,15 @@ docs/notices/guardrails-rolling-windows.md         the deprecation notice the Li
 - Create: `services/core/internal/db/migrations/00019_analytics_snapshots.sql`, `services/core/internal/db/analytics_integration_test.go`
 - Modify: `services/core/internal/db/db_integration_test.go` (`TestRLSWithoutHospitalSeesNothing` seeds the new table)
 
-Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password file, `deploy/` and compose entries, the startup refusal of placeholders). `analytics_epoch` gets its one row from `now()` in Up. Up runs `TRUNCATE guardrail_snapshots` (R41a-3); Down can't restore those rows (a cache of guarded figures) and says so. Follow 00017's pattern for the owner role (created if missing, no members, refused if it has any, kept on Down with every grant revoked) and the definer pattern (owner, `SET search_path = pg_catalog, pg_temp`, every relation written `public.<name>`, `REVOKE ALL … FROM PUBLIC`, `EXECUTE` to `mhai_platform` only).
+Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password file, `deploy/` and compose entries, the startup refusal of placeholders). `analytics_epoch` gets its one row from `now()` in Up. Up runs `TRUNCATE guardrail_snapshots` (R41a-3); Down can't restore those rows (a cache of guarded figures) and says so. Follow 00017's pattern for the owner role (created if missing, no members, refused if it has any, kept on Down with every grant revoked) and the definer pattern (owner, `SET search_path = pg_catalog, pg_temp`, every relation written `public.<name>`, `REVOKE ALL … FROM PUBLIC`, `EXECUTE` to `mhai_analytics_job` only, never `mhai_platform`). Also `REVOKE EXECUTE ON FUNCTION mhai_guardrail_counts(timestamptz, timestamptz) FROM mhai_platform` (spec §9: it returns unguarded counts for any window up to 90 days); Down grants it back as 00017 did. A period is eligible as spec §4 says: a week that starts at or after the epoch, and a month or quarter only if all its children are.
 
 - [ ] **Step 1: Write the failing tests:**
   - `TestAnalyticsFunctionsRefuseRollingWindows` (A4): `mhai_analytics_freeze` with a 30-day window, an ISO week, a period ending in the future or inside the grace, and a week 119 days old → 22023.
   - `TestFreezeParentIsSumOfChildren` (A27): a month with a week not frozen → 22023; a frozen month equals the sum of its frozen weeks after rows are committed late; a second freeze changes nothing.
   - `TestFrozenCountsNotSelectable` (A29): `mhai_platform` can't select `analytics_period_counts` or `analytics_frozen_periods`, nor execute any analytics function; nobody can `UPDATE` or `DELETE` them.
   - `TestFreezeOncePerPeriod` (A4): two parallel freezes of one week, and a retry after a late row is committed, leave exactly the first freeze's rows, for every hospital.
-  - `TestFreezeRefusesBeforeEpoch` (A4): a period that closed before `analytics_epoch` → 22023.
+  - `TestFreezeRefusesIneligible` (A4): a week that started before `analytics_epoch`, and a month or quarter with any such child (even one that closes long after the release) → 22023.
+  - `TestGuardrailCountsRevoked` (A30): after Up, `mhai_platform` gets `insufficient_privilege` on `mhai_guardrail_counts`; after Down, the call works as before.
   - `TestGuardrailSnapshotsEmptied`: after Up, `guardrail_snapshots` has no rows.
   - `TestOwnership`: every new table is owned by `mhai_migrate`; the reader holds grants only.
   - `TestAnalyticsFunctionsReturnAggregatesOnly` (A14): the declared columns only; every hospital, zeros included; no user id.
@@ -202,7 +203,7 @@ Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password fi
 **Interfaces:**
 - `analytics.Body`: per hospital (id, name, staff) and `all`: QG and R cells, shares, `active_clinicians`, `questions_per_clinician`, `median_review_hours`, all `smallgroup` types. `DecodeBody(b []byte, p calendar.Period) (Body, error)` is strict: unknown fields, a shown 1–4, a wrong kind or period → error.
 - `Builder.Build(ctx, p calendar.Period) error`: as `mhai_analytics_job`, freezes `p`, reads the block's frozen rows and onboarding times, builds families, `GuardSnapshot`, `Within` for degraded and for answers within questions, `Set` for active clinicians, `ShareOf`, inserts `ON CONFLICT DO NOTHING`.
-- `Scheduler.Run(ctx)`: every 5 minutes under `pg_try_advisory_lock(<new key>)`; finished periods that closed after the release epoch and have no row, oldest first, week, month, quarter at one instant; a week more than 118 days old that was never frozen → it and its parents `unavailable`. Logs the period and a fixed reason only.
+- `Scheduler.Run(ctx)`: every 5 minutes under `pg_try_advisory_lock(<new key>)`; finished eligible periods without a row, oldest first, week, month, quarter at one instant; a week more than 118 days old that was never frozen → it and its parents `unavailable`. Logs the period and a fixed reason only.
 
 - [ ] **Step 1: Write the failing tests:**
   - `TestBodyDecodeStrict` (A16): a stored shown 3, an unknown key, another period → refused.
@@ -210,10 +211,10 @@ Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password fi
   - `TestLateCommitDoesNotMoveStoredFigures` (A2).
   - `TestSchedulerOneCopy` (A25): two schedulers, one row per period, both read the same bytes.
   - `TestSchedulerOrderWeekMonthQuarter`: on 1 Jan 00:15 the week, December and Q4 are built in that order, and the quarter sees the month frozen.
-  - `TestSchedulerCatchUpAndUnavailable`: a missed week is built on the next wake; a week never frozen and out of reach is stored `unavailable` with its parents; a period that closed before the epoch is never built.
+  - `TestSchedulerCatchUpAndUnavailable`: a missed week is built on the next wake; a week never frozen and out of reach is stored `unavailable` with its parents; with the epoch mid-month, that month and its quarter are never built and have no row (absent, not `unavailable`), and the next full month and quarter are built when they close.
   - `TestRoutesCantReachSchedulerPool` (A29): `internal/platform` doesn't import the scheduler's pool or `builder.go`.
   - `TestBuilderLogsNoCounts`: a forced failure logs ids and a fixed reason; no number from the data.
-  - `TestHistoryFromRouteJSON` (A7, the review's form): the A7 generator feeds the builder through a fake count source; every route's handler (analytics, both series, guardrails on `week`, `month`, `quarter`, `7d`, `30d`, `90d`) renders from the stored bodies; `history_test/parse.go`, which imports neither `joint.go` nor `analytics.Body`, turns the JSON into equations with the published definitions (questions = answers + unanswered, answers = its parts, shares × denominators), shown zeros and onboarding; `solve.Exposed` over all of it exposes no hidden cell and no hidden-member sum of 1–4, and no period is `unavailable`.
+  - `TestHistoryFromRouteJSON` (A7, the review's form): the A7 generator, with the release epoch mid-month in each history, feeds the builder through a fake count source; every route's handler (analytics, both series, guardrails on `week`, `month`, `quarter`, `7d`, `30d`, `90d`) renders from the stored bodies; `history_test/parse.go`, which imports neither `joint.go` nor `analytics.Body`, turns the JSON into equations with the published definitions (questions = answers + unanswered, answers = its parts, shares × denominators), shown zeros and onboarding; `solve.Exposed` over all of it exposes no hidden cell and no hidden-member sum of 1–4, and no period is `unavailable`; ineligible weeks, months and quarters appear in no response, and `period=month` answers `not_yet` until the first full month closes (F19).
   - `TestHistoryEndToEnd` (A7 against the database, small): two synthetic quarters from a hospital's onboarding, through the real scheduler and routes; the same parser and solver pass.
 - [ ] **Step 2: Run (Go, remote):** `go test -race ./internal/analytics/... && go test -race -tags integration ./internal/analytics/...` → fail.
 - [ ] **Step 3:** Implement.
@@ -265,6 +266,7 @@ Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password fi
   - `TestAnalyticsRefusesRollingPeriod` (A3).
   - `TestAnalyticsNoRawSmallCount` (A11): no shown 1–4 anywhere; shares, ratios and medians over hidden inputs hidden.
   - `TestAnalyticsMedianFromShownOnly` (A13).
+  - `TestAnalyticsNotYet` (F19): before the first eligible month, `from`/`to` are null and every area is `{not_yet: true, first_from}`, not `unavailable`.
   - `TestAnalyticsAreaUnavailable` (A16, F13): a missing, `unavailable` or undecodable snapshot makes that area `{unavailable: true}` and leaves the others.
   - `TestAnalyticsReadsNoClinicalTable` (A23): 100 parallel reads, no clinical statement in the log; the 31st in a minute is 429.
   - `TestRenderImportsNoBuilder` (I2): the render package doesn't import `builder.go`'s package or the functions' row types.
@@ -357,7 +359,7 @@ Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password fi
 
 - [ ] **7c-1 slice:** smoke: with a test clock past a week's end plus the grace, the scheduler stores the week; `GET /platform/guardrails?period=week` serves it; `period=30d` carries the deprecation headers and every cell hidden. Contract: the guardrails row gets the new values and the deprecation. CHANGELOG: Added and Deprecated. TODO: R41a decided (done in the design PR); retention names `analytics_snapshots`.
 - [ ] **7c-2 slice:** smoke reads `GET /platform/analytics?period=month` and one hospital series. Contract §14.7: the analytics and series rows to **Built (Plan 7c-2)** with F1, F3, F4, F10–F12, F14–F16 (What changed stays `{unavailable: true}` until 7c-3).
-- [ ] **7c-3 slice:** smoke: a synthetic jump flags a change, a platform admin follows it up, an auditor sees `follow_up` and is refused a `PUT`. Contract §14.7: the follow-up rows to Built, with F2, F6, F7, F8, F17. mhai-web's TODO gets F1–F18.
+- [ ] **7c-3 slice:** smoke: a synthetic jump flags a change, a platform admin follows it up, an auditor sees `follow_up` and is refused a `PUT`. Contract §14.7: the follow-up rows to Built, with F2, F6, F7, F8, F17. mhai-web's TODO gets F1–F19.
 - [ ] **Each slice:** `make smoke` (remote), `oasdiff` additive, docs, TODO entries.
 - [ ] **Commit per slice:** "Smoke and docs: Plan 7c-1" (7c-2, 7c-3).
 
@@ -370,7 +372,7 @@ Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password fi
 | A1 | `TestAnalyticsSameAllPeriod` (6), `TestLatestIsStableWithinPeriod` (1) |
 | A2 | `TestLateCommitDoesNotMoveStoredFigures` (4) |
 | A3 | `TestParseRefusesNonPeriods` (1), `TestAnalyticsRefusesRollingPeriod` (6) |
-| A4 | `TestAnalyticsFunctionsRefuseRollingWindows`, `TestFreezeOncePerPeriod`, `TestFreezeRefusesBeforeEpoch` (3) |
+| A4 | `TestAnalyticsFunctionsRefuseRollingWindows`, `TestFreezeOncePerPeriod`, `TestFreezeRefusesIneligible` (3) |
 | A5 | `TestQuarterMinusMonthsHidden` (2) |
 | A6 | `TestParentSetRule2AndBridge` (2) |
 | A7 | `TestHistoryAnchoredAtOnboarding` (2), `TestHistoryFromRouteJSON`, `TestHistoryEndToEnd` (4) |
@@ -395,6 +397,7 @@ Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password fi
 | A26 | `TestReviewChainingCase`, `TestShownZeroIsKnown` (2) |
 | A27 | `TestFreezeParentIsSumOfChildren` (3), `TestLateCommitDoesNotMoveStoredFigures` (4) |
 | A28 | `TestLinkedFamilies` (2) |
+| A30 | `TestGuardrailCountsRevoked` (3) |
 | A29 | `TestFrozenCountsNotSelectable` (3), `TestRoutesCantReachSchedulerPool` (4) |
 
 ## Order
