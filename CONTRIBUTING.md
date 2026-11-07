@@ -83,7 +83,10 @@ code review:
 - prompts;
 - the NLI, embedding or LLM models (including version bumps);
 - decision mapping;
-- PII rules.
+- PII rules;
+- what may leave for a cloud model: `gate.SYSTEM_PROMPT`, `CloudContext`'s
+  allow-list (`gate.py`), `scan.IDENTIFYING_KEYS` (`scan.py`), and the
+  configured cloud model ids (`INTELLIGENCE_CLOUD_<PROVIDER>_MODEL`).
 
 The process:
 

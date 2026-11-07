@@ -28,3 +28,6 @@ coverage.xml
 
 # Local agent workspace (plans, ledgers, review notes)
 .superpowers/
+
+# The egress proxy's host list is per deployment (deploy/egress-proxy/allowed-hosts.example).
+deploy/egress-proxy/allowed-hosts

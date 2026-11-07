@@ -3,7 +3,10 @@
 INTELLIGENCE_CLOUD_PROVIDERS (a comma list, empty by default) names the
 enabled providers. Each needs INTELLIGENCE_CLOUD_<P>_MODEL and
 INTELLIGENCE_CLOUD_<P>_KEY_FILE everywhere; outside development it also
-needs INTELLIGENCE_CLOUD_<P>_ZDR_REF and HTTPS_PROXY. The base URLs are
+needs INTELLIGENCE_CLOUD_<P>_ZDR_REF and INTELLIGENCE_CLOUD_PROXY (the egress
+proxy; its own name, not HTTPS_PROXY, which every library would read). With
+a provider enabled, OpenSSL's CA file or CA directory must hold something,
+or start-up is refused. The base URLs are
 vocab.BASE_URLS; INTELLIGENCE_CLOUD_<P>_BASE_URL overrides one in
 development only. ZDR_REF=DEMO-SYNTHETIC is accepted only with APP_ENV=demo
 (with a warning) or in development. The SDKs' own environment variables are
@@ -16,7 +19,9 @@ Errors name variables, never their values (design section 7).
 from __future__ import annotations
 
 import logging
+import os
 import re
+import ssl
 from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -28,6 +33,13 @@ from intelligence.boundary.config import is_demo
 log = logging.getLogger("intelligence.boundary.cloud.settings")
 
 PROVIDERS_VAR = "INTELLIGENCE_CLOUD_PROVIDERS"
+# The egress proxy for the provider connections only (plan Task 14, check
+# M5). HTTPS_PROXY is process-wide: requests, the Hugging Face hub and any
+# trust_env client would send their HTTPS through it too. The cloud
+# transport ignores the environment (trust_env=False), so HTTPS_PROXY is
+# neither read nor needed.
+PROXY_VAR = "INTELLIGENCE_CLOUD_PROXY"
+NO_CA_BUNDLE = "no CA bundle at OpenSSL's paths (a CA file or a non-empty CA directory) for the cloud providers"
 DEMO_ZDR_REF = "DEMO-SYNTHETIC"
 _MODEL = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 _ZDR_REF = re.compile(r"[A-Z0-9][A-Z0-9_.-]{2,63}")
@@ -147,14 +159,47 @@ class CloudSettings:
             ps = _provider(env, p, development, demo, base_urls.get(p), errs)
             if ps is not None:
                 providers.append(ps)
-        proxy = get("HTTPS_PROXY")
+        proxy = get(PROXY_VAR)
         if proxy is None:
             if not development:
-                errs.append("HTTPS_PROXY is required when a cloud provider is enabled")
+                errs.append(f"{PROXY_VAR} is required when a cloud provider is enabled")
         elif not _valid_proxy(proxy):
-            errs.append("HTTPS_PROXY must be http://<host>:<port>")
+            errs.append(f"{PROXY_VAR} must be http://<host>:<port>")
             proxy = None
+        if openssl_ca_paths() == (None, None):
+            errs.append(NO_CA_BUNDLE)
         return cls(providers=tuple(providers), proxy_url=proxy, demo=demo)
+
+
+def model_problem(provider: str, model: str) -> str | None:
+    """Why model can't be configured for provider (never quoting it), or
+    None. The worker's settings and the live smoke both check this."""
+    if not _MODEL.fullmatch(model):
+        return "must be 1 to 64 of A-Z a-z 0-9 . _ : -"
+    if provider == "anthropic" and any(m in model.casefold() for m in _RETAINED_ANTHROPIC):
+        return "names a model that needs 30-day retention (Fable, Mythos); not allowed"
+    return None
+
+
+def openssl_ca_paths() -> tuple[str | None, str | None]:
+    """OpenSSL's compiled-in CA file and CA directory, each only when it is
+    there and not empty. The cloud TLS context trusts these and nothing
+    else (never SSL_CERT_FILE or SSL_CERT_DIR); (None, None) means every
+    provider call would fail TLS, so start-up refuses instead."""
+    paths = ssl.get_default_verify_paths()
+    cafile: str | None = paths.openssl_cafile
+    capath: str | None = paths.openssl_capath
+    try:
+        if not (cafile and os.path.isfile(cafile) and os.path.getsize(cafile) > 0):
+            cafile = None
+    except OSError:
+        cafile = None
+    try:
+        if not (capath and os.path.isdir(capath) and any(os.scandir(capath))):
+            capath = None
+    except OSError:
+        capath = None
+    return cafile, capath
 
 
 def _parse_providers(raw: str | None, errs: list[str]) -> list[str]:
@@ -193,12 +238,8 @@ def _provider(
     model = get("MODEL")
     if model is None:
         errs.append(f"{prefix}MODEL is required")
-    elif not _MODEL.fullmatch(model):
-        errs.append(f"{prefix}MODEL must be 1 to 64 of A-Z a-z 0-9 . _ : -")
-    elif p == "anthropic" and any(m in model.casefold() for m in _RETAINED_ANTHROPIC):
-        errs.append(
-            f"{prefix}MODEL names a model that needs 30-day retention (Fable, Mythos); not allowed"
-        )
+    elif (problem := model_problem(p, model)) is not None:
+        errs.append(f"{prefix}MODEL {problem}")
 
     key: ApiKey | None = None
     key_file = get("KEY_FILE")

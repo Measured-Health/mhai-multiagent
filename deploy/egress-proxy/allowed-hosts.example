@@ -1,0 +1,10 @@
+# The provider API hosts the egress proxy allows (CONNECT to port 443
+# only), one per line, exact names, no leading dot. Copy this file to
+# allowed-hosts on the host and add the line of each provider enabled in
+# INTELLIGENCE_CLOUD_PROVIDERS, from intelligence/boundary/cloud/vocab.py
+# HOSTS:
+#   anthropic  api.anthropic.com
+#   openai     api.openai.com
+#   xai        api.x.ai
+# Listing none (as here) refuses everything. When a provider is switched
+# off, remove its line (deploy/README.md, "Cloud models").

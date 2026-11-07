@@ -473,3 +473,22 @@ def check_registered_with_retries_off(provider: str, factory: Factory) -> None:
         assert sdk.max_retries == 0
         sdk2 = factory(MODEL).make_sdk(http, ApiKey(FAKE_KEY), vocab.BASE_URLS[provider])
         assert sdk2.max_retries == 0
+
+
+def check_recorded(provider: str, path: Path) -> None:
+    """A recorded, scrubbed reply (plan Task 15) parses to the outcome its
+    file name starts with ("ok-<model>.json"), through the real client,
+    adapter and scan, as the synthetic fixtures do. An ok one cites only
+    chunks that were sent."""
+    fx = json.loads(path.read_text("utf-8"))
+    expect = path.stem.split("-", 1)[0]
+    assert expect in vocab.OUTCOMES, path.name
+    transport = FixtureTransport(fx)
+    c = make_client(provider, client_mod.ADAPTERS[provider], transport)
+    g, budget = generate(c)
+    assert g.cloud_outcome == expect, (path.name, g.cloud_outcome)
+    assert len(budget.settled) == len(budget.reserved)
+    if expect == "ok":
+        sent = {c.chunk_id for c in tc.shared_chunks()}
+        assert g.available is True and set(g.cited_chunk_ids) <= sent
+        assert g.tokens_in > 0 and g.tokens_out > 0

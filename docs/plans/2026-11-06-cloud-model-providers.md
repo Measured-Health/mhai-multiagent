@@ -1,6 +1,6 @@
 # Cloud model providers (OpenAI, Anthropic, xAI): implementation plan
 
-**Status:** Not started. The design is approved (product owner, 3 Nov 2026, "approve both as recommended"; all six questions in its §16 as recommended). The gate before real patient data (design §13.6) is a human gate, tracked in TODO.md. Nothing in this plan opens it.
+**Status:** Built (PRs A–E, 7 Nov 2026), off by default; the live smoke waits on H1 and H7 (TODO.md). The design is approved (product owner, 3 Nov 2026, "approve both as recommended"; all six questions in its §16 as recommended). The gate before real patient data (design §13.6) is a human gate, tracked in TODO.md. Nothing in this plan opens it.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
@@ -589,6 +589,8 @@ Each adapter task has the same shape: the request test (exact JSON body and head
 - [ ] **Step 3:** Write the config, the compose service and `deploy/README.md`'s "Cloud models" section: enabling a provider (§15 steps 1–5), the key file (mode 0400, owner the worker user), rotation every 90 days and on suspicion (write the new file, rolling restart, revoke the old key), the provider-side spend limit and endpoint scope, and switching off (policy to `none`, then remove the key file and the host from `allowed-hosts`).
 - [ ] **Step 4:** Run both test sets remotely.
 - **Check (Task 4 review M5):** `HTTPS_PROXY` is a process-wide name. In the pipeline worker, `requests`, `boto3` and the Hugging Face hub (anything with `trust_env=True`) would also send HTTPS through the egress proxy, which refuses every other host. That fails closed, but it can break model downloads or the model store when cloud is on. Before this commit, confirm nothing else in the pipeline worker needs HTTPS at run time, or rename the setting to `INTELLIGENCE_CLOUD_PROXY` (Task 4's settings and tests, and this task's compose block).
+  - **As built (PR E):** renamed. The worker reads `INTELLIGENCE_CLOUD_PROXY`; `HTTPS_PROXY` is neither read nor needed (the cloud transport has `trust_env=False`), and the compose block never sets it (`TestPipelineNeverOnEgress`).
+- **Also (PR C, Task 9 concern):** with a provider enabled, start-up refuses when OpenSSL's CA file and CA directory are both missing or empty (`settings.openssl_ca_paths`; `tls_context` refuses too), rather than failing every call on TLS.
 - [ ] **Step 5:** Commit: "An egress proxy that allows only the enabled providers' API hosts on 443".
 
 ### Task 15: The manual live smoke and fixture recording
@@ -630,6 +632,7 @@ The key must never be on the shared build server. steven-reid and mt5-lab run ag
   5. Commit the scrubbed fixtures by PR. CI runs the adapter suite against them, and the printed summary (no text) is pasted in the PR.
 
   Without H1 and H7, the PR says the live run is pending and merges with the synthetic fixtures.
+- **As built (PR E):** `main(argv, *, stdin, transport, env, markers)`: the last four are for the tests only; the command line can't set them. Before the key it also refuses a bad model (`settings.model_problem`, shared with the worker) and, with the real transport, a missing CA bundle (`settings.openssl_ca_paths`). The key is checked by `apikey.key_problem` (shared with `load_api_key`). It also prints the reply's numeric `usage.*` fields and, for xAI, `over_cap` (output over `MAX_OUTPUT_TOKENS`), for step 4's check. Exit 0 for `ok`, 1 for another outcome, 2 when refused. `--record` writes `<outcome>-<model>.json`, never overwrites, and writes nothing that fails the scrubber's check; `test_recorded_fixtures_pass_the_adapter_parsers` runs every recorded file through the client and adapter.
 - [ ] **Step 5:** Commit: "A manual live smoke run by a person off the build server, key from stdin, and a fixture scrubber".
 
 ### Task 16: Docs, the human gates in TODO, and the abuse-case check

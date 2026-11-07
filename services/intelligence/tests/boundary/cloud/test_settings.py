@@ -38,7 +38,7 @@ WORKER = {
 
 
 def cloud_env(key: Path, *providers: str) -> dict[str, str]:
-    env = {"INTELLIGENCE_CLOUD_PROVIDERS": ",".join(providers), "HTTPS_PROXY": PROXY}
+    env = {"INTELLIGENCE_CLOUD_PROVIDERS": ",".join(providers), "INTELLIGENCE_CLOUD_PROXY": PROXY}
     for p in providers:
         u = p.upper()
         env[f"INTELLIGENCE_CLOUD_{u}_MODEL"] = MODELS[p]
@@ -57,7 +57,7 @@ def test_settings_default_has_no_providers() -> None:
     assert errs == [] and s == CloudSettings()
     assert (s.providers, s.proxy_url, s.demo) == ((), None, False)
     # A proxy or a stray model with no provider listed changes nothing.
-    s, errs = read({"HTTPS_PROXY": PROXY, "INTELLIGENCE_CLOUD_PROVIDERS": " "})
+    s, errs = read({"INTELLIGENCE_CLOUD_PROXY": PROXY, "INTELLIGENCE_CLOUD_PROVIDERS": " "})
     assert errs == [] and s == CloudSettings()
     # With no cloud variables, WorkerSettings is exactly today's.
     w = WorkerSettings.from_env(WORKER)
@@ -120,14 +120,42 @@ A = "INTELLIGENCE_CLOUD_ANTHROPIC_"
         (_set(A + "ZDR_REF", "D"), A + "ZDR_REF", ""),
         (_set(A + "ZDR_REF", "DPA 2026"), A + "ZDR_REF", "DPA 2026"),
         (_set(A + "ZDR_REF", "DEMO-SYNTHETIC"), A + "ZDR_REF", ""),
-        (_drop("HTTPS_PROXY"), "HTTPS_PROXY", ""),
-        (_set("HTTPS_PROXY", "https://egress-proxy:3128"), "HTTPS_PROXY", "egress-proxy"),
-        (_set("HTTPS_PROXY", "http://egress-proxy"), "HTTPS_PROXY", "egress-proxy"),
-        (_set("HTTPS_PROXY", "http://u:pw-not-real@egress-proxy:3128"), "HTTPS_PROXY", "pw-not"),
-        (_set("HTTPS_PROXY", "http://egress-proxy:3128/x"), "HTTPS_PROXY", "egress-proxy"),
-        (_set("HTTPS_PROXY", "http://egress-proxy:3128?a=b"), "HTTPS_PROXY", "egress-proxy"),
-        (_set("HTTPS_PROXY", "socks5://egress-proxy:1080"), "HTTPS_PROXY", "egress-proxy"),
-        (_set("HTTPS_PROXY", "http://egress-proxy:99999"), "HTTPS_PROXY", "egress-proxy"),
+        (_drop("INTELLIGENCE_CLOUD_PROXY"), "INTELLIGENCE_CLOUD_PROXY", ""),
+        (
+            _set("INTELLIGENCE_CLOUD_PROXY", "https://egress-proxy:3128"),
+            "INTELLIGENCE_CLOUD_PROXY",
+            "egress-proxy",
+        ),
+        (
+            _set("INTELLIGENCE_CLOUD_PROXY", "http://egress-proxy"),
+            "INTELLIGENCE_CLOUD_PROXY",
+            "egress-proxy",
+        ),
+        (
+            _set("INTELLIGENCE_CLOUD_PROXY", "http://u:pw-not-real@egress-proxy:3128"),
+            "INTELLIGENCE_CLOUD_PROXY",
+            "pw-not",
+        ),
+        (
+            _set("INTELLIGENCE_CLOUD_PROXY", "http://egress-proxy:3128/x"),
+            "INTELLIGENCE_CLOUD_PROXY",
+            "egress-proxy",
+        ),
+        (
+            _set("INTELLIGENCE_CLOUD_PROXY", "http://egress-proxy:3128?a=b"),
+            "INTELLIGENCE_CLOUD_PROXY",
+            "egress-proxy",
+        ),
+        (
+            _set("INTELLIGENCE_CLOUD_PROXY", "socks5://egress-proxy:1080"),
+            "INTELLIGENCE_CLOUD_PROXY",
+            "egress-proxy",
+        ),
+        (
+            _set("INTELLIGENCE_CLOUD_PROXY", "http://egress-proxy:99999"),
+            "INTELLIGENCE_CLOUD_PROXY",
+            "egress-proxy",
+        ),
         (_set(A + "BASE_URL", "https://api.anthropic.com"), A + "BASE_URL", "api.anthropic"),
     ],
 )
@@ -182,7 +210,7 @@ def test_bad_key_refused_through_settings(key_file: Callable[..., Path]) -> None
 
 def test_development_relaxes_only_zdr_and_proxy(key_file: Callable[..., Path]) -> None:
     env = cloud_env(key_file(), "openai")
-    del env["INTELLIGENCE_CLOUD_OPENAI_ZDR_REF"], env["HTTPS_PROXY"]
+    del env["INTELLIGENCE_CLOUD_OPENAI_ZDR_REF"], env["INTELLIGENCE_CLOUD_PROXY"]
     s, errs = read(env, development=True)
     assert errs == [] and s.providers[0].zdr_ref is None and s.proxy_url is None
     del env["INTELLIGENCE_CLOUD_OPENAI_MODEL"]
@@ -211,9 +239,9 @@ def test_demo_accepts_demo_synthetic_with_warning_production_refuses(
     assert errs == []
     # Demo is production in every other respect.
     demo = {**cloud_env(key_file(), "anthropic"), "APP_ENV": "demo"}
-    del demo["HTTPS_PROXY"]
+    del demo["INTELLIGENCE_CLOUD_PROXY"]
     _, errs = read(demo)
-    assert errs == ["HTTPS_PROXY is required when a cloud provider is enabled"]
+    assert errs == ["INTELLIGENCE_CLOUD_PROXY is required when a cloud provider is enabled"]
 
 
 def test_base_url_override_only_in_development(key_file: Callable[..., Path]) -> None:
@@ -371,3 +399,78 @@ def test_unit_modules_disable_sockets_sees_a_missing_mark(tmp_path: Path) -> Non
 def test_sockets_are_blocked_here() -> None:
     with pytest.raises(SocketBlockedError):
         socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+
+def test_https_proxy_is_not_the_cloud_proxy(key_file: Callable[..., Path]) -> None:
+    """The proxy has its own name (plan Task 14, check M5): HTTPS_PROXY is
+    process-wide, so every library would send HTTPS through the egress
+    proxy. It neither satisfies nor overrides INTELLIGENCE_CLOUD_PROXY."""
+    env = cloud_env(key_file(), "anthropic")
+    del env["INTELLIGENCE_CLOUD_PROXY"]
+    env["HTTPS_PROXY"] = PROXY
+    _, errs = read(env)
+    assert errs == ["INTELLIGENCE_CLOUD_PROXY is required when a cloud provider is enabled"]
+    env["INTELLIGENCE_CLOUD_PROXY"] = PROXY
+    env["HTTPS_PROXY"] = "http://elsewhere:8080"
+    s, errs = read(env)
+    assert errs == [] and s.proxy_url == PROXY
+
+
+def _verify_paths(monkeypatch: pytest.MonkeyPatch, cafile: Path, capath: Path) -> None:
+    import ssl
+
+    from intelligence.boundary.cloud import settings as settings_mod
+
+    real = ssl.get_default_verify_paths()
+    fake = ssl.DefaultVerifyPaths(
+        str(cafile),
+        str(capath),
+        real.openssl_cafile_env,
+        str(cafile),
+        real.openssl_capath_env,
+        str(capath),
+    )
+    monkeypatch.setattr(settings_mod.ssl, "get_default_verify_paths", lambda: fake)
+
+
+def test_ca_bundle_checked_at_start(
+    key_file: Callable[..., Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a provider enabled, start-up refuses when OpenSSL's CA file and
+    CA directory are both missing or empty, rather than failing every call
+    on TLS (Task 9 concern). No provider, no check."""
+    from intelligence.boundary.cloud.settings import openssl_ca_paths
+
+    env = cloud_env(key_file(), "anthropic")
+    cafile, capath = tmp_path / "cert.pem", tmp_path / "certs"
+    msg = "no CA bundle at OpenSSL's paths (a CA file or a non-empty CA directory) for the cloud providers"
+
+    _verify_paths(monkeypatch, cafile, capath)  # neither exists
+    assert openssl_ca_paths() == (None, None)
+    _, errs = read(env)
+    assert errs == [msg]
+    assert read({})[1] == []
+    cafile.write_text("")
+    capath.mkdir()
+    assert openssl_ca_paths() == (None, None)  # empty file, empty directory
+    _, errs = read(env, development=True)
+    assert errs == [msg]
+    with pytest.raises(ConfigError, match="CA bundle"):
+        WorkerSettings.from_env({**WORKER, **env})
+
+    (capath / "ca.0").write_text("synthetic")
+    assert openssl_ca_paths() == (None, str(capath))
+    assert read(env)[1] == []
+    cafile.write_text("synthetic")
+    assert openssl_ca_paths() == (str(cafile), str(capath))
+    assert read(env)[1] == []
+
+
+def test_tls_context_refuses_without_ca_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from intelligence.boundary.cloud.client import tls_context
+
+    _verify_paths(monkeypatch, tmp_path / "none.pem", tmp_path / "none")
+    with pytest.raises(ConfigError, match="CA bundle"):
+        tls_context()
