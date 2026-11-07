@@ -297,6 +297,12 @@ func (g *grid) enforce(l line) bool {
 // guarded total first, then each part in order.
 func Set(total int64, parts ...int64) []Guarded { return setForced(total, parts, nil) }
 
+// SetForced is Set with the members in forced (total first) hidden first
+// (a row whose name can't be shown, Plan 7c).
+func SetForced(total int64, parts []int64, forced []bool) []Guarded {
+	return setForced(total, parts, forced)
+}
+
 // setForced is Set with the cells in forced (total first) hidden first.
 func setForced(total int64, parts []int64, forced []bool) []Guarded {
 	vals := append([]int64{total}, parts...)

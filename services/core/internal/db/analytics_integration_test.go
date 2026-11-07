@@ -129,8 +129,8 @@ func TestAnalyticsFunctionsRefuseRollingWindows(t *testing.T) {
 		{"month", recent.AddDate(0, 0, 1).Format(time.DateOnly)}, // a rolling 30 days
 		{"week", recent.AddDate(0, 0, 1).Format(time.DateOnly)},  // a week that isn't month-aligned
 		{"week", recent.AddDate(0, 0, 3).Format(time.DateOnly)},
-		{"week", thisWeek.From.Format(time.DateOnly)},                          // not finished
-		{"month", calendar.Of(calendar.Month, now).From.Format(time.DateOnly)}, // not finished
+		{"week", thisWeek.From.Format(time.DateOnly)},                                            // not finished
+		{"month", calendar.Of(calendar.Month, now).From.Format(time.DateOnly)},                   // not finished
 		{"week", calendar.Of(calendar.Week, now.AddDate(0, 0, -125)).From.Format(time.DateOnly)}, // older than 118 days
 		{"30d", recent.Format(time.DateOnly)},
 		{"quarter", calendar.Of(calendar.Month, now.AddDate(0, -2, 0)).From.AddDate(0, 0, 0).Format(time.DateOnly)},

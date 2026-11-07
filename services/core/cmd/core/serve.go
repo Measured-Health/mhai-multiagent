@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	core "github.com/Measured-Health/mhai-multiagent/services/core"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/apidocs"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
@@ -326,6 +327,15 @@ func serve() error {
 		if err := platform.RunSampler(ctx, platform.Deps{Pool: a.pool, Intel: a.intel, Health: a.health, Log: log},
 			platform.SampleEvery); err != nil {
 			log.Error("core: health sampler stopped", "reason", "internal_error")
+		}
+	}()
+	// Platform analytics (Plan 7c): one guarded snapshot per finished
+	// calendar period, built as mhai_analytics_job; one core copy builds
+	// (an advisory lock) and every copy serves the stored rows.
+	go func() {
+		s := scheduler.Scheduler{Pool: a.pool, Builder: scheduler.Builder{Src: scheduler.DB{Pool: a.pool}}, Log: log}
+		if err := s.Run(ctx); err != nil {
+			log.Error("core: analytics scheduler stopped", "reason", "internal_error")
 		}
 	}()
 	// SIGHUP re-reads the trusted request-keys file (after keys untrust).

@@ -32,9 +32,9 @@ func historyCount() int {
 
 type history struct {
 	months, hosp int
-	epoch        int     // the first eligible week (mid-month)
-	onboard      []int   // each hospital's onboarding week
-	deact        []int   // the first week after deactivation, or -1
+	epoch        int         // the first eligible week (mid-month)
+	onboard      []int       // each hospital's onboarding week
+	deact        []int       // the first week after deactivation, or -1
 	qg, rv       [][][]int64 // [hospital][week][category]
 
 	checkFullyHidden bool
