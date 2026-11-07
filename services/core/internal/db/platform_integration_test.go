@@ -91,7 +91,7 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"idempotency_keys":      "00003: Idempotency-Key replies of platform writes, null-hospital rows only",
 		"audit_verify_runs":     "00014: the chain checks",
 		"guardrail_snapshots":   "00017: the guarded guardrail statistics, one per period and day (SELECT, INSERT)",
-		"hospital_model_policy": "00018: the per-hospital cloud model policy the platform sets (SELECT, INSERT, UPDATE)",
+		"hospital_model_policy": "00018: the per-hospital cloud model policy the platform sets (SELECT, INSERT, column UPDATE)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `

@@ -21,6 +21,8 @@ import (
 // model policy, clinical_queries.model_route set by a definer trigger, the
 // effective-route function the worker's claim calls, and the token ledger
 // the worker reaches only through mhai_cloud_reserve and mhai_cloud_settle.
+// Review fixes: reserve names its provider and refuses a hospital that
+// isn't active (M2, M3).
 
 // appRoles are every application role; none but those named in a test may
 // hold a privilege on the policy or the ledger.
@@ -98,11 +100,11 @@ func routeOf(t *testing.T, pool *pgxpool.Pool, q uuid.UUID) string {
 	return r
 }
 
-// reserve calls mhai_cloud_reserve(n) as the worker for h, committing.
-// ok is false when it returned no row.
-func reserve(ctx context.Context, pool *pgxpool.Pool, h uuid.UUID, n any) (id uuid.UUID, percent int, ok bool, err error) {
+// reserve calls mhai_cloud_reserve(provider, n) as the worker for h,
+// committing. ok is false when it returned no row.
+func reserve(ctx context.Context, pool *pgxpool.Pool, h uuid.UUID, provider, n any) (id uuid.UUID, percent int, ok bool, err error) {
 	err = commitAs(ctx, pool, "mhai_worker", &h, func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT reservation, percent FROM mhai_cloud_reserve($1)`, n).Scan(&id, &percent)
+		err := tx.QueryRow(ctx, `SELECT reservation, percent FROM mhai_cloud_reserve($1, $2)`, provider, n).Scan(&id, &percent)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -271,7 +273,7 @@ func TestTempTableCannotShadowPolicy(t *testing.T) {
 		if err := tx.QueryRow(ctx, `SELECT mhai_effective_model_route($1, 'cloud:xai')`, a).Scan(&eff); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `SELECT count(*) FROM mhai_cloud_reserve(10)`).Scan(&reserved)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM mhai_cloud_reserve('anthropic', 10)`).Scan(&reserved)
 	})
 	if err != nil {
 		t.Fatalf("worker with temporary tables: %v", err)
@@ -284,6 +286,61 @@ func TestTempTableCannotShadowPolicy(t *testing.T) {
 	}
 	if used, res := ledger(t, pool, a); used != 100 || res != 0 {
 		t.Errorf("real ledger: used %d reserved %d, want 100 and 0", used, res)
+	}
+
+	// Settle reads the real reservations and ledger, not the worker's own:
+	// a temporary reservation settles nothing, and the real one moves the
+	// real ledger.
+	setPolicy(t, pool, a, ptr("anthropic"), 1000)
+	heldID, _, ok, err := reserve(ctx, pool, a, "anthropic", 10)
+	if err != nil || !ok {
+		t.Fatalf("real reservation: ok=%v err=%v", ok, err)
+	}
+	fake := uuid.New()
+	var fakeDone, realDone bool
+	err = commitAs(ctx, pool, "mhai_worker", &a, func(tx pgx.Tx) error {
+		for _, s := range []string{
+			`CREATE TEMP TABLE cloud_usage (hospital_id uuid, month date, used bigint, reserved bigint) ON COMMIT DROP`,
+			`CREATE TEMP TABLE cloud_reservations (id uuid, hospital_id uuid, month date, tokens bigint, created_at timestamptz) ON COMMIT DROP`,
+		} {
+			if _, err := tx.Exec(ctx, s); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO cloud_reservations VALUES ($1, $2, date_trunc('month', now() AT TIME ZONE 'UTC')::date, 5000, now())`, fake, a); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO cloud_usage VALUES ($1, date_trunc('month', now() AT TIME ZONE 'UTC')::date, 0, 5000)`, a); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT mhai_cloud_settle($1, 1)`, fake).Scan(&fakeDone); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT mhai_cloud_settle($1, 3)`, heldID).Scan(&realDone)
+	})
+	if err != nil {
+		t.Fatalf("worker settling with temporary tables: %v", err)
+	}
+	if fakeDone || !realDone {
+		t.Errorf("settle: temporary reservation %v (want false), real one %v (want true)", fakeDone, realDone)
+	}
+	if used, res := ledger(t, pool, a); used != 103 || res != 0 {
+		t.Errorf("real ledger after settle: used %d reserved %d, want 103 and 0", used, res)
+	}
+
+	// The platform's usage reads the real ledger, not a temporary one.
+	var used, res int64
+	err = commitAs(ctx, pool, "mhai_platform", nil, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `CREATE TEMP TABLE cloud_usage (hospital_id uuid, month date, used bigint, reserved bigint) ON COMMIT DROP`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO cloud_usage VALUES ($1, date_trunc('month', now() AT TIME ZONE 'UTC')::date, 999, 999)`, a); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT used, reserved FROM mhai_cloud_usage($1)`, a).Scan(&used, &res)
+	})
+	if err != nil || used != 103 || res != 0 {
+		t.Errorf("platform usage with a temporary ledger: used %d reserved %d err %v, want 103 and 0", used, res, err)
 	}
 }
 
@@ -370,7 +427,7 @@ func TestWorkerHasNoGrantOnPolicyOrLedger(t *testing.T) {
 		}
 	}
 	for _, role := range []string{"mhai_gateway", "mhai_platform", "mhai_auth", "mhai_jobs", "mhai_provision", "mhai_audit_drain"} {
-		for _, q := range []string{`SELECT * FROM mhai_cloud_reserve(1)`, `SELECT mhai_cloud_settle(gen_random_uuid(), 1)`,
+		for _, q := range []string{`SELECT * FROM mhai_cloud_reserve('openai', 1)`, `SELECT mhai_cloud_settle(gen_random_uuid(), 1)`,
 			`SELECT mhai_effective_model_route(gen_random_uuid(), 'cloud:openai')`} {
 			_, err := inTx(ctx, pool, []string{`SET LOCAL ROLE ` + role}, &a, q)
 			requireDenied(t, err, role+" "+q)
@@ -410,7 +467,7 @@ func TestReserveIsAtomicUnderRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			id, _, ok, err := reserve(ctx, wide, a, n)
+			id, _, ok, err := reserve(ctx, wide, a, "anthropic", n)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -446,15 +503,15 @@ func TestReserveRefusesNonPositiveHugeAndNoHospital(t *testing.T) {
 	a, _ := seedHospital(t, pool, uniqueCode("RF"))
 	setPolicy(t, pool, a, ptr("openai"), 10_000_000)
 	for _, bad := range []any{0, -1, 100001, nil} {
-		if _, _, ok, err := reserve(ctx, pool, a, bad); pgCode(err) != "22023" || ok {
+		if _, _, ok, err := reserve(ctx, pool, a, "openai", bad); pgCode(err) != "22023" || ok {
 			t.Errorf("reserve(%v): want 22023, got ok=%v err=%v", bad, ok, err)
 		}
 	}
-	if _, pct, ok, err := reserve(ctx, pool, a, 100000); err != nil || !ok || pct != 1 {
+	if _, pct, ok, err := reserve(ctx, pool, a, "openai", 100000); err != nil || !ok || pct != 1 {
 		t.Errorf("reserve(100000): ok=%v percent=%d err=%v, want a reservation at 1%%", ok, pct, err)
 	}
 	// No hospital set: refused, not run for "no hospital".
-	_, err := inTx(ctx, pool, []string{`SET LOCAL ROLE mhai_worker`}, nil, `SELECT * FROM mhai_cloud_reserve(10)`)
+	_, err := inTx(ctx, pool, []string{`SET LOCAL ROLE mhai_worker`}, nil, `SELECT * FROM mhai_cloud_reserve('openai', 10)`)
 	if pgCode(err) != permissionDenied {
 		t.Errorf("reserve with no hospital: want 42501, got %v", err)
 	}
@@ -468,21 +525,21 @@ func TestReserveWithoutEnabledPolicyReturnsNothing(t *testing.T) {
 	_, pool := shared(t)
 	ctx := context.Background()
 	a, _ := seedHospital(t, pool, uniqueCode("RN"))
-	if _, _, ok, err := reserve(ctx, pool, a, 10); err != nil || ok {
+	if _, _, ok, err := reserve(ctx, pool, a, "xai", 10); err != nil || ok {
 		t.Errorf("no policy: ok=%v err=%v, want no reservation", ok, err)
 	}
 	setPolicy(t, pool, a, nil, 1000)
-	if _, _, ok, err := reserve(ctx, pool, a, 10); err != nil || ok {
+	if _, _, ok, err := reserve(ctx, pool, a, "xai", 10); err != nil || ok {
 		t.Errorf("policy off: ok=%v err=%v, want no reservation", ok, err)
 	}
 	setPolicy(t, pool, a, ptr("xai"), 100)
-	if _, pct, ok, err := reserve(ctx, pool, a, 80); err != nil || !ok || pct != 80 {
+	if _, pct, ok, err := reserve(ctx, pool, a, "xai", 80); err != nil || !ok || pct != 80 {
 		t.Errorf("enabled: ok=%v percent=%d err=%v, want a reservation at 80%%", ok, pct, err)
 	}
-	if _, _, ok, err := reserve(ctx, pool, a, 21); err != nil || ok {
+	if _, _, ok, err := reserve(ctx, pool, a, "xai", 21); err != nil || ok {
 		t.Errorf("over budget: ok=%v err=%v, want no reservation", ok, err)
 	}
-	if _, pct, ok, err := reserve(ctx, pool, a, 20); err != nil || !ok || pct != 100 {
+	if _, pct, ok, err := reserve(ctx, pool, a, "xai", 20); err != nil || !ok || pct != 100 {
 		t.Errorf("exactly the budget: ok=%v percent=%d err=%v, want a reservation at 100%%", ok, pct, err)
 	}
 	var rows int
@@ -502,7 +559,7 @@ func TestSettleIsOncePerReservationAndOwnHospitalOnly(t *testing.T) {
 	setPolicy(t, pool, b, ptr("anthropic"), 10_000)
 	mustReserve := func(h uuid.UUID, n int) uuid.UUID {
 		t.Helper()
-		id, _, ok, err := reserve(ctx, pool, h, n)
+		id, _, ok, err := reserve(ctx, pool, h, "anthropic", n)
 		if err != nil || !ok {
 			t.Fatalf("reserve %d: ok=%v err=%v", n, ok, err)
 		}
@@ -734,20 +791,18 @@ func TestProvisionAppendAllowsItOnlyWithoutActor(t *testing.T) {
 	}
 }
 
-// 00018 goes down to 00017 and up again: everything it added is gone, and
-// the two audit policies are 00014's and 00010's exactly.
+// 00018 goes down to 00017 and up again. The two audit policies are
+// compared with their text on a database migrated only to 00017 (before
+// 00018 ever ran): Down restores it exactly, and Up adds only the new action.
 func TestMigration00018DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
-	if err := db.MigrateUp(ctx, pg.URL); err != nil {
-		t.Fatal(err)
-	}
 	pool, err := db.Open(ctx, pg.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	policyChecks := func() map[string]string {
+	policyChecks := func(when string) map[string]string {
 		t.Helper()
 		got := map[string]string{}
 		rows, err := pool.Query(ctx, `SELECT policyname, with_check FROM pg_policies WHERE tablename = 'audit_log' AND policyname IN ('platform_append', 'provision_append')`)
@@ -762,12 +817,44 @@ func TestMigration00018DownUp(t *testing.T) {
 			}
 			got[name] = check
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("%s: audit append policies %v, want platform_append and provision_append", when, got)
+		}
 		return got
+	}
+	if err := db.MigrateUpTo(ctx, pg.URL, 17); err != nil {
+		t.Fatalf("up to 17: %v", err)
+	}
+	pre := policyChecks("before 00018")
+	for name, check := range pre {
+		if strings.Contains(check, "model_policy_changed") {
+			t.Fatalf("before 00018, %s already admits the action: %s", name, check)
+		}
+	}
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+		t.Fatal(err)
+	}
+	up := policyChecks("after up")
+	for name, check := range up {
+		if !strings.Contains(check, "'hospital.model_policy_changed'::text") {
+			t.Errorf("after up, %s does not admit hospital.model_policy_changed: %s", name, check)
+		}
+		if strings.Replace(check, ", 'hospital.model_policy_changed'::text", "", 1) != pre[name] {
+			t.Errorf("after up, %s differs from before 00018 beyond the new action:\n up:     %s\n before: %s", name, check, pre[name])
+		}
 	}
 	if err := db.MigrateDownTo(ctx, pg.URL, 17); err != nil {
 		t.Fatalf("down to 17: %v", err)
 	}
-	before := policyChecks()
+	down := policyChecks("after down")
+	for name, check := range down {
+		if check != pre[name] {
+			t.Errorf("after down, %s is not as before 00018:\n down:   %s\n before: %s", name, check, pre[name])
+		}
+	}
 	var left int
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM pg_class WHERE relname IN ('hospital_model_policy', 'cloud_usage', 'cloud_reservations'))
 		+ (SELECT count(*) FROM pg_attribute WHERE attrelid = 'clinical_queries'::regclass AND attname = 'model_route' AND NOT attisdropped)
@@ -779,31 +866,84 @@ func TestMigration00018DownUp(t *testing.T) {
 	if left != 0 {
 		t.Errorf("after down, %d tables, columns, triggers or functions of 00018 remain", left)
 	}
-	for name, check := range before {
-		if strings.Contains(check, "model_policy_changed") {
-			t.Errorf("after down, %s still admits hospital.model_policy_changed: %s", name, check)
-		}
-	}
-	if !strings.Contains(before["platform_append"], "job.cancelled") || !strings.Contains(before["platform_append"], "hospital_id IS NULL") {
-		t.Errorf("after down, platform_append is not 00014's: %s", before["platform_append"])
-	}
-	if !strings.Contains(before["provision_append"], "hospital.activated") || !strings.Contains(before["provision_append"], "actor_id IS NULL") {
-		t.Errorf("after down, provision_append is not 00010's: %s", before["provision_append"])
-	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)
 	}
-	after := policyChecks()
-	for name, check := range after {
-		if !strings.Contains(check, "hospital.model_policy_changed") {
-			t.Errorf("after up, %s does not admit hospital.model_policy_changed: %s", name, check)
-		}
-		// The rest of the list is the one Down restored.
-		if strings.Replace(check, ", 'hospital.model_policy_changed'::text", "", 1) != before[name] {
-			t.Errorf("after up, %s differs from Down's beyond the new action:\n up:   %s\n down: %s", name, check, before[name])
-		}
-	}
 	if err := db.MigrateDownTo(ctx, pg.URL, 0); err != nil {
 		t.Fatalf("down to 0: %v", err)
+	}
+}
+
+// M2 (ruling C1): a reservation names its provider, and is refused unless
+// the hospital's policy names that provider right now. A switched or
+// switched-off policy stops the old provider's attempts still in flight.
+func TestReserveOnlyForThePolicysProvider(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	a, _ := seedHospital(t, pool, uniqueCode("RP"))
+	setPolicy(t, pool, a, ptr("openai"), 10_000)
+	want := func(what string, provider any, wantOK bool) {
+		t.Helper()
+		if _, _, ok, err := reserve(ctx, pool, a, provider, 10); err != nil || ok != wantOK {
+			t.Errorf("%s: ok=%v err=%v, want ok=%v", what, ok, err, wantOK)
+		}
+	}
+	want("the policy's provider", "openai", true)
+	want("another provider", "anthropic", false)
+	setPolicy(t, pool, a, ptr("anthropic"), 10_000)
+	want("the old provider after a switch", "openai", false)
+	want("the new provider after a switch", "anthropic", true)
+	setPolicy(t, pool, a, nil, 10_000)
+	want("the old provider after switching off", "anthropic", false)
+	for _, bad := range []any{"gemini", "OPENAI", "cloud:openai", "", nil} {
+		if _, _, ok, err := reserve(ctx, pool, a, bad, 10); pgCode(err) != "22023" || ok {
+			t.Errorf("provider %v: want 22023, got ok=%v err=%v", bad, ok, err)
+		}
+	}
+	if used, res := ledger(t, pool, a); used != 0 || res != 20 {
+		t.Errorf("ledger: used %d reserved %d, want 0 and 20", used, res)
+	}
+}
+
+// M3: a hospital that isn't active reserves nothing and runs local; a
+// reservation it already holds still settles.
+func TestReserveAndRouteRefuseInactiveHospital(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	a, _ := seedHospital(t, pool, uniqueCode("IN"))
+	setPolicy(t, pool, a, ptr("openai"), 10_000)
+	held, _, ok, err := reserve(ctx, pool, a, "openai", 10)
+	if err != nil || !ok {
+		t.Fatalf("active hospital: ok=%v err=%v", ok, err)
+	}
+	effective := func() string {
+		t.Helper()
+		var got string
+		if err := commitAs(ctx, pool, "mhai_worker", &a, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT mhai_effective_model_route($1, 'cloud:openai')`, a).Scan(&got)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if r := effective(); r != "cloud:openai" {
+		t.Fatalf("active hospital: route %q", r)
+	}
+	for _, status := range []string{"deactivated", "setup_incomplete", "removal_pending"} {
+		if _, err := pool.Exec(ctx, `UPDATE hospitals SET status = $2 WHERE id = $1`, a, status); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, ok, err := reserve(ctx, pool, a, "openai", 10); err != nil || ok {
+			t.Errorf("%s hospital: ok=%v err=%v, want no reservation", status, ok, err)
+		}
+		if r := effective(); r != "local" {
+			t.Errorf("%s hospital: route %q, want local", status, r)
+		}
+	}
+	if done, err := settle(ctx, pool, a, held, 4); err != nil || !done {
+		t.Errorf("settling a reservation held before deactivation: %v %v", done, err)
+	}
+	if used, res := ledger(t, pool, a); used != 4 || res != 0 {
+		t.Errorf("ledger: used %d reserved %d, want 4 and 0", used, res)
 	}
 }

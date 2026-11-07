@@ -269,7 +269,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if err := db.WithHospital(ctx, one, a, func(pgx.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs", "hospital_model_policy", "cloud_usage"} {
+	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs", "hospital_model_policy", "cloud_usage", "cloud_reservations"} {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -293,7 +293,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			requireDenied(t, err, "gateway reading feedback_buffer")
 			continue
 		}
-		if table == "hospital_model_policy" || table == "cloud_usage" {
+		if table == "hospital_model_policy" || table == "cloud_usage" || table == "cloud_reservations" {
 			// 00018: the policy is the platform's and the CLI's, the ledger
 			// is reached only through definer functions: the gateway holds
 			// no grant on either.

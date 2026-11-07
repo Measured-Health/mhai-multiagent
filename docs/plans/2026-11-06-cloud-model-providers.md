@@ -395,6 +395,7 @@ Abuse-case ids: **A1–A18** are the design's (§13.5); **K1–K14** are this pl
 
 **Interfaces:**
 - `cloud_repo.reserve(cur, tokens: int) -> tuple[str, int] | None` runs `SELECT reservation, percent FROM mhai_cloud_reserve(%s)`. `cloud_repo.settle(cur, reservation: str, used: int | None) -> bool` runs `SELECT mhai_cloud_settle(%s, %s)`. Both are parameterised, on the caller's cursor, and never open a connection (the same rules as `jobs_repo`).
+- **Interface change (Task 1 review, ruling C1):** core's function is now `mhai_cloud_reserve(p_provider text, p_tokens bigint)`. It reserves only while the hospital is active and its policy names that same provider right now, so `cloud_repo.reserve(cur, provider: str, tokens: int)` runs `SELECT reservation, percent FROM mhai_cloud_reserve(%s, %s)` and `BudgetPort.reserve` takes the call's provider; an empty result (budget, switched policy or inactive hospital) is `budget_exhausted`.
 - `estimate_tokens(body_len: int, max_output: int = 1500) -> int`: `ceil(body_len / 3) + max_output`.
 - `Reservation(id: str, tokens: int, percent: int)`.
 - `BudgetPort` (Protocol, sync): `reserve(tokens: int) -> Reservation | None`, `settle(r: Reservation, used: int | None) -> None`. `used=None` (reply lost or unknown) settles as `r.tokens`.

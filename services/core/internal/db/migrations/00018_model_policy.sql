@@ -14,14 +14,23 @@
 -- UPDATE (published_at) only).
 --
 -- mhai_effective_model_route: the worker's claim re-checks the route here.
--- It stays cloud only while the caller's own hospital's policy still names
--- that provider; anything else runs local (design §5.2, A14).
+-- It stays cloud only while the caller's own hospital is active and its
+-- policy still names that provider; anything else runs local (design §5.2,
+-- A14).
 --
 -- cloud_usage and cloud_reservations: the ledger. No application role holds
 -- a grant on either. The worker reserves and settles only through two
 -- definer functions bound to mhai_current_hospital() (plan departure 2):
--- the reservation is one atomic UPDATE under the budget, and a settle
--- consumes its reservation row, so it happens once, for its own hospital.
+-- the reservation names its provider and is one atomic UPDATE under the
+-- budget of a policy enabled for that provider now, for an active hospital
+-- only (review ruling C1, M3): switching or turning the policy off stops
+-- attempts still in flight to the old provider. A settle consumes its
+-- reservation row, so it happens once, for its own hospital.
+--
+-- Hospital status: under FORCE the owner sees hospitals only through
+-- 00009's cancel_check (status <> 'active'), so "active" is written as "not
+-- a row the owner sees as inactive". This reads no more than 00009 already
+-- lets the owner read; TestReserveAndRouteRefuseInactiveHospital pins it.
 -- The platform reads a hospital's month through mhai_cloud_usage.
 --
 -- Every definer function follows 00003/00007/00009: owner mhai_migrate,
@@ -99,6 +108,8 @@ CREATE FUNCTION mhai_effective_model_route(p_hospital uuid, p_route text) RETURN
     AS $$
     SELECT CASE WHEN p_route IS DISTINCT FROM 'local'
                  AND p_hospital = public.mhai_current_hospital()
+                 AND NOT EXISTS (SELECT 1 FROM public.hospitals hs
+                                 WHERE hs.id = p_hospital AND hs.status <> 'active')
                  AND EXISTS (SELECT 1 FROM public.hospital_model_policy p
                              WHERE p.hospital_id = p_hospital
                                AND 'cloud:' || p.cloud_provider = p_route)
@@ -139,11 +150,12 @@ CREATE POLICY owner_read ON cloud_reservations FOR SELECT TO mhai_migrate USING 
 CREATE POLICY owner_insert ON cloud_reservations FOR INSERT TO mhai_migrate WITH CHECK (true);
 CREATE POLICY owner_delete ON cloud_reservations FOR DELETE TO mhai_migrate USING (true);
 
--- Reserve p_tokens of this month's budget for the caller's hospital, in one
--- atomic UPDATE under the budget. No row: over budget, or no enabled
--- policy. The month is the database's, in UTC.
+-- Reserve p_tokens of this month's budget for the caller's hospital, for a
+-- send to p_provider, in one atomic UPDATE under the budget. No row: over
+-- budget, the policy isn't enabled for p_provider right now, or the hospital
+-- isn't active. The month is the database's, in UTC.
 -- +goose StatementBegin
-CREATE FUNCTION mhai_cloud_reserve(p_tokens bigint) RETURNS TABLE (reservation uuid, percent integer)
+CREATE FUNCTION mhai_cloud_reserve(p_provider text, p_tokens bigint) RETURNS TABLE (reservation uuid, percent integer)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, pg_temp
     AS $$
@@ -154,6 +166,10 @@ DECLARE
     v_budget bigint;
     v_id uuid;
 BEGIN
+    IF p_provider IS NULL OR p_provider NOT IN ('openai', 'anthropic', 'xai') THEN
+        RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+            MESSAGE = 'mhai_cloud_reserve: unknown provider';
+    END IF;
     IF p_tokens IS NULL OR p_tokens <= 0 OR p_tokens > 100000 THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
             MESSAGE = 'mhai_cloud_reserve: tokens are 1 to 100000';
@@ -162,12 +178,15 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = 'insufficient_privilege',
             MESSAGE = 'mhai_cloud_reserve: no hospital';
     END IF;
+    IF EXISTS (SELECT 1 FROM public.hospitals hs WHERE hs.id = h AND hs.status <> 'active') THEN
+        RETURN;
+    END IF;
     INSERT INTO public.cloud_usage (hospital_id, month) VALUES (h, m) ON CONFLICT DO NOTHING;
     UPDATE public.cloud_usage u
     SET reserved = u.reserved + p_tokens
     WHERE u.hospital_id = h AND u.month = m
       AND u.used + u.reserved + p_tokens <= (SELECT p.monthly_token_budget FROM public.hospital_model_policy p
-                                             WHERE p.hospital_id = h AND p.cloud_provider IS NOT NULL)
+                                             WHERE p.hospital_id = h AND p.cloud_provider = p_provider)
     RETURNING u.used + u.reserved,
               (SELECT p.monthly_token_budget FROM public.hospital_model_policy p WHERE p.hospital_id = h)
     INTO v_total, v_budget;
@@ -182,9 +201,9 @@ BEGIN
 END
 $$;
 -- +goose StatementEnd
-ALTER FUNCTION mhai_cloud_reserve(bigint) OWNER TO mhai_migrate;
-REVOKE ALL ON FUNCTION mhai_cloud_reserve(bigint) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION mhai_cloud_reserve(bigint) TO mhai_worker;
+ALTER FUNCTION mhai_cloud_reserve(text, bigint) OWNER TO mhai_migrate;
+REVOKE ALL ON FUNCTION mhai_cloud_reserve(text, bigint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION mhai_cloud_reserve(text, bigint) TO mhai_worker;
 
 -- Settle a reservation of the caller's hospital, once: its row is consumed,
 -- reserved drops by its tokens and used grows by the reported use, at most
@@ -264,7 +283,7 @@ CREATE POLICY platform_append ON audit_log FOR INSERT TO mhai_platform
 
 DROP FUNCTION mhai_cloud_usage(uuid);
 DROP FUNCTION mhai_cloud_settle(uuid, bigint);
-DROP FUNCTION mhai_cloud_reserve(bigint);
+DROP FUNCTION mhai_cloud_reserve(text, bigint);
 DROP TABLE cloud_reservations;
 DROP TABLE cloud_usage;
 
