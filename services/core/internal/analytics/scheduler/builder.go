@@ -134,16 +134,6 @@ func (k *block) slots(p calendar.Period) []int {
 	return out
 }
 
-// listed is p's frozen hospitals in block order.
-func (k *block) listed(p calendar.Period) []int {
-	var out []int
-	for h := range k.rows[key(p)] {
-		out = append(out, k.index[h])
-	}
-	sort.Ints(out)
-	return out
-}
-
 // guard builds p's body; frozen is whether the freeze succeeded (p is
 // frozen, perhaps with no hospital at all).
 func (b Builder) guard(ctx context.Context, p calendar.Period, frozen bool) (analytics.Body, error) {
