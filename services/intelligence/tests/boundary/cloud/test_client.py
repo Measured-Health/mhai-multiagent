@@ -712,3 +712,118 @@ def test_wrapped_connection_error_is_retried() -> None:
     assert g.cloud_outcome == "ok"
     assert len(budget.reserved) == 2 and len(sleeps) == 1
     assert isinstance(FakeConnectionError(), Exception)  # the SDK's own type
+
+
+# --- PR C hardening -------------------------------------------------------------------
+
+
+def _hand_built(answer: str, citations: tuple[str, ...]) -> Any:
+    """An Answer that never went through validate_answer."""
+    from intelligence.boundary.cloud.reply import Answer
+
+    return Answer.model_construct(answer=answer, citations=citations, insufficient_evidence=False)
+
+
+@pytest.mark.parametrize(
+    ("text", "citations"),
+    [
+        # A citation that was never sent.
+        ("A [KB#0009].", ("KB#0009",)),
+        # A sent citation, but the text's marker names one that wasn't.
+        ("A [KB#0009].", ("KB#0001",)),
+        # A sent citation and a link the adapter never refused.
+        ("A [KB#0001] https://example.invalid/x", ("KB#0001",)),
+    ],
+)
+def test_adapter_answer_is_rechecked_against_sent_ids(
+    text: str, citations: tuple[str, ...]
+) -> None:
+    # The client never trusts an adapter's Answer as given.
+    c, _, _, _, _ = make(FakeAdapter([CloudReply(_hand_built(text, citations), "m-1", 1, 1, "ok")]))
+    call, budget = call_for()
+    g = run(c, call)
+    assert g.cloud_outcome == "malformed"
+    assert g.available is False and g.response == ""
+    assert len(budget.settled) == 1
+
+
+def test_ok_reply_uses_the_rechecked_answer() -> None:
+    c, _, _, _, _ = make(
+        FakeAdapter([CloudReply(_hand_built("A [KB#0002].", ("KB#0002",)), "m-1", 1, 1, "ok")])
+    )
+    call, _ = call_for()
+    g = run(c, call)
+    assert g.cloud_outcome == "ok"
+    assert g.response == "A [KB#0002]." and g.cited_chunk_ids == ("KB#0002",)
+
+
+def test_reservation_settled_when_the_scan_hook_cannot_be_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise TypeError("synthetic: the hook can't be built")
+
+    c, _, transport, _, sleeps = make()
+    monkeypatch.setattr(client_mod, "ScanHook", broken)
+    call, budget = call_for()
+    g = run(c, call)
+    assert g.cloud_outcome == "egress_blocked"
+    assert g.egress == "none"
+    assert transport.bodies == []
+    assert budget.reserved and budget.settled == [("r1", 0)]
+    assert sleeps == []
+
+
+class DripStream(httpx2.SyncByteStream):
+    """A body that drips one byte per read, each read one second apart."""
+
+    def __init__(self, clock: Clock, n: int) -> None:
+        self.clock = clock
+        self.n = n
+        self.read = 0
+
+    def __iter__(self) -> Iterator[bytes]:
+        for _ in range(self.n):
+            self.clock.now += 1.0
+            self.read += 1
+            yield b" "
+
+
+class DripTransport(CapturingTransport):
+    def __init__(self, clock: Clock, n: int) -> None:
+        super().__init__()
+        self.clock = clock
+        self.n = n
+        self.streams: list[DripStream] = []
+
+    def respond(self, request: httpx2.Request) -> httpx2.Response:
+        s = DripStream(self.clock, self.n)
+        self.streams.append(s)
+        return httpx2.Response(200, stream=s, request=request)
+
+
+def test_a_dripping_reply_stops_at_the_stage_deadline() -> None:
+    # Each read is quick, so no per-read timeout fires; the attempt's
+    # overall deadline over the whole body does.
+    clock = Clock()
+    transport = DripTransport(clock, n=10_000)
+    c, _, _, _, _ = make(transport=transport, clock=clock)
+    call, budget = call_for(deadline=clock.now + 30)
+    g = run(c, call)
+    assert g.cloud_outcome == "timeout"
+    assert g.egress == "anthropic"
+    assert len(transport.streams) == 1
+    assert transport.streams[0].read <= 31
+    assert clock.now <= call.stage_deadline + 1
+    assert budget.settled == [("r1", None)]
+
+
+def test_adapters_turn_sdk_retries_off() -> None:
+    # Tasks 11 to 13: retrying is the client's (RetryPolicy, under the
+    # budget and the stage deadline); an SDK's own retries would resend a
+    # body with no reservation. Every registered adapter's SDK client must
+    # have max_retries == 0.
+    with httpx2.Client(transport=CapturingTransport()) as http:
+        for name, factory in client_mod.ADAPTERS.items():
+            sdk = factory().make_sdk(http, ApiKey(FAKE_KEY), BASE_URL)
+            assert getattr(sdk, "max_retries", None) == 0, name

@@ -135,10 +135,13 @@ class Answer(BaseModel):
 _CITATION = re.compile(r"KB#[0-9]{4}")
 _MARKER = re.compile(r"\[(KB#[0-9]{4})\]")
 _DELIMITERS = ("<<chunk", "<<end")
-# A scheme URL, www., a script scheme, a protocol-relative "//host", or a
-# backslash form of one (a backslash next to a slash, or two backslashes).
+# A scheme URL, www., a script scheme, a data:, mailto:, file: or tel:
+# scheme (none needs "//"), a protocol-relative "//host", or a backslash
+# form of one (a backslash next to a slash, or two backslashes). The
+# schemes refuse prose like "lab data: Hb 9" too: fails closed (for H2).
 _LINK = re.compile(
     r"[a-z][a-z0-9+.\-]*://|www\.|javascript:|vbscript:|//[^\s/]"
+    r"|\b(?:data|mailto|file|tel):"
     # Backslash-slash forms browsers and renderers read as a slash.
     r"|\\/|/\\|\\\\"
 )

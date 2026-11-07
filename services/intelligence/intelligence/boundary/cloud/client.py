@@ -35,8 +35,8 @@ import os
 import ssl
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import httpx2
@@ -60,7 +60,7 @@ from intelligence.boundary.cloud.gate import (
     TaggingMasker,
     shared_chunk_of,
 )
-from intelligence.boundary.cloud.reply import Answer
+from intelligence.boundary.cloud.reply import Answer, validate_answer
 from intelligence.boundary.cloud.retry import RETRY, RetryPolicy
 from intelligence.boundary.cloud.scan import Identifiers, ScanHook, Shape, scan_body
 from intelligence.boundary.config import ConfigError
@@ -155,6 +155,63 @@ class _SharedTransport(httpx2.BaseTransport):
 
     def close(self) -> None:
         return None
+
+
+class _DeadlineStream(httpx2.SyncByteStream):
+    """A response body that stops at the attempt's deadline: the per-read
+    timeout bounds one read, this bounds the whole body, so a reply that
+    drips in a byte at a time still ends at the stage deadline."""
+
+    def __init__(
+        self,
+        inner: httpx2.SyncByteStream,
+        deadline: float,
+        clock: Callable[[], float],
+        request: httpx2.Request,
+    ) -> None:
+        self._inner = inner
+        self._deadline = deadline
+        self._clock = clock
+        self._request = request
+
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self._inner:
+            if self._clock() >= self._deadline:
+                raise httpx2.ReadTimeout("stage deadline", request=self._request)
+            yield chunk
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class _DeadlineTransport(httpx2.BaseTransport):
+    """One attempt's overall deadline, over the whole request and the whole
+    body, on top of the per-read timeouts. A single read that stalls is
+    still bounded by the read timeout, which is at most the time left."""
+
+    def __init__(
+        self, inner: httpx2.BaseTransport, deadline: float, clock: Callable[[], float]
+    ) -> None:
+        self._inner = inner
+        self._deadline = deadline
+        self._clock = clock
+
+    def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+        if self._clock() >= self._deadline:
+            raise httpx2.PoolTimeout("stage deadline", request=request)
+        response = self._inner.handle_request(request)
+        if self._clock() >= self._deadline:
+            response.close()
+            raise httpx2.ReadTimeout("stage deadline", request=request)
+        stream = response.stream
+        if not isinstance(stream, httpx2.SyncByteStream):
+            response.close()
+            raise httpx2.ReadTimeout("not a sync stream", request=request)
+        response.stream = _DeadlineStream(stream, self._deadline, self._clock, request)
+        return response
+
+    def close(self) -> None:
+        self._inner.close()
 
 
 class _Rendered(Exception):
@@ -393,26 +450,37 @@ class CloudModelClient:
                 reservation = None
             if type(reservation) is not Reservation:
                 return "budget_exhausted", None, p if sent_any else "none"
-            hook = ScanHook(call.identifiers, self._adapter.shape)
+            hook: ScanHook | None = None
             reply: CloudReply | None = None
             error: BaseException | None = None
             try:
-                with self._http(_SharedTransport(self._transport), left, [hook]) as http:
+                # Built inside the try: if the hook can't be built, the
+                # reservation is still settled (as 0: nothing was sent).
+                hook = ScanHook(call.identifiers, self._adapter.shape)
+                transport = _DeadlineTransport(
+                    _SharedTransport(self._transport), call.stage_deadline, self._clock
+                )
+                with self._http(transport, left, [hook]) as http:
                     sdk = self._adapter.make_sdk(http, self._provider.key, self._provider.base_url)
                     reply = self._adapter.call(sdk, prompt, self._provider.model, left)
             except Exception as e:
                 error = e
             finally:
                 self._settle(call.budget, reservation, hook, reply)
+            if hook is None:
+                # No scan hook, so nothing could be sent: refuse, never retry.
+                return "egress_blocked", None, p if sent_any else "none"
             sent_any = sent_any or hook.sent
             egress = p if sent_any else "none"
 
-            outcome, retry_after, status = self._outcome(hook, error, reply, sent_ids)
+            outcome, retry_after, status, checked = self._outcome(hook, error, reply, sent_ids)
             if outcome == "auth_failed":
                 log.error("cloud.auth_failed provider=%s status=%s", p, status or "-")
                 telemetry.record_cloud_alert(p, "auth_failed")
             if outcome != RETRY:
-                return outcome, reply if outcome == "ok" else None, egress
+                if outcome == "ok" and reply is not None and checked is not None:
+                    return outcome, replace(reply, answer=checked), egress
+                return ("malformed" if outcome == "ok" else outcome), None, egress
             left = call.stage_deadline - self._clock()
             delay = self._policy.next_delay(attempt, retry_after, left)
             if delay is None:
@@ -426,43 +494,58 @@ class CloudModelClient:
         error: BaseException | None,
         reply: CloudReply | None,
         sent_ids: frozenset[str],
-    ) -> tuple[str, float | None, int | None]:
-        """(RETRY or a final outcome, Retry-After, status) for one attempt.
-        The hook's verdict wins over anything the SDK raised or returned."""
+    ) -> tuple[str, float | None, int | None, Answer | None]:
+        """(RETRY or a final outcome, Retry-After, status, the re-checked
+        answer when ok) for one attempt. The hook's verdict wins over
+        anything the SDK raised or returned."""
         if hook.verdict is not None:
-            return "egress_blocked", None, None
+            return "egress_blocked", None, None, None
         if error is not None:
             status = getattr(error, "status_code", None)
-            return retry.classify(error), None, status if type(status) is int else None
+            return retry.classify(error), None, status if type(status) is int else None, None
         if type(reply) is not CloudReply:
-            return "malformed", None, None
+            return "malformed", None, None, None
         outcome = retry.classify(reply.outcome)
         status = reply.status if type(reply.status) is int else None
         if outcome != "ok":
-            return outcome, reply.retry_after, status
+            return outcome, reply.retry_after, status, None
         a = reply.answer
         if type(a) is not Answer or not isinstance(reply.model_id, str):
-            return "malformed", None, status
+            return "malformed", None, status, None
         version = f"{self._provider.name}/{self._provider.model}@{reply.model_id}"
         if not reply.model_id or not _SAFE_VERSION.fullmatch(version):
-            return "malformed", None, status
-        if not set(a.citations) <= sent_ids:
-            return "malformed", None, status
-        if a.insufficient_evidence:
-            return "insufficient", None, status
-        return "ok", None, status
+            return "malformed", None, status, None
+        # Never trust the adapter's Answer as given (it may be hand-built or
+        # made with model_construct): every rule runs again here, against
+        # this job's sent ids, and only the re-checked answer is used.
+        try:
+            checked = validate_answer(
+                {
+                    "answer": a.answer,
+                    "citations": list(a.citations),
+                    "insufficient_evidence": a.insufficient_evidence,
+                },
+                sent_ids,
+            )
+        except Exception:
+            return "malformed", None, status, None
+        if not set(checked.citations) <= sent_ids:
+            return "malformed", None, status, None
+        if checked.insufficient_evidence:
+            return "insufficient", None, status, None
+        return "ok", None, status, checked
 
     def _settle(
         self,
         budget: BudgetPort,
         reservation: Reservation,
-        hook: ScanHook,
+        hook: ScanHook | None,
         reply: CloudReply | None,
     ) -> None:
         """Settle once, whatever happened: nothing sent is 0; a reply with
         both counts is their sum; anything else is all of the reservation."""
         used: int | None
-        if not hook.sent:
+        if hook is None or not hook.sent:
             used = 0
         elif reply is not None and type(reply) is CloudReply:
             ti, to = _tokens(reply.tokens_in), _tokens(reply.tokens_out)
