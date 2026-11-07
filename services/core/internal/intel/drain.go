@@ -15,8 +15,8 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 )
 
 const (

@@ -522,3 +522,75 @@ func TestComposeSmokeOverride(t *testing.T) {
 		}
 	}
 }
+
+// Plan departure 5: core requires services/gokit (replace ../gokit), so
+// its image builds from services/ with core/Dockerfile, the same way in
+// dev compose, CI, the deploy workflow and the Makefile. A build from
+// services/core would fail at go mod download, so a stale context anywhere
+// is a broken image there.
+func TestCoreBuildsFromServices(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "..")
+	read := func(rel string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	var c struct {
+		Services map[string]struct {
+			Build any    `yaml:"build"`
+			Image string `yaml:"image"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(read("docker-compose.yml")), &c); err != nil {
+		t.Fatal(err)
+	}
+	builds := 0
+	for name, s := range c.Services {
+		if s.Image != "mhai-core:local" || s.Build == nil {
+			continue
+		}
+		builds++
+		b, ok := s.Build.(map[string]any)
+		if !ok || b["context"] != "./services" || b["dockerfile"] != "core/Dockerfile" {
+			t.Errorf("%s builds core with %v, want context ./services and dockerfile core/Dockerfile", name, s.Build)
+		}
+	}
+	if builds != 1 {
+		t.Errorf("%d services build mhai-core:local, want 1", builds)
+	}
+	// Every docker build of core in CI and the Makefile.
+	for _, rel := range []string{".github/workflows/ci.yml", "Makefile"} {
+		n := 0
+		for _, line := range strings.Split(read(rel), "\n") {
+			if !strings.Contains(line, "docker build") || !strings.Contains(line, "mhai-core:") {
+				continue
+			}
+			n++
+			if !strings.HasSuffix(strings.TrimSpace(line), "-f services/core/Dockerfile services") {
+				t.Errorf("%s: %q must build with -f services/core/Dockerfile services", rel, strings.TrimSpace(line))
+			}
+		}
+		if n == 0 {
+			t.Errorf("%s builds no core image", rel)
+		}
+	}
+	deploy := read(".github/workflows/deploy.yml")
+	if !strings.Contains(deploy, "context: services\n") || !strings.Contains(deploy, "file: services/core/Dockerfile\n") ||
+		strings.Contains(deploy, "context: services/core") {
+		t.Error("deploy.yml must build core with context services and file services/core/Dockerfile")
+	}
+	// The context is all of services/: the Python project and test files
+	// stay out of it.
+	ignore := read("services/.dockerignore")
+	for _, want := range []string{"intelligence", "**/*_test.go"} {
+		if !strings.Contains(ignore, want+"\n") {
+			t.Errorf("services/.dockerignore lacks %s", want)
+		}
+	}
+	if !strings.Contains(read("services/core/Dockerfile"), "COPY gokit/") {
+		t.Error("services/core/Dockerfile doesn't copy gokit")
+	}
+}

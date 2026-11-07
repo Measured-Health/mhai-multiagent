@@ -1,9 +1,14 @@
 # The core service. Also runs one-shot migrations: core migrate up.
+# Built from services/ (it requires services/gokit, ADR 0014):
+#   docker build -f services/core/Dockerfile services
 FROM golang:1.24-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY gokit/go.mod gokit/go.sum gokit/
+COPY core/go.mod core/go.sum core/
+WORKDIR /src/core
 RUN go mod download
-COPY . .
+COPY gokit/ /src/gokit/
+COPY core/ /src/core/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/core ./cmd/core
 # /keys holds the dev signing keys (compose volume corekeys); /trusted the
 # request-token trusted-keys file, public keys only (volume trustedkeys).

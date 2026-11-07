@@ -43,7 +43,9 @@ services:
   # carries no core service secrets. Placeholder passwords are refused.
   core-migrate:
     build:
-      context: ./services/core
+      # Core requires services/gokit, so the context is services/ (ADR 0014).
+      context: ./services
+      dockerfile: core/Dockerfile
     image: mhai-core:local
     restart: "no"
     command: ["migrate", "up"]
