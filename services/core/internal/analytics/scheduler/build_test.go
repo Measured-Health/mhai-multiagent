@@ -3,6 +3,7 @@ package scheduler_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"go/parser"
 	"go/token"
 	"log/slog"
@@ -206,7 +207,8 @@ func TestBuilderLogsNoCounts(t *testing.T) {
 
 // A29: no route package reaches the scheduler: internal/platform (and
 // everything inside the module it imports) never imports
-// internal/analytics/scheduler, nor calls db.WithAnalyticsJob.
+// internal/analytics/scheduler, calls db.WithAnalyticsJob or names
+// mhai_analytics_job (the database lets the core login SET ROLE to it).
 func TestRoutesCantReachSchedulerPool(t *testing.T) {
 	const mod = "github.com/Measured-Health/mhai-multiagent/services/core/"
 	root := filepath.Join("..", "..", "..")
@@ -233,6 +235,11 @@ func TestRoutesCantReachSchedulerPool(t *testing.T) {
 			if pkg != "internal/db" && bytes.Contains(src, []byte("WithAnalyticsJob")) {
 				t.Errorf("%s calls WithAnalyticsJob (from %s)", file, via)
 			}
+			// Review fix 2: the core login may SET ROLE to the scheduler's
+			// role, so no route-reachable file may name it at all.
+			if pkg != "internal/db" && bytes.Contains(src, []byte("mhai_analytics_job")) {
+				t.Errorf("%s names mhai_analytics_job (from %s)", file, via)
+			}
 			fs := token.NewFileSet()
 			af, err := parser.ParseFile(fs, file, src, parser.ImportsOnly)
 			if err != nil {
@@ -251,5 +258,55 @@ func TestRoutesCantReachSchedulerPool(t *testing.T) {
 	}
 	if !seen["internal/smallgroup"] && !seen["internal/db"] {
 		t.Fatal("the walk read nothing")
+	}
+}
+
+// Review fix 3: a median review time not shown reads the same whether no
+// correction or 1 to 4 were decided (no {null,false} beside {null,true}).
+// Review fix 4: the staff count is under the small-group rule (Q4 open):
+// 3 is hidden, 9 is shown.
+func TestMedianAndStaffHideAlike(t *testing.T) {
+	clock, epoch := at(2026, 11, 2), at(2026, 10, 1)
+	f := schedtest.New(clock, epoch)
+	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	for i, id := range ids {
+		f.Hosp = append(f.Hosp, scheduler.Hospital{ID: id, Name: "Synthetic " + string(rune('A'+i)), Status: "active", CreatedAt: epoch.AddDate(0, -1, 0)})
+	}
+	f.StaffN[ids[0]], f.StaffN[ids[1]], f.StaffN[ids[2]] = 3, 9, 0
+	median := 12.5
+	for w := calendar.Of(calendar.Week, epoch); w.From.Before(clock); w = calendar.Next(w) {
+		f.Set(w, ids[0], scheduler.FrozenRow{QG: [7]int64{20}, Clinicians: 5})                              // decided 0
+		f.Set(w, ids[1], scheduler.FrozenRow{QG: [7]int64{20}, Clinicians: 5, Decided: 3, Median: &median}) // decided 3
+		f.Set(w, ids[2], scheduler.FrozenRow{QG: [7]int64{20}, Clinicians: 5, Decided: 6, Median: &median}) // decided 6
+	}
+	if _, err := sched(f, nil).Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st, ok := f.Snapshot(calendar.Of(calendar.Week, at(2026, 10, 8)))
+	if !ok {
+		t.Fatal("no week stored")
+	}
+	var body struct {
+		Hospitals []map[string]json.RawMessage `json:"hospitals"`
+	}
+	if err := json.Unmarshal(st.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	row := map[string]map[string]json.RawMessage{}
+	for _, h := range body.Hospitals {
+		var ref struct{ ID string }
+		_ = json.Unmarshal(h["hospital"], &ref)
+		row[ref.ID] = h
+	}
+	a, b, c := row[ids[0].String()], row[ids[1].String()], row[ids[2].String()]
+	if string(a["median_review_hours"]) != string(b["median_review_hours"]) {
+		t.Errorf("median: 0 decided %s, 3 decided %s: a reader can tell them apart", a["median_review_hours"], b["median_review_hours"])
+	}
+	if string(c["median_review_hours"]) != `{"value":12.5,"suppressed":false}` {
+		t.Errorf("median of 6 decided: %s", c["median_review_hours"])
+	}
+	if string(a["staff"]) != `{"value":null,"suppressed":true}` || string(b["staff"]) != `{"value":9,"suppressed":false}` ||
+		string(c["staff"]) != `{"value":0,"suppressed":false}` {
+		t.Errorf("staff 3, 9, 0: %s %s %s", a["staff"], b["staff"], c["staff"])
 	}
 }

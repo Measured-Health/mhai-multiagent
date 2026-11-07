@@ -44,12 +44,26 @@ type Ref struct {
 	Name string `json:"name"`
 }
 
-// HospitalRow is one hospital's figures and its staff count (a plain number,
-// spec §5: accounts the platform provisions).
+// HospitalRow is one hospital's figures and its staff count.
 type HospitalRow struct {
-	Hospital Ref   `json:"hospital"`
-	Staff    int64 `json:"staff"`
+	Hospital Ref                `json:"hospital"`
+	Staff    smallgroup.Guarded `json:"staff"`
 	Row
+}
+
+// HideSmallStaff puts the staff count under the small-group rule (a count
+// of 1 to 4 hidden) until the privacy lead signs off Q4 (spec §16: the
+// staff count as a plain number). Switching it off is this code change:
+// set it false and make HospitalRow.Staff a plain number again (a guarded
+// value refuses a shown 1 to 4 when read back).
+const HideSmallStaff = true
+
+// StaffFigure is a hospital's staff count as stored.
+func StaffFigure(n int64) smallgroup.Guarded {
+	if HideSmallStaff {
+		return smallgroup.Count(n)
+	}
+	return smallgroup.Guarded{Value: &n}
 }
 
 // Row is one row's guarded figures: the QG family (questions, answers and
@@ -177,8 +191,8 @@ func DecodeBody(b []byte, p calendar.Period) (Body, error) {
 	seen := map[string]bool{}
 	for _, h := range out.Hospitals {
 		id, err := uuid.Parse(h.Hospital.ID)
-		named := audit.ShowableName(h.Hospital.Name) || (h.Hospital.Name == "" && h.Staff == 0 && h.Row.AllHidden())
-		if err != nil || id.String() != h.Hospital.ID || seen[h.Hospital.ID] || !named || h.Staff < 0 {
+		named := audit.ShowableName(h.Hospital.Name) || (h.Hospital.Name == "" && !h.Staff.Shown() && h.Row.AllHidden())
+		if err != nil || id.String() != h.Hospital.ID || seen[h.Hospital.ID] || !named {
 			return Body{}, errBody
 		}
 		seen[h.Hospital.ID] = true

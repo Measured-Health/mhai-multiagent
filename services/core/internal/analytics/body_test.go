@@ -18,7 +18,7 @@ func okBody(p calendar.Period) Body {
 		Escalate: smallgroup.Count(0), Degraded: smallgroup.Count(0), Reviews: smallgroup.Count(0), ActiveClinicians: smallgroup.Count(6),
 		QuestionsPerClinician: RatioOf(2)}
 	return Body{Kind: string(p.Kind), From: from, To: to, All: row,
-		Hospitals: []HospitalRow{{Hospital: Ref{ID: uuid.NewString(), Name: "Synthetic General"}, Staff: 9, Row: row}}}
+		Hospitals: []HospitalRow{{Hospital: Ref{ID: uuid.NewString(), Name: "Synthetic General"}, Staff: StaffFigure(9), Row: row}}}
 }
 
 // A16: a stored body with a shown 3, an unknown key, another period, a bad
@@ -60,7 +60,7 @@ func TestBodyDecodeStrict(t *testing.T) {
 	// A hospital whose name can't be shown: an empty name, no staff, every
 	// figure hidden.
 	b := okBody(p)
-	b.Hospitals[0].Hospital.Name, b.Hospitals[0].Staff = "", 0
+	b.Hospitals[0].Hospital.Name, b.Hospitals[0].Staff = "", smallgroup.Guarded{Suppressed: true}
 	raw, _ := json.Marshal(b)
 	if _, err := DecodeBody(raw, p); err == nil {
 		t.Error("an unnamed row with figures accepted")

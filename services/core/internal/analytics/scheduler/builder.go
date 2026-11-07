@@ -453,7 +453,9 @@ func render(p calendar.Period, listed []uuid.UUID, rows map[uuid.UUID]FrozenRow,
 		case i == 0:
 			out.MedianReviewHours = analytics.Hours{} // not additive: the routes take medians over hospitals
 		case !named || r.Decided < analytics.MinReviewsForMedian || r.Median == nil:
-			out.MedianReviewHours = analytics.Hours{Number: analytics.Number{Suppressed: r.Decided > 0 || !named}}
+			// Review fix 3: one representation whether 0 or 1 to 4 were
+			// decided, so the hiding says nothing about which.
+			out.MedianReviewHours = analytics.Hours{Number: analytics.Number{Suppressed: true}}
 		default:
 			out.MedianReviewHours = analytics.HoursOf(*r.Median)
 		}
@@ -463,9 +465,9 @@ func render(p calendar.Period, listed []uuid.UUID, rows map[uuid.UUID]FrozenRow,
 	for i, h := range listed {
 		hosp := byID[h]
 		named := audit.ShowableName(hosp.Name)
-		hr := analytics.HospitalRow{Hospital: analytics.Ref{ID: h.String(), Name: hosp.Name}, Staff: staff[h], Row: row(rows[h], i+1, named)}
+		hr := analytics.HospitalRow{Hospital: analytics.Ref{ID: h.String(), Name: hosp.Name}, Staff: analytics.StaffFigure(staff[h]), Row: row(rows[h], i+1, named)}
 		if !named {
-			hr.Hospital.Name, hr.Staff = "", 0
+			hr.Hospital.Name, hr.Staff = "", smallgroup.Guarded{Suppressed: true}
 		}
 		body.Hospitals = append(body.Hospitals, hr)
 	}
