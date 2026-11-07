@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -245,6 +246,9 @@ func TestModelPolicyPutStrictBody(t *testing.T) {
 		"provider without ref": `{"cloud_provider":"anthropic","monthly_token_budget":5,"backup_code":"` + code + `"}`,
 		"budget 0":             `{"cloud_provider":null,"monthly_token_budget":0,"backup_code":"` + code + `"}`,
 		"bad ref shape":        `{"cloud_provider":"openai","agreement_ref":"signed by Dr Synthetic","monthly_token_budget":5,"backup_code":"` + code + `"}`,
+		"pseudonym ref":        `{"cloud_provider":"openai","agreement_ref":"P-AB12CD34","monthly_token_budget":5,"backup_code":"` + code + `"}`,
+		"name ref":             `{"cloud_provider":"openai","agreement_ref":"ADAEZE-OKAFOR","monthly_token_budget":5,"backup_code":"` + code + `"}`,
+		"ref while off":        `{"cloud_provider":null,"agreement_ref":"AGR-2026-01","monthly_token_budget":5,"backup_code":"` + code + `"}`,
 		"unknown provider":     `{"cloud_provider":"gemini","agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5,"backup_code":"` + code + `"}`,
 		"no provider key":      `{"monthly_token_budget":5,"backup_code":"` + code + `"}`,
 		"not json":             `cloud_provider=anthropic`,
@@ -283,7 +287,7 @@ func TestModelPolicyPutAuditsClosedPayload(t *testing.T) {
 		t.Errorf("updated_by %v, want the admin", by)
 	}
 
-	ok(t, "openai", putPolicy(t, tok, h, policyBody("openai", "DPA-OPENAI.2026", 3000000, backupCode(t, admin))))
+	ok(t, "openai", putPolicy(t, tok, h, policyBody("openai", "DPA-2026-0042", 3000000, backupCode(t, admin))))
 	r = putPolicy(t, tok, h, policyBody("", "", 3000000, backupCode(t, admin)))
 	ok(t, "off", r)
 	if r.body["cloud_provider"] != nil || r.body["agreement_ref"] != nil {
@@ -300,7 +304,7 @@ func TestModelPolicyPutAuditsClosedPayload(t *testing.T) {
 	want := []map[string]any{
 		{"hospital_id": h.String(), "provider": "anthropic", "previous": "none", "agreement_ref": "DEMO-SYNTHETIC",
 			"monthly_token_budget": float64(3000000), "via": "platform"},
-		{"hospital_id": h.String(), "provider": "openai", "previous": "anthropic", "agreement_ref": "DPA-OPENAI.2026",
+		{"hospital_id": h.String(), "provider": "openai", "previous": "anthropic", "agreement_ref": "DPA-2026-0042",
 			"monthly_token_budget": float64(3000000), "via": "platform"},
 		{"hospital_id": h.String(), "provider": "none", "previous": "openai",
 			"monthly_token_budget": float64(3000000), "via": "platform"},
@@ -365,4 +369,40 @@ func TestModelPolicyRateLimited(t *testing.T) {
 		t.Errorf("budget %d after the refused write", b)
 	}
 	ok(t, "another session", putPolicy(t, mint(t, admin), h, policyBody("", "", 5000, backupCode(t, admin))))
+}
+
+// Review M3: two PUTs racing on one hospital each audit the policy they
+// replaced: one row has previous none, the other the first's provider.
+func TestModelPolicyConcurrentPutsChainPrevious(t *testing.T) {
+	for round := 0; round < 5; round++ {
+		h := seedHospital(t, "active")
+		admin := platformAdmin(t)
+		bodies := []string{policyBody("anthropic", "DEMO-SYNTHETIC", 1000, backupCode(t, admin)),
+			policyBody("openai", "AGR-2026-01", 1000, backupCode(t, admin))}
+		toks := []string{mint(t, admin), mint(t, admin)}
+		var wg sync.WaitGroup
+		codes := make([]int, 2)
+		for i := range bodies {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				codes[i] = putPolicy(t, toks[i], h, bodies[i]).code
+			}(i)
+		}
+		wg.Wait()
+		if codes[0] != 200 || codes[1] != 200 {
+			t.Fatalf("round %d: %v", round, codes)
+		}
+		a := policyAudits(t, h)
+		if len(a) != 2 {
+			t.Fatalf("round %d: %d rows", round, len(a))
+		}
+		first, second := a[0].payload, a[1].payload
+		if first["previous"] != "none" || second["previous"] != first["provider"] || second["provider"] == first["provider"] {
+			t.Errorf("round %d: %v then %v", round, first, second)
+		}
+		if p, _, _, _, _ := policyRow(t, h); p == nil || *p != second["provider"] {
+			t.Errorf("round %d: stored %v, last audited %v", round, p, second["provider"])
+		}
+	}
 }

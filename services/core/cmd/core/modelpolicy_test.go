@@ -52,13 +52,17 @@ func TestCLIModelPolicyArgsCheckedFirst(t *testing.T) {
 		"provider without ref": {enabled, []string{"set", "HAV", "--provider", "anthropic"}, errNeedsAgreementRef},
 		"bad ref":              {enabled, []string{"set", "HAV", "--provider", "anthropic", "--agreement-ref", "signed-by-dr-synthetic"}, errBadAgreementRef},
 		"budget 0":             {enabled, []string{"set", "HAV", "--provider", "none", "--budget", "0"}, errBadBudget},
+		"pseudonym ref":        {enabled, []string{"set", "HAV", "--provider", "anthropic", "--agreement-ref", "P-AB12CD34"}, errBadAgreementRef},
+		"name ref":             {enabled, []string{"set", "HAV", "--provider", "anthropic", "--agreement-ref", "ADAEZE-OKAFOR"}, errBadAgreementRef},
+		"ref while off":        {enabled, []string{"set", "HAV", "--provider", "none", "--agreement-ref", "AGR-2026-01"}, errRefWithoutProvider},
 		"budget too big":       {enabled, []string{"set", "HAV", "--provider", "none", "--budget", "1000000001"}, errBadBudget},
 	} {
 		err := run(c.env, c.args...)
 		if !errors.Is(err, c.want) {
 			t.Errorf("%s: %v, want %v", name, err, c.want)
 		}
-		if err != nil && strings.Contains(err.Error(), "signed-by-dr-synthetic") {
+		if err != nil && (strings.Contains(err.Error(), "signed-by-dr-synthetic") || strings.Contains(err.Error(), "OKAFOR") ||
+			strings.Contains(err.Error(), "P-AB12CD34")) {
 			t.Errorf("%s: the error echoes the reference: %v", name, err)
 		}
 	}

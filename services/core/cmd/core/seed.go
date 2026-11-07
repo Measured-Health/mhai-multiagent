@@ -51,10 +51,18 @@ is left as it is. It refuses any other status: a deactivated hospital is
 reactivated through the platform app.
 
 hospitals model-policy set sets the hospital's cloud model policy and audits
-hospital.model_policy_changed (via cli, no actor). A provider must be enabled
-in CORE_CLOUD_PROVIDERS and needs --agreement-ref (the recorded agreement
-check's reference, e.g. DEMO-SYNTHETIC for the synthetic demo); none switches
-the hospital back to its local models. --budget is the monthly token budget
+hospital.model_policy_changed (via cli, no actor). A provider needs
+--agreement-ref, the recorded agreement check's reference: AGR-YYYY-NNNN or
+DPA-YYYY-NNNN (2 to 8 digits after the year), or DEMO-SYNTHETIC for the
+synthetic demo. It is a document reference, never a person's or patient's
+name or identifier. none switches the hospital back to its local models and
+clears the reference (so --agreement-ref is refused with none).
+
+The provider must be enabled in CORE_CLOUD_PROVIDERS as this command sees it.
+That catches a mistake; it is not a control: the operator sets their own
+environment. The provisioning login (mhai_provision) is what authorises the
+write, and the pipeline's own INTELLIGENCE_CLOUD_PROVIDERS and key files
+decide what can actually be sent. --budget is the monthly token budget
 (1 to 1000000000; unchanged when left out, 2000000 for a new policy). It
 prints the hospital id and the provider only.`
 
@@ -150,12 +158,13 @@ func hospitalsActivate(ctx context.Context, args []string, url string, out io.Wr
 var (
 	errModelPolicyArgs = errors.New("usage: core hospitals model-policy set <hospital id or short code> " +
 		"--provider openai|anthropic|xai|none [--agreement-ref REF] [--budget TOKENS]")
-	errUnknownProvider   = errors.New("--provider must be openai, anthropic, xai or none")
-	errProviderDisabled  = errors.New("that provider is not enabled in CORE_CLOUD_PROVIDERS")
-	errNeedsAgreementRef = errors.New("a provider needs --agreement-ref")
-	errBadAgreementRef   = errors.New("--agreement-ref must be 3 to 64 of A-Z, 0-9, _, . and -, starting with a letter or digit")
-	errBadBudget         = errors.New("--budget must be a whole number from 1 to 1000000000")
-	errModelPolicyWrite  = errors.New("could not set the model policy; nothing was changed")
+	errUnknownProvider    = errors.New("--provider must be openai, anthropic, xai or none")
+	errProviderDisabled   = errors.New("that provider is not enabled in CORE_CLOUD_PROVIDERS")
+	errNeedsAgreementRef  = errors.New("a provider needs --agreement-ref")
+	errBadAgreementRef    = errors.New("--agreement-ref must be AGR-YYYY-NNNN, DPA-YYYY-NNNN (2 to 8 digits) or DEMO-SYNTHETIC")
+	errRefWithoutProvider = errors.New("--agreement-ref goes with a provider; none clears it")
+	errBadBudget          = errors.New("--budget must be a whole number from 1 to 1000000000")
+	errModelPolicyWrite   = errors.New("could not set the model policy; nothing was changed")
 )
 
 // hospitalsModelPolicy is "hospitals model-policy set <id or short code>
@@ -197,8 +206,11 @@ func hospitalsModelPolicy(ctx context.Context, args []string, url string, getenv
 	if c.Provider != "" && !slices.Contains(enabled, c.Provider) {
 		return errProviderDisabled
 	}
-	if agreement != "" && !platform.AgreementRefPattern.MatchString(agreement) {
+	if agreement != "" && !platform.AgreementRefOK(agreement) {
 		return errBadAgreementRef
+	}
+	if c.Provider == "" && agreement != "" {
+		return errRefWithoutProvider
 	}
 	if c.Provider != "" && agreement == "" {
 		return errNeedsAgreementRef
@@ -214,7 +226,7 @@ func hospitalsModelPolicy(ctx context.Context, args []string, url string, getenv
 		return err
 	}
 	defer pool.Close()
-	c.Hospital, err = account.WithHospital(ctx, pool, ref, func(tx pgx.Tx, hospital uuid.UUID) error {
+	c.Hospital, err = account.ProvisionOnHospital(ctx, pool, ref, func(tx pgx.Tx, hospital uuid.UUID) error {
 		c.Hospital = hospital
 		if _, err := platform.ApplyModelPolicy(ctx, tx, c); err != nil {
 			if errors.Is(err, platform.ErrNoSuchHospital) {

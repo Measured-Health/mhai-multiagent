@@ -24,11 +24,10 @@ func decodeBody(raw string) (policyBody, bool) {
 func TestModelPolicyBodyRules(t *testing.T) {
 	for _, raw := range []string{
 		`{"cloud_provider":"anthropic","agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":2000000}`,
-		`{"cloud_provider":"openai","agreement_ref":"DPA.2026_11-OPENAI","monthly_token_budget":1}`,
-		`{"cloud_provider":"xai","agreement_ref":"X01","monthly_token_budget":1000000000,"mfa_code":"123456"}`,
+		`{"cloud_provider":"openai","agreement_ref":"DPA-2026-11","monthly_token_budget":1}`,
+		`{"cloud_provider":"xai","agreement_ref":"AGR-2026-12345678","monthly_token_budget":1000000000,"mfa_code":"123456"}`,
 		`{"cloud_provider":null,"agreement_ref":null,"monthly_token_budget":5}`,
 		`{"cloud_provider":null,"monthly_token_budget":5,"backup_code":"synthetic"}`,
-		`{"cloud_provider":null,"agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5}`,
 	} {
 		b, ok := decodeBody(raw)
 		if !ok {
@@ -54,6 +53,12 @@ func TestModelPolicyBodyRules(t *testing.T) {
 		"short ref":             `{"cloud_provider":"openai","agreement_ref":"AB","monthly_token_budget":5}`,
 		"long ref":              `{"cloud_provider":"openai","agreement_ref":"A` + string(bytes.Repeat([]byte("B"), 64)) + `","monthly_token_budget":5}`,
 		"budget 0":              `{"cloud_provider":null,"monthly_token_budget":0}`,
+		"ref while off":         `{"cloud_provider":null,"agreement_ref":"AGR-2026-01","monthly_token_budget":5}`,
+		"old free shape":        `{"cloud_provider":"openai","agreement_ref":"SYNTH-1","monthly_token_budget":5}`,
+		"patient pseudonym":     `{"cloud_provider":"openai","agreement_ref":"P-AB12CD34","monthly_token_budget":5}`,
+		"a person's name":       `{"cloud_provider":"openai","agreement_ref":"ADAEZE-OKAFOR","monthly_token_budget":5}`,
+		"an MRN shape":          `{"cloud_provider":"openai","agreement_ref":"HAV-000123","monthly_token_budget":5}`,
+		"a name and a number":   `{"cloud_provider":"openai","agreement_ref":"OKAFOR-2026-01","monthly_token_budget":5}`,
 		"budget negative":       `{"cloud_provider":null,"monthly_token_budget":-1}`,
 		"budget too big":        `{"cloud_provider":null,"monthly_token_budget":1000000001}`,
 		"budget fraction":       `{"cloud_provider":null,"monthly_token_budget":1.5}`,
@@ -67,6 +72,23 @@ func TestModelPolicyBodyRules(t *testing.T) {
 		}
 		if _, ok := b.check(); ok {
 			t.Errorf("%s: accepted %s", name, raw)
+		}
+	}
+}
+
+// AgreementRefOK (review I1): an agreement code, never a word, a name, a
+// patient pseudonym or an identifier from a record.
+func TestAgreementRefShape(t *testing.T) {
+	for _, ok := range []string{"DEMO-SYNTHETIC", "AGR-2026-01", "DPA-2026-0042", "DPA-2026-12345678"} {
+		if !AgreementRefOK(ok) {
+			t.Errorf("refused %q", ok)
+		}
+	}
+	for _, bad := range []string{"", "P-AB12CD34", "AGR-P-AB12CD34", "ADAEZE-OKAFOR", "HAV-000123", "OKAFOR-2026-01",
+		"AGR-2026-1", "AGR-26-01", "AGR-2026-123456789", "agr-2026-01", "AGR-2026-01 ", "DEMO-SYNTHETIC-2", "SYNTH-1",
+		"AGR-2026-01\n", "\uff21GR-2026-01"} {
+		if AgreementRefOK(bad) {
+			t.Errorf("accepted %q", bad)
 		}
 	}
 }

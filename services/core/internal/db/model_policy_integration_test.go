@@ -34,7 +34,7 @@ func setPolicy(t *testing.T, pool *pgxpool.Pool, h uuid.UUID, provider *string, 
 	t.Helper()
 	ref := (*string)(nil)
 	if provider != nil {
-		r := "SYNTH-AGREEMENT-1"
+		r := "AGR-2026-0001"
 		ref = &r
 	}
 	if _, err := pool.Exec(context.Background(), `
@@ -693,13 +693,20 @@ func TestPolicyChecks(t *testing.T) {
 	a, _ := seedHospital(t, pool, uniqueCode("PC"))
 	ins := `INSERT INTO hospital_model_policy (hospital_id, cloud_provider, agreement_ref, monthly_token_budget) VALUES ($1, $2, $3, $4)`
 	for what, args := range map[string][]any{
-		"unknown provider":           {a, "gemini", "SYNTH-1", 1000},
+		"unknown provider":           {a, "gemini", "AGR-2026-01", 1000},
 		"lower-case agreement_ref":   {a, "openai", "synth-1", 1000},
 		"agreement_ref with a space": {a, "openai", "SYNTH 1", 1000},
 		"agreement_ref too short":    {a, "openai", "AB", 1000},
 		"agreement_ref too long":     {a, "openai", strings.Repeat("A", 65), 1000},
 		"provider without ref":       {a, "openai", nil, 1000},
-		"budget 0":                   {a, "openai", "SYNTH-1", 0},
+		"budget 0":                   {a, "openai", "AGR-2026-01", 0},
+		"old free shape":             {a, "openai", "SYNTH-1", 1000},
+		"patient pseudonym":          {a, "openai", "P-AB12CD34", 1000},
+		"pseudonym inside":           {a, "openai", "AGR-P-AB12CD34", 1000},
+		"a person's name":            {a, "openai", "ADAEZE-OKAFOR", 1000},
+		"an MRN shape":               {a, "openai", "HAV-000123", 1000},
+		"a word and a number":        {a, "openai", "OKAFOR-2026-01", 1000},
+		"reference while off":        {a, nil, "AGR-2026-01", 1000},
 		"negative budget":            {a, nil, nil, -1},
 	} {
 		if _, err := pool.Exec(ctx, ins, args...); pgCode(err) != "23514" {
@@ -715,6 +722,15 @@ func TestPolicyChecks(t *testing.T) {
 	var budget int64
 	if err := pool.QueryRow(ctx, `SELECT monthly_token_budget FROM hospital_model_policy WHERE hospital_id = $1`, a).Scan(&budget); err != nil || budget != 2_000_000 {
 		t.Errorf("default budget %d (%v), want 2000000", budget, err)
+	}
+	for _, ref := range []string{"AGR-2026-0042", "DPA-2026-17", "DPA-2026-12345678"} {
+		if _, err := pool.Exec(ctx, `UPDATE hospital_model_policy SET cloud_provider = 'xai', agreement_ref = $2 WHERE hospital_id = $1`, a, ref); err != nil {
+			t.Errorf("valid reference %s: %v", ref, err)
+		}
+	}
+	// Switching off clears the reference, or the CHECK refuses it.
+	if _, err := pool.Exec(ctx, `UPDATE hospital_model_policy SET cloud_provider = NULL WHERE hospital_id = $1`, a); pgCode(err) != "23514" {
+		t.Errorf("off with a reference: want 23514, got %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE hospital_model_policy SET cloud_provider = 'xai', agreement_ref = 'DEMO-SYNTHETIC' WHERE hospital_id = $1`, a); err != nil {
 		t.Errorf("valid policy: %v", err)

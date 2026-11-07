@@ -1397,8 +1397,12 @@ paths:
         `mfa_required`, a wrong one 403 `mfa_invalid` (audited).
         `cloud_provider` is `openai`, `anthropic`, `xai` or null (off: the
         hospital's questions run on the local models). A provider needs an
-        `agreement_ref`, the reference of the recorded agreement check
-        (3 to 64 of A-Z, 0-9, `_`, `.`, `-`). A provider this deployment
+        `agreement_ref`, the reference of the recorded agreement check:
+        `AGR-YYYY-NNNN` or `DPA-YYYY-NNNN` (2 to 8 digits after the year),
+        or `DEMO-SYNTHETIC` for the synthetic demo. It is a document
+        reference, never a person's or patient's name or identifier. Off
+        has no reference: null clears it, and a reference with a null
+        provider is 422. A provider this deployment
         hasn't enabled (`CORE_CLOUD_PROVIDERS`) is 409 `conflict`. The body
         is checked first (422), then the provider (409), the hospital
         (404), the session's 10 writes a minute (429 `rate_limited`), then
@@ -1422,7 +1426,7 @@ paths:
               additionalProperties: false
               properties:
                 cloud_provider: { type: string, enum: [openai, anthropic, xai], nullable: true }
-                agreement_ref: { type: string, pattern: "^[A-Z0-9][A-Z0-9_.-]{2,63}$", nullable: true }
+                agreement_ref: { type: string, pattern: "^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$", nullable: true }
                 monthly_token_budget: { type: integer, format: int64, minimum: 1, maximum: 1000000000 }
                 mfa_code: { type: string }
                 backup_code: { type: string }
@@ -2027,7 +2031,7 @@ components:
       properties:
         hospital_id: { type: string, format: uuid }
         cloud_provider: { type: string, enum: [openai, anthropic, xai], nullable: true }
-        agreement_ref: { type: string, pattern: "^[A-Z0-9][A-Z0-9_.-]{2,63}$", nullable: true }
+        agreement_ref: { type: string, pattern: "^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$", nullable: true }
         monthly_token_budget: { type: integer, format: int64, minimum: 1, maximum: 1000000000 }
         updated_at: { type: string, format: date-time, nullable: true }
         usage:

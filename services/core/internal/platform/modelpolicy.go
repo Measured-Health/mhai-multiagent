@@ -54,8 +54,22 @@ const (
 	ViaCLI      = "cli"
 )
 
-// AgreementRefPattern is an agreement reference's shape (00018's CHECK).
-var AgreementRefPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9_.-]{2,63}$`)
+// AgreementRefPattern is an agreement reference's shape (00018's CHECK):
+// an agreement code, AGR-YYYY-NNNN or DPA-YYYY-NNNN (a fixed prefix, a
+// four-digit year, then 2 to 8 digits), or the literal DEMO-SYNTHETIC for the
+// synthetic demo. Letters appear only in the fixed prefixes, so a reference
+// can't hold a word, a person's name, a patient pseudonym (P-XXXX...) or a
+// record's identifier with letters (review I1); it is never checked against
+// anything but its shape. H3 (the legal lead) may change the format.
+var AgreementRefPattern = regexp.MustCompile(`^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$`)
+
+// AgreementRefOK reports whether s is an agreement reference: the pattern,
+// and nothing of the pseudonym's shape (pseudonymIn, as the cancel note;
+// the pattern already excludes it, this keeps the rule if the pattern is
+// ever widened).
+func AgreementRefOK(s string) bool {
+	return AgreementRefPattern.MatchString(s) && !pseudonymIn.MatchString(s)
+}
 
 var (
 	// ErrNoSuchHospital: no hospital has the id.
@@ -111,10 +125,11 @@ func (c ModelPolicyChange) valid() bool {
 	if c.Provider != "" && !slices.Contains(config.CloudProviderNames, c.Provider) {
 		return false
 	}
-	if c.AgreementRef != "" && !AgreementRefPattern.MatchString(c.AgreementRef) {
+	if c.AgreementRef != "" && !AgreementRefOK(c.AgreementRef) {
 		return false
 	}
-	if c.Provider != "" && c.AgreementRef == "" {
+	// A reference with a provider only: switching off clears it.
+	if (c.Provider == "") != (c.AgreementRef == "") {
 		return false
 	}
 	if c.Budget != nil && (*c.Budget < 1 || *c.Budget > MaxMonthlyTokenBudget) {
@@ -306,8 +321,8 @@ type policyBody struct {
 }
 
 // check applies the body's rules: cloud_provider present (a known provider
-// or null), a provider with an agreement reference of the id shape, a
-// reference (when given) of that shape, and a budget of 1 to 1000000000.
+// or null), a provider with an agreement reference (AgreementRefOK), null
+// with none, and a budget of 1 to 1000000000.
 // The change it returns has no hospital, actor or via yet.
 func (b policyBody) check() (ModelPolicyChange, bool) {
 	var c ModelPolicyChange
@@ -321,12 +336,13 @@ func (b policyBody) check() (ModelPolicyChange, bool) {
 		c.Provider = *b.CloudProvider.v
 	}
 	if b.AgreementRef != nil {
-		if !AgreementRefPattern.MatchString(*b.AgreementRef) {
+		if !AgreementRefOK(*b.AgreementRef) {
 			return c, false
 		}
 		c.AgreementRef = *b.AgreementRef
 	}
-	if c.Provider != "" && c.AgreementRef == "" {
+	// A provider needs a reference, and off has none (it is cleared).
+	if (c.Provider == "") != (c.AgreementRef == "") {
 		return c, false
 	}
 	n := *b.MonthlyTokenBudget

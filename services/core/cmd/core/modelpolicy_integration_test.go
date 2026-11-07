@@ -84,7 +84,7 @@ func TestCLIModelPolicySet(t *testing.T) {
 		t.Fatalf("anthropic row: %v %v %d %v", p, ref, b, by)
 	}
 	// By id, with a budget.
-	if out, err = run("set", hid.String(), "--provider", "openai", "--agreement-ref", "DPA-OPENAI.2026", "--budget", "750000"); err != nil ||
+	if out, err = run("set", hid.String(), "--provider", "openai", "--agreement-ref", "DPA-2026-0042", "--budget", "750000"); err != nil ||
 		out != "model policy "+hid.String()+" openai\n" {
 		t.Fatalf("openai: %q %v", out, err)
 	}
@@ -117,7 +117,7 @@ func TestCLIModelPolicySet(t *testing.T) {
 	want := []map[string]any{
 		{"hospital_id": hid.String(), "provider": "anthropic", "previous": "none", "agreement_ref": "DEMO-SYNTHETIC",
 			"monthly_token_budget": float64(2000000), "via": "cli"},
-		{"hospital_id": hid.String(), "provider": "openai", "previous": "anthropic", "agreement_ref": "DPA-OPENAI.2026",
+		{"hospital_id": hid.String(), "provider": "openai", "previous": "anthropic", "agreement_ref": "DPA-2026-0042",
 			"monthly_token_budget": float64(750000), "via": "cli"},
 		{"hospital_id": hid.String(), "provider": "none", "previous": "openai", "monthly_token_budget": float64(750000), "via": "cli"},
 	}

@@ -4,7 +4,13 @@
 --
 -- hospital_model_policy: one row per hospital; no row, or a NULL provider,
 -- means local. A provider needs the reference of the recorded agreement
--- check. It is platform-only: mhai_platform (the platform app) and
+-- check, and only a provider has one (switching off clears it). The
+-- reference is an agreement code, AGR-YYYY-NNNN or DPA-YYYY-NNNN (a fixed
+-- prefix, a four-digit year, 2 to 8 digits), or the literal DEMO-SYNTHETIC:
+-- letters appear only in the fixed prefixes, so it can't hold a word, a
+-- person's name or a patient pseudonym, which would stay on the hash-chained
+-- audit log for good (Task 2 review I1). The pseudonym shape is refused
+-- again on its own, as mhai-web's PSEUDONYM_IN. It is platform-only: mhai_platform (the platform app) and
 -- mhai_provision (the CLI twin) read and write it; mhai_gateway and
 -- mhai_worker hold nothing on it (plan departures 3 and 14).
 --
@@ -53,11 +59,12 @@
 CREATE TABLE hospital_model_policy (
     hospital_id          uuid PRIMARY KEY REFERENCES hospitals (id),
     cloud_provider       text CHECK (cloud_provider IN ('openai', 'anthropic', 'xai')),
-    agreement_ref        text CHECK (agreement_ref ~ '^[A-Z0-9][A-Z0-9_.-]{2,63}$'),
+    agreement_ref        text CHECK (agreement_ref ~ '^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$'
+                                     AND agreement_ref !~ '(^|[^A-Za-z0-9])P-[A-Z0-9]{4,12}([^A-Za-z0-9]|$)'),
     monthly_token_budget bigint NOT NULL DEFAULT 2000000 CHECK (monthly_token_budget > 0),
     updated_by           uuid,
     updated_at           timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT hospital_model_policy_agreement CHECK (cloud_provider IS NULL OR agreement_ref IS NOT NULL)
+    CONSTRAINT hospital_model_policy_agreement CHECK ((cloud_provider IS NULL) = (agreement_ref IS NULL))
 );
 ALTER TABLE hospital_model_policy OWNER TO mhai_migrate;
 ALTER TABLE hospital_model_policy ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;

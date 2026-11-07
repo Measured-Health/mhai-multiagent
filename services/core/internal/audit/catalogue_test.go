@@ -278,20 +278,36 @@ func outboxActions(t *testing.T) []string {
 	return out
 }
 
-// platformAppendActions are the actions 00014's platform_append allows.
+// platformAppendActions are the actions the latest platform_append allows:
+// every migration's Up section is read in order, and the last CREATE POLICY
+// platform_append wins (00014 made it; 00018 widened it).
 func platformAppendActions(t *testing.T) []string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "db", "migrations", "00014_platform_reads.sql"))
+	files, err := filepath.Glob(filepath.Join("..", "db", "migrations", "*.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	up := strings.SplitN(string(raw), "-- +goose Down", 2)[0]
-	m := regexp.MustCompile(`(?s)CREATE POLICY platform_append ON audit_log.*?action IN \(([^)]*)\)`).FindStringSubmatch(up)
-	if m == nil {
-		t.Fatal("00014 has no platform_append with an action list")
+	sort.Strings(files)
+	re := regexp.MustCompile(`(?s)CREATE POLICY platform_append ON audit_log.*?action IN \(([^)]*)\)`)
+	var last, from string
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		up := strings.SplitN(string(raw), "-- +goose Down", 2)[0]
+		for _, m := range re.FindAllStringSubmatch(up, -1) {
+			last, from = m[1], filepath.Base(f)
+		}
+	}
+	if last == "" {
+		t.Fatal("no migration has a platform_append with an action list")
+	}
+	if from < "00018" {
+		t.Fatalf("the latest platform_append is %s's; 00018 widened it", from)
 	}
 	var out []string
-	for _, q := range regexp.MustCompile(`'([a-z][a-z0-9_.]*)'`).FindAllStringSubmatch(m[1], -1) {
+	for _, q := range regexp.MustCompile(`'([a-z][a-z0-9_.]*)'`).FindAllStringSubmatch(last, -1) {
 		out = append(out, q[1])
 	}
 	sort.Strings(out)
@@ -320,8 +336,8 @@ func TestEveryActionHasCatalogueRow(t *testing.T) {
 			t.Errorf("platform action %s has no payload schema", a)
 		}
 	}
-	if got := platformAppendActions(t); len(got) != 8 {
-		t.Errorf("platform_append allows %v, want spec §5.5's eight", got)
+	if got := platformAppendActions(t); len(got) != 9 || !slices.Contains(got, "hospital.model_policy_changed") {
+		t.Errorf("platform_append allows %v, want spec §5.5's eight and hospital.model_policy_changed (00018)", got)
 	}
 	for _, a := range audit.RegisteredActions() {
 		if strings.HasPrefix(a, "test.") {

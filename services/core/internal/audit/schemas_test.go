@@ -223,6 +223,13 @@ func TestAuditSchemaModelPolicyChanged(t *testing.T) {
 	if err := audit.CheckActionPayload(action, good()); err != nil {
 		t.Fatalf("good payload: %v", err)
 	}
+	for _, ref := range []string{"AGR-2026-0042", "DPA-2026-17"} {
+		m := good()
+		m["agreement_ref"] = ref
+		if err := audit.CheckActionPayload(action, m); err != nil {
+			t.Errorf("%s: %v", ref, err)
+		}
+	}
 	off := good()
 	off["provider"], off["previous"], off["via"] = "none", "xai", "cli"
 	delete(off, "agreement_ref")
@@ -233,6 +240,12 @@ func TestAuditSchemaModelPolicyChanged(t *testing.T) {
 		"free text reference":  func(m map[string]any) { m["agreement_ref"] = "signed with Dr Synthetic on Monday" },
 		"lower-case reference": func(m map[string]any) { m["agreement_ref"] = "demo-synthetic" },
 		"short reference":      func(m map[string]any) { m["agreement_ref"] = "AB" },
+		"old free shape":       func(m map[string]any) { m["agreement_ref"] = "SYNTH-1" },
+		"patient pseudonym":    func(m map[string]any) { m["agreement_ref"] = "P-AB12CD34" },
+		"a person's name":      func(m map[string]any) { m["agreement_ref"] = "ADAEZE-OKAFOR" },
+		"an MRN shape":         func(m map[string]any) { m["agreement_ref"] = "HAV-000123" },
+		"a name and a number":  func(m map[string]any) { m["agreement_ref"] = "OKAFOR-2026-01" },
+		"reference while off":  func(m map[string]any) { m["provider"] = "none" },
 		"unknown provider":     func(m map[string]any) { m["provider"] = "gemini" },
 		"unknown previous":     func(m map[string]any) { m["previous"] = "local" },
 		"missing previous":     func(m map[string]any) { delete(m, "previous") },

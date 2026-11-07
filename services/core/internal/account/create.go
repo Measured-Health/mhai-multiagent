@@ -130,12 +130,12 @@ func CreateUser(ctx context.Context, pool *pgxpool.Pool, u NewUser) (uuid.UUID, 
 	return id, nil
 }
 
-// WithHospital runs fn as mhai_provision, in one READ COMMITTED transaction,
+// ProvisionOnHospital runs fn as mhai_provision, in one READ COMMITTED transaction,
 // with the id of the hospital ref names (its id or short code), for a CLI
 // write on that hospital (the model policy's "hospitals model-policy set").
 // ErrBadHospitalRef or ErrNoSuchHospital when there is none; fn's error
 // rolls the transaction back and is returned as it is.
-func WithHospital(ctx context.Context, pool *pgxpool.Pool, ref string, fn func(tx pgx.Tx, hospital uuid.UUID) error) (uuid.UUID, error) {
+func ProvisionOnHospital(ctx context.Context, pool *pgxpool.Pool, ref string, fn func(tx pgx.Tx, hospital uuid.UUID) error) (uuid.UUID, error) {
 	r, err := parseHospitalRef(ref)
 	if err != nil {
 		return uuid.Nil, err
