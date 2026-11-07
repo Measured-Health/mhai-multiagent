@@ -99,8 +99,10 @@ func newVersion(t time.Time) (string, error) {
 	return fmt.Sprintf("v%019d-%s", t.UnixNano(), hex.EncodeToString(b[:])), nil
 }
 
-// Put writes v as a new version of p, then drops versions older than Keep.
-func (s *FileStore) Put(ctx context.Context, p Path, v seal.Secret) (string, error) {
+// Put writes v as a new version of p. It never drops a version: the caller
+// prunes (DeleteVersionsBefore) once its metadata names the new one, so a
+// rolled-back write can't lose the version the metadata still names.
+func (s *FileStore) Put(_ context.Context, p Path, v seal.Secret) (string, error) {
 	d, err := s.at(p)
 	if err != nil {
 		return "", err
@@ -128,7 +130,6 @@ func (s *FileStore) Put(ctx context.Context, p Path, v seal.Secret) (string, err
 		_ = os.Remove(tmp)
 		return "", ErrStore
 	}
-	_ = s.DeleteVersionsBefore(ctx, p, Keep)
 	return ver, nil
 }
 

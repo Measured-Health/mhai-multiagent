@@ -47,9 +47,12 @@ var (
 
 var defaultPort = map[string]string{"https": "443", "sftp": "22"}
 
-// reservedSuffixes are names that resolve inside a network, never to a
-// hospital's public system.
-var reservedSuffixes = []string{".localhost", ".local", ".internal", ".arpa", ".home", ".lan", ".intranet", ".corp"}
+// reservedSuffixes are names that resolve inside a network, or are
+// special-use (RFC 6761 .test, .invalid, .localhost; RFC 7686 .onion;
+// RFC 8375 .home.arpa, under .arpa), never a hospital's public system. They
+// are refused in development too.
+var reservedSuffixes = []string{".localhost", ".localdomain", ".local", ".internal", ".arpa", ".home", ".lan",
+	".intranet", ".corp", ".test", ".invalid", ".onion"}
 
 var lookup = idna.New(idna.MapForLookup(), idna.BidiRule(), idna.StrictDomainName(true), idna.Transitional(false))
 

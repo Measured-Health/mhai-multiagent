@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -61,6 +62,8 @@ type fakeEMR struct {
 
 	wipeFails atomic.Bool
 	putFails  atomic.Bool
+	// onPut, when set, runs as a put arrives (before it is answered).
+	onPut func(conn string)
 }
 
 type fakeCall struct {
@@ -154,6 +157,12 @@ func (f *fakeEMR) origin(hid, conn string) ([]emrurl.Origin, bool) {
 }
 
 func (f *fakeEMR) put(c reqtoken.Claims, req *emrpb.PutCredentialsRequest) proto.Message {
+	f.mu.Lock()
+	hook := f.onPut
+	f.mu.Unlock()
+	if hook != nil {
+		hook(req.GetConnectionId())
+	}
 	if f.putFails.Load() {
 		return &emrpb.PutCredentialsReply{} // confirms nothing
 	}
@@ -250,7 +259,7 @@ func (f *fakeEMR) value(conn uuid.UUID, field string) (string, bool) {
 
 func connBody(t *testing.T, kv map[string]any) string {
 	t.Helper()
-	m := map[string]any{"type": "stub", "source_label": "Main record", "base_url": "https://stub.example.test/api",
+	m := map[string]any{"type": "stub", "source_label": "Main record", "base_url": "https://stub.example.org/api",
 		"settings": map[string]string{"client_id": "synthetic-client"}, "credentials": map[string]string{"api_key": "synthetic-key-a"}}
 	for k, v := range kv {
 		if v == nil {
@@ -361,7 +370,7 @@ func TestEMRConnectionLifecycleRoutes(t *testing.T) {
 	if v, _ := fake.value(uuid.MustParse(id), "api_key"); v != "synthetic-key-a" {
 		t.Fatalf("the emr service holds %q", v)
 	}
-	if c.body["settings"].(map[string]any)["client_id"] != "synthetic-client" || c.body["base_url"] != "https://stub.example.test/api" {
+	if c.body["settings"].(map[string]any)["client_id"] != "synthetic-client" || c.body["base_url"] != "https://stub.example.org/api" {
 		t.Fatalf("settings: %s", c.raw)
 	}
 	calls := fake.callsFor(uuid.MustParse(id))
@@ -421,7 +430,7 @@ func TestEMRConnectionLifecycleRoutes(t *testing.T) {
 	}
 
 	// A new path on the same host: the origin is the same, nothing wiped.
-	moved := patchConn(t, tok, id, mustJSONs(map[string]any{"base_url": "https://stub.example.test/api/v2", "version": 4,
+	moved := patchConn(t, tok, id, mustJSONs(map[string]any{"base_url": "https://stub.example.org/api/v2", "version": 4,
 		"backup_code": backupCode(t, admin)}))
 	ok(t, "path", moved)
 	if moved.body["enabled"] != true || creds(moved)["api_key"] == nil {
@@ -475,7 +484,7 @@ func TestCredentialNeverStoredOrLogged(t *testing.T) {
 		"backup_code": backupCode(t, admin)}))
 	ok(t, "patch", p)
 	// A refused one too (a bad address): the error body doesn't echo it.
-	bad := createConn(t, tok, hid, connBody(t, map[string]any{"base_url": "http://stub.example.test",
+	bad := createConn(t, tok, hid, connBody(t, map[string]any{"base_url": "http://stub.example.org",
 		"credentials": map[string]string{"api_key": canary1}, "backup_code": backupCode(t, admin)}))
 	problem(t, "bad address", bad, 422, "validation_failed")
 	for _, canary := range []string{canary1, canary2} {
@@ -603,12 +612,12 @@ func TestOriginChangeWipesAndSwitchesOff(t *testing.T) {
 
 	// The wipe fails: 503, nothing changed.
 	fake.wipeFails.Store(true)
-	failed := patchConn(t, tok, id, mustJSONs(map[string]any{"base_url": "https://new-host.example.test/api", "version": 2,
+	failed := patchConn(t, tok, id, mustJSONs(map[string]any{"base_url": "https://new-host.example.org/api", "version": 2,
 		"backup_code": backupCode(t, admin)}))
 	fake.wipeFails.Store(false)
 	problem(t, "wipe not confirmed", failed, 503, "unavailable")
 	now := get(t, connPath(id), tok)
-	if now.body["base_url"] != "https://stub.example.test/api" || now.body["enabled"] != true || version(t, now) != 2 ||
+	if now.body["base_url"] != "https://stub.example.org/api" || now.body["enabled"] != true || version(t, now) != 2 ||
 		creds(now)["api_key"] == nil {
 		t.Fatalf("after a failed wipe: %s", now.raw)
 	}
@@ -616,7 +625,7 @@ func TestOriginChangeWipesAndSwitchesOff(t *testing.T) {
 		t.Fatalf("a failed PATCH was audited: %d rows", n)
 	}
 
-	moved := patchConn(t, tok, id, mustJSONs(map[string]any{"base_url": "https://new-host.example.test/api", "version": 2,
+	moved := patchConn(t, tok, id, mustJSONs(map[string]any{"base_url": "https://new-host.example.org/api", "version": 2,
 		"backup_code": backupCode(t, admin)}))
 	ok(t, "move", moved)
 	if moved.body["enabled"] != false || creds(moved)["api_key"] != nil || moved.body["last_test"] != nil {
@@ -644,7 +653,7 @@ func TestOriginChangeWipesAndSwitchesOff(t *testing.T) {
 	problem(t, "on after move", send(t, handler, http.MethodPut, connPath(id)+"/enabled", tok,
 		mustJSONs(map[string]any{"enabled": true, "version": version(t, test), "backup_code": backupCode(t, admin)})), 409, "not_tested")
 	// New credentials with an origin change are kept for the new origin.
-	again := patchConn(t, tok, id, mustJSONs(map[string]any{"base_url": "https://third-host.example.test/api",
+	again := patchConn(t, tok, id, mustJSONs(map[string]any{"base_url": "https://third-host.example.org/api",
 		"credentials": map[string]string{"api_key": "synthetic-key-c"}, "version": version(t, test), "backup_code": backupCode(t, admin)}))
 	ok(t, "move with credentials", again)
 	if creds(again)["api_key"] == nil {
@@ -758,13 +767,13 @@ func TestConnectionValidation(t *testing.T) {
 	tok := mint(t, admin)
 	hid := seedHospital(t, "active")
 	for name, over := range map[string]map[string]any{
-		"http address":           {"base_url": "http://stub.example.test"},
+		"http address":           {"base_url": "http://stub.example.org"},
 		"private address":        {"base_url": "https://10.1.2.3"},
 		"metadata address":       {"base_url": "https://169.254.169.254"},
 		"localhost":              {"base_url": "https://localhost"},
-		"userinfo":               {"base_url": "https://u:p@stub.example.test"},
-		"query":                  {"base_url": "https://stub.example.test/?a=1"},
-		"long address":           {"base_url": "https://stub.example.test/" + strings.Repeat("p", 480)},
+		"userinfo":               {"base_url": "https://u:p@stub.example.org"},
+		"query":                  {"base_url": "https://stub.example.org/?a=1"},
+		"long address":           {"base_url": "https://stub.example.org/" + strings.Repeat("p", 480)},
 		"empty label":            {"source_label": ""},
 		"long label":             {"source_label": strings.Repeat("x", 41)},
 		"vendor label":           {"source_label": "Epic records"},
@@ -775,7 +784,7 @@ func TestConnectionValidation(t *testing.T) {
 		"missing credential":     {"credentials": map[string]string{}},
 		"undeclared credential":  {"credentials": map[string]string{"api_key": "a", "private_key": "b"}},
 		"long credential":        {"credentials": map[string]string{"api_key": strings.Repeat("k", 4001)}},
-		"record link elsewhere":  {"settings": map[string]string{"client_id": "c", "record_link": "https://evil.example.test/{id}"}},
+		"record link elsewhere":  {"settings": map[string]string{"client_id": "c", "record_link": "https://evil.example.org/{id}"}},
 		"ranges without private": {"private_cidrs": []string{"10.9.9.0/24"}},
 		"public range":           {"private_network": true, "private_cidrs": []string{"8.8.8.0/24"}},
 		"wide range":             {"private_network": true, "private_cidrs": []string{"10.0.0.0/16"}},
@@ -913,4 +922,113 @@ func TestCreateSameLabelRefused(t *testing.T) {
 	ok(t, "second label", second)
 	problem(t, "rename onto a taken label", patchConn(t, tok, second.body["id"].(string), mustJSONs(map[string]any{
 		"source_label": "Main record", "version": 1, "backup_code": backupCode(t, admin)})), 409, "conflict")
+}
+
+// M1: a same-origin credential change is committed, with its audit row,
+// before the emr service stores anything: a commit that fails can't leave
+// new credentials behind unaudited. If the store then fails, the reply says
+// so: saved, switched off, credentials_missing, the old credentials wiped.
+func TestSameOriginCredentialChangeCommitsBeforeStoring(t *testing.T) {
+	admin := platformAdmin(t)
+	tok := mint(t, admin)
+	hid := seedHospital(t, "active")
+	c := createConn(t, tok, hid, connBody(t, map[string]any{"backup_code": backupCode(t, admin)}))
+	ok(t, "create", c)
+	id := c.body["id"].(string)
+	ok(t, "test", send(t, handler, http.MethodPost, connPath(id)+"/test", tok, ""))
+	ok(t, "on", send(t, handler, http.MethodPut, connPath(id)+"/enabled", tok,
+		mustJSONs(map[string]any{"enabled": true, "version": 1, "backup_code": backupCode(t, admin)})))
+
+	// When the put arrives, the change and its audit row are already
+	// committed (seen from another connection).
+	var audited, saved atomic.Bool
+	fake.mu.Lock()
+	fake.onPut = func(conn string) {
+		if conn != id {
+			return
+		}
+		var n, v int
+		_ = super.QueryRow(context.Background(), `SELECT count(*) FROM audit_log WHERE entity = 'emr_connection'
+			AND entity_id = $1 AND action = 'emr.connection_changed' AND payload->>'credentials_replaced' = 'true'`, id).Scan(&n)
+		_ = super.QueryRow(context.Background(), `SELECT version FROM emr_connections WHERE id = $1`, id).Scan(&v)
+		audited.Store(n == 1)
+		saved.Store(v == 3)
+	}
+	fake.mu.Unlock()
+	replaced := patchConn(t, tok, id, mustJSONs(map[string]any{"credentials": map[string]string{"api_key": "synthetic-key-b"},
+		"version": 2, "backup_code": backupCode(t, admin)}))
+	fake.mu.Lock()
+	fake.onPut = nil
+	fake.mu.Unlock()
+	ok(t, "replace", replaced)
+	if !audited.Load() || !saved.Load() {
+		t.Fatalf("the credentials were stored before the change was committed (audited %v, saved %v)", audited.Load(), saved.Load())
+	}
+	if v, _ := fake.value(uuid.MustParse(id), "api_key"); v != "synthetic-key-b" || replaced.body["enabled"] != true ||
+		replaced.body["credentials_missing"] != false {
+		t.Fatalf("replace: %q %s", v, replaced.raw)
+	}
+
+	// The store fails after the commit: 200, the truth about what is saved.
+	fake.putFails.Store(true)
+	failed := patchConn(t, tok, id, mustJSONs(map[string]any{"credentials": map[string]string{"api_key": "synthetic-key-c"},
+		"version": version(t, replaced), "backup_code": backupCode(t, admin)}))
+	fake.putFails.Store(false)
+	ok(t, "unconfirmed replace", failed)
+	if failed.body["credentials_missing"] != true || failed.body["enabled"] != false || creds(failed)["api_key"] != nil {
+		t.Fatalf("unconfirmed replace: %s", failed.raw)
+	}
+	if _, set := fake.value(uuid.MustParse(id), "api_key"); set {
+		t.Fatal("the old credentials are still in use after an unconfirmed replace")
+	}
+	audits := connAudits(t, id)
+	if last := audits[len(audits)-1]; last.action != "emr.connection_switched_off" {
+		t.Fatalf("audits %+v", audits)
+	}
+	if got := get(t, connPath(id), tok); got.body["credentials_missing"] != true || version(t, got) != version(t, failed) {
+		t.Fatalf("read after: %s", got.raw)
+	}
+}
+
+// M2: credentials sent with an origin change that the emr service doesn't
+// confirm: the change is saved (switched off, wiped), and the reply says so
+// with credentials_missing, not 503.
+func TestOriginChangeUnconfirmedCredentialsAnswersMissing(t *testing.T) {
+	admin := platformAdmin(t)
+	tok := mint(t, admin)
+	hid := seedHospital(t, "active")
+	c := createConn(t, tok, hid, connBody(t, map[string]any{"backup_code": backupCode(t, admin)}))
+	ok(t, "create", c)
+	id := c.body["id"].(string)
+	fake.putFails.Store(true)
+	moved := patchConn(t, tok, id, mustJSONs(map[string]any{"base_url": "https://moved-host.example.org/api",
+		"credentials": map[string]string{"api_key": "synthetic-key-d"}, "version": 1, "backup_code": backupCode(t, admin)}))
+	fake.putFails.Store(false)
+	ok(t, "move, credentials unconfirmed", moved)
+	if moved.body["base_url"] != "https://moved-host.example.org/api" || moved.body["credentials_missing"] != true ||
+		moved.body["enabled"] != false || creds(moved)["api_key"] != nil {
+		t.Fatalf("move: %s", moved.raw)
+	}
+}
+
+// M5: the test route takes no body, an empty object, and nothing else:
+// trailing data after {} is refused, before the emr service is asked.
+func TestConnectionTestBodyStrict(t *testing.T) {
+	admin := platformAdmin(t)
+	tok := mint(t, admin)
+	hid := seedHospital(t, "active")
+	c := createConn(t, tok, hid, connBody(t, map[string]any{"backup_code": backupCode(t, admin)}))
+	ok(t, "create", c)
+	id := c.body["id"].(string)
+	before := len(fake.callsFor(uuid.MustParse(id)))
+	for _, body := range []string{"{}junk", "{} {}", `{"a":1}`, "[]", "{", "{}" + strings.Repeat(" ", 2048)} {
+		problem(t, "test body "+fmt.Sprintf("%.12q", body), send(t, handler, http.MethodPost, connPath(id)+"/test", tok, body),
+			422, "validation_failed")
+	}
+	if after := len(fake.callsFor(uuid.MustParse(id))); after != before {
+		t.Fatalf("a refused body reached the emr service (%d calls)", after-before)
+	}
+	ok(t, "empty object", send(t, handler, http.MethodPost, connPath(id)+"/test", tok, "{}"))
+	ok(t, "whitespace object", send(t, handler, http.MethodPost, connPath(id)+"/test", tok, " { } \n"))
+	ok(t, "no body", send(t, handler, http.MethodPost, connPath(id)+"/test", tok, ""))
 }

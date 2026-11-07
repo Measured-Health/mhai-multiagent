@@ -176,3 +176,24 @@ func TestRecordLinkMustShareHost(t *testing.T) {
 		t.Errorf("origins %v", o)
 	}
 }
+
+// The special-use names (RFC 6761, RFC 7686, RFC 8375) and the common
+// in-network suffixes never name a hospital's public system, development
+// or not.
+func TestReservedSuffixesRefused(t *testing.T) {
+	for _, h := range []string{"fhir.localdomain", "fhir.test", "fhir.example.test", "fhir.invalid",
+		"abcdefghijklmnop.onion", "router.home.arpa", "fhir.home.arpa", "metadata.google.internal", "fhir.internal",
+		"FHIR.Example.TEST.", "fhir.LocalDomain"} {
+		for _, dev := range []bool{false, true} {
+			if _, _, err := CheckURL("https://"+h+"/r4", []string{"https"}, dev); !errors.Is(err, ErrAddress) {
+				t.Errorf("CheckURL(%q, development %v) = %v, want ErrAddress", h, dev, err)
+			}
+		}
+	}
+	// A public name that only contains one of the words is fine.
+	for _, h := range []string{"test.example.org", "onion.example.org", "internal-fhir.example.org", "mytest.org"} {
+		if _, _, err := CheckURL("https://"+h, []string{"https"}, false); err != nil {
+			t.Errorf("CheckURL(%q) = %v", h, err)
+		}
+	}
+}

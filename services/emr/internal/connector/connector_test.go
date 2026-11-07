@@ -102,7 +102,7 @@ func TestConnectorsDeclareTheSharedTable(t *testing.T) {
 // placeholder; it counts its calls (for the A28 tests).
 func TestStubTest(t *testing.T) {
 	s := stub.New()
-	cfg := connector.Config{Type: "stub", BaseURL: "https://stub.example.test", Settings: map[string]string{"client_id": "c"}}
+	cfg := connector.Config{Type: "stub", BaseURL: "https://stub.example.org", Settings: map[string]string{"client_id": "c"}}
 	if err := s.Validate(cfg); err != nil {
 		t.Fatal(err)
 	}

@@ -1619,8 +1619,12 @@ paths:
         change is saved (no confirmation: 503 `unavailable` and nothing
         changes), switches the connection off, and leaves every `set_at`
         null; new credentials in the same request are kept for the new
-        address. The request body is never logged or stored; the
-        idempotency store keeps a keyed hash of it.
+        address. Credentials are sent to the emr service after the change
+        is saved: if it doesn't confirm them, the change stays saved and
+        the answer is 200 with `credentials_missing` true (on the same
+        address the old credentials are deleted too and the connection is
+        switched off); re-send them with PATCH. The request body is never
+        logged or stored; the idempotency store keeps a keyed hash of it.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, hospital_removed, validation_failed, not_ready, unavailable, internal_error]
@@ -1703,7 +1707,9 @@ paths:
         outcome is `last_test` (`code` null when it passed). A credential
         not set for the current address is `sign_in_refused` with nothing
         sent. A change saved meanwhile is 409 `conflict`, nothing recorded.
-        No answer from the emr service is 503 `unavailable`.
+        No answer from the emr service is 503 `unavailable`. The body is
+        empty or `{}` (under 1 KiB); anything else is 422
+        `validation_failed`.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, hospital_removed, validation_failed, no_type, not_ready, unavailable, internal_error]

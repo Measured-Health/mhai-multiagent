@@ -143,9 +143,9 @@ func TestConnectionLifecycleWithStub(t *testing.T) {
 	}
 
 	conn := uuid.New()
-	origin := []emrurl.Origin{"https://stub.example.test:443"}
+	origin := []emrurl.Origin{"https://stub.example.org:443"}
 	if _, err := super.Exec(ctx, `INSERT INTO emr_connections (id, hospital_id, type, source_label, base_url, settings, credentials_origin)
-		VALUES ($1, $2, 'stub', 'Main record', 'https://stub.example.test/api', '{"client_id": "synthetic-client"}', $3)`,
+		VALUES ($1, $2, 'stub', 'Main record', 'https://stub.example.org/api', '{"client_id": "synthetic-client"}', $3)`,
 		conn, hid, emrurl.Strings(origin)); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestConnectionLifecycleWithStub(t *testing.T) {
 	}
 	// A box for another origin is refused: no answer.
 	short, cancel := context.WithTimeout(ctx, 3*time.Second)
-	f, _ := sealer.Seal(conn, "api_key", []emrurl.Origin{"https://evil.example.test:443"}, []byte(canary))
+	f, _ := sealer.Seal(conn, "api_key", []emrurl.Origin{"https://evil.example.org:443"}, []byte(canary))
 	var rep emrpb.PutCredentialsReply
 	err = client.Request(short, caller(true), "put_credentials",
 		&emrpb.PutCredentialsRequest{ConnectionId: conn.String(), Fields: []*emrpb.SealedField{f}}, &rep)
@@ -192,8 +192,8 @@ func TestConnectionLifecycleWithStub(t *testing.T) {
 	}
 	// The address moves (the routes switch it off and wipe first): the
 	// credentials aren't for it.
-	if _, err := super.Exec(ctx, `UPDATE emr_connections SET base_url = 'https://new-host.example.test/api',
-		credentials_origin = '{https://new-host.example.test:443}' WHERE id = $1`, conn); err != nil {
+	if _, err := super.Exec(ctx, `UPDATE emr_connections SET base_url = 'https://new-host.example.org/api',
+		credentials_origin = '{https://new-host.example.org:443}' WHERE id = $1`, conn); err != nil {
 		t.Fatal(err)
 	}
 	if got := test(); got != "sign_in_refused" {
@@ -207,7 +207,7 @@ func TestConnectionLifecycleWithStub(t *testing.T) {
 	if err := super.QueryRow(ctx, `SELECT count(*) FROM emr.credentials WHERE connection_id = $1`, conn).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("metadata after wipe: %d %v", rows, err)
 	}
-	if err := put([]emrurl.Origin{"https://new-host.example.test:443"}); err != nil {
+	if err := put([]emrurl.Origin{"https://new-host.example.org:443"}); err != nil {
 		t.Fatalf("put for the new origin: %v", err)
 	}
 	if got := test(); got != "ok" {

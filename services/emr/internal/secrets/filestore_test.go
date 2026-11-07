@@ -178,3 +178,28 @@ func TestFileStoreModes(t *testing.T) {
 		t.Errorf("error names the directory: %v", err)
 	}
 }
+
+// Put never prunes: a put whose metadata write then rolls back must not
+// have dropped the version the metadata still names. The caller prunes,
+// after its metadata commit.
+func TestFileStorePutKeepsOldVersions(t *testing.T) {
+	s, err := NewFileStore(newDir(t), "development")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	s.Now = func() time.Time { return now }
+	ctx := context.Background()
+	p := path()
+	v1, err := s.Put(ctx, p, seal.NewSecret([]byte(canary)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(25 * time.Hour)
+	if _, err := s.Put(ctx, p, seal.NewSecret([]byte(canary+"-2"))); err != nil {
+		t.Fatal(err)
+	}
+	if old, err := s.GetVersion(ctx, p, v1); err != nil || string(old.Bytes()) != canary {
+		t.Fatalf("a put dropped the version before it: %v", err)
+	}
+}

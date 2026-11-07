@@ -28,8 +28,11 @@ package platform
 // origin (the base address's or the token address's scheme, host or port)
 // wipes them in the emr service before the change commits, and switches the
 // connection off; if the wipe isn't confirmed the PATCH fails and nothing
-// changes. New credentials sent with it are sealed to the new origin and
-// stored after the commit.
+// changes. Credentials sent with a PATCH, on either origin, are stored
+// after the commit, so every stored change has its audit row; if the emr
+// service doesn't confirm them, the change stays and the answer is
+// credentials_missing (on the same origin the old ones are wiped and the
+// connection switched off first).
 
 import (
 	"bytes"
@@ -1202,25 +1205,67 @@ func (d Deps) emrPatch(w http.ResponseWriter, r *http.Request) {
 				return errEMR
 			}
 		}
-		// Same origin: replace the credentials before the commit, so a
-		// refusal changes nothing. A new origin is committed first: the emr
-		// service checks the boxes against the origin it reads.
-		if len(sealed) > 0 && !originChanged {
-			return d.putCredentials(r.Context(), p, cur.hospital, id, rid, sealed)
-		}
 		return nil
 	})
 	if err != nil {
 		d.emrFail(w, r, p, "patch", mapPG(err))
 		return
 	}
-	if len(sealed) > 0 && originChanged {
+	// The credentials go after the commit, so every stored change has its
+	// audit row (and a new origin is the one the emr service reads). If the
+	// emr service doesn't confirm them, the change stays saved and the
+	// answer says what is stored: credentials_missing (ruling E1, as at
+	// create). On the same origin the old credentials are wiped first and
+	// the connection switched off, so it never runs on credentials the
+	// admin meant to replace.
+	if len(sealed) > 0 {
 		if err := d.putCredentials(r.Context(), p, cur.hospital, id, rid, sealed); err != nil {
-			d.emrFail(w, r, p, "patch credentials", err)
-			return
+			if !originChanged {
+				if err := d.dropUnconfirmed(r.Context(), p, cur.hospital, id, rid, *body.Version+1); err != nil {
+					d.emrFail(w, r, p, "patch credentials", err)
+					return
+				}
+			}
+			d.log().Warn("platform: emr connection changed without credentials", "request_id", rid,
+				"connection_id", id.String(), "reason", "credentials_missing")
 		}
 	}
 	d.answer(w, r, p, id)
+}
+
+// dropUnconfirmed wipes a connection's credentials and switches it off,
+// after a same-origin replacement the emr service didn't confirm. version is
+// the one the PATCH committed: a later change wins, and nothing is done.
+// The wipe comes before the commit: no confirmation, no change.
+func (d Deps) dropUnconfirmed(ctx context.Context, p authz.Principal, hid, id uuid.UUID, rid string, version int) error {
+	return d.tx(ctx, func(tx pgx.Tx) error {
+		locked, err := loadConn(ctx, tx, id, true)
+		if err != nil {
+			return err
+		}
+		if locked.version != version {
+			return nil
+		}
+		var rep emrpb.WipeCredentialsReply
+		if err := d.EMR.Request(ctx, emrctl.FromPrincipal(p, hid, rid, false), "wipe_credentials",
+			&emrpb.WipeCredentialsRequest{ConnectionId: id.String()}, &rep); err != nil || !rep.GetWiped() {
+			return errEMR
+		}
+		if err := d.writeAudit(ctx, tx, p, rid, "emr.connection_changed", id, map[string]any{
+			"hospital_id": hid.String(), "connection_id": id.String(), "fields_changed": []any{},
+			"credentials_replaced": false, "credentials_wiped": true}); err != nil {
+			return err
+		}
+		if !locked.enabled {
+			return nil
+		}
+		if _, err := tx.Exec(ctx, `UPDATE emr_connections SET enabled = false, version = version + 1, updated_by = $2,
+			updated_at = now() WHERE id = $1`, id, p.UserID); err != nil {
+			return err
+		}
+		return d.writeAudit(ctx, tx, p, rid, "emr.connection_switched_off", id, map[string]any{
+			"hospital_id": hid.String(), "connection_id": id.String()})
+	})
 }
 
 func sortedKeys(m map[string]bool) []string {
@@ -1339,7 +1384,7 @@ func (d Deps) emrTest(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "validation_failed")
 		return
 	}
-	if b, err := io.ReadAll(io.LimitReader(r.Body, 2)); err != nil || len(bytes.TrimSpace(b)) > 0 && string(bytes.TrimSpace(b)) != "{}" {
+	if !emptyBody(r) {
 		httpx.Error(w, r, "validation_failed")
 		return
 	}

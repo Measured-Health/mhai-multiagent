@@ -6,8 +6,9 @@ package ctl
 //     against the connection's current origin, read under the token's
 //     hospital; any refusal stores nothing (all fields or none). Then the
 //     store, then the metadata rows, in that order, with the store's new
-//     versions dropped again if the metadata can't be written. The reply is
-//     each field and its set time, never a value.
+//     versions dropped again if the metadata can't be written. Replaced
+//     versions older than secrets.Keep are pruned only after the metadata
+//     commits. The reply is each field and its set time, never a value.
 //   - wipe_credentials (platform admin): every secret of the connection
 //     from the store, then its metadata rows; idempotent; wiped only after
 //     both.
@@ -208,6 +209,11 @@ func (s *Credentials) Put(ctx context.Context, c reqtoken.Claims, m proto.Messag
 	if err != nil {
 		undo()
 		return nil, errDatabase
+	}
+	// Only now, with the metadata naming the new versions, the replaced
+	// ones older than Keep go (best effort: a later put retries).
+	for _, w := range done {
+		_ = s.Store.DeleteVersionsBefore(context.WithoutCancel(ctx), w.p, secrets.Keep)
 	}
 	out := &emrpb.PutCredentialsReply{}
 	for _, k := range names {

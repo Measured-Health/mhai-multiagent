@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +30,7 @@ import (
 // Synthetic, obviously fake.
 const credCanary = "synthetic-test-secret-not-real-0004"
 
-var stubOrigin = []emrurl.Origin{"https://stub.example.test:443"}
+var stubOrigin = []emrurl.Origin{"https://stub.example.org:443"}
 
 type credFixture struct {
 	pool     *pgxpool.Pool
@@ -74,7 +75,7 @@ func newCredFixture(t *testing.T) *credFixture {
 func (f *credFixture) seedConn(t *testing.T, hospital, id uuid.UUID) {
 	t.Helper()
 	if _, err := f.pool.Exec(context.Background(), `INSERT INTO emr_connections (id, hospital_id, type, source_label, base_url,
-		settings, credentials_origin) VALUES ($1, $2, 'stub', 'Main record', 'https://stub.example.test/api',
+		settings, credentials_origin) VALUES ($1, $2, 'stub', 'Main record', 'https://stub.example.org/api',
 		'{"client_id": "synthetic-client"}', $3)`, id, hospital, emrurl.Strings(stubOrigin)); err != nil {
 		t.Fatal(err)
 	}
@@ -239,14 +240,14 @@ func TestWipeThenTestSendsNothing(t *testing.T) {
 	if _, err := f.put(t, f.box(t, f.conn, "api_key", credCanary, stubOrigin, f.now)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.pool.Exec(ctx, `UPDATE emr_connections SET base_url = 'https://new.example.test/api' WHERE id = $1`, f.conn); err != nil {
+	if _, err := f.pool.Exec(ctx, `UPDATE emr_connections SET base_url = 'https://new.example.org/api' WHERE id = $1`, f.conn); err != nil {
 		t.Fatal(err)
 	}
 	if r := f.test(t); r.GetCode() != "sign_in_refused" || f.stub.Calls() != 0 {
 		t.Fatalf("test after an address change: %v calls %d", r, f.stub.Calls())
 	}
 	// And with the origin moved too: the metadata's origin is the old one.
-	if _, err := f.pool.Exec(ctx, `UPDATE emr_connections SET credentials_origin = '{https://new.example.test:443}' WHERE id = $1`, f.conn); err != nil {
+	if _, err := f.pool.Exec(ctx, `UPDATE emr_connections SET credentials_origin = '{https://new.example.org:443}' WHERE id = $1`, f.conn); err != nil {
 		t.Fatal(err)
 	}
 	if r := f.test(t); r.GetCode() != "sign_in_refused" || f.stub.Calls() != 0 {
@@ -271,5 +272,53 @@ func TestPlaceholderSecretRefused(t *testing.T) {
 		if r := f.test(t); r.GetOk() || r.GetCode() != "sign_in_refused" || f.stub.Calls() != 0 {
 			t.Fatalf("%q: %v calls %d", v, r, f.stub.Calls())
 		}
+	}
+}
+
+// A put whose metadata write fails leaves the version the metadata names
+// in the store, however old; a put that commits then drops the versions
+// older than secrets.Keep.
+func TestPutCredentialsPrunesOnlyAfterCommit(t *testing.T) {
+	f := newCredFixture(t)
+	f.svc.Store.(*secrets.FileStore).Now = func() time.Time { return f.now }
+	ctx := context.Background()
+	p := secrets.Path{Env: "development", Hospital: f.hospital, Connection: f.conn, Field: "api_key"}
+	if _, err := f.put(t, f.box(t, f.conn, "api_key", credCanary, stubOrigin, f.now)); err != nil {
+		t.Fatal(err)
+	}
+	var v1 string
+	if err := f.pool.QueryRow(ctx, `SELECT secret_version FROM emr.credentials WHERE connection_id = $1`, f.conn).Scan(&v1); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(25 * time.Hour)
+	// Any new metadata row is refused from here (NOT VALID: the existing row
+	// stays).
+	if _, err := f.pool.Exec(ctx, `ALTER TABLE emr.credentials ADD CONSTRAINT test_refuse_writes CHECK (set_at < '2000-01-01') NOT VALID`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.put(t, f.box(t, f.conn, "api_key", credCanary+"-2", stubOrigin, f.now)); err == nil {
+		t.Fatal("the put succeeded without its metadata")
+	}
+	var still string
+	if err := f.pool.QueryRow(ctx, `SELECT secret_version FROM emr.credentials WHERE connection_id = $1`, f.conn).Scan(&still); err != nil || still != v1 {
+		t.Fatalf("metadata after the failed put: %q %v", still, err)
+	}
+	if v, err := f.svc.Store.GetVersion(ctx, p, v1); err != nil || string(v.Bytes()) != credCanary {
+		t.Fatalf("the version the metadata names is gone: %v", err)
+	}
+	if r := f.test(t); !r.GetOk() {
+		t.Fatalf("test after the failed put: %v", r)
+	}
+	if _, err := f.pool.Exec(ctx, `ALTER TABLE emr.credentials DROP CONSTRAINT test_refuse_writes`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.put(t, f.box(t, f.conn, "api_key", credCanary+"-3", stubOrigin, f.now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.Store.GetVersion(ctx, p, v1); !errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("a version older than Keep after a committed put: %v", err)
+	}
+	if files, rows := f.stored(t); files != 1 || rows != 1 {
+		t.Fatalf("%d files, %d rows after the committed put", files, rows)
 	}
 }

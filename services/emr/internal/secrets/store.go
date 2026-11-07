@@ -54,7 +54,7 @@ func (p Path) String() string {
 
 // Store keeps secret values by path, in versions.
 type Store interface {
-	// Put writes a new version and returns its id.
+	// Put writes a new version and returns its id; it drops no version.
 	Put(ctx context.Context, p Path, v seal.Secret) (version string, err error)
 	// Get reads the current version.
 	Get(ctx context.Context, p Path) (seal.Secret, string, error)
