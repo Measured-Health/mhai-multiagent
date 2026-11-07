@@ -11,8 +11,10 @@ reply is parsed again here and every check fails closed:
   MAX_REPLY_BYTES, exactly the three keys of ANSWER_SCHEMA, each of its
   JSON type (no coercion: "false" and 0 are not false);
 - answer: 1 to 6,000 characters, no control or format characters, no URL
-  (protocol-relative "//host" included), HTML tag, Markdown link, image,
-  reference link or link definition, code fence, or chunk delimiter;
+  (protocol-relative "//host" and backslash forms included), HTML tag,
+  "[" or "]" outside an exact [KB#nnnn] marker (so no Markdown link,
+  reference, definition or image), a marker followed by ":", code fence,
+  or chunk delimiter;
 - citations: each KB#nnnn (ASCII digits) and one of the chunk ids sent;
 - the [KB#nnnn] markers in answer are exactly the citations, and no other
   "KB#" text appears (a lookalike marker would show as a citation that was
@@ -133,19 +135,21 @@ class Answer(BaseModel):
 _CITATION = re.compile(r"KB#[0-9]{4}")
 _MARKER = re.compile(r"\[(KB#[0-9]{4})\]")
 _DELIMITERS = ("<<chunk", "<<end")
-# A scheme URL, www., a script scheme, or a protocol-relative "//host".
-_LINK = re.compile(r"[a-z][a-z0-9+.\-]*://|www\.|javascript:|vbscript:|//[^\s/]")
+# A scheme URL, www., a script scheme, a protocol-relative "//host", or a
+# backslash form of one (a backslash next to a slash, or two backslashes).
+_LINK = re.compile(
+    r"[a-z][a-z0-9+.\-]*://|www\.|javascript:|vbscript:|//[^\s/]"
+    # Backslash-slash forms browsers and renderers read as a slash.
+    r"|\\/|/\\|\\\\"
+)
 # "<" then a letter, "/", "!" or "?": a tag, a closing tag, a comment or a
 # processing instruction. "BP <90" and "a < b" are not.
 _HTML = re.compile(r"<[a-z/!?]")
 _MARKDOWN = re.compile(r"!\[|\]\(")
-# A reference-style link, "[text][ref]", "[text][]" or "[text] [ref]",
-# looked for once the [KB#nnnn] markers are taken out (adjacent markers
-# are not one).
-_MD_REFERENCE = re.compile(r"\]\s*\[")
-# A link definition, "[ref]: target", at the start of a line (any indent;
-# a marker too: "[KB#0001]: x" would turn the marker into a link).
-_MD_DEFINITION = re.compile(r"\[[^\]]*\]\s*:")
+# A marker followed by a colon: "[KB#0001]: x" is a link definition that
+# would turn the marker into a link.
+_MARKER_DEFINITION = re.compile(r"\]\s*:")
+_BRACKETS = frozenset("[]")
 _FENCES = ("```", "~~~")
 
 
@@ -224,9 +228,13 @@ def validate_answer(raw: bytes | str | Mapping[str, Any], sent_ids: frozenset[st
         _bad("link")
     if _HTML.search(norm):
         _bad("html")
-    if _MARKDOWN.search(norm) or _MD_REFERENCE.search(norm_text(_MARKER.sub(" ", text))):
+    # Any "[" or "]" outside an exact [KB#nnnn] marker, on the whole
+    # normalised text: no reference link, shortcut reference or link
+    # definition can be written without one, however it is quoted, listed
+    # or split over lines.
+    if _BRACKETS & set(norm_text(_MARKER.sub(" ", text))):
         _bad("markdown")
-    if any(_MD_DEFINITION.match(norm_text(line)) for line in text.splitlines()):
+    if _MARKDOWN.search(norm) or _MARKER_DEFINITION.search(norm):
         _bad("markdown")
     if any(f in compact for f in _FENCES):
         _bad("code_fence")
