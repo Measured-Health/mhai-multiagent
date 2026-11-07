@@ -271,6 +271,15 @@ var Catalogue = map[string]Entry{
 	// policy change yet; sent bare until it has one.
 	"hospital.model_policy_changed": withheld(),
 
+	// EMR connections (EMR design §12.6): mhai-web's Plan 13 kinds, with
+	// the connection as the target. A resume has no kind yet: sent bare.
+	"emr.connection_added":        {Type: "hospital_settings", Kind: "emr_connection_added", Target: entityTarget("connection", "emr_connection")},
+	"emr.connection_changed":      {Type: "hospital_settings", Kind: "emr_connection_changed", Target: entityTarget("connection", "emr_connection")},
+	"emr.connection_switched_on":  {Type: "hospital_settings", Kind: "emr_connection_switched_on", Target: entityTarget("connection", "emr_connection")},
+	"emr.connection_switched_off": {Type: "hospital_settings", Kind: "emr_connection_switched_off", Target: entityTarget("connection", "emr_connection")},
+	"emr.connection_tested":       {Type: "hospital_settings", Kind: "emr_connection_tested", Target: entityTarget("connection", "emr_connection")},
+	"emr.source_resumed":          withheld(),
+
 	// Plan 3: the request-token boundary. No mhai-web kind yet.
 	"intelligence.key_rotated":   withheld(),
 	"intelligence.granted":       withheld(),

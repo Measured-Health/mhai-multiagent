@@ -95,6 +95,7 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"hospital_model_policy": "00018: the per-hospital cloud model policy the platform sets (SELECT, INSERT, column UPDATE)",
 		"analytics_snapshots":   "00019: the guarded analytics snapshots, one per finished period (SELECT)",
 		"analytics_epoch":       "00019: the release epoch, for the not-yet answer (SELECT)",
+		"emr_connections":       "00021: EMR connection configuration, no secret column (SELECT, INSERT, column UPDATE)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `
@@ -146,6 +147,9 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"audit_chain_head":             {"OUT id bigint, OUT hash text", "record"},
 		"mhai_feedback_buffer_waiting": {"", "bigint"},
 		"mhai_cloud_usage":             {"p_hospital uuid", "TABLE(month date, used bigint, reserved bigint)"},
+		"emr_platform_health": {"", "TABLE(connection_id uuid, health text, last_sync_at timestamp with time zone, last_sync_ok boolean, last_sync_records integer, errors_24h bigint)"},
+		"emr_platform_errors":  {"p_connection uuid", "TABLE(at timestamp with time zone, code text, count bigint)"},
+		"emr_credentials_meta": {"p_connection uuid", "TABLE(field text, set_at timestamp with time zone)"},
 	}
 	for name, sig := range platformFunctions {
 		wantFuncs[name] = sig

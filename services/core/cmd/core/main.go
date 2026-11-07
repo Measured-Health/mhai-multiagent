@@ -67,9 +67,6 @@ type loginRequest struct {
 	user, password string
 	role           string
 	defaultUser    string // used when only the password is set; "" = none
-	// roleMayBeAbsent: the role comes with a later migration; until it
-	// exists, migrate up skips this login and says so.
-	roleMayBeAbsent bool
 }
 
 // loginRequests reads the logins to ensure from the environment:
@@ -81,8 +78,7 @@ type loginRequest struct {
 //     login (spec §8.2), a member of mhai_worker_app only. The user
 //     defaults to intelligence_app when only the password is set;
 //   - EMR_DB_USER / EMR_DB_PASSWORD: the emr service's login (EMR design
-//     §3.3), a member of mhai_emr_app only, emr_app by default. Its role
-//     comes with the EMR connections migration; until then it is skipped.
+//     §3.3), a member of mhai_emr_app only (00021), emr_app by default.
 //
 // Each pair is both set or both unset. Passwords must not be placeholders.
 // Errors name variables, never values.
@@ -93,7 +89,7 @@ func loginRequests(getenv func(string) string) ([]loginRequest, error) {
 		{userVar: "CORE_DB_USER", pwVar: "CORE_DB_PASSWORD", role: "mhai_app"},
 		{userVar: "PROVISION_DB_USER", pwVar: "PROVISION_DB_PASSWORD", role: "mhai_provision"},
 		{userVar: "INTELLIGENCE_DB_USER", pwVar: "INTELLIGENCE_DB_PASSWORD", role: "mhai_worker_app", defaultUser: "intelligence_app"},
-		{userVar: "EMR_DB_USER", pwVar: "EMR_DB_PASSWORD", role: "mhai_emr_app", defaultUser: "emr_app", roleMayBeAbsent: true},
+		{userVar: "EMR_DB_USER", pwVar: "EMR_DB_PASSWORD", role: "mhai_emr_app", defaultUser: "emr_app"},
 	} {
 		l.user, l.password = getenv(l.userVar), getenv(l.pwVar)
 		if l.user == "" && l.password != "" {
@@ -148,16 +144,6 @@ func migrateWithLogins(ctx context.Context, args []string, url string, getenv fu
 	}
 	defer pool.Close()
 	for _, l := range reqs {
-		if l.roleMayBeAbsent {
-			var exists bool
-			if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, l.role).Scan(&exists); err != nil {
-				return errors.New("core: cannot check the database roles")
-			}
-			if !exists {
-				fmt.Fprintf(out, "login %s skipped: role %s doesn't exist yet\n", l.user, l.role)
-				continue
-			}
-		}
 		if err := db.EnsureLogin(ctx, pool, l.user, l.password, l.role); err != nil {
 			return err
 		}

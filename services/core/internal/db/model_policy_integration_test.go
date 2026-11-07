@@ -850,7 +850,7 @@ func TestMigration00018DownUp(t *testing.T) {
 			t.Fatalf("before 00018, %s already admits the action: %s", name, check)
 		}
 	}
-	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+	if err := db.MigrateUpTo(ctx, pg.URL, 18); err != nil {
 		t.Fatal(err)
 	}
 	up := policyChecks("after up")
