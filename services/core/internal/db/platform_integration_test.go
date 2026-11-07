@@ -81,16 +81,17 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 	// its reason. A new grant to the platform fails here until it is
 	// justified in this list.
 	wantRelations := map[string]string{
-		"hospitals":           "00003: names and status for the platform screens",
-		"users":               "00003: column SELECT without password_hash (the audit's actor, people search)",
-		"platform_users":      "00003: security_invoker view over users' granted columns",
-		"user_roles":          "00003: roles of the audit's actors",
-		"sessions":            "00003: session metadata (no tokens: those are refresh_tokens)",
-		"audit_log":           "00003: read the chain; append its eight actions (00014 platform_append)",
-		"audit_checkpoints":   "00003: the chain's checkpoints, for verification",
-		"idempotency_keys":    "00003: Idempotency-Key replies of platform writes, null-hospital rows only",
-		"audit_verify_runs":   "00014: the chain checks",
-		"guardrail_snapshots": "00017: the guarded guardrail statistics, one per period and day (SELECT, INSERT)",
+		"hospitals":             "00003: names and status for the platform screens",
+		"users":                 "00003: column SELECT without password_hash (the audit's actor, people search)",
+		"platform_users":        "00003: security_invoker view over users' granted columns",
+		"user_roles":            "00003: roles of the audit's actors",
+		"sessions":              "00003: session metadata (no tokens: those are refresh_tokens)",
+		"audit_log":             "00003: read the chain; append its eight actions (00014 platform_append)",
+		"audit_checkpoints":     "00003: the chain's checkpoints, for verification",
+		"idempotency_keys":      "00003: Idempotency-Key replies of platform writes, null-hospital rows only",
+		"audit_verify_runs":     "00014: the chain checks",
+		"guardrail_snapshots":   "00017: the guarded guardrail statistics, one per period and day (SELECT, INSERT)",
+		"hospital_model_policy": "00018: the per-hospital cloud model policy the platform sets (SELECT, INSERT, column UPDATE)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `
@@ -136,10 +137,12 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 	// The exact set of SECURITY DEFINER functions it may run, PUBLIC's
 	// EXECUTE included, each with its full arguments and result: the four
 	// of 00014 (one replaced by 00015), 00015's guidelines check, the
-	// buffer count (00013) and the chain head (00003).
+	// buffer count (00013), the chain head (00003) and this month's cloud
+	// token usage of one hospital (00018).
 	wantFuncs := map[string][2]string{
 		"audit_chain_head":             {"OUT id bigint, OUT hash text", "record"},
 		"mhai_feedback_buffer_waiting": {"", "bigint"},
+		"mhai_cloud_usage":             {"p_hospital uuid", "TABLE(month date, used bigint, reserved bigint)"},
 	}
 	for name, sig := range platformFunctions {
 		wantFuncs[name] = sig

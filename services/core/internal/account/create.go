@@ -130,6 +130,33 @@ func CreateUser(ctx context.Context, pool *pgxpool.Pool, u NewUser) (uuid.UUID, 
 	return id, nil
 }
 
+// ProvisionOnHospital runs fn as mhai_provision, in one READ COMMITTED transaction,
+// with the id of the hospital ref names (its id or short code), for a CLI
+// write on that hospital (the model policy's "hospitals model-policy set").
+// ErrBadHospitalRef or ErrNoSuchHospital when there is none; fn's error
+// rolls the transaction back and is returned as it is.
+func ProvisionOnHospital(ctx context.Context, pool *pgxpool.Pool, ref string, fn func(tx pgx.Tx, hospital uuid.UUID) error) (uuid.UUID, error) {
+	r, err := parseHospitalRef(ref)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	cond, arg := r.where()
+	var id uuid.UUID
+	err = inTx(ctx, pool, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT id FROM hospitals WHERE `+cond, arg).Scan(&id); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNoSuchHospital
+			}
+			return errors.New("hospital lookup failed")
+		}
+		return fn(tx, id)
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
+}
+
 // inTx runs fn in a READ COMMITTED transaction (audit.Write needs it).
 func inTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})

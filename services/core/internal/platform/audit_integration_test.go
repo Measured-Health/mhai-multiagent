@@ -77,6 +77,10 @@ var (
 	logs      syncBuffer
 )
 
+// testCloudProviders are the providers the test deployment enables
+// (CORE_CLOUD_PROVIDERS): xai is left off, so a PUT naming it is 409.
+var testCloudProviders = []string{"anthropic", "openai"}
+
 // testContact is the configured security contact (synthetic).
 var testContact = platform.SecurityContact{Name: "Synthetic Security Desk", Email: "security@havana.example"}
 
@@ -150,7 +154,8 @@ func TestMain(m *testing.M) {
 			Idem: httpx.IdempotentLog(app, log), IdemAnon: httpx.IdempotentAnonLog(app, log)}
 		mux := authz.NewMux(guard)
 		server.Register(mux, server.Deps{Auth: svc, Pool: app, SecurityContact: testContact,
-			AuditWalk: func(id uuid.UUID) { walks <- id }, Health: healthKV, Intel: intelClient, QueryCap: testQueryCap})
+			AuditWalk: func(id uuid.UUID) { walks <- id }, Health: healthKV, Intel: intelClient, QueryCap: testQueryCap,
+			CloudProviders: testCloudProviders})
 		handler = mux.Handler([]string{serviceKey})
 		return m.Run()
 	}()

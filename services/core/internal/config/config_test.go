@@ -12,7 +12,8 @@ func setEnv(t *testing.T, kv map[string]string) {
 	for _, k := range []string{"CORE_ENV", "HTTP_ADDR", "DATABASE_URL", "NATS_URL", "NATS_NKEY_SEED_PATH", "NATS_GATEWAY_PASSWORD", "NATS_WORKER_PASSWORD",
 		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS",
 		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING",
-		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY", "CORE_ALLOW_SINGLE_NODE"} {
+		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY", "CORE_ALLOW_SINGLE_NODE",
+		"CORE_CLOUD_PROVIDERS"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -540,5 +541,48 @@ func TestLoadAllowSingleNode(t *testing.T) {
 	setEnv(t, e)
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_ALLOW_SINGLE_NODE") {
 		t.Fatalf("bad value: %v", err)
+	}
+}
+
+// CORE_CLOUD_PROVIDERS (cloud model providers plan, Task 2): empty by
+// default (a fresh deployment enables no provider); a comma list of
+// openai, anthropic and xai, each at most once; anything else refuses the
+// start, naming the variable and never its value.
+func TestConfigCloudProviders(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	c, err := Load()
+	if err != nil || len(c.CloudProviders) != 0 {
+		t.Fatalf("default: %v %v", c.CloudProviders, err)
+	}
+	with := func(v string) map[string]string {
+		e := map[string]string{"CORE_CLOUD_PROVIDERS": v}
+		for k, x := range base {
+			e[k] = x
+		}
+		return e
+	}
+	for v, want := range map[string]string{
+		"anthropic":            "anthropic",
+		"openai,anthropic":     "anthropic,openai",
+		" xai , openai ":       "openai,xai",
+		"openai,anthropic,xai": "anthropic,openai,xai",
+		"   ":                  "",
+	} {
+		setEnv(t, with(v))
+		c, err := Load()
+		if err != nil || strings.Join(c.CloudProviders, ",") != want {
+			t.Errorf("%q: %v %v, want %s", v, c.CloudProviders, err, want)
+		}
+	}
+	for _, bad := range []string{"gemini-SYNTH", "openai,openai", "OpenAI", "openai,", ",xai", "openai;xai", "local", "none"} {
+		setEnv(t, with(bad))
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "CORE_CLOUD_PROVIDERS") || strings.Contains(err.Error(), bad) {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	if _, err := ParseCloudProviders("openai,openai"); err == nil {
+		t.Error("ParseCloudProviders took a duplicate")
 	}
 }

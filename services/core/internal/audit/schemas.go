@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 )
 
 // The closed payload schemas of every action core writes (Plan 4 spec §9).
@@ -43,6 +44,9 @@ type Schema struct {
 	// its keys (an action two writers use with two shapes: job.retried and
 	// job.cancelled, per job and per platform call).
 	Shapes []Shape
+	// Holds, when set, is a rule across the payload's keys that it must
+	// also meet (checked after the keys and values fit).
+	Holds func(payload map[string]any) bool
 }
 
 // Shape is one alternative payload of an action: the keys it may carry and
@@ -151,6 +155,9 @@ func checkPayload(action string, raw []byte) error {
 	}
 	if len(s.Shapes) > 0 && !slices.ContainsFunc(s.Shapes, func(sh Shape) bool { return sh.fits(payload) }) {
 		return fmt.Errorf("%w: %s fits none of its shapes", ErrSchema, action)
+	}
+	if s.Holds != nil && !s.Holds(payload) {
+		return fmt.Errorf("%w: %s breaks its rule across keys", ErrSchema, action)
 	}
 	return nil
 }
@@ -296,6 +303,9 @@ var (
 	modelVersionPattern = regexp.MustCompile(`^[A-Za-z0-9_.:/@+-]{1,128}$`)
 	factEntityPattern   = regexp.MustCompile(`^[a-z0-9_.]{0,64}$`)
 	factEntityIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
+	// A model policy's agreement reference (00018's CHECK): AGR-YYYY-NNNN,
+	// DPA-YYYY-NNNN or DEMO-SYNTHETIC, never a word, a name or a pseudonym.
+	agreementRefPattern = regexp.MustCompile(`^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$`)
 )
 
 func fields(kv ...any) map[string]Check {
@@ -347,6 +357,29 @@ func init() {
 		Required: []string{"via", "from"}})
 	Register("user.created", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})
 
+	// Cloud model providers (plan 2026-11-06 Task 2, design §5.3): a
+	// hospital's model policy set by a platform admin (as mhai_platform)
+	// or the CLI twin (as mhai_provision). The row has no hospital (a
+	// platform action); the hospital is in the payload. The agreement
+	// reference has the id shape and is absent when none was given.
+	// The reference is present exactly when a provider is (off clears it).
+	provider := OneOf("none", "openai", "anthropic", "xai")
+	agreementRef := func(v any) bool {
+		s, ok := v.(string)
+		return ok && agreementRefPattern.MatchString(s) && !pseudonymS.MatchString(s)
+	}
+	Register("hospital.model_policy_changed", Schema{Fields: fields(
+		"hospital_id", id, "provider", provider, "previous", provider,
+		"agreement_ref", Check(agreementRef),
+		"monthly_token_budget", Int(1, 1000000000),
+		"via", OneOf("platform", "cli")),
+		Required: []string{"hospital_id", "provider", "previous", "monthly_token_budget", "via"},
+		// A reference exactly when a provider is set.
+		Holds: func(p map[string]any) bool {
+			_, hasRef := p["agreement_ref"]
+			return hasRef == (p["provider"] != "none")
+		}})
+
 	// Plan 3: the request-token boundary (internal/account, grant, intel).
 	Register("intelligence.key_rotated", Schema{Fields: fields(
 		"kid", token, "rotation", OneOf("planned", "emergency"), "change", OneOf("added", "removed")),
@@ -381,7 +414,11 @@ func init() {
 		"trust_band", Nullable(OneOf("low", "mid", "high")),
 		"chunk_ids", List(50, Pattern(chunkIDPattern)),
 		"model_versions", StringMap(16, modelNamePattern, Pattern(modelVersionPattern)),
-		"attempts", count)})
+		"attempts", count,
+		// Cloud model providers (plan Task 3): where the answer's text went
+		// and the cloud outcome code; optional (older workers send neither).
+		"egress", OneOf(config.EgressValues()...),
+		"cloud_outcome", OneOf(config.CloudOutcomes...))})
 	Register("query.failed", Schema{Fields: drained("error", errorCode, "attempts", count)})
 	Register("query.cancelled", Schema{Fields: drained("reason", OneOf("user_deactivated", "hospital_deactivated", "account_unusable"))})
 	Register("job.dead_lettered", Schema{Fields: fields(

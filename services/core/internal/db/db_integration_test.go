@@ -110,8 +110,8 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(st) != 17 {
-		t.Fatalf("want 17 migrations, got %d", len(st))
+	if len(st) != 18 {
+		t.Fatalf("want 18 migrations, got %d", len(st))
 	}
 	for i, s := range st {
 		if s.Source.Version != int64(i+1) || s.State != goose.StateApplied {
@@ -269,7 +269,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if err := db.WithHospital(ctx, one, a, func(pgx.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs"} {
+	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs", "hospital_model_policy", "cloud_usage", "cloud_reservations"} {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -291,6 +291,13 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		if table == "feedback_buffer" {
 			// No role but the owner reads the buffer: the gateway is denied outright.
 			requireDenied(t, err, "gateway reading feedback_buffer")
+			continue
+		}
+		if table == "hospital_model_policy" || table == "cloud_usage" || table == "cloud_reservations" {
+			// 00018: the policy is the platform's and the CLI's, the ledger
+			// is reached only through definer functions: the gateway holds
+			// no grant on either.
+			requireDenied(t, err, "gateway reading "+table)
 			continue
 		}
 		if err != nil {
