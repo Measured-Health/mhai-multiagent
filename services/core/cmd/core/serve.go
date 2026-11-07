@@ -23,6 +23,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/grant"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
@@ -104,6 +105,21 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if err := checkSigningKeys(issuer, signer); err != nil {
 		return nil, err
 	}
+	// EMR (off by default): the emr service's sealing public key and the
+	// idempotency HMAC key for the credential routes; either missing or
+	// unusable stops the service.
+	var (
+		sealer  *emrctl.Sealer
+		idemKey []byte
+	)
+	if cfg.EMREnabled {
+		if sealer, err = emrctl.LoadSealer(cfg.EMRSealPublicKeyPath); err != nil {
+			return nil, err
+		}
+		if idemKey, err = config.LoadIdempotencyHMACKey(cfg.IdempotencyHMACKeyPath); err != nil {
+			return nil, err
+		}
+	}
 	a := &app{log: log}
 	if a.pool, err = openDB(ctx, cfg.DatabaseURL); err != nil {
 		return nil, err
@@ -157,8 +173,9 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	}
 	guard := &authz.Guard{
 		Keys: keys, Denylist: buckets.Denylist, Pool: a.pool, Log: log,
-		Idem:     httpx.IdempotentLog(a.pool, log),
-		IdemAnon: httpx.IdempotentAnonLog(a.pool, log),
+		Idem:      httpx.IdempotentLog(a.pool, log),
+		IdemAnon:  httpx.IdempotentAnonLog(a.pool, log),
+		IdemKeyed: httpx.IdempotentKeyed(a.pool, log, idemKey),
 	}
 	m := authz.NewMux(guard)
 	contact := platform.SecurityContact{Name: cfg.SecurityContactName, Email: cfg.SecurityContactEmail}
@@ -167,7 +184,8 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	}
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.WithLink(server.Readiness(a.pool, nc, buckets.All()), link),
 		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health,
-		CloudProviders: cfg.CloudProviders})
+		CloudProviders: cfg.CloudProviders, EMREnabled: cfg.EMREnabled, EMRTypes: cfg.EMRConnectorTypes,
+		EMR: &emrctl.Client{NC: nc, Signer: signer, Log: log}, EMRSealer: sealer, EMRDevelopment: cfg.Development()})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}

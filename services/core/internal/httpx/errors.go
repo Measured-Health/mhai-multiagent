@@ -37,6 +37,12 @@ var Codes = map[string]int{
 	// Plan 4 (ADR 0012, additive): the two-person rule on corrections.
 	"self_approval":   http.StatusForbidden,
 	"already_decided": http.StatusConflict,
+	// EMR integration (design §16, additive): switching on without a
+	// passing test of the saved settings; a connection write for a removed
+	// or removal-pending hospital; a connection type not offered.
+	"not_tested":       http.StatusConflict,
+	"hospital_removed": http.StatusConflict,
+	"no_type":          http.StatusUnprocessableEntity,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -63,6 +69,9 @@ var titles = map[string]string{
 	"payload_too_large":  "Payload too large",
 	"self_approval":      "Not allowed",
 	"already_decided":    "Already decided",
+	"not_tested":         "Not tested",
+	"hospital_removed":   "Hospital removed",
+	"no_type":            "Unknown connection type",
 }
 
 var details = map[string]string{
@@ -86,6 +95,9 @@ var details = map[string]string{
 	"payload_too_large":  "The request body is too large.",
 	"self_approval":      "You can't decide your own correction.",
 	"already_decided":    "This correction has already been decided.",
+	"not_tested":         "Test the saved settings before switching the connection on.",
+	"hospital_removed":   "The hospital is removed or being removed.",
+	"no_type":            "This connection type is not offered.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.

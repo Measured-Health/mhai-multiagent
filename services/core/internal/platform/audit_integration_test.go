@@ -34,6 +34,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
@@ -42,6 +43,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/seal"
 )
 
 // Plan 4 Task 9: the /platform/audit reads through core's whole chain
@@ -151,12 +153,33 @@ func TestMain(m *testing.M) {
 			MFAKey: []byte(testMFAKey), Argon: password.NewGate(64, time.Minute)}
 		svc := authSvc
 		guard = &authz.Guard{Keys: issuer.PublicKeys(), Denylist: buckets.Denylist, Pool: app, Log: log,
-			Idem: httpx.IdempotentLog(app, log), IdemAnon: httpx.IdempotentAnonLog(app, log)}
+			Idem: httpx.IdempotentLog(app, log), IdemAnon: httpx.IdempotentAnonLog(app, log),
+			IdemKeyed: httpx.IdempotentKeyed(app, log, []byte(testIdemKey))}
+		// EMR (plan Task 11): on, offering the development stub, sealing to
+		// a test key pair whose private half the fake emr service holds.
+		if emrKP, err = seal.GenerateKeyPair(rand.Reader); err != nil {
+			fmt.Fprintln(os.Stderr, "seal key:", err)
+			return 1
+		}
+		if fake, err = startFakeEMR(n.EMRURL, emrKP); err != nil {
+			fmt.Fprintln(os.Stderr, "fake emr:", err)
+			return 1
+		}
+		defer fake.nc.Close()
+		emrClient := &emrctl.Client{NC: gwNC, Signer: reqSigner, Log: log}
 		mux := authz.NewMux(guard)
 		server.Register(mux, server.Deps{Auth: svc, Pool: app, SecurityContact: testContact,
 			AuditWalk: func(id uuid.UUID) { walks <- id }, Health: healthKV, Intel: intelClient, QueryCap: testQueryCap,
-			CloudProviders: testCloudProviders})
+			CloudProviders: testCloudProviders, EMREnabled: true, EMRTypes: []string{"stub"}, EMR: emrClient,
+			EMRSealer: emrctl.NewSealer(emrKP.Public), EMRDevelopment: true})
 		handler = mux.Handler([]string{serviceKey})
+		// The same service with EMR off (the default, K4).
+		offGuard := &authz.Guard{Keys: issuer.PublicKeys(), Denylist: buckets.Denylist, Pool: app, Log: log,
+			Idem: httpx.IdempotentLog(app, log), IdemAnon: httpx.IdempotentAnonLog(app, log)}
+		offMux := authz.NewMux(offGuard)
+		server.Register(offMux, server.Deps{Auth: svc, Pool: app, SecurityContact: testContact, Health: healthKV,
+			Intel: intelClient, QueryCap: testQueryCap, EMR: emrClient})
+		emrOff = offMux.Handler([]string{serviceKey})
 		return m.Run()
 	}()
 	os.Exit(code)

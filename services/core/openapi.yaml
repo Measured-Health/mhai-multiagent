@@ -1508,6 +1508,270 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/emr/connector-types:
+    get:
+      operationId: listEmrConnectorTypes
+      summary: The record connection types this deployment offers.
+      description: |
+        Platform admins and auditors. The types named by
+        `CORE_EMR_CONNECTOR_TYPES` that the emr service can run, each with
+        the fields its form shows. `{types: []}` when EMR is off
+        (`CORE_EMR_ENABLED` false, the default) or no type is offered.
+        Types name a standard or a method, never a product.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The offered types.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [types]
+                additionalProperties: false
+                properties:
+                  types: { type: array, items: { $ref: "#/components/schemas/EmrConnectorType" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/emr/connections:
+    get:
+      operationId: listEmrConnections
+      summary: Record connections, and hospitals with none.
+      description: |
+        Platform admins and auditors. Ordered by hospital name, then source
+        label. `hospital` limits both lists to one hospital; `state` is
+        `all` (default), `needs_attention` (on, with errors or paused),
+        `off` (switched off, tested or not) or `not_connected` (only the
+        hospitals, not removed, with no connection). A summary carries no
+        address, settings or credentials. Empty when EMR is off.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: hospital, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: state, in: query, required: false, schema: { type: string, enum: [all, needs_attention, off, not_connected] } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The connections and the hospitals not connected.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connections, not_connected]
+                additionalProperties: false
+                properties:
+                  connections: { type: array, items: { $ref: "#/components/schemas/EmrConnectionSummary" } }
+                  not_connected: { type: array, items: { $ref: "#/components/schemas/EmrPerson" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/emr/connections/{id}:
+    get:
+      operationId: getEmrConnection
+      summary: One record connection.
+      description: |
+        Platform admins and auditors. Credentials read as the time each was
+        set for the connection's current address (`set_at`), never a value;
+        null when not set. 404 when EMR is off.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The connection.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmrConnection" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    patch:
+      operationId: updateEmrConnection
+      summary: Change a record connection (step-up).
+      description: |
+        Platform admins only, with a fresh code (`mfa_code` or
+        `backup_code`). Send only what changes, and `version` (a stale one
+        is 409 `conflict`). `settings` keys are merged (an empty string
+        removes an optional one); `credentials` are only the ones being
+        replaced. A change of the address, settings, credentials or private
+        network clears `last_test`; a label or interval change keeps it.
+        Credentials are bound to the address they were entered for: a
+        change of the base address's or the token address's scheme, host
+        or port deletes every credential in the emr service before the
+        change is saved (no confirmation: 503 `unavailable` and nothing
+        changes), switches the connection off, and leaves every `set_at`
+        null; new credentials in the same request are kept for the new
+        address. The request body is never logged or stored; the
+        idempotency store keeps a keyed hash of it.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, hospital_removed, validation_failed, not_ready, unavailable, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmrConnectionPatch" }
+      responses:
+        "200":
+          description: The connection as saved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmrConnection" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/emr/connections/{id}/enabled:
+    put:
+      operationId: setEmrConnectionEnabled
+      summary: Switch a record connection on or off (step-up).
+      description: |
+        Platform admins only, with a fresh code. On needs an offered type
+        (422 `no_type`) and a passing test of the saved settings (409
+        `not_tested`); a hospital removed or being removed is 409
+        `hospital_removed`. Off always works and keeps the credentials.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, not_tested, hospital_removed, validation_failed, no_type, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled, version]
+              additionalProperties: false
+              properties:
+                enabled: { type: boolean }
+                version: { type: integer, minimum: 1 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The connection as saved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmrConnection" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/emr/connections/{id}/test:
+    post:
+      operationId: testEmrConnection
+      summary: Try a record connection's saved settings.
+      description: |
+        Platform admins only; no step-up (it changes nothing in the
+        hospital's system, and credentials only go to the address they
+        were entered for). The emr service tries the saved settings; the
+        outcome is `last_test` (`code` null when it passed). A credential
+        not set for the current address is `sign_in_refused` with nothing
+        sent. A change saved meanwhile is 409 `conflict`, nothing recorded.
+        No answer from the emr service is 503 `unavailable`.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, hospital_removed, validation_failed, no_type, not_ready, unavailable, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: The connection with its new `last_test`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmrConnection" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/hospitals/{id}/emr/connections:
+    post:
+      operationId: addEmrConnection
+      summary: Add a record connection to a hospital (step-up).
+      description: |
+        Platform admins only, with a fresh code. Saved switched off and
+        untested. `type` must be offered (422 `no_type`); `source_label`
+        1 to 40 characters naming no product; `base_url` https (sftp for a
+        file export), at most 500 characters, a DNS name, with no userinfo,
+        query or fragment; every address setting gets the same checks, and
+        a record link must be on the base address's host. `settings` are
+        the type's text fields; `credentials` its secret fields, each 1 to
+        4,000 characters, every required one present. Credentials are
+        sealed to the emr service as they arrive and stored there only;
+        if the emr service doesn't confirm them, the connection is saved
+        without them and the answer is 503 `unavailable` (a GET shows
+        `set_at` null). An unknown hospital is 404; one removed or being
+        removed is 409 `hospital_removed`. The request body is never
+        logged or stored; the idempotency store keeps a keyed hash of it.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, hospital_removed, validation_failed, no_type, not_ready, unavailable, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmrConnectionIn" }
+      responses:
+        "200":
+          description: The connection as saved (off).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmrConnection" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
 components:
   securitySchemes:
     ServiceKey:
@@ -1589,6 +1853,9 @@ components:
             - payload_too_large
             - self_approval
             - already_decided
+            - not_tested
+            - hospital_removed
+            - no_type
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -2121,6 +2388,134 @@ components:
             month: { type: string, pattern: "^[0-9]{4}-[0-9]{2}$", description: "The month, UTC, as YYYY-MM." }
             used: { type: integer, format: int64, minimum: 0 }
             reserved: { type: integer, format: int64, minimum: 0 }
+    EmrPerson:
+      type: object
+      required: [id, name]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+    EmrConnectorType:
+      type: object
+      description: A kind of connection, as data. Named by standard or method, never by product.
+      required: [id, label, summary, fields]
+      additionalProperties: false
+      properties:
+        id: { type: string, enum: [fhir_r4, document_archive, file_export, stub] }
+        label: { type: string }
+        summary: { type: string }
+        fields:
+          type: array
+          items:
+            type: object
+            required: [key, label, kind, required, max]
+            additionalProperties: false
+            properties:
+              key: { type: string, pattern: "^[a-z_]+$" }
+              label: { type: string }
+              kind: { type: string, enum: [text, secret], description: "A secret is write-only: never sent back." }
+              required: { type: boolean }
+              max: { type: integer, minimum: 1 }
+    EmrSyncCode:
+      type: string
+      enum: [unreachable, sign_in_refused, timed_out, unreadable_data, unmapped_codes, too_many_requests]
+    EmrConnectionSummary:
+      type: object
+      required: [id, hospital, type, type_label, source_label, enabled, health, last_test, last_sync, errors_24h, paused]
+      properties:
+        id: { type: string, format: uuid }
+        hospital: { $ref: "#/components/schemas/EmrPerson" }
+        type: { type: string }
+        type_label: { type: string }
+        source_label: { type: string, minLength: 1, maxLength: 40 }
+        enabled: { type: boolean }
+        health: { type: string, enum: [never, ok, errors] }
+        last_test:
+          type: object
+          nullable: true
+          required: [at, ok, code]
+          additionalProperties: false
+          properties:
+            at: { type: string, format: date-time }
+            ok: { type: boolean }
+            code: { allOf: [{ $ref: "#/components/schemas/EmrSyncCode" }], nullable: true }
+        last_sync:
+          type: object
+          nullable: true
+          required: [at, ok, records]
+          additionalProperties: false
+          properties:
+            at: { type: string, format: date-time }
+            ok: { type: boolean }
+            records: { type: integer, minimum: 0 }
+        errors_24h: { type: integer, minimum: 0 }
+        paused: { type: boolean, description: "Additive: a source the breaker paused." }
+    EmrConnection:
+      allOf:
+        - $ref: "#/components/schemas/EmrConnectionSummary"
+        - type: object
+          required: [base_url, settings, credentials, errors, updated_by, updated_at, version, poll_seconds, private_network, private_cidrs]
+          properties:
+            base_url: { type: string, maxLength: 500 }
+            settings: { type: object, additionalProperties: { type: string }, description: "The type's text fields only. Secrets are never here." }
+            credentials:
+              type: array
+              description: One per secret field; `set_at` null when not set for the current address. Never a value.
+              items:
+                type: object
+                required: [key, set_at]
+                additionalProperties: false
+                properties:
+                  key: { type: string }
+                  set_at: { type: string, format: date-time, nullable: true }
+            errors:
+              type: array
+              maxItems: 5
+              description: The last 24 hours, by code, newest first.
+              items:
+                type: object
+                required: [at, code, count]
+                additionalProperties: false
+                properties:
+                  at: { type: string, format: date-time }
+                  code: { $ref: "#/components/schemas/EmrSyncCode" }
+                  count: { type: integer, minimum: 1 }
+            updated_by: { allOf: [{ $ref: "#/components/schemas/EmrPerson" }], nullable: true }
+            updated_at: { type: string, format: date-time, nullable: true }
+            version: { type: integer, minimum: 1 }
+            poll_seconds: { type: integer, minimum: 60, maximum: 86400, description: Additive. }
+            private_network: { type: boolean, description: Additive. }
+            private_cidrs: { type: array, items: { type: string }, description: "Additive: the declared private ranges." }
+    EmrConnectionIn:
+      type: object
+      required: [type, source_label, base_url, settings, credentials]
+      additionalProperties: false
+      properties:
+        type: { type: string }
+        source_label: { type: string, minLength: 1, maxLength: 40 }
+        base_url: { type: string, maxLength: 500 }
+        settings: { type: object, additionalProperties: { type: string } }
+        credentials: { type: object, additionalProperties: { type: string, minLength: 1, maxLength: 4000 }, description: "The type's secret fields. Write-only." }
+        poll_seconds: { type: integer, minimum: 60, maximum: 86400 }
+        private_network: { type: boolean }
+        private_cidrs: { type: array, maxItems: 8, items: { type: string }, description: "Private IPv4 networks of at most a /24; needs private_network." }
+        mfa_code: { type: string }
+        backup_code: { type: string }
+    EmrConnectionPatch:
+      type: object
+      required: [version]
+      additionalProperties: false
+      properties:
+        source_label: { type: string, minLength: 1, maxLength: 40 }
+        base_url: { type: string, maxLength: 500 }
+        settings: { type: object, additionalProperties: { type: string } }
+        credentials: { type: object, additionalProperties: { type: string, minLength: 1, maxLength: 4000 }, description: "Only the ones being replaced. Write-only." }
+        poll_seconds: { type: integer, minimum: 60, maximum: 86400 }
+        private_network: { type: boolean }
+        private_cidrs: { type: array, maxItems: 8, items: { type: string } }
+        version: { type: integer, minimum: 1 }
+        mfa_code: { type: string }
+        backup_code: { type: string }
     GuardedCount:
       type: object
       description: "A count under the small-group rule. Never 1 to 4; hidden is `{value: null, suppressed: true}`."
