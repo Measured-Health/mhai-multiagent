@@ -329,7 +329,7 @@ def test_common_word_given_name_blocks_today(given_name: str) -> None:
 
 
 def test_hyphenated_range_is_sent() -> None:
-    """Fix round I2: a range such as "HR 100-120" is sent (digit_runs no
+    """A range such as "HR 100-120" is sent (digit_runs no
     longer joins across a hyphen). The cost, recorded as a residual with the
     spaced-number one ("445 812") and measured in H2: a 6-digit number that
     is not in this patient's record, written "123-456", passes long_digits.
@@ -413,6 +413,34 @@ def test_shape_needs_exact_pointers() -> None:
         scan.Shape(frozenset({"/a"}), frozenset({"/a"}))  # exactly two
     with pytest.raises(ValueError):
         scan.shape_for("gemini", {})
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_hand_built_shape_without_fixed_values_refused(provider: str) -> None:
+    """Only the seven block texts may be free text: a Shape whose other
+    leaves (the model, the system prompt, the schema) carry no fixed value
+    would let any text through them unchecked, so it can't be built. The
+    way to build one is shape_for."""
+    made = shape(provider)
+    texts = scan.block_pointers(provider)
+    # No fixed values at all.
+    with pytest.raises(ValueError):
+        scan.Shape(made.patient_paths, made.allowed_paths)
+    # One leaf left free: the model.
+    assert "/model" in made.fixed_values
+    loose = {k: v for k, v in made.fixed_values.items() if k != "/model"}
+    with pytest.raises(ValueError):
+        scan.Shape(made.patient_paths, made.allowed_paths, loose)
+    # Free text at a pointer that isn't a block.
+    with pytest.raises(ValueError):
+        scan.Shape(made.patient_paths, made.allowed_paths | {"/note"}, made.fixed_values)
+    # Patient paths other than blocks 0 and 1.
+    with pytest.raises(ValueError):
+        scan.Shape(frozenset(texts[1:3]), made.allowed_paths, made.fixed_values)
+    # The same declaration as shape_for gives is accepted.
+    again = scan.Shape(made.patient_paths, made.allowed_paths, made.fixed_values)
+    assert again == made
+    assert scan.scan_body(body(provider, blocks("fever")), _ids(), again) is None
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
@@ -523,7 +551,7 @@ def test_size_cap() -> None:
 
 
 def test_trace_headers_refused() -> None:
-    # Task 4 fix round: no trace context leaves with a request.
+    # No trace context leaves with a request (plan Task 4).
     raw = body("anthropic", blocks("fever"))
     for header in ("traceparent", "TraceState", "baggage"):
         hook = ScanHook(NO_IDS, shape("anthropic"))
@@ -663,7 +691,7 @@ def test_digit_runs_and_grouped_runs() -> None:
     assert grouped_runs("platelets 250 000") == []
 
 
-# --- fix round (task-6-review.md; ruling C5) ------------------------------------------
+# --- the masker's detector, numbers, dates, MRNs, confusables (ruling C5) --------------------
 
 # core's PatientData (services/core/internal/queries/shapes.go): these four
 # keys only; core refuses any other with a 422.
@@ -710,7 +738,7 @@ def test_core_patient_data_feeds_known_identifiers() -> None:
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="NEEDS_CONTEXT (I1): PIIMasker finds names only after a title "
+    reason="Ruling C8 residual: PIIMasker finds names only after a title "
     "(Dr, Mr, Mrs, Ms, Miss, Prof, Patient), so an untitled name on core's "
     "real patient_data reaches the body. Needs a name detector or core's "
     "keyed name hashes (ruling C5's H2 prerequisite).",
@@ -754,7 +782,7 @@ def test_name_key_over_block_pinned() -> None:
     ],
 )
 def test_phone_with_any_short_gap_blocked_without_record(question: str) -> None:
-    # I2: no record; the gap between groups is 1 to 3 non-alphanumerics.
+    # No record; the gap between groups is 1 to 3 non-alphanumerics.
     assert _scan(question) == "ng_phone"
 
 
@@ -803,7 +831,6 @@ def test_vitals_still_sent(question: str) -> None:
     ],
 )
 def test_spaced_and_worded_dates_blocked(question: str) -> None:
-    # I3.
     assert _scan(question) == "date"
 
 
@@ -812,7 +839,7 @@ def test_spaced_and_worded_dates_blocked(question: str) -> None:
     ["T 37.5-38.5", "pH 7.35-7.45", "Hb 11.5-13.5", "temp 36.5 - 37.5", "dose 0.5-1.25 mg/kg"],
 )
 def test_decimal_ranges_are_not_dates(question: str) -> None:
-    # Re-review R1: a date uses the same separator both times, so a
+    # A date uses the same separator both times, so a
     # reference range (d.d-d.d) is sent; every earlier date form still isn't.
     assert _scan(f"{question}: normal?") is None
 
@@ -831,7 +858,6 @@ def test_decimal_ranges_are_not_dates(question: str) -> None:
     ],
 )
 def test_more_mrn_phrasings_blocked(question: str) -> None:
-    # I4.
     assert _scan(f"{question} has fever") == "mrn_prefix"
 
 
@@ -847,19 +873,16 @@ def test_more_mrn_phrasings_blocked(question: str) -> None:
     ],
 )
 def test_confusables_and_marks_blocked(text: str) -> None:
-    # I5.
     assert _scan(text, _ids()) == "known_identifier"
 
 
 def test_placeholder_between_digits_does_not_split_a_number() -> None:
-    # M1.
     assert _scan("NIN 12345[NAME_REDACTED]67[NAME_REDACTED]8901") == "nin"
     ids = _ids({"mrn": "284817"})
     assert _scan("record 284[DATE_REDACTED]817", ids) == "known_identifier"
 
 
 def test_hook_scans_url_and_headers() -> None:
-    # M5.
     raw = body("anthropic", blocks("fever"))
     hook = ScanHook(_ids(), shape("anthropic"))
     with pytest.raises(EgressRefused) as e:
@@ -879,7 +902,7 @@ def test_hook_scans_url_and_headers() -> None:
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_shape_pins_fixed_values(provider: str) -> None:
-    # M6: every leaf outside the blocks has a fixed value; only blocks carry
+    # Every leaf outside the blocks has a fixed value; only blocks carry
     # free text.
     shp = shape(provider)
 
@@ -916,12 +939,12 @@ def test_shape_pins_fixed_values(provider: str) -> None:
         )  # a fixed pointer must be allowed
 
 
-# --- last round (re-review R1-R7) ------------------------------------------------------
+# --- ranges, hyphen chains, gaps, 2-digit years, case-folded confusables ---------------------
 
 
 @pytest.mark.parametrize("written", ["123-456-7890", "1234-567-890", "123-45-678"])
 def test_hyphen_chain_of_three_groups_is_long_digits(written: str) -> None:
-    # R2: hyphens join chains of 3 or more groups; two groups ("HR 100-120")
+    # Hyphens join chains of 3 or more groups; two groups ("HR 100-120")
     # stay sent.
     assert _scan(f"ref {written} attached") == "long_digits"
     assert _scan("HR 100-120 and 1000-1500 ml") is None
@@ -929,7 +952,7 @@ def test_hyphen_chain_of_three_groups_is_long_digits(written: str) -> None:
 
 @pytest.mark.parametrize("sep", [";", "_", " ; ", "_ "])
 def test_semicolon_and_underscore_gaps(sep: str) -> None:
-    # R3: ";" and "_" join groups too (neither is a chunk delimiter).
+    # ";" and "_" join groups too (neither is a chunk delimiter).
     written = sep.join(["0803", "123", "4567"])
     assert _scan(f"call {written} now") == "ng_phone"
     ids = _ids({"phone": "08031234567"})
@@ -939,24 +962,22 @@ def test_semicolon_and_underscore_gaps(sep: str) -> None:
 
 
 def test_single_digit_phone_blocked() -> None:
-    # R3: a phone number spelt out one digit at a time.
+    # A phone number spelt out one digit at a time.
     assert _scan("call 0 8 0 3 1 2 3 4 5 6 7 now") == "ng_phone"
 
 
 @pytest.mark.parametrize("question", ["seen 12 Mar 84", "seen 3 dec 99", "seen 12-mar-84"])
 def test_month_name_with_two_digit_year_is_a_date(question: str) -> None:
-    # R5.
     assert _scan(question) == "date"
 
 
 def test_hospital_hash_is_a_record_number() -> None:
-    # R5.
     assert _scan("hospital #4471 has fever") == "mrn_prefix"
     assert _scan("hospital # 4471 has fever") == "mrn_prefix"
 
 
 def test_cyrillic_ghe_for_r() -> None:
-    # R4: Cyrillic ge for r ("Okafo\u0433").
+    # Cyrillic ge for r ("Okafo\u0433").
     ids = _ids({"family": "Okafor"})
     assert _scan("Okafo\u0433 has chest pain", ids) == "known_identifier"
 
@@ -979,6 +1000,6 @@ def test_cyrillic_ghe_for_r() -> None:
     ],
 )
 def test_cyrillic_and_greek_names_match_in_any_case(recorded: str, written: str) -> None:
-    # R4: case-fold first, then the skeleton, so a name written in Cyrillic
+    # Case-fold first, then the skeleton, so a name written in Cyrillic
     # or Greek matches in either case.
     assert _scan(f"{written} has chest pain", _ids({"name": recorded})) == "known_identifier"

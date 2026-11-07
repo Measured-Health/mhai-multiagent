@@ -133,6 +133,16 @@ class RedactingFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
+            self._redact_record(record)
+        except Exception:
+            # Redaction itself failed (a traceback that can't be rendered, an
+            # odd extra): never raise into the log call, and let nothing of
+            # the record through.
+            _redact_all(record)
+        return True
+
+    def _redact_record(self, record: logging.LogRecord) -> None:
+        try:
             message = record.getMessage()
         except Exception:
             # A bad call: keep what was passed, redacted, rather than let the
@@ -154,7 +164,6 @@ class RedactingFilter(logging.Filter):
         for attr, value in list(record.__dict__.items()):
             if attr not in _RECORD_ATTRS and isinstance(value, str):
                 record.__dict__[attr] = self.redact(value)
-        return True
 
     def clear(self) -> None:
         with self._lock:
@@ -165,6 +174,20 @@ _RECORD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", None, None).__dict
     "message",
     "asctime",
 }
+
+
+def _redact_all(record: logging.LogRecord) -> None:
+    """The fallback when redaction fails: the whole record becomes
+    [REDACTED], extras included. Plain assignments only, so it can't fail."""
+    record.msg = REDACTED
+    record.args = None
+    record.exc_info = None
+    record.exc_text = None
+    record.stack_info = None
+    for attr in [a for a in record.__dict__ if a not in _RECORD_ATTRS]:
+        record.__dict__[attr] = REDACTED
+
+
 _FILTER = RedactingFilter()
 _INSTALL_LOCK = threading.Lock()
 _uncaught = logging.getLogger("intelligence.uncaught")

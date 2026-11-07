@@ -96,7 +96,7 @@ def _seals(tree: ast.AST) -> bool:
 
 
 # The gate's private ways to make a tag or a seal without its public paths
-# (review M2). Only gate.py may use them.
+# (they would copy a tagged value). Only gate.py may use them.
 FORGERS = frozenset({"_seal", "_SEAL_KEY", "_tag_for", "_MASKERS"})
 
 

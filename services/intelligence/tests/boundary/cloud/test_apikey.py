@@ -231,6 +231,36 @@ def test_redacting_filter_survives_bad_args(
     assert FAKE_KEY not in text and "[REDACTED]" in text
 
 
+def test_redaction_failure_never_raises_and_redacts_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If redacting a record fails (here the traceback can't be rendered),
+    the log call still returns and the record is fully redacted: nothing of
+    the message, the exception or the extras reaches a handler."""
+    install_redaction([ApiKey(FAKE_KEY)])
+    out = io.StringIO()
+    handler = logging.StreamHandler(out)
+    handler.setFormatter(logging.Formatter("%(message)s|%(extra_field)s"))
+    log = logging.getLogger("tests.cloud.failing")
+    log.propagate = False
+    log.addHandler(handler)
+
+    def broken(self: logging.Formatter, ei: object) -> str:
+        raise RuntimeError("formatting failed")
+
+    monkeypatch.setattr(logging.Formatter, "formatException", broken)
+    try:
+        try:
+            raise ValueError("Bearer " + FAKE_KEY)
+        except ValueError:
+            log.exception("failed for %s", "synthetic-marker", extra={"extra_field": FAKE_KEY})
+    finally:
+        log.removeHandler(handler)
+    text = out.getvalue()
+    assert FAKE_KEY not in text and "synthetic-marker" not in text
+    assert text.strip() == "[REDACTED]|[REDACTED]"
+
+
 def test_install_redaction_covers_root_handlers() -> None:
     root = logging.getLogger()
     out = io.StringIO()

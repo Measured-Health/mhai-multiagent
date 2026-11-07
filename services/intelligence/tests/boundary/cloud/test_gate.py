@@ -146,7 +146,7 @@ def test_masked_text_only_from_mask(tm: TaggingMasker) -> None:
 
 
 def test_masked_text_takes_an_exact_str_only(tm: TaggingMasker) -> None:
-    """Review M3: a str subclass could tag one value and store another; even
+    """A str subclass could tag one value and store another; even
     with a right tag, only an exact str is accepted."""
 
     class Sneaky(str):
@@ -256,7 +256,7 @@ def test_no_str_method_keeps_the_tag(tm: TaggingMasker) -> None:
     """Every str method and operator, called on a MaskedText, gives plain
     strs (or non-strs): nothing comes back still tagged. Every method is
     called and must succeed: a new or changed method that needs arguments
-    fails here until it is added to _ARGS (review M4)."""
+    fails here until it is added to _ARGS, so no method escapes the check."""
     m = tm.mask(QUESTION)
     names = [n for n in sorted(dir(str)) if n not in _NOT_STR_OPS and callable(getattr(str, n))]
     for name in names:
@@ -542,7 +542,7 @@ def test_prompt_blocks_in_fixed_order(tm: TaggingMasker) -> None:
 
 
 def test_blocks_recheck_every_part(tm: TaggingMasker) -> None:
-    """Review M1: frozen stops plain assignment only. A part swapped or
+    """frozen stops plain assignment only. A part swapped or
     changed after construction (object.__setattr__) is refused when the
     blocks are rendered, not sent."""
 

@@ -1005,9 +1005,13 @@ async def open_database(settings: WorkerSettings) -> Database | None:
 
 
 def secure_logging(settings: WorkerSettings) -> None:
-    """Before anything can log a request: the redacting filter on every root
-    handler, knowing each loaded cloud key's value, and the SDKs' and HTTP
-    stack's debug logging off (cloud model providers, design section 7)."""
+    """With a cloud provider configured, before anything can log a request:
+    the redacting filter on every record and root handler, knowing each
+    loaded cloud key's value, and the SDKs' and HTTP stack's debug logging
+    off (cloud model providers, design section 7). With cloud off it does
+    nothing, so logging is exactly as it was without the cloud route."""
+    if not settings.cloud.providers:
+        return
     install_redaction(p.key for p in settings.cloud.providers)
     quiet_sdk_loggers()
 

@@ -68,7 +68,8 @@ RULES: Final = (
     "scan_error",
 )
 
-# Trace context never leaves with a request (Task 4 fix round).
+# Trace context never leaves with a request: anthropic propagates the
+# current span's unless told not to (plan Task 4), so the hook refuses it.
 TRACE_HEADERS: Final = ("traceparent", "tracestate", "baggage")
 
 # Compared case-folded. Values under these keys, at any depth, are this
@@ -117,7 +118,7 @@ _IGNORABLE_RANGES: Final = (
     (0x3164, 0x3164),
     (0xFE00, 0xFE0F),
     (0xFFA0, 0xFFA0),
-    (0x2800, 0x2800),  # the braille blank renders as nothing (review I5)
+    (0x2800, 0x2800),  # the braille blank renders as nothing
     (0xE0100, 0xE01EF),
 )
 
@@ -133,7 +134,7 @@ def _invisible(c: str) -> bool:
 
 
 # Letters from Cyrillic, Greek and Armenian that look like Latin ones,
-# mapped to the Latin letter (a confusables skeleton, review I5). The map only
+# mapped to the Latin letter (a confusables skeleton). The map only
 # adds matches; a Greek mu (from the micro sign) and beta are left alone.
 _SKELETON: Final = MappingProxyType(
     {
@@ -200,16 +201,16 @@ _SKELETON: Final = MappingProxyType(
         "\u0570": "h",
         "\u0578": "n",
         "\u0566": "q",
-        # Cyrillic ghe looks like r (re-review R4: "Okafo\u0433")
+        # Cyrillic ghe looks like r ("Okafo\u0433")
         "\u0433": "r",
     }
 )
-# Hyphens, dashes and the minus sign, as "-" (review I2: an en dash in a
+# Hyphens, dashes and the minus sign, as "-" (an en dash in a
 # phone number, as phone autocorrect writes it).
 _DASHES: Final = frozenset("\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d")
 
 
-# For the folded path (re-review R4): case-fold first, then map, so a name
+# For the folded path: case-fold first, then map, so a name
 # written in Cyrillic or Greek matches in either case. An upper-case entry
 # gives its lower-case form; an explicit lower-case entry wins.
 _SKELETON_FOLDED: Final = MappingProxyType(
@@ -244,7 +245,8 @@ def norm_words(s: str) -> str:
     space. "Adaeze\\nOkafor", "ADAEZE\\u200b OKAFOR" and "adaeze-okafor" all
     give "adaeze okafor"."""
     t = unicodedata.normalize("NFKD", _clean(s))
-    # Every combining mark goes (Mn, and Mc and Me too: review I5).
+    # Every combining mark goes (Mn, and Mc and Me too: a spacing or
+    # enclosing mark inside a name would otherwise split it).
     t = "".join(c for c in t if unicodedata.category(c)[0] != "M")
     t = "".join(c if unicodedata.category(c)[0] in "LN" else " " for c in t)
     return " ".join(t.split())
@@ -260,7 +262,7 @@ def norm_text(s: str) -> str:
 
 _DIGITS = re.compile(r"[0-9]+")
 # The widest gap of non-alphanumerics between two digit groups that still
-# joins them (review I2): "(0803) 123 4567", "0803 - 123 - 4567", "284,817".
+# joins them: "(0803) 123 4567", "0803 - 123 - 4567", "284,817".
 MAX_DIGIT_GAP: Final = 3
 
 
@@ -270,8 +272,8 @@ def _digit_runs(t: str) -> list[str]:
 
 def digit_runs(s: str) -> list[str]:
     """Plain digit runs of norm_text(s): any non-digit ends a run, so
-    "T 38.5 101.3" gives 38, 5, 101, 3 and "HR 100-120" gives 100, 120 (fix
-    round: a hyphen no longer joins, so ranges are sent)."""
+    "T 38.5 101.3" gives 38, 5, 101, 3 and "HR 100-120" gives 100, 120 (a hyphen
+    doesn't join two groups, so ranges are sent; see _HYPHEN_CHAIN)."""
     return _digit_runs(norm_text(s))
 
 
@@ -335,7 +337,7 @@ def grouped_runs(s: str) -> list[str]:
 
 
 def _phone_runs(t: str) -> list[str]:
-    """For ng_phone (review I2): groups of 2 to 4 digits joined across any
+    """For ng_phone: groups of 2 to 4 digits joined across any
     short gap (_gap_ok), kept where the joined run is a Nigerian phone number.
     A lone "0" right after "234" is the trunk prefix ("+234 (0) 803 ...") and
     is skipped. The 0[789][01] and 234[789][01] prefixes keep vitals out."""
@@ -368,7 +370,7 @@ def _phone_runs(t: str) -> list[str]:
 
 def _chains(t: str) -> list[tuple[str, frozenset[int]]]:
     """For the identifier rule: the digits-only projection of norm_text,
-    groups joined across any short gap (_gap_ok, review I2), with the offsets
+    groups joined across any short gap (_gap_ok), with the offsets
     where groups meet."""
     out: list[tuple[str, frozenset[int]]] = []
     digits = ""
@@ -403,7 +405,7 @@ _PLACEHOLDER_ALT: Final = "|".join(
     re.escape(norm_text(p)) for p in sorted(_PLACEHOLDERS, key=len, reverse=True)
 )
 _PLACEHOLDER_RE: Final = re.compile(_PLACEHOLDER_ALT)
-# A placeholder between two digits joins them (review M1): only the writer
+# A placeholder between two digits joins them: only the writer
 # puts a placeholder literal there, to split a number.
 _PLACEHOLDER_IN_DIGITS: Final = re.compile(rf"(?<=[0-9])(?:{_PLACEHOLDER_ALT})+(?=[0-9])")
 
@@ -448,7 +450,8 @@ class Identifiers:
 
     def hit(self, s: str) -> bool:
         """Whether s holds one of these identifiers, as written or with the
-        masker's placeholders taken out (review M1)."""
+        masker's placeholders taken out (a placeholder written inside a
+        number must not split it)."""
         t = norm_text(s)
         stripped = _PLACEHOLDER_RE.sub("", t)
         return self._hit(s, t) or (stripped != t and self._hit(stripped, stripped))
@@ -582,7 +585,12 @@ class Shape:
     question and the context); allowed_paths are every leaf the adapter
     emits. fixed_values pins the value of every leaf that isn't free text
     (the system prompt, the model, scalars, roles, block types and the
-    schema's leaves: review M6), so only the blocks carry free text."""
+    schema's leaves), so only the blocks carry free text.
+
+    It is enforced here, not left to the adapter: the free pointers (allowed
+    but not fixed) must be exactly one provider's seven block texts, with
+    blocks 0 and 1 as the patient paths. A Shape with no fixed values, or
+    with any other leaf left free, is refused. Build one with shape_for."""
 
     patient_paths: frozenset[str]
     allowed_paths: frozenset[str]
@@ -601,6 +609,15 @@ class Shape:
         fixed = dict(self.fixed_values)
         if not set(fixed) <= self.allowed_paths or set(fixed) & self.patient_paths:
             raise ValueError("a fixed pointer is allowed and not a patient path")
+        free = self.allowed_paths - set(fixed)
+        if not any(
+            free == set(texts) and self.patient_paths == set(texts[:2])
+            for texts in map(block_pointers, BLOCK_ARRAYS)
+        ):
+            raise ValueError(
+                "only one provider's block texts are free; every other leaf is fixed "
+                "(build the Shape with shape_for)"
+            )
         object.__setattr__(self, "fixed_values", MappingProxyType(fixed))
 
 
@@ -637,8 +654,8 @@ _MONTH: Final = (
     r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?![a-z])"
 )
 _DATES: Final = (
-    # A space either side of the separator too (review I3): "12 / 03 / 1984".
-    # The same separator both times (re-review R1), so a reference range
+    # A space either side of the separator too: "12 / 03 / 1984".
+    # The same separator both times, so a reference range
     # such as "T 37.5-38.5" or "pH 7.35-7.45" is not a date.
     re.compile(r"(?<![0-9.])[0-9]{1,2} ?([/.-]) ?[0-9]{1,2} ?\1 ?[0-9]{2,4}(?![0-9])"),
     re.compile(r"(?<![0-9.])[0-9]{4} ?([/.-]) ?[0-9]{1,2} ?\1 ?[0-9]{1,2}(?![0-9])"),
@@ -650,7 +667,7 @@ _DATES: Final = (
         + _MONTH
         + r"\.?[ ,./-]*[0-9]{4}(?![0-9])"
     ),
-    # With a 2-digit year, "12 Mar 84" (re-review R5); not "may", which is
+    # With a 2-digit year, "12 Mar 84"; not "may", which is
     # also a verb ("under 5 may 10 mg").
     re.compile(
         r"(?<![0-9])[0-9]{1,2}(?:st|nd|rd|th)?[ ./-]?(?:of )?(?!may)"
@@ -661,7 +678,7 @@ _DATES: Final = (
         r"(?<![a-z])" + _MONTH + r"\.?[ ./-]?[0-9]{1,2}(?:st|nd|rd|th)?,?[ ./-]?[0-9]{4}(?![0-9])"
     ),
 )
-# A record-number label, then a number or code (review I4). The label must
+# A record-number label, then a number or code. The label must
 # end on a word boundary ("hospital notes" is not one), and the code starts
 # with a letter or digit, never "_" (so "[mrn_redacted]" is not one).
 _MRN: Final = re.compile(
@@ -673,11 +690,11 @@ _MRN: Final = re.compile(
 _JSON_KEY: Final = re.compile(r'"(?:[^"\\]|\\.)*"\s*:')
 
 
-# Three or more digit groups joined by single hyphens (re-review R2):
+# Three or more digit groups joined by single hyphens:
 # "123-456-7890" and "12-34-567"; two groups ("HR 100-120") are a range.
 _HYPHEN_CHAIN: Final = re.compile(r"(?<![0-9-])[0-9]+(?:-[0-9]+){2,}(?![0-9])")
 # Five or more single digits, one space apart: "0 8 0 3 1 2 3 4 5 6 7"
-# (re-review R3). Used for ng_phone only, whose prefix keeps vitals out.
+# Used for ng_phone only, whose prefix keeps vitals out.
 _SPELT_DIGITS: Final = re.compile(r"(?<![0-9])[0-9](?: [0-9]){4,}(?![0-9])")
 
 
@@ -733,7 +750,7 @@ def _scan(body: bytes, ids: Identifiers, shape: Shape) -> str | None:
         rule = _pattern(s)
         if rule is not None:
             return rule
-    # Ruling C5: the masker's own detector over the two patient blocks; any
+    # Ruling C5 (the masker misses what the record doesn't name): its own detector over the two patient blocks; any
     # detection refuses (the blocks should already be masked output).
     if any(_masker_detects(s) for s in patient):
         return "pii_detected"
@@ -793,7 +810,7 @@ class ScanHook:
             if any(h in request.headers for h in TRACE_HEADERS):
                 return "trace_header"
             # The URL (decoded) and every header value carry no identifier
-            # of this patient either (review M5).
+            # of this patient either: an adapter could put text there.
             if self._ids.hit(unquote(str(request.url))) or any(
                 self._ids.hit(v) for v in request.headers.values()
             ):
