@@ -42,6 +42,51 @@ All notable changes to this project are documented here. The format follows
   `cloud_outcome` facts, and a result gains `generated_by` (`local` or
   `cloud` with its provider), read from the decision itself. No cloud call is
   made yet (parts B to E).
+- Cloud model providers, part B (the gate; no network code): the worker's
+  cloud settings, off by default (`INTELLIGENCE_CLOUD_PROVIDERS` empty), with
+  start-up refused on an incomplete provider: no model, key file or
+  zero-retention reference, a Fable or Mythos model, a key file not mode
+  0400/0440 or holding a placeholder, `DEMO-SYNTHETIC` outside
+  `APP_ENV=demo` (new: production in every other respect). Any `OPENAI_*`,
+  `ANTHROPIC_*`, `AZURE_OPENAI_*` or `XAI_*` variable refuses start-up for
+  every worker, cloud on or off. Keys are held as `ApiKey` (redacted). With a
+  provider configured, logging changes: records are redacted at creation
+  (`args=None`, exception text pre-rendered), warnings go through logging,
+  uncaught exceptions are logged as `CRITICAL`, and the HTTP clients' INFO
+  request lines are off. The gate types (`MaskedText`, `CloudContext`'s
+  two-field allow-list, sealed `SharedChunk`s, `CloudPrompt`), the egress scan
+  over the exact request bytes (shape, this patient's identifiers everywhere,
+  number and date patterns on the patient-derived blocks, size), and the
+  budget port over core's reserve and settle functions.
+- Cloud model providers, part C (the client and the job): strict reply
+  validation (citations only of chunks sent, no links), a closed retry table,
+  `CloudModelClient` (local retrieval and verification, a gated, scanned,
+  budgeted cloud draft, a per-attempt deadline, SDK retries off) and
+  `ModelRouter`: each job runs on the route core's claim gives it, and
+  records the provider, `egress` and the outcome. Every cloud failure
+  escalates; there is no fallback.
+- Cloud model providers, part D (adapters): Anthropic (Messages, strict
+  structured output), OpenAI (Responses, `store: false`) and xAI (chat
+  completions; the `x-zero-data-retention` header checked on every reply),
+  against synthetic fixtures. The scan hook refuses any request header not
+  on the provider's list (`scan.ALLOWED_HEADERS`), so an SDK update that adds
+  one fails closed. A reply that reports more tokens than its reservation is
+  logged (`cloud.usage_overrun`), counted (`mhai_cloud_usage_overrun_total`)
+  and, above 10% over, alerted (`mhai_cloud_alerts_total{kind="usage_overrun"}`).
+- Cloud model providers, part E (deployment, smoke and docs): the
+  `egress-proxy` service in `deploy/compose.yml` (Squid pinned by digest,
+  profile `cloud`, off by default) on `backend` and a new `egress` network,
+  allowing only `CONNECT` to port 443 of the hosts in `allowed-hosts`, matched
+  by name with no reverse lookup, IP literals refused;
+  `deploy/egress-proxy/test-egress.sh` checks it (A15). The worker's proxy
+  setting is `INTELLIGENCE_CLOUD_PROXY` (not the process-wide `HTTPS_PROXY`),
+  and with a provider enabled start-up refuses without a CA bundle at
+  OpenSSL's paths. `scripts/cloud_smoke.py`, a manual live smoke a person
+  runs on their own machine (never the build server or CI) with a key from
+  standard input, and `scripts/scrub_cloud_fixture.py`, whose `--check` runs
+  on every committed fixture in the unit suite. `deploy/README.md` "Cloud
+  models" (enabling, key rotation, switching off); TODO.md lists the human
+  gate before real patient data and the people items H1–H7.
 - Document pipeline phase 0, part A: the extraction schema
   `mhai.extraction.clinical_document` 1.0.0 and the evaluation harness
   (`services/intelligence/intelligence/doceval/`). Synthetic patients and
@@ -227,6 +272,16 @@ All notable changes to this project are documented here. The format follows
   in Go or Python needs it; NATS carries the jobs.
 
 ### Security
+- Cloud model providers: `intelligence/boundary/cloud_repo.py` (the budget
+  port's SQL: core's reserve and settle functions only) is added to
+  `tests/boundary/test_no_direct_db.py`'s `REPOS`, the files allowed to hold
+  SQL. A security-test change, reviewed in PR B.
+- Cloud model providers: no real patient data goes to a cloud provider until
+  the human gate in TODO.md is done (masker bar including names without a
+  title, legal check, clinical evaluation, core's keyed name-token hashes).
+  `test_todo_keeps_the_real_data_gate` fails if that entry is removed, and
+  `test_every_abuse_case_has_a_test` checks every A/K case in the plan has
+  its named test.
 - The patient-scoping and two-person-review regression tests moved off
   `SecurePipelineWrapper` onto the orchestrator and the boundary
   (`chunk_visible_to`, `load_chunks`, `OrchestratorModelClient`) with the same

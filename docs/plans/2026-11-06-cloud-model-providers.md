@@ -1,6 +1,6 @@
 # Cloud model providers (OpenAI, Anthropic, xAI): implementation plan
 
-**Status:** Not started. The design is approved (product owner, 3 Nov 2026, "approve both as recommended"; all six questions in its §16 as recommended). The gate before real patient data (design §13.6) is a human gate, tracked in TODO.md. Nothing in this plan opens it.
+**Status:** Built (PRs A–E, 7 Nov 2026), off by default; the live smoke waits on H1 and H7 (TODO.md). The design is approved (product owner, 3 Nov 2026, "approve both as recommended"; all six questions in its §16 as recommended). The gate before real patient data (design §13.6) is a human gate, tracked in TODO.md. Nothing in this plan opens it.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 

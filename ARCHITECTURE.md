@@ -41,8 +41,10 @@ job's creator (second-person rule re-checked), `POST /platform/jobs/cancel`
 needs a fresh two-step code; `GET /platform/guardrails` serves HGA decision
 counts for whole UTC days, one stored snapshot per period and day, through
 the small-group rules (`internal/smallgroup`). The smoke test reads health,
-retries a forced dead letter and reads the statistics. **Next:** the
-hospital endpoints.
+retries a forced dead letter and reads the statistics. **Built (cloud
+models, off by default):** a hospital a platform admin has opted in can
+have its clinical draft written by a cloud model (Anthropic, OpenAI or
+xAI); see "Cloud models" below. **Next:** the hospital endpoints.
 
 | Service | Job |
 |---|---|
@@ -70,6 +72,40 @@ decisions (a signed request token, or an event core published).
 
 Security rules are written once, in Go. Python never takes a hospital or
 user from a payload; it takes them only from the verified token.
+
+## Cloud models
+
+Off by default, per hospital, and on demo and synthetic data only until the
+human gate in TODO.md is done (ADR 0013,
+`docs/specs/2026-11-03-cloud-model-providers-design.md`).
+
+```
+platform admin ─(step-up, audited)→ core: hospital_model_policy
+question → core: model_route set by a definer trigger, re-checked at the claim
+pipeline worker: mask → retrieve locally → gate (CloudPrompt) → scan the exact bytes
+   → reserve tokens (core's function) → egress-proxy ─CONNECT :443─→ provider
+   ← reply validated (citations ⊆ chunks sent) → NLI and HGA locally → settle
+```
+
+- **Core decides.** The route is set by core's trigger from core's
+  platform-only table, and `mhai_effective_model_route` re-checks it in the
+  worker's claim, so a policy switched off runs local. The token budget is
+  core's SQL (`mhai_cloud_reserve`/`mhai_cloud_settle`); the worker has no
+  grant on either table. `generated_by` on a result comes from the decision's
+  own model versions.
+- **Only masked text leaves.** Adapters take a `CloudPrompt` and nothing
+  else: the tagged masked question, two allow-listed context fields, at most
+  five sealed shared guideline chunks and a constant system prompt. The scan
+  hook sees the exact request bytes, and a refusal sends nothing.
+- **One way out.** The pipeline stays on the internal `backend` network. The
+  `egress-proxy` (Squid, compose profile `cloud`) is the only service on the
+  `egress` network and allows only `CONNECT` to port 443 of the enabled
+  providers' hosts, by name, never an IP literal. Fixed base URLs, no
+  redirects, TLS verified, no environment proxies.
+- **Every failure escalates.** There is no fallback to local or to another
+  provider. Retrieval and verification stay local.
+- **Keys** are files on the pipeline host only; a person runs the live smoke
+  on their own machine, never the build server.
 
 ## Services and systems flow
 

@@ -30,6 +30,8 @@ Review as an attacker would, not as the author. Every finding needs a concrete w
 - **Over-broad deny lists:** a credential filter that matches exact names only, so `session_token` slips through. Or the opposite: so broad it breaks real behaviour.
 - **Account enumeration:** different status, body, headers or timing for unknown, locked and wrong-password attempts.
 - **Small-group subtraction leaks:** shown totals or pairs that differ by 1–4, within one reply or across scopes.
+- **A library wrapping a pre-send refusal into a retryable error:** a check that runs as an HTTP request hook raises, and the SDK re-raises it as a connection error, so the refusal is mapped to `unavailable` and retried, or mislabelled. The checker's own verdict must win, and that outcome must never be retried (cloud models, Review Focus 2).
+- **A tagged type losing its tag through a copy made for another purpose:** a value whose type proves it passed a gate (`MaskedText`) is deep-copied, pickled or turned into a plain string for a reviewer, a cache or a log, and the copy then reaches the gated sink. Refuse copy and pickle on the tagged type, make side copies plain, and check the exact type at the sink (cloud models C13).
 
 ## Also check
 - **Identity and hospital** come only from the principal.

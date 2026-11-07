@@ -144,7 +144,7 @@ New table `hospital_model_policy` in core (migration `NNNNN_model_policy.sql`: 0
 |---|---|---|
 | `hospital_id` | uuid PK, FK `hospitals` | one row per hospital; **no row means local** |
 | `cloud_provider` | text NULL | `CHECK IN ('openai','anthropic','xai')`; NULL = local |
-| `agreement_ref` | text NULL | id shape `^[A-Z0-9][A-Z0-9_.-]{2,63}$`; required when a provider is set (`CHECK`): the reference of the recorded data-agreement check (§13.6) |
+| `agreement_ref` | text NULL | an agreement code, `^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$` (as built, ruling C2: a patient pseudonym or a name can't match, so neither can land in the permanent audit chain); required when a provider is set (`CHECK`): the reference of the recorded data-agreement check (§13.6) |
 | `monthly_token_budget` | bigint | > 0, default 2,000,000 |
 | `updated_by`, `updated_at` | uuid, timestamptz | set by core |
 
@@ -163,15 +163,15 @@ It is **not** a column of `hospital_settings`, because `mhai_gateway` (hospital 
 - `GET /platform/hospitals/{id}/model-policy`: `platform_admin`, `auditor` (`Platform`, `NeedsMFA`).
 - `PUT /platform/hospitals/{id}/model-policy`: `platform_admin` only (`Platform`, `NeedsMFA`, `Write`, `StepUp`). Body `{cloud_provider: "openai"|"anthropic"|"xai"|null, agreement_ref, monthly_token_budget}`. Core refuses a provider the deployment hasn't enabled (`CORE_CLOUD_PROVIDERS`, empty by default) with 409 `conflict`.
 - A CLI twin for the demo, `core hospitals model-policy set --hospital <id> --provider anthropic --agreement-ref DEMO-SYNTHETIC` (as `core hospitals activate` from PR #82), running as `mhai_provision` with the same audit.
-- Audit action `hospital.model_policy_changed`, closed payload: **`hospital_id`**, **`provider`** ∈ {`none`,`openai`,`anthropic`,`xai`}, **`previous`** (same set), `agreement_ref` (id shape), `monthly_token_budget` (int). Plan 4's typed audit registry (`audit/schemas.go`) gets the schema.
+- Audit action `hospital.model_policy_changed`, closed payload: **`hospital_id`**, **`provider`** ∈ {`none`,`openai`,`anthropic`,`xai`}, **`previous`** (same set), `agreement_ref` (the agreement-code shape `^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$`), `monthly_token_budget` (int). Plan 4's typed audit registry (`audit/schemas.go`) gets the schema.
 - The clinical result (`GET /queries/{id}/result`) gains an optional `generated_by: {route, provider}` (additive under ADR 0012), so a clinician can see that a cloud model wrote the draft. mhai-web shows it next to the trust band.
 
 ## 6. Network egress
 
 - The pipeline stays on the `backend` network (`internal: true`, no route out). A new container, **`egress-proxy`**, sits on `backend` and on a new `egress` network that has a route out. It is a forward proxy allowing only `CONNECT` to port 443 of the hosts of the providers enabled on this deployment: `api.openai.com`, `api.anthropic.com`, `api.x.ai`. Everything else is refused and logged (host and status only).
-- The pipeline gets `HTTPS_PROXY=http://egress-proxy:3128` and `NO_PROXY` for `nats`, `postgres` and the local model hosts. TLS is end to end through the tunnel (the proxy can't read it), with system CAs and certificate verification on; no custom CA is accepted.
+- The pipeline gets `HTTPS_PROXY=http://egress-proxy:3128` and `NO_PROXY` for `nats`, `postgres` and the local model hosts. (As built: `INTELLIGENCE_CLOUD_PROXY`, read by the cloud transport only, and no `NO_PROXY`; §18 item 17.) TLS is end to end through the tunnel (the proxy can't read it), with system CAs and certificate verification on; no custom CA is accepted.
 - Ollama, the NLI and embedding model hosts, and every future model service stay with no route out. Core, NATS and Postgres are unchanged.
-- The worker refuses to start when a provider is enabled and `HTTPS_PROXY` is unset outside `APP_ENV=development`, so a mis-deployed worker can't try a direct route.
+- The worker refuses to start when a provider is enabled and `HTTPS_PROXY` (as built, `INTELLIGENCE_CLOUD_PROXY`) is unset outside `APP_ENV=development`, so a mis-deployed worker can't try a direct route.
 - Tests: a compose test sends `CONNECT example.com:443` and `CONNECT api.openai.com:80` through the proxy and expects both refused; from the pipeline container, a direct TCP connection to any outside address fails.
 
 ## 7. Secrets and settings
@@ -309,7 +309,7 @@ Patient data (the question and patient fields, before masking); the masked text 
 ### 13.6 Residual risk and sign-off
 
 - **The masker is not fit for real data yet.** `PIIMasker` is regex-based and US-centred (SSN, US phone and ZIP patterns, names only after a title). The scan in §4.4 catches this patient's known identifiers and Nigerian number shapes, but not a relative's name or a free-text identifier nobody recorded. **Before any real patient data goes to a cloud model:** a masker upgrade (Nigerian identifiers and a local NER model for names) measured on a synthetic Nigerian PII set at recall ≥ 0.99 for names and ≥ 0.999 for numeric identifiers, signed off by the privacy lead. TODO.md item.
-- **Legal:** each hospital's data agreement must allow a processor outside Nigeria; the NDPA 2023 rules on cross-border transfer and processors must be checked (adequacy or appropriate safeguards, the processor contract) and each provider's DPA and zero-retention terms signed. The `agreement_ref` records the check per hospital. Legal sign-off, TODO.md item.
+- **Legal:** each hospital's data agreement must allow a processor outside Nigeria; the NDPA 2023 rules on cross-border transfer and processors must be checked (adequacy or appropriate safeguards, the processor contract) and each provider's DPA and zero-retention terms signed. The `agreement_ref` records the check per hospital, as an agreement code (`^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$`; the legal lead confirms the format, TODO H3). Legal sign-off, TODO.md item.
 - **Clinical:** the HGA thresholds were tuned for Qwen. Cloud answers must be evaluated on the synthetic evaluation set (pass and escalate rates, NLI support of claims) before a hospital's clinicians rely on them. Clinical sign-off, TODO.md item.
 - **Accepted for now:** a compromised pipeline worker could send what it can read to an allowed provider API under our key (C9); the providers' own legal-hold and abuse exceptions to zero retention; the masked question still describes a clinical situation. The isolation step that removes most of C9 is §16 question 6.
 
@@ -379,3 +379,65 @@ The questions as written in the draft:
 9. **Live smoke** — `scripts/cloud_smoke.py` on steven-reid with the product owner's key, synthetic data; records the fixtures.
 10. **mhai-web** (separate repo) — the hospital model-policy screen in the platform app; `generated_by` on the clinical result.
 11. **TODO.md** — the masker upgrade and its bar, the legal check (NDPA, hospital agreements, provider DPAs and ZDR), the clinical evaluation of cloud answers.
+
+## 18. As built (7 Nov 2026, PRs A–E)
+
+Built as `docs/plans/2026-11-06-cloud-model-providers.md` sets out. Where the
+build departs from this design (the plan's "Where this plan departs from the
+design", and the rulings made during the build):
+
+1. **Migration 00018**, not 00015 (00015–00017 were taken).
+2. **The worker reaches the budget only through core's functions**,
+   `mhai_cloud_reserve(p_provider, p_tokens)` and `mhai_cloud_settle(p_reservation,
+   p_used)`, by reservation id (`SECURITY DEFINER`, owned by `mhai_migrate`).
+   Reserve refuses unless the hospital's policy names that provider now, and
+   refuses a deactivated hospital (ruling C1). `mhai_worker` has no grant on
+   the policy or the ledger.
+3. **The route trigger is `SECURITY DEFINER`**, and `mhai_gateway` has no grant
+   on the policy.
+4. **The audit policies are widened** for `hospital.model_policy_changed`
+   only, with no hospital (platform) or no actor (CLI).
+5. **Step-up** on the policy change follows the platform's pattern
+   (`mfa_code` or `backup_code`; a failed code is audited).
+6. **The CLI** takes the hospital as an argument: `core hospitals
+   model-policy set <hospital id or short code> --provider …`.
+7. **`APP_ENV=demo`** is new: production in every respect but accepting
+   `ZDR_REF=DEMO-SYNTHETIC` with a warning.
+8. **The reviewer's masked copy** is converted to plain strings
+   (`_plain_tree`), which `CloudPrompt` refuses.
+9. **Known identifiers** come from a second, local masker pass
+   (`scan.collect_identifiers`) plus the values under identifying keys
+   (`scan.IDENTIFYING_KEYS`). The scan also runs the masker's own name and
+   identifier detector over the question and the context (ruling C5).
+10. **Retrieval** uses `HybridRetriever.retrieve` on the job's orchestrator.
+11. **Adapters** are a request builder and a reply parser over one shared
+    `httpx2` transport (the SDKs are built on `httpx2`), with a per-call scan
+    hook. The hook also refuses any request header not on
+    `scan.ALLOWED_HEADERS`, and its verdict wins over the SDK's error mapping.
+12. **The first fixtures are hand-made** from the providers' documented
+    shapes; the live smoke adds recorded, scrubbed ones.
+13. **Semantic entropy** is unchanged (never passed on either path).
+14. **The effective route is a core function**, `mhai_effective_model_route`,
+    called in the worker's claim.
+15. **`generated_by` comes from the decision's model versions**, not the
+    inserted row.
+16. **`agreement_ref`** is an agreement code (§5, ruling C2).
+17. **The proxy setting is `INTELLIGENCE_CLOUD_PROXY`, not `HTTPS_PROXY`**
+    (§6). `HTTPS_PROXY` is process-wide, so every library with `trust_env`
+    would send its HTTPS through the egress proxy; the cloud transport has
+    `trust_env=False` and reads only its own setting. No `NO_PROXY` is needed.
+    With a provider enabled, start-up also refuses when OpenSSL's CA file
+    and CA directory are both missing or empty.
+18. **The live smoke** (§17 item 9) runs on a person's own machine, never on
+    steven-reid, mt5-lab or CI, with a dedicated short-lived smoke key read
+    from standard input (the build servers run agent jobs with the host's
+    Docker socket). It refuses in a container, in CI, or with any SDK
+    variable set.
+19. **The token estimate** is the request's UTF-8 bytes plus the output cap,
+    refused above core's 100K limit (ruling C7). A reply over its
+    reservation is logged, counted and, above 10% over, alerted.
+20. **Residuals accepted for synthetic data only:** names without a title on
+    core's patient data reach the provider (ruling C8; the real-data gate
+    needs both the masker upgrade and core's keyed name-token hashes), and
+    the measured over-blocking and misses listed in TODO.md (ruling C4).
+    Stale reservations wait on a core-side reaper (TODO.md).

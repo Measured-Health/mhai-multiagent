@@ -175,9 +175,12 @@ def _cloud(kind: str) -> tuple[rq.CloudFake, str]:
     suppress_health_check=list(HealthCheck),
 )
 @given(data=st.data())
-async def test_property_no_identifier_reaches_a_body(
+async def test_property(
     make_env: rq.MakeEnv, postgres: rq.Postgres, kind: str, data: st.DataObject
 ) -> None:
+    """A1 (named test_property[<kind>] in the plan's abuse-case table): no
+    identifier from a generated record reaches a request body, and the clean
+    record is sent."""
     env = await make_env()
     async with await rq.su(postgres) as conn:
         await conn.execute(
