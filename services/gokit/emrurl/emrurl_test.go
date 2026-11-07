@@ -95,7 +95,8 @@ func TestCheckURLRefusals(t *testing.T) {
 	if _, o, err := CheckURL("https://127.0.0.1:8443", https, true); err != nil || o != "https://127.0.0.1:8443" {
 		t.Errorf("development IP: %q %v", o, err)
 	}
-	for _, raw := range []string{"http://127.0.0.1", "https://u:p@127.0.0.1", "https://127.0.0.1/?q"} {
+	for _, raw := range []string{"http://127.0.0.1", "https://u:p@127.0.0.1", "https://127.0.0.1/?q",
+		"https://169.254.169.254", "https://10.0.0.5", "https://[fd00::1]", "https://192.168.1.10"} {
 		if _, _, err := CheckURL(raw, https, true); err == nil {
 			t.Errorf("development accepted %q", raw)
 		}

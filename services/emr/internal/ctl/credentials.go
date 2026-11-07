@@ -58,8 +58,8 @@ type Credentials struct {
 	Store secrets.Store
 	// Keys are the sealing key pairs (one, or two during a rotation).
 	Keys seal.Keys
-	// Env is APP_ENV: the store's path segment, and development allows IP
-	// literal addresses (test servers).
+	// Env is APP_ENV: the store's path segment; development allows a
+	// loopback IP literal address (test servers).
 	Env        string
 	Connectors *connector.Registry
 	Now        func() time.Time

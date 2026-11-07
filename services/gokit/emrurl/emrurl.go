@@ -6,8 +6,8 @@
 // checked).
 //
 // An address is https (sftp for file_export), at most 500 characters, a
-// DNS name of at least two labels (an IP literal only in development, for
-// test servers), with no userinfo, query or fragment. The host is
+// DNS name of at least two labels (a loopback IP literal only in
+// development, for test servers), with no userinfo, query or fragment. The host is
 // lower-cased, IDNA-normalised and loses a trailing dot; the origin always
 // names its port. Errors are fixed values and never carry the address.
 package emrurl
@@ -112,7 +112,9 @@ func normaliseHost(h string, development bool) (string, error) {
 		return "", ErrShape
 	}
 	if ip := net.ParseIP(h); ip != nil {
-		if development {
+		// Development allows a loopback literal (test servers) and nothing
+		// else: never a private, link-local or metadata address.
+		if development && ip.IsLoopback() {
 			return ip.String(), nil
 		}
 		return "", ErrAddress
