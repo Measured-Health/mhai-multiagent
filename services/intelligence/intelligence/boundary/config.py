@@ -15,7 +15,13 @@ import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, unquote, urlsplit
+
+if TYPE_CHECKING:
+    # boundary.cloud imports this module; this one imports it only when
+    # building settings, so the import graph is one-way at load.
+    from intelligence.boundary.cloud.settings import CloudSettings
 
 log = logging.getLogger("intelligence.boundary.config")
 
@@ -75,6 +81,14 @@ def _check_nats_url(raw: str, development: bool) -> list[str]:
             elif not development:
                 errs.append("NATS_URL must not carry a password outside development (use NKeys)")
     return errs[:1]
+
+
+def is_demo(environ: Mapping[str, str] | None = None) -> bool:
+    """True only when APP_ENV names demo: production in every respect but
+    one, a cloud provider's ZDR_REF may be DEMO-SYNTHETIC (synthetic data
+    only). Demo is not development."""
+    env = os.environ if environ is None else environ
+    return env.get("APP_ENV", "production").strip().lower() == "demo"
 
 
 def is_placeholder(value: str) -> bool:
@@ -152,6 +166,9 @@ class WorkerSettings:
     # The approve_correction job's learning client: trust_buffer (default)
     # or stub (development only).
     learning_client: str = "trust_buffer"
+    # Cloud model providers (plan 2026-11-06): none unless
+    # INTELLIGENCE_CLOUD_PROVIDERS names some (pipeline only).
+    cloud: CloudSettings = field(default_factory=lambda: _no_cloud())
 
     @classmethod
     def from_env(
@@ -233,6 +250,11 @@ class WorkerSettings:
             errs.append("INTELLIGENCE_LEARNING_CLIENT must be trust_buffer or stub")
         elif learning_client == "stub" and not development:
             errs.append("INTELLIGENCE_LEARNING_CLIENT=stub runs only with APP_ENV=development")
+        from intelligence.boundary.cloud.settings import PROVIDERS_VAR, CloudSettings
+
+        cloud = CloudSettings.from_env(env, development, errs)
+        if get(PROVIDERS_VAR) is not None and svc != "pipeline":
+            errs.append(f"{PROVIDERS_VAR} is for the pipeline service only")
         if errs:
             raise ConfigError("; ".join(errs))
         assert svc is not None and url is not None and keys is not None
@@ -252,7 +274,14 @@ class WorkerSettings:
             development=development,
             model_client=model_client,
             learning_client=learning_client,
+            cloud=cloud,
         )
+
+
+def _no_cloud() -> CloudSettings:
+    from intelligence.boundary.cloud.settings import CloudSettings
+
+    return CloudSettings()
 
 
 _DB_CREDENTIAL_VARS = (
@@ -313,12 +342,20 @@ def _db_credentials(
     return user, password
 
 
-def _read_secret_file(path: str, name: str, development: bool, errs: list[str]) -> str | None:
+def _read_secret_file(
+    path: str,
+    name: str,
+    development: bool,
+    errs: list[str],
+    *,
+    refuse_others_read: bool = False,
+) -> str | None:
     """A password file's contents, without its trailing newline. It must be
     a regular file; outside development, one that neither group nor others
     can write; one others can read (a root-owned 0444 secret mount, say) is
-    allowed with a warning. The mode is checked on the open file, so it is
-    the file that was read."""
+    allowed with a warning, unless refuse_others_read (a cloud API key):
+    then it is refused, in development too. The mode is checked on the open
+    file, so it is the file that was read."""
     try:
         # O_NONBLOCK: a FIFO in place of the file can't hang start-up.
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
@@ -337,6 +374,9 @@ def _read_secret_file(path: str, name: str, development: bool, errs: list[str]) 
         errs.append(f"{name} is not a regular file")
         return None
     with os.fdopen(fd, "rb") as f:
+        if refuse_others_read and st.st_mode & stat.S_IROTH:
+            errs.append(f"{name} is readable by others (use mode 0400 or 0440)")
+            return None
         if not development:
             if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
                 errs.append(f"{name} is writable by group or others (use mode 0400 or 0440)")

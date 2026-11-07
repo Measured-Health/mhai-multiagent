@@ -68,6 +68,7 @@ from opentelemetry.context import Context
 from opentelemetry.trace import SpanKind
 
 from intelligence.boundary import _b64, envelope, telemetry
+from intelligence.boundary.cloud.apikey import install_redaction, quiet_sdk_loggers
 from intelligence.boundary.config import ConfigError, WorkerSettings
 from intelligence.boundary.grant import GrantClient, GrantRefused, Unavailable
 from intelligence.boundary.jobs import JobContext, JobHandler, Slot
@@ -1003,10 +1004,19 @@ async def open_database(settings: WorkerSettings) -> Database | None:
     return database
 
 
+def secure_logging(settings: WorkerSettings) -> None:
+    """Before anything can log a request: the redacting filter on every root
+    handler, knowing each loaded cloud key's value, and the SDKs' and HTTP
+    stack's debug logging off (cloud model providers, design section 7)."""
+    install_redaction(p.key for p in settings.cloud.providers)
+    quiet_sdk_loggers()
+
+
 async def run_service(settings: WorkerSettings) -> None:
     """`intelligence worker`: serve settings.service until SIGTERM. The
     pipeline also runs run_query jobs, but only with a database (T10 note):
     without one it takes no job and health says database_ready false."""
+    secure_logging(settings)
     verifier, trusted = build_verifier(settings)
     # Off unless OTEL_EXPORTER_OTLP_ENDPOINT is set; a bad endpoint turns it
     # off with a warning and the reason, never keeps the worker from starting.

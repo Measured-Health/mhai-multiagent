@@ -918,3 +918,23 @@ def test_bad_bff_request_id_refused_before_any_grant(rid: str | None) -> None:
         assert envelope.REQUEST_ID not in hd
 
     run(go())
+
+
+def test_worker_start_redacts_logs_and_quiets_sdk_loggers() -> None:
+    """At start the worker puts the redacting filter on the root handlers
+    and turns SDK debug logging off (cloud model providers, Task 4)."""
+    from intelligence.boundary import worker as worker_mod
+    from intelligence.boundary.cloud.apikey import SDK_LOGGERS, RedactingFilter
+
+    root = logging.getLogger()
+    handler = logging.StreamHandler()
+    root.addHandler(handler)
+    try:
+        for name in SDK_LOGGERS:
+            logging.getLogger(name).setLevel(logging.DEBUG)
+        worker_mod.secure_logging(WorkerSettings.from_env(BASE))
+        assert any(isinstance(f, RedactingFilter) for f in handler.filters)
+        for name in SDK_LOGGERS:
+            assert logging.getLogger(name).level == logging.WARNING
+    finally:
+        root.removeHandler(handler)

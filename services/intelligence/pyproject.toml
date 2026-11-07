@@ -56,6 +56,10 @@ dependencies = [
     "jsonschema>=4.26.0",
     "safetensors>=0.8.0",
     "pillow>=12.3.0,<13",
+    # Cloud model providers (docs/plans/2026-11-06-cloud-model-providers.md):
+    # imported only under intelligence/boundary/cloud/ (an AST test pins it).
+    "openai>=3.37.0",
+    "anthropic>=2.3.0",
 ]
 
 [dependency-groups]
@@ -73,6 +77,9 @@ dev = [
     # Postgres 16 and NATS 2.10 for the tests marked boundary (spec section 12).
     "testcontainers[minio]>=4.15,<5",
     "zizmor>=1.32.0",
+    # The cloud tests: property tests, and no network in the unit modules.
+    "hypothesis>=6.170.9",
+    "pytest-socket>=0.8.1",
 ]
 # PyTorch build. CPU is the default; for a CUDA machine use
 # `uv sync --no-group cpu --group cu128`.
@@ -263,7 +270,14 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 # The new packages are strict (the flags `strict = true` sets, which mypy only
 # accepts globally).
-module = ["intelligence.doceval", "intelligence.doceval.*", "intelligence.modelstore", "intelligence.modelstore.*"]
+module = [
+    "intelligence.doceval",
+    "intelligence.doceval.*",
+    "intelligence.modelstore",
+    "intelligence.modelstore.*",
+    "intelligence.boundary.cloud",
+    "intelligence.boundary.cloud.*",
+]
 check_untyped_defs = true
 disallow_any_generics = true
 disallow_incomplete_defs = true
