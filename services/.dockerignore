@@ -5,3 +5,10 @@ nats
 **/*_test.go
 **/Dockerfile
 **/.dockerignore
+# Never send local secrets into the build context.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.nk
+**/secrets

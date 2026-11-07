@@ -24,6 +24,7 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
 - **Demo settings.** `SECURITY_CONTACT_*` isn't set, so the audit integrity status returns 503. We need a name and an email from the product owner.
 - **Dependabot backlog.** 21 open PRs (Go modules, Python groups, GitHub Actions, NATS 2.15); each needs CI and a merge.
 
+- **EMR control: enforce `Op.StepUp` (EMR PR 2 review).** `services/emr/internal/ctl/responder.go` records `Op.StepUp` but doesn't enforce it yet. It must be enforced before the `put_credentials` or `redrive` handlers land (EMR PRs 3 and 8).
 ## EMR integration: people items and live-use gates
 
 **These are people's items. An agent never marks one done**; the named owner closes it. From the [plan](docs/plans/2026-11-07-emr-integration.md) ("What's needed from people") and the [design](docs/specs/2026-11-07-emr-integration-design.md) §17.6 and §20.
