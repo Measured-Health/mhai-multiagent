@@ -1,6 +1,6 @@
 # Patient Analysis, named access and clearance letters (hospital side): backend design
 
-- **Status:** Approved (product owner, 2026-11-07), after three design reviews. Design only, no code. **Live use needs clinical, privacy and legal sign-off** (§15). ADR 0015 and the SKILLS.md §1 amendment move from Proposed to Accepted with build PR 1. This design changes the rule that hospital admins see no clinical content.
+- **Status:** Approved (product owner, 2026-11-07), after three design reviews. Design only, no code. **Live use needs clinical, privacy and legal sign-off** (§15). ADR 0015 and the SKILLS.md §1 amendment are **Accepted** (product owner, H4, 7 Nov 2026), written in build PR 1. The plan's departures are recorded in §17. This design changes the rule that hospital admins see no clinical content.
 - **Date:** 2026-11-07
 - **Rulings this design follows:**
   - **R41a (product owner, 7 Nov 2026): fixed periods.** Statistics show only finished, non-overlapping calendar periods (the last full week, month or quarter), never rolling windows.
@@ -1115,3 +1115,13 @@ Each phase is its own PR, reviewed and merged by a person. Phases 2–6 run on t
 16. **How is SKILLS.md §1 amended?** *Through ADR 0015, scoped to `services/core/internal/analysis`.* The rule stays absolute for intelligence and every NATS operation, with a checklist line tied to T22.
 
 **Relation to R41a.** The product owner's R41a ruling (fixed periods), refined by C3 (nested periods), gives Analysis differencing control over time: finished, frozen periods, guarded together across levels. What remains is differencing across filters within one period (R-A1). It is measured, not closed, and the privacy lead accepts it in H1.
+
+## 17. Departures recorded by the plan
+
+The build plan, `docs/plans/2026-11-07-analysis-backend.md`, departs from this design in the places its "Where this plan departs from the design" section lists (fifteen items). Where the two differ, the plan is right. The ones that change the contract:
+
+- **`not_ready` stays 503** (the plan's departure 3), not 409 as §9 and H6(e) say. A code has one status in core's `httpx`, and `not_ready` is 503 on every route.
+- **The new problem codes go in `services/core/internal/httpx/errors.go`** (departure 2), not `authz/errorcodes.go`, which is the worker's closed code set. §9's `invalid` is core's existing `validation_failed` (422).
+- **Audit actions are dotted** (departure 10): `analyst.granted`, `analyst.removed` and `audit.patients_viewed`.
+
+The frontend requirements §10, "Changes from the backend design (H6)", carries these to mhai-web.

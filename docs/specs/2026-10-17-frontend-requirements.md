@@ -421,6 +421,14 @@ verification and named drill-down: Plan 11b and 11c). Needs
 clinical, privacy and legal sign-off before live use, because it changes
 the rule that hospital admins see no clinical content.
 
+[ADR 0015](../adr/0015-population-analysis-under-disclosure-control.md)
+(Accepted, 7 Nov 2026) changes §3's rule in two places only: hospital
+admins and analysts may see aggregates and pseudonymous rows for their own
+hospital under disclosure control, and names only under a verified letter.
+The backend design is `docs/specs/2026-11-07-analysis-backend-design.md`,
+built by `docs/plans/2026-11-07-analysis-backend.md`. The changes it makes to
+the shapes below are listed under "Changes from the backend design (H6)".
+
 ### Analysis, as built in Plan 6
 
 | Endpoint | Behaviour |
@@ -530,7 +538,7 @@ Shapes (ids are opaque, `[A-Za-z0-9_-]+`):
   the app refuses the list if any other field appears (a name, an MRN, a
   date of birth, an address).
 - `pid` matches `^P-[A-Z0-9]{4,12}$`: pseudonymous, stable within the
-  hospital, never the MRN.
+  hospital, never the MRN. (Changing to stable per period: H6d below.)
 - Each call is audited as `analysis_patients_viewed`: type `security`,
   unflagged, with `count` (the rows sent). It appears in the hospital's
   activity.
@@ -540,7 +548,8 @@ Shapes (ids are opaque, `[A-Za-z0-9_-]+`):
 **Errors**
 
 - 422 `invalid_range`: `from` or `to` is not a real day, `from` is after
-  `to`, or the range is more than 24 months.
+  `to`, or the range is more than 24 months. (Changing to "not exactly one
+  frozen period": H6a below.)
 - 404 `not_found`: unknown view, or the gate is off. 503 `unavailable`:
   the app shows that view as failed and offers Try again.
 - 403 `mfa_required`, as above.
@@ -549,6 +558,88 @@ Shapes (ids are opaque, `[A-Za-z0-9_-]+`):
 log it, and neither should the gateway or the API. They are not kept in the
 page URL or in browser storage. The patient list is never cached, exported
 or printed.
+
+### Changes from the backend design (H6)
+
+Status: **Assumed until mhai-web confirms.** These follow from the product
+owner's rulings R41a (finished calendar periods only) and C3 (nested
+periods), and from the backend design §9 and §15 (H6). They change the Plan 6
+shapes above. Everything else is additive.
+
+- **(a) Periods replace `from`/`to` ranges.** Every Analysis read takes
+  `period` (`week`, `month` or `quarter`) and `start` (the period's first
+  day, `YYYY-MM-DD`). A week is a month-aligned block: days 1–7, 8–14, 15–21,
+  or 22 to the month's end, labelled with its dates ("8–14 Mar 2027"). Weeks
+  sit in months and months in quarters. Only finished, frozen periods are
+  answered; there is no rolling window, custom range or multi-period total.
+  `from` and `to` are still accepted while the app moves to the picker, but
+  only when they span exactly one frozen period; anything else is 422
+  `invalid_range`.
+  - `GET /analysis/filters` gains **`periods`**: the answerable frozen
+    periods per level, for the picker. Without `period`, it answers the
+    `periods` list and the latest frozen month's lists; with `period` and
+    `start`, that period's lists. A condition is listed only if it has 5 or
+    more patients in that period, plus "Not standardised".
+- **(b) `Meta` and `history`.** `Meta.from` and `Meta.to` are the period's
+  first and last days. **`Meta.period`** is `{level, start}` (additive).
+  `Meta.bucket` is the series level: a quarter's series is its months, a
+  month's its weeks, and a week's is one point, the week itself. Views gain
+  **`history`** (additive): up to 7 earlier periods of the same level, as
+  `{start, cases, new, patients}`, each `GuardedOut`. Each point is copied
+  from that period's own answer for the same view and filters, and is hidden
+  whole wherever that answer is hidden. Draw it as a trend, with no total.
+- **(c) Platform Analysis (Plan 12)** changes the same way: the last full
+  month or quarter, plus the last four quarters as history, instead of "last
+  3, 6 or 12 months".
+- **(d) Pids are stable per period,** not per hospital. One person's pid is
+  the same in every list from one period, and different in every other
+  period and level. Nothing in the app may link pids across periods. The
+  shape is unchanged (`^P-[A-Z0-9]{4,12}$`).
+- **(e) Errors.**
+  - The Analysis reads: 404 `not_found` (unknown view, or Analysis off for
+    the hospital), 422 `invalid_range`, 422 **`too_many_filters`** (more than
+    two filters besides the period), 429 `rate_limited`, 503 `unavailable`.
+  - **`not_ready` is 503**, not 409: a period that has closed but isn't
+    frozen yet. A code has one status in the API, and `not_ready` is 503 on
+    every route, including a clearance page that isn't ready (Plan 11a says
+    409; the code is what the app reads).
+  - The patient list: 422 **`too_small`**, 422 **`level_not_supported`**,
+    429 `rate_limited`.
+  - Analyst grants: 409 **`analysis_off`**, 409 **`analyst_cap`**, 403
+    `self_change`, 422 `not_eligible`.
+  - Named access and letters, when built: 403 **`named_access_off`**,
+    **`not_cleared`**, **`clearance_ended`**; 409 **`expired`**; 422
+    **`idempotency_mismatch`**, **`would_empty`**, **`end_date_too_late`**,
+    `not_eligible`, **`not_eligible_platform`**; 409 **`above_global`**,
+    **`signoff_missing`**, **`already_used`**; 422 **`too_many_rows`**.
+  - A bad shape is the API's existing **`validation_failed`** (422), where
+    Plan 11a says `invalid`.
+- **(f) Empty lists beside a hidden count.** When a view's `patients` is
+  hidden, or a filtered view has fewer than 10 patients, every number is
+  hidden, no row has a `drill`, and the **lists are sent empty**. The app
+  must accept that, not fail the view.
+- **(g) Step-up when adding Analyst.** `PATCH /hospital/staff/{id}` takes
+  `mfa_code` or `backup_code`, required when `roles` adds `analyst`; without
+  it, 403 `mfa_required`. The grantor is a hospital admin of the same
+  hospital, not the person; the person is an active clinician with two-step
+  set up; a hospital has at most 10 analysts.
+- **(h) The legal resolution screen** (backend design §8.9), for a hospital
+  admin named on a legal reference.
+- **(i) Audit kinds and the `analyst` actor role.** Core records dotted
+  actions and sends mhai-web's kinds: `analyst.granted` and `analyst.removed`
+  are sent as `analyst_granted` and `analyst_removed`;
+  `analysis.patients_viewed` as `analysis_patients_viewed`;
+  `audit.patients_viewed` as `audit_patients_viewed`. The kinds new to the
+  app (backend design §8.7: `analysis_viewed`, `analysis_unusual_querying`,
+  `analysis_patient_cap_reached`, the named-view, clearance, legal and
+  named-access kinds) are sent as pending until mhai-web ships them, and
+  `analyst` appears as an actor role. No entry carries a name, MRN, pid or
+  free text.
+- **`features`.** `User.features {analysis, named_access}` on the sign-in and
+  session replies (additive). `analysis` is true only when the hospital's
+  analysis switch is On, the user is a hospital admin or analyst, and
+  two-step is on. Analysis is off by default for every hospital; no live
+  hospital is turned on before clinical, privacy and legal sign-off.
 
 ### Clearances, named lists and audit: hospital side (Plan 11a)
 
@@ -1146,7 +1237,7 @@ no mhai-web kind is sent as the bare entry (`type: security`,
 |---|---|
 | `GET /platform/audit?hospital&person&type&outcome&flagged&from&to&q&cursor&limit` | → `{events, next_cursor, total, total_capped, oldest_kept_at, last_checkpoint}`. `hospital=platform` selects platform-only events. `type` is a comma list. `from`/`to` are instants, `[from, to)`. The app sends `limit=50` |
 | `GET /platform/audit/{id}` | → the event plus `patients: {count}` (null when there is no drill-down) and `letter` (null unless a named-access event) |
-| `GET /platform/audit/{id}/patients` | → `{pseudonyms}`. The only place a pseudonym is sent. Writes `audit_patients_viewed` |
+| `GET /platform/audit/{id}/patients` | → `{pseudonyms}`: the pids the hospital saw, for that entry's period, in order. The only place outside Analysis a pseudonym is sent. Writes `audit_patients_viewed` (core's action `audit.patients_viewed`) |
 | `GET /platform/audit/people?q` | `q` of 2 or more characters → `{people}`, at most 20, each `{id, name, email, role, kind, hospital}`. Backs the person picker |
 | `GET /platform/audit/hospitals` | → `{hospitals: [{id, name, removed}]}`: every hospital the log names, removed ones included |
 | `POST /platform/audit/undisplayable {ids}` | 1 to 50 ids → 204, recorded as `audit_undisplayable_reported`. The app reports each entry it can't display once |
@@ -1192,8 +1283,9 @@ removed}` or null), `type`, `kind`, `target` (`{kind, id, name?}` or null),
 **Pseudonyms never leave the server except through `/patients`**
 
 - A pseudonym is the same pseudonymous patient id as Analysis (§10):
-  `^P-[A-Z0-9]{4,12}$`, stable within the hospital, never the MRN. No other
-  id may match that shape.
+  `^P-[A-Z0-9]{4,12}$`, never the MRN. It is stable within one period, not
+  across the hospital (§10, H6d; **Assumed until mhai-web confirms**). No
+  other id may match that shape.
 - A patient target is `{kind: "patient"}` with no id and no name.
 - Where a pseudonym was searched or filtered on, the server sends the marker
   `{kind: "patient_id"}` in its place: as `facts.searched` (with
