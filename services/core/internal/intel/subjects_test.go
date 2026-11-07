@@ -11,7 +11,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 func noLoad(context.Context, pgx.Tx, uuid.UUID) (uuid.UUID, uuid.UUID, error) {

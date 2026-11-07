@@ -5,8 +5,8 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // The access-token and request-token keys must be different keys, not only

@@ -31,7 +31,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // Plan 4 Task 11: GET /platform/health and the sampler (spec §6.1;

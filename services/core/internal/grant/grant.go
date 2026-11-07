@@ -66,8 +66,8 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // Subjects, the queue group and the envelope.

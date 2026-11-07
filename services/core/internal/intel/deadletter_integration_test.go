@@ -20,7 +20,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // workerJS is a JetStream handle as the pipeline worker's NATS user: the

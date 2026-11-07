@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // ErrTrustedKeys: the trusted-keys file couldn't be read. The path and the

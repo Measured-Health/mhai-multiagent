@@ -1,7 +1,9 @@
 // Package reqtoken mints the request tokens core puts on every call and job
-// to the intelligence service (spec §7.2, §17.2), and verifies them in Go
-// (spec §7.3 checks 1-5) for tests, the shared vectors and core's own fake
-// worker. The production verifier is the Python twin.
+// to the intelligence service (spec §7.2, §17.2) and to the emr service
+// (EMR design §3.2), and verifies them in Go (spec §7.3 checks 1-5): for
+// the emr service's control responder, tests, the shared vectors and core's
+// own fake worker. The workers' verifier is the Python twin. It lives in
+// services/gokit so core and the emr service share one copy (ADR 0014).
 //
 // Like the access token, the JWT is built by hand: one algorithm (EdDSA over
 // Ed25519), one header shape, a fixed claim set and strict JSON, so there is
@@ -17,23 +19,24 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
 
 // Fixed values (spec §7.2, plan global constraints).
 const (
-	Type        = "mhai-req+jwt"   // the header typ
-	Issuer      = token.IssuerName // iss: mhai-gateway
-	SvcCore     = "svc:core"       // sub for work no user started
+	Type        = "mhai-req+jwt" // the header typ
+	Issuer      = "mhai-gateway" // iss: core's issuer name (core's token.IssuerName; a core test pins them equal)
+	SvcCore     = "svc:core"     // sub for work no user started
 	MaxReqTTL   = 60 * time.Second
 	MaxJobTTL   = 24 * time.Hour
 	Skew        = 5 * time.Second
@@ -215,13 +218,26 @@ func KeyID(pub ed25519.PublicKey) string {
 }
 
 // LoadSigner reads the request-token signing key (REQUEST_KEY_PATH): the
-// same PEM PKCS#8 Ed25519 format and key id rule as token.LoadIssuer.
+// same PEM PKCS#8 Ed25519 format and key id rule as core's token.LoadIssuer
+// (a core test pins them to agree). Errors never name the path.
 func LoadSigner(path string) (Signer, error) {
-	iss, err := token.LoadIssuer(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Signer{}, errKey
 	}
-	return Signer{Key: iss.Key, KeyID: iss.KeyID}, nil
+	blk, _ := pem.Decode(raw)
+	if blk == nil || blk.Type != "PRIVATE KEY" {
+		return Signer{}, errKey
+	}
+	k, err := x509.ParsePKCS8PrivateKey(blk.Bytes)
+	if err != nil {
+		return Signer{}, errKey
+	}
+	priv, ok := k.(ed25519.PrivateKey)
+	if !ok {
+		return Signer{}, errKey
+	}
+	return Signer{Key: priv, KeyID: KeyID(priv.Public().(ed25519.PublicKey))}, nil
 }
 
 // PublicKeys returns the verification key set for this signer.
@@ -390,13 +406,13 @@ func validateMint(c Claims) error {
 	if c.Sub == SvcCore && len(c.Roles) > 0 {
 		return ErrMintClaims // spec §7.2: roles are empty for svc:core
 	}
-	seg := strings.Split(c.Subject, ".")
+	// The subject table (subjects.go): an allowed shape for the kind, the
+	// audience it fixes, the hospital it names, core-only subjects.
+	if !checkSubject(c.Kind, c.Subject, c.Aud, c.Hid, c.Via) {
+		return ErrMintClaims
+	}
 	switch c.Kind {
 	case KindReq:
-		// inference.v1.<service>.<op>, and the service is the audience.
-		if len(seg) != 4 || seg[0] != "inference" || seg[1] != "v1" || seg[2] != c.Aud || !isName(seg[3]) {
-			return ErrMintClaims
-		}
 		switch c.Via {
 		case ViaCore:
 			if c.ReplyPrefix != ReplyCore {
@@ -410,12 +426,8 @@ func validateMint(c Claims) error {
 			return ErrMintClaims
 		}
 	case KindJob:
-		// jobs.v1.<hid|global>.<type>; only core publishes jobs, and a job
-		// has no reply.
-		if len(seg) != 4 || seg[0] != "jobs" || seg[1] != "v1" || !isName(seg[3]) || c.Via != ViaCore || c.ReplyPrefix != "" {
-			return ErrMintClaims
-		}
-		if !global && seg[2] != c.Hid {
+		// Only core publishes jobs, and a job has no reply.
+		if c.Via != ViaCore || c.ReplyPrefix != "" {
 			return ErrMintClaims
 		}
 	}
@@ -490,16 +502,10 @@ func VerifyAt(tok string, keys map[string]ed25519.PublicKey, want Expect, body [
 	if p.Nsub != want.Subject || knd != want.Kind {
 		return Claims{}, ErrBinding
 	}
-	seg := strings.Split(p.Nsub, ".")
-	switch knd {
-	case KindReq:
-		if len(seg) != 4 || seg[0] != "inference" || seg[1] != "v1" {
-			return Claims{}, ErrBinding
-		}
-	case KindJob:
-		if len(seg) != 4 || seg[0] != "jobs" || seg[1] != "v1" || (seg[2] != "global" && seg[2] != p.Hid) {
-			return Claims{}, ErrBinding
-		}
+	// The subject table: an allowed shape for the kind, the audience it
+	// fixes, the hospital it names, and no grant on a core-only subject.
+	if !checkSubject(knd, p.Nsub, p.Aud, p.Hid, via) {
+		return Claims{}, ErrBinding
 	}
 	if subtle.ConstantTimeCompare([]byte(p.Bh), []byte(bodyHash(body))) != 1 {
 		return Claims{}, ErrBinding

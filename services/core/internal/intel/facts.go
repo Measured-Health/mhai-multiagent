@@ -11,7 +11,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // MaxFacts is the most audit facts one reply may carry.

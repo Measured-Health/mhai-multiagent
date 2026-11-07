@@ -15,8 +15,8 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // jsStoreFailed is JetStream's "store failed" API error (10077): what a

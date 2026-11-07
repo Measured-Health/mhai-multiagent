@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // Operation is one row of the operations table: a call that core may make to

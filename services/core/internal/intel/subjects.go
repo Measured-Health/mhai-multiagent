@@ -12,7 +12,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // SubjectLoader reads who submitted a job's subject and who decided it, from

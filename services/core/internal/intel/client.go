@@ -2,7 +2,7 @@
 // the request/reply client, the job publisher, the publish sweeper, the
 // per-hospital in-flight cap, and the audit of what workers report.
 //
-// Every call carries a request token core mints here (internal/reqtoken).
+// Every call carries a request token core mints here (services/gokit/reqtoken).
 // Its sub, hid and roles come only from the Caller, which comes from the
 // verified principal (FromPrincipal) or is core itself (System); nothing in
 // a body, subject or header sets them. Core checks the operation's roles
@@ -30,8 +30,8 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // The envelope headers (spec §6.2).

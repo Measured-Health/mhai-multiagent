@@ -15,8 +15,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
 
 // Synthetic ids only.
@@ -186,30 +184,6 @@ func TestMintVerifyRoundTrip(t *testing.T) {
 	cb, _ := VerifyAt(b, s.PublicKeys(), reqExpect(), body, testNow)
 	if ca.Jti == "" || ca.Jti == cb.Jti {
 		t.Fatalf("jti reused: %q %q", ca.Jti, cb.Jti)
-	}
-}
-
-// A6: an access token, even signed with a trusted request key, is not a
-// request token (its typ is JWT).
-func TestAccessTokenRefusedAsRequestToken(t *testing.T) {
-	s := newSigner(t)
-	iss := token.Issuer{Key: s.Key, KeyID: s.KeyID, Now: func() time.Time { return testNow }}
-	acc, _, err := iss.Access(token.Claims{Sub: testUser, Hid: testHospital, Roles: []string{"clinician"},
-		Sid: testRid, Jti: testPatient})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := VerifyAt(acc, s.PublicKeys(), reqExpect(), nil, testNow); !errors.Is(err, ErrSignature) {
-		t.Fatalf("access token as request token: %v, want ErrSignature", err)
-	}
-}
-
-// A6, reverse: a request token is not an access token.
-func TestRequestTokenRefusedAsAccessToken(t *testing.T) {
-	s := newSigner(t)
-	tok := mint(t, s, reqClaims(), nil, 5*time.Second)
-	if _, err := token.VerifyAt(tok, s.PublicKeys(), testNow); err == nil {
-		t.Fatal("token.VerifyAt accepted a request token")
 	}
 }
 
@@ -605,8 +579,8 @@ func TestReasonCodes(t *testing.T) {
 	}
 }
 
-// LoadSigner reads the same PEM PKCS#8 file as token.LoadIssuer, with the
-// same key id rule.
+// LoadSigner reads a PEM PKCS#8 Ed25519 file with the KeyID rule (core's
+// TestRequestSignerMatchesAccessIssuer pins it to token.LoadIssuer).
 func TestLoadSigner(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	der, _ := x509.MarshalPKCS8PrivateKey(priv)
@@ -618,9 +592,8 @@ func TestLoadSigner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	iss, _ := token.LoadIssuer(path)
-	if s.KeyID != iss.KeyID || s.KeyID != KeyID(priv.Public().(ed25519.PublicKey)) || !s.Key.Equal(priv) {
-		t.Fatalf("kid %q vs %q", s.KeyID, iss.KeyID)
+	if s.KeyID != KeyID(priv.Public().(ed25519.PublicKey)) || !s.Key.Equal(priv) {
+		t.Fatalf("kid %q", s.KeyID)
 	}
 	junk := filepath.Join(t.TempDir(), "junk.pem")
 	_ = os.WriteFile(junk, []byte("not a key"), 0o600)

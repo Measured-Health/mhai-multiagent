@@ -18,8 +18,8 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 func verifyJob(t *testing.T, m jobMsg) reqtoken.Claims {

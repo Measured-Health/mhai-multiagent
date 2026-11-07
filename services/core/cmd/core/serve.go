@@ -29,10 +29,10 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/natsapi"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // SweepEvery is how often serve deletes expired Idempotency-Key rows.
