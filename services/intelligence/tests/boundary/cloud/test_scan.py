@@ -66,6 +66,9 @@ def _scan(
 
 def test_name_without_title_blocked() -> None:
     # A2: the masker only finds names after a title; the record names her.
+    # This holds only when identifiers are supplied: core's PatientData has
+    # no name key, so on real data it needs core's keyed name hashes
+    # (rulings C5 and C8); until then the bare name is a recorded residual.
     question = f"{NAME} has chest pain"
     assert _scan(question, _ids(question=question)) == "known_identifier"
 
@@ -294,6 +297,9 @@ TYPICAL_QUESTIONS = [
     "\u03b2-hCG 1500 IU/L, no intrauterine sac: ectopic?",
     "BP 120 / 80 after 10 min rest: hypertension?",
     "lab values 1100, 120, 1300 over 3 days: trend?",
+    "T 37.5-38.5 over 2 days, pH 7.35-7.45: normal?",
+    "Hb 11.5-13.5, temp 36.5 - 37.5: anything else?",
+    "maintenance 1000-1500 ml/day, GCS 4 5 6: plan?",
 ]
 
 
@@ -674,7 +680,7 @@ CORE_PATIENT: dict[str, Any] = {
     [
         "Dr. Emeka Obi referred her with chest pain",
         "Patient: Ngozi Eze has chest pain",
-        "call 555-123-4567 about chest pain",
+        "call 555.123.4567 about chest pain",
         "Dr. \u0415meka Obi referred her",  # a Cyrillic E: the skeleton maps it back
     ],
 )
@@ -703,6 +709,7 @@ def test_core_patient_data_feeds_known_identifiers() -> None:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="NEEDS_CONTEXT (I1): PIIMasker finds names only after a title "
     "(Dr, Mr, Mrs, Ms, Miss, Prof, Patient), so an untitled name on core's "
     "real patient_data reaches the body. Needs a name detector or core's "
@@ -800,12 +807,14 @@ def test_spaced_and_worded_dates_blocked(question: str) -> None:
     assert _scan(question) == "date"
 
 
-def test_decimal_range_reads_as_a_date_today() -> None:
-    """C4: a measured over-block, pinned (it predates the fix round). A dose
-    range such as "0.5-1.25 mg/kg" has a date's shape (d.d-d.dd) and is
-    refused in the question; in a chunk it is sent (H2)."""
-    assert _scan("dose 0.5-1.25 mg/kg?") == "date"
-    assert _scan("dose?", NO_IDS, "Give 0.5-1.25 mg/kg.") is None
+@pytest.mark.parametrize(
+    "question",
+    ["T 37.5-38.5", "pH 7.35-7.45", "Hb 11.5-13.5", "temp 36.5 - 37.5", "dose 0.5-1.25 mg/kg"],
+)
+def test_decimal_ranges_are_not_dates(question: str) -> None:
+    # Re-review R1: a date uses the same separator both times, so a
+    # reference range (d.d-d.d) is sent; every earlier date form still isn't.
+    assert _scan(f"{question}: normal?") is None
 
 
 @pytest.mark.parametrize(
@@ -905,3 +914,71 @@ def test_shape_pins_fixed_values(provider: str) -> None:
         scan.Shape(
             frozenset({"/a", "/b"}), frozenset({"/a", "/b"}), {"/c": 1}
         )  # a fixed pointer must be allowed
+
+
+# --- last round (re-review R1-R7) ------------------------------------------------------
+
+
+@pytest.mark.parametrize("written", ["123-456-7890", "1234-567-890", "123-45-678"])
+def test_hyphen_chain_of_three_groups_is_long_digits(written: str) -> None:
+    # R2: hyphens join chains of 3 or more groups; two groups ("HR 100-120")
+    # stay sent.
+    assert _scan(f"ref {written} attached") == "long_digits"
+    assert _scan("HR 100-120 and 1000-1500 ml") is None
+
+
+@pytest.mark.parametrize("sep", [";", "_", " ; ", "_ "])
+def test_semicolon_and_underscore_gaps(sep: str) -> None:
+    # R3: ";" and "_" join groups too (neither is a chunk delimiter).
+    written = sep.join(["0803", "123", "4567"])
+    assert _scan(f"call {written} now") == "ng_phone"
+    ids = _ids({"phone": "08031234567"})
+    assert _scan("fever", ids, f"call {written}") == "known_identifier"
+    # The chunk delimiters still never join two numbers.
+    assert _scan("1500 ml", _ids({"mrn": "000115"}), "15 mg") is None
+
+
+def test_single_digit_phone_blocked() -> None:
+    # R3: a phone number spelt out one digit at a time.
+    assert _scan("call 0 8 0 3 1 2 3 4 5 6 7 now") == "ng_phone"
+
+
+@pytest.mark.parametrize("question", ["seen 12 Mar 84", "seen 3 dec 99", "seen 12-mar-84"])
+def test_month_name_with_two_digit_year_is_a_date(question: str) -> None:
+    # R5.
+    assert _scan(question) == "date"
+
+
+def test_hospital_hash_is_a_record_number() -> None:
+    # R5.
+    assert _scan("hospital #4471 has fever") == "mrn_prefix"
+    assert _scan("hospital # 4471 has fever") == "mrn_prefix"
+
+
+def test_cyrillic_ghe_for_r() -> None:
+    # R4: Cyrillic ge for r ("Okafo\u0433").
+    ids = _ids({"family": "Okafor"})
+    assert _scan("Okafo\u0433 has chest pain", ids) == "known_identifier"
+
+
+@pytest.mark.parametrize(
+    ("recorded", "written"),
+    [
+        (
+            "\u041d\u0438\u043a\u043e\u043b\u0430\u0439 \u041f\u0435\u0442\u0440\u043e\u0432",
+            "\u041d\u0418\u041a\u041e\u041b\u0410\u0419 \u041f\u0415\u0422\u0420\u041e\u0412",
+        ),
+        (
+            "\u041d\u0418\u041a\u041e\u041b\u0410\u0419 \u041f\u0415\u0422\u0420\u041e\u0412",
+            "\u043d\u0438\u043a\u043e\u043b\u0430\u0439 \u043f\u0435\u0442\u0440\u043e\u0432",
+        ),
+        (
+            "\u039d\u03af\u03ba\u03bf\u03c2 \u0392\u03ad\u03c1\u03bc\u03b7\u03c2",
+            "\u039d\u0399\u039a\u039f\u03a3 \u0392\u0395\u03a1\u039c\u0397\u03a3",
+        ),
+    ],
+)
+def test_cyrillic_and_greek_names_match_in_any_case(recorded: str, written: str) -> None:
+    # R4: case-fold first, then the skeleton, so a name written in Cyrillic
+    # or Greek matches in either case.
+    assert _scan(f"{written} has chest pain", _ids({"name": recorded})) == "known_identifier"

@@ -200,11 +200,22 @@ _SKELETON: Final = MappingProxyType(
         "\u0570": "h",
         "\u0578": "n",
         "\u0566": "q",
+        # Cyrillic ghe looks like r (re-review R4: "Okafo\u0433")
+        "\u0433": "r",
     }
 )
 # Hyphens, dashes and the minus sign, as "-" (review I2: an en dash in a
 # phone number, as phone autocorrect writes it).
 _DASHES: Final = frozenset("\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d")
+
+
+# For the folded path (re-review R4): case-fold first, then map, so a name
+# written in Cyrillic or Greek matches in either case. An upper-case entry
+# gives its lower-case form; an explicit lower-case entry wins.
+_SKELETON_FOLDED: Final = MappingProxyType(
+    {k.casefold(): v.lower() for k, v in _SKELETON.items() if k.isupper()}
+    | {k: v for k, v in _SKELETON.items() if not k.isupper()}
+)
 
 
 def _clean(s: str, fold: bool = True) -> str:
@@ -220,9 +231,11 @@ def _clean(s: str, fold: bool = True) -> str:
         elif c in _DASHES:
             out.append("-")
         else:
-            out.append(_SKELETON.get(c, c))
+            out.append(c)
     joined = "".join(out)
-    return joined.casefold() if fold else joined
+    if not fold:  # case kept, for the masker's name rules
+        return "".join(_SKELETON.get(c, c) for c in joined)
+    return "".join(_SKELETON_FOLDED.get(c, c) for c in joined.casefold())
 
 
 def norm_words(s: str) -> str:
@@ -265,12 +278,12 @@ def digit_runs(s: str) -> list[str]:
 # What a person puts between the groups of one number. Not "<", ">", "#" or
 # ":": the chunk delimiters ("<<chunk KB#0001>>\n15 mg") must never join two
 # numbers into an identifier (plan Review Focus 1).
-_GAP_CHARS: Final = frozenset(" ()-.,/+")
+_GAP_CHARS: Final = frozenset(" ()-.,/+;_")
 
 
 def _gap_ok(t: str, start: int, end: int) -> bool:
     """A short gap of 1 to MAX_DIGIT_GAP characters, each a space or one of
-    ( ) - . , / + (dashes are "-" after norm_text)."""
+    ( ) - . , / + ; _ (dashes are "-" after norm_text)."""
     return 1 <= end - start <= MAX_DIGIT_GAP and all(c in _GAP_CHARS for c in t[start:end])
 
 
@@ -625,8 +638,10 @@ _MONTH: Final = (
 )
 _DATES: Final = (
     # A space either side of the separator too (review I3): "12 / 03 / 1984".
-    re.compile(r"(?<![0-9])[0-9]{1,2} ?[/.-] ?[0-9]{1,2} ?[/.-] ?[0-9]{2,4}(?![0-9])"),
-    re.compile(r"(?<![0-9])[0-9]{4} ?[/.-] ?[0-9]{1,2} ?[/.-] ?[0-9]{1,2}(?![0-9])"),
+    # The same separator both times (re-review R1), so a reference range
+    # such as "T 37.5-38.5" or "pH 7.35-7.45" is not a date.
+    re.compile(r"(?<![0-9.])[0-9]{1,2} ?([/.-]) ?[0-9]{1,2} ?\1 ?[0-9]{2,4}(?![0-9])"),
+    re.compile(r"(?<![0-9.])[0-9]{4} ?([/.-]) ?[0-9]{1,2} ?\1 ?[0-9]{1,2}(?![0-9])"),
     # Spaces only, with a 4-digit year from 1900 to 2099: "12 03 1984".
     re.compile(r"(?<![0-9.])[0-9]{1,2} [0-9]{1,2} (?:19|20)[0-9]{2}(?![0-9])"),
     # "12 March 1984", "12th of March, 1984", "12-mar-1984".
@@ -634,6 +649,13 @@ _DATES: Final = (
         r"(?<![0-9])[0-9]{1,2}(?:st|nd|rd|th)?[ ./-]?(?:of )?"
         + _MONTH
         + r"\.?[ ,./-]*[0-9]{4}(?![0-9])"
+    ),
+    # With a 2-digit year, "12 Mar 84" (re-review R5); not "may", which is
+    # also a verb ("under 5 may 10 mg").
+    re.compile(
+        r"(?<![0-9])[0-9]{1,2}(?:st|nd|rd|th)?[ ./-]?(?:of )?(?!may)"
+        + _MONTH
+        + r"\.?[ ,./-]*[0-9]{2}(?![0-9])"
     ),
     re.compile(
         r"(?<![a-z])" + _MONTH + r"\.?[ ./-]?[0-9]{1,2}(?:st|nd|rd|th)?,?[ ./-]?[0-9]{4}(?![0-9])"
@@ -643,19 +665,29 @@ _DATES: Final = (
 # end on a word boundary ("hospital notes" is not one), and the code starts
 # with a letter or digit, never "_" (so "[mrn_redacted]" is not one).
 _MRN: Final = re.compile(
-    r"\b(?:m\.?r\.?n|(?:hospital|hosp\.?|folder|card|file) ?(?:number|no))(?![a-z])"
+    r"\b(?:m\.?r\.?n|(?:hospital|hosp\.?|folder|card|file) ?(?:number|no)"
+    r"|(?:hospital|hosp\.?) ?(?=#))(?![a-z])"
     r"[\s:#=.\-]*[^\W_]"
 )
 # A JSON object key in the raw text (the body has already parsed strictly).
 _JSON_KEY: Final = re.compile(r'"(?:[^"\\]|\\.)*"\s*:')
 
 
+# Three or more digit groups joined by single hyphens (re-review R2):
+# "123-456-7890" and "12-34-567"; two groups ("HR 100-120") are a range.
+_HYPHEN_CHAIN: Final = re.compile(r"(?<![0-9-])[0-9]+(?:-[0-9]+){2,}(?![0-9])")
+# Five or more single digits, one space apart: "0 8 0 3 1 2 3 4 5 6 7"
+# (re-review R3). Used for ng_phone only, whose prefix keeps vitals out.
+_SPELT_DIGITS: Final = re.compile(r"(?<![0-9])[0-9](?: [0-9]){4,}(?![0-9])")
+
+
 def _pattern(s: str) -> str | None:
     t = _PLACEHOLDER_IN_DIGITS.sub("", norm_text(s))
     t = _PLACEHOLDER_RE.sub(" ", t)
-    runs = _digit_runs(t)
+    runs = _digit_runs(t) + [m.group().replace("-", "") for m in _HYPHEN_CHAIN.finditer(t)]
     candidates = runs + _grouped_runs(t)
-    if any(_is_phone(r) for r in candidates + _phone_runs(t)):
+    spelt = [m.group().replace(" ", "") for m in _SPELT_DIGITS.finditer(t)]
+    if any(_is_phone(r) for r in candidates + _phone_runs(t) + spelt):
         return "ng_phone"
     if any(len(r) == 11 for r in candidates):
         return "nin"
