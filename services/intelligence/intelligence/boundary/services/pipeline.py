@@ -83,19 +83,22 @@ def job_handlers(
     """The pipeline's job handlers and the run_query runner (whose
     readiness gates every job, and which the caller closes), or (None,
     None) without a database: no job is taken then. The model client is
-    the one INTELLIGENCE_MODEL_CLIENT names, the learning client the one
-    INTELLIGENCE_LEARNING_CLIENT names (each stub only in development)."""
+    the one INTELLIGENCE_MODEL_CLIENT names, behind a router that adds one
+    cloud client per enabled provider (none by default; the route of each
+    job is core's, from the claimed row). The learning client is the one
+    INTELLIGENCE_LEARNING_CLIENT names (each stub only in development);
+    approve_correction gets no router."""
     if database is None:
         return None, None
     from intelligence.boundary.jobs.approve_correction import ApproveCorrection
     from intelligence.boundary.jobs.run_query import RunQuery
     from intelligence.boundary.learning import build_learning_client
-    from intelligence.boundary.models import build_model_client
+    from intelligence.boundary.models import build_model_router
 
     learning_client = build_learning_client(settings)  # refuses a bad one before any thread
     runner = RunQuery(
         database,
-        build_model_client(settings),
+        build_model_router(settings),
         clock=clock,
         max_concurrency=settings.max_concurrency,
     )

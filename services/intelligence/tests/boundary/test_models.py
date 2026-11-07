@@ -5,6 +5,7 @@ Docker and no model weights. Every question, chunk and id is synthetic.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -361,3 +362,165 @@ async def test_slot_held_until_the_thread_finishes() -> None:
         assert not sem.locked()
     slot.release()  # a second release is a no-op, never an extra slot
     assert sem._value == 1  # type: ignore[attr-defined]
+
+
+# --- the cloud route's seams (plan Task 9) ------------------------------------------------
+
+
+def test_generation_cloud_fields_default_to_local() -> None:
+    g = Generation()
+    assert dict(g.versions) == {}
+    assert g.egress == "none"
+    assert g.cloud_outcome is None
+    assert (g.tokens_in, g.tokens_out) == (0, 0)
+
+
+def test_local_clients_accept_and_ignore_call() -> None:
+    stub = StubModelClient()
+    g = stub.generate(QUESTION, {}, None, [_chunk()], call=object())  # type: ignore[arg-type]
+    assert g.available is True and g.cloud_outcome is None and g.egress == "none"
+    cca = StubCCA()
+    client = _orchestrator_client(cca, PassingHGA())
+    g = client.generate(QUESTION, {}, None, [_chunk()], call=object())  # type: ignore[arg-type]
+    assert g.available is True and g.cloud_outcome is None
+
+
+def test_verify_with_is_the_local_verification() -> None:
+    from intelligence.boundary.models import _verify_with
+
+    hga = PassingHGA()
+    client = _orchestrator_client(StubCCA(), hga)
+    g = client.generate(QUESTION, {}, None, [_chunk()])
+    via_client = client.verify(g)
+    via_function = _verify_with(g.handle, g)
+    assert via_client == via_function
+    assert via_function.verified is True and via_function.trust_score == 0.91
+
+
+def test_local_parts_is_default_orchestrators(monkeypatch: pytest.MonkeyPatch) -> None:
+    from intelligence.boundary import models
+
+    sentinel = (lambda chunks: None, {"cca": "g", "dense": "d", "nli": "n"})
+    monkeypatch.setattr(models, "local_parts", lambda: sentinel)
+    client = models.default_orchestrator()
+    assert client.model_versions() == {"cca": "g", "dense": "d", "nli": "n"}
+
+
+# --- the router (plan Task 10) -----------------------------------------------------------
+
+
+class _Closable(StubModelClient):
+    def __init__(self, transport: object) -> None:
+        super().__init__()
+        self.transport = transport
+        self.closed = 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_router_picks_one_client_per_job() -> None:
+    from intelligence.boundary.models import ModelRouter
+
+    local = StubModelClient()
+    shared = object()
+    anthropic, openai = _Closable(shared), _Closable(shared)
+    router = ModelRouter(local, {"anthropic": anthropic, "openai": openai})
+    assert router.client_for("local") == (local, "local")
+    assert router.client_for("cloud:anthropic") == (anthropic, "anthropic")
+    assert router.client_for("cloud:openai") == (openai, "openai")
+    router.close()  # the one shared transport is closed once
+    assert anthropic.closed + openai.closed == 1
+
+
+@pytest.mark.parametrize(
+    ("route", "provider"),
+    [("cloud:xai", "xai"), ("cloud:gemini", "unknown"), ("", "unknown"), ("LOCAL", "unknown")],
+)
+def test_router_unknown_route_is_unconfigured(
+    route: str, provider: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from intelligence.boundary import telemetry
+    from intelligence.boundary.models import ModelRouter, _Unconfigured
+
+    local = StubModelClient()
+    router = ModelRouter(local, {"anthropic": StubModelClient()})
+    client, got = router.client_for(route)
+    assert type(client) is _Unconfigured and got == provider
+    assert client.mask("x") == StubModelClient.MASKED  # the local masker
+    reader = InMemoryMetricReader()
+    stop = telemetry.setup(metric_reader=reader)
+    try:
+        with caplog.at_level(logging.ERROR):
+            g = client.generate("q", {}, None, [_chunk()], call=None)
+        data = reader.get_metrics_data()
+    finally:
+        stop()
+    assert g.available is False and g.cloud_outcome == "unconfigured"
+    assert g.failed_agents == ("CCA",) and dict(g.versions) == {} and g.egress == "none"
+    assert local.calls["generate"] == 0  # no local fallback
+    v = client.verify(g)
+    assert v.decision == "ESCALATE" and v.trust_score is None and v.verified is False
+    assert "cca" not in client.model_versions()
+    assert [r.getMessage() for r in caplog.records] == [f"cloud.unconfigured provider={provider}"]
+    pts = [
+        p
+        for rm in data.resource_metrics
+        for sm in rm.scope_metrics
+        for m in sm.metrics
+        if m.name == "mhai_cloud_alerts_total"
+        for p in m.data.data_points
+    ]
+    assert [(p.attributes["kind"], p.value) for p in pts] == [("unconfigured", 1)]
+
+
+def test_runquery_accepts_plain_client() -> None:
+    from intelligence.boundary.jobs.run_query import RunQuery
+    from intelligence.boundary.models import ModelRouter
+
+    stub = StubModelClient()
+    rq = RunQuery(None, stub)
+    try:
+        assert isinstance(rq._router, ModelRouter)
+        assert rq._router.client_for("local") == (stub, "local")
+        # A plain client has no cloud client: a cloud row is unconfigured.
+        assert rq._router.client_for("cloud:anthropic")[0] is not stub
+    finally:
+        rq.close()
+
+
+def test_build_model_router_without_cloud_is_the_local_client() -> None:
+    from intelligence.boundary.models import ModelRouter, build_model_router
+
+    s = WorkerSettings.from_env({**BASE_ENV, "INTELLIGENCE_MODEL_CLIENT": "stub"})
+    router = build_model_router(s)
+    assert isinstance(router, ModelRouter) and isinstance(router.local, StubModelClient)
+    assert type(router.client_for("cloud:anthropic")[0]).__name__ == "_Unconfigured"
+
+
+def test_stub_parts_retrieve_shared_only_and_verify_like_the_stub() -> None:
+    from intelligence.boundary.models import _verify_with, stub_parts
+
+    build, versions = stub_parts()
+    assert versions == {"dense": "stub", "nli": "stub"}
+    patient = KBChunk("KB#0009", "synthetic lab fluids", "lab", "P-SYN-1", "")
+    orch = build([_chunk(), patient])
+    results = orch.rag_cca.retriever.retrieve("fluids guideline", top_k=5, patient_id=None)
+    assert [r.chunk.chunk_id for r in results] == ["KB#0001"]
+    g = Generation(question="q", response="r", available=True, handle=orch)
+    v = _verify_with(orch, g)
+    assert v.verified is True and v.decision == "PASS" and v.trust_score == 0.9
+
+
+def test_plain_tree_drops_the_tag_and_copies() -> None:
+    from intelligence.boundary.cloud.gate import TaggingMasker
+    from intelligence.boundary.jobs.run_query import _plain_tree
+
+    m = TaggingMasker()
+    tree = {"a": m.mask("x"), "b": [m.mask("y"), 1, None, {"c": 2.5}], "d": True}
+    plain = _plain_tree(tree)
+    assert plain == {"a": "x", "b": ["y", 1, None, {"c": 2.5}], "d": True}
+    assert type(plain["a"]) is str and type(plain["b"][0]) is str
+    assert plain["b"] is not tree["b"] and plain["b"][3] is not tree["b"][3]

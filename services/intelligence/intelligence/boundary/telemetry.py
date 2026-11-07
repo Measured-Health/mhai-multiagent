@@ -249,6 +249,8 @@ class _State:
         settle_failures: Any = None,
         budget_alerts: Any = None,
         settle_clamped: Any = None,
+        cloud_alerts: Any = None,
+        context_dropped: Any = None,
     ) -> None:
         self.tracer = tracer
         self.refusals = refusals
@@ -256,6 +258,8 @@ class _State:
         self.settle_failures = settle_failures
         self.budget_alerts = budget_alerts
         self.settle_clamped = settle_clamped
+        self.cloud_alerts = cloud_alerts
+        self.context_dropped = context_dropped
 
 
 _NOOP = _State(trace.NoOpTracer(), None, None)
@@ -330,8 +334,26 @@ def setup(
         "mhai_cloud_settle_clamped_total",
         description="Cloud settles whose reported use was out of range, settled as all reserved.",
     )
+    # The cloud client (plan Task 9): alerts by provider and kind
+    # (auth_failed, unconfigured), and patient context keys dropped by the
+    # CloudContext allow-list.
+    cloud_alerts = meter.create_counter(
+        "mhai_cloud_alerts_total",
+        description="Cloud calls that need a person: a key refused, or a provider not enabled.",
+    )
+    context_dropped = meter.create_counter(
+        "mhai_cloud_context_dropped_total",
+        description="Patient context keys the cloud allow-list dropped.",
+    )
     state = _State(
-        tp.get_tracer(SCOPE), refusals, verify, settle_failures, budget_alerts, settle_clamped
+        tp.get_tracer(SCOPE),
+        refusals,
+        verify,
+        settle_failures,
+        budget_alerts,
+        settle_clamped,
+        cloud_alerts,
+        context_dropped,
     )
     _state = state
 
@@ -516,6 +538,18 @@ def record_cloud_settle_clamped() -> None:
     c = _state.settle_clamped
     if c is not None:
         c.add(1)
+
+
+def record_cloud_alert(provider: str, kind: str) -> None:
+    c = _state.cloud_alerts
+    if c is not None:
+        c.add(1, {"provider": _label(provider), "kind": _label(kind)})
+
+
+def record_cloud_context_dropped(n: int) -> None:
+    c = _state.context_dropped
+    if c is not None and n > 0:
+        c.add(n)
 
 
 def record_cloud_budget_alert(provider: str) -> None:
