@@ -4,6 +4,7 @@
 - **Date:** 2026-10-28
 - **Context:** [intelligence meeting notes, 28 Oct](../meetings/2026-10-28-intelligence-meeting.md). The product owner approved writing this design and adding the TODO and tracker entries.
 - **Amended 2026-11-03 (ADR 0013):** [ADR 0013](../adr/0013-allow-masked-text-to-cloud-language-models.md) lets masked text from clinical questions go to a cloud language model for opted-in hospitals. **It does not change this design:** documents, page images, OCR text and extraction stay self-hosted, and the model rules in §2 and §6.1 stand for documents.
+- **Amended 2026-11-07 (ADR 0014):** [ADR 0014](../adr/0014-separate-emr-service-and-document-route.md) and the [EMR integration design](2026-11-07-emr-integration-design.md) §9.0 move normalisation to the emr service. This pipeline **proposes codes for review; normalisation is by the emr service.** `finalise_document` writes the reviewed values as raw records (`emr.raw_records`, `source_kind = document`); `mhai_worker` gets `INSERT` on `emr.raw_records` only, nothing on the canonical tables or `emr.patients`. The `records.v1.<hospital>.created` event in §3 becomes `emr.v1.<hid>.fetched`, published by core after `finalise_document`; only the emr normaliser publishes `records.v1`. §2 and §10 carry notes.
 - **Builds on:**
   - [ADR 0009](../adr/0009-integrate-many-emr-systems.md): the FHIR-based canonical model, normalisation in one place, provenance, the per-hospital patient index, and unmapped codes kept and flagged.
   - [Intelligence boundary design](2026-10-28-intelligence-boundary-design.md): the `ingest_document` job type, request tokens, `with_hospital`, the operations table, error codes, the audit outbox.
@@ -28,6 +29,7 @@ What exists today: `services/intelligence/intelligence/agents/dia.py` is a resea
 **Goals**
 - A scan becomes canonical records (ADR 0009) that a person has checked wherever the model is unsure, and wherever clinical safety needs it.
 - Every value traces back to its document, page and region, and to the exact model weights (`model_versions`) that read it.
+- *(Amended 7 Nov, ADR 0014.)* The pipeline proposes codes for review and writes reviewed raw records; the emr service's one normaliser turns them into canonical records (EMR integration design §9.0).
 - Patient documents never leave our servers. Only self-hosted, open-weight models are used.
 - A repeatable, auditable path from a notebook to production weights, with rollback.
 
@@ -78,7 +80,7 @@ core ──jobs.v1.<hospital>.finalise_document──▶ pipeline worker
  12. re-normalise corrected values, re-validate
  13. one transaction: canonical records with provenance + status completed + outbox
                  │
-core publishes records.v1.<hospital>.created → EMR abnormality screening (alert rules, ADR 0009 rule 7)
+core publishes emr.v1.<hid>.fetched (amended 7 Nov, ADR 0014; was records.v1.<hospital>.created) → emr normaliser → EMR abnormality screening (alert rules, ADR 0009 rule 7)
                                              → notifications service delivers any alert
 ```
 
@@ -551,7 +553,7 @@ Actors: clinicians and hospital staff (upload, review), hospital admins, platfor
 | Phase | Ships | Gate |
 |---|---|---|
 | **0. Foundations** | the evaluation harness and synthetic set v1 (§6.2); the promotion CLI, workflow and model store (§7); `models.lock` and verify-at-load; the GPU host (a minimal piece of the parked performance plan) | B16–B23 pass; synthetic data only |
-| **1. Typed lab reports** | upload, scan, sandbox, `ingest_document`, OCR, extraction of `document`, `patient` and `observations`; normalisation to LOINC and UCUM; review of **every** document; `finalise_document`; `records.v1` events into EMR abnormality screening | Pipeline evaluation done, the §6.3 phase 1 thresholds met, clinical sign-off; Plan 3 boundary, documents service and canonical tables in place |
+| **1. Typed lab reports** | upload, scan, sandbox, `ingest_document`, OCR, extraction of `document`, `patient` and `observations`; codes proposed for review (normalisation by the emr service, ADR 0014); review of **every** document; `finalise_document` writes reviewed raw records; `emr.v1.<hid>.fetched` events to the emr normaliser and EMR abnormality screening | Pipeline evaluation done, the §6.3 phase 1 thresholds met, clinical sign-off; Plan 3 boundary, documents service and canonical tables in place |
 | **2. Typed letters and charts** | discharge summaries, referral letters, medication charts: `conditions`, `medications`, `encounter`, `notes`; SNOMED/ICD-10 and RxNorm/ATC; poor scans and phone photos | the phase 1 thresholds on these slices; clinician review of diagnoses and medications |
 | **3. Handwriting** | handwritten and mixed documents; a fine-tune on synthetic handwriting; every handwritten field reviewed | §6.3 phase 3 thresholds |
 | **4. Less review** | auto-acceptance of high-band, grounded, unflagged fields of chosen types; corrections into training with consent (§5.5) | 3 months of production metrics showing a silent error rate ≤ 0.5% per field type; clinical, privacy and legal sign-off |

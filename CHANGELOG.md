@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- EMR integration, PR 1 (docs): ADR 0009 accepted; ADR 0014 records the
+  separate `services/emr/` with its own credentials and egress, and the
+  reviewed route for scanned records; the document pipeline design is
+  amended (normalisation by the emr service, `emr.v1.<hid>.fetched`);
+  frontend requirements §12.1 and §14.11 filed; TODO lists the people items
+  H1–H9 and the live-use gates.
 - Cloud model providers, part A: the per-hospital model policy (OpenAPI
   1.10.0, additive). Migration 00018 adds `hospital_model_policy` (off by
   default; no row means local), the model route set by core on each new
