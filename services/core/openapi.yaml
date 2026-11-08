@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.12.0"
+  version: "1.13.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1267,6 +1267,145 @@ paths:
               schema: { $ref: "#/components/schemas/GuardrailPeriodsOut" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/analytics:
+    get:
+      operationId: getPlatformAnalytics
+      summary: Platform analytics across hospitals for the latest finished calendar period, from its one stored guarded snapshot.
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        New (Plan 7c spec §7.1, rulings R41a to R41a-5). `period` is `week`,
+        `month` or `quarter` (UTC; a week is month-aligned, days 1–7, 8–14,
+        15–21 and 22 to the month's end); anything else is 422
+        `validation_failed`. `from` and `to` bound the latest published
+        period of that kind. Every figure is read from that period's one
+        stored snapshot, computed once after the period ended (`updated_at`),
+        so every read of a period is identical; no read computes a figure.
+
+        `use`, `quality` and `hospitals` each carry their data, or
+        `{unavailable: true}` when the period's snapshot couldn't be
+        computed or read. Before the first period of a kind is published
+        (only periods that start at or after the 7c-1 release are), `from`
+        and `to` are null and each of those areas is `{not_yet: true,
+        first_from}`, the start of the first period that will be. `alerts`
+        is null (no patient alerts yet). `changes` is `{unavailable: true}`
+        until What changed is built (Plan 7c-3).
+
+        Rows are the hospitals the period lists. Every value is guarded,
+        `{value, suppressed}`, as on `/platform/guardrails/periods`, whose
+        cells for the same period are the same, shown and hidden. The
+        confidence mix is the HGA decision (high pass, medium regenerate,
+        low escalate); `needs_review_share` is escalated answers over
+        answers; `agreement_rate` is agreed reviews over reviews. Each
+        `median` is the median over the hospitals whose value is shown (a
+        count median strictly between 0 and 5 is hidden; none shown is
+        `{value: null, suppressed: false}`). `trend` is the all-hospitals
+        cell (questions for Use, the needs-review share for Quality) of each
+        published period of the latest 12 weeks, 12 months or 8 quarters,
+        oldest first: one period each, never a total over several; a period
+        whose snapshot couldn't be computed is hidden.
+
+        Thirty reads a minute per session, shared with the series routes,
+        then 429 `rate_limited`. Not recorded in the audit log (aggregates
+        about no person).
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: period, in: query, required: true, schema: { type: string, enum: [week, month, quarter] } }
+      responses:
+        "200":
+          description: The latest published period's analytics.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/analytics/hospitals/{id}/series:
+    get:
+      operationId: getPlatformAnalyticsHospitalSeries
+      summary: One hospital's stored figure for each of the latest periods, with the other hospitals' median.
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        New (Plan 7c spec §7.2). `measure` is `questions_per_clinician` or
+        `needs_review_share` (the Critical measures wait for patient alerts:
+        422 `validation_failed`, as is any other value); `period` is `week`,
+        `month` or `quarter`. `points` are the hospital's stored cell for
+        each published period of the latest 12 weeks, 12 months or 8
+        quarters, oldest first, one period each: hidden whole where the
+        period's snapshot couldn't be computed, `{value: null, suppressed:
+        false}` where the period doesn't list the hospital. `median` is the
+        median of the other hospitals' shown values for that period, or
+        null. An id that isn't a canonical uuid, or names no hospital in a
+        published period, is 404 `not_found`. Thirty reads a minute per
+        session, shared with `/platform/analytics`.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: measure, in: query, required: true, schema: { type: string, enum: [questions_per_clinician, needs_review_share] } }
+        - { name: period, in: query, required: true, schema: { type: string, enum: [week, month, quarter] } }
+      responses:
+        "200":
+          description: The series.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsSeriesOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/analytics/changes/{id}/series:
+    get:
+      operationId: getPlatformAnalyticsChangeSeries
+      summary: A change's series. No change exists until What changed is built (Plan 7c-3), so every id is 404.
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        New (Plan 7c spec §7.2). `period` is `week`, `month` or `quarter`
+        (422 `validation_failed` otherwise). Until What changed is built
+        (Plan 7c-3) there is no change, so every id is 404 `not_found`; the
+        shape then is `AnalyticsSeriesOut`, with `hospital` null for a
+        change across all hospitals. Thirty reads a minute per session,
+        shared with `/platform/analytics`.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: period, in: query, required: true, schema: { type: string, enum: [week, month, quarter] } }
+      responses:
+        "200":
+          description: The series (never, until Plan 7c-3).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsSeriesOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
@@ -2575,6 +2714,190 @@ components:
                 required: [hospital]
                 properties:
                   hospital: { $ref: "#/components/schemas/PersonRef" }
+    GuardedNumber:
+      type: object
+      description: "A ratio, median or review time under the small-group rule: hidden is `{value: null, suppressed: true}`, nothing to show `{value: null, suppressed: false}`."
+      required: [value, suppressed]
+      additionalProperties: false
+      properties:
+        value: { type: number, minimum: 0, nullable: true }
+        suppressed: { type: boolean }
+    AnalyticsUnavailable:
+      type: object
+      required: [unavailable]
+      additionalProperties: false
+      properties:
+        unavailable: { type: boolean, enum: [true] }
+    AnalyticsNotYet:
+      type: object
+      description: Before the first published period of the kind (F19).
+      required: [not_yet, first_from]
+      additionalProperties: false
+      properties:
+        not_yet: { type: boolean, enum: [true] }
+        first_from: { type: string, format: date-time }
+    AnalyticsCountPoint:
+      type: object
+      required: [start, value]
+      additionalProperties: false
+      properties:
+        start: { type: string, format: date-time }
+        value: { $ref: "#/components/schemas/GuardedCount" }
+    AnalyticsSharePoint:
+      type: object
+      required: [start, value]
+      additionalProperties: false
+      properties:
+        start: { type: string, format: date-time }
+        value: { $ref: "#/components/schemas/GuardedShare" }
+    AnalyticsConfidence:
+      type: object
+      required: [high, medium, low]
+      additionalProperties: false
+      properties:
+        high: { $ref: "#/components/schemas/GuardedCount" }
+        medium: { $ref: "#/components/schemas/GuardedCount" }
+        low: { $ref: "#/components/schemas/GuardedCount" }
+    AnalyticsConfidenceMedian:
+      type: object
+      required: [high, medium, low]
+      additionalProperties: false
+      properties:
+        high: { $ref: "#/components/schemas/GuardedNumber" }
+        medium: { $ref: "#/components/schemas/GuardedNumber" }
+        low: { $ref: "#/components/schemas/GuardedNumber" }
+    AnalyticsUse:
+      type: object
+      required: [updated_at, rows, median, trend]
+      additionalProperties: false
+      properties:
+        updated_at: { type: string, format: date-time }
+        rows:
+          type: array
+          items:
+            type: object
+            required: [hospital, questions, active_clinicians, questions_per_clinician]
+            additionalProperties: false
+            properties:
+              hospital: { $ref: "#/components/schemas/PersonRef" }
+              questions: { $ref: "#/components/schemas/GuardedCount" }
+              active_clinicians: { $ref: "#/components/schemas/GuardedCount" }
+              questions_per_clinician: { $ref: "#/components/schemas/GuardedNumber" }
+        median:
+          type: object
+          required: [questions, active_clinicians, questions_per_clinician]
+          additionalProperties: false
+          properties:
+            questions: { $ref: "#/components/schemas/GuardedNumber" }
+            active_clinicians: { $ref: "#/components/schemas/GuardedNumber" }
+            questions_per_clinician: { $ref: "#/components/schemas/GuardedNumber" }
+        trend: { type: array, items: { $ref: "#/components/schemas/AnalyticsCountPoint" } }
+    AnalyticsQuality:
+      type: object
+      required: [updated_at, rows, median, trend]
+      additionalProperties: false
+      properties:
+        updated_at: { type: string, format: date-time }
+        rows:
+          type: array
+          items:
+            type: object
+            required: [hospital, answers, needs_review_share, confidence, reviews, agreement_rate, median_review_hours]
+            additionalProperties: false
+            properties:
+              hospital: { $ref: "#/components/schemas/PersonRef" }
+              answers: { $ref: "#/components/schemas/GuardedCount" }
+              needs_review_share: { $ref: "#/components/schemas/GuardedShare" }
+              confidence: { $ref: "#/components/schemas/AnalyticsConfidence" }
+              reviews: { $ref: "#/components/schemas/GuardedCount" }
+              agreement_rate: { $ref: "#/components/schemas/GuardedShare" }
+              median_review_hours: { $ref: "#/components/schemas/GuardedNumber" }
+        median:
+          type: object
+          required: [answers, needs_review_share, confidence, reviews, agreement_rate, median_review_hours]
+          additionalProperties: false
+          properties:
+            answers: { $ref: "#/components/schemas/GuardedNumber" }
+            needs_review_share: { $ref: "#/components/schemas/GuardedShare" }
+            confidence: { $ref: "#/components/schemas/AnalyticsConfidenceMedian" }
+            reviews: { $ref: "#/components/schemas/GuardedNumber" }
+            agreement_rate: { $ref: "#/components/schemas/GuardedShare" }
+            median_review_hours: { $ref: "#/components/schemas/GuardedNumber" }
+        trend: { type: array, items: { $ref: "#/components/schemas/AnalyticsSharePoint" } }
+    AnalyticsHospitals:
+      type: object
+      required: [updated_at, rows]
+      additionalProperties: false
+      properties:
+        updated_at: { type: string, format: date-time }
+        rows:
+          type: array
+          items:
+            type: object
+            required: [hospital, size]
+            additionalProperties: false
+            properties:
+              hospital: { $ref: "#/components/schemas/PersonRef" }
+              size:
+                type: object
+                description: "`staff` is under the small-group rule until the privacy lead decides (spec §16, Q4)."
+                required: [staff, active_clinicians, questions]
+                additionalProperties: false
+                properties:
+                  staff: { $ref: "#/components/schemas/GuardedCount" }
+                  active_clinicians: { $ref: "#/components/schemas/GuardedCount" }
+                  questions: { $ref: "#/components/schemas/GuardedCount" }
+    AnalyticsOut:
+      type: object
+      description: Plan 7c spec §7.1 (New).
+      required: [period, from, to, changes, use, alerts, quality, hospitals]
+      additionalProperties: false
+      properties:
+        period: { type: string, enum: [week, month, quarter] }
+        from: { type: string, format: date-time, nullable: true }
+        to: { type: string, format: date-time, nullable: true }
+        changes: { $ref: "#/components/schemas/AnalyticsUnavailable" }
+        use:
+          oneOf:
+            - $ref: "#/components/schemas/AnalyticsUse"
+            - $ref: "#/components/schemas/AnalyticsUnavailable"
+            - $ref: "#/components/schemas/AnalyticsNotYet"
+        alerts: { type: object, nullable: true, additionalProperties: false, description: Always null until patient alerts exist (spec §3, F4). }
+        quality:
+          oneOf:
+            - $ref: "#/components/schemas/AnalyticsQuality"
+            - $ref: "#/components/schemas/AnalyticsUnavailable"
+            - $ref: "#/components/schemas/AnalyticsNotYet"
+        hospitals:
+          oneOf:
+            - $ref: "#/components/schemas/AnalyticsHospitals"
+            - $ref: "#/components/schemas/AnalyticsUnavailable"
+            - $ref: "#/components/schemas/AnalyticsNotYet"
+    AnalyticsSeriesOut:
+      type: object
+      description: Plan 7c spec §7.2 (New).
+      required: [measure, hospital, points]
+      additionalProperties: false
+      properties:
+        measure: { type: string, enum: [questions_per_clinician, needs_review_share] }
+        hospital:
+          allOf:
+            - $ref: "#/components/schemas/PersonRef"
+          nullable: true
+        points:
+          type: array
+          items:
+            type: object
+            required: [start, value, median]
+            additionalProperties: false
+            properties:
+              start: { type: string, format: date-time }
+              value:
+                description: "`GuardedNumber` for `questions_per_clinician` (two decimals), `GuardedShare` for `needs_review_share` (four)."
+                oneOf:
+                  - $ref: "#/components/schemas/GuardedNumber"
+                  - $ref: "#/components/schemas/GuardedShare"
+              median: { type: number, nullable: true }
     GuardrailsOut:
       type: object
       description: Plan 4 spec §6.3 (New).

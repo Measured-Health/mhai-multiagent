@@ -104,7 +104,8 @@ func (d Deps) log() *slog.Logger {
 
 // Register adds the audit log reads, the chain check and the auditors'
 // writes (verify.go), system health (health.go), the failed jobs (jobs.go),
-// the guardrail statistics (guardrails.go), the hospitals' cloud model
+// the guardrail statistics (guardrails.go), the analytics reads
+// (analytics.go, analytics_series.go), the hospitals' cloud model
 // policies (modelpolicy.go) and the EMR connections (emrconnections.go).
 func Register(m *authz.Mux, d Deps) {
 	read := authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin, authz.RoleAuditor}}
@@ -116,6 +117,7 @@ func Register(m *authz.Mux, d Deps) {
 	registerHealth(m, d)
 	registerJobs(m, d)
 	registerGuardrails(m, d)
+	registerAnalytics(m, d)
 	registerModelPolicy(m, d)
 	registerEMRConnections(m, d)
 }
