@@ -53,6 +53,7 @@ Ops items:
 People items:
 - [ ] **H1** (product owner with Havana): a structured source for labs, then vitals and medications (export or FHIR), its frequency, and a synthetic or de-identified layout sample. Blocks PR 11 and real alerts for Havana.
 - [ ] **H2** (our team, with Havana's agreement): the archive's JSON "files added since" listing, a per-integration read-only key, a removed-files listing. Blocks PR 12.
+- [ ] **Ops, before egress-emr runs on a deployed host (EMR PR 4):** publish the emr image (`ghcr.io/measured-health/mhai-multiagent-emr`, not built by CI yet), write K_proxy as `secrets/emr-proxy.key` (0400, owned by 65532; `emr keys proxy-init`), and set `EGRESS_EMR_INTERNAL_CIDRS` to the `backend` network's subnet. Owner: ops.
 - [ ] **H3** (product owner, ops): choose and provision the managed secret store (in-region) and the emr service's identity. Blocks Task 12 and any production use of PR 3.
 - [ ] **H4** (a named clinical lead and a second clinician): rule set v1, breaker and grouped-mode values, the paused-source wording, map review, the shadow review, names and MRNs in alerts, and the clinical reviewers for `CODEOWNERS`. Blocks Task 30, activation and live use.
 - [ ] **H5** (privacy lead and a Nigerian data protection lawyer): DPIA, processing agreement addendum, the hospital's written confirmation that its call process stays primary, NDPA basis, data location, retention values. Blocks any real data.
