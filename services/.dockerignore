@@ -11,4 +11,3 @@ nats
 **/*.pem
 **/*.key
 **/*.nk
-**/secrets
