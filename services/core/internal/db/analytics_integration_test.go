@@ -262,7 +262,10 @@ func TestFreezeOncePerPeriod(t *testing.T) {
 	_, pool := shared(t)
 	ctx := context.Background()
 	setEpoch(t, pool, time.Now().AddDate(0, -6, 0))
-	w := recentWeeks()[5]
+	// A week of the month before the latest: never one of
+	// TestFreezeParentIsSumOfChildren's, which freezes the latest month's
+	// weeks first (recentWeeks()[5] was one of them from the 22nd on).
+	w := calendar.Children(calendar.Prev(calendar.Latest(calendar.Month, time.Now())))[1]
 	h, _ := seedHospital(t, pool, uniqueCode("O"))
 	u := seedClinician(t, pool, h)
 	for i := 0; i < 6; i++ {

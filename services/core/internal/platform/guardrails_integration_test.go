@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,12 +35,37 @@ var rateKeys = []string{"answers", "pass", "regenerate", "escalate", "degraded",
 
 // published is the latest finished month, its weeks published by the real
 // scheduler once, with hospitals of every size (counts of 1 to 4 included)
-// seeded before.
+// seeded before. The scheduler's clock is pinned to the month's end, so the
+// latest stored week and month are always seeded ones, whatever the date.
 var calFixture struct {
 	once  sync.Once
 	month calendar.Period
 	hosp  []uuid.UUID
 }
+
+// fixtureNow is the date the fixture is built for: the real clock, or
+// MHAI_TEST_NOW (RFC 3339, not in the future and within the freeze's 118
+// days) to replay another day.
+func fixtureNow(t *testing.T) time.Time {
+	t.Helper()
+	v := os.Getenv("MHAI_TEST_NOW")
+	if v == "" {
+		return time.Now()
+	}
+	at, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		t.Fatalf("MHAI_TEST_NOW: %v", err)
+	}
+	return at
+}
+
+// pinnedClock is the database source with the scheduler's clock fixed.
+type pinnedClock struct {
+	scheduler.DB
+	at time.Time
+}
+
+func (c pinnedClock) Now(context.Context) (time.Time, error) { return c.at, nil }
 
 func seedQuestionsAt(t *testing.T, h, by uuid.UUID, at time.Time, decision string, degraded bool, n int) {
 	t.Helper()
@@ -61,7 +87,7 @@ func publish(t *testing.T) {
 	t.Helper()
 	calFixture.once.Do(func() {
 		ctx := context.Background()
-		m := calendar.Latest(calendar.Month, time.Now())
+		m := calendar.Latest(calendar.Month, fixtureNow(t))
 		calFixture.month = m
 		if _, err := super.Exec(ctx, `UPDATE analytics_epoch SET released_at = $1`, m.From); err != nil {
 			t.Fatal(err)
@@ -81,9 +107,16 @@ func publish(t *testing.T) {
 				seedQuestionsAt(t, h, u.id, at, "ESCALATE", true, c[3])
 			}
 		}
-		s := scheduler.Scheduler{Pool: app, Builder: scheduler.Builder{Src: scheduler.DB{Pool: app}}}
-		if _, err := s.Tick(ctx); err != nil {
+		// The month has just finished: its weeks and itself are due, nothing
+		// later, so no unseeded week is the latest stored one.
+		src := pinnedClock{DB: scheduler.DB{Pool: app}, at: m.To.Add(calendar.Grace)}
+		s := scheduler.Scheduler{Pool: app, Builder: scheduler.Builder{Src: src}}
+		done, err := s.Tick(ctx)
+		if err != nil {
 			t.Fatalf("scheduler: %v", err)
+		}
+		if want := len(calendar.Children(m)) + 1; len(done) != want {
+			t.Fatalf("scheduler stored %v, want the %d weeks of %v and the month", done, want-1, m)
 		}
 	})
 }
@@ -244,7 +277,7 @@ func TestGuardrailsCalendarPeriods(t *testing.T) {
 	// A quarter, stored by hand (the superuser passes the insert policy):
 	// the month's body, relabelled.
 	body, _, _ := stored(t, calendar.Month)
-	q := calendar.Latest(calendar.Quarter, time.Now())
+	q := calendar.Latest(calendar.Quarter, fixtureNow(t))
 	body["kind"], body["from"], body["to"] = "quarter", q.From.Format(time.DateOnly), q.To.Format(time.DateOnly)
 	raw, _ := json.Marshal(body)
 	if _, err := super.Exec(ctx, `INSERT INTO analytics_snapshots (kind, period_from, period_to, state, body) VALUES ('quarter', $1::date, $2::date, 'ok', $3::jsonb)`,
