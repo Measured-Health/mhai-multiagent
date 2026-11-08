@@ -64,12 +64,11 @@ func (s *system) v(g string) int {
 	return s.vars[g]
 }
 
-// row is an equation total − Σ parts = 0 over the groups (zero groups are
+// eqn is an equation total − Σ parts = 0 over the groups (zero groups are
 // constants and left out).
 type eqn struct {
 	vars    []int
 	coefs   []int64
-	members [][]int // the parts not known to be 0
 	hidden  [][]int // the parts hidden (or never sent): the whole-set rule's members
 }
 

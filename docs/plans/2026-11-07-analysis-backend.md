@@ -75,6 +75,7 @@ The constraints of Plans 2, 3, 4 and 7c still hold. Identity comes only from the
 13. **Drill keys are derived at render time,** not stored in bodies: `HMAC(drill key, hospital ‖ period id ‖ canonical filters ‖ view ‖ row key)`, base64url, 43 characters. They are set only on a shown cell of 5 or more. With the key unchanged, a body is served byte-identically (P3). Rotating the key turns old keys into 422 `too_small`.
 14. **`mhai_analysis_cells` returns one view's raw values** as the design's signature says. The orchestrator calls it five times inside one `REPEATABLE READ` transaction, so the five views see one snapshot.
 15. **`GET /analysis/filters` without `period`** answers the `periods` list and the latest frozen month's lists. With `period` and `start`, it answers that period's lists (M4).
+16. **A location and a setting together are refused** (422 `validation_failed`, `disclose.CheckFilters`; PR 3). A location has its setting, so the pair is the location alone or nothing, and its two parents (`{location}` and `{setting}`) can split the unfiltered view between them: P2 found a hidden cell solvable within that family. Refused, those parents share no family, and what is left between them is part of R-A1, which P2 measures. The design treats every filter pair alike; mhai-web's picker should not offer the pair (H6).
 
 ## Conflicts found (for the coordinator)
 

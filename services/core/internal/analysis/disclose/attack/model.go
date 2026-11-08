@@ -81,6 +81,8 @@ type Cell struct {
 	Shown bool
 	Value int64
 	Truth int64
+	// Dist: a count of distinct patients (a drill can list them).
+	Dist bool
 }
 
 type member struct {
@@ -484,10 +486,14 @@ func (m *Model) read(di int) error {
 	addSet := func(name string, ms ...member) {
 		m.sets = append(m.sets, pset{di, name, ms})
 	}
+	distCell := func(name string, v any, box []term) (int, bool) {
+		i, sh := cell(name, v, box)
+		m.Cells[i].Dist = true
+		return i, sh
+	}
 	pat := m.dist(P, f, nil, 0, -1)
-	var patCell int
 	for _, v := range []string{"prevalence", "affected", "co-occurring", "findings", "quality"} {
-		patCell, _ = cell(v+".patients", views[v]["patients"], pat)
+		distCell(v+".patients", views[v]["patients"], pat)
 	}
 
 	// Prevalence.
@@ -567,7 +573,7 @@ func (m *Model) read(di int) error {
 				key = strOr(ro[part.key])
 				d = map[string]int{"by_age": dAge, "by_sex": dSex, "by_setting": dSetting, "by_specialty": dSpec}[part.field]
 			}
-			i, _ := cell(part.field+"."+key, ro["patients"], m.dist(P, f, map[int]string{d: key}, 0, -1))
+			i, _ := distCell(part.field+"."+key, ro["patients"], m.dist(P, f, map[int]string{d: key}, 0, -1))
 			ms = append(ms, mem(i))
 			if part.field == "by_location" && key != "" {
 				lo, _ := ro["location"].(obj)
@@ -620,8 +626,8 @@ func (m *Model) read(di int) error {
 		name := "pair " + m.w.Dims.Conditions[a] + "+" + m.w.Dims.Conditions[b]
 		ab := m.dist(P, f, nil, 1<<a, -1)
 		both := m.dist(P, f, nil, 1<<a|1<<b, -1)
-		ai, _ := cell(name+".a_patients", ro["a_patients"], ab)
-		bi, _ := cell(name+".patients", ro["patients"], both)
+		ai, _ := distCell(name+".a_patients", ro["a_patients"], ab)
+		bi, _ := distCell(name+".patients", ro["patients"], both)
 		addSet(name, mem(bi), virtual(minus(ab, both), ai, bi))
 	}
 
@@ -634,7 +640,7 @@ func (m *Model) read(di int) error {
 			return err
 		}
 		name := "finding " + strOr(ro["name"]) + "/" + strOr(ro["flag"])
-		cell(name+".patients", ro["patients"], m.dist(P, f, nil, 0, fi))
+		distCell(name+".patients", ro["patients"], m.dist(P, f, nil, 0, fi))
 		cell(name+".results", ro["results"], m.facts(P, f, kResult, func(a atom) bool { return a.d == fi }))
 	}
 	al, _ := fv["alerts"].(obj)
@@ -709,7 +715,6 @@ func (m *Model) read(di int) error {
 		}
 		addSet(name+" corrections", st...)
 	}
-	_ = patCell
 	return firstErr
 }
 
@@ -766,11 +771,18 @@ func boxKey(box []term) string {
 }
 
 // OneState lists groups (identical boxes) shown in one of docs and hidden
-// in another (D5) — boxes that are 0 by definition aside.
+// in another (D5) — boxes that are 0 by definition aside, and docs hidden
+// whole (their patients hidden: A7 hides a narrow view whatever its
+// parents show, which tells nothing).
 func (m *Model) OneState(docs []int) []string {
 	in := map[int]bool{}
 	for _, d := range docs {
 		in[d] = true
+	}
+	for _, c := range m.Cells {
+		if c.Name == "prevalence.patients" && !c.Shown {
+			in[c.Doc] = false
+		}
 	}
 	state := map[string]int{}
 	name := map[string]string{}

@@ -186,8 +186,6 @@ type unknowns struct {
 }
 
 func merge(z []bool, at []int, boxes [][]term) *unknowns {
-	sig := make([][]string, 0)
-	_ = sig
 	n := 0
 	for _, bx := range boxes {
 		for _, t := range bx {

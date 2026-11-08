@@ -34,8 +34,8 @@ func seeds(full, normal, small int) []uint64 {
 	return out
 }
 
-// filterSets are every filter set within the cap over dims' filterable
-// values (none of them null).
+// filterSets are every filter set CheckFilters accepts over dims'
+// filterable values (none of them null).
 func filterSets(d attack.Dims) []Filters {
 	type fv struct {
 		dim int
@@ -66,8 +66,8 @@ func filterSets(d attack.Dims) []Filters {
 			out = append(out, f)
 		}
 		for _, b := range vals[i+1:] {
-			if b.dim == a.dim {
-				continue
+			if b.dim == a.dim || (a.dim == DimLocation && b.dim == DimSetting) || (a.dim == DimSetting && b.dim == DimLocation) {
+				continue // not a context (CheckFilters)
 			}
 			g := f
 			g[b.dim] = b.v
@@ -128,7 +128,7 @@ func TestP1NoHiddenCellSolvable(t *testing.T) {
 			r := rand.New(rand.NewPCG(seed, 1))
 			w := attack.Generate(seed, smallDims(3), octBlocks, false, attack.Options{Subjects: 20 + r.IntN(60), Presence: 0.35, Rare: 0.8})
 			// The unfiltered context and random filter sets within the cap:
-			// at full size, 2,000 worlds × 6 sets reach each of the 79 sets
+			// at full size, 2,000 worlds × 6 sets reach each of the 71 sets
 			// about 150 times.
 			sets := filterSets(w.Dims)
 			r.Shuffle(len(sets)-1, func(i, j int) { sets[i+1], sets[j+1] = sets[j+1], sets[i+1] })

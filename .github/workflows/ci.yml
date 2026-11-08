@@ -178,6 +178,14 @@ jobs:
           go test -count=1 -timeout 30m
           -run 'TestHistoryAnchoredAtOnboarding|TestUnionsOfHiddenWeeksMeasured|TestFullyHiddenAlwaysPasses|TestHistoryFromRouteJSON|TestHistorySetsFromRouteJSON'
           ./internal/smallgroup/...
+      # Analysis (plan Tasks 6–8): the disclosure properties at their
+      # non-race size (P1 one response, P2 every family, P4 histories, P5
+      # bounds). ANALYSIS_LONG=1 runs the full size (2,000 / 100 / 500 / 100).
+      - name: Analysis disclosure properties
+        run: >
+          go test -count=1 -timeout 30m
+          -run 'TestP1|TestP2|TestP4|TestP5|TestOneStatePerGroupInFamily'
+          ./internal/analysis/disclose/...
       # The smoke test runs in boundary-smoke; here it only has to build.
       - name: Vet the smoke test
         run: go vet -tags smoke ./internal/smoke/...
