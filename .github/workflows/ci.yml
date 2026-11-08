@@ -170,6 +170,14 @@ jobs:
         run: go test -race -tags integration ./...
       - name: Integration tests with the test-only fixture routes
         run: go test -race -tags "integration test" ./...
+      # Plan 7c (A7, R41a-5): the analytics history properties at full size
+      # (500 guard-level histories, the unions and the JSON-side set check).
+      # The -race runs above use smaller samples to fit Go's package limit.
+      - name: Analytics history properties (full size)
+        run: >
+          go test -count=1 -timeout 30m
+          -run 'TestHistoryAnchoredAtOnboarding|TestUnionsOfHiddenWeeksMeasured|TestFullyHiddenAlwaysPasses|TestHistoryFromRouteJSON|TestHistorySetsFromRouteJSON'
+          ./internal/smallgroup/...
       # The smoke test runs in boundary-smoke; here it only has to build.
       - name: Vet the smoke test
         run: go vet -tags smoke ./internal/smoke/...
