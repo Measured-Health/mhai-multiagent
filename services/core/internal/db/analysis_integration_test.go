@@ -107,6 +107,17 @@ func setSwitch(t *testing.T, pool *pgxpool.Pool, hospital *uuid.UUID, position, 
 	}
 }
 
+// demoHospital seeds a hospital for the synthetic demo.
+func demoHospital(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
+	t.Helper()
+	h := uuid.New()
+	if _, err := pool.Exec(context.Background(), `INSERT INTO hospitals (id, name, short_code, status, time_zone)
+		VALUES ($1, 'Synthetic Demo Hospital', $2, 'active', 'Africa/Lagos')`, h, uniqueCode("Y")); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
 // onHospital seeds a hospital in zone with its switch and the global
 // switch on, with real (SO-) references.
 func onHospital(t *testing.T, pool *pgxpool.Pool, zone string) uuid.UUID {
@@ -376,7 +387,7 @@ func TestIngestSourceRefusesDemoSwitch(t *testing.T) {
 		})
 		return n, err
 	}
-	demo, _ := seedHospital(t, pool, uniqueCode("D"))
+	demo := demoHospital(t, pool)
 	setSwitch(t, pool, nil, "on", "SO-2026-0001")
 	setSwitch(t, pool, &demo, "on", "DEMO-SYNTHETIC")
 	if _, err := source(demo); pgCode(err) != invalidParameter {
@@ -692,24 +703,43 @@ func TestSwitchWriters(t *testing.T) {
 		})
 	}
 	h, _ := seedHospital(t, pool, uniqueCode("W"))
-	if err := write(prov, "mhai_provision", &h, "on", "SO-2026-0042"); pgCode(err) != rlsViolation {
-		t.Errorf("provision raising with a sign-off: want an RLS refusal, got %v", err)
+	d := demoHospital(t, pool)
+	raise := func(h *uuid.UUID) error {
+		return asAnalysisRole(ctx, prov, "mhai_provision", nil, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `SELECT mhai_analysis_demo_raise($1)`, h)
+			return err
+		})
 	}
-	if err := write(prov, "mhai_provision", &h, "on", "DEMO-SYNTHETIC"); err != nil {
-		t.Errorf("provision raising the demo: %v", err)
+	provUpdate := func(q string, h uuid.UUID) error {
+		return asAnalysisRole(ctx, prov, "mhai_provision", nil, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, q, h)
+			return err
+		})
 	}
-	if err := write(prov, "mhai_provision", &h, "off", nil); err != nil {
+	// Provisioning writes no row directly: it raises a demo hospital's
+	// switch through the function and may only lower a switch.
+	for _, r := range []any{"SO-2026-0042", "DEMO-SYNTHETIC", nil} {
+		if err := write(prov, "mhai_provision", &d, "on", r); pgCode(err) != permissionDenied {
+			t.Errorf("provision inserting a switch row (%v): want 42501, got %v", r, err)
+		}
+	}
+	if err := raise(&d); err != nil {
+		t.Errorf("provision raising the demo hospital: %v", err)
+	}
+	if err := provUpdate(`UPDATE analysis_switch SET position = 'off' WHERE hospital_id = $1`, d); err != nil {
 		t.Errorf("provision lowering: %v", err)
 	}
-	if err := write(pool, "mhai_platform", &h, "on", "DEMO-SYNTHETIC"); pgCode(err) != rlsViolation {
+	if err := provUpdate(`UPDATE analysis_switch SET position = 'on' WHERE hospital_id = $1`, d); pgCode(err) != rlsViolation {
+		t.Errorf("provision raising by UPDATE: want an RLS refusal, got %v", err)
+	}
+	if err := provUpdate(`UPDATE analysis_switch SET signoff_clinical = NULL WHERE hospital_id = $1`, d); pgCode(err) != permissionDenied {
+		t.Errorf("provision clearing a reference: want 42501, got %v", err)
+	}
+	if err := write(pool, "mhai_platform", &d, "on", "DEMO-SYNTHETIC"); pgCode(err) != rlsViolation {
 		t.Errorf("platform writing demo references: want an RLS refusal, got %v", err)
 	}
 	if err := write(pool, "mhai_platform", &h, "on", "SO-2026-0042"); err != nil {
 		t.Errorf("platform raising with a sign-off: %v", err)
-	}
-	// A signed-off row never takes demo references, whoever writes.
-	if err := write(prov, "mhai_provision", &h, "on", "DEMO-SYNTHETIC"); pgCode(err) != checkViolation {
-		t.Errorf("signed-off row to demo: want 23514, got %v", err)
 	}
 	if err := write(pool, "mhai_gateway", &h, "off", nil); pgCode(err) != permissionDenied {
 		t.Errorf("gateway writing the switch: %v", err)
@@ -765,6 +795,91 @@ func TestSwitchWriters(t *testing.T) {
 	if p := position("mhai_auth", nil, k); p != "on" {
 		t.Errorf("sign-in reading the user's hospital: %s", p)
 	}
+}
+
+// Review item 1 (sticky sign-off), the attack exactly: a row signed off
+// once is lowered with its references cleared, then raised again with
+// DEMO-SYNTHETIC. ever_signed_off is set by any SO- reference, can't be
+// cleared by any role, and a flagged row never takes demo references;
+// provisioning can't clear references at all.
+func TestStickySignOff(t *testing.T) {
+	pg, pool := shared(t)
+	ctx := context.Background()
+	prov, _, err := testutil.ProvisionLogin(ctx, pg, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+	as := func(p *pgxpool.Pool, role, q string, h *uuid.UUID) error {
+		return asAnalysisRole(ctx, p, role, nil, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, q, h)
+			return err
+		})
+	}
+	flagged := func(h *uuid.UUID) bool {
+		var f bool
+		if err := pool.QueryRow(ctx, `SELECT ever_signed_off FROM analysis_switch WHERE hospital_id IS NOT DISTINCT FROM $1`, h).Scan(&f); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	d := demoHospital(t, pool)
+	for _, h := range []*uuid.UUID{&d, nil} {
+		name := "the hospital row"
+		if h == nil {
+			name = "the global row"
+			if _, err := pool.Exec(ctx, `DELETE FROM analysis_switch WHERE hospital_id IS NULL`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// The platform signs the row off.
+		if err := as(pool, "mhai_platform", `INSERT INTO analysis_switch (hospital_id, position, signoff_clinical, signoff_privacy, signoff_legal)
+			VALUES ($1, 'on', 'SO-2026-0007', 'SO-2026-0008', 'SO-2026-0009')`, h); err != nil {
+			t.Fatalf("%s: platform sign-off: %v", name, err)
+		}
+		if !flagged(h) {
+			t.Fatalf("%s: a sign-off didn't set ever_signed_off", name)
+		}
+		// The attack: provisioning lowers it and clears the references ...
+		if err := as(prov, "mhai_provision", `UPDATE analysis_switch SET position = 'off', signoff_clinical = NULL, signoff_privacy = NULL,
+			signoff_legal = NULL WHERE hospital_id IS NOT DISTINCT FROM $1`, h); pgCode(err) != permissionDenied {
+			t.Errorf("%s: provision clearing references: want 42501, got %v", name, err)
+		}
+		// ... and raises it again with DEMO-SYNTHETIC.
+		if err := as(prov, "mhai_provision", `UPDATE analysis_switch SET position = 'on', signoff_clinical = 'DEMO-SYNTHETIC',
+			signoff_privacy = 'DEMO-SYNTHETIC', signoff_legal = 'DEMO-SYNTHETIC' WHERE hospital_id IS NOT DISTINCT FROM $1`, h); pgCode(err) != permissionDenied {
+			t.Errorf("%s: provision writing demo references: want 42501, got %v", name, err)
+		}
+		if err := as(prov, "mhai_provision", `UPDATE analysis_switch SET position = 'off' WHERE hospital_id IS NOT DISTINCT FROM $1`, h); err != nil {
+			t.Errorf("%s: provision lowering: %v", name, err)
+		}
+		// Even once the platform clears the references, the row stays
+		// flagged and refuses demo references, from any role.
+		if err := as(pool, "mhai_platform", `UPDATE analysis_switch SET signoff_clinical = NULL, signoff_privacy = NULL, signoff_legal = NULL
+			WHERE hospital_id IS NOT DISTINCT FROM $1`, h); err != nil {
+			t.Errorf("%s: platform clearing references: %v", name, err)
+		}
+		if !flagged(h) {
+			t.Errorf("%s: clearing the references cleared ever_signed_off", name)
+		}
+		if err := as(prov, "mhai_provision", `SELECT mhai_analysis_demo_raise($1)`, h); pgCode(err) != checkViolation {
+			t.Errorf("%s: demo raise after a sign-off: want 23514, got %v", name, err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE analysis_switch SET position = 'on', signoff_clinical = 'DEMO-SYNTHETIC', signoff_privacy = 'DEMO-SYNTHETIC',
+			signoff_legal = 'DEMO-SYNTHETIC' WHERE hospital_id IS NOT DISTINCT FROM $1`, h); pgCode(err) != checkViolation {
+			t.Errorf("%s: the owner writing demo references: want 23514, got %v", name, err)
+		}
+		if err := as(pool, "mhai_platform", `UPDATE analysis_switch SET ever_signed_off = false WHERE hospital_id IS NOT DISTINCT FROM $1`, h); pgCode(err) != permissionDenied {
+			t.Errorf("%s: platform clearing the flag: want 42501, got %v", name, err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE analysis_switch SET ever_signed_off = false WHERE hospital_id IS NOT DISTINCT FROM $1`, h); pgCode(err) != checkViolation {
+			t.Errorf("%s: the owner clearing the flag: want 23514, got %v", name, err)
+		}
+		if !flagged(h) {
+			t.Errorf("%s: ever_signed_off cleared", name)
+		}
+	}
+	setSwitch(t, pool, nil, "on", "SO-2026-0001")
 }
 
 // N1: a temporary table named like an analysis table, made by the caller,
@@ -902,7 +1017,7 @@ func TestSeedOnlyForDemoHospital(t *testing.T) {
 	if _, err := seed(real); pgCode(err) != invalidParameter {
 		t.Errorf("seed of a signed-off hospital: want 22023, got %v", err)
 	}
-	demo, _ := seedHospital(t, pool, uniqueCode("S"))
+	demo := demoHospital(t, pool)
 	setSwitch(t, pool, &demo, "on", "DEMO-SYNTHETIC")
 	if n, err := seed(demo); err != nil || n != 1 {
 		t.Fatalf("seed of the demo hospital: %d (%v)", n, err)

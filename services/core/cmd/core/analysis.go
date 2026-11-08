@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/account"
@@ -24,8 +25,8 @@ const analysisUsage = `usage:
 
 seed-demo is for the synthetic demo hospital only (analysis plan, departure
 5). It sets the global and the hospital's analysis switches on with the
-references DEMO-SYNTHETIC, refusing if either carries a real sign-off
-(SO-...), writes a seeded synthetic cohort through mhai_analysis_seed, and
+references DEMO-SYNTHETIC (mhai_analysis_demo_raise), refusing any switch
+that was ever signed off (SO-...), writes a seeded synthetic cohort through mhai_analysis_seed, and
 audits analysis.switch_raised. A hospital under a demo switch never ingests
 a real consultation. Raising a switch with a real sign-off is the platform's
 two-person flow (Plan 11b), never this command.
@@ -37,7 +38,7 @@ seed-demo prints the hospital id and the subject count only.`
 
 var (
 	errAnalysisArgs  = fmt.Errorf("%s", analysisUsage)
-	errRealSwitch    = errors.New("an analysis switch carries a real sign-off; the CLI never changes it (use the platform)")
+	errRealSwitch    = errors.New("an analysis switch was signed off; the CLI never gives it demo references (use the platform)")
 	errAnalysisWrite = errors.New("could not write the analysis switch or seed; nothing was changed")
 )
 
@@ -98,6 +99,7 @@ func analysisSeedDemo(ctx context.Context, args []string, url string, out io.Wri
 	var subjects int
 	hospital, err := account.ProvisionOnHospital(ctx, pool, ref, func(tx pgx.Tx, hospital uuid.UUID) error {
 		var now time.Time
+		var was bool
 		var err error
 		if clock != nil {
 			now, err = clock(ctx)
@@ -107,29 +109,23 @@ func analysisSeedDemo(ctx context.Context, args []string, url string, out io.Wri
 		if err != nil {
 			return errAnalysisWrite
 		}
-		var real bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM analysis_switch
-			WHERE (hospital_id IS NULL OR hospital_id = $1)
-			  AND (signoff_clinical LIKE 'SO-%' OR signoff_privacy LIKE 'SO-%' OR signoff_legal LIKE 'SO-%'))`, hospital).Scan(&real); err != nil {
-			return errAnalysisWrite
-		}
-		if real {
-			return errRealSwitch
-		}
+		// The database refuses any switch ever signed off (23514); a
+		// refusal rolls back everything, the global row included.
 		raised := map[string]bool{}
-		for scope, h := range map[string]*uuid.UUID{"global": nil, "hospital": &hospital} {
-			var was string
-			err := tx.QueryRow(ctx, `SELECT position FROM analysis_switch WHERE hospital_id IS NOT DISTINCT FROM $1`, h).Scan(&was)
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		for _, scope := range []string{"hospital", "global"} {
+			var h *uuid.UUID
+			if scope == "hospital" {
+				h = &hospital
+			}
+			if err := tx.QueryRow(ctx, `SELECT mhai_analysis_demo_raise($1)`, h).Scan(&was); err != nil {
+				var pe *pgconn.PgError
+				switch {
+				case errors.As(err, &pe) && pe.Code == "23514":
+					return errRealSwitch
+				}
 				return errAnalysisWrite
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO analysis_switch (hospital_id, position, signoff_clinical, signoff_privacy, signoff_legal)
-				VALUES ($1, 'on', $2, $2, $2)
-				ON CONFLICT (hospital_id) DO UPDATE SET position = 'on', signoff_clinical = EXCLUDED.signoff_clinical,
-				    signoff_privacy = EXCLUDED.signoff_privacy, signoff_legal = EXCLUDED.signoff_legal, changed_by = NULL`, h, demoRef); err != nil {
-				return errAnalysisWrite
-			}
-			raised[scope] = was != "on"
+			raised[scope] = was
 		}
 		start := now.UTC().AddDate(0, -months, -2)
 		cohort := synth.Cohort(seed, synth.Options{Subjects: analysisDemoSubjects, Months: months, SmallBias: 0.3, Start: start})

@@ -37,6 +37,7 @@ func analysisEnv(t *testing.T) (super *pgxpool.Pool, provURL string, app *pgxpoo
 	return super, provURL, app
 }
 
+// analysisHospital seeds a hospital marked as the synthetic demo.
 func analysisHospital(t *testing.T, super *pgxpool.Pool, code string) uuid.UUID {
 	t.Helper()
 	var id uuid.UUID

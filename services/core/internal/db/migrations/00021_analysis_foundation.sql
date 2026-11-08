@@ -10,6 +10,11 @@
 -- demo-only CLI (core analysis seed-demo), with DEMO-SYNTHETIC references,
 -- and a hospital under a demo switch never ingests a real consultation.
 --
+-- The demo (review item 1): DEMO-SYNTHETIC references are written only
+-- through mhai_analysis_demo_raise; provisioning otherwise only lowers a
+-- switch and can't touch references. analysis_switch.ever_signed_off is set by any SO- reference and is never
+-- cleared; a row carrying it never takes demo references again.
+--
 -- Roles (cluster-wide: created if missing, refused if they have members,
 -- kept on Down with every grant revoked, as 00017/00019):
 --   - mhai_analysis_writer (NOLOGIN, NOINHERIT, no members): owns the job's
@@ -107,6 +112,7 @@ CREATE TABLE analysis_switch (
     signoff_legal    text CHECK (signoff_legal ~ '^(DEMO-SYNTHETIC|SO-[0-9]{4}-[0-9]{2,8})$'),
     since            timestamptz NOT NULL DEFAULT now(),
     changed_by       uuid,
+    ever_signed_off  boolean NOT NULL DEFAULT false,
     CONSTRAINT analysis_switch_one UNIQUE NULLS NOT DISTINCT (hospital_id),
     CONSTRAINT analysis_switch_signed CHECK (position = 'off'
         OR (signoff_clinical IS NOT NULL AND signoff_privacy IS NOT NULL AND signoff_legal IS NOT NULL)),
@@ -118,47 +124,67 @@ ALTER TABLE analysis_switch OWNER TO mhai_migrate;
 ALTER TABLE analysis_switch ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON analysis_switch FROM PUBLIC;
 
+-- The guard runs as the writer, whoever writes.
 -- +goose StatementBegin
 CREATE FUNCTION mhai_analysis_switch_guard() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, pg_temp
     AS $$
 BEGIN
-    IF TG_OP = 'UPDATE' AND NEW.hospital_id IS DISTINCT FROM OLD.hospital_id THEN
-        RAISE EXCEPTION USING ERRCODE = 'check_violation',
-            MESSAGE = 'analysis_switch: a switch row never moves to another hospital';
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.hospital_id IS DISTINCT FROM OLD.hospital_id THEN
+            RAISE EXCEPTION USING ERRCODE = 'check_violation',
+                MESSAGE = 'analysis_switch: a switch row never moves to another hospital';
+        END IF;
+        IF OLD.ever_signed_off AND NOT NEW.ever_signed_off THEN
+            RAISE EXCEPTION USING ERRCODE = 'check_violation',
+                MESSAGE = 'analysis_switch: ever_signed_off is never cleared';
+        END IF;
     END IF;
-    IF TG_OP = 'UPDATE' AND NEW.signoff_clinical = 'DEMO-SYNTHETIC'
-       AND (OLD.signoff_clinical ~ '^SO-' OR OLD.signoff_privacy ~ '^SO-' OR OLD.signoff_legal ~ '^SO-') THEN
-        RAISE EXCEPTION USING ERRCODE = 'check_violation',
-            MESSAGE = 'analysis_switch: a signed-off switch never takes demo references';
+    IF NEW.signoff_clinical ~ '^SO-' OR NEW.signoff_privacy ~ '^SO-' OR NEW.signoff_legal ~ '^SO-' THEN
+        NEW.ever_signed_off := true;
+    END IF;
+    IF 'DEMO-SYNTHETIC' IN (COALESCE(NEW.signoff_clinical, ''), COALESCE(NEW.signoff_privacy, ''), COALESCE(NEW.signoff_legal, '')) THEN
+        IF NEW.ever_signed_off THEN
+            RAISE EXCEPTION USING ERRCODE = 'check_violation',
+                MESSAGE = 'analysis_switch: a switch that was ever signed off never takes demo references';
+        END IF;
     END IF;
     NEW.since := now();
     RETURN NEW;
 END
 $$;
 -- +goose StatementEnd
-ALTER FUNCTION mhai_analysis_switch_guard() OWNER TO mhai_migrate;
+ALTER FUNCTION mhai_analysis_switch_guard() OWNER TO mhai_analysis_writer;
 REVOKE ALL ON FUNCTION mhai_analysis_switch_guard() FROM PUBLIC;
 CREATE TRIGGER analysis_switch_guard BEFORE INSERT OR UPDATE ON analysis_switch
     FOR EACH ROW EXECUTE FUNCTION mhai_analysis_switch_guard();
 
 -- The platform (Plan 11b's flow): read; write real references or off, never
--- demo references. The provisioning CLI: demo references or off only.
--- Nobody deletes a row. The gateway reads its position through the function.
-GRANT SELECT, INSERT ON analysis_switch TO mhai_platform, mhai_provision;
+-- demo references. The provisioning CLI: read, and lower a switch (UPDATE
+-- of position to 'off' only, never a reference); it raises the demo only
+-- through mhai_analysis_demo_raise. Nobody but the guard writes
+-- ever_signed_off, and nobody deletes a row. The gateway reads its
+-- position through the function.
+GRANT SELECT, INSERT ON analysis_switch TO mhai_platform;
 GRANT UPDATE (position, signoff_clinical, signoff_privacy, signoff_legal, changed_by)
-    ON analysis_switch TO mhai_platform, mhai_provision;
+    ON analysis_switch TO mhai_platform;
+GRANT SELECT ON analysis_switch TO mhai_provision;
+GRANT UPDATE (position) ON analysis_switch TO mhai_provision;
 GRANT SELECT ON analysis_switch TO mhai_analysis_reader, mhai_analysis_writer;
+GRANT INSERT (hospital_id, position, signoff_clinical, signoff_privacy, signoff_legal, changed_by),
+    UPDATE (position, signoff_clinical, signoff_privacy, signoff_legal, changed_by)
+    ON analysis_switch TO mhai_analysis_writer;
 CREATE POLICY platform_switch ON analysis_switch TO mhai_platform USING (true)
     WITH CHECK (COALESCE(signoff_clinical, '') <> 'DEMO-SYNTHETIC'
                 AND COALESCE(signoff_privacy, '') <> 'DEMO-SYNTHETIC'
                 AND COALESCE(signoff_legal, '') <> 'DEMO-SYNTHETIC');
-CREATE POLICY provision_switch ON analysis_switch TO mhai_provision USING (true)
-    WITH CHECK (position = 'off'
-                OR (signoff_clinical = 'DEMO-SYNTHETIC' AND signoff_privacy = 'DEMO-SYNTHETIC'
-                    AND signoff_legal = 'DEMO-SYNTHETIC'));
+CREATE POLICY provision_switch ON analysis_switch FOR UPDATE TO mhai_provision USING (true)
+    WITH CHECK (position = 'off');
+CREATE POLICY provision_read ON analysis_switch FOR SELECT TO mhai_provision USING (true);
 CREATE POLICY analysis_read ON analysis_switch FOR SELECT TO mhai_analysis_reader, mhai_analysis_writer USING (true);
+CREATE POLICY analysis_writer_insert ON analysis_switch FOR INSERT TO mhai_analysis_writer WITH CHECK (true);
+CREATE POLICY analysis_writer_update ON analysis_switch FOR UPDATE TO mhai_analysis_writer USING (true) WITH CHECK (true);
 
 ------------------------------------------------------------------------
 -- Dictionaries (design §4.3): per hospital, opaque ids, the hospital's own
@@ -859,6 +885,30 @@ END
 $$;
 -- +goose StatementEnd
 
+-- mhai_analysis_demo_raise(hospital): switches the demo on with
+-- DEMO-SYNTHETIC references (EXECUTE to mhai_provision only), for the
+-- global row (NULL) or a hospital. The guard refuses (23514) a row that
+-- was ever signed off.
+-- Returns whether the row was not on before.
+-- +goose StatementBegin
+CREATE FUNCTION mhai_analysis_demo_raise(p_hospital uuid) RETURNS boolean
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+DECLARE
+    v_was text;
+BEGIN
+    SELECT s.position INTO v_was FROM public.analysis_switch s WHERE s.hospital_id IS NOT DISTINCT FROM p_hospital FOR UPDATE;
+    INSERT INTO public.analysis_switch AS s (hospital_id, position, signoff_clinical, signoff_privacy, signoff_legal)
+        VALUES (p_hospital, 'on', 'DEMO-SYNTHETIC', 'DEMO-SYNTHETIC', 'DEMO-SYNTHETIC')
+        ON CONFLICT (hospital_id) DO UPDATE SET position = 'on', signoff_clinical = EXCLUDED.signoff_clinical,
+            signoff_privacy = EXCLUDED.signoff_privacy, signoff_legal = EXCLUDED.signoff_legal, changed_by = NULL;
+    RETURN v_was IS DISTINCT FROM 'on';
+END
+$$;
+-- +goose StatementEnd
+
+ALTER FUNCTION mhai_analysis_demo_raise(uuid) OWNER TO mhai_analysis_writer;
 ALTER FUNCTION mhai_analysis_demo(uuid) OWNER TO mhai_analysis_writer;
 ALTER FUNCTION mhai_analysis_zone(uuid) OWNER TO mhai_analysis_writer;
 ALTER FUNCTION mhai_analysis_block_frozen(uuid, date) OWNER TO mhai_analysis_writer;
@@ -879,7 +929,8 @@ GRANT EXECUTE ON FUNCTION mhai_analysis_ingest_source(uuid, timestamptz, timesta
     mhai_analysis_ingest(uuid, timestamptz, jsonb), mhai_analysis_freeze(uuid, timestamptz),
     mhai_analysis_sweep(uuid, timestamptz), mhai_analysis_due(timestamptz), mhai_analysis_ran(uuid, timestamptz)
     TO mhai_analysis_job;
-GRANT EXECUTE ON FUNCTION mhai_analysis_seed(uuid, timestamptz, jsonb) TO mhai_provision;
+REVOKE ALL ON FUNCTION mhai_analysis_demo_raise(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION mhai_analysis_seed(uuid, timestamptz, jsonb), mhai_analysis_demo_raise(uuid) TO mhai_provision;
 
 ------------------------------------------------------------------------
 -- The provisioning audit: the CLI's switch changes.
@@ -929,6 +980,7 @@ CREATE POLICY provision_append ON audit_log FOR INSERT TO mhai_provision
                            'hospital.model_policy_changed')
                 AND actor_id IS NULL);
 
+DROP FUNCTION mhai_analysis_demo_raise(uuid);
 DROP FUNCTION mhai_analysis_seed(uuid, timestamptz, jsonb);
 DROP FUNCTION mhai_analysis_ran(uuid, timestamptz);
 DROP FUNCTION mhai_analysis_due(timestamptz);
