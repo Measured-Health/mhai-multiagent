@@ -252,6 +252,7 @@ type resp struct {
 	code int
 	body map[string]any
 	raw  string
+	hdr  http.Header
 }
 
 func do(t *testing.T, method, path, tok string, platform bool) resp {
@@ -270,7 +271,7 @@ func do(t *testing.T, method, path, tok string, platform bool) resp {
 	}
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
-	out := resp{code: w.Code, raw: w.Body.String()}
+	out := resp{code: w.Code, raw: w.Body.String(), hdr: w.Header()}
 	_ = json.Unmarshal(w.Body.Bytes(), &out.body)
 	return out
 }

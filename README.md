@@ -23,7 +23,8 @@ The backend has two parts:
   daily); (Plan 4, part 4c) platform operations: system health
   (`/platform/health`), the failed jobs list with retry and cancel
   (`/platform/jobs`), and guardrail statistics under small-group rules
-  (`/platform/guardrails`). The contract is
+  (`/platform/guardrails/periods`, finished calendar periods since Plan
+  7c-1; the rolling `/platform/guardrails` is deprecated). The contract is
   [services/core/openapi.yaml](services/core/openapi.yaml).
 
 ## Agents

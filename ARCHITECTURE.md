@@ -38,9 +38,13 @@ reading in a KV bucket that `GET /platform/health` serves without touching
 the database or a worker; `GET /platform/jobs` lists failed questions and
 jobs, `POST /platform/jobs/retry` re-queues and re-publishes them as the
 job's creator (second-person rule re-checked), `POST /platform/jobs/cancel`
-needs a fresh two-step code; `GET /platform/guardrails` serves HGA decision
-counts for whole UTC days, one stored snapshot per period and day, through
-the small-group rules (`internal/smallgroup`). The smoke test reads health,
+needs a fresh two-step code; `GET /platform/guardrails/periods` serves HGA
+decision counts for the latest finished month-aligned week, month or quarter
+from one stored snapshot (Plan 7c-1: the analytics scheduler, a core loop
+running as `mhai_analytics_job`, freezes each period's counts once and
+guards them with its parent set and the published history,
+`internal/smallgroup`), and the rolling `GET /platform/guardrails` is
+deprecated, every figure hidden. The smoke test reads health,
 retries a forced dead letter and reads the statistics. **Built (cloud
 models, off by default):** a hospital a platform admin has opted in can
 have its clinical draft written by a cloud model (Anthropic, OpenAI or

@@ -4,7 +4,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
-**Goal:** Serve the platform admin app's Analytics page (What changed, Use, Answer quality, Hospitals, the series and follow-ups) from figures that cover only finished, nested calendar periods (the latest month-aligned week, month and quarter, UTC). Each period's counts are frozen at close and its figures are one stored snapshot, guarded with its parent as one set and checked against the whole published history, so no hidden count of 1 to 4 can be worked out by subtraction or by chaining from zeros. Move `GET /platform/guardrails` to the same periods and deprecate its rolling windows.
+**Goal:** Serve the platform admin app's Analytics page (What changed, Use, Answer quality, Hospitals, the series and follow-ups) from figures that cover only finished, nested calendar periods (the latest month-aligned week, month and quarter, UTC). Each period's counts are frozen at close and its figures are one stored snapshot, guarded with its parent as one set and checked against the whole published history, so no hidden count of 1 to 4 can be worked out by subtraction or by chaining from zeros. Serve guardrail statistics on the same periods as a new route, `GET /platform/guardrails/periods` (R41a-4), and deprecate `GET /platform/guardrails`'s rolling windows.
 
 **Architecture:** A core scheduler (advisory-lock leader) computes each finished period's snapshot once, 15 minutes after the period ends. It freezes each period's counts through SECURITY DEFINER functions that refuse any window that isn't a nested reporting period (a week from the clinical tables; a month or quarter as the sum of its frozen children). It guards the counts with `internal/smallgroup` (the existing cross-sectional rules, the parent set with the bridge check, and an exact check with shown zeros and onboarding as known), and stores the guarded output in `analytics_snapshots`. Routes only read stored snapshots and render from guarded values. What changed is evaluated weekly from shown cells only. Follow-ups are platform-admin writes with a version check and an audit row. Nothing goes over NATS to intelligence.
 
@@ -53,7 +53,7 @@ In addition:
 
 ## Where this plan departs from the spec
 
-None at the start. Record rulings made while building in the spec's new §17, as Plan 4 did.
+R41a-4 (the calendar periods are a new route, `/platform/guardrails/periods`) and the seven departures of 7c-1 are recorded in the spec's §2 and §18: the scheduler's role reached by SET ROLE; the package `internal/analytics/scheduler`; the reader's extra join columns; A7 asserting nothing of 1 to 4 exposed; the parent-set repair on child cells only; `TestHistoryEndToEnd` on the latest month; the newest stored snapshot served and `RollingDeprecatedAt` set by the release.
 
 ## Running the tests
 
@@ -93,7 +93,7 @@ services/core/
   internal/platform/analytics.go                   GET /platform/analytics, render from Body
   internal/platform/analytics_series.go            the two series routes
   internal/platform/analytics_followup.go          PUT / DELETE follow-up
-  internal/platform/guardrails.go                  + week|month|quarter; deprecated rolling values
+  internal/platform/guardrails.go                  GET /platform/guardrails/periods (new); /platform/guardrails deprecated, rolling values hidden
   internal/audit/schemas.go, catalogue.go          three analytics actions
   openapi.yaml
 docs/notices/guardrails-rolling-windows.md         the deprecation notice the Link names
@@ -223,14 +223,14 @@ Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password fi
 
 ---
 
-### Task 5: Guardrails on calendar periods; the rolling windows deprecated (spec §9)
+### Task 5: Guardrails on calendar periods (`/platform/guardrails/periods`, R41a-4); the rolling windows deprecated (spec §9)
 
 **Files:**
 - Modify: `services/core/internal/platform/{guardrails.go,guardrails_integration_test.go}`, `openapi.yaml`
 - Create: `docs/notices/guardrails-rolling-windows.md`
 
 **Interfaces:**
-- `period` accepts `week|month|quarter`: render `GuardrailsOut` from the latest stored snapshot's QG family (`from`, `to` the period; `updated_at` the stored `computed_at`). Missing or `unavailable` snapshot → 503 `not_ready`.
+- `GET /platform/guardrails/periods?period=week|month|quarter` (R41a-4; `/platform/guardrails` keeps its enum): render the latest stored snapshot's QG family (`from`, `to` the period; `updated_at` the stored `computed_at`). Missing or `unavailable` snapshot → 503 `not_ready`.
 - `7d|30d|90d` (R41a-3): the same shape with every count and share hidden, `all` included, nothing read from or written to `guardrail_snapshots`, wrapped in `httpx.Deprecated(release, release+90 days, "/docs/notices/guardrails-rolling-windows")` for those values only. Release and sunset dates are constants in one place, set when the PR is merged.
 
 - [ ] **Step 1: Write the failing tests:**
@@ -357,7 +357,7 @@ Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password fi
 **Files:**
 - Modify: `services/core/internal/smoke/smoke_test.go`, `services/core/openapi.yaml`, `README.md`, `ARCHITECTURE.md`, `TODO.md`, `CHANGELOG.md`, `services/core/README.md`, `docs/specs/2026-10-17-frontend-requirements.md`
 
-- [ ] **7c-1 slice:** smoke: with a test clock past a week's end plus the grace, the scheduler stores the week; `GET /platform/guardrails?period=week` serves it; `period=30d` carries the deprecation headers and every cell hidden. Contract: the guardrails row gets the new values and the deprecation. CHANGELOG: Added and Deprecated. TODO: R41a decided (done in the design PR); retention names `analytics_snapshots`.
+- [ ] **7c-1 slice:** smoke: with a test clock past a week's end plus the grace, the scheduler stores the week; `GET /platform/guardrails/periods?period=week` serves it (or `not_ready` before the first period after the release); `/platform/guardrails?period=30d` carries the deprecation headers and every cell hidden. Contract: the guardrails row gets the new values and the deprecation. CHANGELOG: Added and Deprecated. TODO: R41a decided (done in the design PR); retention names `analytics_snapshots`.
 - [ ] **7c-2 slice:** smoke reads `GET /platform/analytics?period=month` and one hospital series. Contract §14.7: the analytics and series rows to **Built (Plan 7c-2)** with F1, F3, F4, F10–F12, F14–F16 (What changed stays `{unavailable: true}` until 7c-3).
 - [ ] **7c-3 slice:** smoke: a synthetic jump flags a change, a platform admin follows it up, an auditor sees `follow_up` and is refused a `PUT`. Contract §14.7: the follow-up rows to Built, with F2, F6, F7, F8, F17. mhai-web's TODO gets F1–F19.
 - [ ] **Each slice:** `make smoke` (remote), `oasdiff` additive, docs, TODO entries.

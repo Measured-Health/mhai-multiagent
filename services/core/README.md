@@ -228,7 +228,9 @@ finds clinician B's `review_submitted` in the log filtered to `type=review`.
 for the sampler's first reading of `GET /platform/health` (fresh, `workers`
 ok), forces a dead letter and finds it in `GET /platform/jobs`, retries it
 with `POST /platform/jobs/retry`, and reads `GET /platform/guardrails?period=7d`
-(the right shape, no shown count of 1 to 4).
+(deprecated: the headers, every figure hidden) and
+`GET /platform/guardrails/periods` for each kind (`not_ready` until a period
+after the release is published, then the shape).
 Set
 `POSTGRES_PORT`, `NATS_PORT`, `CORE_PORT` and `SMOKE_PROJECT` when the
 defaults clash.
@@ -425,12 +427,19 @@ Platform audience, two-step always; none of these reads is audit-recorded.
   usable and the second-person rule holds; `POST /platform/jobs/cancel`
   needs a fresh code, and the note is stored apart and never logged. A bad
   body is 422 `validation_failed`.
-- `GET /platform/guardrails?period=7d|30d|90d` counts HGA decisions of the
-  active hospitals over whole UTC days ending at the start of today (until
-  00:15 UTC, yesterday's), through `internal/smallgroup`: no count of 1 to 4,
-  no hidden value that the shown ones give away. Each period's day is one
-  stored snapshot (`guardrail_snapshots`), the same on every copy all day.
-  6 reads a minute per session (429).
+- `GET /platform/guardrails/periods?period=week|month|quarter` (Plan 7c-1)
+  serves the HGA decision counts of the latest published month-aligned week,
+  month or quarter from its one stored snapshot (`analytics_snapshots`); no
+  request computes anything. The analytics scheduler
+  (`internal/analytics/scheduler`, every 5 minutes, one copy under an
+  advisory lock, as `mhai_analytics_job`) freezes each finished period once
+  through migration 00019's functions, which refuse any window that isn't a
+  nested period, and guards it with `internal/smallgroup`'s joint guard (the
+  parent set and an exact check over the published history). 503
+  `not_ready` until the first period of a kind after the release.
+- `GET /platform/guardrails?period=7d|30d|90d` is deprecated: every count
+  and share hidden, `Deprecation`, `Sunset` and `Link` headers, 422 after
+  the sunset. 6 reads a minute per session across both routes (429).
 
 ## Known limits
 

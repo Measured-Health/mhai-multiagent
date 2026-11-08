@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup/solve"
 )
 
 // C20 (property): for random per-hospital tables, no hidden cell can be
@@ -69,10 +72,45 @@ func sums(rows [][]int64) []int64 {
 	return all
 }
 
-// recovered runs the solver: equations eqs over cells (each a list of
-// (cell, coefficient)), with known values for shown cells. It returns the
-// hidden cells the equations pin down.
+// recovered runs the solver (smallgroup/solve, Plan 7c Task 2): equations
+// eqs over cells (each a list of (cell, coefficient)), with the shown cells
+// known, so only the hidden ones are unknowns. It returns the hidden cells
+// the equations pin down, in order.
 func recovered(nCells int, eqs [][][2]int, hide []bool) []int {
+	var unknown []int
+	col := map[int]int{}
+	for c := 0; c < nCells; c++ {
+		if hide[c] {
+			col[c] = len(unknown)
+			unknown = append(unknown, c)
+		}
+	}
+	var es [][]solve.Term
+	for _, eq := range eqs {
+		var ts []solve.Term
+		for _, t := range eq {
+			if j, ok := col[t[0]]; ok {
+				ts = append(ts, solve.Term{Var: j, Coef: int64(t[1])})
+			}
+		}
+		es = append(es, ts)
+	}
+	boxes := make([][]solve.Term, len(unknown))
+	for j := range unknown {
+		boxes[j] = []solve.Term{{Var: j, Coef: 1}}
+	}
+	var out []int
+	for j, e := range solve.ExposedLinear(len(unknown), es, boxes) {
+		if e {
+			out = append(out, unknown[j])
+		}
+	}
+	return out
+}
+
+// recoveredReference is the property test's original in-file solver (Plan
+// 4 C20), kept to show the move to solve changes nothing.
+func recoveredReference(nCells int, eqs [][][2]int, hide []bool) []int {
 	var unknown []int
 	col := make(map[int]int)
 	for c := 0; c < nCells; c++ {
@@ -345,5 +383,36 @@ func TestSolverFindsLeaks(t *testing.T) {
 	hide[4+2], hide[4+3], hide[8+2], hide[8+3] = true, true, true, true
 	if got := recovered(n, equations(h), hide); len(got) != 0 {
 		t.Errorf("a hidden cycle: recovered %v", got)
+	}
+}
+
+// Plan 7c Task 2: the solver moved to smallgroup/solve finds exactly what
+// the old in-file one found, on the C20 random tables.
+func TestSolveMatchesOldPropertySolver(t *testing.T) {
+	r := rand.New(rand.NewSource(20261103))
+	hidden := 0
+	for k := 0; k < 3000; k++ {
+		tb := randomTable(r)
+		h := len(tb.rows)
+		vals, g := guard(tb)
+		// Hide more than the rules did, at random, so there is something to
+		// recover.
+		hide := make([]bool, len(vals))
+		for i, x := range g {
+			hide[i] = x.Suppressed || r.Intn(4) == 0
+			if hide[i] {
+				hidden++
+			}
+		}
+		got := recovered(len(vals), equations(h), hide)
+		want := recoveredReference(len(vals), equations(h), hide)
+		sort.Ints(got)
+		sort.Ints(want)
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("table %d: solve recovers %v, the old solver %v", k, got, want)
+		}
+	}
+	if hidden == 0 {
+		t.Fatal("nothing hidden")
 	}
 }

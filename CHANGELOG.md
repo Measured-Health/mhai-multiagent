@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Platform analytics on calendar periods, part 7c-1 (OpenAPI 1.11.0,
+  additive; Plan 7c, rulings R41a to R41a-4). Migration 00019 adds the
+  analytics scheduler's role (`mhai_analytics_job`) and reader, frozen
+  per-period counts, `analytics_snapshots` and the release epoch. A core
+  loop (one copy at a time) freezes each finished month-aligned week, month
+  and quarter once, guards it with its parent set and the published
+  history (`internal/smallgroup`), and stores one snapshot. New route
+  `GET /platform/guardrails/periods?period=week|month|quarter` serves the
+  latest published period's guardrail statistics from that snapshot
+  (503 `not_ready` until the first one).
 - EMR integration, PR 2 (skeleton; off by default): `services/gokit/`, a Go
   module core and the emr service share, with the request-token package
   (moved from core; its subject rule is now a table that adds
@@ -233,6 +243,16 @@ All notable changes to this project are documented here. The format follows
   (90 days' notice at the demo stage), `info.version` as semver (now 1.0.1).
   CI fails a pull request with a breaking change to `openapi.yaml`
   (oasdiff 1.34.1). `httpx.Deprecated` sets the retirement headers.
+
+### Deprecated
+
+- `GET /platform/guardrails?period=7d|30d|90d` (ADR 0012, R41a-3): from the
+  7c-1 release every count and share is hidden and the responses carry
+  `Deprecation`, `Sunset` (90 days on) and `Link`
+  (`/docs/notices/guardrails-rolling-windows`); after the sunset the values
+  are 422. Use `/platform/guardrails/periods`. Migration 00019 empties
+  `guardrail_snapshots` and revokes `mhai_guardrail_counts` from
+  `mhai_platform`.
 
 ### Changed
 

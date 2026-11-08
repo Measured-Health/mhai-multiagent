@@ -73,6 +73,10 @@ var dbTxAllowedFiles = map[string]string{
 	// connection it takes out of the pool), reading the health functions
 	// as mhai_platform. GET /platform/health reads the KV bucket only.
 	"internal/platform/sampler.go": "the health sampler's leader lock (Acquire) and its reads (db.WithPlatformSnapshot)",
+	// Plan 7c: the analytics scheduler runs as mhai_analytics_job, a role no
+	// route reaches (its own test walks internal/platform's imports).
+	"internal/analytics/scheduler/source.go":    "the analytics scheduler's database access (db.WithAnalyticsJob)",
+	"internal/analytics/scheduler/scheduler.go": "the analytics scheduler's leader lock (Acquire)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on

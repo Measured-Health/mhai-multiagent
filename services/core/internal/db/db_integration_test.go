@@ -110,8 +110,8 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(st) != 18 {
-		t.Fatalf("want 18 migrations, got %d", len(st))
+	if len(st) != 19 {
+		t.Fatalf("want 19 migrations, got %d", len(st))
 	}
 	for i, s := range st {
 		if s.Source.Version != int64(i+1) || s.State != goose.StateApplied {
@@ -132,7 +132,7 @@ func TestAppRolesAreNotOwnersAndCannotBypassRLS(t *testing.T) {
 	ctx := context.Background()
 	rows, err := pool.Query(ctx,
 		`SELECT rolname, rolsuper, rolbypassrls, rolcanlogin FROM pg_roles
-		 WHERE rolname IN ('mhai_gateway','mhai_platform','mhai_auth','mhai_worker','mhai_migrate','mhai_app','mhai_provision','mhai_jobs','mhai_worker_app','mhai_audit_drain','mhai_health_reader','mhai_jobs_reader','mhai_guardrail_reader')`)
+		 WHERE rolname IN ('mhai_gateway','mhai_platform','mhai_auth','mhai_worker','mhai_migrate','mhai_app','mhai_provision','mhai_jobs','mhai_worker_app','mhai_audit_drain','mhai_health_reader','mhai_jobs_reader','mhai_guardrail_reader','mhai_analytics_job','mhai_analytics_reader')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestAppRolesAreNotOwnersAndCannotBypassRLS(t *testing.T) {
 			t.Errorf("%s: super=%v bypassrls=%v login=%v, want all false", name, super, bypass, login)
 		}
 	}
-	if len(seen) != 13 {
+	if len(seen) != 15 {
 		t.Fatalf("roles found: %v", seen)
 	}
 
@@ -269,7 +269,8 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if err := db.WithHospital(ctx, one, a, func(pgx.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs", "hospital_model_policy", "cloud_usage", "cloud_reservations"} {
+	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs", "hospital_model_policy", "cloud_usage", "cloud_reservations",
+		"analytics_snapshots", "analytics_period_counts", "analytics_frozen_periods", "analytics_epoch"} {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -279,7 +280,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		}
 		var n int
 		where := ` WHERE hospital_id IS NOT NULL`
-		if table == "audit_verify_runs" {
+		if table == "audit_verify_runs" || strings.HasPrefix(table, "analytics_") {
 			where = "" // global, no hospital column: the gateway may not read it at all
 		}
 		err = tx.QueryRow(ctx, `SELECT count(*) FROM `+table+where).Scan(&n)
@@ -291,6 +292,12 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		if table == "feedback_buffer" {
 			// No role but the owner reads the buffer: the gateway is denied outright.
 			requireDenied(t, err, "gateway reading feedback_buffer")
+			continue
+		}
+		if strings.HasPrefix(table, "analytics_") {
+			// 00019: platform tables, no hospital scope; the gateway holds no
+			// grant on any of them.
+			requireDenied(t, err, "gateway reading "+table)
 			continue
 		}
 		if table == "hospital_model_policy" || table == "cloud_usage" || table == "cloud_reservations" {
