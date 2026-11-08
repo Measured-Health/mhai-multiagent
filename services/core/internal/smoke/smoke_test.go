@@ -801,4 +801,53 @@ func TestSmokePlatformOps(t *testing.T) {
 			t.Fatalf("GET /platform/guardrails/periods?period=%s: %d %s", k, r.status, r.raw)
 		}
 	}
+
+	// Analytics (Plan 7c-2): the month is either not yet published (every
+	// area {not_yet, first_from}) or the latest stored month; alerts null,
+	// changes unavailable until 7c-3. One hospital's series: a hospital of
+	// the published month, or 404 for one in no published period.
+	r = call("GET", "/platform/analytics?period=month", nil)
+	if r.status != http.StatusOK || r.body["period"] != "month" || r.body["alerts"] != nil {
+		t.Fatalf("GET /platform/analytics?period=month: %d %s", r.status, r.raw)
+	}
+	if c, _ := r.body["changes"].(map[string]any); c["unavailable"] != true {
+		t.Fatalf("analytics: changes %v, want unavailable until 7c-3", r.body["changes"])
+	}
+	seriesID := uuid.NewString()
+	use, _ := r.body["use"].(map[string]any)
+	switch {
+	case r.body["from"] == nil && use["not_yet"] == true:
+		t.Logf("analytics month: not yet published (first %v)", use["first_from"])
+	case r.body["from"] != nil && use["rows"] != nil:
+		rows, _ := use["rows"].([]any)
+		for _, x := range rows {
+			if m, _ := x.(map[string]any); m != nil {
+				h, _ := m["hospital"].(map[string]any)
+				seriesID, _ = h["id"].(string)
+				break
+			}
+		}
+		if raw := string(r.raw); strings.Contains(raw, `"value":1,`) || strings.Contains(raw, `"value":2,`) ||
+			strings.Contains(raw, `"value":3,`) || strings.Contains(raw, `"value":4,`) {
+			t.Fatalf("analytics month: a count of 1 to 4 is shown: %s", r.raw)
+		}
+		t.Logf("analytics month: published, %d hospital rows", len(rows))
+	case r.body["from"] != nil && use["unavailable"] == true:
+		t.Logf("analytics month: published, snapshot unavailable")
+	default:
+		t.Fatalf("analytics month: %s", r.raw)
+	}
+	r = call("GET", "/platform/analytics/hospitals/"+seriesID+"/series?measure=needs_review_share&period=month", nil)
+	switch {
+	case r.status == http.StatusOK:
+		pts, _ := r.body["points"].([]any)
+		if r.body["measure"] != "needs_review_share" || len(pts) == 0 || len(pts) > 12 {
+			t.Fatalf("hospital series: %s", r.raw)
+		}
+		t.Logf("hospital series: %d monthly points", len(pts))
+	case r.status == http.StatusNotFound && r.body["code"] == "not_found":
+		t.Logf("hospital series: no published month lists the hospital (not_found)")
+	default:
+		t.Fatalf("GET hospital series: %d %s", r.status, r.raw)
+	}
 }

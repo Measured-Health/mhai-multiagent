@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Platform analytics reads, part 7c-2 (OpenAPI 1.13.0, additive; Plan 7c
+  Tasks 6 and 7). `GET /platform/analytics?period=week|month|quarter`
+  serves Use, Answer quality and Hospitals of the latest published period,
+  with medians over shown values and trends over the latest 12 weeks, 12
+  months or 8 quarters; `alerts` is null and `changes` unavailable until
+  7c-3; `{not_yet, first_from}` before the first period.
+  `GET /platform/analytics/hospitals/{id}/series` serves one hospital's
+  stored figure per period (`questions_per_clinician`,
+  `needs_review_share`); `GET /platform/analytics/changes/{id}/series` is
+  404 until What changed exists. Every route reads stored snapshots only;
+  30 reads a minute per session. No migration.
 - EMR integration, PR 3 (connections; off by default). Migration 00020:
   the `emr` schema and roles, `emr_connections` (configuration only, no secret column or key),
   credential metadata, sync runs and errors, declared private ranges that

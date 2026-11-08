@@ -230,7 +230,9 @@ ok), forces a dead letter and finds it in `GET /platform/jobs`, retries it
 with `POST /platform/jobs/retry`, and reads `GET /platform/guardrails?period=7d`
 (deprecated: the headers, every figure hidden) and
 `GET /platform/guardrails/periods` for each kind (`not_ready` until a period
-after the release is published, then the shape).
+after the release is published, then the shape), then
+`GET /platform/analytics?period=month` (not yet published, or the latest
+month with no count of 1 to 4 shown) and one hospital's monthly series.
 Set
 `POSTGRES_PORT`, `NATS_PORT`, `CORE_PORT` and `SMOKE_PROJECT` when the
 defaults clash.
@@ -437,6 +439,19 @@ Platform audience, two-step always; none of these reads is audit-recorded.
   nested period, and guards it with `internal/smallgroup`'s joint guard (the
   parent set and an exact check over the published history). 503
   `not_ready` until the first period of a kind after the release.
+- `GET /platform/analytics?period=week|month|quarter` (Plan 7c-2) renders
+  Use, Answer quality and Hospitals of the latest published period from its
+  stored snapshot, each cell as stored; medians over the hospitals' shown
+  values (a count median between 0 and 5 hidden), trends from the stored
+  all-hospitals cells of the latest 12 weeks, 12 months or 8 quarters (one
+  period each). `alerts` is null and `changes` `{unavailable: true}` until
+  7c-3; an area is `{unavailable: true}` when its snapshot couldn't be
+  computed or read, and `{not_yet: true, first_from}` before the first
+  period. `GET /platform/analytics/hospitals/{id}/series?measure&period`
+  (`questions_per_clinician`, `needs_review_share`) is the hospital's stored
+  cell per period with the other hospitals' median; a change's series is 404
+  until 7c-3. 30 reads a minute per session across the three; no read
+  computes a figure or touches a clinical table.
 - `GET /platform/guardrails?period=7d|30d|90d` is deprecated: every count
   and share hidden, `Deprecation`, `Sunset` and `Link` headers, 422 after
   the sunset. 6 reads a minute per session across both routes (429).
