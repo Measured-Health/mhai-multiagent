@@ -33,6 +33,7 @@ package smallgroup
 // check it against.
 
 import (
+	"context"
 	"errors"
 	"math/big"
 	"math/bits"
@@ -502,15 +503,18 @@ func (sc setCheck) violatesAfter(sb pair) bool {
 	return false
 }
 
-// setViolates is the whole-set rule (R41a-5): from before to after, nothing
-// about the members may become determined but their full sum
-// (D_after ⊆ D_before + span(sum)).
-func setViolates(dimB int, sumB bool, dimA int, sumA bool) bool {
+// setViolates is the whole-set rule (R41a-5): from before to after, the
+// determined combinations of the members either stay as they were, or go
+// from nothing to the full sum alone. Once anything about the members is
+// known (a member already determined, say), a newly determined full sum
+// gives the rest away (the full sum minus the known part), so it may not
+// become determined.
+func setViolates(dimB int, _ bool, dimA int, sumA bool) bool {
 	switch {
 	case dimA == dimB:
 		return false
-	case dimA == dimB+1:
-		return !(sumA && !sumB)
+	case dimB == 0 && dimA == 1:
+		return !sumA
 	}
 	return true
 }
@@ -805,6 +809,16 @@ func (b *Block) parentSet(all []snap, s snap, k int, vals [][]int64) ([]int64, [
 // returns its hidden cells (row*len(Measures) + measure, row 0 all). An
 // error means S can't be computed: store it unavailable.
 func GuardSnapshot(b *Block, p Pending) ([]bool, error) {
+	return GuardSnapshotCtx(context.Background(), b, p)
+}
+
+// GuardSnapshotCtx is GuardSnapshot under ctx (T17): it checks ctx at every
+// pass of its loop and between sets, and stops with ctx's error, so a
+// caller's budget bounds it.
+func GuardSnapshotCtx(ctx context.Context, b *Block, p Pending) ([]bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := b.validate(p); err != nil {
 		return nil, err
 	}
@@ -823,7 +837,10 @@ func GuardSnapshot(b *Block, p Pending) ([]bool, error) {
 			return nil, err
 		}
 		all[si].hidden = hide
-		newly := b.newlyExposedWith(all, si, base, earlier)
+		newly, err := b.newlyExposedWith(ctx, all, si, base, earlier)
+		if err != nil {
+			return nil, err
+		}
 		if len(newly) == 0 {
 			return hide, nil
 		}
@@ -855,12 +872,13 @@ func (b *Block) before(all []snap, si int) pair {
 // sum of 1 to 4) exposed once snapshot si is added to base but not before
 // (E1 minus E0).
 func (b *Block) newlyExposed(all []snap, si int, base pair) [][]int {
-	return b.newlyExposedWith(all, si, base, nil)
+	newly, _ := b.newlyExposedWith(context.Background(), all, si, base, nil)
+	return newly
 }
 
 // newlyExposedWith is newlyExposed with the earlier snapshots' sets
 // prepared once (GuardSnapshot reuses them across its loop).
-func (b *Block) newlyExposedWith(all []snap, si int, base pair, earlier []setCheck) [][]int {
+func (b *Block) newlyExposedWith(ctx context.Context, all []snap, si int, base pair, earlier []setCheck) ([][]int, error) {
 	after := base.clone()
 	e, z := b.known(all[si])
 	after.addAll(e, z)
@@ -899,11 +917,14 @@ func (b *Block) newlyExposedWith(all []snap, si int, base pair, earlier []setChe
 		}
 	}
 	for _, sc := range append(earlier, b.prepSets(own, base)...) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if sc.violatesAfter(sb) {
 			newly = append(newly, sc.vars)
 		}
 	}
-	return newly
+	return newly, nil
 }
 
 // cellToHide is the shown S cell with the smallest non-zero value whose box

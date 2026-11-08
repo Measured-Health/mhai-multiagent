@@ -1,6 +1,8 @@
 package smallgroup
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"math/big"
 	"math/rand"
@@ -808,5 +810,24 @@ func TestJointBudget(t *testing.T) {
 	t.Logf("quarter took %v", time.Since(start))
 	if d := time.Since(start); d > 60*time.Second {
 		t.Fatalf("quarter took %v", d)
+	}
+}
+
+// T17: the guard checks its context between sets and stops with its error.
+func TestGuardSnapshotStopsOnContext(t *testing.T) {
+	b := newBlock(QG, 4, 3)
+	r := rand.New(rand.NewSource(5))
+	for h := 0; h < 3; h++ {
+		for s := 0; s < 4; s++ {
+			fillQG(r, b.X[h][s])
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := GuardSnapshotCtx(ctx, b, Pending{Slots: []int{0}, Listed: []int{0, 1, 2}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled guard returned %v, want context.Canceled", err)
+	}
+	if _, err := GuardSnapshotCtx(context.Background(), b, Pending{Slots: []int{0}, Listed: []int{0, 1, 2}}); err != nil {
+		t.Fatalf("a live guard: %v", err)
 	}
 }

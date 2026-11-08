@@ -71,13 +71,24 @@ var ErrNotFreezable = errors.New("scheduler: the period can't be frozen")
 // Builder builds one period's snapshot.
 type Builder struct {
 	Src Source
+	// Guard replaces smallgroup.GuardSnapshotCtx (tests: a slow guard).
+	Guard func(context.Context, *smallgroup.Block, smallgroup.Pending) ([]bool, error)
+	// Budget bounds one period's guard (0: GuardBudget).
+	Budget time.Duration
 }
+
+// GuardBudget is one period's guard budget (spec §6.5, T17).
+const GuardBudget = 60 * time.Second
 
 // The snapshot states.
 const (
 	StateOK          = "ok"
 	StateUnavailable = "unavailable"
 )
+
+// ErrGuardTimeout is a period whose guard ran past its budget: nothing is
+// stored, and the scheduler retries it (T17).
+var ErrGuardTimeout = errors.New("scheduler: the guard ran past its budget")
 
 // errUnguardable is a period that is stored unavailable: counts that don't
 // add up, a child not published, a guard that gave up.
@@ -91,8 +102,17 @@ func (b Builder) Build(ctx context.Context, p calendar.Period) error {
 	if ferr != nil && !errors.Is(ferr, ErrNotFreezable) {
 		return ferr
 	}
-	body, err := b.guard(ctx, p, ferr == nil)
+	budget := b.Budget
+	if budget <= 0 {
+		budget = GuardBudget
+	}
+	gctx, cancel := context.WithTimeout(ctx, budget)
+	body, err := b.guard(gctx, p, ferr == nil)
+	timedOut := errors.Is(gctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+	cancel()
 	switch {
+	case timedOut && err != nil:
+		return ErrGuardTimeout
 	case errors.Is(err, errUnguardable):
 		return b.Src.Insert(ctx, p, StateUnavailable, nil)
 	case err != nil:
@@ -185,7 +205,11 @@ func (b Builder) guard(ctx context.Context, p calendar.Period, frozen bool) (ana
 	if err != nil {
 		return analytics.Body{}, err
 	}
-	return k.build(p, byID, staff, stored)
+	guard := b.Guard
+	if guard == nil {
+		guard = smallgroup.GuardSnapshotCtx
+	}
+	return k.build(ctx, guard, p, byID, staff, stored)
 }
 
 // family is one family's guard input built from the block.
@@ -273,7 +297,8 @@ func hiddenR(r analytics.Row) []bool {
 	return []bool{!r.Reviews.Shown(), !known, !known}
 }
 
-func (k *block) build(p calendar.Period, byID map[uuid.UUID]Hospital, staff map[uuid.UUID]int64, stored []Stored) (analytics.Body, error) {
+func (k *block) build(ctx context.Context, guard func(context.Context, *smallgroup.Block, smallgroup.Pending) ([]bool, error),
+	p calendar.Period, byID map[uuid.UUID]Hospital, staff map[uuid.UUID]int64, stored []Stored) (analytics.Body, error) {
 	idx, bodies, err := k.published(stored)
 	if err != nil {
 		return analytics.Body{}, err
@@ -381,7 +406,10 @@ func (k *block) build(p calendar.Period, byID map[uuid.UUID]Hospital, staff map[
 				}
 			}
 		}
-		hid, err := smallgroup.GuardSnapshot(gb, smallgroup.Pending{Slots: k.slots(p), Listed: lst, Children: ch, Forced: forced})
+		hid, err := guard(ctx, gb, smallgroup.Pending{Slots: k.slots(p), Listed: lst, Children: ch, Forced: forced})
+		if ctx.Err() != nil {
+			return analytics.Body{}, ctx.Err()
+		}
 		if err != nil {
 			return analytics.Body{}, errUnguardable
 		}

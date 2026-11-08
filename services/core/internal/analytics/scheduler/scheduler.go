@@ -2,13 +2,19 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
 )
+
+// MaxGuardTimeouts is how many times a period's guard may run past its
+// budget before the period is stored unavailable (T17).
+const MaxGuardTimeouts = 3
 
 // Every is how often the scheduler wakes (spec §8.3).
 const Every = 5 * time.Minute
@@ -28,6 +34,9 @@ type Scheduler struct {
 	// Lock replaces the advisory lock (tests without a database). nil:
 	// pg_try_advisory_lock on Pool.
 	Lock func(ctx context.Context) (unlock func(), ok bool, err error)
+
+	mu       sync.Mutex
+	timeouts map[string]int // guard timeouts per period, on this copy
 }
 
 // Clock is the source's clock: the database's, so the scheduler's idea of
@@ -37,7 +46,7 @@ type Clock interface {
 	StoredKeys(ctx context.Context, since time.Time) (map[string]bool, error)
 }
 
-func (s Scheduler) log() *slog.Logger {
+func (s *Scheduler) log() *slog.Logger {
 	if s.Log != nil {
 		return s.Log
 	}
@@ -45,7 +54,7 @@ func (s Scheduler) log() *slog.Logger {
 }
 
 // Run ticks until ctx ends.
-func (s Scheduler) Run(ctx context.Context) error {
+func (s *Scheduler) Run(ctx context.Context) error {
 	every := s.Every
 	if every <= 0 {
 		every = Every
@@ -96,7 +105,7 @@ func Due(epoch, now time.Time, have map[string]bool) []calendar.Period {
 // first period that fails other than by being unavailable, so a parent is
 // never built after a child that will be retried. It returns the periods
 // it stored.
-func (s Scheduler) Tick(ctx context.Context) ([]calendar.Period, error) {
+func (s *Scheduler) Tick(ctx context.Context) ([]calendar.Period, error) {
 	unlock, ok, err := s.lock(ctx)
 	if err != nil || !ok {
 		return nil, err
@@ -120,7 +129,22 @@ func (s Scheduler) Tick(ctx context.Context) ([]calendar.Period, error) {
 	}
 	var done []calendar.Period
 	for _, p := range Due(epoch, now, have) {
-		if err := s.Builder.Build(ctx, p); err != nil {
+		err := s.Builder.Build(ctx, p)
+		if errors.Is(err, ErrGuardTimeout) {
+			// T17: no row; retried next wake, until MaxGuardTimeouts.
+			s.log().Error("analytics: period guard timed out", "kind", string(p.Kind), "from", p.From.Format(time.DateOnly), "reason", "timeout")
+			if s.timedOut(p) < MaxGuardTimeouts {
+				return done, err
+			}
+			if err := s.Builder.MarkUnavailable(ctx, p); err != nil {
+				return done, err
+			}
+			s.log().Error("analytics: period stored unavailable after repeated guard timeouts", "kind", string(p.Kind),
+				"from", p.From.Format(time.DateOnly), "reason", "timeout")
+			done = append(done, p)
+			continue
+		}
+		if err != nil {
 			// The period and a fixed reason; never a count.
 			s.log().Error("analytics: period not built", "kind", string(p.Kind), "from", p.From.Format(time.DateOnly), "reason", "internal_error")
 			return done, err
@@ -130,7 +154,19 @@ func (s Scheduler) Tick(ctx context.Context) ([]calendar.Period, error) {
 	return done, nil
 }
 
-func (s Scheduler) lock(ctx context.Context) (func(), bool, error) {
+// timedOut counts one more guard timeout of p on this copy and returns the
+// count.
+func (s *Scheduler) timedOut(p calendar.Period) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.timeouts == nil {
+		s.timeouts = map[string]int{}
+	}
+	s.timeouts[key(p)]++
+	return s.timeouts[key(p)]
+}
+
+func (s *Scheduler) lock(ctx context.Context) (func(), bool, error) {
 	if s.Lock != nil {
 		return s.Lock(ctx)
 	}

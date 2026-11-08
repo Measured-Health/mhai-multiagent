@@ -21,6 +21,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler/schedtest"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup"
 )
 
 // Plan 7c Task 4: the snapshot builder and the scheduler, over the fake
@@ -58,8 +59,8 @@ func fixture(clock, epoch time.Time) (*schedtest.Fake, []uuid.UUID) {
 	return f, ids
 }
 
-func sched(f *schedtest.Fake, log *slog.Logger) scheduler.Scheduler {
-	return scheduler.Scheduler{Builder: scheduler.Builder{Src: f}, Lock: schedtest.NoLock, Log: log}
+func sched(f *schedtest.Fake, log *slog.Logger) *scheduler.Scheduler {
+	return &scheduler.Scheduler{Builder: scheduler.Builder{Src: f}, Lock: schedtest.NoLock, Log: log}
 }
 
 func TestBuildStoresGuardedOnly(t *testing.T) {
@@ -308,5 +309,42 @@ func TestMedianAndStaffHideAlike(t *testing.T) {
 	if string(a["staff"]) != `{"value":null,"suppressed":true}` || string(b["staff"]) != `{"value":9,"suppressed":false}` ||
 		string(c["staff"]) != `{"value":0,"suppressed":false}` {
 		t.Errorf("staff 3, 9, 0: %s %s %s", a["staff"], b["staff"], c["staff"])
+	}
+}
+
+// T17: a period's guard runs under its budget. A guard past it stores no
+// row, logs the period and a fixed reason, and is retried on the next
+// wake; after MaxGuardTimeouts timeouts the period is stored unavailable.
+func TestGuardTimeoutRetriesThenUnavailable(t *testing.T) {
+	f, _ := fixture(at(2026, 10, 8).Add(time.Hour), at(2026, 10, 1)) // one week due
+	var buf bytes.Buffer
+	s := sched(f, slog.New(slog.NewTextHandler(&buf, nil)))
+	calls := 0
+	s.Builder.Budget = 20 * time.Millisecond
+	s.Builder.Guard = func(ctx context.Context, _ *smallgroup.Block, _ smallgroup.Pending) ([]bool, error) {
+		calls++
+		<-ctx.Done() // a guard that never finishes in time
+		return nil, ctx.Err()
+	}
+	w := calendar.Of(calendar.Week, at(2026, 10, 1))
+	for i := 1; i < scheduler.MaxGuardTimeouts; i++ {
+		if _, err := s.Tick(context.Background()); err == nil {
+			t.Fatalf("wake %d: a timed-out guard reported no error", i)
+		}
+		if st, ok := f.Snapshot(w); ok {
+			t.Fatalf("wake %d: a timed-out period stored %s", i, st.State)
+		}
+	}
+	if !strings.Contains(buf.String(), "reason=timeout") || !strings.Contains(buf.String(), "from=2026-10-01") {
+		t.Errorf("the log lacks the period or the reason: %s", buf.String())
+	}
+	if _, err := s.Tick(context.Background()); err != nil {
+		t.Fatalf("the last wake: %v", err)
+	}
+	if st, ok := f.Snapshot(w); !ok || st.State != scheduler.StateUnavailable {
+		t.Fatalf("after %d timeouts: stored %v %s, want unavailable", scheduler.MaxGuardTimeouts, ok, st.State)
+	}
+	if calls < scheduler.MaxGuardTimeouts {
+		t.Errorf("the guard ran %d times", calls)
 	}
 }
