@@ -213,10 +213,7 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 
 ## Test follow-ups
 
-- **`TestTwoCoreCopiesShareGrants` flakes** (`services/core/internal/grant`, `-tags "integration test"`): 99 of 100 grants answered now and then, on other branches too (seen 7 Nov on the EMR build; 10 reruns passed). Find what varies (likely a grant lost between the two copies' queue subscriptions under `-race`) and fix it; no retries.
 - **Interop test of the health probe against the real Python worker.** The sampler's `pipeline.health` token (svc:core, no roles, the fixed probe hospital id) is tested only against a Go fake. Add a test, in the smoke run or the boundary tests, that the Python `pipeline.health` handler accepts it and answers `models_ready` and `database_ready`.
-
-- **`TestTwoCoreCopiesShareGrants` (`internal/grant`) is flaky.** Seen once in CI during Plan 4b; it passed on a re-run. Find the race (two core copies sharing the grants KV) before it hides a real fault.
 
 ## Under consideration
 
