@@ -607,7 +607,7 @@ func TestCoreBuildsFromServices(t *testing.T) {
 // password and nothing of core's.
 func TestComposeEMRProfile(t *testing.T) {
 	svcs := loadCompose(t)
-	emrNames := []string{"emr", "emr-keys"}
+	emrNames := []string{"emr", "emr-keys", "emr-proxy-key", "egress-emr"}
 	for _, name := range emrNames {
 		s, ok := svcs[name]
 		if !ok {
@@ -628,7 +628,7 @@ func TestComposeEMRProfile(t *testing.T) {
 	for name, s := range svcs {
 		for _, v := range s.Volumes {
 			vol := strings.SplitN(v, ":", 2)[0]
-			if (vol == "emr-secrets" || vol == "emr-keys") && !slices.Contains(emrNames, name) {
+			if (vol == "emr-secrets" || vol == "emr-keys") && name != "emr" && name != "emr-keys" {
 				t.Errorf("%s mounts %s", name, vol)
 			}
 			if vol == "emr-secrets" && name != "emr" {
@@ -794,23 +794,37 @@ func readRepoFile(t *testing.T, name string) string {
 
 func loadDeployCompose(t *testing.T) deployCompose {
 	t.Helper()
+	return loadComposeAs(t, filepath.Join("deploy", "compose.yml"))
+}
+
+// loadComposeAs reads a compose file with the fields the network checks
+// read.
+func loadComposeAs(t *testing.T, name string) deployCompose {
+	t.Helper()
 	var c deployCompose
-	if err := yaml.Unmarshal([]byte(readRepoFile(t, filepath.Join("deploy", "compose.yml"))), &c); err != nil {
+	if err := yaml.Unmarshal([]byte(readRepoFile(t, name)), &c); err != nil {
 		t.Fatal(err)
 	}
 	return c
 }
 
 // commentedPipeline parses deploy/compose.yml's commented-out pipeline
-// block as an operator would uncomment it: every line from "  # pipeline:"
-// to the first line that isn't a comment loses its "  # " prefix. Lines
-// commented twice stay comments.
+// block as an operator would uncomment it.
 func commentedPipeline(t *testing.T) deployService {
+	t.Helper()
+	return commentedService(t, "pipeline")
+}
+
+// commentedService parses deploy/compose.yml's commented-out block for
+// service name: every line from "  # <name>:" to the first line that
+// isn't a comment loses its "  # " prefix. Lines commented twice stay
+// comments.
+func commentedService(t *testing.T, name string) deployService {
 	t.Helper()
 	var block []string
 	in := false
 	for _, line := range strings.Split(readRepoFile(t, filepath.Join("deploy", "compose.yml")), "\n") {
-		if line == "  # pipeline:" {
+		if line == "  # "+name+":" {
 			in = true
 		}
 		if !in {
@@ -822,15 +836,15 @@ func commentedPipeline(t *testing.T) deployService {
 		block = append(block, strings.TrimPrefix(strings.TrimPrefix(line, "  #"), " "))
 	}
 	if len(block) == 0 {
-		t.Fatal("deploy/compose.yml has no commented pipeline block")
+		t.Fatalf("deploy/compose.yml has no commented %s block", name)
 	}
 	var svcs map[string]deployService
 	if err := yaml.Unmarshal([]byte(strings.Join(block, "\n")), &svcs); err != nil {
-		t.Fatalf("the commented pipeline block isn't valid YAML once uncommented: %v", err)
+		t.Fatalf("the commented %s block isn't valid YAML once uncommented: %v", name, err)
 	}
-	p, ok := svcs["pipeline"]
+	p, ok := svcs[name]
 	if !ok {
-		t.Fatal("the commented block has no pipeline service")
+		t.Fatalf("the commented block has no %s service", name)
 	}
 	return p
 }
@@ -1076,6 +1090,127 @@ func TestSquidConfAllowsOnlyConnect443ToListedHosts(t *testing.T) {
 	for _, l := range strings.Split(readRepoFile(t, filepath.Join("deploy", "egress-proxy", "allowed-hosts.example")), "\n") {
 		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") {
 			t.Errorf("allowed-hosts.example lists %q", l)
+		}
+	}
+}
+
+// Plan Task 15 (A6, A29, A37; design §6.4): the emr service has no route
+// out. It is on backend (internal: Postgres, NATS) and emr-proxy
+// (internal: egress-emr only); egress-emr is the only service on the
+// egress-emr network, the one with a route out, and on no other network
+// but emr-proxy, so it reaches neither Postgres nor NATS. Both are in the
+// profile emr only (off by default), publish no port, and share only the
+// allow-list (written by emr, read-only for the proxy) and K_proxy
+// (read-only in both). The proxy runs read-only, unprivileged, with no
+// capabilities and no secret of anyone else's. In both compose files; in
+// deploy/compose.yml the emr service is a commented block until the demo
+// has its NATS user and login.
+func TestEMRNeverOnEgressNetwork(t *testing.T) {
+	type file struct {
+		name string
+		c    deployCompose
+		emr  deployService
+	}
+	dev := loadComposeAs(t, "docker-compose.yml")
+	dep := loadDeployCompose(t)
+	for _, f := range []file{{"docker-compose.yml", dev, dev.Services["emr"]}, {"deploy/compose.yml", dep, commentedService(t, "emr")}} {
+		p, ok := f.c.Services["egress-emr"]
+		if !ok {
+			t.Errorf("%s: no egress-emr service", f.name)
+			continue
+		}
+		if got := p.networkNames(); !slices.Equal(got, []string{"egress-emr", "emr-proxy"}) {
+			t.Errorf("%s: egress-emr networks %v, want [egress-emr emr-proxy]", f.name, got)
+		}
+		if got := f.emr.networkNames(); !slices.Equal(got, []string{"backend", "emr-proxy"}) {
+			t.Errorf("%s: emr networks %v, want [backend emr-proxy]: no route out", f.name, got)
+		}
+		if f.emr.NetworkMode != "" || len(f.emr.Ports) != 0 || len(p.Ports) != 0 || p.NetworkMode != "" {
+			t.Errorf("%s: emr or egress-emr publishes a port or sets network_mode", f.name)
+		}
+		if !slices.Equal(p.Profiles, []string{"emr"}) || !slices.Equal(f.emr.Profiles, []string{"emr"}) {
+			t.Errorf("%s: profiles egress-emr %v, emr %v: want [emr], off by default", f.name, p.Profiles, f.emr.Profiles)
+		}
+		if !p.ReadOnly || !slices.Equal(p.CapDrop, []string{"ALL"}) || strings.HasPrefix(p.User, "0") || strings.HasPrefix(p.User, "root") {
+			t.Errorf("%s: egress-emr read_only %v, cap_drop %v, user %q", f.name, p.ReadOnly, p.CapDrop, p.User)
+		}
+		for _, n := range []string{"backend", "emr-proxy"} {
+			if !f.c.Networks[n].Internal {
+				t.Errorf("%s: network %s must be internal", f.name, n)
+			}
+		}
+		if e, ok := f.c.Networks["egress-emr"]; !ok || e.Internal || e.External {
+			t.Errorf("%s: networks.egress-emr = %+v (present %v): a project network with a route out", f.name, e, ok)
+		}
+		all := map[string]deployService{"emr": f.emr}
+		for name, s := range f.c.Services {
+			all[name] = s
+		}
+		for name, s := range all {
+			nets := s.networkNames()
+			if name != "egress-emr" && slices.Contains(nets, "egress-emr") {
+				t.Errorf("%s: %s is on the egress-emr network", f.name, name)
+			}
+			if name != "egress-emr" && name != "emr" && slices.Contains(nets, "emr-proxy") {
+				t.Errorf("%s: %s is on the emr-proxy network", f.name, name)
+			}
+		}
+		// The proxy's mounts: the allow-list and K_proxy, both read-only;
+		// nothing else (never a sealing key, the secret store or core's keys).
+		for _, v := range p.Volumes {
+			parts := strings.Split(v, ":")
+			n := len(parts)
+			if n < 3 || parts[n-1] != "ro" {
+				t.Errorf("%s: egress-emr mount %q must be read-only", f.name, v)
+			}
+			if src := parts[0]; src != "emr-egress-conf" && !strings.Contains(v, "emr-proxy") {
+				t.Errorf("%s: egress-emr mounts %q", f.name, v)
+			}
+		}
+		allowRW := false
+		for _, v := range f.emr.Volumes {
+			if strings.HasPrefix(v, "emr-egress-conf:") && !strings.HasSuffix(v, ":ro") {
+				allowRW = true
+			}
+			if strings.Contains(v, "emr-proxy") && !strings.HasSuffix(v, ":ro") {
+				t.Errorf("%s: emr mounts K_proxy writable: %q", f.name, v)
+			}
+		}
+		if !allowRW {
+			t.Errorf("%s: emr doesn't mount emr-egress-conf to write the allow-list", f.name)
+		}
+		for k := range p.Environment {
+			if !strings.HasPrefix(k, "EGRESS_EMR_") {
+				t.Errorf("%s: egress-emr has %s in its environment", f.name, k)
+			}
+		}
+		for k, v := range map[string]string{"EMR_PROXY_URL": "http://egress-emr:3128", "EMR_EGRESS_DIR": "/emr-egress"} {
+			if f.emr.Environment[k] != v {
+				t.Errorf("%s: emr %s = %q, want %q", f.name, k, f.emr.Environment[k], v)
+			}
+		}
+		for k := range f.emr.Environment {
+			if l := strings.ToLower(k); l == "https_proxy" || l == "http_proxy" || l == "all_proxy" {
+				t.Errorf("%s: emr sets %s: only its egress clients use the proxy", f.name, k)
+			}
+		}
+		// Only the emr services ever mount the egress volumes.
+		for name, s := range f.c.Services {
+			for _, v := range s.Volumes {
+				if (strings.HasPrefix(v, "emr-egress-conf:") || strings.HasPrefix(v, "emr-proxy-key:")) &&
+					name != "emr" && name != "egress-emr" && name != "emr-proxy-key" {
+					t.Errorf("%s: %s mounts %s", f.name, name, v)
+				}
+			}
+		}
+	}
+	// The demo's services keep the networks they had: nothing outside the
+	// profile emr changes in deploy/compose.yml.
+	want := map[string][]string{"postgres": {"backend"}, "nats": {"backend", "bff", "edge"}, "core-migrate": {"backend"},
+		"core": {"backend", "edge"}, "core-cli": {"backend"}, "egress-proxy": {"backend", "egress"}}
+	for name, nets := range want {
+		if got := dep.Services[name].networkNames(); !slices.Equal(got, nets) {
+			t.Errorf("deploy/compose.yml: %s networks %v, want %v", name, got, nets)
 		}
 	}
 }
