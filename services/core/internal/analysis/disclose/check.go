@@ -67,9 +67,9 @@ func (s *system) v(g string) int {
 // eqn is an equation total − Σ parts = 0 over the groups (zero groups are
 // constants and left out).
 type eqn struct {
-	vars    []int
-	coefs   []int64
-	hidden  [][]int // the parts hidden (or never sent): the whole-set rule's members
+	vars   []int
+	coefs  []int64
+	hidden [][]int // the parts hidden (or never sent): the whole-set rule's members
 }
 
 func (s *system) eq(total string, parts []string, hidden []bool) eqn {
