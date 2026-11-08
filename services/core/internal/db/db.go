@@ -2,7 +2,7 @@
 // migrations and runs transactions under the right database role.
 //
 // Every query runs inside one of WithHospital, WithHospitalUser, WithPlatform, WithAuth,
-// WithJobs, WithAnalyticsJob or WithAuditDrain.
+// WithJobs, WithAnalyticsJob, WithAnalysisJob or WithAuditDrain.
 // The gateway's login user holds no table privileges of its own (it is a
 // member of mhai_app, see 00003_rls_roles.sql), so a query outside them
 // fails instead of reading anything.
@@ -36,6 +36,7 @@ const (
 	roleJobs     = "mhai_jobs"
 	roleDrain    = "mhai_audit_drain"
 	roleAnalytic = "mhai_analytics_job"
+	roleAnalysis = "mhai_analysis_job"
 )
 
 // ErrNoHospital is returned by WithHospital for the nil hospital id (the
@@ -108,6 +109,15 @@ func WithJobs(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) er
 // fails if internal/platform imports the scheduler).
 func WithAnalyticsJob(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
 	return inRole(ctx, pool, roleAnalytic, "", nil, fn)
+}
+
+// WithAnalysisJob runs fn in a transaction as mhai_analysis_job: Patient
+// Analysis's nightly role (migration 00021), the only role that runs the
+// job's functions (ingest, sweep, freeze), which write facts for a named
+// hospital. For internal/analysis's nightly run only: no route handler
+// calls it (TestRoutesCantReachAnalysisJobPool).
+func WithAnalysisJob(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	return inRole(ctx, pool, roleAnalysis, "", nil, fn)
 }
 
 // WithJobsThenPlatform runs jobs as mhai_jobs and then platform as

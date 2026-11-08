@@ -96,6 +96,9 @@ type Config struct {
 	// credential routes' requests under (CORE_IDEMPOTENCY_HMAC_KEY_PATH;
 	// EMR design §6.2), required when EMREnabled.
 	IdempotencyHMACKeyPath string
+	// Analysis holds Patient Analysis's four keys (ANALYSIS_*_KEY_FILE),
+	// all or none; it never prints them.
+	Analysis AnalysisKeys
 }
 
 // errConnectorTypes names the variable only, never its value.
@@ -317,6 +320,10 @@ func Load() (Config, error) {
 			}
 			c.BFFServiceKeys = append(c.BFFServiceKeys, k)
 		}
+	}
+
+	if c.Analysis, err = loadAnalysisKeys(os.Getenv); err != nil {
+		errs = append(errs, err)
 	}
 
 	if err := errors.Join(errs...); err != nil {

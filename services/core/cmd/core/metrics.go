@@ -37,6 +37,10 @@ func registerMetrics(a *app, nm *natsapi.Metrics, gm *grant.Metrics) {
 	count("grant_rate_limited_total", "Grant requests refused by the session or hospital rate.", gm.RateLimited.Load)
 	count("grant_overloaded_total", "Grant requests refused because too many were in flight.", gm.Overloaded.Load)
 	count("grant_granted_total", "Grants given.", gm.Granted.Load)
+	if an := a.analysis; an != nil {
+		count("analysis_late_facts_total", "Analysis facts that arrived after their block froze (never counted).", an.LateFacts.Load)
+		count("analysis_freeze_failed_total", "Failed analysis nightly steps (alert analysis_freeze_failed).", an.Failures.Load)
+	}
 	im := a.intel.Metrics
 	count("jobs_dead_letters_total", "Dead letters read from workers.", im.DeadReceived.Load, jobTypeLabel)
 	count("intelligence_dead_ignored_total", "Dead letters that changed nothing (malformed, replayed, or naming no job).", im.DeadIgnored.Load)
