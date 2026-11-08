@@ -77,6 +77,9 @@ type Parser struct {
 	docs    []doc
 	// unavailable counts analytics areas sent {unavailable: true}.
 	unavailable int
+	// Epoch is the release epoch (public: the notice names it), which
+	// fixes the first period a not-yet response names.
+	Epoch time.Time
 }
 
 type cell struct {

@@ -280,6 +280,7 @@ func (w *world) run(t *testing.T) (*Parser, []response) {
 		}
 	}
 	p := New(w.weeks, w.onboard)
+	p.Epoch = w.epoch
 	for _, r := range out {
 		var err error
 		switch {

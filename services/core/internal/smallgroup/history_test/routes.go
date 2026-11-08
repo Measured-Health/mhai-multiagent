@@ -207,11 +207,20 @@ func (p *Parser) AddAnalytics(raw []byte) error {
 			if err != nil || string(m["not_yet"]) != "true" {
 				return fmt.Errorf("not yet: %s %s", a, top[a])
 			}
+			// The first period of k that starts at or after the release
+			// epoch (R41a-3), worked out here from the calendar alone.
+			if p.Epoch.IsZero() {
+				return fmt.Errorf("not yet, and the parser has no epoch")
+			}
+			first := calendar.Of(k, p.Epoch)
+			if first.From.Before(p.Epoch) {
+				first = calendar.Next(first)
+			}
 			var ff string
 			_ = json.Unmarshal(m["first_from"], &ff)
 			t, err := time.Parse(stampLayout, ff)
-			if err != nil || !calendar.Of(k, t).From.Equal(t) {
-				return fmt.Errorf("first_from %s", m["first_from"])
+			if err != nil || !t.Equal(first.From) {
+				return fmt.Errorf("first_from %s, want %v", m["first_from"], first)
 			}
 		}
 		return nil
