@@ -261,6 +261,45 @@ func TestWipeThenTestSendsNothing(t *testing.T) {
 	}
 }
 
+type fakeHolder struct {
+	holds, releases int
+	err             error
+	hospital, conn  uuid.UUID
+}
+
+func (h *fakeHolder) Hold(_ context.Context, hospital, conn uuid.UUID) (func(), error) {
+	h.holds++
+	h.hospital, h.conn = hospital, conn
+	if h.err != nil {
+		return nil, h.err
+	}
+	return func() { h.releases++ }, nil
+}
+
+// Design §6.4, A28: a connection goes on egress-emr's list only for a test
+// that will send (every check passed), under the token's hospital, and
+// comes off it after; a test refused before the connector runs opens
+// nothing. A list that can't be written is unreachable, with nothing sent.
+func TestTestHoldsEgressOnlyWhenItSends(t *testing.T) {
+	f := newCredFixture(t)
+	h := &fakeHolder{}
+	f.svc.Egress = h
+	if r := f.test(t); r.GetCode() != "sign_in_refused" || h.holds != 0 {
+		t.Fatalf("without credentials: %v, %d holds", r, h.holds)
+	}
+	if _, err := f.put(t, f.box(t, f.conn, "api_key", credCanary, stubOrigin, f.now)); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.test(t); !r.GetOk() || h.holds != 1 || h.releases != 1 || h.hospital != f.hospital || h.conn != f.conn {
+		t.Fatalf("with credentials: %v, holder %+v", r, h)
+	}
+	h.err = errors.New("no allow-list")
+	calls := f.stub.Calls()
+	if r := f.test(t); r.GetCode() != "unreachable" || f.stub.Calls() != calls {
+		t.Fatalf("no allow-list: %v, connector calls %d -> %d", r, calls, f.stub.Calls())
+	}
+}
+
 // Design §17.4: an empty or placeholder secret is sign_in_refused without
 // calling out.
 func TestPlaceholderSecretRefused(t *testing.T) {

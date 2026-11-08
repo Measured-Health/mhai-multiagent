@@ -70,6 +70,15 @@ func (s *Credentials) Test(ctx context.Context, c reqtoken.Claims, m proto.Messa
 	}
 	tctx, cancel := context.WithTimeout(ctx, TestTimeout)
 	defer cancel()
+	// Only now, with everything checked, may the connection go out: its
+	// own hosts and ranges, on egress-emr's list, while the test runs.
+	if s.Egress != nil {
+		release, err := s.Egress.Hold(tctx, hid, id)
+		if err != nil {
+			return testReply("unreachable"), nil
+		}
+		defer release()
+	}
 	r := impl.Test(tctx, cn.cfg, creds)
 	return testReply(r.Code), nil
 }

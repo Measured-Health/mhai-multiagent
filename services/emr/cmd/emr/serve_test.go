@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
@@ -22,7 +23,7 @@ func TestHealthHandler(t *testing.T) {
 		db    pinger
 		ready bool
 	}{{fakeDB{}, true}, {fakeDB{errors.New("down")}, false}, {nil, false}} {
-		rep, err := healthHandler(tc.db, nil)(context.Background(), reqtoken.Claims{}, &emrpb.HealthRequest{})
+		rep, err := healthHandler(tc.db, nil, nil)(context.Background(), reqtoken.Claims{}, &emrpb.HealthRequest{})
 		h, ok := rep.(*emrpb.HealthReply)
 		if err != nil || !ok || h.GetDatabaseReady() != tc.ready || h.GetSecretStoreReady() || h.GetRuleSetVersion() != "" ||
 			h.GetProxyAllowListAgeS() != -1 {
@@ -33,9 +34,25 @@ func TestHealthHandler(t *testing.T) {
 		store readier
 		ready bool
 	}{{fakeDB{}, true}, {fakeDB{errors.New("gone")}, false}} {
-		rep, _ := healthHandler(fakeDB{}, tc.store)(context.Background(), reqtoken.Claims{}, &emrpb.HealthRequest{})
+		rep, _ := healthHandler(fakeDB{}, tc.store, nil)(context.Background(), reqtoken.Claims{}, &emrpb.HealthRequest{})
 		if rep.(*emrpb.HealthReply).GetSecretStoreReady() != tc.ready {
 			t.Errorf("store %v: %v", tc.store, rep)
+		}
+	}
+}
+
+// With egress configured, health reports the allow-list's age in seconds;
+// before the first write it is -1.
+func TestHealthAllowListAge(t *testing.T) {
+	for _, tc := range []struct {
+		age  time.Duration
+		ok   bool
+		want int64
+	}{{42 * time.Second, true, 42}, {0, false, -1}} {
+		age := func(time.Time) (time.Duration, bool) { return tc.age, tc.ok }
+		rep, _ := healthHandler(fakeDB{}, nil, age)(context.Background(), reqtoken.Claims{}, &emrpb.HealthRequest{})
+		if got := rep.(*emrpb.HealthReply).GetProxyAllowListAgeS(); got != tc.want {
+			t.Errorf("age %v %v: %d, want %d", tc.age, tc.ok, got, tc.want)
 		}
 	}
 }

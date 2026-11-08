@@ -74,9 +74,15 @@ func TestSettingsRefusals(t *testing.T) {
 		{"unknown APP_ENV", devEnv, func(m map[string]string) { m["APP_ENV"] = "dev" }, "APP_ENV"},
 		{"bad rule set name", devEnv, func(m map[string]string) { m["EMR_RULE_SET_ACTIVE"] = "../ruleset-1" }, "EMR_RULE_SET_ACTIVE"},
 		{"proxy without key", devEnv, func(m map[string]string) { m["EMR_PROXY_URL"] = "http://egress-emr:3128" }, "EMR_PROXY_KEY_PATH"},
+		{"proxy without egress dir", devEnv, func(m map[string]string) {
+			m["EMR_PROXY_URL"] = "http://egress-emr:3128"
+			m["EMR_PROXY_KEY_PATH"] = "/k"
+		}, "EMR_EGRESS_DIR"},
+		{"egress dir without proxy", devEnv, func(m map[string]string) { m["EMR_EGRESS_DIR"] = "/emr-egress-conf" }, "EMR_PROXY_URL"},
 		{"proxy with credentials", devEnv, func(m map[string]string) {
 			m["EMR_PROXY_URL"] = "http://emr:" + secret + "@egress-emr:3128"
 			m["EMR_PROXY_KEY_PATH"] = "/k"
+			m["EMR_EGRESS_DIR"] = "/d"
 		}, "EMR_PROXY_URL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
