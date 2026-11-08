@@ -15,10 +15,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nkeys"
 	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
@@ -97,32 +100,91 @@ func NewNATSEMROff(ctx context.Context) (n *NATS, stop func(), err error) {
 			filepath.Join(dir, "emr-off.conf"): "/etc/nats/emr.conf"})
 }
 
-// StoreContains reports whether any file under the server's JetStream
-// store holds needle as plain bytes (for the encryption-at-rest test).
-func (n *NATS) StoreContains(ctx context.Context, needle string) (bool, error) {
-	code, out, err := n.c.Exec(ctx, []string{"grep", "-r", "-F", "-q", "-a", needle, "/data"})
+// StoreFilesContaining lists every file under the server's JetStream store
+// (store_dir /data) that holds needle as plain bytes, for the
+// encryption-at-rest test. Empty means no file does.
+func (n *NATS) StoreFilesContaining(ctx context.Context, needle string) ([]string, error) {
+	// The needle is an argument, not part of the script, so no quoting
+	// can change what is searched for.
+	out, code, err := n.Run(ctx, `grep -r -l -F -a -e "$1" /data`, needle)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	_, _ = io.Copy(io.Discard, out)
-	switch code {
-	case 0:
-		return true, nil
-	case 1:
-		return false, nil
+	files := strings.Fields(out)
+	switch {
+	case code == 0 && len(files) > 0:
+		return files, nil
+	case code == 1 && len(files) == 0:
+		return nil, nil
 	}
-	return false, fmt.Errorf("grep exit %d", code)
+	return nil, fmt.Errorf("grep exit %d: %q", code, out)
 }
 
-// StoreHasStream reports whether the JetStream store holds a directory for
-// stream name (a positive control for StoreContains).
-func (n *NATS) StoreHasStream(ctx context.Context, name string) (bool, error) {
-	code, out, err := n.c.Exec(ctx, []string{"sh", "-c", "test -d /data/jetstream/*/streams/" + name})
+// StoreStreamBlocks lists the message block files (msgs/*.blk) the
+// JetStream store holds for stream name, with their sizes: the positive
+// control for StoreFilesContaining (the stream is on disk, under /data,
+// and has written blocks).
+func (n *NATS) StoreStreamBlocks(ctx context.Context, name string) (map[string]int64, error) {
+	out, code, err := n.Run(ctx, `for f in /data/jetstream/*/streams/"$1"/msgs/*.blk; do [ -f "$f" ] && echo "$(wc -c < "$f") $f"; done; true`, name)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	_, _ = io.Copy(io.Discard, out)
-	return code == 0, nil
+	if code != 0 {
+		return nil, fmt.Errorf("listing blocks: exit %d: %q", code, out)
+	}
+	blocks := map[string]int64{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		size, file, ok := strings.Cut(line, " ")
+		if !ok {
+			return nil, fmt.Errorf("listing blocks: %q", line)
+		}
+		b, err := strconv.ParseInt(strings.TrimSpace(size), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("listing blocks: %q", line)
+		}
+		blocks[file] = b
+	}
+	return blocks, nil
+}
+
+// execStatusPrefix marks the line Run appends with the script's exit status.
+const execStatusPrefix = "__mhai_exit_status="
+
+// Run runs script with sh in the server's container (args are $1, $2, ...)
+// and returns its output (stdout and stderr) and exit status once it has
+// finished.
+//
+// The status is read from the output, not from testcontainers' Exec: Exec
+// takes the exit code from a docker exec inspect that can run before the
+// daemon has marked the process as running, and then reports 0 for a
+// command that has not finished (about 1 call in 1200 on the build
+// server). Multiplexed reads the output to its end, which comes only when
+// the process exits, so a status printed as the last line is the real one.
+func (n *NATS) Run(ctx context.Context, script string, args ...string) (out string, code int, err error) {
+	// The status goes on a line of its own, even after output with no
+	// final newline.
+	cmd := append([]string{"sh", "-c", "(\n" + script + "\n) 2>&1; printf '\\n" + execStatusPrefix + "%s\\n' \"$?\"", "sh"}, args...)
+	_, r, err := n.c.Exec(ctx, cmd, tcexec.Multiplexed())
+	if err != nil {
+		return "", 0, err
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return "", 0, err
+	}
+	s := strings.TrimSuffix(string(b), "\n")
+	i := strings.LastIndex(s, "\n"+execStatusPrefix)
+	if i < 0 {
+		return "", 0, fmt.Errorf("no exit status in the output: %q", s)
+	}
+	code, err = strconv.Atoi(s[i+1+len(execStatusPrefix):])
+	if err != nil {
+		return "", 0, fmt.Errorf("exit status in %q: %w", s[i+1:], err)
+	}
+	return s[:i], code, nil
 }
 
 // NATSNkey is a throwaway server with one NKey user allowed to publish
