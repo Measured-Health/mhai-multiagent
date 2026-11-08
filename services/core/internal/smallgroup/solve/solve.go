@@ -189,3 +189,87 @@ func ExposedLinear(nVars int, eqs [][]Term, boxes [][]Term) []bool {
 	}
 	return out
 }
+
+// ---- the whole-set check (ruling R41a-5), exact ------------------------------
+//
+// Moved here from 7c's historytest (plan Task 5), so Analysis's checker and
+// 7c's use one exact implementation. For a published set with hidden
+// members H (each a box over the unknowns), the combinations of H that the
+// known rows determine are D = rowspace(known) ∩ span(H). With r_h the
+// residual of member h against the known rows (its unique part on the
+// non-pivot unknowns), a combination Σ c_h·v_h is determined exactly when
+// Σ c_h·r_h = 0, so D is the null space of the residuals: dim D = |H| −
+// rank{r_h}, and the full sum is determined when Σ r_h = 0.
+
+// Basis is what is known so far: an echelon form over the rationals, each
+// row's pivot its smallest unknown with coefficient 1.
+type Basis struct{ b basis }
+
+// NewBasis is nothing known.
+func NewBasis() *Basis { return &Basis{basis{}} }
+
+// residual removes every pivot column from v: the unique part of v on the
+// non-pivot columns, linear in v.
+func (b *Basis) residual(v vec) vec {
+	for i := 0; i < len(v); {
+		row, ok := b.b[v[i].col]
+		if !ok {
+			i++
+			continue
+		}
+		v = sub(v, row, v[i].v)
+	}
+	return v
+}
+
+func (b *Basis) addVec(v vec) bool {
+	v = b.residual(v)
+	if len(v) == 0 {
+		return false
+	}
+	inv := new(big.Rat).Inv(v[0].v)
+	w := make(vec, len(v))
+	for i, t := range v {
+		w[i] = entry{t.col, new(big.Rat).Mul(t.v, inv)}
+	}
+	b.b[w[0].col] = w
+	return true
+}
+
+const anyVar = int(^uint(0) >> 1)
+
+// Add learns the sum of vars (each coefficient 1, repeats added) and
+// reports whether it was independent of what was known.
+func (b *Basis) Add(vars []int) bool { return b.addVec(norm(ones([][]int{vars})[0], anyVar)) }
+
+// AddTerms learns a row with integer coefficients.
+func (b *Basis) AddTerms(ts []Term) bool { return b.addVec(norm(ts, anyVar)) }
+
+// Shape is what the known rows determine about the members: dim D and
+// whether the full sum is determined.
+func (b *Basis) Shape(members [][]int) (dim int, sum bool) {
+	small := NewBasis()
+	var total vec
+	rank := 0
+	for _, m := range members {
+		r := b.residual(norm(ones([][]int{m})[0], anyVar))
+		total = sub(total, r, big.NewRat(-1, 1))
+		if small.addVec(append(vec{}, r...)) {
+			rank++
+		}
+	}
+	return len(members) - rank, len(total) == 0
+}
+
+// Violates is the rule: what is determined about H stays as it was before
+// the set was published, or goes from nothing to the full sum alone (once
+// part of H is known, a newly determined full sum gives the rest away).
+func Violates(dimPre int, _ bool, dimFin int, sumFin bool) bool {
+	switch {
+	case dimFin == dimPre:
+		return false
+	case dimPre == 0 && dimFin == 1:
+		return !sumFin
+	}
+	return true
+}

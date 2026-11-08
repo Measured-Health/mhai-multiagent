@@ -831,3 +831,56 @@ func TestGuardSnapshotStopsOnContext(t *testing.T) {
 		t.Fatalf("a live guard: %v", err)
 	}
 }
+
+// The guard's exposure check as a library (Analysis, plan Task 5):
+// Knowledge decides exposure and the whole-set rule modulo the two primes,
+// as GuardSnapshot does, and agrees with the exact solver.
+func TestKnowledgeExposedAndSetChanged(t *testing.T) {
+	before := NewKnowledge()
+	before.Add([]int{0, 1, 2}, nil) // a total of three hidden members
+	after := before.Clone()
+	after.Add([]int{0, 1}, nil) // the first two's sum
+	if before.Exposed([]int{2}, nil) || !after.Exposed([]int{2}, nil) {
+		t.Fatal("x2 = total − (x0 + x1) isn't exposed after, or is before")
+	}
+	if !after.Exposed([]int{0, 1}, nil) || after.Exposed([]int{0}, nil) {
+		t.Fatal("x0 + x1 is known, x0 alone isn't")
+	}
+	if after.Exposed([]int{3, 4}, []int64{2, -2}) || after.Exposed([]int{3}, nil) {
+		t.Fatal("unknowns in no equation are exposed")
+	}
+	// The whole-set rule: the set {x0, x1} goes from nothing determined to
+	// its full sum alone (allowed); {x0, x2} gains a part (refused).
+	if SetChanged(before, after, [][]int{{0}, {1}}) {
+		t.Error("nothing → the full sum alone is allowed")
+	}
+	if !SetChanged(before, after, [][]int{{0, 1}, {2}}) {
+		t.Error("a member newly determined is a violation")
+	}
+	if SetChanged(after, after, [][]int{{0}, {2}}) {
+		t.Error("no change is no violation")
+	}
+	// Against the exact solver on a random system.
+	r := rand.New(rand.NewSource(7))
+	for trial := 0; trial < 50; trial++ {
+		k := NewKnowledge()
+		var eqs [][]int
+		for i := 0; i < 4; i++ {
+			var e []int
+			for v := 0; v < 6; v++ {
+				if r.Intn(2) == 0 {
+					e = append(e, v)
+				}
+			}
+			eqs = append(eqs, e)
+			k.Add(e, nil)
+		}
+		boxes := [][]int{{0}, {1}, {2, 3}, {4, 5}, {0, 5}}
+		want := solve.Exposed(6, eqs, boxes)
+		for i, bx := range boxes {
+			if got := k.Exposed(bx, nil); got != want[i] {
+				t.Fatalf("trial %d box %v: %v, exact %v", trial, bx, got, want[i])
+			}
+		}
+	}
+}
