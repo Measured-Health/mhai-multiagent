@@ -96,6 +96,7 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"analytics_snapshots":   "00019: the guarded analytics snapshots, one per finished period (SELECT)",
 		"analytics_epoch":       "00019: the release epoch, for the not-yet answer (SELECT)",
 		"emr_connections":       "00020: EMR connection configuration, no secret column (SELECT, INSERT, column UPDATE)",
+		"analysis_switch":       "00021: the analysis switch, read and written with real sign-offs only (Plan 11b's flow)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `
@@ -150,6 +151,8 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"emr_platform_health":          {"", "TABLE(connection_id uuid, health text, last_sync_at timestamp with time zone, last_sync_ok boolean, last_sync_records integer, errors_24h bigint)"},
 		"emr_platform_errors":          {"p_connection uuid", "TABLE(at timestamp with time zone, code text, count bigint)"},
 		"emr_credentials_meta":         {"p_connection uuid", "TABLE(field text, set_at timestamp with time zone)"},
+		// 00021: a hospital's effective analysis position.
+		"mhai_analysis_position": {"p_hospital uuid", "text"},
 	}
 	for name, sig := range platformFunctions {
 		wantFuncs[name] = sig

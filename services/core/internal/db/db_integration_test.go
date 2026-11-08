@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -286,7 +286,9 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, table := range append([]string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs", "hospital_model_policy", "cloud_usage", "cloud_reservations",
-		"analytics_snapshots", "analytics_period_counts", "analytics_frozen_periods", "analytics_epoch"}, emrTables...) {
+		"analytics_snapshots", "analytics_period_counts", "analytics_frozen_periods", "analytics_epoch",
+		"analysis_switch", "analysis_sources", "analysis_locations", "analysis_conditions", "analysis_subjects", "analysis_facts",
+		"analysis_first_seen", "analysis_periods", "analysis_pseudonyms", "analysis_watermarks"}, emrTables...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -314,6 +316,12 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			// 00019: platform tables, no hospital scope; 00020: core's
 			// clinical role holds nothing on the EMR tables. The gateway
 			// holds no grant on any of them.
+			requireDenied(t, err, "gateway reading "+table)
+			continue
+		}
+		if strings.HasPrefix(table, "analysis_") && !analysisDictionaries[table] {
+			// 00021: reached only through definer functions; the gateway
+			// holds no grant (it reads its position through a function).
 			requireDenied(t, err, "gateway reading "+table)
 			continue
 		}
