@@ -62,6 +62,9 @@ type acctRec struct {
 	MFAEnabled           bool
 	RecoveryCodesLeft    int
 	Roles                []string
+	// AnalysisPosition is the hospital's effective analysis switch
+	// (mhai_analysis_position), read with the account.
+	AnalysisPosition string
 }
 
 func (a *acctRec) hospitalID() string {
@@ -85,7 +88,8 @@ SELECT u.id, u.hospital_id, u.email, u.password_hash, u.display_name, u.full_nam
        COALESCE(hs.idle_timeout_minutes, $2), COALESCE(hs.review_overdue_hours, $3),
        COALESCE(hs.require_mfa_for_clinicians, true), COALESCE(hs.allow_trust_device, false),
        COALESCE(m.enabled, false), CASE WHEN m.enabled THEN cardinality(m.backup_code_hashes) ELSE 0 END,
-       ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id)
+       ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id),
+       mhai_analysis_position(u.hospital_id)
 FROM users u
 LEFT JOIN hospitals h          ON h.id = u.hospital_id
 LEFT JOIN hospital_settings hs ON hs.hospital_id = u.hospital_id
@@ -99,7 +103,7 @@ func scanAccount(row pgx.Row) (*acctRec, error) {
 	err := row.Scan(&a.ID, &a.HospitalID, &a.Email, &a.PasswordHash, &a.DisplayName, &a.FullName, &a.RoleTitle, &a.Specialty,
 		&a.Active, &a.MustChangePW, &a.TermsAcceptedAt, &a.HospitalName, &a.HospitalStatus,
 		&a.IdleMinutes, &a.ReviewHours, &a.RequireMFAClinicians, &a.AllowTrustDevice,
-		&a.MFAEnabled, &a.RecoveryCodesLeft, &a.Roles)
+		&a.MFAEnabled, &a.RecoveryCodesLeft, &a.Roles, &a.AnalysisPosition)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNoAccount
 	}
@@ -141,6 +145,28 @@ type userView struct {
 	RecoveryCodesLeft  int          `json:"recovery_codes_left"`
 	IdleTimeoutMinutes int          `json:"idle_timeout_minutes"`
 	ReviewOverdueHours int          `json:"review_overdue_hours"`
+	Features           features     `json:"features"`
+}
+
+// features are what the user may open (analysis design §6.5). The BFF's
+// own sign-off keys can only turn them off.
+type features struct {
+	Analysis    bool `json:"analysis"`
+	NamedAccess bool `json:"named_access"` // false until named access exists (PR 8)
+}
+
+// analysisFeature: the hospital's effective switch is on, the user is a
+// hospital admin or an analyst, and two-step is on.
+func (a *acctRec) analysisFeature() bool {
+	if a.AnalysisPosition != "on" || !a.MFAEnabled {
+		return false
+	}
+	for _, r := range a.Roles {
+		if r == authz.RoleHospitalAdmin || r == authz.RoleAnalyst {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *acctRec) view() userView {
@@ -149,6 +175,7 @@ func (a *acctRec) view() userView {
 		DisplayName: a.DisplayName, FullName: a.FullName, RoleTitle: a.RoleTitle, Specialty: a.Specialty,
 		MFAEnabled: a.MFAEnabled, MustChangePassword: a.MustChangePW, TermsAcceptedAt: a.TermsAcceptedAt,
 		RecoveryCodesLeft: a.RecoveryCodesLeft, IdleTimeoutMinutes: a.IdleMinutes, ReviewOverdueHours: a.ReviewHours,
+		Features: features{Analysis: a.analysisFeature()},
 	}
 	if a.HospitalID != nil && a.HospitalName != nil {
 		v.Hospital = &hospitalRef{ID: a.HospitalID.String(), Name: *a.HospitalName}

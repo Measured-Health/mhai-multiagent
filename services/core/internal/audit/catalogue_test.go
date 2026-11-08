@@ -448,7 +448,7 @@ func candidates() []any {
 		planned emergency added removed PASS REGENERATE ESCALATE low mid high unauthorized invalid_request succeeded
 		refused failed platform via msg-1 kid-2026 core pipeline.run_query nli 1 42 9007199254740991 0
 		2026-11-03T06:00:00Z 2026-11-03T06:00:00.123+01:00 v1.2
-		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume`) {
+		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume demo`) {
 		out = append(out, s)
 	}
 	for _, ty := range audit.AuditTypes {

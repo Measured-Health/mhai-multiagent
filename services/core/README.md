@@ -30,6 +30,8 @@ core hospitals create --name N --short-code CODE --time-zone TZ \
     [--require-mfa-for-clinicians] [--allow-trust-device]
 core hospitals activate ID|CODE    # setup_incomplete -> active, audited (see "Running it in compose")
 core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
+core analysis seed-demo ID|CODE [--seed N] [--months 1-24]   # the synthetic demo hospital only
+core analysis switch off ID|CODE | --global                  # lower an analysis switch, audited
 ```
 
 `users create` never takes the password as an argument. It prompts on a
@@ -97,12 +99,34 @@ one job:
 | `CORE_HTTP_API` | no | `on` (default) or `off`. On: the frontend contract over HTTP with the BFF key, for the switch-over while mhai-web still uses `fetch`. Off: HTTP serves only the probes, on loopback, and `BFF_SERVICE_KEYS` is no longer required. The NATS API is served either way (below) |
 | `CORE_NATS_API_CONCURRENCY` | no | `api.v1` messages handled at once per core copy; past it a message gets 503 `unavailable` at once. Default `256`, 1 to 100000 |
 | `CORE_ENV` | no | default `production`, which fails closed: no API docs, NATS TLS required, no test-only intelligence operations. Compose sets `development` |
+| `ANALYSIS_REF_HMAC_KEY_FILE`, `ANALYSIS_REF_ENC_KEY_FILE`, `ANALYSIS_DRILL_KEY_FILE`, `ANALYSIS_NOTE_KEY_FILE` | no (all four or none) | Patient Analysis's keys: each file holds 32 random bytes in base64 (`openssl rand -base64 32`), mode 0600 or 0640, all four different. Start-up refuses a missing file, a placeholder, a wrong length, a file others can read or two equal keys. Without them, the nightly run fails closed for a signed-off hospital with consultations to ingest; the demo needs none |
 | `CORE_API_DOCS` | no | `true` or `false`: serve the API docs page. Default: on when `CORE_ENV` is `development`, off for every other value (production included). Anything else is refused at start-up. |
 
 Secrets must not contain `changeme`, `change-me` or `placeholder`. Errors
 name the variable, never the value. The core service reads only its own
 secrets: the other NATS users' passwords, the JetStream key and the
 database owner password are not in its environment.
+
+## Patient Analysis (off by default)
+
+Analysis (ADR 0015; plan `docs/plans/2026-11-07-analysis-backend.md`) is
+off until a switch row says otherwise: with no row, a hospital's position is
+`off`, and ingest refuses it in the database itself. Before the people's
+sign-offs (H1 to H3), the only way on is `core analysis seed-demo`, which
+uses the references `DEMO-SYNTHETIC` and writes a seeded synthetic cohort;
+a hospital under a demo switch never ingests a real consultation.
+
+The nightly run is a core loop (one copy at a time, an advisory lock) that
+runs as `mhai_analysis_job`: a NOLOGIN role the core login reaches only by
+`SET LOCAL ROLE` inside `db.WithAnalysisJob`, which no route handler names
+(an AST test). Per hospital whose switch is on, after its local 00:30, once
+a hospital day: ingest (signed-off hospitals only; references become an
+HMAC and an AES-GCM ciphertext bound to the hospital), the 25-month sweep,
+then the freeze: a block at local midnight 3 days after its end, a month
+with its last block, a quarter with its last month. Late facts are stored
+and never counted. It logs hospital ids, the step and a fixed reason only,
+and counts `analysis_late_facts_total` and `analysis_freeze_failed_total`
+(alert `analysis_freeze_failed`).
 
 ## API docs
 

@@ -270,6 +270,10 @@ var Catalogue = map[string]Entry{
 	// Cloud model providers (Task 2): mhai-web has no kind for a model
 	// policy change yet; sent bare until it has one.
 	"hospital.model_policy_changed": withheld(),
+	// Patient Analysis (Task 4): the CLI's demo raise and its lowering. No
+	// mhai-web kind yet; the platform's switch actions come with Plan 11b.
+	"analysis.switch_raised":  withheld(),
+	"analysis.switch_lowered": withheld(),
 
 	// EMR connections (EMR design §12.6): mhai-web's Plan 13 kinds, with
 	// the connection as the target. A resume has no kind yet: sent bare.

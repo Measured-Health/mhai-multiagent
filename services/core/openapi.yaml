@@ -2062,7 +2062,7 @@ components:
     User:
       type: object
       required: [id, role, roles, email, display_name, full_name, role_title, specialty, hospital, mfa_enabled,
-        must_change_password, terms_accepted_at, recovery_codes_left, idle_timeout_minutes, review_overdue_hours]
+        must_change_password, terms_accepted_at, recovery_codes_left, idle_timeout_minutes, review_overdue_hours, features]
       properties:
         id: { type: string, format: uuid }
         role: { type: string, description: The primary role. }
@@ -2087,6 +2087,17 @@ components:
         recovery_codes_left: { type: integer }
         idle_timeout_minutes: { type: integer }
         review_overdue_hours: { type: integer }
+        features:
+          type: object
+          description: >-
+            What the user may open (Patient Analysis). analysis is true only when the
+            hospital's analysis switch is on, the user is a hospital admin or an analyst,
+            and two-step is on; it is off by default. named_access is false until named
+            access exists. The BFF's own sign-off settings can only turn these off.
+          required: [analysis, named_access]
+          properties:
+            analysis: { type: boolean }
+            named_access: { type: boolean }
 
     RefreshRequest:
       type: object

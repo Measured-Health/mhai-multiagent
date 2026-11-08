@@ -315,7 +315,7 @@ func newIP() string {
 
 var userKeys = []string{"id", "role", "roles", "email", "display_name", "full_name", "role_title", "specialty",
 	"hospital", "mfa_enabled", "must_change_password", "terms_accepted_at", "recovery_codes_left",
-	"idle_timeout_minutes", "review_overdue_hours"}
+	"idle_timeout_minutes", "review_overdue_hours", "features"}
 
 func TestLoginSuccessShape(t *testing.T) {
 	e := newEnv(t)
