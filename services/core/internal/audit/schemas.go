@@ -406,6 +406,18 @@ func init() {
 	Register("emr.source_resumed", Schema{Fields: withConn("reason", OneOf("platform_resume")),
 		Required: append(slices.Clone(connReq), "reason")})
 
+	// Patient Analysis (analysis plan Task 4): the provisioning CLI raises
+	// a switch for the synthetic demo only, and lowers one. The row has no
+	// hospital and no actor; the payload names the hospital for a
+	// hospital's switch and nothing for the global one.
+	Register("analysis.switch_raised", Schema{Fields: fields("hospital_id", id, "via", OneOf("cli"), "refs", OneOf("demo")),
+		Required: []string{"via", "refs"}})
+	// A hospital made before hospitals.is_demo, marked as the demo once
+	// (core hospitals mark-demo); the hospital is the row's entity.
+	Register("hospital.marked_demo", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})
+	Register("analysis.switch_lowered", Schema{Fields: fields("hospital_id", id, "via", OneOf("cli")),
+		Required: []string{"via"}})
+
 	// Plan 3: the request-token boundary (internal/account, grant, intel).
 	Register("intelligence.key_rotated", Schema{Fields: fields(
 		"kid", token, "rotation", OneOf("planned", "emergency"), "change", OneOf("added", "removed")),

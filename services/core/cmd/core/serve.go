@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	core "github.com/Measured-Health/mhai-multiagent/services/core"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/apidocs"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
@@ -49,6 +50,8 @@ type app struct {
 	js      jetstream.JetStream
 	health  jetstream.KeyValue // the health bucket (platform.RunSampler)
 	log     *slog.Logger
+	// analysis is Patient Analysis's nightly run (as mhai_analysis_job).
+	analysis *analysis.Nightly
 	// stopAPI ends core's NATS API (natsapi.Serve) and stopGrant its grant
 	// endpoint (grant.Server) before NATS closes.
 	stopAPI, stopGrant func()
@@ -201,6 +204,17 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
+	// Patient Analysis's nightly run: it serves only hospitals whose
+	// analysis switch is on (none by default) and needs its keys only to
+	// ingest a signed-off hospital, where it fails closed without them.
+	var analysisKeys *analysis.Keys
+	if k := cfg.Analysis; k.Set() {
+		if analysisKeys, err = analysis.NewKeys(k.RefHMAC, k.RefEnc, k.Drill, k.Note); err != nil {
+			a.close()
+			return nil, err
+		}
+	}
+	a.analysis = analysis.NewNightly(a.pool, analysisKeys, log)
 	registerMetrics(a, apiMetrics, grantMetrics)
 	if !cfg.HTTPAPI {
 		a.handler = m.ProbesHandler()
@@ -354,6 +368,14 @@ func serve() error {
 		s := scheduler.Scheduler{Pool: a.pool, Builder: scheduler.Builder{Src: scheduler.DB{Pool: a.pool}}, Log: log}
 		if err := s.Run(ctx); err != nil {
 			log.Error("core: analytics scheduler stopped", "reason", "internal_error")
+		}
+	}()
+	// Patient Analysis (analysis plan Task 3): per switched-on hospital,
+	// after its local midnight + 30 minutes, ingest, sweep and freeze; one
+	// core copy runs (an advisory lock).
+	go func() {
+		if err := a.analysis.Run(ctx); err != nil {
+			log.Error("core: analysis nightly run stopped", "reason", "internal_error")
 		}
 	}()
 	// SIGHUP re-reads the trusted request-keys file (after keys untrust).

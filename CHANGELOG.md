@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Patient Analysis, PR 2: the data foundation, **off by default** (OpenAPI
+  1.14.0, additive; analysis backend plan Tasks 2 to 4, ADR 0015).
+  Migration 00021 (its number is fixed: EMR takes 00020) adds the roles
+  `mhai_analysis_writer`, `mhai_analysis_reader` and `mhai_analysis_job`
+  (NOLOGIN, reached by SET ROLE as 7c's job role), subjects, coded facts,
+  first-seen rows, frozen nested periods, dictionaries, the analysis switch
+  (global and per hospital; no row is off) and definer functions that refuse
+  a switched-off hospital, the future, and any real ingest under a demo
+  switch. A core loop (one copy at a time) ingests, sweeps and freezes per
+  switched-on hospital after its local 00:30. Four optional key files
+  (`ANALYSIS_*_KEY_FILE`) seal and match patient references.
+  `core analysis seed-demo` switches the synthetic demo hospital (created
+  with `core hospitals create --demo`; `hospitals.is_demo` never changes)
+  on with `DEMO-SYNTHETIC` references and writes a seeded synthetic cohort;
+  a switch that was ever signed off never takes demo references again;
+  `core analysis switch off` lowers a switch; both are audited. The login
+  and session `user` gains `features {analysis, named_access}`.
 - Platform analytics reads, part 7c-2 (OpenAPI 1.13.0, additive; Plan 7c
   Tasks 6 and 7). `GET /platform/analytics?period=week|month|quarter`
   serves Use, Answer quality and Hospitals of the latest published period,

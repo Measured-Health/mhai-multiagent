@@ -2,7 +2,7 @@
 // migrations and runs transactions under the right database role.
 //
 // Every query runs inside one of WithHospital, WithHospitalUser, WithPlatform, WithAuth,
-// WithJobs, WithAnalyticsJob or WithAuditDrain.
+// WithJobs, WithAnalyticsJob, WithAnalysisJob or WithAuditDrain.
 // The gateway's login user holds no table privileges of its own (it is a
 // member of mhai_app, see 00003_rls_roles.sql), so a query outside them
 // fails instead of reading anything.
@@ -36,6 +36,7 @@ const (
 	roleJobs     = "mhai_jobs"
 	roleDrain    = "mhai_audit_drain"
 	roleAnalytic = "mhai_analytics_job"
+	roleAnalysis = "mhai_analysis_job"
 )
 
 // ErrNoHospital is returned by WithHospital for the nil hospital id (the
@@ -108,6 +109,15 @@ func WithJobs(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) er
 // fails if internal/platform imports the scheduler).
 func WithAnalyticsJob(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
 	return inRole(ctx, pool, roleAnalytic, "", nil, fn)
+}
+
+// WithAnalysisJob runs fn in a transaction as mhai_analysis_job: Patient
+// Analysis's nightly role (migration 00021), the only role that runs the
+// job's functions (ingest, sweep, freeze), which write facts for a named
+// hospital. For internal/analysis's nightly run only: no route handler
+// calls it (TestRoutesCantReachAnalysisJobPool).
+func WithAnalysisJob(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	return inRole(ctx, pool, roleAnalysis, "", nil, fn)
 }
 
 // WithJobsThenPlatform runs jobs as mhai_jobs and then platform as
@@ -240,7 +250,7 @@ func CheckLoginRole(ctx context.Context, pool *pgxpool.Pool) error {
 	err := pool.QueryRow(ctx, `
 		SELECT r.rolname, r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb, r.rolreplication,
 		       pg_has_role(session_user, 'mhai_app', 'MEMBER'),
-		       ARRAY(SELECT x FROM unnest(ARRAY['mhai_migrate', 'mhai_gateway', 'mhai_platform', 'mhai_auth', 'mhai_worker', 'mhai_provision', 'mhai_jobs', 'mhai_audit_drain', 'mhai_worker_app', 'mhai_health_reader', 'mhai_jobs_reader', 'mhai_guardrail_reader', 'mhai_analytics_job', 'mhai_analytics_reader']) AS x
+		       ARRAY(SELECT x FROM unnest(ARRAY['mhai_migrate', 'mhai_gateway', 'mhai_platform', 'mhai_auth', 'mhai_worker', 'mhai_provision', 'mhai_jobs', 'mhai_audit_drain', 'mhai_worker_app', 'mhai_health_reader', 'mhai_jobs_reader', 'mhai_guardrail_reader', 'mhai_analytics_job', 'mhai_analytics_reader', 'mhai_analysis_job', 'mhai_analysis_writer', 'mhai_analysis_reader']) AS x
 		             WHERE EXISTS (SELECT 1 FROM pg_roles p WHERE p.rolname = x)
 		               AND pg_has_role(session_user, x, 'USAGE')),
 		       pg_has_role(session_user, (SELECT d.datdba FROM pg_database d WHERE d.datname = current_database()), 'MEMBER'),

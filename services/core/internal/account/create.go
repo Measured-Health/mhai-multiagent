@@ -19,6 +19,9 @@ import (
 type NewHospital struct {
 	Name, ShortCode, TimeZone                 string
 	RequireMFAForClinicians, AllowTrustDevice bool
+	// Demo marks the synthetic demo hospital (hospitals.is_demo): only it
+	// may take analysis demo references. Set at creation only.
+	Demo bool
 }
 
 // NewUser describes an account to create. Password is checked against the
@@ -47,8 +50,8 @@ func CreateHospital(ctx context.Context, pool *pgxpool.Pool, h NewHospital) (uui
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
 		id = uuid.New()
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO hospitals (id, name, short_code, time_zone) VALUES ($1, $2, $3, $4)`,
-			id, name, code, h.TimeZone); err != nil {
+			`INSERT INTO hospitals (id, name, short_code, time_zone, is_demo) VALUES ($1, $2, $3, $4, $5)`,
+			id, name, code, h.TimeZone, h.Demo); err != nil {
 			if isUnique(err) {
 				return ErrShortCodeTaken
 			}
