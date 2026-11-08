@@ -12,8 +12,11 @@ package historytest
 // the null space of the residuals: dim D = |H| − rank{r_h}, and the full
 // sum is determined when Σ r_h = 0.
 //
-// The rule: since just before the set was published, nothing about H may
-// have become determined except its full sum: D_final ⊆ D_pre + span(sum).
+// The rule: since just before the set was published, D either stayed as it
+// was, or went from nothing to the full sum alone. (Once part of H is
+// known, a newly determined full sum minus the known part is a union of the
+// rest, which may be small: the first build of this check let a 2+2 through
+// that way.)
 // (What was determined before, such as a hidden month whose weeks are all
 // shown, is a combination of shown values and tells nothing new; spec §6.3,
 // E0.)
@@ -122,13 +125,15 @@ func (b rbasis) shape(members [][]int) (dim int, sum bool) {
 	return len(members) - rank, len(total) == 0
 }
 
-// violates is the rule: D_final ⊆ D_pre + span(sum).
-func violates(dimPre int, sumPre bool, dimFin int, sumFin bool) bool {
+// violates is the rule: what is determined about H stays as it was before
+// the set was published, or goes from nothing to the full sum alone (once
+// part of H is known, a newly determined full sum gives the rest away).
+func violates(dimPre int, _ bool, dimFin int, sumFin bool) bool {
 	switch {
 	case dimFin == dimPre:
 		return false
-	case dimFin == dimPre+1:
-		return !(sumFin && !sumPre)
+	case dimPre == 0 && dimFin == 1:
+		return !sumFin
 	}
 	return true
 }
