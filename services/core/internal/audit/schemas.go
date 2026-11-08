@@ -383,7 +383,7 @@ func init() {
 
 	// EMR connections (EMR design §12.6, plan Task 11): ids, the type, the
 	// keys that changed (never a value), closed outcome codes and bools.
-	// The platform writes them with no hospital column (00021's
+	// The platform writes them with no hospital column (00020's
 	// platform_append); the hospital is the payload's id.
 	emrConn := fields("hospital_id", id, "connection_id", id)
 	withConn := func(kv ...any) map[string]Check {

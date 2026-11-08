@@ -1,6 +1,6 @@
 -- EMR integration, connections (EMR design §3.3, §6.1, §6.3, §6.4, §18 item
--- 1; plan Task 6). The number is 00021: Plan 7c holds 00019 and 00020, and
--- this file must not reach main before them (or is renumbered).
+-- 1; plan Task 6). Numbered 00020 after Plan 7c-1's 00019 (ruling M1); later
+-- migrations take the numbers after it.
 --
 -- Roles (cluster-wide: created if missing, never dropped; Down takes back
 -- every grant and membership this file made):

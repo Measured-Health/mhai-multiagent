@@ -78,7 +78,7 @@ type loginRequest struct {
 //     login (spec §8.2), a member of mhai_worker_app only. The user
 //     defaults to intelligence_app when only the password is set;
 //   - EMR_DB_USER / EMR_DB_PASSWORD: the emr service's login (EMR design
-//     §3.3), a member of mhai_emr_app only (00021), emr_app by default.
+//     §3.3), a member of mhai_emr_app only (00020), emr_app by default.
 //
 // Each pair is both set or both unset. Passwords must not be placeholders.
 // Errors name variables, never values.

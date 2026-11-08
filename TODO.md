@@ -31,7 +31,6 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
 - **Demo settings.** `SECURITY_CONTACT_*` isn't set, so the audit integrity status returns 503. We need a name and an email from the product owner.
 - **Dependabot backlog.** 21 open PRs (Go modules, Python groups, GitHub Actions, NATS 2.15); each needs CI and a merge.
 
-
 ## Cloud models: people items
 
 **These are people's items. An agent never marks one done**; the named owner closes it. From the [plan](docs/plans/2026-11-06-cloud-model-providers.md) ("What's needed from people, and when"). The live smoke waits on H1 and H7, the demo on H1 and H5, real data on H2–H4 and H6.

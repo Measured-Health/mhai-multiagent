@@ -280,7 +280,7 @@ func outboxActions(t *testing.T) []string {
 
 // platformAppendActions are the actions the latest platform_append allows:
 // every migration's Up section is read in order, and the last CREATE POLICY
-// platform_append wins (00014 made it; 00018 and 00021 widened it).
+// platform_append wins (00014 made it; 00018 and 00020 widened it).
 func platformAppendActions(t *testing.T) []string {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join("..", "db", "migrations", "*.sql"))
@@ -303,8 +303,8 @@ func platformAppendActions(t *testing.T) []string {
 	if last == "" {
 		t.Fatal("no migration has a platform_append with an action list")
 	}
-	if from < "00021" {
-		t.Fatalf("the latest platform_append is %s's; 00021 widened it", from)
+	if from < "00020" {
+		t.Fatalf("the latest platform_append is %s's; 00020 widened it", from)
 	}
 	var out []string
 	for _, q := range regexp.MustCompile(`'([a-z][a-z0-9_.]*)'`).FindAllStringSubmatch(last, -1) {
@@ -338,7 +338,7 @@ func TestEveryActionHasCatalogueRow(t *testing.T) {
 	}
 	if got := platformAppendActions(t); len(got) != 15 || !slices.Contains(got, "hospital.model_policy_changed") ||
 		!slices.Contains(got, "emr.connection_added") || !slices.Contains(got, "emr.source_resumed") {
-		t.Errorf("platform_append allows %v, want spec §5.5's eight, hospital.model_policy_changed (00018) and the six EMR actions (00021)", got)
+		t.Errorf("platform_append allows %v, want spec §5.5's eight, hospital.model_policy_changed (00018) and the six EMR actions (00020)", got)
 	}
 	for _, a := range audit.RegisteredActions() {
 		if strings.HasPrefix(a, "test.") {

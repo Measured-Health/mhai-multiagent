@@ -8,8 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- EMR integration, PR 3 (connections; off by default). Migration 00020: the `emr` schema and roles,
-  `emr_connections` (configuration only, no secret column or key),
+- EMR integration, PR 3 (connections; off by default). Migration 00020:
+  the `emr` schema and roles, `emr_connections` (configuration only, no secret column or key),
   credential metadata, sync runs and errors, declared private ranges that
   can't overlap across hospitals. `services/gokit`: `emrurl` (address and
   credential-origin checks), `seal` (credentials sealed to the emr service,

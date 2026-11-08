@@ -71,7 +71,7 @@ func TestMigrateUpProvisionsIntelligenceLogin(t *testing.T) {
 	}
 }
 
-// core migrate up provisions the emr service's login (00021): a member of
+// core migrate up provisions the emr service's login (00020): a member of
 // mhai_emr_app only, which holds mhai_emr without inheriting it.
 func TestMigrateUpProvisionsEMRLogin(t *testing.T) {
 	pg := testutil.StartPostgres(t)

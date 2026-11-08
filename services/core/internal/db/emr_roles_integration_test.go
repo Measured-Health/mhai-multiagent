@@ -16,7 +16,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
-// Migration 00021 (EMR plan Task 6; design §3.3, §6.1, §18 item 1): the emr
+// Migration 00020 (EMR plan Task 6; design §3.3, §6.1, §18 item 1): the emr
 // schema, its roles, the connections (configuration only), credential
 // metadata (never a value), sync runs and connection errors.
 
@@ -519,7 +519,7 @@ func TestDefinersIgnoreTempTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every definer of 00021: owner mhai_migrate, the pinned search_path,
+	// Every definer of 00020: owner mhai_migrate, the pinned search_path,
 	// EXECUTE for its roles only.
 	for name, want := range map[string]string{
 		"emr_platform_health":  "mhai_platform",
@@ -561,10 +561,10 @@ func TestDefinersIgnoreTempTables(t *testing.T) {
 	}
 }
 
-// 00021 goes down to 00018 and up again: the audit policy is restored
+// 00020 goes down to 00019 and up again: the audit policy is restored
 // exactly, the schema and its objects are gone, the roles stay (they are
 // cluster-wide) without their memberships.
-func TestMigration00021DownUp(t *testing.T) {
+func TestMigration00020DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
 	pool, err := db.Open(ctx, pg.URL)
@@ -580,8 +580,8 @@ func TestMigration00021DownUp(t *testing.T) {
 		}
 		return s
 	}
-	if err := db.MigrateUpTo(ctx, pg.URL, 18); err != nil {
-		t.Fatalf("up to 18: %v", err)
+	if err := db.MigrateUpTo(ctx, pg.URL, 19); err != nil {
+		t.Fatalf("up to 19: %v", err)
 	}
 	pre := check()
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
@@ -590,8 +590,8 @@ func TestMigration00021DownUp(t *testing.T) {
 	if up := check(); !strings.Contains(up, "'emr.connection_added'::text") || up == pre {
 		t.Fatalf("after up, platform_append: %s", up)
 	}
-	if err := db.MigrateDownTo(ctx, pg.URL, 18); err != nil {
-		t.Fatalf("down to 18: %v", err)
+	if err := db.MigrateDownTo(ctx, pg.URL, 19); err != nil {
+		t.Fatalf("down to 19: %v", err)
 	}
 	if down := check(); down != pre {
 		t.Errorf("after down, platform_append is not as before:\n down:   %s\n before: %s", down, pre)
@@ -606,7 +606,7 @@ func TestMigration00021DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	if left != 0 {
-		t.Errorf("after down, %d objects, policies, memberships or grants of 00021 remain", left)
+		t.Errorf("after down, %d objects, policies, memberships or grants of 00020 remain", left)
 	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)

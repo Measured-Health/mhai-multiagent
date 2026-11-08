@@ -258,7 +258,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An EMR connection with credential metadata, a sync run and an error
-	// (00021), so the EMR tables have rows to hide.
+	// (00020), so the EMR tables have rows to hide.
 	conn := seedConn(t, pool, a)
 	if _, err := pool.Exec(ctx, `INSERT INTO emr.credentials (connection_id, hospital_id, field, set_at, secret_version, origin)
 		VALUES ($1, $2, 'private_key', now(), 'v1', '{https://fhir.example.org:443}')`, conn, a); err != nil {
@@ -311,7 +311,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			continue
 		}
 		if strings.HasPrefix(table, "analytics_") || slices.Contains(emrTables, table) {
-			// 00019: platform tables, no hospital scope; 00021: core's
+			// 00019: platform tables, no hospital scope; 00020: core's
 			// clinical role holds nothing on the EMR tables. The gateway
 			// holds no grant on any of them.
 			requireDenied(t, err, "gateway reading "+table)
@@ -333,7 +333,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	}
 
 	// The emr service's role, with no hospital set, sees no EMR row
-	// (00021); emr.connection_errors it may only append to.
+	// (00020); emr.connection_errors it may only append to.
 	for _, table := range emrTables[:3] {
 		tx, err := one.Begin(ctx)
 		if err != nil {

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.11.0"
+  version: "1.12.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health

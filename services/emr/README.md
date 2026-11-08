@@ -64,7 +64,7 @@ to 9.
 | `APP_ENV` | `development`, `staging` or `production` (unset: production) |
 | `EMR_NATS_URL` | no credentials in it; `tls://` outside development |
 | `EMR_NATS_NKEY_FILE` / `EMR_NATS_PASSWORD` | one of them; the password in development only |
-| `EMR_DATABASE_URL` | the `emr_app` login (migration 00021, PR 3); `sslmode=verify-full` outside development |
+| `EMR_DATABASE_URL` | the `emr_app` login (migration 00020, PR 3); `sslmode=verify-full` outside development |
 | `EMR_TRUSTED_KEYS_PATH` | the request-token trusted-keys file core writes (public keys) |
 | `EMR_SEAL_KEY_PATH` | the directory of the sealing private keys (`seal-<kid>.key`) |
 | `EMR_SECRETS_DIR` | the file secret store (development and staging only); empty: no store, the credential ops answer nothing |

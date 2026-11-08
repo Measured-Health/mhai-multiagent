@@ -784,7 +784,7 @@ func settingsOK(ti emrtypes.TypeInfo, settings map[string]string) bool {
 }
 
 // cidrsOK parses the declared ranges: each a private IPv4 network (RFC
-// 1918) of at most a /24, written as its network, at most 8 (00021 checks
+// 1918) of at most a /24, written as its network, at most 8 (00020 checks
 // again, and that no other hospital's overlaps).
 func cidrsOK(raw []string) ([]netip.Prefix, bool) {
 	if len(raw) > MaxPrivateCIDRs {

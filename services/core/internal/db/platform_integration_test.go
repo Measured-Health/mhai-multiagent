@@ -95,7 +95,7 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"hospital_model_policy": "00018: the per-hospital cloud model policy the platform sets (SELECT, INSERT, column UPDATE)",
 		"analytics_snapshots":   "00019: the guarded analytics snapshots, one per finished period (SELECT)",
 		"analytics_epoch":       "00019: the release epoch, for the not-yet answer (SELECT)",
-		"emr_connections":       "00021: EMR connection configuration, no secret column (SELECT, INSERT, column UPDATE)",
+		"emr_connections":       "00020: EMR connection configuration, no secret column (SELECT, INSERT, column UPDATE)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `

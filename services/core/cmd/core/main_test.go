@@ -144,7 +144,7 @@ func TestTelemetryWarnings(t *testing.T) {
 }
 
 // The emr service's login (EMR_DB_PASSWORD; user emr_app by default) is a
-// member of mhai_emr_app only (00021).
+// member of mhai_emr_app only (00020).
 func TestLoginRequestsEMR(t *testing.T) {
 	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 	reqs, err := loginRequests(env(map[string]string{"EMR_DB_PASSWORD": "test-only-emr-db-password"}))
