@@ -155,8 +155,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The one lookup.
-	lctx, cancel := context.WithTimeout(r.Context(), LookupTimeout)
+	// The one lookup. It and the dial are bounded by their own timeouts,
+	// not by the request: a client that half-closes after its request (as
+	// nc does) cancels the request's context but still awaits the answer.
+	lctx, cancel := context.WithTimeout(context.Background(), LookupTimeout)
 	answer, err := p.Resolver.LookupNetIP(lctx, "ip", host)
 	cancel()
 	if err != nil || len(answer) == 0 {
@@ -194,7 +196,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	release := func() { <-p.sem }
 
-	dctx, dcancel := context.WithTimeout(r.Context(), DialTimeout)
+	dctx, dcancel := context.WithTimeout(context.Background(), DialTimeout)
 	up, err := p.Dialer.DialContext(dctx, "tcp", dst.String())
 	dcancel()
 	if err != nil {

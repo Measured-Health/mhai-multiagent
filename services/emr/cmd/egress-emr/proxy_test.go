@@ -34,9 +34,17 @@ type fakeResolver struct {
 	mu      sync.Mutex
 	answers map[string][][]netip.Addr
 	calls   map[string]int
+	delay   time.Duration
 }
 
-func (r *fakeResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
+func (r *fakeResolver) LookupNetIP(ctx context.Context, _, host string) ([]netip.Addr, error) {
+	r.mu.Lock()
+	d := r.delay
+	r.mu.Unlock()
+	time.Sleep(d)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.calls == nil {
@@ -76,7 +84,10 @@ type fakeDialer struct {
 	addrs []string
 }
 
-func (d *fakeDialer) DialContext(_ context.Context, network, address string) (net.Conn, error) {
+func (d *fakeDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	d.mu.Lock()
 	d.addrs = append(d.addrs, network+" "+address)
 	d.mu.Unlock()
@@ -445,5 +456,33 @@ func TestStaleAllowListRefusesAll(t *testing.T) {
 	l.Reload()
 	if l.Current() != nil {
 		t.Error("a removed file left the previous list in use")
+	}
+}
+
+// A client that half-closes after its request (shuts its write side, as
+// nc does) still gets its answer: the lookup and the dial are bounded by
+// their own timeouts, not by the request's read side.
+func TestHalfClosedClientStillAnswered(t *testing.T) {
+	h := newHarness(t)
+	h.res.mu.Lock()
+	h.res.delay = 300 * time.Millisecond
+	h.res.mu.Unlock()
+	c, err := net.Dial("tcp", h.srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	req := "CONNECT fhir.hospital-a.example:443 HTTP/1.1\r\nHost: fhir.hospital-a.example:443\r\nProxy-Authorization: " +
+		authFor(connA) + "\r\n\r\n"
+	if _, err := io.WriteString(c, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(c), &http.Request{Method: http.MethodConnect})
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("half-closed client: %v %v", resp, err)
 	}
 }
