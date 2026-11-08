@@ -75,6 +75,11 @@ type Parser struct {
 	hosp    map[string]int
 	onboard map[string]time.Time
 	docs    []doc
+	// unavailable counts analytics areas sent {unavailable: true}.
+	unavailable int
+	// Epoch is the release epoch (public: the notice names it), which
+	// fixes the first period a not-yet response names.
+	Epoch time.Time
 }
 
 type cell struct {
@@ -86,6 +91,8 @@ type cell struct {
 type doc struct {
 	source string // a label, so parent sets join cells of one route
 	period calendar.Period
+	raw    map[string]map[string]json.RawMessage // row → published key → value, as sent
+	names  map[string]string                     // hospital id → name, as sent
 	listed []string
 	cells  map[string]map[string]int // row ("all" or id) → measure → index into cellsAll
 	all    []cell
@@ -158,25 +165,35 @@ func (p *Parser) Add(source string, raw []byte, per calendar.Period) error {
 	if err := json.Unmarshal(raw, &top); err != nil {
 		return err
 	}
-	slots, err := p.slots(per)
-	if err != nil {
-		return err
-	}
 	var hospitals []map[string]json.RawMessage
 	if err := json.Unmarshal(top["hospitals"], &hospitals); err != nil {
 		return err
 	}
-	d := doc{source: source, period: per, cells: map[string]map[string]int{}}
-	rows := map[string]map[string]json.RawMessage{}
 	var allRow map[string]json.RawMessage
 	if err := json.Unmarshal(top["all"], &allRow); err != nil {
 		return err
 	}
-	rows["all"] = allRow
+	return p.addDoc(source, per, allRow, hospitals)
+}
+
+// addDoc adds one document's rows: all (nil when the route sends none) and
+// one per listed hospital, each a map from the published key to its
+// {value, suppressed}.
+func (p *Parser) addDoc(source string, per calendar.Period, allRow map[string]json.RawMessage, hospitals []map[string]json.RawMessage) error {
+	slots, err := p.slots(per)
+	if err != nil {
+		return err
+	}
+	d := doc{source: source, period: per, cells: map[string]map[string]int{}, raw: map[string]map[string]json.RawMessage{}, names: map[string]string{}}
+	rows := map[string]map[string]json.RawMessage{}
+	if allRow != nil {
+		rows["all"] = allRow
+	}
 	var listedIdx []int
 	for _, h := range hospitals {
 		var ref struct {
-			ID string `json:"id"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(h["hospital"], &ref); err != nil {
 			return err
@@ -185,10 +202,15 @@ func (p *Parser) Add(source string, raw []byte, per calendar.Period) error {
 		if !ok {
 			return fmt.Errorf("an unknown hospital %s", ref.ID)
 		}
+		if _, dup := rows[ref.ID]; dup {
+			return fmt.Errorf("hospital %s listed twice", ref.ID)
+		}
 		d.listed = append(d.listed, ref.ID)
+		d.names[ref.ID] = ref.Name
 		listedIdx = append(listedIdx, i)
 		rows[ref.ID] = h
 	}
+	d.raw = rows
 	for rowID, row := range rows {
 		hosps := listedIdx
 		if rowID != "all" {

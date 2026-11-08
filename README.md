@@ -24,7 +24,9 @@ The backend has two parts:
   (`/platform/health`), the failed jobs list with retry and cancel
   (`/platform/jobs`), and guardrail statistics under small-group rules
   (`/platform/guardrails/periods`, finished calendar periods since Plan
-  7c-1; the rolling `/platform/guardrails` is deprecated). The contract is
+  7c-1; the rolling `/platform/guardrails` is deprecated), and analytics
+  across hospitals from the same stored snapshots (`/platform/analytics`
+  and its series, Plan 7c-2). The contract is
   [services/core/openapi.yaml](services/core/openapi.yaml).
 
 ## Agents

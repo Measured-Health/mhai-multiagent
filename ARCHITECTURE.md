@@ -44,8 +44,12 @@ from one stored snapshot (Plan 7c-1: the analytics scheduler, a core loop
 running as `mhai_analytics_job`, freezes each period's counts once and
 guards them with its parent set and the published history,
 `internal/smallgroup`), and the rolling `GET /platform/guardrails` is
-deprecated, every figure hidden. The smoke test reads health,
-retries a forced dead letter and reads the statistics. **Built (cloud
+deprecated, every figure hidden; `GET /platform/analytics` and the series
+routes (Plan 7c-2) render Use, Answer quality and Hospitals, medians,
+trends and per-hospital series from the same stored snapshots only
+(`internal/analytics`'s render, which takes stored bodies as its only
+input). The smoke test reads health, retries a forced dead letter and reads
+the statistics and the analytics. **Built (cloud
 models, off by default):** a hospital a platform admin has opted in can
 have its clinical draft written by a cloud model (Anthropic, OpenAI or
 xAI); see "Cloud models" below. **Next:** the hospital endpoints.

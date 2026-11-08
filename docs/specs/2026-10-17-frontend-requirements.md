@@ -927,19 +927,21 @@ is never a member id.
 ### 14.7 Analytics across hospitals
 
 Source: mhai-web `docs/specs/2026-10-22-platform-analytics-design.md` §5–§7.
-Status: **Assumed** (Plan 7c; Plan 7d for notifications). Counts only: no
+Status: the reads are **Built (Plan 7c-2)**, with the changes below (Plan 7c
+design §13: F1, F3, F4, F10–F12, F14–F16, F19); What changed and the
+follow-ups are **Assumed** until Plan 7c-3; notifications are Plan 7d. Counts only: no
 patient names, MRNs, question or answer text, nothing per person. A guarded
 value is `{value, suppressed}`: hidden is `{value: null, suppressed: true}`,
 nothing to show is `{value: null, suppressed: false}`.
 
 | Endpoint | Behaviour |
 |---|---|
-| `GET /platform/analytics?period=7d\|30d\|90d` | → `{period, from, to, changes, use, alerts, quality, hospitals}`; each area is its data with its own `updated_at`, or `{unavailable: true}`. Active hospitals only |
+| `GET /platform/analytics?period=week\|month\|quarter` | **Built (Plan 7c-2).** `period` is a finished calendar period (F1: `7d`, `30d`, `90d` are 422 `validation_failed`); `from`/`to` bound the latest published one, null before the first, when `use`, `quality` and `hospitals` are `{not_yet: true, first_from}` (F19). `alerts` is **null** until patient alerts exist (F4). `changes` is `{unavailable: true}` until Plan 7c-3 (F16). Use rows: `questions`, `active_clinicians`, `questions_per_clinician`; quality rows: `answers`, `needs_review_share` (escalated over answers), `confidence` (high pass, medium regenerate, low escalate; F11), `reviews`, `agreement_rate`, `median_review_hours`; shares have 4 decimals (F12); `staff` is guarded until Q4. `median` over the hospitals whose value is shown; `trend` is the all-hospitals cell of each of the latest 12 weeks, 12 months or 8 quarters (F3). 30 reads a minute per session with the series. As assumed before: → `{period, from, to, changes, use, alerts, quality, hospitals}`; each area is its data with its own `updated_at`, or `{unavailable: true}`. Active hospitals only |
 | | `changes`: `{updated_at, window: {from, to}, items}`, ranked, always the last 7 days vs the 4 weeks before (whatever `period` is). Each item: `id` (stable while the change lasts), `hospital` (`{id, name}` or null for all hospitals), `area` (`use`, `alerts`, `quality`), `measure`, `direction` (`worse`, `better`, `rising`, `falling`), `serious` (Critical-type), `previous`, `current` (guarded), `summary` (plain words), `follow_up` (`{by, at, note, by_you, version}` or null), `version` |
 | | `use`, `alerts`, `quality`: `{updated_at, rows, median, trend}`; one row per active hospital, all values guarded; `median` is the all-hospitals median under the same rules; `trend` is `[{start, value}]` with `value` guarded. Alert rows add `critical_target_minutes` and `critical_overdue` (unhandled Critical alerts past target, guarded); quality rows add `reviews` |
 | | `hospitals`: one row each with `size` (`staff`, `active_clinicians`, `questions`) |
-| `GET /platform/analytics/changes/{id}/series?period` | → `{measure, hospital, points: [{start, value, median}]}`; `value` guarded; `median` of the other active hospitals, or null when there is none |
-| `GET /platform/analytics/hospitals/{id}/series?measure&period` | the same for any active hospital and one of `questions_per_clinician`, `critical_median_ack_minutes`, `critical_within_target`, `needs_review_share` |
+| `GET /platform/analytics/changes/{id}/series?period` | **Built (Plan 7c-2)** as 404 for every id until What changed exists (7c-3); `hospital` will be null for a change across all hospitals (F14). → `{measure, hospital, points: [{start, value, median}]}`; `value` guarded; `median` of the other active hospitals, or null when there is none |
+| `GET /platform/analytics/hospitals/{id}/series?measure&period` | **Built (Plan 7c-2):** one point per stored period of the latest 12 weeks, 12 months or 8 quarters (F3), `questions_per_clinician` or `needs_review_share` only (the Critical measures are 422, F10); an id in no published period is 404. Assumed before: the same for any active hospital and one of `questions_per_clinician`, `critical_median_ack_minutes`, `critical_within_target`, `needs_review_share` |
 | `PUT /platform/analytics/changes/{id}/follow-up {note?, version}` | platform admins; marks followed up or edits the note (≤ 500 characters, author only — others get 403); stale `version` → **409 `conflict`**; audited; → the change |
 | `DELETE /platform/analytics/changes/{id}/follow-up {version}` | any platform admin undoes; stale or nothing to undo → **409 `conflict`**; audited |
 

@@ -35,6 +35,9 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/feedback` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/feedback/stats/mine` | signed in | `clinician` | clinical | no | no | no |
 | GET | `/api/v1/healthz` | public | - | - | no | no | no |
+| GET | `/api/v1/platform/analytics` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/analytics/changes/{id}/series` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/analytics/hospitals/{id}/series` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/audit` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/audit/hospitals` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/audit/people` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
