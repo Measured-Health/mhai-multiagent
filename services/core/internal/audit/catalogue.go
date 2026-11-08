@@ -274,6 +274,7 @@ var Catalogue = map[string]Entry{
 	// mhai-web kind yet; the platform's switch actions come with Plan 11b.
 	"analysis.switch_raised":  withheld(),
 	"analysis.switch_lowered": withheld(),
+	"hospital.marked_demo":    withheld(),
 
 	// EMR connections (EMR design §12.6): mhai-web's Plan 13 kinds, with
 	// the connection as the target. A resume has no kind yet: sent bare.

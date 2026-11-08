@@ -262,3 +262,37 @@ func TestSwitchOffCLI(t *testing.T) {
 		t.Errorf("%d rows still on", n)
 	}
 }
+
+// core hospitals mark-demo: the live demo's hospital (created before
+// is_demo) is marked once, audited, and then seed-demo runs on it.
+func TestHospitalsMarkDemo(t *testing.T) {
+	super, provURL, _ := analysisEnv(t)
+	var h uuid.UUID
+	if err := super.QueryRow(context.Background(), `INSERT INTO hospitals (name, short_code, status, time_zone)
+		VALUES ('Synthetic Hospital', 'SYN', 'active', 'Africa/Lagos') RETURNING id`).Scan(&h); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	now := pinned(time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC))
+	if err := analysisCmd(context.Background(), []string{"seed-demo", "syn", "--months", "2"}, provURL, &out, now); err == nil {
+		t.Fatal("seeded before the hospital was marked")
+	}
+	if err := seed(context.Background(), []string{"hospitals", "mark-demo", "syn"}, provURL, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed(context.Background(), []string{"hospitals", "mark-demo", "syn"}, provURL, strings.NewReader(""), &out); err == nil {
+		t.Error("marked twice")
+	}
+	var payload string
+	var entityID string
+	if err := super.QueryRow(context.Background(), `SELECT payload::text, entity_id FROM audit_log WHERE action = 'hospital.marked_demo'
+		AND actor_id IS NULL AND hospital_id IS NULL`).Scan(&payload, &entityID); err != nil {
+		t.Fatal(err)
+	}
+	if payload != `{"via": "cli"}` || entityID != h.String() {
+		t.Errorf("audit %s %s", payload, entityID)
+	}
+	if err := analysisCmd(context.Background(), []string{"seed-demo", "syn", "--months", "2"}, provURL, &out, now); err != nil {
+		t.Fatalf("seed-demo after marking: %v", err)
+	}
+}

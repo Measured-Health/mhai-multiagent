@@ -13,7 +13,11 @@
 -- The demo (review items 1 and 2): hospitals.is_demo marks the synthetic
 -- demo hospital. It is set only when a hospital is created (the
 -- provisioning login's INSERT, core hospitals create --demo) and no role,
--- the owner included, can change it. Only a demo hospital's switch takes
+-- the owner included, can change it, with one exception: a hospital made
+-- before the flag existed (the live demo's) is marked once through
+-- mhai_hospital_mark_demo (core hospitals mark-demo, audited
+-- hospital.marked_demo), never back, never a hospital with a real cloud
+-- agreement, and never once any analysis switch has been signed off. Only a demo hospital's switch takes
 -- DEMO-SYNTHETIC references, and only through mhai_analysis_demo_raise;
 -- provisioning otherwise only lowers a switch and can't touch references.
 -- analysis_switch.ever_signed_off is set by any SO- reference and is never
@@ -113,6 +117,12 @@ CREATE FUNCTION mhai_hospital_demo_fixed() RETURNS trigger
     SET search_path = pg_catalog, pg_temp
     AS $$
 BEGIN
+    -- The one exception: false to true, inside mhai_hospital_mark_demo (the
+    -- writer, with the hospital named in the transaction's setting).
+    IF NOT OLD.is_demo AND NEW.is_demo AND current_user = 'mhai_analysis_writer'
+       AND current_setting('mhai.demo_mark', true) = NEW.id::text THEN
+        RETURN NEW;
+    END IF;
     IF NEW.is_demo IS DISTINCT FROM OLD.is_demo THEN
         RAISE EXCEPTION USING ERRCODE = 'check_violation',
             MESSAGE = 'hospitals: is_demo is set when a hospital is created and never changes';
@@ -415,6 +425,11 @@ GRANT SELECT (query_id, hospital_id, icd10_code, hga_decision, trust_score, degr
     ON clinical_decisions TO mhai_analysis_writer;
 GRANT SELECT (query_id, hospital_id, action, status, created_at) ON feedback_events TO mhai_analysis_writer;
 GRANT SELECT (id, status, time_zone, is_demo) ON hospitals TO mhai_analysis_writer;
+-- mhai_hospital_mark_demo only: is_demo, and the cloud agreement it checks.
+GRANT UPDATE (is_demo) ON hospitals TO mhai_analysis_writer;
+CREATE POLICY analysis_writer_mark ON hospitals FOR UPDATE TO mhai_analysis_writer USING (true) WITH CHECK (true);
+GRANT SELECT (hospital_id, agreement_ref) ON hospital_model_policy TO mhai_analysis_writer;
+CREATE POLICY analysis_writer_read ON hospital_model_policy FOR SELECT TO mhai_analysis_writer USING (true);
 CREATE POLICY analysis_writer_read ON clinical_queries FOR SELECT TO mhai_analysis_writer USING (true);
 CREATE POLICY analysis_writer_read ON clinical_decisions FOR SELECT TO mhai_analysis_writer USING (true);
 CREATE POLICY analysis_writer_read ON feedback_events FOR SELECT TO mhai_analysis_writer USING (true);
@@ -947,6 +962,35 @@ END
 $$;
 -- +goose StatementEnd
 
+-- mhai_hospital_mark_demo(hospital): marks a hospital made before is_demo
+-- existed as the demo, once (EXECUTE to mhai_provision only). Refuses
+-- (22023) an unknown or already-marked hospital, one with a real cloud
+-- agreement (any reference but DEMO-SYNTHETIC), and any hospital once an
+-- analysis switch has ever been signed off.
+-- +goose StatementBegin
+CREATE FUNCTION mhai_hospital_mark_demo(p_hospital uuid) RETURNS void
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM public.hospitals h WHERE h.id = p_hospital AND NOT h.is_demo) THEN
+        RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'analysis: no such hospital, or already the demo';
+    END IF;
+    IF EXISTS (SELECT 1 FROM public.hospital_model_policy p
+               WHERE p.hospital_id = p_hospital AND p.agreement_ref IS DISTINCT FROM 'DEMO-SYNTHETIC' AND p.agreement_ref IS NOT NULL) THEN
+        RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'analysis: a hospital with a real cloud agreement is not the demo';
+    END IF;
+    IF EXISTS (SELECT 1 FROM public.analysis_switch s WHERE s.ever_signed_off) THEN
+        RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'analysis: an analysis switch was signed off; no hospital is marked as the demo any more';
+    END IF;
+    PERFORM set_config('mhai.demo_mark', p_hospital::text, true);
+    UPDATE public.hospitals SET is_demo = true WHERE id = p_hospital;
+    PERFORM set_config('mhai.demo_mark', '', true);
+END
+$$;
+-- +goose StatementEnd
+
+ALTER FUNCTION mhai_hospital_mark_demo(uuid) OWNER TO mhai_analysis_writer;
 ALTER FUNCTION mhai_analysis_demo_raise(uuid) OWNER TO mhai_analysis_writer;
 ALTER FUNCTION mhai_analysis_demo(uuid) OWNER TO mhai_analysis_writer;
 ALTER FUNCTION mhai_analysis_zone(uuid) OWNER TO mhai_analysis_writer;
@@ -968,7 +1012,8 @@ GRANT EXECUTE ON FUNCTION mhai_analysis_ingest_source(uuid, timestamptz, timesta
     mhai_analysis_ingest(uuid, timestamptz, jsonb), mhai_analysis_freeze(uuid, timestamptz),
     mhai_analysis_sweep(uuid, timestamptz), mhai_analysis_due(timestamptz), mhai_analysis_ran(uuid, timestamptz)
     TO mhai_analysis_job;
-REVOKE ALL ON FUNCTION mhai_analysis_demo_raise(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION mhai_analysis_demo_raise(uuid), mhai_hospital_mark_demo(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION mhai_hospital_mark_demo(uuid) TO mhai_provision;
 GRANT EXECUTE ON FUNCTION mhai_analysis_seed(uuid, timestamptz, jsonb), mhai_analysis_demo_raise(uuid) TO mhai_provision;
 
 ------------------------------------------------------------------------
@@ -977,7 +1022,8 @@ GRANT EXECUTE ON FUNCTION mhai_analysis_seed(uuid, timestamptz, jsonb), mhai_ana
 DROP POLICY provision_append ON audit_log;
 CREATE POLICY provision_append ON audit_log FOR INSERT TO mhai_provision
     WITH CHECK (action IN ('hospital.created', 'user.created', 'intelligence.key_rotated', 'hospital.activated',
-                           'hospital.model_policy_changed', 'analysis.switch_raised', 'analysis.switch_lowered')
+                           'hospital.model_policy_changed', 'analysis.switch_raised', 'analysis.switch_lowered',
+                           'hospital.marked_demo')
                 AND actor_id IS NULL);
 
 -- +goose StatementBegin
@@ -1019,6 +1065,10 @@ CREATE POLICY provision_append ON audit_log FOR INSERT TO mhai_provision
                            'hospital.model_policy_changed')
                 AND actor_id IS NULL);
 
+DROP FUNCTION mhai_hospital_mark_demo(uuid);
+DROP POLICY analysis_writer_read ON hospital_model_policy;
+REVOKE ALL ON hospital_model_policy FROM mhai_analysis_writer;
+DROP POLICY analysis_writer_mark ON hospitals;
 DROP FUNCTION mhai_analysis_demo_raise(uuid);
 DROP FUNCTION mhai_analysis_seed(uuid, timestamptz, jsonb);
 DROP FUNCTION mhai_analysis_ran(uuid, timestamptz);

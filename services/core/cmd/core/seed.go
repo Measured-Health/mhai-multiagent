@@ -15,10 +15,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/term"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/account"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
@@ -28,6 +30,7 @@ import (
 const seedUsage = `usage:
   core hospitals create --name N --short-code CODE --time-zone TZ [--require-mfa-for-clinicians] [--allow-trust-device] [--demo]
   core hospitals activate <hospital id or short code>
+  core hospitals mark-demo <hospital id or short code>
   core hospitals model-policy set <hospital id or short code> --provider openai|anthropic|xai|none [--agreement-ref REF] [--budget TOKENS]
   core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
 
@@ -49,6 +52,12 @@ hospitals activate moves a setup_incomplete hospital to active (POST /queries
 needs an active hospital) and audits hospital.activated. An active hospital
 is left as it is. It refuses any other status: a deactivated hospital is
 reactivated through the platform app.
+
+hospitals mark-demo marks a hospital made before the demo flag existed (the
+live demo's) as the synthetic demo, once, and audits hospital.marked_demo.
+The database refuses a hospital already marked, one with a real cloud
+agreement, and any hospital once an analysis switch has been signed off.
+The flag never goes back.
 
 hospitals model-policy set sets the hospital's cloud model policy and audits
 hospital.model_policy_changed (via cli, no actor). A provider needs
@@ -74,6 +83,9 @@ var errActivateArgs = errors.New("usage: core hospitals activate <hospital id or
 // is the provisioning login. Errors and output never contain the email, name
 // or password.
 func seed(ctx context.Context, args []string, url string, stdin io.Reader, out io.Writer) error {
+	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "mark-demo" {
+		return hospitalsMarkDemo(ctx, args[2:], url, out)
+	}
 	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "activate" {
 		return hospitalsActivate(ctx, args[2:], url, out)
 	}
@@ -155,6 +167,44 @@ func hospitalsActivate(ctx context.Context, args []string, url string, out io.Wr
 		return nil
 	}
 	fmt.Fprintf(out, "activated hospital %s\n", id)
+	return nil
+}
+
+var (
+	errMarkDemoArgs    = errors.New("usage: core hospitals mark-demo <hospital id or short code>")
+	errMarkDemoRefused = errors.New("refused: the hospital is already the demo, has a real cloud agreement, or an analysis switch was signed off; nothing changed")
+	errMarkDemoWrite   = errors.New("could not mark the hospital as the demo; nothing was changed")
+)
+
+// hospitalsMarkDemo is "hospitals mark-demo <id or short code>"
+// (mhai_hospital_mark_demo as mhai_provision, audited hospital.marked_demo).
+func hospitalsMarkDemo(ctx context.Context, args []string, url string, out io.Writer) error {
+	if len(args) != 1 || strings.HasPrefix(args[0], "-") || account.ValidateHospitalRef(args[0]) != nil {
+		return errMarkDemoArgs
+	}
+	pool, err := openOwner(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	id, err := account.ProvisionOnHospital(ctx, pool, args[0], func(tx pgx.Tx, hospital uuid.UUID) error {
+		if _, err := tx.Exec(ctx, `SELECT mhai_hospital_mark_demo($1)`, hospital); err != nil {
+			var pe *pgconn.PgError
+			if errors.As(err, &pe) && pe.Code == "22023" {
+				return errMarkDemoRefused
+			}
+			return errMarkDemoWrite
+		}
+		if err := audit.Write(ctx, tx, audit.Event{Action: "hospital.marked_demo", Entity: "hospital", EntityID: hospital.String(),
+			Payload: map[string]any{"via": "cli"}}); err != nil {
+			return errMarkDemoWrite
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "hospital %s marked as the demo\n", id)
 	return nil
 }
 

@@ -412,6 +412,9 @@ func init() {
 	// hospital's switch and nothing for the global one.
 	Register("analysis.switch_raised", Schema{Fields: fields("hospital_id", id, "via", OneOf("cli"), "refs", OneOf("demo")),
 		Required: []string{"via", "refs"}})
+	// A hospital made before hospitals.is_demo, marked as the demo once
+	// (core hospitals mark-demo); the hospital is the row's entity.
+	Register("hospital.marked_demo", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})
 	Register("analysis.switch_lowered", Schema{Fields: fields("hospital_id", id, "via", OneOf("cli")),
 		Required: []string{"via"}})
 

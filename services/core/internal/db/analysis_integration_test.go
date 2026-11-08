@@ -1201,3 +1201,73 @@ func TestMigration00021DownUp(t *testing.T) {
 		t.Fatalf("down to 0: %v", err)
 	}
 }
+
+// A hospital created before is_demo existed (the live demo's) is marked
+// once through mhai_hospital_mark_demo, as the provisioning login: never
+// back, never twice, never a hospital with a real cloud agreement, and
+// never once any analysis switch has been signed off. A fresh database,
+// since the shared one carries sign-offs.
+func TestMarkDemoOnce(t *testing.T) {
+	pg, pool := testutil.MigratedPostgres(t)
+	ctx := context.Background()
+	prov, _, err := testutil.ProvisionLogin(ctx, pg, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+	mark := func(h uuid.UUID) error {
+		return asAnalysisRole(ctx, prov, "mhai_provision", nil, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `SELECT mhai_hospital_mark_demo($1)`, h)
+			return err
+		})
+	}
+	old, _ := seedHospital(t, pool, uniqueCode("O"))
+	if err := mark(old); err != nil {
+		t.Fatalf("marking an existing hospital: %v", err)
+	}
+	if n := countRows(t, pool, `SELECT count(*) FROM hospitals WHERE id = $1 AND is_demo`, old); n != 1 {
+		t.Fatal("not marked")
+	}
+	if err := mark(old); pgCode(err) != invalidParameter {
+		t.Errorf("marking twice: want 22023, got %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE hospitals SET is_demo = false WHERE id = $1`, old); pgCode(err) != checkViolation {
+		t.Errorf("unmarking: want 23514, got %v", err)
+	}
+	// Direct writes stay refused, with or without the function's setting.
+	if err := asAnalysisRole(ctx, prov, "mhai_provision", nil, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('mhai.demo_mark', $1, true)`, old.String()); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE hospitals SET is_demo = true WHERE id = $1`, old)
+		return err
+	}); pgCode(err) != permissionDenied {
+		t.Errorf("provision updating is_demo directly: want 42501, got %v", err)
+	}
+	agr, _ := seedHospital(t, pool, uniqueCode("A"))
+	if _, err := pool.Exec(ctx, `INSERT INTO hospital_model_policy (hospital_id, cloud_provider, agreement_ref) VALUES ($1, 'openai', 'AGR-2026-0001')`, agr); err != nil {
+		t.Fatal(err)
+	}
+	if err := mark(agr); pgCode(err) != invalidParameter {
+		t.Errorf("a hospital with a real cloud agreement: want 22023, got %v", err)
+	}
+	if err := mark(uuid.New()); pgCode(err) != invalidParameter {
+		t.Errorf("an unknown hospital: want 22023, got %v", err)
+	}
+	// Once any analysis switch has been signed off, nothing more is marked.
+	later, _ := seedHospital(t, pool, uniqueCode("L"))
+	other, _ := seedHospital(t, pool, uniqueCode("S"))
+	setSwitch(t, pool, &other, "off", "SO-2026-0001")
+	if err := mark(later); pgCode(err) != invalidParameter {
+		t.Errorf("after a sign-off: want 22023, got %v", err)
+	}
+	if n := countRows(t, pool, `SELECT count(*) FROM hospitals WHERE is_demo`); n != 1 {
+		t.Errorf("%d demo hospitals, want 1", n)
+	}
+	if err := asAnalysisRole(ctx, pool, "mhai_gateway", &old, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT mhai_hospital_mark_demo($1)`, old)
+		return err
+	}); pgCode(err) != permissionDenied {
+		t.Errorf("the gateway marking: want 42501, got %v", err)
+	}
+}

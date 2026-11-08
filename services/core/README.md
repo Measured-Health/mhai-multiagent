@@ -30,6 +30,7 @@ core hospitals create --name N --short-code CODE --time-zone TZ \
     [--require-mfa-for-clinicians] [--allow-trust-device]
 core hospitals activate ID|CODE    # setup_incomplete -> active, audited (see "Running it in compose")
 core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
+core hospitals mark-demo ID|CODE                             # once: a hospital made before is_demo (the live demo's), audited
 core analysis seed-demo ID|CODE [--seed N] [--months 1-24]   # a hospital created with --demo only
 core analysis switch off ID|CODE | --global                  # lower an analysis switch, audited
 ```
@@ -116,7 +117,11 @@ sign-offs (H1 to H3), the only way on is `core analysis seed-demo`, which
 uses the references `DEMO-SYNTHETIC` and writes a seeded synthetic cohort,
 for a hospital created with `core hospitals create --demo` only
 (`hospitals.is_demo`, which no role can change; the database refuses demo
-references on any other hospital). A switch row that has ever carried a
+references on any other hospital). A hospital made before the flag existed,
+such as the live demo's `SYN`, is marked once with
+`core hospitals mark-demo SYN` (audited `hospital.marked_demo`); the
+database refuses it for a hospital with a real cloud agreement and for any
+hospital once an analysis switch has been signed off. A switch row that has ever carried a
 real sign-off (`ever_signed_off`) never takes demo references again, and
 provisioning can only lower a switch. A hospital under a demo switch never
 ingests a real consultation.
