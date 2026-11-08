@@ -90,7 +90,11 @@ func (w *Writer) Run(ctx context.Context) error {
 	defer t.Stop()
 	for {
 		if err := w.WriteOnce(ctx); err != nil && ctx.Err() == nil && w.Log != nil {
-			w.Log.Warn("allow_list_not_written", "code", "database_unavailable")
+			code := "write_failed" // a refused list (overlapping ranges) or the directory
+			if errors.Is(err, errRead) {
+				code = "database_unavailable"
+			}
+			w.Log.Warn("allow_list_not_written", "code", code)
 		}
 		select {
 		case <-ctx.Done():
