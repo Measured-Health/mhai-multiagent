@@ -44,8 +44,6 @@ var (
 	errAnalysisWrite = errors.New("could not write the analysis switch or seed; nothing was changed")
 )
 
-const demoRef = "DEMO-SYNTHETIC"
-
 // analysisDemoSubjects is the demo cohort's size.
 const analysisDemoSubjects = 600
 
