@@ -42,14 +42,26 @@ func GuardResponse(raw Raw, forced Forced, known ...Body) (Body, error) {
 	for i := range known {
 		ks = append(ks, stateOf(&known[i]))
 	}
-	hiddenElsewhere := map[string]bool{}
+	// A group already published is fixed: hidden in a known body, hidden
+	// here (D5); shown there, shown here (a series point is its child's
+	// total, a filter parent's row is this context's group).
+	hiddenElsewhere, shownElsewhere := map[string]bool{}, map[string]bool{}
 	for _, k := range ks {
 		for i, c := range k.sh.cells {
-			if k.hide[i] && !c.virtual {
+			if c.virtual || c.group == zeroGroup {
+				continue
+			}
+			if k.hide[i] {
 				hiddenElsewhere[c.group] = true
+			} else {
+				shownElsewhere[c.group] = true
 			}
 		}
 	}
+	for g := range hiddenElsewhere {
+		delete(shownElsewhere, g)
+	}
+	g.pinned = shownElsewhere
 	extra := Forced{}
 	for {
 		hide := g.rules(forced, extra, hiddenElsewhere)
@@ -80,10 +92,12 @@ func HiddenWhole(ctx Context) Body {
 }
 
 type guarding struct {
-	raw  *Raw
-	sh   *sheet
-	vals []int64
-	meds []*[]int64
+	// pinned groups are shown in a known body: never hidden here.
+	pinned map[string]bool
+	raw    *Raw
+	sh     *sheet
+	vals   []int64
+	meds   []*[]int64
 }
 
 func newGuarding(raw *Raw) (*guarding, error) {
@@ -186,6 +200,9 @@ func (g *guarding) rules(forced, extra Forced, elsewhere map[string]bool) []bool
 	hide := make([]bool, len(sh.cells))
 	for i, c := range sh.cells {
 		hide[i] = small(g.vals[i]) || forced[c.group] || extra[c.group] || elsewhere[c.group]
+		if g.pinned[c.group] && !forced[c.group] && !extra[c.group] {
+			hide[i] = false
+		}
 	}
 	for {
 		before := append([]bool{}, hide...)
@@ -243,6 +260,11 @@ func (g *guarding) rules(forced, extra Forced, elsewhere map[string]bool) []bool
 						hide[p] = true
 					}
 				}
+			}
+		}
+		for i, c := range sh.cells {
+			if g.pinned[c.group] && !forced[c.group] && !extra[c.group] {
+				hide[i] = false
 			}
 		}
 		if equal(before, hide) {

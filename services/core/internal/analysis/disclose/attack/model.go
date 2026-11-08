@@ -905,12 +905,16 @@ func (m *Model) SetViolations(order []int) []string {
 				continue
 			}
 			var hid [][]int
+			var truth int64
 			for _, mb := range s.members {
 				if mb.hidden {
 					hid = append(hid, u.ones(mb.box))
+					truth += m.value(mb.box)
 				}
 			}
-			if len(hid) < 2 {
+			// Hidden members that are all 0 protect nothing (a body hidden
+			// whole whose zeros a parent shows).
+			if len(hid) < 2 || truth == 0 {
 				continue
 			}
 			dim, sum := known.Shape(hid)

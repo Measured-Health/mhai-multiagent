@@ -255,7 +255,7 @@ func (g *guarding) check(hide []bool, known []*sheetState) int {
 	}
 	best, tier := -1, 3
 	for i, c := range g.sh.cells {
-		if hide[i] || c.virtual || c.group == zeroGroup {
+		if hide[i] || c.virtual || c.group == zeroGroup || g.pinned[c.group] {
 			continue
 		}
 		t := 2

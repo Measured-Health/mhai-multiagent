@@ -143,3 +143,5 @@ func TestBodyHasNoRawField(t *testing.T) {
 		t.Fatal("nothing walked")
 	}
 }
+
+func reflectNumField(v any) int { return reflect.TypeOf(v).NumField() }

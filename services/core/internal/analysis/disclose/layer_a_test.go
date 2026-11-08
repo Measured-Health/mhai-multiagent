@@ -276,3 +276,5 @@ func TestDrillableOnlyShownFiveOrMore(t *testing.T) {
 
 // long reports whether the full-size property runs are asked for.
 func long() bool { return os.Getenv("ANALYSIS_LONG") == "1" }
+
+func countFields(v any) int { return reflectNumField(v) }
