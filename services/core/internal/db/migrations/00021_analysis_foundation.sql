@@ -10,9 +10,13 @@
 -- demo-only CLI (core analysis seed-demo), with DEMO-SYNTHETIC references,
 -- and a hospital under a demo switch never ingests a real consultation.
 --
--- The demo (review item 1): DEMO-SYNTHETIC references are written only
--- through mhai_analysis_demo_raise; provisioning otherwise only lowers a
--- switch and can't touch references. analysis_switch.ever_signed_off is set by any SO- reference and is never
+-- The demo (review items 1 and 2): hospitals.is_demo marks the synthetic
+-- demo hospital. It is set only when a hospital is created (the
+-- provisioning login's INSERT, core hospitals create --demo) and no role,
+-- the owner included, can change it. Only a demo hospital's switch takes
+-- DEMO-SYNTHETIC references, and only through mhai_analysis_demo_raise;
+-- provisioning otherwise only lowers a switch and can't touch references.
+-- analysis_switch.ever_signed_off is set by any SO- reference and is never
 -- cleared; a row carrying it never takes demo references again.
 --
 -- Roles (cluster-wide: created if missing, refused if they have members,
@@ -98,6 +102,31 @@ GRANT USAGE ON SCHEMA public TO mhai_analysis_job, mhai_analysis_writer, mhai_an
 GRANT EXECUTE ON FUNCTION mhai_reporting_period_ok(text, date, date) TO mhai_analysis_writer;
 
 ------------------------------------------------------------------------
+-- The demo marker: set at creation only.
+------------------------------------------------------------------------
+ALTER TABLE hospitals ADD COLUMN is_demo boolean NOT NULL DEFAULT false;
+GRANT INSERT (is_demo) ON hospitals TO mhai_provision;
+
+-- +goose StatementBegin
+CREATE FUNCTION mhai_hospital_demo_fixed() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+BEGIN
+    IF NEW.is_demo IS DISTINCT FROM OLD.is_demo THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+            MESSAGE = 'hospitals: is_demo is set when a hospital is created and never changes';
+    END IF;
+    RETURN NEW;
+END
+$$;
+-- +goose StatementEnd
+ALTER FUNCTION mhai_hospital_demo_fixed() OWNER TO mhai_migrate;
+REVOKE ALL ON FUNCTION mhai_hospital_demo_fixed() FROM PUBLIC;
+CREATE TRIGGER hospitals_demo_fixed BEFORE UPDATE ON hospitals
+    FOR EACH ROW EXECUTE FUNCTION mhai_hospital_demo_fixed();
+
+------------------------------------------------------------------------
 -- The switch (design §7). A NULL hospital_id is the global row. The
 -- effective position is the lower of the global and the hospital's; a
 -- missing row is 'off'. References are DEMO-SYNTHETIC (the demo) or
@@ -124,7 +153,7 @@ ALTER TABLE analysis_switch OWNER TO mhai_migrate;
 ALTER TABLE analysis_switch ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON analysis_switch FROM PUBLIC;
 
--- The guard runs as the writer, whoever writes.
+-- The guard runs as the writer (to read hospitals.is_demo), whoever writes.
 -- +goose StatementBegin
 CREATE FUNCTION mhai_analysis_switch_guard() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
@@ -148,6 +177,11 @@ BEGIN
         IF NEW.ever_signed_off THEN
             RAISE EXCEPTION USING ERRCODE = 'check_violation',
                 MESSAGE = 'analysis_switch: a switch that was ever signed off never takes demo references';
+        END IF;
+        IF NEW.hospital_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.hospitals h
+                                                       WHERE h.id = NEW.hospital_id AND h.is_demo) THEN
+            RAISE EXCEPTION USING ERRCODE = 'check_violation',
+                MESSAGE = 'analysis_switch: only a hospital created as the demo takes demo references';
         END IF;
     END IF;
     NEW.since := now();
@@ -380,7 +414,7 @@ GRANT SELECT (id, hospital_id, created_at, urgency) ON clinical_queries TO mhai_
 GRANT SELECT (query_id, hospital_id, icd10_code, hga_decision, trust_score, degraded, created_at)
     ON clinical_decisions TO mhai_analysis_writer;
 GRANT SELECT (query_id, hospital_id, action, status, created_at) ON feedback_events TO mhai_analysis_writer;
-GRANT SELECT (id, status, time_zone) ON hospitals TO mhai_analysis_writer;
+GRANT SELECT (id, status, time_zone, is_demo) ON hospitals TO mhai_analysis_writer;
 CREATE POLICY analysis_writer_read ON clinical_queries FOR SELECT TO mhai_analysis_writer USING (true);
 CREATE POLICY analysis_writer_read ON clinical_decisions FOR SELECT TO mhai_analysis_writer USING (true);
 CREATE POLICY analysis_writer_read ON feedback_events FOR SELECT TO mhai_analysis_writer USING (true);
@@ -854,7 +888,8 @@ BEGIN
     IF p_hospital IS NULL OR p_now IS NULL OR p_now > now() THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'analysis: not a time that has passed';
     END IF;
-    IF public.mhai_analysis_position(p_hospital) <> 'on'
+    IF NOT EXISTS (SELECT 1 FROM public.hospitals h WHERE h.id = p_hospital AND h.is_demo)
+       OR public.mhai_analysis_position(p_hospital) <> 'on'
        OR NOT EXISTS (SELECT 1 FROM public.analysis_switch s
                       WHERE s.hospital_id = p_hospital AND s.signoff_clinical = 'DEMO-SYNTHETIC'
                         AND s.signoff_privacy = 'DEMO-SYNTHETIC' AND s.signoff_legal = 'DEMO-SYNTHETIC') THEN
@@ -887,8 +922,8 @@ $$;
 
 -- mhai_analysis_demo_raise(hospital): switches the demo on with
 -- DEMO-SYNTHETIC references (EXECUTE to mhai_provision only), for the
--- global row (NULL) or a hospital. The guard refuses (23514) a row that
--- was ever signed off.
+-- global row (NULL) or a hospital created as the demo. Refuses (22023) any
+-- other hospital; the guard refuses (23514) a row that was ever signed off.
 -- Returns whether the row was not on before.
 -- +goose StatementBegin
 CREATE FUNCTION mhai_analysis_demo_raise(p_hospital uuid) RETURNS boolean
@@ -898,6 +933,10 @@ CREATE FUNCTION mhai_analysis_demo_raise(p_hospital uuid) RETURNS boolean
 DECLARE
     v_was text;
 BEGIN
+    IF p_hospital IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.hospitals h WHERE h.id = p_hospital AND h.is_demo) THEN
+        RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+            MESSAGE = 'analysis: only a hospital created as the demo takes demo references';
+    END IF;
     SELECT s.position INTO v_was FROM public.analysis_switch s WHERE s.hospital_id IS NOT DISTINCT FROM p_hospital FOR UPDATE;
     INSERT INTO public.analysis_switch AS s (hospital_id, position, signoff_clinical, signoff_privacy, signoff_legal)
         VALUES (p_hospital, 'on', 'DEMO-SYNTHETIC', 'DEMO-SYNTHETIC', 'DEMO-SYNTHETIC')
@@ -1012,6 +1051,9 @@ DROP TABLE analysis_locations;
 DROP TABLE analysis_sources;
 DROP TABLE analysis_switch;
 DROP FUNCTION mhai_analysis_switch_guard();
+DROP TRIGGER hospitals_demo_fixed ON hospitals;
+DROP FUNCTION mhai_hospital_demo_fixed();
+ALTER TABLE hospitals DROP COLUMN is_demo;
 
 REVOKE EXECUTE ON FUNCTION mhai_reporting_period_ok(text, date, date) FROM mhai_analysis_writer;
 REVOKE USAGE ON SCHEMA public FROM mhai_analysis_job, mhai_analysis_writer, mhai_analysis_reader;

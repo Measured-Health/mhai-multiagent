@@ -46,8 +46,10 @@ All notable changes to this project are documented here. The format follows
   switch. A core loop (one copy at a time) ingests, sweeps and freezes per
   switched-on hospital after its local 00:30. Four optional key files
   (`ANALYSIS_*_KEY_FILE`) seal and match patient references.
-  `core analysis seed-demo` switches the synthetic demo hospital on with
-  `DEMO-SYNTHETIC` references and writes a seeded synthetic cohort;
+  `core analysis seed-demo` switches the synthetic demo hospital (created
+  with `core hospitals create --demo`; `hospitals.is_demo` never changes)
+  on with `DEMO-SYNTHETIC` references and writes a seeded synthetic cohort;
+  a switch that was ever signed off never takes demo references again;
   `core analysis switch off` lowers a switch; both are audited. The login
   and session `user` gains `features {analysis, named_access}`.
 - Platform analytics on calendar periods, part 7c-1 (OpenAPI 1.11.0,

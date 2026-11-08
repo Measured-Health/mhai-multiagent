@@ -26,7 +26,7 @@ import (
 )
 
 const seedUsage = `usage:
-  core hospitals create --name N --short-code CODE --time-zone TZ [--require-mfa-for-clinicians] [--allow-trust-device]
+  core hospitals create --name N --short-code CODE --time-zone TZ [--require-mfa-for-clinicians] [--allow-trust-device] [--demo]
   core hospitals activate <hospital id or short code>
   core hospitals model-policy set <hospital id or short code> --provider openai|anthropic|xai|none [--agreement-ref REF] [--budget TOKENS]
   core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
@@ -106,6 +106,9 @@ func hospitalsCreate(ctx context.Context, args []string, url string, out io.Writ
 	fs.StringVar(&h.TimeZone, "time-zone", "", "")
 	fs.BoolVar(&h.RequireMFAForClinicians, "require-mfa-for-clinicians", false, "")
 	fs.BoolVar(&h.AllowTrustDevice, "allow-trust-device", false, "")
+	// --demo marks the synthetic demo hospital (for core analysis
+	// seed-demo); it is set only now and never changes.
+	fs.BoolVar(&h.Demo, "demo", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return errArgs
 	}

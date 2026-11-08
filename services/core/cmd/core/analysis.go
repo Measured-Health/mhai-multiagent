@@ -24,9 +24,10 @@ const analysisUsage = `usage:
   core analysis switch off <hospital id or short code> | --global
 
 seed-demo is for the synthetic demo hospital only (analysis plan, departure
-5). It sets the global and the hospital's analysis switches on with the
-references DEMO-SYNTHETIC (mhai_analysis_demo_raise), refusing any switch
-that was ever signed off (SO-...), writes a seeded synthetic cohort through mhai_analysis_seed, and
+5): a hospital created with core hospitals create --demo. It sets the global
+and the hospital's analysis switches on with the references DEMO-SYNTHETIC
+(mhai_analysis_demo_raise), refusing any other hospital and any switch that
+was ever signed off (SO-...), writes a seeded synthetic cohort through mhai_analysis_seed, and
 audits analysis.switch_raised. A hospital under a demo switch never ingests
 a real consultation. Raising a switch with a real sign-off is the platform's
 two-person flow (Plan 11b), never this command.
@@ -39,6 +40,7 @@ seed-demo prints the hospital id and the subject count only.`
 var (
 	errAnalysisArgs  = fmt.Errorf("%s", analysisUsage)
 	errRealSwitch    = errors.New("an analysis switch was signed off; the CLI never gives it demo references (use the platform)")
+	errNotDemo       = errors.New("that hospital was not created as the demo (core hospitals create --demo); seed-demo refuses it")
 	errAnalysisWrite = errors.New("could not write the analysis switch or seed; nothing was changed")
 )
 
@@ -109,8 +111,9 @@ func analysisSeedDemo(ctx context.Context, args []string, url string, out io.Wri
 		if err != nil {
 			return errAnalysisWrite
 		}
-		// The database refuses any switch ever signed off (23514); a
-		// refusal rolls back everything, the global row included.
+		// The database refuses a hospital not created as the demo (22023)
+		// and any switch ever signed off (23514); a refusal rolls back
+		// everything, the global row included.
 		raised := map[string]bool{}
 		for _, scope := range []string{"hospital", "global"} {
 			var h *uuid.UUID
@@ -120,6 +123,8 @@ func analysisSeedDemo(ctx context.Context, args []string, url string, out io.Wri
 			if err := tx.QueryRow(ctx, `SELECT mhai_analysis_demo_raise($1)`, h).Scan(&was); err != nil {
 				var pe *pgconn.PgError
 				switch {
+				case errors.As(err, &pe) && pe.Code == "22023":
+					return errNotDemo
 				case errors.As(err, &pe) && pe.Code == "23514":
 					return errRealSwitch
 				}

@@ -50,8 +50,8 @@ func TestFeaturesOffByDefault(t *testing.T) {
 func TestFeaturesNeedRoleAndMFA(t *testing.T) {
 	e := newEnv(t)
 	hid := seedHospital(t, hospitalOpts{})
-	setAnalysisSwitch(t, nil, "on", "DEMO-SYNTHETIC")
-	setAnalysisSwitch(t, &hid, "on", "DEMO-SYNTHETIC")
+	setAnalysisSwitch(t, nil, "on", "SO-2026-0001")
+	setAnalysisSwitch(t, &hid, "on", "SO-2026-0002")
 
 	c := seedUser(t, hid, false, "clinician")
 	r := e.login(t, c.email, testPassword, newIP())
@@ -66,7 +66,7 @@ func TestFeaturesNeedRoleAndMFA(t *testing.T) {
 		t.Error("an admin without two-step: analysis true")
 	}
 	if f := features(t, e.fullSession(t, a, e.enrol(t, a))); f["analysis"] != true {
-		t.Error("an admin with two-step at the demo hospital: analysis false")
+		t.Error("an admin with two-step at a switched-on hospital: analysis false")
 	}
 	an := seedUser(t, hid, false, "clinician", "analyst")
 	en := e.enrol(t, an)
@@ -74,11 +74,11 @@ func TestFeaturesNeedRoleAndMFA(t *testing.T) {
 		t.Error("an analyst with two-step: analysis false")
 	}
 	// The global lowered: off at once, for everyone.
-	setAnalysisSwitch(t, nil, "off", "DEMO-SYNTHETIC")
+	setAnalysisSwitch(t, nil, "off", "SO-2026-0001")
 	if f := features(t, e.fullSession(t, an, en)); f["analysis"] != false {
 		t.Error("global off: analysis true")
 	}
-	setAnalysisSwitch(t, nil, "on", "DEMO-SYNTHETIC")
+	setAnalysisSwitch(t, nil, "on", "SO-2026-0001")
 	// Another hospital's switch gives nothing.
 	other := seedHospital(t, hospitalOpts{})
 	o := seedUser(t, other, false, "hospital_admin")

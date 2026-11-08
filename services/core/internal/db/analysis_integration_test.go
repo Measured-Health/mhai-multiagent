@@ -107,12 +107,13 @@ func setSwitch(t *testing.T, pool *pgxpool.Pool, hospital *uuid.UUID, position, 
 	}
 }
 
-// demoHospital seeds a hospital for the synthetic demo.
+// demoHospital seeds a hospital marked as the synthetic demo (is_demo,
+// set only when a hospital is created).
 func demoHospital(t *testing.T, pool *pgxpool.Pool) uuid.UUID {
 	t.Helper()
 	h := uuid.New()
-	if _, err := pool.Exec(context.Background(), `INSERT INTO hospitals (id, name, short_code, status, time_zone)
-		VALUES ($1, 'Synthetic Demo Hospital', $2, 'active', 'Africa/Lagos')`, h, uniqueCode("Y")); err != nil {
+	if _, err := pool.Exec(context.Background(), `INSERT INTO hospitals (id, name, short_code, status, time_zone, is_demo)
+		VALUES ($1, 'Synthetic Demo Hospital', $2, 'active', 'Africa/Lagos', true)`, h, uniqueCode("Y")); err != nil {
 		t.Fatal(err)
 	}
 	return h
@@ -735,6 +736,9 @@ func TestSwitchWriters(t *testing.T) {
 	if err := provUpdate(`UPDATE analysis_switch SET signoff_clinical = NULL WHERE hospital_id = $1`, d); pgCode(err) != permissionDenied {
 		t.Errorf("provision clearing a reference: want 42501, got %v", err)
 	}
+	if err := raise(&h); pgCode(err) != invalidParameter {
+		t.Errorf("provision raising a real hospital: want 22023, got %v", err)
+	}
 	if err := write(pool, "mhai_platform", &d, "on", "DEMO-SYNTHETIC"); pgCode(err) != rlsViolation {
 		t.Errorf("platform writing demo references: want an RLS refusal, got %v", err)
 	}
@@ -882,6 +886,49 @@ func TestStickySignOff(t *testing.T) {
 	setSwitch(t, pool, nil, "on", "SO-2026-0001")
 }
 
+// Review item 2: is_demo is set when a hospital is created and never
+// changes, for any role.
+func TestDemoFlagImmutable(t *testing.T) {
+	pg, pool := shared(t)
+	ctx := context.Background()
+	prov, _, err := testutil.ProvisionLogin(ctx, pg, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prov.Close()
+	real, _ := seedHospital(t, pool, uniqueCode("R"))
+	demo := demoHospital(t, pool)
+	// Each update flips the flag: a real hospital to demo, a demo one back.
+	for q, h := range map[string]uuid.UUID{`UPDATE hospitals SET is_demo = true WHERE id = $1`: real,
+		`UPDATE hospitals SET is_demo = false WHERE id = $1`: demo} {
+		if _, err := pool.Exec(ctx, q, h); pgCode(err) != checkViolation {
+			t.Errorf("owner %s: want 23514, got %v", q, err)
+		}
+		for _, role := range []string{"mhai_provision", "mhai_platform"} {
+			p := pool
+			if role == "mhai_provision" {
+				p = prov
+			}
+			if err := asAnalysisRole(ctx, p, role, nil, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, q, h)
+				return err
+			}); pgCode(err) != permissionDenied {
+				t.Errorf("%s %s: want 42501, got %v", role, q, err)
+			}
+		}
+	}
+	if n := countRows(t, pool, `SELECT count(*) FROM hospitals WHERE (id = $1 AND is_demo) OR (id = $2 AND NOT is_demo)`, real, demo); n != 0 {
+		t.Errorf("%d hospitals changed their demo flag", n)
+	}
+	// The provisioning login may create a demo hospital.
+	if err := asAnalysisRole(ctx, prov, "mhai_provision", nil, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO hospitals (id, name, short_code, time_zone, is_demo) VALUES (gen_random_uuid(), 'Synthetic Demo', $1, 'UTC', true)`, uniqueCode("Z"))
+		return err
+	}); err != nil {
+		t.Errorf("provision creating a demo hospital: %v", err)
+	}
+}
+
 // N1: a temporary table named like an analysis table, made by the caller,
 // is ignored by every definer function.
 func TestTempTableCannotShadow(t *testing.T) {
@@ -1016,6 +1063,22 @@ func TestSeedOnlyForDemoHospital(t *testing.T) {
 	real := onHospital(t, pool, "Africa/Lagos")
 	if _, err := seed(real); pgCode(err) != invalidParameter {
 		t.Errorf("seed of a signed-off hospital: want 22023, got %v", err)
+	}
+	// Item 2: a real hospital can't carry demo references at all, so it
+	// can never be seeded; a demo hospital can.
+	plain, _ := seedHospital(t, pool, uniqueCode("S"))
+	if _, err := pool.Exec(ctx, `INSERT INTO analysis_switch (hospital_id, position, signoff_clinical, signoff_privacy, signoff_legal)
+		VALUES ($1, 'on', 'DEMO-SYNTHETIC', 'DEMO-SYNTHETIC', 'DEMO-SYNTHETIC')`, plain); pgCode(err) != checkViolation {
+		t.Errorf("demo references on a real hospital: want 23514, got %v", err)
+	}
+	if err := asAnalysisRole(ctx, prov, "mhai_provision", nil, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT mhai_analysis_demo_raise($1)`, plain)
+		return err
+	}); pgCode(err) != invalidParameter {
+		t.Errorf("demo raise of a real hospital: want 22023, got %v", err)
+	}
+	if _, err := seed(plain); pgCode(err) != invalidParameter {
+		t.Errorf("seed of a real hospital: want 22023, got %v", err)
 	}
 	demo := demoHospital(t, pool)
 	setSwitch(t, pool, &demo, "on", "DEMO-SYNTHETIC")

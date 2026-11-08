@@ -41,8 +41,8 @@ func analysisEnv(t *testing.T) (super *pgxpool.Pool, provURL string, app *pgxpoo
 func analysisHospital(t *testing.T, super *pgxpool.Pool, code string) uuid.UUID {
 	t.Helper()
 	var id uuid.UUID
-	if err := super.QueryRow(context.Background(), `INSERT INTO hospitals (name, short_code, status, time_zone)
-		VALUES ('Synthetic Demo Hospital', $1, 'active', 'Africa/Lagos') RETURNING id`, code).Scan(&id); err != nil {
+	if err := super.QueryRow(context.Background(), `INSERT INTO hospitals (name, short_code, status, time_zone, is_demo)
+		VALUES ('Synthetic Demo Hospital', $1, 'active', 'Africa/Lagos', true) RETURNING id`, code).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -80,6 +80,40 @@ func TestSeedDemoRefusesRealSwitch(t *testing.T) {
 		+ (SELECT count(*) FROM analysis_switch WHERE hospital_id IS NULL AND position = 'on')
 		+ (SELECT count(*) FROM audit_log WHERE action LIKE 'analysis.%')`, h); n != 0 {
 		t.Fatalf("%d rows written", n)
+	}
+}
+
+// Review item 2: seed-demo refuses a hospital not created as the demo;
+// nothing is written, not even the global switch.
+func TestSeedDemoRefusesRealHospital(t *testing.T) {
+	super, provURL, _ := analysisEnv(t)
+	var real uuid.UUID
+	if err := super.QueryRow(context.Background(), `INSERT INTO hospitals (name, short_code, status, time_zone)
+		VALUES ('Synthetic Hospital', 'REAL1', 'active', 'Africa/Lagos') RETURNING id`).Scan(&real); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := analysisCmd(context.Background(), []string{"seed-demo", "real1", "--months", "2"}, provURL, &out,
+		pinned(time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC))); err == nil {
+		t.Fatal("seeded a hospital that isn't the demo")
+	}
+	if n := scalar(t, super, `SELECT (SELECT count(*) FROM analysis_switch)
+		+ (SELECT count(*) FROM analysis_subjects WHERE hospital_id = $1)
+		+ (SELECT count(*) FROM audit_log WHERE action LIKE 'analysis.%')`, real); n != 0 {
+		t.Fatalf("%d rows written", n)
+	}
+}
+
+// core hospitals create --demo marks the hospital as the demo.
+func TestHospitalsCreateDemo(t *testing.T) {
+	super, provURL, _ := analysisEnv(t)
+	var out bytes.Buffer
+	if err := seed(context.Background(), []string{"hospitals", "create", "--name", "Synthetic Demo", "--short-code", "demo9",
+		"--time-zone", "Africa/Lagos", "--demo"}, provURL, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	if n := scalar(t, super, `SELECT count(*) FROM hospitals WHERE short_code = 'DEMO9' AND is_demo`); n != 1 {
+		t.Fatalf("demo hospitals %d", n)
 	}
 }
 

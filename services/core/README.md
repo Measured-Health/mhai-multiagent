@@ -30,7 +30,7 @@ core hospitals create --name N --short-code CODE --time-zone TZ \
     [--require-mfa-for-clinicians] [--allow-trust-device]
 core hospitals activate ID|CODE    # setup_incomplete -> active, audited (see "Running it in compose")
 core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
-core analysis seed-demo ID|CODE [--seed N] [--months 1-24]   # the synthetic demo hospital only
+core analysis seed-demo ID|CODE [--seed N] [--months 1-24]   # a hospital created with --demo only
 core analysis switch off ID|CODE | --global                  # lower an analysis switch, audited
 ```
 
@@ -113,8 +113,13 @@ Analysis (ADR 0015; plan `docs/plans/2026-11-07-analysis-backend.md`) is
 off until a switch row says otherwise: with no row, a hospital's position is
 `off`, and ingest refuses it in the database itself. Before the people's
 sign-offs (H1 to H3), the only way on is `core analysis seed-demo`, which
-uses the references `DEMO-SYNTHETIC` and writes a seeded synthetic cohort;
-a hospital under a demo switch never ingests a real consultation.
+uses the references `DEMO-SYNTHETIC` and writes a seeded synthetic cohort,
+for a hospital created with `core hospitals create --demo` only
+(`hospitals.is_demo`, which no role can change; the database refuses demo
+references on any other hospital). A switch row that has ever carried a
+real sign-off (`ever_signed_off`) never takes demo references again, and
+provisioning can only lower a switch. A hospital under a demo switch never
+ingests a real consultation.
 
 The nightly run is a core loop (one copy at a time, an advisory lock) that
 runs as `mhai_analysis_job`: a NOLOGIN role the core login reaches only by
