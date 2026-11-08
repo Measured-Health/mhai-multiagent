@@ -119,6 +119,10 @@ type Guard struct {
 	// (httpx.Idempotent: scoped by the principal). IdemAnon is the one for
 	// public writes such as sign-in (httpx.IdempotentAnon).
 	Idem, IdemAnon func(http.Handler) http.Handler
+	// IdemKeyed is the one for the routes that carry an outside credential
+	// (Rule.Credentials; httpx.IdempotentKeyed). Nil: those routes answer
+	// 503 not_ready.
+	IdemKeyed func(http.Handler) http.Handler
 
 	mu    sync.Mutex
 	cache map[string]cached
@@ -497,7 +501,14 @@ func (g *Guard) wrap(rule Rule, h http.Handler) http.Handler {
 	if rule.Public {
 		return g.IdemAnon(h)
 	}
-	h = g.Idem(h)
+	switch {
+	case rule.Credentials && g.IdemKeyed == nil:
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { httpx.Error(w, r, "not_ready") })
+	case rule.Credentials:
+		h = g.IdemKeyed(h)
+	default:
+		h = g.Idem(h)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, code := g.authenticate(r, rule.MFAEnrol)
 		if code != "" {

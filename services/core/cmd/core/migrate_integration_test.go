@@ -19,8 +19,8 @@ func TestMigrateUpCommand(t *testing.T) {
 	if err := migrate(context.Background(), []string{"up"}, pg.URL, &out); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-	if got := strings.Count(out.String(), "applied"); got != 19 {
-		t.Fatalf("want 19 applied migrations, got output:\n%s", out.String())
+	if got := strings.Count(out.String(), "applied"); got != 20 {
+		t.Fatalf("want 20 applied migrations, got output:\n%s", out.String())
 	}
 }
 
@@ -71,9 +71,9 @@ func TestMigrateUpProvisionsIntelligenceLogin(t *testing.T) {
 	}
 }
 
-// Until the EMR connections migration makes mhai_emr_app, migrate up skips
-// the emr login with a line saying so, and creates nothing.
-func TestMigrateUpSkipsEMRLoginUntilItsRoleExists(t *testing.T) {
+// core migrate up provisions the emr service's login (00020): a member of
+// mhai_emr_app only, which holds mhai_emr without inheriting it.
+func TestMigrateUpProvisionsEMRLogin(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
 	env := map[string]string{"EMR_DB_PASSWORD": "test-only-emr-db-password"}
@@ -81,7 +81,7 @@ func TestMigrateUpSkipsEMRLoginUntilItsRoleExists(t *testing.T) {
 	if err := migrateWithLogins(ctx, []string{"up"}, pg.URL, func(k string) string { return env[k] }, &out); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-	if !strings.Contains(out.String(), "login emr_app skipped: role mhai_emr_app doesn't exist yet") {
+	if !strings.Contains(out.String(), "login emr_app ready (member of mhai_emr_app only)") {
 		t.Fatalf("output:\n%s", out.String())
 	}
 	if strings.Contains(out.String(), env["EMR_DB_PASSWORD"]) {
@@ -92,8 +92,12 @@ func TestMigrateUpSkipsEMRLoginUntilItsRoleExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname = 'emr_app'`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("emr_app made: %d %v", n, err)
+	var member, usesEMR, setEMR bool
+	if err := pool.QueryRow(ctx, `SELECT pg_has_role('emr_app', 'mhai_emr_app', 'MEMBER'),
+		pg_has_role('emr_app', 'mhai_emr', 'USAGE'), pg_has_role('emr_app', 'mhai_emr', 'SET')`).Scan(&member, &usesEMR, &setEMR); err != nil {
+		t.Fatal(err)
+	}
+	if !member || usesEMR || !setEMR {
+		t.Fatalf("emr_app: member of mhai_emr_app %v, uses mhai_emr %v, may SET mhai_emr %v", member, usesEMR, setEMR)
 	}
 }

@@ -2,8 +2,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/mail"
 	"net/netip"
@@ -16,6 +18,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrtypes"
 )
 
 const minSecretLen = 32
@@ -83,6 +87,60 @@ type Config struct {
 	// (CORE_EMR_SEAL_PUBLIC_KEY_PATH; EMR design §6.2), required when
 	// EMREnabled. A public key: core never holds the private one.
 	EMRSealPublicKeyPath string
+	// EMRConnectorTypes are the connector types offered
+	// (CORE_EMR_CONNECTOR_TYPES: a comma list; empty by default, so none
+	// is). Each must be built (gokit/emrtypes), the stub only in
+	// development.
+	EMRConnectorTypes []string
+	// IdempotencyHMACKeyPath is the key the idempotency store hashes the
+	// credential routes' requests under (CORE_IDEMPOTENCY_HMAC_KEY_PATH;
+	// EMR design §6.2), required when EMREnabled.
+	IdempotencyHMACKeyPath string
+}
+
+// errConnectorTypes names the variable only, never its value.
+var errConnectorTypes = errors.New("CORE_EMR_CONNECTOR_TYPES must list built connector types, each once, comma separated (the development connector in development only)")
+
+// ParseConnectorTypes reads CORE_EMR_CONNECTOR_TYPES: blank is none; each
+// name must be a built type for this environment and appear once.
+func ParseConnectorTypes(raw string, development bool) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	built := emrtypes.Built(development)
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if !slices.Contains(built, p) || slices.Contains(out, p) {
+			return nil, errConnectorTypes
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// MinIdempotencyHMACKey is the shortest idempotency HMAC key accepted.
+const MinIdempotencyHMACKey = 32
+
+// LoadIdempotencyHMACKey reads the idempotency HMAC key file: at least 32
+// bytes (surrounding space trimmed), not a placeholder. Errors name the
+// variable, never the path or the key.
+func LoadIdempotencyHMACKey(path string) ([]byte, error) {
+	errKey := errors.New("CORE_IDEMPOTENCY_HMAC_KEY_PATH: the key file is missing, under 32 bytes or a placeholder")
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, errKey
+	}
+	defer func() { _ = f.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil || len(raw) > 4096 {
+		return nil, errKey
+	}
+	k := bytes.TrimSpace(raw)
+	if len(k) < MinIdempotencyHMACKey || checkPlaceholder("CORE_IDEMPOTENCY_HMAC_KEY_PATH", string(k)) != nil {
+		return nil, errKey
+	}
+	return bytes.Clone(k), nil
 }
 
 // CloudProviderNames are the cloud model providers core knows (the closed
@@ -187,6 +245,10 @@ func Load() (Config, error) {
 	if c.CloudProviders, err = ParseCloudProviders(os.Getenv("CORE_CLOUD_PROVIDERS")); err != nil {
 		errs = append(errs, err)
 	}
+	if c.EMRConnectorTypes, err = ParseConnectorTypes(os.Getenv("CORE_EMR_CONNECTOR_TYPES"), c.Development()); err != nil {
+		errs = append(errs, err)
+	}
+	c.IdempotencyHMACKeyPath = strings.TrimSpace(os.Getenv("CORE_IDEMPOTENCY_HMAC_KEY_PATH"))
 
 	if c.NATSAPIConcurrency, err = intEnv("CORE_NATS_API_CONCURRENCY", 256, func(n int) bool { return n >= 1 && n <= 100000 }); err != nil {
 		errs = append(errs, errors.New("CORE_NATS_API_CONCURRENCY must be 1 to 100000"))
@@ -359,6 +421,9 @@ func (c Config) ValidateServe() error {
 	}
 	if c.EMREnabled && c.EMRSealPublicKeyPath == "" {
 		errs = append(errs, errors.New("CORE_EMR_SEAL_PUBLIC_KEY_PATH is required when CORE_EMR_ENABLED is true"))
+	}
+	if c.EMREnabled && c.IdempotencyHMACKeyPath == "" {
+		errs = append(errs, errors.New("CORE_IDEMPOTENCY_HMAC_KEY_PATH is required when CORE_EMR_ENABLED is true"))
 	}
 	// The audit integrity page names a security contact (Plan 4 §5.2):
 	// required outside development, and always well formed when set.

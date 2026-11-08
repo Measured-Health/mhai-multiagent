@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -110,11 +111,12 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(st) != 19 {
-		t.Fatalf("want 19 migrations, got %d", len(st))
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+	if len(st) != len(want) {
+		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
 	for i, s := range st {
-		if s.Source.Version != int64(i+1) || s.State != goose.StateApplied {
+		if s.Source.Version != want[i] || s.State != goose.StateApplied {
 			t.Fatalf("migration %d: version %d state %s", i, s.Source.Version, s.State)
 		}
 	}
@@ -255,6 +257,20 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO audit_verify_runs (state, finished_at, error_code) VALUES ('error', now(), 'timed_out')`); err != nil {
 		t.Fatal(err)
 	}
+	// An EMR connection with credential metadata, a sync run and an error
+	// (00020), so the EMR tables have rows to hide.
+	conn := seedConn(t, pool, a)
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.credentials (connection_id, hospital_id, field, set_at, secret_version, origin)
+		VALUES ($1, $2, 'private_key', now(), 'v1', '{https://fhir.example.org:443}')`, conn, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.sync_runs (hospital_id, connection_id, ok, records, outcome) VALUES ($1, $2, true, 1, 'ok')`, a, conn); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.connection_errors (hospital_id, connection_id, code) VALUES ($1, $2, 'unreachable')`, a, conn); err != nil {
+		t.Fatal(err)
+	}
+	emrTables := []string{"emr_connections", "emr.credentials", "emr.sync_runs", "emr.connection_errors"}
 
 	// One connection, so the second transaction reuses the session that
 	// had mhai.hospital_id set by the first.
@@ -269,8 +285,8 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if err := db.WithHospital(ctx, one, a, func(pgx.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs", "hospital_model_policy", "cloud_usage", "cloud_reservations",
-		"analytics_snapshots", "analytics_period_counts", "analytics_frozen_periods", "analytics_epoch"} {
+	for _, table := range append([]string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs", "hospital_model_policy", "cloud_usage", "cloud_reservations",
+		"analytics_snapshots", "analytics_period_counts", "analytics_frozen_periods", "analytics_epoch"}, emrTables...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -294,9 +310,10 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			requireDenied(t, err, "gateway reading feedback_buffer")
 			continue
 		}
-		if strings.HasPrefix(table, "analytics_") {
-			// 00019: platform tables, no hospital scope; the gateway holds no
-			// grant on any of them.
+		if strings.HasPrefix(table, "analytics_") || slices.Contains(emrTables, table) {
+			// 00019: platform tables, no hospital scope; 00020: core's
+			// clinical role holds nothing on the EMR tables. The gateway
+			// holds no grant on any of them.
 			requireDenied(t, err, "gateway reading "+table)
 			continue
 		}
@@ -312,6 +329,24 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		}
 		if n != 0 {
 			t.Fatalf("%s without hospital: %d rows, want 0", table, n)
+		}
+	}
+
+	// The emr service's role, with no hospital set, sees no EMR row
+	// (00020); emr.connection_errors it may only append to.
+	for _, table := range emrTables[:3] {
+		tx, err := one.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `SET LOCAL ROLE mhai_emr`); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		err = tx.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE hospital_id IS NOT NULL`).Scan(&n)
+		_ = tx.Rollback(ctx)
+		if err != nil || n != 0 {
+			t.Fatalf("emr reading %s without hospital: %d rows, %v", table, n, err)
 		}
 	}
 

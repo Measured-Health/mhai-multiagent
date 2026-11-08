@@ -14,6 +14,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrtypes"
 )
 
 // The closed payload schemas of every action core writes (Plan 4 spec §9).
@@ -380,6 +381,31 @@ func init() {
 			return hasRef == (p["provider"] != "none")
 		}})
 
+	// EMR connections (EMR design §12.6, plan Task 11): ids, the type, the
+	// keys that changed (never a value), closed outcome codes and bools.
+	// The platform writes them with no hospital column (00020's
+	// platform_append); the hospital is the payload's id.
+	emrConn := fields("hospital_id", id, "connection_id", id)
+	withConn := func(kv ...any) map[string]Check {
+		m := fields(kv...)
+		for k, c := range emrConn {
+			m[k] = c
+		}
+		return m
+	}
+	connReq := []string{"hospital_id", "connection_id"}
+	Register("emr.connection_added", Schema{Fields: withConn("type", OneOf(emrTypeIDs()...)),
+		Required: append(slices.Clone(connReq), "type")})
+	Register("emr.connection_changed", Schema{Fields: withConn("fields_changed", List(40, OneOf(EMRConnectionKeys()...)),
+		"credentials_replaced", Check(Bool), "credentials_wiped", Check(Bool)),
+		Required: append(slices.Clone(connReq), "fields_changed", "credentials_replaced", "credentials_wiped")})
+	Register("emr.connection_switched_on", Schema{Fields: withConn(), Required: connReq})
+	Register("emr.connection_switched_off", Schema{Fields: withConn(), Required: connReq})
+	Register("emr.connection_tested", Schema{Fields: withConn("outcome", OneOf(emrtypes.Codes...)),
+		Required: append(slices.Clone(connReq), "outcome")})
+	Register("emr.source_resumed", Schema{Fields: withConn("reason", OneOf("platform_resume")),
+		Required: append(slices.Clone(connReq), "reason")})
+
 	// Plan 3: the request-token boundary (internal/account, grant, intel).
 	Register("intelligence.key_rotated", Schema{Fields: fields(
 		"kid", token, "rotation", OneOf("planned", "emergency"), "change", OneOf("added", "removed")),
@@ -523,4 +549,28 @@ func init() {
 	Register("audit.undisplayable_reported", Schema{Fields: fields(
 		"count", Int(1, 50), "first_id", Pattern(eventIDPattern), "last_id", Pattern(eventIDPattern)),
 		Required: []string{"count", "first_id", "last_id"}})
+}
+
+// emrTypeIDs are the connector type ids (gokit/emrtypes).
+func emrTypeIDs() []string {
+	var out []string
+	for _, t := range emrtypes.Types {
+		out = append(out, t.ID)
+	}
+	return out
+}
+
+// EMRConnectionKeys are the keys an emr.connection_changed payload may name
+// in fields_changed: the connection's own settings and every field a
+// connector type declares (gokit/emrtypes). Keys, never values.
+func EMRConnectionKeys() []string {
+	out := []string{"source_label", "base_url", "poll_seconds", "private_network", "private_cidrs"}
+	for _, t := range emrtypes.Types {
+		for _, f := range t.Fields {
+			if !slices.Contains(out, f.Key) {
+				out = append(out, f.Key)
+			}
+		}
+	}
+	return out
 }

@@ -32,8 +32,30 @@ NATS.
 - `emr keys seal-init --out <dir>`: the X25519 sealing key pair core seals
   credentials to (design §6.2).
 
-Connections, the secret store, egress, connectors, the normaliser and the
-rules come in PRs 3 to 9.
+## What is built (PR 3: connections)
+
+- `emr.v1.ctl.put_credentials` (platform admin; the token must carry
+  core's `stp` claim, a checked step-up code): opens each sealed box
+  (`services/gokit/seal`) against the connection's current credential
+  origin, read under the token's hospital, and stores every field or none;
+  the reply is each field and its set time.
+- `emr.v1.ctl.wipe_credentials` (platform admin): every secret of the
+  connection, then its metadata rows; idempotent.
+- `emr.v1.ctl.test` (platform admin): `sign_in_refused` without calling
+  the connector unless every required secret is set, and usable, for the
+  origin the saved addresses give now (design §6.3, A28); otherwise the
+  connector's read-only probe, 20 s.
+- The file secret store (`EMR_SECRETS_DIR`): development and staging only,
+  0400 files in 0700 directories owned by the service's user; the previous
+  version is kept 24 hours. Production needs the managed store (plan Task
+  12, waiting on H3). The database holds metadata only (`emr.credentials`).
+- The connector interface and the development `stub` (registered only with
+  `APP_ENV=development`); `Creds` never print, and `TestNoConnectorLogsCreds`
+  fails any connector code that hands them to a logger.
+- The service refuses to start without a sealing key.
+
+Egress, the real connectors, the normaliser and the rules come in PRs 4
+to 9.
 
 ## Settings
 
@@ -42,10 +64,11 @@ rules come in PRs 3 to 9.
 | `APP_ENV` | `development`, `staging` or `production` (unset: production) |
 | `EMR_NATS_URL` | no credentials in it; `tls://` outside development |
 | `EMR_NATS_NKEY_FILE` / `EMR_NATS_PASSWORD` | one of them; the password in development only |
-| `EMR_DATABASE_URL` | the `emr_app` login (migration 00021, PR 3); `sslmode=verify-full` outside development |
+| `EMR_DATABASE_URL` | the `emr_app` login (migration 00020, PR 3); `sslmode=verify-full` outside development |
 | `EMR_TRUSTED_KEYS_PATH` | the request-token trusted-keys file core writes (public keys) |
 | `EMR_SEAL_KEY_PATH` | the directory of the sealing private keys (`seal-<kid>.key`) |
-| `EMR_SECRETS_DIR`, `EMR_PROXY_URL`, `EMR_PROXY_KEY_PATH`, `EMR_RULE_SET_ACTIVE` | later PRs; empty by default |
+| `EMR_SECRETS_DIR` | the file secret store (development and staging only); empty: no store, the credential ops answer nothing |
+| `EMR_PROXY_URL`, `EMR_PROXY_KEY_PATH`, `EMR_RULE_SET_ACTIVE` | later PRs; empty by default |
 
 Errors name the variable, never its value.
 

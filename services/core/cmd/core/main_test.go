@@ -144,21 +144,12 @@ func TestTelemetryWarnings(t *testing.T) {
 }
 
 // The emr service's login (EMR_DB_PASSWORD; user emr_app by default) is a
-// member of mhai_emr_app only, and optional: its role comes with the EMR
-// connections migration.
+// member of mhai_emr_app only (00020).
 func TestLoginRequestsEMR(t *testing.T) {
 	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 	reqs, err := loginRequests(env(map[string]string{"EMR_DB_PASSWORD": "test-only-emr-db-password"}))
-	if err != nil || len(reqs) != 1 || reqs[0].user != "emr_app" || reqs[0].role != "mhai_emr_app" || !reqs[0].roleMayBeAbsent {
+	if err != nil || len(reqs) != 1 || reqs[0].user != "emr_app" || reqs[0].role != "mhai_emr_app" {
 		t.Fatalf("emr: %+v %v", reqs, err)
-	}
-	for _, r := range []map[string]string{{"CORE_DB_USER": "core_app", "CORE_DB_PASSWORD": "test-only-core-db-password"}} {
-		reqs, _ := loginRequests(env(r))
-		for _, l := range reqs {
-			if l.roleMayBeAbsent {
-				t.Errorf("%s may skip its role", l.user)
-			}
-		}
 	}
 	if _, err := loginRequests(env(map[string]string{"EMR_DB_PASSWORD": "changemeReplaceWithLettersAndDigits"})); err == nil ||
 		!strings.Contains(err.Error(), "EMR_DB_PASSWORD") {

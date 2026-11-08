@@ -13,18 +13,47 @@ type fakeDB struct{ err error }
 
 func (f fakeDB) Ping(context.Context) error { return f.err }
 
-// Health reports the database honestly and claims nothing it doesn't have.
+func (f fakeDB) Ready(context.Context) error { return f.err }
+
+// Health reports the database and the secret store honestly and claims
+// nothing it doesn't have.
 func TestHealthHandler(t *testing.T) {
 	for _, tc := range []struct {
 		db    pinger
 		ready bool
 	}{{fakeDB{}, true}, {fakeDB{errors.New("down")}, false}, {nil, false}} {
-		rep, err := healthHandler(tc.db)(context.Background(), reqtoken.Claims{}, &emrpb.HealthRequest{})
+		rep, err := healthHandler(tc.db, nil)(context.Background(), reqtoken.Claims{}, &emrpb.HealthRequest{})
 		h, ok := rep.(*emrpb.HealthReply)
 		if err != nil || !ok || h.GetDatabaseReady() != tc.ready || h.GetSecretStoreReady() || h.GetRuleSetVersion() != "" ||
 			h.GetProxyAllowListAgeS() != -1 {
 			t.Errorf("%v: %v %v", tc.db, rep, err)
 		}
+	}
+	for _, tc := range []struct {
+		store readier
+		ready bool
+	}{{fakeDB{}, true}, {fakeDB{errors.New("gone")}, false}} {
+		rep, _ := healthHandler(fakeDB{}, tc.store)(context.Background(), reqtoken.Claims{}, &emrpb.HealthRequest{})
+		if rep.(*emrpb.HealthReply).GetSecretStoreReady() != tc.ready {
+			t.Errorf("store %v: %v", tc.store, rep)
+		}
+	}
+}
+
+// The service refuses to start without its sealing key (design §17.4), and
+// never uses the file store in production.
+func TestServeRefusesWithoutSealingKey(t *testing.T) {
+	env := map[string]string{"APP_ENV": "development", "EMR_NATS_URL": "nats://127.0.0.1:1", "EMR_NATS_PASSWORD": "synthetic-dev-pw",
+		"EMR_DATABASE_URL": "postgres://u@127.0.0.1:1/x", "EMR_TRUSTED_KEYS_PATH": t.TempDir() + "/none.json",
+		"EMR_SEAL_KEY_PATH": t.TempDir()}
+	if _, err := loadSealKeys(env["EMR_SEAL_KEY_PATH"]); err == nil {
+		t.Fatal("an empty sealing key directory accepted")
+	}
+	if _, err := openStore("", "development"); err != nil {
+		t.Fatalf("no store configured: %v", err)
+	}
+	if s, err := openStore(t.TempDir(), "production"); err == nil || s != nil {
+		t.Fatal("the file store opened in production")
 	}
 }
 

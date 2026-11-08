@@ -121,7 +121,9 @@ services:
       SECURITY_CONTACT_NAME: ${SECURITY_CONTACT_NAME:-}
       SECURITY_CONTACT_EMAIL: ${SECURITY_CONTACT_EMAIL:-}
       # The EMR integration (ADR 0014), off by default: no EMR stream, no
-      # emr calls. On, it needs the emr service's sealing public key.
+      # emr calls, the connection writes answer 503. On, it needs the emr
+      # service's sealing public key (CORE_EMR_SEAL_PUBLIC_KEY_PATH) and the
+      # idempotency HMAC key (CORE_IDEMPOTENCY_HMAC_KEY_PATH).
       CORE_EMR_ENABLED: ${CORE_EMR_ENABLED:-false}
     ports: ["127.0.0.1:${CORE_PORT:-8080}:8080"]
     volumes:

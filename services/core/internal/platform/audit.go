@@ -34,6 +34,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 )
@@ -72,6 +73,19 @@ type Deps struct {
 	// (CORE_CLOUD_PROVIDERS): a policy may name only one of these (409
 	// otherwise). Empty: none.
 	CloudProviders []string
+	// EMREnabled is CORE_EMR_ENABLED: off, the connection writes answer
+	// 503 not_ready and the reads answer empty.
+	EMREnabled bool
+	// EMRTypes are the offered connector types (CORE_EMR_CONNECTOR_TYPES).
+	EMRTypes []string
+	// EMR calls the emr service's control ops; EMRSealer seals credentials
+	// to its public key. Either nil: the writes answer 503 not_ready.
+	EMR       *emrctl.Client
+	EMRSealer *emrctl.Sealer
+	// EMRDevelopment allows loopback IP-literal addresses (test servers), as the
+	// emr service does in development; it must match the emr service's
+	// APP_ENV so both derive the same credential origin.
+	EMRDevelopment bool
 }
 
 func (d Deps) now() time.Time {
@@ -90,8 +104,8 @@ func (d Deps) log() *slog.Logger {
 
 // Register adds the audit log reads, the chain check and the auditors'
 // writes (verify.go), system health (health.go), the failed jobs (jobs.go),
-// the guardrail statistics (guardrails.go) and the hospitals' cloud model
-// policies (modelpolicy.go).
+// the guardrail statistics (guardrails.go), the hospitals' cloud model
+// policies (modelpolicy.go) and the EMR connections (emrconnections.go).
 func Register(m *authz.Mux, d Deps) {
 	read := authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin, authz.RoleAuditor}}
 	authz.Route(m, http.MethodGet, "/platform/audit", read, http.HandlerFunc(d.list))
@@ -103,6 +117,7 @@ func Register(m *authz.Mux, d Deps) {
 	registerJobs(m, d)
 	registerGuardrails(m, d)
 	registerModelPolicy(m, d)
+	registerEMRConnections(m, d)
 }
 
 // caller is the verified platform principal, or a 500 (the guard admits

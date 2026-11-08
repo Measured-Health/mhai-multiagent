@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/seal"
 )
 
 func readKey(t *testing.T, path string) []byte {
@@ -62,6 +64,16 @@ func TestSealInitModes(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), kid) {
 		t.Fatalf("output doesn't name the kid: %s", out.String())
+	}
+
+	// What seal-init writes is what core seals to and the service opens
+	// with (gokit/seal), under the same kid.
+	sealKeys, err := loadSealKeys(dir)
+	if err != nil || len(sealKeys) != 1 || sealKeys[kid].Public != [32]byte(pub) {
+		t.Fatalf("loadSealKeys: %v", err)
+	}
+	if _, pkid, err := seal.LoadPublic(pubs[0]); err != nil || pkid != kid {
+		t.Fatalf("LoadPublic: %q %v", pkid, err)
 	}
 
 	// Again: the pair is kept, byte for byte.

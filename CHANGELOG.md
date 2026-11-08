@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- EMR integration, PR 3 (connections; off by default). Migration 00020:
+  the `emr` schema and roles, `emr_connections` (configuration only, no secret column or key),
+  credential metadata, sync runs and errors, declared private ranges that
+  can't overlap across hospitals. `services/gokit`: `emrurl` (address and
+  credential-origin checks), `seal` (credentials sealed to the emr service,
+  bound to connection, field and origin, 60 s), `emrtypes` (the connector
+  types and fields), and the request token's `stp` claim, which the emr
+  responder now requires on step-up ops. The emr service stores and wipes
+  credentials and tests a connection with the development stub. Core serves
+  `/platform/emr/connector-types`, `/platform/emr/connections` and
+  `/platform/hospitals/{id}/emr/connections` (OpenAPI 1.12.0, additive; new
+  codes `not_tested`, `hospital_removed`, `no_type`), sealing credentials as
+  they arrive; a change of address origin wipes them and switches the
+  connection off. With `CORE_EMR_ENABLED` false the writes answer 503
+  `not_ready`; `CORE_EMR_CONNECTOR_TYPES` offers nothing unless named; the
+  credential routes need `CORE_IDEMPOTENCY_HMAC_KEY_PATH`.
 - Platform analytics on calendar periods, part 7c-1 (OpenAPI 1.11.0,
   additive; Plan 7c, rulings R41a to R41a-4). Migration 00019 adds the
   analytics scheduler's role (`mhai_analytics_job`) and reader, frozen

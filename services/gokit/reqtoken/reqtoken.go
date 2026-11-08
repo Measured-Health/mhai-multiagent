@@ -126,6 +126,10 @@ type Claims struct {
 	PatientIDs  []string // pids, omitted when empty
 	ReplyPrefix string   // rpl: required on req, absent on job
 	Via         Via      // via
+	// StepUp is stp: core checked a fresh step-up code for this request
+	// (EMR PR 2 review). Optional, true when present, and only on a subject
+	// whose rule allows it (emr.v1.ctl.<op>), so no worker's token has it.
+	StepUp bool
 
 	KeyID               string // the header kid
 	IssuedAt, ExpiresAt time.Time
@@ -169,6 +173,7 @@ type payload struct {
 	Pids  []string `json:"pids,omitempty"`
 	Rpl   string   `json:"rpl,omitempty"`
 	Via   string   `json:"via"`
+	Stp   bool     `json:"stp,omitempty"`
 }
 
 var (
@@ -176,7 +181,7 @@ var (
 	// payloadKeys: true for a required claim, false for an optional one.
 	payloadKeys = map[string]bool{"iss": true, "aud": true, "sub": true, "hid": true, "roles": true, "rid": true,
 		"jti": true, "iat": true, "exp": true, "knd": true, "nsub": true, "bh": true, "via": true,
-		"pids": false, "rpl": false}
+		"pids": false, "rpl": false, "stp": false}
 )
 
 // b64 is unpadded base64url, strict: non-canonical trailing bits are refused.
@@ -375,7 +380,7 @@ func (s Signer) mint(c Claims, bh string, ttl time.Duration) (string, Claims, er
 	}
 	p, err := json.Marshal(payload{Iss: Issuer, Aud: c.Aud, Sub: c.Sub, Hid: c.Hid, Roles: roles, Rid: c.Rid,
 		Jti: out.Jti, Iat: iat.Unix(), Exp: exp.Unix(), Knd: string(c.Kind), Nsub: c.Subject, Bh: out.BodyHash,
-		Pids: pids, Rpl: c.ReplyPrefix, Via: string(c.Via)})
+		Pids: pids, Rpl: c.ReplyPrefix, Via: string(c.Via), Stp: c.StepUp})
 	if err != nil {
 		return "", Claims{}, err
 	}
@@ -409,6 +414,9 @@ func validateMint(c Claims) error {
 	// The subject table (subjects.go): an allowed shape for the kind, the
 	// audience it fixes, the hospital it names, core-only subjects.
 	if !checkSubject(c.Kind, c.Subject, c.Aud, c.Hid, c.Via) {
+		return ErrMintClaims
+	}
+	if c.StepUp && !stepUpAllowed(c.Kind, c.Subject) {
 		return ErrMintClaims
 	}
 	switch c.Kind {
@@ -472,6 +480,9 @@ func VerifyAt(tok string, keys map[string]ed25519.PublicKey, want Expect, body [
 	if err != nil || !nonEmpty(p.Roles) || !nonEmpty(p.Pids) {
 		return Claims{}, ErrMalformed // [null] would decode as ""
 	}
+	if present["stp"] && !p.Stp {
+		return Claims{}, ErrMalformed // stp is true or absent: one form only
+	}
 	// 3. Claims.
 	for k, required := range payloadKeys {
 		if required && !present[k] {
@@ -479,6 +490,9 @@ func VerifyAt(tok string, keys map[string]ed25519.PublicKey, want Expect, body [
 		}
 	}
 	knd, via := Kind(p.Knd), Via(p.Via)
+	if p.Stp && !stepUpAllowed(knd, p.Nsub) {
+		return Claims{}, ErrClaims
+	}
 	limit, ok := maxTTL(knd)
 	if !ok || p.Iss != Issuer || p.Aud == "" || p.Aud != want.Aud || p.Sub == "" || p.Rid == "" || p.Jti == "" ||
 		p.Nsub == "" || p.Bh == "" {
@@ -511,7 +525,7 @@ func VerifyAt(tok string, keys map[string]ed25519.PublicKey, want Expect, body [
 		return Claims{}, ErrBinding
 	}
 	return Claims{Aud: p.Aud, Sub: p.Sub, Hid: p.Hid, Roles: p.Roles, Rid: p.Rid, Jti: p.Jti, Kind: knd,
-		Subject: p.Nsub, BodyHash: p.Bh, PatientIDs: p.Pids, ReplyPrefix: p.Rpl, Via: via, KeyID: h.Kid,
+		Subject: p.Nsub, BodyHash: p.Bh, PatientIDs: p.Pids, ReplyPrefix: p.Rpl, Via: via, StepUp: p.Stp, KeyID: h.Kid,
 		IssuedAt: time.Unix(p.Iat, 0).UTC(), ExpiresAt: time.Unix(p.Exp, 0).UTC()}, nil
 }
 

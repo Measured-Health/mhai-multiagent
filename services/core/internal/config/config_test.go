@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -13,7 +14,8 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS",
 		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING",
 		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY", "CORE_ALLOW_SINGLE_NODE",
-		"CORE_CLOUD_PROVIDERS", "CORE_EMR_ENABLED", "CORE_EMR_SEAL_PUBLIC_KEY_PATH"} {
+		"CORE_CLOUD_PROVIDERS", "CORE_EMR_ENABLED", "CORE_EMR_SEAL_PUBLIC_KEY_PATH", "CORE_EMR_CONNECTOR_TYPES",
+		"CORE_IDEMPOTENCY_HMAC_KEY_PATH"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -618,16 +620,91 @@ func TestConfigEMREnabled(t *testing.T) {
 	}
 	ok := Config{Env: "development", DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem",
 		RequestKeyPath: "/r.pem", EMREnabled: true}
-	if err := ok.ValidateServe(); err == nil || !strings.Contains(err.Error(), "CORE_EMR_SEAL_PUBLIC_KEY_PATH") {
-		t.Fatalf("enabled without the seal key: %v", err)
+	if err := ok.ValidateServe(); err == nil || !strings.Contains(err.Error(), "CORE_EMR_SEAL_PUBLIC_KEY_PATH") ||
+		!strings.Contains(err.Error(), "CORE_IDEMPOTENCY_HMAC_KEY_PATH") {
+		t.Fatalf("enabled without the seal key or the idempotency key: %v", err)
 	}
 	ok.EMRSealPublicKeyPath = "/emr-seal/seal.pub"
+	ok.IdempotencyHMACKeyPath = "/keys/idempotency.key"
 	if err := ok.ValidateServe(); err != nil {
 		t.Fatal(err)
 	}
 	ok.EMREnabled = false
 	ok.EMRSealPublicKeyPath = ""
+	ok.IdempotencyHMACKeyPath = ""
 	if err := ok.ValidateServe(); err != nil {
 		t.Fatalf("off needs nothing: %v", err)
+	}
+}
+
+// K4: no connector type is offered unless named; only built types may be
+// named, and the development stub only in development.
+func TestConfigEMRConnectorTypes(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	if c, err := Load(); err != nil || len(c.EMRConnectorTypes) != 0 {
+		t.Fatalf("default: %v %v", c.EMRConnectorTypes, err)
+	}
+	with := func(kv ...string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	setEnv(t, with("CORE_ENV", "development", "CORE_EMR_CONNECTOR_TYPES", " stub "))
+	if c, err := Load(); err != nil || len(c.EMRConnectorTypes) != 1 || c.EMRConnectorTypes[0] != "stub" {
+		t.Fatalf("development stub: %v %v", c.EMRConnectorTypes, err)
+	}
+	for env, raw := range map[string]string{
+		"production":  "stub",           // the stub is development-only
+		"development": "fhir_r4",        // not built yet
+		"staging":     "hl7v2_feed",     // not a type
+		"test":        "stub,stub",      // twice
+		"dev":         "stub,https://x", // junk
+	} {
+		e := env
+		if env == "test" || env == "dev" {
+			e = "development"
+		}
+		setEnv(t, with("CORE_ENV", e, "CORE_EMR_CONNECTOR_TYPES", raw))
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "CORE_EMR_CONNECTOR_TYPES") || strings.Contains(err.Error(), raw) {
+			t.Errorf("%s %q: %v", e, raw, err)
+		}
+	}
+	setEnv(t, with("CORE_IDEMPOTENCY_HMAC_KEY_PATH", " /keys/idem.key "))
+	if c, err := Load(); err != nil || c.IdempotencyHMACKeyPath != "/keys/idem.key" {
+		t.Fatalf("idempotency key path: %q %v", c.IdempotencyHMACKeyPath, err)
+	}
+}
+
+// The idempotency HMAC key: a file of at least 32 bytes, not a placeholder;
+// errors name the variable only.
+func TestLoadIdempotencyHMACKey(t *testing.T) {
+	dir := t.TempDir()
+	good := dir + "/good.key"
+	if err := os.WriteFile(good, []byte("synthetic-idempotency-key-0123456789abcdef\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	k, err := LoadIdempotencyHMACKey(good)
+	if err != nil || string(k) != "synthetic-idempotency-key-0123456789abcdef" {
+		t.Fatalf("good: %q %v", k, err)
+	}
+	for name, content := range map[string]string{"short.key": "too-short", "ph.key": "changeme-changeme-changeme-changeme-0123"} {
+		p := dir + "/" + name
+		if err := os.WriteFile(p, []byte(content), 0o400); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadIdempotencyHMACKey(p); err == nil || !strings.Contains(err.Error(), "CORE_IDEMPOTENCY_HMAC_KEY_PATH") ||
+			strings.Contains(err.Error(), dir) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := LoadIdempotencyHMACKey(dir + "/missing"); err == nil || strings.Contains(err.Error(), dir) {
+		t.Errorf("missing: %v", err)
 	}
 }

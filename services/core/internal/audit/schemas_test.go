@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -264,6 +265,63 @@ func TestAuditSchemaModelPolicyChanged(t *testing.T) {
 		m := good()
 		change(m)
 		if err := audit.CheckActionPayload(action, m); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// A21, the EMR connection actions (design §12.6): ids, the type, the keys
+// that changed and closed codes; never a value, an address or a label.
+func TestAuditSchemasEMRConnection(t *testing.T) {
+	hid, cid := uuid.NewString(), uuid.NewString()
+	base := func(kv ...any) map[string]any {
+		m := map[string]any{"hospital_id": hid, "connection_id": cid}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i].(string)] = kv[i+1]
+		}
+		return m
+	}
+	good := map[string]map[string]any{
+		"emr.connection_added": base("type", "fhir_r4"),
+		"emr.connection_changed": base("fields_changed", []any{"base_url", "private_key"},
+			"credentials_replaced", true, "credentials_wiped", true),
+		"emr.connection_switched_on":  base(),
+		"emr.connection_switched_off": base(),
+		"emr.connection_tested":       base("outcome", "sign_in_refused"),
+		"emr.source_resumed":          base("reason", "platform_resume"),
+	}
+	for action, p := range good {
+		if err := audit.CheckActionPayload(action, p); err != nil {
+			t.Errorf("%s: %v", action, err)
+		}
+		// An unknown key is refused (a value smuggled under any name).
+		bad := maps.Clone(p)
+		bad["api_key"] = "synthetic-test-secret-not-real"
+		if err := audit.CheckActionPayload(action, bad); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s with an unknown key: %v", action, err)
+		}
+		missing := maps.Clone(p)
+		delete(missing, "connection_id")
+		if err := audit.CheckActionPayload(action, missing); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s without connection_id: %v", action, err)
+		}
+	}
+	for name, p := range map[string]map[string]any{
+		"unknown type":            base("type", "hl7v2_feed"),
+		"a value in fields":       base("fields_changed", []any{"https://fhir.example.org"}, "credentials_replaced", false, "credentials_wiped", false),
+		"wiped not a bool":        base("fields_changed", []any{}, "credentials_replaced", false, "credentials_wiped", "yes"),
+		"free text outcome":       base("outcome", "the server said no"),
+		"hospital id not an id":   {"hospital_id": "HAV", "connection_id": cid, "type": "stub"},
+		"connection id not an id": {"hospital_id": hid, "connection_id": "Main record", "type": "stub"},
+	} {
+		action := "emr.connection_added"
+		switch {
+		case p["fields_changed"] != nil:
+			action = "emr.connection_changed"
+		case p["outcome"] != nil:
+			action = "emr.connection_tested"
+		}
+		if err := audit.CheckActionPayload(action, p); !errors.Is(err, audit.ErrSchema) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
