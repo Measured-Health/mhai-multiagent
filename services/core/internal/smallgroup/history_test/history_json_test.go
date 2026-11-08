@@ -3,6 +3,7 @@ package historytest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -24,9 +25,11 @@ import (
 // epoch mid-month inside each, fed to the scheduler through the fake
 // source, a wake at every week's end plus the grace. The JSON every route
 // would send (GET /platform/guardrails/periods on week, month and quarter,
-// GET /platform/guardrails on the deprecated 7d, 30d and 90d; until 7c-2 builds the analytics routes, the stored bodies stand
-// in for them: they hold every cell any analytics route sends) is parsed by
-// this package alone. The exact
+// GET /platform/guardrails on the deprecated 7d, 30d and 90d, GET
+// /platform/analytics on week, month and quarter, and every hospital's
+// series on both measures; plus the stored bodies, which hold every cell
+// any route sends) is parsed by this package alone, and every analytics and
+// series response is checked against the stored body of its period. The exact
 // solver over all of it exposes no hidden cell of 1 to 4 and no
 // hidden-member sum of 1 to 4; no period is unavailable; ineligible weeks,
 // months and quarters are in no response.
@@ -177,12 +180,13 @@ type response struct {
 	period  calendar.Period
 	raw     []byte
 	rolling bool
+	kind    calendar.Kind // the analytics routes' period
 }
 
 // routes renders what each route would send for the stored snapshot s:
-// GET /platform/guardrails/periods for its kind (Task 5, R41a-4), and the stored body, which
-// stands in for the analytics routes until 7c-2 (it holds every cell they
-// send).
+// the stored body (every cell any route sends) and GET
+// /platform/guardrails/periods for its kind (Task 5, R41a-4). The analytics
+// routes, which read every stored period of the kind, are rendered in run.
 var routes = []func(t *testing.T, s scheduler.Stored, at time.Time) []response{
 	func(t *testing.T, s scheduler.Stored, _ time.Time) []response {
 		return []response{{source: "stored", period: s.Period, raw: s.Body}}
@@ -220,6 +224,7 @@ func (w *world) run(t *testing.T) (*Parser, []response) {
 	s := scheduler.Scheduler{Builder: scheduler.Builder{Src: w.fake}, Lock: schedtest.NoLock}
 	var out []response
 	seen := map[string]bool{}
+	notYet := map[calendar.Kind]bool{}
 	for _, wk := range w.weeks {
 		w.fake.Clock = wk.To.Add(calendar.Grace)
 		if _, err := s.Tick(context.Background()); err != nil {
@@ -249,6 +254,13 @@ func (w *world) run(t *testing.T) (*Parser, []response) {
 			for _, route := range routes {
 				out = append(out, route(t, st, w.fake.Clock)...)
 			}
+			out = append(out, w.analytics(t, st.Period.Kind)...)
+		}
+		for _, k := range []calendar.Kind{calendar.Week, calendar.Month, calendar.Quarter} {
+			if !notYet[k] && !w.anyStored(k) {
+				notYet[k] = true // GET /platform/analytics before its first period (F19)
+				out = append(out, w.analytics(t, k)...)
+			}
 		}
 		out = append(out, w.rolling(w.fake.Clock)...)
 	}
@@ -270,16 +282,74 @@ func (w *world) run(t *testing.T) (*Parser, []response) {
 	p := New(w.weeks, w.onboard)
 	for _, r := range out {
 		var err error
-		if r.rolling {
+		switch {
+		case r.rolling:
 			err = p.AddRolling(r.raw)
-		} else {
+		case r.source == "analytics":
+			err = p.AddAnalytics(r.raw)
+		case r.source == "series":
+			err = p.AddSeries(r.raw, r.kind)
+		default:
 			err = p.Add(r.source, r.raw, r.period)
 		}
 		if err != nil {
 			t.Fatalf("parse %s %v: %v", r.source, r.period, err)
 		}
 	}
+	if n := p.Unavailable(); n != 0 {
+		t.Fatalf("%d analytics areas unavailable", n)
+	}
 	return p, out
+}
+
+// anyStored reports whether a period of kind k is stored.
+func (w *world) anyStored(k calendar.Kind) bool {
+	for _, s := range w.fake.All() {
+		if s.Period.Kind == k {
+			return true
+		}
+	}
+	return false
+}
+
+// analytics renders GET /platform/analytics?period=k and every hospital's
+// series of kind k over what is stored now, as the routes read it.
+func (w *world) analytics(t *testing.T, k calendar.Kind) []response {
+	t.Helper()
+	var rows []analytics.Snapshot
+	for _, s := range w.fake.All() {
+		if s.Period.Kind == k {
+			rows = append(rows, analytics.Snapshot{Period: s.Period, State: s.State, Body: s.Body, ComputedAt: s.Period.To.Add(calendar.Grace)})
+		}
+	}
+	a, degraded := analytics.Render(k, rows, w.epoch)
+	if degraded {
+		t.Fatalf("%s: a stored body is unreadable", k)
+	}
+	raw, _ := json.Marshal(a)
+	out := []response{{source: "analytics", raw: raw, kind: k}}
+	if len(rows) == 0 {
+		return out
+	}
+	ids := make([]string, 0, len(w.onboard))
+	for id := range w.onboard {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		for _, m := range analytics.SeriesMeasures {
+			s, err := analytics.HospitalSeries(k, rows, id, m)
+			if errors.Is(err, analytics.ErrNoHospital) {
+				continue
+			}
+			if err != nil {
+				t.Fatalf("series %s %s: %v", k, m, err)
+			}
+			raw, _ := json.Marshal(s)
+			out = append(out, response{source: "series", raw: raw, kind: k})
+		}
+	}
+	return out
 }
 
 func TestHistoryFromRouteJSON(t *testing.T) {
