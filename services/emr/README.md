@@ -59,28 +59,38 @@ NATS.
 - `egress-emr` (`cmd/egress-emr`, in the same image, entrypoint
   `/egress-emr`): the emr service's only way out (design §6.4). Each
   CONNECT carries `Proxy-Authorization: Basic base64(<connection
-  id>:<hex HMAC-SHA256(K_proxy, id)>)` (407 otherwise) and reaches only
+  id>:<hex HMAC-SHA256(K_proxy, "<id>|<5-minute window>")>)`, accepted for
+  its window and the two neighbouring ones (407 otherwise), and reaches only
   that connection's `host:port` entries, exactly as written, port 443 or
   22 (403). Nothing is resolved before that, so a name off the list never
-  reaches DNS. A listed name is resolved once; any refused address in the
+  reaches DNS. A listed name is resolved once, fully qualified (no
+  resolv.conf search suffix); any refused address in the
   answer refuses the CONNECT (loopback, link-local and metadata, CGNAT,
   multicast, reserved and documentation ranges, NAT64, 6to4, Teredo, ULA,
-  the internal networks, and RFC 1918 outside the connection's declared
-  ranges); otherwise it dials the address it checked. One log line per
-  CONNECT: connection id, decision code, status, port and a host hash.
+  the internal networks and the host's own addresses, Docker's default
+  bridge, and RFC 1918 outside the connection's declared ranges);
+  otherwise it dials the address it checked. Tunnels pass a half-close
+  through and end when both sides close, after 60 s idle or after 30
+  minutes; one connection holds at most 32 of the 256 tunnel slots. One log
+  line per CONNECT: connection id, decision code, status, port and a host
+  hash. Outside development it refuses to start without
+  `EGRESS_EMR_INTERNAL_CIDRS`.
 - The allow-list (`internal/proxyconf`): `allow.json`, written by the emr
   service every 15 s (`internal/egress.Writer`) from enabled, unpaused
   connections (read as `mhai_emr_sched`) and those under test, each read
   under its own hospital; a connection is listed only while its addresses
   still give the origin its credentials were entered for. The proxy reads
   it every second and refuses everything when it is missing, malformed,
-  over 120 s old or dated ahead, or when two hospitals' ranges overlap.
+  over 120 s old or dated ahead. Connections whose ranges overlap another
+  hospital's are left out (the rest are served) and logged at error level
+  with `"code":"ranges_overlap","alert":true`, by the writer and the proxy.
 - `internal/egress`: `HTTP` (proxy fixed, per-connection
   `Proxy-Authorization`, origin checked before anything is sent, no
   cross-origin redirect and none for a request with a credential, TLS 1.2+
   with system roots, 64 KiB headers, 20 MB bodies), `DecodeJSON` (depth
   64), `SSH` (through the proxy, host key pinned to the typed SHA256
-  fingerprint; PR 11 opens SFTP over it, and adds `github.com/pkg/sftp`
+  fingerprint, a deadline kept after the handshake: the caller's, at most
+  30 minutes; PR 11 opens SFTP over it, and adds `github.com/pkg/sftp`
   then). `test` holds its connection on the allow-list only once every
   check has passed.
 - `emr keys proxy-init --out <dir>`: K_proxy (`k_proxy`, 0400, 64 hex
@@ -110,7 +120,8 @@ egress-emr's own settings:
 |---|---|
 | `EGRESS_EMR_ALLOW_LIST` | the allow-list file (read-only mount) |
 | `EGRESS_EMR_KEY_PATH` | K_proxy |
-| `EGRESS_EMR_INTERNAL_CIDRS` | networks never reached, comma-separated: the `backend` subnet; the proxy adds its own networks |
+| `EGRESS_EMR_ENV` | `development`, `staging` or `production` (unset: production) |
+| `EGRESS_EMR_INTERNAL_CIDRS` | never reached, comma-separated: the `backend` subnet and the host's own addresses (`/32`); required outside development. The proxy adds its own networks, its routing table's gateways and `172.17.0.0/16` |
 | `EGRESS_EMR_LISTEN` | default `:3128` |
 
 Errors name the variable, never its value.

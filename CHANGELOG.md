@@ -30,7 +30,15 @@ All notable changes to this project are documented here. The format follows
   `docker-compose.yml` postgres and nats also join the internal `backend`
   network (the emr service's way to them); `deploy/compose.yml` without a
   profile is unchanged. `deploy/egress-emr/test-egress.sh` checks the
-  proxy end to end on a Docker host.
+  proxy end to end on a Docker host. After review: the proxy token is
+  bound to a 5-minute window; lookups are fully qualified; the host's
+  addresses, the routing table's gateways and Docker's default bridge are
+  always refused, and outside development the proxy needs
+  `EGRESS_EMR_INTERNAL_CIDRS` to start (the dev `backend` network has a
+  fixed subnet, `EMR_BACKEND_SUBNET`); tunnels pass half-closes, end after
+  60 s idle or 30 minutes, and one connection holds at most 32 slots;
+  overlapping ranges leave out only the connections involved, with an
+  alert.
 - Patient Analysis, PR 2: the data foundation, **off by default** (OpenAPI
   1.14.0, additive; analysis backend plan Tasks 2 to 4, ADR 0015).
   Migration 00021 (its number is fixed: EMR takes 00020) adds the roles
