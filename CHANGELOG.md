@@ -8,6 +8,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Platform analytics, part 7c-3: What changed and follow-ups (OpenAPI
+  1.15.0, additive; Plan 7c Tasks 8 and 9). Migration 00022 (planned as
+  00020; EMR and Patient Analysis took 00020 and 00021) adds
+  `analytics_change_runs`, `analytics_changes` and `analytics_follow_ups`
+  and adds the three follow-up actions to `mhai_platform`'s audit append
+  policy (Down restores 00020's). Once a week, after the week's snapshot
+  is stored, the scheduler compares the week with the month that finished
+  before it from the two stored snapshots' shown cells only (Q3: counts at
+  least 10 on both sides and a 50% change; questions per clinician with 5
+  active clinicians; the needs-review share and agreement rate with 20 on
+  both sides and 15 points). `GET /platform/analytics` now serves
+  them in a new property, `what_changed {updated_at, window, items}`
+  (`changes` stays `{unavailable: true}`: widening it would not be
+  additive); `GET
+  /platform/analytics/changes/{id}/series` serves an open change's
+  measure per period. `PUT` and `DELETE
+  /platform/analytics/changes/{id}/follow-up` (platform admins,
+  `Idempotency-Key`, a version check) follow a change up with an optional
+  note, edit the author's note or undo it; each write is audited
+  (`analytics.followed_up`, `analytics.follow_up_edited`,
+  `analytics.follow_up_undone`) with ids only, never the note.
 - Patient Analysis, PR 2: the data foundation, **off by default** (OpenAPI
   1.14.0, additive; analysis backend plan Tasks 2 to 4, ADR 0015).
   Migration 00021 (its number is fixed: EMR takes 00020) adds the roles

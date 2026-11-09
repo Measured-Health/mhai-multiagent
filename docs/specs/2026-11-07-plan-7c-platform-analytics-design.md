@@ -1,6 +1,6 @@
 # Plan 7c: platform analytics across hospitals (backend): design
 
-- **Status:** Approved (product owner, 2026-11-07), after three design reviews (§17). Part 7c-1 built; R41a-4 decided while building it; departures in §18. Rulings R41a, R41a-2 (nested periods) and R41a-3 (the rolling windows hidden at once) are decided (§2). Q3 is decided (§16: counts flag at a change of at least 50% with at least 10 on both sides; the rate and review-time rows keep their minimums); Q4 is open for the privacy lead.
+- **Status:** Approved (product owner, 2026-11-07), after three design reviews (§17). Parts 7c-1 and 7c-2 merged and 7c-3 built; R41a-4 decided while building 7c-1; departures in §18. Rulings R41a, R41a-2 (nested periods) and R41a-3 (the rolling windows hidden at once) are decided (§2). Q3 is decided (§16: counts flag at a change of at least 50% with at least 10 on both sides; the rate and review-time rows keep their minimums); Q4 is open for the privacy lead.
 - **Date:** 2026-11-07
 - **Plan:** `docs/plans/2026-11-07-plan-7c-platform-analytics.md`, built from the task breakdown in §15.
 - **Builds on (and must stay consistent with):**
@@ -194,7 +194,7 @@ A block has at most 12 + 3 + 1 = 16 snapshots. With 50 hospitals the QG family h
 - `Idempotency-Key` on both, as every core write. No step-up: a follow-up is a note between staff and changes no figure.
 - **The note:** 1 to 500 characters, under the R11 rules (newlines allowed; Unicode Cf, Zl and Zp refused), otherwise 422 `validation_failed`. Stored in `analytics_follow_ups`, a table of its own (as R36 isolated the cancel note). It is returned in the changes list to platform admins and auditors, and nowhere else. It is never logged, traced or written in the audit payload.
 - `change.version` moves on with every follow-up write; `follow_up.version` moves on with each note edit. Each write is one conditional `UPDATE … WHERE version = $v`. `by_you` is set per caller.
-- **Audit:** `analytics.followed_up {change_id, has_note}`, `analytics.follow_up_edited {change_id}`, `analytics.follow_up_undone {change_id}`, with closed schemas, in the same transaction as the write. **Migration 00020 replaces `mhai_platform`'s `platform_append` policy on `audit_log`** (drop and create, as 00014 and 00018 did) with 00018's action list plus the three new ones, conditions kept; its Down drops it and recreates 00018's policy exactly.
+- **Audit:** `analytics.followed_up {change_id, has_note}`, `analytics.follow_up_edited {change_id}`, `analytics.follow_up_undone {change_id}`, with closed schemas, in the same transaction as the write. **Migration 00022 replaces `mhai_platform`'s `platform_append` policy on `audit_log`** (drop and create, as 00014, 00018 and 00020 did) with main's action list (00020's: 00018's and the six EMR actions) plus the three new ones, conditions kept; its Down drops it and recreates main's policy exactly. (Planned as 00020; EMR's 00020 and Patient Analysis's 00021 merged first.)
 
 ## 8. Data
 
@@ -394,6 +394,7 @@ Actors: platform admins, auditors, hospital roles (who must get nothing), the pl
 | F17 | **A hospital with no previous month** (onboarded since, or before the second published month) gets no change; show "Not enough data to compare yet" for it | §7.3, R41a-3 |
 | F19 | **Not yet:** before the first eligible month or quarter (the next full one after the release), an area is `{not_yet: true, first_from}` and `from`/`to` are null. Show "First figures after {period}", never "Couldn't load" or zeros. The CSV writes the same line. Guardrails on that period value answer 503 `not_ready` until then | §4, §7.1, R41a-3 |
 | F18 | Rolling `7d`/`30d`/`90d` guardrail figures arrive fully hidden with `Deprecation` and `Sunset` headers, if a screen ever calls them | §9, R41a-3 |
+| F21 | **What changed is `what_changed`**, a new property of `GET /platform/analytics`, not `changes`, which stays `{unavailable: true}`: OpenAPI 1.13/1.14 typed `changes` as `{unavailable: true}` only, and widening it is a breaking change under ADR 0012 (as R41a-4) | §18 7c-3 item 14 |
 | F20 | **Guardrail statistics on calendar periods are `GET /platform/guardrails/periods?period=week\|month\|quarter`** (its own schema, `GuardrailPeriodsOut`), not new values on `/platform/guardrails` | R41a-4 |
 
 The contract file `docs/specs/2026-10-17-frontend-requirements.md` §14.7 is updated in this repository (Task 10), and these changes go to mhai-web's TODO.
@@ -416,7 +417,7 @@ The contract file `docs/specs/2026-10-17-frontend-requirements.md` §14.7 is upd
 | 5 | 7c-1 | Guardrails on calendar periods; rolling windows deprecated and hidden (R41a-3) | A9, A10 |
 | 6 | 7c-2 | `GET /platform/analytics` | A1, A3, A11, A13, A23 |
 | 7 | 7c-2 | The series routes | A13, A22 |
-| 8 | 7c-3 | Migration 00020 and the weekly What changed | A12 |
+| 8 | 7c-3 | Migration 00022 and the weekly What changed | A12 |
 | 9 | 7c-3 | Follow-ups: writes, audit, note rules | A15, A18–A22 |
 | 10 | all | Smoke, contract, docs (each part's slice) | smoke, `oasdiff` |
 
@@ -439,7 +440,7 @@ The review returned "Needs fixes". Each fix is folded into the sections above:
 5. **A7 from the routes' JSON** (§6.4, A7): an independent parser over every route's response, the deprecated windows included.
 6. **Frontend changes** (§13): F14–F18 added; the plan's references reconciled.
 7. **Re-review (7 Nov):** EXECUTE on the analytics functions is `mhai_analytics_job`'s only (the plan agreed); 00019 revokes `mhai_guardrail_counts` from `mhai_platform` (A30); a parent is published only if all its children are eligible, and the first parents that aren't are absent, not `unavailable` (§4, §7.1, F19, A7).
-8. **Minor:** table ownership (§8.1), deletes only by the retention sweep (§8.1, §12), freezing once per period (§6.2, §8.2), 00020 replacing the audit append policy with a Down that restores 00018's (§7.4).
+8. **Minor:** table ownership (§8.1), deletes only by the retention sweep (§8.1, §12), freezing once per period (§6.2, §8.2), 00022 (planned as 00020) replacing the audit append policy with a Down that restores main's (§7.4).
 
 ## 18. Departures while building 7c-1 (rulings and calls made in the code)
 
@@ -458,3 +459,20 @@ The review returned "Needs fixes". Each fix is folded into the sections above:
 3. **Trend and series points exist only for stored periods.** A period never published (before the epoch) has no point; one stored `unavailable` or unreadable is hidden whole (value hidden, series median null); a period that doesn't list the hospital has nothing to show (`{value: null, suppressed: false}`). The series is 404 for a hospital named in no readable stored period of the window.
 4. **`hospitals.size.staff` is guarded**, as the body stores it (Q4 open).
 5. **A7 from the analytics JSON:** `TestHistoryFromRouteJSON` and `TestHistorySetsFromRouteJSON` now render `GET /platform/analytics` (every kind, the not-yet form included) and every hospital's series at each wake; the parser (`history_test/routes.go`, no smallgroup code) adds the analytics rows as equations and checks every cell, median, trend and series point against the stored body of its period (`TestRouteCheckCatches` proves each check fires).
+
+### 7c-3 (calls made in the code)
+
+1. **Migration 00022, not 00020.** EMR's 00020 and Patient Analysis's 00021 merged first. `platform_append` is rebuilt from main's list (00020's: 00018's and the six EMR actions; 00021 changed only `provision_append`) with the three follow-up actions added and the conditions kept; Down restores main's policy exactly. `TestMigration00022DownUp` compares both directions with the policy as main has it.
+2. **A third table, `analytics_change_runs`:** one row per evaluated week, written in the same transaction as that week's changes. It gives the changes area its `window` and `updated_at`, makes a week's evaluation happen once, and lets a wake evaluate every stored week not yet evaluated, oldest first (a failed evaluation is retried on the next wake). A week older than the newest run is refused (`scheduler.ErrOutOfOrder`), since evaluating it would close the newer week's changes. Its insert policy allows only a finished week with a stored snapshot; `mhai_platform` reads it.
+3. **Active clinicians are compared as stored, not per day.** They are a distinct count of people, so scaling a month's count to a week's length would flag a rise every week. Questions per clinician scales the month's ratio per day (its numerator is a count), with two decimals. Questions scale per day with one decimal, as §7.3 says.
+4. **`median_review_hours` has no row.** Its minimum (10 decided on both sides) rests on a count no stored body holds, and a change is computed from stored, shown cells only. The product owner can add it once the body stores the decided count (shown under the small-group rule).
+5. **The shares' minimums** are on their denominators (answers for the needs-review share, reviews for the agreement rate), which must be shown and at least 20 on both sides. A change is flagged only when every value it rests on is shown.
+6. **An unavailable week, or a compared month that is absent, unavailable or unreadable, flags nothing**, so every open change closes that week.
+7. **The summary** is `<measure> <up|down|worse|better>: <previous> to <current>`, with ` a week` for the per-day counts and shares as percentages with two decimals (the share's four). It carries no percentage of change: that would be a third number, and A12 allows the two shown values only.
+8. **Ranking:** items not followed up come first, then by how far each change is past its threshold (the change over `MinChange`), largest first.
+9. **The change series** serves open changes only (a closed one is 404, as it has left the list). Its schema is `AnalyticsChangeSeriesOut` (the change measures' enum), and the route's 200 is a `oneOf` of it and `AnalyticsSeriesOut`, so the change is additive. A count median strictly between 0 and 5 is sent null, as a count median is hidden.
+10. **The follow-up's reply is the change, with its note,** so the idempotency store keeps the note for 72 hours for a replay, as it keeps every write's reply. The note is in no log line, error or audit payload; the platform routes open no span and publish nothing on NATS for it. Any platform admin may undo a follow-up (A19); only its author may edit the note.
+11. **The audit kinds** `change_followed_up`, `change_note_edited` and `change_follow_up_undone` are already in mhai-web's vocabulary (F8), so the catalogue maps the three actions to them (target kind `change`) instead of listing them as pending.
+12. **The smoke test's jump** is two synthetic stored snapshots of January and early February 2020, written as the owner and evaluated with the scheduler's own code as `mhai_analytics_job`: the stack's own scheduler evaluates only weeks that close after its release, which a smoke run never sees.
+13. **A21's rollback** is forced through `platform.Deps.AfterFollowUpAudit`, a test-only field that server.Register never sets.
+14. **What changed is served as `what_changed`, not `changes` (F21).** OpenAPI 1.13 and 1.14 typed `changes` as `{unavailable: true}` only, and `oasdiff breaking` counts adding `AnalyticsChanges` to it as breaking (`response-property-one-of-added`). As R41a-4 did for the guardrail periods, the area is a new property, `what_changed` (`AnalyticsChanges` or `{unavailable: true}`), and `changes` stays `{unavailable: true}`. No exception is added to `openapi-breaking.sh`. The change series' reply became a `oneOf` of `AnalyticsSeriesOut` and `AnalyticsChangeSeriesOut`, which oasdiff reports as a warning only (the original schema kept as an alternative).
