@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.14.0"
+  version: "1.15.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1292,8 +1292,33 @@ paths:
         (only periods that start at or after the 7c-1 release are), `from`
         and `to` are null and each of those areas is `{not_yet: true,
         first_from}`, the start of the first period that will be. `alerts`
-        is null (no patient alerts yet). `changes` is `{unavailable: true}`
-        until What changed is built (Plan 7c-3).
+        is null (no patient alerts yet).
+
+        `changes` stays `{unavailable: true}`: What changed is the new
+        `what_changed` (Plan 7c-3, spec §7.3; a property of its own because
+        widening `changes` would not be additive). It is the same for every
+        `period`:
+        the newest weekly evaluation of What changed, `{updated_at, window,
+        items}`, or `{unavailable: true}` before the first evaluation or
+        when it can't be read. Once a week, after the week's snapshot is
+        stored, the latest week is compared with the month that finished
+        before it started (`window` runs from that month's start to the
+        week's end), from the two stored snapshots' shown cells only: a
+        change is flagged only when both sides, and the figures its minimum
+        rests on, are shown. `current` is the week's shown value;
+        `previous` the month's (for questions and questions per clinician,
+        per day scaled to the week's length, one decimal or the ratio's
+        two). Thresholds: questions and active clinicians at least 10 on
+        both sides and a change of at least 50%; questions per clinician
+        with at least 5 active clinicians on both sides and a change of at
+        least 50%; the needs-review share and the agreement rate with at
+        least 20 answers or reviews on both sides and a change of at least
+        15 points. A change keeps its `id` while each week flags it again
+        and leaves the list when one doesn't. `summary` holds the two values
+        and no hospital name; `serious` is always false (no patient alerts
+        yet). Items not followed up come first, each group by size of
+        change. `follow_up.note` is returned here and in the follow-up
+        writes' replies only; `by_you` is set per caller.
 
         Rows are the hospitals the period lists. Every value is guarded,
         `{value, suppressed}`, as on `/platform/guardrails/periods`, whose
@@ -1380,15 +1405,23 @@ paths:
   /platform/analytics/changes/{id}/series:
     get:
       operationId: getPlatformAnalyticsChangeSeries
-      summary: A change's series. No change exists until What changed is built (Plan 7c-3), so every id is 404.
+      summary: An open change's measure for each of the latest periods.
       description: |
         Platform admins and auditors, platform audience, two-step always.
-        New (Plan 7c spec §7.2). `period` is `week`, `month` or `quarter`
-        (422 `validation_failed` otherwise). Until What changed is built
-        (Plan 7c-3) there is no change, so every id is 404 `not_found`; the
-        shape then is `AnalyticsSeriesOut`, with `hospital` null for a
-        change across all hospitals. Thirty reads a minute per session,
-        shared with `/platform/analytics`.
+        New (Plan 7c spec §7.2; built in Plan 7c-3). `period` is `week`,
+        `month` or `quarter` (422 `validation_failed` otherwise). For a
+        hospital's change, `points` are the hospital's stored cell of the
+        change's measure for each published period of the latest 12 weeks,
+        12 months or 8 quarters, oldest first, one period each, with the
+        median of the other hospitals' shown values (null with none; a
+        count median strictly between 0 and 5 is null, as a count median is
+        hidden). For a change across all hospitals, `hospital` is null, the
+        points are the all-hospitals cells and every `median` is null
+        (F14). A period whose snapshot couldn't be computed is hidden whole;
+        one that doesn't list the hospital is `{value: null, suppressed:
+        false}`. An id that isn't a canonical uuid, or names no open change,
+        is 404 `not_found` (a closed change leaves the list). Thirty reads a
+        minute per session, shared with `/platform/analytics`.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, rate_limited, not_ready, internal_error]
@@ -1399,15 +1432,117 @@ paths:
         - { name: period, in: query, required: true, schema: { type: string, enum: [week, month, quarter] } }
       responses:
         "200":
-          description: The series (never, until Plan 7c-3).
+          description: The change's series.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/AnalyticsSeriesOut" }
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AnalyticsSeriesOut"
+                  - $ref: "#/components/schemas/AnalyticsChangeSeriesOut"
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/analytics/changes/{id}/follow-up:
+    put:
+      operationId: putPlatformAnalyticsFollowUp
+      summary: Follow up an open change, or edit the note of your own follow-up.
+      description: |
+        Platform admins only (an auditor is 403 `forbidden`; hospital
+        audiences `not_platform`), two-step always, `Idempotency-Key` as
+        every write; no step-up (a follow-up changes no figure). New (Plan
+        7c spec §7.4, Plan 7c-3). `version` must be the change's current
+        `version`, or 409 `conflict`; of two writes with one version, one
+        succeeds and the other is 409. A closed change is 409 `conflict`,
+        an unknown id 404 `not_found`. With no follow-up in place this marks
+        the change followed up; with the caller's own it replaces the note
+        (`follow_up.version` moves on); with another admin's it is 403
+        `forbidden` (they undo first). `note` is optional: 1 to 500
+        characters, newlines allowed, no other control or format character
+        and no line or paragraph separator, or 422 `validation_failed`;
+        null or absent is no note. Every write moves the change's `version`
+        on and writes one audit entry in the same transaction
+        (`analytics.followed_up` with whether there is a note, or
+        `analytics.follow_up_edited`), never the note itself. Answers the
+        change as the changes list sends it.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              additionalProperties: false
+              properties:
+                note: { type: string, minLength: 1, maxLength: 500, nullable: true }
+                version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: The change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsChange" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    delete:
+      operationId: deletePlatformAnalyticsFollowUp
+      summary: Undo a change's follow-up.
+      description: |
+        Platform admins only (an auditor is 403 `forbidden`; hospital
+        audiences `not_platform`), two-step always, `Idempotency-Key` as
+        every write. New (Plan 7c spec §7.4, Plan 7c-3). Undoes the
+        follow-up, whoever wrote it. A stale `version`, a closed change or
+        no follow-up to undo is 409 `conflict`; an unknown id 404
+        `not_found`. One `analytics.follow_up_undone` audit entry in the
+        same transaction. Answers the change as the changes list sends it.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              additionalProperties: false
+              properties:
+                version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: The change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsChange" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
@@ -2861,7 +2996,7 @@ components:
     AnalyticsOut:
       type: object
       description: Plan 7c spec §7.1 (New).
-      required: [period, from, to, changes, use, alerts, quality, hospitals]
+      required: [period, from, to, changes, use, alerts, quality, hospitals, what_changed]
       additionalProperties: false
       properties:
         period: { type: string, enum: [week, month, quarter] }
@@ -2884,6 +3019,11 @@ components:
             - $ref: "#/components/schemas/AnalyticsHospitals"
             - $ref: "#/components/schemas/AnalyticsUnavailable"
             - $ref: "#/components/schemas/AnalyticsNotYet"
+        what_changed:
+          description: "What changed (Plan 7c-3, spec §7.3), or `{unavailable: true}` before the first weekly evaluation."
+          oneOf:
+            - $ref: "#/components/schemas/AnalyticsChanges"
+            - $ref: "#/components/schemas/AnalyticsUnavailable"
     AnalyticsSeriesOut:
       type: object
       description: Plan 7c spec §7.2 (New).
@@ -2906,6 +3046,91 @@ components:
               value:
                 description: "`GuardedNumber` for `questions_per_clinician` (two decimals), `GuardedShare` for `needs_review_share` (four)."
                 oneOf:
+                  - $ref: "#/components/schemas/GuardedNumber"
+                  - $ref: "#/components/schemas/GuardedShare"
+              median: { type: number, nullable: true }
+    AnalyticsShownValue:
+      type: object
+      description: A shown value (`suppressed` false); a change is never flagged on a hidden one.
+      required: [value, suppressed]
+      additionalProperties: false
+      properties:
+        value: { type: number, minimum: 0 }
+        suppressed: { type: boolean, enum: [false] }
+    AnalyticsFollowUp:
+      type: object
+      description: Plan 7c spec §7.4 (New).
+      required: [by, at, note, by_you, version]
+      additionalProperties: false
+      properties:
+        by: { $ref: "#/components/schemas/PersonRef" }
+        at: { type: string, format: date-time }
+        note: { type: string, nullable: true }
+        by_you: { type: boolean }
+        version: { type: integer, minimum: 1 }
+    AnalyticsChange:
+      type: object
+      description: Plan 7c spec §7.3 (New).
+      required: [id, hospital, area, measure, direction, serious, previous, current, summary, follow_up, version]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        hospital:
+          allOf:
+            - $ref: "#/components/schemas/PersonRef"
+          nullable: true
+        area: { type: string, enum: [use, quality] }
+        measure: { type: string, enum: [questions, active_clinicians, questions_per_clinician, needs_review_share, agreement_rate] }
+        direction: { type: string, enum: [rising, falling, worse, better] }
+        serious: { type: boolean, enum: [false] }
+        previous: { $ref: "#/components/schemas/AnalyticsShownValue" }
+        current: { $ref: "#/components/schemas/AnalyticsShownValue" }
+        summary: { type: string, maxLength: 200 }
+        follow_up:
+          allOf:
+            - $ref: "#/components/schemas/AnalyticsFollowUp"
+          nullable: true
+        version: { type: integer, minimum: 1 }
+    AnalyticsChanges:
+      type: object
+      description: Plan 7c spec §7.3 (New).
+      required: [updated_at, window, items]
+      additionalProperties: false
+      properties:
+        updated_at: { type: string, format: date-time }
+        window:
+          type: object
+          required: [from, to]
+          additionalProperties: false
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AnalyticsChange" }
+    AnalyticsChangeSeriesOut:
+      type: object
+      description: Plan 7c spec §7.2, a change's series (New). `hospital` and every `median` are null for a change across all hospitals.
+      required: [measure, hospital, points]
+      additionalProperties: false
+      properties:
+        measure: { type: string, enum: [questions, active_clinicians, questions_per_clinician, needs_review_share, agreement_rate] }
+        hospital:
+          allOf:
+            - $ref: "#/components/schemas/PersonRef"
+          nullable: true
+        points:
+          type: array
+          items:
+            type: object
+            required: [start, value, median]
+            additionalProperties: false
+            properties:
+              start: { type: string, format: date-time }
+              value:
+                description: "`GuardedCount` for `questions` and `active_clinicians`, `GuardedNumber` for `questions_per_clinician` (two decimals), `GuardedShare` for the shares (four)."
+                oneOf:
+                  - $ref: "#/components/schemas/GuardedCount"
                   - $ref: "#/components/schemas/GuardedNumber"
                   - $ref: "#/components/schemas/GuardedShare"
               median: { type: number, nullable: true }

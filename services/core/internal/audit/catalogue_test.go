@@ -303,8 +303,8 @@ func platformAppendActions(t *testing.T) []string {
 	if last == "" {
 		t.Fatal("no migration has a platform_append with an action list")
 	}
-	if from < "00020" {
-		t.Fatalf("the latest platform_append is %s's; 00020 widened it", from)
+	if from < "00022" {
+		t.Fatalf("the latest platform_append is %s's; 00022 widened it", from)
 	}
 	var out []string
 	for _, q := range regexp.MustCompile(`'([a-z][a-z0-9_.]*)'`).FindAllStringSubmatch(last, -1) {
@@ -336,9 +336,12 @@ func TestEveryActionHasCatalogueRow(t *testing.T) {
 			t.Errorf("platform action %s has no payload schema", a)
 		}
 	}
-	if got := platformAppendActions(t); len(got) != 15 || !slices.Contains(got, "hospital.model_policy_changed") ||
-		!slices.Contains(got, "emr.connection_added") || !slices.Contains(got, "emr.source_resumed") {
-		t.Errorf("platform_append allows %v, want spec §5.5's eight, hospital.model_policy_changed (00018) and the six EMR actions (00020)", got)
+	if got := platformAppendActions(t); len(got) != 18 || !slices.Contains(got, "hospital.model_policy_changed") ||
+		!slices.Contains(got, "emr.connection_added") || !slices.Contains(got, "emr.source_resumed") ||
+		!slices.Contains(got, "analytics.followed_up") || !slices.Contains(got, "analytics.follow_up_edited") ||
+		!slices.Contains(got, "analytics.follow_up_undone") {
+		t.Errorf("platform_append allows %v, want spec §5.5's eight, hospital.model_policy_changed (00018), the six EMR actions (00020) "+
+			"and the three follow-up actions (00022)", got)
 	}
 	for _, a := range audit.RegisteredActions() {
 		if strings.HasPrefix(a, "test.") {

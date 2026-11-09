@@ -406,6 +406,14 @@ func init() {
 	Register("emr.source_resumed", Schema{Fields: withConn("reason", OneOf("platform_resume")),
 		Required: append(slices.Clone(connReq), "reason")})
 
+	// Plan 7c-3: a platform admin follows a change up, edits the note or
+	// undoes it (spec §7.4). Ids and whether there is a note only: the note
+	// itself never reaches the log (A15).
+	Register("analytics.followed_up", Schema{Fields: fields("change_id", id, "has_note", Check(Bool)),
+		Required: []string{"change_id", "has_note"}})
+	Register("analytics.follow_up_edited", Schema{Fields: fields("change_id", id), Required: []string{"change_id"}})
+	Register("analytics.follow_up_undone", Schema{Fields: fields("change_id", id), Required: []string{"change_id"}})
+
 	// Patient Analysis (analysis plan Task 4): the provisioning CLI raises
 	// a switch for the synthetic demo only, and lowers one. The row has no
 	// hospital and no actor; the payload names the hospital for a
