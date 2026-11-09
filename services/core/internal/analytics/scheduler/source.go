@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 )
@@ -30,7 +31,7 @@ func (s DB) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 		if errors.As(err, &pe) && pe.Code == "22023" {
 			return ErrNotFreezable
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrOutOfOrder) {
 			return err
 		}
 		return errDB
@@ -196,4 +197,119 @@ func (s DB) StoredKeys(ctx context.Context, since time.Time) (map[string]bool, e
 		return rows.Err()
 	})
 	return out, err
+}
+
+// ChangesDue lists the stored weeks newer than the newest evaluated one,
+// oldest first.
+func (s DB) ChangesDue(ctx context.Context) ([]calendar.Period, error) {
+	var out []calendar.Period
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT period_from FROM analytics_snapshots
+			WHERE kind = 'week' AND period_from > coalesce((SELECT max(week_from) FROM analytics_change_runs), '-infinity'::date)
+			ORDER BY period_from`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var from time.Time
+			if err := rows.Scan(&from); err != nil {
+				return err
+			}
+			out = append(out, calendar.Of(calendar.Week, from.UTC()))
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// ApplyChanges records week w's run and opens, updates and closes the open
+// changes to match flags, in one transaction as mhai_analytics_job; nothing
+// when w was evaluated already. Values and summaries go in as parameters;
+// none is ever logged.
+func (s DB) ApplyChanges(ctx context.Context, w, m calendar.Period, flags []analytics.Flag) error {
+	return s.tx(ctx, func(tx pgx.Tx) error {
+		// Weeks are evaluated in calendar order: an older week after a newer
+		// one would close the newer week's changes.
+		var newer bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM analytics_change_runs WHERE week_from > $1::date)`,
+			date(w.From)).Scan(&newer); err != nil {
+			return err
+		}
+		if newer {
+			return ErrOutOfOrder
+		}
+		tag, err := tx.Exec(ctx, `INSERT INTO analytics_change_runs (week_from, week_to, month_from, month_to)
+			VALUES ($1::date, $2::date, $3::date, $4::date) ON CONFLICT (week_from) DO NOTHING`,
+			date(w.From), date(w.To), date(m.From), date(m.To))
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return nil // evaluated already
+		}
+		rows, err := tx.Query(ctx, `SELECT id, hospital_id, measure, direction FROM analytics_changes
+			WHERE closed_week IS NULL FOR UPDATE`)
+		if err != nil {
+			return err
+		}
+		open := map[string]uuid.UUID{}
+		for rows.Next() {
+			var id uuid.UUID
+			var h *uuid.UUID
+			var measure, dir string
+			if err := rows.Scan(&id, &h, &measure, &dir); err != nil {
+				rows.Close()
+				return err
+			}
+			f := analytics.Flag{Measure: measure, Direction: dir}
+			if h != nil {
+				f.Hospital = &analytics.Ref{ID: h.String()}
+			}
+			open[f.Key()] = id
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		flagged := map[string]bool{}
+		for _, f := range flags {
+			flagged[f.Key()] = true
+		}
+		// Close first: a change that turned round closes before its
+		// opposite opens.
+		for k, id := range open {
+			if flagged[k] {
+				continue
+			}
+			if _, err := tx.Exec(ctx, `UPDATE analytics_changes SET closed_week = $2::date WHERE id = $1`, id, date(w.From)); err != nil {
+				return err
+			}
+		}
+		for _, f := range flags {
+			cur, _ := f.Current.MarshalJSON()
+			prev, _ := f.Previous.MarshalJSON()
+			if id, ok := open[f.Key()]; ok {
+				if _, err := tx.Exec(ctx, `UPDATE analytics_changes SET current = $2::jsonb, previous = $3::jsonb, summary = $4,
+					last_week = $5::date WHERE id = $1`, id, string(cur), string(prev), f.Summary, date(w.From)); err != nil {
+					return err
+				}
+				continue
+			}
+			var h any
+			if f.Hospital != nil {
+				id, err := uuid.Parse(f.Hospital.ID)
+				if err != nil {
+					return err
+				}
+				h = id
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO analytics_changes (hospital_id, area, measure, direction, current, previous, summary,
+				opened_week, last_week) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8::date, $8::date)`,
+				h, f.Area, f.Measure, f.Direction, string(cur), string(prev), f.Summary, date(w.From)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

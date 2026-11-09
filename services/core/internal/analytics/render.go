@@ -42,6 +42,11 @@ type Out struct {
 	Alerts    any     `json:"alerts"`
 	Quality   any     `json:"quality"`
 	Hospitals any     `json:"hospitals"`
+	// WhatChanged is the changes area (Plan 7c-3). It is a property of its
+	// own because widening changes, typed {unavailable: true} in OpenAPI
+	// 1.13 and 1.14, would be a breaking change (ADR 0012, as R41a-4):
+	// changes stays {unavailable: true}.
+	WhatChanged any `json:"what_changed"`
 }
 
 // Unavailable is an area that can't be shown.
@@ -262,7 +267,7 @@ func window(k calendar.Kind, rows []Snapshot) (win []stored, degraded bool) {
 // order; rows of other kinds are ignored). degraded reports a stored body
 // that couldn't be read (served unavailable or hidden), for the log.
 func Render(k calendar.Kind, rows []Snapshot, epoch time.Time) (Out, bool) {
-	out := Out{Period: string(k), Changes: Unavailable{true}, Alerts: nil}
+	out := Out{Period: string(k), Changes: Unavailable{true}, Alerts: nil, WhatChanged: Unavailable{true}}
 	win, degraded := window(k, rows)
 	if len(win) == 0 {
 		ny := NotYet{NotYet: true, FirstFrom: Stamp(FirstEligible(k, epoch).From)}
