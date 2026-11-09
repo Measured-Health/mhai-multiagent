@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -15,15 +17,31 @@ import (
 // rewriting ages out on its own.
 type Loader struct {
 	Path string
+	Log  *slog.Logger
 	cur  atomic.Pointer[proxyconf.List]
+	// overlap is the last set of overlapping connections logged (Reload
+	// runs on one goroutine).
+	overlap string
 }
 
-// Reload reads the file and reports whether a list is now in use.
+// Reload reads the file and reports whether a list is now in use. When
+// connections are left out for overlapping ranges, it logs an alert, once
+// per change of that set.
 func (l *Loader) Reload() bool {
 	list, err := proxyconf.ReadFile(l.Path)
 	if err != nil {
 		l.cur.Store(nil)
 		return false
+	}
+	ids := make([]string, len(list.Overlapping))
+	for i, id := range list.Overlapping {
+		ids[i] = id.String()
+	}
+	if key := strings.Join(ids, ","); key != l.overlap {
+		l.overlap = key
+		if len(ids) > 0 && l.Log != nil {
+			l.Log.Error("allow_list_ranges_overlap", "code", "ranges_overlap", "alert", true, "connection_ids", ids)
+		}
 	}
 	l.cur.Store(list)
 	return true

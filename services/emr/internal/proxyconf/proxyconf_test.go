@@ -3,6 +3,7 @@ package proxyconf
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -46,8 +47,6 @@ func TestParseRefusals(t *testing.T) {
 		"cgnat range":     file(Conn{ID: idA, HospitalID: hA, Hosts: ok.Hosts, CIDRs: []string{"100.64.1.0/24"}}),
 		"ipv6 range":      file(Conn{ID: idA, HospitalID: hA, Hosts: ok.Hosts, CIDRs: []string{"fd00::/120"}}),
 		"too many hosts":  file(Conn{ID: idA, HospitalID: hA, Hosts: []string{"a.example.org:443", "b.example.org:443", "c.example.org:443", "d.example.org:443", "e.example.org:443"}}),
-		"overlap across hospitals": file(ok, Conn{ID: idB, HospitalID: hB, Hosts: []string{"fhir.hospital-b.example:443"},
-			CIDRs: []string{"10.99.1.128/25"}}),
 	}
 	for name, f := range bad {
 		if _, err := Marshal(f); !errors.Is(err, ErrMalformed) {
@@ -92,16 +91,17 @@ func TestFresh(t *testing.T) {
 func TestAuthorization(t *testing.T) {
 	key := bytes.Repeat([]byte{7}, KeyBytes)
 	a, b := uuid.MustParse(idA), uuid.MustParse(idB)
-	if id, ok := CheckAuthorization(key, Authorization(key, a)); !ok || id != a {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	if id, ok := CheckAuthorization(key, Authorization(key, a, now), now); !ok || id != a {
 		t.Fatalf("round trip: %v %v", id, ok)
 	}
-	if Token(key, a) == Token(key, b) || len(Token(key, a)) != 64 {
+	if Token(key, a, now) == Token(key, b, now) || len(Token(key, a, now)) != 64 {
 		t.Error("tokens")
 	}
-	if _, ok := CheckAuthorization(key, "basic "+strings.TrimPrefix(Authorization(key, a), "Basic ")); !ok {
+	if _, ok := CheckAuthorization(key, "basic "+strings.TrimPrefix(Authorization(key, a, now), "Basic "), now); !ok {
 		t.Error("the scheme is case-insensitive")
 	}
-	if _, ok := CheckAuthorization(key[:16], Authorization(key[:16], a)); ok {
+	if _, ok := CheckAuthorization(key[:16], Authorization(key[:16], a, now), now); ok {
 		t.Error("a short key was accepted")
 	}
 	if _, err := ParseKey([]byte(strings.Repeat("ab", 32) + "\n")); err != nil {
@@ -111,5 +111,54 @@ func TestAuthorization(t *testing.T) {
 		if _, err := ParseKey([]byte(bad)); !errors.Is(err, ErrKey) {
 			t.Errorf("key %q accepted", bad)
 		}
+	}
+}
+
+// Review item 5: a token is bound to its time window. One from the
+// neighbouring window is accepted (clock skew, a request at the edge);
+// one copied 15 minutes ago is refused, so a captured header stops
+// working on its own.
+func TestTokenBoundToTimeWindow(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, KeyBytes)
+	a := uuid.MustParse(idA)
+	now := time.Date(2026, 11, 9, 12, 2, 30, 0, time.UTC)
+	for d, want := range map[time.Duration]bool{0: true, -TokenWindow: true, TokenWindow: true,
+		-3 * TokenWindow: false, 3 * TokenWindow: false, -24 * time.Hour: false} {
+		if _, ok := CheckAuthorization(key, Authorization(key, a, now.Add(d)), now); ok != want {
+			t.Errorf("token made %s from now: accepted %v, want %v", d, ok, want)
+		}
+	}
+	if Token(key, a, now) == Token(key, a, now.Add(3*TokenWindow)) {
+		t.Error("the token doesn't change with the window")
+	}
+}
+
+// Review item 4: ranges that overlap across hospitals refuse only the
+// connections that hold them; the rest of the file is used. Ranges in one
+// /24 that don't overlap are both kept.
+func TestOverlapRefusesOnlyThoseConnections(t *testing.T) {
+	idC := "c0110000-0000-4000-8000-00000000000c"
+	hC := "0b1f0000-0000-4000-8000-00000000000c"
+	idD := "c0110000-0000-4000-8000-00000000000d"
+	b, err := Marshal(file(
+		Conn{ID: idA, HospitalID: hA, Hosts: []string{"fhir.hospital-a.example:443"}, CIDRs: []string{"10.99.1.0/24"}},
+		Conn{ID: idB, HospitalID: hB, Hosts: []string{"fhir.hospital-b.example:443"}, CIDRs: []string{"10.99.1.128/25"}},
+		Conn{ID: idC, HospitalID: hC, Hosts: []string{"fhir.hospital-c.example:443"}, CIDRs: []string{"10.99.7.0/25"}},
+		Conn{ID: idD, HospitalID: hA, Hosts: []string{"fhir.hospital-a.example:443"}, CIDRs: []string{"10.99.7.128/25"}},
+	))
+	if err != nil {
+		t.Fatalf("one overlap refused the whole file: %v", err)
+	}
+	l, err := Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]bool{idA: false, idB: false, idC: true, idD: true} {
+		if _, ok := l.Conns[uuid.MustParse(id)]; ok != want {
+			t.Errorf("%s listed %v, want %v", id, ok, want)
+		}
+	}
+	if len(l.Overlapping) != 2 || !slices.Contains(l.Overlapping, uuid.MustParse(idA)) || !slices.Contains(l.Overlapping, uuid.MustParse(idB)) {
+		t.Errorf("overlapping %v, want A and B", l.Overlapping)
 	}
 }

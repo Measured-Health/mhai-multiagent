@@ -28,12 +28,16 @@ import (
 // Synthetic test key, not a secret.
 var testKey = bytes.Repeat([]byte{0x5a}, proxyconf.KeyBytes)
 
+// testNow is the harness's clock.
+var testNow = time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+
 // fakeResolver answers each name from a queue of answers (the last one
 // repeats) and counts every lookup.
 type fakeResolver struct {
 	mu      sync.Mutex
 	answers map[string][][]netip.Addr
 	calls   map[string]int
+	asked   []string
 	delay   time.Duration
 }
 
@@ -50,6 +54,8 @@ func (r *fakeResolver) LookupNetIP(ctx context.Context, _, host string) ([]netip
 	if r.calls == nil {
 		r.calls = map[string]int{}
 	}
+	r.asked = append(r.asked, host)
+	host = strings.TrimSuffix(host, ".")
 	r.calls[host]++
 	q := r.answers[host]
 	if len(q) == 0 {
@@ -154,9 +160,9 @@ type harness struct {
 	mu   sync.Mutex
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T, opts ...func(*Proxy)) *harness {
 	t.Helper()
-	h := &harness{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC), dial: &fakeDialer{}, logs: &bytes.Buffer{},
+	h := &harness{now: testNow, dial: &fakeDialer{}, logs: &bytes.Buffer{},
 		res: &fakeResolver{answers: map[string][][]netip.Addr{
 			"fhir.hospital-a.example":     {addrs(publicAddr)},
 			"sftp.hospital-a.example":     {addrs(publicAddrTwo)},
@@ -177,6 +183,9 @@ func newHarness(t *testing.T) *harness {
 		Dialer:   h.dial,
 		Log:      logx.New(&syncWriter{w: h.logs, mu: &h.mu}),
 		Now:      func() time.Time { return h.now },
+	}
+	for _, o := range opts {
+		o(p)
 	}
 	h.srv = httptest.NewServer(p)
 	t.Cleanup(h.srv.Close)
@@ -239,7 +248,7 @@ func (h *harness) connect(t *testing.T, method, target, auth string) (int, http.
 	return resp.StatusCode, resp.Header, c
 }
 
-func authFor(id uuid.UUID) string { return proxyconf.Authorization(testKey, id) }
+func authFor(id uuid.UUID) string { return proxyconf.Authorization(testKey, id, testNow) }
 
 func expect(t *testing.T, h *harness, target, auth string, want int) {
 	t.Helper()
@@ -293,7 +302,7 @@ func TestCONNECTNotOnAllowList(t *testing.T) {
 		t.Errorf("dialled %v", d)
 	}
 	logs := h.logText()
-	for _, leak := range []string{"hospital-a", "unlisted", "x0123456789abcdef", publicAddr, "Basic", proxyconf.Token(testKey, connA)} {
+	for _, leak := range []string{"hospital-a", "unlisted", "x0123456789abcdef", publicAddr, "Basic", proxyconf.Token(testKey, connA, testNow)} {
 		if strings.Contains(logs, leak) {
 			t.Errorf("the log carries %q", leak)
 		}
@@ -349,11 +358,12 @@ func TestCrossConnectionRefused(t *testing.T) {
 	for name, auth := range map[string]string{
 		"no header":         "",
 		"forged token":      enc(connA.String() + ":" + strings.Repeat("0", 64)),
-		"A's id, B's token": enc(connA.String() + ":" + proxyconf.Token(testKey, connB)),
-		"another key":       proxyconf.Authorization(other, connA),
+		"A's id, B's token": enc(connA.String() + ":" + proxyconf.Token(testKey, connB, testNow)),
+		"another key":       proxyconf.Authorization(other, connA, testNow),
+		"an old token":      proxyconf.Authorization(testKey, connA, testNow.Add(-time.Hour)),
 		"id only":           enc(connA.String()),
-		"upper-case id":     enc(strings.ToUpper(connA.String()) + ":" + proxyconf.Token(testKey, connA)),
-		"bearer":            "Bearer " + proxyconf.Token(testKey, connA),
+		"upper-case id":     enc(strings.ToUpper(connA.String()) + ":" + proxyconf.Token(testKey, connA, testNow)),
+		"bearer":            "Bearer " + proxyconf.Token(testKey, connA, testNow),
 		"not base64":        "Basic %%%",
 	} {
 		got, hdr, _ := h.connect(t, http.MethodConnect, "fhir.hospital-a.example:443", auth)
@@ -484,5 +494,187 @@ func TestHalfClosedClientStillAnswered(t *testing.T) {
 	resp, err := http.ReadResponse(bufio.NewReader(c), &http.Request{Method: http.MethodConnect})
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("half-closed client: %v %v", resp, err)
+	}
+}
+
+// Review item 2: the one lookup is fully qualified (a trailing dot), so it
+// never falls back to the resolv.conf search suffixes: a listed name can't
+// be completed into a name under another domain.
+func TestLookupIsFullyQualified(t *testing.T) {
+	h := newHarness(t)
+	expect(t, h, "fhir.hospital-a.example:443", authFor(connA), http.StatusOK)
+	h.res.mu.Lock()
+	asked := append([]string(nil), h.res.asked...)
+	h.res.mu.Unlock()
+	if len(asked) != 1 || asked[0] != "fhir.hospital-a.example." {
+		t.Errorf("asked %q, want the fully qualified name", asked)
+	}
+}
+
+// Review item 1: Docker's default bridge (172.17.0.0/16, where the host's
+// docker0 gateway lives) and the host's own addresses are never reached,
+// even when a connection declares a range there.
+func TestHostAndBridgeAddressesRefused(t *testing.T) {
+	h := newHarness(t, func(p *Proxy) { p.Internal = append(p.Internal, prefixes("10.200.0.12/32")...) })
+	l := testList(h.now.Add(-time.Second))
+	e := l.Conns[connA]
+	e.CIDRs = append(e.CIDRs, prefixes("172.17.0.0/24", "10.200.0.0/24")...)
+	l.Conns[connA] = e
+	h.setList(l)
+	for _, ip := range []string{"172.17.0.1", "172.17.0.9", "10.200.0.12"} {
+		h.res.answers["inside.hospital-a.example"] = [][]netip.Addr{addrs(ip)}
+		expect(t, h, "inside.hospital-a.example:443", authFor(connA), http.StatusForbidden)
+	}
+	h.res.answers["inside.hospital-a.example"] = [][]netip.Addr{addrs("10.200.0.13")}
+	expect(t, h, "inside.hospital-a.example:443", authFor(connA), http.StatusOK)
+}
+
+// tcpDialer dials a real local listener whatever address it is given.
+type tcpDialer struct{ addr string }
+
+func (d tcpDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	var nd net.Dialer
+	return nd.DialContext(ctx, network, d.addr)
+}
+
+// upstream is a TCP server running serve on each connection.
+func upstream(t *testing.T, serve func(net.Conn)) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serve(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// Review item 3: a half-close passes through. The client sends a request
+// and shuts its write side; the upstream reads to EOF and only then
+// answers; the answer still reaches the client.
+func TestTunnelHalfClose(t *testing.T) {
+	addr := upstream(t, func(c net.Conn) {
+		defer func() { _ = c.Close() }()
+		b, _ := io.ReadAll(c)
+		_, _ = io.WriteString(c, "pong:"+string(b))
+	})
+	h := newHarness(t, func(p *Proxy) { p.Dialer = tcpDialer{addr} })
+	_, _, c := h.connect(t, http.MethodConnect, "fhir.hospital-a.example:443", authFor(connA))
+	if c == nil {
+		t.Fatal("no tunnel")
+	}
+	_, _ = io.WriteString(c, "ping")
+	if err := c.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(c)
+	if err != nil || string(b) != "pong:ping" {
+		t.Fatalf("after a half-close: %q %v", b, err)
+	}
+}
+
+// Review item 3: a tunnel ends at its maximum lifetime even while bytes
+// keep moving, and when idle.
+func TestTunnelLifetimeAndIdle(t *testing.T) {
+	addr := upstream(t, func(c net.Conn) { _, _ = io.Copy(c, c); _ = c.Close() })
+	h := newHarness(t, func(p *Proxy) {
+		p.Dialer = tcpDialer{addr}
+		p.MaxLifetime = 600 * time.Millisecond
+		p.IdleTimeout = 300 * time.Millisecond
+	})
+	_, _, c := h.connect(t, http.MethodConnect, "fhir.hospital-a.example:443", authFor(connA))
+	if c == nil {
+		t.Fatal("no tunnel")
+	}
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	start := time.Now()
+	buf := make([]byte, 1)
+	for {
+		if _, err := c.Write([]byte("x")); err != nil {
+			break
+		}
+		if _, err := c.Read(buf); err != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+		if time.Since(start) > 3*time.Second {
+			t.Fatal("a busy tunnel outlived its maximum lifetime")
+		}
+	}
+	if took := time.Since(start); took < 500*time.Millisecond {
+		t.Errorf("closed after %s, before the lifetime", took)
+	}
+	_, _, idle := h.connect(t, http.MethodConnect, "fhir.hospital-a.example:443", authFor(connA))
+	_ = idle.SetDeadline(time.Now().Add(5 * time.Second))
+	start = time.Now()
+	if _, err := idle.Read(buf); err == nil || time.Since(start) > 2*time.Second {
+		t.Errorf("an idle tunnel: %v after %s", err, time.Since(start))
+	}
+}
+
+// Review item 3: one connection can hold only its share of the tunnel
+// slots, so one hospital can't starve the others.
+func TestPerConnectionTunnelCap(t *testing.T) {
+	addr := upstream(t, func(c net.Conn) { _, _ = io.Copy(c, c); _ = c.Close() })
+	h := newHarness(t, func(p *Proxy) {
+		p.Dialer = tcpDialer{addr}
+		p.MaxTunnels = 4
+		p.MaxPerConnection = 2
+	})
+	for i := 0; i < 2; i++ {
+		if got, _, _ := h.connect(t, http.MethodConnect, "fhir.hospital-a.example:443", authFor(connA)); got != http.StatusOK {
+			t.Fatalf("A's tunnel %d: %d", i, got)
+		}
+	}
+	expect(t, h, "fhir.hospital-a.example:443", authFor(connA), http.StatusServiceUnavailable)
+	expect(t, h, "fhir.hospital-b.example:443", authFor(connB), http.StatusOK)
+}
+
+// Review item 4: a file whose ranges overlap across hospitals is still
+// used for every other connection; the connections involved are refused,
+// and the overlap is logged at error level as an alert.
+func TestOverlapLoggedOthersServed(t *testing.T) {
+	var logs bytes.Buffer
+	var mu sync.Mutex
+	path := filepath.Join(t.TempDir(), proxyconf.FileName)
+	l := &Loader{Path: path, Log: logx.New(&syncWriter{w: &logs, mu: &mu})}
+	b, err := proxyconf.Marshal(proxyconf.File{GeneratedAt: testNow, Connections: []proxyconf.Conn{
+		{ID: connA.String(), HospitalID: hospA.String(), Hosts: []string{"fhir.hospital-a.example:443"}, CIDRs: []string{"10.99.1.0/24"}},
+		{ID: connB.String(), HospitalID: hospB.String(), Hosts: []string{"fhir.hospital-b.example:443"}, CIDRs: []string{"10.99.1.0/25"}},
+		{ID: connA2.String(), HospitalID: hospA.String(), Hosts: []string{"a2.hospital-a.example:443"}, CIDRs: []string{}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l.Reload()
+	cur := l.Current()
+	if cur == nil {
+		t.Fatal("an overlap refused the whole list")
+	}
+	if _, ok := cur.Conns[connA2]; !ok {
+		t.Error("an uninvolved connection was dropped")
+	}
+	for _, id := range []uuid.UUID{connA, connB} {
+		if _, ok := cur.Conns[id]; ok {
+			t.Errorf("%s, holding an overlapping range, is listed", id)
+		}
+	}
+	mu.Lock()
+	out := logs.String()
+	mu.Unlock()
+	if !strings.Contains(out, `"level":"ERROR"`) || !strings.Contains(out, "ranges_overlap") ||
+		!strings.Contains(out, connA.String()) || !strings.Contains(out, connB.String()) {
+		t.Errorf("the overlap wasn't alerted:\n%s", out)
 	}
 }

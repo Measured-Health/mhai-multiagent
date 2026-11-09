@@ -343,9 +343,12 @@ services:
   # once and the checked address dialled. With no fresh allow-list (written
   # by the emr service) it refuses everything. Off by default (profile
   # emr); the demo never starts it. K_proxy is the 0400 file
-  # secrets/emr-proxy.key owned by 65532 (emr keys proxy-init writes one);
-  # EGRESS_EMR_INTERNAL_CIDRS is the backend network's subnet, never
-  # reached even when declared (deploy/egress-emr/test-egress.sh).
+  # secrets/emr-proxy.key owned by 65532 (emr keys proxy-init writes one).
+  # EGRESS_EMR_INTERNAL_CIDRS must be set in .env: the backend network's
+  # subnet (docker network inspect mhai-backend_backend) and the host's own
+  # addresses (its VPC address, /32), never reached even when declared. It
+  # runs as production, so it refuses to start without them. The backend
+  # network keeps its subnet (fixing one would recreate it under the demo).
   egress-emr:
     <<: *hardening
     image: ${EMR_IMAGE:-ghcr.io/measured-health/mhai-multiagent-emr:latest}
@@ -358,6 +361,7 @@ services:
     environment:
       EGRESS_EMR_ALLOW_LIST: /emr-egress/allow.json
       EGRESS_EMR_KEY_PATH: /run/secrets/emr-proxy.key
+      EGRESS_EMR_ENV: production
       EGRESS_EMR_INTERNAL_CIDRS: ${EGRESS_EMR_INTERNAL_CIDRS:-}
     volumes:
       - emr-egress-conf:/emr-egress:ro

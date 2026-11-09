@@ -45,7 +45,11 @@ conn_a=c0110000-0000-4000-8000-00000000000a
 conn_b=c0110000-0000-4000-8000-00000000000b
 conn_a3=c0110000-0000-4000-8000-0000000000a3
 
-token() { printf '%s' "$1" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$khex" -r | cut -d' ' -f1; }
+# The token is bound to its 5-minute window: HMAC(K_proxy, "<id>|<window>").
+token() { # $1 id, $2 window offset (default 0)
+  local w=$(( $(date +%s) / 300 + ${2:-0} ))
+  printf '%s|%s' "$1" "$w" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$khex" -r | cut -d' ' -f1
+}
 basic() { printf 'Basic %s' "$(printf '%s:%s' "$1" "$2" | base64 -w0)"; }
 auth_a=$(basic "$conn_a" "$(token "$conn_a")")
 auth_b=$(basic "$conn_b" "$(token "$conn_b")")
@@ -91,7 +95,20 @@ proxy_net=$(subnet emr-proxy)
 first24() { echo "$1" | awk -F'[./]' '{print $1"."$2"."$3".0/24"}'; }
 addr7() { echo "$1" | awk -F'[./]' '{print $1"."$2"."$3".7"}'; }
 backend24=$(first24 "$backend_net"); proxy24=$(first24 "$proxy_net")
+# The host's own address (where sshd listens), named to the proxy as an
+# operator would.
+hostip=$(hostname -I | awk '{print $1}')
 echo "backend $backend_net, emr-proxy $proxy_net"
+
+# Outside development the proxy refuses to start without the internal
+# networks.
+if out=$(docker run --rm --entrypoint /egress-emr -e EGRESS_EMR_ALLOW_LIST=/none -e EGRESS_EMR_KEY_PATH=/none "$image" 2>&1); then
+  echo "FAIL egress-emr started in production with no EGRESS_EMR_INTERNAL_CIDRS"; startfail=1
+elif printf '%s' "$out" | grep -q EGRESS_EMR_INTERNAL_CIDRS; then
+  echo "ok   egress-emr refuses to start in production without EGRESS_EMR_INTERNAL_CIDRS"; startfail=0
+else
+  echo "FAIL egress-emr refused to start for another reason: $out"; startfail=1
+fi
 
 # Phase 2: the proxy, with the test's allow-list directory and key, and
 # /etc/hosts names for the private-address cases (the Go resolver reads it
@@ -104,20 +121,25 @@ $(probe_service)
       - $work/conf:/emr-egress:ro
       - $work/k_proxy:/run/secrets/emr-proxy.key:ro
     environment:
-      EGRESS_EMR_INTERNAL_CIDRS: "$backend_net"
+      EGRESS_EMR_INTERNAL_CIDRS: "$backend_net,$hostip/32"
     extra_hosts:
       - "inside.hospital-a.example:10.99.1.5"
       - "vpn-b.hospital-a.example:10.99.2.5"
       - "meta.hospital-a.example:169.254.169.254"
       - "internal.hospital-a.example:$(addr7 "$backend_net")"
       - "proxynet.hospital-a.example:$(addr7 "$proxy_net")"
+      - "docker0.hospital-a.example:172.17.0.1"
+      - "hostself.hospital-a.example:$hostip"
 YML
 
+# The host's /24 is declared too when it is declarable (RFC 1918).
+case "$hostip" in 10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) host24=",\"$(first24 "$hostip/32")\"";; *) host24="";; esac
+[ "$(first24 "$hostip/32")" = 172.17.0.0/24 ] && host24=""
 write_list() { # $1: generated_at
   cat > "$work/conf/allow.json.tmp" <<JSON
 {"generated_at":"$1","connections":[
  {"id":"$conn_a","hospital_id":"$hosp_a","hosts":["example.com:443","inside.hospital-a.example:443","vpn-b.hospital-a.example:443","meta.hospital-a.example:443"],"cidrs":["10.99.1.0/24"]},
- {"id":"$conn_a3","hospital_id":"$hosp_a","hosts":["internal.hospital-a.example:443","proxynet.hospital-a.example:443"],"cidrs":["$backend24","$proxy24"]},
+ {"id":"$conn_a3","hospital_id":"$hosp_a","hosts":["internal.hospital-a.example:443","proxynet.hospital-a.example:443","docker0.hospital-a.example:443","hostself.hospital-a.example:22"],"cidrs":["$backend24","$proxy24","172.17.0.0/24"$host24]},
  {"id":"$conn_b","hospital_id":"$hosp_b","hosts":["fhir.hospital-b.example:443"],"cidrs":["10.99.2.0/24"]}]}
 JSON
   chmod 0644 "$work/conf/allow.json.tmp"
@@ -151,7 +173,7 @@ status() { # $1 method, $2 target, $3 Proxy-Authorization ('' for none), $4 Host
   compose exec -T emr-probe sh -c "printf '$1 $2 HTTP/1.1\r\nHost: ${4:-$2}\r\n$hdr\r\n' | timeout 20 nc -w 15 egress-emr 3128 | head -n1 | cut -d' ' -f2" 2>/dev/null || true
 }
 
-fail=0
+fail=$startfail
 expect() { # $1 target, $2 auth, $3 want, $4 why
   local got
   got=$(status CONNECT "$1" "$2")
@@ -162,6 +184,7 @@ nonce="x$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 expect example.com:443 "" 407 "no Proxy-Authorization"
 expect example.com:443 "$(basic "$conn_a" "$(printf '0%.0s' $(seq 1 64))")" 407 "forged token"
 expect example.com:443 "$(basic "$conn_a" "$(token "$conn_b")")" 407 "A's id with B's token"
+expect example.com:443 "$(basic "$conn_a" "$(token "$conn_a" -3)")" 407 "A's token from 15 minutes ago"
 expect fhir.hospital-b.example:443 "$auth_a" 403 "A37: B's host with A's connection"
 expect example.com:443 "$auth_b" 403 "A37: A's host with B's connection"
 expect www.iana.org:443 "$auth_a" 403 "A6: a name off the list"
@@ -173,6 +196,8 @@ expect meta.hospital-a.example:443 "$auth_a" 403 "A29: a listed name answering t
 expect vpn-b.hospital-a.example:443 "$auth_a" 403 "A37: a listed name answering inside B's range"
 expect internal.hospital-a.example:443 "$auth_a3" 403 "the backend network, though declared"
 expect proxynet.hospital-a.example:443 "$auth_a3" 403 "the proxy's own network, though declared"
+expect docker0.hospital-a.example:443 "$auth_a3" 403 "Docker's default bridge gateway, though declared"
+expect hostself.hospital-a.example:22 "$auth_a3" 403 "the host's own address (sshd)"
 expect inside.hospital-a.example:443 "$auth_a" 502 "A's own declared range: checked, dialled, nothing there"
 expect inside.hospital-a.example:443 "$auth_a3" 403 "A37: A's host with A3's connection, same hospital"
 expect example.com:443 "$auth_a" 200 "A's listed public host"

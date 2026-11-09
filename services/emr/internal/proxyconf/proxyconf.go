@@ -21,6 +21,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,6 +81,10 @@ type Entry struct {
 type List struct {
 	GeneratedAt time.Time
 	Conns       map[uuid.UUID]Entry
+	// Overlapping are the connections left out because one of their
+	// ranges overlaps a range of another hospital's (A37): an alert for a
+	// person, never a reason to refuse the other connections.
+	Overlapping []uuid.UUID
 }
 
 // Fresh reports whether l may be used at now: generated at most MaxAge
@@ -111,8 +116,10 @@ func Marshal(f File) ([]byte, error) {
 
 // Parse reads and checks an allow-list: one JSON object, no unknown field,
 // canonical non-nil ids each once, valid hosts and declarable ranges
-// within the limits, and no range of one hospital overlapping another
-// hospital's (A37; migration 00020 refuses that too).
+// within the limits; anything else refuses the whole file. A connection
+// with a range that overlaps another hospital's (A37; migration 00020
+// refuses that too) is left out, with every connection it overlaps, and
+// named in Overlapping; the others are kept.
 func Parse(b []byte) (*List, error) {
 	if len(b) == 0 || len(b) > MaxFileBytes {
 		return nil, ErrMalformed
@@ -128,7 +135,12 @@ func Parse(b []byte) (*List, error) {
 		return nil, ErrMalformed // trailing data
 	}
 	l := &List{GeneratedAt: f.GeneratedAt, Conns: make(map[uuid.UUID]Entry, len(f.Connections))}
-	owner := map[netip.Prefix]uuid.UUID{} // the /24 holding each range, and its hospital
+	type held struct {
+		p        netip.Prefix
+		hospital uuid.UUID
+		conn     uuid.UUID
+	}
+	byKey := map[netip.Prefix][]held{} // the /24 holding each range
 	for _, c := range f.Connections {
 		id, ok1 := canonicalID(c.ID)
 		hid, ok2 := canonicalID(c.HospitalID)
@@ -155,14 +167,26 @@ func Parse(b []byte) (*List, error) {
 			// A declarable range is at most a /24, so it overlaps another
 			// only inside the same /24.
 			key := netip.PrefixFrom(p.Addr(), 24).Masked()
-			if other, seen := owner[key]; seen && other != hid {
-				return nil, ErrMalformed
-			}
-			owner[key] = hid
+			byKey[key] = append(byKey[key], held{p, hid, id})
 			e.CIDRs = append(e.CIDRs, p)
 		}
 		l.Conns[id] = e
 	}
+	bad := map[uuid.UUID]bool{}
+	for _, hs := range byKey {
+		for i := range hs {
+			for j := i + 1; j < len(hs); j++ {
+				if hs[i].hospital != hs[j].hospital && hs[i].p.Overlaps(hs[j].p) {
+					bad[hs[i].conn], bad[hs[j].conn] = true, true
+				}
+			}
+		}
+	}
+	for id := range bad {
+		delete(l.Conns, id)
+		l.Overlapping = append(l.Overlapping, id)
+	}
+	slices.SortFunc(l.Overlapping, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
 	return l, nil
 }
 
@@ -283,23 +307,38 @@ func ReadKey(path string) ([]byte, error) {
 	return ParseKey(b)
 }
 
-// Token is hex(HMAC-SHA256(key, connection id)).
-func Token(key []byte, id uuid.UUID) string {
+// TokenWindow is how long a Proxy-Authorization token is made for. The
+// proxy accepts the current window and its two neighbours (clock skew, a
+// request at the edge), so a captured header stops working within three
+// windows on its own.
+const TokenWindow = 5 * time.Minute
+
+func window(at time.Time) int64 {
+	return at.Unix() / int64(TokenWindow/time.Second)
+}
+
+func tokenAt(key []byte, id uuid.UUID, w int64) string {
 	m := hmac.New(sha256.New, key)
-	m.Write([]byte(id.String()))
+	m.Write([]byte(id.String() + "|" + strconv.FormatInt(w, 10)))
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// Authorization is the Proxy-Authorization value for connection id:
-// Basic base64(<id>:<Token>).
-func Authorization(key []byte, id uuid.UUID) string {
-	return "Basic " + base64.StdEncoding.EncodeToString([]byte(id.String()+":"+Token(key, id)))
+// Token is hex(HMAC-SHA256(key, "<connection id>|<window of at>")).
+func Token(key []byte, id uuid.UUID, at time.Time) string {
+	return tokenAt(key, id, window(at))
+}
+
+// Authorization is the Proxy-Authorization value for connection id at
+// time at: Basic base64(<id>:<Token>).
+func Authorization(key []byte, id uuid.UUID, at time.Time) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(id.String()+":"+Token(key, id, at)))
 }
 
 // CheckAuthorization reads a Proxy-Authorization value and returns the
-// connection id it names when its token is K_proxy's for that id
-// (constant-time). Anything else is false, with the nil id.
-func CheckAuthorization(key []byte, header string) (uuid.UUID, bool) {
+// connection id it names when its token is K_proxy's for that id in the
+// window of now or a neighbouring one (each compared in constant time,
+// all three always). Anything else is false, with the nil id.
+func CheckAuthorization(key []byte, header string, now time.Time) (uuid.UUID, bool) {
 	scheme, cred, ok := strings.Cut(header, " ")
 	if !ok || !strings.EqualFold(scheme, "Basic") || len(cred) > 256 {
 		return uuid.Nil, false
@@ -316,7 +355,13 @@ func CheckAuthorization(key []byte, header string) (uuid.UUID, bool) {
 	if !ok || len(key) != KeyBytes {
 		return uuid.Nil, false
 	}
-	if !hmac.Equal([]byte(Token(key, id)), []byte(tok)) {
+	w, match := window(now), false
+	for _, d := range []int64{-1, 0, 1} {
+		if hmac.Equal([]byte(tokenAt(key, id, w+d)), []byte(tok)) {
+			match = true
+		}
+	}
+	if !match {
 		return uuid.Nil, false
 	}
 	return id, true

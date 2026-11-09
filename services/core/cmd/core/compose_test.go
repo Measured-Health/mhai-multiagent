@@ -1214,3 +1214,40 @@ func TestEMRNeverOnEgressNetwork(t *testing.T) {
 		}
 	}
 }
+
+// EMR PR 4 review item 1: egress-emr is told the backend subnet
+// explicitly. In docker-compose.yml the backend network has a fixed
+// subnet and egress-emr's EGRESS_EMR_INTERNAL_CIDRS defaults to it; in
+// deploy/compose.yml (whose backend can't change under the running demo)
+// the operator sets it, and egress-emr runs as production there, so it
+// refuses to start without it.
+func TestEgressEMRToldBackendSubnet(t *testing.T) {
+	var dev struct {
+		Services map[string]deployService `yaml:"services"`
+		Networks map[string]struct {
+			IPAM struct {
+				Config []struct {
+					Subnet string `yaml:"subnet"`
+				} `yaml:"config"`
+			} `yaml:"ipam"`
+		} `yaml:"networks"`
+	}
+	if err := yaml.Unmarshal([]byte(readRepoFile(t, "docker-compose.yml")), &dev); err != nil {
+		t.Fatal(err)
+	}
+	cfg := dev.Networks["backend"].IPAM.Config
+	if len(cfg) != 1 || cfg[0].Subnet == "" {
+		t.Fatalf("docker-compose.yml: backend has no fixed subnet: %+v", cfg)
+	}
+	env := dev.Services["egress-emr"].Environment
+	if got := env["EGRESS_EMR_INTERNAL_CIDRS"]; !strings.Contains(got, strings.TrimPrefix(strings.TrimSuffix(cfg[0].Subnet, "}"), "${EMR_BACKEND_SUBNET:-")) || got == "" {
+		t.Errorf("docker-compose.yml: EGRESS_EMR_INTERNAL_CIDRS %q doesn't name the backend subnet %q", got, cfg[0].Subnet)
+	}
+	dep := loadDeployCompose(t).Services["egress-emr"].Environment
+	if _, ok := dep["EGRESS_EMR_INTERNAL_CIDRS"]; !ok {
+		t.Error("deploy/compose.yml: egress-emr doesn't take EGRESS_EMR_INTERNAL_CIDRS")
+	}
+	if e := dep["EGRESS_EMR_ENV"]; e != "" && e != "production" && e != "staging" {
+		t.Errorf("deploy/compose.yml: EGRESS_EMR_ENV %q: the demo's proxy must require the internal networks", e)
+	}
+}

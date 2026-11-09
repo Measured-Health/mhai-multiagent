@@ -49,6 +49,13 @@ var refusedV4 = mustPrefixes(
 	"240.0.0.0/4",     // reserved, with broadcast 255.255.255.255
 )
 
+// hostSide are never reached, declared or not: Docker's default bridge,
+// whose gateway is the host itself (docker0). The host's other addresses
+// are found at start (routing-table gateways, the proxy's own networks)
+// or named in EGRESS_EMR_INTERNAL_CIDRS, which is required outside
+// development.
+var hostSide = mustPrefixes("172.17.0.0/16")
+
 // privateV4 are reached only inside the connection's declared ranges.
 var privateV4 = mustPrefixes("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 
@@ -77,7 +84,7 @@ func inAny(a netip.Addr, ps []netip.Prefix) bool {
 // ranges, given the internal networks.
 func allowed(a netip.Addr, declared, internal []netip.Prefix) bool {
 	a = a.WithZone("").Unmap()
-	if !a.IsValid() || inAny(a, internal) {
+	if !a.IsValid() || inAny(a, internal) || inAny(a, hostSide) {
 		return false
 	}
 	if a.Is4() {

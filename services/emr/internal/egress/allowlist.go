@@ -164,6 +164,15 @@ func (w *Writer) WriteOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Ranges that overlap across hospitals (A37): the proxy leaves those
+	// connections out and serves the rest. A person must act: alert.
+	if l, err := proxyconf.Parse(b); err == nil && len(l.Overlapping) > 0 && w.Log != nil {
+		ids := make([]string, len(l.Overlapping))
+		for i, id := range l.Overlapping {
+			ids[i] = id.String()
+		}
+		w.Log.Error("allow_list_ranges_overlap", "code", "ranges_overlap", "alert", true, "connection_ids", ids)
+	}
 	if err := writeAtomic(w.Dir, b); err != nil {
 		return err
 	}

@@ -293,9 +293,10 @@ services:
   # proxy. It resolves an allowed name once, checks every address and dials
   # the one it checked; it refuses everything without a fresh allow-list.
   # No database, no NATS, no secret but K_proxy. EGRESS_EMR_INTERNAL_CIDRS
-  # names the backend network's subnet (docker network inspect
-  # mhai_backend), never reached even when a connection declares it; the
-  # proxy adds its own networks itself.
+  # names the backend network's fixed subnet (EMR_BACKEND_SUBNET, below)
+  # and, outside development, the host's own addresses: never reached even
+  # when a connection declares them. The proxy adds its own networks, its
+  # routing table's gateways and Docker's default bridge itself.
   egress-emr:
     image: mhai-emr:local
     profiles: ["emr"]
@@ -305,7 +306,8 @@ services:
     environment:
       EGRESS_EMR_ALLOW_LIST: /emr-egress/allow.json
       EGRESS_EMR_KEY_PATH: /emr-proxy-key/k_proxy
-      EGRESS_EMR_INTERNAL_CIDRS: ${EGRESS_EMR_INTERNAL_CIDRS:-}
+      EGRESS_EMR_ENV: development
+      EGRESS_EMR_INTERNAL_CIDRS: ${EGRESS_EMR_INTERNAL_CIDRS:-${EMR_BACKEND_SUBNET:-10.231.0.0/24}}
     volumes:
       - emr-egress-conf:/emr-egress:ro
       - emr-proxy-key:/emr-proxy-key:ro
@@ -461,9 +463,14 @@ volumes:
 
 networks:
   default: {}
-  # Internal (no route out): Postgres and NATS for the emr service.
+  # Internal (no route out): Postgres and NATS for the emr service. Its
+  # subnet is fixed so egress-emr can be told it (EGRESS_EMR_INTERNAL_CIDRS);
+  # set EMR_BACKEND_SUBNET if 10.231.0.0/24 is taken on your machine.
   backend:
     internal: true
+    ipam:
+      config:
+        - subnet: ${EMR_BACKEND_SUBNET:-10.231.0.0/24}
   # Internal: the emr service and egress-emr only (profile emr).
   emr-proxy:
     internal: true

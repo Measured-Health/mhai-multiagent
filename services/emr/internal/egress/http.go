@@ -9,6 +9,7 @@
 package egress
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -70,20 +71,21 @@ func HTTP(conn connector.Config, proxyURL *url.URL, key []byte) *http.Client {
 // newHTTP is HTTP with roots, for tests (nil: the system roots).
 func newHTTP(conn connector.Config, proxyURL *url.URL, key []byte, roots *x509.CertPool) *http.Client {
 	origins := slices.Clone(conn.Origin)
-	var auth string
-	if len(key) == proxyconf.KeyBytes {
-		auth = proxyconf.Authorization(key, conn.ConnectionID)
-	}
+	usable := len(key) == proxyconf.KeyBytes
+	id := conn.ConnectionID
 	t := &http.Transport{
 		// Fail closed: with no proxy or key there is no way out at all,
 		// never a direct connection.
 		Proxy: func(*http.Request) (*url.URL, error) {
-			if proxyURL == nil || proxyURL.Scheme != "http" || auth == "" {
+			if proxyURL == nil || proxyURL.Scheme != "http" || !usable {
 				return nil, ErrProxy
 			}
 			return proxyURL, nil
 		},
-		ProxyConnectHeader:     http.Header{"Proxy-Authorization": {auth}},
+		// Made for each CONNECT: the token is bound to its time window.
+		GetProxyConnectHeader: func(context.Context, *url.URL, string) (http.Header, error) {
+			return http.Header{"Proxy-Authorization": {proxyconf.Authorization(key, id, time.Now())}}, nil
+		},
 		DialContext:            (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots},
 		ForceAttemptHTTP2:      true,

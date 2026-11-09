@@ -134,6 +134,13 @@ func (c *captured) count() int {
 	return c.hits
 }
 
+// authFor reports whether a Proxy-Authorization value is K_proxy's, now,
+// for connection id.
+func authFor(header string, id uuid.UUID) bool {
+	got, ok := proxyconf.CheckAuthorization(testKey, header, time.Now())
+	return ok && got == id
+}
+
 const (
 	hostA = "fhir.hospital-a.example"
 	hostB = "evil.hospital-b.example"
@@ -216,7 +223,7 @@ func TestCredentialOnlyToOrigin(t *testing.T) {
 		}
 	}
 	req, _ := http.NewRequest(http.MethodGet, "https://"+hostA+"/r4/metadata", nil)
-	req.Header.Set("Proxy-Authorization", proxyconf.Authorization(testKey, uuid.New()))
+	req.Header.Set("Proxy-Authorization", proxyconf.Authorization(testKey, uuid.New(), time.Now()))
 	if _, err := c.Do(req); !errors.Is(err, ErrOrigin) {
 		t.Errorf("caller-set Proxy-Authorization: %v, want ErrOrigin", err)
 	}
@@ -235,7 +242,7 @@ func TestCredentialOnlyToOrigin(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	seen, auths := p.connects()
-	if len(seen) != 1 || seen[0] != hostA+":443" || auths[0] != proxyconf.Authorization(testKey, connA.ConnectionID) {
+	if len(seen) != 1 || seen[0] != hostA+":443" || !authFor(auths[0], connA.ConnectionID) {
 		t.Errorf("CONNECT %v with %v", seen, auths)
 	}
 	if a.count() != 1 || a.auth[0] != tokenCanary {
@@ -399,7 +406,7 @@ func TestSSHHostKeyPinned(t *testing.T) {
 	}
 	seen, auths := p.connects()
 	for i := range seen {
-		if seen[i] != sftpHost+":22" || auths[i] != proxyconf.Authorization(testKey, conn.ConnectionID) {
+		if seen[i] != sftpHost+":22" || !authFor(auths[i], conn.ConnectionID) {
 			t.Errorf("CONNECT %s with %q", seen[i], auths[i])
 		}
 	}
@@ -412,5 +419,58 @@ func TestSSHHostKeyPinned(t *testing.T) {
 	bu, _ := url.Parse(bad.URL)
 	if _, err := SSH(ctx, conn, bu, testKey, conn.Origin[0], good, "synthetic-user", auth); !errors.Is(err, ErrProxy) {
 		t.Errorf("a refusing proxy: %v, want ErrProxy", err)
+	}
+}
+
+// Review item 3: the SSH connection keeps a bounded deadline after the
+// handshake (the caller's, at most MaxSession), never none: past it the
+// connection is closed.
+func TestSSHSessionDeadlineBounded(t *testing.T) {
+	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+	signer, _ := ssh.NewSignerFromKey(hostKey)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	cfg := &ssh.ServerConfig{PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) { return nil, nil }}
+	cfg.AddHostKey(signer)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				sc, chans, reqs, err := ssh.NewServerConn(c, cfg)
+				if err != nil {
+					return
+				}
+				go ssh.DiscardRequests(reqs)
+				for ch := range chans {
+					_ = ch.Reject(ssh.Prohibited, "test")
+				}
+				_ = sc.Close()
+			}()
+		}
+	}()
+	host := "sftp.hospital-a.example"
+	p := newFakeProxy(t, map[string]string{host + ":22": ln.Addr().String()})
+	conn := connA
+	conn.Type, conn.Origin = "file_export", []emrurl.Origin{emrurl.Origin("sftp://" + host + ":22")}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	c, err := SSH(ctx, conn, p.url(), testKey, conn.Origin[0], ssh.FingerprintSHA256(signer.PublicKey()), "synthetic-user",
+		[]ssh.AuthMethod{ssh.Password("synthetic-password-not-real")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if _, _, err := c.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+		t.Fatalf("within the deadline: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+	if _, _, err := c.SendRequest("keepalive@openssh.com", true, nil); err == nil {
+		t.Error("the connection outlived its deadline")
 	}
 }

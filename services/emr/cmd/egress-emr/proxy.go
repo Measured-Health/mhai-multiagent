@@ -15,8 +15,10 @@ package main
 //     may reach (resolve.go; 403), else nothing is dialled;
 //  6. dial the checked address itself (an IPv4 one first), never the name:
 //     no second lookup, so a rebinding answer can't swap in another;
-//  7. 200, then bytes both ways until either side closes or both are idle
-//     for IdleTimeout.
+//  7. 200, then bytes both ways, a half-close passed through, until both
+//     sides have closed, both are idle for IdleTimeout, or MaxLifetime.
+//     One connection holds at most MaxPerConnection of the MaxTunnels
+//     slots, so one hospital can't starve the others.
 //
 // One log line per CONNECT: the connection id (once authenticated), the
 // decision code, the status, the port and a hash of the host. Never the
@@ -27,6 +29,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -44,10 +47,12 @@ import (
 
 // Defaults.
 const (
-	LookupTimeout = 5 * time.Second
-	DialTimeout   = 10 * time.Second
-	IdleTimeout   = 60 * time.Second
-	MaxTunnels    = 256
+	LookupTimeout    = 5 * time.Second
+	DialTimeout      = 10 * time.Second
+	IdleTimeout      = 60 * time.Second
+	MaxLifetime      = 30 * time.Minute
+	MaxTunnels       = 256
+	MaxPerConnection = 32
 )
 
 // Proxy is egress-emr's handler.
@@ -62,12 +67,48 @@ type Proxy struct {
 	Dialer   Dialer
 	Log      *slog.Logger
 	Now      func() time.Time
-	// IdleTimeout and MaxTunnels default to the constants above.
-	IdleTimeout time.Duration
-	MaxTunnels  int
+	// IdleTimeout, MaxLifetime, MaxTunnels and MaxPerConnection default
+	// to the constants above.
+	IdleTimeout      time.Duration
+	MaxLifetime      time.Duration
+	MaxTunnels       int
+	MaxPerConnection int
 
-	once sync.Once
-	sem  chan struct{}
+	mu    sync.Mutex
+	total int
+	per   map[uuid.UUID]int
+}
+
+// acquire takes a tunnel slot for connection id, within both caps.
+func (p *Proxy) acquire(id uuid.UUID) (release func(), ok bool) {
+	limit, each := p.MaxTunnels, p.MaxPerConnection
+	if limit <= 0 {
+		limit = MaxTunnels
+	}
+	if each <= 0 {
+		each = MaxPerConnection
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.per == nil {
+		p.per = map[uuid.UUID]int{}
+	}
+	if p.total >= limit || p.per[id] >= each {
+		return nil, false
+	}
+	p.total++
+	p.per[id]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.total--
+			if p.per[id]--; p.per[id] <= 0 {
+				delete(p.per, id)
+			}
+		})
+	}, true
 }
 
 // HostHash is how a host appears in the log: the first 16 hex characters
@@ -118,7 +159,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.refuse(w, ev, "not_connect", http.StatusMethodNotAllowed)
 		return
 	}
-	id, ok := proxyconf.CheckAuthorization(p.Key, r.Header.Get("Proxy-Authorization"))
+	id, ok := proxyconf.CheckAuthorization(p.Key, r.Header.Get("Proxy-Authorization"), p.now())
 	if !ok {
 		w.Header().Set("Proxy-Authenticate", `Basic realm="egress-emr"`)
 		p.refuse(w, ev, "proxy_auth", http.StatusProxyAuthRequired)
@@ -159,7 +200,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// not by the request: a client that half-closes after its request (as
 	// nc does) cancels the request's context but still awaits the answer.
 	lctx, cancel := context.WithTimeout(context.Background(), LookupTimeout)
-	answer, err := p.Resolver.LookupNetIP(lctx, "ip", host)
+	// Fully qualified: never completed with a resolv.conf search suffix.
+	answer, err := p.Resolver.LookupNetIP(lctx, "ip", host+".")
 	cancel()
 	if err != nil || len(answer) == 0 {
 		p.refuse(w, ev, "lookup_failed", http.StatusBadGateway)
@@ -181,20 +223,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	n, _ := strconv.ParseUint(port, 10, 16) // 443 or 22: ValidHost checked
 	dst := netip.AddrPortFrom(pick.WithZone(""), uint16(n))
 
-	p.once.Do(func() {
-		size := p.MaxTunnels
-		if size <= 0 {
-			size = MaxTunnels
-		}
-		p.sem = make(chan struct{}, size)
-	})
-	select {
-	case p.sem <- struct{}{}:
-	default:
+	release, ok := p.acquire(id)
+	if !ok {
 		p.refuse(w, ev, "busy", http.StatusServiceUnavailable)
 		return
 	}
-	release := func() { <-p.sem }
 
 	dctx, dcancel := context.WithTimeout(context.Background(), DialTimeout)
 	up, err := p.Dialer.DialContext(dctx, "tcp", dst.String())
@@ -238,46 +271,75 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		idle := p.IdleTimeout
+		idle, life := p.IdleTimeout, p.MaxLifetime
 		if idle <= 0 {
 			idle = IdleTimeout
 		}
-		tunnel(c, up, idle)
+		if life <= 0 {
+			life = MaxLifetime
+		}
+		tunnel(c, up, idle, life)
 	}()
 }
 
-// tunnel copies both ways until one side closes, or until neither side has
-// moved a byte for idle.
-func tunnel(a, b net.Conn, idle time.Duration) {
+// tunnel copies both ways. When one side closes its write half, the
+// other side's write half is closed too (where the connection allows it)
+// and the other direction goes on. It ends when both directions have
+// finished, when neither side has moved a byte for idle, or at life.
+func tunnel(a, b net.Conn, idle, life time.Duration) {
+	end := time.Now().Add(life)
 	var last atomic.Int64
 	last.Store(time.Now().UnixNano())
+	var once sync.Once
+	abort := func() {
+		once.Do(func() {
+			_ = a.Close()
+			_ = b.Close()
+		})
+	}
+	until := func() time.Time {
+		if d := time.Now().Add(idle); d.Before(end) {
+			return d
+		}
+		return end
+	}
 	done := make(chan struct{}, 2)
 	cp := func(dst, src net.Conn) {
 		defer func() { done <- struct{}{} }()
 		buf := make([]byte, 32<<10)
 		for {
-			_ = src.SetReadDeadline(time.Now().Add(idle))
+			_ = src.SetReadDeadline(until())
 			n, err := src.Read(buf)
 			if n > 0 {
 				last.Store(time.Now().UnixNano())
-				_ = dst.SetWriteDeadline(time.Now().Add(idle))
+				_ = dst.SetWriteDeadline(until())
 				if _, werr := dst.Write(buf[:n]); werr != nil {
+					abort()
 					return
 				}
 			}
-			if err != nil {
-				var ne net.Error
-				if errors.As(err, &ne) && ne.Timeout() && time.Since(time.Unix(0, last.Load())) < idle {
-					continue // the other direction is busy
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				if cw, ok := dst.(interface{ CloseWrite() error }); ok && cw.CloseWrite() == nil {
+					return // half-closed: the other direction goes on
 				}
+				abort()
 				return
 			}
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() && time.Now().Before(end) &&
+				time.Since(time.Unix(0, last.Load())) < idle {
+				continue // the other direction is busy
+			}
+			abort()
+			return
 		}
 	}
 	go cp(b, a)
 	go cp(a, b)
 	<-done
-	_ = a.Close()
-	_ = b.Close()
 	<-done
+	abort()
 }

@@ -29,8 +29,12 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrurl"
 )
 
-// HandshakeTimeout bounds the CONNECT and the SSH handshake.
-const HandshakeTimeout = 30 * time.Second
+// HandshakeTimeout bounds the CONNECT and the SSH handshake; MaxSession
+// bounds the connection after it (the caller's deadline, if sooner).
+const (
+	HandshakeTimeout = 30 * time.Second
+	MaxSession       = 30 * time.Minute
+)
 
 // validFingerprint: "SHA256:" and the unpadded base64 of 32 bytes.
 func validFingerprint(fp string) bool {
@@ -60,6 +64,10 @@ func SSH(ctx context.Context, conn connector.Config, proxyURL *url.URL, key []by
 	if !proxyconf.ValidHost(target) {
 		return nil, ErrOrigin
 	}
+	session := time.Now().Add(MaxSession)
+	if d, ok := ctx.Deadline(); ok && d.Before(session) {
+		session = d
+	}
 	ctx, cancel := context.WithTimeout(ctx, HandshakeTimeout)
 	defer cancel()
 	d := net.Dialer{Timeout: 10 * time.Second}
@@ -70,7 +78,7 @@ func SSH(ctx context.Context, conn connector.Config, proxyURL *url.URL, key []by
 	deadline, _ := ctx.Deadline()
 	_ = c.SetDeadline(deadline)
 	req := "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\nProxy-Authorization: " +
-		proxyconf.Authorization(key, conn.ConnectionID) + "\r\n\r\n"
+		proxyconf.Authorization(key, conn.ConnectionID, time.Now()) + "\r\n\r\n"
 	if _, err := io.WriteString(c, req); err != nil {
 		_ = c.Close()
 		return nil, ErrProxy
@@ -103,7 +111,9 @@ func SSH(ctx context.Context, conn connector.Config, proxyURL *url.URL, key []by
 		}
 		return nil, ErrProxy
 	}
-	_ = c.SetDeadline(time.Time{})
+	// Never no deadline: the session ends at the caller's deadline, or
+	// MaxSession at the latest.
+	_ = c.SetDeadline(session)
 	return ssh.NewClient(sc, chans, reqs), nil
 }
 
