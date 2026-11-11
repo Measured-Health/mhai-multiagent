@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -271,6 +271,14 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	emrTables := []string{"emr_connections", "emr.credentials", "emr.sync_runs", "emr.connection_errors"}
+	// The canonical model (00023): a patient with an observation, a second
+	// patient and a match, so its tables have rows to hide. The gateway
+	// reads the alert tables under RLS; the rest it can't read at all.
+	pat := seedPatient(t, pool, a, conn, "p-rls", "MRN-RLS")
+	seedObservation(t, pool, a, conn, pat, "p-rls")
+	seedMatch(t, pool, a, pat, seedPatient(t, pool, a, conn, "p-rls-2", "MRN-RLS"))
+	emrGatewayReads := []string{"emr.patients", "emr.observations", "emr.medications", "emr.encounters", "emr.units"}
+	emrHidden := []string{"emr.raw_records", "emr.patient_links", "emr.possible_matches", "emr.merges", "emr.unmapped_codes"}
 
 	// One connection, so the second transaction reuses the session that
 	// had mhai.hospital_id set by the first.
@@ -288,7 +296,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	for _, table := range append([]string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs", "hospital_model_policy", "cloud_usage", "cloud_reservations",
 		"analytics_snapshots", "analytics_period_counts", "analytics_frozen_periods", "analytics_epoch",
 		"analysis_switch", "analysis_sources", "analysis_locations", "analysis_conditions", "analysis_subjects", "analysis_facts",
-		"analysis_first_seen", "analysis_periods", "analysis_pseudonyms", "analysis_watermarks"}, emrTables...) {
+		"analysis_first_seen", "analysis_periods", "analysis_pseudonyms", "analysis_watermarks"}, slices.Concat(emrTables, emrGatewayReads, emrHidden)...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -312,7 +320,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			requireDenied(t, err, "gateway reading feedback_buffer")
 			continue
 		}
-		if strings.HasPrefix(table, "analytics_") || slices.Contains(emrTables, table) {
+		if strings.HasPrefix(table, "analytics_") || slices.Contains(emrTables, table) || slices.Contains(emrHidden, table) {
 			// 00019: platform tables, no hospital scope; 00020: core's
 			// clinical role holds nothing on the EMR tables. The gateway
 			// holds no grant on any of them.
@@ -342,7 +350,8 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 
 	// The emr service's role, with no hospital set, sees no EMR row
 	// (00020); emr.connection_errors it may only append to.
-	for _, table := range emrTables[:3] {
+	emrReads := slices.Concat(emrTables[:3], emrGatewayReads, slices.DeleteFunc(slices.Clone(emrHidden), func(s string) bool { return s == "emr.merges" }))
+	for _, table := range emrReads {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)

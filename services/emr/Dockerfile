@@ -22,6 +22,10 @@ RUN mkdir -p /out/emr-keys /out/emr-secrets /out/emr-proxy-key /out/emr-egress
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/emr /emr
 COPY --from=build /out/egress-emr /egress-emr
+# The code tables and the reviewed maps (EMR_CODES_DIR, EMR_MAPS_DIR). Only
+# synthetic ones exist until H6 and H4; they load in development only.
+COPY --from=build /src/emr/codes /codes
+COPY --from=build /src/emr/maps /maps
 COPY --from=build --chown=65532:65532 /out/emr-keys /emr-keys
 COPY --from=build --chown=65532:65532 /out/emr-secrets /emr-secrets
 COPY --from=build --chown=65532:65532 /out/emr-proxy-key /emr-proxy-key

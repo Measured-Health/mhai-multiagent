@@ -101,3 +101,23 @@ func TestSettingsRefusals(t *testing.T) {
 		})
 	}
 }
+
+// The normaliser's code tables and maps: off by default, both or neither.
+func TestCodesAndMapsTogether(t *testing.T) {
+	s, err := FromEnv(env(devEnv()))
+	if err != nil || s.CodesDir != "" || s.MapsDir != "" {
+		t.Fatalf("default: %+v %v", s, err)
+	}
+	for _, k := range []string{"EMR_CODES_DIR", "EMR_MAPS_DIR"} {
+		e := devEnv()
+		e[k] = "/app/x"
+		if _, err := FromEnv(env(e)); err == nil || !strings.Contains(err.Error(), "EMR_CODES_DIR and EMR_MAPS_DIR") {
+			t.Errorf("only %s: %v", k, err)
+		}
+	}
+	e := devEnv()
+	e["EMR_CODES_DIR"], e["EMR_MAPS_DIR"] = "/app/codes/testdata", "/app/maps"
+	if s, err := FromEnv(env(e)); err != nil || s.CodesDir != "/app/codes/testdata" || s.MapsDir != "/app/maps" {
+		t.Fatalf("both: %+v %v", s, err)
+	}
+}

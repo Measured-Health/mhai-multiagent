@@ -40,6 +40,11 @@ type Settings struct {
 	// and the directory the allow-list is written to (PR 4); all or none.
 	// With none the service has no way out at all.
 	ProxyURL, ProxyKeyPath, EgressDir string
+	// CodesDir and MapsDir are EMR_CODES_DIR and EMR_MAPS_DIR: the code
+	// tables and the reviewed maps (plan Task 18), both or none. With none
+	// the normaliser doesn't run (off by default). Synthetic tables and
+	// unreviewed conversions load only in development.
+	CodesDir, MapsDir string
 	// RuleSetActive is EMR_RULE_SET_ACTIVE: empty means no rule set is
 	// active and every finding is shadow (off by default).
 	RuleSetActive string
@@ -66,6 +71,8 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		ProxyKeyPath:    get("EMR_PROXY_KEY_PATH"),
 		EgressDir:       get("EMR_EGRESS_DIR"),
 		RuleSetActive:   get("EMR_RULE_SET_ACTIVE"),
+		CodesDir:        get("EMR_CODES_DIR"),
+		MapsDir:         get("EMR_MAPS_DIR"),
 	}
 	var errs []error
 	switch s.Env {
@@ -111,6 +118,9 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 			u.RawQuery != "" || u.Fragment != "" {
 			errs = append(errs, errors.New("EMR_PROXY_URL must be http://host:port, with no credentials"))
 		}
+	}
+	if (s.CodesDir == "") != (s.MapsDir == "") {
+		errs = append(errs, errors.New("set both EMR_CODES_DIR and EMR_MAPS_DIR, or neither"))
 	}
 	if s.RuleSetActive != "" && !ruleSetName.MatchString(s.RuleSetActive) {
 		errs = append(errs, errors.New("EMR_RULE_SET_ACTIVE must be a rule set name (lower-case letters, digits and -)"))

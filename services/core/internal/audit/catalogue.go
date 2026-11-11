@@ -284,6 +284,10 @@ var Catalogue = map[string]Entry{
 	"emr.connection_switched_off": {Type: "hospital_settings", Kind: "emr_connection_switched_off", Target: entityTarget("connection", "emr_connection")},
 	"emr.connection_tested":       {Type: "hospital_settings", Kind: "emr_connection_tested", Target: entityTarget("connection", "emr_connection")},
 	"emr.source_resumed":          withheld(),
+	// The EMR patient index (Task 34's routes): no mhai-web kind yet.
+	"emr.patients_merged":        withheld(),
+	"emr.patient_match_rejected": withheld(),
+	"emr.patient_excluded":       withheld(),
 
 	// Plan 3: the request-token boundary. No mhai-web kind yet.
 	"intelligence.key_rotated":   withheld(),

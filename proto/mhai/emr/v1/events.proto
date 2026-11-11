@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+// The EMR stream's events (EMR integration design §3.2). Ids and closed
+// codes only: never a name, an MRN, a source id, a value, a code or a file
+// name. The hospital is the subject's token, never a field.
+package mhai.emr.v1;
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb;emrpb";
+
+// emr.v1.<hid>.fetched: raw records stored and waiting for the normaliser
+// (at most 500 ids). Nats-Msg-Id is the first id.
+message Fetched {
+  repeated string raw_ids = 1;
+}
+
+// records.v1.<hid>.created: canonical observations and medications
+// written by the normaliser (at most 500 ids). Nats-Msg-Id is the first id.
+message Created {
+  repeated string record_ids = 1;
+}
+
+// dead.v1.<hid>.emr_<stage>: a batch the stage gave up on after its last
+// delivery. stage is normalise or rules; batch_id the first id of the
+// message; error_code a closed code.
+message DeadLetter {
+  string stage = 1;
+  string batch_id = 2;
+  string error_code = 3;
+}
+
+// emr.v1.<hid>.signal: something core must record or show (design §10.2,
+// §10.3, §12.4). kind is possible_match, source_merge, breaker_tripped,
+// document_rejected or rule_set_activated; ref_id the row it is about;
+// code a closed reason code or empty. Nats-Msg-Id is kind:ref_id.
+message Signal {
+  string kind = 1;
+  string connection_id = 2;
+  string ref_id = 3;
+  string code = 4;
+}

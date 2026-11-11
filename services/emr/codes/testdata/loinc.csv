@@ -1,0 +1,12 @@
+code,display,status,source
+99901-1,Glucose [synthetic],ACTIVE,synthetic
+99902-9,Potassium [synthetic],ACTIVE,synthetic
+99903-7,Creatinine [synthetic],ACTIVE,synthetic
+99904-5,Sodium [synthetic],ACTIVE,synthetic
+99905-2,Haemoglobin [synthetic],ACTIVE,synthetic
+99906-0,Heart rate [synthetic],ACTIVE,synthetic
+99907-8,Systolic blood pressure [synthetic],ACTIVE,synthetic
+99908-6,Respiratory rate [synthetic],ACTIVE,synthetic
+99909-4,Body temperature [synthetic],ACTIVE,synthetic
+99910-2,Oxygen saturation [synthetic],ACTIVE,synthetic
+99911-0,Old potassium [synthetic],DEPRECATED,synthetic
