@@ -216,6 +216,14 @@ type sheet struct {
 	meds   []medRef
 	pat    int
 	keys   bool // every list's keys are distinct
+	// parts are the row keys of each partition (by dimension), for the
+	// partition equations between contexts.
+	parts map[int][]string
+	// locSetting is each listed location's setting ("" none).
+	locSetting map[string]string
+	// pairsFull: the pairs list reached PairsMax, so a pair it leaves out
+	// isn't known to be 0.
+	pairsFull bool
 }
 
 type layer[C, S, M any] struct {
@@ -237,7 +245,12 @@ func (l *layer[C, S, M]) here(path string, d desc, c *C) int {
 	return l.cell(path, d, l.ctx.Period, l.ctx.First, c)
 }
 
+// rel records total = Σ parts. A set with no listed part is no equation:
+// in a body hidden whole the lists are empty, not zero.
 func (l *layer[C, S, M]) rel(checked bool, total int, parts ...int) {
+	if len(parts) == 0 {
+		return
+	}
 	l.sh.rels = append(l.sh.rels, rel{total, parts, checked})
 }
 
@@ -322,9 +335,16 @@ func layout[C, S, M any](r *Report[C, S, M]) (*sheet, []*C, []*S, []*M) {
 	l.columns(t2)
 
 	// Affected: five partitions of the patients; locations nest in settings.
+	l.sh.parts = map[int][]string{}
+	l.sh.locSetting = map[string]string{}
+	for _, row := range r.ByLocation {
+		l.sh.locSetting[row.Key] = row.Setting
+	}
+	l.sh.pairsFull = len(r.Pairs) >= PairsMax
 	parts := func(name string, dim int, rows []Part[C]) []int {
 		var ps []int
 		for i := range rows {
+			l.sh.parts[dim] = append(l.sh.parts[dim], rows[i].Key)
 			key(name, rows[i].Key)
 			ps = append(ps, l.here(name+"."+rows[i].Key, pat.with(dim, rows[i].Key), &rows[i].Patients))
 		}

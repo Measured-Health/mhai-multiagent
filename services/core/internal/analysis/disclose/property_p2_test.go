@@ -73,6 +73,14 @@ func p2Period(t *testing.T, w *attack.World, p calendar.Period, c *p2Counts) {
 	c.small, c.smallExposed, c.secondary, c.secondaryExposed = c.small+s, c.smallExposed+se, c.secondary+sec, c.secondaryExposed+sece
 	if se > 0 {
 		t.Errorf("%v: %d hidden groups of 1 to 4 solvable across the period's families", p, se)
+		shown := 0
+		for _, i := range m.Exposed(all) {
+			x := m.Cells[i]
+			if x.Truth <= 4 && shown < 6 {
+				shown++
+				t.Logf("  e.g. %s = %d in %v", x.Name, x.Truth, docs[x.Doc].Filters)
+			}
+		}
 	}
 	e, sm := m.DrillExposed(all)
 	c.drilled, c.drillSmall = c.drilled+e, c.drillSmall+sm

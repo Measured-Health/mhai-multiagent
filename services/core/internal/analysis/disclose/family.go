@@ -6,8 +6,10 @@ package disclose
 // are fixed: a cell of the request that is the same group as a parent's
 // hidden cell is hidden, and a request whose own group (its patients) is
 // hidden in a parent's breakdown is answered hidden whole (T5). Guard
-// passes the parents' bodies to GuardResponse as known, so a group a parent
-// shows stays shown and the final check runs on the family together.
+// passes every body published for the period to GuardResponse as known
+// (ruling C10), so a group shown anywhere stays shown, one hidden anywhere
+// is hidden, and the final check runs on the period's accumulated
+// knowledge: siblings included, which the parents alone missed (R-A1).
 
 // FamilyForced is the request's cells that are a group a stored parent
 // hides, and whether the request is hidden whole: its patients are a

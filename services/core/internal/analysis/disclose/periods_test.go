@@ -41,7 +41,14 @@ func publish(t *testing.T, w *attack.World, f Filters) []Body {
 			}
 			kids = append(kids, c)
 		}
-		b, err := GuardPeriod(raw, kids)
+		// Every body already published inside p (ruling C10).
+		var inside []Body
+		for _, o := range out {
+			if p.Contains(o.Context.Period) && !o.Context.Period.Equal(p) {
+				inside = append(inside, o)
+			}
+		}
+		b, err := Guard(raw, kids, inside)
 		if err != nil {
 			t.Fatalf("%v: %v", p, err)
 		}
@@ -85,8 +92,13 @@ func attackAll(t *testing.T, w *attack.World, bodies []Body) *attack.Model {
 	for _, x := range m.Mismatches() {
 		t.Error(x)
 	}
+	// Asserted: no hidden group of 1 to 4 is solvable. A hidden group of 5
+	// or more that the history determines (a parent hidden whole beside its
+	// shown children, say) discloses no small group: counted, not failed.
 	for _, i := range m.Exposed(order) {
-		t.Errorf("hidden %s of doc %d (%v), %d, is solvable", m.Cells[i].Name, m.Cells[i].Doc, bodies[m.Cells[i].Doc].Context.Period, m.Cells[i].Truth)
+		if c := m.Cells[i]; c.Truth <= 4 {
+			t.Errorf("hidden %s of doc %d (%v), %d, is solvable", c.Name, c.Doc, bodies[c.Doc].Context.Period, c.Truth)
+		}
 	}
 	for _, x := range m.SetViolations(order) {
 		t.Error(x)
@@ -256,7 +268,7 @@ func TestP4HistoryNoExposure(t *testing.T) {
 		Locations: []attack.Location{{ID: "L1", Setting: "admitted"}}, Specialties: []string{"S1"}, Sources: []string{"X1"}}
 	from := calendar.Of(calendar.Week, day("2025-01-01"))
 	to := calendar.Of(calendar.Week, from.From.AddDate(0, months, -1))
-	hidden := 0
+	hidden, small, secondary, secondaryExposed := 0, 0, 0, 0
 	for _, seed := range seeds(500, 8, 2) {
 		w := attack.Generate(seed, d, attack.Blocks(from, to), true, attack.Options{Subjects: 25, Presence: 0.12, Rare: 0})
 		bodies := publish(t, &w, Filters{})
@@ -265,12 +277,14 @@ func TestP4HistoryNoExposure(t *testing.T) {
 		for i := range bodies {
 			all = append(all, i)
 		}
-		hidden += len(m.HiddenProtected(all))
+		s, _, sec, sece := m.GroupExposure(all) // small ones exposed fail above
+		hidden, small, secondary, secondaryExposed = hidden+s+sec, small+s, secondary+sec, secondaryExposed+sece
 		if t.Failed() {
 			t.Fatalf("seed %d (%s)", seed, w.Describe())
 		}
 	}
-	t.Logf("P4: %d hidden cells of 1 or more over the histories; none solvable", hidden)
+	t.Logf("P4: %d hidden groups over the histories: of 1–4, %d, none solvable; secondary (5+) solvable %d of %d",
+		hidden, small, secondaryExposed, secondary)
 }
 
 // C3's regression: Monday-to-Sunday weeks published beside months give

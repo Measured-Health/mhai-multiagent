@@ -22,24 +22,23 @@ func sexWorld(bySex map[string]int) attack.World {
 }
 
 // guardFamily guards every context of p within the cap over dims, parents
-// first, each with all its stored filter subsets as parents (its family).
+// first, each with every body already published for the period (ruling
+// C10: one record per period).
 func guardFamily(t *testing.T, w *attack.World, p calendar.Period, sets []Filters) map[Filters]Body {
 	t.Helper()
 	out := map[Filters]Body{}
+	var published []Body
 	for n := 0; n <= FilterCap; n++ {
 		for _, f := range sets {
 			if f.Count() != n {
 				continue
 			}
-			var parents []ParentContext
-			for _, s := range subsets(f) {
-				parents = append(parents, ParentContext{Body: out[s]})
-			}
-			b, err := Guard(rawOf(w, p, f, false), nil, parents)
+			b, err := Guard(rawOf(w, p, f, false), nil, published)
 			if err != nil {
 				t.Fatalf("%v: %v", f, err)
 			}
 			out[f] = b
+			published = append(published, b)
 		}
 	}
 	return out

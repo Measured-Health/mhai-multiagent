@@ -477,7 +477,7 @@ func (b *mbasis) shape(members [][]int) (res []mvec, dim int, sum bool) {
 	var total mvec
 	rank := 0
 	for _, m := range members {
-		r := b.residual(toM(m, nil, b.p))
+		r := dropConst(b.residual(toM(m, nil, b.p)))
 		res = append(res, r)
 		total = madd(total, r, b.p)
 		if small.addIndependent(r) {
@@ -1130,6 +1130,67 @@ func (k *Knowledge) Add(vars []int, coefs []int64) { k.q.add(vars, coefs) }
 
 // Exposed reports whether Σ coefs[i]·x[vars[i]] is determined.
 func (k *Knowledge) Exposed(vars []int, coefs []int64) bool { return k.q.exposed(vars, coefs) }
+
+// constVar is the column of the constant 1 in a valued system: a row
+// Σ a·x = rhs is kept as Σ a·x − rhs·1. It sorts last, so it is never a
+// pivot while the equations are consistent. 7c's systems never use it.
+const constVar = 1<<31 - 1
+
+// dropConst is a residual without its constant: the part that depends on
+// the unknowns.
+func dropConst(v mvec) mvec {
+	if n := len(v); n > 0 && v[n-1].c == constVar {
+		return v[:n-1]
+	}
+	return v
+}
+
+// AddValued learns Σ coefs[i]·x[vars[i]] = rhs (coefs nil: every
+// coefficient 1).
+func (k *Knowledge) AddValued(vars []int, coefs []int64, rhs int64) {
+	c := coefs
+	if c == nil {
+		c = make([]int64, len(vars))
+		for i := range c {
+			c[i] = 1
+		}
+	}
+	k.Add(append(append([]int{}, vars...), constVar), append(append([]int64{}, c...), -rhs))
+}
+
+// Value is Σ coefs[i]·x[vars[i]] when what is known determines it (under
+// either prime; the true value is a count far below the primes, so its
+// residue is the value).
+func (k *Knowledge) Value(vars []int, coefs []int64) (int64, bool) {
+	for i := range k.q {
+		p := k.q[i].p
+		r := k.q[i].residual(toM(vars, coefs, p))
+		switch {
+		case len(r) == 0:
+			return 0, true
+		case len(r) == 1 && r[0].c == constVar:
+			v := r[0].v
+			if v > p/2 {
+				return -int64(p - v), true
+			}
+			return int64(v), true
+		}
+	}
+	return 0, false
+}
+
+// Consistent reports whether what is known can all hold at once: with
+// values, a contradiction is the row 0 = c ≠ 0, and the constant becomes
+// determined as 0 under both primes.
+func (k *Knowledge) Consistent() bool {
+	for i := range k.q {
+		r := k.q[i].residual(mvec{{constVar, 1}})
+		if len(r) == 1 && r[0].c == constVar {
+			return true
+		}
+	}
+	return false
+}
 
 // SetShape is what a state of knowledge determines about a set's hidden
 // members, under each prime: the dimension and whether the full sum is

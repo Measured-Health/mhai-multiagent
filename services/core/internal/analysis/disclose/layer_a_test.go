@@ -278,3 +278,37 @@ func TestDrillableOnlyShownFiveOrMore(t *testing.T) {
 func long() bool { return os.Getenv("ANALYSIS_LONG") == "1" }
 
 func countFields(v any) int { return reflectNumField(v) }
+
+// A known body that contradicts this context's own values means the
+// guard's model is wrong: fail closed, hidden whole.
+func TestContradictoryKnowledgeHidesWhole(t *testing.T) {
+	r := flat(oct2026, 40)
+	r.BySex = []Part[int64]{{Key: "female", Patients: 30}, {Key: "male", Patients: 10}}
+	other := r
+	other.Patients = 41
+	other.BySex = []Part[int64]{{Key: "female", Patients: 31}, {Key: "male", Patients: 10}}
+	other.ByAge = []Part[int64]{{Key: "18-39", Patients: 41}}
+	other.BySetting = []Part[int64]{{Key: "admitted", Patients: 41}}
+	other.ByLocation = []Part[int64]{{Key: "L1", Setting: "admitted", Patients: 41}}
+	other.BySpecialty = []Part[int64]{{Key: "S1", Patients: 41}}
+	known, err := GuardResponse(other, nil)
+	if err != nil || known.Whole {
+		t.Fatalf("the other body: %v", err)
+	}
+	b, err := GuardResponse(r, nil, known)
+	if !b.Whole || !errors.Is(err, ErrInconsistent) {
+		t.Errorf("contradictory knowledge: whole %v, %v", b.Whole, err)
+	}
+}
+
+// A body hidden whole lists nothing: its empty lists are no equations (a
+// partition with no rows would say its patients are 0).
+func TestWholeBodyHasNoEmptySets(t *testing.T) {
+	b := HiddenWhole(Context{Period: octWeek, Filters: Filters{DimSex: "female"}})
+	st := stateOf(&b)
+	for _, r := range st.sh.rels {
+		if len(r.parts) == 0 {
+			t.Errorf("a set with no parts: %s = 0", st.sh.cells[r.total].path)
+		}
+	}
+}

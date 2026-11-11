@@ -905,3 +905,39 @@ func TestSetShapeHoistAgrees(t *testing.T) {
 		}
 	}
 }
+
+// A valued system: equations with right-hand sides; Value gives a
+// determined combination's value, as the exact solver would.
+func TestKnowledgeValue(t *testing.T) {
+	k := NewKnowledge()
+	k.AddValued([]int{0, 1, 2}, nil, 12) // a total of 12
+	k.AddValued([]int{0, 1}, nil, 9)     // its first two
+	if v, ok := k.Value([]int{2}, nil); !ok || v != 3 {
+		t.Fatalf("x2 = %d, %v; want 3", v, ok)
+	}
+	if _, ok := k.Value([]int{0}, nil); ok {
+		t.Fatal("x0 alone isn't determined")
+	}
+	k.AddValued([]int{0, 3}, []int64{1, -1}, 2) // x0 − x3 = 2
+	if v, ok := k.Value([]int{1, 3}, nil); !ok || v != 7 {
+		t.Fatalf("x1 + x3 = %d, %v; want 7", v, ok)
+	}
+	// The whole-set rule ignores the values: {x0, x1} has its sum.
+	if d := k.Shape([][]int{{0}, {1}}); d[0].dim != 1 || !d[0].sum {
+		t.Fatalf("shape: %+v", d)
+	}
+}
+
+// Contradictory knowledge (0 = a non-zero constant) is detected.
+func TestKnowledgeConsistent(t *testing.T) {
+	k := NewKnowledge()
+	k.AddValued([]int{0, 1}, nil, 10)
+	k.AddValued([]int{0}, nil, 4)
+	if !k.Consistent() {
+		t.Fatal("x0 + x1 = 10, x0 = 4: consistent")
+	}
+	k.AddValued([]int{1}, nil, 7)
+	if k.Consistent() {
+		t.Fatal("x1 = 6 and x1 = 7: not consistent")
+	}
+}

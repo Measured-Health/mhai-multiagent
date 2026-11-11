@@ -140,14 +140,26 @@ func GuardPeriod(raw Raw, children []ChildBodies) (Body, error) {
 	return Guard(raw, children, nil)
 }
 
-// Guard is the whole guard of one context (D3, D5): FamilyForced against
-// its stored filter parents (hidden whole if its own group is hidden in
-// one), then GuardResponse with every child and parent body known and
-// ParentForced, repeated until nothing changes. The children are the
-// period's, with the same filters; both lists may be empty.
-func Guard(raw Raw, children []ChildBodies, parents []ParentContext) (Body, error) {
+// Guard is the whole guard of one context (D3, D5; ruling C10). published
+// is every body already published for the context's period, across every
+// filter family, and inside it (its blocks and months): one record per
+// period. FamilyForced runs against its
+// filter parents among them (hidden whole if its own group is hidden in
+// one); then GuardResponse with every child and every published body known
+// (a group hidden in any is hidden here, one shown in any stays shown, and
+// the final check runs on the period's accumulated knowledge, partition
+// equations between contexts included), and ParentForced, repeated until
+// nothing changes. On a check that can't pass, the context is hidden
+// whole. The children are the period's, with the same filters.
+func Guard(raw Raw, children []ChildBodies, published []Body) (Body, error) {
 	if err := CheckFilters(raw.Context.Filters); err != nil {
 		return HiddenWhole(raw.Context), err
+	}
+	var parents []ParentContext
+	for _, b := range published {
+		if b.Context.Period.Equal(raw.Context.Period) && subsetOf(b.Context.Filters, raw.Context.Filters) {
+			parents = append(parents, ParentContext{Body: b})
+		}
 	}
 	forced, whole := FamilyForced(raw, parents)
 	if whole {
@@ -157,8 +169,14 @@ func Guard(raw Raw, children []ChildBodies, parents []ParentContext) (Body, erro
 	for _, c := range children {
 		known = append(known, c.Body)
 	}
-	for _, p := range parents {
-		known = append(known, p.Body)
+	for _, b := range published {
+		dup := false
+		for _, c := range children {
+			dup = dup || (c.Body.Context.Period.Equal(b.Context.Period) && c.Body.Context.Filters == b.Context.Filters)
+		}
+		if !dup {
+			known = append(known, b)
+		}
 	}
 	forced = forced.Union(ParentForced(raw, nil, children))
 	for {
@@ -173,6 +191,19 @@ func Guard(raw Raw, children []ChildBodies, parents []ParentContext) (Body, erro
 			return b, nil
 		}
 	}
+}
+
+// subsetOf: every filter of a is in b, and a has fewer.
+func subsetOf(a, b Filters) bool {
+	if a.Count() >= b.Count() {
+		return false
+	}
+	for d, v := range a {
+		if v != "" && b[d] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // HistoryPointOf is a stored body's point (D3): its cases, new and patients

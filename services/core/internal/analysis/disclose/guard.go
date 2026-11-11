@@ -61,15 +61,29 @@ func GuardResponse(raw Raw, forced Forced, known ...Body) (Body, error) {
 	for g := range hiddenElsewhere {
 		delete(shownElsewhere, g)
 	}
-	g.pinned = shownElsewhere
+	g.pinned, g.public = shownElsewhere, map[string]bool{}
 	extra := Forced{}
 	pr := newPrior(ks)
+	// A group the published bodies already determine is public: hiding it
+	// protects nothing, so it is shown (unless it is 1 to 4, a leak no
+	// guard here can undo).
+	for i, c := range g.sh.cells {
+		if v, ok := pr.sys.vars[c.group]; ok && !c.virtual && !pr.sys.shown[v] {
+			if x, det := pr.before.Value([]int{v}, nil); det && x == g.vals[i] && !small(x) {
+				g.public[c.group] = true
+				delete(hiddenElsewhere, c.group)
+			}
+		}
+	}
 	for {
 		hide := g.rules(forced, extra, hiddenElsewhere)
 		if hide[g.sh.pat] {
 			return HiddenWhole(raw.Context), nil
 		}
 		bad := g.check(hide, pr)
+		if bad == inconsistent {
+			return HiddenWhole(raw.Context), ErrInconsistent
+		}
 		if bad < 0 {
 			return g.body(hide), nil
 		}
@@ -93,12 +107,14 @@ func HiddenWhole(ctx Context) Body {
 }
 
 type guarding struct {
-	// pinned groups are shown in a known body: never hidden here.
-	pinned map[string]bool
-	raw    *Raw
-	sh     *sheet
-	vals   []int64
-	meds   []*[]int64
+	// pinned groups are shown in a known body: never hidden here unless
+	// forced. public ones are determined by the known bodies (not 1 to 4):
+	// hiding them protects nothing, so they are always shown.
+	pinned, public map[string]bool
+	raw            *Raw
+	sh             *sheet
+	vals           []int64
+	meds           []*[]int64
 }
 
 func newGuarding(raw *Raw) (*guarding, error) {
@@ -201,7 +217,7 @@ func (g *guarding) rules(forced, extra Forced, elsewhere map[string]bool) []bool
 	hide := make([]bool, len(sh.cells))
 	for i, c := range sh.cells {
 		hide[i] = small(g.vals[i]) || forced[c.group] || extra[c.group] || elsewhere[c.group]
-		if g.pinned[c.group] && !forced[c.group] && !extra[c.group] {
+		if (g.pinned[c.group] && !forced[c.group] && !extra[c.group]) || g.public[c.group] {
 			hide[i] = false
 		}
 	}
@@ -264,7 +280,7 @@ func (g *guarding) rules(forced, extra Forced, elsewhere map[string]bool) []bool
 			}
 		}
 		for i, c := range sh.cells {
-			if g.pinned[c.group] && !forced[c.group] && !extra[c.group] {
+			if (g.pinned[c.group] && !forced[c.group] && !extra[c.group]) || g.public[c.group] {
 				hide[i] = false
 			}
 		}
