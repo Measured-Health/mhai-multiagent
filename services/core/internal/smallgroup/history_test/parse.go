@@ -77,6 +77,8 @@ type Parser struct {
 	docs    []doc
 	// unavailable counts analytics areas sent {unavailable: true}.
 	unavailable int
+	// changes counts the changes the analytics responses sent, each checked.
+	changes int
 	// Epoch is the release epoch (public: the notice names it), which
 	// fixes the first period a not-yet response names.
 	Epoch time.Time

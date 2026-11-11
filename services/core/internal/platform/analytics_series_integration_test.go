@@ -3,6 +3,7 @@
 package platform_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -99,10 +100,56 @@ func TestSeriesUnknownIds(t *testing.T) {
 	}
 }
 
-// Until 7c-3 builds What changed there is no change: every change id is
-// 404; the query is still checked first.
+// The change series (Plan 7c-3): a hospital's change gives the hospital's
+// stored cell of the change's measure for each stored period, with the
+// other hospitals' median; a change across all hospitals gives the all
+// cells, hospital null and no median (F14). Unknown and closed changes are
+// 404; the query is checked first.
 func TestChangeSeries(t *testing.T) {
+	fx := fixedAnalytics(t)
+	// The fixture's hospital A as a hospital row, so a change can name it.
+	a := fx.hosp[0]
+	if _, err := super.Exec(context.Background(), `INSERT INTO hospitals (id, name, short_code, status) VALUES ($1, $2, $3, 'active')`,
+		a.ID, a.Name, "H"+uniq()); err != nil {
+		t.Fatal(err)
+	}
+	f := seedChanges(t, uuid.MustParse(a.ID), a.Name)
 	tok := mint(t, auditor(t))
+	for k, n := range map[calendar.Kind]int{calendar.Week: 12, calendar.Month: 12, calendar.Quarter: 8} {
+		r := get(t, "/platform/analytics/changes/"+f.hospChange.String()+"/series?period="+string(k), tok)
+		ok(t, string(k), r)
+		top := requireKeys(t, "series", r.body, "change_id", "measure", "hospital", "points")
+		if top["change_id"] != f.hospChange.String() || top["measure"] != "questions" || top["hospital"].(map[string]any)["id"] != a.ID {
+			t.Errorf("%s: %v", k, top)
+		}
+		pts := list(t, "points", top["points"])
+		if len(pts) != n {
+			t.Fatalf("%s: %d points", k, len(pts))
+		}
+		latest := fx.rows[k][len(fx.rows[k])-1]
+		stored := storedRows(t, storedBody(t, latest))
+		last := pts[len(pts)-1].(map[string]any)
+		if jsonOf(last["value"]) != jsonOf(stored[a.ID]["questions"]) || last["start"] != stampOf(latest.From) {
+			t.Errorf("%s: last point %v, stored %v", k, last, stored[a.ID]["questions"])
+		}
+		// The others: B's 24 shown, C hidden: 24.
+		if last["median"] != float64(24) {
+			t.Errorf("%s: median %v", k, last["median"])
+		}
+		r = get(t, "/platform/analytics/changes/"+f.allChng.String()+"/series?period="+string(k), tok)
+		ok(t, string(k)+" all", r)
+		top = requireKeys(t, "series", r.body, "change_id", "measure", "hospital", "points")
+		if top["change_id"] != f.allChng.String() || top["measure"] != "needs_review_share" || top["hospital"] != nil {
+			t.Errorf("%s all: %v", k, top)
+		}
+		all := storedBody(t, latest)["all"].(map[string]any)
+		pts = list(t, "points", top["points"])
+		last = pts[len(pts)-1].(map[string]any)
+		if jsonOf(last["value"]) != jsonOf(all["escalate_share"]) || last["median"] != nil {
+			t.Errorf("%s all: last point %v", k, last)
+		}
+	}
+	problem(t, "closed", get(t, "/platform/analytics/changes/"+f.closed.String()+"/series?period=month", tok), 404, "not_found")
 	id := uuid.NewString()
 	for _, k := range []string{"week", "month", "quarter"} {
 		problem(t, k, get(t, "/platform/analytics/changes/"+id+"/series?period="+k, tok), 404, "not_found")

@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,10 +40,14 @@ import (
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/natsapi"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup"
 )
 
 // The synthetic hospital the smoke clinician belongs to.
@@ -803,15 +808,16 @@ func TestSmokePlatformOps(t *testing.T) {
 	}
 
 	// Analytics (Plan 7c-2): the month is either not yet published (every
-	// area {not_yet, first_from}) or the latest stored month; alerts null,
-	// changes unavailable until 7c-3. One hospital's series: a hospital of
-	// the published month, or 404 for one in no published period.
+	// area {not_yet, first_from}) or the latest stored month; alerts null;
+	// changes unavailable before the first weekly evaluation, or the area
+	// (TestSmokeWhatChanged). One hospital's series: a hospital of the
+	// published month, or 404 for one in no published period.
 	r = call("GET", "/platform/analytics?period=month", nil)
 	if r.status != http.StatusOK || r.body["period"] != "month" || r.body["alerts"] != nil {
 		t.Fatalf("GET /platform/analytics?period=month: %d %s", r.status, r.raw)
 	}
-	if c, _ := r.body["changes"].(map[string]any); c["unavailable"] != true {
-		t.Fatalf("analytics: changes %v, want unavailable until 7c-3", r.body["changes"])
+	if c, _ := r.body["what_changed"].(map[string]any); c["unavailable"] != true && (c["updated_at"] == nil || c["window"] == nil || c["items"] == nil) {
+		t.Fatalf("analytics: changes %v, want unavailable or the changes area", r.body["what_changed"])
 	}
 	seriesID := uuid.NewString()
 	use, _ := r.body["use"].(map[string]any)
@@ -850,4 +856,93 @@ func TestSmokePlatformOps(t *testing.T) {
 	default:
 		t.Fatalf("GET hospital series: %d %s", r.status, r.raw)
 	}
+}
+
+// smokeAllOnly is a stored body of p whose all row shows q questions and
+// hides everything else (synthetic).
+func smokeAllOnly(t *testing.T, p calendar.Period, q int64) string {
+	t.Helper()
+	from, to := analytics.Dates(p)
+	h, hs := smallgroup.Guarded{Suppressed: true}, smallgroup.GuardedShare{Suppressed: true}
+	row := analytics.Row{Questions: smallgroup.Count(q), Answers: h, Pass: h, Regenerate: h, Escalate: h, Degraded: h,
+		PassShare: hs, RegenerateShare: hs, EscalateShare: hs, Reviews: h, AgreementRate: hs, ActiveClinicians: h,
+		QuestionsPerClinician: analytics.Ratio{Number: analytics.Number{Suppressed: true}},
+		MedianReviewHours:     analytics.Hours{Number: analytics.Number{Suppressed: true}}}
+	raw, err := json.Marshal(analytics.Body{Kind: string(p.Kind), From: from, To: to, All: row, Hospitals: []analytics.HospitalRow{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// TestSmokeWhatChanged (Plan 7c-3): a synthetic jump in questions between
+// two stored snapshots (January 2020 and the week of 1–7 February 2020,
+// written as the owner, long before this stack's release epoch) flags a
+// change through the scheduler's own evaluation, as mhai_analytics_job; a
+// platform admin over api.v1.platform sees it and follows it up; an auditor
+// sees the follow-up and is refused a PUT.
+func TestSmokeWhatChanged(t *testing.T) {
+	ctx := context.Background()
+	pool := ownerPool(t)
+	month := calendar.Of(calendar.Month, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	week := calendar.Of(calendar.Week, time.Date(2020, 2, 1, 0, 0, 0, 0, time.UTC))
+	for _, x := range []struct {
+		p calendar.Period
+		q int64
+	}{{month, 62}, {week, 40}} {
+		from, to := analytics.Dates(x.p)
+		if _, err := pool.Exec(ctx, `INSERT INTO analytics_snapshots (kind, period_from, period_to, state, body)
+			VALUES ($1, $2::date, $3::date, 'ok', $4::jsonb) ON CONFLICT DO NOTHING`, string(x.p.Kind), from, to, smokeAllOnly(t, x.p, x.q)); err != nil {
+			t.Fatalf("store a synthetic snapshot: %v", err)
+		}
+	}
+	err := scheduler.Builder{Src: scheduler.DB{Pool: pool}}.EvaluateChanges(ctx, week)
+	if errors.Is(err, scheduler.ErrOutOfOrder) {
+		t.Skip("a newer week was evaluated on this stack already")
+	}
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	nc := platformConn(t)
+	admin := platformSignIn(t, nc, "platform_admin")
+	auditorTok := auditorSignIn(t, nc)
+	call := func(tok, method, path string, body any) reply {
+		return apiOn(t, nc, natsapi.SubjectPlatform, method, path, tok, body)
+	}
+	r := call(admin, "GET", "/platform/analytics?period=week", nil)
+	c, _ := r.body["what_changed"].(map[string]any)
+	items, _ := c["items"].([]any)
+	var change map[string]any
+	for _, x := range items {
+		if m, _ := x.(map[string]any); m != nil && m["measure"] == "questions" && m["hospital"] == nil {
+			change = m
+		}
+	}
+	if r.status != http.StatusOK || change == nil || change["direction"] != "rising" || change["follow_up"] != nil {
+		t.Fatalf("what changed: %d %s", r.status, r.raw)
+	}
+	id, _ := change["id"].(string)
+	version, _ := change["version"].(float64)
+	r = call(admin, "PUT", "/platform/analytics/changes/"+id+"/follow-up", map[string]any{"version": int(version), "note": "Synthetic smoke note"})
+	if fu, _ := r.body["follow_up"].(map[string]any); r.status != http.StatusOK || fu["by_you"] != true {
+		t.Fatalf("follow up: %d %s", r.status, r.raw)
+	}
+	r = call(auditorTok, "GET", "/platform/analytics?period=month", nil)
+	c, _ = r.body["what_changed"].(map[string]any)
+	items, _ = c["items"].([]any)
+	seen := false
+	for _, x := range items {
+		if m, _ := x.(map[string]any); m != nil && m["id"] == id {
+			fu, _ := m["follow_up"].(map[string]any)
+			seen = fu != nil && fu["by_you"] == false && fu["note"] == "Synthetic smoke note"
+		}
+	}
+	if !seen {
+		t.Fatalf("the auditor doesn't see the follow-up: %s", r.raw)
+	}
+	r = call(auditorTok, "PUT", "/platform/analytics/changes/"+id+"/follow-up", map[string]any{"version": int(version) + 1})
+	if r.status != http.StatusForbidden || r.body["code"] != "forbidden" {
+		t.Fatalf("an auditor's PUT: %d %s", r.status, r.raw)
+	}
+	t.Logf("what changed: a synthetic jump flagged, followed up by a platform admin, seen and refused to an auditor")
 }

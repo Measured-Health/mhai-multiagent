@@ -95,6 +95,9 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"hospital_model_policy": "00018: the per-hospital cloud model policy the platform sets (SELECT, INSERT, column UPDATE)",
 		"analytics_snapshots":   "00019: the guarded analytics snapshots, one per finished period (SELECT)",
 		"analytics_epoch":       "00019: the release epoch, for the not-yet answer (SELECT)",
+		"analytics_change_runs": "00022: the newest What changed evaluation, its window (SELECT)",
+		"analytics_changes":     "00022: the open changes (SELECT), a follow-up write's version (UPDATE (version), open changes only)",
+		"analytics_follow_ups":  "00022: follow-ups and their notes, platform admins' writes (SELECT, INSERT, UPDATE (note, version), DELETE)",
 		"emr_connections":       "00020: EMR connection configuration, no secret column (SELECT, INSERT, column UPDATE)",
 		"analysis_switch":       "00021: the analysis switch, read and written with real sign-offs only (Plan 11b's flow)",
 	}

@@ -101,16 +101,28 @@ func Due(epoch, now time.Time, have map[string]bool) []calendar.Period {
 	return out
 }
 
-// Tick builds what is due, if this copy holds the lock. It stops at the
-// first period that fails other than by being unavailable, so a parent is
-// never built after a child that will be retried. It returns the periods
-// it stored.
+// Tick builds what is due, if this copy holds the lock, then evaluates
+// What changed for every stored week not yet evaluated (spec §8.3 step 2).
+// The build stops at the first period that fails other than by being
+// unavailable, so a parent is never built after a child that will be
+// retried. It returns the periods it stored.
 func (s *Scheduler) Tick(ctx context.Context) ([]calendar.Period, error) {
 	unlock, ok, err := s.lock(ctx)
 	if err != nil || !ok {
 		return nil, err
 	}
 	defer unlock()
+	done, err := s.build(ctx)
+	if eerr := s.evaluateDue(ctx); eerr != nil {
+		// A fixed reason; never a figure.
+		s.log().Error("analytics: what changed not evaluated", "reason", "internal_error")
+		err = errors.Join(err, eerr)
+	}
+	return done, err
+}
+
+// build stores every due period (Tick, under the lock).
+func (s *Scheduler) build(ctx context.Context) ([]calendar.Period, error) {
 	clock, ok := s.Builder.Src.(Clock)
 	if !ok {
 		return nil, errUnguardable

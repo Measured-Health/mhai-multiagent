@@ -1,6 +1,6 @@
 # Plan 7c: platform analytics across hospitals (backend): implementation plan
 
-**Status:** Not started. The design is a draft for the product owner's review (7 Nov 2026). Rulings R41a, R41a-2 (nested periods) and R41a-3 (rolling windows hidden at once) are decided; Q3 and Q4 in its §16 are open. Task 8 depends on Q3 (it ships the recommended values, which are one table to change). Revised after the design review (spec §17).
+**Status:** 7c-1 and 7c-2 merged; 7c-3 built (What changed and follow-ups, migration 00022). The design is a draft for the product owner's review (7 Nov 2026). Rulings R41a, R41a-2 (nested periods) and R41a-3 (rolling windows hidden at once) are decided; Q3 and Q4 in its §16 are open. Task 8 depends on Q3 (it ships the recommended values, which are one table to change). Revised after the design review (spec §17).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
@@ -38,7 +38,7 @@ In addition:
 - **Two roles.** Routes run as `mhai_platform` and read guarded rows only; they get no grant on a clinical table, the frozen counts or the analytics functions. The scheduler runs as `mhai_analytics_job` through its own pool, the only role that executes the analytics functions.
 - **R41a-3:** only eligible periods are published: weeks that start at or after the release epoch, and months and quarters whose children all do; the first parents that don't qualify are absent, not `unavailable`; the rolling guardrail windows are served fully hidden; `guardrail_snapshots` is emptied and never read again.
 - **The follow-up note** stays in `analytics_follow_ups`. It is returned only in the changes list on platform routes; never logged, traced, audited or published.
-- **Migrations are 00019 and 00020** (main ends at 00018). If another PR merges a migration first, renumber. Each has a full `Down` that revokes every grant it made. Every new table has `ENABLE` and `FORCE` row-level security, owner `mhai_migrate`, and a row in `TestRLSWithoutHospitalSeesNothing`.
+- **Migrations are 00019 and 00022** (main ended at 00018; EMR's 00020 and Patient Analysis's 00021 merged before 7c-3, so What changed took 00022). If another PR merges a migration first, renumber. Each has a full `Down` that revokes every grant it made. Every new table has `ENABLE` and `FORCE` row-level security, owner `mhai_migrate`, and a row in `TestRLSWithoutHospitalSeesNothing`.
 - **ADR 0012:** additive only. `openapi.yaml` gets a minor bump per PR and `oasdiff breaking` passes. New problem codes: none.
 - **Test-only switches** go behind constructor options or build-tagged files, not package globals (TODO M7 names the existing ones; don't add more).
 
@@ -83,7 +83,7 @@ services/core/
   internal/smallgroup/joint.go                     AcrossRowsFrozen (parent set), Block, Box, known zeros, exposure (two primes), GuardSnapshot
   internal/smallgroup/joint_test.go, history_property_test.go
   internal/db/migrations/00019_analytics_snapshots.sql   reader and job roles, mhai_reporting_period_ok, analytics_epoch, frozen counts, four functions, analytics_snapshots, guardrail_snapshots emptied
-  internal/db/migrations/00020_analytics_changes.sql     analytics_changes, analytics_follow_ups, platform_append replaced (Down restores 00018's)
+  internal/db/migrations/00022_analytics_changes.sql     analytics_change_runs, analytics_changes, analytics_follow_ups, platform_append replaced (Down restores main's, 00020's)
   internal/db/db.go                                + WithAnalyticsJob (the scheduler's pool)
   internal/smallgroup/history_test/                json parser and solver for A7, independent of joint.go
   internal/analytics/body.go                       Body: the stored guarded shape (decode strict)
@@ -301,10 +301,10 @@ Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password fi
 
 ## Phase 7c-3: What changed and follow-ups
 
-### Task 8: Migration 00020 and the weekly What changed (spec §7.3, §8.1)
+### Task 8: Migration 00022 and the weekly What changed (spec §7.3, §8.1)
 
 **Files:**
-- Create: `services/core/internal/db/migrations/00020_analytics_changes.sql` (the two tables; it drops and recreates `mhai_platform`'s `platform_append` policy on `audit_log` with 00018's actions plus the three analytics ones, and Down recreates 00018's policy exactly), `services/core/internal/analytics/{changes.go,changes_test.go}`
+- Create: `services/core/internal/db/migrations/00022_analytics_changes.sql` (the two tables and the run table; it drops and recreates `mhai_platform`'s `platform_append` policy on `audit_log` with main's actions (00020's: 00018's and the six EMR ones; 00021 changed only `provision_append`) plus the three analytics ones, and Down recreates main's policy exactly), `services/core/internal/analytics/{changes.go,changes_test.go}`
 - Modify: `scheduler.go` (evaluate after a new week snapshot), `analytics.go` (serve `changes`)
 
 **Interfaces:**
@@ -318,7 +318,7 @@ Add the login role `mhai_analytics_job` as Plan 3 added `mhai_jobs` (password fi
   - `TestChangeIdStable`: the same id while flagged each week; closed when not; a new id when it comes back.
   - `TestSummaryWording` (A12): the two shown numbers only, no hospital name, no other digit.
   - `TestOneOpenChangePerKey`: the partial unique index refuses a second open row.
-  - `TestMigration00020DownUp`, including that Down leaves `platform_append` exactly as 00018 made it; `TestRLSWithoutHospitalSeesNothing` rows for both tables.
+  - `TestMigration00022DownUp`, including that Up's policy is main's with the three actions added and its conditions unchanged, and that Down leaves `platform_append` exactly as main has it (00020's); `TestRLSWithoutHospitalSeesNothing` rows for the three tables.
 - [ ] **Step 2: Run (Go, remote):** `go test -race ./internal/analytics/... && go test -race -tags integration ./internal/db/... ./internal/analytics/...` → fail.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run the tests.
