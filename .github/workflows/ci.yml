@@ -161,7 +161,7 @@ jobs:
         run: uv run diff-cover coverage.xml --compare-branch="origin/$BASE_REF" --fail-under=80
 
   # Plan Task 24: the whole model promotion flow on MinIO from docker-compose.models.yml,
-  # with development keys made in $RUNNER_TEMP and GitHub's answers from a file
+  # with a development key made in $RUNNER_TEMP
   # (services/intelligence/scripts/rehearse-promotion.sh), then the store tests. Synthetic
   # data only; no credential outside this job's throwaway MinIO.
   model-promotion-e2e:
@@ -182,9 +182,9 @@ jobs:
           cache-dependency-glob: services/intelligence/uv.lock
       - name: Install
         run: uv sync --locked
-      # The store's settings and the five roles' throwaway passwords go to $GITHUB_ENV, masked.
+      # The store's settings and both roles' throwaway passwords go to $GITHUB_ENV, masked.
       - name: Rehearsal store
-        run: uv run --no-sync scripts/rehearse-promotion.sh store-up "$GITHUB_ENV" promoter signoff reader eval-reader eval-writer
+        run: uv run --no-sync scripts/rehearse-promotion.sh store-up "$GITHUB_ENV" writer reader
       - name: Rehearse the promotion flow
         run: uv run --no-sync scripts/rehearse-promotion.sh run
       - name: Store tests (MinIO with testcontainers)

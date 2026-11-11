@@ -72,10 +72,12 @@ def test_store_version_ids() -> None:
     assert check_store_version_id(uuid) == uuid
     assert check_store_version_id("Qv7d.yJ0b_8rQ-t5") == "Qv7d.yJ0b_8rQ-t5"
     assert check_store_version_id("a" * 1024) == "a" * 1024
+    # A bucket without versioning: S3's own id for its one object.
+    assert check_store_version_id("null") == "null"
 
 
 @pytest.mark.parametrize(
-    "bad", ["", "null", "a/b", "a+b", "a=", "a b", "a?x=1", "a%2F", "a\n", "a" * 1025, "é", 7]
+    "bad", ["", "a/b", "a+b", "a=", "a b", "a?x=1", "a%2F", "a\n", "a" * 1025, "é", 7]
 )
 def test_store_version_ids_refused(bad: object) -> None:
     with pytest.raises(Refused) as exc:

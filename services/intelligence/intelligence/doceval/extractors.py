@@ -27,8 +27,7 @@ Every stub reports ``engine="stub"`` and a name ending in ``-stub``. The report 
 those for every gate except ``rehearsal`` (Task 11, ``report.check_gates``), and
 ``mhai-doceval run`` refuses the oracle outside tests. Note for Task 19: the promote flow
 picks the extractor itself (from ``config.json``, never by a self-declared engine name),
-so no stub, and the oracle least of all, can run in the ``model-eval`` or
-``model-promotion`` environments.
+so no stub, and the oracle least of all, can run in the promotion workflow.
 """
 
 import copy

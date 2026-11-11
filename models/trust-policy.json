@@ -1,8 +1,4 @@
 {
   "schema": "mhai.models.trust/1",
-  "signers": {
-    "manifest": [],
-    "signoff": [],
-    "testset": []
-  }
+  "signers": []
 }

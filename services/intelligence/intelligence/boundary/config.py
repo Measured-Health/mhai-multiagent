@@ -19,7 +19,7 @@ roles it needs from the model store before it is ready:
   MODEL_STORE_ENDPOINT       https://host[:port]; plain http only for a loopback
                              host (127.0.0.1, ::1, localhost). A loopback MinIO is
                              for development and rehearsal only: production uses
-                             the TLS store Task 27 sets up
+                             a TLS S3-compatible store
   MODEL_STORE_BUCKET, MODEL_STORE_REGION (default us-east-1)
   MODEL_STORE_READER_ACCESS_KEY_FILE, MODEL_STORE_READER_SECRET_KEY_FILE
                              the reader's credentials, from files only: regular
@@ -33,9 +33,10 @@ roles it needs from the model store before it is ready:
                              repository's testdata/models/warmup/page.png;
                              the image must ship it). Checked at start-up:
                              missing is warmup_page_missing
-  MHAI_MODELS_ENV            ``development`` relaxes the sign-off rule only
-                             together with APP_ENV=development; with any other
-                             APP_ENV (or none) it is refused at start-up
+  MHAI_MODELS_ENV            ``development`` (development signers, fixture
+                             names, the rehearsal gate) only together with
+                             APP_ENV=development; with any other APP_ENV (or
+                             none) it is refused at start-up
 
 Each is refused at start-up if malformed, set or not needed.
 """

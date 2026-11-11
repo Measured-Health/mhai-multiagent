@@ -235,7 +235,7 @@ class TrainingManifest:
             except Refused:
                 raise _invalid(detail) from None
         # Lowercase only (names.check_login, ruling D30): GitHub logins are
-        # case-insensitive, and the sign-off compares this one exactly.
+        # case-insensitive, so one spelling is stored.
         _require(names.is_login(self.trained_by), "trained_by")
         _require(
             isinstance(self.datasets, tuple)

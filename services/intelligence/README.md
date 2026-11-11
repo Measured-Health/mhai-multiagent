@@ -157,9 +157,11 @@ uv run mhai-doceval compare OLD/evaluation.json NEW/evaluation.json
 
 ## Promoting a model
 
-A trained model reaches production in four steps: **promote**, **pin**,
-**sign-off** and **load**. Each step checks the one before it. Any failure
-stops with a fixed reason code, and nothing falls back to another version.
+A trained model reaches production in three steps: **promote**, **pin** (a
+normal PR, whose one reviewer's approval is the sign-off) and **load**. Each
+step checks the one before it. Any failure stops with a fixed reason code,
+and nothing falls back to another version. The AI service never loads a
+model whose files, hash or signature don't match `models.lock`.
 
 ### 1. What goes in the Drive folder
 
@@ -201,26 +203,41 @@ the result says so: it is not a promotion result. It writes nothing.
 
 ### 3. The workflows
 
+No GitHub environment, branch protection or other setting is needed, only
+repository secrets and variables. The secrets: `MODEL_STORE_WRITER_ACCESS_KEY` and
+`MODEL_STORE_WRITER_SECRET_KEY`, `MODEL_STORE_READER_ACCESS_KEY` and
+`MODEL_STORE_READER_SECRET_KEY` (any S3-compatible bucket; versioning is used
+if it's on, not required), `MHAI_MODELS_SIGNING_KEY` (the PEM file
+`mhai-models keygen` writes) and, for a Drive source,
+`MODEL_DRIVE_SA_KEY` (a service account the `MHAI models` folder is shared
+with as Viewer). The variables are `MODEL_STORE_ENDPOINT`,
+`MODEL_STORE_BUCKET`, `MODEL_STORE_REGION` and `MODEL_DRIVE_FOLDER_ID`.
+
 - **Model promotion** (`model-promote.yml`, started by hand): give the
   name, version, run id, source and gate.
-  - The *dry-run* job fetches the run, checks every file, evaluates it on
-    the locked test split and keeps two files: its JSON summary and the
-    report `evaluation.md`.
-  - A platform reviewer reads the report and approves the
-    `model-promotion` environment. The *promote* job then does the same
-    checks again, refuses if the files differ from the dry run's, uploads
-    the run under object lock and signs its manifest.
+  - Without `expect_files` it is a **dry run**: it fetches the run, checks
+    every file, evaluates it on the locked test split and keeps two files,
+    its JSON summary and the report `evaluation.md`. The summary ends with
+    the files hash.
+  - Read the report. Then dispatch again with `expect_files` set to that
+    hash: the **promotion** does the same checks, refuses if the files
+    differ from the dry run's, uploads the run and signs its manifest.
 - **Model lock check** (`model-lock.yml`, every PR): checks the pins in a
-  PR's `models.lock` (see "Pin" below). It is a required check.
-- **Model sign-off** (`model-signoff.yml`, after a `models.lock` change
-  merges): checks the approvals again on the merged commit and writes a
-  signed sign-off next to the version. In production the service loads a
-  version only once that sign-off exists.
+  PR's `models.lock` against the store (see "Pin" below).
 - **Model test set** (`model-testset.yml`, by hand): builds and locks a new
   test split and prints the line for `models/testsets.lock`.
 
-Until the production store exists, these workflows run as a rehearsal on a
-throwaway store with test keys, and say so in their summary.
+Until `MODEL_STORE_ENDPOINT` is set, the promotion and test-set workflows run
+as a rehearsal on a throwaway store with a test key, and say so in their
+summary.
+
+**The signing key.** Run `uv run mhai-models keygen KEY_DIR` once, on a
+trusted machine. Put `KEY_DIR/signing-key.pem` in the repository secret
+`MHAI_MODELS_SIGNING_KEY`, add the printed entry to
+`models/trust-policy.json` in its own PR, and keep the key file offline (or
+use it with the CLI: `MHAI_MODELS_SIGNER=KEY_DIR/signing-key.pem`). To
+change the key, add the new entry, merge, re-sign or re-promote, then remove
+the old one.
 
 ### 4. Reading the report
 
@@ -237,28 +254,25 @@ and the timings. The summary's
 `gates_failed` lists any gate that failed. A version can be promoted with a
 failed gate, but it can't be pinned for that gate.
 
-### 5. Pin, sign-off and rollback
+### 5. Pin, review and rollback
 
 - **Pin.** In a branch, run
-  `uv run mhai-models pin extract NAME VERSION --gate phase1`. It verifies the
-  stored version (signature, every file, the gate's `pass`, the locked test
-  set) and writes `models.lock`. Open a PR that changes only `models.lock`
-  (and `models/`, `docs/` or `CHANGELOG.md` if needed), with the
-  `clinical-review` label, the before-and-after reports, and approvals from
-  a clinical reviewer and a platform reviewer listed in
-  `models/reviewers.json`. Neither may be the PR's author, the person who
-  promoted the model or the person who trained it.
-- **Sign-off.** After the merge, the sign-off workflow checks it all again
-  against the merged commit and writes the sign-off. It also extends the
-  version's retention in the store.
+  `uv run mhai-models pin extract NAME VERSION --gate phase1` (with the
+  reader's credentials). It verifies the stored version (signature, every
+  file, the gate's `pass`, the locked test set) and writes `models.lock`.
+  Open a normal PR with the `clinical-review` label and the
+  before-and-after reports. `lock-check` verifies it again; **one reviewer's
+  approval is the sign-off**, and it should not be the person who trained
+  or promoted the model.
 - **Load.** At start-up the pipeline verifies each pinned role (signature,
-  lock hash, every file, sign-off) and runs a fixed warm-up page. Until that
-  passes it reports not ready and takes no jobs. `model_versions` in every
-  answer names the exact weights used.
+  lock hash, every file) and runs a fixed warm-up page. Until that passes it
+  reports not ready and takes no jobs. `model_versions` in every answer names
+  the exact weights used. With no role pinned (no `INTELLIGENCE_MODEL_ROLES`)
+  nothing changes.
 - **Rollback.** Run `uv run mhai-models rollback extract` (or `--to VERSION`)
-  in a branch and open a PR. Only versions that were signed off before can
-  come back. It needs the `clinical-review` label, one platform approval and
-  a line in the PR description starting `Clinical note:` that says why.
+  in a branch and open a PR. Only an earlier version of the pinned model whose
+  signed manifest and files still verify can come back; `lock-check` checks
+  it again.
 
 See the repository's top-level README.md and ARCHITECTURE.md for the whole
 system, and `services/core/` for the Go service in front of it.

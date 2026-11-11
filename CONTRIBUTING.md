@@ -104,12 +104,12 @@ The process:
    review.
 4. Record significant changes as an ADR (see below).
 
-**The person who trained a model can't be its only approver.** For
-`models.lock`, `lock-check` enforces this: a new pin needs a clinical and a
-platform reviewer from `models/reviewers.json`, two different people, and
-neither may be the PR's author, the person who promoted the model or the
-person who trained it. A `models.lock` PR changes nothing but `models.lock`,
-`models/`, `docs/` and `CHANGELOG.md`. See "Promoting a model" in
+**A `models.lock` PR is the model's sign-off.** `lock-check` verifies every
+changed pin against the model store (signature, every file, the gate and the
+locked test set); one reviewer's approval, by someone other than the person
+who trained or promoted the model, signs it off. Keep the PR to
+`models.lock` (and `models/`, `docs/` or `CHANGELOG.md`), and change
+`models/trust-policy.json` in a PR of its own. See "Promoting a model" in
 `services/intelligence/README.md`.
 
 ## Testing

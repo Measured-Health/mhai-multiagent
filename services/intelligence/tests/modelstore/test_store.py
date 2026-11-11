@@ -1,4 +1,4 @@
-"""The model store: conditional create, compliance-mode object lock, per-role policies.
+"""The model store: conditional create, checksums, versioned or not, two roles' policies.
 
 The tests marked ``store`` run against MinIO provisioned by deploy/minio/init-model-store.sh
 (see conftest.py); the rest need no Docker. Every object is synthetic, under a fresh
@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import secrets
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,13 +22,12 @@ from botocore.exceptions import ClientError
 from intelligence.modelstore import store
 from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.store import Credentials, S3Store
-from tests.modelstore.conftest import MAX_RETENTION_DAYS, RETENTION_DAYS, ROLES, MinioStore
+from tests.modelstore.conftest import ROLES, MinioStore
 
 REPO = Path(__file__).resolve().parents[4]
 POLICY_DIR = REPO / "deploy" / "minio" / "policies"
 STORE_PY = REPO / "services" / "intelligence" / "intelligence" / "modelstore" / "store.py"
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-DAY = 1
 CREDS = Credentials("synthetic-access", "synthetic-secret-not-real")
 
 
@@ -55,8 +53,8 @@ def _raw_denied(fn: Any, **kw: Any) -> str:
 
 
 def _promote(m: MinioStore, name: str, version: str = "1.0.0") -> dict[str, str]:
-    """What the promoter writes: the claim, one run file, one document, the manifest."""
-    p = m.store("promoter")
+    """What a promotion writes: the claim, one run file, one document, the manifest."""
+    p = m.store("writer")
     keys = {
         "claim": store.claim_key(name, version),
         "file": store.run_file_key(name, version, "run_1", "config.json"),
@@ -64,7 +62,7 @@ def _promote(m: MinioStore, name: str, version: str = "1.0.0") -> dict[str, str]
         "sig": store.manifest_sig_key(name, version),
         "manifest": store.manifest_key(name, version),
     }
-    return {k: p.put_new(key, f"synthetic {k}".encode(), DAY) for k, key in keys.items()} | {
+    return {k: p.put_new(key, f"synthetic {k}".encode()) for k, key in keys.items()} | {
         f"{k}_key": key for k, key in keys.items()
     }
 
@@ -84,8 +82,7 @@ def test_layout_keys() -> None:
     )
     assert store.manifest_key("mhai-tiny", "1.2.3") == "models/mhai-tiny/1.2.3/manifest.json"
     assert store.manifest_sig_key("mhai-tiny", "1.2.3") == "models/mhai-tiny/1.2.3/manifest.sig"
-    assert store.signoff_key("mhai-tiny", "1.2.3") == "models/mhai-tiny/1.2.3/signoff.json"
-    assert store.signoff_sig_key("mhai-tiny", "1.2.3") == "models/mhai-tiny/1.2.3/signoff.sig"
+    assert not hasattr(store, "signoff_key") and not hasattr(store, "signoff_sig_key")
     assert (
         store.eval_file_key("clinical_document", "1.0.0", "pages/p-001.png")
         == "eval/clinical_document/1.0.0/files/pages/p-001.png"
@@ -124,22 +121,20 @@ def test_keys_and_version_ids_checked_before_any_call() -> None:
     s = S3Store("http://127.0.0.1:1", "mhai-models", CREDS, max_attempts=1)
     for key in ("../x", "models/../eval/x", "models/a//b", "other/x", "models/a?b", "models/"):
         assert _refused(s.get, key, max_bytes=10).reason == "invalid_name"
-        assert _refused(s.put_new, key, b"x", DAY).reason == "invalid_name"
+        assert _refused(s.put_new, key, b"x").reason == "invalid_name"
         assert _refused(s.head, key).reason == "invalid_name"
         assert _refused(s.versions, key).reason == "invalid_name"
-    for vid in ("a/b", "null", "", "x?versionId=1", "a+b"):
+    for vid in ("a/b", "", "x?versionId=1", "a+b", 7):
         assert _refused(s.get, "models/a/1.0.0/claim.json", vid, max_bytes=10).reason == (
             "invalid_name"
         )
-        assert _refused(s.extend_retention, "models/a/1.0.0/claim.json", vid, 2).reason == (
-            "invalid_name"
-        )
+        assert _refused(s.head, "models/a/1.0.0/claim.json", vid).reason == "invalid_name"
+        out = io.BytesIO()
+        assert _refused(
+            s.download, "models/a/1.0.0/claim.json", version_id=vid, out=out, max_bytes=10
+        ).reason == ("invalid_name")
     for prefix in ("models", "../", "models/a", "eval//"):
         assert _refused(s.list, prefix).reason == "invalid_name"
-    for days in (0, -1, True, 36501, 1.5):
-        assert _refused(s.put_new, "models/a/1.0.0/claim.json", b"x", days).reason == (
-            "not_allowed_here"
-        )
 
 
 def test_put_new_path_must_be_a_regular_file(tmp_path: Path) -> None:
@@ -148,17 +143,15 @@ def test_put_new_path_must_be_a_regular_file(tmp_path: Path) -> None:
     target.write_bytes(b"{}")
     link = tmp_path / "link.json"
     link.symlink_to(target)
-    assert _refused(s.put_new, "models/a/1.0.0/claim.json", link, DAY).reason == "missing_file"
+    assert _refused(s.put_new, "models/a/1.0.0/claim.json", link).reason == "missing_file"
     os.mkfifo(tmp_path / "fifo")
-    assert _refused(s.put_new, "models/a/1.0.0/claim.json", tmp_path / "fifo", DAY).reason == (
+    assert _refused(s.put_new, "models/a/1.0.0/claim.json", tmp_path / "fifo").reason == (
         "file_not_allowed"
     )
     hard = tmp_path / "hard.json"
     os.link(target, hard)
-    assert _refused(s.put_new, "models/a/1.0.0/claim.json", hard, DAY).reason == (
-        "file_not_allowed"
-    )
-    assert _refused(s.put_new, "models/a/1.0.0/claim.json", "config.json", DAY).reason == (
+    assert _refused(s.put_new, "models/a/1.0.0/claim.json", hard).reason == ("file_not_allowed")
+    assert _refused(s.put_new, "models/a/1.0.0/claim.json", "config.json").reason == (
         "file_not_allowed"
     )
 
@@ -228,7 +221,7 @@ def test_errors_unreachable_have_no_url_or_credentials(caplog: pytest.LogCapture
     key = "models/mhai-secret-name/1.0.0/manifest.json"
     for call in (
         lambda: s.get(key, max_bytes=10),
-        lambda: s.put_new(key, b"x", DAY),
+        lambda: s.put_new(key, b"x"),
         lambda: s.head(key),
         lambda: s.versions(key),
         lambda: s.list("models/"),
@@ -299,17 +292,18 @@ def _fake_s3(client: _Client) -> S3Store:
     s = object.__new__(S3Store)
     object.__setattr__(s, "_client", client)
     object.__setattr__(s, "_bucket", "mhai-models-test")
-    object.__setattr__(s, "_max_days", 30)
     return s
 
 
-def _download(data: bytes, length: int, max_bytes: int, sha_of: bytes | None = None) -> Any:
+def _download(
+    data: bytes, length: int, max_bytes: int, sha_of: bytes | None = None, vid: str = "v-1"
+) -> Any:
     body = _Body(data)
     client = _Client(body, length, data if sha_of is None else sha_of)
     out = io.BytesIO()
     key = store.manifest_key("fixture-model", "1.0.0")
     try:
-        result: Any = _fake_s3(client).download(key, version_id="v-1", out=out, max_bytes=max_bytes)
+        result: Any = _fake_s3(client).download(key, version_id=vid, out=out, max_bytes=max_bytes)
     except Refused as e:
         result = e
     return result, out.getvalue(), body, client
@@ -339,59 +333,63 @@ def test_download_names_the_version_and_stops_at_max_bytes() -> None:
         )
 
 
+def test_null_version_reads_the_one_object() -> None:
+    """A bucket without versioning: the recorded id is ``null`` and the read names no
+    version (S3's "the one object"); the hash is still checked."""
+    data = b"synthetic manifest"
+    (n, sha), written, _, client = _download(data, len(data), 100, vid=store.NULL_VERSION)
+    assert (n, sha, written) == (len(data), hashlib.sha256(data).hexdigest(), data)
+    assert "VersionId" not in client.calls[0]
+    err, *_ = _download(data, len(data), 100, sha_of=b"overwritten", vid=store.NULL_VERSION)
+    assert err.reason == "hash_mismatch"
+    # get with "null" and with no version ("latest") both name none; a real id is sent.
+    for vid, sent in ((store.NULL_VERSION, None), (None, None), ("v-2", "v-2")):
+        client = _Client(_Body(data), len(data), data)
+        assert _fake_s3(client).get(store.manifest_key("m-x", "1.0.0"), vid, max_bytes=100) == data
+        assert client.calls[0].get("VersionId") == sent
+    # A store that returns no version id (no versioning) reports "null"; a malformed one
+    # is refused.
+    assert store._returned_version_id(None) == store.NULL_VERSION == "null"
+    assert store._returned_version_id("abc-1") == "abc-1"
+    assert _refused(store._returned_version_id, "a/b").reason == "store_unavailable"
+    assert store._version_kw(None) == {} and store._version_kw("null") == {}
+    assert store._version_kw("v-3") == {"VersionId": "v-3"}
+
+
+def test_no_lock_or_retention_left() -> None:
+    source = STORE_PY.read_text()
+    for gone in ("ObjectLock", "Retention", "retention", "COMPLIANCE"):
+        assert gone not in source.replace("Object lock and retention are not used", "")
+    assert not hasattr(store.S3Store, "extend_retention")
+    assert not hasattr(store.ObjectStore, "extend_retention")
+
+
 def test_policies_load_and_deny_deletes() -> None:
     files = sorted(p.stem for p in POLICY_DIR.glob("*.json"))
-    assert files == sorted(ROLES)
+    assert files == sorted(ROLES) == ["reader", "writer"]
     for role in ROLES:
         doc = json.loads((POLICY_DIR / f"{role}.json").read_text())
         assert doc["Version"] == "2012-10-17"
         statements = doc["Statement"]
+        allowed: set[str] = set()
         for st in statements:
             assert set(st) <= {"Sid", "Effect", "Action", "Resource", "Condition"}
             assert st["Effect"] in ("Allow", "Deny")
             for r in st["Resource"]:
                 assert r.startswith("arn:aws:s3:::@BUCKET@")
             if st["Effect"] == "Allow":
-                # Nothing is ever allowed wholesale, and nothing that deletes or unlocks.
+                # Nothing is ever allowed wholesale, and nothing that deletes.
                 assert "s3:*" not in st["Action"]
                 assert not [a for a in st["Action"] if "Delete" in a or "Bypass" in a]
-                if "s3:PutObjectRetention" in st["Action"]:
-                    assert st["Condition"] == {
-                        "StringEquals": {"s3:object-lock-mode": ["COMPLIANCE"]}
-                    }
-                    cap = [x for x in statements if x.get("Sid") == "RetentionCap"]
-                    assert cap == [
-                        {
-                            "Sid": "RetentionCap",
-                            "Effect": "Deny",
-                            "Action": ["s3:PutObjectRetention"],
-                            "Resource": ["arn:aws:s3:::@BUCKET@/*"],
-                            "Condition": {
-                                "NumericGreaterThan": {
-                                    "s3:object-lock-remaining-retention-days": [
-                                        "@MAX_RETENTION_DAYS@"
-                                    ]
-                                }
-                            },
-                        }
-                    ]
+                allowed |= set(st["Action"])
         denied = {a for st in statements if st["Effect"] == "Deny" for a in st["Action"]}
-        assert {"s3:DeleteObject", "s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"} <= (
-            denied
-        )
-        assert {"s3:PutBucketObjectLockConfiguration", "s3:PutBucketVersioning"} <= denied
-        # Nothing may be written "under" a fixed name (MinIO would then refuse the name).
-        fixed = [st for st in statements if st.get("Sid") == "NothingUnderFixedNames"]
-        assert len(fixed) == 1 and fixed[0]["Effect"] == "Deny"
-        assert "s3:PutObject" in fixed[0]["Action"]
-        for name in ("claim.json", "manifest.json", "manifest.sig", "signoff.json", "signoff.sig"):
-            assert f"arn:aws:s3:::@BUCKET@/models/*/{name}/*" in fixed[0]["Resource"]
-    promoter = json.loads((POLICY_DIR / "promoter.json").read_text())
+        assert {"s3:DeleteObject", "s3:DeleteObjectVersion"} <= denied
+        assert {"s3:PutBucketVersioning", "s3:PutBucketPolicy", "s3:DeleteBucket"} <= denied
+        assert not [a for a in allowed if "Retention" in a or "LegalHold" in a]
+        assert ("s3:PutObject" in allowed) == (role == "writer")
+    reader = json.loads((POLICY_DIR / "reader.json").read_text())
     assert any(
-        st["Effect"] == "Deny"
-        and "s3:PutObject" in st["Action"]
-        and st["Resource"] == ["arn:aws:s3:::@BUCKET@/models/*/*/signoff.*"]
-        for st in promoter["Statement"]
+        st["Effect"] == "Deny" and "s3:PutObject" in st["Action"] for st in reader["Statement"]
     )
 
 
@@ -415,259 +413,178 @@ def test_init_writes_secrets_0600_and_never_echoes_them(minio_store: MinioStore)
     assert dict(again.secrets) == dict(init.secrets)
     for value in [*again.secrets.values(), minio_store.root.secret_key]:
         assert value not in again.logs
-    for role in ("promoter", "signoff", "reader"):
+    for role in ROLES:
         minio_store.store(role).list("models/")
 
 
 @pytest.mark.store
-def test_bucket_has_compliance_lock_and_versioning(minio_store: MinioStore) -> None:
+def test_bucket_is_versioned(minio_store: MinioStore) -> None:
     raw = minio_store.client()
-    lock = raw.get_object_lock_configuration(Bucket=minio_store.bucket)["ObjectLockConfiguration"]
-    assert lock["ObjectLockEnabled"] == "Enabled"
-    assert lock["Rule"]["DefaultRetention"]["Mode"] == "COMPLIANCE"
-    assert lock["Rule"]["DefaultRetention"]["Days"] == RETENTION_DAYS
     assert raw.get_bucket_versioning(Bucket=minio_store.bucket)["Status"] == "Enabled"
 
 
 @pytest.mark.store
 def test_put_new_refuses_existing_key(minio_store: MinioStore) -> None:
-    p = minio_store.store("promoter")
+    w = minio_store.store("writer")
     key = store.claim_key(_name(), "1.0.0")
-    vid = p.put_new(key, b'{"claim":"first"}', DAY)
-    err = _refused(p.put_new, key, b'{"claim":"second"}', DAY)
+    vid = w.put_new(key, b'{"claim":"first"}')
+    err = _refused(w.put_new, key, b'{"claim":"second"}')
     assert err.reason == "version_exists"
     # Root too: the conditional create holds for everyone.
-    assert _refused(minio_store.store().put_new, key, b"x", DAY).reason == "version_exists"
-    assert p.versions(key) == [vid]
-    assert p.get(key, max_bytes=100) == b'{"claim":"first"}'
+    assert _refused(minio_store.store().put_new, key, b"x").reason == "version_exists"
+    assert w.versions(key) == [vid]
+    assert w.get(key, max_bytes=100) == b'{"claim":"first"}'
 
 
 @pytest.mark.store
 def test_version_ids_returned_and_fetchable(minio_store: MinioStore, tmp_path: Path) -> None:
-    p = minio_store.store("promoter")
+    w = minio_store.store("writer")
     name = _name()
     key = store.run_file_key(name, "1.0.0", "run_1", "config.json")
-    vid = p.put_new(key, b'{"synthetic": 1}', DAY)
+    vid = w.put_new(key, b'{"synthetic": 1}')
     assert UUID.fullmatch(vid)
-    info = p.head(key, vid)
+    info = w.head(key, vid)
     assert info.version_id == vid and info.size == 16
     assert info.sha256 == hashlib.sha256(b'{"synthetic": 1}').hexdigest()
-    assert info.lock_mode == "COMPLIANCE"
-    assert info.retain_until is not None
-    assert abs(info.retain_until - (datetime.now(UTC) + timedelta(days=DAY))) < timedelta(minutes=5)
-    assert p.get(key, vid, max_bytes=16) == b'{"synthetic": 1}'
-    assert _refused(p.get, key, vid, max_bytes=15).reason == "too_large"
+    assert w.get(key, vid, max_bytes=16) == b'{"synthetic": 1}'
+    assert _refused(w.get, key, vid, max_bytes=15).reason == "too_large"
+    out = io.BytesIO()
+    assert w.download(key, version_id=vid, out=out, max_bytes=16) == (16, info.sha256)
+    assert _refused(w.download, key, version_id=vid, out=io.BytesIO(), max_bytes=15).reason == (
+        "too_large"
+    )
 
     # Shadowing: an unconditional PUT by a holder of root makes a newer version. The one
     # we recorded is still there, unchanged, and is what we ask for.
     minio_store.client().put_object(Bucket=minio_store.bucket, Key=key, Body=b"shadow")
-    versions = p.versions(key)
+    versions = w.versions(key)
     assert len(versions) == 2 and versions[-1] == vid and versions[0] != vid
-    assert p.get(key, vid, max_bytes=100) == b'{"synthetic": 1}'
+    assert w.get(key, vid, max_bytes=100) == b'{"synthetic": 1}'
 
     # A file is streamed, and listed under its prefix.
     weights = tmp_path / "model.safetensors"
     weights.write_bytes(os.urandom(3000))
     wkey = store.run_file_key(name, "1.0.0", "run_1", "model.safetensors")
-    wvid = p.put_new(wkey, weights, DAY)
-    assert p.get(wkey, wvid, max_bytes=3000) == weights.read_bytes()
-    assert p.list(f"models/{name}/1.0.0/runs/run_1/files/") == sorted([key, wkey])
+    wvid = w.put_new(wkey, weights)
+    assert w.get(wkey, wvid, max_bytes=3000) == weights.read_bytes()
+    assert w.list(f"models/{name}/1.0.0/runs/run_1/files/") == sorted([key, wkey])
 
-    missing = _refused(p.get, store.claim_key(name, "9.9.9"), max_bytes=10)
+    missing = _refused(w.get, store.claim_key(name, "9.9.9"), max_bytes=10)
     assert missing.reason == "not_found"
-    gone = _refused(p.get, key, "6d2f9c1e-3b4a-4f5e-9a8b-7c6d5e4f3a2b", max_bytes=10)
+    no_such_version = "6d2f9c1e-3b4a-4f5e-9a8b-7c6d5e4f3a2b"  # gitleaks:allow (made up)
+    gone = _refused(w.get, key, no_such_version, max_bytes=10)
     assert gone.reason == "not_found"
 
 
 @pytest.mark.store
-def test_locked_object_cannot_be_deleted_or_shortened(minio_store: MinioStore) -> None:
-    ids = _promote(minio_store, _name())
-    key, vid = ids["manifest_key"], ids["manifest"]
-    root = minio_store.client()
-    until = minio_store.store().head(key, vid).retain_until
-    assert until is not None
-    # Compliance mode: not even the root user, not even with the governance bypass.
-    for kw in ({}, {"BypassGovernanceRetention": True}):
-        _raw_denied(root.delete_object, Bucket=minio_store.bucket, Key=key, VersionId=vid, **kw)
-        _raw_denied(
-            root.put_object_retention,
-            Bucket=minio_store.bucket,
-            Key=key,
-            VersionId=vid,
-            Retention={"Mode": "COMPLIANCE", "RetainUntilDate": until - timedelta(hours=1)},
-            **kw,
-        )
-    _raw_denied(
-        root.put_object_retention,
-        Bucket=minio_store.bucket,
-        Key=key,
-        VersionId=vid,
-        Retention={"Mode": "GOVERNANCE", "RetainUntilDate": until + timedelta(days=1)},
-    )
-    resp = root.delete_objects(
-        Bucket=minio_store.bucket,
-        Delete={"Objects": [{"Key": key, "VersionId": vid}]},
-        BypassGovernanceRetention=True,
-    )
-    assert resp.get("Errors") and not resp.get("Deleted")
-    assert minio_store.store("reader").get(key, vid, max_bytes=100) == b"synthetic manifest"
-    assert minio_store.store().head(key, vid).retain_until == until
+def test_bucket_without_versioning(minio_store: MinioStore) -> None:
+    """Versioning is optional: ids are "null", reads work, an overwrite never passes as the
+    recorded bytes."""
+    bucket = f"mhai-plain-{secrets.token_hex(4)}"
+    raw = minio_store.client()
+    raw.create_bucket(Bucket=bucket)
+    assert raw.get_bucket_versioning(Bucket=bucket).get("Status") in (None, "")
+    s = S3Store(minio_store.endpoint, bucket, minio_store.root, max_attempts=1)
+    key = store.run_file_key(_name(), "1.0.0", "run_1", "config.json")
+    body = b'{"synthetic": "plain"}'
+    sha = hashlib.sha256(body).hexdigest()
+    vid = s.put_new(key, body)
+    assert vid == store.NULL_VERSION
+    assert _refused(s.put_new, key, b"again").reason == "version_exists"
+    info = s.head(key, vid)
+    assert (info.version_id, info.size, info.sha256) == (vid, len(body), sha)
+    assert s.get(key, vid, max_bytes=100) == body
+    out = io.BytesIO()
+    assert s.download(key, version_id=vid, out=out, max_bytes=100) == (len(body), sha)
+    assert out.getvalue() == body
+    assert s.versions(key) == [store.NULL_VERSION]
+    # Overwritten outside this code, with a checksum: the bytes read now are not the
+    # recorded SHA-256, which every reader compares (the verifier's hash_mismatch).
+    raw.put_object(Bucket=bucket, Key=key, Body=b"tampered", ChecksumAlgorithm="SHA256")
+    n, got = s.download(key, version_id=vid, out=io.BytesIO(), max_bytes=100)
+    assert (n, got) == (8, hashlib.sha256(b"tampered").hexdigest()) and got != sha
+    assert s.head(key, vid).sha256 != sha
+    # Without a checksum: the store can't vouch for it, so it is refused outright.
+    raw.put_object(Bucket=bucket, Key=key, Body=b"tampered again")
+    err = _refused(s.download, key, version_id=vid, out=io.BytesIO(), max_bytes=100)
+    assert (err.reason, err.detail_code) == ("store_unavailable", "checksum")
 
 
 @pytest.mark.store
-def test_retention_extend_only(minio_store: MinioStore) -> None:
-    ids = _promote(minio_store, _name())
-    key, vid = ids["manifest_key"], ids["manifest"]
-    s = minio_store.store("signoff")
-    before = s.head(key, vid).retain_until
-    assert before is not None
-    after = s.extend_retention(key, vid, 3)
-    assert after > before
-    assert s.head(key, vid).retain_until == after
-    # Never shortened: our code refuses without a call, and the store refuses the call.
-    err = _refused(s.extend_retention, key, vid, 1)
-    assert (err.reason, err.detail_code) == ("not_allowed_here", "retention_not_longer")
-    _raw_denied(
-        minio_store.client("signoff").put_object_retention,
-        Bucket=minio_store.bucket,
-        Key=key,
-        VersionId=vid,
-        Retention={"Mode": "COMPLIANCE", "RetainUntilDate": after - timedelta(days=1)},
-    )
-    assert s.head(key, vid).retain_until == after
-    # The reader and the eval roles may not change retention at all.
-    for role in ("reader", "eval-reader", "eval-writer"):
-        _denied(minio_store.store(role).extend_retention, key, vid, 10)
+def test_writer_reads_and_writes_models_and_eval(minio_store: MinioStore) -> None:
+    w = minio_store.store("writer")
+    name = _name()
+    ids = _promote(minio_store, name)
+    assert w.get(ids["manifest_key"], ids["manifest"], max_bytes=100) == b"synthetic manifest"
+    suite_version = f"1.{secrets.randbelow(10**5)}.0"
+    ekey = store.eval_file_key("clinical_document", suite_version, "pages/p-001.png")
+    evid = w.put_new(ekey, b"synthetic page")
+    assert w.get(ekey, evid, max_bytes=100) == b"synthetic page"
+    assert ekey in w.list(f"eval/clinical_document/{suite_version}/")
+    assert w.versions(ekey) == [evid]
 
 
 @pytest.mark.store
 def test_reader_cannot_write(minio_store: MinioStore) -> None:
     name = _name()
     ids = _promote(minio_store, name)
+    suite_version = f"2.{secrets.randbelow(10**5)}.0"
+    ekey = store.eval_file_key("clinical_document", suite_version, "a.png")
+    evid = minio_store.store("writer").put_new(ekey, b"synthetic page")
     r = minio_store.store("reader")
     assert r.get(ids["manifest_key"], ids["manifest"], max_bytes=100) == b"synthetic manifest"
     assert r.versions(ids["manifest_key"]) == [ids["manifest"]]
     assert store.manifest_key(name, "1.0.0") in r.list(f"models/{name}/1.0.0/")
+    # The reader reads the locked split too (the promotion's evaluation, lock-check).
+    assert r.get(ekey, evid, max_bytes=100) == b"synthetic page"
     for key in (
         store.claim_key(_name(), "1.0.0"),
         store.manifest_key(name, "2.0.0"),
-        store.signoff_key(name, "1.0.0"),
-        store.eval_file_key("clinical_document", "1.0.0", "a.png"),
+        store.eval_file_key("clinical_document", "1.0.0", f"{_name()}.png"),
     ):
-        _denied(r.put_new, key, b"x", DAY)
+        _denied(r.put_new, key, b"x")
     raw = minio_store.client("reader")
     _raw_denied(raw.put_object, Bucket=minio_store.bucket, Key=ids["file_key"], Body=b"shadow")
     assert r.versions(ids["file_key"]) == [ids["file"]]
 
 
 @pytest.mark.store
-def test_promoter_cannot_write_signoff_or_eval_or_delete(minio_store: MinioStore) -> None:
-    name = _name()
-    ids = _promote(minio_store, name)
-    p = minio_store.store("promoter")
-    _denied(p.put_new, store.signoff_key(name, "1.0.0"), b"{}", DAY)
-    _denied(p.put_new, store.signoff_sig_key(name, "1.0.0"), b"{}", DAY)
-    _denied(p.put_new, store.testset_key("clinical_document", "1.0.0"), b"{}", DAY)
-    _denied(p.put_new, store.eval_file_key("clinical_document", "1.0.0", "a.png"), b"x", DAY)
-    _denied(p.list, "eval/")
-    raw = minio_store.client("promoter")
-    bucket = minio_store.bucket
-    # Locking a new object needs s3:PutObjectRetention, so the promoter can also lengthen
-    # a model object's lock (compliance mode only). It can never shorten one.
-    longer = p.extend_retention(ids["file_key"], ids["file"], 2)
-    _raw_denied(
-        raw.put_object_retention,
-        Bucket=bucket,
-        Key=ids["file_key"],
-        VersionId=ids["file"],
-        Retention={"Mode": "COMPLIANCE", "RetainUntilDate": longer - timedelta(hours=12)},
-    )
-    # Deletes are denied outright: not even a delete marker is made.
-    _raw_denied(raw.delete_object, Bucket=bucket, Key=ids["manifest_key"])
-    _raw_denied(
-        raw.delete_object, Bucket=bucket, Key=ids["manifest_key"], VersionId=ids["manifest"]
-    )
-    assert p.versions(ids["manifest_key"]) == [ids["manifest"]]
-    assert p.head(ids["manifest_key"]).version_id == ids["manifest"]
-    # Nor a lock in governance mode, nor a change to the bucket's versioning or lock.
-    _raw_denied(
-        raw.put_object,
-        Bucket=bucket,
-        Key=store.claim_key(_name(), "1.0.0"),
-        Body=b"x",
-        ObjectLockMode="GOVERNANCE",
-        ObjectLockRetainUntilDate=datetime.now(UTC) + timedelta(days=1),
-    )
-    _raw_denied(
-        raw.put_bucket_versioning, Bucket=bucket, VersioningConfiguration={"Status": "Suspended"}
-    )
-    _raw_denied(
-        raw.put_object_lock_configuration,
-        Bucket=bucket,
-        ObjectLockConfiguration={"ObjectLockEnabled": "Enabled"},
-    )
-
-
-@pytest.mark.store
-def test_nobody_can_delete(minio_store: MinioStore) -> None:
+def test_nobody_can_delete_or_change_the_bucket(minio_store: MinioStore) -> None:
     ids = _promote(minio_store, _name())
+    bucket = minio_store.bucket
     for role in ROLES:
         raw = minio_store.client(role)
         for kw in ({}, {"VersionId": ids["file"]}):
-            code = _raw_denied(
-                raw.delete_object, Bucket=minio_store.bucket, Key=ids["file_key"], **kw
-            )
+            code = _raw_denied(raw.delete_object, Bucket=bucket, Key=ids["file_key"], **kw)
             assert code == "AccessDenied", role
-    assert minio_store.store("reader").versions(ids["file_key"]) == [ids["file"]]
+        resp = raw.delete_objects(
+            Bucket=bucket, Delete={"Objects": [{"Key": ids["file_key"], "VersionId": ids["file"]}]}
+        )
+        assert resp.get("Errors") and not resp.get("Deleted"), role
+        _raw_denied(
+            raw.put_bucket_versioning,
+            Bucket=bucket,
+            VersioningConfiguration={"Status": "Suspended"},
+        )
+        _raw_denied(raw.put_bucket_policy, Bucket=bucket, Policy="{}")
+        _raw_denied(raw.delete_bucket, Bucket=bucket)
+    reader = minio_store.store("reader")
+    assert reader.versions(ids["file_key"]) == [ids["file"]]
+    assert reader.head(ids["manifest_key"]).version_id == ids["manifest"]
+    raw = minio_store.client()
+    assert raw.get_bucket_versioning(Bucket=bucket)["Status"] == "Enabled"
 
 
 @pytest.mark.store
-def test_signoff_cannot_write_manifest_or_files(minio_store: MinioStore) -> None:
-    name = _name()
-    ids = _promote(minio_store, name)
-    s = minio_store.store("signoff")
-    vid = s.put_new(store.signoff_key(name, "1.0.0"), b'{"synthetic":"signoff"}', DAY)
-    s.put_new(store.signoff_sig_key(name, "1.0.0"), b'{"synthetic":"sig"}', DAY)
-    assert s.get(store.signoff_key(name, "1.0.0"), vid, max_bytes=100)
-    other = _name()
-    for key in (
-        store.manifest_key(other, "1.0.0"),
-        store.manifest_sig_key(other, "1.0.0"),
-        store.claim_key(other, "1.0.0"),
-        store.run_file_key(other, "1.0.0", "run_1", "config.json"),
-        store.run_doc_key(other, "1.0.0", "run_1", "model_card.md"),
-        # A run file that happens to be named like a sign-off is still a run file.
-        f"models/{other}/1.0.0/runs/run_1/files/signoff.json",
-        store.eval_file_key("clinical_document", "1.0.0", "a.png"),
-    ):
-        _denied(s.put_new, key, b"x", DAY)
-    # It may read the version it signs off, and extend that version's retention.
-    assert s.get(ids["manifest_key"], ids["manifest"], max_bytes=100) == b"synthetic manifest"
-    s.extend_retention(ids["file_key"], ids["file"], 5)
-
-
-@pytest.mark.store
-def test_eval_reader_only_reads_eval(minio_store: MinioStore) -> None:
-    name = _name()
-    ids = _promote(minio_store, name)
-    suite_version = f"1.{secrets.randbelow(10**6)}.0"
-    w = minio_store.store("eval-writer")
-    r = minio_store.store("eval-reader")
-    key = store.eval_file_key("clinical_document", suite_version, "pages/p-001.png")
-    vid = w.put_new(key, b"synthetic page", DAY)
-    tvid = w.put_new(store.testset_key("clinical_document", suite_version), b"{}", DAY)
-    assert r.get(key, vid, max_bytes=100) == b"synthetic page"
-    assert r.get(store.testset_key("clinical_document", suite_version), tvid, max_bytes=10)
-    # The eval reader reads nothing else and writes nothing.
-    _denied(r.get, ids["manifest_key"], ids["manifest"], max_bytes=100)
-    _denied(r.put_new, store.eval_file_key("clinical_document", suite_version, "x.png"), b"x", 1)
-    _denied(r.put_new, store.claim_key(_name(), "1.0.0"), b"x", DAY)
-    # The eval writer writes eval only, and reads no model.
-    _denied(w.put_new, store.claim_key(_name(), "1.0.0"), b"x", DAY)
-    _denied(w.get, ids["manifest_key"], ids["manifest"], max_bytes=100)
-    # The model roles never read the test split.
-    for role in ("promoter", "signoff", "reader"):
-        _denied(minio_store.store(role).get, key, vid, max_bytes=100)
+def test_listing_scoped_to_the_layout(minio_store: MinioStore) -> None:
+    bucket = minio_store.bucket
+    for role in ROLES:
+        raw = minio_store.client(role)
+        _raw_denied(raw.list_object_versions, Bucket=bucket)
+        _raw_denied(raw.list_objects_v2, Bucket=bucket)
+        _raw_denied(raw.list_objects_v2, Bucket=bucket, Prefix="other/")
+        raw.list_objects_v2(Bucket=bucket, Prefix="models/")
+        raw.list_object_versions(Bucket=bucket, Prefix="eval/")
 
 
 @pytest.mark.store
@@ -680,45 +597,23 @@ def test_errors_have_no_url_or_credentials(
     host = minio_store.endpoint.split("://", 1)[1]
     forbidden: list[Any] = [host, minio_store.bucket, name, minio_store.root]
     forbidden += list(minio_store.users.values())
-    wrong = Credentials("promoter", "not-the-password-0123456789")
+    wrong = Credentials("writer", "not-the-password-0123456789")
     bad = S3Store(minio_store.endpoint, minio_store.bucket, wrong, max_attempts=1)
     err = _refused(bad.get, ids["manifest_key"], max_bytes=100)
     assert (err.reason, err.detail_code) == ("store_unavailable", "denied")
     _assert_clean(err, [*forbidden, wrong])
-    p = minio_store.store("promoter")
+    w = minio_store.store("writer")
+    r = minio_store.store("reader")
     for call, reason in (
-        (lambda: p.get(store.claim_key(name, "9.9.9"), max_bytes=10), "not_found"),
-        (lambda: p.put_new(ids["claim_key"], b"x", DAY), "version_exists"),
-        (lambda: p.put_new(store.signoff_key(name, "1.0.0"), b"x", DAY), "store_unavailable"),
-        (lambda: p.head(store.claim_key(name, "9.9.9")), "not_found"),
+        (lambda: w.get(store.claim_key(name, "9.9.9"), max_bytes=10), "not_found"),
+        (lambda: w.put_new(ids["claim_key"], b"x"), "version_exists"),
+        (lambda: r.put_new(store.claim_key(_name(), "1.0.0"), b"x"), "store_unavailable"),
+        (lambda: w.head(store.claim_key(name, "9.9.9")), "not_found"),
     ):
         err = _refused(call)
         assert err.reason == reason
         _assert_clean(err, forbidden)
     _assert_logs_clean(caplog, forbidden)
-
-
-# ---------------------------------------------------------------- fix round 1
-
-
-def test_retention_cap_checked_by_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    s = S3Store("http://127.0.0.1:1", "mhai-models", CREDS, max_retention_days=30)
-    key = "models/a/1.0.0/claim.json"
-    vid = "6d2f9c1e-3b4a-4f5e-9a8b-7c6d5e4f3a2b"
-    for call in (lambda: s.put_new(key, b"x", 31), lambda: s.extend_retention(key, vid, 31)):
-        err = _refused(call)  # refused before any call: nothing listens on port 1
-        assert (err.reason, err.detail_code) == ("not_allowed_here", "retention_days")
-    monkeypatch.delenv(store.MAX_RETENTION_DAYS_ENV, raising=False)
-    assert store.retention_cap_from_env() == store.DEFAULT_MAX_RETENTION_DAYS == 3650
-    monkeypatch.setenv(store.MAX_RETENTION_DAYS_ENV, "90")
-    assert store.retention_cap_from_env() == 90
-    s = S3Store("http://127.0.0.1:1", "mhai-models", CREDS)
-    assert _refused(s.put_new, key, b"x", 91).detail_code == "retention_days"
-    for bad in ("0", "-1", "36501", "1e3", "90 ", "abc"):
-        monkeypatch.setenv(store.MAX_RETENTION_DAYS_ENV, bad)
-        assert _refused(S3Store, "http://127.0.0.1:1", "mhai-models", CREDS).reason == (
-            "not_allowed_here"
-        )
 
 
 def test_sdk_loggers_clamped_at_construction() -> None:
@@ -755,154 +650,14 @@ def test_loopback_ignores_proxy_environment(
         monkeypatch.setenv(var, "http://127.0.0.1:9")
     for var in ("NO_PROXY", "no_proxy"):
         monkeypatch.delenv(var, raising=False)
-    s = minio_store.store("promoter")
+    s = minio_store.store("writer")
     key = store.claim_key(_name(), "1.0.0")
-    vid = s.put_new(key, b"no proxy", DAY)
+    vid = s.put_new(key, b"no proxy")
     assert s.get(key, vid, max_bytes=100) == b"no proxy"
 
 
-@pytest.mark.store
-def test_retention_capped_by_policy(minio_store: MinioStore) -> None:
-    over = MAX_RETENTION_DAYS + 10
-    ids = _promote(minio_store, _name())
-    for days, role in ((5, "promoter"), (6, "signoff")):
-        # Through S3Store (whose own cap is the default 3650): the store refuses the
-        # extension past its cap, and allows one within it.
-        _denied(minio_store.store(role).extend_retention, ids["file_key"], ids["file"], over)
-        minio_store.store(role).extend_retention(ids["file_key"], ids["file"], days)
-    ev = minio_store.store("eval-writer")
-    ekey = store.eval_file_key("clinical_document", "1.0.0", f"{_name()}.png")
-    evid = ev.put_new(ekey, b"x", DAY)
-    _denied(minio_store.store("eval-writer").extend_retention, ekey, evid, over)
-    # Known gap, pinned (TODO.md): the pinned MinIO doesn't evaluate
-    # s3:object-lock-remaining-retention-days for the lock headers of a new PUT (a
-    # condition on it never matches there), so only S3Store's own cap stops an over-long
-    # lock on a new object. AWS evaluates the key on PutObject too (Task 27). If this
-    # starts failing, MinIO enforces it: tighten the test.
-    raw = minio_store.client("promoter")
-    raw.put_object(
-        Bucket=minio_store.bucket,
-        Key=store.claim_key(_name(), "1.0.0"),
-        Body=b"x",
-        ObjectLockMode="COMPLIANCE",
-        ObjectLockRetainUntilDate=datetime.now(UTC) + timedelta(days=over),
-    )
-    capped = S3Store(
-        minio_store.endpoint,
-        minio_store.bucket,
-        minio_store.users["promoter"],
-        max_attempts=1,
-        max_retention_days=MAX_RETENTION_DAYS,
-    )
-    err = _refused(capped.put_new, store.claim_key(_name(), "1.0.0"), b"x", over)
-    assert (err.reason, err.detail_code) == ("not_allowed_here", "retention_days")
-
-
-@pytest.mark.store
-def test_nothing_under_fixed_names(minio_store: MinioStore) -> None:
-    name = _name()
-    bucket = minio_store.bucket
-    signoff = minio_store.client("signoff")
-    for fixed in ("claim.json", "manifest.json", "manifest.sig", "signoff.json", "signoff.sig"):
-        _raw_denied(
-            signoff.put_object,
-            Bucket=bucket,
-            Key=f"models/{name}/2.0.0/{fixed}/signoff.json",
-            Body=b"x",
-        )
-    promoter = minio_store.client("promoter")
-    for fixed in ("claim.json", "manifest.json", "manifest.sig"):
-        _raw_denied(
-            promoter.put_object, Bucket=bucket, Key=f"models/{name}/2.0.0/{fixed}/x", Body=b"x"
-        )
-    _raw_denied(
-        minio_store.client("eval-writer").put_object,
-        Bucket=bucket,
-        Key=f"eval/clinical_document/9.{secrets.randbelow(10**6)}.0/testset.json/x",
-        Body=b"x",
-    )
-    # So the version can still be claimed.
-    minio_store.store("promoter").put_new(store.claim_key(name, "2.0.0"), b"claim", DAY)
-
-
-@pytest.mark.store
-def test_odd_keys_never_reach_the_signoff_key(minio_store: MinioStore) -> None:
-    name = _name()
-    _promote(minio_store, name)
-    raw = minio_store.client("promoter")
-    bucket = minio_store.bucket
-    base = f"models/{name}/1.0.0"
-    for key in (
-        f"{base}/runs/r/files/../../signoff.json",
-        f"{base}//signoff.json",
-        f"{base}/signoff.json/x",
-        f"models/{name}/../{name}/1.0.0/signoff.json",
-    ):
-        with pytest.raises(ClientError):  # denied by the policy, or refused as a name
-            raw.put_object(Bucket=bucket, Key=key, Body=b"forged")
-    # Literal keys that only look like the sign-off may be stored; they are inert.
-    for key in (f"{base}/runs/r/files/%2e%2e%2fsignoff.json", f"{base}/SIGNOFF.json"):
-        try:
-            raw.put_object(Bucket=bucket, Key=key, Body=b"inert")
-        except ClientError:
-            pass
-    reader = minio_store.store("reader")
-    assert reader.versions(store.signoff_key(name, "1.0.0")) == []
-    assert _refused(reader.get, store.signoff_key(name, "1.0.0"), max_bytes=10).reason == (
-        "not_found"
-    )
-
-
-@pytest.mark.store
-def test_legal_hold_denied(minio_store: MinioStore) -> None:
-    ids = _promote(minio_store, _name())
-    bucket = minio_store.bucket
-    for role, key in (
-        ("promoter", store.claim_key(_name(), "1.0.0")),
-        ("eval-writer", store.eval_file_key("clinical_document", "1.0.0", f"{_name()}.png")),
-        ("signoff", store.signoff_key(_name(), "1.0.0")),
-    ):
-        raw = minio_store.client(role)
-        # Known gap, pinned (TODO.md): the pinned MinIO applies a legal hold sent as a PUT
-        # header without checking s3:PutObjectLegalHold, so the explicit Deny doesn't stop
-        # it there. A legal hold, unlike a compliance lock, can be cleared by the root
-        # user. If this starts failing, MinIO enforces the Deny: tighten the test.
-        raw.put_object(Bucket=bucket, Key=key, Body=b"x", ObjectLockLegalHoldStatus="ON")
-        root = minio_store.client()
-        root.put_object_legal_hold(Bucket=bucket, Key=key, LegalHold={"Status": "OFF"})
-        assert root.get_object_legal_hold(Bucket=bucket, Key=key)["LegalHold"]["Status"] == "OFF"
-        # The legal hold call itself is denied.
-        _raw_denied(
-            raw.put_object_legal_hold,
-            Bucket=bucket,
-            Key=ids["file_key"],
-            VersionId=ids["file"],
-            LegalHold={"Status": "ON"},
-        )
-
-
-@pytest.mark.store
-def test_listing_scoped_per_role(minio_store: MinioStore) -> None:
-    bucket = minio_store.bucket
-    for role in ("promoter", "signoff", "reader"):
-        raw = minio_store.client(role)
-        _raw_denied(raw.list_object_versions, Bucket=bucket, Prefix="eval/")
-        _raw_denied(raw.list_object_versions, Bucket=bucket)
-        _raw_denied(raw.list_objects_v2, Bucket=bucket)
-        _raw_denied(raw.list_objects_v2, Bucket=bucket, Prefix="eval/")
-    for role in ("eval-writer", "eval-reader"):
-        raw = minio_store.client(role)
-        _raw_denied(raw.list_object_versions, Bucket=bucket, Prefix="models/")
-        _raw_denied(raw.list_objects_v2, Bucket=bucket, Prefix="models/")
-
-
 def _multipart(raw: Any, bucket: str, key: str, **complete: Any) -> Any:
-    lock = {
-        "ObjectLockMode": "COMPLIANCE",
-        "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=DAY),
-        "ChecksumAlgorithm": "SHA256",
-    }
-    up = raw.create_multipart_upload(Bucket=bucket, Key=key, **lock)
+    up = raw.create_multipart_upload(Bucket=bucket, Key=key, ChecksumAlgorithm="SHA256")
     part = raw.upload_part(
         Bucket=bucket,
         Key=key,
@@ -925,33 +680,30 @@ def _multipart(raw: Any, bucket: str, key: str, **complete: Any) -> Any:
 
 
 @pytest.mark.store
-def test_multipart_only_for_uploaders_and_never_past_if_none_match(
+def test_multipart_only_for_the_writer_and_never_past_if_none_match(
     minio_store: MinioStore,
 ) -> None:
     name = _name()
     ids = _promote(minio_store, name)
     bucket = minio_store.bucket
-    lock = {
-        "ObjectLockMode": "COMPLIANCE",
-        "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=DAY),
-    }
-    for role, key in (
-        ("reader", store.claim_key(_name(), "1.0.0")),
-        ("eval-reader", store.eval_file_key("clinical_document", "1.0.0", f"{_name()}.png")),
-        ("eval-writer", store.claim_key(_name(), "1.0.0")),
-        ("promoter", store.signoff_key(name, "1.0.0")),
-        ("promoter", store.eval_file_key("clinical_document", "1.0.0", f"{_name()}.png")),
-        ("signoff", store.manifest_key(_name(), "1.0.0")),
-        ("signoff", store.run_file_key(name, "1.0.0", "run_1", "model.safetensors")),
-    ):
-        raw = minio_store.client(role)
-        _raw_denied(raw.create_multipart_upload, Bucket=bucket, Key=key, **lock)
-    # The uploader can use multipart, but a conditional completion on an existing key is
+    _raw_denied(
+        minio_store.client("reader").create_multipart_upload,
+        Bucket=bucket,
+        Key=store.claim_key(_name(), "1.0.0"),
+    )
+    # The writer can use multipart, but a conditional completion on an existing key is
     # refused: multipart is no way round If-None-Match.
-    raw = minio_store.client("promoter")
+    raw = minio_store.client("writer")
     new_key = store.run_file_key(name, "1.0.0", "run_2", "model.safetensors")
-    done = _multipart(raw, bucket, new_key, IfNoneMatch="*")
+    done = _multipart(raw, bucket, new_key, IfNoneMatch="*")  # gitleaks:allow (kwarg)
     assert done["VersionId"]
-    code = _raw_denied(_multipart, raw=raw, bucket=bucket, key=ids["claim_key"], IfNoneMatch="*")
+    claim = ids["claim_key"]
+    code = _raw_denied(
+        _multipart,
+        raw=raw,
+        bucket=bucket,
+        key=claim,
+        IfNoneMatch="*",  # gitleaks:allow (a keyword argument)
+    )
     assert code == "PreconditionFailed"
     assert minio_store.store("reader").versions(ids["claim_key"]) == [ids["claim"]]

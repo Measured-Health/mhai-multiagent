@@ -1,6 +1,7 @@
 # The model store for local and CI rehearsal (document pipeline phase 0, Task 16):
-# MinIO with object lock, and a one-shot init that makes the bucket, the five users and
-# their policies (deploy/minio/init-model-store.sh). No app service uses it in phase 0.
+# MinIO, and a one-shot init that makes the bucket (versioned), the writer and reader
+# users and their policies (deploy/minio/init-model-store.sh). No app service uses it in
+# phase 0. Production uses any S3-compatible bucket with the same two users.
 #
 #   mkdir -m 700 .model-store-secrets
 #   MINIO_ROOT_USER=... MINIO_ROOT_PASSWORD=... \
@@ -49,8 +50,6 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
       MODEL_STORE_BUCKET: ${MODEL_STORE_BUCKET:-mhai-models}
-      MODEL_STORE_DEFAULT_RETENTION_DAYS: ${MODEL_STORE_DEFAULT_RETENTION_DAYS:-1}
-      MODEL_STORE_MAX_RETENTION_DAYS: ${MODEL_STORE_MAX_RETENTION_DAYS:-3650}
       MODEL_STORE_SECRETS_DIR: /secrets
     volumes:
       - ./deploy/minio:/init:ro

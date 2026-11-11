@@ -167,10 +167,9 @@ def test_manifest_fields_held_to_patterns() -> None:
         lambda: {"files": [manifest.FileRecord("model.safetensors", True, SHA, "v")]},
         lambda: {"files": [manifest.FileRecord("model.safetensors", 1, "A" * 64, "v")]},
         lambda: {"files": [manifest.FileRecord("model.safetensors", 1, SHA, "")]},
-        # Store version ids: only S3/MinIO characters, never a path, a query or "null".
+        # Store version ids: only S3/MinIO characters, never a path or a query.
         lambda: {"files": [manifest.FileRecord("model.safetensors", 1, SHA, "a/b")]},
         lambda: {"files": [manifest.FileRecord("model.safetensors", 1, SHA, "a+b=")]},
-        lambda: {"files": [manifest.FileRecord("model.safetensors", 1, SHA, "null")]},
         lambda: {
             "documents": {
                 n: manifest.DocumentRecord(SHA, "x?versionId=1") for n in manifest.DOCUMENTS

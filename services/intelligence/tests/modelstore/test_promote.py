@@ -1,6 +1,6 @@
 """``mhai-models promote``: dry run and promotion, step by step (design section 7.1).
 
-The tests marked ``store`` promote into the session's MinIO as the promoter. The rest use
+The tests marked ``store`` promote into the session's MinIO as the writer. The rest use
 an in-memory store (:mod:`tests.modelstore.fakes.memory_store`) that records every call,
 the tiny fixture runs of :mod:`intelligence.modelstore.fixtures` behind a local source, and
 a small hand-built dev split. No real weights, no network: a VLM endpoint is only ever
@@ -15,7 +15,6 @@ import logging
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +88,6 @@ class Keys:
 
 def _entry(signer: signing.FileSigner) -> dict[str, Any]:
     return {
-        "kind": "public_key",
         "alg": "ed25519",
         "key_id": signer.key_id,
         "public_key_pem": signer.public_key_pem(),
@@ -105,7 +103,7 @@ def keys(tmp_path: Path) -> Keys:
     signer = signing.FileSigner(key_path)
     obj = {
         "schema": signing.TRUST_SCHEMA,
-        "signers": {"manifest": [_entry(signer)], "signoff": [], "testset": [_entry(signer)]},
+        "signers": [_entry(signer)],
     }
     policy_path = tmp_path / "trust-policy.json"
     policy_path.write_bytes(canonical.dumps(obj))
@@ -204,7 +202,6 @@ def _write_ctx(ctx: promote.Context, target: Any, keys: Keys) -> promote.Context
         signer=keys.signer,
         policy=keys.policy,
         workflow=WORKFLOW,
-        retention_days=1,
     )
 
 
@@ -270,12 +267,12 @@ def test_promote_requires_write_credentials_and_signer(
     mem = MemoryStore()
     seen: list[Recording] = []
     full = _write_ctx(_ctx(root, registry, licences, dev_set, recording=seen), mem, keys)
-    for missing in ("store", "signer", "policy", "workflow", "retention_days"):
+    for missing in ("store", "signer", "policy", "workflow"):
         ctx = replace(full, **{missing: None})
         err = _refused(promote.promote, _request(_version(), dry_run=False), ctx)
         assert err.reason == "not_allowed_here", missing
     untrusted = signing.parse_policy(
-        {"schema": signing.TRUST_SCHEMA, "signers": {"manifest": [], "signoff": [], "testset": []}},
+        {"schema": signing.TRUST_SCHEMA, "signers": []},
         environment="development",
     )
     err = _refused(
@@ -290,41 +287,37 @@ def test_promote_requires_write_credentials_and_signer(
 
 def test_reserve_writes_the_claim_first(keys: Keys) -> None:
     mem = MemoryStore()
-    claim = promote.reserve(mem, NAME, "1.2.3", RUN, WORKFLOW.actor, 1)
+    claim = promote.reserve(mem, NAME, "1.2.3", RUN, WORKFLOW.actor)
     key = store.claim_key(NAME, "1.2.3")
     assert mem.puts == [key]
     body = json.loads(mem.get(key, claim.version_id, max_bytes=4096))
     assert body["schema"] == promote.CLAIM_SCHEMA
     assert (body["run_id"], body["actor"]) == (RUN, WORKFLOW.actor)
-    err = _refused(promote.reserve, mem, NAME, "1.2.3", RUN, WORKFLOW.actor, 1)
+    err = _refused(promote.reserve, mem, NAME, "1.2.3", RUN, WORKFLOW.actor)
     assert err.reason == "version_exists"  # a second run, even with the same ids
 
 
 def test_retried_claim_that_is_ours_carries_on() -> None:
     key = store.claim_key(NAME, "1.2.4")
     mem = MemoryStore(lost_reply=frozenset({key}))  # stored, then the reply was lost
-    claim = promote.reserve(mem, NAME, "1.2.4", RUN, WORKFLOW.actor, 1)
+    claim = promote.reserve(mem, NAME, "1.2.4", RUN, WORKFLOW.actor)
     assert mem.versions(key) == [claim.version_id]
 
 
 def test_put_once_refuses_an_object_that_is_not_ours() -> None:
     mem = MemoryStore()
     key = store.claim_key(NAME, "1.2.5")
-    mem.put_new(key, b"someone else", 1)
+    mem.put_new(key, b"someone else")
     body = b"ours"
     sha = hashlib.sha256(body).hexdigest()
-    assert _refused(promote.put_once, mem, key, body, len(body), sha, 1).reason == (
-        "version_exists"
-    )
+    assert _refused(promote.put_once, mem, key, body, len(body), sha).reason == "version_exists"
     # ours, but shadowed by a second version: not provably ours any more
     key2 = store.claim_key(NAME, "1.2.6")
     mem2 = MemoryStore(lost_reply=frozenset({key2}))
     with pytest.raises(Refused):
-        mem2.put_new(key2, body, 1)
+        mem2.put_new(key2, body)
     mem2.shadow(key2, body)
-    assert _refused(promote.put_once, mem2, key2, body, len(body), sha, 1).reason == (
-        "version_exists"
-    )
+    assert _refused(promote.put_once, mem2, key2, body, len(body), sha).reason == "version_exists"
 
 
 @pytest.mark.store
@@ -337,8 +330,8 @@ def test_version_exists_refused_before_download(
     dev_set: minisets.MiniSet,
 ) -> None:
     version = _version()
-    target = minio_store.store("promoter")
-    target.put_new(store.claim_key(NAME, version), b'{"another":"run"}', 1)
+    target = minio_store.store("writer")
+    target.put_new(store.claim_key(NAME, version), b'{"another":"run"}')
     seen: list[Recording] = []
     ctx = _write_ctx(
         _ctx(_source_root(tmp_path), registry, licences, dev_set, recording=seen), target, keys
@@ -542,7 +535,7 @@ def test_select_split() -> None:
     reader = MemoryStore()
     entry = testsets.LockEntry("clinical_document", "1.0.0", "ab" * 32)
     policy = signing.parse_policy(
-        {"schema": signing.TRUST_SCHEMA, "signers": {"manifest": [], "signoff": [], "testset": []}},
+        {"schema": signing.TRUST_SCHEMA, "signers": []},
         environment="development",
     )
     dev = promote.select_split({}, reader=reader, lock_entry=entry, policy=policy, dev_set=None)
@@ -559,15 +552,12 @@ def test_select_split() -> None:
 
 @pytest.mark.parametrize("missing", ["reader", "lock_entry", "policy"])
 def test_locked_split_needs_eval_role(missing: str) -> None:
-    # P19: the locked split only with the eval reader's credentials, the lock and the policy.
+    # P19: the locked split only with the reader's credentials, the lock and the policy.
     kw: dict[str, Any] = {
         "reader": MemoryStore(),
         "lock_entry": testsets.LockEntry("clinical_document", "1.0.0", "ab" * 32),
         "policy": signing.parse_policy(
-            {
-                "schema": signing.TRUST_SCHEMA,
-                "signers": {"manifest": [], "signoff": [], "testset": []},
-            },
+            {"schema": signing.TRUST_SCHEMA, "signers": []},
             environment="development",
         ),
         "dev_set": None,
@@ -789,14 +779,14 @@ def test_promote_logs_ids_only(
 
 @dataclass
 class Killing:
-    """A promoter store that dies (as a SIGKILL would) when ``manifest.sig`` goes up."""
+    """A writer store that dies (as a SIGKILL would) when ``manifest.sig`` goes up."""
 
     inner: store.S3Store
 
-    def put_new(self, key: str, data: bytes | Path, retention_days: int) -> str:
+    def put_new(self, key: str, data: bytes | Path) -> str:
         if key.endswith("/manifest.sig"):
             raise SystemExit(137)
-        return self.inner.put_new(key, data, retention_days)
+        return self.inner.put_new(key, data)
 
     def get(self, key: str, version_id: str | None = None, *, max_bytes: int) -> bytes:
         return self.inner.get(key, version_id, max_bytes=max_bytes)
@@ -809,9 +799,6 @@ class Killing:
 
     def list(self, prefix: str) -> list[str]:
         return self.inner.list(prefix)
-
-    def extend_retention(self, key: str, version_id: str, days: int) -> Any:
-        return self.inner.extend_retention(key, version_id, days)
 
 
 def _all_keys(m: MinioStore) -> list[str]:
@@ -827,12 +814,12 @@ def test_dry_run_writes_nothing(
     licences: training.Licences,
     dev_set: minisets.MiniSet,
 ) -> None:
-    # B23: even with the promoter's store in reach, a dry run writes nothing.
+    # B23: even with the writer's store in reach, a dry run writes nothing.
     version = _version()
     before = _all_keys(minio_store)
     ctx = _write_ctx(
         _ctx(_source_root(tmp_path), registry, licences, dev_set),
-        minio_store.store("promoter"),
+        minio_store.store("writer"),
         keys,
     )
     summary = promote.promote(_request(version, dry_run=True), ctx)
@@ -851,7 +838,7 @@ def test_promote_good_fixture(
     dev_set: minisets.MiniSet,
 ) -> None:
     version = _version()
-    target = minio_store.store("promoter")
+    target = minio_store.store("writer")
     ctx = _write_ctx(_ctx(_source_root(tmp_path), registry, licences, dev_set), target, keys)
     summary = promote.promote(_request(version, dry_run=False), ctx)
     reader = minio_store.store("root")
@@ -864,12 +851,11 @@ def test_promote_good_fixture(
     signing.Verifier().verify("manifest", raw, sig, keys.policy)
     for f in m.files:
         info = reader.head(store.run_file_key(NAME, version, RUN, f.path), f.store_version_id)
-        assert (info.size, info.sha256, info.lock_mode) == (f.size, f.sha256, "COMPLIANCE")
+        assert (info.size, info.sha256) == (f.size, f.sha256)
     for doc, d in m.documents.items():
         info = reader.head(store.run_doc_key(NAME, version, RUN, doc), d.store_version_id)
         assert info.sha256 == d.sha256
-    claim = reader.head(store.claim_key(NAME, version))
-    assert claim.lock_mode == "COMPLIANCE"
+    assert reader.head(store.claim_key(NAME, version)).size > 0
     # the manifest is the newest object of the version: written last
     raw_client = minio_store.client("root")
     listed = raw_client.list_object_versions(
@@ -895,7 +881,7 @@ def test_crash_before_manifest_leaves_no_version(
 ) -> None:
     # P8: killed after the files went up. `verify` is Task 22; until then, no manifest.
     version = _version()
-    target = Killing(minio_store.store("promoter"))
+    target = Killing(minio_store.store("writer"))
     ctx = _write_ctx(_ctx(_source_root(tmp_path), registry, licences, dev_set), target, keys)
     with pytest.raises(SystemExit):
         promote.promote(_request(version, dry_run=False), ctx)
@@ -950,7 +936,7 @@ def test_cli_promote_without_write_credentials_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(cli.LOCAL_ROOT_ENV, str(_source_root(tmp_path)))
-    for name in (cli.PROMOTER_ACCESS_ENV, cli.PROMOTER_SECRET_ENV, cli.SIGNER_ENV):
+    for name in (cli.WRITER_ACCESS_ENV, cli.WRITER_SECRET_ENV, cli.SIGNER_ENV):
         monkeypatch.delenv(name, raising=False)
     argv = ["promote", NAME, "1.0.0", "--source", "local", "--run", RUN]
     code, out = _cli([*argv, "--dev-set", str(dev_set.root)], capsys)
@@ -969,8 +955,8 @@ def test_cli_store_unavailable_is_exit_3(
     for k, v in {
         cli.ENDPOINT_ENV: "http://models.example.org:9000",  # plain HTTP off loopback
         cli.BUCKET_ENV: "mhai-models",
-        cli.PROMOTER_ACCESS_ENV: "promoter",
-        cli.PROMOTER_SECRET_ENV: secret,
+        cli.WRITER_ACCESS_ENV: "writer",
+        cli.WRITER_SECRET_ENV: secret,
         cli.SIGNER_ENV: str(keys.key_path),
         cli.TRUST_POLICY_ENV: str(keys.policy_path),
     }.items():
@@ -981,13 +967,63 @@ def test_cli_store_unavailable_is_exit_3(
     assert secret not in out
 
 
-def test_cli_drive_source_unavailable_until_task_28(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+def test_cli_drive_source_needs_a_token_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The Drive source reads its access token from MHAI_MODELS_DRIVE_TOKEN_FILE only:
+    unset, missing, a link or junk is source_unavailable/drive_token, before any call."""
     monkeypatch.setenv(cli.DRIVE_FOLDER_ENV, "0ABCdefGHIjklMNOpqr")
     argv = ["promote", NAME, "1.0.0", "--source", "drive", "--run", RUN, "--dry-run"]
+    monkeypatch.delenv(cli.DRIVE_TOKEN_FILE_ENV, raising=False)
     code, out = _cli(argv, capsys)
-    assert code == 3 and json.loads(out)["refused"] == "source_unavailable"
+    assert code == 3
+    assert json.loads(out) == {"refused": "source_unavailable", "detail": "drive_token"}
+    good = tmp_path / "token"
+    good.write_text("ya29.synthetic-token-" + "x" * 20)
+    link = tmp_path / "link"
+    link.symlink_to(good)
+    junk = tmp_path / "junk"
+    junk.write_text("has spaces in it and is junk")
+    for path in (tmp_path / "missing", link, junk):
+        monkeypatch.setenv(cli.DRIVE_TOKEN_FILE_ENV, str(path))
+        code, out = _cli(argv, capsys)
+        assert code == 3, path
+        assert json.loads(out) == {"refused": "source_unavailable", "detail": "drive_token"}
+
+
+def test_cli_drive_source_checks_scope_first(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a token, the CLI builds the Drive API over a bearer session that follows no
+    redirect and reads no proxy from the environment, and runs drive_check before the run
+    is read: a folder the account can write to stops here."""
+    from intelligence.modelstore.sources import drive
+
+    token = "ya29.synthetic-token-" + "y" * 20
+    path = tmp_path / "token"
+    path.write_text(token + "\n")
+    monkeypatch.setenv(cli.DRIVE_FOLDER_ENV, "0ABCdefGHIjklMNOpqr")
+    monkeypatch.setenv(cli.DRIVE_TOKEN_FILE_ENV, str(path))
+    seen: dict[str, Any] = {}
+
+    class Api:
+        def __init__(self, session: Any) -> None:
+            seen["session"] = session
+
+    def check(api: Any, folder: str) -> None:
+        seen["checked"] = folder
+        raise Refused("drive_scope", detail_code="writable")
+
+    monkeypatch.setattr(drive, "HttpDriveApi", Api)
+    monkeypatch.setattr(drive, "drive_check", check)
+    argv = ["promote", NAME, "1.0.0", "--source", "drive", "--run", RUN, "--dry-run"]
+    code, out = _cli(argv, capsys)
+    assert code == 2 and json.loads(out) == {"refused": "drive_scope", "detail": "writable"}
+    assert seen["checked"] == "0ABCdefGHIjklMNOpqr"
+    session = seen["session"]
+    assert token not in repr(session) and token not in out
+    assert session._session.trust_env is False
+    assert session._session.headers["Authorization"] == f"Bearer {token}"
 
 
 def test_cli_make_fixture_and_check(
@@ -1089,26 +1125,27 @@ def test_cli_dev_set_only_for_a_dry_run_outside_development(
     assert code == 0, out
 
 
-def test_put_once_adopts_only_a_locked_object(keys: Keys) -> None:
+def test_put_once_adopts_only_our_bytes(keys: Keys) -> None:
+    """A retried PUT finds the object there: it is ours only if it is the key's one
+    version with our size and SHA-256 (versioned or not)."""
     body = b"ours"
     sha = hashlib.sha256(body).hexdigest()
-    later = datetime.now(UTC) + timedelta(days=30)
-    cases = [
-        (None, None),  # not locked at all
-        ("GOVERNANCE", later),  # a lock that can be lifted
-        ("COMPLIANCE", datetime.now(UTC) + timedelta(hours=1)),  # shorter than asked
-        ("COMPLIANCE", None),
-    ]
-    for n, (mode, until) in enumerate(cases):
-        mem = MemoryStore()
-        key = store.claim_key(NAME, f"4.0.{n}")
-        mem.shadow(key, body, lock_mode=mode, retain_until=until)
-        err = _refused(promote.put_once, mem, key, body, len(body), sha, 5)
-        assert (err.reason, err.detail_code) == ("version_exists", "not_ours"), mode
+    for versioned in (True, False):
+        mem = MemoryStore(versioned=versioned)
+        key = store.claim_key(NAME, "4.0.0")
+        mem.shadow(key, b"theirs")
+        err = _refused(promote.put_once, mem, key, body, len(body), sha)
+        assert (err.reason, err.detail_code) == ("version_exists", "not_ours")
+        mem = MemoryStore(versioned=versioned)
+        key = store.claim_key(NAME, "4.1.0")
+        vid = mem.shadow(key, body)
+        assert promote.put_once(mem, key, body, len(body), sha) == vid
     mem = MemoryStore()
-    key = store.claim_key(NAME, "4.1.0")
-    vid = mem.shadow(key, body, lock_mode="COMPLIANCE", retain_until=later)
-    assert promote.put_once(mem, key, body, len(body), sha, 5) == vid
+    key = store.claim_key(NAME, "4.2.0")
+    mem.shadow(key, body)
+    mem.shadow(key, body)  # two versions: never adopted
+    err = _refused(promote.put_once, mem, key, body, len(body), sha)
+    assert (err.reason, err.detail_code) == ("version_exists", "not_ours")
 
 
 def _changing(mem: MemoryStore, when: str, target: str) -> None:
@@ -1218,7 +1255,7 @@ def test_doceval_logger_created_during_quiet_is_quiet() -> None:
     assert [r.getMessage() for r in seen.records] == ["late warning kept", "after: debug again"]
 
 
-def test_cli_dry_run_never_builds_the_promoter_store_or_signer(
+def test_cli_dry_run_never_builds_the_writer_store_or_signer(
     tmp_path: Path,
     keys: Keys,
     dev_set: minisets.MiniSet,
@@ -1240,8 +1277,8 @@ def test_cli_dry_run_never_builds_the_promoter_store_or_signer(
     for k, v in {
         cli.ENDPOINT_ENV: "http://127.0.0.1:9",
         cli.BUCKET_ENV: "mhai-models",
-        cli.PROMOTER_ACCESS_ENV: "promoter",
-        cli.PROMOTER_SECRET_ENV: "s3cr3t-" + secrets.token_hex(8),
+        cli.WRITER_ACCESS_ENV: "writer",
+        cli.WRITER_SECRET_ENV: "s3cr3t-" + secrets.token_hex(8),
         cli.SIGNER_ENV: str(keys.key_path),
         cli.TRUST_POLICY_ENV: str(keys.policy_path),
     }.items():

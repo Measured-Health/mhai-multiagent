@@ -1,8 +1,8 @@
 """``scripts/rehearse-promotion.sh`` (plan Task 24), run against the store tests' MinIO.
 
-The script is CI's ``model-promotion-e2e`` rehearsal: the whole promotion flow with
-development keys, a throwaway git repository for main and the PRs, and GitHub's answers
-from a file. This runs it once, as each store role, and checks every stage's JSON summary.
+The script is CI's ``model-promotion-e2e`` rehearsal: the whole promotion flow with a
+development key. This runs it once, as both store roles, and checks every stage's JSON
+summary.
 Synthetic data only; the model name and test split version are random, so the run doesn't
 meet the other store tests' objects in the shared bucket.
 """
@@ -34,7 +34,6 @@ STAGES = [
     "promote-0.1.0",
     "pin-0.1.0",
     "lock-check-0.1.0",
-    "signoff-0.1.0",
     "load-0.1.0",
     "tamper-store-down",
     "tamper-refetched",
@@ -42,7 +41,6 @@ STAGES = [
     "promote-0.2.0",
     "pin-0.2.0",
     "lock-check-0.2.0",
-    "signoff-0.2.0",
     "load-0.2.0",
     "rollback",
     "lock-check-rollback",
@@ -59,8 +57,8 @@ def _env(m: MinioStore, name: str, testset_version: str) -> dict[str, str]:
         "REHEARSAL_NAME": name,
         "REHEARSAL_TESTSET_VERSION": testset_version,
     }
-    for role in ("promoter", "signoff", "reader", "eval-reader", "eval-writer"):
-        var = role.upper().replace("-", "_")
+    for role in ("writer", "reader"):
+        var = role.upper()
         env[f"MODEL_STORE_{var}_ACCESS_KEY"] = m.users[role].access_key
         env[f"MODEL_STORE_{var}_SECRET_KEY"] = m.users[role].secret_key
     return env
@@ -101,8 +99,7 @@ def test_rehearse_promotion_end_to_end(minio_store: MinioStore) -> None:
     for role in minio_store.users.values():
         assert role.secret_key not in done.stdout and role.secret_key not in done.stderr
 
-    assert set(s["keys"]) == {"manifest", "signoff"}
-    assert s["keys"]["manifest"] != s["keys"]["signoff"]
+    assert set(s["keys"]) == {"key_id"} and SHA256.fullmatch(s["keys"]["key_id"])
     assert re.fullmatch(
         rf"clinical_document@{re.escape(testset_version)}#[0-9a-f]{{64}}", s["testset"]["lock_line"]
     )
@@ -124,10 +121,6 @@ def test_rehearse_promotion_end_to_end(minio_store: MinioStore) -> None:
             "manifest_sha256": promoted["manifest_sha256"],
         }
         assert s[f"lock-check-{version}"] == {"lock_check": "pass", "roles": {ROLE: "new"}}
-        signed = s[f"signoff-{version}"]
-        assert signed["signoff"] == {ROLE: "signed_off"}
-        assert signed["pr"] == (1 if version == "0.1.0" else 2)
-        assert signed["retention_extended"] > 0
     assert s["dry-run-0.1.0"]["files_sha256"] != s["dry-run-0.2.0"]["files_sha256"]
 
     def loaded(version: str) -> dict[str, Any]:

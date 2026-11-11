@@ -1,28 +1,16 @@
 name: Model lock check
 
-# lock-check on every PR and again on every review (an approval or a dismissal changes the
-# result). A required status check (H4), so it has no path filter: a PR that changes
-# neither models.lock nor models/ passes at once, before any store or GitHub access.
+# lock-check on every PR: an ordinary CI check, no environment. It compares main's
+# models.lock (the base) with the PR's and verifies every changed role against the model
+# store as the read-only reader: the signed manifest, every file's hash, the gate and, for
+# a new version, its evaluation. A PR that changes no role passes at once, with no store
+# access. One reviewer approving the PR is the sign-off (TODO.md, "Before scale").
 #
-# What it trusts (D31, Task 20 and 21 reviews): main's tip for everything the check reads
-# and runs (the code, reviewers.json, the trust policy, testsets.lock, the thresholds)
-# and, from the PR, only the lock at its head commit, read with git from that exact
-# commit. The PR's code is checked out only as git data and never installed or run. D35b:
-# a PR changing the lock may change nothing but models.lock, models/, docs/ and
-# CHANGELOG.md; lock-check works that out from git itself.
-# D38: while main has no lock-check (the PR adding it), only the empty lock passes.
-#
-# What it can't do (D37): main's code runs, but this workflow file is the PR's
-# (pull_request runs the PR's copy). A PR that edits this file, in the same PR as a lock
-# change or an earlier one, can skip the check and still report a green lock-check. Only
-# people and settings stop that: code-owner review of .github/, approval of the most
-# recent push, and the required reviewer on model-signoff (TODO(H4) in TODO.md).
+# The trust policy is main's when main has one, so a PR can't trust a key it adds in the
+# same change: a key change goes in its own PR, before any pin it signs.
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
 
 permissions: {}
 
@@ -35,7 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
     defaults:
       run:
         shell: bash
@@ -44,20 +31,9 @@ jobs:
       MHAI_MODELS_ENV: production
       APP_ENV: production
     steps:
-      - name: Check out main's tip (code and data)
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: main
-          path: main
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Fetch the PR's head commit (git data only, never installed or run)
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          path: head
-          fetch-depth: 0
+          fetch-depth: 0  # main's lock and trust policy, from git
           persist-credentials: false
 
       - name: Set up uv
@@ -66,27 +42,28 @@ jobs:
           version: "0.12.23"
           enable-cache: false
 
-      - name: Install main's mhai-models
-        working-directory: main/services/intelligence
+      - name: Install
+        working-directory: services/intelligence
         run: uv sync --locked
 
-      - name: The head lock, from the head commit
+      - name: Main's lock and trust policy
         env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad head sha"; exit 1; }
-          git -C main fetch --no-tags --quiet "$GITHUB_WORKSPACE/head" HEAD
-          [ "$(git -C main rev-parse --verify 'FETCH_HEAD^{commit}')" = "$HEAD_SHA" ] ||
-            { echo "::error::the fetched head is not the PR's head sha"; exit 1; }
-          # A PR that deletes models.lock fails here: never an empty or absent head lock.
-          git -C main show "$HEAD_SHA:models.lock" >"$RUNNER_TEMP/head.lock"
+          base="$RUNNER_TEMP/main"
+          mkdir -p "$base"
+          # No models.lock on main yet: the empty lock (nothing pinned).
+          git show "origin/$BASE_REF:models.lock" >"$base/models.lock" 2>/dev/null ||
+            printf '%s\n' '{"models":{},"schema":"mhai.models.lock/1"}' >"$base/models.lock"
+          if git show "origin/$BASE_REF:models/trust-policy.json" >"$base/trust-policy.json" 2>/dev/null; then
+            echo "TRUST_POLICY=$base/trust-policy.json" >>"$GITHUB_ENV"
+          else
+            echo "TRUST_POLICY=$GITHUB_WORKSPACE/models/trust-policy.json" >>"$GITHUB_ENV"
+          fi
 
       - name: lock-check
-        working-directory: main/services/intelligence
+        working-directory: services/intelligence
         env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GITHUB_TOKEN: ${{ github.token }}
           MODEL_STORE_ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT }}
           MODEL_STORE_BUCKET: ${{ vars.MODEL_STORE_BUCKET }}
           MODEL_STORE_REGION: ${{ vars.MODEL_STORE_REGION }}
@@ -94,33 +71,11 @@ jobs:
           MODEL_STORE_READER_ACCESS_KEY: ${{ secrets.MODEL_STORE_READER_ACCESS_KEY }}
           MODEL_STORE_READER_SECRET_KEY: ${{ secrets.MODEL_STORE_READER_SECRET_KEY }}
         run: |
-          [[ "$PR_NUMBER" =~ ^[0-9]{1,10}$ ]] || { echo "::error::bad PR number"; exit 1; }
-          main="$GITHUB_WORKSPACE/main"
-          # D38, the bootstrap: until the PR that adds lock-check merges, main has no
-          # lock-check to run. Only then, and only if the head lock is byte for byte the
-          # empty mhai.models.lock/1 lock (nothing pinned), does the check pass without it.
-          # Compared with cmp, a runner tool: nothing from the PR runs. Main without
-          # lock-check and any other head lock fails; main with it always runs it.
-          if [ ! -e "$main/services/intelligence/intelligence/modelstore/lock.py" ] &&
-            [ ! -L "$main/services/intelligence/intelligence/modelstore/lock.py" ]; then
-            printf '%s\n' '{"models":{},"schema":"mhai.models.lock/1"}' |
-              cmp -s - "$RUNNER_TEMP/head.lock" ||
-              { echo "::error::main has no lock-check yet, and the head lock is not the empty mhai.models.lock/1 lock"; exit 1; }
-            out='{"bootstrap":true,"detail":"main_has_no_lock_check_and_the_head_lock_pins_nothing"}'
-            printf '%s\n' "$out"
-            { echo '### lock-check: bootstrap pass (D38)'
-              echo "Main has no lock-check yet, and the head lock is the empty \`mhai.models.lock/1\` lock, so nothing is pinned. Every later PR runs main's lock-check."
-              echo '```json'; printf '%s\n' "$out"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           code=0
           out="$(uv run --no-sync mhai-models lock-check \
-            --base-dir "$main" \
-            --head "$RUNNER_TEMP/head.lock" \
-            --head-sha "$HEAD_SHA" \
-            --pr "$PR_NUMBER" \
-            --testsets "$main/models/testsets.lock" \
-            --thresholds-dir "$main/services/intelligence/intelligence/doceval/thresholds")" || code=$?
+            --base "$RUNNER_TEMP/main/models.lock" \
+            --head "$GITHUB_WORKSPACE/models.lock" \
+            --trust-policy "$TRUST_POLICY")" || code=$?
           printf '%s\n' "$out"
           { echo '### lock-check'; echo '```json'; printf '%s\n' "$out"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           exit "$code"

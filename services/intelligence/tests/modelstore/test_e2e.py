@@ -1,20 +1,20 @@
 """Phase 0 end to end (plan Task 25).
 
 ``test_e2e_promotion_flow`` (``store``) is Task 24's rehearsal (``rehearse-promotion.sh``)
-in Python, against the store tests' MinIO: development keys, a locked test split, a
+in Python, against the store tests' MinIO: one development key, a locked test split, a
 fixture run, dry run (with its aggregate report rendered as the promote workflow does),
-promote 0.1.0, pin, lock-check (refused without the approvals, then passed), sign-off,
-load in the pipeline's own loader, a tampered cached byte, 0.2.0 the same way, and a
-rollback to 0.1.0 that loads. Every command is ``mhai-models`` itself (``cli.main``), run as
-one store role at a time; git is a throwaway repository standing in for main and the PRs;
-GitHub's answers come from a file (``MHAI_MODELS_GITHUB_FAKE``, development only).
-Synthetic data only; the model name and split version are random so the run doesn't meet
-the other store tests' objects in the shared bucket.
+promote 0.1.0, pin, lock-check (refused under a trust policy without the key, as main's
+policy before the key's own PR, then passed), load in the pipeline's own loader, a
+tampered cached byte, 0.2.0 the same way, and a rollback to 0.1.0 that lock-check passes
+and the pipeline loads. Every command is ``mhai-models`` itself (``cli.main``), run as one
+store role at a time. Synthetic data only; the model name and split version are random so
+the run doesn't meet the other store tests' objects in the shared bucket.
 
 ``test_e2e_every_abuse_case_has_a_test`` reads the plan's "Abuse cases → tests" table and
 checks that every test it names is defined under ``tests/``. Tests the plan gives to the
-tasks that wait on a person (26 and later: H1, H2, H3) don't exist yet and are listed
-here by name; nothing else may be missing, and every case keeps at least one test.
+tasks that wait on a person (26 and later) don't exist yet and are listed here by name;
+nothing else may be missing, and every case keeps at least one test, except the cases
+whose control moved to TODO.md's "Before scale" (the cell says so).
 """
 
 from __future__ import annotations
@@ -22,10 +22,8 @@ from __future__ import annotations
 import ast
 import json
 import logging
-import os
 import re
 import secrets
-import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,17 +34,13 @@ import pytest
 from intelligence.boundary.config import WorkerSettings
 from intelligence.boundary.worker import build_model_gate
 from intelligence.doceval import cli as doceval_cli
-from intelligence.modelstore import cli, signing, verify
-from intelligence.modelstore.lock import Pin
-from intelligence.modelstore.reasons import Refused
+from intelligence.modelstore import cli
 from tests.modelstore.conftest import MinioStore
 
 SERVICE = Path(__file__).resolve().parents[2]
 REPO_ROOT = SERVICE.parents[1]
 TESTS = SERVICE / "tests"
 PLAN = REPO_ROOT / "docs" / "plans" / "2026-11-03-document-pipeline-phase0.md"
-THRESHOLDS_SRC = SERVICE / "intelligence" / "doceval" / "thresholds"
-THRESHOLDS_REL = "services/intelligence/intelligence/doceval/thresholds"
 WARMUP_PAGE = REPO_ROOT / "testdata" / "models" / "warmup" / "page.png"
 
 # ---------------------------------------------------------------- the abuse-case table
@@ -55,13 +49,10 @@ CASES = {f"B{n}" for n in range(16, 24)} | {f"P{n}" for n in range(1, 27)}
 # The first task that waits on a person (Task 26, after H1); its tests and later ones are
 # written then.
 LATER_TASK = 26
-NOT_YET_WRITTEN = frozenset(
-    {
-        "test_wrong_identity_or_key_refused",  # Task 26
-        "test_dev_signer_still_refused_in_production",  # Task 26
-        "test_signoff_key_cannot_sign_manifest",  # Task 26
-    }
-)
+NOT_YET_WRITTEN: frozenset[str] = frozenset()
+# Cases whose control moved to TODO.md, "Before scale" (the lean rewrite of 11 Nov 2026):
+# the PR reviewer is the sign-off, so there is no separate approval check to test.
+BEFORE_SCALE = frozenset({"P15", "P17"})
 _ROW = re.compile(r"^\| ([BP][0-9]+) [^|]*\| (.*) \|$")
 # A run of backticked test names followed by their task numbers, e.g.
 # "`test_a`, `test_b` (20, 21)".
@@ -88,6 +79,8 @@ def _abuse_table() -> dict[str, list[tuple[str, tuple[int, ...]]]]:
             named += [(n, tasks) for n in _NAME.findall(g.group(1))]
         # Every backticked test name in the cell carries its task number.
         assert sorted(n for n, _ in named) == sorted(_NAME.findall(cell)), case
+        if case in BEFORE_SCALE:
+            assert "Before scale" in cell, case
         table[case] = named
     return table
 
@@ -123,6 +116,9 @@ def test_e2e_every_abuse_case_has_a_test() -> None:
     }
     assert later <= NOT_YET_WRITTEN
     for case, named in table.items():
+        if case in BEFORE_SCALE:
+            assert named == [], case
+            continue
         assert any(name in defined for name, _ in named), case
 
 
@@ -131,16 +127,14 @@ def test_e2e_every_abuse_case_has_a_test() -> None:
 ROLE = "extract"
 GATE = "rehearsal"
 SUITE = "clinical_document"
-CLINICAL = "syn-clinical"
-PLATFORM = "syn-platform"
-AUTHOR = "syn-author"
 REPOSITORY = "syn-org/syn-rehearsal"
-STORE_ROLES = ("promoter", "signoff", "reader", "eval-reader", "eval-writer")
+STORE_ROLES = ("writer", "reader")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+EMPTY_LOCK = '{"models":{},"schema":"mhai.models.lock/1"}\n'
 
 
 def _creds_env(role: str) -> tuple[str, str]:
-    var = role.upper().replace("-", "_")
+    var = role.upper()
     return f"MODEL_STORE_{var}_ACCESS_KEY", f"MODEL_STORE_{var}_SECRET_KEY"
 
 
@@ -156,23 +150,26 @@ class Flow:
     printed: list[str] = field(default_factory=list)
 
     @property
-    def repo(self) -> Path:
-        return self.root / "repo"
+    def lock(self) -> Path:
+        """The PR's ``models.lock``."""
+        return self.root / "models.lock"
 
     @property
-    def lock(self) -> Path:
-        return self.repo / "models.lock"
+    def main_lock(self) -> Path:
+        """``main``'s ``models.lock``: the PR's lock becomes it at the merge."""
+        return self.root / "main.lock"
+
+    @property
+    def policy(self) -> Path:
+        return self.root / "trust-policy.json"
 
     @property
     def testsets(self) -> Path:
-        return self.repo / "models" / "testsets.lock"
+        return self.root / "testsets.lock"
 
     @property
-    def thresholds(self) -> Path:
-        return self.repo / THRESHOLDS_REL
-
-    def key(self, purpose: str) -> str:
-        return str(self.root / "keys" / purpose / "dev-signing-key.pem")
+    def key(self) -> str:
+        return str(self.root / "keys" / "dev-signing-key.pem")
 
     def mhai(
         self, argv: list[str], roles: tuple[str, ...] = (), **env: str
@@ -207,107 +204,16 @@ class Flow:
         assert code == 2, (argv[0], out)
         return json.loads(out)
 
-    def git(self, *args: str) -> str:
-        env = {
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": str(self.root),
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_AUTHOR_NAME": "syn",
-            "GIT_AUTHOR_EMAIL": "syn@example.invalid",
-            "GIT_COMMITTER_NAME": "syn",
-            "GIT_COMMITTER_EMAIL": "syn@example.invalid",
-        }
-        done = subprocess.run(
-            ["git", "-C", str(self.repo), *args],
-            env=env,
-            capture_output=True,
-            check=True,
-            timeout=60,
-        )
-        return done.stdout.decode("utf-8")
-
-    def show(self, sha: str, out: Path) -> Path:
-        out.write_text(self.git("show", f"{sha}:models.lock"), encoding="utf-8")
-        return out
-
-    def github(
-        self,
-        pr: int,
-        head: str,
-        body: str,
-        *,
-        approved: bool = True,
-        merge: str | None = None,
-        base: str | None = None,
-    ) -> None:
-        """GitHub's answers for one PR: open or merged, its label, its approvals on
-        ``head`` (none unless ``approved``), and for a merge the commit's PR and parents."""
-        pull = {
-            "number": pr,
-            "state": "closed" if merge else "open",
-            "merged": bool(merge),
-            "merge_commit_sha": merge,
-            "merged_at": "2026-11-06T00:00:00Z" if merge else None,
-            "user": {"login": AUTHOR, "type": "User"},
-            "head": {"sha": head, "ref": "rehearsal"},
-            "base": {"ref": "main", "sha": "0" * 40, "repo": {"id": 1}},
-            "labels": [{"name": "clinical-review"}],
-            "body": body,
-        }
-        reviews = [
-            {
-                "id": i,
-                "user": {"login": who, "type": "User"},
-                "state": "APPROVED",
-                "commit_id": head,
-            }
-            for i, who in enumerate((CLINICAL, PLATFORM), start=1)
-            if approved
-        ]
-        responses: dict[str, Any] = {f"/pulls/{pr}": pull, f"/pulls/{pr}/reviews": reviews}
-        if merge:
-            responses[f"/commits/{merge}/pulls"] = [{"number": pr}]
-            responses[f"/git/commits/{merge}"] = {
-                "sha": merge,
-                "parents": [{"sha": base}, {"sha": head}],
-            }
-        doc = {"repository": REPOSITORY, "responses": responses}
-        (self.root / "github.json").write_text(json.dumps(doc), encoding="utf-8")
-
-    def lock_check_args(self, pr: int, head: str, head_lock: Path) -> list[str]:
+    def lock_check(self, *extra: str) -> list[str]:
         return [
             "lock-check",
-            "--base-dir",
-            str(self.repo),
-            "--testsets",
-            str(self.testsets),
-            "--thresholds-dir",
-            str(self.thresholds),
-            "--rehearsal",
+            "--base",
+            str(self.main_lock),
             "--head",
-            str(head_lock),
-            "--head-sha",
-            head,
-            "--pr",
-            str(pr),
+            str(self.lock),
+            "--rehearsal",
+            *extra,
         ]
-
-    def signed_off(self, version: str, manifest_sha256: str) -> str:
-        """The verifier with the sign-off required, as a production load runs it (the
-        development keys are trusted here because this is development): ``verified``,
-        or ``<reason>:<detail>``."""
-        cache = self.root / "verify-cache"
-        cache.mkdir(mode=0o700, exist_ok=True)
-        policy = signing.load_policy(self.repo / "models" / "trust-policy.json")
-        pin = Pin(self.name, version, manifest_sha256, GATE)
-        try:
-            verify.verify_pin(
-                self.minio.store("reader"), ROLE, pin, policy, cache, require_signoff=True
-            )
-        except Refused as e:
-            return f"{e.reason}:{e.detail_code}"
-        return "verified"
 
     def load(self, lock: Path, endpoint: str | None = None) -> dict[str, Any]:
         """One start of the pipeline's model gate: its own settings and build_model_gate."""
@@ -323,7 +229,7 @@ class Flow:
             "INTELLIGENCE_MODELS_LOCK": str(lock),
             "INTELLIGENCE_MODEL_CACHE": str(self.root / "cache"),
             "INTELLIGENCE_WARMUP_PAGE": str(WARMUP_PAGE),
-            "MHAI_MODELS_TRUST_POLICY": str(self.repo / "models" / "trust-policy.json"),
+            "MHAI_MODELS_TRUST_POLICY": str(self.policy),
             "MODEL_STORE_ENDPOINT": endpoint or self.minio.endpoint,
             "MODEL_STORE_BUCKET": self.minio.bucket,
             "MODEL_STORE_READER_ACCESS_KEY_FILE": str(creds / "reader-access"),
@@ -347,7 +253,7 @@ def flow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[Flow]:
     f = Flow(monkeypatch, capsys, minio_store, tmp_path, f"fixture-tiny-{secrets.token_hex(3)}")
-    for d in ("scratch", "keys", "cache", "creds", "repo/models"):
+    for d in ("scratch", "cache", "creds"):
         (tmp_path / d).mkdir(mode=0o700, parents=True)
     # Development, both switches (the CLI's own rule for a rehearsal), and a synthetic
     # workflow run for the manifest.
@@ -356,13 +262,9 @@ def flow(
         "APP_ENV": "development",
         "MODEL_STORE_ENDPOINT": minio_store.endpoint,
         "MODEL_STORE_BUCKET": minio_store.bucket,
-        "MODEL_STORE_TESTSET_RETENTION_DAYS": "1",
-        "MODEL_STORE_CANDIDATE_RETENTION_DAYS": "1",
-        "MODEL_STORE_APPROVED_RETENTION_DAYS": "2",
         "MHAI_MODELS_SCRATCH": str(tmp_path / "scratch"),
-        "MHAI_MODELS_TRUST_POLICY": str(f.repo / "models" / "trust-policy.json"),
+        "MHAI_MODELS_TRUST_POLICY": str(f.policy),
         "MHAI_MODELS_TESTSETS_LOCK": str(f.testsets),
-        "MHAI_MODELS_GITHUB_FAKE": str(tmp_path / "github.json"),
         "GITHUB_RUN_ID": "1",
         "GITHUB_SHA": "ab" * 20,
         "GITHUB_ACTOR": "syn-promoter",
@@ -371,8 +273,6 @@ def flow(
         monkeypatch.setenv(k, v)
     for k in (
         "GITHUB_TOKEN",
-        "GITHUB_REPOSITORY",
-        "GITHUB_API_URL",
         "MHAI_MODELS_CACHE",
         "MHAI_MODELS_SIGNER",
         "MHAI_MODELS_LOCAL_ROOT",
@@ -391,45 +291,31 @@ def flow(
         cred.chmod(0o600)
     yield f
     # Verified copies are read-only: give write back so tmp_path can be removed.
-    for d in ("cache", "verify-cache"):
-        for p in (tmp_path / d).rglob("*"):
-            p.chmod(0o700 if p.is_dir() else 0o600)
+    for p in (tmp_path / "cache").rglob("*"):
+        p.chmod(0o700 if p.is_dir() else 0o600)
 
 
-def _keys(f: Flow) -> dict[str, str]:
-    """Development manifest and sign-off keys, and the trust policy that trusts them (the
-    manifest key also signs test splits)."""
-    entries = {}
-    for purpose in ("manifest", "signoff"):
-        k = f.json(["dev-keygen", str(f.root / "keys" / purpose)])
-        entries[purpose] = {
-            "kind": "public_key",
-            "alg": "ed25519",
-            "key_id": k["key_id"],
-            "public_key_pem": k["public_key_pem"],
-            "development": True,
-        }
-    policy = {
-        "schema": "mhai.models.trust/1",
-        "signers": {
-            "manifest": [entries["manifest"]],
-            "signoff": [entries["signoff"]],
-            "testset": [entries["manifest"]],
-        },
+def _key(f: Flow) -> str:
+    """One development key, and the trust policy that lists it (for every purpose)."""
+    k = f.json(["dev-keygen", str(f.root / "keys")])
+    signer = {
+        "alg": "ed25519",
+        "key_id": k["key_id"],
+        "public_key_pem": k["public_key_pem"],
+        "development": True,
     }
-    (f.repo / "models" / "trust-policy.json").write_text(
-        json.dumps(policy, sort_keys=True, separators=(",", ":")), encoding="ascii"
-    )
-    return {p: str(e["key_id"]) for p, e in entries.items()}
+    policy = {"schema": "mhai.models.trust/1", "signers": [signer]}
+    f.policy.write_text(json.dumps(policy, sort_keys=True, separators=(",", ":")), "ascii")
+    return str(k["key_id"])
 
 
 def _testset(f: Flow, version: str) -> str:
-    """Build and lock a small test split as the eval writer; exit 4 (locked, scratch copy
-    left behind) is a warning whose code is the last stderr line."""
+    """Build and lock a small test split as the writer; exit 4 (locked, scratch copy left
+    behind) is a warning whose code is the last stderr line."""
     code, out, err = f.mhai(
         ["testset-build", "--suite", SUITE, "--version", version, "--scale", "0.02"],
-        ("eval-writer",),
-        MHAI_MODELS_SIGNER=f.key("manifest"),
+        ("writer",),
+        MHAI_MODELS_SIGNER=f.key,
     )
     assert code in (0, 4), out
     if code == 4:
@@ -440,24 +326,10 @@ def _testset(f: Flow, version: str) -> str:
     return line
 
 
-def _main(f: Flow) -> None:
-    f.lock.write_text('{"models":{},"schema":"mhai.models.lock/1"}\n', encoding="utf-8")
-    reviewers = {"clinical": [CLINICAL], "platform": [PLATFORM]}
-    (f.repo / "models" / "reviewers.json").write_text(
-        json.dumps(reviewers, separators=(",", ":")) + "\n", encoding="utf-8"
-    )
-    f.thresholds.mkdir(parents=True)
-    for src in THRESHOLDS_SRC.glob("*.json"):
-        (f.thresholds / src.name).write_bytes(src.read_bytes())
-    f.git("init", "-q", "-b", "main")
-    f.git("add", "-A")
-    f.git("commit", "-qm", "main")
-
-
 def _release(
-    f: Flow, version: str, run: str, variant: str, pr: int, *, report: bool = False
+    f: Flow, version: str, run: str, variant: str, *, report: bool = False
 ) -> dict[str, Any]:
-    """fixture -> dry run -> promote -> pin -> lock-check -> merge -> sign-off."""
+    """fixture -> dry run -> promote -> pin (the PR) -> lock-check -> merge."""
     out: dict[str, Any] = {}
     source = f.root / "source"
     fixture_dir = str(source / "models" / f.name / run)
@@ -468,62 +340,24 @@ def _release(
     if report:
         (f.root / "report").mkdir(mode=0o700)
         dry_args += ["--report-dir", str(f.root / "report")]
-    out["dry-run"] = dry = f.json(dry_args, ("eval-reader",), **split)
+    out["dry-run"] = dry = f.json(dry_args, ("reader",), **split)
     assert SHA256.fullmatch(dry["files_sha256"])
     out["promote"] = f.json(
         [*promote, "--expect-files", dry["files_sha256"]],
-        ("promoter", "eval-reader"),
-        MHAI_MODELS_SIGNER=f.key("manifest"),
+        ("writer", "reader"),
+        MHAI_MODELS_SIGNER=f.key,
         **split,
     )
-
-    f.git("checkout", "-q", "-b", f"pr-{pr}", "main")
+    f.main_lock.write_bytes(f.lock.read_bytes())
     out["pin"] = f.json(
         ["pin", ROLE, f.name, version, "--gate", GATE, "--lock", str(f.lock), "--rehearsal"],
         ("reader",),
     )
-    f.git("commit", "-qam", f"pin {f.name} {version}")
-    head = f.git("rev-parse", "HEAD").strip()
-    f.git("checkout", "-q", "main")
-    head_lock = f.show(head, f.root / "head.lock")
-    body = f"Pins {f.name} {version} (rehearsal)."
-    # Without the clinical and platform approvals on the head commit: refused.
-    f.github(pr, head, body, approved=False)
-    out["lock-check-unapproved"] = f.refused(f.lock_check_args(pr, head, head_lock), ("reader",))
-    f.github(pr, head, body)
-    out["lock-check"] = f.json(f.lock_check_args(pr, head, head_lock), ("reader",))
-
-    # Before the merge's sign-off exists, the version doesn't verify with it required.
-    sha = out["promote"]["manifest_sha256"]
-    out["verify-before-signoff"] = f.signed_off(version, sha)
-
-    base = f.git("rev-parse", "HEAD").strip()
-    f.git("merge", "-q", "--no-ff", "-m", f"merge pr-{pr}", f"pr-{pr}")
-    merge = f.git("rev-parse", "HEAD").strip()
-    f.github(pr, head, body, merge=merge, base=base)
-    before = f.show(base, f.root / "before.lock")
-    after = f.show(merge, f.root / "after.lock")
-    head_lock = f.show(head, f.root / "head.lock")
-    f.git("checkout", "-q", "--detach", base)  # --base-dir is a checkout of the base sha
-    signoff = {
-        "--base-dir": str(f.repo),
-        "--base-sha": base,
-        "--before": str(before),
-        "--after": str(after),
-        "--commit": merge,
-        "--head-sha": head,
-        "--head-lock": str(head_lock),
-        "--testsets": str(f.testsets),
-        "--thresholds-dir": str(f.thresholds),
-    }
-    out["signoff"] = f.json(
-        ["signoff", *(x for kv in signoff.items() for x in kv), "--rehearsal"],
-        ("signoff",),
-        MHAI_MODELS_SIGNER=f.key("signoff"),
-    )
-    # The sign-off just written is the one the verifier finds and accepts.
-    out["verify-after-signoff"] = f.signed_off(version, sha)
-    f.git("checkout", "-q", "main")
+    # Under a trust policy without the key (main's, before the key's own PR): refused.
+    empty = f.root / "empty-policy.json"
+    empty.write_text('{"schema":"mhai.models.trust/1","signers":[]}', encoding="ascii")
+    out["lock-check-untrusted"] = f.refused(f.lock_check("--trust-policy", str(empty)), ("reader",))
+    out["lock-check"] = f.json(f.lock_check(), ("reader",))
     return out
 
 
@@ -545,14 +379,17 @@ def _tamper(f: Flow) -> None:
 def test_e2e_promotion_flow(flow: Flow, caplog: pytest.LogCaptureFixture) -> None:
     f = flow
     caplog.set_level(logging.DEBUG)
-    keys = _keys(f)
-    assert keys["manifest"] != keys["signoff"]
+    _key(f)
     # The synthetic-data scanner refuses a run of 6 or more digits in a split's version.
     _testset(f, f"9.{secrets.randbelow(100)}.{secrets.randbelow(100)}")
-    _main(f)
+    f.lock.write_text(EMPTY_LOCK, encoding="utf-8")
 
-    v1 = _release(f, "0.1.0", "run-1", "good", 1, report=True)
-    # The dry run's aggregate report, rendered as the promote workflow's dry-run job does.
+    # Nothing pinned: lock-check passes with no store access, and the gate loads nothing.
+    f.main_lock.write_text(EMPTY_LOCK, encoding="utf-8")
+    nothing = f.json(["lock-check", "--base", str(f.main_lock), "--head", str(f.lock)])
+
+    v1 = _release(f, "0.1.0", "run-1", "good", report=True)
+    # The dry run's aggregate report, rendered as the promote workflow's dry run does.
     assert doceval_cli.main(["report", str(f.root / "report" / "evaluation.json")]) == 0
     md = f.capsys.readouterr().out
     assert md.startswith("# Evaluation: ")
@@ -564,25 +401,20 @@ def test_e2e_promotion_flow(flow: Flow, caplog: pytest.LogCaptureFixture) -> Non
     tamper_store_down = f.load(f.lock, "http://127.0.0.1:9")
     tamper_refetched = f.load(f.lock)
 
-    v2 = _release(f, "0.2.0", "run-2", "good_v2", 2)
+    v2 = _release(f, "0.2.0", "run-2", "good_v2")
     loaded_v2 = f.load(f.lock)
 
-    # Roll back to the signed-off 0.1.0 by PR: rollback writes the lock, lock-check takes
-    # it as a rollback (a platform approval and a clinical note), and the pipeline loads it.
-    f.git("checkout", "-q", "-b", "pr-3", "main")
+    # Roll back to 0.1.0 by PR: rollback writes the lock, lock-check takes it as a
+    # rollback, and the pipeline loads it.
+    f.main_lock.write_bytes(f.lock.read_bytes())
     rollback = f.json(["rollback", ROLE, "--lock", str(f.lock), "--rehearsal"], ("reader",))
-    f.git("commit", "-qam", f"roll back {f.name}")
-    head3 = f.git("rev-parse", "HEAD").strip()
-    f.git("checkout", "-q", "main")
-    note = "Clinical note: restoring the signed off synthetic version after a rehearsal."
-    f.github(3, head3, note)
-    head_lock = f.show(head3, f.root / "head.lock")
-    lock_check_rollback = f.json(f.lock_check_args(3, head3, head_lock), ("reader",))
-    loaded_rollback = f.load(f.show(head3, f.root / "rollback.lock"))
+    lock_check_rollback = f.json(f.lock_check(), ("reader",))
+    loaded_rollback = f.load(f.lock)
 
     # ---- what each stage said
+    assert nothing == {"lock_check": "pass", "roles": {}}
     manifests: dict[str, str] = {}
-    for version, r, pr in (("0.1.0", v1, 1), ("0.2.0", v2, 2)):
+    for version, r in (("0.1.0", v1), ("0.2.0", v2)):
         dry, promoted = r["dry-run"], r["promote"]
         assert dry["dry_run"] is True and dry["manifest_sha256"] is None
         assert promoted["dry_run"] is False
@@ -598,13 +430,8 @@ def test_e2e_promotion_flow(flow: Flow, caplog: pytest.LogCaptureFixture) -> Non
             "gate": GATE,
             "manifest_sha256": promoted["manifest_sha256"],
         }
-        assert r["lock-check-unapproved"] == {"refused": "not_approved", "detail": "approvals"}
+        assert r["lock-check-untrusted"]["refused"] == "signer_untrusted"
         assert r["lock-check"] == {"lock_check": "pass", "roles": {ROLE: "new"}}
-        assert r["signoff"]["signoff"] == {ROLE: "signed_off"}
-        assert r["signoff"]["pr"] == pr
-        assert r["signoff"]["retention_extended"] > 0
-        assert r["verify-before-signoff"] == "not_approved:missing"
-        assert r["verify-after-signoff"] == "verified"
     assert v1["dry-run"]["files_sha256"] != v2["dry-run"]["files_sha256"]
 
     def loaded(version: str) -> dict[str, Any]:
@@ -637,6 +464,5 @@ def test_e2e_promotion_flow(flow: Flow, caplog: pytest.LogCaptureFixture) -> Non
     seen = "\n".join([*f.printed, md, caplog.text])
     for role in f.minio.users.values():
         assert role.secret_key not in seen
-    for purpose in ("manifest", "signoff"):
-        assert Path(f.key(purpose)).read_text(encoding="ascii").strip() not in seen
+    assert Path(f.key).read_text(encoding="ascii").strip() not in seen
     assert "PRIVATE KEY" not in seen

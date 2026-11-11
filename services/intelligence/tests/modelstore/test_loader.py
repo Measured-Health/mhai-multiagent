@@ -43,7 +43,6 @@ from tests.modelstore.test_verify import (
     _manifest_bytes,
     _policy,
     _put,
-    write_signoff,
 )
 
 NAME = fixtures.MODEL_NAME
@@ -54,8 +53,8 @@ PINNED = re.compile(r"[a-z0-9][a-z0-9-]{1,62}@\d+\.\d+\.\d+#[0-9a-f]{12}")
 
 @pytest.fixture
 def keys() -> Keys:
-    m, s = MemSigner(), MemSigner()
-    return Keys(m, s, _policy(m, s))
+    m = MemSigner()
+    return Keys(m, _policy(m))
 
 
 @pytest.fixture(autouse=True)
@@ -79,7 +78,6 @@ def publish(
     seed: int = 7,
     warmup: bytes | None = None,
     architecture: str | None = None,
-    with_signoff: bool = True,
 ) -> Published:
     """A promoted version as promote writes it, with a real ``warmup.json``."""
     run_dir = fixtures.make_run(tmp_path / f"run-{version}-{seed}", "good", seed, name=NAME)
@@ -101,10 +99,7 @@ def publish(
     raw = _manifest_bytes(records, docs, version=version)
     _put(target, store.manifest_sig_key(NAME, version), keys.manifest.sign("manifest", raw))
     _put(target, store.manifest_key(NAME, version), raw)
-    pub = Published(raw, manifest.sha256(raw), manifest.parse(raw), run_dir)
-    if with_signoff:
-        write_signoff(target, pub, keys.signoff)
-    return pub
+    return Published(raw, manifest.sha256(raw), manifest.parse(raw), run_dir)
 
 
 def _lock_file(tmp_path: Path, pins: dict[str, Published], name: str = "models.lock") -> Path:
@@ -206,14 +201,46 @@ def test_no_fallback_to_other_version(tmp_path: Path, keys: Keys) -> None:
     ]
 
 
-def test_no_signoff_refused_in_production(tmp_path: Path, keys: Keys) -> None:
+def test_signed_pin_loads_in_production_without_signoff(tmp_path: Path, keys: Keys) -> None:
+    """No sign-off record exists or is read: the PR's approval is the sign-off."""
     mem = MemoryStore()
-    pub = publish(mem, tmp_path, keys, with_signoff=False)
-    e = _refused(_settings(tmp_path, {ROLE: pub}), mem, keys.policy)
-    assert (e.role, e.reason) == (ROLE, "not_approved")
-    write_signoff(mem, pub, keys.signoff)
-    pinned = loader.PinnedModels.load(_settings(tmp_path, {ROLE: pub}), mem, keys.policy)
+    pub = publish(mem, tmp_path, keys)
+    spy = Spy(mem)
+    pinned = loader.PinnedModels.load(_settings(tmp_path, {ROLE: pub}), spy, keys.policy)
     assert pinned.versions()[ROLE].endswith(pub.sha[:12])
+    assert not [r for r in spy.reads if "signoff" in r[1]]
+
+
+def test_untrusted_or_unsigned_pin_refused(tmp_path: Path, keys: Keys) -> None:
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    stranger = MemSigner()
+    e = _refused(_settings(tmp_path, {ROLE: pub}), mem, _policy(stranger))
+    assert (e.role, e.reason) == (ROLE, "signer_untrusted")
+    # A development key outside development: refused too.
+    e = _refused(_settings(tmp_path, {ROLE: pub}), mem, _policy(keys.manifest, development=True))
+    assert (e.role, e.reason) == (ROLE, "policy_invalid")
+    # No signature at all.
+    mem2 = MemoryStore()
+    pub2 = publish(mem2, tmp_path / "u", keys)
+    mem2.objects.pop(store.manifest_sig_key(NAME, VERSION))
+    e = _refused(_settings(tmp_path / "u", {ROLE: pub2}), mem2, keys.policy)
+    assert (e.role, e.reason) == (ROLE, "signature_invalid")
+
+
+def test_unversioned_store_loads_and_refuses_overwrites(tmp_path: Path, keys: Keys) -> None:
+    mem = MemoryStore(versioned=False)
+    pub = publish(mem, tmp_path, keys)
+    settings = _settings(tmp_path, {ROLE: pub})
+    pinned = loader.PinnedModels.load(settings, mem, keys.policy)
+    assert pinned.versions()[ROLE].endswith(pub.sha[:12])
+    key = store.run_file_key(NAME, VERSION, RUN, "model.safetensors")
+    body = mem.get(key, store.NULL_VERSION, max_bytes=1 << 30)
+    mem.shadow(key, body[:-1] + bytes([body[-1] ^ 1]))
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    e = _refused(_settings(fresh, {ROLE: pub}), mem, keys.policy)
+    assert (e.role, e.reason) == (ROLE, "hash_mismatch")
 
 
 def test_warmup_mismatch_not_ready(tmp_path: Path, keys: Keys) -> None:

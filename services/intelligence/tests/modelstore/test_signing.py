@@ -1,4 +1,4 @@
-"""Domain-separated signatures, the development file signer and the trust policy.
+"""Domain-separated Ed25519 signatures, the file signer, key generation and the trust policy.
 
 Keys are generated in ``tmp_path`` only; nothing here prints or keeps private material.
 """
@@ -11,9 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519
-from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 from intelligence.modelstore import canonical, cli, signing
 from intelligence.modelstore.reasons import Refused
@@ -55,7 +54,6 @@ def _pub_pem(key: Any) -> str:
 
 def _entry(key: Any, *, development: bool = True, alg: str = "ed25519") -> dict[str, Any]:
     return {
-        "kind": "public_key",
         "alg": alg,
         "key_id": signing.key_id(key.public_key()),
         "public_key_pem": _pub_pem(key),
@@ -63,14 +61,14 @@ def _entry(key: Any, *, development: bool = True, alg: str = "ed25519") -> dict[
     }
 
 
-def _policy_obj(**signers: list[dict[str, Any]]) -> dict[str, Any]:
-    full = {p: [] for p in signing.PURPOSES}
-    full.update(signers)
-    return {"schema": signing.TRUST_SCHEMA, "signers": full}
+def _policy_obj(*signers: dict[str, Any]) -> dict[str, Any]:
+    return {"schema": signing.TRUST_SCHEMA, "signers": list(signers)}
 
 
-def _policy(environment: str | None = "development", **signers: Any) -> signing.TrustPolicy:
-    return signing.parse_policy(_policy_obj(**signers), environment=environment)
+def _policy(
+    *signers: dict[str, Any], environment: str | None = "development"
+) -> signing.TrustPolicy:
+    return signing.parse_policy(_policy_obj(*signers), environment=environment)
 
 
 def _signer(tmp_path: Path, name: str = "k.pem") -> tuple[signing.FileSigner, Any]:
@@ -94,7 +92,7 @@ def test_sign_verify_round_trip(tmp_path: Path, dev_env: None) -> None:
     # The signature is over the domain-separated message, not the bare payload.
     key.public_key().verify(doc.signature, b"mhai.models.manifest/1\n" + PAYLOAD)
     assert signing.message("manifest", PAYLOAD) == b"mhai.models.manifest/1\n" + PAYLOAD
-    policy = _policy(manifest=[_entry(key)])
+    policy = _policy(_entry(key))
     who = signing.Verifier().verify("manifest", PAYLOAD, signing.parse_signature(raw), policy)
     assert who.key_id == signer.key_id and who.purpose == "manifest" and who.development
     # Bytes are accepted too, and parsed strictly.
@@ -105,40 +103,37 @@ def test_sign_verify_round_trip(tmp_path: Path, dev_env: None) -> None:
     assert e.value.reason == "signature_invalid"
 
 
-def test_ecdsa_p256_verifies_and_needs_der(dev_env: None) -> None:
+def test_one_key_signs_every_purpose(tmp_path: Path, dev_env: None) -> None:
+    """One listed key is trusted for manifests and test sets alike; the purpose lives in
+    the signed message, not in the policy."""
+    signer, key = _signer(tmp_path)
+    policy = _policy(_entry(key))
+    for purpose in signing.PURPOSES:
+        doc = signer.sign(purpose, PAYLOAD)
+        assert signing.Verifier().verify(purpose, PAYLOAD, doc, policy).purpose == purpose
+    assert signing.PURPOSES == ("manifest", "testset")
+    assert signing.ALGS == ("ed25519",)
+
+
+def test_ecdsa_refused(dev_env: None) -> None:
+    """Only Ed25519: an ECDSA key is not a signer, in the policy or as a document."""
     key = ec.generate_private_key(ec.SECP256R1())
-    policy = _policy(signoff=[_entry(key, alg="ecdsa-p256-sha256")])
-    der = key.sign(signing.message("signoff", PAYLOAD), ec.ECDSA(hashes.SHA256()))
-    kid = signing.key_id(key.public_key())
-    doc = signing.SignatureDoc("signoff", "ecdsa-p256-sha256", kid, der)
-    assert signing.Verifier().verify("signoff", PAYLOAD, doc, policy).key_id == kid
-    # A raw r||s signature is never accepted.
-    r, s = decode_dss_signature(der)
-    raw = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    pem = _pub_pem(key)
     with pytest.raises(Refused) as e:
-        signing.Verifier().verify(
-            "signoff", PAYLOAD, signing.SignatureDoc("signoff", doc.alg, kid, raw), policy
+        signing.parse_policy(
+            _policy_obj({**_entry(ed25519.Ed25519PrivateKey.generate()), "public_key_pem": pem}),
+            environment="development",
         )
+    assert e.value.reason == "policy_invalid"
+    with pytest.raises(Refused) as e:
+        signing.SignatureDoc("manifest", "ecdsa-p256-sha256", "a" * 64, b"\x01" * 70)
     assert e.value.reason == "signature_invalid"
-    # Nor a signature over the bare payload.
-    bare = key.sign(PAYLOAD, ec.ECDSA(hashes.SHA256()))
-    with pytest.raises(Refused) as e:
-        signing.Verifier().verify(
-            "signoff", PAYLOAD, signing.SignatureDoc("signoff", doc.alg, kid, bare), policy
-        )
-    assert e.value.reason == "signature_invalid"
-    # The alg in the document must be the trusted key's alg.
-    with pytest.raises(Refused) as e:
-        signing.Verifier().verify(
-            "signoff", PAYLOAD, signing.SignatureDoc("signoff", "ed25519", kid, der), policy
-        )
-    assert e.value.reason == "signer_untrusted"
 
 
 def test_signature_by_untrusted_key_refused(tmp_path: Path, dev_env: None) -> None:
     signer, _ = _signer(tmp_path, "a.pem")
     other = ed25519.Ed25519PrivateKey.generate()
-    policy = _policy(manifest=[_entry(other)])
+    policy = _policy(_entry(other))
     doc = signer.sign("manifest", PAYLOAD)
     with pytest.raises(Refused) as e:
         signing.Verifier().verify("manifest", PAYLOAD, doc, policy)
@@ -150,9 +145,9 @@ def test_signature_by_untrusted_key_refused(tmp_path: Path, dev_env: None) -> No
     with pytest.raises(Refused) as e:
         signing.Verifier().verify("manifest", PAYLOAD, forged, policy)
     assert e.value.reason == "signature_invalid"
-    # The committed policy trusts nobody.
+    # The committed policy trusts nobody yet: the production key is added by PR.
     committed = signing.load_policy(REPO / "models" / "trust-policy.json", environment=None)
-    assert all(not committed.signers[p] for p in signing.PURPOSES)
+    assert committed.signers == ()
     with pytest.raises(Refused) as e:
         signing.Verifier().verify("manifest", PAYLOAD, doc, committed)
     assert e.value.reason == "signer_untrusted"
@@ -160,9 +155,8 @@ def test_signature_by_untrusted_key_refused(tmp_path: Path, dev_env: None) -> No
 
 def test_purpose_confusion_refused(tmp_path: Path, dev_env: None) -> None:
     signer, key = _signer(tmp_path)
-    # The same key is trusted for manifests and test sets (H1: one key for both), but
-    # the domain separates them.
-    policy = _policy(manifest=[_entry(key)], testset=[_entry(key)])
+    # One key signs manifests and test sets, but the domain separates them.
+    policy = _policy(_entry(key))
     tdoc = signer.sign("testset", PAYLOAD)
     assert signing.Verifier().verify("testset", PAYLOAD, tdoc, policy).purpose == "testset"
     with pytest.raises(Refused) as e:
@@ -173,19 +167,12 @@ def test_purpose_confusion_refused(tmp_path: Path, dev_env: None) -> None:
     with pytest.raises(Refused) as e:
         signing.Verifier().verify("manifest", PAYLOAD, relabelled, policy)
     assert e.value.reason == "signature_invalid"
-    doc = signer.sign("signoff", PAYLOAD)
-    # A signoff signature over the same bytes never verifies as a manifest signature.
-    other, okey = _signer(tmp_path, "m.pem")
-    mpolicy = _policy(manifest=[_entry(okey)], signoff=[_entry(key)])
-    as_manifest = signing.SignatureDoc("manifest", doc.alg, doc.key_id, doc.signature)
-    for sig in (doc, as_manifest):
-        with pytest.raises(Refused) as e:
-            signing.Verifier().verify("manifest", PAYLOAD, sig, mpolicy)
-        assert e.value.reason in {"signature_invalid", "signer_untrusted"}
-    with pytest.raises(Refused):
-        signing.message("other", PAYLOAD)
-    with pytest.raises(Refused):
-        other.sign("manifest/1\n", PAYLOAD)
+    # The removed sign-off purpose is no purpose at all.
+    for purpose in ("signoff", "other", "manifest/1\n"):
+        with pytest.raises(Refused):
+            signing.message(purpose, PAYLOAD)
+        with pytest.raises(Refused):
+            signer.sign(purpose, PAYLOAD)
 
 
 def test_signature_doc_strict() -> None:
@@ -212,26 +199,17 @@ def test_signature_doc_strict() -> None:
         assert e.value.reason in {"signature_invalid", "not_canonical"}, b
 
 
-def test_file_signer_refused_outside_development(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    key = ed25519.Ed25519PrivateKey.generate()
-    path = _write_key(tmp_path / "k.pem", key)
-    for value in (None, "", "production", "Development", "development ", "dev"):
-        if value is None:
-            monkeypatch.delenv(signing.ENV_VAR, raising=False)
-        else:
-            monkeypatch.setenv(signing.ENV_VAR, value)
-        with pytest.raises(Refused) as e:
-            signing.FileSigner(path)
-        assert e.value.reason == "not_allowed_here"
-    monkeypatch.setenv(signing.ENV_VAR, "development")
-    signer = signing.FileSigner(path)
-    # Leaving development after construction stops signing too.
-    monkeypatch.setenv(signing.ENV_VAR, "production")
+def test_file_signer_works_in_production(tmp_path: Path, prod_env: None) -> None:
+    """The key file is the production signer too (the repository secret written to a
+    file, or a key file for the CLI); whether its key counts is the policy's business."""
+    signer, key = _signer(tmp_path)
+    doc = signer.sign("manifest", PAYLOAD)
+    policy = _policy(_entry(key, development=False), environment=None)
+    assert not signing.Verifier().verify("manifest", PAYLOAD, doc, policy).development
+    # The same key listed as a development key is refused in production.
     with pytest.raises(Refused) as e:
-        signer.sign("manifest", PAYLOAD)
-    assert e.value.reason == "not_allowed_here"
+        _policy(_entry(key, development=True), environment=None)
+    assert e.value.reason == "policy_invalid"
 
 
 def test_file_signer_key_file_checks(tmp_path: Path, dev_env: None) -> None:
@@ -279,17 +257,15 @@ def test_file_signer_key_file_checks(tmp_path: Path, dev_env: None) -> None:
 
 def test_dev_signer_in_policy_refused_in_production(tmp_path: Path) -> None:
     key = ed25519.Ed25519PrivateKey.generate()
-    obj = _policy_obj(manifest=[_entry(key, development=True)])
+    obj = _policy_obj(_entry(key, development=True))
     for env in (None, "", "production", "Development"):
         with pytest.raises(Refused) as e:
             signing.parse_policy(obj, environment=env)
         assert e.value.reason == "policy_invalid"
-    assert signing.parse_policy(obj, environment="development").signers["manifest"]
+    assert signing.parse_policy(obj, environment="development").signers
     # A production signer loads in production.
-    prod = signing.parse_policy(
-        _policy_obj(manifest=[_entry(key, development=False)]), environment=None
-    )
-    assert not prod.signers["manifest"][0].development
+    prod = signing.parse_policy(_policy_obj(_entry(key, development=False)), environment=None)
+    assert not prod.signers[0].development
     # load_policy reads the environment when none is given.
     path = tmp_path / "trust-policy.json"
     path.write_bytes(canonical.dumps(obj))
@@ -299,7 +275,7 @@ def test_dev_signer_in_policy_refused_in_production(tmp_path: Path) -> None:
             signing.load_policy(path)
         assert e.value.reason == "policy_invalid"
         os.environ[signing.ENV_VAR] = "development"
-        assert signing.load_policy(path).signers["manifest"]
+        assert signing.load_policy(path).signers
     finally:
         os.environ.pop(signing.ENV_VAR, None)
         if old is not None:
@@ -311,7 +287,7 @@ def test_dev_policy_entry_refused_at_verify_in_production(
 ) -> None:
     monkeypatch.setenv(signing.ENV_VAR, "development")
     signer, key = _signer(tmp_path)
-    policy = _policy(manifest=[_entry(key)])
+    policy = _policy(_entry(key))
     doc = signer.sign("manifest", PAYLOAD)
     monkeypatch.setenv(signing.ENV_VAR, "production")
     with pytest.raises(Refused) as e:
@@ -319,51 +295,62 @@ def test_dev_policy_entry_refused_at_verify_in_production(
     assert e.value.reason == "policy_invalid"
 
 
-def test_manifest_and_signoff_signers_disjoint() -> None:
-    key = ed25519.Ed25519PrivateKey.generate()
-    other = ed25519.Ed25519PrivateKey.generate()
-    with pytest.raises(Refused) as e:
-        _policy(manifest=[_entry(key)], signoff=[_entry(key)])
-    assert e.value.reason == "policy_invalid"
-    assert _policy(manifest=[_entry(key)], signoff=[_entry(other)], testset=[_entry(key)])
-
-
-def test_testset_and_signoff_signers_disjoint() -> None:
-    """A test-split key also trusted for sign-offs would let the model-promotion identity
-    sign sign-offs: the policy refuses it."""
-    key = ed25519.Ed25519PrivateKey.generate()
-    other = ed25519.Ed25519PrivateKey.generate()
-    with pytest.raises(Refused) as e:
-        _policy(manifest=[_entry(other)], signoff=[_entry(key)], testset=[_entry(key)])
-    assert (e.value.reason, e.value.detail_code) == ("policy_invalid", "testset_signoff_shared")
-
-
 def test_policy_shape_checked() -> None:
     key = ed25519.Ed25519PrivateKey.generate()
     good = _entry(key)
-    ec_key = ec.generate_private_key(ec.SECP256R1())
-    p384 = ec.generate_private_key(ec.SECP384R1())
     bad: list[Any] = [
         [],
         {"schema": signing.TRUST_SCHEMA},
         {**_policy_obj(), "schema": "mhai.models.trust/2"},
         {**_policy_obj(), "extra": 1},
-        {"schema": signing.TRUST_SCHEMA, "signers": {"manifest": [], "signoff": []}},
-        _policy_obj(manifest=[{**good, "key_id": "0" * 64}]),  # key_id doesn't match the key
-        _policy_obj(manifest=[{**good, "alg": "ecdsa-p256-sha256"}]),  # alg doesn't match
-        _policy_obj(manifest=[{**good, "kind": "sigstore"}]),
-        _policy_obj(manifest=[{**good, "development": "yes"}]),
-        _policy_obj(manifest=[{**good, "extra": 1}]),
-        _policy_obj(manifest=[{**good, "public_key_pem": "junk"}]),
-        _policy_obj(manifest=[good, good]),
-        _policy_obj(manifest=[_entry(p384, alg="ecdsa-p256-sha256")]),
-        _policy_obj(manifest=[{**_entry(ec_key, alg="ecdsa-p256-sha256"), "alg": "ed25519"}]),
+        # The old per-purpose shape is refused, not read.
+        {"schema": signing.TRUST_SCHEMA, "signers": {"manifest": [good], "testset": [good]}},
+        _policy_obj({**good, "key_id": "0" * 64}),  # key_id doesn't match the key
+        _policy_obj({**good, "alg": "ecdsa-p256-sha256"}),
+        _policy_obj({**good, "kind": "public_key"}),
+        _policy_obj({**good, "development": "yes"}),
+        _policy_obj({**good, "extra": 1}),
+        _policy_obj({**good, "public_key_pem": "junk"}),
+        _policy_obj(good, good),
+        _policy_obj(*[_entry(ed25519.Ed25519PrivateKey.generate())] * 2),
+        _policy_obj(*[_entry(ed25519.Ed25519PrivateKey.generate()) for _ in range(17)]),
     ]
     for obj in bad:
         with pytest.raises(Refused) as e:
             signing.parse_policy(obj, environment="development")
         assert e.value.reason == "policy_invalid"
-    assert _policy(manifest=[_entry(ec_key, alg="ecdsa-p256-sha256")])
+    policy = _policy(good)
+    assert policy.trusts(good["key_id"], "ed25519")
+    assert not policy.trusts(good["key_id"], "ecdsa-p256-sha256")
+    assert not policy.trusts("0" * 64, "ed25519")
+    # policy_obj writes what parse_policy reads.
+    back = signing.parse_policy(signing.policy_obj(list(policy.signers)), environment="development")
+    assert back == policy
+
+
+def test_keygen_makes_a_production_key(
+    tmp_path: Path, prod_env: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``mhai-models keygen`` works outside development, writes the key 0600, and prints
+    only the trust-policy entry: a production (non-development) signer that verifies."""
+    out = tmp_path / "keys"
+    assert cli.main(["keygen", str(out)]) == 0
+    printed = capsys.readouterr()
+    private = out / signing.KEY_FILE
+    assert stat.S_IMODE(private.stat().st_mode) == 0o600
+    assert stat.S_IMODE((out / signing.PUBLIC_KEY_FILE).stat().st_mode) == 0o644
+    assert "PRIVATE" not in printed.out + printed.err
+    entry = json.loads(printed.out)["trust_policy_signer"]
+    assert set(entry) == {"alg", "key_id", "public_key_pem", "development"}
+    assert entry["development"] is False
+    policy = signing.parse_policy(_policy_obj(entry), environment=None)
+    signer = signing.FileSigner(private)
+    assert signer.key_id == entry["key_id"]
+    doc = signer.sign("manifest", PAYLOAD)
+    assert signing.Verifier().verify("manifest", PAYLOAD, doc, policy).key_id == signer.key_id
+    # Never overwrites.
+    assert cli.main(["keygen", str(out)]) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "key_exists"}
 
 
 def test_dev_keygen_permissions_and_output(

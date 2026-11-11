@@ -8,10 +8,10 @@ is ``lock_invalid``. A change to the lock file afterwards changes nothing until 
 :meth:`PinnedModels.load` takes each required role in turn:
 
 1. :func:`~intelligence.modelstore.verify.verify_for_load`, the verifier's only entry
-   point for loading: lock hash, signature, identity, gate, every file and the sign-off
-   (required everywhere but development, where both ``MHAI_MODELS_ENV=development`` and
-   ``APP_ENV=development`` are needed; an unset ``APP_ENV`` is production). It never
-   calls ``verify_pin`` and never chooses whether a sign-off is needed.
+   point for loading: lock hash, signature, identity, gate and every file, with the
+   production rules (P14) everywhere but development (where both
+   ``MHAI_MODELS_ENV=development`` and ``APP_ENV=development`` are needed; an unset
+   ``APP_ENV`` is production). It never calls ``verify_pin`` and has no switch.
 2. :func:`warm_up`: ``warmup.json`` is read by the ``store_version_id`` the verified
    manifest recorded (never latest), must have the SHA-256 the manifest recorded, and
    parses strictly (canonical JSON, exactly ``page_sha256``, ``output_sha256``,

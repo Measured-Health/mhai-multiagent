@@ -92,11 +92,10 @@ user from a payload; it takes them only from the verified token.
 `models.lock`, at the repository root, names the exact model version each
 pipeline role uses (name, version, gate and the SHA-256 of its signed
 manifest). It changes only by a reviewed PR: `lock-check` verifies each new
-pin and its approvals, and after the merge the sign-off workflow writes a
-signed sign-off into the model store. At start-up the pipeline verifies every
-pinned role (signature, lock hash, every file, sign-off in production, a
-warm-up page) and takes no jobs until all pass; it never falls back to
-another version. Each answer's `model_versions` names the weights used
+pin against the model store, and one reviewer's approval is the sign-off. At
+start-up the pipeline verifies every pinned role (signature, lock hash, every
+file, a warm-up page) and takes no jobs until all pass; it never falls back
+to another version. Each answer's `model_versions` names the weights used
 (`name@version#hash`). See "Promoting a model" in
 `services/intelligence/README.md` and the design,
 `docs/specs/2026-10-28-document-pipeline-and-model-promotion-design.md`.

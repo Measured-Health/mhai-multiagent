@@ -19,8 +19,7 @@ What is refused here:
 * ``build-set --purpose test`` (``not_allowed_here``): a test split is built only by the
   locked path (``mhai-models testset-build``, Task 17), inside the store.
 * ``run --extractor oracle`` without ``--test-only-oracle``; with it, on any split but
-  ``dev``, or whenever ``MHAI_EVAL_ROLE`` is set (the ``model-eval`` and
-  ``model-promotion`` environments). The oracle reads the set's ground truth: it is a
+  ``dev``, or whenever ``MHAI_EVAL_ROLE`` is set (the promotion workflow). The oracle reads the set's ground truth: it is a
   test fixture and never evaluates anything.
 * Any gate but ``rehearsal`` for a stub extractor (the oracle included). With no
   ``--gate``, a stub is checked against ``rehearsal`` only, anything else against every

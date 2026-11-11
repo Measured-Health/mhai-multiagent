@@ -3,8 +3,7 @@
 ``minio_store`` (tests marked ``store``) starts MinIO, pinned by digest, with
 testcontainers, then runs ``deploy/minio/init-model-store.sh`` in the pinned MinIO client
 container on the host network, exactly as docker-compose.models.yml does: the bucket,
-object lock, default retention, the five users and their policies are the ones compose
-makes. The init script and policies are copied into the container, not bind-mounted, so
+versioning, the two users and their policies are the ones compose makes. The init script and policies are copied into the container, not bind-mounted, so
 this works when the tests themselves run in a container (the remote runner, CI); the
 users' passwords are copied back out of it. The root password is random per session.
 Every object written is synthetic and lives only as long as the container.
@@ -38,12 +37,7 @@ MC_IMAGE = (
     "@sha256:73bd39f7899a0cef12b8dd5df13aa93a3ed1aaa44236542442e9ac76819ac158"
 )
 BUCKET = "mhai-models-test"
-ROLES = ("promoter", "signoff", "reader", "eval-reader", "eval-writer")
-RETENTION_DAYS = 1
-# The policies' cap on remaining lock days. Small here so a test can go past it; the
-# stores built below don't share it (they use the default), so the store's own refusal is
-# what the tests see.
-MAX_RETENTION_DAYS = 30
+ROLES = ("writer", "reader")
 LABEL = "mhai.test"
 MC_UID = 1001  # the client image's user
 
@@ -70,7 +64,7 @@ class MinioStore:
         return S3Store(self.endpoint, self.bucket, creds, max_attempts=1)
 
     def client(self, role: str = "root") -> Any:
-        """A raw boto3 client, for the calls S3Store never makes (deletes, shortening)."""
+        """A raw boto3 client, for the calls S3Store never makes (deletes, overwrites)."""
         import boto3
         from botocore.config import Config
 
@@ -189,8 +183,6 @@ def minio_store() -> Iterator[MinioStore]:
             "MINIO_ROOT_USER": root.access_key,
             "MINIO_ROOT_PASSWORD": root.secret_key,
             "MODEL_STORE_BUCKET": BUCKET,
-            "MODEL_STORE_DEFAULT_RETENTION_DAYS": str(RETENTION_DAYS),
-            "MODEL_STORE_MAX_RETENTION_DAYS": str(MAX_RETENTION_DAYS),
             "MODEL_STORE_SECRETS_DIR": "/tmp/secrets",
         }
         init = run_init(env)

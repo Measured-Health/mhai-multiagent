@@ -129,9 +129,8 @@ def _cli_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **overrides: str |
     env: dict[str, str | None] = {
         "MODEL_STORE_ENDPOINT": "https://store.example.test",
         "MODEL_STORE_BUCKET": "mhai-models-test",
-        "MODEL_STORE_EVAL_WRITER_ACCESS_KEY": "synthetic-access",
-        "MODEL_STORE_EVAL_WRITER_SECRET_KEY": "synthetic-secret-not-real",
-        "MODEL_STORE_TESTSET_RETENTION_DAYS": "1",
+        "MODEL_STORE_WRITER_ACCESS_KEY": "synthetic-access",
+        "MODEL_STORE_WRITER_SECRET_KEY": "synthetic-secret-not-real",
         "MHAI_MODELS_SIGNER": str(tmp_path / "missing.pem"),
         "MHAI_MODELS_TRUST_POLICY": str(tmp_path / "missing-policy.json"),
         "MHAI_MODELS_ENV": "development",
@@ -195,9 +194,8 @@ def test_cli_checks_names_before_any_io(
     [
         "MODEL_STORE_ENDPOINT",
         "MODEL_STORE_BUCKET",
-        "MODEL_STORE_EVAL_WRITER_ACCESS_KEY",
-        "MODEL_STORE_EVAL_WRITER_SECRET_KEY",
-        "MODEL_STORE_TESTSET_RETENTION_DAYS",
+        "MODEL_STORE_WRITER_ACCESS_KEY",
+        "MODEL_STORE_WRITER_SECRET_KEY",
         "MHAI_MODELS_SIGNER",
         "MHAI_MODELS_TRUST_POLICY",
     ],
@@ -214,25 +212,19 @@ def test_cli_needs_its_settings_from_the_environment(
 def test_cli_dev_signer_only_in_development(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_build: None
 ) -> None:
+    """A development key signs in production only if the policy lists it, and a policy
+    listing a development key is refused in production: nothing is built."""
     monkeypatch.setenv("MHAI_MODELS_ENV", "development")
-    signing.generate_dev_key(tmp_path / "keys")
+    keys = _make_keys(tmp_path / "k")
     _cli_env(
         monkeypatch,
         tmp_path,
-        MHAI_MODELS_SIGNER=str(tmp_path / "keys" / signing.DEV_KEY_FILE),
+        MHAI_MODELS_SIGNER=str(keys.key_path),
+        MHAI_MODELS_TRUST_POLICY=str(keys.policy_path),
         MHAI_MODELS_ENV="production",
     )
     code, out = _run_cli(_build_argv())
-    assert (code, json.loads(out)) == (2, {"refused": "not_allowed_here"})
-
-
-def test_cli_retention_days_checked(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_build: None
-) -> None:
-    for bad in ("0", "-1", "1.5", "x", "99999999"):
-        _cli_env(monkeypatch, tmp_path, MODEL_STORE_TESTSET_RETENTION_DAYS=bad)
-        code, out = _run_cli(_build_argv())
-        assert (code, json.loads(out)) == (2, {"refused": "not_allowed_here"})
+    assert (code, json.loads(out)) == (2, {"refused": "policy_invalid"})
 
 
 # ---------------------------------------------------------------- signing helpers
@@ -249,7 +241,6 @@ class Keys:
 
 def _entry_for(signer: signing.FileSigner) -> dict[str, Any]:
     return {
-        "kind": "public_key",
         "alg": "ed25519",
         "key_id": signer.key_id,
         "public_key_pem": signer.public_key_pem(),
@@ -262,16 +253,10 @@ def _make_keys(folder: Path) -> Keys:
     signing.generate_dev_key(folder / "keys")
     key_path = folder / "keys" / signing.DEV_KEY_FILE
     signer = signing.FileSigner(key_path)
-    obj = {
-        "schema": signing.TRUST_SCHEMA,
-        "signers": {"manifest": [], "signoff": [], "testset": [_entry_for(signer)]},
-    }
+    obj = {"schema": signing.TRUST_SCHEMA, "signers": [_entry_for(signer)]}
     policy_path = folder / "trust-policy.json"
     policy_path.write_bytes(canonical.dumps(obj))
-    empty = {
-        "schema": signing.TRUST_SCHEMA,
-        "signers": {"manifest": [], "signoff": [], "testset": []},
-    }
+    empty = {"schema": signing.TRUST_SCHEMA, "signers": []}
     return Keys(
         signer=signer,
         policy=signing.parse_policy(obj, environment="development"),
@@ -332,7 +317,6 @@ def test_locked_manifest_checks() -> None:
         mutate(lambda o: o["files"][0].update(size=-1)),
         mutate(lambda o: o["files"][0].update(sha256="AB" * 32)),
         mutate(lambda o: o["files"][0].update(extra=1)),
-        mutate(lambda o: o["store_version_ids"].update({o["files"][0]["path"]: "null"})),
         mutate(lambda o: o["store_version_ids"].update({o["files"][0]["path"]: "a/b"})),
         canonical.dumps(good) + b" ",  # not canonical
         json.dumps(good, indent=1).encode(),
@@ -340,6 +324,9 @@ def test_locked_manifest_checks() -> None:
     ]
     for raw in cases:
         assert _refused(testsets.check_locked, raw, entry).reason == "testset_mismatch"
+    # A bucket without versioning records "null" for every file: accepted.
+    unversioned = mutate(lambda o: o["store_version_ids"].update({o["files"][0]["path"]: "null"}))
+    assert len(testsets.check_locked(unversioned, entry)) == 2
 
 
 # ---------------------------------------------------------------- the build's clean-up
@@ -353,7 +340,7 @@ class MemoryStore:
         self.fail_after = fail_after
         self.puts = 0
 
-    def put_new(self, key: str, data: bytes | Path, retention_days: int) -> str:
+    def put_new(self, key: str, data: bytes | Path) -> str:
         store._check_key(key)
         if key in self.objects:
             raise Refused("version_exists")
@@ -379,14 +366,11 @@ class MemoryStore:
     def head(self, key: str, version_id: str | None = None) -> ObjectInfo:
         for vid, body in self.objects.get(key, []):
             if version_id is None or vid == version_id:
-                return ObjectInfo(vid, len(body), hashlib.sha256(body).hexdigest(), None, None)
+                return ObjectInfo(vid, len(body), hashlib.sha256(body).hexdigest())
         raise Refused("not_found")
 
     def list(self, prefix: str) -> list[str]:
         return sorted(k for k in self.objects if k.startswith(prefix))
-
-    def extend_retention(self, key: str, version_id: str, days: int) -> Any:
-        raise AssertionError("not used")
 
 
 def _fake_build(
@@ -450,7 +434,6 @@ def test_build_failure_removes_scratch(
         suite=SUITE,
         version="1.0.0",
         scale=SCALE,
-        retention_days=DAY,
         scratch_parent=scratch,
     )
     assert err.reason == "evaluation_failed"
@@ -483,7 +466,6 @@ def test_scanner_refusal_uploads_nothing(
         suite=SUITE,
         version="1.0.0",
         scale=SCALE,
-        retention_days=DAY,
         scratch_parent=scratch,
     )
     assert err.reason == "dataset_not_synthetic"
@@ -508,7 +490,6 @@ def test_upload_failure_removes_scratch_and_writes_no_manifest(
         suite=SUITE,
         version="1.0.0",
         scale=SCALE,
-        retention_days=DAY,
         scratch_parent=scratch,
     )
     assert err.reason == "store_unavailable"
@@ -531,7 +512,6 @@ def test_untrusted_signer_refused_before_anything(
         suite=SUITE,
         version="1.0.0",
         scale=SCALE,
-        retention_days=DAY,
         scratch_parent=tmp_path,
     )
     assert err.reason == "signer_untrusted"
@@ -552,7 +532,6 @@ def test_memory_build_and_fetch_round_trip(
         suite=SUITE,
         version="1.0.0",
         scale=SCALE,
-        retention_days=DAY,
         scratch_parent=tmp_path,
     )
     order = list(s.objects)
@@ -572,7 +551,6 @@ def test_memory_build_and_fetch_round_trip(
         suite=SUITE,
         version="1.0.0",
         scale=SCALE,
-        retention_days=DAY,
         scratch_parent=tmp_path,
     )
     assert again.reason == "version_exists"
@@ -617,7 +595,7 @@ def locked(minio_store: MinioStore, tmp_path_factory: pytest.TempPathFactory) ->
             seeds.append(out)
         return out
 
-    creds = minio_store.users["eval-writer"]
+    creds = minio_store.users["writer"]
     handler = _Capture()
     root_logger = logging.getLogger()
     old_level = root_logger.level
@@ -628,9 +606,8 @@ def locked(minio_store: MinioStore, tmp_path_factory: pytest.TempPathFactory) ->
         for k, v in {
             "MODEL_STORE_ENDPOINT": minio_store.endpoint,
             "MODEL_STORE_BUCKET": minio_store.bucket,
-            "MODEL_STORE_EVAL_WRITER_ACCESS_KEY": creds.access_key,
-            "MODEL_STORE_EVAL_WRITER_SECRET_KEY": creds.secret_key,
-            "MODEL_STORE_TESTSET_RETENTION_DAYS": str(DAY),
+            "MODEL_STORE_WRITER_ACCESS_KEY": creds.access_key,
+            "MODEL_STORE_WRITER_SECRET_KEY": creds.secret_key,
             "MHAI_MODELS_SIGNER": str(keys.key_path),
             "MHAI_MODELS_TRUST_POLICY": str(keys.policy_path),
             "MHAI_MODELS_SCRATCH": str(scratch),
@@ -649,7 +626,7 @@ def locked(minio_store: MinioStore, tmp_path_factory: pytest.TempPathFactory) ->
 
 
 def _locked_manifest(m: MinioStore, x: Locked) -> tuple[bytes, dict[str, Any]]:
-    r = m.store("eval-reader")
+    r = m.store("reader")
     key = store.testset_key(SUITE, x.version)
     for vid in r.versions(key):
         raw = r.get(key, vid, max_bytes=64 * 1024 * 1024)
@@ -669,19 +646,16 @@ def test_build_upload_lock_and_fetch(
     raw, obj = _locked_manifest(minio_store, locked)
     assert obj["locked"] is True and obj["purpose"] == "test"
     assert set(obj["store_version_ids"]) == {f["path"] for f in obj["files"]}
-    # Every object is compliance-locked.
+    # Every object is stored as the split recorded it.
     root = minio_store.store()
     for f in obj["files"]:
         info = root.head(
             store.eval_file_key(SUITE, locked.version, f["path"]),
             obj["store_version_ids"][f["path"]],
         )
-        assert info.lock_mode == "COMPLIANCE"
         assert (info.size, info.sha256) == (f["size"], f["sha256"])
-    # It fetches back as the eval reader, and the runner's own checks accept it.
-    out = testsets.fetch(
-        minio_store.store("eval-reader"), locked.entry, locked.keys.policy, tmp_path
-    )
+    # It fetches back as the reader, and the runner's own checks accept it.
+    out = testsets.fetch(minio_store.store("reader"), locked.entry, locked.keys.policy, tmp_path)
     assert (out / "testset.json").read_bytes() == raw
     assert not (out / "testset.sig").exists()
     assert oct(out.stat().st_mode & 0o777) == oct(0o700)
@@ -699,14 +673,14 @@ def test_build_upload_lock_and_fetch(
         assert doc_id not in locked.logs
     # A second build of the same version stops at the claim.
     with pytest.MonkeyPatch.context() as mp:
-        creds = minio_store.users["eval-writer"]
+        creds = minio_store.users["writer"]
         _cli_env(
             mp,
             tmp_path,
             MODEL_STORE_ENDPOINT=minio_store.endpoint,
             MODEL_STORE_BUCKET=minio_store.bucket,
-            MODEL_STORE_EVAL_WRITER_ACCESS_KEY=creds.access_key,
-            MODEL_STORE_EVAL_WRITER_SECRET_KEY=creds.secret_key,
+            MODEL_STORE_WRITER_ACCESS_KEY=creds.access_key,
+            MODEL_STORE_WRITER_SECRET_KEY=creds.secret_key,
             MHAI_MODELS_SIGNER=str(locked.keys.key_path),
             MHAI_MODELS_TRUST_POLICY=str(locked.keys.policy_path),
         )
@@ -754,8 +728,8 @@ def test_testset_tampered_file_refused(
     page = next(f for f in obj["files"] if f["path"].endswith(".png"))
     key = store.eval_file_key(SUITE, locked.version, page["path"])
     # A holder of the eval writer's credentials shadows one page with a newer version.
-    shadow = _raw_put(minio_store, "eval-writer", key, b"not the locked page")
-    reader = minio_store.store("eval-reader")
+    shadow = _raw_put(minio_store, "writer", key, b"not the locked page")
+    reader = minio_store.store("reader")
     assert reader.versions(key)[0] == shadow
     # Fetch still takes the recorded version.
     out = testsets.fetch(reader, locked.entry, locked.keys.policy, tmp_path / "a")
@@ -766,8 +740,8 @@ def test_testset_tampered_file_refused(
     bad["store_version_ids"][page["path"]] = shadow
     bad_raw = canonical.dumps(bad)
     sig = locked.keys.signer.sign("testset", bad_raw).to_bytes()
-    _raw_put(minio_store, "eval-writer", store.testset_key(SUITE, locked.version), bad_raw)
-    _raw_put(minio_store, "eval-writer", store.testset_sig_key(SUITE, locked.version), sig)
+    _raw_put(minio_store, "writer", store.testset_key(SUITE, locked.version), bad_raw)
+    _raw_put(minio_store, "writer", store.testset_sig_key(SUITE, locked.version), sig)
     bad_entry = testsets.LockEntry(SUITE, locked.version, hashlib.sha256(bad_raw).hexdigest())
     err = _refused(testsets.fetch, reader, bad_entry, locked.keys.policy, tmp_path / "b")
     assert err.reason == "testset_mismatch"
@@ -781,7 +755,7 @@ def test_testset_tampered_file_refused(
 def test_testset_lock_mismatch_refused(
     minio_store: MinioStore, locked: Locked, tmp_path: Path, dev_env: None
 ) -> None:
-    reader = minio_store.store("eval-reader")
+    reader = minio_store.store("reader")
     wrong = testsets.LockEntry(SUITE, locked.version, secrets.token_hex(32))
     err = _refused(testsets.fetch, reader, wrong, locked.keys.policy, tmp_path)
     assert err.reason == "testset_mismatch"
@@ -800,10 +774,10 @@ def test_testset_lock_mismatch_refused(
     other = _make_keys(tmp_path.parent / f"other-{secrets.token_hex(4)}")
     obj["totals"] = dict(obj["totals"], documents=obj["totals"]["documents"] + 1)
     forged = canonical.dumps(obj)
-    _raw_put(minio_store, "eval-writer", store.testset_key(SUITE, locked.version), forged)
+    _raw_put(minio_store, "writer", store.testset_key(SUITE, locked.version), forged)
     _raw_put(
         minio_store,
-        "eval-writer",
+        "writer",
         store.testset_sig_key(SUITE, locked.version),
         other.signer.sign("testset", forged).to_bytes(),
     )
@@ -814,59 +788,24 @@ def test_testset_lock_mismatch_refused(
 
 
 @pytest.mark.store
-def test_wrong_role_cannot_build_or_read(
+def test_reader_cannot_build(
     minio_store: MinioStore, locked: Locked, tmp_path: Path, dev_env: None
 ) -> None:
-    for role in ("promoter", "signoff", "reader", "eval-reader"):
-        scratch = tmp_path / f"build-{role}"
-        scratch.mkdir()
-        err = _refused(
-            testsets.build_and_lock,
-            minio_store.store(role),
-            locked.keys.signer,
-            locked.keys.policy,
-            suite=SUITE,
-            version=_version(),
-            scale=SCALE,
-            retention_days=DAY,
-            scratch_parent=scratch,
-        )
-        assert (err.reason, err.detail_code) == ("store_unavailable", "denied")
-        assert list(scratch.iterdir()) == []
-    for role in ("promoter", "signoff", "reader", "eval-writer"):
-        scratch = tmp_path / f"read-{role}"
-        scratch.mkdir()
-        err = _refused(
-            testsets.fetch, minio_store.store(role), locked.entry, locked.keys.policy, scratch
-        )
-        assert err.reason == "store_unavailable"
-        assert list(scratch.iterdir()) == []
-
-
-@pytest.mark.store
-def test_eval_reader_lists_versions_under_eval_only(minio_store: MinioStore) -> None:
-    from botocore.exceptions import ClientError
-
-    raw = minio_store.client("eval-reader")
-    raw.list_object_versions(Bucket=minio_store.bucket, Prefix=f"eval/{SUITE}/")
-    for kw in ({}, {"Prefix": "models/"}, {"Prefix": ""}, {"Prefix": "evalx/"}):
-        with pytest.raises(ClientError):
-            raw.list_object_versions(Bucket=minio_store.bucket, **kw)
-    with pytest.raises(ClientError):
-        raw.list_objects_v2(Bucket=minio_store.bucket, Prefix="eval/")
-    # The other roles still list nothing under eval.
-    for role in ("promoter", "signoff", "reader"):
-        with pytest.raises(ClientError):
-            minio_store.client(role).list_object_versions(Bucket=minio_store.bucket, Prefix="eval/")
-
-
-@pytest.mark.store
-def test_nothing_under_the_eval_claim(minio_store: MinioStore) -> None:
-    from botocore.exceptions import ClientError
-
-    version = _version()
-    with pytest.raises(ClientError):
-        _raw_put(minio_store, "eval-writer", f"{store.testset_claim_key(SUITE, version)}/x", b"x")
+    """The reader can't write a split; it can read the locked one."""
+    scratch = tmp_path / "build-reader"
+    scratch.mkdir()
+    err = _refused(
+        testsets.build_and_lock,
+        minio_store.store("reader"),
+        locked.keys.signer,
+        locked.keys.policy,
+        suite=SUITE,
+        version=_version(),
+        scale=SCALE,
+        scratch_parent=scratch,
+    )
+    assert (err.reason, err.detail_code) == ("store_unavailable", "denied")
+    assert list(scratch.iterdir()) == []
 
 
 def test_seed_never_reaches_the_build_output(tmp_path: Path) -> None:
@@ -884,27 +823,24 @@ def test_scratch_folder_mode(tmp_path: Path) -> None:
         os.rmdir(folder)
 
 
-def test_policies_cover_the_eval_claim_and_scope_version_listing() -> None:
+def test_policies_scope_listing_to_the_layout() -> None:
+    """Both store users list (and list versions) only under models/ and eval/."""
     folder = REPO / "deploy" / "minio" / "policies"
+    assert sorted(p.stem for p in folder.glob("*.json")) == ["reader", "writer"]
     for path in folder.glob("*.json"):
         doc = json.loads(path.read_text())
-        fixed = [st for st in doc["Statement"] if st.get("Sid") == "NothingUnderFixedNames"]
-        assert "arn:aws:s3:::@BUCKET@/eval/*/claim.json/*" in fixed[0]["Resource"]
         listing = [
             st
             for st in doc["Statement"]
             if st["Effect"] == "Allow" and "s3:ListBucketVersions" in st["Action"]
         ]
-        if path.stem != "eval-reader":
-            continue
-        # The eval reader lists versions only under eval/.
         assert listing == [
             {
-                "Sid": "ListEvalVersions",
+                "Sid": "List",
                 "Effect": "Allow",
-                "Action": ["s3:ListBucketVersions"],
+                "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
                 "Resource": ["arn:aws:s3:::@BUCKET@"],
-                "Condition": {"StringLike": {"s3:prefix": ["eval/*"]}},
+                "Condition": {"StringLike": {"s3:prefix": ["models/*", "eval/*"]}},
             }
         ]
 
@@ -943,7 +879,6 @@ def _memory_locked(
         suite=SUITE,
         version="1.0.0",
         scale=SCALE,
-        retention_days=DAY,
         scratch_parent=tmp_path,
     )
     return s, keys, built
@@ -1030,18 +965,8 @@ def test_manifest_purpose_signature_refused_at_fetch(
     entry = testsets.LockEntry.parse(built.entry.text)
     tkey, skey = store.testset_key(SUITE, "1.0.0"), store.testset_sig_key(SUITE, "1.0.0")
     raw = s.objects[tkey][0][1]
-    # A policy that trusts the same key for manifests too (the KMS plan shares one key).
-    both = signing.parse_policy(
-        {
-            "schema": signing.TRUST_SCHEMA,
-            "signers": {
-                "manifest": [_entry_for(keys.signer)],
-                "signoff": [],
-                "testset": [_entry_for(keys.signer)],
-            },
-        },
-        environment="development",
-    )
+    # One key signs manifests and test splits: only the purpose tells them apart.
+    both = keys.policy
     doc = keys.signer.sign("manifest", raw)
     relabelled = signing.SignatureDoc("testset", doc.alg, doc.key_id, doc.signature)
     for forged in (doc.to_bytes(), relabelled.to_bytes()):
@@ -1090,7 +1015,6 @@ def test_build_read_refusal_carries_no_document_id(
         suite=SUITE,
         version="1.0.0",
         scale=SCALE,
-        retention_days=DAY,
         scratch_parent=scratch,
     )
     assert err.detail_code == "scratch"
@@ -1109,7 +1033,6 @@ def test_bad_scratch_or_wrong_key_never_takes_the_claim(
         "suite": SUITE,
         "version": "1.0.0",
         "scale": SCALE,
-        "retention_days": DAY,
     }
     # A scratch root that doesn't exist.
     err = _refused(
@@ -1161,7 +1084,6 @@ def test_scratch_not_removed_is_reported(
         suite=SUITE,
         version="1.0.0",
         scale=SCALE,
-        retention_days=DAY,
         scratch_parent=scratch,
     )
     assert built.scratch_removed is False
@@ -1237,19 +1159,19 @@ def test_scanner_failure_logs_no_document_id(
 @pytest.mark.parametrize(
     "prefix", ["eval/../models/", "eval/%2e%2e/models/", "eval/./../models/", "eval/..%2fmodels/"]
 )
-def test_eval_reader_listing_cannot_climb_out_of_eval(
+def test_reader_listing_cannot_climb_out_of_the_layout(
     minio_store: MinioStore, locked: Locked, prefix: str
 ) -> None:
     from botocore.exceptions import ClientError
 
-    raw = minio_store.client("eval-reader")
+    raw = minio_store.client("reader")
     try:
         resp = raw.list_object_versions(Bucket=minio_store.bucket, Prefix=prefix)
     except ClientError:
         return  # refused outright
     keys = [v["Key"] for v in resp.get("Versions", []) + resp.get("DeleteMarkers", [])]
     keys += [p["Prefix"] for p in resp.get("CommonPrefixes", [])]
-    assert not [k for k in keys if not k.startswith("eval/")]
+    assert not [k for k in keys if not k.startswith(("eval/", "models/"))]
 
 
 @pytest.mark.store
@@ -1257,14 +1179,14 @@ def test_same_bytes_and_junk_versions_in_minio(
     minio_store: MinioStore, locked: Locked, tmp_path: Path, dev_env: None
 ) -> None:
     raw, _ = _locked_manifest(minio_store, locked)
-    r = minio_store.store("eval-reader")
+    r = minio_store.store("reader")
     tkey = store.testset_key(SUITE, locked.version)
     skey = store.testset_sig_key(SUITE, locked.version)
     sig_vid = r.versions(skey)[-1]  # the oldest: the build's own
     sig = r.get(skey, sig_vid, max_bytes=4096)
     for body in (raw, b"junk manifest"):
-        _raw_put(minio_store, "eval-writer", tkey, body)
+        _raw_put(minio_store, "writer", tkey, body)
     for body in (sig, b"junk signature"):
-        _raw_put(minio_store, "eval-writer", skey, body)
+        _raw_put(minio_store, "writer", skey, body)
     out = testsets.fetch(r, locked.entry, locked.keys.policy, tmp_path)
     assert (out / "testset.json").read_bytes() == raw

@@ -3,9 +3,9 @@
 The steps, in order, each a function of its own:
 
 1. :func:`check_request` and :func:`check_inputs`: names, versions, the source's options,
-   the runtime URL and the gates, before any I/O. Not a dry run: the promoter's store, the
-   signer (trusted for ``manifest``), the trust policy, the workflow run and the retention
-   must all be present (``not_allowed_here``), and nothing is touched until they are.
+   the runtime URL and the gates, before any I/O. Not a dry run: the writer's store, the
+   signer (a key the trust policy lists), the trust policy and the workflow run must all
+   be present (``not_allowed_here``), and nothing is touched until they are.
 2. :func:`reserve` (not a dry run): ``models/<name>/<version>/claim.json`` with a
    conditional create, before any download. A taken version stops here
    (``version_exists``, P7: reserve, then check).
@@ -24,7 +24,7 @@ The steps, in order, each a function of its own:
    ``--runtime-url``, anything else is ``no_runtime``. No doceval stub can be chosen, and
    :func:`evaluate` refuses one anyway. This module, not the caller or the model, sets
    each extractor's engine and hardware. The split (:func:`select_split`): with
-   ``MHAI_EVAL_ROLE=locked`` and the eval reader's credentials, the locked split through
+   ``MHAI_EVAL_ROLE=locked`` and the reader's credentials, the locked split through
    ``testsets.fetch`` (Task 17); anywhere else the dev split, and the report says so.
 6. :func:`warmup`: the extractor on ``testdata/models/warmup/page.png``, recorded as
    ``warmup.json`` ``{page_sha256, output_sha256, engine, engine_version}``.
@@ -42,7 +42,7 @@ Promotion stores a candidate whether or not it passes its gates; the gates are e
 pin time (Task 20), and the summary says which failed.
 
 **The split a promotion is measured on.** Outside development (both switches, as for
-lock, sign-off and load: :func:`intelligence.modelstore.verify.is_development`) a
+lock-check and load: :func:`intelligence.modelstore.verify.is_development`) a
 promotion (not a dry run) needs the locked split (``MHAI_EVAL_ROLE=locked`` with the eval
 reader's credentials) and ``--expect-files``, or it is ``not_allowed_here`` before the
 claim. A development rehearsal may promote on the dev split; the manifest's
@@ -54,8 +54,8 @@ checksum and size of the stored version must match too (``hash_mismatch``), so n
 changed between the check and the upload is ever named by a manifest. A PUT that succeeded
 on the server whose reply was lost is retried by the SDK and then reports
 ``version_exists``. The object is ours if the key has exactly one version with our size and
-SHA-256 (for the claim, the same bytes: the same run id, actor and a fresh nonce), locked in
-compliance mode at least as long as we asked; then we carry on with its version id.
+SHA-256 (for the claim, the same bytes: the same run id, actor and a fresh nonce); then we
+carry on with its version id.
 Anything else is ``version_exists``.
 
 **The VLM runtime** (phase 0 contract): ``--runtime-url`` must be a loopback IP literal
@@ -81,7 +81,7 @@ import secrets
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -189,7 +189,7 @@ class DevSplit:
 
 @dataclass(frozen=True, slots=True)
 class LockedSplit:
-    """The locked test split, read as the eval reader (Task 17)."""
+    """The locked test split, read as the store's reader (Task 17)."""
 
     reader: ObjectStore
     entry: testsets.LockEntry
@@ -204,8 +204,8 @@ class Context:
     """Everything the pipeline uses, made by the CLI from the environment (or by a test).
 
     ``source_for`` makes the run's source once the scratch folder exists (an HF source
-    keeps its cache there). ``store``, ``signer``, ``policy``, ``workflow`` and
-    ``retention_days`` are for a promotion only; a dry run never reads them.
+    keeps its cache there). ``store``, ``signer``, ``policy`` and ``workflow`` are for a
+    promotion only; a dry run never reads them.
     ``base_verifier`` verifies a promoted base model's pin
     (:func:`intelligence.modelstore.lock.base_verifier`); without one a promoted base is
     refused (``base_unverified``)."""
@@ -218,7 +218,6 @@ class Context:
     signer: signing.Signer | None = field(default=None, repr=False)
     policy: signing.TrustPolicy | None = field(default=None, repr=False)
     workflow: WorkflowRun | None = None
-    retention_days: int | None = None
     scratch_parent: Path | None = None
     warmup_page: Path = WARMUP_PAGE
     deadline_s: float = DEFAULT_DEADLINE_S
@@ -312,12 +311,11 @@ def _source_ref(req: Request) -> str:
 
 
 def _check_signer(signer: signing.Signer, policy: signing.TrustPolicy) -> None:
-    """The signer must be one the policy trusts for ``manifest``. Nothing is signed here:
-    the only bytes ever signed for ``manifest`` are :func:`manifest.build`'s output."""
+    """The signer must be a key the policy lists. Nothing is signed here: the only bytes
+    ever signed for ``manifest`` are :func:`manifest.build`'s output."""
     if not isinstance(policy, signing.TrustPolicy):
         raise Refused("policy_invalid", detail_code="type")
-    trusted = {(k.key_id, k.alg) for k in policy.signers["manifest"]}
-    if (signer.key_id, signer.alg) not in trusted:
+    if not policy.trusts(signer.key_id, signer.alg):
         raise Refused("signer_untrusted")
 
 
@@ -328,7 +326,7 @@ def check_inputs(req: Request, ctx: Context) -> None:
         raise Refused("not_allowed_here", detail_code="context")
     if req.dry_run:
         return
-    rehearsal = verify.is_development()  # both switches, as lock, sign-off and load
+    rehearsal = verify.is_development()  # both switches, as lock-check and load
     if not rehearsal and report.REHEARSAL_GATE in req.gates:
         # P14: nothing measured only against the rehearsal bar is signed outside a
         # development rehearsal, so no such version exists in a production store.
@@ -350,9 +348,6 @@ def check_inputs(req: Request, ctx: Context) -> None:
     ):
         if value is None:
             raise Refused("not_allowed_here", detail_code=detail)
-    days = ctx.retention_days
-    if not isinstance(days, int) or isinstance(days, bool) or days < 1:
-        raise Refused("not_allowed_here", detail_code="retention_days")
     assert ctx.signer is not None and ctx.policy is not None and ctx.workflow is not None
     _check_signer(ctx.signer, ctx.policy)
     ctx.workflow.promotion("2000-01-01T00:00:00Z")  # every field held to its pattern now
@@ -367,49 +362,38 @@ class Claim:
     version_id: str
 
 
-def _check_stored(
-    info: store.ObjectInfo, version_id: str, size: int, sha256: str, until: datetime
-) -> bool:
+def _check_stored(info: store.ObjectInfo, version_id: str, size: int, sha256: str) -> bool:
     """The stored version is exactly ours: its id, size and SHA-256 (the store's own
-    checksum of what it received), locked in compliance mode at least until ``until``."""
-    held = info.retain_until
+    checksum of what it received)."""
     return (
         info.version_id == version_id
         and info.size == size
         and secrets.compare_digest(info.sha256, sha256)
-        and info.lock_mode == store.LOCK_MODE
-        and isinstance(held, datetime)
-        and held.tzinfo is not None
-        and held >= until
     )
 
 
-def put_once(
-    target: ObjectStore, key: str, data: bytes | Path, size: int, sha256: str, days: int
-) -> str:
+def put_once(target: ObjectStore, key: str, data: bytes | Path, size: int, sha256: str) -> str:
     """``put_new``, then the stored version read back: the store's SHA-256 and size must be
     the ones checked (``hash_mismatch`` otherwise: bytes changed between the check and the
-    upload) and it must be locked in compliance mode for at least ``days``.
+    upload).
 
     If ``put_new`` reports ``version_exists``, the object there may be ours (a retried PUT
     whose first attempt succeeded): it is adopted only if it is the key's one version, with
-    our size and SHA-256, compliance-locked at least as long as we asked. Anything else is
-    ``version_exists``."""
-    until = datetime.now(UTC).replace(microsecond=0) + timedelta(days=days)
+    our size and SHA-256. Anything else is ``version_exists``."""
     vid: str | None = None
     try:
-        vid = target.put_new(key, data, days)
+        vid = target.put_new(key, data)
     except Refused as exc:
         if exc.reason != "version_exists":
             raise
     if vid is not None:
-        if not _check_stored(target.head(key, vid), vid, size, sha256, until):
+        if not _check_stored(target.head(key, vid), vid, size, sha256):
             raise Refused("hash_mismatch", detail_code="stored")
         return vid
     found = target.versions(key)
     if len(found) != 1:
         raise Refused("version_exists", detail_code="not_ours")
-    if not _check_stored(target.head(key, found[0]), found[0], size, sha256, until):
+    if not _check_stored(target.head(key, found[0]), found[0], size, sha256):
         raise Refused("version_exists", detail_code="not_ours")
     log.info("promote put retried and found ours: versions=1 sha256=%s", sha256)
     return found[0]
@@ -428,13 +412,11 @@ def claim_bytes(run_id: str, actor: str) -> bytes:
     )
 
 
-def reserve(
-    target: ObjectStore, name: str, version: str, run_id: str, actor: str, days: int
-) -> Claim:
+def reserve(target: ObjectStore, name: str, version: str, run_id: str, actor: str) -> Claim:
     """Step 2: the conditional create of the version's claim, before anything else."""
     key = store.claim_key(name, version)
     body = claim_bytes(run_id, actor)
-    vid = put_once(target, key, body, len(body), hashlib.sha256(body).hexdigest(), days)
+    vid = put_once(target, key, body, len(body), hashlib.sha256(body).hexdigest())
     log.info("promote reserved: name=%s version=%s run=%s", name, version, run_id)
     return Claim(key, vid)
 
@@ -636,9 +618,8 @@ def select_split(
     dev_set: Path | None,
     dev_scale: float = 1.0,
 ) -> Split:
-    """The evaluation split. ``MHAI_EVAL_ROLE=locked`` (the ``model-eval`` and
-    ``model-promotion`` environments) needs the eval reader, the lock entry and the trust
-    policy, or it is refused (P19); unset, it is the dev split; any other value is
+    """The evaluation split. ``MHAI_EVAL_ROLE=locked`` (the promotion workflow) needs the
+    reader, the lock entry and the trust policy, or it is refused (P19); unset, it is the dev split; any other value is
     refused."""
     role = env.get(EVAL_ROLE_ENV)
     if role is None or role == "":
@@ -901,23 +882,20 @@ def upload_run(
     run_dir: Path,
     entries: Sequence[files.FileEntry],
     docs: Mapping[str, bytes],
-    days: int,
 ) -> tuple[list[manifest.FileRecord], dict[str, manifest.DocumentRecord]]:
     """Step 8a: every file and document under ``runs/<run_id>/``, each with ``put_new``."""
     records: list[manifest.FileRecord] = []
     for e in sorted(entries, key=lambda e: e.path):
         _rehash(run_dir, e)
         key = store.run_file_key(name, version, run_id, e.path)
-        vid = put_once(target, key, run_dir / e.path, e.size, e.sha256, days)
+        vid = put_once(target, key, run_dir / e.path, e.size, e.sha256)
         records.append(manifest.FileRecord(e.path, e.size, e.sha256, vid))
     doc_records: dict[str, manifest.DocumentRecord] = {}
     for doc in sorted(docs):
         body = docs[doc]
         sha = hashlib.sha256(body).hexdigest()
         key = store.run_doc_key(name, version, run_id, doc)
-        doc_records[doc] = manifest.DocumentRecord(
-            sha, put_once(target, key, body, len(body), sha, days)
-        )
+        doc_records[doc] = manifest.DocumentRecord(sha, put_once(target, key, body, len(body), sha))
     log.info(
         "promote uploaded: name=%s version=%s run=%s files=%d documents=%d",
         name,
@@ -936,7 +914,6 @@ def write_manifest(
     name: str,
     version: str,
     body: bytes,
-    days: int,
 ) -> str:
     """Step 8b: sign ``body`` (which must be :func:`manifest.build` output: it is parsed
     back strictly first), check the signature against the policy, then write
@@ -953,10 +930,9 @@ def write_manifest(
         sig_bytes,
         len(sig_bytes),
         hashlib.sha256(sig_bytes).hexdigest(),
-        days,
     )
     sha = manifest.sha256(body)
-    put_once(target, store.manifest_key(name, version), body, len(body), sha, days)
+    put_once(target, store.manifest_key(name, version), body, len(body), sha)
     log.info("promote manifest written: name=%s version=%s sha256=%s", name, version, sha)
     return sha
 
@@ -1012,8 +988,8 @@ def promote(req: Request, ctx: Context) -> Summary:
     )
     target = None if req.dry_run else ctx.store
     if target is not None:  # 2
-        assert ctx.workflow is not None and ctx.retention_days is not None
-        reserve(target, req.name, req.version, req.run, ctx.workflow.actor, ctx.retention_days)
+        assert ctx.workflow is not None
+        reserve(target, req.name, req.version, req.run, ctx.workflow.actor)
     gates = gate_thresholds(promotion_gates(req))
     with sources.scratch(ctx.scratch_parent) as sc:
         source = ctx.source_for(sc)  # 3
@@ -1053,10 +1029,9 @@ def promote(req: Request, ctx: Context) -> Summary:
         manifest_sha: str | None = None
         if target is not None:  # 8
             assert ctx.signer is not None and ctx.policy is not None
-            assert ctx.workflow is not None and ctx.retention_days is not None
-            days = ctx.retention_days
+            assert ctx.workflow is not None
             file_records, doc_records = upload_run(
-                target, req.name, req.version, req.run, sc.run, entries, docs, days
+                target, req.name, req.version, req.run, sc.run, entries, docs
             )
             body = manifest.build(
                 name=req.name,
@@ -1078,7 +1053,7 @@ def promote(req: Request, ctx: Context) -> Summary:
                 trained_by=checked.manifest.trained_by,
             )
             manifest_sha = write_manifest(
-                target, ctx.signer, ctx.policy, req.name, req.version, body, days
+                target, ctx.signer, ctx.policy, req.name, req.version, body
             )
     summary = Summary(
         name=req.name,

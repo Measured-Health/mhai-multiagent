@@ -1,4 +1,4 @@
-"""The model store: an S3 bucket with versioning and compliance-mode object lock.
+"""The model store: a plain S3-compatible bucket, versioned if the store offers it.
 
 **Layout** (one bucket, ``MODEL_STORE_BUCKET``)::
 
@@ -7,25 +7,27 @@
     models/<name>/<version>/runs/<run_id>/docs/<document>    the six documents of the manifest
     models/<name>/<version>/manifest.sig                     signature (purpose manifest)
     models/<name>/<version>/manifest.json                    written last: the version exists once this does
-    models/<name>/<version>/signoff.json, signoff.sig        written by the sign-off workflow only
     eval/<suite>/<set_version>/claim.json                    reserved first (conditional create)
     eval/<suite>/<set_version>/files/<path>, testset.json, testset.sig   the locked test split
 
 Keys are only ever built by the layout functions below, from checked names; a key or a
 version id that came from outside is checked against the same patterns before any call.
 
-**Immutability.** :meth:`ObjectStore.put_new` is a conditional create
+**Write once.** :meth:`ObjectStore.put_new` is a conditional create
 (``If-None-Match: *``): a key that already exists is ``version_exists`` (P7). Every put
-sets ``ObjectLockMode=COMPLIANCE`` and ``ObjectLockRetainUntilDate`` and sends its own
-SHA-256 (``ChecksumAlgorithm=SHA256`` with ``ChecksumSHA256``), so the store refuses a body
-that changed on the way. Nothing here deletes or overwrites: there is no delete method,
-and retention is only ever extended (compliance mode refuses shortening, even for the
-store's root user).
+sends its own SHA-256 (``ChecksumAlgorithm=SHA256`` with ``ChecksumSHA256``), so the store
+refuses a body that changed on the way. Nothing here deletes or overwrites: there is no
+delete method. Object lock and retention are not used (TODO.md, "Before scale").
 
-**Shadowing.** In a versioned bucket a second, unconditional PUT to a key (by a holder of
-write credentials outside this code) makes a newer version that object lock doesn't stop.
-So readers never trust "latest": the manifest records each object's ``store_version_id``
-and the verifier asks for that version (Task 22).
+**Versioning is optional.** In a versioned bucket every put returns a version id, and the
+manifest records it (``store_version_id``); readers ask for that version. In a bucket
+without versioning the store returns none, and :data:`NULL_VERSION` (``null``, S3's own
+name for it) is recorded and read as "the one object at this key". Either way the bytes
+are never trusted for their key: the lock pins the manifest's SHA-256, the manifest pins
+every file's SHA-256 and size, and the verifier checks both (Task 22). A second,
+unconditional PUT by a holder of write credentials outside this code (a newer version, or
+an overwrite in an unversioned bucket) is therefore a hash mismatch, never a different
+model.
 
 ``version_id=None`` ("latest") on :meth:`ObjectStore.get` and :meth:`ObjectStore.head` is
 for tests and operators' checks only: promote, the test-split fetch and the load-time
@@ -51,7 +53,6 @@ import stat
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 from urllib.parse import urlsplit
@@ -61,14 +62,8 @@ from intelligence.modelstore.manifest import DOCUMENTS
 from intelligence.modelstore.reasons import Refused
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
-LOCK_MODE = "COMPLIANCE"
-# The longest lock any call may set or reach, in days: MODEL_STORE_MAX_RETENTION_DAYS, the
-# same cap the store's policies enforce (deploy/minio/policies). The design states no
-# period; the compliance lead sets it (TODO.md). A compliance lock can never be undone, so
-# an uncapped one could keep junk forever.
-DEFAULT_MAX_RETENTION_DAYS = 3650
-MAX_RETENTION_DAYS_ENV = "MODEL_STORE_MAX_RETENTION_DAYS"
-_RETENTION_CEILING = 36500
+# The version id of an object in a bucket without versioning (S3's own spelling).
+NULL_VERSION = "null"
 MAX_PUT_BYTES = 5 * 1024**3  # one S3 PUT; larger objects need multipart (not in phase 0)
 MAX_KEY_CHARS = 1024
 MAX_LIST = 10_000
@@ -163,14 +158,6 @@ def manifest_sig_key(name: str, version: str) -> str:
     return f"{_version_dir(name, version)}/manifest.sig"
 
 
-def signoff_key(name: str, version: str) -> str:
-    return f"{_version_dir(name, version)}/signoff.json"
-
-
-def signoff_sig_key(name: str, version: str) -> str:
-    return f"{_version_dir(name, version)}/signoff.sig"
-
-
 def _eval_dir(suite: str, set_version: str) -> str:
     if not isinstance(suite, str) or _SUITE.fullmatch(suite) is None:
         raise Refused("invalid_name")
@@ -207,19 +194,18 @@ def testset_sig_key(suite: str, set_version: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ObjectInfo:
-    """One stored object version: its id, size, SHA-256 (lowercase hex) and lock."""
+    """One stored object version: its id (:data:`NULL_VERSION` without versioning), size
+    and SHA-256 (lowercase hex)."""
 
     version_id: str
     size: int
     sha256: str
-    lock_mode: str | None
-    retain_until: datetime | None
 
 
 class ObjectStore(Protocol):
-    """Write-once, versioned, locked object storage. There is no delete method."""
+    """Write-once object storage. There is no delete method."""
 
-    def put_new(self, key: str, data: bytes | Path, retention_days: int) -> str: ...
+    def put_new(self, key: str, data: bytes | Path) -> str: ...
 
     def get(self, key: str, version_id: str | None = None, *, max_bytes: int) -> bytes: ...
 
@@ -228,8 +214,6 @@ class ObjectStore(Protocol):
     def head(self, key: str, version_id: str | None = None) -> ObjectInfo: ...
 
     def list(self, prefix: str) -> list[str]: ...
-
-    def extend_retention(self, key: str, version_id: str, days: int) -> datetime: ...
 
 
 # ---------------------------------------------------------------- S3
@@ -309,23 +293,6 @@ def _quiet_sdk_loggers() -> None:
             logger.setLevel(logging.ERROR)
 
 
-def _check_days(days: object, cap: int) -> int:
-    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= cap:
-        raise Refused("not_allowed_here", detail_code="retention_days")
-    return days
-
-
-def retention_cap_from_env() -> int:
-    """``MODEL_STORE_MAX_RETENTION_DAYS`` (default :data:`DEFAULT_MAX_RETENTION_DAYS`), a
-    whole number of days from 1 to 36,500; anything else is ``not_allowed_here``."""
-    raw = os.environ.get(MAX_RETENTION_DAYS_ENV)
-    if raw is None:
-        return DEFAULT_MAX_RETENTION_DAYS
-    if re.fullmatch(r"[1-9][0-9]{0,4}", raw, re.ASCII) is None or int(raw) > _RETENTION_CEILING:
-        raise Refused("not_allowed_here", detail_code="max_retention_days")
-    return int(raw)
-
-
 def _check_version_id(version_id: object) -> str:
     if not isinstance(version_id, str):
         raise Refused("invalid_name")
@@ -333,8 +300,10 @@ def _check_version_id(version_id: object) -> str:
 
 
 def _returned_version_id(value: object) -> str:
-    """A version id the store returned: it must be a real one, never missing or ``null``
-    (an unversioned bucket)."""
+    """A version id the store returned; none at all (a bucket without versioning) is
+    :data:`NULL_VERSION`."""
+    if value is None:
+        return NULL_VERSION
     failed = False
     try:
         _check_version_id(value)
@@ -343,6 +312,16 @@ def _returned_version_id(value: object) -> str:
     if failed:
         raise _unavailable("version_id")
     return str(value)
+
+
+def _version_kw(version_id: str | None) -> dict[str, str]:
+    """The ``VersionId`` argument for a read: none for "latest" and for
+    :data:`NULL_VERSION` (the one object of an unversioned bucket; its hash is checked by
+    the caller like any other)."""
+    if version_id is None:
+        return {}
+    vid = _check_version_id(version_id)
+    return {} if vid == NULL_VERSION else {"VersionId": vid}
 
 
 def _hex_from_b64(value: object) -> str:
@@ -386,7 +365,7 @@ class S3Store:
     """:class:`ObjectStore` over the S3 API (boto3): MinIO in tests and compose, the
     cloud store in production (Task 27)."""
 
-    __slots__ = ("_bucket", "_client", "_max_days")
+    __slots__ = ("_bucket", "_client")
 
     def __init__(
         self,
@@ -398,12 +377,8 @@ class S3Store:
         connect_timeout: float = 10.0,
         read_timeout: float = 120.0,
         max_attempts: int = 5,
-        max_retention_days: int | None = None,
     ) -> None:
         url = check_endpoint(endpoint)
-        cap = retention_cap_from_env() if max_retention_days is None else max_retention_days
-        if not isinstance(cap, int) or isinstance(cap, bool) or not 1 <= cap <= _RETENTION_CEILING:
-            raise Refused("not_allowed_here", detail_code="max_retention_days")
         check_bucket(bucket)
         check_region(region)
         if not isinstance(credentials, Credentials):
@@ -446,7 +421,6 @@ class S3Store:
         if failed:
             raise _unavailable("client")
         self._bucket = bucket
-        self._max_days = cap
 
     def __repr__(self) -> str:
         return "S3Store()"
@@ -486,19 +460,17 @@ class S3Store:
 
     # ------------------------------------------------------------ the protocol
 
-    def put_new(self, key: str, data: bytes | Path, retention_days: int) -> str:
-        """Create ``key`` once, locked in compliance mode for ``retention_days``; return
-        its version id. An existing key is ``version_exists`` (P7). A ``Path`` is read
+    def put_new(self, key: str, data: bytes | Path) -> str:
+        """Create ``key`` once and return its version id (:data:`NULL_VERSION` in a bucket
+        without versioning). An existing key is ``version_exists`` (P7). A ``Path`` is read
         without following a link and streamed; if it changes between hashing and upload,
         the store refuses it (``hash_mismatch``)."""
         _check_key(key)
-        days = _check_days(retention_days, self._max_days)
-        until = datetime.now(UTC).replace(microsecond=0) + timedelta(days=days)
         if isinstance(data, (bytes, bytearray)):
             body = bytes(data)
             if len(body) > MAX_PUT_BYTES:
                 raise Refused("too_large")
-            return self._put(key, io.BytesIO(body), hashlib.sha256(body).digest(), until)
+            return self._put(key, io.BytesIO(body), hashlib.sha256(body).digest())
         if not isinstance(data, Path):
             raise Refused("file_not_allowed", detail_code="data")
         with _open_regular(data) as (f, size):
@@ -508,9 +480,9 @@ class S3Store:
             if n != size:
                 raise Refused("size_mismatch")
             f.seek(0)
-            return self._put(key, f, digest, until)
+            return self._put(key, f, digest)
 
-    def _put(self, key: str, body: BinaryIO, digest: bytes, until: datetime) -> str:
+    def _put(self, key: str, body: BinaryIO, digest: bytes) -> str:
         checksum = base64.b64encode(digest).decode("ascii")
         resp = self._call(
             self._client.put_object,
@@ -518,8 +490,6 @@ class S3Store:
             Key=key,
             Body=body,
             IfNoneMatch="*",
-            ObjectLockMode=LOCK_MODE,
-            ObjectLockRetainUntilDate=until,
             ChecksumAlgorithm="SHA256",
             ChecksumSHA256=checksum,
         )
@@ -533,9 +503,7 @@ class S3Store:
         _check_key(key)
         if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 0:
             raise Refused("too_large", detail_code="max_bytes")
-        kw: dict[str, Any] = {"Key": key, "ChecksumMode": "ENABLED"}
-        if version_id is not None:
-            kw["VersionId"] = _check_version_id(version_id)
+        kw: dict[str, Any] = {"Key": key, "ChecksumMode": "ENABLED", **_version_kw(version_id)}
         resp = self._call(self._client.get_object, **kw)
         stream = resp.get("Body")
         try:
@@ -560,15 +528,15 @@ class S3Store:
     ) -> tuple[int, str]:
         """Stream exactly ``version_id`` of ``key`` into ``out`` in 8 MB blocks and return
         its size and SHA-256 (lowercase hex). There is no "latest": ``version_id`` is
-        required. More than ``max_bytes`` (announced or read) is ``too_large`` and reading
+        required (:data:`NULL_VERSION` in a bucket without versioning). More than ``max_bytes`` (announced or read) is ``too_large`` and reading
         stops there; a short body is ``size_mismatch``; a body that isn't the SHA-256 the
         store keeps with it is ``hash_mismatch``. The caller compares the result with what
         the manifest recorded."""
         _check_key(key)
-        vid = _check_version_id(version_id)
+        version = _version_kw(_check_version_id(version_id))
         if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 0:
             raise Refused("too_large", detail_code="max_bytes")
-        resp = self._call(self._client.get_object, Key=key, VersionId=vid, ChecksumMode="ENABLED")
+        resp = self._call(self._client.get_object, Key=key, ChecksumMode="ENABLED", **version)
         stream = resp.get("Body")
         try:
             length = resp.get("ContentLength")
@@ -626,21 +594,15 @@ class S3Store:
 
     def head(self, key: str, version_id: str | None = None) -> ObjectInfo:
         _check_key(key)
-        kw: dict[str, Any] = {"Key": key, "ChecksumMode": "ENABLED"}
-        if version_id is not None:
-            kw["VersionId"] = _check_version_id(version_id)
+        kw: dict[str, Any] = {"Key": key, "ChecksumMode": "ENABLED", **_version_kw(version_id)}
         resp = self._call(self._client.head_object, **kw)
         size = resp.get("ContentLength")
         if not isinstance(size, int) or size < 0:
             raise _unavailable("size")
-        mode = resp.get("ObjectLockMode")
-        until = resp.get("ObjectLockRetainUntilDate")
         return ObjectInfo(
             version_id=_returned_version_id(resp.get("VersionId")),
             size=size,
             sha256=_hex_from_b64(resp.get("ChecksumSHA256")),
-            lock_mode=mode if isinstance(mode, str) else None,
-            retain_until=until if isinstance(until, datetime) else None,
         )
 
     def versions(self, key: str) -> list[str]:
@@ -688,37 +650,10 @@ class S3Store:
                 return sorted(out)
             kw = {"Prefix": prefix, "ContinuationToken": token}
 
-    def extend_retention(self, key: str, version_id: str, days: int) -> datetime:
-        """Keep ``version_id`` of ``key`` locked until ``days`` from now. It only ever
-        lengthens: a date not later than the current one is ``not_allowed_here`` and no
-        call is made (compliance mode would refuse it anyway). ``days`` over this store's
-        cap (``MODEL_STORE_MAX_RETENTION_DAYS``) is ``not_allowed_here`` too; the store's
-        policies enforce the same cap. Returns the new date."""
-        _check_key(key)
-        vid = _check_version_id(version_id)
-        n = _check_days(days, self._max_days)
-        until = datetime.now(UTC).replace(microsecond=0) + timedelta(days=n)
-        current = self._call(self._client.get_object_retention, Key=key, VersionId=vid)
-        retention = current.get("Retention") or {}
-        mode = retention.get("Mode")
-        held = retention.get("RetainUntilDate")
-        if mode != LOCK_MODE or not isinstance(held, datetime):
-            raise _unavailable("not_locked")
-        if until <= held:
-            raise Refused("not_allowed_here", detail_code="retention_not_longer")
-        self._call(
-            self._client.put_object_retention,
-            Key=key,
-            VersionId=vid,
-            Retention={"Mode": LOCK_MODE, "RetainUntilDate": until},
-        )
-        return until
-
 
 __all__ = [
-    "DEFAULT_MAX_RETENTION_DAYS",
-    "LOCK_MODE",
     "LOOPBACK_HOSTS",
+    "NULL_VERSION",
     "Credentials",
     "ObjectInfo",
     "ObjectStore",
@@ -726,15 +661,12 @@ __all__ = [
     "check_bucket",
     "check_endpoint",
     "check_region",
-    "retention_cap_from_env",
     "claim_key",
     "eval_file_key",
     "manifest_key",
     "manifest_sig_key",
     "run_doc_key",
     "run_file_key",
-    "signoff_key",
-    "signoff_sig_key",
     "testset_claim_key",
     "testset_key",
     "testset_sig_key",

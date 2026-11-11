@@ -1,4 +1,4 @@
-"""An in-memory :class:`~intelligence.modelstore.store.ObjectStore` with versions.
+"""An in-memory :class:`~intelligence.modelstore.store.ObjectStore`, versioned or not.
 
 It checks keys with the store's own layout check, refuses a second create of a key
 (``version_exists``) as the conditional PUT does, and records every call in order, so a
@@ -11,6 +11,10 @@ Two hooks drive the failure paths:
 * ``lost_reply``: keys whose PUT succeeds on the server but whose reply never reaches the
   client, so the SDK's retry finds the object there and the call reports
   ``version_exists`` (Task 16 M5).
+
+``versioned=False`` is a bucket without versioning: every object's version id is
+``null`` (:data:`~intelligence.modelstore.store.NULL_VERSION`) and a :meth:`shadow` write
+replaces the object.
 """
 
 from __future__ import annotations
@@ -18,7 +22,6 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
 
@@ -33,10 +36,10 @@ class MemoryStore:
         *,
         fail: Callable[[str], BaseException | None] | None = None,
         lost_reply: frozenset[str] = frozenset(),
+        versioned: bool = True,
     ) -> None:
         self.objects: dict[str, list[tuple[str, bytes]]] = {}
-        # version id -> (lock mode, retain-until), as the store would report them
-        self.locks: dict[str, tuple[str | None, datetime | None]] = {}
+        self.versioned = versioned
         # called with (key, data) before each put is stored (to change a file mid-flight)
         self.before_put: Callable[[str, bytes | Path], None] | None = None
         self.calls: list[tuple[str, str]] = []
@@ -47,7 +50,10 @@ class MemoryStore:
     def puts(self) -> list[str]:
         return [key for op, key in self.calls if op == "put"]
 
-    def put_new(self, key: str, data: bytes | Path, retention_days: int) -> str:
+    def _new_vid(self) -> str:
+        return str(uuid.uuid4()) if self.versioned else store.NULL_VERSION
+
+    def put_new(self, key: str, data: bytes | Path) -> str:
         store._check_key(key)
         self.calls.append(("put", key))
         if self.fail is not None:
@@ -61,28 +67,21 @@ class MemoryStore:
         body = data if isinstance(data, bytes) else Path(data).read_bytes()
         if len(body) > store.MAX_PUT_BYTES:
             raise Refused("too_large")
-        vid = str(uuid.uuid4())
+        vid = self._new_vid()
         self.objects[key] = [(vid, body)]
-        until = datetime.now(UTC).replace(microsecond=0) + timedelta(days=retention_days)
-        self.locks[vid] = ("COMPLIANCE", until)
         if key in self.lost_reply:
             self.lost_reply.discard(key)
             raise Refused("version_exists", detail_code="exists")  # the retry's 412
         return vid
 
-    def shadow(
-        self,
-        key: str,
-        body: bytes,
-        *,
-        lock_mode: str | None = None,
-        retain_until: datetime | None = None,
-    ) -> str:
-        """An unconditional PUT by someone else (a newer version of ``key``, or its first),
-        with whatever lock that writer chose (none by default)."""
-        vid = str(uuid.uuid4())
-        self.objects.setdefault(key, []).append((vid, body))
-        self.locks[vid] = (lock_mode, retain_until)
+    def shadow(self, key: str, body: bytes) -> str:
+        """An unconditional PUT by someone else: a newer version of ``key`` (or its first),
+        or, without versioning, a replacement of the one object."""
+        vid = self._new_vid()
+        if self.versioned:
+            self.objects.setdefault(key, []).append((vid, body))
+        else:
+            self.objects[key] = [(vid, body)]
         return vid
 
     def _find(self, key: str, version_id: str | None) -> tuple[str, bytes]:
@@ -122,15 +121,11 @@ class MemoryStore:
     def head(self, key: str, version_id: str | None = None) -> ObjectInfo:
         self.calls.append(("head", key))
         vid, body = self._find(key, version_id)
-        mode, until = self.locks.get(vid, (None, None))
-        return ObjectInfo(vid, len(body), hashlib.sha256(body).hexdigest(), mode, until)
+        return ObjectInfo(vid, len(body), hashlib.sha256(body).hexdigest())
 
     def list(self, prefix: str) -> list[str]:
         self.calls.append(("list", prefix))
         return sorted(k for k in self.objects if k.startswith(prefix))
-
-    def extend_retention(self, key: str, version_id: str, days: int) -> datetime:
-        raise Refused("not_allowed_here")
 
 
 __all__ = ["MemoryStore"]

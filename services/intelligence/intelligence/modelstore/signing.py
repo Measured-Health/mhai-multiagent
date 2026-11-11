@@ -1,25 +1,24 @@
-"""Domain-separated signatures, the trust policy, and a development-only file signer.
+"""Domain-separated Ed25519 signatures, the trust policy, and the file signer.
 
 **The signed message** is ``b"mhai.models.<purpose>/1\\n" + payload``, with ``purpose`` one
-of :data:`PURPOSES` (``manifest``, ``signoff``, ``testset``). A signature made for one
-purpose never verifies as another, and a signature over the bare payload never verifies
-at all (P13).
+of :data:`PURPOSES` (``manifest``, ``testset``). A signature made for one purpose never
+verifies as another, and a signature over the bare payload never verifies at all (P13).
+The purpose is bound in the signed bytes, so one key can sign both.
 
 **A signature document** (``mhai.models.signature/1``) is strict canonical JSON:
-``{schema, purpose, alg, key_id, signature}``; ``signature`` is standard, padded base64
-of the raw Ed25519 signature or of the DER-encoded ECDSA signature (never raw ``r||s``).
-``key_id`` is the lowercase hex SHA-256 of the DER SubjectPublicKeyInfo.
+``{schema, purpose, alg, key_id, signature}``; ``alg`` is ``ed25519`` and ``signature``
+standard, padded base64 of the raw 64-byte signature. ``key_id`` is the lowercase hex
+SHA-256 of the DER SubjectPublicKeyInfo.
 
-**The trust policy** (``models/trust-policy.json``, ``mhai.models.trust/1``) lists, per
-purpose, the accepted signers: ``{kind: public_key, alg: ed25519|ecdsa-p256-sha256,
-key_id, public_key_pem, development}``. Loading it outside development refuses any
-signer marked ``development`` (``policy_invalid``, P12), as does verifying with one; the
-``manifest`` and ``signoff`` sets never share a key (the two workflows' signers are
-separate). The committed policy trusts nobody until Task 26.
+**The trust policy** (``models/trust-policy.json``, ``mhai.models.trust/1``) lists the
+accepted public keys: ``{schema, signers: [{alg: ed25519, key_id, public_key_pem,
+development}]}``. One key is enough; any listed key may sign any purpose. Loading it
+outside development refuses any signer marked ``development`` (``policy_invalid``, P12),
+as does verifying with one. A key change goes in its own PR, before any pin it signs.
 
-**The file signer** (:class:`FileSigner`) is Ed25519 from a PEM file, for development
-and tests only: it refuses to exist, or to sign, unless ``MHAI_MODELS_ENV`` is exactly
-``development``. Private key material is never logged, printed or put in an error.
+**The file signer** (:class:`FileSigner`) is Ed25519 from a PEM file: the repository
+secret written to a 0600 file in the promotion job, or a key file on the machine that
+runs the CLI. Private key material is never logged, printed or put in an error.
 """
 
 import base64
@@ -29,31 +28,27 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, Protocol
 
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519
-from cryptography.hazmat.primitives.asymmetric.utils import (
-    decode_dss_signature,
-    encode_dss_signature,
-)
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from intelligence.modelstore import canonical, files
 from intelligence.modelstore.reasons import Refused
 
-PURPOSES: tuple[str, ...] = ("manifest", "signoff", "testset")
-ALGS: tuple[str, ...] = ("ed25519", "ecdsa-p256-sha256")
+PURPOSES: tuple[str, ...] = ("manifest", "testset")
+ALGS: tuple[str, ...] = ("ed25519",)
 SIGNATURE_SCHEMA = "mhai.models.signature/1"
 TRUST_SCHEMA = "mhai.models.trust/1"
 ENV_VAR = "MHAI_MODELS_ENV"
 DEVELOPMENT = "development"
 DEV_KEY_FILE = "dev-signing-key.pem"
 DEV_PUBLIC_KEY_FILE = "dev-signing-key.pub.pem"
+KEY_FILE = "signing-key.pem"
+PUBLIC_KEY_FILE = "signing-key.pub.pem"
 
 MAX_SIGNATURE_DOC_BYTES = 4096
 MAX_SIGNATURE_BYTES = 512
@@ -65,10 +60,10 @@ MAX_KEY_FILE_BYTES = 16 * 1024
 _KEY_ID = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _B64 = re.compile(r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?", re.ASCII)
 _SIGNATURE_KEYS = frozenset({"schema", "purpose", "alg", "key_id", "signature"})
-_SIGNER_KEYS = frozenset({"kind", "alg", "key_id", "public_key_pem", "development"})
+_SIGNER_KEYS = frozenset({"alg", "key_id", "public_key_pem", "development"})
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
-PublicKey = ed25519.Ed25519PublicKey | ec.EllipticCurvePublicKey
+PublicKey = ed25519.Ed25519PublicKey
 
 
 # ---------------------------------------------------------------- environment
@@ -77,11 +72,6 @@ PublicKey = ed25519.Ed25519PublicKey | ec.EllipticCurvePublicKey
 def is_development() -> bool:
     """True only when ``MHAI_MODELS_ENV`` is exactly ``development``."""
     return os.environ.get(ENV_VAR) == DEVELOPMENT
-
-
-def _require_development() -> None:
-    if not is_development():
-        raise Refused("not_allowed_here", detail_code="not_development")
 
 
 # ---------------------------------------------------------------- messages and ids
@@ -198,20 +188,16 @@ def _policy(detail: str) -> Refused:
 
 @dataclass(frozen=True, slots=True)
 class TrustedKey:
-    """One accepted public-key signer. Construction checks that ``key_id`` is the key's
-    id, that the key fits ``alg`` (Ed25519, or ECDSA on P-256), and that the PEM is the
-    key's own canonical SubjectPublicKeyInfo PEM."""
+    """One accepted Ed25519 public key. Construction checks that ``key_id`` is the key's
+    id and that the PEM is the key's own canonical SubjectPublicKeyInfo PEM."""
 
     alg: str
     key_id: str
     public_key_pem: str
     development: bool
     public_key: PublicKey = field(init=False, repr=False, compare=False)
-    kind: str = "public_key"
 
     def __post_init__(self) -> None:
-        if self.kind != "public_key":
-            raise _policy("signer_kind")
         if not isinstance(self.alg, str) or self.alg not in ALGS:
             raise _policy("signer_alg")
         if not isinstance(self.development, bool):
@@ -228,11 +214,7 @@ class TrustedKey:
             failed = True
         if failed:
             raise _policy("signer_pem")
-        if self.alg == "ed25519":
-            ok = isinstance(key, ed25519.Ed25519PublicKey)
-        else:
-            ok = isinstance(key, ec.EllipticCurvePublicKey) and isinstance(key.curve, ec.SECP256R1)
-        if not ok:
+        if not isinstance(key, ed25519.Ed25519PublicKey):
             raise _policy("signer_alg_mismatch")
         if _public_pem(key) != pem:
             raise _policy("signer_pem")
@@ -240,44 +222,43 @@ class TrustedKey:
             raise _policy("signer_key_id_mismatch")
         object.__setattr__(self, "public_key", key)
 
+    def to_obj(self) -> dict[str, Any]:
+        return {
+            "alg": self.alg,
+            "development": self.development,
+            "key_id": self.key_id,
+            "public_key_pem": self.public_key_pem,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class TrustPolicy:
-    """The accepted signers per purpose. Construction requires every purpose, at most
-    :data:`MAX_SIGNERS` distinct keys each, and no ``signoff`` key that is also a
-    ``manifest`` or ``testset`` key."""
+    """The accepted signers: at most :data:`MAX_SIGNERS` distinct keys, any of which may
+    sign any purpose (the purpose is bound in the signed message)."""
 
-    signers: Mapping[str, tuple[TrustedKey, ...]]
+    signers: tuple[TrustedKey, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.signers, Mapping) or set(self.signers) != set(PURPOSES):
-            raise _policy("purposes")
-        for keys in self.signers.values():
-            if (
-                not isinstance(keys, tuple)
-                or len(keys) > MAX_SIGNERS
-                or not all(isinstance(k, TrustedKey) for k in keys)
-                or len({k.key_id for k in keys}) != len(keys)
-            ):
-                raise _policy("signers")
-        signoff_ids = {k.key_id for k in self.signers["signoff"]}
-        if signoff_ids & {k.key_id for k in self.signers["manifest"]}:
-            raise _policy("manifest_signoff_shared")
-        # The test-split signer lives in model-promotion; a shared key would let that
-        # identity sign sign-offs (domain separation can't help the key's holder).
-        if signoff_ids & {k.key_id for k in self.signers["testset"]}:
-            raise _policy("testset_signoff_shared")
-        object.__setattr__(self, "signers", MappingProxyType(dict(self.signers)))
+        keys = self.signers
+        if (
+            not isinstance(keys, tuple)
+            or len(keys) > MAX_SIGNERS
+            or not all(isinstance(k, TrustedKey) for k in keys)
+            or len({k.key_id for k in keys}) != len(keys)
+        ):
+            raise _policy("signers")
 
     def has_development_signer(self) -> bool:
-        return any(k.development for keys in self.signers.values() for k in keys)
+        return any(k.development for k in self.signers)
+
+    def trusts(self, key_id: str, alg: str) -> bool:
+        """Whether ``(key_id, alg)`` is one of the listed signers."""
+        return any((k.key_id, k.alg) == (key_id, alg) for k in self.signers)
 
 
 def _signer(obj: object) -> TrustedKey:
     if not isinstance(obj, dict) or set(obj) != _SIGNER_KEYS:
         raise _policy("signer_keys")
-    if obj["kind"] != "public_key":
-        raise _policy("signer_kind")
     return TrustedKey(obj["alg"], obj["key_id"], obj["public_key_pem"], obj["development"])
 
 
@@ -289,19 +270,19 @@ def parse_policy(obj: object, *, environment: str | None) -> TrustPolicy:
         raise _policy("keys")
     if obj["schema"] != TRUST_SCHEMA:
         raise _policy("schema")
-    signers = obj["signers"]
-    if not isinstance(signers, dict) or set(signers) != set(PURPOSES):
-        raise _policy("purposes")
-    out: dict[str, tuple[TrustedKey, ...]] = {}
-    for purpose in PURPOSES:
-        entries = signers[purpose]
-        if not isinstance(entries, list) or len(entries) > MAX_SIGNERS:
-            raise _policy("signers")
-        out[purpose] = tuple(_signer(e) for e in entries)
-    policy = TrustPolicy(out)
+    entries = obj["signers"]
+    if not isinstance(entries, list) or len(entries) > MAX_SIGNERS:
+        raise _policy("signers")
+    policy = TrustPolicy(tuple(_signer(e) for e in entries))
     if environment != DEVELOPMENT and policy.has_development_signer():
         raise _policy("development_signer_in_production")
     return policy
+
+
+def policy_obj(signers: list[TrustedKey]) -> dict[str, Any]:
+    """The JSON object of a trust policy listing ``signers`` (for ``mhai-models keygen``
+    and the rehearsal)."""
+    return {"schema": TRUST_SCHEMA, "signers": [k.to_obj() for k in signers]}
 
 
 class _FromEnvironment:
@@ -333,8 +314,7 @@ def load_policy(
 
 
 class Signer(Protocol):
-    """Signs a payload for one purpose (the development :class:`FileSigner`; the
-    production backend in Task 26)."""
+    """Signs a payload for one purpose (:class:`FileSigner`)."""
 
     @property
     def key_id(self) -> str: ...
@@ -357,25 +337,9 @@ class SignerId:
 
 def _verify_raw(key: TrustedKey, signature: bytes, msg: bytes) -> bool:
     try:
-        if key.alg == "ed25519":
-            pub = key.public_key
-            if not isinstance(pub, ed25519.Ed25519PublicKey) or len(signature) != 64:
-                return False
-            pub.verify(signature, msg)
-            return True
-        pub_ec = key.public_key
-        if not isinstance(pub_ec, ec.EllipticCurvePublicKey):
+        if len(signature) != 64:
             return False
-        # DER only: it must decode, and re-encode to exactly the same bytes. High-S is
-        # accepted on purpose: (r, n - s) also verifies, and cloud KMS ECDSA signers
-        # (Task 26) don't normalise S, so requiring low S would refuse about half of
-        # their valid signatures. A signature is therefore malleable and must never be
-        # used as an identifier or a deduplication key; pins and locks name the signed
-        # payload's SHA-256 instead.
-        r, s = decode_dss_signature(signature)
-        if encode_dss_signature(r, s) != signature:
-            return False
-        pub_ec.verify(signature, msg, ec.ECDSA(hashes.SHA256()))
+        key.public_key.verify(signature, msg)
         return True
     except (InvalidSignature, ValueError, TypeError):
         return False
@@ -391,7 +355,7 @@ class Verifier:
 
         * ``signature_invalid``: a malformed document, another purpose, or a signature
           that does not verify over the domain-separated message;
-        * ``signer_untrusted``: no signer for ``purpose`` has this key id and alg;
+        * ``signer_untrusted``: no listed signer has this key id and alg;
         * ``policy_invalid``: not a policy, or a development signer outside development.
         """
         msg = message(purpose, payload)
@@ -403,7 +367,7 @@ class Verifier:
             raise _policy("type")
         if sig.purpose != purpose:
             raise _sig_invalid("purpose_mismatch")
-        trusted = [k for k in policy.signers[purpose] if (k.key_id, k.alg) == (sig.key_id, sig.alg)]
+        trusted = [k for k in policy.signers if (k.key_id, k.alg) == (sig.key_id, sig.alg)]
         if not trusted:
             raise Refused("signer_untrusted")
         key = trusted[0]
@@ -414,7 +378,7 @@ class Verifier:
         return SignerId(purpose, key.key_id, key.alg, key.development)
 
 
-# ---------------------------------------------------------------- the development signer
+# ---------------------------------------------------------------- the file signer
 
 
 def _key_invalid(detail: str) -> Refused:
@@ -461,12 +425,12 @@ def _read_private_key(path: Path | str) -> ed25519.Ed25519PrivateKey:
 
 
 class FileSigner:
-    """Ed25519 from a PEM file: development and tests only (P12)."""
+    """Ed25519 from a PEM file (mode 0600 or stricter, owned by this user). Whether its
+    key is trusted, and for development only or not, is the trust policy's business."""
 
     __slots__ = ("_key", "_key_id")
 
     def __init__(self, path: Path | str) -> None:
-        _require_development()
         self._key = _read_private_key(path)
         self._key_id = key_id(self._key.public_key())
 
@@ -482,7 +446,6 @@ class FileSigner:
         return _public_pem(self._key.public_key())
 
     def sign(self, purpose: str, payload: bytes) -> SignatureDoc:
-        _require_development()
         msg = message(purpose, payload)
         return SignatureDoc(purpose, self.alg, self._key_id, self._key.sign(msg))
 
@@ -519,19 +482,24 @@ def _open_out_dir(out: Path) -> int:
     return dfd
 
 
-def generate_dev_key(out_dir: Path | str) -> tuple[str, str]:
-    """Make a development Ed25519 key pair in ``out_dir``: :data:`DEV_KEY_FILE` (mode
-    0600) and :data:`DEV_PUBLIC_KEY_FILE` (0644). Both files appear, or neither: each is
-    written to a fresh temporary name (``O_EXCL``, mode 0600) and then linked into place
-    without replacing anything, and if the second fails the first is removed. Never
-    overwrites: an existing key file is ``key_exists``. ``out_dir`` is created with mode
-    0700 if missing; an existing one owned by someone else, or writable by group or
-    others, is ``key_invalid``. Returns the key id and the public key PEM, never the
-    private key."""
-    _require_development()
+def generate_key(out_dir: Path | str, *, development: bool) -> TrustedKey:
+    """Make an Ed25519 key pair in ``out_dir``: :data:`DEV_KEY_FILE` and
+    :data:`DEV_PUBLIC_KEY_FILE` for a development key, else :data:`KEY_FILE` and
+    :data:`PUBLIC_KEY_FILE`; the private key mode 0600, the public 0644. Both files
+    appear, or neither: each is written to a fresh temporary name (``O_EXCL``, mode 0600)
+    and then linked into place without replacing anything, and if the second fails the
+    first is removed. Never overwrites: an existing key file is ``key_exists``.
+    ``out_dir`` is created with mode 0700 if missing; an existing one owned by someone
+    else, or writable by group or others, is ``key_invalid``. Returns the trust-policy
+    entry for the key, never the private key."""
+    if not isinstance(development, bool):
+        raise _key_invalid("development")
+    private_name, public_name = (
+        (DEV_KEY_FILE, DEV_PUBLIC_KEY_FILE) if development else (KEY_FILE, PUBLIC_KEY_FILE)
+    )
     dfd = _open_out_dir(Path(out_dir))
     try:
-        for name in (DEV_KEY_FILE, DEV_PUBLIC_KEY_FILE):
+        for name in (private_name, public_name):
             try:
                 os.stat(name, dir_fd=dfd, follow_symlinks=False)
             except FileNotFoundError:
@@ -542,13 +510,22 @@ def generate_dev_key(out_dir: Path | str) -> tuple[str, str]:
         _write_pair(
             dfd,
             [
-                (DEV_KEY_FILE, 0o600, _private_pem(key)),
-                (DEV_PUBLIC_KEY_FILE, 0o644, pub_pem.encode()),
+                (private_name, 0o600, _private_pem(key)),
+                (public_name, 0o644, pub_pem.encode()),
             ],
         )
     finally:
         os.close(dfd)
-    return key_id(key.public_key()), pub_pem
+    return TrustedKey("ed25519", key_id(key.public_key()), pub_pem, development)
+
+
+def generate_dev_key(out_dir: Path | str) -> tuple[str, str]:
+    """A development key pair (:func:`generate_key`); only in ``MHAI_MODELS_ENV=
+    development`` (``not_allowed_here`` otherwise). Returns the key id and public PEM."""
+    if not is_development():
+        raise Refused("not_allowed_here", detail_code="not_development")
+    entry = generate_key(out_dir, development=True)
+    return entry.key_id, entry.public_key_pem
 
 
 def _private_pem(key: ed25519.Ed25519PrivateKey) -> bytes:
@@ -628,6 +605,8 @@ __all__ = [
     "DEV_KEY_FILE",
     "DEV_PUBLIC_KEY_FILE",
     "ENV_VAR",
+    "KEY_FILE",
+    "PUBLIC_KEY_FILE",
     "PURPOSES",
     "SIGNATURE_SCHEMA",
     "TRUST_SCHEMA",
@@ -639,10 +618,12 @@ __all__ = [
     "TrustedKey",
     "Verifier",
     "generate_dev_key",
+    "generate_key",
     "is_development",
     "key_id",
     "load_policy",
     "message",
     "parse_policy",
     "parse_signature",
+    "policy_obj",
 ]

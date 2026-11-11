@@ -33,7 +33,7 @@ from intelligence.modelstore import fixtures, loader, signing, verify
 from tests.boundary.tokens import Signer
 from tests.modelstore.fakes.memory_store import MemoryStore
 from tests.modelstore.test_loader import _lock_file, _settings, publish
-from tests.modelstore.test_verify import Keys, MemSigner, Spy, _policy, write_signoff
+from tests.modelstore.test_verify import Keys, MemSigner, Spy, _policy
 
 ROLE = fixtures.ROLE
 # The same examples as TestModelVersionAllowsHash (services/core/internal/intel).
@@ -60,8 +60,8 @@ BAD_VERSIONS = (
 
 @pytest.fixture
 def keys() -> Keys:
-    m, s = MemSigner(), MemSigner()
-    return Keys(m, s, _policy(m, s))
+    m = MemSigner()
+    return Keys(m, _policy(m))
 
 
 @pytest.fixture(autouse=True)
@@ -246,17 +246,21 @@ def _failures(reader: InMemoryMetricReader) -> dict[tuple[str, str], int]:
     return out
 
 
-def test_ready_after_signoff_appears(
+def test_ready_after_signature_appears(
     tmp_path: Path,
     keys: Keys,
     caplog: pytest.LogCaptureFixture,
     metrics: InMemoryMetricReader,
 ) -> None:
-    """A deploy that arrives before its sign-off: refused (not_approved), retried with
-    backoff, each retry a full verification of the same pin, ready once the sign-off
-    exists. No job slot is taken meanwhile."""
+    """A deploy that arrives before its manifest's signature is in the store: refused
+    (signature_invalid), retried with backoff, each retry a full verification of the same
+    pin, ready once the signature exists. No job slot is taken meanwhile."""
+    from intelligence.modelstore import store
+
     mem = MemoryStore()
-    pub = publish(mem, tmp_path, keys, with_signoff=False)
+    pub = publish(mem, tmp_path, keys)
+    sig_key = store.manifest_sig_key(pub.m.name, pub.m.version)
+    sig = mem.objects.pop(sig_key)
     settings = _settings(tmp_path, {ROLE: pub})
     spy = Spy(mem)
     delays: list[float] = []
@@ -264,7 +268,7 @@ def test_ready_after_signoff_appears(
     async def sleep(s: float) -> None:
         delays.append(s)
         if len(delays) == 3:
-            write_signoff(mem, pub, keys.signoff)
+            mem.objects[sig_key] = sig
 
     gate = PinnedModelGate(
         lambda: loader.PinnedModels.load(settings, spy, keys.policy),
@@ -277,20 +281,37 @@ def test_ready_after_signoff_appears(
     asyncio.run(gate.run())
     assert gate.ready() is True
     assert delays == [2.0, 4.0, 5.0]
-    assert gate.failures == {(ROLE, "not_approved"): 3}
+    assert gate.failures == {(ROLE, "signature_invalid"): 3}
     assert gate.models is not None
     assert gate.models.versions() == {ROLE: f"{fixtures.MODEL_NAME}@0.1.0#{pub.sha[:12]}"}
     # Every attempt read the pinned manifest again (a full verification), and only it.
     manifests = [r for r in spy.reads if r[1].endswith("/manifest.json")]
     assert all("/0.1.0/" in r[1] for r in manifests)
     assert len([r for r in manifests if r[0] == "versions"]) == 4
+    # No weights were fetched before the signature verified.
+    assert spy.downloads == len(pub.m.files)
     failed = [r.getMessage() for r in caplog.records if "model.verify_failed" in r.getMessage()]
     assert len(failed) == 3
-    assert all(m.startswith(f"model.verify_failed role={ROLE} reason=not_approved") for m in failed)
+    assert all(
+        m.startswith(f"model.verify_failed role={ROLE} reason=signature_invalid") for m in failed
+    )
     loaded = [r.getMessage() for r in caplog.records if r.getMessage().startswith("model.loaded")]
     assert len(loaded) == 1
     assert pub.sha in loaded[0] and fixtures.MODEL_NAME in loaded[0] and "0.1.0" in loaded[0]
-    assert _failures(metrics) == {(ROLE, "not_approved"): 3}
+    assert _failures(metrics) == {(ROLE, "signature_invalid"): 3}
+
+
+def test_unpinned_role_never_ready(tmp_path: Path, keys: Keys) -> None:
+    """A role the service needs but the lock doesn't pin: the start stops (lock_invalid);
+    nothing unverified is ever loaded in its place."""
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+    lock_path = _lock_file(tmp_path, {"other_role": pub})
+    with pytest.raises(Exception) as e:
+        loader.LoadSettings.from_lock((ROLE,), lock_path, cache)
+    assert getattr(e.value, "reason", None) == "lock_invalid"
 
 
 def test_metric_labels_come_from_closed_sets(metrics: InMemoryMetricReader) -> None:
@@ -448,6 +469,37 @@ def test_no_roles_needs_no_store_settings() -> None:
             env["INTELLIGENCE_MODEL_ROLES"] = roles
         s = WorkerSettings.from_env(env)
         assert s.model_roles == ()
+
+
+def test_no_models_pinned_behaves_as_before(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no INTELLIGENCE_MODEL_ROLES, in production as in development: no store,
+    lock, cache or trust policy is needed, no gate is built, readiness is the runner's
+    own, and model_versions() reports the configured models only."""
+    from intelligence.boundary.worker import build_model_gate, pipeline_readiness
+
+    for app_env in ("development", None):
+        env = {k: v for k, v in BASE.items() if k != "APP_ENV"}
+        if app_env is not None:
+            env["APP_ENV"] = app_env
+        try:
+            s = WorkerSettings.from_env(env)
+        except ConfigError:
+            assert app_env is None  # production needs NATS TLS and NKeys: not about models
+            continue
+        assert s.model_roles == () and s.models_lock_path is None
+        assert s.models_trust_policy_path is None and s.model_store_endpoint is None
+        assert build_model_gate(s) is None
+
+    runner = ReadyRunner()
+
+    async def go() -> None:
+        models_ready, jobs_ready = pipeline_readiness(runner, None)  # type: ignore[arg-type]
+        assert await all_ready(models_ready)() is True
+        assert jobs_ready == runner.ready
+
+    asyncio.run(go())
+    legacy = {"cca": "qwen2.5:7b-instruct", "dense": "all-MiniLM-L6-v2", "nli": "x/nli"}
+    assert _client(lambda: None).model_versions() == legacy
 
 
 @pytest.mark.parametrize(

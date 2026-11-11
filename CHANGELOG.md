@@ -8,25 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Document pipeline phase 0, part B: model promotion
+- Document pipeline phase 0, part B: model promotion, the lean version
   (`services/intelligence/intelligence/modelstore/`, the `mhai-models` CLI).
   File checks for a trained run (safetensors only, a fixed list of JSON
   files, header validation, size caps, SHA-256), the training manifest with
-  the approved-dataset and licence registries, canonical signed manifests
-  (development Ed25519 keys; the production KMS signer is Task 26), the
-  model store with versioning and object lock (MinIO for tests and
-  rehearsal), the locked evaluation test split, run sources (a local
-  folder, Google Drive behind a fake until Task 28, pinned Hugging Face
-  revisions), `promote` with a dry run, `models.lock` with `pin`,
-  `lock-check`, sign-off and rollback, load-time verification and the
-  pipeline's pinned roles (not ready until every pinned role verifies;
-  `model_versions` now carries `name@version#hash`). Four workflows
-  (`model-promote`, `model-lock`, `model-signoff`, `model-testset`); the
-  dry run uploads its JSON summary and the aggregate `evaluation.md`. CI
-  rehearses the whole flow on MinIO (`model-promotion-e2e`), and
-  `tests/modelstore/test_e2e.py` runs it in Python and checks that every
-  abuse case in the plan has its test. Production pins wait on H1–H4 and
-  Tasks 26–28 (TODO.md); until then the system fails closed.
+  the approved-dataset and licence registries and the model card, canonical
+  manifests signed with one Ed25519 key (purpose bound in the signed bytes;
+  the public key in `models/trust-policy.json`, the private key a
+  repository secret or a key file; `mhai-models keygen`), a plain
+  S3-compatible model store (conditional writes, versioning used if on),
+  the locked evaluation test split, run sources (a local folder, Google
+  Drive with a read-only token, pinned Hugging Face revisions), `promote`
+  with a dry run, `models.lock` with `pin`, `lock-check` (an ordinary PR
+  check; one reviewer's approval is the sign-off) and rollback by pinning an
+  earlier version, load-time verification and the pipeline's pinned roles
+  (not ready until every pinned role verifies; `model_versions` now carries
+  `name@version#hash`). Three workflows (`model-promote`, `model-lock`,
+  `model-testset`), no GitHub environment or setting needed. CI rehearses
+  the whole flow on MinIO (`model-promotion-e2e`). With no model pinned,
+  nothing changes. The enterprise controls left out are listed in TODO.md,
+  "Before scale".
 - EMR integration, PR 4 (egress; off by default, profile `emr` only; no
   migration). `egress-emr`, the emr service's own CONNECT proxy
   (`services/emr/cmd/egress-emr`, same image): every CONNECT names its

@@ -1,9 +1,9 @@
 """The locked test split: built once inside the store, signed, pinned in models/testsets.lock.
 
-**Build** (:func:`build_and_lock`, ``mhai-models testset-build``), as the ``eval-writer``:
+**Build** (:func:`build_and_lock`, ``mhai-models testset-build``), as the store's writer:
 
-1. before anything is written: the names; the signer, which must be trusted for
-   ``testset`` by the given policy (``signer_untrusted``) and must hold that key (a probe
+1. before anything is written: the names; the signer, which must be a key the given
+   policy lists (``signer_untrusted``) and must hold that key (a probe
    payload, never a valid manifest, is signed and verified); and a fresh 0700 scratch
    folder (``not_allowed_here``/``scratch``). None of these can burn a version;
 2. ``eval/<suite>/<version>/claim.json`` is reserved with a conditional create, so a second
@@ -33,7 +33,7 @@ testset.json>`` (the CLI prints it, and it goes into ``models/testsets.lock`` by
 for reports, :meth:`Built.export`: the SHA-256, ``extraction_schema_version``, ``slices``
 and ``totals``. Never a document id, path, page or value of the split.
 
-**Fetch** (:func:`fetch`), as the ``eval-reader``, never trusts "latest":
+**Fetch** (:func:`fetch`), as the store's reader, never trusts "latest":
 
 * ``testset.json`` is taken by its recorded version id when the lock entry has one;
   otherwise it is the oldest stored version whose SHA-256 equals the lock's. Versions are
@@ -48,18 +48,16 @@ and ``totals``. Never a document id, path, page or value of the split.
   size and SHA-256 checked. Only the files the signed manifest lists are read: other
   objects under ``files/`` (an extra upload) are ignored, never fetched.
 
-Finding the versions needs ``ListObjectVersions``: the eval reader may list versions under
-``eval/`` only (``s3:prefix`` condition, deploy/minio/policies/eval-reader.json), which shows
-it no more than it can already read. Any mismatch (the lock's hash, the signature, a file's
-hash or size, a file missing from or extra in the manifest's ``store_version_ids``, a
-signed manifest that points at a shadowing version) is
-``testset_mismatch``; a store that refuses the caller is ``store_unavailable``.
-Residual risk: a holder of eval-writer credentials can still make a fetch slow or fail by
-uploading very many versions (the store's listing cap is 10,000); the eval writer is
-trusted not to deny service. The scratch
-folder is filled only after the signature checks, and removed on any failure. The fetched
-folder holds the files and the locked ``testset.json`` (the runner's set check accepts it),
-not the signature.
+Finding the versions needs ``ListObjectVersions`` (deploy/minio/policies/reader.json),
+which shows the reader no more than it can already read. Any mismatch (the lock's hash,
+the signature, a file's hash or size, a file missing from or extra in the manifest's
+``store_version_ids``, a signed manifest that points at a shadowing version) is
+``testset_mismatch``; a store that refuses the caller is ``store_unavailable``. Residual
+risk: a holder of writer credentials can still make a fetch slow or fail by uploading very
+many versions (the store's listing cap is 10,000); the writer is trusted not to deny
+service. The scratch folder is filled only after the signature checks, and removed on any
+failure. The fetched folder holds the files and the locked ``testset.json`` (the runner's
+set check accepts it), not the signature.
 
 **models/testsets.lock** is ASCII, one entry per line (``<suite>@<semver>#<64 hex>``) and
 comment lines that start with ``#``; every line ends with ``\\n``; no blank lines, no
@@ -308,12 +306,12 @@ _PROBE = canonical.dumps({"schema": "mhai.models.testset_signer_probe/1"})
 
 
 def _trusted(signer: signing.Signer, policy: signing.TrustPolicy) -> None:
-    """The signer's key must be trusted for ``testset`` and its signatures must verify
-    under the policy (a key id that names a trusted key but a private key that doesn't
-    match it is ``signature_invalid``)."""
+    """The signer's key must be one the policy lists and its signatures must verify under
+    the policy (a key id that names a trusted key but a private key that doesn't match it
+    is ``signature_invalid``)."""
     if not isinstance(policy, signing.TrustPolicy):
         raise Refused("policy_invalid", detail_code="type")
-    if not any((k.key_id, k.alg) == (signer.key_id, signer.alg) for k in policy.signers[PURPOSE]):
+    if not policy.trusts(signer.key_id, signer.alg):
         raise Refused("signer_untrusted")
     signing.Verifier().verify(PURPOSE, _PROBE, signer.sign(PURPOSE, _PROBE), policy)
 
@@ -351,16 +349,15 @@ def build_and_lock(
     suite: str,
     version: str,
     scale: float,
-    retention_days: int,
     scratch_parent: Path | str | None = None,
 ) -> Built:
     """Build the ``test`` split of ``suite`` ``version``, upload it, sign it, lock it.
 
-    See the module docstring for the order. The names, the signer (trusted for
-    ``testset``, and holding that key) and the scratch folder are all checked before the
+    See the module docstring for the order. The names, the signer (a listed key, and
+    holding it) and the scratch folder are all checked before the
     claim, so none of them can burn a version. Raises :class:`Refused`; a failed build
     leaves no scratch copy and no ``testset.json`` in the store (files already uploaded
-    stay, locked, under a version that can never be locked again: its claim is taken).
+    stay under a version that can never be locked again: its claim is taken).
     ``Built.scratch_removed`` is ``False`` if the scratch copy could not be removed."""
     suite, version = _check_suite(suite, version)
     _trusted(signer, policy)
@@ -370,7 +367,7 @@ def build_and_lock(
         claim = canonical.dumps(
             {"schema": CLAIM_SCHEMA, "suite": suite, "version": version, "signer": signer.key_id}
         )
-        target.put_new(store.testset_claim_key(suite, version), claim, retention_days)
+        target.put_new(store.testset_claim_key(suite, version), claim)
         error: str | None = None
         try:
             made = sets.build("test", None, scratch, scale, version=version)
@@ -393,15 +390,15 @@ def build_and_lock(
             data = _read_scratch(made.root / path, MAX_FILE_BYTES)
             if len(data) != size or hashlib.sha256(data).hexdigest() != sha:
                 raise Refused("hash_mismatch", detail_code="scratch")
-            vids[path] = target.put_new(key, data, retention_days)
+            vids[path] = target.put_new(key, data)
         locked = dict(manifest, locked=True, store_version_ids=vids)
         raw = canonical.dumps(locked)
         entry = LockEntry(suite, version, hashlib.sha256(raw).hexdigest())
         check_locked(raw, entry)
         sig = signer.sign(PURPOSE, raw)
         signing.Verifier().verify(PURPOSE, raw, sig, policy)
-        tvid = target.put_new(store.testset_key(suite, version), raw, retention_days)
-        svid = target.put_new(store.testset_sig_key(suite, version), sig.to_bytes(), retention_days)
+        tvid = target.put_new(store.testset_key(suite, version), raw)
+        svid = target.put_new(store.testset_sig_key(suite, version), sig.to_bytes())
     finally:
         removed = _remove_scratch(scratch)
     built = Built(

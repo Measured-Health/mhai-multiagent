@@ -1,5 +1,6 @@
 """Load-time verification (plan Task 22): lock hash, identity, signature, every file,
-the exact set, the sign-off, and a cache that is never trusted.
+the exact set, the production rules at load, and a cache that is never trusted. There is
+no sign-off record: a pin reaches the lock only through a reviewed PR.
 
 Every model here is a tiny synthetic safetensors run (``fixtures.make_run``); keys are made
 in memory; the store is the in-memory fake, and MinIO for the ``store`` test.
@@ -28,7 +29,6 @@ from intelligence.modelstore import (
     fixtures,
     manifest,
     signing,
-    signoff,
     store,
     training,
     verify,
@@ -52,7 +52,7 @@ MARKER = "Zqxverifymarkerwv"
 
 
 class MemSigner:
-    """An Ed25519 key in memory (FileSigner refuses to exist outside development)."""
+    """An Ed25519 key in memory."""
 
     def __init__(self) -> None:
         self._key = ed25519.Ed25519PrivateKey.generate()
@@ -79,24 +79,18 @@ class MemSigner:
 @dataclass(frozen=True)
 class Keys:
     manifest: MemSigner
-    signoff: MemSigner
     policy: signing.TrustPolicy
 
 
-def _policy(m: MemSigner, s: MemSigner, *, development: bool = False) -> signing.TrustPolicy:
-    return signing.TrustPolicy(
-        {
-            "manifest": (m.trusted(development),),
-            "signoff": (s.trusted(development),),
-            "testset": (),
-        }
-    )
+def _policy(m: MemSigner, *, development: bool = False) -> signing.TrustPolicy:
+    """The trust policy: one signer, for every purpose (the purpose is in the message)."""
+    return signing.TrustPolicy((m.trusted(development),))
 
 
 @pytest.fixture
 def keys() -> Keys:
-    m, s = MemSigner(), MemSigner()
-    return Keys(m, s, _policy(m, s))
+    m = MemSigner()
+    return Keys(m, _policy(m))
 
 
 @pytest.fixture(autouse=True)
@@ -137,7 +131,7 @@ def _docs() -> dict[str, bytes]:
 
 
 def _put(target: Any, key: str, body: bytes | Path) -> str:
-    return str(target.put_new(key, body, 1))
+    return str(target.put_new(key, body))
 
 
 def _upload(
@@ -208,10 +202,9 @@ def publish(
     role: str = ROLE,
     seed: int = 7,
     sign: bool = True,
-    with_signoff: bool = True,
 ) -> Published:
     """A promoted version as promote writes it: files, documents, manifest.sig, then
-    manifest.json; and (``with_signoff``) a sign-off as Task 21 writes it."""
+    manifest.json."""
     records, docs, run_dir = _upload(
         target, tmp_path, name=name, version=version, role=role, seed=seed
     )
@@ -220,37 +213,7 @@ def publish(
         _put(target, store.manifest_sig_key(name, version), keys.manifest.sign("manifest", raw))
     _put(target, store.manifest_key(name, version), raw)
     m = manifest.parse(raw)
-    pub = Published(raw, manifest.sha256(raw), m, run_dir)
-    if with_signoff:
-        write_signoff(target, pub, keys.signoff)
-    return pub
-
-
-def signoff_bytes(pub: Published, **overrides: Any) -> bytes:
-    s = signoff.Signoff(
-        name=pub.m.name,
-        version=pub.m.version,
-        role=pub.m.role,
-        gate=GATE,
-        manifest_sha256=pub.sha,
-        evaluation_sha256=pub.m.evaluation.report_sha256,
-        pr=17,
-        merge_commit="ef" * 20,
-        clinical_reviewers=("clinical-reviewer",),
-        platform_reviewers=("platform-reviewer",),
-        promotion_actor=ACTOR,
-        trained_by=TRAINER,
-        at="2026-11-06T01:00:00Z",
-    )
-    return signoff.to_bytes(replace(s, **overrides))
-
-
-def write_signoff(
-    target: Any, pub: Published, signer: MemSigner, *, purpose: str = "signoff", **overrides: Any
-) -> None:
-    body = signoff_bytes(pub, **overrides)
-    _put(target, store.signoff_key(pub.m.name, pub.m.version), body)
-    _put(target, store.signoff_sig_key(pub.m.name, pub.m.version), signer.sign(purpose, body))
+    return Published(raw, manifest.sha256(raw), m, run_dir)
 
 
 def _cache(tmp_path: Path) -> Path:
@@ -260,7 +223,6 @@ def _cache(tmp_path: Path) -> Path:
 
 
 def _verify(src: Any, pub: Published, keys: Keys, cache: Path, **kw: Any) -> verify.VerifiedModel:
-    kw.setdefault("require_signoff", True)
     return verify.verify_pin(
         src, kw.pop("role", ROLE), kw.pop("entry", pub.pin), keys.policy, cache, **kw
     )
@@ -438,7 +400,7 @@ def test_download_stops_at_recorded_size(tmp_path: Path, keys: Keys) -> None:
     _put(mem, store.manifest_key(NAME, "0.1.1"), raw)
     pin = Pin(NAME, "0.1.1", manifest.sha256(raw))
     cache = _cache(tmp_path)
-    err = _refused(verify.verify_pin, mem, ROLE, pin, keys.policy, cache, require_signoff=False)
+    err = _refused(verify.verify_pin, mem, ROLE, pin, keys.policy, cache)
     assert err.reason == "size_mismatch"
     assert os.listdir(cache / NAME) == [f".0.1.1-{pin.manifest_sha256[:12]}.lock"]
 
@@ -459,19 +421,19 @@ def test_unsigned_or_wrong_signer_refused(tmp_path: Path, keys: Keys) -> None:
     _put(mem, store.manifest_sig_key(NAME, VERSION), stranger.sign("manifest", raw))
     _put(mem, store.manifest_key(NAME, VERSION), raw)
     pin = Pin(NAME, VERSION, manifest.sha256(raw))
-    err = _refused(verify.verify_pin, mem, ROLE, pin, keys.policy, cache, require_signoff=False)
+    err = _refused(verify.verify_pin, mem, ROLE, pin, keys.policy, cache)
     assert err.reason == "signer_untrusted"
 
-    # A signature for another purpose over the same bytes, by a key trusted for that
-    # purpose, is not a manifest signature.
-    for purpose, signer in (("signoff", keys.signoff), ("testset", keys.manifest)):
+    # A signature for another purpose over the same bytes, by the trusted key, is not a
+    # manifest signature (the purpose is bound in the signed message).
+    for purpose, signer in (("testset", keys.manifest),):
         mem = MemoryStore()
         records, docs, _ = _upload(mem, tmp_path / purpose)
         raw = _manifest_bytes(records, docs)
         _put(mem, store.manifest_sig_key(NAME, VERSION), signer.sign(purpose, raw))
         _put(mem, store.manifest_key(NAME, VERSION), raw)
         pin = Pin(NAME, VERSION, manifest.sha256(raw))
-        err = _refused(verify.verify_pin, mem, ROLE, pin, keys.policy, cache, require_signoff=False)
+        err = _refused(verify.verify_pin, mem, ROLE, pin, keys.policy, cache)
         assert err.reason == "signature_invalid"
     assert _pin_dirs(cache, unsigned) == []
 
@@ -490,7 +452,7 @@ def test_lock_hash_differs_refused(tmp_path: Path, keys: Keys) -> None:
     pub = publish(mem, tmp_path, keys)
     cache = _cache(tmp_path)
     other = Pin(NAME, VERSION, _hex("another manifest"))
-    err = _refused(verify.verify_pin, mem, ROLE, other, keys.policy, cache, require_signoff=True)
+    err = _refused(verify.verify_pin, mem, ROLE, other, keys.policy, cache)
     assert err.reason == "lock_mismatch"
     bad = Pin(NAME, VERSION, "not-a-hash")
     assert _refused(_verify, mem, pub, keys, cache, entry=bad).reason == "lock_invalid"
@@ -530,7 +492,7 @@ def test_checksumless_versions_skipped_not_fatal(tmp_path: Path, keys: Keys) -> 
     pin = Pin(NAME, VERSION, manifest.sha256(raw))
     spy = Spy(mem)
     spy.no_checksum.add(junk)
-    v = verify.verify_pin(spy, ROLE, pin, keys.policy, _cache(tmp_path), require_signoff=False)
+    v = verify.verify_pin(spy, ROLE, pin, keys.policy, _cache(tmp_path))
     assert v.manifest_sha256 == pin.manifest_sha256
 
     # A store failure that is not about one version still stops verification.
@@ -545,7 +507,6 @@ def test_checksumless_versions_skipped_not_fatal(tmp_path: Path, keys: Keys) -> 
         pin,
         keys.policy,
         _cache(tmp_path),
-        require_signoff=False,
     )
     assert (err.reason, err.detail_code) == ("store_unavailable", "denied")
 
@@ -584,13 +545,13 @@ def test_manifest_for_other_name_version_or_role_refused(tmp_path: Path, keys: K
     _put(mem, store.manifest_key(NAME, "0.2.0"), pub.raw)
     _put(mem, store.manifest_sig_key(NAME, "0.2.0"), keys.manifest.sign("manifest", pub.raw))
     moved = Pin(NAME, "0.2.0", pub.sha)
-    err = _refused(verify.verify_pin, mem, ROLE, moved, keys.policy, cache, require_signoff=False)
+    err = _refused(verify.verify_pin, mem, ROLE, moved, keys.policy, cache)
     assert err.reason == "identity_mismatch"
 
     # And under another name's key.
     _put(mem, store.manifest_key("other-model", VERSION), pub.raw)
     renamed = Pin("other-model", VERSION, pub.sha)
-    err = _refused(verify.verify_pin, mem, ROLE, renamed, keys.policy, cache, require_signoff=False)
+    err = _refused(verify.verify_pin, mem, ROLE, renamed, keys.policy, cache)
     assert err.reason == "identity_mismatch"
     assert _pin_dirs(cache, pub) == []
 
@@ -613,7 +574,7 @@ def test_extra_or_missing_file_refused(
     _put(mem, store.manifest_key(NAME, VERSION), raw)
     pin = Pin(NAME, VERSION, manifest.sha256(raw))
     cache = _cache(tmp_path)
-    err = _refused(verify.verify_pin, mem, ROLE, pin, keys.policy, cache, require_signoff=False)
+    err = _refused(verify.verify_pin, mem, ROLE, pin, keys.policy, cache)
     assert err.reason == "missing_file"
     assert os.listdir(cache / NAME) == [f".{VERSION}-{pin.manifest_sha256[:12]}.lock"]
 
@@ -656,160 +617,9 @@ def test_partial_upload_not_found(tmp_path: Path, keys: Keys) -> None:
     _put(mem, store.manifest_sig_key(NAME, VERSION), keys.manifest.sign("manifest", raw))
     pin = Pin(NAME, VERSION, manifest.sha256(raw))
     cache = _cache(tmp_path)
-    err = _refused(verify.verify_pin, mem, ROLE, pin, keys.policy, cache, require_signoff=False)
+    err = _refused(verify.verify_pin, mem, ROLE, pin, keys.policy, cache)
     assert err.reason == "not_found"
     assert not (cache / NAME).exists()
-
-
-# ---------------------------------------------------------------- P17: the sign-off
-
-
-def test_no_signoff_refused_in_production_allowed_in_development(
-    tmp_path: Path, keys: Keys, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    mem = MemoryStore()
-    pub = publish(mem, tmp_path, keys, with_signoff=False)
-    cache = _cache(tmp_path)
-    assert verify.requires_signoff() is True
-    err = _refused(_verify, mem, pub, keys, cache, require_signoff=verify.requires_signoff())
-    assert (err.reason, err.detail_code) == ("not_approved", "missing")
-    assert _pin_dirs(cache, pub) == []
-
-    # The load entry point has no switch: production without a sign-off is refused.
-    err = _refused(verify.verify_for_load, mem, ROLE, pub.pin, keys.policy, cache)
-    assert err.reason == "not_approved"
-    with pytest.raises(TypeError):
-        verify.verify_for_load(  # type: ignore[call-arg]
-            mem, ROLE, pub.pin, keys.policy, cache, require_signoff=False
-        )
-
-    monkeypatch.setenv(signing.ENV_VAR, "development")
-    assert verify.requires_signoff() is True  # APP_ENV unset is production
-    monkeypatch.setenv(verify.APP_ENV, "development")
-    assert verify.requires_signoff() is False
-    v = verify.verify_for_load(mem, ROLE, pub.pin, keys.policy, cache)
-    assert v.path.is_dir()
-    # With a sign-off required, a verified, cached directory is still not handed out
-    # without one, and is removed.
-    assert _refused(_verify, mem, pub, keys, cache, require_signoff=True).reason == "not_approved"
-    assert _pin_dirs(cache, pub) == []
-
-
-def test_missing_signoff_fetches_no_weights(tmp_path: Path, keys: Keys) -> None:
-    """The sign-off needs only the manifest, so it is checked before any file is
-    downloaded: a pin waiting for its sign-off costs a few small reads per gate retry,
-    never the weights again."""
-    mem = MemoryStore()
-    pub = publish(mem, tmp_path, keys, with_signoff=False)
-    cache = _cache(tmp_path)
-    spy = Spy(mem)
-    for _ in range(3):  # gate retries
-        err = _refused(_verify, spy, pub, keys, cache, require_signoff=True)
-        assert (err.reason, err.detail_code) == ("not_approved", "missing")
-    assert spy.downloads == 0
-    assert [r for r in spy.reads if r[0] == "download"] == []
-    assert _pin_dirs(cache, pub) == []
-    # With the sign-off written, the same pin downloads and verifies.
-    write_signoff(mem, pub, keys.signoff)
-    assert _verify(spy, pub, keys, cache).path.is_dir()
-    assert spy.downloads == len(pub.m.files)
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "other_name",
-        "other_version",
-        "other_role",
-        "other_hash",
-        "other_evaluation",
-        "other_trainer",
-        "reviewer_is_promoter",
-        "reviewer_is_trainer",
-        "one_reviewer_both_kinds",
-        "other_gate",
-        "other_actor",
-        "wrong_purpose",
-        "wrong_key",
-        "unsigned",
-    ],
-)
-def test_signoff_must_match_and_verify(
-    tmp_path: Path, keys: Keys, case: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    mem = MemoryStore()
-    pub = publish(mem, tmp_path, keys, with_signoff=False)
-    if case == "other_name":
-        write_signoff(mem, pub, keys.signoff, name="other-model")
-    elif case == "other_version":
-        write_signoff(mem, pub, keys.signoff, version="0.2.0")
-    elif case == "other_evaluation":
-        write_signoff(mem, pub, keys.signoff, evaluation_sha256=_hex("other report"))
-    elif case == "other_trainer":
-        write_signoff(mem, pub, keys.signoff, trained_by="someone-else")
-    elif case == "reviewer_is_promoter":
-        write_signoff(mem, pub, keys.signoff, platform_reviewers=(ACTOR,))
-    elif case == "reviewer_is_trainer":
-        write_signoff(mem, pub, keys.signoff, clinical_reviewers=(TRAINER,))
-    elif case == "one_reviewer_both_kinds":
-        write_signoff(
-            mem,
-            pub,
-            keys.signoff,
-            clinical_reviewers=("same-person",),
-            platform_reviewers=("same-person",),
-        )
-    elif case == "other_role":
-        write_signoff(mem, pub, keys.signoff, role="ocr")
-    elif case == "other_hash":
-        write_signoff(mem, pub, keys.signoff, manifest_sha256=_hex("x"))
-    elif case == "other_gate":
-        write_signoff(mem, pub, keys.signoff, gate="phase3")
-    elif case == "other_actor":
-        write_signoff(mem, pub, keys.signoff, promotion_actor="someone-else")
-    elif case == "wrong_purpose":
-        write_signoff(mem, pub, keys.signoff, purpose="manifest")
-    elif case == "wrong_key":
-        write_signoff(mem, pub, keys.manifest)  # the promotion key is not the sign-off key
-    else:
-        _put(mem, store.signoff_key(NAME, VERSION), signoff_bytes(pub))
-    err = _refused(_verify, mem, pub, keys, _cache(tmp_path))
-    assert err.reason == "not_approved"
-    if case.startswith(("reviewer_", "one_reviewer")):
-        assert err.detail_code == "separation"
-    # Development needs no sign-off: the same pin loads there.
-    monkeypatch.setenv(signing.ENV_VAR, "development")
-    monkeypatch.setenv(verify.APP_ENV, "development")
-    assert verify.verify_for_load(mem, ROLE, pub.pin, keys.policy, _cache(tmp_path / "d"))
-
-
-def test_signoff_picked_by_verification_not_latest(tmp_path: Path, keys: Keys) -> None:
-    mem = MemoryStore()
-    pub = publish(mem, tmp_path, keys)
-    # Newer, unsigned or mismatching shadows of signoff.json and signoff.sig are ignored.
-    mem.shadow(store.signoff_key(NAME, VERSION), signoff_bytes(pub, role="ocr"))
-    mem.shadow(store.signoff_key(NAME, VERSION), b"{}")
-    mem.shadow(store.signoff_sig_key(NAME, VERSION), b"junk")
-    assert _verify(mem, pub, keys, _cache(tmp_path)).manifest_sha256 == pub.sha
-
-
-def test_signoff_parse_strict(tmp_path: Path, keys: Keys) -> None:
-    mem = MemoryStore()
-    pub = publish(mem, tmp_path, keys, with_signoff=False)
-    good = signoff_bytes(pub)
-    assert signoff.parse(good).manifest_sha256 == pub.sha
-    obj = canonical.loads_strict(good, signoff.MAX_BYTES)
-    for bad in (
-        good + b"\n",
-        canonical.dumps({**obj, "extra": "x"}),
-        canonical.dumps({k: v for k, v in obj.items() if k != "gate"}),
-        canonical.dumps({**obj, "pr": True}),
-        canonical.dumps({**obj, "clinical_reviewers": []}),
-        canonical.dumps({**obj, "platform_reviewers": ["b", "a"]}),
-        canonical.dumps({**obj, "schema": "mhai.models.signoff/2"}),
-        canonical.dumps({**obj, "at": "2026-13-40T00:00:00Z"}),
-    ):
-        assert _refused(signoff.parse, bad).reason == "not_approved"
 
 
 # ---------------------------------------------------------------- P12: environment
@@ -820,31 +630,31 @@ def test_dev_policy_refused_in_production(
 ) -> None:
     mem = MemoryStore()
     pub = publish(mem, tmp_path, keys)
-    dev_keys = Keys(
-        keys.manifest, keys.signoff, _policy(keys.manifest, keys.signoff, development=True)
-    )
+    dev_keys = Keys(keys.manifest, _policy(keys.manifest, development=True))
     cache = _cache(tmp_path)
     err = _refused(_verify, mem, pub, dev_keys, cache)
     assert (err.reason, err.detail_code) == ("policy_invalid", "development_signer_in_production")
     for value in ("production", "prod", "staging", ""):
         monkeypatch.setenv(signing.ENV_VAR, "development")
         monkeypatch.setenv(verify.APP_ENV, value)
-        err = _refused(_verify, mem, pub, dev_keys, cache, require_signoff=False)
+        err = _refused(_verify, mem, pub, dev_keys, cache)
         assert (err.reason, err.detail_code) == ("not_allowed_here", "development_in_production")
     monkeypatch.setenv(verify.APP_ENV, "development")
-    assert _verify(mem, pub, dev_keys, cache, require_signoff=False).path.is_dir()
+    assert _verify(mem, pub, dev_keys, cache).path.is_dir()
     # MHAI_MODELS_ENV=development with no APP_ENV: production for the service, so for the
-    # verifier too. Refused, and the sign-off would be required.
+    # verifier too.
     monkeypatch.delenv(verify.APP_ENV)
-    assert verify.requires_signoff() is True
-    err = _refused(_verify, mem, pub, dev_keys, cache, require_signoff=False)
+    assert verify.is_development() is False
+    err = _refused(_verify, mem, pub, dev_keys, cache)
     assert (err.reason, err.detail_code) == ("not_allowed_here", "development_in_production")
     err = _refused(verify.verify_for_load, mem, ROLE, pub.pin, dev_keys.policy, cache)
     assert (err.reason, err.detail_code) == ("not_allowed_here", "development_in_production")
-    # And with MHAI_MODELS_ENV unset too: a development signer is refused.
+    # And with MHAI_MODELS_ENV unset too: a development signer is refused, and the cache
+    # verified under development is removed (definitive).
     monkeypatch.delenv(signing.ENV_VAR)
-    err = _refused(_verify, mem, pub, dev_keys, cache, require_signoff=False)
+    err = _refused(verify.verify_for_load, mem, ROLE, pub.pin, dev_keys.policy, cache)
     assert (err.reason, err.detail_code) == ("policy_invalid", "development_signer_in_production")
+    assert _pin_dirs(cache, pub) == []
 
 
 # ---------------------------------------------------------------- P11: the cache
@@ -955,7 +765,7 @@ def test_refusal_logs_ids_only(
     tmp_path: Path, keys: Keys, caplog: pytest.LogCaptureFixture
 ) -> None:
     mem = MemoryStore()
-    pub = publish(mem, tmp_path, keys, with_signoff=False)
+    pub = publish(mem, tmp_path, keys)
     cache = _cache(tmp_path / MARKER)
     spy = Spy(mem)
     spy.corrupt.add(_weights(pub))
@@ -968,10 +778,10 @@ def test_refusal_logs_ids_only(
 
     with caplog.at_level(logging.DEBUG):
         errors = [
-            _refused(_verify, mem, pub, keys, cache),  # not_approved
-            _refused(_verify, spy, pub, keys, _cache(tmp_path / "b"), require_signoff=False),
+            _refused(_verify, mem, pub, Keys(MemSigner(), _policy(MemSigner())), cache),
+            _refused(_verify, spy, pub, keys, _cache(tmp_path / "b")),
             _refused(_verify, mem, pub, keys, cache, entry=Pin(NAME, VERSION, _hex("x"))),
-            _refused(_verify, mem, pub, keys, link, require_signoff=False),  # cache_dir
+            _refused(_verify, mem, pub, keys, link),  # cache_dir
             _refused(_verify, Down(mem), pub, keys, cache),  # store_unavailable
             _refused(_verify, mem, pub, keys, cache, role="ocr"),  # identity
         ]
@@ -981,7 +791,7 @@ def test_refusal_logs_ids_only(
         assert err.__cause__ is None and err.__context__ is None, err.reason
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "model.verify_refused" in text
-    assert "reason=not_approved" in text and "reason=hash_mismatch" in text
+    assert "reason=signer_untrusted" in text and "reason=hash_mismatch" in text
     assert "reason=lock_mismatch" in text
     assert MARKER not in text and str(tmp_path) not in text
     assert "models/" not in text and "http" not in text
@@ -999,7 +809,7 @@ def test_good_pin_verifies_on_minio(tmp_path: Path, keys: Keys, minio_store: Min
     pub = publish(root, tmp_path, keys, version=version)
     reader = minio_store.store("reader")
     cache = _cache(tmp_path)
-    v = verify.verify_pin(reader, ROLE, pub.pin, keys.policy, cache, require_signoff=True)
+    v = verify.verify_pin(reader, ROLE, pub.pin, keys.policy, cache)
     assert sorted(os.listdir(v.path)) == [f.path for f in pub.m.files]
     for f in pub.m.files:
         assert (v.path / f.path).read_bytes() == (pub.run_dir / f.path).read_bytes()
@@ -1020,7 +830,7 @@ def test_good_pin_verifies_on_minio(tmp_path: Path, keys: Keys, minio_store: Min
         Body=b"{}",
     )
     fresh = _cache(tmp_path / "fresh")
-    v2 = verify.verify_pin(reader, ROLE, pub.pin, keys.policy, fresh, require_signoff=True)
+    v2 = verify.verify_pin(reader, ROLE, pub.pin, keys.policy, fresh)
     assert (v2.path / weights).read_bytes() == (pub.run_dir / weights).read_bytes()
     assert sorted(os.listdir(v2.path)) == [f.path for f in pub.m.files]
 
@@ -1038,7 +848,8 @@ def test_gate_must_pass_in_the_manifest(
     _put(mem, store.manifest_key(NAME, VERSION), raw)
     sha = manifest.sha256(raw)
     cache = _cache(tmp_path)
-    # Development (no sign-off) still refuses a pin whose own gate result is not pass.
+    # Development (no production rules) still refuses a pin whose own gate result is not
+    # pass.
     monkeypatch.setenv(signing.ENV_VAR, "development")
     monkeypatch.setenv(verify.APP_ENV, "development")
     for gate in ("rehearsal", "phase3"):
@@ -1068,11 +879,8 @@ def test_version_flood_is_told_apart(tmp_path: Path, keys: Keys) -> None:
     _junk_versions(mem, store.manifest_key(NAME, VERSION), 40)
     err = _refused(_verify, mem, pub, keys, _cache(tmp_path))
     assert (err.reason, err.detail_code) == ("lock_mismatch", "too_many_versions")
-    # The same flood under manifest.sig and under signoff.json.
-    for key, reason in (
-        (store.manifest_sig_key(NAME, VERSION), "signature_invalid"),
-        (store.signoff_key(NAME, VERSION), "not_approved"),
-    ):
+    # The same flood under manifest.sig.
+    for key, reason in ((store.manifest_sig_key(NAME, VERSION), "signature_invalid"),):
         mem = MemoryStore()
         pub = publish(mem, tmp_path / reason, keys)
         _junk_versions(mem, key, 40)
@@ -1125,7 +933,7 @@ def test_definitive_refusal_removes_earlier_cache(tmp_path: Path, keys: Keys) ->
     assert _refused(_verify, Down(mem), pub, keys, cache).reason == "store_unavailable"
     assert v.path.is_dir()
     # The manifest key rotated out of the policy: definitive, the directory goes.
-    rotated = Keys(MemSigner(), keys.signoff, _policy(MemSigner(), keys.signoff))
+    rotated = Keys(MemSigner(), _policy(MemSigner()))
     assert _refused(_verify, mem, pub, rotated, cache).reason == "signer_untrusted"
     assert _pin_dirs(cache, pub) == []
     # A lock that no longer matches anything stored: definitive too.
@@ -1144,14 +952,14 @@ def test_transient_error_keeps_a_verified_directory(tmp_path: Path, keys: Keys) 
     v = _verify(mem, pub, keys, cache)
     before = {f.path: (v.path / f.path).read_bytes() for f in pub.m.files}
 
-    class SignoffDown(Spy):
+    class SignatureDown(Spy):
         def get(self, key: str, version_id: str | None = None, *, max_bytes: int) -> bytes:
-            if key == store.signoff_key(NAME, VERSION):
+            if key == store.manifest_sig_key(NAME, VERSION):
                 raise Refused("store_unavailable", detail_code="transport")
             return super().get(key, version_id, max_bytes=max_bytes)
 
     # Another process using the directory must not lose it to this one's outage.
-    assert _refused(_verify, SignoffDown(mem), pub, keys, cache).reason == "store_unavailable"
+    assert _refused(_verify, SignatureDown(mem), pub, keys, cache).reason == "store_unavailable"
     assert {p: (v.path / p).read_bytes() for p in before} == before
     assert _pin_dirs(cache, pub) == [v.path.name]
     assert _verify(mem, pub, keys, cache).path == v.path
@@ -1244,20 +1052,8 @@ def test_logins_are_lowercase_only(tmp_path: Path, keys: Keys) -> None:
     assert names.check_login("alice") == "alice"
     for bad in ("Alice", "ALICE", "alice-", "-alice", "al--ice", "", "a" * 40):
         assert _refused(names.check_login, bad).reason == "invalid_name"
-    # The trainer "alice" and a reviewer "Alice" are one GitHub account: the mixed-case
-    # spelling is refused when the sign-off is parsed, so it can never slip past the
-    # exact comparison of separation of duties.
     mem = MemoryStore()
-    pub = publish(mem, tmp_path, keys, with_signoff=False)
-    for field in ("clinical_reviewers", "platform_reviewers"):
-        obj = canonical.loads_strict(signoff_bytes(pub), signoff.MAX_BYTES)
-        obj[field] = [TRAINER.upper()]
-        err = _refused(signoff.parse, canonical.dumps(obj))
-        assert (err.reason, err.detail_code) == ("not_approved", field)
-    for field in ("promotion_actor", "trained_by"):
-        obj = canonical.loads_strict(signoff_bytes(pub), signoff.MAX_BYTES)
-        obj[field] = "Alice"
-        assert _refused(signoff.parse, canonical.dumps(obj)).reason == "not_approved"
+    pub = publish(mem, tmp_path, keys)
     # The training manifest's trainer and the manifest's promoter and trainer too.
     tm = json.loads((pub.run_dir / training.FILE_NAME).read_text(encoding="utf-8"))
     tm["trained_by"] = "Alice"
@@ -1305,24 +1101,6 @@ def test_flood_of_unreadable_versions_is_capped(tmp_path: Path, keys: Keys) -> N
     assert (err.reason, err.detail_code) == ("lock_mismatch", "too_many_versions")
     heads = [r for r in spy.reads if r[0] == "head"]
     assert len(heads) == verify.MAX_VERSION_READS  # reading stopped at the cap
-
-
-def test_signoff_signatures_read_once(tmp_path: Path, keys: Keys) -> None:
-    mem = MemoryStore()
-    pub = publish(mem, tmp_path, keys, with_signoff=False)
-    # Many matching but unsigned sign-off versions, then the signed one.
-    for i in range(5):
-        mem.shadow(store.signoff_key(NAME, VERSION), signoff_bytes(pub, pr=100 + i))
-    write_signoff_key = store.signoff_key(NAME, VERSION)
-    body = signoff_bytes(pub)
-    mem.shadow(write_signoff_key, body)
-    mem.shadow(store.signoff_sig_key(NAME, VERSION), keys.signoff.sign("signoff", body))
-    spy = Spy(mem)
-    _verify(spy, pub, keys, _cache(tmp_path))
-    sig_key = store.signoff_sig_key(NAME, VERSION)
-    assert [r for r in spy.reads if r[0] == "versions" and r[1] == sig_key] == [
-        ("versions", sig_key, None)
-    ]
 
 
 @pytest.mark.parametrize("failure", ["checksum", "hash_mismatch", "not_found", "transport"])
@@ -1392,7 +1170,7 @@ def test_production_load_refuses_rehearsal_gate_and_fixture_names(
 ) -> None:
     """Outside development the load refuses a pin that lock.check_production refuses (the
     rehearsal gate, a fixture- name), before anything is fetched, even with a trusted
-    signature and a matching sign-off: the sign-off is not the only P14 control at load."""
+    signature: lock-check is not the only P14 control."""
     mem = MemoryStore()
     name, gate = ("fixture-tiny", GATE) if case == "fixture_name" else (NAME, "rehearsal")
     records, docs, run_dir = _upload(mem, tmp_path, name=name)
@@ -1400,15 +1178,12 @@ def test_production_load_refuses_rehearsal_gate_and_fixture_names(
     _put(mem, store.manifest_sig_key(name, VERSION), keys.manifest.sign("manifest", raw))
     _put(mem, store.manifest_key(name, VERSION), raw)
     pub = Published(raw, manifest.sha256(raw), manifest.parse(raw), run_dir)
-    write_signoff(mem, pub, keys.signoff, gate=gate)
     pin = Pin(name, VERSION, pub.sha, gate)
-    # The verifier itself accepts it (signed, signed off): only the production rule refuses.
-    assert verify.verify_pin(
-        mem, ROLE, pin, keys.policy, _cache(tmp_path / "p"), require_signoff=True
-    ).path.is_dir()
+    # The verifier itself accepts it (signed, every file): only the production rule refuses.
+    assert verify.verify_pin(mem, ROLE, pin, keys.policy, _cache(tmp_path / "p")).path.is_dir()
     cache = _cache(tmp_path / "load")
     spy = Spy(mem)
-    assert verify.requires_signoff() is True
+    assert verify.is_development() is False
     err = _refused(verify.verify_for_load, spy, ROLE, pin, keys.policy, cache)
     if case == "fixture_name":
         assert (err.reason, err.detail_code) == ("fixture_name", None)
@@ -1419,3 +1194,154 @@ def test_production_load_refuses_rehearsal_gate_and_fixture_names(
     monkeypatch.setenv(signing.ENV_VAR, "development")
     monkeypatch.setenv(verify.APP_ENV, "development")
     assert verify.verify_for_load(mem, ROLE, pin, keys.policy, cache).path.is_dir()
+
+
+# ---------------------------------------------------------------- the load: fail closed
+
+
+def test_production_load_needs_no_signoff_record(tmp_path: Path, keys: Keys) -> None:
+    """The lean flow: a signed, pinned version with a production gate loads in
+    production with nothing beside the manifest and its signature; the PR's approval
+    is the sign-off."""
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    assert verify.is_development() is False
+    v = verify.verify_for_load(mem, ROLE, pub.pin, keys.policy, _cache(tmp_path))
+    assert sorted(os.listdir(v.path)) == [f.path for f in pub.m.files]
+    assert not [k for k in mem.objects if "signoff" in k]
+
+
+def test_load_entry_point_has_no_switch(tmp_path: Path, keys: Keys) -> None:
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    cache = _cache(tmp_path)
+    for kw in ({"require_signoff": False}, {"require_gate": False}, {"production": False}):
+        with pytest.raises(TypeError):
+            verify.verify_for_load(mem, ROLE, pub.pin, keys.policy, cache, **kw)  # type: ignore[call-arg]
+    assert not hasattr(verify, "requires_signoff")
+
+
+def test_bad_signature_bytes_refused_at_load(tmp_path: Path, keys: Keys) -> None:
+    """A signature document by the trusted key whose signature bytes don't verify over the
+    manifest (one bit flipped), or that signs other bytes: refused, nothing cached."""
+    cache = _cache(tmp_path)
+    for case in ("flipped", "other_bytes"):
+        mem = MemoryStore()
+        pub = publish(mem, tmp_path / case, keys, sign=False)
+        if case == "flipped":
+            doc = signing.parse_signature(keys.manifest.sign("manifest", pub.raw))
+            bad = bytearray(doc.signature)
+            bad[0] ^= 0x01
+            sig = signing.SignatureDoc("manifest", "ed25519", doc.key_id, bytes(bad)).to_bytes()
+        else:
+            sig = keys.manifest.sign("manifest", pub.raw + b" ")
+        _put(mem, store.manifest_sig_key(NAME, VERSION), sig)
+        err = _refused(verify.verify_for_load, mem, ROLE, pub.pin, keys.policy, cache)
+        assert err.reason == "signature_invalid", case
+        assert _pin_dirs(cache, pub) == []
+
+
+def test_untrusted_signer_and_testset_purpose_refused_at_load(tmp_path: Path, keys: Keys) -> None:
+    cache = _cache(tmp_path)
+    for case, signer, purpose, reason in (
+        ("stranger", MemSigner(), "manifest", "signer_untrusted"),
+        ("testset", keys.manifest, "testset", "signature_invalid"),
+    ):
+        mem = MemoryStore()
+        pub = publish(mem, tmp_path / case, keys, sign=False)
+        _put(mem, store.manifest_sig_key(NAME, VERSION), signer.sign(purpose, pub.raw))
+        err = _refused(verify.verify_for_load, mem, ROLE, pub.pin, keys.policy, cache)
+        assert err.reason == reason, case
+        assert _pin_dirs(cache, pub) == []
+
+
+def test_gate_fail_refused_at_load(tmp_path: Path, keys: Keys) -> None:
+    mem = MemoryStore()
+    records, docs, _ = _upload(mem, tmp_path)
+    raw = _manifest_bytes(records, docs, gates={GATE: "fail"})
+    _put(mem, store.manifest_sig_key(NAME, VERSION), keys.manifest.sign("manifest", raw))
+    _put(mem, store.manifest_key(NAME, VERSION), raw)
+    pin = Pin(NAME, VERSION, manifest.sha256(raw))
+    spy = Spy(mem)
+    err = _refused(verify.verify_for_load, spy, ROLE, pin, keys.policy, _cache(tmp_path))
+    assert err.reason == "gate_failed"
+    assert spy.downloads == 0
+
+
+def test_hash_mismatch_refused_at_load(tmp_path: Path, keys: Keys) -> None:
+    """The store hands back a changed weights byte: the load is refused, nothing is
+    cached; a cached copy edited after the load is found at the next start and fetched
+    again, never handed out."""
+    mem = MemoryStore()
+    pub = publish(mem, tmp_path, keys)
+    weights = _weights(pub)
+    spy = Spy(mem)
+    spy.corrupt.add(weights)
+    cache = _cache(tmp_path)
+    err = _refused(verify.verify_for_load, spy, ROLE, pub.pin, keys.policy, cache)
+    assert err.reason == "hash_mismatch"
+    assert _pin_dirs(cache, pub) == []
+    v = verify.verify_for_load(mem, ROLE, pub.pin, keys.policy, cache)
+    _tamper(v.path / weights)
+    again = verify.verify_for_load(mem, ROLE, pub.pin, keys.policy, cache)
+    assert (again.path / weights).read_bytes() == (pub.run_dir / weights).read_bytes()
+
+
+# ---------------------------------------------------------------- a bucket without versioning
+
+
+def test_unversioned_store_verifies_and_refuses_overwrites(tmp_path: Path, keys: Keys) -> None:
+    """Versioning is optional: every object is version ``null``, and the hashes are the
+    guard. An overwrite of a weights file, of the manifest or of its signature (a write
+    outside the workflow) is refused, never loaded."""
+    mem = MemoryStore(versioned=False)
+    pub = publish(mem, tmp_path, keys)
+    assert {f.store_version_id for f in pub.m.files} == {store.NULL_VERSION}
+    cache = _cache(tmp_path)
+    v = verify.verify_for_load(mem, ROLE, pub.pin, keys.policy, cache)
+    weights = _weights(pub)
+    original = (pub.run_dir / weights).read_bytes()
+    assert (v.path / weights).read_bytes() == original
+
+    # The cached copy edited: refetched from the store and still the signed bytes.
+    _tamper(v.path / weights)
+    assert (
+        verify.verify_for_load(mem, ROLE, pub.pin, keys.policy, cache).path / weights
+    ).read_bytes() == original
+
+    # The weights overwritten in the store, and the cache edited too: refused, and the
+    # pin's directory is gone.
+    key = store.run_file_key(NAME, VERSION, RUN, weights)
+    mem.shadow(key, original[:-1] + bytes([original[-1] ^ 1]))
+    fresh = _cache(tmp_path / "fresh")
+    assert _refused(verify.verify_for_load, mem, ROLE, pub.pin, keys.policy, fresh).reason == (
+        "hash_mismatch"
+    )
+    assert _pin_dirs(fresh, pub) == []
+    _tamper(_final(cache, pub) / weights)
+    assert _refused(verify.verify_for_load, mem, ROLE, pub.pin, keys.policy, cache).reason == (
+        "hash_mismatch"
+    )
+    assert _pin_dirs(cache, pub) == []
+
+    # The manifest overwritten (even with a valid signature by the trusted key): not the
+    # lock's hash, refused.
+    mem2 = MemoryStore(versioned=False)
+    pub2 = publish(mem2, tmp_path / "m", keys)
+    records, docs, _ = _upload(MemoryStore(), tmp_path / "other", seed=8)
+    other = _manifest_bytes(records, docs)
+    mem2.shadow(store.manifest_key(NAME, VERSION), other)
+    mem2.shadow(store.manifest_sig_key(NAME, VERSION), keys.manifest.sign("manifest", other))
+    err = _refused(
+        verify.verify_for_load, mem2, ROLE, pub2.pin, keys.policy, _cache(tmp_path / "m")
+    )
+    assert err.reason == "lock_mismatch"
+
+    # The signature overwritten with junk: refused.
+    mem3 = MemoryStore(versioned=False)
+    pub3 = publish(mem3, tmp_path / "s", keys)
+    mem3.shadow(store.manifest_sig_key(NAME, VERSION), b"junk")
+    err = _refused(
+        verify.verify_for_load, mem3, ROLE, pub3.pin, keys.policy, _cache(tmp_path / "s")
+    )
+    assert err.reason == "signature_invalid"
