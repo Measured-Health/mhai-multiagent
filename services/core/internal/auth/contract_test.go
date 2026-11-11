@@ -167,3 +167,46 @@ func TestOpenAPIProblemCodes(t *testing.T) {
 		t.Fatalf("Problem.code enum %v, want httpx.Codes %v", got, want)
 	}
 }
+
+// The change series' reply is oneOf the two series schemas, and they are
+// mutually exclusive: the change series requires change_id, which the
+// hospital series (additionalProperties false) can't have. (anyOf would be
+// a breaking change to the reply, oasdiff says; overlapping oneOf
+// alternatives would make a valid reply invalid.)
+func TestChangeSeriesReplyExclusive(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	at := func(v any, keys ...string) any {
+		for _, k := range keys {
+			m, _ := v.(map[string]any)
+			v = m[k]
+		}
+		return v
+	}
+	schema, _ := at(doc, "paths", "/platform/analytics/changes/{id}/series", "get", "responses", "200", "content", "application/json", "schema").(map[string]any)
+	if schema == nil || schema["oneOf"] == nil || schema["anyOf"] != nil {
+		t.Fatalf("the change series reply: %v, want oneOf", schema)
+	}
+	hosp := at(doc, "components", "schemas", "AnalyticsSeriesOut")
+	change := at(doc, "components", "schemas", "AnalyticsChangeSeriesOut")
+	props, _ := at(hosp, "properties").(map[string]any)
+	if at(hosp, "additionalProperties") != false {
+		t.Fatal("AnalyticsSeriesOut admits other properties: the alternatives can overlap")
+	}
+	req, _ := at(change, "required").([]any)
+	exclusive := false
+	for _, r := range req {
+		if _, ok := props[r.(string)]; !ok {
+			exclusive = true
+		}
+	}
+	if !exclusive {
+		t.Errorf("AnalyticsChangeSeriesOut requires nothing AnalyticsSeriesOut lacks (%v): a reply can match both", req)
+	}
+}

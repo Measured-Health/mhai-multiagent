@@ -266,7 +266,10 @@ with `POST /platform/jobs/retry`, and reads `GET /platform/guardrails?period=7d`
 `GET /platform/guardrails/periods` for each kind (`not_ready` until a period
 after the release is published, then the shape), then
 `GET /platform/analytics?period=month` (not yet published, or the latest
-month with no count of 1 to 4 shown) and one hospital's monthly series.
+month with no count of 1 to 4 shown) and one hospital's monthly series;
+then stores two synthetic 2020 snapshots with a jump in questions, runs the
+scheduler's evaluation on them, follows the flagged change up as a platform
+admin, and checks that an auditor sees the follow-up and is refused a `PUT`.
 Set
 `POSTGRES_PORT`, `NATS_PORT`, `CORE_PORT` and `SMOKE_PROJECT` when the
 defaults clash.
@@ -478,14 +481,29 @@ Platform audience, two-step always; none of these reads is audit-recorded.
   stored snapshot, each cell as stored; medians over the hospitals' shown
   values (a count median between 0 and 5 hidden), trends from the stored
   all-hospitals cells of the latest 12 weeks, 12 months or 8 quarters (one
-  period each). `alerts` is null and `changes` `{unavailable: true}` until
-  7c-3; an area is `{unavailable: true}` when its snapshot couldn't be
+  period each). `alerts` is null; an area is `{unavailable: true}` when its snapshot couldn't be
   computed or read, and `{not_yet: true, first_from}` before the first
   period. `GET /platform/analytics/hospitals/{id}/series?measure&period`
   (`questions_per_clinician`, `needs_review_share`) is the hospital's stored
-  cell per period with the other hospitals' median; a change's series is 404
-  until 7c-3. 30 reads a minute per session across the three; no read
-  computes a figure or touches a clinical table.
+  cell per period with the other hospitals' median. 30 reads a minute per
+  session across the three; no read computes a figure or touches a clinical
+  table.
+- What changed (Plan 7c-3, migration 00022): after each new week snapshot
+  the scheduler compares the week with the month that finished before it,
+  from the two stored bodies' shown cells only (`analytics.Changes`, the
+  thresholds in `analytics.Thresholds`), and opens, updates or closes rows
+  of `analytics_changes` in one transaction with the week's
+  `analytics_change_runs` row. `GET /platform/analytics` serves them as
+  `what_changed {updated_at, window, items}` (the same for every period;
+  `{unavailable: true}` before the first evaluation; `changes` stays
+  `{unavailable: true}`, as widening it would not be additive);
+  `GET /platform/analytics/changes/{id}/series?period` is an open change's
+  measure per stored period. `PUT` and `DELETE
+  /platform/analytics/changes/{id}/follow-up {note?, version}` are platform
+  admins' (`Idempotency-Key`; 409 on a stale version or a closed change, 403
+  for another admin's note; ten writes a minute per session, 429), each
+  audited in its transaction with ids only;
+  the note stays in `analytics_follow_ups`.
 - `GET /platform/guardrails?period=7d|30d|90d` is deprecated: every count
   and share hidden, `Deprecation`, `Sunset` and `Link` headers, 422 after
   the sunset. 6 reads a minute per session across both routes (429).

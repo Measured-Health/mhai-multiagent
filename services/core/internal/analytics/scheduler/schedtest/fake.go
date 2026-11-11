@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler"
 )
@@ -32,6 +33,23 @@ type Fake struct {
 	Inserts   []string // the order periods were stored in
 	FailOnce  map[string]error
 	FailFrozn error
+	// What changed: the runs (week key → run) and every change, open and
+	// closed, in the order opened. FailChanges fails the next ApplyChanges.
+	runs        map[string]analytics.ChangesRun
+	changes     []*Change
+	FailChanges error
+	// Evaluated is the order weeks were evaluated in.
+	Evaluated []string
+}
+
+// Change is one stored change: its id, the flag as last stored, the weeks
+// it opened, was last flagged and closed in, and its version.
+type Change struct {
+	ID           string
+	Flag         analytics.Flag
+	Opened, Last time.Time
+	Closed       *time.Time
+	Version      int
 }
 
 // New is an empty source at clock with the epoch.
@@ -203,3 +221,110 @@ func (f *Fake) All() []scheduler.Stored {
 
 // NoLock is a Scheduler.Lock that always succeeds.
 func NoLock(context.Context) (func(), bool, error) { return func() {}, true, nil }
+
+// ChangesDue is every stored week newer than the newest run, oldest first.
+func (f *Fake) ChangesDue(context.Context) ([]calendar.Period, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var newest time.Time
+	for _, r := range f.runs {
+		if r.Week.From.After(newest) {
+			newest = r.Week.From
+		}
+	}
+	var out []calendar.Period
+	for _, st := range f.stored {
+		if st.Period.Kind == calendar.Week && st.Period.From.After(newest) && !st.Period.From.Before(f.EpochAt) {
+			out = append(out, st.Period)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].From.Before(out[j].From) })
+	return out, nil
+}
+
+// ApplyChanges is the database's: the run once per week, then close, update
+// and open, all or nothing.
+func (f *Fake) ApplyChanges(_ context.Context, w, m calendar.Period, flags []analytics.Flag) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.FailChanges; err != nil {
+		f.FailChanges = nil
+		return err
+	}
+	for _, r := range f.runs {
+		if r.Week.From.After(w.From) {
+			return scheduler.ErrOutOfOrder
+		}
+	}
+	if _, ok := f.runs[Key(w)]; ok {
+		return nil
+	}
+	if _, ok := f.stored[Key(w)]; !ok || !w.Finished(f.Clock) {
+		return errors.New("schedtest: the run policy refuses the week")
+	}
+	if f.runs == nil {
+		f.runs = map[string]analytics.ChangesRun{}
+	}
+	f.runs[Key(w)] = analytics.ChangesRun{Week: w, Month: m, EvaluatedAt: f.Clock}
+	f.Evaluated = append(f.Evaluated, Key(w))
+	flagged := map[string]analytics.Flag{}
+	for _, fl := range flags {
+		flagged[fl.Key()] = fl
+	}
+	open := map[string]bool{}
+	for _, c := range f.changes {
+		if c.Closed != nil {
+			continue
+		}
+		fl, ok := flagged[c.Flag.Key()]
+		if !ok {
+			at := w.From
+			c.Closed = &at
+			continue
+		}
+		c.Flag, c.Last = fl, w.From
+		open[fl.Key()] = true
+	}
+	for _, fl := range flags {
+		if !open[fl.Key()] {
+			f.changes = append(f.changes, &Change{ID: uuid.NewString(), Flag: fl, Opened: w.From, Last: w.From, Version: 1})
+		}
+	}
+	return nil
+}
+
+// AllChanges is every change, open and closed, in the order opened.
+func (f *Fake) AllChanges() []Change {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]Change, 0, len(f.changes))
+	for _, c := range f.changes {
+		out = append(out, *c)
+	}
+	return out
+}
+
+// ChangesNow is the newest run and the open changes as the routes read
+// them (no follow-ups: the fake has no users).
+func (f *Fake) ChangesNow() (*analytics.ChangesRun, []analytics.ChangeRow) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var run *analytics.ChangesRun
+	for _, r := range f.runs {
+		if run == nil || r.Week.From.After(run.Week.From) {
+			r := r
+			run = &r
+		}
+	}
+	var rows []analytics.ChangeRow
+	for _, c := range f.changes {
+		if c.Closed != nil {
+			continue
+		}
+		cur, _ := c.Flag.Current.MarshalJSON()
+		prev, _ := c.Flag.Previous.MarshalJSON()
+		rows = append(rows, analytics.ChangeRow{ID: c.ID, Hospital: c.Flag.Hospital, Area: c.Flag.Area, Measure: c.Flag.Measure,
+			Direction: c.Flag.Direction, Current: cur, Previous: prev, Summary: c.Flag.Summary, Version: c.Version})
+	}
+	return run, rows
+}

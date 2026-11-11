@@ -111,7 +111,8 @@ func sortStrings(s []string) {
 }
 
 // The shape (spec §7.1): every area's keys as the contract, alerts null,
-// changes unavailable until 7c-3, the latest stored period's bounds.
+// changes (and, before the route fills it, what_changed) unavailable, the
+// latest stored period's bounds.
 func TestRenderShape(t *testing.T) {
 	rows := history(t, calendar.Month, day(2026, 10, 1), 3)
 	out, degraded := Render(calendar.Month, rows, day(2026, 7, 1))
@@ -119,7 +120,7 @@ func TestRenderShape(t *testing.T) {
 		t.Error("degraded")
 	}
 	m := marshal(t, out)
-	if keys(m) != "alerts,changes,from,hospitals,period,quality,to,use" {
+	if keys(m) != "alerts,changes,from,hospitals,period,quality,to,use,what_changed" {
 		t.Fatalf("keys %s", keys(m))
 	}
 	if m["period"] != "month" || m["from"] != "2026-10-01T00:00:00.000Z" || m["to"] != "2026-11-01T00:00:00.000Z" {
@@ -128,8 +129,12 @@ func TestRenderShape(t *testing.T) {
 	if m["alerts"] != nil {
 		t.Errorf("alerts %v, want null", m["alerts"])
 	}
-	if c, _ := m["changes"].(map[string]any); keys(c) != "unavailable" || c["unavailable"] != true {
-		t.Errorf("changes %v", m["changes"])
+	// changes is {unavailable: true} always; What changed is the route's
+	// to fill (what_changed).
+	for _, a := range []string{"changes", "what_changed"} {
+		if c, _ := m[a].(map[string]any); keys(c) != "unavailable" || c["unavailable"] != true {
+			t.Errorf("%s %v", a, m[a])
+		}
 	}
 	use := m["use"].(map[string]any)
 	if keys(use) != "median,rows,trend,updated_at" || use["updated_at"] != "2026-11-01T00:20:00.000Z" {
