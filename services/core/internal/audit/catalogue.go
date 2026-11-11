@@ -285,6 +285,12 @@ var Catalogue = map[string]Entry{
 	"emr.connection_tested":       {Type: "hospital_settings", Kind: "emr_connection_tested", Target: entityTarget("connection", "emr_connection")},
 	"emr.source_resumed":          withheld(),
 
+	// Plan 7c-3: follow-ups on What changed. The target is the change; the
+	// note is never in the payload, so none is sent.
+	"analytics.followed_up":      {Type: "platform", Kind: "change_followed_up", Target: entityTarget("change", "analytics_change")},
+	"analytics.follow_up_edited": {Type: "platform", Kind: "change_note_edited", Target: entityTarget("change", "analytics_change")},
+	"analytics.follow_up_undone": {Type: "platform", Kind: "change_follow_up_undone", Target: entityTarget("change", "analytics_change")},
+
 	// Plan 3: the request-token boundary. No mhai-web kind yet.
 	"intelligence.key_rotated":   withheld(),
 	"intelligence.granted":       withheld(),

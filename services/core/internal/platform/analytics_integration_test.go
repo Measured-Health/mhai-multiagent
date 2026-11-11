@@ -153,7 +153,7 @@ func TestAnalyticsShape(t *testing.T) {
 	for _, k := range []calendar.Kind{calendar.Week, calendar.Month, calendar.Quarter} {
 		r := analyticsGet(t, mint(t, platformAdmin(t)), "?period="+string(k))
 		ok(t, string(k), r)
-		top := requireKeys(t, string(k), r.body, "period", "from", "to", "changes", "use", "alerts", "quality", "hospitals")
+		top := requireKeys(t, string(k), r.body, "period", "from", "to", "changes", "use", "alerts", "quality", "hospitals", "what_changed")
 		latest := f.rows[k][len(f.rows[k])-1]
 		if top["period"] != string(k) || top["from"] != stampOf(latest.From) || top["to"] != stampOf(latest.To) {
 			t.Errorf("%s: %v %v %v, want %v", k, top["period"], top["from"], top["to"], latest)
@@ -161,7 +161,7 @@ func TestAnalyticsShape(t *testing.T) {
 		if top["alerts"] != nil {
 			t.Errorf("%s: alerts %v", k, top["alerts"])
 		}
-		if c := requireKeys(t, "changes", top["changes"], "unavailable"); c["unavailable"] != true {
+		if c := requireKeys(t, "changes", top["changes"], "unavailable"); c["unavailable"] != true || top["what_changed"] == nil {
 			t.Errorf("changes %v", c)
 		}
 		if r.hdr.Get("Cache-Control") != "no-store" {

@@ -1093,15 +1093,25 @@ func TestJetStreamEncryptedAtRest(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(2 * time.Second) // let the file store write the block
-	if ok, err := sharedNATS.StoreHasStream(ctx, bus.JobsStream); err != nil || !ok {
-		t.Fatalf("no JOBS directory in the store (%v): the check would prove nothing", err)
-	}
-	found, err := sharedNATS.StoreContains(ctx, marker)
+	// Positive control: JOBS is on disk under the scanned directory and
+	// its blocks hold bytes, at least this message's.
+	blocks, err := sharedNATS.StoreStreamBlocks(ctx, bus.JobsStream)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if found {
-		t.Fatal("a job body is stored in clear")
+	var stored int64
+	for _, size := range blocks {
+		stored += size
+	}
+	if stored < int64(len(marker)) {
+		t.Fatalf("JOBS has no written blocks in the store (%v): the check would prove nothing", blocks)
+	}
+	files, err := sharedNATS.StoreFilesContaining(ctx, marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) > 0 {
+		t.Fatalf("a job body is stored in clear in %v", files)
 	}
 }
 

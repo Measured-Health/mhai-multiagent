@@ -8,6 +8,61 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Platform analytics, part 7c-3: What changed and follow-ups (OpenAPI
+  1.15.0, additive; Plan 7c Tasks 8 and 9). Migration 00022 (planned as
+  00020; EMR and Patient Analysis took 00020 and 00021) adds
+  `analytics_change_runs`, `analytics_changes` and `analytics_follow_ups`
+  and adds the three follow-up actions to `mhai_platform`'s audit append
+  policy (Down restores 00020's). Once a week, after the week's snapshot
+  is stored, the scheduler compares the week with the month that finished
+  before it from the two stored snapshots' shown cells only (Q3: questions
+  at least 10 on both sides and a 50% change; the needs-review share and
+  agreement rate with 20 on both sides and 15 points). Active clinicians
+  and questions per clinician are not compared (ruling C9: a week's
+  distinct clinicians aren't comparable with a month's); they come back
+  later as like-for-like comparisons. Follow-up writes are limited to ten
+  a minute per session (429 `rate_limited`). `GET /platform/analytics` now serves
+  them in a new property, `what_changed {updated_at, window, items}`
+  (`changes` stays `{unavailable: true}`: widening it would not be
+  additive); `GET
+  /platform/analytics/changes/{id}/series` serves an open change's
+  measure per period. `PUT` and `DELETE
+  /platform/analytics/changes/{id}/follow-up` (platform admins,
+  `Idempotency-Key`, a version check) follow a change up with an optional
+  note, edit the author's note or undo it; each write is audited
+  (`analytics.followed_up`, `analytics.follow_up_edited`,
+  `analytics.follow_up_undone`) with ids only, never the note.
+- EMR integration, PR 4 (egress; off by default, profile `emr` only; no
+  migration). `egress-emr`, the emr service's own CONNECT proxy
+  (`services/emr/cmd/egress-emr`, same image): every CONNECT names its
+  connection (`Proxy-Authorization`: the connection id and
+  HMAC-SHA256(K_proxy, id), else 407) and gets only that connection's
+  hosts (403); a name off the list, an IP literal or a port other than 443
+  or 22 is refused before any DNS lookup; a listed name is resolved once,
+  refused if any address is loopback, link-local or metadata, CGNAT,
+  multicast, reserved, an IPv6 form carrying IPv4, inside the internal
+  networks, or private outside the connection's declared ranges, and
+  otherwise the checked address is dialled. No fresh allow-list (120 s):
+  everything refused. The emr service writes the allow-list every 15 s
+  (enabled, unpaused connections whose origin is unchanged, plus one under
+  test), and its HTTP and SSH clients reach a hospital only through the
+  proxy, only at the connection's origin: no cross-origin redirect, none
+  with a credential, 20 MB bodies, 64 KiB headers, JSON depth 64, SSH host
+  key pinned to the typed SHA256 fingerprint. `emr keys proxy-init` makes
+  K_proxy. Compose: `emr` on the internal `backend` and `emr-proxy`
+  networks only; `egress-emr` alone on `egress-emr`. In
+  `docker-compose.yml` postgres and nats also join the internal `backend`
+  network (the emr service's way to them); `deploy/compose.yml` without a
+  profile is unchanged. `deploy/egress-emr/test-egress.sh` checks the
+  proxy end to end on a Docker host. After review: the proxy token is
+  bound to a 5-minute window; lookups are fully qualified; the host's
+  addresses, the routing table's gateways and Docker's default bridge are
+  always refused, and outside development the proxy needs
+  `EGRESS_EMR_INTERNAL_CIDRS` to start (the dev `backend` network has a
+  fixed subnet, `EMR_BACKEND_SUBNET`); tunnels pass half-closes, end after
+  60 s idle or 30 minutes, and one connection holds at most 32 slots;
+  overlapping ranges leave out only the connections involved, with an
+  alert.
 - Patient Analysis, PR 2: the data foundation, **off by default** (OpenAPI
   1.14.0, additive; analysis backend plan Tasks 2 to 4, ADR 0015).
   Migration 00021 (its number is fixed: EMR takes 00020) adds the roles

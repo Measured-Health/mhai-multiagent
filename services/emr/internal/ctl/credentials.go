@@ -64,6 +64,15 @@ type Credentials struct {
 	Env        string
 	Connectors *connector.Registry
 	Now        func() time.Time
+	// Egress lists a connection on egress-emr's allow-list while it is
+	// tested (design §6.4: enabled or being tested); nil in tests of the
+	// ops alone.
+	Egress Holder
+}
+
+// Holder holds a connection on the egress allow-list until release.
+type Holder interface {
+	Hold(ctx context.Context, hospital, conn uuid.UUID) (release func(), err error)
 }
 
 func (s *Credentials) now() time.Time {

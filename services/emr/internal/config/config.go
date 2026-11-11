@@ -35,9 +35,11 @@ type Settings struct {
 	SealKeyPath string
 	// SecretsDir is EMR_SECRETS_DIR, the file secret store (PR 3).
 	SecretsDir string
-	// ProxyURL and ProxyKeyPath are EMR_PROXY_URL and EMR_PROXY_KEY_PATH,
-	// egress-emr and its K_proxy key (PR 4); both or neither.
-	ProxyURL, ProxyKeyPath string
+	// ProxyURL, ProxyKeyPath and EgressDir are EMR_PROXY_URL,
+	// EMR_PROXY_KEY_PATH and EMR_EGRESS_DIR: egress-emr, its K_proxy key
+	// and the directory the allow-list is written to (PR 4); all or none.
+	// With none the service has no way out at all.
+	ProxyURL, ProxyKeyPath, EgressDir string
 	// RuleSetActive is EMR_RULE_SET_ACTIVE: empty means no rule set is
 	// active and every finding is shadow (off by default).
 	RuleSetActive string
@@ -62,6 +64,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		SecretsDir:      get("EMR_SECRETS_DIR"),
 		ProxyURL:        get("EMR_PROXY_URL"),
 		ProxyKeyPath:    get("EMR_PROXY_KEY_PATH"),
+		EgressDir:       get("EMR_EGRESS_DIR"),
 		RuleSetActive:   get("EMR_RULE_SET_ACTIVE"),
 	}
 	var errs []error
@@ -96,9 +99,12 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	if s.DatabaseURL != "" && !s.Development() && !verifyFull(s.DatabaseURL) {
 		errs = append(errs, errors.New("EMR_DATABASE_URL must be a postgres:// URL with sslmode=verify-full outside development"))
 	}
-	if s.ProxyURL != "" || s.ProxyKeyPath != "" {
+	if s.ProxyURL != "" || s.ProxyKeyPath != "" || s.EgressDir != "" {
 		if s.ProxyKeyPath == "" {
 			errs = append(errs, errors.New("EMR_PROXY_KEY_PATH is required with EMR_PROXY_URL"))
+		}
+		if s.EgressDir == "" {
+			errs = append(errs, errors.New("EMR_EGRESS_DIR is required with EMR_PROXY_URL"))
 		}
 		u, err := url.Parse(s.ProxyURL)
 		if s.ProxyURL == "" || err != nil || u.Scheme != "http" || u.Host == "" || u.User != nil || u.Path != "" ||

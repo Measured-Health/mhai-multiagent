@@ -86,6 +86,10 @@ type Deps struct {
 	// emr service does in development; it must match the emr service's
 	// APP_ENV so both derive the same credential origin.
 	EMRDevelopment bool
+	// AfterFollowUpAudit, when set, runs after a follow-up write's audit row
+	// and before commit; its error rolls the write and the row back. Tests
+	// only (A21); server.Register never sets it.
+	AfterFollowUpAudit func() error
 }
 
 func (d Deps) now() time.Time {
@@ -105,7 +109,8 @@ func (d Deps) log() *slog.Logger {
 // Register adds the audit log reads, the chain check and the auditors'
 // writes (verify.go), system health (health.go), the failed jobs (jobs.go),
 // the guardrail statistics (guardrails.go), the analytics reads
-// (analytics.go, analytics_series.go), the hospitals' cloud model
+// (analytics.go, analytics_series.go) and follow-ups
+// (analytics_followup.go), the hospitals' cloud model
 // policies (modelpolicy.go) and the EMR connections (emrconnections.go).
 func Register(m *authz.Mux, d Deps) {
 	read := authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin, authz.RoleAuditor}}
@@ -118,6 +123,7 @@ func Register(m *authz.Mux, d Deps) {
 	registerJobs(m, d)
 	registerGuardrails(m, d)
 	registerAnalytics(m, d)
+	registerFollowUps(m, d)
 	registerModelPolicy(m, d)
 	registerEMRConnections(m, d)
 }

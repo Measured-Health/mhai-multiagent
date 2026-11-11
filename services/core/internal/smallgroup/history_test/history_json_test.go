@@ -27,9 +27,10 @@ import (
 // would send (GET /platform/guardrails/periods on week, month and quarter,
 // GET /platform/guardrails on the deprecated 7d, 30d and 90d, GET
 // /platform/analytics on week, month and quarter, and every hospital's
-// series on both measures; plus the stored bodies, which hold every cell
-// any route sends) is parsed by this package alone, and every analytics and
-// series response is checked against the stored body of its period. The exact
+// series on both measures, What changed and every open change's series;
+// plus the stored bodies, which hold every cell any route sends) is parsed
+// by this package alone, and every analytics, series and change response is
+// checked against the stored bodies of its periods. The exact
 // solver over all of it exposes no hidden cell of 1 to 4 and no
 // hidden-member sum of 1 to 4; no period is unavailable; ineligible weeks,
 // months and quarters are in no response.
@@ -181,6 +182,7 @@ type response struct {
 	raw     []byte
 	rolling bool
 	kind    calendar.Kind // the analytics routes' period
+	item    []byte        // a change series' change, as the changes area sent it
 }
 
 // routes renders what each route would send for the stored snapshot s:
@@ -290,6 +292,8 @@ func (w *world) run(t *testing.T) (*Parser, []response) {
 			err = p.AddAnalytics(r.raw)
 		case r.source == "series":
 			err = p.AddSeries(r.raw, r.kind)
+		case r.source == "change_series":
+			err = p.AddChangeSeries(r.raw, r.kind, r.item)
 		default:
 			err = p.Add(r.source, r.raw, r.period)
 		}
@@ -327,10 +331,31 @@ func (w *world) analytics(t *testing.T, k calendar.Kind) []response {
 	if degraded {
 		t.Fatalf("%s: a stored body is unreadable", k)
 	}
+	// What changed (Plan 7c-3): the newest evaluation, as the route reads
+	// it.
+	run, changes := w.fake.ChangesNow()
+	a.WhatChanged, degraded = analytics.RenderChanges(run, changes, "")
+	if degraded {
+		t.Fatalf("a stored change is unreadable")
+	}
 	raw, _ := json.Marshal(a)
 	out := []response{{source: "analytics", raw: raw, kind: k}}
 	if len(rows) == 0 {
 		return out
+	}
+	// Every open change's series of kind k.
+	for _, c := range changes {
+		item, err := analytics.ChangeOutOf(c, "")
+		if err != nil {
+			t.Fatalf("change %s: %v", c.ID, err)
+		}
+		s, err := analytics.ChangeSeries(k, rows, c.ID, c.Hospital, c.Measure)
+		if err != nil {
+			t.Fatalf("change series %s: %v", c.Measure, err)
+		}
+		sraw, _ := json.Marshal(s)
+		iraw, _ := json.Marshal(item)
+		out = append(out, response{source: "change_series", raw: sraw, kind: k, item: iraw})
 	}
 	ids := make([]string, 0, len(w.onboard))
 	for id := range w.onboard {
@@ -355,7 +380,7 @@ func (w *world) analytics(t *testing.T, k calendar.Kind) []response {
 
 func TestHistoryFromRouteJSON(t *testing.T) {
 	r := rand.New(rand.NewSource(20261107))
-	cells, hidden, exposed := 0, 0, 0
+	cells, hidden, exposed, changes := 0, 0, 0, 0
 	for k := 0; k < historyCount(); k++ {
 		w := randomWorld(r)
 		p, _ := w.run(t)
@@ -366,12 +391,16 @@ func TestHistoryFromRouteJSON(t *testing.T) {
 		cells += rep.Cells
 		hidden += rep.Hidden
 		exposed += rep.ExposedCells
+		changes += p.Changes()
 	}
 	if hidden == 0 {
 		t.Fatal("nothing was hidden: the generator tests nothing")
 	}
-	t.Logf("%d histories: %d published cells, %d hidden, %d hidden cells exposed with 0 or 5 and up (known before they were hidden)",
-		historyCount(), cells, hidden, exposed)
+	if changes == 0 {
+		t.Fatal("no change was flagged: the changes check tests nothing")
+	}
+	t.Logf("%d histories: %d published cells, %d hidden, %d hidden cells exposed with 0 or 5 and up (known before they were hidden); "+
+		"%d changes sent, each checked against the stored cells", historyCount(), cells, hidden, exposed, changes)
 }
 
 // R41a-5, the whole set: replayed in publication order from the JSON, no

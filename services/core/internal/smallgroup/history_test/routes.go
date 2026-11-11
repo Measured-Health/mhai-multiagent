@@ -177,7 +177,7 @@ func (p *Parser) Unavailable() int { return p.unavailable }
 
 // AddAnalytics reads one GET /platform/analytics response.
 func (p *Parser) AddAnalytics(raw []byte) error {
-	top, err := strictObject(raw, "period", "from", "to", "changes", "use", "alerts", "quality", "hospitals")
+	top, err := strictObject(raw, "period", "from", "to", "changes", "use", "alerts", "quality", "hospitals", "what_changed")
 	if err != nil {
 		return err
 	}
@@ -191,6 +191,11 @@ func (p *Parser) AddAnalytics(raw []byte) error {
 	}
 	if string(top["alerts"]) != "null" || !isUnavailable(top["changes"]) {
 		return fmt.Errorf("alerts %s, changes %s", top["alerts"], top["changes"])
+	}
+	if !isUnavailable(top["what_changed"]) {
+		if err := p.AddChanges(top["what_changed"]); err != nil {
+			return fmt.Errorf("what_changed: %w", err)
+		}
 	}
 	var from, to *string
 	_ = json.Unmarshal(top["from"], &from)
