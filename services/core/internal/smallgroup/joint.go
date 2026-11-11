@@ -1131,16 +1131,39 @@ func (k *Knowledge) Add(vars []int, coefs []int64) { k.q.add(vars, coefs) }
 // Exposed reports whether Σ coefs[i]·x[vars[i]] is determined.
 func (k *Knowledge) Exposed(vars []int, coefs []int64) bool { return k.q.exposed(vars, coefs) }
 
-// SetChanged is the whole-set rule (R41a-5, SetViolates) from before to
-// after, under either prime, for a set's hidden members (each the sum of
-// its unknowns).
-func SetChanged(before, after *Knowledge, members [][]int) bool {
-	for i := range before.q {
-		_, db, sb := before.q[i].shape(members)
+// SetShape is what a state of knowledge determines about a set's hidden
+// members, under each prime: the dimension and whether the full sum is
+// determined. Taken once, it is checked against later states (hoisted out
+// of a guard's retry loop).
+type SetShape [2]struct {
+	dim int
+	sum bool
+}
+
+// Shape is members' shape under k.
+func (k *Knowledge) Shape(members [][]int) SetShape {
+	var s SetShape
+	for i := range k.q {
+		_, s[i].dim, s[i].sum = k.q[i].shape(members)
+	}
+	return s
+}
+
+// Changed is the whole-set rule (R41a-5, SetViolates) from this shape to
+// after, under either prime.
+func (s SetShape) Changed(after *Knowledge, members [][]int) bool {
+	for i := range after.q {
 		_, da, sa := after.q[i].shape(members)
-		if SetViolates(db, sb, da, sa) {
+		if SetViolates(s[i].dim, s[i].sum, da, sa) {
 			return true
 		}
 	}
 	return false
+}
+
+// SetChanged is the whole-set rule (R41a-5, SetViolates) from before to
+// after, under either prime, for a set's hidden members (each the sum of
+// its unknowns).
+func SetChanged(before, after *Knowledge, members [][]int) bool {
+	return before.Shape(members).Changed(after, members)
 }

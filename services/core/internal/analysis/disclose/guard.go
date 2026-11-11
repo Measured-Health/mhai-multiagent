@@ -63,12 +63,13 @@ func GuardResponse(raw Raw, forced Forced, known ...Body) (Body, error) {
 	}
 	g.pinned = shownElsewhere
 	extra := Forced{}
+	pr := newPrior(ks)
 	for {
 		hide := g.rules(forced, extra, hiddenElsewhere)
 		if hide[g.sh.pat] {
 			return HiddenWhole(raw.Context), nil
 		}
-		bad := g.check(hide, ks)
+		bad := g.check(hide, pr)
 		if bad < 0 {
 			return g.body(hide), nil
 		}

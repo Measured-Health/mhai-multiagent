@@ -190,31 +190,53 @@ func (s *system) crossSets(all []*sheetState, involving int) []eqn {
 	return out
 }
 
+// prior is what the known bodies publish, built once per GuardResponse:
+// the groups, what they determine, and the shape of each of their sets.
+type prior struct {
+	known  []*sheetState
+	sys    *system
+	before *smallgroup.Knowledge
+	sets   []eqn
+	shapes []smallgroup.SetShape
+}
+
+func newPrior(known []*sheetState) *prior {
+	p := &prior{known: known, sys: &system{vars: map[string]int{}}, before: smallgroup.NewKnowledge()}
+	for _, k := range known {
+		p.sets = append(p.sets, p.sys.learn(p.before, k)...)
+	}
+	for _, e := range p.sys.crossSets(known, -1) {
+		p.before.Add(e.vars, e.coefs)
+		p.sets = append(p.sets, e)
+	}
+	for _, e := range p.sets {
+		p.shapes = append(p.shapes, p.before.Shape(e.hidden))
+	}
+	return p
+}
+
 // check returns a cell of the current context to hide, or −1 when what it
 // publishes with the known bodies passes.
-func (g *guarding) check(hide []bool, known []*sheetState) int {
+func (g *guarding) check(hide []bool, p *prior) int {
 	ch := make([]bool, len(hide))
 	for i, c := range g.sh.cells {
 		ch[i] = hide[i] && !c.virtual
 	}
 	hideVirtual(g.sh, ch, func(i int) bool { return g.sh.cells[i].virtual })
 	cur := &sheetState{sh: g.sh, hide: ch}
-	s := &system{vars: map[string]int{}}
-	before := smallgroup.NewKnowledge()
-	var sets []eqn
-	for _, k := range known {
-		sets = append(sets, s.learn(before, k)...)
-	}
-	for _, e := range s.crossSets(known, -1) {
-		before.Add(e.vars, e.coefs)
-		sets = append(sets, e)
-	}
+	s, before := p.sys, p.before
 	after := before.Clone()
-	sets = append(sets, s.learn(after, cur)...)
-	all := append(append([]*sheetState{}, known...), cur)
+	sets := append([]eqn{}, p.sets...)
+	shapes := append([]smallgroup.SetShape{}, p.shapes...)
+	own := s.learn(after, cur)
+	all := append(append([]*sheetState{}, p.known...), cur)
 	for _, e := range s.crossSets(all, len(all)-1) {
 		after.Add(e.vars, e.coefs)
+		own = append(own, e)
+	}
+	for _, e := range own {
 		sets = append(sets, e)
+		shapes = append(shapes, before.Shape(e.hidden))
 	}
 	bad := map[int]bool{}
 	for _, st := range all {
@@ -228,8 +250,8 @@ func (g *guarding) check(hide []bool, known []*sheetState) int {
 			}
 		}
 	}
-	for _, e := range sets {
-		if len(e.hidden) >= 2 && smallgroup.SetChanged(before, after, e.hidden) {
+	for i, e := range sets {
+		if len(e.hidden) >= 2 && shapes[i].Changed(after, e.hidden) {
 			for _, m := range e.hidden {
 				bad[m[0]] = true
 			}

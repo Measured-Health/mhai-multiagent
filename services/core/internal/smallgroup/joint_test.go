@@ -884,3 +884,24 @@ func TestKnowledgeExposedAndSetChanged(t *testing.T) {
 		}
 	}
 }
+
+// The before shape hoisted out of a loop (the shape taken once, checked
+// against many states of knowledge) decides exactly as SetChanged does.
+func TestSetShapeHoistAgrees(t *testing.T) {
+	r := rand.New(rand.NewSource(11))
+	for trial := 0; trial < 200; trial++ {
+		before := NewKnowledge()
+		for i := 0; i < 3; i++ {
+			before.Add([]int{r.Intn(6), r.Intn(6)}, nil)
+		}
+		members := [][]int{{0}, {1, 2}, {3}}
+		shape := before.Shape(members)
+		after := before.Clone()
+		for i := 0; i < 4; i++ {
+			after.Add([]int{r.Intn(6), r.Intn(6), r.Intn(6)}, nil)
+			if got, want := shape.Changed(after, members), SetChanged(before, after, members); got != want {
+				t.Fatalf("trial %d step %d: hoisted %v, SetChanged %v", trial, i, got, want)
+			}
+		}
+	}
+}
