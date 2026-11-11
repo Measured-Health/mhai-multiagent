@@ -107,3 +107,33 @@ func TestCSVFormulaNeutralised(t *testing.T) {
 		t.Errorf("a value is not display text: %q", out["value_quantity"])
 	}
 }
+
+// Nested and split tags can't rebuild markup after a pass: no '<' followed
+// by a letter, '/', '!' or '?' survives, while comparators do.
+func TestCleanTextNestedAndSplitTags(t *testing.T) {
+	for _, in := range []string{
+		"<scr<x>ipt>alert(1)</script>",
+		"<<x>script>alert(1)<</x>/script>",
+		"<scr<b>ipt>alert(1)</scr<i>ipt>",
+		"<<script>script>alert(1)",
+		"<<<b>b>b>img src=x onerror=alert(1)>",
+		"<i<b>mg src=x onerror=alert(1)>",
+		"<!<x>-- x -->",
+		"</<x>a>",
+		"<\x00script>alert(1)",
+		"<\u200bscript>alert(1)",
+	} {
+		got := CleanText(in, 200)
+		for i := 0; i+1 < len(got); i++ {
+			if c := got[i+1]; got[i] == '<' && (c == '/' || c == '!' || c == '?' || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')) {
+				t.Errorf("CleanText(%q) = %q: markup can open", in, got)
+				break
+			}
+		}
+	}
+	for in, want := range map[string]string{"<0.5": "<0.5", ">100": ">100", "<5.0 and >2": "<5.0 and >2", "a < b": "a < b"} {
+		if got := CleanText(in, 120); got != want {
+			t.Errorf("CleanText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

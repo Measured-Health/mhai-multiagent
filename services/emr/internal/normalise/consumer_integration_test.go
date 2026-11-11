@@ -554,3 +554,47 @@ func TestReplacedByOtherConnectionIgnored(t *testing.T) {
 		t.Errorf("external links %d signals %d", f.n.metrics().ExternalLinks.Load(), len(f.pub.on(".signal")))
 	}
 }
+
+// Security review: an excluded patient's record that also fails another
+// check (a bad unit, a bad status, an unknown category, a bad time) is
+// dropped as excluded with its payload cleared, not kept under another
+// reject code. The same for a patient merged into an excluded one.
+func TestExcludedPatientRecordWithOtherFaultsCleared(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.normalise(t, f.put(t, f.hospital, f.conn, patientRec("p-1", "MRN-1", "1970-01-01", "male"), obsRec("o-1", "1", "p-1", nil)))
+	var pid uuid.UUID
+	if err := f.pool.QueryRow(ctx, `SELECT patient_id FROM emr.patient_links WHERE source_patient_id = 'p-1'`).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`SET LOCAL ROLE mhai_gateway`, `SELECT set_config('mhai.hospital_id', '` + f.hospital.String() + `', true)`} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `SELECT * FROM emr_exclude_patient($1, 'objection')`, pid); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ids := f.put(t, f.hospital, f.conn,
+		obsRec("o-unit", "1", "p-1", map[string]any{"value_quantity": "6.5 mmol/l"}),
+		obsRec("o-status", "1", "p-1", map[string]any{"status": "weird"}),
+		obsRec("o-scope", "1", "p-1", map[string]any{"category": "social-history"}),
+		obsRec("o-time", "1", "p-1", map[string]any{"effective": "2026-11-07T08:00:00"}),
+		obsRec("o-codes", "1", "p-1", map[string]any{"codings": nil}),
+		connector.RawRecord{Kind: "encounter", SourceID: "e-1", SourceVersion: "1", Fields: map[string]any{"patient": "p-1", "class": "XX"}},
+		connector.RawRecord{Kind: "medication", SourceID: "m-1", SourceVersion: "1", Fields: map[string]any{"patient": "p-1", "kind": "other"}},
+	)
+	f.normalise(t, ids)
+	for _, id := range ids {
+		if s, code, payload := f.rawStatus(t, id); s != "rejected" || code != "excluded" || payload {
+			t.Errorf("raw %v: %s %s payload kept %v", id, s, code, payload)
+		}
+	}
+}
