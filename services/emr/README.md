@@ -98,7 +98,45 @@ NATS.
 - `deploy/egress-emr/test-egress.sh` runs the real proxy on the real
   networks (see the script for what it checks).
 
-The real connectors, the normaliser and the rules come in PRs 5 to 9.
+## What is built (PR 5: canonical model, normaliser, patient index)
+
+Migration 00023 (core) adds `emr.raw_records`, the canonical tables
+(`patients`, `patient_links`, `units`, `encounters`, `observations`,
+`medications`), `possible_matches`, `merges` and `unmapped_codes`, each
+keyed by `(hospital_id, id)` under forced RLS, and core's definers
+`emr_patient_in_hospital`, `emr_merge_patients` and `emr_exclude_patient`
+(the emr role can't call them, and has no `DELETE`).
+
+- `internal/sink`: `RawSink`. Keeps only the allow-listed fields of each kind
+  (§14.1; the rest is dropped and counted), cleans display text
+  (`CleanText`: NFC, no markup, control or format characters, capped) and
+  neutralises spreadsheet formulas (`CSVCell`), stores each source version
+  once and announces new ids on `emr.v1.<hid>.fetched` (500 a message).
+- `internal/codes`: the code tables (`codes/testdata/`: synthetic until H6),
+  the reviewed per-connection maps, units and conversions (`maps/`). By code
+  only, never by display text; synthetic tables and unreviewed conversions
+  load in development only (K10).
+- `internal/normalise`: the one normaliser. Strict decimals (the
+  connection's `decimal_separator`, comparators kept as text), FHIR times
+  (a date is a date; no offset, no time; over 10 minutes ahead refused),
+  versions (a new source version is a new row, the old one superseded;
+  `entered-in-error` and `cancelled` mark the current row), unmapped codes
+  and units kept unstandardised and counted. A record it can't read is
+  rejected with a closed code; an excluded patient's records are dropped
+  with their payload. Five failed deliveries dead-letter the batch (ids
+  only). The sweep re-announces rows whose announcement was refused.
+- `internal/index`: patients per hospital by `(connection, source id)`;
+  never by name. Equal MRNs across connections that declare the same
+  `mrn_namespace`, and a source's `replaced-by` within one connection, only
+  make an `emr.possible_matches` row and an id-only signal: a hospital admin
+  confirms each merge through core.
+- `internal/signals`: `emr.v1.<hid>.signal`, ids and a closed kind.
+- `emr unmapped --hospital <id> --connection <id>`: a connection's unmapped
+  codes and counts (no patient data).
+
+The normaliser runs only with `EMR_CODES_DIR` and `EMR_MAPS_DIR` set, and
+only finds work once core has made the `EMR` stream (`CORE_EMR_ENABLED`).
+The connectors and the rules come in PRs 6 to 9.
 
 ## Settings
 
@@ -112,6 +150,7 @@ The real connectors, the normaliser and the rules come in PRs 5 to 9.
 | `EMR_SEAL_KEY_PATH` | the directory of the sealing private keys (`seal-<kid>.key`) |
 | `EMR_SECRETS_DIR` | the file secret store (development and staging only); empty: no store, the credential ops answer nothing |
 | `EMR_PROXY_URL`, `EMR_PROXY_KEY_PATH`, `EMR_EGRESS_DIR` | egress-emr (`http://host:port`), K_proxy and the allow-list directory: all or none; none means no way out |
+| `EMR_CODES_DIR`, `EMR_MAPS_DIR` | the code tables and the maps (the image has `/codes/testdata` and `/maps`): both or none; none means no normaliser |
 | `EMR_RULE_SET_ACTIVE` | later PRs; empty by default |
 
 egress-emr's own settings:

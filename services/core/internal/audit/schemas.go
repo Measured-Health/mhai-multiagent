@@ -406,6 +406,18 @@ func init() {
 	Register("emr.source_resumed", Schema{Fields: withConn("reason", OneOf("platform_resume")),
 		Required: append(slices.Clone(connReq), "reason")})
 
+	// The EMR patient index (EMR design §10.2, §10.6, §12.6; plan Task 16,
+	// written by Task 34's routes): ids, closed reason codes and counts;
+	// never a name, an MRN or a source id. The gateway writes them with its
+	// hospital.
+	Register("emr.patients_merged", Schema{Fields: fields("match_id", id, "merge_id", id, "kept_patient_id", id,
+		"merged_patient_id", id), Required: []string{"match_id", "merge_id", "kept_patient_id", "merged_patient_id"}})
+	Register("emr.patient_match_rejected", Schema{Fields: fields("match_id", id), Required: []string{"match_id"}})
+	Register("emr.patient_excluded", Schema{Fields: fields("patient_id", id,
+		"reason", OneOf("objection", "hospital_policy", "other"), "via", OneOf("route", "cli"),
+		"observations", count, "medications", count, "encounters", count, "raw_records", count, "matches", count),
+		Required: []string{"patient_id", "reason", "via", "observations", "medications", "encounters", "raw_records", "matches"}})
+
 	// Plan 7c-3: a platform admin follows a change up, edits the note or
 	// undoes it (spec §7.4). Ids and whether there is a note only: the note
 	// itself never reaches the log (A15).

@@ -326,3 +326,37 @@ func TestAuditSchemasEMRConnection(t *testing.T) {
 		}
 	}
 }
+
+// The EMR patient index actions (plan Task 16): ids, closed codes and
+// counts only; a name, an MRN or a free-text reason is refused.
+func TestAuditSchemasEMRPatients(t *testing.T) {
+	pid, mid := uuid.NewString(), uuid.NewString()
+	good := map[string]map[string]any{
+		"emr.patients_merged": {"match_id": mid, "merge_id": uuid.NewString(), "kept_patient_id": pid,
+			"merged_patient_id": uuid.NewString()},
+		"emr.patient_match_rejected": {"match_id": mid},
+		"emr.patient_excluded": {"patient_id": pid, "reason": "objection", "via": "route", "observations": 3,
+			"medications": 0, "encounters": 1, "raw_records": 5, "matches": 0},
+	}
+	for action, p := range good {
+		if err := audit.CheckActionPayload(action, p); err != nil {
+			t.Errorf("%s: %v", action, err)
+		}
+		bad := maps.Clone(p)
+		bad["mrn"] = "MRN-SYNTHETIC-1"
+		if err := audit.CheckActionPayload(action, bad); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s with an MRN: %v", action, err)
+		}
+	}
+	for name, p := range map[string]map[string]any{
+		"free-text reason": {"patient_id": pid, "reason": "the patient asked", "via": "cli", "observations": 0,
+			"medications": 0, "encounters": 0, "raw_records": 0, "matches": 0},
+		"name as patient": {"patient_id": "Synthetic Patient", "reason": "other", "via": "cli", "observations": 0,
+			"medications": 0, "encounters": 0, "raw_records": 0, "matches": 0},
+		"no counts": {"patient_id": pid, "reason": "other", "via": "cli"},
+	} {
+		if err := audit.CheckActionPayload("emr.patient_excluded", p); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

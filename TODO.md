@@ -77,6 +77,26 @@ Gates before live use (design §17.6; all of them):
 - [ ] The on-call owner named (H9). Owner: product owner.
 - [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
 
+## EMR: follow-ups from PR 5 (11 Nov)
+
+- [ ] **PR 9 must defer the exclusion purge under a legal hold.** Until then `emr_exclude_patient` purges at once (product owner, 11 Nov: excluding a patient purges its data); no legal hold exists yet. PR 9 moves the purge behind `emr.purge_requests` with the hold check (design §10.6, A41).
+- [ ] **PR 8a adds the alert steps** to `emr_merge_patients` (re-point open alerts) and `emr_exclude_patient` (withdraw them), with `CREATE OR REPLACE` in 00024, and the reject function for matches.
+- [ ] **PR 8a: retry an exclusion or merge on a deadlock (40P01).** Both now take the emr service's link locks and the patient row (race review), so one racing a normaliser batch on several of the same patients can be chosen as the deadlock victim; nothing is left half-done, but core's route must retry or answer 503.
+- [ ] Re-normalise the last 7 days of a local code after its map changes (design §9.4); not built.
+- [ ] Patients are updated in place by a newer Patient resource (the row is the identity); its `raw_id` names the version used. Versioned patient history if the clinical lead wants it.
+- [ ] A date-only medication time is stored as no time (`start_at`/`end_at` null); a date column if the rules need it (PR 7).
+
+## EMR: before scale
+
+The product owner asked for the simplest safe version first (11 Nov). These wait until volume needs them:
+
+- [ ] An outbox for `records.v1.*.created` and `emr.v1.*.signal`: they are published after the commit. A lost `created` is re-announced only when the batch is redelivered (a retraction-only update isn't); a lost signal leaves the match row listed but unannounced.
+- [ ] The normaliser runs one batch (at most 500 records) in one transaction with a savepoint per record, one batch at a time per process; parallel consumers and per-hospital fairness when volume needs them.
+- [ ] The sweep reads at most 5,000 unannounced rows per hospital a minute, as the scheduler's role across hospitals.
+- [ ] The sink inserts one row per transaction; batch inserts (`COPY` or multi-row) for large backfills.
+- [ ] Metrics (`emr_sink_dropped_fields_total`, the normaliser's counts) are in-process counters; export them when the service gets a metrics endpoint.
+- [ ] The cross-connection match query scans patients by `(hospital_id, mrn)`; add a normalised-MRN index per namespace if it shows up in plans.
+
 ## Decided
 
 - **Go alongside Python.** The core service (Go, `services/core/`) owns the API, auth, tenancy, audit and EMR plumbing. The Python services (`services/intelligence/`) keep the models and are reached only over NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md).

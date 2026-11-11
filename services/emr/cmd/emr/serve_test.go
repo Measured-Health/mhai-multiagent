@@ -75,7 +75,8 @@ func TestServeRefusesWithoutSealingKey(t *testing.T) {
 }
 
 func TestUsage(t *testing.T) {
-	for _, args := range [][]string{nil, {"nope"}, {"serve", "x"}} {
+	for _, args := range [][]string{nil, {"nope"}, {"serve", "x"}, {"unmapped", "--hospital", "x", "--connection", "y"},
+		{"unmapped", "--connection", "x"}} {
 		if err := run(args, func(string) string { return "" }, nil); err != errUsage {
 			t.Errorf("%v: %v", args, err)
 		}

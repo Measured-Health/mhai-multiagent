@@ -1,0 +1,28 @@
+# Unit strings a source may send, and the UCUM code each one means (EMR
+# design §9.2). Exact matches only: a string not listed is unmapped, never
+# guessed. A clinical change: review per CONTRIBUTING "Clinical change
+# control".
+version: units-0-synthetic
+units:
+  - ucum: mg/dL
+    aliases: ["mg/dl", "mg%"]
+  - ucum: mmol/L
+    aliases: ["mmol/l", "mmol/Litre"]
+  - ucum: umol/L
+    aliases: ["umol/l", "µmol/L", "µmol/l"]
+  - ucum: g/dL
+    aliases: ["g/dl"]
+  - ucum: g/L
+    aliases: ["g/l"]
+  - ucum: 10*9/L
+    aliases: ["x10^9/L", "10^9/L", "G/L"]
+  - ucum: /min
+    aliases: ["bpm", "beats/min", "breaths/min"]
+  - ucum: mm[Hg]
+    aliases: ["mmHg"]
+  - ucum: Cel
+    aliases: ["°C", "degC"]
+  - ucum: "%"
+    aliases: []
+  - ucum: mg
+    aliases: []

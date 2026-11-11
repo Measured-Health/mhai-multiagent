@@ -8,6 +8,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- EMR integration, PR 5 (canonical model, normaliser and patient index;
+  off by default). Migration **00023** (the plan's 00022; 00021 and 00022
+  were taken by Analysis and Plan 7c-3): `emr.raw_records` (a document
+  record needs its review, A26), the canonical tables with provenance and
+  versions, the per-hospital patient index (MRN and birth date nullable),
+  `possible_matches`, `merges`, `unmapped_codes`; every key carries the
+  hospital, RLS forced. Core's definers `emr_patient_in_hospital`,
+  `emr_merge_patients` (locks both patients, re-checks, one wins) and
+  `emr_exclude_patient`, which purges the patient's canonical rows, raw
+  records and matches at once and keeps only the cleared patient row and
+  its links; the emr role can't call them and can't delete. Audit schemas
+  for `emr.patients_merged`, `emr.patient_match_rejected` and
+  `emr.patient_excluded` (written by PR 8a's routes). In the emr service:
+  `RawSink` (the allow-list, text cleaning, formula neutralising, one row
+  per source version), synthetic code tables and maps (refused outside
+  development), the normaliser (strict decimals and times, versions,
+  unmapped kept unstandardised, dead letters after five deliveries, a sweep
+  for unannounced rows), the patient index (by source id; matches only
+  proposed, never merged), id-only signals, `proto/mhai/emr/v1/events.proto`
+  and `emr unmapped`. The normaliser runs only with `EMR_CODES_DIR` and
+  `EMR_MAPS_DIR` set.
 - Platform analytics, part 7c-3: What changed and follow-ups (OpenAPI
   1.15.0, additive; Plan 7c Tasks 8 and 9). Migration 00022 (planned as
   00020; EMR and Patient Analysis took 00020 and 00021) adds
