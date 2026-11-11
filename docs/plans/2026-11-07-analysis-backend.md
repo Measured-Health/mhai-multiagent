@@ -76,6 +76,7 @@ The constraints of Plans 2, 3, 4 and 7c still hold. Identity comes only from the
 14. **`mhai_analysis_cells` returns one view's raw values** as the design's signature says. The orchestrator calls it five times inside one `REPEATABLE READ` transaction, so the five views see one snapshot.
 15. **`GET /analysis/filters` without `period`** answers the `periods` list and the latest frozen month's lists. With `period` and `start`, it answers that period's lists (M4).
 16. **A location and a setting together are refused** (422 `validation_failed`, `disclose.CheckFilters`; PR 3). A location has its setting, so the pair is the location alone or nothing, and its two parents (`{location}` and `{setting}`) can split the unfiltered view between them: P2 found a hidden cell solvable within that family. Refused, those parents share no family, and what is left between them is part of R-A1, which P2 measures. The design treats every filter pair alike; mhai-web's picker should not offer the pair (H6).
+17. **One record per period (ruling C10, PR 3 review).** Departure 9's parents-first order stays, but each body is now guarded against every body already published for its period (all families, and its blocks and months), not its parents alone: `disclose.Guard(raw, children, published)`. PR 4's orchestrator passes them. This closes R-A1 (design D6).
 
 ## Conflicts found (for the coordinator)
 
