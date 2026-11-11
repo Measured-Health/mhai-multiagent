@@ -177,6 +177,7 @@ func TestModelVersionAllowsHash(t *testing.T) {
 		}
 	}
 }
+
 // A16 (cloud model providers plan, Task 3): query.completed records where
 // the answer's text went (egress) and the cloud outcome code, each from a
 // closed set; a fact from an older worker, without either, stays valid.
