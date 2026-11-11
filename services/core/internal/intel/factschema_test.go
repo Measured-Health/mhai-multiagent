@@ -5,11 +5,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 )
 
 // Every fact intelligence may hand core has a schema in core's audit
@@ -51,6 +56,9 @@ func TestDrainedFactsFitAuditSchemas(t *testing.T) {
 			{"decision": "PASS", "attempts": 1},
 			{"decision": "ESCALATE", "trust_band": nil, "chunk_ids": chunks, "model_versions": manyVersions, "attempts": maxAttempts},
 			{"decision": "REGENERATE", "trust_band": "mid", "chunk_ids": []any{}, "model_versions": versions, "attempts": 0},
+			{"decision": "PASS", "attempts": 1, "egress": "anthropic", "cloud_outcome": "ok", "model_versions": versions},
+			{"decision": "ESCALATE", "attempts": 1, "egress": "none", "cloud_outcome": "egress_blocked"},
+			{"decision": "ESCALATE", "attempts": 1, "egress": "elsewhere", "cloud_outcome": "free text"},
 			{"decision": "free text"}, {"free": "text"}, {},
 		},
 		"query.failed": {
@@ -168,4 +176,103 @@ func TestModelVersionAllowsHash(t *testing.T) {
 			t.Errorf("audit accepted %q", v)
 		}
 	}
+}
+// A16 (cloud model providers plan, Task 3): query.completed records where
+// the answer's text went (egress) and the cloud outcome code, each from a
+// closed set; a fact from an older worker, without either, stays valid.
+// Both intel's schema and the audit registry are held to the same sets.
+func TestQueryCompletedEgressAndOutcome(t *testing.T) {
+	qid := uuid.New()
+	schema := jobFactSchemas["query.completed"].schema
+	base := func(kv ...any) map[string]any {
+		p := map[string]any{"decision": "ESCALATE", "attempts": float64(1), "query_id": qid.String()}
+		for i := 0; i+1 < len(kv); i += 2 {
+			p[kv[i].(string)] = kv[i+1]
+		}
+		return p
+	}
+	accept := []map[string]any{base()}
+	for _, e := range []string{"none", "openai", "anthropic", "xai"} {
+		accept = append(accept, base("egress", e))
+	}
+	outcomes := []string{"ok", "egress_blocked", "budget_exhausted", "unconfigured", "unavailable", "timeout",
+		"auth_failed", "refused", "truncated", "malformed", "insufficient", "retention_unconfirmed"}
+	for _, o := range outcomes {
+		accept = append(accept, base("cloud_outcome", o), base("egress", "anthropic", "cloud_outcome", o))
+	}
+	for i, p := range accept {
+		if !schema.check(p, qid) {
+			t.Errorf("accept %d: intel refused %v", i, p)
+		}
+		if err := audit.CheckActionPayload("query.completed", p); err != nil {
+			t.Errorf("accept %d: audit refused %v: %v", i, p, err)
+		}
+	}
+	refuse := []map[string]any{
+		base("egress", "gemini"), base("egress", "OpenAI"), base("egress", ""), base("egress", float64(1)),
+		base("egress", nil), base("egress", "sent the note to anthropic"), base("egress", []any{"openai"}),
+		base("cloud_outcome", "nope"), base("cloud_outcome", "OK"), base("cloud_outcome", float64(0)),
+		base("cloud_outcome", nil), base("cloud_outcome", "timeout: Adaeze Okafor"), base("cloud_outcome", map[string]any{}),
+		base("cloud", "anthropic"),
+	}
+	for i, p := range refuse {
+		if schema.check(p, qid) {
+			t.Errorf("refuse %d: intel accepted %v", i, p)
+		}
+		if err := audit.CheckActionPayload("query.completed", p); err == nil {
+			t.Errorf("refuse %d: audit accepted %v", i, p)
+		}
+	}
+	// The Go lists are exactly these (the worker's are pinned below).
+	if !slices.Equal(config.CloudOutcomes, outcomes) {
+		t.Errorf("config.CloudOutcomes %v", config.CloudOutcomes)
+	}
+	if !slices.Equal(config.EgressValues(), []string{"none", "anthropic", "openai", "xai"}) {
+		t.Errorf("config.EgressValues %v", config.EgressValues())
+	}
+}
+
+// K14: Go's outcome, provider and egress lists equal the worker's
+// (services/intelligence/intelligence/boundary/cloud/vocab.py, read as
+// text), so the two sides can't drift.
+func TestOutcomeVocabularyMatchesWorker(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "intelligence", "intelligence", "boundary", "cloud", "vocab.py")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	for name, want := range map[string][]string{
+		"OUTCOMES":  config.CloudOutcomes,
+		"PROVIDERS": config.CloudProviderNames,
+		"EGRESS":    config.EgressValues(),
+	} {
+		got := pyStrings(t, src, name)
+		if !slices.Equal(sorted(got), sorted(want)) {
+			t.Errorf("vocab.%s = %v, Go has %v", name, got, want)
+		}
+	}
+}
+
+// pyStrings returns the quoted strings of the tuple, list or set assigned
+// to name at the start of a line in src. It reads literal strings only, so
+// vocab.py spells each list out (no `*PROVIDERS` unpacking).
+func pyStrings(t *testing.T, src, name string) []string {
+	t.Helper()
+	re := regexp.MustCompile(`(?ms)^` + regexp.QuoteMeta(name) + `\b[^=\n]*=\s*[(\[{](.*?)[)\]}]`)
+	m := re.FindStringSubmatch(src)
+	if m == nil {
+		t.Fatalf("vocab.py has no %s = (...)", name)
+	}
+	var out []string
+	for _, s := range regexp.MustCompile(`["']([^"']*)["']`).FindAllStringSubmatch(m[1], -1) {
+		out = append(out, s[1])
+	}
+	return out
+}
+
+func sorted(s []string) []string {
+	c := slices.Clone(s)
+	slices.Sort(c)
+	return c
 }

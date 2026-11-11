@@ -30,17 +30,35 @@ from nats.aio.client import Client
 from nats.js import api
 
 from intelligence.boundary import envelope, jobs_repo
+from intelligence.boundary.cloud import vocab
+from intelligence.boundary.cloud.apikey import ApiKey
+from intelligence.boundary.cloud.client import CloudModelClient
+from intelligence.boundary.cloud.settings import ProviderSettings
 from intelligence.boundary.config import WorkerSettings
 from intelligence.boundary.db import Database, DatabaseError
 from intelligence.boundary.jobs.run_query import JobSettings, RunQuery
 from intelligence.boundary.keys import TrustedKeys
-from intelligence.boundary.models import ModelClient, StubModelClient
+from intelligence.boundary.models import (
+    Generation,
+    ModelClient,
+    ModelRouter,
+    StubModelClient,
+    Verification,
+    stub_parts,
+)
 from intelligence.boundary.operations import Operations
 from intelligence.boundary.pb import envelope_pb2, pipeline_pb2
 from intelligence.boundary.replay import JtiSet
 from intelligence.boundary.services import pipeline
 from intelligence.boundary.verify import Verifier
 from intelligence.boundary.worker import Worker
+from tests.boundary.cloud.conftest import (
+    BASE_URL,
+    FAKE_KEY,
+    MODEL,
+    CapturingTransport,
+    FakeAdapter,
+)
 from tests.boundary.conftest import (
     INTELLIGENCE_DB_PASSWORD,
     INTELLIGENCE_DB_USER,
@@ -205,7 +223,7 @@ class Env:
 
     async def start(
         self,
-        models: ModelClient,
+        models: ModelClient | ModelRouter,
         *,
         settings: JobSettings | None = None,
         max_concurrency: int = 2,
@@ -317,7 +335,29 @@ async def su(pg: Postgres) -> psycopg.AsyncConnection[Any]:
     return await psycopg.AsyncConnection.connect(pg.url, autocommit=True)
 
 
-async def seed_query(pg: Postgres, hid: str = HOSPITAL_A, question: str = "") -> str:
+async def set_policy(conn: Any, hid: str, provider: str | None) -> None:
+    """The hospital's model policy, as the platform admin sets it (core's
+    routes; here the superuser): provider None is no policy (local)."""
+    if provider is None:
+        await conn.execute("DELETE FROM hospital_model_policy WHERE hospital_id = %s", (hid,))
+        return
+    await conn.execute(
+        "INSERT INTO hospital_model_policy (hospital_id, cloud_provider, agreement_ref) "
+        "VALUES (%s, %s, 'DEMO-SYNTHETIC') ON CONFLICT (hospital_id) DO UPDATE "
+        "SET cloud_provider = EXCLUDED.cloud_provider, agreement_ref = EXCLUDED.agreement_ref",
+        (hid, provider),
+    )
+
+
+async def seed_query(
+    pg: Postgres,
+    hid: str = HOSPITAL_A,
+    question: str = "",
+    provider: str | None = None,
+    patient: dict[str, Any] | None = None,
+) -> str:
+    """A queued question. The hospital's policy is set first (provider None:
+    none), so core's trigger routes the row: local, or cloud:<provider>."""
     qid = str(uuid.uuid4())
     async with await su(pg) as conn:
         for h, code in ((HOSPITAL_A, "T11A"), (HOSPITAL_B, "T11B")):
@@ -326,6 +366,7 @@ async def seed_query(pg: Postgres, hid: str = HOSPITAL_A, question: str = "") ->
                 "VALUES (%s, %s, %s, 'active', 'UTC') ON CONFLICT (id) DO NOTHING",
                 (h, "Synthetic Hospital " + code, code),
             )
+        await set_policy(conn, hid, provider)
         await conn.execute(
             "INSERT INTO kb_chunks (chunk_id, hospital_id, content, chunk_type) "
             "VALUES ('KB#0001', NULL, 'Synthetic shared guideline.', 'guideline') "
@@ -352,7 +393,9 @@ async def seed_query(pg: Postgres, hid: str = HOSPITAL_A, question: str = "") ->
                 qid,
                 hid,
                 question or "Synthetic question for a synthetic patient",
-                json.dumps({"note": "synthetic", "marker": MARKER}),
+                json.dumps(
+                    patient if patient is not None else {"note": "synthetic", "marker": MARKER}
+                ),
                 RID,
             ),
         )
@@ -428,6 +471,80 @@ def started(stub: StubModelClient, stage: str) -> Callable[[], Awaitable[bool]]:
     return p
 
 
+# --- the two client kinds (plan Task 10, design section 12) ---------------------------
+
+KINDS = ("stub", "cloud_fake")
+PROVIDER = {"stub": None, "cloud_fake": "anthropic"}
+
+
+class Controlled:
+    """A client with the stub's stage controls (fail, raises, block,
+    started, calls) in front of it, so the job tests run unchanged on the
+    cloud path."""
+
+    def __init__(self, inner: Any, controls: StubModelClient) -> None:
+        self.inner = inner
+        self.controls = controls
+
+    def mask(self, text: str) -> str:
+        self.controls._enter("mask")
+        return self.inner.mask(text)  # type: ignore[no-any-return]
+
+    def generate(self, *args: Any, **kw: Any) -> Generation:
+        self.controls._enter("generate")
+        return self.inner.generate(*args, **kw)  # type: ignore[no-any-return]
+
+    def verify(self, generation: Generation) -> Verification:
+        self.controls._enter("verify")
+        return self.inner.verify(generation)  # type: ignore[no-any-return]
+
+    def model_versions(self) -> dict[str, str]:
+        return self.inner.model_versions()  # type: ignore[no-any-return]
+
+
+@dataclass
+class CloudFake:
+    """cloud_fake: a ModelRouter whose anthropic client is a CloudModelClient
+    over FakeAdapter and the stub's local parts (no models), every request
+    captured, nothing sent anywhere."""
+
+    router: ModelRouter
+    cloud: CloudModelClient
+    adapter: FakeAdapter
+    transport: CapturingTransport
+    controls: StubModelClient
+
+
+def cloud_fake(
+    adapter: Any = None,
+    *,
+    provider: str = "anthropic",
+    transport: CapturingTransport | None = None,
+    **controls: Any,
+) -> CloudFake:
+    """FakeAdapter by default; a real adapter (PR D) with the transport
+    that answers for it."""
+    build, versions = stub_parts()
+    adapter = adapter or FakeAdapter()
+    transport = transport or CapturingTransport()
+    base = BASE_URL if provider == "anthropic" else vocab.BASE_URLS[provider]
+    settings = ProviderSettings(provider, MODEL, ApiKey(FAKE_KEY), None, base)
+    cloud = CloudModelClient(settings, adapter, build, versions, transport, sleep=lambda s: None)
+    ctl = StubModelClient(**controls)
+    router = ModelRouter(StubModelClient(), {provider: Controlled(cloud, ctl)})
+    return CloudFake(router, cloud, adapter, transport, ctl)
+
+
+def models_for(kind: str, **controls: Any) -> tuple[Any, StubModelClient]:
+    """(what the worker runs, the stub whose controls and counters the test
+    reads) for a client kind."""
+    if kind == "stub":
+        stub = StubModelClient(**controls)
+        return stub, stub
+    f = cloud_fake(**controls)
+    return f.router, f.controls
+
+
 # --- the tests ---------------------------------------------------------------------
 
 
@@ -457,7 +574,9 @@ async def test_job_runs_to_completed(
         "chunk_ids",
         "model_versions",
         "attempts",
+        "egress",
     }
+    assert payload["egress"] == "none"  # no cloud_outcome on the local route
     assert payload["query_id"] == qid and payload["decision"] == "PASS"
     assert payload["attempts"] == 1
     # Retrieval saw shared guidelines only, and the cited id is one of them.
@@ -470,7 +589,7 @@ async def test_job_runs_to_completed(
     assert "KB#0001" in seen and set(seen) <= shared
     assert not {"KB#A-PAT", "KB#A-REF", "KB#B-GUIDE"} & set(seen)
     assert len(payload["chunk_ids"]) == 1 and set(payload["chunk_ids"]) <= shared
-    assert payload["model_versions"] == {"stub": "1"}
+    assert payload["model_versions"] == {"stub": "1", "cca_route": "local"}
     assert await env.settled()
     async with await su(postgres) as conn:
         cur = await conn.execute(
@@ -478,7 +597,14 @@ async def test_job_runs_to_completed(
             "hospital_id::text FROM clinical_decisions WHERE query_id = %s",
             (qid,),
         )
-        assert await cur.fetchone() == ("PASS", True, False, "high", {"stub": "1"}, HOSPITAL_A)
+        assert await cur.fetchone() == (
+            "PASS",
+            True,
+            False,
+            "high",
+            {"stub": "1", "cca_route": "local"},
+            HOSPITAL_A,
+        )
     # The question went to the models masked (the stub's mask replaces it).
     assert stub.seen_questions == [StubModelClient.MASKED]
     # No question text, patient data or answer in any log line (spec §10.3).
@@ -515,15 +641,16 @@ async def test_run_query_writes_masked_copy_and_timings(
     assert all(isinstance(v, int) and v >= 0 for v in timings.values())
 
 
+@pytest.mark.parametrize("kind", KINDS)
 async def test_redelivery_after_completion_acks_without_second_decision(
-    make_env: MakeEnv, postgres: Postgres
+    kind: str, make_env: MakeEnv, postgres: Postgres
 ) -> None:
     """A4: the same message again after completion is acked; still one
     decision and one outbox fact."""
     env = await make_env()
-    qid = await seed_query(postgres)
-    stub = StubModelClient()
-    await env.start(stub)
+    qid = await seed_query(postgres, provider=PROVIDER[kind])
+    models, stub = models_for(kind)
+    await env.start(models)
     subject, headers, body = await env.publish(qid)
     assert await until(lambda: status_is(postgres, qid, "completed"))
     assert await env.settled()
@@ -536,25 +663,26 @@ async def test_redelivery_after_completion_acks_without_second_decision(
     assert (await row(postgres, qid))["attempts"] == 1
 
 
+@pytest.mark.parametrize("kind", KINDS)
 async def test_killed_worker_job_redelivered_to_other_copy(
-    make_env: MakeEnv, postgres: Postgres
+    kind: str, make_env: MakeEnv, postgres: Postgres
 ) -> None:
     """Two copies on the one durable consumer. The first is killed mid-job
     with no ack; after ack_wait JetStream redelivers to the other, which
     finds the dead copy's lease still live, Naks until it ends (F1), then
     claims and completes. Nothing is lost: one decision."""
     env = await make_env(ack_wait=2)
-    qid = await seed_query(postgres)
+    qid = await seed_query(postgres, provider=PROVIDER[kind])
     gate = env.gate()
-    dying = StubModelClient(block={"generate": gate})
+    dying_models, dying = models_for(kind, block={"generate": gate})
     settings = JobSettings(lease_s=4, tick=0.05, nak_delays=FAST_NAKS)
-    w1, _ = await env.start(dying, settings=settings)
+    w1, _ = await env.start(dying_models, settings=settings)
     await env.publish(qid)
     assert await until(started(dying, "generate"))
     assert (await row(postgres, qid))["attempts"] == 1
     await w1.abort()  # killed: no ack, no Nak, no further write
-    survivor = StubModelClient()
-    await env.start(survivor, settings=settings)
+    survivor_models, survivor = models_for(kind)
+    await env.start(survivor_models, settings=settings)
     assert await until(lambda: status_is(postgres, qid, "completed"), timeout=30)
     r = await row(postgres, qid)
     assert r["attempts"] == 2
@@ -567,18 +695,21 @@ async def test_killed_worker_job_redelivered_to_other_copy(
     assert await count(postgres, "decisions", qid) == 1
 
 
-async def test_two_workers_race_one_decision(make_env: MakeEnv, postgres: Postgres) -> None:
+@pytest.mark.parametrize("kind", KINDS)
+async def test_two_workers_race_one_decision(
+    kind: str, make_env: MakeEnv, postgres: Postgres
+) -> None:
     """Two workers hold the same message at once (the first one's lease
     expired, so the redelivery re-claims). Both finish their models; only
     the claim holder writes. Exactly one decision and one fact."""
     env = await make_env(ack_wait=2)
-    qid = await seed_query(postgres)
+    qid = await seed_query(postgres, provider=PROVIDER[kind])
     gate_a, gate_b = env.gate(), env.gate()
-    a = StubModelClient(block={"verify": gate_a})
-    b = StubModelClient(block={"verify": gate_b})
+    a_models, a = models_for(kind, block={"verify": gate_a})
+    b_models, b = models_for(kind, block={"verify": gate_b})
     settings = JobSettings(tick=0.05, nak_delays=FAST_NAKS)
     # One slot: A can't take its own redelivery while it holds the job.
-    await env.start(a, settings=settings, max_concurrency=1)
+    await env.start(a_models, settings=settings, max_concurrency=1)
     await env.publish(qid)
     assert await until(started(a, "verify"))
     async with await su(postgres) as conn:  # A's lease runs out
@@ -586,7 +717,7 @@ async def test_two_workers_race_one_decision(make_env: MakeEnv, postgres: Postgr
             "UPDATE clinical_queries SET lease_until = now() - interval '1 s' WHERE id = %s",
             (qid,),
         )
-    await env.start(b, settings=settings)
+    await env.start(b_models, settings=settings)
     assert await until(started(b, "verify"), timeout=20)
     assert (await row(postgres, qid))["attempts"] == 2
     gate_a.set()
@@ -681,14 +812,15 @@ async def test_foreign_query_id_is_not_found_and_reads_nothing(
     assert not any(qb in e.sql for e in entries)  # parameters only, never in the SQL
 
 
+@pytest.mark.parametrize("kind", KINDS)
 async def test_completion_commit_writes_outbox_atomically(
-    make_env: MakeEnv, postgres: Postgres
+    kind: str, make_env: MakeEnv, postgres: Postgres
 ) -> None:
     """A13 (worker side): the worker dies right after the commit, before
     the ack. The outbox fact is there; the redelivery acks without a
     second decision."""
     env = await make_env(ack_wait=2)
-    qid = await seed_query(postgres)
+    qid = await seed_query(postgres, provider=PROVIDER[kind])
     crashed: list[int] = []
 
     def crash() -> None:
@@ -696,8 +828,8 @@ async def test_completion_commit_writes_outbox_atomically(
             crashed.append(1)
             raise RuntimeError("synthetic crash between commit and ack")
 
-    stub = StubModelClient()
-    await env.start(stub, after_commit=crash)
+    models, stub = models_for(kind)
+    await env.start(models, after_commit=crash)
     await env.publish(qid)
     assert await until(lambda: status_is(postgres, qid, "completed"))
     assert await count(postgres, "outbox", qid, "query.completed") == 1
@@ -710,15 +842,16 @@ async def test_completion_commit_writes_outbox_atomically(
     assert await count(postgres, "outbox", qid) == 1
 
 
+@pytest.mark.parametrize("kind", KINDS)
 async def test_poison_job_dead_letters_after_five_deliveries(
-    make_env: MakeEnv, postgres: Postgres
+    kind: str, make_env: MakeEnv, postgres: Postgres
 ) -> None:
     """A20: a model that is always unavailable: five deliveries (the Nak
     delays shortened), then Term, one dead letter, failed, query.failed."""
     env = await make_env()
-    qid = await seed_query(postgres)
-    stub = StubModelClient(fail={"generate": "unavailable"})
-    await env.start(stub)
+    qid = await seed_query(postgres, provider=PROVIDER[kind])
+    models, stub = models_for(kind, fail={"generate": "unavailable"})
+    await env.start(models)
     await env.publish(qid)
     dead = await env.dead_letters(1, timeout=20)
     assert len(dead) == 1
@@ -738,8 +871,9 @@ async def test_poison_job_dead_letters_after_five_deliveries(
     assert len(await env.dead_letters(1, timeout=1)) == 0
 
 
+@pytest.mark.parametrize("kind", KINDS)
 async def test_retried_question_after_five_attempts_completes(
-    make_env: MakeEnv, postgres: Postgres
+    kind: str, make_env: MakeEnv, postgres: Postgres
 ) -> None:
     """Plan 4 Task 12: attempts never goes down, so the cap is per platform
     retry (retry_count, 00016), as approve_correction's. A question failed
@@ -748,9 +882,9 @@ async def test_retried_question_after_five_attempts_completes(
     second budget) and completes, instead of failing at once on the old
     lifetime cap."""
     env = await make_env()
-    qid = await seed_query(postgres)
-    stub = StubModelClient(fail={"generate": "unavailable"})
-    await env.start(stub)
+    qid = await seed_query(postgres, provider=PROVIDER[kind])
+    models, stub = models_for(kind, fail={"generate": "unavailable"})
+    await env.start(models)
     await env.publish(qid)
     dead = await env.dead_letters(1, timeout=20)
     assert [(d.code, d.attempts) for _, d in dead] == [("unavailable", 5)]
@@ -772,14 +906,17 @@ async def test_retried_question_after_five_attempts_completes(
     assert await env.settled()
 
 
-async def test_cancelled_between_stages_stops(make_env: MakeEnv, postgres: Postgres) -> None:
+@pytest.mark.parametrize("kind", KINDS)
+async def test_cancelled_between_stages_stops(
+    kind: str, make_env: MakeEnv, postgres: Postgres
+) -> None:
     """A21 (worker side): cancelled while generation runs: no decision, no
     query.completed, the message acked."""
     env = await make_env()
-    qid = await seed_query(postgres)
+    qid = await seed_query(postgres, provider=PROVIDER[kind])
     gate = env.gate()
-    stub = StubModelClient(block={"generate": gate})
-    await env.start(stub)
+    models, stub = models_for(kind, block={"generate": gate})
+    await env.start(models)
     await env.publish(qid)
     assert await until(started(stub, "generate"))
     async with await su(postgres) as conn:
@@ -852,8 +989,9 @@ async def test_refused_job_touches_no_database(
     assert (await row(postgres, qid))["status"] == "queued"
 
 
+@pytest.mark.parametrize("kind", KINDS)
 async def test_deadline_marks_failed(
-    make_env: MakeEnv, postgres: Postgres, caplog: pytest.LogCaptureFixture
+    kind: str, make_env: MakeEnv, postgres: Postgres, caplog: pytest.LogCaptureFixture
 ) -> None:
     """F6, both ways. A job token that expired in the queue: Term and a
     dead letter deadline_exceeded with no alert and no database (core marks
@@ -862,9 +1000,9 @@ async def test_deadline_marks_failed(
     caplog.set_level(logging.INFO)
     env = await make_env()
     # 1. Expired in the queue.
-    q1 = await seed_query(postgres)
-    stub1 = StubModelClient()
-    w, _ = await env.start(stub1, max_concurrency=1)
+    q1 = await seed_query(postgres, provider=PROVIDER[kind])
+    models1, stub1 = models_for(kind)
+    w, _ = await env.start(models1, max_concurrency=1)
     now = int(time.time())
     await env.publish(q1, ttl=60, iat=now - 120)
     dead = await env.dead_letters(1)
@@ -880,10 +1018,10 @@ async def test_deadline_marks_failed(
     await w.abort()
 
     # 2. Past exp mid-run.
-    q2 = await seed_query(postgres)
+    q2 = await seed_query(postgres, provider=PROVIDER[kind])
     gate = env.gate()
-    stub2 = StubModelClient(block={"generate": gate})
-    w2, _ = await env.start(stub2, max_concurrency=1)
+    models2, stub2 = models_for(kind, block={"generate": gate})
+    w2, _ = await env.start(models2, max_concurrency=1)
     await env.publish(q2, ttl=3)
     assert await until(started(stub2, "generate"))
     assert await until(lambda: status_is(postgres, q2, "failed"), timeout=10)
@@ -895,7 +1033,7 @@ async def test_deadline_marks_failed(
     assert await count(postgres, "decisions", q2) == 0
     # The abandoned thread still holds the only slot (T9 minor): the next
     # job waits in the queue ...
-    q3 = await seed_query(postgres)
+    q3 = await seed_query(postgres, provider=PROVIDER[kind])
     await env.publish(q3)
     await asyncio.sleep(1.5)
     assert (await row(postgres, q3))["status"] == "queued"
@@ -916,15 +1054,16 @@ class FakeClock:
         return self.t
 
 
-async def test_wip_sent_on_long_stage(make_env: MakeEnv, postgres: Postgres) -> None:
+@pytest.mark.parametrize("kind", KINDS)
+async def test_wip_sent_on_long_stage(kind: str, make_env: MakeEnv, postgres: Postgres) -> None:
     """A 25 s stage (on a test clock) sends +WIP, so JetStream doesn't
     redeliver a job that is still running."""
     env = await make_env()
-    qid = await seed_query(postgres)
+    qid = await seed_query(postgres, provider=PROVIDER[kind])
     gate = env.gate()
-    stub = StubModelClient(block={"generate": gate})
+    models, stub = models_for(kind, block={"generate": gate})
     clock = FakeClock()
-    w, _ = await env.start(stub, wip_clock=clock)
+    w, _ = await env.start(models, wip_clock=clock)
     sent: list[tuple[str, bytes]] = []
     nc = w.connection
     real = nc.publish

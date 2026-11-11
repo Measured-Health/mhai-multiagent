@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.4
 
 require (
+	github.com/Measured-Health/mhai-multiagent/services/gokit v0.0.0
 	github.com/bufbuild/protocompile v0.14.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
@@ -89,3 +90,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250929231259-57b25ae835d4 // indirect
 	google.golang.org/grpc v1.75.1 // indirect
 )
+
+// gokit is the module core shares with the emr service (ADR 0014). It is
+// always built from this repository, never fetched.
+replace github.com/Measured-Health/mhai-multiagent/services/gokit => ../gokit

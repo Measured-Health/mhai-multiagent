@@ -32,6 +32,11 @@ the [review checklist](#review-checklist).
   it entails the claim.
 - Never build anything that spans patients: cross-patient summaries,
   entity graphs, clustering, or "similar cases" lookups.
+- Exception ([ADR 0015](docs/adr/0015-population-analysis-under-disclosure-control.md)):
+  `services/core/internal/analysis` may aggregate across patients of one
+  hospital, and serve de-identified rows, under its disclosure rules. The
+  rule stays absolute for intelligence, retrieval, prompts, models and
+  every NATS operation.
 
 ## 2. Fail closed (#2)
 
@@ -114,6 +119,8 @@ the [review checklist](#review-checklist).
 - [ ] Does any new retrieval, cache, prompt or index path take and
       honour `patient_id`?
 - [ ] Could any new id value collide with a reserved one?
+- [ ] Does any analysis table, function or result reach a worker role or
+      a NATS subject? (T22)
 - [ ] On every failure path, does the result escalate rather than
       invent a value?
 - [ ] Is any per-request value written onto a shared object?

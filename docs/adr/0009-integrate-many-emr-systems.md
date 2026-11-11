@@ -1,8 +1,9 @@
 # 0009. Integrate many EMR systems through one canonical model
 
-- **Status:** Proposed
+- **Status:** Accepted 2026-11-07 by the product owner, with the EMR integration design ([design](../specs/2026-11-07-emr-integration-design.md), [plan](../plans/2026-11-07-emr-integration.md))
 - **Date:** 2026-10-17
-- **Deciders:** product owner, frontend lead, backend lead (to confirm)
+- **Deciders:** product owner, frontend lead, backend lead
+- **Extended by:** [ADR 0014](0014-separate-emr-service-and-document-route.md): a separate `services/emr/` with its own credentials and egress, and the reviewed document route for sources that hold only scanned records.
 
 ## Context
 

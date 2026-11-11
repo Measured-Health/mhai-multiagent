@@ -30,13 +30,13 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/queries"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 const (
@@ -636,4 +636,115 @@ func TestPostQueriesHospitalDeactivatedDuringSubmit(t *testing.T) {
 	if js := jobs(t, hid); len(js) != 0 {
 		t.Fatalf("%d jobs published for a deactivated hospital", len(js))
 	}
+}
+
+// A14, I-2 (cloud model providers plan, Task 3): generated_by on the result
+// is the route that produced the answer, read from the decision's own
+// model_versions: never the route the row was inserted with, and never the
+// hospital's policy now. Another hospital's query still 404s.
+func TestResultGeneratedBy(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, 10)
+	hid := seedHospital(t)
+	clin := seedUser(t, hid, authz.RoleClinician)
+	tok := mint(t, clin)
+	policy := func(provider string) {
+		t.Helper()
+		var p, ref any
+		if provider != "" {
+			p, ref = provider, "AGR-2026-0042"
+		}
+		if _, err := super.Exec(ctx, `INSERT INTO hospital_model_policy (hospital_id, cloud_provider, agreement_ref) VALUES ($1, $2, $3)
+			ON CONFLICT (hospital_id) DO UPDATE SET cloud_provider = EXCLUDED.cloud_provider, agreement_ref = EXCLUDED.agreement_ref`,
+			hid, p, ref); err != nil {
+			t.Fatal(err)
+		}
+	}
+	route := func(id string) string {
+		t.Helper()
+		var r string
+		if err := super.QueryRow(ctx, `SELECT model_route FROM clinical_queries WHERE id = $1`, id).Scan(&r); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	// complete stores a decision with these model_versions and completes the row.
+	complete := func(id, decision, versions string, verified bool) {
+		t.Helper()
+		if _, err := super.Exec(ctx, `INSERT INTO clinical_decisions (id, hospital_id, query_id, response_text, citations_json,
+			trust_score, hga_decision, guardrail_report_json, retrieval_ms, generation_ms, verified, degraded, failed_agents, model_versions, trust_band)
+			VALUES ($1, $2, $3, CASE WHEN $5 THEN 'Synthetic answer' ELSE '' END, '[]', CASE WHEN $5 THEN 0.8 END, $4, '{}', 10, 20,
+			        $5, NOT $5, CASE WHEN $5 THEN '{}'::text[] ELSE '{CCA}'::text[] END, $6::jsonb, CASE WHEN $5 THEN 'high' END)`,
+			uuid.New(), hid, id, decision, verified, versions); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := super.Exec(ctx, `UPDATE clinical_queries SET status = 'completed', progress = 1, current_stage = 'decision' WHERE id = $1`,
+			id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := func(id, tok string) resp {
+		t.Helper()
+		return e.do(t, "GET", "/queries/"+id+"/result", tok, "", nil)
+	}
+
+	// 1. Inserted as cloud:anthropic; the policy was switched off before the
+	// claim, so the worker ran it local and says so.
+	policy("anthropic")
+	switched := submit(t, e, tok)
+	if r := route(switched); r != "cloud:anthropic" {
+		t.Fatalf("inserted route %q", r)
+	}
+	policy("")
+	complete(switched, "PASS", `{"cca_route":"local","cca":"qwen2.5:7b"}`, true)
+	r := result(switched, tok)
+	if r.code != 200 {
+		t.Fatalf("switched: %d %s", r.code, r.raw)
+	}
+	if gb, _ := r.body["generated_by"].(map[string]any); gb == nil || gb["route"] != "local" || gb["provider"] != nil ||
+		len(gb) != 2 {
+		t.Errorf("switched off before the claim: generated_by %v", r.body["generated_by"])
+	}
+
+	// 2. A cloud answer shows its provider, and keeps showing it after the
+	// policy moves to another provider or is switched off (I-2).
+	policy("anthropic")
+	cloud := submit(t, e, tok)
+	complete(cloud, "PASS", `{"cca_route":"cloud","cca":"anthropic/claude-opus-5-5@claude-opus-5-5","dense":"bge"}`, true)
+	for _, now := range []string{"anthropic", "openai", ""} {
+		policy(now)
+		r := result(cloud, tok)
+		gb, _ := r.body["generated_by"].(map[string]any)
+		if r.code != 200 || gb == nil || gb["route"] != "cloud" || gb["provider"] != "anthropic" {
+			t.Errorf("cloud answer with the policy now %q: %d %s", now, r.code, r.raw)
+		}
+	}
+
+	// 3. A cloud failure with no draft (no cca_route) has no generated_by.
+	policy("anthropic")
+	failed := submit(t, e, tok)
+	complete(failed, "ESCALATE", `{"dense":"bge"}`, false)
+	r = result(failed, tok)
+	if r.code != 200 || r.body["decision"] != "ESCALATE" {
+		t.Fatalf("escalation: %d %s", r.code, r.raw)
+	}
+	if _, ok := r.body["generated_by"]; ok {
+		t.Errorf("escalation without a draft has generated_by: %s", r.raw)
+	}
+
+	// 4. A decision naming a provider outside the set shows nothing.
+	odd := submit(t, e, tok)
+	complete(odd, "PASS", `{"cca_route":"cloud","cca":"gemini/g@g"}`, true)
+	if r := result(odd, tok); r.code != 200 || r.body["generated_by"] != nil {
+		t.Errorf("unknown provider: %d %s", r.code, r.raw)
+	}
+
+	// 5. Another hospital's clinician still gets 404, never the route.
+	other := mint(t, seedUser(t, seedHospital(t), authz.RoleClinician))
+	for _, id := range []string{switched, cloud, failed} {
+		if r := result(id, other); r.code != 404 || r.body["code"] != "not_found" || r.body["generated_by"] != nil {
+			t.Errorf("other hospital: %d %s", r.code, r.raw)
+		}
+	}
+	jobs(t, hid)
 }

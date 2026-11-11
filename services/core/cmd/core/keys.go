@@ -16,8 +16,8 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/account"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 const keysUsage = "usage: core keys new|ensure --out PATH [--kind access|request] [--trusted-out PATH] | " +

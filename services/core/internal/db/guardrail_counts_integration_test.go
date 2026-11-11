@@ -29,12 +29,19 @@ func seedDecision(t *testing.T, h uuid.UUID, decision *string, degraded bool, ag
 
 type counts struct{ answers, pass, regenerate, escalate, degraded int64 }
 
-// guardrailCounts runs the function as mhai_platform over the last days.
+// asOwner runs fn in a transaction of the migrating superuser: 00019
+// revoked mhai_guardrail_counts from mhai_platform (Plan 7c, A30), and the
+// body these tests pin is still 00017's.
+func asOwner(ctx context.Context, fn func(pgx.Tx) error) error {
+	return pgx.BeginFunc(ctx, sharedPool, fn)
+}
+
+// guardrailCounts runs the function over the last days.
 func guardrailCounts(t *testing.T, days int) map[uuid.UUID]counts {
 	t.Helper()
 	ctx := context.Background()
 	out := map[uuid.UUID]counts{}
-	err := db.WithPlatform(ctx, sharedPool, func(tx pgx.Tx) error {
+	err := asOwner(ctx, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT hospital_id, answers, pass, regenerate, escalate, degraded
 			FROM mhai_guardrail_counts(now() - make_interval(days => $1), now())`, days)
 		if err != nil {
@@ -102,7 +109,7 @@ func TestGuardrailCountsFunction(t *testing.T) {
 	// Fix round 3: 90 days ending yesterday's midnight, as the route asks
 	// in the 15 minutes after midnight UTC (R43), starts just over 91 days
 	// ago and is accepted.
-	if err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+	if err := asOwner(ctx, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `SELECT * FROM mhai_guardrail_counts(
 			date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' - interval '91 days',
 			date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' - interval '1 day')`)
@@ -117,7 +124,7 @@ func TestGuardrailCountsFunction(t *testing.T) {
 		`now() - interval '91 days', now()`, `now() - interval '95 days', now() - interval '93 days'`,
 		`now(), now() + interval '2 days'`,
 	} {
-		err := db.WithPlatform(ctx, pool, func(tx pgx.Tx) error {
+		err := asOwner(ctx, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `SELECT * FROM mhai_guardrail_counts(`+w+`)`)
 			return err
 		})

@@ -267,6 +267,23 @@ var Catalogue = map[string]Entry{
 	"hospital.created":   {Type: "hospital_settings", Kind: "hospital_added", Target: entityTarget("hospital", "hospital")},
 	"hospital.activated": withheld(),
 	"user.created":       withheld(),
+	// Cloud model providers (Task 2): mhai-web has no kind for a model
+	// policy change yet; sent bare until it has one.
+	"hospital.model_policy_changed": withheld(),
+	// Patient Analysis (Task 4): the CLI's demo raise and its lowering. No
+	// mhai-web kind yet; the platform's switch actions come with Plan 11b.
+	"analysis.switch_raised":  withheld(),
+	"analysis.switch_lowered": withheld(),
+	"hospital.marked_demo":    withheld(),
+
+	// EMR connections (EMR design §12.6): mhai-web's Plan 13 kinds, with
+	// the connection as the target. A resume has no kind yet: sent bare.
+	"emr.connection_added":        {Type: "hospital_settings", Kind: "emr_connection_added", Target: entityTarget("connection", "emr_connection")},
+	"emr.connection_changed":      {Type: "hospital_settings", Kind: "emr_connection_changed", Target: entityTarget("connection", "emr_connection")},
+	"emr.connection_switched_on":  {Type: "hospital_settings", Kind: "emr_connection_switched_on", Target: entityTarget("connection", "emr_connection")},
+	"emr.connection_switched_off": {Type: "hospital_settings", Kind: "emr_connection_switched_off", Target: entityTarget("connection", "emr_connection")},
+	"emr.connection_tested":       {Type: "hospital_settings", Kind: "emr_connection_tested", Target: entityTarget("connection", "emr_connection")},
+	"emr.source_resumed":          withheld(),
 
 	// Plan 3: the request-token boundary. No mhai-web kind yet.
 	"intelligence.key_rotated":   withheld(),

@@ -23,9 +23,9 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 )
 
 // --- helpers -----------------------------------------------------------------

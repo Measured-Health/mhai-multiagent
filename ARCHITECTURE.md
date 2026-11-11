@@ -38,11 +38,26 @@ reading in a KV bucket that `GET /platform/health` serves without touching
 the database or a worker; `GET /platform/jobs` lists failed questions and
 jobs, `POST /platform/jobs/retry` re-queues and re-publishes them as the
 job's creator (second-person rule re-checked), `POST /platform/jobs/cancel`
-needs a fresh two-step code; `GET /platform/guardrails` serves HGA decision
-counts for whole UTC days, one stored snapshot per period and day, through
-the small-group rules (`internal/smallgroup`). The smoke test reads health,
-retries a forced dead letter and reads the statistics. **Next:** the
-hospital endpoints.
+needs a fresh two-step code; `GET /platform/guardrails/periods` serves HGA
+decision counts for the latest finished month-aligned week, month or quarter
+from one stored snapshot (Plan 7c-1: the analytics scheduler, a core loop
+running as `mhai_analytics_job`, freezes each period's counts once and
+guards them with its parent set and the published history,
+`internal/smallgroup`), and the rolling `GET /platform/guardrails` is
+deprecated, every figure hidden; `GET /platform/analytics` and the series
+routes (Plan 7c-2) render Use, Answer quality and Hospitals, medians,
+trends and per-hospital series from the same stored snapshots only
+(`internal/analytics`'s render, which takes stored bodies as its only
+input). **Built (Patient Analysis PR 2, off by
+default):** the data foundation (migration 00021): a nightly core loop, as
+`mhai_analysis_job`, ingests coded facts for hospitals whose analysis switch
+is on, sweeps them after 25 months and freezes finished hospital-day blocks,
+months and quarters; only the synthetic demo hospital is switched on, by
+`core analysis seed-demo`. Nothing of it reaches a worker or NATS. The smoke test reads health,
+retries a forced dead letter and reads the statistics and the analytics. **Built (cloud
+models, off by default):** a hospital a platform admin has opted in can
+have its clinical draft written by a cloud model (Anthropic, OpenAI or
+xAI); see "Cloud models" below. **Next:** the hospital endpoints.
 
 | Service | Job |
 |---|---|
@@ -85,6 +100,39 @@ another version. Each answer's `model_versions` names the weights used
 (`name@version#hash`). See "Promoting a model" in
 `services/intelligence/README.md` and the design,
 `docs/specs/2026-10-28-document-pipeline-and-model-promotion-design.md`.
+## Cloud models
+
+Off by default, per hospital, and on demo and synthetic data only until the
+human gate in TODO.md is done (ADR 0013,
+`docs/specs/2026-11-03-cloud-model-providers-design.md`).
+
+```
+platform admin ─(step-up, audited)→ core: hospital_model_policy
+question → core: model_route set by a definer trigger, re-checked at the claim
+pipeline worker: mask → retrieve locally → gate (CloudPrompt) → scan the exact bytes
+   → reserve tokens (core's function) → egress-proxy ─CONNECT :443─→ provider
+   ← reply validated (citations ⊆ chunks sent) → NLI and HGA locally → settle
+```
+
+- **Core decides.** The route is set by core's trigger from core's
+  platform-only table, and `mhai_effective_model_route` re-checks it in the
+  worker's claim, so a policy switched off runs local. The token budget is
+  core's SQL (`mhai_cloud_reserve`/`mhai_cloud_settle`); the worker has no
+  grant on either table. `generated_by` on a result comes from the decision's
+  own model versions.
+- **Only masked text leaves.** Adapters take a `CloudPrompt` and nothing
+  else: the tagged masked question, two allow-listed context fields, at most
+  five sealed shared guideline chunks and a constant system prompt. The scan
+  hook sees the exact request bytes, and a refusal sends nothing.
+- **One way out.** The pipeline stays on the internal `backend` network. The
+  `egress-proxy` (Squid, compose profile `cloud`) is the only service on the
+  `egress` network and allows only `CONNECT` to port 443 of the enabled
+  providers' hosts, by name, never an IP literal. Fixed base URLs, no
+  redirects, TLS verified, no environment proxies.
+- **Every failure escalates.** There is no fallback to local or to another
+  provider. Retrieval and verification stay local.
+- **Keys** are files on the pipeline host only; a person runs the live smoke
+  on their own machine, never the build server.
 
 ## Services and systems flow
 

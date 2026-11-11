@@ -421,6 +421,14 @@ verification and named drill-down: Plan 11b and 11c). Needs
 clinical, privacy and legal sign-off before live use, because it changes
 the rule that hospital admins see no clinical content.
 
+[ADR 0015](../adr/0015-population-analysis-under-disclosure-control.md)
+(Accepted, 7 Nov 2026) changes §3's rule in two places only: hospital
+admins and analysts may see aggregates and pseudonymous rows for their own
+hospital under disclosure control, and names only under a verified letter.
+The backend design is `docs/specs/2026-11-07-analysis-backend-design.md`,
+built by `docs/plans/2026-11-07-analysis-backend.md`. The changes it makes to
+the shapes below are listed under "Changes from the backend design (H6)".
+
 ### Analysis, as built in Plan 6
 
 | Endpoint | Behaviour |
@@ -530,7 +538,7 @@ Shapes (ids are opaque, `[A-Za-z0-9_-]+`):
   the app refuses the list if any other field appears (a name, an MRN, a
   date of birth, an address).
 - `pid` matches `^P-[A-Z0-9]{4,12}$`: pseudonymous, stable within the
-  hospital, never the MRN.
+  hospital, never the MRN. (Changing to stable per period: H6d below.)
 - Each call is audited as `analysis_patients_viewed`: type `security`,
   unflagged, with `count` (the rows sent). It appears in the hospital's
   activity.
@@ -540,7 +548,8 @@ Shapes (ids are opaque, `[A-Za-z0-9_-]+`):
 **Errors**
 
 - 422 `invalid_range`: `from` or `to` is not a real day, `from` is after
-  `to`, or the range is more than 24 months.
+  `to`, or the range is more than 24 months. (Changing to "not exactly one
+  frozen period": H6a below.)
 - 404 `not_found`: unknown view, or the gate is off. 503 `unavailable`:
   the app shows that view as failed and offers Try again.
 - 403 `mfa_required`, as above.
@@ -549,6 +558,88 @@ Shapes (ids are opaque, `[A-Za-z0-9_-]+`):
 log it, and neither should the gateway or the API. They are not kept in the
 page URL or in browser storage. The patient list is never cached, exported
 or printed.
+
+### Changes from the backend design (H6)
+
+Status: **Assumed until mhai-web confirms.** These follow from the product
+owner's rulings R41a (finished calendar periods only) and C3 (nested
+periods), and from the backend design §9 and §15 (H6). They change the Plan 6
+shapes above. Everything else is additive.
+
+- **(a) Periods replace `from`/`to` ranges.** Every Analysis read takes
+  `period` (`week`, `month` or `quarter`) and `start` (the period's first
+  day, `YYYY-MM-DD`). A week is a month-aligned block: days 1–7, 8–14, 15–21,
+  or 22 to the month's end, labelled with its dates ("8–14 Mar 2027"). Weeks
+  sit in months and months in quarters. Only finished, frozen periods are
+  answered; there is no rolling window, custom range or multi-period total.
+  `from` and `to` are still accepted while the app moves to the picker, but
+  only when they span exactly one frozen period; anything else is 422
+  `invalid_range`.
+  - `GET /analysis/filters` gains **`periods`**: the answerable frozen
+    periods per level, for the picker. Without `period`, it answers the
+    `periods` list and the latest frozen month's lists; with `period` and
+    `start`, that period's lists. A condition is listed only if it has 5 or
+    more patients in that period, plus "Not standardised".
+- **(b) `Meta` and `history`.** `Meta.from` and `Meta.to` are the period's
+  first and last days. **`Meta.period`** is `{level, start}` (additive).
+  `Meta.bucket` is the series level: a quarter's series is its months, a
+  month's its weeks, and a week's is one point, the week itself. Views gain
+  **`history`** (additive): up to 7 earlier periods of the same level, as
+  `{start, cases, new, patients}`, each `GuardedOut`. Each point is copied
+  from that period's own answer for the same view and filters, and is hidden
+  whole wherever that answer is hidden. Draw it as a trend, with no total.
+- **(c) Platform Analysis (Plan 12)** changes the same way: the last full
+  month or quarter, plus the last four quarters as history, instead of "last
+  3, 6 or 12 months".
+- **(d) Pids are stable per period,** not per hospital. One person's pid is
+  the same in every list from one period, and different in every other
+  period and level. Nothing in the app may link pids across periods. The
+  shape is unchanged (`^P-[A-Z0-9]{4,12}$`).
+- **(e) Errors.**
+  - The Analysis reads: 404 `not_found` (unknown view, or Analysis off for
+    the hospital), 422 `invalid_range`, 422 **`too_many_filters`** (more than
+    two filters besides the period), 429 `rate_limited`, 503 `unavailable`.
+  - **`not_ready` is 503**, not 409: a period that has closed but isn't
+    frozen yet. A code has one status in the API, and `not_ready` is 503 on
+    every route, including a clearance page that isn't ready (Plan 11a says
+    409; the code is what the app reads).
+  - The patient list: 422 **`too_small`**, 422 **`level_not_supported`**,
+    429 `rate_limited`.
+  - Analyst grants: 409 **`analysis_off`**, 409 **`analyst_cap`**, 403
+    `self_change`, 422 `not_eligible`.
+  - Named access and letters, when built: 403 **`named_access_off`**,
+    **`not_cleared`**, **`clearance_ended`**; 409 **`expired`**; 422
+    **`idempotency_mismatch`**, **`would_empty`**, **`end_date_too_late`**,
+    `not_eligible`, **`not_eligible_platform`**; 409 **`above_global`**,
+    **`signoff_missing`**, **`already_used`**; 422 **`too_many_rows`**.
+  - A bad shape is the API's existing **`validation_failed`** (422), where
+    Plan 11a says `invalid`.
+- **(f) Empty lists beside a hidden count.** When a view's `patients` is
+  hidden, or a filtered view has fewer than 10 patients, every number is
+  hidden, no row has a `drill`, and the **lists are sent empty**. The app
+  must accept that, not fail the view.
+- **(g) Step-up when adding Analyst.** `PATCH /hospital/staff/{id}` takes
+  `mfa_code` or `backup_code`, required when `roles` adds `analyst`; without
+  it, 403 `mfa_required`. The grantor is a hospital admin of the same
+  hospital, not the person; the person is an active clinician with two-step
+  set up; a hospital has at most 10 analysts.
+- **(h) The legal resolution screen** (backend design §8.9), for a hospital
+  admin named on a legal reference.
+- **(i) Audit kinds and the `analyst` actor role.** Core records dotted
+  actions and sends mhai-web's kinds: `analyst.granted` and `analyst.removed`
+  are sent as `analyst_granted` and `analyst_removed`;
+  `analysis.patients_viewed` as `analysis_patients_viewed`;
+  `audit.patients_viewed` as `audit_patients_viewed`. The kinds new to the
+  app (backend design §8.7: `analysis_viewed`, `analysis_unusual_querying`,
+  `analysis_patient_cap_reached`, the named-view, clearance, legal and
+  named-access kinds) are sent as pending until mhai-web ships them, and
+  `analyst` appears as an actor role. No entry carries a name, MRN, pid or
+  free text.
+- **`features`.** `User.features {analysis, named_access}` on the sign-in and
+  session replies (additive). `analysis` is true only when the hospital's
+  analysis switch is On, the user is a hospital admin or analyst, and
+  two-step is on. Analysis is off by default for every hospital; no live
+  hospital is turned on before clinical, privacy and legal sign-off.
 
 ### Clearances, named lists and audit: hospital side (Plan 11a)
 
@@ -678,6 +769,40 @@ frontend:
   **New**); connection setup in the platform admin app, driven by the
   fields each connector declares (shape: **New**).
 
+### 12.1 Alert settings, routing and evidence (hospital side; Plan 13, filed 7 Nov)
+
+Additive requirements from mhai-web Plan 13 and the
+[EMR integration design](2026-11-07-emr-integration-design.md) §12 and §16.
+The shapes are the design's §16.2 and §16.3.
+
+- **Alert settings** (`GET`/`PATCH /hospital/alert-settings`, hospital
+  admin): units covered, which levels to receive (`critical`, `urgent`,
+  `info`; never a threshold), recipients (the queue and named clinicians,
+  active clinicians of the same hospital only; 422 `no_recipients` when
+  none), connection status by source label only (no address, type or error
+  code), `version` for conflicts.
+- **Routing is fixed at creation:** an alert's recipients are recorded when
+  it is raised and never recomputed from later settings. A recipient who
+  is deactivated or loses `clinician` has their open alerts moved to the
+  queue.
+- **Evidence on every alert:** the finding (name, value as recorded, unit,
+  flag, reference range as given, `recorded_at`, `code_system`,
+  `standardised`), likely causes with a confidence word (`caution` or
+  `review`; `high` is never sent in v1), the patient's name, MRN and
+  location, `source_label` and `emr_link`.
+- **Fields the app must show before live use** (design §16.4):
+  `sources_status` on every alert page (an empty list says "no alerts"
+  only when every source is current), `arrived_late`, `preliminary`,
+  `amended`, `withdrawn` (`source_amended`, `source_retracted`,
+  `excluded`), grouped mode (`grouped {since, count}`), and a nullable
+  `mrn` ("No MRN recorded").
+- **Possible duplicates** (`/hospital/patient-matches`, confirm or reject,
+  step-up): the hospital admin decides every merge; nothing merges by
+  itself.
+- **Exclusions** (`POST /hospital/patient-exclusions`, step-up): a patient
+  who objects is excluded; open alerts are withdrawn at once and their data
+  purged within 24 hours (`purge_by`).
+
 ## 13. Conflicts with the gateway design
 
 Each needs a decision, then an update to the gateway spec or this list.
@@ -802,19 +927,21 @@ is never a member id.
 ### 14.7 Analytics across hospitals
 
 Source: mhai-web `docs/specs/2026-10-22-platform-analytics-design.md` §5–§7.
-Status: **Assumed** (Plan 7c; Plan 7d for notifications). Counts only: no
+Status: the reads are **Built (Plan 7c-2)**, with the changes below (Plan 7c
+design §13: F1, F3, F4, F10–F12, F14–F16, F19); What changed and the
+follow-ups are **Assumed** until Plan 7c-3; notifications are Plan 7d. Counts only: no
 patient names, MRNs, question or answer text, nothing per person. A guarded
 value is `{value, suppressed}`: hidden is `{value: null, suppressed: true}`,
 nothing to show is `{value: null, suppressed: false}`.
 
 | Endpoint | Behaviour |
 |---|---|
-| `GET /platform/analytics?period=7d\|30d\|90d` | → `{period, from, to, changes, use, alerts, quality, hospitals}`; each area is its data with its own `updated_at`, or `{unavailable: true}`. Active hospitals only |
+| `GET /platform/analytics?period=week\|month\|quarter` | **Built (Plan 7c-2).** `period` is a finished calendar period (F1: `7d`, `30d`, `90d` are 422 `validation_failed`); `from`/`to` bound the latest published one, null before the first, when `use`, `quality` and `hospitals` are `{not_yet: true, first_from}` (F19). `alerts` is **null** until patient alerts exist (F4). `changes` is `{unavailable: true}` until Plan 7c-3 (F16). Use rows: `questions`, `active_clinicians`, `questions_per_clinician`; quality rows: `answers`, `needs_review_share` (escalated over answers), `confidence` (high pass, medium regenerate, low escalate; F11), `reviews`, `agreement_rate`, `median_review_hours`; shares have 4 decimals (F12); `staff` is guarded until Q4. `median` over the hospitals whose value is shown; `trend` is the all-hospitals cell of each of the latest 12 weeks, 12 months or 8 quarters (F3). 30 reads a minute per session with the series. As assumed before: → `{period, from, to, changes, use, alerts, quality, hospitals}`; each area is its data with its own `updated_at`, or `{unavailable: true}`. Active hospitals only |
 | | `changes`: `{updated_at, window: {from, to}, items}`, ranked, always the last 7 days vs the 4 weeks before (whatever `period` is). Each item: `id` (stable while the change lasts), `hospital` (`{id, name}` or null for all hospitals), `area` (`use`, `alerts`, `quality`), `measure`, `direction` (`worse`, `better`, `rising`, `falling`), `serious` (Critical-type), `previous`, `current` (guarded), `summary` (plain words), `follow_up` (`{by, at, note, by_you, version}` or null), `version` |
 | | `use`, `alerts`, `quality`: `{updated_at, rows, median, trend}`; one row per active hospital, all values guarded; `median` is the all-hospitals median under the same rules; `trend` is `[{start, value}]` with `value` guarded. Alert rows add `critical_target_minutes` and `critical_overdue` (unhandled Critical alerts past target, guarded); quality rows add `reviews` |
 | | `hospitals`: one row each with `size` (`staff`, `active_clinicians`, `questions`) |
-| `GET /platform/analytics/changes/{id}/series?period` | → `{measure, hospital, points: [{start, value, median}]}`; `value` guarded; `median` of the other active hospitals, or null when there is none |
-| `GET /platform/analytics/hospitals/{id}/series?measure&period` | the same for any active hospital and one of `questions_per_clinician`, `critical_median_ack_minutes`, `critical_within_target`, `needs_review_share` |
+| `GET /platform/analytics/changes/{id}/series?period` | **Built (Plan 7c-2)** as 404 for every id until What changed exists (7c-3); `hospital` will be null for a change across all hospitals (F14). → `{measure, hospital, points: [{start, value, median}]}`; `value` guarded; `median` of the other active hospitals, or null when there is none |
+| `GET /platform/analytics/hospitals/{id}/series?measure&period` | **Built (Plan 7c-2):** one point per stored period of the latest 12 weeks, 12 months or 8 quarters (F3), `questions_per_clinician` or `needs_review_share` only (the Critical measures are 422, F10); an id in no published period is 404. Assumed before: the same for any active hospital and one of `questions_per_clinician`, `critical_median_ack_minutes`, `critical_within_target`, `needs_review_share` |
 | `PUT /platform/analytics/changes/{id}/follow-up {note?, version}` | platform admins; marks followed up or edits the note (≤ 500 characters, author only — others get 403); stale `version` → **409 `conflict`**; audited; → the change |
 | `DELETE /platform/analytics/changes/{id}/follow-up {version}` | any platform admin undoes; stale or nothing to undo → **409 `conflict`**; audited |
 
@@ -1010,7 +1137,8 @@ its query. Served by the core service; the shape is in
 
 | Endpoint | Behaviour | Status |
 |---|---|---|
-| `GET /platform/guardrails?period=7d\|30d\|90d` | → `{period, from, to, updated_at, all, hospitals}`; `all` and each hospital row (`{hospital: {id, name}, ...}`) carry `answers`, `pass`, `regenerate`, `escalate`, `degraded`, `pass_share`, `regenerate_share`, `escalate_share`, every one guarded (`{value, suppressed}`, §14.7). Active hospitals only. The period is whole UTC days ending at the start of today (`to`, and `updated_at`, are 00:00 UTC today; until 00:15 UTC, yesterday's), and each day's figures are one stored snapshot, so they are the same all day. Platform admins and auditors; two-step. 6 reads a minute per session, then **429 `rate_limited`**. Not audited | **Built (Plan 4c)**, New |
+| `GET /platform/guardrails/periods?period=week\|month\|quarter` | → `{period, from, to, updated_at, all, hospitals}`, the same rows and keys as below, for the latest published finished period of that kind (UTC; a week is month-aligned: 1–7, 8–14, 15–21, 22–end). `updated_at` is when its one stored snapshot was computed; a period's figures never change. **503 `not_ready`** until the first period of a kind after the 7c-1 release is published (show "First figures after {period}", F19). The same cells, shown and hidden, as Answer quality for the period. Platform admins and auditors; two-step. 6 reads a minute per session (shared with the route below), then **429 `rate_limited`**. Not audited | **Built (Plan 7c-1)**, New (R41a-4) |
+| `GET /platform/guardrails?period=7d\|30d\|90d` | **Deprecated (Plan 7c-1, R41a-3, R41a-4).** Same shape and enum as before, but every count and share is hidden (`all` included); `Deprecation`, `Sunset` and `Link` headers on every response; 422 `validation_failed` after the sunset (90 days after the release). Move to `/platform/guardrails/periods`. Was: `all` and each hospital row (`{hospital: {id, name}, ...}`) carry `answers`, `pass`, `regenerate`, `escalate`, `degraded`, `pass_share`, `regenerate_share`, `escalate_share`, every one guarded (`{value, suppressed}`, §14.7); active hospitals only; whole UTC days ending at the start of today | **Built (Plan 4c)**, Deprecated (7c-1) |
 
 The server applies the §14.7 small-group duties: no count of 1–4; in each
 set that adds up (a row's answers and its parts, each column's `all` and its
@@ -1146,7 +1274,7 @@ no mhai-web kind is sent as the bare entry (`type: security`,
 |---|---|
 | `GET /platform/audit?hospital&person&type&outcome&flagged&from&to&q&cursor&limit` | → `{events, next_cursor, total, total_capped, oldest_kept_at, last_checkpoint}`. `hospital=platform` selects platform-only events. `type` is a comma list. `from`/`to` are instants, `[from, to)`. The app sends `limit=50` |
 | `GET /platform/audit/{id}` | → the event plus `patients: {count}` (null when there is no drill-down) and `letter` (null unless a named-access event) |
-| `GET /platform/audit/{id}/patients` | → `{pseudonyms}`. The only place a pseudonym is sent. Writes `audit_patients_viewed` |
+| `GET /platform/audit/{id}/patients` | → `{pseudonyms}`: the pids the hospital saw, for that entry's period, in order. The only place outside Analysis a pseudonym is sent. Writes `audit_patients_viewed` (core's action `audit.patients_viewed`) |
 | `GET /platform/audit/people?q` | `q` of 2 or more characters → `{people}`, at most 20, each `{id, name, email, role, kind, hospital}`. Backs the person picker |
 | `GET /platform/audit/hospitals` | → `{hospitals: [{id, name, removed}]}`: every hospital the log names, removed ones included |
 | `POST /platform/audit/undisplayable {ids}` | 1 to 50 ids → 204, recorded as `audit_undisplayable_reported`. The app reports each entry it can't display once |
@@ -1192,8 +1320,9 @@ removed}` or null), `type`, `kind`, `target` (`{kind, id, name?}` or null),
 **Pseudonyms never leave the server except through `/patients`**
 
 - A pseudonym is the same pseudonymous patient id as Analysis (§10):
-  `^P-[A-Z0-9]{4,12}$`, stable within the hospital, never the MRN. No other
-  id may match that shape.
+  `^P-[A-Z0-9]{4,12}$`, never the MRN. It is stable within one period, not
+  across the hospital (§10, H6d; **Assumed until mhai-web confirms**). No
+  other id may match that shape.
 - A patient target is `{kind: "patient"}` with no id and no name.
 - Where a pseudonym was searched or filtered on, the server sends the marker
   `{kind: "patient_id"}` in its place: as `facts.searched` (with
@@ -1290,3 +1419,29 @@ reason}`, `kind` one of `retention` or `re_anchor`.
   audience.
 - Daily check at 06:00 UTC (a suggestion), each run its own entry; one run at
   a time.
+
+### 14.11 Record connections (platform admin; Plan 13, filed 7 Nov)
+
+The platform app's record connections screens. Shapes: the
+[EMR integration design](2026-11-07-emr-integration-design.md) §16.1.
+(§14.10, platform clearances, is mhai-web Plan 11b's contract.)
+
+- **Connector types** come from the backend (`GET
+  /platform/emr/connector-types`), with the fields each declares; only
+  built types are listed, and none while EMR is off.
+- **Connections** are listed by hospital and state (`all`,
+  `needs_attention`, `off`, `not_connected`), created **off**, changed with
+  step-up and a `version`, and switched on only after a passing test of
+  the saved settings (409 `not_tested`).
+- **Credentials are write-only:** the app sends them; the backend returns
+  only `credentials: [{key, set_at}]`, never a value. Changing the base
+  address or token address wipes them and switches the connection off.
+- **Health:** `never`, `ok` or `errors`; `last_sync`; at most five recent
+  errors from a closed list (`unreachable`, `sign_in_refused`,
+  `timed_out`, `unreadable_data`, `unmapped_codes`, `too_many_requests`);
+  `paused` when the source's breaker tripped, with `resume` (step-up).
+- **No vendor names:** `source_label` is 1 to 40 characters and never a
+  vendor or product name; `type_label` is the type's own label.
+- **Before the first real hospital's credentials,** the platform BFF seals
+  them before they leave the Node server (`credentials_sealed`), so core
+  never sees plaintext (design §6.2, §17.6).

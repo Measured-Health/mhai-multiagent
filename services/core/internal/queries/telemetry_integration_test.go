@@ -18,8 +18,8 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 )
 
 // TestMarkerNotInSpansOrLogs (A14, core side): a PHI-like marker in the

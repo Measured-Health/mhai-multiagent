@@ -27,6 +27,170 @@ All notable changes to this project are documented here. The format follows
   `tests/modelstore/test_e2e.py` runs it in Python and checks that every
   abuse case in the plan has its test. Production pins wait on H1–H4 and
   Tasks 26–28 (TODO.md); until then the system fails closed.
+- EMR integration, PR 4 (egress; off by default, profile `emr` only; no
+  migration). `egress-emr`, the emr service's own CONNECT proxy
+  (`services/emr/cmd/egress-emr`, same image): every CONNECT names its
+  connection (`Proxy-Authorization`: the connection id and
+  HMAC-SHA256(K_proxy, id), else 407) and gets only that connection's
+  hosts (403); a name off the list, an IP literal or a port other than 443
+  or 22 is refused before any DNS lookup; a listed name is resolved once,
+  refused if any address is loopback, link-local or metadata, CGNAT,
+  multicast, reserved, an IPv6 form carrying IPv4, inside the internal
+  networks, or private outside the connection's declared ranges, and
+  otherwise the checked address is dialled. No fresh allow-list (120 s):
+  everything refused. The emr service writes the allow-list every 15 s
+  (enabled, unpaused connections whose origin is unchanged, plus one under
+  test), and its HTTP and SSH clients reach a hospital only through the
+  proxy, only at the connection's origin: no cross-origin redirect, none
+  with a credential, 20 MB bodies, 64 KiB headers, JSON depth 64, SSH host
+  key pinned to the typed SHA256 fingerprint. `emr keys proxy-init` makes
+  K_proxy. Compose: `emr` on the internal `backend` and `emr-proxy`
+  networks only; `egress-emr` alone on `egress-emr`. In
+  `docker-compose.yml` postgres and nats also join the internal `backend`
+  network (the emr service's way to them); `deploy/compose.yml` without a
+  profile is unchanged. `deploy/egress-emr/test-egress.sh` checks the
+  proxy end to end on a Docker host. After review: the proxy token is
+  bound to a 5-minute window; lookups are fully qualified; the host's
+  addresses, the routing table's gateways and Docker's default bridge are
+  always refused, and outside development the proxy needs
+  `EGRESS_EMR_INTERNAL_CIDRS` to start (the dev `backend` network has a
+  fixed subnet, `EMR_BACKEND_SUBNET`); tunnels pass half-closes, end after
+  60 s idle or 30 minutes, and one connection holds at most 32 slots;
+  overlapping ranges leave out only the connections involved, with an
+  alert.
+- Patient Analysis, PR 2: the data foundation, **off by default** (OpenAPI
+  1.14.0, additive; analysis backend plan Tasks 2 to 4, ADR 0015).
+  Migration 00021 (its number is fixed: EMR takes 00020) adds the roles
+  `mhai_analysis_writer`, `mhai_analysis_reader` and `mhai_analysis_job`
+  (NOLOGIN, reached by SET ROLE as 7c's job role), subjects, coded facts,
+  first-seen rows, frozen nested periods, dictionaries, the analysis switch
+  (global and per hospital; no row is off) and definer functions that refuse
+  a switched-off hospital, the future, and any real ingest under a demo
+  switch. A core loop (one copy at a time) ingests, sweeps and freezes per
+  switched-on hospital after its local 00:30. Four optional key files
+  (`ANALYSIS_*_KEY_FILE`) seal and match patient references.
+  `core analysis seed-demo` switches the synthetic demo hospital (created
+  with `core hospitals create --demo`; `hospitals.is_demo` never changes)
+  on with `DEMO-SYNTHETIC` references and writes a seeded synthetic cohort;
+  a switch that was ever signed off never takes demo references again;
+  `core analysis switch off` lowers a switch; both are audited. The login
+  and session `user` gains `features {analysis, named_access}`.
+- Platform analytics reads, part 7c-2 (OpenAPI 1.13.0, additive; Plan 7c
+  Tasks 6 and 7). `GET /platform/analytics?period=week|month|quarter`
+  serves Use, Answer quality and Hospitals of the latest published period,
+  with medians over shown values and trends over the latest 12 weeks, 12
+  months or 8 quarters; `alerts` is null and `changes` unavailable until
+  7c-3; `{not_yet, first_from}` before the first period.
+  `GET /platform/analytics/hospitals/{id}/series` serves one hospital's
+  stored figure per period (`questions_per_clinician`,
+  `needs_review_share`); `GET /platform/analytics/changes/{id}/series` is
+  404 until What changed exists. Every route reads stored snapshots only;
+  30 reads a minute per session. No migration.
+- EMR integration, PR 3 (connections; off by default). Migration 00020:
+  the `emr` schema and roles, `emr_connections` (configuration only, no secret column or key),
+  credential metadata, sync runs and errors, declared private ranges that
+  can't overlap across hospitals. `services/gokit`: `emrurl` (address and
+  credential-origin checks), `seal` (credentials sealed to the emr service,
+  bound to connection, field and origin, 60 s), `emrtypes` (the connector
+  types and fields), and the request token's `stp` claim, which the emr
+  responder now requires on step-up ops. The emr service stores and wipes
+  credentials and tests a connection with the development stub. Core serves
+  `/platform/emr/connector-types`, `/platform/emr/connections` and
+  `/platform/hospitals/{id}/emr/connections` (OpenAPI 1.12.0, additive; new
+  codes `not_tested`, `hospital_removed`, `no_type`), sealing credentials as
+  they arrive; a change of address origin wipes them and switches the
+  connection off. With `CORE_EMR_ENABLED` false the writes answer 503
+  `not_ready`; `CORE_EMR_CONNECTOR_TYPES` offers nothing unless named; the
+  credential routes need `CORE_IDEMPOTENCY_HMAC_KEY_PATH`.
+- Platform analytics on calendar periods, part 7c-1 (OpenAPI 1.11.0,
+  additive; Plan 7c, rulings R41a to R41a-4). Migration 00019 adds the
+  analytics scheduler's role (`mhai_analytics_job`) and reader, frozen
+  per-period counts, `analytics_snapshots` and the release epoch. A core
+  loop (one copy at a time) freezes each finished month-aligned week, month
+  and quarter once, guards it with its parent set and the published
+  history (`internal/smallgroup`), and stores one snapshot. New route
+  `GET /platform/guardrails/periods?period=week|month|quarter` serves the
+  latest published period's guardrail statistics from that snapshot
+  (503 `not_ready` until the first one).
+- EMR integration, PR 2 (skeleton; off by default): `services/gokit/`, a Go
+  module core and the emr service share, with the request-token package
+  (moved from core; its subject rule is now a table that adds
+  `emr.v1.ctl.<op>` with audience `emr`, and new shared vectors), a
+  bounded replay set, `dbx.WithHospital` over a closed role set, the log
+  redactor (moved), the emr control-operations table and the generated
+  `mhai.emr.v1` contract. `services/emr/`: `emr serve` answers
+  `emr.v1.ctl.health` after verifying every request (token, reply subject,
+  replay, caller rule, request id, strict schema); `emr keys seal-init`.
+  The `emr` NATS user (dev config), core's rights on `emr.v1.ctl.>` and the
+  `EMR` stream, created only when `CORE_EMR_ENABLED=true`; the compose
+  profile `emr`. Core's Docker build context is now `services/` (`-f
+  services/core/Dockerfile services`) in compose, CI, the deploy workflow
+  and the Makefile.
+- EMR integration, PR 1 (docs): ADR 0009 accepted; ADR 0014 records the
+  separate `services/emr/` with its own credentials and egress, and the
+  reviewed route for scanned records; the document pipeline design is
+  amended (normalisation by the emr service, `emr.v1.<hid>.fetched`);
+  frontend requirements §12.1 and §14.11 filed; TODO lists the people items
+  H1–H9 and the live-use gates.
+- Cloud model providers, part A: the per-hospital model policy (OpenAPI
+  1.10.0, additive). Migration 00018 adds `hospital_model_policy` (off by
+  default; no row means local), the model route set by core on each new
+  question, and the monthly token ledger reached only through core's
+  `mhai_cloud_reserve`/`mhai_cloud_settle` functions. Platform admins read a
+  hospital's policy with this month's usage and change it (`GET`/`PUT
+  /platform/hospitals/{id}/model-policy`; a change needs step-up MFA and is
+  audited as `hospital.model_policy_changed`), and `core hospitals
+  model-policy set` does the same from the CLI. `agreement_ref`
+  takes only an agreement code (`AGR-`/`DPA-` plus digits, or
+  `DEMO-SYNTHETIC`). `query.completed` gains the closed `egress` and
+  `cloud_outcome` facts, and a result gains `generated_by` (`local` or
+  `cloud` with its provider), read from the decision itself. No cloud call is
+  made yet (parts B to E).
+- Cloud model providers, part B (the gate; no network code): the worker's
+  cloud settings, off by default (`INTELLIGENCE_CLOUD_PROVIDERS` empty), with
+  start-up refused on an incomplete provider: no model, key file or
+  zero-retention reference, a Fable or Mythos model, a key file not mode
+  0400/0440 or holding a placeholder, `DEMO-SYNTHETIC` outside
+  `APP_ENV=demo` (new: production in every other respect). Any `OPENAI_*`,
+  `ANTHROPIC_*`, `AZURE_OPENAI_*` or `XAI_*` variable refuses start-up for
+  every worker, cloud on or off. Keys are held as `ApiKey` (redacted). With a
+  provider configured, logging changes: records are redacted at creation
+  (`args=None`, exception text pre-rendered), warnings go through logging,
+  uncaught exceptions are logged as `CRITICAL`, and the HTTP clients' INFO
+  request lines are off. The gate types (`MaskedText`, `CloudContext`'s
+  two-field allow-list, sealed `SharedChunk`s, `CloudPrompt`), the egress scan
+  over the exact request bytes (shape, this patient's identifiers everywhere,
+  number and date patterns on the patient-derived blocks, size), and the
+  budget port over core's reserve and settle functions.
+- Cloud model providers, part C (the client and the job): strict reply
+  validation (citations only of chunks sent, no links), a closed retry table,
+  `CloudModelClient` (local retrieval and verification, a gated, scanned,
+  budgeted cloud draft, a per-attempt deadline, SDK retries off) and
+  `ModelRouter`: each job runs on the route core's claim gives it, and
+  records the provider, `egress` and the outcome. Every cloud failure
+  escalates; there is no fallback.
+- Cloud model providers, part D (adapters): Anthropic (Messages, strict
+  structured output), OpenAI (Responses, `store: false`) and xAI (chat
+  completions; the `x-zero-data-retention` header checked on every reply),
+  against synthetic fixtures. The scan hook refuses any request header not
+  on the provider's list (`scan.ALLOWED_HEADERS`), so an SDK update that adds
+  one fails closed. A reply that reports more tokens than its reservation is
+  logged (`cloud.usage_overrun`), counted (`mhai_cloud_usage_overrun_total`)
+  and, above 10% over, alerted (`mhai_cloud_alerts_total{kind="usage_overrun"}`).
+- Cloud model providers, part E (deployment, smoke and docs): the
+  `egress-proxy` service in `deploy/compose.yml` (Squid pinned by digest,
+  profile `cloud`, off by default) on `backend` and a new `egress` network,
+  allowing only `CONNECT` to port 443 of the hosts in `allowed-hosts`, matched
+  by name with no reverse lookup, IP literals refused;
+  `deploy/egress-proxy/test-egress.sh` checks it (A15). The worker's proxy
+  setting is `INTELLIGENCE_CLOUD_PROXY` (not the process-wide `HTTPS_PROXY`),
+  and with a provider enabled start-up refuses without a CA bundle at
+  OpenSSL's paths. `scripts/cloud_smoke.py`, a manual live smoke a person
+  runs on their own machine (never the build server or CI) with a key from
+  standard input, and `scripts/scrub_cloud_fixture.py`, whose `--check` runs
+  on every committed fixture in the unit suite. `deploy/README.md` "Cloud
+  models" (enabling, key rotation, switching off); TODO.md lists the human
+  gate before real patient data and the people items H1–H7.
 - Document pipeline phase 0, part A: the extraction schema
   `mhai.extraction.clinical_document` 1.0.0 and the evaluation harness
   (`services/intelligence/intelligence/doceval/`). Synthetic patients and
@@ -174,6 +338,16 @@ All notable changes to this project are documented here. The format follows
   CI fails a pull request with a breaking change to `openapi.yaml`
   (oasdiff 1.34.1). `httpx.Deprecated` sets the retirement headers.
 
+### Deprecated
+
+- `GET /platform/guardrails?period=7d|30d|90d` (ADR 0012, R41a-3): from the
+  7c-1 release every count and share is hidden and the responses carry
+  `Deprecation`, `Sunset` (90 days on) and `Link`
+  (`/docs/notices/guardrails-rolling-windows`); after the sunset the values
+  are 422. Use `/platform/guardrails/periods`. Migration 00019 empties
+  `guardrail_snapshots` and revokes `mhai_guardrail_counts` from
+  `mhai_platform`.
+
 ### Changed
 
 - The pipeline worker requires `sslmode=verify-full` for its database
@@ -212,6 +386,16 @@ All notable changes to this project are documented here. The format follows
   in Go or Python needs it; NATS carries the jobs.
 
 ### Security
+- Cloud model providers: `intelligence/boundary/cloud_repo.py` (the budget
+  port's SQL: core's reserve and settle functions only) is added to
+  `tests/boundary/test_no_direct_db.py`'s `REPOS`, the files allowed to hold
+  SQL. A security-test change, reviewed in PR B.
+- Cloud model providers: no real patient data goes to a cloud provider until
+  the human gate in TODO.md is done (masker bar including names without a
+  title, legal check, clinical evaluation, core's keyed name-token hashes).
+  `test_todo_keeps_the_real_data_gate` fails if that entry is removed, and
+  `test_every_abuse_case_has_a_test` checks every A/K case in the plan has
+  its named test.
 - The patient-scoping and two-person-review regression tests moved off
   `SecurePipelineWrapper` onto the orchestrator and the boundary
   (`chunk_visible_to`, `load_chunks`, `OrchestratorModelClient`) with the same

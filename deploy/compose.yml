@@ -264,9 +264,111 @@ services:
   #     INTELLIGENCE_DB_URL: postgres://postgres:5432/mhai?sslmode=verify-full
   #     INTELLIGENCE_DB_PASSWORD_FILE: /run/secrets/intelligence-db-password
   #     INTELLIGENCE_WARMUP_PAGE: /app/warmup/page.png   # shipped in the image
-  #   volumes: ["trustedkeys:/trusted:ro"]
+  #     # Cloud models (off by default; deploy/README.md, "Cloud models").
+  #     # The proxy has its own setting: HTTPS_PROXY would send every
+  #     # library's HTTPS through it. Never put a key in the environment.
+  #     INTELLIGENCE_CLOUD_PROXY: http://egress-proxy:3128
+  #     # INTELLIGENCE_CLOUD_PROVIDERS: anthropic
+  #     # INTELLIGENCE_CLOUD_ANTHROPIC_MODEL: claude-opus-5-5
+  #     # INTELLIGENCE_CLOUD_ANTHROPIC_KEY_FILE: /run/secrets/anthropic-api-key
+  #     # INTELLIGENCE_CLOUD_ANTHROPIC_ZDR_REF: <the provider's ZDR reference>
+  #   volumes:
+  #     - trustedkeys:/trusted:ro
+  #     # Mode 0400, owned by the worker's user (deploy/README.md).
+  #     - ./secrets/anthropic-api-key:/run/secrets/anthropic-api-key:ro
+  #   # backend only: the egress proxy (profile cloud) is its only way out.
   #   networks: [backend]
-  #   mem_limit: ...
+  #   mem_limit: 3g
+
+  # The egress proxy for the cloud model providers (design section 6): the
+  # only service on `egress`, the one network here with a route out. It
+  # allows CONNECT to port 443 of the hosts in egress-proxy/allowed-hosts
+  # and nothing else (egress-proxy/squid.conf). Off by default: it starts
+  # only with `--profile cloud`, after the steps in deploy/README.md
+  # ("Cloud models"). The demo never starts it and needs none of its files.
+  egress-proxy:
+    <<: *hardening
+    image: ubuntu/squid:6.6-24.04_edge@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
+    profiles: ["cloud"]
+    restart: unless-stopped
+    # Squid without the image's entrypoint (which writes certificates and
+    # log files): no daemon, our config, as the image's proxy user.
+    entrypoint: ["/usr/sbin/squid"]
+    command: ["-N", "-f", "/etc/squid/squid.conf"]
+    user: "13:13"
+    volumes:
+      - ./egress-proxy/squid.conf:/etc/squid/squid.conf:ro
+      - ${EGRESS_ALLOWED_HOSTS:-./egress-proxy/allowed-hosts}:/etc/squid/allowed-hosts:ro
+    tmpfs:
+      - /tmp
+      - /var/run/squid
+    mem_limit: 128m
+    networks: [backend, egress]
+
+  # The EMR integration (ADR 0014; EMR design §6.4). Off on the demo: the
+  # demo has neither the emr NATS user nor its database login yet
+  # (services/emr/README.md), so the emr service below stays commented
+  # until it does. When it runs it is on backend (internal: Postgres,
+  # NATS) and emr-proxy (internal: egress-emr only), with no route out;
+  # it needs, as the pipeline above does, its own NATS NKey and database
+  # login, the trusted keys read-only, and no env_file.
+  # emr:
+  #   image: ${EMR_IMAGE:-ghcr.io/measured-health/mhai-multiagent-emr:latest}
+  #   profiles: ["emr"]
+  #   command: ["serve"]
+  #   environment:
+  #     APP_ENV: staging
+  #     EMR_NATS_URL: tls://nats:4222
+  #     EMR_NATS_NKEY_FILE: /run/secrets/nats-emr.nk
+  #     EMR_DATABASE_URL: postgres://emr_app@postgres:5432/mhai?sslmode=verify-full
+  #     EMR_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+  #     EMR_SEAL_KEY_PATH: /emr-keys
+  #     EMR_SECRETS_DIR: /emr-secrets
+  #     EMR_RULE_SET_ACTIVE: ""
+  #     # The only way out (never HTTPS_PROXY).
+  #     EMR_PROXY_URL: http://egress-emr:3128
+  #     EMR_PROXY_KEY_PATH: /run/secrets/emr-proxy.key
+  #     EMR_EGRESS_DIR: /emr-egress
+  #   volumes:
+  #     - trustedkeys:/trusted:ro
+  #     - emr-egress-conf:/emr-egress
+  #     - ./secrets/emr-proxy.key:/run/secrets/emr-proxy.key:ro
+  #   networks: [backend, emr-proxy]
+  #   mem_limit: 256m
+
+  # egress-emr, the emr service's own CONNECT proxy (services/emr/cmd/
+  # egress-emr): the only service on egress-emr, the network with a route
+  # out, and on emr-proxy, where only the emr service reaches it; never on
+  # backend. Each CONNECT names its connection (Proxy-Authorization from
+  # K_proxy) and reaches only that connection's hosts; a name is resolved
+  # once and the checked address dialled. With no fresh allow-list (written
+  # by the emr service) it refuses everything. Off by default (profile
+  # emr); the demo never starts it. K_proxy is the 0400 file
+  # secrets/emr-proxy.key owned by 65532 (emr keys proxy-init writes one).
+  # EGRESS_EMR_INTERNAL_CIDRS must be set in .env: the backend network's
+  # subnet (docker network inspect mhai-backend_backend) and the host's own
+  # addresses (its VPC address, /32), never reached even when declared. It
+  # runs as production, so it refuses to start without them. The backend
+  # network keeps its subnet (fixing one would recreate it under the demo).
+  egress-emr:
+    <<: *hardening
+    image: ${EMR_IMAGE:-ghcr.io/measured-health/mhai-multiagent-emr:latest}
+    pull_policy: missing
+    profiles: ["emr"]
+    restart: unless-stopped
+    entrypoint: ["/egress-emr"]
+    command: []
+    user: "65532:65532"
+    environment:
+      EGRESS_EMR_ALLOW_LIST: /emr-egress/allow.json
+      EGRESS_EMR_KEY_PATH: /run/secrets/emr-proxy.key
+      EGRESS_EMR_ENV: production
+      EGRESS_EMR_INTERNAL_CIDRS: ${EGRESS_EMR_INTERNAL_CIDRS:-}
+    volumes:
+      - emr-egress-conf:/emr-egress:ro
+      - ${EMR_PROXY_KEY_FILE:-./secrets/emr-proxy.key}:/run/secrets/emr-proxy.key:ro
+    mem_limit: 64m
+    networks: [emr-proxy, egress-emr]
 
 networks:
   # No route out: Postgres and NATS can't reach anything but each other and
@@ -275,6 +377,13 @@ networks:
     internal: true
   # Only for the loopback ports of core and NATS.
   edge: {}
+  # The egress proxy's way out, and only its (profile cloud).
+  egress: {}
+  # The emr service and egress-emr only, no route out (profile emr).
+  emr-proxy:
+    internal: true
+  # egress-emr's way out, and only its (profile emr).
+  egress-emr: {}
   # Shared with the frontend's compose project (mhai-web), made by
   # setup-host.sh with --internal. Only NATS is on it here: the BFF reaches
   # it as mhai-nats:4222 and nothing else in this stack.
@@ -299,3 +408,6 @@ volumes:
   trustedkeys:
     external: true
     name: mhai-backend-trustedkeys
+  # The allow-list the emr service writes and egress-emr reads (profile
+  # emr); rewritten every 15 s, so not external.
+  emr-egress-conf: {}

@@ -19,8 +19,8 @@ func TestMigrateUpCommand(t *testing.T) {
 	if err := migrate(context.Background(), []string{"up"}, pg.URL, &out); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-	if got := strings.Count(out.String(), "applied"); got != 17 {
-		t.Fatalf("want 17 applied migrations, got output:\n%s", out.String())
+	if got := strings.Count(out.String(), "applied"); got != 21 { // 00001-00021
+		t.Fatalf("want 21 applied migrations, got output:\n%s", out.String())
 	}
 }
 
@@ -68,5 +68,36 @@ func TestMigrateUpProvisionsIntelligenceLogin(t *testing.T) {
 	}
 	if !member || usesWorker {
 		t.Fatalf("intelligence_app: member of mhai_worker_app %v, uses mhai_worker %v", member, usesWorker)
+	}
+}
+
+// core migrate up provisions the emr service's login (00020): a member of
+// mhai_emr_app only, which holds mhai_emr without inheriting it.
+func TestMigrateUpProvisionsEMRLogin(t *testing.T) {
+	pg := testutil.StartPostgres(t)
+	ctx := context.Background()
+	env := map[string]string{"EMR_DB_PASSWORD": "test-only-emr-db-password"}
+	var out bytes.Buffer
+	if err := migrateWithLogins(ctx, []string{"up"}, pg.URL, func(k string) string { return env[k] }, &out); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	if !strings.Contains(out.String(), "login emr_app ready (member of mhai_emr_app only)") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), env["EMR_DB_PASSWORD"]) {
+		t.Fatal("output carries the password")
+	}
+	pool, err := pgxpool.New(ctx, pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var member, usesEMR, setEMR bool
+	if err := pool.QueryRow(ctx, `SELECT pg_has_role('emr_app', 'mhai_emr_app', 'MEMBER'),
+		pg_has_role('emr_app', 'mhai_emr', 'USAGE'), pg_has_role('emr_app', 'mhai_emr', 'SET')`).Scan(&member, &usesEMR, &setEMR); err != nil {
+		t.Fatal(err)
+	}
+	if !member || usesEMR || !setEMR {
+		t.Fatalf("emr_app: member of mhai_emr_app %v, uses mhai_emr %v, may SET mhai_emr %v", member, usesEMR, setEMR)
 	}
 }

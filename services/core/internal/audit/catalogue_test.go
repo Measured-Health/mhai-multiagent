@@ -278,20 +278,36 @@ func outboxActions(t *testing.T) []string {
 	return out
 }
 
-// platformAppendActions are the actions 00014's platform_append allows.
+// platformAppendActions are the actions the latest platform_append allows:
+// every migration's Up section is read in order, and the last CREATE POLICY
+// platform_append wins (00014 made it; 00018 and 00020 widened it).
 func platformAppendActions(t *testing.T) []string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "db", "migrations", "00014_platform_reads.sql"))
+	files, err := filepath.Glob(filepath.Join("..", "db", "migrations", "*.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	up := strings.SplitN(string(raw), "-- +goose Down", 2)[0]
-	m := regexp.MustCompile(`(?s)CREATE POLICY platform_append ON audit_log.*?action IN \(([^)]*)\)`).FindStringSubmatch(up)
-	if m == nil {
-		t.Fatal("00014 has no platform_append with an action list")
+	sort.Strings(files)
+	re := regexp.MustCompile(`(?s)CREATE POLICY platform_append ON audit_log.*?action IN \(([^)]*)\)`)
+	var last, from string
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		up := strings.SplitN(string(raw), "-- +goose Down", 2)[0]
+		for _, m := range re.FindAllStringSubmatch(up, -1) {
+			last, from = m[1], filepath.Base(f)
+		}
+	}
+	if last == "" {
+		t.Fatal("no migration has a platform_append with an action list")
+	}
+	if from < "00020" {
+		t.Fatalf("the latest platform_append is %s's; 00020 widened it", from)
 	}
 	var out []string
-	for _, q := range regexp.MustCompile(`'([a-z][a-z0-9_.]*)'`).FindAllStringSubmatch(m[1], -1) {
+	for _, q := range regexp.MustCompile(`'([a-z][a-z0-9_.]*)'`).FindAllStringSubmatch(last, -1) {
 		out = append(out, q[1])
 	}
 	sort.Strings(out)
@@ -320,8 +336,9 @@ func TestEveryActionHasCatalogueRow(t *testing.T) {
 			t.Errorf("platform action %s has no payload schema", a)
 		}
 	}
-	if got := platformAppendActions(t); len(got) != 8 {
-		t.Errorf("platform_append allows %v, want spec §5.5's eight", got)
+	if got := platformAppendActions(t); len(got) != 15 || !slices.Contains(got, "hospital.model_policy_changed") ||
+		!slices.Contains(got, "emr.connection_added") || !slices.Contains(got, "emr.source_resumed") {
+		t.Errorf("platform_append allows %v, want spec §5.5's eight, hospital.model_policy_changed (00018) and the six EMR actions (00020)", got)
 	}
 	for _, a := range audit.RegisteredActions() {
 		if strings.HasPrefix(a, "test.") {
@@ -430,7 +447,8 @@ func candidates() []any {
 		platform_account bad_current weak token_attempts account_attempts token_mismatch otp backup none step_up pwd
 		planned emergency added removed PASS REGENERATE ESCALATE low mid high unauthorized invalid_request succeeded
 		refused failed platform via msg-1 kid-2026 core pipeline.run_query nli 1 42 9007199254740991 0
-		2026-11-03T06:00:00Z 2026-11-03T06:00:00.123+01:00 v1.2`) {
+		2026-11-03T06:00:00Z 2026-11-03T06:00:00.123+01:00 v1.2
+		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume demo`) {
 		out = append(out, s)
 	}
 	for _, ty := range audit.AuditTypes {
@@ -443,7 +461,7 @@ func candidates() []any {
 		out = append(out, n)
 	}
 	out = append(out, true, false, nil,
-		[]any{"pwd", "otp"}, []any{"audit", "security"}, []any{"P-ABCD12"}, []any{ids[0]}, []any{},
+		[]any{"pwd", "otp"}, []any{"audit", "security"}, []any{"base_url", "private_key"}, []any{"P-ABCD12"}, []any{ids[0]}, []any{},
 		map[string]any{}, map[string]any{"hospital": "platform"},
 		map[string]any{"hospital": ids[0], "person": ids[1], "type": []any{"audit", "review"}, "outcome": "refused",
 			"flagged": true, "from": "2026-11-01T00:00:00Z", "to": "2026-11-03T00:00:00Z"},
@@ -459,7 +477,7 @@ func fuzzCatalogue(t *testing.T, voc *vocabulary, n int) {
 	t.Helper()
 	rng := rand.New(rand.NewSource(20261103))
 	pool := candidates()
-	entities := []string{"", "session", "hospital", "query", "correction", "job", "audit_run", "audit_list", "audit_search", "user", "operation"}
+	entities := []string{"", "session", "hospital", "query", "correction", "job", "audit_run", "audit_list", "audit_search", "user", "operation", "emr_connection"}
 	entityIDs := append([]string{"", "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11", "pipeline.run_query", "has space"}, pseudonyms...)
 	hospitals := []string{"", "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11"}
 	mappedOnce := map[string]bool{}

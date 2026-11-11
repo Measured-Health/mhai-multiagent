@@ -3,7 +3,7 @@
 Only boundary/db.py opens a connection or a cursor, so every query runs
 inside with_hospital (SET LOCAL ROLE mhai_worker, the verified hospital).
 The repositories (boundary/kb_repo.py, boundary/jobs_repo.py,
-boundary/learning_repo.py) may run SQL
+boundary/learning_repo.py, boundary/cloud_repo.py) may run SQL
 only on a cursor they are handed as a parameter, and only with SQL text
 that is a literal (a string, a module constant bound once to one, or a
 psycopg sql.SQL composition of one), so it is always parameterised.
@@ -20,7 +20,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2] / "intelligence"
 HELPER = "boundary/db.py"
-REPOS = {"boundary/kb_repo.py", "boundary/jobs_repo.py", "boundary/learning_repo.py"}
+REPOS = {
+    "boundary/kb_repo.py",
+    "boundary/jobs_repo.py",
+    "boundary/learning_repo.py",
+    "boundary/cloud_repo.py",
+}
 GENERATED = "boundary/pb/"
 
 DRIVERS = {"psycopg", "psycopg_pool", "psycopg2", "asyncpg", "sqlalchemy", "sqlite3", "pg8000"}
@@ -200,6 +205,20 @@ def test_learning_job_runs_no_sql_of_its_own() -> None:
         src = (ROOT / rel).read_text(encoding="utf-8")
         assert offenders(rel, src) == []
         assert ".execute(" not in src, rel
+
+
+def test_no_direct_db_still_passes() -> None:
+    """The cloud budget (plan Task 7): its SQL lives in cloud_repo.py, a
+    repository, and budget.py (which holds the port) runs none: it may not
+    even import the cursor type."""
+    assert (ROOT / "boundary/cloud_repo.py").is_file()
+    assert "boundary/cloud/budget.py" not in REPOS
+    budget = (ROOT / "boundary/cloud/budget.py").read_text(encoding="utf-8")
+    assert offenders("boundary/cloud/budget.py", budget) == []
+    assert ".execute(" not in budget and "SELECT" not in budget
+    assert offenders(
+        "boundary/cloud/budget.py", "async def f(cur):\n    await cur.execute('SELECT 1')"
+    )
 
 
 def test_guard_catches_each_kind() -> None:

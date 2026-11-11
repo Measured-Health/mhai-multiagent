@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.9.0"
+  version: "1.14.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1156,37 +1156,28 @@ paths:
   /platform/guardrails:
     get:
       operationId: getPlatformGuardrails
-      summary: Guardrail (HGA) statistics across the active hospitals, under the small-group rules.
+      summary: Deprecated. Rolling guardrail windows, every figure hidden since Plan 7c; use /platform/guardrails/periods.
+      deprecated: true
+      x-sunset: "2027-02-14"
       description: |
-        Platform admins and auditors, platform audience, two-step always.
-        New (Plan 4 spec §6.3; not in the frontend contract yet). Per active
-        hospital and across all of them (`all`), over `period` (`7d`, `30d`
-        or `90d`, required) as whole UTC days ending at the start of today
-        (00:00 UTC): the answers, and of those
-        `pass`, `regenerate` and `escalate` (a missing or unknown decision
-        counts as `escalate`), the `degraded` ones, and the three shares of
-        `answers`. Hospitals that aren't active have no row and aren't in
-        `all`.
+        **Deprecated** (Plan 7c spec §9, rulings R41a-3 and R41a-4; ADR
+        0012). Platform admins and auditors, platform audience, two-step
+        always. Use `GET /platform/guardrails/periods` (`week`, `month`,
+        `quarter`) instead.
 
-        Every value is guarded, `{value, suppressed}`, by the small-group
-        rules: a count of 1 to 4 is `{value: null, suppressed: true}`, 0 is
-        0; in each set that adds up (a row's answers and its three parts,
-        each column's `all` and its hospitals, degraded's `all` and its
-        hospitals) enough is hidden that the hidden members together are at
-        least 5 and never exactly one is hidden; `degraded` is hidden when
-        its `answers` is, or when `answers − degraded` is 1 to 4; a share is hidden when its
-        numerator or its complement is 1 to 4 or either count is hidden; and
-        more is hidden until no hidden value can be worked out from the
-        shown ones (row sums, `all` minus the shown rows). A share is 0 to 1
-        with four decimal places; `{value: null, suppressed: false}` is no
-        answers to divide by. `from` and `to` bound the period; the figures
-        run to `to`, the start of today, UTC (until 00:15 UTC, the start of
-        yesterday: a day's figures wait 15 minutes for late commits), and
-        `updated_at` is that same instant. Each period's day is one stored
-        snapshot, computed once and served by every core copy all day, so
-        reads within a day are identical. Six
-        reads a minute per session, then 429 `rate_limited`. Not recorded in
-        the audit log (aggregates about no person).
+        From the 7c-1 release every response of this route carries
+        `Deprecation`, `Sunset` and `Link` headers (the notice at
+        `/docs/notices/guardrails-rolling-windows`). `period` (`7d`, `30d` or
+        `90d`, required) still answers in the same shape: `from` and `to` are
+        whole UTC days ending at the start of today (until 00:15 UTC, the
+        start of yesterday), `updated_at` is `to`, and the active hospitals
+        are listed. **Every count and share is hidden**, `all` included
+        (`{value: null, suppressed: true}`): rolling windows can be
+        subtracted from each other and from the calendar periods to reveal a
+        hidden small count. After the sunset (90 days after the release) the
+        values are 422 `validation_failed`. Six reads a minute per session,
+        shared with `/platform/guardrails/periods`, then 429 `rate_limited`.
+        Not recorded in the audit log.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, rate_limited, not_ready, internal_error]
@@ -1199,11 +1190,222 @@ paths:
           description: The guarded statistics.
           headers:
             Cache-Control: { schema: { type: string, enum: [no-store] } }
+            Deprecation:
+              description: "`@` and the 7c-1 release, in Unix seconds (RFC 9745)."
+              schema: { type: string }
+            Sunset:
+              description: The HTTP-date the rolling values are removed (RFC 8594).
+              schema: { type: string }
+            Link:
+              description: The deprecation notice (`rel="deprecation"`).
+              schema: { type: string }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/GuardrailsOut" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/guardrails/periods:
+    get:
+      operationId: getPlatformGuardrailPeriods
+      summary: Guardrail (HGA) statistics across hospitals for the latest finished calendar period, under the small-group rules.
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        New (Plan 7c spec §9, rulings R41a, R41a-2, R41a-4). `period` is
+        `week`, `month` or `quarter` (UTC). A week is month-aligned: days
+        1–7, 8–14, 15–21 and 22 to the month's end (7 to 10 days); weeks nest
+        in months and months in quarters. The response is the latest
+        published period of that kind: `from` and `to` bound it, and
+        `updated_at` is when its one stored snapshot was computed (15
+        minutes or more after it ended). Its figures never change, so every
+        read of a period is identical. Only periods that start at or after
+        the 7c-1 release are published; until the first one of a kind is,
+        or if its snapshot couldn't be computed, the answer is 503
+        `not_ready`. The cells are the same ones, shown and hidden, as the
+        analytics Answer quality area of the same period.
+
+        Per hospital and across all of them (`all`): the answers (questions
+        with a decision, counted in the question's week), and of those
+        `pass`, `regenerate` and `escalate` (a missing or unknown decision
+        counts as `escalate`), the `degraded` ones, and the three shares of
+        `answers`.
+
+        Every value is guarded, `{value, suppressed}`, by the small-group
+        rules: a count of 1 to 4 is `{value: null, suppressed: true}`, 0 is
+        0; in each set that adds up (a row's answers and its three parts,
+        each column's `all` and its hospitals, a month and its weeks, a
+        quarter and its months) enough is hidden that the hidden members
+        together are at least 5 and never exactly one is hidden; `degraded`
+        is hidden when its `answers` is, or when `answers − degraded` is 1 to
+        4; a share is hidden when its numerator or its complement is 1 to 4
+        or either count is hidden; and more is hidden until no hidden value,
+        nor a hidden total of 1 to 4, can be worked out from everything
+        published so far. A share is 0 to 1 with four decimal places;
+        `{value: null, suppressed: false}` is no answers to divide by.
+
+        Six reads a minute per session, shared with `/platform/guardrails`,
+        then 429 `rate_limited`. Not recorded in the audit log (aggregates
+        about no person).
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: period, in: query, required: true, schema: { type: string, enum: [week, month, quarter] } }
+      responses:
+        "200":
+          description: The guarded statistics of the latest published period.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GuardrailPeriodsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/analytics:
+    get:
+      operationId: getPlatformAnalytics
+      summary: Platform analytics across hospitals for the latest finished calendar period, from its one stored guarded snapshot.
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        New (Plan 7c spec §7.1, rulings R41a to R41a-5). `period` is `week`,
+        `month` or `quarter` (UTC; a week is month-aligned, days 1–7, 8–14,
+        15–21 and 22 to the month's end); anything else is 422
+        `validation_failed`. `from` and `to` bound the latest published
+        period of that kind. Every figure is read from that period's one
+        stored snapshot, computed once after the period ended (`updated_at`),
+        so every read of a period is identical; no read computes a figure.
+
+        `use`, `quality` and `hospitals` each carry their data, or
+        `{unavailable: true}` when the period's snapshot couldn't be
+        computed or read. Before the first period of a kind is published
+        (only periods that start at or after the 7c-1 release are), `from`
+        and `to` are null and each of those areas is `{not_yet: true,
+        first_from}`, the start of the first period that will be. `alerts`
+        is null (no patient alerts yet). `changes` is `{unavailable: true}`
+        until What changed is built (Plan 7c-3).
+
+        Rows are the hospitals the period lists. Every value is guarded,
+        `{value, suppressed}`, as on `/platform/guardrails/periods`, whose
+        cells for the same period are the same, shown and hidden. The
+        confidence mix is the HGA decision (high pass, medium regenerate,
+        low escalate); `needs_review_share` is escalated answers over
+        answers; `agreement_rate` is agreed reviews over reviews. Each
+        `median` is the median over the hospitals whose value is shown (a
+        count median strictly between 0 and 5 is hidden; none shown is
+        `{value: null, suppressed: false}`). `trend` is the all-hospitals
+        cell (questions for Use, the needs-review share for Quality) of each
+        published period of the latest 12 weeks, 12 months or 8 quarters,
+        oldest first: one period each, never a total over several; a period
+        whose snapshot couldn't be computed is hidden.
+
+        Thirty reads a minute per session, shared with the series routes,
+        then 429 `rate_limited`. Not recorded in the audit log (aggregates
+        about no person).
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: period, in: query, required: true, schema: { type: string, enum: [week, month, quarter] } }
+      responses:
+        "200":
+          description: The latest published period's analytics.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/analytics/hospitals/{id}/series:
+    get:
+      operationId: getPlatformAnalyticsHospitalSeries
+      summary: One hospital's stored figure for each of the latest periods, with the other hospitals' median.
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        New (Plan 7c spec §7.2). `measure` is `questions_per_clinician` or
+        `needs_review_share` (the Critical measures wait for patient alerts:
+        422 `validation_failed`, as is any other value); `period` is `week`,
+        `month` or `quarter`. `points` are the hospital's stored cell for
+        each published period of the latest 12 weeks, 12 months or 8
+        quarters, oldest first, one period each: hidden whole where the
+        period's snapshot couldn't be computed, `{value: null, suppressed:
+        false}` where the period doesn't list the hospital. `median` is the
+        median of the other hospitals' shown values for that period, or
+        null. An id that isn't a canonical uuid, or names no hospital in a
+        published period, is 404 `not_found`. Thirty reads a minute per
+        session, shared with `/platform/analytics`.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: measure, in: query, required: true, schema: { type: string, enum: [questions_per_clinician, needs_review_share] } }
+        - { name: period, in: query, required: true, schema: { type: string, enum: [week, month, quarter] } }
+      responses:
+        "200":
+          description: The series.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsSeriesOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/analytics/changes/{id}/series:
+    get:
+      operationId: getPlatformAnalyticsChangeSeries
+      summary: A change's series. No change exists until What changed is built (Plan 7c-3), so every id is 404.
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        New (Plan 7c spec §7.2). `period` is `week`, `month` or `quarter`
+        (422 `validation_failed` otherwise). Until What changed is built
+        (Plan 7c-3) there is no change, so every id is 404 `not_found`; the
+        shape then is `AnalyticsSeriesOut`, with `hospital` null for a
+        change across all hospitals. Thirty reads a minute per session,
+        shared with `/platform/analytics`.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: period, in: query, required: true, schema: { type: string, enum: [week, month, quarter] } }
+      responses:
+        "200":
+          description: The series (never, until Plan 7c-3).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsSeriesOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
@@ -1359,6 +1561,366 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/hospitals/{id}/model-policy:
+    get:
+      operationId: getHospitalModelPolicy
+      summary: A hospital's cloud model policy and this month's token usage.
+      description: |
+        Platform admins and auditors. With no policy the hospital is off
+        (local models): `cloud_provider` and `agreement_ref` null, the
+        default budget, `updated_at` null. `usage` is this month's (UTC)
+        token ledger, zeros when nothing was used. An id that is no
+        hospital's, or not a canonical uuid, is 404 `not_found`.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The policy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelPolicy" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    put:
+      operationId: setHospitalModelPolicy
+      summary: Set a hospital's cloud model policy (step-up).
+      description: |
+        Platform admins only (an auditor is 403), with a fresh TOTP code
+        (`mfa_code`) or an unused backup code (`backup_code`): none is 403
+        `mfa_required`, a wrong one 403 `mfa_invalid` (audited).
+        `cloud_provider` is `openai`, `anthropic`, `xai` or null (off: the
+        hospital's questions run on the local models). A provider needs an
+        `agreement_ref`, the reference of the recorded agreement check:
+        `AGR-YYYY-NNNN` or `DPA-YYYY-NNNN` (2 to 8 digits after the year),
+        or `DEMO-SYNTHETIC` for the synthetic demo. It is a document
+        reference, never a person's or patient's name or identifier. Off
+        has no reference: null clears it, and a reference with a null
+        provider is 422. A provider this deployment
+        hasn't enabled (`CORE_CLOUD_PROVIDERS`) is 409 `conflict`. The body
+        is checked first (422), then the provider (409), the hospital
+        (404), the session's 10 writes a minute (429 `rate_limited`), then
+        the code. One `hospital.model_policy_changed` audit entry per
+        write. Answers as the GET.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cloud_provider, monthly_token_budget]
+              additionalProperties: false
+              properties:
+                cloud_provider: { type: string, enum: [openai, anthropic, xai], nullable: true }
+                agreement_ref: { type: string, pattern: "^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$", nullable: true }
+                monthly_token_budget: { type: integer, format: int64, minimum: 1, maximum: 1000000000 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The policy as written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelPolicy" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/emr/connector-types:
+    get:
+      operationId: listEmrConnectorTypes
+      summary: The record connection types this deployment offers.
+      description: |
+        Platform admins and auditors. The types named by
+        `CORE_EMR_CONNECTOR_TYPES` that the emr service can run, each with
+        the fields its form shows. `{types: []}` when EMR is off
+        (`CORE_EMR_ENABLED` false, the default) or no type is offered.
+        Types name a standard or a method, never a product.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The offered types.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [types]
+                additionalProperties: false
+                properties:
+                  types: { type: array, items: { $ref: "#/components/schemas/EmrConnectorType" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/emr/connections:
+    get:
+      operationId: listEmrConnections
+      summary: Record connections, and hospitals with none.
+      description: |
+        Platform admins and auditors. Ordered by hospital name, then source
+        label. `hospital` limits both lists to one hospital; `state` is
+        `all` (default), `needs_attention` (on, with errors or paused),
+        `off` (switched off, tested or not) or `not_connected` (only the
+        hospitals, not removed, with no connection). A summary carries no
+        address, settings or credentials. Empty when EMR is off.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: hospital, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: state, in: query, required: false, schema: { type: string, enum: [all, needs_attention, off, not_connected] } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The connections and the hospitals not connected.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connections, not_connected]
+                additionalProperties: false
+                properties:
+                  connections: { type: array, items: { $ref: "#/components/schemas/EmrConnectionSummary" } }
+                  not_connected: { type: array, items: { $ref: "#/components/schemas/EmrPerson" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/emr/connections/{id}:
+    get:
+      operationId: getEmrConnection
+      summary: One record connection.
+      description: |
+        Platform admins and auditors. Credentials read as the time each was
+        set for the connection's current address (`set_at`), never a value;
+        null when not set. 404 when EMR is off.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The connection.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmrConnection" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    patch:
+      operationId: updateEmrConnection
+      summary: Change a record connection (step-up).
+      description: |
+        Platform admins only, with a fresh code (`mfa_code` or
+        `backup_code`). Send only what changes, and `version` (a stale one
+        is 409 `conflict`, as is a label the hospital already has). `settings` keys are merged (an empty string
+        removes an optional one); `credentials` are only the ones being
+        replaced. A change of the address, settings, credentials or private
+        network clears `last_test`; a label or interval change keeps it.
+        Credentials are bound to the address they were entered for: a
+        change of the base address's or the token address's scheme, host
+        or port deletes every credential in the emr service before the
+        change is saved (no confirmation: 503 `unavailable` and nothing
+        changes), switches the connection off, and leaves every `set_at`
+        null; new credentials in the same request are kept for the new
+        address. Credentials are sent to the emr service after the change
+        is saved: if it doesn't confirm them, the change stays saved and
+        the answer is 200 with `credentials_missing` true (on the same
+        address the old credentials are deleted too and the connection is
+        switched off); re-send them with PATCH. The request body is never
+        logged or stored; the idempotency store keeps a keyed hash of it.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, hospital_removed, validation_failed, not_ready, unavailable, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmrConnectionPatch" }
+      responses:
+        "200":
+          description: The connection as saved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmrConnection" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/emr/connections/{id}/enabled:
+    put:
+      operationId: setEmrConnectionEnabled
+      summary: Switch a record connection on or off (step-up).
+      description: |
+        Platform admins only, with a fresh code. On needs an offered type
+        (422 `no_type`) and a passing test of the saved settings (409
+        `not_tested`); a hospital removed or being removed is 409
+        `hospital_removed`. Off always works and keeps the credentials.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, not_tested, hospital_removed, validation_failed, no_type, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled, version]
+              additionalProperties: false
+              properties:
+                enabled: { type: boolean }
+                version: { type: integer, minimum: 1 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The connection as saved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmrConnection" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/emr/connections/{id}/test:
+    post:
+      operationId: testEmrConnection
+      summary: Try a record connection's saved settings.
+      description: |
+        Platform admins only; no step-up (it changes nothing in the
+        hospital's system, and credentials only go to the address they
+        were entered for). The emr service tries the saved settings; the
+        outcome is `last_test` (`code` null when it passed). A credential
+        not set for the current address is `sign_in_refused` with nothing
+        sent. A change saved meanwhile is 409 `conflict`, nothing recorded.
+        No answer from the emr service is 503 `unavailable`. The body is
+        empty or `{}` (under 1 KiB); anything else is 422
+        `validation_failed`.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, hospital_removed, validation_failed, no_type, not_ready, unavailable, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: The connection with its new `last_test`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmrConnection" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/hospitals/{id}/emr/connections:
+    post:
+      operationId: addEmrConnection
+      summary: Add a record connection to a hospital (step-up).
+      description: |
+        Platform admins only, with a fresh code. Saved switched off and
+        untested. `type` must be offered (422 `no_type`); `source_label`
+        1 to 40 characters naming no product; `base_url` https (sftp for a
+        file export), at most 500 characters, a DNS name, with no userinfo,
+        query or fragment; every address setting gets the same checks, and
+        a record link must be on the base address's host. `settings` are
+        the type's text fields; `credentials` its secret fields, each 1 to
+        4,000 characters, every required one present. Credentials are
+        sealed to the emr service as they arrive and stored there only;
+        if the emr service doesn't confirm them, the connection is still
+        created (off) and answered with `credentials_missing` true and
+        `set_at` null: re-send them with PATCH on that connection. A retry
+        with the same `Idempotency-Key` answers the same connection; a
+        label the hospital already has (in any case) is 409 `conflict`, so
+        a retry without the key never adds a second connection. An unknown
+        hospital is 404; one removed or being removed is 409
+        `hospital_removed`. The request body is never
+        logged or stored; the idempotency store keeps a keyed hash of it.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, hospital_removed, validation_failed, no_type, not_ready, unavailable, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmrConnectionIn" }
+      responses:
+        "200":
+          description: The connection as saved (off).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmrConnection" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
 components:
   securitySchemes:
     ServiceKey:
@@ -1440,6 +2002,9 @@ components:
             - payload_too_large
             - self_approval
             - already_decided
+            - not_tested
+            - hospital_removed
+            - no_type
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -1497,7 +2062,7 @@ components:
     User:
       type: object
       required: [id, role, roles, email, display_name, full_name, role_title, specialty, hospital, mfa_enabled,
-        must_change_password, terms_accepted_at, recovery_codes_left, idle_timeout_minutes, review_overdue_hours]
+        must_change_password, terms_accepted_at, recovery_codes_left, idle_timeout_minutes, review_overdue_hours, features]
       properties:
         id: { type: string, format: uuid }
         role: { type: string, description: The primary role. }
@@ -1522,6 +2087,17 @@ components:
         recovery_codes_left: { type: integer }
         idle_timeout_minutes: { type: integer }
         review_overdue_hours: { type: integer }
+        features:
+          type: object
+          description: >-
+            What the user may open (Patient Analysis). analysis is true only when the
+            hospital's analysis switch is on, the user is a hospital admin or an analyst,
+            and two-step is on; it is off by default. named_access is false until named
+            access exists. The BFF's own sign-off settings can only turn these off.
+          required: [analysis, named_access]
+          properties:
+            analysis: { type: boolean }
+            named_access: { type: boolean }
 
     RefreshRequest:
       type: object
@@ -1716,6 +2292,22 @@ components:
             cascade_pass: { type: boolean }
         retrieval_ms: { type: number }
         generation_ms: { type: number }
+        generated_by:
+          type: object
+          description: >-
+            Where the answer was drafted, from the decision's own model versions:
+            `local`, or `cloud` with the provider. It names the route that produced
+            this answer and doesn't change when the hospital's model policy changes
+            later. Absent when unknown (an answer from an older pipeline, or a cloud
+            failure that produced no draft). Added in 1.10.0.
+          required: [route, provider]
+          properties:
+            route: { type: string, enum: [local, cloud] }
+            provider:
+              type: string
+              nullable: true
+              enum: [anthropic, openai, xai, null]
+              description: The cloud provider; null on a local answer.
 
     FeedbackIn:
       type: object
@@ -1937,6 +2529,154 @@ components:
       properties:
         jobs: { type: array, items: { $ref: "#/components/schemas/Job" } }
         next_cursor: { type: string, nullable: true }
+    ModelPolicy:
+      type: object
+      description: A hospital's cloud model policy (off when `cloud_provider` is null) and this month's token usage.
+      required: [hospital_id, cloud_provider, agreement_ref, monthly_token_budget, updated_at, usage]
+      additionalProperties: false
+      properties:
+        hospital_id: { type: string, format: uuid }
+        cloud_provider: { type: string, enum: [openai, anthropic, xai], nullable: true }
+        agreement_ref: { type: string, pattern: "^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$", nullable: true }
+        monthly_token_budget: { type: integer, format: int64, minimum: 1, maximum: 1000000000 }
+        updated_at: { type: string, format: date-time, nullable: true }
+        usage:
+          type: object
+          required: [month, used, reserved]
+          additionalProperties: false
+          properties:
+            month: { type: string, pattern: "^[0-9]{4}-[0-9]{2}$", description: "The month, UTC, as YYYY-MM." }
+            used: { type: integer, format: int64, minimum: 0 }
+            reserved: { type: integer, format: int64, minimum: 0 }
+    EmrPerson:
+      type: object
+      required: [id, name]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+    EmrConnectorType:
+      type: object
+      description: A kind of connection, as data. Named by standard or method, never by product.
+      required: [id, label, summary, fields]
+      additionalProperties: false
+      properties:
+        id: { type: string, enum: [fhir_r4, document_archive, file_export, stub] }
+        label: { type: string }
+        summary: { type: string }
+        fields:
+          type: array
+          items:
+            type: object
+            required: [key, label, kind, required, max]
+            additionalProperties: false
+            properties:
+              key: { type: string, pattern: "^[a-z_]+$" }
+              label: { type: string }
+              kind: { type: string, enum: [text, secret], description: "A secret is write-only: never sent back." }
+              required: { type: boolean }
+              max: { type: integer, minimum: 1 }
+    EmrSyncCode:
+      type: string
+      enum: [unreachable, sign_in_refused, timed_out, unreadable_data, unmapped_codes, too_many_requests]
+    EmrConnectionSummary:
+      type: object
+      required: [id, hospital, type, type_label, source_label, enabled, health, last_test, last_sync, errors_24h, paused, credentials_missing]
+      properties:
+        id: { type: string, format: uuid }
+        hospital: { $ref: "#/components/schemas/EmrPerson" }
+        type: { type: string }
+        type_label: { type: string }
+        source_label: { type: string, minLength: 1, maxLength: 40 }
+        enabled: { type: boolean }
+        health: { type: string, enum: [never, ok, errors] }
+        last_test:
+          type: object
+          nullable: true
+          required: [at, ok, code]
+          additionalProperties: false
+          properties:
+            at: { type: string, format: date-time }
+            ok: { type: boolean }
+            code: { allOf: [{ $ref: "#/components/schemas/EmrSyncCode" }], nullable: true }
+        last_sync:
+          type: object
+          nullable: true
+          required: [at, ok, records]
+          additionalProperties: false
+          properties:
+            at: { type: string, format: date-time }
+            ok: { type: boolean }
+            records: { type: integer, minimum: 0 }
+        errors_24h: { type: integer, minimum: 0 }
+        paused: { type: boolean, description: "Additive: a source the breaker paused." }
+        credentials_missing: { type: boolean, description: "Additive: a required credential isn't set for the current address; re-send it with PATCH on this connection." }
+    EmrConnection:
+      allOf:
+        - $ref: "#/components/schemas/EmrConnectionSummary"
+        - type: object
+          required: [base_url, settings, credentials, errors, updated_by, updated_at, version, poll_seconds, private_network, private_cidrs]
+          properties:
+            base_url: { type: string, maxLength: 500 }
+            settings: { type: object, additionalProperties: { type: string }, description: "The type's text fields only. Secrets are never here." }
+            credentials:
+              type: array
+              description: One per secret field; `set_at` null when not set for the current address. Never a value.
+              items:
+                type: object
+                required: [key, set_at]
+                additionalProperties: false
+                properties:
+                  key: { type: string }
+                  set_at: { type: string, format: date-time, nullable: true }
+            errors:
+              type: array
+              maxItems: 5
+              description: The last 24 hours, by code, newest first.
+              items:
+                type: object
+                required: [at, code, count]
+                additionalProperties: false
+                properties:
+                  at: { type: string, format: date-time }
+                  code: { $ref: "#/components/schemas/EmrSyncCode" }
+                  count: { type: integer, minimum: 1 }
+            updated_by: { allOf: [{ $ref: "#/components/schemas/EmrPerson" }], nullable: true }
+            updated_at: { type: string, format: date-time, nullable: true }
+            version: { type: integer, minimum: 1 }
+            poll_seconds: { type: integer, minimum: 60, maximum: 86400, description: Additive. }
+            private_network: { type: boolean, description: Additive. }
+            private_cidrs: { type: array, items: { type: string }, description: "Additive: the declared private ranges." }
+    EmrConnectionIn:
+      type: object
+      required: [type, source_label, base_url, settings, credentials]
+      additionalProperties: false
+      properties:
+        type: { type: string }
+        source_label: { type: string, minLength: 1, maxLength: 40 }
+        base_url: { type: string, maxLength: 500 }
+        settings: { type: object, additionalProperties: { type: string } }
+        credentials: { type: object, additionalProperties: { type: string, minLength: 1, maxLength: 4000 }, description: "The type's secret fields. Write-only." }
+        poll_seconds: { type: integer, minimum: 60, maximum: 86400 }
+        private_network: { type: boolean }
+        private_cidrs: { type: array, maxItems: 8, items: { type: string }, description: "Private IPv4 networks of at most a /24; needs private_network." }
+        mfa_code: { type: string }
+        backup_code: { type: string }
+    EmrConnectionPatch:
+      type: object
+      required: [version]
+      additionalProperties: false
+      properties:
+        source_label: { type: string, minLength: 1, maxLength: 40 }
+        base_url: { type: string, maxLength: 500 }
+        settings: { type: object, additionalProperties: { type: string } }
+        credentials: { type: object, additionalProperties: { type: string, minLength: 1, maxLength: 4000 }, description: "Only the ones being replaced. Write-only." }
+        poll_seconds: { type: integer, minimum: 60, maximum: 86400 }
+        private_network: { type: boolean }
+        private_cidrs: { type: array, maxItems: 8, items: { type: string } }
+        version: { type: integer, minimum: 1 }
+        mfa_code: { type: string }
+        backup_code: { type: string }
     GuardedCount:
       type: object
       description: "A count under the small-group rule. Never 1 to 4; hidden is `{value: null, suppressed: true}`."
@@ -1965,6 +2705,210 @@ components:
         pass_share: { $ref: "#/components/schemas/GuardedShare" }
         regenerate_share: { $ref: "#/components/schemas/GuardedShare" }
         escalate_share: { $ref: "#/components/schemas/GuardedShare" }
+    GuardrailPeriodsOut:
+      type: object
+      description: Plan 7c spec §9 (New), the calendar periods.
+      required: [period, from, to, updated_at, all, hospitals]
+      additionalProperties: false
+      properties:
+        period: { type: string, enum: [week, month, quarter] }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        all: { $ref: "#/components/schemas/GuardrailRates" }
+        hospitals:
+          type: array
+          items:
+            allOf:
+              - $ref: "#/components/schemas/GuardrailRates"
+              - type: object
+                required: [hospital]
+                properties:
+                  hospital: { $ref: "#/components/schemas/PersonRef" }
+    GuardedNumber:
+      type: object
+      description: "A ratio, median or review time under the small-group rule: hidden is `{value: null, suppressed: true}`, nothing to show `{value: null, suppressed: false}`."
+      required: [value, suppressed]
+      additionalProperties: false
+      properties:
+        value: { type: number, minimum: 0, nullable: true }
+        suppressed: { type: boolean }
+    AnalyticsUnavailable:
+      type: object
+      required: [unavailable]
+      additionalProperties: false
+      properties:
+        unavailable: { type: boolean, enum: [true] }
+    AnalyticsNotYet:
+      type: object
+      description: Before the first published period of the kind (F19).
+      required: [not_yet, first_from]
+      additionalProperties: false
+      properties:
+        not_yet: { type: boolean, enum: [true] }
+        first_from: { type: string, format: date-time }
+    AnalyticsCountPoint:
+      type: object
+      required: [start, value]
+      additionalProperties: false
+      properties:
+        start: { type: string, format: date-time }
+        value: { $ref: "#/components/schemas/GuardedCount" }
+    AnalyticsSharePoint:
+      type: object
+      required: [start, value]
+      additionalProperties: false
+      properties:
+        start: { type: string, format: date-time }
+        value: { $ref: "#/components/schemas/GuardedShare" }
+    AnalyticsConfidence:
+      type: object
+      required: [high, medium, low]
+      additionalProperties: false
+      properties:
+        high: { $ref: "#/components/schemas/GuardedCount" }
+        medium: { $ref: "#/components/schemas/GuardedCount" }
+        low: { $ref: "#/components/schemas/GuardedCount" }
+    AnalyticsConfidenceMedian:
+      type: object
+      required: [high, medium, low]
+      additionalProperties: false
+      properties:
+        high: { $ref: "#/components/schemas/GuardedNumber" }
+        medium: { $ref: "#/components/schemas/GuardedNumber" }
+        low: { $ref: "#/components/schemas/GuardedNumber" }
+    AnalyticsUse:
+      type: object
+      required: [updated_at, rows, median, trend]
+      additionalProperties: false
+      properties:
+        updated_at: { type: string, format: date-time }
+        rows:
+          type: array
+          items:
+            type: object
+            required: [hospital, questions, active_clinicians, questions_per_clinician]
+            additionalProperties: false
+            properties:
+              hospital: { $ref: "#/components/schemas/PersonRef" }
+              questions: { $ref: "#/components/schemas/GuardedCount" }
+              active_clinicians: { $ref: "#/components/schemas/GuardedCount" }
+              questions_per_clinician: { $ref: "#/components/schemas/GuardedNumber" }
+        median:
+          type: object
+          required: [questions, active_clinicians, questions_per_clinician]
+          additionalProperties: false
+          properties:
+            questions: { $ref: "#/components/schemas/GuardedNumber" }
+            active_clinicians: { $ref: "#/components/schemas/GuardedNumber" }
+            questions_per_clinician: { $ref: "#/components/schemas/GuardedNumber" }
+        trend: { type: array, items: { $ref: "#/components/schemas/AnalyticsCountPoint" } }
+    AnalyticsQuality:
+      type: object
+      required: [updated_at, rows, median, trend]
+      additionalProperties: false
+      properties:
+        updated_at: { type: string, format: date-time }
+        rows:
+          type: array
+          items:
+            type: object
+            required: [hospital, answers, needs_review_share, confidence, reviews, agreement_rate, median_review_hours]
+            additionalProperties: false
+            properties:
+              hospital: { $ref: "#/components/schemas/PersonRef" }
+              answers: { $ref: "#/components/schemas/GuardedCount" }
+              needs_review_share: { $ref: "#/components/schemas/GuardedShare" }
+              confidence: { $ref: "#/components/schemas/AnalyticsConfidence" }
+              reviews: { $ref: "#/components/schemas/GuardedCount" }
+              agreement_rate: { $ref: "#/components/schemas/GuardedShare" }
+              median_review_hours: { $ref: "#/components/schemas/GuardedNumber" }
+        median:
+          type: object
+          required: [answers, needs_review_share, confidence, reviews, agreement_rate, median_review_hours]
+          additionalProperties: false
+          properties:
+            answers: { $ref: "#/components/schemas/GuardedNumber" }
+            needs_review_share: { $ref: "#/components/schemas/GuardedShare" }
+            confidence: { $ref: "#/components/schemas/AnalyticsConfidenceMedian" }
+            reviews: { $ref: "#/components/schemas/GuardedNumber" }
+            agreement_rate: { $ref: "#/components/schemas/GuardedShare" }
+            median_review_hours: { $ref: "#/components/schemas/GuardedNumber" }
+        trend: { type: array, items: { $ref: "#/components/schemas/AnalyticsSharePoint" } }
+    AnalyticsHospitals:
+      type: object
+      required: [updated_at, rows]
+      additionalProperties: false
+      properties:
+        updated_at: { type: string, format: date-time }
+        rows:
+          type: array
+          items:
+            type: object
+            required: [hospital, size]
+            additionalProperties: false
+            properties:
+              hospital: { $ref: "#/components/schemas/PersonRef" }
+              size:
+                type: object
+                description: "`staff` is under the small-group rule until the privacy lead decides (spec §16, Q4)."
+                required: [staff, active_clinicians, questions]
+                additionalProperties: false
+                properties:
+                  staff: { $ref: "#/components/schemas/GuardedCount" }
+                  active_clinicians: { $ref: "#/components/schemas/GuardedCount" }
+                  questions: { $ref: "#/components/schemas/GuardedCount" }
+    AnalyticsOut:
+      type: object
+      description: Plan 7c spec §7.1 (New).
+      required: [period, from, to, changes, use, alerts, quality, hospitals]
+      additionalProperties: false
+      properties:
+        period: { type: string, enum: [week, month, quarter] }
+        from: { type: string, format: date-time, nullable: true }
+        to: { type: string, format: date-time, nullable: true }
+        changes: { $ref: "#/components/schemas/AnalyticsUnavailable" }
+        use:
+          oneOf:
+            - $ref: "#/components/schemas/AnalyticsUse"
+            - $ref: "#/components/schemas/AnalyticsUnavailable"
+            - $ref: "#/components/schemas/AnalyticsNotYet"
+        alerts: { type: object, nullable: true, additionalProperties: false, description: Always null until patient alerts exist (spec §3, F4). }
+        quality:
+          oneOf:
+            - $ref: "#/components/schemas/AnalyticsQuality"
+            - $ref: "#/components/schemas/AnalyticsUnavailable"
+            - $ref: "#/components/schemas/AnalyticsNotYet"
+        hospitals:
+          oneOf:
+            - $ref: "#/components/schemas/AnalyticsHospitals"
+            - $ref: "#/components/schemas/AnalyticsUnavailable"
+            - $ref: "#/components/schemas/AnalyticsNotYet"
+    AnalyticsSeriesOut:
+      type: object
+      description: Plan 7c spec §7.2 (New).
+      required: [measure, hospital, points]
+      additionalProperties: false
+      properties:
+        measure: { type: string, enum: [questions_per_clinician, needs_review_share] }
+        hospital:
+          allOf:
+            - $ref: "#/components/schemas/PersonRef"
+          nullable: true
+        points:
+          type: array
+          items:
+            type: object
+            required: [start, value, median]
+            additionalProperties: false
+            properties:
+              start: { type: string, format: date-time }
+              value:
+                description: "`GuardedNumber` for `questions_per_clinician` (two decimals), `GuardedShare` for `needs_review_share` (four)."
+                oneOf:
+                  - $ref: "#/components/schemas/GuardedNumber"
+                  - $ref: "#/components/schemas/GuardedShare"
+              median: { type: number, nullable: true }
     GuardrailsOut:
       type: object
       description: Plan 4 spec §6.3 (New).

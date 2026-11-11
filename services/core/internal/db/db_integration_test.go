@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -110,11 +111,12 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(st) != 17 {
-		t.Fatalf("want 17 migrations, got %d", len(st))
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21}
+	if len(st) != len(want) {
+		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
 	for i, s := range st {
-		if s.Source.Version != int64(i+1) || s.State != goose.StateApplied {
+		if s.Source.Version != want[i] || s.State != goose.StateApplied {
 			t.Fatalf("migration %d: version %d state %s", i, s.Source.Version, s.State)
 		}
 	}
@@ -132,7 +134,7 @@ func TestAppRolesAreNotOwnersAndCannotBypassRLS(t *testing.T) {
 	ctx := context.Background()
 	rows, err := pool.Query(ctx,
 		`SELECT rolname, rolsuper, rolbypassrls, rolcanlogin FROM pg_roles
-		 WHERE rolname IN ('mhai_gateway','mhai_platform','mhai_auth','mhai_worker','mhai_migrate','mhai_app','mhai_provision','mhai_jobs','mhai_worker_app','mhai_audit_drain','mhai_health_reader','mhai_jobs_reader','mhai_guardrail_reader')`)
+		 WHERE rolname IN ('mhai_gateway','mhai_platform','mhai_auth','mhai_worker','mhai_migrate','mhai_app','mhai_provision','mhai_jobs','mhai_worker_app','mhai_audit_drain','mhai_health_reader','mhai_jobs_reader','mhai_guardrail_reader','mhai_analytics_job','mhai_analytics_reader')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +150,7 @@ func TestAppRolesAreNotOwnersAndCannotBypassRLS(t *testing.T) {
 			t.Errorf("%s: super=%v bypassrls=%v login=%v, want all false", name, super, bypass, login)
 		}
 	}
-	if len(seen) != 13 {
+	if len(seen) != 15 {
 		t.Fatalf("roles found: %v", seen)
 	}
 
@@ -255,6 +257,20 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO audit_verify_runs (state, finished_at, error_code) VALUES ('error', now(), 'timed_out')`); err != nil {
 		t.Fatal(err)
 	}
+	// An EMR connection with credential metadata, a sync run and an error
+	// (00020), so the EMR tables have rows to hide.
+	conn := seedConn(t, pool, a)
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.credentials (connection_id, hospital_id, field, set_at, secret_version, origin)
+		VALUES ($1, $2, 'private_key', now(), 'v1', '{https://fhir.example.org:443}')`, conn, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.sync_runs (hospital_id, connection_id, ok, records, outcome) VALUES ($1, $2, true, 1, 'ok')`, a, conn); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.connection_errors (hospital_id, connection_id, code) VALUES ($1, $2, 'unreachable')`, a, conn); err != nil {
+		t.Fatal(err)
+	}
+	emrTables := []string{"emr_connections", "emr.credentials", "emr.sync_runs", "emr.connection_errors"}
 
 	// One connection, so the second transaction reuses the session that
 	// had mhai.hospital_id set by the first.
@@ -269,7 +285,10 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if err := db.WithHospital(ctx, one, a, func(pgx.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs"} {
+	for _, table := range append([]string{"clinical_queries", "users", "hospital_settings", "audit_log", "kb_chunks", "feedback_events", "jobs", "feedback_buffer", "audit_verify_runs", "hospital_model_policy", "cloud_usage", "cloud_reservations",
+		"analytics_snapshots", "analytics_period_counts", "analytics_frozen_periods", "analytics_epoch",
+		"analysis_switch", "analysis_sources", "analysis_locations", "analysis_conditions", "analysis_subjects", "analysis_facts",
+		"analysis_first_seen", "analysis_periods", "analysis_pseudonyms", "analysis_watermarks"}, emrTables...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -279,7 +298,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		}
 		var n int
 		where := ` WHERE hospital_id IS NOT NULL`
-		if table == "audit_verify_runs" {
+		if table == "audit_verify_runs" || strings.HasPrefix(table, "analytics_") {
 			where = "" // global, no hospital column: the gateway may not read it at all
 		}
 		err = tx.QueryRow(ctx, `SELECT count(*) FROM `+table+where).Scan(&n)
@@ -293,11 +312,49 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			requireDenied(t, err, "gateway reading feedback_buffer")
 			continue
 		}
+		if strings.HasPrefix(table, "analytics_") || slices.Contains(emrTables, table) {
+			// 00019: platform tables, no hospital scope; 00020: core's
+			// clinical role holds nothing on the EMR tables. The gateway
+			// holds no grant on any of them.
+			requireDenied(t, err, "gateway reading "+table)
+			continue
+		}
+		if strings.HasPrefix(table, "analysis_") && !analysisDictionaries[table] {
+			// 00021: reached only through definer functions; the gateway
+			// holds no grant (it reads its position through a function).
+			requireDenied(t, err, "gateway reading "+table)
+			continue
+		}
+		if table == "hospital_model_policy" || table == "cloud_usage" || table == "cloud_reservations" {
+			// 00018: the policy is the platform's and the CLI's, the ledger
+			// is reached only through definer functions: the gateway holds
+			// no grant on either.
+			requireDenied(t, err, "gateway reading "+table)
+			continue
+		}
 		if err != nil {
 			t.Fatalf("%s without hospital: %v", table, err)
 		}
 		if n != 0 {
 			t.Fatalf("%s without hospital: %d rows, want 0", table, n)
+		}
+	}
+
+	// The emr service's role, with no hospital set, sees no EMR row
+	// (00020); emr.connection_errors it may only append to.
+	for _, table := range emrTables[:3] {
+		tx, err := one.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `SET LOCAL ROLE mhai_emr`); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		err = tx.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE hospital_id IS NOT NULL`).Scan(&n)
+		_ = tx.Rollback(ctx)
+		if err != nil || n != 0 {
+			t.Fatalf("emr reading %s without hospital: %d rows, %v", table, n, err)
 		}
 	}
 

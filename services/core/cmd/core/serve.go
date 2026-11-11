@@ -15,6 +15,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	core "github.com/Measured-Health/mhai-multiagent/services/core"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/apidocs"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
@@ -22,17 +24,18 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/grant"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/natsapi"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // SweepEvery is how often serve deletes expired Idempotency-Key rows.
@@ -47,6 +50,8 @@ type app struct {
 	js      jetstream.JetStream
 	health  jetstream.KeyValue // the health bucket (platform.RunSampler)
 	log     *slog.Logger
+	// analysis is Patient Analysis's nightly run (as mhai_analysis_job).
+	analysis *analysis.Nightly
 	// stopAPI ends core's NATS API (natsapi.Serve) and stopGrant its grant
 	// endpoint (grant.Server) before NATS closes.
 	stopAPI, stopGrant func()
@@ -103,6 +108,21 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if err := checkSigningKeys(issuer, signer); err != nil {
 		return nil, err
 	}
+	// EMR (off by default): the emr service's sealing public key and the
+	// idempotency HMAC key for the credential routes; either missing or
+	// unusable stops the service.
+	var (
+		sealer  *emrctl.Sealer
+		idemKey []byte
+	)
+	if cfg.EMREnabled {
+		if sealer, err = emrctl.LoadSealer(cfg.EMRSealPublicKeyPath); err != nil {
+			return nil, err
+		}
+		if idemKey, err = config.LoadIdempotencyHMACKey(cfg.IdempotencyHMACKeyPath); err != nil {
+			return nil, err
+		}
+	}
 	a := &app{log: log}
 	if a.pool, err = openDB(ctx, cfg.DatabaseURL); err != nil {
 		return nil, err
@@ -131,6 +151,10 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
+	if err := ensureEMR(ctx, cfg, js); err != nil {
+		a.close()
+		return nil, err
+	}
 	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log, Metrics: &intel.Metrics{}, Pool: a.pool}
 	a.js = js
 	if cfg.RequestTrustedKeysPath != "" {
@@ -152,8 +176,9 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	}
 	guard := &authz.Guard{
 		Keys: keys, Denylist: buckets.Denylist, Pool: a.pool, Log: log,
-		Idem:     httpx.IdempotentLog(a.pool, log),
-		IdemAnon: httpx.IdempotentAnonLog(a.pool, log),
+		Idem:      httpx.IdempotentLog(a.pool, log),
+		IdemAnon:  httpx.IdempotentAnonLog(a.pool, log),
+		IdemKeyed: httpx.IdempotentKeyed(a.pool, log, idemKey),
 	}
 	m := authz.NewMux(guard)
 	contact := platform.SecurityContact{Name: cfg.SecurityContactName, Email: cfg.SecurityContactEmail}
@@ -161,7 +186,9 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		log.Warn("core: no usable security contact (SECURITY_CONTACT_NAME, SECURITY_CONTACT_EMAIL); the audit integrity status answers 503")
 	}
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.WithLink(server.Readiness(a.pool, nc, buckets.All()), link),
-		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health})
+		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health,
+		CloudProviders: cfg.CloudProviders, EMREnabled: cfg.EMREnabled, EMRTypes: cfg.EMRConnectorTypes,
+		EMR: &emrctl.Client{NC: nc, Signer: signer, Log: log}, EMRSealer: sealer, EMRDevelopment: cfg.Development()})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}
@@ -177,6 +204,17 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
+	// Patient Analysis's nightly run: it serves only hospitals whose
+	// analysis switch is on (none by default) and needs its keys only to
+	// ingest a signed-off hospital, where it fails closed without them.
+	var analysisKeys *analysis.Keys
+	if k := cfg.Analysis; k.Set() {
+		if analysisKeys, err = analysis.NewKeys(k.RefHMAC, k.RefEnc, k.Drill, k.Note); err != nil {
+			a.close()
+			return nil, err
+		}
+	}
+	a.analysis = analysis.NewNightly(a.pool, analysisKeys, log)
 	registerMetrics(a, apiMetrics, grantMetrics)
 	if !cfg.HTTPAPI {
 		a.handler = m.ProbesHandler()
@@ -186,6 +224,16 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	// NATS (see internal/apidocs): only this HTTP handler carries them.
 	a.handler = apidocs.Wrap(cfg.APIDocs, core.OpenAPI, m.Handler(cfg.BFFServiceKeys))
 	return a, nil
+}
+
+// ensureEMR creates the EMR stream and its durables only when
+// CORE_EMR_ENABLED is on (K4: off by default, no stream exists). Off, it
+// doesn't touch JetStream.
+func ensureEMR(ctx context.Context, cfg config.Config, js jetstream.JetStream) error {
+	if !cfg.EMREnabled {
+		return nil
+	}
+	return bus.EnsureEMRStream(ctx, js, cfg.NATSJSReplicas)
 }
 
 // checkSigningKeys refuses one key for both token kinds (spec §7.2): the
@@ -311,6 +359,23 @@ func serve() error {
 		if err := platform.RunSampler(ctx, platform.Deps{Pool: a.pool, Intel: a.intel, Health: a.health, Log: log},
 			platform.SampleEvery); err != nil {
 			log.Error("core: health sampler stopped", "reason", "internal_error")
+		}
+	}()
+	// Platform analytics (Plan 7c): one guarded snapshot per finished
+	// calendar period, built as mhai_analytics_job; one core copy builds
+	// (an advisory lock) and every copy serves the stored rows.
+	go func() {
+		s := scheduler.Scheduler{Pool: a.pool, Builder: scheduler.Builder{Src: scheduler.DB{Pool: a.pool}}, Log: log}
+		if err := s.Run(ctx); err != nil {
+			log.Error("core: analytics scheduler stopped", "reason", "internal_error")
+		}
+	}()
+	// Patient Analysis (analysis plan Task 3): per switched-on hospital,
+	// after its local midnight + 30 minutes, ingest, sweep and freeze; one
+	// core copy runs (an advisory lock).
+	go func() {
+		if err := a.analysis.Run(ctx); err != nil {
+			log.Error("core: analysis nightly run stopped", "reason", "internal_error")
 		}
 	}()
 	// SIGHUP re-reads the trusted request-keys file (after keys untrust).

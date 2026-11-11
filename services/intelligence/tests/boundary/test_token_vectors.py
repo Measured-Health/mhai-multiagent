@@ -1,6 +1,6 @@
 """A25: the Python verifier gives every shared request-token vector the
 verdict Go gives it (testdata/request-tokens/*.json, written by
-services/core/internal/reqtoken/vectors_test.go).
+services/gokit/reqtoken/vectors_test.go).
 
 The verdict covers checks 1-5 of spec §7.3, the checks the token alone
 decides. A valid vector whose subject has an operation also goes through
@@ -84,9 +84,25 @@ def test_shared_token_vectors() -> None:
     files = sorted(VECTORS.glob("*.json"))
     assert len(vectors) == len(files) >= 40, "drift guard: every file is a vector"
     ops = Operations.load(development=True)
-    checked, full, mismatches = 0, 0, []
+    checked, full, emr, mismatches = 0, 0, 0, []
     for v in vectors:
         body = base64.b64decode(v["body"], validate=True)
+        if v["subject"].startswith("emr."):
+            # The emr service's control vectors (EMR design §3.2): its Go
+            # responder gives the verdict. A worker (aud pipeline) refuses
+            # every one of them.
+            got = _verifier({**v, "service": "pipeline"}, ops).check_token(
+                v["token"], v["subject"], v["reply"], v["knd"], body, granted=v["granted"]
+            )
+            # aud emr: refused by audience. A forged aud pipeline on an emr
+            # subject passes that check and is refused by the subject's shape.
+            aud = json.loads(base64.urlsafe_b64decode(v["token"].split(".")[1] + "=="))["aud"]
+            want = "binding" if aud == "pipeline" else "claims"
+            if got != want:
+                mismatches.append(f"{v['name']}: a worker gives {got!r}, want {want!r}")
+            emr += 1
+            checked += 1
+            continue
         verifier = _verifier(v, ops)
         got = verifier.check_token(
             v["token"], v["subject"], v["reply"], v["knd"], body, granted=v["granted"]
@@ -105,6 +121,7 @@ def test_shared_token_vectors() -> None:
     assert checked == len(files), "no vector skipped"
     # valid_req, valid_job, valid_grant, iat_at_skew, exp_iat_60s (valid_global_job has no operation).
     assert full == 5
+    assert emr == 5, "the five emr control vectors"
 
 
 def test_test_signer_matches_go_vector() -> None:

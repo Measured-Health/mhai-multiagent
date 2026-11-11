@@ -47,8 +47,13 @@ import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, unquote, urlsplit
+
+if TYPE_CHECKING:
+    # boundary.cloud imports this module; this one imports it only when
+    # building settings, so the import graph is one-way at load.
+    from intelligence.boundary.cloud.settings import CloudSettings
 
 log = logging.getLogger("intelligence.boundary.config")
 
@@ -117,6 +122,14 @@ def _check_nats_url(raw: str, development: bool) -> list[str]:
             elif not development:
                 errs.append("NATS_URL must not carry a password outside development (use NKeys)")
     return errs[:1]
+
+
+def is_demo(environ: Mapping[str, str] | None = None) -> bool:
+    """True only when APP_ENV names demo: production in every respect but
+    one, a cloud provider's ZDR_REF may be DEMO-SYNTHETIC (synthetic data
+    only). Demo is not development."""
+    env = os.environ if environ is None else environ
+    return env.get("APP_ENV", "production").strip().lower() == "demo"
 
 
 def is_placeholder(value: str) -> bool:
@@ -205,6 +218,9 @@ class WorkerSettings:
     model_store_secret_key: str | None = field(default=None, repr=False)
     models_trust_policy_path: str | None = None
     model_warmup_page: str | None = None
+    # Cloud model providers (plan 2026-11-06): none unless
+    # INTELLIGENCE_CLOUD_PROVIDERS names some (pipeline only).
+    cloud: CloudSettings = field(default_factory=lambda: _no_cloud())
 
     @classmethod
     def from_env(
@@ -287,6 +303,11 @@ class WorkerSettings:
         elif learning_client == "stub" and not development:
             errs.append("INTELLIGENCE_LEARNING_CLIENT=stub runs only with APP_ENV=development")
         pinned = _model_settings(env, svc, development, errs)
+        from intelligence.boundary.cloud.settings import PROVIDERS_VAR, CloudSettings
+
+        cloud = CloudSettings.from_env(env, development, errs)
+        if get(PROVIDERS_VAR) is not None and svc != "pipeline":
+            errs.append(f"{PROVIDERS_VAR} is for the pipeline service only")
         if errs:
             raise ConfigError("; ".join(errs))
         assert svc is not None and url is not None and keys is not None
@@ -307,7 +328,14 @@ class WorkerSettings:
             model_client=model_client,
             learning_client=learning_client,
             **pinned,
+            cloud=cloud,
         )
+
+
+def _no_cloud() -> CloudSettings:
+    from intelligence.boundary.cloud.settings import CloudSettings
+
+    return CloudSettings()
 
 
 _DB_CREDENTIAL_VARS = (
@@ -368,12 +396,23 @@ def _db_credentials(
     return user, password
 
 
-def _read_secret_file(path: str, name: str, development: bool, errs: list[str]) -> str | None:
+def _read_secret_file(
+    path: str,
+    name: str,
+    development: bool,
+    errs: list[str],
+    *,
+    key_file: bool = False,
+    max_bytes: int | None = None,
+) -> str | None:
     """A password file's contents, without its trailing newline. It must be
     a regular file; outside development, one that neither group nor others
     can write; one others can read (a root-owned 0444 secret mount, say) is
-    allowed with a warning. The mode is checked on the open file, so it is
-    the file that was read."""
+    allowed with a warning. A key_file (a cloud API key) is stricter, in
+    development too: mode 0400 or 0440 only, so one others can read, or
+    anyone (the owner too) can write, is refused. With max_bytes, a file
+    longer than that (its newline counted) is refused. The mode is checked on the open file, so it is the
+    file that was read."""
     try:
         # O_NONBLOCK: a FIFO in place of the file can't hang start-up.
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
@@ -392,6 +431,12 @@ def _read_secret_file(path: str, name: str, development: bool, errs: list[str]) 
         errs.append(f"{name} is not a regular file")
         return None
     with os.fdopen(fd, "rb") as f:
+        if key_file and st.st_mode & stat.S_IROTH:
+            errs.append(f"{name} is readable by others (use mode 0400 or 0440)")
+            return None
+        if key_file and st.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+            errs.append(f"{name} is writable (use mode 0400 or 0440)")
+            return None
         if not development:
             if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
                 errs.append(f"{name} is writable by group or others (use mode 0400 or 0440)")
@@ -403,7 +448,11 @@ def _read_secret_file(path: str, name: str, development: bool, errs: list[str]) 
                     stat.S_IMODE(st.st_mode),
                 )
         try:
-            return f.read().decode("utf-8").rstrip("\r\n")
+            raw = f.read() if max_bytes is None else f.read(max_bytes + 1)
+            if max_bytes is not None and len(raw) > max_bytes:
+                errs.append(f"{name} is too long (at most {max_bytes} bytes)")
+                return None
+            return raw.decode("utf-8").rstrip("\r\n")
         except (OSError, UnicodeDecodeError):
             errs.append(f"{name} can't be read")
             return None

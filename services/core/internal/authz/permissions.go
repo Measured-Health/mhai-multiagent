@@ -57,6 +57,11 @@ type Rule struct {
 	// Probe: a public GET served before the BFF credential check (health
 	// probes only).
 	Probe bool
+	// Credentials: the body carries an outside credential (EMR design
+	// §6.2). The idempotency store keeps an HMAC of the request
+	// (Guard.IdemKeyed), never a plain hash; without that middleware the
+	// route answers 503 not_ready. Only on an unsafe Platform Write route.
+	Credentials bool
 	// Calls names the intelligence operations the route publishes to (the
 	// operations table, operations.go). The route's roles, or every
 	// clinical role when AnyRole is empty, must all be allowed by each
@@ -145,6 +150,9 @@ func validate(method, pattern string, rule Rule) error {
 		!strings.HasPrefix(pattern, AuditorWritePrefix) || path.Clean(pattern) != pattern) {
 		return fmt.Errorf("authz: auditor write %s %s must be an unsafe platform route under %s, without StepUp or Write",
 			method, pattern, AuditorWritePrefix)
+	}
+	if rule.Credentials && (!rule.Platform || !rule.Write || safeMethod(method)) {
+		return fmt.Errorf("authz: credential route %s %s must be an unsafe platform write", method, pattern)
 	}
 	if rule.Platform && !safeMethod(method) && !rule.Write && !rule.AuditorWrite {
 		return fmt.Errorf("authz: platform route %s %s changes data and must set Write", method, pattern)

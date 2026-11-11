@@ -13,6 +13,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/feedback"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
@@ -39,6 +40,17 @@ type Deps struct {
 	// Health is the health bucket (bus.OpenHealthBucket), which GET
 	// /platform/health serves; nil answers 503 unavailable.
 	Health jetstream.KeyValue
+	// CloudProviders are the enabled cloud model providers
+	// (CORE_CLOUD_PROVIDERS), for the model policy routes.
+	CloudProviders []string
+	// The EMR connection routes (EMR plan Task 11): off unless EMREnabled
+	// (CORE_EMR_ENABLED); the offered types; the emr client and the
+	// sealer; whether addresses may be IP literals (development).
+	EMREnabled     bool
+	EMRTypes       []string
+	EMR            *emrctl.Client
+	EMRSealer      *emrctl.Sealer
+	EMRDevelopment bool
 }
 
 // Register adds every route to m.
@@ -55,11 +67,13 @@ func Register(m *authz.Mux, d Deps) {
 	// an intelligence client is set.
 	feedback.Register(m, feedback.Deps{Pool: d.Pool, Intel: d.Intel, Log: a.Log})
 	// The platform app's audit log reads (Plan 4 spec §5.2), system
-	// health (§6.1), the failed jobs (§6.2) and the guardrail statistics
-	// (§6.3).
+	// health (§6.1), the failed jobs (§6.2), the guardrail statistics
+	// (§6.3), the hospitals' cloud model policies (cloud model
+	// providers plan, Task 2) and the EMR connections (EMR plan Task 11).
 	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log, MasterKey: a.MFAKey,
 		SecurityContact: d.SecurityContact, Walk: d.AuditWalk, Health: d.Health, Intel: d.Intel,
-		Auth: a, QueryCap: d.QueryCap})
+		Auth: a, QueryCap: d.QueryCap, CloudProviders: d.CloudProviders, EMREnabled: d.EMREnabled, EMRTypes: d.EMRTypes,
+		EMR: d.EMR, EMRSealer: d.EMRSealer, EMRDevelopment: d.EMRDevelopment})
 	registerFixtures(m, d)
 }
 

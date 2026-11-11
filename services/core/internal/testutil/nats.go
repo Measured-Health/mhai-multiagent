@@ -15,10 +15,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nkeys"
 	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
@@ -34,12 +37,15 @@ const (
 	natsEchoPassword        = "test-only-echo-pw"
 	natsBFFClinicalPassword = "test-only-bff-clinical-pw"
 	natsBFFPlatformPassword = "test-only-bff-platform-pw"
+	natsEMRPassword         = "test-only-emr-pw"
 	natsJSKey               = "testOnlyJetStreamKeyNotForAnyRealServer0123"
 )
 
-// NATSEnv is the environment the real nats.conf needs: every user's
-// password and the JetStream encryption key. Exported so other packages'
-// tests (and a Python fixture's documentation) use the same names.
+// NATSEnv is the environment the real nats.conf needs with the emr user on
+// (emr.conf): every user's password and the JetStream encryption key.
+// Exported so other packages' tests (and a Python fixture's documentation)
+// use the same names. With the emr user off (emr-off.conf, the dev default)
+// NATS_EMR_PASSWORD isn't needed.
 func NATSEnv() map[string]string {
 	return map[string]string{
 		"NATS_GATEWAY_PASSWORD":      natsGatewayPassword,
@@ -47,6 +53,7 @@ func NATSEnv() map[string]string {
 		"NATS_ECHO_PASSWORD":         natsEchoPassword,
 		"NATS_BFF_CLINICAL_PASSWORD": natsBFFClinicalPassword,
 		"NATS_BFF_PLATFORM_PASSWORD": natsBFFPlatformPassword,
+		"NATS_EMR_PASSWORD":          natsEMRPassword,
 		"NATS_JS_KEY":                natsJSKey,
 	}
 }
@@ -61,6 +68,7 @@ type NATS struct {
 	EchoURL        string // the echo worker
 	BFFClinicalURL string // the clinical app's BFF
 	BFFPlatformURL string // the platform app's BFF
+	EMRURL         string // the emr service
 
 	c testcontainers.Container
 }
@@ -73,38 +81,110 @@ func NATSConfDir() string {
 
 // NewNATS starts the container. The config is copied in rather than
 // bind-mounted, so it works when the tests themselves run in a container.
+// The emr user is on (emr.conf), so its rights can be tested.
 func NewNATS(ctx context.Context) (n *NATS, stop func(), err error) {
 	dir := NATSConfDir()
 	return startNATS(ctx, filepath.Join(dir, "nats.conf"), NATSEnv(),
-		map[string]string{filepath.Join(dir, "bff-clinical.test.conf"): "/etc/nats/bff-clinical.test.conf"})
+		map[string]string{filepath.Join(dir, "bff-clinical.test.conf"): "/etc/nats/bff-clinical.test.conf",
+			filepath.Join(dir, "emr.conf"): "/etc/nats/emr.conf"})
 }
 
-// StoreContains reports whether any file under the server's JetStream
-// store holds needle as plain bytes (for the encryption-at-rest test).
-func (n *NATS) StoreContains(ctx context.Context, needle string) (bool, error) {
-	code, out, err := n.c.Exec(ctx, []string{"grep", "-r", "-F", "-q", "-a", needle, "/data"})
-	if err != nil {
-		return false, err
-	}
-	_, _ = io.Copy(io.Discard, out)
-	switch code {
-	case 0:
-		return true, nil
-	case 1:
-		return false, nil
-	}
-	return false, fmt.Errorf("grep exit %d", code)
+// NewNATSEMROff is NewNATS as dev compose runs it by default: the emr user
+// off (emr-off.conf) and no NATS_EMR_PASSWORD in the environment.
+func NewNATSEMROff(ctx context.Context) (n *NATS, stop func(), err error) {
+	dir := NATSConfDir()
+	env := NATSEnv()
+	delete(env, "NATS_EMR_PASSWORD")
+	return startNATS(ctx, filepath.Join(dir, "nats.conf"), env,
+		map[string]string{filepath.Join(dir, "bff-clinical.test.conf"): "/etc/nats/bff-clinical.test.conf",
+			filepath.Join(dir, "emr-off.conf"): "/etc/nats/emr.conf"})
 }
 
-// StoreHasStream reports whether the JetStream store holds a directory for
-// stream name (a positive control for StoreContains).
-func (n *NATS) StoreHasStream(ctx context.Context, name string) (bool, error) {
-	code, out, err := n.c.Exec(ctx, []string{"sh", "-c", "test -d /data/jetstream/*/streams/" + name})
+// StoreFilesContaining lists every file under the server's JetStream store
+// (store_dir /data) that holds needle as plain bytes, for the
+// encryption-at-rest test. Empty means no file does.
+func (n *NATS) StoreFilesContaining(ctx context.Context, needle string) ([]string, error) {
+	// The needle is an argument, not part of the script, so no quoting
+	// can change what is searched for.
+	out, code, err := n.Run(ctx, `grep -r -l -F -a -e "$1" /data`, needle)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	_, _ = io.Copy(io.Discard, out)
-	return code == 0, nil
+	files := strings.Fields(out)
+	switch {
+	case code == 0 && len(files) > 0:
+		return files, nil
+	case code == 1 && len(files) == 0:
+		return nil, nil
+	}
+	return nil, fmt.Errorf("grep exit %d: %q", code, out)
+}
+
+// StoreStreamBlocks lists the message block files (msgs/*.blk) the
+// JetStream store holds for stream name, with their sizes: the positive
+// control for StoreFilesContaining (the stream is on disk, under /data,
+// and has written blocks).
+func (n *NATS) StoreStreamBlocks(ctx context.Context, name string) (map[string]int64, error) {
+	out, code, err := n.Run(ctx, `for f in /data/jetstream/*/streams/"$1"/msgs/*.blk; do [ -f "$f" ] && echo "$(wc -c < "$f") $f"; done; true`, name)
+	if err != nil {
+		return nil, err
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("listing blocks: exit %d: %q", code, out)
+	}
+	blocks := map[string]int64{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		size, file, ok := strings.Cut(line, " ")
+		if !ok {
+			return nil, fmt.Errorf("listing blocks: %q", line)
+		}
+		b, err := strconv.ParseInt(strings.TrimSpace(size), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("listing blocks: %q", line)
+		}
+		blocks[file] = b
+	}
+	return blocks, nil
+}
+
+// execStatusPrefix marks the line Run appends with the script's exit status.
+const execStatusPrefix = "__mhai_exit_status="
+
+// Run runs script with sh in the server's container (args are $1, $2, ...)
+// and returns its output (stdout and stderr) and exit status once it has
+// finished.
+//
+// The status is read from the output, not from testcontainers' Exec: Exec
+// takes the exit code from a docker exec inspect that can run before the
+// daemon has marked the process as running, and then reports 0 for a
+// command that has not finished (about 1 call in 1200 on the build
+// server). Multiplexed reads the output to its end, which comes only when
+// the process exits, so a status printed as the last line is the real one.
+func (n *NATS) Run(ctx context.Context, script string, args ...string) (out string, code int, err error) {
+	// The status goes on a line of its own, even after output with no
+	// final newline.
+	cmd := append([]string{"sh", "-c", "(\n" + script + "\n) 2>&1; printf '\\n" + execStatusPrefix + "%s\\n' \"$?\"", "sh"}, args...)
+	_, r, err := n.c.Exec(ctx, cmd, tcexec.Multiplexed())
+	if err != nil {
+		return "", 0, err
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return "", 0, err
+	}
+	s := strings.TrimSuffix(string(b), "\n")
+	i := strings.LastIndex(s, "\n"+execStatusPrefix)
+	if i < 0 {
+		return "", 0, fmt.Errorf("no exit status in the output: %q", s)
+	}
+	code, err = strconv.Atoi(s[i+1+len(execStatusPrefix):])
+	if err != nil {
+		return "", 0, fmt.Errorf("exit status in %q: %w", s[i+1:], err)
+	}
+	return s[:i], code, nil
 }
 
 // NATSNkey is a throwaway server with one NKey user allowed to publish
@@ -318,6 +398,7 @@ func startNATS(ctx context.Context, conf string, env map[string]string, extra ma
 		EchoURL:        u("echo", natsEchoPassword),
 		BFFClinicalURL: u("bff_clinical", natsBFFClinicalPassword),
 		BFFPlatformURL: u("bff_platform", natsBFFPlatformPassword),
+		EMRURL:         u("emr", natsEMRPassword),
 		c:              c,
 	}, stop, nil
 }

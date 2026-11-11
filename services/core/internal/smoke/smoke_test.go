@@ -102,6 +102,7 @@ type reply struct {
 	status int
 	body   map[string]any
 	raw    []byte
+	header nats.Header
 }
 
 // api sends one request over api.v1.clinical, as the BFF does.
@@ -136,7 +137,7 @@ func apiOn(t *testing.T, nc *nats.Conn, subject, method, path, bearer string, bo
 	if err != nil {
 		t.Fatalf("%s %s: no %s", method, path, natsapi.HeaderStatus)
 	}
-	r := reply{status: status, raw: resp.Data}
+	r := reply{status: status, raw: resp.Data, header: resp.Header}
 	if len(resp.Data) > 0 {
 		_ = json.Unmarshal(resp.Data, &r.body)
 	}
@@ -752,13 +753,23 @@ func TestSmokePlatformOps(t *testing.T) {
 	}
 	t.Logf("jobs: retried")
 
-	// Guardrails: shape and the small-group rule.
+	// Guardrails (Plan 7c, R41a-3, R41a-4): the deprecated rolling route
+	// answers in its old shape with every figure hidden and the deprecation
+	// headers; the calendar periods route answers 503 not_ready until its
+	// first period after the release is published, and then the shape.
 	r = call("GET", "/platform/guardrails?period=7d", nil)
 	if r.status != http.StatusOK {
 		t.Fatalf("GET /platform/guardrails: %d %s", r.status, r.raw)
 	}
 	if r.body["period"] != "7d" || r.body["from"] == nil || r.body["to"] == nil || r.body["updated_at"] == nil {
 		t.Fatalf("guardrails: missing period, from, to or updated_at: %s", r.raw)
+	}
+	if r.header.Get("Deprecation") == "" || r.header.Get("Sunset") == "" ||
+		!strings.Contains(r.header.Get("Link"), "/docs/notices/guardrails-rolling-windows") {
+		t.Fatalf("guardrails 7d: no deprecation headers: %v", r.header)
+	}
+	if strings.Contains(string(r.raw), `"suppressed":false`) {
+		t.Fatalf("guardrails 7d: a figure is shown: %s", r.raw)
 	}
 	all, _ := r.body["all"].(map[string]any)
 	ratesOK(t, "all", all)
@@ -773,5 +784,70 @@ func TestSmokePlatformOps(t *testing.T) {
 		}
 		ratesOK(t, fmt.Sprintf("hospitals[%d]", i), m)
 	}
-	t.Logf("guardrails: 7d shape ok, %d hospital rows, no shown count of 1 to 4", len(hospitals))
+	t.Logf("guardrails: 7d deprecated and fully hidden, %d hospital rows", len(hospitals))
+	for _, k := range []string{"week", "month", "quarter"} {
+		r = call("GET", "/platform/guardrails/periods?period="+k, nil)
+		switch {
+		case r.status == http.StatusServiceUnavailable && r.body["code"] == "not_ready":
+			t.Logf("guardrails/periods %s: not published yet (not_ready)", k)
+		case r.status == http.StatusOK:
+			if r.body["period"] != k || r.header.Get("Deprecation") != "" {
+				t.Fatalf("guardrails/periods %s: %s %v", k, r.raw, r.header)
+			}
+			all, _ := r.body["all"].(map[string]any)
+			ratesOK(t, k+" all", all)
+			t.Logf("guardrails/periods %s: published", k)
+		default:
+			t.Fatalf("GET /platform/guardrails/periods?period=%s: %d %s", k, r.status, r.raw)
+		}
+	}
+
+	// Analytics (Plan 7c-2): the month is either not yet published (every
+	// area {not_yet, first_from}) or the latest stored month; alerts null,
+	// changes unavailable until 7c-3. One hospital's series: a hospital of
+	// the published month, or 404 for one in no published period.
+	r = call("GET", "/platform/analytics?period=month", nil)
+	if r.status != http.StatusOK || r.body["period"] != "month" || r.body["alerts"] != nil {
+		t.Fatalf("GET /platform/analytics?period=month: %d %s", r.status, r.raw)
+	}
+	if c, _ := r.body["changes"].(map[string]any); c["unavailable"] != true {
+		t.Fatalf("analytics: changes %v, want unavailable until 7c-3", r.body["changes"])
+	}
+	seriesID := uuid.NewString()
+	use, _ := r.body["use"].(map[string]any)
+	switch {
+	case r.body["from"] == nil && use["not_yet"] == true:
+		t.Logf("analytics month: not yet published (first %v)", use["first_from"])
+	case r.body["from"] != nil && use["rows"] != nil:
+		rows, _ := use["rows"].([]any)
+		for _, x := range rows {
+			if m, _ := x.(map[string]any); m != nil {
+				h, _ := m["hospital"].(map[string]any)
+				seriesID, _ = h["id"].(string)
+				break
+			}
+		}
+		if raw := string(r.raw); strings.Contains(raw, `"value":1,`) || strings.Contains(raw, `"value":2,`) ||
+			strings.Contains(raw, `"value":3,`) || strings.Contains(raw, `"value":4,`) {
+			t.Fatalf("analytics month: a count of 1 to 4 is shown: %s", r.raw)
+		}
+		t.Logf("analytics month: published, %d hospital rows", len(rows))
+	case r.body["from"] != nil && use["unavailable"] == true:
+		t.Logf("analytics month: published, snapshot unavailable")
+	default:
+		t.Fatalf("analytics month: %s", r.raw)
+	}
+	r = call("GET", "/platform/analytics/hospitals/"+seriesID+"/series?measure=needs_review_share&period=month", nil)
+	switch {
+	case r.status == http.StatusOK:
+		pts, _ := r.body["points"].([]any)
+		if r.body["measure"] != "needs_review_share" || len(pts) == 0 || len(pts) > 12 {
+			t.Fatalf("hospital series: %s", r.raw)
+		}
+		t.Logf("hospital series: %d monthly points", len(pts))
+	case r.status == http.StatusNotFound && r.body["code"] == "not_found":
+		t.Logf("hospital series: no published month lists the hospital (not_found)")
+	default:
+		t.Fatalf("GET hospital series: %d %s", r.status, r.raw)
+	}
 }

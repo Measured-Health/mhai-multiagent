@@ -1,0 +1,18 @@
+{
+  "name": "emr_ctl_inference_aud",
+  "note": "aud pipeline on an emr control subject, validly signed",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEiLCJ0eXAiOiJtaGFpLXJlcStqd3QifQ.eyJhdWQiOiJwaXBlbGluZSIsImJoIjoiTEpnUFVFcXppUDRadnNTSWVBWmZKNE5sRW9oRGxTdmhoTDBaOFFORy1xZyIsImV4cCI6MTc5MzE4ODgwNSwiaGlkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiaWF0IjoxNzkzMTg4ODAwLCJpc3MiOiJtaGFpLWdhdGV3YXkiLCJqdGkiOiJnZ3VkcFdxb2xybERNdXN4NjZZSmt3Iiwia25kIjoicmVxIiwibnN1YiI6ImVtci52MS5jdGwudGVzdCIsInJpZCI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsInJvbGVzIjpbInBsYXRmb3JtX2FkbWluIl0sInJwbCI6Il9JTkJPWF9nYXRld2F5LiIsInN1YiI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsInZpYSI6ImNvcmUifQ.kZKHfLqrQKRopaAvx1k0eWPG0m55jIOSf-lqzX0RM2mV8Yr9_G1SWUOVwPxTBIQDcXtWBtBf3-3Cyw51Z6NJCw",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "CiQ4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODg=",
+  "subject": "emr.v1.ctl.test",
+  "reply": "_INBOX_gateway.vectors.1",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.emr.v1.TestRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "emr",
+  "now": 1793188801,
+  "verdict": "claims"
+}

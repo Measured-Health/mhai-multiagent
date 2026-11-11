@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -12,7 +13,10 @@ func setEnv(t *testing.T, kv map[string]string) {
 	for _, k := range []string{"CORE_ENV", "HTTP_ADDR", "DATABASE_URL", "NATS_URL", "NATS_NKEY_SEED_PATH", "NATS_GATEWAY_PASSWORD", "NATS_WORKER_PASSWORD",
 		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS",
 		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING",
-		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY", "CORE_ALLOW_SINGLE_NODE"} {
+		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY", "CORE_ALLOW_SINGLE_NODE",
+		"CORE_CLOUD_PROVIDERS", "CORE_EMR_ENABLED", "CORE_EMR_SEAL_PUBLIC_KEY_PATH", "CORE_EMR_CONNECTOR_TYPES",
+		"CORE_IDEMPOTENCY_HMAC_KEY_PATH",
+		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -540,5 +544,168 @@ func TestLoadAllowSingleNode(t *testing.T) {
 	setEnv(t, e)
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_ALLOW_SINGLE_NODE") {
 		t.Fatalf("bad value: %v", err)
+	}
+}
+
+// CORE_CLOUD_PROVIDERS (cloud model providers plan, Task 2): empty by
+// default (a fresh deployment enables no provider); a comma list of
+// openai, anthropic and xai, each at most once; anything else refuses the
+// start, naming the variable and never its value.
+func TestConfigCloudProviders(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	c, err := Load()
+	if err != nil || len(c.CloudProviders) != 0 {
+		t.Fatalf("default: %v %v", c.CloudProviders, err)
+	}
+	with := func(v string) map[string]string {
+		e := map[string]string{"CORE_CLOUD_PROVIDERS": v}
+		for k, x := range base {
+			e[k] = x
+		}
+		return e
+	}
+	for v, want := range map[string]string{
+		"anthropic":            "anthropic",
+		"openai,anthropic":     "anthropic,openai",
+		" xai , openai ":       "openai,xai",
+		"openai,anthropic,xai": "anthropic,openai,xai",
+		"   ":                  "",
+	} {
+		setEnv(t, with(v))
+		c, err := Load()
+		if err != nil || strings.Join(c.CloudProviders, ",") != want {
+			t.Errorf("%q: %v %v, want %s", v, c.CloudProviders, err, want)
+		}
+	}
+	for _, bad := range []string{"gemini-SYNTH", "openai,openai", "OpenAI", "openai,", ",xai", "openai;xai", "local", "none"} {
+		setEnv(t, with(bad))
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "CORE_CLOUD_PROVIDERS") || strings.Contains(err.Error(), bad) {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	if _, err := ParseCloudProviders("openai,openai"); err == nil {
+		t.Error("ParseCloudProviders took a duplicate")
+	}
+}
+
+// K4: EMR is off unless CORE_EMR_ENABLED says true; on, serve needs the
+// emr service's sealing public key (EMR design §6.2).
+func TestConfigEMREnabled(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	c, err := Load()
+	if err != nil || c.EMREnabled || c.EMRSealPublicKeyPath != "" {
+		t.Fatalf("default: %+v %v", c, err)
+	}
+	for raw, want := range map[string]bool{"true": true, "TRUE": true, " false ": false, "": false} {
+		m := map[string]string{"CORE_EMR_ENABLED": raw}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if c, err := Load(); err != nil || c.EMREnabled != want {
+			t.Errorf("%q: %v %v", raw, c.EMREnabled, err)
+		}
+	}
+	for _, bad := range []string{"yes", "1", "on", "maybe"} {
+		m := map[string]string{"CORE_EMR_ENABLED": bad}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_EMR_ENABLED") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	ok := Config{Env: "development", DatabaseURL: "postgres://u:p@h/db", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem",
+		RequestKeyPath: "/r.pem", EMREnabled: true}
+	if err := ok.ValidateServe(); err == nil || !strings.Contains(err.Error(), "CORE_EMR_SEAL_PUBLIC_KEY_PATH") ||
+		!strings.Contains(err.Error(), "CORE_IDEMPOTENCY_HMAC_KEY_PATH") {
+		t.Fatalf("enabled without the seal key or the idempotency key: %v", err)
+	}
+	ok.EMRSealPublicKeyPath = "/emr-seal/seal.pub"
+	ok.IdempotencyHMACKeyPath = "/keys/idempotency.key"
+	if err := ok.ValidateServe(); err != nil {
+		t.Fatal(err)
+	}
+	ok.EMREnabled = false
+	ok.EMRSealPublicKeyPath = ""
+	ok.IdempotencyHMACKeyPath = ""
+	if err := ok.ValidateServe(); err != nil {
+		t.Fatalf("off needs nothing: %v", err)
+	}
+}
+
+// K4: no connector type is offered unless named; only built types may be
+// named, and the development stub only in development.
+func TestConfigEMRConnectorTypes(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	if c, err := Load(); err != nil || len(c.EMRConnectorTypes) != 0 {
+		t.Fatalf("default: %v %v", c.EMRConnectorTypes, err)
+	}
+	with := func(kv ...string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	setEnv(t, with("CORE_ENV", "development", "CORE_EMR_CONNECTOR_TYPES", " stub "))
+	if c, err := Load(); err != nil || len(c.EMRConnectorTypes) != 1 || c.EMRConnectorTypes[0] != "stub" {
+		t.Fatalf("development stub: %v %v", c.EMRConnectorTypes, err)
+	}
+	for env, raw := range map[string]string{
+		"production":  "stub",           // the stub is development-only
+		"development": "fhir_r4",        // not built yet
+		"staging":     "hl7v2_feed",     // not a type
+		"test":        "stub,stub",      // twice
+		"dev":         "stub,https://x", // junk
+	} {
+		e := env
+		if env == "test" || env == "dev" {
+			e = "development"
+		}
+		setEnv(t, with("CORE_ENV", e, "CORE_EMR_CONNECTOR_TYPES", raw))
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "CORE_EMR_CONNECTOR_TYPES") || strings.Contains(err.Error(), raw) {
+			t.Errorf("%s %q: %v", e, raw, err)
+		}
+	}
+	setEnv(t, with("CORE_IDEMPOTENCY_HMAC_KEY_PATH", " /keys/idem.key "))
+	if c, err := Load(); err != nil || c.IdempotencyHMACKeyPath != "/keys/idem.key" {
+		t.Fatalf("idempotency key path: %q %v", c.IdempotencyHMACKeyPath, err)
+	}
+}
+
+// The idempotency HMAC key: a file of at least 32 bytes, not a placeholder;
+// errors name the variable only.
+func TestLoadIdempotencyHMACKey(t *testing.T) {
+	dir := t.TempDir()
+	good := dir + "/good.key"
+	if err := os.WriteFile(good, []byte("synthetic-idempotency-key-0123456789abcdef\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	k, err := LoadIdempotencyHMACKey(good)
+	if err != nil || string(k) != "synthetic-idempotency-key-0123456789abcdef" {
+		t.Fatalf("good: %q %v", k, err)
+	}
+	for name, content := range map[string]string{"short.key": "too-short", "ph.key": "changeme-changeme-changeme-changeme-0123"} {
+		p := dir + "/" + name
+		if err := os.WriteFile(p, []byte(content), 0o400); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadIdempotencyHMACKey(p); err == nil || !strings.Contains(err.Error(), "CORE_IDEMPOTENCY_HMAC_KEY_PATH") ||
+			strings.Contains(err.Error(), dir) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := LoadIdempotencyHMACKey(dir + "/missing"); err == nil || strings.Contains(err.Error(), dir) {
+		t.Errorf("missing: %v", err)
 	}
 }

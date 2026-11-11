@@ -31,7 +31,7 @@ test: ## Run test suite (no models, no Docker)
 	$(PY) uv run pytest -m "not models and not boundary and not store and not slow"
 
 test-boundary: ## Boundary tests: Postgres 16 + NATS 2.10 in Docker (build host only)
-	docker build -t mhai-core:test services/core
+	docker build -t mhai-core:test -f services/core/Dockerfile services
 	$(PY) uv run pytest -m boundary tests/boundary
 
 cov: ## Tests with coverage
@@ -97,12 +97,12 @@ core-lint: ## Vet and staticcheck the core service (Go)
 # The contract between core and intelligence (spec 6.3). Generated code is
 # committed; `make proto-check` fails if it is stale.
 PB := intelligence/boundary/pb
-GO_PB := services/core/internal/intelpb
+GO_PB := services/core/internal/intelpb services/gokit/emrpb
 
 DOCS_PAGE := services/core/internal/apidocs/assets/intelligence.html
 
 proto: ## Generate the Go and Python code and the Intelligence API docs page from proto/ (needs buf, protoc-gen-go, uv)
-	cd proto && buf generate
+	cd proto && buf generate && buf generate --template buf.gen.emr.yaml
 	cd services/core && go run ./cmd/permgen
 	$(PY) rm -rf .pbgen && mkdir .pbgen && \
 	  uv run --locked python -m grpc_tools.protoc -I ../../proto \

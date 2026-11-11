@@ -1,0 +1,18 @@
+{
+  "name": "emr_ctl_wrong_shape",
+  "note": "emr.v1.ctl.test.x: a fifth segment",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6Ijk1Y2M3MDFkNzBhNmVkMWEiLCJ0eXAiOiJtaGFpLXJlcStqd3QifQ.eyJhdWQiOiJlbXIiLCJiaCI6IkxKZ1BVRXF6aVA0WnZzU0llQVpmSjRObEVvaERsU3ZoaEwwWjhRTkctcWciLCJleHAiOjE3OTMxODg4MDUsImhpZCI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImlhdCI6MTc5MzE4ODgwMCwiaXNzIjoibWhhaS1nYXRld2F5IiwianRpIjoiNkVxUUxUQmlxdUFvTTNpQTBzRU9WUSIsImtuZCI6InJlcSIsIm5zdWIiOiJlbXIudjEuY3RsLnRlc3QueCIsInJpZCI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsInJvbGVzIjpbInBsYXRmb3JtX2FkbWluIl0sInJwbCI6Il9JTkJPWF9nYXRld2F5LiIsInN1YiI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsInZpYSI6ImNvcmUifQ.zg93ZT-Vb1WvYDp-u054diqmfiqXSz6xKatDS3YKJ_DD-u1Y_OfQbVbrp8_9dAFyVKjFsUvKBnA8Rd86BvgwBw",
+  "keys": {
+    "95cc701d70a6ed1a": "TpCMtg--xO35g5opMJ6zjwLLFC7-9yTAF_Omd86Dnv0"
+  },
+  "body": "CiQ4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODg=",
+  "subject": "emr.v1.ctl.test.x",
+  "reply": "_INBOX_gateway.vectors.1",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "schema": "mhai.emr.v1.TestRequest",
+  "knd": "req",
+  "granted": false,
+  "service": "emr",
+  "now": 1793188801,
+  "verdict": "binding"
+}

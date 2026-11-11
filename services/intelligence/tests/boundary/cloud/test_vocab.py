@@ -1,0 +1,53 @@
+"""The closed vocabularies (Global Constraints): Python and Go hold the
+same lists, and core's TestOutcomeVocabularyMatchesWorker reads this
+module's file to compare them (K14)."""
+
+from __future__ import annotations
+
+import pytest
+
+from intelligence.boundary.cloud import vocab
+
+pytestmark = pytest.mark.disable_socket
+
+
+def test_vocab_lists_are_closed_and_sorted() -> None:
+    for name in ("PROVIDERS", "ROUTES", "EGRESS", "OUTCOMES"):
+        values = getattr(vocab, name)
+        assert isinstance(values, tuple), name
+        assert list(values) == sorted(set(values)), name
+    assert vocab.PROVIDERS == ("anthropic", "openai", "xai")
+    assert vocab.ROUTES == ("cloud:anthropic", "cloud:openai", "cloud:xai", "local")
+    assert vocab.EGRESS == ("anthropic", "none", "openai", "xai")
+    assert set(vocab.OUTCOMES) == {
+        "ok",
+        "egress_blocked",
+        "budget_exhausted",
+        "unconfigured",
+        "unavailable",
+        "timeout",
+        "auth_failed",
+        "refused",
+        "truncated",
+        "malformed",
+        "insufficient",
+        "retention_unconfirmed",
+    }
+    assert len(vocab.OUTCOMES) == 12
+
+
+def test_base_urls_and_hosts_are_fixed() -> None:
+    assert dict(vocab.BASE_URLS) == {
+        "anthropic": "https://api.anthropic.com",
+        "openai": "https://api.openai.com/v1",
+        "xai": "https://api.x.ai/v1",
+    }
+    assert dict(vocab.HOSTS) == {
+        "anthropic": "api.anthropic.com",
+        "openai": "api.openai.com",
+        "xai": "api.x.ai",
+    }
+    with pytest.raises(TypeError):
+        vocab.BASE_URLS["openai"] = "https://example.invalid"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        vocab.HOSTS["openai"] = "example.invalid"  # type: ignore[index]

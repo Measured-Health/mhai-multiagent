@@ -41,8 +41,13 @@ sessions, two-step verification, permissions, tenancy and audit (Plan 2).
 Its contract is `services/core/openapi.yaml`; a contract test keeps it in
 step with the routes. See `services/core/README.md`.
 
-- **Go:** the API, authentication, permissions, tenancy, audit and EMR
-  plumbing.
+- **Go (`services/core/`):** the API, authentication, permissions, tenancy,
+  audit, and who sees an EMR alert.
+- **Go (`services/emr/`):** EMR plumbing: connectors, outside credentials,
+  egress, normalisation, the patient index and the abnormality rules
+  (ADR 0014). It imports nothing from `services/core/`.
+- **Go (`services/gokit/`):** the small module core and the emr service
+  share (request tokens, replay set, `WithHospital`, log redaction).
 - **Python (`services/intelligence/intelligence/`):** models and the pipeline: agents, retrieval,
   guardrails, PII masking.
 - **NATS** is the only link between them. Python services are never
@@ -82,7 +87,10 @@ code review:
 - the extraction schema's major versions
   (`services/intelligence/intelligence/schemas/extraction/`);
 - decision mapping;
-- PII rules.
+- PII rules;
+- what may leave for a cloud model: `gate.SYSTEM_PROMPT`, `CloudContext`'s
+  allow-list (`gate.py`), `scan.IDENTIFYING_KEYS` (`scan.py`), and the
+  configured cloud model ids (`INTELLIGENCE_CLOUD_<PROVIDER>_MODEL`).
 
 The process:
 

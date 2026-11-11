@@ -30,6 +30,9 @@ core hospitals create --name N --short-code CODE --time-zone TZ \
     [--require-mfa-for-clinicians] [--allow-trust-device]
 core hospitals activate ID|CODE    # setup_incomplete -> active, audited (see "Running it in compose")
 core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
+core hospitals mark-demo ID|CODE                             # once: a hospital made before is_demo (the live demo's), audited
+core analysis seed-demo ID|CODE [--seed N] [--months 1-24]   # a hospital created with --demo only
+core analysis switch off ID|CODE | --global                  # lower an analysis switch, audited
 ```
 
 `users create` never takes the password as an argument. It prompts on a
@@ -97,12 +100,43 @@ one job:
 | `CORE_HTTP_API` | no | `on` (default) or `off`. On: the frontend contract over HTTP with the BFF key, for the switch-over while mhai-web still uses `fetch`. Off: HTTP serves only the probes, on loopback, and `BFF_SERVICE_KEYS` is no longer required. The NATS API is served either way (below) |
 | `CORE_NATS_API_CONCURRENCY` | no | `api.v1` messages handled at once per core copy; past it a message gets 503 `unavailable` at once. Default `256`, 1 to 100000 |
 | `CORE_ENV` | no | default `production`, which fails closed: no API docs, NATS TLS required, no test-only intelligence operations. Compose sets `development` |
+| `ANALYSIS_REF_HMAC_KEY_FILE`, `ANALYSIS_REF_ENC_KEY_FILE`, `ANALYSIS_DRILL_KEY_FILE`, `ANALYSIS_NOTE_KEY_FILE` | no (all four or none) | Patient Analysis's keys: each file holds 32 random bytes in base64 (`openssl rand -base64 32`), mode 0600 or 0640, all four different. Start-up refuses a missing file, a placeholder, a wrong length, a file others can read or two equal keys. Without them, the nightly run fails closed for a signed-off hospital with consultations to ingest; the demo needs none |
 | `CORE_API_DOCS` | no | `true` or `false`: serve the API docs page. Default: on when `CORE_ENV` is `development`, off for every other value (production included). Anything else is refused at start-up. |
 
 Secrets must not contain `changeme`, `change-me` or `placeholder`. Errors
 name the variable, never the value. The core service reads only its own
 secrets: the other NATS users' passwords, the JetStream key and the
 database owner password are not in its environment.
+
+## Patient Analysis (off by default)
+
+Analysis (ADR 0015; plan `docs/plans/2026-11-07-analysis-backend.md`) is
+off until a switch row says otherwise: with no row, a hospital's position is
+`off`, and ingest refuses it in the database itself. Before the people's
+sign-offs (H1 to H3), the only way on is `core analysis seed-demo`, which
+uses the references `DEMO-SYNTHETIC` and writes a seeded synthetic cohort,
+for a hospital created with `core hospitals create --demo` only
+(`hospitals.is_demo`, which no role can change; the database refuses demo
+references on any other hospital). A hospital made before the flag existed,
+such as the live demo's `SYN`, is marked once with
+`core hospitals mark-demo SYN` (audited `hospital.marked_demo`); the
+database refuses it for a hospital with a real cloud agreement and for any
+hospital once an analysis switch has been signed off. A switch row that has ever carried a
+real sign-off (`ever_signed_off`) never takes demo references again, and
+provisioning can only lower a switch. A hospital under a demo switch never
+ingests a real consultation.
+
+The nightly run is a core loop (one copy at a time, an advisory lock) that
+runs as `mhai_analysis_job`: a NOLOGIN role the core login reaches only by
+`SET LOCAL ROLE` inside `db.WithAnalysisJob`, which no route handler names
+(an AST test). Per hospital whose switch is on, after its local 00:30, once
+a hospital day: ingest (signed-off hospitals only; references become an
+HMAC and an AES-GCM ciphertext bound to the hospital), the 25-month sweep,
+then the freeze: a block at local midnight 3 days after its end, a month
+with its last block, a quarter with its last month. Late facts are stored
+and never counted. It logs hospital ids, the step and a fixed reason only,
+and counts `analysis_late_facts_total` and `analysis_freeze_failed_total`
+(alert `analysis_freeze_failed`).
 
 ## API docs
 
@@ -228,7 +262,11 @@ finds clinician B's `review_submitted` in the log filtered to `type=review`.
 for the sampler's first reading of `GET /platform/health` (fresh, `workers`
 ok), forces a dead letter and finds it in `GET /platform/jobs`, retries it
 with `POST /platform/jobs/retry`, and reads `GET /platform/guardrails?period=7d`
-(the right shape, no shown count of 1 to 4).
+(deprecated: the headers, every figure hidden) and
+`GET /platform/guardrails/periods` for each kind (`not_ready` until a period
+after the release is published, then the shape), then
+`GET /platform/analytics?period=month` (not yet published, or the latest
+month with no count of 1 to 4 shown) and one hospital's monthly series.
 Set
 `POSTGRES_PORT`, `NATS_PORT`, `CORE_PORT` and `SMOKE_PROJECT` when the
 defaults clash.
@@ -425,12 +463,32 @@ Platform audience, two-step always; none of these reads is audit-recorded.
   usable and the second-person rule holds; `POST /platform/jobs/cancel`
   needs a fresh code, and the note is stored apart and never logged. A bad
   body is 422 `validation_failed`.
-- `GET /platform/guardrails?period=7d|30d|90d` counts HGA decisions of the
-  active hospitals over whole UTC days ending at the start of today (until
-  00:15 UTC, yesterday's), through `internal/smallgroup`: no count of 1 to 4,
-  no hidden value that the shown ones give away. Each period's day is one
-  stored snapshot (`guardrail_snapshots`), the same on every copy all day.
-  6 reads a minute per session (429).
+- `GET /platform/guardrails/periods?period=week|month|quarter` (Plan 7c-1)
+  serves the HGA decision counts of the latest published month-aligned week,
+  month or quarter from its one stored snapshot (`analytics_snapshots`); no
+  request computes anything. The analytics scheduler
+  (`internal/analytics/scheduler`, every 5 minutes, one copy under an
+  advisory lock, as `mhai_analytics_job`) freezes each finished period once
+  through migration 00019's functions, which refuse any window that isn't a
+  nested period, and guards it with `internal/smallgroup`'s joint guard (the
+  parent set and an exact check over the published history). 503
+  `not_ready` until the first period of a kind after the release.
+- `GET /platform/analytics?period=week|month|quarter` (Plan 7c-2) renders
+  Use, Answer quality and Hospitals of the latest published period from its
+  stored snapshot, each cell as stored; medians over the hospitals' shown
+  values (a count median between 0 and 5 hidden), trends from the stored
+  all-hospitals cells of the latest 12 weeks, 12 months or 8 quarters (one
+  period each). `alerts` is null and `changes` `{unavailable: true}` until
+  7c-3; an area is `{unavailable: true}` when its snapshot couldn't be
+  computed or read, and `{not_yet: true, first_from}` before the first
+  period. `GET /platform/analytics/hospitals/{id}/series?measure&period`
+  (`questions_per_clinician`, `needs_review_share`) is the hospital's stored
+  cell per period with the other hospitals' median; a change's series is 404
+  until 7c-3. 30 reads a minute per session across the three; no read
+  computes a figure or touches a clinical table.
+- `GET /platform/guardrails?period=7d|30d|90d` is deprecated: every count
+  and share hidden, `Deprecation`, `Sunset` and `Link` headers, 422 after
+  the sunset. 6 reads a minute per session across both routes (429).
 
 ## Known limits
 

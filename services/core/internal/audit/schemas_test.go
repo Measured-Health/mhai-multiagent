@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -207,5 +208,121 @@ func TestRegisterRefusesMistakes(t *testing.T) {
 			}()
 			f()
 		}()
+	}
+}
+
+// hospital.model_policy_changed (cloud model providers plan, Task 2): a
+// closed payload of ids, closed codes and a bounded integer; the agreement
+// reference has the id shape, never free text.
+func TestAuditSchemaModelPolicyChanged(t *testing.T) {
+	const action = "hospital.model_policy_changed"
+	hid := uuid.NewString()
+	good := func() map[string]any {
+		return map[string]any{"hospital_id": hid, "provider": "anthropic", "previous": "none",
+			"agreement_ref": "DEMO-SYNTHETIC", "monthly_token_budget": 2000000, "via": "platform"}
+	}
+	if err := audit.CheckActionPayload(action, good()); err != nil {
+		t.Fatalf("good payload: %v", err)
+	}
+	for _, ref := range []string{"AGR-2026-0042", "DPA-2026-17"} {
+		m := good()
+		m["agreement_ref"] = ref
+		if err := audit.CheckActionPayload(action, m); err != nil {
+			t.Errorf("%s: %v", ref, err)
+		}
+	}
+	off := good()
+	off["provider"], off["previous"], off["via"] = "none", "xai", "cli"
+	delete(off, "agreement_ref")
+	if err := audit.CheckActionPayload(action, off); err != nil {
+		t.Fatalf("switched off, no reference: %v", err)
+	}
+	for name, change := range map[string]func(m map[string]any){
+		"free text reference":  func(m map[string]any) { m["agreement_ref"] = "signed with Dr Synthetic on Monday" },
+		"lower-case reference": func(m map[string]any) { m["agreement_ref"] = "demo-synthetic" },
+		"short reference":      func(m map[string]any) { m["agreement_ref"] = "AB" },
+		"old free shape":       func(m map[string]any) { m["agreement_ref"] = "SYNTH-1" },
+		"patient pseudonym":    func(m map[string]any) { m["agreement_ref"] = "P-AB12CD34" },
+		"a person's name":      func(m map[string]any) { m["agreement_ref"] = "ADAEZE-OKAFOR" },
+		"an MRN shape":         func(m map[string]any) { m["agreement_ref"] = "HAV-000123" },
+		"a name and a number":  func(m map[string]any) { m["agreement_ref"] = "OKAFOR-2026-01" },
+		"reference while off":  func(m map[string]any) { m["provider"] = "none" },
+		"unknown provider":     func(m map[string]any) { m["provider"] = "gemini" },
+		"unknown previous":     func(m map[string]any) { m["previous"] = "local" },
+		"missing previous":     func(m map[string]any) { delete(m, "previous") },
+		"missing provider":     func(m map[string]any) { delete(m, "provider") },
+		"missing hospital":     func(m map[string]any) { delete(m, "hospital_id") },
+		"missing budget":       func(m map[string]any) { delete(m, "monthly_token_budget") },
+		"missing via":          func(m map[string]any) { delete(m, "via") },
+		"budget 0":             func(m map[string]any) { m["monthly_token_budget"] = 0 },
+		"budget too big":       func(m map[string]any) { m["monthly_token_budget"] = 1000000001 },
+		"budget fraction":      func(m map[string]any) { m["monthly_token_budget"] = 1.5 },
+		"unknown via":          func(m map[string]any) { m["via"] = "api" },
+		"hospital not a uuid":  func(m map[string]any) { m["hospital_id"] = "HAV" },
+		"extra key":            func(m map[string]any) { m["note"] = "synthetic" },
+		"null provider":        func(m map[string]any) { m["provider"] = nil },
+	} {
+		m := good()
+		change(m)
+		if err := audit.CheckActionPayload(action, m); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// A21, the EMR connection actions (design §12.6): ids, the type, the keys
+// that changed and closed codes; never a value, an address or a label.
+func TestAuditSchemasEMRConnection(t *testing.T) {
+	hid, cid := uuid.NewString(), uuid.NewString()
+	base := func(kv ...any) map[string]any {
+		m := map[string]any{"hospital_id": hid, "connection_id": cid}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i].(string)] = kv[i+1]
+		}
+		return m
+	}
+	good := map[string]map[string]any{
+		"emr.connection_added": base("type", "fhir_r4"),
+		"emr.connection_changed": base("fields_changed", []any{"base_url", "private_key"},
+			"credentials_replaced", true, "credentials_wiped", true),
+		"emr.connection_switched_on":  base(),
+		"emr.connection_switched_off": base(),
+		"emr.connection_tested":       base("outcome", "sign_in_refused"),
+		"emr.source_resumed":          base("reason", "platform_resume"),
+	}
+	for action, p := range good {
+		if err := audit.CheckActionPayload(action, p); err != nil {
+			t.Errorf("%s: %v", action, err)
+		}
+		// An unknown key is refused (a value smuggled under any name).
+		bad := maps.Clone(p)
+		bad["api_key"] = "synthetic-test-secret-not-real"
+		if err := audit.CheckActionPayload(action, bad); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s with an unknown key: %v", action, err)
+		}
+		missing := maps.Clone(p)
+		delete(missing, "connection_id")
+		if err := audit.CheckActionPayload(action, missing); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s without connection_id: %v", action, err)
+		}
+	}
+	for name, p := range map[string]map[string]any{
+		"unknown type":            base("type", "hl7v2_feed"),
+		"a value in fields":       base("fields_changed", []any{"https://fhir.example.org"}, "credentials_replaced", false, "credentials_wiped", false),
+		"wiped not a bool":        base("fields_changed", []any{}, "credentials_replaced", false, "credentials_wiped", "yes"),
+		"free text outcome":       base("outcome", "the server said no"),
+		"hospital id not an id":   {"hospital_id": "HAV", "connection_id": cid, "type": "stub"},
+		"connection id not an id": {"hospital_id": hid, "connection_id": "Main record", "type": "stub"},
+	} {
+		action := "emr.connection_added"
+		switch {
+		case p["fields_changed"] != nil:
+			action = "emr.connection_changed"
+		case p["outcome"] != nil:
+			action = "emr.connection_tested"
+		}
+		if err := audit.CheckActionPayload(action, p); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

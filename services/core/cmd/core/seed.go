@@ -8,21 +8,30 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	_ "time/tzdata" // IANA zones for --time-zone checks, even in a minimal image
 	"unicode/utf8"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/term"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/account"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 )
 
 const seedUsage = `usage:
-  core hospitals create --name N --short-code CODE --time-zone TZ [--require-mfa-for-clinicians] [--allow-trust-device]
+  core hospitals create --name N --short-code CODE --time-zone TZ [--require-mfa-for-clinicians] [--allow-trust-device] [--demo]
   core hospitals activate <hospital id or short code>
+  core hospitals mark-demo <hospital id or short code>
+  core hospitals model-policy set <hospital id or short code> --provider openai|anthropic|xai|none [--agreement-ref REF] [--budget TOKENS]
   core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
 
 The password is never an argument: users create prompts for it on a terminal
@@ -42,7 +51,29 @@ of it (the core service refuses to start if it is).
 hospitals activate moves a setup_incomplete hospital to active (POST /queries
 needs an active hospital) and audits hospital.activated. An active hospital
 is left as it is. It refuses any other status: a deactivated hospital is
-reactivated through the platform app.`
+reactivated through the platform app.
+
+hospitals mark-demo marks a hospital made before the demo flag existed (the
+live demo's) as the synthetic demo, once, and audits hospital.marked_demo.
+The database refuses a hospital already marked, one with a real cloud
+agreement, and any hospital once an analysis switch has been signed off.
+The flag never goes back.
+
+hospitals model-policy set sets the hospital's cloud model policy and audits
+hospital.model_policy_changed (via cli, no actor). A provider needs
+--agreement-ref, the recorded agreement check's reference: AGR-YYYY-NNNN or
+DPA-YYYY-NNNN (2 to 8 digits after the year), or DEMO-SYNTHETIC for the
+synthetic demo. It is a document reference, never a person's or patient's
+name or identifier. none switches the hospital back to its local models and
+clears the reference (so --agreement-ref is refused with none).
+
+The provider must be enabled in CORE_CLOUD_PROVIDERS as this command sees it.
+That catches a mistake; it is not a control: the operator sets their own
+environment. The provisioning login (mhai_provision) is what authorises the
+write, and the pipeline's own INTELLIGENCE_CLOUD_PROVIDERS and key files
+decide what can actually be sent. --budget is the monthly token budget
+(1 to 1000000000; unchanged when left out, 2000000 for a new policy). It
+prints the hospital id and the provider only.`
 
 var errArgs = errors.New("invalid arguments (run core hospitals|users create -h)")
 
@@ -52,8 +83,14 @@ var errActivateArgs = errors.New("usage: core hospitals activate <hospital id or
 // is the provisioning login. Errors and output never contain the email, name
 // or password.
 func seed(ctx context.Context, args []string, url string, stdin io.Reader, out io.Writer) error {
+	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "mark-demo" {
+		return hospitalsMarkDemo(ctx, args[2:], url, out)
+	}
 	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "activate" {
 		return hospitalsActivate(ctx, args[2:], url, out)
+	}
+	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "model-policy" {
+		return hospitalsModelPolicy(ctx, args[2:], url, os.Getenv, out)
 	}
 	if len(args) < 2 || args[1] != "create" {
 		return fmt.Errorf("%s", seedUsage)
@@ -81,6 +118,9 @@ func hospitalsCreate(ctx context.Context, args []string, url string, out io.Writ
 	fs.StringVar(&h.TimeZone, "time-zone", "", "")
 	fs.BoolVar(&h.RequireMFAForClinicians, "require-mfa-for-clinicians", false, "")
 	fs.BoolVar(&h.AllowTrustDevice, "allow-trust-device", false, "")
+	// --demo marks the synthetic demo hospital (for core analysis
+	// seed-demo); it is set only now and never changes.
+	fs.BoolVar(&h.Demo, "demo", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return errArgs
 	}
@@ -127,6 +167,132 @@ func hospitalsActivate(ctx context.Context, args []string, url string, out io.Wr
 		return nil
 	}
 	fmt.Fprintf(out, "activated hospital %s\n", id)
+	return nil
+}
+
+var (
+	errMarkDemoArgs    = errors.New("usage: core hospitals mark-demo <hospital id or short code>")
+	errMarkDemoRefused = errors.New("refused: the hospital is already the demo, has a real cloud agreement, or an analysis switch was signed off; nothing changed")
+	errMarkDemoWrite   = errors.New("could not mark the hospital as the demo; nothing was changed")
+)
+
+// hospitalsMarkDemo is "hospitals mark-demo <id or short code>"
+// (mhai_hospital_mark_demo as mhai_provision, audited hospital.marked_demo).
+func hospitalsMarkDemo(ctx context.Context, args []string, url string, out io.Writer) error {
+	if len(args) != 1 || strings.HasPrefix(args[0], "-") || account.ValidateHospitalRef(args[0]) != nil {
+		return errMarkDemoArgs
+	}
+	pool, err := openOwner(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	id, err := account.ProvisionOnHospital(ctx, pool, args[0], func(tx pgx.Tx, hospital uuid.UUID) error {
+		if _, err := tx.Exec(ctx, `SELECT mhai_hospital_mark_demo($1)`, hospital); err != nil {
+			var pe *pgconn.PgError
+			if errors.As(err, &pe) && pe.Code == "22023" {
+				return errMarkDemoRefused
+			}
+			return errMarkDemoWrite
+		}
+		if err := audit.Write(ctx, tx, audit.Event{Action: "hospital.marked_demo", Entity: "hospital", EntityID: hospital.String(),
+			Payload: map[string]any{"via": "cli"}}); err != nil {
+			return errMarkDemoWrite
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "hospital %s marked as the demo\n", id)
+	return nil
+}
+
+var (
+	errModelPolicyArgs = errors.New("usage: core hospitals model-policy set <hospital id or short code> " +
+		"--provider openai|anthropic|xai|none [--agreement-ref REF] [--budget TOKENS]")
+	errUnknownProvider    = errors.New("--provider must be openai, anthropic, xai or none")
+	errProviderDisabled   = errors.New("that provider is not enabled in CORE_CLOUD_PROVIDERS")
+	errNeedsAgreementRef  = errors.New("a provider needs --agreement-ref")
+	errBadAgreementRef    = errors.New("--agreement-ref must be AGR-YYYY-NNNN, DPA-YYYY-NNNN (2 to 8 digits) or DEMO-SYNTHETIC")
+	errRefWithoutProvider = errors.New("--agreement-ref goes with a provider; none clears it")
+	errBadBudget          = errors.New("--budget must be a whole number from 1 to 1000000000")
+	errModelPolicyWrite   = errors.New("could not set the model policy; nothing was changed")
+)
+
+// hospitalsModelPolicy is "hospitals model-policy set <id or short code>
+// --provider P [--agreement-ref R] [--budget N]" (platform.ApplyModelPolicy
+// as mhai_provision, via cli). Everything is checked before connecting; the
+// provider must be enabled in CORE_CLOUD_PROVIDERS (read with getenv).
+// Errors and output never hold the reference.
+func hospitalsModelPolicy(ctx context.Context, args []string, url string, getenv func(string) string, out io.Writer) error {
+	if len(args) < 2 || args[0] != "set" || strings.HasPrefix(args[1], "-") {
+		return errModelPolicyArgs
+	}
+	ref := args[1]
+	fs := newFlags("hospitals model-policy set")
+	var provider, agreement string
+	var budget int64
+	fs.StringVar(&provider, "provider", "", "")
+	fs.StringVar(&agreement, "agreement-ref", "", "")
+	fs.Int64Var(&budget, "budget", 0, "")
+	if err := fs.Parse(args[2:]); err != nil || fs.NArg() != 0 || provider == "" {
+		return errModelPolicyArgs
+	}
+	budgetSet := false
+	fs.Visit(func(f *flag.Flag) { budgetSet = budgetSet || f.Name == "budget" })
+	if err := account.ValidateHospitalRef(ref); err != nil {
+		return err
+	}
+	c := platform.ModelPolicyChange{Via: platform.ViaCLI, AgreementRef: agreement}
+	switch {
+	case provider == platform.ProviderNone:
+	case slices.Contains(config.CloudProviderNames, provider):
+		c.Provider = provider
+	default:
+		return errUnknownProvider
+	}
+	enabled, err := config.ParseCloudProviders(getenv("CORE_CLOUD_PROVIDERS"))
+	if err != nil {
+		return err
+	}
+	if c.Provider != "" && !slices.Contains(enabled, c.Provider) {
+		return errProviderDisabled
+	}
+	if agreement != "" && !platform.AgreementRefOK(agreement) {
+		return errBadAgreementRef
+	}
+	if c.Provider == "" && agreement != "" {
+		return errRefWithoutProvider
+	}
+	if c.Provider != "" && agreement == "" {
+		return errNeedsAgreementRef
+	}
+	if budgetSet {
+		if budget < 1 || budget > platform.MaxMonthlyTokenBudget {
+			return errBadBudget
+		}
+		c.Budget = &budget
+	}
+	pool, err := openOwner(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	c.Hospital, err = account.ProvisionOnHospital(ctx, pool, ref, func(tx pgx.Tx, hospital uuid.UUID) error {
+		c.Hospital = hospital
+		if _, err := platform.ApplyModelPolicy(ctx, tx, c); err != nil {
+			if errors.Is(err, platform.ErrNoSuchHospital) {
+				return account.ErrNoSuchHospital
+			}
+			return errModelPolicyWrite
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "model policy %s %s\n", c.Hospital, provider)
 	return nil
 }
 

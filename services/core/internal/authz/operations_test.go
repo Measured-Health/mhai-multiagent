@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 var nameRE = regexp.MustCompile(`^[a-z0-9_]+$`)

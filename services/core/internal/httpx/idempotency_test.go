@@ -131,3 +131,42 @@ func TestCredentialKeySubstring(t *testing.T) {
 		}
 	}
 }
+
+// The credential routes' idempotency rows keep an HMAC of the request under
+// a per-deployment key, never a plain hash of a body that holds a secret
+// (EMR design §6.2): the same request and key hash the same; another key,
+// path or body hash differently; the plain hash is never what is stored.
+func TestRequestHashKeyed(t *testing.T) {
+	body := []byte(`{"credentials":{"api_key":"synthetic-test-secret-not-real-0005"}}`)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/platform/hospitals/x/emr/connections", nil)
+	k1 := []byte("synthetic-idempotency-key-one-0123456789")
+	k2 := []byte("synthetic-idempotency-key-two-0123456789")
+	plain := requestHash(r, body)
+	h1, h2 := keyedHash(k1)(r, body), keyedHash(k2)(r, body)
+	if h1 == plain || h2 == plain || h1 == h2 || len(h1) != 64 {
+		t.Fatalf("keyed %q %q plain %q", h1, h2, plain)
+	}
+	if keyedHash(k1)(r, body) != h1 {
+		t.Fatal("not deterministic")
+	}
+	other := httptest.NewRequest(http.MethodPost, "/api/v1/platform/hospitals/y/emr/connections", nil)
+	if keyedHash(k1)(other, body) == h1 || keyedHash(k1)(r, append(body, ' ')) == h1 {
+		t.Fatal("the path or body doesn't bind")
+	}
+	// Without a key the keyed middleware refuses rather than fall back to
+	// the plain hash.
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+	req.Header.Set("Idempotency-Key", "k1")
+	rec := httptest.NewRecorder()
+	called := false
+	IdempotentKeyed(nil, nil, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(rec, req)
+	if called || rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("no key: called %v status %d", called, rec.Code)
+	}
+	short := IdempotentKeyed(nil, nil, []byte("short"))
+	rec = httptest.NewRecorder()
+	short(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(rec, req)
+	if called || rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("short key: called %v status %d", called, rec.Code)
+	}
+}

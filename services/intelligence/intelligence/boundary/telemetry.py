@@ -242,11 +242,27 @@ def links_from(headers: Mapping[str, str] | None) -> list[Link]:
 
 class _State:
     def __init__(
-        self, tracer: trace.Tracer, refusals: Any, verify: Any, model_failures: Any = None
+        self,
+        tracer: trace.Tracer,
+        refusals: Any,
+        verify: Any,
+        settle_failures: Any = None,
+        budget_alerts: Any = None,
+        settle_clamped: Any = None,
+        cloud_alerts: Any = None,
+        context_dropped: Any = None,
+        usage_overrun: Any = None,
+        model_failures: Any = None,
     ) -> None:
         self.tracer = tracer
         self.refusals = refusals
         self.verify = verify
+        self.settle_failures = settle_failures
+        self.budget_alerts = budget_alerts
+        self.settle_clamped = settle_clamped
+        self.cloud_alerts = cloud_alerts
+        self.context_dropped = context_dropped
+        self.usage_overrun = usage_overrun
         self.model_failures = model_failures
 
 
@@ -311,7 +327,50 @@ def setup(
         "mhai_model_verify_failures_total",
         description="Pinned model verifications that failed, by role and reason.",
     )
-    state = _State(tp.get_tracer(SCOPE), refusals, verify, model_failures)
+    # The cloud token budget (plan Task 7): settles that failed (a
+    # reservation then stays held to the month's end), and hospitals past
+    # 80% of their month, by provider.
+    settle_failures = meter.create_counter(
+        "mhai_cloud_settle_failures_total",
+        description="Cloud token reservations whose settle failed.",
+    )
+    budget_alerts = meter.create_counter(
+        "mhai_cloud_budget_alerts_total",
+        description="Cloud calls that found their hospital at 80% or more of its budget.",
+    )
+    settle_clamped = meter.create_counter(
+        "mhai_cloud_settle_clamped_total",
+        description="Cloud settles whose reported use was out of range, settled as all reserved.",
+    )
+    # The cloud client (plan Task 9): alerts by provider and kind
+    # (auth_failed, unconfigured), and patient context keys dropped by the
+    # CloudContext allow-list.
+    cloud_alerts = meter.create_counter(
+        "mhai_cloud_alerts_total",
+        description="Cloud calls that need a person: a key refused, or a provider not enabled.",
+    )
+    context_dropped = meter.create_counter(
+        "mhai_cloud_context_dropped_total",
+        description="Patient context keys the cloud allow-list dropped.",
+    )
+    # Review I1: replies that reported more tokens than were reserved (core
+    # settles at most the reservation, so the excess is not in the ledger).
+    usage_overrun = meter.create_counter(
+        "mhai_cloud_usage_overrun_total",
+        description="Cloud replies that used more tokens than their reservation.",
+    )
+    state = _State(
+        tp.get_tracer(SCOPE),
+        refusals,
+        verify,
+        settle_failures,
+        budget_alerts,
+        settle_clamped,
+        cloud_alerts,
+        context_dropped,
+        usage_overrun,
+        model_failures,
+    )
     _state = state
 
     def shutdown() -> None:
@@ -492,6 +551,42 @@ def record_model_verify_failure(role: str, reason: str) -> None:
     c = _state.model_failures
     if c is not None:
         c.add(1, {"role": _label(role), "reason": _label(reason)})
+
+
+def record_cloud_settle_failure() -> None:
+    c = _state.settle_failures
+    if c is not None:
+        c.add(1)
+
+
+def record_cloud_settle_clamped() -> None:
+    c = _state.settle_clamped
+    if c is not None:
+        c.add(1)
+
+
+def record_cloud_alert(provider: str, kind: str) -> None:
+    c = _state.cloud_alerts
+    if c is not None:
+        c.add(1, {"provider": _label(provider), "kind": _label(kind)})
+
+
+def record_cloud_usage_overrun(provider: str) -> None:
+    c = _state.usage_overrun
+    if c is not None:
+        c.add(1, {"provider": _label(provider)})
+
+
+def record_cloud_context_dropped(n: int) -> None:
+    c = _state.context_dropped
+    if c is not None and n > 0:
+        c.add(n)
+
+
+def record_cloud_budget_alert(provider: str) -> None:
+    c = _state.budget_alerts
+    if c is not None:
+        c.add(1, {"provider": _label(provider)})
 
 
 class RefusalCounter(Counter[Any]):

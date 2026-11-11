@@ -29,12 +29,12 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 const serviceKey = "test-only-bff-service-key-0123456789abcdef"
@@ -315,7 +315,7 @@ func newIP() string {
 
 var userKeys = []string{"id", "role", "roles", "email", "display_name", "full_name", "role_title", "specialty",
 	"hospital", "mfa_enabled", "must_change_password", "terms_accepted_at", "recovery_codes_left",
-	"idle_timeout_minutes", "review_overdue_hours"}
+	"idle_timeout_minutes", "review_overdue_hours", "features"}
 
 func TestLoginSuccessShape(t *testing.T) {
 	e := newEnv(t)

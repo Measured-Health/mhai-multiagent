@@ -73,6 +73,17 @@ var dbTxAllowedFiles = map[string]string{
 	// connection it takes out of the pool), reading the health functions
 	// as mhai_platform. GET /platform/health reads the KV bucket only.
 	"internal/platform/sampler.go": "the health sampler's leader lock (Acquire) and its reads (db.WithPlatformSnapshot)",
+	// Plan 7c: the analytics scheduler runs as mhai_analytics_job, a role no
+	// route reaches (its own test walks internal/platform's imports).
+	"internal/analytics/scheduler/source.go":    "the analytics scheduler's database access (db.WithAnalyticsJob)",
+	"internal/analytics/scheduler/scheduler.go": "the analytics scheduler's leader lock (Acquire)",
+	// Patient Analysis's nightly run (00021) runs as mhai_analysis_job, a
+	// role no route reaches (TestRoutesCantReachAnalysisJobPool), with no
+	// principal; one core copy at a time (Acquire for the advisory lock).
+	"internal/analysis/store.go": "the analysis nightly run's database access (db.WithAnalysisJob) and its lock (Acquire)",
+	// The analysis provisioning CLI (core analysis switch off --global):
+	// SET LOCAL ROLE mhai_provision on the provisioning login, no hospital.
+	"cmd/core/analysis.go": "the analysis CLI's provisioning transaction (mhai_provision)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on

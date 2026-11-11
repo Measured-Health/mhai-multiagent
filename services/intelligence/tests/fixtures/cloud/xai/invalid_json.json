@@ -1,0 +1,34 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "x-request-id": "req_SYNTHETIC0001",
+    "x-zero-data-retention": "true"
+  },
+  "body": {
+    "id": "chatcmpl-SYNTHETIC0001",
+    "object": "chat.completion",
+    "created": 1762473600,
+    "model": "synthetic-model-1",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Synthetic answer, not JSON [KB#0001]",
+          "refusal": null
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 812,
+      "completion_tokens": 64,
+      "total_tokens": 896,
+      "completion_tokens_details": {
+        "reasoning_tokens": 20
+      }
+    },
+    "system_fingerprint": "fp_SYNTHETIC0001"
+  }
+}

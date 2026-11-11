@@ -112,7 +112,7 @@ jobs:
         run: uv sync --locked
       - name: Build the core image (migrations)
         working-directory: .
-        run: docker build -t mhai-core:test services/core
+        run: docker build -t mhai-core:test -f services/core/Dockerfile services
       - name: Boundary tests
         env:
           COVERAGE_FILE: coverage.boundary
@@ -215,9 +215,69 @@ jobs:
         run: go test -race -tags integration ./...
       - name: Integration tests with the test-only fixture routes
         run: go test -race -tags "integration test" ./...
+      # Plan 7c (A7, R41a-5): the analytics history properties at full size
+      # (500 guard-level histories, the unions and the JSON-side set check).
+      # The -race runs above use smaller samples to fit Go's package limit.
+      - name: Analytics history properties (full size)
+        run: >
+          go test -count=1 -timeout 30m
+          -run 'TestHistoryAnchoredAtOnboarding|TestUnionsOfHiddenWeeksMeasured|TestFullyHiddenAlwaysPasses|TestHistoryFromRouteJSON|TestHistorySetsFromRouteJSON'
+          ./internal/smallgroup/...
       # The smoke test runs in boundary-smoke; here it only has to build.
       - name: Vet the smoke test
         run: go vet -tags smoke ./internal/smoke/...
+
+  # The Go module core and the emr service share (ADR 0014): a defect here
+  # reaches both.
+  gokit:
+    runs-on: ubuntu-latest  # ships Docker, which the integration tests use
+    defaults:
+      run:
+        working-directory: services/gokit
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24"
+          cache-dependency-path: services/gokit/go.sum
+      - name: Formatted (gofmt)
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+      - name: Test
+        run: go test -race ./...
+      - name: Integration tests
+        run: go test -race -tags integration ./...
+
+  # The emr service (ADR 0014). Its integration tests run on core's
+  # migrations (internal/testpg).
+  emr:
+    runs-on: ubuntu-latest  # ships Docker, which the integration tests use
+    defaults:
+      run:
+        working-directory: services/emr
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24"
+          cache-dependency-path: services/emr/go.sum
+      - name: Formatted (gofmt)
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+      - name: Test
+        run: go test -race ./...
+      - name: Integration tests
+        run: go test -race -tags integration ./...
 
   # ADR 0012: a breaking change to the HTTP contract needs a new major
   # version (/api/v2), so it may not change /api/v1 in place.
@@ -260,6 +320,12 @@ jobs:
               - services/intelligence/uv.lock
               - services/intelligence/intelligence/**
               - services/intelligence/warmup/**
+            go_image:
+              - .github/workflows/ci.yml
+              - services/.dockerignore
+              - services/core/**
+              - services/gokit/**
+              - services/emr/**
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
         if: steps.changes.outputs.image == 'true'
       # Layers are cached between runs, so only changed layers rebuild.
@@ -295,6 +361,21 @@ jobs:
           print('operations.json and catalogue.json load from the installed package')
           "
 
+      # The Go images build from services/ (they require services/gokit,
+      # ADR 0014), as the deploy workflow builds core.
+      - name: Build the core image from services/
+        if: steps.changes.outputs.go_image == 'true'
+        run: |
+          docker build -t mhai-core:ci -f services/core/Dockerfile services
+          out=$(docker run --rm mhai-core:ci help 2>&1 || true)
+          case "$out" in "usage: core"*) echo "the core image runs" ;; *) echo "::error::the core image doesn't run"; exit 1 ;; esac
+      - name: Build the emr image from services/
+        if: steps.changes.outputs.go_image == 'true'
+        run: |
+          docker build -t mhai-emr:ci -f services/emr/Dockerfile services
+          out=$(docker run --rm mhai-emr:ci help 2>&1 || true)
+          case "$out" in "usage: emr"*) echo "the emr image runs" ;; *) echo "::error::the emr image doesn't run"; exit 1 ;; esac
+
   # Spec section 12: the whole boundary end to end. The smoke stack
   # (docker-compose.yml + docker-compose.smoke.yml: core, NATS, Postgres,
   # the pipeline worker with the stub models, the echo worker), then
@@ -317,12 +398,17 @@ jobs:
         run: |
           docker compose --env-file .env.example config -q
           docker compose --env-file .env.example --profile test --profile observability config -q
+          docker compose --env-file .env.example --profile emr config -q
           docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.smoke.yml config -q
           docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.gpu.yml config -q
           # The demo deploy's file, with synthetic values for the host's .env.
           env POSTGRES_PASSWORD=x CORE_DB_PASSWORD=x PROVISION_DB_PASSWORD=x MFA_ENCRYPTION_KEY=x \
             BFF_SERVICE_KEYS=x NATS_GATEWAY_NKEY=x NATS_BFF_NKEY=x NATS_BFF_PLATFORM_NKEY=x \
             docker compose -f deploy/compose.yml config -q
+          # The same with the tools, cloud and emr profiles (the egress proxies).
+          env POSTGRES_PASSWORD=x CORE_DB_PASSWORD=x PROVISION_DB_PASSWORD=x MFA_ENCRYPTION_KEY=x \
+            BFF_SERVICE_KEYS=x NATS_GATEWAY_NKEY=x NATS_BFF_NKEY=x NATS_BFF_PLATFORM_NKEY=x \
+            docker compose -f deploy/compose.yml --profile tools --profile cloud --profile emr config -q
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       # The same layers as the image job, from the GitHub Actions cache.
       - name: Build the intelligence image
@@ -334,7 +420,7 @@ jobs:
           tags: mhai-intelligence:cpu
           cache-from: type=gha
       - name: Build the core image
-        run: docker build -t mhai-core:local services/core
+        run: docker build -t mhai-core:local -f services/core/Dockerfile services
       # The demo deploy's pre-migration check, against a throwaway Postgres
       # with core's migrations (fails closed on every error).
       - name: Pre-migration check tests

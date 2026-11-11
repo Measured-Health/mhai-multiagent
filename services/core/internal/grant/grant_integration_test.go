@@ -35,14 +35,14 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/grant"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/natsapi"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 const (
@@ -251,6 +251,20 @@ func decode(t *testing.T, m *nats.Msg) answer {
 		t.Fatalf("grant refused: %v code %q status %q", err, r.Code, status)
 	}
 	return answer{code: r.Code}
+}
+
+// waitInFlightZero fails unless m's in-flight count is 0 within d. A reply
+// is sent before the handler releases its slot, so the count can trail the
+// answer by a moment; a slot that is never released still fails.
+func waitInFlightZero(t *testing.T, m *grant.Metrics, d time.Duration, what string) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for m.InFlight.Load() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("in flight %d %s", m.InFlight.Load(), what)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func mustAsk(t *testing.T, nc *nats.Conn, service string, req *intelpb.GrantRequest) answer {
@@ -1097,27 +1111,49 @@ func TestGrantedAudited(t *testing.T) {
 // some of 100 grants, none twice. Then one copy is killed; retried
 // grants are all answered by the other.
 func TestTwoCoreCopiesShareGrants(t *testing.T) {
-	a := startCore(t, copyOpts{limits: grant.Limits{PerSession: 1000, PerHospital: 1000}})
-	b := startCore(t, copyOpts{limits: grant.Limits{PerSession: 1000, PerHospital: 1000}})
+	const n = 100
+	// Each copy's in-flight bound covers all n grants. NATS gives each
+	// message to a queue member at random, and the granted rows queue on
+	// the audit chain's lock, so nearly all n are in flight at once: with
+	// the default bound (64) a split of 65 or more to one copy (about 1 run
+	// in 300) answered one grant overloaded. That is the bound working
+	// (TestGrantOverloaded), not the sharing this test is about.
+	lim := grant.Limits{PerSession: 1000, PerHospital: 1000, InFlight: n}
+	a := startCore(t, copyOpts{limits: lim})
+	b := startCore(t, copyOpts{limits: lim})
 	_, s := clinician(t)
 	ec := echoConn(t)
 	var wg sync.WaitGroup
 	var granted atomic.Int64
-	for i := 0; i < 100; i++ {
+	var mu sync.Mutex
+	failures := map[string]int{} // refusal code or request error → count
+	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if ans, err := ask(t, ec, "echo", pingRequest(s.tok, []byte("x"))); err == nil && ans.code == "" {
+			ans, err := ask(t, ec, "echo", pingRequest(s.tok, []byte("x")))
+			if err == nil && ans.code == "" {
 				granted.Add(1)
+				return
 			}
+			why := ans.code
+			if err != nil {
+				why = err.Error()
+			}
+			mu.Lock()
+			failures[why]++
+			mu.Unlock()
 		}()
 	}
 	wg.Wait()
 	na, nb := a.metrics.Granted.Load(), b.metrics.Granted.Load()
-	if granted.Load() != 100 || na+nb != 100 || na == 0 || nb == 0 {
-		t.Fatalf("granted %d (copy a %d, copy b %d)", granted.Load(), na, nb)
+	if granted.Load() != n || na+nb != n || na == 0 || nb == 0 {
+		t.Fatalf("granted %d of %d (copy a %d, copy b %d; overloaded %d; not granted: %v)", granted.Load(), n, na, nb,
+			a.metrics.Overloaded.Load()+b.metrics.Overloaded.Load(), failures)
 	}
-	if a.metrics.Refused.Load()+b.metrics.Refused.Load() != 0 {
+	if a.metrics.Refused.Load()+b.metrics.Refused.Load() != 0 ||
+		a.metrics.Overloaded.Load()+b.metrics.Overloaded.Load() != 0 ||
+		a.metrics.RateLimited.Load()+b.metrics.RateLimited.Load() != 0 {
 		t.Fatal("a copy refused")
 	}
 
@@ -1266,9 +1302,11 @@ func TestGrantPanicAnswersNotReady(t *testing.T) {
 			t.Fatalf("after a panic: %+v in %v", a, time.Since(start))
 		}
 	}
-	if c.metrics.InFlight.Load() != 0 {
-		t.Fatalf("in flight %d after panics", c.metrics.InFlight.Load())
-	}
+	// The reply goes out before the handler's deferred release (as on the
+	// happy path: a grant holds its in-flight slot until it has answered),
+	// so the worker can see the answer a moment before the counter drops.
+	// The slot must still be released, promptly.
+	waitInFlightZero(t, c.metrics, 2*time.Second, "after panics")
 	if !strings.Contains(logs.String(), "grant: handler panicked") {
 		t.Fatal("panic not logged")
 	}

@@ -1,0 +1,15 @@
+# Product and vendor names that must never name a connector type or a
+# source label (ADR 0003; mhai-web's scripts/vendor-names.mjs). Matched as
+# whole words, any case, after splitting identifiers. One per line.
+epic
+cerner
+oracle
+openmrs
+meditech
+athena
+athenahealth
+allscripts
+nextgen
+eclinicalworks
+dhis
+bahmni

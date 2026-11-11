@@ -14,7 +14,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 )
 
-const usage = "usage: core serve | core migrate up|status | core keys new|ensure|untrust ... | core hospitals create|activate ... | core users create ..."
+const usage = "usage: core serve | core migrate up|status | core keys new|ensure|untrust ... | core hospitals create|activate|model-policy ... | core users create ... | core analysis seed-demo|switch off ..."
 
 func main() {
 	var err error
@@ -25,6 +25,8 @@ func main() {
 		err = migrateWithLogins(context.Background(), os.Args[2:], os.Getenv("DATABASE_URL"), os.Getenv, os.Stdout)
 	case len(os.Args) >= 2 && os.Args[1] == "keys":
 		err = keys(os.Args[2:], os.Stdout)
+	case len(os.Args) >= 2 && os.Args[1] == "analysis":
+		err = analysisCmd(context.Background(), os.Args[2:], os.Getenv("DATABASE_URL"), os.Stdout, nil)
 	case len(os.Args) >= 2 && (os.Args[1] == "hospitals" || os.Args[1] == "users"):
 		err = seed(context.Background(), os.Args[1:], os.Getenv("DATABASE_URL"), os.Stdin, os.Stdout)
 	default:
@@ -76,7 +78,9 @@ type loginRequest struct {
 //     member of mhai_provision only;
 //   - INTELLIGENCE_DB_USER / INTELLIGENCE_DB_PASSWORD: the pipeline's
 //     login (spec §8.2), a member of mhai_worker_app only. The user
-//     defaults to intelligence_app when only the password is set.
+//     defaults to intelligence_app when only the password is set;
+//   - EMR_DB_USER / EMR_DB_PASSWORD: the emr service's login (EMR design
+//     §3.3), a member of mhai_emr_app only (00020), emr_app by default.
 //
 // Each pair is both set or both unset. Passwords must not be placeholders.
 // Errors name variables, never values.
@@ -87,6 +91,7 @@ func loginRequests(getenv func(string) string) ([]loginRequest, error) {
 		{userVar: "CORE_DB_USER", pwVar: "CORE_DB_PASSWORD", role: "mhai_app"},
 		{userVar: "PROVISION_DB_USER", pwVar: "PROVISION_DB_PASSWORD", role: "mhai_provision"},
 		{userVar: "INTELLIGENCE_DB_USER", pwVar: "INTELLIGENCE_DB_PASSWORD", role: "mhai_worker_app", defaultUser: "intelligence_app"},
+		{userVar: "EMR_DB_USER", pwVar: "EMR_DB_PASSWORD", role: "mhai_emr_app", defaultUser: "emr_app"},
 	} {
 		l.user, l.password = getenv(l.userVar), getenv(l.pwVar)
 		if l.user == "" && l.password != "" {

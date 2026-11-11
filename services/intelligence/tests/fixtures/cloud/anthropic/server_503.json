@@ -1,0 +1,15 @@
+{
+  "status": 503,
+  "headers": {
+    "content-type": "application/json",
+    "request-id": "req_SYNTHETIC0001"
+  },
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "api_error",
+      "message": "Synthetic service unavailable"
+    },
+    "request_id": "req_SYNTHETIC0001"
+  }
+}

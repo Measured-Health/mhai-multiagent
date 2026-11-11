@@ -38,6 +38,7 @@ touches the EMR containers, the web demo or nginx.
 | `core-request-key` | core | one-shot: the request-token signing key, made once, and its public half in the `mhai-backend-trustedkeys` volume | 64 MiB |
 | `core` | core, uid 65532 | `core serve` on 127.0.0.1:8092 | 320 MiB, CPUs 0-1 |
 | `core-cli` | core | the seed CLI, run by hand (profile `tools`) | 128 MiB |
+| `egress-proxy` | `ubuntu/squid` by digest, uid 13 | the cloud providers' only way out (profile `cloud`, off by default; see "Cloud models") | 128 MiB |
 
 Every container has a read-only root filesystem, no Linux capabilities and
 `no-new-privileges`. The intelligence workers (`pipeline`, `echo`) are not
@@ -398,6 +399,109 @@ sudo cp deploy/nginx/mhai-backend.conf.disabled /etc/nginx/sites-available/mhai-
 sudo ln -s /etc/nginx/sites-available/mhai-backend /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+## Cloud models (off by default)
+
+A hospital a platform admin has opted in can have its clinical answers
+drafted by a cloud model (Anthropic, OpenAI or xAI). Only masked text and
+shared guideline text leave, through the pipeline's egress gate and scan,
+and only through `egress-proxy` (design
+`docs/specs/2026-11-03-cloud-model-providers-design.md`; ADR 0013). **Demo
+and synthetic data only** until every human gate in `TODO.md` ("Cloud
+models: before any real patient data") is done. Nothing here opens that
+gate.
+
+```
+pipeline ──backend (internal)──> egress-proxy ──egress──> CONNECT api.<provider>:443 only
+```
+
+The proxy (`egress-proxy/squid.conf`, Squid pinned by digest, profile
+`cloud`) allows `CONNECT` to port 443 of the hosts in
+`egress-proxy/allowed-hosts`, matched by name with no reverse lookup, and
+refuses IP literals, other ports, other hosts and plain requests. A name
+off the list is refused before any DNS lookup (no leaking data in the
+names asked for), and an allowed name that resolves to a loopback, private
+or link-local address is refused. It never
+sees inside the TLS tunnel. Its access log holds time, method, host, port
+and status only. `egress-proxy/test-egress.sh` checks all of this (A15) on
+a Docker host; never run it with a key, and never in CI.
+
+### Enabling a provider (design §15, steps 1–5)
+
+Needs a host big enough for the pipeline (the embedding and NLI models on
+CPU, weights baked into the image or mounted read-only with
+`HF_HUB_OFFLINE=1`: the pipeline has no route to Hugging Face), the
+provider key and its zero-data-retention reference (TODO H1, H5).
+
+1. **Provision.** Enable the pipeline in `compose.yml` as its comment block
+   describes (its own NKey, database login, trusted keys, `backend` only),
+   and copy `egress-proxy/` to `/srv/mhai-backend/egress-proxy/` (the deploy
+   workflow copies only `compose.yml` and `nats/nats.conf`). Create
+   `egress-proxy/allowed-hosts` from `allowed-hosts.example` with the one
+   provider's host (`api.anthropic.com`, `api.openai.com` or `api.x.ai`),
+   mode 0644. Start the proxy: `docker compose --profile cloud up -d
+   egress-proxy`.
+2. **The key file.** Write the key to `secrets/<provider>-api-key` from a
+   password manager (never on a command line, never in `.env`), mode 0400,
+   owned by the worker's user; mount it read-only at
+   `/run/secrets/<provider>-api-key` (the block shows it). The worker refuses
+   to start on a placeholder, a short key, a key with whitespace, or a mode
+   other than 0400/0440. Set, on the pipeline only:
+   `INTELLIGENCE_CLOUD_PROXY=http://egress-proxy:3128` (not `HTTPS_PROXY`,
+   which every library would read), `INTELLIGENCE_CLOUD_PROVIDERS=<provider>`,
+   `INTELLIGENCE_CLOUD_<PROVIDER>_MODEL`, `INTELLIGENCE_CLOUD_<PROVIDER>_KEY_FILE`
+   and `INTELLIGENCE_CLOUD_<PROVIDER>_ZDR_REF` (`DEMO-SYNTHETIC` only with
+   `APP_ENV=demo`, logged as a warning; production refuses it). Set
+   `CORE_CLOUD_PROVIDERS=<provider>` on core. Never set any `OPENAI_*`,
+   `ANTHROPIC_*`, `AZURE_OPENAI_*` or `XAI_*` variable: the worker refuses to
+   start. The image must carry a CA bundle at OpenSSL's paths; the worker
+   refuses to start without one.
+3. **Switch the demo hospital on:** `docker compose --profile tools run --rm
+   core-cli hospitals model-policy set <hospital id or short code> --provider
+   <provider> --agreement-ref DEMO-SYNTHETIC [--budget <tokens>]`, or the
+   platform app's hospital page (MFA and step-up). Both are audited
+   (`hospital.model_policy_changed`).
+4. **Check:** ask a synthetic question. The result shows `generated_by`, and
+   the `query.completed` fact shows `egress=<provider>` and the outcome.
+5. **Alerts:** route these to the person H5 names:
+   `mhai_cloud_alerts_total` by `kind` (`auth_failed`, `unconfigured`, and
+   `usage_overrun` when a reply uses more than 10% over its reservation),
+   `mhai_cloud_budget_alerts_total` (a hospital at 80% of its month),
+   `mhai_cloud_settle_failures_total` (a reservation held to the month's
+   end) and `mhai_cloud_usage_overrun_total` (any reply over its
+   reservation: core settles at most the reservation, so the excess is not
+   in the ledger).
+
+### At the provider
+
+- One key per provider per environment, in a project or workspace used only
+  by this deployment, with the provider's own spend limit (USD 50 a month
+  for the demo).
+- Scope it to the inference endpoints only (no admin, files, fine-tuning or
+  batch) and to this host's egress address, where the provider offers it.
+- The zero-data-retention terms are signed and their reference is the
+  `ZDR_REF` setting.
+
+### Rotating a key (every 90 days, and at once on suspicion)
+
+1. Create the new key at the provider (same scope and limit).
+2. Write it over `secrets/<provider>-api-key` (mode 0400, the worker's
+   user), from a password manager.
+3. Restart the pipeline (rolling where there is more than one): it reads the
+   key only at start.
+4. Revoke the old key at the provider, and check that answers still show
+   `ok` (not `auth_failed`).
+
+### Switching off
+
+1. Set the hospital's policy to none: `hospitals model-policy set <hospital>
+   --provider none` (or the platform app). It takes effect at the next claim;
+   a question already queued as cloud runs local.
+2. Remove `INTELLIGENCE_CLOUD_*` from the pipeline and the provider from
+   `CORE_CLOUD_PROVIDERS`, delete the key file, and restart both.
+3. Remove the host from `egress-proxy/allowed-hosts` and restart the proxy,
+   or stop it: `docker compose --profile cloud stop egress-proxy`.
+4. Revoke the key at the provider.
 
 ## Known limits
 

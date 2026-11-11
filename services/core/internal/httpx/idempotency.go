@@ -3,9 +3,11 @@ package httpx
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"hash"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,7 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 )
 
 // Principal is who a request acts for. The token middleware sets it with
@@ -93,7 +95,28 @@ func Idempotent(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 // IdempotentLog is Idempotent with the logger that records replies which
 // could not be stored.
 func IdempotentLog(pool *pgxpool.Pool, log *slog.Logger) func(http.Handler) http.Handler {
-	return idempotent(pool, log, principalScope)
+	return idempotent(pool, log, principalScope, requestHash)
+}
+
+// MinHashKey is the shortest key IdempotentKeyed accepts.
+const MinHashKey = 32
+
+// IdempotentKeyed is IdempotentLog for the routes whose bodies carry an
+// outside credential (EMR design §6.2): the stored request hash is
+// HMAC-SHA256 under key, a per-deployment secret, so the idempotency_keys
+// row can't be used to confirm a guessed credential. Without a usable key
+// (nil or under 32 bytes) every request is refused 503 not_ready: it never
+// falls back to the plain hash.
+func IdempotentKeyed(pool *pgxpool.Pool, log *slog.Logger, key []byte) func(http.Handler) http.Handler {
+	if log == nil {
+		log = slog.Default()
+	}
+	if len(key) < MinHashKey {
+		return func(http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { Error(w, r, "not_ready") })
+		}
+	}
+	return idempotent(pool, log, principalScope, keyedHash(bytes.Clone(key)))
 }
 
 // IdempotentAnon is Idempotent for public routes (sign-in, refresh, the
@@ -106,7 +129,7 @@ func IdempotentAnon(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 
 // IdempotentAnonLog is IdempotentAnon with a logger.
 func IdempotentAnonLog(pool *pgxpool.Pool, log *slog.Logger) func(http.Handler) http.Handler {
-	return idempotent(pool, log, anonScope)
+	return idempotent(pool, log, anonScope, requestHash)
 }
 
 // scopeFunc picks the scope; ok false runs without idempotency, err
@@ -115,7 +138,10 @@ type scopeFunc func(context.Context) (sc scope, ok bool, err error)
 
 var errNoPrincipal = errors.New("idempotency: no principal")
 
-func idempotent(pool *pgxpool.Pool, log *slog.Logger, scopeOf scopeFunc) func(http.Handler) http.Handler {
+// hashFunc binds a key to one request.
+type hashFunc func(r *http.Request, body []byte) string
+
+func idempotent(pool *pgxpool.Pool, log *slog.Logger, scopeOf scopeFunc, hashOf hashFunc) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
@@ -149,7 +175,7 @@ func idempotent(pool *pgxpool.Pool, log *slog.Logger, scopeOf scopeFunc) func(ht
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
-			st := &store{pool: pool, log: log, sc: sc, key: keys[0], hash: requestHash(r, body)}
+			st := &store{pool: pool, log: log, sc: sc, key: keys[0], hash: hashOf(r, body)}
 			st.serve(w, r, next)
 		})
 	}
@@ -197,7 +223,15 @@ func anonScope(ctx context.Context) (scope, bool, error) {
 
 // requestHash binds a key to one request: method, path, query and body.
 func requestHash(r *http.Request, body []byte) string {
-	h := sha256.New()
+	return writeRequest(sha256.New(), r, body)
+}
+
+// keyedHash is requestHash as HMAC-SHA256 under key.
+func keyedHash(key []byte) hashFunc {
+	return func(r *http.Request, body []byte) string { return writeRequest(hmac.New(sha256.New, key), r, body) }
+}
+
+func writeRequest(h hash.Hash, r *http.Request, body []byte) string {
 	for _, part := range []string{r.Method, r.URL.Path, r.URL.RawQuery} {
 		_, _ = io.WriteString(h, strconv.Itoa(len(part))+":"+part+"\n")
 	}

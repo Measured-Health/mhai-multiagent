@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrtypes"
 )
 
 // The closed payload schemas of every action core writes (Plan 4 spec §9).
@@ -43,6 +45,9 @@ type Schema struct {
 	// its keys (an action two writers use with two shapes: job.retried and
 	// job.cancelled, per job and per platform call).
 	Shapes []Shape
+	// Holds, when set, is a rule across the payload's keys that it must
+	// also meet (checked after the keys and values fit).
+	Holds func(payload map[string]any) bool
 }
 
 // Shape is one alternative payload of an action: the keys it may carry and
@@ -151,6 +156,9 @@ func checkPayload(action string, raw []byte) error {
 	}
 	if len(s.Shapes) > 0 && !slices.ContainsFunc(s.Shapes, func(sh Shape) bool { return sh.fits(payload) }) {
 		return fmt.Errorf("%w: %s fits none of its shapes", ErrSchema, action)
+	}
+	if s.Holds != nil && !s.Holds(payload) {
+		return fmt.Errorf("%w: %s breaks its rule across keys", ErrSchema, action)
 	}
 	return nil
 }
@@ -298,6 +306,9 @@ var (
 	modelVersionPattern = regexp.MustCompile(`^(?:[A-Za-z0-9_.:/@+-]{1,128}|[a-z0-9][a-z0-9-]{1,62}@(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})#[0-9a-f]{12})$`)
 	factEntityPattern   = regexp.MustCompile(`^[a-z0-9_.]{0,64}$`)
 	factEntityIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
+	// A model policy's agreement reference (00018's CHECK): AGR-YYYY-NNNN,
+	// DPA-YYYY-NNNN or DEMO-SYNTHETIC, never a word, a name or a pseudonym.
+	agreementRefPattern = regexp.MustCompile(`^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$`)
 )
 
 func fields(kv ...any) map[string]Check {
@@ -349,6 +360,66 @@ func init() {
 		Required: []string{"via", "from"}})
 	Register("user.created", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})
 
+	// Cloud model providers (plan 2026-11-06 Task 2, design §5.3): a
+	// hospital's model policy set by a platform admin (as mhai_platform)
+	// or the CLI twin (as mhai_provision). The row has no hospital (a
+	// platform action); the hospital is in the payload. The agreement
+	// reference has the id shape and is absent when none was given.
+	// The reference is present exactly when a provider is (off clears it).
+	provider := OneOf("none", "openai", "anthropic", "xai")
+	agreementRef := func(v any) bool {
+		s, ok := v.(string)
+		return ok && agreementRefPattern.MatchString(s) && !pseudonymS.MatchString(s)
+	}
+	Register("hospital.model_policy_changed", Schema{Fields: fields(
+		"hospital_id", id, "provider", provider, "previous", provider,
+		"agreement_ref", Check(agreementRef),
+		"monthly_token_budget", Int(1, 1000000000),
+		"via", OneOf("platform", "cli")),
+		Required: []string{"hospital_id", "provider", "previous", "monthly_token_budget", "via"},
+		// A reference exactly when a provider is set.
+		Holds: func(p map[string]any) bool {
+			_, hasRef := p["agreement_ref"]
+			return hasRef == (p["provider"] != "none")
+		}})
+
+	// EMR connections (EMR design §12.6, plan Task 11): ids, the type, the
+	// keys that changed (never a value), closed outcome codes and bools.
+	// The platform writes them with no hospital column (00020's
+	// platform_append); the hospital is the payload's id.
+	emrConn := fields("hospital_id", id, "connection_id", id)
+	withConn := func(kv ...any) map[string]Check {
+		m := fields(kv...)
+		for k, c := range emrConn {
+			m[k] = c
+		}
+		return m
+	}
+	connReq := []string{"hospital_id", "connection_id"}
+	Register("emr.connection_added", Schema{Fields: withConn("type", OneOf(emrTypeIDs()...)),
+		Required: append(slices.Clone(connReq), "type")})
+	Register("emr.connection_changed", Schema{Fields: withConn("fields_changed", List(40, OneOf(EMRConnectionKeys()...)),
+		"credentials_replaced", Check(Bool), "credentials_wiped", Check(Bool)),
+		Required: append(slices.Clone(connReq), "fields_changed", "credentials_replaced", "credentials_wiped")})
+	Register("emr.connection_switched_on", Schema{Fields: withConn(), Required: connReq})
+	Register("emr.connection_switched_off", Schema{Fields: withConn(), Required: connReq})
+	Register("emr.connection_tested", Schema{Fields: withConn("outcome", OneOf(emrtypes.Codes...)),
+		Required: append(slices.Clone(connReq), "outcome")})
+	Register("emr.source_resumed", Schema{Fields: withConn("reason", OneOf("platform_resume")),
+		Required: append(slices.Clone(connReq), "reason")})
+
+	// Patient Analysis (analysis plan Task 4): the provisioning CLI raises
+	// a switch for the synthetic demo only, and lowers one. The row has no
+	// hospital and no actor; the payload names the hospital for a
+	// hospital's switch and nothing for the global one.
+	Register("analysis.switch_raised", Schema{Fields: fields("hospital_id", id, "via", OneOf("cli"), "refs", OneOf("demo")),
+		Required: []string{"via", "refs"}})
+	// A hospital made before hospitals.is_demo, marked as the demo once
+	// (core hospitals mark-demo); the hospital is the row's entity.
+	Register("hospital.marked_demo", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})
+	Register("analysis.switch_lowered", Schema{Fields: fields("hospital_id", id, "via", OneOf("cli")),
+		Required: []string{"via"}})
+
 	// Plan 3: the request-token boundary (internal/account, grant, intel).
 	Register("intelligence.key_rotated", Schema{Fields: fields(
 		"kid", token, "rotation", OneOf("planned", "emergency"), "change", OneOf("added", "removed")),
@@ -383,7 +454,11 @@ func init() {
 		"trust_band", Nullable(OneOf("low", "mid", "high")),
 		"chunk_ids", List(50, Pattern(chunkIDPattern)),
 		"model_versions", StringMap(16, modelNamePattern, Pattern(modelVersionPattern)),
-		"attempts", count)})
+		"attempts", count,
+		// Cloud model providers (plan Task 3): where the answer's text went
+		// and the cloud outcome code; optional (older workers send neither).
+		"egress", OneOf(config.EgressValues()...),
+		"cloud_outcome", OneOf(config.CloudOutcomes...))})
 	Register("query.failed", Schema{Fields: drained("error", errorCode, "attempts", count)})
 	Register("query.cancelled", Schema{Fields: drained("reason", OneOf("user_deactivated", "hospital_deactivated", "account_unusable"))})
 	Register("job.dead_lettered", Schema{Fields: fields(
@@ -488,4 +563,28 @@ func init() {
 	Register("audit.undisplayable_reported", Schema{Fields: fields(
 		"count", Int(1, 50), "first_id", Pattern(eventIDPattern), "last_id", Pattern(eventIDPattern)),
 		Required: []string{"count", "first_id", "last_id"}})
+}
+
+// emrTypeIDs are the connector type ids (gokit/emrtypes).
+func emrTypeIDs() []string {
+	var out []string
+	for _, t := range emrtypes.Types {
+		out = append(out, t.ID)
+	}
+	return out
+}
+
+// EMRConnectionKeys are the keys an emr.connection_changed payload may name
+// in fields_changed: the connection's own settings and every field a
+// connector type declares (gokit/emrtypes). Keys, never values.
+func EMRConnectionKeys() []string {
+	out := []string{"source_label", "base_url", "poll_seconds", "private_network", "private_cidrs"}
+	for _, t := range emrtypes.Types {
+		for _, f := range t.Fields {
+			if !slices.Contains(out, f.Key) {
+				out = append(out, f.Key)
+			}
+		}
+	}
+	return out
 }

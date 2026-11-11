@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 )
 
 // Closed payload schemas for the facts intelligence hands core (spec §10.2:
@@ -57,6 +58,13 @@ var (
 	}()
 )
 
+// Cloud model providers (plan Task 3, design §8, §11): where an answer's
+// text went and the cloud call's outcome code.
+var (
+	egressValues  = setOf(config.EgressValues())
+	cloudOutcomes = setOf(config.CloudOutcomes)
+)
+
 // fieldCheck checks one payload value.
 type fieldCheck func(v any) bool
 
@@ -87,6 +95,10 @@ var jobFactSchemas = map[string]struct {
 		"chunk_ids":      stringList(maxChunkIDs, chunkIDPattern),
 		"model_versions": stringMap(maxModelVersions, modelNamePattern, modelVersionPattern),
 		"attempts":       integer,
+		// Optional, so a fact from a worker without the cloud path stays
+		// valid (A16).
+		"egress":        inSet(egressValues),
+		"cloud_outcome": inSet(cloudOutcomes),
 	}, required: []string{"decision", "attempts"}}, "completed", "", "", ""},
 	"query.failed": {factSchema{fields: map[string]fieldCheck{
 		"error":    inSet(errorCodes),
@@ -137,6 +149,14 @@ func (s factSchema) check(payload map[string]any, queryID uuid.UUID) bool {
 		}
 	}
 	return true
+}
+
+func setOf(list []string) map[string]bool {
+	m := make(map[string]bool, len(list))
+	for _, s := range list {
+		m[s] = true
+	}
+	return m
 }
 
 func inSet(set map[string]bool) fieldCheck {

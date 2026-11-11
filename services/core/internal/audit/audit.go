@@ -23,7 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/logx"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 )
 
 // Event is one audit entry. ActorID and HospitalID are uuids, or "" for

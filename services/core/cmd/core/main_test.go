@@ -142,3 +142,17 @@ func TestTelemetryWarnings(t *testing.T) {
 		}
 	}
 }
+
+// The emr service's login (EMR_DB_PASSWORD; user emr_app by default) is a
+// member of mhai_emr_app only (00020).
+func TestLoginRequestsEMR(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	reqs, err := loginRequests(env(map[string]string{"EMR_DB_PASSWORD": "test-only-emr-db-password"}))
+	if err != nil || len(reqs) != 1 || reqs[0].user != "emr_app" || reqs[0].role != "mhai_emr_app" {
+		t.Fatalf("emr: %+v %v", reqs, err)
+	}
+	if _, err := loginRequests(env(map[string]string{"EMR_DB_PASSWORD": "changemeReplaceWithLettersAndDigits"})); err == nil ||
+		!strings.Contains(err.Error(), "EMR_DB_PASSWORD") {
+		t.Fatalf("placeholder: %v", err)
+	}
+}

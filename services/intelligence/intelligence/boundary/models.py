@@ -55,6 +55,7 @@ from intelligence.boundary.config import ConfigError, WorkerSettings
 
 if TYPE_CHECKING:
     from intelligence.agents.orchestrator import DynamicOrchestratorAgent
+    from intelligence.boundary.cloud.client import CloudCall
     from intelligence.knowledge_base.kb_builder import KBChunk
 
 log = logging.getLogger("intelligence.boundary.models")
@@ -106,6 +107,15 @@ class Generation:
     patient_id: str | None = field(default=None, repr=False)
     # The client's per-job state for verify() (the orchestrator it built).
     handle: Any = field(default=None, repr=False, compare=False)
+    # The cloud route (plan Task 9): versions this generation adds to the
+    # decision's model_versions (cca, cca_route; none on a failure), where
+    # its text went (vocab.EGRESS), the outcome (vocab.OUTCOMES; None on
+    # the local path) and the provider's reported tokens.
+    versions: Mapping[str, str] = field(default_factory=dict)
+    egress: str = "none"
+    cloud_outcome: str | None = None
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 @dataclass(frozen=True)
@@ -142,6 +152,8 @@ class ModelClient(Protocol):
         patient_context: Mapping[str, Any],
         patient_id: str | None,
         chunks: Sequence[KBChunk],
+        *,
+        call: CloudCall | None = None,
     ) -> Generation: ...
 
     def verify(self, generation: Generation) -> Verification: ...
@@ -182,6 +194,66 @@ def _clean_versions(versions: Mapping[str, Any]) -> dict[str, str]:
 
 def _number(v: Any) -> float | None:
     return float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+
+
+def _verify_with(orch: Any, generation: Generation) -> Verification:
+    """Local verification (NLI and HGA) of an available generation, with
+    the question's own thresholds, as process_query does. The local and the
+    cloud client both use it, so a cloud answer is verified exactly as a
+    local one (design section 9)."""
+    hga = getattr(orch, "hga", None)
+    if hga is None:
+        return _escalated(("HGA",))
+    try:
+        classified = orch.classifier.classify(generation.question)
+        t = orch.threshold_manager.get_thresholds(classified)
+        r = hga.verify(
+            response_text=generation.response,
+            patient_id=generation.patient_id,
+            pass_threshold=t.trust_pass,
+            escalate_threshold=t.trust_escalate,
+            critical_penalty=t.critical_flag_penalty,
+            warning_penalty=t.warning_flag_penalty,
+        )
+        trust = _number(r.get("trust_score"))
+        if trust is None:
+            raise TypeError("no trust score")
+    except Exception as e:
+        log.warning("model stage failed agent=HGA error=%s", type(e).__name__)
+        return _escalated(("HGA",))
+    decision = str(r.get("decision", "")).upper()
+    if decision not in DECISIONS:
+        decision = "ESCALATE"
+    scores = {
+        k: s
+        for k, s in (
+            ("nli", _number(r.get("nli_score"))),
+            ("coherence", _number(r.get("coherence_score"))),
+            ("numerical", _number(r.get("numerical_score"))),
+            ("se", _number(r.get("semantic_entropy_score"))),
+        )
+        if s is not None
+    }
+    weights = {
+        str(k): float(w)
+        for k, w in (r.get("weights") or {}).items()
+        if _number(w) is not None and _SAFE_KEY.fullmatch(str(k))
+    }
+    flags = tuple(
+        (str(f.get("type", ""))[:32], str(f.get("severity", ""))[:16])
+        for f in r.get("flags") or ()
+        if isinstance(f, dict)
+    )
+    return Verification(
+        decision=decision,
+        trust_score=trust,
+        verified=True,
+        degraded=False,
+        scores=scores,
+        flag_penalty=_number(r.get("flag_penalty")),
+        weights=weights,
+        flags=flags,
+    )
 
 
 # --- the orchestrator -------------------------------------------------------------
@@ -227,6 +299,8 @@ class OrchestratorModelClient:
         patient_context: Mapping[str, Any],
         patient_id: str | None,
         chunks: Sequence[KBChunk],
+        *,
+        call: CloudCall | None = None,
     ) -> Generation:
         try:
             # Building loads the models: a failure here escalates like any
@@ -279,60 +353,7 @@ class OrchestratorModelClient:
     def verify(self, generation: Generation) -> Verification:
         if not generation.available:
             return _escalated(generation.failed_agents or ("CCA",))
-        orch = generation.handle
-        hga = getattr(orch, "hga", None)
-        if hga is None:
-            return _escalated(("HGA",))
-        try:
-            classified = orch.classifier.classify(generation.question)
-            t = orch.threshold_manager.get_thresholds(classified)
-            r = hga.verify(
-                response_text=generation.response,
-                patient_id=generation.patient_id,
-                pass_threshold=t.trust_pass,
-                escalate_threshold=t.trust_escalate,
-                critical_penalty=t.critical_flag_penalty,
-                warning_penalty=t.warning_flag_penalty,
-            )
-            trust = _number(r.get("trust_score"))
-            if trust is None:
-                raise TypeError("no trust score")
-        except Exception as e:
-            log.warning("model stage failed agent=HGA error=%s", type(e).__name__)
-            return _escalated(("HGA",))
-        decision = str(r.get("decision", "")).upper()
-        if decision not in DECISIONS:
-            decision = "ESCALATE"
-        scores = {
-            k: s
-            for k, s in (
-                ("nli", _number(r.get("nli_score"))),
-                ("coherence", _number(r.get("coherence_score"))),
-                ("numerical", _number(r.get("numerical_score"))),
-                ("se", _number(r.get("semantic_entropy_score"))),
-            )
-            if s is not None
-        }
-        weights = {
-            str(k): float(w)
-            for k, w in (r.get("weights") or {}).items()
-            if _number(w) is not None and _SAFE_KEY.fullmatch(str(k))
-        }
-        flags = tuple(
-            (str(f.get("type", ""))[:32], str(f.get("severity", ""))[:16])
-            for f in r.get("flags") or ()
-            if isinstance(f, dict)
-        )
-        return Verification(
-            decision=decision,
-            trust_score=trust,
-            verified=True,
-            degraded=False,
-            scores=scores,
-            flag_penalty=_number(r.get("flag_penalty")),
-            weights=weights,
-            flags=flags,
-        )
+        return _verify_with(generation.handle, generation)
 
     def model_versions(self) -> dict[str, str]:
         """The legacy entries overlaid by the verified pinned roles' strings."""
@@ -403,6 +424,17 @@ def default_orchestrator(
     the Ollama generator are shared: they hold no per-request state. Loads
     the models on first use, on the job's thread. pinned gives what the
     worker verified (None until then); pinned_roles are the roles it needs."""
+    source: PinnedSource = pinned if pinned is not None else (lambda: None)
+    build, versions = local_parts(source, pinned_roles)
+    return OrchestratorModelClient(build, versions=versions, pinned=source)
+
+
+def local_parts(
+    pinned: PinnedSource | None = None, pinned_roles: Sequence[str] = ()
+) -> tuple[Builder, dict[str, str]]:
+    """default_orchestrator's builder and versions, for the cloud clients
+    (plan Task 9): they retrieve and verify with the same local models.
+    pinned and pinned_roles as for default_orchestrator."""
     pinned_nli = "nli" in pinned_roles
     if pinned_nli:
         set_hub_offline()  # before the imports below can import transformers
@@ -438,15 +470,11 @@ def default_orchestrator(
         cca = RAGClinicalContextAgent(retriever, generator=generator)
         return DynamicOrchestratorAgent(rag_cca=cca, hga=hga)
 
-    return OrchestratorModelClient(
-        build,
-        versions={
-            "cca": generator.name,
-            "dense": str(cfg.DENSE_MODEL),
-            "nli": str(cfg.NLI_MODEL),
-        },
-        pinned=source,
-    )
+    return build, {
+        "cca": generator.name,
+        "dense": str(cfg.DENSE_MODEL),
+        "nli": str(cfg.NLI_MODEL),
+    }
 
 
 # --- the stub -----------------------------------------------------------------------
@@ -513,6 +541,8 @@ class StubModelClient:
         patient_context: Mapping[str, Any],
         patient_id: str | None,
         chunks: Sequence[KBChunk],
+        *,
+        call: CloudCall | None = None,
     ) -> Generation:
         self._enter("generate")
         ids = tuple(c.chunk_id for c in chunks if _CHUNK_ID.fullmatch(c.chunk_id))
@@ -561,3 +591,163 @@ def build_model_client(settings: WorkerSettings, pinned: PinnedSource | None = N
     if settings.model_client == "orchestrator":
         return default_orchestrator(pinned, settings.model_roles)
     raise ConfigError("INTELLIGENCE_MODEL_CLIENT must be orchestrator or stub")
+
+
+# --- the stub's local parts, for the cloud fake (plan Task 10) -------------------------
+
+
+class _KeywordRetriever:
+    """retrieve() over one job's chunks by shared words: no model, no
+    download. Only what chunk_visible_to allows for patient_id."""
+
+    def __init__(self, chunks: Sequence[KBChunk]) -> None:
+        self._chunks = list(chunks)
+
+    def retrieve(self, query: str, top_k: int = 5, patient_id: str | None = None) -> list[Any]:
+        from intelligence.knowledge_base.kb_builder import RetrievalResult, chunk_visible_to
+
+        words = set(str(query).lower().split())
+        visible = [c for c in self._chunks if chunk_visible_to(c, patient_id)]
+        scored = sorted(
+            ((len(words & set(c.content.lower().split())), i, c) for i, c in enumerate(visible)),
+            key=lambda t: (-t[0], t[1]),
+        )
+        return [
+            RetrievalResult(chunk=c, score=float(s), retrieval_method="keyword", rank=r)
+            for r, (s, _, c) in enumerate(scored[:top_k])
+        ]
+
+
+class _StubCCA:
+    def __init__(self, chunks: Sequence[KBChunk]) -> None:
+        self.retriever = _KeywordRetriever(chunks)
+
+    def generate_with_rag(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the stub's parts never generate locally")
+
+
+class _StubHGA:
+    """The stub client's fixed verification, as an HGA."""
+
+    def verify(self, response_text: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "trust_score": 0.9,
+            "decision": "pass",
+            "nli_score": 0.9,
+            "coherence_score": 1.0,
+            "numerical_score": 0.85,
+            "semantic_entropy_score": 0.7,
+            "flag_penalty": 0.0,
+            "flags": [],
+            "weights": {"alpha": 0.35, "beta": 0.25, "gamma": 0.2, "delta": 0.2},
+        }
+
+
+def stub_parts() -> tuple[Builder, dict[str, str]]:
+    """A builder whose orchestrator has a keyword retriever over the job's
+    chunks and an HGA giving the stub's fixed verification (development
+    only, with the stub client; and the cloud-fake tests)."""
+
+    def build(chunks: Sequence[KBChunk]) -> DynamicOrchestratorAgent:
+        from intelligence.agents.orchestrator import DynamicOrchestratorAgent
+
+        return DynamicOrchestratorAgent(rag_cca=_StubCCA(chunks), hga=_StubHGA())
+
+    return build, {"dense": "stub", "nli": "stub"}
+
+
+# --- the router (plan Task 10) -----------------------------------------------------------
+
+
+class _Unconfigured:
+    """A cloud route whose provider this worker hasn't enabled (core and the
+    worker's settings disagree): masks with the local masker, and every
+    generation escalates as unconfigured, logged and counted. Nothing is
+    sent, and nothing runs locally in its place."""
+
+    def __init__(self, local: ModelClient, provider: str) -> None:
+        self._local = local
+        self._provider = provider
+
+    def mask(self, text: str) -> str:
+        return self._local.mask(text)
+
+    def generate(
+        self,
+        question: str,
+        patient_context: Mapping[str, Any],
+        patient_id: str | None,
+        chunks: Sequence[KBChunk],
+        *,
+        call: CloudCall | None = None,
+    ) -> Generation:
+        from intelligence.boundary import telemetry
+
+        log.error("cloud.unconfigured provider=%s", self._provider)
+        telemetry.record_cloud_alert(self._provider, "unconfigured")
+        return Generation(failed_agents=("CCA",), available=False, cloud_outcome="unconfigured")
+
+    def verify(self, generation: Generation) -> Verification:
+        return _escalated(generation.failed_agents or ("CCA",))
+
+    def model_versions(self) -> dict[str, str]:
+        return {k: v for k, v in self._local.model_versions().items() if k != "cca"}
+
+
+class ModelRouter:
+    """The client for a job's route, decided by core and read from the
+    claimed row (never from the message). local is the local client; cloud
+    maps an enabled provider to its CloudModelClient."""
+
+    def __init__(self, local: ModelClient, cloud: Mapping[str, ModelClient]) -> None:
+        self.local = local
+        self._cloud = dict(cloud)
+
+    def client_for(self, route: str) -> tuple[ModelClient, str]:
+        """(the client, its provider), "local" for the local route. A cloud
+        route with no client here, or any route outside vocab.ROUTES, is
+        unconfigured."""
+        from intelligence.boundary.cloud.vocab import PROVIDERS, ROUTES
+
+        if route == "local":
+            return self.local, "local"
+        provider = route[len("cloud:") :] if route in ROUTES else "unknown"
+        client = self._cloud.get(provider) if provider in PROVIDERS else None
+        if client is None:
+            return _Unconfigured(self.local, provider), provider
+        return client, provider
+
+    def close(self) -> None:
+        """Close each cloud client (its shared transport) once."""
+        seen: set[int] = set()
+        for c in self._cloud.values():
+            transport = getattr(c, "transport", None)
+            if transport is None or id(transport) in seen:
+                continue
+            seen.add(id(transport))
+            try:
+                c.close()  # type: ignore[attr-defined]
+            except Exception as e:
+                log.warning("cloud client close failed error=%s", type(e).__name__)
+
+
+def build_model_router(settings: WorkerSettings, pinned: PinnedSource | None = None) -> ModelRouter:
+    """The local client INTELLIGENCE_MODEL_CLIENT names, and one cloud
+    client per enabled provider (none by default), retrieving and verifying
+    with the same local parts: the orchestrator's, or the stub's in
+    development. pinned gives the verified pinned models (None until
+    verified)."""
+    if not settings.cloud.providers:
+        return ModelRouter(build_model_client(settings, pinned), {})
+    from intelligence.boundary.cloud.client import build_cloud_clients
+
+    local: ModelClient
+    if settings.model_client == "orchestrator":
+        source: PinnedSource = pinned if pinned is not None else (lambda: None)
+        build, versions = local_parts(source, settings.model_roles)
+        local = OrchestratorModelClient(build, versions=versions, pinned=source)
+    else:
+        local = build_model_client(settings)  # the stub, development only
+        build, versions = stub_parts()
+    cloud = build_cloud_clients(settings.cloud, build, versions)
+    return ModelRouter(local, cloud)

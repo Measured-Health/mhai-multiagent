@@ -15,7 +15,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
 
 // received is one message the fake worker got, with what its checks said.
