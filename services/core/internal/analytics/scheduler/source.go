@@ -199,13 +199,16 @@ func (s DB) StoredKeys(ctx context.Context, since time.Time) (map[string]bool, e
 	return out, err
 }
 
-// ChangesDue lists the stored weeks newer than the newest evaluated one,
-// oldest first.
+// ChangesDue lists the stored weeks newer than the newest evaluated one
+// that start at or after the release epoch, oldest first: a first run
+// evaluates only weeks that close after the release (spec §18, 7c-3 item
+// 12), never a week stored from before it.
 func (s DB) ChangesDue(ctx context.Context) ([]calendar.Period, error) {
 	var out []calendar.Period
 	err := s.tx(ctx, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT period_from FROM analytics_snapshots
 			WHERE kind = 'week' AND period_from > coalesce((SELECT max(week_from) FROM analytics_change_runs), '-infinity'::date)
+			  AND (period_from::timestamp AT TIME ZONE 'UTC') >= (SELECT released_at FROM analytics_epoch)
 			ORDER BY period_from`)
 		if err != nil {
 			return err

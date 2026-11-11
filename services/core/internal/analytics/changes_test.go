@@ -62,11 +62,9 @@ func TestThresholdsAsDecided(t *testing.T) {
 		area      string
 		shareRows bool
 	}{
-		"questions":               {"questions", 10, 0.5, true, "rising", "falling", "use", false},
-		"active_clinicians":       {"active_clinicians", 10, 0.5, false, "rising", "falling", "use", false},
-		"questions_per_clinician": {"active_clinicians", 5, 0.5, true, "rising", "falling", "use", false},
-		"needs_review_share":      {"answers", 20, 0.15, false, "worse", "better", "quality", true},
-		"agreement_rate":          {"reviews", 20, 0.15, false, "better", "worse", "quality", true},
+		"questions":          {"questions", 10, 0.5, true, "rising", "falling", "use", false},
+		"needs_review_share": {"answers", 20, 0.15, false, "worse", "better", "quality", true},
+		"agreement_rate":     {"reviews", 20, 0.15, false, "better", "worse", "quality", true},
 	}
 	if len(Thresholds) != len(want) {
 		t.Fatalf("%d rows, want %d", len(Thresholds), len(want))
@@ -78,8 +76,12 @@ func TestThresholdsAsDecided(t *testing.T) {
 			t.Errorf("%+v, want %+v", th, w)
 		}
 	}
-	if _, ok := ThresholdOf("median_review_hours"); ok {
-		t.Error("median review time is flagged, though its minimum isn't stored")
+	// Ruling C9: distinct clinicians over a week against a month's, and a
+	// ratio over them, aren't like for like; not flagged.
+	for _, m := range []string{"median_review_hours", "active_clinicians", "questions_per_clinician"} {
+		if _, ok := ThresholdOf(m); ok {
+			t.Errorf("%s is flagged", m)
+		}
 	}
 }
 
@@ -109,12 +111,6 @@ func TestChangeNeedsBothSidesShown(t *testing.T) {
 		"share base hidden":   {hide(cur, func(r *Row) { r.Answers = hiddenCount; r.EscalateShare = smallgroup.Share(30, 40) }), prev, "needs_review_share"},
 		"share base under 20": {hide(cur, func(r *Row) { r.Answers = smallgroup.Count(19); r.EscalateShare = smallgroup.Share(15, 19) }), prev, "needs_review_share"},
 		"share hidden":        {hide(cur, func(r *Row) { r.EscalateShare = hiddenShare }), prev, "needs_review_share"},
-		// Questions per clinician: the clinicians, its base, hidden.
-		"ratio base hidden": {hide(cur, func(r *Row) { r.ActiveClinicians = hiddenCount; r.QuestionsPerClinician = RatioOf(9) }), prev, "questions_per_clinician"},
-		// A shown base under 5 can only be 0 (1 to 4 are hidden).
-		"ratio base under 5": {hide(cur, func(r *Row) { r.ActiveClinicians = smallgroup.Count(0); r.QuestionsPerClinician = RatioOf(9) }), prev, "questions_per_clinician"},
-		"ratio hidden":       {hide(cur, func(r *Row) { r.QuestionsPerClinician = Ratio{Number{Suppressed: true}} }), prev, "questions_per_clinician"},
-		"clinicians hidden":  {hide(cur, func(r *Row) { r.ActiveClinicians = hiddenCount }), hide(prev, func(r *Row) { r.ActiveClinicians = smallgroup.Count(30) }), "active_clinicians"},
 	}
 	for name, c := range cases {
 		w, m := pair(c.cur, c.prev)
@@ -162,7 +158,7 @@ func TestChangeUsesStoredCellsOnly(t *testing.T) {
 	w, m := pair(cur, prev)
 	for _, f := range Changes(chWeek, w, chMonth, m) {
 		switch f.Measure {
-		case "questions", "active_clinicians", "needs_review_share", "questions_per_clinician":
+		case "questions", "needs_review_share":
 			t.Errorf("flagged on a hidden value: %+v", f)
 		}
 	}
@@ -202,18 +198,14 @@ func TestPreviousIsOnePeriod(t *testing.T) {
 			t.Errorf("%v: %+v, want previous %s", c.week, got, c.want)
 		}
 	}
-	// Active clinicians are people, not a sum over days: compared as
-	// stored. 12 against 12 is no change, whatever the lengths.
-	cur, prev := steady(40, 12, 10, 30, 3.33), steady(56, 12, 10, 30, 4.67)
+	// Ruling C9: neither clinicians nor questions per clinician is
+	// compared, whatever the figures.
+	cur, prev := steady(40, 30, 10, 30, 9), steady(56, 12, 10, 30, 1)
 	w, m := pair(cur, prev)
-	if got := flagsOf(Changes(chWeek, w, chMonth, m), false, "active_clinicians"); len(got) != 0 {
-		t.Errorf("clinicians scaled per day: %+v", got)
-	}
-	// Questions per clinician: the month's ratio per day, two decimals:
-	// 4.67 × 10 / 28 = 1.67; 3.33 is up 99%.
-	got := flagsOf(Changes(chWeek, w, chMonth, m), false, "questions_per_clinician")
-	if len(got) != 1 || got[0].Previous.Text() != "1.67" || got[0].Current.Text() != "3.33" || got[0].Direction != "rising" {
-		t.Errorf("questions per clinician: %+v", got)
+	for _, f := range Changes(chWeek, w, chMonth, m) {
+		if f.Measure == "active_clinicians" || f.Measure == "questions_per_clinician" {
+			t.Errorf("flagged %+v", f)
+		}
 	}
 }
 
@@ -246,7 +238,7 @@ func TestSummaryWording(t *testing.T) {
 			t.Errorf("%q is over 200", f.Summary)
 		}
 	}
-	for _, m := range []string{"questions", "active_clinicians", "questions_per_clinician", "needs_review_share", "agreement_rate"} {
+	for _, m := range []string{"questions", "needs_review_share", "agreement_rate"} {
 		if !seen[m] {
 			t.Errorf("the fixture flags no %s: the wording isn't tested for it", m)
 		}
@@ -336,12 +328,12 @@ func mustMarshal(t *testing.T, v any) []byte {
 // median between 0 and 5 null), or the all cells with no median (F14).
 func TestChangeSeries(t *testing.T) {
 	rows := history(t, calendar.Month, day(2026, 6, 1), 3)
-	all, err := ChangeSeries(calendar.Month, rows, nil, "questions")
+	all, err := ChangeSeries(calendar.Month, rows, "00000000-0000-4000-8000-000000000001", nil, "questions")
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := marshal(t, all)
-	if m["hospital"] != nil || m["measure"] != "questions" {
+	if m["hospital"] != nil || m["measure"] != "questions" || m["change_id"] != "00000000-0000-4000-8000-000000000001" {
 		t.Fatalf("all: %v", m)
 	}
 	for _, p := range m["points"].([]any) {
@@ -350,14 +342,14 @@ func TestChangeSeries(t *testing.T) {
 			t.Errorf("all point %v", pt)
 		}
 	}
-	a, err := ChangeSeries(calendar.Month, rows, &hospA, "active_clinicians")
+	a, err := ChangeSeries(calendar.Month, rows, "00000000-0000-4000-8000-000000000002", &hospA, "questions")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range marshal(t, a)["points"].([]any) {
 		pt := p.(map[string]any)
-		// A's 6; the others shown: B's 12 (C hidden) → 12.
-		if pt["value"].(map[string]any)["value"] != float64(6) || pt["median"] != float64(12) {
+		// A's 12; the others shown: B's 24 (C hidden) → 24.
+		if pt["value"].(map[string]any)["value"] != float64(12) || pt["median"] != float64(24) {
 			t.Errorf("A point %v", pt)
 		}
 	}
@@ -368,12 +360,14 @@ func TestChangeSeries(t *testing.T) {
 		b.Hospitals[0].Row.Questions = smallgroup.Count(0)
 		b.Hospitals[2].Row.Questions = smallgroup.Count(5)
 		s := snap(t, b, p.Period)
-		got, _ := ChangeSeries(calendar.Month, []Snapshot{s}, &hospB, "questions")
+		got, _ := ChangeSeries(calendar.Month, []Snapshot{s}, "00000000-0000-4000-8000-000000000003", &hospB, "questions")
 		if pt := marshal(t, got)["points"].([]any)[0].(map[string]any); pt["median"] != nil {
 			t.Errorf("a count median of 2.5 sent: %v", pt)
 		}
 	}
-	if _, err := ChangeSeries(calendar.Month, rows, nil, "median_review_hours"); err == nil {
-		t.Error("a measure no change has")
+	for _, m := range []string{"median_review_hours", "active_clinicians", "questions_per_clinician"} {
+		if _, err := ChangeSeries(calendar.Month, rows, "00000000-0000-4000-8000-000000000004", nil, m); err == nil {
+			t.Errorf("%s: a measure no change has", m)
+		}
 	}
 }

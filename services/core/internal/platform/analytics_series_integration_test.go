@@ -118,8 +118,8 @@ func TestChangeSeries(t *testing.T) {
 	for k, n := range map[calendar.Kind]int{calendar.Week: 12, calendar.Month: 12, calendar.Quarter: 8} {
 		r := get(t, "/platform/analytics/changes/"+f.hospChange.String()+"/series?period="+string(k), tok)
 		ok(t, string(k), r)
-		top := requireKeys(t, "series", r.body, "measure", "hospital", "points")
-		if top["measure"] != "questions" || top["hospital"].(map[string]any)["id"] != a.ID {
+		top := requireKeys(t, "series", r.body, "change_id", "measure", "hospital", "points")
+		if top["change_id"] != f.hospChange.String() || top["measure"] != "questions" || top["hospital"].(map[string]any)["id"] != a.ID {
 			t.Errorf("%s: %v", k, top)
 		}
 		pts := list(t, "points", top["points"])
@@ -138,8 +138,8 @@ func TestChangeSeries(t *testing.T) {
 		}
 		r = get(t, "/platform/analytics/changes/"+f.allChng.String()+"/series?period="+string(k), tok)
 		ok(t, string(k)+" all", r)
-		top = requireKeys(t, "series", r.body, "measure", "hospital", "points")
-		if top["measure"] != "needs_review_share" || top["hospital"] != nil {
+		top = requireKeys(t, "series", r.body, "change_id", "measure", "hospital", "points")
+		if top["change_id"] != f.allChng.String() || top["measure"] != "needs_review_share" || top["hospital"] != nil {
 			t.Errorf("%s all: %v", k, top)
 		}
 		all := storedBody(t, latest)["all"].(map[string]any)

@@ -166,6 +166,9 @@ type (
 
 // SeriesOut is a series: {measure, hospital, points}.
 type SeriesOut struct {
+	// ChangeID is the change a change series is of; a hospital series has
+	// none (it keeps the two reply schemas mutually exclusive).
+	ChangeID *string       `json:"change_id,omitempty"`
 	Measure  string        `json:"measure"`
 	Hospital *Ref          `json:"hospital"`
 	Points   []SeriesPoint `json:"points"`

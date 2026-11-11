@@ -193,16 +193,18 @@ func TestAnalyticsChangesGrants(t *testing.T) {
 		"suppressed not false": {`{"value": 20, "suppressed": null}`, shownJSON},
 	} {
 		_, err := asJobExec(ctx, pool, `INSERT INTO analytics_changes (area, measure, direction, current, previous, summary,
-			opened_week, last_week) VALUES ('use', 'active_clinicians', 'rising', $1::jsonb, $2::jsonb, 'x', '2024-02-01', '2024-02-01')`, cols[0], cols[1])
+			opened_week, last_week) VALUES ('quality', 'needs_review_share', 'worse', $1::jsonb, $2::jsonb, 'x', '2024-02-01', '2024-02-01')`, cols[0], cols[1])
 		if pgCode(err) != checkViolation {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
 	for name, q := range map[string]string{
-		"serious":             `INSERT INTO analytics_changes (area, measure, direction, serious, current, previous, summary, opened_week, last_week) VALUES ('use', 'active_clinicians', 'rising', true, '` + shownJSON + `', '` + shownJSON + `', 'x', '2024-02-01', '2024-02-01')`,
-		"a quality direction": `INSERT INTO analytics_changes (area, measure, direction, current, previous, summary, opened_week, last_week) VALUES ('use', 'active_clinicians', 'worse', '` + shownJSON + `', '` + shownJSON + `', 'x', '2024-02-01', '2024-02-01')`,
-		"median review time":  `INSERT INTO analytics_changes (area, measure, direction, current, previous, summary, opened_week, last_week) VALUES ('quality', 'median_review_hours', 'worse', '` + shownJSON + `', '` + shownJSON + `', 'x', '2024-02-01', '2024-02-01')`,
-		"a summary over 200":  `INSERT INTO analytics_changes (area, measure, direction, current, previous, summary, opened_week, last_week) VALUES ('use', 'active_clinicians', 'rising', '` + shownJSON + `', '` + shownJSON + `', repeat('x', 201), '2024-02-01', '2024-02-01')`,
+		"serious":                `INSERT INTO analytics_changes (area, measure, direction, serious, current, previous, summary, opened_week, last_week) VALUES ('quality', 'needs_review_share', 'worse', true, '` + shownJSON + `', '` + shownJSON + `', 'x', '2024-02-01', '2024-02-01')`,
+		"a quality direction":    `INSERT INTO analytics_changes (area, measure, direction, current, previous, summary, opened_week, last_week) VALUES ('use', 'questions', 'worse', '` + shownJSON + `', '` + shownJSON + `', 'x', '2024-02-01', '2024-02-01')`,
+		"median review time":     `INSERT INTO analytics_changes (area, measure, direction, current, previous, summary, opened_week, last_week) VALUES ('quality', 'median_review_hours', 'worse', '` + shownJSON + `', '` + shownJSON + `', 'x', '2024-02-01', '2024-02-01')`,
+		"active clinicians (C9)": `INSERT INTO analytics_changes (area, measure, direction, current, previous, summary, opened_week, last_week) VALUES ('use', 'active_clinicians', 'rising', '` + shownJSON + `', '` + shownJSON + `', 'x', '2024-02-01', '2024-02-01')`,
+		"per clinician (C9)":     `INSERT INTO analytics_changes (area, measure, direction, current, previous, summary, opened_week, last_week) VALUES ('use', 'questions_per_clinician', 'rising', '` + shownJSON + `', '` + shownJSON + `', 'x', '2024-02-01', '2024-02-01')`,
+		"a summary over 200":     `INSERT INTO analytics_changes (area, measure, direction, current, previous, summary, opened_week, last_week) VALUES ('quality', 'needs_review_share', 'worse', '` + shownJSON + `', '` + shownJSON + `', repeat('x', 201), '2024-02-01', '2024-02-01')`,
 	} {
 		if _, err := asJobExec(ctx, pool, q); pgCode(err) != checkViolation && pgCode(err) != permissionDenied {
 			t.Errorf("%s: %v", name, err)
@@ -211,7 +213,7 @@ func TestAnalyticsChangesGrants(t *testing.T) {
 
 	// The routes' role: reads, and moves an open change's version only.
 	if _, err := asPlatform(ctx, pool, `INSERT INTO analytics_changes (area, measure, direction, current, previous, summary, opened_week, last_week)
-		VALUES ('use', 'active_clinicians', 'rising', '`+shownJSON+`', '`+shownJSON+`', 'x', '2024-02-01', '2024-02-01')`); pgCode(err) != permissionDenied {
+		VALUES ('quality', 'needs_review_share', 'worse', '`+shownJSON+`', '`+shownJSON+`', 'x', '2024-02-01', '2024-02-01')`); pgCode(err) != permissionDenied {
 		t.Errorf("platform inserts a change: %v", err)
 	}
 	if _, err := asPlatform(ctx, pool, `UPDATE analytics_changes SET current = '{"value": 1, "suppressed": false}' WHERE id = $1`, id); pgCode(err) != permissionDenied {
@@ -244,7 +246,7 @@ func TestAnalyticsChangesGrants(t *testing.T) {
 	}
 
 	// The note's backstop (core checks first): length and separators.
-	open := insertChange(t, pool, h, "active_clinicians", "rising")
+	open := insertChange(t, pool, h, "agreement_rate", "better")
 	for name, note := range map[string]string{
 		"U+2028":     "Synthetic\u2028note",
 		"U+2029":     "Synthetic\u2029note",

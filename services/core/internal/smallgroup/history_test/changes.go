@@ -51,11 +51,9 @@ type changeRule struct {
 }
 
 var changeRules = map[string]changeRule{
-	"questions":               {"use", "questions", "questions", 10, 0.5, false, true, 1, true, "rising", "falling"},
-	"active_clinicians":       {"use", "active_clinicians", "active_clinicians", 10, 0.5, false, false, 0, true, "rising", "falling"},
-	"questions_per_clinician": {"use", "questions_per_clinician", "active_clinicians", 5, 0.5, false, true, 2, false, "rising", "falling"},
-	"needs_review_share":      {"quality", "escalate_share", "answers", 20, 0.15, true, false, 4, false, "worse", "better"},
-	"agreement_rate":          {"quality", "agreement_rate", "reviews", 20, 0.15, true, false, 4, false, "better", "worse"},
+	"questions":          {"use", "questions", "questions", 10, 0.5, false, true, 1, true, "rising", "falling"},
+	"needs_review_share": {"quality", "escalate_share", "answers", 20, 0.15, true, false, 4, false, "worse", "better"},
+	"agreement_rate":     {"quality", "agreement_rate", "reviews", 20, 0.15, true, false, 4, false, "better", "worse"},
 }
 
 var numberRe = regexp.MustCompile(`[0-9]+(\.[0-9]+)?`)
@@ -282,7 +280,7 @@ func (p *Parser) checkChange(raw json.RawMessage, week, month calendar.Period, w
 // response of kind k for the change item (as the changes area sent it). A
 // series adds no equation: its points are stored cells.
 func (p *Parser) AddChangeSeries(raw []byte, k calendar.Kind, item json.RawMessage) error {
-	top, err := strictObject(raw, "measure", "hospital", "points")
+	top, err := strictObject(raw, "change_id", "measure", "hospital", "points")
 	if err != nil {
 		return err
 	}
@@ -297,6 +295,9 @@ func (p *Parser) AddChangeSeries(raw []byte, k calendar.Kind, item json.RawMessa
 	rule, ok := changeRules[measure]
 	if !ok || measure != want {
 		return fmt.Errorf("series measure %q for a change of %q", measure, want)
+	}
+	if !jsonEqual(top["change_id"], it["id"]) {
+		return fmt.Errorf("series change_id %s for change %s", top["change_id"], it["id"])
 	}
 	if !jsonEqual(top["hospital"], it["hospital"]) {
 		return fmt.Errorf("series hospital %s for a change of %s", top["hospital"], it["hospital"])

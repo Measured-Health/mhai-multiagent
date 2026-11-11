@@ -55,20 +55,17 @@ type Threshold struct {
 // 20 and 15 points). The product owner may change it: this table is the
 // one place.
 //
-// Two calls made while building (spec §18, 7c-3): active clinicians are a
-// distinct count of people, not a sum over days, so the month's value is
-// compared as it is, not per day (per day it would flag a rise every
-// week); questions per clinician scales the month's questions per day, as
-// questions are. median_review_hours has no row: its minimum (10 decided
-// on both sides) rests on a count no stored body holds, and a change is
-// computed from stored, shown cells only.
+// Ruling C9 (the 7c-3 review): active clinicians and questions per
+// clinician have no row. A week's distinct clinicians can't be compared
+// fairly with a whole month's, and the ratio mixes the two windows: both
+// would flag nearly every week where clinicians rotate shifts (anti-goal
+// 1). They come back as like-for-like comparisons (TODO.md).
+// median_review_hours has no row: its minimum (10 decided on both sides)
+// rests on a count no stored body holds, and a change is computed from
+// stored, shown cells only.
 var Thresholds = []Threshold{
 	{Measure: "questions", Label: "Questions", Area: "use", Shape: ShapeCount, Base: "questions", MinBase: 10, MinChange: 0.5,
 		PerDay: true, Up: "rising", Down: "falling"},
-	{Measure: "active_clinicians", Label: "Active clinicians", Area: "use", Shape: ShapeCount, Base: "active_clinicians", MinBase: 10,
-		MinChange: 0.5, Up: "rising", Down: "falling"},
-	{Measure: "questions_per_clinician", Label: "Questions per clinician", Area: "use", Shape: ShapeRatio, Base: "active_clinicians",
-		MinBase: 5, MinChange: 0.5, PerDay: true, Up: "rising", Down: "falling"},
 	{Measure: "needs_review_share", Label: "Needs-review share", Area: "quality", Shape: ShapeShare, Base: "answers", MinBase: 20,
 		MinChange: 0.15, Up: "worse", Down: "better"},
 	{Measure: "agreement_rate", Label: "Agreement rate", Area: "quality", Shape: ShapeShare, Base: "reviews", MinBase: 20,
@@ -513,7 +510,7 @@ func measureCell(r Row, measure string) (cell any, shown *float64, hidden, nothi
 	}
 }
 
-// ChangeSeries is GET /platform/analytics/changes/{id}/series for a change
+// ChangeSeries is GET /platform/analytics/changes/{id}/series for change id
 // of measure: for a hospital's change (ref set), the hospital's stored cell
 // for each stored period of the latest TrendLength of kind k, oldest first,
 // with the median of the other named hospitals' shown values; for a change
@@ -521,13 +518,13 @@ func measureCell(r Row, measure string) (cell any, shown *float64, hidden, nothi
 // stored unavailable or unreadable is hidden whole; one that doesn't list
 // the hospital has nothing to show. A count median strictly between 0 and 5
 // is sent null, as a count median is hidden.
-func ChangeSeries(k calendar.Kind, rows []Snapshot, ref *Ref, measure string) (SeriesOut, error) {
+func ChangeSeries(k calendar.Kind, rows []Snapshot, id string, ref *Ref, measure string) (SeriesOut, error) {
 	if _, ok := ThresholdOf(measure); !ok {
 		return SeriesOut{}, ErrMeasure
 	}
 	_, _, hidden, nothing, digits, isCount := measureCell(Row{}, measure)
 	win, _ := window(k, rows)
-	out := SeriesOut{Measure: measure, Hospital: ref, Points: make([]SeriesPoint, 0, len(win))}
+	out := SeriesOut{ChangeID: &id, Measure: measure, Hospital: ref, Points: make([]SeriesPoint, 0, len(win))}
 	for _, s := range win {
 		pt := SeriesPoint{Start: Stamp(s.period.From), Value: hidden}
 		if s.body != nil {

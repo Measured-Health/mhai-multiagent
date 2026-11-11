@@ -55,8 +55,9 @@ CREATE TABLE analytics_changes (
     id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     hospital_id uuid        REFERENCES hospitals (id),
     area        text        NOT NULL CHECK (area IN ('use', 'quality')),
-    measure     text        NOT NULL CHECK (measure IN ('questions', 'active_clinicians', 'questions_per_clinician',
-                                                        'needs_review_share', 'agreement_rate')),
+    -- Ruling C9: no active_clinicians or questions_per_clinician (a week's
+    -- distinct clinicians aren't comparable with a month's).
+    measure     text        NOT NULL CHECK (measure IN ('questions', 'needs_review_share', 'agreement_rate')),
     direction   text        NOT NULL CHECK (direction IN ('rising', 'falling', 'worse', 'better')),
     -- Serious (Critical-type) changes come from patient alerts (§3).
     serious     boolean     NOT NULL DEFAULT false CHECK (NOT serious),
@@ -67,7 +68,7 @@ CREATE TABLE analytics_changes (
     last_week   date        NOT NULL,
     closed_week date,
     version     integer     NOT NULL DEFAULT 1 CHECK (version >= 1),
-    CHECK ((area = 'use') = (measure IN ('questions', 'active_clinicians', 'questions_per_clinician'))),
+    CHECK ((area = 'use') = (measure = 'questions')),
     CHECK ((direction IN ('rising', 'falling')) = (area = 'use')),
     -- current and previous are shown values as the routes send them:
     -- {"value": n >= 0, "suppressed": false}, nothing else.

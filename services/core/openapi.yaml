@@ -1306,14 +1306,13 @@ paths:
         week's end), from the two stored snapshots' shown cells only: a
         change is flagged only when both sides, and the figures its minimum
         rests on, are shown. `current` is the week's shown value;
-        `previous` the month's (for questions and questions per clinician,
-        per day scaled to the week's length, one decimal or the ratio's
-        two). Thresholds: questions and active clinicians at least 10 on
-        both sides and a change of at least 50%; questions per clinician
-        with at least 5 active clinicians on both sides and a change of at
-        least 50%; the needs-review share and the agreement rate with at
-        least 20 answers or reviews on both sides and a change of at least
-        15 points. A change keeps its `id` while each week flags it again
+        `previous` the month's (for questions, per day scaled to the
+        week's length, one decimal). Thresholds: questions at least 10 on
+        both sides and a change of at least 50%; the needs-review share and
+        the agreement rate with at least 20 answers or reviews on both sides
+        and a change of at least 15 points. Active clinicians and questions
+        per clinician are not compared (ruling C9: a week's distinct
+        clinicians aren't comparable with a month's). A change keeps its `id` while each week flags it again
         and leaves the list when one doesn't. `summary` holds the two values
         and no hospital name; `serious` is always false (no patient alerts
         yet). Items not followed up come first, each group by size of
@@ -1469,11 +1468,12 @@ paths:
         null or absent is no note. Every write moves the change's `version`
         on and writes one audit entry in the same transaction
         (`analytics.followed_up` with whether there is a note, or
-        `analytics.follow_up_edited`), never the note itself. Answers the
-        change as the changes list sends it.
+        `analytics.follow_up_edited`), never the note itself. Ten writes a
+        minute per session, `PUT` and `DELETE` together, then 429
+        `rate_limited`. Answers the change as the changes list sends it.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, rate_limited, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
         - $ref: "#/components/parameters/ClientIP"
@@ -1501,6 +1501,7 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
     delete:
@@ -1513,10 +1514,12 @@ paths:
         follow-up, whoever wrote it. A stale `version`, a closed change or
         no follow-up to undo is 409 `conflict`; an unknown id 404
         `not_found`. One `analytics.follow_up_undone` audit entry in the
-        same transaction. Answers the change as the changes list sends it.
+        same transaction. Ten writes a minute per session, shared with the
+        `PUT`, then 429 `rate_limited`. Answers the change as the changes
+        list sends it.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, rate_limited, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
         - $ref: "#/components/parameters/ClientIP"
@@ -1543,6 +1546,7 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
@@ -3080,7 +3084,7 @@ components:
             - $ref: "#/components/schemas/PersonRef"
           nullable: true
         area: { type: string, enum: [use, quality] }
-        measure: { type: string, enum: [questions, active_clinicians, questions_per_clinician, needs_review_share, agreement_rate] }
+        measure: { type: string, enum: [questions, needs_review_share, agreement_rate] }
         direction: { type: string, enum: [rising, falling, worse, better] }
         serious: { type: boolean, enum: [false] }
         previous: { $ref: "#/components/schemas/AnalyticsShownValue" }
@@ -3110,11 +3114,12 @@ components:
           items: { $ref: "#/components/schemas/AnalyticsChange" }
     AnalyticsChangeSeriesOut:
       type: object
-      description: Plan 7c spec §7.2, a change's series (New). `hospital` and every `median` are null for a change across all hospitals.
-      required: [measure, hospital, points]
+      description: Plan 7c spec §7.2, a change's series (New). `change_id` is the change's id (the hospital series has none, so a reply matches one schema only). `hospital` and every `median` are null for a change across all hospitals.
+      required: [change_id, measure, hospital, points]
       additionalProperties: false
       properties:
-        measure: { type: string, enum: [questions, active_clinicians, questions_per_clinician, needs_review_share, agreement_rate] }
+        change_id: { type: string, format: uuid }
+        measure: { type: string, enum: [questions, needs_review_share, agreement_rate] }
         hospital:
           allOf:
             - $ref: "#/components/schemas/PersonRef"
@@ -3128,10 +3133,9 @@ components:
             properties:
               start: { type: string, format: date-time }
               value:
-                description: "`GuardedCount` for `questions` and `active_clinicians`, `GuardedNumber` for `questions_per_clinician` (two decimals), `GuardedShare` for the shares (four)."
+                description: "`GuardedCount` for `questions`, `GuardedShare` for the shares (four decimals)."
                 oneOf:
                   - $ref: "#/components/schemas/GuardedCount"
-                  - $ref: "#/components/schemas/GuardedNumber"
                   - $ref: "#/components/schemas/GuardedShare"
               median: { type: number, nullable: true }
     GuardrailsOut:

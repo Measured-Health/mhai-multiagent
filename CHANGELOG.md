@@ -15,10 +15,13 @@ All notable changes to this project are documented here. The format follows
   and adds the three follow-up actions to `mhai_platform`'s audit append
   policy (Down restores 00020's). Once a week, after the week's snapshot
   is stored, the scheduler compares the week with the month that finished
-  before it from the two stored snapshots' shown cells only (Q3: counts at
-  least 10 on both sides and a 50% change; questions per clinician with 5
-  active clinicians; the needs-review share and agreement rate with 20 on
-  both sides and 15 points). `GET /platform/analytics` now serves
+  before it from the two stored snapshots' shown cells only (Q3: questions
+  at least 10 on both sides and a 50% change; the needs-review share and
+  agreement rate with 20 on both sides and 15 points). Active clinicians
+  and questions per clinician are not compared (ruling C9: a week's
+  distinct clinicians aren't comparable with a month's); they come back
+  later as like-for-like comparisons. Follow-up writes are limited to ten
+  a minute per session (429 `rate_limited`). `GET /platform/analytics` now serves
   them in a new property, `what_changed {updated_at, window, items}`
   (`changes` stays `{unavailable: true}`: widening it would not be
   additive); `GET

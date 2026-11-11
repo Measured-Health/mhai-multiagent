@@ -98,6 +98,10 @@ func TestEvaluateChangesDB(t *testing.T) {
 	for i, q := range []int64{40, 41, 15, 40} {
 		store(weeks[i], q)
 	}
+	// The release before these periods: they are evaluated.
+	if _, err := sup.Exec(ctx, `UPDATE analytics_epoch SET released_at = '2024-12-01'`); err != nil {
+		t.Fatal(err)
+	}
 	src := scheduler.DB{Pool: login}
 	b := scheduler.Builder{Src: src}
 	due, err := src.ChangesDue(ctx)
@@ -158,5 +162,44 @@ func TestEvaluateChangesDB(t *testing.T) {
 	var runs int
 	if err := sup.QueryRow(ctx, `SELECT count(*) FROM analytics_change_runs WHERE month_from = '2025-01-01'`).Scan(&runs); err != nil || runs != 4 {
 		t.Errorf("%d runs: %v", runs, err)
+	}
+}
+
+// A first run (no run stored) evaluates only weeks that start at or after
+// the release epoch (spec §18, 7c-3 item 12): a stored week from before it,
+// such as the smoke test's synthetic 2020 snapshots, is never due.
+func TestChangesDueFromEpoch(t *testing.T) {
+	pg := testutil.StartPostgres(t)
+	ctx := context.Background()
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+		t.Fatal(err)
+	}
+	sup, err := db.Open(ctx, pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sup.Close()
+	login, err := testutil.AppLogin(ctx, pg, sup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer login.Close()
+	if _, err := sup.Exec(ctx, `UPDATE analytics_epoch SET released_at = '2025-02-10T12:00:00Z'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range calendar.Children(calendar.Of(calendar.Month, time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC))) {
+		from, to := analytics.Dates(w)
+		if _, err := sup.Exec(ctx, `INSERT INTO analytics_snapshots (kind, period_from, period_to, state) VALUES ('week', $1::date, $2::date, 'unavailable')`,
+			from, to); err != nil {
+			t.Fatal(err)
+		}
+	}
+	due, err := scheduler.DB{Pool: login}.ChangesDue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1–7 and 8–14 February started before the epoch (10 Feb, 12:00).
+	if len(due) != 2 || due[0].From.Day() != 15 || due[1].From.Day() != 22 {
+		t.Errorf("due %v, want the weeks of 15 and 22 February only", due)
 	}
 }

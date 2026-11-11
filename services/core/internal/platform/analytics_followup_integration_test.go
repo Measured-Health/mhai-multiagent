@@ -77,8 +77,8 @@ func seedChanges(t *testing.T, hospital uuid.UUID, name string) *changesFixture 
 		"Questions up: 14.0 to 40 a week", "2090-03-15", "2090-03-22", nil)
 	f.allChng = insert(nil, "quality", "needs_review_share", "worse", `{"value": 0.7500, "suppressed": false}`, `{"value": 0.2500, "suppressed": false}`,
 		"Needs-review share worse: 25.00% to 75.00%", "2090-03-22", "2090-03-22", nil)
-	f.closed = insert(hospital, "use", "active_clinicians", "falling", `{"value": 10, "suppressed": false}`, `{"value": 30, "suppressed": false}`,
-		"Active clinicians down: 30 to 10", "2090-03-08", "2090-03-08", "2090-03-15")
+	f.closed = insert(hospital, "quality", "agreement_rate", "worse", `{"value": 0.2500, "suppressed": false}`, `{"value": 0.7500, "suppressed": false}`,
+		"Agreement rate worse: 75.00% to 25.00%", "2090-03-08", "2090-03-08", "2090-03-15")
 	return f
 }
 
@@ -457,4 +457,30 @@ func TestByYouPerCaller(t *testing.T) {
 	if items[f.allChng.String()]["follow_up"].(map[string]any)["by_you"] != true {
 		t.Error("by_you not set for the author")
 	}
+}
+
+// Ten follow-up writes a minute per session, PUT and DELETE together, then
+// 429 rate_limited, as the job retry and model policy writes; a refused
+// body isn't counted, and another session has its own minute.
+func TestFollowUpRateLimited(t *testing.T) {
+	f := seedChanges(t, uuid.Nil, "")
+	u := platformAdmin(t)
+	tok := mint(t, u)
+	problem(t, "a bad body first", putFollow(t, tok, f.hospChange, `{"note":"x"}`), 422, "validation_failed")
+	for v := 1; v <= platform.FollowUpWritesPerMinute; v++ {
+		var r resp
+		if v%2 == 1 {
+			r = putFollow(t, tok, f.hospChange, vbody(v, ""))
+		} else {
+			r = delFollow(t, tok, f.hospChange, vbody(v, ""))
+		}
+		ok(t, fmt.Sprintf("write %d", v), r)
+	}
+	v := platform.FollowUpWritesPerMinute + 1
+	problem(t, "one more PUT", putFollow(t, tok, f.hospChange, vbody(v, "")), 429, "rate_limited")
+	problem(t, "one more DELETE", delFollow(t, tok, f.hospChange, vbody(v, "")), 429, "rate_limited")
+	if changeVersion(t, f.hospChange) != v {
+		t.Errorf("a refused write moved the version to %d", changeVersion(t, f.hospChange))
+	}
+	ok(t, "another session", putFollow(t, mint(t, u), f.hospChange, vbody(v, "")))
 }

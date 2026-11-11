@@ -349,7 +349,7 @@ func (w *world) analytics(t *testing.T, k calendar.Kind) []response {
 		if err != nil {
 			t.Fatalf("change %s: %v", c.ID, err)
 		}
-		s, err := analytics.ChangeSeries(k, rows, c.Hospital, c.Measure)
+		s, err := analytics.ChangeSeries(k, rows, c.ID, c.Hospital, c.Measure)
 		if err != nil {
 			t.Fatalf("change series %s: %v", c.Measure, err)
 		}

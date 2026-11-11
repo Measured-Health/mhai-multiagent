@@ -97,7 +97,7 @@ func (d Deps) changeSeries(w http.ResponseWriter, r *http.Request) {
 		d.analyticsFail(w, r, "change series")
 		return
 	}
-	out, err := analytics.ChangeSeries(k, rows, c.Hospital, c.Measure)
+	out, err := analytics.ChangeSeries(k, rows, c.ID, c.Hospital, c.Measure)
 	if err != nil {
 		d.analyticsFail(w, r, "change series")
 		return

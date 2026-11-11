@@ -19,8 +19,8 @@ import (
 
 // ChangeSource is where What changed is read and written: DB, or a fake.
 type ChangeSource interface {
-	// ChangesDue is every stored week newer than the newest evaluated one,
-	// oldest first.
+	// ChangesDue is every stored week newer than the newest evaluated one
+	// that starts at or after the release epoch, oldest first.
 	ChangesDue(ctx context.Context) ([]calendar.Period, error)
 	// ApplyChanges records week w's evaluation against month m and opens,
 	// updates and closes the open changes to match flags, in one

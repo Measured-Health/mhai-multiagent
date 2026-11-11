@@ -155,7 +155,7 @@ func (c *changeCase) series(t *testing.T, id string) ([]byte, []byte) {
 		if row.ID != id {
 			continue
 		}
-		s, err := analytics.ChangeSeries(calendar.Week, c.weekRow, row.Hospital, row.Measure)
+		s, err := analytics.ChangeSeries(calendar.Week, c.weekRow, row.ID, row.Hospital, row.Measure)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -170,8 +170,8 @@ func (c *changeCase) series(t *testing.T, id string) ([]byte, []byte) {
 
 func TestChangeCheckAcceptsTheRoutes(t *testing.T) {
 	c := newChangeCase(t, nil)
-	if len(c.items) != 10 {
-		t.Fatalf("%d changes flagged, want five each for all and A: %s", len(c.items), c.area)
+	if len(c.items) != 6 {
+		t.Fatalf("%d changes flagged, want three each for all and A: %s", len(c.items), c.area)
 	}
 	if err := c.p.AddChanges(c.area); err != nil {
 		t.Fatalf("changes: %v", err)
@@ -182,7 +182,7 @@ func TestChangeCheckAcceptsTheRoutes(t *testing.T) {
 			t.Fatalf("series %s %s: %v", row.Measure, row.ID, err)
 		}
 	}
-	if c.p.Changes() != 10 {
+	if c.p.Changes() != 6 {
 		t.Errorf("%d changes counted", c.p.Changes())
 	}
 }
@@ -238,6 +238,7 @@ func TestChangeCheckCatches(t *testing.T) {
 		// The item.
 		"an extra key":        {"change: keys of", one(-1, "questions", func(m map[string]any) { m["raw"] = 3 })},
 		"an unknown measure":  {`measure "median_review_hours"`, one(-1, "questions", func(m map[string]any) { m["measure"] = "median_review_hours" })},
+		"a measure ruled out": {`measure "active_clinicians"`, one(-1, "questions", func(m map[string]any) { m["measure"] = "active_clinicians" })},
 		"the wrong area":      {"in area", one(-1, "questions", func(m map[string]any) { m["area"] = "quality" })},
 		"serious":             {"serious", one(-1, "questions", func(m map[string]any) { m["serious"] = true })},
 		"a quality direction": {"isn't the measure's", one(-1, "questions", func(m map[string]any) { m["direction"] = "worse" })},
@@ -266,10 +267,11 @@ func TestChangeCheckCatches(t *testing.T) {
 			week.All.Reviews = smallgroup.Guarded{Suppressed: true}
 		})},
 		"under the threshold": {"under the threshold", func(t *testing.T, c *changeCase) error {
-			it := copied(c.item(t, c.ids[0], "active_clinicians"), func(m map[string]any) {
+			// B: 14 this week against March's 62 (14.0 a week).
+			it := copied(c.item(t, c.ids[0], "questions"), func(m map[string]any) {
 				m["hospital"] = map[string]any{"id": c.ids[1], "name": "Synthetic B"}
-				m["current"], m["previous"] = shown(12), shown(12)
-				m["summary"] = "Active clinicians up: 12 to 12"
+				m["current"], m["previous"] = shown(14), shown(14)
+				m["summary"] = "Questions up: 14.0 to 14 a week"
 			})
 			return c.p.AddChanges(c.withItems(it))
 		}},
@@ -310,7 +312,7 @@ func TestChangeCheckCatches(t *testing.T) {
 	edits := func(f func(m map[string]any)) func(t *testing.T, raw, item []byte) ([]byte, []byte) {
 		return func(t *testing.T, raw, item []byte) ([]byte, []byte) { return edit(t, raw, f), item }
 	}
-	cases["a series of another measure"] = tc{"series measure", ser("questions", -1, edits(func(m map[string]any) { m["measure"] = "active_clinicians" }))}
+	cases["a series of another measure"] = tc{"series measure", ser("questions", -1, edits(func(m map[string]any) { m["measure"] = "agreement_rate" }))}
 	cases["a series of another hospital"] = tc{"series hospital", ser("questions", 0, func(t *testing.T, raw, item []byte) ([]byte, []byte) {
 		return edit(t, raw, func(m map[string]any) { m["hospital"] = nil }), item
 	})}
@@ -326,6 +328,9 @@ func TestChangeCheckCatches(t *testing.T) {
 		pts[len(pts)-1].(map[string]any)["value"] = map[string]any{"value": 41, "suppressed": false}
 	}))}
 	cases["a point missing"] = tc{"points for", ser("questions", -1, edits(func(m map[string]any) { m["points"] = m["points"].([]any)[1:] }))}
+	cases["a series of another change"] = tc{"series change_id", ser("questions", -1, edits(func(m map[string]any) {
+		m["change_id"] = "00000000-0000-4000-8000-0000000000ff"
+	}))}
 	cases["a series that isn't an object"] = tc{"not an object", ser("questions", -1, func(t *testing.T, raw, item []byte) ([]byte, []byte) {
 		return []byte(`[]`), item
 	})}

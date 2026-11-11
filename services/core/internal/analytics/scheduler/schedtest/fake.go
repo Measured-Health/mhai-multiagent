@@ -234,7 +234,7 @@ func (f *Fake) ChangesDue(context.Context) ([]calendar.Period, error) {
 	}
 	var out []calendar.Period
 	for _, st := range f.stored {
-		if st.Period.Kind == calendar.Week && st.Period.From.After(newest) {
+		if st.Period.Kind == calendar.Week && st.Period.From.After(newest) && !st.Period.From.Before(f.EpochAt) {
 			out = append(out, st.Period)
 		}
 	}

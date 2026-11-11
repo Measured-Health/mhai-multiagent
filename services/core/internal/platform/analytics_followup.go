@@ -20,7 +20,11 @@ package platform
 // line, error, span or audit payload; the reply (the change, as the changes
 // list sends it) carries it to the caller.
 //
-// Order: the path (404), the body (422), then in the transaction the change
+// Ten writes a minute per session, PUT and DELETE together (429
+// rate_limited), counted after the body is checked.
+//
+// Order: the path (404), the body (422), the session's minute (429), then in
+// the transaction the change
 // (404 unknown; 409 closed or a stale version), then the follow-up (403 when
 // another admin's is in place and this is a PUT; 409 when a DELETE finds
 // none).
@@ -39,9 +43,34 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
-// FollowUpNoteMax is a follow-up note's length in characters (as the cancel
-// note's).
-const FollowUpNoteMax = CancelNoteMax
+const (
+	// FollowUpNoteMax is a follow-up note's length in characters (as the
+	// cancel note's).
+	FollowUpNoteMax = CancelNoteMax
+	// FollowUpWritesPerMinute is the follow-up writes (PUT and DELETE
+	// together) one session may make a minute, as the job retries'.
+	FollowUpWritesPerMinute = 10
+	// followUpScope is the idempotency_keys scope of the write counter (as
+	// retryScope).
+	followUpScope = "platform.analytics.follow_up_rate"
+)
+
+// followUpRate counts one follow-up write of the session; false when the
+// answer (429 rate_limited or 503 not_ready) is already written.
+func (d Deps) followUpRate(w http.ResponseWriter, r *http.Request, p authz.Principal) bool {
+	allowed, err := d.reserveRate(r, p, followUpScope, "platform.analytics.follow_up.v1", FollowUpWritesPerMinute)
+	switch {
+	case err != nil:
+		d.log().Error("platform: follow-up refused: rate counter unavailable", "request_id", httpx.RequestIDFrom(r.Context()),
+			"reason", "not_ready")
+		httpx.Error(w, r, "not_ready")
+		return false
+	case !allowed:
+		httpx.Error(w, r, "rate_limited")
+		return false
+	}
+	return true
+}
 
 // The follow-up refusals, each answered with its code.
 var (
@@ -173,6 +202,9 @@ func (d Deps) followUpPut(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "validation_failed")
 		return
 	}
+	if !d.followUpRate(w, r, p) {
+		return
+	}
 	note := body.Note.v
 	rid := httpx.RequestIDFrom(r.Context())
 	var out analytics.ChangeOut
@@ -236,6 +268,9 @@ func (d Deps) followUpDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Version == nil || *body.Version < 1 {
 		httpx.Error(w, r, "validation_failed")
+		return
+	}
+	if !d.followUpRate(w, r, p) {
 		return
 	}
 	rid := httpx.RequestIDFrom(r.Context())

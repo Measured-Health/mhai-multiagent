@@ -501,7 +501,8 @@ Platform audience, two-step always; none of these reads is audit-recorded.
   measure per stored period. `PUT` and `DELETE
   /platform/analytics/changes/{id}/follow-up {note?, version}` are platform
   admins' (`Idempotency-Key`; 409 on a stale version or a closed change, 403
-  for another admin's note), each audited in its transaction with ids only;
+  for another admin's note; ten writes a minute per session, 429), each
+  audited in its transaction with ids only;
   the note stays in `analytics_follow_ups`.
 - `GET /platform/guardrails?period=7d|30d|90d` is deprecated: every count
   and share hidden, `Deprecation`, `Sunset` and `Link` headers, 422 after
