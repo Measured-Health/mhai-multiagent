@@ -163,6 +163,9 @@ func (n *Normaliser) Sweep(ctx context.Context) error {
 	}
 	var errs []error
 	for _, hid := range hospitals {
+		if err := ClearExcluded(ctx, n.Pool, hid); err != nil {
+			errs = append(errs, err)
+		}
 		var ids []uuid.UUID
 		err := dbx.WithHospital(ctx, n.Pool, dbx.EMR, hid, func(tx pgx.Tx) error {
 			rows, err := tx.Query(ctx, `SELECT id FROM emr.raw_records WHERE hospital_id = $1 AND status = 'pending'
@@ -191,6 +194,29 @@ func (n *Normaliser) Sweep(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// ClearExcluded clears the payload of every raw record of hospital hid that
+// names an excluded patient (directly, or through a merge), and marks a
+// pending one rejected as excluded: a record stored or left behind before
+// the exclusion reached it (a dead-lettered batch, a failed normalise)
+// keeps nothing (design §10.6; race review 3).
+func ClearExcluded(ctx context.Context, pool *pgxpool.Pool, hid uuid.UUID) error {
+	return dbx.WithHospital(ctx, pool, dbx.EMR, hid, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE emr.raw_records r
+			SET payload = NULL,
+			    reject_code = CASE WHEN r.status = 'pending' THEN 'excluded' ELSE r.reject_code END,
+			    status = CASE WHEN r.status = 'pending' THEN 'rejected' ELSE r.status END,
+			    normalised_at = coalesce(r.normalised_at, now())
+			FROM emr.patient_links l
+			JOIN emr.patients p ON p.id = l.patient_id AND p.hospital_id = l.hospital_id
+			LEFT JOIN emr.patients q ON q.id = p.merged_into AND q.hospital_id = p.hospital_id
+			WHERE r.hospital_id = $1 AND l.hospital_id = $1 AND r.payload IS NOT NULL
+			  AND l.connection_id = r.connection_id
+			  AND l.source_patient_id = CASE WHEN r.resource_kind = 'patient' THEN r.source_id ELSE r.payload ->> 'patient' END
+			  AND (p.status = 'excluded' OR q.status = 'excluded')`, hid)
+		return err
+	})
 }
 
 // RunSweep sweeps every SweepEvery until ctx ends.

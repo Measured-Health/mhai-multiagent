@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -586,5 +587,50 @@ func TestMigration00023DownUp(t *testing.T) {
 	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)
+	}
+}
+
+// Race review 1: the exclusion takes the emr service's link lock (the same
+// advisory key) before it purges, so a normaliser transaction holding it
+// finishes first and what it wrote is purged too.
+func TestExclusionWaitsForLinkLock(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	h, _ := seedHospital(t, pool, uniqueCode("XL"))
+	c := seedConn(t, pool, h)
+	p := seedPatient(t, pool, h, c, "p-lock", "MRN-L")
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "emr-link:"+c.String()+":p-lock"); err != nil {
+		t.Fatal(err)
+	}
+	// The holder stands for a normaliser transaction on this source id
+	// that hasn't reached the patient row yet.
+	raw := seedRaw(t, pool, h, c, "observation", "o-lock", "1", `{"patient": "p-lock"}`)
+	done := make(chan error, 1)
+	go func() {
+		done <- asRoleIn(ctx, pool, "mhai_gateway", h, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `SELECT * FROM emr_exclude_patient($1, 'objection')`, p)
+			return err
+		})
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the exclusion didn't wait for the link lock: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM emr.observations WHERE patient_id = $1)
+		+ (SELECT count(*) FROM emr.raw_records WHERE id = $2)`, p, raw).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("%d rows left after the exclusion (%v)", left, err)
 	}
 }

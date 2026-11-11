@@ -48,24 +48,26 @@ func NormaliseMRN(s string) string {
 
 // Resolve is the MHAI patient of (conn, sourcePatientID), created with p's
 // fields if new. With p, an active patient's fields are updated (an
-// excluded patient's never are: its data stays purged). Concurrent calls
-// for one source id are serialised by a transaction lock.
+// excluded patient's never are: its data stays purged).
+//
+// Locks (race review): concurrent calls for one source id are serialised
+// by a transaction-level advisory lock, which emr_exclude_patient takes
+// too; the patient row is held FOR SHARE until the caller commits, so an
+// exclusion or a merge (FOR UPDATE) waits for this transaction, or this
+// one waits for it and then sees the patient excluded or merged. A merged
+// patient is followed to the one it was merged into, under the same lock.
 func Resolve(ctx context.Context, tx pgx.Tx, conn connector.Config, sourcePatientID string, p *PatientFields, rawID *uuid.UUID) (Patient, error) {
 	if sourcePatientID == "" || len(sourcePatientID) > 256 {
 		return Patient{}, ErrSourceID
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-		"emr-link:"+conn.ConnectionID.String()+":"+sourcePatientID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, LockKey(conn.ConnectionID, sourcePatientID)); err != nil {
 		return Patient{}, err
 	}
-	var out Patient
-	var into *uuid.UUID
-	err := tx.QueryRow(ctx, `SELECT p.id, p.status, p.merged_into FROM emr.patient_links l
-		JOIN emr.patients p ON p.id = l.patient_id AND p.hospital_id = l.hospital_id
-		WHERE l.hospital_id = $1 AND l.connection_id = $2 AND l.source_patient_id = $3`,
-		conn.HospitalID, conn.ConnectionID, sourcePatientID).Scan(&out.ID, &out.Status, &into)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
+	out, found, err := Lookup(ctx, tx, conn.HospitalID, conn.ConnectionID, sourcePatientID)
+	if err != nil {
+		return Patient{}, err
+	}
+	if !found {
 		f := fieldsOrEmpty(p)
 		if err := tx.QueryRow(ctx, `INSERT INTO emr.patients (hospital_id, display_name, mrn, birth_date, sex, raw_id)
 			VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, status`, conn.HospitalID, nullable(f.DisplayName), nullable(f.MRN),
@@ -77,27 +79,59 @@ func Resolve(ctx context.Context, tx pgx.Tx, conn connector.Config, sourcePatien
 			return Patient{}, err
 		}
 		return out, nil
-	case err != nil:
-		return Patient{}, err
-	}
-	// Links move with a merge, so a link names a merged patient only if the
-	// merge left it behind; follow it (one step: merges re-point links).
-	if out.Status == "merged_into" && into != nil {
-		if err := tx.QueryRow(ctx, `SELECT p.id, p.status FROM emr.patients p WHERE p.hospital_id = $1 AND p.id = $2`,
-			conn.HospitalID, *into).Scan(&out.ID, &out.Status); err != nil {
-			return Patient{}, err
-		}
 	}
 	if p != nil && out.Status == "active" {
 		f := fieldsOrEmpty(p)
 		if _, err := tx.Exec(ctx, `UPDATE emr.patients SET display_name = $3, mrn = $4, birth_date = $5, sex = $6,
-			raw_id = $7, updated_at = now() WHERE hospital_id = $1 AND id = $2`, conn.HospitalID, out.ID,
+			raw_id = $7, updated_at = now() WHERE hospital_id = $1 AND id = $2 AND status = 'active'`, conn.HospitalID, out.ID,
 			nullable(f.DisplayName), nullable(f.MRN), f.BirthDate, sex(f.Sex), rawID); err != nil {
 			return Patient{}, err
 		}
 	}
 	return out, nil
 }
+
+// LockKey is the advisory lock key of one source patient id; core's
+// emr_exclude_patient builds the same text.
+func LockKey(connection uuid.UUID, sourcePatientID string) string {
+	return "emr-link:" + connection.String() + ":" + sourcePatientID
+}
+
+// maxMergeDepth bounds following merged_into (links move with a merge, so
+// one step is the usual case).
+const maxMergeDepth = 16
+
+// Lookup is the patient (conn, sourcePatientID) links to, if any, held FOR
+// SHARE until the caller commits; a merged patient is followed to the one
+// it was merged into. It creates nothing.
+func Lookup(ctx context.Context, tx pgx.Tx, hospital, connection uuid.UUID, sourcePatientID string) (Patient, bool, error) {
+	var id uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT l.patient_id FROM emr.patient_links l
+		WHERE l.hospital_id = $1 AND l.connection_id = $2 AND l.source_patient_id = $3`,
+		hospital, connection, sourcePatientID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Patient{}, false, nil
+	}
+	if err != nil {
+		return Patient{}, false, err
+	}
+	for range maxMergeDepth {
+		var out Patient
+		var into *uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT p.id, p.status, p.merged_into FROM emr.patients p
+			WHERE p.hospital_id = $1 AND p.id = $2 FOR SHARE`, hospital, id).Scan(&out.ID, &out.Status, &into); err != nil {
+			return Patient{}, false, err
+		}
+		if out.Status != "merged_into" || into == nil {
+			return out, true, nil
+		}
+		id = *into
+	}
+	return Patient{}, false, ErrMergeChain
+}
+
+// ErrMergeChain: merged_into deeper than maxMergeDepth (fixed text).
+var ErrMergeChain = errors.New("index: merge chain too deep")
 
 func fieldsOrEmpty(p *PatientFields) PatientFields {
 	if p == nil {

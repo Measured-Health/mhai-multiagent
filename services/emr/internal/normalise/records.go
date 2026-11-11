@@ -88,28 +88,17 @@ func (n *Normaliser) record(ctx context.Context, tx pgx.Tx, cfg connector.Config
 
 // namesExcluded reports whether r is about a patient already excluded: the
 // Patient resource itself, or a record whose patient field names one. It
-// creates nothing. A link left on a merged patient is followed to the
-// patient it was merged into.
+// creates nothing; the patient is held FOR SHARE (index.Lookup).
 func namesExcluded(ctx context.Context, tx pgx.Tx, cfg connector.Config, r raw) (bool, error) {
 	src := r.sourceID
 	if r.kind != "patient" {
 		src = str(r.payload, "patient")
 	}
-	if src == "" {
+	if src == "" || len(src) > 256 {
 		return false, nil
 	}
-	var excluded bool
-	err := tx.QueryRow(ctx, `WITH RECURSIVE chain(id, status, merged_into, depth) AS (
-			SELECT p.id, p.status, p.merged_into, 0 FROM emr.patient_links l
-			JOIN emr.patients p ON p.id = l.patient_id AND p.hospital_id = l.hospital_id
-			WHERE l.hospital_id = $1 AND l.connection_id = $2 AND l.source_patient_id = $3
-			UNION ALL
-			SELECT p.id, p.status, p.merged_into, c.depth + 1 FROM chain c
-			JOIN emr.patients p ON p.id = c.merged_into AND p.hospital_id = $1
-			WHERE c.depth < 16)
-		SELECT EXISTS (SELECT 1 FROM chain WHERE status = 'excluded')`,
-		cfg.HospitalID, cfg.ConnectionID, src).Scan(&excluded)
-	return excluded, err
+	p, found, err := index.Lookup(ctx, tx, cfg.HospitalID, cfg.ConnectionID, src)
+	return found && p.Status == "excluded", err
 }
 
 func (n *Normaliser) dispatch(ctx context.Context, tx pgx.Tx, cfg connector.Config, r raw) (outcome, error) {

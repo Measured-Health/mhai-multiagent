@@ -77,6 +77,7 @@ Gates before live use (design §17.6; all of them):
 
 - [ ] **PR 9 must defer the exclusion purge under a legal hold.** Until then `emr_exclude_patient` purges at once (product owner, 11 Nov: excluding a patient purges its data); no legal hold exists yet. PR 9 moves the purge behind `emr.purge_requests` with the hold check (design §10.6, A41).
 - [ ] **PR 8a adds the alert steps** to `emr_merge_patients` (re-point open alerts) and `emr_exclude_patient` (withdraw them), with `CREATE OR REPLACE` in 00024, and the reject function for matches.
+- [ ] **PR 8a: retry an exclusion or merge on a deadlock (40P01).** Both now take the emr service's link locks and the patient row (race review), so one racing a normaliser batch on several of the same patients can be chosen as the deadlock victim; nothing is left half-done, but core's route must retry or answer 503.
 - [ ] Re-normalise the last 7 days of a local code after its map changes (design §9.4); not built.
 - [ ] Patients are updated in place by a newer Patient resource (the row is the identity); its `raw_id` names the version used. Versioned patient history if the clinical lead wants it.
 - [ ] A date-only medication time is stored as no time (`start_at`/`end_at` null); a date column if the rules need it (PR 7).

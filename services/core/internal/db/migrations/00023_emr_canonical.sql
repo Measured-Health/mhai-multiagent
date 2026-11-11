@@ -356,8 +356,10 @@ ALTER TABLE emr.unmapped_codes ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURI
 -- The emr service: its hospital's rows; never DELETE; never a column that
 -- merges or excludes a patient, or decides a match.
 GRANT SELECT ON emr.raw_records TO mhai_emr;
+-- status and reject_code: a record of an excluded patient is stored
+-- rejected, without its payload (design §10.6).
 GRANT INSERT (hospital_id, source_kind, connection_id, resource_kind, source_id, source_version, source_updated_at,
-              payload, payload_sha256, connector_type, connector_version) ON emr.raw_records TO mhai_emr;
+              payload, payload_sha256, connector_type, connector_version, status, reject_code) ON emr.raw_records TO mhai_emr;
 GRANT UPDATE (status, reject_code, payload, published_at, normalised_at) ON emr.raw_records TO mhai_emr;
 
 GRANT SELECT ON emr.patients TO mhai_emr;
@@ -543,6 +545,14 @@ BEGIN
     IF reason IS NULL OR reason NOT IN ('objection', 'hospital_policy', 'other') THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'emr_exclude_patient: reason';
     END IF;
+    -- The emr service's link locks first (the order it takes them in:
+    -- advisory, then the patient row), sorted, so a normaliser or sink
+    -- transaction on this patient either finishes before the purge or
+    -- waits and then sees the patient excluded. Links move with a merge,
+    -- so the patient's own links cover the patients merged into it.
+    PERFORM pg_advisory_xact_lock(hashtextextended('emr-link:' || k.connection_id::text || ':' || k.source_patient_id, 0))
+    FROM (SELECT l.connection_id, l.source_patient_id FROM emr.patient_links l
+          WHERE l.hospital_id = hid AND l.patient_id = pid ORDER BY 1, 2) k;
     PERFORM 1 FROM emr.patients p WHERE p.id = pid AND p.hospital_id = hid AND p.status IN ('active', 'excluded')
         FOR UPDATE;
     IF hid IS NULL OR NOT FOUND THEN

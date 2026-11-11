@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/index"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/dbx"
 )
 
@@ -37,10 +38,11 @@ type Publish func(ctx context.Context, hospital uuid.UUID, rawIDs []uuid.UUID) e
 
 // Metrics counts what the sink drops and stores, by kind; no content.
 type Metrics struct {
-	mu      sync.Mutex
-	dropped map[string]int64
-	stored  map[string]int64
-	replays int64
+	mu       sync.Mutex
+	dropped  map[string]int64
+	stored   map[string]int64
+	replays  int64
+	excluded int64
 }
 
 func (m *Metrics) add(kind string, dropped int, stored bool) {
@@ -58,6 +60,23 @@ func (m *Metrics) add(kind string, dropped int, stored bool) {
 	} else {
 		m.replays++
 	}
+}
+
+func (m *Metrics) addExcluded() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.excluded++
+}
+
+// Excluded is how many records of excluded patients were kept without a
+// payload.
+func (m *Metrics) Excluded() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.excluded
 }
 
 // Dropped is emr_sink_dropped_fields_total{kind}.
@@ -115,8 +134,32 @@ func (s *Sink) Put(ctx context.Context, r connector.RawRecord) error {
 		updated = &u
 	}
 	var id uuid.UUID
-	stored := false
+	stored, excluded := false, false
+	src := r.SourceID
+	if r.Kind != "patient" {
+		src, _ = fields["patient"].(string)
+	}
 	err = dbx.WithHospital(ctx, s.pool, dbx.EMR, s.hospital, func(tx pgx.Tx) error {
+		// An excluded patient's record is kept as a rejected row with no
+		// payload (design §10.6), so a replay stays a no-op and nothing of
+		// it is held. The patient is held FOR SHARE until this commits, so
+		// an exclusion either waits for this row (and purges it) or has
+		// committed and is seen here.
+		if src != "" {
+			p, found, err := index.Lookup(ctx, tx, s.hospital, s.connection, src)
+			if err != nil {
+				return err
+			}
+			if found && p.Status == "excluded" {
+				_, err := tx.Exec(ctx, `INSERT INTO emr.raw_records (hospital_id, source_kind, connection_id, resource_kind,
+					source_id, source_version, source_updated_at, payload, payload_sha256, connector_type, connector_version,
+					status, reject_code)
+					VALUES ($1, 'connector', $2, $3, $4, $5, $6, NULL, $7, $8, $9, 'rejected', 'excluded') ON CONFLICT DO NOTHING`,
+					s.hospital, s.connection, r.Kind, r.SourceID, r.SourceVersion, updated, sum[:], s.connType, s.connVersion)
+				excluded = err == nil
+				return err
+			}
+		}
 		err := tx.QueryRow(ctx, `INSERT INTO emr.raw_records (hospital_id, source_kind, connection_id, resource_kind,
 			source_id, source_version, source_updated_at, payload, payload_sha256, connector_type, connector_version)
 			VALUES ($1, 'connector', $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING RETURNING id`,
@@ -130,6 +173,10 @@ func (s *Sink) Put(ctx context.Context, r connector.RawRecord) error {
 	})
 	if err != nil {
 		return err
+	}
+	if excluded {
+		s.Metrics.addExcluded()
+		return nil
 	}
 	s.Metrics.add(r.Kind, dropped, stored)
 	if !stored {
