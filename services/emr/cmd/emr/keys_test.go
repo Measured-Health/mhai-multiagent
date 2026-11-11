@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/proxyconf"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/seal"
 )
 
@@ -106,5 +107,44 @@ func TestSealInitModes(t *testing.T) {
 		if err := run(args, nil, &out); err != errUsage {
 			t.Errorf("%v: %v", args, err)
 		}
+	}
+}
+
+// Design §6.4: emr keys proxy-init writes K_proxy once, 0400, never
+// printed; an existing key is kept and a broken one refused.
+func TestProxyInit(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := run([]string{"keys", "proxy-init", "--out", dir}, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, proxyconf.KeyFile)
+	st, err := os.Stat(path)
+	if err != nil || st.Mode().Perm() != 0o400 {
+		t.Fatalf("k_proxy: %v %v", st, err)
+	}
+	k, err := proxyconf.ReadKey(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(out.String(), strings.TrimSpace(string(raw))) {
+		t.Error("the key was printed")
+	}
+	if err := run([]string{"keys", "proxy-init", "--out", dir}, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if k2, _ := proxyconf.ReadKey(path); !bytes.Equal(k, k2) {
+		t.Error("an existing key was replaced")
+	}
+	bad := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bad, proxyconf.KeyFile), []byte("short\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"keys", "proxy-init", "--out", bad}, nil, &out); err == nil {
+		t.Error("a broken key was kept")
+	}
+	if err := run([]string{"keys", "proxy-init", "--out", filepath.Join(dir, "none")}, nil, &out); err == nil {
+		t.Error("a missing directory accepted")
 	}
 }

@@ -4,12 +4,14 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/proxyconf"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/seal"
 )
 
@@ -68,5 +70,41 @@ func writeNew(path string, b []byte, mode os.FileMode) error {
 		_ = os.Remove(path)
 		return errors.New("emr keys seal-init: cannot write a key file")
 	}
+	return nil
+}
+
+// proxyInit is "emr keys proxy-init --out <dir>" (EMR design §6.4): K_proxy,
+// the key the emr service and egress-emr share for the per-connection
+// Proxy-Authorization, as <dir>/k_proxy (0400, 64 hex characters). It never
+// overwrites: an existing usable key is kept, and an unusable one is
+// refused. The key is never printed.
+func proxyInit(dir string, out io.Writer) error {
+	st, err := os.Stat(dir)
+	if err != nil || !st.IsDir() {
+		return errors.New("emr keys proxy-init: --out must be an existing directory")
+	}
+	path := filepath.Join(dir, proxyconf.KeyFile)
+	if _, err := os.Lstat(path); err == nil {
+		if _, err := proxyconf.ReadKey(path); err != nil {
+			return errors.New("emr keys proxy-init: the directory holds an unusable K_proxy; refusing to write")
+		}
+		fmt.Fprintln(out, "K_proxy present; kept, nothing written")
+		return nil
+	}
+	k := make([]byte, proxyconf.KeyBytes)
+	if _, err := rand.Read(k); err != nil {
+		return errors.New("emr keys proxy-init: no randomness")
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400)
+	if err != nil {
+		return errors.New("emr keys proxy-init: cannot create the key file")
+	}
+	_, werr := f.WriteString(hex.EncodeToString(k) + "\n")
+	cerr := f.Close()
+	if werr != nil || cerr != nil || os.Chmod(path, 0o400) != nil {
+		_ = os.Remove(path)
+		return errors.New("emr keys proxy-init: cannot write the key file")
+	}
+	fmt.Fprintln(out, "K_proxy made (mount it read-only in the emr service and egress-emr only)")
 	return nil
 }
