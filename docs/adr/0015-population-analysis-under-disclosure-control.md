@@ -34,8 +34,8 @@ The product owner ruled that statistics show only finished, non-overlapping cale
 ## Consequences
 
 - Hospitals get disease and population figures for their own patients. Drill-down users see pseudonymous microdata. The aggregate rules protect people **without** drill access, and the drill controls limit and record what drill users do (design §5.2).
-- Five residual risks are accepted, each with a measure or a sign-off:
-  - **R-A1:** differencing across filter families within one period. Measured by P2 at a filter cap of 2; the privacy lead accepts it with that number (H1).
+- Five residual risks were named (R-A1 is now closed), each with a measure or a sign-off:
+  - **R-A1:** differencing across filter families within one period. Closed by design (ruling C10, design D6): each body is guarded against everything published for its period; P2 asserts no hidden group of 1 to 4 is solvable.
   - **R-A2:** narrowing by bounds, within responses and across levels for distinct counts. Measured by P5.
   - **R-A3:** two releases about one hospital, its own Analysis and platform Analysis (Plan 12), at different filter granularities. Only someone with both kinds of account can combine them.
   - **R-A4:** drill-down users see microdata. Their counts are exact, and they can count small subgroups. The controls limit and record this but don't prevent it. This is the central privacy question (H1).

@@ -463,22 +463,28 @@ func (b *Block) prepSets(sets [][][]int, base pair) []setCheck {
 			sc.vars = append(sc.vars, m...)
 		}
 		for i := range base {
-			small := newMBasis(base[i].p)
-			var total mvec
-			rank := 0
-			for _, m := range hid {
-				r := base[i].residual(toM(m, nil, base[i].p))
-				sc.res[i] = append(sc.res[i], r)
-				total = madd(total, r, base[i].p)
-				if small.addIndependent(r) {
-					rank++
-				}
-			}
-			sc.dimB[i], sc.sumB[i] = len(hid)-rank, len(total) == 0
+			sc.res[i], sc.dimB[i], sc.sumB[i] = base[i].shape(hid)
 		}
 		out = append(out, sc)
 	}
 	return out
+}
+
+// shape is the members' residuals against b, the dimension of the
+// combinations of them b determines, and whether their full sum is one.
+func (b *mbasis) shape(members [][]int) (res []mvec, dim int, sum bool) {
+	small := newMBasis(b.p)
+	var total mvec
+	rank := 0
+	for _, m := range members {
+		r := dropConst(b.residual(toM(m, nil, b.p)))
+		res = append(res, r)
+		total = madd(total, r, b.p)
+		if small.addIndependent(r) {
+			rank++
+		}
+	}
+	return res, len(members) - rank, len(total) == 0
 }
 
 // violatesAfter is the rule once S's rows are known: sb holds S's rows'
@@ -496,7 +502,7 @@ func (sc setCheck) violatesAfter(sb pair) bool {
 				rank++
 			}
 		}
-		if setViolates(sc.dimB[i], sc.sumB[i], len(sc.res[i])-rank, len(total) == 0) {
+		if SetViolates(sc.dimB[i], sc.sumB[i], len(sc.res[i])-rank, len(total) == 0) {
 			return true
 		}
 	}
@@ -509,7 +515,7 @@ func (sc setCheck) violatesAfter(sb pair) bool {
 // known (a member already determined, say), a newly determined full sum
 // gives the rest away (the full sum minus the known part), so it may not
 // become determined.
-func setViolates(dimB int, _ bool, dimA int, sumA bool) bool {
+func SetViolates(dimB int, _ bool, dimA int, sumA bool) bool {
 	switch {
 	case dimA == dimB:
 		return false
@@ -1102,4 +1108,123 @@ func equalBools(a, b []bool) bool {
 		}
 	}
 	return true
+}
+
+// ---- the check as a library (Analysis, plan Task 5) -------------------------
+
+// Knowledge is what an attacker knows, as GuardSnapshot keeps it: linear
+// equations over integer unknowns, decided modulo the two primes (exposed
+// when exposed under either). It errs only by finding more exposed, except
+// with negligible probability. Analysis's guard (internal/analysis/disclose)
+// runs its final check on it; smallgroup/solve is the exact reference.
+type Knowledge struct{ q pair }
+
+// NewKnowledge is nothing known.
+func NewKnowledge() *Knowledge { return &Knowledge{newPair()} }
+
+// Clone is a copy that learns independently.
+func (k *Knowledge) Clone() *Knowledge { return &Knowledge{k.q.clone()} }
+
+// Add learns Σ coefs[i]·x[vars[i]] (coefs nil: every coefficient 1).
+func (k *Knowledge) Add(vars []int, coefs []int64) { k.q.add(vars, coefs) }
+
+// Exposed reports whether Σ coefs[i]·x[vars[i]] is determined.
+func (k *Knowledge) Exposed(vars []int, coefs []int64) bool { return k.q.exposed(vars, coefs) }
+
+// constVar is the column of the constant 1 in a valued system: a row
+// Σ a·x = rhs is kept as Σ a·x − rhs·1. It sorts last, so it is never a
+// pivot while the equations are consistent. 7c's systems never use it.
+const constVar = 1<<31 - 1
+
+// dropConst is a residual without its constant: the part that depends on
+// the unknowns.
+func dropConst(v mvec) mvec {
+	if n := len(v); n > 0 && v[n-1].c == constVar {
+		return v[:n-1]
+	}
+	return v
+}
+
+// AddValued learns Σ coefs[i]·x[vars[i]] = rhs (coefs nil: every
+// coefficient 1).
+func (k *Knowledge) AddValued(vars []int, coefs []int64, rhs int64) {
+	c := coefs
+	if c == nil {
+		c = make([]int64, len(vars))
+		for i := range c {
+			c[i] = 1
+		}
+	}
+	k.Add(append(append([]int{}, vars...), constVar), append(append([]int64{}, c...), -rhs))
+}
+
+// Value is Σ coefs[i]·x[vars[i]] when what is known determines it (under
+// either prime; the true value is a count far below the primes, so its
+// residue is the value).
+func (k *Knowledge) Value(vars []int, coefs []int64) (int64, bool) {
+	for i := range k.q {
+		p := k.q[i].p
+		r := k.q[i].residual(toM(vars, coefs, p))
+		switch {
+		case len(r) == 0:
+			return 0, true
+		case len(r) == 1 && r[0].c == constVar:
+			v := r[0].v
+			if v > p/2 {
+				return -int64(p - v), true
+			}
+			return int64(v), true
+		}
+	}
+	return 0, false
+}
+
+// Consistent reports whether what is known can all hold at once: with
+// values, a contradiction is the row 0 = c ≠ 0, and the constant becomes
+// determined as 0 under both primes.
+func (k *Knowledge) Consistent() bool {
+	for i := range k.q {
+		r := k.q[i].residual(mvec{{constVar, 1}})
+		if len(r) == 1 && r[0].c == constVar {
+			return true
+		}
+	}
+	return false
+}
+
+// SetShape is what a state of knowledge determines about a set's hidden
+// members, under each prime: the dimension and whether the full sum is
+// determined. Taken once, it is checked against later states (hoisted out
+// of a guard's retry loop).
+type SetShape [2]struct {
+	dim int
+	sum bool
+}
+
+// Shape is members' shape under k.
+func (k *Knowledge) Shape(members [][]int) SetShape {
+	var s SetShape
+	for i := range k.q {
+		_, s[i].dim, s[i].sum = k.q[i].shape(members)
+	}
+	return s
+}
+
+// Changed is the whole-set rule (R41a-5, SetViolates) from this shape to
+// after, under either prime.
+func (s SetShape) Changed(after *Knowledge, members [][]int) bool {
+	for i := range after.q {
+		_, da, sa := after.q[i].shape(members)
+		if SetViolates(s[i].dim, s[i].sum, da, sa) {
+			return true
+		}
+	}
+	return false
+}
+
+// SetChanged is the whole-set rule (R41a-5, SetViolates) from before to
+// after, under either prime, for a set's hidden members (each the sum of
+// its unknowns).
+func SetChanged(before, after *Knowledge, members [][]int) bool {
+	return before.Shape(members).Changed(after, members)
 }

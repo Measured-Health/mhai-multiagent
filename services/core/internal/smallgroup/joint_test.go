@@ -831,3 +831,113 @@ func TestGuardSnapshotStopsOnContext(t *testing.T) {
 		t.Fatalf("a live guard: %v", err)
 	}
 }
+
+// The guard's exposure check as a library (Analysis, plan Task 5):
+// Knowledge decides exposure and the whole-set rule modulo the two primes,
+// as GuardSnapshot does, and agrees with the exact solver.
+func TestKnowledgeExposedAndSetChanged(t *testing.T) {
+	before := NewKnowledge()
+	before.Add([]int{0, 1, 2}, nil) // a total of three hidden members
+	after := before.Clone()
+	after.Add([]int{0, 1}, nil) // the first two's sum
+	if before.Exposed([]int{2}, nil) || !after.Exposed([]int{2}, nil) {
+		t.Fatal("x2 = total − (x0 + x1) isn't exposed after, or is before")
+	}
+	if !after.Exposed([]int{0, 1}, nil) || after.Exposed([]int{0}, nil) {
+		t.Fatal("x0 + x1 is known, x0 alone isn't")
+	}
+	if after.Exposed([]int{3, 4}, []int64{2, -2}) || after.Exposed([]int{3}, nil) {
+		t.Fatal("unknowns in no equation are exposed")
+	}
+	// The whole-set rule: the set {x0, x1} goes from nothing determined to
+	// its full sum alone (allowed); {x0, x2} gains a part (refused).
+	if SetChanged(before, after, [][]int{{0}, {1}}) {
+		t.Error("nothing → the full sum alone is allowed")
+	}
+	if !SetChanged(before, after, [][]int{{0, 1}, {2}}) {
+		t.Error("a member newly determined is a violation")
+	}
+	if SetChanged(after, after, [][]int{{0}, {2}}) {
+		t.Error("no change is no violation")
+	}
+	// Against the exact solver on a random system.
+	r := rand.New(rand.NewSource(7))
+	for trial := 0; trial < 50; trial++ {
+		k := NewKnowledge()
+		var eqs [][]int
+		for i := 0; i < 4; i++ {
+			var e []int
+			for v := 0; v < 6; v++ {
+				if r.Intn(2) == 0 {
+					e = append(e, v)
+				}
+			}
+			eqs = append(eqs, e)
+			k.Add(e, nil)
+		}
+		boxes := [][]int{{0}, {1}, {2, 3}, {4, 5}, {0, 5}}
+		want := solve.Exposed(6, eqs, boxes)
+		for i, bx := range boxes {
+			if got := k.Exposed(bx, nil); got != want[i] {
+				t.Fatalf("trial %d box %v: %v, exact %v", trial, bx, got, want[i])
+			}
+		}
+	}
+}
+
+// The before shape hoisted out of a loop (the shape taken once, checked
+// against many states of knowledge) decides exactly as SetChanged does.
+func TestSetShapeHoistAgrees(t *testing.T) {
+	r := rand.New(rand.NewSource(11))
+	for trial := 0; trial < 200; trial++ {
+		before := NewKnowledge()
+		for i := 0; i < 3; i++ {
+			before.Add([]int{r.Intn(6), r.Intn(6)}, nil)
+		}
+		members := [][]int{{0}, {1, 2}, {3}}
+		shape := before.Shape(members)
+		after := before.Clone()
+		for i := 0; i < 4; i++ {
+			after.Add([]int{r.Intn(6), r.Intn(6), r.Intn(6)}, nil)
+			if got, want := shape.Changed(after, members), SetChanged(before, after, members); got != want {
+				t.Fatalf("trial %d step %d: hoisted %v, SetChanged %v", trial, i, got, want)
+			}
+		}
+	}
+}
+
+// A valued system: equations with right-hand sides; Value gives a
+// determined combination's value, as the exact solver would.
+func TestKnowledgeValue(t *testing.T) {
+	k := NewKnowledge()
+	k.AddValued([]int{0, 1, 2}, nil, 12) // a total of 12
+	k.AddValued([]int{0, 1}, nil, 9)     // its first two
+	if v, ok := k.Value([]int{2}, nil); !ok || v != 3 {
+		t.Fatalf("x2 = %d, %v; want 3", v, ok)
+	}
+	if _, ok := k.Value([]int{0}, nil); ok {
+		t.Fatal("x0 alone isn't determined")
+	}
+	k.AddValued([]int{0, 3}, []int64{1, -1}, 2) // x0 − x3 = 2
+	if v, ok := k.Value([]int{1, 3}, nil); !ok || v != 7 {
+		t.Fatalf("x1 + x3 = %d, %v; want 7", v, ok)
+	}
+	// The whole-set rule ignores the values: {x0, x1} has its sum.
+	if d := k.Shape([][]int{{0}, {1}}); d[0].dim != 1 || !d[0].sum {
+		t.Fatalf("shape: %+v", d)
+	}
+}
+
+// Contradictory knowledge (0 = a non-zero constant) is detected.
+func TestKnowledgeConsistent(t *testing.T) {
+	k := NewKnowledge()
+	k.AddValued([]int{0, 1}, nil, 10)
+	k.AddValued([]int{0}, nil, 4)
+	if !k.Consistent() {
+		t.Fatal("x0 + x1 = 10, x0 = 4: consistent")
+	}
+	k.AddValued([]int{1}, nil, 7)
+	if k.Consistent() {
+		t.Fatal("x1 = 6 and x1 = 7: not consistent")
+	}
+}
