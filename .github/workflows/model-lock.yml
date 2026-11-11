@@ -60,7 +60,7 @@ jobs:
           base="$RUNNER_TEMP/main"
           mkdir -p "$base"
           # Every models.lock main has held, one per line (a deletion leaves no line).
-          git log --format=%H "origin/$BASE_REF" -- models.lock | while read -r c; do
+          git log --first-parent --format=%H "origin/$BASE_REF" -- models.lock | while read -r c; do
             git show "$c:models.lock" 2>/dev/null || true
           done >"$base/history"
           if git show "origin/$BASE_REF:models/testsets.lock" >"$base/testsets.lock" 2>/dev/null; then

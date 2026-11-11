@@ -232,7 +232,7 @@ def test_lock_check_is_an_ordinary_check_with_mains_lock_and_policy() -> None:
     assert '--base "$RUNNER_TEMP/main/models.lock"' in runs
     assert '--trust-policy "$TRUST_POLICY"' in runs
     # rollbacks only to entries main pinned before; main's test splits and thresholds
-    assert 'git log --format=%H "origin/$BASE_REF" -- models.lock' in runs
+    assert 'git log --first-parent --format=%H "origin/$BASE_REF" -- models.lock' in runs
     assert '--history "$RUNNER_TEMP/main/history"' in runs
     assert '--testsets "$TESTSETS"' in runs and '--thresholds-dir "$THRESHOLDS"' in runs
     assert 'git show "origin/$BASE_REF:models/testsets.lock"' in runs
