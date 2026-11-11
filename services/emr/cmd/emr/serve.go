@@ -17,6 +17,8 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/stub"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/ctl"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/egress"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/proxyconf"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/secrets"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
@@ -45,10 +47,17 @@ type readier interface {
 }
 
 // healthHandler answers emr.v1.ctl.health: readiness flags only, no
-// counts of anyone's data. No rule set is active and no proxy allow-list
-// is written yet, so they are reported as absent and never written.
-func healthHandler(db pinger, store readier) ctl.Handler {
+// counts of anyone's data. No rule set is active yet, so it is reported as
+// absent. The allow-list's age is in whole seconds, -1 when this process
+// hasn't written one (no egress configured, or no write yet).
+func healthHandler(db pinger, store readier, allowAge func(time.Time) (time.Duration, bool)) ctl.Handler {
 	return func(ctx context.Context, _ reqtoken.Claims, _ proto.Message) (proto.Message, error) {
+		age := int64(-1)
+		if allowAge != nil {
+			if a, ok := allowAge(time.Now()); ok {
+				age = int64(a / time.Second)
+			}
+		}
 		ready, storeReady := false, false
 		c, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
@@ -59,7 +68,7 @@ func healthHandler(db pinger, store readier) ctl.Handler {
 			storeReady = store.Ready(c) == nil
 		}
 		return &emrpb.HealthReply{DatabaseReady: ready, SecretStoreReady: storeReady, RuleSetVersion: "",
-			ProxyAllowListAgeS: -1}, nil
+			ProxyAllowListAgeS: age}, nil
 	}
 }
 
@@ -137,14 +146,34 @@ func serve(getenv func(string) string) error {
 	}
 	defer nc.Close()
 
+	// The way out (PR 4): egress-emr and the allow-list it reads. Without
+	// it there is none: the stub needs no network, and a connector that
+	// does finds no proxy and fails closed.
+	var writer *egress.Writer
+	var allowAge func(time.Time) (time.Duration, bool)
+	if s.ProxyURL != "" {
+		if _, err := proxyconf.ReadKey(s.ProxyKeyPath); err != nil {
+			return errors.New("EMR_PROXY_KEY_PATH: K_proxy missing or not a 32-byte hex key")
+		}
+		if st, err := os.Stat(s.EgressDir); err != nil || !st.IsDir() {
+			return errors.New("EMR_EGRESS_DIR must be an existing directory")
+		}
+		writer = &egress.Writer{Pool: pool, Dir: s.EgressDir, Development: s.Development(), Log: log}
+		allowAge = writer.Age
+		go func() { _ = writer.Run(ctx) }()
+	}
+
 	handlers := map[string]ctl.Handler{}
 	if store != nil {
 		creds := &ctl.Credentials{Pool: pool, Store: store, Keys: sealKeys, Env: s.Env,
 			Connectors: connector.NewRegistry(s.Development(), stub.New())}
+		if writer != nil {
+			creds.Egress = writer
+		}
 		handlers = creds.Handlers()
-		handlers["health"] = healthHandler(pool, store)
+		handlers["health"] = healthHandler(pool, store, allowAge)
 	} else {
-		handlers["health"] = healthHandler(pool, nil)
+		handlers["health"] = healthHandler(pool, nil, allowAge)
 	}
 	r := &ctl.Responder{
 		Keys:     func() map[string]ed25519.PublicKey { return keys },
@@ -159,7 +188,7 @@ func serve(getenv func(string) string) error {
 	}
 	defer stopCtl()
 	log.Info("emr serving", "env", s.Env, "subjects", ctl.Subjects, "rule_set_active", s.RuleSetActive != "",
-		"secret_store", store != nil, "sealing_keys", len(sealKeys))
+		"secret_store", store != nil, "sealing_keys", len(sealKeys), "egress", writer != nil)
 	<-ctx.Done()
 	return nil
 }

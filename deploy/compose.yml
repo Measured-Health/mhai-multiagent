@@ -304,6 +304,71 @@ services:
     mem_limit: 128m
     networks: [backend, egress]
 
+  # The EMR integration (ADR 0014; EMR design §6.4). Off on the demo: the
+  # demo has neither the emr NATS user nor its database login yet
+  # (services/emr/README.md), so the emr service below stays commented
+  # until it does. When it runs it is on backend (internal: Postgres,
+  # NATS) and emr-proxy (internal: egress-emr only), with no route out;
+  # it needs, as the pipeline above does, its own NATS NKey and database
+  # login, the trusted keys read-only, and no env_file.
+  # emr:
+  #   image: ${EMR_IMAGE:-ghcr.io/measured-health/mhai-multiagent-emr:latest}
+  #   profiles: ["emr"]
+  #   command: ["serve"]
+  #   environment:
+  #     APP_ENV: staging
+  #     EMR_NATS_URL: tls://nats:4222
+  #     EMR_NATS_NKEY_FILE: /run/secrets/nats-emr.nk
+  #     EMR_DATABASE_URL: postgres://emr_app@postgres:5432/mhai?sslmode=verify-full
+  #     EMR_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+  #     EMR_SEAL_KEY_PATH: /emr-keys
+  #     EMR_SECRETS_DIR: /emr-secrets
+  #     EMR_RULE_SET_ACTIVE: ""
+  #     # The only way out (never HTTPS_PROXY).
+  #     EMR_PROXY_URL: http://egress-emr:3128
+  #     EMR_PROXY_KEY_PATH: /run/secrets/emr-proxy.key
+  #     EMR_EGRESS_DIR: /emr-egress
+  #   volumes:
+  #     - trustedkeys:/trusted:ro
+  #     - emr-egress-conf:/emr-egress
+  #     - ./secrets/emr-proxy.key:/run/secrets/emr-proxy.key:ro
+  #   networks: [backend, emr-proxy]
+  #   mem_limit: 256m
+
+  # egress-emr, the emr service's own CONNECT proxy (services/emr/cmd/
+  # egress-emr): the only service on egress-emr, the network with a route
+  # out, and on emr-proxy, where only the emr service reaches it; never on
+  # backend. Each CONNECT names its connection (Proxy-Authorization from
+  # K_proxy) and reaches only that connection's hosts; a name is resolved
+  # once and the checked address dialled. With no fresh allow-list (written
+  # by the emr service) it refuses everything. Off by default (profile
+  # emr); the demo never starts it. K_proxy is the 0400 file
+  # secrets/emr-proxy.key owned by 65532 (emr keys proxy-init writes one).
+  # EGRESS_EMR_INTERNAL_CIDRS must be set in .env: the backend network's
+  # subnet (docker network inspect mhai-backend_backend) and the host's own
+  # addresses (its VPC address, /32), never reached even when declared. It
+  # runs as production, so it refuses to start without them. The backend
+  # network keeps its subnet (fixing one would recreate it under the demo).
+  egress-emr:
+    <<: *hardening
+    image: ${EMR_IMAGE:-ghcr.io/measured-health/mhai-multiagent-emr:latest}
+    pull_policy: missing
+    profiles: ["emr"]
+    restart: unless-stopped
+    entrypoint: ["/egress-emr"]
+    command: []
+    user: "65532:65532"
+    environment:
+      EGRESS_EMR_ALLOW_LIST: /emr-egress/allow.json
+      EGRESS_EMR_KEY_PATH: /run/secrets/emr-proxy.key
+      EGRESS_EMR_ENV: production
+      EGRESS_EMR_INTERNAL_CIDRS: ${EGRESS_EMR_INTERNAL_CIDRS:-}
+    volumes:
+      - emr-egress-conf:/emr-egress:ro
+      - ${EMR_PROXY_KEY_FILE:-./secrets/emr-proxy.key}:/run/secrets/emr-proxy.key:ro
+    mem_limit: 64m
+    networks: [emr-proxy, egress-emr]
+
 networks:
   # No route out: Postgres and NATS can't reach anything but each other and
   # core, and nothing reaches them from the host.
@@ -313,6 +378,11 @@ networks:
   edge: {}
   # The egress proxy's way out, and only its (profile cloud).
   egress: {}
+  # The emr service and egress-emr only, no route out (profile emr).
+  emr-proxy:
+    internal: true
+  # egress-emr's way out, and only its (profile emr).
+  egress-emr: {}
   # Shared with the frontend's compose project (mhai-web), made by
   # setup-host.sh with --internal. Only NATS is on it here: the BFF reaches
   # it as mhai-nats:4222 and nothing else in this stack.
@@ -337,3 +407,6 @@ volumes:
   trustedkeys:
     external: true
     name: mhai-backend-trustedkeys
+  # The allow-list the emr service writes and egress-emr reads (profile
+  # emr); rewritten every 15 s, so not external.
+  emr-egress-conf: {}
