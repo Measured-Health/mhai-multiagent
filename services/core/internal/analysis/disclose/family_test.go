@@ -45,6 +45,13 @@ func guardFamily(t *testing.T, w *attack.World, p calendar.Period, sets []Filter
 	return out
 }
 
+// guardPeriodAll guards every context of p, parents first (the
+// orchestrator's order).
+func guardPeriodAll(t *testing.T, w *attack.World, p calendar.Period, sets []Filters) map[Filters]Body {
+	t.Helper()
+	return guardFamily(t, w, p, sets)
+}
+
 // subsets are f's proper subsets: its family above it.
 func subsets(f Filters) []Filters {
 	var set []int

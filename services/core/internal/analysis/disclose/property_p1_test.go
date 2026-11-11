@@ -54,8 +54,20 @@ func filterSets(d attack.Dims) []Filters {
 	for _, s := range d.Sexes {
 		vals = append(vals, fv{DimSex, s})
 	}
+	settings := map[string]bool{}
 	for _, l := range d.Locations {
-		vals = append(vals, fv{DimLocation, l.ID}, fv{DimSetting, l.Setting})
+		vals = append(vals, fv{DimLocation, l.ID})
+		if l.Setting != "" && !settings[l.Setting] {
+			settings[l.Setting] = true
+			vals = append(vals, fv{DimSetting, l.Setting})
+		}
+	}
+	if len(d.Specialties) > 1 {
+		for _, s := range d.Specialties {
+			if s != "" {
+				vals = append(vals, fv{DimSpecialty, s})
+			}
+		}
 	}
 	seen := map[Filters]bool{}
 	out := []Filters{{}}
