@@ -9,6 +9,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose/attack"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup"
 )
 
 // seeds is how many seeded worlds a property runs: ANALYSIS_SEED runs one;
@@ -107,6 +108,9 @@ func checkOne(t *testing.T, w *attack.World, p calendar.Period, f Filters, first
 		t.Errorf("%v %v: hidden %s (%d) is solvable", p, f, m.Cells[i].Name, m.Cells[i].Truth)
 	}
 	for _, x := range m.SetViolations([]int{0}) {
+		t.Errorf("%v %v: %s", p, f, x)
+	}
+	for _, x := range m.ContractViolations() {
 		t.Errorf("%v %v: %s", p, f, x)
 	}
 	return len(m.HiddenProtected([]int{0})), len(ex)
@@ -220,4 +224,67 @@ func rawCount(r Raw, dim, key string) gd {
 		}
 	}
 	return gd{Suppressed: true}
+}
+
+// The attacker's contract checks fire on bodies that break A4 (shares),
+// A6 (order), the pairs' top 20 and A7 (QuerySetMin), and pass the guard's.
+func TestP1ContractChecksFire(t *testing.T) {
+	w := attack.Generate(5, smallDims(3), []calendar.Period{octWeek}, false, attack.Options{Subjects: 90, Presence: 1, Rare: 0.2})
+	raw := rawOf(&w, octWeek, Filters{}, false)
+	b, err := GuardResponse(raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(name string, bodies []Body, want bool) {
+		t.Helper()
+		var docs []attack.Doc
+		for _, x := range bodies {
+			d, err := docOf(x)
+			if err != nil {
+				t.Fatal(err)
+			}
+			docs = append(docs, d)
+		}
+		m, err := attack.New(&w, docs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := len(m.ContractViolations()) > 0; got != want {
+			t.Errorf("%s: violations %v, want %v: %v", name, got, want, m.ContractViolations())
+		}
+	}
+	check("the guarded body", []Body{b}, false)
+	copyBody := func() Body {
+		c := b
+		c.BySex = append([]Part[gd]{}, b.BySex...)
+		c.Pairs = append([]Pair[gd, smallgroup.GuardedShare]{}, b.Pairs...)
+		return c
+	}
+	// A4: a share shown beside a hidden count.
+	c := copyBody()
+	if len(c.Pairs) == 0 {
+		t.Fatal("no pairs: the A4 case proves nothing")
+	}
+	half := 0.5
+	c.Pairs[0].Patients = gd{Suppressed: true}
+	c.Pairs[0].ShareOfA = smallgroup.GuardedShare{Share: &half}
+	check("A4 share over a hidden count", []Body{c}, true)
+	// A6: shown rows out of order.
+	c = copyBody()
+	if len(c.BySex) < 2 || !c.BySex[0].Patients.Shown() || !c.BySex[1].Patients.Shown() {
+		t.Fatalf("by_sex: %+v: the A6 case proves nothing", c.BySex)
+	}
+	c.BySex[0], c.BySex[1] = c.BySex[1], c.BySex[0]
+	check("A6 order", []Body{c}, true)
+	// The top 20: a 21st pair.
+	c = copyBody()
+	for len(c.Pairs) <= PairsMax {
+		c.Pairs = append(c.Pairs, c.Pairs[len(c.Pairs)-1])
+	}
+	check("21 pairs", []Body{c}, true)
+	// A7: a filtered view of 7 patients shown.
+	nar := HiddenWhole(Context{Period: octWeek, Filters: Filters{DimSex: "female"}})
+	seven := int64(7)
+	nar.Whole, nar.Patients = false, gd{Value: &seven}
+	check("A7 QuerySetMin", []Body{nar}, true)
 }

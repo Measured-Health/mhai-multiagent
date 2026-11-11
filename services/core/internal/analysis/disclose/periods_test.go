@@ -91,6 +91,9 @@ func attackAll(t *testing.T, w *attack.World, bodies []Body) *attack.Model {
 	for _, x := range m.SetViolations(order) {
 		t.Error(x)
 	}
+	for _, x := range m.ContractViolations() {
+		t.Error(x)
+	}
 	return m
 }
 
