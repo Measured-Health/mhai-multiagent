@@ -25,7 +25,9 @@ SHA_PIN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}")
 WRITE_VARIABLES = re.compile(r"MODEL_STORE_WRITER_|MHAI_MODELS_SIGNING_KEY")
 REHEARSAL_SWITCH = "${{ vars.MODEL_STORE_ENDPOINT == '' }}"
 REHEARSAL_STEP_IF = "env.REHEARSAL == 'true'"
-PRODUCTION_PREFIX = "${{ vars.MODEL_STORE_ENDPOINT != '' && "
+MAIN_DISPATCH = "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
+# A secret reaches a step only from main's dispatch, and only outside rehearsal mode.
+PRODUCTION_PREFIX = "${{ " + MAIN_DISPATCH + " && vars.MODEL_STORE_ENDPOINT != '' && "
 PROMOTE_CALL = re.compile(r"(\(|mhai-models\s+)promote\b")
 
 
@@ -229,6 +231,11 @@ def test_lock_check_is_an_ordinary_check_with_mains_lock_and_policy() -> None:
     assert 'git show "origin/$BASE_REF:models/trust-policy.json"' in runs
     assert '--base "$RUNNER_TEMP/main/models.lock"' in runs
     assert '--trust-policy "$TRUST_POLICY"' in runs
+    # rollbacks only to entries main pinned before; main's test splits and thresholds
+    assert 'git log --format=%H "origin/$BASE_REF" -- models.lock' in runs
+    assert '--history "$RUNNER_TEMP/main/history"' in runs
+    assert '--testsets "$TESTSETS"' in runs and '--thresholds-dir "$THRESHOLDS"' in runs
+    assert 'git show "origin/$BASE_REF:models/testsets.lock"' in runs
     assert "--rehearsal" not in runs
     secrets_named = re.findall(r"secrets\.([A-Z_]+)", yaml.safe_dump(job))
     assert sorted(secrets_named) == [
@@ -264,6 +271,7 @@ def test_promotion_is_a_dry_run_unless_given_the_dry_runs_files() -> None:
 def test_drive_token_is_read_only_and_production_only() -> None:
     job = _jobs("model-promote.yml")["promote"]
     drive = next(s for s in _steps(job) if s.get("id") == "drive")
+    assert drive["with"]["credentials_json"].startswith("${{ " + MAIN_DISPATCH + " && ")
     assert drive["if"] == "env.REHEARSAL == 'false' && env.SOURCE == 'drive'"
     assert drive["with"]["access_token_scopes"] == "https://www.googleapis.com/auth/drive.readonly"
     assert drive["with"]["create_credentials_file"] is False
@@ -352,6 +360,8 @@ def test_concurrency_set(name: str) -> None:
 @pytest.mark.parametrize("name", ["model-promote.yml", "model-testset.yml"])
 def test_dispatched_jobs_refuse_any_ref_but_main(name: str) -> None:
     for j, job in _jobs(name).items():
+        # The job itself runs only for main's dispatch; a branch gets no job, no secret.
+        assert job["if"] == MAIN_DISPATCH, (name, j)
         first = _steps(job)[0]
         assert first["name"] == "Main only", (name, j)
         assert first["env"] == {"REF": "${{ github.ref }}"}

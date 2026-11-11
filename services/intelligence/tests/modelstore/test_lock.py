@@ -298,7 +298,10 @@ def _check(
     *,
     policy: signing.TrustPolicy | None = None,
     rehearsal: bool = False,
+    history: list[lock.Lock] | None = None,
 ) -> dict[str, str]:
+    """lock_check with main's earlier locks in ``history`` (by default: the head, so a
+    version the head pins counts as pinned before)."""
     return lock.lock_check(
         lock.to_bytes(base),
         lock.to_bytes(head),
@@ -308,6 +311,7 @@ def _check(
         testsets_lock=TESTSETS,
         thresholds_dir=report.THRESHOLDS_DIR,
         rehearsal=rehearsal,
+        history=[lock.to_bytes(x) for x in (history if history is not None else [head])],
     )
 
 
@@ -759,6 +763,24 @@ def test_lock_check_rollback_is_verified_without_a_new_evaluation(
     assert r.reason in ("hash_mismatch", "size_mismatch")
 
 
+def test_never_pinned_older_version_is_not_a_rollback(
+    tmp_path: Path, keys: Keys, cache: Path
+) -> None:
+    """An older version main never pinned gets the full evaluation, not the rollback
+    shortcut: here its test split isn't in main's testsets.lock, so it is refused."""
+    st = MemoryStore()
+    old_split = f"clinical_document@1.0.0#{'ee' * 32}"
+    old = publish(st, tmp_path, keys, version="1.0.0", testset=old_split)
+    current = publish(st, tmp_path, keys, version="1.1.0", seed=8)
+    base, head = lock.Lock({ROLE: current.pin()}), lock.Lock({ROLE: old.pin()})
+    other_sha = lock.Lock({ROLE: lock.Pin(NAME, "1.0.0", "ab" * 32, "phase1")})
+    for history in ([], [base], [other_sha]):
+        r = _reason(lambda h=history: _check(st, keys, cache, base, head, history=h))
+        assert (r.reason, r.detail_code) == ("testset_mismatch", "not_locked")
+    # pinned on main before (the exact entry): a rollback
+    assert _check(st, keys, cache, base, head, history=[head, base]) == {ROLE: "rollback"}
+
+
 def test_lock_check_rollback_needs_a_signed_passing_version(
     tmp_path: Path, keys: Keys, cache: Path
 ) -> None:
@@ -1004,7 +1026,10 @@ def test_cli_pin_lock_check_and_rollback(
     assert cli.main(["pin", ROLE, "../x", "1.0.0", "--gate", "phase1", "--lock", str(path)]) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": "invalid_name"}
 
+    history = tmp_path / "history"
+    history.write_bytes(main_lock.read_bytes())
     check = ["lock-check", "--base", str(main_lock), "--head", str(path)]
+    check += ["--history", str(history)]
     assert cli.main(check) == 0
     assert json.loads(capsys.readouterr().out) == {"lock_check": "pass", "roles": {ROLE: "new"}}
     with pytest.raises(SystemExit):  # --base is required
@@ -1013,11 +1038,13 @@ def test_cli_pin_lock_check_and_rollback(
 
     # the PR that pinned 1.0.0 merged; a later PR moves to 1.1.0, then rolls back
     main_lock.write_bytes(path.read_bytes())
+    history.write_bytes(history.read_bytes() + path.read_bytes())
     assert cli.main(["pin", ROLE, NAME, "1.1.0", "--gate", "phase1", "--lock", str(path)]) == 0
     capsys.readouterr()
     assert cli.main(check) == 0
     assert json.loads(capsys.readouterr().out)["roles"] == {ROLE: "new"}
     main_lock.write_bytes(path.read_bytes())
+    history.write_bytes(history.read_bytes() + path.read_bytes())
     assert cli.main(["rollback", ROLE, "--lock", str(path)]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out == {
@@ -1025,6 +1052,9 @@ def test_cli_pin_lock_check_and_rollback(
     }
     assert cli.main(check) == 0
     assert json.loads(capsys.readouterr().out)["roles"] == {ROLE: "rollback"}
+    # without main's history the same change is a new pin, fully evaluated
+    assert cli.main(check[:-2]) == 0
+    assert json.loads(capsys.readouterr().out)["roles"] == {ROLE: "new"}
     assert cli.main(["rollback", ROLE, "--lock", str(path)]) == 2
     out = json.loads(capsys.readouterr().out)
     assert out == {"refused": "not_found", "detail": "no_candidate"}

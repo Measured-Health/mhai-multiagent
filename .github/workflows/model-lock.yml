@@ -6,8 +6,15 @@ name: Model lock check
 # a new version, its evaluation. A PR that changes no role passes at once, with no store
 # access. One reviewer approving the PR is the sign-off (TODO.md, "Before scale").
 #
-# The trust policy is main's when main has one, so a PR can't trust a key it adds in the
-# same change: a key change goes in its own PR, before any pin it signs.
+# The trust policy, the test-set lock and the thresholds are main's when main has them,
+# so a PR can't trust a key, a test split or a lower bar it adds in the same change. A
+# rollback counts as one only to an entry main pinned before (main's models.lock history,
+# from git); anything else is evaluated in full.
+#
+# Accepted startup risk (TODO.md, "Before scale"): this job runs the PR's own code, so a
+# PR that edits lock-check (or this file) can pass itself. The safety net is the reviewer
+# who approves the PR, and the AI service, which still verifies every pin's signature
+# against the deployed trust policy and every file's hash before it loads a model.
 
 on:
   pull_request:
@@ -46,12 +53,27 @@ jobs:
         working-directory: services/intelligence
         run: uv sync --locked
 
-      - name: Main's lock and trust policy
+      - name: Main's lock, its history, trust policy, test splits and thresholds
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
           base="$RUNNER_TEMP/main"
           mkdir -p "$base"
+          # Every models.lock main has held, one per line (a deletion leaves no line).
+          git log --format=%H "origin/$BASE_REF" -- models.lock | while read -r c; do
+            git show "$c:models.lock" 2>/dev/null || true
+          done >"$base/history"
+          if git show "origin/$BASE_REF:models/testsets.lock" >"$base/testsets.lock" 2>/dev/null; then
+            echo "TESTSETS=$base/testsets.lock" >>"$GITHUB_ENV"
+          else
+            echo "TESTSETS=$GITHUB_WORKSPACE/models/testsets.lock" >>"$GITHUB_ENV"
+          fi
+          thresholds=services/intelligence/intelligence/doceval/thresholds
+          if git archive "origin/$BASE_REF" "$thresholds" 2>/dev/null | tar -x -C "$base"; then
+            echo "THRESHOLDS=$base/$thresholds" >>"$GITHUB_ENV"
+          else
+            echo "THRESHOLDS=$GITHUB_WORKSPACE/$thresholds" >>"$GITHUB_ENV"
+          fi
           # No models.lock on main yet: the empty lock (nothing pinned).
           git show "origin/$BASE_REF:models.lock" >"$base/models.lock" 2>/dev/null ||
             printf '%s\n' '{"models":{},"schema":"mhai.models.lock/1"}' >"$base/models.lock"
@@ -75,7 +97,10 @@ jobs:
           out="$(uv run --no-sync mhai-models lock-check \
             --base "$RUNNER_TEMP/main/models.lock" \
             --head "$GITHUB_WORKSPACE/models.lock" \
-            --trust-policy "$TRUST_POLICY")" || code=$?
+            --history "$RUNNER_TEMP/main/history" \
+            --trust-policy "$TRUST_POLICY" \
+            --testsets "$TESTSETS" \
+            --thresholds-dir "$THRESHOLDS")" || code=$?
           printf '%s\n' "$out"
           { echo '### lock-check'; echo '```json'; printf '%s\n' "$out"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           exit "$code"

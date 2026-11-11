@@ -64,6 +64,8 @@ concurrency:
 
 jobs:
   promote:
+    # Main only: the repository secrets below reach this job from main's dispatch only.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -155,7 +157,7 @@ jobs:
         if: env.REHEARSAL == 'false' && env.SOURCE == 'drive'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
-          credentials_json: ${{ secrets.MODEL_DRIVE_SA_KEY }}
+          credentials_json: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && secrets.MODEL_DRIVE_SA_KEY || '' }}
           token_format: access_token
           access_token_scopes: https://www.googleapis.com/auth/drive.readonly
           create_credentials_file: false
@@ -169,11 +171,11 @@ jobs:
           P_REGION: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_REGION || '' }}
           P_DRIVE_FOLDER: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_DRIVE_FOLDER_ID || '' }}
           P_DRIVE_TOKEN: ${{ steps.drive.outputs.access_token }}
-          P_READER_ACCESS: ${{ vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_READER_ACCESS_KEY || '' }}
-          P_READER_SECRET: ${{ vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_READER_SECRET_KEY || '' }}
-          P_WRITER_ACCESS: ${{ vars.MODEL_STORE_ENDPOINT != '' && inputs.expect_files != '' && secrets.MODEL_STORE_WRITER_ACCESS_KEY || '' }}
-          P_WRITER_SECRET: ${{ vars.MODEL_STORE_ENDPOINT != '' && inputs.expect_files != '' && secrets.MODEL_STORE_WRITER_SECRET_KEY || '' }}
-          P_SIGNING_KEY: ${{ vars.MODEL_STORE_ENDPOINT != '' && inputs.expect_files != '' && secrets.MHAI_MODELS_SIGNING_KEY || '' }}
+          P_READER_ACCESS: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_READER_ACCESS_KEY || '' }}
+          P_READER_SECRET: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_READER_SECRET_KEY || '' }}
+          P_WRITER_ACCESS: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && inputs.expect_files != '' && secrets.MODEL_STORE_WRITER_ACCESS_KEY || '' }}
+          P_WRITER_SECRET: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && inputs.expect_files != '' && secrets.MODEL_STORE_WRITER_SECRET_KEY || '' }}
+          P_SIGNING_KEY: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && inputs.expect_files != '' && secrets.MHAI_MODELS_SIGNING_KEY || '' }}
         run: |
           if [ "$REHEARSAL" != true ]; then
             export MODEL_STORE_ENDPOINT="$P_ENDPOINT" MODEL_STORE_BUCKET="$P_BUCKET"

@@ -272,12 +272,21 @@ stage keys make_keys "$T/keys"
 build_testset "$SIGNER" "$TESTSETS"
 say testset "$(python3 -I -c 'import json,sys; print(json.dumps({"lock_line": sys.argv[1].strip()}))' "$(cat "$TESTSETS")")"
 printf '{"models":{},"schema":"mhai.models.lock/1"}\n' >"$LOCK"
+: >"$T/history"
 
 # ---------------------------------------------------------------- one model version
 
-# lock_check BASE HEAD STAGE: the PR's lock-check, main's lock against the PR's.
+# lock_check BASE HEAD STAGE: the PR's lock-check, main's lock against the PR's, with
+# every lock main has held ($T/history) to tell a rollback from a new pin.
 lock_check() {
-  stage "$3" as_role READER mhai-models lock-check --base "$1" --head "$2" --rehearsal
+  stage "$3" as_role READER mhai-models lock-check --base "$1" --head "$2" \
+    --history "$T/history" --rehearsal
+}
+
+# merged: the PR's lock becomes main's, and joins main's history.
+merged() {
+  cp "$LOCK" "$T/main.lock"
+  cat "$LOCK" >>"$T/history"
 }
 
 # release VERSION RUN VARIANT: fixture -> dry run -> promote -> pin (the PR) ->
@@ -299,7 +308,7 @@ release() {
     MHAI_MODELS_SIGNER="$SIGNER" \
     "${split[@]}" "${promote[@]}" --expect-files "$files"
 
-  cp "$LOCK" "$T/main.lock"
+  merged
   stage "pin-$version" as_role READER mhai-models pin "$ROLE" "$NAME" "$version" \
     --gate "$GATE" --lock "$LOCK" --rehearsal
   lock_check "$T/main.lock" "$LOCK" "lock-check-$version"
@@ -381,7 +390,7 @@ load load-0.2.0 "$LOCK"
 
 # Roll back to 0.1.0 by PR: rollback writes the lock, lock-check takes it as a rollback,
 # and the pipeline loads 0.1.0.
-cp "$LOCK" "$T/main.lock"
+merged
 stage rollback as_role READER mhai-models rollback "$ROLE" --lock "$LOCK" --rehearsal
 lock_check "$T/main.lock" "$LOCK" lock-check-rollback
 load load-rollback "$LOCK"

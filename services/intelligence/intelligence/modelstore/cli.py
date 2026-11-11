@@ -13,7 +13,8 @@ Commands::
     mhai-models make-fixture DIR [--variant V] [--seed N] [--name NAME]
     mhai-models store-init
     mhai-models pin ROLE NAME VERSION --gate phase1|phase3 [--lock PATH [--rehearsal]]
-    mhai-models lock-check --base MAIN_LOCK [--head LOCK] [--trust-policy FILE] [--rehearsal]
+    mhai-models lock-check --base MAIN_LOCK [--head LOCK] [--history FILE]
+        [--trust-policy FILE] [--testsets FILE] [--thresholds-dir DIR] [--rehearsal]
     mhai-models rollback ROLE [--to VERSION] [--lock PATH] [--rehearsal]
 
 The store is any S3-compatible bucket: ``MODEL_STORE_ENDPOINT`` (TLS unless loopback),
@@ -80,7 +81,10 @@ compares ``--base`` (``main``'s ``models.lock``) with ``--head`` (the PR's, by d
 ``models.lock``) and verifies every changed role as the reader. ``--trust-policy`` (the
 workflow passes ``main``'s copy when ``main`` has one) overrides ``MHAI_MODELS_TRUST_POLICY``.
 It prints ``{"lock_check": "pass", "roles": {role: new|rollback|removed}}``; a lock with no
-changed role needs no store access. Verified files go to ``MHAI_MODELS_CACHE`` when set,
+changed role needs no store access. ``--history`` holds every ``models.lock`` main has
+had, one per line (the workflow writes it from ``git log``): a rollback must be to an
+entry pinned there before; anything else gets the full evaluation, against
+``--testsets`` and ``--thresholds-dir`` (the workflow passes main's copies). Verified files go to ``MHAI_MODELS_CACHE`` when set,
 else to a private temporary folder removed afterwards.
 
 ``rollback ROLE`` (:func:`intelligence.modelstore.lock.rollback`) pins ``ROLE`` to the latest
@@ -123,6 +127,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from intelligence.doceval.report import THRESHOLDS_DIR
 from intelligence.modelstore import (
     canonical,
     files,
@@ -442,6 +447,24 @@ def _pin(args: argparse.Namespace) -> int:
     return 0
 
 
+MAX_HISTORY_BYTES = 16 * 1024 * 1024
+
+
+def _history(path: str | None) -> list[bytes]:
+    """The locks main has held, one canonical lock per line (none without a file)."""
+    if not path:
+        return []
+    failed = False
+    raw = b""
+    try:
+        raw = files.read_regular(path, MAX_HISTORY_BYTES)
+    except Refused:
+        failed = True
+    if failed:
+        raise Refused("lock_invalid", detail_code="history")
+    return [line + b"\n" for line in raw.split(b"\n") if line.strip()]
+
+
 def _lock_check(args: argparse.Namespace) -> int:
     rehearsal = bool(args.rehearsal)
     lock.check_rehearsal(rehearsal)
@@ -452,9 +475,11 @@ def _lock_check(args: argparse.Namespace) -> int:
     if not lock.changed_roles(base, head):
         _print({"lock_check": "pass", "roles": {}})
         return 0
+    history = _history(args.history)
     source = _reader_store()
     policy = _trust_policy(args.trust_policy)
-    locked = _testsets_lock()
+    locked = _testsets_lock(args.testsets)
+    thresholds = Path(args.thresholds_dir) if args.thresholds_dir else THRESHOLDS_DIR
     with _cache() as cache_dir:
         roles = lock.lock_check(
             lock.to_bytes(base),
@@ -463,7 +488,9 @@ def _lock_check(args: argparse.Namespace) -> int:
             policy=policy,
             cache_dir=cache_dir,
             testsets_lock=locked,
+            thresholds_dir=thresholds,
             rehearsal=rehearsal,
+            history=history,
         )
     _print({"lock_check": "pass", "roles": roles})
     return 0
@@ -709,6 +736,9 @@ def _parser() -> argparse.ArgumentParser:
     lc.add_argument("--base", required=True)
     lc.add_argument("--head", default=None)
     lc.add_argument("--trust-policy", default=None)
+    lc.add_argument("--history", default=None)
+    lc.add_argument("--testsets", default=None)
+    lc.add_argument("--thresholds-dir", default=None)
     lc.add_argument("--rehearsal", action="store_true")
     lc.set_defaults(func=_lock_check)
     rb = sub.add_parser("rollback", help="pin a role back to an earlier verified version")

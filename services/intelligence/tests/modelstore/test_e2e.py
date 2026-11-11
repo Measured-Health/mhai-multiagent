@@ -160,6 +160,17 @@ class Flow:
         return self.root / "main.lock"
 
     @property
+    def history(self) -> Path:
+        """Every lock ``main`` has held, one per line."""
+        return self.root / "history"
+
+    def merged(self) -> None:
+        """The PR's lock becomes main's and joins its history."""
+        self.main_lock.write_bytes(self.lock.read_bytes())
+        with self.history.open("ab") as fh:
+            fh.write(self.lock.read_bytes())
+
+    @property
     def policy(self) -> Path:
         return self.root / "trust-policy.json"
 
@@ -211,6 +222,8 @@ class Flow:
             str(self.main_lock),
             "--head",
             str(self.lock),
+            "--history",
+            str(self.history),
             "--rehearsal",
             *extra,
         ]
@@ -348,7 +361,7 @@ def _release(
         MHAI_MODELS_SIGNER=f.key,
         **split,
     )
-    f.main_lock.write_bytes(f.lock.read_bytes())
+    f.merged()
     out["pin"] = f.json(
         ["pin", ROLE, f.name, version, "--gate", GATE, "--lock", str(f.lock), "--rehearsal"],
         ("reader",),
@@ -406,7 +419,7 @@ def test_e2e_promotion_flow(flow: Flow, caplog: pytest.LogCaptureFixture) -> Non
 
     # Roll back to 0.1.0 by PR: rollback writes the lock, lock-check takes it as a
     # rollback, and the pipeline loads it.
-    f.main_lock.write_bytes(f.lock.read_bytes())
+    f.merged()
     rollback = f.json(["rollback", ROLE, "--lock", str(f.lock), "--rehearsal"], ("reader",))
     lock_check_rollback = f.json(f.lock_check(), ("reader",))
     loaded_rollback = f.load(f.lock)

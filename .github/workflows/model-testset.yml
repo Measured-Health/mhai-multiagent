@@ -33,6 +33,8 @@ concurrency:
 
 jobs:
   testset-build:
+    # Main only: the repository secrets below reach this job from main's dispatch only.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -103,9 +105,9 @@ jobs:
           P_ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_ENDPOINT || '' }}
           P_BUCKET: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_BUCKET || '' }}
           P_REGION: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_REGION || '' }}
-          P_WRITER_ACCESS: ${{ vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_WRITER_ACCESS_KEY || '' }}
-          P_WRITER_SECRET: ${{ vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_WRITER_SECRET_KEY || '' }}
-          P_SIGNING_KEY: ${{ vars.MODEL_STORE_ENDPOINT != '' && secrets.MHAI_MODELS_SIGNING_KEY || '' }}
+          P_WRITER_ACCESS: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_WRITER_ACCESS_KEY || '' }}
+          P_WRITER_SECRET: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_WRITER_SECRET_KEY || '' }}
+          P_SIGNING_KEY: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && secrets.MHAI_MODELS_SIGNING_KEY || '' }}
         run: |
           if [ "$REHEARSAL" != true ]; then
             export MODEL_STORE_ENDPOINT="$P_ENDPOINT" MODEL_STORE_BUCKET="$P_BUCKET"

@@ -40,7 +40,8 @@ the lock on ``main`` (the base) with the PR's lock (the head). Every head entry 
 
 * **new version** (no base pin, another model, or a later version of the same model):
   verified as for ``pin``, evaluation included;
-* **rollback** (an earlier version of the base pin's model): verified (signature, every
+* **rollback** (an earlier version of the base pin's model whose exact entry ``main``
+  pinned for this role before, from ``main``'s ``models.lock`` history): verified (signature, every
   file's hash, the gate's ``pass`` in the signed manifest, measured on the ``test``
   split). Its evaluation was checked
   when it was first pinned, and a promotion signs only what it evaluated, so it is not
@@ -75,7 +76,7 @@ import hashlib
 import os
 import re
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -446,12 +447,33 @@ def check_dependencies(head: Lock, manifests: Mapping[str, manifest.Manifest]) -
             note(d.name, d.version, d.manifest_sha256)
 
 
-def _is_rollback(old: Pin | None, entry: Pin) -> bool:
-    """An earlier version of the model the base pins for this role."""
+def pinned_before(history: Iterable[bytes]) -> frozenset[tuple[str, Pin]]:
+    """Every ``(role, entry)`` a lock in ``history`` (the locks ``main`` has held, from
+    git) pinned. A lock that doesn't parse is ``lock_invalid``/``history``."""
+    out: set[tuple[str, Pin]] = set()
+    for raw in history:
+        failed = False
+        try:
+            past = parse(raw)
+        except Refused:
+            failed = True
+        if failed:
+            raise _invalid("history")
+        out.update(past.models.items())
+    return frozenset(out)
+
+
+def _is_rollback(
+    old: Pin | None, role: str, entry: Pin, before: frozenset[tuple[str, Pin]]
+) -> bool:
+    """An earlier version of the model the base pins for this role, whose exact entry
+    (name, version, manifest hash, gate) ``main`` pinned for this role before. Anything
+    else is a new version and gets the full evaluation."""
     return (
         old is not None
         and old.name == entry.name
         and names.Version.parse(entry.version) < names.Version.parse(old.version)
+        and (role, entry) in before
     )
 
 
@@ -465,14 +487,17 @@ def lock_check(
     testsets_lock: Mapping[tuple[str, str], TestsetEntry],
     thresholds_dir: Path | str = THRESHOLDS_DIR,
     rehearsal: bool = False,
+    history: Iterable[bytes] = (),
 ) -> dict[str, str]:
     """Check a PR's change to ``models.lock`` (see the module docstring); returns
     ``{role: new|rollback|removed}``. ``base_raw`` is ``main``'s lock (the empty lock
-    when ``main`` has none), ``head_raw`` the PR's. ``rehearsal`` (development only)
+    when ``main`` has none), ``head_raw`` the PR's, ``history`` every lock ``main`` has
+    held (a rollback must be to an entry pinned there before). ``rehearsal`` (development only)
     allows fixture names and the rehearsal gate (:func:`check_production`). Raises
     :class:`Refused` on any failure."""
     check_rehearsal(rehearsal)
     base, head = parse(base_raw), parse(head_raw)
+    before = pinned_before(history)
     for role, pinned in head.models.items():
         check_production(role, pinned, rehearsal=rehearsal)
     roles = changed_roles(base, head)
@@ -488,7 +513,7 @@ def lock_check(
             continue
         m = verify.verify_pin(source, role, entry, policy, cache_dir).manifest
         manifests[role] = m
-        if _is_rollback(base.models.get(role), entry):
+        if _is_rollback(base.models.get(role), role, entry, before):
             check_test_split(m)
             out[role] = "rollback"
             continue
@@ -708,6 +733,7 @@ __all__ = [
     "lock_check",
     "parse",
     "parse_base_pin",
+    "pinned_before",
     "pin",
     "read",
     "rollback",
