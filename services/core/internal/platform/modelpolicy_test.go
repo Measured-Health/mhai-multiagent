@@ -26,6 +26,7 @@ func TestModelPolicyBodyRules(t *testing.T) {
 		`{"cloud_provider":"anthropic","agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":2000000}`,
 		`{"cloud_provider":"openai","agreement_ref":"DPA-2026-11","monthly_token_budget":1}`,
 		`{"cloud_provider":"xai","agreement_ref":"AGR-2026-12345678","monthly_token_budget":1000000000,"mfa_code":"123456"}`,
+		`{"cloud_provider":"gemini","agreement_ref":"DPA-2026-0007","monthly_token_budget":5}`,
 		`{"cloud_provider":null,"agreement_ref":null,"monthly_token_budget":5}`,
 		`{"cloud_provider":null,"monthly_token_budget":5,"backup_code":"synthetic"}`,
 	} {
@@ -42,7 +43,7 @@ func TestModelPolicyBodyRules(t *testing.T) {
 		"unknown key":           `{"cloud_provider":null,"monthly_token_budget":5,"model":"x"}`,
 		"no provider key":       `{"agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5}`,
 		"no budget":             `{"cloud_provider":null}`,
-		"unknown provider":      `{"cloud_provider":"gemini","agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5}`,
+		"unknown provider":      `{"cloud_provider":"mistral","agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5}`,
 		"provider as none":      `{"cloud_provider":"none","monthly_token_budget":5}`,
 		"empty provider":        `{"cloud_provider":"","monthly_token_budget":5}`,
 		"provider without ref":  `{"cloud_provider":"anthropic","monthly_token_budget":5}`,

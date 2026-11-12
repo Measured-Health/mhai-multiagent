@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Cloud model providers: Google Gemini as a fourth provider (OpenAPI 1.16.0,
+  migration 00025; off by default). The worker's `gemini_adapter` calls
+  Google's OpenAI-compatible endpoint
+  (`generativelanguage.googleapis.com/v1beta/openai`) with the openai SDK,
+  under the same gate, egress scan (exact header list, every leaf pinned),
+  budget reservation, strict reply check, `max_retries=0` and no redirects
+  as the other adapters; a bad key (400 `API_KEY_INVALID`) is `auth_failed`.
+  The model comes from `INTELLIGENCE_CLOUD_GEMINI_MODEL`. The worker warns at
+  start unless `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified` (the key must be
+  on a paid, billing-enabled project: free-tier prompts may be used by
+  Google). `gemini` joins every closed set: core's providers, the route,
+  `mhai_cloud_reserve`, the audit and fact schemas, the CLI and the
+  `PUT .../model-policy` request. Response enums can't widen in /api/v1
+  (ADR 0012), so `ModelPolicy` and `generated_by` gain `provider_code` (a
+  string with documented values, any provider); `cloud_provider` and
+  `generated_by.provider` keep their enums and are null for gemini.
+  Migration 00025 is numbered after Patient Analysis PR 4's 00024.
 - Document pipeline phase 0, part B: model promotion, the lean version
   (`services/intelligence/intelligence/modelstore/`, the `mhai-models` CLI).
   File checks for a trained run (safetensors only, a fixed list of JSON

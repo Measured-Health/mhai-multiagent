@@ -9,6 +9,9 @@ after:
         --provider anthropic --model claude-opus-5-5 --key-stdin \\
         [--record tests/fixtures/cloud/anthropic/recorded/]
 
+--provider is any of vocab.PROVIDERS (anthropic, gemini, openai, xai);
+--model is the exact model id the deployment will configure.
+
 The key is pasted at the prompt (getpass) or piped as one line on standard
 input. There is no option to read it from a file or the environment, and
 none that loads code or a transport.
@@ -18,8 +21,14 @@ retriever over three fixed synthetic guideline chunks, a budget capped at
 three attempts, a direct TLS connection (verified, no proxy, no redirects),
 and one fixed synthetic question and patient. It prints only the provider,
 the outcome, the versions, token counts (and the reply's numeric usage
-fields), the xAI retention header and whether the answer validated: never
-the question, the chunks, the answer or the key. --record writes the reply,
+fields), the xAI retention header, for gemini the reply's shape codes (the
+object, the finish reason and whether a model id came back: what the
+adapter's mapping assumes of Google's OpenAI-compatible endpoint), and
+whether the answer validated: never the question, the chunks, the answer
+or the key.
+
+For gemini, use a key from a paid, billing-enabled Google project (a
+free-tier key's prompts may be used by Google): deploy/README.md. --record writes the reply,
 scrubbed (scripts/scrub_cloud_fixture.py), for the adapter tests.
 
 Exit codes: 0 the outcome was ok; 1 another outcome; 2 refused.
@@ -200,6 +209,40 @@ def _usage(body: bytes) -> dict[str, int]:
     return out
 
 
+# The codes _chat_shape prints; anything else prints as "other".
+CHAT_OBJECTS = ("chat.completion",)
+CHAT_FINISH = ("content_filter", "length", "stop", "tool_calls")
+
+
+def _chat_shape(body: bytes) -> list[str]:
+    """A Chat Completions reply's shape, as closed codes (no text): the
+    object, the first choice's finish reason, how many choices, and whether
+    a model id came back."""
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict):
+        return ["reply_object=missing", "finish_reason=missing", "choices=0", "model_present=no"]
+    obj = doc.get("object")
+    choices = doc.get("choices") if isinstance(doc.get("choices"), list) else []
+    first = choices[0] if choices and isinstance(choices[0], dict) else {}
+    finish = first.get("finish_reason")
+
+    def code(v: object, known: tuple[str, ...]) -> str:
+        if v is None:
+            return "missing"
+        return v if isinstance(v, str) and v in known else "other"
+
+    model = doc.get("model")
+    return [
+        f"reply_object={code(obj, CHAT_OBJECTS)}",
+        f"finish_reason={code(finish, CHAT_FINISH)}",
+        f"choices={min(len(choices), 9)}",
+        f"model_present={'yes' if isinstance(model, str) and model else 'no'}",
+    ]
+
+
 def _load_scrubber() -> Any:
     spec = importlib.util.spec_from_file_location(
         "_scrub_cloud_fixture", HERE / "scrub_cloud_fixture.py"
@@ -257,13 +300,16 @@ def _run(args: argparse.Namespace, key: Any, transport: Any, out: IO[str]) -> in
     last = recording.last
     usage = _usage(last[2]) if last is not None else {}
     lines += [f"{k}={v}" for k, v in sorted(usage.items())]
+    if provider == "gemini":
+        lines += _chat_shape(last[2] if last is not None else b"")
+    if provider in ("gemini", "xai"):
+        prompt, total = usage.get("usage.prompt_tokens"), usage.get("usage.total_tokens")
+        if prompt is not None and total is not None:
+            lines.append(f"over_cap={'yes' if total - prompt > MAX_OUTPUT_TOKENS else 'no'}")
     if provider == "xai":
         header = last[1].get("x-zero-data-retention") if last is not None else None
         shown = "missing" if header is None else header.strip().lower()
         lines.append(f"retention_header={shown if shown in ('true', 'false') else 'other'}")
-        prompt, total = usage.get("usage.prompt_tokens"), usage.get("usage.total_tokens")
-        if prompt is not None and total is not None:
-            lines.append(f"over_cap={'yes' if total - prompt > MAX_OUTPUT_TOKENS else 'no'}")
     lines.append(f"answer_validated={'yes' if outcome == 'ok' and g.available else 'no'}")
     print("\n".join(lines), file=out)
 

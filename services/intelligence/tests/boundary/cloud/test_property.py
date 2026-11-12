@@ -151,13 +151,19 @@ def _leaks(body: bytes, values: list[Any]) -> list[str]:
 # The real adapters (plan Tasks 11 to 13): provider -> its adapter class.
 def _adapters() -> dict[str, Any]:
     from intelligence.boundary.cloud.anthropic_adapter import AnthropicAdapter
+    from intelligence.boundary.cloud.gemini_adapter import GeminiAdapter
     from intelligence.boundary.cloud.openai_adapter import OpenAIAdapter
     from intelligence.boundary.cloud.xai_adapter import XaiAdapter
 
-    return {"anthropic": AnthropicAdapter, "openai": OpenAIAdapter, "xai": XaiAdapter}
+    return {
+        "anthropic": AnthropicAdapter,
+        "gemini": GeminiAdapter,
+        "openai": OpenAIAdapter,
+        "xai": XaiAdapter,
+    }
 
 
-KINDS = ("fake", "anthropic", "openai", "xai")
+KINDS = ("fake", "anthropic", "gemini", "openai", "xai")
 
 
 def _cloud(kind: str) -> tuple[rq.CloudFake, str]:

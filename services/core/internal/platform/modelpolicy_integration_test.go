@@ -24,7 +24,7 @@ import (
 
 // Cloud model providers plan, Task 2: GET and PUT
 // /platform/hospitals/{id}/model-policy through core's whole chain. The
-// test server enables anthropic and openai (testCloudProviders), not xai.
+// test server enables anthropic, gemini and openai (testCloudProviders), not xai.
 // Every id, name and reference here is synthetic.
 
 func policyPath(hid uuid.UUID) string { return "/platform/hospitals/" + hid.String() + "/model-policy" }
@@ -109,7 +109,7 @@ func policyAudits(t *testing.T, hid uuid.UUID) []policyAudit {
 	return out
 }
 
-var policyKeys = []string{"hospital_id", "cloud_provider", "agreement_ref", "monthly_token_budget", "updated_at", "usage"}
+var policyKeys = []string{"hospital_id", "cloud_provider", "provider_code", "agreement_ref", "monthly_token_budget", "updated_at", "usage"}
 
 func thisMonth() string { return time.Now().UTC().Format("2006-01") }
 
@@ -166,7 +166,7 @@ func TestModelPolicyGetDefaultsAndUsage(t *testing.T) {
 	r := get(t, policyPath(h), tok)
 	ok(t, "GET", r)
 	checkPolicyShape(t, "GET", r, h)
-	if r.body["cloud_provider"] != nil || r.body["agreement_ref"] != nil || r.body["updated_at"] != nil ||
+	if r.body["cloud_provider"] != nil || r.body["provider_code"] != nil || r.body["agreement_ref"] != nil || r.body["updated_at"] != nil ||
 		r.body["monthly_token_budget"] != float64(platform.DefaultMonthlyTokenBudget) {
 		t.Errorf("defaults: %s", r.raw)
 	}
@@ -249,7 +249,7 @@ func TestModelPolicyPutStrictBody(t *testing.T) {
 		"pseudonym ref":        `{"cloud_provider":"openai","agreement_ref":"P-AB12CD34","monthly_token_budget":5,"backup_code":"` + code + `"}`,
 		"name ref":             `{"cloud_provider":"openai","agreement_ref":"ADAEZE-OKAFOR","monthly_token_budget":5,"backup_code":"` + code + `"}`,
 		"ref while off":        `{"cloud_provider":null,"agreement_ref":"AGR-2026-01","monthly_token_budget":5,"backup_code":"` + code + `"}`,
-		"unknown provider":     `{"cloud_provider":"gemini","agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5,"backup_code":"` + code + `"}`,
+		"unknown provider":     `{"cloud_provider":"mistral","agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5,"backup_code":"` + code + `"}`,
 		"no provider key":      `{"monthly_token_budget":5,"backup_code":"` + code + `"}`,
 		"not json":             `cloud_provider=anthropic`,
 	} {
@@ -274,7 +274,7 @@ func TestModelPolicyPutAuditsClosedPayload(t *testing.T) {
 	r := putPolicy(t, tok, h, policyBody("anthropic", "DEMO-SYNTHETIC", 3000000, backupCode(t, admin)))
 	ok(t, "anthropic", r)
 	checkPolicyShape(t, "anthropic", r, h)
-	if r.body["cloud_provider"] != "anthropic" || r.body["agreement_ref"] != "DEMO-SYNTHETIC" ||
+	if r.body["cloud_provider"] != "anthropic" || r.body["provider_code"] != "anthropic" || r.body["agreement_ref"] != "DEMO-SYNTHETIC" ||
 		r.body["monthly_token_budget"] != float64(3000000) || r.body["updated_at"] == nil {
 		t.Errorf("reply: %s", r.raw)
 	}
@@ -290,7 +290,7 @@ func TestModelPolicyPutAuditsClosedPayload(t *testing.T) {
 	ok(t, "openai", putPolicy(t, tok, h, policyBody("openai", "DPA-2026-0042", 3000000, backupCode(t, admin))))
 	r = putPolicy(t, tok, h, policyBody("", "", 3000000, backupCode(t, admin)))
 	ok(t, "off", r)
-	if r.body["cloud_provider"] != nil || r.body["agreement_ref"] != nil {
+	if r.body["cloud_provider"] != nil || r.body["provider_code"] != nil || r.body["agreement_ref"] != nil {
 		t.Errorf("off: %s", r.raw)
 	}
 	if p, ref, _, _, found := policyRow(t, h); !found || p != nil || ref != nil {
@@ -404,5 +404,33 @@ func TestModelPolicyConcurrentPutsChainPrevious(t *testing.T) {
 		if p, _, _, _, _ := policyRow(t, h); p == nil || *p != second["provider"] {
 			t.Errorf("round %d: stored %v, last audited %v", round, p, second["provider"])
 		}
+	}
+}
+
+// Gemini: the policy is written and audited like any provider, and the
+// reply reports it in provider_code. cloud_provider, whose openapi 1.x
+// enum can't name it (ADR 0012: a response enum doesn't widen in /api/v1),
+// is null; the GET answers the same.
+func TestModelPolicyPutGeminiReportsProviderCode(t *testing.T) {
+	h := seedHospital(t, "active")
+	admin := platformAdmin(t)
+	tok := mint(t, admin)
+	r := putPolicy(t, tok, h, policyBody("gemini", "DPA-2026-0007", 4000, backupCode(t, admin)))
+	ok(t, "gemini", r)
+	checkPolicyShape(t, "gemini", r, h)
+	if r.body["provider_code"] != "gemini" || r.body["cloud_provider"] != nil || r.body["agreement_ref"] != "DPA-2026-0007" {
+		t.Errorf("reply: %s", r.raw)
+	}
+	g := get(t, policyPath(h), tok)
+	ok(t, "GET", g)
+	if g.raw != r.raw {
+		t.Errorf("PUT answered %s, GET %s", r.raw, g.raw)
+	}
+	if p, _, _, _, found := policyRow(t, h); !found || p == nil || *p != "gemini" {
+		t.Errorf("row provider %v", p)
+	}
+	a := policyAudits(t, h)
+	if len(a) != 1 || a[0].payload["provider"] != "gemini" || a[0].payload["previous"] != "none" {
+		t.Errorf("audit rows %+v", a)
 	}
 }

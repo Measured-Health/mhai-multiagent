@@ -549,7 +549,7 @@ func TestLoadAllowSingleNode(t *testing.T) {
 
 // CORE_CLOUD_PROVIDERS (cloud model providers plan, Task 2): empty by
 // default (a fresh deployment enables no provider); a comma list of
-// openai, anthropic and xai, each at most once; anything else refuses the
+// openai, anthropic, xai and gemini, each at most once; anything else refuses the
 // start, naming the variable and never its value.
 func TestConfigCloudProviders(t *testing.T) {
 	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
@@ -566,11 +566,13 @@ func TestConfigCloudProviders(t *testing.T) {
 		return e
 	}
 	for v, want := range map[string]string{
-		"anthropic":            "anthropic",
-		"openai,anthropic":     "anthropic,openai",
-		" xai , openai ":       "openai,xai",
-		"openai,anthropic,xai": "anthropic,openai,xai",
-		"   ":                  "",
+		"anthropic":                   "anthropic",
+		"openai,anthropic":            "anthropic,openai",
+		" xai , openai ":              "openai,xai",
+		"openai,anthropic,xai":        "anthropic,openai,xai",
+		"gemini":                      "gemini",
+		"xai,gemini,openai,anthropic": "anthropic,gemini,openai,xai",
+		"   ":                         "",
 	} {
 		setEnv(t, with(v))
 		c, err := Load()
@@ -578,7 +580,7 @@ func TestConfigCloudProviders(t *testing.T) {
 			t.Errorf("%q: %v %v, want %s", v, c.CloudProviders, err, want)
 		}
 	}
-	for _, bad := range []string{"gemini-SYNTH", "openai,openai", "OpenAI", "openai,", ",xai", "openai;xai", "local", "none"} {
+	for _, bad := range []string{"gemini-SYNTH", "Gemini", "gemini,gemini", "google", "openai,openai", "OpenAI", "openai,", ",xai", "openai;xai", "local", "none"} {
 		setEnv(t, with(bad))
 		_, err := Load()
 		if err == nil || !strings.Contains(err.Error(), "CORE_CLOUD_PROVIDERS") || strings.Contains(err.Error(), bad) {

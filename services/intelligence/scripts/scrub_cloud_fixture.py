@@ -46,7 +46,7 @@ _ACCOUNT_KEYS = frozenset(
 _PREFIX = re.compile(r"^([a-z]{2,10}[_-])")
 
 # Strings that must never be in a fixture.
-_KEY_SHAPE = re.compile(r"(?<![A-Za-z0-9_-])(?:sk-ant-|sk-|xai-)[A-Za-z0-9_-]{8,}")
+_KEY_SHAPE = re.compile(r"(?<![A-Za-z0-9_-])(?:sk-ant-|sk-|xai-|AIza)[A-Za-z0-9_-]{8,}")
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{8,}")
 _ACCOUNT_ID = re.compile(r"(?<![A-Za-z0-9])(?:org|proj|user|ws|wrkspc)[-_][A-Za-z0-9]{8,}")
 

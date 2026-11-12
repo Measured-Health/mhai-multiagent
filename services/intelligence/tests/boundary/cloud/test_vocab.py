@@ -16,9 +16,15 @@ def test_vocab_lists_are_closed_and_sorted() -> None:
         values = getattr(vocab, name)
         assert isinstance(values, tuple), name
         assert list(values) == sorted(set(values)), name
-    assert vocab.PROVIDERS == ("anthropic", "openai", "xai")
-    assert vocab.ROUTES == ("cloud:anthropic", "cloud:openai", "cloud:xai", "local")
-    assert vocab.EGRESS == ("anthropic", "none", "openai", "xai")
+    assert vocab.PROVIDERS == ("anthropic", "gemini", "openai", "xai")
+    assert vocab.ROUTES == (
+        "cloud:anthropic",
+        "cloud:gemini",
+        "cloud:openai",
+        "cloud:xai",
+        "local",
+    )
+    assert vocab.EGRESS == ("anthropic", "gemini", "none", "openai", "xai")
     assert set(vocab.OUTCOMES) == {
         "ok",
         "egress_blocked",
@@ -39,11 +45,13 @@ def test_vocab_lists_are_closed_and_sorted() -> None:
 def test_base_urls_and_hosts_are_fixed() -> None:
     assert dict(vocab.BASE_URLS) == {
         "anthropic": "https://api.anthropic.com",
+        "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
         "openai": "https://api.openai.com/v1",
         "xai": "https://api.x.ai/v1",
     }
     assert dict(vocab.HOSTS) == {
         "anthropic": "api.anthropic.com",
+        "gemini": "generativelanguage.googleapis.com",
         "openai": "api.openai.com",
         "xai": "api.x.ai",
     }

@@ -438,7 +438,8 @@ provider key and its zero-data-retention reference (TODO H1, H5).
    and copy `egress-proxy/` to `/srv/mhai-backend/egress-proxy/` (the deploy
    workflow copies only `compose.yml` and `nats/nats.conf`). Create
    `egress-proxy/allowed-hosts` from `allowed-hosts.example` with the one
-   provider's host (`api.anthropic.com`, `api.openai.com` or `api.x.ai`),
+   provider's host (`api.anthropic.com`, `api.openai.com`, `api.x.ai` or,
+   for Gemini, `generativelanguage.googleapis.com`),
    mode 0644. Start the proxy: `docker compose --profile cloud up -d
    egress-proxy`.
 2. **The key file.** Write the key to `secrets/<provider>-api-key` from a
@@ -453,8 +454,10 @@ provider key and its zero-data-retention reference (TODO H1, H5).
    and `INTELLIGENCE_CLOUD_<PROVIDER>_ZDR_REF` (`DEMO-SYNTHETIC` only with
    `APP_ENV=demo`, logged as a warning; production refuses it). Set
    `CORE_CLOUD_PROVIDERS=<provider>` on core. Never set any `OPENAI_*`,
-   `ANTHROPIC_*`, `AZURE_OPENAI_*` or `XAI_*` variable: the worker refuses to
-   start. The image must carry a CA bundle at OpenSSL's paths; the worker
+   `ANTHROPIC_*`, `AZURE_OPENAI_*`, `XAI_*` or `GEMINI_*` variable: the worker
+   refuses to start. For Gemini also set
+   `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified` once the check under "Gemini:
+   paid tier only" is done; until then the worker starts with a warning. The image must carry a CA bundle at OpenSSL's paths; the worker
    refuses to start without one.
 3. **Switch the demo hospital on:** `docker compose --profile tools run --rm
    core-cli hospitals model-policy set <hospital id or short code> --provider
@@ -481,6 +484,29 @@ provider key and its zero-data-retention reference (TODO H1, H5).
   batch) and to this host's egress address, where the provider offers it.
 - The zero-data-retention terms are signed and their reference is the
   `ZDR_REF` setting.
+
+### Gemini: paid tier only
+
+Google's Gemini API terms differ by tier (re-read them before switch-on).
+On the **free tier**, Google may use the
+prompts and replies to improve its products, and people may review them.
+On the **paid tier** (a Google Cloud project with **billing enabled**), it
+does not; it keeps them for a limited time for abuse monitoring only. So:
+
+- Create the key in a Google Cloud project used only by this deployment,
+  with a **billing account linked and enabled**, never in a free-tier
+  project. In Google AI Studio the key's project must show the paid tier.
+- Check it, record the check (who, when, the project) as the agreement
+  reference (`INTELLIGENCE_CLOUD_GEMINI_ZDR_REF`, the `AGR-`/`DPA-` code),
+  and only then set `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified`. Unset or
+  `unverified`, the worker starts but logs a warning at every start naming
+  the setting; it never refuses, so a demo can run, but **no hospital is
+  switched to gemini while that warning shows**.
+- Re-check after any billing change: a project whose billing lapses goes
+  back to free-tier terms.
+- Gemini has no per-reply retention header (xAI's
+  `x-zero-data-retention`), so this project check is the only control on
+  retention. Set the project's own spend cap too.
 
 ### Rotating a key (every 90 days, and at once on suspicion)
 
