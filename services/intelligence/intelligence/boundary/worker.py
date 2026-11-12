@@ -40,6 +40,16 @@ goes to its handler, which owns the message's outcome.
 The reply is published directly to msg.reply rather than with
 Msg.respond: nats-py's respond() sends the request's own headers back,
 which would echo the request token or the access token to the caller.
+
+Pinned models (plan Task 23): with INTELLIGENCE_MODEL_ROLES the pipeline
+refuses to start on a role no lock may pin (one outside lock.ROLES, today
+extract only), reads models.lock once at start-up and verifies every required role
+(PinnedModelGate, modelstore.loader) before it is ready. Until then health
+answers models_ready false and jobs stay paused (the jobs_ready gate). A
+refusal logs model.verify_failed role=<role> reason=<reason> and counts
+mhai_model_verify_failures_total{role,reason} (both from closed sets), and
+is retried with a capped backoff, each retry a full verification of the
+same pin: never another version. Success logs model.loaded.
 """
 
 from __future__ import annotations
@@ -52,6 +62,7 @@ import logging
 import re
 import signal
 import ssl
+import threading
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
@@ -96,6 +107,8 @@ from intelligence.boundary.verify import (
 
 if TYPE_CHECKING:
     from intelligence.boundary.db import Database
+    from intelligence.boundary.jobs.run_query import RunQuery
+    from intelligence.modelstore.loader import PinnedModels
 
 log = logging.getLogger("intelligence.boundary.worker")
 
@@ -969,17 +982,23 @@ def build_verifier(settings: WorkerSettings) -> tuple[Verifier, TrustedKeys]:
 
 
 def service_handlers(
-    service: str, database: Database | None = None, *, models_ready: bool = False
+    service: str, database: Database | None = None, *, models_ready: bool | Readiness = False
 ) -> dict[str, Handler]:
     from intelligence.boundary.services import echo, pipeline
 
     if service == "echo":
         return dict(echo.HANDLERS)
     if service == "pipeline":
+        models: Readiness
+        if callable(models_ready):
+            models = models_ready
+        else:
+            fixed = models_ready is True
 
-        def models() -> bool:
-            return models_ready
+            def fixed_ready() -> bool:
+                return fixed
 
+            models = fixed_ready
         if database is None:
             return pipeline.handlers(models_ready=models)
         return pipeline.handlers(database_ready=database.ready, models_ready=models)
@@ -1022,31 +1041,47 @@ async def run_service(settings: WorkerSettings) -> None:
     without one it takes no job and health says database_ready false."""
     secure_logging(settings)
     verifier, trusted = build_verifier(settings)
+    # Read models.lock, the trust policy and the store settings once, before
+    # anything else: a bad one refuses to start.
+    gate = build_model_gate(settings)
     # Off unless OTEL_EXPORTER_OTLP_ENDPOINT is set; a bad endpoint turns it
     # off with a warning and the reason, never keeps the worker from starting.
     stop_telemetry = telemetry.start(service=settings.service, development=settings.development)
     database = await open_database(settings)
     runner = None
+    gate_task: asyncio.Task[None] | None = None
     try:
         jobs: dict[str, JobHandler] | None = None
         if settings.service == "pipeline":
             from intelligence.boundary.services import pipeline
 
-            jobs, runner = pipeline.job_handlers(settings, database, clock=verifier.clock)
+            jobs, runner = pipeline.job_handlers(
+                settings,
+                database,
+                clock=verifier.clock,
+                pinned=gate.source() if gate is not None else None,
+            )
             if database is None:
                 log.warning(
                     "no INTELLIGENCE_DB_URL: run_query and approve_correction jobs are not taken"
                 )
+        models_ready, jobs_ready = pipeline_readiness(runner, gate)
+        if gate is not None:
+            gate_task = asyncio.get_running_loop().create_task(gate.run())
         w = Worker(
             settings,
-            service_handlers(settings.service, database, models_ready=runner is not None),
+            service_handlers(settings.service, database, models_ready=models_ready),
             verifier,
             jobs=jobs,
-            jobs_ready=runner.ready if runner is not None else None,
+            jobs_ready=jobs_ready,
         )
         await w.start()
         await w.run(trusted)
     finally:
+        if gate_task is not None:
+            gate_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await gate_task
         if runner is not None:
             runner.close()
         if database is not None:
@@ -1055,3 +1090,222 @@ async def run_service(settings: WorkerSettings) -> None:
             stop_telemetry()
     if w.insecure:
         raise ConnectionError("the NATS connection lost TLS")
+
+
+# --- pinned models (plan Task 23) ---------------------------------------------------
+
+
+def all_ready(*checks: Readiness) -> Callable[[], Awaitable[bool]]:
+    """Ready only when every check answers exactly True; one that raises is
+    not ready (fail closed)."""
+
+    async def ready() -> bool:
+        for check in checks:
+            try:
+                r = check()
+                if inspect.isawaitable(r):
+                    r = await r
+            except Exception as e:
+                log.warning("readiness check failed error=%s", type(e).__name__)
+                return False
+            if r is not True:
+                return False
+        return True
+
+    return ready
+
+
+class PinnedModelGate:
+    """Verifies the pinned roles before the pipeline is ready.
+
+    ``load`` is one full verification of the pins read at start-up
+    (modelstore.loader.PinnedModels.load bound to its settings, store and
+    policy): every attempt runs it from the start, so a retry can only ever
+    load the same pins. ``run`` retries until it succeeds, waiting
+    first_delay, doubling, at most max_delay. Metric labels come from closed
+    sets: a role outside the configured ones is "other" (an unexpected error
+    with no role is "all"), a reason outside the refusal reasons is
+    "internal"."""
+
+    def __init__(
+        self,
+        load: Callable[[], PinnedModels],
+        roles: tuple[str, ...] | list[str],
+        *,
+        first_delay: float = 2.0,
+        max_delay: float = 300.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        if not 0 < first_delay <= max_delay:
+            raise ValueError("backoff delays")
+        self._load = load
+        self.roles = tuple(roles)
+        self._first = first_delay
+        self._max = max_delay
+        self._sleep = sleep
+        self._models: PinnedModels | None = None
+        self.attempts = 0
+        self.failures: Counter[tuple[str, str]] = Counter()
+
+    @property
+    def models(self) -> PinnedModels | None:
+        return self._models
+
+    def ready(self) -> bool:
+        return self._models is not None
+
+    def source(self) -> Callable[[], PinnedModels | None]:
+        """What the model client reads: the verified models, or None."""
+
+        def models() -> PinnedModels | None:
+            return self._models
+
+        return models
+
+    def attempt(self, retry_in: float | None = None) -> bool:
+        """One full verification; True when every role verified."""
+        from intelligence.modelstore.loader import INTERNAL, PinRefused
+        from intelligence.modelstore.reasons import REASONS
+
+        self.attempts += 1
+        try:
+            models = self._load()
+        except PinRefused as e:
+            role = e.role if e.role in self.roles else "other"
+            reason = e.reason if e.reason in REASONS else INTERNAL
+            detail = e.detail_code
+        except Exception as e:
+            log.warning("model.load_error error=%s", type(e).__name__)
+            role, reason, detail = "all", INTERNAL, None
+        else:
+            self._models = models
+            return True
+        self.failures[(role, reason)] += 1
+        telemetry.record_model_verify_failure(role, reason)
+        log.warning(
+            "model.verify_failed role=%s reason=%s detail=%s attempt=%d retry_in_s=%s",
+            role,
+            reason,
+            detail if detail is not None and _SAFE.fullmatch(detail) else "-",
+            self.attempts,
+            "-" if retry_in is None else f"{retry_in:g}",
+        )
+        return False
+
+    async def run(self) -> None:
+        """Attempt until ready. Each attempt runs on a daemon thread (verification
+        hashes and downloads): cancelling run() returns at once, and a verification
+        still running never holds the process's exit (it is abandoned; the pin's
+        lock and partial directory are the verifier's to clean up next time)."""
+        delay = self._first
+        while not await self._attempt_in_thread(delay):
+            await self._sleep(delay)
+            delay = min(delay * 2, self._max)
+
+    async def _attempt_in_thread(self, delay: float) -> bool:
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[bool] = loop.create_future()
+
+        def finish(ok: bool) -> None:
+            if not done.done():
+                done.set_result(ok)
+
+        def work() -> None:
+            ok = False
+            try:
+                ok = self.attempt(delay)
+            except BaseException as e:  # attempt() catches everything; fail closed anyway
+                log.warning("model.load_error error=%s", type(e).__name__)
+            with contextlib.suppress(RuntimeError):  # the loop closed: shutting down
+                loop.call_soon_threadsafe(finish, ok)
+
+        threading.Thread(target=work, name="model-verify", daemon=True).start()
+        return await done
+
+
+def pipeline_readiness(
+    runner: RunQuery | None, gate: PinnedModelGate | None
+) -> tuple[Readiness, Readiness | None]:
+    """The pipeline's (models_ready, jobs_ready), as run_service wires them.
+
+    models_ready: the model client was built (a runner exists) and, with pinned
+    roles, every role verified. jobs_ready: the runner's own check (its
+    database answers) and, with pinned roles, the gate: no job is fetched
+    before the pins verify (B18). Without a runner there is no job consumer
+    (None). TODO(GPU task): the worker has one jobs_ready for every durable,
+    so approve_correction (which uses no pinned model) waits for the gate too;
+    give each consumer its own readiness before a long-running pin (a VLM) can
+    hold learning jobs up, and check the JOBS stream's max age then."""
+    built = runner is not None
+
+    def client_built() -> bool:
+        return built
+
+    if gate is None:
+        return client_built, (runner.ready if runner is not None else None)
+    return (
+        all_ready(client_built, gate.ready),
+        all_ready(runner.ready, gate.ready) if runner is not None else None,
+    )
+
+
+def build_model_gate(settings: WorkerSettings) -> PinnedModelGate | None:
+    """The gate for settings.model_roles, or None without roles. The lock,
+    the trust policy and the store client are set up here, once: a role that
+    isn't pinnable (not in lock.ROLES), a lock that doesn't pin a required
+    role, a policy that doesn't load or a store setting the client refuses
+    stops the start (ConfigError)."""
+    if not settings.model_roles:
+        return None
+    from intelligence.modelstore import loader, lock, promote, signing, store, verify
+    from intelligence.modelstore.reasons import Refused
+
+    if settings.service != "pipeline":
+        raise ConfigError("INTELLIGENCE_MODEL_ROLES is for the pipeline service only")
+    # Only a role with an evaluation suite can be pinned (lock.ROLES); any other could
+    # never verify, so it stops the start rather than leaving a pipeline never ready.
+    # TODO(TODO.md "Pinnable roles"): nli, ocr and cca join when their suites exist.
+    unpinnable = sorted(set(settings.model_roles) - lock.ROLES)
+    if unpinnable:
+        raise ConfigError(
+            f"INTELLIGENCE_MODEL_ROLES: {','.join(unpinnable)} is not a pinnable role "
+            f"(pinnable: {','.join(sorted(lock.ROLES))})"
+        )
+    lock_path, cache = settings.models_lock_path, settings.model_cache_dir
+    policy_path = settings.models_trust_policy_path
+    endpoint, bucket = settings.model_store_endpoint, settings.model_store_bucket
+    if not (lock_path and cache and policy_path and endpoint and bucket):
+        raise ConfigError("INTELLIGENCE_MODEL_ROLES needs the model store settings")
+    failed: str | None = None
+    try:
+        # Every role loadable in phase 0 runs in-process and is warmed up, so the
+        # page is needed whenever there are roles.
+        page = settings.model_warmup_page or str(promote.WARMUP_PAGE)
+        loader.check_warmup_page(page)
+        verify.check_cache_dir(cache)  # Task 22's rules, once at start-up
+        load_settings = loader.LoadSettings.from_lock(
+            settings.model_roles, lock_path, cache, warmup_page=page
+        )
+        policy = signing.load_policy(policy_path)
+        source = store.S3Store(
+            endpoint,
+            bucket,
+            store.Credentials(
+                settings.model_store_access_key or "", settings.model_store_secret_key or ""
+            ),
+            settings.model_store_region,
+        )
+    except Refused as e:
+        failed = e.reason
+    if failed is not None:
+        raise ConfigError(f"the pinned models can't be set up: {failed}")
+
+    def load() -> PinnedModels:
+        return loader.PinnedModels.load(load_settings, source, policy)
+
+    log.info(
+        "model.pins_read roles=%s versions=%s",
+        ",".join(load_settings.roles),
+        ",".join(f"{p.name}@{p.version}" for p in load_settings.pins.values()),
+    )
+    return PinnedModelGate(load, settings.model_roles)

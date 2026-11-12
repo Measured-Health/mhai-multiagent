@@ -176,7 +176,9 @@ def load_cca(model_name, threads):
 
     torch.set_num_threads(threads)
     tok = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, dtype=torch.bfloat16, use_safetensors=True
+    )
     model.eval()
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token

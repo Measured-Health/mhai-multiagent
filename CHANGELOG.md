@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Document pipeline phase 0, part B: model promotion, the lean version
+  (`services/intelligence/intelligence/modelstore/`, the `mhai-models` CLI).
+  File checks for a trained run (safetensors only, a fixed list of JSON
+  files, header validation, size caps, SHA-256), the training manifest with
+  the approved-dataset and licence registries and the model card, canonical
+  manifests signed with one Ed25519 key (purpose bound in the signed bytes;
+  the public key in `models/trust-policy.json`, the private key a
+  repository secret or a key file; `mhai-models keygen`), a plain
+  S3-compatible model store (conditional writes, versioning used if on),
+  the locked evaluation test split, run sources (a local folder, Google
+  Drive with a read-only token, pinned Hugging Face revisions), `promote`
+  with a dry run, `models.lock` with `pin`, `lock-check` (an ordinary PR
+  check; one reviewer's approval is the sign-off) and rollback by pinning an
+  earlier version, load-time verification and the pipeline's pinned roles
+  (not ready until every pinned role verifies; `model_versions` now carries
+  `name@version#hash`). Three workflows (`model-promote`, `model-lock`,
+  `model-testset`), no GitHub environment or setting needed. CI rehearses
+  the whole flow on MinIO (`model-promotion-e2e`). With no model pinned,
+  nothing changes. The enterprise controls left out are listed in TODO.md,
+  "Before scale".
 - EMR integration, PR 5 (canonical model, normaliser and patient index;
   off by default). Migration **00023** (the plan's 00022; 00021 and 00022
   were taken by Analysis and Plan 7c-3): `emr.raw_records` (a document

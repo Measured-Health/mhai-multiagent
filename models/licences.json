@@ -1,0 +1,4 @@
+{
+  "schema": "mhai.models.licences/1",
+  "licences": ["Apache-2.0", "MIT"]
+}

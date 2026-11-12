@@ -1,0 +1,15 @@
+{
+  "schema": "mhai.models.training/1",
+  "name": "doc-extract-example",
+  "role": "extract",
+  "trained_by": "example-trainer",
+  "datasets": ["clinical_document-train@1.0.0"],
+  "base_model": {
+    "upstream": "mhai-fixtures/mhai-tiny-base",
+    "revision": "0123456789abcdef0123456789abcdef01234567",
+    "licence": "Apache-2.0"
+  },
+  "framework": {"numpy": "2.2.6", "safetensors": "0.5.3", "transformers": "4.57.1"},
+  "notebook_metrics": {"epochs": 3, "train_loss": 0.4213, "eval_field_f1": 0.871},
+  "created_at": "2026-11-03T12:00:00Z"
+}

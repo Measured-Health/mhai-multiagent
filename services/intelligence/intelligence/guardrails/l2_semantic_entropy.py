@@ -92,7 +92,7 @@ class BidirectionalEntailmentClassifier:
         self.device = device
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(
-            model_name
+            model_name, use_safetensors=True
         ).to(device)
         self.model.eval()
 
@@ -156,7 +156,8 @@ class ResponseSampler:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            device_map="auto" if device == "cuda" else None
+            device_map="auto" if device == "cuda" else None,
+            use_safetensors=True,
         )
         self.model.eval()
 
@@ -439,7 +440,7 @@ class CitationEntailmentVerifier:
         self.device = device
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(
-            model_name
+            model_name, use_safetensors=True
         ).to(device)
         self.model.eval()
         self.label_map = nli_label_map(self.model)

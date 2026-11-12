@@ -6,6 +6,39 @@ password in the URL, no TLS) are on only when development is named.
 
 Errors name variables, never their values: a NATS_URL carries a password in
 development.
+
+The pinned models (plan Task 23, design section 7.4). The pipeline verifies the
+roles it needs from the model store before it is ready:
+
+  INTELLIGENCE_MODEL_ROLES   comma-separated roles (``^[a-z][a-z0-9_]{1,31}$``,
+                             at most 16, no repeats); empty or unset means none,
+                             and then none of the settings below is needed
+  INTELLIGENCE_MODELS_LOCK   the models.lock to load from, read once at start-up
+  INTELLIGENCE_MODEL_CACHE   an absolute path: the verified copies (Task 22's
+                             cache rules apply)
+  MODEL_STORE_ENDPOINT       https://host[:port]; plain http only for a loopback
+                             host (127.0.0.1, ::1, localhost). A loopback MinIO is
+                             for development and rehearsal only: production uses
+                             a TLS S3-compatible store
+  MODEL_STORE_BUCKET, MODEL_STORE_REGION (default us-east-1)
+  MODEL_STORE_READER_ACCESS_KEY_FILE, MODEL_STORE_READER_SECRET_KEY_FILE
+                             the reader's credentials, from files only: regular
+                             files (not links), mode 0600 or tighter, never a
+                             placeholder (empty, changeme, change-me,
+                             placeholder, minioadmin, example). The variables
+                             without _FILE are refused
+  MHAI_MODELS_TRUST_POLICY   the trust policy for signatures
+  INTELLIGENCE_WARMUP_PAGE   an absolute path: the fixed warm-up page each
+                             in-process role must reproduce (default: the
+                             repository's testdata/models/warmup/page.png;
+                             the image must ship it). Checked at start-up:
+                             missing is warmup_page_missing
+  MHAI_MODELS_ENV            ``development`` (development signers, fixture
+                             names, the rehearsal gate) only together with
+                             APP_ENV=development; with any other APP_ENV (or
+                             none) it is refused at start-up
+
+Each is refused at start-up if malformed, set or not needed.
 """
 
 from __future__ import annotations
@@ -15,7 +48,7 @@ import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 if TYPE_CHECKING:
@@ -34,6 +67,15 @@ MODEL_CLIENTS = frozenset({"orchestrator", "stub"})
 LEARNING_CLIENTS = frozenset({"trust_buffer", "stub"})
 MAX_CONCURRENCY = 1024
 _PLACEHOLDERS = ("change-me", "changeme", "placeholder")
+# Store credentials: the placeholders above, plus the MinIO default and the
+# documentation examples (AWS's AKIAIOSFODNN7EXAMPLE and the like).
+_STORE_PLACEHOLDERS = ("minioadmin", "example")
+MAX_MODEL_ROLES = 16
+MAX_SECRET_FILE_BYTES = 4096
+_STORE_CREDENTIAL_FILES = (
+    "MODEL_STORE_READER_ACCESS_KEY_FILE",
+    "MODEL_STORE_READER_SECRET_KEY_FILE",
+)
 DEFAULT_DB_USER = "intelligence_app"
 MIN_DB_PASSWORD_LEN = 16  # core's MinLoginPasswordLen
 # libpq parameters a database URL may carry. Anything else (options, which
@@ -166,6 +208,17 @@ class WorkerSettings:
     # The approve_correction job's learning client: trust_buffer (default)
     # or stub (development only).
     learning_client: str = "trust_buffer"
+    # The pinned models (module docstring): none unless INTELLIGENCE_MODEL_ROLES.
+    model_roles: tuple[str, ...] = ()
+    models_lock_path: str | None = None
+    model_cache_dir: str | None = None
+    model_store_endpoint: str | None = None
+    model_store_bucket: str | None = None
+    model_store_region: str = "us-east-1"
+    model_store_access_key: str | None = field(default=None, repr=False)
+    model_store_secret_key: str | None = field(default=None, repr=False)
+    models_trust_policy_path: str | None = None
+    model_warmup_page: str | None = None
     # Cloud model providers (plan 2026-11-06): none unless
     # INTELLIGENCE_CLOUD_PROVIDERS names some (pipeline only).
     cloud: CloudSettings = field(default_factory=lambda: _no_cloud())
@@ -250,6 +303,7 @@ class WorkerSettings:
             errs.append("INTELLIGENCE_LEARNING_CLIENT must be trust_buffer or stub")
         elif learning_client == "stub" and not development:
             errs.append("INTELLIGENCE_LEARNING_CLIENT=stub runs only with APP_ENV=development")
+        pinned = _model_settings(env, svc, development, errs)
         from intelligence.boundary.cloud.settings import PROVIDERS_VAR, CloudSettings
 
         cloud = CloudSettings.from_env(env, development, errs)
@@ -274,6 +328,7 @@ class WorkerSettings:
             development=development,
             model_client=model_client,
             learning_client=learning_client,
+            **pinned,
             cloud=cloud,
         )
 
@@ -402,3 +457,144 @@ def _read_secret_file(
         except (OSError, UnicodeDecodeError):
             errs.append(f"{name} can't be read")
             return None
+
+
+def is_store_placeholder(value: str) -> bool:
+    """A store credential that is empty or a known placeholder."""
+    v = value.strip().lower()
+    return not v or is_placeholder(v) or any(p in v for p in _STORE_PLACEHOLDERS)
+
+
+def _model_roles(raw: str | None, errs: list[str]) -> tuple[str, ...]:
+    from intelligence.modelstore import names
+    from intelligence.modelstore.reasons import Refused
+
+    if raw is None or not raw.strip():
+        return ()
+    roles = [r.strip() for r in raw.split(",")]
+    bad = False
+    for r in roles:
+        try:
+            names.check_role(r)
+        except Refused:
+            bad = True
+    if bad or len(set(roles)) != len(roles) or len(roles) > MAX_MODEL_ROLES:
+        errs.append(
+            "INTELLIGENCE_MODEL_ROLES must be distinct roles (^[a-z][a-z0-9_]{1,31}$), "
+            f"comma-separated, at most {MAX_MODEL_ROLES}"
+        )
+        return ()
+    return tuple(roles)
+
+
+def _model_settings(
+    env: Mapping[str, str], svc: str | None, development: bool, errs: list[str]
+) -> dict[str, Any]:
+    """The pinned models' settings (module docstring), as WorkerSettings fields.
+    Anything set is checked; with roles, everything is required. Errors name
+    variables only."""
+
+    def get(name: str) -> str | None:
+        v = env.get(name, "").strip()
+        return v or None
+
+    out: dict[str, Any] = {}
+    if env.get("MHAI_MODELS_ENV", "").strip() == "development" and not development:
+        errs.append("MHAI_MODELS_ENV=development runs only with APP_ENV=development")
+    roles = _model_roles(env.get("INTELLIGENCE_MODEL_ROLES"), errs)
+    needed = bool(roles)
+    if roles and svc != "pipeline":
+        errs.append("INTELLIGENCE_MODEL_ROLES is for the pipeline service only")
+    for name in ("MODEL_STORE_READER_ACCESS_KEY", "MODEL_STORE_READER_SECRET_KEY"):
+        if name in env:
+            errs.append(f"{name} is refused: use {name}_FILE")
+
+    def required(name: str) -> str | None:
+        v = get(name)
+        if v is None and needed:
+            errs.append(f"{name} is required with INTELLIGENCE_MODEL_ROLES")
+        return v
+
+    lock_path = required("INTELLIGENCE_MODELS_LOCK")
+    cache = required("INTELLIGENCE_MODEL_CACHE")
+    if cache is not None and not os.path.isabs(cache):
+        errs.append("INTELLIGENCE_MODEL_CACHE must be an absolute path")
+    policy = required("MHAI_MODELS_TRUST_POLICY")
+    warmup_page = get("INTELLIGENCE_WARMUP_PAGE")
+    if warmup_page is not None and not os.path.isabs(warmup_page):
+        errs.append("INTELLIGENCE_WARMUP_PAGE must be an absolute path")
+    endpoint = required("MODEL_STORE_ENDPOINT")
+    bucket = required("MODEL_STORE_BUCKET")
+    region = get("MODEL_STORE_REGION")
+    if endpoint is not None or bucket is not None or region is not None:
+        from intelligence.modelstore import store
+        from intelligence.modelstore.reasons import Refused
+
+        for name, value, check in (
+            ("MODEL_STORE_ENDPOINT", endpoint, store.check_endpoint),
+            ("MODEL_STORE_BUCKET", bucket, store.check_bucket),
+            ("MODEL_STORE_REGION", region, store.check_region),
+        ):
+            if value is None:
+                continue
+            try:
+                check(value)
+            except Refused:
+                # TLS unless loopback (Task 16's rule); no userinfo, path or query.
+                errs.append(f"{name} is invalid")
+    credentials: list[str | None] = []
+    for name in _STORE_CREDENTIAL_FILES:
+        path = required(name)
+        credentials.append(None if path is None else _read_store_secret(path, name, errs))
+    if roles:
+        out.update(
+            model_roles=roles,
+            models_lock_path=lock_path,
+            model_cache_dir=cache,
+            model_store_endpoint=endpoint,
+            model_store_bucket=bucket,
+            model_store_region=region or "us-east-1",
+            model_store_access_key=credentials[0],
+            model_store_secret_key=credentials[1],
+            models_trust_policy_path=policy,
+            model_warmup_page=warmup_page,
+        )
+    return out
+
+
+def _read_store_secret(path: str, name: str, errs: list[str]) -> str | None:
+    """A store credential file's contents (no trailing newline): a regular file,
+    never through a link, mode 0600 or tighter (no group or other bits), at most
+    4 KiB of ASCII, and not a placeholder. Checked on the open file."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        errs.append(f"{name} can't be read (or is a link)")
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            errs.append(f"{name} is not a regular file")
+            return None
+        if stat.S_IMODE(st.st_mode) & 0o077:
+            errs.append(f"{name} must have mode 0600 or tighter")
+            return None
+        raw = os.read(fd, MAX_SECRET_FILE_BYTES + 1)
+    except OSError:
+        errs.append(f"{name} can't be read")
+        return None
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_SECRET_FILE_BYTES:
+        errs.append(f"{name} is too large")
+        return None
+    try:
+        value = raw.decode("ascii").rstrip("\r\n")
+    except UnicodeDecodeError:
+        errs.append(f"{name} must be ASCII")
+        return None
+    if is_store_placeholder(value) or any(c.isspace() for c in value):
+        errs.append(f"{name} is not a usable credential")
+        return None
+    return value

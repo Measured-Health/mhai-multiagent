@@ -263,6 +263,7 @@ services:
   #     INTELLIGENCE_TRUSTED_KEYS_PATH: /trusted/request-keys.json
   #     INTELLIGENCE_DB_URL: postgres://postgres:5432/mhai?sslmode=verify-full
   #     INTELLIGENCE_DB_PASSWORD_FILE: /run/secrets/intelligence-db-password
+  #     INTELLIGENCE_WARMUP_PAGE: /app/warmup/page.png   # shipped in the image
   #     # Cloud models (off by default; deploy/README.md, "Cloud models").
   #     # The proxy has its own setting: HTTPS_PROXY would send every
   #     # library's HTTPS through it. Never put a key in the environment.

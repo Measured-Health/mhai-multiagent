@@ -401,7 +401,7 @@ def test_local_parts_is_default_orchestrators(monkeypatch: pytest.MonkeyPatch) -
     from intelligence.boundary import models
 
     sentinel = (lambda chunks: None, {"cca": "g", "dense": "d", "nli": "n"})
-    monkeypatch.setattr(models, "local_parts", lambda: sentinel)
+    monkeypatch.setattr(models, "local_parts", lambda *a, **k: sentinel)
     client = models.default_orchestrator()
     assert client.model_versions() == {"cca": "g", "dense": "d", "nli": "n"}
 

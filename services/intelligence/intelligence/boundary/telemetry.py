@@ -252,6 +252,7 @@ class _State:
         cloud_alerts: Any = None,
         context_dropped: Any = None,
         usage_overrun: Any = None,
+        model_failures: Any = None,
     ) -> None:
         self.tracer = tracer
         self.refusals = refusals
@@ -262,6 +263,7 @@ class _State:
         self.cloud_alerts = cloud_alerts
         self.context_dropped = context_dropped
         self.usage_overrun = usage_overrun
+        self.model_failures = model_failures
 
 
 _NOOP = _State(trace.NoOpTracer(), None, None)
@@ -321,6 +323,10 @@ def setup(
     verify = meter.create_histogram(
         "boundary_verify_seconds", unit="s", description="Time spent verifying a message."
     )
+    model_failures = meter.create_counter(
+        "mhai_model_verify_failures_total",
+        description="Pinned model verifications that failed, by role and reason.",
+    )
     # The cloud token budget (plan Task 7): settles that failed (a
     # reservation then stays held to the month's end), and hospitals past
     # 80% of their month, by provider.
@@ -363,6 +369,7 @@ def setup(
         cloud_alerts,
         context_dropped,
         usage_overrun,
+        model_failures,
     )
     _state = state
 
@@ -535,6 +542,15 @@ def record_refusal(service: str, reason: str, n: int = 1) -> None:
     c = _state.refusals
     if c is not None:
         c.add(n, {"service": _label(service), "reason": _label(reason)})
+
+
+def record_model_verify_failure(role: str, reason: str) -> None:
+    """mhai_model_verify_failures_total{role,reason}. The caller passes values
+    from closed sets (the configured roles, the refusal reasons); a value of
+    any other shape is "other" here too."""
+    c = _state.model_failures
+    if c is not None:
+        c.add(1, {"role": _label(role), "reason": _label(reason)})
 
 
 def record_cloud_settle_failure() -> None:

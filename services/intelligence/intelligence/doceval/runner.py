@@ -41,16 +41,15 @@ Latency is the wall time of each call divided by its pages, one value per page,
 including calls that timed out or failed. Apart from latency and throughput, a run is
 deterministic. :class:`RunResult` holds aggregates only: no values, no identifiers and no
 per-document rows. Logs carry ids, slices, counts, timings and reason codes only (P21);
-the per-document lines are DEBUG, and DEBUG must be off in the ``model-eval``
-environment (the ids of the locked test split stay out of its logs).
+the per-document lines are DEBUG, and DEBUG must be off in the promotion workflow (the
+ids of the locked test split stay out of its logs).
 
 Notes for later tasks:
 
 * Stubs (``engine == "stub"`` or a name ending ``-stub``) pass only the ``rehearsal``
   gate: the report refuses them for any other (Task 11). Note for Task 19: the promote
   flow chooses the extractor from the run's ``config.json``, so a stub (the oracle above
-  all, which reads ground truth) is never what runs in ``model-eval`` or
-  ``model-promotion``.
+  all, which reads ground truth) is never what runs in the promotion workflow.
 * Isolation of in-process extractors is by the interface only (page bytes in, nothing
   else); a Python extractor in this process could still open files its user can read.
   TODO: the first in-process model runner gets a subprocess boundary with no access to

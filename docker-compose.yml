@@ -376,6 +376,8 @@ services:
       INTELLIGENCE_DB_PASSWORD: ${INTELLIGENCE_DB_PASSWORD:?set INTELLIGENCE_DB_PASSWORD in .env}
       # orchestrator (the real models) or stub (synthetic answers, development only).
       INTELLIGENCE_MODEL_CLIENT: ${INTELLIGENCE_MODEL_CLIENT:-orchestrator}
+      # The warm-up page the image ships, for pinned roles (INTELLIGENCE_MODEL_ROLES).
+      INTELLIGENCE_WARMUP_PAGE: /app/warmup/page.png
       # Traces and metrics, off while empty. With the observability profile:
       # http://otel-collector:4317. Spans carry ids, codes and numbers only.
       OTEL_EXPORTER_OTLP_ENDPOINT: ${INTELLIGENCE_OTEL_ENDPOINT:-}

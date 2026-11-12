@@ -5,6 +5,7 @@ from intelligence.modelstore.names import (
     check_name,
     check_role,
     check_run_id,
+    check_store_version_id,
     check_version,
 )
 from intelligence.modelstore.reasons import Refused
@@ -64,3 +65,21 @@ def test_version_components_are_bounded(bad: str) -> None:
     assert str(exc.value) == "invalid_name"
     with pytest.raises(Refused):
         check_version(bad)
+
+
+def test_store_version_ids() -> None:
+    uuid = "6d2f9c1e-3b4a-4f5e-9a8b-7c6d5e4f3a2b"
+    assert check_store_version_id(uuid) == uuid
+    assert check_store_version_id("Qv7d.yJ0b_8rQ-t5") == "Qv7d.yJ0b_8rQ-t5"
+    assert check_store_version_id("a" * 1024) == "a" * 1024
+    # A bucket without versioning: S3's own id for its one object.
+    assert check_store_version_id("null") == "null"
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "a/b", "a+b", "a=", "a b", "a?x=1", "a%2F", "a\n", "a" * 1025, "é", 7]
+)
+def test_store_version_ids_refused(bad: object) -> None:
+    with pytest.raises(Refused) as exc:
+        check_store_version_id(bad)  # type: ignore[arg-type]
+    assert str(exc.value) == "invalid_name"

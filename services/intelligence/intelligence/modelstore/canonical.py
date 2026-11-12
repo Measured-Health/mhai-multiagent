@@ -7,6 +7,7 @@ trailing bytes, and oversized input are all refused.
 """
 
 import json
+import math
 from typing import Any
 
 from intelligence.modelstore.reasons import Refused
@@ -20,6 +21,13 @@ def _no_float(_: str) -> Any:
 
 def _no_constant(_: str) -> Any:
     raise Refused("json_invalid")
+
+
+def _finite_float(s: str) -> float:
+    value = float(s)
+    if not math.isfinite(value):
+        raise Refused("json_invalid")
+    return value
 
 
 def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -73,26 +81,39 @@ def dumps(obj: Any) -> bytes:
     return text.encode("ascii")
 
 
-def loads_strict(b: bytes, max_bytes: int) -> Any:
+def loads_strict(
+    b: bytes, max_bytes: int, *, allow_floats: bool = False, trailing_whitespace: bool = False
+) -> Any:
+    """Parse ``b`` strictly. ``allow_floats`` admits finite floats, and
+    ``trailing_whitespace`` JSON whitespace after the value (the newline that
+    ``transformers`` and editors write at the end of a file), for files that are checked
+    but never hashed as canonical JSON (``config.json`` and the like, hand-edited
+    registries); anything hashed or signed keeps the defaults.
+    """
     if not isinstance(b, (bytes, bytearray)):
         raise Refused("json_invalid")
     if len(b) > max_bytes:
         raise Refused("too_large")
     if b.startswith(b"\xef\xbb\xbf"):
         raise Refused("json_invalid")
+    # The refusal is raised outside the ``except`` block, so no exception in its chain
+    # (a JSONDecodeError's ``doc``, a UnicodeDecodeError's ``object``) holds the input.
+    failed = False
     try:
         text = bytes(b).decode("utf-8")
         decoder = json.JSONDecoder(
-            parse_float=_no_float,
+            parse_float=_finite_float if allow_floats else _no_float,
             parse_constant=_no_constant,
             object_pairs_hook=_no_duplicates,
         )
         obj, end = decoder.raw_decode(text, 0)
     except Refused:
-        raise
-    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-        raise Refused("json_invalid") from exc
-    if end != len(text):
+        failed = True
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        failed = True
+    if failed:
+        raise Refused("json_invalid")
+    if end != len(text) and not (trailing_whitespace and text[end:].strip(" \t\n\r") == ""):
         raise Refused("json_invalid")
     _check_depth(obj)
     return obj

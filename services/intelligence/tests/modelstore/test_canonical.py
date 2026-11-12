@@ -67,3 +67,13 @@ def test_nesting_depth_limit_is_pinned() -> None:
     with pytest.raises(Refused) as exc:
         canonical.loads_strict(deep65, 10_000)
     assert str(exc.value) == "json_invalid"
+
+
+def test_trailing_whitespace_only_when_asked() -> None:
+    with pytest.raises(Refused):
+        canonical.loads_strict(b'{"a":1}\n', 100)
+    assert canonical.loads_strict(b'{"a":1}\n', 100, trailing_whitespace=True) == {"a": 1}
+    for raw in (b'{"a":1}\n{}', b'{"a":1} x', b' {"a":1}'):
+        with pytest.raises(Refused):
+            canonical.loads_strict(raw, 100, trailing_whitespace=True)
+    assert not canonical.is_canonical(b'{"a":1}\n')

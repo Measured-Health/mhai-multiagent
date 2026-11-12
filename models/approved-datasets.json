@@ -1,0 +1,21 @@
+{
+  "schema": "mhai.models.datasets/1",
+  "datasets": [
+    {
+      "id": "clinical_document-dev@1.0.0",
+      "kind": "synthetic",
+      "generator": "intelligence.doceval.sets",
+      "version": "1.0.0",
+      "testset_disjoint": true,
+      "approved_by_pr": 91
+    },
+    {
+      "id": "clinical_document-train@1.0.0",
+      "kind": "synthetic",
+      "generator": "intelligence.doceval.sets",
+      "version": "1.0.0",
+      "testset_disjoint": true,
+      "approved_by_pr": 91
+    }
+  ]
+}

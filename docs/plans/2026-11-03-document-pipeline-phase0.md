@@ -1,6 +1,8 @@
 # Document pipeline phase 0: model promotion and the evaluation harness: implementation plan
 
-**Status:** Approved by the product owner, 3 Nov 2026 ("approve both as recommended"): every open question below decided as recommended. Not started.
+**Status:** Approved by the product owner, 3 Nov 2026 ("approve both as recommended"): every open question below decided as recommended. Built: part A in #91, part B in #94.
+
+> **Amended 11 Nov 2026 (product owner: a hospital test quickly).** Part B was rewritten lean. Tasks 21 (the sign-off), 26 (KMS signer) and the H1–H4 settings are not built; Task 27's store is any S3-compatible bucket with a writer and a reader, and Task 28's Drive access uses a service account key. What was left out, and when it comes back, is in TODO.md, "Before scale"; what was built is in the spec, §13. The task text below is the original plan; the abuse-case table is current.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
@@ -866,11 +868,11 @@ Every case is a named test, written before the code it proves.
 | B16 unknown dataset id, or no training manifest | `test_missing_training_manifest_refused`, `test_unknown_dataset_refused` (14); `test_each_bad_fixture_refused_with_its_reason` (19) |
 | B17 non-synthetic dataset (memorisation probe not built: refused outright) | `test_non_synthetic_dataset_refused` (14); `test_each_bad_fixture_refused_with_its_reason` (19) |
 | B18 one byte changed in a weights file | `test_one_byte_changed_refused` (22); `test_unverified_pin_not_ready_and_no_jobs` (23); the tamper stage of `rehearse-promotion.sh` (24) |
-| B19 manifest not signed by the trusted signer; lock hash differs | `test_signature_by_untrusted_key_refused` (15); `test_unsigned_or_wrong_signer_refused`, `test_lock_hash_differs_refused` (22); `test_pin_refuses_unsigned_or_tampered` (20); `test_wrong_identity_or_key_refused` (26) |
+| B19 manifest not signed by the trusted signer; lock hash differs | `test_signature_by_untrusted_key_refused` (15); `test_unsigned_or_wrong_signer_refused`, `test_lock_hash_differs_refused` (22); `test_pin_refuses_unsigned_untrusted_or_tampered` (20) |
 | B20 `pytorch_model.bin`, `.pkl` or `.py` in a run | `test_pickle_and_code_refused` (13); `test_each_bad_fixture_refused_with_its_reason` (19); live in Task 28 step 3 |
 | B21 safetensors with an overlapping offset or a header past the end | `test_header_overlap_past_end_gap_trailing_refused` (13) |
 | B22 the Drive account sees exactly one folder and can't write it | `test_drive_check_one_folder_read_only` (18, fake); live in Task 28 step 1 |
-| B23 a promotion without the environment approval never writes | `test_dry_run_writes_nothing` (19); `test_writing_jobs_have_environment`, `test_id_token_only_where_needed`, `test_write_variables_scoped` (24); live in Task 27 step 2 |
+| B23 a promotion without the dry run's files hash never writes | `test_dry_run_writes_nothing` (19); `test_writing_jobs_write_only_in_production_steps`, `test_no_model_workflow_needs_a_github_setting`, `test_write_variables_scoped` (24) |
 | P1 path traversal, symlinks, hard links, bad names | `test_symlink_and_hardlink_refused` (13); `test_local_traversal_and_symlink_refused`, `test_drive_bad_names_refused` (18) |
 | P2 duplicate names in a Drive folder | `test_drive_duplicate_names_refused` (18); live in Task 28 |
 | P3 Google-native files, shortcuts, subfolders | `test_drive_native_shortcut_subfolder_refused` (18) |
@@ -882,19 +884,19 @@ Every case is a named test, written before the code it proves.
 | P9 a signed manifest for another name, version or role | `test_manifest_for_other_name_version_or_role_refused` (22) |
 | P10 an extra or missing file | `test_extra_or_missing_file_refused` (22) |
 | P11 the cache changed between starts | `test_cache_rehashed_every_start` (22) |
-| P12 a development signer or key in production | `test_file_signer_refused_outside_development`, `test_dev_signer_in_policy_refused_in_production` (15); `test_dev_policy_refused_in_production` (22); `test_dev_signer_still_refused_in_production` (26) |
-| P13 a signature for one purpose used as another | `test_purpose_confusion_refused` (15); `test_signoff_key_cannot_sign_manifest` (26) |
-| P14 pinning a failing, unsigned, fixture or rehearsal version | `test_pin_refuses_failing_gate_fixture_and_rehearsal`, `test_pin_refuses_unsigned_or_tampered` (20) |
-| P15 the promoter or trainer approves their own model; reviewers added in the same PR | `test_promoter_or_trainer_cannot_be_the_approver`, `test_reviewers_read_from_base_not_head`, `test_lock_check_needs_clinical_and_platform_on_head_commit` (20) |
-| P16 rollback to a never-approved version | `test_rollback_to_never_approved_refused` (20, 21) |
-| P17 a lock on `main` without the approvals | `test_signoff_refused_without_approvals` (21); `test_no_signoff_refused_in_production_allowed_in_development` (22); `test_ready_after_signoff_appears` (23) |
+| P12 a development signer or key in production | `test_file_signer_works_in_production`, `test_dev_signer_in_policy_refused_in_production` (15); `test_dev_policy_refused_in_production` (22) |
+| P13 a signature for one purpose used as another | `test_purpose_confusion_refused`, `test_one_key_signs_every_purpose` (15) |
+| P14 pinning a failing, unsigned, fixture or rehearsal version | `test_pin_refuses_failing_gate_fixture_and_rehearsal`, `test_pin_refuses_unsigned_untrusted_or_tampered` (20) |
+| P15 the promoter or trainer approves their own model; reviewers added in the same PR | the PR's reviewer (TODO.md, "Before scale") |
+| P16 rollback to a version that doesn't verify | `test_rollback_skips_versions_that_do_not_verify`, `test_lock_check_rollback_needs_a_signed_passing_version` (20) |
+| P17 a lock on `main` without the approvals | the PR's reviewer (TODO.md, "Before scale") |
 | P18 workflow input injection; unpinned actions | `test_inputs_only_through_env`, `test_actions_pinned_by_sha`, `test_no_pull_request_target` (24); `zizmor` in CI |
-| P19 test split leakage | `test_test_refuses_explicit_seed`, `test_two_test_builds_differ`, `test_test_seed_not_in_outputs_or_logs` (8); `test_report_has_no_per_document_data`, `test_cli_refuses_test_build` (11); `test_eval_reader_only_reads_eval` (16); `test_scratch_removed_and_seed_absent`, `test_wrong_role_cannot_build_or_read` (17); `test_dry_run_outside_eval_env_uses_dev_split`, `test_locked_split_needs_eval_role` (19) |
+| P19 test split leakage | `test_test_refuses_explicit_seed`, `test_two_test_builds_differ`, `test_test_seed_not_in_outputs_or_logs` (8); `test_report_has_no_per_document_data`, `test_cli_refuses_test_build` (11); `test_reader_cannot_write` (16); `test_scratch_removed_and_seed_absent`, `test_reader_cannot_build` (17); `test_dry_run_outside_eval_env_uses_dev_split`, `test_locked_split_needs_eval_role` (19) |
 | P20 non-synthetic identifiers in a generated or ingested set | `test_scanner_flags_real_looking_mrn_and_name` (3); `test_scanner_passes_on_built_set` (8); `test_unknown_or_missing_id_refused`, `test_scanner_runs_on_intake` (7) |
 | P21 values in logs | `test_runner_logs_no_values` (10); `test_promote_logs_ids_only` (19); `test_refusal_logs_ids_only` (22) |
 | P22 malformed or oversize extractor output | `test_invalid_outputs_counted_not_crashing` (10); `test_openai_compat_oversize_and_invalid_responses` (12) |
 | P23 an unpinned upstream revision | `test_unpinned_upstream_revision_refused` (14); `test_hf_revision_must_be_commit` (18) |
-| P24 a store role doing another's job | `test_reader_cannot_write`, `test_promoter_cannot_write_signoff_or_eval_or_delete`, `test_signoff_cannot_write_manifest_or_files` (16); live in Task 27 step 2 |
+| P24 a store role doing another's job | `test_reader_cannot_write`, `test_nobody_can_delete_or_change_the_bucket` (16) |
 | P25 a tampered or unpinned test set | `test_testset_tamper_refused_before_running` (10); `test_testset_tampered_file_refused`, `test_testset_lock_mismatch_refused` (17) |
 | P26 different files promoted from those dry-run and approved | `test_expect_files_mismatch_refused` (19) |
 

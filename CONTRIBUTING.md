@@ -82,6 +82,10 @@ code review:
 - guardrail thresholds and trust weights;
 - prompts;
 - the NLI, embedding or LLM models (including version bumps);
+- the OCR and extraction models and their versions in `models.lock`;
+- the evaluation pass marks (`services/intelligence/intelligence/doceval/thresholds/`);
+- the extraction schema's major versions
+  (`services/intelligence/intelligence/schemas/extraction/`);
 - decision mapping;
 - PII rules;
 - what may leave for a cloud model: `gate.SYSTEM_PROMPT`, `CloudContext`'s
@@ -93,9 +97,20 @@ The process:
 1. Label the PR `clinical-review`.
 2. Attach the `services/intelligence/scripts/e2e_models.py` report from before **and** after the
    change, and say which numbers moved and why that's acceptable.
+   For a document model, attach the promotion's `evaluation.md` for the
+   current and the new version instead (`mhai-doceval compare` puts them
+   side by side).
 3. A clinically qualified reviewer approves it in addition to the code
    review.
 4. Record significant changes as an ADR (see below).
+
+**A `models.lock` PR is the model's sign-off.** `lock-check` verifies every
+changed pin against the model store (signature, every file, the gate and the
+locked test set); one reviewer's approval, by someone other than the person
+who trained or promoted the model, signs it off. Keep the PR to
+`models.lock` (and `models/`, `docs/` or `CHANGELOG.md`), and change
+`models/trust-policy.json` in a PR of its own. See "Promoting a model" in
+`services/intelligence/README.md`.
 
 ## Testing
 
@@ -116,6 +131,10 @@ Python paths here are relative to `services/intelligence/`.
 - **Synthetic or properly anonymised data only, everywhere outside
   production:** tests, fixtures, notebooks, issues, PRs, screenshots, logs
   and bug reports.
+- **Drive and notebooks hold synthetic data, or de-identified data with an
+  approval record; nothing else, ever.** A training run may name only
+  datasets in `models/approved-datasets.json`, and the promotion refuses
+  any other.
 - Never commit `.env` files, keys, credentials, patient exports or model
   weights. `.gitignore`, pre-commit (gitleaks, private-key detection) and CI
   enforce this. If something slips through, treat it as compromised: rotate

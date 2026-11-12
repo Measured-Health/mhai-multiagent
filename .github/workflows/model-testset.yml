@@ -1,0 +1,142 @@
+name: Model test split
+
+# Build, sign and lock a test split in the store's evaluation area (mhai-models
+# testset-build; plan Task 17) and print its line for models/testsets.lock, which goes in
+# by PR. Nothing else of the split leaves the store: the job summary has the lock line
+# only, and no artifact is uploaded.
+#
+# Every input reaches the shell only through env:, quoted; the CLI checks the suite and
+# version again before any I/O. Rehearsal mode (the repository variable
+# MODEL_STORE_ENDPOINT empty): MinIO from docker-compose.models.yml and an in-job
+# development key, in development, and a small split; the summary says "rehearsal".
+# Outside it both switches are production, and the store's writer and the signing key
+# (repository secrets, no environment) reach a step only then. The job runs on main only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Evaluation suite
+        required: true
+        type: choice
+        options: [clinical_document]
+      version:
+        description: Split version (semver; five digits or fewer in all)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: model-testset
+  cancel-in-progress: false
+
+jobs:
+  testset-build:
+    # Main only: the repository secrets below reach this job from main's dispatch only.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Rehearsal or production, from the repository variable (never from an input).
+      REHEARSAL: ${{ vars.MODEL_STORE_ENDPOINT == '' }}
+      SUITE: ${{ inputs.suite }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Main only
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          [ "$REF" = refs/heads/main ] ||
+            { echo "::error::this job runs on main only (ref $REF refused)"; exit 1; }
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.12.23"
+          enable-cache: false
+
+      - name: Install
+        working-directory: services/intelligence
+        run: uv sync --locked
+
+      - name: Mode
+        run: |
+          case "$REHEARSAL" in true | false) ;; *) echo "::error::bad mode"; exit 1 ;; esac
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version"; exit 1; }
+          if [ "$REHEARSAL" = true ]; then
+            {
+              echo MHAI_MODELS_ENV=development
+              echo APP_ENV=development
+              echo SCALE=0.02
+            } >>"$GITHUB_ENV"
+            echo '## rehearsal: no production store; development key, small split' >>"$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo MHAI_MODELS_ENV=production
+              echo APP_ENV=production
+              echo SCALE=1.0
+              echo "MHAI_MODELS_TRUST_POLICY=$GITHUB_WORKSPACE/models/trust-policy.json"
+            } >>"$GITHUB_ENV"
+          fi
+
+      # The store's settings and the writer's throwaway password go to $GITHUB_ENV, masked.
+      - name: Rehearsal store
+        if: env.REHEARSAL == 'true'
+        working-directory: services/intelligence
+        run: uv run --no-sync scripts/rehearse-promotion.sh store-up "$GITHUB_ENV" writer
+
+      - name: Rehearsal key
+        if: env.REHEARSAL == 'true'
+        working-directory: services/intelligence
+        run: uv run --no-sync scripts/rehearse-promotion.sh keys "$RUNNER_TEMP/rehearsal" "$GITHUB_ENV"
+
+      - name: Build and lock the split
+        working-directory: services/intelligence
+        env:
+          P_ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_ENDPOINT || '' }}
+          P_BUCKET: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_BUCKET || '' }}
+          P_REGION: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_REGION || '' }}
+          P_WRITER_ACCESS: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_WRITER_ACCESS_KEY || '' }}
+          P_WRITER_SECRET: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_WRITER_SECRET_KEY || '' }}
+          P_SIGNING_KEY: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && secrets.MHAI_MODELS_SIGNING_KEY || '' }}
+        run: |
+          if [ "$REHEARSAL" != true ]; then
+            export MODEL_STORE_ENDPOINT="$P_ENDPOINT" MODEL_STORE_BUCKET="$P_BUCKET"
+            export MODEL_STORE_REGION="$P_REGION"
+            export MODEL_STORE_WRITER_ACCESS_KEY="$P_WRITER_ACCESS"
+            export MODEL_STORE_WRITER_SECRET_KEY="$P_WRITER_SECRET"
+            # The signing key, in a file only this job's user can read.
+            (umask 077 && printf '%s\n' "$P_SIGNING_KEY" >"$RUNNER_TEMP/signing-key.pem")
+            export MHAI_MODELS_SIGNER="$RUNNER_TEMP/signing-key.pem"
+          fi
+          # A private scratch folder on the runner's disk for the plaintext split.
+          export MHAI_MODELS_SCRATCH="$RUNNER_TEMP/testset-scratch"
+          mkdir -m 700 "$MHAI_MODELS_SCRATCH"
+          code=0
+          line="$(uv run --no-sync mhai-models testset-build --suite "$SUITE" --version "$VERSION" \
+            --scale "$SCALE" 2>"$RUNNER_TEMP/testset.err")" || code=$?
+          rm -f "$RUNNER_TEMP/signing-key.pem"
+          if [ "$code" -eq 4 ]; then
+            # Locked, but the scratch copy stayed. stderr then has two lines: parse the
+            # last (Task 17 N1). Success with a warning, for testset-build only.
+            if tail -n 1 "$RUNNER_TEMP/testset.err" | jq -e '.warning == "scratch_not_removed"' >/dev/null; then
+              echo "::warning::the split is locked, but its scratch copy could not be removed"
+              code=0
+            fi
+          fi
+          if [ "$code" -ne 0 ]; then
+            printf '%s\n' "$line"
+            exit "$code"
+          fi
+          [[ "$line" =~ ^[a-z_]+@[0-9.]+#[0-9a-f]{64}$ ]] || { echo "::error::no lock line"; exit 1; }
+          printf 'models/testsets.lock line: %s\n' "$line"
+          { echo '### models/testsets.lock'; echo '```'; printf '%s\n' "$line"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
