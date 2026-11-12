@@ -3,6 +3,7 @@ package routes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -50,6 +51,12 @@ func (h *handlers) views(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, problem(err))
 		return
 	}
+	// Nothing is computed for an id the period doesn't list, or past the
+	// person's cold contexts for the period.
+	if err := h.admit(ctx, p, f); err != nil {
+		h.fail(w, r, err)
+		return
+	}
 	s, err := h.d.Engine.Body(ctx, p, f)
 	if err != nil {
 		h.fail(w, r, err)
@@ -89,6 +96,15 @@ func (h *handlers) history(ctx context.Context, per calendar.Period, f disclose.
 			if err == analysis.ErrNoPeriod {
 				break // older than 24 months: nothing earlier is answerable
 			}
+			return nil, err
+		}
+		// An id the earlier period doesn't list (a condition under 5
+		// patients there) is a group too small to show: the point is
+		// hidden whole, and nothing is computed for it.
+		if err := h.admit(ctx, p, f); errors.Is(err, errListed) {
+			bodies = append(bodies, disclose.HiddenWhole(disclose.Context{Period: prev, Filters: f}))
+			continue
+		} else if err != nil {
 			return nil, err
 		}
 		s, err := h.d.Engine.Body(ctx, p, f)

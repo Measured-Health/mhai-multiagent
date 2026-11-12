@@ -176,6 +176,8 @@ func problem(err error) string {
 		return "too_many_filters"
 	case errors.Is(err, errQuery), errors.Is(err, disclose.ErrInvalid):
 		return "validation_failed"
+	case errors.As(err, new(coldError)):
+		return "rate_limited"
 	case errors.Is(err, analysis.ErrPending), errors.Is(err, analysis.ErrNotReady):
 		return "not_ready"
 	}

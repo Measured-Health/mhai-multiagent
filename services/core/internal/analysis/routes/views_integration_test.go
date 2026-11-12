@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	_ "time/tzdata"
@@ -393,4 +394,111 @@ func TestFiltersRoute(t *testing.T) {
 	if c, _ := e.get(t, "/analysis/filters?period=week&start=2026-11-01"); c != 503 {
 		t.Errorf("an unfrozen week: %d", c)
 	}
+}
+
+// Security review: a condition, location or source id that isn't in the
+// period's stored filter lists is refused (422) before anything is
+// computed or stored, so well-formed ids can't fill the period's body cap.
+func TestUnknownFilterIdRefusedBeforeCompute(t *testing.T) {
+	super, app := pools(t)
+	e := newEnv(t, super, app, true)
+	// The period's lists are stored once, whatever is asked for.
+	for _, p := range []string{"/analysis/prevalence?period=month&start=2026-10-01", "/analysis/filters?period=month&start=2026-10-01"} {
+		if c, b := e.get(t, p); c != 200 {
+			t.Fatalf("%s: %d %s", p, c, b)
+		}
+	}
+	var before int
+	if err := super.QueryRow(context.Background(), `SELECT count(*) FROM analysis_snapshots WHERE hospital_id = $1`, e.h).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	for _, dim := range []string{"condition", "location", "source"} {
+		c, b := e.get(t, "/analysis/prevalence?period=month&start=2026-10-01&"+dim+"="+uuid.NewString())
+		if c != 422 || code(b) != "validation_failed" {
+			t.Errorf("an unknown %s: %d %s", dim, c, b)
+		}
+	}
+	var after int
+	if err := super.QueryRow(context.Background(), `SELECT count(*) FROM analysis_snapshots WHERE hospital_id = $1`, e.h).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Errorf("%d bodies stored for unknown ids", after-before)
+	}
+	// A listed id is answered.
+	if c, b := e.get(t, "/analysis/prevalence?period=month&start=2026-10-01&condition="+e.cond.String()); c != 200 {
+		t.Errorf("a listed condition: %d %s", c, b)
+	}
+}
+
+// Security review: a person may make at most ColdContexts distinct cold
+// contexts per period (reserve, then check); past it, 429 and nothing
+// computed. A context already stored costs nothing.
+func TestColdContextCapPerPersonPeriod(t *testing.T) {
+	super, app := pools(t)
+	e := newEnv(t, super, app, true)
+	if c, b := e.get(t, "/analysis/prevalence?period=month&start=2026-10-01"); c != 200 {
+		t.Fatalf("%d %s", c, b)
+	}
+	// Exhaust the person's budget for October.
+	run(t, super, `INSERT INTO analysis_cold_budget (hospital_id, user_id, period_id, used)
+		SELECT $1, $2, p.id, $3 FROM analysis_periods p WHERE p.hospital_id = $1 AND p.level = 'month' AND p.start = '2026-10-01'
+		ON CONFLICT (hospital_id, user_id, period_id) DO UPDATE SET used = EXCLUDED.used`, e.h, e.user, ColdContexts)
+	if c, b := e.get(t, "/analysis/prevalence?period=month&start=2026-10-01&sex=male"); c != 429 || code(b) != "rate_limited" {
+		t.Errorf("past the cap: %d %s", c, b)
+	}
+	var n int
+	if err := super.QueryRow(context.Background(), `SELECT count(*) FROM analysis_snapshots s JOIN analysis_periods p ON p.id = s.period_id
+		WHERE s.hospital_id = $1 AND p.level = 'month' AND p.start = '2026-10-01' AND s.query_hash = $2`, e.h, analysis.Hash(disclose.Filters{disclose.DimSex: "male"})).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Error("a context past the cap was stored")
+	}
+	// A stored context still answers.
+	if c, b := e.get(t, "/analysis/affected?period=month&start=2026-10-01"); c != 200 {
+		t.Errorf("a stored context past the cap: %d %s", c, b)
+	}
+	// Twenty parallel reservations for distinct contexts against a cap
+	// with five left: five pass, the counter matches the rows.
+	run(t, super, `UPDATE analysis_cold_budget SET used = $3 WHERE hospital_id = $1 AND user_id = $2`, e.h, e.user, ColdContexts-5)
+	var pid uuid.UUID
+	if err := super.QueryRow(context.Background(), `SELECT id FROM analysis_periods WHERE hospital_id = $1 AND level = 'month' AND start = '2026-10-01'`, e.h).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	passed := 0
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ctx := authz.WithPrincipal(context.Background(), authz.Principal{UserID: e.user, HospitalID: e.h,
+				Roles: []string{authz.RoleHospitalAdmin}, MFA: true, SessionID: e.session})
+			ok, err := reserveCold(ctx, app, e.user, pid, []byte(fmt.Sprintf("%032d", i)))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if ok {
+				mu.Lock()
+				passed++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if passed != 5 {
+		t.Errorf("%d reservations passed, want 5", passed)
+	}
+	var used, rows int
+	if err := super.QueryRow(context.Background(), `SELECT b.used, (SELECT count(*) FROM analysis_cold_contexts c
+		WHERE c.hospital_id = b.hospital_id AND c.user_id = b.user_id AND c.period_id = b.period_id)
+		FROM analysis_cold_budget b WHERE b.hospital_id = $1 AND b.user_id = $2 AND b.period_id = $3`, e.h, e.user, pid).Scan(&used, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if used != ColdContexts {
+		t.Errorf("used %d, want %d", used, ColdContexts)
+	}
+	_ = rows
 }

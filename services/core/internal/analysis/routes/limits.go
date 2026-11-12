@@ -59,3 +59,7 @@ func (l *limiter) allow(key string) bool {
 	}
 	return true
 }
+
+// ColdContexts is the most distinct contexts one person may have computed
+// cold in one period (security review): past it, 429 rate_limited.
+const ColdContexts = 100

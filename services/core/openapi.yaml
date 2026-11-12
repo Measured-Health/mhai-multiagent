@@ -801,7 +801,9 @@ paths:
         `to` that span exactly one period (anything else is 422 invalid_range). A period that has
         ended but isn't frozen is 503 not_ready, as is a body that couldn't be computed within the
         cold budget (retry: it is being computed). At most two filters (422 too_many_filters); a
-        location and a setting together are refused. Every number is guarded under the small-group
+        location and a setting together are refused. A condition, location or source that isn't in the
+        period's filter lists is 422 validation_failed, and a person may have at most 100 distinct
+        contexts computed cold per period (429 rate_limited past it). Every number is guarded under the small-group
         rule and served from the stored body unchanged; `history` lists up to 7 earlier periods of
         the level, each copied from that period's own stored body. Reads are recorded once per
         session, filter set and period. Added in 1.16.0.
@@ -2952,7 +2954,7 @@ components:
       type: object
       required: [updated_at, periods, conditions, locations, specialties, sources]
       properties:
-        updated_at: { type: string, format: date-time, nullable: true, description: When the lists were stored; null when no month is frozen yet. }
+        updated_at: { type: string, format: date-time, nullable: true, description: "When the lists were stored; null when no month is frozen yet." }
         periods:
           type: object
           description: The answerable frozen periods' first days, per level, oldest first.
@@ -2997,7 +2999,7 @@ components:
         drill: { type: string, nullable: true }
     AnalysisMinutes:
       type: object
-      description: A median in minutes (a whole number or a half); hidden is `{value: null, suppressed: true}`.
+      description: "A median in minutes (a whole number or a half); hidden is `{value: null, suppressed: true}`."
       required: [value, suppressed]
       properties:
         value: { type: number, nullable: true }

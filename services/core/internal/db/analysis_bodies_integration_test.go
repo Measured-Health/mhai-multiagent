@@ -24,7 +24,7 @@ func TestAnalysisBodiesGrants(t *testing.T) {
 		'mhai_analysis_job', 'mhai_jobs', 'mhai_worker_read', 'mhai_worker_write']) r(role)
 		WHERE p.proname IN ('mhai_analysis_period', 'mhai_analysis_periods', 'mhai_analysis_lock', 'mhai_analysis_cells',
 			'mhai_analysis_filters', 'mhai_analysis_snapshot_get', 'mhai_analysis_snapshot_put', 'mhai_analysis_records',
-			'mhai_analysis_viewed')
+			'mhai_analysis_viewed', 'mhai_analysis_reserve_cold')
 		  AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r.role)
 		  AND has_function_privilege(r.role, p.oid, 'EXECUTE')`).Scan(&bad); err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func TestAnalysisBodiesGrants(t *testing.T) {
 	}
 	var tables int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM unnest(ARRAY['analysis_subject_attrs', 'analysis_hospital_start',
-		'analysis_snapshots', 'analysis_view_log', 'analysis_unusual']) t
+		'analysis_snapshots', 'analysis_view_log', 'analysis_unusual', 'analysis_cold_budget', 'analysis_cold_contexts']) t
 		WHERE has_table_privilege('mhai_gateway', t, 'SELECT') OR has_table_privilege('mhai_gateway', t, 'INSERT')
 		   OR has_table_privilege('mhai_analysis_reader', t, 'UPDATE') OR has_table_privilege('mhai_analysis_reader', t, 'DELETE')`).Scan(&tables); err != nil {
 		t.Fatal(err)
@@ -72,11 +72,11 @@ func TestMigration00024DownUp(t *testing.T) {
 	var left int
 	if err := pool.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM pg_class WHERE relname IN ('analysis_subject_attrs', 'analysis_hospital_start', 'analysis_snapshots',
-			'analysis_view_log', 'analysis_unusual'))
+			'analysis_view_log', 'analysis_unusual', 'analysis_cold_budget', 'analysis_cold_contexts'))
 		+ (SELECT count(*) FROM pg_proc WHERE proname IN ('mhai_analysis_period', 'mhai_analysis_periods', 'mhai_analysis_lock',
 			'mhai_analysis_cells', 'mhai_analysis_filters', 'mhai_analysis_snapshot_get', 'mhai_analysis_snapshot_put',
 			'mhai_analysis_records', 'mhai_analysis_viewed', 'mhai_analysis_hospital', 'mhai_analysis_frozen',
-			'mhai_analysis_small_shown', 'mhai_analysis_subject_attrs_put'))
+			'mhai_analysis_small_shown', 'mhai_analysis_subject_attrs_put', 'mhai_analysis_reserve_cold'))
 		+ (SELECT count(*) FROM pg_policies WHERE policyname = 'analysis_reader')
 		+ (SELECT count(*) FROM unnest(ARRAY['analysis_facts', 'analysis_first_seen', 'analysis_periods', 'hospitals']) t
 		   WHERE has_any_column_privilege('mhai_analysis_reader', t, 'SELECT'))

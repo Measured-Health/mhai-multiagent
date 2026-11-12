@@ -23,6 +23,8 @@
 --     filters), insert only, served as stored (design §11, I1). Each holds
 --     the engine's record of the body (for the period's guard, ruling C10)
 --     and the five views as sent; or the period's filter lists.
+--   - analysis_cold_budget and analysis_cold_contexts: at most a cap of
+--     distinct cold contexts per person and period (security review).
 --   - analysis_view_log and analysis_unusual: analysis.viewed once per
 --     session, filter set and period; analysis.unusual_querying once per
 --     person and hospital day (D7).
@@ -150,21 +152,52 @@ CREATE TABLE analysis_unusual (
     PRIMARY KEY (hospital_id, user_id, day)
 );
 
+------------------------------------------------------------------------
+-- Cold contexts per person and period (security review): a person may
+-- have at most a cap of distinct contexts computed cold in one period,
+-- reserved before anything is computed (reserve, then check: the counter
+-- row is locked FOR UPDATE).
+------------------------------------------------------------------------
+CREATE TABLE analysis_cold_budget (
+    hospital_id uuid NOT NULL,
+    user_id     uuid NOT NULL,
+    period_id   uuid NOT NULL,
+    used        integer NOT NULL DEFAULT 0 CHECK (used >= 0),
+    PRIMARY KEY (hospital_id, user_id, period_id),
+    FOREIGN KEY (hospital_id, period_id) REFERENCES analysis_periods (hospital_id, id)
+);
+CREATE TABLE analysis_cold_contexts (
+    hospital_id uuid NOT NULL,
+    user_id     uuid NOT NULL,
+    period_id   uuid NOT NULL,
+    query_hash  bytea NOT NULL CHECK (octet_length(query_hash) = 32),
+    PRIMARY KEY (hospital_id, user_id, period_id, query_hash),
+    FOREIGN KEY (hospital_id, user_id, period_id) REFERENCES analysis_cold_budget (hospital_id, user_id, period_id)
+);
+
 ALTER TABLE analysis_subject_attrs OWNER TO mhai_migrate;
 ALTER TABLE analysis_hospital_start OWNER TO mhai_migrate;
 ALTER TABLE analysis_snapshots OWNER TO mhai_migrate;
 ALTER TABLE analysis_view_log OWNER TO mhai_migrate;
 ALTER TABLE analysis_unusual OWNER TO mhai_migrate;
+ALTER TABLE analysis_cold_budget OWNER TO mhai_migrate;
+ALTER TABLE analysis_cold_contexts OWNER TO mhai_migrate;
 ALTER TABLE analysis_subject_attrs ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 ALTER TABLE analysis_hospital_start ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 ALTER TABLE analysis_snapshots ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 ALTER TABLE analysis_view_log ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 ALTER TABLE analysis_unusual ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
-REVOKE ALL ON analysis_subject_attrs, analysis_hospital_start, analysis_snapshots, analysis_view_log, analysis_unusual FROM PUBLIC;
+ALTER TABLE analysis_cold_budget ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+ALTER TABLE analysis_cold_contexts ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON analysis_subject_attrs, analysis_hospital_start, analysis_snapshots, analysis_view_log, analysis_unusual,
+    analysis_cold_budget, analysis_cold_contexts FROM PUBLIC;
 
 -- The writer: attributes through the trigger; the sweep's deletes.
 GRANT SELECT, INSERT ON analysis_subject_attrs TO mhai_analysis_writer;
-GRANT SELECT, DELETE ON analysis_snapshots, analysis_view_log, analysis_unusual TO mhai_analysis_writer;
+GRANT SELECT, DELETE ON analysis_snapshots, analysis_view_log, analysis_unusual, analysis_cold_budget, analysis_cold_contexts
+    TO mhai_analysis_writer;
+CREATE POLICY analysis_writer ON analysis_cold_budget TO mhai_analysis_writer USING (true);
+CREATE POLICY analysis_writer ON analysis_cold_contexts TO mhai_analysis_writer USING (true);
 CREATE POLICY analysis_writer ON analysis_subject_attrs TO mhai_analysis_writer USING (true) WITH CHECK (true);
 CREATE POLICY analysis_writer ON analysis_snapshots TO mhai_analysis_writer USING (true);
 CREATE POLICY analysis_writer ON analysis_view_log TO mhai_analysis_writer USING (true);
@@ -175,7 +208,9 @@ CREATE POLICY analysis_writer ON analysis_unusual TO mhai_analysis_writer USING 
 -- hospital filter still sees one hospital). Insert only where it writes.
 GRANT SELECT ON analysis_facts, analysis_subject_attrs, analysis_first_seen, analysis_periods,
     analysis_conditions, analysis_locations, analysis_sources TO mhai_analysis_reader;
-GRANT SELECT, INSERT ON analysis_hospital_start, analysis_snapshots, analysis_view_log, analysis_unusual TO mhai_analysis_reader;
+GRANT SELECT, INSERT ON analysis_hospital_start, analysis_snapshots, analysis_view_log, analysis_unusual,
+    analysis_cold_budget, analysis_cold_contexts TO mhai_analysis_reader;
+GRANT UPDATE (used) ON analysis_cold_budget TO mhai_analysis_reader;
 GRANT SELECT (id, time_zone) ON hospitals TO mhai_analysis_reader;
 CREATE POLICY analysis_reader ON analysis_facts FOR SELECT TO mhai_analysis_reader USING (hospital_id = public.mhai_current_hospital());
 CREATE POLICY analysis_reader ON analysis_subject_attrs FOR SELECT TO mhai_analysis_reader USING (hospital_id = public.mhai_current_hospital());
@@ -192,6 +227,10 @@ CREATE POLICY analysis_reader ON analysis_snapshots TO mhai_analysis_reader
 CREATE POLICY analysis_reader ON analysis_view_log TO mhai_analysis_reader
     USING (hospital_id = public.mhai_current_hospital()) WITH CHECK (hospital_id = public.mhai_current_hospital());
 CREATE POLICY analysis_reader ON analysis_unusual TO mhai_analysis_reader
+    USING (hospital_id = public.mhai_current_hospital()) WITH CHECK (hospital_id = public.mhai_current_hospital());
+CREATE POLICY analysis_reader ON analysis_cold_budget TO mhai_analysis_reader
+    USING (hospital_id = public.mhai_current_hospital()) WITH CHECK (hospital_id = public.mhai_current_hospital());
+CREATE POLICY analysis_reader ON analysis_cold_contexts TO mhai_analysis_reader
     USING (hospital_id = public.mhai_current_hospital()) WITH CHECK (hospital_id = public.mhai_current_hospital());
 
 ------------------------------------------------------------------------
@@ -615,6 +654,49 @@ END
 $$;
 -- +goose StatementEnd
 
+-- mhai_analysis_reserve_cold(user, period, hash, cap): reserves one cold
+-- context of the period for the person before anything is computed
+-- (security review): true when the context is stored already, reserved
+-- before by them, or newly reserved within cap; false past the cap. The
+-- person's counter row is locked FOR UPDATE, so parallel requests queue
+-- on it (reserve, then check). The user is the verified token's, passed
+-- by core.
+-- +goose StatementBegin
+CREATE FUNCTION mhai_analysis_reserve_cold(p_user uuid, p_period uuid, p_hash bytea, p_cap integer) RETURNS boolean
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+DECLARE
+    v_h    uuid := public.mhai_analysis_hospital();
+    v_used integer;
+BEGIN
+    PERFORM public.mhai_analysis_frozen(p_period);
+    IF p_user IS NULL OR p_hash IS NULL OR octet_length(p_hash) <> 32 OR p_cap IS NULL OR p_cap < 1 OR p_cap > 10000 THEN
+        RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'analysis: not a reservation';
+    END IF;
+    IF EXISTS (SELECT 1 FROM public.analysis_snapshots s
+               WHERE s.hospital_id = v_h AND s.period_id = p_period AND s.query_hash = p_hash) THEN
+        RETURN true;
+    END IF;
+    INSERT INTO public.analysis_cold_budget (hospital_id, user_id, period_id) VALUES (v_h, p_user, p_period)
+        ON CONFLICT (hospital_id, user_id, period_id) DO NOTHING;
+    SELECT b.used INTO v_used FROM public.analysis_cold_budget b
+    WHERE b.hospital_id = v_h AND b.user_id = p_user AND b.period_id = p_period FOR UPDATE;
+    IF EXISTS (SELECT 1 FROM public.analysis_cold_contexts c WHERE c.hospital_id = v_h AND c.user_id = p_user
+               AND c.period_id = p_period AND c.query_hash = p_hash) THEN
+        RETURN true;
+    END IF;
+    IF v_used >= p_cap THEN
+        RETURN false;
+    END IF;
+    INSERT INTO public.analysis_cold_contexts (hospital_id, user_id, period_id, query_hash) VALUES (v_h, p_user, p_period, p_hash);
+    UPDATE public.analysis_cold_budget b SET used = b.used + 1
+    WHERE b.hospital_id = v_h AND b.user_id = p_user AND b.period_id = p_period;
+    RETURN true;
+END
+$$;
+-- +goose StatementEnd
+
 -- mhai_analysis_viewed(user, session, period, query, filters, now): logs a
 -- read; first is whether it is the first of this session, filter set and
 -- period (analysis.viewed is written then), and unusual whether it is the
@@ -681,6 +763,14 @@ BEGIN
     GET DIAGNOSTICS v_n = ROW_COUNT;
     -- 00024: stored bodies live as long as their period's facts (25
     -- months); the read log and the day's flags for two hospital days.
+    DELETE FROM public.analysis_cold_contexts c
+    WHERE c.hospital_id = p_hospital
+      AND EXISTS (SELECT 1 FROM public.analysis_periods p
+                  WHERE p.hospital_id = c.hospital_id AND p.id = c.period_id AND p."end" < v_cut);
+    DELETE FROM public.analysis_cold_budget b
+    WHERE b.hospital_id = p_hospital
+      AND EXISTS (SELECT 1 FROM public.analysis_periods p
+                  WHERE p.hospital_id = b.hospital_id AND p.id = b.period_id AND p."end" < v_cut);
     DELETE FROM public.analysis_snapshots s
     WHERE s.hospital_id = p_hospital
       AND EXISTS (SELECT 1 FROM public.analysis_periods p
@@ -710,18 +800,19 @@ ALTER FUNCTION mhai_analysis_snapshot_get(uuid, bytea) OWNER TO mhai_analysis_re
 ALTER FUNCTION mhai_analysis_snapshot_put(uuid, bytea, jsonb) OWNER TO mhai_analysis_reader;
 ALTER FUNCTION mhai_analysis_records(uuid, bigint[]) OWNER TO mhai_analysis_reader;
 ALTER FUNCTION mhai_analysis_viewed(uuid, text, uuid, bytea, bytea, timestamptz) OWNER TO mhai_analysis_reader;
+ALTER FUNCTION mhai_analysis_reserve_cold(uuid, uuid, bytea, integer) OWNER TO mhai_analysis_reader;
 REVOKE ALL ON FUNCTION mhai_analysis_hospital(), mhai_analysis_frozen(uuid), mhai_analysis_small_shown(jsonb),
     mhai_analysis_period(text, date, timestamptz), mhai_analysis_periods(timestamptz), mhai_analysis_lock(uuid),
     mhai_analysis_cells(uuid, jsonb), mhai_analysis_filters(uuid), mhai_analysis_snapshot_get(uuid, bytea),
     mhai_analysis_snapshot_put(uuid, bytea, jsonb), mhai_analysis_records(uuid, bigint[]),
-    mhai_analysis_viewed(uuid, text, uuid, bytea, bytea, timestamptz) FROM PUBLIC;
+    mhai_analysis_viewed(uuid, text, uuid, bytea, bytea, timestamptz), mhai_analysis_reserve_cold(uuid, uuid, bytea, integer) FROM PUBLIC;
 -- The definer functions reach the switch and the period check as the reader.
 GRANT EXECUTE ON FUNCTION mhai_reporting_period_ok(text, date, date) TO mhai_analysis_reader;
 GRANT EXECUTE ON FUNCTION mhai_analysis_period(text, date, timestamptz), mhai_analysis_periods(timestamptz),
     mhai_analysis_lock(uuid), mhai_analysis_cells(uuid, jsonb), mhai_analysis_filters(uuid),
     mhai_analysis_snapshot_get(uuid, bytea), mhai_analysis_snapshot_put(uuid, bytea, jsonb),
-    mhai_analysis_records(uuid, bigint[]), mhai_analysis_viewed(uuid, text, uuid, bytea, bytea, timestamptz)
-    TO mhai_gateway;
+    mhai_analysis_records(uuid, bigint[]), mhai_analysis_viewed(uuid, text, uuid, bytea, bytea, timestamptz),
+    mhai_analysis_reserve_cold(uuid, uuid, bytea, integer) TO mhai_gateway;
 
 -- +goose StatementBegin
 DO $$
@@ -782,6 +873,7 @@ END
 $$;
 -- +goose StatementEnd
 
+DROP FUNCTION mhai_analysis_reserve_cold(uuid, uuid, bytea, integer);
 DROP FUNCTION mhai_analysis_viewed(uuid, text, uuid, bytea, bytea, timestamptz);
 DROP FUNCTION mhai_analysis_records(uuid, bigint[]);
 DROP FUNCTION mhai_analysis_snapshot_put(uuid, bytea, jsonb);
@@ -807,6 +899,8 @@ DROP POLICY analysis_reader ON analysis_sources;
 REVOKE ALL ON analysis_facts, analysis_first_seen, analysis_periods, analysis_conditions, analysis_locations,
     analysis_sources FROM mhai_analysis_reader;
 
+DROP TABLE analysis_cold_contexts;
+DROP TABLE analysis_cold_budget;
 DROP TABLE analysis_unusual;
 DROP TABLE analysis_view_log;
 DROP TABLE analysis_snapshots;

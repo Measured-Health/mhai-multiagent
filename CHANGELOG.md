@@ -84,7 +84,10 @@ All notable changes to this project are documented here. The format follows
   `analysis.viewed` once per session, filter set and period, and
   `analysis.unusual_querying`. New problem codes `too_many_filters` and
   `invalid_range` (422). openapi 1.16.0 (additive). Drill fields are null
-  until PR 5.
+  until PR 5. A condition, location or source must be in the period's
+  stored filter lists (else 422 before anything is computed), and a person
+  may have at most 100 distinct contexts computed cold per period
+  (`analysis_cold_budget`, reserved before the engine runs; else 429).
 - EMR integration, PR 5 (canonical model, normaliser and patient index;
   off by default). Migration **00023** (the plan's 00022; 00021 and 00022
   were taken by Analysis and Plan 7c-3): `emr.raw_records` (a document
