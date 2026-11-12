@@ -48,6 +48,11 @@ type Settings struct {
 	// RuleSetActive is EMR_RULE_SET_ACTIVE: empty means no rule set is
 	// active and every finding is shadow (off by default).
 	RuleSetActive string
+	// DevCAFile is EMR_DEV_CA_FILE: an extra CA the egress clients trust,
+	// for the synthetic FHIR server's throwaway certificate (plan Task 25).
+	// Development only; refused anywhere else, where TLS uses the system
+	// roots and nothing more (design §6.4).
+	DevCAFile string
 }
 
 // Development reports whether APP_ENV is development.
@@ -73,6 +78,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		RuleSetActive:   get("EMR_RULE_SET_ACTIVE"),
 		CodesDir:        get("EMR_CODES_DIR"),
 		MapsDir:         get("EMR_MAPS_DIR"),
+		DevCAFile:       get("EMR_DEV_CA_FILE"),
 	}
 	var errs []error
 	switch s.Env {
@@ -121,6 +127,9 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	}
 	if (s.CodesDir == "") != (s.MapsDir == "") {
 		errs = append(errs, errors.New("set both EMR_CODES_DIR and EMR_MAPS_DIR, or neither"))
+	}
+	if s.DevCAFile != "" && !s.Development() {
+		errs = append(errs, errors.New("EMR_DEV_CA_FILE is for development only (the synthetic FHIR server)"))
 	}
 	if s.RuleSetActive != "" && !ruleSetName.MatchString(s.RuleSetActive) {
 		errs = append(errs, errors.New("EMR_RULE_SET_ACTIVE must be a rule set name (lower-case letters, digits and -)"))
