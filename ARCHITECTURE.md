@@ -56,7 +56,11 @@ default):** the data foundation (migration 00021): a nightly core loop, as
 `mhai_analysis_job`, ingests coded facts for hospitals whose analysis switch
 is on, sweeps them after 25 months and freezes finished hospital-day blocks,
 months and quarters; only the synthetic demo hospital is switched on, by
-`core analysis seed-demo`. Nothing of it reaches a worker or NATS. The smoke test reads health,
+`core analysis seed-demo`. Nothing of it reaches a worker or NATS.
+**Built (Patient Analysis PR 4, off by default):** `GET /analysis/filters`
+and `GET /analysis/{view}` serve guarded bodies stored once per frozen
+period and filter set (migration 00024), each guarded against everything
+its period has published, one guard per hospital and period at a time. The smoke test reads health,
 retries a forced dead letter, reads the statistics and the analytics, and
 follows up a synthetic change. **Built (cloud
 models, off by default):** a hospital a platform admin has opted in can

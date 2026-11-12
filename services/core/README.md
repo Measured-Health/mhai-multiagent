@@ -138,6 +138,20 @@ and never counted. It logs hospital ids, the step and a fixed reason only,
 and counts `analysis_late_facts_total` and `analysis_freeze_failed_total`
 (alert `analysis_freeze_failed`).
 
+The aggregate reads (PR 4, migration 00024) are `GET /analysis/filters` and
+`GET /analysis/{view}`, for hospital admins and analysts with two-step,
+answering 404 while the hospital's switch is off. Each answers one frozen
+period (`period` and `start`, or `from` and `to` spanning exactly one) from
+a stored body: the engine (`internal/analysis`) computes a context the first
+time it is asked for, parents first (child periods, then filter parents),
+under an advisory lock per hospital and period, against that period's
+record of everything already published (`disclose.Ledger`, kept in memory
+between requests and synced from the stored bodies), and stores it once
+through `mhai_analysis_snapshot_put`, which refuses a shown count of 1 to 4.
+The raw reader (`internal/analysis/cells`) is the engine's only; the routes
+never import it. A body that can't be computed within 2 s answers 503
+`not_ready` and is finished in the background. Nothing logs a query string.
+
 ## API docs
 
 `GET /api/docs` is a Redoc page for [`openapi.yaml`](openapi.yaml);

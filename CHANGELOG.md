@@ -63,6 +63,28 @@ All notable changes to this project are documented here. The format follows
   the whole flow on MinIO (`model-promotion-e2e`). With no model pinned,
   nothing changes. The enterprise controls left out are listed in TODO.md,
   "Before scale".
+- Patient Analysis, PR 4 (aggregate routes; off by default, the demo
+  hospital only). Migration **00024**: `analysis_subject_attrs` (a
+  subject's attributes, fixed by its first fact), `analysis_hospital_start`,
+  `analysis_snapshots` (one guarded body per context, insert only, at most
+  20,000 per period and 4 MiB, refusing a shown count of 1 to 4),
+  `analysis_view_log` and `analysis_unusual`; the gateway's definer
+  functions `mhai_analysis_{period, periods, lock, cells, filters,
+  snapshot_get, snapshot_put, records, viewed}`, owned by
+  `mhai_analysis_reader`, each refusing a hospital that is off; the sweep
+  also sweeps bodies and the read log. `GET /analysis/filters` and
+  `GET /analysis/{view}` (hospital admin or analyst, two-step; 404 when off;
+  one frozen period by `period`/`start` or an exact `from`/`to`, else 422
+  `invalid_range`; 422 `too_many_filters`; 503 `not_ready` for a period not
+  frozen yet or a body past the 2 s cold budget; 429 past 30 reads a minute;
+  `history` copied from stored bodies; `Cache-Control: no-store`). The
+  engine computes parents first, one guard per hospital and period at a time
+  (an advisory lock), against the period's record kept between requests
+  (`disclose.Ledger`), with the source list given to the guard; audit
+  `analysis.viewed` once per session, filter set and period, and
+  `analysis.unusual_querying`. New problem codes `too_many_filters` and
+  `invalid_range` (422). openapi 1.16.0 (additive). Drill fields are null
+  until PR 5.
 - EMR integration, PR 5 (canonical model, normaliser and patient index;
   off by default). Migration **00023** (the plan's 00022; 00021 and 00022
   were taken by Analysis and Plan 7c-3): `emr.raw_records` (a document

@@ -99,6 +99,20 @@ The product owner asked for the simplest safe version first (11 Nov). These wait
 - [ ] Metrics (`emr_sink_dropped_fields_total`, the normaliser's counts) are in-process counters; export them when the service gets a metrics endpoint.
 - [ ] The cross-connection match query scans patients by `(hospital_id, mrn)`; add a normalised-MRN index per namespace if it shows up in plans.
 
+## Analysis: before scale
+
+PR 4 (aggregate routes) is the simplest version that keeps the disclosure guarantees (product owner, 11 Nov). These wait until a live hospital or volume needs them:
+
+- [ ] **Precompute at freeze.** The nightly run doesn't compute the unfiltered bodies and filter lists of a newly frozen period (plan Task 9); the first request does, and a cold quarter can answer 503 `not_ready` a few times while it is finished in the background.
+- [ ] **The guard's cost.** Each period's knowledge is kept between requests (`disclose.Ledger`), but one guard still grows with what the period has published (on the build host, realistic dimensions: about 1.4 s a context on average, the worst several seconds). Past the 2 s budget the request answers 503 and the body is stored in the background. Make the final check incremental (only the groups the new equations touch) before a large hospital.
+- [ ] **Materialise pairs** per period at freeze (design §11); `mhai_analysis_cells` counts them per request.
+- [ ] **Shared limits and flights across core copies.** The 30-a-minute aggregate limit and the one-computation-per-context map are per process; the period lock and the body's primary key keep the database right across copies.
+- [ ] **Ledger memory.** One copy keeps the 64 most recent periods' records; the oldest is rebuilt from the stored bodies when next asked for.
+- [ ] **Map `analysis.viewed` and `analysis.unusual_querying` to mhai-web's audit kinds** (`analysis_viewed`; a flagged kind for unusual querying): sent bare until the facts are agreed (H6).
+- [ ] **A subject's attributes are its first fact's** (age band, sex, location and setting, specialty, source), for the whole retention: the guard's equations need one value per patient at every level. Per-period attributes need a guard model that allows them (H2 decides whether the definition is acceptable).
+- [ ] **A late fact in a hospital's first quarter** can make a first period's "every case is new" false; the guard then finds the raw values inconsistent and the context is stored hidden whole, with the `analysis_inconsistent` alert (fail closed).
+- [ ] **Smoke:** `TestSmokeAnalysis` is vetted in CI's core job and runs in boundary-smoke; it wasn't run on the build host for PR 4.
+
 ## Decided
 
 - **Go alongside Python.** The core service (Go, `services/core/`) owns the API, auth, tenancy, audit and EMR plumbing. The Python services (`services/intelligence/`) keep the models and are reached only over NATS. See [ADR 0010](docs/adr/0010-api-in-go-models-in-python-over-nats.md).
