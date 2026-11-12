@@ -1,8 +1,7 @@
 -- EMR integration, the scheduler's state (EMR design §5.1, §7.1, §15.2,
--- §15.4; plan Tasks 23-24). Numbered 00025: 00024 is held by Analysis PR 4,
--- which may merge first or after. goose refuses a lower version once a
--- higher one is applied, so this file merges after Analysis PR 4 or is
--- renumbered (the PR says so).
+-- §15.4; plan Tasks 23-24). Numbered 00026: 00024 is Gemini's (#137) and
+-- 00025 Analysis PR 4's. goose refuses a lower version once a higher one is
+-- applied, so this file merges after both.
 --
 -- emr.sync_state: one row per connection the scheduler has seen: the
 -- connector's cursor (opaque to the database, small), live_since (null

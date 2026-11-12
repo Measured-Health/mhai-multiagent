@@ -8,10 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- EMR integration, PR 6 (FHIR R4; off by default). Migration **00025**
-  (00024 is Analysis PR 4's): `emr.sync_state`, `emr.raw_records.backfill`,
-  and `emr_platform_health()` reporting a connection that is on and silent
-  for three poll intervals as `errors`. The `fhir_r4` connector is built:
+- EMR integration, PR 6 (FHIR R4; off by default). Migration **00026**
+  (00024 and 00025 are Gemini's and Analysis PR 4's): `emr.sync_state`,
+  `emr.raw_records.backfill`, and `emr_platform_health()` reporting a
+  connection that is on and silent for three poll intervals as `errors`. The `fhir_r4` connector is built:
   SMART Backend Services sign-in (RS384 or ES384, credential origin only),
   a read-only test with capability checks, and polling by `_lastUpdated`
   with a per-type cursor, page and record limits, references read from the

@@ -79,7 +79,7 @@ Gates before live use (design §17.6; all of them):
 
 ## EMR: follow-ups from PR 6 (12 Nov)
 
-- [ ] **Migration order:** 00025 (`emr_sync_state`) must merge after Analysis PR 4's 00024, or be renumbered. goose refuses a lower version once a higher one is applied.
+- [ ] **Migration order:** 00026 (`emr_sync_state`) must merge after Gemini's 00024 (#137) and Analysis PR 4's 00025. goose refuses a lower version once a higher one is applied.
 - [ ] PR 8a's `sources_status` reads staleness by the §15.4 rule (`scheduler.Stale` on the emr side; core's `emr_platform_health()` now marks a silent connection that is on as `errors`).
 - [ ] PR 7: findings from raw rows with `backfill = true` are `historical` (A18).
 - [ ] Core doesn't call `emr.v1.ctl.sync_now` yet (no route asks for it).
