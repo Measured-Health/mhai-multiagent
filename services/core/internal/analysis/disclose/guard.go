@@ -31,6 +31,11 @@ import (
 // first) and the pairs' top 20. Inconsistent raw values give the context
 // hidden whole and ErrInconsistent.
 func GuardResponse(raw Raw, forced Forced, known ...Body) (Body, error) {
+	return NewLedger(known...).guardResponse(raw, forced)
+}
+
+// guardResponse is GuardResponse against the ledger's record.
+func (l *Ledger) guardResponse(raw Raw, forced Forced) (Body, error) {
 	g, err := newGuarding(&raw)
 	if err != nil {
 		return HiddenWhole(raw.Context), err
@@ -38,10 +43,7 @@ func GuardResponse(raw Raw, forced Forced, known ...Body) (Body, error) {
 	if g.wholeByPatients() {
 		return HiddenWhole(raw.Context), nil
 	}
-	ks := make([]*sheetState, 0, len(known))
-	for i := range known {
-		ks = append(ks, stateOf(&known[i]))
-	}
+	ks := l.p.known
 	// A group already published is fixed: hidden in a known body, hidden
 	// here (D5); shown there, shown here (a series point is its child's
 	// total, a filter parent's row is this context's group).
@@ -63,7 +65,7 @@ func GuardResponse(raw Raw, forced Forced, known ...Body) (Body, error) {
 	}
 	g.pinned, g.public = shownElsewhere, map[string]bool{}
 	extra := Forced{}
-	pr := newPrior(ks)
+	pr := l.p
 	// A group the published bodies already determine is public: hiding it
 	// protects nothing, so it is shown (unless it is 1 to 4, a leak no
 	// guard here can undo).
@@ -358,6 +360,7 @@ func median(vals []int64, hidden bool) GuardedMinutes {
 func reshape[C, S, M, C2, S2, M2 any](r *Report[C, S, M]) Report[C2, S2, M2] {
 	var o Report[C2, S2, M2]
 	o.Context = r.Context
+	o.Sources = append([]string(nil), r.Sources...)
 	for _, x := range r.ByCondition {
 		o.ByCondition = append(o.ByCondition, ConditionRow[C2]{Condition: x.Condition})
 	}

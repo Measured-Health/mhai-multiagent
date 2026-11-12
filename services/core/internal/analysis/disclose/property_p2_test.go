@@ -136,3 +136,26 @@ func TestP2Realistic(t *testing.T) {
 	}
 	c.log(t, "P2 realistic")
 }
+
+// sourceDims are smallDims with two sources: the source filter is a
+// partition the views don't list, so the guard is given the source list
+// (PR 3 review, condition 2) and the attacker ranges over sources too.
+func sourceDims() attack.Dims {
+	d := smallDims(2)
+	d.Sources = []string{"X1", "X2"}
+	return d
+}
+
+// P2 over the source filter: every context with a source, guarded with the
+// period's record; nothing of 1 to 4 solvable across the period.
+func TestP2CoversSources(t *testing.T) {
+	if raceEnabled || testing.Short() {
+		t.Skip("every context of a period: run without -race (CI's analysis property step)")
+	}
+	var c p2Counts
+	for _, seed := range seeds(40, 3, 1) {
+		w := attack.Generate(seed, sourceDims(), []calendar.Period{octWeek}, false, attack.Options{Subjects: 120, Presence: 0.9, Rare: 0.6})
+		p2Period(t, &w, octWeek, &c)
+	}
+	c.log(t, "P2 sources")
+}
