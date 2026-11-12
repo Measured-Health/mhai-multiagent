@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 )
 
@@ -76,4 +77,37 @@ func TestParse(t *testing.T) {
 func urlValues(q string) (map[string][]string, error) {
 	v, err := url.ParseQuery(q)
 	return v, err
+}
+
+// Every dimension that isn't a fixed code list is checked against the
+// period's stored lists: a value the lists don't have is refused, one they
+// have passes; a dimension with no list is refused (fail closed).
+func TestEveryOpaqueDimensionChecked(t *testing.T) {
+	lists := []byte(`{"conditions": [{"id": "c1", "name": null, "icd10": null}], "locations": [{"id": "l1", "label": "W", "setting": null}],
+		"specialties": ["paediatrics"], "sources": [{"id": "s1", "label": "S"}]}`)
+	listedValue := map[int]string{disclose.DimCondition: "c1", disclose.DimLocation: "l1", disclose.DimSpecialty: "paediatrics", disclose.DimSource: "s1"}
+	for d := range disclose.DimNames {
+		if fixedCodes(d) {
+			continue
+		}
+		var f disclose.Filters
+		f[d] = "not_listed"
+		if ok, err := listed(lists, f); ok || err != nil {
+			t.Errorf("%s: an unlisted value passes (%v)", disclose.DimNames[d], err)
+		}
+		v, has := listedValue[d]
+		if !has {
+			t.Errorf("%s: an opaque dimension the test doesn't know", disclose.DimNames[d])
+			continue
+		}
+		f[d] = v
+		if ok, err := listed(lists, f); !ok || err != nil {
+			t.Errorf("%s: a listed value refused (%v)", disclose.DimNames[d], err)
+		}
+	}
+	var f disclose.Filters
+	f[disclose.DimSpecialty] = "paediatrics"
+	if ok, _ := listed([]byte(`{"conditions": []}`), f); ok {
+		t.Error("a dimension with no list passes")
+	}
 }

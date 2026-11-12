@@ -84,7 +84,8 @@ All notable changes to this project are documented here. The format follows
   `analysis.viewed` once per session, filter set and period, and
   `analysis.unusual_querying`. New problem codes `too_many_filters` and
   `invalid_range` (422). openapi 1.16.0 (additive). Drill fields are null
-  until PR 5. A condition, location or source must be in the period's
+  until PR 5. Every opaque filter (condition, location, specialty, source)
+  must be in the period's
   stored filter lists (else 422 before anything is computed), and a person
   may have at most 100 distinct contexts computed cold per period
   (`analysis_cold_budget`, reserved before the engine runs; else 429).

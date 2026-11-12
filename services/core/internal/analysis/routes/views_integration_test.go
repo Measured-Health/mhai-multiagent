@@ -412,10 +412,11 @@ func TestUnknownFilterIdRefusedBeforeCompute(t *testing.T) {
 	if err := super.QueryRow(context.Background(), `SELECT count(*) FROM analysis_snapshots WHERE hospital_id = $1`, e.h).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	for _, dim := range []string{"condition", "location", "source"} {
-		c, b := e.get(t, "/analysis/prevalence?period=month&start=2026-10-01&"+dim+"="+uuid.NewString())
+	for _, q := range []string{"condition=" + uuid.NewString(), "location=" + uuid.NewString(), "source=" + uuid.NewString(),
+		"specialty=synthetic_unlisted"} {
+		c, b := e.get(t, "/analysis/prevalence?period=month&start=2026-10-01&"+q)
 		if c != 422 || code(b) != "validation_failed" {
-			t.Errorf("an unknown %s: %d %s", dim, c, b)
+			t.Errorf("an unlisted %s: %d %s", q, c, b)
 		}
 	}
 	var after int
