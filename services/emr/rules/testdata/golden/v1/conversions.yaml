@@ -1,0 +1,38 @@
+description: Source units go through the normaliser's reviewed UCUM conversions before a rule compares them; a unit with no conversion never reaches a rule.
+rule_set: "1"
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: p1
+    sex: male
+    birth_date: "1965-03-03"
+    observations:
+      - {id: glucose-44mgdl, loinc: "2345-7", value: "44", unit: mg/dL, at: -1h}
+      - {id: glucose-46mgdl, loinc: "2345-7", value: "46", unit: mg/dl, at: -1h}
+      - {id: glucose-460mgdl, loinc: "2339-0", value: "460", unit: mg/dL, at: -1h}
+      - {id: glucose-blood-mmol, loinc: "15074-8", value: "2.1", unit: mmol/L, at: -1h}
+      - {id: creatinine-4.1mgdl, loinc: "2160-0", value: "4.1", unit: mg/dL, at: -1h}
+      - {id: creatinine-3.9mgdl, loinc: "2160-0", value: "3.9", unit: mg/dL, at: -1h}
+      - {id: haemoglobin-55gl, analyte: haemoglobin, value: "55", unit: g/L, at: -1h}
+      - {id: haemoglobin-65gl, analyte: haemoglobin, value: "65", unit: g/L, at: -1h}
+      - {id: platelets-15kul, analyte: platelets, value: "15", unit: K/uL, at: -1h}
+      - {id: potassium-blood, loinc: "6298-4", value: "6.9", unit: mmol/L, at: -1h}
+      - {id: potassium-mgdl, analyte: potassium, value: "30", unit: mg/dL, at: -1h}
+      - {id: potassium-gt7, analyte: potassium, value: ">7.0", unit: mmol/L, at: -1h}
+      - {id: platelets-lt10, analyte: platelets, value: "<10", unit: 10^9/L, at: -1h}
+      - {id: temperature-f, analyte: temperature, value: "94", unit: "[degF]", at: -1h}
+expect:
+  - {patient: p1, observation: glucose-44mgdl, rule_id: glucose-critical-low, severity: critical}
+  - {patient: p1, observation: glucose-460mgdl, rule_id: glucose-critical-high, severity: critical}
+  - {patient: p1, observation: glucose-blood-mmol, rule_id: glucose-critical-low, severity: critical}
+  - {patient: p1, observation: creatinine-4.1mgdl, rule_id: creatinine-critical-high, severity: critical}
+  - {patient: p1, observation: haemoglobin-55gl, rule_id: haemoglobin-critical-low, severity: critical}
+  - {patient: p1, observation: platelets-15kul, rule_id: platelets-critical-low, severity: critical}
+  - {patient: p1, observation: potassium-blood, rule_id: potassium-critical-high, severity: critical}
+  - {patient: p1, observation: potassium-gt7, rule_id: potassium-critical-high, severity: critical}
+  - {patient: p1, observation: platelets-lt10, rule_id: platelets-critical-low, severity: critical}
+expect_none:
+  - {patient: p1, observation: glucose-46mgdl, rule_id: glucose-critical-low}
+  - {patient: p1, observation: creatinine-3.9mgdl, rule_id: creatinine-critical-high}
+  - {patient: p1, observation: haemoglobin-65gl, rule_id: haemoglobin-critical-low}
+  - {patient: p1, observation: potassium-mgdl, rule_id: potassium-critical-high}
+  - {patient: p1, observation: temperature-f, rule_id: temperature-critical-low}

@@ -33,3 +33,18 @@ analytes:
   - loinc: 99910-2   # oxygen saturation
     canonical: "%"
     conversions: []
+  - loinc: 99907-8   # systolic blood pressure
+    canonical: mm[Hg]
+    conversions: []
+  - loinc: 99908-6   # respiratory rate
+    canonical: /min
+    conversions: []
+  - loinc: 99909-4   # body temperature
+    canonical: Cel
+    conversions: []
+  - loinc: 99915-1   # lactate
+    canonical: mmol/L
+    conversions: []
+  - loinc: 99916-9   # troponin
+    canonical: ng/L
+    conversions: []

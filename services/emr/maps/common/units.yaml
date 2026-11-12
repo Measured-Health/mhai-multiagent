@@ -16,6 +16,10 @@ units:
     aliases: ["g/l"]
   - ucum: 10*9/L
     aliases: ["x10^9/L", "10^9/L", "G/L"]
+  - ucum: 10*3/uL
+    aliases: ["x10^3/uL", "10^3/uL", "K/uL"]
+  - ucum: ng/L
+    aliases: ["ng/l"]
   - ucum: /min
     aliases: ["bpm", "beats/min", "breaths/min"]
   - ucum: mm[Hg]

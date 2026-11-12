@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/url"
@@ -27,6 +28,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/egress"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/normalise"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/proxyconf"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/rules"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/secrets"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/sink"
@@ -58,10 +60,11 @@ type readier interface {
 }
 
 // healthHandler answers emr.v1.ctl.health: readiness flags only, no
-// counts of anyone's data. No rule set is active yet, so it is reported as
-// absent. The allow-list's age is in whole seconds, -1 when this process
-// hasn't written one (no egress configured, or no write yet).
-func healthHandler(db pinger, store readier, allowAge func(time.Time) (time.Duration, bool)) ctl.Handler {
+// counts of anyone's data. ruleSet is the version the rules consumer
+// evaluates, "" when the rules don't run. The allow-list's age is in whole
+// seconds, -1 when this process hasn't written one (no egress configured,
+// or no write yet).
+func healthHandler(db pinger, store readier, allowAge func(time.Time) (time.Duration, bool), ruleSet string) ctl.Handler {
 	return func(ctx context.Context, _ reqtoken.Claims, _ proto.Message) (proto.Message, error) {
 		age := int64(-1)
 		if allowAge != nil {
@@ -78,7 +81,7 @@ func healthHandler(db pinger, store readier, allowAge func(time.Time) (time.Dura
 		if store != nil {
 			storeReady = store.Ready(c) == nil
 		}
-		return &emrpb.HealthReply{DatabaseReady: ready, SecretStoreReady: storeReady, RuleSetVersion: "",
+		return &emrpb.HealthReply{DatabaseReady: ready, SecretStoreReady: storeReady, RuleSetVersion: ruleSet,
 			ProxyAllowListAgeS: age}, nil
 	}
 }
@@ -218,6 +221,7 @@ func serve(getenv func(string) string) error {
 	// The normaliser (PR 5): only with code tables and maps configured.
 	// Synthetic tables and unreviewed conversions load in development only.
 	normaliser := false
+	ruleSet := ""
 	var js jetstream.JetStream
 	if s.CodesDir != "" {
 		tables, err := codes.Load(s.CodesDir, s.Development())
@@ -236,6 +240,26 @@ func serve(getenv func(string) string) error {
 		go func() { _ = n.Run(ctx, js) }()
 		go n.RunSweep(ctx)
 		normaliser = true
+
+		// The rules (PR 7): only with a rule set file. Every finding is
+		// shadow unless EMR_RULE_SET_ACTIVE names this set and a platform
+		// admin activated it for the hospital.
+		if s.RuleSetFile != "" {
+			rs, missing, err := loadRules(s.RuleSetFile, maps, s.Development())
+			if err != nil {
+				return err
+			}
+			pub := normalise.JSPublisher{JS: js}
+			e := &rules.Engine{Pool: pool, RuleSet: rs, Maps: maps, Active: s.RuleSetActive, Pub: pub, Log: log,
+				Breaker: &rules.Breaker{Pool: pool, Pub: pub, Multiple: s.BreakerMultiple, FloorCritical: s.BreakerFloorCritical,
+					Log: log}}
+			go func() { _ = e.Run(ctx, js) }()
+			go e.RunSweep(ctx)
+			ruleSet = rs.Version()
+			sha := rs.SHA256()
+			log.Info("emr rules", "version", rs.Version(), "status", rs.Status(), "sha256", hex.EncodeToString(sha[:]),
+				"active", s.RuleSetActive == rs.Version(), "analyte_codes_without_conversion", len(missing))
+		}
 	}
 
 	// The scheduler (PR 6): only with every piece a sync needs: the secret
@@ -269,9 +293,9 @@ func serve(getenv func(string) string) error {
 			creds.Egress = writer
 		}
 		handlers = creds.Handlers()
-		handlers["health"] = healthHandler(pool, store, allowAge)
+		handlers["health"] = healthHandler(pool, store, allowAge, ruleSet)
 	} else {
-		handlers["health"] = healthHandler(pool, nil, allowAge)
+		handlers["health"] = healthHandler(pool, nil, allowAge, ruleSet)
 	}
 	handlers["sync_now"] = (&ctl.SyncNow{Pool: pool}).Handle
 	r := &ctl.Responder{
@@ -287,7 +311,7 @@ func serve(getenv func(string) string) error {
 	}
 	defer stopCtl()
 	log.Info("emr serving", "env", s.Env, "subjects", ctl.Subjects, "rule_set_active", s.RuleSetActive != "",
-		"secret_store", store != nil, "sealing_keys", len(sealKeys), "egress", writer != nil, "normaliser", normaliser,
+		"secret_store", store != nil, "sealing_keys", len(sealKeys), "egress", writer != nil, "normaliser", normaliser, "rules", ruleSet != "",
 		"polling", polling)
 	<-ctx.Done()
 	return nil

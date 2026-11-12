@@ -1,0 +1,50 @@
+description: Three consecutive rising values inside the window; a dip, too few values or a value outside the window is no trend.
+rule_set: 0-synthetic
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: rising
+    sex: male
+    birth_date: "1970-01-01"
+    observations:
+      - {id: l-2.0, analyte: lactate, value: "2.0", unit: mmol/L, at: -5h}
+      - {id: l-2.5, analyte: lactate, value: "2.5", unit: mmol/L, at: -3h}
+      - {id: l-3.0, analyte: lactate, value: "3.0", unit: mmol/L, at: -1h}
+    triggers: [l-3.0]
+  - id: dip
+    sex: male
+    birth_date: "1970-01-01"
+    observations:
+      - {id: l-2.0, analyte: lactate, value: "2.0", unit: mmol/L, at: -5h}
+      - {id: l-3.0, analyte: lactate, value: "3.0", unit: mmol/L, at: -3h}
+      - {id: l-2.5, analyte: lactate, value: "2.5", unit: mmol/L, at: -1h}
+    triggers: [l-2.5]
+  - id: flat
+    sex: male
+    birth_date: "1970-01-01"
+    observations:
+      - {id: l-2.0, analyte: lactate, value: "2.0", unit: mmol/L, at: -5h}
+      - {id: l-2.5a, analyte: lactate, value: "2.5", unit: mmol/L, at: -3h}
+      - {id: l-2.5b, analyte: lactate, value: "2.5", unit: mmol/L, at: -1h}
+    triggers: [l-2.5b]
+  - id: two
+    sex: male
+    birth_date: "1970-01-01"
+    observations:
+      - {id: l-2.5, analyte: lactate, value: "2.5", unit: mmol/L, at: -3h}
+      - {id: l-3.0, analyte: lactate, value: "3.0", unit: mmol/L, at: -1h}
+    triggers: [l-3.0]
+  - id: outside
+    sex: male
+    birth_date: "1970-01-01"
+    observations:
+      - {id: l-2.0, analyte: lactate, value: "2.0", unit: mmol/L, at: -8h}
+      - {id: l-2.5, analyte: lactate, value: "2.5", unit: mmol/L, at: -3h}
+      - {id: l-3.0, analyte: lactate, value: "3.0", unit: mmol/L, at: -1h}
+    triggers: [l-3.0]
+expect:
+  - {patient: rising, observation: l-3.0, rule_id: lactate-rising, severity: urgent, evidence: [l-2.0, l-2.5]}
+expect_none:
+  - {patient: dip, observation: l-2.5, rule_id: lactate-rising}
+  - {patient: flat, observation: l-2.5b, rule_id: lactate-rising}
+  - {patient: two, observation: l-3.0, rule_id: lactate-rising}
+  - {patient: outside, observation: l-3.0, rule_id: lactate-rising}

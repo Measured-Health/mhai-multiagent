@@ -1,0 +1,45 @@
+description: Thresholds at and around each edge; comparators; one finding per analyte (the most severe); unit conversion.
+rule_set: 0-synthetic
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: p1
+    sex: female
+    birth_date: "1970-01-01"
+    observations:
+      - {id: k-6.5, analyte: potassium, value: "6.5", unit: mmol/L, at: -1h}
+      - {id: k-6.49, analyte: potassium, value: "6.49", unit: mmol/L, at: -1h}
+      - {id: k-6.0, analyte: potassium, value: "6.0", unit: mmol/l, at: -1h}
+      - {id: k-5.99, analyte: potassium, value: "5.99", unit: mmol/L, at: -1h}
+      - {id: k-2.5, analyte: potassium, value: "2.5", unit: mmol/L, at: -1h}
+      - {id: k-2.51, analyte: potassium, value: "2.51", unit: mmol/L, at: -1h}
+      - {id: k-gt7, analyte: potassium, value: ">7", unit: mmol/L, at: -1h}
+      - {id: k-gt6, analyte: potassium, value: ">6", unit: mmol/L, at: -1h}
+      - {id: k-gt5, analyte: potassium, value: ">5", unit: mmol/L, at: -1h}
+      - {id: k-lt0.5, analyte: potassium, value: "<0.5", unit: mmol/L, at: -1h}
+      - {id: k-lt6.6, analyte: potassium, value: "<6.6", unit: mmol/L, at: -1h}
+      - {id: k-mgdl, analyte: potassium, value: "26", unit: mg/dL, at: -1h}
+      - {id: glu-45mgdl, analyte: glucose, value: "45", unit: mg/dL, at: -1h}
+      - {id: glu-46mgdl, analyte: glucose, value: "46", unit: mg/dL, at: -1h}
+      - {id: glu-gl, analyte: glucose, value: "0.2", unit: g/L, at: -1h}
+      - {id: hr-131, analyte: heart_rate, value: "131", unit: bpm, at: -1h, category: vital-signs}
+      - {id: hr-130, analyte: heart_rate, value: "130", unit: /min, at: -1h, category: vital-signs}
+expect:
+  - {patient: p1, observation: k-6.5, rule_id: potassium-critical-high, severity: critical}
+  - {patient: p1, observation: k-6.49, rule_id: potassium-urgent-high, severity: urgent}
+  - {patient: p1, observation: k-6.0, rule_id: potassium-urgent-high, severity: urgent}
+  - {patient: p1, observation: k-2.5, rule_id: potassium-critical-low, severity: critical}
+  - {patient: p1, observation: k-gt7, rule_id: potassium-critical-high, severity: critical}
+  - {patient: p1, observation: k-gt6, rule_id: potassium-urgent-high, severity: urgent}
+  - {patient: p1, observation: k-lt0.5, rule_id: potassium-critical-low, severity: critical}
+  - {patient: p1, observation: glu-45mgdl, rule_id: glucose-critical-low, severity: critical}
+  - {patient: p1, observation: hr-131, rule_id: heart-rate-critical-high, severity: critical}
+expect_none:
+  - {patient: p1, observation: k-6.5, rule_id: potassium-urgent-high}
+  - {patient: p1, observation: k-5.99, rule_id: potassium-urgent-high}
+  - {patient: p1, observation: k-2.51, rule_id: potassium-critical-low}
+  - {patient: p1, observation: k-gt5, rule_id: potassium-urgent-high}
+  - {patient: p1, observation: k-lt6.6, rule_id: potassium-critical-low}
+  - {patient: p1, observation: k-mgdl, rule_id: potassium-critical-high}
+  - {patient: p1, observation: glu-46mgdl, rule_id: glucose-critical-low}
+  - {patient: p1, observation: glu-gl, rule_id: glucose-critical-low}
+  - {patient: p1, observation: hr-130, rule_id: heart-rate-critical-high}

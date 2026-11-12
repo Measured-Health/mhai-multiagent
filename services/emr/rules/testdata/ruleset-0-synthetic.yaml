@@ -1,0 +1,171 @@
+# SYNTHETIC rule set (EMR plan departure 14). It drives the rules engine's
+# tests and the synthetic end-to-end run, on the synthetic code tables
+# (services/emr/codes/testdata). Every number here is made up to exercise
+# the engine: none is a clinical threshold. The emr service refuses this
+# file outside APP_ENV=development (K10).
+version: 0-synthetic
+status: synthetic
+clinical_signoff: none
+description: Synthetic rules that exercise every rule kind. Not for patients.
+
+categories:
+  blood_chemistry: {label: Blood chemistry, freshness_hours: 72}
+  blood_count: {label: Blood count, freshness_hours: 72}
+  kidney_function: {label: Kidney function, freshness_hours: 72}
+  blood_gases_lactate: {label: Blood gases and lactate, freshness_hours: 72}
+  heart_markers: {label: Heart markers, freshness_hours: 72}
+  blood_sugar: {label: Blood sugar, freshness_hours: 72}
+  vital_signs: {label: Vital signs, freshness_hours: 6}
+  infection_markers: {label: Infection markers, freshness_hours: 72}
+
+analytes:
+  - {name: glucose, loinc: ["99901-1"], unit: mmol/L, category: blood_sugar}
+  - {name: potassium, loinc: ["99902-9"], unit: mmol/L, category: blood_chemistry}
+  - {name: creatinine, loinc: ["99903-7"], unit: umol/L, category: kidney_function}
+  - {name: sodium, loinc: ["99904-5"], unit: mmol/L, category: blood_chemistry}
+  - {name: haemoglobin, loinc: ["99905-2"], unit: g/dL, category: blood_count}
+  - {name: heart_rate, loinc: ["99906-0"], unit: /min, category: vital_signs}
+  - {name: systolic_bp, loinc: ["99907-8"], unit: "mm[Hg]", category: vital_signs}
+  - {name: respiratory_rate, loinc: ["99908-6"], unit: /min, category: vital_signs}
+  - {name: temperature, loinc: ["99909-4"], unit: Cel, category: vital_signs}
+  - {name: spo2, loinc: ["99910-2"], unit: "%", category: vital_signs}
+  - {name: consciousness, loinc: ["99912-8"], text: true, category: vital_signs}
+  - {name: air_or_oxygen, loinc: ["99913-6"], text: true, category: vital_signs}
+  - {name: spo2_scale, loinc: ["99914-4"], text: true, category: vital_signs}
+  - {name: lactate, loinc: ["99915-1"], unit: mmol/L, category: blood_gases_lactate}
+
+rules:
+  - id: potassium-critical-high
+    kind: threshold
+    analyte: potassium
+    severity: critical
+    op: ">="
+    value: 6.5
+    source: synthetic
+    causes:
+      - id: potassium-supplement
+        label: Potassium supplement
+        confidence: review
+        evidence:
+          - {medication_atc: [Z99AB]}
+      - id: kidney-function
+        label: Reduced kidney function
+        confidence: caution
+        evidence:
+          - {analyte: creatinine, op: ">=", value: 150, within_hours: 72}
+
+  - id: potassium-urgent-high
+    kind: threshold
+    analyte: potassium
+    severity: urgent
+    op: ">="
+    value: 6.0
+    source: synthetic
+
+  - id: potassium-critical-low
+    kind: threshold
+    analyte: potassium
+    severity: critical
+    op: "<="
+    value: 2.5
+    source: synthetic
+
+  - id: glucose-critical-low
+    kind: threshold
+    analyte: glucose
+    severity: critical
+    op: "<="
+    value: 2.5
+    source: synthetic
+
+  - id: haemoglobin-critical-low
+    kind: threshold
+    analyte: haemoglobin
+    severity: critical
+    op: "<"
+    bands:
+      - {sex: female, min_age: 18, max_age: 130, value: 7.0}
+      - {sex: male, min_age: 18, max_age: 130, value: 8.0}
+      - {sex: unknown, value: 8.0}
+    source: synthetic
+
+  - id: heart-rate-critical-high
+    kind: threshold
+    analyte: heart_rate
+    severity: critical
+    op: ">="
+    value: 131
+    source: synthetic
+
+  - id: lab-critical-flag
+    kind: source_flag
+    severity: critical
+    flags: [LL, HH, AA]
+    unmapped_category: {laboratory: blood_chemistry, vital-signs: vital_signs}
+    source: synthetic
+
+  - id: outside-source-range
+    kind: reference_range
+    severity: info
+    analytes: [sodium, potassium, glucose]
+    source: synthetic
+
+  - id: creatinine-rise-48h
+    kind: delta
+    analyte: creatinine
+    severity: urgent
+    rise: 26.5
+    within_hours: 48
+    source: synthetic
+
+  - id: creatinine-ratio-7d
+    kind: delta
+    analyte: creatinine
+    severity: urgent
+    ratio: 1.5
+    within_hours: 168
+    source: synthetic
+
+  - id: haemoglobin-fall-24h
+    kind: delta
+    analyte: haemoglobin
+    severity: urgent
+    fall: 2.0
+    within_hours: 24
+    source: synthetic
+
+  - id: lactate-rising
+    kind: trend
+    analyte: lactate
+    severity: urgent
+    direction: rising
+    count: 3
+    within_hours: 6
+    source: synthetic
+
+  - id: news2
+    kind: score
+    score: news2
+    within_hours: 1
+    total_critical: 7
+    total_urgent: 5
+    single_three: urgent
+    params:
+      respiratory_rate: respiratory_rate
+      spo2: spo2
+      spo2_scale: spo2_scale
+      air_or_oxygen: air_or_oxygen
+      systolic_bp: systolic_bp
+      heart_rate: heart_rate
+      consciousness: consciousness
+      temperature: temperature
+    source: synthetic
+
+  - id: potassium-with-supplement
+    kind: combination
+    analyte: potassium
+    severity: urgent
+    op: ">="
+    value: 5.5
+    with_atc: [Z99AB]
+    source: synthetic

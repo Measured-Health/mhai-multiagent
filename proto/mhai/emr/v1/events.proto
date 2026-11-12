@@ -38,3 +38,11 @@ message Signal {
   string ref_id = 3;
   string code = 4;
 }
+
+// emr.v1.<hid>.finding: a finding to raise, or a change to one core has
+// seen (superseded by an amended result's finding, or withdrawn). Core
+// reads the finding's row under its hospital (mhai_emr_core): the message
+// carries the id only. Nats-Msg-Id is finding_id:status.
+message Finding {
+  string finding_id = 1;
+}

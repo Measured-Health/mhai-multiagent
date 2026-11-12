@@ -1,0 +1,141 @@
+description: NEWS2 from one set of vitals within 1 h; every parameter needed (consciousness and air or oxygen included); Scale 2 only when recorded.
+rule_set: 0-synthetic
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: total-9
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "26", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "90", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: air, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "105", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "37.0", unit: Cel, at: -30m}
+      - {id: avpu, analyte: consciousness, text: A, at: -30m}
+      - {id: hr, analyte: heart_rate, value: "115", unit: /min, at: -20m}
+  - id: total-5
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "22", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "95", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: air, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "120", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "38.5", unit: Cel, at: -30m}
+      - {id: avpu, analyte: consciousness, text: A, at: -30m}
+      - {id: hr, analyte: heart_rate, value: "95", unit: /min, at: -20m}
+  - id: single-3
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "16", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "97", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: air, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "85", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "37.0", unit: Cel, at: -30m}
+      - {id: avpu, analyte: consciousness, text: A, at: -30m}
+      - {id: hr, analyte: heart_rate, value: "70", unit: /min, at: -20m}
+  - id: total-4
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "22", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "95", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: air, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "120", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "37.0", unit: Cel, at: -30m}
+      - {id: avpu, analyte: consciousness, text: A, at: -30m}
+      - {id: hr, analyte: heart_rate, value: "95", unit: /min, at: -20m}
+  - id: no-avpu
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "30", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "80", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: oxygen, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "80", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "34.0", unit: Cel, at: -30m}
+      - {id: hr, analyte: heart_rate, value: "150", unit: /min, at: -20m}
+  - id: scale2-air-88
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "16", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "88", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: air, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "120", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "37.0", unit: Cel, at: -30m}
+      - {id: avpu, analyte: consciousness, text: A, at: -30m}
+      - {id: scale, analyte: spo2_scale, text: "2", at: -3d}
+      - {id: hr, analyte: heart_rate, value: "70", unit: /min, at: -20m}
+  - id: scale1-88
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "16", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "88", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: air, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "120", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "37.0", unit: Cel, at: -30m}
+      - {id: avpu, analyte: consciousness, text: A, at: -30m}
+      - {id: hr, analyte: heart_rate, value: "70", unit: /min, at: -20m}
+  - id: scale2-o2-97
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "16", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "97", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: oxygen, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "120", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "37.0", unit: Cel, at: -30m}
+      - {id: avpu, analyte: consciousness, text: A, at: -30m}
+      - {id: scale, analyte: spo2_scale, text: "2", at: -3d}
+      - {id: hr, analyte: heart_rate, value: "70", unit: /min, at: -20m}
+  - id: voice
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "16", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "97", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: air, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "120", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "37.0", unit: Cel, at: -30m}
+      - {id: avpu, analyte: consciousness, text: V, at: -30m}
+      - {id: hr, analyte: heart_rate, value: "70", unit: /min, at: -20m}
+  - id: o2-only
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "16", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "96", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: oxygen, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "120", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "37.0", unit: Cel, at: -30m}
+      - {id: avpu, analyte: consciousness, text: A, at: -30m}
+      - {id: hr, analyte: heart_rate, value: "70", unit: /min, at: -20m}
+  - id: avpu-old
+    sex: female
+    birth_date: "1960-01-01"
+    observations:
+      - {id: rr, analyte: respiratory_rate, value: "30", unit: /min, at: -30m}
+      - {id: spo2, analyte: spo2, value: "80", unit: "%", at: -30m}
+      - {id: o2, analyte: air_or_oxygen, text: oxygen, at: -30m}
+      - {id: sbp, analyte: systolic_bp, value: "80", unit: mmHg, at: -30m}
+      - {id: temp, analyte: temperature, value: "34.0", unit: Cel, at: -30m}
+      - {id: avpu, analyte: consciousness, text: A, at: -2h}
+      - {id: hr, analyte: heart_rate, value: "150", unit: /min, at: -20m}
+expect:
+  - {patient: total-9, observation: hr, rule_id: news2, severity: critical, score: 9, scale: 1}
+  - {patient: total-5, observation: hr, rule_id: news2, severity: urgent, score: 5, scale: 1}
+  - {patient: single-3, observation: hr, rule_id: news2, severity: urgent, score: 3, scale: 1}
+  - {patient: scale1-88, observation: hr, rule_id: news2, severity: urgent, score: 3, scale: 1}
+  - {patient: scale2-o2-97, observation: hr, rule_id: news2, severity: urgent, score: 5, scale: 2}
+  - {patient: voice, observation: hr, rule_id: news2, severity: urgent, score: 3, scale: 1}
+  - {patient: no-avpu, observation: hr, rule_id: heart-rate-critical-high, severity: critical}
+  - {patient: avpu-old, observation: hr, rule_id: heart-rate-critical-high, severity: critical}
+expect_none:
+  - {patient: total-4, observation: hr, rule_id: news2}
+  - {patient: no-avpu, observation: hr, rule_id: news2}
+  - {patient: scale2-air-88, observation: hr, rule_id: news2}
+  - {patient: o2-only, observation: hr, rule_id: news2}
+  - {patient: avpu-old, observation: hr, rule_id: news2}
