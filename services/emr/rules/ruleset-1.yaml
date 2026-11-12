@@ -1,0 +1,233 @@
+# Rule set v1: a small, conservative starter set of widely accepted
+# critical-value thresholds (EMR design §11; plan Task 30).
+#
+# PILOT, CLINICAL SIGN-OFF DEFERRED. The product owner deferred the formal
+# clinical sign-off for the pilot (README "Pilot mode"); reviewed_by is
+# empty until the clinical lead and a second clinician review it (H4).
+# Until a platform admin activates this version for a hospital (an audited
+# step-up action), and the deployment names it in EMR_RULE_SET_ACTIVE,
+# every finding it makes is shadow: stored, never an alert.
+#
+# Every threshold cites its source; REFERENCES.md has the full references
+# and the reasoning. Values are in each analyte's canonical UCUM unit: the
+# normaliser converts a source value with the reviewed conversions
+# (maps/common/conversions.yaml) and a value it can't convert never reaches
+# a numeric rule. Single thresholds only: no delta, trend, score or
+# combination rule in v1 (the "Before scale" list in REFERENCES.md).
+version: "1"
+status: pilot
+clinical_signoff: deferred
+description: Critical values for common labs and vital signs, pilot, clinical sign-off deferred.
+
+categories:
+  blood_chemistry: {label: Blood chemistry, freshness_hours: 72}
+  blood_count: {label: Blood count, freshness_hours: 72}
+  kidney_function: {label: Kidney function, freshness_hours: 72}
+  blood_gases_lactate: {label: Blood gases and lactate, freshness_hours: 72}
+  heart_markers: {label: Heart markers, freshness_hours: 72}
+  blood_sugar: {label: Blood sugar, freshness_hours: 72}
+  vital_signs: {label: Vital signs, freshness_hours: 6}
+  infection_markers: {label: Infection markers, freshness_hours: 72}
+
+analytes:
+  # Potassium [Moles/volume] in Serum or Plasma; in Blood.
+  - {name: potassium, loinc: ["2823-3", "6298-4"], unit: mmol/L, category: blood_chemistry}
+  # Sodium [Moles/volume] in Serum or Plasma; in Blood.
+  - {name: sodium, loinc: ["2951-2", "2947-0"], unit: mmol/L, category: blood_chemistry}
+  # Glucose [Mass/volume] and [Moles/volume] in Serum or Plasma and in Blood.
+  - {name: glucose, loinc: ["2345-7", "2339-0", "14749-6", "15074-8"], unit: mmol/L, category: blood_sugar}
+  # Hemoglobin [Mass/volume] in Blood.
+  - {name: haemoglobin, loinc: ["718-7"], unit: g/dL, category: blood_count}
+  # Platelets [#/volume] in Blood by Automated count.
+  - {name: platelets, loinc: ["777-3"], unit: 10*9/L, category: blood_count}
+  # Creatinine [Mass/volume] and [Moles/volume] in Serum or Plasma.
+  - {name: creatinine, loinc: ["2160-0", "14682-9"], unit: umol/L, category: kidney_function}
+  # Troponin T.cardiac [Mass/volume] in Serum or Plasma by High sensitivity method.
+  - {name: troponin_t_hs, loinc: ["67151-1"], unit: ng/L, category: heart_markers}
+  # Oxygen saturation in Arterial blood by Pulse oximetry.
+  - {name: spo2, loinc: ["59408-5"], unit: "%", category: vital_signs}
+  # Body temperature.
+  - {name: temperature, loinc: ["8310-5"], unit: Cel, category: vital_signs}
+  # Systolic blood pressure.
+  - {name: systolic_bp, loinc: ["8480-6"], unit: "mm[Hg]", category: vital_signs}
+  # Heart rate.
+  - {name: heart_rate, loinc: ["8867-4"], unit: /min, category: vital_signs}
+
+rules:
+  # Labs: RCPath G158 (2017) alert limits; Kost (1990) for the US survey.
+  - id: potassium-critical-low
+    kind: threshold
+    analyte: potassium
+    severity: critical
+    op: "<="
+    value: 2.5
+    source: "RCPath G158 (2017), critical limits, potassium <= 2.5 mmol/L; Kost GJ, JAMA 1990;263:704-7"
+
+  - id: potassium-critical-high
+    kind: threshold
+    analyte: potassium
+    severity: critical
+    op: ">="
+    value: 6.5
+    source: "RCPath G158 (2017), critical limits, potassium >= 6.5 mmol/L; Kost GJ, JAMA 1990;263:704-7"
+    causes:
+      - id: potassium-raising-medicine
+        label: Potassium-raising medicine
+        confidence: review
+        evidence:
+          # Potassium-sparing diuretics, ACE inhibitors, angiotensin II
+          # receptor blockers, potassium supplements (WHO ATC).
+          - {medication_atc: [C03DA, C09A, C09B, C09C, C09D, A12BA]}
+
+  - id: sodium-critical-low
+    kind: threshold
+    analyte: sodium
+    severity: critical
+    op: "<="
+    value: 120
+    source: "RCPath G158 (2017), critical limits, sodium <= 120 mmol/L"
+    causes:
+      - id: thiazide
+        label: Thiazide diuretic
+        confidence: caution
+        evidence:
+          - {medication_atc: [C03A, C03EA]}
+
+  - id: sodium-critical-high
+    kind: threshold
+    analyte: sodium
+    severity: critical
+    op: ">="
+    value: 155
+    source: "RCPath G158 (2017), critical limits, sodium >= 155 mmol/L"
+
+  - id: glucose-critical-low
+    kind: threshold
+    analyte: glucose
+    severity: critical
+    op: "<="
+    value: 2.5
+    source: "RCPath G158 (2017), critical limits, glucose <= 2.5 mmol/L; Kost GJ, JAMA 1990;263:704-7"
+    causes:
+      - id: glucose-lowering-medicine
+        label: Insulin or sulfonylurea
+        confidence: review
+        evidence:
+          - {medication_atc: [A10A, A10BB]}
+
+  - id: glucose-critical-high
+    kind: threshold
+    analyte: glucose
+    severity: critical
+    op: ">="
+    value: 25.0
+    source: "RCPath G158 (2017), critical limits, glucose >= 25 mmol/L; Kost GJ, JAMA 1990;263:704-7"
+
+  - id: haemoglobin-critical-low
+    kind: threshold
+    analyte: haemoglobin
+    severity: critical
+    op: "<="
+    value: 6.0
+    source: "Kost GJ, JAMA 1990;263:704-7 (haemoglobin low critical limit, about 6 g/dL); RCPath G158 (2017), haematology"
+
+  - id: platelets-critical-low
+    kind: threshold
+    analyte: platelets
+    severity: critical
+    op: "<="
+    value: 20
+    source: "RCPath G158 (2017), haematology, platelets <= 20 x10^9/L; Kost GJ, JAMA 1990;263:704-7"
+
+  - id: platelets-critical-high
+    kind: threshold
+    analyte: platelets
+    severity: critical
+    op: ">="
+    value: 1000
+    source: "RCPath G158 (2017), haematology, platelets >= 1000 x10^9/L; Kost GJ, JAMA 1990;263:704-7"
+
+  - id: creatinine-critical-high
+    kind: threshold
+    analyte: creatinine
+    severity: critical
+    op: ">="
+    value: 354
+    source: "RCPath G158 (2017), critical limits, creatinine >= 354 umol/L (4.0 mg/dL), unless known renal failure"
+
+  - id: troponin-t-hs-critical-high
+    kind: threshold
+    analyte: troponin_t_hs
+    severity: critical
+    op: ">="
+    value: 52
+    source: "ESC 2020 NSTE-ACS guidelines (Collet JP et al., Eur Heart J 2021;42:1289-1367), 0h/1h algorithm rule-in, hs-cTnT >= 52 ng/L"
+
+  # Vital signs: the NEWS2 single-parameter red score (3 points), which
+  # RCP NEWS2 (2017) says needs an urgent clinical review. Low SpO2 on
+  # Scale 1: a patient on Scale 2 (hypercapnic respiratory failure) may
+  # trigger this; the shadow review checks how often.
+  - id: spo2-critical-low
+    kind: threshold
+    analyte: spo2
+    severity: critical
+    op: "<="
+    value: 91
+    source: "RCP National Early Warning Score (NEWS) 2 (2017), chart 1, SpO2 Scale 1 <= 91% scores 3"
+
+  - id: temperature-critical-low
+    kind: threshold
+    analyte: temperature
+    severity: critical
+    op: "<="
+    value: 35.0
+    source: "RCP National Early Warning Score (NEWS) 2 (2017), chart 1, temperature <= 35.0 C scores 3"
+
+  - id: temperature-urgent-high
+    kind: threshold
+    analyte: temperature
+    severity: urgent
+    op: ">="
+    value: 39.1
+    source: "RCP National Early Warning Score (NEWS) 2 (2017), chart 1, temperature >= 39.1 C scores 2"
+
+  - id: systolic-bp-critical-low
+    kind: threshold
+    analyte: systolic_bp
+    severity: critical
+    op: "<="
+    value: 90
+    source: "RCP National Early Warning Score (NEWS) 2 (2017), chart 1, systolic BP <= 90 mmHg scores 3"
+
+  - id: systolic-bp-critical-high
+    kind: threshold
+    analyte: systolic_bp
+    severity: critical
+    op: ">="
+    value: 220
+    source: "RCP National Early Warning Score (NEWS) 2 (2017), chart 1, systolic BP >= 220 mmHg scores 3"
+
+  - id: heart-rate-critical-low
+    kind: threshold
+    analyte: heart_rate
+    severity: critical
+    op: "<="
+    value: 40
+    source: "RCP National Early Warning Score (NEWS) 2 (2017), chart 1, pulse <= 40 per minute scores 3"
+
+  - id: heart-rate-critical-high
+    kind: threshold
+    analyte: heart_rate
+    severity: critical
+    op: ">="
+    value: 131
+    source: "RCP National Early Warning Score (NEWS) 2 (2017), chart 1, pulse >= 131 per minute scores 3"
+
+  # The lab's own critical flag raises a critical finding even for a code
+  # MHAI has no map for (design §11.1, §21 question 2).
+  - id: lab-critical-flag
+    kind: source_flag
+    severity: critical
+    flags: [LL, HH, AA]
+    unmapped_category: {laboratory: blood_chemistry, vital-signs: vital_signs}
+    source: "EMR design §11.1 and §21 question 2: the reporting laboratory's own critical interpretation (HL7 FHIR R4 ObservationInterpretation LL, HH, AA)"

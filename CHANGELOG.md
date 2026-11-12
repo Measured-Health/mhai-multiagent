@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- EMR integration, PR 7 (the alert rules; off by default). Migration
+  **00027** (after Gemini's 00024, Analysis PR 4's 00025 and EMR PR 6's 00026): `emr.findings` (one per rule set
+  version, rule and observation; historical, shadow, preliminary,
+  arrived_late, supersedes and withdrawn), `emr.breaker_trips`,
+  `emr_rule_set_activation`, `emr_pause_connection()`,
+  `emr_sources_status()`, the `emr_normalise` and `emr_rules` job types, and
+  a paused source reported as `errors` at once. The emr service's rules
+  engine (`internal/rules`): a strict, hashed YAML rule set, the seven rule
+  kinds with golden tests, the `emr_rules` consumer (stops a hospital's
+  evaluation on any error, no partial findings) and the per-source breaker.
+  Rule set v1 (`services/emr/rules/ruleset-1.yaml`): pilot, clinical
+  sign-off deferred, conservative critical values with their sources in
+  `REFERENCES.md`. New route `GET`/`PUT /platform/hospitals/{id}/emr-rule-set`
+  (platform admins, step-up, audited `emr.rule_set_switched`; OpenAPI
+  1.16.0, additive), `emr rules check`, `EMR_RULE_SET_FILE` and the breaker
+  settings, and the `emr.v1.Finding` event.
 - EMR integration, PR 6 (FHIR R4; off by default). Migration **00025**
   (00024 is Analysis PR 4's): `emr.sync_state`, `emr.raw_records.backfill`,
   and `emr_platform_health()` reporting a connection that is on and silent
