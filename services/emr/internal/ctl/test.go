@@ -13,17 +13,15 @@ import (
 	"errors"
 	"slices"
 
-	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
-	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/secrets"
-	"github.com/Measured-Health/mhai-multiagent/services/gokit/dbx"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/creds"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrtypes"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrurl"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
-	"github.com/Measured-Health/mhai-multiagent/services/gokit/seal"
 )
 
 func testReply(code string) *emrpb.TestReply {
@@ -80,68 +78,25 @@ func (s *Credentials) Test(ctx context.Context, c reqtoken.Claims, m proto.Messa
 		defer release()
 	}
 	r := impl.Test(tctx, cn.cfg, creds)
+	if r.OK {
+		// A passing test resumes a connection the scheduler stopped after
+		// three sign-in refusals (design §15.2). Best effort: the reply is
+		// the test's outcome either way.
+		_ = scheduler.Resume(context.WithoutCancel(ctx), s.Pool, hid, id, s.now())
+	}
 	return testReply(r.Code), nil
 }
 
 // loadCreds reads every secret the type declares that is set for the
-// current origin. ok is false when a required one isn't, or is a
-// placeholder.
+// current origin (internal/creds). ok is false when a required one isn't,
+// or is a placeholder.
 func (s *Credentials) loadCreds(ctx context.Context, ti emrtypes.TypeInfo, cn connRow) (connector.Creds, bool, error) {
-	type meta struct {
-		version string
-		origin  []string
+	c, ok, err := creds.Load(ctx, s.Pool, s.Store, s.Env, ti, cn.cfg)
+	switch {
+	case errors.Is(err, creds.ErrStore):
+		return c, false, errStore
+	case err != nil:
+		return c, false, errDatabase
 	}
-	set := map[string]meta{}
-	err := dbx.WithHospital(ctx, s.Pool, dbx.EMR, cn.cfg.HospitalID, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT field, secret_version, origin FROM emr.credentials
-			WHERE connection_id = $1 AND hospital_id = $2`, cn.cfg.ConnectionID, cn.cfg.HospitalID)
-		if err != nil {
-			return errDatabase
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var f string
-			var m meta
-			if err := rows.Scan(&f, &m.version, &m.origin); err != nil {
-				return errDatabase
-			}
-			slices.Sort(m.origin)
-			set[f] = m
-		}
-		return rows.Err()
-	})
-	if err != nil {
-		return connector.Creds{}, false, errDatabase
-	}
-	want := emrurl.Strings(cn.cfg.Origin)
-	values := map[string]seal.Secret{}
-	creds := func() connector.Creds { return connector.NewCreds(values) }
-	for _, f := range ti.Fields {
-		if f.Kind != emrtypes.KindSecret {
-			continue
-		}
-		m, has := set[f.Key]
-		if !has || !slices.Equal(m.origin, want) {
-			if f.Required {
-				return creds(), false, nil
-			}
-			continue
-		}
-		v, err := s.Store.GetVersion(ctx, secrets.Path{Env: s.Env, Hospital: cn.cfg.HospitalID,
-			Connection: cn.cfg.ConnectionID, Field: f.Key}, m.version)
-		switch {
-		case errors.Is(err, secrets.ErrNotFound):
-			if f.Required {
-				return creds(), false, nil
-			}
-			continue
-		case err != nil:
-			return creds(), false, errStore
-		}
-		values[f.Key] = v
-		if f.Required && connector.Placeholder(v.Bytes()) {
-			return creds(), false, nil
-		}
-	}
-	return creds(), true, nil
+	return c, ok, nil
 }

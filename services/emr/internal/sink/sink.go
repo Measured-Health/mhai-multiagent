@@ -102,6 +102,9 @@ type Sink struct {
 	mrnSystem            string
 	publish              Publish
 	Metrics              *Metrics
+	// Backfill flags every record this sink stores as a first sync's
+	// (design §7.1): findings from it are historical and never alert.
+	Backfill bool
 
 	mu      sync.Mutex
 	pending []uuid.UUID
@@ -118,14 +121,20 @@ func New(pool *pgxpool.Pool, hospital, connection uuid.UUID, connType string, co
 
 // Put stores r's allow-listed fields once, and queues its id to announce.
 func (s *Sink) Put(ctx context.Context, r connector.RawRecord) error {
+	_, err := s.PutStored(ctx, r)
+	return err
+}
+
+// PutStored is Put, reporting whether r was new (stored, not a replay).
+func (s *Sink) PutStored(ctx context.Context, r connector.RawRecord) (bool, error) {
 	if !slices.Contains(Kinds, r.Kind) || r.SourceID == "" || len(r.SourceID) > 256 || !printable(r.SourceID) ||
 		len(r.SourceVersion) > 64 || !printable(r.SourceVersion) {
-		return ErrRecord
+		return false, ErrRecord
 	}
 	fields, dropped := keep(r.Kind, r.Fields, s.mrnSystem)
 	payload, err := json.Marshal(fields)
 	if err != nil {
-		return ErrRecord
+		return false, ErrRecord
 	}
 	sum := sha256.Sum256(append([]byte(r.Kind+"\x00"+r.SourceID+"\x00"+r.SourceVersion+"\x00"), payload...))
 	var updated *time.Time
@@ -153,18 +162,18 @@ func (s *Sink) Put(ctx context.Context, r connector.RawRecord) error {
 			if found && p.Status == "excluded" {
 				_, err := tx.Exec(ctx, `INSERT INTO emr.raw_records (hospital_id, source_kind, connection_id, resource_kind,
 					source_id, source_version, source_updated_at, payload, payload_sha256, connector_type, connector_version,
-					status, reject_code)
-					VALUES ($1, 'connector', $2, $3, $4, $5, $6, NULL, $7, $8, $9, 'rejected', 'excluded') ON CONFLICT DO NOTHING`,
-					s.hospital, s.connection, r.Kind, r.SourceID, r.SourceVersion, updated, sum[:], s.connType, s.connVersion)
+					status, reject_code, backfill)
+					VALUES ($1, 'connector', $2, $3, $4, $5, $6, NULL, $7, $8, $9, 'rejected', 'excluded', $10) ON CONFLICT DO NOTHING`,
+					s.hospital, s.connection, r.Kind, r.SourceID, r.SourceVersion, updated, sum[:], s.connType, s.connVersion, s.Backfill)
 				excluded = err == nil
 				return err
 			}
 		}
 		err := tx.QueryRow(ctx, `INSERT INTO emr.raw_records (hospital_id, source_kind, connection_id, resource_kind,
-			source_id, source_version, source_updated_at, payload, payload_sha256, connector_type, connector_version)
-			VALUES ($1, 'connector', $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING RETURNING id`,
+			source_id, source_version, source_updated_at, payload, payload_sha256, connector_type, connector_version, backfill)
+			VALUES ($1, 'connector', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT DO NOTHING RETURNING id`,
 			s.hospital, s.connection, r.Kind, r.SourceID, r.SourceVersion, updated, payload, sum[:], s.connType,
-			s.connVersion).Scan(&id)
+			s.connVersion, s.Backfill).Scan(&id)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -172,24 +181,24 @@ func (s *Sink) Put(ctx context.Context, r connector.RawRecord) error {
 		return err
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	if excluded {
 		s.Metrics.addExcluded()
-		return nil
+		return false, nil
 	}
 	s.Metrics.add(r.Kind, dropped, stored)
 	if !stored {
-		return nil
+		return false, nil
 	}
 	s.mu.Lock()
 	s.pending = append(s.pending, id)
 	full := len(s.pending) >= MaxBatch
 	s.mu.Unlock()
 	if full {
-		return s.Flush(ctx)
+		return true, s.Flush(ctx)
 	}
-	return nil
+	return true, nil
 }
 
 // Flush announces the queued ids, MaxBatch a message, and marks them
