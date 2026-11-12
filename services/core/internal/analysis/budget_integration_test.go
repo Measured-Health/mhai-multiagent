@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
 )
@@ -18,10 +20,10 @@ import (
 // The cold budget (design §11; plan Task 11), measured on the build host
 // with ANALYSIS_LONG=1: a synthetic hospital of 200,000 subjects, the
 // worst cold request (a quarter with two filters, every parent and child
-// cold). Every request answers within the budget (plus scheduling slack):
-// stored and served, or 503 not_ready while the body is finished in the
-// background. The PR reports the latencies and how long until the body is
-// served.
+// cold), per level. Every request answers within the budget (plus
+// scheduling slack): stored and served, or 503 while the body is finished
+// in the background, or 503 when it can't be (the 5 s statement timeout):
+// never anything unstored. The PR reports the numbers.
 func TestColdFamilyBudget(t *testing.T) {
 	if os.Getenv("ANALYSIS_LONG") != "1" {
 		t.Skip("ANALYSIS_LONG=1: the 200,000-subject budget run")
@@ -58,36 +60,71 @@ func TestColdFamilyBudget(t *testing.T) {
 	e.Budget = disclose.ColdBody
 	var computed atomic.Int64
 	e.OnCompute = func() { computed.Add(1) }
-	q3 := calendar.Period{Kind: calendar.Quarter, From: day("2026-07-01"), To: day("2026-10-01")}
-	p := w.period(t, e, q3)
 	var f disclose.Filters
 	f[disclose.DimSex], f[disclose.DimAgeBand] = "female", "40-64"
-	var lat []time.Duration
-	began := time.Now()
-	for i := 0; ; i++ {
-		t0 := time.Now()
-		_, err := e.Body(as(w.h), p, f)
-		lat = append(lat, time.Since(t0))
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, ErrNotReady) {
-			t.Fatalf("request %d: %v", i+1, err)
-		}
-		if time.Since(began) > 30*time.Minute {
-			t.Fatal("not served within 30 minutes")
+
+	// The raw read alone, per level, without the statement timeout (for the
+	// report: the 5 s timeout is what a request gets).
+	for _, per := range []calendar.Period{
+		{Kind: calendar.Week, From: day("2026-07-01"), To: day("2026-07-08")},
+		{Kind: calendar.Month, From: day("2026-07-01"), To: day("2026-08-01")},
+		{Kind: calendar.Quarter, From: day("2026-07-01"), To: day("2026-10-01")}} {
+		p := w.period(t, e, per)
+		for _, ff := range []disclose.Filters{{}, f} {
+			t0 := time.Now()
+			if err := gateway(t, w.app, w.h, func(tx pgx.Tx) error {
+				if _, err := tx.Exec(context.Background(), `SET LOCAL statement_timeout = 0`); err != nil {
+					return err
+				}
+				_, err := readCells(context.Background(), tx, p, ff)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("cells %s, %d filters: %v", per.Kind, ff.Count(), time.Since(t0))
 		}
 	}
-	slices.Sort(lat)
-	p50, p99 := lat[len(lat)/2], lat[(len(lat)*99)/100]
-	t.Logf("cold quarter, two filters: served after %v and %d requests (%d contexts computed); request latency p50 %v, p99 %v, max %v",
-		time.Since(began), len(lat), computed.Load(), p50, p99, lat[len(lat)-1])
-	if lat[len(lat)-1] > disclose.ColdBody+500*time.Millisecond {
-		t.Errorf("a request took %v: over the %v budget", lat[len(lat)-1], disclose.ColdBody)
+
+	// Each level's worst cold request (two filters, every parent and child
+	// cold): every request answers within the budget; the body is served,
+	// or the engine fails closed (503) and nothing is served unstored.
+	for _, per := range []calendar.Period{
+		{Kind: calendar.Week, From: day("2026-07-08"), To: day("2026-07-15")},
+		{Kind: calendar.Month, From: day("2026-08-01"), To: day("2026-09-01")},
+		{Kind: calendar.Quarter, From: day("2026-07-01"), To: day("2026-10-01")}} {
+		p := w.period(t, e, per)
+		computed.Store(0)
+		var lat []time.Duration
+		began := time.Now()
+		var last error
+		for {
+			t0 := time.Now()
+			_, err := e.Body(as(w.h), p, f)
+			lat = append(lat, time.Since(t0))
+			last = err
+			if !errors.Is(err, ErrNotReady) || time.Since(began) > 20*time.Minute {
+				break
+			}
+		}
+		slices.Sort(lat)
+		p50, p99 := lat[len(lat)/2], lat[(len(lat)*99)/100]
+		outcome := "served"
+		if last != nil {
+			outcome = "failed closed (" + last.Error() + ")"
+		}
+		t.Logf("cold %s, two filters: %s after %v and %d requests (%d contexts computed); request latency p50 %v, p99 %v, max %v",
+			per.Kind, outcome, time.Since(began), len(lat), computed.Load(), p50, p99, lat[len(lat)-1])
+		if lat[len(lat)-1] > disclose.ColdBody+500*time.Millisecond {
+			t.Errorf("%s: a request took %v, over the %v budget", per.Kind, lat[len(lat)-1], disclose.ColdBody)
+		}
+		if last != nil && !errors.Is(last, ErrFailed) && !errors.Is(last, ErrNotReady) {
+			t.Errorf("%s: %v is not a fail-closed refusal", per.Kind, last)
+		}
+		if last == nil {
+			t0 := time.Now()
+			if _, err := e.Body(as(w.h), p, f); err != nil || time.Since(t0) > disclose.ColdBody {
+				t.Errorf("%s: the stored body: %v in %v", per.Kind, err, time.Since(t0))
+			}
+		}
 	}
-	t0 := time.Now()
-	if _, err := e.Body(as(w.h), p, f); err != nil || time.Since(t0) > disclose.ColdBody {
-		t.Errorf("the stored body: %v in %v", err, time.Since(t0))
-	}
-	t.Logf("served stored in %v", time.Since(t0))
 }

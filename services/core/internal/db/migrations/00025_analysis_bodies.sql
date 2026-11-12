@@ -448,15 +448,20 @@ BEGIN
 
     -- The history's start: fixed by the first fact in a frozen block (no
     -- fact can arrive before one that isn't late).
-    INSERT INTO public.analysis_hospital_start (hospital_id, start)
-    SELECT v_h, date_trunc('quarter', min(f.day))::date
-    FROM public.analysis_facts f
-    JOIN public.analysis_periods w ON w.hospital_id = f.hospital_id AND w.level = 'week'
-                                  AND f.day BETWEEN w.start AND w."end"
-    WHERE f.hospital_id = v_h
-    HAVING min(f.day) IS NOT NULL
-    ON CONFLICT (hospital_id) DO NOTHING;
+    -- Weeks freeze in order, so a fact no later than the last frozen week's
+    -- end is in a frozen block (or older than the answerable window): the
+    -- index on (hospital_id, day) finds the first at once. Computed once.
     SELECT s.start INTO v_hstart FROM public.analysis_hospital_start s WHERE s.hospital_id = v_h;
+    IF v_hstart IS NULL THEN
+        INSERT INTO public.analysis_hospital_start (hospital_id, start)
+        SELECT v_h, date_trunc('quarter', min(f.day))::date
+        FROM public.analysis_facts f
+        WHERE f.hospital_id = v_h
+          AND f.day <= (SELECT max(w."end") FROM public.analysis_periods w WHERE w.hospital_id = v_h AND w.level = 'week')
+        HAVING min(f.day) IS NOT NULL
+        ON CONFLICT (hospital_id) DO NOTHING;
+        SELECT s.start INTO v_hstart FROM public.analysis_hospital_start s WHERE s.hospital_id = v_h;
+    END IF;
 
     WITH f AS (
         SELECT x.subject_id AS s, x.kind, x.condition_id AS c, x.flag, x.severity, x.ack_minutes, x.dismiss_reason,
