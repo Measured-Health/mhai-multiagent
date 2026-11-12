@@ -277,8 +277,9 @@ func TestEMRUserIsAnOptInInclude(t *testing.T) {
 // The pilot (deploy/pilot/README.md): the demo config has the pipeline
 // user as an NKey user with exactly the dev config's pipeline permissions,
 // so the pilot pipeline can do on the demo what it does in dev and nothing
-// more. Its public key is NATS_PIPELINE_NKEY (compose gives it a seedless
-// default, so the user exists but no one can sign in until the pilot).
+// more. Its public key is NATS_PIPELINE_NKEY (compose's default is a public
+// key whose seed was thrown away, so the user exists but no one can sign in
+// until the pilot).
 func TestDeployPipelineUserMatchesDev(t *testing.T) {
 	dev := stripComments(permissionsAfter(t, readConf(t, "services/nats/nats.conf"), "password: $NATS_PIPELINE_PASSWORD"))
 	prod := stripComments(permissionsAfter(t, readConf(t, "deploy/nats/nats.conf"), "nkey: $NATS_PIPELINE_NKEY"))

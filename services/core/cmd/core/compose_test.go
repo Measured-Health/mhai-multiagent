@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nats-io/nkeys"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1062,10 +1063,24 @@ func TestPilotIsOffByDefault(t *testing.T) {
 		t.Errorf("core-migrate INTELLIGENCE_DB_PASSWORD = %q, want ${INTELLIGENCE_DB_PASSWORD:-} (the login only when set)", got)
 	}
 	// NATS knows the pipeline user from the start, under a public key whose
-	// seed never existed unless the pilot set NATS_PIPELINE_NKEY.
+	// seed was thrown away, unless the pilot set NATS_PIPELINE_NKEY.
 	off := regexp.MustCompile(`^\$\{NATS_PIPELINE_NKEY:-U[A-Z2-7]{55}\}$`)
-	if got := c.Services["nats"].Environment["NATS_PIPELINE_NKEY"]; !off.MatchString(got) {
-		t.Errorf("nats NATS_PIPELINE_NKEY = %q, want ${NATS_PIPELINE_NKEY:-<a seedless public key>}", got)
+	got := c.Services["nats"].Environment["NATS_PIPELINE_NKEY"]
+	if !off.MatchString(got) {
+		t.Fatalf("nats NATS_PIPELINE_NKEY = %q, want ${NATS_PIPELINE_NKEY:-<a seedless public key>}", got)
+	}
+	// nats-server refuses to start on a user key it can't decode, and core
+	// and the demo stop with it: the default must be a real public user key.
+	def := strings.TrimSuffix(strings.TrimPrefix(got, "${NATS_PIPELINE_NKEY:-"), "}")
+	kp, err := nkeys.FromPublicKey(def)
+	if err != nil {
+		t.Fatalf("the default NATS_PIPELINE_NKEY is not a valid public key: %v", err)
+	}
+	if pub, err := kp.PublicKey(); err != nil || pub != def || !nkeys.IsValidPublicUserKey(def) {
+		t.Fatalf("the default NATS_PIPELINE_NKEY is not a public user key (%v)", err)
+	}
+	if _, err := kp.Seed(); err == nil {
+		t.Fatal("the default NATS_PIPELINE_NKEY came with a seed")
 	}
 }
 

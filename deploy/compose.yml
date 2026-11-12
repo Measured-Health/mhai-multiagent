@@ -86,9 +86,9 @@ services:
       NATS_BFF_NKEY: ${NATS_BFF_NKEY:?set in /srv/mhai-backend/.env}
       NATS_BFF_PLATFORM_NKEY: ${NATS_BFF_PLATFORM_NKEY:?set in /srv/mhai-backend/.env (run setup-host.sh)}
       # The pilot pipeline's public key (deploy/pilot/enable-pilot.sh writes
-      # it). The default is a public key whose seed never existed: the user
+      # it). The default is a real public key whose seed was thrown away: the user
       # is in nats.conf from the start, and no one can sign in as it.
-      NATS_PIPELINE_NKEY: ${NATS_PIPELINE_NKEY:-UBAAQAZYHQ5QQDODQD742E2H6PQD734J54VXQT23CDN7AKSAYLBA23W6}
+      NATS_PIPELINE_NKEY: ${NATS_PIPELINE_NKEY:-UBEBXXYDPNSDCIC4J52JS4FS4S4YKKXBTUT7TC3FKSKA54XNFUCS2PLV}
       GOMEMLIMIT: 96MiB
     volumes:
       - ./nats/nats.conf:/etc/nats/nats.conf:ro

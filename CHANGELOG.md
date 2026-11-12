@@ -13,7 +13,7 @@ All notable changes to this project are documented here. The format follows
   sign-offs are recorded in PR #134). `deploy/compose.yml` gains the
   `pipeline` worker under the `pilot` profile (off by default: the default
   deploy only gains empty `CORE_CLOUD_PROVIDERS` and
-  `INTELLIGENCE_DB_PASSWORD` and a seedless `NATS_PIPELINE_NKEY`), and
+  `INTELLIGENCE_DB_PASSWORD` and a `NATS_PIPELINE_NKEY` default whose seed was thrown away (checked by `nats-server -t` in CI, `deploy/nats/check-configs.sh`)), and
   `deploy/nats/nats.conf` the `pipeline` NKey user (a test keeps its
   permissions equal to dev's). `deploy/pilot/enable-pilot.sh` makes the
   pipeline's NKey, login and key file, starts the egress proxy and the
