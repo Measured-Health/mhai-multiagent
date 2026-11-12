@@ -1,0 +1,35 @@
+# Per-analyte canonical units and reviewed conversions (EMR design §9.2).
+# SYNTHETIC: the codes are the synthetic tables' and nobody has reviewed
+# these factors (reviewed_by is empty), so the emr service refuses this
+# file outside APP_ENV=development. Rule set v1 (H4) brings the reviewed
+# file.
+version: conversions-0-synthetic
+reviewed_by: []
+analytes:
+  - loinc: 99901-1   # glucose
+    canonical: mmol/L
+    conversions:
+      - from: mg/dL
+        factor: 0.0555
+  - loinc: 99902-9   # potassium
+    canonical: mmol/L
+    conversions: []
+  - loinc: 99903-7   # creatinine
+    canonical: umol/L
+    conversions:
+      - from: mg/dL
+        factor: 88.4
+  - loinc: 99904-5   # sodium
+    canonical: mmol/L
+    conversions: []
+  - loinc: 99905-2   # haemoglobin
+    canonical: g/dL
+    conversions:
+      - from: g/L
+        factor: 0.1
+  - loinc: 99906-0   # heart rate
+    canonical: /min
+    conversions: []
+  - loinc: 99910-2   # oxygen saturation
+    canonical: "%"
+    conversions: []

@@ -19,7 +19,11 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
 - **EHR/EMR integration: designed and planned.** The [design](docs/specs/2026-11-07-emr-integration-design.md) is approved (7 Nov), with [ADR 0009](docs/adr/0009-integrate-many-emr-systems.md) accepted and [ADR 0014](docs/adr/0014-separate-emr-service-and-document-route.md) added; the [plan](docs/plans/2026-11-07-emr-integration.md) is thirteen PRs, off by default. Live use waits on the people items under "EMR integration: people items and live-use gates" below.
 - **Patient analysis (§10 Analysis, Plan 6).** Designed and planned: see the [plan](docs/plans/2026-11-07-analysis-backend.md) (ten PRs) and [ADR 0015](docs/adr/0015-population-analysis-under-disclosure-control.md). Off by default; phases 2–6 run on the synthetic demo hospital only.
 - **Analysis: no live hospital until H1–H3 are signed.** These are people's gates; nothing in the build opens them ([design](docs/specs/2026-11-07-analysis-backend-design.md) §15):
-  - **H1 (privacy lead):** confirm the approach (exact counts, no noise; drill users see pseudonymous microdata under role, audit and caps, R-A4), the nested periods, the constants, and the residuals R-A1 and R-A2 with the numbers P2 and P5 report. The constants at the PR 3 review; sign-off before any live hospital.
+  - **H1 (privacy lead):** confirm the approach (exact counts, no noise; drill users see pseudonymous microdata under role, audit and caps, R-A4), the nested periods, the constants, and the residuals with PR 3's numbers. The constants at the PR 3 review; sign-off before any live hospital. The numbers (P2 counts each hidden group once):
+    - **R-A1, closed by design (ruling C10):** every body is guarded against the period's accumulated knowledge. Hidden groups of 1 to 4 solvable across families: before, 585 of 1,856 (31.5%, small worlds) and 963 of 7,381 (13.0%, realistic: every age band, sex code and setting, 700 patients, three weeks); after, **0 of 1,753** and **0 of 7,591**, asserted. Secondary groups of 5 or more still determined: 0.2% and 0.7% (before 40.7% and 28.5%). P4 histories: 0 of 2,247 small, 0 of 395 secondary. Open: the source filter, until the guard is given the source list (PR 4).
+    - **R-A2 (P5):** 0 hidden cells bounded away from 0 within a range narrower than 0–4.
+    - **R-A4 (drill run):** every hidden group of 1 to 4 within a drillable group is countable from drill rows (100%), as designed.
+    - **Cost:** about a second a context, cold, on the build host for a realistic week; PR 4 keeps the period's knowledge and measures against the 2 s budget.
   - **H2 (clinical lead):** that hospital admins and analysts may see the five views; the definitions of case, new and existing; the confidence mapping; condition grouping. Before any live hospital.
   - **H3 (legal and compliance lead):** the NDPA 2023 basis, the clause in hospital agreements, the letter template, retention, and the legal resolution path (design §8.9) before PR 9. Before any live hospital; the template before PR 7 goes live.
   - **H5 (platform and operations):** the documents service and object storage, the scheduler slot, alerts for `analysis_freeze_failed` and the body cap, and `SECURITY_CONTACT_*`. Before PR 7 goes live, and PR 9.
@@ -72,6 +76,26 @@ Gates before live use (design §17.6; all of them):
 - [ ] Rule set v1 run in shadow with every critical finding reviewed (H4). Owner: clinical lead.
 - [ ] The on-call owner named (H9). Owner: product owner.
 - [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
+
+## EMR: follow-ups from PR 5 (11 Nov)
+
+- [ ] **PR 9 must defer the exclusion purge under a legal hold.** Until then `emr_exclude_patient` purges at once (product owner, 11 Nov: excluding a patient purges its data); no legal hold exists yet. PR 9 moves the purge behind `emr.purge_requests` with the hold check (design §10.6, A41).
+- [ ] **PR 8a adds the alert steps** to `emr_merge_patients` (re-point open alerts) and `emr_exclude_patient` (withdraw them), with `CREATE OR REPLACE` in 00024, and the reject function for matches.
+- [ ] **PR 8a: retry an exclusion or merge on a deadlock (40P01).** Both now take the emr service's link locks and the patient row (race review), so one racing a normaliser batch on several of the same patients can be chosen as the deadlock victim; nothing is left half-done, but core's route must retry or answer 503.
+- [ ] Re-normalise the last 7 days of a local code after its map changes (design §9.4); not built.
+- [ ] Patients are updated in place by a newer Patient resource (the row is the identity); its `raw_id` names the version used. Versioned patient history if the clinical lead wants it.
+- [ ] A date-only medication time is stored as no time (`start_at`/`end_at` null); a date column if the rules need it (PR 7).
+
+## EMR: before scale
+
+The product owner asked for the simplest safe version first (11 Nov). These wait until volume needs them:
+
+- [ ] An outbox for `records.v1.*.created` and `emr.v1.*.signal`: they are published after the commit. A lost `created` is re-announced only when the batch is redelivered (a retraction-only update isn't); a lost signal leaves the match row listed but unannounced.
+- [ ] The normaliser runs one batch (at most 500 records) in one transaction with a savepoint per record, one batch at a time per process; parallel consumers and per-hospital fairness when volume needs them.
+- [ ] The sweep reads at most 5,000 unannounced rows per hospital a minute, as the scheduler's role across hospitals.
+- [ ] The sink inserts one row per transaction; batch inserts (`COPY` or multi-row) for large backfills.
+- [ ] Metrics (`emr_sink_dropped_fields_total`, the normaliser's counts) are in-process counters; export them when the service gets a metrics endpoint.
+- [ ] The cross-connection match query scans patients by `(hospital_id, mrn)`; add a normalised-MRN index per namespace if it shows up in plans.
 
 ## Decided
 

@@ -1,0 +1,10 @@
+# A synthetic connection's local codes (EMR design §9.4). Loaded only in
+# development (testdata). The connection id is the synthetic FHIR server's.
+version: synthetic-fhir-1
+hospital: SYN
+connection: 00000000-0000-4000-8000-00000000f41a
+entries:
+  - {system: "urn:synthetic:lab", code: "GLU", loinc: "99901-1", display: "Glucose"}
+  - {system: "urn:synthetic:lab", code: "K", loinc: "99902-9", display: "Potassium"}
+  - {system: "urn:synthetic:lab", code: "CREA", loinc: "99903-7", display: "Creatinine"}
+  - {system: "urn:synthetic:drug", code: "FUROS", atc: "Z99AA01", display: "Loop diuretic one"}

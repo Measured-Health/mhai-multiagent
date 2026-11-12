@@ -347,11 +347,14 @@ Every number passes through `internal/smallgroup` or through `internal/analysis/
   - asking for a complementary cell directly as a filter;
   - comparing views against each other.
 
-**D6 The filter-only residual (R-A1).**
+**D6 One record per period (ruling C10, closes R-A1).**
 
-- **What is left.** The same group can be reached from two families that don't overlap. Within one period, for example, `{age=80+}` shows `by_sex.male` while `{sex=male}` hides `by_age.80+`.
-- **Why the design doesn't remove it.** Making suppression consistent across every context in the filter lattice is intractable at request time.
-- **How big it is.** P2 runs exhaustively at `FilterCap` 2 on synthetic cohorts and reports how often a hidden cell can be solved. That rate is the measured size of R-A1, for the privacy lead (H1).
+- **What was left.** The same group reached from two families that don't overlap. Within one period, `{A}` minus `{A, male}` gives `{A, female}`, and a location's setting links `{male, outpatient}` to `{male}` minus `{male, L1}`. Guarding a context against its parents alone missed its stored siblings.
+- **The rule.** Each new body's final check runs against everything already published for its period, across every filter family, and inside it (its blocks and months), with the equations the definitions make between contexts. A context is the sum of its sub-contexts over any attribute it lists (age band, sex, setting, location, specialty), and a setting is the sum of its locations (plus the patients at no location). A count shown 0 makes every part of it 0. The check uses the values (counts far below the primes), so it knows what a group comes to: a group published hidden may never become determined, and a group never published (a member never sent, a sub-context not yet asked for) may not become determined at 1 to 4. It uses 7c's whole-set rule (R41a-5) on every set. On a failure it hides more; if nothing passes, the context is hidden whole. A group the published bodies already determine (not 1 to 4) is public, and stays shown.
+- **Fail closed.** If what is known ever contradicts itself (a modelling error), the context is hidden whole and `ErrInconsistent` raises the alert.
+- **Measured (P2, PR 3).** Before the rule, on the parents-only guard: small worlds, 585 of 1,856 hidden groups of 1 to 4 solvable across families (31.5%); realistic worlds (every age band, sex code and setting, 700 patients, three weeks), 963 of 7,381 (13.0%), and 602 of 2,114 secondary groups of 5 or more (28.5%). After: **0** of 1,753 and **0** of 7,591; secondary 4 of 2,023 (0.2%) and 26 of 3,830 (0.7%), which disclose no group of 1 to 4. P2 now asserts it.
+- **Limit.** The source filter has no partition in the views, so the guard can't write "the unfiltered view is the sum of its sources" until it is given the source list (PR 4's orchestrator has it). Until then P2 doesn't range over sources.
+- **Cost.** The check grows with what the period has published. On the build host the realistic run guards 528 contexts in about 10 minutes (about a second each, cold, rebuilding the period each time). PR 4 must keep the period's knowledge between requests rather than rebuild it, and measure against the 2 s cold budget (§11).
 
 **D7 Budgets and audit.** These don't prevent differencing. They make it visible.
 
@@ -378,7 +381,7 @@ Every number passes through `internal/smallgroup` or through `internal/analysis/
 
 **A family (D5).** One guarded state per group across up to 4 contexts. P2 checks this against the union of the family's equations.
 
-**Not claimed:** consistency across families (R-A1, measured), and bounds on distinct counts (R-A2, measured).
+**Across families (D6).** Every published body of the period is guarded against all the others, with the partition equations between contexts, so P2 checks the whole period, not one family. **Not claimed:** bounds on distinct counts (R-A2, measured), and a sum over the source filter until the guard has the source list (D6).
 
 ### 5.6 Drill-down controls
 
@@ -967,7 +970,7 @@ Children are computed before parents (D3).
 |---|---|---|---|---|
 | AN1 | Information disclosure | A small group worked out from one response | Layer A | P1, T1–T3 |
 | AN2 | Information disclosure | **Differencing over time:** overlapping windows, month-edge days, the start of the hospital's data, zeros, late data | Finished, nested periods (D1); freezing (D2); guarding across levels (D3); no grand totals | P3, P4, T4 |
-| AN3 | Information disclosure | **Differencing across filters and views** | Cap of 2 and `QuerySetMin` (D4); family fixpoint (D5); budgets and audit (D7); residual R-A1 measured | P2, T5, T6 |
+| AN3 | Information disclosure | **Differencing across filters and views** | Cap of 2 and `QuerySetMin` (D4); family fixpoint (D5); one record per period (D6, closes R-A1); budgets and audit (D7) | P2, T5, T6 |
 | AN4 | Information disclosure | Revealing attributes through a narrow view or the filter list | Empty lists under A7; the filter list per frozen period with at least 5 patients | P6, T7 |
 | AN5 | Information disclosure | **Profiling through drill-downs** | Pids per period; rows limited to the period; caps on distinct patients and on lists; every list audited | P8, T8, T9 |
 | AN6 | Information disclosure | **Drill-down users counting small subgroups** | Accepted by design and stated (§5.2); role, audit and caps; H1 confirms | P2 (drill run) |
@@ -1053,7 +1056,7 @@ Children are computed before parents (D3).
 
 ### 13.6 Residual risk and sign-off
 
-- **R-A1: differencing across filter families within one period.** The same group reached from two families that don't overlap. P2 measures how often, exhaustively at a cap of 2. The privacy lead accepts it with that number (H1).
+- **R-A1: differencing across filter families within one period. Closed by design (ruling C10, D6):** each body is guarded against the period's accumulated knowledge. P2 asserts no hidden group of 1 to 4 is solvable across the period (0 of 1,753 small-world and 0 of 7,591 realistic groups; 31.5% and 13.0% before). Secondary groups of 5 or more are still determined at 0.2% and 0.7%, and disclose no small group. Left: the source filter (D6, "Limit").
 - **R-A2: narrowing by bounds.** Bounds within responses (Plan 4c's residual), and distinct counts across levels (largest child ≤ parent ≤ sum of children). Measured by P5.
 - **R-A3: two releases about one hospital.** The hospital's own Analysis and Plan 12, which use different filter granularities. Only a person with both kinds of account can combine them.
 - **R-A4: drill-down users see microdata.** Their counts are exact, and they can count small subgroups (§5.2). The controls limit and record this but don't prevent it. **This is the central privacy question.**
@@ -1087,7 +1090,7 @@ Each phase is its own PR, reviewed and merged by a person. Phases 2–6 run on t
 
 | # | Who | What, exactly | Needed by |
 |---|---|---|---|
-| H1 | Privacy lead | **Confirm the approach.** (1) Exact counts, no noise, and the aggregate rules protect against people without drill access, while drill users see pseudonymous microdata under role, audit and caps (§5.2, R-A4). (2) The C3 choice: month-aligned week blocks, months and quarters, nested and guarded across levels (D1–D3). (3) The filter residual R-A1, accepted with the number P2 measures at a cap of 2, and R-A2 with P5's number. (4) The constants: `Min` 5, `QuerySetMin` 10, `FilterCap` 2, 3 days' grace, pids per period, the distinct-patient cap of 300, the list and named-view budgets, retention. | PR 3 review (constants); before any live hospital (sign-off) |
+| H1 | Privacy lead | **Confirm the approach.** (1) Exact counts, no noise, and the aggregate rules protect against people without drill access, while drill users see pseudonymous microdata under role, audit and caps (§5.2, R-A4). (2) The C3 choice: month-aligned week blocks, months and quarters, nested and guarded across levels (D1–D3). (3) R-A1, closed by design (D6; P2: 0 hidden groups of 1 to 4 solvable, secondary 0.2–0.7%), and R-A2 with P5's number. (4) The constants: `Min` 5, `QuerySetMin` 10, `FilterCap` 2, 3 days' grace, pids per period, the distinct-patient cap of 300, the list and named-view budgets, retention. | PR 3 review (constants); before any live hospital (sign-off) |
 | H2 | Clinical lead | Sign-off that hospital admins and analysts may see the five views; the definitions ("case", "new", "existing"); the confidence mapping (§4.1); condition grouping. | Before any live hospital |
 | H3 | Legal / compliance lead | NDPA 2023 basis for this secondary use; the clause in hospital agreements; the letter as authority (a template); retention of letters and audit; **the legal resolution path (§8.9)** as the way to answer a request that needs names. | Before any live hospital; the template before PR 7 goes live; §8.9 before PR 9 |
 | H4 | Product owner | Approve this design and the open questions; move ADR 0015 and the SKILLS.md amendment from Proposed to Accepted; name the pilot hospital; confirm Analysis waits for patient references. | PR 1 |
@@ -1097,7 +1100,7 @@ Each phase is its own PR, reviewed and merged by a person. Phases 2–6 run on t
 
 ## 16. Open questions, each with a recommendation
 
-1. **Exact counts or noise?** *Decided: exact counts, no noise.* R41a's fixed periods remove differencing over time. Noise would be undone by exact drill counts anyway (§5.2). Differencing across filters is measured and accepted (R-A1, H1).
+1. **Exact counts or noise?** *Decided: exact counts, no noise.* R41a's fixed periods remove differencing over time. Noise would be undone by exact drill counts anyway (§5.2). Differencing across filters is closed by guarding each body against the whole period (D6, ruling C10).
 2. **Count consultations that have no patient reference?** *No.* Build on synthetic subjects, and go live once references exist.
 3. **`QuerySetMin` for filtered views?** *10.*
 4. **Filter cap?** *Decided: 2.*
@@ -1114,7 +1117,7 @@ Each phase is its own PR, reviewed and merged by a person. Phases 2–6 run on t
 15. **Upload letters before the documents service exists?** *No:* 503 until then.
 16. **How is SKILLS.md §1 amended?** *Through ADR 0015, scoped to `services/core/internal/analysis`.* The rule stays absolute for intelligence and every NATS operation, with a checklist line tied to T22.
 
-**Relation to R41a.** The product owner's R41a ruling (fixed periods), refined by C3 (nested periods), gives Analysis differencing control over time: finished, frozen periods, guarded together across levels. What remains is differencing across filters within one period (R-A1). It is measured, not closed, and the privacy lead accepts it in H1.
+**Relation to R41a.** The product owner's R41a ruling (fixed periods), refined by C3 (nested periods), gives Analysis differencing control over time: finished, frozen periods, guarded together across levels. Differencing across filters within one period (R-A1) is closed by D6: every body is guarded against everything the period has published.
 
 ## 17. Departures recorded by the plan
 

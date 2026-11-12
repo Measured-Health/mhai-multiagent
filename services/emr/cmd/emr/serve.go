@@ -11,13 +11,16 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/codes"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/stub"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/ctl"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/egress"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/normalise"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/proxyconf"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/secrets"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb"
@@ -163,6 +166,28 @@ func serve(getenv func(string) string) error {
 		go func() { _ = writer.Run(ctx) }()
 	}
 
+	// The normaliser (PR 5): only with code tables and maps configured.
+	// Synthetic tables and unreviewed conversions load in development only.
+	normaliser := false
+	if s.CodesDir != "" {
+		tables, err := codes.Load(s.CodesDir, s.Development())
+		if err != nil {
+			return errors.New("EMR_CODES_DIR: the code tables are missing, not valid, or synthetic outside development")
+		}
+		maps, err := codes.LoadMaps(s.MapsDir, tables, s.Development())
+		if err != nil {
+			return errors.New("EMR_MAPS_DIR: the maps are missing, not valid, or unreviewed outside development")
+		}
+		js, err := jetstream.New(nc)
+		if err != nil {
+			return errors.New("emr: cannot open JetStream")
+		}
+		n := &normalise.Normaliser{Pool: pool, Tables: tables, Maps: maps, Pub: normalise.JSPublisher{JS: js}, Log: log}
+		go func() { _ = n.Run(ctx, js) }()
+		go n.RunSweep(ctx)
+		normaliser = true
+	}
+
 	handlers := map[string]ctl.Handler{}
 	if store != nil {
 		creds := &ctl.Credentials{Pool: pool, Store: store, Keys: sealKeys, Env: s.Env,
@@ -188,7 +213,7 @@ func serve(getenv func(string) string) error {
 	}
 	defer stopCtl()
 	log.Info("emr serving", "env", s.Env, "subjects", ctl.Subjects, "rule_set_active", s.RuleSetActive != "",
-		"secret_store", store != nil, "sealing_keys", len(sealKeys), "egress", writer != nil)
+		"secret_store", store != nil, "sealing_keys", len(sealKeys), "egress", writer != nil, "normaliser", normaliser)
 	<-ctx.Done()
 	return nil
 }

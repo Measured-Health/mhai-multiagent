@@ -31,3 +31,10 @@
 /services/intelligence/intelligence/schemas/        @ojies
 /services/intelligence/intelligence/modelstore/     @ojies
 /.github/workflows/model-*.yml                      @ojies
+
+# EMR code tables, maps and rules are clinical changes (EMR design §9.4,
+# §11.5): the platform owner now; add the clinical reviewers once named
+# (H4, TODO.md).
+/services/emr/maps/                                 @ojies
+/services/emr/rules/                                @ojies
+/services/emr/codes/                                @ojies

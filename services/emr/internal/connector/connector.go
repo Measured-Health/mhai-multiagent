@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -55,10 +56,25 @@ func Result(code string) TestResult {
 	return TestResult{OK: code == "ok", Code: code}
 }
 
-// RawRecord is one record as fetched (plan Task 17 gives it its fields).
+// RawRecord is one record as fetched, mapped by its connector to the
+// allow-list's field names (EMR design §14.1). Kind is patient, encounter,
+// location, observation or medication. RawSink keeps only the listed
+// fields of the right shape and drops the rest before anything is stored.
+// A reference to a patient, an encounter or a location is the source's
+// plain id ("123", not "Patient/123"); codings and identifiers are
+// []Coding.
 type RawRecord struct {
-	Kind, SourceID, VersionID string
-	Body                      []byte
+	Kind, SourceID, SourceVersion string
+	SourceUpdatedAt               time.Time
+	Fields                        map[string]any
+}
+
+// Coding is one code from the source (FHIR Coding), or one identifier
+// (System is the identifier's namespace, Code its value).
+type Coding struct {
+	System  string `json:"system,omitempty"`
+	Code    string `json:"code,omitempty"`
+	Display string `json:"display,omitempty"`
 }
 
 // RawSink takes raw records: it enforces the allow-list and the size
