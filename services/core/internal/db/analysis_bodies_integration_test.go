@@ -10,7 +10,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
-// Migration 00024 (analysis backend plan Task 9): stored bodies and the
+// Migration 00025 (analysis backend plan Task 9): stored bodies and the
 // request functions. Their behaviour is tested in internal/analysis; here,
 // the grants and the Down.
 
@@ -54,8 +54,8 @@ func TestAnalysisBodiesGrants(t *testing.T) {
 	}
 }
 
-// 00024 goes down to 00023 and up again, leaving nothing behind.
-func TestMigration00024DownUp(t *testing.T) {
+// 00025 goes down to 00024 and up again, leaving nothing behind.
+func TestMigration00025DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
@@ -66,8 +66,8 @@ func TestMigration00024DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := db.MigrateDownTo(ctx, pg.URL, 23); err != nil {
-		t.Fatalf("down to 23: %v", err)
+	if err := db.MigrateDownTo(ctx, pg.URL, 24); err != nil {
+		t.Fatalf("down to 24: %v", err)
 	}
 	var left int
 	if err := pool.QueryRow(ctx, `SELECT
@@ -84,7 +84,7 @@ func TestMigration00024DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	if left != 0 {
-		t.Errorf("after down, %d objects or grants of 00024 remain", left)
+		t.Errorf("after down, %d objects or grants of 00025 remain", left)
 	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)

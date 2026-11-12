@@ -1,5 +1,5 @@
 // Package cells is Analysis's raw reader: one context's raw values, read
-// through mhai_analysis_cells (migration 00024) into disclose.Raw, for one
+// through mhai_analysis_cells (migration 00025) into disclose.Raw, for one
 // guard computation. Only the engine (internal/analysis) imports it; the
 // routes never do (I2, pinned by a test), so nothing that writes a
 // response can reach a raw count.

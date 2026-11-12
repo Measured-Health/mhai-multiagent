@@ -62,7 +62,7 @@ type Period struct {
 
 // Engine computes, stores and serves guarded bodies (design §11; plan Task
 // 9). Every statement runs in the request's transaction (authz.Tx: the
-// principal's hospital, as mhai_gateway), through migration 00024's
+// principal's hospital, as mhai_gateway), through migration 00025's
 // functions. A context is computed parents first: every child period and
 // every filter parent is stored before it, each in its own transaction, so
 // a request cut short by the budget keeps what it finished. Each context's

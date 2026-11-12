@@ -23,7 +23,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 )
 
-// Migration 00024 and the engine on a migrated database, as the core
+// Migration 00025 and the engine on a migrated database, as the core
 // login (mhai_gateway through authz.Tx). Every hospital, subject and fact
 // is synthetic, and every date pinned: the facts are in October 2026, the
 // freeze runs at 6 November 2026 and the engine's clock is 12 November

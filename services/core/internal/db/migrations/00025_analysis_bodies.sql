@@ -1,6 +1,6 @@
 -- Patient Analysis, stored bodies (analysis backend design §5.4, §9-§11;
--- plan Task 9, "migration B"; ADR 0015). NUMBERED 00024 (coordinator):
--- 00023 is EMR PR 5's.
+-- plan Task 9, "migration B"; ADR 0015). NUMBERED 00025 (coordinator):
+-- 00023 is EMR PR 5's, 00024 the Gemini provider's (#137).
 --
 -- Analysis stays OFF: nothing here raises a switch. Every function below
 -- refuses a hospital whose position isn't 'on', and takes the hospital
@@ -761,7 +761,7 @@ BEGIN
     v_cut := ((p_now AT TIME ZONE public.mhai_analysis_zone(p_hospital))::date - interval '25 months')::date;
     DELETE FROM public.analysis_facts f WHERE f.hospital_id = p_hospital AND f.day < v_cut;
     GET DIAGNOSTICS v_n = ROW_COUNT;
-    -- 00024: stored bodies live as long as their period's facts (25
+    -- 00025: stored bodies live as long as their period's facts (25
     -- months); the read log and the day's flags for two hospital days.
     DELETE FROM public.analysis_cold_contexts c
     WHERE c.hospital_id = p_hospital

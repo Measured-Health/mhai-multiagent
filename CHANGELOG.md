@@ -64,7 +64,7 @@ All notable changes to this project are documented here. The format follows
   nothing changes. The enterprise controls left out are listed in TODO.md,
   "Before scale".
 - Patient Analysis, PR 4 (aggregate routes; off by default, the demo
-  hospital only). Migration **00024**: `analysis_subject_attrs` (a
+  hospital only). Migration **00025** (00024 is the Gemini provider's, #137): `analysis_subject_attrs` (a
   subject's attributes, fixed by its first fact), `analysis_hospital_start`,
   `analysis_snapshots` (one guarded body per context, insert only, at most
   20,000 per period and 4 MiB, refusing a shown count of 1 to 4),

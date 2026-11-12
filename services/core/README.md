@@ -138,7 +138,7 @@ and never counted. It logs hospital ids, the step and a fixed reason only,
 and counts `analysis_late_facts_total` and `analysis_freeze_failed_total`
 (alert `analysis_freeze_failed`).
 
-The aggregate reads (PR 4, migration 00024) are `GET /analysis/filters` and
+The aggregate reads (PR 4, migration 00025) are `GET /analysis/filters` and
 `GET /analysis/{view}`, for hospital admins and analysts with two-step,
 answering 404 while the hospital's switch is off. Each answers one frozen
 period (`period` and `start`, or `from` and `to` spanning exactly one) from

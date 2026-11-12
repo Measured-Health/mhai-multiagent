@@ -59,7 +59,7 @@ months and quarters; only the synthetic demo hospital is switched on, by
 `core analysis seed-demo`. Nothing of it reaches a worker or NATS.
 **Built (Patient Analysis PR 4, off by default):** `GET /analysis/filters`
 and `GET /analysis/{view}` serve guarded bodies stored once per frozen
-period and filter set (migration 00024), each guarded against everything
+period and filter set (migration 00025), each guarded against everything
 its period has published, one guard per hospital and period at a time. The smoke test reads health,
 retries a forced dead letter, reads the statistics and the analytics, and
 follows up a synthetic change. **Built (cloud

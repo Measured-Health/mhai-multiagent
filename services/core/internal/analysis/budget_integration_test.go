@@ -40,13 +40,13 @@ func TestColdFamilyBudget(t *testing.T) {
 	}
 	all := append([]string{w.conds[0].String(), w.conds[1].String(), w.conds[2].String()}, conds...)
 	exec(t, super, `INSERT INTO analysis_subjects (hospital_id, subject_id, ref_hmac, created_day)
-		SELECT $1, md5($1::text || g)::uuid, sha256(convert_to($1::text || g, 'UTF8')), '2026-07-01'
+		SELECT $1::uuid, md5($1::uuid::text || g)::uuid, sha256(convert_to($1::uuid::text || g, 'UTF8')), '2026-07-01'
 		FROM generate_series(1, 200000) g`, w.h)
 	exec(t, super, `INSERT INTO analysis_facts (hospital_id, subject_id, day, kind, condition_id, age_band, sex, setting, location_id, source_id, period_late)
-		SELECT $1, md5($1::text || g)::uuid, '2026-07-01'::date + ((g * 7 + k * 13) % 92),
+		SELECT $1::uuid, md5($1::uuid::text || g)::uuid, '2026-07-01'::date + ((g * 7 + k * 13) % 92),
 		       'diagnosis', ($2::uuid[])[1 + ((g * k) % 10) * ((g * k) % 10) % 10],
 		       (ARRAY['0-17', '18-39', '40-64', '65-79', '80+'])[1 + g % 5],
-		       (ARRAY['female', 'male', 'other', 'not_recorded'])[1 + g % 4], 'admitted', $3, (ARRAY[$4, $5]::uuid[])[1 + g % 2], false
+		       (ARRAY['female', 'male', 'other', 'not_recorded'])[1 + g % 4], 'admitted', $3::uuid, (ARRAY[$4::uuid, $5::uuid])[1 + g % 2], false
 		FROM generate_series(1, 200000) g, generate_series(1, 3) k`, w.h, all, w.loc, w.src, w.src2)
 	exec(t, super, `INSERT INTO analysis_first_seen (hospital_id, subject_id, condition_id, first_day, first_late)
 		SELECT hospital_id, subject_id, condition_id, min(day), false FROM analysis_facts
