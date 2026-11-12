@@ -59,6 +59,8 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/platform/guardrails` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/guardrails/periods` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/health` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/hospitals/{id}/emr-rule-set` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| PUT | `/api/v1/platform/hospitals/{id}/emr-rule-set` | signed in | `platform_admin` | platform | yes | yes | yes |
 | POST | `/api/v1/platform/hospitals/{id}/emr/connections` | signed in | `platform_admin` | platform | yes | yes | yes |
 | GET | `/api/v1/platform/hospitals/{id}/model-policy` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | PUT | `/api/v1/platform/hospitals/{id}/model-policy` | signed in | `platform_admin` | platform | yes | yes | yes |

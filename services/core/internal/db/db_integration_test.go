@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25, 27}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -273,15 +273,27 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO emr.sync_state (connection_id, hospital_id) VALUES ($1, $2)`, conn, a); err != nil {
 		t.Fatal(err)
 	}
-	emrTables := []string{"emr_connections", "emr.credentials", "emr.sync_runs", "emr.connection_errors", "emr.sync_state"}
+	emrTables := []string{"emr_connections", "emr.credentials", "emr.sync_runs", "emr.connection_errors", "emr.sync_state",
+		"emr_rule_set_activation"}
+	if _, err := pool.Exec(ctx, `INSERT INTO emr_rule_set_activation (hospital_id, version, sha256) VALUES ($1, '1', $2)`,
+		a, emrSHA[:]); err != nil {
+		t.Fatal(err)
+	}
 	// The canonical model (00023): a patient with an observation, a second
 	// patient and a match, so its tables have rows to hide. The gateway
 	// reads the alert tables under RLS; the rest it can't read at all.
 	pat := seedPatient(t, pool, a, conn, "p-rls", "MRN-RLS")
-	seedObservation(t, pool, a, conn, pat, "p-rls")
+	obs := seedObservation(t, pool, a, conn, pat, "p-rls")
 	seedMatch(t, pool, a, pat, seedPatient(t, pool, a, conn, "p-rls-2", "MRN-RLS"))
+	// Findings and a breaker trip (00027), so they have rows to hide.
+	seedFinding(t, pool, a, pat, obs, "rls")
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.breaker_trips (hospital_id, connection_id, severity, window_start, window_count, baseline)
+		VALUES ($1, $2, 'critical', now(), 11, 0)`, a, conn); err != nil {
+		t.Fatal(err)
+	}
 	emrGatewayReads := []string{"emr.patients", "emr.observations", "emr.medications", "emr.encounters", "emr.units"}
-	emrHidden := []string{"emr.raw_records", "emr.patient_links", "emr.possible_matches", "emr.merges", "emr.unmapped_codes"}
+	emrHidden := []string{"emr.raw_records", "emr.patient_links", "emr.possible_matches", "emr.merges", "emr.unmapped_codes",
+		"emr.findings", "emr.breaker_trips"}
 
 	// One connection, so the second transaction reuses the session that
 	// had mhai.hospital_id set by the first.

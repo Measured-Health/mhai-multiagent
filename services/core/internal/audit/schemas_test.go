@@ -360,3 +360,29 @@ func TestAuditSchemasEMRPatients(t *testing.T) {
 		}
 	}
 }
+
+// The rule set switch (EMR plan Task 30): a version or shadow, the one it
+// replaced, the file's hash in hex.
+func TestAuditSchemaRuleSetSwitched(t *testing.T) {
+	hid := uuid.NewString()
+	sha := strings.Repeat("ab", 32)
+	for _, p := range []map[string]any{
+		{"hospital_id": hid, "version": "1", "previous": "shadow", "sha256": sha, "via": "platform"},
+		{"hospital_id": hid, "version": "shadow", "previous": "1", "via": "platform"},
+	} {
+		if err := audit.CheckActionPayload("emr.rule_set_switched", p); err != nil {
+			t.Errorf("%v: %v", p, err)
+		}
+	}
+	for name, p := range map[string]map[string]any{
+		"short hash":     {"hospital_id": hid, "version": "1", "previous": "shadow", "sha256": "abcd", "via": "platform"},
+		"free text":      {"hospital_id": hid, "version": "Version One", "previous": "shadow", "sha256": sha, "via": "platform"},
+		"via cli":        {"hospital_id": hid, "version": "1", "previous": "shadow", "sha256": sha, "via": "cli"},
+		"unknown key":    {"hospital_id": hid, "version": "1", "previous": "shadow", "sha256": sha, "via": "platform", "note": "x"},
+		"not a hospital": {"hospital_id": "x", "version": "1", "previous": "shadow", "sha256": sha, "via": "platform"},
+	} {
+		if err := audit.CheckActionPayload("emr.rule_set_switched", p); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

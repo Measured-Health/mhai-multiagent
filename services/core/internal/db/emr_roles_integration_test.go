@@ -367,7 +367,8 @@ func TestPlatformAppendAllowsEMRConnectionActionsOnly(t *testing.T) {
 	h, _ := seedHospital(t, pool, uniqueCode("PA"))
 	setup := []string{`SET LOCAL ROLE mhai_platform`}
 	for _, action := range []string{"emr.connection_added", "emr.connection_changed", "emr.connection_switched_on",
-		"emr.connection_switched_off", "emr.connection_tested", "emr.source_resumed", "hospital.model_policy_changed", "job.retried"} {
+		"emr.connection_switched_off", "emr.connection_tested", "emr.source_resumed", "hospital.model_policy_changed", "job.retried",
+		"emr.rule_set_switched"} {
 		if _, err := inTx(ctx, pool, setup, nil, auditInsert, nil, nil, action, uuid.NewString()); err != nil {
 			t.Errorf("platform appending %s: %v", action, err)
 		}
