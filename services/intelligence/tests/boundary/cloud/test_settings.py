@@ -488,9 +488,13 @@ def test_tls_context_refuses_without_ca_bundle(
         tls_context()
 
 
-# --- Gemini: the paid-tier check (a warning, not a refusal) -------------------------------
+# --- Gemini: the paid-tier check (refused unless verified; development warns) -------------
 
 PAID_VAR = "INTELLIGENCE_CLOUD_GEMINI_PAID_TIER"
+PAID_ERROR = (
+    f"{PAID_VAR}=verified is required with gemini enabled "
+    "(the key must be on a paid, billing-enabled project)"
+)
 
 
 def _paid_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -498,36 +502,65 @@ def _paid_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 @pytest.mark.parametrize("tier", [None, "unverified"])
-def test_gemini_unverified_paid_tier_warns_and_starts(
+@pytest.mark.parametrize("app_env", [None, "production", "demo"])
+def test_gemini_unverified_paid_tier_refused_outside_development(
+    key_file: Callable[..., Path],
+    caplog: pytest.LogCaptureFixture,
+    tier: str | None,
+    app_env: str | None,
+) -> None:
+    """Google may use free-tier prompts to improve its products: outside
+    development, gemini starts only with the paid tier marked verified.
+    Demo counts as real (the pilot runs there). The error names the setting,
+    never the key."""
+    env = cloud_env(key_file(), "gemini")
+    if tier is not None:
+        env[PAID_VAR] = tier
+    if app_env is not None:
+        env["APP_ENV"] = app_env
+    s, errs = read(env)
+    assert errs == [PAID_ERROR]
+    assert s.providers == ()
+    assert FAKE_KEY not in " ".join(errs) and FAKE_KEY not in caplog.text
+    with pytest.raises(ConfigError) as e:
+        # WORKER is development; unset APP_ENV is production, so drop it.
+        worker = {k: v for k, v in WORKER.items() if k != "APP_ENV"}
+        WorkerSettings.from_env({**worker, **_prod_worker(), **env})
+    assert PAID_VAR in str(e.value) and FAKE_KEY not in str(e.value)
+
+
+@pytest.mark.parametrize("tier", [None, "unverified"])
+def test_gemini_unverified_paid_tier_only_warns_in_development(
     key_file: Callable[..., Path], caplog: pytest.LogCaptureFixture, tier: str | None
 ) -> None:
-    """Google may use free-tier prompts to improve its products: with the
-    project not marked verified as paid, start-up goes on with a warning
-    naming the setting (never the key)."""
     caplog.set_level(logging.WARNING)
     env = cloud_env(key_file(), "gemini")
     if tier is not None:
         env[PAID_VAR] = tier
-    s, errs = read(env)
-    assert errs == []
-    assert [p.name for p in s.providers] == ["gemini"]
+    s, errs = read(env, development=True)
+    assert errs == [] and [p.name for p in s.providers] == ["gemini"]
     warned = _paid_warnings(caplog)
-    assert len(warned) == 1 and "paid" in warned[0] and "verified" in warned[0]
+    assert len(warned) == 1 and "paid" in warned[0]
     assert FAKE_KEY not in caplog.text
 
 
-def test_gemini_verified_paid_tier_is_quiet(
-    key_file: Callable[..., Path], caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("development", [False, True])
+def test_gemini_verified_paid_tier_starts_quietly(
+    key_file: Callable[..., Path], caplog: pytest.LogCaptureFixture, development: bool
 ) -> None:
     caplog.set_level(logging.WARNING)
-    s, errs = read({**cloud_env(key_file(), "gemini"), PAID_VAR: "verified"})
+    env = {**cloud_env(key_file(), "gemini"), PAID_VAR: "verified"}
+    s, errs = read(env, development=development)
     assert errs == [] and [p.name for p in s.providers] == ["gemini"]
     assert _paid_warnings(caplog) == []
 
 
 @pytest.mark.parametrize("value", ["yes", "true", "Verified", "paid"])
-def test_gemini_paid_tier_other_values_refused(key_file: Callable[..., Path], value: str) -> None:
-    s, errs = read({**cloud_env(key_file(), "gemini"), PAID_VAR: value})
+@pytest.mark.parametrize("development", [False, True])
+def test_gemini_paid_tier_other_values_refused(
+    key_file: Callable[..., Path], value: str, development: bool
+) -> None:
+    s, errs = read({**cloud_env(key_file(), "gemini"), PAID_VAR: value}, development=development)
     assert errs == [f"{PAID_VAR} must be verified or unverified"]
     assert s.providers == ()
 

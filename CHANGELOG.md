@@ -15,10 +15,11 @@ All notable changes to this project are documented here. The format follows
   under the same gate, egress scan (exact header list, every leaf pinned),
   budget reservation, strict reply check, `max_retries=0` and no redirects
   as the other adapters; a bad key (400 `API_KEY_INVALID`) is `auth_failed`.
-  The model comes from `INTELLIGENCE_CLOUD_GEMINI_MODEL`. The worker warns at
-  start unless `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified` (the key must be
-  on a paid, billing-enabled project: free-tier prompts may be used by
-  Google). `gemini` joins every closed set: core's providers, the route,
+  The model comes from `INTELLIGENCE_CLOUD_GEMINI_MODEL`. The worker refuses to
+  start with gemini enabled unless `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified`
+  (the key must be on a paid, billing-enabled project: free-tier prompts may
+  be used by Google); demo included, only `APP_ENV=development` warns
+  instead. `gemini` joins every closed set: core's providers, the route,
   `mhai_cloud_reserve`, the audit and fact schemas, the CLI and the
   `PUT .../model-policy` request. Response enums can't widen in /api/v1
   (ADR 0012), so `ModelPolicy` and `generated_by` gain `provider_code` (a

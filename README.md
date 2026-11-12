@@ -13,6 +13,12 @@
 > - **Legal and compliance:** the hospital data agreement, the NDPA 2023
 >   basis and cross-border transfer, the cloud providers' data processing
 >   and zero-retention terms, and the DPIA for EMR data.
+> - **Google Gemini in the pilot:** the key must be on a paid,
+>   billing-enabled Google project (on the free tier Google may use prompts
+>   to improve its products). The worker refuses to start with gemini
+>   enabled until `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified`, demo
+>   included ([deploy/README.md](deploy/README.md), "Gemini: paid tier
+>   only").
 > - **Clinical lead:** review of the cloud model's instructions and
 >   answers, EMR alert rule set v1 (a second clinician too), and the wording
 >   of the "masked where detected" notice.

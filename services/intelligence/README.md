@@ -89,7 +89,9 @@ claim runs local.
 - `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER`: `verified` once someone has checked
   the Gemini key's Google project is on the paid tier with billing on (a
   free-tier key's prompts may be used by Google to improve its products).
-  Unset or `unverified` starts with a warning; any other value is refused.
+  Unset or `unverified` refuses start-up with gemini enabled (demo too);
+  only `APP_ENV=development` starts, with a warning. Any other value is
+  refused.
 - Per provider: `INTELLIGENCE_CLOUD_<PROVIDER>_MODEL` (an exact model id; no
   Fable or Mythos), `INTELLIGENCE_CLOUD_<PROVIDER>_KEY_FILE` (mode 0400 or
   0440; never a variable holding the key), and outside development

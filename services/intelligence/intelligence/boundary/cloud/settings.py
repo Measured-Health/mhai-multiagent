@@ -17,8 +17,9 @@ Gemini: Google may use prompts sent with a free-tier key to improve its
 products; a key on a paid, billing-enabled project is not used that way.
 INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified records that someone checked
 the key's project is on the paid tier. With gemini enabled and it unset or
-"unverified", start-up goes on with a warning (deploy/README.md); any other
-value is refused.
+"unverified", start-up is refused, demo included (the pilot runs there);
+only APP_ENV=development starts, with a warning (deploy/README.md). Any
+other value is refused everywhere.
 
 Errors name variables, never their values (design section 7).
 """
@@ -53,10 +54,14 @@ _ZDR_REF = re.compile(r"[A-Z0-9][A-Z0-9_.-]{2,63}")
 # INTELLIGENCE_CLOUD_GEMINI_PAID_TIER's values; unset is "unverified".
 GEMINI_PAID_TIER_VAR = "INTELLIGENCE_CLOUD_GEMINI_PAID_TIER"
 GEMINI_PAID_TIER_VALUES = ("unverified", "verified")
+GEMINI_UNVERIFIED_ERROR = (
+    f"{GEMINI_PAID_TIER_VAR}=verified is required with gemini enabled "
+    "(the key must be on a paid, billing-enabled project)"
+)
 GEMINI_UNVERIFIED_WARNING = (
-    "%s is not verified: Google may use prompts sent with a free-tier key to improve its "
-    "products. Use a key from a paid, billing-enabled project, check it, then set %s=verified "
-    "(deploy/README.md)"
+    "%s is not verified (development only): Google may use prompts sent with a free-tier key "
+    "to improve its products; use a key on a paid, billing-enabled project. Outside "
+    "development, start-up refuses until it is verified (deploy/README.md)"
 )
 # Anthropic models that need 30-day retention: not allowed (design section 14).
 _RETAINED_ANTHROPIC = ("fable", "mythos")
@@ -283,7 +288,10 @@ def _provider(
         if tier is not None and tier not in GEMINI_PAID_TIER_VALUES:
             errs.append(f"{GEMINI_PAID_TIER_VAR} must be verified or unverified")
         elif tier != "verified":
-            log.warning(GEMINI_UNVERIFIED_WARNING, GEMINI_PAID_TIER_VAR, GEMINI_PAID_TIER_VAR)
+            if development:
+                log.warning(GEMINI_UNVERIFIED_WARNING, GEMINI_PAID_TIER_VAR)
+            else:
+                errs.append(GEMINI_UNVERIFIED_ERROR)
 
     if len(errs) != before or model is None or key is None:
         return None

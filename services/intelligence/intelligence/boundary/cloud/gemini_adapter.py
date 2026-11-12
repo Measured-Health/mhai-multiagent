@@ -27,8 +27,9 @@ every leaf outside the block texts, so the scan refuses anything else.
 Retention: Gemini has no per-reply retention header (xAI's
 x-zero-data-retention). What stops Google using prompts to improve its
 products is the key's project being on the paid tier, with billing on; the
-worker warns at start-up unless INTELLIGENCE_CLOUD_GEMINI_PAID_TIER says
-verified (settings.py), and deploy/README.md says how to check.
+worker refuses to start (outside APP_ENV=development, where it warns) unless
+INTELLIGENCE_CLOUD_GEMINI_PAID_TIER says verified (settings.py), and
+deploy/README.md says how to check.
 
 The reply: a refusal, or finish_reason content_filter (Gemini's safety,
 recitation and blocklist stops), is refused; finish_reason length is

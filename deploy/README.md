@@ -457,8 +457,9 @@ provider key and its zero-data-retention reference (TODO H1, H5).
    `ANTHROPIC_*`, `AZURE_OPENAI_*`, `XAI_*` or `GEMINI_*` variable: the worker
    refuses to start. For Gemini also set
    `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified` once the check under "Gemini:
-   paid tier only" is done; until then the worker starts with a warning. The image must carry a CA bundle at OpenSSL's paths; the worker
-   refuses to start without one.
+   paid tier only" is done; until then the worker **refuses to start**
+   (demo included). The image must carry a CA bundle at OpenSSL's paths; the
+   worker refuses to start without one.
 3. **Switch the demo hospital on:** `docker compose --profile tools run --rm
    core-cli hospitals model-policy set <hospital id or short code> --provider
    <provider> --agreement-ref DEMO-SYNTHETIC [--budget <tokens>]`, or the
@@ -499,9 +500,10 @@ does not; it keeps them for a limited time for abuse monitoring only. So:
 - Check it, record the check (who, when, the project) as the agreement
   reference (`INTELLIGENCE_CLOUD_GEMINI_ZDR_REF`, the `AGR-`/`DPA-` code),
   and only then set `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified`. Unset or
-  `unverified`, the worker starts but logs a warning at every start naming
-  the setting; it never refuses, so a demo can run, but **no hospital is
-  switched to gemini while that warning shows**.
+  `unverified`, the worker **refuses to start** with gemini enabled, in
+  production and in demo alike (the pilot runs on demo, with a real
+  hospital). Only `APP_ENV=development` starts without it, with a warning;
+  any other value is refused everywhere.
 - Re-check after any billing change: a project whose billing lapses goes
   back to free-tier terms.
 - Gemini has no per-reply retention header (xAI's
