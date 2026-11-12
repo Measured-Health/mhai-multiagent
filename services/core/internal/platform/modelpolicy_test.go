@@ -3,7 +3,13 @@ package platform
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // decodeBody decodes as httpx.Decode does: unknown keys refused.
@@ -90,6 +96,53 @@ func TestAgreementRefShape(t *testing.T) {
 		"AGR-2026-01\n", "\uff21GR-2026-01"} {
 		if AgreementRefOK(bad) {
 			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
+// The contract says what "off" is (review of #137): provider_code null.
+// cloud_provider is also null for gemini (its 1.x enum can't name it), so
+// no description may define off by cloud_provider alone, or a client
+// reading the contract would show a Gemini hospital as off.
+func TestModelPolicyContractOffIsProviderCode(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Paths map[string]map[string]struct {
+			Description string `yaml:"description"`
+		} `yaml:"paths"`
+		Components struct {
+			Schemas map[string]struct {
+				Description string `yaml:"description"`
+				Properties  map[string]struct {
+					Description string `yaml:"description"`
+				} `yaml:"properties"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	mp := doc.Components.Schemas["ModelPolicy"]
+	get := doc.Paths["/platform/hospitals/{id}/model-policy"]["get"].Description
+	for what, text := range map[string]string{
+		"ModelPolicy":                mp.Description,
+		"ModelPolicy.cloud_provider": mp.Properties["cloud_provider"].Description,
+		"ModelPolicy.provider_code":  mp.Properties["provider_code"].Description,
+		"GET":                        get,
+	} {
+		flat := strings.Join(strings.Fields(text), " ")
+		if regexp.MustCompile("off (when|if) `cloud_provider` is null").MatchString(flat) ||
+			strings.Contains(flat, "off (local models): `cloud_provider`") {
+			t.Errorf("%s defines off by cloud_provider: %q", what, flat)
+		}
+	}
+	for what, text := range map[string]string{"ModelPolicy": mp.Description, "GET": get} {
+		flat := strings.Join(strings.Fields(text), " ")
+		if !strings.Contains(flat, "`provider_code` is null") {
+			t.Errorf("%s doesn't define off as provider_code null: %q", what, flat)
 		}
 	}
 }

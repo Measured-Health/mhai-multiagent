@@ -429,8 +429,24 @@ func TestModelPolicyPutGeminiReportsProviderCode(t *testing.T) {
 	if p, _, _, _, found := policyRow(t, h); !found || p == nil || *p != "gemini" {
 		t.Errorf("row provider %v", p)
 	}
+	// Core's own reads take the stored provider, never the 1.x field: a
+	// switch from gemini is audited with previous gemini, not none.
+	ok(t, "openai", putPolicy(t, tok, h, policyBody("openai", "DPA-2026-0008", 4000, backupCode(t, admin))))
+	off := putPolicy(t, tok, h, policyBody("", "", 4000, backupCode(t, admin)))
+	ok(t, "off", off)
+	if off.body["provider_code"] != nil || off.body["cloud_provider"] != nil {
+		t.Errorf("off: %s", off.raw)
+	}
+	ok(t, "gemini again", putPolicy(t, tok, h, policyBody("gemini", "DPA-2026-0007", 4000, backupCode(t, admin))))
+	ok(t, "off again", putPolicy(t, tok, h, policyBody("", "", 4000, backupCode(t, admin))))
 	a := policyAudits(t, h)
-	if len(a) != 1 || a[0].payload["provider"] != "gemini" || a[0].payload["previous"] != "none" {
-		t.Errorf("audit rows %+v", a)
+	want := [][2]string{{"gemini", "none"}, {"openai", "gemini"}, {"none", "openai"}, {"gemini", "none"}, {"none", "gemini"}}
+	if len(a) != len(want) {
+		t.Fatalf("%d audit rows, want %d", len(a), len(want))
+	}
+	for i, w := range want {
+		if a[i].payload["provider"] != w[0] || a[i].payload["previous"] != w[1] {
+			t.Errorf("audit row %d: provider %v previous %v, want %v", i, a[i].payload["provider"], a[i].payload["previous"], w)
+		}
 	}
 }
