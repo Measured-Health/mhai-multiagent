@@ -51,3 +51,49 @@ HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/health
 
 ENTRYPOINT ["intelligence"]
 CMD ["run", "--help"]
+
+# ── Pilot: the runtime plus the embedding and NLI weights, for a host with
+# no route to Hugging Face (the pilot pipeline on the demo host,
+# deploy/pilot/README.md; build with --target pilot). Each model is pinned
+# by commit and fetched as safetensors and config files only (never a
+# pickled .bin). refs/main is pointed at the pinned commit, so the offline
+# load by name finds exactly that snapshot; the build then loads both
+# offline, so an image that can't is never pushed.
+FROM runtime AS pilot
+ARG DENSE_REPO=sentence-transformers/all-MiniLM-L6-v2
+ARG DENSE_REVISION=1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+ARG NLI_REPO=cross-encoder/nli-deberta-v3-base
+ARG NLI_REVISION=6c749ce3425cd33b46d187e45b92bbf96ee12ec7
+ENV HF_HOME=/home/appuser/.cache/huggingface
+RUN python - <<'PY'
+import os
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+
+home = Path(os.environ["HF_HOME"]) / "hub"
+for repo, rev, patterns in (
+    (os.environ["DENSE_REPO"], os.environ["DENSE_REVISION"],
+     ["*.json", "*.txt", "model.safetensors"]),
+    (os.environ["NLI_REPO"], os.environ["NLI_REVISION"],
+     ["*.json", "spm.model", "model.safetensors"]),
+):
+    snapshot_download(repo, revision=rev, allow_patterns=patterns)
+    refs = home / ("models--" + repo.replace("/", "--")) / "refs"
+    refs.mkdir(parents=True, exist_ok=True)
+    (refs / "main").write_text(rev)
+PY
+ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+RUN python - <<'PY'
+from sentence_transformers import SentenceTransformer
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import os
+
+SentenceTransformer(os.environ["DENSE_REPO"], device="cpu")
+AutoTokenizer.from_pretrained(os.environ["NLI_REPO"])
+AutoModelForSequenceClassification.from_pretrained(os.environ["NLI_REPO"], use_safetensors=True)
+print("pilot weights load offline")
+PY
+
+# The default target stays the plain runtime (CI, release).
+FROM runtime
