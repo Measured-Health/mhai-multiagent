@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
+	analysisroutes "github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/routes"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
@@ -51,6 +53,10 @@ type Deps struct {
 	EMR            *emrctl.Client
 	EMRSealer      *emrctl.Sealer
 	EMRDevelopment bool
+	// Analysis computes and serves Patient Analysis's stored bodies; nil
+	// (or a hospital whose switch is off) answers every /analysis/ route
+	// 404.
+	Analysis *analysis.Engine
 }
 
 // Register adds every route to m.
@@ -74,6 +80,9 @@ func Register(m *authz.Mux, d Deps) {
 		SecurityContact: d.SecurityContact, Walk: d.AuditWalk, Health: d.Health, Intel: d.Intel,
 		Auth: a, QueryCap: d.QueryCap, CloudProviders: d.CloudProviders, EMREnabled: d.EMREnabled, EMRTypes: d.EMRTypes,
 		EMR: d.EMR, EMRSealer: d.EMRSealer, EMRDevelopment: d.EMRDevelopment})
+	// Patient Analysis's aggregate reads (analysis backend plan Task 10):
+	// off unless the hospital's analysis switch is on.
+	analysisroutes.Register(m, analysisroutes.Deps{Pool: d.Pool, Engine: d.Analysis, Log: a.Log})
 	registerFixtures(m, d)
 }
 

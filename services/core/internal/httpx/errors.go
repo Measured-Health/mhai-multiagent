@@ -43,6 +43,10 @@ var Codes = map[string]int{
 	"not_tested":       http.StatusConflict,
 	"hospital_removed": http.StatusConflict,
 	"no_type":          http.StatusUnprocessableEntity,
+	// Patient Analysis (analysis backend design §9, additive): more than
+	// two filters; a period that isn't exactly one answerable frozen period.
+	"too_many_filters": http.StatusUnprocessableEntity,
+	"invalid_range":    http.StatusUnprocessableEntity,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -72,6 +76,8 @@ var titles = map[string]string{
 	"not_tested":         "Not tested",
 	"hospital_removed":   "Hospital removed",
 	"no_type":            "Unknown connection type",
+	"too_many_filters":   "Too many filters",
+	"invalid_range":      "Invalid period",
 }
 
 var details = map[string]string{
@@ -98,6 +104,8 @@ var details = map[string]string{
 	"not_tested":         "Test the saved settings before switching the connection on.",
 	"hospital_removed":   "The hospital is removed or being removed.",
 	"no_type":            "This connection type is not offered.",
+	"too_many_filters":   "At most two filters can be used together.",
+	"invalid_range":      "Choose one finished period.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.

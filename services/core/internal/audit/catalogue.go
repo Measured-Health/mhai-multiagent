@@ -275,6 +275,11 @@ var Catalogue = map[string]Entry{
 	"analysis.switch_raised":  withheld(),
 	"analysis.switch_lowered": withheld(),
 	"hospital.marked_demo":    withheld(),
+	// Patient Analysis reads (plan Task 10): mhai-web's analysis_viewed
+	// kind takes facts this payload doesn't carry yet (H6); sent bare until
+	// the mapping is agreed (TODO.md, "Before scale").
+	"analysis.viewed":           withheld(),
+	"analysis.unusual_querying": withheld(),
 
 	// EMR connections (EMR design §12.6): mhai-web's Plan 13 kinds, with
 	// the connection as the target. A resume has no kind yet: sent bare.
