@@ -964,7 +964,7 @@ func TestReserveAndRouteRefuseInactiveHospital(t *testing.T) {
 	}
 }
 
-// Migration 00025: gemini is a provider like the others. Its policy sets
+// Migration 00024: gemini is a provider like the others. Its policy sets
 // the route cloud:gemini, the worker reserves for it only while the policy
 // names it, the effective route holds, and an unknown provider is still
 // refused by every check.
@@ -1001,9 +1001,9 @@ func TestGeminiPolicyRouteAndReserve(t *testing.T) {
 	}
 }
 
-// 00025 goes down and up again: down restores 00018's lists (gemini
+// 00024 goes down and up again: down restores 00018's lists (gemini
 // refused again), and refuses while a policy names gemini.
-func TestMigration00025DownUp(t *testing.T) {
+func TestMigration00024DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
 	pool, err := db.Open(ctx, pg.URL)

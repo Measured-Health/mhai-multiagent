@@ -2,9 +2,8 @@
 -- widens the three closed sets of 00018 to name 'gemini', and nothing
 -- existing changes meaning.
 --
--- Numbered 00025: 00024 is claimed by Patient Analysis PR 4. goose refuses
--- an out-of-order migration, so whichever merges second keeps its number
--- only if the other is already applied everywhere; otherwise renumber.
+-- Numbered 00024 by the merge-order ruling (12 Nov): this merges first;
+-- Patient Analysis PR 4 takes 00025, EMR PR 6 00026 and EMR PR 7 00027.
 --
 --   - hospital_model_policy.cloud_provider: the CHECK gains 'gemini';
 --   - clinical_queries.model_route: the CHECK gains 'cloud:gemini' (the

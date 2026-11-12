@@ -204,7 +204,7 @@ async def test_db_error_from_core_fails_closed(postgres: Postgres, database: Dat
 
 
 async def test_gemini_reserves_under_its_own_policy(postgres: Postgres, database: Database) -> None:
-    """Migration 00025: a gemini policy reserves for gemini and nothing else,
+    """Migration 00024: a gemini policy reserves for gemini and nothing else,
     and its reservation settles like any other."""
     hid = await _hospital(postgres, "gemini", 10 * TOKENS)
     port = _port(database, hid)
