@@ -1,5 +1,26 @@
 # MHAI Multi-Agent System
 
+> **⚠️ Pilot mode: the formal sign-offs are deferred, not done.**
+> On 12 Nov 2026 the product owner decided to start a pilot with one willing
+> hospital before the privacy, legal and clinical sign-offs are in place.
+> **Before a second hospital, before any growth, and before real patient
+> data goes to a cloud model at scale, every item below must be signed off
+> and recorded:**
+>
+> - **Privacy lead:** masking recall (it currently misses names written
+>   without a title, e.g. "Adaeze Okafor has chest pain"), the Analysis
+>   disclosure rules and constants, and the staff-count question (7c Q4).
+> - **Legal and compliance:** the hospital data agreement, the NDPA 2023
+>   basis and cross-border transfer, the cloud providers' data processing
+>   and zero-retention terms, and the DPIA for EMR data.
+> - **Clinical lead:** review of the cloud model's instructions and
+>   answers, EMR alert rule set v1 (a second clinician too), and the wording
+>   of the "masked where detected" notice.
+>
+> The full list, with owners, is in [TODO.md](TODO.md) under "People" and
+> "Before scale". Until these are signed, treat the pilot as a supervised
+> test: one hospital, clinicians in the loop, and every answer reviewed.
+
 **Medical Healthcare AI** — A hallucination-resistant clinical decision-support system
 with 5 specialized transformer-based agents and a 4-layer guardrail cascade.
 
