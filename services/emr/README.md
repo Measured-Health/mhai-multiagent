@@ -136,7 +136,66 @@ keyed by `(hospital_id, id)` under forced RLS, and core's definers
 
 The normaliser runs only with `EMR_CODES_DIR` and `EMR_MAPS_DIR` set, and
 only finds work once core has made the `EMR` stream (`CORE_EMR_ENABLED`).
-The connectors and the rules come in PRs 6 to 9.
+
+## What is built (PR 6: FHIR R4)
+
+Migration 00025 (core; 00024 is Analysis PR 4's) adds `emr.sync_state` (the
+cursor, the due time, failure counts, the end of the backfill and the day of
+the last reconciliation, per connection), `emr.raw_records.backfill`, the
+emr role's read of `hospitals.time_zone`, and makes `emr_platform_health()`
+report a connection that is on but has had no successful poll for three
+intervals as `errors` (§15.4).
+
+- `internal/connector/fhir`: SMART Backend Services sign-in (a client
+  assertion signed RS384 for an RSA key or ES384 for a P-384 key, sent only
+  to the credential origin; the token held in memory until a minute before
+  it expires). `Test`: sign in, the capability statement (R4 only, every
+  resource with `_lastUpdated` and `_sort`), a count. `Fetch`: Observation
+  (laboratory, vital signs), MedicationRequest and MedicationStatement by
+  `_lastUpdated`, 200 a page, then the patients, encounters and locations a
+  page names, read from the same server by `_id`. At most 20 pages or 4,000
+  records a run. The cursor, per resource type, is the last completed page's
+  greatest `lastUpdated` minus 2 minutes, and never moves backward. A first
+  sync reads back 30 days. Allow-listed structs only. A page is refused
+  whole when it is the wrong shape, too big, out of order, dated ahead of
+  our clock, or names a next link off the base address.
+- `internal/scheduler`: every 10 s, the due connections (as
+  `mhai_emr_sched`), one run each under a per-connection advisory lock.
+  Each run is an `emr.sync_runs` row with a closed code. A 429's
+  `Retry-After` is honoured (capped at 15 minutes), other failures double
+  up to 15 minutes, and three sign-in refusals in a row stop polling until a
+  test passes. The secret store being down is `unreachable`. A first sync's
+  records are flagged `backfill` until a run has read everything. Once a
+  day, from 02:00 hospital time, the last 24 hours are read again, and
+  records only that finds are counted (`ReconciledLate`). `Stale` is the
+  §15.4 rule.
+- `emr.v1.ctl.sync_now` (svc:core): due at the next tick, unless the
+  connection is backing off.
+- `gokit/recordlink`: the "open record" link (https, the base address's
+  host, the id path-escaped).
+- `internal/synth` and `emr synth-fhir` (development only): synthetic
+  patients and a FHIR server with SMART sign-in.
+
+The scheduler runs only with the secret store, egress-emr and the
+normaliser configured. It polls only connections that are switched on, and
+none is on by default.
+
+### Synthetic end to end
+
+`bash services/emr/scripts/e2e-fhir.sh` (on the build server, with Docker
+and Go; never in CI, never against a real server) starts Postgres, the real
+egress-emr and `emr synth-fhir` on the proxy's outside network. It then runs
+a test container on the emr service's networks only. The test saves a
+synthetic connection, writes the allow-list, and checks five things:
+
+- a direct request can't reach the server;
+- the FHIR test passes through egress-emr;
+- a connection that doesn't declare the server's range is refused;
+- a sync puts records in the canonical tables and ends the backfill;
+- no synthetic name, MRN or value is in any log or message.
+
+`EGRESS_EMR_DEV_EXEMPT` lets the proxy reach the server's network, which it
+shares. It is development only.
 
 ## Settings
 
@@ -152,6 +211,7 @@ The connectors and the rules come in PRs 6 to 9.
 | `EMR_PROXY_URL`, `EMR_PROXY_KEY_PATH`, `EMR_EGRESS_DIR` | egress-emr (`http://host:port`), K_proxy and the allow-list directory: all or none; none means no way out |
 | `EMR_CODES_DIR`, `EMR_MAPS_DIR` | the code tables and the maps (the image has `/codes/testdata` and `/maps`): both or none; none means no normaliser |
 | `EMR_RULE_SET_ACTIVE` | later PRs; empty by default |
+| `EMR_DEV_CA_FILE` | development only: an extra CA for the synthetic FHIR server's certificate; refused elsewhere |
 
 egress-emr's own settings:
 
@@ -162,6 +222,7 @@ egress-emr's own settings:
 | `EGRESS_EMR_ENV` | `development`, `staging` or `production` (unset: production) |
 | `EGRESS_EMR_INTERNAL_CIDRS` | never reached, comma-separated: the `backend` subnet and the host's own addresses (`/32`); required outside development. The proxy adds its own networks, its routing table's gateways and `172.17.0.0/16` |
 | `EGRESS_EMR_LISTEN` | default `:3128` |
+| `EGRESS_EMR_DEV_EXEMPT` | development only: one private network of at most a `/24` taken out of the proxy's own networks (the synthetic server's, for the end-to-end run); never a gateway or an internal network |
 
 Errors name the variable, never its value.
 

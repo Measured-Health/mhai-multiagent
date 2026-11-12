@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- EMR integration, PR 6 (FHIR R4; off by default). Migration **00025**
+  (00024 is Analysis PR 4's): `emr.sync_state`, `emr.raw_records.backfill`,
+  and `emr_platform_health()` reporting a connection that is on and silent
+  for three poll intervals as `errors`. The `fhir_r4` connector is built:
+  SMART Backend Services sign-in (RS384 or ES384, credential origin only),
+  a read-only test with capability checks, and polling by `_lastUpdated`
+  with a per-type cursor, page and record limits, references read from the
+  same server only, and hostile-response refusals. It declares an optional
+  `mrn_namespace` setting. The scheduler adds advisory locks, backoff and
+  `Retry-After`, backfill flags, daily reconciliation, a stop after three
+  sign-in refusals, and `sync_now`. Also: `gokit/recordlink`, the synthetic
+  FHIR server (`emr synth-fhir`, development only), and
+  `services/emr/scripts/e2e-fhir.sh`, which runs the sync end to end
+  through egress-emr. egress-emr gains a development-only
+  `EGRESS_EMR_DEV_EXEMPT`, and the emr service a development-only
+  `EMR_DEV_CA_FILE`.
 - Document pipeline phase 0, part B: model promotion, the lean version
   (`services/intelligence/intelligence/modelstore/`, the `mhai-models` CLI).
   File checks for a trained run (safetensors only, a fixed list of JSON
