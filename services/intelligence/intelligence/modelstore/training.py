@@ -24,10 +24,11 @@ A shape or pattern failure is ``manifest_invalid``; a missing file is
 ``training_manifest_missing``.
 
 :func:`check` then holds the manifest to the registries (B16, B17, design decision 10):
-``dataset_unknown``, ``dataset_not_synthetic`` (phase 0 admits synthetic datasets only),
-``revision_unpinned`` (an upstream revision that is not a 40-hex commit),
-``licence_not_allowed``, and for a promoted base whatever the injected pin verifier
-raises; the default verifier refuses (``base_unverified``) so nothing passes unverified.
+``role_unknown`` (a role not in :data:`ROLES`), ``dataset_unknown``,
+``dataset_not_synthetic`` (phase 0 admits synthetic datasets only), ``revision_unpinned``
+(an upstream revision that is not a 40-hex commit), ``licence_not_allowed``, and for a
+promoted base whatever the injected pin verifier raises; the default verifier refuses
+(``base_unverified``) so nothing passes unverified.
 
 The registries, ``models/approved-datasets.json`` (``mhai.models.datasets/1``) and
 ``models/licences.json`` (``mhai.models.licences/1``), are changed only by PR (CODEOWNERS).
@@ -35,6 +36,7 @@ A malformed or missing registry is ``policy_invalid``.
 """
 
 import math
+import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -54,6 +56,22 @@ FILE_NAME = "training_manifest.json"
 SYNTHETIC_GENERATOR = "intelligence.doceval.sets"
 KINDS = ("synthetic", "deidentified")
 ALLOWED_KINDS = frozenset({"synthetic"})  # phase 0 (plan departure 10)
+# The roles a training manifest may name: ``extract`` (the document extractor) and ``cca``
+# (the answer model, docs/plans/2026-11-13-own-answer-model.md). A role is pinnable only
+# once it has an evaluation suite (``lock.ROLES``); ``cca`` gets its suite in that plan's
+# PR 2, so until then a ``cca`` run passes these checks but cannot be pinned.
+ROLES = frozenset({"extract", "cca"})
+# The roles whose run may carry a GGUF. Only ``cca`` is served from a GGUF (llama.cpp);
+# ``extract`` is evaluated and served from the safetensors, so a GGUF in its run would be
+# signed without ever being evaluated (security review of PR #143). For ``cca`` the GGUF
+# is the artifact that is served, so it must be the artifact that is evaluated: the
+# ``clinical_answer`` suite (own answer model plan, PR 2) MUST score the GGUF file itself
+# through llama.cpp, never the safetensors. Until that suite exists ``cca`` has no entry
+# in ``promote.SUITES`` or ``lock.ROLES``, so a ``cca`` run stops at evaluation
+# (``no_suite``) and cannot be signed or pinned.
+GGUF_ROLES = frozenset({"cca"})
+CHAT_TEMPLATE_JSON = "chat_template.json"
+TOKENIZER_CONFIG_JSON = "tokenizer_config.json"
 
 MAX_DATASETS = 64
 MAX_FRAMEWORK = 32
@@ -170,6 +188,11 @@ def is_commit(value: object) -> bool:
     return _match(value, _COMMIT)
 
 
+def is_package_version(value: object) -> bool:
+    """A framework version as the manifest takes it (a PEP 440 subset)."""
+    return _match(value, _PACKAGE_VERSION)
+
+
 def is_metric_name(value: object) -> bool:
     return (
         _match(value, _METRIC)
@@ -252,7 +275,7 @@ class TrainingManifest:
                 isinstance(p, tuple)
                 and len(p) == 2
                 and p[0] in FRAMEWORKS
-                and _match(p[1], _PACKAGE_VERSION)
+                and is_package_version(p[1])
                 for p in self.framework
             )
             and len({p[0] for p in self.framework}) == len(self.framework),
@@ -366,6 +389,62 @@ def load(path: Path | str) -> TrainingManifest:
 def load_run(run_dir: Path | str) -> TrainingManifest:
     """The training manifest of a run directory."""
     return load(Path(run_dir) / FILE_NAME)
+
+
+# ---------------------------------------------------------------- a GGUF in the run
+
+
+def _template_field(path: Path) -> tuple[bool, object]:
+    """Whether ``path`` (a checked JSON file) exists and its ``chat_template`` field."""
+    reason: str | None = None
+    obj: Any = None
+    try:
+        obj = files.check_json(path, path.name)
+    except Refused as exc:
+        reason = exc.reason
+    if reason == "missing_file":
+        return False, None
+    if reason is not None:
+        raise Refused(reason, detail_code="chat_template")
+    return True, obj.get("chat_template")
+
+
+def run_chat_template(run_dir: Path | str) -> str | None:
+    """The run's chat template as transformers would load it: ``chat_template.json``
+    when present (it overrides), else ``tokenizer_config.json``'s ``chat_template``.
+    None when neither has one; a template that is not one string (a list of named
+    templates, null) is ``gguf_template_mismatch``/``run_invalid``."""
+    run = Path(run_dir)
+    for name in (CHAT_TEMPLATE_JSON, TOKENIZER_CONFIG_JSON):
+        present, value = _template_field(run / name)
+        if not present or (name == TOKENIZER_CONFIG_JSON and value is None):
+            continue
+        if not isinstance(value, str):
+            raise Refused("gguf_template_mismatch", detail_code="run_invalid")
+        return value
+    return None
+
+
+def check_gguf_run(tm: TrainingManifest, run_dir: Path | str) -> None:
+    """A GGUF in the run (after ``files.check_run``): only for a role in
+    :data:`GGUF_ROLES` (``gguf_not_allowed_for_role``), and its embedded chat template
+    must be the run's, byte for byte (``gguf_template_mismatch``: ``gguf_missing``,
+    ``run_missing``, ``run_invalid`` or ``differs``). A cheap consistency check: the
+    weights themselves are proven only by evaluating the GGUF (see :data:`GGUF_ROLES`)."""
+    run = Path(run_dir)
+    ggufs = sorted(n for n in os.listdir(run) if n.endswith(files.GGUF_SUFFIX))
+    if not ggufs:
+        return
+    if tm.role not in GGUF_ROLES:
+        raise Refused("gguf_not_allowed_for_role")
+    served = files.gguf_chat_template(run / ggufs[0])
+    expected = run_chat_template(run)
+    if served is None:
+        raise Refused("gguf_template_mismatch", detail_code="gguf_missing")
+    if expected is None:
+        raise Refused("gguf_template_mismatch", detail_code="run_missing")
+    if served != expected.encode("utf-8"):
+        raise Refused("gguf_template_mismatch", detail_code="differs")
 
 
 # ---------------------------------------------------------------- the registries
@@ -524,6 +603,8 @@ def check(
         raise _invalid("type")
     if not isinstance(registry, Registry) or not isinstance(licences, Licences):
         raise _policy("type")
+    if tm.role not in ROLES:
+        raise Refused("role_unknown")
     entries: list[Dataset] = []
     for ident in tm.datasets:
         entry = registry.datasets.get(ident)
@@ -557,9 +638,11 @@ __all__ = [
     "ALLOWED_KINDS",
     "FILE_NAME",
     "FRAMEWORKS",
+    "GGUF_ROLES",
     "KINDS",
     "LICENCES_SCHEMA",
     "REGISTRY_SCHEMA",
+    "ROLES",
     "SCHEMA",
     "SYNTHETIC_GENERATOR",
     "Dataset",
@@ -570,10 +653,12 @@ __all__ = [
     "TrainingManifest",
     "UpstreamBase",
     "check",
+    "check_gguf_run",
     "is_commit",
     "is_dataset_id",
     "is_licence_id",
     "is_metric_name",
+    "is_package_version",
     "is_pin",
     "load",
     "load_licences",
@@ -583,5 +668,6 @@ __all__ = [
     "parse_licences",
     "parse_registry",
     "report_metrics",
+    "run_chat_template",
     "unverified_pin",
 ]

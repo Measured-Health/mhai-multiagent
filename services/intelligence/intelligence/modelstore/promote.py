@@ -111,6 +111,8 @@ EVAL_ROLE_ENV = "MHAI_EVAL_ROLE"
 LOCKED_ROLE = "locked"
 CLAIM_SCHEMA = "mhai.models.claim/1"
 SOURCES = manifest.SOURCES
+# ``cca`` joins only with a suite that scores the run's GGUF itself through llama.cpp (the
+# file that is served), never its safetensors: see training.GGUF_ROLES.
 SUITES: Mapping[str, str] = {"extract": "clinical_document"}
 TINY_ARCHITECTURE = "MhaiTinyExtractor"  # doceval.tiny.ARCHITECTURE
 # Vision-language architectures served by vLLM that the extraction role may use. The
@@ -425,13 +427,9 @@ def reserve(target: ObjectStore, name: str, version: str, run_id: str, actor: st
 
 
 def files_hash(entries: Sequence[files.FileEntry]) -> str:
-    """The files hash (``--expect-files``): SHA-256 of the canonical JSON of the sorted
-    ``[{path, size, sha256}]``."""
-    rows = sorted(
-        ({"path": e.path, "size": e.size, "sha256": e.sha256} for e in entries),
-        key=lambda r: str(r["path"]),
-    )
-    return hashlib.sha256(canonical.dumps(rows)).hexdigest()
+    """The files hash (``--expect-files``): :func:`intelligence.modelstore.files.files_hash`
+    (it lives there so the export step computes it without this module)."""
+    return files.files_hash(entries)
 
 
 def fetch_run(source: sources.Source, name: str, run: str, dest: Path) -> list[files.FileEntry]:
@@ -490,7 +488,9 @@ def check_training(
     tm = training.load_run(run_dir)
     if tm.name != name:
         raise Refused("identity_mismatch", detail_code="training_manifest_name")
-    return training.check(tm, registry, licences, verify_pin=verify_base)
+    checked = training.check(tm, registry, licences, verify_pin=verify_base)
+    training.check_gguf_run(tm, run_dir)  # a GGUF only where it is the evaluated artifact
+    return checked
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,6 +509,7 @@ def check_folder(
     entries = check_files(Path(run_dir))
     tm = training.load_run(Path(run_dir))
     tc = training.check(tm, registry, licences)
+    training.check_gguf_run(tm, Path(run_dir))
     return FolderCheck(tuple(entries), files_hash(entries), tc)
 
 

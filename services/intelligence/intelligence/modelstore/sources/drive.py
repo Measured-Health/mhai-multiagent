@@ -351,6 +351,7 @@ class DriveSource:
             if item.get("name") in seen:
                 raise invalid("duplicate")
             seen.add(item.get("name"))
+        files.check_misnamed(seen)
         return check_listing([_remote_file(i) for i in items], self._limits)
 
     def fetch(self, file: RemoteFile, dest: Path, max_bytes: int) -> str:
