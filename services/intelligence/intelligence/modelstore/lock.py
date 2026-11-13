@@ -82,7 +82,13 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from intelligence.doceval.report import GATES, PRODUCTION_GATES, THRESHOLDS_DIR
+from intelligence.doceval.report import (
+    ANSWER_GATE,
+    GATES,
+    PRODUCTION_GATES,
+    SUITE_GATES,
+    THRESHOLDS_DIR,
+)
 from intelligence.doceval.report import load_thresholds as _load_thresholds
 from intelligence.doceval.report import parse_report as _parse_report
 from intelligence.modelstore import canonical, files, manifest, names, signing, store, verify
@@ -248,13 +254,22 @@ def check_rehearsal(rehearsal: bool) -> None:
         raise Refused("not_allowed_here", detail_code="rehearsal")
 
 
+def check_role_gate(role: str, gate: str) -> None:
+    """A role is pinned only against a gate of its own suite (``cca``: ``answer``;
+    ``extract``: the document gates): ``gate_failed``/``suite`` otherwise."""
+    if gate not in SUITE_GATES[SUITES[role]]:
+        raise Refused("gate_failed", detail_code="suite")
+
+
 def check_production(role: str, entry: Pin, *, rehearsal: bool = False) -> None:
-    """P14: a production pin names a known role, a production gate and no fixture. A
-    rehearsal (development only, :func:`check_rehearsal`) still needs a known role, and
-    allows a ``fixture-`` name and the ``rehearsal`` gate (Task 24's CI rehearsal)."""
+    """P14: a production pin names a known role, a gate of that role's suite, a production
+    gate and no fixture. A rehearsal (development only, :func:`check_rehearsal`) still
+    needs a known role and its suite's gate, and allows a ``fixture-`` name and the
+    ``rehearsal`` gate (Task 24's CI rehearsal)."""
     check_rehearsal(rehearsal)
     if role not in ROLES:
         raise _invalid("role")
+    check_role_gate(role, entry.gate)
     if rehearsal:
         return
     if entry.name.startswith(FIXTURE_PREFIX):
@@ -341,7 +356,12 @@ def check_evaluation(
     failed = False
     rep: dict[str, Any] = {}
     try:
-        rep = _parse_report(raw)
+        if gate == ANSWER_GATE:
+            from intelligence.doceval.answers import report as answer_report
+
+            rep = answer_report.parse_report(raw)
+        else:
+            rep = _parse_report(raw)
     except Refused:
         failed = True
     if failed:
@@ -407,6 +427,8 @@ def pin(
     ``lock_path``; returns the entry written. Raises :class:`Refused` on any failure, and
     then the lock is unchanged."""
     _check_names(role, name, version, gate)
+    if role in ROLES:
+        check_role_gate(role, gate)
     if production:
         if role not in ROLES:
             raise _invalid("role")
@@ -726,6 +748,7 @@ __all__ = [
     "check_dependencies",
     "check_evaluation",
     "check_production",
+    "check_role_gate",
     "check_rehearsal",
     "check_test_split",
     "empty",

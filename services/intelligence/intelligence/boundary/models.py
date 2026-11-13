@@ -430,11 +430,16 @@ def default_orchestrator(
 
 
 def local_parts(
-    pinned: PinnedSource | None = None, pinned_roles: Sequence[str] = ()
+    pinned: PinnedSource | None = None,
+    pinned_roles: Sequence[str] = (),
+    *,
+    generator: Any = None,
 ) -> tuple[Builder, dict[str, str]]:
     """default_orchestrator's builder and versions, for the cloud clients
     (plan Task 9): they retrieve and verify with the same local models.
-    pinned and pinned_roles as for default_orchestrator."""
+    pinned and pinned_roles as for default_orchestrator. generator replaces
+    the Ollama generator (the answer gate scores a candidate GGUF through it:
+    intelligence.doceval.answers.gate)."""
     pinned_nli = "nli" in pinned_roles
     if pinned_nli:
         set_hub_offline()  # before the imports below can import transformers
@@ -453,7 +458,8 @@ def local_parts(
     from intelligence.tools.ollama_client import OllamaGenerator
 
     cfg = get_config()
-    generator = OllamaGenerator()
+    if generator is None:
+        generator = OllamaGenerator()
     nli = nli_factory(str(cfg.NLI_MODEL), source, pinned_nli=pinned_nli)
 
     def build(chunks: Sequence[KBChunk]) -> DynamicOrchestratorAgent:

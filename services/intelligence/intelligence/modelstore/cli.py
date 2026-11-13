@@ -4,7 +4,7 @@ Commands::
 
     mhai-models keygen OUT_DIR
     mhai-models dev-keygen OUT_DIR
-    mhai-models testset-build --suite clinical_document --version 1.0.0 [--scale S]
+    mhai-models testset-build --suite clinical_document|clinical_answer --version 1.0.0 [--scale S]
     mhai-models promote NAME VERSION --source drive|local|hf --run RUN
         [--hf-repo R --hf-revision SHA] [--dry-run] [--expect-files SHA256]
         [--runtime-url URL] [--gate phase1|phase3|rehearsal ...] [--dev-set DIR]
@@ -133,6 +133,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from intelligence.doceval import report
 from intelligence.doceval.report import THRESHOLDS_DIR
 from intelligence.modelstore import (
     canonical,
@@ -283,23 +284,28 @@ def _workflow() -> promote.WorkflowRun | None:
     return promote.WorkflowRun(run_id, ref, commit, actor.lower())
 
 
-def _lock_entry() -> testsets.LockEntry | None:
-    """The newest locked split of the extraction suite in ``models/testsets.lock``."""
+def _lock_entry(suite: str = promote.DOCUMENT_SUITE) -> testsets.LockEntry | None:
+    """The newest locked split of ``suite`` in ``models/testsets.lock``."""
     path = os.environ.get(TESTSETS_LOCK_ENV) or str(MODELS_DIR / "testsets.lock")
-    suite = promote.SUITES["extract"]
     found = [e for (s, _), e in testsets.read_lock(path).items() if s == suite]
     if not found:
         return None
     return max(found, key=lambda e: names.Version.parse(e.version))
 
 
-def _split(dev_set: str | None) -> promote.Split:
+def _suite_of(gates: tuple[str, ...]) -> str:
+    """The suite a promotion's locked split is for: the answer suite when ``--gate answer``
+    is asked for (the model-promote workflow always names its gate), else the documents'."""
+    return promote.ANSWER_SUITE if report.ANSWER_GATE in gates else promote.DOCUMENT_SUITE
+
+
+def _split(dev_set: str | None, suite: str = promote.DOCUMENT_SUITE) -> promote.Split:
     reader: store.S3Store | None = None
     entry: testsets.LockEntry | None = None
     policy: signing.TrustPolicy | None = None
     if os.environ.get(promote.EVAL_ROLE_ENV) == promote.LOCKED_ROLE:
         reader = _s3(READER_ACCESS_ENV, READER_SECRET_ENV)
-        entry = _lock_entry()
+        entry = _lock_entry(suite)
         policy = _trust_policy()
     return promote.select_split(
         os.environ,
@@ -567,7 +573,7 @@ def _promote(args: argparse.Namespace) -> int:
             registry=registry,
             licences=licences,
             source_for=_source_for(req),
-            split=_split(args.dev_set),
+            split=_split(args.dev_set, _suite_of(req.gates)),
             scratch_parent=Path(os.environ[SCRATCH_ENV]) if os.environ.get(SCRATCH_ENV) else None,
             base_verifier=_base_verifier(stack),
         )

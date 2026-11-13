@@ -17,7 +17,8 @@ The steps, in order, each a function of its own:
 4. :func:`check_files` (Task 13's ``check_run`` on the scratch copy, which must equal what
    was fetched; one PUT caps a file at 5 GiB) and :func:`check_training` (Task 14's
    ``training.load`` and ``training.check``; the manifest names this model).
-5. Evaluation. The suite comes from the role (:func:`suite_for`). The extractor comes only
+5. Evaluation. The suite comes from the role (:func:`suite_for`), and the gates must be
+   that suite's (:func:`promotion_gates`). For ``clinical_document`` the extractor comes only
    from ``config.json``'s architecture (:func:`choose_extractor`), never from a name the
    run declares for itself: ``MhaiTinyExtractor`` is the tiny extractor, a known VLM
    architecture is :class:`~intelligence.doceval.openai_compat.OpenAICompatExtractor` at
@@ -26,8 +27,15 @@ The steps, in order, each a function of its own:
    each extractor's engine and hardware. The split (:func:`select_split`): with
    ``MHAI_EVAL_ROLE=locked`` and the reader's credentials, the locked split through
    ``testsets.fetch`` (Task 17); anywhere else the dev split, and the report says so.
+   For ``clinical_answer`` (role ``cca``, own answer model plan PR 2) the scored artifact is
+   the run's GGUF itself, the file that is served, never its safetensors: the job starts
+   ``llama-server`` (llama.cpp at the pinned commit) on that GGUF in the scratch folder, on
+   loopback and offline, and scores the question set through it
+   (:func:`intelligence.doceval.answers.gate.evaluate_gguf_run`). ``--runtime-url`` is
+   refused for it: the job starts its own runtime.
 6. :func:`warmup`: the extractor on ``testdata/models/warmup/page.png``, recorded as
-   ``warmup.json`` ``{page_sha256, output_sha256, engine, engine_version}``.
+   ``warmup.json`` ``{page_sha256, output_sha256, engine, engine_version}``; for ``cca``
+   one fixed synthetic question, ``{answered, engine, engine_version, question_sha256}``.
 7. :func:`make_documents`: ``evaluation.json``, ``evaluation.md``, ``model_card.md``,
    ``data_statement.md``, ``training_manifest.json`` and ``warmup.json``.
 8. Not a dry run: :func:`upload_run` puts every file and document under
@@ -63,7 +71,9 @@ Anything else is ``version_exists``.
 files fetched into this job's scratch. Phase 0 cannot prove that the server serves those
 files, so a promotion (not a dry run) with ``--runtime-url`` is ``no_runtime``.
 TODO(GPU task): a hash handshake in which the server proves it serves the fetched files and
-reports its engine version; then allow it for a promotion.
+reports its engine version; then allow it for a VLM promotion. (The ``cca`` gate has its
+own: this job starts llama.cpp on the hashed GGUF with ``--alias <its SHA-256>`` and
+requires that alias before scoring, so the rule above is for ``--runtime-url`` only.)
 
 **Logs** carry names, versions, run ids, counts, hashes and reason codes only: never file
 contents, page text, ground truth, credentials, paths or URLs.
@@ -111,9 +121,11 @@ EVAL_ROLE_ENV = "MHAI_EVAL_ROLE"
 LOCKED_ROLE = "locked"
 CLAIM_SCHEMA = "mhai.models.claim/1"
 SOURCES = manifest.SOURCES
-# ``cca`` joins only with a suite that scores the run's GGUF itself through llama.cpp (the
-# file that is served), never its safetensors: see training.GGUF_ROLES.
-SUITES: Mapping[str, str] = {"extract": "clinical_document"}
+# ``cca``'s suite scores the run's GGUF itself through llama.cpp (the file that is served),
+# never its safetensors: see training.GGUF_ROLES and doceval.answers.gate.
+SUITES: Mapping[str, str] = {"extract": "clinical_document", "cca": "clinical_answer"}
+DOCUMENT_SUITE = "clinical_document"
+ANSWER_SUITE = "clinical_answer"
 TINY_ARCHITECTURE = "MhaiTinyExtractor"  # doceval.tiny.ARCHITECTURE
 # Vision-language architectures served by vLLM that the extraction role may use. The
 # list is closed: a new one is a reviewed change.
@@ -224,6 +236,11 @@ class Context:
     warmup_page: Path = WARMUP_PAGE
     deadline_s: float = DEFAULT_DEADLINE_S
     base_verifier: Callable[[str], None] | None = field(default=None, repr=False)
+    # The answer gate (role cca): the llama.cpp settings (None: from the environment,
+    # llama_runtime.Settings.from_env) and the orchestrator builder for a generator (None:
+    # the worker's own, doceval.answers.gate.default_builder).
+    llama: Any = None
+    answer_builder: Callable[[Any], Any] | None = field(default=None, repr=False)
 
 
 def _is_loopback_literal(host: str) -> bool:
@@ -642,9 +659,47 @@ class SplitDir:
     name: str  # dev or test
 
 
-def prepare_split(split: Split, scratch_root: Path) -> SplitDir:
+def _prepare_answer_split(split: Split, scratch_root: Path) -> SplitDir:
+    from intelligence.doceval.answers import bank, schema
+
+    failed = False
+    if isinstance(split, LockedSplit):
+        path = testsets.fetch(split.reader, split.entry, split.policy, scratch_root / "eval")
+        try:
+            meta = schema.load_set(path).meta
+        except schema.ItemInvalid:
+            failed = True
+        if (
+            failed
+            or meta["purpose"] != "test"
+            or not secrets.compare_digest(str(meta["sha256"]), split.entry.sha256)
+        ):
+            raise Refused("testset_mismatch", detail_code="locked_split")
+        return SplitDir(path, "test")
+    if not isinstance(split, DevSplit):
+        raise Refused("not_allowed_here", detail_code="split")
+    try:
+        if split.path is None:
+            path = bank.build("dev", scratch_root / "answers", version="1.0.0").root
+        else:
+            path = Path(split.path)
+        meta = schema.load_set(path).meta
+    except schema.ItemInvalid:
+        failed = True
+    if failed:
+        raise Refused("evaluation_failed", detail_code="dev_split")
+    if meta["purpose"] != "dev" or meta["locked"]:
+        raise Refused("not_allowed_here", detail_code="split")
+    return SplitDir(path, "dev")
+
+
+def prepare_split(split: Split, scratch_root: Path, suite: str = DOCUMENT_SUITE) -> SplitDir:
     """The split's folder, checked: a dev split must say ``dev`` and carry no lock; the
-    locked split comes from the store and must be the locked ``test`` split."""
+    locked split comes from the store and must be the locked ``test`` split of ``suite``."""
+    if isinstance(split, LockedSplit) and split.entry.suite != suite:
+        raise Refused("testset_mismatch", detail_code="suite")
+    if suite == ANSWER_SUITE:
+        return _prepare_answer_split(split, scratch_root)
     if isinstance(split, LockedSplit):
         path = testsets.fetch(split.reader, split.entry, split.policy, scratch_root / "eval")
         meta = report.testset_meta(path)
@@ -675,6 +730,7 @@ def prepare_split(split: Split, scratch_root: Path) -> SplitDir:
 
 
 DOCEVAL_LOGGER = "intelligence.doceval"
+ANSWER_REPORT_SCHEMA = "mhai.evaluation.answer_report/1"  # doceval.answers.report
 
 
 class _WarningsOnly(logging.Filter):
@@ -711,18 +767,22 @@ def _quiet_doceval() -> Iterator[None]:
             lg.removeFilter(quiet)
 
 
-def promotion_gates(req: Request) -> tuple[str, ...]:
-    """The gates to measure: those asked for; with none, every gate, except that a
-    promotion outside development is measured on the production gates only (P14)."""
+def promotion_gates(req: Request, suite: str = DOCUMENT_SUITE) -> tuple[str, ...]:
+    """The gates to measure, all of ``suite``'s (another suite's gate is
+    ``invalid_name``/``gate``): those asked for; with none, every gate of the suite, except
+    that a promotion outside development is measured on the production gates only (P14)."""
+    own = report.SUITE_GATES[suite]
+    if any(g not in own for g in req.gates):
+        raise _invalid("gate")
     if req.gates:
         return tuple(req.gates)
     if not req.dry_run and not verify.is_development():
-        return tuple(g for g in report.GATES if g in report.PRODUCTION_GATES)
-    return tuple(report.GATES)
+        return tuple(g for g in own if g in report.PRODUCTION_GATES)
+    return tuple(own)
 
 
 def gate_thresholds(gates: Sequence[str]) -> tuple[report.Thresholds, ...]:
-    return tuple(report.packaged_thresholds(g) for g in (gates or report.GATES))
+    return tuple(report.packaged_thresholds(g) for g in (gates or report.DOCUMENT_GATES))
 
 
 def evaluate(
@@ -827,9 +887,15 @@ def make_documents(
     warmup_json: bytes,
 ) -> dict[str, bytes]:
     """Step 7: the six documents of the manifest, by name."""
+    if rep.get("schema") == ANSWER_REPORT_SCHEMA:
+        from intelligence.doceval.answers import report as areport
+
+        markdown = areport.render_markdown(rep)
+    else:
+        markdown = report.render_markdown(rep)
     docs = {
         "evaluation.json": report.dumps(rep),
-        "evaluation.md": report.render_markdown(rep).encode("utf-8"),
+        "evaluation.md": markdown.encode("utf-8"),
         "model_card.md": documents.model_card(checked, rep, licences).encode("utf-8"),
         "data_statement.md": documents.data_statement(checked.manifest, registry).encode("utf-8"),
         "training_manifest.json": bytes(training_manifest),
@@ -975,6 +1041,44 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _split_for(ctx: Context, sc: sources.Scratch, suite: str, writing: bool) -> SplitDir:
+    split = prepare_split(ctx.split, sc.root, suite)
+    if writing and split.name != "test" and not verify.is_development():
+        raise Refused("not_allowed_here", detail_code="locked_split_required")
+    return split
+
+
+def _evaluate_answers(
+    req: Request,
+    ctx: Context,
+    sc: sources.Scratch,
+    entries: Sequence[files.FileEntry],
+    gates: Sequence[report.Thresholds],
+    writing: bool,
+) -> tuple[dict[str, Any], bytes, str, str, SplitDir]:
+    """Step 5 and 6 for ``cca``: the run's GGUF scored through llama.cpp."""
+    from intelligence.doceval.answers import gate, llama_runtime
+
+    if req.runtime_url is not None:
+        raise Refused("not_allowed_here", detail_code="runtime_url")
+    gate.find_gguf(entries)  # before the split is fetched or anything starts
+    (thresholds,) = gates
+    split = _split_for(ctx, sc, ANSWER_SUITE, writing)
+    settings = ctx.llama if ctx.llama is not None else llama_runtime.Settings.from_env()
+    with _quiet_doceval():
+        run = gate.evaluate_gguf_run(
+            sc.run,
+            entries,
+            split.path,
+            thresholds,
+            settings=settings,
+            home=sc.root / "llama-home",
+            split=split.name,
+            builder_for=ctx.answer_builder,
+        )
+    return run.report, run.warmup, run.engine, run.engine_version, split
+
+
 def promote(req: Request, ctx: Context) -> Summary:
     """Run the eight steps for ``req``; see the module docstring. Raises :class:`Refused`
     with a fixed code on any failure; the scratch folder is removed on every path."""
@@ -991,7 +1095,6 @@ def promote(req: Request, ctx: Context) -> Summary:
     if target is not None:  # 2
         assert ctx.workflow is not None
         reserve(target, req.name, req.version, req.run, ctx.workflow.actor)
-    gates = gate_thresholds(promotion_gates(req))
     with sources.scratch(ctx.scratch_parent) as sc:
         source = ctx.source_for(sc)  # 3
         fetched = fetch_run(source, req.name, req.run, sc.run)
@@ -1005,17 +1108,22 @@ def promote(req: Request, ctx: Context) -> Summary:
             verify_base=ctx.base_verifier or training.unverified_pin,
         )
         role = checked.manifest.role
-        suite_for(role)  # 5
-        chosen = choose_extractor(sc.run, req.name, role, req.version, req.runtime_url)
-        if target is not None and chosen.engine_version is None:
-            # TODO(GPU task): the runtime reports its version in the hash handshake.
-            raise Refused("no_runtime", detail_code="runtime_unverified")
-        split = prepare_split(ctx.split, sc.root)
-        if target is not None and split.name != "test" and not verify.is_development():
-            raise Refused("not_allowed_here", detail_code="locked_split_required")
-        notebook = training.report_metrics(checked.manifest)
-        rep = evaluate(chosen, split.path, gates, notebook, deadline_s=ctx.deadline_s)
-        warm = warmup(chosen, ctx.warmup_page, deadline_s=ctx.deadline_s)  # 6
+        suite = suite_for(role)  # 5
+        gates = gate_thresholds(promotion_gates(req, suite))
+        if suite == ANSWER_SUITE:
+            rep, warm, engine, engine_version, split = _evaluate_answers(
+                req, ctx, sc, entries, gates, target is not None
+            )
+        else:
+            chosen = choose_extractor(sc.run, req.name, role, req.version, req.runtime_url)
+            if target is not None and chosen.engine_version is None:
+                # TODO(GPU task): the runtime reports its version in the hash handshake.
+                raise Refused("no_runtime", detail_code="runtime_unverified")
+            split = _split_for(ctx, sc, suite, target is not None)
+            notebook = training.report_metrics(checked.manifest)
+            rep = evaluate(chosen, split.path, gates, notebook, deadline_s=ctx.deadline_s)
+            warm = warmup(chosen, ctx.warmup_page, deadline_s=ctx.deadline_s)  # 6
+            engine, engine_version = chosen.engine, str(chosen.engine_version)
         docs = make_documents(  # 7
             rep,
             checked,
@@ -1049,7 +1157,7 @@ def promote(req: Request, ctx: Context) -> Summary:
                     {g: "pass" if v == "pass" else "fail" for g, v in verdicts.items()},
                     split.name,
                 ),
-                runtime=manifest.Runtime(chosen.engine, str(chosen.engine_version), None),
+                runtime=manifest.Runtime(engine, engine_version, None),
                 promotion=ctx.workflow.promotion(_now()),
                 trained_by=checked.manifest.trained_by,
             )

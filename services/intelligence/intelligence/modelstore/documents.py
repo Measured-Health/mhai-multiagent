@@ -28,6 +28,19 @@ INTENDED_USE = (
     "Every extraction carries per-field confidence and is reviewed under the pipeline's "
     "always-review rules before it reaches a patient record."
 )
+ANSWER_INTENDED_USE = (
+    "Answering clinical questions from the shared reference guidelines retrieved for the "
+    "question, with a citation for each claim, inside the platform's answer pipeline. Every "
+    "answer is verified (NLI grounding and the guardrails) and escalates to a clinician "
+    "when verification fails. Served from this version's verified GGUF only."
+)
+ANSWER_OUT_OF_SCOPE = (
+    "Diagnosis, triage, dosing or any clinical decision without a clinician's review.",
+    "Questions outside the reference guidelines, and emergencies: these must escalate.",
+    "Use outside the platform's model host, or with weights other than this version's "
+    "verified GGUF.",
+    "Use as a clinically signed-off model: the question set and pass mark are pilot, unsigned.",
+)
 OUT_OF_SCOPE = (
     "Diagnosis, triage or any clinical decision without a clinician's review.",
     "Documents, languages or schema versions outside the evaluation set below.",
@@ -59,10 +72,15 @@ def _manifest(tm: object) -> training.TrainingManifest:
     return tm
 
 
-def _evaluation(evaluation: object) -> dict[str, Any]:
-    """The report, read back as Task 19 reads ``evaluation.json`` (strict, no markup)."""
+def _evaluation(evaluation: object, role: str) -> dict[str, Any]:
+    """The report, read back as Task 19 reads ``evaluation.json`` (strict, no markup): the
+    answer report for ``cca``, the document report otherwise."""
     if not isinstance(evaluation, Mapping):
         raise Refused("manifest_invalid", detail_code="document_evaluation")
+    if role == "cca":
+        from intelligence.doceval.answers import report as areport
+
+        return areport.parse_report(report.dumps(evaluation))
     return report.parse_report(report.dumps(evaluation))
 
 
@@ -119,10 +137,23 @@ def model_card(
     if not isinstance(checked, training.TrainingCheck):
         raise Refused("manifest_invalid", detail_code="document_manifest")
     tm = _manifest(checked.manifest)
-    rep = _evaluation(evaluation)
+    rep = _evaluation(evaluation, tm.role)
     licence = _licence(checked, licences, base_licence)
     ts = rep["testset"]
     split = rep["split"]
+    answers = tm.role == "cca"
+    if answers:
+        set_lines = [
+            f"- Items: {ts['items']}; must escalate: {ts['must_escalate']}",
+            f"- Item schema: {_code(ts['item_schema'])}",
+            f"- Scored file: the GGUF, SHA-256 {_code(rep['gguf_sha256'])}",
+            f"- Sign-off: {_code(rep['sign_off'])}",
+        ]
+    else:
+        set_lines = [
+            f"- Extraction schema: {_code(ts['extraction_schema_version'])}",
+            f"- Documents: {ts['documents']}; pages: {ts['pages']}",
+        ]
 
     out = [
         f"# Model card: {_code(tm.name)}",
@@ -133,17 +164,16 @@ def model_card(
         "",
         "## Intended use",
         "",
-        INTENDED_USE,
+        ANSWER_INTENDED_USE if answers else INTENDED_USE,
         "",
         "## Out-of-scope uses",
         "",
-        *(f"- {line}" for line in OUT_OF_SCOPE),
+        *(f"- {line}" for line in (ANSWER_OUT_OF_SCOPE if answers else OUT_OF_SCOPE)),
         "",
         "## Evaluation",
         "",
         f"- Test set: {_code(ts['name'] + '@' + ts['version'])}, SHA-256 {_code(ts['sha256'])}",
-        f"- Extraction schema: {_code(ts['extraction_schema_version'])}",
-        f"- Documents: {ts['documents']}; pages: {ts['pages']}",
+        *set_lines,
         f"- Split: {_code(split['name'])}"
         + (" (development split, not a promotion result)" if split["name"] == "dev" else ""),
         "",

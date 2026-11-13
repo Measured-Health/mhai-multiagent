@@ -17,6 +17,12 @@ name: Model promotion
 # (both switches). The job summary says "rehearsal". Outside rehearsal mode both switches
 # are production, and the production secrets reach a step only then. The job runs on main
 # only.
+#
+# Gate answer (role cca, own answer model plan PR 2): the run's GGUF itself is scored
+# through llama-server, built here at llama.cpp's pinned commit (the export step's), on
+# loopback and offline. The retriever and NLI models the answer checks use are downloaded
+# first; the evaluation then runs with the Hugging Face hub offline. Production mode only
+# (rehearsal mode forces the rehearsal gate, a document gate).
 
 on:
   workflow_dispatch:
@@ -50,7 +56,7 @@ on:
         description: Gate the promotion is measured against
         required: true
         type: choice
-        options: [phase1, phase3, rehearsal]
+        options: [phase1, phase3, answer, rehearsal]
       expect_files:
         description: The dry run's files hash; empty for a dry run
         required: false
@@ -127,7 +133,7 @@ jobs:
               *) echo "::error::local-fixture is for rehearsal only"; exit 1 ;;
             esac
             # P14: production promotions are measured against a production gate only.
-            case "$GATE_INPUT" in phase1 | phase3) ;; *) echo "::error::the rehearsal gate is for rehearsal mode only"; exit 1 ;; esac
+            case "$GATE_INPUT" in phase1 | phase3 | answer) ;; *) echo "::error::the rehearsal gate is for rehearsal mode only"; exit 1 ;; esac
             {
               echo MHAI_MODELS_ENV=production
               echo APP_ENV=production
@@ -149,6 +155,25 @@ jobs:
         if: env.REHEARSAL == 'true'
         working-directory: services/intelligence
         run: uv run --no-sync scripts/rehearse-promotion.sh prepare "$RUNNER_TEMP/rehearsal" "$NAME" "$RUN" "$GITHUB_ENV"
+
+      # The answer gate's runtime: llama-server at the pinned commit (LLAMA_CPP_COMMIT in
+      # intelligence/doceval/answers/llama_runtime.py), built without curl, so it cannot
+      # fetch a model. Then the answer checks' retriever and NLI models into the cache.
+      - name: llama.cpp and the answer checks' models (answer gate)
+        if: env.GATE == 'answer'
+        working-directory: services/intelligence
+        env:
+          LLAMA_CPP_COMMIT: b1b770d90d94cad9e9ea5b993bdbc383a522fb28
+        run: |
+          src="$RUNNER_TEMP/llama.cpp"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth 1 https://github.com/ggml-org/llama.cpp "$LLAMA_CPP_COMMIT"
+          git -C "$src" checkout -q FETCH_HEAD
+          [ "$(git -C "$src" rev-parse HEAD)" = "$LLAMA_CPP_COMMIT" ] || { echo "::error::llama.cpp commit"; exit 1; }
+          cmake -S "$src" -B "$src/build" -DLLAMA_CURL=OFF -DLLAMA_BUILD_IS_DEV=OFF -DGGML_NATIVE=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$src/build" --target llama-server -j 4
+          echo "MHAI_LLAMA_SERVER=$src/build/bin/llama-server" >>"$GITHUB_ENV"
+          uv run --no-sync python -c 'from huggingface_hub import snapshot_download as d; from intelligence.config.settings import get_config as g; c = g(); d(f"sentence-transformers/{c.DENSE_MODEL}"); d(str(c.NLI_MODEL))'
 
       # A short-lived, read-only Drive token from the service account's key (repository
       # secret MODEL_DRIVE_SA_KEY); the CLI runs drive_check before it reads the run.
@@ -215,7 +240,11 @@ jobs:
           [ "$code" -eq 0 ] || exit "$code"
           if [ -z "$EXPECT_FILES" ]; then
             # The aggregate-only renderer: metrics per field and gate verdicts, no document rows.
-            uv run --no-sync mhai-doceval report "$RUNNER_TEMP/report/evaluation.json" >"$RUNNER_TEMP/summary/evaluation.md"
+            if [ "$GATE" = answer ]; then
+              uv run --no-sync python -m intelligence.doceval.answers.report "$RUNNER_TEMP/report/evaluation.json" >"$RUNNER_TEMP/summary/evaluation.md"
+            else
+              uv run --no-sync mhai-doceval report "$RUNNER_TEMP/report/evaluation.json" >"$RUNNER_TEMP/summary/evaluation.md"
+            fi
             cat "$RUNNER_TEMP/summary/evaluation.md" >>"$GITHUB_STEP_SUMMARY"
             files="$(printf '%s' "$out" | jq -r .files_sha256)"
             [[ "$files" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no files hash"; exit 1; }
