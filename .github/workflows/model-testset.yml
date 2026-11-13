@@ -19,7 +19,7 @@ on:
         description: Evaluation suite
         required: true
         type: choice
-        options: [clinical_document]
+        options: [clinical_document, clinical_answer]
       version:
         description: Split version (semver; five digits or fewer in all)
         required: true

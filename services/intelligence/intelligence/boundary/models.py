@@ -415,6 +415,28 @@ def nli_factory(model_name: str, pinned: PinnedSource, *, pinned_nli: bool) -> C
     return nli
 
 
+def _local_nli(folder: Path) -> Callable[[], Any]:
+    """The NLI verifier from a verified folder only (local_files_only, safetensors,
+    require_model), made once on first use."""
+    lock = threading.Lock()
+    shared: dict[str, Any] = {}
+
+    def nli() -> Any:
+        with lock:
+            if "nli" not in shared:
+                from intelligence.agents import hga_nli
+
+                shared["nli"] = hga_nli.NLIEntailmentVerifier(
+                    model_name=str(folder),
+                    device="cpu",
+                    local_files_only=True,
+                    require_model=True,
+                )
+            return shared["nli"]
+
+    return nli
+
+
 def default_orchestrator(
     pinned: PinnedSource | None = None, pinned_roles: Sequence[str] = ()
 ) -> OrchestratorModelClient:
@@ -430,11 +452,21 @@ def default_orchestrator(
 
 
 def local_parts(
-    pinned: PinnedSource | None = None, pinned_roles: Sequence[str] = ()
+    pinned: PinnedSource | None = None,
+    pinned_roles: Sequence[str] = (),
+    *,
+    generator: Any = None,
+    local_models: Mapping[str, Path] | None = None,
 ) -> tuple[Builder, dict[str, str]]:
     """default_orchestrator's builder and versions, for the cloud clients
     (plan Task 9): they retrieve and verify with the same local models.
-    pinned and pinned_roles as for default_orchestrator."""
+    pinned and pinned_roles as for default_orchestrator. generator replaces
+    the Ollama generator (the answer gate scores a candidate GGUF through it:
+    intelligence.doceval.answers.gate). local_models ({"dense", "nli"} ->
+    a verified folder, doceval.answers.gate_models) loads both models from
+    those folders only, offline, instead of the configured hub names."""
+    if local_models is not None:
+        set_hub_offline()
     pinned_nli = "nli" in pinned_roles
     if pinned_nli:
         set_hub_offline()  # before the imports below can import transformers
@@ -453,15 +485,19 @@ def local_parts(
     from intelligence.tools.ollama_client import OllamaGenerator
 
     cfg = get_config()
-    generator = OllamaGenerator()
-    nli = nli_factory(str(cfg.NLI_MODEL), source, pinned_nli=pinned_nli)
+    if generator is None:
+        generator = OllamaGenerator()
+    dense_name = f"sentence-transformers/{cfg.DENSE_MODEL}"
+    if local_models is not None:
+        dense_name = str(local_models["dense"])
+        nli = _local_nli(local_models["nli"])
+    else:
+        nli = nli_factory(str(cfg.NLI_MODEL), source, pinned_nli=pinned_nli)
 
     def build(chunks: Sequence[KBChunk]) -> DynamicOrchestratorAgent:
         kb = MedicalKnowledgeBase()
         kb.chunks = {c.chunk_id: c for c in chunks}
-        retriever = HybridRetriever(
-            dense_model=f"sentence-transformers/{cfg.DENSE_MODEL}", device="cpu"
-        )
+        retriever = HybridRetriever(dense_model=dense_name, device="cpu")
         retriever.index_kb(kb)
         verifier = nli()
         hga = NLIBackedHGA(

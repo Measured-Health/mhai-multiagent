@@ -87,7 +87,8 @@ log = logging.getLogger(__name__)
 
 PURPOSE = "testset"
 CLAIM_SCHEMA = "mhai.models.testset_claim/1"
-SUITES = frozenset({sets.SET_NAME})
+ANSWER_SUITE = "clinical_answer"  # doceval.answers.schema.SET_NAME
+SUITES = frozenset({sets.SET_NAME, ANSWER_SUITE})
 MAX_TESTSET_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_FILES = 200_000
@@ -341,6 +342,26 @@ def _read_set_manifest(root: Path, expected_sha: str) -> dict[str, Any]:
     return obj
 
 
+def _build_test_split(suite: str, version: str, scratch: Path, scale: float) -> Any:
+    """The ``test`` split of ``suite``, drawn into ``scratch`` with no seed kept: the
+    document set (``doceval.sets``), or the answer bank (``doceval.answers.bank``, whose
+    items each pass the synthetic-data scanner's text rules as they are written)."""
+    error: str | None = None
+    try:
+        if suite == ANSWER_SUITE:
+            from intelligence.doceval.answers import bank, schema
+
+            try:
+                return bank.build("test", scratch, version=version)
+            except schema.ItemInvalid as e:
+                error = str(e)
+        else:
+            return sets.build("test", None, scratch, scale, version=version)
+    except sets.SetError as e:
+        error = str(e)
+    raise Refused("evaluation_failed", detail_code=f"build_{error}")
+
+
 def build_and_lock(
     target: ObjectStore,
     signer: signing.Signer,
@@ -368,15 +389,10 @@ def build_and_lock(
             {"schema": CLAIM_SCHEMA, "suite": suite, "version": version, "signer": signer.key_id}
         )
         target.put_new(store.testset_claim_key(suite, version), claim)
-        error: str | None = None
-        try:
-            made = sets.build("test", None, scratch, scale, version=version)
-        except sets.SetError as e:
-            error = str(e)
-        if error is not None:
-            raise Refused("evaluation_failed", detail_code=f"build_{error}")
-        scan = synth_scanner.scan_set(made.root)
-        if not scan.ok:
+        made = _build_test_split(suite, version, scratch, scale)
+        # Answer items are each held to the scanner's text rules as they are written.
+        scan = synth_scanner.scan_set(made.root) if suite == sets.SET_NAME else None
+        if scan is not None and not scan.ok:
             rules = sorted({f.rule for f in scan.findings})
             log.error(
                 "test split refused by the scanner: findings=%d rules=%s", len(scan.findings), rules

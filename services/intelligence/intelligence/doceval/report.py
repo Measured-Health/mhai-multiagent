@@ -78,9 +78,18 @@ from intelligence.modelstore.reasons import Refused
 
 REPORT_SCHEMA = "mhai.evaluation.report/1"
 THRESHOLDS_SCHEMA = "mhai.evaluation.thresholds/1"
-GATES: tuple[str, ...] = ("phase1", "phase3", "rehearsal")
-PRODUCTION_GATES = frozenset({"phase1", "phase3"})
+# The document extractor's gates (suite ``clinical_document``), and the answer model's one
+# gate (suite ``clinical_answer``, :mod:`intelligence.doceval.answers`). A gate measures one
+# suite only: :data:`SUITE_GATES`.
+DOCUMENT_GATES: tuple[str, ...] = ("phase1", "phase3", "rehearsal")
+ANSWER_GATE = "answer"
+GATES: tuple[str, ...] = (*DOCUMENT_GATES, ANSWER_GATE)
+PRODUCTION_GATES = frozenset({"phase1", "phase3", ANSWER_GATE})
 REHEARSAL_GATE = "rehearsal"
+SUITE_GATES: dict[str, tuple[str, ...]] = {
+    "clinical_document": DOCUMENT_GATES,
+    "clinical_answer": (ANSWER_GATE,),
+}
 THRESHOLDS_DIR = Path(__file__).resolve().parent / "thresholds"
 TESTSET_NAME = "clinical_document"  # sets.SET_NAME (not imported: sets pulls in the renderer)
 DEV_LABEL = "development split, not a promotion result"
@@ -233,7 +242,20 @@ def _canonical_doc(raw: bytes, cap: int) -> Any:
     return obj
 
 
-def _allowed_metrics(scope: str) -> dict[str, str]:
+# The answer gate's metrics (all over the whole set, scope ``overall``), each higher or
+# lower is better: :mod:`intelligence.doceval.answers.score`.
+ANSWER_METRICS: dict[str, str] = {
+    "escalation_recall": HIGHER,
+    "unsafe_rate": LOWER,
+    "grounded_pass_rate": HIGHER,
+    "fact_coverage": HIGHER,
+    "over_escalation_rate": LOWER,
+}
+
+
+def _allowed_metrics(scope: str, gate: str | None = None) -> dict[str, str]:
+    if gate == ANSWER_GATE:
+        return ANSWER_METRICS if scope == "overall" else {}
     if scope == "run":
         return RUN_METRICS
     if scope == f"slices.{runner.HOSTILE_SLICE}":
@@ -241,11 +263,11 @@ def _allowed_metrics(scope: str) -> dict[str, str]:
     return DOC_METRICS
 
 
-def _rule(obj: Any, scope: str) -> Rule:
+def _rule(obj: Any, gate: str, scope: str) -> Rule:
     if not isinstance(obj, dict) or not isinstance(obj.get("metric"), str):
         raise _policy()
     metric, op = obj["metric"], obj.get("op")
-    if metric not in _allowed_metrics(scope):
+    if metric not in _allowed_metrics(scope, gate):
         raise _policy()
     if op == "not_applicable":
         if set(obj) != {"metric", "op"}:
@@ -294,7 +316,7 @@ def load_thresholds(path: str | Path, *, file: str | None = None) -> Thresholds:
         n = block["min_documents"]
         if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_MIN_DOCUMENTS:
             raise _policy()
-        parsed = tuple(_rule(r, scope) for r in block["rules"])
+        parsed = tuple(_rule(r, gate, scope) for r in block["rules"])
         if len({r.metric for r in parsed}) != len(parsed):
             raise _policy()
         out[scope] = parsed
@@ -327,7 +349,7 @@ def check_gates(info: extractors.ExtractorInfo, gates: Sequence[Thresholds]) -> 
     if not gates or len({g.gate for g in gates}) != len(gates):
         raise _policy()
     for g in gates:
-        if not isinstance(g, Thresholds):
+        if not isinstance(g, Thresholds) or g.gate not in DOCUMENT_GATES:
             raise _policy()
         if g.gate != REHEARSAL_GATE and is_stub(info):
             raise Refused("not_allowed_here", detail_code="stub_extractor")
@@ -733,6 +755,22 @@ def _evaluate(
 # ---------------------------------------------------------------- building the report
 
 
+def evaluate_rules(
+    th: Thresholds, values: Mapping[str, Mapping[str, Value]], counts: Mapping[str, int]
+) -> dict[str, Any]:
+    """One gate's verdict over ``values`` (scope -> metric -> exact value or ``None``) with
+    ``counts`` (scope -> how many it measured), by the same rules as a document report: a
+    ``None`` metric is ``not_measured`` and fails, too few fails, a gate with no rule fails."""
+    return _evaluate(th, values, counts, "cpu")
+
+
+def decimal(v: Fraction | None) -> str | None:
+    """A rate as a report shows it: a decimal string with six places, or ``None``."""
+    out = _fmt(v)
+    assert not isinstance(out, int)
+    return out
+
+
 def check_split(purpose: object) -> dict[str, Any]:
     """The report's split for a set's purpose: ``dev`` (labelled) or ``test``; anything
     else is refused (``not_allowed_here``). Call it before a run, not only after."""
@@ -1077,7 +1115,7 @@ def _check_hostile(h: Any) -> None:
 
 
 def _check_verdict(gate: str, v: Any, stopped: bool) -> None:
-    _req(gate in GATES and _exact(v, ("verdict", "results", "failed")))
+    _req(gate in DOCUMENT_GATES and _exact(v, ("verdict", "results", "failed")))
     _req(v["verdict"] in ("pass", "fail"))
     results = v["results"]
     _req(isinstance(results, dict))
@@ -1118,7 +1156,7 @@ def _check_header(obj: dict[str, Any], any_thresholds_file: bool = False) -> Non
     th = obj["thresholds"]
     _req(isinstance(th, dict) and bool(th) and set(th) == set(obj["verdicts"]))
     for gate, t in th.items():
-        _req(gate in GATES and _exact(t, ("file", "sha256", "production")))
+        _req(gate in DOCUMENT_GATES and _exact(t, ("file", "sha256", "production")))
         packaged = t["file"] == f"thresholds/{gate}.json"
         # building a report, a test's own thresholds file may be named plainly
         _req(packaged or (any_thresholds_file and _is_token(t["file"], _KEY)))
@@ -1484,11 +1522,15 @@ def compare(before: Mapping[str, Any], after: Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "ANSWER_GATE",
+    "ANSWER_METRICS",
     "DEV_LABEL",
+    "DOCUMENT_GATES",
     "GATES",
     "MIN_CELL",
     "PRODUCTION_GATES",
     "REPORT_SCHEMA",
+    "SUITE_GATES",
     "SILENT_ERROR_DEFINITION",
     "SUPPRESSED",
     "THRESHOLDS_DIR",
@@ -1500,7 +1542,9 @@ __all__ = [
     "check_gates",
     "check_split",
     "compare",
+    "decimal",
     "dumps",
+    "evaluate_rules",
     "is_stub",
     "is_token",
     "load_thresholds",

@@ -63,7 +63,7 @@ def noisy(mini: minisets.MiniSet) -> runner.RunResult:
 
 
 def _gates() -> list[report.Thresholds]:
-    return [report.packaged_thresholds(g) for g in report.GATES]
+    return [report.packaged_thresholds(g) for g in report.DOCUMENT_GATES]
 
 
 def _thresholds(tmp_path: Path, gate: str, scopes: dict[str, Any], name: str = "t.json") -> Path:
@@ -122,7 +122,7 @@ def test_report_round_trip_canonical(perfect: runner.RunResult) -> None:
     assert rep["model_versions"] == {"extract": "0.1.0"}
     assert rep["engine"] == {"name": "numpy", "version": None}
     assert rep["hardware"] == "cpu"
-    assert set(rep["verdicts"]) == set(report.GATES)
+    assert set(rep["verdicts"]) == set(report.DOCUMENT_GATES)
     # a report that is not canonical, or names something odd, is refused
     with pytest.raises(Refused):
         report.parse_report(json.dumps(rep, indent=1).encode())
@@ -151,7 +151,7 @@ def test_report_has_no_per_document_data(
 
 def test_report_records_thresholds_file_and_hash(perfect: runner.RunResult) -> None:
     rep = report.build_report(perfect, _gates())
-    for gate in report.GATES:
+    for gate in report.DOCUMENT_GATES:
         path = report.THRESHOLDS_DIR / f"{gate}.json"
         assert rep["thresholds"][gate] == {
             "file": f"thresholds/{gate}.json",
@@ -566,7 +566,7 @@ def test_timeout_stop_reported(mini: minisets.MiniSet) -> None:
     raw = report.dumps(rep)
     assert report.parse_report(raw) == rep
     assert rep["stopped"] == "timeouts"
-    for gate in report.GATES:
+    for gate in report.DOCUMENT_GATES:
         assert rep["verdicts"][gate]["verdict"] == "fail"
     md = report.render_markdown(rep)
     assert "stopped" in md.lower() and "5%" in md
