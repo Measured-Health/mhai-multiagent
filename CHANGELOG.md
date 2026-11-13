@@ -27,6 +27,22 @@ All notable changes to this project are documented here. The format follows
   `generated_by.provider` keep their enums and are null for gemini.
   Migration 00024 merges first; Patient Analysis PR 4 takes 00025 and EMR
   PR 6 00026.
+- The pilot: cloud answers for one real hospital on the demo host
+  (`deploy/pilot/`, product owner's decision of 12 Nov 2026; the deferred
+  sign-offs are recorded in PR #134). `deploy/compose.yml` gains the
+  `pipeline` worker under the `pilot` profile (off by default: the default
+  deploy only gains empty `CORE_CLOUD_PROVIDERS` and
+  `INTELLIGENCE_DB_PASSWORD` and a `NATS_PIPELINE_NKEY` default whose seed was thrown away (checked by `nats-server -t` in CI, `deploy/nats/check-configs.sh`)), and
+  `deploy/nats/nats.conf` the `pipeline` NKey user (a test keeps its
+  permissions equal to dev's). `deploy/pilot/enable-pilot.sh` makes the
+  pipeline's NKey, login and key file, starts the egress proxy and the
+  pipeline, and creates the hospital and its model policy; the provider is
+  a parameter (anthropic, or gemini once its adapter merges). The
+  intelligence Dockerfile gains a `pilot` target with the embedding and NLI
+  weights pinned and loaded offline, built for arm64 by the new "Pilot
+  pipeline image" workflow. The worker gains `INTELLIGENCE_SINGLE_HOST=on`:
+  NATS and Postgres without TLS outside development, only to Docker service
+  names on its own host (`tests/security/test_single_host_transport.py`).
 - Document pipeline phase 0, part B: model promotion, the lean version
   (`services/intelligence/intelligence/modelstore/`, the `mhai-models` CLI).
   File checks for a trained run (safetensors only, a fixed list of JSON

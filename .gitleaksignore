@@ -15,3 +15,8 @@ a5ccb6d6f10243ca1e783cc3819d961dc76f8544:services/intelligence/tests/modelstore/
 # services/nats/emr-off.conf: the deny-all emr user's NKey *public* key (its seed
 # was never kept). A public key is not a secret.
 ef70aa976617c60b19381d92c58b482e9f17ba0a:services/nats/emr-off.conf:generic-api-key:5
+# deploy/nats/check-configs.sh: placeholder NATS user *public* keys (U..., no seed) used to
+# render the deploy config for nats-server -t in CI. Public keys are not secrets.
+9860a3ecf14941e4254620f3bd38e5440b0d56e4:deploy/nats/check-configs.sh:generic-api-key:32
+9860a3ecf14941e4254620f3bd38e5440b0d56e4:deploy/nats/check-configs.sh:generic-api-key:33
+9860a3ecf14941e4254620f3bd38e5440b0d56e4:deploy/nats/check-configs.sh:generic-api-key:34

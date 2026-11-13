@@ -1,0 +1,56 @@
+name: Pilot pipeline image
+
+# The pipeline worker's image for the pilot on the demo host
+# (deploy/pilot/README.md): services/intelligence/Dockerfile, target pilot
+# (the runtime plus the pinned embedding and NLI weights, loaded offline in
+# the build), for arm64 (the demo host is Graviton). Started by hand from
+# main only; it pushes the image and does nothing on the host.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: pilot-image
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build-pipeline:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/${{ github.repository }}-pipeline-pilot
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: services/intelligence
+          target: pilot
+          build-args: TORCH=cpu
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # No shared cache: the image is pushed (zizmor cache-poisoning).
+          no-cache: true

@@ -66,6 +66,15 @@ jobs:
       - name: Workflow security (zizmor)
         run: uv run zizmor --offline ../../.github/workflows
 
+      # The NATS configs start: nats-server -t on deploy/nats/nats.conf with
+      # the nats service's environment as the default deploy renders it
+      # (compose defaults included), and on the dev config, in the deploy's
+      # pinned NATS image. A key or line nats-server refuses would stop NATS,
+      # and core and the demo with it.
+      - name: NATS configs (nats-server -t)
+        working-directory: .
+        run: bash deploy/nats/check-configs.sh
+
       - name: Lint
         run: uv run ruff check .
 
