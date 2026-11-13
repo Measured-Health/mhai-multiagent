@@ -168,6 +168,19 @@ The lean rewrite (11 Nov 2026, product owner: a hospital test quickly) kept the 
 - **Accepted startup risk: the writer key and the signing key are repository secrets.** Anyone with write access could read them through a workflow on a branch. Narrowed: only main's dispatch of `model-promote.yml` and `model-testset.yml` runs the job (a job-level `if`) and passes them; every other trigger or ref gets empty values. Until they move into a protected environment (before scale): keep write access to the repository to the core team, and rotate the signing key (a new trust-policy entry, the old one removed) and the store's writer key when anyone with write access leaves.
 - **Key-less Drive access** (H3: a workload identity pool limited to this repository and the environments). Today a service account key in a repository secret. Bring back with the environments.
 
+## Own answer model: before scale (own model PR 3, 13 Nov)
+
+The local route serves the pinned `cca` GGUF from the `llama` sidecar (profile `ownmodel`), lean and fail closed. Left out, each back at the trigger named (and the plan's own "Before scale" list):
+
+- **The switch runbook** (own model PR 4): `eval-local.sh` on the host, the switch and switch back, `enable-pilot.sh`'s memory check and its refusal of `ownmodel` without `PILOT_MODEL_ROLES=cca`. Before any hospital moves to its own model.
+- **A published sidecar image pinned by digest** (built and pushed by a workflow for arm64 and amd64) instead of building `deploy/llama` on the host. Before a second host.
+- **model-fetch's way out limited to the store's host** (its own proxy or an egress allow-list) rather than a plain network with a route out. It holds only the reader's credential and never sees a question. Before a second hospital.
+- **The sidecar re-reading a new pin**: after a re-pin and `model-fetch`, `llama` must be restarted by hand (until then the worker refuses the old alias and is not ready). With PR 4's runbook.
+- **The sidecar's identity proven cryptographically** (attestation or a measured image) rather than our entrypoint plus the alias. Before the sidecar runs on another host than the worker.
+- **A per-generation identity check** (the completion's own model id) besides the per-job alias check. With the attestation.
+- **The engine version of the running sidecar checked** at start-up (today the image is built at the pinned commit and `warmup.json`'s engine version must be that commit's; the running binary is not asked). With the published image.
+- **Per-hospital choice of local model, GPU serving and concurrency**: the plan's "Before scale".
+
 ## Open items for the core service
 
 From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md):
