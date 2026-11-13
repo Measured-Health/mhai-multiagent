@@ -570,6 +570,7 @@ def local_parts(
         MedicalKnowledgeBase,
         RAGClinicalContextAgent,
     )
+
     cfg = get_config()
     if generator is None:
         generator = _generator_for(source, pinned_roles, None)

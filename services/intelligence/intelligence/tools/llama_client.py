@@ -60,7 +60,9 @@ DETAILS = frozenset(
 )
 _INT = re.compile(r"[0-9]{1,7}", re.ASCII)
 _FLOAT = re.compile(r"[0-9]{1,3}(?:\.[0-9]{1,6})?", re.ASCII)
-_HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
+_HOST = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
+)
 
 
 class LocalUnverified(Exception):
@@ -126,7 +128,9 @@ def check_url(raw: str, *, development: bool) -> str:
     raise ValueError("host")
 
 
-def settings_from_env(env: Mapping[str, str], development: bool, errs: list[str]) -> LocalLLMSettings:
+def settings_from_env(
+    env: Mapping[str, str], development: bool, errs: list[str]
+) -> LocalLLMSettings:
     """:class:`LocalLLMSettings` from the environment; each malformed variable is named in
     ``errs`` (never its value) and its default kept."""
     d = LocalLLMSettings()

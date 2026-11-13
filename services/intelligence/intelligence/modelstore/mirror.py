@@ -111,10 +111,10 @@ class DirReadStore:
         finally:
             os.close(dfd)
         out = []
-        for e in entries:
-            if e.startswith(base + SEP):
+        for entry in entries:
+            if entry.startswith(base + SEP):
                 try:
-                    out.append(_vid(e[len(base) + 1 :]))
+                    out.append(_vid(entry[len(base) + 1 :]))
                 except Refused:
                     continue
         return sorted(out)

@@ -186,8 +186,11 @@ def _settings(url: str, **kw: Any) -> LocalLLMSettings:
     return LocalLLMSettings(url=url, timeout_s=kw.pop("timeout_s", 5.0), **kw)
 
 
+_DEFAULT_PIN = FakePinned({"cca": PINNED})
+
+
 def _client(
-    url: str, pinned: FakePinned | None = FakePinned({"cca": PINNED}), **kw: Any
+    url: str, pinned: FakePinned | None = _DEFAULT_PIN, **kw: Any
 ) -> tuple[OrchestratorModelClient, list[list[KBChunk]]]:
     from intelligence.agents.orchestrator import DynamicOrchestratorAgent
 
