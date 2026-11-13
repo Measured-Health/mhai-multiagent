@@ -93,6 +93,7 @@ Plans 2, 3 and 4 and the cloud plan's constraints still hold: identity only from
 22. **PR 7's migration is 00027.** Gemini took 00024, Analysis PR 4 00025 and EMR PR 6 is renumbered to 00026; findings need PR 6's `raw_records.backfill`, so 00027 merges last. It also adds `emr_rule_set_activation`, `emr_pause_connection()` and `emr_sources_status()`, and a paused source reads `errors`/`behind` at once (A42).
 23. **Rule set v1 is a pilot set, clinical sign-off deferred** (product owner, 12 Nov; README "Pilot mode"). The loader accepts `status: pilot` with `clinical_signoff: deferred` and no `reviewed_by`, outside development, with a source on every rule; `status: reviewed` needs two reviewers per rule. To keep it switchable per hospital, a finding alerts only when `EMR_RULE_SET_ACTIVE` names the loaded set **and** a platform admin activated the same version and SHA-256 for the hospital (`PUT /platform/hospitals/{id}/emr-rule-set`, step-up, audited `emr.rule_set_switched`). The start-up `rule_set_activated` signal is not sent (TODO, "EMR: before scale").
 24. **One rule set at a time, and simpler in places** (startup speed): no candidate set in shadow beside the active one; dedup is `(version, rule, observation)` (the observation fixes the patient, and a merge moves findings); the breaker counts critical findings only and records trips in `emr.breaker_trips`; findings are announced by id (`emr.v1.Finding`) after the commit, with a minute sweep. Each is on the "EMR: before scale" list in TODO.md.
+25. **An evaluation error holds its batch, not the hospital** (review, 13 Nov). Design §15.2 stops the hospital's evaluation; a hospital-wide stop let one bad batch delay, and then dead-letter, healthy batches (a critical potassium). The failing batch is held for 5 minutes (paged) and dead-letters on its fifth delivery; other batches go on. A merge racing the batch retries it; a dead letter that can't be sent keeps the message.
 
 ---
 
@@ -870,7 +871,7 @@ As design §17.6, plus:
 | A21 every action audited with a closed payload | `TestAuditSchemasEMRConnection` (11); `TestSettingsAuditCountsOnly` (32); `TestAlertsReadAudited` (33); `TestConfirmAuditedMergeOnly` (34); `TestResumeStepUpAudited` (37) |
 | A22 no synthetic PHI in telemetry | `TestSyntheticSyncNoPHIInTelemetry` (25); `TestFullCycleNoPHIInTelemetry` (37); `TestSignalCarriesIdsOnly` (20) |
 | A23 a silent source is `behind` | `TestStaleRules` (24); `TestSourcesStatusBehindWhenStaleOrPaused` (33) |
-| A24 a rule error stops the hospital, no partial findings | `TestRuleErrorStopsHospitalNoPartialFindings` (28) |
+| A24 a rule error stops evaluation (the failing batch, departure 25), no partial findings | `TestRuleErrorHoldsBatchNoPartialFindings` (28) |
 | A25 record links safe | `TestRecordLink` (25) |
 | A26 a document row without review refused | `TestDocumentRawRecordNeedsReview` (16); `TestUnreviewedDocumentNeverCanonical` (47) |
 | A27 no patient recipient | `TestNoPatientRecipientType` (31); `TestAlertRecipientsAreClinicians` (33) |

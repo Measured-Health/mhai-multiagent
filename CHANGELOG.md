@@ -16,8 +16,8 @@ All notable changes to this project are documented here. The format follows
   `emr_sources_status()`, the `emr_normalise` and `emr_rules` job types, and
   a paused source reported as `errors` at once. The emr service's rules
   engine (`internal/rules`): a strict, hashed YAML rule set, the seven rule
-  kinds with golden tests, the `emr_rules` consumer (stops a hospital's
-  evaluation on any error, no partial findings) and the per-source breaker.
+  kinds with golden tests, the `emr_rules` consumer (holds a failing
+  batch, no partial findings) and the per-source breaker.
   Rule set v1 (`services/emr/rules/ruleset-1.yaml`): pilot, clinical
   sign-off deferred, conservative critical values with their sources in
   `REFERENCES.md`. New route `GET`/`PUT /platform/hospitals/{id}/emr-rule-set`

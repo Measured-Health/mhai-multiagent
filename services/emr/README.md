@@ -218,13 +218,18 @@ source is `errors` (platform) and `behind` (hospital) at once.
   backfill; `shadow` unless the deployment and the hospital's activation
   both name the loaded set; `arrived_late` after an hour; an amended
   result's finding `supersedes` the old one, a result corrected to normal
-  or retracted withdraws it. Any error rolls the batch back and stops the
-  hospital's evaluation for five minutes; the fifth delivery
-  dead-letters. Findings are announced by id on `emr.v1.<hid>.finding`
+  or retracted withdraws it. Any error rolls the batch back; an evaluation
+  error holds that batch for five minutes (paged) while the hospital's
+  other batches go on; the fifth delivery dead-letters (and a failed dead
+  letter keeps the message). A mapped value no numeric rule can read (a
+  unit with no reviewed conversion) is counted as not evaluable. Findings are announced by id on `emr.v1.<hid>.finding`
   after the commit, again by the sweep if a publish failed.
 - The per-source breaker: more critical findings in 15 minutes than both
-  the floor (10) and 5 times the source's 14-day median pauses the source
-  and signals `breaker_tripped`. Findings already made are kept and
+  the floor (10) and 5 times the source's 14-day median (at least 4 while
+  the source has under 14 days of findings) pauses the source and signals
+  `breaker_tripped`, only while the rule set alerts for the hospital
+  (never in shadow). The service refuses to start with an active rule set
+  whose analyte codes lack a reviewed conversion. Findings already made are kept and
   announced.
 - Rule set v1 (`rules/ruleset-1.yaml`, pilot, clinical sign-off deferred)
   and `rules/REFERENCES.md`. `emr rules check <file>` prints the version

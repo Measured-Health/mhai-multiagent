@@ -125,6 +125,11 @@ The product owner asked for the simplest safe version first (11 Nov). These wait
 - [ ] Rules: the breaker counts critical findings only; urgent and info floods, and documents as a source, wait.
 - [ ] Rules: a patient's history loads at most 5,000 observations and 5,000 medications per evaluation; the consumer is one batch at a time per process.
 - [ ] Rules: findings are announced after the commit (with a sweep every minute), not through an outbox.
+- [ ] Rules (review notes, 13 Nov): a superseding result whose finding is historical (an old amendment) supersedes or withdraws the open finding without an alert of its own; PR 8b decides what the open alert shows then.
+- [ ] Rules: a transient database error retries the batch (backoff by delivery) per process; nothing is shared across emr copies.
+- [ ] Rules: two consumers on one patient's amendments at once could each supersede the same open finding; one consumer per process today (the patient's `FOR SHARE` lock doesn't serialise them).
+- [ ] Rules / PR 8b: shadow findings are announced to `core_emr` too and pile up there; core acks them with no alert (K11), or the emr side stops announcing shadow findings.
+- [ ] The normaliser's `Deliveries` still reads a metadata error as the last delivery (dead-letters on a guess); fix as the rules consumer was.
 - [ ] Rules: v1 has thresholds and the lab's flags only. NEWS2, the KDIGO creatinine rise, haemoglobin falls, lactate trends and the potassium combination are built and tested on the synthetic set; adding them to a rule set is a clinical review.
 
 ## Decided

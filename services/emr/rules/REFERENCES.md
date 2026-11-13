@@ -104,7 +104,10 @@ medicines support it:
 - **A reviewed `maps/common/conversions.yaml`** with v1's analytes and the
   factors in the fixture: glucose 1 mg/dL = 0.0555 mmol/L, creatinine
   1 mg/dL = 88.4 µmol/L, haemoglobin 10 g/L = 1 g/dL, platelets
-  10³/µL = 10⁹/L.
+  10³/µL = 10⁹/L, and the exact ones: potassium and sodium 1 mEq/L =
+  1 mmol/L, troponin 1 pg/mL = 1 ng/L. The emr service refuses to start
+  with `EMR_RULE_SET_ACTIVE=1` while any of v1's codes lacks a conversion,
+  and counts a mapped value it can't evaluate (`NotEvaluable`).
 - **Activation:** the shadow review (design §11.5), then a platform admin's
   `PUT /platform/hospitals/{id}/emr-rule-set` (step-up, audited
   `emr.rule_set_switched`) with the version and hash, and
