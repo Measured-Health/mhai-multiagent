@@ -79,6 +79,12 @@ Gates before live use (design §17.6; all of them):
 - [ ] The on-call owner named (H9). Owner: product owner.
 - [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
 
+## EMR: follow-ups from PR 6 (12 Nov)
+
+- [ ] PR 8a's `sources_status` reads staleness by the §15.4 rule (`scheduler.Stale` on the emr side; core's `emr_platform_health()` now marks a silent connection that is on as `errors`).
+- [ ] PR 7: findings from raw rows with `backfill = true` are `historical` (A18).
+- [ ] Core doesn't call `emr.v1.ctl.sync_now` yet (no route asks for it).
+
 ## EMR: follow-ups from PR 5 (11 Nov)
 
 - [ ] **PR 9 must defer the exclusion purge under a legal hold.** Until then `emr_exclude_patient` purges at once (product owner, 11 Nov: excluding a patient purges its data); no legal hold exists yet. PR 9 moves the purge behind `emr.purge_requests` with the hold check (design §10.6, A41).
@@ -98,6 +104,12 @@ The product owner asked for the simplest safe version first (11 Nov). These wait
 - [ ] The sink inserts one row per transaction; batch inserts (`COPY` or multi-row) for large backfills.
 - [ ] Metrics (`emr_sink_dropped_fields_total`, the normaliser's counts) are in-process counters; export them when the service gets a metrics endpoint.
 - [ ] The cross-connection match query scans patients by `(hospital_id, mrn)`; add a normalised-MRN index per namespace if it shows up in plans.
+- [ ] FHIR (PR 6): the scheduler runs due connections one after another in one process; run several at once, with fairness across hospitals, when there are many connections.
+- [ ] FHIR: more than 4,000 records that share one `lastUpdated` within the 2-minute overlap would make each run re-read the same window. Add a `_lastUpdated` plus id tie-break (or a server page token) if a source ever does this.
+- [ ] FHIR: the daily reconciliation reads at most one run's budget (20 pages). The rest of a busy day's 24 hours isn't reconciled.
+- [ ] FHIR: a run that stops at its page limit is still `ok`, so a source with a steady backlog shows as current while it lags. Report the lag (the oldest unread `lastUpdated`) in health.
+- [ ] FHIR: `backfill_days` is fixed at 30 (design §7.1 allows a setting up to 365), and `medicationReference` (a separate Medication resource) isn't read. A request that names its medication only by reference stores no code.
+- [ ] FHIR: one sign-in token per connection per process, cached in memory. Nothing is shared across emr copies.
 
 ## Analysis: before scale
 

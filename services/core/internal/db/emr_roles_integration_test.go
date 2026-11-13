@@ -205,8 +205,9 @@ func TestEMRRoleGrants(t *testing.T) {
 		  AND has_column_privilege('mhai_emr', 'hospitals', a.attname, 'SELECT')`).Scan(&hosp); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(hosp, []string{"id", "status"}) {
-		t.Errorf("mhai_emr reads %v of hospitals, want id and status", hosp)
+	// 00026 adds the time zone (the reconciliation hour, design §5.1).
+	if !slices.Equal(hosp, []string{"id", "status", "time_zone"}) {
+		t.Errorf("mhai_emr reads %v of hospitals, want id, status and time_zone", hosp)
 	}
 	// The scheduler: ids, switches and the interval only.
 	var sched []string

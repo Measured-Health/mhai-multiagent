@@ -664,7 +664,7 @@ func TestConfigEMRConnectorTypes(t *testing.T) {
 	}
 	for env, raw := range map[string]string{
 		"production":  "stub",           // the stub is development-only
-		"development": "fhir_r4",        // not built yet
+		"development": "file_export",    // not built yet
 		"staging":     "hl7v2_feed",     // not a type
 		"test":        "stub,stub",      // twice
 		"dev":         "stub,https://x", // junk

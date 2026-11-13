@@ -68,6 +68,13 @@ func HTTP(conn connector.Config, proxyURL *url.URL, key []byte) *http.Client {
 	return newHTTP(conn, proxyURL, key, nil)
 }
 
+// HTTPWithRoots is HTTP trusting roots instead of the system roots: the
+// synthetic FHIR server's throwaway CA in development (EMR_DEV_CA_FILE,
+// which config refuses anywhere else). nil roots is HTTP.
+func HTTPWithRoots(conn connector.Config, proxyURL *url.URL, key []byte, roots *x509.CertPool) *http.Client {
+	return newHTTP(conn, proxyURL, key, roots)
+}
+
 // newHTTP is HTTP with roots, for tests (nil: the system roots).
 func newHTTP(conn connector.Config, proxyURL *url.URL, key []byte, roots *x509.CertPool) *http.Client {
 	origins := slices.Clone(conn.Origin)

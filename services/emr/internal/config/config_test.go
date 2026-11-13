@@ -121,3 +121,22 @@ func TestCodesAndMapsTogether(t *testing.T) {
 		t.Fatalf("both: %+v %v", s, err)
 	}
 }
+
+// EMR_DEV_CA_FILE (the synthetic FHIR server's throwaway CA, plan Task 25)
+// is accepted in development only: everywhere else TLS uses the system
+// roots and nothing else.
+func TestDevCAOnlyInDevelopment(t *testing.T) {
+	e := devEnv()
+	e["EMR_DEV_CA_FILE"] = " /synth/ca.pem "
+	if s, err := FromEnv(env(e)); err != nil || s.DevCAFile != "/synth/ca.pem" {
+		t.Fatalf("development: %+v %v", s, err)
+	}
+	for _, envName := range []string{"staging", "production"} {
+		p := prodEnv()
+		p["APP_ENV"] = envName
+		p["EMR_DEV_CA_FILE"] = "/synth/ca.pem"
+		if _, err := FromEnv(env(p)); err == nil || !strings.Contains(err.Error(), "EMR_DEV_CA_FILE") || strings.Contains(err.Error(), "/synth") {
+			t.Errorf("%s: %v", envName, err)
+		}
+	}
+}
