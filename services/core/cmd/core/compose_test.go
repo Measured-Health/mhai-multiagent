@@ -760,6 +760,12 @@ type deployService struct {
 	User        string            `yaml:"user"`
 	Command     []string          `yaml:"command"`
 	EnvFile     yaml.Node         `yaml:"env_file"`
+	Build       yaml.Node         `yaml:"build"`
+	Restart     string            `yaml:"restart"`
+	Entrypoint  []string          `yaml:"entrypoint"`
+	Tmpfs       []string          `yaml:"tmpfs"`
+	Memswap     string            `yaml:"memswap_limit"`
+	SecurityOpt []string          `yaml:"security_opt"`
 }
 
 type deployCompose struct {
@@ -928,8 +934,10 @@ func TestEgressProxyOnlyServiceOnEgressNetwork(t *testing.T) {
 // check M5), so it is never set. The key is a read-only file mount.
 func TestPipelineNeverOnEgress(t *testing.T) {
 	p := pilotPipeline(t)
-	if !slices.Equal(p.networkNames(), []string{"backend"}) {
-		t.Errorf("pipeline networks %v, want [backend] only", p.networkNames())
+	// backend, and model: the internal network shared with the llama sidecar only
+	// (profile ownmodel; TestOwnModelSidecarOnlyOnInternalModelNetwork).
+	if !slices.Equal(p.networkNames(), []string{"backend", "model"}) {
+		t.Errorf("pipeline networks %v, want [backend model] only", p.networkNames())
 	}
 	if p.NetworkMode != "" || len(p.Ports) != 0 {
 		t.Errorf("pipeline network_mode %q, ports %v", p.NetworkMode, p.Ports)
@@ -1027,6 +1035,11 @@ func TestPilotPipeline(t *testing.T) {
 	}
 	mounts := map[string]string{}
 	for _, v := range p.Volumes {
+		// The one writable mount: the verified model cache the worker writes (own
+		// answer model plan, PR 3), which the llama sidecar mounts read-only.
+		if v == "modelcache:/models" {
+			continue
+		}
 		parts := strings.Split(v, ":")
 		n := len(parts)
 		if n < 3 || parts[n-1] != "ro" {
@@ -1379,5 +1392,211 @@ func TestEgressEMRToldBackendSubnet(t *testing.T) {
 	}
 	if e := dep["EGRESS_EMR_ENV"]; e != "" && e != "production" && e != "staging" {
 		t.Errorf("deploy/compose.yml: EGRESS_EMR_ENV %q: the demo's proxy must require the internal networks", e)
+	}
+}
+
+// ownModelServices are deploy/compose.yml's llama and model-fetch services (profile
+// ownmodel, own answer model plan PR 3).
+func ownModelServices(t *testing.T) (deployCompose, deployService, deployService) {
+	t.Helper()
+	c := loadDeployCompose(t)
+	llama, ok := c.Services["llama"]
+	if !ok {
+		t.Fatal("deploy/compose.yml has no llama service (profile ownmodel)")
+	}
+	fetch, ok := c.Services["model-fetch"]
+	if !ok {
+		t.Fatal("deploy/compose.yml has no model-fetch service (profile ownmodel)")
+	}
+	return c, llama, fetch
+}
+
+// Both new services are off by default (profile ownmodel only), hardened as every
+// service (read-only root, no capabilities, no new privileges), run as a non-root
+// user, have a memory cap, no published port and no env_file (they must not see the
+// core service's secrets). No other service is in the ownmodel profile.
+func TestOwnModelServicesHardenedAndOffByDefault(t *testing.T) {
+	c, llama, fetch := ownModelServices(t)
+	for name, s := range map[string]deployService{"llama": llama, "model-fetch": fetch} {
+		if !slices.Equal(s.Profiles, []string{"ownmodel"}) {
+			t.Errorf("%s profiles %v, want [ownmodel]: off by default", name, s.Profiles)
+		}
+		if !s.ReadOnly || !slices.Equal(s.CapDrop, []string{"ALL"}) {
+			t.Errorf("%s: read_only %v, cap_drop %v", name, s.ReadOnly, s.CapDrop)
+		}
+		if !slices.Contains(s.SecurityOpt, "no-new-privileges:true") {
+			t.Errorf("%s security_opt %v: no-new-privileges", name, s.SecurityOpt)
+		}
+		if s.MemLimit == "" {
+			t.Errorf("%s has no mem_limit", name)
+		}
+		if s.EnvFile.Kind != 0 {
+			t.Errorf("%s has an env_file", name)
+		}
+		if s.User == "" || strings.HasPrefix(s.User, "0") || strings.HasPrefix(s.User, "root") {
+			t.Errorf("%s user %q: never root", name, s.User)
+		}
+		if len(s.Ports) != 0 || s.NetworkMode != "" {
+			t.Errorf("%s ports %v, network_mode %q", name, s.Ports, s.NetworkMode)
+		}
+		for k, v := range s.Environment {
+			if strings.Contains(v, ":?") {
+				t.Errorf("%s %s = %q: a required variable would break the default deploy's compose config", name, k, v)
+			}
+		}
+	}
+	for name, s := range c.Services {
+		if name != "llama" && name != "model-fetch" && slices.Contains(s.Profiles, "ownmodel") {
+			t.Errorf("%s is in the ownmodel profile", name)
+		}
+	}
+	if fetch.Restart != "no" {
+		t.Errorf("model-fetch restart %q, want \"no\": a one-shot", fetch.Restart)
+	}
+	// The sidecar's memory is a setting with a documented default (plan Decision 8),
+	// and swap is capped with it.
+	if llama.MemLimit != "${PILOT_LOCAL_MODEL_MEM:-4g}" || llama.Memswap != llama.MemLimit {
+		t.Errorf("llama mem_limit %q memswap_limit %q, want ${PILOT_LOCAL_MODEL_MEM:-4g} for both", llama.MemLimit, llama.Memswap)
+	}
+}
+
+// The llama sidecar is on the internal `model` network only (no route out, no DNS
+// beyond it, no backend: it never reaches Postgres or NATS), mounts the verified cache
+// read-only and nothing else, and is built from deploy/llama (llama.cpp at the pinned
+// commit). Only the pipeline shares `model` with it.
+func TestOwnModelSidecarOnlyOnInternalModelNetwork(t *testing.T) {
+	c, llama, _ := ownModelServices(t)
+	if !slices.Equal(llama.networkNames(), []string{"model"}) {
+		t.Errorf("llama networks %v, want [model] only", llama.networkNames())
+	}
+	if n, ok := c.Networks["model"]; !ok || !n.Internal || n.External {
+		t.Errorf("networks.model = %+v (present %v): must be a project network with internal: true", n, ok)
+	}
+	if !slices.Equal(llama.Volumes, []string{"modelcache:/models:ro"}) {
+		t.Errorf("llama volumes %v, want [modelcache:/models:ro] only", llama.Volumes)
+	}
+	if !slices.Equal(llama.Tmpfs, []string{"/tmp"}) {
+		t.Errorf("llama tmpfs %v, want [/tmp]", llama.Tmpfs)
+	}
+	ctx := ""
+	switch llama.Build.Kind {
+	case yaml.ScalarNode:
+		ctx = llama.Build.Value
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(llama.Build.Content); i += 2 {
+			if llama.Build.Content[i].Value == "context" {
+				ctx = llama.Build.Content[i+1].Value
+			}
+		}
+	}
+	if ctx != "./llama" {
+		t.Errorf("llama build context %q, want ./llama (deploy/llama/Dockerfile)", ctx)
+	}
+	for k := range llama.Environment {
+		if l := strings.ToLower(k); strings.Contains(l, "proxy") || strings.HasPrefix(k, "MODEL_STORE_") || strings.HasPrefix(k, "HF_") {
+			t.Errorf("llama sets %s: the sidecar has no route out and no store access", k)
+		}
+	}
+	for name, s := range c.Services {
+		if name != "llama" && name != "pipeline" && slices.Contains(s.networkNames(), "model") {
+			t.Errorf("%s is on the model network: only the pipeline and llama", name)
+		}
+	}
+	for _, v := range llama.Volumes {
+		if strings.HasPrefix(v, "modelmirror") || strings.Contains(v, "secrets") || strings.HasPrefix(v, "trustedkeys") {
+			t.Errorf("llama mounts %q", v)
+		}
+	}
+}
+
+// Security (own answer model plan, Review Focus 4 and "Patient data never leaves the
+// host"): the pipeline sends questions to the sidecar only over a network with no route
+// out. Every network the two share is internal, the sidecar is on no other network, and
+// the pipeline names the sidecar by its service name on that network.
+func TestPipelineReachesSidecarOnlyOverInternalNetwork(t *testing.T) {
+	c, llama, _ := ownModelServices(t)
+	p := pilotPipeline(t)
+	shared := 0
+	for _, n := range llama.networkNames() {
+		if !c.Networks[n].Internal {
+			t.Errorf("llama is on %s, which is not internal", n)
+		}
+		if slices.Contains(p.networkNames(), n) {
+			shared++
+		}
+	}
+	if shared == 0 {
+		t.Error("the pipeline shares no network with llama")
+	}
+	if got := p.Environment["INTELLIGENCE_LOCAL_LLM_URL"]; got != "http://llama:8080" {
+		t.Errorf("pipeline INTELLIGENCE_LOCAL_LLM_URL = %q, want http://llama:8080", got)
+	}
+	// The pinned roles are off by default (none), and the pipeline verifies offline from
+	// the mirror: it is never given the store's endpoint or a store credential.
+	if got := p.Environment["INTELLIGENCE_MODEL_ROLES"]; got != "${PILOT_MODEL_ROLES:-}" {
+		t.Errorf("pipeline INTELLIGENCE_MODEL_ROLES = %q, want ${PILOT_MODEL_ROLES:-}", got)
+	}
+	if got := p.Environment["INTELLIGENCE_MODEL_MIRROR"]; got != "/mirror" {
+		t.Errorf("pipeline INTELLIGENCE_MODEL_MIRROR = %q, want /mirror", got)
+	}
+	for k := range p.Environment {
+		if strings.HasPrefix(k, "MODEL_STORE_") {
+			t.Errorf("pipeline sets %s: only model-fetch talks to the store", k)
+		}
+	}
+	if !slices.Contains(p.Volumes, "modelcache:/models") || !slices.Contains(p.Volumes, "modelmirror:/mirror:ro") {
+		t.Errorf("pipeline volumes %v: want modelcache:/models and modelmirror:/mirror:ro", p.Volumes)
+	}
+}
+
+// model-fetch is the only container with a route to the model store: alone on its own
+// network (model-store), never on backend, model or egress, never mounting the cache the
+// sidecar serves from, the database or any secret but the store reader's two files.
+func TestModelFetchIsTheOnlyRouteToTheStore(t *testing.T) {
+	c, _, fetch := ownModelServices(t)
+	if !slices.Equal(fetch.networkNames(), []string{"model-store"}) {
+		t.Errorf("model-fetch networks %v, want [model-store] only", fetch.networkNames())
+	}
+	if n, ok := c.Networks["model-store"]; !ok || n.Internal || n.External {
+		t.Errorf("networks.model-store = %+v (present %v): model-fetch's own way out", n, ok)
+	}
+	for name, s := range c.Services {
+		if name != "model-fetch" && slices.Contains(s.networkNames(), "model-store") {
+			t.Errorf("%s is on the model-store network", name)
+		}
+	}
+	mounts := map[string]string{}
+	for _, v := range fetch.Volumes {
+		parts := strings.Split(v, ":")
+		n := len(parts)
+		if n < 2 {
+			t.Errorf("model-fetch mount %q", v)
+			continue
+		}
+		target := parts[1]
+		if n >= 3 && parts[n-1] != "ro" {
+			t.Errorf("model-fetch mount %q", v)
+		}
+		mounts[target] = v
+		if strings.HasPrefix(v, "modelcache") || strings.HasPrefix(v, "corekeys") || strings.HasPrefix(v, "pgdata") || strings.HasPrefix(v, "trustedkeys") {
+			t.Errorf("model-fetch mounts %q", v)
+		}
+		if strings.Contains(v, "/run/secrets/") && !strings.Contains(v, "model-store-reader-") {
+			t.Errorf("model-fetch mounts a secret other than the reader's: %q", v)
+		}
+	}
+	if mounts["/mirror"] != "modelmirror:/mirror" {
+		t.Errorf("model-fetch mirror mount %q, want modelmirror:/mirror", mounts["/mirror"])
+	}
+	for k, v := range fetch.Environment {
+		if (k == "MODEL_STORE_READER_ACCESS_KEY" || k == "MODEL_STORE_READER_SECRET_KEY") || strings.Contains(k, "WRITER") {
+			t.Errorf("model-fetch sets %s: the reader's credential comes from files only", k)
+		}
+		if strings.Contains(k, "DB") || strings.HasPrefix(k, "NATS") {
+			t.Errorf("model-fetch sets %s = %q", k, v)
+		}
+	}
+	if !slices.Equal(fetch.Command, []string{"fetch-pinned", "--lock", "/lock/models.lock", "--to", "/mirror"}) {
+		t.Errorf("model-fetch command %v", fetch.Command)
 	}
 }
