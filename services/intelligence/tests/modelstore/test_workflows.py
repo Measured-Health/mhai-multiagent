@@ -394,6 +394,6 @@ def test_production_promotion_refuses_the_rehearsal_gate() -> None:
     mode = [s for s in _steps(job) if s.get("name") == "Mode"]
     assert len(mode) == 1
     _, production = re.split(r"\n\s*else\n", str(mode[0]["run"]))
-    refuse = 'case "$GATE_INPUT" in phase1 | phase3) ;; *) echo "::error::'
+    refuse = 'case "$GATE_INPUT" in phase1 | phase3 | answer) ;; *) echo "::error::'
     assert refuse in production
     assert production.index(refuse) < production.index('echo "GATE=$GATE_INPUT"')

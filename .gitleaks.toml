@@ -10,3 +10,15 @@ useDefault = true
 description = "Synthetic request-token test vectors"
 targetRules = ["jwt"]
 paths = ['''(^|/)testdata/request-tokens/[^/]+\.json$''']
+
+# models/answer-gate-models.lock: SHA-256s of public Hugging Face model files
+# (product owner approval, 13 Nov 2026). Entries named like tokenizer.json sit
+# next to a 64-hex hash, which the generic rule reads as a token. Waived only
+# for the generic rule, only in that file, and only for values that are exactly
+# 64 lowercase hex characters; anything else there still fails the scan.
+[[allowlists]]
+description = "Public model file SHA-256s in the answer gate lock"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^models/answer-gate-models\.lock$''']
+regexes = ['''^[0-9a-f]{64}$''']

@@ -27,7 +27,6 @@ from intelligence.modelstore import (
     cli,
     files,
     fixtures,
-    lock,
     manifest,
     promote,
     signing,
@@ -593,7 +592,7 @@ def test_dry_run_outside_eval_env_uses_dev_split(
     rep = report.parse_report(summary.documents["evaluation.json"])
     assert rep["split"] == {"name": "dev", "label": report.DEV_LABEL}
     assert "development split" in summary.documents["model_card.md"].decode()
-    assert set(summary.verdicts) == set(report.GATES)
+    assert set(summary.verdicts) == set(report.DOCUMENT_GATES)
     out = summary.to_obj()
     assert out["gates_failed"] == sorted(g for g, v in summary.verdicts.items() if v != "pass")
 
@@ -707,7 +706,7 @@ def test_promote_writes_in_order_and_the_manifest_last(
     assert m.promotion.actor == WORKFLOW.actor
     # a development rehearsal on the dev split says so, in the manifest and the summary
     assert m.evaluation.split == "dev" and summary.split == "dev"
-    assert set(m.evaluation.gates) == set(report.GATES)
+    assert set(m.evaluation.gates) == set(report.DOCUMENT_GATES)
     sig = mem.get(store.manifest_sig_key(NAME, version), max_bytes=4096)
     signer = signing.Verifier().verify("manifest", raw, sig, keys.policy)
     assert signer.key_id == keys.signer.key_id
@@ -1430,11 +1429,11 @@ def test_production_promotion_refuses_rehearsal_gate_and_fixture_names(
     assert mem.calls == []
     # With no --gate, a production promotion is measured on the production gates only.
     assert promote.promotion_gates(replace(good, gates=())) == ("phase1", "phase3")
-    assert promote.promotion_gates(replace(good, gates=(), dry_run=True)) == report.GATES
+    assert promote.promotion_gates(replace(good, gates=(), dry_run=True)) == report.DOCUMENT_GATES
     # A development rehearsal may do both.
     monkeypatch.setenv(signing.ENV_VAR, "development")
     promote.check_inputs(bad, ctx)
-    assert promote.promotion_gates(replace(good, gates=())) == report.GATES
+    assert promote.promotion_gates(replace(good, gates=())) == report.DOCUMENT_GATES
 
 
 @pytest.mark.parametrize("app_env", [None, "production"])
@@ -1525,33 +1524,3 @@ def test_cca_gguf_template_mismatch_refused_at_promotion(
     with pytest.raises(Refused) as err:
         promote.check_training(run, NAME, registry, licences)
     assert (err.value.reason, err.value.detail_code) == ("gguf_template_mismatch", "differs")
-
-
-def test_cca_run_with_a_gguf_cannot_be_promoted_or_pinned(
-    tmp_path: Path,
-    registry: training.Registry,
-    licences: training.Licences,
-    dev_set: minisets.MiniSet,
-) -> None:
-    """Until PR 2's clinical_answer suite scores the GGUF itself through llama.cpp, a
-    cca run stops at step 5 (no suite), so nothing is signed, and pin refuses the role."""
-    root = tmp_path / "source"
-    _with_gguf(fixtures.make_run(root / "models" / NAME / RUN, "good", 3, role="cca"))
-    ctx = _ctx(root, registry, licences, dev_set)
-    with pytest.raises(Refused) as err:
-        promote.promote(_request(dry_run=True), ctx)
-    assert err.value.reason == "no_suite"
-    assert "cca" not in promote.SUITES and "cca" not in lock.ROLES
-    with pytest.raises(Refused) as err:
-        lock.pin(
-            "cca",
-            NAME,
-            "1.0.0",
-            "phase1",
-            source=None,  # type: ignore[arg-type]
-            policy=None,  # type: ignore[arg-type]
-            cache_dir=tmp_path / "cache",
-            lock_path=tmp_path / "models.lock",
-            testsets_lock={},
-        )
-    assert (err.value.reason, err.value.detail_code) == ("lock_invalid", "role")
