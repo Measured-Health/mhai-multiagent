@@ -302,6 +302,33 @@ def test_mirror_with_a_changed_file_is_refused(tmp_path: Path, keys: Keys) -> No
     assert not (settings.cache_dir / loader.ACTIVE_FILE).exists()
 
 
+def test_fetch_replaces_a_changed_copy_and_refuses_a_changed_download(
+    tmp_path: Path, keys: Keys
+) -> None:
+    mem = MemoryStore()
+    pub = publish_cca(mem, tmp_path, keys)
+    settings = _settings(tmp_path, pub)
+    root = tmp_path / "mirror"
+    root.mkdir(mode=0o700)
+    lk = lock.read(tmp_path / "models.lock")
+    mirror.fetch_pinned(mem, lk, root)
+    gguf = next(f for f in pub.m.files if f.path.endswith(".gguf"))
+    key = store.run_file_key(NAME, VERSION, RUN, gguf.path)
+    p = root / f"{key}@{gguf.store_version_id}"
+    p.chmod(0o600)
+    p.write_bytes(b"changed on the host")
+    assert mirror.fetch_pinned(mem, lk, root)["cca"] == 1  # fetched again
+    _load(settings, mirror.DirReadStore(root), keys, FakeSidecar(settings.cache_dir))
+    # The store's copy changed under the same version id: refused, nothing written.
+    p.unlink()
+    [(vid, body)] = mem.objects[key]
+    mem.objects[key] = [(vid, body[:-1] + bytes([body[-1] ^ 1]))]
+    with pytest.raises(Refused) as e:
+        mirror.fetch_pinned(mem, lk, root)
+    assert e.value.reason == "hash_mismatch" and not p.exists()
+    assert not [x for x in p.parent.iterdir() if x.name.endswith(".partial")]
+
+
 def test_dir_read_store_refuses_links_and_bad_names(tmp_path: Path) -> None:
     root = tmp_path / "mirror"
     root.mkdir()

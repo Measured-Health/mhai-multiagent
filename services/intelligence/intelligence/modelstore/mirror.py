@@ -166,14 +166,23 @@ def _write(
     data: bytes | None,
     src: verify.ReadStore,
     max_bytes: int,
+    sha256: str | None = None,
 ) -> bool:
-    """``key@version_id`` under ``root`` unless already there; True when copied."""
+    """``key@version_id`` under ``root``; True when copied. A copy already there is kept
+    only when it is a regular file with the SHA-256 the manifest records (``sha256``;
+    a signature, which has none, is kept as it is: the verifier tries every version).
+    Anything else is replaced. A download whose SHA-256 is not ``sha256`` is refused
+    (``hash_mismatch``) and nothing is written."""
     store._check_key(key)
     vid = _vid(version_id)
     target_dir = root.joinpath(*key.split("/")[:-1])
     target = target_dir / f"{key.rsplit('/', 1)[-1]}{SEP}{vid}"
-    if target.is_file() and not target.is_symlink():
-        return False
+    if target.is_symlink():
+        target.unlink()
+    elif target.is_file():
+        if sha256 is None or _sha256_file(target) == sha256:
+            return False
+        target.unlink()  # a changed copy: fetched again
     target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = target_dir / f".{secrets.token_hex(8)}.partial"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _CLOEXEC
@@ -182,8 +191,11 @@ def _write(
         with os.fdopen(fd, "wb") as out:
             if data is not None:
                 out.write(data)
+                got = hashlib.sha256(data).hexdigest()
             else:
-                src.download(key, version_id=vid, out=out, max_bytes=max_bytes)
+                _, got = src.download(key, version_id=vid, out=out, max_bytes=max_bytes)
+            if sha256 is not None and got != sha256:
+                raise Refused("hash_mismatch", detail_code="fetched")
             out.flush()
             os.fsync(out.fileno())
         os.chmod(tmp, 0o400)
@@ -194,22 +206,32 @@ def _write(
     return True
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb", opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW)) as fh:
+        while block := fh.read(_BLOCK):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def fetch_one(src: verify.ReadStore, pin: lock.Pin, root: Path) -> int:
     """Copy what verifying ``pin`` reads; returns the number of objects copied."""
     name, version = names.check_name(pin.name), names.check_version(pin.version)
     copied = 0
     vid, raw = verify.find_manifest_version(src, name, version, pin.manifest_sha256)
-    copied += _write(root, store.manifest_key(name, version), vid, raw, src, len(raw))
+    copied += _write(
+        root, store.manifest_key(name, version), vid, raw, src, len(raw), pin.manifest_sha256
+    )
     sig_key = store.manifest_sig_key(name, version)
     for svid in src.versions(sig_key)[: verify.MAX_VERSIONS]:
         copied += _write(root, sig_key, svid, None, src, signing.MAX_SIGNATURE_DOC_BYTES)
     m = manifest.parse(raw)
     for f in m.files:
         key = store.run_file_key(name, version, m.run.id, f.path)
-        copied += _write(root, key, f.store_version_id, None, src, f.size)
+        copied += _write(root, key, f.store_version_id, None, src, f.size, f.sha256)
     for d, rec in m.documents.items():
         key = store.run_doc_key(name, version, m.run.id, d)
-        copied += _write(root, key, rec.store_version_id, None, src, MAX_DOCUMENT_BYTES)
+        copied += _write(root, key, rec.store_version_id, None, src, MAX_DOCUMENT_BYTES, rec.sha256)
     return copied
 
 
