@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,12 @@ var (
 	ErrPending = errors.New("analysis: period not frozen yet")
 	// ErrFailed: the database refused or timed out (503 unavailable).
 	ErrFailed = errors.New("analysis: body failed")
+	// ErrOverBudget: the contexts a request would newly store would take
+	// the person past their cold contexts for a period (429).
+	ErrOverBudget = errors.New("analysis: over the cold budget")
+	// ErrTooMany: a request would newly store more contexts than its
+	// ceiling (429).
+	ErrTooMany = errors.New("analysis: too many new contexts")
 )
 
 // AlertInconsistent is raised when the engine sees inconsistent raw values
@@ -335,6 +342,106 @@ func getTx(ctx context.Context, tx pgx.Tx, p Period, f disclose.Filters) (Stored
 	return s, true, nil
 }
 
+// Reserve charges the person every context Body(p, f) would newly store
+// (the context, its child periods' and its filter parents', recursively:
+// what ensure computes) against their cold budget, before anything is
+// computed (security review): all or none, in one transaction, each
+// period's counter row locked then checked (mhai_analysis_reserve_cold,
+// in period order so two requests can't deadlock). A context already
+// stored costs nothing. More than ceiling new contexts is ErrTooMany; past
+// cap in any period, ErrOverBudget. It returns how many it reserved.
+func (e *Engine) Reserve(ctx context.Context, p Period, f disclose.Filters, cap, ceiling int) (int, error) {
+	if err := disclose.CheckFilters(f); err != nil {
+		return 0, err
+	}
+	refs, err := e.missing(ctx, p, f, ceiling)
+	if err != nil || len(refs) == 0 {
+		return 0, failed(err)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if a, b := refs[i].p.ID.String(), refs[j].p.ID.String(); a != b {
+			return a < b
+		}
+		return string(Hash(refs[i].f)) < string(Hash(refs[j].f))
+	})
+	pr, _ := authz.FromContext(ctx)
+	err = authz.Tx(ctx, e.Pool, func(tx pgx.Tx) error {
+		for _, r := range refs {
+			var ok bool
+			if err := tx.QueryRow(ctx, `SELECT mhai_analysis_reserve_cold($1, $2, $3, $4)`, pr.UserID, r.p.ID, Hash(r.f), cap).Scan(&ok); err != nil {
+				return err
+			}
+			if !ok {
+				return ErrOverBudget // the transaction rolls back: nothing reserved
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, failed(err)
+	}
+	return len(refs), nil
+}
+
+type ctxRef struct {
+	p Period
+	f disclose.Filters
+}
+
+// missing lists the contexts ensure(p, f) would newly store: a stored
+// context's own family is stored (parents first), so the walk stops there.
+// Past ceiling it is ErrTooMany.
+func (e *Engine) missing(ctx context.Context, p Period, f disclose.Filters, ceiling int) ([]ctxRef, error) {
+	seen := map[string]bool{}
+	var out []ctxRef
+	var walk func(p Period, f disclose.Filters) error
+	walk = func(p Period, f disclose.Filters) error {
+		key := p.ID.String() + string(Hash(f))
+		if seen[key] {
+			return nil
+		}
+		seen[key] = true
+		ok, err := e.stored(ctx, p, f)
+		if err != nil || ok {
+			return err
+		}
+		out = append(out, ctxRef{p, f})
+		if len(out) > ceiling {
+			return ErrTooMany
+		}
+		kids, err := e.children(ctx, p)
+		if err != nil {
+			return err
+		}
+		for _, k := range kids {
+			if err := walk(k, f); err != nil {
+				return err
+			}
+		}
+		for d, v := range f {
+			if v != "" {
+				if err := walk(p, f.Without(d)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk(p, f); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// stored reports whether (p, f) has a stored body, without reading it.
+func (e *Engine) stored(ctx context.Context, p Period, f disclose.Filters) (bool, error) {
+	var ok bool
+	err := authz.Tx(ctx, e.Pool, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM mhai_analysis_snapshot_get($1, $2))`, p.ID, Hash(f)).Scan(&ok)
+	})
+	return ok, failed(err)
+}
+
 // ensure stores (p, f), its child periods' bodies and its filter parents
 // first. depth guards against a runaway recursion (a period has at most
 // two levels below it, a filter set two filters).
@@ -512,7 +619,8 @@ func failed(err error) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, ErrNotReady), errors.Is(err, ErrCap), errors.Is(err, ErrNoPeriod), errors.Is(err, ErrPending),
-		errors.Is(err, ErrFailed), errors.Is(err, disclose.ErrTooManyFilters), errors.Is(err, disclose.ErrInvalid):
+		errors.Is(err, ErrFailed), errors.Is(err, disclose.ErrTooManyFilters), errors.Is(err, disclose.ErrInvalid),
+		errors.Is(err, ErrOverBudget), errors.Is(err, ErrTooMany):
 		return err
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return ErrNotReady

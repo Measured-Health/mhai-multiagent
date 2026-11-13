@@ -17,6 +17,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
@@ -180,7 +181,16 @@ func TestPeriodsAndRanges(t *testing.T) {
 	}
 	// from/to exactly a frozen month answers the same bytes as the period
 	// (apart from nothing: updated_at is the stored body's).
+	// The history fills in as its periods are stored (at most
+	// NewContextsMax new contexts a request): read until it is stable.
 	c1, b1 := e.get(t, "/analysis/prevalence?period=month&start=2026-10-01")
+	for i := 0; i < 5; i++ {
+		c, b := e.get(t, "/analysis/prevalence?period=month&start=2026-10-01")
+		if c == c1 && bytes.Equal(b, b1) {
+			break
+		}
+		c1, b1 = c, b
+	}
 	c2, b2 := e.get(t, "/analysis/prevalence?from=2026-10-01&to=2026-10-31")
 	if c1 != 200 || c2 != 200 || !bytes.Equal(b1, b2) {
 		t.Errorf("period %d and from/to %d differ:\n%s\n%s", c1, c2, b1, b2)
@@ -502,4 +512,102 @@ func TestColdContextCapPerPersonPeriod(t *testing.T) {
 		t.Errorf("used %d, want %d", used, ColdContexts)
 	}
 	_ = rows
+}
+
+// charged is how many cold contexts the env's person has reserved, over
+// every period.
+func (e *env) charged(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := e.super.QueryRow(context.Background(), `SELECT count(*) FROM analysis_cold_contexts WHERE hospital_id = $1 AND user_id = $2`,
+		e.h, e.user).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func (e *env) stored(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := e.super.QueryRow(context.Background(), `SELECT count(*) FROM analysis_snapshots WHERE hospital_id = $1 AND body ? 'record'`,
+		e.h).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// Security review: one request's whole family is charged. Every context
+// the engine would newly store (the request, its child periods, its
+// filter parents) is reserved against the person's cold budget before
+// anything is computed, and a request needing more than NewContextsMax is
+// refused: a quarter with two filters (16 periods × 4 filter sets = 64
+// contexts) is 429 and stores nothing; a month with two filters (5 × 4 =
+// 20) is charged its family and its history's, each once.
+func TestOneRequestChargesItsWholeFamily(t *testing.T) {
+	super, app := pools(t)
+	e := newEnv(t, super, app, true)
+	if 64 <= NewContextsMax {
+		t.Fatalf("NewContextsMax %d: the quarter proves nothing", NewContextsMax)
+	}
+	c, b := e.get(t, "/analysis/prevalence?period=quarter&start=2026-07-01&sex=female&age_band=40-64")
+	if c != 429 || code(b) != "rate_limited" {
+		t.Errorf("a quarter with two filters: %d %s", c, b)
+	}
+	if n := e.stored(t); n != 0 {
+		t.Errorf("%d bodies stored for a refused request", n)
+	}
+	if n := e.charged(t); n != 0 {
+		t.Errorf("%d contexts charged for a refused request", n)
+	}
+	c, b = e.get(t, "/analysis/prevalence?period=month&start=2026-08-01&sex=female&age_band=40-64")
+	if c != 200 {
+		t.Fatalf("a month with two filters: %d %s", c, b)
+	}
+	// August's family, plus each history month's (July and earlier):
+	// every stored body is charged to the person, none twice.
+	if s, ch := e.stored(t), e.charged(t); s != ch || ch < 20 {
+		t.Errorf("stored %d, charged %d: every new context must be charged once", s, ch)
+	}
+}
+
+// Contexts already stored are never charged again: a second request
+// sharing the family's parents is charged only its new contexts, and a
+// repeated request nothing.
+func TestStoredParentsNotChargedTwice(t *testing.T) {
+	super, app := pools(t)
+	e := newEnv(t, super, app, true)
+	e.session = uuid.NewString()
+	if c, b := e.get(t, "/analysis/prevalence?period=week&start=2026-10-01&sex=female"); c != 200 {
+		t.Fatalf("%d %s", c, b)
+	}
+	first := e.charged(t)
+	if first != e.stored(t) {
+		t.Fatalf("charged %d, stored %d", first, e.stored(t))
+	}
+	if c, b := e.get(t, "/analysis/prevalence?period=week&start=2026-10-01&sex=female&age_band=40-64"); c != 200 {
+		t.Fatalf("%d %s", c, b)
+	}
+	// New for October's first week and each history week: {age} and
+	// {sex, age}; {} and {sex} were stored by the first request.
+	if got, stored := e.charged(t), e.stored(t); got != stored {
+		t.Errorf("charged %d for %d stored bodies: a stored parent was charged again, or a new one not at all", got, stored)
+	}
+	before := e.charged(t)
+	if c, _ := e.get(t, "/analysis/affected?period=week&start=2026-10-01&sex=female&age_band=40-64"); c != 200 {
+		t.Fatal(c)
+	}
+	if after := e.charged(t); after != before {
+		t.Errorf("a stored context was charged again: %d → %d", before, after)
+	}
+}
+
+// reserveCold reserves one context directly (the race test) the context hash of period for user
+// (mhai_analysis_reserve_cold: the counter row locked, then checked).
+// false is past the cap.
+func reserveCold(ctx context.Context, pool *pgxpool.Pool, user, period uuid.UUID, hash []byte) (bool, error) {
+	var ok bool
+	err := authz.Tx(ctx, pool, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT mhai_analysis_reserve_cold($1, $2, $3, $4)`, user, period, hash, ColdContexts).Scan(&ok)
+	})
+	return ok, err
 }

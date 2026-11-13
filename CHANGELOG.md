@@ -88,7 +88,10 @@ All notable changes to this project are documented here. The format follows
   must be in the period's
   stored filter lists (else 422 before anything is computed), and a person
   may have at most 100 distinct contexts computed cold per period
-  (`analysis_cold_budget`, reserved before the engine runs; else 429).
+  (`analysis_cold_budget`): every context a request would newly store, its
+  child periods' and filter parents' included, is reserved before the
+  engine runs, and at most 32 per request (else 429; a history point past
+  them is sent hidden whole).
 - EMR integration, PR 5 (canonical model, normaliser and patient index;
   off by default). Migration **00023** (the plan's 00022; 00021 and 00022
   were taken by Analysis and Plan 7c-3): `emr.raw_records` (a document

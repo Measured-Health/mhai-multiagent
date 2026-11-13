@@ -3,33 +3,20 @@ package routes
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"errors"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 )
 
 // The security review's two controls on what a request may make the
 // engine compute: every opaque filter (condition, location, specialty,
 // source: any dimension that isn't a fixed code list) must be in the
-// period's stored filter lists (422 before anything is computed or stored), and a
-// person may have at most ColdContexts distinct contexts computed cold per
-// period (reserved before the engine runs; 429 past it).
-
-// reserveCold reserves the context hash of period for user
-// (mhai_analysis_reserve_cold: the counter row locked, then checked).
-// false is past the cap.
-func reserveCold(ctx context.Context, pool *pgxpool.Pool, user, period uuid.UUID, hash []byte) (bool, error) {
-	var ok bool
-	err := authz.Tx(ctx, pool, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT mhai_analysis_reserve_cold($1, $2, $3, $4)`, user, period, hash, ColdContexts).Scan(&ok)
-	})
-	return ok, err
-}
+// period's stored filter lists (422 before anything is computed or
+// stored), and every context a request would newly store (its family
+// included) is reserved against the person's ColdContexts per period, and
+// at most NewContextsMax per request, before the engine runs (429 past
+// either).
 
 // codeLists are the dimensions whose values are a fixed code list the
 // contract closes (disclose.CheckFilters refuses anything else). Every
@@ -94,29 +81,27 @@ type coldError struct{}
 
 func (coldError) Error() string { return "routes: cold contexts" }
 
-// admit checks f against p's lists and reserves its context for the
-// person: errListed, coldError, or an engine error.
-func (h *handlers) admit(ctx context.Context, p analysis.Period, f disclose.Filters) error {
+// admit checks f against p's lists and reserves, against the person's
+// cold budget, every context the engine would newly store for it (at most
+// left): errListed, coldError, or an engine error. It returns how many it
+// reserved.
+func (h *handlers) admit(ctx context.Context, p analysis.Period, f disclose.Filters, left int) (int, error) {
 	if opaque(f) {
 		lists, _, err := h.d.Engine.Filters(ctx, p)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		ok, err := listed(lists, f)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if !ok {
-			return errListed
+			return 0, errListed
 		}
 	}
-	pr, _ := authz.FromContext(ctx)
-	ok, err := reserveCold(ctx, h.d.Pool, pr.UserID, p.ID, analysis.Hash(f))
-	if err != nil {
-		return analysis.ErrFailed
+	n, err := h.d.Engine.Reserve(ctx, p, f, ColdContexts, left)
+	if errors.Is(err, analysis.ErrOverBudget) || errors.Is(err, analysis.ErrTooMany) {
+		return 0, coldError{}
 	}
-	if !ok {
-		return coldError{}
-	}
-	return nil
+	return n, err
 }

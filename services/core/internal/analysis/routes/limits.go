@@ -60,6 +60,13 @@ func (l *limiter) allow(key string) bool {
 	return true
 }
 
+// NewContextsMax is the most contexts one request may make the engine
+// newly compute and store (its own family: child periods and filter
+// parents; then its history points'), whatever the person's cold budget
+// (security review). A request whose own family is larger is 429; a
+// history point past it is sent hidden whole, computing nothing.
+const NewContextsMax = 32
+
 // ColdContexts is the most distinct contexts one person may have computed
 // cold in one period (security review): past it, 429 rate_limited.
 const ColdContexts = 100

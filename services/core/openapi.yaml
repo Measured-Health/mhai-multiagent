@@ -802,8 +802,9 @@ paths:
         ended but isn't frozen is 503 not_ready, as is a body that couldn't be computed within the
         cold budget (retry: it is being computed). At most two filters (422 too_many_filters); a
         location and a setting together are refused. A condition, location or source that isn't in the
-        period's filter lists is 422 validation_failed (so is a specialty), and a person may have at most 100 distinct
-        contexts computed cold per period (429 rate_limited past it). Every number is guarded under the small-group
+        period's filter lists is 422 validation_failed (so is a specialty). A person may have at most 100 distinct
+        contexts computed cold per period, counting the child periods and filter parents a request needs, and
+        one request at most 32 (429 rate_limited past either; a history point past them is hidden whole). Every number is guarded under the small-group
         rule and served from the stored body unchanged; `history` lists up to 7 earlier periods of
         the level, each copied from that period's own stored body. Reads are recorded once per
         session, filter set and period. Added in 1.17.0.

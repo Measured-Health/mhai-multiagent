@@ -53,7 +53,8 @@ func (h *handlers) views(w http.ResponseWriter, r *http.Request) {
 	}
 	// Nothing is computed for an id the period doesn't list, or past the
 	// person's cold contexts for the period.
-	if err := h.admit(ctx, p, f); err != nil {
+	used, err := h.admit(ctx, p, f, NewContextsMax)
+	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
@@ -62,7 +63,7 @@ func (h *handlers) views(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, err)
 		return
 	}
-	hist, err := h.history(ctx, per, f)
+	hist, err := h.history(ctx, per, f, NewContextsMax-used)
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -85,8 +86,9 @@ func (h *handlers) views(w http.ResponseWriter, r *http.Request) {
 
 // history is the points of the earlier periods of per's level that are
 // answerable, newest last, at most disclose.HistoryPoints; each from its
-// stored body (computed first if it isn't stored, within the budget).
-func (h *handlers) history(ctx context.Context, per calendar.Period, f disclose.Filters) ([]disclose.HistoryPoint, error) {
+// stored body (computed first if it isn't stored, within the budget and
+// the request's left new contexts).
+func (h *handlers) history(ctx context.Context, per calendar.Period, f disclose.Filters, left int) ([]disclose.HistoryPoint, error) {
 	var bodies []disclose.Body
 	prev := per
 	for i := 0; i < disclose.HistoryPoints; i++ {
@@ -101,12 +103,17 @@ func (h *handlers) history(ctx context.Context, per calendar.Period, f disclose.
 		// An id the earlier period doesn't list (a condition under 5
 		// patients there) is a group too small to show: the point is
 		// hidden whole, and nothing is computed for it.
-		if err := h.admit(ctx, p, f); errors.Is(err, errListed) {
+		// A point past the request's new contexts, or the person's cold
+		// budget, is sent hidden whole and computes nothing (it is shown
+		// once its period's body is stored).
+		n, err := h.admit(ctx, p, f, left)
+		if errors.Is(err, errListed) || errors.As(err, new(coldError)) {
 			bodies = append(bodies, disclose.HiddenWhole(disclose.Context{Period: prev, Filters: f}))
 			continue
 		} else if err != nil {
 			return nil, err
 		}
+		left -= n
 		s, err := h.d.Engine.Body(ctx, p, f)
 		if err != nil {
 			return nil, err
