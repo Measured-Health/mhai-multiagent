@@ -1,6 +1,6 @@
 # Own answer model replaces cloud: implementation plan
 
-**Status:** PR 1 merged (#143), PR 2 merged (#144; see "PR 2 as built"). PR 3 (pinned local generator and sidecar) built; see "PR 3 as built". Lean by decision (product owner, 11 Nov 2026, "get a hospital testing fast"): essential safety only (verify what you load, fail closed, patient data never leaves the host). Heavier controls are listed under "Before scale" and come back at the trigger named. Clinical sign-off is deferred for the pilot (README, "Pilot mode"); nothing in this plan stands in for it.
+**Status:** PR 1 merged (#143), PR 2 merged (#144; see "PR 2 as built"). PR 3 (pinned local generator and sidecar) built; see "PR 3 as built". PR 4 (the switch runbook) built; see "PR 4 as built". Lean by decision (product owner, 11 Nov 2026, "get a hospital testing fast"): essential safety only (verify what you load, fail closed, patient data never leaves the host). Heavier controls are listed under "Before scale" and come back at the trigger named. Clinical sign-off is deferred for the pilot (README, "Pilot mode"); nothing in this plan stands in for it.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
@@ -252,6 +252,14 @@ The cloud plan's and the promotion design's constraints hold: no PHI or secrets 
 - [ ] TODO.md: the before-scale list below, and "clinical sign-off of the `clinical_answer` set and pass mark" under the deferred sign-offs.
 
 **Acceptance:** a person following the README on the demo host switches the pilot hospital to the pinned model and back without editing a file other than `.env`.
+
+#### PR 4 as built (departures from Tasks 12-13)
+
+- **`mhai-models eval-served`** (`doceval/answers/served.py`) is the on-host evaluation: the expected alias is the `cca` pin in `models.lock` (never what the sidecar says), the client is the worker's own (`local_generator`'s `PinnedLlamaGenerator` with its per-item alias check, `OrchestratorModelClient` over `local_parts`), the sidecar must serve the alias before any question (`no_runtime` otherwise), and the verdict is the committed `answer` thresholds plus a median answer time at most `--max-seconds` (90). It prints aggregates only and exits 0 on pass, 1 on fail. It runs as a one-off `docker compose run` of the `pipeline` service (same image, settings and networks), so nothing new joins the `model` network.
+- **The locked split on the host:** `mhai-models testset-fetch` runs in `model-fetch` (the only container with a route to the store) into a throwaway volume; `eval-served` re-checks it against `models/testsets.lock`. With no locked split yet, it scores the dev split (rebuilt from the public seed, byte for byte) and the script says so in capitals; a dev split is refused once a locked one exists.
+- **Not compared with the pinned `evaluation.json`**: the verdict is against the same committed thresholds, which is the comparison that matters; the summary goes to `local-eval/` on the host and the tracker by hand.
+- **`enable-ownmodel.sh` instead of extending `enable-pilot.sh`**: the reader's credentials on stdin (two lines, 0400 files), the lock files copied from the checkout, the `.env` settings, the `llama` build, `model-fetch`, the pipeline restarted when `models.lock` changed and `llama` once when it serves an older alias. `enable-pilot.sh` only keeps `ownmodel` in `COMPOSE_PROFILES` when it is on. The memory check is shared (`ownmodel-lib.sh`): the host's total must hold the model's cap, the pipeline's 1600 MiB and 2048 MiB for the rest of the host, so the 3.7 GiB demo host is refused with "resize".
+- **Tests:** `tests/doceval/test_answer_served.py` (a fake sidecar on loopback: pass, unsafe, missed escalation, another alias, unreachable, too slow, locked split) and `deploy/pilot/test-preflight.sh` (no Docker: a fake `docker` that answers read-only questions only) in CI with `shellcheck`.
 
 ---
 

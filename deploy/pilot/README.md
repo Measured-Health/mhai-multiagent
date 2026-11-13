@@ -200,16 +200,106 @@ Rotating the key: `--replace-key` with the new key on stdin, then
 
 ## Switch a hospital to your own model
 
-The pilot can move a hospital from the cloud to the team's own answer model
-(trained in Colab, promoted, gated on the clinical question set and pinned
-in `models.lock` as `cca`). The pieces are in place (profile `ownmodel`:
-the `llama` sidecar and `model-fetch`; deploy/README.md, "Own answer
-model"), but **the switch itself is the runbook of own model PR 4**
-(`deploy/pilot/eval-local.sh`, the on-host evaluation before the switch,
-and the switch and switch back). Placeholder until PR 4 lands: do not
-switch a hospital by hand. Until then every hospital stays on the cloud,
-and a hospital on `--provider none` gets escalations only (no pinned `cca`
-and no unpinned model in production).
+Moves one hospital from the cloud to the team's own answer model (role
+`cca`), and back, without editing any file but `.env`. Every hospital
+stays where it is until step 8, and the cloud stays configured, so the way
+back is one command. Clinicians stay in the loop: the own model's answers
+are drafts, like the cloud's.
+
+1. **Resize the host.** The demo host has about 3.7 GiB in all, and even a
+   1-3B model doesn't fit next to the pilot (deploy/README.md, "Sizing").
+   Stop the instance, change its type to t4g.large (8 GiB, fits a 3B
+   model), start it. The scripts below refuse a host that is too small,
+   before they change anything.
+2. **Train and export in Colab**, following
+   [docs/models/export-step.md](../../docs/models/export-step.md): role
+   `cca`, a GGUF next to the safetensors, the run folder uploaded to Drive.
+3. **Register the dataset** the run was trained on: its entry in
+   `models/approved-datasets.json`, synthetic only, by its own PR. The
+   export step refuses a dataset that isn't registered, so merge that PR
+   before step 2's export.
+4. **Promote** with the "Model promotion" workflow (Actions, on `main`),
+   gate `answer`: first a dry run (no `expect_files`) and read its
+   `evaluation.md`; then the real run with `expect_files` set to the dry
+   run's files hash. It scores the GGUF itself on the locked
+   `clinical_answer` split (the "Model test set" workflow builds it once,
+   its line goes into `models/testsets.lock` by PR).
+5. **Pin**: `mhai-models pin cca <name> <version> --gate answer` (as the
+   store's reader) writes `models.lock`; open a PR with it. The "Model
+   lock" workflow verifies it; a reviewer merges. Pin refuses anything
+   that didn't pass on the locked split.
+6. **Fetch the pinned model onto the host** (`mhai-models fetch-pinned`,
+   in the `model-fetch` container). On the host, from a checkout of the
+   repository at the deployed release, with the store reader's two
+   credentials on stdin (access key, then secret key; hidden prompts on a
+   terminal):
+
+   ```bash
+   bash deploy/pilot/enable-ownmodel.sh --store-endpoint https://<store host> \
+     --store-bucket <bucket> [--mem 3g] [--threads 2]
+   ```
+
+   It checks memory and the lock, copies `models.lock`, `models/trust-policy.json`
+   and `models/testsets.lock` into `/srv/mhai-backend/models`, writes the
+   credentials (0400 files, never printed), sets `PILOT_MODEL_ROLES=cca`,
+   `PILOT_LOCAL_MODEL_*`, `PILOT_MODEL_STORE_*` and
+   `COMPOSE_PROFILES=cloud,pilot,ownmodel` in `.env`, builds the `llama`
+   image, runs `model-fetch`, and starts `llama` and the pipeline until the
+   pipeline logs `model.served role=cca`. It switches no hospital. Safe to
+   run again; `--mem` is the sidecar column of the sizing table plus 0.5 GB.
+7. **Evaluate on this host**, and go on only on PASS:
+
+   ```bash
+   bash deploy/pilot/eval-local.sh
+   ```
+
+   It checks memory, the lock and the images (the sidecar's llama.cpp is
+   the gate's), brings up the `ownmodel` profile, requires the sidecar to
+   serve exactly the alias pinned in `models.lock`, then scores the locked
+   split through the worker's own client, one question at a time, and
+   prints PASS or FAIL with the totals (the gate's thresholds, and a median
+   answer time of at most 90 s: `--max-seconds`). The summary is kept in
+   `/srv/mhai-backend/local-eval/`; put it in the tracker. Until a locked
+   split exists it scores the dev split and says so in capitals: a dev PASS
+   is not the gate. It exits non-zero on FAIL: don't switch.
+8. **Switch one hospital** (audited `hospital.model_policy_changed`):
+
+   ```bash
+   cd /srv/mhai-backend
+   docker compose --profile tools run --rm core-cli hospitals model-policy set <CODE> --provider none
+   ```
+
+   New questions from that hospital go to the local route from the next
+   job.
+9. **Watch the first answers** with the hospital's clinicians: they review
+   every answer for the first days, as with the cloud. In the audit chain,
+   each `query.completed` for the hospital has `model_versions` with
+   `cca: <name>@<version>#<sha12>`, the pinned version. Count escalations: a few is the model being careful;
+   many, or any `local_unverified`, is the next point.
+10. **Switch back to the cloud**, one command; nothing else changes:
+
+    ```bash
+    docker compose --profile tools run --rm core-cli hospitals model-policy set <CODE> \
+      --provider anthropic --agreement-ref AGR-2026-01
+    ```
+
+11. **`local_unverified` escalations** (the `query.completed` outcome) mean
+    the worker could not show that the sidecar serves the pinned model:
+    no verified pin, the sidecar down or still loading, or another alias.
+    Nothing was generated; the question escalated to a clinician. What to
+    do: switch the hospital back (step 10), then look at
+    `docker compose logs pipeline llama` (fixed codes only:
+    `model.verify_failed ... detail=`). Run `enable-ownmodel.sh` again
+    (it restarts what needs it), then `eval-local.sh`, before switching
+    again. Never set `INTELLIGENCE_LOCAL_UNPINNED`.
+
+**A new model or a rollback:** pin it (step 5) or roll back
+(`mhai-models rollback cca`, by PR), then on the host `enable-ownmodel.sh`
+(it copies the new lock, fetches, restarts the pipeline and, if it still
+serves the old alias, the sidecar) and `eval-local.sh` again. A hospital on
+`--provider none` gets escalations, not answers, while the new pin loads.
+
+`test-preflight.sh` tests the scripts' pre-flight without Docker.
 
 ## Known limits (the pilot accepts these; see PR #134)
 

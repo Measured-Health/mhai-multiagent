@@ -469,6 +469,12 @@ jobs:
         run: |
           shellcheck -x deploy/llama/*.sh
           bash deploy/llama/test-entrypoint.sh
+      # The own model's switch scripts (deploy/pilot/): shellcheck, and the
+      # pre-flight (memory, the pinned lock, the images) with a fake docker.
+      - name: Own model switch pre-flight tests
+        run: |
+          shellcheck -x deploy/pilot/*.sh
+          bash deploy/pilot/test-preflight.sh
       - name: Smoke test
         run: .github/scripts/boundary-smoke.sh
 
