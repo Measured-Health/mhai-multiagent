@@ -77,6 +77,7 @@ GGUF_MAX_KEY = 255  # bytes: keys and tensor names are under 256
 GGUF_MAX_STRING = 1024 * 1024 - 1  # bytes: string values under 1 MiB
 GGUF_MAX_DIMS = 4
 GGUF_DEFAULT_ALIGNMENT = 32
+GGUF_NAMED_TEMPLATE_PREFIX = "tokenizer.chat_template."
 GGUF_ARCHITECTURES: frozenset[str] = frozenset(
     {"llama", "qwen2", "qwen3", "gemma2", "gemma3", "phi3", "mistral"}
 )
@@ -655,9 +656,15 @@ def _check_gguf_file(
     alignment = GGUF_DEFAULT_ALIGNMENT
     for _ in range(n_kv):
         key = _gguf_key(r, name, "key")
+        # Any repeated key is refused: we would check one value and the runtime might
+        # use the other (a parser differential), above all for the chat template.
         if key in seen:
             raise _gguf_bad(name, "duplicate_key")
         seen.add(key)
+        # Only the single default template: llama.cpp may select a named one
+        # (``tokenizer.chat_template.tool_use``), which the run's check never compared.
+        if key.startswith(GGUF_NAMED_TEMPLATE_PREFIX):
+            raise _gguf_bad(name, "named_template")
         vtype = r.unpack("<I")
         value = _gguf_value(r, vtype, name)
         if key == "general.architecture":

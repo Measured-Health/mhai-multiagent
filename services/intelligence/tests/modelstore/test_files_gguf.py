@@ -108,6 +108,31 @@ def test_gguf_without_safetensors_refused(tmp_path: Path) -> None:
     assert _code(files.check_run, run) == ("missing_file", "no_weights")
 
 
+@pytest.mark.parametrize(
+    "key", [b"tokenizer.chat_template.tool_use", b"tokenizer.chat_template.rag"]
+)
+def test_named_chat_templates_refused(tmp_path: Path, key: bytes) -> None:
+    """Only the single default template is allowed: llama.cpp may select a named one,
+    which the template check would never have compared."""
+    raw = g.gguf([*g.tiny_kvs(), g.kv_string(key, b"{{ other }}")], g.TINY_INFOS, g.TINY_DATA)
+    assert _code(files.check_gguf, _file(tmp_path, raw)) == ("gguf_invalid", "named_template")
+    assert _code(files.gguf_chat_template, tmp_path / GGUF_NAME) == (
+        "gguf_invalid",
+        "named_template",
+    )
+
+
+def test_duplicate_default_template_refused(tmp_path: Path) -> None:
+    """Two default templates: we would check one value and the runtime might use the
+    other (a parser differential), so any repeated key is refused."""
+    second = g.kv_string(b"tokenizer.chat_template", b"{{ other }}")
+    raw = g.gguf([*g.tiny_kvs(), second], g.TINY_INFOS, g.TINY_DATA)
+    assert _code(files.gguf_chat_template, _file(tmp_path, raw)) == (
+        "gguf_invalid",
+        "duplicate_key",
+    )
+
+
 def test_gguf_chat_template_read_from_the_header(tmp_path: Path) -> None:
     assert files.gguf_chat_template(_file(tmp_path, g.tiny())) == g.TINY_TEMPLATE
     no_template = g.gguf([g.tiny_kvs()[0]], g.TINY_INFOS, g.TINY_DATA)

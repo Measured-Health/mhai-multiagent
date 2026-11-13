@@ -31,7 +31,10 @@ if jinja.exists():
 ```
 
 The step refuses a GGUF whose embedded template differs from the run's
-(`gguf_template_mismatch`). Only a `cca` run may carry a GGUF
+(`gguf_template_mismatch`). Only one default template is allowed. A GGUF that also
+carries named templates (`tokenizer.chat_template.<name>`, such as `tool_use`), or that
+repeats any metadata key, is refused (`gguf_invalid`). So don't save extra named
+templates with the tokenizer. Only a `cca` run may carry a GGUF
 (`gguf_not_allowed_for_role`); for an `extract` run, pass `gguf=False`.
 
 The datasets you name must already be in `models/approved-datasets.json` (synthetic only
