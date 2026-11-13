@@ -152,7 +152,12 @@ type Report[C, S, M any] struct {
 	Context Context
 	// Whole: hidden whole (A7, or D5's T5): every number hidden, every
 	// list empty. Set on a Body only.
-	Whole       bool
+	Whole bool
+	// Sources are the period's sources (ids; "" the patients with none):
+	// a partition of the patients that no view lists, given to the guard so
+	// the unfiltered context is the sum of its sources (PR 3 review,
+	// condition 2). Never sent; empty in a body hidden whole.
+	Sources     []string
 	Patients    C
 	Total       CNE[C]
 	ByCondition []ConditionRow[C]

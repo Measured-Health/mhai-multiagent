@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -270,7 +270,10 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO emr.connection_errors (hospital_id, connection_id, code) VALUES ($1, $2, 'unreachable')`, a, conn); err != nil {
 		t.Fatal(err)
 	}
-	emrTables := []string{"emr_connections", "emr.credentials", "emr.sync_runs", "emr.connection_errors"}
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.sync_state (connection_id, hospital_id) VALUES ($1, $2)`, conn, a); err != nil {
+		t.Fatal(err)
+	}
+	emrTables := []string{"emr_connections", "emr.credentials", "emr.sync_runs", "emr.connection_errors", "emr.sync_state"}
 	// The canonical model (00023): a patient with an observation, a second
 	// patient and a match, so its tables have rows to hide. The gateway
 	// reads the alert tables under RLS; the rest it can't read at all.
@@ -297,7 +300,9 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		"analytics_snapshots", "analytics_period_counts", "analytics_frozen_periods", "analytics_epoch",
 		"analytics_change_runs", "analytics_changes", "analytics_follow_ups",
 		"analysis_switch", "analysis_sources", "analysis_locations", "analysis_conditions", "analysis_subjects", "analysis_facts",
-		"analysis_first_seen", "analysis_periods", "analysis_pseudonyms", "analysis_watermarks"}, slices.Concat(emrTables, emrGatewayReads, emrHidden)...) {
+		"analysis_first_seen", "analysis_periods", "analysis_pseudonyms", "analysis_watermarks",
+		"analysis_subject_attrs", "analysis_hospital_start", "analysis_snapshots", "analysis_view_log", "analysis_unusual",
+		"analysis_cold_budget", "analysis_cold_contexts"}, slices.Concat(emrTables, emrGatewayReads, emrHidden)...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)

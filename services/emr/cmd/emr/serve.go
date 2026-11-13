@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/x509"
 	"errors"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -17,13 +21,17 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/codes"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/fhir"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/stub"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/ctl"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/egress"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/normalise"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/proxyconf"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/secrets"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/sink"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrtypes"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/replay"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
@@ -73,6 +81,30 @@ func healthHandler(db pinger, store readier, allowAge func(time.Time) (time.Dura
 		return &emrpb.HealthReply{DatabaseReady: ready, SecretStoreReady: storeReady, RuleSetVersion: "",
 			ProxyAllowListAgeS: age}, nil
 	}
+}
+
+// devRoots is the system roots plus the CA in file, in development only
+// (config refuses the setting elsewhere); nil (the system roots alone)
+// without one.
+func devRoots(file string, development bool) (*x509.CertPool, error) {
+	if file == "" {
+		return nil, nil
+	}
+	if !development {
+		return nil, errors.New("EMR_DEV_CA_FILE is for development only")
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return nil, errors.New("EMR_DEV_CA_FILE: cannot read the CA file")
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(b) {
+		return nil, errors.New("EMR_DEV_CA_FILE: no certificate in the file")
+	}
+	return pool, nil
 }
 
 // loadSealKeys reads the sealing private keys (EMR_SEAL_KEY_PATH): the
@@ -154,9 +186,16 @@ func serve(getenv func(string) string) error {
 	// does finds no proxy and fails closed.
 	var writer *egress.Writer
 	var allowAge func(time.Time) (time.Duration, bool)
+	var proxyURL *url.URL
+	var proxyKey []byte
 	if s.ProxyURL != "" {
-		if _, err := proxyconf.ReadKey(s.ProxyKeyPath); err != nil {
+		k, err := proxyconf.ReadKey(s.ProxyKeyPath)
+		if err != nil {
 			return errors.New("EMR_PROXY_KEY_PATH: K_proxy missing or not a 32-byte hex key")
+		}
+		proxyKey = k
+		if proxyURL, err = url.Parse(s.ProxyURL); err != nil {
+			return errors.New("EMR_PROXY_URL is invalid")
 		}
 		if st, err := os.Stat(s.EgressDir); err != nil || !st.IsDir() {
 			return errors.New("EMR_EGRESS_DIR must be an existing directory")
@@ -166,9 +205,20 @@ func serve(getenv func(string) string) error {
 		go func() { _ = writer.Run(ctx) }()
 	}
 
+	// The egress clients: through egress-emr only. With no proxy they fail
+	// closed (no way out at all). In development only, the synthetic FHIR
+	// server's CA may be trusted too (EMR_DEV_CA_FILE).
+	roots, err := devRoots(s.DevCAFile, s.Development())
+	if err != nil {
+		return err
+	}
+	clients := func(cfg connector.Config) *http.Client { return egress.HTTPWithRoots(cfg, proxyURL, proxyKey, roots) }
+	registry := connector.NewRegistry(s.Development(), stub.New(), fhir.New(clients))
+
 	// The normaliser (PR 5): only with code tables and maps configured.
 	// Synthetic tables and unreviewed conversions load in development only.
 	normaliser := false
+	var js jetstream.JetStream
 	if s.CodesDir != "" {
 		tables, err := codes.Load(s.CodesDir, s.Development())
 		if err != nil {
@@ -178,7 +228,7 @@ func serve(getenv func(string) string) error {
 		if err != nil {
 			return errors.New("EMR_MAPS_DIR: the maps are missing, not valid, or unreviewed outside development")
 		}
-		js, err := jetstream.New(nc)
+		js, err = jetstream.New(nc)
 		if err != nil {
 			return errors.New("emr: cannot open JetStream")
 		}
@@ -188,10 +238,33 @@ func serve(getenv func(string) string) error {
 		normaliser = true
 	}
 
+	// The scheduler (PR 6): only with every piece a sync needs: the secret
+	// store, the way out, and the normaliser to announce records to. No
+	// connection is enabled by default, so it polls nothing until one is.
+	polling := false
+	if store != nil && writer != nil && js != nil {
+		pub := normalise.JSPublisher{JS: js}
+		sched := &scheduler.Scheduler{Pool: pool, Connectors: registry, Store: store, Env: s.Env, Log: log,
+			Metrics: &scheduler.Metrics{},
+			NewSink: func(cfg connector.Config, backfill bool) scheduler.Sink {
+				version := 1
+				if ti, ok := emrtypes.Lookup(cfg.Type); ok {
+					version = ti.Version
+				}
+				sk := sink.New(pool, cfg.HospitalID, cfg.ConnectionID, cfg.Type, version, cfg.Settings["mrn_namespace"],
+					func(ctx context.Context, hid uuid.UUID, ids []uuid.UUID) error {
+						return normalise.PublishFetched(ctx, pub, hid, ids)
+					})
+				sk.Backfill = backfill
+				return sk
+			}}
+		go func() { _ = sched.Run(ctx) }()
+		polling = true
+	}
+
 	handlers := map[string]ctl.Handler{}
 	if store != nil {
-		creds := &ctl.Credentials{Pool: pool, Store: store, Keys: sealKeys, Env: s.Env,
-			Connectors: connector.NewRegistry(s.Development(), stub.New())}
+		creds := &ctl.Credentials{Pool: pool, Store: store, Keys: sealKeys, Env: s.Env, Connectors: registry}
 		if writer != nil {
 			creds.Egress = writer
 		}
@@ -200,6 +273,7 @@ func serve(getenv func(string) string) error {
 	} else {
 		handlers["health"] = healthHandler(pool, nil, allowAge)
 	}
+	handlers["sync_now"] = (&ctl.SyncNow{Pool: pool}).Handle
 	r := &ctl.Responder{
 		Keys:     func() map[string]ed25519.PublicKey { return keys },
 		Replay:   replay.New(ctl.ReplayWindow, ctl.MaxReplayIDs),
@@ -213,7 +287,8 @@ func serve(getenv func(string) string) error {
 	}
 	defer stopCtl()
 	log.Info("emr serving", "env", s.Env, "subjects", ctl.Subjects, "rule_set_active", s.RuleSetActive != "",
-		"secret_store", store != nil, "sealing_keys", len(sealKeys), "egress", writer != nil, "normaliser", normaliser)
+		"secret_store", store != nil, "sealing_keys", len(sealKeys), "egress", writer != nil, "normaliser", normaliser,
+		"polling", polling)
 	<-ctx.Done()
 	return nil
 }

@@ -23,6 +23,7 @@ type sheetState struct {
 	hide  []bool
 	vals  []int64 // shown cells' values
 	whole bool
+	body  Body           // the body itself (a recorded one), for D5's parents
 	at    map[string]int // a cell of each group (built on first use)
 }
 
@@ -53,7 +54,7 @@ func stateOf(b *Body) *sheetState {
 		}
 	}
 	hideVirtual(sh, h, func(i int) bool { return cs[i] == nil })
-	return &sheetState{sh: sh, hide: h, vals: vals, whole: b.Whole}
+	return &sheetState{sh: sh, hide: h, vals: vals, whole: b.Whole, body: *b}
 }
 
 // hideVirtual: a member never sent is known exactly when the rest of the

@@ -38,12 +38,18 @@ func TestTypesClosed(t *testing.T) {
 		"unmapped_codes", "too_many_requests"}) {
 		t.Fatalf("codes %v", Codes)
 	}
-	// Only the stub is built in this PR, and only in development.
-	if b := Built(false); len(b) != 0 {
+	// FHIR R4 is built (EMR PR 6); the stub only in development.
+	if b := Built(false); !slices.Equal(b, []string{"fhir_r4"}) {
 		t.Fatalf("built outside development: %v", b)
 	}
-	if b := Built(true); !slices.Equal(b, []string{"stub"}) {
+	if b := Built(true); !slices.Equal(b, []string{"fhir_r4", "stub"}) {
 		t.Fatalf("built in development: %v", b)
+	}
+	// The MRN namespace (design §10.2, §16.1): an optional text setting,
+	// so the sink keeps the hospital's MRN and nothing else.
+	fhir, _ := Lookup("fhir_r4")
+	if f, ok := fhir.Field("mrn_namespace"); !ok || f.Kind != KindText || f.Required || f.Max != 200 {
+		t.Fatalf("fhir_r4 mrn_namespace: %+v %v", f, ok)
 	}
 	if _, ok := Lookup("hl7v2_feed"); ok {
 		t.Fatal("hl7v2_feed is not built and not offered")
