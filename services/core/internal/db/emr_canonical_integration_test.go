@@ -251,6 +251,9 @@ func TestEMRCanonicalRLS(t *testing.T) {
 	}
 	for _, role := range []string{"mhai_worker", "mhai_platform", "mhai_jobs", "mhai_auth", "mhai_emr_sched", "mhai_emr_core"} {
 		for _, table := range emrCanonicalTables {
+			if role == "mhai_emr_core" && slices.Contains([]string{"emr.observations", "emr.medications", "emr.patients"}, table) {
+				continue // 00027: core's finding consumer reads the evidence columns (TestFindingsRLS)
+			}
 			var held bool
 			if err := pool.QueryRow(ctx, `SELECT has_table_privilege($1, $2, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
 				OR has_any_column_privilege($1, $2, 'SELECT,INSERT,UPDATE')`, role, table).Scan(&held); err != nil {

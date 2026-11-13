@@ -1,0 +1,18 @@
+code,display,status,source
+2823-3,Potassium [Moles/volume] in Serum or Plasma,ACTIVE,rules-golden-fixture
+6298-4,Potassium [Moles/volume] in Blood,ACTIVE,rules-golden-fixture
+2951-2,Sodium [Moles/volume] in Serum or Plasma,ACTIVE,rules-golden-fixture
+2947-0,Sodium [Moles/volume] in Blood,ACTIVE,rules-golden-fixture
+2345-7,Glucose [Mass/volume] in Serum or Plasma,ACTIVE,rules-golden-fixture
+2339-0,Glucose [Mass/volume] in Blood,ACTIVE,rules-golden-fixture
+14749-6,Glucose [Moles/volume] in Serum or Plasma,ACTIVE,rules-golden-fixture
+15074-8,Glucose [Moles/volume] in Blood,ACTIVE,rules-golden-fixture
+718-7,Hemoglobin [Mass/volume] in Blood,ACTIVE,rules-golden-fixture
+777-3,Platelets [#/volume] in Blood by Automated count,ACTIVE,rules-golden-fixture
+2160-0,Creatinine [Mass/volume] in Serum or Plasma,ACTIVE,rules-golden-fixture
+14682-9,Creatinine [Moles/volume] in Serum or Plasma,ACTIVE,rules-golden-fixture
+67151-1,Troponin T.cardiac [Mass/volume] in Serum or Plasma by High sensitivity method,ACTIVE,rules-golden-fixture
+59408-5,Oxygen saturation in Arterial blood by Pulse oximetry,ACTIVE,rules-golden-fixture
+8310-5,Body temperature,ACTIVE,rules-golden-fixture
+8480-6,Systolic blood pressure,ACTIVE,rules-golden-fixture
+8867-4,Heart rate,ACTIVE,rules-golden-fixture

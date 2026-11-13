@@ -1,0 +1,41 @@
+description: Population bands by sex and age; an unknown sex or age uses the unknown band, never an adult default.
+rule_set: 0-synthetic
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: woman
+    sex: female
+    birth_date: "1970-01-01"
+    observations:
+      - {id: hb-6.9, analyte: haemoglobin, value: "6.9", unit: g/dL, at: -1h}
+      - {id: hb-7.0, analyte: haemoglobin, value: "7.0", unit: g/dL, at: -1h}
+      - {id: hb-69gl, analyte: haemoglobin, value: "69", unit: g/L, at: -1h}
+  - id: man
+    sex: male
+    birth_date: "1970-01-01"
+    observations:
+      - {id: hb-7.9, analyte: haemoglobin, value: "7.9", unit: g/dL, at: -1h}
+      - {id: hb-8.0, analyte: haemoglobin, value: "8.0", unit: g/dL, at: -1h}
+  - id: unknown-sex
+    sex: unknown
+    birth_date: "1970-01-01"
+    observations:
+      - {id: hb-7.5-unknown-sex, analyte: haemoglobin, value: "7.5", unit: g/dL, at: -1h}
+  - id: no-birth-date
+    sex: female
+    observations:
+      - {id: hb-7.5-no-age, analyte: haemoglobin, value: "7.5", unit: g/dL, at: -1h}
+  - id: girl
+    sex: female
+    birth_date: "2016-01-01"
+    observations:
+      - {id: hb-7.5-child, analyte: haemoglobin, value: "7.5", unit: g/dL, at: -1h}
+expect:
+  - {patient: woman, observation: hb-6.9, rule_id: haemoglobin-critical-low, severity: critical}
+  - {patient: woman, observation: hb-69gl, rule_id: haemoglobin-critical-low, severity: critical}
+  - {patient: man, observation: hb-7.9, rule_id: haemoglobin-critical-low, severity: critical}
+  - {patient: unknown-sex, observation: hb-7.5-unknown-sex, rule_id: haemoglobin-critical-low, severity: critical}
+  - {patient: no-birth-date, observation: hb-7.5-no-age, rule_id: haemoglobin-critical-low, severity: critical}
+  - {patient: girl, observation: hb-7.5-child, rule_id: haemoglobin-critical-low, severity: critical}
+expect_none:
+  - {patient: woman, observation: hb-7.0, rule_id: haemoglobin-critical-low}
+  - {patient: man, observation: hb-8.0, rule_id: haemoglobin-critical-low}

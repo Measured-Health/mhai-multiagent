@@ -1,0 +1,35 @@
+description: The lab's critical flag for unmapped codes; preliminary, amended, superseded and entered-in-error results; causes capped at review.
+rule_set: "1"
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: p1
+    sex: female
+    birth_date: "1948-08-08"
+    observations:
+      - {id: unmapped-hh, local_code: TROPI-LOCAL, value: "5000", unit: ng/L, flag: HH, at: -1h}
+      - {id: unmapped-aa-text, local_code: CULTURE, text: "growth", flag: AA, at: -1h}
+      - {id: unmapped-h, local_code: CRP, value: "50", unit: mg/L, flag: H, at: -1h}
+      - {id: mapped-hh-normal, analyte: potassium, value: "5.0", unit: mmol/L, flag: HH, at: -1h}
+      - {id: mapped-hh-critical, analyte: potassium, value: "6.7", unit: mmol/L, flag: HH, at: -1h}
+      - {id: prelim-k-6.6, analyte: potassium, value: "6.6", unit: mmol/L, at: -1h, status: preliminary}
+      - {id: amended-na-118, analyte: sodium, value: "118", unit: mmol/L, at: -1h, status: amended}
+      - {id: old-na-118, analyte: sodium, value: "118", unit: mmol/L, at: -1h, superseded: true}
+      - {id: error-na-118, analyte: sodium, value: "118", unit: mmol/L, at: -1h, status: entered-in-error}
+      - {id: glucose-2.0, analyte: glucose, value: "2.0", unit: mmol/L, at: -1h}
+    medications:
+      - {id: insulin, atc: A10AB01, status: active, start: -240h}
+      - {id: spironolactone, atc: C03DA01, status: active, start: -240h}
+      - {id: bendroflumethiazide, atc: C03AA01, status: stopped, start: -240h}
+expect:
+  - {patient: p1, observation: unmapped-hh, rule_id: lab-critical-flag, severity: critical, category: blood_chemistry, standardised: false}
+  - {patient: p1, observation: unmapped-aa-text, rule_id: lab-critical-flag, severity: critical}
+  - {patient: p1, observation: mapped-hh-normal, rule_id: lab-critical-flag, severity: critical}
+  - {patient: p1, observation: mapped-hh-critical, rule_id: potassium-critical-high, severity: critical, causes: [potassium-raising-medicine]}
+  - {patient: p1, observation: prelim-k-6.6, rule_id: potassium-critical-high, severity: critical, preliminary: true}
+  - {patient: p1, observation: amended-na-118, rule_id: sodium-critical-low, severity: critical, causes: []}
+  - {patient: p1, observation: glucose-2.0, rule_id: glucose-critical-low, severity: critical, causes: [glucose-lowering-medicine]}
+expect_none:
+  - {patient: p1, observation: unmapped-h, rule_id: lab-critical-flag}
+  - {patient: p1, observation: mapped-hh-critical, rule_id: lab-critical-flag}
+  - {patient: p1, observation: old-na-118, rule_id: sodium-critical-low}
+  - {patient: p1, observation: error-na-118, rule_id: sodium-critical-low}

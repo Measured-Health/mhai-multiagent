@@ -252,6 +252,54 @@ func (x *Signal) GetCode() string {
 	return ""
 }
 
+// emr.v1.<hid>.finding: a finding to raise, or a change to one core has
+// seen (superseded by an amended result's finding, or withdrawn). Core
+// reads the finding's row under its hospital (mhai_emr_core): the message
+// carries the id only. Nats-Msg-Id is finding_id:status.
+type Finding struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FindingId     string                 `protobuf:"bytes,1,opt,name=finding_id,json=findingId,proto3" json:"finding_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Finding) Reset() {
+	*x = Finding{}
+	mi := &file_mhai_emr_v1_events_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Finding) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Finding) ProtoMessage() {}
+
+func (x *Finding) ProtoReflect() protoreflect.Message {
+	mi := &file_mhai_emr_v1_events_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Finding.ProtoReflect.Descriptor instead.
+func (*Finding) Descriptor() ([]byte, []int) {
+	return file_mhai_emr_v1_events_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Finding) GetFindingId() string {
+	if x != nil {
+		return x.FindingId
+	}
+	return ""
+}
+
 var File_mhai_emr_v1_events_proto protoreflect.FileDescriptor
 
 const file_mhai_emr_v1_events_proto_rawDesc = "" +
@@ -272,7 +320,10 @@ const file_mhai_emr_v1_events_proto_rawDesc = "" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12#\n" +
 	"\rconnection_id\x18\x02 \x01(\tR\fconnectionId\x12\x15\n" +
 	"\x06ref_id\x18\x03 \x01(\tR\x05refId\x12\x12\n" +
-	"\x04code\x18\x04 \x01(\tR\x04codeBGZEgithub.com/Measured-Health/mhai-multiagent/services/gokit/emrpb;emrpbb\x06proto3"
+	"\x04code\x18\x04 \x01(\tR\x04code\"(\n" +
+	"\aFinding\x12\x1d\n" +
+	"\n" +
+	"finding_id\x18\x01 \x01(\tR\tfindingIdBGZEgithub.com/Measured-Health/mhai-multiagent/services/gokit/emrpb;emrpbb\x06proto3"
 
 var (
 	file_mhai_emr_v1_events_proto_rawDescOnce sync.Once
@@ -286,12 +337,13 @@ func file_mhai_emr_v1_events_proto_rawDescGZIP() []byte {
 	return file_mhai_emr_v1_events_proto_rawDescData
 }
 
-var file_mhai_emr_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_mhai_emr_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_mhai_emr_v1_events_proto_goTypes = []any{
 	(*Fetched)(nil),    // 0: mhai.emr.v1.Fetched
 	(*Created)(nil),    // 1: mhai.emr.v1.Created
 	(*DeadLetter)(nil), // 2: mhai.emr.v1.DeadLetter
 	(*Signal)(nil),     // 3: mhai.emr.v1.Signal
+	(*Finding)(nil),    // 4: mhai.emr.v1.Finding
 }
 var file_mhai_emr_v1_events_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for method output_type
@@ -312,7 +364,7 @@ func file_mhai_emr_v1_events_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mhai_emr_v1_events_proto_rawDesc), len(file_mhai_emr_v1_events_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -1,0 +1,25 @@
+description: Outside the source's own range is info, only when no threshold or flag rule hit, and only for the listed analytes.
+rule_set: 0-synthetic
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: p1
+    sex: female
+    birth_date: "1980-02-02"
+    observations:
+      - {id: na-130, analyte: sodium, value: "130", unit: mmol/L, ref_low: "135", ref_high: "145", at: -1h}
+      - {id: na-146, analyte: sodium, value: "146", unit: mmol/L, ref_low: "135", ref_high: "145", at: -1h}
+      - {id: na-135, analyte: sodium, value: "135", unit: mmol/L, ref_low: "135", ref_high: "145", at: -1h}
+      - {id: na-no-range, analyte: sodium, value: "120", unit: mmol/L, at: -1h}
+      - {id: k-6.6, analyte: potassium, value: "6.6", unit: mmol/L, ref_low: "3.5", ref_high: "5.1", at: -1h}
+      - {id: k-5.4, analyte: potassium, value: "5.4", unit: mmol/L, ref_low: "3.5", ref_high: "5.1", at: -1h}
+      - {id: crea-200, analyte: creatinine, value: "200", unit: umol/L, ref_low: "45", ref_high: "90", at: -1h}
+expect:
+  - {patient: p1, observation: na-130, rule_id: outside-source-range, severity: info}
+  - {patient: p1, observation: na-146, rule_id: outside-source-range, severity: info}
+  - {patient: p1, observation: k-6.6, rule_id: potassium-critical-high, severity: critical}
+  - {patient: p1, observation: k-5.4, rule_id: outside-source-range, severity: info}
+expect_none:
+  - {patient: p1, observation: na-135, rule_id: outside-source-range}
+  - {patient: p1, observation: na-no-range, rule_id: outside-source-range}
+  - {patient: p1, observation: k-6.6, rule_id: outside-source-range}
+  - {patient: p1, observation: crea-200, rule_id: outside-source-range}

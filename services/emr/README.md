@@ -198,6 +198,49 @@ synthetic connection, writes the allow-list, and checks five things:
 `EGRESS_EMR_DEV_EXEMPT` lets the proxy reach the server's network, which it
 shares. It is development only.
 
+## What is built (PR 7: rules)
+
+Migration **00027** (core; it needs EMR PR 6's migration, now 00026, and merges after it)
+adds `emr.findings`, `emr.breaker_trips`, `emr_rule_set_activation`,
+`emr_pause_connection()`, `emr_sources_status()`, the `emr_normalise` and
+`emr_rules` job types, and core's finding reader `mhai_emr_core`. A paused
+source is `errors` (platform) and `behind` (hospital) at once.
+
+- `internal/rules`: the rule set loader (strict YAML, pinned by its
+  SHA-256; every rule cites its source; causes `caution` or `review` only;
+  a synthetic set in development only; a pilot set has its clinical
+  sign-off `deferred`), and the evaluator: the seven kinds of design §11.1
+  (threshold with population bands, source flag, reference range, delta,
+  trend, NEWS2, combination), likely causes from the patient's own rows,
+  comparators as bounds (`>7` is above 7), one finding per value per
+  analyte.
+- The rules consumer (`emr_rules`): findings once (`dedup_key`), stored
+  `historical` when older than the category's window, date-only or from a
+  backfill; `shadow` unless the deployment and the hospital's activation
+  both name the loaded set; `arrived_late` after an hour; an amended
+  result's finding `supersedes` the old one, a result corrected to normal
+  or retracted withdraws it. Any error rolls the batch back; an evaluation
+  error holds that batch for five minutes (paged) while the hospital's
+  other batches go on; the fifth delivery dead-letters (and a failed dead
+  letter keeps the message). A mapped value no numeric rule can read (a
+  unit with no reviewed conversion) is counted as not evaluable. Findings are announced by id on `emr.v1.<hid>.finding`
+  after the commit, again by the sweep if a publish failed.
+- The per-source breaker: more critical findings in 15 minutes than both
+  the floor (10) and 5 times the source's 14-day median (at least 4 while
+  the source has under 14 days of findings) pauses the source and signals
+  `breaker_tripped`, only while the rule set alerts for the hospital
+  (never in shadow). The service refuses to start with an active rule set
+  whose analyte codes lack a reviewed conversion. Findings already made are kept and
+  announced.
+- Rule set v1 (`rules/ruleset-1.yaml`, pilot, clinical sign-off deferred)
+  and `rules/REFERENCES.md`. `emr rules check <file>` prints the version
+  and hash to activate.
+
+Everything is off by default: with no `EMR_RULE_SET_FILE` the rules don't
+run, and with it every finding is shadow until `EMR_RULE_SET_ACTIVE` names
+the set and a platform admin activates the same version and hash for the
+hospital (`PUT /platform/hospitals/{id}/emr-rule-set`, step-up, audited).
+
 ## Settings
 
 | Variable | |
@@ -211,7 +254,9 @@ shares. It is development only.
 | `EMR_SECRETS_DIR` | the file secret store (development and staging only); empty: no store, the credential ops answer nothing |
 | `EMR_PROXY_URL`, `EMR_PROXY_KEY_PATH`, `EMR_EGRESS_DIR` | egress-emr (`http://host:port`), K_proxy and the allow-list directory: all or none; none means no way out |
 | `EMR_CODES_DIR`, `EMR_MAPS_DIR` | the code tables and the maps (the image has `/codes/testdata` and `/maps`): both or none; none means no normaliser |
-| `EMR_RULE_SET_ACTIVE` | later PRs; empty by default |
+| `EMR_RULE_SET_FILE` | the rule set the rules evaluate (`/rules/ruleset-1.yaml`); needs `EMR_CODES_DIR`; empty: the rules don't run |
+| `EMR_RULE_SET_ACTIVE` | the version allowed to alert; empty by default (every finding shadow). A hospital also needs its platform admin's activation |
+| `EMR_BREAKER_MULTIPLE`, `EMR_BREAKER_FLOOR_CRITICAL` | the per-source breaker: 5 and 10 by default (H4 values) |
 | `EMR_DEV_CA_FILE` | development only: an extra CA for the synthetic FHIR server's certificate; refused elsewhere |
 
 egress-emr's own settings:

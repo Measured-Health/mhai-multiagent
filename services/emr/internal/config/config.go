@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -46,8 +47,22 @@ type Settings struct {
 	// unreviewed conversions load only in development.
 	CodesDir, MapsDir string
 	// RuleSetActive is EMR_RULE_SET_ACTIVE: empty means no rule set is
-	// active and every finding is shadow (off by default).
+	// active and every finding is shadow (off by default). Naming the
+	// loaded set's version lets it alert, but only for a hospital a
+	// platform admin activated it for (the same version and hash).
 	RuleSetActive string
+	// RuleSetFile is EMR_RULE_SET_FILE: the rule set the rules consumer
+	// evaluates (plan Task 27). Empty: the rules don't run (off by
+	// default). Needs the code tables and maps (EMR_CODES_DIR). A
+	// synthetic set loads only in development.
+	RuleSetFile string
+	// BreakerMultiple and BreakerFloorCritical are EMR_BREAKER_MULTIPLE
+	// (default 5) and EMR_BREAKER_FLOOR_CRITICAL (default 10): a source is
+	// paused when its critical findings in 15 minutes exceed both the
+	// multiple of its 14-day median and the floor (design §12.4; values
+	// for the clinical lead, H4).
+	BreakerMultiple      float64
+	BreakerFloorCritical int
 	// DevCAFile is EMR_DEV_CA_FILE: an extra CA the egress clients trust,
 	// for the synthetic FHIR server's throwaway certificate (plan Task 25).
 	// Development only; refused anywhere else, where TLS uses the system
@@ -76,6 +91,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		ProxyKeyPath:    get("EMR_PROXY_KEY_PATH"),
 		EgressDir:       get("EMR_EGRESS_DIR"),
 		RuleSetActive:   get("EMR_RULE_SET_ACTIVE"),
+		RuleSetFile:     get("EMR_RULE_SET_FILE"),
 		CodesDir:        get("EMR_CODES_DIR"),
 		MapsDir:         get("EMR_MAPS_DIR"),
 		DevCAFile:       get("EMR_DEV_CA_FILE"),
@@ -130,6 +146,24 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	}
 	if s.DevCAFile != "" && !s.Development() {
 		errs = append(errs, errors.New("EMR_DEV_CA_FILE is for development only (the synthetic FHIR server)"))
+	}
+	if s.RuleSetFile != "" && s.CodesDir == "" {
+		errs = append(errs, errors.New("EMR_RULE_SET_FILE needs EMR_CODES_DIR and EMR_MAPS_DIR (the rules run on normalised records)"))
+	}
+	s.BreakerMultiple, s.BreakerFloorCritical = 5, 10
+	if v := get("EMR_BREAKER_MULTIPLE"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || !(f >= 1 && f <= 100) {
+			errs = append(errs, errors.New("EMR_BREAKER_MULTIPLE must be a number from 1 to 100"))
+		}
+		s.BreakerMultiple = f
+	}
+	if v := get("EMR_BREAKER_FLOOR_CRITICAL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 10000 {
+			errs = append(errs, errors.New("EMR_BREAKER_FLOOR_CRITICAL must be a whole number from 1 to 10000"))
+		}
+		s.BreakerFloorCritical = n
 	}
 	if s.RuleSetActive != "" && !ruleSetName.MatchString(s.RuleSetActive) {
 		errs = append(errs, errors.New("EMR_RULE_SET_ACTIVE must be a rule set name (lower-case letters, digits and -)"))
