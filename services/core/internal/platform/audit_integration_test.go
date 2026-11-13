@@ -1194,7 +1194,7 @@ func TestDeferredAuditRoutes404(t *testing.T) {
 	tok := mint(t, auditor(t))
 	id := strconv.FormatInt(insertRow(t, row{action: "auth.logout"}), 10)
 	for _, c := range []struct{ method, path string }{
-		{"GET", "/platform/audit/" + id + "/patients"},
+		{"GET", "/platform/audit/" + id + "/patients"}, // not a drill-down entry
 		{"GET", "/platform/audit/named-access"},
 		{"GET", "/platform/audit/named-access?hospital=platform"},
 		{"GET", "/platform/audit/exports"},
@@ -1206,7 +1206,7 @@ func TestDeferredAuditRoutes404(t *testing.T) {
 		problem(t, c.method+" "+c.path, do(t, c.method, c.path, tok, true), 404, "not_found")
 	}
 	for _, rr := range server.Table() {
-		for _, deferred := range []string{"/patients", "/named-access", "/exports"} {
+		for _, deferred := range []string{"/named-access", "/exports"} {
 			if strings.HasPrefix(rr.Pattern, httpx.BasePath+"/platform/audit") && strings.Contains(rr.Pattern, deferred) {
 				t.Errorf("deferred route registered: %s %s", rr.Method, rr.Pattern)
 			}

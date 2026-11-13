@@ -128,6 +128,14 @@ services:
       # service's sealing public key (CORE_EMR_SEAL_PUBLIC_KEY_PATH) and the
       # idempotency HMAC key (CORE_IDEMPOTENCY_HMAC_KEY_PATH).
       CORE_EMR_ENABLED: ${CORE_EMR_ENABLED:-false}
+      # Patient Analysis's four key files (none by default: no drill-down
+      # and no ingest of a signed-off hospital). Paths inside the
+      # container, each a 0600 file of 32 random bytes in base64; the smoke
+      # stack mounts generated ones (docker-compose.smoke.yml).
+      ANALYSIS_REF_HMAC_KEY_FILE: ${ANALYSIS_REF_HMAC_KEY_FILE:-}
+      ANALYSIS_REF_ENC_KEY_FILE: ${ANALYSIS_REF_ENC_KEY_FILE:-}
+      ANALYSIS_DRILL_KEY_FILE: ${ANALYSIS_DRILL_KEY_FILE:-}
+      ANALYSIS_NOTE_KEY_FILE: ${ANALYSIS_NOTE_KEY_FILE:-}
     ports: ["127.0.0.1:${CORE_PORT:-8080}:8080"]
     volumes:
       - corekeys:/keys:ro
