@@ -34,6 +34,16 @@ verified directory only, with local_files_only=True and use_safetensors=True,
 after HF_HUB_OFFLINE=1 is set, and not at all until the pin is verified (the
 job escalates), never the configured hub model instead.
 
+The local route's answer model (own answer model plan, PR 3): local_generator picks the
+CCA's generator. With ``cca`` pinned it is tools.llama_client.PinnedLlamaGenerator over
+the ``llama`` sidecar, and the local client's preflight (before every job, before
+anything is built) requires the sidecar to serve exactly the verified
+``<name>@<version>#<sha12>``; model_versions() then records ``cca`` as that string (the
+pinned overlay). Without a pinned ``cca`` it is Ollama, only in development or with
+INTELLIGENCE_LOCAL_UNPINNED=on; otherwise RefusedGenerator. A failed preflight escalates
+the job with failed_agents ("CCA",) and the outcome ``local_unverified``, and nothing is
+generated; there is no fallback to Ollama, the cloud or another version.
+
 Nothing here logs question text, patient data or model output; Generation
 and Verification keep text out of their repr.
 """
@@ -75,6 +85,9 @@ _PINNED_VERSION = (
 _SAFE_VERSION = re.compile(r"[A-Za-z0-9_.:/@+\-]{1,128}|" + _PINNED_VERSION, re.ASCII)
 _CHUNK_ID = re.compile(r"[A-Za-z0-9#_.:\-]{1,16}")
 MAX_CITED = 50
+# The local route's outcome when the answer model can't be shown to be the verified one
+# (cloud.vocab.LOCAL_OUTCOMES).
+LOCAL_UNVERIFIED = "local_unverified"
 
 
 class ModelError(Exception):
@@ -277,6 +290,7 @@ class OrchestratorModelClient:
         masker: Any = None,
         versions: Mapping[str, str] | None = None,
         pinned: PinnedSource | None = None,
+        preflight: Callable[[], None] | None = None,
     ) -> None:
         if masker is None:
             from intelligence.security.hipaa import PIIMasker
@@ -287,6 +301,9 @@ class OrchestratorModelClient:
         self._mask_lock = threading.Lock()  # PIIMasker counts detections
         self._versions = _clean_versions(versions or {})
         self._pinned = pinned
+        # The local generator's check before every job (local_generator): raises when
+        # the answer model can't be shown to be the verified one.
+        self._preflight = preflight
 
     def mask(self, text: str) -> str:
         with self._mask_lock:
@@ -302,6 +319,18 @@ class OrchestratorModelClient:
         *,
         call: CloudCall | None = None,
     ) -> Generation:
+        if self._preflight is not None:
+            try:
+                self._preflight()
+            except Exception as e:
+                detail = getattr(e, "detail", None)
+                log.warning(
+                    "local.unverified reason=%s",
+                    detail if isinstance(detail, str) and _SAFE_KEY.fullmatch(detail) else "-",
+                )
+                return Generation(
+                    question=question, failed_agents=("CCA",), cloud_outcome=LOCAL_UNVERIFIED
+                )
         try:
             # Building loads the models: a failure here escalates like any
             # other model failure (ADR 0005).
@@ -438,17 +467,75 @@ def _local_nli(folder: Path) -> Callable[[], Any]:
 
 
 def default_orchestrator(
-    pinned: PinnedSource | None = None, pinned_roles: Sequence[str] = ()
+    pinned: PinnedSource | None = None,
+    pinned_roles: Sequence[str] = (),
+    settings: WorkerSettings | None = None,
 ) -> OrchestratorModelClient:
     """The production client: each job gets its own knowledge base,
     retriever, CCA and HGA over that job's chunks (departure 10: indexing
     per job; a cached index is performance-plan work). The NLI model and
-    the Ollama generator are shared: they hold no per-request state. Loads
+    the generator are shared: they hold no per-request state. Loads
     the models on first use, on the job's thread. pinned gives what the
-    worker verified (None until then); pinned_roles are the roles it needs."""
+    worker verified (None until then); pinned_roles are the roles it needs;
+    settings the local route's (local_generator; None: the defaults, and
+    development only when APP_ENV says so)."""
     source: PinnedSource = pinned if pinned is not None else (lambda: None)
-    build, versions = local_parts(source, pinned_roles)
-    return OrchestratorModelClient(build, versions=versions, pinned=source)
+    gen = _generator_for(source, pinned_roles, settings)
+    build, versions = local_parts(source, pinned_roles, generator=gen)
+    return OrchestratorModelClient(
+        build, versions=versions, pinned=source, preflight=getattr(gen, "check", None)
+    )
+
+
+def local_generator(
+    pinned: PinnedSource,
+    pinned_roles: Sequence[str],
+    settings: Any,
+    *,
+    development: bool,
+    unpinned: bool = False,
+) -> Any:
+    """The local route's CCA generator (module docstring): the pinned llama sidecar when
+    ``cca`` is a pinned role; else Ollama in development or with ``unpinned``
+    (INTELLIGENCE_LOCAL_UNPINNED=on); else the refused route, which escalates every job.
+    settings is a tools.llama_client.LocalLLMSettings."""
+    from intelligence.tools import llama_client
+
+    if "cca" in pinned_roles:
+
+        def expected() -> str | None:
+            p = pinned()
+            return None if p is None else p.versions().get("cca")
+
+        return llama_client.PinnedLlamaGenerator(llama_client.LlamaSidecar(settings), expected)
+    if development or unpinned:
+        from intelligence.tools.ollama_client import OllamaGenerator
+
+        if not development:
+            log.warning("local.unpinned: the local route answers from an unpinned Ollama model")
+        return OllamaGenerator()
+    log.error(
+        "local.unpinned_refused: no pinned cca and INTELLIGENCE_LOCAL_UNPINNED is off: "
+        "every question on the local route escalates"
+    )
+    return llama_client.RefusedGenerator()
+
+
+def _generator_for(
+    pinned: PinnedSource, pinned_roles: Sequence[str], settings: WorkerSettings | None
+) -> Any:
+    if settings is not None:
+        return local_generator(
+            pinned,
+            pinned_roles,
+            settings.local_llm,
+            development=settings.development,
+            unpinned=settings.local_unpinned,
+        )
+    from intelligence.boundary.config import is_development
+    from intelligence.tools.llama_client import LocalLLMSettings
+
+    return local_generator(pinned, pinned_roles, LocalLLMSettings(), development=is_development())
 
 
 def local_parts(
@@ -460,9 +547,10 @@ def local_parts(
 ) -> tuple[Builder, dict[str, str]]:
     """default_orchestrator's builder and versions, for the cloud clients
     (plan Task 9): they retrieve and verify with the same local models.
-    pinned and pinned_roles as for default_orchestrator. generator replaces
-    the Ollama generator (the answer gate scores a candidate GGUF through it:
-    intelligence.doceval.answers.gate). local_models ({"dense", "nli"} ->
+    pinned and pinned_roles as for default_orchestrator. generator is the
+    CCA's generator (local_generator's; the answer gate scores a candidate GGUF
+    through its own: intelligence.doceval.answers.gate); None is
+    local_generator's choice with the default settings. local_models ({"dense", "nli"} ->
     a verified folder, doceval.answers.gate_models) loads both models from
     those folders only, offline, instead of the configured hub names."""
     if local_models is not None:
@@ -482,11 +570,9 @@ def local_parts(
         MedicalKnowledgeBase,
         RAGClinicalContextAgent,
     )
-    from intelligence.tools.ollama_client import OllamaGenerator
-
     cfg = get_config()
     if generator is None:
-        generator = OllamaGenerator()
+        generator = _generator_for(source, pinned_roles, None)
     dense_name = f"sentence-transformers/{cfg.DENSE_MODEL}"
     if local_models is not None:
         dense_name = str(local_models["dense"])
@@ -625,7 +711,7 @@ def build_model_client(settings: WorkerSettings, pinned: PinnedSource | None = N
         log.warning("model client is the stub: synthetic answers only")
         return StubModelClient()
     if settings.model_client == "orchestrator":
-        return default_orchestrator(pinned, settings.model_roles)
+        return default_orchestrator(pinned, settings.model_roles, settings)
     raise ConfigError("INTELLIGENCE_MODEL_CLIENT must be orchestrator or stub")
 
 
@@ -780,8 +866,11 @@ def build_model_router(settings: WorkerSettings, pinned: PinnedSource | None = N
     local: ModelClient
     if settings.model_client == "orchestrator":
         source: PinnedSource = pinned if pinned is not None else (lambda: None)
-        build, versions = local_parts(source, settings.model_roles)
-        local = OrchestratorModelClient(build, versions=versions, pinned=source)
+        gen = _generator_for(source, settings.model_roles, settings)
+        build, versions = local_parts(source, settings.model_roles, generator=gen)
+        local = OrchestratorModelClient(
+            build, versions=versions, pinned=source, preflight=getattr(gen, "check", None)
+        )
     else:
         local = build_model_client(settings)  # the stub, development only
         build, versions = stub_parts()
