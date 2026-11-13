@@ -172,6 +172,7 @@ The cloud plan's and the promotion design's constraints hold: no PHI or secrets 
 - **Question bank instead of a JSONL from the owner.** `doceval/answers/bank.py` holds templates around the six seeded guidelines (required facts, must not say, red flag, out of scope, missing info). The dev split (76 items, 36 must-escalate) is drawn with a public seed and committed in `testdata/answers/dev`; the locked test split is drawn with the OS random source inside the store by `testset-build --suite clinical_answer` (the model-testset workflow), so the existing tooling and `models/testsets.lock` carry it unchanged. The templates are in the repository, so the locked split differs from the dev split in its draws only.
 - **Escalated** means the verification decision is `ESCALATE` (a failed or raising generation counts as escalated). The report holds aggregates only, never an item, id or answer.
 - **Cloud comparison:** the report's `comparison` block (informational, never a gate) and a scorer that takes any `ModelClient`; no runner for it yet (the cloud client needs a job grant).
+- **The gate's retriever and NLI models are pinned** (security review of #144): `models/answer-gate-models.lock` names an exact commit and the SHA-256 of every file (safetensors and JSON/tokenizer files only) for the configured `DENSE_MODEL` and `NLI_MODEL`. The workflow downloads exactly those, the gate verifies every file before anything starts (a mismatch refuses it) and loads both from those folders only, offline. When `nli` becomes pinnable in `models.lock`, the gate moves to that pin.
 - **Workflow:** `model-promote.yml` gains the `answer` gate (production mode only; rehearsal mode still forces the document rehearsal gate).
 
 ### PR 3: pinned local generator and sidecar
@@ -282,7 +283,6 @@ Each comes back at the trigger named, alongside TODO.md's existing model-promoti
 - **Drift and quality monitoring** on live answers (escalation rate, trust distribution per version), with an alert. Before a second hospital.
 - **Training on de-identified real data** (`training.ALLOWED_KINDS` gains `deidentified`), with the privacy lead's sign-off. Not before.
 - **A written, held-out locked split** for `clinical_answer` from the question set owner (beside or instead of the template bank), so the locked questions are not derivable from the repository. With the clinical sign-off.
-- **Pinned retriever and NLI models for the answer gate** (today the gate, like the worker, uses the configured `DENSE_MODEL` and `NLI_MODEL` from the cache). When `nli` becomes pinnable.
 - **A runner for the cloud comparison** on the locked split (the report already has the field). Before the first switch (PR 4) if the product owner wants the numbers side by side.
 - **A `cca` rehearsal in the CI rehearsal mode** (a tiny GGUF and llama-server in `model-promotion-e2e`). When promotion runs are frequent enough to need it.
 - **Removing the cloud route** for a hospital entirely (no key on the host). When every hospital runs local.

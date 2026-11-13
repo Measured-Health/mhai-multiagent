@@ -16,12 +16,15 @@ safetensors (security review of #143). :func:`evaluate_gguf_run`:
    ``warmup.json`` ``{answered, engine, engine_version, question_sha256}``;
 6. stops the server and checks the GGUF is unchanged.
 
-The default builder loads the configured retriever and NLI models with the Hugging Face
-hub offline (they must already be in the job's cache); a test passes its own.
+The default builder loads the retriever and NLI models from folders verified, before
+anything starts, against the exact revisions and file hashes in
+``models/answer-gate-models.lock`` (:mod:`gate_models`; a mismatch refuses the gate), with
+the Hugging Face hub offline; a test passes its own builder.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -29,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from intelligence.doceval import report
-from intelligence.doceval.answers import llama_runtime, schema, score
+from intelligence.doceval.answers import gate_models, llama_runtime, schema, score
 from intelligence.doceval.answers import report as areport
 from intelligence.modelstore import canonical, files
 from intelligence.modelstore.reasons import Refused
@@ -43,13 +46,13 @@ WARMUP_SYSTEM = "Answer briefly from the shared clinical guidelines."
 BuilderFor = Callable[[Any], Callable[[Sequence[Any]], Any]]
 
 
-def default_builder(generator: Any) -> Callable[[Sequence[Any]], Any]:
-    """The worker's builder (``local_parts``) with ``generator`` as the CCA's generator,
-    loading its retriever and NLI models from the local cache only."""
-    from intelligence.boundary.models import local_parts, set_hub_offline
+def default_builder(generator: Any, models: Mapping[str, Path]) -> Callable[[Sequence[Any]], Any]:
+    """The worker's builder (``local_parts``) with ``generator`` as the CCA's generator and
+    its retriever and NLI models loaded, offline, from ``models``: the folders
+    :func:`gate_models.paths_from_env` verified against ``models/answer-gate-models.lock``."""
+    from intelligence.boundary.models import local_parts
 
-    set_hub_offline()
-    build, _ = local_parts(generator=generator)
+    build, _ = local_parts(generator=generator, local_models=models)
     return build
 
 
@@ -110,11 +113,16 @@ def evaluate_gguf_run(
     from intelligence.boundary.models import OrchestratorModelClient
 
     gguf = find_gguf(entries)
+    make: BuilderFor
+    if builder_for is None:
+        # verified before the server or any model starts
+        make = functools.partial(default_builder, models=gate_models.paths_from_env())
+    else:
+        make = builder_for
     loaded = schema.load_set(set_dir)
     if loaded.meta["purpose"] != split:
         raise Refused("testset_mismatch", detail_code="split")
     engine_version = llama_runtime.check_engine(settings)
-    make = builder_for or default_builder
     with llama_runtime.LlamaServer(settings, run_dir / gguf.path, gguf.sha256, home) as server:
         client = OrchestratorModelClient(make(server.generator), masker=_NoMasker())
         results = score.score(client, loaded.items)

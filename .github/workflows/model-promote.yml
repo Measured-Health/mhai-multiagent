@@ -21,7 +21,8 @@ name: Model promotion
 # Gate answer (role cca, own answer model plan PR 2): the run's GGUF itself is scored
 # through llama-server, built here at llama.cpp's pinned commit (the export step's), on
 # loopback and offline. The retriever and NLI models the answer checks use are downloaded
-# first; the evaluation then runs with the Hugging Face hub offline. Production mode only
+# first at the exact revisions in models/answer-gate-models.lock and verified file by file
+# against its hashes; the evaluation loads them from that folder only, hub offline. Production mode only
 # (rehearsal mode forces the rehearsal gate, a document gate).
 
 on:
@@ -158,7 +159,7 @@ jobs:
 
       # The answer gate's runtime: llama-server at the pinned commit (LLAMA_CPP_COMMIT in
       # intelligence/doceval/answers/llama_runtime.py), built without curl, so it cannot
-      # fetch a model. Then the answer checks' retriever and NLI models into the cache.
+      # fetch a model. Then the answer checks' retriever and NLI models, pinned and verified.
       - name: llama.cpp and the answer checks' models (answer gate)
         if: env.GATE == 'answer'
         working-directory: services/intelligence
@@ -173,7 +174,9 @@ jobs:
           cmake -S "$src" -B "$src/build" -DLLAMA_CURL=OFF -DLLAMA_BUILD_IS_DEV=OFF -DGGML_NATIVE=OFF -DCMAKE_BUILD_TYPE=Release
           cmake --build "$src/build" --target llama-server -j 4
           echo "MHAI_LLAMA_SERVER=$src/build/bin/llama-server" >>"$GITHUB_ENV"
-          uv run --no-sync python -c 'from huggingface_hub import snapshot_download as d; from intelligence.config.settings import get_config as g; c = g(); d(f"sentence-transformers/{c.DENSE_MODEL}"); d(str(c.NLI_MODEL))'
+          install -d -m 700 "$RUNNER_TEMP/gate-models"
+          uv run --no-sync python -m intelligence.doceval.answers.gate_models fetch "$RUNNER_TEMP/gate-models"
+          echo "MHAI_ANSWER_GATE_MODELS=$RUNNER_TEMP/gate-models" >>"$GITHUB_ENV"
 
       # A short-lived, read-only Drive token from the service account's key (repository
       # secret MODEL_DRIVE_SA_KEY); the CLI runs drive_check before it reads the run.
