@@ -188,7 +188,8 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.WithLink(server.Readiness(a.pool, nc, buckets.All()), link),
 		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health,
 		CloudProviders: cfg.CloudProviders, EMREnabled: cfg.EMREnabled, EMRTypes: cfg.EMRConnectorTypes,
-		EMR: &emrctl.Client{NC: nc, Signer: signer, Log: log}, EMRSealer: sealer, EMRDevelopment: cfg.Development()})
+		EMR: &emrctl.Client{NC: nc, Signer: signer, Log: log}, EMRSealer: sealer, EMRDevelopment: cfg.Development(),
+		Analysis: analysis.NewEngine(a.pool, log)})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}

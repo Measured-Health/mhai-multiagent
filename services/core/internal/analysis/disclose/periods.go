@@ -152,45 +152,12 @@ func GuardPeriod(raw Raw, children []ChildBodies) (Body, error) {
 // nothing changes. On a check that can't pass, the context is hidden
 // whole. The children are the period's, with the same filters.
 func Guard(raw Raw, children []ChildBodies, published []Body) (Body, error) {
-	if err := CheckFilters(raw.Context.Filters); err != nil {
-		return HiddenWhole(raw.Context), err
-	}
-	var parents []ParentContext
-	for _, b := range published {
-		if b.Context.Period.Equal(raw.Context.Period) && subsetOf(b.Context.Filters, raw.Context.Filters) {
-			parents = append(parents, ParentContext{Body: b})
-		}
-	}
-	forced, whole := FamilyForced(raw, parents)
-	if whole {
-		return HiddenWhole(raw.Context), nil
-	}
 	var known []Body
 	for _, c := range children {
 		known = append(known, c.Body)
 	}
-	for _, b := range published {
-		dup := false
-		for _, c := range children {
-			dup = dup || (c.Body.Context.Period.Equal(b.Context.Period) && c.Body.Context.Filters == b.Context.Filters)
-		}
-		if !dup {
-			known = append(known, b)
-		}
-	}
-	forced = forced.Union(ParentForced(raw, nil, children))
-	for {
-		b, err := GuardResponse(raw, forced, known...)
-		if err != nil || b.Whole {
-			return b, err
-		}
-		more := ParentForced(raw, &b, children)
-		n := len(forced)
-		forced = forced.Union(more)
-		if len(forced) == n {
-			return b, nil
-		}
-	}
+	known = append(known, published...)
+	return NewLedger(known...).Guard(raw, children)
 }
 
 // subsetOf: every filter of a is in b, and a has fewer.

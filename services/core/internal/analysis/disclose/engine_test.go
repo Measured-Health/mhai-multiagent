@@ -17,6 +17,9 @@ func rawOf(w *attack.World, p calendar.Period, f Filters, first bool) Raw {
 	d := w.Dims
 	var r Raw
 	r.Context = Context{Period: p, Filters: f, First: first}
+	// The hospital's sources: every subject has one (the definer function
+	// lists the period's, null included when a subject has none).
+	r.Sources = append([]string{}, d.Sources...)
 	in := func(per calendar.Period) []int {
 		var out []int
 		for i, b := range w.Blocks {
