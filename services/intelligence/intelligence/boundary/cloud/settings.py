@@ -13,6 +13,14 @@ development only. ZDR_REF=DEMO-SYNTHETIC is accepted only with APP_ENV=demo
 refused whether a provider is enabled or not (SDK_ENV_PREFIXES), and a
 custom CA (SSL_CERT_FILE, SSL_CERT_DIR) once one is.
 
+Gemini: Google may use prompts sent with a free-tier key to improve its
+products; a key on a paid, billing-enabled project is not used that way.
+INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified records that someone checked
+the key's project is on the paid tier. With gemini enabled and it unset or
+"unverified", start-up is refused, demo included (the pilot runs there);
+only APP_ENV=development starts, with a warning (deploy/README.md). Any
+other value is refused everywhere.
+
 Errors name variables, never their values (design section 7).
 """
 
@@ -43,6 +51,18 @@ NO_CA_BUNDLE = "no CA bundle at OpenSSL's paths (a CA file or a non-empty CA dir
 DEMO_ZDR_REF = "DEMO-SYNTHETIC"
 _MODEL = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 _ZDR_REF = re.compile(r"[A-Z0-9][A-Z0-9_.-]{2,63}")
+# INTELLIGENCE_CLOUD_GEMINI_PAID_TIER's values; unset is "unverified".
+GEMINI_PAID_TIER_VAR = "INTELLIGENCE_CLOUD_GEMINI_PAID_TIER"
+GEMINI_PAID_TIER_VALUES = ("unverified", "verified")
+GEMINI_UNVERIFIED_ERROR = (
+    f"{GEMINI_PAID_TIER_VAR}=verified is required with gemini enabled "
+    "(the key must be on a paid, billing-enabled project)"
+)
+GEMINI_UNVERIFIED_WARNING = (
+    "%s is not verified (development only): Google may use prompts sent with a free-tier key "
+    "to improve its products; use a key on a paid, billing-enabled project. Outside "
+    "development, start-up refuses until it is verified (deploy/README.md)"
+)
 # Anthropic models that need 30-day retention: not allowed (design section 14).
 _RETAINED_ANTHROPIC = ("fable", "mythos")
 
@@ -51,7 +71,7 @@ _RETAINED_ANTHROPIC = ("fable", "mythos")
 # request headers, an organisation, project or workspace, a credential
 # chain, debug logging or trace propagation from them, and a new release
 # adds names. A prefix also refuses those.
-SDK_ENV_PREFIXES = ("OPENAI_", "ANTHROPIC_", "AZURE_OPENAI_", "XAI_")
+SDK_ENV_PREFIXES = ("OPENAI_", "ANTHROPIC_", "AZURE_OPENAI_", "XAI_", "GEMINI_")
 
 # Documentation only (the prefixes are the rule): the names openai 3.37.0
 # and anthropic 2.3.0 read for the clients this worker builds, from their
@@ -90,6 +110,9 @@ SDK_ENV_REFUSED = (
     "ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE",
     "ANTHROPIC_OPEN_TELEMETRY_TRACES_MAX_CONTENT_BYTES",
     "XAI_API_KEY",
+    # Not read by the openai SDK; refused so a Gemini key never sits in
+    # the environment (google-genai's name for it).
+    "GEMINI_API_KEY",
 )
 
 # A custom CA for the provider connections: OpenSSL's default paths and
@@ -259,6 +282,16 @@ def _provider(
             log.warning("%sZDR_REF is %s (APP_ENV=demo): synthetic data only", prefix, DEMO_ZDR_REF)
         else:
             errs.append(f"{prefix}ZDR_REF={DEMO_ZDR_REF} is accepted only with APP_ENV=demo")
+
+    if p == "gemini":
+        tier = get("PAID_TIER")
+        if tier is not None and tier not in GEMINI_PAID_TIER_VALUES:
+            errs.append(f"{GEMINI_PAID_TIER_VAR} must be verified or unverified")
+        elif tier != "verified":
+            if development:
+                log.warning(GEMINI_UNVERIFIED_WARNING, GEMINI_PAID_TIER_VAR)
+            else:
+                errs.append(GEMINI_UNVERIFIED_ERROR)
 
     if len(errs) != before or model is None or key is None:
         return None

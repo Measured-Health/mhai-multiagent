@@ -26,7 +26,12 @@ from tests.boundary.cloud.conftest import FAKE_KEY
 
 pytestmark = pytest.mark.disable_socket
 
-MODELS = {"anthropic": "claude-opus-5-5", "openai": "gpt-6.1-sol", "xai": "grok-4.7"}
+MODELS = {
+    "anthropic": "claude-opus-5-5",
+    "gemini": "gemini-synthetic-1",
+    "openai": "gpt-6.1-sol",
+    "xai": "grok-4.7",
+}
 ZDR = "DPA-2026-0001"
 PROXY = "http://egress-proxy:3128"
 WORKER = {
@@ -101,7 +106,11 @@ A = "INTELLIGENCE_CLOUD_ANTHROPIC_"
 @pytest.mark.parametrize(
     "change,name,value",
     [
-        (_set("INTELLIGENCE_CLOUD_PROVIDERS", "gemini"), "INTELLIGENCE_CLOUD_PROVIDERS", "gemini"),
+        (
+            _set("INTELLIGENCE_CLOUD_PROVIDERS", "mistral"),
+            "INTELLIGENCE_CLOUD_PROVIDERS",
+            "mistral",
+        ),
         (
             _set("INTELLIGENCE_CLOUD_PROVIDERS", "anthropic,anthropic"),
             "INTELLIGENCE_CLOUD_PROVIDERS",
@@ -270,7 +279,7 @@ def test_sdk_environment_variables_refused() -> None:
     """K16: any variable an SDK could read (a key, a base URL, extra headers,
     a credential chain, debug logging, trace propagation) refuses start-up,
     by prefix, so a name a later SDK release adds is refused too."""
-    assert SDK_ENV_PREFIXES == ("OPENAI_", "ANTHROPIC_", "AZURE_OPENAI_", "XAI_")
+    assert SDK_ENV_PREFIXES == ("OPENAI_", "ANTHROPIC_", "AZURE_OPENAI_", "XAI_", "GEMINI_")
     # The documented names (read by openai 3.37.0 and anthropic 2.3.0) all
     # fall under a prefix.
     assert {
@@ -281,6 +290,7 @@ def test_sdk_environment_variables_refused() -> None:
         "ANTHROPIC_CUSTOM_HEADERS",
         "ANTHROPIC_OPEN_TELEMETRY_PROPAGATION",
         "XAI_API_KEY",
+        "GEMINI_API_KEY",
     } <= set(SDK_ENV_REFUSED)
     assert all(n.startswith(SDK_ENV_PREFIXES) for n in SDK_ENV_REFUSED)
     value = "fake" + "9" * 24
@@ -290,6 +300,8 @@ def test_sdk_environment_variables_refused() -> None:
         "ANTHROPIC_CUSTOM_HEADERS",
         "AZURE_OPENAI_API_KEY",
         "XAI_ANYTHING_NEW",
+        "GEMINI_API_KEY",
+        "GEMINI_ANYTHING_NEW",
         "ANTHROPIC_A_NAME_A_LATER_SDK_ADDS",
     )
     for name in names:
@@ -474,3 +486,97 @@ def test_tls_context_refuses_without_ca_bundle(
     _verify_paths(monkeypatch, tmp_path / "none.pem", tmp_path / "none")
     with pytest.raises(ConfigError, match="CA bundle"):
         tls_context()
+
+
+# --- Gemini: the paid-tier check (refused unless verified; development warns) -------------
+
+PAID_VAR = "INTELLIGENCE_CLOUD_GEMINI_PAID_TIER"
+PAID_ERROR = (
+    f"{PAID_VAR}=verified is required with gemini enabled "
+    "(the key must be on a paid, billing-enabled project)"
+)
+
+
+def _paid_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if PAID_VAR in r.getMessage()]
+
+
+@pytest.mark.parametrize("tier", [None, "unverified"])
+@pytest.mark.parametrize("app_env", [None, "production", "demo"])
+def test_gemini_unverified_paid_tier_refused_outside_development(
+    key_file: Callable[..., Path],
+    caplog: pytest.LogCaptureFixture,
+    tier: str | None,
+    app_env: str | None,
+) -> None:
+    """Google may use free-tier prompts to improve its products: outside
+    development, gemini starts only with the paid tier marked verified.
+    Demo counts as real (the pilot runs there). The error names the setting,
+    never the key."""
+    env = cloud_env(key_file(), "gemini")
+    if tier is not None:
+        env[PAID_VAR] = tier
+    if app_env is not None:
+        env["APP_ENV"] = app_env
+    s, errs = read(env)
+    assert errs == [PAID_ERROR]
+    assert s.providers == ()
+    assert FAKE_KEY not in " ".join(errs) and FAKE_KEY not in caplog.text
+    with pytest.raises(ConfigError) as e:
+        # WORKER is development; unset APP_ENV is production, so drop it.
+        worker = {k: v for k, v in WORKER.items() if k != "APP_ENV"}
+        WorkerSettings.from_env({**worker, **_prod_worker(), **env})
+    assert PAID_VAR in str(e.value) and FAKE_KEY not in str(e.value)
+
+
+@pytest.mark.parametrize("tier", [None, "unverified"])
+def test_gemini_unverified_paid_tier_only_warns_in_development(
+    key_file: Callable[..., Path], caplog: pytest.LogCaptureFixture, tier: str | None
+) -> None:
+    caplog.set_level(logging.WARNING)
+    env = cloud_env(key_file(), "gemini")
+    if tier is not None:
+        env[PAID_VAR] = tier
+    s, errs = read(env, development=True)
+    assert errs == [] and [p.name for p in s.providers] == ["gemini"]
+    warned = _paid_warnings(caplog)
+    assert len(warned) == 1 and "paid" in warned[0]
+    assert FAKE_KEY not in caplog.text
+
+
+@pytest.mark.parametrize("development", [False, True])
+def test_gemini_verified_paid_tier_starts_quietly(
+    key_file: Callable[..., Path], caplog: pytest.LogCaptureFixture, development: bool
+) -> None:
+    caplog.set_level(logging.WARNING)
+    env = {**cloud_env(key_file(), "gemini"), PAID_VAR: "verified"}
+    s, errs = read(env, development=development)
+    assert errs == [] and [p.name for p in s.providers] == ["gemini"]
+    assert _paid_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("value", ["yes", "true", "Verified", "paid"])
+@pytest.mark.parametrize("development", [False, True])
+def test_gemini_paid_tier_other_values_refused(
+    key_file: Callable[..., Path], value: str, development: bool
+) -> None:
+    s, errs = read({**cloud_env(key_file(), "gemini"), PAID_VAR: value}, development=development)
+    assert errs == [f"{PAID_VAR} must be verified or unverified"]
+    assert s.providers == ()
+
+
+def test_paid_tier_is_read_for_gemini_only(
+    key_file: Callable[..., Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING)
+    _, errs = read({**cloud_env(key_file(), "openai"), PAID_VAR: "anything"})
+    assert errs == [] and _paid_warnings(caplog) == []
+
+
+def test_gemini_needs_its_agreement_reference_outside_development(
+    key_file: Callable[..., Path],
+) -> None:
+    env = cloud_env(key_file(), "gemini")
+    del env["INTELLIGENCE_CLOUD_GEMINI_ZDR_REF"]
+    _, errs = read({**env, PAID_VAR: "verified"})
+    assert errs == ["INTELLIGENCE_CLOUD_GEMINI_ZDR_REF is required outside development"]

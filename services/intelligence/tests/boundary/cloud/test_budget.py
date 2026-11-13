@@ -177,7 +177,7 @@ async def test_policy_switch_refuses_the_old_provider(
     assert await _in_thread(port.reserve, "openai", TOKENS) is None
     assert await _in_thread(port.reserve, "anthropic", TOKENS) is not None
     await _set_provider(postgres, hid, None)
-    for p in ("openai", "anthropic", "xai"):
+    for p in ("openai", "anthropic", "xai", "gemini"):
         assert await _in_thread(port.reserve, p, TOKENS) is None
     assert await _ledger(postgres, hid) == (0, 2 * TOKENS, 2)
 
@@ -201,3 +201,15 @@ async def test_db_error_from_core_fails_closed(postgres: Postgres, database: Dat
     assert await _in_thread(port.reserve, "anthropic", 100_001) is None
     assert await _in_thread(port.reserve, "anthropic", 0) is None
     assert await _ledger(postgres, hid) == (0, 0, 0)
+
+
+async def test_gemini_reserves_under_its_own_policy(postgres: Postgres, database: Database) -> None:
+    """Migration 00024: a gemini policy reserves for gemini and nothing else,
+    and its reservation settles like any other."""
+    hid = await _hospital(postgres, "gemini", 10 * TOKENS)
+    port = _port(database, hid)
+    r = await _in_thread(port.reserve, "gemini", TOKENS)
+    assert r is not None
+    assert await _in_thread(port.reserve, "xai", TOKENS) is None
+    await _in_thread(port.settle, r, 300)
+    assert await _ledger(postgres, hid) == (300, 0, 0)

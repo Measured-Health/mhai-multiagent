@@ -435,7 +435,13 @@ def test_router_picks_one_client_per_job() -> None:
 
 @pytest.mark.parametrize(
     ("route", "provider"),
-    [("cloud:xai", "xai"), ("cloud:gemini", "unknown"), ("", "unknown"), ("LOCAL", "unknown")],
+    [
+        ("cloud:xai", "xai"),
+        ("cloud:gemini", "gemini"),
+        ("cloud:mistral", "unknown"),
+        ("", "unknown"),
+        ("LOCAL", "unknown"),
+    ],
 )
 def test_router_unknown_route_is_unconfigured(
     route: str, provider: str, caplog: pytest.LogCaptureFixture

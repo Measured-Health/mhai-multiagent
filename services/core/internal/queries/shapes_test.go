@@ -9,7 +9,7 @@ import (
 // model_versions (plan departure 15), never from the inserted row or the
 // hospital's policy now, so it names the route that produced the answer.
 func TestGeneratedByFromDecision(t *testing.T) {
-	anthropic, openai, xai := "anthropic", "openai", "xai"
+	anthropic, openai, xai, gemini := "anthropic", "openai", "xai", "gemini"
 	for _, c := range []struct {
 		name     string
 		versions string
@@ -19,10 +19,14 @@ func TestGeneratedByFromDecision(t *testing.T) {
 		{"local without cca", `{"cca_route":"local"}`, &GeneratedBy{Route: "local"}},
 		{"local ignores a provider-shaped cca", `{"cca_route":"local","cca":"anthropic/x@y"}`, &GeneratedBy{Route: "local"}},
 		{"cloud anthropic", `{"cca_route":"cloud","cca":"anthropic/claude-opus-5-5@claude-opus-5-5"}`,
-			&GeneratedBy{Route: "cloud", Provider: &anthropic}},
-		{"cloud openai", `{"cca_route":"cloud","cca":"openai/gpt-6.1-sol@gpt-6.1-sol"}`, &GeneratedBy{Route: "cloud", Provider: &openai}},
-		{"cloud xai", `{"cca_route":"cloud","cca":"xai/grok-4.7@grok-4.7"}`, &GeneratedBy{Route: "cloud", Provider: &xai}},
-		{"unknown provider prefix", `{"cca_route":"cloud","cca":"gemini/g-3@g-3"}`, nil},
+			&GeneratedBy{Route: "cloud", Provider: &anthropic, ProviderCode: &anthropic}},
+		{"cloud openai", `{"cca_route":"cloud","cca":"openai/gpt-6.1-sol@gpt-6.1-sol"}`, &GeneratedBy{Route: "cloud", Provider: &openai, ProviderCode: &openai}},
+		{"cloud xai", `{"cca_route":"cloud","cca":"xai/grok-4.7@grok-4.7"}`, &GeneratedBy{Route: "cloud", Provider: &xai, ProviderCode: &xai}},
+		// openapi 1.x's provider enum can't name gemini: null there, and
+		// provider_code says gemini.
+		{"cloud gemini", `{"cca_route":"cloud","cca":"gemini/synthetic-model@synthetic-model"}`,
+			&GeneratedBy{Route: "cloud", ProviderCode: &gemini}},
+		{"unknown provider prefix", `{"cca_route":"cloud","cca":"mistral/m-3@m-3"}`, nil},
 		{"provider in the wrong case", `{"cca_route":"cloud","cca":"Anthropic/claude@x"}`, nil},
 		{"cloud without cca", `{"cca_route":"cloud"}`, nil},
 		{"malformed cca: no slash", `{"cca_route":"cloud","cca":"anthropic"}`, nil},
@@ -47,8 +51,16 @@ func TestGeneratedByFromDecision(t *testing.T) {
 	}
 	// The wire shape: provider is present, and null on a local answer.
 	raw, _ := json.Marshal(generatedBy(stringVersions([]byte(`{"cca_route":"local"}`))))
-	if string(raw) != `{"route":"local","provider":null}` {
+	if string(raw) != `{"route":"local","provider":null,"provider_code":null}` {
 		t.Errorf("local wire shape %s", raw)
+	}
+	raw, _ = json.Marshal(generatedBy(stringVersions([]byte(`{"cca_route":"cloud","cca":"gemini/m@m"}`))))
+	if string(raw) != `{"route":"cloud","provider":null,"provider_code":"gemini"}` {
+		t.Errorf("gemini wire shape %s", raw)
+	}
+	raw, _ = json.Marshal(generatedBy(stringVersions([]byte(`{"cca_route":"cloud","cca":"xai/m@m"}`))))
+	if string(raw) != `{"route":"cloud","provider":"xai","provider_code":"xai"}` {
+		t.Errorf("xai wire shape %s", raw)
 	}
 	raw, _ = json.Marshal(ClinicalResultOut{})
 	var m map[string]any
@@ -62,8 +74,6 @@ func sameGeneratedBy(a, b *GeneratedBy) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if a.Route != b.Route || (a.Provider == nil) != (b.Provider == nil) {
-		return false
-	}
-	return a.Provider == nil || *a.Provider == *b.Provider
+	same := func(x, y *string) bool { return (x == nil && y == nil) || (x != nil && y != nil && *x == *y) }
+	return a.Route == b.Route && same(a.Provider, b.Provider) && same(a.ProviderCode, b.ProviderCode)
 }

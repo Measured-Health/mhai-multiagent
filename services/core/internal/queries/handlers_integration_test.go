@@ -702,7 +702,7 @@ func TestResultGeneratedBy(t *testing.T) {
 		t.Fatalf("switched: %d %s", r.code, r.raw)
 	}
 	if gb, _ := r.body["generated_by"].(map[string]any); gb == nil || gb["route"] != "local" || gb["provider"] != nil ||
-		len(gb) != 2 {
+		gb["provider_code"] != nil || len(gb) != 3 {
 		t.Errorf("switched off before the claim: generated_by %v", r.body["generated_by"])
 	}
 
@@ -715,9 +715,20 @@ func TestResultGeneratedBy(t *testing.T) {
 		policy(now)
 		r := result(cloud, tok)
 		gb, _ := r.body["generated_by"].(map[string]any)
-		if r.code != 200 || gb == nil || gb["route"] != "cloud" || gb["provider"] != "anthropic" {
+		if r.code != 200 || gb == nil || gb["route"] != "cloud" || gb["provider"] != "anthropic" || gb["provider_code"] != "anthropic" {
 			t.Errorf("cloud answer with the policy now %q: %d %s", now, r.code, r.raw)
 		}
+	}
+	// A gemini answer: provider (whose 1.x enum can't name it) is null,
+	// provider_code says gemini.
+	policy("gemini")
+	gem := submit(t, e, tok)
+	complete(gem, "PASS", `{"cca_route":"cloud","cca":"gemini/synthetic-model@synthetic-model","dense":"bge"}`, true)
+	if r := result(gem, tok); r.code != 200 {
+		t.Errorf("gemini answer: %d %s", r.code, r.raw)
+	} else if gb, _ := r.body["generated_by"].(map[string]any); gb == nil || gb["route"] != "cloud" || gb["provider"] != nil ||
+		gb["provider_code"] != "gemini" {
+		t.Errorf("gemini answer: %s", r.raw)
 	}
 
 	// 3. A cloud failure with no draft (no cca_route) has no generated_by.
@@ -734,7 +745,7 @@ func TestResultGeneratedBy(t *testing.T) {
 
 	// 4. A decision naming a provider outside the set shows nothing.
 	odd := submit(t, e, tok)
-	complete(odd, "PASS", `{"cca_route":"cloud","cca":"gemini/g@g"}`, true)
+	complete(odd, "PASS", `{"cca_route":"cloud","cca":"mistral/m@m"}`, true)
 	if r := result(odd, tok); r.code != 200 || r.body["generated_by"] != nil {
 		t.Errorf("unknown provider: %d %s", r.code, r.raw)
 	}

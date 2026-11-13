@@ -91,7 +91,15 @@ claim runs local.
 
 **Settings** (pipeline only; all unset by default):
 
-- `INTELLIGENCE_CLOUD_PROVIDERS`: a comma list of `anthropic`, `openai`, `xai`.
+- `INTELLIGENCE_CLOUD_PROVIDERS`: a comma list of `anthropic`, `gemini`,
+  `openai`, `xai`. Gemini goes through Google's OpenAI-compatible endpoint
+  (`boundary/cloud/gemini_adapter.py`).
+- `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER`: `verified` once someone has checked
+  the Gemini key's Google project is on the paid tier with billing on (a
+  free-tier key's prompts may be used by Google to improve its products).
+  Unset or `unverified` refuses start-up with gemini enabled (demo too);
+  only `APP_ENV=development` starts, with a warning. Any other value is
+  refused.
 - Per provider: `INTELLIGENCE_CLOUD_<PROVIDER>_MODEL` (an exact model id; no
   Fable or Mythos), `INTELLIGENCE_CLOUD_<PROVIDER>_KEY_FILE` (mode 0400 or
   0440; never a variable holding the key), and outside development
@@ -105,7 +113,7 @@ claim runs local.
 Start-up refuses any of: an incomplete provider; a key file with the wrong
 mode, a placeholder, whitespace or under 20 characters; `SSL_CERT_FILE` or
 `SSL_CERT_DIR` with a provider enabled; no CA bundle at OpenSSL's paths with
-a provider enabled. **Any `OPENAI_*`, `ANTHROPIC_*`, `AZURE_OPENAI_*` or
+a provider enabled. **Any `OPENAI_*`, `ANTHROPIC_*`, `AZURE_OPENAI_*`, `GEMINI_*` or
 `XAI_*` variable refuses start-up for every worker, cloud on or off** (a
 developer shell exporting `OPENAI_API_KEY` will hit it): the SDKs read keys,
 base URLs, headers and logging from them.

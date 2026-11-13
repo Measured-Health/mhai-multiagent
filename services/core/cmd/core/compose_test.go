@@ -1097,8 +1097,8 @@ func TestEgressProxyPinnedByDigest(t *testing.T) {
 // service in either compose file (nor the commented pipeline) has a
 // provider key in its environment, and core has no worker cloud setting.
 func TestNoProviderKeyInAnyEnvironment(t *testing.T) {
-	providerVar := regexp.MustCompile(`(?i)(OPENAI|ANTHROPIC|XAI|INTELLIGENCE_CLOUD_[A-Z]+)_(API_)?KEY$|^(OPENAI|ANTHROPIC|XAI|AZURE_OPENAI)_`)
-	keyValue := regexp.MustCompile(`\b(sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9_-]{8,})`)
+	providerVar := regexp.MustCompile(`(?i)(OPENAI|ANTHROPIC|XAI|GEMINI|GOOGLE|INTELLIGENCE_CLOUD_[A-Z]+)_(API_)?KEY$|^(OPENAI|ANTHROPIC|XAI|AZURE_OPENAI|GEMINI)_`)
+	keyValue := regexp.MustCompile(`\b(sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{8,})`)
 	check := func(file, name string, env map[string]string) {
 		for k, v := range env {
 			if providerVar.MatchString(k) {
@@ -1120,6 +1120,8 @@ func TestNoProviderKeyInAnyEnvironment(t *testing.T) {
 	}
 	// The negative case, so the pattern can't silently match nothing.
 	if !providerVar.MatchString("ANTHROPIC_API_KEY") || !providerVar.MatchString("INTELLIGENCE_CLOUD_XAI_KEY") ||
+		!providerVar.MatchString("GEMINI_API_KEY") || !providerVar.MatchString("GOOGLE_API_KEY") ||
+		!providerVar.MatchString("INTELLIGENCE_CLOUD_GEMINI_KEY") || !keyValue.MatchString("AIzaSYNTHETIC000") ||
 		providerVar.MatchString("INTELLIGENCE_CLOUD_XAI_KEY_FILE") || providerVar.MatchString("NATS_JS_KEY") {
 		t.Fatal("providerVar pattern is wrong")
 	}

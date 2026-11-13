@@ -29,7 +29,8 @@ SDK_LOGGERS = ("openai", "anthropic", "httpx", "httpcore", "httpx2", "httpcore2"
 
 # Provider key shapes. The lookbehind keeps words such as "risk-assessment"
 # whole; a key is preceded by a space, a quote, "=" or ":" in practice.
-_KEY_SHAPES = re.compile(r"(?<![A-Za-z0-9_-])(?:sk-ant-|sk-|xai-)[A-Za-z0-9_-]{8,}")
+# Google's API keys start "AIza".
+_KEY_SHAPES = re.compile(r"(?<![A-Za-z0-9_-])(?:sk-ant-|sk-|xai-|AIza)[A-Za-z0-9_-]{8,}")
 
 
 @final

@@ -366,7 +366,7 @@ func init() {
 	// platform action); the hospital is in the payload. The agreement
 	// reference has the id shape and is absent when none was given.
 	// The reference is present exactly when a provider is (off clears it).
-	provider := OneOf("none", "openai", "anthropic", "xai")
+	provider := OneOf("none", "openai", "anthropic", "xai", "gemini")
 	agreementRef := func(v any) bool {
 		s, ok := v.(string)
 		return ok && agreementRefPattern.MatchString(s) && !pseudonymS.MatchString(s)

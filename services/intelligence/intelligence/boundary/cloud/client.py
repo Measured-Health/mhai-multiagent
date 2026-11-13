@@ -288,6 +288,10 @@ class CloudModelClient:
             raise ConfigError("the adapter is not this provider's")
         if type(adapter.shape) is not Shape:
             raise ConfigError("the adapter has no Shape")
+        # The scan hook takes its header list from the Shape's provider:
+        # it must be this provider's (two providers can share a layout).
+        if adapter.shape.provider != provider.name:
+            raise ConfigError("the adapter's Shape is not this provider's")
         self._provider = provider
         self._adapter = adapter
         self._build = build
@@ -599,6 +603,12 @@ def _anthropic(model: str) -> Adapter:
     return AnthropicAdapter(model)
 
 
+def _gemini(model: str) -> Adapter:
+    from intelligence.boundary.cloud.gemini_adapter import GeminiAdapter
+
+    return GeminiAdapter(model)
+
+
 def _openai(model: str) -> Adapter:
     from intelligence.boundary.cloud.openai_adapter import OpenAIAdapter
 
@@ -615,6 +625,7 @@ def _xai(model: str) -> Adapter:
 
 ADAPTERS: dict[str, Callable[[str], Adapter]] = {
     "anthropic": _anthropic,
+    "gemini": _gemini,
     "openai": _openai,
     "xai": _xai,
 }

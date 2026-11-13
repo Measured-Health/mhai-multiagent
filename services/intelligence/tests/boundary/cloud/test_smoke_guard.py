@@ -31,7 +31,12 @@ SCRIPTS = ROOT / "scripts"
 SMOKE = SCRIPTS / "cloud_smoke.py"
 SCRUB = SCRIPTS / "scrub_cloud_fixture.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "cloud"
-MODELS = {"anthropic": "claude-opus-5-5", "openai": "gpt-6.1-sol", "xai": "grok-4.7"}
+MODELS = {
+    "anthropic": "claude-opus-5-5",
+    "gemini": "gemini-synthetic-1",
+    "openai": "gpt-6.1-sol",
+    "xai": "grok-4.7",
+}
 # A person's machine: the smoke's own variable, nothing else of note.
 OK_ENV = {"MHAI_CLOUD_SMOKE": "1", "APP_ENV": "demo", "PATH": "/usr/bin"}
 
@@ -288,6 +293,15 @@ def test_smoke_never_prints_or_logs_the_key(
         assert lines["over_cap"] == "no"
     else:
         assert "retention_header" not in lines
+    if provider == "gemini":
+        # The reply's shape as closed codes: what the adapter assumes of
+        # Google's OpenAI-compatible endpoint, checked on the live run.
+        assert lines["reply_object"] == "chat.completion"
+        assert lines["finish_reason"] == "stop"
+        assert lines["choices"] == "1" and lines["model_present"] == "yes"
+        assert lines["over_cap"] == "no"
+    else:
+        assert "reply_object" not in lines
     # Only provider, outcome, versions, counts, the header and the verdict:
     # no text of the question, the chunks or the answer.
     assert "Synthetic" not in out and "KB#" not in out

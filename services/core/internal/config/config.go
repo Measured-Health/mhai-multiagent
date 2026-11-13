@@ -148,7 +148,24 @@ func LoadIdempotencyHMACKey(path string) ([]byte, error) {
 
 // CloudProviderNames are the cloud model providers core knows (the closed
 // vocabulary of the design; Python holds the same list).
-var CloudProviderNames = []string{"anthropic", "openai", "xai"}
+var CloudProviderNames = []string{"anthropic", "gemini", "openai", "xai"}
+
+// CloudProviderEnumV1 are the providers that openapi 1.x's response enums
+// name (ModelPolicy.cloud_provider and generated_by.provider). Widening a
+// response enum breaks /api/v1 (ADR 0012), so a provider added later
+// (gemini) is reported in the provider_code property only, and those enum
+// fields say null for it. Never add a value here.
+var CloudProviderEnumV1 = []string{"anthropic", "openai", "xai"}
+
+// EnumV1Provider is provider when openapi 1.x's response enums name it,
+// else nil (see CloudProviderEnumV1).
+func EnumV1Provider(provider *string) *string {
+	if provider == nil || !slices.Contains(CloudProviderEnumV1, *provider) {
+		return nil
+	}
+	p := *provider
+	return &p
+}
 
 // CloudOutcomes are the cloud call's outcome codes (design §11), the closed
 // set of query.completed's cloud_outcome. The worker holds the same list
@@ -161,7 +178,7 @@ var CloudOutcomes = []string{"ok", "egress_blocked", "budget_exhausted", "unconf
 func EgressValues() []string { return append([]string{"none"}, CloudProviderNames...) }
 
 // errCloudProviders names the variable only, never its value.
-var errCloudProviders = errors.New("CORE_CLOUD_PROVIDERS must list each of anthropic openai xai at most once, comma separated")
+var errCloudProviders = errors.New("CORE_CLOUD_PROVIDERS must list each of anthropic gemini openai xai at most once, comma separated")
 
 // ParseCloudProviders reads CORE_CLOUD_PROVIDERS: blank is none; otherwise
 // each comma-separated name, trimmed, must be one of CloudProviderNames and

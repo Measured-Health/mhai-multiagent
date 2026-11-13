@@ -1,0 +1,18 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "SYNTHETIC0001",
+    "object": "chat.completion",
+    "created": 1762473600,
+    "model": "synthetic-model-1",
+    "choices": [],
+    "usage": {
+      "prompt_tokens": 812,
+      "completion_tokens": 64,
+      "total_tokens": 916
+    }
+  }
+}

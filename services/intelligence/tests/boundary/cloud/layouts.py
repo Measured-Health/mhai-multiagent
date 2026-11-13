@@ -24,7 +24,7 @@ import httpx2
 from intelligence.boundary.cloud import scan
 from intelligence.boundary.cloud.gate import SYSTEM_PROMPT
 
-PROVIDERS = ("anthropic", "openai", "xai")
+PROVIDERS = ("anthropic", "gemini", "openai", "xai")
 MODEL = "synthetic-model-1"
 MAX_TOKENS = 1500
 
@@ -47,6 +47,7 @@ SCHEMA: dict[str, Any] = {
 
 _SCHEMA_PREFIX = {
     "anthropic": "/output_config/format/schema",
+    "gemini": "/response_format/json_schema/schema",
     "openai": "/text/format/schema",
     "xai": "/response_format/json_schema/schema",
 }
@@ -86,10 +87,12 @@ def render(
                 }
             },
         }
-    if provider == "xai":
+    if provider in ("gemini", "xai"):
+        extra = {"reasoning_effort": "low"} if provider == "gemini" else {}
         return {
             "model": MODEL,
             "max_tokens": MAX_TOKENS,
+            **extra,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": content},
@@ -121,7 +124,7 @@ def _fixed(provider: str) -> frozenset[str]:
                 "/text/format/strict",
             }
         )
-    return frozenset(
+    chat = frozenset(
         {
             "/model",
             "/max_tokens",
@@ -133,6 +136,7 @@ def _fixed(provider: str) -> frozenset[str]:
             "/response_format/json_schema/strict",
         }
     )
+    return chat | {"/reasoning_effort"} if provider == "gemini" else chat
 
 
 def shape(provider: str, schema: dict[str, Any] | None = None) -> scan.Shape:
@@ -207,9 +211,10 @@ def sdk_body(provider: str, blocks: Sequence[str]) -> bytes:
                 input=[{"role": "user", "content": content}],
             )
         else:
+            base = {"gemini": "https://generativelanguage.googleapis.com/v1beta/openai"}
             x = openai.OpenAI(
                 api_key=key,
-                base_url="https://api.x.ai/v1",
+                base_url=base.get(provider, "https://api.x.ai/v1"),
                 http_client=_sdk_client(captured),
                 max_retries=0,
             )
@@ -251,4 +256,5 @@ def sdk_shape(provider: str) -> scan.Shape:
             "/messages/1/role": "user",
         },
     }
+    fixed["gemini"] = fixed["xai"]
     return scan.shape_for(provider, fixed[provider])
