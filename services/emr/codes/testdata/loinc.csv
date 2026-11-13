@@ -10,3 +10,9 @@ code,display,status,source
 99909-4,Body temperature [synthetic],ACTIVE,synthetic
 99910-2,Oxygen saturation [synthetic],ACTIVE,synthetic
 99911-0,Old potassium [synthetic],DEPRECATED,synthetic
+99912-8,Level of consciousness [synthetic],ACTIVE,synthetic
+99913-6,Air or supplemental oxygen [synthetic],ACTIVE,synthetic
+99914-4,SpO2 scale [synthetic],ACTIVE,synthetic
+99915-1,Lactate [synthetic],ACTIVE,synthetic
+99916-9,Troponin [synthetic],ACTIVE,synthetic
+99917-7,Analyte with no conversion row [synthetic],ACTIVE,synthetic

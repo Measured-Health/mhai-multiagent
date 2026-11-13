@@ -1,0 +1,92 @@
+description: Rises, falls and ratios against earlier values inside the window; only final, timed, current values count as a baseline; conversion before comparison.
+rule_set: 0-synthetic
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: rise
+    sex: female
+    birth_date: "1950-01-01"
+    observations:
+      - {id: c-80, analyte: creatinine, value: "80", unit: umol/L, at: -40h}
+      - {id: c-110, analyte: creatinine, value: "110", unit: umol/L, at: -1h}
+    triggers: [c-110]
+  - id: rise-edge
+    sex: female
+    birth_date: "1950-01-01"
+    observations:
+      - {id: c-80, analyte: creatinine, value: "80", unit: umol/L, at: -47h}
+      - {id: c-106.5, analyte: creatinine, value: "106.5", unit: umol/L, at: -1h}
+    triggers: [c-106.5]
+  - id: rise-short
+    sex: female
+    birth_date: "1950-01-01"
+    observations:
+      - {id: c-80, analyte: creatinine, value: "80", unit: umol/L, at: -20h}
+      - {id: c-106.4, analyte: creatinine, value: "106.4", unit: umol/L, at: -1h}
+    triggers: [c-106.4]
+  - id: rise-outside-window
+    sex: female
+    birth_date: "1950-01-01"
+    observations:
+      - {id: c-80, analyte: creatinine, value: "80", unit: umol/L, at: -50h}
+      - {id: c-110, analyte: creatinine, value: "110", unit: umol/L, at: -1h}
+    triggers: [c-110]
+  - id: ratio
+    sex: male
+    birth_date: "1950-01-01"
+    observations:
+      - {id: c-80, analyte: creatinine, value: "80", unit: umol/L, at: -144h}
+      - {id: c-125, analyte: creatinine, value: "125", unit: umol/L, at: -1h}
+    triggers: [c-125]
+  - id: ratio-short
+    sex: male
+    birth_date: "1950-01-01"
+    observations:
+      - {id: c-80, analyte: creatinine, value: "80", unit: umol/L, at: -144h}
+      - {id: c-119, analyte: creatinine, value: "119", unit: umol/L, at: -1h}
+    triggers: [c-119]
+  - id: rise-mgdl
+    sex: male
+    birth_date: "1950-01-01"
+    observations:
+      - {id: c-1.0mgdl, analyte: creatinine, value: "1.0", unit: mg/dL, at: -24h}
+      - {id: c-1.4mgdl, analyte: creatinine, value: "1.4", unit: mg/dL, at: -1h}
+    triggers: [c-1.4mgdl]
+  - id: baseline-not-final
+    sex: male
+    birth_date: "1950-01-01"
+    observations:
+      - {id: c-60-prelim, analyte: creatinine, value: "60", unit: umol/L, at: -30h, status: preliminary}
+      - {id: c-60-error, analyte: creatinine, value: "60", unit: umol/L, at: -30h, status: entered-in-error}
+      - {id: c-60-old-version, analyte: creatinine, value: "60", unit: umol/L, at: -30h, superseded: true}
+      - {id: c-60-date-only, analyte: creatinine, value: "60", unit: umol/L, at: "date:2026-11-06"}
+      - {id: c-60-later, analyte: creatinine, value: "60", unit: umol/L, at: -30m}
+      - {id: c-100, analyte: creatinine, value: "100", unit: umol/L, at: -1h}
+    triggers: [c-100]
+  - id: hb-fall
+    sex: female
+    birth_date: "1950-01-01"
+    observations:
+      - {id: hb-10, analyte: haemoglobin, value: "10.0", unit: g/dL, at: -20h}
+      - {id: hb-8, analyte: haemoglobin, value: "8.0", unit: g/dL, at: -1h}
+    triggers: [hb-8]
+  - id: hb-fall-short
+    sex: female
+    birth_date: "1950-01-01"
+    observations:
+      - {id: hb-9.9, analyte: haemoglobin, value: "9.9", unit: g/dL, at: -20h}
+      - {id: hb-8, analyte: haemoglobin, value: "8.0", unit: g/dL, at: -1h}
+    triggers: [hb-8]
+expect:
+  - {patient: rise, observation: c-110, rule_id: creatinine-rise-48h, severity: urgent, evidence: [c-80]}
+  - {patient: rise-edge, observation: c-106.5, rule_id: creatinine-rise-48h, severity: urgent}
+  - {patient: ratio, observation: c-125, rule_id: creatinine-ratio-7d, severity: urgent, evidence: [c-80]}
+  - {patient: rise-mgdl, observation: c-1.4mgdl, rule_id: creatinine-rise-48h, severity: urgent}
+  - {patient: hb-fall, observation: hb-8, rule_id: haemoglobin-fall-24h, severity: urgent}
+expect_none:
+  - {patient: rise, observation: c-110, rule_id: creatinine-ratio-7d}
+  - {patient: rise-short, observation: c-106.4, rule_id: creatinine-rise-48h}
+  - {patient: rise-outside-window, observation: c-110, rule_id: creatinine-rise-48h}
+  - {patient: ratio-short, observation: c-119, rule_id: creatinine-ratio-7d}
+  - {patient: baseline-not-final, observation: c-100, rule_id: creatinine-rise-48h}
+  - {patient: baseline-not-final, observation: c-100, rule_id: creatinine-ratio-7d}
+  - {patient: hb-fall-short, observation: hb-8, rule_id: haemoglobin-fall-24h}

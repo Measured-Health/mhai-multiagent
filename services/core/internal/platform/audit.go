@@ -126,6 +126,7 @@ func Register(m *authz.Mux, d Deps) {
 	registerFollowUps(m, d)
 	registerModelPolicy(m, d)
 	registerEMRConnections(m, d)
+	registerEMRRuleSet(m, d)
 }
 
 // caller is the verified platform principal, or a 500 (the guard admits

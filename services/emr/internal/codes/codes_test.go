@@ -71,7 +71,7 @@ func TestNoConversionNoValueSI(t *testing.T) {
 	for _, c := range []struct {
 		loinc, unit string
 		v           float64
-	}{{"99902-9", "mg/dL", 18}, {"99907-8", "mm[Hg]", 120}, {"99901-1", "g/L", 1}, {"99901-1", "mmol/L", math.NaN()}} {
+	}{{"99902-9", "mg/dL", 18}, {"99917-7", "mmol/L", 120}, {"99901-1", "g/L", 1}, {"99901-1", "mmol/L", math.NaN()}} {
 		if v, ok := m.Convert(c.loinc, c.v, c.unit); ok {
 			t.Errorf("%s in %s converted to %v", c.loinc, c.unit, v)
 		}

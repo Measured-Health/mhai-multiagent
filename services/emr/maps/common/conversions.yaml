@@ -13,7 +13,9 @@ analytes:
         factor: 0.0555
   - loinc: 99902-9   # potassium
     canonical: mmol/L
-    conversions: []
+    conversions:
+      - from: meq/L
+        factor: 1
   - loinc: 99903-7   # creatinine
     canonical: umol/L
     conversions:
@@ -21,7 +23,9 @@ analytes:
         factor: 88.4
   - loinc: 99904-5   # sodium
     canonical: mmol/L
-    conversions: []
+    conversions:
+      - from: meq/L
+        factor: 1
   - loinc: 99905-2   # haemoglobin
     canonical: g/dL
     conversions:
@@ -33,3 +37,20 @@ analytes:
   - loinc: 99910-2   # oxygen saturation
     canonical: "%"
     conversions: []
+  - loinc: 99907-8   # systolic blood pressure
+    canonical: mm[Hg]
+    conversions: []
+  - loinc: 99908-6   # respiratory rate
+    canonical: /min
+    conversions: []
+  - loinc: 99909-4   # body temperature
+    canonical: Cel
+    conversions: []
+  - loinc: 99915-1   # lactate
+    canonical: mmol/L
+    conversions: []
+  - loinc: 99916-9   # troponin
+    canonical: ng/L
+    conversions:
+      - from: pg/mL
+        factor: 1
