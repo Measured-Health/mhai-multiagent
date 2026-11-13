@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.16.0"
+  version: "1.17.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -767,7 +767,7 @@ paths:
         (otherwise 404 not_found, before anything else is read). Without `period` and `start`, the
         latest frozen month's lists; with them, that period's. A condition is listed only with 5 or
         more patients in the period, plus every "Not standardised" entry. A period's lists are stored
-        when first asked for and never change. Added in 1.16.0.
+        when first asked for and never change. Added in 1.17.0.
       tags: [analysis]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, invalid_range, rate_limited, not_ready, unavailable, internal_error]
@@ -806,7 +806,7 @@ paths:
         contexts computed cold per period (429 rate_limited past it). Every number is guarded under the small-group
         rule and served from the stored body unchanged; `history` lists up to 7 earlier periods of
         the level, each copied from that period's own stored body. Reads are recorded once per
-        session, filter set and period. Added in 1.16.0.
+        session, filter set and period. Added in 1.17.0.
       tags: [analysis]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, invalid_range, too_many_filters, rate_limited, not_ready, unavailable, internal_error]
