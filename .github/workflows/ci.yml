@@ -199,8 +199,44 @@ jobs:
       - name: Store tests (MinIO with testcontainers)
         run: uv run --no-sync pytest -q -m store tests/modelstore
 
+  # The core suites run as parallel jobs: one after another they took about
+  # 77 minutes per PR, which slows the pilot down. Same commands as before.
   core:
+    name: core (${{ matrix.suite }})
     runs-on: ubuntu-latest  # ships Docker, which the integration tests use
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: lint and unit
+            run: |
+              test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
+              go vet ./...
+              go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+              go test -race ./...
+              # The smoke test runs in boundary-smoke; here it only has to build.
+              go vet -tags smoke ./internal/smoke/...
+          - suite: integration
+            run: go test -race -tags integration ./...
+          - suite: integration with fixture routes
+            run: go test -race -tags "integration test" ./...
+          # Plan 7c (A7, R41a-5): the analytics history properties at full size
+          # (500 guard-level histories, the unions and the JSON-side set check).
+          # The -race runs use smaller samples to fit Go's package limit.
+          - suite: analytics history properties
+            run: >
+              go test -count=1 -timeout 30m
+              -run 'TestHistoryAnchoredAtOnboarding|TestUnionsOfHiddenWeeksMeasured|TestFullyHiddenAlwaysPasses|TestHistoryFromRouteJSON|TestHistorySetsFromRouteJSON'
+              ./internal/smallgroup/...
+          # Analysis (plan Tasks 6-8, ruling C10): the disclosure properties at
+          # their non-race size (P1 one response, P2 every context of a period,
+          # small and realistic worlds, P4 histories, P5 bounds).
+          # ANALYSIS_LONG=1 runs the full size (2,000 / 100 / 500 / 100).
+          - suite: analysis disclosure properties
+            run: >
+              go test -count=1 -timeout 60m
+              -run 'TestP1|TestP2|TestP4|TestP5|TestOneStatePerGroupInFamily'
+              ./internal/analysis/disclose/...
     defaults:
       run:
         working-directory: services/core
@@ -212,38 +248,10 @@ jobs:
         with:
           go-version: "1.24"
           cache-dependency-path: services/core/go.mod
-      - name: Formatted (gofmt)
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
-      - name: Vet
-        run: go vet ./...
-      - name: Staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
-      - name: Test
-        run: go test -race ./...
-      - name: Integration tests
-        run: go test -race -tags integration ./...
-      - name: Integration tests with the test-only fixture routes
-        run: go test -race -tags "integration test" ./...
-      # Plan 7c (A7, R41a-5): the analytics history properties at full size
-      # (500 guard-level histories, the unions and the JSON-side set check).
-      # The -race runs above use smaller samples to fit Go's package limit.
-      - name: Analytics history properties (full size)
-        run: >
-          go test -count=1 -timeout 30m
-          -run 'TestHistoryAnchoredAtOnboarding|TestUnionsOfHiddenWeeksMeasured|TestFullyHiddenAlwaysPasses|TestHistoryFromRouteJSON|TestHistorySetsFromRouteJSON'
-          ./internal/smallgroup/...
-      # Analysis (plan Tasks 6–8, ruling C10): the disclosure properties at
-      # their non-race size (P1 one response, P2 every context of a period,
-      # small and realistic worlds, P4 histories, P5 bounds).
-      # ANALYSIS_LONG=1 runs the full size (2,000 / 100 / 500 / 100).
-      - name: Analysis disclosure properties
-        run: >
-          go test -count=1 -timeout 60m
-          -run 'TestP1|TestP2|TestP4|TestP5|TestOneStatePerGroupInFamily'
-          ./internal/analysis/disclose/...
-      # The smoke test runs in boundary-smoke; here it only has to build.
-      - name: Vet the smoke test
-        run: go vet -tags smoke ./internal/smoke/...
+      - name: ${{ matrix.suite }}
+        env:
+          SUITE_RUN: ${{ matrix.run }}
+        run: bash -eo pipefail -c "$SUITE_RUN"
 
   # The Go module core and the emr service share (ADR 0014): a defect here
   # reaches both.
