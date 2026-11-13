@@ -280,6 +280,14 @@ var Catalogue = map[string]Entry{
 	// the mapping is agreed (TODO.md, "Before scale").
 	"analysis.viewed":           withheld(),
 	"analysis.unusual_querying": withheld(),
+	// The drill-down (plan Tasks 13-14): mhai-web's analysis_patients_viewed
+	// and audit_patients_viewed take facts and targets not agreed yet (H6):
+	// sent bare until they are (TODO.md, "Before scale"). Bare entries carry
+	// no payload, so no count leaves through them either.
+	"analysis.patients_viewed":     withheld(),
+	"analysis.list_limit_reached":  withheld(),
+	"analysis.patient_cap_reached": withheld(),
+	"audit.patients_viewed":        withheld(),
 
 	// EMR connections (EMR design §12.6): mhai-web's Plan 13 kinds, with
 	// the connection as the target. A resume has no kind yet: sent bare.

@@ -1,5 +1,6 @@
-// Package routes serves Patient Analysis's aggregate reads (design §9;
-// plan Task 10): GET /analysis/filters and GET /analysis/{view}, for a
+// Package routes serves Patient Analysis's reads (design §9; plan Tasks 10
+// and 13): GET /analysis/filters, GET /analysis/{view} and the
+// de-identified list, GET /analysis/patients, for a
 // hospital admin or an analyst with two-step, only while the hospital's
 // analysis switch is on (otherwise 404, before anything else is read).
 // Every number it sends is from a stored, guarded body (internal/analysis);
@@ -36,6 +37,9 @@ type Deps struct {
 	Log    *slog.Logger
 	// Now is the rate limiter's clock (nil: time.Now).
 	Now func() time.Time
+	// Keys derive the drill keys (departure 13). Nil: no count has a
+	// drill, and every list is 422 too_small.
+	Keys *analysis.Keys
 }
 
 // Rule is the routes' rule: hospital admins and analysts, two-step.
@@ -44,12 +48,17 @@ var Rule = authz.Rule{AnyRole: []string{authz.RoleHospitalAdmin, authz.RoleAnaly
 type handlers struct {
 	d   Deps
 	lim *limiter
+	// afterOpen, when set, runs after a list is opened and before its
+	// audit entry is appended; its error rolls the list back (tests only:
+	// T18).
+	afterOpen func() error
 }
 
 // Register adds the aggregate routes to m.
 func Register(m *authz.Mux, d Deps) {
 	h := &handlers{d: d, lim: newLimiter(AggregateReads, AggregateWindow, d.Now)}
 	authz.Route(m, http.MethodGet, "/analysis/filters", Rule, http.HandlerFunc(h.filters))
+	authz.Route(m, http.MethodGet, "/analysis/patients", Rule, http.HandlerFunc(h.patients))
 	authz.Route(m, http.MethodGet, "/analysis/{view}", Rule, http.HandlerFunc(h.views))
 }
 

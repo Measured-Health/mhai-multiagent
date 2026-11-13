@@ -46,6 +46,8 @@ type env struct {
 	logs       *bytes.Buffer
 	session    string
 	user       uuid.UUID
+	hd         *handlers
+	eng        *analysis.Engine
 }
 
 func pools(t *testing.T) (*pgxpool.Pool, *pgxpool.Pool) {
@@ -76,6 +78,11 @@ func newEnv(t *testing.T, super, app *pgxpool.Pool, on bool) *env {
 		VALUES ($1, 'Synthetic Demo Hospital', $2, 'active', 'Africa/Lagos', true)`, e.h, "Y"+e.h.String()[:8])
 	run(t, super, `INSERT INTO analysis_switch (hospital_id, position, signoff_clinical, signoff_privacy, signoff_legal)
 		VALUES (NULL, 'on', 'DEMO-SYNTHETIC', 'DEMO-SYNTHETIC', 'DEMO-SYNTHETIC') ON CONFLICT DO NOTHING`)
+	// The admin, with two-step on (the list re-reads both, §6.4).
+	run(t, super, `INSERT INTO users (id, hospital_id, email, display_name) VALUES ($1, $2, $3, 'Synthetic Admin')`,
+		e.user, e.h, "admin-"+e.user.String()[:8]+"@demo.example.test")
+	run(t, super, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'hospital_admin')`, e.user)
+	run(t, super, `INSERT INTO user_mfa (user_id, secret_enc, enabled) VALUES ($1, '\x00', true)`, e.user)
 	if on {
 		run(t, super, `INSERT INTO analysis_switch (hospital_id, position, signoff_clinical, signoff_privacy, signoff_legal)
 			VALUES ($1, 'on', 'DEMO-SYNTHETIC', 'DEMO-SYNTHETIC', 'DEMO-SYNTHETIC')`, e.h)
@@ -118,9 +125,11 @@ func newEnv(t *testing.T, super, app *pgxpool.Pool, on bool) *env {
 	eng.Budget = time.Minute
 	log := slog.New(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	eng.Log = log
-	h := &handlers{d: Deps{Pool: app, Engine: eng, Log: log}, lim: newLimiter(AggregateReads, AggregateWindow, nil)}
+	h := &handlers{d: Deps{Pool: app, Engine: eng, Log: log, Keys: testKeys(t, 1)}, lim: newLimiter(AggregateReads, AggregateWindow, nil)}
+	e.hd, e.eng = h, eng
 	e.mux = http.NewServeMux()
 	e.mux.Handle("GET "+httpx.BasePath+"/analysis/filters", http.HandlerFunc(h.filters))
+	e.mux.Handle("GET "+httpx.BasePath+"/analysis/patients", http.HandlerFunc(h.patients))
 	e.mux.Handle("GET "+httpx.BasePath+"/analysis/{view}", http.HandlerFunc(h.views))
 	return e
 }

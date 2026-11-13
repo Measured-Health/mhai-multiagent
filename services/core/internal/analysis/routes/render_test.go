@@ -51,6 +51,13 @@ func TestAnalysisRolesAndMFA(t *testing.T) {
 	}
 }
 
+// The list limits (design §5.6), pinned.
+func TestListLimits(t *testing.T) {
+	if ListsPerMinute != 10 || ListsPerDay != 50 {
+		t.Errorf("lists %d a minute, %d a day; want 10 and 50", ListsPerMinute, ListsPerDay)
+	}
+}
+
 // parse: one period exactly, the contract's filters, nothing else.
 func TestParse(t *testing.T) {
 	for q, want := range map[string]error{

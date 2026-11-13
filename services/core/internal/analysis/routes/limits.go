@@ -12,6 +12,12 @@ const (
 	// session may make in AggregateWindow; past it, 429 rate_limited.
 	AggregateReads  = 30
 	AggregateWindow = time.Minute
+	// ListsPerMinute and ListsPerDay are the most de-identified lists one
+	// person may open in a minute and in a hospital day (design §5.6);
+	// past either, 429 rate_limited and one flagged entry a day. Counted
+	// in the database, across core copies (mhai_analysis_list_admit).
+	ListsPerMinute = 10
+	ListsPerDay    = 50
 )
 
 // limiter is a sliding window per session, in this core copy (a shared
