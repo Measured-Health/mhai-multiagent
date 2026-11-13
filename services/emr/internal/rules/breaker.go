@@ -8,7 +8,10 @@ package rules
 // breaker_tripped is signalled to core by ids. Findings already made are
 // kept and announced; the backlog waits for a platform admin's resume
 // (plan Task 37). Historical findings don't count (a first sync would trip
-// it); shadow ones do (a flood is a flood, alerting or not).
+// it); shadow ones do (a flood is a flood, alerting or not), but the
+// consumer only runs the breaker while the rule set alerts for the
+// hospital: a source is never paused for findings no one is shown. A
+// source with less than 14 days of findings is held to YoungBaseline.
 
 import (
 	"context"
@@ -29,6 +32,10 @@ const (
 	DefaultBreakerMultiple      = 5.0
 	DefaultBreakerFloorCritical = 10
 	breakerBaselineWindows      = 14 * 96 // 14 days of 15-minute windows
+	// YoungBaseline is the baseline a source is held to until it has 14
+	// days of findings: its median is still mostly empty windows, so the
+	// floor alone would pause a new source on its first busy ward round.
+	YoungBaseline = 4.0
 )
 
 // Breaker trips per source on critical findings.
@@ -83,6 +90,15 @@ func (b *Breaker) Observe(ctx context.Context, hid, conn uuid.UUID) (bool, error
 			FROM generate_series(0, $4 - 1) AS g(w) LEFT JOIN counts c USING (w)`, hid, conn, now, breakerBaselineWindows).
 			Scan(&baseline); err != nil {
 			return err
+		}
+		var young bool
+		if err := tx.QueryRow(ctx, `SELECT coalesce(min(created_at) > $3::timestamptz - interval '14 days', true)
+			FROM emr.findings WHERE hospital_id = $1 AND connection_id = $2 AND severity = 'critical'
+			AND status <> 'historical'`, hid, conn, now).Scan(&young); err != nil {
+			return err
+		}
+		if young && baseline < YoungBaseline {
+			baseline = YoungBaseline
 		}
 		if float64(count) <= b.Multiple*baseline {
 			return nil

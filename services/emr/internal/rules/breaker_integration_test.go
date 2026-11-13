@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
+
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb"
 )
 
@@ -144,21 +146,54 @@ func TestBreakerNeedsBothMultipleAndFloor(t *testing.T) {
 	}
 }
 
-// The consumer runs the breaker after announcing: every finding made
-// before the trip is announced, and the source is paused.
+// The consumer runs the breaker after announcing, and only while the rule
+// set alerts for the hospital: in shadow no source is paused. Active, every
+// finding made before the trip is announced, and the source is paused.
 func TestConsumerBreakerAnnouncesThenPauses(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	f.eng.Breaker = &Breaker{Pool: f.pool, Pub: f.pub, Multiple: 5, FloorCritical: 2}
-	ids := f.ingest(t, false, patientRec("p1"), kRec("k1", "1", "p1", "6.8", "final", time.Hour),
-		kRec("k2", "1", "p1", "6.9", "final", time.Hour), kRec("k3", "1", "p1", "7.0", "final", time.Hour))
-	if err := f.eng.Handle(ctx, f.hospital, ids); err != nil {
+	f.eng.Breaker = &Breaker{Pool: f.pool, Pub: f.pub, Multiple: 1, FloorCritical: 2}
+	recs := func(prefix string) []connector.RawRecord {
+		out := []connector.RawRecord{patientRec("p1")}
+		for i := range 5 {
+			out = append(out, kRec(prefix+string(rune('a'+i)), "1", "p1", "6.8", "final", time.Hour))
+		}
+		return out
+	}
+	if err := f.eng.Handle(ctx, f.hospital, f.ingest(t, false, recs("s-")...)); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(f.pub.on(".finding")); n != 3 {
-		t.Fatalf("%d announced, want 3", n)
+	if f.paused(t) || len(f.pub.on(".signal")) != 0 {
+		t.Fatal("a source was paused while the rule set is in shadow")
+	}
+	sha := f.eng.RuleSet.SHA256()
+	f.eng.Active = f.eng.RuleSet.Version()
+	f.activate(t, f.eng.RuleSet.Version(), sha[:])
+	if err := f.eng.Handle(ctx, f.hospital, f.ingest(t, false, recs("a-")...)); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.pub.on(".finding")); n != 10 {
+		t.Fatalf("%d announced, want 10", n)
 	}
 	if !f.paused(t) || len(f.pub.on(".signal")) != 1 {
 		t.Fatalf("paused %v signals %d", f.paused(t), len(f.pub.on(".signal")))
+	}
+}
+
+// A source with less than 14 days of findings is held to a baseline of 4
+// a window, so 15 criticals (over the floor of 10) don't pause it; 21 do.
+func TestBreakerYoungSourceBaselineFloor(t *testing.T) {
+	f := newFixture(t)
+	obs, patient := f.oneObservation(t)
+	now := time.Now()
+	ctx := context.Background()
+	b := &Breaker{Pool: f.pool, Pub: f.pub, Multiple: 5, FloorCritical: 10, Now: func() time.Time { return now }}
+	f.seedFindings(t, obs, patient, 15, now.Add(-time.Minute))
+	if tripped, err := b.Observe(ctx, f.hospital, f.conn); err != nil || tripped {
+		t.Fatalf("15 on a young source: %v %v", tripped, err)
+	}
+	f.seedFindings(t, obs, patient, 6, now.Add(-time.Minute))
+	if tripped, err := b.Observe(ctx, f.hospital, f.conn); err != nil || !tripped {
+		t.Fatalf("21 on a young source: %v %v", tripped, err)
 	}
 }
