@@ -51,6 +51,14 @@ public request keys, mounted read-only; re-read on SIGHUP),
 `INTELLIGENCE_MAX_CONCURRENCY`, and `OTEL_EXPORTER_OTLP_ENDPOINT`. A bad
 setting stops the worker with a message that names variables, never values.
 
+`INTELLIGENCE_SINGLE_HOST=on` (exactly `on`) is the one transport exception
+outside development: NATS (`nats://`) and Postgres (`sslmode=disable`)
+without TLS, only to single-label Docker service names on the worker's own
+host (no dot, no address, not localhost). The NKey, the file password and
+every other production rule stay, and the worker logs a warning at start.
+It exists for the pilot on the demo host (`deploy/pilot/README.md`), which
+has no TLS inside the instance yet; never use it across hosts.
+
 ## Cloud models (off by default)
 
 A hospital a platform admin has opted in can have its clinical drafts

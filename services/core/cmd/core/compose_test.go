@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nats-io/nkeys"
 	"gopkg.in/yaml.v3"
 )
 
@@ -757,6 +758,8 @@ type deployService struct {
 	MemLimit    string            `yaml:"mem_limit"`
 	CapDrop     []string          `yaml:"cap_drop"`
 	User        string            `yaml:"user"`
+	Command     []string          `yaml:"command"`
+	EnvFile     yaml.Node         `yaml:"env_file"`
 }
 
 type deployCompose struct {
@@ -808,11 +811,15 @@ func loadComposeAs(t *testing.T, name string) deployCompose {
 	return c
 }
 
-// commentedPipeline parses deploy/compose.yml's commented-out pipeline
-// block as an operator would uncomment it.
-func commentedPipeline(t *testing.T) deployService {
+// pilotPipeline is deploy/compose.yml's pipeline service (profile pilot,
+// deploy/pilot/README.md).
+func pilotPipeline(t *testing.T) deployService {
 	t.Helper()
-	return commentedService(t, "pipeline")
+	p, ok := loadDeployCompose(t).Services["pipeline"]
+	if !ok {
+		t.Fatal("deploy/compose.yml has no pipeline service (profile pilot)")
+	}
+	return p
 }
 
 // commentedService parses deploy/compose.yml's commented-out block for
@@ -901,7 +908,7 @@ func TestEgressProxyOnlyServiceOnEgressNetwork(t *testing.T) {
 	if !c.Networks["backend"].Internal {
 		t.Error("networks.backend must stay internal")
 	}
-	all := map[string]deployService{"pipeline (commented)": commentedPipeline(t)}
+	all := map[string]deployService{}
 	for name, s := range c.Services {
 		all[name] = s
 	}
@@ -915,12 +922,12 @@ func TestEgressProxyOnlyServiceOnEgressNetwork(t *testing.T) {
 	}
 }
 
-// The pipeline, once uncommented, stays on backend only (no route out) and
+// The pipeline (profile pilot) stays on backend only (no route out) and
 // reaches the providers only through the proxy, named by its own setting:
 // HTTPS_PROXY would send every library's HTTPS through it (plan Task 14
 // check M5), so it is never set. The key is a read-only file mount.
 func TestPipelineNeverOnEgress(t *testing.T) {
-	p := commentedPipeline(t)
+	p := pilotPipeline(t)
 	if !slices.Equal(p.networkNames(), []string{"backend"}) {
 		t.Errorf("pipeline networks %v, want [backend] only", p.networkNames())
 	}
@@ -946,17 +953,134 @@ func TestPipelineNeverOnEgress(t *testing.T) {
 		}
 	}
 	if !key {
-		t.Error("the pipeline block shows no key-file mount (/run/secrets/<provider>-api-key)")
+		t.Error("the pipeline shows no key-file mount (/run/secrets/<...>-api-key)")
 	}
-	raw := readRepoFile(t, filepath.Join("deploy", "compose.yml"))
-	for _, v := range []string{"INTELLIGENCE_CLOUD_PROVIDERS", "INTELLIGENCE_CLOUD_ANTHROPIC_MODEL",
-		"INTELLIGENCE_CLOUD_ANTHROPIC_KEY_FILE", "INTELLIGENCE_CLOUD_ANTHROPIC_ZDR_REF"} {
-		if !strings.Contains(raw, "# "+v+":") {
-			t.Errorf("the pipeline block doesn't show %s, commented out", v)
+	// Off by default: the provider and its settings come from .env, empty
+	// unless deploy/pilot/enable-pilot.sh wrote them, so the worker starts
+	// with no provider (or refuses to start) rather than with a fixed one.
+	if got := p.Environment["INTELLIGENCE_CLOUD_PROVIDERS"]; got != "${PILOT_CLOUD_PROVIDER:-}" {
+		t.Errorf("INTELLIGENCE_CLOUD_PROVIDERS = %q, want ${PILOT_CLOUD_PROVIDER:-}", got)
+	}
+	for _, prov := range []string{"ANTHROPIC", "GEMINI"} {
+		for _, v := range []string{"MODEL", "KEY_FILE", "ZDR_REF"} {
+			name := "INTELLIGENCE_CLOUD_" + prov + "_" + v
+			if got, want := p.Environment[name], "${PILOT_"+prov+"_"+v+":-}"; got != want {
+				t.Errorf("%s = %q, want %q", name, got, want)
+			}
 		}
-		if _, ok := p.Environment[v]; ok {
-			t.Errorf("%s is set by uncommenting the block once: it must stay commented (off by default)", v)
+	}
+}
+
+// The pilot pipeline (deploy/pilot/README.md): off by default (profile
+// pilot), hardened as every other container, with only its own secrets as
+// read-only files, the trusted keys (never corekeys), no env_file, no
+// required variable (so the default deploy's `compose config` needs none),
+// production settings, the single-host transport, the weights offline, and
+// a memory cap for the small shared host.
+func TestPilotPipeline(t *testing.T) {
+	p := pilotPipeline(t)
+	if !slices.Equal(p.Profiles, []string{"pilot"}) {
+		t.Errorf("pipeline profiles %v, want [pilot]: off by default", p.Profiles)
+	}
+	if !p.ReadOnly || !slices.Equal(p.CapDrop, []string{"ALL"}) {
+		t.Errorf("pipeline: read_only %v, cap_drop %v", p.ReadOnly, p.CapDrop)
+	}
+	if p.MemLimit == "" {
+		t.Error("pipeline has no mem_limit")
+	}
+	if p.EnvFile.Kind != 0 {
+		t.Error("pipeline has an env_file: it must not see the core service's secrets")
+	}
+	if !slices.Equal(p.Command, []string{"worker", "--service", "pipeline"}) {
+		t.Errorf("pipeline command %v", p.Command)
+	}
+	want := map[string]string{
+		"APP_ENV":                        "production",
+		"INTELLIGENCE_SINGLE_HOST":       "on",
+		"NATS_URL":                       "nats://nats:4222",
+		"NATS_NKEY_SEED_PATH":            "/run/secrets/nats-pipeline.nk",
+		"INTELLIGENCE_TRUSTED_KEYS_PATH": "/trusted/request-keys.json",
+		"INTELLIGENCE_DB_URL":            "postgres://postgres:5432/mhai?sslmode=disable",
+		"INTELLIGENCE_DB_USER":           "intelligence_app",
+		"INTELLIGENCE_DB_PASSWORD_FILE":  "/run/secrets/intelligence-db-password",
+		"INTELLIGENCE_MODEL_CLIENT":      "orchestrator",
+		"HF_HUB_OFFLINE":                 "1",
+		"TRANSFORMERS_OFFLINE":           "1",
+	}
+	for k, v := range want {
+		if got := p.Environment[k]; got != v {
+			t.Errorf("pipeline %s = %q, want %q", k, got, v)
 		}
+	}
+	for k, v := range p.Environment {
+		if strings.Contains(v, ":?") {
+			t.Errorf("pipeline %s = %q: a required variable would break the default deploy's compose config", k, v)
+		}
+		if k == "INTELLIGENCE_DB_PASSWORD" || (strings.HasPrefix(k, "NATS_") && strings.Contains(k, "PASSWORD")) {
+			t.Errorf("pipeline sets %s: passwords come from files", k)
+		}
+	}
+	mounts := map[string]string{}
+	for _, v := range p.Volumes {
+		parts := strings.Split(v, ":")
+		n := len(parts)
+		if n < 3 || parts[n-1] != "ro" {
+			t.Errorf("pipeline mount %q must be read-only", v)
+			continue
+		}
+		mounts[parts[n-2]] = strings.Join(parts[:n-2], ":")
+		if strings.HasPrefix(v, "corekeys") {
+			t.Errorf("pipeline mounts corekeys (%q): only the trusted keys", v)
+		}
+	}
+	for target, src := range map[string]string{
+		"/trusted":                              "trustedkeys",
+		"/run/secrets/nats-pipeline.nk":         "./secrets/nats-pipeline.nk",
+		"/run/secrets/intelligence-db-password": "./secrets/intelligence-db-password",
+	} {
+		if mounts[target] != src {
+			t.Errorf("pipeline mounts %q at %s, want %q", mounts[target], target, src)
+		}
+	}
+}
+
+// The default deploy is unchanged by the pilot: no default service is in
+// a pilot profile, and core and the CLI read the enabled providers from
+// .env with an empty default (none).
+func TestPilotIsOffByDefault(t *testing.T) {
+	c := loadDeployCompose(t)
+	for name, s := range c.Services {
+		if name != "pipeline" && slices.Contains(s.Profiles, "pilot") {
+			t.Errorf("%s is in the pilot profile", name)
+		}
+	}
+	for _, name := range []string{"core", "core-cli"} {
+		if got := c.Services[name].Environment["CORE_CLOUD_PROVIDERS"]; got != "${CORE_CLOUD_PROVIDERS:-}" {
+			t.Errorf("%s CORE_CLOUD_PROVIDERS = %q, want ${CORE_CLOUD_PROVIDERS:-}", name, got)
+		}
+	}
+	if got := c.Services["core-migrate"].Environment["INTELLIGENCE_DB_PASSWORD"]; got != "${INTELLIGENCE_DB_PASSWORD:-}" {
+		t.Errorf("core-migrate INTELLIGENCE_DB_PASSWORD = %q, want ${INTELLIGENCE_DB_PASSWORD:-} (the login only when set)", got)
+	}
+	// NATS knows the pipeline user from the start, under a public key whose
+	// seed was thrown away, unless the pilot set NATS_PIPELINE_NKEY.
+	off := regexp.MustCompile(`^\$\{NATS_PIPELINE_NKEY:-U[A-Z2-7]{55}\}$`)
+	got := c.Services["nats"].Environment["NATS_PIPELINE_NKEY"]
+	if !off.MatchString(got) {
+		t.Fatalf("nats NATS_PIPELINE_NKEY = %q, want ${NATS_PIPELINE_NKEY:-<a seedless public key>}", got)
+	}
+	// nats-server refuses to start on a user key it can't decode, and core
+	// and the demo stop with it: the default must be a real public user key.
+	def := strings.TrimSuffix(strings.TrimPrefix(got, "${NATS_PIPELINE_NKEY:-"), "}")
+	kp, err := nkeys.FromPublicKey(def)
+	if err != nil {
+		t.Fatalf("the default NATS_PIPELINE_NKEY is not a valid public key: %v", err)
+	}
+	if pub, err := kp.PublicKey(); err != nil || pub != def || !nkeys.IsValidPublicUserKey(def) {
+		t.Fatalf("the default NATS_PIPELINE_NKEY is not a public user key (%v)", err)
+	}
+	if _, err := kp.Seed(); err == nil {
+		t.Fatal("the default NATS_PIPELINE_NKEY came with a seed")
 	}
 }
 
@@ -994,7 +1118,6 @@ func TestNoProviderKeyInAnyEnvironment(t *testing.T) {
 	for name, s := range loadDeployCompose(t).Services {
 		check("deploy/compose.yml", name, s.Environment)
 	}
-	check("deploy/compose.yml", "pipeline (commented)", commentedPipeline(t).Environment)
 	// The negative case, so the pattern can't silently match nothing.
 	if !providerVar.MatchString("ANTHROPIC_API_KEY") || !providerVar.MatchString("INTELLIGENCE_CLOUD_XAI_KEY") ||
 		providerVar.MatchString("INTELLIGENCE_CLOUD_XAI_KEY_FILE") || providerVar.MatchString("NATS_JS_KEY") {
