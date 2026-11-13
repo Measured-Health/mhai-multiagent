@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -513,8 +514,9 @@ func TestListAdmitLimits(t *testing.T) {
 	}
 }
 
-// N10: opens and their counters go after the quarter and one month; a
-// subject a list cites is kept.
+// N10, review finding 1: a quarter's opens and counter stay while any of
+// its periods can be listed (the cap holds for it), and go once the quarter
+// ended before the 25-month cut; a subject a list cites is kept.
 func TestOpensSwept(t *testing.T) {
 	_, pool := shared(t)
 	ctx := context.Background()
@@ -522,26 +524,91 @@ func TestOpensSwept(t *testing.T) {
 	if _, _, err := open(ctx, pool, x, x.user, x.week, `{}`, femaleGroup, 6, 300, false); err != nil {
 		t.Fatal(err)
 	}
-	sweep := func(day string) {
-		if err := asAnalysisJob(ctx, pool, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `SELECT mhai_analysis_sweep($1, $2)`, x.h, at(t, "Africa/Lagos", day, 0))
-			return err
-		}); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := pool.Exec(ctx, `INSERT INTO analysis_patient_budget (hospital_id, user_id, quarter, opened) VALUES ($1, $2, '2024-01-01', 7)`,
+		x.h, x.user); err != nil {
+		t.Fatal(err)
 	}
-	opens := `SELECT (SELECT count(*) FROM analysis_patient_opens WHERE hospital_id = $1) + (SELECT count(*) FROM analysis_patient_budget WHERE hospital_id = $1)`
-	sweep("2026-07-31")
-	if n := countRows(t, pool, opens, x.h); n != 7 {
-		t.Errorf("before the quarter and a month have passed: %d rows, want 7", n)
+	if err := asAnalysisJob(ctx, pool, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT mhai_analysis_sweep($1, now())`, x.h)
+		return err
+	}); err != nil {
+		t.Fatal(err)
 	}
-	sweep("2026-08-01")
-	if n := countRows(t, pool, opens, x.h); n != 0 {
-		t.Errorf("after: %d rows left", n)
+	if n := countRows(t, pool, `SELECT (SELECT count(*) FROM analysis_patient_opens WHERE hospital_id = $1 AND quarter = '2026-04-01')
+		+ (SELECT count(*) FROM analysis_patient_budget WHERE hospital_id = $1 AND quarter = '2026-04-01')`, x.h); n != 7 {
+		t.Errorf("a quarter still listable: %d rows kept, want 7", n)
+	}
+	if n := countRows(t, pool, `SELECT count(*) FROM analysis_patient_budget WHERE hospital_id = $1 AND quarter = '2024-01-01'`, x.h); n != 0 {
+		t.Errorf("a quarter past the 25-month cut kept its counter")
 	}
 	if n := countRows(t, pool, `SELECT count(*) FROM analysis_view_rows r JOIN analysis_subjects s USING (hospital_id, subject_id)
 		WHERE r.hospital_id = $1`, x.h); n != 6 {
 		t.Errorf("subjects cited by the list: %d kept, want 6", n)
+	}
+}
+
+// Review finding 2: 20 parallel requests by one person admit at most the
+// minute's limit, whatever order they took the lock in.
+func TestListAdmitParallel(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	x := newDrill(t, pool, 6)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			view := uuid.New()
+			_ = asPerson(ctx, pool, x.h, x.user, func(tx pgx.Tx) error {
+				var got string
+				if err := tx.QueryRow(ctx, `SELECT mhai_analysis_list_admit(3, 100, NULL)`).Scan(&got); err != nil || got != "ok" {
+					return fmt.Errorf("refused")
+				}
+				if _, err := tx.Exec(ctx, `SELECT count(*) FROM mhai_analysis_open($1, $2, '{}', $3::jsonb, 'affected', $4, 6, 300, NULL)`,
+					view, x.week, femaleGroup, make([]byte, 32)); err != nil {
+					return err
+				}
+				return audit.Write(ctx, tx, audit.Event{ActorID: x.user.String(), HospitalID: x.h.String(), Action: "analysis.patients_viewed",
+					Entity: "analysis_view", EntityID: view.String(), Payload: map[string]any{"view": "affected", "period": "week:2026-04-01",
+						"filters": map[string]any{}, "patient_count": 6, "rows": 6}})
+			})
+		}()
+	}
+	wg.Wait()
+	if n := countRows(t, pool, `SELECT count(*) FROM analysis_views WHERE hospital_id = $1`, x.h); n != 3 {
+		t.Errorf("%d lists admitted in a minute with 3 allowed", n)
+	}
+}
+
+// Review finding 3: a row always shows what its list was opened on, even
+// past the 10 conditions a row carries.
+func TestRowShowsWhatTheListWasOpenedOn(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	x := newDrill(t, pool, 0)
+	var conds []uuid.UUID
+	for i := 0; i < 11; i++ {
+		conds = append(conds, condition(t, pool, x.h, fmt.Sprintf("Z%02d", i)))
+	}
+	slices.SortFunc(conds, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	last := conds[len(conds)-1]
+	for i := 0; i < 5; i++ {
+		s := addSubject(t, pool, x.h, "2026-04-02", conds[0], false, x.d)
+		for _, c := range conds[1:] {
+			if _, err := pool.Exec(ctx, `INSERT INTO analysis_facts (hospital_id, subject_id, day, kind, condition_id, age_band, sex, setting, period_late)
+				VALUES ($1, $2, '2026-04-03', 'diagnosis', $3, '40-64', 'female', 'outpatient', false)`, x.h, s, c); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	rows, _, err := open(ctx, pool, x, x.user, x.week, `{"condition": "`+last.String()+`"}`, femaleGroup, 5, 300, false)
+	if err != nil || len(rows) != 5 {
+		t.Fatalf("list: %d rows (%v)", len(rows), err)
+	}
+	for _, r := range rows {
+		if !strings.Contains(string(r.conditions), last.String()) {
+			t.Errorf("a row of a list opened on a condition doesn't show it: %s", r.conditions)
+		}
 	}
 }
 
@@ -593,5 +660,24 @@ func TestMigration00028DownUp(t *testing.T) {
 	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)
+	}
+}
+
+// A login that can reach the reveal's owner role, even by SET ROLE through
+// a role that doesn't inherit it, is refused at start (review finding 4).
+func TestCheckLoginRoleRefusesAuditorReach(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	mid := "mid_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	if _, err := pool.Exec(ctx, `CREATE ROLE `+mid+` NOLOGIN`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `GRANT mhai_analysis_auditor TO `+mid+` WITH INHERIT FALSE`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `REVOKE mhai_analysis_auditor FROM `+mid) })
+	_, p := loginPool(t, "IN ROLE mhai_app, "+mid)
+	if err := db.CheckLoginRole(ctx, p); err == nil || !strings.Contains(err.Error(), "mhai_analysis_auditor") {
+		t.Errorf("a login reaching mhai_analysis_auditor: %v", err)
 	}
 }

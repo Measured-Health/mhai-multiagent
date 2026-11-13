@@ -123,6 +123,22 @@ func TestAuditPatientsReveal(t *testing.T) {
 	}
 }
 
+// A reader whose role is taken away is refused at once, whatever the
+// guard's cache still holds (review finding 6).
+func TestRevealRoleRemovedRefusedAtOnce(t *testing.T) {
+	id, _, _ := drillList(t, 5)
+	a := auditor(t)
+	tok := mint(t, a)
+	ok(t, "reveal", get(t, "/platform/audit/"+strconv.FormatInt(id, 10)+"/patients", tok))
+	if _, err := super.Exec(context.Background(), `DELETE FROM user_roles WHERE user_id = $1`, a.id); err != nil {
+		t.Fatal(err)
+	}
+	r := get(t, "/platform/audit/"+strconv.FormatInt(id, 10)+"/patients", tok)
+	if (r.code != 403 && r.code != 401) || strings.Contains(r.raw, "P-") {
+		t.Errorf("after the role was removed: %d %s", r.code, r.raw)
+	}
+}
+
 // Every reveal is recorded, one entry each, with the entry revealed and a
 // count; never a pid.
 func TestRevealAudited(t *testing.T) {

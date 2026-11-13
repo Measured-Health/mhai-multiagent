@@ -28,8 +28,9 @@
 --     views, their rows and the pids.
 --   - platform_append: 00022's list plus audit.patients_viewed.
 --   - mhai_analysis_sweep replaced (same signature, owner and grants):
---     opens and budgets after their quarter plus one month, flags after two
---     hospital days; a subject a view row or an open cites is kept.
+--     opens and budgets once their quarter can't be listed any more, flags
+--     after two hospital days; a subject a view row or an open cites is
+--     kept.
 --
 -- Drill groups (plan departure 19): a list is opened only on a group the
 -- rows describe, in a context whose filters the rows describe (age band,
@@ -441,7 +442,8 @@ CREATE CONSTRAINT TRIGGER analysis_views_audited AFTER INSERT ON analysis_views
 ------------------------------------------------------------------------
 
 -- mhai_analysis_list_admit(per minute, per day, now): the person's lists
--- in the minute before now and in the hospital day of now, under a lock
+-- in the minute before now and in the hospital day of now (now: the wall
+-- clock once the lock is held, unless pinned), under a lock
 -- per person and hospital held to the end of the transaction (parallel
 -- lists queue, so the count is exact): 'ok', or the limit that refuses
 -- ('minute', 'day'). now defaults to the database's and may not be later.
@@ -453,17 +455,22 @@ CREATE FUNCTION mhai_analysis_list_admit(p_minute integer, p_day integer, p_now 
 DECLARE
     v_h   uuid := public.mhai_analysis_hospital();
     v_u   uuid := public.mhai_current_user();
-    v_now timestamptz := COALESCE(p_now, now());
+    v_now timestamptz;
     v_day date;
 BEGIN
-    IF v_u IS NULL OR v_now > now() OR p_minute IS NULL OR p_minute < 1 OR p_minute > 100
+    IF v_u IS NULL OR p_now > now() OR p_minute IS NULL OR p_minute < 1 OR p_minute > 100
        OR p_day IS NULL OR p_day < 1 OR p_day > 1000 THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'analysis: not a list admission';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtext('mhai.analysis.lists'), hashtext(v_h::text || '/' || v_u::text));
+    -- The wall clock after the lock (not the transaction's start): a list
+    -- committed by a request that started later but took the lock first is
+    -- counted (lists are stamped the same way, mhai_analysis_open).
+    v_now := COALESCE(p_now, clock_timestamp());
     SELECT (v_now AT TIME ZONE h.time_zone)::date INTO v_day FROM public.hospitals h WHERE h.id = v_h;
     IF (SELECT count(*) FROM public.analysis_views v
-        WHERE v.hospital_id = v_h AND v.viewer = v_u AND v.at > v_now - interval '1 minute' AND v.at <= v_now) >= p_minute THEN
+        WHERE v.hospital_id = v_h AND v.viewer = v_u AND v.at > v_now - interval '1 minute'
+          AND (p_now IS NULL OR v.at <= v_now)) >= p_minute THEN
         RETURN 'minute';
     END IF;
     IF (SELECT count(*) FROM public.analysis_views v
@@ -483,7 +490,8 @@ $$;
 -- (P0001 'patient_cap' past cap), recorded with the list, given their pids
 -- for the period, and returned in order: pid, age band, sex, setting, and
 -- at most 10 condition ids and 10 findings (condition id or "", flag or
--- "") recorded within the period, in a fixed order. The list is kept only
+-- "") recorded within the period, those the list was opened on first, then
+-- in a fixed order (so a list's membership is always on its rows). The list is kept only
 -- if its audit entry is appended before commit (the deferred check).
 -- +goose StatementBegin
 CREATE FUNCTION mhai_analysis_open(p_view uuid, p_period uuid, p_filters jsonb, p_group jsonb, p_source text,
@@ -495,14 +503,19 @@ CREATE FUNCTION mhai_analysis_open(p_view uuid, p_period uuid, p_filters jsonb, 
 DECLARE
     v_h    uuid := public.mhai_analysis_hospital();
     v_u    uuid := public.mhai_current_user();
-    v_now  timestamptz := COALESCE(p_now, now());
+    v_now  timestamptz := COALESCE(p_now, clock_timestamp());
     v_per  record;
+    -- What the list was opened on comes first on a row (at most 10 of
+    -- each are sent): the context's condition, the pair's two, the finding.
+    v_prio text[] := ARRAY[p_filters ->> 'condition', p_group ->> 'a', p_group ->> 'b'];
+    v_fc   text := CASE WHEN p_group ->> 'kind' = 'finding' THEN p_group ->> 'condition' END;
+    v_ff   text := CASE WHEN p_group ->> 'kind' = 'finding' THEN p_group ->> 'flag' END;
     v_all  uuid[];
     v_rows uuid[];
     v_day  date;
 BEGIN
     SELECT * INTO v_per FROM public.mhai_analysis_frozen(p_period);
-    IF v_u IS NULL OR p_view IS NULL OR v_now > now() OR p_source NOT IN ('affected', 'co-occurring', 'findings')
+    IF v_u IS NULL OR p_view IS NULL OR p_now > now() OR p_source NOT IN ('affected', 'co-occurring', 'findings')
        OR p_drill IS NULL OR octet_length(p_drill) <> 32 OR p_expected IS NULL OR p_cap IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'analysis: not a list';
     END IF;
@@ -522,15 +535,17 @@ BEGIN
     RETURN QUERY
     SELECT r.n::integer, p.pid, a.age_band, a.sex, a.setting,
            COALESCE((SELECT jsonb_agg(x.c ORDER BY x.c) FROM (
-                SELECT DISTINCT fc.condition_id::text AS c FROM public.analysis_facts fc
-                WHERE fc.hospital_id = v_h AND fc.subject_id = r.s AND fc.day BETWEEN v_per.start AND v_per."end"
-                  AND NOT fc.period_late AND fc.condition_id IS NOT NULL
-                ORDER BY 1 LIMIT 10) x), '[]'::jsonb),
+                SELECT y.c FROM (
+                    SELECT DISTINCT fc.condition_id::text AS c FROM public.analysis_facts fc
+                    WHERE fc.hospital_id = v_h AND fc.subject_id = r.s AND fc.day BETWEEN v_per.start AND v_per."end"
+                      AND NOT fc.period_late AND fc.condition_id IS NOT NULL) y
+                ORDER BY COALESCE(y.c = ANY (v_prio), false) DESC, y.c LIMIT 10) x), '[]'::jsonb),
            COALESCE((SELECT jsonb_agg(jsonb_build_object('condition', x.c, 'flag', x.fl) ORDER BY x.c, x.fl) FROM (
-                SELECT DISTINCT COALESCE(ff.condition_id::text, '') AS c, COALESCE(ff.flag, '') AS fl FROM public.analysis_facts ff
-                WHERE ff.hospital_id = v_h AND ff.subject_id = r.s AND ff.day BETWEEN v_per.start AND v_per."end"
-                  AND NOT ff.period_late AND ff.kind = 'finding'
-                ORDER BY 1, 2 LIMIT 10) x), '[]'::jsonb)
+                SELECT y.c, y.fl FROM (
+                    SELECT DISTINCT COALESCE(ff.condition_id::text, '') AS c, COALESCE(ff.flag, '') AS fl FROM public.analysis_facts ff
+                    WHERE ff.hospital_id = v_h AND ff.subject_id = r.s AND ff.day BETWEEN v_per.start AND v_per."end"
+                      AND NOT ff.period_late AND ff.kind = 'finding') y
+                ORDER BY (y.c IS NOT DISTINCT FROM v_fc AND y.fl IS NOT DISTINCT FROM v_ff) DESC, y.c, y.fl LIMIT 10) x), '[]'::jsonb)
     FROM unnest(v_rows) WITH ORDINALITY r(s, n)
     JOIN public.analysis_subject_attrs a ON a.hospital_id = v_h AND a.subject_id = r.s
     JOIN public.mhai_analysis_pseudonyms(p_period, v_rows) p ON p.subject_id = r.s
@@ -600,8 +615,8 @@ $$;
 -- +goose StatementEnd
 
 -- mhai_analysis_sweep, replaced: 00025's retention, plus opens and their
--- counters after the quarter and one month, flags after two hospital
--- days; a subject a list or an open cites is kept (design §4.3: as long as
+-- counters once their quarter can't be listed any more, flags after two
+-- hospital days; a subject a list or an open cites is kept (design §4.3: as long as
 -- the audit record that cites it).
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION mhai_analysis_sweep(p_hospital uuid, p_now timestamptz) RETURNS integer
@@ -636,12 +651,14 @@ BEGIN
                   WHERE p.hospital_id = s.hospital_id AND p.id = s.period_id AND p."end" < v_cut);
     DELETE FROM public.analysis_view_log l WHERE l.hospital_id = p_hospital AND l.day < v_today - 2;
     DELETE FROM public.analysis_unusual u WHERE u.hospital_id = p_hospital AND u.day < v_today - 2;
-    -- 00028: the distinct-patient cap's opens and counters after their
-    -- quarter and one month (N10); the drill flags after two hospital days.
+    -- 00028: the distinct-patient cap's opens and counters once no period
+    -- of their quarter can be listed any more (the quarter ended before the
+    -- 25-month cut; N10, departure 22): until then the cap holds for it.
+    -- The drill flags after two hospital days.
     DELETE FROM public.analysis_patient_opens o
-    WHERE o.hospital_id = p_hospital AND (o.quarter + interval '4 months')::date <= v_today;
+    WHERE o.hospital_id = p_hospital AND (o.quarter + interval '3 months')::date <= v_cut;
     DELETE FROM public.analysis_patient_budget b
-    WHERE b.hospital_id = p_hospital AND (b.quarter + interval '4 months')::date <= v_today;
+    WHERE b.hospital_id = p_hospital AND (b.quarter + interval '3 months')::date <= v_cut;
     DELETE FROM public.analysis_drill_flags d WHERE d.hospital_id = p_hospital AND d.day < v_today - 2;
     DELETE FROM public.analysis_first_seen fs WHERE fs.hospital_id = p_hospital AND fs.first_day < v_cut;
     DELETE FROM public.analysis_subjects s

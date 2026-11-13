@@ -192,7 +192,10 @@ func stillAllowed(ctx context.Context, tx pgx.Tx, pr authz.Principal) error {
 // flagged audit entry, in its own transaction (the request's rolled back).
 // A failure is logged with ids and a fixed reason only; the reply is the
 // refusal either way.
-func (h *handlers) flag(ctx context.Context, pr authz.Principal, kind, action string, payload map[string]any) {
+func (h *handlers) flag(parent context.Context, pr authz.Principal, kind, action string, payload map[string]any) {
+	// A client that hangs up on its refusal doesn't stop the entry.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 2*disclose.StatementTimeout)
+	defer cancel()
 	err := db.WithHospitalUser(ctx, h.d.Pool, pr.HospitalID, pr.UserID, func(tx pgx.Tx) error {
 		var first bool
 		if err := tx.QueryRow(ctx, `SELECT mhai_analysis_drill_flag($1, $2)`, kind, h.d.Engine.ClockNow()).Scan(&first); err != nil {
