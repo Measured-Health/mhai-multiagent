@@ -20,8 +20,12 @@ PY_IMAGE=python:3.12-alpine
 
 dir=$(mktemp -d)
 chmod 700 "$dir"
-project=mhai-ops-test-$$
-net=mhai-ops-test-net-$$
+# A random run id, not $$: inside a container the PID is small and repeats,
+# so two runs on one Docker host could share names and remove each other's
+# containers on exit.
+run_id=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
+project=mhai-ops-test-$run_id
+net=mhai-ops-test-net-$run_id
 pw=k$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 cat > "$dir/compose.yml" <<YAML
 name: $project
