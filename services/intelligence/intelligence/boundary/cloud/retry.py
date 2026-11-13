@@ -2,7 +2,7 @@
 and 11; plan Task 8).
 
 classify maps a status, an exception or an adapter's outcome to RETRY or
-to a final outcome from the closed set (vocab.OUTCOMES). Only a connection
+to a final outcome from the closed set (vocab.CLOUD_OUTCOMES). Only a connection
 error, a timeout, 429, 500, 502, 503, 504 and a provider's "overloaded"
 (Anthropic 529) are retried. A final outcome is never retried (K12): 400,
 401, 403, 404, a refusal, a truncation, a malformed reply, a blocked
@@ -33,7 +33,7 @@ import httpx2
 import openai
 
 from intelligence.boundary.cloud.gate import EgressRefused
-from intelligence.boundary.cloud.vocab import OUTCOMES
+from intelligence.boundary.cloud.vocab import CLOUD_OUTCOMES
 
 RETRY: Final = "retry"
 
@@ -102,13 +102,13 @@ def _exception(exc: BaseException) -> str:
 
 
 def classify(exc_or_status: BaseException | int | str) -> str:
-    """RETRY, or a final outcome from vocab.OUTCOMES."""
+    """RETRY, or a final outcome from vocab.CLOUD_OUTCOMES."""
     x = exc_or_status
     if isinstance(x, BaseException):
         return _exception(x)
     if type(x) is int:
         return _status(x)
-    if type(x) is str and (x == RETRY or x in OUTCOMES):
+    if type(x) is str and (x == RETRY or x in CLOUD_OUTCOMES):
         return x
     return "unavailable"
 
@@ -116,7 +116,7 @@ def classify(exc_or_status: BaseException | int | str) -> str:
 def final_outcome(x: str) -> str:
     """The outcome recorded when retrying stops: RETRY (retries used up) is
     "unavailable", and anything outside the closed set is too."""
-    return x if x in OUTCOMES else "unavailable"
+    return x if x in CLOUD_OUTCOMES else "unavailable"
 
 
 def _finite_nonneg(v: float) -> bool:
