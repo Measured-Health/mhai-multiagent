@@ -1,0 +1,14 @@
+[Unit]
+Description=MHAI nightly encrypted backup of the mhai database (deploy/ops/backup.sh)
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/mhai-ops/backup.sh
+UMask=0077
+PrivateTmp=yes
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=2h

@@ -140,6 +140,19 @@ The product owner asked for the simplest safe version first (11 Nov). These wait
 - **Pinnable roles are the roles with an evaluation suite (Task 20).** `lock.ROLES` is `promote.SUITES`' keys (`extract` today), since only those can pass a gate. A role such as `ocr`, `nli` or `cca` joins the production lock when its suite exists.
 - **Eval claim (Task 17).** A build first reserves `eval/<suite>/<version>/claim.json` (conditional create), so a second build of the same version stops before it generates or uploads anything. A build that fails after the claim leaves files under a version that can never be built again: use the next version.
 
+## Before scale: operations
+
+The pilot's baseline (deploy/README.md, "Operations"; B-66) is lean: nightly `age`-encrypted `pg_dump` with rotation and an optional offsite copy, a weekly restore test the operator runs, and a five-minute health check that posts to one webhook. Bring these in before a second hospital, or when the trigger named comes first.
+
+- **Metrics and dashboards:** Prometheus (core's `/metrics`, node and cAdvisor exporters), Grafana, and Alertmanager routing the alerts already named in deploy/README.md ("Cloud models": `mhai_cloud_alerts_total`, the budget, settle failures) and H5's Analysis alerts. Today nothing scrapes them. Before a second hospital.
+- **Point-in-time recovery:** WAL archiving (pgBackRest or WAL-G) to the offsite bucket, so a restore loses minutes rather than up to a day. Before a second hospital, or when the pilot's data-loss tolerance is set below a day.
+- **Offsite on by default, object lock and a second region:** today offsite is optional and its retention is a bucket lifecycle rule. Make it required, with compliance-mode object lock. Before real data beyond the pilot hospital.
+- **Automated restore test** on a separate machine holding the private key (a scheduled job), instead of the operator by hand weekly. With the metrics stack.
+- **An external uptime probe** (outside the host: the host down sends no alert today) and **paging/escalation** (on-call rota, a second contact). Before a second hospital; the uptime probe as soon as someone names the service.
+- **The pipeline's health over NATS** (`pipeline.health`) in the health check; today only its container state is checked.
+- **JetStream encryption at rest and backup** if `DEAD` or an EMR stream ever holds something not rebuildable (deploy/README.md, "What is backed up").
+- **Backup key custody:** the private key's holders, rotation (a new recipient, old backups re-encrypted or aged out) and the recovery drill written down by the operations owner.
+
 ## Before scale: model promotion controls left out of the lean version
 
 The lean rewrite (11 Nov 2026, product owner: a hospital test quickly) kept the patient-safety line (the AI service refuses any model whose files, hash or signature don't match `models.lock`, and fails closed) and left these out. Each comes back at the trigger named.
