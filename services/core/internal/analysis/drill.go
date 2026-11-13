@@ -13,8 +13,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup"
 )
 
@@ -353,6 +356,18 @@ func listErr(err error) error {
 		return ErrTooSmall
 	}
 	return failed(err)
+}
+
+// PersonTx runs fn as the verified principal's hospital and person
+// (db.WithHospitalUser: mhai_current_user() is the token's user, never a
+// value from the request), for the list's functions, which act as that
+// person. A platform principal, or none, is refused.
+func PersonTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	p, ok := authz.FromContext(ctx)
+	if !ok || p.Platform || p.HospitalID == uuid.Nil || p.UserID == uuid.Nil {
+		return authz.ErrNoPrincipal
+	}
+	return db.WithHospitalUser(ctx, pool, p.HospitalID, p.UserID, fn)
 }
 
 // Stored is the stored body of (p, f), never computed: ok false when

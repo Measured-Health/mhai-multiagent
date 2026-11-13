@@ -62,7 +62,8 @@ func TestMigration00022DownUp(t *testing.T) {
 	if len(mainActions) != 15 || !strings.Contains(main, "hospital_id IS NULL") {
 		t.Fatalf("main's platform_append isn't 00020's: %s", main)
 	}
-	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+	// Up to 22 only: 00028 widens the list again (audit.patients_viewed).
+	if err := db.MigrateUpTo(ctx, pg.URL, 22); err != nil {
 		t.Fatal(err)
 	}
 	up, upActions := appendPolicy(t, pool, "platform_append")

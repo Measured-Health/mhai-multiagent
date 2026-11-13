@@ -15,7 +15,6 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
-	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
@@ -99,7 +98,7 @@ func (h *handlers) patients(w http.ResponseWriter, r *http.Request) {
 	}
 	view := uuid.New()
 	var rows []analysis.PatientRow
-	err = db.WithHospitalUser(ctx, h.d.Pool, pr.HospitalID, pr.UserID, func(tx pgx.Tx) error {
+	err = analysis.PersonTx(ctx, h.d.Pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '`+disclose.StatementTimeout.String()+`'`); err != nil {
 			return err
 		}
@@ -167,7 +166,7 @@ func stillAllowed(ctx context.Context, tx pgx.Tx, pr authz.Principal) error {
 	var roles []string
 	err := tx.QueryRow(ctx, `SELECT u.is_active AND u.hospital_id = $2, COALESCE(m.enabled, false),
 		ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id)
-		FROM users u LEFT JOIN user_mfa m ON m.user_id = u.id WHERE u.id = $1`, pr.UserID, pr.HospitalID).Scan(&active, &mfa, &roles)
+		FROM users u LEFT JOIN user_mfa m ON m.user_id = u.id WHERE u.id = $1 FOR SHARE OF u`, pr.UserID, pr.HospitalID).Scan(&active, &mfa, &roles)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errRole
 	}
@@ -196,7 +195,7 @@ func (h *handlers) flag(parent context.Context, pr authz.Principal, kind, action
 	// A client that hangs up on its refusal doesn't stop the entry.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 2*disclose.StatementTimeout)
 	defer cancel()
-	err := db.WithHospitalUser(ctx, h.d.Pool, pr.HospitalID, pr.UserID, func(tx pgx.Tx) error {
+	err := analysis.PersonTx(authz.WithPrincipal(ctx, pr), h.d.Pool, func(tx pgx.Tx) error {
 		var first bool
 		if err := tx.QueryRow(ctx, `SELECT mhai_analysis_drill_flag($1, $2)`, kind, h.d.Engine.ClockNow()).Scan(&first); err != nil {
 			return err
