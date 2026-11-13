@@ -39,14 +39,14 @@ touches the EMR containers, the web demo or nginx.
 | `core` | core, uid 65532 | `core serve` on 127.0.0.1:8092 | 320 MiB, CPUs 0-1 |
 | `core-cli` | core | the seed CLI, run by hand (profile `tools`) | 128 MiB |
 | `egress-proxy` | `ubuntu/squid` by digest, uid 13 | the cloud providers' only way out (profile `cloud`, off by default; see "Cloud models") | 128 MiB |
+| `pipeline` | `mhai-multiagent-pipeline-pilot` (weights baked in) | the pipeline worker, for the pilot only (profile `pilot`, off by default; see `pilot/README.md`) | 1600 MiB |
 
 Every container has a read-only root filesystem, no Linux capabilities and
-`no-new-privileges`. The intelligence workers (`pipeline`, `echo`) are not
-deployed on the demo in Plan 3, on purpose: the instance is small and the
-models are heavy. Core starts and serves everything else; a question
-(`POST /queries`) is queued and, with no pipeline to take it, fails at its
-10-minute deadline. What deploying the pipeline needs is sketched in
-`compose.yml`. `CORE_HTTP_API` stays `on` (the frontend still calls HTTP).
+`no-new-privileges`. The pipeline worker runs only for the pilot (one real
+hospital with cloud answers, `pilot/README.md`; `pilot/enable-pilot.sh`
+sets it up); echo never comes here. Without the pipeline, core starts and
+serves everything else; a question (`POST /queries`) is queued and fails at
+its 10-minute deadline. `CORE_HTTP_API` stays `on` (the frontend still calls HTTP).
 
 ### Before merging Plan 3 (the boundary): the demo's `clinical_queries`
 
@@ -433,8 +433,11 @@ CPU, weights baked into the image or mounted read-only with
 `HF_HUB_OFFLINE=1`: the pipeline has no route to Hugging Face), the
 provider key and its zero-data-retention reference (TODO H1, H5).
 
-1. **Provision.** Enable the pipeline in `compose.yml` as its comment block
-   describes (its own NKey, database login, trusted keys, `backend` only),
+On the demo host, `pilot/enable-pilot.sh` does steps 1 to 3 for one
+hospital (`pilot/README.md`). By hand:
+
+1. **Provision.** Start the pipeline (profile `pilot`) with its own NKey,
+   database login and trusted keys, `backend` only, as `compose.yml` shows,
    and copy `egress-proxy/` to `/srv/mhai-backend/egress-proxy/` (the deploy
    workflow copies only `compose.yml` and `nats/nats.conf`). Create
    `egress-proxy/allowed-hosts` from `allowed-hosts.example` with the one
@@ -510,7 +513,9 @@ provider key and its zero-data-retention reference (TODO H1, H5).
   takes `NATS_TLS_*` (Plan 3), and `nats/nats.conf` documents the server's
   `tls {}` block (`verify`, `handshake_first: 300ms`, the fallback still
   TLS-only); turning it on needs certificates on the instance. Required
-  before any intelligence worker runs off this host.
+  before any intelligence worker runs off this host. The pilot pipeline
+  runs on this host with `INTELLIGENCE_SINGLE_HOST=on`, which the worker
+  accepts only for the Docker service names `nats` and `postgres`.
 - **No JetStream encryption at rest** on the demo (dev compose has it,
   `NATS_JS_KEY`): turning it on needs the store converted or recreated.
 - **NATS is on a non-internal network** (`edge`), because Docker publishes
