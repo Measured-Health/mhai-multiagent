@@ -39,13 +39,17 @@ usage: bash enable-pilot.sh --provider anthropic|gemini
          --hospital-name NAME --short-code CODE [--time-zone TZ]
          --agreement-ref AGR-YYYY-NN|DPA-YYYY-NN --zdr-ref REF
          [--model MODEL] [--budget TOKENS] [--image IMAGE]
+         [--gemini-paid-tier verified]
          [--replace-key] [--seed-reference-guidelines]
 The API key is read from standard input.
+For gemini, --gemini-paid-tier verified confirms the key's Google project is
+paid and billing-enabled (free-tier prompts may be used by Google); the
+pipeline refuses to start without it.
 EOF
   exit 2
 }
 
-PROVIDER='' NAME='' CODE='' TZONE=Africa/Lagos AGREEMENT='' ZDR='' MODEL='' BUDGET='' IMAGE=''
+PROVIDER='' NAME='' CODE='' TZONE=Africa/Lagos AGREEMENT='' ZDR='' MODEL='' BUDGET='' IMAGE='' GEMINI_TIER=''
 REPLACE_KEY=0 SEED_GUIDELINES=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -58,6 +62,7 @@ while [ $# -gt 0 ]; do
     --model) [ $# -ge 2 ] || usage; MODEL=$2; shift 2 ;;
     --budget) [ $# -ge 2 ] || usage; BUDGET=$2; shift 2 ;;
     --image) [ $# -ge 2 ] || usage; IMAGE=$2; shift 2 ;;
+    --gemini-paid-tier) [ $# -ge 2 ] || usage; GEMINI_TIER=$2; shift 2 ;;
     --replace-key) REPLACE_KEY=1; shift ;;
     --seed-reference-guidelines) SEED_GUIDELINES=1; shift ;;
     *) usage ;;
@@ -67,7 +72,8 @@ done
 # --- the arguments, checked before anything is touched ----------------------
 case "$PROVIDER" in
   anthropic) MODEL=${MODEL:-claude-opus-5-5} ;;
-  gemini) [ -n "$MODEL" ] || die "--model is required for gemini (the exact model id the gemini adapter allows)" ;;
+  gemini) [ -n "$MODEL" ] || die "--model is required for gemini (the exact model id the gemini adapter allows)"
+    [ "$GEMINI_TIER" = verified ] || die "--gemini-paid-tier verified is required for gemini: confirm the key's Google project is paid and billing-enabled first" ;;
   *) die "--provider must be anthropic or gemini" ;;
 esac
 P_UPPER=$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')
@@ -255,10 +261,12 @@ for other in ANTHROPIC GEMINI; do
   [ "$other" = "$P_UPPER" ] && continue
   for v in MODEL KEY_FILE ZDR_REF; do env_unset "PILOT_${other}_$v"; done
 done
+[ "$PROVIDER" = gemini ] || env_unset PILOT_GEMINI_PAID_TIER
 env_set PILOT_CLOUD_PROVIDER "$PROVIDER"
 env_set "PILOT_${P_UPPER}_MODEL" "$MODEL"
 env_set "PILOT_${P_UPPER}_KEY_FILE" /run/secrets/cloud-api-key
 env_set "PILOT_${P_UPPER}_ZDR_REF" "$ZDR"
+[ "$PROVIDER" != gemini ] || env_set PILOT_GEMINI_PAID_TIER verified
 env_set PIPELINE_IMAGE "$IMAGE"
 CORE_CHANGED=0
 [ "$(env_get CORE_CLOUD_PROVIDERS)" = "$PROVIDER" ] || CORE_CHANGED=1
