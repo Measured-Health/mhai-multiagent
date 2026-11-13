@@ -843,3 +843,25 @@ def test_hf_settings_restored_after_a_failed_call(
         assert k not in os.environ
     assert _hf_constants() == before
     assert not (work.run / f.name).exists()
+
+
+# ---------------------------------------------------------------- manifest.json (own model PR 1)
+
+
+def test_local_misnamed_training_manifest_refused(tmp_path: Path) -> None:
+    d = _local_run(tmp_path / "src")
+    (d / "manifest.json").write_bytes(b"{}")
+    src = LocalSource(tmp_path / "src")
+    err = _refused(src.list_run, "mhai-tiny", "run-1")
+    assert err.reason == "training_manifest_misnamed"
+    (d / "training_manifest.json").write_bytes(b"{}")  # both: manifest.json is just not allowed
+    assert _code(_refused(src.list_run, "mhai-tiny", "run-1")) == ("source_invalid", "name")
+
+
+def test_drive_misnamed_training_manifest_refused() -> None:
+    d = DriveRun()
+    d.fake.file("manifest.json", d.run.id, b"{}")
+    assert _refused(d.source.list_run, "mhai-tiny", "run-1").reason == (
+        "training_manifest_misnamed"
+    )
+    assert d.media_requests() == 0

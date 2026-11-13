@@ -16,7 +16,8 @@
 # add one.
 #
 # Memory: the instance has 3.7 GiB shared with MongoDB, the EMR and the
-# web demo. Every container is capped.
+# web demo. Every container is capped. The pilot pipeline (profile pilot)
+# takes up to 1600 MiB: enable-pilot.sh refuses to start it without room.
 
 name: mhai-backend
 
@@ -84,6 +85,10 @@ services:
       NATS_GATEWAY_NKEY: ${NATS_GATEWAY_NKEY:?set in /srv/mhai-backend/.env}
       NATS_BFF_NKEY: ${NATS_BFF_NKEY:?set in /srv/mhai-backend/.env}
       NATS_BFF_PLATFORM_NKEY: ${NATS_BFF_PLATFORM_NKEY:?set in /srv/mhai-backend/.env (run setup-host.sh)}
+      # The pilot pipeline's public key (deploy/pilot/enable-pilot.sh writes
+      # it). The default is a real public key whose seed was thrown away: the user
+      # is in nats.conf from the start, and no one can sign in as it.
+      NATS_PIPELINE_NKEY: ${NATS_PIPELINE_NKEY:-UBEBXXYDPNSDCIC4J52JS4FS4S4YKKXBTUT7TC3FKSKA54XNFUCS2PLV}
       GOMEMLIMIT: 96MiB
     volumes:
       - ./nats/nats.conf:/etc/nats/nats.conf:ro
@@ -128,6 +133,9 @@ services:
       CORE_DB_PASSWORD: ${CORE_DB_PASSWORD:?set in /srv/mhai-backend/.env}
       PROVISION_DB_USER: core_provision
       PROVISION_DB_PASSWORD: ${PROVISION_DB_PASSWORD:?set in /srv/mhai-backend/.env}
+      # The pilot pipeline's login (intelligence_app, a member of
+      # mhai_worker_app only): made only when set (deploy/pilot/).
+      INTELLIGENCE_DB_PASSWORD: ${INTELLIGENCE_DB_PASSWORD:-}
     mem_limit: 128m
     networks: [backend]
     depends_on:
@@ -183,6 +191,9 @@ services:
       REQUEST_KEY_PATH: /keys/request.pem
       REQUEST_TRUSTED_KEYS_PATH: /trusted/request-keys.json   # public; dead-letter re-mint after a rotation
       INTELLIGENCE_QUERY_CAP: "10"   # questions in flight per hospital (decision 8)
+      # The cloud providers a hospital's policy may name: none unless the
+      # pilot set it in .env (deploy/pilot/enable-pilot.sh).
+      CORE_CLOUD_PROVIDERS: ${CORE_CLOUD_PROVIDERS:-}
       # The API over HTTP too: the frontend still calls HTTP until mhai-web's
       # BFF moves to NATS (spec §17.1). Core serves api.v1.<app> over NATS
       # as well.
@@ -231,54 +242,94 @@ services:
     restart: "no"
     environment:
       DATABASE_URL: postgres://core_provision:${PROVISION_DB_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=disable
+      # hospitals model-policy set checks the provider against this.
+      CORE_CLOUD_PROVIDERS: ${CORE_CLOUD_PROVIDERS:-}
     mem_limit: 128m
     networks: [backend]
     depends_on:
       core-migrate: { condition: service_completed_successfully }
 
-  # The intelligence workers (pipeline, echo) are not deployed on the demo
-  # in Plan 3, on purpose: the instance is small (3.7 GiB shared with the
-  # EMR and the web demo) and the models are heavy. Without them, core
-  # still starts and serves everything else; a question (POST /queries) is
-  # queued and, with no pipeline to take it, fails at its 10-minute
-  # deadline (deadline_exceeded). echo is test-only and never comes here.
-  # When the pipeline is deployed (a bigger host, or a model service):
-  #   - its own NATS NKey (a `pipeline` user in nats/nats.conf with the
-  #     permissions from services/nats/nats.conf) and TLS (nats.conf);
-  #   - its own database login, INTELLIGENCE_DB_USER (a member of
+  # The pipeline worker, for the pilot only (profile pilot; off by default:
+  # the demo never starts it and needs none of its files or variables).
+  # deploy/pilot/enable-pilot.sh makes everything it needs and starts it;
+  # deploy/pilot/README.md is the runbook. Without it, core still serves
+  # everything else and a question fails at its 10-minute deadline. echo is
+  # test-only and never comes here.
+  #   - its own NATS NKey (the seed a 0400 file; its public key is
+  #     NATS_PIPELINE_NKEY, the `pipeline` user in nats/nats.conf);
+  #   - its own database login, intelligence_app (a member of
   #     mhai_worker_app only; core-migrate makes it when
-  #     INTELLIGENCE_DB_PASSWORD is set), the password from a file, and
-  #     sslmode=verify-full (the worker refuses anything else outside
-  #     development);
+  #     INTELLIGENCE_DB_PASSWORD is set), the password from a 0400 file;
   #   - the trusted keys read-only (trustedkeys:/trusted:ro), never corekeys;
   #   - no env_file: it must not see the core service's secrets;
-  #   - on `backend` only, no published port, a mem_limit.
-  # pipeline:
-  #   image: ghcr.io/measured-health/mhai-multiagent:<version>
-  #   command: ["worker", "--service", "pipeline"]
-  #   environment:
-  #     APP_ENV: production
-  #     NATS_URL: tls://nats:4222
-  #     NATS_NKEY_SEED_PATH: /run/secrets/nats-pipeline.nk
-  #     INTELLIGENCE_TRUSTED_KEYS_PATH: /trusted/request-keys.json
-  #     INTELLIGENCE_DB_URL: postgres://postgres:5432/mhai?sslmode=verify-full
-  #     INTELLIGENCE_DB_PASSWORD_FILE: /run/secrets/intelligence-db-password
-  #     INTELLIGENCE_WARMUP_PAGE: /app/warmup/page.png   # shipped in the image
-  #     # Cloud models (off by default; deploy/README.md, "Cloud models").
-  #     # The proxy has its own setting: HTTPS_PROXY would send every
-  #     # library's HTTPS through it. Never put a key in the environment.
-  #     INTELLIGENCE_CLOUD_PROXY: http://egress-proxy:3128
-  #     # INTELLIGENCE_CLOUD_PROVIDERS: anthropic
-  #     # INTELLIGENCE_CLOUD_ANTHROPIC_MODEL: claude-opus-5-5
-  #     # INTELLIGENCE_CLOUD_ANTHROPIC_KEY_FILE: /run/secrets/anthropic-api-key
-  #     # INTELLIGENCE_CLOUD_ANTHROPIC_ZDR_REF: <the provider's ZDR reference>
-  #   volumes:
-  #     - trustedkeys:/trusted:ro
-  #     # Mode 0400, owned by the worker's user (deploy/README.md).
-  #     - ./secrets/anthropic-api-key:/run/secrets/anthropic-api-key:ro
-  #   # backend only: the egress proxy (profile cloud) is its only way out.
-  #   networks: [backend]
-  #   mem_limit: 3g
+  #   - on `backend` only, no published port: the egress proxy (profile
+  #     cloud) is its only way out, named by INTELLIGENCE_CLOUD_PROXY (never
+  #     HTTPS_PROXY), and only to the one provider's API host;
+  #   - production, with INTELLIGENCE_SINGLE_HOST=on: NATS and Postgres
+  #     without TLS, to the service names nats and postgres on this host
+  #     only (TLS is required before any worker runs off this host);
+  #   - the embedding and NLI weights baked into the image (Dockerfile
+  #     target pilot), loaded offline: it has no route to Hugging Face;
+  #   - one question at a time, under a memory cap (the host is small).
+  # The provider and its settings come from .env (empty by default), and
+  # the key is a 0400 file, never a variable. Never set any OPENAI_*,
+  # ANTHROPIC_*, AZURE_OPENAI_*, XAI_* or GEMINI_* variable here.
+  pipeline:
+    <<: *hardening
+    image: ${PIPELINE_IMAGE:-ghcr.io/measured-health/mhai-multiagent-pipeline-pilot:latest}
+    pull_policy: missing
+    profiles: ["pilot"]
+    restart: unless-stopped
+    command: ["worker", "--service", "pipeline"]
+    environment:
+      APP_ENV: production
+      INTELLIGENCE_SINGLE_HOST: "on"
+      NATS_URL: nats://nats:4222
+      NATS_NKEY_SEED_PATH: /run/secrets/nats-pipeline.nk
+      INTELLIGENCE_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+      INTELLIGENCE_DB_URL: postgres://postgres:5432/mhai?sslmode=disable
+      INTELLIGENCE_DB_USER: intelligence_app
+      INTELLIGENCE_DB_PASSWORD_FILE: /run/secrets/intelligence-db-password
+      INTELLIGENCE_MODEL_CLIENT: orchestrator
+      INTELLIGENCE_MAX_CONCURRENCY: "1"
+      INTELLIGENCE_WARMUP_PAGE: /app/warmup/page.png   # shipped in the image
+      # The weights are in the image; nothing is downloaded.
+      HF_HOME: /home/appuser/.cache/huggingface
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      OMP_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
+      # The cloud route (deploy/README.md, "Cloud models").
+      INTELLIGENCE_CLOUD_PROXY: http://egress-proxy:3128
+      INTELLIGENCE_CLOUD_PROVIDERS: ${PILOT_CLOUD_PROVIDER:-}
+      INTELLIGENCE_CLOUD_ANTHROPIC_MODEL: ${PILOT_ANTHROPIC_MODEL:-}
+      INTELLIGENCE_CLOUD_ANTHROPIC_KEY_FILE: ${PILOT_ANTHROPIC_KEY_FILE:-}
+      INTELLIGENCE_CLOUD_ANTHROPIC_ZDR_REF: ${PILOT_ANTHROPIC_ZDR_REF:-}
+      INTELLIGENCE_CLOUD_GEMINI_MODEL: ${PILOT_GEMINI_MODEL:-}
+      INTELLIGENCE_CLOUD_GEMINI_KEY_FILE: ${PILOT_GEMINI_KEY_FILE:-}
+      INTELLIGENCE_CLOUD_GEMINI_ZDR_REF: ${PILOT_GEMINI_ZDR_REF:-}
+      INTELLIGENCE_CLOUD_GEMINI_PAID_TIER: ${PILOT_GEMINI_PAID_TIER:-}
+    volumes:
+      - trustedkeys:/trusted:ro
+      # Each mode 0400, owned by the image's user (enable-pilot.sh).
+      - ./secrets/nats-pipeline.nk:/run/secrets/nats-pipeline.nk:ro
+      - ./secrets/intelligence-db-password:/run/secrets/intelligence-db-password:ro
+      - ./secrets/pilot-cloud-api-key:/run/secrets/cloud-api-key:ro
+    tmpfs:
+      - /tmp
+    cpus: 1.5
+    mem_limit: 1600m
+    memswap_limit: 1600m
+    networks: [backend]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
+    # Health is a NATS request (pipeline.health); enable-pilot.sh checks
+    # the log for the worker's start line.
+    healthcheck:
+      disable: true
 
   # The egress proxy for the cloud model providers (design section 6): the
   # only service on `egress`, the one network here with a route out. It

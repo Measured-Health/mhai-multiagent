@@ -81,7 +81,7 @@ var (
 
 // testCloudProviders are the providers the test deployment enables
 // (CORE_CLOUD_PROVIDERS): xai is left off, so a PUT naming it is 409.
-var testCloudProviders = []string{"anthropic", "openai"}
+var testCloudProviders = []string{"anthropic", "gemini", "openai"}
 
 // testContact is the configured security contact (synthetic).
 var testContact = platform.SecurityContact{Name: "Synthetic Security Desk", Email: "security@havana.example"}

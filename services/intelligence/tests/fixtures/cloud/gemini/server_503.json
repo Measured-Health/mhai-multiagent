@@ -1,0 +1,13 @@
+{
+  "status": 503,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "error": {
+      "code": 503,
+      "message": "Synthetic model overloaded",
+      "status": "UNAVAILABLE"
+    }
+  }
+}

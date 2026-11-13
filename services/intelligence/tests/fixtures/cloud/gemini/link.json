@@ -1,0 +1,27 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "SYNTHETIC0001",
+    "object": "chat.completion",
+    "created": 1762473600,
+    "model": "synthetic-model-1",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "{\"answer\": \"Synthetic answer [KB#0001], see https://example.org/fluids.\", \"citations\": [\"KB#0001\"], \"insufficient_evidence\": false}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 812,
+      "completion_tokens": 64,
+      "total_tokens": 916
+    }
+  }
+}

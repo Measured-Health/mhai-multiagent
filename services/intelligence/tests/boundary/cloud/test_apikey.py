@@ -190,7 +190,9 @@ def test_redacting_filter_on_message_args_and_exception(
     log, out, _ = captured
     ant = "sk-ant-" + "a" * 16
     xai = "xai-" + "b" * 16
+    google = "AIza" + "c" * 35  # the shape of a Google API key (synthetic)
     log.info("calling with %s", FAKE_KEY)
+    log.info("gemini key=%s", google)
     log.info("in the message " + FAKE_KEY)
     log.info("prefixed %s %s %s", FAKE_SK_KEY, ant, xai)
     log.info("mapping %(k)s", {"k": FAKE_KEY})
@@ -205,9 +207,9 @@ def test_redacting_filter_on_message_args_and_exception(
         log.error("send failed", exc_info=e)
     log.warning("stack", stack_info=True, extra={"unused": 1})
     text = out.getvalue()
-    for secret in (FAKE_KEY, FAKE_SK_KEY, ant, xai, "a" * 16, "b" * 16):
+    for secret in (FAKE_KEY, FAKE_SK_KEY, ant, xai, google, "a" * 16, "b" * 16, "c" * 16):
         assert secret not in text
-    assert text.count("[REDACTED]") >= 9
+    assert text.count("[REDACTED]") >= 10
     assert "Authorization: Bearer [REDACTED]" in text
     assert "RuntimeError" in text and "ValueError" in text  # the trace is kept
 
@@ -216,9 +218,9 @@ def test_redacting_filter_keeps_short_or_unrelated_text(
     captured: tuple[logging.Logger, io.StringIO, RedactingFilter],
 ) -> None:
     log, out, _ = captured
-    log.info("task-1 sk-short xai-abc risk-assessment-score taxai-0123456789 %d", 7)
+    log.info("task-1 sk-short xai-abc AIza-x risk-assessment-score taxai-0123456789 %d", 7)
     assert out.getvalue().strip() == (
-        "INFO task-1 sk-short xai-abc risk-assessment-score taxai-0123456789 7"
+        "INFO task-1 sk-short xai-abc AIza-x risk-assessment-score taxai-0123456789 7"
     )
 
 

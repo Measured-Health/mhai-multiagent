@@ -89,10 +89,14 @@ func registerModelPolicy(m *authz.Mux, d Deps) {
 }
 
 // ModelPolicyOut is the policy as both routes answer it: exactly these
-// keys.
+// keys. ProviderCode is the policy's provider, any of
+// config.CloudProviderNames, or null when off; CloudProvider is the same
+// value only when openapi 1.x's enum names it (config.EnumV1Provider), so
+// it is null for gemini.
 type ModelPolicyOut struct {
 	HospitalID         string        `json:"hospital_id"`
 	CloudProvider      *string       `json:"cloud_provider"`
+	ProviderCode       *string       `json:"provider_code"`
 	AgreementRef       *string       `json:"agreement_ref"`
 	MonthlyTokenBudget int64         `json:"monthly_token_budget"`
 	UpdatedAt          *string       `json:"updated_at"`
@@ -232,9 +236,10 @@ func readModelPolicy(ctx context.Context, tx pgx.Tx, hid uuid.UUID) (ModelPolicy
 	}
 	var at time.Time
 	err = tx.QueryRow(ctx, `SELECT cloud_provider, agreement_ref, monthly_token_budget, updated_at
-		FROM hospital_model_policy WHERE hospital_id = $1`, hid).Scan(&out.CloudProvider, &out.AgreementRef, &out.MonthlyTokenBudget, &at)
+		FROM hospital_model_policy WHERE hospital_id = $1`, hid).Scan(&out.ProviderCode, &out.AgreementRef, &out.MonthlyTokenBudget, &at)
 	switch {
 	case err == nil:
+		out.CloudProvider = config.EnumV1Provider(out.ProviderCode)
 		s := stamp(at)
 		out.UpdatedAt = &s
 	case !errors.Is(err, pgx.ErrNoRows):

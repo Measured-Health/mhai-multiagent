@@ -121,6 +121,7 @@ class LocalSource:
                 raise invalid("list")
             if len(entries) > self._limits.max_files:
                 raise invalid("count")
+            files.check_misnamed(entries)
             found: list[RemoteFile] = []
             for entry_name in entries:
                 allowed_name(entry_name)

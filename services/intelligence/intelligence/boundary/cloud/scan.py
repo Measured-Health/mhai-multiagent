@@ -103,6 +103,9 @@ _SDK_HEADERS: Final = frozenset(
 ALLOWED_HEADERS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {
         "anthropic": _SDK_HEADERS | {"anthropic-version"},
+        # The openai SDK against Google's OpenAI-compatible endpoint: the
+        # same headers as openai and xai, the key as a Bearer token.
+        "gemini": _SDK_HEADERS,
         "openai": _SDK_HEADERS,
         "xai": _SDK_HEADERS,
     }
@@ -136,6 +139,7 @@ NAME_KEYS: Final = frozenset({"name", "given", "family"})
 BLOCK_ARRAYS: Final = MappingProxyType(
     {
         "anthropic": "/messages/0/content",
+        "gemini": "/messages/1/content",  # Chat Completions, as xai
         "openai": "/input/0/content",
         "xai": "/messages/1/content",  # /messages/0 is the system message
     }
@@ -626,13 +630,19 @@ class Shape:
     It is enforced here, not left to the adapter: the free pointers (allowed
     but not fixed) must be exactly one provider's seven block texts, with
     blocks 0 and 1 as the patient paths. A Shape with no fixed values, or
-    with any other leaf left free, is refused. Build one with shape_for."""
+    with any other leaf left free, is refused. Build one with shape_for.
+
+    provider names whose request this is (the scan hook takes that
+    provider's header list from it). Two providers can share a block
+    layout (gemini and xai are both Chat Completions), so it is required
+    whenever the layout alone doesn't name one, and must fit the layout."""
 
     patient_paths: frozenset[str]
     allowed_paths: frozenset[str]
     fixed_values: Mapping[str, Any] = field(
         default_factory=lambda: MappingProxyType({}), compare=False, hash=False
     )
+    provider: str = ""
 
     def __post_init__(self) -> None:
         for paths in (self.patient_paths, self.allowed_paths):
@@ -646,15 +656,25 @@ class Shape:
         if not set(fixed) <= self.allowed_paths or set(fixed) & self.patient_paths:
             raise ValueError("a fixed pointer is allowed and not a patient path")
         free = self.allowed_paths - set(fixed)
-        if not any(
-            free == set(texts) and self.patient_paths == set(texts[:2])
-            for texts in map(block_pointers, BLOCK_ARRAYS)
-        ):
+        fits = [
+            p
+            for p in BLOCK_ARRAYS
+            if free == set(block_pointers(p)) and self.patient_paths == set(block_pointers(p)[:2])
+        ]
+        if not fits:
             raise ValueError(
                 "only one provider's block texts are free; every other leaf is fixed "
                 "(build the Shape with shape_for)"
             )
+        provider = self.provider
+        if provider == "":
+            if len(fits) != 1:
+                raise ValueError("this block layout is more than one provider's: name the provider")
+            provider = fits[0]
+        elif provider not in fits:
+            raise ValueError("the block layout is not this provider's")
         object.__setattr__(self, "fixed_values", MappingProxyType(fixed))
+        object.__setattr__(self, "provider", provider)
 
 
 def block_pointers(provider: str) -> tuple[str, ...]:
@@ -665,15 +685,17 @@ def block_pointers(provider: str) -> tuple[str, ...]:
     return tuple(f"{base}/{i}/text" for i in range(MAX_BLOCKS))
 
 
-BLOCK_TYPES: Final = MappingProxyType({"anthropic": "text", "openai": "input_text", "xai": "text"})
+BLOCK_TYPES: Final = MappingProxyType(
+    {"anthropic": "text", "gemini": "text", "openai": "input_text", "xai": "text"}
+)
 
 
 def provider_of(shape: Shape) -> str:
-    """The provider whose block layout shape has (Shape admits exactly one)."""
-    for p in BLOCK_ARRAYS:
-        if shape.patient_paths == frozenset(block_pointers(p)[:2]):
-            return p
-    raise ValueError("a Shape names one provider's layout")
+    """The provider the shape was made for (checked against its layout
+    when the Shape was built)."""
+    if type(shape) is not Shape or shape.provider not in BLOCK_ARRAYS:
+        raise ValueError("a Shape names one provider")
+    return shape.provider
 
 
 def shape_for(provider: str, fixed: Mapping[str, Any]) -> Shape:
@@ -687,7 +709,7 @@ def shape_for(provider: str, fixed: Mapping[str, Any]) -> Shape:
     values.update(fixed)
     if set(values) & set(texts):
         raise ValueError("a block's text is never fixed")
-    return Shape(frozenset(texts[:2]), frozenset(texts) | frozenset(values), values)
+    return Shape(frozenset(texts[:2]), frozenset(texts) | frozenset(values), values, provider)
 
 
 # --- the rules -------------------------------------------------------------------------------

@@ -31,7 +31,7 @@ const seedUsage = `usage:
   core hospitals create --name N --short-code CODE --time-zone TZ [--require-mfa-for-clinicians] [--allow-trust-device] [--demo]
   core hospitals activate <hospital id or short code>
   core hospitals mark-demo <hospital id or short code>
-  core hospitals model-policy set <hospital id or short code> --provider openai|anthropic|xai|none [--agreement-ref REF] [--budget TOKENS]
+  core hospitals model-policy set <hospital id or short code> --provider openai|anthropic|xai|gemini|none [--agreement-ref REF] [--budget TOKENS]
   core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
 
 The password is never an argument: users create prompts for it on a terminal
@@ -210,8 +210,8 @@ func hospitalsMarkDemo(ctx context.Context, args []string, url string, out io.Wr
 
 var (
 	errModelPolicyArgs = errors.New("usage: core hospitals model-policy set <hospital id or short code> " +
-		"--provider openai|anthropic|xai|none [--agreement-ref REF] [--budget TOKENS]")
-	errUnknownProvider    = errors.New("--provider must be openai, anthropic, xai or none")
+		"--provider openai|anthropic|xai|gemini|none [--agreement-ref REF] [--budget TOKENS]")
+	errUnknownProvider    = errors.New("--provider must be openai, anthropic, xai, gemini or none")
 	errProviderDisabled   = errors.New("that provider is not enabled in CORE_CLOUD_PROVIDERS")
 	errNeedsAgreementRef  = errors.New("a provider needs --agreement-ref")
 	errBadAgreementRef    = errors.New("--agreement-ref must be AGR-YYYY-NNNN, DPA-YYYY-NNNN (2 to 8 digits) or DEMO-SYNTHETIC")

@@ -273,3 +273,20 @@ func TestEMRUserIsAnOptInInclude(t *testing.T) {
 		t.Fatal("the deploy config must not include an emr user yet (NATS_EMR_NKEY isn't provisioned)")
 	}
 }
+
+// The pilot (deploy/pilot/README.md): the demo config has the pipeline
+// user as an NKey user with exactly the dev config's pipeline permissions,
+// so the pilot pipeline can do on the demo what it does in dev and nothing
+// more. Its public key is NATS_PIPELINE_NKEY (compose's default is a public
+// key whose seed was thrown away, so the user exists but no one can sign in
+// until the pilot).
+func TestDeployPipelineUserMatchesDev(t *testing.T) {
+	dev := stripComments(permissionsAfter(t, readConf(t, "services/nats/nats.conf"), "password: $NATS_PIPELINE_PASSWORD"))
+	prod := stripComments(permissionsAfter(t, readConf(t, "deploy/nats/nats.conf"), "nkey: $NATS_PIPELINE_NKEY"))
+	if dev != prod {
+		t.Fatalf("pipeline permissions differ:\ndev:  %s\nprod: %s", dev, prod)
+	}
+	if strings.Count(stripComments(readConf(t, "deploy/nats/nats.conf")), "nkey:$NATS_PIPELINE_NKEY") != 1 {
+		t.Fatal("deploy/nats/nats.conf must define the pipeline user exactly once")
+	}
+}

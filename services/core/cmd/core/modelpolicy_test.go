@@ -45,7 +45,8 @@ func TestCLIModelPolicyArgsCheckedFirst(t *testing.T) {
 		args []string
 		want error
 	}{
-		"unknown provider":     {enabled, []string{"set", "HAV", "--provider", "gemini", "--agreement-ref", "DEMO-SYNTHETIC"}, errUnknownProvider},
+		"unknown provider":     {enabled, []string{"set", "HAV", "--provider", "mistral", "--agreement-ref", "DEMO-SYNTHETIC"}, errUnknownProvider},
+		"gemini not enabled":   {enabled, []string{"set", "HAV", "--provider", "gemini", "--agreement-ref", "DEMO-SYNTHETIC"}, errProviderDisabled},
 		"local":                {enabled, []string{"set", "HAV", "--provider", "local"}, errUnknownProvider},
 		"disabled provider":    {enabled, []string{"set", "HAV", "--provider", "xai", "--agreement-ref", "DEMO-SYNTHETIC"}, errProviderDisabled},
 		"nothing enabled":      {envOf(nil), []string{"set", "HAV", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC"}, errProviderDisabled},

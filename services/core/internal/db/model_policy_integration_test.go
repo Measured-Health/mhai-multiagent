@@ -693,7 +693,7 @@ func TestPolicyChecks(t *testing.T) {
 	a, _ := seedHospital(t, pool, uniqueCode("PC"))
 	ins := `INSERT INTO hospital_model_policy (hospital_id, cloud_provider, agreement_ref, monthly_token_budget) VALUES ($1, $2, $3, $4)`
 	for what, args := range map[string][]any{
-		"unknown provider":           {a, "gemini", "AGR-2026-01", 1000},
+		"unknown provider":           {a, "mistral", "AGR-2026-01", 1000},
 		"lower-case agreement_ref":   {a, "openai", "synth-1", 1000},
 		"agreement_ref with a space": {a, "openai", "SYNTH 1", 1000},
 		"agreement_ref too short":    {a, "openai", "AB", 1000},
@@ -911,7 +911,7 @@ func TestReserveOnlyForThePolicysProvider(t *testing.T) {
 	want("the new provider after a switch", "anthropic", true)
 	setPolicy(t, pool, a, nil, 10_000)
 	want("the old provider after switching off", "anthropic", false)
-	for _, bad := range []any{"gemini", "OPENAI", "cloud:openai", "", nil} {
+	for _, bad := range []any{"mistral", "Gemini", "OPENAI", "cloud:openai", "", nil} {
 		if _, _, ok, err := reserve(ctx, pool, a, bad, 10); pgCode(err) != "22023" || ok {
 			t.Errorf("provider %v: want 22023, got ok=%v err=%v", bad, ok, err)
 		}
@@ -961,5 +961,79 @@ func TestReserveAndRouteRefuseInactiveHospital(t *testing.T) {
 	}
 	if used, res := ledger(t, pool, a); used != 4 || res != 0 {
 		t.Errorf("ledger: used %d reserved %d, want 4 and 0", used, res)
+	}
+}
+
+// Migration 00024: gemini is a provider like the others. Its policy sets
+// the route cloud:gemini, the worker reserves for it only while the policy
+// names it, the effective route holds, and an unknown provider is still
+// refused by every check.
+func TestGeminiPolicyRouteAndReserve(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	a, _ := seedHospital(t, pool, uniqueCode("GM"))
+	setPolicy(t, pool, a, ptr("gemini"), 10_000)
+	q := gatewayInsert(t, pool, a, "cloud:openai")
+	if r := routeOf(t, pool, q); r != "cloud:gemini" {
+		t.Errorf("gemini policy: route %q, want cloud:gemini", r)
+	}
+	var eff string
+	if err := commitAs(ctx, pool, "mhai_worker", &a, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT mhai_effective_model_route($1, 'cloud:gemini')`, a).Scan(&eff)
+	}); err != nil || eff != "cloud:gemini" {
+		t.Errorf("effective route %q, %v", eff, err)
+	}
+	if _, _, ok, err := reserve(ctx, pool, a, "gemini", 10); err != nil || !ok {
+		t.Errorf("reserve for gemini: ok=%v err=%v", ok, err)
+	}
+	if _, _, ok, err := reserve(ctx, pool, a, "xai", 10); err != nil || ok {
+		t.Errorf("reserve for another provider: ok=%v err=%v", ok, err)
+	}
+	setPolicy(t, pool, a, ptr("openai"), 10_000)
+	if _, _, ok, err := reserve(ctx, pool, a, "gemini", 10); err != nil || ok {
+		t.Errorf("reserve for gemini after a switch: ok=%v err=%v", ok, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE hospital_model_policy SET cloud_provider = 'google' WHERE hospital_id = $1`, a); pgCode(err) != "23514" {
+		t.Errorf("provider google: want 23514, got %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE clinical_queries SET model_route = 'cloud:google' WHERE id = $1`, q); pgCode(err) != "23514" {
+		t.Errorf("route cloud:google: want 23514, got %v", err)
+	}
+}
+
+// 00024 goes down and up again: down restores 00018's lists (gemini
+// refused again), and refuses while a policy names gemini.
+func TestMigration00024DownUp(t *testing.T) {
+	pg := testutil.StartPostgres(t)
+	ctx := context.Background()
+	pool, err := db.Open(ctx, pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := seedHospital(t, pool, uniqueCode("GD"))
+	setPolicy(t, pool, a, ptr("gemini"), 1000)
+	if err := db.MigrateDownTo(ctx, pg.URL, 23); err == nil {
+		t.Fatal("down ran while a policy names gemini")
+	}
+	setPolicy(t, pool, a, nil, 1000)
+	if err := db.MigrateDownTo(ctx, pg.URL, 23); err != nil {
+		t.Fatalf("down to 23: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE hospital_model_policy SET cloud_provider = 'gemini', agreement_ref = 'AGR-2026-0001' WHERE hospital_id = $1`, a); pgCode(err) != "23514" {
+		t.Errorf("after down, gemini policy: want 23514, got %v", err)
+	}
+	if _, _, _, err := reserve(ctx, pool, a, "gemini", 10); pgCode(err) != "22023" {
+		t.Errorf("after down, reserve for gemini: want 22023, got %v", err)
+	}
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	setPolicy(t, pool, a, ptr("gemini"), 1000)
+	if _, _, ok, err := reserve(ctx, pool, a, "gemini", 10); err != nil || !ok {
+		t.Errorf("after up, reserve for gemini: ok=%v err=%v", ok, err)
 	}
 }

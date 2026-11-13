@@ -92,8 +92,8 @@ func TestCLIModelPolicySet(t *testing.T) {
 	if _, err := run("set", "HAV", "--provider", "xai", "--agreement-ref", "DEMO-SYNTHETIC"); !errors.Is(err, errProviderDisabled) {
 		t.Fatalf("xai: %v", err)
 	}
-	if _, err := run("set", "HAV", "--provider", "gemini", "--agreement-ref", "DEMO-SYNTHETIC"); !errors.Is(err, errUnknownProvider) {
-		t.Fatalf("gemini: %v", err)
+	if _, err := run("set", "HAV", "--provider", "mistral", "--agreement-ref", "DEMO-SYNTHETIC"); !errors.Is(err, errUnknownProvider) {
+		t.Fatalf("mistral: %v", err)
 	}
 	if p, _, b, _ := policy(); p == nil || *p != "openai" || b != 750000 {
 		t.Fatalf("after refusals: %v %d", p, b)

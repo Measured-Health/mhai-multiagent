@@ -1,4 +1,4 @@
-"""What the three adapters share (plan Tasks 11 to 13).
+"""What the adapters share (plan Tasks 11 to 13).
 
 - A provider's status error becomes a reply, never an exception: its
   status is the outcome, through retry.classify, with the Retry-After
@@ -81,6 +81,22 @@ def envelope(raw: Any) -> tuple[dict[str, Any] | None, int | None]:
 def count(v: object) -> int | None:
     """A token count: a non-negative int, not a bool."""
     return v if type(v) is int and v >= 0 else None
+
+
+def chat_tokens_out(usage: dict[str, Any], tokens_in: int | None) -> int | None:
+    """A Chat Completions reply's output tokens, reasoning included (xai,
+    gemini). With total_tokens, what it holds beyond the prompt (whichever
+    way the reasoning is counted); without it, completion plus reasoning,
+    which can only over-count."""
+    completion = count(usage.get("completion_tokens"))
+    if completion is None:
+        return None
+    total = count(usage.get("total_tokens"))
+    if total is not None and tokens_in is not None:
+        return max(completion, total - tokens_in)
+    details = obj(usage.get("completion_tokens_details"))
+    reasoning = count(details.get("reasoning_tokens")) or 0
+    return completion + reasoning
 
 
 def obj(v: object) -> dict[str, Any]:

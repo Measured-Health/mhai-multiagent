@@ -9,11 +9,11 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - EMR integration, PR 6 (FHIR R4; off by default). Migration **00026**
-  (00024 and 00025 are Gemini's and Analysis PR 4's): `emr.sync_state`,
+  (after Gemini's 00024 and Analysis PR 4's 00025): `emr.sync_state`,
   `emr.raw_records.backfill`, and `emr_platform_health()` reporting a
-  connection that is on and silent for three poll intervals as `errors`. The `fhir_r4` connector is built:
-  SMART Backend Services sign-in (RS384 or ES384, credential origin only),
-  a read-only test with capability checks, and polling by `_lastUpdated`
+  connection that is on and silent for three poll intervals as `errors`.
+  The `fhir_r4` connector is built: SMART Backend Services sign-in (RS384
+  or ES384, credential origin only), a read-only test with capability checks, and polling by `_lastUpdated`
   with a per-type cursor, page and record limits, references read from the
   same server only, and hostile-response refusals. It declares an optional
   `mrn_namespace` setting. The scheduler adds advisory locks, backoff and
@@ -24,6 +24,41 @@ All notable changes to this project are documented here. The format follows
   through egress-emr. egress-emr gains a development-only
   `EGRESS_EMR_DEV_EXEMPT`, and the emr service a development-only
   `EMR_DEV_CA_FILE`.
+- Cloud model providers: Google Gemini as a fourth provider (OpenAPI 1.16.0,
+  migration 00024; off by default). The worker's `gemini_adapter` calls
+  Google's OpenAI-compatible endpoint
+  (`generativelanguage.googleapis.com/v1beta/openai`) with the openai SDK,
+  under the same gate, egress scan (exact header list, every leaf pinned),
+  budget reservation, strict reply check, `max_retries=0` and no redirects
+  as the other adapters; a bad key (400 `API_KEY_INVALID`) is `auth_failed`.
+  The model comes from `INTELLIGENCE_CLOUD_GEMINI_MODEL`. The worker refuses to
+  start with gemini enabled unless `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified`
+  (the key must be on a paid, billing-enabled project: free-tier prompts may
+  be used by Google); demo included, only `APP_ENV=development` warns
+  instead. `gemini` joins every closed set: core's providers, the route,
+  `mhai_cloud_reserve`, the audit and fact schemas, the CLI and the
+  `PUT .../model-policy` request. Response enums can't widen in /api/v1
+  (ADR 0012), so `ModelPolicy` and `generated_by` gain `provider_code` (a
+  string with documented values, any provider); `cloud_provider` and
+  `generated_by.provider` keep their enums and are null for gemini.
+  Migration 00024 merges first; Patient Analysis PR 4 takes 00025 and EMR
+  PR 6 00026.
+- The pilot: cloud answers for one real hospital on the demo host
+  (`deploy/pilot/`, product owner's decision of 12 Nov 2026; the deferred
+  sign-offs are recorded in PR #134). `deploy/compose.yml` gains the
+  `pipeline` worker under the `pilot` profile (off by default: the default
+  deploy only gains empty `CORE_CLOUD_PROVIDERS` and
+  `INTELLIGENCE_DB_PASSWORD` and a `NATS_PIPELINE_NKEY` default whose seed was thrown away (checked by `nats-server -t` in CI, `deploy/nats/check-configs.sh`)), and
+  `deploy/nats/nats.conf` the `pipeline` NKey user (a test keeps its
+  permissions equal to dev's). `deploy/pilot/enable-pilot.sh` makes the
+  pipeline's NKey, login and key file, starts the egress proxy and the
+  pipeline, and creates the hospital and its model policy; the provider is
+  a parameter (anthropic, or gemini once its adapter merges). The
+  intelligence Dockerfile gains a `pilot` target with the embedding and NLI
+  weights pinned and loaded offline, built for arm64 by the new "Pilot
+  pipeline image" workflow. The worker gains `INTELLIGENCE_SINGLE_HOST=on`:
+  NATS and Postgres without TLS outside development, only to Docker service
+  names on its own host (`tests/security/test_single_host_transport.py`).
 - Document pipeline phase 0, part B: model promotion, the lean version
   (`services/intelligence/intelligence/modelstore/`, the `mhai-models` CLI).
   File checks for a trained run (safetensors only, a fixed list of JSON
@@ -44,6 +79,35 @@ All notable changes to this project are documented here. The format follows
   the whole flow on MinIO (`model-promotion-e2e`). With no model pinned,
   nothing changes. The enterprise controls left out are listed in TODO.md,
   "Before scale".
+- Patient Analysis, PR 4 (aggregate routes; off by default, the demo
+  hospital only). Migration **00025** (00024 is the Gemini provider's, #137): `analysis_subject_attrs` (a
+  subject's attributes, fixed by its first fact), `analysis_hospital_start`,
+  `analysis_snapshots` (one guarded body per context, insert only, at most
+  20,000 per period and 4 MiB, refusing a shown count of 1 to 4),
+  `analysis_view_log` and `analysis_unusual`; the gateway's definer
+  functions `mhai_analysis_{period, periods, lock, cells, filters,
+  snapshot_get, snapshot_put, records, viewed}`, owned by
+  `mhai_analysis_reader`, each refusing a hospital that is off; the sweep
+  also sweeps bodies and the read log. `GET /analysis/filters` and
+  `GET /analysis/{view}` (hospital admin or analyst, two-step; 404 when off;
+  one frozen period by `period`/`start` or an exact `from`/`to`, else 422
+  `invalid_range`; 422 `too_many_filters`; 503 `not_ready` for a period not
+  frozen yet or a body past the 2 s cold budget; 429 past 30 reads a minute;
+  `history` copied from stored bodies; `Cache-Control: no-store`). The
+  engine computes parents first, one guard per hospital and period at a time
+  (an advisory lock), against the period's record kept between requests
+  (`disclose.Ledger`), with the source list given to the guard; audit
+  `analysis.viewed` once per session, filter set and period, and
+  `analysis.unusual_querying`. New problem codes `too_many_filters` and
+  `invalid_range` (422). openapi 1.17.0 (additive). Drill fields are null
+  until PR 5. Every opaque filter (condition, location, specialty, source)
+  must be in the period's
+  stored filter lists (else 422 before anything is computed), and a person
+  may have at most 100 distinct contexts computed cold per period
+  (`analysis_cold_budget`): every context a request would newly store, its
+  child periods' and filter parents' included, is reserved before the
+  engine runs, and at most 32 per request (else 429; a history point past
+  them is sent hidden whole).
 - EMR integration, PR 5 (canonical model, normaliser and patient index;
   off by default). Migration **00023** (the plan's 00022; 00021 and 00022
   were taken by Analysis and Plan 7c-3): `emr.raw_records` (a document

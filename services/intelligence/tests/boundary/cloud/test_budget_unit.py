@@ -291,7 +291,7 @@ def test_reserve_refuses_unknown_provider_and_non_int_tokens(
 
     monkeypatch.setattr(cloud_repo, "reserve", rec)
     p = port(FakeDb())
-    for provider, tokens in (("gemini", 10), ("", 10), ("anthropic", True), ("anthropic", 1.5)):
+    for provider, tokens in (("mistral", 10), ("", 10), ("anthropic", True), ("anthropic", 1.5)):
         assert p.reserve(provider, tokens) is None  # type: ignore[arg-type]
     assert calls == []
 

@@ -51,6 +51,14 @@ public request keys, mounted read-only; re-read on SIGHUP),
 `INTELLIGENCE_MAX_CONCURRENCY`, and `OTEL_EXPORTER_OTLP_ENDPOINT`. A bad
 setting stops the worker with a message that names variables, never values.
 
+`INTELLIGENCE_SINGLE_HOST=on` (exactly `on`) is the one transport exception
+outside development: NATS (`nats://`) and Postgres (`sslmode=disable`)
+without TLS, only to single-label Docker service names on the worker's own
+host (no dot, no address, not localhost). The NKey, the file password and
+every other production rule stay, and the worker logs a warning at start.
+It exists for the pilot on the demo host (`deploy/pilot/README.md`), which
+has no TLS inside the instance yet; never use it across hosts.
+
 ## Cloud models (off by default)
 
 A hospital a platform admin has opted in can have its clinical drafts
@@ -83,7 +91,15 @@ claim runs local.
 
 **Settings** (pipeline only; all unset by default):
 
-- `INTELLIGENCE_CLOUD_PROVIDERS`: a comma list of `anthropic`, `openai`, `xai`.
+- `INTELLIGENCE_CLOUD_PROVIDERS`: a comma list of `anthropic`, `gemini`,
+  `openai`, `xai`. Gemini goes through Google's OpenAI-compatible endpoint
+  (`boundary/cloud/gemini_adapter.py`).
+- `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER`: `verified` once someone has checked
+  the Gemini key's Google project is on the paid tier with billing on (a
+  free-tier key's prompts may be used by Google to improve its products).
+  Unset or `unverified` refuses start-up with gemini enabled (demo too);
+  only `APP_ENV=development` starts, with a warning. Any other value is
+  refused.
 - Per provider: `INTELLIGENCE_CLOUD_<PROVIDER>_MODEL` (an exact model id; no
   Fable or Mythos), `INTELLIGENCE_CLOUD_<PROVIDER>_KEY_FILE` (mode 0400 or
   0440; never a variable holding the key), and outside development
@@ -97,7 +113,7 @@ claim runs local.
 Start-up refuses any of: an incomplete provider; a key file with the wrong
 mode, a placeholder, whitespace or under 20 characters; `SSL_CERT_FILE` or
 `SSL_CERT_DIR` with a provider enabled; no CA bundle at OpenSSL's paths with
-a provider enabled. **Any `OPENAI_*`, `ANTHROPIC_*`, `AZURE_OPENAI_*` or
+a provider enabled. **Any `OPENAI_*`, `ANTHROPIC_*`, `AZURE_OPENAI_*`, `GEMINI_*` or
 `XAI_*` variable refuses start-up for every worker, cloud on or off** (a
 developer shell exporting `OPENAI_API_KEY` will hit it): the SDKs read keys,
 base URLs, headers and logging from them.

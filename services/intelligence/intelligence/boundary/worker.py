@@ -80,7 +80,7 @@ from opentelemetry.trace import SpanKind
 
 from intelligence.boundary import _b64, envelope, telemetry
 from intelligence.boundary.cloud.apikey import install_redaction, quiet_sdk_loggers
-from intelligence.boundary.config import ConfigError, WorkerSettings
+from intelligence.boundary.config import ConfigError, WorkerSettings, check_single_host_nats
 from intelligence.boundary.grant import GrantClient, GrantRefused, Unavailable
 from intelligence.boundary.jobs import JobContext, JobHandler, Slot
 from intelligence.boundary.keys import TrustedKeys, install_sighup_reload
@@ -335,7 +335,12 @@ class Worker:
         nothing is ever sent in the clear. The transport is checked for TLS
         after connecting and after every reconnect as well."""
         s = self.settings
-        if not s.development and not (s.tls_ca_path and s.tls_cert_path and s.tls_key_path):
+        # INTELLIGENCE_SINGLE_HOST=on: the settings allowed plaintext to a
+        # Docker service name on this host only (config._single_host).
+        tls_required = not s.development and not s.single_host
+        if s.single_host and not s.development and (errs := check_single_host_nats(s.nats_url)):
+            raise ConfigError(errs[0])
+        if tls_required and not (s.tls_ca_path and s.tls_cert_path and s.tls_key_path):
             raise ConfigError(
                 "NATS_TLS_CA_PATH, NATS_TLS_CERT_PATH and NATS_TLS_KEY_PATH are required "
                 "outside development"
@@ -359,7 +364,7 @@ class Worker:
             nkeys_seed=s.nkey_seed_path,
             error_cb=on_error,
             max_reconnect_attempts=-1,
-            tls_handshake_first=not s.development,
+            tls_handshake_first=not s.development and tls is not None,
             reconnected_cb=self._on_reconnected,
         )
         if self._require_tls and not _is_tls(nc):

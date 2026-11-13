@@ -426,7 +426,7 @@ the rule that hospital admins see no clinical content.
 admins and analysts may see aggregates and pseudonymous rows for their own
 hospital under disclosure control, and names only under a verified letter.
 The backend design is `docs/specs/2026-11-07-analysis-backend-design.md`,
-built by `docs/plans/2026-11-07-analysis-backend.md`. The changes it makes to
+built by `docs/plans/2026-11-07-analysis-backend.md`. **Built (PR 4, off by default, demo hospital only):** `GET /analysis/filters` and `GET /analysis/{view}` as below, with `periods`, `Meta.period`, `history`, 422 `invalid_range` and `too_many_filters`, and 503 `not_ready` (also when a body is still being computed: retry). `drill` is `null` until the drill-down (PR 5). `GET /analysis/filters` answers `periods` as `{week, month, quarter}`, each a list of first days, oldest first; `updated_at` is null when no month is frozen yet. The changes it makes to
 the shapes below are listed under "Changes from the backend design (H6)".
 
 ### Analysis, as built in Plan 6
