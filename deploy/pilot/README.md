@@ -84,9 +84,12 @@ bash deploy/pilot/enable-pilot.sh --provider anthropic \
 ```
 
 It asks for the key with a hidden prompt (or reads one line piped from a
-password manager). For Gemini: `--provider gemini --model <model id>`; it
-refuses until both the pipeline image and core know `gemini`, before
-changing anything.
+password manager). For Gemini: `--provider gemini --model <model id>
+--gemini-paid-tier verified`. Pass the last flag only once you have checked the
+key's Google project is paid and billing-enabled (free-tier prompts may be
+used by Google); without it the script stops, and the pipeline would refuse
+to start anyway. It also refuses until both the pipeline image and core know
+`gemini`, before changing anything.
 
 It is safe to run again: every step checks first and keeps what is there.
 Each step, in order:

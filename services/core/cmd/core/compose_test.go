@@ -969,6 +969,11 @@ func TestPipelineNeverOnEgress(t *testing.T) {
 			}
 		}
 	}
+	// Gemini refuses to start outside development unless the key's paid,
+	// billing-enabled tier is confirmed; only enable-pilot.sh sets it.
+	if got, want := p.Environment["INTELLIGENCE_CLOUD_GEMINI_PAID_TIER"], "${PILOT_GEMINI_PAID_TIER:-}"; got != want {
+		t.Errorf("INTELLIGENCE_CLOUD_GEMINI_PAID_TIER = %q, want %q", got, want)
+	}
 }
 
 // The pilot pipeline (deploy/pilot/README.md): off by default (profile
