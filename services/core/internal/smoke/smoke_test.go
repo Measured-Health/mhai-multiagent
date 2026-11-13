@@ -948,26 +948,30 @@ func TestSmokeWhatChanged(t *testing.T) {
 }
 
 // analysisAdminSignIn creates a synthetic hospital admin of code with the
-// CLI and signs in over api.v1.clinical with two-step (the Analysis routes
-// need it): password, the first password change and the terms, two-step
-// enrolment, then a session proven with a code.
+// CLI and signs in over api.v1.clinical with two-step, as platformSignIn
+// does on the platform audience: an admin must use two-step, so the
+// password step answers mfa_required with an enrolment-only session; then
+// enrolment, a full session proven with a code (the next 30 s step), and
+// the first password change and the terms the CLI's new user owes.
 func analysisAdminSignIn(t *testing.T, nc *nats.Conn, code string) string {
 	t.Helper()
 	email := "smoke-analysis-" + randomHex(t, 6) + "@demo.example.test"
 	first, second := "Smoke-first-"+randomHex(t, 12), "Smoke-second-"+randomHex(t, 12)
 	cli(t, first+"\n", "users", "create", "--email", email, "--name", "Synthetic Smoke Admin", "--roles", "hospital_admin", "--hospital", code)
-	r := api(t, nc, "POST", "/auth/login", "", map[string]any{"username": email, "password": first})
-	access, _ := r.body["access_token"].(string)
-	if r.status != http.StatusOK || access == "" {
-		t.Fatalf("admin sign in: %d %s", r.status, r.raw)
+	login := func(pw string) string {
+		r := api(t, nc, "POST", "/auth/login", "", map[string]any{"username": email, "password": pw})
+		tok, _ := r.body["mfa_token"].(string)
+		if r.status != http.StatusOK || r.body["mfa_required"] != true || tok == "" {
+			t.Fatalf("admin sign in: %d %s, want the two-step branch", r.status, r.raw)
+		}
+		return tok
 	}
-	if r := api(t, nc, "POST", "/auth/password", access, map[string]any{"current_password": first, "new_password": second}); r.status != http.StatusNoContent {
-		t.Fatalf("admin password: %d %s", r.status, r.raw)
+	r := api(t, nc, "POST", "/auth/mfa/challenge", "", map[string]any{"mfa_token": login(first), "code": ""})
+	limited, _ := r.body["access_token"].(string)
+	if r.status != http.StatusOK || limited == "" {
+		t.Fatalf("admin enrolment session: %d %s", r.status, r.raw)
 	}
-	if r := api(t, nc, "POST", "/auth/terms", access, map[string]any{"version": "2026-10"}); r.status != http.StatusNoContent {
-		t.Fatalf("admin terms: %d %s", r.status, r.raw)
-	}
-	r = api(t, nc, "POST", "/auth/mfa/enroll", access, nil)
+	r = api(t, nc, "POST", "/auth/mfa/enroll", limited, nil)
 	uri, _ := r.body["otpauth_uri"].(string)
 	u, err := url.Parse(uri)
 	if r.status != http.StatusOK || err != nil {
@@ -978,19 +982,24 @@ func analysisAdminSignIn(t *testing.T, nc *nats.Conn, code string) string {
 		t.Fatal("admin enrol: no secret")
 	}
 	step := time.Now().Unix() / 30
-	if r := api(t, nc, "POST", "/auth/mfa/verify", access, map[string]any{"code": totpFor(secret, step)}); r.status != http.StatusNoContent {
+	if r := api(t, nc, "POST", "/auth/mfa/verify", limited, map[string]any{"code": totpFor(secret, step)}); r.status != http.StatusNoContent {
 		t.Fatalf("admin mfa verify: %d %s", r.status, r.raw)
 	}
-	r = api(t, nc, "POST", "/auth/login", "", map[string]any{"username": email, "password": second})
-	tok, _ := r.body["mfa_token"].(string)
-	if r.status != http.StatusOK || tok == "" {
-		t.Fatalf("admin second sign in: %d %s, want the two-step branch", r.status, r.raw)
-	}
-	r = api(t, nc, "POST", "/auth/mfa/challenge", "", map[string]any{"mfa_token": tok, "code": totpFor(secret, step+1)})
-	access, _ = r.body["access_token"].(string)
+	r = api(t, nc, "POST", "/auth/mfa/challenge", "", map[string]any{"mfa_token": login(first), "code": totpFor(secret, step+1)})
+	access, _ := r.body["access_token"].(string)
 	if r.status != http.StatusOK || access == "" {
 		t.Fatalf("admin challenge: %d %s", r.status, r.raw)
 	}
+	user, _ := r.body["user"].(map[string]any)
+	if must, _ := user["must_change_password"].(bool); must {
+		if r := api(t, nc, "POST", "/auth/password", access, map[string]any{"current_password": first, "new_password": second}); r.status != http.StatusNoContent {
+			t.Fatalf("admin password: %d %s", r.status, r.raw)
+		}
+	}
+	if r := api(t, nc, "POST", "/auth/terms", access, map[string]any{"version": "2026-10"}); r.status != http.StatusNoContent {
+		t.Fatalf("admin terms: %d %s", r.status, r.raw)
+	}
+	t.Logf("signed in a synthetic hospital admin over api.v1.clinical (two-step)")
 	return access
 }
 

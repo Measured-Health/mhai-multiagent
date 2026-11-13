@@ -112,7 +112,7 @@ PR 4 (aggregate routes) is the simplest version that keeps the disclosure guaran
 - [ ] **Map `analysis.viewed` and `analysis.unusual_querying` to mhai-web's audit kinds** (`analysis_viewed`; a flagged kind for unusual querying): sent bare until the facts are agreed (H6).
 - [ ] **A subject's attributes are its first fact's** (age band, sex, location and setting, specialty, source), for the whole retention: the guard's equations need one value per patient at every level. Per-period attributes need a guard model that allows them (H2 decides whether the definition is acceptable).
 - [ ] **A late fact in a hospital's first quarter** can make a first period's "every case is new" false; the guard then finds the raw values inconsistent and the context is stored hidden whole, with the `analysis_inconsistent` alert (fail closed).
-- [ ] **Smoke:** `TestSmokeAnalysis` is vetted in CI's core job and runs in boundary-smoke; it wasn't run on the build host for PR 4.
+- [x] **Smoke:** `TestSmokeAnalysis` runs in boundary-smoke (run on steven-reid for PR 4: passes).
 
 ## Decided
 
