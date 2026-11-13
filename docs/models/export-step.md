@@ -33,7 +33,9 @@ if jinja.exists():
 The step refuses a GGUF whose embedded template differs from the run's
 (`gguf_template_mismatch`). Only one default template is allowed. A GGUF that also
 carries named templates (`tokenizer.chat_template.<name>`, such as `tool_use`), or that
-repeats any metadata key, is refused (`gguf_invalid`). So don't save extra named
+repeats any metadata key, is refused (`gguf_invalid`). So is a metadata key or tensor
+name outside lowercase `a-z`, digits, `_` and `.`, and any string value containing a NUL
+byte. llama.cpp's own output always fits these rules. So don't save extra named
 templates with the tokenizer. Only a `cca` run may carry a GGUF
 (`gguf_not_allowed_for_role`); for an `extract` run, pass `gguf=False`.
 

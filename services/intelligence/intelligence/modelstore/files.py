@@ -78,6 +78,9 @@ GGUF_MAX_STRING = 1024 * 1024 - 1  # bytes: string values under 1 MiB
 GGUF_MAX_DIMS = 4
 GGUF_DEFAULT_ALIGNMENT = 32
 GGUF_NAMED_TEMPLATE_PREFIX = "tokenizer.chat_template."
+# Metadata keys and tensor names (bytes, before decoding): no upper case, '-', space,
+# NUL or other control byte. The length cap is GGUF_MAX_KEY.
+_GGUF_NAME = re.compile(rb"[a-z0-9_.]+", re.ASCII)
 GGUF_ARCHITECTURES: frozenset[str] = frozenset(
     {"llama", "qwen2", "qwen3", "gemma2", "gemma3", "phi3", "mistral"}
 )
@@ -605,11 +608,24 @@ class _GgufReader:
         return self.take(n)
 
 
-def _gguf_key(r: _GgufReader, name: str | None, detail: str) -> str:
+def _gguf_name(r: _GgufReader, name: str | None, detail: str) -> str:
+    """A metadata key or tensor name: lowercase ASCII letters, digits, ``_`` and ``.``
+    only (every key and tensor name llama.cpp writes fits). llama.cpp reads these as C
+    strings, so a NUL or other control byte would let ``tokenizer.chat_template\x00x``
+    pass our checks as a distinct key while the runtime sees the default template."""
     raw = r.string(GGUF_MAX_KEY, detail)
-    if not raw or not raw.isascii():
+    if _GGUF_NAME.fullmatch(raw) is None:
         raise _gguf_bad(name, detail)
     return raw.decode("ascii")
+
+
+def _gguf_text(r: _GgufReader, name: str | None) -> bytes:
+    """A string value. One holding a NUL is refused: llama.cpp would see it cut at the
+    NUL, so the value we compare (the chat template) would not be the value it uses."""
+    raw = r.string(GGUF_MAX_STRING, "string")
+    if b"\x00" in raw:
+        raise _gguf_bad(name, "nul_in_string")
+    return raw
 
 
 def _gguf_value(r: _GgufReader, vtype: int, name: str | None) -> Any:
@@ -617,7 +633,7 @@ def _gguf_value(r: _GgufReader, vtype: int, name: str | None) -> Any:
     if vtype in _GGUF_SCALARS:
         return r.unpack(_GGUF_SCALARS[vtype])
     if vtype == _GGUF_STRING:
-        return r.string(GGUF_MAX_STRING, "string")
+        return _gguf_text(r, name)
     if vtype != _GGUF_ARRAY:
         raise _gguf_bad(name, "type")
     etype = r.unpack("<I")
@@ -628,7 +644,7 @@ def _gguf_value(r: _GgufReader, vtype: int, name: str | None) -> Any:
         r.take(count * struct.calcsize(_GGUF_SCALARS[etype]))
     elif etype == _GGUF_STRING:
         for _ in range(count):
-            r.string(GGUF_MAX_STRING, "string")
+            _gguf_text(r, name)
     else:
         raise _gguf_bad(name, "type")
     return None
@@ -655,7 +671,7 @@ def _check_gguf_file(
     template: bytes | None = None
     alignment = GGUF_DEFAULT_ALIGNMENT
     for _ in range(n_kv):
-        key = _gguf_key(r, name, "key")
+        key = _gguf_name(r, name, "bad_key")
         # Any repeated key is refused: we would check one value and the runtime might
         # use the other (a parser differential), above all for the chat template.
         if key in seen:
@@ -684,7 +700,7 @@ def _check_gguf_file(
     tensors: list[tuple[int, int]] = []
     tensor_names: set[str] = set()
     for _ in range(n_tensors):
-        tname = _gguf_key(r, name, "tensor_name")
+        tname = _gguf_name(r, name, "bad_tensor_name")
         if tname in tensor_names:
             raise _gguf_bad(name, "tensor_duplicate")
         tensor_names.add(tname)

@@ -57,6 +57,20 @@ def _long_template() -> list[bytes]:
     return kvs
 
 
+def _extra(kv: bytes) -> bytes:
+    return g.gguf([*g.tiny_kvs(), kv], g.TINY_INFOS, g.TINY_DATA)
+
+
+def _one_tensor(name: bytes) -> bytes:
+    return g.gguf(g.tiny_kvs(), [g.tensor(name, [4], g.F32, 0)], bytes(32))
+
+
+def _with_template(template: bytes) -> bytes:
+    kvs = g.tiny_kvs()
+    kvs[1] = g.kv_string(b"tokenizer.chat_template", template)
+    return g.gguf(kvs, g.TINY_INFOS, g.TINY_DATA)
+
+
 @pytest.mark.parametrize(
     ("raw", "detail"),
     [
@@ -80,8 +94,20 @@ def _long_template() -> list[bytes]:
         (g.gguf(g.tiny_kvs(), g.TINY_INFOS + g.TINY_INFOS[:1], g.TINY_DATA), "tensor_duplicate"),
         (g.gguf(g.tiny_kvs(), [], b"", n_tensors=10**9), "counts"),
         (g.gguf(g.tiny_kvs(), [], b"", n_kv=10**9), "counts"),
-        (g.gguf([*g.tiny_kvs(), g.kv_string("é".encode(), b"x")], [], b""), "key"),
-        (g.gguf([*g.tiny_kvs(), g.kv_string(b"k" * 256, b"x")], [], b""), "key"),
+        (g.gguf([*g.tiny_kvs(), g.kv_string("é".encode(), b"x")], [], b""), "bad_key"),
+        (g.gguf([*g.tiny_kvs(), g.kv_string(b"k" * 256, b"x")], [], b""), "bad_key"),
+        # Parser differentials: llama.cpp reads keys, names and strings as C strings.
+        (_extra(g.kv_string(b"tokenizer.chat_template\x00x", b"{{ other }}")), "bad_key"),
+        (_extra(g.kv_string(b"general.na\x01me", b"x")), "bad_key"),
+        (_extra(g.kv_string(b"General.Name", b"x")), "bad_key"),
+        (_extra(g.kv_string(b"general name", b"x")), "bad_key"),
+        (_with_template(g.TINY_TEMPLATE + b"\x00{{ hidden }}"), "nul_in_string"),
+        (
+            _extra(g.kv_array(b"tokenizer.ggml.merges", g.STRING, [g.string(b"a\x00b")])),
+            "nul_in_string",
+        ),
+        (_one_tensor(b"output.weight\x00x"), "bad_tensor_name"),
+        (_one_tensor(b"Output-Weight"), "bad_tensor_name"),
         (g.gguf([*g.tiny_kvs(), g.tiny_kvs()[0]], [], b""), "duplicate_key"),
         (
             g.gguf([*g.tiny_kvs(), g.kv_array(b"nested", g.ARRAY, [b""])], [], b""),
