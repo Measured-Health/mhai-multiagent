@@ -417,6 +417,17 @@ func init() {
 	Register("emr.source_resumed", Schema{Fields: withConn("reason", OneOf("platform_resume")),
 		Required: append(slices.Clone(connReq), "reason")})
 
+	// A hospital's EMR rule set switched by a platform admin (EMR plan Task
+	// 30; design §11.5): the version activated or "shadow", the one it
+	// replaced, and the rule set file's SHA-256 (hex) when one is
+	// activated (ApplyRuleSet writes it exactly then). No hospital column
+	// (a platform action).
+	ruleSetVersion := Pattern(regexp.MustCompile(`^(shadow|[a-z0-9][a-z0-9-]{0,62})$`))
+	Register("emr.rule_set_switched", Schema{Fields: fields(
+		"hospital_id", id, "version", ruleSetVersion, "previous", ruleSetVersion,
+		"sha256", Pattern(regexp.MustCompile(`^[0-9a-f]{64}$`)), "via", OneOf("platform")),
+		Required: []string{"hospital_id", "version", "previous", "via"}})
+
 	// The EMR patient index (EMR design §10.2, §10.6, §12.6; plan Task 16,
 	// written by Task 34's routes): ids, closed reason codes and counts;
 	// never a name, an MRN or a source id. The gateway writes them with its

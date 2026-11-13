@@ -26,7 +26,7 @@
 --     platform function, mhai_audit_view_pseudonyms(audit id), the reveal
 --     (design §8.8). Its only reads: the drill-down audit entries, the
 --     views, their rows and the pids.
---   - platform_append: 00022's list plus audit.patients_viewed.
+--   - platform_append: 00027's list plus audit.patients_viewed.
 --   - mhai_analysis_sweep replaced (same signature, owner and grants):
 --     opens and budgets once their quarter can't be listed any more, flags
 --     after two hospital days; a subject a view row or an open cites is
@@ -693,7 +693,7 @@ GRANT EXECUTE ON FUNCTION mhai_analysis_list_admit(integer, integer, timestamptz
 GRANT EXECUTE ON FUNCTION mhai_audit_view_pseudonyms(bigint) TO mhai_platform;
 
 ------------------------------------------------------------------------
--- The platform's audit appends: 00022's list plus the reveal.
+-- The platform's audit appends: 00027's list plus the reveal.
 ------------------------------------------------------------------------
 DROP POLICY platform_append ON audit_log;
 CREATE POLICY platform_append ON audit_log FOR INSERT TO mhai_platform
@@ -702,7 +702,7 @@ CREATE POLICY platform_append ON audit_log FOR INSERT TO mhai_platform
                            'hospital.model_policy_changed', 'emr.connection_added', 'emr.connection_changed',
                            'emr.connection_switched_on', 'emr.connection_switched_off', 'emr.connection_tested',
                            'emr.source_resumed', 'analytics.followed_up', 'analytics.follow_up_edited',
-                           'analytics.follow_up_undone', 'audit.patients_viewed')
+                           'analytics.follow_up_undone', 'emr.rule_set_switched', 'audit.patients_viewed')
                 AND hospital_id IS NULL);
 
 -- +goose StatementBegin
@@ -737,7 +737,7 @@ END
 $$;
 -- +goose StatementEnd
 
--- 00022's append, as it was.
+-- 00027's append, as it was.
 DROP POLICY platform_append ON audit_log;
 CREATE POLICY platform_append ON audit_log FOR INSERT TO mhai_platform
     WITH CHECK (action IN ('audit.viewed', 'audit.searched', 'audit.verify_started', 'audit.verify_finished',
@@ -745,7 +745,7 @@ CREATE POLICY platform_append ON audit_log FOR INSERT TO mhai_platform
                            'hospital.model_policy_changed', 'emr.connection_added', 'emr.connection_changed',
                            'emr.connection_switched_on', 'emr.connection_switched_off', 'emr.connection_tested',
                            'emr.source_resumed', 'analytics.followed_up', 'analytics.follow_up_edited',
-                           'analytics.follow_up_undone')
+                           'analytics.follow_up_undone', 'emr.rule_set_switched')
                 AND hospital_id IS NULL);
 
 -- 00025's sweep, as it was.

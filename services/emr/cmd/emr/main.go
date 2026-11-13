@@ -12,6 +12,7 @@ import (
 )
 
 const usage = "usage: emr serve | emr keys seal-init --out <dir> | emr keys proxy-init --out <dir> | emr unmapped --hospital <id> --connection <id> |\n" +
+	"       emr rules check <rule set file> |\n" +
 	"       emr synth-fhir --name <dns name> --out <dir> [--addr :8443] [--seed 1] [--patients 20]   (development only)"
 
 func main() {
@@ -35,6 +36,8 @@ func run(args []string, getenv func(string) string, out io.Writer) error {
 		return proxyInit(args[3], out)
 	case len(args) == 5 && args[0] == "unmapped" && args[1] == "--hospital" && args[3] == "--connection":
 		return unmappedCmd(getenv, args[2], args[4], out)
+	case len(args) == 3 && args[0] == "rules" && args[1] == "check" && args[2] != "":
+		return rulesCheck(args[2], getenv, out)
 	case len(args) >= 1 && args[0] == "synth-fhir":
 		return synthFHIR(args[1:], getenv, out)
 	default:

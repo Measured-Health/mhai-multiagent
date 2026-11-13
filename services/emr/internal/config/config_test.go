@@ -140,3 +140,37 @@ func TestDevCAOnlyInDevelopment(t *testing.T) {
 		}
 	}
 }
+
+// The rules (PR 7) are off by default: no rule set file, nothing active,
+// the recommended breaker values. A rule set needs the normaliser's tables;
+// the breaker values are bounded.
+func TestRulesSettings(t *testing.T) {
+	s, err := FromEnv(env(devEnv()))
+	if err != nil || s.RuleSetFile != "" || s.RuleSetActive != "" || s.BreakerMultiple != 5 || s.BreakerFloorCritical != 10 {
+		t.Fatalf("defaults: %+v %v", s, err)
+	}
+	e := devEnv()
+	e["EMR_RULE_SET_FILE"] = "/app/rules/ruleset-1.yaml"
+	if _, err := FromEnv(env(e)); err == nil || !strings.Contains(err.Error(), "EMR_RULE_SET_FILE needs EMR_CODES_DIR") {
+		t.Fatalf("rules without codes: %v", err)
+	}
+	e["EMR_CODES_DIR"], e["EMR_MAPS_DIR"] = "/app/codes", "/app/maps"
+	e["EMR_BREAKER_MULTIPLE"], e["EMR_BREAKER_FLOOR_CRITICAL"] = "3.5", "25"
+	if s, err := FromEnv(env(e)); err != nil || s.RuleSetFile == "" || s.BreakerMultiple != 3.5 || s.BreakerFloorCritical != 25 {
+		t.Fatalf("set: %+v %v", s, err)
+	}
+	for k, v := range map[string]string{"EMR_BREAKER_MULTIPLE": "0", "EMR_BREAKER_FLOOR_CRITICAL": "0"} {
+		e := devEnv()
+		e[k] = v
+		if _, err := FromEnv(env(e)); err == nil || !strings.Contains(err.Error(), k) {
+			t.Errorf("%s=%s: %v", k, v, err)
+		}
+	}
+	for _, v := range []string{"NaN", "x", "1e9", "-1"} {
+		e := devEnv()
+		e["EMR_BREAKER_MULTIPLE"] = v
+		if _, err := FromEnv(env(e)); err == nil {
+			t.Errorf("EMR_BREAKER_MULTIPLE=%s accepted", v)
+		}
+	}
+}

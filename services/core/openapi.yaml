@@ -1973,6 +1973,85 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/hospitals/{id}/emr-rule-set:
+    get:
+      operationId: getHospitalEMRRuleSet
+      summary: The EMR rule set activated for a hospital, or shadow.
+      description: |
+        Platform admins and auditors. `version` and `sha256` are the rule
+        set file activated for the hospital (as `emr rules check` prints
+        them), or both null: shadow, the default, in which every EMR
+        finding is stored for review and none is an alert. An id that is
+        no hospital's, or not a canonical uuid, is 404 `not_found`.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The hospital's rule set.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EMRRuleSet" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    put:
+      operationId: setHospitalEMRRuleSet
+      summary: Activate an EMR rule set for a hospital, or go back to shadow (step-up).
+      description: |
+        Platform admins only (an auditor is 403), with a fresh TOTP code
+        (`mfa_code`) or an unused backup code (`backup_code`). `version`
+        and `sha256` (64 lower-case hex) name the exact rule set file to
+        activate; null for both puts the hospital back in shadow. Both keys
+        are required. Activation alone raises no alert: the emr service
+        alerts only when the deployment also names the version
+        (`EMR_RULE_SET_ACTIVE`) and its loaded file has the same hash.
+        Off (no `CORE_EMR_ENABLED`) the PUT is 503 `not_ready`. The body
+        is checked first (422), then the hospital (404), the session's 10
+        writes a minute (429 `rate_limited`), then the code. One
+        `emr.rule_set_switched` audit entry per write. Answers as the GET.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, sha256]
+              additionalProperties: false
+              properties:
+                version: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,62}$", nullable: true }
+                sha256: { type: string, pattern: "^[0-9a-f]{64}$", nullable: true }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The hospital's rule set as written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EMRRuleSet" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
   /platform/emr/connector-types:
     get:
       operationId: listEmrConnectorTypes
@@ -2880,6 +2959,15 @@ components:
       properties:
         jobs: { type: array, items: { $ref: "#/components/schemas/Job" } }
         next_cursor: { type: string, nullable: true }
+    EMRRuleSet:
+      type: object
+      required: [hospital_id, version, sha256, activated_at]
+      additionalProperties: false
+      properties:
+        hospital_id: { type: string, format: uuid }
+        version: { type: string, nullable: true, description: "The activated rule set version; null is shadow." }
+        sha256: { type: string, nullable: true, description: "The activated rule set file's SHA-256, hex." }
+        activated_at: { type: string, format: date-time, nullable: true }
     ModelPolicy:
       type: object
       description: >-

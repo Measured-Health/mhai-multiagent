@@ -79,10 +79,18 @@ Gates before live use (design §17.6; all of them):
 - [ ] The on-call owner named (H9). Owner: product owner.
 - [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
 
+## EMR: follow-ups from PR 7 (12 Nov)
+
+- [ ] **Migration order:** 00027 (`emr_findings`) merges after 00024 (Gemini), 00025 (Analysis PR 4) and 00026 (EMR PR 6, renumbered from 00025); it needs EMR PR 6's tables.
+- [ ] **Rule set v1 is pilot, clinical sign-off deferred** (product owner). Before a platform admin activates it for a hospital: the clinical lead's review of `services/emr/rules/REFERENCES.md` against the hospital's own laboratory list, and the shadow review (design §11.5). People's item, not an agent's.
+- [ ] v1's numeric rules fire only once the real LOINC tables (Task 21, H6) and a reviewed `maps/common/conversions.yaml` with its analytes land; until then only the lab's own critical flags can fire (and the synthetic tables load in development only).
+- [ ] Resume a paused source: Task 37's platform `resume` route. Until then an operator clears `emr_connections.paused` by SQL, recorded in the incident log.
+- [ ] PR 8b: core reads findings as `mhai_emr_core`, raises alerts for `open` non-shadow findings, updates on `superseded`, withdraws on `withdrawn` (`withdrawn_reason`), and records `breaker_tripped`.
+- [ ] PR 8a: `sources_status` calls `emr_sources_status()` (behind when stale or paused).
+
 ## EMR: follow-ups from PR 6 (12 Nov)
 
 - [ ] PR 8a's `sources_status` reads staleness by the §15.4 rule (`scheduler.Stale` on the emr side; core's `emr_platform_health()` now marks a silent connection that is on as `errors`).
-- [ ] PR 7: findings from raw rows with `backfill = true` are `historical` (A18).
 - [ ] Core doesn't call `emr.v1.ctl.sync_now` yet (no route asks for it).
 
 ## EMR: follow-ups from PR 5 (11 Nov)
@@ -110,6 +118,20 @@ The product owner asked for the simplest safe version first (11 Nov). These wait
 - [ ] FHIR: a run that stops at its page limit is still `ok`, so a source with a steady backlog shows as current while it lags. Report the lag (the oldest unread `lastUpdated`) in health.
 - [ ] FHIR: `backfill_days` is fixed at 30 (design §7.1 allows a setting up to 365), and `medicationReference` (a separate Medication resource) isn't read. A request that names its medication only by reference stores no code.
 - [ ] FHIR: one sign-in token per connection per process, cached in memory. Nothing is shared across emr copies.
+- [ ] Rules (PR 7): one rule set at a time. Running a candidate version in shadow beside the active one (design §11.5, `rules.Run(active, shadow)`) waits; until then a new version is shadow for every hospital until each is activated.
+- [ ] Rules: the start-up `rule_set_activated` signal (core recording version and hash on the chain at start) isn't sent; the per-hospital activation is audited instead (`emr.rule_set_switched`).
+- [ ] Rules: `quiet_hours` per category aren't in the rule set yet (core's fatigue controls, PR 8b, read them).
+- [ ] Rules: a new medication doesn't re-run the combination rule for earlier results; only a new observation triggers evaluation.
+- [ ] Rules: re-normalisation has no marker, so its findings aren't forced `historical` (old values are historical by the window anyway).
+- [ ] Rules: the breaker counts critical findings only; urgent and info floods, and documents as a source, wait.
+- [ ] Rules: a patient's history loads at most 5,000 observations and 5,000 medications per evaluation; the consumer is one batch at a time per process.
+- [ ] Rules: findings are announced after the commit (with a sweep every minute), not through an outbox.
+- [ ] Rules (review notes, 13 Nov): a superseding result whose finding is historical (an old amendment) supersedes or withdraws the open finding without an alert of its own; PR 8b decides what the open alert shows then.
+- [ ] Rules: a transient database error retries the batch (backoff by delivery) per process; nothing is shared across emr copies.
+- [ ] Rules: two consumers on one patient's amendments at once could each supersede the same open finding; one consumer per process today (the patient's `FOR SHARE` lock doesn't serialise them).
+- [ ] Rules / PR 8b: shadow findings are announced to `core_emr` too and pile up there; core acks them with no alert (K11), or the emr side stops announcing shadow findings.
+- [ ] The normaliser's `Deliveries` still reads a metadata error as the last delivery (dead-letters on a guess); fix as the rules consumer was.
+- [ ] Rules: v1 has thresholds and the lab's flags only. NEWS2, the KDIGO creatinine rise, haemoglobin falls, lactate trends and the potassium combination are built and tested on the synthetic set; adding them to a rule set is a clinical review.
 
 ## Analysis: before scale
 
@@ -166,7 +188,7 @@ PR 4 (aggregate routes) is the simplest version that keeps the disclosure guaran
 - **MinIO is test-only (Task 16 departure, ruling D21).** MinIO (server and client) is AGPL: it runs only in the `store` tests and `docker-compose.models.yml`, and is never shipped in an image or used in production. The `minio/minio` and `minio/mc` repositories are no longer published, so the pins are the last community builds still available, `bitnamilegacy/minio` 2025.7.23 and `bitnamilegacy/minio-client` 2025.7.21 (frozen in August 2025), by digest. They get no more fixes: replace them if a maintained build appears, and never expose them beyond loopback.
 - **The SDK loggers are held at ERROR.** `S3Store` raises the `boto3`, `botocore`, `s3transfer` and `urllib3` loggers to ERROR, because their debug output has endpoints, keys and signed request details. Don't lower them in a service that holds store credentials.
 - **A test split's version keeps five digits or fewer in all (Task 17).** The synthetic-data scanner refuses a joined digit run of 6 or more anywhere in `testset.json`, the `version` field included (`1.10.100` fails the build; `1.0.0` and `2.15.3` pass).
-- **Pinnable roles are the roles with an evaluation suite (Task 20).** `lock.ROLES` is `promote.SUITES`' keys (`extract` today), since only those can pass a gate. A role such as `ocr`, `nli` or `cca` joins the production lock when its suite exists.
+- **Pinnable roles are the roles with an evaluation suite (Task 20).** `lock.ROLES` is `promote.SUITES`' keys (`extract`, and `cca` with the `clinical_answer` suite and the `answer` gate, which scores the GGUF itself through llama.cpp), since only those can pass a gate. A role such as `ocr` or `nli` joins the production lock when its suite exists.
 - **Eval claim (Task 17).** A build first reserves `eval/<suite>/<version>/claim.json` (conditional create), so a second build of the same version stops before it generates or uploads anything. A build that fails after the claim leaves files under a version that can never be built again: use the next version.
 
 ## Before scale: operations

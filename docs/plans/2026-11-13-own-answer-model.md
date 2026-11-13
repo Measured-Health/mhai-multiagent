@@ -1,6 +1,6 @@
 # Own answer model replaces cloud: implementation plan
 
-**Status:** Not started. Lean by decision (product owner, 11 Nov 2026, "get a hospital testing fast"): essential safety only (verify what you load, fail closed, patient data never leaves the host). Heavier controls are listed under "Before scale" and come back at the trigger named. Clinical sign-off is deferred for the pilot (README, "Pilot mode"); nothing in this plan stands in for it.
+**Status:** PR 1 merged (#143). PR 2 (answer role, question set and gate) built; see "PR 2 as built" under its tasks. Lean by decision (product owner, 11 Nov 2026, "get a hospital testing fast"): essential safety only (verify what you load, fail closed, patient data never leaves the host). Heavier controls are listed under "Before scale" and come back at the trigger named. Clinical sign-off is deferred for the pilot (README, "Pilot mode"); nothing in this plan stands in for it.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
@@ -166,6 +166,15 @@ The cloud plan's and the promotion design's constraints hold: no PHI or secrets 
 **Tests:** a report at each boundary passes or fails as expected; pin refuses a failing `cca` evaluation (existing `check_evaluation` path, new suite).
 **Acceptance:** `mhai-models pin cca ...` succeeds only for a promotion measured on the locked split that meets every threshold.
 
+#### PR 2 as built (departures from Tasks 4-7)
+
+- **The gate scores the GGUF itself** (Decision 2): `doceval/answers/llama_runtime.py` starts `llama-server` (built at the pinned llama.cpp commit `b1b770d9`, checked by `--version`) on the hashed GGUF in the job's scratch, loopback only, `--offline`, a clean environment, `--jinja` (the GGUF's embedded template), `--alias <sha256>`; the alias must match before scoring and the GGUF is re-hashed after. No image digest for promotion yet: the binary is built in the job (the sidecar image digest is PR 3's).
+- **Question bank instead of a JSONL from the owner.** `doceval/answers/bank.py` holds templates around the six seeded guidelines (required facts, must not say, red flag, out of scope, missing info). The dev split (76 items, 36 must-escalate) is drawn with a public seed and committed in `testdata/answers/dev`; the locked test split is drawn with the OS random source inside the store by `testset-build --suite clinical_answer` (the model-testset workflow), so the existing tooling and `models/testsets.lock` carry it unchanged. The templates are in the repository, so the locked split differs from the dev split in its draws only.
+- **Escalated** means the verification decision is `ESCALATE` (a failed or raising generation counts as escalated). The report holds aggregates only, never an item, id or answer.
+- **Cloud comparison:** the report's `comparison` block (informational, never a gate) and a scorer that takes any `ModelClient`; no runner for it yet (the cloud client needs a job grant).
+- **The gate's retriever and NLI models are pinned** (security review of #144): `models/answer-gate-models.lock` names an exact commit and the SHA-256 of every file (safetensors and JSON/tokenizer files only) for the configured `DENSE_MODEL` and `NLI_MODEL`. The workflow downloads exactly those, the gate verifies every file before anything starts (a mismatch refuses it) and loads both from those folders only, offline. When `nli` becomes pinnable in `models.lock`, the gate moves to that pin.
+- **Workflow:** `model-promote.yml` gains the `answer` gate (production mode only; rehearsal mode still forces the document rehearsal gate).
+
 ### PR 3: pinned local generator and sidecar
 
 #### Task 8: `PinnedLlamaGenerator`
@@ -273,6 +282,9 @@ Each comes back at the trigger named, alongside TODO.md's existing model-promoti
 - **GPU serving and more than one concurrent question** (`--parallel`, a queue, the pipeline's concurrency raised). When answer time or volume demands it.
 - **Drift and quality monitoring** on live answers (escalation rate, trust distribution per version), with an alert. Before a second hospital.
 - **Training on de-identified real data** (`training.ALLOWED_KINDS` gains `deidentified`), with the privacy lead's sign-off. Not before.
+- **A written, held-out locked split** for `clinical_answer` from the question set owner (beside or instead of the template bank), so the locked questions are not derivable from the repository. With the clinical sign-off.
+- **A runner for the cloud comparison** on the locked split (the report already has the field). Before the first switch (PR 4) if the product owner wants the numbers side by side.
+- **A `cca` rehearsal in the CI rehearsal mode** (a tiny GGUF and llama-server in `model-promotion-e2e`). When promotion runs are frequent enough to need it.
 - **Removing the cloud route** for a hospital entirely (no key on the host). When every hospital runs local.
 
 ## Open questions

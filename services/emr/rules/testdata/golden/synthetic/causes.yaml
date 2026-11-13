@@ -1,0 +1,28 @@
+description: A likely cause is shown only when its evidence is found in the patient's own rows; at most three evidence items.
+rule_set: 0-synthetic
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: both
+    sex: male
+    birth_date: "1950-01-01"
+    observations:
+      - {id: k-6.8, analyte: potassium, value: "6.8", unit: mmol/L, at: -1h}
+      - {id: c-160, analyte: creatinine, value: "160", unit: umol/L, at: -20h}
+    medications:
+      - {id: kcl, atc: Z99AB01, status: active, start: -72h}
+    triggers: [k-6.8]
+  - id: neither
+    sex: male
+    birth_date: "1950-01-01"
+    observations:
+      - {id: k-6.8, analyte: potassium, value: "6.8", unit: mmol/L, at: -1h}
+      - {id: c-160-old, analyte: creatinine, value: "160", unit: umol/L, at: -100h}
+      - {id: c-90, analyte: creatinine, value: "90", unit: umol/L, at: -10h}
+    medications:
+      - {id: diuretic, atc: Z99AA01, status: active, start: -72h}
+    triggers: [k-6.8]
+expect:
+  - {patient: both, observation: k-6.8, rule_id: potassium-critical-high, severity: critical, causes: [potassium-supplement, kidney-function]}
+  - {patient: neither, observation: k-6.8, rule_id: potassium-critical-high, severity: critical, causes: []}
+expect_none:
+  - {patient: both, observation: k-6.8, rule_id: potassium-urgent-high}

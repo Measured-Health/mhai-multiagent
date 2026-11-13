@@ -1,0 +1,82 @@
+description: Every v1 threshold at its edge and just inside the normal side.
+rule_set: "1"
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: p1
+    sex: female
+    birth_date: "1970-01-01"
+    observations:
+      - {id: potassium-critical-low-hit, analyte: potassium, value: "2.5", unit: "mmol/L", at: -1h}
+      - {id: potassium-critical-low-miss, analyte: potassium, value: "2.6", unit: "mmol/L", at: -1h}
+      - {id: potassium-critical-high-hit, analyte: potassium, value: "6.5", unit: "mmol/L", at: -1h}
+      - {id: potassium-critical-high-miss, analyte: potassium, value: "6.4", unit: "mmol/L", at: -1h}
+      - {id: sodium-critical-low-hit, analyte: sodium, value: "120", unit: "mmol/L", at: -1h}
+      - {id: sodium-critical-low-miss, analyte: sodium, value: "121", unit: "mmol/L", at: -1h}
+      - {id: sodium-critical-high-hit, analyte: sodium, value: "155", unit: "mmol/L", at: -1h}
+      - {id: sodium-critical-high-miss, analyte: sodium, value: "154", unit: "mmol/L", at: -1h}
+      - {id: glucose-critical-low-hit, analyte: glucose, value: "2.5", unit: "mmol/L", at: -1h}
+      - {id: glucose-critical-low-miss, analyte: glucose, value: "2.6", unit: "mmol/L", at: -1h}
+      - {id: glucose-critical-high-hit, analyte: glucose, value: "25.0", unit: "mmol/L", at: -1h}
+      - {id: glucose-critical-high-miss, analyte: glucose, value: "24.9", unit: "mmol/L", at: -1h}
+      - {id: haemoglobin-critical-low-hit, analyte: haemoglobin, value: "6.0", unit: "g/dL", at: -1h}
+      - {id: haemoglobin-critical-low-miss, analyte: haemoglobin, value: "6.1", unit: "g/dL", at: -1h}
+      - {id: platelets-critical-low-hit, analyte: platelets, value: "20", unit: "10*9/L", at: -1h}
+      - {id: platelets-critical-low-miss, analyte: platelets, value: "21", unit: "10*9/L", at: -1h}
+      - {id: platelets-critical-high-hit, analyte: platelets, value: "1000", unit: "10*9/L", at: -1h}
+      - {id: platelets-critical-high-miss, analyte: platelets, value: "999", unit: "10*9/L", at: -1h}
+      - {id: creatinine-critical-high-hit, analyte: creatinine, value: "354", unit: "umol/L", at: -1h}
+      - {id: creatinine-critical-high-miss, analyte: creatinine, value: "353", unit: "umol/L", at: -1h}
+      - {id: troponin-t-hs-critical-high-hit, analyte: troponin_t_hs, value: "52", unit: "ng/L", at: -1h}
+      - {id: troponin-t-hs-critical-high-miss, analyte: troponin_t_hs, value: "51", unit: "ng/L", at: -1h}
+      - {id: spo2-critical-low-hit, analyte: spo2, value: "91", unit: "%", at: -1h}
+      - {id: spo2-critical-low-miss, analyte: spo2, value: "92", unit: "%", at: -1h}
+      - {id: temperature-critical-low-hit, analyte: temperature, value: "35.0", unit: "Cel", at: -1h}
+      - {id: temperature-critical-low-miss, analyte: temperature, value: "35.1", unit: "Cel", at: -1h}
+      - {id: temperature-urgent-high-hit, analyte: temperature, value: "39.1", unit: "Cel", at: -1h}
+      - {id: temperature-urgent-high-miss, analyte: temperature, value: "39.0", unit: "Cel", at: -1h}
+      - {id: systolic-bp-critical-low-hit, analyte: systolic_bp, value: "90", unit: "mmHg", at: -1h}
+      - {id: systolic-bp-critical-low-miss, analyte: systolic_bp, value: "91", unit: "mmHg", at: -1h}
+      - {id: systolic-bp-critical-high-hit, analyte: systolic_bp, value: "220", unit: "mmHg", at: -1h}
+      - {id: systolic-bp-critical-high-miss, analyte: systolic_bp, value: "219", unit: "mmHg", at: -1h}
+      - {id: heart-rate-critical-low-hit, analyte: heart_rate, value: "40", unit: "/min", at: -1h}
+      - {id: heart-rate-critical-low-miss, analyte: heart_rate, value: "41", unit: "/min", at: -1h}
+      - {id: heart-rate-critical-high-hit, analyte: heart_rate, value: "131", unit: "/min", at: -1h}
+      - {id: heart-rate-critical-high-miss, analyte: heart_rate, value: "130", unit: "/min", at: -1h}
+expect:
+  - {patient: p1, observation: potassium-critical-low-hit, rule_id: potassium-critical-low, severity: critical}
+  - {patient: p1, observation: potassium-critical-high-hit, rule_id: potassium-critical-high, severity: critical}
+  - {patient: p1, observation: sodium-critical-low-hit, rule_id: sodium-critical-low, severity: critical}
+  - {patient: p1, observation: sodium-critical-high-hit, rule_id: sodium-critical-high, severity: critical}
+  - {patient: p1, observation: glucose-critical-low-hit, rule_id: glucose-critical-low, severity: critical}
+  - {patient: p1, observation: glucose-critical-high-hit, rule_id: glucose-critical-high, severity: critical}
+  - {patient: p1, observation: haemoglobin-critical-low-hit, rule_id: haemoglobin-critical-low, severity: critical}
+  - {patient: p1, observation: platelets-critical-low-hit, rule_id: platelets-critical-low, severity: critical}
+  - {patient: p1, observation: platelets-critical-high-hit, rule_id: platelets-critical-high, severity: critical}
+  - {patient: p1, observation: creatinine-critical-high-hit, rule_id: creatinine-critical-high, severity: critical}
+  - {patient: p1, observation: troponin-t-hs-critical-high-hit, rule_id: troponin-t-hs-critical-high, severity: critical}
+  - {patient: p1, observation: spo2-critical-low-hit, rule_id: spo2-critical-low, severity: critical}
+  - {patient: p1, observation: temperature-critical-low-hit, rule_id: temperature-critical-low, severity: critical}
+  - {patient: p1, observation: temperature-urgent-high-hit, rule_id: temperature-urgent-high, severity: urgent}
+  - {patient: p1, observation: systolic-bp-critical-low-hit, rule_id: systolic-bp-critical-low, severity: critical}
+  - {patient: p1, observation: systolic-bp-critical-high-hit, rule_id: systolic-bp-critical-high, severity: critical}
+  - {patient: p1, observation: heart-rate-critical-low-hit, rule_id: heart-rate-critical-low, severity: critical}
+  - {patient: p1, observation: heart-rate-critical-high-hit, rule_id: heart-rate-critical-high, severity: critical}
+expect_none:
+  - {patient: p1, observation: potassium-critical-low-miss, rule_id: potassium-critical-low}
+  - {patient: p1, observation: potassium-critical-high-miss, rule_id: potassium-critical-high}
+  - {patient: p1, observation: sodium-critical-low-miss, rule_id: sodium-critical-low}
+  - {patient: p1, observation: sodium-critical-high-miss, rule_id: sodium-critical-high}
+  - {patient: p1, observation: glucose-critical-low-miss, rule_id: glucose-critical-low}
+  - {patient: p1, observation: glucose-critical-high-miss, rule_id: glucose-critical-high}
+  - {patient: p1, observation: haemoglobin-critical-low-miss, rule_id: haemoglobin-critical-low}
+  - {patient: p1, observation: platelets-critical-low-miss, rule_id: platelets-critical-low}
+  - {patient: p1, observation: platelets-critical-high-miss, rule_id: platelets-critical-high}
+  - {patient: p1, observation: creatinine-critical-high-miss, rule_id: creatinine-critical-high}
+  - {patient: p1, observation: troponin-t-hs-critical-high-miss, rule_id: troponin-t-hs-critical-high}
+  - {patient: p1, observation: spo2-critical-low-miss, rule_id: spo2-critical-low}
+  - {patient: p1, observation: temperature-critical-low-miss, rule_id: temperature-critical-low}
+  - {patient: p1, observation: temperature-urgent-high-miss, rule_id: temperature-urgent-high}
+  - {patient: p1, observation: systolic-bp-critical-low-miss, rule_id: systolic-bp-critical-low}
+  - {patient: p1, observation: systolic-bp-critical-high-miss, rule_id: systolic-bp-critical-high}
+  - {patient: p1, observation: heart-rate-critical-low-miss, rule_id: heart-rate-critical-low}
+  - {patient: p1, observation: heart-rate-critical-high-miss, rule_id: heart-rate-critical-high}

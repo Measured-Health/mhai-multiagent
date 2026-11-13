@@ -336,12 +336,12 @@ func TestEveryActionHasCatalogueRow(t *testing.T) {
 			t.Errorf("platform action %s has no payload schema", a)
 		}
 	}
-	if got := platformAppendActions(t); len(got) != 19 || !slices.Contains(got, "audit.patients_viewed") || !slices.Contains(got, "hospital.model_policy_changed") ||
+	if got := platformAppendActions(t); len(got) != 20 || !slices.Contains(got, "audit.patients_viewed") || !slices.Contains(got, "emr.rule_set_switched") || !slices.Contains(got, "hospital.model_policy_changed") ||
 		!slices.Contains(got, "emr.connection_added") || !slices.Contains(got, "emr.source_resumed") ||
 		!slices.Contains(got, "analytics.followed_up") || !slices.Contains(got, "analytics.follow_up_edited") ||
 		!slices.Contains(got, "analytics.follow_up_undone") {
 		t.Errorf("platform_append allows %v, want spec §5.5's eight, hospital.model_policy_changed (00018), the six EMR actions (00020) "+
-			"the three follow-up actions (00022) and audit.patients_viewed (00028)", got)
+			"the three follow-up actions (00022), emr.rule_set_switched (00027) and audit.patients_viewed (00028)", got)
 	}
 	for _, a := range audit.RegisteredActions() {
 		if strings.HasPrefix(a, "test.") {

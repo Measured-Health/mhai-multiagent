@@ -1,0 +1,51 @@
+description: Potassium with an active potassium supplement raises the severity one step and names the medicine.
+rule_set: 0-synthetic
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: supplement
+    sex: male
+    birth_date: "1955-01-01"
+    observations:
+      - {id: k-5.6, analyte: potassium, value: "5.6", unit: mmol/L, at: -1h}
+      - {id: k-6.1, analyte: potassium, value: "6.1", unit: mmol/L, at: -1h}
+      - {id: k-5.4, analyte: potassium, value: "5.4", unit: mmol/L, at: -1h}
+    medications:
+      - {id: kcl, atc: Z99AB01, status: active, start: -72h}
+  - id: none
+    sex: male
+    birth_date: "1955-01-01"
+    observations:
+      - {id: k-5.6, analyte: potassium, value: "5.6", unit: mmol/L, at: -1h}
+    medications:
+      - {id: diuretic, atc: Z99AA01, status: active, start: -72h}
+  - id: stopped
+    sex: male
+    birth_date: "1955-01-01"
+    observations:
+      - {id: k-5.6, analyte: potassium, value: "5.6", unit: mmol/L, at: -1h}
+    medications:
+      - {id: kcl, atc: Z99AB01, status: stopped, start: -72h}
+  - id: ended
+    sex: male
+    birth_date: "1955-01-01"
+    observations:
+      - {id: k-5.6, analyte: potassium, value: "5.6", unit: mmol/L, at: -1h}
+    medications:
+      - {id: kcl, atc: Z99AB01, status: active, start: -72h, end: -24h}
+  - id: later
+    sex: male
+    birth_date: "1955-01-01"
+    observations:
+      - {id: k-5.6, analyte: potassium, value: "5.6", unit: mmol/L, at: -1h}
+    medications:
+      - {id: kcl, atc: Z99AB01, status: active, start: -30m}
+expect:
+  - {patient: supplement, observation: k-5.6, rule_id: potassium-with-supplement, severity: urgent, medications: [kcl]}
+  - {patient: supplement, observation: k-6.1, rule_id: potassium-urgent-high, severity: urgent}
+  - {patient: supplement, observation: k-6.1, rule_id: potassium-with-supplement, severity: critical, medications: [kcl]}
+expect_none:
+  - {patient: supplement, observation: k-5.4, rule_id: potassium-with-supplement}
+  - {patient: none, observation: k-5.6, rule_id: potassium-with-supplement}
+  - {patient: stopped, observation: k-5.6, rule_id: potassium-with-supplement}
+  - {patient: ended, observation: k-5.6, rule_id: potassium-with-supplement}
+  - {patient: later, observation: k-5.6, rule_id: potassium-with-supplement}

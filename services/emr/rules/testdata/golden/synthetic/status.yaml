@@ -1,0 +1,36 @@
+description: Preliminary results run critical thresholds and source flags only; amended and corrected results run as final; superseded, entered-in-error and cancelled rows raise nothing.
+rule_set: 0-synthetic
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: p1
+    sex: female
+    birth_date: "1975-01-01"
+    observations:
+      - {id: prelim-k-6.6, analyte: potassium, value: "6.6", unit: mmol/L, at: -1h, status: preliminary}
+      - {id: prelim-k-6.2, analyte: potassium, value: "6.2", unit: mmol/L, at: -1h, status: preliminary}
+      - {id: prelim-na-130, analyte: sodium, value: "130", unit: mmol/L, ref_low: "135", ref_high: "145", at: -1h, status: preliminary}
+      - {id: prelim-unmapped-hh, local_code: XYZ, value: "9", unit: mmol/L, flag: HH, at: -1h, status: preliminary}
+      - {id: amended-k-6.6, analyte: potassium, value: "6.6", unit: mmol/L, at: -1h, status: amended}
+      - {id: corrected-k-6.6, analyte: potassium, value: "6.6", unit: mmol/L, at: -1h, status: corrected}
+      - {id: old-version-k-7, analyte: potassium, value: "7.0", unit: mmol/L, at: -1h, superseded: true}
+      - {id: error-k-7, analyte: potassium, value: "7.0", unit: mmol/L, at: -1h, status: entered-in-error}
+      - {id: cancelled-k-7, analyte: potassium, value: "7.0", unit: mmol/L, at: -1h, status: cancelled}
+  - id: p2
+    sex: female
+    birth_date: "1975-01-01"
+    observations:
+      - {id: c-80, analyte: creatinine, value: "80", unit: umol/L, at: -20h}
+      - {id: prelim-c-200, analyte: creatinine, value: "200", unit: umol/L, at: -1h, status: preliminary}
+    triggers: [prelim-c-200]
+expect:
+  - {patient: p1, observation: prelim-k-6.6, rule_id: potassium-critical-high, severity: critical, preliminary: true}
+  - {patient: p1, observation: prelim-unmapped-hh, rule_id: lab-critical-flag, severity: critical, preliminary: true}
+  - {patient: p1, observation: amended-k-6.6, rule_id: potassium-critical-high, severity: critical, preliminary: false}
+  - {patient: p1, observation: corrected-k-6.6, rule_id: potassium-critical-high, severity: critical}
+expect_none:
+  - {patient: p1, observation: prelim-k-6.2, rule_id: potassium-urgent-high}
+  - {patient: p1, observation: prelim-na-130, rule_id: outside-source-range}
+  - {patient: p1, observation: old-version-k-7, rule_id: potassium-critical-high}
+  - {patient: p1, observation: error-k-7, rule_id: potassium-critical-high}
+  - {patient: p1, observation: cancelled-k-7, rule_id: potassium-critical-high}
+  - {patient: p2, observation: prelim-c-200, rule_id: creatinine-rise-48h}

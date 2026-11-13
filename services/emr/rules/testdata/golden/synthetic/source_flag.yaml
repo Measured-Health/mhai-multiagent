@@ -1,0 +1,28 @@
+description: The lab's own critical flag raises a critical finding, also for an unmapped code; not when MHAI's own critical threshold already hit.
+rule_set: 0-synthetic
+now: "2026-11-07T12:00:00Z"
+patients:
+  - id: p1
+    sex: male
+    birth_date: "1960-05-05"
+    observations:
+      - {id: unmapped-hh, local_code: XYZ, value: "999", unit: mmol/L, flag: HH, at: -1h}
+      - {id: unmapped-ll-text, local_code: ABC, text: "see comment", flag: LL, at: -1h}
+      - {id: unmapped-h, local_code: XYZ, value: "40", unit: mmol/L, flag: H, at: -1h}
+      - {id: unmapped-none, local_code: XYZ, value: "40", unit: mmol/L, at: -1h}
+      - {id: unmapped-vital-aa, local_code: VIT, value: "12", unit: /min, flag: AA, at: -1h, category: vital-signs}
+      - {id: k-5.0-ll, analyte: potassium, value: "5.0", unit: mmol/L, flag: LL, at: -1h}
+      - {id: k-6.6-hh, analyte: potassium, value: "6.6", unit: mmol/L, flag: HH, at: -1h}
+      - {id: k-6.2-hh, analyte: potassium, value: "6.2", unit: mmol/L, flag: HH, at: -1h}
+expect:
+  - {patient: p1, observation: unmapped-hh, rule_id: lab-critical-flag, severity: critical, category: blood_chemistry, standardised: false}
+  - {patient: p1, observation: unmapped-ll-text, rule_id: lab-critical-flag, severity: critical}
+  - {patient: p1, observation: unmapped-vital-aa, rule_id: lab-critical-flag, severity: critical, category: vital_signs}
+  - {patient: p1, observation: k-5.0-ll, rule_id: lab-critical-flag, severity: critical, category: blood_chemistry, standardised: true}
+  - {patient: p1, observation: k-6.6-hh, rule_id: potassium-critical-high, severity: critical}
+  - {patient: p1, observation: k-6.2-hh, rule_id: potassium-urgent-high, severity: urgent}
+  - {patient: p1, observation: k-6.2-hh, rule_id: lab-critical-flag, severity: critical}
+expect_none:
+  - {patient: p1, observation: unmapped-h, rule_id: lab-critical-flag}
+  - {patient: p1, observation: unmapped-none, rule_id: lab-critical-flag}
+  - {patient: p1, observation: k-6.6-hh, rule_id: lab-critical-flag}

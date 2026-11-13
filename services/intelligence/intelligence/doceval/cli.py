@@ -134,7 +134,7 @@ def _check_run_args(args: argparse.Namespace) -> None:
     if args.extractor not in EXTRACTORS:
         raise Refused("no_runtime")
     for g in args.gate or ():
-        if g not in report.GATES:
+        if g not in report.DOCUMENT_GATES:
             raise Refused("invalid_name")
     _model_versions(args.model_version)
     for token in (args.engine, args.hardware):
@@ -239,7 +239,7 @@ def _run(args: argparse.Namespace) -> int:
     except ValueError as e:
         raise Refused("manifest_invalid", detail_code="extractor_info") from e
     gate_names = args.gate or (
-        [report.REHEARSAL_GATE] if report.is_stub(info) else list(report.GATES)
+        [report.REHEARSAL_GATE] if report.is_stub(info) else list(report.DOCUMENT_GATES)
     )
     gates = [report.packaged_thresholds(g) for g in dict.fromkeys(gate_names)]
     report.check_gates(info, gates)

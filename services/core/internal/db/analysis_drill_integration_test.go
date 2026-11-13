@@ -613,7 +613,7 @@ func TestRowShowsWhatTheListWasOpenedOn(t *testing.T) {
 }
 
 // 00028 goes down to the migration before it and up again, leaving
-// nothing behind and the platform's appends as 00022 left them.
+// nothing behind and the platform's appends as 00027 left them.
 func TestMigration00028DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
@@ -656,7 +656,7 @@ func TestMigration00028DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	if want := regexp.MustCompile(`,\s*'audit\.patients_viewed'::text`).ReplaceAllString(before, ""); down != want {
-		t.Errorf("platform_append after down:\n%s\nwant 00022's:\n%s", down, want)
+		t.Errorf("platform_append after down:\n%s\nwant 00027's:\n%s", down, want)
 	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)

@@ -58,17 +58,14 @@ KINDS = ("synthetic", "deidentified")
 ALLOWED_KINDS = frozenset({"synthetic"})  # phase 0 (plan departure 10)
 # The roles a training manifest may name: ``extract`` (the document extractor) and ``cca``
 # (the answer model, docs/plans/2026-11-13-own-answer-model.md). A role is pinnable only
-# once it has an evaluation suite (``lock.ROLES``); ``cca`` gets its suite in that plan's
-# PR 2, so until then a ``cca`` run passes these checks but cannot be pinned.
+# once it has an evaluation suite (``lock.ROLES``); ``cca``'s is ``clinical_answer``.
 ROLES = frozenset({"extract", "cca"})
 # The roles whose run may carry a GGUF. Only ``cca`` is served from a GGUF (llama.cpp);
 # ``extract`` is evaluated and served from the safetensors, so a GGUF in its run would be
 # signed without ever being evaluated (security review of PR #143). For ``cca`` the GGUF
 # is the artifact that is served, so it must be the artifact that is evaluated: the
 # ``clinical_answer`` suite (own answer model plan, PR 2) MUST score the GGUF file itself
-# through llama.cpp, never the safetensors. Until that suite exists ``cca`` has no entry
-# in ``promote.SUITES`` or ``lock.ROLES``, so a ``cca`` run stops at evaluation
-# (``no_suite``) and cannot be signed or pinned.
+# through llama.cpp, never the safetensors: it does (``doceval.answers.gate``).
 GGUF_ROLES = frozenset({"cca"})
 CHAT_TEMPLATE_JSON = "chat_template.json"
 TOKENIZER_CONFIG_JSON = "tokenizer_config.json"
