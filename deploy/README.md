@@ -400,6 +400,120 @@ sudo ln -s /etc/nginx/sites-available/mhai-backend /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
+## Operations: backups, restore test, health alerts
+
+The lean baseline for the pilot (`ops/`): a nightly encrypted backup, a
+weekly restore test, and a five-minute health check that alerts through a
+webhook. **Off until the operator runs `ops/install-ops.sh`**; the deploy
+workflow never touches it and the compose project is unchanged. It runs on
+the host as root, from systemd timers. Prometheus, Grafana and the rest are
+on TODO.md's "Before scale: operations" list.
+
+| Piece | When | What |
+|---|---|---|
+| `ops/backup.sh` | nightly, 01:30 UTC (`mhai-backup.timer`) | `pg_dump -Fc` of `mhai` and the roles (no passwords) from one snapshot, with every table's row count; each stream encrypted with `age` as it is written; `SHA256SUMS`; 7 daily + the newest of 4 ISO weeks kept; offsite copy if configured; `/var/lib/mhai-ops/backup.status` |
+| `ops/restore-test.sh` | weekly, by the operator | the newest backup into a throwaway Postgres (internal network, removed after): checksums, decrypt, `pg_restore --exit-on-error`, every row count equal to the backup's, the goose version equal, `core migrate status`; prints PASS or FAIL |
+| `ops/healthcheck.sh` | every 5 minutes (`mhai-healthcheck.timer`) | containers running and not unhealthy (`postgres`, `nats`, `core`, plus `pipeline` and `egress-proxy` when their profiles are on), core's `readyz`, disk free (≥ 15%), last backup ok and < 26 h old, last restore test passed < 8 days ago; one alert per change of failures (repeated hourly), one "recovered" |
+
+**What is backed up.** The `mhai` database, which holds everything that
+matters. Not the NATS JetStream store: its KV buckets live minutes to an
+hour, `JOBS` is the work queue of questions in flight (each fails at its
+10-minute deadline anyway), and `DEAD` keeps dead-letter ids for 30 days
+for diagnosis; core recreates the streams and buckets at start. Losing it
+loses in-flight questions and the revoked-token denylist until those tokens
+expire. Not the signing keys (`mhai-backend-corekeys`): a new key signs
+everyone out once, nothing more. Not `.env` and `secrets/`: keep their
+values in the password manager.
+
+### What the operator provides
+
+All in `/etc/mhai-ops/` (root, mode 700). Never commit or paste any of them.
+
+1. **The backup key pair**, made on the operator's own machine, never on
+   the host: `age-keygen -o mhai-backup-key.txt`, store the file in the
+   password manager, then delete it locally. Put **only the public key**
+   (the `age1...` line `age-keygen` prints as "Public key") in
+   `/etc/mhai-ops/backup-recipients.txt`. A second line can hold a second
+   person's public key. The scripts refuse a private key there. Lose the
+   private key and the backups can't be read.
+2. **The alert webhook URL** (optional, off when missing), one line in
+   `/etc/mhai-ops/alert-webhook-url`, mode 600: a Slack or Mattermost
+   incoming webhook, an email relay that takes `{"text": ...}`, or
+   `https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>`.
+   Alerts carry check names and numbers only, never patient data.
+3. **The offsite bucket** (optional, off by default),
+   `/etc/mhai-ops/offsite.env`, mode 600: `OFFSITE_ENDPOINT`,
+   `OFFSITE_BUCKET`, `OFFSITE_PREFIX`, `OFFSITE_REGION`,
+   `OFFSITE_ACCESS_KEY_ID`, `OFFSITE_SECRET_ACCESS_KEY` (`KEY=value` lines,
+   no quotes). Any S3-compatible store; the copy runs in
+   `rclone/rclone`. Give the key write access to that prefix only (no
+   delete), and set a lifecycle rule on the bucket (e.g. expire after 35
+   days): the script doesn't rotate offsite. The files are already
+   encrypted.
+
+### Switch it on (once)
+
+```bash
+sudo apt-get install -y age
+sudo install -d -m 700 /etc/mhai-ops
+sudo nano /etc/mhai-ops/backup-recipients.txt     # the age1... public key
+sudo nano /etc/mhai-ops/alert-webhook-url         # optional; then: sudo chmod 600 it
+sudo bash deploy/ops/install-ops.sh               # from a copy of deploy/ at the deployed release
+sudo systemctl start mhai-backup.service          # the first backup now
+sudo journalctl -u mhai-backup -n 20
+```
+
+`install-ops.sh` copies the scripts to `/usr/local/lib/mhai-ops/`, writes
+`/etc/mhai-ops/ops.env` from `ops/ops.env.example` once (set `HOST_LABEL`
+there), and enables the two timers. Run it again after a release changes
+`deploy/ops/`. `--uninstall` turns the timers off and keeps the backups.
+
+### Weekly: the restore test
+
+The private key is needed, so the operator runs it, from the password
+manager on standard input (kept in memory, never written or printed):
+
+```bash
+<password manager CLI> | sudo /usr/local/lib/mhai-ops/restore-test.sh --identity-stdin
+# or paste it at the hidden prompt:
+sudo /usr/local/lib/mhai-ops/restore-test.sh --identity-stdin
+```
+
+It ends with `PASS: backup <name> restored and checked`, or `FAIL: <why>`;
+either way it is in `/var/lib/mhai-ops/restore.status`, and the health
+check alerts if no test has passed for 8 days. It needs about 512 MiB for a
+few minutes; with the pilot pipeline running, check `free -m` first. To run
+it on another machine instead, copy one backup directory there and use
+`--identity <file> --backup <dir>`, and set `RESTORE_MAX_AGE_DAYS=0` on the
+host.
+
+### Restoring for real
+
+Stop core (and the pipeline), restore into the running Postgres, start
+again. The key is pasted into a shell variable, never a file:
+
+```bash
+sudo -i                                   # the backups are root's
+read -rs K                                # paste the AGE-SECRET-KEY-... line (hidden), then Enter
+cd /srv/mhai-backend && docker compose stop core pipeline
+B=/var/backups/mhai/<backup>
+age -d -i <(printf '%s\n' "$K") $B/globals.sql.age | docker compose exec -T postgres psql -U pgadmin -d postgres
+age -d -i <(printf '%s\n' "$K") $B/mhai.dump.age \
+  | docker compose exec -T postgres pg_restore -U pgadmin -d mhai --clean --if-exists --exit-on-error
+unset K
+docker compose up -d core                 # core-migrate resets the logins' passwords from .env
+```
+
+"Role already exists" errors from the first command are expected. Run the
+restore test on that backup first if there is time.
+
+### When an alert comes
+
+`sudo journalctl -u mhai-healthcheck -n 50` names each failed check.
+`sudo /usr/local/lib/mhai-ops/healthcheck.sh` runs it now. Backup failures:
+`sudo journalctl -u mhai-backup -n 50` and
+`sudo cat /var/lib/mhai-ops/backup.status`.
+
 ## Cloud models (off by default)
 
 A hospital a platform admin has opted in can have its clinical answers
@@ -554,9 +668,12 @@ does not; it keeps them for a limited time for abuse monitoring only. So:
   on its second run: `EnsureLogin` sends `ALTER ROLE ... NOBYPASSRLS
   NOREPLICATION`, which only a role holding those attributes may send. Fix
   `EnsureLogin` first, then switch.
-- **Single instance, no backups.** The database volume is on the instance's
-  disk. Take `docker compose exec postgres pg_dump -U pgadmin mhai` before
-  anything risky.
+- **Single instance.** The database volume is on the instance's disk.
+  Backups and alerts are opt-in ("Operations": `ops/install-ops.sh`), and
+  until they're on there are none; the backups stay on the same disk unless
+  the offsite bucket is set. Run `sudo systemctl start mhai-backup.service`
+  (or, before install, `docker compose exec postgres pg_dump -U pgadmin mhai`)
+  before anything risky.
 - **The gateway permissions are copied** from `services/nats/nats.conf` into
   `nats/nats.conf`; change both together.
 - **Config changes in `compose.yml` and `nats/nats.conf` reach the instance

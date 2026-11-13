@@ -451,6 +451,14 @@ jobs:
       # with core's migrations (fails closed on every error).
       - name: Pre-migration check tests
         run: .github/scripts/premigrate-check-test.sh
+      # The operations baseline (deploy/ops/): shellcheck, then backup ->
+      # restore test against throwaway Postgres containers, the offsite copy
+      # to a throwaway MinIO, and the health check's alert to a fake webhook.
+      - name: Ops baseline tests
+        run: |
+          sudo apt-get install -y -qq age >/dev/null
+          shellcheck -x deploy/ops/*.sh .github/scripts/ops-test.sh
+          .github/scripts/ops-test.sh
       - name: Smoke test
         run: .github/scripts/boundary-smoke.sh
 

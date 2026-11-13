@@ -1,0 +1,12 @@
+[Unit]
+Description=MHAI nightly backup
+
+[Timer]
+# 01:30 UTC (02:30 in Lagos), within 15 minutes; a missed run (host off)
+# runs at the next boot.
+OnCalendar=*-*-* 01:30:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

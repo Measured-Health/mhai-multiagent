@@ -136,6 +136,30 @@ docker compose --profile tools run --rm core-cli users create \
   --email <email> --name "<name>" --roles clinician --hospital <CODE>   # prompts for the password
 ```
 
+## Backups and alerts (before the first real question)
+
+Real patient data needs the operations baseline on (deploy/README.md,
+"Operations"). Once, before the hospital's first clinician signs in:
+
+1. Make the backup key pair on your own machine (`age-keygen`), keep it in
+   the password manager, and put only the public key (`age1...`) in
+   `/etc/mhai-ops/backup-recipients.txt` on the host.
+2. Put the alert webhook URL in `/etc/mhai-ops/alert-webhook-url`
+   (mode 600), and optionally the offsite bucket in
+   `/etc/mhai-ops/offsite.env`.
+3. `sudo bash deploy/ops/install-ops.sh`, then
+   `sudo systemctl start mhai-backup.service`. With the pilot on, the health
+   check also watches `pipeline` and `egress-proxy`.
+4. Run the first restore test and see `PASS`:
+   `sudo /usr/local/lib/mhai-ops/restore-test.sh --identity-stdin` (paste the
+   private key at the hidden prompt).
+   Then trigger one alert to see it arrive:
+   `sudo env DISK_MIN_FREE_PCT=101 /usr/local/lib/mhai-ops/healthcheck.sh`
+   (and run it once more without the variable for the "recovered" message).
+
+Every week: the restore test (step 4). Every day: glance at the alert
+channel; no news is good news only because step 4 proved alerts arrive.
+
 ## Check it
 
 - [ ] `docker compose ps` shows `pipeline` and `egress-proxy` running, and
