@@ -64,12 +64,13 @@ def gguf(
     return head + data
 
 
+TINY_TEMPLATE = b"{% for m in messages %}{{ m.content }}{% endfor %}"
+
+
 def tiny_kvs(architecture: bytes = b"llama") -> list[bytes]:
     return [
         kv_string(b"general.architecture", architecture),
-        kv_string(
-            b"tokenizer.chat_template", b"{% for m in messages %}{{ m.content }}{% endfor %}"
-        ),
+        kv_string(b"tokenizer.chat_template", TINY_TEMPLATE),
         kv_array(b"tokenizer.ggml.tokens", STRING, [string(b"<s>"), string(b"a"), string(b"b")]),
     ]
 

@@ -69,6 +69,8 @@ def run(tmp_path: Path) -> Path:
     """A trained run as the notebook leaves it: weights, config, tokenizer, no manifest."""
     r = fixtures.make_run(tmp_path / "run", "good", 3)
     (r / training.FILE_NAME).unlink()
+    template = g.TINY_TEMPLATE.decode("utf-8")
+    (r / "chat_template.json").write_text(json.dumps({"chat_template": template}))
     return r
 
 
@@ -122,6 +124,23 @@ def test_export_writes_manifest_and_gguf_and_passes(run: Path, llama: Path) -> N
     assert not convert[convert.index("--outfile") + 1].startswith(str(run))  # f16 kept out
     assert quantize[2] == str(run / "model-q4_k_m.gguf") and quantize[3] == "Q4_K_M"
     assert sorted(p.name for p in run.iterdir() if p.suffix == ".gguf") == ["model-q4_k_m.gguf"]
+
+
+def test_gguf_template_must_match_the_run(run: Path, llama: Path) -> None:
+    (run / "chat_template.json").write_text(json.dumps({"chat_template": "{{ other }}"}))
+    with pytest.raises(Refused) as err:
+        export.export_run(run, llama_cpp=llama, **_kw())
+    assert (err.value.reason, err.value.detail_code) == ("gguf_template_mismatch", "differs")
+    assert export.fix_for(err.value)
+
+
+def test_extract_run_cannot_carry_a_gguf(run: Path, llama: Path) -> None:
+    with pytest.raises(Refused) as err:
+        export.export_run(run, llama_cpp=llama, **_kw(role="extract"))
+    assert err.value.reason == "gguf_not_allowed_for_role"
+    assert export.fix_for(err.value)
+    assert _calls(llama) == [] and not (run / training.FILE_NAME).exists()
+    assert export.export_run(run, gguf=False, **_kw(role="extract")).gguf is None
 
 
 def test_q8_0_is_written_by_the_converter_directly(run: Path, llama: Path) -> None:

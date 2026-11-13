@@ -59,6 +59,8 @@ REASONS: frozenset[str] = frozenset(
         "gguf_invalid",
         "training_manifest_misnamed",
         "role_unknown",
+        "gguf_not_allowed_for_role",
+        "gguf_template_mismatch",
     }
 )
 

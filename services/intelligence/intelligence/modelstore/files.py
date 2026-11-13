@@ -633,10 +633,13 @@ def _gguf_value(r: _GgufReader, vtype: int, name: str | None) -> Any:
     return None
 
 
-def _check_gguf_file(f: io.FileIO, size: int, name: str | None, digest: Any = None) -> int:
+def _check_gguf_file(
+    f: io.FileIO, size: int, name: str | None, digest: Any = None
+) -> tuple[int, bytes | None]:
     """Validate the GGUF header and tensor table read from ``f``'s position (0); return
-    the bytes read from the file (all fed to ``digest``). Tensor data is never parsed:
-    each tensor's extent is checked against the data region's size."""
+    the bytes read from the file (all fed to ``digest``) and the ``tokenizer.chat_template``
+    string, if any. Tensor data is never parsed: each tensor's extent is checked against
+    the data region's size."""
     r = _GgufReader(f, name, GGUF_HEADER_CAP, digest)
     if r.take(4) != GGUF_MAGIC:
         raise _gguf_bad(name, "magic")
@@ -648,6 +651,7 @@ def _check_gguf_file(f: io.FileIO, size: int, name: str | None, digest: Any = No
         raise _gguf_bad(name, "counts")
     seen: set[str] = set()
     architecture: Any = None
+    template: bytes | None = None
     alignment = GGUF_DEFAULT_ALIGNMENT
     for _ in range(n_kv):
         key = _gguf_key(r, name, "key")
@@ -658,6 +662,10 @@ def _check_gguf_file(f: io.FileIO, size: int, name: str | None, digest: Any = No
         value = _gguf_value(r, vtype, name)
         if key == "general.architecture":
             architecture = value if vtype == _GGUF_STRING else None
+        elif key == "tokenizer.chat_template":
+            if vtype != _GGUF_STRING:
+                raise _gguf_bad(name, "chat_template")
+            template = value
         elif key == "general.alignment":
             if vtype != _GGUF_UINT32 or not 0 < value <= 1 << 16 or value & (value - 1):
                 raise _gguf_bad(name, "alignment")
@@ -695,13 +703,20 @@ def _check_gguf_file(f: io.FileIO, size: int, name: str | None, digest: Any = No
     for offset, nbytes in tensors:
         if offset % alignment or offset + nbytes > data_len:
             raise _gguf_bad(name, "offsets")
-    return r.consumed
+    return r.consumed, template
 
 
 def check_gguf(path: Path | str) -> None:
     """Validate a GGUF file's header and tensor table; tensor data is never read."""
     with _parent(Path(path)) as (dfd, name), _open(name, dfd) as (f, size):
         _check_gguf_file(f, size, name)
+
+
+def gguf_chat_template(path: Path | str) -> bytes | None:
+    """The ``tokenizer.chat_template`` of a GGUF file (after the full header check), or
+    None when it has none: the template the server would apply to every question."""
+    with _parent(Path(path)) as (dfd, name), _open(name, dfd) as (f, size):
+        return _check_gguf_file(f, size, name)[1]
 
 
 # --- the whole run ---------------------------------------------------------
@@ -805,7 +820,7 @@ def check_run(dir: Path | str, limits: Limits | None = None) -> list[FileEntry]:
                     sha = hashlib.sha256(raw).hexdigest()
                 elif name.endswith(GGUF_SUFFIX):
                     digest = hashlib.sha256()
-                    done = _check_gguf_file(f, size, name, digest)
+                    done, _ = _check_gguf_file(f, size, name, digest)
                     sha = _stream_rest(f, size, done, digest, name)
                 else:
                     digest = hashlib.sha256()
@@ -847,6 +862,7 @@ __all__ = [
     "check_gguf",
     "check_json",
     "check_misnamed",
+    "gguf_chat_template",
     "check_run",
     "check_safetensors",
     "files_hash",

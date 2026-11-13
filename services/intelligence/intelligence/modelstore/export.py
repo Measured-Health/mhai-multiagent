@@ -119,6 +119,15 @@ _HINTS: Mapping[str, str] = {
         " metric names snake_case without a run of three digits, values finite numbers;"
         " give either an upstream base (repo, revision, licence) or a promoted one"
     ),
+    "gguf_not_allowed_for_role": (
+        "only a cca (answer) run carries a GGUF: pass gguf=False (--no-gguf) for this role"
+        " and delete the .gguf from the run folder"
+    ),
+    "gguf_template_mismatch": (
+        "the GGUF's chat template must be the run's: keep the template in chat_template.json"
+        " or tokenizer_config.json (convert a chat_template.jinja into chat_template.json)"
+        " before this step, and let this step write the GGUF from that folder"
+    ),
     "invalid_name": "the version is <major>.<minor>.<patch>, for example 0.1.0",
     "training_manifest_missing": "the training manifest was not written: run this step again",
     "not_found": "the run folder does not exist",
@@ -283,6 +292,7 @@ def check(
     entries = tuple(files.check_run(run_dir))
     tm = training.load_run(run_dir)
     checked = training.check(tm, registry, licences, verify_pin=_at_promotion)
+    training.check_gguf_run(tm, run_dir)
     return entries, files.files_hash(entries), checked
 
 
@@ -331,6 +341,8 @@ def export_run(
         base_promoted=base_promoted,
         notebook_metrics=notebook_metrics,
     )
+    if gguf and role not in training.GGUF_ROLES:
+        raise Refused("gguf_not_allowed_for_role")
     tools = _find_tools(llama_cpp, quant) if gguf else None
     raw = json.dumps(obj, indent=2, sort_keys=True, allow_nan=False) + "\n"
     (run / training.FILE_NAME).write_text(raw, encoding="ascii")

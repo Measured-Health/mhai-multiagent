@@ -19,7 +19,9 @@ def test_refused_str_has_no_detail() -> None:
 
 def test_reason_set_is_closed() -> None:
     assert isinstance(REASONS, frozenset)
-    assert len(REASONS) == 49
+    assert len(REASONS) == 51
+    assert "gguf_not_allowed_for_role" in REASONS  # a GGUF on a role that is not served
+    assert "gguf_template_mismatch" in REASONS  # the served template is not the run's
     assert "gguf_invalid" in REASONS  # own model PR 1: a GGUF header refused
     assert "training_manifest_misnamed" in REASONS  # a manifest.json in place of it
     assert "role_unknown" in REASONS  # a training manifest role with no plan

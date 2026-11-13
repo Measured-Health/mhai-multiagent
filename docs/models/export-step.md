@@ -17,6 +17,23 @@ model.save_pretrained("/content/run-1", safe_serialization=True, max_shard_size=
 tokenizer.save_pretrained("/content/run-1")
 ```
 
+The chat template must be in `chat_template.json` (`{"chat_template": "..."}`) or in
+`tokenizer_config.json`. Recent transformers versions save it as `chat_template.jinja`,
+which isn't allowed in a run, so move it into `chat_template.json` before the step:
+
+```python
+import json, pathlib
+jinja = pathlib.Path("/content/run-1/chat_template.jinja")
+if jinja.exists():
+    pathlib.Path("/content/run-1/chat_template.json").write_text(
+        json.dumps({"chat_template": jinja.read_text()}))
+    jinja.unlink()
+```
+
+The step refuses a GGUF whose embedded template differs from the run's
+(`gguf_template_mismatch`). Only a `cca` run may carry a GGUF
+(`gguf_not_allowed_for_role`); for an `extract` run, pass `gguf=False`.
+
 The datasets you name must already be in `models/approved-datasets.json` (synthetic only
 for now), and an upstream base model's licence must be in `models/licences.json`
 (Apache-2.0 or MIT today). Both lists change only through a pull request.
@@ -96,5 +113,7 @@ manifest that verification trusts, so a run holding one is refused with
 Upload the folder to the shared Drive folder as `models/<name>/<run>/` (for example
 `models/mhai-answer/run-1/`). Then ask for the promotion with the line the step printed:
 `mhai-models promote <name> <version> --source drive --run <run> --expect-files <hash>`.
-A `cca` run passes these checks today but can't be pinned until its evaluation suite
-lands (own answer model plan, PR 2).
+A `cca` run passes these checks today, but promotion stops it at evaluation (`no_suite`),
+so it can't be signed or pinned until its evaluation suite lands (own answer model plan,
+PR 2). That suite must score the GGUF file itself through llama.cpp, because the GGUF is
+what gets served.

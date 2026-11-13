@@ -27,6 +27,7 @@ from intelligence.modelstore import (
     cli,
     files,
     fixtures,
+    lock,
     manifest,
     promote,
     signing,
@@ -40,6 +41,7 @@ from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.sources.local import LocalSource
 from tests.doceval import minisets
 from tests.modelstore.conftest import MinioStore
+from tests.modelstore.fakes import gguf as g
 from tests.modelstore.fakes.memory_store import MemoryStore
 
 REPO = Path(__file__).resolve().parents[4]
@@ -1495,3 +1497,61 @@ def test_cli_check_names_a_misnamed_training_manifest(
             " (manifest.json is reserved for the signed store manifest)"
         ),
     }
+
+
+# ---------------------------------------------------------------- a GGUF (security review of #143)
+
+
+def _with_gguf(run: Path, template: bytes | None = None) -> Path:
+    (run / "model-q4_k_m.gguf").write_bytes(g.tiny())
+    text = (template or g.TINY_TEMPLATE).decode("utf-8")
+    (run / "chat_template.json").write_text(json.dumps({"chat_template": text}))
+    return run
+
+
+def test_extract_run_with_a_gguf_refused(
+    tmp_path: Path, registry: training.Registry, licences: training.Licences
+) -> None:
+    run = _with_gguf(fixtures.make_run(tmp_path / "run", "good", 3))
+    with pytest.raises(Refused) as err:
+        promote.check_folder(run, registry, licences)
+    assert err.value.reason == "gguf_not_allowed_for_role"
+
+
+def test_cca_gguf_template_mismatch_refused_at_promotion(
+    tmp_path: Path, registry: training.Registry, licences: training.Licences
+) -> None:
+    run = _with_gguf(fixtures.make_run(tmp_path / "run", "good", 3, role="cca"), b"{{ x }}")
+    with pytest.raises(Refused) as err:
+        promote.check_training(run, NAME, registry, licences)
+    assert (err.value.reason, err.value.detail_code) == ("gguf_template_mismatch", "differs")
+
+
+def test_cca_run_with_a_gguf_cannot_be_promoted_or_pinned(
+    tmp_path: Path,
+    registry: training.Registry,
+    licences: training.Licences,
+    dev_set: minisets.MiniSet,
+) -> None:
+    """Until PR 2's clinical_answer suite scores the GGUF itself through llama.cpp, a
+    cca run stops at step 5 (no suite), so nothing is signed, and pin refuses the role."""
+    root = tmp_path / "source"
+    _with_gguf(fixtures.make_run(root / "models" / NAME / RUN, "good", 3, role="cca"))
+    ctx = _ctx(root, registry, licences, dev_set)
+    with pytest.raises(Refused) as err:
+        promote.promote(_request(dry_run=True), ctx)
+    assert err.value.reason == "no_suite"
+    assert "cca" not in promote.SUITES and "cca" not in lock.ROLES
+    with pytest.raises(Refused) as err:
+        lock.pin(
+            "cca",
+            NAME,
+            "1.0.0",
+            "phase1",
+            source=None,  # type: ignore[arg-type]
+            policy=None,  # type: ignore[arg-type]
+            cache_dir=tmp_path / "cache",
+            lock_path=tmp_path / "models.lock",
+            testsets_lock={},
+        )
+    assert (err.value.reason, err.value.detail_code) == ("lock_invalid", "role")

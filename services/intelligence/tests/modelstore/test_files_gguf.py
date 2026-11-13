@@ -108,6 +108,12 @@ def test_gguf_without_safetensors_refused(tmp_path: Path) -> None:
     assert _code(files.check_run, run) == ("missing_file", "no_weights")
 
 
+def test_gguf_chat_template_read_from_the_header(tmp_path: Path) -> None:
+    assert files.gguf_chat_template(_file(tmp_path, g.tiny())) == g.TINY_TEMPLATE
+    no_template = g.gguf([g.tiny_kvs()[0]], g.TINY_INFOS, g.TINY_DATA)
+    assert files.gguf_chat_template(_file(tmp_path, no_template)) is None
+
+
 def test_gguf_over_the_weights_cap_refused(tmp_path: Path) -> None:
     run = _run_with(tmp_path, g.tiny())
     limits = files.Limits(max_file_bytes=len(g.tiny()) - 1)
