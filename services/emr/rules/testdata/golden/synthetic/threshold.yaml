@@ -18,6 +18,7 @@ patients:
       - {id: k-lt0.5, analyte: potassium, value: "<0.5", unit: mmol/L, at: -1h}
       - {id: k-lt6.6, analyte: potassium, value: "<6.6", unit: mmol/L, at: -1h}
       - {id: k-mgdl, analyte: potassium, value: "26", unit: mg/dL, at: -1h}
+      - {id: k-meq, analyte: potassium, value: "6.5", unit: mEq/L, at: -1h}
       - {id: glu-45mgdl, analyte: glucose, value: "45", unit: mg/dL, at: -1h}
       - {id: glu-46mgdl, analyte: glucose, value: "46", unit: mg/dL, at: -1h}
       - {id: glu-gl, analyte: glucose, value: "0.2", unit: g/L, at: -1h}
@@ -32,6 +33,7 @@ expect:
   - {patient: p1, observation: k-gt6, rule_id: potassium-urgent-high, severity: urgent}
   - {patient: p1, observation: k-lt0.5, rule_id: potassium-critical-low, severity: critical}
   - {patient: p1, observation: glu-45mgdl, rule_id: glucose-critical-low, severity: critical}
+  - {patient: p1, observation: k-meq, rule_id: potassium-critical-high, severity: critical}
   - {patient: p1, observation: hr-131, rule_id: heart-rate-critical-high, severity: critical}
 expect_none:
   - {patient: p1, observation: k-6.5, rule_id: potassium-urgent-high}

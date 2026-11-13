@@ -20,6 +20,10 @@ patients:
       - {id: potassium-gt7, analyte: potassium, value: ">7.0", unit: mmol/L, at: -1h}
       - {id: platelets-lt10, analyte: platelets, value: "<10", unit: 10^9/L, at: -1h}
       - {id: temperature-f, analyte: temperature, value: "94", unit: "[degF]", at: -1h}
+      - {id: potassium-meq, analyte: potassium, value: "6.6", unit: mEq/L, at: -1h}
+      - {id: sodium-meq, loinc: "2947-0", value: "118", unit: meq/l, at: -1h}
+      - {id: troponin-pgml, analyte: troponin_t_hs, value: "60", unit: pg/mL, at: -1h}
+      - {id: troponin-pgml-low, analyte: troponin_t_hs, value: "51", unit: pg/ml, at: -1h}
 expect:
   - {patient: p1, observation: glucose-44mgdl, rule_id: glucose-critical-low, severity: critical}
   - {patient: p1, observation: glucose-460mgdl, rule_id: glucose-critical-high, severity: critical}
@@ -30,7 +34,11 @@ expect:
   - {patient: p1, observation: potassium-blood, rule_id: potassium-critical-high, severity: critical}
   - {patient: p1, observation: potassium-gt7, rule_id: potassium-critical-high, severity: critical}
   - {patient: p1, observation: platelets-lt10, rule_id: platelets-critical-low, severity: critical}
+  - {patient: p1, observation: potassium-meq, rule_id: potassium-critical-high, severity: critical}
+  - {patient: p1, observation: sodium-meq, rule_id: sodium-critical-low, severity: critical}
+  - {patient: p1, observation: troponin-pgml, rule_id: troponin-t-hs-critical-high, severity: critical}
 expect_none:
+  - {patient: p1, observation: troponin-pgml-low, rule_id: troponin-t-hs-critical-high}
   - {patient: p1, observation: glucose-46mgdl, rule_id: glucose-critical-low}
   - {patient: p1, observation: creatinine-3.9mgdl, rule_id: creatinine-critical-high}
   - {patient: p1, observation: haemoglobin-65gl, rule_id: haemoglobin-critical-low}

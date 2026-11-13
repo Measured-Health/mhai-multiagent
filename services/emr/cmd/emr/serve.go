@@ -245,7 +245,7 @@ func serve(getenv func(string) string) error {
 		// shadow unless EMR_RULE_SET_ACTIVE names this set and a platform
 		// admin activated it for the hospital.
 		if s.RuleSetFile != "" {
-			rs, missing, err := loadRules(s.RuleSetFile, maps, s.Development())
+			rs, missing, err := loadRules(s.RuleSetFile, maps, s.Development(), s.RuleSetActive)
 			if err != nil {
 				return err
 			}

@@ -14,8 +14,11 @@ import (
 // normaliser's conversions: an analyte the conversions put in another unit
 // refuses the start (a threshold would compare against the wrong unit). It
 // returns the analyte codes the conversions don't list yet: their numeric
-// rules can't fire until they do (their source flags still do).
-func loadRules(path string, maps *codes.Maps, development bool) (*rules.RuleSet, []string, error) {
+// rules can't fire until they do (their source flags still do). A rule set
+// the deployment makes active (active is its version) must have every
+// analyte code in the conversions: an active set never skips a threshold
+// silently, so the start is refused.
+func loadRules(path string, maps *codes.Maps, development bool, active string) (*rules.RuleSet, []string, error) {
 	rs, err := rules.Load(path, development)
 	if err != nil {
 		if errors.Is(err, rules.ErrSynthetic) {
@@ -26,6 +29,10 @@ func loadRules(path string, maps *codes.Maps, development bool) (*rules.RuleSet,
 	missing, err := rs.UnitsMissing(maps)
 	if err != nil {
 		return nil, nil, errors.New("EMR_RULE_SET_FILE: an analyte's unit differs from the conversions' canonical unit")
+	}
+	if active != "" && active == rs.Version() && len(missing) > 0 {
+		return nil, nil, fmt.Errorf("EMR_RULE_SET_ACTIVE: %d of the rule set's analyte codes have no reviewed conversion; "+
+			"an active rule set would skip their thresholds", len(missing))
 	}
 	return rs, missing, nil
 }

@@ -13,7 +13,9 @@ analytes:
         factor: 0.0555
   - loinc: 99902-9   # potassium
     canonical: mmol/L
-    conversions: []
+    conversions:
+      - from: meq/L
+        factor: 1
   - loinc: 99903-7   # creatinine
     canonical: umol/L
     conversions:
@@ -21,7 +23,9 @@ analytes:
         factor: 88.4
   - loinc: 99904-5   # sodium
     canonical: mmol/L
-    conversions: []
+    conversions:
+      - from: meq/L
+        factor: 1
   - loinc: 99905-2   # haemoglobin
     canonical: g/dL
     conversions:
@@ -47,4 +51,6 @@ analytes:
     conversions: []
   - loinc: 99916-9   # troponin
     canonical: ng/L
-    conversions: []
+    conversions:
+      - from: pg/mL
+        factor: 1

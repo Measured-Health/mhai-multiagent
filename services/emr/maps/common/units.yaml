@@ -8,6 +8,8 @@ units:
     aliases: ["mg/dl", "mg%"]
   - ucum: mmol/L
     aliases: ["mmol/l", "mmol/Litre"]
+  - ucum: meq/L
+    aliases: ["mEq/L", "mEq/l", "meq/l"]
   - ucum: umol/L
     aliases: ["umol/l", "µmol/L", "µmol/l"]
   - ucum: g/dL
@@ -20,6 +22,8 @@ units:
     aliases: ["x10^3/uL", "10^3/uL", "K/uL"]
   - ucum: ng/L
     aliases: ["ng/l"]
+  - ucum: pg/mL
+    aliases: ["pg/ml"]
   - ucum: /min
     aliases: ["bpm", "beats/min", "breaths/min"]
   - ucum: mm[Hg]

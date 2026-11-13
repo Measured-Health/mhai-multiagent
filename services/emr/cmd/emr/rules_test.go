@@ -57,10 +57,10 @@ func TestLoadRulesChecksUnits(t *testing.T) {
 		t.Fatal(err)
 	}
 	synth := filepath.Join("..", "..", "rules", "testdata", "ruleset-0-synthetic.yaml")
-	if _, missing, err := loadRules(synth, maps, true); err != nil || len(missing) != 0 {
+	if _, missing, err := loadRules(synth, maps, true, ""); err != nil || len(missing) != 0 {
 		t.Fatalf("synthetic: %v %v", missing, err)
 	}
-	if _, _, err := loadRules(synth, maps, false); err == nil || !strings.Contains(err.Error(), "development only") {
+	if _, _, err := loadRules(synth, maps, false, ""); err == nil || !strings.Contains(err.Error(), "development only") {
 		t.Fatalf("synthetic outside development: %v", err)
 	}
 	b, err := os.ReadFile(synth)
@@ -71,12 +71,25 @@ func TestLoadRulesChecksUnits(t *testing.T) {
 	if err := os.WriteFile(wrong, []byte(strings.Replace(string(b), `loinc: ["99901-1"], unit: mmol/L`, `loinc: ["99901-1"], unit: mg/dL`, 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := loadRules(wrong, maps, true); err == nil || !strings.Contains(err.Error(), "unit") {
+	if _, _, err := loadRules(wrong, maps, true, ""); err == nil || !strings.Contains(err.Error(), "unit") {
 		t.Fatalf("glucose in mg/dL: %v", err)
 	}
 	// v1 against the synthetic conversions: its real codes aren't listed
 	// (Task 21), so it loads with every code missing a conversion.
-	if _, missing, err := loadRules(filepath.Join("..", "..", "rules", "ruleset-1.yaml"), maps, false); err != nil || len(missing) == 0 {
+	v1 := filepath.Join("..", "..", "rules", "ruleset-1.yaml")
+	if _, missing, err := loadRules(v1, maps, false, ""); err != nil || len(missing) == 0 {
 		t.Fatalf("v1: %v %v", missing, err)
+	}
+	// Active, it is refused: its thresholds would be skipped silently. An
+	// active name for another version doesn't make v1 active.
+	if _, _, err := loadRules(v1, maps, false, "1"); err == nil || !strings.Contains(err.Error(), "no reviewed conversion") {
+		t.Fatalf("v1 active without conversions: %v", err)
+	}
+	if _, _, err := loadRules(v1, maps, false, "2"); err != nil {
+		t.Fatalf("v1 loaded while another version is named active: %v", err)
+	}
+	// The synthetic set has every code converted: active is fine.
+	if _, _, err := loadRules(synth, maps, true, "0-synthetic"); err != nil {
+		t.Fatalf("synthetic active: %v", err)
 	}
 }

@@ -4,14 +4,16 @@
 # with the real code tables (plan Task 21, H6) and their clinical review
 # (H4). The factors are the standard ones: glucose 1 mg/dL = 0.0555 mmol/L
 # (molar mass 180.16 g/mol), creatinine 1 mg/dL = 88.4 umol/L (113.12
-# g/mol), haemoglobin 10 g/L = 1 g/dL, platelets 10^3/uL = 10^9/L.
+# g/mol), haemoglobin 10 g/L = 1 g/dL, platelets 10^3/uL = 10^9/L, and the
+# exact ones: potassium and sodium (monovalent) 1 mEq/L = 1 mmol/L,
+# troponin 1 pg/mL = 1 ng/L.
 version: conversions-v1-golden-fixture
 reviewed_by: []
 analytes:
-  - {loinc: 2823-3, canonical: mmol/L, conversions: []}
-  - {loinc: 6298-4, canonical: mmol/L, conversions: []}
-  - {loinc: 2951-2, canonical: mmol/L, conversions: []}
-  - {loinc: 2947-0, canonical: mmol/L, conversions: []}
+  - {loinc: 2823-3, canonical: mmol/L, conversions: [{from: meq/L, factor: 1}]}
+  - {loinc: 6298-4, canonical: mmol/L, conversions: [{from: meq/L, factor: 1}]}
+  - {loinc: 2951-2, canonical: mmol/L, conversions: [{from: meq/L, factor: 1}]}
+  - {loinc: 2947-0, canonical: mmol/L, conversions: [{from: meq/L, factor: 1}]}
   - {loinc: 2345-7, canonical: mmol/L, conversions: [{from: mg/dL, factor: 0.0555}]}
   - {loinc: 2339-0, canonical: mmol/L, conversions: [{from: mg/dL, factor: 0.0555}]}
   - {loinc: 14749-6, canonical: mmol/L, conversions: [{from: mg/dL, factor: 0.0555}]}
@@ -20,7 +22,7 @@ analytes:
   - {loinc: 777-3, canonical: 10*9/L, conversions: [{from: 10*3/uL, factor: 1}]}
   - {loinc: 2160-0, canonical: umol/L, conversions: [{from: mg/dL, factor: 88.4}]}
   - {loinc: 14682-9, canonical: umol/L, conversions: [{from: mg/dL, factor: 88.4}]}
-  - {loinc: 67151-1, canonical: ng/L, conversions: []}
+  - {loinc: 67151-1, canonical: ng/L, conversions: [{from: pg/mL, factor: 1}]}
   - {loinc: 59408-5, canonical: "%", conversions: []}
   - {loinc: 8310-5, canonical: Cel, conversions: []}
   - {loinc: 8480-6, canonical: "mm[Hg]", conversions: []}
