@@ -139,7 +139,8 @@ only finds work once core has made the `EMR` stream (`CORE_EMR_ENABLED`).
 
 ## What is built (PR 6: FHIR R4)
 
-Migration 00025 (core; 00024 is Analysis PR 4's) adds `emr.sync_state` (the
+Migration 00026 (core; 00024 and 00025 are Gemini's and Analysis PR 4's)
+adds `emr.sync_state` (the
 cursor, the due time, failure counts, the end of the backfill and the day of
 the last reconciliation, per connection), `emr.raw_records.backfill`, the
 emr role's read of `hospitals.time_zone`, and makes `emr_platform_health()`

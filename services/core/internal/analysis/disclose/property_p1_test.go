@@ -69,6 +69,13 @@ func filterSets(d attack.Dims) []Filters {
 			}
 		}
 	}
+	if len(d.Sources) > 1 {
+		for _, s := range d.Sources {
+			if s != "" {
+				vals = append(vals, fv{DimSource, s})
+			}
+		}
+	}
 	seen := map[Filters]bool{}
 	out := []Filters{{}}
 	for i, a := range vals {

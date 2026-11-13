@@ -13,13 +13,19 @@ from types import MappingProxyType
 from typing import Final
 from urllib.parse import urlsplit
 
-PROVIDERS: Final[tuple[str, ...]] = ("anthropic", "openai", "xai")
+PROVIDERS: Final[tuple[str, ...]] = ("anthropic", "gemini", "openai", "xai")
 
 # A query's model_route, set by core's trigger (migration 00018).
-ROUTES: Final[tuple[str, ...]] = ("cloud:anthropic", "cloud:openai", "cloud:xai", "local")
+ROUTES: Final[tuple[str, ...]] = (
+    "cloud:anthropic",
+    "cloud:gemini",
+    "cloud:openai",
+    "cloud:xai",
+    "local",
+)
 
 # query.completed's egress: where an answer's text went.
-EGRESS: Final[tuple[str, ...]] = ("anthropic", "none", "openai", "xai")
+EGRESS: Final[tuple[str, ...]] = ("anthropic", "gemini", "none", "openai", "xai")
 
 # query.completed's cloud_outcome (design section 11).
 OUTCOMES: Final[tuple[str, ...]] = (
@@ -42,6 +48,8 @@ OUTCOMES: Final[tuple[str, ...]] = (
 BASE_URLS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "anthropic": "https://api.anthropic.com",
+        # Google's OpenAI-compatible endpoint (gemini_adapter).
+        "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
         "openai": "https://api.openai.com/v1",
         "xai": "https://api.x.ai/v1",
     }

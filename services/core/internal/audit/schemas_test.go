@@ -231,6 +231,11 @@ func TestAuditSchemaModelPolicyChanged(t *testing.T) {
 			t.Errorf("%s: %v", ref, err)
 		}
 	}
+	gemini := good()
+	gemini["provider"], gemini["previous"] = "gemini", "xai"
+	if err := audit.CheckActionPayload(action, gemini); err != nil {
+		t.Errorf("gemini: %v", err)
+	}
 	off := good()
 	off["provider"], off["previous"], off["via"] = "none", "xai", "cli"
 	delete(off, "agreement_ref")
@@ -247,7 +252,7 @@ func TestAuditSchemaModelPolicyChanged(t *testing.T) {
 		"an MRN shape":         func(m map[string]any) { m["agreement_ref"] = "HAV-000123" },
 		"a name and a number":  func(m map[string]any) { m["agreement_ref"] = "OKAFOR-2026-01" },
 		"reference while off":  func(m map[string]any) { m["provider"] = "none" },
-		"unknown provider":     func(m map[string]any) { m["provider"] = "gemini" },
+		"unknown provider":     func(m map[string]any) { m["provider"] = "mistral" },
 		"unknown previous":     func(m map[string]any) { m["previous"] = "local" },
 		"missing previous":     func(m map[string]any) { delete(m, "previous") },
 		"missing provider":     func(m map[string]any) { delete(m, "provider") },

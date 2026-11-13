@@ -1,0 +1,11 @@
+[Unit]
+Description=MHAI health check and alert (deploy/ops/healthcheck.sh)
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/mhai-ops/healthcheck.sh
+UMask=0077
+PrivateTmp=yes
+TimeoutStartSec=5min

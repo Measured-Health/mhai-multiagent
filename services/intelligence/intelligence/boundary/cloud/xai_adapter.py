@@ -36,6 +36,7 @@ import openai
 from intelligence.boundary.cloud import scan
 from intelligence.boundary.cloud.adapter_common import (
     answered,
+    chat_tokens_out,
     check_prompt,
     count,
     envelope,
@@ -65,21 +66,6 @@ def _fixed(model: str) -> dict[str, Any]:
             "json_schema": {"name": SCHEMA_NAME, "strict": True, "schema": answer_schema()},
         },
     }
-
-
-def _tokens_out(usage: dict[str, Any], tokens_in: int | None) -> int | None:
-    """Completion tokens plus reasoning tokens. With total_tokens, what it
-    holds beyond the prompt (whichever way the reasoning is counted);
-    without it, completion plus reasoning, which can only over-count."""
-    completion = count(usage.get("completion_tokens"))
-    if completion is None:
-        return None
-    total = count(usage.get("total_tokens"))
-    if total is not None and tokens_in is not None:
-        return max(completion, total - tokens_in)
-    details = obj(usage.get("completion_tokens_details"))
-    reasoning = count(details.get("reasoning_tokens")) or 0
-    return completion + reasoning
 
 
 class XaiAdapter:
@@ -149,7 +135,7 @@ class XaiAdapter:
         model_id = model_of(doc)
         usage = obj(doc.get("usage"))
         tin = count(usage.get("prompt_tokens"))
-        tout = _tokens_out(usage, tin)
+        tout = chat_tokens_out(usage, tin)
         choices = doc.get("choices")
         if doc.get("object") != "chat.completion" or not isinstance(choices, list):
             return failed("malformed", model_id, tin, tout, status)

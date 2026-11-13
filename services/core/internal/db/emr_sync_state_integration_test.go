@@ -12,7 +12,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
-// Migration 00025 (EMR plan Tasks 23-24): the scheduler's state per
+// Migration 00026 (EMR plan Tasks 23-24): the scheduler's state per
 // connection (cursor, due time, failure counts), the backfill flag on raw
 // records, and platform health that turns to errors when a connection on
 // goes silent (design §15.4: a stale source never looks fresh).
@@ -129,8 +129,8 @@ func TestPlatformHealthStaleIsErrors(t *testing.T) {
 	}
 }
 
-// 00025 goes down to 00023 and up again.
-func TestMigration00025DownUp(t *testing.T) {
+// 00026 goes down (to 25: whatever is below it stays) and up again.
+func TestMigration00026DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
@@ -141,8 +141,8 @@ func TestMigration00025DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := db.MigrateDownTo(ctx, pg.URL, 23); err != nil {
-		t.Fatalf("down to 23: %v", err)
+	if err := db.MigrateDownTo(ctx, pg.URL, 25); err != nil {
+		t.Fatalf("down to 25: %v", err)
 	}
 	var left int
 	var usage, tz bool

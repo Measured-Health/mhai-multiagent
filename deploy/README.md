@@ -39,14 +39,14 @@ touches the EMR containers, the web demo or nginx.
 | `core` | core, uid 65532 | `core serve` on 127.0.0.1:8092 | 320 MiB, CPUs 0-1 |
 | `core-cli` | core | the seed CLI, run by hand (profile `tools`) | 128 MiB |
 | `egress-proxy` | `ubuntu/squid` by digest, uid 13 | the cloud providers' only way out (profile `cloud`, off by default; see "Cloud models") | 128 MiB |
+| `pipeline` | `mhai-multiagent-pipeline-pilot` (weights baked in) | the pipeline worker, for the pilot only (profile `pilot`, off by default; see `pilot/README.md`) | 1600 MiB |
 
 Every container has a read-only root filesystem, no Linux capabilities and
-`no-new-privileges`. The intelligence workers (`pipeline`, `echo`) are not
-deployed on the demo in Plan 3, on purpose: the instance is small and the
-models are heavy. Core starts and serves everything else; a question
-(`POST /queries`) is queued and, with no pipeline to take it, fails at its
-10-minute deadline. What deploying the pipeline needs is sketched in
-`compose.yml`. `CORE_HTTP_API` stays `on` (the frontend still calls HTTP).
+`no-new-privileges`. The pipeline worker runs only for the pilot (one real
+hospital with cloud answers, `pilot/README.md`; `pilot/enable-pilot.sh`
+sets it up); echo never comes here. Without the pipeline, core starts and
+serves everything else; a question (`POST /queries`) is queued and fails at
+its 10-minute deadline. `CORE_HTTP_API` stays `on` (the frontend still calls HTTP).
 
 ### Before merging Plan 3 (the boundary): the demo's `clinical_queries`
 
@@ -400,6 +400,120 @@ sudo ln -s /etc/nginx/sites-available/mhai-backend /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
+## Operations: backups, restore test, health alerts
+
+The lean baseline for the pilot (`ops/`): a nightly encrypted backup, a
+weekly restore test, and a five-minute health check that alerts through a
+webhook. **Off until the operator runs `ops/install-ops.sh`**; the deploy
+workflow never touches it and the compose project is unchanged. It runs on
+the host as root, from systemd timers. Prometheus, Grafana and the rest are
+on TODO.md's "Before scale: operations" list.
+
+| Piece | When | What |
+|---|---|---|
+| `ops/backup.sh` | nightly, 01:30 UTC (`mhai-backup.timer`) | `pg_dump -Fc` of `mhai` and the roles (no passwords) from one snapshot, with every table's row count; each stream encrypted with `age` as it is written; `SHA256SUMS`; 7 daily + the newest of 4 ISO weeks kept; offsite copy if configured; `/var/lib/mhai-ops/backup.status` |
+| `ops/restore-test.sh` | weekly, by the operator | the newest backup into a throwaway Postgres (internal network, removed after): checksums, decrypt, `pg_restore --exit-on-error`, every row count equal to the backup's, the goose version equal, `core migrate status`; prints PASS or FAIL |
+| `ops/healthcheck.sh` | every 5 minutes (`mhai-healthcheck.timer`) | containers running and not unhealthy (`postgres`, `nats`, `core`, plus `pipeline` and `egress-proxy` when their profiles are on), core's `readyz`, disk free (≥ 15%), last backup ok and < 26 h old, last restore test passed < 8 days ago; one alert per change of failures (repeated hourly), one "recovered" |
+
+**What is backed up.** The `mhai` database, which holds everything that
+matters. Not the NATS JetStream store: its KV buckets live minutes to an
+hour, `JOBS` is the work queue of questions in flight (each fails at its
+10-minute deadline anyway), and `DEAD` keeps dead-letter ids for 30 days
+for diagnosis; core recreates the streams and buckets at start. Losing it
+loses in-flight questions and the revoked-token denylist until those tokens
+expire. Not the signing keys (`mhai-backend-corekeys`): a new key signs
+everyone out once, nothing more. Not `.env` and `secrets/`: keep their
+values in the password manager.
+
+### What the operator provides
+
+All in `/etc/mhai-ops/` (root, mode 700). Never commit or paste any of them.
+
+1. **The backup key pair**, made on the operator's own machine, never on
+   the host: `age-keygen -o mhai-backup-key.txt`, store the file in the
+   password manager, then delete it locally. Put **only the public key**
+   (the `age1...` line `age-keygen` prints as "Public key") in
+   `/etc/mhai-ops/backup-recipients.txt`. A second line can hold a second
+   person's public key. The scripts refuse a private key there. Lose the
+   private key and the backups can't be read.
+2. **The alert webhook URL** (optional, off when missing), one line in
+   `/etc/mhai-ops/alert-webhook-url`, mode 600: a Slack or Mattermost
+   incoming webhook, an email relay that takes `{"text": ...}`, or
+   `https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>`.
+   Alerts carry check names and numbers only, never patient data.
+3. **The offsite bucket** (optional, off by default),
+   `/etc/mhai-ops/offsite.env`, mode 600: `OFFSITE_ENDPOINT`,
+   `OFFSITE_BUCKET`, `OFFSITE_PREFIX`, `OFFSITE_REGION`,
+   `OFFSITE_ACCESS_KEY_ID`, `OFFSITE_SECRET_ACCESS_KEY` (`KEY=value` lines,
+   no quotes). Any S3-compatible store; the copy runs in
+   `rclone/rclone`. Give the key write access to that prefix only (no
+   delete), and set a lifecycle rule on the bucket (e.g. expire after 35
+   days): the script doesn't rotate offsite. The files are already
+   encrypted.
+
+### Switch it on (once)
+
+```bash
+sudo apt-get install -y age
+sudo install -d -m 700 /etc/mhai-ops
+sudo nano /etc/mhai-ops/backup-recipients.txt     # the age1... public key
+sudo nano /etc/mhai-ops/alert-webhook-url         # optional; then: sudo chmod 600 it
+sudo bash deploy/ops/install-ops.sh               # from a copy of deploy/ at the deployed release
+sudo systemctl start mhai-backup.service          # the first backup now
+sudo journalctl -u mhai-backup -n 20
+```
+
+`install-ops.sh` copies the scripts to `/usr/local/lib/mhai-ops/`, writes
+`/etc/mhai-ops/ops.env` from `ops/ops.env.example` once (set `HOST_LABEL`
+there), and enables the two timers. Run it again after a release changes
+`deploy/ops/`. `--uninstall` turns the timers off and keeps the backups.
+
+### Weekly: the restore test
+
+The private key is needed, so the operator runs it, from the password
+manager on standard input (kept in memory, never written or printed):
+
+```bash
+<password manager CLI> | sudo /usr/local/lib/mhai-ops/restore-test.sh --identity-stdin
+# or paste it at the hidden prompt:
+sudo /usr/local/lib/mhai-ops/restore-test.sh --identity-stdin
+```
+
+It ends with `PASS: backup <name> restored and checked`, or `FAIL: <why>`;
+either way it is in `/var/lib/mhai-ops/restore.status`, and the health
+check alerts if no test has passed for 8 days. It needs about 512 MiB for a
+few minutes; with the pilot pipeline running, check `free -m` first. To run
+it on another machine instead, copy one backup directory there and use
+`--identity <file> --backup <dir>`, and set `RESTORE_MAX_AGE_DAYS=0` on the
+host.
+
+### Restoring for real
+
+Stop core (and the pipeline), restore into the running Postgres, start
+again. The key is pasted into a shell variable, never a file:
+
+```bash
+sudo -i                                   # the backups are root's
+read -rs K                                # paste the AGE-SECRET-KEY-... line (hidden), then Enter
+cd /srv/mhai-backend && docker compose stop core pipeline
+B=/var/backups/mhai/<backup>
+age -d -i <(printf '%s\n' "$K") $B/globals.sql.age | docker compose exec -T postgres psql -U pgadmin -d postgres
+age -d -i <(printf '%s\n' "$K") $B/mhai.dump.age \
+  | docker compose exec -T postgres pg_restore -U pgadmin -d mhai --clean --if-exists --exit-on-error
+unset K
+docker compose up -d core                 # core-migrate resets the logins' passwords from .env
+```
+
+"Role already exists" errors from the first command are expected. Run the
+restore test on that backup first if there is time.
+
+### When an alert comes
+
+`sudo journalctl -u mhai-healthcheck -n 50` names each failed check.
+`sudo /usr/local/lib/mhai-ops/healthcheck.sh` runs it now. Backup failures:
+`sudo journalctl -u mhai-backup -n 50` and
+`sudo cat /var/lib/mhai-ops/backup.status`.
+
 ## Cloud models (off by default)
 
 A hospital a platform admin has opted in can have its clinical answers
@@ -433,12 +547,16 @@ CPU, weights baked into the image or mounted read-only with
 `HF_HUB_OFFLINE=1`: the pipeline has no route to Hugging Face), the
 provider key and its zero-data-retention reference (TODO H1, H5).
 
-1. **Provision.** Enable the pipeline in `compose.yml` as its comment block
-   describes (its own NKey, database login, trusted keys, `backend` only),
+On the demo host, `pilot/enable-pilot.sh` does steps 1 to 3 for one
+hospital (`pilot/README.md`). By hand:
+
+1. **Provision.** Start the pipeline (profile `pilot`) with its own NKey,
+   database login and trusted keys, `backend` only, as `compose.yml` shows,
    and copy `egress-proxy/` to `/srv/mhai-backend/egress-proxy/` (the deploy
    workflow copies only `compose.yml` and `nats/nats.conf`). Create
    `egress-proxy/allowed-hosts` from `allowed-hosts.example` with the one
-   provider's host (`api.anthropic.com`, `api.openai.com` or `api.x.ai`),
+   provider's host (`api.anthropic.com`, `api.openai.com`, `api.x.ai` or,
+   for Gemini, `generativelanguage.googleapis.com`),
    mode 0644. Start the proxy: `docker compose --profile cloud up -d
    egress-proxy`.
 2. **The key file.** Write the key to `secrets/<provider>-api-key` from a
@@ -453,9 +571,12 @@ provider key and its zero-data-retention reference (TODO H1, H5).
    and `INTELLIGENCE_CLOUD_<PROVIDER>_ZDR_REF` (`DEMO-SYNTHETIC` only with
    `APP_ENV=demo`, logged as a warning; production refuses it). Set
    `CORE_CLOUD_PROVIDERS=<provider>` on core. Never set any `OPENAI_*`,
-   `ANTHROPIC_*`, `AZURE_OPENAI_*` or `XAI_*` variable: the worker refuses to
-   start. The image must carry a CA bundle at OpenSSL's paths; the worker
-   refuses to start without one.
+   `ANTHROPIC_*`, `AZURE_OPENAI_*`, `XAI_*` or `GEMINI_*` variable: the worker
+   refuses to start. For Gemini also set
+   `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified` once the check under "Gemini:
+   paid tier only" is done; until then the worker **refuses to start**
+   (demo included). The image must carry a CA bundle at OpenSSL's paths; the
+   worker refuses to start without one.
 3. **Switch the demo hospital on:** `docker compose --profile tools run --rm
    core-cli hospitals model-policy set <hospital id or short code> --provider
    <provider> --agreement-ref DEMO-SYNTHETIC [--budget <tokens>]`, or the
@@ -481,6 +602,30 @@ provider key and its zero-data-retention reference (TODO H1, H5).
   batch) and to this host's egress address, where the provider offers it.
 - The zero-data-retention terms are signed and their reference is the
   `ZDR_REF` setting.
+
+### Gemini: paid tier only
+
+Google's Gemini API terms differ by tier (re-read them before switch-on).
+On the **free tier**, Google may use the
+prompts and replies to improve its products, and people may review them.
+On the **paid tier** (a Google Cloud project with **billing enabled**), it
+does not; it keeps them for a limited time for abuse monitoring only. So:
+
+- Create the key in a Google Cloud project used only by this deployment,
+  with a **billing account linked and enabled**, never in a free-tier
+  project. In Google AI Studio the key's project must show the paid tier.
+- Check it, record the check (who, when, the project) as the agreement
+  reference (`INTELLIGENCE_CLOUD_GEMINI_ZDR_REF`, the `AGR-`/`DPA-` code),
+  and only then set `INTELLIGENCE_CLOUD_GEMINI_PAID_TIER=verified`. Unset or
+  `unverified`, the worker **refuses to start** with gemini enabled, in
+  production and in demo alike (the pilot runs on demo, with a real
+  hospital). Only `APP_ENV=development` starts without it, with a warning;
+  any other value is refused everywhere.
+- Re-check after any billing change: a project whose billing lapses goes
+  back to free-tier terms.
+- Gemini has no per-reply retention header (xAI's
+  `x-zero-data-retention`), so this project check is the only control on
+  retention. Set the project's own spend cap too.
 
 ### Rotating a key (every 90 days, and at once on suspicion)
 
@@ -510,7 +655,9 @@ provider key and its zero-data-retention reference (TODO H1, H5).
   takes `NATS_TLS_*` (Plan 3), and `nats/nats.conf` documents the server's
   `tls {}` block (`verify`, `handshake_first: 300ms`, the fallback still
   TLS-only); turning it on needs certificates on the instance. Required
-  before any intelligence worker runs off this host.
+  before any intelligence worker runs off this host. The pilot pipeline
+  runs on this host with `INTELLIGENCE_SINGLE_HOST=on`, which the worker
+  accepts only for the Docker service names `nats` and `postgres`.
 - **No JetStream encryption at rest** on the demo (dev compose has it,
   `NATS_JS_KEY`): turning it on needs the store converted or recreated.
 - **NATS is on a non-internal network** (`edge`), because Docker publishes
@@ -521,9 +668,12 @@ provider key and its zero-data-retention reference (TODO H1, H5).
   on its second run: `EnsureLogin` sends `ALTER ROLE ... NOBYPASSRLS
   NOREPLICATION`, which only a role holding those attributes may send. Fix
   `EnsureLogin` first, then switch.
-- **Single instance, no backups.** The database volume is on the instance's
-  disk. Take `docker compose exec postgres pg_dump -U pgadmin mhai` before
-  anything risky.
+- **Single instance.** The database volume is on the instance's disk.
+  Backups and alerts are opt-in ("Operations": `ops/install-ops.sh`), and
+  until they're on there are none; the backups stay on the same disk unless
+  the offsite bucket is set. Run `sudo systemctl start mhai-backup.service`
+  (or, before install, `docker compose exec postgres pg_dump -U pgadmin mhai`)
+  before anything risky.
 - **The gateway permissions are copied** from `services/nats/nats.conf` into
   `nats/nats.conf`; change both together.
 - **Config changes in `compose.yml` and `nats/nats.conf` reach the instance

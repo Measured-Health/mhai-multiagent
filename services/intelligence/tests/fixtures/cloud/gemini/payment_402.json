@@ -1,0 +1,13 @@
+{
+  "status": 402,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "error": {
+      "code": 402,
+      "message": "Synthetic prepay credit depleted",
+      "status": "FAILED_PRECONDITION"
+    }
+  }
+}

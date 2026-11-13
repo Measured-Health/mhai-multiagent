@@ -1,0 +1,14 @@
+{
+  "status": 429,
+  "headers": {
+    "content-type": "application/json",
+    "retry-after": "1"
+  },
+  "body": {
+    "error": {
+      "code": 429,
+      "message": "Synthetic quota exceeded",
+      "status": "RESOURCE_EXHAUSTED"
+    }
+  }
+}

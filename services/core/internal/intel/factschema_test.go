@@ -210,7 +210,7 @@ func TestQueryCompletedEgressAndOutcome(t *testing.T) {
 		}
 	}
 	refuse := []map[string]any{
-		base("egress", "gemini"), base("egress", "OpenAI"), base("egress", ""), base("egress", float64(1)),
+		base("egress", "mistral"), base("egress", "Gemini"), base("egress", "OpenAI"), base("egress", ""), base("egress", float64(1)),
 		base("egress", nil), base("egress", "sent the note to anthropic"), base("egress", []any{"openai"}),
 		base("cloud_outcome", "nope"), base("cloud_outcome", "OK"), base("cloud_outcome", float64(0)),
 		base("cloud_outcome", nil), base("cloud_outcome", "timeout: Adaeze Okafor"), base("cloud_outcome", map[string]any{}),
@@ -228,7 +228,7 @@ func TestQueryCompletedEgressAndOutcome(t *testing.T) {
 	if !slices.Equal(config.CloudOutcomes, outcomes) {
 		t.Errorf("config.CloudOutcomes %v", config.CloudOutcomes)
 	}
-	if !slices.Equal(config.EgressValues(), []string{"none", "anthropic", "openai", "xai"}) {
+	if !slices.Equal(config.EgressValues(), []string{"none", "anthropic", "gemini", "openai", "xai"}) {
 		t.Errorf("config.EgressValues %v", config.EgressValues())
 	}
 }

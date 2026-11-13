@@ -1,0 +1,8 @@
+{
+  "status": 301,
+  "headers": {
+    "content-type": "application/json",
+    "location": "https://redirect.invalid/v1beta/openai/chat/completions"
+  },
+  "body": {}
+}

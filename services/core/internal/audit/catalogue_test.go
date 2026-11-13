@@ -451,7 +451,7 @@ func candidates() []any {
 		planned emergency added removed PASS REGENERATE ESCALATE low mid high unauthorized invalid_request succeeded
 		refused failed platform via msg-1 kid-2026 core pipeline.run_query nli 1 42 9007199254740991 0
 		2026-11-03T06:00:00Z 2026-11-03T06:00:00.123+01:00 v1.2
-		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume demo`) {
+		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume demo prevalence month:2026-10-01`) {
 		out = append(out, s)
 	}
 	for _, ty := range audit.AuditTypes {
@@ -470,7 +470,8 @@ func candidates() []any {
 			"flagged": true, "from": "2026-11-01T00:00:00Z", "to": "2026-11-03T00:00:00Z"},
 		map[string]any{"hospital": "P-ABCD12"}, map[string]any{"person": "P-7F3K2"}, map[string]any{"q": "P-ABCD12"},
 		map[string]any{"q": ids[0]}, map[string]any{"type": []any{"P-ABCD12"}},
-		map[string]any{"nli": "v1"}, map[string]any{"nli": "P-ABCD12"})
+		map[string]any{"nli": "v1"}, map[string]any{"nli": "P-ABCD12"},
+		map[string]any{"sex": "female"}, map[string]any{"location": "P-ABCD12"})
 	return out
 }
 

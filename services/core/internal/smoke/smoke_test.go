@@ -946,3 +946,124 @@ func TestSmokeWhatChanged(t *testing.T) {
 	}
 	t.Logf("what changed: a synthetic jump flagged, followed up by a platform admin, seen and refused to an auditor")
 }
+
+// analysisAdminSignIn creates a synthetic hospital admin of code with the
+// CLI and signs in over api.v1.clinical with two-step, as platformSignIn
+// does on the platform audience: an admin must use two-step, so the
+// password step answers mfa_required with an enrolment-only session; then
+// enrolment, a full session proven with a code (the next 30 s step), and
+// the first password change and the terms the CLI's new user owes.
+func analysisAdminSignIn(t *testing.T, nc *nats.Conn, code string) string {
+	t.Helper()
+	email := "smoke-analysis-" + randomHex(t, 6) + "@demo.example.test"
+	first, second := "Smoke-first-"+randomHex(t, 12), "Smoke-second-"+randomHex(t, 12)
+	cli(t, first+"\n", "users", "create", "--email", email, "--name", "Synthetic Smoke Admin", "--roles", "hospital_admin", "--hospital", code)
+	login := func(pw string) string {
+		r := api(t, nc, "POST", "/auth/login", "", map[string]any{"username": email, "password": pw})
+		tok, _ := r.body["mfa_token"].(string)
+		if r.status != http.StatusOK || r.body["mfa_required"] != true || tok == "" {
+			t.Fatalf("admin sign in: %d %s, want the two-step branch", r.status, r.raw)
+		}
+		return tok
+	}
+	r := api(t, nc, "POST", "/auth/mfa/challenge", "", map[string]any{"mfa_token": login(first), "code": ""})
+	limited, _ := r.body["access_token"].(string)
+	if r.status != http.StatusOK || limited == "" {
+		t.Fatalf("admin enrolment session: %d %s", r.status, r.raw)
+	}
+	r = api(t, nc, "POST", "/auth/mfa/enroll", limited, nil)
+	uri, _ := r.body["otpauth_uri"].(string)
+	u, err := url.Parse(uri)
+	if r.status != http.StatusOK || err != nil {
+		t.Fatalf("admin enrol: %d %s", r.status, r.raw)
+	}
+	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(u.Query().Get("secret"))
+	if err != nil || len(secret) == 0 {
+		t.Fatal("admin enrol: no secret")
+	}
+	step := time.Now().Unix() / 30
+	if r := api(t, nc, "POST", "/auth/mfa/verify", limited, map[string]any{"code": totpFor(secret, step)}); r.status != http.StatusNoContent {
+		t.Fatalf("admin mfa verify: %d %s", r.status, r.raw)
+	}
+	r = api(t, nc, "POST", "/auth/mfa/challenge", "", map[string]any{"mfa_token": login(first), "code": totpFor(secret, step+1)})
+	access, _ := r.body["access_token"].(string)
+	if r.status != http.StatusOK || access == "" {
+		t.Fatalf("admin challenge: %d %s", r.status, r.raw)
+	}
+	user, _ := r.body["user"].(map[string]any)
+	if must, _ := user["must_change_password"].(bool); must {
+		if r := api(t, nc, "POST", "/auth/password", access, map[string]any{"current_password": first, "new_password": second}); r.status != http.StatusNoContent {
+			t.Fatalf("admin password: %d %s", r.status, r.raw)
+		}
+	}
+	if r := api(t, nc, "POST", "/auth/terms", access, map[string]any{"version": "2026-10"}); r.status != http.StatusNoContent {
+		t.Fatalf("admin terms: %d %s", r.status, r.raw)
+	}
+	t.Logf("signed in a synthetic hospital admin over api.v1.clinical (two-step)")
+	return access
+}
+
+// TestSmokeAnalysis (analysis plan Task 11): a synthetic demo hospital,
+// seeded with seed-demo and frozen through the job's own function (as
+// mhai_analysis_job, at the database's clock); its two-step admin reads
+// the latest frozen week's prevalence over api.v1.clinical; with the
+// switch lowered, the same read is 404.
+func TestSmokeAnalysis(t *testing.T) {
+	ctx := context.Background()
+	pool := ownerPool(t)
+	const code = "ANZ"
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM hospitals WHERE short_code = $1`, code).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n > 0 {
+		t.Skip("the demo hospital exists on this stack already (seed-demo runs once)")
+	}
+	cli(t, "", "hospitals", "create", "--name", "Synthetic Demo Hospital ANZ", "--short-code", code, "--time-zone", "UTC", "--demo")
+	cli(t, "", "hospitals", "activate", code)
+	cli(t, "", "analysis", "seed-demo", code, "--months", "2")
+	var h string
+	if err := pool.QueryRow(ctx, `SELECT id::text FROM hospitals WHERE short_code = $1`, code).Scan(&h); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`SET LOCAL ROLE mhai_analysis_job`, `SELECT set_config('mhai.analysis.engine', '1', true)`} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `SELECT mhai_analysis_freeze($1::uuid, now())`, h); err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	nc := bffConn(t)
+	access := analysisAdminSignIn(t, nc, code)
+	r := api(t, nc, "GET", "/analysis/filters", access, nil)
+	periods, _ := r.body["periods"].(map[string]any)
+	weeks, _ := periods["week"].([]any)
+	if r.status != http.StatusOK || len(weeks) == 0 {
+		t.Fatalf("filters: %d %s", r.status, r.raw)
+	}
+	path := fmt.Sprintf("/analysis/prevalence?period=week&start=%s", weeks[len(weeks)-1])
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		r = api(t, nc, "GET", path, access, nil)
+		if r.status != http.StatusServiceUnavailable || r.body["code"] != "not_ready" || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Second) // being computed: the cold budget answered not_ready
+	}
+	if r.status != http.StatusOK || r.body["patients"] == nil {
+		t.Fatalf("prevalence: %d %s", r.status, r.raw)
+	}
+	cli(t, "", "analysis", "switch", "off", code)
+	if r := api(t, nc, "GET", path, access, nil); r.status != http.StatusNotFound {
+		t.Fatalf("with the switch off: %d %s", r.status, r.raw)
+	}
+	t.Logf("analysis: a frozen week's prevalence served to a two-step admin of the demo hospital; 404 with the switch off")
+}

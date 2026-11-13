@@ -356,6 +356,12 @@ func layout[C, S, M any](r *Report[C, S, M]) (*sheet, []*C, []*S, []*M) {
 	setIDs := parts("by_setting", DimSetting, r.BySetting)
 	locIDs := parts("by_location", DimLocation, r.ByLocation)
 	parts("by_specialty", DimSpecialty, r.BySpecialty)
+	// The source partition: no view lists it, so it has no cell here, but
+	// the context is the sum of its sources' sub-contexts (ruling C10; PR 3
+	// review, condition 2). A body hidden whole lists nothing.
+	if r.Context.Filters[DimSource] == "" && len(r.ByAge) > 0 {
+		l.sh.parts[DimSource] = append([]string(nil), r.Sources...)
+	}
 	for _, s := range Settings {
 		var in []int
 		for i := range r.ByLocation {

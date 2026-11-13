@@ -222,9 +222,15 @@ type ClinicalResultOut struct {
 
 // GeneratedBy is ClinicalResultOut.generated_by: the route that drafted the
 // answer, and the cloud provider when it was a cloud model.
+//
+// Provider is null on a local answer, and on a cloud answer from a provider
+// openapi 1.x's enum doesn't name (gemini; config.EnumV1Provider).
+// ProviderCode is the cloud provider, any of config.CloudProviderNames, or
+// null on a local answer (added in 1.16.0).
 type GeneratedBy struct {
-	Route    string  `json:"route"`    // "local" or "cloud"
-	Provider *string `json:"provider"` // null on a local answer
+	Route        string  `json:"route"`         // "local" or "cloud"
+	Provider     *string `json:"provider"`      // null on a local answer
+	ProviderCode *string `json:"provider_code"` // null on a local answer
 }
 
 // generatedBy reads where the answer was drafted from the decision's own
@@ -246,7 +252,7 @@ func generatedBy(modelVersions map[string]string) *GeneratedBy {
 		if !ok || !slices.Contains(config.CloudProviderNames, provider) {
 			return nil
 		}
-		return &GeneratedBy{Route: "cloud", Provider: &provider}
+		return &GeneratedBy{Route: "cloud", Provider: config.EnumV1Provider(&provider), ProviderCode: &provider}
 	}
 	return nil
 }

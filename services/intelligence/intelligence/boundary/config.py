@@ -7,6 +7,13 @@ password in the URL, no TLS) are on only when development is named.
 Errors name variables, never their values: a NATS_URL carries a password in
 development.
 
+INTELLIGENCE_SINGLE_HOST=on is the one transport exception outside
+development: NATS (nats://) and Postgres (sslmode=disable) without TLS, only
+to single-label Docker service names on the worker's own host, for the
+pilot on the demo host (deploy/pilot/README.md). NKeys, file passwords and
+every other production rule stay; TLS is required again before any worker
+runs off that host.
+
 The pinned models (plan Task 23, design section 7.4). The pipeline verifies the
 roles it needs from the model store before it is ready:
 
@@ -45,6 +52,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -133,6 +141,49 @@ def is_demo(environ: Mapping[str, str] | None = None) -> bool:
     return env.get("APP_ENV", "production").strip().lower() == "demo"
 
 
+SINGLE_HOST_VAR = "INTELLIGENCE_SINGLE_HOST"
+# A Docker service name on the host's own network: one DNS label, no dot,
+# so it can't name another machine. Not localhost (inside a container that
+# is the container itself) and not an address.
+_SERVICE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}")
+
+
+def is_service_name(host: str | None) -> bool:
+    """True for a single-label Docker service name (see _SERVICE_NAME)."""
+    return bool(host) and host != "localhost" and _SERVICE_NAME.fullmatch(host or "") is not None
+
+
+def _single_host(env: Mapping[str, str], development: bool, errs: list[str]) -> bool:
+    """INTELLIGENCE_SINGLE_HOST: "on", or unset/empty for off. With it, outside
+    development, NATS and Postgres may run without TLS, but only to Docker
+    service names on this host (deploy/pilot/README.md). Nothing else
+    changes: NKeys, file passwords and every other production rule stay."""
+    raw = env.get(SINGLE_HOST_VAR, "").strip()
+    if raw == "":
+        return False
+    if raw != "on":
+        errs.append(f"{SINGLE_HOST_VAR} must be on, or unset")
+        return False
+    return not development
+
+
+def check_single_host_nats(raw: str) -> list[str]:
+    """Every server is nats://<service name>[:port]: plaintext on the Docker
+    network only."""
+    for part in raw.split(","):
+        try:
+            u = urlsplit(part.strip())
+            host = u.hostname
+        except ValueError:
+            return ["NATS_URL is invalid"]
+        if u.scheme != "nats" or not is_service_name(host):
+            return [
+                f"NATS_URL must be nats://<docker service name> with {SINGLE_HOST_VAR}=on "
+                "(no dot, no address, not localhost)"
+            ]
+    return []
+
+
 def is_placeholder(value: str) -> bool:
     return any(p in value.lower() for p in _PLACEHOLDERS)
 
@@ -203,6 +254,9 @@ class WorkerSettings:
     # False (production) unless from_env read APP_ENV=development: TLS with
     # a handshake first is the default.
     development: bool = False
+    # INTELLIGENCE_SINGLE_HOST=on (never with development): NATS and Postgres
+    # without TLS, to Docker service names on this host only.
+    single_host: bool = False
     # The pipeline's models: orchestrator (default) or stub (development only).
     model_client: str = "orchestrator"
     # The approve_correction job's learning client: trust_buffer (default)
@@ -235,6 +289,7 @@ class WorkerSettings:
 
         development = is_development(env)
         errs: list[str] = []
+        single_host = _single_host(env, development, errs)
         svc = get("INTELLIGENCE_SERVICE")
         if service is not None:
             if svc is not None and svc != service:
@@ -252,6 +307,8 @@ class WorkerSettings:
             errs.append("NATS_URL is required")
         else:
             errs.extend(_check_nats_url(url, development))
+            if single_host:
+                errs.extend(check_single_host_nats(url))
         keys = get("INTELLIGENCE_TRUSTED_KEYS_PATH")
         if keys is None:
             errs.append("INTELLIGENCE_TRUSTED_KEYS_PATH is required")
@@ -265,7 +322,7 @@ class WorkerSettings:
             # NATS carries access tokens since spec §17: TLS with verify (a
             # client certificate, as core's ValidateServe) and NKeys
             # everywhere but development; unset APP_ENV fails closed.
-            if not all(tls_set):
+            if not all(tls_set) and not single_host:
                 errs.append(f"{tls_names} are required outside development")
             if nkey is None:
                 errs.append("NATS_NKEY_SEED_PATH is required outside development")
@@ -286,7 +343,9 @@ class WorkerSettings:
         if db is not None and svc != "pipeline":
             errs.append("INTELLIGENCE_DB_URL is for the pipeline service only")
         elif db is not None:
-            db_user, db_password = _db_credentials(env, db, development, errs)
+            db_user, db_password = _db_credentials(
+                env, db, development, errs, single_host=single_host
+            )
         elif any(get(n) for n in _DB_CREDENTIAL_VARS):
             errs.append(
                 "INTELLIGENCE_DB_USER and INTELLIGENCE_DB_PASSWORD need INTELLIGENCE_DB_URL"
@@ -311,6 +370,11 @@ class WorkerSettings:
             errs.append(f"{PROVIDERS_VAR} is for the pipeline service only")
         if errs:
             raise ConfigError("; ".join(errs))
+        if single_host:
+            log.warning(
+                "%s=on: NATS and Postgres without TLS, to Docker service names on this host only",
+                SINGLE_HOST_VAR,
+            )
         assert svc is not None and url is not None and keys is not None
         return cls(
             service=svc,
@@ -326,6 +390,7 @@ class WorkerSettings:
             db_user=db_user,
             db_password=db_password,
             development=development,
+            single_host=single_host,
             model_client=model_client,
             learning_client=learning_client,
             **pinned,
@@ -347,7 +412,12 @@ _DB_CREDENTIAL_VARS = (
 
 
 def _db_credentials(
-    env: Mapping[str, str], raw_url: str, development: bool, errs: list[str]
+    env: Mapping[str, str],
+    raw_url: str,
+    development: bool,
+    errs: list[str],
+    *,
+    single_host: bool = False,
 ) -> tuple[str | None, str | None]:
     """The login and password for the pipeline's database. The password
     comes from a file (production) or the environment, never from the URL
@@ -357,7 +427,21 @@ def _db_credentials(
     except ConfigError as e:
         errs.append(str(e))
         return None, None
-    if not development and dict(url.params).get("sslmode") != "verify-full":
+    sslmode = dict(url.params).get("sslmode")
+    if single_host:
+        # The single-host exception: a Docker service name on this host,
+        # and either no TLS (disable) or verified TLS, never a mode that
+        # looks like TLS but accepts a downgrade or any certificate.
+        if not is_service_name(url.host):
+            errs.append(
+                f"INTELLIGENCE_DB_URL must name a docker service with {SINGLE_HOST_VAR}=on "
+                "(no dot, no address, not localhost)"
+            )
+        if sslmode not in ("disable", "verify-full"):
+            errs.append(
+                f"INTELLIGENCE_DB_URL needs sslmode=disable or verify-full with {SINGLE_HOST_VAR}=on"
+            )
+    elif not development and sslmode != "verify-full":
         # The pipeline's queries carry questions and patient data: outside
         # development the connection is TLS with the server's certificate
         # and name checked, never a downgrade libpq would allow.

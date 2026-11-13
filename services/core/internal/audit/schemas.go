@@ -30,6 +30,13 @@ import (
 // already write, frozen. No action carries free text, a name, an email, a
 // diagnosis or a note.
 
+// The Analysis read's period and filter shapes (codes and opaque ids only).
+var (
+	analysisPeriod      = regexp.MustCompile(`^(week|month|quarter):[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
+	analysisFilterKey   = regexp.MustCompile(`^(condition|age_band|sex|location|setting|specialty|source)$`)
+	analysisFilterValue = regexp.MustCompile(`^([0-9a-f-]{36}|[a-z0-9_+-]{1,40})$`) // ids and codes; never a pid shape
+)
+
 // Check reports whether one payload value fits. Values are as
 // encoding/json decodes them: string, float64, bool, nil, []any,
 // map[string]any.
@@ -366,7 +373,7 @@ func init() {
 	// platform action); the hospital is in the payload. The agreement
 	// reference has the id shape and is absent when none was given.
 	// The reference is present exactly when a provider is (off clears it).
-	provider := OneOf("none", "openai", "anthropic", "xai")
+	provider := OneOf("none", "openai", "anthropic", "xai", "gemini")
 	agreementRef := func(v any) bool {
 		s, ok := v.(string)
 		return ok && agreementRefPattern.MatchString(s) && !pseudonymS.MatchString(s)
@@ -448,6 +455,16 @@ func init() {
 	// A hospital made before hospitals.is_demo, marked as the demo once
 	// (core hospitals mark-demo); the hospital is the row's entity.
 	Register("hospital.marked_demo", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})
+	// Patient Analysis reads (analysis backend design D7; plan Task 10):
+	// the view, the period and the filters' codes and opaque ids, once per
+	// session, filter set and period; and the day a person passes 100
+	// distinct filter sets. Never a count from a body, never free text.
+	Register("analysis.viewed", Schema{Fields: fields(
+		"view", OneOf("prevalence", "affected", "co-occurring", "findings", "quality"),
+		"period", Pattern(analysisPeriod),
+		"filters", StringMap(2, analysisFilterKey, Pattern(analysisFilterValue))),
+		Required: []string{"view", "period", "filters"}})
+	Register("analysis.unusual_querying", Schema{Fields: fields("filter_sets", Int(101, 1e6)), Required: []string{"filter_sets"}})
 	Register("analysis.switch_lowered", Schema{Fields: fields("hospital_id", id, "via", OneOf("cli")),
 		Required: []string{"via"}})
 

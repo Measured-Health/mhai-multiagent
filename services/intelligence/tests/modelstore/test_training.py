@@ -10,6 +10,7 @@ import pytest
 
 from intelligence.modelstore import canonical, fixtures, training
 from intelligence.modelstore.reasons import Refused
+from tests.modelstore.fakes import gguf as g
 
 REPO = Path(__file__).resolve().parents[4]
 REGISTRY = REPO / "models" / "approved-datasets.json"
@@ -526,3 +527,95 @@ def test_negative_zero_is_never_shown(tmp_path: Path) -> None:
     shown = training.report_metrics(training.load(path))
     assert shown == {"a": "0.000000", "b": "0.000000", "c": "0.000000"}
     assert all(not str(v).startswith("-") for v in shown.values())
+
+
+# ---------------------------------------------------------------- roles (own model PR 1)
+
+
+def test_training_roles_are_extract_and_cca() -> None:
+    assert training.ROLES == frozenset({"extract", "cca"})
+
+
+def test_cca_role_accepted(tmp_path: Path) -> None:
+    registry, licences = _committed()
+    run = fixtures.make_run(tmp_path / "cca", "good", 7, role="cca")
+    tm = training.load_run(run)
+    assert training.check(tm, registry, licences).manifest.role == "cca"
+
+
+@pytest.mark.parametrize("role", ["ocr", "nli", "answer"])
+def test_unknown_role_refused(tmp_path: Path, role: str) -> None:
+    registry, licences = _committed()
+    tm = training.load_run(fixtures.make_run(tmp_path / role, "good", 7, role=role))
+    assert _reason(lambda: training.check(tm, registry, licences)) == "role_unknown"
+
+
+@pytest.mark.parametrize(
+    ("version", "ok"),
+    [("2.5.1", True), ("2.5.1+cu121", True), ("4.57.0.dev0", True), ("latest", False), ("", False)],
+)
+def test_package_version_pattern_is_public(version: str, ok: bool) -> None:
+    assert training.is_package_version(version) is ok
+
+
+# ---------------------------------------------------------------- a GGUF in the run (security review)
+
+
+def _gguf_run(tmp_path: Path, role: str, template: object = None, where: str = "chat") -> Path:
+    run = fixtures.make_run(tmp_path / f"{role}-{where}", "good", 7, role=role)
+    (run / "model-q4_k_m.gguf").write_bytes(g.tiny())
+    if where == "chat":
+        (run / "chat_template.json").write_text(json.dumps({"chat_template": template}))
+    elif where == "tokenizer":
+        cfg = json.loads((run / "tokenizer_config.json").read_text())
+        cfg["chat_template"] = template
+        (run / "tokenizer_config.json").write_text(json.dumps(cfg))
+    return run
+
+
+def _gguf_code(run: Path) -> tuple[str, str | None]:
+    tm = training.load_run(run)
+    with pytest.raises(Refused) as exc:
+        training.check_gguf_run(tm, run)
+    return exc.value.reason, exc.value.detail_code
+
+
+def test_gguf_only_for_cca(tmp_path: Path) -> None:
+    assert training.GGUF_ROLES == frozenset({"cca"})
+    run = _gguf_run(tmp_path, "extract", g.TINY_TEMPLATE.decode())
+    assert _gguf_code(run) == ("gguf_not_allowed_for_role", None)
+
+
+@pytest.mark.parametrize("where", ["chat", "tokenizer"])
+def test_cca_gguf_template_matches_the_run(tmp_path: Path, where: str) -> None:
+    run = _gguf_run(tmp_path, "cca", g.TINY_TEMPLATE.decode(), where)
+    training.check_gguf_run(training.load_run(run), run)
+
+
+@pytest.mark.parametrize(
+    ("template", "where", "detail"),
+    [
+        ("{{ other }}", "chat", "differs"),
+        ("{{ other }}", "tokenizer", "differs"),
+        (None, "none", "run_missing"),
+        ([{"name": "default", "template": "x"}], "tokenizer", "run_invalid"),
+        (None, "chat", "run_invalid"),
+    ],
+)
+def test_cca_gguf_template_mismatch_refused(
+    tmp_path: Path, template: object, where: str, detail: str
+) -> None:
+    run = _gguf_run(tmp_path, "cca", template, where)
+    assert _gguf_code(run) == ("gguf_template_mismatch", detail)
+
+
+def test_cca_gguf_without_template_refused(tmp_path: Path) -> None:
+    run = _gguf_run(tmp_path, "cca", g.TINY_TEMPLATE.decode())
+    no_template = g.gguf([g.tiny_kvs()[0], g.tiny_kvs()[2]], g.TINY_INFOS, g.TINY_DATA)
+    (run / "model-q4_k_m.gguf").write_bytes(no_template)
+    assert _gguf_code(run) == ("gguf_template_mismatch", "gguf_missing")
+
+
+def test_run_without_gguf_needs_no_template(tmp_path: Path) -> None:
+    run = fixtures.make_run(tmp_path / "plain", "good", 7, role="cca")
+    training.check_gguf_run(training.load_run(run), run)

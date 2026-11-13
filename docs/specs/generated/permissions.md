@@ -14,6 +14,8 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 
 | Method | Path | Access | Roles | Audience | Two-step session | Step-up | Write |
 |---|---|---|---|---|---|---|---|
+| GET | `/api/v1/analysis/filters` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
+| GET | `/api/v1/analysis/{view}` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
 | POST | `/api/v1/auth/login` | public | - | - | no | no | no |
 | POST | `/api/v1/auth/logout` | enrolment | any | both | no | no | no |
 | POST | `/api/v1/auth/mfa/challenge` | public | - | - | no | no | no |

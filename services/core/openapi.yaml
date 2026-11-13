@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.16.0"
+  version: "1.18.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -758,6 +758,92 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /analysis/filters:
+    get:
+      operationId: getAnalysisFilters
+      summary: The answerable frozen periods, and one period's filter lists (Patient Analysis).
+      description: >
+        Hospital admins and analysts, with two-step, while the hospital's analysis switch is on
+        (otherwise 404 not_found, before anything else is read). Without `period` and `start`, the
+        latest frozen month's lists; with them, that period's. A condition is listed only with 5 or
+        more patients in the period, plus every "Not standardised" entry. A period's lists are stored
+        when first asked for and never change. Added in 1.17.0.
+      tags: [analysis]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, invalid_range, rate_limited, not_ready, unavailable, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/AnalysisPeriod"
+        - $ref: "#/components/parameters/AnalysisStart"
+      responses:
+        "200":
+          description: The periods and lists.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalysisFilters" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /analysis/{view}:
+    get:
+      operationId: getAnalysisView
+      summary: One Analysis view of one frozen period (Patient Analysis).
+      description: >
+        Hospital admins and analysts, with two-step, while the hospital's analysis switch is on
+        (otherwise 404 not_found). One finished, frozen period: `period` and `start`, or `from` and
+        `to` that span exactly one period (anything else is 422 invalid_range). A period that has
+        ended but isn't frozen is 503 not_ready, as is a body that couldn't be computed within the
+        cold budget (retry: it is being computed). At most two filters (422 too_many_filters); a
+        location and a setting together are refused. A condition, location or source that isn't in the
+        period's filter lists is 422 validation_failed (so is a specialty). A person may have at most 100 distinct
+        contexts computed cold per period, counting the child periods and filter parents a request needs, and
+        one request at most 32 (429 rate_limited past either; a history point past them is hidden whole). Every number is guarded under the small-group
+        rule and served from the stored body unchanged; `history` lists up to 7 earlier periods of
+        the level, each copied from that period's own stored body. Reads are recorded once per
+        session, filter set and period. Added in 1.17.0.
+      tags: [analysis]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, invalid_range, too_many_filters, rate_limited, not_ready, unavailable, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - name: view
+          in: path
+          required: true
+          schema: { type: string, enum: [prevalence, affected, co-occurring, findings, quality] }
+        - $ref: "#/components/parameters/AnalysisPeriod"
+        - $ref: "#/components/parameters/AnalysisStart"
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: condition, in: query, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - { name: age_band, in: query, schema: { type: string, enum: ["0-17", "18-39", "40-64", "65-79", "80+"] } }
+        - { name: sex, in: query, schema: { type: string, enum: [female, male, other, not_recorded] } }
+        - { name: location, in: query, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - { name: setting, in: query, schema: { type: string, enum: [admitted, outpatient, emergency] } }
+        - { name: specialty, in: query, schema: { type: string, pattern: "^[a-z][a-z_]{1,39}$" } }
+        - { name: source, in: query, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+      responses:
+        "200":
+          description: The view, its Meta and its history.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalysisView" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
   /platform/audit:
     get:
       operationId: listAuditEvents
@@ -1705,9 +1791,12 @@ paths:
       operationId: getHospitalModelPolicy
       summary: A hospital's cloud model policy and this month's token usage.
       description: |
-        Platform admins and auditors. With no policy the hospital is off
-        (local models): `cloud_provider` and `agreement_ref` null, the
-        default budget, `updated_at` null. `usage` is this month's (UTC)
+        Platform admins and auditors. The hospital is off (local models)
+        exactly when `provider_code` is null. `provider_code` is the source
+        of truth: `cloud_provider` is null for off and also for `gemini`,
+        which its enum can't name. With no policy: `provider_code`,
+        `cloud_provider` and `agreement_ref` null, the default budget,
+        `updated_at` null. `usage` is this month's (UTC)
         token ledger, zeros when nothing was used. An id that is no
         hospital's, or not a canonical uuid, is 404 `not_found`.
       tags: [platform]
@@ -1736,8 +1825,9 @@ paths:
         Platform admins only (an auditor is 403), with a fresh TOTP code
         (`mfa_code`) or an unused backup code (`backup_code`): none is 403
         `mfa_required`, a wrong one 403 `mfa_invalid` (audited).
-        `cloud_provider` is `openai`, `anthropic`, `xai` or null (off: the
-        hospital's questions run on the local models). A provider needs an
+        `cloud_provider` is `openai`, `anthropic`, `xai`, `gemini` (Google
+        Gemini, added in 1.16.0) or null (off: the hospital's questions run on
+        the local models). The reply reports the provider in `provider_code`. A provider needs an
         `agreement_ref`, the reference of the recorded agreement check:
         `AGR-YYYY-NNNN` or `DPA-YYYY-NNNN` (2 to 8 digits after the year),
         or `DEMO-SYNTHETIC` for the synthetic demo. It is a document
@@ -1766,7 +1856,7 @@ paths:
               required: [cloud_provider, monthly_token_budget]
               additionalProperties: false
               properties:
-                cloud_provider: { type: string, enum: [openai, anthropic, xai], nullable: true }
+                cloud_provider: { type: string, enum: [openai, anthropic, xai, gemini], nullable: true }
                 agreement_ref: { type: string, pattern: "^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$", nullable: true }
                 monthly_token_budget: { type: integer, format: int64, minimum: 1, maximum: 1000000000 }
                 mfa_code: { type: string }
@@ -2171,6 +2261,16 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    AnalysisPeriod:
+      name: period
+      in: query
+      description: The period's level (with `start`).
+      schema: { type: string, enum: [week, month, quarter] }
+    AnalysisStart:
+      name: start
+      in: query
+      description: "The period's first day, a hospital day: a week is days 1-7, 8-14, 15-21 or 22 to the month's end."
+      schema: { type: string, format: date }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -2223,6 +2323,8 @@ components:
             - not_tested
             - hospital_removed
             - no_type
+            - too_many_filters
+            - invalid_range
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -2518,14 +2620,25 @@ components:
             this answer and doesn't change when the hospital's model policy changes
             later. Absent when unknown (an answer from an older pipeline, or a cloud
             failure that produced no draft). Added in 1.10.0.
-          required: [route, provider]
+          required: [route, provider, provider_code]
           properties:
             route: { type: string, enum: [local, cloud] }
             provider:
               type: string
               nullable: true
               enum: [anthropic, openai, xai, null]
-              description: The cloud provider; null on a local answer.
+              description: >-
+                The cloud provider; null on a local answer. This enum can't grow in
+                /api/v1 (ADR 0012), so it is also null on a cloud answer from a
+                provider added later (`gemini`): read `provider_code`.
+            provider_code:
+              type: string
+              nullable: true
+              description: >-
+                The cloud provider, as a code: `anthropic`, `gemini` (Google Gemini),
+                `openai` or `xai`; null on a local answer. More codes may be added
+                without a new API version: show an unknown code as it is. Added in
+                1.16.0.
 
     FeedbackIn:
       type: object
@@ -2758,12 +2871,34 @@ components:
         activated_at: { type: string, format: date-time, nullable: true }
     ModelPolicy:
       type: object
-      description: A hospital's cloud model policy (off when `cloud_provider` is null) and this month's token usage.
-      required: [hospital_id, cloud_provider, agreement_ref, monthly_token_budget, updated_at, usage]
+      description: >-
+        A hospital's cloud model policy and this month's token usage. The
+        hospital is off (local models) exactly when `provider_code` is null;
+        read the provider from `provider_code`, never from `cloud_provider`
+        alone, which is also null for a provider its enum can't name
+        (`gemini`).
+      required: [hospital_id, cloud_provider, provider_code, agreement_ref, monthly_token_budget, updated_at, usage]
       additionalProperties: false
       properties:
         hospital_id: { type: string, format: uuid }
-        cloud_provider: { type: string, enum: [openai, anthropic, xai], nullable: true }
+        cloud_provider:
+          type: string
+          enum: [openai, anthropic, xai]
+          nullable: true
+          description: >-
+            The policy's provider when this enum names it. Null does not mean
+            off: it is null when off and also for a provider added later
+            (`gemini`), since a response enum can't grow in /api/v1 (ADR
+            0012). Read `provider_code`.
+        provider_code:
+          type: string
+          nullable: true
+          description: >-
+            The policy's cloud provider, as a code: `anthropic`, `gemini` (Google
+            Gemini), `openai` or `xai`; null exactly when the policy is off (the
+            source of truth for on and off). More codes may be added
+            without a new API version: show an unknown code as it is. Added in
+            1.16.0.
         agreement_ref: { type: string, pattern: "^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$", nullable: true }
         monthly_token_budget: { type: integer, format: int64, minimum: 1, maximum: 1000000000 }
         updated_at: { type: string, format: date-time, nullable: true }
@@ -2904,6 +3039,91 @@ components:
         version: { type: integer, minimum: 1 }
         mfa_code: { type: string }
         backup_code: { type: string }
+    AnalysisFilters:
+      type: object
+      required: [updated_at, periods, conditions, locations, specialties, sources]
+      properties:
+        updated_at: { type: string, format: date-time, nullable: true, description: "When the lists were stored; null when no month is frozen yet." }
+        periods:
+          type: object
+          description: The answerable frozen periods' first days, per level, oldest first.
+          required: [week, month, quarter]
+          properties:
+            week: { type: array, items: { type: string, format: date } }
+            month: { type: array, items: { type: string, format: date } }
+            quarter: { type: array, items: { type: string, format: date } }
+        conditions: { type: array, items: { $ref: "#/components/schemas/AnalysisConditionRef" } }
+        locations:
+          type: array
+          items:
+            type: object
+            required: [id, label, setting]
+            properties:
+              id: { type: string }
+              label: { type: string }
+              setting: { type: string, nullable: true, enum: [admitted, outpatient, emergency, null] }
+        specialties: { type: array, items: { type: string } }
+        sources:
+          type: array
+          items:
+            type: object
+            required: [id, label]
+            properties:
+              id: { type: string }
+              label: { type: string }
+    AnalysisConditionRef:
+      type: object
+      required: [id, name, icd10]
+      properties:
+        id: { type: string }
+        name: { type: string, nullable: true, description: 'null reads "Not standardised".' }
+        icd10: { type: string, nullable: true }
+    AnalysisDrillable:
+      type: object
+      description: A GuardedCount with its drill key; drill is null until the drill-down route exists, and on any count hidden or under 5.
+      required: [value, suppressed, drill]
+      properties:
+        value: { type: integer, minimum: 0, nullable: true }
+        suppressed: { type: boolean }
+        drill: { type: string, nullable: true }
+    AnalysisMinutes:
+      type: object
+      description: "A median in minutes (a whole number or a half); hidden is `{value: null, suppressed: true}`."
+      required: [value, suppressed]
+      properties:
+        value: { type: number, nullable: true }
+        suppressed: { type: boolean }
+    AnalysisHistoryPoint:
+      type: object
+      required: [start, cases, new, patients]
+      properties:
+        start: { type: string, format: date }
+        cases: { $ref: "#/components/schemas/GuardedCount" }
+        new: { $ref: "#/components/schemas/GuardedCount" }
+        patients: { $ref: "#/components/schemas/GuardedCount" }
+    AnalysisView:
+      type: object
+      description: >
+        Meta (updated_at, from, to, bucket, patients, period) and history, then the view's own fields
+        (frontend requirements §10): prevalence {total, by_condition, series}; affected {by_age,
+        by_sex, by_setting, by_location, by_specialty}; co-occurring {pairs}; findings {findings,
+        alerts}; quality {by_condition}. A view hidden whole has every number hidden and every list
+        empty.
+      required: [updated_at, from, to, bucket, patients, period, history]
+      properties:
+        updated_at: { type: string, format: date-time }
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        bucket: { type: string, enum: [week, month] }
+        patients: { $ref: "#/components/schemas/GuardedCount" }
+        period:
+          type: object
+          required: [level, start]
+          properties:
+            level: { type: string, enum: [week, month, quarter] }
+            start: { type: string, format: date }
+        history: { type: array, maxItems: 7, items: { $ref: "#/components/schemas/AnalysisHistoryPoint" } }
+      additionalProperties: true
     GuardedCount:
       type: object
       description: "A count under the small-group rule. Never 1 to 4; hidden is `{value: null, suppressed: true}`."

@@ -412,7 +412,7 @@ def test_shape_needs_exact_pointers() -> None:
     with pytest.raises(ValueError):
         scan.Shape(frozenset({"/a"}), frozenset({"/a"}))  # exactly two
     with pytest.raises(ValueError):
-        scan.shape_for("gemini", {})
+        scan.shape_for("mistral", {})
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
@@ -438,7 +438,7 @@ def test_hand_built_shape_without_fixed_values_refused(provider: str) -> None:
     with pytest.raises(ValueError):
         scan.Shape(frozenset(texts[1:3]), made.allowed_paths, made.fixed_values)
     # The same declaration as shape_for gives is accepted.
-    again = scan.Shape(made.patient_paths, made.allowed_paths, made.fixed_values)
+    again = scan.Shape(made.patient_paths, made.allowed_paths, made.fixed_values, provider)
     assert again == made
     assert scan.scan_body(body(provider, blocks("fever")), _ids(), again) is None
 
@@ -501,7 +501,12 @@ def test_scan_reports_rule_not_text(caplog: pytest.LogCaptureFixture) -> None:
 def test_patient_paths_are_exact_for_each_layout(provider: str, n_chunks: int) -> None:
     # R-1: the patterns see blocks 0 and 1 only, whatever the chunk count.
     shp = shape(provider)
-    prefix = {"anthropic": "/messages/0", "openai": "/input/0", "xai": "/messages/1"}[provider]
+    prefix = {
+        "anthropic": "/messages/0",
+        "gemini": "/messages/1",
+        "openai": "/input/0",
+        "xai": "/messages/1",
+    }[provider]
     assert shp.patient_paths == {f"{prefix}/content/0/text", f"{prefix}/content/1/text"}
     for i in range(7):
         assert f"{prefix}/content/{i}/text" in shp.allowed_paths
@@ -1043,3 +1048,22 @@ def test_cyrillic_and_greek_names_match_in_any_case(recorded: str, written: str)
     # Case-fold first, then the skeleton, so a name written in Cyrillic
     # or Greek matches in either case.
     assert _scan(f"{written} has chest pain", _ids({"name": recorded})) == "known_identifier"
+
+
+def test_shared_layout_needs_its_provider() -> None:
+    """gemini and xai both lay a request out as Chat Completions: a Shape
+    built by hand from that layout must name its provider (the scan hook
+    takes the header list from it), and must fit the layout it names."""
+    made = shape("gemini")
+    with pytest.raises(ValueError):
+        scan.Shape(made.patient_paths, made.allowed_paths, made.fixed_values)
+    with pytest.raises(ValueError):
+        scan.Shape(made.patient_paths, made.allowed_paths, made.fixed_values, "openai")
+    with pytest.raises(ValueError):
+        scan.Shape(made.patient_paths, made.allowed_paths, made.fixed_values, "mistral")
+    assert scan.provider_of(made) == "gemini"
+    assert scan.provider_of(shape("xai")) == "xai"
+    assert made != scan.Shape(made.patient_paths, made.allowed_paths, made.fixed_values, "xai")
+    # A layout only one provider has still needs no name.
+    openai = shape("openai")
+    assert scan.Shape(openai.patient_paths, openai.allowed_paths, openai.fixed_values) == openai
