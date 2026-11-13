@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/fhir"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/stub"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrtypes"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/seal"
@@ -66,7 +67,7 @@ func TestStubOnlyInDevelopment(t *testing.T) {
 		t.Fatal("stub registered outside development")
 	}
 	if got := prod.Offered([]string{"stub", "fhir_r4"}); len(got) != 0 {
-		t.Fatalf("offered outside development: %v", got)
+		t.Fatalf("offered outside development: %v (fhir_r4 not registered here)", got)
 	}
 	dev := connector.NewRegistry(true, stub.New())
 	if _, ok := dev.Get("stub"); !ok {
@@ -77,14 +78,19 @@ func TestStubOnlyInDevelopment(t *testing.T) {
 	}
 	got := dev.Offered([]string{"stub", "fhir_r4", "hl7v2_feed"})
 	if len(got) != 1 || got[0].ID != "stub" {
-		t.Fatalf("offered %v, want the stub only (fhir_r4 not built yet)", got)
+		t.Fatalf("offered %v, want the stub only (the only one registered)", got)
+	}
+	// FHIR R4 is built (PR 6): registered in production too.
+	both := connector.NewRegistry(false, stub.New(), fhir.New(nil))
+	if got := both.Offered([]string{"stub", "fhir_r4"}); len(got) != 1 || got[0].ID != "fhir_r4" {
+		t.Fatalf("production offers %v, want fhir_r4 only", got)
 	}
 }
 
 // Every registered connector declares exactly its row of the shared table
 // (gokit/emrtypes), so core's fields and the emr service's agree.
 func TestConnectorsDeclareTheSharedTable(t *testing.T) {
-	r := connector.NewRegistry(true, stub.New())
+	r := connector.NewRegistry(true, stub.New(), fhir.New(nil))
 	for _, id := range emrtypes.Built(true) {
 		c, ok := r.Get(id)
 		if !ok {

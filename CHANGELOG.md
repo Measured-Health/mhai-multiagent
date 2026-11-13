@@ -27,6 +27,22 @@ All notable changes to this project are documented here. The format follows
   pids to platform admins and auditors, each reveal audited
   (`audit.patients_viewed`); the entry's detail answers `patients: {count}`.
   New problem codes `too_small` and `level_not_supported` (422).
+- EMR integration, PR 6 (FHIR R4; off by default). Migration **00026**
+  (after Gemini's 00024 and Analysis PR 4's 00025): `emr.sync_state`,
+  `emr.raw_records.backfill`, and `emr_platform_health()` reporting a
+  connection that is on and silent for three poll intervals as `errors`.
+  The `fhir_r4` connector is built: SMART Backend Services sign-in (RS384
+  or ES384, credential origin only), a read-only test with capability checks, and polling by `_lastUpdated`
+  with a per-type cursor, page and record limits, references read from the
+  same server only, and hostile-response refusals. It declares an optional
+  `mrn_namespace` setting. The scheduler adds advisory locks, backoff and
+  `Retry-After`, backfill flags, daily reconciliation, a stop after three
+  sign-in refusals, and `sync_now`. Also: `gokit/recordlink`, the synthetic
+  FHIR server (`emr synth-fhir`, development only), and
+  `services/emr/scripts/e2e-fhir.sh`, which runs the sync end to end
+  through egress-emr. egress-emr gains a development-only
+  `EGRESS_EMR_DEV_EXEMPT`, and the emr service a development-only
+  `EMR_DEV_CA_FILE`.
 - Cloud model providers: Google Gemini as a fourth provider (OpenAPI 1.16.0,
   migration 00024; off by default). The worker's `gemini_adapter` calls
   Google's OpenAI-compatible endpoint

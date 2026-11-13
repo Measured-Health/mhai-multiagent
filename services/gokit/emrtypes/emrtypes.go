@@ -74,12 +74,16 @@ var recordLink = Field{Key: "record_link", Label: "Record link", Kind: KindText,
 
 // Types is the table (design §4.1). hl7v2_feed is not built and not here.
 var Types = []TypeInfo{
+	// fhir_r4: built (EMR PR 6). mrn_namespace is the identifier system
+	// whose value is the hospital's MRN (design §10.2): the one identifier
+	// kept; without it no MRN is stored.
 	{ID: "fhir_r4", Label: "FHIR R4 server", Summary: "Reads results, vital signs and medications from a FHIR R4 server.",
-		Version: 1, Fields: []Field{
+		Version: 1, built: true, Fields: []Field{
 			{Key: "client_id", Label: "Client id", Kind: KindText, Required: true, Max: 200},
 			{Key: "token_url", Label: "Token address", Kind: KindText, Required: true, Max: 500},
 			{Key: "private_key", Label: "Private key", Kind: KindSecret, Required: true, Max: 4000},
 			{Key: "scope", Label: "Scope", Kind: KindText, Max: 200},
+			{Key: "mrn_namespace", Label: "MRN identifier system", Kind: KindText, Max: 200},
 			recordLink,
 		}},
 	{ID: "document_archive", Label: "Scanned record archive", Summary: "Sends new scanned records for review.",

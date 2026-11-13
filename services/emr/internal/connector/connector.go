@@ -140,3 +140,49 @@ func Placeholder(v []byte) bool {
 	}
 	return false
 }
+
+// FetchError is a fetch's failure as a closed code (emrtypes.Codes), with
+// how long the source asked us to wait (429 Retry-After; 0 when it named
+// none). Its text is fixed: never a URL, a host or a body.
+type FetchError struct {
+	Code       string
+	RetryAfter time.Duration
+}
+
+func (e *FetchError) Error() string { return "connector: fetch failed: " + e.Code }
+
+// Fail is a FetchError for code; a code outside the closed set reads as
+// unreadable_data.
+func Fail(code string, retryAfter time.Duration) *FetchError {
+	if !emrtypes.IsCode(code) || code == "ok" {
+		code = "unreadable_data"
+	}
+	return &FetchError{Code: code, RetryAfter: retryAfter}
+}
+
+// CodeOf is err's closed code: ok for nil, the FetchError's code, and
+// unreachable for anything else (our own database or the sink: never the
+// source's fault, never sign_in_refused).
+func CodeOf(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	var fe *FetchError
+	if errors.As(err, &fe) {
+		return fe.Code
+	}
+	return "unreachable"
+}
+
+// CatchUp is a connector whose cursor tells whether the last fetch read
+// everything there was (the end of a first sync's backfill, design §7.1).
+type CatchUp interface {
+	CaughtUp(cur Cursor) bool
+}
+
+// Reconciler is a connector that can re-read a window it has already read
+// (the daily reconciliation, design §5.1): Rewind returns cur set to read
+// from since again, without ever moving its high-water mark backward.
+type Reconciler interface {
+	Rewind(cur Cursor, since time.Time) Cursor
+}

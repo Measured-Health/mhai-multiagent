@@ -21,6 +21,14 @@
 //	                           the proxy off them. Added at start: the
 //	                           proxy's own networks, the gateways in its
 //	                           routing table, and Docker's default bridge
+//	EGRESS_EMR_DEV_EXEMPT      development only (refused elsewhere): one
+//	                           RFC 1918 network of at most a /24, taken out
+//	                           of the proxy's own networks so the synthetic
+//	                           FHIR server beside it can be reached by a
+//	                           connection that declares it (the end-to-end
+//	                           run, services/emr/scripts/e2e-fhir.sh).
+//	                           Gateways and the configured internal
+//	                           networks are never exempt
 package main
 
 import (
@@ -56,6 +64,7 @@ func main() {
 type settings struct {
 	env, listen, allowList, keyPath string
 	internal                        []netip.Prefix
+	devExempt                       netip.Prefix
 }
 
 func readSettings(getenv func(string) string) (settings, error) {
@@ -92,7 +101,37 @@ func readSettings(getenv func(string) string) (settings, error) {
 	if len(s.internal) == 0 && s.env != "development" {
 		errs = append(errs, errors.New("EGRESS_EMR_INTERNAL_CIDRS is required outside development: the backend subnet and the host's own addresses"))
 	}
+	if v := strings.TrimSpace(getenv("EGRESS_EMR_DEV_EXEMPT")); v != "" {
+		p, err := netip.ParsePrefix(v)
+		ok := err == nil && s.env == "development" && p.Addr().Is4() && p.Bits() >= 24 && inAny(p.Addr(), privateV4)
+		for _, in := range s.internal {
+			if ok && in.Overlaps(p) {
+				ok = false
+			}
+		}
+		if !ok {
+			errs = append(errs, errors.New("EGRESS_EMR_DEV_EXEMPT is for development only: one private network of at most a /24, not an internal one"))
+		} else {
+			s.devExempt = p.Masked()
+		}
+	}
 	return s, errors.Join(errs...)
+}
+
+// exemptOwn drops from own the networks inside ex (development's
+// EGRESS_EMR_DEV_EXEMPT); a wider own network stays.
+func exemptOwn(own []netip.Prefix, ex netip.Prefix) []netip.Prefix {
+	if !ex.IsValid() {
+		return own
+	}
+	var out []netip.Prefix
+	for _, p := range own {
+		if p.Bits() >= ex.Bits() && ex.Contains(p.Addr()) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // ownNetworks are the networks the proxy's interfaces are on (emr-proxy,
@@ -174,7 +213,7 @@ func run(getenv func(string) string) error {
 	loader.Reload()
 	go loader.Run(ctx, proxyconf.ReloadEvery, func(ok bool) { log.Info("allow_list", "usable", ok) })
 
-	internal := append(append(s.internal, ownNetworks()...), gateways()...)
+	internal := append(append(s.internal, exemptOwn(ownNetworks(), s.devExempt)...), gateways()...)
 	p := &Proxy{Key: key, List: loader.Current, Internal: internal,
 		Resolver: &net.Resolver{PreferGo: true}, Dialer: &net.Dialer{Timeout: DialTimeout}, Log: log}
 	srv := &http.Server{Addr: s.listen, Handler: p, ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 8 << 10,
@@ -185,7 +224,8 @@ func run(getenv func(string) string) error {
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
-	log.Info("egress-emr listening", "env", s.env, "allow_list_usable", loader.Current() != nil, "internal_networks", len(internal))
+	log.Info("egress-emr listening", "env", s.env, "allow_list_usable", loader.Current() != nil, "internal_networks", len(internal),
+		"dev_exempt", s.devExempt.IsValid())
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return errors.New("egress-emr: cannot listen")
 	}

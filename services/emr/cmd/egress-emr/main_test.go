@@ -61,3 +61,47 @@ func TestGatewaysFromRouteTable(t *testing.T) {
 		t.Errorf("garbage gave %v", g)
 	}
 }
+
+// The end-to-end run's allowance (plan Task 25): EGRESS_EMR_DEV_EXEMPT
+// names the synthetic server's network, which the proxy shares; in
+// development only, it is taken out of the proxy's own networks (so a
+// connection that declares it may reach it). It is an RFC 1918 network of
+// at most a /24, never one of the configured internal networks, and never
+// exempts a gateway.
+func TestDevExemptOnlyInDevelopment(t *testing.T) {
+	base := map[string]string{"EGRESS_EMR_ALLOW_LIST": "/a", "EGRESS_EMR_KEY_PATH": "/k", "EGRESS_EMR_ENV": "development",
+		"EGRESS_EMR_INTERNAL_CIDRS": "10.233.0.0/24"}
+	get := func(extra map[string]string) func(string) string {
+		return func(k string) string {
+			if v, ok := extra[k]; ok {
+				return v
+			}
+			return base[k]
+		}
+	}
+	s, err := readSettings(get(map[string]string{"EGRESS_EMR_DEV_EXEMPT": "10.233.5.0/24"}))
+	if err != nil || s.devExempt != netip.MustParsePrefix("10.233.5.0/24") {
+		t.Fatalf("development: %v %v", s.devExempt, err)
+	}
+	for name, extra := range map[string]map[string]string{
+		"staging":    {"EGRESS_EMR_ENV": "staging", "EGRESS_EMR_DEV_EXEMPT": "10.233.5.0/24"},
+		"production": {"EGRESS_EMR_ENV": "production", "EGRESS_EMR_DEV_EXEMPT": "10.233.5.0/24"},
+		"public":     {"EGRESS_EMR_DEV_EXEMPT": "8.8.8.0/24"},
+		"too wide":   {"EGRESS_EMR_DEV_EXEMPT": "10.233.0.0/16"},
+		"internal":   {"EGRESS_EMR_DEV_EXEMPT": "10.233.0.0/24"},
+		"junk":       {"EGRESS_EMR_DEV_EXEMPT": "nope"},
+		"loopback":   {"EGRESS_EMR_DEV_EXEMPT": "127.0.0.0/24"},
+	} {
+		if _, err := readSettings(get(extra)); err == nil || !strings.Contains(err.Error(), "EGRESS_EMR_DEV_EXEMPT") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	own := []netip.Prefix{netip.MustParsePrefix("10.233.1.0/24"), netip.MustParsePrefix("10.233.5.0/24"), netip.MustParsePrefix("10.0.0.0/8")}
+	got := exemptOwn(own, netip.MustParsePrefix("10.233.5.0/24"))
+	if want := []netip.Prefix{own[0], own[2]}; !slices.Equal(got, want) {
+		t.Fatalf("exempted %v, want %v (a wider own network stays)", got, want)
+	}
+	if got := exemptOwn(own, netip.Prefix{}); !slices.Equal(got, own) {
+		t.Fatalf("no exemption changed %v", got)
+	}
+}
