@@ -308,6 +308,7 @@ services:
       INTELLIGENCE_CLOUD_GEMINI_MODEL: ${PILOT_GEMINI_MODEL:-}
       INTELLIGENCE_CLOUD_GEMINI_KEY_FILE: ${PILOT_GEMINI_KEY_FILE:-}
       INTELLIGENCE_CLOUD_GEMINI_ZDR_REF: ${PILOT_GEMINI_ZDR_REF:-}
+      INTELLIGENCE_CLOUD_GEMINI_PAID_TIER: ${PILOT_GEMINI_PAID_TIER:-}
     volumes:
       - trustedkeys:/trusted:ro
       # Each mode 0400, owned by the image's user (enable-pilot.sh).
