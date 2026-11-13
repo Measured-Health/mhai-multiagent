@@ -19,7 +19,10 @@ def test_refused_str_has_no_detail() -> None:
 
 def test_reason_set_is_closed() -> None:
     assert isinstance(REASONS, frozenset)
-    assert len(REASONS) == 46
+    assert len(REASONS) == 49
+    assert "gguf_invalid" in REASONS  # own model PR 1: a GGUF header refused
+    assert "training_manifest_misnamed" in REASONS  # a manifest.json in place of it
+    assert "role_unknown" in REASONS  # a training manifest role with no plan
     assert "warmup_page_missing" in REASONS  # Task 23: the service's warm-up page is absent
     assert "invalid_name" in REASONS
     assert "base_unverified" in REASONS  # Task 14: a promoted base not yet verified

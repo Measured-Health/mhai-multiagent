@@ -425,13 +425,9 @@ def reserve(target: ObjectStore, name: str, version: str, run_id: str, actor: st
 
 
 def files_hash(entries: Sequence[files.FileEntry]) -> str:
-    """The files hash (``--expect-files``): SHA-256 of the canonical JSON of the sorted
-    ``[{path, size, sha256}]``."""
-    rows = sorted(
-        ({"path": e.path, "size": e.size, "sha256": e.sha256} for e in entries),
-        key=lambda r: str(r["path"]),
-    )
-    return hashlib.sha256(canonical.dumps(rows)).hexdigest()
+    """The files hash (``--expect-files``): :func:`intelligence.modelstore.files.files_hash`
+    (it lives there so the export step computes it without this module)."""
+    return files.files_hash(entries)
 
 
 def fetch_run(source: sources.Source, name: str, run: str, dest: Path) -> list[files.FileEntry]:

@@ -24,10 +24,11 @@ A shape or pattern failure is ``manifest_invalid``; a missing file is
 ``training_manifest_missing``.
 
 :func:`check` then holds the manifest to the registries (B16, B17, design decision 10):
-``dataset_unknown``, ``dataset_not_synthetic`` (phase 0 admits synthetic datasets only),
-``revision_unpinned`` (an upstream revision that is not a 40-hex commit),
-``licence_not_allowed``, and for a promoted base whatever the injected pin verifier
-raises; the default verifier refuses (``base_unverified``) so nothing passes unverified.
+``role_unknown`` (a role not in :data:`ROLES`), ``dataset_unknown``,
+``dataset_not_synthetic`` (phase 0 admits synthetic datasets only), ``revision_unpinned``
+(an upstream revision that is not a 40-hex commit), ``licence_not_allowed``, and for a
+promoted base whatever the injected pin verifier raises; the default verifier refuses
+(``base_unverified``) so nothing passes unverified.
 
 The registries, ``models/approved-datasets.json`` (``mhai.models.datasets/1``) and
 ``models/licences.json`` (``mhai.models.licences/1``), are changed only by PR (CODEOWNERS).
@@ -54,6 +55,11 @@ FILE_NAME = "training_manifest.json"
 SYNTHETIC_GENERATOR = "intelligence.doceval.sets"
 KINDS = ("synthetic", "deidentified")
 ALLOWED_KINDS = frozenset({"synthetic"})  # phase 0 (plan departure 10)
+# The roles a training manifest may name: ``extract`` (the document extractor) and ``cca``
+# (the answer model, docs/plans/2026-11-13-own-answer-model.md). A role is pinnable only
+# once it has an evaluation suite (``lock.ROLES``); ``cca`` gets its suite in that plan's
+# PR 2, so until then a ``cca`` run passes these checks but cannot be pinned.
+ROLES = frozenset({"extract", "cca"})
 
 MAX_DATASETS = 64
 MAX_FRAMEWORK = 32
@@ -170,6 +176,11 @@ def is_commit(value: object) -> bool:
     return _match(value, _COMMIT)
 
 
+def is_package_version(value: object) -> bool:
+    """A framework version as the manifest takes it (a PEP 440 subset)."""
+    return _match(value, _PACKAGE_VERSION)
+
+
 def is_metric_name(value: object) -> bool:
     return (
         _match(value, _METRIC)
@@ -252,7 +263,7 @@ class TrainingManifest:
                 isinstance(p, tuple)
                 and len(p) == 2
                 and p[0] in FRAMEWORKS
-                and _match(p[1], _PACKAGE_VERSION)
+                and is_package_version(p[1])
                 for p in self.framework
             )
             and len({p[0] for p in self.framework}) == len(self.framework),
@@ -524,6 +535,8 @@ def check(
         raise _invalid("type")
     if not isinstance(registry, Registry) or not isinstance(licences, Licences):
         raise _policy("type")
+    if tm.role not in ROLES:
+        raise Refused("role_unknown")
     entries: list[Dataset] = []
     for ident in tm.datasets:
         entry = registry.datasets.get(ident)
@@ -560,6 +573,7 @@ __all__ = [
     "KINDS",
     "LICENCES_SCHEMA",
     "REGISTRY_SCHEMA",
+    "ROLES",
     "SCHEMA",
     "SYNTHETIC_GENERATOR",
     "Dataset",
@@ -574,6 +588,7 @@ __all__ = [
     "is_dataset_id",
     "is_licence_id",
     "is_metric_name",
+    "is_package_version",
     "is_pin",
     "load",
     "load_licences",

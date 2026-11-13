@@ -526,3 +526,32 @@ def test_negative_zero_is_never_shown(tmp_path: Path) -> None:
     shown = training.report_metrics(training.load(path))
     assert shown == {"a": "0.000000", "b": "0.000000", "c": "0.000000"}
     assert all(not str(v).startswith("-") for v in shown.values())
+
+
+# ---------------------------------------------------------------- roles (own model PR 1)
+
+
+def test_training_roles_are_extract_and_cca() -> None:
+    assert training.ROLES == frozenset({"extract", "cca"})
+
+
+def test_cca_role_accepted(tmp_path: Path) -> None:
+    registry, licences = _committed()
+    run = fixtures.make_run(tmp_path / "cca", "good", 7, role="cca")
+    tm = training.load_run(run)
+    assert training.check(tm, registry, licences).manifest.role == "cca"
+
+
+@pytest.mark.parametrize("role", ["ocr", "nli", "answer"])
+def test_unknown_role_refused(tmp_path: Path, role: str) -> None:
+    registry, licences = _committed()
+    tm = training.load_run(fixtures.make_run(tmp_path / role, "good", 7, role=role))
+    assert _reason(lambda: training.check(tm, registry, licences)) == "role_unknown"
+
+
+@pytest.mark.parametrize(
+    ("version", "ok"),
+    [("2.5.1", True), ("2.5.1+cu121", True), ("4.57.0.dev0", True), ("latest", False), ("", False)],
+)
+def test_package_version_pattern_is_public(version: str, ok: bool) -> None:
+    assert training.is_package_version(version) is ok

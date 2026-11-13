@@ -1,11 +1,15 @@
 """Checks on the files of a model run, before anything else reads them.
 
-* :func:`check_file_name`: the allow-list. Weights are safetensors only; pickle
+* :func:`check_file_name`: the allow-list. Weights are safetensors (and one GGUF); pickle
   formats are ``pickle_refused``, code is ``code_refused``, anything else is
   ``file_not_allowed``. Names are flat and match ``^[A-Za-z0-9._-]{1,128}$``.
 * :func:`check_json`: strict parse with a size cap; no remote code references.
 * :func:`check_safetensors`: our own header parser (not the library), with bounded
   reads. It never maps or loads tensor data.
+* :func:`check_gguf`: the same for a GGUF file (the served export of the weights): our
+  own bounded parser of the header and tensor table, ``gguf_invalid`` with a fixed detail.
+* :func:`check_misnamed`: a ``manifest.json`` where ``training_manifest.json`` belongs is
+  ``training_manifest_misnamed`` (that name is the signed store manifest's).
 * :func:`check_run`: every file of a run directory: names, links, special files,
   caps, contents, and a SHA-256 streamed in 8 MB blocks over the same open file and
   in the same pass as the checks, so the hash covers exactly the checked bytes.
@@ -21,7 +25,7 @@ import os
 import re
 import stat
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,8 +56,71 @@ JSON_FILES: frozenset[str] = frozenset(
         "training_manifest.json",
     }
 )
-# ``*.safetensors`` (shards, adapters) plus the exact JSON names above.
-ALLOWED: frozenset[str] = JSON_FILES | {"*" + SAFETENSORS_SUFFIX}
+GGUF_SUFFIX = ".gguf"
+# ``*.safetensors`` (shards, adapters), one ``*.gguf`` (the served export, checked by
+# :func:`check_gguf`) and the exact JSON names above.
+ALLOWED: frozenset[str] = JSON_FILES | {"*" + SAFETENSORS_SUFFIX, "*" + GGUF_SUFFIX}
+# The signed store manifest's name: never a run file. Found without a training manifest,
+# it is the training manifest under the wrong name.
+STORE_MANIFEST_NAME = "manifest.json"
+TRAINING_MANIFEST_NAME = "training_manifest.json"
+
+# GGUF (v3 only): caps on what one header may hold. Real headers are a few MB (the
+# vocabulary arrays); the cap bounds memory and time on a hostile one.
+GGUF_MAGIC = b"GGUF"
+GGUF_VERSION = 3
+GGUF_HEADER_CAP = 64 * 1024 * 1024
+GGUF_MAX_TENSORS = 65536
+GGUF_MAX_KV = 4096
+GGUF_MAX_ARRAY = 1 << 22
+GGUF_MAX_KEY = 255  # bytes: keys and tensor names are under 256
+GGUF_MAX_STRING = 1024 * 1024 - 1  # bytes: string values under 1 MiB
+GGUF_MAX_DIMS = 4
+GGUF_DEFAULT_ALIGNMENT = 32
+GGUF_ARCHITECTURES: frozenset[str] = frozenset(
+    {"llama", "qwen2", "qwen3", "gemma2", "gemma3", "phi3", "mistral"}
+)
+# Metadata value types: the fixed-size scalars (struct format), then string and array.
+_GGUF_SCALARS: dict[int, str] = {
+    0: "<B",
+    1: "<b",
+    2: "<H",
+    3: "<h",
+    4: "<I",
+    5: "<i",
+    6: "<f",
+    7: "<B",
+    10: "<Q",
+    11: "<q",
+    12: "<d",
+}
+_GGUF_STRING = 8
+_GGUF_ARRAY = 9
+_GGUF_UINT32 = 4
+# ggml tensor types we accept (a closed list: the float types and the quantisations the
+# export step writes), as (elements per block, bytes per block).
+GGML_TYPES: dict[int, tuple[int, int]] = {
+    0: (1, 4),  # F32
+    1: (1, 2),  # F16
+    2: (32, 18),  # Q4_0
+    3: (32, 20),  # Q4_1
+    6: (32, 22),  # Q5_0
+    7: (32, 24),  # Q5_1
+    8: (32, 34),  # Q8_0
+    9: (32, 36),  # Q8_1
+    10: (256, 84),  # Q2_K
+    11: (256, 110),  # Q3_K
+    12: (256, 144),  # Q4_K
+    13: (256, 176),  # Q5_K
+    14: (256, 210),  # Q6_K
+    15: (256, 292),  # Q8_K
+    24: (1, 1),  # I8
+    25: (1, 2),  # I16
+    26: (1, 4),  # I32
+    27: (1, 8),  # I64
+    28: (1, 8),  # F64
+    30: (1, 2),  # BF16
+}
 
 PICKLE_SUFFIXES: frozenset[str] = frozenset(
     {".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle", ".joblib", ".npy", ".npz"}
@@ -151,9 +218,19 @@ def check_file_name(name: str) -> str:
         raise FileRefused("code_refused", name)
     if name.startswith("."):
         raise FileRefused("file_not_allowed", name, "hidden")
-    if name in JSON_FILES or name.endswith(SAFETENSORS_SUFFIX):
+    if name in JSON_FILES or name.endswith(SAFETENSORS_SUFFIX) or name.endswith(GGUF_SUFFIX):
         return name
     raise FileRefused("file_not_allowed", name)
+
+
+def check_misnamed(names: Iterable[object]) -> None:
+    """``training_manifest_misnamed`` when ``names`` (a run's listing) holds a
+    ``manifest.json`` and no ``training_manifest.json``: the trainer's manifest under the
+    name reserved for the signed store manifest. Checked before the allow-list, so the
+    refusal says what to rename rather than ``file_not_allowed``."""
+    listed = set(names)
+    if STORE_MANIFEST_NAME in listed and TRAINING_MANIFEST_NAME not in listed:
+        raise FileRefused("training_manifest_misnamed", STORE_MANIFEST_NAME)
 
 
 def _json_cap(kind: str) -> int:
@@ -476,6 +553,157 @@ def check_safetensors(path: Path | str, limits: Limits | None = None) -> None:
         _check_safetensors_file(f, size, name, max_header)
 
 
+# --- GGUF ------------------------------------------------------------------
+
+
+def _gguf_bad(name: str | None, detail: str) -> FileRefused:
+    return FileRefused("gguf_invalid", name, detail)
+
+
+class _GgufReader:
+    """Sequential reads of a GGUF header from ``f``'s current position (0), in blocks.
+
+    Every block read from the file goes to ``digest`` (when given) as it is read, so the
+    caller can stream the rest of the file into the same digest from ``consumed``. The
+    logical position ``pos`` may not pass ``cap``."""
+
+    def __init__(self, f: io.FileIO, name: str | None, cap: int, digest: Any) -> None:
+        self._f = f
+        self._name = name
+        self._cap = cap
+        self._digest = digest
+        self._buf = b""
+        self._off = 0
+        self.pos = 0
+        self.consumed = 0
+
+    def take(self, n: int) -> bytes:
+        if n < 0 or self.pos + n > self._cap:
+            raise _gguf_bad(self._name, "header_size")
+        while len(self._buf) - self._off < n:
+            chunk = _read_block(self._f, self._name or "gguf")
+            if not chunk:
+                raise _gguf_bad(self._name, "truncated")
+            if self._digest is not None:
+                self._digest.update(chunk)
+            self.consumed += len(chunk)
+            self._buf = self._buf[self._off :] + chunk
+            self._off = 0
+        out = self._buf[self._off : self._off + n]
+        self._off += n
+        self.pos += n
+        return out
+
+    def unpack(self, fmt: str) -> Any:
+        return struct.unpack(fmt, self.take(struct.calcsize(fmt)))[0]
+
+    def string(self, cap: int, detail: str) -> bytes:
+        n = self.unpack("<Q")
+        if n > cap:
+            raise _gguf_bad(self._name, detail)
+        return self.take(n)
+
+
+def _gguf_key(r: _GgufReader, name: str | None, detail: str) -> str:
+    raw = r.string(GGUF_MAX_KEY, detail)
+    if not raw or not raw.isascii():
+        raise _gguf_bad(name, detail)
+    return raw.decode("ascii")
+
+
+def _gguf_value(r: _GgufReader, vtype: int, name: str | None) -> Any:
+    """One metadata value; arrays are read through (bounded) and returned as None."""
+    if vtype in _GGUF_SCALARS:
+        return r.unpack(_GGUF_SCALARS[vtype])
+    if vtype == _GGUF_STRING:
+        return r.string(GGUF_MAX_STRING, "string")
+    if vtype != _GGUF_ARRAY:
+        raise _gguf_bad(name, "type")
+    etype = r.unpack("<I")
+    count = r.unpack("<Q")
+    if count > GGUF_MAX_ARRAY or etype == _GGUF_ARRAY:
+        raise _gguf_bad(name, "array")
+    if etype in _GGUF_SCALARS:
+        r.take(count * struct.calcsize(_GGUF_SCALARS[etype]))
+    elif etype == _GGUF_STRING:
+        for _ in range(count):
+            r.string(GGUF_MAX_STRING, "string")
+    else:
+        raise _gguf_bad(name, "type")
+    return None
+
+
+def _check_gguf_file(f: io.FileIO, size: int, name: str | None, digest: Any = None) -> int:
+    """Validate the GGUF header and tensor table read from ``f``'s position (0); return
+    the bytes read from the file (all fed to ``digest``). Tensor data is never parsed:
+    each tensor's extent is checked against the data region's size."""
+    r = _GgufReader(f, name, GGUF_HEADER_CAP, digest)
+    if r.take(4) != GGUF_MAGIC:
+        raise _gguf_bad(name, "magic")
+    if r.unpack("<I") != GGUF_VERSION:
+        raise _gguf_bad(name, "version")
+    n_tensors = r.unpack("<Q")
+    n_kv = r.unpack("<Q")
+    if n_tensors > GGUF_MAX_TENSORS or n_kv > GGUF_MAX_KV:
+        raise _gguf_bad(name, "counts")
+    seen: set[str] = set()
+    architecture: Any = None
+    alignment = GGUF_DEFAULT_ALIGNMENT
+    for _ in range(n_kv):
+        key = _gguf_key(r, name, "key")
+        if key in seen:
+            raise _gguf_bad(name, "duplicate_key")
+        seen.add(key)
+        vtype = r.unpack("<I")
+        value = _gguf_value(r, vtype, name)
+        if key == "general.architecture":
+            architecture = value if vtype == _GGUF_STRING else None
+        elif key == "general.alignment":
+            if vtype != _GGUF_UINT32 or not 0 < value <= 1 << 16 or value & (value - 1):
+                raise _gguf_bad(name, "alignment")
+            alignment = value
+    if not isinstance(architecture, bytes) or architecture not in {
+        a.encode("ascii") for a in GGUF_ARCHITECTURES
+    }:
+        raise _gguf_bad(name, "architecture")
+    tensors: list[tuple[int, int]] = []
+    tensor_names: set[str] = set()
+    for _ in range(n_tensors):
+        tname = _gguf_key(r, name, "tensor_name")
+        if tname in tensor_names:
+            raise _gguf_bad(name, "tensor_duplicate")
+        tensor_names.add(tname)
+        n_dims = r.unpack("<I")
+        if not 1 <= n_dims <= GGUF_MAX_DIMS:
+            raise _gguf_bad(name, "tensor")
+        dims = [r.unpack("<Q") for _ in range(n_dims)]
+        ttype = r.unpack("<I")
+        offset = r.unpack("<Q")
+        if ttype not in GGML_TYPES:
+            raise _gguf_bad(name, "tensor_type")
+        block, block_bytes = GGML_TYPES[ttype]
+        numel = 1
+        for d in dims:
+            numel *= d
+        if not all(d >= 1 for d in dims) or dims[0] % block:
+            raise _gguf_bad(name, "tensor")
+        tensors.append((offset, numel // block * block_bytes))
+    data_start = r.pos + (-r.pos % alignment)
+    if data_start > size:
+        raise _gguf_bad(name, "offsets")
+    data_len = size - data_start
+    for offset, nbytes in tensors:
+        if offset % alignment or offset + nbytes > data_len:
+            raise _gguf_bad(name, "offsets")
+    return r.consumed
+
+
+def check_gguf(path: Path | str) -> None:
+    """Validate a GGUF file's header and tensor table; tensor data is never read."""
+    with _parent(Path(path)) as (dfd, name), _open(name, dfd) as (f, size):
+        _check_gguf_file(f, size, name)
+
+
 # --- the whole run ---------------------------------------------------------
 
 
@@ -526,18 +754,21 @@ def _list_run(dfd: int, max_files: int) -> list[str]:
 def check_run(dir: Path | str, limits: Limits | None = None) -> list[FileEntry]:
     """Check every file of the run in ``dir``; return them sorted by name, with hashes.
 
-    Refuses (fail closed) a missing or linked directory, an entry that isn't on the
+    Refuses (fail closed) a ``manifest.json`` with no training manifest
+    (:func:`check_misnamed`), a missing or linked directory, an entry that isn't on the
     allow-list, a symlink, hard link, directory or special file, more than
     ``max_files`` files, a file over ``max_file_bytes``, a total over
     ``max_total_bytes``, a run without a ``*.safetensors`` file or without
-    ``config.json`` or ``adapter_config.json`` (``missing_file``), and any JSON or
-    safetensors file that fails its check. Each file is checked and hashed in one
+    ``config.json`` or ``adapter_config.json`` (``missing_file``), more than one GGUF
+    (``gguf_invalid``/``count``; a GGUF is only ever next to the safetensors), and any
+    JSON, safetensors or GGUF file that fails its check. Each file is checked and hashed in one
     pass over one open file: the digest covers exactly the bytes that were checked.
     """
     limits = limits or Limits()
     dfd = _open_run_dir(Path(dir))
     try:
         names = _list_run(dfd, limits.max_files)
+        check_misnamed(names)
 
         stats: dict[str, os.stat_result] = {}
         total = 0
@@ -555,6 +786,9 @@ def check_run(dir: Path | str, limits: Limits | None = None) -> list[FileEntry]:
             raise FileRefused("missing_file", None, "no_weights")
         if not {"config.json", "adapter_config.json"} & set(names):
             raise FileRefused("missing_file", None, "no_config")
+        ggufs = [n for n in names if n.endswith(GGUF_SUFFIX)]
+        if len(ggufs) > 1:
+            raise FileRefused("gguf_invalid", ggufs[1], "count")
 
         present = frozenset(names)
         out: list[FileEntry] = []
@@ -569,6 +803,10 @@ def check_run(dir: Path | str, limits: Limits | None = None) -> list[FileEntry]:
                         raise FileRefused("size_mismatch", name, "grew")
                     _check_json_bytes(raw, name, name, present)
                     sha = hashlib.sha256(raw).hexdigest()
+                elif name.endswith(GGUF_SUFFIX):
+                    digest = hashlib.sha256()
+                    done = _check_gguf_file(f, size, name, digest)
+                    sha = _stream_rest(f, size, done, digest, name)
                 else:
                     digest = hashlib.sha256()
                     _check_safetensors_file(f, size, name, limits.max_header_bytes, digest)
@@ -580,12 +818,25 @@ def check_run(dir: Path | str, limits: Limits | None = None) -> list[FileEntry]:
         os.close(dfd)
 
 
+def files_hash(entries: Sequence[FileEntry]) -> str:
+    """The files hash (``--expect-files``): SHA-256 of the canonical JSON of the sorted
+    ``[{path, size, sha256}]``."""
+    rows = sorted(
+        ({"path": e.path, "size": e.size, "sha256": e.sha256} for e in entries),
+        key=lambda r: str(r["path"]),
+    )
+    return hashlib.sha256(canonical.dumps(rows)).hexdigest()
+
+
 __all__ = [
     "ALLOWED",
     "BLOCK_SIZE",
     "CODE_SUFFIXES",
     "DEFAULT_HEADER_BYTES",
     "DTYPE_SIZES",
+    "GGML_TYPES",
+    "GGUF_ARCHITECTURES",
+    "GGUF_SUFFIX",
     "JSON_FILES",
     "MAX_HEADER_BYTES",
     "PICKLE_SUFFIXES",
@@ -593,8 +844,11 @@ __all__ = [
     "FileRefused",
     "Limits",
     "check_file_name",
+    "check_gguf",
     "check_json",
+    "check_misnamed",
     "check_run",
     "check_safetensors",
+    "files_hash",
     "read_regular",
 ]

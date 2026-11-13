@@ -5,6 +5,9 @@ carries no file name, value or content: the optional ``detail_code`` is a
 short fixed code for operators and is never part of ``str()``.
 """
 
+from collections.abc import Mapping
+from types import MappingProxyType
+
 REASONS: frozenset[str] = frozenset(
     {
         "file_not_allowed",
@@ -53,6 +56,20 @@ REASONS: frozenset[str] = frozenset(
         "key_invalid",
         "key_exists",
         "gate_failed",
+        "gguf_invalid",
+        "training_manifest_misnamed",
+        "role_unknown",
+    }
+)
+
+# The fix for a refusal whose cause is a plain naming mistake: a fixed text (no file name,
+# value or content), printed with the code by the command line.
+FIXES: Mapping[str, str] = MappingProxyType(
+    {
+        "training_manifest_misnamed": (
+            "found manifest.json; rename it to training_manifest.json"
+            " (manifest.json is reserved for the signed store manifest)"
+        ),
     }
 )
 

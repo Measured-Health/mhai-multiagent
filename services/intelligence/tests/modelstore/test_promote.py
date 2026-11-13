@@ -1476,3 +1476,22 @@ def test_promotion_development_needs_both_switches(
     code, out = _cli([*argv, "--expect-files", "0" * 64, "--dev-set", str(dev_set.root)], capsys)
     assert code == 2
     assert json.loads(out) == {"refused": "not_allowed_here", "detail": "dev_set_promotion"}
+
+
+def test_cli_check_names_a_misnamed_training_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = fixtures.make_run(tmp_path / "run", "good", 3)
+    (run / "training_manifest.json").rename(run / "manifest.json")
+    with pytest.raises(Refused) as err:
+        promote.check_folder(run, *cli._registries())
+    assert err.value.reason == "training_manifest_misnamed"
+    code, out = _cli(["check", str(run)], capsys)
+    assert code == 2
+    assert json.loads(out) == {
+        "refused": "training_manifest_misnamed",
+        "fix": (
+            "found manifest.json; rename it to training_manifest.json"
+            " (manifest.json is reserved for the signed store manifest)"
+        ),
+    }

@@ -10,6 +10,7 @@ Commands::
         [--runtime-url URL] [--gate phase1|phase3|rehearsal ...] [--dev-set DIR]
         [--report-dir DIR]
     mhai-models check DIR
+    mhai-models export RUN_DIR --name NAME --version VERSION ... (see export --help)
     mhai-models make-fixture DIR [--variant V] [--seed N] [--name NAME]
     mhai-models store-init
     mhai-models pin ROLE NAME VERSION --gate phase1|phase3 [--lock PATH [--rehearsal]]
@@ -57,6 +58,10 @@ with ``MHAI_EVAL_ROLE=locked``, the locked split named by ``models/testsets.lock
 split built into scratch. The registries are ``models/approved-datasets.json`` and
 ``models/licences.json`` (``MHAI_MODELS_DATASETS``, ``MHAI_MODELS_LICENCES``).
 
+``export`` is :mod:`intelligence.modelstore.export`: the step a trainer runs at the end of
+a notebook (training manifest, GGUF, the checks below, with a fix for each refusal). It
+has its own output (lines for a person, not JSON) and imports only the light modules.
+
 ``check DIR`` runs steps 3 and 4 (file and training manifest checks) on a local run folder
 and prints its files hash. ``make-fixture`` writes a tiny synthetic run
 (:func:`intelligence.modelstore.fixtures.make_run`). ``store-init`` is for rehearsal only: it
@@ -102,7 +107,8 @@ A promotion (not ``--dry-run``) outside ``MHAI_MODELS_ENV=development`` must run
 ``MHAI_EVAL_ROLE=locked`` (the locked split), must pass ``--expect-files`` and may not pass
 ``--dev-set``; each is ``not_allowed_here`` otherwise.
 
-Exit codes: 0 done, 2 refused (one JSON line ``{"refused": "<code>"}`` on stdout; for
+Exit codes: 0 done, 2 refused (one JSON line ``{"refused": "<code>"}`` on stdout, with
+``"fix"``, a fixed text, for a naming mistake in ``reasons.FIXES``; for
 ``promote``, ``check``, ``make-fixture``, ``store-init``, ``pin``, ``lock-check`` and
 ``rollback`` with ``"detail"``, a fixed code, when there is one), 3 a file could not be
 read or written, or (those same commands) the store or the source is unavailable, 4
@@ -141,7 +147,7 @@ from intelligence.modelstore import (
     training,
     verify,
 )
-from intelligence.modelstore.reasons import Refused
+from intelligence.modelstore.reasons import FIXES, Refused
 
 ENDPOINT_ENV = "MODEL_STORE_ENDPOINT"
 BUCKET_ENV = "MODEL_STORE_BUCKET"
@@ -722,6 +728,8 @@ def _parser() -> argparse.ArgumentParser:
     mf.add_argument("--seed", default="0")
     mf.add_argument("--name", default=None)
     mf.set_defaults(func=_make_fixture)
+    # Listed for --help only: main() hands ``export`` to intelligence.modelstore.export.
+    sub.add_parser("export", help="training manifest, GGUF and checks (see export --help)")
     si = sub.add_parser("store-init", help="provision a loopback MinIO (rehearsal only)")
     si.set_defaults(func=_store_init)
     pn = sub.add_parser("pin", help="verify a promoted version and pin it in models.lock")
@@ -755,6 +763,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     3 unavailable, unreadable or unexpected); no traceback or exception text is printed,
     except with ``MHAI_MODELS_DEBUG=1`` in development, where an unexpected error's
     traceback goes to stderr."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["export"]:
+        # Its own light module: it runs in Colab without this package's dependencies.
+        from intelligence.modelstore import export
+
+        return export.main(argv[1:])
     args = _parser().parse_args(argv)
     detailed = args.command in _DETAILED
     refusal: Refused | None = None
@@ -776,6 +790,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         out: dict[str, Any] = {"refused": refusal.reason}
         if detailed and refusal.detail_code is not None:
             out["detail"] = refusal.detail_code
+        if refusal.reason in FIXES:
+            out["fix"] = FIXES[refusal.reason]
         _print(out)
         return 3 if detailed and refusal.reason in UNAVAILABLE else 2
     _print({"error": error or "internal"})

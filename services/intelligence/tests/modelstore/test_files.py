@@ -71,7 +71,7 @@ def test_pickle_and_code_refused(tmp_path: Path, variant: str) -> None:
             for ext in (".py", ".so", ".dll", ".dylib", ".sh", ".ipynb")
         ],
         ("tokenizer.model", "file_not_allowed"),
-        ("model.gguf", "file_not_allowed"),
+        ("model.ggml", "file_not_allowed"),
         ("model.onnx", "file_not_allowed"),
         ("weights.zip", "file_not_allowed"),
         ("weights.tar.gz", "file_not_allowed"),
