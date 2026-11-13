@@ -4,6 +4,7 @@ package rules
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/normalise"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/sink"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/testpg"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/dbx"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb"
 )
 
@@ -217,55 +219,66 @@ func (f *fixture) activate(t *testing.T, version string, sha []byte) {
 }
 
 // A24: an evaluation error rolls the whole batch back (no partial
-// findings), and stops the hospital's evaluation for five minutes; the
-// message is not acked.
-func TestRuleErrorStopsHospitalNoPartialFindings(t *testing.T) {
+// findings) and holds that batch for five minutes (paged); the message is
+// not acked and, before its fifth delivery, never dead-lettered. Another
+// batch of the same hospital (here a critical potassium of another
+// patient) is evaluated at once: one bad batch never delays another.
+func TestRuleErrorHoldsBatchNoPartialFindings(t *testing.T) {
 	f := newFixture(t)
-	ids := f.ingest(t, false, patientRec("p1"), kRec("k1", "1", "p1", "6.8", "final", time.Hour),
+	ctx := context.Background()
+	bad := f.ingest(t, false, patientRec("p1"), kRec("k1", "1", "p1", "6.8", "final", time.Hour),
 		kRec("k2", "1", "p1", "7.1", "final", time.Hour))
-	if len(ids) != 2 {
-		t.Fatalf("created %v", ids)
+	good := f.ingest(t, false, patientRec("p2"), kRec("k3", "1", "p2", "7.2", "final", time.Hour))
+	if len(bad) != 2 || len(good) != 1 {
+		t.Fatalf("created %v %v", bad, good)
 	}
-	var calls atomic.Int32
 	f.eng.Evaluate = func(rs *RuleSet, h History, trig uuid.UUID, now time.Time) ([]Finding, error) {
-		if calls.Add(1) == 2 {
+		if trig == bad[1] {
 			return nil, ErrEvaluate
 		}
 		return Evaluate(rs, h, trig, now)
 	}
-	ctx := context.Background()
-	if err := f.eng.Handle(ctx, f.hospital, ids); err == nil {
-		t.Fatal("an evaluation error was not reported")
+	subject := "records.v1." + f.hospital.String() + ".created"
+	for _, n := range []uint64{1, MaxDeliver - 1} {
+		msg := &fakeMsg{subject: subject, data: created(bad), deliveries: n}
+		f.eng.HandleMsg(ctx, msg)
+		if !msg.naked || msg.acked || msg.termed || msg.delay != StopFor {
+			t.Fatalf("delivery %d of the bad batch: %+v", n, msg)
+		}
 	}
 	if got := f.findings(t); len(got) != 0 {
 		t.Fatalf("partial findings: %+v", got)
 	}
-	if f.eng.metrics().Stopped.Load() != 1 {
-		t.Fatal("the stop was not counted")
+	if f.eng.metrics().Stopped.Load() != 2 || len(f.pub.on(".emr_rules")) != 0 {
+		t.Fatalf("held %d, dead letters %d", f.eng.metrics().Stopped.Load(), len(f.pub.on(".emr_rules")))
 	}
-	// Stopped: nothing is evaluated, whatever the message, for 5 minutes.
-	f.eng.Evaluate = nil
-	before := calls.Load()
-	msg := &fakeMsg{subject: "records.v1." + f.hospital.String() + ".created", data: created(ids), deliveries: 1}
-	f.eng.HandleMsg(ctx, msg)
-	if !msg.naked || msg.acked || msg.delay <= 0 || msg.delay > StopFor || calls.Load() != before {
-		t.Fatalf("stopped hospital: %+v", msg)
-	}
-	if got := f.findings(t); len(got) != 0 {
-		t.Fatalf("findings while stopped: %+v", got)
-	}
-	// Another hospital is not stopped.
-	if f.eng.stoppedFor(uuid.New()) > 0 {
-		t.Fatal("another hospital stopped")
-	}
-	f.clock.Store(int64(StopFor/time.Second) + 1)
-	msg = &fakeMsg{subject: msg.subject, data: msg.data, deliveries: 2}
+	msg := &fakeMsg{subject: subject, data: created(good), deliveries: 1}
 	f.eng.HandleMsg(ctx, msg)
 	if !msg.acked {
-		t.Fatalf("after the stop: %+v", msg)
+		t.Fatalf("the good batch: %+v", msg)
 	}
-	if got := f.findings(t); len(got) != 2 {
-		t.Fatalf("after the stop: %d findings", len(got))
+	if got := f.findings(t); len(got) != 1 || got[0].severity != "critical" {
+		t.Fatalf("the good batch's finding: %+v", got)
+	}
+	// Fixed (the next delivery after the hold): the bad batch evaluates.
+	f.eng.Evaluate = nil
+	msg = &fakeMsg{subject: subject, data: created(bad), deliveries: 3}
+	f.eng.HandleMsg(ctx, msg)
+	if !msg.acked || len(f.findings(t)) != 3 {
+		t.Fatalf("after the fix: %+v, %d findings", msg, len(f.findings(t)))
+	}
+}
+
+// A delivery count that can't be read is never taken as the last one: the
+// message is naked, not dead-lettered.
+func TestUnknownDeliveriesNaks(t *testing.T) {
+	f := newFixture(t)
+	ids := f.ingest(t, false, patientRec("p1"), kRec("k1", "1", "p1", "6.8", "final", time.Hour))
+	f.eng.Evaluate = func(*RuleSet, History, uuid.UUID, time.Time) ([]Finding, error) { return nil, ErrEvaluate }
+	msg := &fakeMsg{subject: "records.v1." + f.hospital.String() + ".created", data: created(ids), derr: errors.New("no metadata")}
+	f.eng.HandleMsg(context.Background(), msg)
+	if !msg.naked || msg.termed || len(f.pub.on(".emr_rules")) != 0 {
+		t.Fatalf("%+v", msg)
 	}
 }
 
@@ -285,6 +298,109 @@ func TestRulesDeadLetterAfterFive(t *testing.T) {
 	if err := proto.Unmarshal(dl[0].data, &d); err != nil || d.Stage != "rules" || d.BatchId != ids[0].String() ||
 		d.ErrorCode != "rules_failed" {
 		t.Fatalf("dead letter body %v %v", &d, err)
+	}
+	// The dead letter can't be published: the message is kept (naked),
+	// never terminated.
+	f.pub.fail = true
+	msg = &fakeMsg{subject: msg.subject, data: msg.data, deliveries: MaxDeliver}
+	f.eng.HandleMsg(context.Background(), msg)
+	if msg.termed || !msg.naked {
+		t.Fatalf("dead letter not sent: %+v", msg)
+	}
+}
+
+// A merge that commits after the batch read its observations: the patient
+// is merged_into when locked. The batch is retried (ErrMerged), never
+// acked with nothing raised, and the retry raises the finding on the kept
+// patient.
+func TestMergedDuringBatchRetries(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	ids := f.ingest(t, false, patientRec("p-gone"), patientRec("p-keep"), kRec("k1", "1", "p-gone", "6.8", "final", time.Hour))
+	var gone, keep uuid.UUID
+	if err := f.pool.QueryRow(ctx, `SELECT o.patient_id FROM emr.observations o WHERE o.id = $1`, ids[0]).Scan(&gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.pool.QueryRow(ctx, `SELECT patient_id FROM emr.patient_links WHERE source_patient_id = 'p-keep'`).Scan(&keep); err != nil {
+		t.Fatal(err)
+	}
+	// The batch's read, before the merge.
+	var trig []obsRow
+	if err := dbx.WithHospital(ctx, f.pool, dbx.EMR, f.hospital, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT `+obsCols+` FROM emr.observations o
+			JOIN emr.raw_records r ON r.hospital_id = o.hospital_id AND r.id = o.raw_id WHERE o.id = ANY ($1)`, ids)
+		if err != nil {
+			return err
+		}
+		trig, err = pgx.CollectRows(rows, scanObs)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The merge commits (as core does, through the definer).
+	var match uuid.UUID
+	if err := f.pool.QueryRow(ctx, `INSERT INTO emr.possible_matches (hospital_id, patient_a, patient_b, reason)
+		VALUES ($1, $2, $3, 'mrn_birth_sex') RETURNING id`, f.hospital, keep, gone).Scan(&match); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`SET LOCAL ROLE mhai_gateway`, `SELECT set_config('mhai.hospital_id', '` + f.hospital.String() + `', true)`} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `SELECT emr_merge_patients($1, 'a')`, match); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The batch locks the patient it read: merged, so it retries.
+	err = dbx.WithHospital(ctx, f.pool, dbx.EMR, f.hospital, func(tx pgx.Tx) error {
+		_, err := f.eng.patient(ctx, tx, f.hospital, gone, trig, true, map[uuid.UUID]rune{})
+		return err
+	})
+	if !errors.Is(err, ErrMerged) {
+		t.Fatalf("merged patient: %v, want ErrMerged", err)
+	}
+	msg := &fakeMsg{subject: "records.v1." + f.hospital.String() + ".created", data: created(ids), deliveries: 1}
+	f.eng.Evaluate = func(rs *RuleSet, h History, trig uuid.UUID, now time.Time) ([]Finding, error) {
+		if h.Patient.ID != keep {
+			t.Errorf("evaluated for %v, want the kept patient", h.Patient.ID)
+		}
+		return Evaluate(rs, h, trig, now)
+	}
+	f.eng.HandleMsg(ctx, msg)
+	if !msg.acked {
+		t.Fatalf("retry: %+v", msg)
+	}
+	var owner uuid.UUID
+	if err := f.pool.QueryRow(ctx, `SELECT patient_id FROM emr.findings WHERE hospital_id = $1`, f.hospital).Scan(&owner); err != nil || owner != keep {
+		t.Fatalf("finding on %v (%v), want the kept patient", owner, err)
+	}
+}
+
+// Item 4 of the review: a mapped potassium in a unit with no reviewed
+// conversion is counted (and logged by id) as not evaluable, never
+// silently normal; in mEq/L it converts exactly and raises its finding.
+func TestNotEvaluableCounted(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	k := kRec("k-mgdl", "1", "p1", "26", "final", time.Hour)
+	k.Fields["unit"] = "mg/dL"
+	meq := kRec("k-meq", "1", "p1", "6.8", "final", time.Hour)
+	meq.Fields["unit"] = "mEq/L"
+	if err := f.eng.Handle(ctx, f.hospital, f.ingest(t, false, patientRec("p1"), k, meq)); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.eng.metrics().NotEvaluable.Load(); n != 1 {
+		t.Fatalf("not evaluable %d, want 1", n)
+	}
+	if got := f.findings(t); len(got) != 1 || got[0].rule != "potassium-critical-high" {
+		t.Fatalf("findings %+v", got)
 	}
 }
 

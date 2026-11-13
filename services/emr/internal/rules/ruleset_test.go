@@ -230,7 +230,7 @@ func TestUnmappedRunsSourceFlagOnly(t *testing.T) {
 }
 
 // A trigger not in the history, or a value that isn't a number, is an
-// error: the consumer stops the hospital rather than skip it.
+// error: the consumer holds the batch rather than skip it.
 func TestEvaluateErrors(t *testing.T) {
 	rs := loadBase(t)
 	o := Observation{ID: uuid.New(), LOINC: "2823-3", Category: "laboratory", Status: "final", ValueNum: f64(7), ValueSI: f64(7),

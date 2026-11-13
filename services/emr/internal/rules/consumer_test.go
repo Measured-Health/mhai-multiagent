@@ -19,13 +19,14 @@ type fakeMsg struct {
 	deliveries           uint64
 	acked, naked, termed bool
 	delay                time.Duration
+	derr                 error
 }
 
-func (m *fakeMsg) Subject() string    { return m.subject }
-func (m *fakeMsg) Data() []byte       { return m.data }
-func (m *fakeMsg) Ack() error         { m.acked = true; return nil }
-func (m *fakeMsg) Term() error        { m.termed = true; return nil }
-func (m *fakeMsg) Deliveries() uint64 { return m.deliveries }
+func (m *fakeMsg) Subject() string             { return m.subject }
+func (m *fakeMsg) Data() []byte                { return m.data }
+func (m *fakeMsg) Ack() error                  { m.acked = true; return nil }
+func (m *fakeMsg) Term() error                 { m.termed = true; return nil }
+func (m *fakeMsg) Deliveries() (uint64, error) { return m.deliveries, m.derr }
 func (m *fakeMsg) NakWithDelay(d time.Duration) error {
 	m.naked, m.delay = true, d
 	return nil

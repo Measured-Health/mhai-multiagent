@@ -15,8 +15,8 @@ import (
 )
 
 // ErrEvaluate: the history can't be evaluated as given (a trigger not in
-// it, a value that isn't a finite number). The consumer stops the
-// hospital's evaluation rather than skip a record (design §15.1).
+// it, a value that isn't a finite number). The consumer holds the batch
+// rather than skip a record (design §15.1).
 var ErrEvaluate = errors.New("rules: evaluation error")
 
 // Patient is what population bands need of a patient.

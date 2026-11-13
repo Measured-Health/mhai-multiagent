@@ -18,9 +18,13 @@ package rules
 //   - superseded or withdrawn when an amended, corrected or retracted
 //     result replaces the one a finding used (A30).
 //
-// Any error rolls the batch back (no partial findings, A24), leaves the
-// message unacked and stops the hospital's evaluation for StopFor; the
-// fifth delivery dead-letters dead.v1.<hid>.emr_rules. Findings are
+// Any error rolls the batch back (no partial findings, A24) and leaves the
+// message unacked. An evaluation error holds that batch for StopFor (and
+// pages); other batches of the hospital go on, so one bad batch never
+// delays another patient's critical result. Any other error (the database,
+// a merge racing the batch) retries sooner. The fifth delivery
+// dead-letters dead.v1.<hid>.emr_rules; if that publish fails the message
+// is naked, never dropped. Findings are
 // announced on emr.v1.<hid>.finding by id after the commit; a status not
 // yet announced is announced again by the next message or the sweep.
 
@@ -54,7 +58,7 @@ const (
 	Durable    = "emr_rules"
 	MaxDeliver = 5 // the durable's limit: the 5th failed delivery dead-letters
 	MaxBatch   = 500
-	// StopFor is how long an evaluation error stops a hospital's rules.
+	// StopFor is how long an evaluation error holds its batch.
 	StopFor = 5 * time.Minute
 	// LateAfter: received this long after the value was taken is late.
 	LateAfter   = time.Hour
@@ -66,12 +70,18 @@ const (
 	maxRows = 5000
 )
 
-// ErrStopped: the hospital's evaluation is stopped after an error.
-var ErrStopped = errors.New("rules: the hospital's evaluation is stopped")
+// ErrMerged: a patient of the batch was merged after its observations
+// were read; the batch is retried (the merge moved them to the kept
+// patient).
+var ErrMerged = errors.New("rules: a patient was merged during the batch")
 
 // Metrics are counts only.
 type Metrics struct {
 	Batches, Findings, Historical, Refused, Stopped, Announced, DeadLettered atomic.Int64
+	// NotEvaluable counts mapped observations of a rule set analyte whose
+	// value no numeric rule could read (a unit with no reviewed
+	// conversion, an unreadable comparator): never silently normal.
+	NotEvaluable atomic.Int64
 }
 
 // Msg is what HandleMsg needs of a JetStream message.
@@ -81,7 +91,9 @@ type Msg interface {
 	Ack() error
 	NakWithDelay(time.Duration) error
 	Term() error
-	Deliveries() uint64
+	// Deliveries is the delivery count; an error when it can't be read
+	// (the message is then naked, never dead-lettered on a guess).
+	Deliveries() (uint64, error)
 }
 
 // Engine evaluates and writes findings; it is safe for concurrent use.
@@ -102,8 +114,7 @@ type Engine struct {
 	// Evaluate is the evaluator (Evaluate when nil; tests replace it).
 	Evaluate func(*RuleSet, History, uuid.UUID, time.Time) ([]Finding, error)
 
-	mu      sync.Mutex
-	stopped map[uuid.UUID]time.Time
+	mu sync.Mutex
 }
 
 func (e *Engine) now() time.Time {
@@ -136,31 +147,12 @@ func (e *Engine) evaluate(h History, trig uuid.UUID) ([]Finding, error) {
 	return Evaluate(e.RuleSet, h, trig, e.now())
 }
 
-// stoppedFor is how much longer hospital hid's evaluation is stopped.
-func (e *Engine) stoppedFor(hid uuid.UUID) time.Duration {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	until, ok := e.stopped[hid]
-	if !ok {
-		return 0
-	}
-	if d := until.Sub(e.now()); d > 0 {
-		return d
-	}
-	delete(e.stopped, hid)
-	return 0
-}
-
-func (e *Engine) stop(hid uuid.UUID) {
-	e.mu.Lock()
-	if e.stopped == nil {
-		e.stopped = map[uuid.UUID]time.Time{}
-	}
-	e.stopped[hid] = e.now().Add(StopFor)
-	e.mu.Unlock()
+// held records an evaluation error: the batch waits StopFor; on-call is
+// paged (emr_rules_stopped, design §15.2) with ids only.
+func (e *Engine) held(hid, batch uuid.UUID) {
 	e.metrics().Stopped.Add(1)
-	// emr_rules_stopped pages on-call (design §15.2): the hospital, no data.
-	e.log().Error("rules: evaluation stopped for the hospital", "hospital", hid.String(), "for_s", int(StopFor/time.Second))
+	e.log().Error("rules: evaluation error; batch held", "hospital", hid.String(), "batch", batch.String(),
+		"for_s", int(StopFor/time.Second))
 }
 
 // HandleMsg settles one records.v1.<hid>.created message.
@@ -195,32 +187,48 @@ func (e *Engine) HandleMsg(ctx context.Context, m Msg) {
 		ids = append(ids, id)
 	}
 	if err := e.Handle(ctx, hid, ids); err != nil {
-		if m.Deliveries() >= MaxDeliver {
-			e.deadLetter(ctx, hid, ids[0])
-			_ = m.Term()
+		n, derr := m.Deliveries()
+		if derr != nil {
+			_ = m.NakWithDelay(5 * time.Second)
 			return
 		}
-		delay := e.stoppedFor(hid)
-		if delay <= 0 {
-			delay = time.Duration(m.Deliveries()) * 5 * time.Second
+		if n >= MaxDeliver {
+			if e.deadLetter(ctx, hid, ids[0]) {
+				_ = m.Term()
+				return
+			}
+			// The dead letter wasn't sent: keep the message. Past the
+			// durable's MaxDeliver the server holds it unacked in the stream
+			// (a MAX_DELIVERIES advisory), so it is never lost silently.
+			_ = m.NakWithDelay(30 * time.Second)
+			return
 		}
-		_ = m.NakWithDelay(delay)
+		switch {
+		case errors.Is(err, ErrEvaluate):
+			e.held(hid, ids[0])
+			_ = m.NakWithDelay(StopFor)
+		case errors.Is(err, ErrMerged):
+			_ = m.NakWithDelay(time.Second)
+		default:
+			_ = m.NakWithDelay(time.Duration(n) * 5 * time.Second)
+		}
 		return
 	}
 	_ = m.Ack()
 }
 
-func (e *Engine) deadLetter(ctx context.Context, hid, batch uuid.UUID) {
+func (e *Engine) deadLetter(ctx context.Context, hid, batch uuid.UUID) bool {
 	b, err := proto.Marshal(&emrpb.DeadLetter{Stage: "rules", BatchId: batch.String(), ErrorCode: "rules_failed"})
 	if err == nil {
 		err = e.Pub.Publish(ctx, "dead.v1."+hid.String()+".emr_rules", b, "emr_rules:"+batch.String())
 	}
 	if err != nil {
 		e.log().Error("rules: dead letter not sent", "batch", batch.String())
-		return
+		return false
 	}
 	e.metrics().DeadLettered.Add(1)
 	e.log().Warn("rules: batch dead-lettered", "batch", batch.String())
+	return true
 }
 
 // obsRow is an observation as loaded, with what the consumer needs beyond
@@ -255,20 +263,19 @@ func scanObs(r pgx.CollectableRow) (obsRow, error) {
 }
 
 // Handle evaluates hospital hid's created records (observation ids; other
-// ids are ignored). It returns an error for anything worth retrying; the
-// error also stops the hospital's evaluation.
+// ids are ignored). It returns an error for anything worth retrying
+// (ErrEvaluate for an evaluation error, which holds the batch).
 func (e *Engine) Handle(ctx context.Context, hid uuid.UUID, ids []uuid.UUID) error {
-	if e.stoppedFor(hid) > 0 {
-		return ErrStopped
-	}
 	e.metrics().Batches.Add(1)
 	var critical []uuid.UUID // connections with a new critical, non-historical finding
+	inShadow := true
 	err := dbx.WithHospital(ctx, e.Pool, dbx.EMR, hid, func(tx pgx.Tx) error {
 		critical = nil
 		shadow, err := e.shadow(ctx, tx, hid)
 		if err != nil {
 			return err
 		}
+		inShadow = shadow
 		seps, err := separators(ctx, tx, hid)
 		if err != nil {
 			return err
@@ -308,13 +315,14 @@ func (e *Engine) Handle(ctx context.Context, hid uuid.UUID, ids []uuid.UUID) err
 		} else {
 			e.log().Error("rules: batch failed", "ids", len(ids))
 		}
-		e.stop(hid)
 		return err
 	}
 	if err := e.Announce(ctx, hid); err != nil {
 		return err
 	}
-	if e.Breaker != nil {
+	// The breaker guards alerting: a rule set in shadow raises no alert, so
+	// it never pauses a source (the findings are kept for the review).
+	if e.Breaker != nil && !inShadow {
 		slices.SortFunc(critical, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
 		for _, conn := range slices.Compact(critical) {
 			if _, err := e.Breaker.Observe(ctx, hid, conn); err != nil {
@@ -382,8 +390,17 @@ func (e *Engine) patient(ctx context.Context, tx pgx.Tx, hid, pid uuid.UUID, tri
 	// FOR SHARE: an exclusion or merge (which lock the patient FOR UPDATE)
 	// waits for this batch, or this batch waits and then sees the patient
 	// excluded or merged.
-	if status != "active" {
-		return nil, nil // excluded or merged: nothing evaluates
+	switch status {
+	case "excluded":
+		return nil, nil // excluded: nothing evaluates (its rows are purged)
+	case "merged_into":
+		// Merged after the batch read its observations: the merge moved
+		// them to the kept patient, so evaluate them there on a retry
+		// rather than acknowledge the batch with nothing raised.
+		return nil, ErrMerged
+	case "active":
+	default:
+		return nil, ErrEvaluate
 	}
 	rows, err := tx.Query(ctx, `SELECT `+obsCols+` FROM emr.observations o
 		JOIN emr.raw_records r ON r.hospital_id = o.hospital_id AND r.id = o.raw_id
@@ -446,6 +463,7 @@ func (e *Engine) patient(ctx context.Context, tx pgx.Tx, hid, pid uuid.UUID, tri
 		if t.Superseded {
 			continue // an older version that arrived late: nothing to raise
 		}
+		e.countNotEvaluable(byID[t.ID])
 		fs, err := e.evaluate(h, t.ID)
 		if err != nil {
 			return nil, err
@@ -522,6 +540,25 @@ func (e *Engine) patient(ctx context.Context, tx pgx.Tx, hid, pid uuid.UUID, tri
 		}
 	}
 	return critical, nil
+}
+
+// countNotEvaluable counts (and logs, by id) a mapped observation of a rule
+// set's numeric analyte that carries a value no numeric rule can read: a
+// unit with no reviewed conversion, a comparator it can't convert, text.
+// Its source flag still runs; the count shows the gap instead of hiding it.
+func (e *Engine) countNotEvaluable(o obsRow) {
+	if o.LOINC == "" || slices.Contains([]string{"entered-in-error", "cancelled"}, o.Status) {
+		return
+	}
+	a, ok := e.RuleSet.AnalyteOf(o.LOINC)
+	if !ok || a.Text || o.ValueSI != nil || o.BoundSI != nil {
+		return
+	}
+	if o.ValueNum == nil && o.Comparator == "" && o.ValueText == "" {
+		return
+	}
+	e.metrics().NotEvaluable.Add(1)
+	e.log().Warn("rules: mapped value not evaluable", "observation", o.ID.String(), "loinc", o.LOINC)
 }
 
 // causeJSON is a cause as stored: ids only.
@@ -649,12 +686,12 @@ func (e *Engine) Announce(ctx context.Context, hid uuid.UUID) error {
 // jsMsg adapts a jetstream.Msg.
 type jsMsg struct{ jetstream.Msg }
 
-func (m jsMsg) Deliveries() uint64 {
+func (m jsMsg) Deliveries() (uint64, error) {
 	md, err := m.Metadata()
 	if err != nil {
-		return MaxDeliver
+		return 0, err
 	}
-	return md.NumDelivered
+	return md.NumDelivered, nil
 }
 
 // Run pulls the rules durable until ctx ends. Until core has made the
