@@ -8,7 +8,7 @@
 --   - The team: a platform account's activity flag (users.is_active, only
 --     for accounts with no hospital), its platform role rows (user_roles,
 --     platform_admin and auditor only, of accounts with no hospital), its
---     sessions' revoked_at, its two-step flag (user_mfa.enabled, read only)
+--     sessions' revoked_at, its two-step flag (through a definer: nothing on user_mfa)
 --     and platform_member_versions (the role's version, for "changed by
 --     someone else"). Core serialises every team write with a transaction
 --     advisory lock and checks the last-admin and own-role rules under it.
@@ -59,9 +59,21 @@ CREATE POLICY platform_team_revoke ON sessions FOR UPDATE TO mhai_platform
     USING (revoked_at IS NULL AND EXISTS (SELECT 1 FROM users u WHERE u.id = user_id AND u.hospital_id IS NULL))
     WITH CHECK (revoked_at IS NOT NULL);
 
-GRANT SELECT (user_id, enabled) ON user_mfa TO mhai_platform;
-CREATE POLICY platform_team_mfa ON user_mfa FOR SELECT TO mhai_platform
-    USING (EXISTS (SELECT 1 FROM users u WHERE u.id = user_id AND u.hospital_id IS NULL));
+-- A platform account's two-step flag, through a definer: mhai_platform
+-- holds nothing on user_mfa (its secrets and backup codes).
+CREATE POLICY platform_mfa_owner ON user_mfa FOR SELECT TO mhai_migrate USING (true);
+-- +goose StatementBegin
+CREATE FUNCTION mhai_platform_mfa_enabled(uid uuid) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+    SELECT COALESCE((SELECT m.enabled FROM public.user_mfa m JOIN public.users u ON u.id = m.user_id
+                     WHERE m.user_id = uid AND u.hospital_id IS NULL), false)
+$$;
+-- +goose StatementEnd
+ALTER FUNCTION mhai_platform_mfa_enabled(uuid) OWNER TO mhai_migrate;
+REVOKE ALL ON FUNCTION mhai_platform_mfa_enabled(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION mhai_platform_mfa_enabled(uuid) TO mhai_platform;
 
 ------------------------------------------------------------------------
 -- Legal holds.
@@ -171,8 +183,8 @@ REVOKE INSERT (hospital_id, reference, reason, review_on, placed_by), UPDATE (li
 REVOKE SELECT (reason, review_on, placed_by, version) ON legal_holds FROM mhai_platform;
 ALTER TABLE legal_holds DROP COLUMN version, DROP COLUMN placed_by, DROP COLUMN review_on, DROP COLUMN reason;
 
-DROP POLICY platform_team_mfa ON user_mfa;
-REVOKE SELECT (user_id, enabled) ON user_mfa FROM mhai_platform;
+DROP FUNCTION mhai_platform_mfa_enabled(uuid);
+DROP POLICY platform_mfa_owner ON user_mfa;
 DROP POLICY platform_team_revoke ON sessions;
 REVOKE UPDATE (revoked_at) ON sessions FROM mhai_platform;
 DROP POLICY platform_team_drop ON user_roles;

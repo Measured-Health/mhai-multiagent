@@ -68,11 +68,15 @@ func TestPlatformAdminWritesScoped(t *testing.T) {
 			t.Errorf("%s on a hospital account: %d rows, %v", q, n, err)
 		}
 	}
+	// Two-step through the definer only: a hospital account reads false.
 	if err := as(func(tx pgx.Tx) error {
-		var n int
-		return tx.QueryRow(ctx, `SELECT count(*) FROM user_mfa WHERE user_id = $1`, clin).Scan(&n)
+		var on bool
+		if err := tx.QueryRow(ctx, `SELECT mhai_platform_mfa_enabled($1)`, clin).Scan(&on); err != nil || on {
+			t.Errorf("a hospital account's two-step: %v %v", on, err)
+		}
+		return nil
 	}); err != nil {
-		t.Errorf("reading user_mfa: %v", err)
+		t.Error(err)
 	}
 	if _, err := exec(`INSERT INTO user_roles (user_id, role) VALUES ($1, 'platform_admin')`, clin); pgCode(err) != permissionDenied {
 		t.Errorf("a platform role for a hospital account: %v", err)

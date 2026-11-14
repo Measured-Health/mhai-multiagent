@@ -85,7 +85,7 @@ type TeamMember struct {
 const teamSelect = `SELECT u.id, u.display_name, u.email::text,
 		CASE WHEN EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = u.id AND r.role = 'platform_admin')
 		     THEN 'platform_admin' ELSE 'auditor' END,
-		COALESCE((SELECT m.enabled FROM user_mfa m WHERE m.user_id = u.id), false),
+		mhai_platform_mfa_enabled(u.id),
 		u.last_login_at,
 		COALESCE((SELECT v.version FROM platform_member_versions v WHERE v.user_id = u.id), 1)
 	FROM users u
@@ -331,6 +331,12 @@ func (d Deps) teamPatch(w http.ResponseWriter, r *http.Request) {
 		if sids, err = revokeMember(r.Context(), tx, id); err != nil {
 			return err
 		}
+		// A demoted admin is no longer one of a lift's two people.
+		if m.Role == authz.RolePlatformAdmin {
+			if err := cancelMemberLifts(r.Context(), tx, p, rid, id); err != nil {
+				return err
+			}
+		}
 		if err := bumpMember(r.Context(), tx, id); err != nil {
 			return err
 		}
@@ -405,6 +411,9 @@ func (d Deps) teamDelete(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if sids, err = revokeMember(r.Context(), tx, id); err != nil {
+			return err
+		}
+		if err := cancelMemberLifts(r.Context(), tx, p, rid, id); err != nil {
 			return err
 		}
 		if err := bumpMember(r.Context(), tx, id); err != nil {

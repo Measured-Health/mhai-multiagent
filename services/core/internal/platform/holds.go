@@ -17,7 +17,9 @@ package platform
 //   - POST /platform/legal-holds/{id}/lift/approve {version, code}: a
 //     different platform admin, with step-up, lifts the hold (409
 //     same_person for the requester, 409 expired once it lapsed, 409
-//     conflict on a stale version).
+//     conflict on a stale version or when the requester is no longer an
+//     active platform admin). Removing or demoting a platform admin
+//     cancels their open requests (team.go).
 //   - POST /platform/legal-holds/{id}/lift/cancel {version}: either, no
 //     step-up.
 //   - PATCH /platform/legal-holds/{id} and POST .../lift/undo: 501.
@@ -750,6 +752,43 @@ func (d Deps) holdLift(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, out)
 }
 
+// cancelMemberLifts cancels every open lift request of member (removed or
+// demoted from platform admin in the same transaction), each audited
+// legal_hold.lift_cancelled by the admin who changed the team.
+func cancelMemberLifts(ctx context.Context, tx pgx.Tx, p authz.Principal, rid string, member uuid.UUID) error {
+	rows, err := tx.Query(ctx, `UPDATE legal_hold_lifts SET cancelled_by = $2, cancelled_at = now()
+		WHERE requested_by = $1 AND approved_at IS NULL AND cancelled_at IS NULL RETURNING id, hold_id`, member, p.UserID)
+	if err != nil {
+		return err
+	}
+	type ended struct{ lift, hold uuid.UUID }
+	var all []ended
+	for rows.Next() {
+		var e ended
+		if err := rows.Scan(&e.lift, &e.hold); err != nil {
+			rows.Close()
+			return err
+		}
+		all = append(all, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, e := range all {
+		var hospital uuid.UUID
+		if err := tx.QueryRow(ctx, `UPDATE legal_holds SET version = version + 1 WHERE id = $1 RETURNING hospital_id`,
+			e.hold).Scan(&hospital); err != nil {
+			return err
+		}
+		if err := holdAudit(ctx, tx, p, rid, "legal_hold.lift_cancelled", e.hold, hospital,
+			map[string]any{"lift_id": e.lift.String()}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type versionBody struct {
 	Version    *int   `json:"version"`
 	MFACode    string `json:"mfa_code"`
@@ -806,6 +845,12 @@ func (d Deps) holdApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	check := func(tx pgx.Tx) (lockedHold, uuid.UUID, error) {
+		// The team lock, shared: a removal or demotion of the requester
+		// (which cancels their requests) either committed before this
+		// reads, or waits for it.
+		if _, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock_shared(hashtext('mhai.platform_team'))`); err != nil {
+			return lockedHold{}, uuid.Nil, err
+		}
 		h, lift, by, expires, err := openLift(r.Context(), tx, id, *b.Version)
 		switch {
 		case err != nil:
@@ -814,6 +859,18 @@ func (d Deps) holdApprove(w http.ResponseWriter, r *http.Request) {
 			return h, lift, errSamePerson
 		case !expires.After(d.now()):
 			return h, lift, errHoldExpired
+		}
+		// The requester must still be an active platform admin: a request
+		// of someone deactivated, removed or demoted since is not one of the
+		// two people.
+		var still bool
+		if err := tx.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 FROM users u WHERE u.id = $1 AND u.is_active
+			AND u.hospital_id IS NULL AND EXISTS (SELECT 1 FROM user_roles x WHERE x.user_id = u.id AND x.role = 'platform_admin'))`,
+			by).Scan(&still); err != nil {
+			return h, lift, err
+		}
+		if !still {
+			return h, lift, errHoldConflict
 		}
 		return h, lift, nil
 	}

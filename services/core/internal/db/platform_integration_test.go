@@ -105,7 +105,6 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"legal_hold_lifts":         "00037: the two-person lift requests (SELECT, column INSERT, column UPDATE of an open one)",
 		"platform_member_versions": "00037: a platform member's version, for the team's role changes (SELECT, INSERT, UPDATE (version))",
 		"platform_email_prefs":     "00037: a platform admin's analytics e-mail mode (SELECT, INSERT, UPDATE (mode, version))",
-		"user_mfa":                 "00037: the two-step flag of platform accounts only, for the team list (column SELECT of user_id, enabled)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `
@@ -155,6 +154,8 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 	// token usage of one hospital (00018).
 	wantFuncs := map[string][2]string{
 		"audit_chain_head":             {"OUT id bigint, OUT hash text", "record"},
+		"mhai_hold_lift_approved":      {"hid uuid", "boolean"},
+		"mhai_platform_mfa_enabled":    {"uid uuid", "boolean"},
 		"mhai_feedback_buffer_waiting": {"", "bigint"},
 		"mhai_cloud_usage":             {"p_hospital uuid", "TABLE(month date, used bigint, reserved bigint)"},
 		"emr_platform_health":          {"", "TABLE(connection_id uuid, health text, last_sync_at timestamp with time zone, last_sync_ok boolean, last_sync_records integer, errors_24h bigint)"},

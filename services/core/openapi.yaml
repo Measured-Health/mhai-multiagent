@@ -2831,7 +2831,9 @@ paths:
       description: |
         A different platform admin, with step-up. The requester is 409
         `same_person` and a lapsed request 409 `expired` (both before the code);
-        no request, a lifted hold or a stale `version` 409 `conflict`. The hold is
+        no request, a lifted hold, a stale `version` or a requester who is no
+        longer an active platform admin 409 `conflict`. Removing or demoting
+        a platform admin cancels their open requests. The hold is
         lifted at once (no grace period: `released_on` is the approval). One
         `legal_hold.lifted` entry. Added in 1.26.0.
       tags: [platform]
