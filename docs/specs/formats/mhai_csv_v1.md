@@ -21,7 +21,7 @@ The reader fails closed. Anything this document doesn't allow is refused, never 
 
 ## File names
 
-`<kind>-<YYYYMMDD>T<HHMMSS>Z[-<n>].csv`, for example `results-20261114T060000Z.csv` or `results-20261114T060000Z-2.csv`. The time is the export's, in UTC. Files are read in time order, then kind order (`patients`, `encounters`, `results`, `vitals`, `medications`), then `n`. **Any other file in the folder is left alone**: never read, never moved, counted only. Write each file under another name (for example with a `.part` suffix) and rename it when complete, so a half-written file is never read.
+`<kind>-<YYYYMMDD>T<HHMMSS>Z[-<n>].csv`, for example `results-20261114T060000Z.csv` or `results-20261114T060000Z-2.csv`. The time is the export's, in UTC. Files are read in time order, then kind order (`patients`, `encounters`, `results`, `vitals`, `medications`), then `n`. **Any other file in the folder is left alone**: never read, never moved, and reported to the platform team as a count (never by name), except names ending `.part` or `.tmp` or starting with a dot, which are taken as still being written. Write each file under such a name and rename it when complete. A file that is shorter than listed or doesn't end with a line break is left for the next poll and reported. A file whose name is already in `processed/` (a re-export under the same name) is moved beside it with a suffix, never over it.
 
 A file name must never contain a patient's name or number.
 
@@ -31,10 +31,10 @@ A file name must never contain a patient's name or number.
 - An empty cell means "not given".
 - **Times:** ISO 8601 with seconds and an offset: `2026-11-14T05:10:00+01:00` or `2026-11-14T04:10:00Z` (fractions of a second allowed). A time without an offset is refused, never read in a guessed zone. A time more than 10 minutes in the future is refused later, when normalised.
 - **Dates** (birth date only): `YYYY-MM-DD`.
-- **Ids** (`source_*_id`, `replaced_by`, `mrn`): 1 to 128 characters of letters, digits and `. _ : / -`, starting with a letter or digit. An id is stable: the same thing keeps its id across files.
+- **Ids** (`source_*_id`, `replaced_by`; `mrn` at most 64): 1 to 128 characters of letters, digits and `. _ : / -`, starting with a letter or digit. An id is stable: the same thing keeps its id across files.
 - **Codes** (`local_code`): 1 to 64 characters of letters, digits and `. _ : / + % -`, starting with a letter or digit. MHAI maps each local code to LOINC (results, vitals) or ATC (medications) through the connection's reviewed map; a code not in the map is kept and flagged "not standardised", never guessed.
 - **Values:** a decimal with `.` as the decimal point, an optional leading `-`, and an optional comparator `<`, `<=`, `>`, `>=` (`<0.5`). No thousands separator, no exponent, no unit in the value, no spaces.
-- **Units:** as the source writes them (`mmol/L`, `mg/dL`, `/min`), up to 40 characters, no spaces; mapped to UCUM later.
+- **Units:** as the source writes them (`mmol/L`, `mg/dL`, `µmol/L`, `/min`), up to 40 bytes of UTF-8, no spaces or control characters, not starting with `=`, `+`, `-` or `@`; mapped to UCUM later.
 - **Text** (names, labels): any text; markup and control characters are removed, and a cell starting with `=`, `+`, `-` or `@` is stored with a leading `'` so no spreadsheet runs it.
 - **`updated_at`** (every kind, required): when the source last changed the row. Rows are versioned by content: the same row exported again is ignored; a changed row (an amended result) is a new version, and the newest `updated_at` wins.
 
