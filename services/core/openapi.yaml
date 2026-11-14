@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.31.0"
+  version: "1.33.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -2540,6 +2540,365 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/audit/named-access:
+    get:
+      operationId: listNamedAccess
+      summary: The named-view entries, each with its letter (off by default).
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        `analysis.named_viewed` and `analysis.named_view_failed` entries,
+        newest first, 50 a page, each as the audit catalogue sends it (named
+        entries are sent bare until mhai-web's named-view facts are agreed)
+        plus its `letter`. The cursor is bound to the session and the
+        filters. Every page is recorded (`audit.viewed {list: named_access}`,
+        deduplicated as the events list). 404 `not_found` until
+        CORE_AUDIT_EXPORTS is on. Added in 1.33.0.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: hospital, in: query, schema: { type: string, format: uuid } }
+        - { name: person, in: query, schema: { type: string, format: uuid } }
+        - { name: clearance, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: cursor, in: query, schema: { type: string, pattern: "^[0-9a-f]{48}$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: A page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, next_cursor]
+                additionalProperties: false
+                properties:
+                  events:
+                    type: array
+                    maxItems: 100
+                    items:
+                      allOf:
+                        - $ref: "#/components/schemas/AuditEntry"
+                        - type: object
+                          required: [letter]
+                          properties:
+                            letter: { $ref: "#/components/schemas/AuditLetter" }
+                  next_cursor: { type: string, nullable: true }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/audit/exports:
+    get:
+      operationId: listAuditExports
+      summary: The export records, newest first (off by default).
+      description: |
+        Platform admins and auditors. 50 a page; the cursor is the last
+        record's id. Recorded as `audit.searched {searched_kind: export}`,
+        once per session per 5 minutes. Never a pid. 404 `not_found` until
+        CORE_AUDIT_EXPORTS is on. Added in 1.33.0.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, internal_error]
+      parameters:
+        - { name: cursor, in: query, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: A page of records.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [exports, next_cursor]
+                additionalProperties: false
+                properties:
+                  exports: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/AuditExportRecord" } }
+                  next_cursor: { type: string, nullable: true }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+    post:
+      operationId: createAuditExport
+      summary: Export audit entries (platform admins and auditors, step-up; off by default).
+      description: |
+        `kind` `events` (the audit list's filters, without `q`) or
+        `named_access` (`hospital` required; `person`, `clearance`, `from`,
+        `to`). `reason` one of the contract's; `other` needs a `note` (1–200
+        characters, no control character, no pseudonym); `reference` up to
+        60 of letters, digits, space and `._/:-`. 10 an hour per person
+        (reserved before the check). In one transaction: the snapshot, the
+        record, the rows (over 50,000: 422 `too_many_rows` with `rows`, and
+        nothing kept), the file built for its checksum and dropped (no file
+        is kept; it is built again at its one download), and the entry
+        (`audit.exported` or `audit.named_access_exported`; a named
+        export's before any pseudonym is read). A named export citing a
+        letter core holds no copy of is 503 `unavailable`. `capped` is
+        always false. 404 `not_found` until CORE_AUDIT_EXPORTS is on.
+        Added in 1.33.0.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, validation_failed, too_many_rows, rate_limited, not_ready, unavailable, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, filters, reason]
+              additionalProperties: false
+              properties:
+                kind: { type: string, enum: [events, named_access] }
+                filters: { type: object }
+                reason: { type: string, enum: [legal_request, hospital_request, regulator_request, internal_review, security_investigation, other] }
+                note: { type: string, minLength: 1, maxLength: 200, nullable: true }
+                reference: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9 ._/:-]{0,59}$", nullable: true }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [export_id, rows, capped, checksum, expires_at, file_name]
+                additionalProperties: false
+                properties:
+                  export_id: { type: string, format: uuid }
+                  rows: { type: integer, minimum: 0, maximum: 50000 }
+                  capped: { type: boolean }
+                  checksum: { type: string, pattern: "^[0-9a-f]{64}$" }
+                  expires_at: { type: string, format: date-time }
+                  file_name: { type: string, pattern: "^[A-Za-z0-9._-]{1,120}$" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/audit/exports/{id}/file:
+    get:
+      operationId: downloadAuditExport
+      summary: An export's file, once, to its owner, within 15 minutes (off by default).
+      description: |
+        Anyone but the owner: 403 `forbidden`, recorded as
+        `audit.export_download_refused {not_owner}`. Downloaded already or
+        past `expires_at`: 410 `gone`, recorded with `gone`. Otherwise, in
+        one transaction: the record marked downloaded, its
+        `audit.export_downloaded` entry, and the file rebuilt from the
+        record's snapshot and checked against its checksum (503
+        `unavailable`, not spent, when it differs). `text/csv`, or
+        `application/zip` for a named export (the CSV and the cited
+        letters' pages). 30 a minute per person. 404 `not_found` until
+        CORE_AUDIT_EXPORTS is on. Added in 1.33.0.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, gone, rate_limited, not_ready, unavailable, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The file.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            text/csv: { schema: { type: string } }
+            application/zip: { schema: { type: string, format: binary } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "410": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /platform/audit/legal-references:
+    post:
+      operationId: createLegalReference
+      summary: Bind a named export to one legal reference (platform admins, step-up; off by default).
+      description: |
+        Design §8.9 step 1. The export must be the caller's own
+        `named_access` export with 1–200 rows (more: 422 `too_many_rows`
+        with `rows`), not yet bound (409 `conflict`; a reference also binds
+        one export only). `admins` are 1–3 distinct active hospital admins
+        of the export's hospital with two-step (422 `not_eligible`).
+        Recorded as `legal_reference.created` (the admins by id). 10 an hour
+        per person. 404 `not_found` until CORE_AUDIT_EXPORTS is on. Added in
+        1.33.0.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, validation_failed, too_many_rows, not_eligible, rate_limited, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [export_id, reference, admins]
+              additionalProperties: false
+              properties:
+                export_id: { type: string, format: uuid }
+                reference: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9 ._/:-]{0,59}$" }
+                admins: { type: array, minItems: 1, maxItems: 3, items: { type: string, format: uuid } }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The reference.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, export_id, reference, admins, created_at]
+                additionalProperties: false
+                properties:
+                  id: { type: string, format: uuid }
+                  export_id: { type: string, format: uuid }
+                  reference: { type: string }
+                  admins: { type: array, items: { type: string, format: uuid } }
+                  created_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /hospital/legal-resolutions:
+    get:
+      operationId: listLegalReferences
+      summary: The caller's open legal references (hospital admins).
+      description: |
+        The references naming the caller at this hospital, not yet used.
+        Analysis off, or CORE_AUDIT_EXPORTS off: 404; named access off: 403
+        `named_access_off`. Added in 1.33.0.
+      tags: [analysis]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, validation_failed, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The references.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [references]
+                additionalProperties: false
+                properties:
+                  references:
+                    type: array
+                    maxItems: 50
+                    items:
+                      type: object
+                      required: [id, reference, rows, created_at]
+                      additionalProperties: false
+                      properties:
+                        id: { type: string, format: uuid }
+                        reference: { type: string }
+                        rows: { type: integer, minimum: 1, maximum: 200 }
+                        created_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+    post:
+      operationId: resolveLegalReference
+      summary: Resolve a legal reference once, in the app (a named hospital admin, covered, step-up).
+      description: |
+        Design §8.9 step 2. `Idempotency-Key` required; no generic
+        idempotency store (the reply holds names). Only a hospital admin
+        named on the reference, at its hospital (anyone else 404), covered
+        by a letter now (403 `named_access_off`, `not_cleared`,
+        `clearance_ended`, `forbidden`). Once only (409 `already_used`); the
+        same admin with the same key within 15 minutes resolves again, each
+        time audited, at most 3 times. 5 a minute per person. The flagged
+        `analysis.legal_resolved` commits before names are read; names and
+        MRNs are sent in this reply only, never as a file, and kept nowhere
+        (503 `unavailable` and `analysis.legal_resolve_failed` when they
+        can't be read). A refusal of a reference the caller is named on is
+        recorded (`analysis.legal_resolve_refused`). No pseudonym. Never
+        cached. 404 while CORE_AUDIT_EXPORTS is off. Added in 1.33.0.
+      tags: [analysis]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, not_cleared, clearance_ended, already_used, validation_failed, rate_limited, not_ready, unavailable, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [legal_reference_id]
+              additionalProperties: false
+              properties:
+                legal_reference_id: { type: string, format: uuid }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The resolved rows.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [legal_reference_id, rows]
+                additionalProperties: false
+                properties:
+                  legal_reference_id: { type: string, format: uuid }
+                  rows:
+                    type: array
+                    maxItems: 200
+                    items:
+                      type: object
+                      required: [export_row_ref, period, name, mrn]
+                      additionalProperties: false
+                      properties:
+                        export_row_ref: { type: string, pattern: "^[0-9a-f]{24}$" }
+                        period:
+                          type: object
+                          required: [level, start]
+                          additionalProperties: false
+                          properties:
+                            level: { type: string, enum: [week, month, quarter] }
+                            start: { type: string, format: date }
+                        name: { type: string }
+                        mrn: { type: string, nullable: true }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
   /platform/audit/{id}/patients:
     get:
       operationId: getAuditEventPatients
@@ -5159,6 +5518,9 @@ components:
             - not_cleared
             - clearance_ended
             - idempotency_mismatch
+            - too_many_rows
+            - gone
+            - already_used
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -6869,7 +7231,67 @@ components:
               description: On a drill-down entry, how many rows its list sent (since 1.19.0); null otherwise.
               properties:
                 count: { type: integer, minimum: 1, maximum: 200 }
-            letter: { type: object, nullable: true }
+            letter:
+              type: object
+              nullable: true
+              description: The letter a named entry names (since 1.33.0); null otherwise. As AuditLetter.
+              properties:
+                id: { type: string, format: uuid }
+                status: { type: string, enum: [checking, refused, waiting, active, rejected, ended, revoked] }
+                valid_from: { type: string, format: date }
+                valid_to: { type: string, format: date }
+                verified_by:
+                  type: object
+                  nullable: true
+                  properties:
+                    id: { type: string }
+                    name: { type: string }
+    AuditLetter:
+      type: object
+      nullable: true
+      description: A clearance letter as the audit shows it (since 1.33.0). valid_from is the letter's date, valid_to its end date.
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [checking, refused, waiting, active, rejected, ended, revoked] }
+        valid_from: { type: string, format: date }
+        valid_to: { type: string, format: date }
+        verified_by:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            name: { type: string }
+    AuditExportRecord:
+      type: object
+      description: An export record (since 1.33.0). Never a pid.
+      required: [id, kind, by, at, reason, note, reference, filters, filter_names, rows, capped, checksum, expires_at, downloaded_at]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [events, named_access] }
+        by:
+          type: object
+          required: [id, name]
+          properties:
+            id: { type: string }
+            name: { type: string }
+        at: { type: string, format: date-time }
+        reason: { type: string, enum: [legal_request, hospital_request, regulator_request, internal_review, security_investigation, other] }
+        note: { type: string, nullable: true }
+        reference: { type: string, nullable: true }
+        filters: { type: object }
+        filter_names:
+          type: object
+          required: [hospital, person, clearance]
+          properties:
+            hospital: { type: string, nullable: true }
+            person: { type: string, nullable: true }
+            clearance: { type: string, nullable: true }
+        rows: { type: integer, minimum: 0, maximum: 50000 }
+        capped: { type: boolean }
+        checksum: { type: string, pattern: "^[0-9a-f]{64}$" }
+        expires_at: { type: string, format: date-time }
+        downloaded_at: { type: string, format: date-time, nullable: true }
     AlertSettingsOut:
       type: object
       required: [connection, units, categories, recipients, updated_by, updated_at, version]

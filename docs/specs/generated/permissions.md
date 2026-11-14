@@ -57,6 +57,8 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/hospital/corrections/{id}/assign` | signed in | `hospital_admin` | clinical | yes | no | yes |
 | GET | `/api/v1/hospital/corrections/{id}/eligible-reviewers` | signed in | `hospital_admin` | clinical | yes | no | no |
 | POST | `/api/v1/hospital/corrections/{id}/remind` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| GET | `/api/v1/hospital/legal-resolutions` | signed in | `hospital_admin` | clinical | yes | no | no |
+| POST | `/api/v1/hospital/legal-resolutions` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | POST | `/api/v1/hospital/patient-exclusions` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | GET | `/api/v1/hospital/patient-matches` | signed in | `hospital_admin` | clinical | yes | no | no |
 | POST | `/api/v1/hospital/patient-matches/{id}/confirm` | signed in | `hospital_admin` | clinical | yes | yes | yes |
@@ -86,7 +88,12 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/platform/analytics/changes/{id}/series` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/analytics/hospitals/{id}/series` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/audit` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/audit/exports` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| POST | `/api/v1/platform/audit/exports` | signed in | `platform_admin`, `auditor` | platform | yes | no | auditor write |
+| GET | `/api/v1/platform/audit/exports/{id}/file` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/audit/hospitals` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| POST | `/api/v1/platform/audit/legal-references` | signed in | `platform_admin` | platform | yes | yes | yes |
+| GET | `/api/v1/platform/audit/named-access` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/audit/people` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | POST | `/api/v1/platform/audit/undisplayable` | signed in | `platform_admin`, `auditor` | platform | yes | no | auditor write |
 | POST | `/api/v1/platform/audit/verify` | signed in | `platform_admin`, `auditor` | platform | yes | no | auditor write |
