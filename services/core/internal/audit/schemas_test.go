@@ -392,6 +392,47 @@ func TestAuditSchemaRuleSetSwitched(t *testing.T) {
 	}
 }
 
+// A21 (EMR plan Tasks 31-34): the alert actions carry ids, closed codes,
+// counts and bools only; a name, an MRN, a note or a free-text reason is
+// refused.
+func TestAuditSchemasAlerts(t *testing.T) {
+	aid := uuid.NewString()
+	good := map[string]map[string]any{
+		"alert_settings.units_changed":      {"covered": 3, "units": 4},
+		"alert_settings.rules_changed":      {"levels_changed": 2},
+		"alert_settings.recipients_changed": {"recipients": 1, "queue": true, "requeued": 0},
+		"alert.acknowledged":                {"alert_id": aid},
+		"alert.dismissed":                   {"alert_id": aid, "reason": "already_known"},
+		"alert.withdrawn":                   {"alert_id": aid, "reason": "excluded"},
+		"alert.requeued":                    {"alert_ids": []any{aid}, "reason": "role_removed"},
+		"alerts.read":                       {"alert_ids": []any{aid}, "status": "new", "source": true, "page": false},
+		"emr.patient_matches_read":          {"match_ids": []any{aid}},
+		"notification_settings.changed":     {"alert_popups": false, "correction_popups": true},
+	}
+	for action, p := range good {
+		if err := audit.CheckActionPayload(action, p); err != nil {
+			t.Errorf("%s: %v", action, err)
+		}
+		bad := maps.Clone(p)
+		bad["note"] = "SYNTHETIC NOTE"
+		if err := audit.CheckActionPayload(action, bad); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s with a note: %v", action, err)
+		}
+	}
+	for action, p := range map[string]map[string]any{
+		"alert.dismissed": {"alert_id": aid, "reason": "the patient is fine"},
+		"alert.requeued":  {"alert_ids": []any{"Synthetic Patient"}, "reason": "user_deactivated"},
+		"alerts.read":     {"alert_ids": []any{aid}, "source": "Main record", "page": false},
+	} {
+		if err := audit.CheckActionPayload(action, p); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s accepted %v: %v", action, p, err)
+		}
+	}
+	if err := audit.CheckActionPayload("alert.requeued", map[string]any{"payload_refused": true}); err != nil {
+		t.Errorf("refused shape: %v", err)
+	}
+}
+
 // The analyst grant (plan Task 16): the change id, the channel and, for a
 // removal, the reason; never a name, an email or free text.
 func TestAnalystActionsSchemas(t *testing.T) {

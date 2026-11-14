@@ -307,6 +307,20 @@ var Catalogue = map[string]Entry{
 	"emr.patients_merged":        withheld(),
 	"emr.patient_match_rejected": withheld(),
 	"emr.patient_excluded":       withheld(),
+	"emr.patient_matches_read":   withheld(),
+
+	// Alerts (EMR plan Tasks 31-34): the settings saves and an
+	// acknowledgement have mhai-web kinds (Plan 13), with no target; the
+	// rest have none yet and are sent bare.
+	"alert_settings.units_changed":      {Type: "alerts", Kind: "alert_units_changed"},
+	"alert_settings.rules_changed":      {Type: "alerts", Kind: "alert_rules_changed"},
+	"alert_settings.recipients_changed": {Type: "alerts", Kind: "alert_recipients_changed"},
+	"alert.acknowledged":                {Type: "alerts", Kind: "alert_acknowledged"},
+	"alert.dismissed":                   withheld(),
+	"alert.withdrawn":                   withheld(),
+	"alert.requeued":                    withheld(),
+	"alerts.read":                       withheld(),
+	"notification_settings.changed":     withheld(),
 
 	// Plan 7c-3: follow-ups on What changed. The target is the change; the
 	// note is never in the payload, so none is sent.

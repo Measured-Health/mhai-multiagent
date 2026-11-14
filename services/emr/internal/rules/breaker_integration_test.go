@@ -151,6 +151,7 @@ func TestBreakerNeedsBothMultipleAndFloor(t *testing.T) {
 // finding made before the trip is announced, and the source is paused.
 func TestConsumerBreakerAnnouncesThenPauses(t *testing.T) {
 	f := newFixture(t)
+	f.shadowOnly(t)
 	ctx := context.Background()
 	f.eng.Breaker = &Breaker{Pool: f.pool, Pub: f.pub, Multiple: 1, FloorCritical: 2}
 	recs := func(prefix string) []connector.RawRecord {
@@ -172,8 +173,9 @@ func TestConsumerBreakerAnnouncesThenPauses(t *testing.T) {
 	if err := f.eng.Handle(ctx, f.hospital, f.ingest(t, false, recs("a-")...)); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(f.pub.on(".finding")); n != 10 {
-		t.Fatalf("%d announced, want 10", n)
+	// The five shadow findings are never announced; the five live ones are.
+	if n := len(f.pub.on(".finding")); n != 5 {
+		t.Fatalf("%d announced, want 5", n)
 	}
 	if !f.paused(t) || len(f.pub.on(".signal")) != 1 {
 		t.Fatalf("paused %v signals %d", f.paused(t), len(f.pub.on(".signal")))

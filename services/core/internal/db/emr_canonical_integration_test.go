@@ -241,8 +241,14 @@ func TestEMRCanonicalRLS(t *testing.T) {
 	}); err != nil || n != 1 {
 		t.Errorf("gateway as A: %d rows %v, want 1", n, err)
 	}
+	// 00029: the match columns a match card shows, its hospital only.
+	if err := asRoleIn(ctx, pool, "mhai_gateway", a, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM emr.possible_matches WHERE hospital_id <> $1`, a).Scan(&n)
+	}); err != nil || n != 0 {
+		t.Errorf("gateway sees %d of another hospital's matches: %v", n, err)
+	}
 	for _, q := range []string{`SELECT count(*) FROM emr.raw_records`, `SELECT count(*) FROM emr.patient_links`,
-		`SELECT count(*) FROM emr.possible_matches`, `SELECT count(*) FROM emr.merges`, `SELECT count(*) FROM emr.unmapped_codes`,
+		`SELECT count(*) FROM emr.merges`, `SELECT count(*) FROM emr.unmapped_codes`,
 		`SELECT count(raw_id) FROM emr.observations`, `SELECT count(*) FROM emr.patients WHERE origin = 'connector'`} {
 		err := asRoleIn(ctx, pool, "mhai_gateway", a, func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q); return err })
 		if pgCode(err) != permissionDenied {
@@ -437,7 +443,8 @@ func TestExclusionPurgesAtOnce(t *testing.T) {
 	exclude := func(hospital, pid uuid.UUID, reason string) ([5]int64, error) {
 		var n [5]int64
 		err := asRoleIn(ctx, pool, "mhai_gateway", hospital, func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT * FROM emr_exclude_patient($1, $2)`, pid, reason).Scan(&n[0], &n[1], &n[2], &n[3], &n[4])
+			return tx.QueryRow(ctx, `SELECT observations, medications, encounters, raw_records, matches FROM emr_exclude_patient($1, $2)`,
+				pid, reason).Scan(&n[0], &n[1], &n[2], &n[3], &n[4])
 		})
 		return n, err
 	}

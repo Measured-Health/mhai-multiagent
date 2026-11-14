@@ -14,6 +14,10 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 
 | Method | Path | Access | Roles | Audience | Two-step session | Step-up | Write |
 |---|---|---|---|---|---|---|---|
+| GET | `/api/v1/alerts` | signed in | `clinician` | clinical | no | no | no |
+| GET | `/api/v1/alerts/unread-count` | signed in | `clinician` | clinical | no | no | no |
+| POST | `/api/v1/alerts/{id}/acknowledge` | signed in | `clinician` | clinical | no | no | yes |
+| POST | `/api/v1/alerts/{id}/dismiss` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/analysis/filters` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
 | GET | `/api/v1/analysis/patients` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
 | GET | `/api/v1/analysis/{view}` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
@@ -38,6 +42,14 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/feedback` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/feedback/stats/mine` | signed in | `clinician` | clinical | no | no | no |
 | GET | `/api/v1/healthz` | public | - | - | no | no | no |
+| GET | `/api/v1/hospital/alert-settings` | signed in | `hospital_admin` | clinical | yes | no | no |
+| PATCH | `/api/v1/hospital/alert-settings` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| POST | `/api/v1/hospital/patient-exclusions` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| GET | `/api/v1/hospital/patient-matches` | signed in | `hospital_admin` | clinical | yes | no | no |
+| POST | `/api/v1/hospital/patient-matches/{id}/confirm` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| POST | `/api/v1/hospital/patient-matches/{id}/reject` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| GET | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | no |
+| PATCH | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/platform/analytics` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | DELETE | `/api/v1/platform/analytics/changes/{id}/follow-up` | signed in | `platform_admin` | platform | yes | no | yes |
 | PUT | `/api/v1/platform/analytics/changes/{id}/follow-up` | signed in | `platform_admin` | platform | yes | no | yes |

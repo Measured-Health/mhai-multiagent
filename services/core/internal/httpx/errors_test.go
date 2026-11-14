@@ -40,6 +40,7 @@ func TestCodesCatalogue(t *testing.T) {
 		"self_approval": 403, "already_decided": 409,
 		"not_tested": 409, "hospital_removed": 409, "no_type": 422,
 		"too_many_filters": 422, "invalid_range": 422, "too_small": 422, "level_not_supported": 422,
+		"already_handled": 409, "no_recipients": 422,
 	}
 	if len(Codes) != len(want) {
 		t.Fatalf("Codes has %d entries, want %d", len(Codes), len(want))
@@ -293,5 +294,33 @@ func TestTwoPersonCodes(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil || rec.Code != want[0] || p["code"] != code || p["title"] != want[1] {
 			t.Errorf("%s: %d %s", code, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+// EMR alerts (design §12.5): the 409 already_handled body carries the
+// alert's status (as mhai-web's AlertHandledOut reads it), who and when;
+// the code, type and request id can't be replaced.
+func TestErrorFields(t *testing.T) {
+	rec := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ErrorFields(w, r, "already_handled", map[string]any{"status": "dismissed", "handled_at": "2026-11-14T09:00:00Z",
+			"handled_by": map[string]any{"display_name": "Synthetic Clinician"}})
+	}), bffRequest(http.MethodPost, "/api/v1/probe", ""))
+	var p map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil || rec.Code != 409 {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if p["code"] != "already_handled" || p["title"] != "Already handled" || p["handled_at"] != "2026-11-14T09:00:00Z" ||
+		rec.Header().Get("Content-Type") != "application/problem+json" {
+		t.Fatalf("body %v", p)
+	}
+	if p["status"] != "dismissed" {
+		t.Fatalf("status member %v", p["status"])
+	}
+	rec = serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ErrorFields(w, r, "already_handled", map[string]any{"code": "x", "type": "x", "request_id": "x"})
+	}), bffRequest(http.MethodPost, "/api/v1/probe", ""))
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil || p["code"] != "already_handled" || p["type"] == "x" ||
+		p["request_id"] == "x" {
+		t.Fatalf("protected members replaced: %v", p)
 	}
 }
