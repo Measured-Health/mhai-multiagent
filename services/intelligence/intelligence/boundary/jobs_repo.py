@@ -163,7 +163,7 @@ class Decision:
     egress: str = "none"
     cloud_outcome: str | None = None
     # The cited reference sources (boundary/cited_sources.py): title, link
-    # and source credit of each cited shared reference row (00040).
+    # and source credit of each cited shared reference row (00041).
     cited_sources: Sequence[Mapping[str, Any]] = ()
 
 

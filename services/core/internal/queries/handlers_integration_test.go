@@ -579,7 +579,7 @@ func TestStatusMapping(t *testing.T) {
 	if ids, _ := r.body["cited_chunk_ids"].([]any); len(ids) != 2 {
 		t.Errorf("cited_chunk_ids %v", r.body["cited_chunk_ids"])
 	}
-	// Reference library PR 3 (1.29.0): the cited sources, only for cited ids.
+	// Reference library PR 3 (1.30.0): the cited sources, only for cited ids.
 	sources, _ := r.body["cited_sources"].([]any)
 	if len(sources) != 1 {
 		t.Fatalf("cited_sources %v", r.body["cited_sources"])

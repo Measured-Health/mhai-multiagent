@@ -1,5 +1,5 @@
 -- The reference sources an answer cites: title, link and source credit
--- (reference library, PR 3). NUMBERED 00040: 00039 is the reference library.
+-- (reference library, PR 3). NUMBERED 00041: 00040 is the reference library.
 --
 -- clinical_decisions.cited_sources_json: what the pipeline wrote when it
 -- answered (intelligence/boundary/cited_sources.py), so an answer keeps its

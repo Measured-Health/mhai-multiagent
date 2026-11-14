@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.29.0"
+  version: "1.30.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -5295,7 +5295,7 @@ components:
             (a reference library row, such as an FDA drug label or a MedlinePlus
             health topic), in citation order, as stored with the answer. Only ids
             in cited_chunk_ids appear; a cited hospital or patient record never
-            does. Empty when none. Added in 1.29.0.
+            does. Empty when none. Added in 1.30.0.
           items: { $ref: "#/components/schemas/CitedSource" }
         guardrail_details:
           type: object

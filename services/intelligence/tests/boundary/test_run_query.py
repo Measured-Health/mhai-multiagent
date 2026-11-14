@@ -660,7 +660,7 @@ class CitingStub(StubModelClient):
 
 
 async def test_decision_keeps_cited_sources(make_env: MakeEnv, postgres: Postgres) -> None:
-    """Reference library PR 3 (00040): the decision stores the title, link
+    """Reference library PR 3 (00041): the decision stores the title, link
     and source credit of each cited reference library row; a cited seeded
     guideline (no title) gives none."""
     meta = {

@@ -1,5 +1,5 @@
 """The reference sources an answer cites: title, link and source credit
-(migration 00040; core's ClinicalResult.cited_sources).
+(migration 00041; core's ClinicalResult.cited_sources).
 
 Only a shared reference guideline gives a source: a row kb_repo loaded from
 kb_chunks with no hospital (REFERENCE_SOURCE, chunk type guideline; a

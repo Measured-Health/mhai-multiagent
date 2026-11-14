@@ -198,9 +198,9 @@ type Citation struct {
 }
 
 // CitedSource is one entry of ClinicalResultOut.cited_sources (added in
-// 1.29.0): a cited shared reference row's title, link and source credit, as
+// 1.30.0): a cited shared reference row's title, link and source credit, as
 // the pipeline stored them with the answer (clinical_decisions
-// .cited_sources_json, 00040). URL and Attribution are null when unknown.
+// .cited_sources_json, 00041). URL and Attribution are null when unknown.
 type CitedSource struct {
 	ChunkID     string  `json:"chunk_id"`
 	Title       string  `json:"title"`

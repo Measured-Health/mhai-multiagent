@@ -8,8 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Citations show title, link and source (migration **00040**, OpenAPI
-  **1.29.0**, additive): `ClinicalResult.cited_sources`, one
+- Citations show title, link and source (migration **00041**, OpenAPI
+  **1.30.0**, additive): `ClinicalResult.cited_sources`, one
   `{chunk_id, title, url, source, attribution}` per cited shared reference
   row, in citation order, only for ids in `cited_chunk_ids`. The pipeline
   stores them with the decision (`clinical_decisions.cited_sources_json`),
