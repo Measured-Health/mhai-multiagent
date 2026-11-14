@@ -180,8 +180,8 @@ func TestCSVFormulaCells(t *testing.T) {
 	if cs[0].Display != `'=HYPERLINK("http://x")` || f["ref_text"] != "'@SUM(A1)" || f["value_text"] != "'+Positive" {
 		t.Errorf("not neutralised: %+v", f)
 	}
-	p = parse(t, "results", header("results")+resultRow(map[string]string{"local_name": "Potassium<script>x</script>‮"}))
-	if d := p.rows[0].Records[0].Fields["codings"].([]connector.Coding)[0].Display; strings.ContainsAny(d, "<>‮") {
+	p = parse(t, "results", header("results")+resultRow(map[string]string{"local_name": "Potassium<script>x</script>\u202e"}))
+	if d := p.rows[0].Records[0].Fields["codings"].([]connector.Coding)[0].Display; strings.ContainsAny(d, "<>\u202e") {
 		t.Errorf("markup kept: %q", d)
 	}
 	for col, v := range map[string]string{"local_code": "=K", "unit": "=cmd|' /C calc'!A0", "source_patient_id": "-SYNP"} {

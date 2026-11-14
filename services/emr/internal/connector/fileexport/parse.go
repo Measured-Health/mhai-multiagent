@@ -200,14 +200,6 @@ func (r *rowReader) bad(reason string) {
 	}
 }
 
-func (r *rowReader) need(col string) string {
-	v := r.row[col]
-	if v == "" {
-		r.bad(RowRequired)
-	}
-	return v
-}
-
 // id puts an optional reference under key.
 func (r *rowReader) id(col, key string, required bool) string {
 	v := r.row[col]
