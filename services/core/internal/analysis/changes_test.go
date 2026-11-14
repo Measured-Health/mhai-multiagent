@@ -87,8 +87,9 @@ func TestNightlyIngestOffByDefault(t *testing.T) {
 }
 
 // Departure 89: the changes run for every due hospital, whatever its
-// switch, after ingest and before the sweep; a failure is the step
-// "changes", and the hospital isn't marked ran.
+// switch, first; a failure is the step "changes", the sweep still runs
+// (removal never waits on another step: security review M1), and the
+// hospital neither ingests nor is marked ran.
 func TestNightlyAppliesChangesWhateverTheSwitch(t *testing.T) {
 	h := ids(3)
 	s := &fakeStore{due: []Due{{Hospital: h[0], On: true}, {Hospital: h[1], On: true, Demo: true}, {Hospital: h[2]}},
@@ -101,18 +102,35 @@ func TestNightlyAppliesChangesWhateverTheSwitch(t *testing.T) {
 	}
 	got := strings.Join(s.calls, "\n")
 	for _, want := range []string{
-		"ingest " + h[0].String() + "\nchanges " + h[0].String() + "\nsweep " + h[0].String(),
+		"changes " + h[0].String() + "\nsweep " + h[0].String() + "\ningest " + h[0].String(),
 		"changes " + h[1].String() + "\nsweep " + h[1].String(),
-		"changes " + h[2].String(),
+		"changes " + h[2].String() + "\nsweep " + h[2].String(),
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("calls\n%s\nlack\n%s", got, want)
 		}
 	}
-	if strings.Contains(got, "ran "+h[2].String()) || strings.Contains(got, "sweep "+h[2].String()) {
+	if strings.Contains(got, "ran "+h[2].String()) || strings.Contains(got, "ingest "+h[2].String()) {
 		t.Errorf("the failed hospital went on: %s", got)
 	}
 	if len(s.changed) != 2 || bytes.Contains(s.changed[0], []byte("emr-index")) {
 		t.Errorf("changes built %s", s.changed)
+	}
+}
+
+// Security review M1: a failing ingest never stops the changes or the
+// sweep (erasure and retention don't wait on it).
+func TestRemovalStepsRunWhenIngestFails(t *testing.T) {
+	h := ids(1)
+	s := &fakeStore{due: []Due{{Hospital: h[0], On: true}},
+		fail: map[string]error{"ingest " + h[0].String(): errors.New("synthetic failure")}}
+	n := &Nightly{Store: s, Keys: testKeys(t), Clock: fixedClock(testNow), Lock: noLock, Ingest: true}
+	if ran, err := n.Tick(context.Background()); err == nil || len(ran) != 0 {
+		t.Fatalf("ran %v (%v)", ran, err)
+	}
+	got := strings.Join(s.calls, "\n")
+	if !strings.Contains(got, "changes "+h[0].String()+"\nsweep "+h[0].String()+"\ningest "+h[0].String()) ||
+		strings.Contains(got, "freeze ") || strings.Contains(got, "ran ") {
+		t.Errorf("calls %s", got)
 	}
 }

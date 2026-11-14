@@ -776,9 +776,89 @@ func TestExclusionForgetsUnfrozenOnly(t *testing.T) {
 	if n := countRows(t, pool, `SELECT count(*) FROM analysis_facts WHERE subject_id = $1`, subjectOf(t, pool, w.h, other.String())); n != 1 {
 		t.Error("another subject was touched")
 	}
-	// The watermark moved: the same exclusion isn't listed again.
-	if c := patientChanges(t, pool, w.h, dbNow(t, pool)); len(c) != 0 {
-		t.Errorf("listed again: %+v", c)
+	// Changes are read again for a day after the watermark (a purge that
+	// committed late is never missed: security review H1); applied again,
+	// a forget changes nothing.
+	until = dbNow(t, pool)
+	again := patientChanges(t, pool, w.h, until)
+	if len(again) != 1 || again[0] != c[0] {
+		t.Fatalf("listed again within the overlap: %+v", again)
+	}
+	if n, err := applyChanges(ctx, pool, w.h, until, forget(again[0].Ref)); err != nil || n != 0 {
+		t.Errorf("a second forget: %d %v", n, err)
+	}
+}
+
+// Security review H1: a purge whose transaction began before the
+// watermark but committed after it (done_at is the transaction's start) is
+// still listed on the next run.
+func TestLateCommittedPurgeIsListed(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	w := newEMRWorld(t, pool, "Africa/Lagos")
+	now := dbNow(t, pool)
+	p := w.patient(t, pool, "1983-06-09", "male")
+	putFacts(t, pool, w.h, now, p.String(), fact{"day": now.In(mustZone(t, w.zone)).Format(time.DateOnly), "kind": "consultation",
+		"sex": "male"})
+	if _, err := applyChanges(ctx, pool, w.h, dbNow(t, pool)); err != nil {
+		t.Fatal(err)
+	}
+	// Committed now, stamped before the watermark.
+	if _, err := pool.Exec(ctx, `UPDATE emr.patients SET status = 'excluded', excluded_at = now() - interval '2 hours',
+		exclude_reason = 'objection' WHERE id = $1`, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.purge_requests (hospital_id, patient_id, requested_at, due_at, state, done_at)
+		VALUES ($1, $2, now() - interval '2 hours', now() - interval '2 hours', 'done', now() - interval '2 hours')`, w.h, p); err != nil {
+		t.Fatal(err)
+	}
+	c := patientChanges(t, pool, w.h, dbNow(t, pool))
+	if len(c) != 1 || c[0] != (change{"excluded", p.String(), ""}) {
+		t.Fatalf("a late-committed purge: %+v", c)
+	}
+}
+
+// Security review H1 (the overlap's other side): a merge read again after
+// its survivor was excluded never makes a sealed subject for the excluded
+// survivor; one whose survivor was merged on names the final survivor.
+func TestMergeSurvivorIsTheActiveOne(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	w := newEMRWorld(t, pool, "Africa/Lagos")
+	now := dbNow(t, pool)
+	day := now.In(mustZone(t, w.zone)).Format(time.DateOnly)
+	a, b, c, x, y := w.patient(t, pool, "1983-06-09", "male"), w.patient(t, pool, "1983-06-09", "male"),
+		w.patient(t, pool, "1983-06-09", "male"), w.patient(t, pool, "1983-06-09", "male"), w.patient(t, pool, "1983-06-09", "male")
+	putFacts(t, pool, w.h, now, a.String(), fact{"day": day, "kind": "consultation", "sex": "male"})
+	mergeRow := func(merged, kept uuid.UUID) {
+		t.Helper()
+		match := seedMatch(t, pool, w.h, merged, kept)
+		if _, err := pool.Exec(ctx, `INSERT INTO emr.merges (hospital_id, match_id, kept_patient, merged_patient) VALUES ($1, $2, $3, $4)`,
+			w.h, match, kept, merged); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE emr.patients SET status = 'merged_into', merged_into = $2 WHERE id = $1`, merged, kept); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mergeRow(a, b) // a -> b -> c: the survivor is c
+	mergeRow(b, c)
+	mergeRow(x, y) // x -> y, then y excluded: no merge listed
+	if _, err := pool.Exec(ctx, `UPDATE emr.patients SET status = 'excluded', excluded_at = now(), exclude_reason = 'objection'
+		WHERE id = $1`, y); err != nil {
+		t.Fatal(err)
+	}
+	got := map[change]bool{}
+	for _, ch := range patientChanges(t, pool, w.h, dbNow(t, pool)) {
+		got[ch] = true
+	}
+	if !got[change{"merged", a.String(), c.String()}] || !got[change{"merged", b.String(), c.String()}] {
+		t.Errorf("survivors: %v", got)
+	}
+	for ch := range got {
+		if ch.Survivor == y.String() || ch.Survivor == b.String() || ch.Ref == x.String() {
+			t.Errorf("listed %+v", ch)
+		}
 	}
 }
 
@@ -809,8 +889,19 @@ func TestExclusionWaitsForLegalHold(t *testing.T) {
 	if err := maint(ctx, pool, w.h, `SELECT emr_purge_patient($1)`, &res, x.request); err != nil || !jsonHas(res, "state", "done") {
 		t.Fatalf("purge: %s %v", res, err)
 	}
-	if c := patientChanges(t, pool, w.h, dbNow(t, pool)); len(c) != 1 || c[0].Kind != "excluded" || c[0].Ref != p.String() {
+	until := dbNow(t, pool)
+	c := patientChanges(t, pool, w.h, until)
+	if len(c) != 1 || c[0].Kind != "excluded" || c[0].Ref != p.String() {
 		t.Fatalf("after the purge: %+v", c)
+	}
+	// Forgotten with no fact left, the subject keeps no attributes
+	// (security review L2).
+	s := subjectOf(t, pool, w.h, p.String())
+	if _, err := applyChanges(ctx, pool, w.h, until, forget(p.String())); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, pool, `SELECT count(*) FROM analysis_subject_attrs WHERE subject_id = $1`, s); n != 0 {
+		t.Error("a forgotten subject with no facts keeps its attributes")
 	}
 }
 
