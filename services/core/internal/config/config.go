@@ -92,6 +92,11 @@ type Config struct {
 	// is). Each must be built (gokit/emrtypes), the stub only in
 	// development.
 	EMRConnectorTypes []string
+	// EMRAllowNullMRN (CORE_EMR_ALLOW_NULL_MRN=true) lets the finding
+	// consumer raise alerts for patients with no MRN (known only from
+	// documents). Off by default: such a finding is recorded as not raised
+	// (null_mrn) until mhai-web shows a missing MRN (EMR design §16.4).
+	EMRAllowNullMRN bool
 	// IdempotencyHMACKeyPath is the key the idempotency store hashes the
 	// credential routes' requests under (CORE_IDEMPOTENCY_HMAC_KEY_PATH;
 	// EMR design §6.2), required when EMREnabled.
@@ -265,6 +270,13 @@ func Load() (Config, error) {
 		c.EMREnabled = true
 	default:
 		errs = append(errs, errors.New("CORE_EMR_ENABLED must be true or false"))
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_EMR_ALLOW_NULL_MRN"))) {
+	case "", "false":
+	case "true":
+		c.EMRAllowNullMRN = true
+	default:
+		errs = append(errs, errors.New("CORE_EMR_ALLOW_NULL_MRN must be true or false"))
 	}
 
 	if c.CloudProviders, err = ParseCloudProviders(os.Getenv("CORE_CLOUD_PROVIDERS")); err != nil {

@@ -295,7 +295,13 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	// match card shows, under RLS.
 	emrGatewayReads := []string{"emr.patients", "emr.observations", "emr.medications", "emr.encounters", "emr.units",
 		"emr.possible_matches", "emr.findings"}
-	emrHidden := []string{"emr.raw_records", "emr.patient_links", "emr.merges", "emr.unmapped_codes", "emr.breaker_trips"}
+	emrHidden := []string{"emr.raw_records", "emr.patient_links", "emr.merges", "emr.unmapped_codes", "emr.breaker_trips",
+		"emr_consumed"}
+	// What core's consumer acted on (00031), so it has a row to hide.
+	if _, err := pool.Exec(ctx, `INSERT INTO emr_consumed (hospital_id, kind, ref_id, status, outcome)
+		VALUES ($1, 'finding', gen_random_uuid(), 'open', 'raised')`, a); err != nil {
+		t.Fatal(err)
+	}
 	// Alerts, their settings and deliveries (00029), so they have rows to
 	// hide from the gateway with no hospital set.
 	alertClin := seedClinician(t, pool, a)
@@ -395,7 +401,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 
 	// The emr service's role, with no hospital set, sees no EMR row
 	// (00020); emr.connection_errors it may only append to.
-	emrReads := slices.Concat(emrTables[:3], emrGatewayReads, slices.DeleteFunc(slices.Clone(emrHidden), func(s string) bool { return s == "emr.merges" }))
+	emrReads := slices.Concat(emrTables[:3], emrGatewayReads, slices.DeleteFunc(slices.Clone(emrHidden), func(s string) bool { return s == "emr.merges" || s == "emr_consumed" }))
 	for _, table := range emrReads {
 		tx, err := one.Begin(ctx)
 		if err != nil {

@@ -1,6 +1,11 @@
 package alerts
 
-import "net/http"
+import (
+	"context"
+	"net/http"
+
+	"github.com/google/uuid"
+)
 
 // WithStepUpCheck returns d with its step-up check replaced (tests only).
 func WithStepUpCheck(d Deps, f func(r *http.Request, mfaCode, backupCode string) error) Deps {
@@ -25,4 +30,10 @@ func Handlers(d Deps) map[string]http.Handler {
 		"GET /me/notification-settings":               http.HandlerFunc(d.notifyGet),
 		"PATCH /me/notification-settings":             http.HandlerFunc(d.notifyPatch),
 	}
+}
+
+// WithFindingHandler replaces the consumer's finding handler (tests only).
+func WithFindingHandler(c *Consumer, f func(ctx context.Context, hid, fid uuid.UUID) error) *Consumer {
+	c.handleFinding = f
+	return c
 }

@@ -416,6 +416,10 @@ func init() {
 		Required: append(slices.Clone(connReq), "outcome")})
 	Register("emr.source_resumed", Schema{Fields: withConn("reason", OneOf("platform_resume")),
 		Required: append(slices.Clone(connReq), "reason")})
+	// Core's finding consumer records a breaker trip (EMR plan Task 37),
+	// with its hospital on the row as well.
+	Register("emr.source_paused", Schema{Fields: withConn("reason", OneOf("breaker_tripped")),
+		Required: append(slices.Clone(connReq), "reason")})
 
 	// A hospital's EMR rule set switched by a platform admin (EMR plan Task
 	// 30; design §11.5): the version activated or "shadow", the one it
@@ -458,6 +462,24 @@ func init() {
 		"reason", OneOf("not_relevant", "already_known", "wrong_patient", "other")), Required: []string{"alert_id", "reason"}})
 	Register("alert.withdrawn", Schema{Fields: fields("alert_id", id,
 		"reason", OneOf("source_amended", "source_retracted", "excluded")), Required: []string{"alert_id", "reason"}})
+	// Core's finding consumer (EMR plan Tasks 35-37, migration 00031):
+	// with the hospital and no actor. An alert raised names its routing by
+	// counts; one updated says whether by an amended result or a new hit
+	// on the same rule and analyte; a finding not raised gives its reason.
+	severity := OneOf("critical", "urgent", "info")
+	Register("alert.raised", Schema{Fields: fields("alert_id", id, "finding_id", id,
+		"rule_set_version", Pattern(regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)),
+		"rule_id", Pattern(regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)),
+		"category", OneOf("blood_chemistry", "blood_count", "kidney_function", "blood_gases_lactate", "heart_markers",
+			"blood_sugar", "vital_signs", "infection_markers"),
+		"severity", severity, "routed_queue", Check(Bool), "routed_named", count, "grouped", Check(Bool)),
+		Required: []string{"alert_id", "finding_id", "rule_set_version", "rule_id", "category", "severity", "routed_queue",
+			"routed_named", "grouped"}})
+	Register("alert.updated", Schema{Fields: fields("alert_id", id, "finding_id", id, "severity", severity,
+		"change", OneOf("amended", "new_hit")), Required: []string{"alert_id", "finding_id", "severity", "change"}})
+	Register("alert.not_raised", Schema{Fields: fields("finding_id", id,
+		"reason", OneOf("unit_not_covered", "level_off", "null_mrn", "hospital_inactive", "no_connection", "already_open",
+			"already_handled")), Required: []string{"finding_id", "reason"}})
 	// Written by 00029's definers through the outbox (the drainer checks
 	// it); a payload that doesn't fit is replaced by payload_refused.
 	Register("alert.requeued", Schema{Fields: fields("alert_ids", List(500, id),
