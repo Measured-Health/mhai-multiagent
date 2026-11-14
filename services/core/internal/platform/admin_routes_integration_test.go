@@ -554,3 +554,71 @@ func TestNotImplementedRoutes(t *testing.T) {
 	}
 	problem(t, "no two-step", get(t, "/platform/settings", signIn(t, platformAdmin(t), false).tok), 403, "mfa_required")
 }
+
+// A lift request outlives no change to its requester: a requester who is
+// deactivated, removed or demoted can't have their request approved (409),
+// and removing or demoting a member through the team routes cancels their
+// open requests, audited.
+func TestLegalHoldLiftRequesterGone(t *testing.T) {
+	ctx := context.Background()
+	approver := platformAdmin(t)
+	tokB := mint(t, approver)
+	requested := func(t *testing.T) (user, any, int) {
+		t.Helper()
+		a := platformAdmin(t)
+		ta := mint(t, a)
+		placed := send(t, handler, http.MethodPost, "/platform/legal-holds", ta,
+			placeBody(t, seedHospital(t, "active"), "LH-2026-7301", backupCode(t, a), nil))
+		ok(t, "place", placed)
+		id := placed.body["id"]
+		r := send(t, handler, http.MethodPost, holdPath(id, "/lift"), ta, jsonBody(t, map[string]any{"reason": "case_closed",
+			"authority": "CT-2026-7302", "backup_code": backupCode(t, a)}))
+		ok(t, "request", r)
+		return a, id, int(r.body["version"].(float64))
+	}
+	approve := func(id any, v int) resp {
+		return send(t, handler, http.MethodPost, holdPath(id, "/lift/approve"), tokB,
+			jsonBody(t, map[string]any{"version": v, "backup_code": "synthunspent"}))
+	}
+	for what, change := range map[string]string{
+		"deactivated": `UPDATE users SET is_active = false WHERE id = $1`,
+		"demoted":     `UPDATE user_roles SET role = 'auditor' WHERE user_id = $1 AND role = 'platform_admin'`,
+	} {
+		a, id, v := requested(t)
+		if _, err := super.Exec(ctx, change, a.id); err != nil {
+			t.Fatal(err)
+		}
+		problem(t, "approve after the requester was "+what, approve(id, v), 409, "conflict")
+		var lifted *time.Time
+		if err := super.QueryRow(ctx, `SELECT lifted_at FROM legal_holds WHERE id = $1`, id).Scan(&lifted); err != nil || lifted != nil {
+			t.Errorf("%s: lifted %v %v", what, lifted, err)
+		}
+	}
+
+	// Through the team routes: the request is cancelled, audited by the
+	// admin who changed the team.
+	for what, act := range map[string]func(a user) resp{
+		"removed": func(a user) resp {
+			return send(t, handler, http.MethodDelete, "/platform/team/"+a.id.String(), tokB,
+				jsonBody(t, map[string]any{"backup_code": backupCode(t, approver)}))
+		},
+		"demoted": func(a user) resp {
+			return send(t, handler, http.MethodPatch, "/platform/team/"+a.id.String(), tokB,
+				jsonBody(t, map[string]any{"role": "auditor", "version": 1, "backup_code": backupCode(t, approver)}))
+		},
+	} {
+		a, id, _ := requested(t)
+		if r := act(a); r.code != http.StatusNoContent && r.code != http.StatusOK {
+			t.Fatalf("%s: %d %s", what, r.code, r.raw)
+		}
+		g := get(t, holdPath(id, ""), tokB)
+		if g.body["status"] != "active" || g.body["lift"] != nil {
+			t.Errorf("%s: the request is still open: %v", what, g.body)
+		}
+		rows := platformAuditRows(t, "legal_hold.lift_cancelled", "hold_id", id.(string))
+		if len(rows) != 1 || rows[0].actor != approver.id.String() {
+			t.Errorf("%s: cancel audit %+v", what, rows)
+		}
+		problem(t, what+": approve", approve(id, int(g.body["version"].(float64))), 409, "conflict")
+	}
+}
