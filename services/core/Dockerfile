@@ -1,7 +1,7 @@
 # The core service. Also runs one-shot migrations: core migrate up.
 # Built from services/ (it requires services/gokit, ADR 0014):
 #   docker build -f services/core/Dockerfile services
-FROM golang:1.24-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY gokit/go.mod gokit/go.sum gokit/
 COPY core/go.mod core/go.sum core/

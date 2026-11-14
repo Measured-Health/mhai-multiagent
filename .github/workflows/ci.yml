@@ -44,7 +44,7 @@ jobs:
       # `make proto`. Runs from the repository root.
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           cache: false
       - name: Install buf and protoc-gen-go
         working-directory: .
@@ -212,7 +212,7 @@ jobs:
             run: |
               test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
               go vet ./...
-              go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+              go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
               go test -race -timeout 25m ./...
               # The smoke test runs in boundary-smoke; here it only has to build.
               go vet -tags smoke ./internal/smoke/...
@@ -246,7 +246,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           cache-dependency-path: services/core/go.mod
       - name: ${{ matrix.suite }}
         env:
@@ -266,14 +266,14 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           cache-dependency-path: services/gokit/go.sum
       - name: Formatted (gofmt)
         run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
       - name: Vet
         run: go vet ./...
       - name: Staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
       - name: Test
         run: go test -race -timeout 25m ./...
       - name: Integration tests
@@ -292,14 +292,14 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           cache-dependency-path: services/emr/go.sum
       - name: Formatted (gofmt)
         run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
       - name: Vet
         run: go vet ./...
       - name: Staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
       - name: Test
         run: go test -race -timeout 25m ./...
       - name: Integration tests
@@ -416,7 +416,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           cache: false  # this job builds the images the smoke test runs (zizmor cache-poisoning)
       # Every compose file parses with the example settings (never run
       # before Task 15), the test profile included.
