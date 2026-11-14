@@ -17,6 +17,7 @@ import (
 	core "github.com/Measured-Health/mhai-multiagent/services/core"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/alerts"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/letters"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/apidocs"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
@@ -225,6 +226,16 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	// analysis switch is on (none by default) and needs its keys only to
 	// ingest a signed-off hospital, where it fails closed without them.
 	a.analysis = analysis.NewNightly(a.pool, analysisKeys, log)
+	// Then the clearance letters: end those past their hospital's last day
+	// and record reminders (none exist until a hospital has letters).
+	a.analysis.After = func(ctx context.Context, now time.Time) error {
+		due, err := analysis.ClearancesDue(ctx, a.pool, now)
+		if err != nil {
+			return err
+		}
+		_, err = letters.Nightly(ctx, a.pool, due, now, log)
+		return err
+	}
 	registerMetrics(a, apiMetrics, grantMetrics)
 	if !cfg.HTTPAPI {
 		a.handler = m.ProbesHandler()

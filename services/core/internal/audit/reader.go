@@ -271,6 +271,7 @@ var (
 		{actions: []string{"auth.login.locked", "auth.login.ceiling", "auth.mfa.locked"}},
 		{actions: []string{"audit.verify_finished"}, key: "state", values: []string{"broken"}},
 		{actions: []string{"correction.decision_refused"}, key: "reason", values: []string{"self_approval"}},
+		{actions: []string{"clearance.refused"}, key: "reason", values: []string{"failed_safety_check"}},
 	}
 )
 

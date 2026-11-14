@@ -25,6 +25,13 @@ func TestAnalysisCLIRefusesBeforeConnecting(t *testing.T) {
 		{"switch", "off", "hav", "--global"},
 		{"switch", "raise", "--global"},
 		{"raise", "hav"},
+		{"named-access", "on", "hav"},
+		{"named-access", "letters_only", "hav"},
+		{"named-access", "demo"},
+		{"named-access", "demo", "--global"},
+		{"named-access", "demo", "not a ref!"},
+		{"named-access", "off"},
+		{"named-access", "off", "hav", "--global"},
 	} {
 		var out bytes.Buffer
 		err := analysisCmd(context.Background(), args, "", &out, nil)

@@ -549,6 +549,34 @@ func init() {
 	Register("analyst.removed", Schema{Fields: fields("change_id", id, "via", OneOf("app", "cli"),
 		"reason", OneOf("removed", "clinician_removed")), Required: []string{"change_id", "via", "reason"}})
 
+	// Clearance letters, hospital side (analysis plan Tasks 18-20,
+	// migration 00034): the letter is the row's entity; the payload is the
+	// database's event id and codes. Never a note, a signer, a file name or
+	// an email. 00034 refuses to commit a letter change without its entry.
+	Register("clearance.uploaded", Schema{Fields: fields("event_id", id), Required: []string{"event_id"}})
+	Register("clearance.ready", Schema{Fields: fields("event_id", id, "pages", Check(Int(1, 20))),
+		Required: []string{"event_id", "pages"}})
+	Register("clearance.refused", Schema{Fields: fields("event_id", id, "reason", OneOf("file_type", "file_too_large",
+		"too_many_pages", "password_protected", "unreadable", "failed_safety_check")), Required: []string{"event_id", "reason"}})
+	Register("clearance.verified", Schema{Fields: fields("event_id", id), Required: []string{"event_id"}})
+	Register("clearance.rejected", Schema{Fields: fields("event_id", id, "reason", OneOf("wrong_people", "end_date_mismatch",
+		"not_leadership", "unreadable", "other")), Required: []string{"event_id", "reason"}})
+	Register("clearance.narrowed", Schema{Fields: fields("event_id", id, "person", id, "reason", OneOf("person_left",
+		"no_longer_needed", "uploaded_in_error", "other")), Required: []string{"event_id", "person", "reason"}})
+	Register("clearance.revoked", Schema{Fields: fields("event_id", id, "side", OneOf("hospital", "platform"),
+		"reason", OneOf("no_longer_needed", "person_left", "uploaded_in_error", "security_concern", "other")),
+		Required: []string{"event_id", "side", "reason"}})
+	Register("clearance.ended", Schema{Fields: fields("event_id", id), Required: []string{"event_id"}})
+	Register("clearance.reminder_sent", Schema{Fields: fields("event_id", id, "days", Check(func(v any) bool { n, ok := v.(float64); return ok && (n == 30 || n == 7 || n == 1) }),
+		"delivery", OneOf("pending")), Required: []string{"event_id", "days", "delivery"}})
+	// A page of a letter shown to a hospital admin (no event: nothing changed).
+	Register("clearance.viewed", Schema{Fields: fields("page", Check(Int(1, 20))), Required: []string{"page"}})
+	// The CLI's demo raise and lowering of the named-access switch (plan
+	// departure 39), as analysis.switch_raised: no actor, the hospital in
+	// the payload for a hospital's row.
+	Register("named_access.changed", Schema{Fields: fields("hospital_id", id, "via", OneOf("cli"),
+		"position", OneOf("off", "letters_only"), "refs", OneOf("demo")), Required: []string{"via", "position"}})
+
 	// Plan 3: the request-token boundary (internal/account, grant, intel).
 	Register("intelligence.key_rotated", Schema{Fields: fields(
 		"kid", token, "rotation", OneOf("planned", "emergency"), "change", OneOf("added", "removed")),
