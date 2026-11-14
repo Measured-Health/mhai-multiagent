@@ -228,13 +228,15 @@ PR 4 (aggregate routes) is the simplest version that keeps the disclosure guaran
 
 ## Analysis: EMR facts, blocked and follow-ups (PR 10, 14 Nov)
 
-PR 10 is built (migration 00046, plan departures 78-90) and off by default: ingest needs the hospital's switch on with real references and `ANALYSIS_INGEST=true`.
+PR 10 is built (migration 00046, plan departures 78-91) and off by default: ingest needs the hospital's switch on with real references and `ANALYSIS_INGEST=true`.
 
 - [ ] **Recorded diagnoses (blocked).** The EMR canonical model has observations, medications and encounters but no conditions, so no `diagnosis` fact is written. Needs a conditions table in the EMR plan (canonical model, normaliser, ICD-10 mapping), then a source branch here.
 - [ ] **Set `ANALYSIS_INGEST=true` only after H2 and H7** (the confidence mapping; references in consultations) and with a hospital raised by Plan 11b's two-person switch. Operators' item; nothing in the build does it.
 - [ ] **Agreement and corrections (H2).** Ratings and corrections arrive after the consultation's fact and facts are append-only, so `rating` and `correction` stay null: a feedback fact kind (or counting at freeze) is needed for the agreement and corrections views.
 - [ ] **A findings dictionary (H2).** Findings carry no condition (no diagnosis code); naming them by category or analyte needs H2's view definitions.
 - [ ] **H1 and H3 to confirm the exclusion and merge handling** (built as the more private choice, departures 87-88): an exclusion forgets unfrozen facts and the reference once the EMR purge is done; frozen facts and bodies stay. A legal resolution of a list holding an excluded subject sends nothing (503); H3 may prefer a per-row "excluded".
+- [ ] **Never rotate the reference HMAC key while sealed references exist** (security review M2). A new key matches no subject, so an exclusion would be skipped silently; a rotation needs the old key kept for matching (or a re-key of `analysis_subjects`). Without any keys, a hospital with a change to apply fails the `changes` step every night (the sweep still runs) until the keys are back.
+- [ ] **Changes are read with a day's overlap** (security review H1): a purge or merge is stamped when its transaction began, so one that commits after a run is read on the next. A purge transaction longer than a day would still be missed; tracking applied purge and merge ids instead of a time watermark would close it.
 - [ ] **Specialty** on consultation facts stays null: it is on the user, which the writer can't read.
 
 ## Hospital admin routes: gaps and frontend changes (14 Nov)

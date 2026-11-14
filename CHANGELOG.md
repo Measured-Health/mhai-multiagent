@@ -21,7 +21,7 @@ All notable changes to this project are documented here. The format follows
   merges are applied by the nightly run whatever the switch: unfrozen facts
   are deleted or moved to the survivor, an excluded subject's reference is
   cleared, and nothing frozen changes. Recorded diagnoses wait for the EMR
-  model (TODO.md). Plan departures 78-90.
+  model (TODO.md). Plan departures 78-91.
 - Patient Analysis PR 9: the audit list, exports and the legal path
   (migration **00044**, OpenAPI **1.32.0**; off by default:
   `CORE_AUDIT_EXPORTS` gates every export route, the named-access list, the

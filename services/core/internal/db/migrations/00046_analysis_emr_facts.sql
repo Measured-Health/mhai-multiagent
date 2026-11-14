@@ -22,9 +22,13 @@
 --       observation's encounter);
 --       alerts settled by a person (handled or dismissed, never withdrawn),
 --       when settled, on the day raised, with the minutes to the response.
---   - mhai_analysis_patient_changes(hospital, until): the merges and the
---     done exclusion purges (with the patients merged into an excluded
---     one) after the hospital's changes_until; nothing for a hospital that
+--   - mhai_analysis_patient_changes(hospital, until): the merges (to the
+--     active end of the survivor's merges; none when it ends excluded) and
+--     the done exclusion purges (with the patients merged into an excluded
+--     one) after the hospital's changes_until less a day (a purge or merge
+--     is stamped when its transaction began, so one that commits late is
+--     read on the next run; applying a change again does nothing);
+--     nothing for a hospital that
 --     holds no sealed reference. A purge held by a legal hold isn't done,
 --     so it isn't listed until the hold is lifted and the purge runs.
 --   - mhai_analysis_apply_changes(hospital, until, {"changes": [...]}):
@@ -63,6 +67,7 @@ $$;
 ALTER TABLE analysis_watermarks ADD COLUMN changes_until timestamptz;
 GRANT UPDATE (changes_until) ON analysis_watermarks TO mhai_analysis_writer;
 GRANT UPDATE (ref_hmac, ref_enc) ON analysis_subjects TO mhai_analysis_writer;
+GRANT DELETE ON analysis_subject_attrs TO mhai_analysis_writer;
 
 -- What the source reads: codes, ids and times only.
 GRANT USAGE ON SCHEMA emr TO mhai_analysis_writer;
@@ -258,16 +263,29 @@ BEGIN
         SELECT r.patient_id, r.done_at
         FROM emr.purge_requests r
         WHERE r.hospital_id = p_hospital AND r.state = 'done'
-          AND (v_after IS NULL OR r.done_at > v_after) AND r.done_at <= p_until
+          AND (v_after IS NULL OR r.done_at > v_after - interval '1 day') AND r.done_at <= p_until
         UNION
         SELECT m.id, g.t
         FROM emr.patients m JOIN gone g ON m.hospital_id = p_hospital AND m.merged_into = g.pid
     )
     SELECT y.k, y.r, y.s FROM (
-        SELECT 'merged'::text AS k, mg.merged_patient::text AS r, mg.kept_patient::text AS s, mg.merged_at AS t, 0 AS o
+        SELECT 'merged'::text AS k, mg.merged_patient::text AS r, fin.id::text AS s, mg.merged_at AS t, 0 AS o
         FROM emr.merges mg
+        -- The survivor is the active end of the kept patient's merges; a
+        -- chain that ends excluded lists no merge (the exclusion forgets).
+        CROSS JOIN LATERAL (
+            WITH RECURSIVE chain (id, st, nxt, n) AS (
+                SELECT p.id, p.status, p.merged_into, 0
+                FROM emr.patients p WHERE p.hospital_id = p_hospital AND p.id = mg.kept_patient
+                UNION ALL
+                SELECT p.id, p.status, p.merged_into, c.n + 1
+                FROM chain c JOIN emr.patients p ON p.hospital_id = p_hospital AND p.id = c.nxt
+                WHERE c.st = 'merged_into' AND c.n < 50
+            )
+            SELECT chain.id FROM chain WHERE chain.st = 'active' LIMIT 1
+        ) fin
         WHERE mg.hospital_id = p_hospital
-          AND (v_after IS NULL OR mg.merged_at > v_after) AND mg.merged_at <= p_until
+          AND (v_after IS NULL OR mg.merged_at > v_after - interval '1 day') AND mg.merged_at <= p_until
         UNION ALL
         SELECT 'excluded'::text, g.pid::text, NULL::text, g.t, 1 FROM gone g
     ) y
@@ -382,6 +400,11 @@ BEGIN
             DELETE FROM public.analysis_facts f
             WHERE f.hospital_id = p_hospital AND f.subject_id = v_m
               AND NOT public.mhai_analysis_block_frozen(p_hospital, f.day);
+            -- No fact left: no attributes either (they are kept while a
+            -- frozen fact needs them).
+            DELETE FROM public.analysis_subject_attrs a
+            WHERE a.hospital_id = p_hospital AND a.subject_id = v_m
+              AND NOT EXISTS (SELECT 1 FROM public.analysis_facts f WHERE f.hospital_id = p_hospital AND f.subject_id = v_m);
             UPDATE public.analysis_subjects s
             SET ref_enc = NULL, ref_hmac = sha256(convert_to(gen_random_uuid()::text || gen_random_uuid()::text, 'UTF8'))
             WHERE s.hospital_id = p_hospital AND s.subject_id = v_m;
@@ -546,6 +569,7 @@ REVOKE SELECT ON emr.patients, emr.findings, emr.observations, emr.encounters, e
 REVOKE SELECT (patient_id) ON clinical_queries FROM mhai_analysis_writer;
 REVOKE USAGE ON SCHEMA emr FROM mhai_analysis_writer;
 REVOKE UPDATE (ref_hmac, ref_enc) ON analysis_subjects FROM mhai_analysis_writer;
+REVOKE DELETE ON analysis_subject_attrs FROM mhai_analysis_writer;
 ALTER TABLE analysis_watermarks DROP COLUMN changes_until;
 
 -- +goose StatementBegin
