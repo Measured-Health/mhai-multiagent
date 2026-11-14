@@ -40,12 +40,26 @@ roles it needs from the model store before it is ready:
                              repository's testdata/models/warmup/page.png;
                              the image must ship it). Checked at start-up:
                              missing is warmup_page_missing
+  INTELLIGENCE_MODEL_MIRROR  an absolute path: the read-only copy of the pinned
+                             files that model-fetch wrote (own answer model plan,
+                             PR 3). With it the pins are verified offline from
+                             that copy (modelstore.mirror.DirReadStore), exactly
+                             as from the store, and none of the MODEL_STORE_*
+                             settings may be set: the pipeline has no route or
+                             credential for the store
   MHAI_MODELS_ENV            ``development`` (development signers, fixture
                              names, the rehearsal gate) only together with
                              APP_ENV=development; with any other APP_ENV (or
                              none) it is refused at start-up
 
 Each is refused at start-up if malformed, set or not needed.
+
+The local route's answer model (own answer model plan, PR 3): with ``cca`` in
+INTELLIGENCE_MODEL_ROLES the local route answers from the ``llama`` sidecar
+(tools.llama_client: INTELLIGENCE_LOCAL_LLM_URL and its settings). Without a pinned
+``cca``, the plain Ollama route runs only in development or with
+INTELLIGENCE_LOCAL_UNPINNED=on (``on`` or ``off``, default off); otherwise every local
+question escalates as ``local_unverified``.
 """
 
 from __future__ import annotations
@@ -63,6 +77,7 @@ if TYPE_CHECKING:
     # boundary.cloud imports this module; this one imports it only when
     # building settings, so the import graph is one-way at load.
     from intelligence.boundary.cloud.settings import CloudSettings
+    from intelligence.tools.llama_client import LocalLLMSettings
 
 log = logging.getLogger("intelligence.boundary.config")
 
@@ -83,6 +98,13 @@ MAX_SECRET_FILE_BYTES = 4096
 _STORE_CREDENTIAL_FILES = (
     "MODEL_STORE_READER_ACCESS_KEY_FILE",
     "MODEL_STORE_READER_SECRET_KEY_FILE",
+)
+# Every store setting the pipeline could be given; none with INTELLIGENCE_MODEL_MIRROR.
+_STORE_SETTINGS = (
+    "MODEL_STORE_ENDPOINT",
+    "MODEL_STORE_BUCKET",
+    "MODEL_STORE_REGION",
+    *_STORE_CREDENTIAL_FILES,
 )
 DEFAULT_DB_USER = "intelligence_app"
 MIN_DB_PASSWORD_LEN = 16  # core's MinLoginPasswordLen
@@ -273,6 +295,10 @@ class WorkerSettings:
     model_store_secret_key: str | None = field(default=None, repr=False)
     models_trust_policy_path: str | None = None
     model_warmup_page: str | None = None
+    model_mirror_dir: str | None = None
+    # The local route's answer model (module docstring).
+    local_llm: LocalLLMSettings = field(default_factory=lambda: _default_local_llm())
+    local_unpinned: bool = False
     # Cloud model providers (plan 2026-11-06): none unless
     # INTELLIGENCE_CLOUD_PROVIDERS names some (pipeline only).
     cloud: CloudSettings = field(default_factory=lambda: _no_cloud())
@@ -363,6 +389,12 @@ class WorkerSettings:
         elif learning_client == "stub" and not development:
             errs.append("INTELLIGENCE_LEARNING_CLIENT=stub runs only with APP_ENV=development")
         pinned = _model_settings(env, svc, development, errs)
+        from intelligence.tools import llama_client
+
+        local_llm = llama_client.settings_from_env(env, development, errs)
+        unpinned_raw = get("INTELLIGENCE_LOCAL_UNPINNED") or "off"
+        if unpinned_raw not in ("on", "off"):
+            errs.append("INTELLIGENCE_LOCAL_UNPINNED must be on or off")
         from intelligence.boundary.cloud.settings import PROVIDERS_VAR, CloudSettings
 
         cloud = CloudSettings.from_env(env, development, errs)
@@ -394,6 +426,8 @@ class WorkerSettings:
             model_client=model_client,
             learning_client=learning_client,
             **pinned,
+            local_llm=local_llm,
+            local_unpinned=unpinned_raw == "on",
             cloud=cloud,
         )
 
@@ -402,6 +436,12 @@ def _no_cloud() -> CloudSettings:
     from intelligence.boundary.cloud.settings import CloudSettings
 
     return CloudSettings()
+
+
+def _default_local_llm() -> LocalLLMSettings:
+    from intelligence.tools.llama_client import LocalLLMSettings
+
+    return LocalLLMSettings()
 
 
 _DB_CREDENTIAL_VARS = (
@@ -599,6 +639,28 @@ def _model_settings(
             errs.append(f"{name} is required with INTELLIGENCE_MODEL_ROLES")
         return v
 
+    mirror = get("INTELLIGENCE_MODEL_MIRROR")
+    if mirror is not None:
+        if not os.path.isabs(mirror):
+            errs.append("INTELLIGENCE_MODEL_MIRROR must be an absolute path")
+        store_set = [n for n in _STORE_SETTINGS if get(n) is not None]
+        if store_set:
+            errs.append(
+                "INTELLIGENCE_MODEL_MIRROR is verified offline: unset "
+                + ", ".join(store_set)
+                + " (only model-fetch talks to the store)"
+            )
+        # With the mirror the store settings are neither needed nor read.
+        needed_store = False
+    else:
+        needed_store = needed
+
+    def store_required(name: str) -> str | None:
+        v = get(name)
+        if v is None and needed_store:
+            errs.append(f"{name} is required with INTELLIGENCE_MODEL_ROLES")
+        return v
+
     lock_path = required("INTELLIGENCE_MODELS_LOCK")
     cache = required("INTELLIGENCE_MODEL_CACHE")
     if cache is not None and not os.path.isabs(cache):
@@ -607,8 +669,8 @@ def _model_settings(
     warmup_page = get("INTELLIGENCE_WARMUP_PAGE")
     if warmup_page is not None and not os.path.isabs(warmup_page):
         errs.append("INTELLIGENCE_WARMUP_PAGE must be an absolute path")
-    endpoint = required("MODEL_STORE_ENDPOINT")
-    bucket = required("MODEL_STORE_BUCKET")
+    endpoint = store_required("MODEL_STORE_ENDPOINT")
+    bucket = store_required("MODEL_STORE_BUCKET")
     region = get("MODEL_STORE_REGION")
     if endpoint is not None or bucket is not None or region is not None:
         from intelligence.modelstore import store
@@ -628,7 +690,10 @@ def _model_settings(
                 errs.append(f"{name} is invalid")
     credentials: list[str | None] = []
     for name in _STORE_CREDENTIAL_FILES:
-        path = required(name)
+        path = store_required(name)
+        if mirror is not None:
+            credentials.append(None)  # refused above; never read
+            continue
         credentials.append(None if path is None else _read_store_secret(path, name, errs))
     if roles:
         out.update(
@@ -642,6 +707,7 @@ def _model_settings(
             model_store_secret_key=credentials[1],
             models_trust_policy_path=policy,
             model_warmup_page=warmup_page,
+            model_mirror_dir=mirror,
         )
     return out
 

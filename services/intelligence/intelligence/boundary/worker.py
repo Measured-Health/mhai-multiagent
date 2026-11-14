@@ -43,13 +43,16 @@ which would echo the request token or the access token to the caller.
 
 Pinned models (plan Task 23): with INTELLIGENCE_MODEL_ROLES the pipeline
 refuses to start on a role no lock may pin (one outside lock.ROLES, today
-extract only), reads models.lock once at start-up and verifies every required role
+extract and cca), reads models.lock once at start-up and verifies every required role
 (PinnedModelGate, modelstore.loader) before it is ready. Until then health
 answers models_ready false and jobs stay paused (the jobs_ready gate). A
 refusal logs model.verify_failed role=<role> reason=<reason> and counts
 mhai_model_verify_failures_total{role,reason} (both from closed sets), and
 is retried with a capped backoff, each retry a full verification of the
-same pin: never another version. Success logs model.loaded.
+same pin: never another version. Success logs model.loaded. With
+INTELLIGENCE_MODEL_MIRROR the pins are verified offline from model-fetch's copy;
+``cca`` is served by the llama sidecar (modelstore.loader.serve_cca: active.json,
+the alias, the warm-up question).
 """
 
 from __future__ import annotations
@@ -1262,14 +1265,14 @@ def build_model_gate(settings: WorkerSettings) -> PinnedModelGate | None:
     stops the start (ConfigError)."""
     if not settings.model_roles:
         return None
-    from intelligence.modelstore import loader, lock, promote, signing, store, verify
+    from intelligence.modelstore import loader, lock, mirror, promote, signing, store, verify
     from intelligence.modelstore.reasons import Refused
 
     if settings.service != "pipeline":
         raise ConfigError("INTELLIGENCE_MODEL_ROLES is for the pipeline service only")
     # Only a role with an evaluation suite can be pinned (lock.ROLES); any other could
     # never verify, so it stops the start rather than leaving a pipeline never ready.
-    # TODO(TODO.md "Pinnable roles"): nli, ocr and cca join when their suites exist.
+    # TODO(TODO.md "Pinnable roles"): nli and ocr join when their suites exist.
     unpinnable = sorted(set(settings.model_roles) - lock.ROLES)
     if unpinnable:
         raise ConfigError(
@@ -1279,7 +1282,8 @@ def build_model_gate(settings: WorkerSettings) -> PinnedModelGate | None:
     lock_path, cache = settings.models_lock_path, settings.model_cache_dir
     policy_path = settings.models_trust_policy_path
     endpoint, bucket = settings.model_store_endpoint, settings.model_store_bucket
-    if not (lock_path and cache and policy_path and endpoint and bucket):
+    mirror_dir = settings.model_mirror_dir
+    if not (lock_path and cache and policy_path and (mirror_dir or (endpoint and bucket))):
         raise ConfigError("INTELLIGENCE_MODEL_ROLES needs the model store settings")
     failed: str | None = None
     try:
@@ -1289,24 +1293,40 @@ def build_model_gate(settings: WorkerSettings) -> PinnedModelGate | None:
         loader.check_warmup_page(page)
         verify.check_cache_dir(cache)  # Task 22's rules, once at start-up
         load_settings = loader.LoadSettings.from_lock(
-            settings.model_roles, lock_path, cache, warmup_page=page
+            settings.model_roles,
+            lock_path,
+            cache,
+            warmup_page=page,
+            start_timeout_s=settings.local_llm.start_timeout_s,
         )
         policy = signing.load_policy(policy_path)
-        source = store.S3Store(
-            endpoint,
-            bucket,
-            store.Credentials(
-                settings.model_store_access_key or "", settings.model_store_secret_key or ""
-            ),
-            settings.model_store_region,
-        )
+        source: verify.ReadStore
+        if mirror_dir:
+            # Offline: the copy model-fetch wrote, verified exactly as the store would be.
+            source = mirror.DirReadStore(mirror_dir)
+        else:
+            assert endpoint and bucket
+            source = store.S3Store(
+                endpoint,
+                bucket,
+                store.Credentials(
+                    settings.model_store_access_key or "", settings.model_store_secret_key or ""
+                ),
+                settings.model_store_region,
+            )
     except Refused as e:
         failed = e.reason
     if failed is not None:
         raise ConfigError(f"the pinned models can't be set up: {failed}")
 
+    sidecar = None
+    if "cca" in settings.model_roles:
+        from intelligence.tools.llama_client import LlamaSidecar
+
+        sidecar = LlamaSidecar(settings.local_llm)
+
     def load() -> PinnedModels:
-        return loader.PinnedModels.load(load_settings, source, policy)
+        return loader.PinnedModels.load(load_settings, source, policy, sidecar=sidecar)
 
     log.info(
         "model.pins_read roles=%s versions=%s",

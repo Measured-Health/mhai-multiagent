@@ -38,8 +38,13 @@ def test_vocab_lists_are_closed_and_sorted() -> None:
         "malformed",
         "insufficient",
         "retention_unconfirmed",
+        "local_unverified",
     }
-    assert len(vocab.OUTCOMES) == 12
+    assert len(vocab.OUTCOMES) == 13
+    # The local route's verification outcome (own answer model plan, Task 11) is never a
+    # cloud call's: the cloud retry and adapters keep to CLOUD_OUTCOMES.
+    assert set(vocab.CLOUD_OUTCOMES) == set(vocab.OUTCOMES) - {"local_unverified"}
+    assert vocab.LOCAL_OUTCOMES == ("local_unverified",)
 
 
 def test_base_urls_and_hosts_are_fixed() -> None:

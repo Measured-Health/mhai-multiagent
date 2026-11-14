@@ -309,8 +309,27 @@ services:
       INTELLIGENCE_CLOUD_GEMINI_KEY_FILE: ${PILOT_GEMINI_KEY_FILE:-}
       INTELLIGENCE_CLOUD_GEMINI_ZDR_REF: ${PILOT_GEMINI_ZDR_REF:-}
       INTELLIGENCE_CLOUD_GEMINI_PAID_TIER: ${PILOT_GEMINI_PAID_TIER:-}
+      # The own answer model (profile ownmodel, deploy/README.md "Own answer model"):
+      # none unless .env sets PILOT_MODEL_ROLES=cca. The pins are verified offline
+      # from the copy model-fetch wrote (/mirror); the verified GGUF goes into the
+      # cache (/models), which the llama sidecar serves read-only. The worker never
+      # gets the store's address or a store credential. Without a pinned cca the
+      # local route escalates every question (no unpinned Ollama in production).
+      INTELLIGENCE_MODEL_ROLES: ${PILOT_MODEL_ROLES:-}
+      INTELLIGENCE_MODELS_LOCK: /lock/models.lock
+      MHAI_MODELS_TRUST_POLICY: /lock/trust-policy.json
+      INTELLIGENCE_MODEL_CACHE: /models
+      INTELLIGENCE_MODEL_MIRROR: /mirror
+      INTELLIGENCE_LOCAL_LLM_URL: http://llama:8080
     volumes:
       - trustedkeys:/trusted:ro
+      # The verified model cache: the only writable mount (active.json and the
+      # verified copies; owned by the image's user, mode 0700).
+      - modelcache:/models
+      - modelmirror:/mirror:ro
+      # models.lock and models/trust-policy.json from the repository, copied by the
+      # operator (deploy/README.md, "Own answer model").
+      - ./models:/lock:ro
       # Each mode 0400, owned by the image's user (enable-pilot.sh).
       - ./secrets/nats-pipeline.nk:/run/secrets/nats-pipeline.nk:ro
       - ./secrets/intelligence-db-password:/run/secrets/intelligence-db-password:ro
@@ -320,7 +339,8 @@ services:
     cpus: 1.5
     mem_limit: 1600m
     memswap_limit: 1600m
-    networks: [backend]
+    # model: the internal network shared with the llama sidecar only (no route out).
+    networks: [backend, model]
     depends_on:
       postgres: { condition: service_healthy }
       nats: { condition: service_healthy }
@@ -355,6 +375,75 @@ services:
       - /var/run/squid
     mem_limit: 128m
     networks: [backend, egress]
+
+  # The own answer model's runtime (own answer model plan, PR 3): llama.cpp's
+  # llama-server built at the pinned commit (llama/Dockerfile), serving the cca GGUF
+  # the pipeline verified. Off by default (profile ownmodel); deploy/README.md, "Own
+  # answer model", is the runbook. Its entrypoint waits for the worker's active.json,
+  # re-hashes the GGUF it names, refuses to start on any mismatch, and starts
+  # llama-server with --alias <name>@<version>#<sha12>, --offline and the GGUF's own
+  # chat template (--jinja). The worker checks that alias before every question.
+  #   - on `model` only: internal, shared with the pipeline only. No route out, no
+  #     backend (it never reaches Postgres or NATS), no published port;
+  #   - the verified cache read-only, nothing else (no secret, no mirror);
+  #   - the same uid as the pipeline image's user, which owns the cache;
+  #   - memory, threads and context from .env (PILOT_LOCAL_MODEL_*; the sizing
+  #     table is in deploy/README.md).
+  llama:
+    <<: *hardening
+    image: ${LLAMA_IMAGE:-mhai-llama:local}
+    build: { context: ./llama }
+    pull_policy: never
+    profiles: ["ownmodel"]
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      LLAMA_THREADS: ${PILOT_LOCAL_MODEL_THREADS:-2}
+      LLAMA_CTX: ${PILOT_LOCAL_MODEL_CTX:-4096}
+    volumes:
+      - modelcache:/models:ro
+    tmpfs:
+      - /tmp
+    cpus: ${PILOT_LOCAL_MODEL_THREADS:-2}
+    mem_limit: ${PILOT_LOCAL_MODEL_MEM:-4g}
+    memswap_limit: ${PILOT_LOCAL_MODEL_MEM:-4g}
+    networks: [model]
+    # No shell tools for a probe beyond the entrypoint's; the worker's alias check
+    # is the health check that matters.
+    healthcheck:
+      disable: true
+
+  # One-shot (profile ownmodel): copies the pinned files named by models.lock from
+  # the model store into the mirror volume, as the store's reader. The only container
+  # with a route to the store, on its own network (model-store), never on backend or
+  # model: it never sees a question. Nothing is verified here; the pipeline verifies
+  # everything it loads, offline, from the copy. The reader's credentials are two
+  # 0400 files owned by uid 1000 (secrets/model-store-reader-*), never variables.
+  model-fetch:
+    <<: *hardening
+    image: ${PIPELINE_IMAGE:-ghcr.io/measured-health/mhai-multiagent-pipeline-pilot:latest}
+    pull_policy: missing
+    profiles: ["ownmodel"]
+    restart: "no"
+    user: "1000:1000"
+    entrypoint: ["mhai-models"]
+    command: ["fetch-pinned", "--lock", "/lock/models.lock", "--to", "/mirror"]
+    environment:
+      APP_ENV: production
+      MODEL_STORE_ENDPOINT: ${PILOT_MODEL_STORE_ENDPOINT:-}
+      MODEL_STORE_BUCKET: ${PILOT_MODEL_STORE_BUCKET:-}
+      MODEL_STORE_REGION: ${PILOT_MODEL_STORE_REGION:-us-east-1}
+      MODEL_STORE_READER_ACCESS_KEY_FILE: /run/secrets/model-store-reader-access-key
+      MODEL_STORE_READER_SECRET_KEY_FILE: /run/secrets/model-store-reader-secret-key
+    volumes:
+      - modelmirror:/mirror
+      - ./models:/lock:ro
+      - ./secrets/model-store-reader-access-key:/run/secrets/model-store-reader-access-key:ro
+      - ./secrets/model-store-reader-secret-key:/run/secrets/model-store-reader-secret-key:ro
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    networks: [model-store]
 
   # The EMR integration (ADR 0014; EMR design §6.4). Off on the demo: the
   # demo has neither the emr NATS user nor its database login yet
@@ -435,6 +524,12 @@ networks:
     internal: true
   # egress-emr's way out, and only its (profile emr).
   egress-emr: {}
+  # The pipeline and the llama sidecar only, no route out (profile ownmodel): the
+  # questions the sidecar answers never leave the host.
+  model:
+    internal: true
+  # model-fetch's way out to the model store, and only its (profile ownmodel).
+  model-store: {}
   # Shared with the frontend's compose project (mhai-web), made by
   # setup-host.sh with --internal. Only NATS is on it here: the BFF reaches
   # it as mhai-nats:4222 and nothing else in this stack.
@@ -462,3 +557,8 @@ volumes:
   # The allow-list the emr service writes and egress-emr reads (profile
   # emr); rewritten every 15 s, so not external.
   emr-egress-conf: {}
+  # The own answer model (profile ownmodel): model-fetch's copy of the pinned files,
+  # and the pipeline's verified cache the llama sidecar serves from. Both can be
+  # rebuilt (model-fetch, then a pipeline restart), so not external.
+  modelmirror: {}
+  modelcache: {}

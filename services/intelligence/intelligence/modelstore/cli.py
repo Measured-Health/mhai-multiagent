@@ -17,6 +17,7 @@ Commands::
     mhai-models lock-check --base MAIN_LOCK [--head LOCK] [--history FILE]
         [--trust-policy FILE] [--testsets FILE] [--thresholds-dir DIR] [--rehearsal]
     mhai-models rollback ROLE [--to VERSION] [--lock PATH] [--rehearsal]
+    mhai-models fetch-pinned --lock PATH --to DIR
 
 The store is any S3-compatible bucket: ``MODEL_STORE_ENDPOINT`` (TLS unless loopback),
 ``MODEL_STORE_BUCKET`` and ``MODEL_STORE_REGION`` (optional). Two credentials: the writer
@@ -107,6 +108,14 @@ A promotion (not ``--dry-run``) outside ``MHAI_MODELS_ENV=development`` must run
 ``MHAI_EVAL_ROLE=locked`` (the locked split), must pass ``--expect-files`` and may not pass
 ``--dev-set``; each is ``not_allowed_here`` otherwise.
 
+``fetch-pinned`` (:func:`intelligence.modelstore.mirror.fetch_pinned`, the ``model-fetch``
+container of the ``ownmodel`` profile) copies what verifying each pin in ``--lock`` reads
+into the mirror ``--to`` (an existing folder, not a link) as the reader, for the pipeline to
+verify offline. The reader's credentials come from files only:
+``MODEL_STORE_READER_ACCESS_KEY_FILE`` and ``MODEL_STORE_READER_SECRET_KEY_FILE`` (mode 0600
+or tighter, never a link or a placeholder). Nothing is verified here: the pipeline verifies
+everything it loads. It prints ``{"fetched": {role: objects copied}}``.
+
 Exit codes: 0 done, 2 refused (one JSON line ``{"refused": "<code>"}`` on stdout, with
 ``"fix"``, a fixed text, for a naming mistake in ``reasons.FIXES``; for
 ``promote``, ``check``, ``make-fixture``, ``store-init``, ``pin``, ``lock-check`` and
@@ -181,8 +190,18 @@ DEBUG_ENV = "MHAI_MODELS_DEBUG"
 # Commands whose refusals carry the fixed detail code, and whose store or source being
 # unavailable is exit 3.
 _DETAILED = frozenset(
-    {"promote", "check", "make-fixture", "store-init", "pin", "lock-check", "rollback"}
+    {
+        "promote",
+        "check",
+        "make-fixture",
+        "store-init",
+        "pin",
+        "lock-check",
+        "rollback",
+        "fetch-pinned",
+    }
 )
+READER_FILE_ENVS = (READER_ACCESS_ENV + "_FILE", READER_SECRET_ENV + "_FILE")
 
 
 def _print(obj: dict[str, Any]) -> None:
@@ -697,6 +716,40 @@ def _store_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _reader_from_files() -> store.S3Store:
+    """The store as the reader, with the credentials from ``*_FILE`` only."""
+    from intelligence.boundary.config import _read_store_secret
+
+    for name in (READER_ACCESS_ENV, READER_SECRET_ENV):
+        if os.environ.get(name):
+            raise Refused("not_allowed_here", detail_code="credential_env")
+    errs: list[str] = []
+    values = []
+    for name in READER_FILE_ENVS:
+        path = os.environ.get(name)
+        values.append(_read_store_secret(path, name, errs) if path else None)
+    if errs or not all(values):
+        raise Refused("not_allowed_here", detail_code="reader_credentials")
+    endpoint = store.check_endpoint(_env(ENDPOINT_ENV, "store_unavailable"))
+    bucket = _env(BUCKET_ENV, "store_unavailable")
+    region = os.environ.get(REGION_ENV) or "us-east-1"
+    return store.S3Store(
+        endpoint, bucket, store.Credentials(str(values[0]), str(values[1])), region
+    )
+
+
+def _fetch_pinned(args: argparse.Namespace) -> int:
+    from intelligence.modelstore import mirror
+
+    pinned = lock.read(args.lock)
+    root = Path(args.to)
+    if root.is_symlink() or not root.is_dir():
+        raise Refused("file_not_allowed", detail_code="mirror")
+    source = _reader_from_files()
+    _print({"fetched": mirror.fetch_pinned(source, pinned, root)})
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mhai-models")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -761,6 +814,10 @@ def _parser() -> argparse.ArgumentParser:
     rb.add_argument("--lock", default=None)
     rb.add_argument("--rehearsal", action="store_true")
     rb.set_defaults(func=_rollback)
+    fp = sub.add_parser("fetch-pinned", help="copy the pinned models into an offline mirror")
+    fp.add_argument("--lock", required=True)
+    fp.add_argument("--to", required=True)
+    fp.set_defaults(func=_fetch_pinned)
     return parser
 
 

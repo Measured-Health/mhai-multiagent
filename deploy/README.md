@@ -648,6 +648,64 @@ does not; it keeps them for a limited time for abuse monitoring only. So:
    or stop it: `docker compose --profile cloud stop egress-proxy`.
 4. Revoke the key at the provider.
 
+## Own answer model (off by default)
+
+The team's own answer model (own answer model plan,
+`docs/plans/2026-11-13-own-answer-model.md`) runs on the local route as two
+services under the profile `ownmodel`, next to the pilot pipeline:
+
+| Service | What it does | Networks | Mounts |
+|---|---|---|---|
+| `model-fetch` | one-shot: copies what `models.lock` pins from the model store into the `modelmirror` volume, as the store's reader | `model-store` only (its own way out) | `modelmirror` (rw), `./models` (ro), the reader's two credential files (ro) |
+| `llama` | llama.cpp's `llama-server` at the pinned commit (`llama/Dockerfile`), serving the verified GGUF under the alias `<name>@<version>#<sha12>` | `model` only (internal, shared with the pipeline) | `modelcache` (ro) |
+| `pipeline` | verifies the pins offline from the mirror into `modelcache`, writes `active.json`, checks the sidecar's alias before every question | `backend`, `model` | `modelcache` (rw), `modelmirror` (ro), `./models` (ro) |
+
+Fail closed: no verified pin, an `active.json` that doesn't match, a GGUF
+whose hash changed (the sidecar refuses to start), a sidecar that is down or
+serves another alias: every local question escalates with the outcome
+`local_unverified`. There is no fallback to Ollama, the cloud or another
+version. In production the plain Ollama route is refused unless
+`INTELLIGENCE_LOCAL_UNPINNED=on` (never set it on the pilot host).
+
+**Settings** (`.env`, all empty or defaulted):
+
+| Variable | Default | What |
+|---|---|---|
+| `PILOT_MODEL_ROLES` | empty (none) | `cca` to load the pinned answer model |
+| `PILOT_LOCAL_MODEL_MEM` | `4g` | the sidecar's memory cap (and swap) |
+| `PILOT_LOCAL_MODEL_THREADS` | `2` | llama-server threads, and the sidecar's CPUs |
+| `PILOT_LOCAL_MODEL_CTX` | `4096` | context size |
+| `PILOT_MODEL_STORE_ENDPOINT`, `PILOT_MODEL_STORE_BUCKET`, `PILOT_MODEL_STORE_REGION` | empty, empty, `us-east-1` | the store, for `model-fetch` only |
+
+Files on the host: `models/models.lock` and `models/trust-policy.json`
+(copied from the repository at the deployed commit), and
+`secrets/model-store-reader-access-key` and
+`secrets/model-store-reader-secret-key` (mode 0400, owned by uid 1000).
+The `llama` image is built on the host from `llama/` (copy the folder next
+to `compose.yml`; `docker compose --profile ownmodel build llama`).
+
+**Sizing** (CPU, Q4_K_M; set `PILOT_LOCAL_MODEL_MEM` to the sidecar column
+plus 0.5 GB):
+
+| Model size | GGUF on disk | Sidecar memory (ctx 4096) | Speed on 2 arm64 cores | Fit |
+|---|---|---|---|---|
+| 1-3B | 1-2 GB | about 2-3 GB | tens of seconds per answer | yes, if the host has the RAM |
+| 7-8B | about 4.5 GB | about 5-6 GB | minutes per answer | a larger host or a GPU only |
+
+The demo host has about 3.7 GiB in all, shared with MongoDB, the EMR and the
+web demo, and the pilot pipeline already takes up to 1600 MiB: even a 1-3B
+model does not fit beside them. Resize the instance (t4g.large, 8 GiB, fits
+a 3B model) before turning the profile on.
+
+**The switch** (pinning a passing `cca`, `model-fetch`, the on-host
+evaluation, `--provider none`, and back) is own model PR 4's runbook;
+until it lands, nothing here switches a hospital.
+
+`llama/test-entrypoint.sh` tests the entrypoint without Docker;
+`llama/test-llama.sh` builds the image and checks, with a tiny public test
+GGUF, that the sidecar serves exactly the verified alias, reaches nothing
+outside its network, and refuses a GGUF with one flipped byte.
+
 ## Known limits
 
 - **No TLS inside the instance.** Postgres (`sslmode=disable`) and NATS

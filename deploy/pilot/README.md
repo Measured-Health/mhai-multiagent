@@ -198,6 +198,19 @@ Fast, in this order:
 Rotating the key: `--replace-key` with the new key on stdin, then
 `docker compose restart pipeline`, then revoke the old key.
 
+## Switch a hospital to your own model
+
+The pilot can move a hospital from the cloud to the team's own answer model
+(trained in Colab, promoted, gated on the clinical question set and pinned
+in `models.lock` as `cca`). The pieces are in place (profile `ownmodel`:
+the `llama` sidecar and `model-fetch`; deploy/README.md, "Own answer
+model"), but **the switch itself is the runbook of own model PR 4**
+(`deploy/pilot/eval-local.sh`, the on-host evaluation before the switch,
+and the switch and switch back). Placeholder until PR 4 lands: do not
+switch a hospital by hand. Until then every hospital stays on the cloud,
+and a hospital on `--provider none` gets escalations only (no pinned `cca`
+and no unpinned model in production).
+
 ## Known limits (the pilot accepts these; see PR #134)
 
 - **The deferred sign-offs** (TODO.md, "Cloud models: before any real

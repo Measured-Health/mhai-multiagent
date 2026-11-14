@@ -27,8 +27,31 @@ ROUTES: Final[tuple[str, ...]] = (
 # query.completed's egress: where an answer's text went.
 EGRESS: Final[tuple[str, ...]] = ("anthropic", "gemini", "none", "openai", "xai")
 
-# query.completed's cloud_outcome (design section 11).
+# query.completed's cloud_outcome (design section 11), and the local route's one outcome
+# (LOCAL_OUTCOMES).
 OUTCOMES: Final[tuple[str, ...]] = (
+    "auth_failed",
+    "budget_exhausted",
+    "egress_blocked",
+    "insufficient",
+    "local_unverified",
+    "malformed",
+    "ok",
+    "refused",
+    "retention_unconfirmed",
+    "timeout",
+    "truncated",
+    "unavailable",
+    "unconfigured",
+)
+
+# The local route's outcome (own answer model plan, Task 11): the pinned answer model's
+# sidecar could not be shown to serve the verified model, so the job escalated before
+# anything was generated. Never a cloud call's outcome.
+LOCAL_OUTCOMES: Final[tuple[str, ...]] = ("local_unverified",)
+
+# A cloud call's outcomes: OUTCOMES without the local route's.
+CLOUD_OUTCOMES: Final[tuple[str, ...]] = (
     "auth_failed",
     "budget_exhausted",
     "egress_blocked",
