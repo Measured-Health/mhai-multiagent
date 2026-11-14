@@ -3,14 +3,22 @@ name: Pilot pipeline image
 # The pipeline worker's image for the pilot on the demo host
 # (deploy/pilot/README.md): services/intelligence/Dockerfile, target pilot
 # (the runtime plus the pinned embedding and NLI weights, loaded offline in
-# the build), for arm64 (the demo host is Graviton). Started by hand from
-# main only; it pushes the image and does nothing on the host.
+# the build), for arm64 (the demo host is Graviton) or, with arch amd64, for
+# an x86 intelligence host (docs/deploy/remote-intelligence.md; tags
+# latest-amd64 and sha-...-amd64). Started by hand from main only; it pushes
+# the image and does nothing on the host.
 
 on:
   workflow_dispatch:
+    inputs:
+      arch:
+        description: "Architecture: arm64 (the demo host) or amd64 (an x86 intelligence host)"
+        type: choice
+        options: [arm64, amd64]
+        default: arm64
 
 concurrency:
-  group: pilot-image
+  group: pilot-image-${{ inputs.arch }}
   cancel-in-progress: false
 
 permissions: {}
@@ -18,7 +26,7 @@ permissions: {}
 jobs:
   build-pipeline:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ inputs.arch == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
       packages: write
@@ -42,13 +50,15 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha,format=long
+          flavor: |
+            suffix=${{ inputs.arch == 'amd64' && '-amd64' || '' }},onlatest=true
 
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: services/intelligence
           target: pilot
           build-args: TORCH=cpu
-          platforms: linux/arm64
+          platforms: ${{ inputs.arch == 'amd64' && 'linux/amd64' || 'linux/arm64' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

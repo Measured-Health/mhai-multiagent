@@ -153,7 +153,7 @@ PRODUCTION = {
     "NATS_TLS_KEY_PATH": "/run/nats/pipeline-key.pem",
     "NATS_NKEY_SEED_PATH": "/run/nats/pipeline.nk",
     # Outside development the pipeline's database needs verified TLS.
-    "INTELLIGENCE_DB_URL": "postgres://db.internal:5432/mhai?sslmode=verify-full",
+    "INTELLIGENCE_DB_URL": "postgres://db.internal:5432/mhai?sslmode=verify-full&sslrootcert=/run/tls/ca.pem",
 }
 
 
@@ -272,7 +272,10 @@ def test_settings_need_verified_tls_to_postgres_outside_development(tmp_path: Pa
         with pytest.raises(ConfigError, match="sslmode=verify-full"):
             WorkerSettings.from_env(env)
     s = WorkerSettings.from_env(
-        {**prod, "INTELLIGENCE_DB_URL": "postgres://db.internal:5432/mhai?sslmode=verify-full"}
+        {
+            **prod,
+            "INTELLIGENCE_DB_URL": "postgres://db.internal:5432/mhai?sslmode=verify-full&sslrootcert=/run/tls/ca.pem",
+        }
     )
     assert s.db_password == "test-only-file-password-0002"
     dev = WorkerSettings.from_env(

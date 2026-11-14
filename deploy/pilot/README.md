@@ -42,6 +42,15 @@ service names on its own host (`nats`, `postgres`: no dot, no address, not
 localhost), still needs its NKey and a file password, and logs a warning at
 every start. TLS is required before any worker runs off this host.
 
+**On its own server instead:** when the host is too small for the pipeline and
+a model, run the pipeline, llama, `model-fetch` and the egress proxy on an
+intelligence host, with TLS for NATS and Postgres between the two hosts
+([docs/deploy/remote-intelligence.md](../../docs/deploy/remote-intelligence.md):
+`deploy/enable-split.sh` on the app host, `deploy/intelligence-host/` there).
+The single-host switch is then off. Never set it up on the demo host. The
+hospital and model-policy steps below (7 and 8) are the same, run on the app
+host.
+
 ## Before you start (once)
 
 1. **The release with the pilot is deployed** (this PR merged, the "Deploy
