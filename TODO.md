@@ -100,7 +100,7 @@ Alerts now carry `patient.id`, so a clinician can ask about an alert's patient. 
 
 ## EMR: follow-ups from PR 11 (14 Nov)
 
-- [ ] **Migration order:** 00043 (`last_file_at`, file export staleness) merges after the reference library's 00040 (merged) and 00041 and Analysis PR 8's 00042; the migration-count test counts 40 until they land, then 42.
+- [ ] **Migration order:** 00043 (`last_file_at`, file export staleness) merges after Analysis PR 8's 00042 (00040 and 00041 are on main); the migration-count test counts 41 until 00042 lands, then 42.
 - [ ] **Before H7 (live):** a synthetic SFTP end-to-end run through the real `egress-emr` on the build host (an `emr synth-sftp` development command beside `synth-fhir`), as the FHIR run does (plan departure 72).
 - [ ] **Deploy, after H1 and H7:** add `file_export` to `CORE_EMR_CONNECTOR_TYPES`; give the platform admin the host key fingerprint and the export interval from Havana IT; Havana creates `processed/` and `rejected/` and writes files as `.part` then renames.
 - [ ] **mhai-web:** the `file_export` form shows the new fields from `GET /platform/emr/connector-types` (`username`, `expected_every_minutes`, `mrn_namespace`); no contract change.
