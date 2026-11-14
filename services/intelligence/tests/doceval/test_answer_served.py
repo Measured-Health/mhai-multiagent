@@ -170,7 +170,7 @@ def test_the_escalation_guard_catches_a_missed_escalation(
 
 
 def _without_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The gate's scoring mechanics alone: the escalation guard (ADR 0016) would catch the
+    """The gate's scoring mechanics alone: the escalation guard (ADR 0017) would catch the
     fake's missed escalation, so a test of "one miss fails" switches it off."""
     from intelligence.boundary import models
     from intelligence.guardrails import escalation_guard

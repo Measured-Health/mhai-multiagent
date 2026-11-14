@@ -1,5 +1,5 @@
 """The escalation guard: question-level checks that send an answer to a clinician whatever
-its grounding says (ADR 0016).
+its grounding says (ADR 0017).
 
 NLI checks that each sentence of an answer is supported by the chunk it cites. It cannot
 tell whether the answer is the right response to the question: a reply that recites the
@@ -60,7 +60,7 @@ NAME = "escalation-guard"
 RULES_PATH = Path(__file__).resolve().parent / "rules" / "escalation-guard.yaml"
 # The reviewed rule set's SHA-256. An edit to the YAML must change this too (and the
 # version): an unreviewed edit refuses to load.
-RULES_SHA256 = "b628252635021f8646a6b1db5ea6f28b629072935e35c3661a4e1bdeaf78f18d"
+RULES_SHA256 = "41576549f60b41094157a73b39e35e60364a4bf120d44ceaf78413d1964a50e7"
 
 RED_FLAG = "red_flag"
 MISSING_INFORMATION = "missing_information"

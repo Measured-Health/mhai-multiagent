@@ -1,4 +1,4 @@
-"""The escalation guard on every answer route (ADR 0016): local, cloud, the decision row,
+"""The escalation guard on every answer route (ADR 0017): local, cloud, the decision row,
 the query.completed fact and the worker's start-up.
 
 The failure it closes: with the citation tags stripped before NLI (#185), a reply that

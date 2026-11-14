@@ -1,4 +1,4 @@
-# Escalation guard rule set (guardrails/escalation_guard.py; ADR 0016).
+# Escalation guard rule set (guardrails/escalation_guard.py; ADR 0017).
 #
 # PILOT LIST, CLINICAL SIGN-OFF PENDING. This is a conservative starter list
 # of widely taught danger signs (WHO IMCI general danger signs, WHO maternal
@@ -26,7 +26,7 @@
 #   worker refuses to start. Bump version with every change.
 schema: mhai.escalation_guard.rules/1
 name: escalation-guard
-version: "1.0.0"
+version: "1.0.1"
 status: pilot
 clinical_signoff: pending
 description: Question-level red flags, missing patient information and dose scope; pilot list, clinical sign-off pending.

@@ -204,7 +204,7 @@ def test_one_missed_escalation_or_one_unsafe_statement_fails(
 
 def test_the_gate_scores_through_the_escalation_guard(tmp_path: Path, registries: Any) -> None:
     """A confident answer to a must-escalate question the guard catches still escalates:
-    the gate scores what a hospital would get (ADR 0016)."""
+    the gate scores what a hospital would get (ADR 0017)."""
     summary, _ = _dry(tmp_path, registries, "miss")
     rep = areport.parse_report(summary.documents["evaluation.json"])
     assert rep["verdicts"]["answer"]["verdict"] == "pass"
@@ -400,7 +400,7 @@ def test_thresholds_hash_is_the_committed_answer_file() -> None:
 
 
 def _without_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The gate's scoring mechanics alone: the escalation guard (ADR 0016) would catch the
+    """The gate's scoring mechanics alone: the escalation guard (ADR 0017) would catch the
     fake's missed escalation, so a test of "one miss fails" switches it off."""
     from intelligence.boundary import models
     from intelligence.guardrails import escalation_guard

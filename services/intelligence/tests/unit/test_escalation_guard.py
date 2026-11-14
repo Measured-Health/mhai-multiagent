@@ -1,4 +1,4 @@
-"""The escalation guard's rule set and checks (guardrails/escalation_guard.py, ADR 0016).
+"""The escalation guard's rule set and checks (guardrails/escalation_guard.py, ADR 0017).
 
 Every question, value and chunk here is synthetic and written for these tests, in many
 phrasings: none is copied from the answer gate's bank (doceval/answers/bank.py), whose
@@ -71,7 +71,7 @@ def _packaged() -> str:
     ("edit", "code"),
     [
         (lambda s: s.replace("schema: mhai.escalation_guard.rules/1", "schema: other/1"), "schema"),
-        (lambda s: s.replace('version: "1.0.0"', 'version: "one"'), "version"),
+        (lambda s: s.replace('version: "1.0.1"', 'version: "one"'), "version"),
         (lambda s: s.replace("status: pilot", "status: draft"), "status"),
         (lambda s: s + "\nextra: 1\n", "top"),
         (

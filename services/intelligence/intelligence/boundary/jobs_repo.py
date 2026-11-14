@@ -166,7 +166,7 @@ class Decision:
     # and source credit of each cited shared reference row (00041).
     cited_sources: Sequence[Mapping[str, Any]] = ()
     # The escalation guard's reasons (guardrails.escalation_guard.REASONS):
-    # query.completed's guard_reasons, codes only (ADR 0016).
+    # query.completed's guard_reasons, codes only (ADR 0017).
     guard_reasons: Sequence[str] = ()
 
 

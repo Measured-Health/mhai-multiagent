@@ -299,7 +299,7 @@ def _verify_with(orch: Any, generation: Generation) -> Verification:
     cloud client both use it, so a cloud answer is verified exactly as a
     local one (design section 9).
 
-    The escalation guard (guardrails.escalation_guard, ADR 0016) reads the question
+    The escalation guard (guardrails.escalation_guard, ADR 0017) reads the question
     first: a red flag, missing patient information or a dose out of the cited chunks'
     scope makes the decision ESCALATE whatever NLI says; a PASS that only recites its
     chunks, off the question, becomes the rule set's recital action. A guard that

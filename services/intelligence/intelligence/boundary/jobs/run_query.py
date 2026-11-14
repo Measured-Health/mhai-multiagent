@@ -615,7 +615,7 @@ class RunQuery:
             "failed_agents": list(failed),
             "flags": [list(f) for f in v.flags],
             "model_used": g.model_used,
-            # The escalation guard's codes (ADR 0016): why it escalated or downgraded.
+            # The escalation guard's codes (ADR 0017): why it escalated or downgraded.
             "guard_reasons": list(v.guard_reasons),
             "guard_rules": list(v.guard_rules),
         }

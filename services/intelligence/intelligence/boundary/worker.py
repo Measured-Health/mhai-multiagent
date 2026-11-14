@@ -1048,7 +1048,7 @@ async def run_service(settings: WorkerSettings) -> None:
     pipeline also runs run_query jobs, but only with a database (T10 note):
     without one it takes no job and health says database_ready false."""
     secure_logging(settings)
-    # The escalation guard's pinned rule set (ADR 0016): every answer is checked with
+    # The escalation guard's pinned rule set (ADR 0017): every answer is checked with
     # it, so a pipeline worker that can't load it refuses to start (RuleSetError).
     if settings.service == "pipeline":
         from intelligence.guardrails import escalation_guard

@@ -212,7 +212,7 @@ var CloudOutcomes = []string{"ok", "egress_blocked", "budget_exhausted", "unconf
 	"local_unverified"}
 
 // GuardReasons are query.completed's guard_reasons: the worker's escalation
-// guard's reason codes (ADR 0016). The worker holds the same list
+// guard's reason codes (ADR 0017). The worker holds the same list
 // (guardrails/escalation_guard.py REASONS; TestGuardReasonsMatchWorker).
 // recital is a downgrade (PASS to REGENERATE); the others escalate.
 var GuardReasons = []string{"red_flag", "missing_information", "out_of_scope", "recital", "guard_unavailable"}

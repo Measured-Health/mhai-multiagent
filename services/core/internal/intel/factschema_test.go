@@ -234,7 +234,7 @@ func TestQueryCompletedEgressAndOutcome(t *testing.T) {
 	}
 }
 
-// ADR 0016: query.completed may carry the escalation guard's reasons, codes
+// ADR 0017: query.completed may carry the escalation guard's reasons, codes
 // from a closed set only, never text; a fact without them stays valid.
 func TestQueryCompletedGuardReasons(t *testing.T) {
 	qid := uuid.New()
@@ -279,7 +279,7 @@ func TestQueryCompletedGuardReasons(t *testing.T) {
 	}
 }
 
-// ADR 0016: Go's guard reasons equal the worker's
+// ADR 0017: Go's guard reasons equal the worker's
 // (services/intelligence/intelligence/guardrails/escalation_guard.py REASONS,
 // read as text), so the two sides can't drift.
 func TestGuardReasonsMatchWorker(t *testing.T) {

@@ -63,7 +63,7 @@ var (
 var (
 	egressValues  = setOf(config.EgressValues())
 	cloudOutcomes = setOf(config.CloudOutcomes)
-	// The escalation guard's reason codes (ADR 0016).
+	// The escalation guard's reason codes (ADR 0017).
 	guardReasons = setOf(config.GuardReasons)
 )
 
@@ -102,7 +102,7 @@ var jobFactSchemas = map[string]struct {
 		"egress":        inSet(egressValues),
 		"cloud_outcome": inSet(cloudOutcomes),
 		// Optional: why the escalation guard escalated or downgraded the
-		// answer, codes only (ADR 0016).
+		// answer, codes only (ADR 0017).
 		"guard_reasons": codeSet(guardReasons),
 	}, required: []string{"decision", "attempts"}}, "completed", "", "", ""},
 	"query.failed": {factSchema{fields: map[string]fieldCheck{

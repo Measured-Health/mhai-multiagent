@@ -59,7 +59,7 @@ every other production rule stay, and the worker logs a warning at start.
 It exists for the pilot on the demo host (`deploy/pilot/README.md`), which
 has no TLS inside the instance yet; never use it across hosts.
 
-## The escalation guard (ADR 0016)
+## The escalation guard (ADR 0017)
 
 Every answer, on every route, is checked against its question before an NLI
 decision can stand (`intelligence/guardrails/escalation_guard.py`). A red

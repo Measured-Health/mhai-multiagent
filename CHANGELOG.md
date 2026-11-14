@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- **Clinical review:** the escalation guard (ADR 0016; no migration; a new
+- **Clinical review:** the escalation guard (ADR 0017; no migration; a new
   optional `query.completed` key). Every answer, on every route (local, cloud,
   the answer gate, `eval-served`), is checked against the question before an
   NLI decision can stand: a red flag in the masked question or the patient's

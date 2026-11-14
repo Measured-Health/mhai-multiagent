@@ -1,4 +1,4 @@
-# 0016. A question-level escalation guard before any answer can pass
+# 0017. A question-level escalation guard before any answer can pass
 
 - **Status:** Proposed 2026-11-14 (clinical review: the red-flag list is a pilot list pending clinical sign-off)
 - **Date:** 2026-11-14
