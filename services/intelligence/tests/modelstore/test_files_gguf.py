@@ -51,6 +51,12 @@ def test_each_listed_architecture_passes(tmp_path: Path, arch: str) -> None:
     files.check_gguf(_file(tmp_path, g.tiny(arch.encode("ascii"))))
 
 
+def test_gemma4_passes(tmp_path: Path) -> None:
+    # The first trained answer model is on google/gemma-4-E4B-it, which the pinned
+    # llama.cpp converts to (and serves as) general.architecture "gemma4".
+    files.check_gguf(_file(tmp_path, g.tiny(b"gemma4")))
+
+
 def _long_template() -> list[bytes]:
     kvs = g.tiny_kvs()
     kvs[1] = g.kv_string(b"tokenizer.chat_template", b"x" * (1024 * 1024))
