@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- EMR PR 11: the scheduled file export (`file_export`, migration **00043**;
+  off by default: the type joins `CORE_EMR_CONNECTOR_TYPES` only by a
+  deploy change after H1 and H7). Files in the published `mhai_csv_v1`
+  format (`docs/specs/formats/mhai_csv_v1.md`: patients, encounters,
+  results, vitals, medications) are pulled over SFTP through egress-emr
+  with the pinned host key, signed in with the connection's SSH key, read
+  strictly and stored as raw records through the allow-list. A file of the
+  wrong shape is refused whole and moved to `rejected/`; a row of the wrong
+  values is kept as a dead letter (a rejected raw record, no payload);
+  loaded files move to `processed/`; nothing is deleted or overwritten.
+  The folder is listed a page at a time and capped. A connection is behind
+  when no new file has arrived for its declared interval plus 50%. The
+  type gains `username`, `expected_every_minutes` and `mrn_namespace`.
+
 - A clinician's patient lookup by MRN (OpenAPI 1.29.0, additive; migration
   00039), as designed in TODO.md's note and approved by the product owner
   (14 Nov): `POST /patients/lookup` `{mrn}` (never an MRN in a URL), for
