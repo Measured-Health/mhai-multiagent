@@ -40,6 +40,10 @@ import (
 // design §6.4, and well inside the proxy's proxyconf.MaxAge.
 const Interval = 15 * time.Second
 
+// ReloadWait is how long after a write the proxy is taken to have read it:
+// one of its reloads (proxyconf.ReloadEvery) and a margin.
+const ReloadWait = proxyconf.ReloadEvery + 500*time.Millisecond
+
 // errRead is the writer's one database error: a fixed value.
 var errRead = errors.New("egress: cannot read the connections")
 
@@ -49,6 +53,13 @@ func WriteAllowList(ctx context.Context, pool *pgxpool.Pool, dir string) error {
 }
 
 type heldKey struct{ hospital, conn uuid.UUID }
+
+// listing is when a connection first appeared in the file, in the run of
+// writes that has listed it since (monotonic time).
+type listing struct {
+	hospital uuid.UUID
+	since    time.Time
+}
 
 // Writer writes the allow-list.
 type Writer struct {
@@ -66,6 +77,10 @@ type Writer struct {
 	held    map[heldKey]int
 	writeMu sync.Mutex
 	last    atomic.Int64
+	// listed are the connections the last file gave the proxy, and
+	// written when it was written (under mu).
+	listed  map[uuid.UUID]listing
+	written time.Time
 }
 
 func (w *Writer) init() {
@@ -144,10 +159,74 @@ func (w *Writer) Hold(ctx context.Context, hospital, id uuid.UUID) (release func
 		return nil, err
 	}
 	select {
-	case <-time.After(proxyconf.ReloadEvery + 500*time.Millisecond):
+	case <-time.After(ReloadWait):
 	case <-ctx.Done():
 	}
 	return release, nil
+}
+
+// Ensure makes sure connection id of hospital is on the list egress-emr
+// uses before the scheduler polls it: the first poll after a switch-on
+// may come before the next periodic write. It adds nothing to the list: a
+// connection is listed only as an enabled one (or one held for a test),
+// exactly as every write lists it.
+//
+// When the last file listed the connection and is recent, Ensure only
+// waits, if need be, until the proxy has had ReloadWait to read it.
+// Otherwise it writes the file now, as Hold does, and waits the same.
+// listed is false when a fresh write leaves the connection out (switched
+// off, an origin or port the proxy never opens, a range it can't
+// declare): the poll must not go out. err is non-nil when the list could
+// not be written or ctx ended: the allow-list isn't ready yet.
+func (w *Writer) Ensure(ctx context.Context, hospital, id uuid.UUID) (listed bool, err error) {
+	w.init()
+	since, ok := w.listedSince(hospital, id)
+	if !ok {
+		if err := w.WriteOnce(ctx); err != nil {
+			return false, err
+		}
+		if since, ok = w.listedSince(hospital, id); !ok {
+			return false, nil
+		}
+	}
+	if wait := ReloadWait - time.Since(since); wait > 0 {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	return true, nil
+}
+
+// listedSince is when the file began listing id under hospital, when the
+// last file did and was written within two Intervals (an older one may
+// have aged out at the proxy).
+func (w *Writer) listedSince(hospital, id uuid.UUID) (time.Time, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	l, ok := w.listed[id]
+	if !ok || l.hospital != hospital || time.Since(w.written) > 2*Interval {
+		return time.Time{}, false
+	}
+	return l.since, true
+}
+
+// noteListed records what a file just written gives the proxy.
+func (w *Writer) noteListed(l *proxyconf.List, at time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	next := make(map[uuid.UUID]listing, len(l.Conns))
+	for id, e := range l.Conns {
+		if prev, ok := w.listed[id]; ok && prev.hospital == e.HospitalID {
+			next[id] = prev
+		} else {
+			next[id] = listing{hospital: e.HospitalID, since: at}
+		}
+	}
+	w.listed, w.written = next, at
 }
 
 // WriteOnce reads the connections and writes the file.
@@ -164,9 +243,15 @@ func (w *Writer) WriteOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// What the proxy will use: Marshal parsed it already, so this can't
+	// fail.
+	l, err := proxyconf.Parse(b)
+	if err != nil {
+		return err
+	}
 	// Ranges that overlap across hospitals (A37): the proxy leaves those
 	// connections out and serves the rest. A person must act: alert.
-	if l, err := proxyconf.Parse(b); err == nil && len(l.Overlapping) > 0 && w.Log != nil {
+	if len(l.Overlapping) > 0 && w.Log != nil {
 		ids := make([]string, len(l.Overlapping))
 		for i, id := range l.Overlapping {
 			ids[i] = id.String()
@@ -177,6 +262,7 @@ func (w *Writer) WriteOnce(ctx context.Context) error {
 		return err
 	}
 	w.last.Store(now.UnixNano())
+	w.noteListed(l, time.Now())
 	return nil
 }
 

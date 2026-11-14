@@ -13,6 +13,14 @@
 // store down is unreachable, never sign_in_refused; three sign-in refusals
 // in a row stop polling until a test passes (Resume). Nothing is logged
 // but ids, codes and counts.
+//
+// Before a fetch goes out, the connection must be on egress-emr's
+// allow-list (Egress.Ensure): the first poll after a switch-on can come
+// before the allow-list's next periodic write. A list not ready yet is not
+// the source's failure: the poll is tried again after NotReadyRetry,
+// with no run row and no back-off, at most MaxNotReady times in a row;
+// after that it is recorded unreachable and backs off. A connection the
+// list leaves out is unreachable at once, and nothing is sent.
 package scheduler
 
 import (
@@ -21,6 +29,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,7 +54,21 @@ const (
 	ReconcileWindow = 24 * time.Hour
 	// maxDue bounds how many due connections one tick takes.
 	maxDue = 50
+	// NotReadyRetry is when a poll whose allow-list wasn't ready is tried
+	// again: one allow-list Interval, not a back-off.
+	NotReadyRetry = 15 * time.Second
+	// MaxNotReady bounds those retries in a row; the next one is recorded
+	// unreachable and backs off (fail closed).
+	MaxNotReady = 4
 )
+
+// Egress is egress-emr's allow-list (egress.Writer).
+type Egress interface {
+	// Ensure returns once the proxy has the connection on its list:
+	// listed false when the list leaves it out, an error when the list
+	// isn't ready yet.
+	Ensure(ctx context.Context, hospital, conn uuid.UUID) (listed bool, err error)
+}
 
 // Sink stores one run's records (sink.Sink).
 type Sink interface {
@@ -58,6 +81,8 @@ type Sink interface {
 // Metrics are counts only.
 type Metrics struct {
 	Runs, Failed, Skipped atomic.Int64
+	// NotReady counts polls put off because the allow-list wasn't ready.
+	NotReady atomic.Int64
 	// ReconciledLate is emr_reconciled_late_total: records only the daily
 	// reconciliation found.
 	ReconciledLate atomic.Int64
@@ -78,6 +103,13 @@ type Scheduler struct {
 	Jitter  func() float64
 	Log     *slog.Logger
 	Metrics *Metrics
+	// Egress puts a connection on egress-emr's allow-list before its poll
+	// (nil: no check, for a connector that needs no network).
+	Egress Egress
+
+	mu sync.Mutex
+	// notReady counts each connection's polls put off in a row.
+	notReady map[uuid.UUID]int
 }
 
 func (s *Scheduler) now() time.Time {
@@ -262,11 +294,18 @@ func (s *Scheduler) runOne(ctx context.Context, d due) (bool, error) {
 	if !built || !known {
 		return false, nil
 	}
+	listed, ready := s.ensureListed(ctx, c)
+	if !ready {
+		if ctx.Err() != nil {
+			return false, nil // stopping: the connection stays due
+		}
+		return false, s.retrySoon(ctx, c)
+	}
 	runID, err := s.startRun(ctx, c)
 	if err != nil {
 		return false, err
 	}
-	res := s.fetch(ctx, c, impl, ti, now)
+	res := s.fetch(ctx, c, impl, ti, now, listed)
 	s.metrics().Runs.Add(1)
 	if res.code != "ok" {
 		s.metrics().Failed.Add(1)
@@ -277,6 +316,49 @@ func (s *Scheduler) runOne(ctx context.Context, d due) (bool, error) {
 	s.log().Info("emr sync", "connection", c.cfg.ConnectionID.String(), "outcome", res.code, "records", res.records,
 		"backfill", c.live == nil, "reconcile", res.reconciled)
 	return true, nil
+}
+
+// ensureListed puts c on egress-emr's allow-list before its poll. ready is
+// false when the list isn't ready and the poll is to be tried again soon;
+// once MaxNotReady polls in a row have been put off, it is ready with
+// listed false, so the run is recorded unreachable and backs off.
+func (s *Scheduler) ensureListed(ctx context.Context, c conn) (listed, ready bool) {
+	if s.Egress == nil {
+		return true, true
+	}
+	id := c.cfg.ConnectionID
+	listed, err := s.Egress.Ensure(ctx, c.cfg.HospitalID, id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		delete(s.notReady, id)
+		return listed, true
+	}
+	if ctx.Err() != nil {
+		return false, false
+	}
+	if s.notReady == nil {
+		s.notReady = map[uuid.UUID]int{}
+	}
+	s.notReady[id]++
+	if s.notReady[id] > MaxNotReady {
+		delete(s.notReady, id)
+		return false, true
+	}
+	s.metrics().NotReady.Add(1)
+	s.log().Info("emr sync put off", "connection", id.String(), "code", "allow_list_not_ready", "attempt", s.notReady[id])
+	return false, false
+}
+
+// retrySoon makes c due again after NotReadyRetry, its failure counts as
+// they are: no run, no error row, no back-off.
+func (s *Scheduler) retrySoon(ctx context.Context, c conn) error {
+	now := s.now()
+	return dbx.WithHospital(ctx, s.Pool, dbx.EMR, c.cfg.HospitalID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE emr.sync_state SET next_due_at = $2, updated_at = $3 WHERE connection_id = $1`,
+			c.cfg.ConnectionID, now.Add(NotReadyRetry), now)
+		return err
+	})
 }
 
 func (s *Scheduler) startRun(ctx context.Context, c conn) (uuid.UUID, error) {
@@ -345,7 +427,10 @@ func (c *counting) Put(ctx context.Context, r connector.RawRecord) error {
 	return nil
 }
 
-func (s *Scheduler) fetch(ctx context.Context, c conn, impl connector.Connector, ti emrtypes.TypeInfo, now time.Time) result {
+// fetch runs one poll. listed is false when egress-emr's list leaves the
+// connection out: after the checks, the run is unreachable and nothing is
+// sent.
+func (s *Scheduler) fetch(ctx context.Context, c conn, impl connector.Connector, ti emrtypes.TypeInfo, now time.Time, listed bool) result {
 	if impl.Validate(c.cfg) != nil {
 		return result{code: "unreadable_data"}
 	}
@@ -363,6 +448,9 @@ func (s *Scheduler) fetch(ctx context.Context, c conn, impl connector.Connector,
 		return result{code: "unreachable"} // the store or our database: never sign_in_refused
 	case !ok:
 		return result{code: "sign_in_refused"}
+	}
+	if !listed {
+		return result{code: "unreachable"}
 	}
 	cur := connector.Cursor(c.cursor)
 	reconcile, _ := reconcileDue(c, now)
