@@ -16,7 +16,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
 
@@ -439,10 +439,28 @@ def test_file_too_large_for_one_put_refused(
     dev_set: minisets.MiniSet,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # TODO(Task 27): a conditional multipart upload; phase 0 fixtures are tiny.
+    # A store without conditional multipart takes one PUT (test_store_multipart.py).
     monkeypatch.setattr(store, "MAX_PUT_BYTES", 256)
     ctx = _ctx(_source_root(tmp_path), registry, licences, dev_set)
     err = _refused(promote.promote, _request(), ctx)
+    assert (err.reason, err.detail_code) == ("too_large", "file_too_large_for_store")
+
+
+def test_dry_run_takes_the_multipart_cap_when_the_store_has_it(
+    tmp_path: Path,
+    registry: training.Registry,
+    licences: training.Licences,
+    dev_set: minisets.MiniSet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # MODEL_STORE_CONDITIONAL_MULTIPART=1: a file over one PUT passes the dry run (the CLI
+    # sets dry_run_max_file_bytes from it); over the multipart bound it is still refused.
+    monkeypatch.setattr(store, "MAX_PUT_BYTES", 256)
+    root = _source_root(tmp_path)
+    ok = _ctx(root, registry, licences, dev_set, dry_run_max_file_bytes=10**9)
+    assert promote.promote(_request(), ok).dry_run
+    low = _ctx(root, registry, licences, dev_set, dry_run_max_file_bytes=256)
+    err = _refused(promote.promote, _request(), low)
     assert (err.reason, err.detail_code) == ("too_large", "file_too_large_for_store")
 
 
@@ -784,10 +802,15 @@ class Killing:
 
     inner: store.S3Store
 
-    def put_new(self, key: str, data: bytes | Path) -> str:
+    def put_new(self, key: str, data: bytes | Path, *, sha256: str | None = None) -> str:
         if key.endswith("/manifest.sig"):
             raise SystemExit(137)
-        return self.inner.put_new(key, data)
+        return self.inner.put_new(key, data, sha256=sha256)
+
+    def download(
+        self, key: str, *, version_id: str, out: BinaryIO, max_bytes: int
+    ) -> tuple[int, str]:
+        return self.inner.download(key, version_id=version_id, out=out, max_bytes=max_bytes)
 
     def get(self, key: str, version_id: str | None = None, *, max_bytes: int) -> bytes:
         return self.inner.get(key, version_id, max_bytes=max_bytes)

@@ -22,7 +22,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
 
@@ -340,7 +340,7 @@ class MemoryStore:
         self.fail_after = fail_after
         self.puts = 0
 
-    def put_new(self, key: str, data: bytes | Path) -> str:
+    def put_new(self, key: str, data: bytes | Path, *, sha256: str | None = None) -> str:
         store._check_key(key)
         if key in self.objects:
             raise Refused("version_exists")
@@ -371,6 +371,13 @@ class MemoryStore:
 
     def list(self, prefix: str) -> list[str]:
         return sorted(k for k in self.objects if k.startswith(prefix))
+
+    def download(
+        self, key: str, *, version_id: str, out: BinaryIO, max_bytes: int
+    ) -> tuple[int, str]:
+        body = self.get(key, version_id, max_bytes=max_bytes)
+        out.write(body)
+        return len(body), hashlib.sha256(body).hexdigest()
 
 
 def _fake_build(

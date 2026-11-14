@@ -15,8 +15,10 @@ The steps, in order, each a function of its own:
    on by the workflow) the hash must match (``hash_mismatch``, P26): the files the approver
    saw are the files promoted.
 4. :func:`check_files` (Task 13's ``check_run`` on the scratch copy, which must equal what
-   was fetched; one PUT caps a file at 5 GiB) and :func:`check_training` (Task 14's
-   ``training.load`` and ``training.check``; the manifest names this model).
+   was fetched; a file is at most what the writer's store takes, :func:`store.object_cap`:
+   5 GiB, or 50 GiB where the store does a conditional multipart upload) and
+   :func:`check_training` (Task 14's ``training.load`` and ``training.check``; the
+   manifest names this model).
 5. Evaluation. The suite comes from the role (:func:`suite_for`), and the gates must be
    that suite's (:func:`promotion_gates`). For ``clinical_document`` the extractor comes only
    from ``config.json``'s architecture (:func:`choose_extractor`), never from a name the
@@ -59,8 +61,10 @@ claim. A development rehearsal may promote on the dev split; the manifest's
 **Every PUT is read back** (:func:`put_once`): each scratch file is streamed again and must
 still have the size and SHA-256 Task 13 recorded, and after the PUT the store's own
 checksum and size of the stored version must match too (``hash_mismatch``), so nothing that
-changed between the check and the upload is ever named by a manifest. A PUT that succeeded
-on the server whose reply was lost is retried by the SDK and then reports
+changed between the check and the upload is ever named by a manifest. A file over 5 GiB
+goes up as a conditional multipart upload (:mod:`intelligence.modelstore.store`), of which
+the store keeps no whole SHA-256: that version is read back in full and hashed instead. A
+PUT that succeeded on the server whose reply was lost is retried by the SDK and then reports
 ``version_exists``. The object is ours if the key has exactly one version with our size and
 SHA-256 (for the claim, the same bytes: the same run id, actor and a fresh nonce); then we
 carry on with its version id.
@@ -236,6 +240,10 @@ class Context:
     warmup_page: Path = WARMUP_PAGE
     deadline_s: float = DEFAULT_DEADLINE_S
     base_verifier: Callable[[str], None] | None = field(default=None, repr=False)
+    # A dry run's file cap (it has no store): what the store that will promote it takes
+    # (the CLI sets it from MODEL_STORE_CONDITIONAL_MULTIPART). None: one PUT's 5 GiB. A
+    # promotion uses its store's own cap, store.object_cap.
+    dry_run_max_file_bytes: int | None = None
     # The answer gate (role cca): the llama.cpp settings (None: from the environment,
     # llama_runtime.Settings.from_env) and the orchestrator builder for a generator (None:
     # the worker's own, doceval.answers.gate.default_builder).
@@ -391,22 +399,39 @@ def _check_stored(info: store.ObjectInfo, version_id: str, size: int, sha256: st
     )
 
 
+def _stored_matches(target: ObjectStore, key: str, version_id: str, size: int, sha256: str) -> bool:
+    """The stored version is exactly ours: by the store's own SHA-256 of it or, for an
+    object it keeps none for (a multipart upload), by reading it back in full."""
+    info: store.ObjectInfo | None = None
+    try:
+        info = target.head(key, version_id)
+    except Refused as exc:
+        if (exc.reason, exc.detail_code) != ("store_unavailable", "checksum"):
+            raise
+    if info is not None:
+        return _check_stored(info, version_id, size, sha256)
+    with open(os.devnull, "wb") as sink:
+        n, got = target.download(key, version_id=version_id, out=sink, max_bytes=size)
+    return n == size and secrets.compare_digest(got, sha256)
+
+
 def put_once(target: ObjectStore, key: str, data: bytes | Path, size: int, sha256: str) -> str:
-    """``put_new``, then the stored version read back: the store's SHA-256 and size must be
-    the ones checked (``hash_mismatch`` otherwise: bytes changed between the check and the
-    upload).
+    """``put_new`` (which checks the bytes against ``sha256`` as it sends them), then the
+    stored version read back: its size and SHA-256 must be the ones checked
+    (``hash_mismatch`` otherwise: bytes changed between the check and the upload).
 
     If ``put_new`` reports ``version_exists``, the object there may be ours (a retried PUT
     whose first attempt succeeded): it is adopted only if it is the key's one version, with
-    our size and SHA-256. Anything else is ``version_exists``."""
+    our size and SHA-256. Anything else is ``version_exists``. (A multipart upload settles
+    its own retried completion and reports ``not_ours`` otherwise.)"""
     vid: str | None = None
     try:
-        vid = target.put_new(key, data)
+        vid = target.put_new(key, data, sha256=sha256)
     except Refused as exc:
-        if exc.reason != "version_exists":
+        if exc.reason != "version_exists" or exc.detail_code == "not_ours":
             raise
     if vid is not None:
-        if not _check_stored(target.head(key, vid), vid, size, sha256):
+        if not _stored_matches(target, key, vid, size, sha256):
             raise Refused("hash_mismatch", detail_code="stored")
         return vid
     found = target.versions(key)
@@ -475,18 +500,22 @@ def check_expected(entries: Sequence[files.FileEntry], expect: str | None) -> st
 
 
 def check_files(
-    run_dir: Path, fetched: Sequence[files.FileEntry] | None = None
+    run_dir: Path,
+    fetched: Sequence[files.FileEntry] | None = None,
+    *,
+    max_file_bytes: int | None = None,
 ) -> list[files.FileEntry]:
     """Step 4a: Task 13's checks on the run folder; with ``fetched``, the checked files must
-    be exactly the fetched ones. A file larger than one PUT is refused (TODO(Task 27): a
-    conditional multipart upload)."""
+    be exactly the fetched ones. A file larger than ``max_file_bytes`` (what the writer's
+    store takes, :func:`store.object_cap`; by default one PUT's 5 GiB) is refused."""
+    cap = store.MAX_PUT_BYTES if max_file_bytes is None else max_file_bytes
     entries = files.check_run(run_dir)
     if fetched is not None:
         got = [(e.path, e.size, e.sha256) for e in entries]
         if got != [(e.path, e.size, e.sha256) for e in sorted(fetched, key=lambda e: e.path)]:
             raise Refused("hash_mismatch", detail_code="fetched")
     for e in entries:
-        if e.size > store.MAX_PUT_BYTES:
+        if e.size > cap:
             raise Refused("too_large", detail_code=FILE_TOO_LARGE)
     return entries
 
@@ -523,7 +552,7 @@ def check_folder(
     """``mhai-models check DIR``: steps 3 and 4 on a local folder (no source, no copy:
     ``check_run`` opens nothing through a link). The folder's training manifest names
     the model."""
-    entries = check_files(Path(run_dir))
+    entries = check_files(Path(run_dir), max_file_bytes=store.object_cap(None))
     tm = training.load_run(Path(run_dir))
     tc = training.check(tm, registry, licences)
     training.check_gguf_run(tm, Path(run_dir))
@@ -1099,7 +1128,11 @@ def promote(req: Request, ctx: Context) -> Summary:
         source = ctx.source_for(sc)  # 3
         fetched = fetch_run(source, req.name, req.run, sc.run)
         files_sha = check_expected(fetched, req.expect_files)
-        entries = check_files(sc.run, fetched)  # 4
+        if target is not None:
+            cap = store.object_cap(target)
+        else:
+            cap = ctx.dry_run_max_file_bytes or store.MAX_PUT_BYTES
+        entries = check_files(sc.run, fetched, max_file_bytes=cap)  # 4
         checked = check_training(
             sc.run,
             req.name,

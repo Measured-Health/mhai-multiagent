@@ -499,6 +499,7 @@ Actors: clinicians and hospital staff (upload, review), hospital admins, platfor
 | T14 | DoS | Upload floods or huge documents tie up GPUs | per-user upload rate limit in core; 5 ingest jobs per hospital; page cap; JetStream `discard: new`; per-page deadline | B25 |
 | T15 | Tampering | A reviewer's stale screen overwrites a newer review | `version` on every review write; 409 `conflict` | B26 |
 | T16 | EoP | A platform admin reads documents through the jobs view | jobs never show content (frontend §14.8.3); no `documents.*` permission for platform roles | B27 |
+| T17 | Tampering | **A weight file over 5 GiB** (one PUT's limit) goes up in parts: a part changed on the way, a completion over an existing object, bytes other than those hashed, or parts left behind | multipart only on a store shown to honour `If-None-Match: *` on `CompleteMultipartUpload` (else refused, never an unconditional write); the key checked free first; a SHA-256 per part; the whole file's SHA-256 over the bytes sent checked against the run's files hash before completion; the stored object read back (its size and its checksum of the parts' SHA-256s, or the whole object) and the key's only version; abort on any failure, a stale-upload cleanup; writer credential only; the load still hashes every byte | B28 |
 
 ### 9.4 Controls (decided)
 
@@ -539,6 +540,7 @@ Actors: clinicians and hospital staff (upload, review), hospital admins, platfor
 - **B25** A sixth concurrent ingest job for one hospital is refused with 503; a seventy-page document is refused.
 - **B26** Two reviewers saving the same document: the second gets 409 `conflict`.
 - **B27** A platform admin gets 404 on every document and review endpoint.
+- **B28** A multipart upload over an existing object is refused (before and at completion) and the object is unchanged; a part changed on the way, or a file whose SHA-256 is not the files hash, leaves no object and no upload; a failure mid-upload aborts it; a store without conditional multipart refuses the file; the reader can't abort or list uploads; the load refuses a multipart object whose SHA-256 is not the manifest's.
 
 ### 9.6 Residual risk and sign-off
 
@@ -618,3 +620,4 @@ Phase 0 was built by [the phase 0 plan](../plans/2026-11-03-document-pipeline-ph
 - **The dry run keeps `evaluation.md`**: `promote --dry-run --report-dir` writes `evaluation.json`, the workflow renders it with `mhai-doceval report` and uploads the Markdown with the summary (Task 25).
 - **The promotion is two dispatches of one job**: a dry run, then the promotion with the dry run's files hash (`expect_files`); there is no approval gate between them.
 - **Rehearsal switch**: `--rehearsal` lets the CI rehearsal pin a fixture, and is refused outside development (Task 24).
+- **Files over 5 GiB go up as a conditional multipart upload** (TODO Task 27; Gemma 4's per-layer embedding is one 5.6 GB tensor). The per-file cap is 50 GiB and the run cap stays 200 GiB. It is used only on a store with `MODEL_STORE_CONDITIONAL_MULTIPART=1`, set after `mhai-models store-probe-multipart` shows that the store refuses a conditional completion over an existing object (MinIO and AWS S3 do). The store keeps no whole-object SHA-256 for such a file, so promote reads it back in full, and the load hashes it in full against the manifest as for any file (T17, B28; deploy/model-store/README.md).

@@ -53,7 +53,7 @@ class MemoryStore:
     def _new_vid(self) -> str:
         return str(uuid.uuid4()) if self.versioned else store.NULL_VERSION
 
-    def put_new(self, key: str, data: bytes | Path) -> str:
+    def put_new(self, key: str, data: bytes | Path, *, sha256: str | None = None) -> str:
         store._check_key(key)
         self.calls.append(("put", key))
         if self.fail is not None:
