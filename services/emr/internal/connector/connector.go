@@ -186,3 +186,25 @@ type CatchUp interface {
 type Reconciler interface {
 	Rewind(cur Cursor, since time.Time) Cursor
 }
+
+// RejectedRecord is a record a connector read but could not take as given
+// (a value or time the source's format doesn't allow): its identity only,
+// never its content.
+type RejectedRecord struct {
+	Kind, SourceID, SourceVersion string
+	SourceUpdatedAt               time.Time
+}
+
+// Rejecter is a RawSink that keeps a dead letter: Reject stores r as a
+// rejected raw record (unreadable_data) with its provenance and no payload,
+// once, so it is counted and visible and never normalised.
+type Rejecter interface {
+	Reject(ctx context.Context, r RejectedRecord) error
+}
+
+// FileSource is a connector whose source drops files on a schedule (design
+// §15.4): NewFileAt is when the fetch that wrote cur last loaded a new
+// file, and false when it loaded none.
+type FileSource interface {
+	NewFileAt(cur Cursor) (time.Time, bool)
+}

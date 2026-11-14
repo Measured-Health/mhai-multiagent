@@ -55,6 +55,8 @@ var (
 	// ErrHostKey: an SSH host key other than the typed fingerprint, or a
 	// fingerprint that isn't a SHA256 one.
 	ErrHostKey = errors.New("egress: host key refused")
+	// ErrSignIn: the SSH server refused our key (file_export, PR 11).
+	ErrSignIn = errors.New("egress: sign-in refused")
 	// ErrProxy: no proxy, the proxy refused the CONNECT, or the SSH
 	// handshake behind it failed.
 	ErrProxy = errors.New("egress: the egress proxy refused")

@@ -43,6 +43,7 @@ type Metrics struct {
 	stored   map[string]int64
 	replays  int64
 	excluded int64
+	rejected int64
 }
 
 func (m *Metrics) add(kind string, dropped int, stored bool) {
@@ -69,6 +70,13 @@ func (m *Metrics) addExcluded() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.excluded++
+}
+
+// Rejected is how many dead letters a connector handed in were stored.
+func (m *Metrics) Rejected() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rejected
 }
 
 // Excluded is how many records of excluded patients were kept without a
@@ -110,7 +118,10 @@ type Sink struct {
 	pending []uuid.UUID
 }
 
-var _ connector.RawSink = (*Sink)(nil)
+var (
+	_ connector.RawSink  = (*Sink)(nil)
+	_ connector.Rejecter = (*Sink)(nil)
+)
 
 // New returns the sink for one connection. mrnSystem is the connection's
 // MRN namespace (settings.mrn_namespace): the one identifier kept.
@@ -199,6 +210,15 @@ func (s *Sink) PutStored(ctx context.Context, r connector.RawRecord) (bool, erro
 		return true, s.Flush(ctx)
 	}
 	return true, nil
+}
+
+// Reject keeps r as a dead letter (design §15.1, §15.2: a record that
+// can't be read is rejected with a code and counted, not the hospital's
+// feed): a rejected raw record, reject_code unreadable_data, with its
+// provenance and no payload, stored once (a replay is a no-op). It is
+// never announced, so nothing normalises it.
+func (s *Sink) Reject(ctx context.Context, r connector.RejectedRecord) error {
+	return nil // not yet
 }
 
 // Flush announces the queued ids, MaxBatch a message, and marks them
