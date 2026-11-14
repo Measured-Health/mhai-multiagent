@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/mail"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,6 +35,9 @@ var (
 	ErrEmailTaken       = errors.New("an account with that email already exists")
 	ErrShortCodeTaken   = errors.New("a hospital with that short code already exists")
 	ErrHospitalNotFound = errors.New("no hospital with that short code")
+	// The analyst role is granted to an existing clinician with two-step,
+	// by a hospital admin, under the database's rules (migration 00030).
+	ErrAnalystAtCreation = errors.New("analyst is not given at creation; grant it later with core users roles <email> --add analyst --by <admin email>")
 )
 
 var platformRoles = map[string]bool{"platform_admin": true, "auditor": true}
@@ -123,5 +127,11 @@ func ValidateNewUser(u NewUser) error {
 			return ErrBadShortCode
 		}
 	}
-	return ValidateRoles(u.Roles, code)
+	if err := ValidateRoles(u.Roles, code); err != nil {
+		return err
+	}
+	if slices.Contains(u.Roles, "analyst") {
+		return ErrAnalystAtCreation
+	}
+	return nil
 }

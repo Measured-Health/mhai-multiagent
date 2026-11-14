@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"slices"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/account"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
@@ -33,6 +35,7 @@ const seedUsage = `usage:
   core hospitals mark-demo <hospital id or short code>
   core hospitals model-policy set <hospital id or short code> --provider openai|anthropic|xai|gemini|none [--agreement-ref REF] [--budget TOKENS]
   core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
+  core users roles <email> --add analyst|--remove analyst --by <admin email>
 
 The password is never an argument: users create prompts for it on a terminal
 and reads one line from stdin otherwise.
@@ -83,6 +86,9 @@ var errActivateArgs = errors.New("usage: core hospitals activate <hospital id or
 // is the provisioning login. Errors and output never contain the email, name
 // or password.
 func seed(ctx context.Context, args []string, url string, stdin io.Reader, out io.Writer) error {
+	if len(args) >= 2 && args[0] == "users" && args[1] == "roles" {
+		return usersRoles(ctx, args[2:], url, out, analysis.NotifyAnalystGranted(slog.Default()))
+	}
 	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "mark-demo" {
 		return hospitalsMarkDemo(ctx, args[2:], url, out)
 	}

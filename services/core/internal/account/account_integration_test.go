@@ -134,7 +134,7 @@ func TestCreationIsAuditedWithoutEmails(t *testing.T) {
 	if !req || !trust || status != "setup_incomplete" {
 		t.Fatalf("settings %v %v %q", req, trust, status)
 	}
-	uid, err := CreateUser(ctx, prov, NewUser{Email: "grace@havana.example", Name: "Grace", Roles: []string{"clinician", "analyst"},
+	uid, err := CreateUser(ctx, prov, NewUser{Email: "grace@havana.example", Name: "Grace", Roles: []string{"clinician", "hospital_admin"},
 		HospitalShortCode: "HAV", Password: goodPW})
 	if err != nil {
 		t.Fatal(err)

@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Patient Analysis PR 6: the analyst grant (migration 00030; off by
+  default, no route). Triggers on `user_roles` enforce the analyst rules for
+  every writer: the grantor an active hospital admin of the person's
+  hospital and not the person, the hospital's analysis switch on, the person
+  an active clinician with two-step, at most 10 analysts; an analyst row is
+  never updated, and removing `clinician` removes `analyst`. Every grant and
+  removal is recorded and the database refuses to commit one without its
+  `analyst.granted` or `analyst.removed` audit entry. `core users roles
+  <email> --add|--remove analyst --by <admin email>` grants and removes
+  through the same functions, as the provisioning login; `core users create`
+  no longer takes `analyst`. The step-up on `PATCH /hospital/staff/{id}`
+  waits for the staff endpoints.
 - EMR integration, PR 8a (alert settings and routes; off by default: nothing
   raises an alert until core's finding consumer, PR 8b). Migration **00029**
   (after Analysis PR 5's 00028): `alert_settings`, `alert_units`,
