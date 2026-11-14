@@ -590,6 +590,23 @@ func init() {
 	Register("analysis.list_limit_reached", Schema{Fields: fields("window", OneOf("minute", "day")), Required: []string{"window"}})
 	Register("analysis.patient_cap_reached", Schema{Fields: fields("cap", Check(Int(1, 300))), Required: []string{"cap"}})
 	Register("audit.patients_viewed", Schema{Fields: fields("rows", Check(Int(0, 200))), Required: []string{"rows"}})
+	// Named access (plan Task 22, migration 00040): a named list or a
+	// replay of one (the list is the entity; the de-identified list's facts,
+	// the purpose code, the replay's number, 0 for the list itself, and the
+	// letter that covered the person). Never a name, an MRN, a pid or the
+	// note. A list or replay that failed at the identity call (flagged; the
+	// letter only), and a person's named-view limit reached (flagged; once a
+	// day). 00040 refuses to commit a named list or a replay without its entry.
+	Register("analysis.named_viewed", Schema{Fields: fields(
+		"view", OneOf("affected", "co-occurring", "findings"),
+		"period", Pattern(analysisPeriod),
+		"filters", StringMap(2, analysisDrillFilterKey, Pattern(analysisFilterValue)),
+		"patient_count", Check(Int(5, 1e7)), "rows", Check(Int(1, 200)),
+		"purpose", OneOf("clinical_follow_up", "quality_improvement", "audit", "other"),
+		"replays", Check(Int(0, 1000)), "clearance_id", id),
+		Required: []string{"view", "period", "filters", "patient_count", "rows", "purpose", "replays", "clearance_id"}})
+	Register("analysis.named_view_failed", Schema{Fields: fields("clearance_id", id), Required: []string{"clearance_id"}})
+	Register("analysis.named_limit_reached", Schema{Fields: fields("limit", Check(Int(1, 5))), Required: []string{"limit"}})
 	// The analyst grant (plan Tasks 15-16, migration 00030): the person is
 	// the row's entity (user) and is named by display name at read time
 	// only; the payload is the database's change id, the channel and, for
@@ -642,7 +659,7 @@ func init() {
 	// departure 39), as analysis.switch_raised: no actor, the hospital in
 	// the payload for a hospital's row.
 	Register("named_access.changed", Schema{Fields: fields("hospital_id", id, "via", OneOf("cli"),
-		"position", OneOf("off", "letters_only"), "refs", OneOf("demo")), Required: []string{"via", "position"}})
+		"position", OneOf("off", "letters_only", "on"), "refs", OneOf("demo")), Required: []string{"via", "position"}})
 
 	// Plan 3: the request-token boundary (internal/account, grant, intel).
 	Register("intelligence.key_rotated", Schema{Fields: fields(

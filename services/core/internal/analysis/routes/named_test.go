@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
@@ -71,7 +72,7 @@ func TestParseNamedBody(t *testing.T) {
 	var a, b namedBody
 	_ = json.Unmarshal([]byte(good), &a)
 	_ = json.Unmarshal([]byte(`{"period":{"start":"2026-10-01","level":"week"},"filters":{"sex":"female"},"purpose":"audit","drill":"`+synthDrill+`"}`), &b)
-	if string(canonical(a, nil)) != string(canonical(b, nil)) {
+	if string(canonical(a, disclose.Filters{})) != string(canonical(b, disclose.Filters{})) {
 		t.Error("the same request in another order binds differently")
 	}
 }

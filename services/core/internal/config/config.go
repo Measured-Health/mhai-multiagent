@@ -109,7 +109,16 @@ type Config struct {
 	// Analysis holds Patient Analysis's four keys (ANALYSIS_*_KEY_FILE),
 	// all or none; it never prints them.
 	Analysis AnalysisKeys
+	// AnalysisNamedIdentity is where named lists' names come from
+	// (ANALYSIS_NAMED_IDENTITY): empty, the live source, which answers
+	// unavailable until the EMR service has its identity operation (H7);
+	// or demo-fixture, the synthetic demo fixture, refused with
+	// CORE_EMR_ENABLED (analysis plan Task 23, T27).
+	AnalysisNamedIdentity string
 }
+
+// NamedIdentityDemo selects the synthetic demo identity fixture.
+const NamedIdentityDemo = "demo-fixture"
 
 // errConnectorTypes names the variable only, never its value.
 var errConnectorTypes = errors.New("CORE_EMR_CONNECTOR_TYPES must list built connector types, each once, comma separated (the development connector in development only)")
@@ -370,6 +379,15 @@ func Load() (Config, error) {
 
 	if c.Analysis, err = loadAnalysisKeys(os.Getenv); err != nil {
 		errs = append(errs, err)
+	}
+	switch c.AnalysisNamedIdentity = strings.TrimSpace(os.Getenv("ANALYSIS_NAMED_IDENTITY")); c.AnalysisNamedIdentity {
+	case "":
+	case NamedIdentityDemo:
+		if c.EMREnabled {
+			errs = append(errs, errors.New("ANALYSIS_NAMED_IDENTITY=demo-fixture is refused with CORE_EMR_ENABLED (the demo fixture never stands in for live identity)"))
+		}
+	default:
+		errs = append(errs, errors.New("ANALYSIS_NAMED_IDENTITY must be empty or demo-fixture"))
 	}
 
 	if err := errors.Join(errs...); err != nil {

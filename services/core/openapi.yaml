@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.28.0"
+  version: "1.30.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -906,6 +906,161 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /analysis/patients/named:
+    post:
+      operationId: postAnalysisPatientsNamed
+      summary: The named patients behind one shown count, under a clearance letter (Patient Analysis).
+      description: >
+        Hospital admins and analysts, with two-step, while the hospital's analysis switch is on
+        (otherwise 404 not_found) and its effective named-access position is `on` (otherwise 403
+        named_access_off), for a person an active, verified letter of the hospital covers today (403
+        not_cleared; 403 clearance_ended when the letter that covered them has ended). An
+        `Idempotency-Key` is required (422 validation_failed without); the same key from another person
+        or with another body is 422 idempotency_mismatch. A retry with the same key and body is a replay:
+        every check again, the same rows and `named_until`, audited again; after `named_until` it is 409
+        expired. The body is exactly `{drill, purpose, note?, filters, period}` (an unknown field, a
+        hospital, viewer or clearance id is 422 validation_failed); `other` needs a `note` of 1–200
+        characters with no control characters. `drill` is as for GET /analysis/patients (422 too_small
+        otherwise). At most 5 named lists a hospital day per person, replays included, and the 300
+        distinct patients a quarter shared with de-identified lists (429 rate_limited, recorded once a
+        day as a flagged entry). The role, two-step and account are re-read (403 forbidden or
+        mfa_required at once). The list is recorded and audited (`analysis.named_viewed`, flagged)
+        before names are read; names and MRNs then come from the EMR service, are sent in this reply
+        and kept nowhere (503 unavailable, and a flagged `analysis.named_view_failed`, when they can't
+        be read, including until the EMR service has its identity operation). Never cached, logged or
+        kept by the idempotency store. Added in 1.30.0.
+      tags: [analysis]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, invalid_range, too_many_filters, too_small, named_access_off, not_cleared, clearance_ended, idempotency_mismatch, expired, conflict, rate_limited, not_ready, unavailable, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [drill, purpose, filters, period]
+              additionalProperties: false
+              properties:
+                drill: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+                purpose: { type: string, enum: [clinical_follow_up, quality_improvement, audit, other] }
+                note: { type: string, minLength: 1, maxLength: 200, description: "Required for other; kept sealed, never audited or logged." }
+                filters:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    condition: { type: string, pattern: "^[A-Za-z0-9_-]+$" }
+                    age_band: { type: string, enum: ["0-17", "18-39", "40-64", "65-79", "80+"] }
+                    sex: { type: string, enum: [female, male, other, not_recorded] }
+                    location: { type: string, pattern: "^[A-Za-z0-9_-]+$" }
+                    setting: { type: string, enum: [admitted, outpatient, emergency] }
+                    specialty: { type: string, pattern: "^[a-z][a-z_]{1,39}$" }
+                    source: { type: string, pattern: "^[A-Za-z0-9_-]+$" }
+                period:
+                  type: object
+                  required: [level, start]
+                  additionalProperties: false
+                  properties:
+                    level: { type: string, enum: [week, month, quarter] }
+                    start: { type: string, format: date }
+      responses:
+        "200":
+          description: The named list.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalysisPatientsNamed" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /analysis/clearance/me:
+    get:
+      operationId: getAnalysisClearanceMe
+      summary: Whether a clearance letter covers the caller for named access now.
+      description: >
+        Hospital admins and analysts, with two-step, while the hospital's analysis switch is on
+        (otherwise 404 not_found) and its effective named-access position is not `off` (otherwise 403
+        named_access_off). Read again on every call, nothing cached; not audited; at most 6 a minute per
+        session (429 rate_limited). `reason` is null when covered; otherwise `none`, `ended`, `revoked`,
+        `removed_from_letter`, `role_or_account` or `switched_off`, from the letter whose cover of the
+        person stopped last. `until` is the earlier of the end of the letter's last day in the
+        hospital's time zone and 30 minutes on. Added in 1.30.0.
+      tags: [analysis]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, named_access_off, rate_limited, unavailable, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The caller's cover.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [named, until, clearance_id, version, reason]
+                additionalProperties: false
+                properties:
+                  named: { type: boolean }
+                  until: { type: string, format: date-time, nullable: true }
+                  clearance_id: { type: string, format: uuid, nullable: true }
+                  version: { type: integer, nullable: true }
+                  reason:
+                    type: string
+                    nullable: true
+                    enum: [none, ended, revoked, removed_from_letter, role_or_account, switched_off, null]
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /analysis/named-access:
+    get:
+      operationId: getAnalysisNamedAccess
+      summary: The hospital's effective named-access position.
+      description: >
+        Hospital admins and analysts, with two-step, while the hospital's analysis switch is on
+        (otherwise 404 not_found). `position` is the lower of the global and the hospital's;
+        `since` is when either last changed. While it is `off`, 403 named_access_off. Added in 1.30.0.
+      tags: [analysis]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, named_access_off, unavailable, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The position.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [position, since]
+                additionalProperties: false
+                properties:
+                  position: { type: string, enum: [letters_only, "on"] }
+                  since: { type: string, format: date-time, nullable: true }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
   /hospital/staff:
@@ -4925,6 +5080,9 @@ components:
             - end_date_too_late
             - not_eligible_platform
             - would_empty
+            - not_cleared
+            - clearance_ended
+            - idempotency_mismatch
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -5012,8 +5170,9 @@ components:
           description: >-
             What the user may open (Patient Analysis). analysis is true only when the
             hospital's analysis switch is on, the user is a hospital admin or an analyst,
-            and two-step is on; it is off by default. named_access is false until named
-            access exists. The BFF's own sign-off settings can only turn these off.
+            and two-step is on; it is off by default. named_access is true when analysis is
+            and the hospital's effective named-access position is not off (since 1.30.0;
+            off by default). The BFF's own sign-off settings can only turn these off.
           required: [analysis, named_access]
           properties:
             analysis: { type: boolean }
@@ -6016,6 +6175,48 @@ components:
                     name: { type: string, nullable: true }
                     flag: { type: string, nullable: true, enum: [low, high, abnormal, null] }
                     source_label: { type: string, nullable: true, description: Always null (a row shows no source). }
+    AnalysisPatientsNamed:
+      type: object
+      description: A named list (since 1.30.0). Each row is the de-identified row plus `name` and `mrn`.
+      required: [level, count, patients, named_until, clearance]
+      additionalProperties: false
+      properties:
+        level: { type: string, enum: [named] }
+        count: { type: integer, minimum: 5 }
+        patients:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            required: [pid, age_band, sex, setting, conditions, findings, name, mrn]
+            additionalProperties: false
+            properties:
+              pid: { type: string, pattern: "^P-[A-Z0-9]{4,12}$" }
+              age_band: { type: string, nullable: true, enum: ["0-17", "18-39", "40-64", "65-79", "80+", null] }
+              sex: { type: string, enum: [female, male, other, not_recorded] }
+              setting: { type: string, nullable: true, enum: [admitted, outpatient, emergency, null] }
+              conditions: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/AnalysisConditionRef" } }
+              findings:
+                type: array
+                maxItems: 10
+                items:
+                  type: object
+                  required: [name, flag, source_label]
+                  additionalProperties: false
+                  properties:
+                    name: { type: string, nullable: true }
+                    flag: { type: string, nullable: true, enum: [low, high, abnormal, null] }
+                    source_label: { type: string, nullable: true, description: Always null (a row shows no source). }
+              name: { type: string }
+              mrn: { type: string, nullable: true }
+        named_until: { type: string, format: date-time }
+        clearance:
+          type: object
+          required: [id, end_date]
+          additionalProperties: false
+          properties:
+            id: { type: string, format: uuid }
+            end_date: { type: string, format: date }
     AnalysisMinutes:
       type: object
       description: "A median in minutes (a whole number or a half); hidden is `{value: null, suppressed: true}`."

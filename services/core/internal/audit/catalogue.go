@@ -297,6 +297,11 @@ var Catalogue = map[string]Entry{
 	"analysis.list_limit_reached":  withheld(),
 	"analysis.patient_cap_reached": withheld(),
 	"audit.patients_viewed":        withheld(),
+	// Named access (plan Task 22): sent bare until mhai-web's named-view
+	// kinds and facts are agreed (departure 52), as the drill-down's.
+	"analysis.named_viewed":        withheld(),
+	"analysis.named_view_failed":   withheld(),
+	"analysis.named_limit_reached": withheld(),
 	// The analyst grant (plan Tasks 15-16): mhai-web's staff_role_changed
 	// takes facts not agreed for these yet (H6); sent bare until they are.
 	"analyst.granted": withheld(),

@@ -18,6 +18,14 @@ const (
 	// in the database, across core copies (mhai_analysis_list_admit).
 	ListsPerMinute = 10
 	ListsPerDay    = 50
+	// NamedPerDay is the most named lists, replays included, one person
+	// may open in a hospital day (design §5.6, M7); past it, 429
+	// rate_limited and one flagged entry a day. Reserved in the database
+	// (mhai_analysis_named_admit, which refuses a limit above 5).
+	NamedPerDay = 5
+	// ClearanceMePerMinute is GET /analysis/clearance/me's limit per
+	// session (design §8.4: the app polls every 30 seconds).
+	ClearanceMePerMinute = 6
 )
 
 // limiter is a sliding window per session, in this core copy (a shared

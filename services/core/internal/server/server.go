@@ -62,6 +62,9 @@ type Deps struct {
 	Analysis *analysis.Engine
 	// AnalysisKeys derive the drill keys; nil: no drill, every list 422.
 	AnalysisKeys *analysis.Keys
+	// AnalysisIdentity resolves named lists' names after their entries
+	// commit; nil: unavailable (every named list fails 503).
+	AnalysisIdentity analysis.Resolver
 }
 
 // Register adds every route to m.
@@ -88,7 +91,8 @@ func Register(m *authz.Mux, d Deps) {
 	// Patient Analysis's reads and the de-identified list (analysis
 	// backend plan Tasks 10 and 13): off unless the hospital's analysis
 	// switch is on.
-	analysisroutes.Register(m, analysisroutes.Deps{Pool: d.Pool, Engine: d.Analysis, Log: a.Log, Keys: d.AnalysisKeys})
+	analysisroutes.Register(m, analysisroutes.Deps{Pool: d.Pool, Engine: d.Analysis, Log: a.Log, Keys: d.AnalysisKeys,
+		Identity: d.AnalysisIdentity})
 	// Clearance letters, hospital side (analysis backend plan Tasks 18-20):
 	// off unless the hospital's analysis switch is on and its named-access
 	// position is letters_only or on (none is, by default).

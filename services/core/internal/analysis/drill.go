@@ -264,13 +264,9 @@ func Open(ctx context.Context, tx pgx.Tx, l List) ([]PatientRow, error) {
 	if err != nil {
 		return nil, listErr(err)
 	}
-	type raw struct {
-		row          PatientRow
-		conds, finds []byte
-	}
-	var got []raw
+	var got []rawRow
 	for rows.Next() {
-		var r raw
+		var r rawRow
 		var ord int
 		if err := rows.Scan(&ord, &r.row.PID, &r.row.AgeBand, &r.row.Sex, &r.row.Setting, &r.conds, &r.finds); err != nil {
 			rows.Close()
@@ -282,6 +278,18 @@ func Open(ctx context.Context, tx pgx.Tx, l List) ([]PatientRow, error) {
 	if err := rows.Err(); err != nil {
 		return nil, listErr(err)
 	}
+	return buildRows(ctx, tx, got)
+}
+
+// rawRow is a list row as the database sends it.
+type rawRow struct {
+	row          PatientRow
+	conds, finds []byte
+}
+
+// buildRows is the rows as sent: the conditions and findings named from
+// the hospital's dictionary, at most 10 of each.
+func buildRows(ctx context.Context, tx pgx.Tx, got []rawRow) ([]PatientRow, error) {
 	n, err := loadNames(ctx, tx)
 	if err != nil {
 		return nil, ErrFailed

@@ -203,6 +203,20 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 			return nil, err
 		}
 	}
+	// Named lists' names (analysis plan Task 23): the live source answers
+	// unavailable until the EMR service has its identity operation (H7);
+	// the synthetic demo fixture only when chosen, and never beside the
+	// EMR integration (T27).
+	var identity analysis.Resolver = analysis.Unavailable{}
+	if cfg.AnalysisNamedIdentity == config.NamedIdentityDemo {
+		demo, err := analysis.NewDemoIdentity(cfg.EMREnabled)
+		if err != nil {
+			a.close()
+			return nil, err
+		}
+		identity = demo
+		log.Warn("core: named lists resolve synthetic names from the demo fixture (ANALYSIS_NAMED_IDENTITY=demo-fixture)")
+	}
 	m := authz.NewMux(guard)
 	contact := platform.SecurityContact{Name: cfg.SecurityContactName, Email: cfg.SecurityContactEmail}
 	if !contact.OK() {
@@ -212,7 +226,8 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health,
 		CloudProviders: cfg.CloudProviders, EMREnabled: cfg.EMREnabled, EMRTypes: cfg.EMRConnectorTypes,
 		EMR: &emrctl.Client{NC: nc, Signer: signer, Log: log}, EMRSealer: sealer, EMRDevelopment: cfg.Development(),
-		Analysis: analysis.NewEngine(a.pool, log), AnalysisKeys: analysisKeys})
+		Analysis: analysis.NewEngine(a.pool, log), AnalysisKeys: analysisKeys,
+		AnalysisIdentity: identity})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}

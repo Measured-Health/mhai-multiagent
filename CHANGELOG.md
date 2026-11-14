@@ -8,6 +8,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Patient Analysis PR 8: named access (migration **00040**, OpenAPI
+  **1.30.0**; off by default: a named list needs the hospital's analysis
+  switch on, its effective named-access position `on`, which no hospital's
+  is, and an active, verified letter covering the person today, which only
+  the platform's verify (Plan 11b) makes). `POST /analysis/patients/named`
+  (required `Idempotency-Key`, never kept by the idempotency store; its own
+  key table replays every check and is audited again; 5 named lists a day
+  per person, replays included, reserved in SQL; the distinct-patient cap
+  shared with de-identified lists), `GET /analysis/clearance/me` (6 a
+  minute, not audited) and `GET /analysis/named-access`.
+  `mhai_named_cover` holds who is covered, for the session's own person,
+  with nothing cached; revocation, narrowing, the role, two-step and the
+  account take effect on the next request. The list and its flagged
+  `analysis.named_viewed` entry commit before any name is read, and the
+  database refuses a named list or a replay without its entry. Names and
+  MRNs come from the identity source into one reply and are kept, logged
+  and traced nowhere; the reply must hold exactly the asked references
+  (T20). The live source answers 503 `unavailable` until the EMR service
+  has its identity operation (H7); `ANALYSIS_NAMED_IDENTITY=demo-fixture`
+  serves synthetic names for demo letters only and refuses to start with
+  `CORE_EMR_ENABLED` (T27). `features.named_access` is now live. `core
+  analysis named-access demo-on` raises the demo scope to `on`. New problem
+  codes: `not_cleared`, `clearance_ended`, `idempotency_mismatch`.
 - Patient Analysis PR 7: clearance letters, hospital side (migration
   **00038**, OpenAPI **1.28.0**; off by default: every letter route answers
   404 while the hospital's analysis switch is off and 403
