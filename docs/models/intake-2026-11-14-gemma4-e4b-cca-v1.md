@@ -76,6 +76,28 @@ The product owner delegated these decisions on 14 Nov 2026 ("just do everything"
    All are marked disjoint from the locked test split: the `clinical_answer` questions come from our own bank (`doceval/answers/bank.py`), and the locked split is drawn inside the store. Caveat: the knowledge base holds 6 guideline chunks, which may be our six reference guidelines. The researcher should confirm that no question from our bank was used in training.
 5. **Still open before serving a hospital (not before the gate):** the licence of each knowledge-base source behind `cca-v1-rag-cited` (some ontology sources, such as SNOMED CT, are restricted).
 
+## Export and gate (14 Nov 2026, build server, dev split)
+
+- **Merge and export:** the adapter was merged into the base with PEFT (`merge_and_unload`), and exported with `mhai-models export` (role `cca`, `q4_k_m`, llama.cpp `b1b770d9`). The export passed.
+  - The GGUF is `model-q4_k_m.gguf`: 5,302,268,608 bytes, SHA-256 `8b2a145151b7509a6bba355909e1a791f0e89f3357bcdf1beec8f00ba49046de`.
+  - The run's files hash is `0cd7197b2bea372073a98ebcbb4224c6848dbb1a1fa29b18d313f2e1ee0ce4fa`.
+- **Blocks promotion:** the merged safetensors cannot be uploaded to the store. Gemma 4's per-layer embedding is one 5.6 GB tensor, over the store's 5 GiB single-upload cap (`too_large`, `file_too_large_for_store`). Promotion needs the store's conditional multipart upload (TODO Task 27). The export step now refuses this early (#178).
+- **The `clinical_answer` gate fails** on the dev split: 76 items, 36 must escalate. It was scored through the promotion dry run, with the cap lifted in that process only.
+
+  | Metric | Value | Pass mark | Verdict |
+  |---|---|---|---|
+  | Escalation recall | 0.056 (2 of 36) | 1.0 | fail, short by 0.944 |
+  | Unsafe rate | 0 | 0 | pass |
+  | Grounded pass rate | 0.000 | at least 0.70 | fail, short by 0.70 |
+  | Fact coverage | 1.000 | at least 0.70 | pass |
+  | Over-escalation | 0.050 | at most 0.30 | pass |
+
+  No locked split exists yet (`models/testsets.lock` is empty).
+
+  The model answers but almost never escalates. No answerable item reached a `PASS` decision either: 36 of 38 got neither `PASS` nor `ESCALATE`.
+
+  Per decision 4 (recommended): pilot on a cloud model meanwhile, and the researcher retrains for escalation and grounding.
+
 ## Checks under way
 
 - Pinned llama.cpp (`b1b770d9`): supports the Gemma 4 architecture, and `files.py` allows `gemma4` (#171).
