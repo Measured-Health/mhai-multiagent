@@ -272,7 +272,7 @@ func TestNamedBudgetReserveRace(t *testing.T) {
 			defer wg.Done()
 			var ok bool
 			err := asPerson(context.Background(), pool, w.h, w.admin, func(tx pgx.Tx) error {
-				return tx.QueryRow(context.Background(), `SELECT mhai_analysis_named_admit(5, NULL)`).Scan(&ok)
+				return tx.QueryRow(context.Background(), `SELECT mhai_analysis_named_admit(5)`).Scan(&ok)
 			})
 			if err != nil {
 				t.Error(err)
@@ -290,7 +290,7 @@ func TestNamedBudgetReserveRace(t *testing.T) {
 	}
 	// The limit is at most 5, whatever the caller asks.
 	err := asPerson(context.Background(), pool, w.h, w.analyst, func(tx pgx.Tx) error {
-		_, err := tx.Exec(context.Background(), `SELECT mhai_analysis_named_admit(6, NULL)`)
+		_, err := tx.Exec(context.Background(), `SELECT mhai_analysis_named_admit(6)`)
 		return err
 	})
 	if pgCode(err) != "22023" {
@@ -313,12 +313,23 @@ type namedOpen struct {
 // openNamed opens a named list of the drill's female group in its week as
 // user, with its entry unless noAudit.
 func openNamed(ctx context.Context, pool *pgxpool.Pool, w namedWorld, user uuid.UUID, noAudit bool) (namedOpen, error) {
+	return openNamedOpt(ctx, pool, w, user, noAudit, false)
+}
+
+// openNamedOpt is openNamed without the budget's reservation when
+// noReserve.
+func openNamedOpt(ctx context.Context, pool *pgxpool.Pool, w namedWorld, user uuid.UUID, noAudit, noReserve bool) (namedOpen, error) {
 	o := namedOpen{view: uuid.New()}
 	k, b := sha256.Sum256([]byte("synthetic-key-"+o.view.String())), sha256.Sum256([]byte("synthetic-body"))
 	o.key, o.body = k[:], b[:]
 	err := asPerson(ctx, pool, w.h, user, func(tx pgx.Tx) error {
+		if !noReserve {
+			if _, err := tx.Exec(ctx, `SELECT mhai_analysis_named_admit(5)`); err != nil {
+				return err
+			}
+		}
 		rows, err := tx.Query(ctx, `SELECT ref_enc, clearance_id FROM mhai_analysis_open_named($1, $2, '{}'::jsonb, $3::jsonb, 'affected',
-			$4, $5, 300, 'audit', NULL, $6, $7, NULL)`, o.view, w.week, femaleGroup, make([]byte, 32), len(w.subjects), o.key, o.body)
+			$4, $5, 300, 'audit', NULL, $6, $7)`, o.view, w.week, femaleGroup, make([]byte, 32), len(w.subjects), o.key, o.body)
 		if err != nil {
 			return err
 		}
@@ -357,6 +368,10 @@ func TestOpenNamedRecordsAndAudits(t *testing.T) {
 		t.Fatalf("no letter: %v", err)
 	}
 	letter := activeLetter(t, pool, w.h, 30, w.admin)
+	// The budget is the database's: no reservation in this transaction, no list.
+	if _, err := openNamedOpt(ctx, pool, w, w.admin, false, true); p0001(err) != "not_reserved" {
+		t.Fatalf("without a reservation: %v", err)
+	}
 	if _, err := openNamed(ctx, pool, w, w.admin, true); pgCode(err) != "23514" {
 		t.Fatalf("without its entry: %v", err)
 	}
@@ -397,7 +412,10 @@ func TestOpenNamedRecordsAndAudits(t *testing.T) {
 func replay(ctx context.Context, pool *pgxpool.Pool, w namedWorld, user uuid.UUID, o namedOpen, body []byte, audited bool) (int, error) {
 	n := 0
 	err := asPerson(ctx, pool, w.h, user, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT replays, clearance_id FROM mhai_analysis_named_replay($1, $2, $3, '{}'::jsonb, $4::jsonb, $5, $6, 300, NULL)`,
+		if _, err := tx.Exec(ctx, `SELECT mhai_analysis_named_admit(5)`); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT replays, clearance_id FROM mhai_analysis_named_replay($1, $2, $3, '{}'::jsonb, $4::jsonb, $5, $6, 300)`,
 			o.key, body, w.week, femaleGroup, make([]byte, 32), len(w.subjects))
 		if err != nil {
 			return err

@@ -33,7 +33,10 @@ import (
 // NamedRule is the named list's rule: the routes' roles, two-step, and a
 // write (auditors are refused). The named list has no step-up (design
 // §8.3); the role, two-step and account are re-read in its transaction.
-var NamedRule = authz.Rule{AnyRole: Rule.AnyRole, NeedsMFA: true, Write: true}
+// It runs without the generic idempotency store (NoIdempotency): neither
+// a hash of a body that may hold a note, nor a reply with names, is kept
+// there; its own key table handles replays (design §8.5).
+var NamedRule = authz.Rule{AnyRole: Rule.AnyRole, NeedsMFA: true, Write: true, NoIdempotency: true}
 
 func (h *handlers) resolver() analysis.Resolver {
 	if h.d.Identity != nil {
@@ -291,7 +294,7 @@ func (h *handlers) named(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	l := analysis.NamedList{View: uuid.New(), Period: p, F: f, G: g, Drill: b.Drill, Purpose: b.Purpose, Note: note,
-		Key: analysis.KeyHash(keys[0]), Body: mac, Now: h.d.Engine.ClockNow()}
+		Key: analysis.KeyHash(pr.HospitalID, pr.UserID, keys[0]), Body: mac}
 	var res analysis.Named
 	err = analysis.PersonTx(ctx, h.d.Pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '`+disclose.StatementTimeout.String()+`'`); err != nil {
@@ -315,7 +318,7 @@ func (h *handlers) named(w http.ResponseWriter, r *http.Request) {
 		if err := stillAllowed(ctx, tx, pr); err != nil {
 			return err
 		}
-		admitted, err := analysis.NamedAdmit(ctx, tx, NamedPerDay, l.Now)
+		admitted, err := analysis.NamedAdmit(ctx, tx, NamedPerDay)
 		if err != nil {
 			return err
 		}
@@ -376,6 +379,12 @@ func (h *handlers) named(w http.ResponseWriter, r *http.Request) {
 
 	// Committed and audited: now, and only now, the names.
 	people, err := h.identify(ctx, pr, l.View, res)
+	if err == nil {
+		// The cover again, after the identity call (security review): a
+		// revocation, narrowing, role or two-step change, or the
+		// hospital's midnight that came while names were read sends none.
+		err = h.stillCovered(ctx, pr, res)
+	}
 	if err != nil {
 		h.namedViewFailed(r.Context(), pr, l.View, res.Clearance)
 		httpx.Error(w, r, "unavailable")
@@ -386,6 +395,31 @@ func (h *handlers) named(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.JSON(w, http.StatusOK, out)
 }
+
+// stillCovered re-reads the person's cover in its own transaction: still
+// named, by the same letter, before named_until.
+func (h *handlers) stillCovered(ctx context.Context, pr authz.Principal, res analysis.Named) error {
+	var c analysis.Cover
+	err := analysis.PersonTx(ctx, h.d.Pool, func(tx pgx.Tx) error {
+		if err := stillAllowed(ctx, tx, pr); err != nil {
+			return err
+		}
+		var err error
+		c, err = analysis.NamedCover(ctx, tx, pr.UserID)
+		return err
+	})
+	switch {
+	case err != nil:
+		return err
+	case !c.Named || c.Clearance == nil || *c.Clearance != res.Clearance || !time.Now().Before(res.Until):
+		return analysis.ErrNotCleared
+	}
+	return nil
+}
+
+// identifyTimeout bounds the identity call: names arrive within it or
+// not at all.
+const identifyTimeout = 10 * time.Second
 
 // identify resolves exactly the list's subjects, each reference opened
 // for this call only, and checks the reply (T20).
@@ -401,7 +435,9 @@ func (h *handlers) identify(ctx context.Context, pr authz.Principal, view uuid.U
 		}
 		refs[i] = ref
 	}
-	ids, err := h.resolver().Resolve(ctx, analysis.IdentityRequest{Hospital: pr.HospitalID, User: pr.UserID, View: view,
+	ictx, cancel := context.WithTimeout(ctx, identifyTimeout)
+	defer cancel()
+	ids, err := h.resolver().Resolve(ictx, analysis.IdentityRequest{Hospital: pr.HospitalID, User: pr.UserID, View: view,
 		Clearance: res.Clearance, Demo: res.Demo, Refs: slices.Clone(refs)})
 	if err == nil {
 		err = analysis.CheckIdentities(refs, ids)

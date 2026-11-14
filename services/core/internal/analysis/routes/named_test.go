@@ -18,7 +18,7 @@ func TestNamedLimitsPinned(t *testing.T) {
 	if NamedPerDay != 5 || ClearanceMePerMinute != 6 {
 		t.Errorf("named %d a day, clearance/me %d a minute; want 5 and 6", NamedPerDay, ClearanceMePerMinute)
 	}
-	if !NamedRule.NeedsMFA || !NamedRule.Write || NamedRule.Platform || strings.Join(NamedRule.AnyRole, ",") != "hospital_admin,analyst" {
+	if !NamedRule.NeedsMFA || !NamedRule.Write || !NamedRule.NoIdempotency || NamedRule.Platform || strings.Join(NamedRule.AnyRole, ",") != "hospital_admin,analyst" {
 		t.Errorf("NamedRule %+v", NamedRule)
 	}
 	for code, status := range map[string]int{"not_cleared": 403, "clearance_ended": 403, "idempotency_mismatch": 422, "expired": 409,

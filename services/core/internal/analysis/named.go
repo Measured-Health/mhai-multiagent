@@ -88,12 +88,13 @@ func NamedState(ctx context.Context, tx pgx.Tx) (string, *time.Time, error) {
 	return pos, since, nil
 }
 
-// NamedAdmit reserves one of the person's named views for today (replays
-// count); false past limit. Run in the request's transaction: a refusal
-// there rolls the slot back.
-func NamedAdmit(ctx context.Context, tx pgx.Tx, limit int, now *time.Time) (bool, error) {
+// NamedAdmit reserves one of the person's named views for the hospital's
+// day (replays count); false past limit. Run in the request's
+// transaction: a refusal there rolls the slot back, and the list or
+// replay opens only in the transaction that reserved it.
+func NamedAdmit(ctx context.Context, tx pgx.Tx, limit int) (bool, error) {
 	var ok bool
-	if err := tx.QueryRow(ctx, `SELECT mhai_analysis_named_admit($1, $2)`, limit, now).Scan(&ok); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT mhai_analysis_named_admit($1)`, limit).Scan(&ok); err != nil {
 		return false, namedErr(err)
 	}
 	return ok, nil
@@ -113,10 +114,16 @@ func KeyState(ctx context.Context, tx pgx.Tx, key, body []byte) (string, uuid.UU
 	return state, *view, nil
 }
 
-// KeyHash is the stored form of an Idempotency-Key (never the key).
-func KeyHash(key string) []byte {
-	h := sha256.Sum256([]byte("analysis/named-key/v1\x00" + key))
-	return h[:]
+// KeyHash is the stored form of an Idempotency-Key (never the key),
+// bound to the hospital and the person: one person's key is never another
+// person's, so a key is no probe of what others sent (departure 57).
+func KeyHash(hospital, user uuid.UUID, key string) []byte {
+	h := sha256.New()
+	h.Write([]byte("analysis/named-key/v2\x00"))
+	h.Write(hospital[:])
+	h.Write(user[:])
+	h.Write([]byte(key))
+	return h.Sum(nil)
 }
 
 // BodyMAC binds a key to one request body: an HMAC, under the drill key
@@ -142,7 +149,6 @@ type NamedList struct {
 	// Note is the purpose note sealed with the note key (nil: none).
 	Note      []byte
 	Key, Body []byte
-	Now       *time.Time
 }
 
 // Named is a named list as recorded: its rows (pid first, as the
@@ -169,9 +175,9 @@ func OpenNamed(ctx context.Context, tx pgx.Tx, l NamedList) (Named, error) {
 	drill := sha256.Sum256([]byte(l.Drill))
 	rows, err := tx.Query(ctx, `SELECT ord, pid, age_band, sex, setting, conditions::text, findings::text, ref_enc,
 			clearance_id, clearance_end, demo, named_until, replays
-		FROM mhai_analysis_open_named($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		FROM mhai_analysis_open_named($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		l.View, l.Period.ID, filtersJSON(l.F), string(g), string(l.G.View), drill[:], l.G.Count, disclose.PatientCap,
-		l.Purpose, l.Note, l.Key, l.Body, l.Now)
+		l.Purpose, l.Note, l.Key, l.Body)
 	if err != nil {
 		return Named{}, namedErr(err)
 	}
@@ -189,8 +195,8 @@ func ReplayNamed(ctx context.Context, tx pgx.Tx, l NamedList) (Named, error) {
 	drill := sha256.Sum256([]byte(l.Drill))
 	rows, err := tx.Query(ctx, `SELECT ord, pid, age_band, sex, setting, conditions::text, findings::text, ref_enc,
 			clearance_id, clearance_end, demo, named_until, replays
-		FROM mhai_analysis_named_replay($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9)`,
-		l.Key, l.Body, l.Period.ID, filtersJSON(l.F), string(g), drill[:], l.G.Count, disclose.PatientCap, l.Now)
+		FROM mhai_analysis_named_replay($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)`,
+		l.Key, l.Body, l.Period.ID, filtersJSON(l.F), string(g), drill[:], l.G.Count, disclose.PatientCap)
 	if err != nil {
 		return Named{}, namedErr(err)
 	}

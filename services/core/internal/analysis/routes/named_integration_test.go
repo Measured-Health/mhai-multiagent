@@ -33,13 +33,17 @@ type countingResolver struct {
 	calls  int
 	inner  analysis.Resolver
 	tamper func(map[string]analysis.Identity)
+	during func() // runs while names are being read
 }
 
 func (c *countingResolver) Resolve(ctx context.Context, r analysis.IdentityRequest) (map[string]analysis.Identity, error) {
 	c.mu.Lock()
 	c.calls++
-	tamper := c.tamper
+	tamper, during := c.tamper, c.during
 	c.mu.Unlock()
+	if during != nil {
+		during()
+	}
 	if c.inner == nil {
 		return nil, analysis.ErrIdentityUnavailable
 	}
@@ -233,8 +237,10 @@ func TestNamedViewAndReplay(t *testing.T) {
 		AND payload->>'replays' IN ('0', '1') AND payload->>'clearance_id' = $2`, e.user, e.letter.String()); n != 2 {
 		t.Errorf("%d named entries, want the list and its replay", n)
 	}
-	if c, b := e.post(t, e.other, "synthetic-key-0001", body); c != 422 || code(b) != "idempotency_mismatch" {
-		t.Errorf("another person's key: %d %s", c, b)
+	// Keys are each person's own (departure 57): the same key from
+	// another person is their own new list, never a probe of this one.
+	if c, b := e.post(t, e.other, "synthetic-key-0001", body); c != 200 {
+		t.Errorf("another person's same key: %d %s", c, b)
 	}
 	if c, b := e.post(t, uuid.Nil, "synthetic-key-0001", e.namedBody(t, "quality_improvement", "")); c != 422 || code(b) != "idempotency_mismatch" {
 		t.Errorf("another body: %d %s", c, b)
@@ -510,5 +516,28 @@ func TestClearanceMeRateLimited(t *testing.T) {
 	}
 	if after := e.count(t, `SELECT count(*) FROM audit_log`); after != before {
 		t.Errorf("clearance/me wrote %d entries", after-before)
+	}
+}
+
+// A revocation, or the role lost, while names are being read: none are
+// sent (security review: the cover is read again after the identity call).
+func TestCoverLostDuringIdentitySendsNoNames(t *testing.T) {
+	e := newNamedEnv(t)
+	body := e.namedBody(t, "audit", "")
+	e.res.during = func() {
+		run(t, e.super, `UPDATE clearances SET status = 'revoked', revoked_at = now(), revoke_reason = 'security_concern',
+			revoked_side = 'platform' WHERE id = $1`, e.letter)
+	}
+	if c, b := e.post(t, uuid.Nil, "synthetic-key-0111", body); c != 503 || strings.Contains(string(b), "synthetic)") {
+		t.Errorf("revoked while reading names: %d %s", c, b)
+	}
+	other := addAdmin(t, e.env)
+	seedActive(t, e.env, 30, other)
+	e.res.during = func() { run(t, e.super, `DELETE FROM user_roles WHERE user_id = $1`, other) }
+	if c, b := e.post(t, other, "synthetic-key-0112", body); c != 503 || strings.Contains(string(b), "synthetic)") {
+		t.Errorf("role lost while reading names: %d %s", c, b)
+	}
+	if n := e.count(t, `SELECT count(*) FROM audit_log WHERE action = 'analysis.named_view_failed'`); n != 2 {
+		t.Errorf("%d failed entries, want 2", n)
 	}
 }

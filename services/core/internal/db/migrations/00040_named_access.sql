@@ -94,6 +94,9 @@ CREATE TABLE named_view_budget (
     user_id     uuid NOT NULL,
     day         date NOT NULL,
     used        integer NOT NULL CHECK (used >= 0),
+    -- The transaction that last reserved a slot: a named list or replay
+    -- opens only in the transaction that reserved it.
+    xact        xid8 NOT NULL,
     PRIMARY KEY (hospital_id, user_id, day)
 );
 
@@ -113,7 +116,7 @@ GRANT SELECT, INSERT ON named_view_keys TO mhai_analysis_reader;
 GRANT UPDATE (replays) ON named_view_keys TO mhai_analysis_reader;
 GRANT INSERT ON named_view_notes TO mhai_analysis_reader;
 GRANT SELECT, INSERT ON named_view_budget TO mhai_analysis_reader;
-GRANT UPDATE (used) ON named_view_budget TO mhai_analysis_reader;
+GRANT UPDATE (used, xact) ON named_view_budget TO mhai_analysis_reader;
 CREATE POLICY analysis_reader ON named_view_keys TO mhai_analysis_reader
     USING (hospital_id = public.mhai_current_hospital())
     WITH CHECK (hospital_id = public.mhai_current_hospital() AND user_id = public.mhai_current_user());
@@ -417,13 +420,45 @@ END
 $$;
 -- +goose StatementEnd
 
--- mhai_analysis_named_admit(limit, now): reserves one of the person's
--- named views for the hospital day of now (replays count), by one upsert
--- whose row lock queues the person's parallel requests to their commit;
--- false past limit (at most 5). A refusal, or any later failure of the
--- request, rolls the slot back with the transaction.
+-- The hospital's day now (the database's clock). Internal.
 -- +goose StatementBegin
-CREATE FUNCTION mhai_analysis_named_admit(p_limit integer, p_now timestamptz) RETURNS boolean
+CREATE FUNCTION mhai_analysis_named_day(p_hospital uuid) RETURNS date
+    LANGUAGE sql STABLE
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+    SELECT (now() AT TIME ZONE h.time_zone)::date FROM public.hospitals h WHERE h.id = p_hospital
+$$;
+-- +goose StatementEnd
+
+-- A named list or replay opens only in the transaction that reserved its
+-- slot within the day's limit (mhai_analysis_named_admit): the budget is
+-- the database's, not the caller's order of calls. Internal.
+-- +goose StatementBegin
+CREATE FUNCTION mhai_analysis_named_reserved() RETURNS void
+    LANGUAGE plpgsql STABLE
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+DECLARE
+    v_h uuid := public.mhai_analysis_hospital();
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM public.named_view_budget b
+                   WHERE b.hospital_id = v_h AND b.user_id = public.mhai_current_user()
+                     AND b.day = public.mhai_analysis_named_day(v_h)
+                     AND b.xact = pg_catalog.pg_current_xact_id() AND b.used <= 5) THEN
+        RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'not_reserved';
+    END IF;
+END
+$$;
+-- +goose StatementEnd
+
+-- mhai_analysis_named_admit(limit): reserves one of the person's named
+-- views for the hospital's day (the database's clock; replays count), by
+-- one upsert whose row lock queues the person's parallel requests to their
+-- commit, and marks the reservation with this transaction; false past
+-- limit (at most 5). A refusal, or any later failure of the request, rolls
+-- the slot back with the transaction.
+-- +goose StatementBegin
+CREATE FUNCTION mhai_analysis_named_admit(p_limit integer) RETURNS boolean
     LANGUAGE plpgsql VOLATILE SECURITY DEFINER
     SET search_path = pg_catalog, pg_temp
     AS $$
@@ -433,12 +468,13 @@ DECLARE
     v_day date;
     v_n   integer;
 BEGIN
-    IF v_u IS NULL OR p_limit IS NULL OR p_limit < 1 OR p_limit > 5 OR p_now > now() THEN
+    IF v_u IS NULL OR p_limit IS NULL OR p_limit < 1 OR p_limit > 5 THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'analysis: not a named admission';
     END IF;
-    SELECT (COALESCE(p_now, now()) AT TIME ZONE h.time_zone)::date INTO v_day FROM public.hospitals h WHERE h.id = v_h;
-    INSERT INTO public.named_view_budget AS b (hospital_id, user_id, day, used) VALUES (v_h, v_u, v_day, 1)
-    ON CONFLICT (hospital_id, user_id, day) DO UPDATE SET used = b.used + 1
+    v_day := public.mhai_analysis_named_day(v_h);
+    INSERT INTO public.named_view_budget AS b (hospital_id, user_id, day, used, xact)
+    VALUES (v_h, v_u, v_day, 1, pg_catalog.pg_current_xact_id())
+    ON CONFLICT (hospital_id, user_id, day) DO UPDATE SET used = b.used + 1, xact = pg_catalog.pg_current_xact_id()
     RETURNING b.used INTO v_n;
     RETURN v_n <= p_limit;
 END
@@ -480,8 +516,8 @@ $$;
 -- +goose StatementEnd
 
 -- mhai_analysis_open_named(view, period, filters, group, source view,
--- drill hash, expected, cap, purpose, note ciphertext, key hash, body mac,
--- now): one named list for the session's person, under the letter that
+-- drill hash, expected, cap, purpose, note ciphertext, key hash, body
+-- mac): one named list, in the transaction that reserved its slot, for the session's person, under the letter that
 -- covers them now (P0001 named_access_off, not_cleared, clearance_ended,
 -- forbidden), as mhai_analysis_open: the group recounted and checked
 -- against the shown cell (too_small), the first 200 subjects reserved
@@ -493,7 +529,7 @@ $$;
 -- +goose StatementBegin
 CREATE FUNCTION mhai_analysis_open_named(p_view uuid, p_period uuid, p_filters jsonb, p_group jsonb, p_source text,
                                          p_drill bytea, p_expected integer, p_cap integer, p_purpose text, p_note bytea,
-                                         p_key bytea, p_body bytea, p_now timestamptz)
+                                         p_key bytea, p_body bytea)
     RETURNS TABLE (ord integer, pid text, age_band text, sex text, setting text, conditions jsonb, findings jsonb,
                    ref_enc bytea, clearance_id uuid, clearance_end date, demo boolean, named_until timestamptz,
                    replays integer)
@@ -504,7 +540,7 @@ CREATE FUNCTION mhai_analysis_open_named(p_view uuid, p_period uuid, p_filters j
 DECLARE
     v_h   uuid := public.mhai_analysis_hospital();
     v_u   uuid := public.mhai_current_user();
-    v_now timestamptz := COALESCE(p_now, clock_timestamp());
+    v_now timestamptz := clock_timestamp();
     v_per record;
     v_cov record;
     v_all uuid[];
@@ -512,13 +548,14 @@ DECLARE
     v_day date;
 BEGIN
     SELECT * INTO v_per FROM public.mhai_analysis_frozen(p_period);
-    IF v_u IS NULL OR p_view IS NULL OR p_now > now() OR p_source NOT IN ('affected', 'co-occurring', 'findings')
+    IF v_u IS NULL OR p_view IS NULL OR p_source NOT IN ('affected', 'co-occurring', 'findings')
        OR p_drill IS NULL OR octet_length(p_drill) <> 32 OR p_expected IS NULL OR p_cap IS NULL
        OR p_purpose IS NULL OR p_purpose NOT IN ('clinical_follow_up', 'quality_improvement', 'audit', 'other')
        OR (p_purpose = 'other' AND p_note IS NULL)
        OR octet_length(p_key) IS DISTINCT FROM 32 OR octet_length(p_body) IS DISTINCT FROM 32 THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'analysis: not a named list';
     END IF;
+    PERFORM public.mhai_analysis_named_reserved();
     SELECT * INTO v_cov FROM public.mhai_analysis_named_covered();
     SELECT array_agg(g ORDER BY g) INTO v_all FROM public.mhai_analysis_group(p_period, p_filters, p_group) g;
     IF COALESCE(cardinality(v_all), 0) <> p_expected OR p_expected < 5 THEN
@@ -547,7 +584,8 @@ $$;
 -- +goose StatementEnd
 
 -- mhai_analysis_named_replay(key hash, body mac, period, filters, group,
--- drill hash, expected, cap, now): a replay of the session person's named
+-- drill hash, expected, cap): a replay, in the transaction that reserved
+-- its slot, of the session person's named
 -- list (design §8.5): the key (P0001 idempotency_mismatch, expired), the
 -- cover now, the group recounted against the stored list (too_small), the
 -- stored subjects reserved again (nothing new), the replay counted. The
@@ -556,7 +594,7 @@ $$;
 -- appended before commit.
 -- +goose StatementBegin
 CREATE FUNCTION mhai_analysis_named_replay(p_key bytea, p_body bytea, p_period uuid, p_filters jsonb, p_group jsonb,
-                                           p_drill bytea, p_expected integer, p_cap integer, p_now timestamptz)
+                                           p_drill bytea, p_expected integer, p_cap integer)
     RETURNS TABLE (ord integer, pid text, age_band text, sex text, setting text, conditions jsonb, findings jsonb,
                    ref_enc bytea, clearance_id uuid, clearance_end date, demo boolean, named_until timestamptz,
                    replays integer)
@@ -576,9 +614,10 @@ DECLARE
     v_n   integer;
 BEGIN
     SELECT * INTO v_per FROM public.mhai_analysis_frozen(p_period);
-    IF v_u IS NULL OR p_now > now() OR p_drill IS NULL OR octet_length(p_drill) <> 32 OR p_expected IS NULL OR p_cap IS NULL THEN
+    IF v_u IS NULL OR p_drill IS NULL OR octet_length(p_drill) <> 32 OR p_expected IS NULL OR p_cap IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value', MESSAGE = 'analysis: not a named replay';
     END IF;
+    PERFORM public.mhai_analysis_named_reserved();
     SELECT k.user_id, k.body_mac, k.view_id, k.named_until INTO v_k FROM public.named_view_keys k
     WHERE k.hospital_id = v_h AND k.key_hash = p_key FOR UPDATE;
     IF NOT FOUND OR v_k.user_id IS DISTINCT FROM v_u OR v_k.body_mac IS DISTINCT FROM p_body THEN
@@ -702,20 +741,23 @@ $$;
 ALTER FUNCTION mhai_named_replay_audited() OWNER TO mhai_analysis_reader;
 ALTER FUNCTION mhai_analysis_named_covered() OWNER TO mhai_analysis_reader;
 ALTER FUNCTION mhai_analysis_named_rows(uuid, uuid, jsonb, jsonb) OWNER TO mhai_analysis_reader;
-ALTER FUNCTION mhai_analysis_named_admit(integer, timestamptz) OWNER TO mhai_analysis_reader;
+ALTER FUNCTION mhai_analysis_named_day(uuid) OWNER TO mhai_analysis_reader;
+ALTER FUNCTION mhai_analysis_named_reserved() OWNER TO mhai_analysis_reader;
+ALTER FUNCTION mhai_analysis_named_admit(integer) OWNER TO mhai_analysis_reader;
 ALTER FUNCTION mhai_analysis_named_key(bytea, bytea) OWNER TO mhai_analysis_reader;
-ALTER FUNCTION mhai_analysis_open_named(uuid, uuid, jsonb, jsonb, text, bytea, integer, integer, text, bytea, bytea, bytea, timestamptz)
+ALTER FUNCTION mhai_analysis_open_named(uuid, uuid, jsonb, jsonb, text, bytea, integer, integer, text, bytea, bytea, bytea)
     OWNER TO mhai_analysis_reader;
-ALTER FUNCTION mhai_analysis_named_replay(bytea, bytea, uuid, jsonb, jsonb, bytea, integer, integer, timestamptz)
+ALTER FUNCTION mhai_analysis_named_replay(bytea, bytea, uuid, jsonb, jsonb, bytea, integer, integer)
     OWNER TO mhai_analysis_reader;
 REVOKE ALL ON FUNCTION mhai_named_replay_audited(), mhai_analysis_named_covered(),
-    mhai_analysis_named_rows(uuid, uuid, jsonb, jsonb), mhai_analysis_named_admit(integer, timestamptz),
+    mhai_analysis_named_rows(uuid, uuid, jsonb, jsonb), mhai_analysis_named_admit(integer),
+    mhai_analysis_named_day(uuid), mhai_analysis_named_reserved(),
     mhai_analysis_named_key(bytea, bytea),
-    mhai_analysis_open_named(uuid, uuid, jsonb, jsonb, text, bytea, integer, integer, text, bytea, bytea, bytea, timestamptz),
-    mhai_analysis_named_replay(bytea, bytea, uuid, jsonb, jsonb, bytea, integer, integer, timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION mhai_analysis_named_admit(integer, timestamptz), mhai_analysis_named_key(bytea, bytea),
-    mhai_analysis_open_named(uuid, uuid, jsonb, jsonb, text, bytea, integer, integer, text, bytea, bytea, bytea, timestamptz),
-    mhai_analysis_named_replay(bytea, bytea, uuid, jsonb, jsonb, bytea, integer, integer, timestamptz) TO mhai_gateway;
+    mhai_analysis_open_named(uuid, uuid, jsonb, jsonb, text, bytea, integer, integer, text, bytea, bytea, bytea),
+    mhai_analysis_named_replay(bytea, bytea, uuid, jsonb, jsonb, bytea, integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION mhai_analysis_named_admit(integer), mhai_analysis_named_key(bytea, bytea),
+    mhai_analysis_open_named(uuid, uuid, jsonb, jsonb, text, bytea, integer, integer, text, bytea, bytea, bytea),
+    mhai_analysis_named_replay(bytea, bytea, uuid, jsonb, jsonb, bytea, integer, integer) TO mhai_gateway;
 
 -- +goose StatementBegin
 DO $$
@@ -856,10 +898,12 @@ END
 $$;
 -- +goose StatementEnd
 
-DROP FUNCTION mhai_analysis_named_replay(bytea, bytea, uuid, jsonb, jsonb, bytea, integer, integer, timestamptz);
-DROP FUNCTION mhai_analysis_open_named(uuid, uuid, jsonb, jsonb, text, bytea, integer, integer, text, bytea, bytea, bytea, timestamptz);
+DROP FUNCTION mhai_analysis_named_replay(bytea, bytea, uuid, jsonb, jsonb, bytea, integer, integer);
+DROP FUNCTION mhai_analysis_open_named(uuid, uuid, jsonb, jsonb, text, bytea, integer, integer, text, bytea, bytea, bytea);
 DROP FUNCTION mhai_analysis_named_key(bytea, bytea);
-DROP FUNCTION mhai_analysis_named_admit(integer, timestamptz);
+DROP FUNCTION mhai_analysis_named_admit(integer);
+DROP FUNCTION mhai_analysis_named_reserved();
+DROP FUNCTION mhai_analysis_named_day(uuid);
 DROP FUNCTION mhai_analysis_named_rows(uuid, uuid, jsonb, jsonb);
 DROP FUNCTION mhai_analysis_named_covered();
 DROP TABLE named_view_keys;
