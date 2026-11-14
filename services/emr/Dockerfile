@@ -19,10 +19,10 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/emr ./cmd/emr && \
 # service writes and egress-emr reads (volume emr-egress-conf). The secret
 # store must be 0700 (the file store refuses anything else), and a fresh
 # volume takes the folder's mode: without it `--profile emr` never starts
-# the emr service. COPY of a folder copies what is in it, so the 0700
-# folder is copied as an entry of its parent, which keeps its mode.
-RUN mkdir -p /out/emr-keys /out/secret-store/emr-secrets /out/emr-proxy-key /out/emr-egress && \
-    chmod 0700 /out/secret-store/emr-secrets
+# the emr service. A folder COPY creates its target with the default mode,
+# so the target's mode is set on the COPY itself (BuildKit --chmod).
+# services/emr/scripts/image-check.sh checks the modes and owners.
+RUN mkdir -p /out/emr-keys /out/emr-secrets /out/emr-proxy-key /out/emr-egress
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/emr /emr
@@ -35,7 +35,7 @@ COPY --from=build /src/emr/maps /maps
 # synthetic set under /rules/testdata loads in development only.
 COPY --from=build /src/emr/rules /rules
 COPY --from=build --chown=65532:65532 /out/emr-keys /emr-keys
-COPY --from=build --chown=65532:65532 /out/secret-store/ /
+COPY --from=build --chown=65532:65532 --chmod=0700 /out/emr-secrets /emr-secrets
 COPY --from=build --chown=65532:65532 /out/emr-proxy-key /emr-proxy-key
 COPY --from=build --chown=65532:65532 /out/emr-egress /emr-egress
 USER nonroot:nonroot

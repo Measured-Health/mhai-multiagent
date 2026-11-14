@@ -579,8 +579,11 @@ All notable changes to this project are documented here. The format follows
 - The emr image's secret store folder (`/emr-secrets`) is now 0700, so a
   fresh `emr-secrets` volume takes that mode and `docker compose --profile
   emr` starts the emr service: before, the folder was 0755 (a folder COPY
-  copies only its contents) and the file store refused to start. Found by
-  the full live check (mhai-web `scripts/it/live-full.sh`).
+  creates its target with the default mode) and the file store refused to
+  start. The COPY sets it (`--chmod=0700`, that folder only);
+  `services/emr/scripts/image-check.sh` checks the image's state folders'
+  modes and owners and that every other top-level entry is root's. Found
+  by the full live check (mhai-web `scripts/it/live-full.sh`).
 
 - `GET /api/openapi.yaml` is now `text/plain` with `Content-Disposition: inline`,
   so a browser shows the spec instead of saving it (`application/yaml` was
