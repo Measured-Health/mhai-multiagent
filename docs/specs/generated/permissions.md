@@ -44,6 +44,12 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/healthz` | public | - | - | no | no | no |
 | GET | `/api/v1/hospital/alert-settings` | signed in | `hospital_admin` | clinical | yes | no | no |
 | PATCH | `/api/v1/hospital/alert-settings` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| GET | `/api/v1/hospital/clearances` | signed in | `hospital_admin` | clinical | yes | no | no |
+| POST | `/api/v1/hospital/clearances` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| GET | `/api/v1/hospital/clearances/{id}` | signed in | `hospital_admin` | clinical | yes | no | no |
+| POST | `/api/v1/hospital/clearances/{id}/narrow` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| GET | `/api/v1/hospital/clearances/{id}/pages/{n}` | signed in | `hospital_admin` | clinical | yes | no | no |
+| POST | `/api/v1/hospital/clearances/{id}/revoke` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | POST | `/api/v1/hospital/patient-exclusions` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | GET | `/api/v1/hospital/patient-matches` | signed in | `hospital_admin` | clinical | yes | no | no |
 | POST | `/api/v1/hospital/patient-matches/{id}/confirm` | signed in | `hospital_admin` | clinical | yes | yes | yes |

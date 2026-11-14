@@ -8,6 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Patient Analysis PR 7: clearance letters, hospital side (migration
+  **00034**, OpenAPI **1.23.0**; off by default: every letter route answers
+  404 while the hospital's analysis switch is off and 403
+  `named_access_off` while its named-access position is `off`, which it is
+  everywhere until `core analysis named-access demo` raises the demo
+  hospital to `letters_only`). `GET/POST /hospital/clearances`, `GET
+  …/{id}`, `GET …/{id}/pages/{n}`, `POST …/{id}/revoke|narrow` for hospital
+  admins with two-step (re-read in every transaction), step-up and a
+  required `Idempotency-Key` on writes. The rules are triggers on
+  `clearances` and `clearance_covered` for every writer (statuses and who
+  may move them, the 12-month cap, narrowing only and never to nobody,
+  version up by one, and the platform side's actor, `same_person` and
+  `same_side` checks, T15), and the database refuses to commit a letter
+  change without its `clearance.*` audit entry. A live upload is 503
+  `unavailable` with nothing stored until the documents service exists; the
+  demo keeps only the file's SHA-256 and serves fixture pages drawn in code,
+  each view audited (`clearance.viewed`). The nightly run ends letters after
+  their hospital's last day and records reminders at 30, 7 and 1 days
+  (`clearance.reminder_sent`, delivery pending). New problem codes:
+  `named_access_off`, `file_too_large`, `file_type`, `end_date_too_late`,
+  `not_eligible`, `not_eligible_platform`, `would_empty`. Plan departures
+  29–42.
 - EMR integration, PR 8b (the finding consumer; off by default: it runs only
   with `CORE_EMR_ENABLED`, and with no rule set activated for a hospital
   every finding is shadow and never reaches it). Core's `core_emr` consumer
