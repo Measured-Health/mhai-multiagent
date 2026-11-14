@@ -45,7 +45,8 @@ const SecretField = "access_key"
 const (
 	// MaxFiles is the most files one run reads; the rest wait for the next.
 	MaxFiles = 20
-	// MaxListed is the most folder entries a run looks at.
+	// MaxListed is the most folder entries a run reads; a listing longer
+	// than that is refused (unreadable_data) as soon as it passes it.
 	MaxListed = 10_000
 	// MinExpectedMinutes and MaxExpectedMinutes bound the declared export
 	// interval (settings.expected_every_minutes): five minutes to a week.
@@ -348,19 +349,24 @@ func (c *FileExport) Fetch(ctx context.Context, cfg connector.Config, creds conn
 	}
 	defer s.close()
 	folder := cfg.Settings["folder"]
-	entries, err := s.sftp.ReadDirContext(ctx, folder)
-	if err != nil {
-		return out.encode(), remoteError(ctx, err)
+	// Read a page at a time and capped as it goes (listdir.go): never the
+	// whole listing first.
+	entries, err := listDir(ctx, s.ssh, folder)
+	switch {
+	case err == nil:
+	case ctx.Err() != nil:
+		return out.encode(), connector.Fail("timed_out", 0)
+	case errors.Is(err, errListing):
+		return out.encode(), connector.Fail("unreadable_data", 0)
+	default:
+		return out.encode(), connector.Fail("unreachable", 0)
 	}
 	m := c.metrics()
-	if len(entries) > MaxListed {
-		return out.encode(), connector.Fail("unreadable_data", 0)
-	}
 	var files []fileKey
 	for _, e := range entries {
-		k, ok := parseName(e.Name())
-		if !ok || !e.Mode().IsRegular() {
-			if !e.IsDir() {
+		k, ok := parseName(e.name)
+		if !ok || !e.regular {
+			if !e.dir {
 				m.Skipped.Add(1)
 			}
 			continue
