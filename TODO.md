@@ -148,6 +148,9 @@ PR 4 (aggregate routes) is the simplest version that keeps the disclosure guaran
 - [ ] **A late fact in a hospital's first quarter** can make a first period's "every case is new" false; the guard then finds the raw values inconsistent and the context is stored hidden whole, with the `analysis_inconsistent` alert (fail closed).
 - [x] **Smoke:** `TestSmokeAnalysis` runs in boundary-smoke (run on steven-reid for PR 4: passes).
 - [ ] **Map the drill-down's audit actions to mhai-web's kinds** (`analysis.patients_viewed` as `analysis_patients_viewed`, `audit.patients_viewed` as `audit_patients_viewed`, and flagged kinds for `analysis.list_limit_reached` and `analysis.patient_cap_reached`): sent bare until their facts and targets are agreed (H6, PR 5).
+- [ ] **Step-up on `PATCH /hospital/staff/{id}` when it adds `analyst` (Analysis Task 17, moved to the staff-endpoints plan; departure 28).** The rules, functions and CLI are built (PR 6, migration 00030); the route calls `analysis.GrantAnalyst` after step-up, maps the six refusals, audits any `clinician` removal with `analysis.AuditAnalystChanges` (or the database refuses the commit) and notifies after commit. Tests `TestT26RouteRefusals` and `TestRemoveAnalystEndsPatientAccessAtOnce`.
+- [ ] **Map `analyst.granted` and `analyst.removed` to mhai-web's `staff_role_changed`** (target the person): sent bare until the facts are agreed (H6, PR 6).
+- [ ] **Tell every hospital admin of an analyst grant** when the notifications service exists: `analysis.NotifyAnalystGranted` records the ids only today (PR 6).
 - [ ] **Drills on location, specialty, source and prevalence (PR 5, departure 19).** None today: pids are stable within a period, so lists split by a dimension the rows don't show could be compared to reveal a hidden small group. Needs a design (for example pids scoped per list, or the dimension shown on the row) and H1's agreement.
 
 ## Decided
