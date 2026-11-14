@@ -13,6 +13,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/alerts"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/letters"
 	analysisroutes "github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/routes"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
@@ -93,6 +94,10 @@ func Register(m *authz.Mux, d Deps) {
 	// backend plan Tasks 10 and 13): off unless the hospital's analysis
 	// switch is on.
 	analysisroutes.Register(m, analysisroutes.Deps{Pool: d.Pool, Engine: d.Analysis, Log: a.Log, Keys: d.AnalysisKeys})
+	// Clearance letters, hospital side (analysis backend plan Tasks 18-20):
+	// off unless the hospital's analysis switch is on and its named-access
+	// position is letters_only or on (none is, by default).
+	letters.Register(m, letters.Deps{Pool: d.Pool, Auth: a, Log: a.Log})
 	// EMR alerts (EMR plan Tasks 32-34): the hospital admin's alert
 	// settings, possible duplicates and exclusions, and the clinicians'
 	// alerts and notification settings. They always answer (empty lists,

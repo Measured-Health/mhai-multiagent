@@ -62,6 +62,11 @@ type Nightly struct {
 	// pg_try_advisory_lock on the pool.
 	Lock func(ctx context.Context) (unlock func(), ok bool, err error)
 
+	// After, when set, runs once per tick after the hospitals' steps (the
+	// clearance letters' ending and reminders, internal/analysis/letters):
+	// a failure is logged and alerted as the step "letters".
+	After func(ctx context.Context, now time.Time) error
+
 	LateFacts atomic.Int64 // facts that arrived after their block froze
 	Failures  atomic.Int64 // failed steps (the analysis_freeze_failed alert)
 }
@@ -129,6 +134,12 @@ func (n *Nightly) Tick(ctx context.Context) ([]uuid.UUID, error) {
 			continue
 		}
 		done = append(done, d.Hospital)
+	}
+	if n.After != nil {
+		if err := n.After(ctx, now); err != nil {
+			n.fail(uuid.Nil, "letters")
+			failed = true
+		}
 	}
 	if failed {
 		return done, errStep

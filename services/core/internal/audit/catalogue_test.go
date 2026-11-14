@@ -453,7 +453,8 @@ func candidates() []any {
 		2026-11-03T06:00:00Z 2026-11-03T06:00:00.123+01:00 v1.2
 		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume demo prevalence month:2026-10-01 affected minute day
 		excluded already_known null_mrn level_off already_open breaker_tripped new_hit regrouped amended critical blood_chemistry
-		platform_admin auditor off critical_and_digest regulator case_closed miss hospital_day`) {
+		platform_admin auditor off critical_and_digest regulator case_closed
+		unreadable failed_safety_check wrong_people person_left pending letters_only hospital miss hospital_day`) {
 		out = append(out, s)
 	}
 	for _, ty := range audit.AuditTypes {
@@ -462,7 +463,7 @@ func candidates() []any {
 	for _, c := range authz.ErrorCodes() {
 		out = append(out, c.Code)
 	}
-	for _, n := range []float64{0, 1, 2, 49, 50, 51, 1000, 65536, 1e15, -1, 1.5} {
+	for _, n := range []float64{0, 1, 2, 7, 49, 50, 51, 1000, 65536, 1e15, -1, 1.5} {
 		out = append(out, n)
 	}
 	out = append(out, true, false, nil,
@@ -483,7 +484,7 @@ func fuzzCatalogue(t *testing.T, voc *vocabulary, n int) {
 	t.Helper()
 	rng := rand.New(rand.NewSource(20261103))
 	pool := candidates()
-	entities := []string{"", "session", "hospital", "query", "correction", "job", "audit_run", "audit_list", "audit_search", "user", "operation", "emr_connection"}
+	entities := []string{"", "session", "hospital", "query", "correction", "job", "audit_run", "audit_list", "audit_search", "user", "operation", "emr_connection", "clearance"}
 	entityIDs := append([]string{"", "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11", "pipeline.run_query", "has space"}, pseudonyms...)
 	hospitals := []string{"", "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11"}
 	mappedOnce := map[string]bool{}

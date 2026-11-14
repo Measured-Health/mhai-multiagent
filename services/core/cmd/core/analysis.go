@@ -22,6 +22,8 @@ import (
 const analysisUsage = `usage:
   core analysis seed-demo <hospital id or short code> [--seed N] [--months 1-24]
   core analysis switch off <hospital id or short code> | --global
+  core analysis named-access demo <hospital id or short code>
+  core analysis named-access off <hospital id or short code> | --global
 
 seed-demo is for the synthetic demo hospital only (analysis plan, departure
 5): a hospital created with core hospitals create --demo. It sets the global
@@ -34,6 +36,15 @@ two-person flow (Plan 11b), never this command.
 
 switch off lowers a switch at once and audits analysis.switch_lowered.
 
+named-access demo raises the global and the demo hospital's named-access
+switches to letters_only with the references DEMO-SYNTHETIC
+(mhai_named_access_demo_raise), so the demo hospital's admins can upload
+and manage clearance letters. It refuses a hospital whose analysis switch
+isn't the demo's (run seed-demo first) and any switch ever signed off.
+named-access off lowers one at once. Both audit named_access.changed.
+Raising named access for a real hospital, and to on, is the platform's
+two-person flow (Plan 11b), never this command.
+
 Both connect with DATABASE_URL as the provisioning login (mhai_provision).
 seed-demo prints the hospital id and the subject count only.`
 
@@ -42,6 +53,8 @@ var (
 	errRealSwitch    = errors.New("an analysis switch was signed off; the CLI never gives it demo references (use the platform)")
 	errNotDemo       = errors.New("that hospital was not created as the demo (core hospitals create --demo); seed-demo refuses it")
 	errAnalysisWrite = errors.New("could not write the analysis switch or seed; nothing was changed")
+	errNamedNotDemo  = errors.New("named access demo needs the hospital's demo analysis switch (core analysis seed-demo first); nothing was changed")
+	errNamedReal     = errors.New("a named-access switch was signed off; the CLI never gives it demo references (use the platform)")
 )
 
 // analysisDemoSubjects is the demo cohort's size.
@@ -56,6 +69,10 @@ func analysisCmd(ctx context.Context, args []string, url string, out io.Writer,
 		return analysisSeedDemo(ctx, args[1:], url, out, clock)
 	case len(args) == 3 && args[0] == "switch" && args[1] == "off":
 		return analysisSwitchOff(ctx, args[2], url, out)
+	case len(args) == 3 && args[0] == "named-access" && args[1] == "demo":
+		return namedAccessDemo(ctx, args[2], url, out)
+	case len(args) == 3 && args[0] == "named-access" && args[1] == "off":
+		return namedAccessOff(ctx, args[2], url, out)
 	}
 	return errAnalysisArgs
 }
@@ -232,5 +249,115 @@ func provisionTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error)
 	if err := tx.Commit(ctx); err != nil {
 		return errors.New("commit failed")
 	}
+	return nil
+}
+
+// namedAccessDemo raises the global and the demo hospital's named-access
+// switches to letters_only with demo references (plan departure 39), the
+// global first (a hospital's row is never above it), and audits each one
+// raised. A refusal rolls back both.
+func namedAccessDemo(ctx context.Context, ref, url string, out io.Writer) error {
+	if strings.HasPrefix(ref, "-") || account.ValidateHospitalRef(ref) != nil {
+		return errAnalysisArgs
+	}
+	pool, err := openOwner(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	hospital, err := account.ProvisionOnHospital(ctx, pool, ref, func(tx pgx.Tx, hospital uuid.UUID) error {
+		raised := map[string]bool{}
+		for _, scope := range []string{"global", "hospital"} {
+			var h *uuid.UUID
+			if scope == "hospital" {
+				h = &hospital
+			}
+			var was bool
+			if err := tx.QueryRow(ctx, `SELECT mhai_named_access_demo_raise($1)`, h).Scan(&was); err != nil {
+				var pe *pgconn.PgError
+				switch {
+				case errors.As(err, &pe) && pe.Code == "22023":
+					return errNamedNotDemo
+				case errors.As(err, &pe) && pe.Code == "23514":
+					return errNamedReal
+				}
+				return errAnalysisWrite
+			}
+			raised[scope] = was
+		}
+		for _, scope := range []string{"global", "hospital"} {
+			if !raised[scope] {
+				continue
+			}
+			p := map[string]any{"via": "cli", "position": "letters_only", "refs": "demo"}
+			if scope == "hospital" {
+				p["hospital_id"] = hospital.String()
+			}
+			if err := audit.Write(ctx, tx, audit.Event{Action: "named_access.changed", Payload: p}); err != nil {
+				return errAnalysisWrite
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "named access %s letters_only (demo)\n", hospital)
+	return nil
+}
+
+// namedAccessOff lowers a named-access switch to off at once and audits it.
+func namedAccessOff(ctx context.Context, target, url string, out io.Writer) error {
+	global := target == "--global"
+	if !global && (strings.HasPrefix(target, "-") || account.ValidateHospitalRef(target) != nil) {
+		return errAnalysisArgs
+	}
+	pool, err := openOwner(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	lower := func(tx pgx.Tx, h *uuid.UUID) (bool, error) {
+		tag, err := tx.Exec(ctx, `UPDATE named_access_switch SET position = 'off'
+			WHERE hospital_id IS NOT DISTINCT FROM $1 AND position <> 'off'`, h)
+		if err != nil {
+			return false, errAnalysisWrite
+		}
+		if tag.RowsAffected() == 0 {
+			return false, nil
+		}
+		p := map[string]any{"via": "cli", "position": "off"}
+		if h != nil {
+			p["hospital_id"] = h.String()
+		}
+		if err := audit.Write(ctx, tx, audit.Event{Action: "named_access.changed", Payload: p}); err != nil {
+			return false, errAnalysisWrite
+		}
+		return true, nil
+	}
+	var changed bool
+	name := "global"
+	if global {
+		err = provisionTx(ctx, pool, func(tx pgx.Tx) error {
+			changed, err = lower(tx, nil)
+			return err
+		})
+	} else {
+		var h uuid.UUID
+		h, err = account.ProvisionOnHospital(ctx, pool, target, func(tx pgx.Tx, h uuid.UUID) error {
+			var err error
+			changed, err = lower(tx, &h)
+			return err
+		})
+		name = h.String()
+	}
+	if err != nil {
+		return err
+	}
+	if !changed {
+		fmt.Fprintf(out, "named access %s already off; nothing changed\n", name)
+		return nil
+	}
+	fmt.Fprintf(out, "named access %s off\n", name)
 	return nil
 }

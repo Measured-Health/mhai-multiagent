@@ -25,6 +25,32 @@ All notable changes to this project are documented here. The format follows
   lookup is audited `patients.lookup` (the patient id on a hit, never the
   MRN typed). The route keeps no idempotency row (`authz.Rule.NoIdempotency`:
   no hash of the MRN, no reply stored).
+- Patient Analysis PR 7: clearance letters, hospital side (migration
+  **00038**, OpenAPI **1.28.0**; off by default: every letter route answers
+  404 while the hospital's analysis switch is off and 403
+  `named_access_off` while its named-access position is `off`, which it is
+  everywhere until `core analysis named-access demo` raises the demo
+  hospital to `letters_only`). `GET/POST /hospital/clearances`, `GET
+  …/{id}`, `GET …/{id}/pages/{n}`, `POST …/{id}/revoke|narrow` for hospital
+  admins with two-step (re-read in every transaction), step-up and a
+  required `Idempotency-Key` on writes. The rules are triggers on
+  `clearances` and `clearance_covered` for every writer (statuses and who
+  may move them, the 12-month cap, narrowing only and never to nobody,
+  version up by one, and the platform side's actor, `same_person` and
+  `same_side` checks, T15), and the database refuses to commit a letter
+  change without its `clearance.*` audit entry. A live upload is 503
+  `unavailable` with nothing stored until the documents service exists; the
+  demo keeps only the file's SHA-256 and serves fixture pages drawn in code,
+  each view audited (`clearance.viewed`). The nightly run ends letters after
+  their hospital's last day and records reminders at 30, 7 and 1 days
+  (`clearance.reminder_sent`, delivery pending). New problem codes:
+  `named_access_off`, `file_too_large`, `file_type`, `end_date_too_late`,
+  `not_eligible`, `not_eligible_platform`, `would_empty`. Plan departures
+  29–44. Security review: outside the demo every upload is the same 503
+  whatever it holds; `not_eligible_platform` is one reply with no list;
+  platform admins are shown only on verified letters; eligibility
+  refusals are limited to 5 a day per person, reserved before the check
+  so parallel requests can't pass the limit.
 - Clinician alerts carry the patient's id (OpenAPI 1.27.0, additive):
   `patient.id` on each alert of `GET /alerts` and on an acknowledged or
   dismissed alert, the MHAI patient's lower-case uuid, so the clinical app

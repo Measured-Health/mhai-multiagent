@@ -1522,6 +1522,263 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "501": { $ref: "#/components/responses/Problem" }
 
+  /hospital/clearances:
+    get:
+      operationId: listClearances
+      summary: The hospital's clearance letters (hospital admins; off by default).
+      description: |
+        Hospital admins, with two-step, while the hospital's analysis switch
+        is on (otherwise 404 `not_found`) and its named-access position is
+        `letters_only` or `on` (otherwise 403 `named_access_off`). The role,
+        account and two-step are re-read on every call (403 `forbidden`).
+        Newest first, at most 200. `today` and `max_end_date` are the
+        hospital's days. An active letter past its end date is sent as
+        `ended`. Never cached. Added in 1.28.0.
+      tags: [clearances]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The letters.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClearancesOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    post:
+      operationId: uploadClearance
+      summary: Upload a clearance letter (hospital admins, step-up; demo only until the documents service exists).
+      description: |
+        Multipart only (415 `file_type` otherwise), within the API's body
+        limit (413 `file_too_large`; 413 `payload_too_large` over NATS).
+        An `Idempotency-Key` is required. Fields, each once except
+        `covered` and `covered_platform`: `file`, `signed_by`,
+        `signer_title` (1–120 characters), `letter_date` (within the 12
+        months up to the hospital's today), `end_date`, `covered` (staff
+        ids), `covered_platform` (platform admins' emails), `renews`
+        (optional), `mfa_code` or `backup_code`. Any other field is 422
+        `validation_failed`. Order: the gates (404, 403); a hospital that
+        isn't the demo then gets 503 `unavailable` whatever the body holds,
+        with nothing checked or stored; the body (415, 413, 422), the code
+        (403), then, before anything is stored, 429 `rate_limited` after 5
+        eligibility refusals in the hospital's day, 422
+        `end_date_too_late` (not after today, or past `max_end_date`), 1–20
+        people, 422 `not_eligible` (with `ids`: staff who aren't active
+        hospital admins or analysts with two-step), 422
+        `not_eligible_platform` (no list:
+        the platform's accounts are not a lookup; the same for any address
+        that isn't an eligible platform admin), 422 for `renews`. The letter
+        is stored with fixture pages (status `waiting`)
+        and audited (`clearance.uploaded`, `clearance.ready`); the file is
+        never kept. Platform admins a letter names appear in
+        `covered_platform` only once Measured Health has verified a letter of
+        the hospital naming them. Added in 1.28.0.
+      tags: [clearances]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, file_type, file_too_large, validation_failed, end_date_too_late, not_eligible, not_eligible_platform, conflict, rate_limited, unavailable, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, signed_by, signer_title, letter_date, end_date]
+              additionalProperties: false
+              properties:
+                file: { type: string, format: binary }
+                signed_by: { type: string, minLength: 1, maxLength: 120 }
+                signer_title: { type: string, minLength: 1, maxLength: 120 }
+                letter_date: { type: string, format: date }
+                end_date: { type: string, format: date }
+                covered: { type: array, maxItems: 20, items: { type: string, format: uuid } }
+                covered_platform: { type: array, maxItems: 20, items: { type: string, maxLength: 254 } }
+                renews: { type: string, format: uuid }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "201":
+          description: The letter, as stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClearanceOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "413": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /hospital/clearances/{id}:
+    get:
+      operationId: getClearance
+      summary: One clearance letter (hospital admins).
+      description: |
+        As the list; another hospital's letter is 404. Added in 1.28.0.
+      tags: [clearances]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The letter.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClearanceOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /hospital/clearances/{id}/pages/{n}:
+    get:
+      operationId: getClearancePage
+      summary: One page of a clearance letter, as a flat image (hospital admins).
+      description: |
+        Never the original. Another hospital's letter, or a page past the
+        letter's last, is 404; a letter with no pages yet is 503
+        `not_ready`; a letter that isn't a demo letter is 503 `unavailable`
+        (its pages are the documents service's). Every view is audited
+        (`clearance.viewed`) before the page is sent. `image/png`,
+        `Cache-Control: no-store`, `Content-Disposition: inline`,
+        `X-Content-Type-Options: nosniff`. Added in 1.28.0.
+      tags: [clearances]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, not_ready, unavailable, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: n, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 20 } }
+      responses:
+        "200":
+          description: The page.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+            Content-Disposition: { schema: { type: string, enum: [inline] } }
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /hospital/clearances/{id}/revoke:
+    post:
+      operationId: revokeClearance
+      summary: Revoke a waiting or active clearance letter (hospital admins, step-up).
+      description: |
+        Takes effect at once. `version`, when sent, must be the letter's
+        (409 `conflict` otherwise); a letter that isn't waiting or active is
+        409 `conflict`. `other` needs a `note` (1–500 characters). An
+        `Idempotency-Key` is required. Order: the gates and the letter (404,
+        403), the body (422), the code (403). Audited `clearance.revoked`
+        (the note never is). Replies with the letter. Added in 1.28.0.
+      tags: [clearances]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              additionalProperties: false
+              properties:
+                reason: { type: string, enum: [no_longer_needed, person_left, uploaded_in_error, security_concern, other] }
+                note: { type: string, minLength: 1, maxLength: 500 }
+                version: { type: integer, minimum: 1 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The letter.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClearanceOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /hospital/clearances/{id}/narrow:
+    post:
+      operationId: narrowClearance
+      summary: Remove people from a clearance letter (hospital admins, step-up).
+      description: |
+        Only removes people the letter still covers (staff or platform),
+        never all of them (422 `would_empty`: revoke instead), at the
+        letter's `version` (409 `conflict` otherwise), while it is checking,
+        waiting or active. `other` needs a `note`. An `Idempotency-Key` is
+        required. Audited once per person removed (`clearance.narrowed`).
+        Replies with the letter. Added in 1.28.0.
+      tags: [clearances]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, conflict, validation_failed, would_empty, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [remove, reason, version]
+              additionalProperties: false
+              properties:
+                remove: { type: array, minItems: 1, maxItems: 20, items: { type: string, format: uuid } }
+                reason: { type: string, enum: [person_left, no_longer_needed, uploaded_in_error, other] }
+                note: { type: string, minLength: 1, maxLength: 500 }
+                version: { type: integer, minimum: 1 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The letter.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClearanceOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
   /hospital/alert-settings:
     get:
       operationId: getAlertSettings
@@ -4738,6 +4995,12 @@ components:
             - own_role
             - same_person
             - expired
+            - named_access_off
+            - file_too_large
+            - file_type
+            - end_date_too_late
+            - not_eligible_platform
+            - would_empty
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -5712,6 +5975,91 @@ components:
         value: { type: integer, minimum: 0, nullable: true }
         suppressed: { type: boolean }
         drill: { type: string, nullable: true }
+    ClearanceWho:
+      description: A person, by display name only (since 1.28.0).
+      type: object
+      required: [display_name]
+      additionalProperties: false
+      properties:
+        display_name: { type: string }
+    ClearanceCovered:
+      description: A person a letter covers (since 1.28.0).
+      type: object
+      required: [id, display_name]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        display_name: { type: string }
+    ClearanceEventOut:
+      description: One line of a letter's history (since 1.28.0). `removed` only on `narrowed`, one person per line.
+      type: object
+      required: [at, kind, by, side, reason, note]
+      additionalProperties: false
+      properties:
+        at: { type: string, format: date-time }
+        kind: { type: string, enum: [uploaded, refused, ready, verified, rejected, narrowed, revoked, ended, reminded] }
+        by: { nullable: true, allOf: [{ $ref: "#/components/schemas/ClearanceWho" }] }
+        side: { type: string, nullable: true, enum: [hospital, platform] }
+        reason: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        removed: { type: array, items: { $ref: "#/components/schemas/ClearanceCovered" } }
+    ClearanceOut:
+      description: A clearance letter (contract §10; since 1.28.0). Dates are the hospital's days.
+      type: object
+      required: [id, status, refused_reason, signed_by, signer_title, letter_date, covered, covered_platform, end_date,
+        uploaded_by, uploaded_at, verified_by, verified_at, rejection, revocation, renews, pages, history, version]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [checking, refused, waiting, active, rejected, ended, revoked] }
+        refused_reason:
+          type: string
+          nullable: true
+          enum: [file_type, file_too_large, too_many_pages, password_protected, unreadable, failed_safety_check]
+        signed_by: { type: string }
+        signer_title: { type: string }
+        letter_date: { type: string, format: date }
+        covered: { type: array, items: { $ref: "#/components/schemas/ClearanceCovered" } }
+        covered_platform: { type: array, items: { $ref: "#/components/schemas/ClearanceCovered" } }
+        end_date: { type: string, format: date }
+        uploaded_by: { $ref: "#/components/schemas/ClearanceWho" }
+        uploaded_at: { type: string, format: date-time }
+        verified_by: { nullable: true, allOf: [{ $ref: "#/components/schemas/ClearanceWho" }] }
+        verified_at: { type: string, format: date-time, nullable: true }
+        rejection:
+          type: object
+          nullable: true
+          required: [reason, note, at]
+          additionalProperties: false
+          properties:
+            reason: { type: string, enum: [wrong_people, end_date_mismatch, not_leadership, unreadable, other] }
+            note: { type: string, nullable: true }
+            at: { type: string, format: date-time }
+        revocation:
+          type: object
+          nullable: true
+          required: [by, side, at, day, reason, note]
+          additionalProperties: false
+          properties:
+            by: { $ref: "#/components/schemas/ClearanceWho" }
+            side: { type: string, enum: [hospital, platform] }
+            at: { type: string, format: date-time }
+            day: { type: string, format: date }
+            reason: { type: string, enum: [no_longer_needed, person_left, uploaded_in_error, security_concern, other] }
+            note: { type: string, nullable: true }
+        renews: { type: string, format: uuid, nullable: true }
+        pages: { type: integer, minimum: 0, maximum: 20 }
+        history: { type: array, items: { $ref: "#/components/schemas/ClearanceEventOut" } }
+        version: { type: integer, minimum: 1 }
+    ClearancesOut:
+      description: The hospital's letters (since 1.28.0).
+      type: object
+      required: [clearances, today, max_end_date]
+      additionalProperties: false
+      properties:
+        clearances: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/ClearanceOut" } }
+        today: { type: string, format: date }
+        max_end_date: { type: string, format: date }
     AnalysisPatients:
       type: object
       description: A de-identified list (since 1.19.0).
