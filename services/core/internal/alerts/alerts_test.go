@@ -1,6 +1,7 @@
 package alerts_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -136,5 +137,19 @@ func TestHandlersNeedAPrincipal(t *testing.T) {
 		if w.Code != http.StatusInternalServerError {
 			t.Errorf("%s with no principal: %d", k, w.Code)
 		}
+	}
+}
+
+// mhai-web #93: the alert's patient always carries id, null when no
+// active patient stands behind the alert.
+func TestPatientOutIDAlwaysSent(t *testing.T) {
+	raw, err := json.Marshal(alerts.PatientOut{FullName: "Synthetic Patient"})
+	if err != nil || !strings.Contains(string(raw), `"id":null`) {
+		t.Fatalf("%s %v", raw, err)
+	}
+	id := "0f0e0d0c-0b0a-4908-8706-050403020100"
+	raw, _ = json.Marshal(alerts.PatientOut{ID: &id})
+	if !strings.Contains(string(raw), `"id":"`+id+`"`) {
+		t.Fatalf("%s", raw)
 	}
 }

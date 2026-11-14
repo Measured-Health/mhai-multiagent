@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.26.0"
+  version: "1.27.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1708,7 +1708,9 @@ paths:
         is `behind` when paused or silent for three poll intervals, so an
         empty list is "no alerts" only when every source is `current`.
         `grouped` is null until grouped mode exists. A page with alerts is
-        audited (`alerts.read`, the ids served).
+        audited (`alerts.read`, the ids served). Each alert's `patient.id`
+        (1.27.0) is the patient's MHAI id while the patient is active, else
+        null; it is neither logged nor audited here.
       tags: [alerts]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
@@ -6369,8 +6371,16 @@ components:
               evidence: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/AlertEvidence" } }
         patient:
           type: object
-          required: [full_name, mrn, location]
+          required: [id, full_name, mrn, location]
           properties:
+            id:
+              type: string
+              format: uuid
+              nullable: true
+              description: |
+                The MHAI patient the alert is about (1.27.0): a lower-case uuid, to send as `patient_id`
+                on `POST /queries`. Null when the patient is no longer active (excluded, or merged into
+                another patient). Never another hospital's patient.
             full_name: { type: string }
             mrn: { type: string, nullable: true, description: Null for a patient with no MRN. }
             location:

@@ -79,6 +79,17 @@ Gates before live use (design §17.6; all of them):
 - [ ] The on-call owner named (H9). Owner: product owner.
 - [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
 
+## Clinician patient lookup by MRN: design note, not built (14 Nov)
+
+Alerts now carry `patient.id`, so a clinician can ask about an alert's patient. A question about any other patient would need a lookup: a clinician types an MRN and gets the patient's id to send as `patient_id`. Not built; it needs a product and privacy decision first (owners: product owner, privacy lead).
+
+- **Shape:** `GET /patients/lookup?mrn=` (clinicians, the caller's hospital only, active patients only), answering at most the id, name, age and sex, or 404. Two active patients with one MRN: 409, never a list to choose from.
+- **Exact match only:** the whole MRN, compared exactly (no prefix, substring, fuzzy or name search), so it can't be used to browse the patient list. Should the MRN be normalised (case, spaces, leading zeros) first, and per hospital?
+- **Rate limits:** per user and per hospital (for example 30 lookups an hour per clinician), refusing with 429 and flagging a user who hits the limit; misses count too, so MRNs can't be enumerated. What limits fit a ward's real use?
+- **Audit:** every lookup, hit or miss, audited as `patients.lookup` with the patient id on a hit and no MRN (the MRN is free text a clinician typed). Do hospitals want a lookup without a later question flagged in the hospital admin's activity view?
+- **Who may look up:** any clinician of the hospital, or only one with a treatment relationship (an encounter on the clinician's unit)? The alert link needs none, since the alert was already routed to them.
+- **Threats:** a clinician curious about a colleague or a public figure (needs audit and review, maybe a reason field); enumeration by sequential MRNs (exact match plus rate limits); a stolen session (step-up for lookups?); another hospital's patient (RLS and the hospital from the token, as for alerts). A full threat model goes in the design before any build (`secure-design`).
+
 ## EMR: follow-ups from PR 13 (14 Nov)
 
 - [x] **Migration order:** 00033 (a question's patient) follows EMR PR 9's 00032 (merged 14 Nov); the migration-count tests list it.

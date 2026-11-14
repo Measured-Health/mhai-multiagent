@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Clinician alerts carry the patient's id (OpenAPI 1.27.0, additive):
+  `patient.id` on each alert of `GET /alerts` and on an acknowledged or
+  dismissed alert, the MHAI patient's lower-case uuid, so the clinical app
+  can send it as `patient_id` on `POST /queries` (mhai-web #93). Null when
+  the patient is excluded or merged into another; an alert whose patient
+  a purge cleared or a held purge moved aside is not listed, as before.
+  The id is neither logged nor audited on the list.
 - The platform app's team, activity, legal holds and analytics e-mail
   setting (mhai-web Plan 7b §9, Plan 8a, Plan 7d). New routes (OpenAPI
   1.26.0, additive), platform audience with two-step: `GET /platform/team`,
