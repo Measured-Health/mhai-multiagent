@@ -302,14 +302,15 @@ func TestStaffPatchRoles(t *testing.T) {
 	if audits(t, w.h, "staff.specialty_changed") != 1 {
 		t.Error("specialty change not audited")
 	}
-	// A self role add: allowed, flagged.
+	// A self role add (ruling, 14 Nov): refused before the code, nothing
+	// changed.
+	checked := w.codesChecked
 	code, out = w.adm(http.MethodPatch, "/hospital/staff/"+w.admin.String(), patch(1, `, "roles": ["hospital_admin", "clinician"], "mfa_code": "`+goodCode+`"`))
-	if code != 200 || out["is_you"] != true {
-		t.Fatalf("self clinician: %d %v", code, out)
+	if code != 403 || out["code"] != "self_change" || w.codesChecked != checked {
+		t.Fatalf("self clinician: %d %v (codes checked %d -> %d)", code, out, checked, w.codesChecked)
 	}
-	if n := scalar(t, `SELECT count(*) FROM audit_log WHERE action = 'staff.roles_changed' AND entity_id = $1 AND (payload->>'self')::boolean`,
-		w.admin.String()); n != 1 {
-		t.Errorf("self role change entries %d", n)
+	if !slices.Equal(w.roles(t, w.admin), []string{"hospital_admin"}) {
+		t.Fatalf("own roles %v", w.roles(t, w.admin))
 	}
 	// Demote: ada had hospital_admin; dropping it with another admin left.
 	code, _ = w.adm(http.MethodPatch, path, patch(2, `, "roles": ["clinician"], "mfa_code": "`+goodCode+`"`))
@@ -635,7 +636,7 @@ func TestActivity(t *testing.T) {
 	if code, _ := w.adm(http.MethodPatch, path, patch(1, `, "roles": ["clinician", "hospital_admin"], "mfa_code": "`+goodCode+`"`)); code != 200 {
 		t.Fatal(code)
 	}
-	if code, _ := w.adm(http.MethodPatch, "/hospital/staff/"+w.admin.String(), patch(1, `, "roles": ["clinician", "hospital_admin"], "mfa_code": "`+goodCode+`"`)); code != 200 {
+	if code, _ := w.adm(http.MethodPost, "/hospital/staff/"+w.ben.String()+"/deactivate", `{"mfa_code": "`+goodCode+`"}`); code != 200 {
 		t.Fatal(code)
 	}
 	// Hospital 2's own change.
@@ -655,14 +656,11 @@ func TestActivity(t *testing.T) {
 	if len(page.Events) != 2 || page.Next != nil {
 		t.Fatalf("events %s", raw)
 	}
-	self, other := page.Events[0], page.Events[1]
-	if self["kind"] != "self_role_change" || self["type"] != "security" || self["flag"] != "alert" {
-		t.Errorf("self %v", self)
+	deact, other := page.Events[0], page.Events[1]
+	if deact["kind"] != "deactivated" || deact["type"] != "admin" || deact["flag"] != nil {
+		t.Errorf("deactivated %v", deact)
 	}
-	if ra, _ := self["roles_added"].([]any); len(ra) != 1 || ra[0] != "clinician" {
-		t.Errorf("roles_added %v", self["roles_added"])
-	}
-	if other["kind"] != "roles_changed" || other["type"] != "admin" || other["flag"] != nil {
+	if other["kind"] != "roles_changed" || other["type"] != "admin" || other["flag"] != nil || other["roles_added"] != nil {
 		t.Errorf("other %v", other)
 	}
 	if tg, _ := other["target"].(map[string]any); !strings.HasPrefix(tg["display_name"].(string), "Synth Ada") {
@@ -680,11 +678,14 @@ func TestActivity(t *testing.T) {
 		_ = json.Unmarshal(raw, &p)
 		return code, len(p.Events), p.Next
 	}
-	if _, n, _ := get("flagged=true"); n != 1 {
+	if _, n, _ := get("flagged=true"); n != 0 {
 		t.Errorf("flagged %d", n)
 	}
-	if _, n, _ := get("type=admin"); n != 1 {
+	if _, n, _ := get("type=admin"); n != 2 {
 		t.Errorf("admin %d", n)
+	}
+	if _, n, _ := get("type=security"); n != 0 {
+		t.Errorf("security %d", n)
 	}
 	if _, n, _ := get("type=review"); n != 0 {
 		t.Errorf("review %d", n)

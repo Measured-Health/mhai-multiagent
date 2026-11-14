@@ -28,7 +28,7 @@ func Plan(version int, roles []string, specialty *string, s StaffOut, activeAdmi
 		in.Specialty = optString{set: true, val: specialty}
 	}
 	c, err := plan(in, s, activeAdmins)
-	return c.add, c.remove, c.selfAdds, err
+	return c.add, c.remove, c.self, err
 }
 
 // ValidRoles exposes validRoles.

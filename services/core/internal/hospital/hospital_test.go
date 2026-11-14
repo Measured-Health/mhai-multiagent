@@ -103,10 +103,10 @@ func TestValidRoles(t *testing.T) {
 	}
 }
 
-// Frontend requirements §5.1, §6 rule 7: an admin may add roles to
-// themselves (flagged), never drop their own hospital_admin nor give
-// themselves Analyst; the last active admin keeps the role; a stale
-// version is a conflict.
+// Frontend requirements §5.1, §6, with the 14 Nov ruling on rule 7: an
+// admin adds no role to themselves (clinician and Analyst included) and
+// never drops their own hospital_admin; the last active admin keeps the
+// role; a stale version is a conflict.
 func TestPlanRefusals(t *testing.T) {
 	admin := []string{"clinician", "hospital_admin"}
 	me := hospital.Person([]string{"hospital_admin"}, 3, true, true)
@@ -121,14 +121,19 @@ func TestPlanRefusals(t *testing.T) {
 	if _, _, _, err := hospital.Plan(3, []string{"hospital_admin", "clinician", "analyst"}, nil, me, 1); !errors.Is(err, hospital.ErrSelf) {
 		t.Errorf("own analyst: %v", err)
 	}
-	add, remove, self, err := hospital.Plan(3, []string{"hospital_admin", "clinician"}, nil, me, 1)
-	if err != nil || !slices.Equal(add, []string{"clinician"}) || len(remove) != 0 || !self {
-		t.Errorf("own clinician: %v %v %v %v", add, remove, self, err)
+	// Ruling (14 Nov): no role added to yourself, clinician included.
+	if _, _, _, err := hospital.Plan(3, []string{"hospital_admin", "clinician"}, nil, me, 1); !errors.Is(err, hospital.ErrSelf) {
+		t.Errorf("own clinician: %v", err)
+	}
+	// Your own specialty, or an edit that keeps your roles, is fine.
+	sp := "Synthetic nephrology"
+	if _, _, _, err := hospital.Plan(3, []string{"hospital_admin"}, &sp, me, 1); err != nil {
+		t.Errorf("own specialty: %v", err)
 	}
 	if _, _, _, err := hospital.Plan(7, []string{"clinician"}, nil, other, 0); !errors.Is(err, hospital.ErrLastAdmin) {
 		t.Errorf("last admin: %v", err)
 	}
-	add, remove, self, err = hospital.Plan(7, []string{"clinician"}, nil, other, 1)
+	add, remove, self, err := hospital.Plan(7, []string{"clinician"}, nil, other, 1)
 	if err != nil || len(add) != 0 || !slices.Equal(remove, []string{"hospital_admin"}) || self {
 		t.Errorf("demote another: %v %v %v %v", add, remove, self, err)
 	}
@@ -216,7 +221,7 @@ func TestActivityKindsInContract(t *testing.T) {
 	kinds := []string{"signed_in", "signed_in_without_mfa", "sign_in_locked", "consultation_run", "result_agreed",
 		"correction_suggested", "correction_approved", "correction_rejected", "correction_withdrawn", "roles_changed",
 		"specialty_changed", "deactivated", "reactivated", "settings_changed", "analyst_granted", "analyst_removed",
-		"alert_units_changed", "alert_rules_changed", "alert_recipients_changed", "self_role_change"}
+		"alert_units_changed", "alert_rules_changed", "alert_recipients_changed"}
 	for a, k := range hospital.ActivityActions {
 		if !slices.Contains(kinds, k.Kind()) || !slices.Contains(hospital.ActivityTypes, k.Type()) {
 			t.Errorf("%s: %s/%s not in the contract", a, k.Type(), k.Kind())

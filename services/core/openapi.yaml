@@ -976,8 +976,9 @@ paths:
         must be empty (core has no reviewer assignment): 422 otherwise.
         Order: the path and body (404, 422), the person (404: unknown or
         another hospital's), the `version` (409 `conflict`), your own
-        account (403 `self_change`: dropping your own `hospital_admin`, or
-        giving yourself `analyst`), the last active admin (409
+        account (403 `self_change`: adding any role to yourself, `clinician`
+        included, or dropping your own `hospital_admin`), the last active
+        admin (409
         `last_admin`), then the code (403 `mfa_required`, `mfa_invalid`, 429
         `mfa_locked`), so a refused request doesn't spend it. An edit that
         changes nothing answers the person without a code.
@@ -988,7 +989,7 @@ paths:
         `analyst_cap`, 422 `not_eligible` (the person needs `clinician`, an
         active account and two-step). Removing `clinician` removes
         `analyst`. Each change is audited (`staff.roles_changed`, with
-        `self` when admins add roles to themselves; `staff.specialty_changed`;
+        `self` when admins remove their own roles; `staff.specialty_changed`;
         `analyst.granted`, `analyst.removed`); a grant notifies the
         hospital's admins after commit. Answers the person. Send an
         `Idempotency-Key`.
@@ -1312,8 +1313,8 @@ paths:
         (`roles_changed`, `specialty_changed`, `deactivated`,
         `reactivated`, `analyst_granted`, `analyst_removed`,
         `settings_changed`, `alert_units_changed`, `alert_rules_changed`,
-        `alert_recipients_changed`); an admin adding roles to themselves is
-        `security`/`self_role_change`, flag `alert`, with `roles_added`.
+        `alert_recipients_changed`). Core flags no event today (self role
+        adds are refused), so `flagged=true` answers an empty page.
         `person` matches part of the actor's or target's display name;
         `staff_id` the actor or target; `from`/`to` an RFC 3339 time or a
         date; `flagged=true` flagged events only; `cursor` the previous
@@ -5188,7 +5189,6 @@ components:
         device: { type: string, nullable: true }
         count: { type: integer, nullable: true }
         flag: { type: string, nullable: true, enum: [policy, alert] }
-        roles_added: { type: array, items: { type: string, enum: [clinician, analyst, hospital_admin] } }
     ReviewOversightOut:
       type: object
       required: [overdue_after_hours, waiting, median_decision_hours, decided_this_week, items, reviewers_by_specialty]

@@ -207,7 +207,7 @@ Gaps (each route is registered and answers 501 `not_implemented`):
 - [ ] **SSO and allowed email domains**: core has no SSO; `sso` is always `not_set_up`, `allowed_email_domains` empty. The SSO open question of frontend requirements §6 (IdP two-step for admins) stays open.
 - [ ] **A specialty list**: `settings.specialties` is the active staff's specialties; there is no hospital specialty catalogue.
 - [ ] **Map the new audit actions for the platform app** (`staff.roles_changed`, `staff.specialty_changed`, `staff.deactivated`, `staff.reactivated`, `hospital_settings.changed`): withheld in the platform catalogue until mhai-web's staff kinds take their facts (H6). The hospital's own Activity page shows them.
-- [ ] **Self role adds are visible only inside the hospital** (security review M1). Frontend requirements §6 rule 7 lets an admin give themselves `clinician` (audited, flagged `self_role_change`), but the only reader is the hospital's own Activity page, which a sole admin controls, and the platform catalogue sends `staff.roles_changed` bare. Product owner: keep rule 7 and surface the flag to Measured Health (map the action's `self`/`added` facts), or refuse self role adds as for Analyst.
+- [x] **Self role adds refused** (ruling, 14 Nov, on security review M1 and frontend requirements §6 rule 7): a hospital admin adds no role to themselves, `clinician` included: 403 `self_change`, before step-up. Removing your own `clinician` or Analyst stays allowed (audited, `self`); dropping your own `hospital_admin` stays refused. No `self_role_change` event is emitted.
 - [ ] **A failed denylist write after a deactivation** is logged at error; the sessions then end when the guard's 30-second cache expires (they are revoked in the database either way).
 - [ ] **Activity reads are not audited** (the platform audit log's reads are, `audit.viewed`). Decide whether a hospital admin's Activity read should be.
 
@@ -218,7 +218,8 @@ mhai-web changes (core's contract wins; the BFF already passes these bodies thro
 - [ ] **New codes**: `self_change` 403, `last_admin` 409, `analysis_off` 409, `analyst_cap` 409, `not_eligible` 422 (Analyst refusals; also `analyst` without `clinician`), `not_implemented` 501 for the gaps above.
 - [ ] **Usage `alerts`** is core's guarded block `{total, by_severity, by_category, by_route, by_handling}` (each `{value, suppressed}`), not the contract's `UsageAlertsOut` (changes, series, rising, worsening, top findings and locations are not built). Null with no EMR source, `{unavailable: true}` on a failure.
 - [ ] **Staff**: `status` is never `invited`; `issues` only `mfa_not_set_up`; `can_review` and `review_specialties` are derived and a PATCH that contradicts them is 422.
-- [ ] **Activity kinds** core emits are listed in openapi `GET /hospital/activity`; `device` and `count` are always null, a consultation event carries no specialty or confidence.
+- [ ] **Activity kinds** core emits are listed in openapi `GET /hospital/activity`; `device` and `count` are always null, a consultation event carries no specialty or confidence; no event is flagged (no `self_role_change`, no `roles_added`).
+- [ ] **Self role adds are refused** (403 `self_change`, ruling of 14 Nov), replacing frontend requirements §6 rule 7: the staff screen shouldn't offer an admin roles for themselves.
 
 ## Decided
 

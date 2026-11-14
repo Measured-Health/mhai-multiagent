@@ -25,7 +25,8 @@ All notable changes to this project are documented here. The format follows
   `GET /hospital/corrections/{id}/eligible-reviewers`. Hospital admins with
   a two-step session only; every change audited (`staff.roles_changed`,
   `staff.specialty_changed`, `staff.deactivated`, `staff.reactivated`,
-  `hospital_settings.changed`). Invites, password and two-step resets,
+  `hospital_settings.changed`). An admin adds no role to themselves
+  (403 `self_change`). Invites, password and two-step resets,
   reminders, removal and reviewer assignment answer 501 `not_implemented`
   (TODO.md lists the gaps and the changes mhai-web needs). New problem codes
   `self_change`, `last_admin`, `analysis_off`, `analyst_cap`,

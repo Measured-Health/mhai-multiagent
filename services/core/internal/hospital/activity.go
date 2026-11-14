@@ -36,9 +36,9 @@ func (k activityKind) Type() string { return k.typ }
 func (k activityKind) Kind() string { return k.kind }
 
 // ActivityActions maps each action Activity shows to its type and kind.
-// staff.roles_changed is admin/roles_changed, or security/self_role_change
-// (flag alert) when an admin added roles to themselves; auth.login.succeeded
-// is signed_in, or signed_in_without_mfa without a second factor.
+// auth.login.succeeded is signed_in, or signed_in_without_mfa without a
+// second factor. Core flags no event today: self role adds are refused
+// (ruling, 14 Nov), so flagged=true answers an empty page.
 var ActivityActions = map[string]activityKind{
 	"auth.login.succeeded":              {"sign_in", "signed_in"},
 	"auth.login.locked":                 {"sign_in", "sign_in_locked"},
@@ -60,11 +60,6 @@ var ActivityActions = map[string]activityKind{
 	"alert_settings.rules_changed":      {"admin", "alert_rules_changed"},
 	"alert_settings.recipients_changed": {"admin", "alert_recipients_changed"},
 }
-
-// selfRoleSQL is true on a staff.roles_changed row where an admin added
-// roles to themselves.
-const selfRoleSQL = `(a.action = 'staff.roles_changed' AND COALESCE((a.payload ->> 'self')::boolean, false)
-	AND jsonb_array_length(COALESCE(a.payload -> 'added', '[]'::jsonb)) > 0)`
 
 // Activity bounds.
 const (
@@ -92,7 +87,6 @@ type EventOut struct {
 	Device     *string    `json:"device"`
 	Count      *int       `json:"count"`
 	Flag       *string    `json:"flag"`
-	RolesAdded []string   `json:"roles_added,omitempty"`
 }
 
 // ActivityPage is ActivityPageOut.
@@ -200,29 +194,16 @@ func likePattern(s string) string {
 	return "%" + r.Replace(s) + "%"
 }
 
-// actionsFor lists the actions of type typ ("" for all), and the extra
-// condition on staff.roles_changed for that type.
-func actionsFor(typ string) (actions []string, rolesCond string) {
+// actionsFor lists the actions of type typ ("" for all).
+func actionsFor(typ string) []string {
+	actions := []string{}
 	for a, k := range ActivityActions {
-		if a == "staff.roles_changed" {
-			continue
-		}
 		if typ == "" || k.typ == typ {
 			actions = append(actions, a)
 		}
 	}
 	slices.Sort(actions)
-	switch typ {
-	case "":
-		rolesCond = `a.action = 'staff.roles_changed'`
-	case "admin":
-		rolesCond = `(a.action = 'staff.roles_changed' AND NOT ` + selfRoleSQL + `)`
-	case "security":
-		rolesCond = selfRoleSQL
-	default:
-		rolesCond = `false`
-	}
-	return actions, rolesCond
+	return actions
 }
 
 func (d Deps) activity(w http.ResponseWriter, r *http.Request) {
@@ -245,14 +226,9 @@ func (d Deps) activity(w http.ResponseWriter, r *http.Request) {
 	if q.To != nil && q.To.Before(to) {
 		to = *q.To
 	}
-	actions, rolesCond := actionsFor(q.Type)
-	cond := `(a.action = ANY($2::text[]) OR ` + rolesCond + `)`
+	actions := actionsFor(q.Type)
 	if q.Flagged {
-		// Only a self role change is flagged; $2 is still typed.
-		cond = `(` + selfRoleSQL + ` AND cardinality(COALESCE($2::text[], '{}')) >= 0)`
-		if q.Type != "" && q.Type != "security" {
-			cond = `(false AND cardinality(COALESCE($2::text[], '{}')) >= 0)`
-		}
+		actions = []string{} // nothing is flagged
 	}
 	var person *string
 	if q.Person != "" {
@@ -268,7 +244,7 @@ func (d Deps) activity(w http.ResponseWriter, r *http.Request) {
 		FROM audit_log a
 		LEFT JOIN users ua ON ua.id = a.actor_id AND ua.hospital_id = a.hospital_id
 		LEFT JOIN users ut ON a.entity = 'user' AND ut.id::text = a.entity_id AND ut.hospital_id = a.hospital_id
-		WHERE a.hospital_id = $1 AND ` + cond + `
+		WHERE a.hospital_id = $1 AND a.action = ANY($2::text[])
 		  AND a.ts >= $3 AND a.ts < $4
 		  AND ($5::bigint IS NULL OR a.id < $5)
 		  AND ($6::text IS NULL OR a.actor_id::text = $6 OR (a.entity = 'user' AND a.entity_id = $6))
@@ -317,7 +293,7 @@ func lastID(es []EventOut) int64 {
 }
 
 // toEvent shows one row. Only closed values leave: the kind's codes, the
-// display names, and roles from a closed set.
+// display names.
 func toEvent(id int64, at time.Time, action string, actor, target *string, raw []byte) EventOut {
 	k := ActivityActions[action]
 	e := EventOut{ID: strconv.FormatInt(id, 10), At: stamp(at), Type: k.typ, Kind: k.kind}
@@ -329,25 +305,8 @@ func toEvent(id int64, at time.Time, action string, actor, target *string, raw [
 	}
 	var payload map[string]any
 	_ = json.Unmarshal(raw, &payload)
-	switch action {
-	case "auth.login.succeeded":
-		if mfa, _ := payload["mfa"].(bool); !mfa {
-			e.Kind = "signed_in_without_mfa"
-		}
-	case "staff.roles_changed":
-		self, _ := payload["self"].(bool)
-		added := []string{}
-		if l, ok := payload["added"].([]any); ok {
-			for _, v := range l {
-				if s, ok := v.(string); ok && slices.Contains(StaffRoles, s) {
-					added = append(added, s)
-				}
-			}
-		}
-		if self && len(added) > 0 {
-			flag := "alert"
-			e.Type, e.Kind, e.Flag, e.RolesAdded = "security", "self_role_change", &flag, added
-		}
+	if mfa, _ := payload["mfa"].(bool); action == "auth.login.succeeded" && !mfa {
+		e.Kind = "signed_in_without_mfa"
 	}
 	return e
 }

@@ -6,10 +6,11 @@ package hospital
 // The rules, in the order a write checks them:
 //   - the person in the caller's hospital (else 404 not_found);
 //   - the body (422 validation_failed), the version (409 conflict);
-//   - an admin never drops their own hospital_admin, nor deactivates
-//     themselves (403 self_change); adding a role to yourself is allowed,
-//     audited and flagged (self_role_change), except Analyst, which the
-//     database refuses (self_change);
+//   - an admin adds no role to themselves, drops not their own
+//     hospital_admin, and doesn't deactivate themselves (403 self_change;
+//     the ruling of 14 Nov on frontend requirements §6 rule 7: no self
+//     role adds, clinician included); removing your own clinician or
+//     Analyst is allowed and audited with self;
 //   - an action that leaves no active hospital admin is 409 last_admin;
 //   - only then the step-up code (403 mfa_required without one), so a
 //     refused request doesn't spend it;
@@ -219,7 +220,7 @@ type change struct {
 	add, remove      []string
 	setSpecialty     bool
 	specialty        *string
-	selfAdds         bool
+	self             bool
 	specialtyChanged bool
 }
 
@@ -296,13 +297,12 @@ func plan(in patchIn, s StaffOut, activeAdmins int) (change, error) {
 		return c, errInvalid
 	}
 	if s.IsYou {
-		if slices.Contains(c.remove, authz.RoleHospitalAdmin) {
+		// No role added to yourself (ruling, 14 Nov: clinician and Analyst
+		// included), and never your own hospital_admin dropped.
+		if len(c.add) > 0 || slices.Contains(c.remove, authz.RoleHospitalAdmin) {
 			return c, errSelf
 		}
-		if slices.Contains(c.add, authz.RoleAnalyst) {
-			return c, errSelf
-		}
-		c.selfAdds = len(c.add) > 0
+		c.self = true
 	}
 	if slices.Contains(c.remove, authz.RoleHospitalAdmin) && s.active && activeAdmins == 0 {
 		return c, errLastAdmin
@@ -483,7 +483,7 @@ func (d Deps) apply(ctx context.Context, tx pgx.Tx, p authz.Principal, id uuid.U
 	}
 	added, removed := withoutAnalyst(c.add), withoutAnalyst(c.remove)
 	if len(added) > 0 || len(removed) > 0 {
-		if err := ev("staff.roles_changed", map[string]any{"added": added, "removed": removed, "self": c.selfAdds}); err != nil {
+		if err := ev("staff.roles_changed", map[string]any{"added": added, "removed": removed, "self": c.self}); err != nil {
 			return false, err
 		}
 	}
