@@ -66,6 +66,7 @@ var refusals = map[string]string{
 	"not_eligible_platform": "not_eligible_platform",
 	"invalid":               "validation_failed",
 	"unavailable":           "unavailable",
+	"rate_limited":          "rate_limited",
 	// The platform side's checks (Plan 11b); no route here reaches them.
 	"same_person": "forbidden",
 	"same_side":   "forbidden",
@@ -339,7 +340,12 @@ func load(ctx context.Context, tx pgx.Tx, id *uuid.UUID) ([]ClearanceOut, error)
 		for _, p := range covered[cid] {
 			o := CoveredOut{ID: p.id.String(), DisplayName: name(p.id)}
 			if p.side == "platform" {
-				c.CoveredPlatform = append(c.CoveredPlatform, o)
+				// A platform admin is shown only once Measured Health has
+				// verified a letter of this hospital naming them (security
+				// review: the upload is not a lookup of platform accounts).
+				if _, known := names[p.id]; known && x.verifiedAt != nil {
+					c.CoveredPlatform = append(c.CoveredPlatform, o)
+				}
 			} else {
 				c.Covered = append(c.Covered, o)
 			}
@@ -371,7 +377,13 @@ func load(ctx context.Context, tx pgx.Tx, id *uuid.UUID) ([]ClearanceOut, error)
 				o.By = &Who{name(*e.by)}
 			}
 			if e.person != nil {
-				o.Removed = []CoveredOut{{ID: e.person.String(), DisplayName: name(*e.person)}}
+				// Only a person this hospital may see (a platform admin
+				// removed before verification is not named).
+				if n, known := names[*e.person]; known {
+					o.Removed = []CoveredOut{{ID: e.person.String(), DisplayName: n}}
+				} else {
+					o.Removed = []CoveredOut{}
+				}
 			}
 			c.History = append(c.History, o)
 		}

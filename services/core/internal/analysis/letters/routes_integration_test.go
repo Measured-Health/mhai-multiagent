@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -451,7 +452,7 @@ func TestDemoUploadAndPages(t *testing.T) {
 	}
 	// Covered platform admins, by email on upload, by id after.
 	c, b := e.upload(t, e.letterForm(e.admin).withExtra([2]string{"covered_platform", strings.ToUpper(e.paEmail[:1]) + e.paEmail[1:]}))
-	if c != http.StatusCreated || !strings.Contains(string(b), e.pa.String()) || strings.Contains(string(b), e.paEmail) {
+	if c != http.StatusCreated || strings.Contains(string(b), e.pa.String()) || strings.Contains(string(b), e.paEmail) {
 		t.Errorf("platform cover: %d %s", c, b)
 	}
 	st, h, page := e.do(t, e.admin, http.MethodGet, "/hospital/clearances/"+l.ID+"/pages/1", "", nil, false)
@@ -626,5 +627,147 @@ func TestT12EndsAtHospitalMidnightAndReminders(t *testing.T) {
 		if !strings.Contains(string(b), `"status":"ended"`) {
 			t.Errorf("%s: %s", zone, b)
 		}
+	}
+}
+
+// Security review (1): outside the demo every upload is the same 503,
+// whatever the body holds; nothing is checked, counted or stored.
+func TestNonDemoUploadIs503WhateverTheBody(t *testing.T) {
+	super, app := pools(t)
+	e := newEnv(t, super, app, false, "Africa/Lagos")
+	ok := e.letterForm(e.admin)
+	big := ok
+	big.file = bytes.Repeat([]byte("x"), httpx.MaxBody+1)
+	var first []byte
+	for i, f := range []form{
+		ok.withExtra([2]string{"covered_platform", "nobody@measured-health.example"}),
+		ok.withExtra([2]string{"covered_platform", e.paEmail}),
+		e.letterForm(e.clin),
+		ok.with("end_date", "2027-02-30"),
+		ok.without("mfa_code"),
+		big,
+	} {
+		c, b := e.upload(t, f)
+		if c != http.StatusServiceUnavailable || code(b) != "unavailable" {
+			t.Errorf("body %d: %d %s", i, c, b)
+		}
+		var p map[string]any
+		_ = json.Unmarshal(b, &p)
+		delete(p, "request_id")
+		got, _ := json.Marshal(p)
+		if first == nil {
+			first = got
+		} else if !bytes.Equal(first, got) {
+			t.Errorf("body %d: %s differs from %s", i, got, first)
+		}
+	}
+	if c, _, b := e.do(t, e.admin, http.MethodPost, "/hospital/clearances", "application/json", []byte(`{}`), false); c != 503 {
+		t.Errorf("JSON without a key: %d %s", c, b)
+	}
+	if e.letters(t) != 0 || e.count(t, `SELECT count(*) FROM clearance_check_refusals WHERE hospital_id = $1`, e.h) != 0 {
+		t.Error("a non-demo upload stored or counted something")
+	}
+}
+
+// Security review (2): not_eligible_platform is the same reply whether the
+// address is unknown, an inactive platform admin, one without two-step,
+// an auditor or a hospital account; it names none of them.
+func TestNotEligiblePlatformReplyIdentical(t *testing.T) {
+	super, app := pools(t)
+	e := newEnv(t, super, app, true, "Africa/Lagos")
+	tag := e.h.String()[:8]
+	inactive := "inactive-" + tag + "@measured-health.example"
+	run(t, super, `UPDATE users SET is_active = false WHERE id = $1`, user(t, super, nil, inactive, true, "platform_admin"))
+	noMFA := "nomfa-" + tag + "@measured-health.example"
+	user(t, super, nil, noMFA, false, "platform_admin")
+	auditor := "auditor-" + tag + "@measured-health.example"
+	user(t, super, nil, auditor, true, "auditor")
+	var first []byte
+	for _, email := range []string{"unknown-" + tag + "@measured-health.example", inactive, noMFA, auditor,
+		"admin-" + tag + "@hospital.example.test"} {
+		c, b := e.upload(t, e.letterForm(e.admin).withExtra([2]string{"covered_platform", email}))
+		if c != http.StatusUnprocessableEntity || code(b) != "not_eligible_platform" || strings.Contains(string(b), email) ||
+			strings.Contains(string(b), "@") {
+			t.Errorf("%s: %d %s", email, c, b)
+		}
+		var p map[string]any
+		_ = json.Unmarshal(b, &p)
+		delete(p, "request_id")
+		got, _ := json.Marshal(p)
+		if first == nil {
+			first = got
+		} else if !bytes.Equal(first, got) {
+			t.Errorf("%s: %s differs from %s", email, got, first)
+		}
+	}
+	if e.letters(t) != 0 {
+		t.Error("a refused upload stored a letter")
+	}
+}
+
+// Security review (3): a platform admin named on a letter is not shown to
+// the hospital (no id, no name) until Measured Health has verified it.
+func TestPlatformAdminShownOnlyOnceVerified(t *testing.T) {
+	super, app := pools(t)
+	e := newEnv(t, super, app, true, "Africa/Lagos")
+	run(t, super, `UPDATE users SET display_name = 'Synthetic Platform Zeta' WHERE id = $1`, e.pa)
+	c, b := e.upload(t, e.letterForm(e.admin).withExtra([2]string{"covered_platform", e.paEmail}))
+	if c != http.StatusCreated {
+		t.Fatalf("upload: %d %s", c, b)
+	}
+	var l ClearanceOut
+	if err := json.Unmarshal(b, &l); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"", "/hospital/clearances", "/hospital/clearances/" + l.ID} {
+		body := b
+		if p != "" {
+			_, body = e.get(t, p)
+		}
+		if strings.Contains(string(body), e.pa.String()) || strings.Contains(string(body), "Platform Zeta") {
+			t.Errorf("%q shows the platform admin before verification: %s", p, body)
+		}
+	}
+	// Once a platform admin has verified it, the letter names them.
+	verifier := user(t, super, nil, "verifier-"+e.h.String()[:8]+"@measured-health.example", true, "platform_admin")
+	run(t, super, `UPDATE clearances SET status = 'active', verified_by = $2, verified_at = now() WHERE id = $1`, l.ID, verifier)
+	_, body := e.get(t, "/hospital/clearances/"+l.ID)
+	if !strings.Contains(string(body), e.pa.String()) || !strings.Contains(string(body), "Platform Zeta") {
+		t.Errorf("a verified letter doesn't name its platform admin: %s", body)
+	}
+}
+
+// Security review (4): eligibility refusals are counted per person and
+// hospital day; past RefusalsPerDay the check is 429, whatever the body,
+// with one flagged entry.
+func TestEligibilityRefusalsRateLimited(t *testing.T) {
+	super, app := pools(t)
+	e := newEnv(t, super, app, true, "Africa/Lagos")
+	for i := range RefusalsPerDay {
+		f := e.letterForm(e.clin)
+		if i%2 == 1 {
+			f = e.letterForm(e.admin).withExtra([2]string{"covered_platform", fmt.Sprintf("guess-%d@measured-health.example", i)})
+		}
+		if c, b := e.upload(t, f); c != http.StatusUnprocessableEntity {
+			t.Fatalf("refusal %d: %d %s", i, c, b)
+		}
+	}
+	for _, f := range []form{e.letterForm(e.clin), e.letterForm(e.admin)} {
+		if c, b := e.upload(t, f); c != http.StatusTooManyRequests || code(b) != "rate_limited" {
+			t.Errorf("past the limit: %d %s", c, b)
+		}
+	}
+	if e.letters(t) != 0 {
+		t.Error("a letter was stored past the limit")
+	}
+	if n := e.count(t, `SELECT count(*) FROM audit_log WHERE action = 'clearance.check_limit_reached' AND actor_id = $1
+		AND hospital_id = $2`, e.admin, e.h); n != 1 {
+		t.Errorf("%d limit entries, want 1", n)
+	}
+	// Another admin of the hospital is not limited.
+	other := user(t, super, &e.h, "other-"+e.h.String()[:8]+"@hospital.example.test", true, "hospital_admin")
+	body, ct := e.letterForm(other).encode(t)
+	if c, _, b := e.do(t, other, http.MethodPost, "/hospital/clearances", ct, body, true); c != http.StatusCreated {
+		t.Errorf("another admin: %d %s", c, b)
 	}
 }

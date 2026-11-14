@@ -376,7 +376,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		"analysis_subject_attrs", "analysis_hospital_start", "analysis_snapshots", "analysis_view_log", "analysis_unusual",
 		"analysis_cold_budget", "analysis_cold_contexts", "analysis_views", "analysis_view_rows", "analysis_patient_budget",
 		"analysis_patient_opens", "analysis_drill_flags", "analyst_changes",
-		"clearances", "clearance_covered", "clearance_events", "named_access_switch"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
+		"clearances", "clearance_covered", "clearance_events", "named_access_switch", "clearance_check_refusals"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -395,8 +395,9 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			requireDenied(t, err, "gateway reading audit_verify_runs")
 			continue
 		}
-		if table == "named_access_switch" {
-			// 00034: read through mhai_named_access_position only.
+		if table == "named_access_switch" || table == "clearance_check_refusals" {
+			// 00034: read through mhai_named_access_position, or written by
+			// mhai_clearance_note_refusal, only.
 			requireDenied(t, err, "gateway reading named_access_switch")
 			continue
 		}

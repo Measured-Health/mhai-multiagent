@@ -315,6 +315,7 @@ var Catalogue = map[string]Entry{
 	"clearance.viewed":        {Type: "named_access", Kind: "clearance_viewed", Target: entityTarget("clearance", "clearance")},
 	"clearance.reminder_sent": {Type: "named_access", Kind: "clearance_reminder_sent", Target: entityTarget("clearance", "clearance")},
 	"clearance.ready":         withheld(),
+	"clearance.check_limit_reached": withheld(),
 	"named_access.changed":    withheld(),
 
 	// EMR connections (EMR design §12.6): mhai-web's Plan 13 kinds, with

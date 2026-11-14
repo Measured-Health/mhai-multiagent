@@ -660,7 +660,11 @@ a live upload is 503 `unavailable` with nothing stored); in the demo a
 letter is `waiting` at once, with 2 sample pages; `history` has one
 `narrowed` line per person removed; `refused`, `verified` and `rejected`
 come with Plan 11b; 422 `not_eligible_platform` carries no `emails` list (the
-platform's accounts are not a lookup). Audit kinds: `clearance_uploaded`, `_narrowed`,
+platform's accounts are not a lookup); a hospital that isn't the demo gets
+503 `unavailable` for every upload, whatever the body; 429 `rate_limited`
+after 5 eligibility refusals in a day; `covered_platform` lists a platform
+admin only once Measured Health has verified a letter of the hospital
+naming them. Audit kinds: `clearance_uploaded`, `_narrowed`,
 `_revoked`, `_ended`, `_viewed`, `_reminder_sent` (target the letter, no
 facts); the demo's `ready` is sent bare.
 

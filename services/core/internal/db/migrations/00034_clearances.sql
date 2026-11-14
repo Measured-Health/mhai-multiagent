@@ -273,6 +273,22 @@ CREATE INDEX clearance_events_letter_idx ON clearance_events (hospital_id, clear
 CREATE INDEX clearance_events_xact_idx ON clearance_events (xact);
 CREATE UNIQUE INDEX clearance_events_reminded_idx ON clearance_events (clearance_id, days) WHERE kind = 'reminded';
 
+-- The upload's eligibility refusals, per person and hospital day (security
+-- review: the check is not a lookup of who is a platform admin). Past
+-- mhai_clearance_refusals_max a day, the check itself is refused.
+CREATE TABLE clearance_check_refusals (
+    hospital_id uuid NOT NULL REFERENCES hospitals (id),
+    user_id     uuid NOT NULL,
+    day         date NOT NULL,
+    refused     integer NOT NULL CHECK (refused >= 1),
+    PRIMARY KEY (hospital_id, user_id, day)
+);
+ALTER TABLE clearance_check_refusals OWNER TO mhai_migrate;
+ALTER TABLE clearance_check_refusals ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON clearance_check_refusals FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE ON clearance_check_refusals TO mhai_clearance_rules;
+CREATE POLICY clearance_rules ON clearance_check_refusals TO mhai_clearance_rules USING (true) WITH CHECK (true);
+
 ALTER TABLE clearances OWNER TO mhai_migrate;
 ALTER TABLE clearance_covered OWNER TO mhai_migrate;
 ALTER TABLE clearance_events OWNER TO mhai_migrate;
@@ -896,7 +912,16 @@ DECLARE
     v_id    uuid;
 BEGIN
     PERFORM public.mhai_clearance_gate();
+    -- No letter is stored outside the demo until the documents service
+    -- exists, and nothing is looked up for one either (security review).
+    IF NOT public.mhai_clearance_demo_hospital(v_h) THEN
+        RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'unavailable';
+    END IF;
     v_today := public.mhai_clearance_day(v_h, now());
+    IF COALESCE((SELECT r.refused FROM public.clearance_check_refusals r WHERE r.hospital_id = v_h
+                   AND r.user_id = public.mhai_current_user() AND r.day = v_today), 0) >= 5 THEN
+        RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'rate_limited';
+    END IF;
     IF p_end_date IS NULL OR p_end_date <= v_today OR p_end_date > (v_today + interval '12 months')::date THEN
         RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'end_date_too_late';
     END IF;
@@ -1050,8 +1075,36 @@ END
 $$;
 -- +goose StatementEnd
 
+-- mhai_clearance_note_refusal(): records one eligibility refusal of the
+-- caller today (in its own transaction: the refused one rolls back) and
+-- returns the day's count; the fifth is the one that reaches the limit.
+-- +goose StatementBegin
+CREATE FUNCTION mhai_clearance_note_refusal() RETURNS integer
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+DECLARE
+    v_h uuid := public.mhai_current_hospital();
+    v_u uuid := public.mhai_current_user();
+    v_n integer;
+BEGIN
+    IF v_h IS NULL OR v_u IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'forbidden';
+    END IF;
+    INSERT INTO public.clearance_check_refusals AS r (hospital_id, user_id, day, refused)
+    VALUES (v_h, v_u, public.mhai_clearance_day(v_h, now()), 1)
+    ON CONFLICT (hospital_id, user_id, day) DO UPDATE SET refused = r.refused + 1
+    RETURNING r.refused INTO v_n;
+    RETURN v_n;
+END
+$$;
+-- +goose StatementEnd
+
 -- mhai_clearance_names(users): display names, for this hospital's people
--- and the platform admins its letters name or record.
+-- and the platform admins Measured Health has confirmed on its letters (a
+-- verified letter names them) or who acted on them. A platform admin
+-- named only on an unverified letter is not shown (security review: the
+-- upload is not a lookup of platform accounts).
 -- +goose StatementBegin
 CREATE FUNCTION mhai_clearance_names(p_users uuid[]) RETURNS TABLE (id uuid, display_name text)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -1066,8 +1119,10 @@ BEGIN
     WHERE u.id = ANY (p_users)
       AND (u.hospital_id = v_h
            OR (u.hospital_id IS NULL AND (
-                EXISTS (SELECT 1 FROM public.clearance_covered k WHERE k.hospital_id = v_h AND k.user_id = u.id)
-                OR EXISTS (SELECT 1 FROM public.clearance_events e WHERE e.hospital_id = v_h AND e.by_user = u.id))));
+                EXISTS (SELECT 1 FROM public.clearance_covered k JOIN public.clearances c ON c.id = k.clearance_id
+                        WHERE k.hospital_id = v_h AND k.user_id = u.id AND c.verified_at IS NOT NULL)
+                OR EXISTS (SELECT 1 FROM public.clearance_events e WHERE e.hospital_id = v_h AND e.by_user = u.id
+                             AND e.side = 'platform'))));
 END
 $$;
 -- +goose StatementEnd
@@ -1224,6 +1279,7 @@ ALTER FUNCTION mhai_clearance_lock(uuid, integer) OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_revoke(uuid, integer, text, text) OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_narrow(uuid, integer, uuid[], text, text) OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_names(uuid[]) OWNER TO mhai_clearance_rules;
+ALTER FUNCTION mhai_clearance_note_refusal() OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_pending() OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_due(timestamptz) OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_nightly(timestamptz) OWNER TO mhai_clearance_rules;
@@ -1238,7 +1294,7 @@ REVOKE ALL ON FUNCTION mhai_named_access_rank(text), mhai_named_access_within_gl
     mhai_clearance_check(date, date, uuid, uuid[], citext[]), mhai_clearance_create(text, text, date, date, uuid, uuid[], uuid[]),
     mhai_clearance_demo_ready(uuid, integer, bytea), mhai_clearance_lock(uuid, integer),
     mhai_clearance_revoke(uuid, integer, text, text), mhai_clearance_narrow(uuid, integer, uuid[], text, text),
-    mhai_clearance_names(uuid[]), mhai_clearance_pending(), mhai_clearance_due(timestamptz),
+    mhai_clearance_names(uuid[]), mhai_clearance_note_refusal(), mhai_clearance_pending(), mhai_clearance_due(timestamptz),
     mhai_clearance_nightly(timestamptz) FROM PUBLIC;
 -- The CHECK constraint calls the rank and the bound as whoever writes the
 -- switch (here the provisioning CLI's lowering); the bound is a definer
@@ -1251,7 +1307,7 @@ GRANT EXECUTE ON FUNCTION mhai_clearance_gate(), mhai_clearance_today(),
     mhai_clearance_check(date, date, uuid, uuid[], citext[]), mhai_clearance_create(text, text, date, date, uuid, uuid[], uuid[]),
     mhai_clearance_demo_ready(uuid, integer, bytea), mhai_clearance_revoke(uuid, integer, text, text),
     mhai_clearance_narrow(uuid, integer, uuid[], text, text), mhai_clearance_names(uuid[]), mhai_clearance_pending(),
-    mhai_clearance_nightly(timestamptz) TO mhai_gateway;
+    mhai_clearance_note_refusal(), mhai_clearance_nightly(timestamptz) TO mhai_gateway;
 GRANT EXECUTE ON FUNCTION mhai_clearance_due(timestamptz) TO mhai_analysis_job;
 
 -- The CLI's named_access.changed entries (no actor, as its other entries).
@@ -1295,6 +1351,7 @@ $$;
 
 DROP POLICY provision_named_access_append ON audit_log;
 
+DROP TABLE clearance_check_refusals;
 DROP TABLE clearance_events;
 DROP TABLE clearance_covered;
 DROP TABLE clearances;
@@ -1305,6 +1362,7 @@ DROP FUNCTION mhai_named_access_demo_raise(uuid);
 DROP FUNCTION mhai_clearance_nightly(timestamptz);
 DROP FUNCTION mhai_clearance_due(timestamptz);
 DROP FUNCTION mhai_clearance_pending();
+DROP FUNCTION mhai_clearance_note_refusal();
 DROP FUNCTION mhai_clearance_names(uuid[]);
 DROP FUNCTION mhai_clearance_narrow(uuid, integer, uuid[], text, text);
 DROP FUNCTION mhai_clearance_revoke(uuid, integer, text, text);

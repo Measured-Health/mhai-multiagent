@@ -595,6 +595,9 @@ func init() {
 	Register("clearance.ended", Schema{Fields: fields("event_id", id), Required: []string{"event_id"}})
 	Register("clearance.reminder_sent", Schema{Fields: fields("event_id", id, "days", Check(func(v any) bool { n, ok := v.(float64); return ok && (n == 30 || n == 7 || n == 1) }),
 		"delivery", OneOf("pending")), Required: []string{"event_id", "days", "delivery"}})
+	// A person reached the day's limit of eligibility refusals on letter
+	// uploads (flagged; once a day).
+	Register("clearance.check_limit_reached", Schema{Fields: fields("limit", Check(Int(1, 100))), Required: []string{"limit"}})
 	// A page of a letter shown to a hospital admin (no event: nothing changed).
 	Register("clearance.viewed", Schema{Fields: fields("page", Check(Int(1, 20))), Required: []string{"page"}})
 	// The CLI's demo raise and lowering of the named-access switch (plan

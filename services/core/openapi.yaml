@@ -942,20 +942,25 @@ paths:
         months up to the hospital's today), `end_date`, `covered` (staff
         ids), `covered_platform` (platform admins' emails), `renews`
         (optional), `mfa_code` or `backup_code`. Any other field is 422
-        `validation_failed`. Order: the gates (404, 403), the body (415,
-        413, 422), the code (403), then, before anything is stored, 422
+        `validation_failed`. Order: the gates (404, 403); a hospital that
+        isn't the demo then gets 503 `unavailable` whatever the body holds,
+        with nothing checked or stored; the body (415, 413, 422), the code
+        (403), then, before anything is stored, 429 `rate_limited` after 5
+        eligibility refusals in the hospital's day, 422
         `end_date_too_late` (not after today, or past `max_end_date`), 1–20
         people, 422 `not_eligible` (with `ids`: staff who aren't active
         hospital admins or analysts with two-step), 422
         `not_eligible_platform` (no list:
-        the platform's accounts are not a lookup), 422 for `renews`. A hospital
-        that isn't the demo gets 503 `unavailable` with nothing stored. In
-        the demo the letter is stored with fixture pages (status `waiting`)
+        the platform's accounts are not a lookup; the same for any address
+        that isn't an eligible platform admin), 422 for `renews`. The letter
+        is stored with fixture pages (status `waiting`)
         and audited (`clearance.uploaded`, `clearance.ready`); the file is
-        never kept. Added in 1.23.0.
+        never kept. Platform admins a letter names appear in
+        `covered_platform` only once Measured Health has verified a letter of
+        the hospital naming them. Added in 1.23.0.
       tags: [clearances]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, file_type, file_too_large, validation_failed, end_date_too_late, not_eligible, not_eligible_platform, conflict, unavailable, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, file_type, file_too_large, validation_failed, end_date_too_late, not_eligible, not_eligible_platform, conflict, rate_limited, unavailable, not_ready, internal_error]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"

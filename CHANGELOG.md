@@ -29,7 +29,10 @@ All notable changes to this project are documented here. The format follows
   (`clearance.reminder_sent`, delivery pending). New problem codes:
   `named_access_off`, `file_too_large`, `file_type`, `end_date_too_late`,
   `not_eligible`, `not_eligible_platform`, `would_empty`. Plan departures
-  29–42.
+  29–44. Security review: outside the demo every upload is the same 503
+  whatever it holds; `not_eligible_platform` is one reply with no list;
+  platform admins are shown only on verified letters; eligibility
+  refusals are limited to 5 a day per person.
 - EMR integration, PR 9 (retention, the exclusion purge and Usage; off by
   default). Migration **00032** (after 00031): `legal_holds` (placed and
   lifted only by the provisioning login, never deleted), durable
