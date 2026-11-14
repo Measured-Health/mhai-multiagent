@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38, 39, 40}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38, 39, 42}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -409,7 +409,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			continue
 		}
 		if strings.HasPrefix(table, "named_view_") {
-			// 00040: written and read by the reader's functions only.
+			// 00042: written and read by the reader's functions only.
 			requireDenied(t, err, "gateway reading "+table)
 			continue
 		}

@@ -602,13 +602,13 @@ func init() {
 	Register("analysis.list_limit_reached", Schema{Fields: fields("window", OneOf("minute", "day")), Required: []string{"window"}})
 	Register("analysis.patient_cap_reached", Schema{Fields: fields("cap", Check(Int(1, 300))), Required: []string{"cap"}})
 	Register("audit.patients_viewed", Schema{Fields: fields("rows", Check(Int(0, 200))), Required: []string{"rows"}})
-	// Named access (plan Task 22, migration 00040): a named list or a
+	// Named access (plan Task 22, migration 00042): a named list or a
 	// replay of one (the list is the entity; the de-identified list's facts,
 	// the purpose code, the replay's number, 0 for the list itself, and the
 	// letter that covered the person). Never a name, an MRN, a pid or the
 	// note. A list or replay that failed at the identity call (flagged; the
 	// letter only), and a person's named-view limit reached (flagged; once a
-	// day). 00040 refuses to commit a named list or a replay without its entry.
+	// day). 00042 refuses to commit a named list or a replay without its entry.
 	Register("analysis.named_viewed", Schema{Fields: fields(
 		"view", OneOf("affected", "co-occurring", "findings"),
 		"period", Pattern(analysisPeriod),

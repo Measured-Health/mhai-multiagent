@@ -8,8 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Patient Analysis PR 8: named access (migration **00040**, OpenAPI
-  **1.30.0**; off by default: a named list needs the hospital's analysis
+- Patient Analysis PR 8: named access (migration **00042**, OpenAPI
+  **1.31.0**; off by default: a named list needs the hospital's analysis
   switch on, its effective named-access position `on`, which no hospital's
   is, and an active, verified letter covering the person today, which only
   the platform's verify (Plan 11b) makes). `POST /analysis/patients/named`

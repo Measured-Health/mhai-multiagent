@@ -742,7 +742,7 @@ role `hospital_admin` or `analyst`, and two-step set up (`issues` has no
 
 ### Clearances, platform side and named lists (later: Plan 11b and 11c)
 
-**Built (Analysis PR 8, OpenAPI 1.30.0, off by default, demo only): named
+**Built (Analysis PR 8, OpenAPI 1.31.0, off by default, demo only): named
 lists, hospital side.** Not `GET /analysis/patients?level=named` (that is
 still 422 `level_not_supported`) but `POST /analysis/patients/named` with
 `{drill, purpose, note?, filters, period: {level, start}}` and a required

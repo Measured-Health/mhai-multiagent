@@ -1,6 +1,6 @@
 # Patient Analysis, named access and clearance letters (hospital side): implementation plan
 
-**Status:** PRs 1–4 merged (PR 4 as #141, migration 00025, departure 18). PR 5 (Tasks 12–14) merged as #149, with migration 00028, OpenAPI 1.19.0 and departures 19–24 below. PR 6 (Tasks 15–16) built on `agent/analysis-build-6`, with migration 00030 and departures 25–28; Task 17 moves to the staff-endpoints plan (departure 12). PR 7 (Tasks 18–20) merged as #169, with migration 00038, OpenAPI 1.28.0 and departures 29–44. PR 8 (Tasks 21–23) built on `agent/analysis-build-8`, with migration 00040, OpenAPI 1.30.0 and departures 45–59. The design is approved (product owner, 7 Nov 2026, after three reviews). ADR 0015 and the SKILLS.md §1 amendment are written as **Accepted** in PR 1 (H4 is given). Live use waits on H1–H3 (design §15), which are people's gates in TODO.md. Nothing in this plan opens them.
+**Status:** PRs 1–4 merged (PR 4 as #141, migration 00025, departure 18). PR 5 (Tasks 12–14) merged as #149, with migration 00028, OpenAPI 1.19.0 and departures 19–24 below. PR 6 (Tasks 15–16) built on `agent/analysis-build-6`, with migration 00030 and departures 25–28; Task 17 moves to the staff-endpoints plan (departure 12). PR 7 (Tasks 18–20) merged as #169, with migration 00038, OpenAPI 1.28.0 and departures 29–44. PR 8 (Tasks 21–23) built on `agent/analysis-build-8`, with migration 00042, OpenAPI 1.31.0 and departures 45–59. The design is approved (product owner, 7 Nov 2026, after three reviews). ADR 0015 and the SKILLS.md §1 amendment are written as **Accepted** in PR 1 (H4 is given). Live use waits on H1–H3 (design §15), which are people's gates in TODO.md. Nothing in this plan opens them.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
@@ -668,12 +668,12 @@ Depends on PR 6. The live upload needs the documents service (H5), and the platf
 
 ### PR 8: named access (design §8.2–§8.7)
 
-Depends on PR 7. Live identity needs the EMR service's identity operation (H7, and the conflict above) and NATS TLS. **Built as migration 00040** (the clinician patient lookup, #172, takes 00039) and **OpenAPI 1.30.0** (#172 takes 1.29.0), with departures 45–59. Off by default: a named view needs the hospital's analysis switch on (else 404), its effective named-access position `on` (else 403 `named_access_off`), and an active, verified letter of the hospital that covers the person today. No hospital's position is `on`; the CLI raises only the demo scope, and no letter becomes active without the platform's verify (Plan 11b).
+Depends on PR 7. Live identity needs the EMR service's identity operation (H7, and the conflict above) and NATS TLS. **Built as migration 00042** (the clinician patient lookup, #172, took 00039; the reference library PRs take 00040 and 00041) and **OpenAPI 1.31.0** (#172 took 1.29.0, the reference library 1.30.0), with departures 45–59. Off by default: a named view needs the hospital's analysis switch on (else 404), its effective named-access position `on` (else 403 `named_access_off`), and an active, verified letter of the hospital that covers the person today. No hospital's position is `on`; the CLI raises only the demo scope, and no letter becomes active without the platform's verify (Plan 11b).
 
-### Task 21: Migration 00040: cover, named views, keys, notes and the named budget
+### Task 21: Migration 00042: cover, named views, keys, notes and the named budget
 
 **Files:**
-- Create: `services/core/internal/db/migrations/00040_named_access.sql`, `services/core/internal/db/named_access_integration_test.go`
+- Create: `services/core/internal/db/migrations/00042_named_access.sql`, `services/core/internal/db/named_access_integration_test.go`
 - Modify: `services/core/internal/db/db_integration_test.go` (`TestMigrateUpFromEmpty`, `TestRLSWithoutHospitalSeesNothing`), `services/core/internal/db/clearances_integration_test.go` (`TestClearanceGrants`: the new switch functions)
 
 **Interfaces:**
@@ -688,17 +688,17 @@ Depends on PR 7. Live identity needs the EMR service's identity operation (H7, a
 - `mhai_analysis_drill_flag` takes `named_day` too; `mhai_analysis_sweep` also drops keys 24 hours after `named_until` and budget rows after two hospital days; notes stay with their list.
 - `mhai_named_access_demo_on(hospital or NULL)`: as `mhai_named_access_demo_raise`, to `on` (provisioning only).
 
-- [ ] **Step 1: Write the failing tests:** `TestNamedCoverRules` (**T11**: letters_only → switched_off; **T12**: revoked, removed and ended letters give their reasons at once, the latest end date wins, `until` is the hospital's midnight or 30 minutes; **T13**: role removed → role_or_account; **T14**: two-step off or the account inactive → role_or_account; another person's id refused; another hospital's letter never covers); `TestNamedCoverRevokeWaits` (a revoke during a view waits for its commit; the next cover sees it); `TestNamedBudgetReserveRace` (20 parallel admits, exactly 5 true); `TestOpenNamedRecordsAndAudits` (the list, rows, note and key; refused at commit without its entry; `named_until`, clearance and purpose set; ref_enc returned); `TestNamedReplayAuditedAndBounded` (a replay without its entry refused at commit; `expired`; `idempotency_mismatch` for another person or body); `TestNamedTablesGrants` (no app role reads or writes them; the functions' grants); `TestMigration00040DownUp`.
+- [ ] **Step 1: Write the failing tests:** `TestNamedCoverRules` (**T11**: letters_only → switched_off; **T12**: revoked, removed and ended letters give their reasons at once, the latest end date wins, `until` is the hospital's midnight or 30 minutes; **T13**: role removed → role_or_account; **T14**: two-step off or the account inactive → role_or_account; another person's id refused; another hospital's letter never covers); `TestNamedCoverRevokeWaits` (a revoke during a view waits for its commit; the next cover sees it); `TestNamedBudgetReserveRace` (20 parallel admits, exactly 5 true); `TestOpenNamedRecordsAndAudits` (the list, rows, note and key; refused at commit without its entry; `named_until`, clearance and purpose set; ref_enc returned); `TestNamedReplayAuditedAndBounded` (a replay without its entry refused at commit; `expired`; `idempotency_mismatch` for another person or body); `TestNamedTablesGrants` (no app role reads or writes them; the functions' grants); `TestMigration00042DownUp`.
 - [ ] **Step 2: Run (Go, remote):** `go test -race -tags integration ./internal/db/...` → fail.
 - [ ] **Step 3:** Write the migration.
 - [ ] **Step 4:** Run the tests.
-- [ ] **Step 5:** Commit: "Migration 00040: who is covered, named lists, their keys, notes and budget".
+- [ ] **Step 5:** Commit: "Migration 00042: who is covered, named lists, their keys, notes and budget".
 
 ### Task 22: The routes: `clearance/me`, `named-access` and the named list
 
 **Files:**
 - Create: `services/core/internal/analysis/named.go`, `services/core/internal/analysis/routes/{named.go,named_test.go,named_integration_test.go}`
-- Modify: `routes/{register.go,limits.go}`, `internal/auth/user.go` (+ test), `internal/httpx/errors.go` (`not_cleared`, `clearance_ended` 403; `idempotency_mismatch` 422), `internal/audit/{schemas.go,catalogue.go}`, `openapi.yaml` (1.30.0), `docs/specs/generated/permissions.md`
+- Modify: `routes/{register.go,limits.go}`, `internal/auth/user.go` (+ test), `internal/httpx/errors.go` (`not_cleared`, `clearance_ended` 403; `idempotency_mismatch` 422), `internal/audit/{schemas.go,catalogue.go}`, `openapi.yaml` (1.31.0), `docs/specs/generated/permissions.md`
 
 **Interfaces:**
 - `GET /analysis/named-access` → `{position, since}`; `GET /analysis/clearance/me` → `{named, until, clearance_id, version, reason}` (6 a minute per session, not audited). Both: analysis off 404; position `off` 403 `named_access_off`.
@@ -729,7 +729,7 @@ Depends on PR 7. Live identity needs the EMR service's identity operation (H7, a
 
 #### Departures (PR 8)
 
-45. **Numbers.** Migration 00040 and OpenAPI 1.30.0 (coordinator: the clinician patient lookup, #172, takes 00039 and 1.29.0).
+45. **Numbers.** Migration 00042 and OpenAPI 1.31.0 (coordinator: the clinician patient lookup, #172, took 00039 and 1.29.0; the reference library PRs take 00040, 00041 and 1.30.0).
 46. **The live identity call waits for H7.** The EMR service defines no identity operation yet, so the live resolver answers 503 `unavailable` and appends `analysis.named_view_failed` (design §8.6, "before the EMR service exists"). This PR ships the seam, the exact-reply check (T20) and the demo fixture; the core-signed, single-use, 30-second token is built with the operation.
 47. **Cover is the caller's own** (the more private reading): `mhai_named_cover` refuses any user but the session's, so it is never a lookup of another person. A hospital that isn't active gives `role_or_account`. "The most recent letter that covered the person" is the verified letter whose cover of them stopped last (removal, revocation or the end of its last day).
 48. **Below `on`, the gate answers first.** While the effective position is `off`, `GET /analysis/named-access`, `GET /analysis/clearance/me` and the named route are 403 `named_access_off` (the contract's gate: `features.named_access` is false). At `letters_only`, `clearance/me` answers `reason: switched_off` and the named route 403 `named_access_off`. Analysis off is 404 before either.

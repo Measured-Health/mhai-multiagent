@@ -1,6 +1,7 @@
 -- Named access, hospital side (analysis backend design §8.2-§8.7, §10;
--- plan Task 21, departures 45-57; ADR 0015). NUMBERED 00040 (coordinator):
--- the clinician patient lookup (#172) takes 00039.
+-- plan Task 21, departures 45-59; ADR 0015). NUMBERED 00042 (coordinator):
+-- the clinician patient lookup (#172) took 00039, and the reference
+-- library PRs take 00040 and 00041.
 --
 -- Nothing here turns anything on. A named list needs the hospital's
 -- analysis switch on, its effective named-access position 'on' (no
@@ -721,7 +722,7 @@ BEGIN
     DELETE FROM public.analysis_patient_budget b
     WHERE b.hospital_id = p_hospital AND (b.quarter + interval '3 months')::date <= v_cut;
     DELETE FROM public.analysis_drill_flags d WHERE d.hospital_id = p_hospital AND d.day < v_today - 2;
-    -- 00040: a named list's key 24 hours after named_until (design §8.5),
+    -- 00042: a named list's key 24 hours after named_until (design §8.5),
     -- the named budget after two hospital days.
     DELETE FROM public.named_view_keys k WHERE k.hospital_id = p_hospital AND k.named_until < p_now - interval '24 hours';
     DELETE FROM public.named_view_budget b WHERE b.hospital_id = p_hospital AND b.day < v_today - 2;
@@ -786,7 +787,7 @@ DECLARE
     r text;
 BEGIN
     IF EXISTS (SELECT 1 FROM analysis_views WHERE level = 'named') THEN
-        RAISE EXCEPTION USING ERRCODE = 'object_in_use', MESSAGE = '00040: named lists exist; they are kept with the audit chain';
+        RAISE EXCEPTION USING ERRCODE = 'object_in_use', MESSAGE = '00042: named lists exist; they are kept with the audit chain';
     END IF;
     FOREACH r IN ARRAY ARRAY['mhai_clearance_rules', 'mhai_analysis_reader', 'mhai_analysis_writer'] LOOP
         IF NOT pg_has_role(current_user, r, 'MEMBER') THEN

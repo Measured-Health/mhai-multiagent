@@ -22,7 +22,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
-// Migration 00040 (analysis backend plan Task 21): who is covered, named
+// Migration 00042 (analysis backend plan Task 21): who is covered, named
 // lists, their keys, notes and the named budget. The superuser seeds the
 // fixtures (exempt from the letter rules, as it can disable any trigger):
 // active letters exist only after the platform's verify (Plan 11b).
@@ -546,10 +546,10 @@ func TestNamedTablesGrants(t *testing.T) {
 	}
 }
 
-func TestMigration00040DownUp(t *testing.T) {
+func TestMigration00042DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
-	if err := db.MigrateUpTo(ctx, pg.URL, 38); err != nil {
+	if err := db.MigrateUpTo(ctx, pg.URL, 41); err != nil {
 		t.Fatal(err)
 	}
 	pool, err := db.Open(ctx, pg.URL)
@@ -578,8 +578,8 @@ func TestMigration00040DownUp(t *testing.T) {
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	if err := db.MigrateDownTo(ctx, pg.URL, 38); err != nil {
-		t.Fatalf("down to 38: %v", err)
+	if err := db.MigrateDownTo(ctx, pg.URL, 41); err != nil {
+		t.Fatalf("down to 41: %v", err)
 	}
 	var left int
 	if err := pool.QueryRow(ctx, `SELECT
@@ -589,16 +589,16 @@ func TestMigration00040DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	if left != 0 {
-		t.Errorf("after down, %d objects of 00040 remain", left)
+		t.Errorf("after down, %d objects of 00042 remain", left)
 	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)
 	}
-	if err := db.MigrateDownTo(ctx, pg.URL, 38); err != nil {
+	if err := db.MigrateDownTo(ctx, pg.URL, 41); err != nil {
 		t.Fatalf("down again: %v", err)
 	}
 	if after := state(); after != before {
-		t.Errorf("00038's state changed across up and down:\n%s\nwant\n%s", after, before)
+		t.Errorf("the state before 00042 changed across up and down:\n%s\nwant\n%s", after, before)
 	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up a third time: %v", err)

@@ -15,7 +15,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose"
 )
 
-// Named access (design §8.2-§8.5; plan Tasks 21-22, migration 00040): who
+// Named access (design §8.2-§8.5; plan Tasks 21-22, migration 00042): who
 // is covered, and the named list under the letter that covers the person.
 // The database holds every rule (the cover, the budget, the key, the
 // cap); these are its calls, run in the request's transaction as the

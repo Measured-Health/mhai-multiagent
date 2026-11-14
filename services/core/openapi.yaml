@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.30.0"
+  version: "1.31.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1005,7 +1005,7 @@ paths:
         before names are read; names and MRNs then come from the EMR service, are sent in this reply
         and kept nowhere (503 unavailable, and a flagged `analysis.named_view_failed`, when they can't
         be read, including until the EMR service has its identity operation). Never cached, logged or
-        kept by the idempotency store. Added in 1.30.0.
+        kept by the idempotency store. Added in 1.31.0.
       tags: [analysis]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, invalid_range, too_many_filters, too_small, named_access_off, not_cleared, clearance_ended, idempotency_mismatch, expired, conflict, rate_limited, not_ready, unavailable, internal_error]
@@ -1070,7 +1070,7 @@ paths:
         session (429 rate_limited). `reason` is null when covered; otherwise `none`, `ended`, `revoked`,
         `removed_from_letter`, `role_or_account` or `switched_off`, from the letter whose cover of the
         person stopped last. `until` is the earlier of the end of the letter's last day in the
-        hospital's time zone and 30 minutes on. Added in 1.30.0.
+        hospital's time zone and 30 minutes on. Added in 1.31.0.
       tags: [analysis]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, named_access_off, rate_limited, unavailable, internal_error]
@@ -1111,7 +1111,7 @@ paths:
       description: >
         Hospital admins and analysts, with two-step, while the hospital's analysis switch is on
         (otherwise 404 not_found). `position` is the lower of the global and the hospital's;
-        `since` is when either last changed. While it is `off`, 403 named_access_off. Added in 1.30.0.
+        `since` is when either last changed. While it is `off`, 403 named_access_off. Added in 1.31.0.
       tags: [analysis]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, named_access_off, unavailable, internal_error]
@@ -5247,7 +5247,7 @@ components:
             What the user may open (Patient Analysis). analysis is true only when the
             hospital's analysis switch is on, the user is a hospital admin or an analyst,
             and two-step is on; it is off by default. named_access is true when analysis is
-            and the hospital's effective named-access position is not off (since 1.30.0;
+            and the hospital's effective named-access position is not off (since 1.31.0;
             off by default). The BFF's own sign-off settings can only turn these off.
           required: [analysis, named_access]
           properties:
@@ -6253,7 +6253,7 @@ components:
                     source_label: { type: string, nullable: true, description: Always null (a row shows no source). }
     AnalysisPatientsNamed:
       type: object
-      description: A named list (since 1.30.0). Each row is the de-identified row plus `name` and `mrn`.
+      description: A named list (since 1.31.0). Each row is the de-identified row plus `name` and `mrn`.
       required: [level, count, patients, named_until, clearance]
       additionalProperties: false
       properties:
