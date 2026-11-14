@@ -63,3 +63,16 @@ func TestClinicalRolesAreAuthzs(t *testing.T) {
 		}
 	}
 }
+
+// The analyst role is never given at creation (migration 00030): a new
+// account has no two-step and no grantor, so the database would refuse it;
+// the CLI says how to grant it instead.
+func TestAnalystNotAtCreation(t *testing.T) {
+	err := ValidateNewUser(NewUser{Email: "grace@havana.example", Name: "Grace", Roles: []string{"clinician", "analyst"}, HospitalShortCode: "HAV"})
+	if !errors.Is(err, ErrAnalystAtCreation) {
+		t.Fatalf("clinician+analyst at creation: %v", err)
+	}
+	if err := ValidateNewUser(NewUser{Email: "grace@havana.example", Name: "Grace", Roles: []string{"clinician"}, HospitalShortCode: "HAV"}); err != nil {
+		t.Fatal(err)
+	}
+}
