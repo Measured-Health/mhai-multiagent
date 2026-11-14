@@ -25,7 +25,8 @@ A shape or pattern failure is ``manifest_invalid``; a missing file is
 
 :func:`check` then holds the manifest to the registries (B16, B17, design decision 10):
 ``role_unknown`` (a role not in :data:`ROLES`), ``dataset_unknown``,
-``dataset_not_synthetic`` (phase 0 admits synthetic datasets only), ``revision_unpinned``
+``dataset_not_synthetic`` (phase 0 admits synthetic datasets, and public datasets that hold
+no patient data, only), ``revision_unpinned``
 (an upstream revision that is not a 40-hex commit), ``licence_not_allowed``, and for a
 promoted base whatever the injected pin verifier raises; the default verifier refuses
 (``base_unverified``) so nothing passes unverified.
@@ -54,8 +55,12 @@ REGISTRY_SCHEMA = "mhai.models.datasets/1"
 LICENCES_SCHEMA = "mhai.models.licences/1"
 FILE_NAME = "training_manifest.json"
 SYNTHETIC_GENERATOR = "intelligence.doceval.sets"
-KINDS = ("synthetic", "deidentified")
-ALLOWED_KINDS = frozenset({"synthetic"})  # phase 0 (plan departure 10)
+# ``public``: a published dataset that holds no patient data (exam questions, literature,
+# drug labels); no generator. Admitted with ``synthetic`` (product owner, 14 Nov 2026,
+# docs/models/intake-2026-11-14-gemma4-e4b-cca-v1.md). ``deidentified`` (real patients) is
+# still refused.
+KINDS = ("synthetic", "public", "deidentified")
+ALLOWED_KINDS = frozenset({"synthetic", "public"})  # phase 0 (plan departure 10)
 # The roles a training manifest may name: ``extract`` (the document extractor) and ``cca``
 # (the answer model, docs/plans/2026-11-13-own-answer-model.md). A role is pinnable only
 # once it has an evaluation suite (``lock.ROLES``); ``cca``'s is ``clinical_answer``.
@@ -453,7 +458,7 @@ class Dataset:
     entry built in process is held to the same rules as one read from the file."""
 
     id: str
-    kind: Literal["synthetic", "deidentified"]
+    kind: Literal["synthetic", "public", "deidentified"]
     generator: str | None
     version: str
     testset_disjoint: bool

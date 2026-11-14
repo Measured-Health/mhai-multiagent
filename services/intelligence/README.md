@@ -200,8 +200,9 @@ Drive:
 
 Nothing else is accepted: no `.bin`, `.pt`, `.pkl`, `.py`, sub-folders or
 shortcuts. Datasets must be listed in `models/approved-datasets.json`, and in
-phase 0 only synthetic ones are allowed. Drive and notebooks hold synthetic
-data, or de-identified data with an approval record; nothing else, ever.
+phase 0 only synthetic ones and public ones with no patient data (kind `public`)
+are allowed. Drive and notebooks hold synthetic or public data, or de-identified
+data with an approval record; nothing else, ever.
 
 ### 2. Check it before you dispatch
 

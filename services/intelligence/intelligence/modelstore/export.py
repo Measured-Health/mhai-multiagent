@@ -107,7 +107,9 @@ _HINTS: Mapping[str, str] = {
         "use a dataset id from models/approved-datasets.json (<name>@<x.y.z>);"
         " a new dataset is added there by a pull request first"
     ),
-    "dataset_not_synthetic": "only synthetic datasets are approved for now",
+    "dataset_not_synthetic": (
+        "only synthetic datasets, and public datasets with no patient data, are approved for now"
+    ),
     "revision_unpinned": "give the base model's full 40-character commit hash, not a branch or tag",
     "licence_not_allowed": (
         "the base model's licence (an SPDX id) must be in models/licences.json;"
