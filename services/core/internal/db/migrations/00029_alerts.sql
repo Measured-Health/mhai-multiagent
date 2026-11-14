@@ -868,7 +868,9 @@ REVOKE SELECT ON emr.possible_matches FROM mhai_gateway;
 DROP POLICY gateway_read ON emr.findings;
 REVOKE SELECT ON emr.findings FROM mhai_gateway;
 
--- The tables take their policies, triggers, indexes and grants with them.
+-- The tables take their policies, triggers, indexes and grants with them
+-- (the update policy on alerts reads alert_deliveries: it goes first).
+DROP POLICY gateway_handle ON alerts;
 DROP TABLE user_notification_settings;
 DROP TABLE alert_deliveries;
 DROP TABLE alerts;
