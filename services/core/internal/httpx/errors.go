@@ -47,6 +47,10 @@ var Codes = map[string]int{
 	// two filters; a period that isn't exactly one answerable frozen period.
 	"too_many_filters": http.StatusUnprocessableEntity,
 	"invalid_range":    http.StatusUnprocessableEntity,
+	// EMR alerts (design §16, additive): an alert someone handled first
+	// (the body names who and when); alert settings with no recipient.
+	"already_handled": http.StatusConflict,
+	"no_recipients":   http.StatusUnprocessableEntity,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -78,6 +82,8 @@ var titles = map[string]string{
 	"no_type":            "Unknown connection type",
 	"too_many_filters":   "Too many filters",
 	"invalid_range":      "Invalid period",
+	"already_handled":    "Already handled",
+	"no_recipients":      "No recipients",
 }
 
 var details = map[string]string{
@@ -106,6 +112,8 @@ var details = map[string]string{
 	"no_type":            "This connection type is not offered.",
 	"too_many_filters":   "At most two filters can be used together.",
 	"invalid_range":      "Choose one finished period.",
+	"already_handled":    "Someone has already handled this alert.",
+	"no_recipients":      "Choose the queue or at least one clinician.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.
@@ -150,6 +158,37 @@ func Error(w http.ResponseWriter, r *http.Request, code string) {
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+}
+
+// ErrorFields is Error on the clinical audience with extra members in the
+// body, for a refusal whose reply the frontend contract shapes: the 409
+// already_handled names the alert's status (status, as mhai-web's
+// AlertHandledOut reads it, in place of the problem's number), who handled
+// it and when (design §12.5). extra may replace title, detail and status;
+// never type, code or request_id. Its values are the server's own, never
+// input. On the platform audience it is Error.
+func ErrorFields(w http.ResponseWriter, r *http.Request, code string, extra map[string]any) {
+	status, ok := Codes[code]
+	if !ok || Audience(r.Context()) == AudiencePlatform {
+		Error(w, r, code)
+		return
+	}
+	body := map[string]any{"title": titles[code], "status": status, "detail": details[code]}
+	for k, v := range extra {
+		body[k] = v
+	}
+	body["type"], body["code"], body["request_id"] = problemTypeBase+code, code, RequestIDFrom(r.Context())
+	raw, err := json.Marshal(body)
+	if err != nil {
+		Error(w, r, "internal_error")
+		return
+	}
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_, _ = w.Write(raw)
 }
 
 // ErrorRetryAfter is Error with a Retry-After header of seconds (whole

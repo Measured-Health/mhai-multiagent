@@ -435,8 +435,42 @@ func init() {
 	Register("emr.patient_match_rejected", Schema{Fields: fields("match_id", id), Required: []string{"match_id"}})
 	Register("emr.patient_excluded", Schema{Fields: fields("patient_id", id,
 		"reason", OneOf("objection", "hospital_policy", "other"), "via", OneOf("route", "cli"),
-		"observations", count, "medications", count, "encounters", count, "raw_records", count, "matches", count),
+		"observations", count, "medications", count, "encounters", count, "raw_records", count, "matches", count,
+		"alerts", count),
 		Required: []string{"patient_id", "reason", "via", "observations", "medications", "encounters", "raw_records", "matches"}})
+	// A hospital admin read the possible duplicates (the cards carry names
+	// and MRNs): the match ids served, at most a page.
+	Register("emr.patient_matches_read", Schema{Fields: fields("match_ids", List(100, id)), Required: []string{"match_ids"}})
+
+	// Alerts (EMR design §12.5, §12.6; plan Tasks 31-34): ids, closed codes,
+	// counts and bools; never a name, an MRN, a value or the dismissal note.
+	// The settings saves carry counts only (A21).
+	Register("alert_settings.units_changed", Schema{Fields: fields("covered", count, "units", count),
+		Required: []string{"covered", "units"}})
+	Register("alert_settings.rules_changed", Schema{Fields: fields("levels_changed", count),
+		Required: []string{"levels_changed"}})
+	Register("alert_settings.recipients_changed", Schema{Fields: fields("recipients", count, "queue", Check(Bool),
+		"requeued", count), Required: []string{"recipients", "queue", "requeued"}})
+	Register("alert.acknowledged", Schema{Fields: fields("alert_id", id), Required: []string{"alert_id"}})
+	Register("alert.dismissed", Schema{Fields: fields("alert_id", id,
+		"reason", OneOf("not_relevant", "already_known", "wrong_patient", "other")), Required: []string{"alert_id", "reason"}})
+	Register("alert.withdrawn", Schema{Fields: fields("alert_id", id,
+		"reason", OneOf("source_amended", "source_retracted", "excluded")), Required: []string{"alert_id", "reason"}})
+	// Written by 00029's definers through the outbox (the drainer checks
+	// it); a payload that doesn't fit is replaced by payload_refused.
+	Register("alert.requeued", Schema{Fields: fields("alert_ids", List(500, id),
+		"reason", OneOf("user_deactivated", "role_removed", "recipient_removed"), "payload_refused", Check(Bool)),
+		Shapes: []Shape{{Keys: []string{"alert_ids", "reason"}, Required: []string{"alert_ids", "reason"}},
+			{Keys: []string{"payload_refused"}, Required: []string{"payload_refused"}}}})
+	// A list page served (design §12.6): the ids served (at most the page
+	// limit) and the filters by code; the source label is free text, so
+	// only whether one was given.
+	Register("alerts.read", Schema{Fields: fields("alert_ids", List(100, id),
+		"status", OneOf("new", "handled", "dismissed"), "severity", OneOf("critical", "urgent", "info"),
+		"sent_to", OneOf("you", "queue"), "source", Check(Bool), "page", Check(Bool)),
+		Required: []string{"alert_ids", "source", "page"}})
+	Register("notification_settings.changed", Schema{Fields: fields("alert_popups", Check(Bool),
+		"correction_popups", Check(Bool)), Required: []string{"alert_popups", "correction_popups"}})
 
 	// Plan 7c-3: a platform admin follows a change up, edits the note or
 	// undoes it (spec §7.4). Ids and whether there is a note only: the note

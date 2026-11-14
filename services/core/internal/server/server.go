@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/alerts"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
 	analysisroutes "github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/routes"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
@@ -83,6 +84,12 @@ func Register(m *authz.Mux, d Deps) {
 	// Patient Analysis's aggregate reads (analysis backend plan Task 10):
 	// off unless the hospital's analysis switch is on.
 	analysisroutes.Register(m, analysisroutes.Deps{Pool: d.Pool, Engine: d.Analysis, Log: a.Log})
+	// EMR alerts (EMR plan Tasks 32-34): the hospital admin's alert
+	// settings, possible duplicates and exclusions, and the clinicians'
+	// alerts and notification settings. They always answer (empty lists,
+	// not_connected) whether or not EMR is on; nothing raises an alert
+	// until core's finding consumer runs (PR 8b).
+	alerts.Register(m, alerts.Deps{Pool: d.Pool, Log: a.Log, Auth: a, MasterKey: a.MFAKey})
 	registerFixtures(m, d)
 }
 
