@@ -12,6 +12,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/fhir"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/fileexport"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/stub"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrtypes"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/seal"
@@ -90,7 +91,7 @@ func TestStubOnlyInDevelopment(t *testing.T) {
 // Every registered connector declares exactly its row of the shared table
 // (gokit/emrtypes), so core's fields and the emr service's agree.
 func TestConnectorsDeclareTheSharedTable(t *testing.T) {
-	r := connector.NewRegistry(true, stub.New(), fhir.New(nil))
+	r := connector.NewRegistry(true, stub.New(), fhir.New(nil), fileexport.New(nil))
 	for _, id := range emrtypes.Built(true) {
 		c, ok := r.Get(id)
 		if !ok {
