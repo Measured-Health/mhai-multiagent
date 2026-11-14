@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
@@ -51,20 +52,101 @@ const (
 // for work no user started; Hid the hospital (every token carries one but
 // a global job's, F10); Rid the request id (X-Request-ID, the audit chain);
 // Roles the roles to mint (none for svc:core).
+//
+// The MHAI patient ids the token's pids claim carries (EMR design §10.5)
+// are unexported: only CheckPatient adds one, after the database said it is
+// an active patient of the caller's hospital. A Caller built any other way
+// mints no pids, and a body that names a patient it doesn't carry is
+// refused before anything is signed.
 type Caller struct {
 	Sub, Hid, Rid string
 	Roles         []string
 	pids          []string
 }
 
-// PatientIDs: red stub (PR 13, test first).
-func (c Caller) PatientIDs() []string { return c.pids }
+// PatientIDs are the checked patient ids the caller's tokens carry (a
+// copy; nil for none).
+func (c Caller) PatientIDs() []string { return slices.Clone(c.pids) }
 
-// CheckPatient: red stub (PR 13, test first): checks nothing.
-func CheckPatient(_ context.Context, _ pgx.Tx, c Caller, _ uuid.UUID) (Caller, error) { return c, nil }
+// CheckPatient asks the database, in tx, whether pid is an active patient
+// of the caller's hospital (emr_patient_in_hospital: not another
+// hospital's, not excluded, not merged away), and returns c carrying it in
+// its pids. tx must be bound to the caller's own hospital as core's
+// clinical role (authz.Tx, db.WithHospital); a tx bound to another
+// hospital, or none, is ErrMisuse. A patient that isn't one is ErrNoPatient,
+// whichever of the reasons, so a caller can't tell another hospital's
+// patient from no patient. c itself is never changed.
+func CheckPatient(ctx context.Context, tx pgx.Tx, c Caller, pid uuid.UUID) (Caller, error) {
+	if !canonicalUUID(c.Hid) || tx == nil {
+		return c, ErrMisuse
+	}
+	if pid == uuid.Nil {
+		return c, ErrNoPatient
+	}
+	var bound, ok bool
+	if err := tx.QueryRow(ctx, `SELECT public.mhai_current_hospital() IS NOT DISTINCT FROM $1::uuid,
+		       public.mhai_current_hospital() IS NOT DISTINCT FROM $1::uuid AND emr_patient_in_hospital($2)`,
+		c.Hid, pid).Scan(&bound, &ok); err != nil {
+		return c, errPatientLookup // driver errors can carry values: classify, never wrap
+	}
+	if !bound {
+		return c, ErrMisuse
+	}
+	if !ok {
+		return c, ErrNoPatient
+	}
+	out := c
+	out.Roles = slices.Clone(c.Roles)
+	out.pids = slices.Clone(c.pids)
+	if s := pid.String(); !slices.Contains(out.pids, s) {
+		out.pids = append(out.pids, s)
+	}
+	return out, nil
+}
 
-// patientsCarried: red stub (PR 13, test first).
-func patientsCarried(_ proto.Message, _ []string) bool { return true }
+// patientsCarried reports whether every patient id msg names (a string
+// field called patient_id or patient_ids, at any depth: the worker's check
+// 8, spec §7.3) is one the caller carries, so core never signs a token the
+// worker would refuse for scope.
+func patientsCarried(msg proto.Message, pids []string) bool {
+	ok := true
+	var walk func(m protoreflect.Message)
+	walk = func(m protoreflect.Message) {
+		m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+			switch {
+			case fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind:
+				switch {
+				case fd.IsList():
+					for i := 0; i < v.List().Len(); i++ {
+						walk(v.List().Get(i).Message())
+					}
+				case fd.IsMap():
+					v.Map().Range(func(_ protoreflect.MapKey, mv protoreflect.Value) bool {
+						if fd.MapValue().Kind() == protoreflect.MessageKind {
+							walk(mv.Message())
+						}
+						return true
+					})
+				default:
+					walk(v.Message())
+				}
+			case fd.Kind() == protoreflect.StringKind && (fd.Name() == "patient_id" || fd.Name() == "patient_ids"):
+				if fd.IsList() {
+					for i := 0; i < v.List().Len(); i++ {
+						if !slices.Contains(pids, v.List().Get(i).String()) {
+							ok = false
+						}
+					}
+				} else if s := v.String(); s != "" && !slices.Contains(pids, s) {
+					ok = false
+				}
+			}
+			return ok
+		})
+	}
+	walk(msg.ProtoReflect())
+	return ok
+}
 
 // FromPrincipal is the Caller for an authenticated request: the
 // principal's user, hospital and current roles, and the request id.
@@ -184,6 +266,9 @@ func (c *Client) Request(ctx context.Context, caller Caller, opName string, req,
 	if err := checkCaller(op, caller); err != nil {
 		return nil, err
 	}
+	if !patientsCarried(req, caller.pids) {
+		return nil, ErrMisuse
+	}
 	// F10: a request token always carries a hospital. svc:core calls name
 	// the hospital they are for; a hospital-less call would need a spec
 	// change first.
@@ -210,6 +295,7 @@ func (c *Client) Request(ctx context.Context, caller Caller, opName string, req,
 	tok, claims, err := c.Signer.Mint(reqtoken.Claims{
 		Aud: op.Service, Sub: caller.Sub, Hid: caller.Hid, Roles: slices.Clone(caller.Roles), Rid: caller.Rid,
 		Kind: reqtoken.KindReq, Subject: subject, ReplyPrefix: reqtoken.ReplyCore, Via: reqtoken.ViaCore,
+		PatientIDs: slices.Clone(caller.pids),
 	}, body, ttl)
 	if err != nil {
 		// Mint's errors are fixed values with no claim in them.

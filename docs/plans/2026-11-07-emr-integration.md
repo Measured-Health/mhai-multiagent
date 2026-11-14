@@ -36,7 +36,7 @@ Every PR leaves `main` working, with EMR off: no connection can be saved, no emr
 | **10: mhai-web** | 42 (core side) | core accepts BFF-sealed credentials; the mhai-web PR itself is in the other repository (handoff list below) | **now** (core side) | mhai-web PR after 8b |
 | **11: Havana structured** | 43–44 | `mhai_csv_v1`, the SFTP connector, staleness by expected interval | **not before H1** | **H1** (what Havana can export); live: **H7** |
 | **12: Havana archive** | 45–47 | migration 00026, the reviewer's patient search and creation, the archive connector, rejected values back to review | **not yet** | **H2**, the documents service, document pipeline phase 1 and its clinical sign-off |
-| **13: `pids`** | 48 | core's patient check and the token claim | **now** | PR 5 |
+| **13: `pids`** | 48 | migration 00033 (departure 56), core's patient check, the token claim and the job's patient | **built** (14 Nov) | PR 5 |
 
 PRs 4 and 5 can run in parallel after PR 3 (PR 4 needs only PR 2). The migrations are linear: 00021 (PR 3), 00022 (PR 5), 00023 (PR 7), 00024 (PR 8a), 00025 (PR 9), 00026 (PR 12).
 
@@ -112,6 +112,12 @@ Plans 2, 3 and 4 and the cloud plan's constraints still hold: identity only from
 40. **Left for later in PR 8b's scope** (product owner, startup speed; each is in TODO.md): grouped mode and the info cap (no flood control past the per-source breaker; default levels don't admit `info`), quiet hours, the `resume` route, and EMR dead letters in the Failed jobs view with `redrive` (Task 38). Core's own consumer dead-letters `dead.v1.<hid>.core_emr` after five deliveries (a page; the letter keeps 30 days in `DEAD`; `core_dead` reads it as an unknown type) and, if that publish fails, keeps the message. The publish is retried in process (past the durable's limit the server won't deliver the message again). The consumer fetches one message at a time (none waits past its ack wait), and retries the durable until it exists rather than stopping. The gateway NATS user gains publish on `dead.v1.*.core_emr` only. No OpenAPI change: `AlertOut` already carries what the consumer writes.
 41. **`alert.updated` says why** (`change`: `amended` or `new_hit`), and `alert.not_raised` adds `already_open` and `already_handled` to design §12.6's reasons, plus `hospital_inactive`, `no_connection` and `null_mrn`. A shadow or historical finding writes nothing (it was never a candidate). A message naming no finding of its subject's hospital is acked and counted (`emr_finding_foreign_total`), never audited: it may be another hospital's id.
 42. **No LOINC display label on the alert.** Core still has no LOINC table, so the alert shows the source's own display text (departure 32); the label waits for the real tables (Task 21).
+
+56. **PR 13's migration is 00033** (EMR PR 9 holds 00032; built 14 Nov), merged after PR 9. OpenAPI 1.22.0 (additive): `POST /queries` takes an optional `patient_id` and may answer 404 `not_found`. Off by default: while `CORE_EMR_ENABLED` is false every `patient_id` is 404 `not_found` and the database isn't asked. A malformed id (not a canonical lower-case uuid, or the nil uuid) is 422 `validation_failed`.
+57. **A question names an active patient, checked twice, and loses it when the patient leaves.** `clinical_queries.patient_id` has a `(hospital_id, patient_id)` key to `emr.patients` (`ON DELETE SET NULL (patient_id)`), and a definer trigger checks the patient active under a share lock on its row (as 00031 does for alerts), so a racing exclusion or merge either waits or is seen. When a patient stops being active (excluded or merged away) a trigger on `emr.patients` clears it from every question that names it, in the same transaction: the more private choice where the design is silent (a question about an objecting patient no longer points at them; a merge's question is not moved to the kept patient). The question itself stays.
+58. **The job names the patient, and every mint checks it again.** `RunQueryJob` gains `patient_id` (additive proto change), so the worker's check 8 binds the body's patient to the token's `pids`. Core refuses to sign a body that names a patient its caller doesn't carry. `intel.Caller`'s patient ids are unexported: only `intel.CheckPatient` (which calls `emr_patient_in_hospital()` in a transaction bound to the caller's own hospital) adds one, so `pids` holds checked ids only. The publish after the commit, the publish sweeper, the platform's retry and the dead-letter re-mint all read the row's patient and check it again; a patient no longer active is never minted (the sweeper leaves the row; the unlink above lets the next sweep publish it with no patient; the retry skips it).
+59. **The audit says a patient was named, not which.** `query.submitted` gains `patient: true`; the patient id stays on the question row, which the unlink and a purge clear, whereas the audit chain is never purged. Who asked about which patient is read from the row while the link lasts.
+60. **Left as they are** (more private): the grant endpoint still refuses any patient id (`not_found`), since no `bff_direct` operation names a patient yet; the worker doesn't yet use the patient for retrieval (shared guidelines only, as before), and checks only that the job's patient is in `pids`. "Ask MHAI about this patient" (design §10.5, a later plan) adds patient-scoped retrieval, and with it a worker check that the claimed row's patient equals the job's.
 
 ---
 
@@ -810,6 +816,8 @@ Each task's first step writes its abuse-case tests (A-numbers are the design's, 
 ### PR 13: `pids`
 
 ### Task 48: Core's patient check and the token claim
+
+Built 14 Nov (PR 13): migration 00033, departures 56–60.
 
 **Files:** Modify `services/core/internal/intel/client.go` (`Caller.PatientIDs`, set only from `emr_patient_in_hospital` results), `services/core/internal/queries/handlers.go` (an optional `patient_id` on `POST /queries`, checked; 404 `not_found` otherwise), `openapi.yaml`; `services/intelligence/tests/boundary/` (a test that a body patient id outside `pids` is refused, check 8; added if missing)
 

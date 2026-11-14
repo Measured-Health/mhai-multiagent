@@ -79,6 +79,13 @@ Gates before live use (design §17.6; all of them):
 - [ ] The on-call owner named (H9). Owner: product owner.
 - [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
 
+## EMR: follow-ups from PR 13 (14 Nov)
+
+- [ ] **Migration order:** 00033 (a question's patient) follows EMR PR 9's 00032; merge PR 9 first (the migration-count test lists 00033).
+- [ ] mhai-web: `POST /queries` may send `patient_id` (OpenAPI 1.22.0) and must show 404 `not_found` as "patient not found"; nothing sends it yet.
+- [ ] "Ask MHAI about this patient" (design §10.5): patient-scoped retrieval in the worker, which must then check the claimed row's `patient_id` equals the job's (and so the token's `pids`), and treat source text as untrusted model input. The grant endpoint keeps refusing patient ids until a `bff_direct` operation needs one.
+- [ ] An in-flight job keeps the `pids` it was minted with when its patient is excluded mid-run (at most the job's deadline, 10 minutes); harmless while the worker doesn't read the patient, and to be closed by the row check above.
+
 ## EMR: follow-ups from PR 8b (14 Nov)
 
 - [x] **Migration order:** 00031 (`emr_consumed`, the consumer's grants) follows Analysis PR 6's 00030 (merged 14 Nov); the migration-count tests list both.
@@ -272,7 +279,7 @@ From §11 of the [design](docs/specs/2026-10-26-go-gateway-nats-and-auth-design.
 - **Forgot / reset password** (contract §2.5). Needs the mail provider.
 - **Turn core's HTTP API off** (`CORE_HTTP_API=off`, probes only on localhost) once mhai-web's BFF talks to core over NATS. That switch is mhai-web work (its TODO.md, "BFF over NATS"; rollout step 6 of its plan `docs/plans/2026-10-31-bff-nats-transport.md`). The same change brings mhai-web's `contract.ts` in line with Plan 3: `ClinicalResult` gains `trust_band` and `cited_chunk_ids`, and the problem codes gain 405 `method_not_allowed`, 413 `payload_too_large` (both on the NATS path) and 503 `unavailable`.
 - **Citations are empty** in `GET /queries/{id}/result` until the pipeline stores citation details: today it stores only `cited_chunk_ids`. Flagged to the product owner and the intelligence lead (Plan 3 T12).
-- **Patient ids in questions and tokens** (`pids`, plan departure 7): with the EMR plan. Until then retrieval returns shared guidelines only.
+- **Patient ids in questions and tokens** (`pids`, plan departure 7): core's check, the `pids` claim and the job's patient are built (EMR PR 13, off with `CORE_EMR_ENABLED`). Retrieval still returns shared guidelines only until "Ask MHAI about this patient" adds patient-scoped retrieval (EMR follow-ups from PR 13).
 - **The shared replay check** (NATS KV) when a request/reply operation first writes data (boundary design, decision 3). Today each worker copy keeps its own `jti` set, which is enough while request/reply operations only read.
 - **Hospital setup flow.** `setup_incomplete` hospitals can sign in so the first admin can finish setup; revisit when the flow exists (T8 M8), and decide whether `POST /queries` for a `setup_incomplete` hospital should be 403 rather than 401. Until then an operator activates a hospital with `core hospitals activate`.
 - **Admin unlock** for the per-login ceiling, with the staff endpoints (only a trusted device gets past it today); alert on `auth.login.ceiling` audit rows.

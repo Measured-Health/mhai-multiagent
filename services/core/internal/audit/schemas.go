@@ -568,7 +568,10 @@ func init() {
 	// drainer, the sweeper, the dead-letter consumer). The drainer may add
 	// fact_entity and fact_entity_id, or replace a payload that doesn't fit
 	// intel's schema with {query_id, payload_refused}.
-	Register("query.submitted", Schema{Fields: fields("query_id", id, "urgency", OneOf("routine", "urgent", "emergency")),
+	// patient: the question named a checked MHAI patient (EMR design §10.5);
+	// never which one (the chain is never purged).
+	Register("query.submitted", Schema{Fields: fields("query_id", id, "urgency", OneOf("routine", "urgent", "emergency"),
+		"patient", Check(Bool)),
 		Required: []string{"query_id", "urgency"}})
 	drained := func(kv ...any) map[string]Check {
 		m := fields(kv...)

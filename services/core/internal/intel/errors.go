@@ -53,8 +53,12 @@ var (
 	// two-person rule refuses its creator). Not transient: the sweeper
 	// skips the row instead of retrying it, and its deadline ends it.
 	ErrJobSkipped = errors.New("intel: the job can't be published as it stands")
-	// ErrNoPatient: red stub (PR 13, test first).
+	// ErrNoPatient: a patient id that isn't an active patient of the
+	// caller's hospital (another hospital's, excluded, merged away, or
+	// none): CheckPatient, and Republish for a row that names one.
 	ErrNoPatient = errors.New("intel: not an active patient of the caller's hospital")
+	// errPatientLookup: the patient check couldn't be made (fail closed).
+	errPatientLookup = errors.New("intel: patient check failed")
 )
 
 // Error is a worker's answer when it refused or failed a call: a code from
@@ -137,6 +141,8 @@ func Code(err error) (code string, retryAfter int) {
 		return "rate_limited", 0
 	case errors.Is(err, ErrNotAllowed), errors.Is(err, ErrSecondPerson):
 		return "forbidden", 0
+	case errors.Is(err, ErrNoPatient):
+		return "not_found", 0
 	}
 	return "internal_error", 0
 }
