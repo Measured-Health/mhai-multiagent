@@ -1,0 +1,69 @@
+# The app host's override for the split mode (docs/deploy/remote-intelligence.md):
+# the pipeline worker runs on its own server and reaches NATS and Postgres over
+# the private network, with TLS. Turned on by enable-split.sh, which writes
+#   COMPOSE_FILE=compose.yml:compose.split.yml
+# into .env (so every `docker compose` here, the deploy workflow's included,
+# keeps it), and the files mounted below. The single-host demo never sets it:
+# TLS stays off there.
+#
+#   - NATS runs nats/tls.conf (nats.conf plus the tls block: verify, client
+#     certificates, handshake_first) and is published on the host's PRIVATE
+#     address too (SPLIT_APP_ADDR; enable-split.sh refuses a public one).
+#   - Postgres turns TLS on (its own server certificate) and takes its client
+#     rules from postgres/pg_hba.conf: intelligence_app only over TLS and only
+#     from the intelligence host; nothing else from that host. It joins `edge`
+#     because Docker publishes ports only from a network that isn't internal
+#     (a residual risk in the design doc: it needs no route out).
+#   - core connects to NATS over TLS with its client certificate. Its database
+#     link stays as it is (the internal network, never off the host).
+#   - The pipeline profile is not used on this host (enable-split.sh refuses).
+#
+# Every key is a 0400 (Postgres: 0600) file owned by its service's uid, written
+# by enable-split.sh; the certificates come from the operator's private CA
+# (deploy/tls/). None is in the repository.
+
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - shared_buffers=48MB
+      - -c
+      - max_connections=40
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgresql/tls/server.pem
+      - -c
+      - ssl_key_file=/etc/postgresql/tls/server-key.pem
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    volumes:
+      - ./tls/postgres:/etc/postgresql/tls:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    ports:
+      - "${SPLIT_APP_ADDR:?set by enable-split.sh}:5432:5432"
+    networks:
+      backend: {}
+      edge: {}
+
+  nats:
+    command: ["-c", "/etc/nats/tls.conf"]
+    volumes:
+      - ./nats/tls.conf:/etc/nats/tls.conf:ro
+      - ./tls/nats:/etc/nats/tls:ro
+    ports:
+      - "${SPLIT_APP_ADDR:?set by enable-split.sh}:4222:4222"
+
+  core:
+    environment:
+      NATS_URL: tls://nats:4222
+      NATS_TLS_CA_PATH: /run/tls/ca.pem
+      NATS_TLS_CERT_PATH: /run/tls/core.pem
+      NATS_TLS_KEY_PATH: /run/tls/core-key.pem
+    volumes:
+      - ./tls/core:/run/tls:ro

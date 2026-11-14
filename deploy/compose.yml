@@ -267,7 +267,8 @@ services:
   #     HTTPS_PROXY), and only to the one provider's API host;
   #   - production, with INTELLIGENCE_SINGLE_HOST=on: NATS and Postgres
   #     without TLS, to the service names nats and postgres on this host
-  #     only (TLS is required before any worker runs off this host);
+  #     only (off this host: the split mode, deploy/intelligence-host/ and
+  #     docs/deploy/remote-intelligence.md, with TLS on both links);
   #   - the embedding and NLI weights baked into the image (Dockerfile
   #     target pilot), loaded offline: it has no route to Hugging Face;
   #   - one question at a time, under a memory cap (the host is small).

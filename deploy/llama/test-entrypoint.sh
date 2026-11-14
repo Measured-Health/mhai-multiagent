@@ -29,14 +29,14 @@ setup() { # a fresh cache with one GGUF and an active.json naming it
 
 run() {
   LLAMA_MODELS_DIR="$tmp/models" LLAMA_SERVER="$tmp/fake-server" LLAMA_ACTIVE_TIMEOUT=2 \
-    LLAMA_THREADS="${THREADS:-2}" bash "$here/entrypoint.sh" 2>"$tmp/err"
+    LLAMA_THREADS="${THREADS:-2}" LLAMA_GPU_LAYERS="${GPU:-0}" bash "$here/entrypoint.sh" 2>"$tmp/err"
 }
 
 expect_ok() {
   local out
   if ! out=$(run); then echo "FAIL $1: refused ($(cat "$tmp/err"))"; fail=1; return; fi
   case "$out" in
-    "SERVED -m $gguf --alias $alias --host 0.0.0.0 --port 8080 -t 2 -c 4096 -np 1 --jinja --offline --no-webui")
+    "SERVED -m $gguf --alias $alias --host 0.0.0.0 --port 8080 -t 2 -c 4096 -np 1 --jinja --offline --no-webui${GPU_ARGS:-}")
       echo "ok   $1" ;;
     *) echo "FAIL $1: $out"; fail=1 ;;
   esac
@@ -79,5 +79,11 @@ setup; mv "$tmp/models/active.json" "$tmp/active.json"; ln -s "$tmp/active.json"
 expect_refused "a linked active.json is never read" "no active.json"
 
 setup; THREADS="2 --host 0.0.0.0" expect_refused "a malformed setting is refused" "LLAMA_THREADS"
+
+# The GPU (the intelligence host's CUDA build): -ngl only when layers are asked for.
+setup; GPU=999 GPU_ARGS=" -ngl 999" expect_ok "GPU layers are offloaded with -ngl"
+setup; GPU=0 expect_ok "no GPU layers: no -ngl"
+setup; GPU="99 --host 0.0.0.0" expect_refused "malformed GPU layers are refused" "LLAMA_GPU_LAYERS"
+setup; GPU=1000 expect_refused "too many GPU layers are refused" "LLAMA_GPU_LAYERS"
 
 exit "$fail"

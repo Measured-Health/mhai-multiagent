@@ -14,6 +14,11 @@ pilot on the demo host (deploy/pilot/README.md). NKeys, file passwords and
 every other production rule stay; TLS is required again before any worker
 runs off that host.
 
+Off one host (docs/deploy/remote-intelligence.md) the switch is off: NATS TLS
+with a client certificate, TLS first, and Postgres sslmode=verify-full with
+sslrootcert naming the CA file (an absolute path: never libpq's default
+~/.postgresql/root.crt, never "system").
+
 The pinned models (plan Task 23, design section 7.4). The pipeline verifies the
 roles it needs from the model store before it is ready:
 
@@ -486,6 +491,16 @@ def _db_credentials(
         # development the connection is TLS with the server's certificate
         # and name checked, never a downgrade libpq would allow.
         errs.append("INTELLIGENCE_DB_URL needs sslmode=verify-full outside development")
+    if not development and sslmode == "verify-full":
+        # The CA file, named (docs/deploy/remote-intelligence.md, D12): without
+        # it libpq reads ~/.postgresql/root.crt, and "system" would trust any
+        # public CA for the name.
+        root = dict(url.params).get("sslrootcert", "")
+        if not root.startswith("/"):
+            errs.append(
+                "INTELLIGENCE_DB_URL needs sslrootcert=<absolute path of the CA file> "
+                "with sslmode=verify-full outside development"
+            )
     user = env.get("INTELLIGENCE_DB_USER", "").strip() or url.user or DEFAULT_DB_USER
     if url.user is not None and url.user != user:
         errs.append("INTELLIGENCE_DB_URL names a different user than INTELLIGENCE_DB_USER")
