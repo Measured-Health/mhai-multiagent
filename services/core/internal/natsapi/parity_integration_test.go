@@ -5,6 +5,7 @@ package natsapi_test
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -85,6 +86,15 @@ func same(t *testing.T, name string, h, n resp) {
 		}
 	}
 	switch {
+	case h.code < 300 && h.code == n.code && strings.HasPrefix(h.raw, "[") && strings.HasPrefix(n.raw, "["):
+		// A list (GET /hospital/staff): each call seeds its own account, so
+		// the two lists differ in length; compare their entries' fields.
+		var ha, na []map[string]any
+		if json.Unmarshal([]byte(h.raw), &ha) != nil || json.Unmarshal([]byte(n.raw), &na) != nil {
+			t.Errorf("%s: list HTTP %q, NATS %q", name, h.raw, n.raw)
+		} else if len(ha) > 0 && len(na) > 0 && !reflect.DeepEqual(keysOf(ha[0]), keysOf(na[0])) {
+			t.Errorf("%s: list fields HTTP %s, NATS %s", name, h.raw, n.raw)
+		}
 	case h.body == nil || n.body == nil:
 		if h.raw != n.raw {
 			t.Errorf("%s: body HTTP %q, NATS %q", name, h.raw, n.raw)

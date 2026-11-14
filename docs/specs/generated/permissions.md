@@ -42,18 +42,30 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/feedback` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/feedback/stats/mine` | signed in | `clinician` | clinical | no | no | no |
 | GET | `/api/v1/healthz` | public | - | - | no | no | no |
+| GET | `/api/v1/hospital/activity` | signed in | `hospital_admin` | clinical | yes | no | no |
 | GET | `/api/v1/hospital/alert-settings` | signed in | `hospital_admin` | clinical | yes | no | no |
 | PATCH | `/api/v1/hospital/alert-settings` | signed in | `hospital_admin` | clinical | yes | no | yes |
-| GET | `/api/v1/hospital/clearances` | signed in | `hospital_admin` | clinical | yes | no | no |
-| POST | `/api/v1/hospital/clearances` | signed in | `hospital_admin` | clinical | yes | yes | yes |
-| GET | `/api/v1/hospital/clearances/{id}` | signed in | `hospital_admin` | clinical | yes | no | no |
-| POST | `/api/v1/hospital/clearances/{id}/narrow` | signed in | `hospital_admin` | clinical | yes | yes | yes |
-| GET | `/api/v1/hospital/clearances/{id}/pages/{n}` | signed in | `hospital_admin` | clinical | yes | no | no |
-| POST | `/api/v1/hospital/clearances/{id}/revoke` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| POST | `/api/v1/hospital/corrections/{id}/assign` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| GET | `/api/v1/hospital/corrections/{id}/eligible-reviewers` | signed in | `hospital_admin` | clinical | yes | no | no |
+| POST | `/api/v1/hospital/corrections/{id}/remind` | signed in | `hospital_admin` | clinical | yes | no | yes |
 | POST | `/api/v1/hospital/patient-exclusions` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | GET | `/api/v1/hospital/patient-matches` | signed in | `hospital_admin` | clinical | yes | no | no |
 | POST | `/api/v1/hospital/patient-matches/{id}/confirm` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | POST | `/api/v1/hospital/patient-matches/{id}/reject` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| GET | `/api/v1/hospital/review-oversight` | signed in | `hospital_admin` | clinical | yes | no | no |
+| GET | `/api/v1/hospital/settings` | signed in | `hospital_admin` | clinical | yes | no | no |
+| PATCH | `/api/v1/hospital/settings` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| GET | `/api/v1/hospital/staff` | signed in | `hospital_admin` | clinical | yes | no | no |
+| POST | `/api/v1/hospital/staff/invites` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| DELETE | `/api/v1/hospital/staff/{id}` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| PATCH | `/api/v1/hospital/staff/{id}` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| POST | `/api/v1/hospital/staff/{id}/deactivate` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| POST | `/api/v1/hospital/staff/{id}/password-reset` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| POST | `/api/v1/hospital/staff/{id}/reactivate` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| POST | `/api/v1/hospital/staff/{id}/remind` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| POST | `/api/v1/hospital/staff/{id}/resend-invite` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| POST | `/api/v1/hospital/staff/{id}/reset-mfa` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| GET | `/api/v1/hospital/usage` | signed in | `hospital_admin` | clinical | yes | no | no |
 | GET | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | no |
 | PATCH | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/platform/analytics` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |

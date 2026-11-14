@@ -644,8 +644,8 @@ func TestMigration00038DownUp(t *testing.T) {
 		}
 		return s
 	}
-	if err := db.MigrateDownTo(ctx, pg.URL, 33); err != nil {
-		t.Fatalf("down to 33: %v", err)
+	if err := db.MigrateDownTo(ctx, pg.URL, 35); err != nil {
+		t.Fatalf("down to 35: %v", err)
 	}
 	before := policies()
 	var left int
@@ -665,7 +665,7 @@ func TestMigration00038DownUp(t *testing.T) {
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)
 	}
-	if err := db.MigrateDownTo(ctx, pg.URL, 33); err != nil {
+	if err := db.MigrateDownTo(ctx, pg.URL, 35); err != nil {
 		t.Fatalf("down again: %v", err)
 	}
 	if after := policies(); after != before {

@@ -82,7 +82,7 @@ Gates before live use (design §17.6; all of them):
 ## EMR: follow-ups from PR 13 (14 Nov)
 
 - [x] **Migration order:** 00033 (a question's patient) follows EMR PR 9's 00032 (merged 14 Nov); the migration-count tests list it.
-- [ ] mhai-web: `POST /queries` may send `patient_id` (OpenAPI 1.22.0) and must show 404 `not_found` as "patient not found"; nothing sends it yet.
+- [ ] mhai-web: `POST /queries` may send `patient_id` (OpenAPI 1.24.0) and must show 404 `not_found` as "patient not found"; nothing sends it yet.
 - [ ] "Ask MHAI about this patient" (design §10.5): patient-scoped retrieval in the worker, which must then check the claimed row's `patient_id` equals the job's (and so the token's `pids`), and treat source text as untrusted model input. The grant endpoint keeps refusing patient ids until a `bff_direct` operation needs one.
 - [ ] An in-flight job keeps the `pids` it was minted with when its patient is excluded between the check and the publish, or mid-run (at most the job's deadline, 10 minutes); harmless while the worker doesn't read the patient. Before any patient-scoped read the worker must check the patient is still active (`emr_patient_in_hospital` under the token's hospital) as well as the row check above (security review, 14 Nov).
 
@@ -95,7 +95,7 @@ Gates before live use (design §17.6; all of them):
 - [ ] **Provision the operator's EMR login** (`EMR_ADMIN_DB_USER`, `EMR_ADMIN_DB_PASSWORD`) on a host that needs `core emr exclude`; only the operator holds it. Owner: ops.
 - [ ] Hold release and purge run in the loop, which runs only with `CORE_EMR_ENABLED`: a held purge of a hospital whose EMR was switched off waits until it is on again. Revisit if EMR is ever switched off with holds open.
 - [ ] Backups: a restore must re-apply exclusions and deletions made since the backup before the data is used (design §10.6, §14.2). An ops runbook item, not code.
-- [ ] `/hospital/usage` (not in the EMR plan) serves `alerts.UsageBlock`.
+- [x] `/hospital/usage` (not in the EMR plan) serves `alerts.UsageBlock` (hospital admin routes, migration 00035).
 - [ ] Security review residuals (plan departure 55): place and lift legal holds only through definers that write the audit row (revoke the provisioning role's direct writes); record an operator id on `core emr exclude` rows (as `mhai.operator_id` for the analyst CLI); decide whether `mhai_emr_admin` keeps `emr_merge_patients()` and `emr_reject_match()`; consider a database-side retention switch.
 
 ## EMR: follow-ups from PR 8b (14 Nov)
@@ -188,7 +188,7 @@ PR 4 (aggregate routes) is the simplest version that keeps the disclosure guaran
 - [ ] **A late fact in a hospital's first quarter** can make a first period's "every case is new" false; the guard then finds the raw values inconsistent and the context is stored hidden whole, with the `analysis_inconsistent` alert (fail closed).
 - [x] **Smoke:** `TestSmokeAnalysis` runs in boundary-smoke (run on steven-reid for PR 4: passes).
 - [ ] **Map the drill-down's audit actions to mhai-web's kinds** (`analysis.patients_viewed` as `analysis_patients_viewed`, `audit.patients_viewed` as `audit_patients_viewed`, and flagged kinds for `analysis.list_limit_reached` and `analysis.patient_cap_reached`): sent bare until their facts and targets are agreed (H6, PR 5).
-- [ ] **Step-up on `PATCH /hospital/staff/{id}` when it adds `analyst` (Analysis Task 17, moved to the staff-endpoints plan; departure 28).** The rules, functions and CLI are built (PR 6, migration 00030); the route calls `analysis.GrantAnalyst` after step-up, maps the six refusals, audits any `clinician` removal with `analysis.AuditAnalystChanges` (or the database refuses the commit) and notifies after commit. Tests `TestT26RouteRefusals` and `TestRemoveAnalystEndsPatientAccessAtOnce`.
+- [x] **Step-up on `PATCH /hospital/staff/{id}` when it adds `analyst` (Analysis Task 17, moved to the staff-endpoints plan; departure 28).** Built with the hospital admin routes (migration 00035): every staff write takes step-up, not only the Analyst grant. The rules, functions and CLI are built (PR 6, migration 00030); the route calls `analysis.GrantAnalyst` after step-up, maps the six refusals, audits any `clinician` removal with `analysis.AuditAnalystChanges` (or the database refuses the commit) and notifies after commit. Tests `TestT26RouteRefusals` and `TestRemoveAnalystEndsPatientAccessAtOnce`.
 - [ ] **Map `analyst.granted` and `analyst.removed` to mhai-web's `staff_role_changed`** (target the person): sent bare until the facts are agreed (H6, PR 6).
 - [ ] **Tell every hospital admin of an analyst grant** when the notifications service exists: `analysis.NotifyAnalystGranted` records the ids only today (PR 6).
 - [ ] **Letters live (PR 7).** Upload answers 503 `unavailable` outside the demo until the documents service exists (H5): the file should go to it directly, not through core's 64 KiB API body (departure 35); then the documents outcome (`checking → waiting|refused`, `clearance.refused` flagged for `failed_safety_check`) and real, stamped page images. The H3 letter template before any live hospital.
@@ -196,6 +196,34 @@ PR 4 (aggregate routes) is the simplest version that keeps the disclosure guaran
 - [ ] **Deliver letter reminders and the "ended" notice** when the notifications service exists: they are recorded today (`clearance.reminder_sent` with `delivery: pending`, PR 7).
 - [ ] **Map `clearance.ready` and `named_access.changed`** to mhai-web kinds when it has them: sent bare (PR 7).
 - [ ] **Drills on location, specialty, source and prevalence (PR 5, departure 19).** None today: pids are stable within a period, so lists split by a dimension the rows don't show could be compared to reveal a hidden small group. Needs a design (for example pids scoped per list, or the dimension shown on the row) and H1's agreement.
+
+## Hospital admin routes: gaps and frontend changes (14 Nov)
+
+Built: `GET /hospital/staff`, `PATCH /hospital/staff/{id}` (roles, specialty; Analyst through 00030), `POST /hospital/staff/{id}/deactivate` and `/reactivate`, `GET` and `PATCH /hospital/settings`, `GET /hospital/usage`, `GET /hospital/activity`, `GET /hospital/review-oversight`, `GET /hospital/corrections/{id}/eligible-reviewers` (migration 00035, OpenAPI 1.24.0).
+
+Gaps (each route is registered and answers 501 `not_implemented`):
+
+- [ ] **Invites** (`POST /hospital/staff/invites`, `/resend-invite`): core has no email delivery and no invite acceptance. Staff are created by Measured Health with `core users create` until then. Needs the notifications service and an invite-token design (hashed, single-use, 7 days).
+- [ ] **Password reset and two-step reset by an admin** (`/password-reset`, `/reset-mfa`) and the **two-step reminder** (`/remind`): no email or notifications; the reset of another person's two-step needs its own design (who may, step-up, sessions revoked, audit).
+- [ ] **Removing a person** (`DELETE /hospital/staff/{id}`): deleting an account while keeping its consultations, feedback and audit attributed needs the retention design. Deactivate meanwhile.
+- [ ] **Reviewer assignment and reminders** (`/hospital/corrections/{id}/assign`, `/remind`): 00011's `assigned_to` is never written, and the transition trigger only lets a waiting correction be approved, rejected or withdrawn. Needs a migration and the notifications service.
+- [ ] **Per-specialty reviewing** (`can_review`, `review_specialties`, `reviewers_share_specialty`): every active clinician reviews every correction. Served read-only (`can_review` follows the clinician role, `review_specialties` empty, `reviewers_share_specialty` false).
+- [ ] **SSO and allowed email domains**: core has no SSO; `sso` is always `not_set_up`, `allowed_email_domains` empty. The SSO open question of frontend requirements §6 (IdP two-step for admins) stays open.
+- [ ] **A specialty list**: `settings.specialties` is the active staff's specialties; there is no hospital specialty catalogue.
+- [ ] **Map the new audit actions for the platform app** (`staff.roles_changed`, `staff.specialty_changed`, `staff.deactivated`, `staff.reactivated`, `hospital_settings.changed`): withheld in the platform catalogue until mhai-web's staff kinds take their facts (H6). The hospital's own Activity page shows them.
+- [x] **Self role adds refused** (ruling, 14 Nov, on security review M1 and frontend requirements §6 rule 7): a hospital admin adds no role to themselves, `clinician` included: 403 `self_change`, before step-up. Removing your own `clinician` or Analyst stays allowed (audited, `self`); dropping your own `hospital_admin` stays refused. No `self_role_change` event is emitted.
+- [ ] **A failed denylist write after a deactivation** is logged at error; the sessions then end when the guard's 30-second cache expires (they are revoked in the database either way).
+- [ ] **Activity reads are not audited** (the platform audit log's reads are, `audit.viewed`). Decide whether a hospital admin's Activity read should be.
+
+mhai-web changes (core's contract wins; the BFF already passes these bodies through):
+
+- [ ] **Step-up on every staff write**: `updateStaff` and `staffAction` (`deactivate`, `reactivate`) send the admin's `{mfa_code}` or `{backup_code}` in the body, as `removeStaff` does; 403 `mfa_required` without one, `mfa_invalid`, 429 `mfa_locked`. Refusals that need no code (`not_found`, `conflict`, `self_change`, `last_admin`, `validation_failed`) come first.
+- [ ] **Step-up on a settings edit that loosens sign-in** (clinicians' two-step off, trusted devices on, a longer idle timeout): `updateSettings` sends the code then.
+- [ ] **New codes**: `self_change` 403, `last_admin` 409, `analysis_off` 409, `analyst_cap` 409, `not_eligible` 422 (Analyst refusals; also `analyst` without `clinician`), `not_implemented` 501 for the gaps above.
+- [ ] **Usage `alerts`** is core's guarded block `{total, by_severity, by_category, by_route, by_handling}` (each `{value, suppressed}`), not the contract's `UsageAlertsOut` (changes, series, rising, worsening, top findings and locations are not built). Null with no EMR source, `{unavailable: true}` on a failure.
+- [ ] **Staff**: `status` is never `invited`; `issues` only `mfa_not_set_up`; `can_review` and `review_specialties` are derived and a PATCH that contradicts them is 422.
+- [ ] **Activity kinds** core emits are listed in openapi `GET /hospital/activity`; `device` and `count` are always null, a consultation event carries no specialty or confidence; no event is flagged (no `self_role_change`, no `roles_added`).
+- [ ] **Self role adds are refused** (403 `self_change`, ruling of 14 Nov), replacing frontend requirements §6 rule 7: the staff screen shouldn't offer an admin roles for themselves.
 
 ## Decided
 

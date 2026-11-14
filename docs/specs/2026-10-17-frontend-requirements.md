@@ -244,9 +244,7 @@ structured, never free text: `id`, `at`, `type` (`sign_in`,
 `confidence`, `device`, `count`, `flag` (`policy`, `alert` or null). A
 consultation event carries only its specialty and confidence level.
 
-Required event: **`security` / `self_role_change`**, flag `alert`, with
-the actor, the target (themselves) and `roles_added`, whenever an admin
-adds a role to themselves (§6).
+No `self_role_change` event: self role adds are refused (§6 rule 7, ruling of 2026-11-14).
 
 ### 5.4 Review oversight
 
@@ -290,10 +288,11 @@ These are requirements, not suggestions. Each needs a test in
    increment).
 6. **Backup codes are shared with sign-in.** They are the account's own
    codes; one used here can't be used again anywhere.
-7. **Admins may add roles to themselves**, for example give themselves
-   `clinician`, but it is audited and flagged (`self_role_change`,
-   `roles_added`, flag `alert`). Dropping their own `hospital_admin` stays
-   refused (`self_change`). Product decision, 2026-10-17.
+7. **Admins may not add roles to themselves**, `clinician` included:
+   403 `self_change`, before the step-up code is checked. Dropping their own
+   `hospital_admin` stays refused (`self_change`). Ruling, 2026-11-14
+   (replaces the product decision of 2026-10-17, which allowed it flagged:
+   only the hospital itself could see the flag).
 8. **Idempotency keys** are honoured for at least 72 hours (§10).
 9. **No clinical content on admin routes.** Hospital admin and platform
    admin responses carry counts, specialties and confidence levels only.
