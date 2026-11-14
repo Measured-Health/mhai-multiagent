@@ -50,6 +50,7 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/hospital/patient-matches/{id}/reject` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | GET | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | no |
 | PATCH | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | yes |
+| GET | `/api/v1/platform/analysis/status` | signed in | `platform_admin` | platform | yes | no | no |
 | GET | `/api/v1/platform/analytics` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | DELETE | `/api/v1/platform/analytics/changes/{id}/follow-up` | signed in | `platform_admin` | platform | yes | no | yes |
 | PUT | `/api/v1/platform/analytics/changes/{id}/follow-up` | signed in | `platform_admin` | platform | yes | no | yes |
