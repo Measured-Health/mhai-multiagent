@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- EMR integration, PR 8b (the finding consumer; off by default: it runs only
+  with `CORE_EMR_ENABLED`, and with no rule set activated for a hospital
+  every finding is shadow and never reaches it). Core's `core_emr` consumer
+  re-reads each finding under its subject's hospital as `mhai_emr_core`
+  and, once per finding and status, raises a routed alert (hospital active
+  with a connection on, the null-MRN gate `CORE_EMR_ALLOW_NULL_MRN`, the
+  hospital's units, levels and recipients), updates the patient's open
+  alert for the same rule and analyte, updates an alert in place for an
+  amended result (`amended`) or withdraws it (`source_amended`,
+  `source_retracted`), marking a handled alert without reopening it;
+  historical and shadow findings never alert; a breaker trip is recorded
+  as `emr.source_paused`. Every alert written is audited (`alert.raised`,
+  `alert.updated`, `alert.not_raised`, `alert.withdrawn`). A message that
+  fails five times is dead-lettered on `dead.v1.<hid>.core_emr` (the
+  gateway NATS user may publish there), never dropped. Migration **00031**
+  (after Analysis PR 6's 00030): `emr_consumed`, a handled alert may carry
+  `withdrawn`, an alert must name an active patient (a trigger), the
+  definers `alert_route_facts()` and `alert_source_known()`, and the
+  consumer's audit append. No OpenAPI change.
 - EMR integration, PR 8a (alert settings and routes; off by default: nothing
   raises an alert until core's finding consumer, PR 8b). Migration **00029**
   (after Analysis PR 5's 00028): `alert_settings`, `alert_units`,
