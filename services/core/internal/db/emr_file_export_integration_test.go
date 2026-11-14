@@ -84,12 +84,30 @@ func TestStaleByExpectedInterval(t *testing.T) {
 	setFile("91 minutes")
 	check("91 minutes, past 90", "behind", "errors")
 	setFile("5 minutes")
-	for _, bad := range []string{`{"expected_every_minutes": "sixty"}`, `{"expected_every_minutes": "0"}`, `{}`} {
+	for _, bad := range []string{`{"expected_every_minutes": "sixty"}`, `{"expected_every_minutes": "0"}`, `{}`,
+		`{"expected_every_minutes": "4"}`, `{"expected_every_minutes": "10081"}`} {
 		if _, err := pool.Exec(ctx, `UPDATE emr_connections SET settings = $2::jsonb WHERE id = $1`, c, bad); err != nil {
 			t.Fatal(err)
 		}
 		check("interval "+bad, "behind", "errors")
 	}
+	// Security review (14 Nov): rows kept as dead letters or files set
+	// aside (an unreadable_data error row in the last 24 hours) turn the
+	// platform's health to errors, while the data stays current for
+	// clinicians.
+	if _, err := pool.Exec(ctx, `UPDATE emr_connections SET settings = '{"expected_every_minutes": "60"}' WHERE id = $1`, c); err != nil {
+		t.Fatal(err)
+	}
+	check("fresh", "current", "ok")
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.connection_errors (hospital_id, connection_id, at, code)
+		VALUES ($1, $2, now() - interval '2 hours', 'unreadable_data')`, h, c); err != nil {
+		t.Fatal(err)
+	}
+	check("a dead letter 2 hours ago", "current", "errors")
+	if _, err := pool.Exec(ctx, `UPDATE emr.connection_errors SET at = now() - interval '25 hours' WHERE connection_id = $1`, c); err != nil {
+		t.Fatal(err)
+	}
+	check("a dead letter 25 hours ago", "current", "ok")
 	// The poll rule still holds for a file export with fresh files.
 	if _, err := pool.Exec(ctx, `UPDATE emr_connections SET settings = '{"expected_every_minutes": "60"}' WHERE id = $1`, c); err != nil {
 		t.Fatal(err)

@@ -318,6 +318,9 @@ func (c *FileExport) CaughtUp(raw connector.Cursor) bool {
 	return ok && cur.Drained
 }
 
+// SetAside: not yet.
+func (c *FileExport) SetAside(connector.Cursor) int { return 0 }
+
 // NewFileAt is when the run that wrote cur loaded its last new file.
 func (c *FileExport) NewFileAt(raw connector.Cursor) (time.Time, bool) {
 	cur, ok := decodeCursor(raw)

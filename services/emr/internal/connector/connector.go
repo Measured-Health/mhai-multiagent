@@ -204,7 +204,10 @@ type Rejecter interface {
 
 // FileSource is a connector whose source drops files on a schedule (design
 // §15.4): NewFileAt is when the fetch that wrote cur last loaded a new
-// file, and false when it loaded none.
+// file, and false when it loaded none; SetAside is how many files that
+// fetch left unloaded on purpose (refused and moved aside, misnamed, or
+// still being written), which the run reports without failing.
 type FileSource interface {
 	NewFileAt(cur Cursor) (time.Time, bool)
+	SetAside(cur Cursor) int
 }

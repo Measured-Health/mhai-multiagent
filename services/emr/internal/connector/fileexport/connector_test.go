@@ -422,8 +422,8 @@ func TestBadFileMovedToRejected(t *testing.T) {
 	c := s.connector()
 	sk := &memSink{}
 	cur, err := c.Fetch(ctx(t), s.config(), s.creds(), nil, sk)
-	if connector.CodeOf(err) != "unreadable_data" {
-		t.Fatalf("err %v", err)
+	if err != nil {
+		t.Fatalf("a refused file moved aside is handled: %v", err)
 	}
 	if got := s.list(Rejected); !slices.Equal(got, []string{"results-20261114T060000Z.csv"}) {
 		t.Fatalf("rejected %v", got)
@@ -439,7 +439,9 @@ func TestBadFileMovedToRejected(t *testing.T) {
 			t.Fatalf("a record of the refused file was stored: %s", r.SourceID)
 		}
 	}
-	if len(sk.recs) != 2 || c.CaughtUp(cur) || c.Metrics.FilesRejected.Load() != 1 {
+	// Handled, so a first sync can still catch up (and go live), and the
+	// refusal is reported for the run's error row.
+	if len(sk.recs) != 2 || !c.CaughtUp(cur) || c.SetAside(cur) != 1 || c.Metrics.FilesRejected.Load() != 1 {
 		t.Fatalf("%d records, caught up %v", len(sk.recs), c.CaughtUp(cur))
 	}
 	if _, ok := c.NewFileAt(cur); !ok {
@@ -447,7 +449,7 @@ func TestBadFileMovedToRejected(t *testing.T) {
 	}
 	// An over-large file is refused without being read.
 	s.put("results-20261114T070000Z.csv", make([]byte, MaxFile+1))
-	if _, err := c.Fetch(ctx(t), s.config(), s.creds(), nil, sk); connector.CodeOf(err) != "unreadable_data" {
+	if cur, err := c.Fetch(ctx(t), s.config(), s.creds(), nil, sk); err != nil || c.SetAside(cur) != 1 {
 		t.Fatalf("large: %v", err)
 	}
 	if got := s.list(Rejected); len(got) != 2 {
@@ -533,8 +535,13 @@ func TestOtherFilesLeftAlone(t *testing.T) {
 	c := s.connector()
 	sk := &memSink{}
 	cur, err := c.Fetch(ctx(t), s.config(), s.creds(), nil, sk)
-	if err != nil || len(sk.recs) != 0 || len(s.list("")) != 2 || c.Metrics.Skipped.Load() != 2 {
+	if err != nil || len(sk.recs) != 0 || len(s.list("")) != 2 || c.Metrics.Skipped.Load() != 1 {
 		t.Fatalf("%v %d %v", err, len(sk.recs), s.list(""))
+	}
+	// A misnamed file is reported (no name, a count), so a lost results
+	// file isn't silent; a file still being written (.part) is not.
+	if c.SetAside(cur) != 1 {
+		t.Errorf("set aside %d, want the misnamed file only", c.SetAside(cur))
 	}
 	if _, ok := c.NewFileAt(cur); ok {
 		t.Error("a skipped file counted as new")
@@ -624,5 +631,46 @@ func TestErrorsNameNothing(t *testing.T) {
 	fe := &FileError{Reason: ReasonHeader, Line: 1}
 	if fe.Error() != "fileexport: file refused: header" {
 		t.Error(fe.Error())
+	}
+}
+
+// Security review (14 Nov): a name already in processed/ (a re-export under
+// the same name) is moved beside it with a suffix, never over it, so it
+// can't block the files after it.
+func TestNameCollisionNeverOverwrites(t *testing.T) {
+	s := newServer(t)
+	b := samples(t)["vitals-20261114T060000Z.csv"]
+	s.put("vitals-20261114T060000Z.csv", b)
+	c := s.connector()
+	if _, err := c.Fetch(ctx(t), s.config(), s.creds(), nil, &memSink{}); err != nil {
+		t.Fatal(err)
+	}
+	again := []byte(strings.Replace(string(b), "131", "132", 1))
+	s.put("vitals-20261114T060000Z.csv", again)
+	s.put("vitals-20261114T070000Z.csv", b)
+	if _, err := c.Fetch(ctx(t), s.config(), s.creds(), nil, &memSink{}); err != nil {
+		t.Fatal(err)
+	}
+	got := s.list(Processed)
+	if len(got) != 3 || len(s.list("")) != 0 {
+		t.Fatalf("processed %v, folder %v", got, s.list(""))
+	}
+	if string(s.read(path.Join(Processed, "vitals-20261114T060000Z.csv"))) != string(b) {
+		t.Fatal("the first file was overwritten")
+	}
+}
+
+// Residual from the review: a file that is shorter than its listed size,
+// or doesn't end a row, may still be being written: it is left where it
+// is (not refused, not moved), reported, and read again next run.
+func TestHalfWrittenFileLeft(t *testing.T) {
+	s := newServer(t)
+	b := samples(t)["vitals-20261114T060000Z.csv"]
+	s.put("vitals-20261114T060000Z.csv", b[:len(b)-1])
+	c := s.connector()
+	sk := &memSink{}
+	cur, err := c.Fetch(ctx(t), s.config(), s.creds(), nil, sk)
+	if err != nil || len(sk.recs) != 0 || len(s.list("")) != 1 || len(s.list(Rejected)) != 0 || c.SetAside(cur) != 1 {
+		t.Fatalf("%v %d %v", err, len(sk.recs), s.list(""))
 	}
 }

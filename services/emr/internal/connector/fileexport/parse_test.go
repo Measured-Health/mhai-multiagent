@@ -335,3 +335,38 @@ func TestFileNames(t *testing.T) {
 		t.Fatal("order: export time, then kind")
 	}
 }
+
+// Security review (14 Nov): what the parser keeps, the sink keeps whole.
+// A unit or an MRN the sink would drop or cut is a dead letter here, never
+// a result stored without its unit or two MRNs made one.
+func TestUnitAndMRNMatchTheSink(t *testing.T) {
+	for _, v := range []string{"mmol\u200b/L", strings.Repeat("\u00b5", 21), "mmol/L\u202e", "mg dL"} {
+		p := parse(t, "results", header("results")+resultRow(map[string]string{"unit": v}))
+		if p.err != nil || p.rows[0].Reject == nil {
+			t.Errorf("unit %q kept: %+v %v", v, p.rows, p.err)
+		}
+	}
+	for _, v := range []string{"\u00b5mol/L", "\u00b0C", "10*9/L", "%"} {
+		p := parse(t, "results", header("results")+resultRow(map[string]string{"unit": v}))
+		if p.err != nil || p.rows[0].Reject != nil || p.rows[0].Records[0].Fields["unit"] != v {
+			t.Errorf("unit %q: %+v %v", v, p.rows, p.err)
+		}
+	}
+	row := func(mrn string) string {
+		return header("patients") + "SYNP-T-1,2026-11-14T05:40:00Z," + mrn + ",Synthia,Testperson,,,,\n"
+	}
+	if p := parse(t, "patients", row(strings.Repeat("7", 65))); p.err != nil || p.rows[0].Reject == nil {
+		t.Errorf("65-character MRN kept: %+v %v", p.rows, p.err)
+	}
+	if p := parse(t, "patients", row(strings.Repeat("7", 64))); p.err != nil || p.rows[0].Reject != nil {
+		t.Errorf("64-character MRN: %+v %v", p.rows, p.err)
+	}
+}
+
+// Security review (14 Nov): a row's version can't be forged by moving a
+// separator between cells.
+func TestVersionCellBoundaries(t *testing.T) {
+	if versionOf("results", []string{"a\x1f", "b"}) == versionOf("results", []string{"a", "\x1fb"}) {
+		t.Fatal("two different rows, one version")
+	}
+}

@@ -429,8 +429,11 @@ var _ = errors.New
 // (nil: none).
 type fileConn struct {
 	*fakeConn
-	newFile *time.Time
+	newFile  *time.Time
+	setAside int
 }
+
+func (f *fileConn) SetAside(connector.Cursor) int { return f.setAside }
 
 func (f *fileConn) NewFileAt(connector.Cursor) (time.Time, bool) {
 	if f.newFile == nil {
@@ -500,5 +503,44 @@ func TestDeadLettersAndNewFileRecorded(t *testing.T) {
 	}
 	if errs != 1 || last == nil || !last.Equal(at) {
 		t.Fatalf("after a quiet run: errors %d, last file %v", errs, last)
+	}
+	// Files set aside (refused, misnamed, half-written) are reported the
+	// same way: the run ok, one error row.
+	fc.setAside = 2
+	f.advance(10 * time.Minute)
+	f.due(t)
+	if n, err := s.Once(context.Background()); err != nil || n != 1 {
+		t.Fatalf("third run %d: %v", n, err)
+	}
+	if outcome, ok, _ := f.lastRun(t); outcome != "ok" || !ok {
+		t.Fatalf("set aside: run %s", outcome)
+	}
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM emr.connection_errors WHERE connection_id = $1
+		AND code = 'unreadable_data'`, f.id).Scan(&errs); err != nil || errs != 2 {
+		t.Fatalf("set aside: errors %d %v", errs, err)
+	}
+}
+
+// putOnlySink keeps no dead letters.
+type putOnlySink struct{ Sink }
+
+// Security review (14 Nov): a run's sink offers dead letters only when the
+// sink behind it keeps them, so a connector's check (store nothing without
+// one) means what it says.
+func TestNoDeadLettersWithoutTheSinksSupport(t *testing.T) {
+	f := newFixture(t)
+	offered := true
+	f.conn.fetch = func(_ context.Context, _ connector.Cursor, s connector.RawSink) (connector.Cursor, error) {
+		_, offered = s.(connector.Rejecter)
+		return connector.Cursor(`{"v":1}`), nil
+	}
+	s := f.scheduler(f.store)
+	inner := s.NewSink
+	s.NewSink = func(cfg connector.Config, backfill bool) Sink { return putOnlySink{inner(cfg, backfill)} }
+	if n, err := s.Once(context.Background()); err != nil || n != 1 {
+		t.Fatalf("ran %d: %v", n, err)
+	}
+	if offered {
+		t.Fatal("dead letters offered by a sink that keeps none")
 	}
 }
