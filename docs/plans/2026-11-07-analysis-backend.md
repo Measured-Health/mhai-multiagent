@@ -1,6 +1,6 @@
 # Patient Analysis, named access and clearance letters (hospital side): implementation plan
 
-**Status:** PRs 1–4 merged (PR 4 as #141, migration 00025, departure 18). PR 5 (Tasks 12–14) merged as #149, with migration 00028, OpenAPI 1.19.0 and departures 19–24 below. PR 6 (Tasks 15–16) built on `agent/analysis-build-6`, with migration 00030 and departures 25–28; Task 17 moves to the staff-endpoints plan (departure 12). The design is approved (product owner, 7 Nov 2026, after three reviews). ADR 0015 and the SKILLS.md §1 amendment are written as **Accepted** in PR 1 (H4 is given). Live use waits on H1–H3 (design §15), which are people's gates in TODO.md. Nothing in this plan opens them.
+**Status:** PRs 1–4 merged (PR 4 as #141, migration 00025, departure 18). PR 5 (Tasks 12–14) merged as #149, with migration 00028, OpenAPI 1.19.0 and departures 19–24 below. PR 6 (Tasks 15–16) built on `agent/analysis-build-6`, with migration 00030 and departures 25–28; Task 17 moves to the staff-endpoints plan (departure 12). PR 7 (Tasks 18–20) built on `agent/analysis-build-7`, with migration 00034, OpenAPI 1.23.0 and departures 29–42. The design is approved (product owner, 7 Nov 2026, after three reviews). ADR 0015 and the SKILLS.md §1 amendment are written as **Accepted** in PR 1 (H4 is given). Live use waits on H1–H3 (design §15), which are people's gates in TODO.md. Nothing in this plan opens them.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
@@ -584,11 +584,83 @@ Abuse-case ids: **T1–T29** and **P1–P8** are the design's (§13.5, §5.7). *
 
 ### PR 7: letters, hospital side (design §8.1, §8.10)
 
-Depends on PR 6. The live upload needs the documents service (H5), and the platform-side verify, reject and revoke follow the Plan 11b design. Migration 00034+.
+Depends on PR 6. The live upload needs the documents service (H5), and the platform-side verify, reject and revoke follow the Plan 11b design. **Built as migration 00034** (EMR PR 9 takes 00032 and EMR PR 13 00033) and **OpenAPI 1.23.0** (EMR takes 1.21.0 and 1.22.0), with departures 29–42. Off by default: every letter route answers 404 while the hospital's analysis switch is off, and 403 `named_access_off` while its named-access position is `off`, which it is everywhere until the CLI raises the demo hospital to `letters_only`.
 
-- **Task 18: Clearance tables and the transition trigger.** `clearances`, `clearance_covered`, `clearance_events`, `named_access_switch`. The trigger enforces the statuses, the 12-month cap, narrowing only, `would_empty`, and `version`. The platform side's `same_side`, `same_person` and actor-kind checks are in the same trigger (**T15**, even in SQL). The named-access switch rows are `off`/`letters_only`/`on`, global and per hospital, and `above_global` is a CHECK through a function. Tests: T15, the transitions table, RLS, Down/Up.
-- **Task 19: Hospital routes.** `GET/POST /hospital/clearances`, `GET …/{id}`, `GET …/{id}/pages/{n}`, `POST …/{id}/revoke|narrow`, with step-up on writes and `Idempotency-Key`. Multipart limits are checked before anything is stored (413 `file_too_large`, 422 `end_date_too_late`, `not_eligible`, `not_eligible_platform`). Live upload gives 503 `unavailable` until the documents service exists. Demo pages come from fixture PNGs, refused outside the demo configuration. Pages are `image/png`, `no-store`, `inline` and `nosniff`, and audited (`clearance.viewed`). Tests: T10 (another hospital's letter or page is 404), T19 (body fields ignored), the refusal table, the audit schemas.
-- **Task 20: Ending and reminders.** The nightly step 3 (§11): `ended` and `clearance_ended` after the hospital's midnight; reminders at 30, 7 and 1 days are recorded (`clearance.reminder_sent`), and delivery waits for notifications. Tests: T12 (the midnight half), with a clock in a far time zone.
+### Task 18: Migration 00034: letters, people covered, events and the named-access switch
+
+**Files:**
+- Create: `services/core/internal/db/migrations/00034_clearances.sql`, `services/core/internal/db/clearances_integration_test.go`
+- Modify: `services/core/internal/db/db_integration_test.go` (`TestMigrateUpFromEmpty`, `TestRLSWithoutHospitalSeesNothing`)
+
+**Interfaces:**
+- Role `mhai_clearance_rules` (NOLOGIN, NOINHERIT, no members), as 00030's `mhai_analyst_rules`: it owns the triggers and functions. Its reads: users' id, hospital, active flag, email and display name; `user_roles`; `user_mfa.enabled`; hospitals' id, status, time zone and demo flag; the analysis switch; the clearance audit entries. Its writes: the clearance tables only.
+- `named_access_switch (hospital_id NULL, position off|letters_only|on, the three sign-off references, since, changed_by, ever_signed_off)`, one row per scope, as `analysis_switch`. A hospital row above the global row is refused (`CHECK (mhai_named_access_within_global(hospital_id, position))`, P0001-free: 23514). `mhai_named_access_position(hospital)` is the lower of the two, `off` when either is missing; a gateway caller learns only its own hospital's. Writers: `mhai_platform` (Plan 11b; no demo references), the CLI's lowering (`mhai_provision`, `position = 'off'` only), and `mhai_named_access_demo_raise(hospital or NULL)` (`letters_only` with `DEMO-SYNTHETIC`, only where the analysis switch of that scope carries demo references and the row was never signed off).
+- `clearances (id, hospital_id, status, refused_reason, signed_by, signer_title, letter_date, end_date, renews, uploaded_by/at, verified_by/at, rejected_by/at, reject_reason, reject_note, revoked_by/at, revoked_side, revoke_reason, revoke_note, ended_at, pages, sha256, demo, version)`, with a CHECK per status (`refused` ⇔ a reason, `checking`/`refused` ⇔ no pages, and so on). `clearance_covered (hospital_id, clearance_id, user_id, side hospital|platform, removed_at/by, removed_reason, removed_note)`: people by user id, never by email (departure 34). `clearance_events (id, seq, hospital_id, clearance_id, kind, at, by_user, side, reason, note, person, days, xact)`.
+- The rules (triggers, for every writer except a superuser acting as itself, as 00030):
+  - insert: as `mhai_gateway`, by `mhai_current_user()`, an active hospital admin with two-step, of `mhai_current_hospital()`; analysis `on` (else `not_found`) and named access `letters_only` or `on` (else `named_access_off`); status `checking`, version 1; `end_date` after the hospital's today and no later than 12 months on (`end_date_too_late`); `letter_date` within the 12 months up to today (`invalid`); `demo` set by the trigger (the hospital is the demo, under a demo analysis switch), never by the caller;
+  - update: `version` is the old one plus 1, whatever the caller sends; the letter's facts never change; the transitions are exactly `checking → waiting|refused` (the documents outcome: in this PR, the demo function only), `waiting → active|rejected` (`mhai_platform` only, by `mhai_current_user()`, an active platform admin with two-step who is not covered by the letter, removed or not, `same_person`, and not linked to the hospital, `same_side`: **T15**), `waiting|active → revoked` (a hospital admin of the hospital, side `hospital`; or a platform admin under the same two checks, side `platform`), `active → ended` (once `end_date` is before the hospital's today) and a same-status update that changes nothing but the version (narrowing); anything else is `conflict`; no delete;
+  - people covered: inserted only with their letter, in its transaction, each eligible (`not_eligible`, `not_eligible_platform`), at most 20; a person is only ever removed (narrowing), by a hospital admin of the hospital, from a letter that is `checking`, `waiting` or `active`, and never the last (`would_empty`);
+  - every insert, transition and removal writes an event (`uploaded`, `ready`, `refused`, `verified`, `rejected`, `narrowed` (one per person), `revoked`, `ended`, `reminded`), and a deferred constraint trigger refuses, at commit, an event without its `clearance.<kind>` audit entry (entity `clearance`, the event's id in the payload, by its actor, in its hospital): departure 33.
+- Gateway functions (each re-checks the gate and the caller, and takes the hospital from the session): `mhai_clearance_gate()`, `mhai_clearance_today()` (today, `max_end_date`, the zone, whether letters here are demo letters), `mhai_clearance_check(letter_date, end_date, renews, staff ids, platform emails)` (the refusals before anything is stored: the people who aren't eligible, and the platform admins' ids), `mhai_clearance_create(...)`, `mhai_clearance_demo_ready(id, pages, sha256)` (refused for a letter that isn't a demo letter), `mhai_clearance_revoke(id, version, reason, note)`, `mhai_clearance_narrow(id, version, remove, reason, note)`, `mhai_clearance_names(users)` (display names of this hospital's people and of the platform admins its letters name), `mhai_clearance_pending()` (this transaction's events still to audit). The gateway reads the three tables under RLS for its hospital and writes none of them directly.
+- Job function: `mhai_clearance_due(now)` (`mhai_analysis_job`: the hospitals with a letter to end or a reminder due); and, as the gateway for that hospital, `mhai_clearance_nightly(now)` (Task 20).
+
+- [ ] **Step 1: Write the failing tests:** `TestT15TriggerRefusesWrongVerifier` (**T15**: a hospital admin, a covered platform admin, a platform admin with an account domain of the hospital, and an auditor, each refused even by a direct `UPDATE`); `TestClearanceTransitionsTable` (every pair of statuses: only the listed ones pass, each only for its actor); `TestClearanceInsertRules` (12-month cap, an end date not after today, a stale or future letter date, `demo` set by the trigger, another hospital's letter as `renews`); `TestNarrowOnlyRemoves` (`would_empty`, no re-adding, no delete, version up by one); `TestClearanceEventsAudited` (the commit refused without the entry, or with another event's); `TestNamedAccessSwitch` (writers, `above_global`, the demo raise only for the demo); `TestClearanceGrants` (the gateway's reads under RLS, no direct write; the helpers nobody's); `TestMigration00034DownUp`.
+- [ ] **Step 2: Run (Go, remote):** `go test -race -tags integration ./internal/db/...` → fail.
+- [ ] **Step 3:** Write the migration.
+- [ ] **Step 4:** Run the tests.
+- [ ] **Step 5:** Commit: "Migration 00034: clearance letters, their people and events, and the named-access switch".
+
+### Task 19: The hospital routes
+
+**Files:**
+- Create: `services/core/internal/analysis/letters/{letters.go,routes.go,upload.go,pages.go,*_test.go,routes_integration_test.go}`
+- Modify: `internal/server/server.go`, `internal/httpx/errors.go` (`named_access_off` 403, `file_too_large` 413, `file_type` 415, `end_date_too_late`, `not_eligible`, `not_eligible_platform`, `would_empty` 422), `internal/audit/{schemas.go,catalogue.go}`, `openapi.yaml` (1.23.0), `docs/specs/generated/permissions.md`
+
+**Interfaces:**
+- `GET /hospital/clearances` → `{clearances, today, max_end_date}` (newest first, at most 200); `GET /hospital/clearances/{id}` → one `ClearanceOut` as contract §10 has it (`revocation.day` the hospital's day; an `active` letter past its end date is sent as `ended`). Hospital admins with two-step; the gate first.
+- `POST /hospital/clearances`: multipart, `Idempotency-Key` required. In order: the gate (404, 403 `named_access_off`, 403 `forbidden` when the role, account or two-step is gone); not multipart, 415 `file_type`; a body past the API's limit, 413 `file_too_large`; an unknown or repeated field (a `hospital_id`, an `uploaded_by`, a `status`), a bad shape, 0 or more than 20 people, 422 `validation_failed` (T19); step-up (403 `mfa_required` without a code; `mfa_invalid`, `mfa_locked`); then `mhai_clearance_check`: 422 `end_date_too_late`, 422 `not_eligible` with `ids`, 422 `not_eligible_platform` with `emails`, 422 `validation_failed` for `renews`; then, outside the demo, 503 `unavailable` with nothing stored. In the demo: the letter, its people, `ready` with the fixture's pages, the entries, 201 with the letter (`waiting`). The file is never kept, parsed or logged: only its size bound and SHA-256.
+- `GET /hospital/clearances/{id}/pages/{n}`: another hospital's letter, an unknown page, 404; no pages yet, 503 `not_ready` (departure 3); not a demo letter, 503 `unavailable`; otherwise `clearance.viewed {page}` is appended and committed, then the fixture page as `image/png`, `Cache-Control: no-store`, `Content-Disposition: inline`, `X-Content-Type-Options: nosniff`.
+- `POST …/{id}/revoke {reason, note?, version?, mfa_code|backup_code}` and `POST …/{id}/narrow {remove, reason, note?, version, mfa_code|backup_code}`: `Idempotency-Key` required, step-up, 409 `conflict` on a stale version or a status that can't change, 422 `would_empty`; `other` needs a note (1–500 characters, no control characters). The reply is the letter.
+- Audit: `clearance.uploaded`, `.ready`, `.narrowed` (`person`, `reason`), `.revoked` (`side`, `reason`), `.ended`, `.reminder_sent` (`days`, `delivery: pending`), `.viewed` (`page`), and for Plan 11b `.refused`, `.verified`, `.rejected`; ids and codes only, never a note, a signer, a file name or an email. The ones mhai-web has kinds for are mapped (`named_access`, target `clearance`); `clearance.ready` and `named_access.changed` are sent bare.
+
+- [ ] **Step 1: Write the failing tests:** `TestLetterGate` (analysis off 404; named access off 403; a clinician 403); `TestT10OtherHospitalsLetterIs404` (**T10**: the letter, its page, revoke and narrow); `TestT19BodyFieldsRefused` (**T19**); `TestUploadRefusals` (the table above, nothing stored after any); `TestLiveUploadIs503AndStoresNothing`; `TestDemoUploadAndPages` (headers, the entry per page, `not_ready`, 404 past the last page); `TestRevokeAndNarrow` (versions, `would_empty`, every entry, and no note, signer or email in an entry or a log line); unit: `TestParseUpload`, `TestFixturePagesArePNG`, `TestLetterActionsSchemas`.
+- [ ] **Step 2: Run (Go, remote):** `go test -race ./internal/analysis/letters/... ./internal/audit/... && go test -race -tags integration ./internal/analysis/letters/...` → fail.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the tests, `permgen` and `oasdiff`.
+- [ ] **Step 5:** Commit: "Clearance letters on the hospital side: upload, list, pages, revoke and narrow, every action audited".
+
+### Task 20: Ending and reminders, and the demo switch
+
+**Files:**
+- Create: `services/core/internal/analysis/letters/nightly.go` (+ integration test)
+- Modify: `internal/analysis/nightly.go` (an `After` step), `cmd/core/serve.go`, `cmd/core/analysis.go` (+ tests)
+
+**Interfaces:**
+- Each nightly tick, after the analysis steps: `mhai_clearance_due(now)` as `mhai_analysis_job`, then per hospital, as the gateway with that hospital and no user, `mhai_clearance_nightly(now)`: `active → ended` once `end_date` is before the hospital's today (access already ended at the hospital's midnight through the cover check, PR 8), and one `reminded` event at the smallest of 30, 7 and 1 days that applies, once per letter and number. The entries (`clearance.ended`, `clearance.reminder_sent` with `delivery: pending`) in the same transaction. Delivery waits for notifications.
+- `core analysis named-access demo <hospital>` (`letters_only` for the demo hospital and the global row, `DEMO-SYNTHETIC`) and `core analysis named-access off <hospital>|--global`, each audited `named_access.changed`. `on` waits for PR 8.
+
+- [ ] **Step 1: Write the failing tests:** `TestT12EndsAtHospitalMidnightAndReminders` (**T12**, midnight half: hospitals in `Pacific/Kiritimati` and `Pacific/Pago_Pago`; a letter whose end date is the hospital's today stays active, one whose end date was yesterday there is ended and audited; reminders once per letter and number over two runs); `TestNamedAccessDemoCLI` (refuses a hospital that isn't the demo, audits).
+- [ ] **Step 2–4:** Run, implement, run.
+- [ ] **Step 5:** Commit: "End letters after the hospital's last day, record their reminders, and raise named access for the demo only".
+
+**PR 7:** run `security-review` and open it.
+
+#### Departures (PR 7)
+
+29. **Numbers.** Migration 00034, OpenAPI 1.23.0 (coordinator).
+30. **Two gates, re-read every time (the more private reading).** A letter route needs the analysis switch on (404, as every Analysis route) and named access at `letters_only` or `on` (403 `named_access_off`, contract §10). The hospital-admin role, the active account and two-step are re-read inside each transaction (403 `forbidden`), not taken from the 30-second cache.
+31. **No direct writes.** The design lets the gateway insert into the clearance tables; here it only reads them (its hospital, RLS) and writes through the functions, as departure 20. `mhai_platform` gets no grant on them, nor any write on `named_access_switch`, in this PR: its verify, reject and revoke functions and its two-person raise, each with an audit check, are Plan 11b's (security review: no write path that nothing audits). A signed-off hospital row is never raised under a demo global row, nor the global row given demo references over a signed-off hospital that is on. The trigger already holds the platform side's rules, and T15 is tested with a test-only grant.
+32. **`same_side` without a domain list.** No hospital has a list of allowed domains yet, so a platform admin is on the hospital's side when their email's domain is the domain of any account of the hospital, active or not. A shared public domain therefore refuses (fails closed). Plan 11b may add a domain list and account links under the same function, `mhai_clearance_same_side`.
+33. **Every letter action is an event, audited at commit.** As departures 21 and 25: the triggers write `clearance_events` whoever writes, and a deferred check refuses an event without its entry. Narrowing writes one event and one entry per person removed (contract §10). The documents outcome `ready` has its own action, `clearance.ready` (additive; sent bare until mhai-web has a kind).
+34. **People by id, never by email.** Platform admins named on upload are resolved to their account ids then; no email is stored, audited or logged. The 422 `not_eligible_platform` carries no email list (the contract asks for one): which addresses are active platform admins with two-step is the platform's to say, not a lookup for any hospital admin (security review). The residual: one guess per fresh step-up code, and a covered platform admin's display name on the letter.
+35. **The upload stays within the API's 64 KiB body limit.** Core never streams a 10 MB file: the live path waits for the documents service (H5), which should take the file directly, so a live upload is 503 `unavailable` after the checks, with nothing stored. The demo accepts a small letter, keeps only its SHA-256, and serves fixture pages drawn in code (marked SAMPLE, not stamped with the viewer's name, which is the documents service's job). A body over the limit is 413 `file_too_large` where the handler sees it (422 `validation_failed` from the idempotency layer, 413 `payload_too_large` over NATS).
+36. **Letter dates.** `letter_date` must be within the 12 months up to the hospital's today (the design is silent; a future or stale letter is refused).
+37. **`Idempotency-Key` is required** on the three letter writes (422 `validation_failed` without): one click, one letter. The generic store may keep the reply: it holds no patient data.
+38. **Reminders** are recorded once per letter and number, at the smallest of 30, 7 and 1 days that applies (a letter uploaded with 5 days left gets the 7-day one only), with `delivery: pending` until notifications exist. Ending and reminders run for every hospital with a letter due, whatever its switches.
+39. **The named-access switch's only writers here are the CLI's demo raise and its lowering** (`named_access.changed`, sent bare), as departure 5 does for analysis. The two-person raise is Plan 11b's.
+40. **Revoking a `checking` letter is 409 `conflict`** (the design's lifecycle); in the demo a letter is `waiting` at once.
+41. **A platform revoke needs only an active platform admin with two-step** (security review): `same_side` and `same_person` guard who may verify or reject (§8.10); revoking only takes access away, so a hospital can't block it by holding an account in the platform's email domain. mhai-web's Plan 11b ruling refuses a covered or linked admin's revoke too; the more private reading here is that removing access must always be possible.
+42. **`mhai_clearance_nightly` acts only for the last hour** (`p_now` no older than an hour; security review), so no caller records a reminder early.
 
 ### PR 8: named access (design §8.2–§8.7)
 
@@ -689,14 +761,14 @@ These are the design's R-A1 to R-A5, with P2's and P5's numbers reported in PR 3
 | T7 | `TestT7NarrowViewEmptyLists` (6) |
 | T8 | `TestT8ListAndCapLimits` (13) |
 | T9 | `TestT9RowsWithinPeriodAtMostTen` (13) |
-| T10 | `TestCellsRefusesUnfrozenAndForeignPeriod` (9), `TestOtherHospitalGetsNothing` (10), `TestT10ForeignDrillIs422` (13); letters (19) |
-| T11–T12 | Task 21; T12 midnight (20) |
+| T10 | `TestCellsRefusesUnfrozenAndForeignPeriod` (9), `TestOtherHospitalGetsNothing` (10), `TestT10ForeignDrillIs422` (13); `TestT10OtherHospitalsLetterIs404` (19) |
+| T11–T12 | Task 21; T12 midnight: `TestT12EndsAtHospitalMidnightAndReminders` (20) |
 | T13 | `TestPatientsRoleRemovedRefusedAtOnce` (13), `TestRemoveAnalystEndsPatientAccessAtOnce` (17); named (21) |
 | T14 | `TestPatientsMFAResetRefused` (13); named (21) |
-| T15 | Task 18 |
+| T15 | `TestT15TriggerRefusesWrongVerifier` (18) |
 | T16–T17 | Task 22, 23 |
 | T18 | `TestAuditFailRollsBack` (13); named (22) |
-| T19 | `TestViewInsertNeedsSelfAsViewer` (12); Task 19, 22 |
+| T19 | `TestViewInsertNeedsSelfAsViewer` (12); `TestT19BodyFieldsRefused` (19); Task 22 |
 | T20 | Task 23 |
 | T21 | `TestColdBodyOnceUnderRace`, `TestOverCapIs503AndUnstored` (9) |
 | T22 | `TestWorkerRolesSeeNoAnalysis` (2) |
