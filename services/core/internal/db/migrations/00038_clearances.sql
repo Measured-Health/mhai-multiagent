@@ -1,7 +1,7 @@
 -- Clearance letters, hospital side, and the named-access switch (analysis
 -- backend design §7, §8.1, §8.10, §10; plan Tasks 18-20, departures
--- 29-40; ADR 0015). NUMBERED 00034 (coordinator): EMR PR 9 takes 00032
--- and EMR PR 13 takes 00033.
+-- 29-40; ADR 0015). NUMBERED 00038 (coordinator): EMR PR 9 took 00032, EMR PR 13
+-- 00033, and the hospital and platform route PRs take 00035-00037.
 --
 -- Nothing here turns anything on: with no switch row the named-access
 -- position is 'off', and every letter function refuses a hospital whose
@@ -51,7 +51,7 @@ BEGIN
     -- Nobody may already act as it: it writes letters and the switch.
     IF EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE g.rolname = 'mhai_clearance_rules') THEN
         RAISE EXCEPTION USING ERRCODE = 'object_in_use',
-            MESSAGE = '00034: mhai_clearance_rules already has members; remove them first';
+            MESSAGE = '00038: mhai_clearance_rules already has members; remove them first';
     END IF;
     -- The runner acts as the owners while it hands functions over and
     -- grants on the analysis position (00021's reader owns it).

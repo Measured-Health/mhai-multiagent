@@ -82,7 +82,7 @@ var dbTxAllowedFiles = map[string]string{
 	// role no route reaches (TestRoutesCantReachAnalysisJobPool), with no
 	// principal; one core copy at a time (Acquire for the advisory lock).
 	"internal/analysis/store.go": "the analysis nightly run's database access (db.WithAnalysisJob) and its lock (Acquire)",
-	// Clearance letters (00034): the nightly run lists the hospitals with a
+	// Clearance letters (00038): the nightly run lists the hospitals with a
 	// letter due as mhai_analysis_job, then ends and reminds each as the
 	// gateway for that hospital with no user (no token: a background run).
 	"internal/analysis/clearances.go":      "the letters' due list as the analysis nightly role (db.WithAnalysisJob)",

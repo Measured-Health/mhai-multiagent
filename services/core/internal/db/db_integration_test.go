@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 38}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -342,7 +342,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	alertTables := []string{"alerts", "alert_deliveries", "alert_settings", "alert_units", "alert_levels", "alert_recipients",
 		"user_notification_settings"}
 
-	// A letter, its person and an event (00034), so they have rows to hide.
+	// A letter, its person and an event (00038), so they have rows to hide.
 	letter := uuid.New()
 	for _, q := range []string{
 		`INSERT INTO clearances (id, hospital_id, signed_by, signer_title, letter_date, end_date, uploaded_by)
@@ -396,7 +396,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			continue
 		}
 		if table == "named_access_switch" || table == "clearance_check_refusals" {
-			// 00034: read through mhai_named_access_position, or written by
+			// 00038: read through mhai_named_access_position, or written by
 			// mhai_clearance_note_refusal, only.
 			requireDenied(t, err, "gateway reading named_access_switch")
 			continue

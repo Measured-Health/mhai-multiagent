@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - Patient Analysis PR 7: clearance letters, hospital side (migration
-  **00034**, OpenAPI **1.23.0**; off by default: every letter route answers
+  **00038**, OpenAPI **1.27.0**; off by default: every letter route answers
   404 while the hospital's analysis switch is off and 403
   `named_access_off` while its named-access position is `off`, which it is
   everywhere until `core analysis named-access demo` raises the demo

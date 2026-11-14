@@ -18,7 +18,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
-// Migration 00034 (analysis backend plan Task 18): clearance letters, the
+// Migration 00038 (analysis backend plan Task 18): clearance letters, the
 // people they cover, their events and the named-access switch. The rules
 // are triggers, for every writer; the superuser seeds fixtures (exempt, as
 // it can disable any trigger) and every rule is exercised as mhai_gateway
@@ -625,7 +625,7 @@ func TestClearanceGrants(t *testing.T) {
 	}
 }
 
-func TestMigration00034DownUp(t *testing.T) {
+func TestMigration00038DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
@@ -660,7 +660,7 @@ func TestMigration00034DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	if left != 0 {
-		t.Errorf("after down, %d objects or grants of 00034 remain", left)
+		t.Errorf("after down, %d objects or grants of 00038 remain", left)
 	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)

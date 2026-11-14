@@ -1,12 +1,12 @@
 // Package letters serves clearance letters on the hospital side (analysis
-// backend design §8.1, §9; plan Tasks 18-20, migration 00034): the list,
+// backend design §8.1, §9; plan Tasks 18-20, migration 00038): the list,
 // one letter, its pages, upload, revoke and narrow, for hospital admins
 // with two-step, while the hospital's analysis switch is on (404
 // otherwise) and its named-access position is letters_only or on (403
 // named_access_off otherwise). Off by default: no hospital has a
 // named-access row until the CLI raises the demo hospital.
 //
-// The rules live in the database (00034's triggers and functions, for
+// The rules live in the database (00038's triggers and functions, for
 // every writer): this package only calls the functions and appends the
 // audit entries the database demands before it lets the transaction
 // commit. A letter is never parsed here: a live upload is 503 until the
@@ -54,7 +54,7 @@ type refusal struct{ code string }
 
 func (r refusal) Error() string { return "letters: refused: " + r.code }
 
-// refusals maps 00034's P0001 messages to problem codes.
+// refusals maps 00038's P0001 messages to problem codes.
 var refusals = map[string]string{
 	"not_found":             "not_found",
 	"named_access_off":      "named_access_off",
@@ -393,7 +393,7 @@ func load(ctx context.Context, tx pgx.Tx, id *uuid.UUID) ([]ClearanceOut, error)
 }
 
 // AuditPending appends one entry per letter event of this transaction
-// still without one (mhai_clearance_pending), in order: 00034 refuses to
+// still without one (mhai_clearance_pending), in order: 00038 refuses to
 // commit an event without its entry. The payload is the event's id and
 // codes only. It returns how many it appended.
 func AuditPending(ctx context.Context, tx pgx.Tx, requestID string) (int, error) {

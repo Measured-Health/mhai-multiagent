@@ -386,7 +386,7 @@ func (d Deps) change(w http.ResponseWriter, r *http.Request, what string, id uui
 
 // RefusalsPerDay is how many eligibility checks one person may spend on
 // refusals in a hospital day (security review): each check reserves a slot
-// first, atomically and committed (00034, mhai_clearance_reserve_check), so
+// first, atomically and committed (00038, mhai_clearance_reserve_check), so
 // parallel checks can't all pass; a check that wasn't an eligibility
 // refusal gives its slot back. Past the limit the upload is 429
 // rate_limited, and the first refusal past it writes one flagged entry.

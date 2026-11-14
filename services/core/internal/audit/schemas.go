@@ -576,9 +576,9 @@ func init() {
 		"reason", OneOf("removed", "clinician_removed")), Required: []string{"change_id", "via", "reason"}})
 
 	// Clearance letters, hospital side (analysis plan Tasks 18-20,
-	// migration 00034): the letter is the row's entity; the payload is the
+	// migration 00038): the letter is the row's entity; the payload is the
 	// database's event id and codes. Never a note, a signer, a file name or
-	// an email. 00034 refuses to commit a letter change without its entry.
+	// an email. 00038 refuses to commit a letter change without its entry.
 	Register("clearance.uploaded", Schema{Fields: fields("event_id", id), Required: []string{"event_id"}})
 	Register("clearance.ready", Schema{Fields: fields("event_id", id, "pages", Check(Int(1, 20))),
 		Required: []string{"event_id", "pages"}})
