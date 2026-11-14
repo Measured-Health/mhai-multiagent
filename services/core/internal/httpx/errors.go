@@ -55,14 +55,22 @@ var Codes = map[string]int{
 	// (the body names who and when); alert settings with no recipient.
 	"already_handled": http.StatusConflict,
 	"no_recipients":   http.StatusUnprocessableEntity,
-	// The platform admin routes (additive): a route core has no feature for
-	// yet; the team's own-role and last-admin rules; the two-person rule
-	// on a hold's lift and a lapsed request.
-	"not_implemented": http.StatusNotImplemented,
-	"own_role":        http.StatusConflict,
+	// The hospital admin's staff routes (frontend requirements §5.1;
+	// Analysis Task 17, additive): an admin's change to their own account
+	// that isn't allowed; no active hospital admin would be left; the
+	// Analyst grant's refusals (migration 00030); and a route the app
+	// calls that core has no feature behind yet.
+	"self_change":     http.StatusForbidden,
 	"last_admin":      http.StatusConflict,
-	"same_person":     http.StatusConflict,
-	"expired":         http.StatusConflict,
+	"analysis_off":    http.StatusConflict,
+	"analyst_cap":     http.StatusConflict,
+	"not_eligible":    http.StatusUnprocessableEntity,
+	"not_implemented": http.StatusNotImplemented,
+	// The platform admin routes (additive): the team's own-role rule, and
+	// the two-person rule on a hold's lift and a lapsed request.
+	"own_role":    http.StatusConflict,
+	"same_person": http.StatusConflict,
+	"expired":     http.StatusConflict,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -98,9 +106,13 @@ var titles = map[string]string{
 	"level_not_supported": "Level not supported",
 	"already_handled":     "Already handled",
 	"no_recipients":       "No recipients",
-	"not_implemented":     "Not implemented",
+	"self_change":         "Not allowed on your own account",
+	"last_admin":          "Last hospital admin",
+	"analysis_off":        "Analysis is off",
+	"analyst_cap":         "Analyst limit reached",
+	"not_eligible":        "Not eligible",
+	"not_implemented":     "Not available",
 	"own_role":            "Own role",
-	"last_admin":          "Last platform admin",
 	"same_person":         "Same person",
 	"expired":             "Expired",
 }
@@ -135,9 +147,13 @@ var details = map[string]string{
 	"level_not_supported": "Only the de-identified list is available.",
 	"already_handled":     "Someone has already handled this alert.",
 	"no_recipients":       "Choose the queue or at least one clinician.",
-	"not_implemented":     "This is not available yet.",
+	"self_change":         "You can't make this change to your own account.",
+	"last_admin":          "The hospital needs at least one active hospital admin.",
+	"analysis_off":        "Patient Analysis is off for this hospital.",
+	"analyst_cap":         "The hospital already has the most analysts allowed.",
+	"not_eligible":        "This person can't be given this role.",
+	"not_implemented":     "This isn't available yet.",
 	"own_role":            "You can't change your own role.",
-	"last_admin":          "There must be at least one platform admin.",
 	"same_person":         "A different person must approve this.",
 	"expired":             "This request has lapsed.",
 }

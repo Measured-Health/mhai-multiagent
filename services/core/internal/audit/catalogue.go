@@ -292,6 +292,14 @@ var Catalogue = map[string]Entry{
 	// takes facts not agreed for these yet (H6); sent bare until they are.
 	"analyst.granted": withheld(),
 	"analyst.removed": withheld(),
+	// The hospital admin's staff and settings changes (internal/hospital):
+	// shown on the hospital's own Activity page; for the platform app,
+	// sent bare until mhai-web's staff kinds take their facts (H6).
+	"staff.roles_changed":       withheld(),
+	"staff.specialty_changed":   withheld(),
+	"staff.deactivated":         withheld(),
+	"staff.reactivated":         withheld(),
+	"hospital_settings.changed": withheld(),
 
 	// EMR connections (EMR design §12.6): mhai-web's Plan 13 kinds, with
 	// the connection as the target. A resume has no kind yet: sent bare.

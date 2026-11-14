@@ -229,32 +229,40 @@ func teamCheck(ctx context.Context, tx pgx.Tx, id, you uuid.UUID, version *int, 
 }
 
 // revokeMember revokes every open session of a platform member and returns
-// their ids, for the denylist after commit.
-func revokeMember(ctx context.Context, tx pgx.Tx, id uuid.UUID) ([]string, error) {
-	rows, err := tx.Query(ctx, `UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL RETURNING id`, id)
+// each one's access token id (session id to token ids, as
+// auth.Service.DenySessions takes them), for the denylist after commit.
+func revokeMember(ctx context.Context, tx pgx.Tx, id uuid.UUID) (map[string][]string, error) {
+	rows, err := tx.Query(ctx, `UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL
+		RETURNING id, access_jti`, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var sids []string
+	out := map[string][]string{}
 	for rows.Next() {
 		var sid uuid.UUID
-		if err := rows.Scan(&sid); err != nil {
+		var jti *uuid.UUID
+		if err := rows.Scan(&sid, &jti); err != nil {
 			return nil, err
 		}
-		sids = append(sids, sid.String())
+		var js []string
+		if jti != nil {
+			js = []string{jti.String()}
+		}
+		out[sid.String()] = js
 	}
-	return sids, rows.Err()
+	return out, rows.Err()
 }
 
 // denyAfterCommit puts the revoked sessions on the denylist. A failure is
 // logged by ids only: revoked_at still refuses them within the guard's
 // cache time.
-func (d Deps) denyAfterCommit(r *http.Request, sids []string) {
-	if len(sids) == 0 || d.Auth == nil {
+func (d Deps) denyAfterCommit(r *http.Request, revoked map[string][]string) {
+	if len(revoked) == 0 || d.Auth == nil {
 		return
 	}
-	if err := d.Auth.DenySessions(r.Context(), sids); err != nil {
+	// After commit, whatever the caller does: the revocation has happened.
+	if err := d.Auth.DenySessions(context.WithoutCancel(r.Context()), revoked); err != nil {
 		d.log().Error("platform: team write: denylist write failed", "request_id", httpx.RequestIDFrom(r.Context()),
 			"reason", "denylist_unavailable")
 	}
@@ -309,7 +317,7 @@ func (d Deps) teamPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	rid := httpx.RequestIDFrom(r.Context())
 	var out TeamMember
-	var sids []string
+	var sids map[string][]string
 	err = d.tx(r.Context(), func(tx pgx.Tx) error {
 		if err := teamLock(r.Context(), tx); err != nil {
 			return err
@@ -398,7 +406,7 @@ func (d Deps) teamDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rid := httpx.RequestIDFrom(r.Context())
-	var sids []string
+	var sids map[string][]string
 	err = d.tx(r.Context(), func(tx pgx.Tx) error {
 		if err := teamLock(r.Context(), tx); err != nil {
 			return err

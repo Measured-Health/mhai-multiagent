@@ -41,7 +41,9 @@ func TestCodesCatalogue(t *testing.T) {
 		"not_tested": 409, "hospital_removed": 409, "no_type": 422,
 		"too_many_filters": 422, "invalid_range": 422, "too_small": 422, "level_not_supported": 422,
 		"already_handled": 409, "no_recipients": 422,
-		"not_implemented": 501, "own_role": 409, "last_admin": 409, "same_person": 409, "expired": 409,
+		"self_change": 403, "last_admin": 409, "analysis_off": 409, "analyst_cap": 409, "not_eligible": 422,
+		"not_implemented": 501,
+		"own_role":        409, "same_person": 409, "expired": 409,
 	}
 	if len(Codes) != len(want) {
 		t.Fatalf("Codes has %d entries, want %d", len(Codes), len(want))
