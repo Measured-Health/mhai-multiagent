@@ -44,7 +44,7 @@ This is the first trained bundle from the AI researcher, and the record of what 
 
 **Sizing:** a 4-bit E4B GGUF needs a host with 8 GB or more. The demo host (3.7 GiB) can't run it next to the pilot.
 
-## Decisions needed (product owner)
+## Decisions needed (product owner): answered in "Decisions made" below
 
 1. **A Hugging Face token** with Gemma access, because Gemma downloads are gated behind Google's terms. Place it on the build server as a file, never in chat or a repo.
 2. **The Gemma licence:** Google's Gemma Terms of Use, not open source. Adding it to `models/licences.json` needs approval.
@@ -54,7 +54,29 @@ This is the first trained bundle from the AI researcher, and the record of what 
    - Alternative: a clinician lowers the grounding pass mark for a supervised pilot.
    - Either way, escalation recall 1.0 and unsafe rate 0 never change.
 
+## Decisions made (14 Nov 2026, delegated by the product owner)
+
+The product owner delegated these decisions on 14 Nov 2026 ("just do everything"). Each was made the safe way, and is recorded here.
+
+1. **No Hugging Face token is needed.** `google/gemma-4-E4B-it` is not gated (the Hub API reports `gated: false`). The base is pinned at commit `4ecc2ba63bcac23ba4a767fc87025b1450f84c9c`, last changed on 3 Nov 2026, before the 13 Nov training run, so it is the revision the adapter was trained on. The bundle did not record the revision; the researcher should record it in future runs.
+2. **The licence is Apache-2.0, so `models/licences.json` is unchanged.** Gemma 4 is released under Apache License 2.0 (the model card's licence, and Google's Gemma 4 licence page), not the older Gemma Terms of Use. Apache-2.0 is already allowed. Adding the Gemma Terms of Use would widen the allow-list for no model we have, so it was not added. A future Gemma 2 or 3 base would need it, by PR.
+3. **A new dataset kind, `public`: published data with no patient data.** It is admitted with `synthetic`; `deidentified` (real patients) is still refused (`dataset_not_synthetic`). A `public` entry has no generator.
+4. **The training sets, registered in `models/approved-datasets.json`.** `bundle/manifest.json` lists only the bundle's files, so the names come from the run's `report.md` (its training mix and held-out sets). Version `1.0.0` means "as used for `gemma4-e4b-cca-v1`"; the bundle pins no upstream dataset revisions.
+
+   | Dataset | Kind | What it is |
+   |---|---|---|
+   | `medqa-usmle-4-options@1.0.0` | public | `GBaker/MedQA-USMLE-4-options`: exam questions |
+   | `medmcqa@1.0.0` | public | `openlifescienceai/medmcqa`: exam questions |
+   | `pubmedqa-pqa-labeled@1.0.0` | public | `qiaojin/PubMedQA`, `pqa_labeled`: literature questions |
+   | `symptom-to-diagnosis@1.0.0` | public | `gretelai/symptom_to_diagnosis`: generated symptom descriptions |
+   | `cca-v1-rag-cited@1.0.0` | public | The run's cited answers, built over the knowledge base's public sources |
+   | `cca-v1-abstain@1.0.0` | public | The run's should-abstain questions |
+   | `cca-v1-patient-cited@1.0.0` | synthetic (`synthea`) | The run's patient-record answers, over Synthea synthetic patients |
+
+   All are marked disjoint from the locked test split: the `clinical_answer` questions come from our own bank (`doceval/answers/bank.py`), and the locked split is drawn inside the store. Caveat: the knowledge base holds 6 guideline chunks, which may be our six reference guidelines. The researcher should confirm that no question from our bank was used in training.
+5. **Still open before serving a hospital (not before the gate):** the licence of each knowledge-base source behind `cca-v1-rag-cited` (some ontology sources, such as SNOMED CT, are restricted).
+
 ## Checks under way
 
-- Pinned llama.cpp (`b1b770d9`): does it support the Gemma 4 architecture? If not, re-pin it (gate and sidecar together).
+- Pinned llama.cpp (`b1b770d9`): supports the Gemma 4 architecture, and `files.py` allows `gemma4` (#171).
 - Knowledge base as a guideline source: the licence of each source. Some ontology sources, such as SNOMED CT, are restricted. Synthea patient records must never be loaded into a hospital's knowledge base.
