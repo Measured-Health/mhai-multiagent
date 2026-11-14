@@ -714,7 +714,9 @@ func init() {
 		// Cloud model providers (plan Task 3): where the answer's text went
 		// and the cloud outcome code; optional (older workers send neither).
 		"egress", OneOf(config.EgressValues()...),
-		"cloud_outcome", OneOf(config.CloudOutcomes...))})
+		"cloud_outcome", OneOf(config.CloudOutcomes...),
+		// The escalation guard's reason codes (ADR 0016); optional.
+		"guard_reasons", List(len(config.GuardReasons), OneOf(config.GuardReasons...)))})
 	Register("query.failed", Schema{Fields: drained("error", errorCode, "attempts", count)})
 	Register("query.cancelled", Schema{Fields: drained("reason", OneOf("user_deactivated", "hospital_deactivated", "account_unusable"))})
 	Register("job.dead_lettered", Schema{Fields: fields(

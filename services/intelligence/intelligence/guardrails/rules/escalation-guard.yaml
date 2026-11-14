@@ -1,0 +1,554 @@
+# Escalation guard rule set (guardrails/escalation_guard.py; ADR 0016).
+#
+# PILOT LIST, CLINICAL SIGN-OFF PENDING. This is a conservative starter list
+# of widely taught danger signs (WHO IMCI general danger signs, WHO maternal
+# danger signs, NEWS2, qSOFA, ADA hypoglycaemia levels, ACC/AHA severe
+# hypertension). It has not been reviewed by the clinical lead or a second
+# clinician (README "Pilot mode"). Until it is, every rule here may only make
+# an answer go to a clinician: no rule can make an answer pass.
+#
+# How it is read (the module docstring has the detail):
+# * Every pattern is a Python regular expression over the normalised text: the
+#   masked question plus the patient's symptoms and history, NFKC, casefolded,
+#   dashes as '-', '≥' as '>=', '°' and 'º' removed, 'µ' as 'u', whitespace
+#   collapsed. Write patterns in lower case.
+# * A word pattern does not count when a negation cue (negation.cues) stands
+#   within negation.window words before it in the same phrase; a phrase ends
+#   at punctuation or a word in negation.breaks. A pattern that starts with
+#   its own negation ("no fetal movement") is matched as written.
+# * Values beat words: a value (a number with its label, or a structured
+#   field) is read in the analyte's canonical unit. A word rule with
+#   unless_value does not count when that analyte has a value, so the value
+#   rules decide. A value rule fires on any value that meets it, from any
+#   source.
+# * Changing this file changes its SHA-256, which the module pins
+#   (RULES_SHA256): an edit without the code change refuses to load, and the
+#   worker refuses to start. Bump version with every change.
+schema: mhai.escalation_guard.rules/1
+name: escalation-guard
+version: "1.0.0"
+status: pilot
+clinical_signoff: pending
+description: Question-level red flags, missing patient information and dose scope; pilot list, clinical sign-off pending.
+
+negation:
+  cues: ["no", "not", "denies", "denied", "deny", "without", "negative", "nor", "never", "free of", "absence of", "ruled out"]
+  window: 3
+  breaks: ["and", "but", "with", "now", "then", "however", "although", "though", "yet", "plus", "also", "after", "since"]
+
+# Number labels for each analyte, in the canonical unit. units maps a unit
+# pattern to the factor that converts it to the canonical unit; bare reads a
+# number with no unit (at most max) with factor, and one above max with above
+# when given (glucose: up to 35 reads as mmol/L, above as mg/dL; null: a bare
+# number is not read). plausible bounds the converted value; anything outside is not read.
+# structured names the patient-data fields (top level, or under "vitals" or
+# "labs") read as numbers in the canonical unit.
+analytes:
+  glucose:
+    unit: mg/dL
+    labels: '(?:blood|capillary|plasma|serum|random|fasting|finger-?stick|finger-?prick|bedside)?\s*(?:glucose|sugars?)|\b(?:bg|cbg|rbs|fbs|fpg|rbg|bsl)\b|glucometer(?: reading)?'
+    units: {'mg/ ?dl': 1.0, 'mmol/ ?l': 18.0, 'mmol': 18.0}
+    bare: {max: 35, factor: 18.0, above: 1.0}
+    plausible: [5, 3000]
+    structured: [glucose_mg_dl, blood_glucose_mg_dl]
+  systolic_bp:
+    unit: mmHg
+    labels: '\b(?:systolic|sbp)\b(?:\s+(?:bp|blood pressure|pressure))?'
+    units: {'mm ?hg': 1.0}
+    bare: {max: 400, factor: 1.0}
+    plausible: [40, 300]
+    structured: [systolic_bp, sbp]
+  diastolic_bp:
+    unit: mmHg
+    labels: '\b(?:diastolic|dbp)\b(?:\s+(?:bp|blood pressure|pressure))?'
+    units: {'mm ?hg': 1.0}
+    bare: {max: 300, factor: 1.0}
+    plausible: [20, 200]
+    structured: [diastolic_bp, dbp]
+  heart_rate:
+    unit: /min
+    labels: '\b(?:hr|heart rate|pulse(?: rate)?|pr)\b'
+    units: {'bpm': 1.0, 'beats?(?: per |/)min(?:ute)?': 1.0, '/ ?min': 1.0}
+    bare: {max: 300, factor: 1.0}
+    plausible: [20, 300]
+    structured: [heart_rate, pulse]
+  respiratory_rate:
+    unit: /min
+    labels: '\b(?:rr|resp(?:iratory)? rate|breathing rate|respirations?)\b'
+    units: {'breaths?(?: per |/)min(?:ute)?': 1.0, '/ ?min': 1.0, 'bpm': 1.0}
+    bare: {max: 120, factor: 1.0}
+    plausible: [4, 120]
+    structured: [respiratory_rate, rr]
+  spo2:
+    unit: "%"
+    labels: '\b(?:spo2|sp02|sao2|o2 sats?|o2 saturation|oxygen sat(?:uration)?s?|sats|saturations?|pulse ox(?:imetry)?)\b'
+    units: {'%': 1.0, 'percent': 1.0}
+    bare: {max: 100, factor: 1.0}
+    plausible: [30, 100]
+    structured: [spo2, oxygen_saturation]
+  temperature:
+    unit: Cel
+    labels: '\b(?:temp(?:erature)?|t|fever|pyrexia|febrile)\b'
+    units: {'c\b': 1.0, 'celsius': 1.0, 'degrees? c(?:elsius)?': 1.0}
+    bare: {max: 45, factor: 1.0}
+    plausible: [25, 45]
+    structured: [temperature, temperature_c]
+    unit_alone: ['c\b', 'celsius', 'degrees? c(?:elsius)?']
+    # A Fahrenheit reading (a number then F) is converted in code: (F - 32) / 1.8.
+    fahrenheit: true
+  haemoglobin:
+    unit: g/dL
+    labels: '\b(?:hb|hgb|ha?emoglobin)\b'
+    units: {'g/ ?dl': 1.0, 'g/ ?l': 0.1}
+    bare: {max: 25, factor: 1.0}
+    plausible: [1, 25]
+    structured: [haemoglobin, hemoglobin, hb]
+  bilirubin:
+    unit: mg/dL
+    labels: '\b(?:total (?:serum )?bilirubin|bilirubin|bili|tsb|sbr)\b'
+    units: {'mg/ ?dl': 1.0, 'u ?mol/ ?l': 0.0585}
+    bare: {max: 60, factor: 1.0}
+    plausible: [0.1, 60]
+    structured: [bilirubin_mg_dl]
+  gcs:
+    unit: "1"
+    labels: '\b(?:gcs|glasgow(?: coma)?(?: scale| score)?)\b'
+    units: {'/ ?15': 1.0}
+    bare: {max: 15, factor: 1.0}
+    plausible: [3, 15]
+    structured: [gcs]
+  weight:
+    unit: kg
+    labels: '\b(?:weight|weighs|weighing|wt)\b'
+    units: {'kgs?\b': 1.0, 'kilo(?:gram)?s?': 1.0, 'g\b': 0.001, 'grams?': 0.001}
+    bare: null
+    plausible: [0.3, 400]
+    structured: [weight, weight_kg]
+    unit_alone: ['kgs?\b', 'kilo(?:gram)?s?\b']
+  hba1c:
+    unit: "%"
+    labels: '\b(?:hba1c|a1c|glycated ha?emoglobin)\b'
+    units: {'%': 1.0, 'percent': 1.0}
+    bare: {max: 25, factor: 1.0}
+    plausible: [3, 25]
+    structured: [hba1c]
+  creatinine:
+    unit: mg/dL
+    labels: '\b(?:creatinine|cr|creat)\b'
+    units: {'mg/ ?dl': 1.0, 'u ?mol/ ?l': 0.0113}
+    bare: null
+    plausible: [0.1, 30]
+    structured: [creatinine_mg_dl]
+  parasitaemia:
+    unit: "%"
+    labels: '\b(?:parasit(?:a?emia|e density|e count|es)|parasite load)\b'
+    units: {'%': 1.0, 'percent': 1.0}
+    bare: null
+    plausible: [0, 100]
+    structured: [parasitaemia]
+
+# Named conditions the rules share. A condition is one of:
+#   any: [pattern, ...]          one pattern matches (not negated)
+#   unless_value: analyte        (with any) not when that analyte has a value
+#   all: [condition, ...]        every one holds
+#   one_of: [condition, ...]     at least one holds
+#   value: {analyte, op, value}  a value of the analyte meets op value
+#   ref: name                    the named context below
+# Ages are read from the patient's structured age (years) and the question
+# ("3-month-old", "aged 2 years", "36 hours old", "day 3 of life"):
+# age_years and age_hours are analytes for value conditions.
+contexts:
+  pregnant:
+    one_of:
+      - any: ['pregnan', '\bgravid', 'gestation(?:al)? (?:age|week)', '\b\d+ ?(?:weeks?|wks?)(?:''|s)? (?:pregnant|gestation|ga)\b', 'antenatal', 'prenatal', '\btrimester', '\bg\d+ ?p\d+', '\bgdm\b', 'gestational diabetes', 'expecting (?:a baby|twins)', 'pre-?eclamp', '\beclamp', 'in labou?r\b']
+  postpartum:
+    any: ['post-?partum', 'post-?natal', 'after (?:giving birth|delivery|childbirth)', 'delivered (?:\d+|a|two|three|four|five|six|one) (?:days?|weeks?) ago', 'since (?:the )?delivery']
+  neonate:
+    one_of:
+      - any: ['new-?born', 'neonat', '\bnb\b']
+      - value: {analyte: age_hours, op: "<", value: 672}
+  child_under_5:
+    one_of:
+      - ref: neonate
+      - any: ['\binfant', '\btoddler', '\bbaby\b', '\bbabies\b', 'under-?fives?', '\bchild\b(?! ?bearing)', '\bchildren\b', '\bkid\b', '\bboy\b', '\bgirl\b']
+        unless_value: age_years
+      - value: {analyte: age_years, op: "<", value: 5}
+  adult_or_unknown:
+    one_of:
+      - value: {analyte: age_years, op: ">=", value: 12}
+      - all:
+          - any: ['\bchild\b', '\bchildren\b', '\binfant', '\btoddler', 'new-?born', 'neonat', '\bbaby\b', '\bboy\b', '\bgirl\b', '\bkid\b', '\bpaediatric', '\bpediatric']
+            negate: true
+          - value: {analyte: age_years, op: missing, value: 0}
+  fever:
+    one_of:
+      - any: ['\bfever', '\bfebrile', 'pyrexi', 'high temperature', 'running a temperature', '\bhot to (?:the )?touch', '\brigou?rs\b']
+      - value: {analyte: temperature, op: ">=", value: 38.0}
+  altered_consciousness:
+    one_of:
+      - any: ['confus', 'disorient', 'delirium', 'delirious', 'altered (?:mental|consciousness|sensorium|mentation|level of consciousness)', 'unconscious', 'unresponsive', 'not respond', 'non-?responsive', 'obtunded', 'stupor', 'comatose', '\bcoma\b', 'difficult to (?:wake|rouse|arouse)', "(?:can ?not|can't|cannot|won't|will not|unable to) be (?:woken|roused|aroused)", 'drowsy', 'lethargic', 'letharg', 'collapsed', 'passed out', 'fainted', 'syncop', 'seizure', 'convuls', '\bfitting\b', '\bhad (?:a )?fits?\b', 'status epilepticus', 'post-?ictal', 'slurred speech', 'not making sense']
+      - value: {analyte: gcs, op: "<=", value: 14}
+
+red_flags:
+  # --- glycaemia (ADA Standards of Care 2025, section 6: level 2 hypoglycaemia
+  # < 54 mg/dL; DKA and HHS are emergencies). The upper value rule is the
+  # pilot's > 400 mg/dL (22.2 mmol/L): above it, DKA or HHS must be excluded.
+  - id: glucose-severely-high
+    group: glycaemia
+    when: {value: {analyte: glucose, op: ">", value: 400}}
+    source: "Pilot threshold > 400 mg/dL; ADA Standards of Care 2025 s.16 (DKA/HHS)"
+  - id: glucose-low
+    group: glycaemia
+    when: {value: {analyte: glucose, op: "<", value: 54}}
+    source: "ADA Standards of Care 2025 s.6, level 2 hypoglycaemia < 54 mg/dL (3.0 mmol/L)"
+  - id: hyperglycaemic-emergency-words
+    group: glycaemia
+    when: {any: ['\bdka\b', 'ketoacidosis', '\bhhs\b', 'hyperosmolar', 'kussmaul', 'ketones? (?:are |is )?(?:high|large|moderate|positive|\+)', 'positive (?:urine |blood )?ketones', 'fruity (?:breath|smell)', 'acetone (?:breath|smell)']}
+    source: "ADA Standards of Care 2025 s.16"
+  - id: glucose-extreme-words
+    group: glycaemia
+    when: {any: ['(?:glucometer|meter|machine)[^.;]{0,20}\b(?:reads?|says|shows|showing|reading|displays?) "?(?:hi|lo|high|low|error)\b', '(?:sugar|glucose) (?:is |was )?(?:too (?:high|low) to (?:read|measure)|off the (?:chart|scale)|unreadable|dangerously (?:high|low))'], unless_value: glucose}
+    source: "Meter HI/LO readings are outside the measurable range"
+  - id: hypoglycaemia-with-neuro
+    group: glycaemia
+    when:
+      all:
+        - any: ['hypo(?:glyc)?', 'low (?:blood )?(?:sugar|glucose)', '(?:sugar|glucose) (?:is |was )?(?:very )?low']
+        - ref: altered_consciousness
+    source: "ADA level 3 hypoglycaemia: altered mental or physical state"
+
+  # --- chest pain with risk signs (NICE CG95; ESC 2023 ACS)
+  - id: chest-pain-with-risk-signs
+    group: chest_pain
+    when:
+      all:
+        - any: ['chest (?:pain|pressure|tightness|heaviness|discomfort|ache)', 'crushing (?:chest|pain)', 'angina', 'pain in (?:the|his|her|their) chest', 'tight(?:ness)? in (?:the|his|her|their) chest']
+        - one_of:
+            - any: ['radiat', '\bjaw\b', '(?:left|both) arms?', 'down (?:the|his|her|their) arm', '\bsweat', 'diaphores', 'clammy', 'short(?:ness)? of breath', 'breathless', 'dyspn', 'faint', 'syncop', 'collapse', 'nausea', 'vomit', 'exert', 'at rest', 'troponin', 'st elevation', 'st-elevation', 'stemi', '\bmi\b', 'heart attack', 'palpitation', 'grey', 'pale']
+            - value: {analyte: systolic_bp, op: "<", value: 90}
+            - value: {analyte: heart_rate, op: ">", value: 120}
+            - value: {analyte: age_years, op: ">=", value: 40}
+    source: "NICE CG95 chest pain of recent onset; ESC 2023 ACS guidelines"
+  - id: acs-words
+    group: chest_pain
+    when: {any: ['heart attack', 'myocardial infarction', '\bstemi\b', 'st elevation', 'st-elevation', 'acute coronary', '\bacs\b', 'troponin (?:is |was )?(?:raised|elevated|high|positive|up)', 'aortic dissection', 'tearing (?:chest |back )?pain']}
+    source: "ESC 2023 ACS guidelines"
+
+  # --- stroke (BE-FAST / FAST)
+  - id: stroke-signs
+    group: stroke
+    when: {any: ['stroke', '\btia\b', 'transient isch', 'face (?:is )?droop', 'facial (?:droop|weakness|palsy|asymmetry)', 'droop(?:ing|y)? (?:face|mouth|side of)', 'slurred speech', 'slurring', 'speech (?:is )?(?:slurred|garbled|difficult)', 'difficulty (?:speaking|talking|finding words)', 'aphasi', 'dysarthri', '(?:one|left|right)-?sided (?:weakness|numbness|paralysis)', 'weakness (?:on|of) (?:one|the left|the right|his left|his right|her left|her right) (?:side|arm|leg)', '(?:sudden|new) (?:weakness|numbness)', 'hemipar', 'hemipleg', 'arm drift', "(?:can ?not|can't|cannot|unable to) (?:move|lift|raise) (?:his|her|their|one|the) (?:left |right )?(?:arm|leg|side)", 'sudden (?:loss of |blurred |double )?vision', 'sudden (?:severe )?(?:headache|confusion|dizziness)', 'worst headache', 'thunderclap', 'facial asymmetry']}
+    source: "BE-FAST; NICE NG128 stroke and TIA"
+
+  # --- sepsis and infection with organ dysfunction (qSOFA; NICE NG51)
+  - id: sepsis-words
+    group: sepsis
+    when: {any: ['\bseps', '\bseptic', 'mottled', 'non-?blanching rash', 'purpur', 'petechial rash', 'meningit', 'neck stiffness', 'stiff neck', 'bulging fontanel', 'necrotising', 'necrotizing']}
+    source: "NICE NG51 sepsis: high-risk criteria"
+  - id: fever-with-danger-signs
+    group: sepsis
+    when:
+      all:
+        - ref: fever
+        - one_of:
+            - ref: altered_consciousness
+            - any: ['hypotens', 'low (?:blood )?pressure', 'cold (?:hands|feet|peripheries|extremities)', 'not passing urine', 'no urine', 'anuri', 'breathing (?:fast|rapidly|quickly|hard)', 'rapid breathing', 'fast breathing', 'respiratory distress', 'short(?:ness)? of breath', 'breathless', 'rigou?rs']
+            - all:
+                - ref: adult_or_unknown
+                - one_of:
+                    - value: {analyte: systolic_bp, op: "<=", value: 100}
+                    - value: {analyte: respiratory_rate, op: ">=", value: 22}
+                    - value: {analyte: heart_rate, op: ">", value: 130}
+    source: "qSOFA (SBP <= 100, RR >= 22, altered mentation); NICE NG51"
+
+  # --- circulation, breathing and consciousness (NEWS2 score-3 bands)
+  - id: shock
+    group: circulation
+    when: {any: ['\bshock\b', 'hypotensi', 'low blood pressure', '\bbp (?:is |was )?(?:very )?low', 'pressure (?:is |was )?(?:dropping|falling|very low)'], unless_value: systolic_bp}
+    source: "NEWS2: SBP <= 90"
+  - id: systolic-low
+    group: circulation
+    when:
+      one_of:
+        - all:
+            - ref: adult_or_unknown
+            - value: {analyte: systolic_bp, op: "<", value: 90}
+        - value: {analyte: systolic_bp, op: "<", value: 70}
+    source: "NEWS2 SBP <= 90 scores 3 (adults; pilot uses < 90); < 70 at any age (PALS hypotension floor)"
+  - id: hypertensive-severe
+    group: circulation
+    when:
+      one_of:
+        - value: {analyte: systolic_bp, op: ">=", value: 180}
+        - value: {analyte: diastolic_bp, op: ">=", value: 120}
+        - any: ['hypertensive (?:crisis|emergency|urgency|encephalopathy)', 'malignant hypertension']
+    source: "ACC/AHA 2017: severe hypertension >= 180/120"
+  - id: heart-rate-extreme
+    group: circulation
+    when:
+      one_of:
+        - all:
+            - ref: adult_or_unknown
+            - one_of:
+                - value: {analyte: heart_rate, op: ">", value: 130}
+                - value: {analyte: heart_rate, op: "<", value: 40}
+        - value: {analyte: heart_rate, op: ">", value: 180}
+        - all:
+            - ref: child_under_5
+            - value: {analyte: heart_rate, op: "<", value: 60}
+    source: "NEWS2 pulse >= 131 or <= 40 scores 3 (adults); any age > 180; under five < 60 (PALS bradycardia)"
+  - id: severe-bleeding
+    group: bleeding
+    when: {any: ['vomit(?:ing|ed|s)? (?:up )?blood', 'ha?ematemesis', 'coughing (?:up )?(?:a lot of )?blood', 'ha?emoptysis', 'mela?ena', 'black,? tarry', 'tarry stool', '(?:heavy|severe|massive|uncontrolled|profuse) bleed', 'bleeding (?:heavily|profusely|a lot|won.t stop|that will not stop)', '(?:soaking|soaked) (?:through )?(?:a |her )?pads?', 'post-?partum ha?emorrhage', '\bpph\b', 'blood in (?:the )?vomit', 'passing clots']}
+    source: "NICE NG141 GI bleeding; WHO PPH recommendations"
+  - id: anaphylaxis
+    group: anaphylaxis
+    when: {any: ['anaphyla', 'angio-?o?edema', '(?:throat|tongue|lips?|face) (?:is |are )?(?:swelling|swollen|closing|tight)', 'swelling of (?:the |his |her |their )?(?:throat|tongue|lips|face)', 'stridor']}
+    source: "Resuscitation Council UK anaphylaxis 2021"
+  - id: breathing-severe
+    group: breathing
+    when: {any: ["(?:can ?not|can't|cannot|unable to|struggling to|fighting to) (?:breathe|catch (?:his|her|their) breath)", "(?:can ?not|can't|cannot|unable to) (?:speak|talk) in (?:full )?sentences", 'severe (?:shortness of breath|breathlessness|dyspn|respiratory distress|asthma)', 'respiratory (?:distress|failure)', 'cyanos', 'cyanotic', 'blue (?:lips|tongue|around the lips)', 'gasping', 'grunting', 'chest (?:wall )?in-?drawing', 'subcostal recession', 'silent chest', 'apno?ea', 'stopped breathing', 'choking']}
+    source: "WHO IMCI; BTS/SIGN asthma (life-threatening features); NEWS2"
+  - id: spo2-low
+    group: breathing
+    when: {value: {analyte: spo2, op: "<=", value: 91}}
+    source: "NEWS2 SpO2 <= 91% scores 3; WHO IMCI SpO2 < 90%"
+  - id: respiratory-rate-extreme-adult
+    group: breathing
+    when:
+      all:
+        - ref: adult_or_unknown
+        - one_of:
+            - value: {analyte: respiratory_rate, op: ">=", value: 25}
+            - value: {analyte: respiratory_rate, op: "<=", value: 8}
+    source: "NEWS2 respiration >= 25 or <= 8 scores 3"
+  - id: respiratory-rate-infant
+    group: paediatric
+    when:
+      all:
+        - ref: child_under_5
+        - value: {analyte: respiratory_rate, op: ">=", value: 60}
+    source: "WHO IMCI: fast breathing >= 60/min in a young infant is a danger sign"
+  - id: temperature-extreme
+    group: sepsis
+    when:
+      one_of:
+        - value: {analyte: temperature, op: ">=", value: 40.0}
+        - value: {analyte: temperature, op: "<=", value: 35.0}
+        - any: ['hypotherm', 'heat ?stroke']
+    source: "NEWS2 temperature <= 35.0 scores 3; >= 40 hyperpyrexia"
+  - id: consciousness-altered
+    group: neurology
+    when: {ref: altered_consciousness}
+    source: "NEWS2 new confusion scores 3 (ACVPU); WHO IMCI lethargic or unconscious"
+  - id: severe-headache-or-neuro
+    group: neurology
+    when: {any: ['worst headache', 'thunderclap', 'sudden(?:,)? severe headache', 'head injury', 'head trauma', 'hit (?:his|her|their) head', 'paraly']}
+    source: "NICE NG232 head injury; NICE CKS headache red flags"
+  - id: haemoglobin-severe
+    group: circulation
+    when:
+      one_of:
+        - value: {analyte: haemoglobin, op: "<", value: 5.0}
+        - all:
+            - one_of: [{ref: pregnant}, {ref: child_under_5}]
+            - value: {analyte: haemoglobin, op: "<", value: 7.0}
+    source: "WHO severe anaemia: Hb < 7 g/dL in pregnancy and young children; < 5 transfusion threshold"
+  - id: severe-malaria-features
+    group: sepsis
+    when:
+      all:
+        - any: ['malaria', 'plasmodium', '\bfalciparum']
+        - one_of:
+            - ref: altered_consciousness
+            - any: ['respiratory distress', 'prostrat', '(?:unable|not able) to (?:sit|stand|walk)', 'jaundice', 'dark urine', 'cola-colou?red urine', 'black ?water', 'spontaneous bleeding', 'pulmonary o?edema', 'severe ana?emia', 'acidosis']
+            - value: {analyte: parasitaemia, op: ">", value: 10}
+            - value: {analyte: glucose, op: "<", value: 40}
+    source: "WHO Guidelines for malaria 2023: severe malaria criteria"
+
+  # --- pregnancy and postpartum (WHO danger signs in pregnancy; ACOG/NICE NG133)
+  - id: pregnancy-danger-signs
+    group: pregnancy
+    when:
+      all:
+        - one_of: [{ref: pregnant}, {ref: postpartum}]
+        - one_of:
+            - any: ['bleed', 'spotting', 'severe headache', 'blurr(?:ed|y) vision', 'visual disturbance', 'seeing (?:spots|stars|flashing)', 'flashing lights', 'convuls', 'seizure', '\bfits?\b', 'severe (?:abdominal|tummy|stomach|belly) pain', 'epigastric pain', 'upper (?:abdominal|right) pain', 'right upper quadrant', '(?:reduced|decreased|less|no|absent|fewer) (?:fetal|foetal|baby|baby.s) movements?', "(?:baby|fetus|foetus) (?:is |has )?(?:not|stopped|isn't|hasn't)(?: been)? (?:moving|kicking)", "(?:not|hasn't|has not) felt (?:the )?baby", 'swollen (?:face|hands)', 'swelling (?:of|in) (?:the |her )?(?:face|hands)', 'puffy face', '(?:waters?|membranes) (?:have |has )?(?:broken|ruptured|broke)', 'leaking (?:fluid|water)', 'fluid leaking', 'gush of fluid', 'preterm labou?r', 'foul(?:-smelling)? discharge', 'proteinuria', 'protein in (?:the )?urine', 'short(?:ness)? of breath', 'breathless', 'difficulty breathing', 'chest pain', 'calf (?:pain|swelling)']
+            - ref: fever
+            - ref: altered_consciousness
+            - value: {analyte: systolic_bp, op: ">=", value: 160}
+            - value: {analyte: diastolic_bp, op: ">=", value: 110}
+    source: "WHO maternal danger signs (IMPAC); NICE NG133 severe hypertension in pregnancy >= 160/110"
+  - id: pregnancy-hypertension
+    group: pregnancy
+    when:
+      all:
+        - ref: pregnant
+        - one_of:
+            - value: {analyte: systolic_bp, op: ">=", value: 140}
+            - value: {analyte: diastolic_bp, op: ">=", value: 90}
+            - any: ['pre-?eclamp', '\beclamp', '\bhellp\b']
+    source: "NICE NG133: hypertension in pregnancy needs specialist assessment"
+
+  # --- children under five (WHO IMCI general danger signs; neonatal signs)
+  - id: child-danger-signs
+    group: paediatric
+    when:
+      all:
+        - ref: child_under_5
+        - any: ["(?:unable|not able|can ?not|can't|cannot|won't|will not|refus(?:es|ing|ed)) (?:to )?(?:drink|feed|breast-?feed|suck|eat)", 'not (?:drinking|feeding|breast-?feeding|sucking|eating)', 'stopped (?:feeding|drinking|breast-?feeding)', 'poor(?:ly)? feed', 'vomit(?:s|ing|ed)? everything', 'vomits? (?:all|after every)', 'floppy', 'limp\b', 'letharg', 'not waking', 'hard to wake', 'sunken (?:eyes|fontanel)', 'skin pinch goes back (?:very )?slowly', 'bulging fontanel', 'not passing urine', 'no wet nappies', 'no wet diapers', 'high-pitched cry', 'inconsolable', 'convuls', 'seizure', '\bfits?\b', 'severe (?:dehydration|pneumonia|malnutrition)', 'chest (?:wall )?in-?drawing', 'grunting']
+    source: "WHO IMCI 2014 general danger signs (any one needs urgent referral)"
+  - id: neonate-danger-signs
+    group: paediatric
+    when:
+      all:
+        - ref: neonate
+        - one_of:
+            - ref: fever
+            - any: ['jaundice (?:on|of|in|to|involving) (?:the )?(?:palms|soles|hands|feet)', 'yellow (?:palms|soles|hands and feet)', '(?:palms|soles) (?:are |look )?yellow', 'umbilic\w* (?:red|pus|discharge|swelling|smell)', 'red(?:ness)? (?:around|spreading from) the (?:umbilic|cord)', 'pus from the (?:umbilic|cord)', 'many (?:skin )?pustules', 'cold to (?:the )?touch', 'not feeding', 'feeding poorly', 'poor feeding']
+            - value: {analyte: temperature, op: "<", value: 35.5}
+            - value: {analyte: bilirubin, op: ">=", value: 20}
+    source: "WHO IMCI young infant (0-2 months): fever, hypothermia, jaundice on palms and soles, local infection"
+  - id: young-infant-fever
+    group: paediatric
+    when:
+      all:
+        - one_of:
+            - ref: neonate
+            - value: {analyte: age_hours, op: "<", value: 2192}
+        - one_of:
+            - ref: fever
+            - value: {analyte: temperature, op: ">=", value: 37.5}
+    source: "NICE NG143: fever >= 38 C under 3 months is high risk; WHO IMCI young infant >= 37.5 C"
+  - id: neonatal-jaundice-first-day
+    group: paediatric
+    when:
+      all:
+        - any: ['jaundic', 'yellow (?:skin|eyes|baby|colou?r)', 'looks yellow', 'turned yellow', 'bilirubin', 'icter']
+        - one_of:
+            - value: {analyte: age_hours, op: "<", value: 24}
+            - any: ['(?:first|1st) (?:24 ?h|day)', 'within (?:the first )?24 ?h', 'day (?:one|1) of life', 'day of birth', 'at birth', 'since birth']
+    source: "WHO IMCI and NICE CG98: jaundice in the first 24 hours needs urgent assessment"
+
+  # --- overdose, poisoning and self-harm
+  - id: overdose-poisoning
+    group: overdose
+    when: {any: ['overdos', 'took (?:too many|a (?:handful|bottle|box|pack|whole)|an entire|all (?:of )?(?:her|his|their|the) )', 'swallowed (?:a |some |his |her |their )?(?:pills|tablets|bottle|bleach|poison|battery|batteries|kerosene|paraffin|pesticide|chemicals?|detergent|medic)', 'ingest(?:ed|ion)', 'poison', 'toxic(?:ity)? (?:dose|ingestion|level)', 'drank (?:some |a )?(?:bleach|kerosene|paraffin|pesticide|petrol|antifreeze|chemicals?|detergent|organophosphate)', 'accidental(?:ly)? (?:took|ingest|swallow|drank)', 'snake ?bite', 'scorpion sting', 'dog bite']}
+    source: "WHO poisoning management; local emergency referral"
+  - id: suicidality-self-harm
+    group: suicidality
+    when: {any: ['suicid', 'kill (?:him|her|them|my|your)sel(?:f|ves)', 'end (?:his|her|their|my) (?:own )?life', 'take (?:his|her|their|my) (?:own )?life', 'self-?harm', 'self-?injur', '(?:harm|hurt|cut|cutting|harming|hurting) (?:him|her|them|my)sel(?:f|ves)', 'wants? to die', 'wish(?:es)? (?:he|she|they) (?:were|was) dead', 'better off dead', 'no (?:reason|point) (?:to|in) (?:live|living)', 'hearing voices telling', 'harm (?:others|someone|the baby)', 'thoughts of (?:dying|death)']}
+    source: "NICE NG225 self-harm; WHO mhGAP"
+
+# The question asks for a judgement that needs this patient's values. Each
+# type fires when asks holds and none of requires holds (no value of any
+# analyte in any_value, no pattern of any in the question or patient data).
+# The patterns name "this patient": a subject (she, he, they, this patient,
+# the woman's, her baby...) with a judgement verb or adjective. A general
+# question ("what defines...", "when should a patient...") is not one.
+missing_information:
+  - id: disposition
+    asks: {any: ['go home', 'send (?:him|her|them|the \w+) home', 'sent home', 'discharg', 'safe to (?:leave|go|send)', 'manage(?:d)? (?:at home|as an outpatient)', 'outpatient (?:or|vs\.?) (?:inpatient|admission)', 'needs? (?:to be )?admi(?:t|ssion)', 'should (?:\w+ )?(?:be )?admit', 'refer (?:or|vs\.?) (?:treat|manage)', 'need (?:to )?(?:refer|referral)', 'home care (?:is )?enough', 'enough to (?:go|manage) (?:home|at home)']}
+    requires:
+      any_value: [systolic_bp, heart_rate, respiratory_rate, spo2, temperature]
+    source: "A disposition decision needs current vital signs (NEWS2 inputs)"
+  - id: severity-judgement
+    asks:
+      all:
+        - any: ['how (?:severe|serious|bad|sick)', '\bseverity\b', '\b(?:is|was|are)\s+(?:this|that|the|his|her|their|my|it)\b[^.?;]{0,40}?\b(?:severe|serious|complicated|uncomplicated|mild|moderate|non-severe)\b', '(?:severe|complicated) (?:or|vs\.?|versus) (?:mild|uncomplicated|non-severe|simple)', '(?:mild|uncomplicated|non-severe|simple) (?:or|vs\.?|versus) (?:severe|complicated)', 'grade (?:the|this|his|her)', 'classify (?:the|this|his|her)']
+        - any: &patient_ref ['\b(?:she|he|they|him|her|his|their|them)\b', '\b(?:this|that|the|my|our)\s+(?:[a-z-]+\s+)?(?:patient|client|child|baby|infant|newborn|neonate|woman|man|mother|lady|boy|girl|person|toddler|adolescent|teenager|case)\b']
+    requires:
+      any_value: [haemoglobin, parasitaemia, glucose, systolic_bp, diastolic_bp, heart_rate, respiratory_rate, spo2, temperature, bilirubin, gcs, creatinine, hba1c]
+      any: ['rdt (?:is |was )?(?:positive|negative)', 'microscopy (?:is |was )?(?:positive|negative)', 'smear (?:is |was )?(?:positive|negative)', '(?:respiratory distress|convuls|prostrat|jaundice|bleeding|vomiting|unable to)']
+    source: "A severity grade needs the findings that define it"
+  - id: diagnosis-or-treatment-judgement
+    asks:
+      all:
+        - any:
+            - '\b(?:does|do|did|could|might|would|can|should|will|is|are)\s+(?:she|he|they|it|(?:this|that|the|my|our|his|her|their)\s+(?:[a-z-]+\s+)?(?:patient|client|child|baby|infant|newborn|neonate|woman|man|mother|lady|boy|girl|person|toddler|adolescent|teenager)(?:''s)?)\s+(?:[a-z-]+\s+){0,3}?(?:have|has|meet|meets|qualify|fit|need|needs|require|requires|start|begin|receive|get|take|warrant|be (?:started|treated|given|diagnosed|labelled|labeled))\b'
+            - '\b(?:is|are|was)\s+(?:she|he|they|(?:this|that|the|my|our|his|her|their)\s+(?:[a-z-]+\s+)?(?:patient|client|child|baby|infant|newborn|neonate|woman|man|mother|lady|boy|girl|person|toddler)(?:''s)?)\s+(?:[a-z-]+\s+){0,3}?(?:diabetic|hypertensive|an?a?emic|jaundiced|infected|positive|controlled|uncontrolled|normal|abnormal|pathological|physiological)\b'
+            - '\b(?:is|are|was)\s+(?:his|her|their)\s+(?:[a-z-]+\s+){1,3}?(?:controlled|uncontrolled|normal|abnormal|high|low|ok|okay|pathological|physiological)\b'
+            - '(?:diagnose|confirm|label|call) (?:him|her|them|it|this|the (?:patient|child|baby))\b'
+            - 'is (?:it|this|that) (?:\w+ )?(?:diabetes|hypertension|malaria|gdm|physiological|pathological|normal|abnormal)\b'
+            - '(?:physiological|pathological) (?:or|vs\.?|versus) (?:physiological|pathological)'
+            - 'meet(?:s)? (?:the )?(?:criteria|definition|threshold)'
+            - '(?:controlled|under control)\?'
+        - any: ['diabet', 't[12]dm', '\bdm\b', 'hyperglyc', 'gdm', 'hypertens', 'blood pressure', '\bbp\b', '\bhtn\b', 'malaria', 'jaundic', 'bilirubin', 'an?a?emi', 'kidney', 'renal', 'infect', 'pre-?eclamp', 'sugar', 'glucose']
+    requires:
+      any_value: [glucose, hba1c, systolic_bp, diastolic_bp, haemoglobin, parasitaemia, bilirubin, creatinine, temperature, age_hours]
+      any: ['rdt (?:is |was |came back )?(?:positive|negative|\+|-)', '(?:microscopy|smear|blood film|thick film|thin film) (?:is |was |came back |shows? |showed )?(?:positive|negative|\+|-|parasites)', '(?:positive|negative) (?:rdt|microscopy|smear|blood film)', '(?:onset|appeared|started|noticed|began) (?:at|on|within|after|in) (?:day|\d|the first)', 'on day \d', 'day \d+ of life', '\d+ (?:hours?|hrs?|days?) (?:old|of age|of life|after birth)', 'ogtt', 'glucose tolerance', 'two (?:separate )?(?:occasions|readings|visits)']
+    source: "A diagnosis or a decision to treat needs the values its definition uses"
+  - id: paediatric-dose-without-weight
+    asks:
+      all:
+        - ref: child_under_5
+        - any: ['\bdos(?:e|es|ing|age)\b', 'how (?:much|many)\b', '\bregimen', 'mg/kg', 'how many (?:mg|ml|tablets|drops|spoons|teaspoons)']
+    requires:
+      any_value: [weight]
+    source: "WHO model formulary for children: doses are by weight"
+
+# The question asks for a dose, regimen or titration (asks; change_asks counts
+# only when the question names a drug), or for a treatment threshold
+# (threshold_asks). Some cited chunk must give it: for a named drug or
+# treatment, a cited sentence with that word and a dose (a threshold: any
+# number); with none named, a cited chunk with a dose (or number) that shares
+# a content word (four or more characters, or a synonym group) with the
+# question. Otherwise out of scope.
+dose_scope:
+  asks: {any: ['\bdos(?:e|es|ing|age)\b', 'how (?:much|many (?:mg|milligrams?|micrograms?|grams?|tablets|units|ml|mls|millilit(?:er|re)s|puffs|capsules|drops))', 'how many (?:times|tablets)', '\bregimen', 'titrat', 'up-?titrat', 'loading dose', '(?:maximum|max|starting|initial|maintenance) (?:daily )?(?:dose|amount)', 'what strength', 'mg/kg', '\bstart (?:\w+ )?on (?:what|which)', '(?:increase|decrease|reduce|adjust|double|halve) (?:the |his |her |their )?(?:dose|insulin|metformin|medication|tablets)', 'sliding scale']}
+  change_asks: {any: ['\b(?:adjust(?:ed|ing|ment)?|titrat\w*|increas(?:e|ed|ing)|decreas(?:e|ed|ing)|reduc(?:e|ed|ing)|doubl(?:e|ed|ing)|halv(?:e|ed|ing)|withh[oe]ld|hold|switch(?:ed)?|chang(?:e|ed|ing)|stop(?:ped)?|restart(?:ed)?)\b']}
+  threshold_asks: {any: ['\bthreshold', '\bcut-?off', '\bat what (?:\w+ )?(?:level|value|bilirubin|glucose|hb|ha?emoglobin|count|reading|bp|pressure)\b', '(?:when|at what point) (?:should|do|does|to) (?:\w+ ){0,3}(?:start|begin|initiate|give|transfuse)\b']}
+  synonyms:
+    - ['t2dm', 't2d', 'type 2 diabetes', 'type ii diabetes', 'type two diabetes']
+    - ['t1dm', 'type 1 diabetes', 'type i diabetes']
+    - ['gdm', 'gestational diabetes']
+    - ['htn', 'hypertension', 'high blood pressure', 'raised blood pressure']
+    - ['urti', 'upper respiratory', 'common cold', 'sore throat']
+    - ['bili', 'bilirubin', 'jaundice']
+    - ['hb', 'haemoglobin', 'hemoglobin', 'anaemia', 'anemia']
+  dose: '\b\d+(?:\.\d+)?\s*(?:mg|mcg|ug|g|iu|units?|ml|tablets?|tabs?|caps?(?:ules)?|puffs?)\b(?!\s*/\s*(?:dl|l)\b)|\b(?:bid|tid|qid|qds|tds|od|bd|q\d+h|once daily|twice daily|three times daily|every \d+ hours)\b'
+  not_dose: ['\b\d+\s*g\s*(?:oral\s*)?(?:ogtt|glucose (?:load|tolerance|drink|challenge))', '\b\d+\s*-?\s*g\s+(?:\w+\s+)?ogtt']
+  drugs:
+    - 'insulin\w*'
+    - 'metformin'
+    - 'glib\w+|glic\w+|glim\w+|glyb\w+|glip\w+'
+    - '\w+gliptin'
+    - '\w+gliflozin'
+    - '\w+glutide|\w+natide'
+    - 'pioglitazone|\w+glitazone'
+    - '\w+pril'
+    - '\w+sartan'
+    - '\w+dipine'
+    - '\w+olol'
+    - '\w+thiazide|chlortalidone|chlorthalidone|indapamide|furosemide|frusemide|spironolactone'
+    - 'thiazides?|ace ?inhibitors?|\bacei\b|\barbs?\b|ccbs?|calcium channel blockers?|diuretics?|beta[- ]?blockers?|statins?'
+    - 'hydralazine|methyldopa|labetalol|magnesium sulpha?f?ate|mgso4'
+    - '\w+statin'
+    - 'aspirin|clopidogrel|heparin|enoxaparin|warfarin|\w+xaban|dabigatran'
+    - 'paracetamol|acetaminophen|ibuprofen|diclofenac|naproxen|morphine|tramadol|codeine'
+    - '\w+cillin|cef\w+|ceph\w+|\w+mycin|\w+floxacin|doxycycline|tetracycline|metronidazole|co-?trimoxazole|cotrimoxazole|trimethoprim|nitrofurantoin|gentamicin|ceftriaxone'
+    - 'antibiotics?|antimalarials?|antihypertensives?|anticoagulants?|steroids?|corticosteroids?|oral hypoglyc\w+'
+    - 'artemether|lumefantrine|\bact\b|artesunate|artemisinin\w*|quinine|chloroquine|primaquine|amodiaquine|dihydroartemisinin|piperaquine|mefloquine|sulfadoxine|pyrimethamine|\bsp\b'
+    - 'prednisolone|prednisone|dexamethasone|hydrocortisone|salbutamol|oxygen'
+    - 'iron|ferrous \w+|folic acid|folate|vitamin \w+|zinc|ors\b|oral rehydration'
+    - 'phototherapy'
+    - 'oxytocin|misoprostol'
+
+# A reply that only recites its chunks: every sentence (citation tags
+# removed, at least min_words words) is a near-verbatim copy of a chunk
+# sentence (token overlap >= near_verbatim of the shorter), and the
+# question-to-answer relevance is low. Relevance is the highest cosine
+# between the question and an answer sentence by the pinned embedder (the
+# retriever's dense model, when it is the named one); without that embedder
+# it is lexical: no content word of the question (four or more letters) is in
+# the answer. Low relevance is a cosine below min_relevance.
+# Threshold (14 Nov 2026): on all-MiniLM-L6-v2, a question and a sentence
+# that answers it sit well above 0.30; unrelated clinical sentences sit below
+# 0.20. 0.20 catches only a recital of an unrelated chunk. The action is a
+# downgrade: a PASS becomes REGENERATE, never a PASS from anything else.
+recital:
+  near_verbatim: 0.9
+  min_words: 3
+  embedder: all-MiniLM-L6-v2
+  min_relevance: 0.20
+  action: REGENERATE

@@ -234,6 +234,65 @@ func TestQueryCompletedEgressAndOutcome(t *testing.T) {
 	}
 }
 
+// ADR 0016: query.completed may carry the escalation guard's reasons, codes
+// from a closed set only, never text; a fact without them stays valid.
+func TestQueryCompletedGuardReasons(t *testing.T) {
+	qid := uuid.New()
+	schema := jobFactSchemas["query.completed"].schema
+	base := func(v any) map[string]any {
+		return map[string]any{"decision": "ESCALATE", "attempts": float64(1), "query_id": qid.String(), "guard_reasons": v}
+	}
+	reasons := []string{"red_flag", "missing_information", "out_of_scope", "recital", "guard_unavailable"}
+	accept := []map[string]any{
+		base([]any{"red_flag"}), base([]any{"red_flag", "missing_information", "out_of_scope"}),
+		base([]any{"recital"}), base([]any{"guard_unavailable"}),
+	}
+	for i, p := range accept {
+		if !schema.check(p, qid) {
+			t.Errorf("accept %d: intel refused %v", i, p)
+		}
+		if err := audit.CheckActionPayload("query.completed", p); err != nil {
+			t.Errorf("accept %d: audit refused %v: %v", i, p, err)
+		}
+	}
+	refuse := []map[string]any{
+		base([]any{"chest pain, Adaeze Okafor"}), base([]any{"RED_FLAG"}), base("red_flag"),
+		base([]any{float64(1)}), base([]any{nil}), base(map[string]any{"red_flag": true}),
+		base([]any{"red_flag", "red_flag"}), base([]any{}), base(nil),
+	}
+	for i, p := range refuse {
+		if schema.check(p, qid) {
+			t.Errorf("refuse %d: intel accepted %v", i, p)
+		}
+	}
+	// The audit registry refuses any value outside the set, and more codes than exist.
+	for i, p := range []map[string]any{
+		base([]any{"chest pain, Adaeze Okafor"}), base([]any{"RED_FLAG"}), base("red_flag"), base([]any{float64(1)}),
+		base([]any{"red_flag", "red_flag", "red_flag", "red_flag", "red_flag", "red_flag"}),
+	} {
+		if err := audit.CheckActionPayload("query.completed", p); err == nil {
+			t.Errorf("refuse %d: audit accepted %v", i, p)
+		}
+	}
+	if !slices.Equal(config.GuardReasons, reasons) {
+		t.Errorf("config.GuardReasons %v", config.GuardReasons)
+	}
+}
+
+// ADR 0016: Go's guard reasons equal the worker's
+// (services/intelligence/intelligence/guardrails/escalation_guard.py REASONS,
+// read as text), so the two sides can't drift.
+func TestGuardReasonsMatchWorker(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "intelligence", "intelligence", "guardrails", "escalation_guard.py")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pyStrings(t, string(raw), "REASONS"); !slices.Equal(got, config.GuardReasons) {
+		t.Errorf("escalation_guard.REASONS = %v, Go has %v", got, config.GuardReasons)
+	}
+}
+
 // K14: Go's outcome, provider and egress lists equal the worker's
 // (services/intelligence/intelligence/boundary/cloud/vocab.py, read as
 // text), so the two sides can't drift.

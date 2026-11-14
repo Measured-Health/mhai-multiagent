@@ -130,6 +130,10 @@ class Generation:
     cloud_outcome: str | None = None
     tokens_in: int = 0
     tokens_out: int = 0
+    # What the escalation guard reads (guardrails.escalation_guard): the masked patient
+    # context and this job's chunks (id -> text), in-process only.
+    patient_context: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    chunk_texts: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -146,6 +150,10 @@ class Verification:
     weights: Mapping[str, float] = field(default_factory=dict)
     # (type, severity) of each flag: never the claim text a flag quotes.
     flags: tuple[tuple[str, str], ...] = ()
+    # The escalation guard's codes: its reasons (escalation_guard.REASONS) and the ids
+    # of the rules that fired. Never text.
+    guard_reasons: tuple[str, ...] = ()
+    guard_rules: tuple[str, ...] = ()
 
 
 def trust_band(v: Verification) -> str | None:
@@ -186,7 +194,11 @@ class Pinned(Protocol):
 PinnedSource = Callable[[], Pinned | None]
 
 
-def _escalated(failed: Sequence[str]) -> Verification:
+def _escalated(
+    failed: Sequence[str],
+    guard_reasons: Sequence[str] = (),
+    guard_rules: Sequence[str] = (),
+) -> Verification:
     """Fail closed: unverified or missing goes to a human, with no score."""
     return Verification(
         decision="ESCALATE",
@@ -194,7 +206,78 @@ def _escalated(failed: Sequence[str]) -> Verification:
         verified=False,
         degraded=True,
         failed_agents=tuple(failed),
+        guard_reasons=tuple(guard_reasons),
+        guard_rules=tuple(guard_rules),
     )
+
+
+def _chunk_texts(chunks: Sequence[Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for c in chunks:
+        cid, text = getattr(c, "chunk_id", None), getattr(c, "content", None)
+        if isinstance(cid, str) and isinstance(text, str):
+            out[cid] = text
+    return out
+
+
+def _guard_question(generation: Generation) -> tuple[Any, Any]:
+    """(the guard's verdict on the question, the rule set; None when it can't load)."""
+    from intelligence.guardrails import escalation_guard as eg
+
+    try:
+        rules = eg.default()
+    except Exception as e:
+        log.error("escalation_guard.unavailable error=%s", type(e).__name__)
+        return eg.UNAVAILABLE, None
+    try:
+        texts = generation.chunk_texts
+        cited = [
+            texts[c]
+            for c in eg.cited_ids(generation.response, generation.cited_chunk_ids)
+            if c in texts
+        ]
+    except Exception as e:  # fail closed: escalate, never skip the guard
+        log.warning("escalation_guard.failed check=cited error=%s", type(e).__name__)
+        return eg.UNAVAILABLE, rules
+    return eg.check_question(rules, generation.question, generation.patient_context, cited), rules
+
+
+def _embedder(orch: Any, rules: Any) -> Callable[[Sequence[str]], Any] | None:
+    """The retriever's dense model when it is the one the recital threshold was set on
+    (the pinned embedder); None otherwise (the guard's lexical relevance)."""
+    from intelligence.config.settings import get_config
+
+    dense = getattr(getattr(getattr(orch, "rag_cca", None), "retriever", None), "dense", None)
+    model = getattr(dense, "model", None)
+    if (
+        getattr(dense, "_loaded", False) is not True
+        or not callable(getattr(model, "encode", None))
+        or str(get_config().DENSE_MODEL) != rules.recital.embedder
+    ):
+        return None
+
+    def embed(texts: Sequence[str]) -> Any:
+        assert model is not None
+        return model.encode(list(texts), normalize_embeddings=True, show_progress_bar=False)
+
+    return embed
+
+
+def _recited(orch: Any, generation: Generation, rules: Any) -> bool:
+    """The guard's recital check; a failure counts as a recital (fail closed)."""
+    from intelligence.guardrails import escalation_guard as eg
+
+    try:
+        return eg.is_recital(
+            rules,
+            generation.question,
+            generation.response,
+            list(generation.chunk_texts.values()),
+            _embedder(orch, rules),
+        )
+    except Exception as e:
+        log.warning("escalation_guard.failed check=recital error=%s", type(e).__name__)
+        return True
 
 
 def _clean_versions(versions: Mapping[str, Any]) -> dict[str, str]:
@@ -214,10 +297,18 @@ def _verify_with(orch: Any, generation: Generation) -> Verification:
     """Local verification (NLI and HGA) of an available generation, with
     the question's own thresholds, as process_query does. The local and the
     cloud client both use it, so a cloud answer is verified exactly as a
-    local one (design section 9)."""
+    local one (design section 9).
+
+    The escalation guard (guardrails.escalation_guard, ADR 0016) reads the question
+    first: a red flag, missing patient information or a dose out of the cited chunks'
+    scope makes the decision ESCALATE whatever NLI says; a PASS that only recites its
+    chunks, off the question, becomes the rule set's recital action. A guard that
+    can't run escalates. Its reason codes go into the verification, never text."""
+    verdict, rules = _guard_question(generation)
+    reasons, rule_ids = list(verdict.reasons), list(verdict.rule_ids)
     hga = getattr(orch, "hga", None)
     if hga is None:
-        return _escalated(("HGA",))
+        return _escalated(("HGA",), reasons, rule_ids)
     try:
         classified = orch.classifier.classify(generation.question)
         t = orch.threshold_manager.get_thresholds(classified)
@@ -234,10 +325,20 @@ def _verify_with(orch: Any, generation: Generation) -> Verification:
             raise TypeError("no trust score")
     except Exception as e:
         log.warning("model stage failed agent=HGA error=%s", type(e).__name__)
-        return _escalated(("HGA",))
+        return _escalated(("HGA",), reasons, rule_ids)
     decision = str(r.get("decision", "")).upper()
     if decision not in DECISIONS:
         decision = "ESCALATE"
+    if verdict.escalate:
+        decision = "ESCALATE"
+    elif decision == "PASS" and rules is not None and _recited(orch, generation, rules):
+        from intelligence.guardrails.escalation_guard import RECITAL
+
+        decision = rules.recital.action
+        reasons.append(RECITAL)
+        rule_ids.append("recital")
+    if reasons:
+        log.info("escalation_guard reasons=%s rules=%s", ",".join(reasons), ",".join(rule_ids))
     scores = {
         k: s
         for k, s in (
@@ -267,6 +368,8 @@ def _verify_with(orch: Any, generation: Generation) -> Verification:
         flag_penalty=_number(r.get("flag_penalty")),
         weights=weights,
         flags=flags,
+        guard_reasons=tuple(reasons),
+        guard_rules=tuple(rule_ids),
     )
 
 
@@ -388,6 +491,8 @@ class OrchestratorModelClient:
             generation_ms=(total - retrieval) if total is not None and retrieval else total,
             patient_id=patient_id,
             handle=orch,
+            patient_context=dict(patient_context),
+            chunk_texts=_chunk_texts(chunks),
         )
 
     def verify(self, generation: Generation) -> Verification:
@@ -629,10 +734,15 @@ def local_parts(
         cca = RAGClinicalContextAgent(retriever, generator=generator)
         return DynamicOrchestratorAgent(rag_cca=cca, hga=hga)
 
+    from intelligence.guardrails import escalation_guard
+
+    # The guard's rule set, pinned: one that can't load refuses here, before any job.
+    guard = escalation_guard.default()
     return build, {
         "cca": generator.name,
         "dense": str(cfg.DENSE_MODEL),
         "nli": str(cfg.NLI_MODEL),
+        "escalation_guard": guard.version_string,
     }
 
 

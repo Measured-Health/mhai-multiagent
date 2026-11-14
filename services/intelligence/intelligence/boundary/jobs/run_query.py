@@ -615,6 +615,9 @@ class RunQuery:
             "failed_agents": list(failed),
             "flags": [list(f) for f in v.flags],
             "model_used": g.model_used,
+            # The escalation guard's codes (ADR 0016): why it escalated or downgraded.
+            "guard_reasons": list(v.guard_reasons),
+            "guard_rules": list(v.guard_rules),
         }
         if provider != "local":
             report.update(
@@ -641,6 +644,7 @@ class RunQuery:
             flags=v.flags,
             egress=g.egress,
             cloud_outcome=g.cloud_outcome,
+            guard_reasons=tuple(v.guard_reasons),
         )
 
     async def _complete(self, job: _Job, d: jobs_repo.Decision) -> None:

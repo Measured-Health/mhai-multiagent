@@ -165,6 +165,9 @@ class Decision:
     # The cited reference sources (boundary/cited_sources.py): title, link
     # and source credit of each cited shared reference row (00041).
     cited_sources: Sequence[Mapping[str, Any]] = ()
+    # The escalation guard's reasons (guardrails.escalation_guard.REASONS):
+    # query.completed's guard_reasons, codes only (ADR 0016).
+    guard_reasons: Sequence[str] = ()
 
 
 def _masked_question(q: str | None) -> str | None:
@@ -315,6 +318,8 @@ async def complete(cur: Cursor, query_id: str, attempts: int, d: Decision) -> bo
     }
     if d.cloud_outcome is not None:
         payload["cloud_outcome"] = d.cloud_outcome
+    if d.guard_reasons:
+        payload["guard_reasons"] = list(d.guard_reasons)
     await cur.execute(_INSERT_FACT, (qid, QUERY_COMPLETED, qid, json.dumps(payload)))
     await cur.execute(_COMPLETE, (qid, int(attempts)))
     if await cur.fetchone() is None:  # can't happen while we hold the row lock

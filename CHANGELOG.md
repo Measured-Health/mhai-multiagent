@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Clinical review:** the escalation guard (ADR 0016; no migration; a new
+  optional `query.completed` key). Every answer, on every route (local, cloud,
+  the answer gate, `eval-served`), is checked against the question before an
+  NLI decision can stand: a red flag in the masked question or the patient's
+  current data, missing patient values for a judgement (a diagnosis, a
+  severity, going home, a child's dose), or a dose no cited chunk gives makes
+  the answer `ESCALATE` whatever its grounding; a `PASS` that only recites its
+  chunks, off the question, becomes `REGENERATE`. The rules are a versioned
+  YAML rule set (`guardrails/rules/escalation-guard.yaml`, a **pilot list
+  pending clinical sign-off**) whose SHA-256 is pinned in the code; a rule set
+  that can't load stops the pipeline worker at start-up and escalates any
+  verification (`guard_unavailable`). The reasons are codes in the decision's
+  `guardrail_report` (`guard_reasons`, `guard_rules`) and on the
+  `query.completed` fact (`guard_reasons`, a closed set core checks); the rule
+  set's version is in every decision's `model_versions`
+  (`escalation_guard`). `pyyaml` is now a direct dependency.
+
 - EMR PR 11: the scheduled file export (`file_export`, migration **00043**;
   off by default: the type joins `CORE_EMR_CONNECTOR_TYPES` only by a
   deploy change after H1 and H7). Files in the published `mhai_csv_v1`

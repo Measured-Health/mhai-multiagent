@@ -32,6 +32,7 @@ def _worker(args):
     from intelligence.boundary.db import DatabaseError
     from intelligence.boundary.keys import TrustedKeysError
     from intelligence.boundary.operations import OperationsError
+    from intelligence.guardrails.escalation_guard import RuleSetError
 
     setup_logging(args.log_level)
     try:
@@ -41,6 +42,10 @@ def _worker(args):
         return 2
     try:
         asyncio.run(worker.run_service(settings))
+    except RuleSetError as e:
+        # A fixed code, never the file's content.
+        print(f"intelligence worker: escalation guard rule set refused: {e}", file=sys.stderr)
+        return 2
     except (TrustedKeysError, OperationsError, DatabaseError) as e:
         # These messages name files, variables and roles, never credentials.
         print(f"intelligence worker: {e}", file=sys.stderr)
