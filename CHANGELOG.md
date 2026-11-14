@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Citations show title, link and source (migration **00041**, OpenAPI
+  **1.30.0**, additive): `ClinicalResult.cited_sources`, one
+  `{chunk_id, title, url, source, attribution}` per cited shared reference
+  row, in citation order, only for ids in `cited_chunk_ids`. The pipeline
+  stores them with the decision (`clinical_decisions.cited_sources_json`),
+  from reference rows only (never a hospital's or a patient's chunk), every
+  field checked; core checks them again before showing them, and shows a
+  link only when it is a plain https URL.
 - Reference library v1, `medref` (no migration, no contract change): openFDA
   drug labels (CC0; safety-critical sections first) and English MedlinePlus
   health topics (public domain; labelled patient-facing), 23,654 rows. An

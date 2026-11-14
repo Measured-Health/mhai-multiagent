@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -196,6 +197,83 @@ type Citation struct {
 	Reason        string  `json:"reason"`
 }
 
+// CitedSource is one entry of ClinicalResultOut.cited_sources (added in
+// 1.30.0): a cited shared reference row's title, link and source credit, as
+// the pipeline stored them with the answer (clinical_decisions
+// .cited_sources_json, 00041). URL and Attribution are null when unknown.
+type CitedSource struct {
+	ChunkID     string  `json:"chunk_id"`
+	Title       string  `json:"title"`
+	URL         *string `json:"url"`
+	Source      string  `json:"source"`
+	Attribution *string `json:"attribution"`
+}
+
+// Limits on a cited source's fields (the pipeline's cited_sources.py).
+const (
+	maxCitedSources   = 50
+	maxSourceTitle    = 300
+	maxSourceName     = 64
+	maxSourceCredit   = 600
+	maxSourceURLBytes = 500
+)
+
+// sourceURL is the only link shape shown: https, a host name, then an
+// optional path and query of URL-safe characters (no userinfo, port,
+// fragment, quote, angle bracket or space).
+var sourceURL = regexp.MustCompile(`^https://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?:/[A-Za-z0-9._~%/?=&+-]*)?$`)
+
+// sourceText is a stored text field when it is a plain, non-empty string
+// within limit runes with no control or format characters.
+func sourceText(v any, limit int) (string, bool) {
+	s, ok := v.(string)
+	if !ok || s == "" || !utf8.ValidString(s) || utf8.RuneCountInString(s) > limit {
+		return "", false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return "", false
+		}
+	}
+	return s, true
+}
+
+// citedSources decodes a decision's cited_sources_json and keeps, in order
+// and once each, the entries for ids in cited whose fields pass the checks;
+// anything else is dropped rather than shown. Never nil.
+func citedSources(raw []byte, cited []string) []CitedSource {
+	out := []CitedSource{}
+	var entries []map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &entries) != nil {
+		return out
+	}
+	seen := map[string]bool{}
+	for _, e := range entries {
+		id, ok := e["chunk_id"].(string)
+		if !ok || seen[id] || !slices.Contains(cited, id) {
+			continue
+		}
+		title, okT := sourceText(e["title"], maxSourceTitle)
+		source, okS := sourceText(e["source"], maxSourceName)
+		if !okT || !okS {
+			continue
+		}
+		c := CitedSource{ChunkID: id, Title: title, Source: source}
+		if u, ok := e["url"].(string); ok && len(u) <= maxSourceURLBytes && sourceURL.MatchString(u) {
+			c.URL = &u
+		}
+		if a, ok := sourceText(e["attribution"], maxSourceCredit); ok {
+			c.Attribution = &a
+		}
+		seen[id] = true
+		out = append(out, c)
+		if len(out) == maxCitedSources {
+			break
+		}
+	}
+	return out
+}
+
 // L3NLI is guardrail_details.l3_nli.
 type L3NLI struct {
 	PassRate      float64 `json:"pass_rate"`
@@ -239,6 +317,7 @@ type ClinicalResultOut struct {
 	TrustBand         *string          `json:"trust_band"`
 	Citations         []Citation       `json:"citations"`
 	CitedChunkIDs     []string         `json:"cited_chunk_ids"`
+	CitedSources      []CitedSource    `json:"cited_sources"`
 	GuardrailDetails  GuardrailDetails `json:"guardrail_details"`
 	RetrievalMS       float64          `json:"retrieval_ms"`
 	GenerationMS      float64          `json:"generation_ms"`
