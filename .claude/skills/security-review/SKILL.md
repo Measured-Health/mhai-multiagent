@@ -35,6 +35,7 @@ Review as an attacker would, not as the author. Every finding needs a concrete w
 - **A tagged type losing its tag through a copy made for another purpose:** a value whose type proves it passed a gate (`MaskedText`) is deep-copied, pickled or turned into a plain string for a reviewer, a cache or a log, and the copy then reaches the gated sink. Refuse copy and pickle on the tagged type, make side copies plain, and check the exact type at the sink (cloud models C13).
 - **A purge rule checked after other refusals:** a record for an excluded patient that also fails a format check is rejected under the other code and keeps its payload. Decide the patient (excluded or not) first, and clear what an excluded patient's record holds whatever else is wrong with it (EMR PR 5).
 - **One-pass sanitising:** stripping tags once leaves `<scr<x>ipt>` as `<script>`. Repeat until nothing changes and drop any leftover opener; even then, text cleaning is not an XSS control: renderers HTML-escape (EMR PR 5).
+- **An audit gate that any matching entry satisfies:** a definer function or commit check that asks "does an entry for this record exist?" accepts one committed earlier, by anyone with the append policy, so the sensitive read happens with no entry of its own and is attributed to someone else. Tie the entry to the transaction doing the read (its `xmin`), to the actor, and to the record's own values, not the caller's arguments (Analysis PR 9).
 
 ## Also check
 - **Identity and hospital** come only from the principal.
