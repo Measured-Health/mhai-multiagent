@@ -419,7 +419,7 @@ class RunQuery:
         masked_patient = _plain_tree(context)
         await self._checkpoint(job, 0.25, "generation")
         started = time.monotonic()
-        chunks = await self._chunks(job)
+        chunks = await self._chunks(job, str(question))
         chunks_ms = _ms(time.monotonic() - started)
         if provider == "local":
             generation = await self._stage(job, client.generate, question, context, None, chunks)
@@ -462,13 +462,14 @@ class RunQuery:
         masked = _mask_tree(client.mask, dict(patient))
         return client.mask(question), masked if isinstance(masked, dict) else {}
 
-    async def _chunks(self, job: _Job) -> list[Any]:
+    async def _chunks(self, job: _Job, question: str) -> list[Any]:
         assert self._db is not None
         # Departure 7: no patient id on the row yet, so None: shared
         # guidelines only. The id would come from the claimed row, never
-        # from the message.
+        # from the message. The masked question picks a reference library's
+        # candidates (kb_repo).
         async with self._db.with_hospital(job.v) as cur:
-            return await kb_repo.load_chunks(cur, None)
+            return await kb_repo.load_chunks(cur, None, question=question)
 
     # --- stages, heartbeats and checkpoints ---------------------------------------
 
