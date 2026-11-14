@@ -77,3 +77,8 @@ func drawPage(n int) []byte {
 	}
 	return b.Bytes()
 }
+
+// FixturePage is page n (1 to DemoPages) of the demo's sample letter, for
+// a demo letter's copy in a named-access export (plan departure 66); nil
+// outside that range. The same bytes on every call.
+func FixturePage(n int) []byte { return fixturePage(n) }

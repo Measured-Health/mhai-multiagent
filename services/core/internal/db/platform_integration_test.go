@@ -105,6 +105,7 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"legal_hold_lifts":         "00037: the two-person lift requests (SELECT, column INSERT, column UPDATE of an open one)",
 		"platform_member_versions": "00037: a platform member's version, for the team's role changes (SELECT, INSERT, UPDATE (version))",
 		"platform_email_prefs":     "00037: a platform admin's analytics e-mail mode (SELECT, INSERT, UPDATE (mode, version))",
+		"audit_exports":            "00044: export records it makes and lists (SELECT, INSERT); rows, checksum and file name in the record's own transaction, and its one download (column UPDATE, under a trigger)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `
@@ -165,6 +166,13 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"mhai_analysis_position": {"p_hospital uuid", "text"},
 		// 00028: a drill-down entry's pids, the recorded reveal.
 		"mhai_audit_view_pseudonyms": {"p_audit_id bigint", "text[]"},
+		// 00044: a named export's rows (its creation transaction only), its
+		// pids (the creation or download transaction, after the entry), the
+		// letters an entry names, and binding an export to a legal reference.
+		"mhai_audit_export_named":     {"p_export uuid, p_max integer", "integer"},
+		"mhai_audit_export_pids":      {"p_export uuid", "TABLE(ref text, seq bigint, hash text, ts timestamp with time zone, actor_id uuid, clearance_id uuid, purpose text, level text, start date, pid text)"},
+		"mhai_audit_letters":          {"p_ids uuid[]", "TABLE(id uuid, hospital_id uuid, status text, letter_date date, end_date date, verified_by uuid, demo boolean, pages integer)"},
+		"mhai_legal_reference_create": {"p_export uuid, p_reference text, p_admins uuid[], p_by uuid", "TABLE(id uuid, hospital_id uuid, export_rows integer, created_at timestamp with time zone)"},
 	}
 	for name, sig := range platformFunctions {
 		wantFuncs[name] = sig

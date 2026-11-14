@@ -1,6 +1,6 @@
 # Patient Analysis, named access and clearance letters (hospital side): implementation plan
 
-**Status:** PRs 1–4 merged (PR 4 as #141, migration 00025, departure 18). PR 5 (Tasks 12–14) merged as #149, with migration 00028, OpenAPI 1.19.0 and departures 19–24 below. PR 6 (Tasks 15–16) built on `agent/analysis-build-6`, with migration 00030 and departures 25–28; Task 17 moves to the staff-endpoints plan (departure 12). PR 7 (Tasks 18–20) merged as #169, with migration 00038, OpenAPI 1.28.0 and departures 29–44. PR 8 (Tasks 21–23) built on `agent/analysis-build-8`, with migration 00042, OpenAPI 1.31.0 and departures 45–59. The design is approved (product owner, 7 Nov 2026, after three reviews). ADR 0015 and the SKILLS.md §1 amendment are written as **Accepted** in PR 1 (H4 is given). Live use waits on H1–H3 (design §15), which are people's gates in TODO.md. Nothing in this plan opens them.
+**Status:** PRs 1–4 merged (PR 4 as #141, migration 00025, departure 18). PR 5 (Tasks 12–14) merged as #149, with migration 00028, OpenAPI 1.19.0 and departures 19–24 below. PR 6 (Tasks 15–16) built on `agent/analysis-build-6`, with migration 00030 and departures 25–28; Task 17 moves to the staff-endpoints plan (departure 12). PR 7 (Tasks 18–20) merged as #169, with migration 00038, OpenAPI 1.28.0 and departures 29–44. PR 8 (Tasks 21–23) merged as #176, with migration 00042, OpenAPI 1.31.0 and departures 45–59. PR 9 (Tasks 24–26) built on `agent/analysis-build-9`, with migration 00044, OpenAPI 1.32.0 and departures 60–77. The design is approved (product owner, 7 Nov 2026, after three reviews). ADR 0015 and the SKILLS.md §1 amendment are written as **Accepted** in PR 1 (H4 is given). Live use waits on H1–H3 (design §15), which are people's gates in TODO.md. Nothing in this plan opens them.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
@@ -28,8 +28,8 @@
 | **6. Analyst grant** | 15–17 | migration D, the trigger, the CLI, step-up on the staff route | 2; Task 17 waits for the staff endpoints | none |
 | **7. Letters, hospital side** | 18–20 | task level | 6; documents service (live); Plan 11b design | H3 template before live |
 | **8. Named access** | 21–23 | task level | 7; EMR service identity call (live) | H1–H3 before live |
-| **9. Audit list, exports, legal path** | 24–25 | task level | 7, 8; object storage | H3 (§8.9) |
-| **10. EMR facts** | 26–27 | task level | EMR plan PRs 5, 7, 8b, 13; notifications | H2, H7 |
+| **9. Audit list, exports, legal path** | 24–26 | task level | 7, 8; object storage | H3 (§8.9) |
+| **10. EMR facts** | 27–28 | task level | EMR plan PRs 5, 7, 8b, 13; notifications | H2, H7 |
 
 Phases 2–6 need no sign-off because the switch is On only for the demo hospital (departure 5). PRs 7–10 are planned to task level here. Each gets its own detailed plan, or an update of this one, when its dependency exists.
 
@@ -747,17 +747,101 @@ Depends on PR 7. Live identity needs the EMR service's identity operation (H7, a
 
 ### PR 9: audit list, exports and the legal path (design §8.8, §8.9)
 
-Depends on PRs 7 and 8, object storage (H5), and H3 for §8.9. Migration 00036+.
+Depends on PRs 7 and 8, and H3 for §8.9 before any live use. Object storage (H5) doesn't exist, so no file is kept (departure 62). **Built as migration 00044** (EMR PR 11 took 00043) and **OpenAPI 1.32.0** (EMR PR 11, #179, took 00043 and no OpenAPI version), with departures 60–77. Off by default: every export route, the named-access list, the legal-reference route and the legal resolution routes answer 404 until `CORE_AUDIT_EXPORTS=true`; a legal resolution also needs the hospital's analysis switch on (else 404), its named-access position `on` (else 403 `named_access_off`), a letter covering the admin today, and a reference, which needs a `named_access` export. The `letter` on an entry is a read of what exists (named entries exist only in the demo).
 
-- **Task 24: The named-access list and exports.** `GET /platform/audit/named-access`, `letter` on entries, and `/platform/audit/exports*` per contract §14.9: a `named_access` export is a ZIP holding the CSV with `export_row_ref`, period and pid (never a name) and the cited letters. The export record is written before release; the file is the owner's only, downloadable once within 15 minutes. Tests: T23 (no pid outside `/{id}/patients` and the export file), the once-only download, the closed schemas.
-- **Task 25: Legal references and resolution.** `POST /platform/audit/legal-references` (`mhai_legal_reference_create`; one export per reference; at most 200 rows, else 422 `too_many_rows`; 1–3 named admins) and `POST /hospital/legal-resolutions` (`mhai_legal_subjects`: named admin only, else 404; once only through a conditional `UPDATE`, else 409 `already_used`; cover and step-up; the flagged `analysis.legal_resolved` committed before identity; rows in the app only). Tests: T29, and parallel resolutions giving exactly one success.
+### Task 24: Migration 00044: export records, their rows, legal references and the commit checks
+
+**Files:**
+- Create: `services/core/internal/db/migrations/00044_audit_exports.sql`, `services/core/internal/db/audit_exports_integration_test.go`
+- Modify: `services/core/internal/db/db_integration_test.go` (`TestMigrateUpFromEmpty`, `TestRLSWithoutHospitalSeesNothing`)
+
+**Interfaces:**
+- Role `mhai_export_rules` (NOLOGIN, NOINHERIT, no members), as `mhai_clearance_rules`: it owns the functions and triggers below. Its reads: the named-view audit entries and the export, download and legal entries; `analysis_views` (id, hospital, period, level, letter), `analysis_view_rows`, the hospital-side pids, `analysis_periods`, `analysis_subjects.ref_enc`; users, roles, two-step and hospitals; clearances (status, dates, verifier, demo, pages). Its writes: `audit_export_rows` and `legal_references`. `db.CheckLoginRole` refuses a login that can reach it.
+- `audit_exports (id, kind events|named_access, owner, hospital_id, reason, note, reference, filters, max_seq, rows, capped, checksum, file_name, created_at, expires_at, created_xact, downloaded_at, download_xact)`: `hospital_id` set exactly for `named_access`; `rows` 0–50,000; `capped` always false (departure 64); `expires_at` is `created_at` plus 15 minutes. `mhai_platform` inserts and reads them and may set only `downloaded_at` and `download_xact`, once, before `expires_at`, to `now()` and this transaction (a trigger: `gone`). No delete.
+- `audit_export_rows (export_id, ord, ref, hospital_id, view_id, row_ord, seq)`: one row per named-view entry and list row; `ref` is the opaque `export_row_ref` (24 lowercase hex, unique, never of the pid's shape). No app grant.
+- `legal_references (id, export_id unique, hospital_id, reference unique, admins uuid[] 1–3, created_by, created_at, used_at, used_by, used_key, replays)`. No app grant.
+- Commit checks (deferred constraint triggers, departures 21, 25, 33): an export without its `audit.exported` entry by its owner; a download without its `audit.export_downloaded` entry; a reference without its `legal_reference.created` entry by its creator; a use or replay without its `analysis.legal_resolved` entry with that replay number, by the admin, in the hospital.
+- Functions:
+  - `mhai_audit_export_named(p_export, p_max)` (`mhai_platform`, in the export's creation transaction only): the rows of the named-view entries of the export's hospital under the record's own filters; the count, writing nothing when it is over `p_max`.
+  - `mhai_audit_export_pids(p_export)` (`mhai_platform`): `(ref, seq, view, level, start, pid, clearance)` in order, only in the export's creation transaction or its one download transaction (departure 65).
+  - `mhai_audit_letters(p_ids uuid[])` (`mhai_platform`): `(id, hospital, status, letter_date, end_date, verified_by, demo, pages)`; an `active` letter past its end date in the hospital's zone is `ended`.
+  - `mhai_legal_reference_create(p_export, p_reference, p_admins uuid[], p_by)` (`mhai_platform`): `not_found` (no such export, or not `named_access`), `forbidden` (not the export's owner, or not an active platform admin with two-step), `conflict` (bound, or the reference taken), `too_many_rows` (over 200), `not_eligible` (an admin who isn't an active hospital admin of the export's hospital with two-step, or a repeat).
+  - `mhai_legal_subjects(p_reference, p_key bytea)` (`mhai_gateway`, as the person): analysis off `not_found`; not a hospital admin named on a reference of the session's hospital `not_found`; the cover (`named_access_off`, `not_cleared`, `clearance_ended`, `forbidden`); then once only: the conditional `UPDATE … WHERE used_at IS NULL`, or a replay by the same admin with the same key within 15 minutes (at most 3), else `already_used`. Returns `(ref, level, start, ref_enc, demo, clearance_id, export_id, replays)` in order.
+  - `mhai_legal_references_mine()` (`mhai_gateway`): the caller's unused references at the session's hospital, `(id, reference, rows, created_at)`.
+- `platform_export_append`: a second permissive `audit_log` policy for `mhai_platform` (as 00037's `platform_admin_append`): `audit.exported`, `audit.export_downloaded`, `audit.export_download_refused`, `legal_reference.created`, no hospital, an actor. `platform_append` is not touched.
+
+- [ ] **Step 1: Write the failing tests:** `TestExportRecordAudited` (an export or a download without its entry refused at commit; with another export's entry refused); `TestExportDownloadOnce` (a second download, one after `expires_at`, one that changes anything else: refused; no delete); `TestExportPidsOnlyInTheirTransactions` (pids from the creation and the one download transaction; another transaction gets nothing); `TestExportNamedRows` (rows per entry and list row, refs unique and not pid-shaped, another hospital's entry or a de-identified entry refused, over the max writes nothing); `TestLegalReferenceRules` (every refusal; the 201st row; one export per reference, one reference per export; audited at commit); `TestLegalSubjectsOnceUnderRace` (**T29**: 10 parallel resolutions, exactly one succeeds); `TestLegalSubjectsRefusals` (not named 404, another hospital 404, analysis off, cover, replay by key within 15 minutes and at most 3, another key `already_used`, audited at commit); `TestExportTablesGrants`; `TestMigration00044DownUp`.
+- [ ] **Step 2: Run (Go, remote):** `go test -race -tags integration ./internal/db/...` → fail.
+- [ ] **Step 3:** Write the migration.
+- [ ] **Step 4:** Run the tests.
+- [ ] **Step 5:** Commit: "Migration 00044: export records and rows, legal references, each audited at commit".
+
+### Task 25: The named-access list, the letter, and exports (contract §14.9)
+
+**Files:**
+- Create: `services/core/internal/platform/{exports.go,exportfile.go,exportfile_test.go,named_access.go,exports_integration_test.go,named_access_integration_test.go}`
+- Modify: `internal/audit/{reader.go,catalogue.go,schemas.go}` (+ tests), `internal/analysis/letters/pages.go` (`FixturePage`), `internal/httpx/errors.go` (`too_many_rows` 422 with `rows`, `gone` 410, `already_used` 409), `internal/config/config.go` (+ test: `CORE_AUDIT_EXPORTS`), `cmd/core/serve.go`, `internal/server/{server.go,server_test.go}` (`TestAuditorWriteRoutesPinned`), `openapi.yaml` (1.32.0), `docs/specs/generated/permissions.md`, `testdata/web-audit-vocabulary.json` untouched (the kinds exist in mhai-web)
+
+**Interfaces:**
+- `GET /platform/audit/named-access?hospital&person&clearance&from&to&cursor` (404 while exports are off) → `{events, next_cursor}`: `analysis.named_viewed` and `analysis.named_view_failed` entries, newest first, 50 a page, each as the catalogue sends it plus `letter`. The cursor is bound to the session and the filters. The first page of a filter set writes one `audit.viewed {list: named_access, filters}` (deduplicated with the events list's rule, separately).
+- `GET /platform/audit/{id}`: `letter` (`{id, status, valid_from, valid_to, verified_by}`) on an entry whose payload names a letter (named entries, `analysis.legal_resolved`), null otherwise.
+- `POST /platform/audit/exports {kind, filters, reason, note?, reference?, mfa_code | backup_code}` (platform admins and auditors: an auditor write, `Idempotency-Key`): 404 while exports are off; 422 `validation_failed` for an unknown field, filter, reason, a note over 200 or with a control character, `other` without a note, a reference outside `^[A-Za-z0-9][A-Za-z0-9 ._/:-]{0,59}$`, a pseudonym anywhere, or a `named_access` export without `hospital`; 429 `rate_limited` past 10 an hour per person (reserve then check); step-up; then in one transaction: the snapshot (`max_seq`), the rows, 422 `too_many_rows {rows}` over 50,000 (nothing recorded), 503 `unavailable` for a cited letter with no copy (not a demo letter), the record; for a named export its `audit.named_access_exported` entry before any pid is read; the file built, its SHA-256 set on the record; an events export's `audit.exported` last; commit. → `{export_id, rows, capped, checksum, expires_at, file_name}`.
+- `GET /platform/audit/exports?cursor` → `{exports, next_cursor}` (newest first, 50 a page), recorded as `audit.searched {searched_kind: export}`.
+- `GET /platform/audit/exports/{id}/file`: not the owner 403 `forbidden` and `audit.export_download_refused {reason: not_owner}`; spent or past `expires_at` 410 `gone` and the same with `gone`; otherwise, in one transaction: the record marked downloaded, `audit.export_downloaded`, the file rebuilt and checked against its checksum (503 `unavailable`, not spent, when it differs: both roll back); commit; then the file, `text/csv` or `application/zip`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`. 30 a minute per person.
+- The file: key-value header rows (`export_id`, `kind`, `made_by` (id), `made_at`, `reason`, `reference`, each filter, `rows`, `capped`), a blank row, then the table. `events`: `seq, hash, at, actor_id, hospital_id, type, kind, target_kind, target_id, outcome, flag` (the catalogue's mapping; a bare entry's type and kind). `named_access`: a ZIP of `named-access.csv` (`export_row_ref, seq, hash, at, actor_id, hospital_id, clearance_id, purpose, view, period, pseudonym`) and `letters/{id}/page-{n}.png`. Every cell neutralised against spreadsheet formulas. ZIP entries stored, with fixed times.
+- Audit: `audit.exported` (`kind`, `rows`, `capped`, `checksum`, `filters`; mapped to `audit_exported` or `named_access_exported`, target and `refs.export_id` the export), `audit.export_downloaded` (`export_downloaded`), `audit.export_download_refused` (`reason`; `export_download_refused`, outcome refused). Never the note or the reference.
+
+- [ ] **Step 1: Write the failing tests:** `TestNamedAccessList` (filters, cursor, letter on each, recorded once, another session's cursor refused); `TestAuditDetailLetter`; `TestExportsOffIs404`; `TestExportRefusals` (the table above, nothing recorded after any); `TestExportEvents` (header, rows, checksum equals the file's, record before reply, `audit.exported`); `TestExportNamedAccessZip` (the CSV with refs, periods and pids, the letter pages; no name, MRN or note anywhere); `TestT23ExportRepliesHoldNoPid` (create, list, entry and detail replies); `TestExportDownloadOnceOwnerOnly` (the owner once; again 410; another reader 403; after 15 minutes 410; each refusal recorded); `TestExportDownloadUnderRace` (10 parallel downloads, one file); `TestExportTooManyRows`; `TestExportRateLimitUnderRace`; unit: `TestCSVCellsNeutralised`, `TestZipDeterministic`, `TestExportActionsSchemas`, `TestExportFileHoldsNoNames`.
+- [ ] **Step 2: Run (Go, remote):** `go test -race ./internal/platform/... ./internal/audit/... && go test -race -tags integration ./internal/platform/...` → fail.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the tests, `permgen` and `oasdiff`.
+- [ ] **Step 5:** Commit: "Audit exports and the named-access list: records before files, files once to their owner, every step audited".
+
+### Task 26: Legal references and their resolution
+
+**Files:**
+- Create: `services/core/internal/platform/legal.go` (+ integration test), `services/core/internal/analysis/routes/{legal.go,legal_integration_test.go}`
+- Modify: `routes/register.go` (`Auth`), `internal/server/server.go`, `internal/audit/{schemas.go,catalogue.go}`, `openapi.yaml`, `docs/specs/generated/permissions.md`
+
+**Interfaces:**
+- `POST /platform/audit/legal-references {export_id, reference, admins, mfa_code | backup_code}` (platform admins, step-up, `Idempotency-Key`; 404 while exports are off): 10 an hour per person; `mhai_legal_reference_create`'s refusals (404 `not_found`, 403 `forbidden`, 409 `conflict`, 422 `too_many_rows {rows}`, 422 `not_eligible`); `legal_reference.created` (flagged; `export_id`, `hospital_id`, `admins` by id) in the same transaction. → `{id, export_id, reference, admins, created_at}`.
+- `GET /hospital/legal-resolutions` (hospital admins, two-step): the caller's open references. Analysis off 404; position `off` 403 `named_access_off`.
+- `POST /hospital/legal-resolutions {legal_reference_id, mfa_code | backup_code}` (hospital admins, step-up, `Idempotency-Key` required; no generic store: the reply holds names): analysis off 404; 5 a minute per person; step-up; in one transaction as the person: the role, two-step and account re-read (403); `mhai_legal_subjects` (404, 403 `named_access_off`, `not_cleared`, `clearance_ended`, `forbidden`, 409 `already_used`); `analysis.legal_resolved` (flagged; `export_id`, `clearance_id`, `rows`, `replays`) last; commit. Then identity for exactly the distinct subjects, the reply checked (T20), the cover re-read; on failure 503 `unavailable` and a flagged `analysis.legal_resolve_failed {export_id}` (departure 76). → `{legal_reference_id, rows: [{export_row_ref, period: {level, start}, name, mrn}]}`, `Cache-Control: no-store`. No pid.
+
+- [ ] **Step 1: Write the failing tests:** `TestLegalReferenceRoute` (each refusal, the entry, the step-up); `TestT29OnlyNamedAdmins` (another admin of the hospital, an admin of another hospital, an analyst: 404); `TestT29OnceOnly` (a second call 409 with a new key; the same key within 15 minutes re-resolves with a new entry; a fourth replay 409); `TestT29ParallelExactlyOne`; `TestT29TooManyRowsAtStepOne` (201 rows 422); `TestLegalAuditFailNoIdentityCall` (T18); `TestLegalNoNamesStoredOrLogged` (T16, T17); `TestLegalCoverReadAgain`; `TestLegalReplyHoldsNoPid`.
+- [ ] **Step 2–4:** Run, implement, run (with `permgen` and `oasdiff`).
+- [ ] **Step 5:** Commit: "The legal path: one export bound to one reference, resolved once by a named, covered admin, audited before names".
+
+**PR 9:** run `security-review` and open it.
+
+#### Departures (PR 9)
+
+60. **Numbers.** Migration 00044 and OpenAPI 1.32.0 (coordinator: EMR PR 11, #179, took 00043 and left OpenAPI at 1.31.0).
+61. **Off by default through configuration.** Exports have no hospital switch to sit behind, so `CORE_AUDIT_EXPORTS` (false unless set to `true`) gates every `/platform/audit/exports*` route, `POST /platform/audit/legal-references` and `GET /platform/audit/named-access` (coordinator's security review: the list too): 404 while off. The `letter` on an entry's detail is always sent (it is null unless a named entry exists, which only the demo has). The legal resolution is behind the analysis switch, the named-access position, the cover and a reference.
+62. **No file is kept anywhere (object storage, H5, doesn't exist; the more private choice).** The record holds the snapshot (`max_seq` and the filters), the row count and the checksum. The file is built in the creation transaction (for its checksum and count) and dropped, and built again in the one download transaction, from the same append-only entries up to `max_seq`, and sent only if its SHA-256 equals the record's (503 `unavailable` otherwise, and the file is not spent). Nothing of a file is ever written to disk, the database or a cache.
+63. **Files carry ids and codes, never names or free text.** People and hospitals are ids (a name can change between creation and download, and the file must rebuild exactly); the note never enters the file or an entry, and the reference is limited to `^[A-Za-z0-9][A-Za-z0-9 ._/:-]{0,59}$`. Every cell that could start a spreadsheet formula is prefixed with `'`. The `after_break` marks are the app's to add.
+64. **Over 50,000 rows is refused, never cut.** 422 `too_many_rows {rows}` with nothing recorded; `capped` is therefore always false.
+65. **A `named_access` export names one hospital** (`hospital` required; `person`, `clearance`, `from`, `to` optional) and has one row per named-view entry and list row (a replay is its own entry). Its pids are read through `mhai_audit_export_pids`, which answers only in the export's creation transaction or its single download transaction (bound by transaction id in the database), and only once that transaction already holds the export's `audit.named_access_exported` or the download's `audit.export_downloaded` entry (P0001 `not_audited` otherwise; coordinator's security review). So the entry is appended before the pids are read, the chain lock is held while the file is built, and a pid of an export is read at most twice, each time under its entry.
+66. **Letter copies are the demo's fixture pages.** Letters are kept only by the documents service (H5); a `named_access` export citing a letter that isn't a demo letter is 503 `unavailable`, with nothing recorded.
+67. **Downloads.** Owner only (403 `forbidden`), once and before `expires_at` (410 `gone`), each refusal recorded as `audit.export_download_refused` (`not_owner`, `gone`), and each download recorded as `audit.export_downloaded` (mhai-web's `export_downloaded`) in the transaction that spends it. The database refuses, at commit, an export or a download without its entry.
+68. **The export kinds are mapped, the legal ones sent bare.** `audit.exported` (events) and `audit.named_access_exported` map to `audit_exported` and `named_access_exported` (facts `rows`, `capped`, `filters`, and `checksum` for an events export; a named export's entry precedes its file, so its checksum is on the record only), `audit.export_downloaded` and `audit.export_download_refused` to theirs, each with the export as target and `refs.export_id`. `legal_reference.created`, `analysis.legal_resolved` and `analysis.legal_resolve_failed` have no mhai-web kind and are sent bare (departure 52). `legal_reference.created` names the admins by id, not display name (no name in a payload).
+69. **The named-access list sends its entries as the catalogue does.** Named entries are still bare (departure 52), so each comes with its `letter` but no facts until H6. `valid_from` is the letter's date and `valid_to` its end date; an active letter past its end date is `ended`; `verified_by` is the verifier by id and name.
+70. **Reads of the exports list are recorded** as `audit.searched {searched_kind: export}` (mhai-web's value), once per session per 5 minutes.
+71. **Binding is the export's owner's, a platform admin's** (the more private choice: an auditor's export can't be bound by someone else, and nobody binds an export they didn't make). The admins must be active hospital admins of the export's hospital with two-step, distinct, 1–3.
+72. **A resolution's replay is a new resolution, audited.** The design lets the same key and body re-resolve within 15 minutes without a new entry; here each replay appends its own flagged `analysis.legal_resolved` with its number, by the same admin with the same key, within 15 minutes of the first, at most 3. Any other second call is 409 `already_used`.
+73. **The resolution sends no pid.** Rows carry `export_row_ref`, the period, the name and the MRN: the reference ties them to the export the requester holds. It doesn't use the named-view budget or the patient cap: one reference, at most 200 rows, once.
+74. **`GET /hospital/legal-resolutions`** lists the caller's open references (id, reference, rows, created) so a named admin can find one; the contract is silent (H6(h)).
+75. **Rate limits, reserve then check** (one upsert on the person's counter, `platform.reserveRate`'s rule): exports 10 an hour, downloads 30 a minute, legal references 10 an hour, per person; resolutions 5 a minute per person in SQL.
+76. **A resolution that sends no names** appends a flagged `analysis.legal_resolve_failed {export_id}` (the named route's `named_view_failed`, for this path) and answers 503 `unavailable`; the reference stays used.
+
+77. **Security reviews (PR 9).** The coordinator's and this PR's own reviews made these rules the database's, not the route's: a pid, a download, a reference and a resolution count only under an audit entry written by the same transaction (the entry's `xmin`), so an entry committed earlier, by anyone, never stands for one; an export's owner is an active platform admin or auditor; a named export's rows come from the record's own filters (`mhai_audit_export_named(export, max)`), so the recorded filters are the exported ones; a reference counts the export's rows itself and refuses a record that disagrees; a resolution whose rows no longer all resolve sends none (503) and uses nothing. The legal resolution routes answer 404 while `CORE_AUDIT_EXPORTS` is off, as the platform's routes do; the role re-read on both sides of the identity call asks for `hospital_admin` (an analyst isn't enough); a refused resolution of a reference the admin is named on is recorded (`analysis.legal_resolve_refused`, sent bare), as is a download that couldn't be sent (`audit.export_download_refused {unavailable}`, in its own transaction). An unknown export id and a reader whose role was taken away answer without an entry: they name nothing that exists for them.
 
 ### PR 10: EMR facts (design §4.1, §4.4)
 
 Depends on EMR plan PRs 5 (patient index), 7 (findings), 8b (alerts), 13 (`pids` on consultations), notifications, and H7. Migration 00037+.
 
-- **Task 26: Consultations with a patient reference.** `mhai_analysis_ingest_source` reads the reference column that the EMR `pids` work adds to consultations, after `emr_patient_in_hospital`. Consultations without one are never counted (§16 Q2). The confidence mapping is H2's. Tests: a consultation without a reference produces no fact; the mapping table, pinned.
-- **Task 27: Canonical EMR events, alerts and the patient-index changes.** Coded facts for diagnoses, findings, alerts, settings, locations and sources, from the EMR service's events, in the same nightly run. Exclusions and merges are handled as the conflict above proposes, once H1 and H3 rule. Tests: the exclusion purge leaves frozen bodies unchanged and removes `ref_enc`; a merge never changes a frozen period; no name or MRN in any fact.
+- **Task 27: Consultations with a patient reference.** `mhai_analysis_ingest_source` reads the reference column that the EMR `pids` work adds to consultations, after `emr_patient_in_hospital`. Consultations without one are never counted (§16 Q2). The confidence mapping is H2's. Tests: a consultation without a reference produces no fact; the mapping table, pinned.
+- **Task 28: Canonical EMR events, alerts and the patient-index changes.** Coded facts for diagnoses, findings, alerts, settings, locations and sources, from the EMR service's events, in the same nightly run. Exclusions and merges are handled as the conflict above proposes, once H1 and H3 rule. Tests: the exclusion purge leaves frozen bodies unchanged and removes `ref_enc`; a merge never changes a frozen period; no name or MRN in any fact.
 
 ---
 
@@ -847,13 +931,13 @@ These are the design's R-A1 to R-A5, with P2's and P5's numbers reported in PR 3
 | T20 | Task 23 |
 | T21 | `TestColdBodyOnceUnderRace`, `TestOverCapIs503AndUnstored` (9) |
 | T22 | `TestWorkerRolesSeeNoAnalysis` (2) |
-| T23 | `TestT23NoPidElsewhere` (14); exports (24) |
+| T23 | `TestT23NoPidElsewhere` (14); `TestT23ExportRepliesHoldNoPid` (25) |
 | T24 | `TestGatewayCannotWriteAnalysis` (2) |
 | T25 | `TestIngestRefusesSwitchOff` (2), `TestNightlyRunsOnlySwitchedOnHospitals` (3) |
 | T26 | `TestT26TriggerRefusals` (15), `TestCLIRolesUsesTheFunction`, `TestNoticeCalledOncePerGrant` (16), `TestT26RouteRefusals` (17) |
 | T27 | Task 23 |
 | T28 | `TestReservePatientsRace` (12) |
-| T29 | Task 25 |
+| T29 | `TestLegalSubjectsOnceUnderRace` (24); `TestT29OnlyNamedAdmins`, `TestT29OnceOnly`, `TestT29ParallelExactlyOne`, `TestT29TooManyRowsAtStepOne` (26) |
 | P1 | `TestP1NoHiddenCellSolvable` (6), `TestP1DrillCountEqualsCell` (13) |
 | P2 | `TestP2FamilyExhaustive` (8) |
 | P3 | `TestFreezeServesByteIdentical` (9) |
@@ -884,7 +968,7 @@ Nothing below blocks PRs 1–6, except the 7c-1 merge (an engineering dependency
 | # | Who | What, exactly | Needed by |
 |---|---|---|---|
 | H1 | Privacy lead | Design §15 H1. Review the constants in PR 3, and receive the R-A1 (P2), R-A2 (P5), drill-run and P8 numbers that PR 3 and PR 5 report. Accept or change them. Also accept departure 9's extra hiding and the demo facts in production. | PR 3 review; before any live hospital |
-| H2 | Clinical lead | Design §15 H2 (views, definitions, confidence mapping). | Before any live hospital; Task 26 |
+| H2 | Clinical lead | Design §15 H2 (views, definitions, confidence mapping). | Before any live hospital; Task 27 |
 | H3 | Legal / compliance lead | Design §15 H3; the letter template before PR 7 goes live; §8.9 before PR 9; the exclusion-versus-frozen-period proposal (conflicts) before PR 10. | As listed |
 | H4 | Product owner | Given 7 Nov. Also: confirm that the switch stays demo-only until Plan 11b's two-person raise (departure 5), and name the pilot hospital. | PR 2 |
 | H5 | Platform and operations | Design §15 H5. Also: provision the `mhai_analysis_job` login secret and the four key files in each environment, and the `analysis_freeze_failed` and body-cap alerts. | PR 2 deploy; PR 7 live; PR 9 |
@@ -905,7 +989,7 @@ Nothing below blocks PRs 1–6, except the 7c-1 merge (an engineering dependency
 
   | Design | Task |
   |---|---|
-  | §4.3–4.4 tables, ingest, late facts | 2, 3; 26–27 |
+  | §4.3–4.4 tables, ingest, late facts | 2, 3; 27–28 |
   | §4.5 pids | 12 |
   | §5.3 Layer A | 6 |
   | §5.4 D1–D3 | 2 (freeze), 7; D4–D5: 8; D6: 8 (P2); D7: 10, 13 |
@@ -913,7 +997,7 @@ Nothing below blocks PRs 1–6, except the 7c-1 merge (an engineering dependency
   | §5.7 P1–P8 | 6, 7, 8, 9, 13 |
   | §6 analyst | 15–17; §6.5 `features`: 4 (21 for `named_access`) |
   | §7 switches | 2, 4 (demo); 18 (named switch); raise: Plan 11b |
-  | §8 letters, named, identity, audit, legal | 18–25 |
+  | §8 letters, named, identity, audit, legal | 18–26 |
   | §9 contract | 10, 13, 14; 19, 21, 22, 24, 25 |
   | §10 migrations, RLS | 2, 9, 12, 15 |
   | §11 performance | 9, 11 |

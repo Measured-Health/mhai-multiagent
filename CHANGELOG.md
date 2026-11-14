@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Patient Analysis PR 9: the audit list, exports and the legal path
+  (migration **00044**, OpenAPI **1.32.0**; off by default:
+  `CORE_AUDIT_EXPORTS` gates every export route, the named-access list, the
+  legal-reference route and the legal resolution routes, which answer 404
+  until it is `true`; a legal resolution also needs the hospital's analysis switch on, named access
+  `on` and a letter covering the admin). `GET /platform/audit/named-access`
+  (named entries with their `letter`) and `letter` on an entry's detail;
+  `POST`/`GET /platform/audit/exports` and `GET .../exports/{id}/file`: the
+  record and its entry commit before the reply, no file is kept anywhere
+  (built for its checksum, then again at its one download, owner only,
+  within 15 minutes; every refusal recorded), files hold ids and codes,
+  never names or free text, and a named export's pseudonyms are read only
+  in its creation or download transaction, after its entry. Over 50,000
+  rows is 422 `too_many_rows` with `rows`. `POST
+  /platform/audit/legal-references` binds an owner's named export of at
+  most 200 rows to one reference and 1-3 hospital admins; `POST
+  /hospital/legal-resolutions` lets a named, covered admin with step-up
+  resolve it once (the flagged `analysis.legal_resolved` commits before
+  names are read; names in the reply only, no pseudonym), with `GET` for
+  the admin's open references. Plan departures 60-77.
 - EMR PR 11: the scheduled file export (`file_export`, migration **00043**;
   off by default: the type joins `CORE_EMR_CONNECTOR_TYPES` only by a
   deploy change after H1 and H7). Files in the published `mhai_csv_v1`

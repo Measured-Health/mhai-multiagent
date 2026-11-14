@@ -125,6 +125,10 @@ type Config struct {
 	// or demo-fixture, the synthetic demo fixture, refused with
 	// CORE_EMR_ENABLED (analysis plan Task 23, T27).
 	AnalysisNamedIdentity string
+	// AuditExports (CORE_AUDIT_EXPORTS=true) turns the platform audit
+	// exports and the legal-reference route on (analysis plan departure
+	// 61). Off by default: they answer 404.
+	AuditExports bool
 }
 
 // NamedIdentityDemo selects the synthetic demo identity fixture.
@@ -304,6 +308,13 @@ func Load() (Config, error) {
 		c.EMREnabled = true
 	default:
 		errs = append(errs, errors.New("CORE_EMR_ENABLED must be true or false"))
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_AUDIT_EXPORTS"))) {
+	case "", "false":
+	case "true":
+		c.AuditExports = true
+	default:
+		errs = append(errs, errors.New("CORE_AUDIT_EXPORTS must be true or false"))
 	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_EMR_ALLOW_NULL_MRN"))) {
 	case "", "false":

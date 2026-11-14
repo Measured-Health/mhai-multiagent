@@ -70,6 +70,9 @@ type Deps struct {
 	// AnalysisIdentity resolves named lists' names after their entries
 	// commit; nil: unavailable (every named list fails 503).
 	AnalysisIdentity analysis.Resolver
+	// AuditExports is CORE_AUDIT_EXPORTS: off, every audit export route
+	// and the legal-reference route answer 404 (analysis plan departure 61).
+	AuditExports bool
 }
 
 // Register adds every route to m.
@@ -92,12 +95,12 @@ func Register(m *authz.Mux, d Deps) {
 	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log, MasterKey: a.MFAKey,
 		SecurityContact: d.SecurityContact, Walk: d.AuditWalk, Health: d.Health, Intel: d.Intel,
 		Auth: a, QueryCap: d.QueryCap, CloudProviders: d.CloudProviders, EMREnabled: d.EMREnabled, EMRTypes: d.EMRTypes,
-		EMR: d.EMR, EMRSealer: d.EMRSealer, EMRDevelopment: d.EMRDevelopment})
+		EMR: d.EMR, EMRSealer: d.EMRSealer, EMRDevelopment: d.EMRDevelopment, ExportsOn: d.AuditExports})
 	// Patient Analysis's reads and the de-identified list (analysis
 	// backend plan Tasks 10 and 13): off unless the hospital's analysis
 	// switch is on.
 	analysisroutes.Register(m, analysisroutes.Deps{Pool: d.Pool, Engine: d.Analysis, Log: a.Log, Keys: d.AnalysisKeys,
-		Identity: d.AnalysisIdentity})
+		Identity: d.AnalysisIdentity, Auth: a, LegalOn: d.AuditExports})
 	// Clearance letters, hospital side (analysis backend plan Tasks 18-20):
 	// off unless the hospital's analysis switch is on and its named-access
 	// position is letters_only or on (none is, by default).
