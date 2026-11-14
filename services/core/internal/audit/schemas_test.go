@@ -528,3 +528,49 @@ func TestAuditSchemasEMRRetention(t *testing.T) {
 		}
 	}
 }
+
+// The platform admin routes' payloads (00037): a platform hold names its
+// hospital and a code; the team and the e-mail setting carry ids and codes.
+// A name, a reference, an email or a free code never fits.
+func TestPlatformAdminPayloads(t *testing.T) {
+	hold, hosp, lift, user := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	good := map[string]map[string]any{
+		"legal_hold.placed":                {"hold_id": hold, "hospital_id": hosp, "reason": "regulator"},
+		"legal_hold.lifted":                {"hold_id": hold, "hospital_id": hosp, "lift_id": lift},
+		"legal_hold.lift_requested":        {"hold_id": hold, "hospital_id": hosp, "lift_id": lift, "reason": "case_closed"},
+		"legal_hold.lift_cancelled":        {"hold_id": hold, "hospital_id": hosp, "lift_id": lift},
+		"platform.team_role_changed":       {"user_id": user, "role": "auditor", "previous": "platform_admin"},
+		"platform.team_member_removed":     {"user_id": user, "role": "auditor"},
+		"platform.analytics_email_changed": {"mode": "critical", "previous": "off"},
+	}
+	for action, p := range good {
+		if err := audit.CheckActionPayload(action, p); err != nil {
+			t.Errorf("%s: %v", action, err)
+		}
+		for k, v := range map[string]any{"display_name": "Synthetic Okafor", "email": "synthetic.ok@havana.example",
+			"reference": "LH-2026-7781", "note": "synthetic note"} {
+			bad := maps.Clone(p)
+			bad[k] = v
+			if err := audit.CheckActionPayload(action, bad); !errors.Is(err, audit.ErrSchema) {
+				t.Errorf("%s with %s: %v", action, k, err)
+			}
+		}
+	}
+	for name, c := range map[string]struct {
+		action string
+		p      map[string]any
+	}{
+		"platform hold without its hospital": {"legal_hold.placed", map[string]any{"hold_id": hold, "reason": "other"}},
+		"cli hold with a hospital": {"legal_hold.placed", map[string]any{"hold_id": hold, "via": "cli",
+			"hospital_id": hosp, "reason": "other"}},
+		"free reason":      {"legal_hold.placed", map[string]any{"hold_id": hold, "via": "platform", "hospital_id": hosp, "reason": "Synthetic case"}},
+		"lift via the cli": {"legal_hold.lift_requested", map[string]any{"hold_id": hold, "via": "cli", "hospital_id": hosp, "lift_id": lift, "reason": "other"}},
+		"clinical role":    {"platform.team_role_changed", map[string]any{"user_id": user, "role": "clinician", "previous": "auditor"}},
+		"name as the user": {"platform.team_member_removed", map[string]any{"user_id": "Synthetic Okafor", "role": "auditor"}},
+		"free e-mail mode": {"platform.analytics_email_changed", map[string]any{"mode": "weekly", "previous": "off"}},
+	} {
+		if err := audit.CheckActionPayload(c.action, c.p); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
