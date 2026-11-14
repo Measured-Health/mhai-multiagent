@@ -79,6 +79,17 @@ Gates before live use (design §17.6; all of them):
 - [ ] The on-call owner named (H9). Owner: product owner.
 - [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
 
+## EMR: follow-ups from PR 9 (14 Nov)
+
+- [x] **Migration order:** 00032 (purge requests, legal holds, retention) follows EMR PR 8b's 00031; the migration-count tests list it.
+- [ ] **Retention values (H5):** the sweep runs only with `CORE_EMR_RETENTION_SWEEP=true` (off by default). Switch it on once the privacy lead confirms design §14.2's values (7 days, 90 days, 13 and 24 months). Owner: privacy lead, then ops.
+- [ ] **A wipe path for hospital removal** (plan departure 48): `core emr remove-hospital-data` refuses while any credential metadata remains, and `wipe_credentials` is a platform admin's op only. Add a platform "wipe credentials" action (or an emr-side operator command) and have the removal flow call it before the hook; audit `emr.credentials_deleted`.
+- [ ] **Held purges over 90 days** are counted (`emr_purges_held_overdue`) and logged with ids; tell the hospital's privacy contact too once hospitals have one (design §10.6).
+- [ ] **Provision the operator's EMR login** (`EMR_ADMIN_DB_USER`, `EMR_ADMIN_DB_PASSWORD`) on a host that needs `core emr exclude`; only the operator holds it. Owner: ops.
+- [ ] Hold release and purge run in the loop, which runs only with `CORE_EMR_ENABLED`: a held purge of a hospital whose EMR was switched off waits until it is on again. Revisit if EMR is ever switched off with holds open.
+- [ ] Backups: a restore must re-apply exclusions and deletions made since the backup before the data is used (design §10.6, §14.2). An ops runbook item, not code.
+- [ ] `/hospital/usage` (not in the EMR plan) serves `alerts.UsageBlock`.
+
 ## EMR: follow-ups from PR 8b (14 Nov)
 
 - [x] **Migration order:** 00031 (`emr_consumed`, the consumer's grants) follows Analysis PR 6's 00030 (merged 14 Nov); the migration-count tests list both.
@@ -86,7 +97,7 @@ Gates before live use (design §17.6; all of them):
 - [ ] Quiet hours after an alert is handled: the rule set has none yet (Rules, "before scale"); until then a fresh finding of a handled rule alerts at once. A higher severity on the same chain re-alerts as designed.
 - [ ] `POST /platform/emr/connections/{id}/resume` (Task 37; step-up, `emr.source_resumed`, then `sync_now`): not built; an operator clears `paused` by SQL, recorded in the incident log.
 - [ ] EMR dead letters in the Failed jobs view and `emr.v1.ctl.redrive` (Task 38). Core's consumer dead-letters `dead.v1.<hid>.core_emr` (a page, `emr_core_dead_lettered_total`); `core_dead` acks it as an unknown type and the letter stays in `DEAD` 30 days. Until the jobs view reads it, an operator replays the finding id from the letter.
-- [ ] `emr_consumed` grows by one row per finding status; PR 9's retention sweep should trim it with the findings.
+- [x] `emr_consumed` grows by one row per finding status; PR 9's retention sweep trims it 90 days after its finding is gone, and the exclusion purge with the finding.
 - [ ] A cross-service run (sync → rules → `core_emr` → acknowledge, A22 across both services) waits for the end-to-end harness to start core's consumer; PR 8b tests the core side against seeded findings.
 - [ ] Re-notification is `last_notified_at` (the BFF's polling sees a new or re-raised critical); a push notifier, if one is built, reads it.
 
@@ -95,7 +106,7 @@ Gates before live use (design §17.6; all of them):
 - [x] **Migration order:** 00029 (`alerts`) follows Analysis PR 5's 00028 (merged 14 Nov); the migration-count tests list both.
 - [x] PR 8b: the finding consumer writes `alerts` (with `connection_id`) and `alert_deliveries` as `mhai_emr_core`, using `alerts.Route`; it records `alert.raised` and `alert.not_raised`; the recipients come through a definer (`alert_route_facts`), with its own audit append policy (00031).
 - [ ] Grouped mode (`AlertPageOut.grouped` is always null until then) and the info cap: not built in PR 8b (departure 40). See "EMR: follow-ups from PR 8b".
-- [ ] The CLI fallback for exclusions (`core emr exclude`, Task 34) is not built: it needs a login for `mhai_emr_admin` and its audit append. With PR 9's legal-hold CLI. Until then an exclusion is the hospital admin's route only.
+- [x] The CLI fallback for exclusions (`core emr exclude`, Task 34): built in PR 9, as its own login (`EMR_ADMIN_DB_USER`, `mhai_emr_admin` only), the MRN from stdin, audited via cli.
 - [ ] `finding.name` is the source's own display text (core has no LOINC table); a LOINC display label waits for the real tables (Task 21; departure 42).
 - [ ] mhai-web (PR 10): `already_handled`'s body carries the alert's `status` in place of the problem's number, as `AlertHandledOut` reads it; the new audit kinds (`alert.*`, `alerts.read`, `emr.patient_matches_read`, `notification_settings.changed`) are sent bare until mhai-web has words for them.
 - [ ] A hospital admin's re-queue of a removed named clinician also widens visibility for alerts that clinician can still see (design §12.2); revisit if the clinical lead prefers it only on deactivation and role loss.
@@ -116,7 +127,7 @@ Gates before live use (design §17.6; all of them):
 
 ## EMR: follow-ups from PR 5 (11 Nov)
 
-- [ ] **PR 9 must defer the exclusion purge under a legal hold.** Until then `emr_exclude_patient` purges at once (product owner, 11 Nov: excluding a patient purges its data); no legal hold exists yet. PR 9 moves the purge behind `emr.purge_requests` with the hold check (design §10.6, A41).
+- [x] **PR 9 defers the exclusion purge under a legal hold.** `emr_exclude_patient` still purges at once without a hold, through a durable `emr.purge_requests` row; under a hold the row is held and nothing is deleted until the hold is lifted (design §10.6, A41).
 - [x] **PR 8a adds the alert steps** to `emr_merge_patients` (re-point alerts) and `emr_exclude_patient` (withdraw open alerts, clear every alert's patient columns), and `emr_reject_match()` (migration 00029).
 - [x] **PR 8a: retry an exclusion or merge on a deadlock (40P01) or serialization failure (40001):** three attempts, then 503 `not_ready`.
 - [ ] Re-normalise the last 7 days of a local code after its map changes (design §9.4); not built.
