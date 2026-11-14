@@ -272,8 +272,12 @@ CORE_CHANGED=0
 [ "$(env_get CORE_CLOUD_PROVIDERS)" = "$PROVIDER" ] || CORE_CHANGED=1
 env_set CORE_CLOUD_PROVIDERS "$PROVIDER"
 # So every later `docker compose` here, the deploy workflow's included,
-# keeps the proxy and the pipeline in the project.
-env_set COMPOSE_PROFILES cloud,pilot
+# keeps the proxy and the pipeline in the project. The own model's profile
+# (enable-ownmodel.sh) is kept when it is on.
+case ",$(env_get COMPOSE_PROFILES)," in
+  *,ownmodel,*) env_set COMPOSE_PROFILES cloud,pilot,ownmodel ;;
+  *) env_set COMPOSE_PROFILES cloud,pilot ;;
+esac
 docker compose config --quiet || die "compose.yml and .env don't validate"
 
 say "The egress proxy allows $HOST only"

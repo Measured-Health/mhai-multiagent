@@ -697,9 +697,10 @@ web demo, and the pilot pipeline already takes up to 1600 MiB: even a 1-3B
 model does not fit beside them. Resize the instance (t4g.large, 8 GiB, fits
 a 3B model) before turning the profile on.
 
-**The switch** (pinning a passing `cca`, `model-fetch`, the on-host
-evaluation, `--provider none`, and back) is own model PR 4's runbook;
-until it lands, nothing here switches a hospital.
+**The switch** (pinning a passing `cca`, `enable-ownmodel.sh` with
+`model-fetch`, the on-host evaluation `eval-local.sh`, `--provider none`,
+and back) is the runbook in `pilot/README.md`, "Switch a hospital to your
+own model".
 
 `llama/test-entrypoint.sh` tests the entrypoint without Docker;
 `llama/test-llama.sh` builds the image and checks, with a tiny public test
