@@ -46,7 +46,7 @@ func synthFHIR(args []string, getenv func(string) string, out io.Writer) error {
 	n := fs.Int("patients", 20, "how many synthetic patients")
 	name := fs.String("name", "", "the server's DNS name (in its certificate and links)")
 	dir := fs.String("out", "", "where to write ca.pem and client.key")
-	late := fs.Duration("late-critical", 0, "serve a new critical potassium for the first patient this long after the first sync (0: never)")
+	late := fs.Duration("late-critical", 0, "serve a new critical potassium for the first two patients this long after the first sync (0: never)")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return errUsage
 	}
@@ -83,9 +83,17 @@ func synthFHIR(args []string, getenv func(string) string, out io.Writer) error {
 	if *late > 0 {
 		// After a first sync's backfill (stored historical, never announced),
 		// a fresh critical result: what a live check needs to see an alert.
-		first := ps[0]
+		// Two patients, so a live check can acknowledge one alert and
+		// dismiss the other.
+		first := ps[:min(2, len(ps))]
 		opts.LateAfter = *late
-		opts.Late = func(at time.Time) []map[string]any { return []map[string]any{synth.LateCritical(first, at)} }
+		opts.Late = func(at time.Time) []map[string]any {
+			out := make([]map[string]any, 0, len(first))
+			for _, p := range first {
+				out = append(out, synth.LateCritical(p, at))
+			}
+			return out
+		}
 	}
 	h := synth.Handler(ps, opts)
 	srv := &http.Server{Addr: *addr, Handler: h, ReadHeaderTimeout: 10 * time.Second,
