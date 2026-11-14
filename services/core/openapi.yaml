@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.28.0"
+  version: "1.29.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -5163,6 +5163,26 @@ components:
         nli_confidence: { type: number }
         action: { type: string, enum: [PASS, FLAG, REDACT] }
         reason: { type: string }
+    CitedSource:
+      type: object
+      required: [chunk_id, title, url, source, attribution]
+      properties:
+        chunk_id: { type: string }
+        title: { type: string, maxLength: 300 }
+        url:
+          type: string
+          nullable: true
+          maxLength: 500
+          description: An https link to the source page; null when there is none.
+        source:
+          type: string
+          maxLength: 64
+          description: Who published it, for example `openFDA` or `MedlinePlus`.
+        attribution:
+          type: string
+          nullable: true
+          maxLength: 600
+          description: The source's credit and no-warranty notice, to show with the citation.
     ClinicalResult:
       type: object
       required: [query_id, decision, verified, degraded, failed_agents, response_available, diagnosis, icd10_code,
@@ -5191,6 +5211,16 @@ components:
         cited_chunk_ids:
           type: array
           items: { type: string }
+        cited_sources:
+          type: array
+          maxItems: 50
+          description: >-
+            Title, link and source credit of each cited shared reference source
+            (a reference library row, such as an FDA drug label or a MedlinePlus
+            health topic), in citation order, as stored with the answer. Only ids
+            in cited_chunk_ids appear; a cited hospital or patient record never
+            does. Empty when none. Added in 1.29.0.
+          items: { $ref: "#/components/schemas/CitedSource" }
         guardrail_details:
           type: object
           required: [l1_persona, l2_entropy, l3_nli, l4_trust, cascade_pass]

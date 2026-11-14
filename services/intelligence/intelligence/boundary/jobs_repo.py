@@ -62,9 +62,9 @@ RETURNING id"""
 _INSERT_DECISION = """INSERT INTO clinical_decisions (id, hospital_id, query_id, response_text,
     citations_json, trust_score, hga_decision, guardrail_report_json, retrieval_ms,
     generation_ms, verified, degraded, failed_agents, model_versions, trust_band,
-    masked_question, masked_patient_json, timings_ms)
+    masked_question, masked_patient_json, timings_ms, cited_sources_json)
 VALUES (%s, mhai_current_hospital(), %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s, %s,
-    %s::text[], %s::jsonb, %s, %s, %s::jsonb, %s::jsonb)"""
+    %s::text[], %s::jsonb, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)"""
 
 _INSERT_HGA = """INSERT INTO hga_evaluations (hospital_id, query_id, target_agent, trust, decision,
     nli_score, coherence_score, numerical_score, se_score, flag_penalty, weights_snapshot_json,
@@ -162,6 +162,9 @@ class Decision:
     # keys (plan Task 3).
     egress: str = "none"
     cloud_outcome: str | None = None
+    # The cited reference sources (boundary/cited_sources.py): title, link
+    # and source credit of each cited shared reference row (00040).
+    cited_sources: Sequence[Mapping[str, Any]] = ()
 
 
 def _masked_question(q: str | None) -> str | None:
@@ -282,6 +285,7 @@ async def complete(cur: Cursor, query_id: str, attempts: int, d: Decision) -> bo
             _masked_question(d.masked_question),
             _masked_patient(d.masked_patient),
             _timings(d.timings_ms),
+            json.dumps([dict(c) for c in d.cited_sources]) if d.cited_sources else None,
         ),
     )
     await cur.execute(

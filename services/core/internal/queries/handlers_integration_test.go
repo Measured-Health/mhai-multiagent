@@ -552,8 +552,12 @@ func TestStatusMapping(t *testing.T) {
 	}
 	set(`status = 'running', error = NULL`)
 	if _, err := super.Exec(context.Background(), `INSERT INTO clinical_decisions (id, hospital_id, query_id, response_text, citations_json,
-		trust_score, hga_decision, guardrail_report_json, retrieval_ms, generation_ms, verified, degraded, failed_agents, model_versions, trust_band)
-		VALUES ($1, $2, $3, 'Synthetic answer', '["chunk-1","chunk-2"]', 0.82, 'PASS', '{}', 12, 340, true, false, '{}', '{"cca":"1"}', 'high')`,
+		trust_score, hga_decision, guardrail_report_json, retrieval_ms, generation_ms, verified, degraded, failed_agents, model_versions, trust_band,
+		cited_sources_json)
+		VALUES ($1, $2, $3, 'Synthetic answer', '["chunk-1","chunk-2"]', 0.82, 'PASS', '{}', 12, 340, true, false, '{}', '{"cca":"1"}', 'high',
+		'[{"chunk_id":"chunk-2","title":"Synthetic Fever","url":"https://medlineplus.gov/syntheticfever.html","source":"MedlinePlus",
+		   "attribution":"Source: MedlinePlus, National Library of Medicine."},
+		  {"chunk_id":"chunk-9","title":"Not cited","url":null,"source":"openFDA","attribution":null}]')`,
 		uuid.New(), hid, id); err != nil {
 		t.Fatal(err)
 	}
@@ -574,6 +578,16 @@ func TestStatusMapping(t *testing.T) {
 	}
 	if ids, _ := r.body["cited_chunk_ids"].([]any); len(ids) != 2 {
 		t.Errorf("cited_chunk_ids %v", r.body["cited_chunk_ids"])
+	}
+	// Reference library PR 3 (1.29.0): the cited sources, only for cited ids.
+	sources, _ := r.body["cited_sources"].([]any)
+	if len(sources) != 1 {
+		t.Fatalf("cited_sources %v", r.body["cited_sources"])
+	}
+	if s, _ := sources[0].(map[string]any); s["chunk_id"] != "chunk-2" || s["title"] != "Synthetic Fever" ||
+		s["url"] != "https://medlineplus.gov/syntheticfever.html" || s["source"] != "MedlinePlus" ||
+		s["attribution"] != "Source: MedlinePlus, National Library of Medicine." {
+		t.Errorf("cited source %v", s)
 	}
 	jobs(t, hid)
 }
