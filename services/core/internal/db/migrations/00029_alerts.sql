@@ -227,7 +227,10 @@ GRANT SELECT (id, hospital_id, finding_id, patient_id, connection_id, rule_id, l
 GRANT UPDATE (status, handled_by, handled_at, dismiss_reason, dismiss_note, updated_at) ON alerts TO mhai_gateway;
 CREATE POLICY gateway_read ON alerts FOR SELECT TO mhai_gateway USING (hospital_id = mhai_current_hospital());
 CREATE POLICY gateway_handle ON alerts FOR UPDATE TO mhai_gateway
-    USING (hospital_id = mhai_current_hospital())
+    USING (hospital_id = mhai_current_hospital()
+           AND (routed_queue OR EXISTS (SELECT 1 FROM alert_deliveries d
+                                        WHERE d.hospital_id = alerts.hospital_id AND d.alert_id = alerts.id
+                                          AND d.user_id = mhai_current_user())))
     WITH CHECK (hospital_id = mhai_current_hospital() AND status IN ('handled', 'dismissed')
                 AND handled_by = mhai_current_user() AND withdrawn IS NULL);
 CREATE POLICY gateway_only_new ON alerts AS RESTRICTIVE FOR UPDATE TO mhai_gateway USING (status = 'new') WITH CHECK (true);
@@ -407,13 +410,20 @@ CREATE TRIGGER user_roles_requeue_alerts_update AFTER UPDATE OF role ON user_rol
     EXECUTE FUNCTION mhai_alerts_requeue_role();
 
 -- A hospital admin takes clinicians off the named list (design §12.2): the
--- same move, for the caller's hospital, in the settings transaction.
+-- same move, for the caller's hospital, in the settings transaction; only
+-- for users no longer on the list (a named recipient's alerts never move).
+CREATE POLICY owner_read ON alert_recipients FOR SELECT TO mhai_migrate
+    USING (hospital_id = mhai_current_hospital());
 -- +goose StatementBegin
 CREATE FUNCTION alerts_requeue_removed(uids uuid[]) RETURNS integer
     LANGUAGE sql SECURITY DEFINER
     SET search_path = pg_catalog, pg_temp
     AS $$
-    SELECT public.mhai_alerts_requeue(public.mhai_current_hospital(), uids, 'recipient_removed')
+    SELECT public.mhai_alerts_requeue(public.mhai_current_hospital(),
+        ARRAY(SELECT u FROM unnest(uids) u
+              WHERE NOT EXISTS (SELECT 1 FROM public.alert_recipients r
+                                WHERE r.hospital_id = public.mhai_current_hospital() AND r.user_id = u)),
+        'recipient_removed')
 $$;
 -- +goose StatementEnd
 ALTER FUNCTION alerts_requeue_removed(uuid[]) OWNER TO mhai_migrate;

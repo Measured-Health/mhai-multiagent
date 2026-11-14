@@ -257,6 +257,18 @@ func TestAlertUpdateOnlyFromNew(t *testing.T) {
 	if err != nil || n != 0 {
 		t.Fatalf("a handled alert was changed: %d %v", n, err)
 	}
+	// Routing holds at the database too: an alert sent only to v can't be
+	// handled as u.
+	c := seedAlert(t, pool, f, "r3", "critical", false, f.v)
+	if n, err := handle(f.u, f.u, "handled"); err != nil || n != 0 {
+		_ = c
+		t.Fatalf("handled the first alert again: %d %v", n, err)
+	}
+	if n, err := inTx(ctx, pool, []string{`SET LOCAL ROLE mhai_gateway`,
+		`SELECT set_config('mhai.user_id', '` + f.u.String() + `', true)`}, &f.h,
+		`UPDATE alerts SET status = 'handled', handled_by = $2, handled_at = now() WHERE id = $1`, c, f.u); err != nil || n != 0 {
+		t.Fatalf("u handled an alert sent only to v: %d %v", n, err)
+	}
 	// And never back to new.
 	b := seedAlert(t, pool, f, "r2", "critical", true)
 	if _, err := inTx(ctx, pool, []string{`SET LOCAL ROLE mhai_gateway`,
