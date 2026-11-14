@@ -305,18 +305,18 @@ var Catalogue = map[string]Entry{
 	// the letter as the target and no facts. The demo's documents outcome
 	// (ready) and the CLI's switch change have no kind yet: sent bare. A
 	// file refused for the safety check is flagged (design §8.7).
-	"clearance.uploaded":      {Type: "named_access", Kind: "clearance_uploaded", Target: entityTarget("clearance", "clearance")},
-	"clearance.refused":       {Type: "named_access", Kind: "clearance_refused", Target: entityTarget("clearance", "clearance"), Flag: safetyFlag},
-	"clearance.verified":      {Type: "named_access", Kind: "clearance_verified", Target: entityTarget("clearance", "clearance")},
-	"clearance.rejected":      {Type: "named_access", Kind: "clearance_rejected", Target: entityTarget("clearance", "clearance")},
-	"clearance.narrowed":      {Type: "named_access", Kind: "clearance_narrowed", Target: entityTarget("clearance", "clearance")},
-	"clearance.revoked":       {Type: "named_access", Kind: "clearance_revoked", Target: entityTarget("clearance", "clearance")},
-	"clearance.ended":         {Type: "named_access", Kind: "clearance_ended", Target: entityTarget("clearance", "clearance")},
-	"clearance.viewed":        {Type: "named_access", Kind: "clearance_viewed", Target: entityTarget("clearance", "clearance")},
-	"clearance.reminder_sent": {Type: "named_access", Kind: "clearance_reminder_sent", Target: entityTarget("clearance", "clearance")},
-	"clearance.ready":         withheld(),
+	"clearance.uploaded":            {Type: "named_access", Kind: "clearance_uploaded", Target: entityTarget("clearance", "clearance")},
+	"clearance.refused":             {Type: "named_access", Kind: "clearance_refused", Target: entityTarget("clearance", "clearance"), Flag: safetyFlag},
+	"clearance.verified":            {Type: "named_access", Kind: "clearance_verified", Target: entityTarget("clearance", "clearance")},
+	"clearance.rejected":            {Type: "named_access", Kind: "clearance_rejected", Target: entityTarget("clearance", "clearance")},
+	"clearance.narrowed":            {Type: "named_access", Kind: "clearance_narrowed", Target: entityTarget("clearance", "clearance")},
+	"clearance.revoked":             {Type: "named_access", Kind: "clearance_revoked", Target: entityTarget("clearance", "clearance")},
+	"clearance.ended":               {Type: "named_access", Kind: "clearance_ended", Target: entityTarget("clearance", "clearance")},
+	"clearance.viewed":              {Type: "named_access", Kind: "clearance_viewed", Target: entityTarget("clearance", "clearance")},
+	"clearance.reminder_sent":       {Type: "named_access", Kind: "clearance_reminder_sent", Target: entityTarget("clearance", "clearance")},
+	"clearance.ready":               withheld(),
 	"clearance.check_limit_reached": withheld(),
-	"named_access.changed":    withheld(),
+	"named_access.changed":          withheld(),
 
 	// EMR connections (EMR design §12.6): mhai-web's Plan 13 kinds, with
 	// the connection as the target. A resume has no kind yet: sent bare.
