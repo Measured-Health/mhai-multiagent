@@ -156,4 +156,3 @@ func TestMigration00043DownUp(t *testing.T) {
 		t.Fatalf("up again: %v", err)
 	}
 }
-

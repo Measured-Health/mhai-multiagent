@@ -7,11 +7,20 @@ package fileexport
 // sink.CSVCell (A7, A8), as the sink does again.
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/csv"
+	"encoding/hex"
+	"errors"
 	"io"
 	"iter"
+	"regexp"
+	"slices"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/sink"
 )
 
 // FileError refuses a file whole. Reason is closed (the constants below);
@@ -72,5 +81,321 @@ var rawKind = map[string]string{"patients": "patient", "encounters": "encounter"
 // sequence once before storing). mrnSystem is the connection's MRN
 // namespace: the mrn column is kept as an identifier in it, or not at all.
 func Parse(kind string, r io.Reader, mrnSystem string) iter.Seq2[Row, error] {
-	return func(func(Row, error) bool) {} // not yet
+	return func(yield func(Row, error) bool) {
+		fail := func(reason string, line int) { yield(Row{}, &FileError{Reason: reason, Line: line}) }
+		cols, ok := Columns[kind]
+		if !ok {
+			fail(ReasonKind, 0)
+			return
+		}
+		data, err := io.ReadAll(io.LimitReader(r, MaxFile+1))
+		if err != nil {
+			fail(ReasonShape, 0)
+			return
+		}
+		if len(data) > MaxFile {
+			fail(ReasonTooLarge, 0)
+			return
+		}
+		if !utf8.Valid(data) || bytes.HasPrefix(data, []byte("\xef\xbb\xbf")) || bytes.IndexByte(data, 0) >= 0 {
+			fail(ReasonEncoding, 0)
+			return
+		}
+		cr := csv.NewReader(bytes.NewReader(data))
+		cr.FieldsPerRecord = len(cols)
+		cr.ReuseRecord = true
+		header, err := cr.Read()
+		if err != nil || !slices.Equal(header, cols) {
+			fail(ReasonHeader, 1)
+			return
+		}
+		last := cr.InputOffset()
+		seen := map[string]string{} // source id -> version
+		rows := 0
+		for {
+			rec, err := cr.Read()
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			if err != nil {
+				line := 0
+				var pe *csv.ParseError
+				if errors.As(err, &pe) {
+					line = pe.Line
+				}
+				fail(ReasonShape, line)
+				return
+			}
+			line, _ := cr.FieldPos(0)
+			off := cr.InputOffset()
+			if off-last > MaxRow {
+				fail(ReasonRowTooLong, line)
+				return
+			}
+			last = off
+			if rows++; rows > MaxRows {
+				fail(ReasonTooMany, line)
+				return
+			}
+			row := map[string]string{}
+			for i, c := range cols {
+				row[c] = rec[i]
+			}
+			id := rec[0]
+			if !idShape.MatchString(id) {
+				fail(ReasonSourceID, line)
+				return
+			}
+			version := versionOf(kind, rec)
+			if v, dup := seen[id]; dup {
+				if v != version {
+					fail(ReasonDuplicate, line)
+					return
+				}
+				continue // the same row twice: once is enough
+			}
+			seen[id] = version
+			out := mapRow(kind, row, id, version, mrnSystem)
+			out.Line = line
+			if !yield(out, nil) {
+				return
+			}
+		}
+	}
+}
+
+// versionOf is the row's content hash: an unchanged row exported again is
+// the same version (a no-op in the sink); a changed row is a new one.
+func versionOf(kind string, rec []string) string {
+	h := sha256.New()
+	h.Write([]byte(Format + "\x00" + kind))
+	for _, c := range rec {
+		h.Write([]byte{0x1f})
+		h.Write([]byte(c))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// rowReader checks one row's cells; the first problem found is its reject
+// reason.
+type rowReader struct {
+	row    map[string]string
+	reason string
+	fields map[string]any
+}
+
+func (r *rowReader) bad(reason string) {
+	if r.reason == "" {
+		r.reason = reason
+	}
+}
+
+func (r *rowReader) need(col string) string {
+	v := r.row[col]
+	if v == "" {
+		r.bad(RowRequired)
+	}
+	return v
+}
+
+// id puts an optional reference under key.
+func (r *rowReader) id(col, key string, required bool) string {
+	v := r.row[col]
+	switch {
+	case v == "" && required:
+		r.bad(RowRequired)
+	case v != "" && !idShape.MatchString(v):
+		r.bad(RowCode)
+	case v != "":
+		r.fields[key] = v
+	}
+	return v
+}
+
+func (r *rowReader) time(col, key string, required bool) time.Time {
+	v := r.row[col]
+	if v == "" {
+		if required {
+			r.bad(RowRequired)
+		}
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, v)
+	if !timeShape.MatchString(v) || err != nil {
+		r.bad(RowTime)
+		return time.Time{}
+	}
+	if key != "" {
+		r.fields[key] = v
+	}
+	return t.UTC()
+}
+
+func (r *rowReader) date(col, key string) {
+	v := r.row[col]
+	if v == "" {
+		return
+	}
+	if _, err := time.Parse("2006-01-02", v); !dateShape.MatchString(v) || err != nil {
+		r.bad(RowTime)
+		return
+	}
+	r.fields[key] = v
+}
+
+func (r *rowReader) closed(col, key string, set []string, required bool) string {
+	v := r.row[col]
+	switch {
+	case v == "" && required:
+		r.bad(RowRequired)
+	case v != "" && !slices.Contains(set, v):
+		r.bad(RowCode)
+	case v != "" && key != "":
+		r.fields[key] = v
+	}
+	return v
+}
+
+// text puts a display cell, cleaned and neutralised, under key; one longer
+// than max (after cleaning) is a dead letter, never cut.
+func (r *rowReader) text(col, key string, max int) string {
+	v := r.row[col]
+	if v == "" {
+		return ""
+	}
+	c := sink.CSVCell(sink.CleanText(v, -1))
+	if utf8.RuneCountInString(c) > max {
+		r.bad(RowTooLong)
+		return ""
+	}
+	if c != "" && key != "" {
+		r.fields[key] = c
+	}
+	return c
+}
+
+func (r *rowReader) shaped(col, key string, re *regexp.Regexp) {
+	v := r.row[col]
+	if v == "" {
+		return
+	}
+	if !re.MatchString(v) {
+		r.bad(RowValue)
+		return
+	}
+	r.fields[key] = v
+}
+
+func (r *rowReader) code(col string, required bool) string {
+	v := r.row[col]
+	switch {
+	case v == "" && required:
+		r.bad(RowRequired)
+	case v != "" && !codeShape.MatchString(v):
+		r.bad(RowCode)
+	}
+	return v
+}
+
+// mapRow maps a row whose id is good to its raw records, or to a dead
+// letter.
+func mapRow(kind string, row map[string]string, id, version, mrnSystem string) Row {
+	r := &rowReader{row: row, fields: map[string]any{}}
+	updated := r.time("updated_at", "", true)
+	var extra []connector.RawRecord
+	switch kind {
+	case "patients":
+		if mrn := r.row["mrn"]; mrn != "" {
+			if !idShape.MatchString(mrn) {
+				r.bad(RowCode)
+			} else if mrnSystem != "" {
+				r.fields["identifier"] = []connector.Coding{{System: mrnSystem, Code: mrn}}
+			}
+		}
+		r.text("given_name", "given", 60)
+		r.text("family_name", "family", 60)
+		r.date("birth_date", "birth_date")
+		r.closed("sex", "sex", sexes, false)
+		if a := r.closed("active", "", actives, false); a != "" {
+			r.fields["active"] = a == "true"
+		}
+		if rb := r.id("replaced_by", "link_replaced_by", false); rb == id {
+			r.bad(RowCode)
+		}
+	case "encounters":
+		r.id("source_patient_id", "patient", true)
+		r.closed("class", "class", encounterClass, true)
+		r.closed("status", "status", encounterStatus, true)
+		r.time("start_at", "period_start", false)
+		r.time("end_at", "period_end", false)
+		r.text("bed_label", "bed_label", 20)
+		if loc := r.id("source_location_id", "location", false); loc != "" {
+			lr := &rowReader{row: row, fields: map[string]any{}}
+			if lr.text("location_name", "name", 60) == "" {
+				r.bad(RowRequired)
+			}
+			lr.closed("location_type", "type", locationTypes, false)
+			r.bad(lr.reason)
+			lh := sha256.Sum256([]byte(Format + "\x00location\x00" + loc + "\x1f" + row["location_name"] + "\x1f" + row["location_type"]))
+			extra = append(extra, connector.RawRecord{Kind: "location", SourceID: loc,
+				SourceVersion: hex.EncodeToString(lh[:]), SourceUpdatedAt: updated, Fields: lr.fields})
+		} else if row["location_name"] != "" || row["location_type"] != "" {
+			r.bad(RowRequired)
+		}
+	case "results", "vitals":
+		category, system, at, issued := "laboratory", ResultSystem, "collected_at", "resulted_at"
+		if kind == "vitals" {
+			category, system, at, issued = "vital-signs", VitalSystem, "measured_at", ""
+		}
+		r.fields["category"] = category
+		r.id("source_patient_id", "patient", true)
+		r.id("source_encounter_id", "encounter", false)
+		r.time(at, "effective", true)
+		if issued != "" {
+			r.time(issued, "issued", false)
+		}
+		r.closed("status", "status", resultStatus, true)
+		code := r.code("local_code", true)
+		name := r.text("local_name", "", 200)
+		if code != "" && r.reason == "" {
+			r.fields["codings"] = []connector.Coding{{System: system, Code: code, Display: name}}
+		}
+		r.shaped("value", "value_quantity", valueShape)
+		if kind == "results" {
+			r.text("value_text", "value_text", 120)
+			if row["value_text"] != "" && row["value"] != "" {
+				r.bad(RowValue)
+			}
+			r.shaped("ref_low", "ref_low", decimalShape)
+			r.shaped("ref_high", "ref_high", decimalShape)
+			r.text("ref_text", "ref_text", 120)
+		}
+		r.shaped("unit", "unit", unitShape)
+		r.closed("flag", "interpretation", flags, false)
+	case "medications":
+		r.id("source_patient_id", "patient", true)
+		r.closed("kind", "kind", medKinds, true)
+		r.closed("status", "status", medStatus, true)
+		code := r.code("local_code", false)
+		name := r.text("local_name", "med_text", 200)
+		if code == "" && name == "" {
+			r.bad(RowRequired)
+		}
+		if code != "" && r.reason == "" {
+			r.fields["codings"] = []connector.Coding{{System: MedicationSystem, Code: code, Display: name}}
+		}
+		r.shaped("dose_value", "dose_value", decimalShape)
+		r.shaped("dose_unit", "dose_unit", unitShape)
+		r.text("route", "route", 40)
+		r.text("timing_text", "timing_text", 60)
+		r.time("authored_at", "authored", false)
+		r.time("start_at", "period_start", false)
+		r.time("end_at", "period_end", false)
+	}
+	rk := rawKind[kind]
+	if r.reason != "" {
+		return Row{Reject: &Reject{Kind: rk, SourceID: id, SourceVersion: version, SourceUpdatedAt: updated, Reason: r.reason}}
+	}
+	rec := connector.RawRecord{Kind: rk, SourceID: id, SourceVersion: version, SourceUpdatedAt: updated, Fields: r.fields}
+	return Row{Records: append(extra, rec)}
 }

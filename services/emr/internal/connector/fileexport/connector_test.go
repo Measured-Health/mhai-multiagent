@@ -114,6 +114,7 @@ func newServer(t *testing.T) *server {
 	}))
 	t.Cleanup(p.Close)
 	s.proxy, _ = url.Parse(p.URL)
+	s.mkdir(path.Dir(folder))
 	s.mkdir(folder)
 	s.mkdir(path.Join(folder, Processed))
 	s.mkdir(path.Join(folder, Rejected))

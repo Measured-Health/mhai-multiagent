@@ -218,7 +218,36 @@ func (s *Sink) PutStored(ctx context.Context, r connector.RawRecord) (bool, erro
 // provenance and no payload, stored once (a replay is a no-op). It is
 // never announced, so nothing normalises it.
 func (s *Sink) Reject(ctx context.Context, r connector.RejectedRecord) error {
-	return nil // not yet
+	if !slices.Contains(Kinds, r.Kind) || r.SourceID == "" || len(r.SourceID) > 256 || !printable(r.SourceID) ||
+		len(r.SourceVersion) > 64 || !printable(r.SourceVersion) {
+		return ErrRecord
+	}
+	sum := sha256.Sum256([]byte(r.Kind + "\x00" + r.SourceID + "\x00" + r.SourceVersion + "\x00"))
+	var updated *time.Time
+	if !r.SourceUpdatedAt.IsZero() {
+		u := r.SourceUpdatedAt.UTC()
+		updated = &u
+	}
+	stored := false
+	err := dbx.WithHospital(ctx, s.pool, dbx.EMR, s.hospital, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO emr.raw_records (hospital_id, source_kind, connection_id, resource_kind,
+			source_id, source_version, source_updated_at, payload, payload_sha256, connector_type, connector_version,
+			status, reject_code, backfill)
+			VALUES ($1, 'connector', $2, $3, $4, $5, $6, NULL, $7, $8, $9, 'rejected', 'unreadable_data', $10)
+			ON CONFLICT DO NOTHING`,
+			s.hospital, s.connection, r.Kind, r.SourceID, r.SourceVersion, updated, sum[:], s.connType, s.connVersion, s.Backfill)
+		stored = err == nil && tag.RowsAffected() == 1
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if stored && s.Metrics != nil {
+		s.Metrics.mu.Lock()
+		s.Metrics.rejected++
+		s.Metrics.mu.Unlock()
+	}
+	return nil
 }
 
 // Flush announces the queued ids, MaxBatch a message, and marks them
