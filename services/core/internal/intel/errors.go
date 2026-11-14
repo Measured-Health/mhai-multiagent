@@ -53,6 +53,8 @@ var (
 	// two-person rule refuses its creator). Not transient: the sweeper
 	// skips the row instead of retrying it, and its deadline ends it.
 	ErrJobSkipped = errors.New("intel: the job can't be published as it stands")
+	// ErrNoPatient: red stub (PR 13, test first).
+	ErrNoPatient = errors.New("intel: not an active patient of the caller's hospital")
 )
 
 // Error is a worker's answer when it refused or failed a call: a code from

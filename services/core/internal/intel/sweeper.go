@@ -57,6 +57,8 @@ type JobRow struct {
 	// RetryCount is the platform's retries of the row (00016): a retried
 	// row is published under PlatformRetryMsgID, never its job id again.
 	RetryCount int
+	// PatientID: red stub (PR 13, test first).
+	PatientID uuid.UUID
 }
 
 // msgID is the Nats-Msg-Id a sweep publishes r under: the job id, or for

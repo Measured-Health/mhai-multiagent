@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -53,7 +54,17 @@ const (
 type Caller struct {
 	Sub, Hid, Rid string
 	Roles         []string
+	pids          []string
 }
+
+// PatientIDs: red stub (PR 13, test first).
+func (c Caller) PatientIDs() []string { return c.pids }
+
+// CheckPatient: red stub (PR 13, test first): checks nothing.
+func CheckPatient(_ context.Context, _ pgx.Tx, c Caller, _ uuid.UUID) (Caller, error) { return c, nil }
+
+// patientsCarried: red stub (PR 13, test first).
+func patientsCarried(_ proto.Message, _ []string) bool { return true }
 
 // FromPrincipal is the Caller for an authenticated request: the
 // principal's user, hospital and current roles, and the request id.
