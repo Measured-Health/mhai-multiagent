@@ -1,0 +1,207 @@
+# The intelligence host (docs/deploy/remote-intelligence.md): the pipeline
+# worker, the app-link relay, and optionally the egress proxy (profile cloud),
+# the llama sidecar and model-fetch (profile ownmodel), on a server of their
+# own. Core, Postgres, NATS and the web apps stay on the app host
+# (deploy/compose.yml with compose.split.yml). Lives at /srv/mhai-intelligence;
+# enable-intelligence-host.sh writes .env, the secrets and the TLS files, and
+# starts it. GPU: add compose.gpu.yml (COMPOSE_FILE in .env, `up --gpu`).
+#
+# The worker runs as production with INTELLIGENCE_SINGLE_HOST off, so it needs
+# NATS TLS with its client certificate (TLS first), its NKey, and Postgres
+# sslmode=verify-full against the private CA; it refuses anything else.
+#
+# Networks: the worker has no route out. It is on `backend` (internal: the
+# relay and the egress proxy) and `model` (internal: llama). app-link is the
+# only container on `uplink`, and forwards exactly <app host>:4222 and :5432;
+# the worker reaches them as mhai-app, a name the app host's certificates
+# carry. The egress proxy (one provider host, port 443) and model-fetch (the
+# model store) have their own ways out, as on the pilot. Nothing is published.
+#
+# Secrets: 0400 files owned by the image's user, never variables, never in
+# .env: secrets/nats-pipeline.nk (made here, never leaves this host),
+# secrets/intelligence-db-password (from the app host, on stdin),
+# secrets/pilot-cloud-api-key and secrets/model-store-reader-* (put-secret.sh).
+# tls/: ca.pem, pipeline.pem (public) and pipeline-key.pem (made here).
+
+name: mhai-intelligence
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  # The TCP relay to the app host (decision D5): two ports, one address.
+  app-link:
+    <<: *hardening
+    image: ${APP_LINK_IMAGE:-haproxy:3.0.12-alpine}
+    restart: unless-stopped
+    command: ["haproxy", "-W", "-db", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+    environment:
+      APP_HOST_ADDR: ${APP_HOST_ADDR:?set by enable-intelligence-host.sh}
+    volumes:
+      - ./app-link.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    tmpfs:
+      - /tmp
+    mem_limit: 64m
+    networks:
+      backend:
+        aliases: [mhai-app]
+      uplink: {}
+
+  pipeline:
+    <<: *hardening
+    image: ${PIPELINE_IMAGE:-ghcr.io/measured-health/mhai-multiagent-pipeline-pilot:latest}
+    pull_policy: missing
+    restart: unless-stopped
+    command: ["worker", "--service", "pipeline"]
+    environment:
+      APP_ENV: production
+      # No INTELLIGENCE_SINGLE_HOST: TLS on both links (the worker refuses
+      # anything else). TLS first to NATS; verify-full to Postgres.
+      NATS_URL: tls://mhai-app:4222
+      NATS_NKEY_SEED_PATH: /run/secrets/nats-pipeline.nk
+      NATS_TLS_CA_PATH: /run/tls/ca.pem
+      NATS_TLS_CERT_PATH: /run/tls/pipeline.pem
+      NATS_TLS_KEY_PATH: /run/tls/pipeline-key.pem
+      INTELLIGENCE_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+      INTELLIGENCE_DB_URL: postgres://mhai-app:5432/mhai?sslmode=verify-full&sslrootcert=/run/tls/ca.pem
+      INTELLIGENCE_DB_USER: intelligence_app
+      INTELLIGENCE_DB_PASSWORD_FILE: /run/secrets/intelligence-db-password
+      INTELLIGENCE_MODEL_CLIENT: orchestrator
+      INTELLIGENCE_MAX_CONCURRENCY: ${PIPELINE_MAX_CONCURRENCY:-1}
+      INTELLIGENCE_WARMUP_PAGE: /app/warmup/page.png
+      HF_HOME: /home/appuser/.cache/huggingface
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      OMP_NUM_THREADS: ${PIPELINE_THREADS:-2}
+      TOKENIZERS_PARALLELISM: "false"
+      # The cloud route (profile cloud): as on the pilot (deploy/README.md).
+      INTELLIGENCE_CLOUD_PROXY: http://egress-proxy:3128
+      INTELLIGENCE_CLOUD_PROVIDERS: ${PILOT_CLOUD_PROVIDER:-}
+      INTELLIGENCE_CLOUD_ANTHROPIC_MODEL: ${PILOT_ANTHROPIC_MODEL:-}
+      INTELLIGENCE_CLOUD_ANTHROPIC_KEY_FILE: ${PILOT_ANTHROPIC_KEY_FILE:-}
+      INTELLIGENCE_CLOUD_ANTHROPIC_ZDR_REF: ${PILOT_ANTHROPIC_ZDR_REF:-}
+      INTELLIGENCE_CLOUD_GEMINI_MODEL: ${PILOT_GEMINI_MODEL:-}
+      INTELLIGENCE_CLOUD_GEMINI_KEY_FILE: ${PILOT_GEMINI_KEY_FILE:-}
+      INTELLIGENCE_CLOUD_GEMINI_ZDR_REF: ${PILOT_GEMINI_ZDR_REF:-}
+      INTELLIGENCE_CLOUD_GEMINI_PAID_TIER: ${PILOT_GEMINI_PAID_TIER:-}
+      # The own answer model (profile ownmodel): as on the pilot.
+      INTELLIGENCE_MODEL_ROLES: ${PILOT_MODEL_ROLES:-}
+      INTELLIGENCE_MODELS_LOCK: /lock/models.lock
+      MHAI_MODELS_TRUST_POLICY: /lock/trust-policy.json
+      INTELLIGENCE_MODEL_CACHE: /models
+      INTELLIGENCE_MODEL_MIRROR: /mirror
+      INTELLIGENCE_LOCAL_LLM_URL: http://llama:8080
+    volumes:
+      - ./trusted:/trusted:ro
+      - ./tls:/run/tls:ro
+      - modelcache:/models
+      - modelmirror:/mirror:ro
+      - ./models:/lock:ro
+      - ./secrets/nats-pipeline.nk:/run/secrets/nats-pipeline.nk:ro
+      - ./secrets/intelligence-db-password:/run/secrets/intelligence-db-password:ro
+      - ./secrets/pilot-cloud-api-key:/run/secrets/cloud-api-key:ro
+    tmpfs:
+      - /tmp
+    cpus: ${PIPELINE_CPUS:-2}
+    mem_limit: ${PIPELINE_MEM:-2g}
+    memswap_limit: ${PIPELINE_MEM:-2g}
+    networks: [backend, model]
+    depends_on:
+      app-link: { condition: service_started }
+    healthcheck:
+      disable: true
+
+  # As deploy/compose.yml's egress proxy: CONNECT to port 443 of the hosts in
+  # egress-proxy/allowed-hosts (the provider's one API host), nothing else.
+  egress-proxy:
+    <<: *hardening
+    image: ubuntu/squid:6.6-24.04_edge@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
+    profiles: ["cloud"]
+    restart: unless-stopped
+    entrypoint: ["/usr/sbin/squid"]
+    command: ["-N", "-f", "/etc/squid/squid.conf"]
+    user: "13:13"
+    volumes:
+      - ./egress-proxy/squid.conf:/etc/squid/squid.conf:ro
+      - ./egress-proxy/allowed-hosts:/etc/squid/allowed-hosts:ro
+    tmpfs:
+      - /tmp
+      - /var/run/squid
+    mem_limit: 128m
+    networks: [backend, egress]
+
+  # As deploy/compose.yml's llama sidecar: re-hashes the verified GGUF and serves
+  # it under its pinned alias; `model` only, the verified cache read-only.
+  llama:
+    <<: *hardening
+    image: ${LLAMA_IMAGE:-mhai-llama:local}
+    build: { context: ./llama }
+    pull_policy: never
+    profiles: ["ownmodel"]
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      LLAMA_THREADS: ${PILOT_LOCAL_MODEL_THREADS:-4}
+      LLAMA_CTX: ${PILOT_LOCAL_MODEL_CTX:-4096}
+      LLAMA_GPU_LAYERS: ${PILOT_LOCAL_MODEL_GPU_LAYERS:-0}
+    volumes:
+      - modelcache:/models:ro
+    tmpfs:
+      - /tmp
+    cpus: ${PILOT_LOCAL_MODEL_THREADS:-4}
+    mem_limit: ${PILOT_LOCAL_MODEL_MEM:-8g}
+    memswap_limit: ${PILOT_LOCAL_MODEL_MEM:-8g}
+    networks: [model]
+    healthcheck:
+      disable: true
+
+  # As deploy/compose.yml's model-fetch: copies the pinned files from the store
+  # into the mirror, as the store's reader; never on backend or model.
+  model-fetch:
+    <<: *hardening
+    image: ${PIPELINE_IMAGE:-ghcr.io/measured-health/mhai-multiagent-pipeline-pilot:latest}
+    pull_policy: missing
+    profiles: ["ownmodel"]
+    restart: "no"
+    user: "1000:1000"
+    entrypoint: ["mhai-models"]
+    command: ["fetch-pinned", "--lock", "/lock/models.lock", "--to", "/mirror"]
+    environment:
+      APP_ENV: production
+      MODEL_STORE_ENDPOINT: ${PILOT_MODEL_STORE_ENDPOINT:-}
+      MODEL_STORE_BUCKET: ${PILOT_MODEL_STORE_BUCKET:-}
+      MODEL_STORE_REGION: ${PILOT_MODEL_STORE_REGION:-us-east-1}
+      MODEL_STORE_READER_ACCESS_KEY_FILE: /run/secrets/model-store-reader-access-key
+      MODEL_STORE_READER_SECRET_KEY_FILE: /run/secrets/model-store-reader-secret-key
+    volumes:
+      - modelmirror:/mirror
+      - ./models:/lock:ro
+      - ./secrets/model-store-reader-access-key:/run/secrets/model-store-reader-access-key:ro
+      - ./secrets/model-store-reader-secret-key:/run/secrets/model-store-reader-secret-key:ro
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    networks: [model-store]
+
+networks:
+  # The worker, the relay and the egress proxy: no route out.
+  backend:
+    internal: true
+  # app-link's way to the app host, and only its.
+  uplink: {}
+  # The egress proxy's way out (profile cloud).
+  egress: {}
+  # The worker and llama only, no route out (profile ownmodel).
+  model:
+    internal: true
+  # model-fetch's way to the model store (profile ownmodel).
+  model-store: {}
+
+volumes:
+  modelmirror: {}
+  modelcache: {}

@@ -157,7 +157,10 @@ def test_database_sslmode_disable_or_verify_full_only(single: dict[str, str], mo
             {**single, "INTELLIGENCE_DB_URL": "postgres://postgres:5432/mhai" + mode}
         )
     s = WorkerSettings.from_env(
-        {**single, "INTELLIGENCE_DB_URL": "postgres://postgres:5432/mhai?sslmode=verify-full"}
+        {
+            **single,
+            "INTELLIGENCE_DB_URL": "postgres://postgres:5432/mhai?sslmode=verify-full&sslrootcert=/run/tls/ca.pem",
+        }
     )
     assert s.single_host is True
 
