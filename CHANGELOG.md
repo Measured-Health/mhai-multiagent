@@ -8,6 +8,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The hospital admin routes of the clinical app (frontend requirements §5).
+  Migration **00035** (additive: `users.staff_version`,
+  `hospital_settings.version`, `updated_by`, `updated_at`) and OpenAPI
+  **1.24.0** (1.23.0 is Analysis PR 7's). `GET /hospital/staff`;
+  `PATCH /hospital/staff/{id}` (roles and
+  specialty, with a step-up code; Analyst granted and removed only through
+  migration 00030's functions, which closes Analysis plan Task 17);
+  `POST /hospital/staff/{id}/deactivate` and `/reactivate` (step-up; a
+  deactivation revokes and denylists every session, forgets trusted
+  devices and removes Analyst); `GET` and `PATCH
+  /hospital/settings` (step-up when an edit loosens sign-in);
+  `GET /hospital/usage` (counts, with `alerts.UsageBlock`);
+  `GET /hospital/activity` (the hospital's own audit entries as structured
+  events); `GET /hospital/review-oversight` and
+  `GET /hospital/corrections/{id}/eligible-reviewers`. Hospital admins with
+  a two-step session only; every change audited (`staff.roles_changed`,
+  `staff.specialty_changed`, `staff.deactivated`, `staff.reactivated`,
+  `hospital_settings.changed`). An admin adds no role to themselves
+  (403 `self_change`). Invites, password and two-step resets,
+  reminders, removal and reviewer assignment answer 501 `not_implemented`
+  (TODO.md lists the gaps and the changes mhai-web needs). New problem codes
+  `self_change`, `last_admin`, `analysis_off`, `analyst_cap`,
+  `not_eligible`, `not_implemented`.
 - EMR integration, PR 13 (`pids`; off by default: while `CORE_EMR_ENABLED`
   is false every `patient_id` is 404 `not_found`). `POST /queries` takes an
   optional `patient_id` (OpenAPI **1.22.0**, additive), accepted only for an

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.22.0"
+  version: "1.24.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -908,6 +908,545 @@ paths:
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
+  /hospital/staff:
+    get:
+      operationId: listStaff
+      summary: Everyone at the caller's hospital (hospital admins).
+      description: |
+        Hospital admins, with a two-step session. Every account of the
+        caller's hospital, by display name; never another hospital's.
+        `status` is `active` or `deactivated` (core has no invites, so never
+        `invited`; `invited_at` and `invite_expires_at` are always null).
+        `issues` holds `mfa_not_set_up` when the account's roles or the
+        hospital's policy need two-step and it isn't on. `sign_in` is `sso`,
+        `password_mfa`, `password` or null. Core has no reviewer assignment:
+        `can_review` is true for an active clinician and
+        `review_specialties` is always empty (every specialty). `version` is
+        sent back on an edit.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The staff.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/StaffOut" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/staff/invites:
+    post:
+      operationId: inviteStaff
+      summary: Invite staff (not available).
+      description: |
+        Core has no email delivery and no invite acceptance, so this answers
+        501 `not_implemented`. Staff accounts are created by Measured Health
+        (`core users create`).
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: &hospitalMissing [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_implemented, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+
+  /hospital/staff/{id}:
+    patch:
+      operationId: updateStaff
+      summary: Change a person's roles or specialty (step-up).
+      description: |
+        Hospital admins, with a two-step session and a fresh TOTP code
+        (`mfa_code`) or an unused backup code (`backup_code`). `roles` is
+        the new set (one to three of `clinician`, `analyst`,
+        `hospital_admin`; `analyst` needs `clinician`, else 422
+        `not_eligible`); `specialty` a word or a few, or null.
+        `can_review` must match the clinician role and `review_specialties`
+        must be empty (core has no reviewer assignment): 422 otherwise.
+        Order: the path and body (404, 422), the person (404: unknown or
+        another hospital's), the `version` (409 `conflict`), your own
+        account (403 `self_change`: adding any role to yourself, `clinician`
+        included, or dropping your own `hospital_admin`), the last active
+        admin (409
+        `last_admin`), then the code (403 `mfa_required`, `mfa_invalid`, 429
+        `mfa_locked`), so a refused request doesn't spend it. An edit that
+        changes nothing answers the person without a code.
+
+        `analyst` is granted and removed through the database's rules
+        (migration 00030), in the same transaction: 403 `forbidden` or
+        `self_change`, 404 `not_found`, 409 `analysis_off` or
+        `analyst_cap`, 422 `not_eligible` (the person needs `clinician`, an
+        active account and two-step). Removing `clinician` removes
+        `analyst`. Each change is audited (`staff.roles_changed`, with
+        `self` when admins remove their own roles; `staff.specialty_changed`;
+        `analyst.granted`, `analyst.removed`); a grant notifies the
+        hospital's admins after commit. Answers the person. Send an
+        `Idempotency-Key`.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, conflict, last_admin, analysis_off, analyst_cap, validation_failed, not_eligible, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffPatchIn" }
+      responses:
+        "200":
+          description: The person, changed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    delete:
+      operationId: removeStaff
+      summary: Remove a person (not available).
+      description: |
+        Core can't yet delete an account while keeping its consultations,
+        feedback and audit entries attributed, so this answers 501
+        `not_implemented`. Deactivate instead.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *hospitalMissing
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+
+  /hospital/staff/{id}/deactivate:
+    post:
+      operationId: deactivateStaff
+      summary: Deactivate a person (step-up).
+      description: |
+        Hospital admins, with a fresh code in the body (`mfa_code` or
+        `backup_code`). Order: the person (404), yourself (403
+        `self_change`), an account already deactivated (409 `conflict`),
+        the last active admin with two-step on (409 `last_admin`), then the
+        code. The account
+        can't sign in; every session is revoked and denylisted, its trusted
+        devices forgotten and `analyst` removed (a reactivation needs a fresh
+        grant); its queued questions are cancelled. Audited (`staff.deactivated`, with the
+        number of sessions revoked). Reversible. Answers the person.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-step-up: true
+      x-error-codes: &staffStatusErrors [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, conflict, last_admin, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepUpRequest" }
+      responses:
+        "200":
+          description: The person, deactivated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/staff/{id}/reactivate:
+    post:
+      operationId: reactivateStaff
+      summary: Reactivate a person (step-up).
+      description: |
+        As deactivate: 409 `conflict` for an account that is active.
+        Audited (`staff.reactivated`). Answers the person.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-step-up: true
+      x-error-codes: *staffStatusErrors
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepUpRequest" }
+      responses:
+        "200":
+          description: The person, reactivated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/staff/{id}/password-reset:
+    post:
+      operationId: resetStaffPassword
+      summary: Send a password reset (not available).
+      description: Core has no email delivery, so this answers 501 `not_implemented`.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *hospitalMissing
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+
+  /hospital/staff/{id}/reset-mfa:
+    post:
+      operationId: resetStaffMFA
+      summary: Reset a person's two-step (not available).
+      description: Not built in core yet, so this answers 501 `not_implemented`.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *hospitalMissing
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+
+  /hospital/staff/{id}/remind:
+    post:
+      operationId: remindStaff
+      summary: Remind a person to set up two-step (not available).
+      description: Core has no notifications, so this answers 501 `not_implemented`.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *hospitalMissing
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+
+  /hospital/staff/{id}/resend-invite:
+    post:
+      operationId: resendStaffInvite
+      summary: Resend an invite (not available).
+      description: Core has no invites, so this answers 501 `not_implemented`.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *hospitalMissing
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+
+  /hospital/settings:
+    get:
+      operationId: getHospitalSettings
+      summary: The hospital's settings (hospital admins).
+      description: |
+        Hospital admins, with a two-step session. `limits` are the choices
+        Measured Health allows. Read-only, with no feature behind them in
+        core yet: `sso` is always `{status: not_set_up, domain: null}`,
+        `allowed_email_domains` always empty, `reviewers_share_specialty`
+        always false. `specialties` are the active staff's specialties.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HospitalSettingsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    patch:
+      operationId: updateHospitalSettings
+      summary: Change the hospital's settings (step-up when loosening sign-in).
+      description: |
+        With the `version` it was read at (409 `conflict` when stale), any
+        of `review_overdue_hours`, `require_mfa_for_clinicians`,
+        `idle_timeout_minutes` (each one of `limits`), `allow_trust_device`;
+        `reviewers_share_specialty` only false (422 otherwise). An edit that
+        loosens sign-in (two-step for clinicians off, trusted devices on, a
+        longer idle timeout) also needs a fresh `mfa_code` or `backup_code`,
+        checked after the version. Audited (`hospital_settings.changed`,
+        the field names and whether it loosened). Answers as the GET. Send
+        an `Idempotency-Key`.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HospitalSettingsPatchIn" }
+      responses:
+        "200":
+          description: The settings, saved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HospitalSettingsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/usage:
+    get:
+      operationId: getHospitalUsage
+      summary: The hospital's usage counts (hospital admins).
+      description: |
+        Counts only, for the caller's hospital, in its time zone: `period`
+        is exactly one of `this_month`, `last_month`, `last_90_days` (422
+        otherwise); `to` is exclusive. `confidence` maps the HGA decision
+        (PASS `high`, REGENERATE `caution`, ESCALATE `review`; a failed
+        question `failed`). `agreement_rate` (0 to 1) and
+        `median_review_hours` are null with nothing to measure.
+        `by_specialty` is the 20 largest. `alerts` is core's EMR alert block
+        under the small-group rule (by severity, category, route and
+        handling), null when the hospital has no EMR source, or
+        `{unavailable: true}` when it couldn't be computed.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: period, in: query, required: true, schema: { type: string, enum: [this_month, last_month, last_90_days] } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The counts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HospitalUsageOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/activity:
+    get:
+      operationId: listHospitalActivity
+      summary: The hospital's activity (hospital admins).
+      description: |
+        The hospital's own audit entries, newest first, the last 12 months,
+        as structured events: never free text, a question, a patient or a
+        payload's ids. Shown: sign-ins (`signed_in`,
+        `signed_in_without_mfa`, `sign_in_locked`), consultations
+        (`consultation_run`), feedback and review (`result_agreed`,
+        `correction_suggested`, `correction_approved`,
+        `correction_rejected`, `correction_withdrawn`) and admin changes
+        (`roles_changed`, `specialty_changed`, `deactivated`,
+        `reactivated`, `analyst_granted`, `analyst_removed`,
+        `settings_changed`, `alert_units_changed`, `alert_rules_changed`,
+        `alert_recipients_changed`). Core flags no event today (self role
+        adds are refused), so `flagged=true` answers an empty page.
+        `person` matches part of the actor's or target's display name;
+        `staff_id` the actor or target; `from`/`to` an RFC 3339 time or a
+        date; `flagged=true` flagged events only; `cursor` the previous
+        page's `next_cursor`; `limit` 1 to 100 (50). Each key at most once;
+        anything else is 422.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: type, in: query, schema: { type: string, enum: [sign_in, consultation, feedback, review, account, admin, security] } }
+        - { name: person, in: query, schema: { type: string, maxLength: 64 } }
+        - { name: staff_id, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string } }
+        - { name: to, in: query, schema: { type: string } }
+        - { name: flagged, in: query, schema: { type: boolean } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: One page of events.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HospitalActivityPage" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/review-oversight:
+    get:
+      operationId: getReviewOversight
+      summary: The waiting corrections and reviewers (hospital admins).
+      description: |
+        No clinical content: a waiting correction is its id, a short `ref`,
+        who suggested it, its consultation's specialty and when; never its
+        reason, its suggested diagnosis or the question. At most 200 items,
+        oldest first. Core has no reviewer assignment or reminders:
+        `assigned_to` and `reminded_at` are null, and `eligible_reviewers`
+        counts the active clinicians but the submitter.
+        `median_decision_hours` is over the last 30 days;
+        `decided_this_week` the last 7 days.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The oversight.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewOversightOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/corrections/{id}/eligible-reviewers:
+    get:
+      operationId: listEligibleReviewers
+      summary: Who may review a waiting correction (hospital admins).
+      description: |
+        The hospital's active clinicians but the submitter, by display name
+        (at most 500). 404 for an unknown or another hospital's correction;
+        409 `already_decided` when it is no longer waiting.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, already_decided, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The reviewers.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ReviewerOut" } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/corrections/{id}/remind:
+    post:
+      operationId: remindReviewers
+      summary: Remind the reviewers (not available).
+      description: Core has no notifications, so this answers 501 `not_implemented`.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *hospitalMissing
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+
+  /hospital/corrections/{id}/assign:
+    post:
+      operationId: assignReviewer
+      summary: Assign a reviewer (not available).
+      description: |
+        Core has no reviewer assignment (a waiting correction is only ever
+        approved, rejected or withdrawn), so this answers 501
+        `not_implemented`.
+      tags: [hospital]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *hospitalMissing
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+
   /hospital/alert-settings:
     get:
       operationId: getAlertSettings
@@ -2893,6 +3432,12 @@ components:
             - level_not_supported
             - already_handled
             - no_recipients
+            - self_change
+            - last_admin
+            - analysis_off
+            - analyst_cap
+            - not_eligible
+            - not_implemented
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -4496,3 +5041,189 @@ components:
       properties:
         alert_popups: { type: boolean }
         correction_popups: { type: boolean }
+    StaffOut:
+      type: object
+      required: [id, full_name, display_name, email, roles, specialty, can_review, review_specialties, status, issues, sign_in,
+                 last_active_at, joined_at, invited_at, invite_expires_at, is_you, version]
+      properties:
+        id: { type: string, format: uuid }
+        full_name: { type: string }
+        display_name: { type: string }
+        email: { type: string }
+        roles: { type: array, items: { type: string, enum: [clinician, analyst, hospital_admin] } }
+        specialty: { type: string, nullable: true }
+        can_review: { type: boolean }
+        review_specialties: { type: array, maxItems: 0, items: { type: string } }
+        status: { type: string, enum: [active, deactivated] }
+        issues: { type: array, items: { type: string, enum: [mfa_not_set_up] } }
+        sign_in: { type: string, enum: [sso, password_mfa, password], nullable: true }
+        last_active_at: { type: string, format: date-time, nullable: true }
+        joined_at: { type: string, format: date-time, nullable: true }
+        invited_at: { type: string, format: date-time, nullable: true }
+        invite_expires_at: { type: string, format: date-time, nullable: true }
+        is_you: { type: boolean }
+        version: { type: integer, minimum: 1 }
+    StaffPatchIn:
+      type: object
+      required: [version]
+      additionalProperties: false
+      properties:
+        version: { type: integer, minimum: 1 }
+        roles:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items: { type: string, enum: [clinician, analyst, hospital_admin] }
+        specialty: { type: string, nullable: true, pattern: "^[A-Za-z][A-Za-z -]{0,39}$" }
+        can_review: { type: boolean }
+        review_specialties: { type: array, maxItems: 0, items: { type: string } }
+        mfa_code: { type: string }
+        backup_code: { type: string }
+    HospitalSettingsOut:
+      type: object
+      required: [hospital_name, review_overdue_hours, reviewers_share_specialty, require_mfa_for_clinicians, idle_timeout_minutes,
+                 allow_trust_device, sso, allowed_email_domains, specialties, limits, version]
+      properties:
+        hospital_name: { type: string }
+        review_overdue_hours: { type: integer }
+        reviewers_share_specialty: { type: boolean }
+        require_mfa_for_clinicians: { type: boolean }
+        idle_timeout_minutes: { type: integer }
+        allow_trust_device: { type: boolean }
+        sso:
+          type: object
+          required: [status, domain]
+          properties:
+            status: { type: string, enum: [connected, not_set_up, error] }
+            domain: { type: string, nullable: true }
+        allowed_email_domains: { type: array, items: { type: string } }
+        specialties: { type: array, items: { type: string } }
+        limits:
+          type: object
+          required: [review_overdue_hours, idle_timeout_minutes]
+          properties:
+            review_overdue_hours: { type: array, items: { type: integer } }
+            idle_timeout_minutes: { type: array, items: { type: integer } }
+        version: { type: integer, minimum: 1 }
+    HospitalSettingsPatchIn:
+      type: object
+      required: [version]
+      additionalProperties: false
+      properties:
+        version: { type: integer, minimum: 1 }
+        review_overdue_hours: { type: integer }
+        reviewers_share_specialty: { type: boolean }
+        require_mfa_for_clinicians: { type: boolean }
+        idle_timeout_minutes: { type: integer }
+        allow_trust_device: { type: boolean }
+        mfa_code: { type: string }
+        backup_code: { type: string }
+    HospitalUsageOut:
+      type: object
+      required: [period, from, to, consultations, active_clinicians, agreement_rate, median_review_hours, confidence, by_specialty, alerts]
+      properties:
+        period: { type: string, enum: [this_month, last_month, last_90_days] }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        consultations: { type: integer, minimum: 0 }
+        active_clinicians: { type: integer, minimum: 0 }
+        agreement_rate: { type: number, minimum: 0, maximum: 1, nullable: true }
+        median_review_hours: { type: number, minimum: 0, nullable: true }
+        confidence:
+          type: object
+          required: [high, caution, review, failed]
+          properties:
+            high: { type: integer, minimum: 0 }
+            caution: { type: integer, minimum: 0 }
+            review: { type: integer, minimum: 0 }
+            failed: { type: integer, minimum: 0 }
+        by_specialty:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            required: [specialty, consultations]
+            properties:
+              specialty: { type: string }
+              consultations: { type: integer, minimum: 0 }
+        alerts:
+          nullable: true
+          description: "Null with no EMR source; `{unavailable: true}` when the block could not be computed."
+          oneOf:
+            - $ref: "#/components/schemas/HospitalUsageAlertsOut"
+            - type: object
+              required: [unavailable]
+              additionalProperties: false
+              properties:
+                unavailable: { type: boolean, enum: [true] }
+    HospitalUsageAlertsOut:
+      type: object
+      description: Every count under the small-group rule; each breakdown is guarded as a set with the total.
+      required: [total, by_severity, by_category, by_route, by_handling]
+      additionalProperties: false
+      properties:
+        total: { $ref: "#/components/schemas/GuardedCount" }
+        by_severity: { type: object, additionalProperties: { $ref: "#/components/schemas/GuardedCount" } }
+        by_category: { type: object, additionalProperties: { $ref: "#/components/schemas/GuardedCount" } }
+        by_route: { type: object, additionalProperties: { $ref: "#/components/schemas/GuardedCount" } }
+        by_handling: { type: object, additionalProperties: { $ref: "#/components/schemas/GuardedCount" } }
+    HospitalActivityPage:
+      type: object
+      required: [events, next_cursor]
+      properties:
+        events: { type: array, items: { $ref: "#/components/schemas/HospitalActivityEvent" } }
+        next_cursor: { type: string, nullable: true }
+    HospitalActivityEvent:
+      type: object
+      required: [id, at, type, kind, actor, target, specialty, confidence, device, count, flag]
+      properties:
+        id: { type: string }
+        at: { type: string, format: date-time }
+        type: { type: string, enum: [sign_in, consultation, feedback, review, account, admin, security] }
+        kind: { type: string }
+        actor: { type: object, nullable: true, required: [display_name], properties: { display_name: { type: string } } }
+        target: { type: object, nullable: true, required: [display_name], properties: { display_name: { type: string } } }
+        specialty: { type: string, nullable: true }
+        confidence: { type: string, nullable: true, enum: [high, caution, review, failed] }
+        device: { type: string, nullable: true }
+        count: { type: integer, nullable: true }
+        flag: { type: string, nullable: true, enum: [policy, alert] }
+    ReviewOversightOut:
+      type: object
+      required: [overdue_after_hours, waiting, median_decision_hours, decided_this_week, items, reviewers_by_specialty]
+      properties:
+        overdue_after_hours: { type: integer }
+        waiting: { type: integer, minimum: 0 }
+        median_decision_hours: { type: number, nullable: true }
+        decided_this_week: { type: integer, minimum: 0 }
+        items:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            required: [id, ref, suggested_by, specialty, submitted_at, eligible_reviewers, assigned_to, reminded_at]
+            properties:
+              id: { type: string, format: uuid }
+              ref: { type: string, pattern: "^C-[0-9A-F]{6}$" }
+              suggested_by: { type: object, required: [display_name], properties: { display_name: { type: string } } }
+              specialty: { type: string, nullable: true }
+              submitted_at: { type: string, format: date-time }
+              eligible_reviewers: { type: integer, minimum: 0 }
+              assigned_to: { type: object, nullable: true, required: [display_name], properties: { display_name: { type: string } } }
+              reminded_at: { type: string, format: date-time, nullable: true }
+        reviewers_by_specialty:
+          type: array
+          items:
+            type: object
+            required: [specialty, reviewers]
+            properties:
+              specialty: { type: string }
+              reviewers: { type: integer, minimum: 0 }
+    ReviewerOut:
+      type: object
+      required: [id, display_name, specialty]
+      properties:
+        id: { type: string, format: uuid }
+        display_name: { type: string }
+        specialty: { type: string, nullable: true }
