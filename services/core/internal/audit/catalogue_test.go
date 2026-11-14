@@ -453,6 +453,7 @@ func candidates() []any {
 		2026-11-03T06:00:00Z 2026-11-03T06:00:00.123+01:00 v1.2
 		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume demo prevalence month:2026-10-01 affected minute day
 		excluded already_known null_mrn level_off already_open breaker_tripped new_hit regrouped amended critical blood_chemistry
+		platform_admin auditor off critical_and_digest regulator case_closed
 		unreadable failed_safety_check wrong_people person_left pending letters_only hospital`) {
 		out = append(out, s)
 	}
@@ -773,6 +774,39 @@ func TestBatchJobRowsMap(t *testing.T) {
 		}
 		if err := audit.CheckActionPayload(action, p); err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// The platform admin routes' own audit policy (00037,
+// platform_admin_append): every action it allows has a catalogue row and a
+// payload schema, and it allows exactly the seven the routes write.
+func TestPlatformAdminAppendActions(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "db", "migrations", "00037_platform_admin_routes.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := strings.SplitN(string(raw), "-- +goose Down", 2)[0]
+	m := regexp.MustCompile(`(?s)CREATE POLICY platform_admin_append ON audit_log.*?action IN \(([^)]*)\)`).FindStringSubmatch(up)
+	if m == nil {
+		t.Fatal("no platform_admin_append with an action list in 00037")
+	}
+	var got []string
+	for _, q := range regexp.MustCompile(`'([a-z][a-z0-9_.]*)'`).FindAllStringSubmatch(m[1], -1) {
+		got = append(got, q[1])
+	}
+	sort.Strings(got)
+	want := []string{"legal_hold.lift_cancelled", "legal_hold.lift_requested", "legal_hold.lifted", "legal_hold.placed",
+		"platform.analytics_email_changed", "platform.team_member_removed", "platform.team_role_changed"}
+	if !slices.Equal(got, want) {
+		t.Errorf("platform_admin_append allows %v, want %v", got, want)
+	}
+	for _, a := range got {
+		if _, ok := audit.Catalogue[a]; !ok {
+			t.Errorf("no catalogue row for %s", a)
+		}
+		if !audit.Registered(a) {
+			t.Errorf("%s has no payload schema", a)
 		}
 	}
 }

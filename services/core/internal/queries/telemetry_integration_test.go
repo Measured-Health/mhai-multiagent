@@ -134,17 +134,17 @@ func TestMarkerNotInSpansOrLogs(t *testing.T) {
 		}
 		texts := []string{s.Name, s.Status.Description}
 		for _, kv := range s.Attributes {
-			texts = append(texts, string(kv.Key), kv.Value.Emit())
+			texts = append(texts, string(kv.Key), kv.Value.String())
 		}
 		for _, ev := range s.Events {
 			texts = append(texts, ev.Name)
 			for _, kv := range ev.Attributes {
-				texts = append(texts, string(kv.Key), kv.Value.Emit())
+				texts = append(texts, string(kv.Key), kv.Value.String())
 			}
 		}
 		for _, l := range s.Links {
 			for _, kv := range l.Attributes {
-				texts = append(texts, string(kv.Key), kv.Value.Emit())
+				texts = append(texts, string(kv.Key), kv.Value.String())
 			}
 		}
 		for _, text := range texts {

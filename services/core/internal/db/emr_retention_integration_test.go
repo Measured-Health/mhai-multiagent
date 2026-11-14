@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -690,10 +691,31 @@ func TestLegalHoldsProvisionOnly(t *testing.T) {
 	}); pgCode(err) != permissionDenied {
 		t.Errorf("provision deleting a hold: %v", err)
 	}
+	// 00036: the platform app reads the holds (the hospitals list and
+	// page); 00037 lets it place one with its reason, review date and
+	// placer, and lift an open one (platform_admin_integration_test.go). A
+	// bare hold, a change to a lifted one and a delete stay refused.
+	if err := asRoleIn(ctx, pool, "mhai_platform", r.h, func(tx pgx.Tx) error {
+		var n int
+		return tx.QueryRow(ctx, `SELECT count(*) FROM legal_holds WHERE id = $1 AND lifted_at IS NOT NULL`, id).Scan(&n)
+	}); err != nil {
+		t.Errorf("platform reading the holds: %v", err)
+	}
+	for _, q := range []string{`INSERT INTO legal_holds (hospital_id, reference) VALUES ($1, 'LH-2026-0043')`,
+		`DELETE FROM legal_holds WHERE hospital_id = $1`} {
+		err := asRoleIn(ctx, pool, "mhai_platform", r.h, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, q, r.h)
+			return err
+		})
+		requireDenied(t, err, "mhai_platform "+q)
+	}
 	for _, role := range []string{"mhai_gateway", "mhai_platform", "mhai_emr", "mhai_emr_core", "mhai_emr_maint", "mhai_emr_admin",
 		"mhai_worker", "mhai_jobs"} {
 		for _, q := range []string{`SELECT count(*) FROM legal_holds`, `SELECT count(*) FROM emr.purge_requests`,
 			`SELECT count(*) FROM emr.purge_held_alerts`} {
+			if role == "mhai_platform" && strings.Contains(q, "legal_holds") {
+				continue // 00036, above
+			}
 			err := asRoleIn(ctx, pool, role, r.h, func(tx pgx.Tx) error {
 				var n int
 				return tx.QueryRow(ctx, q).Scan(&n)
