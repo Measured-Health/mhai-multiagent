@@ -446,7 +446,7 @@ ADVERSARIAL = [
     "glucose " + "<" * 10_000 + " x",
     "glucose" + " :" * 5000 + " x",
     "bp" + " is" * 3300 + " 1x",
-    "temperature" + " reading" * 1100 + " x",
+    "temperature" + " reading" * 1300 + " x",
     "glucose 1" + ".1" * 5000,
     "hb " + "1 " * 5000,
 ]
