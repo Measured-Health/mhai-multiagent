@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Documents service PR 1: ADR 0016 and the service skeleton (off by default;
+  no migration, no OpenAPI change). `services/documents/` is its own Go
+  module and binary: settings that fail closed, `documents.v1.ctl.health`
+  (as `svc:core`) behind gokit's request-token checks, readiness flags that
+  report no keyring, scanner or sandbox until PRs 3 and 4 build them. gokit
+  gains the `documents.v1.ctl.<op>` subject rule (audience `documents`,
+  core only, no step-up), the operations table `docops` and the protobuf
+  contract `docspb`. The `documents` NATS user is an opt-in include
+  (`NATS_DOCUMENTS_CONF=documents.conf`) that publishes nothing; core's
+  `gateway` may call `documents.v1.ctl.>`. Compose profile `documents`
+  (read-only, no capabilities, internal network only). The design's §17
+  lists where the build departs from its plan.
 - Patient Analysis PR 8: named access (migration **00042**, OpenAPI
   **1.31.0**; off by default: a named list needs the hospital's analysis
   switch on, its effective named-access position `on`, which no hospital's
