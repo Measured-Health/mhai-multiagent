@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/docspb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
@@ -377,5 +378,36 @@ func TestHandlerHasTheOpsDeadline(t *testing.T) {
 func TestSubscriptionShape(t *testing.T) {
 	if Subjects != "documents.v1.ctl.>" || QueueGroup != "documents" || Audience != "documents" {
 		t.Fatalf("%s %s %s", Subjects, QueueGroup, Audience)
+	}
+}
+
+// The strict schema check holds for every message of the contract: no
+// map fields, whose message values a careless decoder could skip.
+func TestContractHasNoMaps(t *testing.T) {
+	msgs := docspb.File_mhai_documents_v1_control_proto.Messages()
+	if msgs.Len() == 0 {
+		t.Fatal("no messages")
+	}
+	for i := 0; i < msgs.Len(); i++ {
+		fields := msgs.Get(i).Fields()
+		for j := 0; j < fields.Len(); j++ {
+			if fields.Get(j).IsMap() {
+				t.Errorf("%s.%s is a map", msgs.Get(i).FullName(), fields.Get(j).Name())
+			}
+		}
+	}
+}
+
+// hasUnknown finds an unknown field inside a message-typed map value.
+func TestHasUnknownInsideMapValues(t *testing.T) {
+	// structpb.Struct holds map<string, Value>: a known message with a map.
+	v := structpb.NewStringValue("synthetic")
+	v.ProtoReflect().SetUnknown(protowire.AppendVarint(protowire.AppendTag(nil, 99, protowire.VarintType), 1))
+	st := &structpb.Struct{Fields: map[string]*structpb.Value{"k": v}}
+	if !hasUnknown(st.ProtoReflect()) {
+		t.Fatal("an unknown field inside a map value was not found")
+	}
+	if hasUnknown((&structpb.Struct{Fields: map[string]*structpb.Value{"k": structpb.NewNullValue()}}).ProtoReflect()) {
+		t.Fatal("a clean map was flagged")
 	}
 }

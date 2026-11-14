@@ -299,7 +299,7 @@ func TestDocumentsUserIsAnOptInInclude(t *testing.T) {
 		t.Fatal("documents.conf must define the documents user with NATS_DOCUMENTS_PASSWORD")
 	}
 	if !strings.Contains(on, `publish:{deny:[">"]}`) || !strings.Contains(on, `"documents.v1.ctl.>documents"`) ||
-		!strings.Contains(on, `"_INBOX_worker.documents.>"`) || !strings.Contains(on, `allow_responses:{max:1,expires:"1m"}`) {
+		strings.Contains(on, "_INBOX") || !strings.Contains(on, `allow_responses:{max:1,expires:"1m"}`) {
 		t.Fatalf("documents.conf rights: %s", on)
 	}
 	for _, c := range []struct{ file, gateway string }{

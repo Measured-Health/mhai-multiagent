@@ -221,8 +221,13 @@ func TestSubjectRulesDocumentsCtl(t *testing.T) {
 	// No documents op takes step-up: the stp claim is refused on it.
 	stp := c
 	stp.StepUp = true
-	if _, _, err := s.Mint(stp, body, 5*time.Second); err == nil {
-		t.Fatal("minted stp on documents.v1.ctl.health")
+	if _, _, err := s.Mint(stp, body, 5*time.Second); !errors.Is(err, ErrMintClaims) {
+		t.Fatalf("minted stp on documents.v1.ctl.health: %v", err)
+	}
+	// A validly signed token carrying stp is refused by the verifier.
+	forgedStp := resign(t, s, tok, func(_, p map[string]any) { p["stp"] = true })
+	if _, err := VerifyAt(forgedStp, s.PublicKeys(), want, body, testNow); err == nil {
+		t.Fatal("stp verified on documents.v1.ctl.health")
 	}
 }
 

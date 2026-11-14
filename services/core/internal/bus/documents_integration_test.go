@@ -34,7 +34,9 @@ func TestDocumentsUserPermissions(t *testing.T) {
 		"$JS.API.CONSUMER.MSG.NEXT.EMR.emr_normalise", bus.GatewayInboxPrefix+".x", "_INBOX_worker.emr.x")
 	cannotSubscribe(t, documentsSvc, "api.v1.>", "jobs.v1.>", "inference.v1.>", "$KV.>", bus.GatewayInboxPrefix+".>",
 		"emr.v1.>", "records.v1.>", "documents.v1.*.uploaded", "documents.v1.*.page", "documents.v1.*.intake",
-		"_INBOX_worker.emr.>", "_INBOX_bff.clinical.>", ">")
+		"_INBOX_worker.emr.>", "_INBOX_bff.clinical.>", ">",
+		// No inbox of its own in PR 1: it asks nothing.
+		"_INBOX_worker.documents.>")
 	// documents.v1.ctl.> only in queue group documents.
 	s := documentsSvc(t)
 	_, _ = s.nc.Subscribe("documents.v1.ctl.>", func(*nats.Msg) {})

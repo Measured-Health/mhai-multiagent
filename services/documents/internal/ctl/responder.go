@@ -252,6 +252,14 @@ func hasUnknown(m protoreflect.Message) bool {
 				found = hasUnknown(l.Get(i).Message())
 			}
 		case fd.IsMap():
+			// Message-typed map values are checked too (the emr copy
+			// skips them; the documents contract has no maps today).
+			if fd.MapValue().Message() != nil {
+				v.Map().Range(func(_ protoreflect.MapKey, mv protoreflect.Value) bool {
+					found = hasUnknown(mv.Message())
+					return !found
+				})
+			}
 		case fd.Message() != nil:
 			found = hasUnknown(v.Message())
 		}
