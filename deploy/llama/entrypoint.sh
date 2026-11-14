@@ -10,7 +10,8 @@
 #
 # Settings: LLAMA_MODELS_DIR (/models, the cache mounted read-only), LLAMA_THREADS (2),
 # LLAMA_CTX (4096), LLAMA_PORT (8080), LLAMA_ACTIVE_TIMEOUT (seconds to wait for
-# active.json, 900). It never names a path or a hash it was not given in its messages.
+# active.json, 900), LLAMA_GPU_LAYERS (0: CPU only; 1 to 999 layers offloaded to the
+# GPU, for the CUDA build on the intelligence host). It never names a path or a hash it was not given in its messages.
 set -euo pipefail
 
 die() { printf 'llama-entrypoint: %s\n' "$*" >&2; exit 1; }
@@ -20,6 +21,7 @@ THREADS=${LLAMA_THREADS:-2}
 CTX=${LLAMA_CTX:-4096}
 PORT=${LLAMA_PORT:-8080}
 WAIT=${LLAMA_ACTIVE_TIMEOUT:-900}
+GPU_LAYERS=${LLAMA_GPU_LAYERS:-0}
 SERVER=${LLAMA_SERVER:-/usr/local/bin/llama-server}
 
 int() {
@@ -31,6 +33,11 @@ int LLAMA_THREADS "$THREADS" 1 256
 int LLAMA_CTX "$CTX" 256 131072
 int LLAMA_PORT "$PORT" 1 65535
 int LLAMA_ACTIVE_TIMEOUT "$WAIT" 1 86400
+gpu=()
+if [ "$GPU_LAYERS" != 0 ]; then
+  int LLAMA_GPU_LAYERS "$GPU_LAYERS" 1 999
+  gpu=(-ngl "$GPU_LAYERS")
+fi
 
 active="$MODELS/active.json"
 waited=0
@@ -65,4 +72,4 @@ got=$(sha256sum -- "$path" | cut -d' ' -f1)
 
 printf 'llama-entrypoint: serving %s (sha256 verified)\n' "$alias" >&2
 exec "$SERVER" -m "$path" --alias "$alias" --host 0.0.0.0 --port "$PORT" \
-  -t "$THREADS" -c "$CTX" -np 1 --jinja --offline --no-webui
+  -t "$THREADS" -c "$CTX" -np 1 --jinja --offline --no-webui "${gpu[@]}"

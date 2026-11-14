@@ -18,7 +18,8 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"CORE_CLOUD_PROVIDERS", "CORE_EMR_ENABLED", "CORE_EMR_SEAL_PUBLIC_KEY_PATH", "CORE_EMR_CONNECTOR_TYPES",
 		"CORE_IDEMPOTENCY_HMAC_KEY_PATH", "CORE_EMR_ALLOW_NULL_MRN", "CORE_EMR_RETENTION_SWEEP",
 		"CORE_PATIENT_LOOKUP_PER_MINUTE", "CORE_PATIENT_LOOKUP_PER_DAY", "CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY",
-		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE", "ANALYSIS_NAMED_IDENTITY"} {
+		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE", "ANALYSIS_NAMED_IDENTITY",
+		"CORE_AUDIT_EXPORTS"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -701,11 +702,11 @@ func TestConfigEMRConnectorTypes(t *testing.T) {
 		t.Fatalf("development stub: %v %v", c.EMRConnectorTypes, err)
 	}
 	for env, raw := range map[string]string{
-		"production":  "stub",           // the stub is development-only
-		"development": "file_export",    // not built yet
-		"staging":     "hl7v2_feed",     // not a type
-		"test":        "stub,stub",      // twice
-		"dev":         "stub,https://x", // junk
+		"production":  "stub",             // the stub is development-only
+		"development": "document_archive", // not built yet
+		"staging":     "hl7v2_feed",       // not a type
+		"test":        "stub,stub",        // twice
+		"dev":         "stub,https://x",   // junk
 	} {
 		e := env
 		if env == "test" || env == "dev" {
@@ -827,5 +828,31 @@ func TestNamedIdentityConfig(t *testing.T) {
 	setEnv(t, base)
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ANALYSIS_NAMED_IDENTITY must be") || strings.Contains(err.Error(), "synthetic-live-xyz") {
 		t.Fatalf("unknown value: %v", err)
+	}
+}
+
+// Audit exports are off unless CORE_AUDIT_EXPORTS says true (analysis plan
+// departure 61).
+func TestConfigAuditExports(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	for raw, want := range map[string]bool{"": false, "false": false, "true": true, " TRUE ": true} {
+		m := map[string]string{"CORE_AUDIT_EXPORTS": raw}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if c, err := Load(); err != nil || c.AuditExports != want {
+			t.Errorf("%q: %v %v", raw, c.AuditExports, err)
+		}
+	}
+	for _, bad := range []string{"yes", "1", "on"} {
+		m := map[string]string{"CORE_AUDIT_EXPORTS": bad}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_AUDIT_EXPORTS") {
+			t.Errorf("%q: %v", bad, err)
+		}
 	}
 }

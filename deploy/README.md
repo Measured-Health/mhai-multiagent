@@ -707,16 +707,38 @@ own model".
 GGUF, that the sidecar serves exactly the verified alias, reaches nothing
 outside its network, and refuses a GGUF with one flipped byte.
 
+## Intelligence on its own server (split mode, off by default)
+
+The pipeline worker, the llama sidecar, `model-fetch` and the egress proxy can
+run on an **intelligence host** (GPU optional), with core, Postgres, NATS and
+the web apps on this **app host**, in one private network. NATS and Postgres
+then have TLS from our own private CA. The design, threat model, firewall
+rules, sizing and runbook are in
+[docs/deploy/remote-intelligence.md](../docs/deploy/remote-intelligence.md).
+**Never on the demo host:** the demo stays single-host, with TLS off.
+
+| File | What it is |
+|---|---|
+| `tls/make-ca.sh`, `tls/issue.sh` | the private CA and its certificates (keys 0600, never printed) |
+| `compose.split.yml` | the app host's override: `nats/tls.conf` (mutual TLS, `handshake_first`), Postgres TLS with `postgres/pg_hba.conf`, core's `NATS_TLS_*`, both published on the private address only |
+| `postgres/pg_hba.split.conf`, `postgres/render-hba.sh` | `intelligence_app` over TLS from the intelligence host only, nothing else from it |
+| `enable-split.sh` | the app host: issues and places the certificates, writes `pg_hba.conf` and `.env` (`COMPOSE_FILE=compose.yml:compose.split.yml`, the switch), recreates postgres, nats and core, prints the firewall rules |
+| `intelligence-host/compose.yml`, `compose.gpu.yml`, `app-link.cfg` | the intelligence host: the worker on internal networks only, `app-link` (a TCP relay to the app host's 4222 and 5432) its only way there |
+| `intelligence-host/enable-intelligence-host.sh`, `put-secret.sh` | the intelligence host: `init` (its NKey and TLS key, made there), `up` (the database password on stdin, the certificate checked, start) |
+
+Tests: `tls/test-tls.sh`, `tls/test-split-lib.sh`, and
+`intelligence-host/test-split.sh` (two hosts stood in for by Docker networks;
+CI's boundary-smoke job).
+
 ## Known limits
 
-- **No TLS inside the instance.** Postgres (`sslmode=disable`) and NATS
-  run without TLS, on Docker networks and loopback only. Core's NATS client
-  takes `NATS_TLS_*` (Plan 3), and `nats/nats.conf` documents the server's
-  `tls {}` block (`verify`, `handshake_first: 300ms`, the fallback still
-  TLS-only); turning it on needs certificates on the instance. Required
-  before any intelligence worker runs off this host. The pilot pipeline
+- **No TLS inside the demo instance.** Postgres (`sslmode=disable`) and NATS
+  run without TLS, on Docker networks and loopback only. The pilot pipeline
   runs on this host with `INTELLIGENCE_SINGLE_HOST=on`, which the worker
-  accepts only for the Docker service names `nats` and `postgres`.
+  accepts only for the Docker service names `nats` and `postgres`. A worker
+  on another host needs the split mode above (TLS for NATS and Postgres);
+  core's own Postgres link stays plaintext on the internal network even
+  then.
 - **No JetStream encryption at rest** on the demo (dev compose has it,
   `NATS_JS_KEY`): turning it on needs the store converted or recreated.
 - **NATS is on a non-internal network** (`edge`), because Docker publishes

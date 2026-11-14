@@ -229,7 +229,7 @@ func batchRow(e Event) bool {
 // mhai-web's facts.searched_kind takes.
 func searchedInWeb(e Event) bool {
 	k := str(e, "searched_kind")
-	return k == "event" || k == "request"
+	return k == "event" || k == "request" || k == "export"
 }
 
 // safetyFlag flags a letter refused for the safety check (design §8.7).
@@ -457,6 +457,22 @@ var Catalogue = map[string]Entry{
 			return nil
 		},
 		Facts: map[string]string{"state": "state", "first_broken_seq": "first_broken_seq"}},
-	"audit.check_outcome":          {Type: "audit", Kind: "audit_check_outcome", Target: runTarget},
-	"audit.undisplayable_reported": {Type: "audit", Kind: "audit_undisplayable_reported"},
+	"audit.check_outcome": {Type: "audit", Kind: "audit_check_outcome", Target: runTarget},
+	// Exports (plan Task 25): the export is the target (and refs.export_id).
+	// Facts are the record's row count, checksum and recorded filters; the
+	// note and the reference never reach an entry.
+	"audit.exported": {Type: "export", Kind: "audit_exported", Target: entityTarget("export", "audit_export"),
+		Facts: map[string]string{"rows": "rows", "capped": "capped", "checksum": "checksum", "filters": "filters"}},
+	"audit.named_access_exported": {Type: "export", Kind: "named_access_exported", Target: entityTarget("export", "audit_export"),
+		Facts: map[string]string{"rows": "rows", "capped": "capped", "checksum": "checksum", "filters": "filters"}},
+	"audit.export_downloaded": {Type: "export", Kind: "export_downloaded", Target: entityTarget("export", "audit_export")},
+	"audit.export_download_refused": {Type: "export", Kind: "export_download_refused", Target: entityTarget("export", "audit_export"),
+		Outcome: fixed("refused")},
+	// The legal path (plan Task 26): no mhai-web kind yet; sent bare
+	// (departure 68).
+	"legal_reference.created":        withheld(),
+	"analysis.legal_resolved":        withheld(),
+	"analysis.legal_resolve_failed":  withheld(),
+	"analysis.legal_resolve_refused": withheld(),
+	"audit.undisplayable_reported":   {Type: "audit", Kind: "audit_undisplayable_reported"},
 }

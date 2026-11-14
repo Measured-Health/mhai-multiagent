@@ -1,0 +1,29 @@
+# The intelligence host with an NVIDIA GPU for the llama sidecar
+# (docs/deploy/remote-intelligence.md, decision D9). enable-intelligence-host.sh
+# --gpu adds it through COMPOSE_FILE in .env. Needs the NVIDIA driver and the
+# NVIDIA Container Toolkit on the host.
+#
+# The image is the same pinned llama.cpp built with CUDA (deploy/llama/Dockerfile,
+# build args); the entrypoint is unchanged and offloads PILOT_LOCAL_MODEL_GPU_LAYERS
+# layers (999: all of them). The worker and the rest stay on the CPU.
+
+services:
+  llama:
+    image: ${LLAMA_IMAGE:-mhai-llama:cuda}
+    build:
+      context: ./llama
+      args:
+        BUILD_BASE: ${LLAMA_CUDA_BUILD_BASE:-nvidia/cuda:12.6.3-devel-ubuntu24.04}
+        RUN_BASE: ${LLAMA_CUDA_RUN_BASE:-nvidia/cuda:12.6.3-runtime-ubuntu24.04}
+        GGML_CUDA: "ON"
+    environment:
+      LLAMA_GPU_LAYERS: ${PILOT_LOCAL_MODEL_GPU_LAYERS:-999}
+      NVIDIA_VISIBLE_DEVICES: ${LLAMA_GPUS:-all}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

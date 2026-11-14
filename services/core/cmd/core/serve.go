@@ -230,7 +230,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		Analysis: analysis.NewEngine(a.pool, log), AnalysisKeys: analysisKeys,
 		PatientLookup: patients.Limits{PerMinute: cfg.PatientLookupPerMinute, PerDay: cfg.PatientLookupPerDay,
 			HospitalPerDay: cfg.PatientLookupHospitalPerDay},
-		AnalysisIdentity: identity})
+		AnalysisIdentity: identity, AuditExports: cfg.AuditExports})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}

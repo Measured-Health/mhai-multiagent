@@ -454,7 +454,8 @@ func candidates() []any {
 		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume demo prevalence month:2026-10-01 affected minute day
 		excluded already_known null_mrn level_off already_open breaker_tripped new_hit regrouped amended critical blood_chemistry
 		platform_admin auditor off critical_and_digest regulator case_closed
-		unreadable failed_safety_check wrong_people person_left pending letters_only hospital miss hospital_day`) {
+		unreadable failed_safety_check wrong_people person_left pending letters_only hospital miss hospital_day
+		not_owner gone abababababababababababababababababababababababababababababababab`) {
 		out = append(out, s)
 	}
 	for _, ty := range audit.AuditTypes {
@@ -474,7 +475,8 @@ func candidates() []any {
 		map[string]any{"hospital": "P-ABCD12"}, map[string]any{"person": "P-7F3K2"}, map[string]any{"q": "P-ABCD12"},
 		map[string]any{"q": ids[0]}, map[string]any{"type": []any{"P-ABCD12"}},
 		map[string]any{"nli": "v1"}, map[string]any{"nli": "P-ABCD12"},
-		map[string]any{"sex": "female"}, map[string]any{"location": "P-ABCD12"})
+		map[string]any{"sex": "female"}, map[string]any{"location": "P-ABCD12"},
+		map[string]any{"hospital": ids[0], "clearance": ids[1]}, map[string]any{"clearance": "P-ABCD12"})
 	return out
 }
 
@@ -484,7 +486,7 @@ func fuzzCatalogue(t *testing.T, voc *vocabulary, n int) {
 	t.Helper()
 	rng := rand.New(rand.NewSource(20261103))
 	pool := candidates()
-	entities := []string{"", "session", "hospital", "query", "correction", "job", "audit_run", "audit_list", "audit_search", "user", "operation", "emr_connection", "clearance"}
+	entities := []string{"", "session", "hospital", "query", "correction", "job", "audit_run", "audit_list", "audit_search", "user", "operation", "emr_connection", "clearance", "audit_export"}
 	entityIDs := append([]string{"", "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11", "pipeline.run_query", "has space"}, pseudonyms...)
 	hospitals := []string{"", "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11"}
 	mappedOnce := map[string]bool{}

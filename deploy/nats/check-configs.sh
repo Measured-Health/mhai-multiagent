@@ -5,6 +5,9 @@
 #   - deploy/nats/nats.conf with the nats service's environment as
 #     `docker compose config` renders it from deploy/compose.yml (the
 #     defaults, plus the three public keys setup-host.sh writes to .env);
+#   - deploy/nats/tls.conf (the split mode, docs/deploy/remote-intelligence.md)
+#     around it, with certificates made here for the run by deploy/tls/
+#     (make-ca.sh, issue.sh) and removed at the end;
 #   - services/nats/nats.conf as dev compose mounts it, with the emr user
 #     off (emr-off.conf) and on (emr.conf).
 # The image is the deploy's pinned NATS image. Needs docker and docker
@@ -52,6 +55,33 @@ check() {
 
 check "deploy/nats/nats.conf (default deploy, $image)" --env-file "$work/nats.env" \
   -v "$SRCROOT/deploy/nats/nats.conf:/etc/nats/nats.conf:ro"
+
+# The split mode: nats-server -t loads the TLS files, so they must exist. Made
+# inside the checkout (the daemon mounts them by SRCROOT), test-only, removed on exit.
+tlsdir=$(mktemp -d "$ROOT/deploy/nats/.tls-check.XXXXXX")
+trap 'rm -rf "$work" "$tlsdir"' EXIT
+bash "$ROOT/deploy/tls/make-ca.sh" "$tlsdir/ca" >/dev/null
+bash "$ROOT/deploy/tls/issue.sh" --ca-dir "$tlsdir/ca" --out "$tlsdir/tls" --name server --kind server \
+  --dns nats,mhai-nats,mhai-app --ip 10.0.1.10 >/dev/null
+cp "$tlsdir/ca/ca.pem" "$tlsdir/tls/ca.pem"
+chmod 644 "$tlsdir/tls/"*
+chmod 755 "$tlsdir/tls"
+rel=${tlsdir#"$ROOT"/}
+{ cat "$work/deploy.env"; echo SPLIT_APP_ADDR=10.0.1.10; } > "$work/split.env"
+cfg=$(docker compose -p mhai-backend -f deploy/compose.yml -f deploy/compose.split.yml \
+  --env-file "$work/split.env" config --format json)
+[ "$(printf '%s' "$cfg" | jq -c '.services.nats.command')" = '["-c","/etc/nats/tls.conf"]' ] \
+  || { echo "compose.split.yml does not start NATS with tls.conf" >&2; exit 1; }
+if out=$(docker run --rm --network none --env-file "$work/nats.env" \
+    -v "$SRCROOT/deploy/nats/nats.conf:/etc/nats/nats.conf:ro" \
+    -v "$SRCROOT/deploy/nats/tls.conf:/etc/nats/tls.conf:ro" \
+    -v "$SRCROOT/$rel/tls:/etc/nats/tls:ro" "$image" -t -c /etc/nats/tls.conf 2>&1); then
+  echo "ok   deploy/nats/tls.conf (split mode, $image)"
+else
+  echo "FAIL deploy/nats/tls.conf (split mode)" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+fi
 
 cat > "$work/dev.env" <<'E'
 NATS_GATEWAY_PASSWORD=testonlygateway0001

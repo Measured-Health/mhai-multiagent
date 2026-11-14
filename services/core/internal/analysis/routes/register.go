@@ -2,7 +2,8 @@
 // 13 and 22): GET /analysis/filters, GET /analysis/{view}, the
 // de-identified list, GET /analysis/patients, and named access (GET
 // /analysis/named-access, GET /analysis/clearance/me, POST
-// /analysis/patients/named), for a
+// /analysis/patients/named) and the legal path (GET and POST
+// /hospital/legal-resolutions), for a
 // hospital admin or an analyst with two-step, only while the hospital's
 // analysis switch is on (otherwise 404, before anything else is read).
 // Every number it sends is from a stored, guarded body (internal/analysis);
@@ -27,6 +28,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
@@ -46,6 +48,12 @@ type Deps struct {
 	// (design §8.6). Nil: unavailable, and every named list fails 503
 	// after it is recorded (departure 46).
 	Identity analysis.Resolver
+	// Auth checks a legal resolution's step-up code (auth.Service.StepUp).
+	// Nil: the resolution answers 503 not_ready.
+	Auth *auth.Service
+	// LegalOn is CORE_AUDIT_EXPORTS: off, the legal resolution routes
+	// answer 404 as the platform's export and reference routes do.
+	LegalOn bool
 }
 
 // Rule is the routes' rule: hospital admins and analysts, two-step.
@@ -60,6 +68,9 @@ type handlers struct {
 	// audit entry is appended; its error rolls the list back (tests only:
 	// T18).
 	afterOpen func() error
+	// stepUpCheck, when set, checks a legal resolution's code in place of
+	// Deps.Auth (tests only, as the letter routes' seam).
+	stepUpCheck func(r *http.Request, mfa, backup string) error
 }
 
 // Register adds the aggregate routes to m.
@@ -75,6 +86,10 @@ func Register(m *authz.Mux, d Deps) {
 	authz.Route(m, http.MethodGet, "/analysis/clearance/me", Rule, http.HandlerFunc(h.clearanceMe))
 	authz.Route(m, http.MethodGet, "/analysis/named-access", Rule, http.HandlerFunc(h.namedAccess))
 	authz.Route(m, http.MethodGet, "/analysis/{view}", Rule, http.HandlerFunc(h.views))
+	// The legal path (plan Task 26): the reply holds names, so neither the
+	// idempotency store nor any cache keeps it.
+	authz.Route(m, http.MethodGet, "/hospital/legal-resolutions", LegalReadRule, http.HandlerFunc(h.legalList))
+	authz.Route(m, http.MethodPost, "/hospital/legal-resolutions", LegalRule, httpx.NoStore(http.HandlerFunc(h.legalResolve)))
 }
 
 func (h *handlers) log() *slog.Logger {

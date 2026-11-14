@@ -171,7 +171,7 @@ func TestMain(m *testing.M) {
 		server.Register(mux, server.Deps{Auth: svc, Pool: app, SecurityContact: testContact,
 			AuditWalk: func(id uuid.UUID) { walks <- id }, Health: healthKV, Intel: intelClient, QueryCap: testQueryCap,
 			CloudProviders: testCloudProviders, EMREnabled: true, EMRTypes: []string{"stub"}, EMR: emrClient,
-			EMRSealer: emrctl.NewSealer(emrKP.Public), EMRDevelopment: true})
+			EMRSealer: emrctl.NewSealer(emrKP.Public), EMRDevelopment: true, AuditExports: true})
 		handler = mux.Handler([]string{serviceKey})
 		// The same service with EMR off (the default, K4).
 		offGuard := &authz.Guard{Keys: issuer.PublicKeys(), Denylist: buckets.Denylist, Pool: app, Log: log,
@@ -1195,23 +1195,14 @@ func TestDeferredAuditRoutes404(t *testing.T) {
 	id := strconv.FormatInt(insertRow(t, row{action: "auth.logout"}), 10)
 	for _, c := range []struct{ method, path string }{
 		{"GET", "/platform/audit/" + id + "/patients"}, // not a drill-down entry
-		{"GET", "/platform/audit/named-access"},
-		{"GET", "/platform/audit/named-access?hospital=platform"},
-		{"GET", "/platform/audit/exports"},
-		{"POST", "/platform/audit/exports"},
-		{"GET", "/platform/audit/exports/abc/file"},
+		{"GET", "/platform/audit/exports/abc/file"},    // not an export id
 		{"POST", "/platform/audit"},
 		{"DELETE", "/platform/audit/" + id},
 	} {
 		problem(t, c.method+" "+c.path, do(t, c.method, c.path, tok, true), 404, "not_found")
 	}
-	for _, rr := range server.Table() {
-		for _, deferred := range []string{"/named-access", "/exports"} {
-			if strings.HasPrefix(rr.Pattern, httpx.BasePath+"/platform/audit") && strings.Contains(rr.Pattern, deferred) {
-				t.Errorf("deferred route registered: %s %s", rr.Method, rr.Pattern)
-			}
-		}
-	}
+	// The named-access list and the exports exist since Analysis PR 9,
+	// behind CORE_AUDIT_EXPORTS (TestExportsOffIs404).
 }
 
 func TestAuditPeopleNeedsTwoChars(t *testing.T) {

@@ -43,6 +43,7 @@ type Metrics struct {
 	stored   map[string]int64
 	replays  int64
 	excluded int64
+	rejected int64
 }
 
 func (m *Metrics) add(kind string, dropped int, stored bool) {
@@ -69,6 +70,13 @@ func (m *Metrics) addExcluded() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.excluded++
+}
+
+// Rejected is how many dead letters a connector handed in were stored.
+func (m *Metrics) Rejected() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rejected
 }
 
 // Excluded is how many records of excluded patients were kept without a
@@ -110,7 +118,10 @@ type Sink struct {
 	pending []uuid.UUID
 }
 
-var _ connector.RawSink = (*Sink)(nil)
+var (
+	_ connector.RawSink  = (*Sink)(nil)
+	_ connector.Rejecter = (*Sink)(nil)
+)
 
 // New returns the sink for one connection. mrnSystem is the connection's
 // MRN namespace (settings.mrn_namespace): the one identifier kept.
@@ -199,6 +210,44 @@ func (s *Sink) PutStored(ctx context.Context, r connector.RawRecord) (bool, erro
 		return true, s.Flush(ctx)
 	}
 	return true, nil
+}
+
+// Reject keeps r as a dead letter (design §15.1, §15.2: a record that
+// can't be read is rejected with a code and counted, not the hospital's
+// feed): a rejected raw record, reject_code unreadable_data, with its
+// provenance and no payload, stored once (a replay is a no-op). It is
+// never announced, so nothing normalises it.
+func (s *Sink) Reject(ctx context.Context, r connector.RejectedRecord) error {
+	if !slices.Contains(Kinds, r.Kind) || r.SourceID == "" || len(r.SourceID) > 256 || !printable(r.SourceID) ||
+		len(r.SourceVersion) > 64 || !printable(r.SourceVersion) {
+		return ErrRecord
+	}
+	sum := sha256.Sum256([]byte(r.Kind + "\x00" + r.SourceID + "\x00" + r.SourceVersion + "\x00"))
+	var updated *time.Time
+	if !r.SourceUpdatedAt.IsZero() {
+		u := r.SourceUpdatedAt.UTC()
+		updated = &u
+	}
+	stored := false
+	err := dbx.WithHospital(ctx, s.pool, dbx.EMR, s.hospital, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO emr.raw_records (hospital_id, source_kind, connection_id, resource_kind,
+			source_id, source_version, source_updated_at, payload, payload_sha256, connector_type, connector_version,
+			status, reject_code, backfill)
+			VALUES ($1, 'connector', $2, $3, $4, $5, $6, NULL, $7, $8, $9, 'rejected', 'unreadable_data', $10)
+			ON CONFLICT DO NOTHING`,
+			s.hospital, s.connection, r.Kind, r.SourceID, r.SourceVersion, updated, sum[:], s.connType, s.connVersion, s.Backfill)
+		stored = err == nil && tag.RowsAffected() == 1
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if stored && s.Metrics != nil {
+		s.Metrics.mu.Lock()
+		s.Metrics.rejected++
+		s.Metrics.mu.Unlock()
+	}
+	return nil
 }
 
 // Flush announces the queued ids, MaxBatch a message, and marks them
