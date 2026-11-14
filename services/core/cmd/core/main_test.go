@@ -156,3 +156,18 @@ func TestLoginRequestsEMR(t *testing.T) {
 		t.Fatalf("placeholder: %v", err)
 	}
 }
+
+// The operator's EMR login (EMR_ADMIN_DB_USER and _PASSWORD, both needed:
+// no default user) is a member of mhai_emr_admin only (00032).
+func TestLoginRequestsEMRAdmin(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	reqs, err := loginRequests(env(map[string]string{"EMR_ADMIN_DB_USER": "emr_operator",
+		"EMR_ADMIN_DB_PASSWORD": "test-only-emr-admin-password"}))
+	if err != nil || len(reqs) != 1 || reqs[0].user != "emr_operator" || reqs[0].role != "mhai_emr_admin" {
+		t.Fatalf("emr admin: %+v %v", reqs, err)
+	}
+	if _, err := loginRequests(env(map[string]string{"EMR_ADMIN_DB_PASSWORD": "test-only-emr-admin-password"})); err == nil ||
+		!strings.Contains(err.Error(), "EMR_ADMIN_DB_USER") {
+		t.Fatalf("no user: %v", err)
+	}
+}
