@@ -14,7 +14,10 @@ All notable changes to this project are documented here. The format follows
   two-step: `GET /platform/hospitals?status&q&cursor` (50 a page, by name),
   `GET /platform/hospitals/{id}` (the summary, the active hospital admins
   and the open legal holds) and `GET /platform/hospitals/{id}/sso` (always
-  off: core keeps no single sign-on per hospital). What core doesn't keep
+  off: core keeps no single sign-on per hospital), and `GET
+  /platform/analysis/status` for platform admins (the sidebar's Analysis
+  status: off, since core serves no platform Analysis view yet; the
+  hospitals split by their effective switch). What core doesn't keep
   is sent empty, never invented (country, email domains, deactivation,
   first-admin invite, removal request). Migration **00036**: `mhai_platform`
   reads `legal_holds` (no write). The reads aren't audited (platform

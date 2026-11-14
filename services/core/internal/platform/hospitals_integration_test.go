@@ -387,7 +387,9 @@ func TestPlatformAnalysisStatus(t *testing.T) {
 		VALUES ($1, 'on', 'SO-2026-7704', 'SO-2026-7705', 'SO-2026-7706')`, on); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = super.Exec(ctx, `UPDATE analysis_switch SET position = 'off' WHERE hospital_id IS NULL`) })
+	t.Cleanup(func() {
+		_, _ = super.Exec(ctx, `UPDATE analysis_switch SET position = 'off' WHERE hospital_id IS NULL`)
+	})
 
 	problem(t, "auditor", get(t, "/platform/analysis/status", mint(t, auditor(t))), 403, "forbidden")
 	problem(t, "hospital admin", get(t, "/platform/analysis/status", mint(t, seedUser(t, on, "", authz.RoleHospitalAdmin))), 403, "not_platform")
