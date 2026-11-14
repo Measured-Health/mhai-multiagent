@@ -81,7 +81,7 @@ Gates before live use (design §17.6; all of them):
 
 ## EMR: follow-ups from PR 8b (14 Nov)
 
-- [ ] **Migration order:** 00031 (`emr_consumed`, the consumer's grants) follows Analysis PR 6's 00030; until 00030 merges, the migrate command test counts 30 applied. Renumber if another PR takes 00031 first.
+- [x] **Migration order:** 00031 (`emr_consumed`, the consumer's grants) follows Analysis PR 6's 00030 (merged 14 Nov); the migration-count tests list both.
 - [ ] Grouped mode (design §12.4: over 30 criticals per hospital in 15 minutes, H4) and the info cap (20 per hospital per hour): not built. Until then every alert notifies; the per-source breaker is the only flood control, and default levels don't admit `info`.
 - [ ] Quiet hours after an alert is handled: the rule set has none yet (Rules, "before scale"); until then a fresh finding of a handled rule alerts at once. A higher severity on the same chain re-alerts as designed.
 - [ ] `POST /platform/emr/connections/{id}/resume` (Task 37; step-up, `emr.source_resumed`, then `sync_now`): not built; an operator clears `paused` by SQL, recorded in the incident log.
@@ -169,6 +169,9 @@ PR 4 (aggregate routes) is the simplest version that keeps the disclosure guaran
 - [ ] **A late fact in a hospital's first quarter** can make a first period's "every case is new" false; the guard then finds the raw values inconsistent and the context is stored hidden whole, with the `analysis_inconsistent` alert (fail closed).
 - [x] **Smoke:** `TestSmokeAnalysis` runs in boundary-smoke (run on steven-reid for PR 4: passes).
 - [ ] **Map the drill-down's audit actions to mhai-web's kinds** (`analysis.patients_viewed` as `analysis_patients_viewed`, `audit.patients_viewed` as `audit_patients_viewed`, and flagged kinds for `analysis.list_limit_reached` and `analysis.patient_cap_reached`): sent bare until their facts and targets are agreed (H6, PR 5).
+- [ ] **Step-up on `PATCH /hospital/staff/{id}` when it adds `analyst` (Analysis Task 17, moved to the staff-endpoints plan; departure 28).** The rules, functions and CLI are built (PR 6, migration 00030); the route calls `analysis.GrantAnalyst` after step-up, maps the six refusals, audits any `clinician` removal with `analysis.AuditAnalystChanges` (or the database refuses the commit) and notifies after commit. Tests `TestT26RouteRefusals` and `TestRemoveAnalystEndsPatientAccessAtOnce`.
+- [ ] **Map `analyst.granted` and `analyst.removed` to mhai-web's `staff_role_changed`** (target the person): sent bare until the facts are agreed (H6, PR 6).
+- [ ] **Tell every hospital admin of an analyst grant** when the notifications service exists: `analysis.NotifyAnalystGranted` records the ids only today (PR 6).
 - [ ] **Drills on location, specialty, source and prevalence (PR 5, departure 19).** None today: pids are stable within a period, so lists split by a dimension the rows don't show could be compared to reveal a hidden small group. Needs a design (for example pids scoped per list, or the dimension shown on the row) and H1's agreement.
 
 ## Decided

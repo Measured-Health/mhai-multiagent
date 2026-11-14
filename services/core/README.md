@@ -30,6 +30,7 @@ core hospitals create --name N --short-code CODE --time-zone TZ \
     [--require-mfa-for-clinicians] [--allow-trust-device]
 core hospitals activate ID|CODE    # setup_incomplete -> active, audited (see "Running it in compose")
 core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
+core users roles EMAIL --add analyst|--remove analyst --by ADMIN_EMAIL   # the analyst rules apply (migration 00030)
 core hospitals mark-demo ID|CODE                             # once: a hospital made before is_demo (the live demo's), audited
 core analysis seed-demo ID|CODE [--seed N] [--months 1-24]   # a hospital created with --demo only
 core analysis switch off ID|CODE | --global                  # lower an analysis switch, audited
@@ -60,7 +61,7 @@ one job:
 |---|---|---|
 | `POSTGRES_USER` (owner / superuser) | — | `core migrate` only |
 | `core_app` (`CORE_DB_USER`) | `mhai_app` only | `core serve` |
-| `core_provision` (`PROVISION_DB_USER`) | `mhai_provision` only | `core hospitals create`, `core hospitals activate`, `core users create`, `core keys` rotations |
+| `core_provision` (`PROVISION_DB_USER`) | `mhai_provision` only | `core hospitals create`, `core hospitals activate`, `core users create`, `core users roles`, `core keys` rotations |
 
 - `core serve` refuses any other login at start-up (`db.CheckLoginRole`):
   a superuser, `BYPASSRLS`, an owner, a login that inherits an app role, or
