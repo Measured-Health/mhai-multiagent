@@ -30,6 +30,9 @@ func TestAnalysisCLIRefusesBeforeConnecting(t *testing.T) {
 		{"named-access", "demo"},
 		{"named-access", "demo", "--global"},
 		{"named-access", "demo", "not a ref!"},
+		{"named-access", "demo-on"},
+		{"named-access", "demo-on", "--global"},
+		{"named-access", "demo-on", "not a ref!"},
 		{"named-access", "off"},
 		{"named-access", "off", "hav", "--global"},
 	} {

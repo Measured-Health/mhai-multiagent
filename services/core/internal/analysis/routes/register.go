@@ -1,6 +1,8 @@
-// Package routes serves Patient Analysis's reads (design §9; plan Tasks 10
-// and 13): GET /analysis/filters, GET /analysis/{view} and the
-// de-identified list, GET /analysis/patients, for a
+// Package routes serves Patient Analysis's reads (design §9; plan Tasks 10,
+// 13 and 22): GET /analysis/filters, GET /analysis/{view}, the
+// de-identified list, GET /analysis/patients, and named access (GET
+// /analysis/named-access, GET /analysis/clearance/me, POST
+// /analysis/patients/named), for a
 // hospital admin or an analyst with two-step, only while the hospital's
 // analysis switch is on (otherwise 404, before anything else is read).
 // Every number it sends is from a stored, guarded body (internal/analysis);
@@ -40,6 +42,10 @@ type Deps struct {
 	// Keys derive the drill keys (departure 13). Nil: no count has a
 	// drill, and every list is 422 too_small.
 	Keys *analysis.Keys
+	// Identity resolves a named list's names after its entry commits
+	// (design §8.6). Nil: unavailable, and every named list fails 503
+	// after it is recorded (departure 46).
+	Identity analysis.Resolver
 }
 
 // Rule is the routes' rule: hospital admins and analysts, two-step.
@@ -48,6 +54,8 @@ var Rule = authz.Rule{AnyRole: []string{authz.RoleHospitalAdmin, authz.RoleAnaly
 type handlers struct {
 	d   Deps
 	lim *limiter
+	// meLim is GET /analysis/clearance/me's limit per session.
+	meLim *limiter
 	// afterOpen, when set, runs after a list is opened and before its
 	// audit entry is appended; its error rolls the list back (tests only:
 	// T18).
@@ -56,9 +64,16 @@ type handlers struct {
 
 // Register adds the aggregate routes to m.
 func Register(m *authz.Mux, d Deps) {
-	h := &handlers{d: d, lim: newLimiter(AggregateReads, AggregateWindow, d.Now)}
+	h := &handlers{d: d, lim: newLimiter(AggregateReads, AggregateWindow, d.Now),
+		meLim: newLimiter(ClearanceMePerMinute, time.Minute, d.Now)}
 	authz.Route(m, http.MethodGet, "/analysis/filters", Rule, http.HandlerFunc(h.filters))
 	authz.Route(m, http.MethodGet, "/analysis/patients", Rule, http.HandlerFunc(h.patients))
+	// Named access (plan Task 22): the named list is never kept by the
+	// idempotency store (its reply holds names); its own key table
+	// handles replays (design §8.5).
+	authz.Route(m, http.MethodPost, "/analysis/patients/named", NamedRule, httpx.NoStore(http.HandlerFunc(h.named)))
+	authz.Route(m, http.MethodGet, "/analysis/clearance/me", Rule, http.HandlerFunc(h.clearanceMe))
+	authz.Route(m, http.MethodGet, "/analysis/named-access", Rule, http.HandlerFunc(h.namedAccess))
 	authz.Route(m, http.MethodGet, "/analysis/{view}", Rule, http.HandlerFunc(h.views))
 }
 

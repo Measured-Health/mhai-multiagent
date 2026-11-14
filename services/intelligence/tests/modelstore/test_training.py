@@ -70,17 +70,61 @@ def _reason(fn: Callable[[], object]) -> str:
 
 def test_committed_registry_seeded_with_dev_and_train() -> None:
     registry, _ = _committed()
-    assert set(registry.datasets) == {
-        "clinical_document-dev@1.0.0",
-        "clinical_document-train@1.0.0",
-    }
-    for entry in registry.datasets.values():
+    for ident in ("clinical_document-dev@1.0.0", "clinical_document-train@1.0.0"):
+        entry = registry.datasets[ident]
         assert entry.kind == "synthetic"
         assert entry.generator == training.SYNTHETIC_GENERATOR
         assert entry.version == "1.0.0"
+    for entry in registry.datasets.values():
+        assert entry.kind in training.ALLOWED_KINDS
         assert entry.testset_disjoint is True
         assert entry.approved_by_pr >= 1
     assert fixtures.TRAIN_DATASET in registry.datasets
+
+
+# The answer model gemma4-e4b-cca-v1's training sets (docs/models/intake-2026-11-14-gemma4-e4b-cca-v1.md).
+CCA_V1_PUBLIC = (
+    "medqa-usmle-4-options@1.0.0",
+    "medmcqa@1.0.0",
+    "pubmedqa-pqa-labeled@1.0.0",
+    "symptom-to-diagnosis@1.0.0",
+    "cca-v1-rag-cited@1.0.0",
+    "cca-v1-abstain@1.0.0",
+)
+CCA_V1_SYNTHETIC = ("cca-v1-patient-cited@1.0.0",)
+
+
+def test_committed_registry_holds_the_cca_v1_training_sets() -> None:
+    registry, _ = _committed()
+    for ident in CCA_V1_PUBLIC:
+        entry = registry.datasets[ident]
+        assert entry.kind == "public"
+        assert entry.generator is None
+    for ident in CCA_V1_SYNTHETIC:
+        entry = registry.datasets[ident]
+        assert entry.kind == "synthetic"
+        assert entry.generator == "synthea"
+    assert set(registry.datasets) == {
+        "clinical_document-dev@1.0.0",
+        "clinical_document-train@1.0.0",
+        *CCA_V1_PUBLIC,
+        *CCA_V1_SYNTHETIC,
+    }
+
+
+def test_public_datasets_are_admitted(tmp_path: Path) -> None:
+    registry, licences = _committed()
+    obj = _tm_obj(tmp_path)
+    obj["role"] = "cca"
+    obj["datasets"] = [*CCA_V1_PUBLIC, *CCA_V1_SYNTHETIC]
+    tm = training.load(_write(tmp_path, obj))
+    result = training.check(tm, registry, licences)
+    assert [d.kind for d in result.datasets].count("public") == len(CCA_V1_PUBLIC)
+
+
+def test_allowed_kinds_are_synthetic_and_public_only() -> None:
+    assert training.ALLOWED_KINDS == frozenset({"synthetic", "public"})
+    assert "deidentified" not in training.ALLOWED_KINDS
 
 
 def test_committed_licences_are_exactly_apache_and_mit() -> None:
@@ -327,7 +371,8 @@ def _registry_mutations() -> list[tuple[str, Callable[[dict[str, Any]], None]]]:
         obj["datasets"].append(copy.deepcopy(obj["datasets"][0]))
 
     return [
-        ("unknown kind", entry("kind", "public")),
+        ("unknown kind", entry("kind", "proprietary")),
+        ("public with a generator", entry("kind", "public")),
         ("not disjoint", entry("testset_disjoint", False)),
         ("version differs from id", entry("version", "1.0.1")),
         ("no approval", entry("approved_by_pr", 0)),
@@ -460,7 +505,9 @@ def test_registry_values_checked_when_built() -> None:
     for args in (
         ("x@1.0.0", "synthetic", "a | <b>", "1.0.0", True, 1),
         ("x | y@1.0.0", "synthetic", training.SYNTHETIC_GENERATOR, "1.0.0", True, 1),
-        ("x@1.0.0", "public", None, "1.0.0", True, 1),
+        ("x@1.0.0", "proprietary", None, "1.0.0", True, 1),
+        ("x@1.0.0", "public", "a.b", "1.0.0", True, 1),
+        ("x@1.0.0", "public", None, "1.0.0", False, 1),
         ("x@1.0.0", "synthetic", training.SYNTHETIC_GENERATOR, "2.0.0", True, 1),
         ("x@1.0.0", "synthetic", training.SYNTHETIC_GENERATOR, "1.0.0", False, 1),
         ("x@1.0.0", "synthetic", training.SYNTHETIC_GENERATOR, "1.0.0", True, 0),
@@ -470,6 +517,8 @@ def test_registry_values_checked_when_built() -> None:
             training.Dataset(*args)  # type: ignore[arg-type]
         assert exc.value.reason == "policy_invalid", args
     assert training.Registry({"x@1.0.0": good}).datasets["x@1.0.0"] is good
+    public = training.Dataset("p@1.0.0", "public", None, "1.0.0", True, 1)
+    assert training.Registry({"p@1.0.0": public}).datasets["p@1.0.0"] is public
     for bad in ({"y@1.0.0": good}, {"x@1.0.0": "not a dataset"}, [good]):
         with pytest.raises(Refused) as exc:
             training.Registry(bad)  # type: ignore[arg-type]

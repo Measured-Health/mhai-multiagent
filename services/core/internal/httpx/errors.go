@@ -81,6 +81,12 @@ var Codes = map[string]int{
 	"end_date_too_late":     http.StatusUnprocessableEntity,
 	"not_eligible_platform": http.StatusUnprocessableEntity,
 	"would_empty":           http.StatusUnprocessableEntity,
+	// Named access (analysis backend design §8.3, §8.5; additive): no
+	// letter covers the person, or the one that did has just ended; an
+	// Idempotency-Key used by another person or with another body.
+	"not_cleared":          http.StatusForbidden,
+	"clearance_ended":      http.StatusForbidden,
+	"idempotency_mismatch": http.StatusUnprocessableEntity,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -131,6 +137,9 @@ var titles = map[string]string{
 	"end_date_too_late":     "End date too late",
 	"not_eligible_platform": "Not eligible",
 	"would_empty":           "Would cover nobody",
+	"not_cleared":           "Not cleared",
+	"clearance_ended":       "Clearance ended",
+	"idempotency_mismatch":  "Idempotency key mismatch",
 }
 
 var details = map[string]string{
@@ -178,6 +187,9 @@ var details = map[string]string{
 	"end_date_too_late":     "The end date must be after today and at most 12 months away.",
 	"not_eligible_platform": "Some Measured Health staff can't be covered by a letter.",
 	"would_empty":           "A letter must cover someone; revoke it instead.",
+	"not_cleared":           "No current clearance letter covers you for named access.",
+	"clearance_ended":       "The clearance letter that covered you has ended.",
+	"idempotency_mismatch":  "This Idempotency-Key was used for another request.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.

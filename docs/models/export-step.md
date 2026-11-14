@@ -39,8 +39,8 @@ byte. llama.cpp's own output always fits these rules. So don't save extra named
 templates with the tokenizer. Only a `cca` run may carry a GGUF
 (`gguf_not_allowed_for_role`); for an `extract` run, pass `gguf=False`.
 
-The datasets you name must already be in `models/approved-datasets.json` (synthetic only
-for now), and an upstream base model's licence must be in `models/licences.json`
+The datasets you name must already be in `models/approved-datasets.json` (synthetic, or
+public with no patient data, for now), and an upstream base model's licence must be in `models/licences.json`
 (Apache-2.0 or MIT today). Both lists change only through a pull request.
 
 ## The Colab cells
@@ -101,7 +101,10 @@ GGUF each time.
 ## What the folder must hold
 
 - `config.json`, `generation_config.json` and the tokenizer JSON files
-- `*.safetensors` (or the index and its shards)
+- `*.safetensors` (or the index and its shards), each file at most 5 GiB: one upload to the
+  model store. A model with a single tensor over 5 GiB (Gemma 4's per-layer embedding, for
+  example) is refused (`too_large`, `file_too_large_for_store`) until the store has a
+  conditional multipart upload
 - one `model-<quant>.gguf`, written by this step
 - `training_manifest.json`
 
