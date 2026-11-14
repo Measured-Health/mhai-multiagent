@@ -57,6 +57,16 @@ type Config struct {
 	// have queued or running at once (INTELLIGENCE_QUERY_CAP, decision 8);
 	// past it a submit is 429 rate_limited (intel.ReserveInFlight).
 	IntelligenceQueryCap int
+	// The clinician's patient lookup by MRN (POST /patients/lookup), per
+	// clinician: lookups in any minute (CORE_PATIENT_LOOKUP_PER_MINUTE,
+	// default 5, 1 to 100) and in a hospital day
+	// (CORE_PATIENT_LOOKUP_PER_DAY, default 50, 1 to 1000); and per
+	// hospital in a day (CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY, default
+	// 1000, 1 to 100000). Misses count as well as hits; past a limit a
+	// lookup is 429 rate_limited.
+	PatientLookupPerMinute      int
+	PatientLookupPerDay         int
+	PatientLookupHospitalPerDay int
 	// APIDocs serves the Redoc page and openapi.yaml (CORE_API_DOCS).
 	APIDocs            bool
 	HTTPAPI            bool
@@ -259,6 +269,16 @@ func Load() (Config, error) {
 	}
 	if c.IntelligenceQueryCap, err = intEnv("INTELLIGENCE_QUERY_CAP", 10, func(n int) bool { return n >= 1 && n <= 1000 }); err != nil {
 		errs = append(errs, errors.New("INTELLIGENCE_QUERY_CAP must be 1 to 1000"))
+	}
+
+	if c.PatientLookupPerMinute, err = intEnv("CORE_PATIENT_LOOKUP_PER_MINUTE", 5, func(n int) bool { return n >= 1 && n <= 100 }); err != nil {
+		errs = append(errs, errors.New("CORE_PATIENT_LOOKUP_PER_MINUTE must be 1 to 100"))
+	}
+	if c.PatientLookupPerDay, err = intEnv("CORE_PATIENT_LOOKUP_PER_DAY", 50, func(n int) bool { return n >= 1 && n <= 1000 }); err != nil {
+		errs = append(errs, errors.New("CORE_PATIENT_LOOKUP_PER_DAY must be 1 to 1000"))
+	}
+	if c.PatientLookupHospitalPerDay, err = intEnv("CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY", 1000, func(n int) bool { return n >= 1 && n <= 100000 }); err != nil {
+		errs = append(errs, errors.New("CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY must be 1 to 100000"))
 	}
 
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_ALLOW_SINGLE_NODE"))) {

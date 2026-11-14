@@ -497,6 +497,16 @@ func init() {
 	// A hospital admin read the possible duplicates (the cards carry names
 	// and MRNs): the match ids served, at most a page.
 	Register("emr.patient_matches_read", Schema{Fields: fields("match_ids", List(100, id)), Required: []string{"match_ids"}})
+	// A clinician's patient lookup by MRN (POST /patients/lookup, migration
+	// 00039): every lookup. A hit names the patient found (patient_id) and
+	// nothing else; a miss or an MRN of two patients says so (result).
+	// Never the MRN typed or a name. Past a limit, one flagged entry per
+	// clinician and hospital day, naming the limit.
+	Register("patients.lookup", Schema{Fields: fields("result", OneOf("miss", "ambiguous"), "patient_id", id),
+		Shapes: []Shape{{Keys: []string{"patient_id"}, Required: []string{"patient_id"}},
+			{Keys: []string{"result"}, Required: []string{"result"}}}})
+	Register("patients.lookup_limit_reached", Schema{Fields: fields("window", OneOf("minute", "day", "hospital_day")),
+		Required: []string{"window"}})
 
 	// Alerts (EMR design §12.5, §12.6; plan Tasks 31-34): ids, closed codes,
 	// counts and bools; never a name, an MRN, a value or the dismissal note.
