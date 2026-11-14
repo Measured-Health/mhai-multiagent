@@ -1,7 +1,7 @@
 # Reference library v1 (`medref`)
 
 A shared, licence-clean reference corpus that every hospital's questions can
-cite (migration 00039; `intelligence/knowledge_base/reference_library.py`).
+cite (migration 00040; `intelligence/knowledge_base/reference_library.py`).
 It fills the pilot's guideline gap until hospital and national guidelines
 are added.
 

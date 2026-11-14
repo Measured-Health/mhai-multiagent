@@ -615,7 +615,7 @@ async def test_job_runs_to_completed(
 async def test_masked_question_picks_reference_library_candidates(
     make_env: MakeEnv, postgres: Postgres
 ) -> None:
-    """Migration 00039: the job reads a reference library's rows matching
+    """Migration 00040: the job reads a reference library's rows matching
     the masked question (never the raw one), as shared guidelines."""
     raw_word = "zyxquorbital"
     async with await su(postgres) as conn:

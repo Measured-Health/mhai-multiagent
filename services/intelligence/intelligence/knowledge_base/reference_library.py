@@ -1,5 +1,5 @@
 """A reference library: a licence-clean shared corpus, built once per pinned
-version and loaded into kb_chunks (migration 00039).
+version and loaded into kb_chunks (migration 00040).
 
 Library v1, ``medref``, is two sources only (the licence review):
 
@@ -18,7 +18,7 @@ Three steps, each its own command:
 ``convert`` (scripts/reflib_convert.py, an operator on a build machine)
     Streams a bundle's ``chunks.jsonl.gz`` line by line, keeps the approved
     rows (:func:`select`), orders them (safety-critical first) and numbers
-    them ``KB#1000001`` up (00039's reference namespace), embeds them with
+    them ``KB#1000001`` up (00040's reference namespace), embeds them with
     OUR pinned embedder (``models/answer-gate-models.lock``, role dense) and
     writes the artefact.
 ``verify``
@@ -49,7 +49,9 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
+import stat
 import sys
 import unicodedata
 import zipfile
@@ -435,10 +437,36 @@ def load_lock(path: Path | None = None) -> dict[str, Pin]:
     return out
 
 
-def verify(path: Path, pins: Mapping[str, Pin]) -> tuple[Header, str]:
-    """The artefact's header, once its bytes are the ones a lock pins."""
-    sha = sha256_file(path)
-    header = read_header(path)
+MAX_ARTEFACT_BYTES = 1 << 30
+
+
+def _read_once(path: Path) -> bytes:
+    """The file's bytes, read once from one descriptor opened without
+    following a link (security review: no check-then-reopen)."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise LibraryError("unreadable") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise LibraryError("not_a_file")
+        parts: list[bytes] = []
+        total = 0
+        while block := os.read(fd, 1 << 20):
+            total += len(block)
+            if total > MAX_ARTEFACT_BYTES:
+                raise LibraryError("too_large")
+            parts.append(block)
+    except OSError:
+        raise LibraryError("unreadable") from None
+    finally:
+        os.close(fd)
+    return b"".join(parts)
+
+
+def check_pin(header: Header, sha: str, pins: Mapping[str, Pin]) -> None:
+    """The header and digest are the ones a lock pins, or LibraryError."""
     pin = pins.get(header.name)
     if pin is None or pin.version != header.version:
         raise LibraryError("not_pinned")
@@ -446,6 +474,22 @@ def verify(path: Path, pins: Mapping[str, Pin]) -> tuple[Header, str]:
         raise LibraryError("hash_mismatch")
     if pin.count != header.count:
         raise LibraryError("count_mismatch")
+
+
+def read_pinned(path: Path, pins: Mapping[str, Pin]) -> tuple[Header, str, bytes]:
+    """The artefact's header, digest and bytes, once those bytes are the ones
+    a lock pins. Parse these bytes (read_rows(data, header)), never the file
+    again: it may have changed since."""
+    data = _read_once(path)
+    sha = hashlib.sha256(data).hexdigest()
+    header = read_header(data)
+    check_pin(header, sha, pins)
+    return header, sha, data
+
+
+def verify(path: Path, pins: Mapping[str, Pin]) -> tuple[Header, str]:
+    """The artefact's header and digest, once its bytes are the ones a lock pins."""
+    header, sha, _ = read_pinned(path, pins)
     return header, sha
 
 
@@ -474,8 +518,12 @@ def _header(obj: Any) -> Header:
     return Header(**{k: obj[k] for k in Header.__dataclass_fields__})
 
 
-def read_header(path: Path) -> Header:
-    with gzip.open(path, "rb") as g:
+def _gunzip(source: Path | bytes) -> Any:
+    return gzip.open(io.BytesIO(source) if isinstance(source, bytes) else source, "rb")
+
+
+def read_header(source: Path | bytes) -> Header:
+    with _gunzip(source) as g:
         line = g.readline(MAX_LINE_BYTES + 1)
     try:
         return _header(json.loads(line))
@@ -504,10 +552,11 @@ def _row(obj: Any, dim: int) -> Row:
     return Row(cid, content, meta, tuple(float(x) for x in emb))
 
 
-def read_rows(path: Path, header: Header) -> Iterator[Row]:
-    """The artefact's rows, each checked; the count must be the header's."""
+def read_rows(source: Path | bytes, header: Header) -> Iterator[Row]:
+    """The artefact's rows (from read_pinned's bytes when loading), each
+    checked; the count must be the header's."""
     seen: set[str] = set()
-    with gzip.open(path, "rb") as g:
+    with _gunzip(source) as g:
         g.readline(MAX_LINE_BYTES + 1)
         n = 0
         for line in g:

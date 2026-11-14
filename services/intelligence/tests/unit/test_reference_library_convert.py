@@ -341,3 +341,21 @@ def test_a_row_that_could_forge_a_delimiter_or_citation_is_refused(
     _rewrite(path, edit)
     with pytest.raises(reflib.LibraryError):
         list(reflib.read_rows(path, header))
+
+
+def test_read_pinned_reads_the_file_once_and_never_through_a_link(tmp_path: Path) -> None:
+    """Security review (TOCTOU): the bytes checked against the pin are the
+    bytes parsed, read once from one descriptor opened without following a
+    link."""
+    path, sha, header = _artefact(tmp_path)
+    got, got_sha, data = reflib.read_pinned(path, _pins(sha))
+    assert got == header and got_sha == sha and data == path.read_bytes()
+    path.write_bytes(b"replaced after the read")
+    assert [r.chunk_id for r in reflib.read_rows(data, got)][-1] == "KB#1000004"
+    link = tmp_path / "link.jsonl.gz"
+    path.write_bytes(data)
+    link.symlink_to(path)
+    with pytest.raises(reflib.LibraryError):
+        reflib.read_pinned(link, _pins(sha))
+    with pytest.raises(reflib.LibraryError):
+        reflib.read_pinned(tmp_path, _pins(sha))  # a directory

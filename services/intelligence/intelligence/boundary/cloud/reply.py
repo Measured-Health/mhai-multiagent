@@ -134,7 +134,7 @@ class Answer(BaseModel):
     insufficient_evidence: bool
 
 
-# KB#nnnn, or a reference library's KB#nnnnnnn (migration 00039).
+# KB#nnnn, or a reference library's KB#nnnnnnn (migration 00040).
 _CITATION = re.compile(r"KB#(?:[0-9]{4}|[1-9][0-9]{6})")
 _MARKER = re.compile(r"\[(KB#(?:[0-9]{4}|[1-9][0-9]{6}))\]")
 _DELIMITERS = ("<<chunk", "<<end")

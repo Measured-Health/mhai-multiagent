@@ -155,6 +155,11 @@ func TestRuleValidation(t *testing.T) {
 		"self-service write":       {"POST", "/auth/x", Rule{SelfService: true, Write: true}},
 		"enrol not self-service":   {"POST", "/auth/x", Rule{MFAEnrol: true}},
 		"relative pattern":         {"GET", "x", Rule{}},
+		"no-idempotency get":       {"GET", "/x", Rule{AnyRole: []string{RoleClinician}, NoIdempotency: true}},
+		"no-idempotency public":    {"POST", "/x", Rule{Public: true, NoIdempotency: true}},
+		"no-idempotency platform":  {"POST", "/x", Rule{Platform: true, Write: true, NoIdempotency: true}},
+		"no-idempotency self":      {"POST", "/auth/x", Rule{SelfService: true, NoIdempotency: true}},
+		"no-idempotency creds":     {"POST", "/x", Rule{Platform: true, Write: true, Credentials: true, NoIdempotency: true}},
 	}
 	for name, c := range bad {
 		func() {
@@ -351,4 +356,36 @@ func TestAuditorWriteOutsideAuditPanics(t *testing.T) {
 	// The good form registers.
 	Route(NewMux(nil), "POST", "/platform/audit/verify",
 		Rule{Platform: true, NeedsMFA: true, AnyRole: roles, AuditorWrite: true}, http.NotFoundHandler())
+}
+
+// A NoIdempotency route runs without any idempotency store, so neither a
+// hash of its body nor its reply is kept; every other authenticated route
+// keeps its store.
+func TestNoIdempotencyRouteSkipsTheStore(t *testing.T) {
+	mark := func(name string) func(http.Handler) http.Handler {
+		return func(h http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Add("X-Store", name)
+				h.ServeHTTP(w, r)
+			})
+		}
+	}
+	g := &Guard{Idem: mark("principal"), IdemAnon: mark("anon"), IdemKeyed: mark("keyed")}
+	for name, c := range map[string]struct {
+		rule Rule
+		want string
+	}{
+		"no idempotency": {Rule{AnyRole: []string{RoleClinician}, Write: true, NoIdempotency: true}, ""},
+		"clinical write": {Rule{AnyRole: []string{RoleClinician}, Write: true}, "principal"},
+		"credentials":    {Rule{Platform: true, Write: true, Credentials: true}, "keyed"},
+	} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r.Header.Set("Idempotency-Key", "synthetic-key-1")
+		g.idempotent(c.rule, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).
+			ServeHTTP(w, r)
+		if got := w.Header().Get("X-Store"); got != c.want || w.Code != http.StatusOK {
+			t.Errorf("%s: store %q, status %d; want %q, 200", name, got, w.Code, c.want)
+		}
+	}
 }

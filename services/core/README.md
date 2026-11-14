@@ -104,6 +104,7 @@ one job:
 | `ACCESS_KEY_PATH` | yes | PKCS#8 Ed25519 PEM from `core keys new` |
 | `REQUEST_KEY_PATH` | yes | the request-token key (spec §7.2), from `core keys new --kind request`: another file and another key than `ACCESS_KEY_PATH` (start-up refuses the same key id) |
 | `INTELLIGENCE_QUERY_CAP` | no | clinical questions one hospital may have queued or running at once; past it a submit is 429 `rate_limited`. Default `10`, 1 to 1000 |
+| `CORE_PATIENT_LOOKUP_PER_MINUTE`, `CORE_PATIENT_LOOKUP_PER_DAY`, `CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY` | no | the clinician patient lookup's rate limits (`POST /patients/lookup`, with `CORE_EMR_ENABLED`): lookups per clinician in any minute (default `5`, 1 to 100) and in the hospital's day (default `50`, 1 to 1000), and per hospital in a day (default `1000`, 1 to 100000). Misses count as well as hits; past a limit a lookup is 429 `rate_limited`, and the clinician's first refusal of the day is audited `patients.lookup_limit_reached` |
 | `MFA_ENCRYPTION_KEY` | yes | at least 32 bytes; seals TOTP secrets, keys backup-code hashes, and derives the counter key (HKDF-SHA256, label `mhai lockout key v1`) that names the lockout and MFA counters. Changing it forgets live lockouts. |
 | `BFF_SERVICE_KEYS` | while `CORE_HTTP_API` is on | comma-separated, each at least 32 bytes; one per BFF |
 | `HTTP_ADDR` | no | default `:8080`, or `127.0.0.1:8080` when `CORE_HTTP_API` is off. With the API off it must be a loopback IP (`127.0.0.1`, `[::1]`); anything else is refused at start-up |

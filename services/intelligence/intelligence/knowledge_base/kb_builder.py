@@ -56,7 +56,7 @@ REFERENCE_SOURCE = "reference"
 UNASSIGNED_SOURCE = "unassigned"
 RESERVED_PATIENT_IDS = frozenset({REFERENCE_SOURCE, UNASSIGNED_SOURCE, "unknown", "ref", ""})
 # A citation in an answer: [KB#nnnn] (a hospital's or a seeded guideline's
-# chunk) or [KB#nnnnnnn] (a reference library's, migration 00039). The group
+# chunk) or [KB#nnnnnnn] (a reference library's, migration 00040). The group
 # is the number.
 CITATION_MARKER = r'\[KB#(\d{4}|[1-9]\d{6})\]'
 
