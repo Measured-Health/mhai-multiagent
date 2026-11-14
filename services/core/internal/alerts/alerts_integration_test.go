@@ -151,7 +151,7 @@ func (w *world) newPatient(t *testing.T, src, mrn string) (patient, obs, finding
 		value_num, unit_ucum, value_si, ref_low, ref_high, source_flag, status, effective_at, standardised, raw_id, source_kind,
 		connection_id, connector_type, connector_version, source_id, source_version, received_at, mapping_version,
 		normaliser_version)
-		VALUES ($1, $2, 'laboratory', '99901-1', 'Potassium', 6.8, 'mmol/L', 6.8, 3.5, 5.1, 'HH', 'final', now(), true, $3,
+		VALUES ($1, $2, 'laboratory', '99901-1', 'Potassium', 6.8371, 'mmol/L', 6.8371, 3.5, 5.1, 'HH', 'final', now(), true, $3,
 		        'connector', $4, 'fhir_r4', 1, $5, '1', now(), 'synthetic-map', 'n1') RETURNING id`,
 		w.h, patient, raw, w.conn, "obs-"+src).Scan(&obs); err != nil {
 		t.Fatal(err)
@@ -483,7 +483,7 @@ func TestQueueAlertStaysVisibleAfterQueueOff(t *testing.T) {
 	// The evidence: the finding, the patient, the link, causes caution and
 	// review only (never high).
 	f := al["finding"].(map[string]any)
-	if f["name"] != "Potassium" || f["value"] != "6.8" || f["flag"] != "high" || f["code_system"] != "loinc" ||
+	if f["name"] != "Potassium" || f["value"] != "6.8371" || f["flag"] != "high" || f["code_system"] != "loinc" ||
 		f["reference_range"] != "3.5–5.1" {
 		t.Fatalf("finding %v", f)
 	}
@@ -819,9 +819,5 @@ func TestLogsCarryNoPatientData(t *testing.T) {
 	w.clin(w.u, "GET", "/alerts", "")
 	w.adm("POST", "/hospital/patient-exclusions", `{"mrn": "SYN-NONE", "reason": "objection", "mfa_code": "123456"}`)
 	w.clin(w.u, "POST", "/alerts/"+uuid.NewString()+"/acknowledge", "")
-	for _, s := range []string{"SYN-0001", "SYN-NONE", "Synthetic Patient", "6.8"} {
-		if strings.Contains(w.logs.String(), s) {
-			t.Errorf("a log line carries %q", s)
-		}
-	}
+	requireAbsent(t, w, "SYN-0001", "SYN-NONE", "Synthetic Patient", "6.8371")
 }

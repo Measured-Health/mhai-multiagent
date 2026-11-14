@@ -79,13 +79,24 @@ Gates before live use (design §17.6; all of them):
 - [ ] The on-call owner named (H9). Owner: product owner.
 - [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
 
+## EMR: follow-ups from PR 8b (14 Nov)
+
+- [x] **Migration order:** 00031 (`emr_consumed`, the consumer's grants) follows Analysis PR 6's 00030 (merged 14 Nov); the migration-count tests list both.
+- [ ] Grouped mode (design §12.4: over 30 criticals per hospital in 15 minutes, H4) and the info cap (20 per hospital per hour): not built. Until then every alert notifies; the per-source breaker is the only flood control, and default levels don't admit `info`.
+- [ ] Quiet hours after an alert is handled: the rule set has none yet (Rules, "before scale"); until then a fresh finding of a handled rule alerts at once. A higher severity on the same chain re-alerts as designed.
+- [ ] `POST /platform/emr/connections/{id}/resume` (Task 37; step-up, `emr.source_resumed`, then `sync_now`): not built; an operator clears `paused` by SQL, recorded in the incident log.
+- [ ] EMR dead letters in the Failed jobs view and `emr.v1.ctl.redrive` (Task 38). Core's consumer dead-letters `dead.v1.<hid>.core_emr` (a page, `emr_core_dead_lettered_total`); `core_dead` acks it as an unknown type and the letter stays in `DEAD` 30 days. Until the jobs view reads it, an operator replays the finding id from the letter.
+- [ ] `emr_consumed` grows by one row per finding status; PR 9's retention sweep should trim it with the findings.
+- [ ] A cross-service run (sync → rules → `core_emr` → acknowledge, A22 across both services) waits for the end-to-end harness to start core's consumer; PR 8b tests the core side against seeded findings.
+- [ ] Re-notification is `last_notified_at` (the BFF's polling sees a new or re-raised critical); a push notifier, if one is built, reads it.
+
 ## EMR: follow-ups from PR 8a (14 Nov)
 
 - [x] **Migration order:** 00029 (`alerts`) follows Analysis PR 5's 00028 (merged 14 Nov); the migration-count tests list both.
-- [ ] PR 8b: the finding consumer writes `alerts` (with `connection_id`, so `source_label` and `emr_link` resolve) and `alert_deliveries` as `mhai_emr_core`, using `alerts.Route`; it records `alert.raised` and `alert.not_raised` (schemas to add with it), and needs `mhai_emr_core` reads of `users`/`user_roles` and its audit append policy.
-- [ ] PR 8b: grouped mode (`AlertPageOut.grouped` is always null until then) and the info cap.
+- [x] PR 8b: the finding consumer writes `alerts` (with `connection_id`) and `alert_deliveries` as `mhai_emr_core`, using `alerts.Route`; it records `alert.raised` and `alert.not_raised`; the recipients come through a definer (`alert_route_facts`), with its own audit append policy (00031).
+- [ ] Grouped mode (`AlertPageOut.grouped` is always null until then) and the info cap: not built in PR 8b (departure 40). See "EMR: follow-ups from PR 8b".
 - [ ] The CLI fallback for exclusions (`core emr exclude`, Task 34) is not built: it needs a login for `mhai_emr_admin` and its audit append. With PR 9's legal-hold CLI. Until then an exclusion is the hospital admin's route only.
-- [ ] `finding.name` is the source's own display text (core has no LOINC table); a LOINC display label on the alert when the consumer writes it (PR 8b).
+- [ ] `finding.name` is the source's own display text (core has no LOINC table); a LOINC display label waits for the real tables (Task 21; departure 42).
 - [ ] mhai-web (PR 10): `already_handled`'s body carries the alert's `status` in place of the problem's number, as `AlertHandledOut` reads it; the new audit kinds (`alert.*`, `alerts.read`, `emr.patient_matches_read`, `notification_settings.changed`) are sent bare until mhai-web has words for them.
 - [ ] A hospital admin's re-queue of a removed named clinician also widens visibility for alerts that clinician can still see (design §12.2); revisit if the clinical lead prefers it only on deactivation and role loss.
 
@@ -94,8 +105,8 @@ Gates before live use (design §17.6; all of them):
 - [ ] **Migration order:** 00027 (`emr_findings`) merges after 00024 (Gemini), 00025 (Analysis PR 4) and 00026 (EMR PR 6, renumbered from 00025); it needs EMR PR 6's tables.
 - [ ] **Rule set v1 is pilot, clinical sign-off deferred** (product owner). Before a platform admin activates it for a hospital: the clinical lead's review of `services/emr/rules/REFERENCES.md` against the hospital's own laboratory list, and the shadow review (design §11.5). People's item, not an agent's.
 - [ ] v1's numeric rules fire only once the real LOINC tables (Task 21, H6) and a reviewed `maps/common/conversions.yaml` with its analytes land; until then only the lab's own critical flags can fire (and the synthetic tables load in development only).
-- [ ] Resume a paused source: Task 37's platform `resume` route. Until then an operator clears `emr_connections.paused` by SQL, recorded in the incident log.
-- [ ] PR 8b: core reads findings as `mhai_emr_core`, raises alerts for `open` non-shadow findings, updates on `superseded`, withdraws on `withdrawn` (`withdrawn_reason`), and records `breaker_tripped`.
+- [ ] Resume a paused source: Task 37's platform `resume` route. Until then an operator clears `emr_connections.paused` by SQL, recorded in the incident log. Still not built after PR 8b (see its follow-ups).
+- [x] PR 8b: core reads findings as `mhai_emr_core`, raises alerts for `open` non-shadow findings, updates on `superseded`, withdraws on `withdrawn` (`withdrawn_reason`), and records `breaker_tripped` (`emr.source_paused`).
 - [x] PR 8a: `sources_status` calls `emr_sources_status()` (behind when stale or paused).
 
 ## EMR: follow-ups from PR 6 (12 Nov)
@@ -136,7 +147,7 @@ The product owner asked for the simplest safe version first (11 Nov). These wait
 - [ ] Rules: the breaker counts critical findings only; urgent and info floods, and documents as a source, wait.
 - [ ] Rules: a patient's history loads at most 5,000 observations and 5,000 medications per evaluation; the consumer is one batch at a time per process.
 - [ ] Rules: findings are announced after the commit (with a sweep every minute), not through an outbox.
-- [ ] Rules (review notes, 13 Nov): a superseding result whose finding is historical (an old amendment) supersedes or withdraws the open finding without an alert of its own; PR 8b decides what the open alert shows then.
+- [x] Rules (review notes, 13 Nov): a superseding result whose finding is historical (an old amendment) supersedes or withdraws the open finding without an alert of its own; PR 8b updates the open alert in place to it, marked `amended` (departure 37).
 - [ ] Rules: a transient database error retries the batch (backoff by delivery) per process; nothing is shared across emr copies.
 - [ ] Rules: two consumers on one patient's amendments at once could each supersede the same open finding; one consumer per process today (the patient's `FOR SHARE` lock doesn't serialise them).
 - [x] Rules / PR 8a: the emr service no longer announces shadow findings (they are never alerts), so they don't pile up on `emr.v1.<hid>.finding`; the unannounced index leaves them out.

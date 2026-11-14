@@ -452,7 +452,7 @@ func candidates() []any {
 		refused failed platform via msg-1 kid-2026 core pipeline.run_query nli 1 42 9007199254740991 0
 		2026-11-03T06:00:00Z 2026-11-03T06:00:00.123+01:00 v1.2
 		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume demo prevalence month:2026-10-01 affected minute day
-		excluded already_known`) {
+		excluded already_known null_mrn level_off already_open breaker_tripped new_hit regrouped amended critical blood_chemistry`) {
 		out = append(out, s)
 	}
 	for _, ty := range audit.AuditTypes {

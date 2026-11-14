@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	core "github.com/Measured-Health/mhai-multiagent/services/core"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/alerts"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/apidocs"
@@ -52,6 +53,9 @@ type app struct {
 	log     *slog.Logger
 	// analysis is Patient Analysis's nightly run (as mhai_analysis_job).
 	analysis *analysis.Nightly
+	// emrConsumer turns EMR findings into alerts (core_emr; run only with
+	// CORE_EMR_ENABLED).
+	emrConsumer *alerts.Consumer
 	// stopAPI ends core's NATS API (natsapi.Serve) and stopGrant its grant
 	// endpoint (grant.Server) before NATS closes.
 	stopAPI, stopGrant func()
@@ -155,6 +159,8 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
+	a.emrConsumer = &alerts.Consumer{Pool: a.pool, Pub: alerts.JSPublisher{JS: js}, AllowNullMRN: cfg.EMRAllowNullMRN,
+		Log: log, Metrics: &alerts.ConsumerMetrics{}}
 	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log, Metrics: &intel.Metrics{}, Pool: a.pool}
 	a.js = js
 	if cfg.RequestTrustedKeysPath != "" {
@@ -350,6 +356,15 @@ func serve() error {
 			log.Error("core: dead-letter consumer stopped", "error", err)
 		}
 	}()
+	// EMR findings into alerts (core_emr, shared by every core copy): only
+	// with CORE_EMR_ENABLED, which creates the durable at start-up.
+	if cfg.EMREnabled {
+		go func() {
+			if err := a.emrConsumer.Run(ctx, a.js); err != nil {
+				log.Error("core: EMR finding consumer stopped", "reason", "internal_error")
+			}
+		}()
+	}
 	// The daily audit chain check at 06:00 UTC; one core copy starts it
 	// (an advisory lock). It also sets audit_chain_broken at start-up.
 	go func() {

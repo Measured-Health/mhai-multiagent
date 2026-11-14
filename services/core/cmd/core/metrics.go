@@ -41,6 +41,19 @@ func registerMetrics(a *app, nm *natsapi.Metrics, gm *grant.Metrics) {
 		count("analysis_late_facts_total", "Analysis facts that arrived after their block froze (never counted).", an.LateFacts.Load)
 		count("analysis_freeze_failed_total", "Failed analysis nightly steps (alert analysis_freeze_failed).", an.Failures.Load)
 	}
+	if c := a.emrConsumer; c != nil && c.Metrics != nil {
+		em := c.Metrics
+		count("emr_alerts_raised_total", "Alerts raised from EMR findings.", em.Raised.Load)
+		count("emr_alerts_updated_total", "Open alerts updated by an amended result or a new hit.", em.Updated.Load)
+		count("emr_alerts_withdrawn_total", "Alerts withdrawn or marked withdrawn by the source.", em.Withdrawn.Load)
+		count("emr_alerts_not_raised_total", "Findings recorded as not raised (filtered, gated or already open).", em.NotRaised.Load)
+		count("emr_finding_foreign_total", "Finding messages naming no finding of their subject's hospital.", em.Foreign.Load)
+		count("emr_core_refused_total", "Malformed EMR messages refused.", em.Refused.Load)
+		count("emr_core_retried_total", "EMR messages naked for a retry.", em.Retried.Load)
+		count("emr_core_dead_lettered_total", "EMR messages core dead-lettered after five deliveries (page).", em.DeadLettered.Load)
+		count("emr_core_dead_letter_failed_total", "Dead letters core couldn't send; the message is kept (page).", em.DeadFailed.Load)
+		count("emr_source_paused_total", "EMR sources paused by their breaker (page).", em.SourcePaused.Load)
+	}
 	im := a.intel.Metrics
 	count("jobs_dead_letters_total", "Dead letters read from workers.", im.DeadReceived.Load, jobTypeLabel)
 	count("intelligence_dead_ignored_total", "Dead letters that changed nothing (malformed, replayed, or naming no job).", im.DeadIgnored.Load)
