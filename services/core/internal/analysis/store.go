@@ -15,8 +15,7 @@ import (
 // (db.WithAnalysisJob), through migration 00021's functions.
 type DBStore struct {
 	Pool *pgxpool.Pool
-	// Source replaces mhai_analysis_ingest_source (tests only: no
-	// consultation carries a patient reference until PR 10). nil: the
+	// Source replaces mhai_analysis_ingest_source (tests only). nil: the
 	// function.
 	Source func(ctx context.Context, tx pgx.Tx, hospital uuid.UUID, after *time.Time, until time.Time) ([]SourceRow, error)
 }
@@ -64,7 +63,8 @@ func (s *DBStore) Ingest(ctx context.Context, hospital uuid.UUID, after *time.Ti
 
 func sqlSource(ctx context.Context, tx pgx.Tx, hospital uuid.UUID, after *time.Time, until time.Time) ([]SourceRow, error) {
 	rows, err := tx.Query(ctx, `SELECT ref, day, kind, condition_id, age_band, sex, setting, location_id, specialty, source_id,
-		urgency, confidence, rating, correction FROM mhai_analysis_ingest_source($1, $2, $3)`, hospital, after, until)
+		urgency, confidence, rating, correction, flag, severity, ack_minutes, dismiss_reason
+		FROM mhai_analysis_ingest_source($1, $2, $3)`, hospital, after, until)
 	if err != nil {
 		return nil, err
 	}
@@ -73,12 +73,46 @@ func sqlSource(ctx context.Context, tx pgx.Tx, hospital uuid.UUID, after *time.T
 	for rows.Next() {
 		var r SourceRow
 		if err := rows.Scan(&r.Ref, &r.Day, &r.Kind, &r.Condition, &r.AgeBand, &r.Sex, &r.Setting, &r.Location, &r.Specialty,
-			&r.Source, &r.Urgency, &r.Confidence, &r.Rating, &r.Correction); err != nil {
+			&r.Source, &r.Urgency, &r.Confidence, &r.Rating, &r.Correction, &r.Flag, &r.Severity, &r.AckMinutes,
+			&r.Dismiss); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// Changes reads the patient-index changes after the hospital's changes
+// watermark, builds them with build and applies them, in one transaction;
+// it returns the subjects changed.
+func (s *DBStore) Changes(ctx context.Context, hospital uuid.UUID, until time.Time,
+	build func([]ChangeRow) ([]byte, error)) (int, error) {
+	var n int
+	err := db.WithAnalysisJob(ctx, s.Pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT kind, ref, survivor FROM mhai_analysis_patient_changes($1, $2)`, hospital, until)
+		if err != nil {
+			return err
+		}
+		var list []ChangeRow
+		for rows.Next() {
+			var c ChangeRow
+			if err := rows.Scan(&c.Kind, &c.Ref, &c.Survivor); err != nil {
+				rows.Close()
+				return err
+			}
+			list = append(list, c)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		body, err := build(list)
+		if err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT mhai_analysis_apply_changes($1, $2, $3::jsonb)`, hospital, until, string(body)).Scan(&n)
+	})
+	return n, err
 }
 
 func (s *DBStore) Sweep(ctx context.Context, hospital uuid.UUID, now time.Time) error {

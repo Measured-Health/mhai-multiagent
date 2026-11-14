@@ -250,6 +250,9 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	// analysis switch is on (none by default) and needs its keys only to
 	// ingest a signed-off hospital, where it fails closed without them.
 	a.analysis = analysis.NewNightly(a.pool, analysisKeys, log)
+	// Consultations and EMR facts are read only with ANALYSIS_INGEST=true
+	// (off by default; analysis plan departure 79).
+	a.analysis.Ingest = cfg.AnalysisIngest
 	// Then the clearance letters: end those past their hospital's last day
 	// and record reminders (none exist until a hospital has letters).
 	a.analysis.After = func(ctx context.Context, now time.Time) error {

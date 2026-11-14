@@ -36,12 +36,12 @@ const (
 
 // sourceRow is one row of mhai_analysis_ingest_source.
 type sourceRow struct {
-	Ref, Kind, Sex                                         string
-	Day                                                    time.Time
-	Condition, Location, Source                            *uuid.UUID
-	AgeBand, Setting, Specialty, Urgency, Confidence       *string
-	Rating, Correction, Flag, Severity, Dismiss            *string
-	AckMinutes                                             *int
+	Ref, Kind, Sex                                   string
+	Day                                              time.Time
+	Condition, Location, Source                      *uuid.UUID
+	AgeBand, Setting, Specialty, Urgency, Confidence *string
+	Rating, Correction, Flag, Severity, Dismiss      *string
+	AckMinutes                                       *int
 }
 
 // emrWorld is a hospital switched on (real references), with one
@@ -356,7 +356,9 @@ func applyChanges(ctx context.Context, pool *pgxpool.Pool, h uuid.UUID, until ti
 	return n, err
 }
 
-func forget(ref string) map[string]any { return map[string]any{"kind": "forget", "ref_hmac": testHMAC(ref)} }
+func forget(ref string) map[string]any {
+	return map[string]any{"kind": "forget", "ref_hmac": testHMAC(ref)}
+}
 
 func merge(from, to string) map[string]any {
 	return map[string]any{"kind": "merge", "ref_hmac": testHMAC(from), "to_hmac": testHMAC(to), "to_enc": testEnc(to)}

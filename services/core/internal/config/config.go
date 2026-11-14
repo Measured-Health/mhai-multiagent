@@ -129,6 +129,11 @@ type Config struct {
 	// exports and the legal-reference route on (analysis plan departure
 	// 61). Off by default: they answer 404.
 	AuditExports bool
+	// AnalysisIngest (ANALYSIS_INGEST=true) lets the Analysis nightly run
+	// read consultations and EMR facts for a hospital whose switch is on
+	// with real references (analysis plan departure 79). Off by default;
+	// refused without the four analysis keys.
+	AnalysisIngest bool
 }
 
 // NamedIdentityDemo selects the synthetic demo identity fixture.
@@ -316,6 +321,13 @@ func Load() (Config, error) {
 	default:
 		errs = append(errs, errors.New("CORE_AUDIT_EXPORTS must be true or false"))
 	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ANALYSIS_INGEST"))) {
+	case "", "false":
+	case "true":
+		c.AnalysisIngest = true
+	default:
+		errs = append(errs, errors.New("ANALYSIS_INGEST must be true or false"))
+	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_EMR_ALLOW_NULL_MRN"))) {
 	case "", "false":
 	case "true":
@@ -410,6 +422,9 @@ func Load() (Config, error) {
 
 	if c.Analysis, err = loadAnalysisKeys(os.Getenv); err != nil {
 		errs = append(errs, err)
+	}
+	if c.AnalysisIngest && !c.Analysis.Set() {
+		errs = append(errs, errors.New("ANALYSIS_INGEST=true needs the four ANALYSIS_*_KEY_FILE keys"))
 	}
 	switch c.AnalysisNamedIdentity = strings.TrimSpace(os.Getenv("ANALYSIS_NAMED_IDENTITY")); c.AnalysisNamedIdentity {
 	case "":
