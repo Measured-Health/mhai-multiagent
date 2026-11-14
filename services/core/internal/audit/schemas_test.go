@@ -391,3 +391,40 @@ func TestAuditSchemaRuleSetSwitched(t *testing.T) {
 		}
 	}
 }
+
+// The analyst grant (plan Task 16): the change id, the channel and, for a
+// removal, the reason; never a name, an email or free text.
+func TestAnalystActionsSchemas(t *testing.T) {
+	c := uuid.NewString()
+	good := map[string]map[string]any{
+		"analyst.granted": {"change_id": c, "via": "app"},
+		"analyst.removed": {"change_id": c, "via": "cli", "reason": "clinician_removed"},
+	}
+	for action, p := range good {
+		if err := audit.CheckActionPayload(action, p); err != nil {
+			t.Errorf("%s: %v", action, err)
+		}
+		for k, v := range map[string]any{"display_name": "Synthetic Staff", "person": "ada@example.test", "note": "asked"} {
+			bad := maps.Clone(p)
+			bad[k] = v
+			if err := audit.CheckActionPayload(action, bad); err == nil {
+				t.Errorf("%s with %s accepted", action, k)
+			}
+		}
+	}
+	for name, p := range map[string]struct {
+		action string
+		p      map[string]any
+	}{
+		"a removal without a reason": {"analyst.removed", map[string]any{"change_id": c, "via": "app"}},
+		"a free-text reason":         {"analyst.removed", map[string]any{"change_id": c, "via": "app", "reason": "left the team"}},
+		"a grant with a reason":      {"analyst.granted", map[string]any{"change_id": c, "via": "app", "reason": "removed"}},
+		"a name as the change":       {"analyst.granted", map[string]any{"change_id": "Synthetic Staff", "via": "app"}},
+		"another channel":            {"analyst.granted", map[string]any{"change_id": c, "via": "platform"}},
+		"no change id":               {"analyst.granted", map[string]any{"via": "cli"}},
+	} {
+		if err := audit.CheckActionPayload(p.action, p.p); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

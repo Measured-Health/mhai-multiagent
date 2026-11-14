@@ -288,6 +288,10 @@ var Catalogue = map[string]Entry{
 	"analysis.list_limit_reached":  withheld(),
 	"analysis.patient_cap_reached": withheld(),
 	"audit.patients_viewed":        withheld(),
+	// The analyst grant (plan Tasks 15-16): mhai-web's staff_role_changed
+	// takes facts not agreed for these yet (H6); sent bare until they are.
+	"analyst.granted": withheld(),
+	"analyst.removed": withheld(),
 
 	// EMR connections (EMR design §12.6): mhai-web's Plan 13 kinds, with
 	// the connection as the target. A resume has no kind yet: sent bare.

@@ -315,7 +315,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		"analysis_first_seen", "analysis_periods", "analysis_pseudonyms", "analysis_watermarks",
 		"analysis_subject_attrs", "analysis_hospital_start", "analysis_snapshots", "analysis_view_log", "analysis_unusual",
 		"analysis_cold_budget", "analysis_cold_contexts", "analysis_views", "analysis_view_rows", "analysis_patient_budget",
-		"analysis_patient_opens", "analysis_drill_flags"}, slices.Concat(emrTables, emrGatewayReads, emrHidden)...) {
+		"analysis_patient_opens", "analysis_drill_flags", "analyst_changes"}, slices.Concat(emrTables, emrGatewayReads, emrHidden)...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -332,6 +332,11 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		_ = tx.Rollback(ctx)
 		if table == "audit_verify_runs" {
 			requireDenied(t, err, "gateway reading audit_verify_runs")
+			continue
+		}
+		if table == "analyst_changes" {
+			// 00030: written by the analyst rules' triggers only.
+			requireDenied(t, err, "gateway reading analyst_changes")
 			continue
 		}
 		if table == "feedback_buffer" {

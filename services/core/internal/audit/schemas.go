@@ -484,6 +484,14 @@ func init() {
 	Register("analysis.list_limit_reached", Schema{Fields: fields("window", OneOf("minute", "day")), Required: []string{"window"}})
 	Register("analysis.patient_cap_reached", Schema{Fields: fields("cap", Check(Int(1, 300))), Required: []string{"cap"}})
 	Register("audit.patients_viewed", Schema{Fields: fields("rows", Check(Int(0, 200))), Required: []string{"rows"}})
+	// The analyst grant (plan Tasks 15-16, migration 00030): the person is
+	// the row's entity (user) and is named by display name at read time
+	// only; the payload is the database's change id, the channel and, for
+	// a removal, why. 00030 refuses to commit a change without its entry.
+	Register("analyst.granted", Schema{Fields: fields("change_id", id, "via", OneOf("app", "cli")),
+		Required: []string{"change_id", "via"}})
+	Register("analyst.removed", Schema{Fields: fields("change_id", id, "via", OneOf("app", "cli"),
+		"reason", OneOf("removed", "clinician_removed")), Required: []string{"change_id", "via", "reason"}})
 
 	// Plan 3: the request-token boundary (internal/account, grant, intel).
 	Register("intelligence.key_rotated", Schema{Fields: fields(
