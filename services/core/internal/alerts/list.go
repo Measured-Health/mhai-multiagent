@@ -74,7 +74,11 @@ type LocationOut struct {
 }
 
 // PatientOut is the alert's patient. mrn is null for a patient with none.
+// id is the MHAI patient id (lower-case), so a question can name the
+// alert's patient (POST /queries patient_id); null unless the patient is
+// active (excluded or merged into another: no id).
 type PatientOut struct {
+	ID       *string      `json:"id"`
 	FullName string       `json:"full_name"`
 	MRN      *string      `json:"mrn"`
 	Location *LocationOut `json:"location"`
@@ -236,11 +240,14 @@ const visible = `a.hospital_id = $1 AND a.patient_id IS NOT NULL
 	                               WHERE d.hospital_id = a.hospital_id AND d.alert_id = a.id AND d.user_id = $2))`
 
 // alertSelect reads everything an AlertOut shows, for alert a (with
-// visible's $1 and $2).
+// visible's $1 and $2). The patient's id only while the patient is active:
+// an excluded patient, or one merged into another, gives no id (the alert
+// still names the patient it was raised for, as before). A held purge
+// (EMR PR 9) moves the alert's patient aside, so the alert isn't listed.
 const alertSelect = `SELECT a.id, a.severity, a.status, a.category, a.routed_queue,
 	EXISTS (SELECT 1 FROM alert_deliveries d WHERE d.hospital_id = a.hospital_id AND d.alert_id = a.id AND d.user_id = $2),
 	a.preliminary, a.arrived_late, a.amended, a.withdrawn, h.display_name, a.handled_at, a.dismiss_reason, a.created_at,
-	a.connection_id, p.display_name, p.mrn, p.birth_date, p.sex, f.causes,
+	a.connection_id, CASE WHEN p.status = 'active' THEN p.id END, p.display_name, p.mrn, p.birth_date, p.sex, f.causes,
 	o.local_display, o.loinc, o.value_num::text, o.comparator, o.value_text, o.unit_ucum, o.unit_source,
 	o.ref_low::text, o.ref_high::text, o.ref_text, o.source_flag, o.effective_at, o.standardised,
 	loc.class, loc.bed_label, loc.unit_label
@@ -279,6 +286,7 @@ func scanAlert(row pgx.Row, now time.Time) (alertRow, error) {
 	var amended []byte
 	var handledBy *string
 	var handledAt *time.Time
+	var pid *uuid.UUID
 	var name *string
 	var birth *time.Time
 	var sex string
@@ -290,7 +298,7 @@ func scanAlert(row pgx.Row, now time.Time) (alertRow, error) {
 	var class, bed, unitLabel *string
 	err := row.Scan(&id, &x.out.Severity, &x.out.Status, &category, &routedQueue, &toYou, &x.out.Preliminary,
 		&x.out.ArrivedLate, &amended, &x.out.Withdrawn, &handledBy, &handledAt, &x.out.DismissReason, &x.createdAt,
-		&x.conn, &name, &x.out.Patient.MRN, &birth, &sex, &causes, &display, &loinc, &valueNum, &comparator, &valueText,
+		&x.conn, &pid, &name, &x.out.Patient.MRN, &birth, &sex, &causes, &display, &loinc, &valueNum, &comparator, &valueText,
 		&unitUCUM, &unitSource, &refLow, &refHigh, &refText, &flag, &effective, &standardised, &class, &bed, &unitLabel)
 	if err != nil {
 		return x, err
@@ -305,6 +313,10 @@ func scanAlert(row pgx.Row, now time.Time) (alertRow, error) {
 		x.out.Category = &CategoryRef{ID: c.ID, Label: c.Label}
 	}
 	x.out.Routing = RoutingOut{ToYou: toYou, Queue: routedQueue}
+	if pid != nil {
+		s := pid.String()
+		x.out.Patient.ID = &s
+	}
 	if name != nil {
 		x.out.Patient.FullName = *name
 	}
