@@ -66,6 +66,11 @@ var Codes = map[string]int{
 	"analyst_cap":     http.StatusConflict,
 	"not_eligible":    http.StatusUnprocessableEntity,
 	"not_implemented": http.StatusNotImplemented,
+	// The platform admin routes (additive): the team's own-role rule, and
+	// the two-person rule on a hold's lift and a lapsed request.
+	"own_role":    http.StatusConflict,
+	"same_person": http.StatusConflict,
+	"expired":     http.StatusConflict,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -107,6 +112,9 @@ var titles = map[string]string{
 	"analyst_cap":         "Analyst limit reached",
 	"not_eligible":        "Not eligible",
 	"not_implemented":     "Not available",
+	"own_role":            "Own role",
+	"same_person":         "Same person",
+	"expired":             "Expired",
 }
 
 var details = map[string]string{
@@ -145,6 +153,9 @@ var details = map[string]string{
 	"analyst_cap":         "The hospital already has the most analysts allowed.",
 	"not_eligible":        "This person can't be given this role.",
 	"not_implemented":     "This isn't available yet.",
+	"own_role":            "You can't change your own role.",
+	"same_person":         "A different person must approve this.",
+	"expired":             "This request has lapsed.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.

@@ -326,6 +326,14 @@ var Catalogue = map[string]Entry{
 	"emr.hospital_data_removed":    withheld(),
 	"legal_hold.placed":            withheld(),
 	"legal_hold.lifted":            withheld(),
+	// The platform app's holds, team and e-mail setting (00037): no
+	// mhai-web audit kind agreed yet; sent bare. The activity feed
+	// (/platform/activity) shows them.
+	"legal_hold.lift_requested":        withheld(),
+	"legal_hold.lift_cancelled":        withheld(),
+	"platform.team_role_changed":       withheld(),
+	"platform.team_member_removed":     withheld(),
+	"platform.analytics_email_changed": withheld(),
 
 	// Alerts (EMR plan Tasks 31-34): the settings saves and an
 	// acknowledgement have mhai-web kinds (Plan 13), with no target; the

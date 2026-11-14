@@ -68,6 +68,7 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/hospital/usage` | signed in | `hospital_admin` | clinical | yes | no | no |
 | GET | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | no |
 | PATCH | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | yes |
+| GET | `/api/v1/platform/activity` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/analysis/status` | signed in | `platform_admin` | platform | yes | no | no |
 | GET | `/api/v1/platform/analytics` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | DELETE | `/api/v1/platform/analytics/changes/{id}/follow-up` | signed in | `platform_admin` | platform | yes | no | yes |
@@ -105,6 +106,35 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/platform/jobs` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | POST | `/api/v1/platform/jobs/cancel` | signed in | `platform_admin` | platform | yes | yes | yes |
 | POST | `/api/v1/platform/jobs/retry` | signed in | `platform_admin` | platform | yes | no | yes |
+| GET | `/api/v1/platform/legal-holds` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| POST | `/api/v1/platform/legal-holds` | signed in | `platform_admin` | platform | yes | yes | yes |
+| GET | `/api/v1/platform/legal-holds/{id}` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| PATCH | `/api/v1/platform/legal-holds/{id}` | signed in | `platform_admin` | platform | yes | no | yes |
+| POST | `/api/v1/platform/legal-holds/{id}/lift` | signed in | `platform_admin` | platform | yes | yes | yes |
+| POST | `/api/v1/platform/legal-holds/{id}/lift/approve` | signed in | `platform_admin` | platform | yes | yes | yes |
+| POST | `/api/v1/platform/legal-holds/{id}/lift/cancel` | signed in | `platform_admin` | platform | yes | no | yes |
+| POST | `/api/v1/platform/legal-holds/{id}/lift/undo` | signed in | `platform_admin` | platform | yes | yes | yes |
+| GET | `/api/v1/platform/me/analytics-email` | signed in | `platform_admin` | platform | yes | no | no |
+| PUT | `/api/v1/platform/me/analytics-email` | signed in | `platform_admin` | platform | yes | no | yes |
+| GET | `/api/v1/platform/named-access` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| POST | `/api/v1/platform/named-access/lower` | signed in | `platform_admin` | platform | yes | yes | yes |
+| POST | `/api/v1/platform/named-access/requests` | signed in | `platform_admin` | platform | yes | yes | yes |
+| POST | `/api/v1/platform/named-access/requests/{id}/approve` | signed in | `platform_admin` | platform | yes | yes | yes |
+| POST | `/api/v1/platform/named-access/requests/{id}/cancel` | signed in | `platform_admin` | platform | yes | no | yes |
+| GET | `/api/v1/platform/notifications` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| POST | `/api/v1/platform/notifications/seen` | signed in | `platform_admin` | platform | yes | no | yes |
+| GET | `/api/v1/platform/settings` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| POST | `/api/v1/platform/settings/feedback-buffer/reset` | signed in | `platform_admin` | platform | yes | yes | yes |
+| POST | `/api/v1/platform/settings/requests/{id}/approve` | signed in | `platform_admin` | platform | yes | yes | yes |
+| POST | `/api/v1/platform/settings/requests/{id}/cancel` | signed in | `platform_admin` | platform | yes | no | yes |
+| PUT | `/api/v1/platform/settings/retention-pause` | signed in | `platform_admin` | platform | yes | yes | yes |
+| PUT | `/api/v1/platform/settings/retention/{id}` | signed in | `platform_admin` | platform | yes | yes | yes |
+| GET | `/api/v1/platform/settings/retention/{id}/preview` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| PUT | `/api/v1/platform/settings/triage` | signed in | `platform_admin` | platform | yes | yes | yes |
+| GET | `/api/v1/platform/team` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| POST | `/api/v1/platform/team/invites` | signed in | `platform_admin` | platform | yes | no | yes |
+| DELETE | `/api/v1/platform/team/{id}` | signed in | `platform_admin` | platform | yes | yes | yes |
+| PATCH | `/api/v1/platform/team/{id}` | signed in | `platform_admin` | platform | yes | yes | yes |
 | POST | `/api/v1/queries` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/queries/{id}` | signed in | `clinician` | clinical | no | no | no |
 | GET | `/api/v1/queries/{id}/result` | signed in | `clinician` | clinical | no | no | no |
