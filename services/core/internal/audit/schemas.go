@@ -442,8 +442,34 @@ func init() {
 	Register("emr.patient_excluded", Schema{Fields: fields("patient_id", id,
 		"reason", OneOf("objection", "hospital_policy", "other"), "via", OneOf("route", "cli"),
 		"observations", count, "medications", count, "encounters", count, "raw_records", count, "matches", count,
-		"alerts", count),
+		"alerts", count, "findings", count, "request_id", id, "held", Check(Bool)),
 		Required: []string{"patient_id", "reason", "via", "observations", "medications", "encounters", "raw_records", "matches"}})
+	// The exclusion purge and legal holds (EMR design §10.6, §14.2; plan
+	// Tasks 39-40, migration 00032): ids, counts and closed codes. The
+	// route and the operator CLI write them with the exclusion; core's
+	// maintenance loop writes them with its hospital and no actor.
+	purgeVia := OneOf("route", "cli", "loop")
+	Register("emr.exclusion_purged", Schema{Fields: fields("request_id", id, "patient_id", id, "via", purgeVia,
+		"observations", count, "medications", count, "encounters", count, "raw_records", count, "matches", count,
+		"findings", count, "alerts", count),
+		Required: []string{"request_id", "patient_id", "via", "observations", "medications", "encounters", "raw_records",
+			"matches", "findings", "alerts"}})
+	Register("emr.exclusion_purge_held", Schema{Fields: fields("request_id", id, "patient_id", id, "via", purgeVia),
+		Required: []string{"request_id", "patient_id", "via"}})
+	Register("emr.exclusion_purge_released", Schema{Fields: fields("request_ids", List(500, id), "count", count),
+		Required: []string{"request_ids", "count"}})
+	Register("emr.retention_swept", Schema{Fields: fields("raw_payloads", count, "findings", count, "observations", count,
+		"medications", count, "encounters", count, "raw_records", count, "alert_patients", count, "alerts", count,
+		"consumed", count, "patients", count),
+		Required: []string{"raw_payloads", "findings", "observations", "medications", "encounters", "raw_records",
+			"alert_patients", "alerts", "consumed", "patients"}})
+	Register("legal_hold.placed", Schema{Fields: fields("hold_id", id, "via", OneOf("cli")), Required: []string{"hold_id", "via"}})
+	Register("legal_hold.lifted", Schema{Fields: fields("hold_id", id, "via", OneOf("cli")), Required: []string{"hold_id", "via"}})
+	removed := fields("via", OneOf("cli"))
+	for _, k := range HospitalDataRemovedKeys {
+		removed[k] = count
+	}
+	Register("emr.hospital_data_removed", Schema{Fields: removed, Required: []string{"via"}})
 	// A hospital admin read the possible duplicates (the cards carry names
 	// and MRNs): the match ids served, at most a page.
 	Register("emr.patient_matches_read", Schema{Fields: fields("match_ids", List(100, id)), Required: []string{"match_ids"}})
@@ -479,7 +505,7 @@ func init() {
 		"change", OneOf("amended", "new_hit", "regrouped")), Required: []string{"alert_id", "finding_id", "severity", "change"}})
 	Register("alert.not_raised", Schema{Fields: fields("finding_id", id,
 		"reason", OneOf("unit_not_covered", "level_off", "null_mrn", "hospital_inactive", "no_connection", "already_open",
-			"already_handled")), Required: []string{"finding_id", "reason"}})
+			"already_handled", "patient_excluded")), Required: []string{"finding_id", "reason"}})
 	// Written by 00029's definers through the outbox (the drainer checks
 	// it); a payload that doesn't fit is replaced by payload_refused.
 	Register("alert.requeued", Schema{Fields: fields("alert_ids", List(500, id),
@@ -717,3 +743,11 @@ func EMRConnectionKeys() []string {
 	}
 	return out
 }
+
+// HospitalDataRemovedKeys are the counts emr_remove_hospital_data
+// (migration 00032) returns: one per table it empties, by table name.
+var HospitalDataRemovedKeys = []string{"purge_held_alerts", "alert_deliveries", "alerts", "alert_recipients", "alert_levels",
+	"alert_units", "alert_settings", "user_notification_settings", "emr_consumed", "findings", "breaker_trips",
+	"observations", "medications", "encounters", "units", "merges", "possible_matches", "purge_requests", "patient_links",
+	"patients", "raw_records", "unmapped_codes", "sync_state", "sync_runs", "connection_errors", "emr_rule_set_activation",
+	"emr_connections"}

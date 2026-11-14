@@ -329,11 +329,14 @@ type excludeIn struct {
 	stepUpIn
 }
 
-// ExclusionOut is the 202 reply: the patient, and when its data is gone
-// (purged in the same transaction in this version: the request's time).
+// ExclusionOut is the 202 reply: the patient, and when its data is gone.
+// Purged in the same transaction: purge_by is the request's time and
+// purge_held false. Under a legal hold nothing is deleted: purge_held is
+// true and purge_by the request's due time, which the hold suspends.
 type ExclusionOut struct {
 	PatientID string `json:"patient_id"`
 	PurgeBy   string `json:"purge_by"`
+	PurgeHeld bool   `json:"purge_held"`
 }
 
 // errAmbiguous: an MRN names more than one active patient.
@@ -403,34 +406,83 @@ func (d Deps) exclude(w http.ResponseWriter, r *http.Request) {
 	if !d.stepUp(w, r, in.stepUpIn) {
 		return
 	}
-	var at time.Time
+	var x ExclusionResult
 	err = d.retryTx(r.Context(), func(tx pgx.Tx) error {
 		ctx := r.Context()
-		var o, m, e, raw, x int64
-		var withdrawn []uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT observations, medications, encounters, raw_records, matches, alert_ids
-			FROM emr_exclude_patient($1, $2)`, pid, *in.Reason).Scan(&o, &m, &e, &raw, &x, &withdrawn); err != nil {
+		var err error
+		if x, err = ExcludePatient(ctx, tx, AuditBy{ActorID: p.UserID.String(), HospitalID: p.HospitalID.String(),
+			RequestID: httpx.RequestIDFrom(ctx), Via: "route"}, pid, *in.Reason); err != nil {
 			return err
 		}
-		rid := httpx.RequestIDFrom(ctx)
-		if err := audit.Write(ctx, tx, audit.Event{ActorID: p.UserID.String(), HospitalID: p.HospitalID.String(),
-			RequestID: rid, Action: "emr.patient_excluded", Entity: "patient", EntityID: pid.String(),
-			Payload: map[string]any{"patient_id": pid.String(), "reason": *in.Reason, "via": "route", "observations": o,
-				"medications": m, "encounters": e, "raw_records": raw, "matches": x, "alerts": len(withdrawn)}}); err != nil {
-			return err
-		}
-		for _, a := range withdrawn {
-			if err := audit.Write(ctx, tx, audit.Event{ActorID: p.UserID.String(), HospitalID: p.HospitalID.String(),
-				RequestID: rid, Action: "alert.withdrawn", Entity: "alert", EntityID: a.String(),
-				Payload: map[string]any{"alert_id": a.String(), "reason": "excluded"}}); err != nil {
-				return err
-			}
-		}
-		return tx.QueryRow(ctx, `SELECT now()`).Scan(&at)
+		return nil
 	})
 	if err != nil {
 		d.fail(w, r, p, "exclusion", err)
 		return
 	}
-	httpx.JSON(w, http.StatusAccepted, ExclusionOut{PatientID: pid.String(), PurgeBy: stamp(at)})
+	httpx.JSON(w, http.StatusAccepted, ExclusionOut{PatientID: pid.String(), PurgeBy: stamp(x.PurgeBy), PurgeHeld: x.Held})
+}
+
+// ExclusionResult is what an exclusion did: the purge request, whether it
+// is held, when the data is (or is due to be) gone, the counts and the
+// alerts withdrawn.
+type ExclusionResult struct {
+	RequestID uuid.UUID
+	Held      bool
+	PurgeBy   time.Time
+	Withdrawn []uuid.UUID
+	Counts    map[string]int64
+}
+
+// AuditBy is who the exclusion's audit rows name: the actor (none from the
+// operator CLI), the hospital, the request id and the path ("route" or
+// "cli").
+type AuditBy struct {
+	ActorID, HospitalID, RequestID, Via string
+}
+
+// ExcludePatient excludes patient pid in tx (the hospital set; as the
+// gateway or the operator's mhai_emr_admin) through emr_exclude_patient,
+// and writes its audit rows in the same transaction: emr.patient_excluded
+// (counts), one alert.withdrawn per alert withdrawn, and
+// emr.exclusion_purged (counts) or, under a legal hold,
+// emr.exclusion_purge_held. Ids, codes and counts only.
+func ExcludePatient(ctx context.Context, tx pgx.Tx, by AuditBy, pid uuid.UUID, reason string) (ExclusionResult, error) {
+	var x ExclusionResult
+	var o, m, e, raw, matches, findings, cleared int64
+	if err := tx.QueryRow(ctx, `SELECT observations, medications, encounters, raw_records, matches, alert_ids, findings,
+		request_id, held, purge_by, alerts_cleared FROM emr_exclude_patient($1, $2)`, pid, reason).
+		Scan(&o, &m, &e, &raw, &matches, &x.Withdrawn, &findings, &x.RequestID, &x.Held, &x.PurgeBy, &cleared); err != nil {
+		return x, err
+	}
+	x.Counts = map[string]int64{"observations": o, "medications": m, "encounters": e, "raw_records": raw, "matches": matches,
+		"findings": findings, "alerts": int64(len(x.Withdrawn))}
+	event := func(action, entity, id string, payload map[string]any) audit.Event {
+		return audit.Event{ActorID: by.ActorID, HospitalID: by.HospitalID, RequestID: by.RequestID, Action: action,
+			Entity: entity, EntityID: id, Payload: payload}
+	}
+	excluded := map[string]any{"patient_id": pid.String(), "reason": reason, "via": by.Via, "request_id": x.RequestID.String(),
+		"held": x.Held}
+	for k, n := range x.Counts {
+		excluded[k] = n
+	}
+	if err := audit.Write(ctx, tx, event("emr.patient_excluded", "patient", pid.String(), excluded)); err != nil {
+		return x, err
+	}
+	for _, a := range x.Withdrawn {
+		if err := audit.Write(ctx, tx, event("alert.withdrawn", "alert", a.String(),
+			map[string]any{"alert_id": a.String(), "reason": "excluded"})); err != nil {
+			return x, err
+		}
+	}
+	purge := map[string]any{"request_id": x.RequestID.String(), "patient_id": pid.String(), "via": by.Via}
+	if x.Held {
+		return x, audit.Write(ctx, tx, event("emr.exclusion_purge_held", "purge_request", x.RequestID.String(), purge))
+	}
+	for _, k := range []string{"observations", "medications", "encounters", "raw_records", "matches", "findings"} {
+		purge[k] = x.Counts[k]
+	}
+	// The alerts the purge took the patient from (withdrawn or handled).
+	purge["alerts"] = cleared
+	return x, audit.Write(ctx, tx, event("emr.exclusion_purged", "purge_request", x.RequestID.String(), purge))
 }

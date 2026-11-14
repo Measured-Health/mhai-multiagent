@@ -87,6 +87,9 @@ const (
 	ReasonNullMRN          = "null_mrn"
 	ReasonAlreadyOpen      = "already_open"
 	ReasonAlreadyHandled   = "already_handled"
+	// ReasonPatientExcluded: the patient was excluded while its purge is
+	// held under a legal hold, so its findings still exist (EMR PR 9).
+	ReasonPatientExcluded = "patient_excluded"
 )
 
 // errRace: something the transaction read changed under it (a merge, an
@@ -709,8 +712,13 @@ func (c *Consumer) raise(ctx context.Context, tx pgx.Tx, hid uuid.UUID, f *findi
 		}
 		return "", "", err
 	}
+	if status == "excluded" {
+		// Excluded under a legal hold: the purge is deferred, so the
+		// finding stands, but no alert is ever raised for the patient.
+		return "not_raised", ReasonPatientExcluded, c.notRaised(ctx, tx, hid, f.id, ReasonPatientExcluded)
+	}
 	if status != "active" {
-		return "", "", errRace // merged or excluded meanwhile: read the finding again
+		return "", "", errRace // merged meanwhile: read the finding again
 	}
 	if noMRN && !c.AllowNullMRN {
 		return "not_raised", ReasonNullMRN, c.notRaised(ctx, tx, hid, f.id, ReasonNullMRN)
