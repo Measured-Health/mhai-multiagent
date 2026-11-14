@@ -474,3 +474,39 @@ func TestSSHSessionDeadlineBounded(t *testing.T) {
 		t.Error("the connection outlived its deadline")
 	}
 }
+
+// PR 11: a key the SSH server refuses is ErrSignIn (sign_in_refused for
+// the connection), told apart from a proxy or network failure.
+func TestSSHSignInRefused(t *testing.T) {
+	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+	signer, _ := ssh.NewSignerFromKey(hostKey)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	cfg := &ssh.ServerConfig{PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
+		return nil, errors.New("refused")
+	}}
+	cfg.AddHostKey(signer)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _, _, _ = ssh.NewServerConn(c, cfg); _ = c.Close() }()
+		}
+	}()
+	host := "sftp.hospital-a.example"
+	p := newFakeProxy(t, map[string]string{host + ":22": ln.Addr().String()})
+	conn := connA
+	conn.Type, conn.Origin = "file_export", []emrurl.Origin{emrurl.Origin("sftp://" + host + ":22")}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = SSH(ctx, conn, p.url(), testKey, conn.Origin[0], ssh.FingerprintSHA256(signer.PublicKey()), "synthetic-user",
+		[]ssh.AuthMethod{ssh.Password("synthetic-password-not-real")})
+	if !errors.Is(err, ErrSignIn) {
+		t.Fatalf("refused key: %v, want ErrSignIn", err)
+	}
+}

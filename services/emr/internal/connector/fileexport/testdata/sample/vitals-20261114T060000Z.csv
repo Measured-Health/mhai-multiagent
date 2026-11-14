@@ -1,0 +1,3 @@
+source_vital_id,source_patient_id,source_encounter_id,measured_at,updated_at,status,local_code,local_name,value,unit,flag
+SYNV-CSV-0001,SYNP-CSV-0001,SYNE-CSV-0001,2026-11-14T05:30:00+01:00,2026-11-14T05:31:00+01:00,final,HR,Heart rate (synthetic),131,/min,H
+SYNV-CSV-0002,SYNP-CSV-0001,SYNE-CSV-0001,2026-11-14T05:30:00+01:00,2026-11-14T05:31:00+01:00,final,TEMP,Temperature (synthetic),39.47,Cel,H

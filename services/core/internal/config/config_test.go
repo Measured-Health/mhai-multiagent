@@ -701,11 +701,11 @@ func TestConfigEMRConnectorTypes(t *testing.T) {
 		t.Fatalf("development stub: %v %v", c.EMRConnectorTypes, err)
 	}
 	for env, raw := range map[string]string{
-		"production":  "stub",           // the stub is development-only
-		"development": "file_export",    // not built yet
-		"staging":     "hl7v2_feed",     // not a type
-		"test":        "stub,stub",      // twice
-		"dev":         "stub,https://x", // junk
+		"production":  "stub",             // the stub is development-only
+		"development": "document_archive", // not built yet
+		"staging":     "hl7v2_feed",       // not a type
+		"test":        "stub,stub",        // twice
+		"dev":         "stub,https://x",   // junk
 	} {
 		e := env
 		if env == "test" || env == "dev" {

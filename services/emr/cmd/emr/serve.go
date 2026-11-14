@@ -17,12 +17,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/codes"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/fhir"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/fileexport"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector/stub"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/ctl"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/egress"
@@ -34,6 +36,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/sink"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrtypes"
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrurl"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/replay"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
@@ -216,7 +219,13 @@ func serve(getenv func(string) string) error {
 		return err
 	}
 	clients := func(cfg connector.Config) *http.Client { return egress.HTTPWithRoots(cfg, proxyURL, proxyKey, roots) }
-	registry := connector.NewRegistry(s.Development(), stub.New(), fhir.New(clients))
+	// The SFTP client for file exports: through egress-emr only, with the
+	// connection's own Proxy-Authorization and its pinned host key.
+	dial := func(ctx context.Context, cfg connector.Config, origin emrurl.Origin, fingerprint, user string,
+		auth []ssh.AuthMethod) (*ssh.Client, error) {
+		return egress.SSH(ctx, cfg, proxyURL, proxyKey, origin, fingerprint, user, auth)
+	}
+	registry := connector.NewRegistry(s.Development(), stub.New(), fhir.New(clients), fileexport.New(dial))
 
 	// The normaliser (PR 5): only with code tables and maps configured.
 	// Synthetic tables and unreviewed conversions load in development only.

@@ -424,3 +424,123 @@ func TestDailyReconciliation(t *testing.T) {
 }
 
 var _ = errors.New
+
+// fileConn is fakeConn as a file source: it reports a new file at newFile
+// (nil: none).
+type fileConn struct {
+	*fakeConn
+	newFile  *time.Time
+	setAside int
+}
+
+func (f *fileConn) SetAside(connector.Cursor) int { return f.setAside }
+
+func (f *fileConn) NewFileAt(connector.Cursor) (time.Time, bool) {
+	if f.newFile == nil {
+		return time.Time{}, false
+	}
+	return *f.newFile, true
+}
+
+// PR 11 (design §15.1, §15.4): rows a connector kept as dead letters leave
+// the run ok (no back-off) but record an unreadable_data error, so the
+// platform sees them; a file source's new-file time is kept for staleness,
+// and a run without a new file never moves it.
+func TestDeadLettersAndNewFileRecorded(t *testing.T) {
+	f := newFixture(t)
+	at := f.clock().Add(-time.Minute).Truncate(time.Microsecond)
+	fc := &fileConn{fakeConn: f.conn, newFile: &at}
+	f.conn.fetch = func(ctx context.Context, _ connector.Cursor, s connector.RawSink) (connector.Cursor, error) {
+		if err := s.Put(ctx, connector.RawRecord{Kind: "observation", SourceID: "SYNR-CSV-1", SourceVersion: "1",
+			SourceUpdatedAt: at, Fields: map[string]any{"status": "final"}}); err != nil {
+			return nil, err
+		}
+		rj, ok := s.(connector.Rejecter)
+		if !ok {
+			t.Fatal("the run's sink keeps no dead letters")
+		}
+		return connector.Cursor(`{"v":1}`), rj.Reject(ctx, connector.RejectedRecord{Kind: "observation", SourceID: "SYNR-CSV-2",
+			SourceVersion: "1", SourceUpdatedAt: at})
+	}
+	s := f.scheduler(f.store)
+	s.Connectors = connector.NewRegistry(true, fc)
+	if n, err := s.Once(context.Background()); err != nil || n != 1 {
+		t.Fatalf("ran %d: %v", n, err)
+	}
+	if outcome, ok, records := f.lastRun(t); outcome != "ok" || !ok || records != 1 {
+		t.Fatalf("run %s %v %d", outcome, ok, records)
+	}
+	if st := f.state(t); st.failures != 0 {
+		t.Fatalf("failures %d: dead letters must not back off", st.failures)
+	}
+	var errs int
+	var last *time.Time
+	if err := f.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM emr.connection_errors
+		WHERE connection_id = $1 AND code = 'unreadable_data'), (SELECT last_file_at FROM emr.sync_state WHERE connection_id = $1)`,
+		f.id).Scan(&errs, &last); err != nil {
+		t.Fatal(err)
+	}
+	if errs != 1 || last == nil || !last.Equal(at) {
+		t.Fatalf("errors %d, last file %v want %v", errs, last, at)
+	}
+	var rejected int
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM emr.raw_records WHERE connection_id = $1
+		AND status = 'rejected' AND reject_code = 'unreadable_data' AND payload IS NULL`, f.id).Scan(&rejected); err != nil || rejected != 1 {
+		t.Fatalf("dead letters %d %v", rejected, err)
+	}
+	// A run with no new file and no dead letter: last_file_at stays, no
+	// error row.
+	fc.newFile = nil
+	f.conn.fetch = nil
+	f.advance(10 * time.Minute)
+	f.due(t)
+	if n, err := s.Once(context.Background()); err != nil || n != 1 {
+		t.Fatalf("second run %d: %v", n, err)
+	}
+	if err := f.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM emr.connection_errors WHERE connection_id = $1),
+		(SELECT last_file_at FROM emr.sync_state WHERE connection_id = $1)`, f.id).Scan(&errs, &last); err != nil {
+		t.Fatal(err)
+	}
+	if errs != 1 || last == nil || !last.Equal(at) {
+		t.Fatalf("after a quiet run: errors %d, last file %v", errs, last)
+	}
+	// Files set aside (refused, misnamed, half-written) are reported the
+	// same way: the run ok, one error row.
+	fc.setAside = 2
+	f.advance(10 * time.Minute)
+	f.due(t)
+	if n, err := s.Once(context.Background()); err != nil || n != 1 {
+		t.Fatalf("third run %d: %v", n, err)
+	}
+	if outcome, ok, _ := f.lastRun(t); outcome != "ok" || !ok {
+		t.Fatalf("set aside: run %s", outcome)
+	}
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM emr.connection_errors WHERE connection_id = $1
+		AND code = 'unreadable_data'`, f.id).Scan(&errs); err != nil || errs != 2 {
+		t.Fatalf("set aside: errors %d %v", errs, err)
+	}
+}
+
+// putOnlySink keeps no dead letters.
+type putOnlySink struct{ Sink }
+
+// Security review (14 Nov): a run's sink offers dead letters only when the
+// sink behind it keeps them, so a connector's check (store nothing without
+// one) means what it says.
+func TestNoDeadLettersWithoutTheSinksSupport(t *testing.T) {
+	f := newFixture(t)
+	offered := true
+	f.conn.fetch = func(_ context.Context, _ connector.Cursor, s connector.RawSink) (connector.Cursor, error) {
+		_, offered = s.(connector.Rejecter)
+		return connector.Cursor(`{"v":1}`), nil
+	}
+	s := f.scheduler(f.store)
+	inner := s.NewSink
+	s.NewSink = func(cfg connector.Config, backfill bool) Sink { return putOnlySink{inner(cfg, backfill)} }
+	if n, err := s.Once(context.Background()); err != nil || n != 1 {
+		t.Fatalf("ran %d: %v", n, err)
+	}
+	if offered {
+		t.Fatal("dead letters offered by a sink that keeps none")
+	}
+}
