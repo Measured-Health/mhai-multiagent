@@ -223,6 +223,7 @@ func TestNamedCoverRevokeWaits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	for _, q := range []string{`SET LOCAL ROLE mhai_gateway`} {
 		if _, err := tx.Exec(ctx, q); err != nil {
 			t.Fatal(err)

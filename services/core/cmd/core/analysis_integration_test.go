@@ -363,3 +363,40 @@ func TestNamedAccessDemoCLI(t *testing.T) {
 		t.Errorf("second off: %v %q", err, out.String())
 	}
 }
+
+// core analysis named-access demo-on raises the demo scope to on (plan
+// departure 56), only under the demo's analysis switch, auditing each row
+// raised; a hospital that isn't the demo is refused.
+func TestNamedAccessDemoOnCLI(t *testing.T) {
+	super, provURL, _ := analysisEnv(t)
+	ctx := context.Background()
+	h := analysisHospital(t, super, "DEMO5")
+	var out bytes.Buffer
+	if err := analysisCmd(ctx, []string{"named-access", "demo-on", "demo5"}, provURL, &out, nil); err == nil {
+		t.Fatal("raised named access to on without the demo analysis switch")
+	}
+	if err := analysisCmd(ctx, []string{"seed-demo", "demo5", "--months", "2"}, provURL, &out,
+		pinned(time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC))); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := analysisCmd(ctx, []string{"named-access", "demo-on", "demo5"}, provURL, &out, nil); err != nil {
+		t.Fatalf("demo-on: %v", err)
+	}
+	if !strings.Contains(out.String(), " on (demo)") {
+		t.Errorf("output %q", out.String())
+	}
+	if n := scalar(t, super, `SELECT count(*) FROM named_access_switch WHERE (hospital_id IS NULL OR hospital_id = $1)
+		AND position = 'on' AND signoff_clinical = 'DEMO-SYNTHETIC'`, h); n != 2 {
+		t.Errorf("%d rows on, want 2", n)
+	}
+	if n := scalar(t, super, `SELECT count(*) FROM audit_log WHERE action = 'named_access.changed' AND payload->>'position' = 'on'`); n != 2 {
+		t.Errorf("%d entries, want 2", n)
+	}
+	if _, err := super.Exec(ctx, `INSERT INTO hospitals (name, short_code, status, time_zone) VALUES ('Synthetic Real', 'REAL5', 'active', 'UTC')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := analysisCmd(ctx, []string{"named-access", "demo-on", "real5"}, provURL, &out, nil); err == nil {
+		t.Error("raised named access to on for a hospital that isn't the demo")
+	}
+}
