@@ -77,6 +77,28 @@ $$;
 
 GRANT USAGE ON SCHEMA public TO mhai_analyst_rules;
 
+-- No analyst row from before the rules may break the clinician rule (an
+-- account given analyst at creation, which core users create allowed
+-- until now): the migration refuses, and names the count only. Remove the
+-- role from those accounts, or give them clinician, and run it again.
+-- (security review). The grant-time rules (two-step, switch, cap) are
+-- checked at each grant; the patient-level routes re-check two-step.
+-- +goose StatementBegin
+DO $$
+DECLARE
+    n integer;
+BEGIN
+    SELECT count(*) INTO n FROM user_roles a
+    WHERE a.role = 'analyst'
+      AND NOT EXISTS (SELECT 1 FROM user_roles c WHERE c.user_id = a.user_id AND c.role = 'clinician');
+    IF n > 0 THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+            MESSAGE = format('00030: %s analyst account(s) without the clinician role; remove analyst from them or give them clinician first', n);
+    END IF;
+END
+$$;
+-- +goose StatementEnd
+
 ------------------------------------------------------------------------
 -- The record of grants and removals.
 ------------------------------------------------------------------------
@@ -135,10 +157,12 @@ $$;
 -- +goose StatementEnd
 
 -- The writer's grantor and channel. Inside a definer function current_user
--- is the owner, but the role setting is still the caller's SET ROLE. Only
--- the provisioning role is read from mhai.operator_id (the CLI's --by
--- admin, after mhai_analyst_cli_users checked it); every other writer is
--- the token's user.
+-- is the owner, but the role setting is still the caller's SET ROLE. As
+-- mhai_gateway (db.WithHospitalUser) the grantor is the token's user; as
+-- mhai_provision (the CLI's SET LOCAL ROLE) it is mhai.operator_id, the
+-- --by admin mhai_analyst_cli_users checked. Any other session, such as a
+-- provisioning login that inherits the role without SET ROLE, has no
+-- grantor, so it can't pose as either (security review).
 -- +goose StatementBegin
 CREATE FUNCTION mhai_analyst_actor(OUT by_user uuid, OUT via text)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -148,8 +172,11 @@ BEGIN
     IF pg_catalog.current_setting('role') = 'mhai_provision' THEN
         by_user := NULLIF(pg_catalog.current_setting('mhai.operator_id', true), '')::uuid;
         via := 'cli';
-    ELSE
+    ELSIF pg_catalog.current_setting('role') = 'mhai_gateway' THEN
         by_user := public.mhai_current_user();
+        via := 'app';
+    ELSE
+        by_user := NULL;
         via := 'app';
     END IF;
 END
@@ -241,7 +268,7 @@ BEGIN
     IF NEW.role <> 'analyst' OR public.mhai_analyst_exempt() THEN
         RETURN NEW;
     END IF;
-    IF pg_catalog.current_setting('transaction_isolation') = 'repeatable read' THEN
+    IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
         RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'not_eligible',
             DETAIL = 'grant an analyst in a READ COMMITTED transaction';
     END IF;
@@ -376,6 +403,8 @@ DECLARE
     v_h uuid;
 BEGIN
     v_h := public.mhai_analyst_person(p_user);
+    -- The grantor first: nobody else learns whether the person holds it.
+    PERFORM public.mhai_analyst_check_grantor((SELECT a.by_user FROM public.mhai_analyst_actor() a), v_h);
     IF EXISTS (SELECT 1 FROM public.user_roles r WHERE r.user_id = p_user AND r.role = 'analyst') THEN
         RETURN false;
     END IF;
@@ -469,12 +498,31 @@ GRANT EXECUTE ON FUNCTION mhai_grant_analyst(uuid), mhai_remove_analyst(uuid), m
 GRANT EXECUTE ON FUNCTION mhai_analyst_cli_users(citext, citext) TO mhai_provision;
 
 ------------------------------------------------------------------------
--- The CLI's analyst entries: by the --by admin, in the person's hospital.
+-- The CLI's analyst entries: only for a change this transaction made, by
+-- the --by admin, in the person's hospital (security review: the
+-- provisioning role can't write an entry with no change behind it).
 ------------------------------------------------------------------------
+-- +goose StatementBegin
+CREATE FUNCTION mhai_analyst_change_open(p_change text, p_user text, p_hospital uuid, p_by uuid, p_action text)
+    RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+    SELECT EXISTS (SELECT 1 FROM public.analyst_changes c
+                   WHERE c.id::text = p_change AND c.user_id::text = p_user AND c.hospital_id = p_hospital
+                     AND c.by_user = p_by AND 'analyst.' || c.change = p_action AND c.via = 'cli'
+                     AND c.xact = pg_catalog.pg_current_xact_id())
+$$;
+-- +goose StatementEnd
+ALTER FUNCTION mhai_analyst_change_open(text, text, uuid, uuid, text) OWNER TO mhai_analyst_rules;
+REVOKE ALL ON FUNCTION mhai_analyst_change_open(text, text, uuid, uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION mhai_analyst_change_open(text, text, uuid, uuid, text) TO mhai_provision;
 CREATE POLICY provision_analyst_append ON audit_log FOR INSERT TO mhai_provision
     WITH CHECK (action IN ('analyst.granted', 'analyst.removed') AND entity = 'user'
                 AND hospital_id IS NOT NULL AND actor_id IS NOT NULL
-                AND actor_id = NULLIF(current_setting('mhai.operator_id', true), '')::uuid);
+                AND actor_id = NULLIF(current_setting('mhai.operator_id', true), '')::uuid
+                AND payload ->> 'via' = 'cli'
+                AND public.mhai_analyst_change_open(payload ->> 'change_id', entity_id, hospital_id, actor_id, action));
 
 -- +goose StatementBegin
 DO $$
@@ -493,6 +541,9 @@ $$;
 
 -- +goose Down
 
+-- Analyst rows stay as they are, with no rules over them until 00030 runs
+-- again; the change record goes, and the audit chain keeps every entry.
+
 -- +goose StatementBegin
 DO $$
 DECLARE
@@ -509,6 +560,7 @@ $$;
 -- +goose StatementEnd
 
 DROP POLICY provision_analyst_append ON audit_log;
+DROP FUNCTION mhai_analyst_change_open(text, text, uuid, uuid, text);
 
 DROP TRIGGER analyst_changes_audited ON analyst_changes;
 DROP TRIGGER user_roles_analyst_after ON user_roles;

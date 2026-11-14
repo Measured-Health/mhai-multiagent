@@ -587,7 +587,113 @@ func TestMigration00030DownUp(t *testing.T) {
 	if after != before {
 		t.Errorf("the audit appends changed:\n%s\nwant\n%s", after, before)
 	}
+	// An analyst row without clinician, from before the rules: Up refuses
+	// until it is fixed.
+	h := uuid.New()
+	var u uuid.UUID
+	if _, err := pool.Exec(ctx, `INSERT INTO hospitals (id, name, short_code, status, time_zone) VALUES ($1, 'Synthetic', $2, 'active', 'UTC')`,
+		h, uniqueCode("M")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO users (hospital_id, email, display_name) VALUES ($1, $2, 'Synthetic Staff') RETURNING id`,
+		h, uniqueCode("m")+"@example.test").Scan(&u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'analyst')`, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MigrateUp(ctx, pg.URL); err == nil || !strings.Contains(err.Error(), "without the clinician role") {
+		t.Fatalf("up with an analyst without clinician: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'clinician')`, u); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)
+	}
+}
+
+// Security review: a provisioning login that inherits mhai_provision
+// without SET ROLE can't pose as the gateway (it has no grantor), and the
+// provisioning role writes no analyst entry without a change of its own
+// transaction behind it.
+func TestProvisionCantPoseOrForge(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	w := newAnalystWorld(t, pool)
+	_, prov := loginPool(t, "IN ROLE mhai_provision")
+	tx, err := prov.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"mhai.user_id", "mhai.operator_id"} {
+		if _, err := tx.Exec(ctx, `SELECT set_config($1, $2, true)`, k, w.admin.String()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('mhai.hospital_id', $1, true)`, w.h.String()); err != nil {
+		t.Fatal(err)
+	}
+	_, err = tx.Exec(ctx, `SELECT mhai_grant_analyst($1)`, w.person)
+	_ = tx.Rollback(ctx)
+	if refusal(err) != "forbidden" {
+		t.Errorf("an inheriting provisioning login posing as the app: %v", err)
+	}
+	// As mhai_provision with the operator set: no entry without its change.
+	ptx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ptx.Rollback(ctx) }()
+	if _, err := ptx.Exec(ctx, `SET LOCAL ROLE mhai_provision`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ptx.Exec(ctx, `SELECT set_config('mhai.operator_id', $1, true)`, w.admin.String()); err != nil {
+		t.Fatal(err)
+	}
+	err = auditWrite(ctx, ptx, w.admin.String(), w.h.String(), "analyst.granted", w.person.String(), uuid.NewString(), "cli", "")
+	if pgCode(err) != rlsViolation {
+		t.Errorf("a provisioning entry with no change behind it: want 42501, got %v", err)
+	}
+	if isAnalyst(t, pool, w.person) {
+		t.Fatal("granted")
+	}
+}
+
+// Security review: a grant refuses any isolation but READ COMMITTED (the
+// lock then gives fresh reads), and a caller who isn't an admin learns
+// nothing of whether the person already holds the role.
+func TestGrantNeedsReadCommittedAndAdminFirst(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	w := newAnalystWorld(t, pool)
+	for _, iso := range []pgx.TxIsoLevel{pgx.RepeatableRead, pgx.Serializable} {
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: iso})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range []string{`SET LOCAL ROLE mhai_gateway`} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('mhai.hospital_id', $1, true), set_config('mhai.user_id', $2, true)`,
+			w.h.String(), w.admin.String()); err != nil {
+			t.Fatal(err)
+		}
+		_, err = tx.Exec(ctx, `SELECT mhai_grant_analyst($1)`, w.person)
+		_ = tx.Rollback(ctx)
+		if refusal(err) != "not_eligible" {
+			t.Errorf("%s: want not_eligible, got %v", iso, err)
+		}
+	}
+	held := staffer(t, pool, w.h, staffOpts{roles: []string{"clinician", "analyst"}})
+	clin := staffer(t, pool, w.h, staffOpts{roles: []string{"clinician"}})
+	err := asPerson(ctx, pool, w.h, clin, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT mhai_grant_analyst($1)`, held)
+		return err
+	})
+	if refusal(err) != "forbidden" {
+		t.Errorf("a clinician asking about an analyst: want forbidden, got %v", err)
 	}
 }
