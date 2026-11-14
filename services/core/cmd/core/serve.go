@@ -27,6 +27,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrmaint"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/grant"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
@@ -54,6 +55,9 @@ type app struct {
 	log     *slog.Logger
 	// analysis is Patient Analysis's nightly run (as mhai_analysis_job).
 	analysis *analysis.Nightly
+	// emrMaint runs the EMR purges and retention (run only with
+	// CORE_EMR_ENABLED).
+	emrMaint *emrmaint.Loop
 	// emrConsumer turns EMR findings into alerts (core_emr; run only with
 	// CORE_EMR_ENABLED).
 	emrConsumer *alerts.Consumer
@@ -162,6 +166,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	}
 	a.emrConsumer = &alerts.Consumer{Pool: a.pool, Pub: alerts.JSPublisher{JS: js}, AllowNullMRN: cfg.EMRAllowNullMRN,
 		Log: log, Metrics: &alerts.ConsumerMetrics{}}
+	a.emrMaint = &emrmaint.Loop{Pool: a.pool, Log: log, Retention: cfg.EMRRetentionSweep, Metrics: &emrmaint.Metrics{}}
 	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log, Metrics: &intel.Metrics{}, Pool: a.pool}
 	a.js = js
 	if cfg.RequestTrustedKeysPath != "" {
@@ -373,6 +378,16 @@ func serve() error {
 		go func() {
 			if err := a.emrConsumer.Run(ctx, a.js); err != nil {
 				log.Error("core: EMR finding consumer stopped", "reason", "internal_error")
+			}
+		}()
+	}
+	// EMR purges and retention (EMR design §10.6, §14.2): only with
+	// CORE_EMR_ENABLED; one core copy runs them (an advisory lock), as
+	// mhai_emr_maint. The nightly sweep also needs CORE_EMR_RETENTION_SWEEP.
+	if cfg.EMREnabled {
+		go func() {
+			if err := a.emrMaint.Run(ctx); err != nil {
+				log.Error("core: EMR maintenance loop stopped", "reason", "internal_error")
 			}
 		}()
 	}

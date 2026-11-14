@@ -333,6 +333,15 @@ var Catalogue = map[string]Entry{
 	"emr.patient_match_rejected": withheld(),
 	"emr.patient_excluded":       withheld(),
 	"emr.patient_matches_read":   withheld(),
+	// The exclusion purge, retention, legal holds and hospital removal
+	// (EMR PR 9): no mhai-web kind yet; sent bare.
+	"emr.exclusion_purged":         withheld(),
+	"emr.exclusion_purge_held":     withheld(),
+	"emr.exclusion_purge_released": withheld(),
+	"emr.retention_swept":          withheld(),
+	"emr.hospital_data_removed":    withheld(),
+	"legal_hold.placed":            withheld(),
+	"legal_hold.lifted":            withheld(),
 
 	// Alerts (EMR plan Tasks 31-34): the settings saves and an
 	// acknowledgement have mhai-web kinds (Plan 13), with no target; the

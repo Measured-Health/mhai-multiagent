@@ -30,6 +30,29 @@ All notable changes to this project are documented here. The format follows
   `named_access_off`, `file_too_large`, `file_type`, `end_date_too_late`,
   `not_eligible`, `not_eligible_platform`, `would_empty`. Plan departures
   29–42.
+- EMR integration, PR 9 (retention, the exclusion purge and Usage; off by
+  default). Migration **00032** (after 00031): `legal_holds` (placed and
+  lifted only by the provisioning login, never deleted), durable
+  `emr.purge_requests`, and the purge, release, retention and removal
+  functions, with a new role `mhai_emr_maint`. An exclusion still purges at
+  once, now also the patient's findings and what core's consumer recorded
+  about them; under a legal hold nothing is deleted, the request is held,
+  and the alerts stop naming the patient until the hold is lifted. Core's
+  maintenance loop (only with `CORE_EMR_ENABLED`, one copy) releases held
+  requests after a lift and purges them, lists requests held over 90 days,
+  and, with `CORE_EMR_RETENTION_SWEEP` (off by default until the privacy
+  lead confirms the values), runs design §14.2's retention nightly; a
+  hospital on hold is never swept. New commands: `core emr exclude` (as a
+  login made from `EMR_ADMIN_DB_USER`, a member of `mhai_emr_admin` only;
+  the MRN from stdin), `core emr remove-hospital-data` and `core hospitals
+  legal-hold place|lift` (provisioning login). Every purge and hold change
+  is audited with ids and counts (`emr.exclusion_purged`,
+  `emr.exclusion_purge_held`, `emr.exclusion_purge_released`,
+  `emr.retention_swept`, `legal_hold.placed`, `legal_hold.lifted`,
+  `emr.hospital_data_removed`); `alert.not_raised` gains
+  `patient_excluded`. OpenAPI 1.21.0 (additive): the exclusion's reply
+  carries `purge_held`. `alerts.UsageBlock` counts alerts for Usage under
+  the small-group rule (no route yet).
 - EMR integration, PR 8b (the finding consumer; off by default: it runs only
   with `CORE_EMR_ENABLED`, and with no rule set activated for a hospital
   every finding is shadow and never reaches it). Core's `core_emr` consumer
@@ -584,6 +607,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Go 1.26 for CI and the core and emr images (was 1.24, now out of
+  support), with staticcheck 2026.2.2. Newer Go dependency updates require
+  Go 1.25 or 1.26.
 - The pipeline worker requires `sslmode=verify-full` for its database
   outside development. Core and the workers warn when
   `OTEL_EXPORTER_OTLP_INSECURE` is on outside development, and log why

@@ -90,6 +90,11 @@ var dbTxAllowedFiles = map[string]string{
 	// The analysis provisioning CLI (core analysis switch off --global):
 	// SET LOCAL ROLE mhai_provision on the provisioning login, no hospital.
 	"cmd/core/analysis.go": "the analysis CLI's provisioning transaction (mhai_provision)",
+	// EMR PR 9: core's maintenance loop runs as mhai_emr_maint with the
+	// hospital it visits set, under its leader lock; the operator's EMR
+	// exclusion runs as mhai_emr_admin (its own login).
+	"internal/emrmaint/loop.go": "the EMR maintenance loop's leader lock (Acquire) and its transactions as mhai_emr_maint",
+	"cmd/core/emr.go":           "the operator's EMR exclusion transaction (mhai_emr_admin)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on

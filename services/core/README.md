@@ -17,7 +17,7 @@ Design: `docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md`.
   (`go run ./cmd/permgen`; a test fails when they are stale).
 
 Module `github.com/Measured-Health/mhai-multiagent/services/core`, binary
-`core`, Go 1.24.
+`core`, Go 1.26.
 
 ## Commands
 
@@ -34,7 +34,15 @@ core users roles EMAIL --add analyst|--remove analyst --by ADMIN_EMAIL   # the a
 core hospitals mark-demo ID|CODE                             # once: a hospital made before is_demo (the live demo's), audited
 core analysis seed-demo ID|CODE [--seed N] [--months 1-24]   # a hospital created with --demo only
 core analysis switch off ID|CODE | --global                  # lower an analysis switch, audited
+core hospitals legal-hold place|lift ID|CODE --reference REF  # EMR: no deletion while a hold is open, audited
+core emr exclude --hospital ID|CODE (--patient ID | --mrn-stdin) --reason CODE   # as the EMR operator login
+core emr remove-hospital-data ID|CODE                        # removal_scheduled, no hold, credentials wiped first
 ```
+
+`emr exclude` reads an MRN from stdin (`--mrn-stdin`), never from an
+argument. EMR purges and retention run in `core serve` itself (only with
+`CORE_EMR_ENABLED`; the nightly sweep also needs
+`CORE_EMR_RETENTION_SWEEP`), one core copy at a time.
 
 `users create` never takes the password as an argument. It prompts on a
 terminal and reads one line from stdin otherwise. New accounts must change
@@ -44,7 +52,7 @@ email, name or password.
 From `services/core/` (or `make core-test` / `make core-lint` from the root):
 
 ```bash
-gofmt -l . && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+gofmt -l . && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
 go test -race ./...                              # unit tests
 go test -race -tags integration ./...            # + Postgres and NATS in containers
 go test -race -tags "integration test" ./...     # + the /_test/ fixture routes
@@ -62,6 +70,7 @@ one job:
 | `POSTGRES_USER` (owner / superuser) | — | `core migrate` only |
 | `core_app` (`CORE_DB_USER`) | `mhai_app` only | `core serve` |
 | `core_provision` (`PROVISION_DB_USER`) | `mhai_provision` only | `core hospitals create`, `core hospitals activate`, `core users create`, `core users roles`, `core keys` rotations |
+| (none; `EMR_ADMIN_DB_USER`) | `mhai_emr_admin` only | `core emr exclude` (the operator's fallback for a hospital's written request) |
 
 - `core serve` refuses any other login at start-up (`db.CheckLoginRole`):
   a superuser, `BYPASSRLS`, an owner, a login that inherits an app role, or
