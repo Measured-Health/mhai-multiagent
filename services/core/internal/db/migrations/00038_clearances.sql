@@ -898,12 +898,13 @@ END
 $$;
 -- +goose StatementEnd
 
--- mhai_clearance_check(...): the upload's refusals before anything is
+-- mhai_clearance_check(..., slot): the upload's refusals before anything is
 -- stored (design §8.1): the dates (end_date_too_late, invalid), then the
 -- people who aren't eligible, the platform admins' ids for the emails in
 -- order, and whether renews names a letter of this hospital.
 -- +goose StatementBegin
 CREATE FUNCTION mhai_clearance_check(p_letter_date date, p_end_date date, p_renews uuid, p_staff uuid[], p_emails citext[],
+    p_slot integer,
     OUT bad_staff uuid[], OUT bad_emails text[], OUT platform_ids uuid[], OUT renews_ok boolean)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path = pg_catalog, pg_temp
@@ -921,9 +922,15 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'unavailable';
     END IF;
     v_today := public.mhai_clearance_day(v_h, now());
-    -- Reserve, then check: a slot taken today, within the limit, or no check.
-    IF COALESCE((SELECT r.refused FROM public.clearance_check_refusals r WHERE r.hospital_id = v_h
-                   AND r.user_id = public.mhai_current_user() AND r.day = v_today), 0) NOT BETWEEN 1 AND 5 THEN
+    -- Reserve, then check: p_slot is the number mhai_clearance_reserve_check
+    -- handed this request, within the limit and taken today. The limit is
+    -- the reservation's (atomic), not today's total now: a later
+    -- reservation must not refuse a check that was already within it
+    -- (CI: under load the re-read refused in-limit checks, which then gave
+    -- their slots back).
+    IF p_slot IS NULL OR p_slot NOT BETWEEN 1 AND 5
+       OR p_slot > COALESCE((SELECT r.refused FROM public.clearance_check_refusals r WHERE r.hospital_id = v_h
+                               AND r.user_id = public.mhai_current_user() AND r.day = v_today), 0) THEN
         RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'rate_limited';
     END IF;
     IF p_end_date IS NULL OR p_end_date <= v_today OR p_end_date > (v_today + interval '12 months')::date THEN
@@ -1289,7 +1296,7 @@ ALTER FUNCTION mhai_clearance_event_audited() OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_event_rules() OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_gate() OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_today() OWNER TO mhai_clearance_rules;
-ALTER FUNCTION mhai_clearance_check(date, date, uuid, uuid[], citext[]) OWNER TO mhai_clearance_rules;
+ALTER FUNCTION mhai_clearance_check(date, date, uuid, uuid[], citext[], integer) OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_create(text, text, date, date, uuid, uuid[], uuid[]) OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_demo_ready(uuid, integer, bytea) OWNER TO mhai_clearance_rules;
 ALTER FUNCTION mhai_clearance_lock(uuid, integer) OWNER TO mhai_clearance_rules;
@@ -1309,7 +1316,7 @@ REVOKE ALL ON FUNCTION mhai_named_access_rank(text), mhai_named_access_within_gl
     mhai_clearance_demo_hospital(uuid), mhai_clearance_gate_for(uuid), mhai_clearance_action(text),
     mhai_clearance_rules(), mhai_clearance_after(), mhai_clearance_covered_rules(), mhai_clearance_covered_after(),
     mhai_clearance_event_audited(), mhai_clearance_event_rules(), mhai_clearance_gate(), mhai_clearance_today(),
-    mhai_clearance_check(date, date, uuid, uuid[], citext[]), mhai_clearance_create(text, text, date, date, uuid, uuid[], uuid[]),
+    mhai_clearance_check(date, date, uuid, uuid[], citext[], integer), mhai_clearance_create(text, text, date, date, uuid, uuid[], uuid[]),
     mhai_clearance_demo_ready(uuid, integer, bytea), mhai_clearance_lock(uuid, integer),
     mhai_clearance_revoke(uuid, integer, text, text), mhai_clearance_narrow(uuid, integer, uuid[], text, text),
     mhai_clearance_names(uuid[]), mhai_clearance_reserve_check(), mhai_clearance_release_check(), mhai_clearance_pending(), mhai_clearance_due(timestamptz),
@@ -1322,7 +1329,7 @@ GRANT EXECUTE ON FUNCTION mhai_named_access_rank(text), mhai_named_access_within
 GRANT EXECUTE ON FUNCTION mhai_named_access_position(uuid) TO mhai_gateway, mhai_provision;
 GRANT EXECUTE ON FUNCTION mhai_named_access_demo_raise(uuid) TO mhai_provision;
 GRANT EXECUTE ON FUNCTION mhai_clearance_gate(), mhai_clearance_today(),
-    mhai_clearance_check(date, date, uuid, uuid[], citext[]), mhai_clearance_create(text, text, date, date, uuid, uuid[], uuid[]),
+    mhai_clearance_check(date, date, uuid, uuid[], citext[], integer), mhai_clearance_create(text, text, date, date, uuid, uuid[], uuid[]),
     mhai_clearance_demo_ready(uuid, integer, bytea), mhai_clearance_revoke(uuid, integer, text, text),
     mhai_clearance_narrow(uuid, integer, uuid[], text, text), mhai_clearance_names(uuid[]), mhai_clearance_pending(),
     mhai_clearance_reserve_check(), mhai_clearance_release_check(), mhai_clearance_nightly(timestamptz) TO mhai_gateway;
@@ -1388,7 +1395,7 @@ DROP FUNCTION mhai_clearance_revoke(uuid, integer, text, text);
 DROP FUNCTION mhai_clearance_lock(uuid, integer);
 DROP FUNCTION mhai_clearance_demo_ready(uuid, integer, bytea);
 DROP FUNCTION mhai_clearance_create(text, text, date, date, uuid, uuid[], uuid[]);
-DROP FUNCTION mhai_clearance_check(date, date, uuid, uuid[], citext[]);
+DROP FUNCTION mhai_clearance_check(date, date, uuid, uuid[], citext[], integer);
 DROP FUNCTION mhai_clearance_today();
 DROP FUNCTION mhai_clearance_gate();
 DROP FUNCTION mhai_clearance_event_rules();

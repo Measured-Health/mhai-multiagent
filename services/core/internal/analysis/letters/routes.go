@@ -392,16 +392,16 @@ func (d Deps) change(w http.ResponseWriter, r *http.Request, what string, id uui
 // rate_limited, and the first refusal past it writes one flagged entry.
 const RefusalsPerDay = 5
 
-// reserveCheck takes a check slot in its own committed transaction; ok is
-// false past the limit (the reply is then 429).
-func (d Deps) reserveCheck(ctx context.Context) (ok bool, err error) {
+// reserveCheck takes a check slot in its own committed transaction and
+// returns its number; ok is false past the limit (the reply is then 429).
+func (d Deps) reserveCheck(ctx context.Context) (slot int, ok bool, err error) {
 	p, _ := authz.FromContext(ctx)
 	err = authz.TxUser(ctx, d.Pool, func(tx pgx.Tx) error {
 		var n int
 		if err := tx.QueryRow(ctx, `SELECT mhai_clearance_reserve_check()`).Scan(&n); err != nil {
 			return err
 		}
-		ok = n <= RefusalsPerDay
+		slot, ok = n, n <= RefusalsPerDay
 		if n != RefusalsPerDay+1 {
 			return nil
 		}
@@ -409,7 +409,7 @@ func (d Deps) reserveCheck(ctx context.Context) (ok bool, err error) {
 			RequestID: httpx.RequestIDFrom(ctx), Action: "clearance.check_limit_reached", Entity: "user",
 			EntityID: p.UserID.String(), Payload: map[string]any{"limit": RefusalsPerDay}})
 	})
-	return ok, err
+	return slot, ok, err
 }
 
 // releaseCheck gives a slot back in its own transaction (the check wasn't
@@ -477,10 +477,12 @@ func (d Deps) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Reserve, then check (the limit holds under concurrency).
-	if ok, err := d.reserveCheck(ctx); err != nil {
+	slot, ok, err := d.reserveCheck(ctx)
+	if err != nil {
 		d.fail(w, r, "upload", err)
 		return
-	} else if !ok {
+	}
+	if !ok {
 		httpx.Error(w, r, "rate_limited")
 		return
 	}
@@ -490,14 +492,14 @@ func (d Deps) upload(w http.ResponseWriter, r *http.Request) {
 	var bad []string
 	badCode := ""
 	platformRefused := false
-	err := d.tx(ctx, func(tx pgx.Tx) error {
+	err = d.tx(ctx, func(tx pgx.Tx) error {
 		var badStaff []uuid.UUID
 		var badEmails []string
 		var platformIDs []uuid.UUID
 		var renewsOK bool
 		if err := tx.QueryRow(ctx, `SELECT bad_staff, bad_emails, platform_ids, renews_ok
-			FROM mhai_clearance_check($1, $2, $3, $4, $5::citext[])`,
-			in.letterDate, in.endDate, in.renews, in.covered, in.coveredPlatform).
+			FROM mhai_clearance_check($1, $2, $3, $4, $5::citext[], $6)`,
+			in.letterDate, in.endDate, in.renews, in.covered, in.coveredPlatform, slot).
 			Scan(&badStaff, &badEmails, &platformIDs, &renewsOK); err != nil {
 			return err
 		}
@@ -537,7 +539,10 @@ func (d Deps) upload(w http.ResponseWriter, r *http.Request) {
 		out, err = one(ctx, tx, id)
 		return err
 	})
-	if badCode == "" && !platformRefused {
+	// A slot is given back only when the check answered something other
+	// than an eligibility refusal, or the request failed after it; a limit
+	// refusal keeps it.
+	if code, _ := codeOf(err); badCode == "" && !platformRefused && code != "rate_limited" {
 		d.releaseCheck(ctx)
 	}
 	if err != nil {

@@ -811,11 +811,20 @@ func TestEligibilityRefusalsLimitUnderRace(t *testing.T) {
 			t.Errorf("unexpected status %d", c)
 		}
 	}
+	// The security property, whatever the load: at most RefusalsPerDay
+	// eligibility answers; every other request a limit refusal.
 	if answered > RefusalsPerDay || answered+limited != n {
 		t.Errorf("%d not-eligible answers and %d limited of %d parallel checks, want at most %d answers",
 			answered, limited, n, RefusalsPerDay)
 	}
-	if got := e.count(t, `SELECT refused FROM clearance_check_refusals WHERE hospital_id = $1 AND user_id = $2`, e.h, e.admin); got != n {
-		t.Errorf("%d slots taken, want %d", got, n)
+	// Every answer and every limit refusal keeps its slot (none is given
+	// back), and the counter never exceeds the requests made.
+	if got := e.count(t, `SELECT refused FROM clearance_check_refusals WHERE hospital_id = $1 AND user_id = $2`, e.h, e.admin); got != answered+limited || got > n {
+		t.Errorf("%d slots taken for %d answers and %d limit refusals of %d requests", got, answered, limited, n)
+	}
+	// And a reservation within the limit is answered, not refused by a later
+	// one: the first RefusalsPerDay slots each got an answer.
+	if answered != RefusalsPerDay {
+		t.Errorf("%d answers, want %d (an in-limit check was refused)", answered, RefusalsPerDay)
 	}
 }
