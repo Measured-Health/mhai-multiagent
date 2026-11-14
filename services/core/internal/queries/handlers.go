@@ -7,7 +7,14 @@
 // asked. Another hospital's or another clinician's id is 404 not_found,
 // never 403. The question and the patient data are stored on the row only:
 // they are never logged, audited or put on a NATS message (the job carries
-// the query id).
+// the query id, and the patient id when the question names one).
+//
+// A question may name an MHAI patient (patient_id, EMR design §10.5). Core
+// accepts it only after emr_patient_in_hospital says it is an active
+// patient of the caller's hospital (intel.CheckPatient); otherwise 404
+// not_found, never 403, so another hospital's patient and no patient look
+// the same. With EMR off (CORE_EMR_ENABLED false) no patient is accepted,
+// and the database isn't asked. The checked id is the job token's pids.
 package queries
 
 import (
@@ -21,6 +28,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
@@ -40,6 +48,9 @@ type Deps struct {
 	// Cap is the questions in flight per hospital (INTELLIGENCE_QUERY_CAP).
 	Cap int
 	Log *slog.Logger
+	// Patients accepts a question's patient_id (CORE_EMR_ENABLED). False:
+	// any patient_id is 404 not_found.
+	Patients bool
 }
 
 func (d Deps) log() *slog.Logger {
@@ -83,12 +94,17 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "validation_failed")
 		return
 	}
+	pid, _ := in.patient()
+	if pid != uuid.Nil && !d.Patients {
+		httpx.Error(w, r, "not_found")
+		return
+	}
 	op, ok := authz.OperationByName(RunQuery)
 	if !ok || d.Intel == nil || d.Pool == nil || d.Cap < 1 {
 		httpx.Error(w, r, "not_ready")
 		return
 	}
-	patient, err := json.Marshal(in.PatientData)
+	patientData, err := json.Marshal(in.PatientData)
 	if err != nil {
 		httpx.Error(w, r, "validation_failed")
 		return
@@ -110,6 +126,20 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		if !usable {
 			return errUnusable
 		}
+		var patient any
+		if pid != uuid.Nil {
+			// Before the in-flight slot: a refused patient takes nothing.
+			if _, err := intel.CheckPatient(ctx, tx, intel.FromPrincipal(p, rid), pid); err != nil {
+				if errors.Is(err, intel.ErrNoPatient) {
+					return errNoPatient
+				}
+				return errInsert
+			}
+			patient = pid
+			if betweenCheckAndInsert != nil {
+				betweenCheckAndInsert()
+			}
+		}
 		if err := intel.ReserveInFlight(ctx, tx, p.HospitalID, d.Cap); err != nil {
 			return err
 		}
@@ -118,17 +148,28 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 			category = cat
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO clinical_queries
-			(id, hospital_id, patient_data_json, clinical_question, urgency, category, status, created_by, request_id, deadline_at)
-			VALUES ($1, $2, $3::jsonb, $4, $5, $6, 'queued', $7, $8, now() + make_interval(secs => $9))
+			(id, hospital_id, patient_data_json, clinical_question, urgency, category, status, created_by, request_id, deadline_at,
+			 patient_id)
+			VALUES ($1, $2, $3::jsonb, $4, $5, $6, 'queued', $7, $8, now() + make_interval(secs => $9), $10)
 			RETURNING deadline_at`,
-			id, p.HospitalID, string(patient), in.ClinicalQuestion, in.Urgency, category, p.UserID, rid, op.Timeout.Seconds()).
-			Scan(&deadline); err != nil {
+			id, p.HospitalID, string(patientData), in.ClinicalQuestion, in.Urgency, category, p.UserID, rid, op.Timeout.Seconds(),
+			patient).Scan(&deadline); err != nil {
+			// 00033's check, under a share lock on the patient row: an
+			// exclusion or a merge that committed since the check above.
+			if pid != uuid.Nil && patientRefused(err) {
+				return errNoPatient
+			}
 			return errInsert
 		}
 		// Ids and codes only. The specialty (stored as category) is free
 		// text with no closed list in the contract (each hospital sets its
-		// own), so it stays out of the chain.
+		// own), so it stays out of the chain. A question about a patient
+		// says so, not which: the chain is never purged, and the patient
+		// id stays on the row, which an exclusion unlinks (00033).
 		payload := map[string]any{"query_id": id.String(), "urgency": in.Urgency}
+		if pid != uuid.Nil {
+			payload["patient"] = true
+		}
 		return audit.Write(ctx, tx, audit.Event{ActorID: p.UserID.String(), HospitalID: p.HospitalID.String(), RequestID: rid,
 			Action: "query.submitted", Entity: "query", EntityID: id.String(), Payload: payload})
 	})
@@ -137,6 +178,8 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, errUnusable):
 			code = "unauthenticated"
+		case errors.Is(err, errNoPatient):
+			code = "not_found"
 		case !errors.Is(err, intel.ErrAtCap):
 			code = "internal_error"
 			d.log().Error("queries: submit failed", "request_id", rid, "hospital_id", p.HospitalID.String())
@@ -154,10 +197,22 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 // afterCommit is a test hook (export_test.go): nil in production.
 var afterCommit func()
 
+// betweenCheckAndInsert is a test hook (export_test.go): runs after the
+// patient check and before the insert. Nil in production.
+var betweenCheckAndInsert func()
+
 var (
-	errInsert   = errors.New("queries: insert failed")
-	errUnusable = errors.New("queries: the account or hospital was deactivated")
+	errInsert    = errors.New("queries: insert failed")
+	errUnusable  = errors.New("queries: the account or hospital was deactivated")
+	errNoPatient = errors.New("queries: not an active patient of the hospital")
 )
+
+// patientRefused reports whether err is 00033's active-patient check (its
+// SQLSTATE and constraint name), and no other fault of the insert.
+func patientRefused(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "23514" && pe.ConstraintName == "clinical_queries_patient_active"
+}
 
 // publish publishes the job after the commit, as the principal (their
 // current roles), and marks the row published; first it re-checks the row
@@ -174,10 +229,31 @@ func (d Deps) publish(ctx context.Context, p authz.Principal, rid string, id uui
 	// left unpublished for the sweeper, which re-checks the account and
 	// hospital and cancels it (account_unusable); the worker refuses to
 	// claim it if a publish slips past this check.
+	//
+	// A question that names a patient is checked again in the same
+	// transaction, and the job carries that checked patient only.
 	var live bool
+	caller := intel.FromPrincipal(p, intel.JobRID(id, rid))
+	job := &intelpb.RunQueryJob{QueryId: id.String()}
 	if err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM clinical_queries q JOIN hospitals h ON h.id = q.hospital_id
-			WHERE q.id = $1 AND q.status = 'queued' AND h.status = 'active')`, id).Scan(&live)
+		var pid *uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT q.patient_id FROM clinical_queries q JOIN hospitals h ON h.id = q.hospital_id
+			WHERE q.id = $1 AND q.status = 'queued' AND h.status = 'active'`, id).Scan(&pid)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// EMR switched off since: the job goes without the patient.
+		if pid != nil && d.Patients {
+			if caller, err = intel.CheckPatient(ctx, tx, caller, *pid); err != nil {
+				return err
+			}
+			job.PatientId = pid.String()
+		}
+		live = true
+		return nil
 	}); err != nil {
 		d.log().Warn("queries: pre-publish check failed; the sweeper will", "query_id", id.String(), "request_id", rid)
 		return
@@ -186,8 +262,7 @@ func (d Deps) publish(ctx context.Context, p authz.Principal, rid string, id uui
 		d.log().Info("queries: not published: cancelled or hospital deactivated", "query_id", id.String(), "request_id", rid)
 		return
 	}
-	caller := intel.FromPrincipal(p, intel.JobRID(id, rid))
-	if err := d.Intel.PublishJob(ctx, caller, RunQuery, id, &intelpb.RunQueryJob{QueryId: id.String()}, deadline); err != nil {
+	if err := d.Intel.PublishJob(ctx, caller, RunQuery, id, job, deadline); err != nil {
 		d.log().Warn("queries: job not published; the sweeper will", "query_id", id.String(), "request_id", rid)
 		return
 	}
