@@ -55,6 +55,17 @@ var Codes = map[string]int{
 	// (the body names who and when); alert settings with no recipient.
 	"already_handled": http.StatusConflict,
 	"no_recipients":   http.StatusUnprocessableEntity,
+	// The hospital admin's staff routes (frontend requirements §5.1;
+	// Analysis Task 17, additive): an admin's change to their own account
+	// that isn't allowed; no active hospital admin would be left; the
+	// Analyst grant's refusals (migration 00030); and a route the app
+	// calls that core has no feature behind yet.
+	"self_change":     http.StatusForbidden,
+	"last_admin":      http.StatusConflict,
+	"analysis_off":    http.StatusConflict,
+	"analyst_cap":     http.StatusConflict,
+	"not_eligible":    http.StatusUnprocessableEntity,
+	"not_implemented": http.StatusNotImplemented,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -90,6 +101,12 @@ var titles = map[string]string{
 	"level_not_supported": "Level not supported",
 	"already_handled":     "Already handled",
 	"no_recipients":       "No recipients",
+	"self_change":         "Not allowed on your own account",
+	"last_admin":          "Last hospital admin",
+	"analysis_off":        "Analysis is off",
+	"analyst_cap":         "Analyst limit reached",
+	"not_eligible":        "Not eligible",
+	"not_implemented":     "Not available",
 }
 
 var details = map[string]string{
@@ -122,6 +139,12 @@ var details = map[string]string{
 	"level_not_supported": "Only the de-identified list is available.",
 	"already_handled":     "Someone has already handled this alert.",
 	"no_recipients":       "Choose the queue or at least one clinician.",
+	"self_change":         "You can't make this change to your own account.",
+	"last_admin":          "The hospital needs at least one active hospital admin.",
+	"analysis_off":        "Patient Analysis is off for this hospital.",
+	"analyst_cap":         "The hospital already has the most analysts allowed.",
+	"not_eligible":        "This person can't be given this role.",
+	"not_implemented":     "This isn't available yet.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.
