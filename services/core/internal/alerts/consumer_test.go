@@ -3,6 +3,7 @@ package alerts_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -100,7 +101,7 @@ func TestConsumerDeadLettersNeverSkips(t *testing.T) {
 		t.Fatalf("fifth delivery: acked %d termed %d naked %d", a, tm, nk)
 	}
 	if len(pub.subjects) != 1 || pub.subjects[0] != "dead.v1."+hid.String()+".core_emr" ||
-		pub.ids[0] != "core_emr:finding:"+fid.String() || met.DeadLettered.Load() != 1 {
+		!strings.HasPrefix(pub.ids[0], "core_emr:finding:"+fid.String()+":") || met.DeadLettered.Load() != 1 {
 		t.Fatalf("dead letter: %v %v %d", pub.subjects, pub.ids, met.DeadLettered.Load())
 	}
 	var dl emrpb.DeadLetter

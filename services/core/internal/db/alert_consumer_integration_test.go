@@ -50,6 +50,14 @@ func TestAlertPatientMustBeActive(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE alerts SET patient_id = $2 WHERE id = $1`, a, op); err == nil {
 		t.Error("alert moved to another hospital's patient")
 	}
+	// A role bound to hospital A can't use the check on B's patient.
+	if err := asRoleIn(ctx, pool, "mhai_emr_core", f.h, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO alerts (hospital_id, patient_id, rule_id, category, severity, routed_queue)
+			VALUES ($1, $2, 'r3', 'blood_sugar', 'critical', true)`, other, op)
+		return err
+	}); pgCode(err) != permissionDenied {
+		t.Errorf("cross-hospital alert through the check: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `UPDATE alerts SET patient_id = NULL, finding_id = NULL WHERE id = $1`, a); err != nil {
 		t.Fatalf("clearing the patient: %v", err)
 	}

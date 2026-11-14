@@ -618,3 +618,52 @@ func TestConsumerNoPHIInLogsOrAudit(t *testing.T) {
 	}
 	_ = authz.RoleClinician
 }
+
+// A new alert that a second hit moved stands for both findings: when the
+// newer one is retracted or amended down, the alert goes back to the
+// other open finding (never withdrawn, never below it).
+func TestGroupedAlertNeverDropsAnOpenFinding(t *testing.T) {
+	w := newWorld(t)
+	c := w.consumer()
+	mustHandle(t, c, w.h, w.finding) // F0 critical
+	f1 := w.addFinding(t, w.patient, w.observation(t, w.patient, 7.0, "final"), fspec{})
+	mustHandle(t, c, w.h, f1) // new hit: the alert moves to F1
+	if got := alertRows(t, w.h); len(got) != 1 || got[0].finding != f1 {
+		t.Fatalf("new hit: %+v", got)
+	}
+	withdrawFinding(t, f1, "source_retracted")
+	mustHandle(t, c, w.h, f1)
+	got := alertRows(t, w.h)
+	if len(got) != 1 || got[0].status != "new" || got[0].withdrawn != nil || got[0].finding != w.finding ||
+		got[0].severity != "critical" {
+		t.Fatalf("retracting F1 dropped F0: %+v", got)
+	}
+	if lastPayload(t, w.h, "alert.updated")["change"] != "regrouped" {
+		t.Fatal("not audited as regrouped")
+	}
+	// Amended down to urgent while F0 is still critical: stays critical on F0.
+	f2 := w.addFinding(t, w.patient, w.observation(t, w.patient, 7.1, "final"), fspec{})
+	mustHandle(t, c, w.h, f2)
+	f3 := w.amendFinding(t, f2, 5.9, "urgent")
+	mustHandle(t, c, w.h, f3)
+	got = alertRows(t, w.h)
+	if len(got) != 1 || got[0].severity != "critical" || got[0].status != "new" {
+		t.Fatalf("amended below an open critical: %+v", got)
+	}
+}
+
+// K11: a shadow successor (the hospital went back to shadow) never
+// changes a live alert.
+func TestShadowSuccessorLeavesLiveAlert(t *testing.T) {
+	w := newWorld(t)
+	c := w.consumer()
+	mustHandle(t, c, w.h, w.finding)
+	obs := w.observation(t, w.patient, 9.9, "amended")
+	f2 := w.addFinding(t, w.patient, obs, fspec{shadow: true, supersedes: &w.finding})
+	exec(t, `UPDATE emr.findings SET status = 'superseded', superseded_by = $2 WHERE id = $1`, w.finding, f2)
+	mustHandle(t, c, w.h, w.finding)
+	got := alertRows(t, w.h)
+	if len(got) != 1 || got[0].finding != w.finding || got[0].amended != nil || got[0].status != "new" {
+		t.Fatalf("a shadow finding changed the alert: %+v", got)
+	}
+}

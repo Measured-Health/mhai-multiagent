@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -58,7 +59,9 @@ const (
 	// ConsumerMaxDeliver is the durable's limit (bus.EMRMaxDeliver): the
 	// fifth failed delivery dead-letters.
 	ConsumerMaxDeliver = bus.EMRMaxDeliver
-	consumerFetchBatch = 10
+	// consumerFetchBatch: one message at a time, so a message never waits
+	// in a batch past its ack wait (and isn't redelivered meanwhile).
+	consumerFetchBatch = 1
 	consumerFetchWait  = 5 * time.Second
 	// consumerDeadline is inside the durable's 60 s ack wait.
 	consumerDeadline = 50 * time.Second
@@ -66,6 +69,10 @@ const (
 	// a merge, a deadlock) is retried in process this many times before
 	// the message is naked.
 	consumerAttempts = 3
+	// deadAttempts and deadBackoff: a dead letter's publish is tried this
+	// many times, waiting a growing multiple of deadBackoff between.
+	deadAttempts = 3
+	deadBackoff  = time.Second
 	// maxChain bounds how far a chain of amended findings is followed.
 	maxChain = 20
 	// maxPrevious bounds an amended alert's previous value (characters).
@@ -102,6 +109,7 @@ type ConsumerMetrics struct {
 	Retried      atomic.Int64 // messages naked for a retry
 	DeadLettered atomic.Int64 // messages dead-lettered (pages)
 	DeadFailed   atomic.Int64 // dead letters that couldn't be sent (message kept)
+	Unavailable  atomic.Int64 // attempts to reach the durable that failed (page)
 }
 
 // Publisher publishes one message with a de-duplication id (the dead
@@ -261,10 +269,24 @@ func errCode(err error) string {
 
 func (c *Consumer) deadLetter(ctx context.Context, hid uuid.UUID, kind string, ref uuid.UUID) bool {
 	b, err := proto.Marshal(&emrpb.DeadLetter{Stage: "core", BatchId: ref.String(), ErrorCode: "core_" + kind + "_failed"})
-	if err == nil && c.Pub != nil {
-		err = c.Pub.Publish(ctx, "dead.v1."+hid.String()+".core_emr", b, "core_emr:"+kind+":"+ref.String())
-	} else if err == nil {
+	if err == nil && c.Pub == nil {
 		err = errors.New("alerts: no publisher")
+	}
+	if err == nil {
+		// Past the durable's MaxDeliver the server won't deliver the
+		// message again, so the publish is retried here. The id names this
+		// attempt: a later letter about the same finding (another status)
+		// is never taken for a duplicate.
+		id := "core_emr:" + kind + ":" + ref.String() + ":" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		for i := 0; i < deadAttempts; i++ {
+			if err = c.Pub.Publish(ctx, "dead.v1."+hid.String()+".core_emr", b, id); err == nil || ctx.Err() != nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Duration(i+1) * deadBackoff):
+			}
+		}
 	}
 	if err != nil {
 		c.metrics().DeadFailed.Add(1)
@@ -395,16 +417,36 @@ func (c *Consumer) finding(ctx context.Context, tx pgx.Tx, hid, fid uuid.UUID) e
 	}
 	outcome, reason := "no_change", ""
 	for _, a := range linked {
-		switch {
-		case a.withdrawn != nil:
+		if a.withdrawn != nil || (head.status != "withdrawn" && a.finding == head.id) {
 			continue
+		}
+		// A shadow head (the hospital went back to shadow) never changes
+		// a live alert: it keeps the value it was raised on (K11).
+		if head.shadow {
+			continue
+		}
+		// A new alert may stand for other open findings of the same
+		// patient, rule and analyte (a second hit moved it): it is never
+		// withdrawn while one of them is open, nor amended below one.
+		var other *findingRow
+		if a.status == "new" {
+			if other, err = groupBest(ctx, tx, hid, a.id, chain); err != nil {
+				return err
+			}
+		}
+		switch {
+		case other != nil && (head.status == "withdrawn" || rank(other.severity) > rank(head.severity)):
+			if err := c.amend(ctx, tx, hid, a, other, "regrouped"); err != nil {
+				return err
+			}
+			outcome = "amended"
 		case head.status == "withdrawn":
 			if err := c.withdraw(ctx, tx, hid, a, *head.withdrawnReason); err != nil {
 				return err
 			}
 			outcome = "withdrawn"
-		case a.finding != head.id:
-			if err := c.amend(ctx, tx, hid, a, head); err != nil {
+		default:
+			if err := c.amend(ctx, tx, hid, a, head, "amended"); err != nil {
 				return err
 			}
 			outcome = "amended"
@@ -492,6 +534,28 @@ func readChain(ctx context.Context, tx pgx.Tx, hid uuid.UUID, f *findingRow) ([]
 	return ids, head, nil
 }
 
+// groupBest is the best other open finding alert aid stands for: an open,
+// fresh (not historical), non-shadow finding of the alert's patient, rule
+// and analyte outside chain, the highest severity first, then the newest;
+// nil when there is none.
+func groupBest(ctx context.Context, tx pgx.Tx, hid, aid uuid.UUID, chain []uuid.UUID) (*findingRow, error) {
+	var id uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT f.id FROM alerts a
+		JOIN emr.findings f ON f.hospital_id = a.hospital_id AND f.patient_id = a.patient_id AND f.rule_id = a.rule_id
+		JOIN emr.observations o ON o.hospital_id = f.hospital_id AND o.id = f.primary_observation_id
+		WHERE a.hospital_id = $1 AND a.id = $2 AND coalesce(o.loinc, '') = coalesce(a.loinc, '')
+		  AND f.status = 'open' AND NOT f.shadow AND f.id <> ALL ($3)
+		ORDER BY `+rankSQL("f.severity")+` DESC, f.effective_at DESC NULLS LAST, f.id
+		LIMIT 1`, hid, aid, chain).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return readFinding(ctx, tx, hid, id)
+}
+
 // alertRef is an alert linked to a chain of findings.
 type alertRef struct {
 	id, finding     uuid.UUID
@@ -548,7 +612,7 @@ func valueOf(ctx context.Context, tx pgx.Tx, hid, finding uuid.UUID) (string, er
 // statement, so an acknowledgement racing it is never lost (Review Focus
 // 5): either it lands first and the alert is marked, or it lands on the
 // updated alert.
-func (c *Consumer) amend(ctx context.Context, tx pgx.Tx, hid uuid.UUID, a alertRef, head *findingRow) error {
+func (c *Consumer) amend(ctx context.Context, tx pgx.Tx, hid uuid.UUID, a alertRef, head *findingRow, change string) error {
 	prev, err := valueOf(ctx, tx, hid, a.finding)
 	if err != nil {
 		return err
@@ -579,7 +643,7 @@ func (c *Consumer) amend(ctx context.Context, tx pgx.Tx, hid uuid.UUID, a alertR
 	}
 	c.metrics().Updated.Add(1)
 	return c.audit(ctx, tx, hid, "alert.updated", "alert", a.id, map[string]any{
-		"alert_id": a.id.String(), "finding_id": head.id.String(), "severity": severity, "change": "amended"})
+		"alert_id": a.id.String(), "finding_id": head.id.String(), "severity": severity, "change": change})
 }
 
 func rankSQL(expr string) string {
@@ -839,9 +903,22 @@ func (c *Consumer) Run(ctx context.Context, js jetstream.JetStream) error {
 	if js == nil || c.Pool == nil {
 		return errors.New("alerts: consumer unavailable")
 	}
-	cons, err := js.Consumer(ctx, bus.EMRStream, bus.CoreEMRConsumer)
-	if err != nil {
-		return errors.New("alerts: consumer unavailable")
+	// The durable is retried until it is found (a NATS hiccup at start-up
+	// must not leave core running with no consumer); each failure is
+	// logged and counted (a page).
+	var cons jetstream.Consumer
+	for ctx.Err() == nil {
+		x, err := js.Consumer(ctx, bus.EMRStream, bus.CoreEMRConsumer)
+		if err == nil {
+			cons = x
+			break
+		}
+		c.metrics().Unavailable.Add(1)
+		c.log().Error("alerts: the core_emr durable isn't available; retrying")
+		select {
+		case <-ctx.Done():
+		case <-time.After(10 * time.Second):
+		}
 	}
 	for ctx.Err() == nil {
 		batch, err := cons.Fetch(consumerFetchBatch, jetstream.FetchMaxWait(consumerFetchWait))

@@ -88,6 +88,12 @@ BEGIN
     IF NEW.patient_id IS NULL THEN
         RETURN NEW;
     END IF;
+    -- A caller bound to a hospital writes its own hospital's alerts only:
+    -- refused here, before the lock, so it can neither probe nor hold
+    -- another hospital's patient row.
+    IF nullif(prev, '') IS NOT NULL AND nullif(prev, '')::uuid IS DISTINCT FROM NEW.hospital_id THEN
+        RAISE EXCEPTION USING ERRCODE = 'insufficient_privilege', MESSAGE = 'alert patient: another hospital';
+    END IF;
     -- The owner's policy on the patients is scoped to the hospital set:
     -- the alert's own, for this statement, then put back.
     PERFORM set_config('mhai.hospital_id', NEW.hospital_id::text, true);

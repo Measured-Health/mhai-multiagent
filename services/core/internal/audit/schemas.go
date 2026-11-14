@@ -476,7 +476,7 @@ func init() {
 		Required: []string{"alert_id", "finding_id", "rule_set_version", "rule_id", "category", "severity", "routed_queue",
 			"routed_named", "grouped"}})
 	Register("alert.updated", Schema{Fields: fields("alert_id", id, "finding_id", id, "severity", severity,
-		"change", OneOf("amended", "new_hit")), Required: []string{"alert_id", "finding_id", "severity", "change"}})
+		"change", OneOf("amended", "new_hit", "regrouped")), Required: []string{"alert_id", "finding_id", "severity", "change"}})
 	Register("alert.not_raised", Schema{Fields: fields("finding_id", id,
 		"reason", OneOf("unit_not_covered", "level_off", "null_mrn", "hospital_inactive", "no_connection", "already_open",
 			"already_handled")), Required: []string{"finding_id", "reason"}})
