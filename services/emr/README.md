@@ -90,8 +90,7 @@ NATS.
   with system roots, 64 KiB headers, 20 MB bodies), `DecodeJSON` (depth
   64), `SSH` (through the proxy, host key pinned to the typed SHA256
   fingerprint, a deadline kept after the handshake: the caller's, at most
-  30 minutes; PR 11 opens SFTP over it, and adds `github.com/pkg/sftp`
-  then). `test` holds its connection on the allow-list only once every
+  30 minutes; PR 11 opens SFTP over it with `github.com/pkg/sftp`). `test` holds its connection on the allow-list only once every
   check has passed.
 - `emr keys proxy-init --out <dir>`: K_proxy (`k_proxy`, 0400, 64 hex
   characters), shared by the emr service and the proxy only.
@@ -240,6 +239,30 @@ Everything is off by default: with no `EMR_RULE_SET_FILE` the rules don't
 run, and with it every finding is shadow until `EMR_RULE_SET_ACTIVE` names
 the set and a platform admin activates the same version and hash for the
 hospital (`PUT /platform/hospitals/{id}/emr-rule-set`, step-up, audited).
+
+## What is built (PR 11: scheduled file export)
+
+Migration **00043** (core; after 00040-00042) adds `emr.sync_state.last_file_at`
+and the file export's staleness: a switched-on `file_export` is behind with
+no new file for `expected_every_minutes` plus 50% (design §15.4), and the
+platform sees it as errors for 24 hours after a run that kept dead letters.
+
+- `internal/connector/fileexport`: the `mhai_csv_v1` parser (strict:
+  RFC 4180, UTF-8 without a BOM, the exact header, 50 MB, 8 KB a row,
+  200,000 rows; a file of the wrong shape refused whole, a row of the wrong
+  values a dead letter) and the SFTP connector (through `egress.SSH` only,
+  the pinned host key, the connection's SSH key; the folder listed a page at
+  a time over its own SFTP channel, capped at 10,000 entries; at most 20
+  files a run, in export order; loaded files to `processed/`, refused ones
+  to `rejected/`, never deleted or overwritten; misnamed and half-written
+  files left in place and reported).
+- `sink.Sink.Reject`: a dead letter is a rejected raw record
+  (`unreadable_data`, provenance, no payload), stored once, never announced.
+- The scheduler reports dead letters and files set aside as an
+  `unreadable_data` error row without failing the run, and keeps
+  `last_file_at`.
+- The format is published at `docs/specs/formats/mhai_csv_v1.md`, with
+  synthetic samples in `internal/connector/fileexport/testdata/sample/`.
 
 ## Settings
 

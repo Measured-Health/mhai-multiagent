@@ -314,6 +314,7 @@ func (s *Scheduler) runOne(ctx context.Context, d due) (bool, error) {
 		return true, err
 	}
 	s.log().Info("emr sync", "connection", c.cfg.ConnectionID.String(), "outcome", res.code, "records", res.records,
+		"rejected", res.rejected, "set_aside", res.setAside,
 		"backfill", c.live == nil, "reconcile", res.reconciled)
 	return true, nil
 }
@@ -377,6 +378,14 @@ type result struct {
 	records    int
 	caughtUp   bool
 	reconciled bool
+	// rejected: dead letters the connector handed in (a run that is
+	// otherwise ok still records an unreadable_data error row).
+	rejected int
+	// newFile: when a file source last loaded a new file (design §15.4).
+	newFile *time.Time
+	// setAside: files a file source left unloaded on purpose (refused and
+	// moved aside, misnamed, half-written): reported like dead letters.
+	setAside int
 }
 
 // reconcileDue reports whether this run is the day's reconciliation: the
@@ -408,9 +417,27 @@ func reconcileDue(c conn, now time.Time) (bool, time.Time) {
 type counting struct {
 	sink      Sink
 	stored    int
+	rejected  int
 	late      int
 	reconcile bool
 	before    time.Time
+}
+
+// rejecting is counting for a sink that keeps dead letters: only then is
+// the run's sink a connector.Rejecter, so a connector that needs one can
+// refuse to store anything without it.
+type rejecting struct {
+	*counting
+	rj connector.Rejecter
+}
+
+// Reject passes a dead letter to the sink and counts it.
+func (c rejecting) Reject(ctx context.Context, r connector.RejectedRecord) error {
+	if err := c.rj.Reject(ctx, r); err != nil {
+		return err
+	}
+	c.rejected++
+	return nil
 }
 
 func (c *counting) Put(ctx context.Context, r connector.RawRecord) error {
@@ -463,13 +490,23 @@ func (s *Scheduler) fetch(ctx context.Context, c conn, impl connector.Connector,
 	sk := &counting{sink: s.NewSink(c.cfg, c.live == nil), reconcile: reconcile, before: now.Add(-2 * poll)}
 	fctx, cancel := context.WithTimeout(ctx, RunTimeout)
 	defer cancel()
-	next, ferr := impl.Fetch(fctx, c.cfg, cr, cur, sk)
+	var runSink connector.RawSink = sk
+	if rj, ok := sk.sink.(connector.Rejecter); ok {
+		runSink = rejecting{counting: sk, rj: rj}
+	}
+	next, ferr := impl.Fetch(fctx, c.cfg, cr, cur, runSink)
 	// What was stored is announced whatever the outcome; a refused
 	// announcement is the normaliser's sweep's to repeat.
 	if err := sk.sink.Flush(context.WithoutCancel(ctx)); err != nil {
 		s.log().Warn("emr sync: records not announced", "connection", c.cfg.ConnectionID.String(), "code", "publish_failed")
 	}
-	res := result{code: connector.CodeOf(ferr), cursor: next, records: sk.stored, reconciled: reconcile}
+	res := result{code: connector.CodeOf(ferr), cursor: next, records: sk.stored, reconciled: reconcile, rejected: sk.rejected}
+	if fs, ok := impl.(connector.FileSource); ok {
+		if t, ok := fs.NewFileAt(next); ok {
+			res.newFile = &t
+		}
+		res.setAside = fs.SetAside(next)
+	}
 	var fe *connector.FetchError
 	if errors.As(ferr, &fe) {
 		res.retry = fe.RetryAfter
@@ -515,9 +552,13 @@ func (s *Scheduler) finish(ctx context.Context, c conn, runID uuid.UUID, res res
 			WHERE id = $1`, runID, now, res.code == "ok", res.records, res.code); err != nil {
 			return err
 		}
-		if res.code != "ok" {
+		errCode := res.code
+		if errCode == "ok" && (res.rejected > 0 || res.setAside > 0) {
+			errCode = "unreadable_data" // dead letters or files set aside: visible, without a back-off
+		}
+		if errCode != "ok" {
 			if _, err := tx.Exec(ctx, `INSERT INTO emr.connection_errors (hospital_id, connection_id, at, code) VALUES ($1, $2, $3, $4)`,
-				c.cfg.HospitalID, c.cfg.ConnectionID, now, res.code); err != nil {
+				c.cfg.HospitalID, c.cfg.ConnectionID, now, errCode); err != nil {
 				return err
 			}
 		}
@@ -526,8 +567,9 @@ func (s *Scheduler) finish(ctx context.Context, c conn, runID uuid.UUID, res res
 			cursor = string(res.cursor)
 		}
 		_, err := tx.Exec(ctx, `UPDATE emr.sync_state SET cursor = COALESCE($2::jsonb, cursor), live_since = $3, next_due_at = $4,
-			failures = $5, sign_in_failures = $6, reconciled_on = COALESCE($7::date, reconciled_on), updated_at = $8
-			WHERE connection_id = $1`, c.cfg.ConnectionID, cursor, live, next, failures, signIn, reconciledOn, now)
+			failures = $5, sign_in_failures = $6, reconciled_on = COALESCE($7::date, reconciled_on), updated_at = $8,
+			last_file_at = COALESCE($9::timestamptz, last_file_at)
+			WHERE connection_id = $1`, c.cfg.ConnectionID, cursor, live, next, failures, signIn, reconciledOn, now, res.newFile)
 		return err
 	})
 }

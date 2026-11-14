@@ -1,0 +1,3 @@
+source_encounter_id,source_patient_id,updated_at,class,status,start_at,end_at,source_location_id,location_name,location_type,bed_label
+SYNE-CSV-0001,SYNP-CSV-0001,2026-11-14T05:43:00+01:00,inpatient,in-progress,2026-11-13T22:15:00+01:00,,SYNL-WARD-7,Synthetic Ward Seven,ward,Bed 7C
+SYNE-CSV-0002,SYNP-CSV-0002,2026-11-14T05:44:00+01:00,emergency,arrived,2026-11-14T04:05:00+01:00,,,,,

@@ -1,0 +1,2 @@
+source_medication_id,source_patient_id,updated_at,kind,status,local_code,local_name,dose_value,dose_unit,route,timing_text,authored_at,start_at,end_at
+SYNM-CSV-0001,SYNP-CSV-0001,2026-11-14T05:45:00+01:00,request,active,FUROS,Loop diuretic one (synthetic),40,mg,oral,twice daily,2026-11-14T05:44:00+01:00,2026-11-14T06:00:00+01:00,

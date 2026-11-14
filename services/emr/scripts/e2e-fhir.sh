@@ -14,14 +14,24 @@
 #   bash services/emr/scripts/e2e-fhir.sh
 #
 # KEEP_FOR_DEBUG=1 leaves the project up for a person to inspect.
+# E2E_PROJECT names the compose project and its images (default
+# mhai-emr-e2e-<pid>), and E2E_NET the first two octets of its three /24
+# subnets (default 10.233), for a shared build host.
 set -euo pipefail
 exec </dev/null
 
 here=$(cd "$(dirname "$0")" && pwd)
 svc=$(cd "$here/../.." && pwd)
-project=mhai-emr-e2e-$$
-image=mhai-emr:$project
-runner=mhai-emr-e2e-runner:$project
+project=${E2E_PROJECT:-mhai-emr-e2e-$$}
+if [ -n "${E2E_PROJECT:-}" ]; then
+  image=$project-emr:local
+  runner=$project-runner:local
+else
+  image=mhai-emr:$project
+  runner=mhai-emr-e2e-runner:$project
+fi
+net=${E2E_NET:-10.233}
+case "$net" in 10.[0-9]|10.[0-9][0-9]|10.[0-9][0-9][0-9]) ;; *) echo "E2E_NET must be 10.<n>" >&2; exit 2 ;; esac
 work=$(mktemp -d)
 seed=${E2E_SEED:-7}
 patients=${E2E_PATIENTS:-12}
@@ -84,7 +94,7 @@ services:
     volumes: [synth:/synth]
     networks:
       egress:
-        ipv4_address: 10.233.5.10
+        ipv4_address: ${net}.5.10
         aliases: [fhir.synthetic.example]
   egress-emr:
     image: $image
@@ -94,8 +104,8 @@ services:
       EGRESS_EMR_ALLOW_LIST: /emr-egress/allow.json
       EGRESS_EMR_KEY_PATH: /emr-proxy-key/k_proxy
       EGRESS_EMR_ENV: development
-      EGRESS_EMR_INTERNAL_CIDRS: "10.233.0.0/24,10.233.1.0/24"
-      EGRESS_EMR_DEV_EXEMPT: "10.233.5.0/24"
+      EGRESS_EMR_INTERNAL_CIDRS: "${net}.0.0/24,${net}.1.0/24"
+      EGRESS_EMR_DEV_EXEMPT: "${net}.5.0/24"
     volumes:
       - emr-egress:/emr-egress:ro
       - emr-proxy-key:/emr-proxy-key:ro
@@ -116,7 +126,7 @@ services:
       E2E_EGRESS_DIR: /emr-egress
       E2E_SYNTH_DIR: /synth
       E2E_FHIR_NAME: fhir.synthetic.example
-      E2E_FHIR_CIDR: 10.233.5.0/24
+      E2E_FHIR_CIDR: ${net}.5.0/24
       E2E_SEED: "$seed"
       E2E_PATIENTS: "$patients"
     volumes:
@@ -135,13 +145,13 @@ volumes:
 networks:
   backend:
     internal: true
-    ipam: { config: [{ subnet: 10.233.0.0/24 }] }
+    ipam: { config: [{ subnet: ${net}.0.0/24 }] }
   emr-proxy:
     internal: true
-    ipam: { config: [{ subnet: 10.233.1.0/24 }] }
+    ipam: { config: [{ subnet: ${net}.1.0/24 }] }
   egress:
     internal: true
-    ipam: { config: [{ subnet: 10.233.5.0/24 }] }
+    ipam: { config: [{ subnet: ${net}.5.0/24 }] }
 YML
 
 compose() { docker compose -p "$project" -f "$work/compose.yml" "$@"; }

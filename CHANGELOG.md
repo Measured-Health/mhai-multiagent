@@ -20,6 +20,20 @@ All notable changes to this project are documented here. The format follows
   `gateway` may call `documents.v1.ctl.>`. Compose profile `documents`
   (read-only, no capabilities, internal network only). The design's §17
   lists where the build departs from its plan.
+- EMR PR 11: the scheduled file export (`file_export`, migration **00043**;
+  off by default: the type joins `CORE_EMR_CONNECTOR_TYPES` only by a
+  deploy change after H1 and H7). Files in the published `mhai_csv_v1`
+  format (`docs/specs/formats/mhai_csv_v1.md`: patients, encounters,
+  results, vitals, medications) are pulled over SFTP through egress-emr
+  with the pinned host key, signed in with the connection's SSH key, read
+  strictly and stored as raw records through the allow-list. A file of the
+  wrong shape is refused whole and moved to `rejected/`; a row of the wrong
+  values is kept as a dead letter (a rejected raw record, no payload);
+  loaded files move to `processed/`; nothing is deleted or overwritten.
+  The folder is listed a page at a time and capped. A connection is behind
+  when no new file has arrived for its declared interval plus 50%. The
+  type gains `username`, `expected_every_minutes` and `mrn_namespace`.
+
 - Patient Analysis PR 8: named access (migration **00042**, OpenAPI
   **1.31.0**; off by default: a named list needs the hospital's analysis
   switch on, its effective named-access position `on`, which no hospital's
@@ -51,6 +65,16 @@ All notable changes to this project are documented here. The format follows
   from reference rows only (never a hospital's or a patient's chunk), every
   field checked; core checks them again before showing them, and shows a
   link only when it is a plain https URL.
+- Answer profiles for trained answer models (`agents/answer_profile.py`; no
+  migration, no contract change). The local route reads a pinned `cca` model's
+  replies with the profile its training manifest selects (role, upstream base and
+  revision, and the exact dataset set); any other model keeps the default, which
+  changes nothing, and the cloud clients never use one. The first profile, for
+  `gemma4-e4b-cca-v1`: its `INSUFFICIENT EVIDENCE` decline escalates (anywhere in
+  the reply, any case or width), a reply with no `[KB#nnnn]` citation escalates,
+  and the NLI check judges each claim without its citation markers (a marker in
+  the hypothesis made the NLI model call a word-for-word claim neutral). The
+  answer gate scores a run with the profile from that run's manifest.
 - Reference library v1, `medref` (no migration, no contract change): openFDA
   drug labels (CC0; safety-critical sections first) and English MedlinePlus
   health topics (public domain; labelled patient-facing), 23,654 rows. An

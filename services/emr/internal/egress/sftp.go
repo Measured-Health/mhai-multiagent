@@ -5,8 +5,7 @@ package egress
 // Proxy-Authorization, to one of the connection's sftp origins only, and
 // accepts only the host key whose SHA256 fingerprint the hospital typed
 // in: there is no "accept any key" and no key learned on first use. PR 11
-// opens its SFTP session over the client this returns (plan departure:
-// the github.com/pkg/sftp dependency arrives with its only user).
+// opens its SFTP session over the client this returns.
 
 import (
 	"bufio"
@@ -108,6 +107,11 @@ func SSH(ctx context.Context, conn connector.Config, proxyURL *url.URL, key []by
 		_ = c.Close()
 		if mismatch.Load() {
 			return nil, ErrHostKey
+		}
+		// x/crypto/ssh gives the client no typed error for a refused
+		// sign-in, only this fixed text; it never carries the key.
+		if strings.Contains(err.Error(), "unable to authenticate") {
+			return nil, ErrSignIn
 		}
 		return nil, ErrProxy
 	}

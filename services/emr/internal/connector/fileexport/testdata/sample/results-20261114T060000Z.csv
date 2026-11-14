@@ -1,0 +1,5 @@
+source_result_id,source_patient_id,source_encounter_id,collected_at,resulted_at,updated_at,status,local_code,local_name,value,value_text,unit,ref_low,ref_high,ref_text,flag
+SYNR-CSV-0001,SYNP-CSV-0001,SYNE-CSV-0001,2026-11-14T05:10:00+01:00,2026-11-14T05:35:00+01:00,2026-11-14T05:35:00+01:00,final,K,Potassium (synthetic),6.83,,mmol/L,3.5,5.1,,HH
+SYNR-CSV-0002,SYNP-CSV-0001,SYNE-CSV-0001,2026-11-14T05:10:00+01:00,2026-11-14T05:36:00+01:00,2026-11-14T05:36:00+01:00,final,GLU,Glucose (synthetic),17.37,,mmol/L,3.9,7.8,,H
+SYNR-CSV-0003,SYNP-CSV-0002,,2026-11-14T04:20:00+01:00,2026-11-14T04:50:00+01:00,2026-11-14T04:50:00+01:00,preliminary,MAL,Malaria film (synthetic),,Positive (synthetic),,,,Negative,A
+SYNR-CSV-0004,SYNP-CSV-0002,,2026-11-14T04:20:00+01:00,2026-11-14T04:51:00+01:00,2026-11-14T04:51:00+01:00,final,CREA,Creatinine (synthetic),<44.2,,umol/L,62,106,,L
