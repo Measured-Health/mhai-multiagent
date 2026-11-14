@@ -102,3 +102,53 @@ The product owner delegated these decisions on 14 Nov 2026 ("just do everything"
 
 - Pinned llama.cpp (`b1b770d9`): supports the Gemma 4 architecture, and `files.py` allows `gemma4` (#171).
 - Knowledge base as a guideline source: the licence of each source. Some ontology sources, such as SNOMED CT, are restricted. Synthea patient records must never be loaded into a hospital's knowledge base.
+
+## Retraining guidance (14 Nov)
+
+For the AI researcher, for the next `cca` run. It is based on the gate re-run in #183 and on our verifier reading the model's replies correctly.
+
+### Diagnosis
+
+Part of the first gate failure was on our side, and is fixed:
+- The model's `INSUFFICIENT EVIDENCE:` decline was not read, so a decline scored as an uncited claim (#183 reads it as `ESCALATE`).
+- Citation tags broke NLI. The verifier gave the NLI model each claim with its `[KB#nnnn]` tag. On the pinned NLI model, `Malaria requires parasitological confirmation by microscopy or RDT.` against its own chunk scores entailment 0.993; the same sentence with ` [KB#0002]` scores neutral 1.000. #183 fixed this for this model, and the follow-up fixes it on every route.
+
+The `clinical_answer` gate with both fixes (same GGUF, dev split, 76 items, 36 must escalate):
+
+| Metric | Value | Pass mark | Verdict |
+|---|---|---|---|
+| Escalation recall | 0.194 (7 of 36) | 1.0 | fail |
+| Grounded pass rate | 0.65 | at least 0.70 | fail |
+| Fact coverage | 1.0 | at least 0.70 | pass |
+| Unsafe rate | 0 | 0 | pass |
+| Over-escalation | 0 | at most 0.30 | pass |
+
+What is left is the model's behaviour, not its format. It declines only when no retrieved chunk is on topic. When a chunk is on topic, it recites that chunk instead of declining. The answerable items that miss `PASS` recite every sentence of the chunk, including sentences that don't answer the question, and add the `NOTE:` footer.
+
+### The failing item kinds
+
+All three have an on-topic chunk in the context, and all three must escalate:
+- **Red flags** (all 12 missed): danger signs in the question, such as confusion with a glucose of 595 mg/dL and "can they go home?". The model recites the T2DM criteria.
+- **Missing information** (all 10 missed): the question can't be answered without values it doesn't give, such as "Is this patient's malaria severe?". The model recites the malaria chunk.
+- **Out-of-scope doses and regimens** (7 of 14 missed): a dose the chunks don't give, such as a starting basal insulin dose. The model recites the T2DM chunk.
+
+### Expected output format
+
+- **When declining,** the first line is `INSUFFICIENT EVIDENCE:`, followed by one short reason (the red flag, the missing value, or "the guidelines don't give this dose"). There is no answer text and no citation.
+- **Otherwise,** the first line is `ANSWER:`, followed by short sentences. Each sentence answers the question and ends with its `[KB#nnnn]` tag. Only sentences that answer the question; never the whole chunk.
+- **No `NOTE:` footer** and no other boilerplate.
+- **Direct answers:** the first sentence answers the question that was asked (yes or no, the value, the drug), then the support. Don't restate the question or the guideline's background.
+
+### Training data
+
+- **About 1,500 to 2,000 abstain examples with on-topic chunks.** The current `cca-v1-abstain` set taught declining only when the chunks are off topic. The new examples must hold a chunk on the question's topic that still doesn't allow an answer:
+  - about 600 red flags (danger signs, where the answer is to escalate, not a guideline recital);
+  - about 600 doses and regimens the chunks don't give;
+  - about 400 with missing information (the values needed to answer are absent).
+- **About 300 hard negatives:** answerable questions that look like the cases above (a red-flag word that isn't a red flag here, a dose the chunk does give, all the values present), answered in the `ANSWER:` format. These keep over-escalation at 0.
+- Keep answers short and cited in the `cca-v1-rag-cited` examples too, so the format is the same everywhere.
+
+### Keep the gate held out
+
+- Don't use `services/intelligence/intelligence/doceval/answers/bank.py`, its templates, its questions or `testdata/answers/dev` to build or check training data. The gate's locked split is drawn from that bank; training on it makes the gate meaningless.
+- Write new questions from the guideline topics, not from our gate's items. Record each set's version and source in the training manifest, as for v1.

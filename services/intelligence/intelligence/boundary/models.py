@@ -618,7 +618,7 @@ def local_parts(
         kb.chunks = {c.chunk_id: c for c in chunks}
         retriever = HybridRetriever(dense_model=dense_name, device="cpu")
         retriever.index_kb(kb)
-        verifier = answer_profile.wrap_nli(nli(), profile)
+        verifier = nli()
         hga = answer_profile.wrap_hga(
             NLIBackedHGA(
                 nli_verifier=verifier,

@@ -45,10 +45,9 @@ All notable changes to this project are documented here. The format follows
   revision, and the exact dataset set); any other model keeps the default, which
   changes nothing, and the cloud clients never use one. The first profile, for
   `gemma4-e4b-cca-v1`: its `INSUFFICIENT EVIDENCE` decline escalates (anywhere in
-  the reply, any case or width), a reply with no `[KB#nnnn]` citation escalates,
-  and the NLI check judges each claim without its citation markers (a marker in
-  the hypothesis made the NLI model call a word-for-word claim neutral). The
-  answer gate scores a run with the profile from that run's manifest.
+  the reply, any case or width), and a reply with no `[KB#nnnn]` citation
+  escalates. The answer gate scores a run with the profile from that run's
+  manifest.
 - Reference library v1, `medref` (no migration, no contract change): openFDA
   drug labels (CC0; safety-critical sections first) and English MedlinePlus
   health topics (public domain; labelled patient-facing), 23,654 rows. An
@@ -789,6 +788,20 @@ All notable changes to this project are documented here. The format follows
   1.0.2 (doc-only).
 
 ### Fixed
+
+- **Clinical review:** answer verification judges each claim without its
+  citation tags, on every route (cloud and local, every answer model). The
+  citation pipeline (`agents/hga_nli.py`) gave the NLI model the claim with its
+  `[KB#nnnn]` tag, which the pinned NLI model reads as unsupported content: a
+  claim copied from its chunk scored entailed 0.993 without the tag and neutral
+  1.000 with it, so grounded claims counted as unsupported and answers fell to
+  `REGENERATE` or `ESCALATE`. Only the exact tags are removed
+  (`kb_builder.strip_citation_tags`), from the NLI hypothesis only; the claim
+  shown, the cited chunk, and the citation checks (the id exists, is visible to
+  the patient, is a shared guideline) are unchanged. The NLI threshold and the
+  trust weights are unchanged, but the trust bands clinicians see change: cited,
+  grounded answers now score higher. The answer profile's own NLI wrapper is
+  gone; it uses this.
 
 - The emr image's secret store folder (`/emr-secrets`) is now 0700, so a
   fresh `emr-secrets` volume takes that mode and `docker compose --profile
