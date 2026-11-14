@@ -307,6 +307,8 @@ var (
 	instantPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$`)
 	// An audit event id as core sends it: the entry's sequence number.
 	eventIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
+	// checksumPattern is an export's SHA-256, lowercase hex.
+	checksumPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	// intelligence's facts, as intel/factschema.go checks them first.
 	chunkIDPattern   = regexp.MustCompile(`^[A-Za-z0-9#_.:-]{1,128}$`)
 	modelNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,64}$`)
@@ -792,23 +794,59 @@ func init() {
 	// mhai_platform (00014's platform_append). Never the searched text, the
 	// outcome note, or anything of the entries read.
 	seq := Int(1, 1<<53-1)
+	// The recorded filters (mhai-web RecordedFilters, with the named-access
+	// list's clearance): ids, codes and instants, never q.
+	recordedFilters := Object(map[string]Check{
+		"hospital":  func(v any) bool { return v == "platform" || UUID(v) },
+		"person":    id,
+		"clearance": id,
+		"type":      List(len(AuditTypes), OneOf(AuditTypes...)),
+		"outcome":   OneOf(Outcomes...),
+		"flagged":   b,
+		"from":      Instant,
+		"to":        Instant,
+	})
 	Register("audit.viewed", Schema{Fields: fields(
 		"list", OneOf("events", "named_access"),
-		"filters", Object(map[string]Check{
-			"hospital": func(v any) bool { return v == "platform" || UUID(v) },
-			"person":   id,
-			"type":     List(len(AuditTypes), OneOf(AuditTypes...)),
-			"outcome":  OneOf(Outcomes...),
-			"flagged":  b,
-			"from":     Instant,
-			"to":       Instant,
-		})),
+		"filters", recordedFilters),
 		Required: []string{"list"}})
+	// Exports (contract §14.9; plan Task 25): the export is the row's
+	// entity; an events or a named-access export; its row count, recorded
+	// filters and, for an events export, its checksum (a named export's
+	// entry is written before its pids are read, so before its file and
+	// checksum exist; the record holds the checksum). Never the
+	// note or the reference. A download, and a refused one (why). 00044
+	// refuses to commit an export or a download without its entry.
+	exported := Schema{Fields: fields("rows", Check(Int(0, 50000)), "capped", b,
+		"checksum", Pattern(checksumPattern), "filters", recordedFilters),
+		Required: []string{"rows", "capped", "filters"}}
+	Register("audit.exported", exported)
+	Register("audit.named_access_exported", exported)
+	Register("audit.export_downloaded", Schema{})
+	Register("audit.export_download_refused", Schema{Fields: fields("reason", OneOf("not_owner", "gone", "unavailable")),
+		Required: []string{"reason"}})
+	// The legal path (design §8.9; plan Task 26): a reference binding a
+	// named export (flagged; the reference is the entity; the export, its
+	// hospital and the named admins by id, never a name or the reference's
+	// text); a resolution or replay of one (flagged; the export, the letter
+	// covering the admin, the rows, the replay's number); and one that sent
+	// no names (flagged). 00044 refuses to commit a reference or a use
+	// without its entry.
+	Register("legal_reference.created", Schema{Fields: fields("export_id", id, "hospital_id", id, "admins", List(3, id)),
+		Required: []string{"export_id", "hospital_id", "admins"}})
+	Register("analysis.legal_resolved", Schema{Fields: fields("export_id", id, "clearance_id", id,
+		"rows", Check(Int(1, 200)), "replays", Check(Int(0, 3))),
+		Required: []string{"export_id", "clearance_id", "rows", "replays"}})
+	Register("analysis.legal_resolve_failed", Schema{Fields: fields("export_id", id), Required: []string{"export_id"}})
+	// A refused resolution of a reference the admin is named on (flagged
+	// by kind; why, as the route's code; security review).
+	Register("analysis.legal_resolve_refused", Schema{Fields: fields("reason", OneOf("already_used", "not_cleared",
+		"clearance_ended", "forbidden", "named_access_off", "unavailable")), Required: []string{"reason"}})
 	// person and hospital: the person picker and the hospitals list (Task 9
 	// review); run: the chain checks' reads (runs, a run, the status).
 	// mhai-web has no such searched_kind yet, so those rows are gated out
 	// of the catalogue and sent bare (TODO.md).
-	Register("audit.searched", Schema{Fields: fields("searched_kind", OneOf("event", "request", "person", "hospital", "run")),
+	Register("audit.searched", Schema{Fields: fields("searched_kind", OneOf("event", "request", "person", "hospital", "run", "export")),
 		Required: []string{"searched_kind"}})
 	Register("audit.verify_started", Schema{Fields: fields("run_id", id, "by", OneOf("person", "schedule")),
 		Required: []string{"run_id", "by"}})

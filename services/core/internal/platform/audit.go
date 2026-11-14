@@ -8,9 +8,9 @@
 // platform principal is db.WithPlatform (mhai_platform: no clinical
 // table). Entries leave only through the audit catalogue (audit.Map, or
 // the bare entry). A drill-down entry's pids leave only through the
-// recorded reveal, /{id}/patients (audit_patients.go). The deferred routes
-// (/named-access, /exports*) are not registered: the router answers 404
-// not_found.
+// recorded reveal, /{id}/patients (audit_patients.go), and in a
+// named-access export's file (exports.go). The named-access list, the
+// exports and the legal references are in exports.go and legal.go.
 package platform
 
 import (
@@ -88,6 +88,9 @@ type Deps struct {
 	// emr service does in development; it must match the emr service's
 	// APP_ENV so both derive the same credential origin.
 	EMRDevelopment bool
+	// ExportsOn is CORE_AUDIT_EXPORTS: off (the default), every export
+	// route and the legal-reference route answer 404 (plan departure 61).
+	ExportsOn bool
 	// AfterFollowUpAudit, when set, runs after a follow-up write's audit row
 	// and before commit; its error rolls the write and the row back. Tests
 	// only (A21); server.Register never sets it.
@@ -137,6 +140,7 @@ func Register(m *authz.Mux, d Deps) {
 	registerModelPolicy(m, d)
 	registerEMRConnections(m, d)
 	registerEMRRuleSet(m, d)
+	registerExports(m, d)
 }
 
 // caller is the verified platform principal, or a 500 (the guard admits

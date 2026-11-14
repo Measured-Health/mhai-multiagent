@@ -178,6 +178,7 @@ func TestProbesHandlerServesOnlyProbes(t *testing.T) {
 // §5.2, with their roles; nothing else carries AuditorWrite.
 func TestAuditorWriteRoutesPinned(t *testing.T) {
 	want := map[string][]string{
+		"POST /api/v1/platform/audit/exports":                  {authz.RolePlatformAdmin, authz.RoleAuditor},
 		"POST /api/v1/platform/audit/undisplayable":            {authz.RolePlatformAdmin, authz.RoleAuditor},
 		"POST /api/v1/platform/audit/verify":                   {authz.RolePlatformAdmin, authz.RoleAuditor},
 		"POST /api/v1/platform/audit/verify/runs/{id}/outcome": {authz.RoleAuditor},
