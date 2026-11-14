@@ -19,7 +19,9 @@ safetensors (security review of #143). :func:`evaluate_gguf_run`:
 The default builder loads the retriever and NLI models from folders verified, before
 anything starts, against the exact revisions and file hashes in
 ``models/answer-gate-models.lock`` (:mod:`gate_models`; a mismatch refuses the gate), with
-the Hugging Face hub offline; a test passes its own builder.
+the Hugging Face hub offline; a test passes its own builder. The default builder reads the
+answers with the run's answer profile (:func:`agents.answer_profile.for_run`, chosen by the
+run's training manifest), the one the worker uses for the same pinned model.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from intelligence.agents import answer_profile
 from intelligence.doceval import report
 from intelligence.doceval.answers import gate_models, llama_runtime, schema, score
 from intelligence.doceval.answers import report as areport
@@ -46,14 +49,27 @@ WARMUP_SYSTEM = "Answer briefly from the shared clinical guidelines."
 BuilderFor = Callable[[Any], Callable[[Sequence[Any]], Any]]
 
 
-def default_builder(generator: Any, models: Mapping[str, Path]) -> Callable[[Sequence[Any]], Any]:
+def default_builder(
+    generator: Any,
+    models: Mapping[str, Path],
+    profile: answer_profile.AnswerProfile = answer_profile.DEFAULT,
+) -> Callable[[Sequence[Any]], Any]:
     """The worker's builder (``local_parts``) with ``generator`` as the CCA's generator and
     its retriever and NLI models loaded, offline, from ``models``: the folders
-    :func:`gate_models.paths_from_env` verified against ``models/answer-gate-models.lock``."""
+    :func:`gate_models.paths_from_env` verified against ``models/answer-gate-models.lock``;
+    answers are read with ``profile``."""
     from intelligence.boundary.models import local_parts
 
     build, _ = local_parts(generator=generator, local_models=models)
-    return build
+    # local_parts' build takes the profile; the Builder type names only its chunks.
+    return functools.partial(build, profile=profile)  # type: ignore[call-arg]
+
+
+def run_builder(run_dir: Path, models: Mapping[str, Path]) -> BuilderFor:
+    """:func:`default_builder` for the run at ``run_dir``, with its answer profile."""
+    return functools.partial(
+        default_builder, models=models, profile=answer_profile.for_run(run_dir)
+    )
 
 
 @dataclass(frozen=True)
@@ -116,7 +132,7 @@ def evaluate_gguf_run(
     make: BuilderFor
     if builder_for is None:
         # verified before the server or any model starts
-        make = functools.partial(default_builder, models=gate_models.paths_from_env())
+        make = run_builder(run_dir, gate_models.paths_from_env())
     else:
         make = builder_for
     loaded = schema.load_set(set_dir)
@@ -140,4 +156,11 @@ def evaluate_gguf_run(
     return AnswerRun(rep, warm, llama_runtime.ENGINE, engine_version)
 
 
-__all__ = ["WARMUP_QUESTION", "AnswerRun", "default_builder", "evaluate_gguf_run", "find_gguf"]
+__all__ = [
+    "WARMUP_QUESTION",
+    "AnswerRun",
+    "default_builder",
+    "evaluate_gguf_run",
+    "find_gguf",
+    "run_builder",
+]

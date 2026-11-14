@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from intelligence.boundary.config import ConfigError, WorkerSettings
 
 if TYPE_CHECKING:
+    from intelligence.agents.answer_profile import AnswerProfile
     from intelligence.agents.orchestrator import DynamicOrchestratorAgent
     from intelligence.boundary.cloud.client import CloudCall
     from intelligence.knowledge_base.kb_builder import KBChunk
@@ -282,6 +283,11 @@ class OrchestratorModelClient:
     over that job's chunks; generate() runs its CCA, verify() its HGA with
     the thresholds the orchestrator's classifier and threshold manager give
     the question (passed per call, as process_query does).
+
+    profile gives the answer profile (agents.answer_profile) of the model
+    this client generates with, read before every job and passed to
+    build(chunks, profile=...); None calls build(chunks), as the cloud
+    clients do, so a local model's profile never reads a cloud answer.
     """
 
     def __init__(
@@ -291,6 +297,7 @@ class OrchestratorModelClient:
         versions: Mapping[str, str] | None = None,
         pinned: PinnedSource | None = None,
         preflight: Callable[[], None] | None = None,
+        profile: Callable[[], AnswerProfile] | None = None,
     ) -> None:
         if masker is None:
             from intelligence.security.hipaa import PIIMasker
@@ -304,6 +311,7 @@ class OrchestratorModelClient:
         # The local generator's check before every job (local_generator): raises when
         # the answer model can't be shown to be the verified one.
         self._preflight = preflight
+        self._profile = profile
 
     def mask(self, text: str) -> str:
         with self._mask_lock:
@@ -334,7 +342,10 @@ class OrchestratorModelClient:
         try:
             # Building loads the models: a failure here escalates like any
             # other model failure (ADR 0005).
-            orch = self._build(list(chunks))
+            if self._profile is None:
+                orch = self._build(list(chunks))
+            else:
+                orch = self._build(list(chunks), profile=self._profile())  # type: ignore[call-arg]
         except Exception as e:
             log.warning("model stage failed agent=build error=%s", type(e).__name__)
             return Generation(question=question, failed_agents=("CCA",))
@@ -483,8 +494,24 @@ def default_orchestrator(
     gen = _generator_for(source, pinned_roles, settings)
     build, versions = local_parts(source, pinned_roles, generator=gen)
     return OrchestratorModelClient(
-        build, versions=versions, pinned=source, preflight=getattr(gen, "check", None)
+        build,
+        versions=versions,
+        pinned=source,
+        preflight=getattr(gen, "check", None),
+        profile=pinned_profile(source),
     )
+
+
+def pinned_profile(source: PinnedSource) -> Callable[[], AnswerProfile]:
+    """The local client's profile: the pinned cca's training manifest's
+    (agents.answer_profile.for_pinned), read before every job."""
+
+    def profile() -> AnswerProfile:
+        from intelligence.agents import answer_profile
+
+        return answer_profile.for_pinned(source)
+
+    return profile
 
 
 def local_generator(
@@ -552,13 +579,16 @@ def local_parts(
     through its own: intelligence.doceval.answers.gate); None is
     local_generator's choice with the default settings. local_models ({"dense", "nli"} ->
     a verified folder, doceval.answers.gate_models) loads both models from
-    those folders only, offline, instead of the configured hub names."""
+    those folders only, offline, instead of the configured hub names.
+    build(chunks, profile=...) reads the answers with that answer profile
+    (agents.answer_profile; the default changes nothing)."""
     if local_models is not None:
         set_hub_offline()
     pinned_nli = "nli" in pinned_roles
     if pinned_nli:
         set_hub_offline()  # before the imports below can import transformers
     source: PinnedSource = pinned if pinned is not None else (lambda: None)
+    from intelligence.agents import answer_profile
     from intelligence.agents.hga_nli import (
         CitationVerificationPipeline,
         NLIBackedHGA,
@@ -581,14 +611,20 @@ def local_parts(
     else:
         nli = nli_factory(str(cfg.NLI_MODEL), source, pinned_nli=pinned_nli)
 
-    def build(chunks: Sequence[KBChunk]) -> DynamicOrchestratorAgent:
+    def build(
+        chunks: Sequence[KBChunk], profile: AnswerProfile = answer_profile.DEFAULT
+    ) -> DynamicOrchestratorAgent:
         kb = MedicalKnowledgeBase()
         kb.chunks = {c.chunk_id: c for c in chunks}
         retriever = HybridRetriever(dense_model=dense_name, device="cpu")
         retriever.index_kb(kb)
-        verifier = nli()
-        hga = NLIBackedHGA(
-            nli_verifier=verifier, citation_pipeline=CitationVerificationPipeline(verifier, kb)
+        verifier = answer_profile.wrap_nli(nli(), profile)
+        hga = answer_profile.wrap_hga(
+            NLIBackedHGA(
+                nli_verifier=verifier,
+                citation_pipeline=CitationVerificationPipeline(verifier, kb),
+            ),
+            profile,
         )
         cca = RAGClinicalContextAgent(retriever, generator=generator)
         return DynamicOrchestratorAgent(rag_cca=cca, hga=hga)
@@ -870,7 +906,11 @@ def build_model_router(settings: WorkerSettings, pinned: PinnedSource | None = N
         gen = _generator_for(source, settings.model_roles, settings)
         build, versions = local_parts(source, settings.model_roles, generator=gen)
         local = OrchestratorModelClient(
-            build, versions=versions, pinned=source, preflight=getattr(gen, "check", None)
+            build,
+            versions=versions,
+            pinned=source,
+            preflight=getattr(gen, "check", None),
+            profile=pinned_profile(source),
         )
     else:
         local = build_model_client(settings)  # the stub, development only

@@ -39,6 +39,16 @@ All notable changes to this project are documented here. The format follows
   from reference rows only (never a hospital's or a patient's chunk), every
   field checked; core checks them again before showing them, and shows a
   link only when it is a plain https URL.
+- Answer profiles for trained answer models (`agents/answer_profile.py`; no
+  migration, no contract change). The local route reads a pinned `cca` model's
+  replies with the profile its training manifest selects (role, upstream base and
+  revision, and the exact dataset set); any other model keeps the default, which
+  changes nothing, and the cloud clients never use one. The first profile, for
+  `gemma4-e4b-cca-v1`: its `INSUFFICIENT EVIDENCE` decline escalates (anywhere in
+  the reply, any case or width), a reply with no `[KB#nnnn]` citation escalates,
+  and the NLI check judges each claim without its citation markers (a marker in
+  the hypothesis made the NLI model call a word-for-word claim neutral). The
+  answer gate scores a run with the profile from that run's manifest.
 - Reference library v1, `medref` (no migration, no contract change): openFDA
   drug labels (CC0; safety-critical sections first) and English MedlinePlus
   health topics (public domain; labelled patient-facing), 23,654 rows. An
