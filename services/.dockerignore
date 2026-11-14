@@ -1,4 +1,4 @@
-# The Go images (core, emr) build from services/, because both require
+# The Go images (core, emr, documents) build from services/, because they require
 # services/gokit (ADR 0014). Only the Go modules go into the context.
 intelligence
 nats

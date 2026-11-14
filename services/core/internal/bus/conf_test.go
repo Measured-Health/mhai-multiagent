@@ -274,6 +274,47 @@ func TestEMRUserIsAnOptInInclude(t *testing.T) {
 	}
 }
 
+// ADR 0016: the documents NATS user is an include, as the emr user is:
+// documents.conf (on) or documents-off.conf (the dev default), which needs
+// no variable and lets no one in or do anything. On, it publishes nothing
+// in PR 1 and subscribes its control subjects in queue group documents
+// only. Core may call it; the demo config has no documents user yet.
+func TestDocumentsUserIsAnOptInInclude(t *testing.T) {
+	dev := readConf(t, "services/nats/nats.conf")
+	if !strings.Contains(dev, `{ include "documents.conf" }`) || strings.Contains(stripComments(dev), "NATS_DOCUMENTS_PASSWORD") ||
+		strings.Contains(stripComments(dev), "user:documents") {
+		t.Fatal("services/nats/nats.conf must take the documents user from the documents.conf include only")
+	}
+	off := stripComments(readConf(t, "services/nats/documents-off.conf"))
+	if strings.Contains(off, "$") || strings.Contains(off, "password") || !strings.Contains(off, `publish:{deny:[">"]}`) ||
+		!strings.Contains(off, `subscribe:{deny:[">"]}`) || strings.Contains(off, "allow") {
+		t.Fatalf("documents-off.conf must need no variable and deny everything: %s", off)
+	}
+	emrOff := stripComments(readConf(t, "services/nats/emr-off.conf"))
+	if i, j := strings.Index(emrOff, "nkey:"), strings.Index(off, "nkey:"); i < 0 || j < 0 || emrOff[i:i+61] == off[j:j+61] {
+		t.Fatal("documents-off.conf must have its own NKey, not the emr-off one")
+	}
+	on := stripComments(readConf(t, "services/nats/documents.conf"))
+	if !strings.Contains(on, "user:documents") || !strings.Contains(on, "password:$NATS_DOCUMENTS_PASSWORD") {
+		t.Fatal("documents.conf must define the documents user with NATS_DOCUMENTS_PASSWORD")
+	}
+	if !strings.Contains(on, `publish:{deny:[">"]}`) || !strings.Contains(on, `"documents.v1.ctl.>documents"`) ||
+		!strings.Contains(on, `"_INBOX_worker.documents.>"`) || !strings.Contains(on, `allow_responses:{max:1,expires:"1m"}`) {
+		t.Fatalf("documents.conf rights: %s", on)
+	}
+	for _, c := range []struct{ file, gateway string }{
+		{"services/nats/nats.conf", "user: gateway"}, {"deploy/nats/nats.conf", "nkey: $NATS_GATEWAY_NKEY"}} {
+		gw := stripComments(permissionsAfter(t, readConf(t, c.file), c.gateway))
+		if !strings.Contains(gw, `"documents.v1.ctl.>"`) {
+			t.Errorf("%s: gateway can't call documents.v1.ctl.>", c.file)
+		}
+	}
+	if strings.Contains(stripComments(readConf(t, "deploy/nats/nats.conf")), "documents.conf") ||
+		strings.Contains(stripComments(readConf(t, "deploy/nats/nats.conf")), "NATS_DOCUMENTS") {
+		t.Fatal("the deploy config must not include a documents user yet (NATS_DOCUMENTS_NKEY isn't provisioned)")
+	}
+}
+
 // The pilot (deploy/pilot/README.md): the demo config has the pipeline
 // user as an NKey user with exactly the dev config's pipeline permissions,
 // so the pilot pipeline can do on the demo what it does in dev and nothing

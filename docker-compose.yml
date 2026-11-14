@@ -208,6 +208,17 @@ services:
             esac;;
           *) echo "NATS_EMR_CONF must be emr-off.conf or emr.conf" >&2; exit 1;;
         esac
+        # The documents user (ADR 0016) likewise: off unless
+        # NATS_DOCUMENTS_CONF=documents.conf, and only then is
+        # NATS_DOCUMENTS_PASSWORD needed, and checked.
+        case "$$NATS_DOCUMENTS_CONF" in
+          ""|documents-off.conf) ;;
+          documents.conf)
+            case "$$NATS_DOCUMENTS_PASSWORD" in
+              ""|*[Cc][Hh][Aa][Nn][Gg][Ee][Mm][Ee]*|*[Cc][Hh][Aa][Nn][Gg][Ee]-[Mm][Ee]*|*[Pp][Ll][Aa][Cc][Ee][Hh][Oo][Ll][Dd][Ee][Rr]*) echo "NATS_DOCUMENTS_PASSWORD is missing or a placeholder" >&2; exit 1;;
+            esac;;
+          *) echo "NATS_DOCUMENTS_CONF must be documents-off.conf or documents.conf" >&2; exit 1;;
+        esac
         exec nats-server -c /etc/nats/nats.conf
     environment:
       NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}
@@ -219,12 +230,18 @@ services:
       # emr NATS user on (with the profile emr).
       NATS_EMR_CONF: ${NATS_EMR_CONF:-emr-off.conf}
       NATS_EMR_PASSWORD: ${NATS_EMR_PASSWORD:-}
+      # Off by default; NATS_DOCUMENTS_CONF=documents.conf and
+      # NATS_DOCUMENTS_PASSWORD turn the documents NATS user on (with the
+      # profile documents).
+      NATS_DOCUMENTS_CONF: ${NATS_DOCUMENTS_CONF:-documents-off.conf}
+      NATS_DOCUMENTS_PASSWORD: ${NATS_DOCUMENTS_PASSWORD:-}
       NATS_JS_KEY: ${NATS_JS_KEY:?set NATS_JS_KEY in .env}
     ports: ["127.0.0.1:${NATS_PORT:-4222}:4222"]
     volumes:
       - ./services/nats/nats.conf:/etc/nats/nats.conf:ro
       - ./services/nats/bff-clinical.test.conf:/etc/nats/bff-clinical.test.conf:ro
       - ./services/nats/${NATS_EMR_CONF:-emr-off.conf}:/etc/nats/emr.conf:ro
+      - ./services/nats/${NATS_DOCUMENTS_CONF:-documents-off.conf}:/etc/nats/documents.conf:ro
       - natsdata:/data
     # As postgres: default, and backend for the emr service.
     networks: [default, backend]
@@ -293,6 +310,49 @@ services:
       core-request-key: { condition: service_completed_successfully }
       emr-keys: { condition: service_completed_successfully }
       emr-proxy-key: { condition: service_completed_successfully }
+    healthcheck:
+      disable: true
+
+  # The documents service (ADR 0016; services/documents). Off by default:
+  # only with
+  #   NATS_DOCUMENTS_CONF=documents.conf NATS_DOCUMENTS_PASSWORD=... docker compose --profile documents up -d
+  # (the first two switch its NATS user on; without them NATS runs as
+  # before). Its own NATS user and password, the request-token trusted keys
+  # (public, read-only) and its own database login (the role comes with PR
+  # 3's migration; until then health reports database_ready false); nothing
+  # of core's or the emr service's. PR 1 runs the service alone: clamav and
+  # docsandbox join the profile in PR 4 (design §17).
+  #
+  # Locked down: read-only root, no capabilities, no-new-privileges, and
+  # only the internal backend network (Postgres and NATS; no route out). No
+  # port. No healthcheck: the image is distroless (no shell); readiness is
+  # documents.v1.ctl.health, which core asks.
+  documents:
+    build:
+      # The documents service requires services/gokit, so the context is services/.
+      context: ./services
+      dockerfile: documents/Dockerfile
+    image: mhai-documents:local
+    profiles: ["documents"]
+    restart: unless-stopped
+    command: ["serve"]
+    environment:
+      APP_ENV: development
+      DOCUMENTS_NATS_URL: nats://nats:4222
+      # Empty unless the documents user is on (the service then refuses to start).
+      DOCUMENTS_NATS_PASSWORD: ${NATS_DOCUMENTS_PASSWORD:-}
+      DOCUMENTS_DATABASE_URL: postgres://${DOCUMENTS_DB_USER:-documents_app}:${DOCUMENTS_DB_PASSWORD:-}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
+      DOCUMENTS_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+    volumes:
+      - trustedkeys:/trusted:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [backend]
+    depends_on:
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
     healthcheck:
       disable: true
 
@@ -486,8 +546,9 @@ volumes:
 
 networks:
   default: {}
-  # Internal (no route out): Postgres and NATS for the emr service. Its
-  # subnet is fixed so egress-emr can be told it (EGRESS_EMR_INTERNAL_CIDRS);
+  # Internal (no route out): Postgres and NATS for the emr and documents
+  # services. Its subnet is fixed so egress-emr can be told it
+  # (EGRESS_EMR_INTERNAL_CIDRS);
   # set EMR_BACKEND_SUBNET if 10.231.0.0/24 is taken on your machine.
   backend:
     internal: true
