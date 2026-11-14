@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38, 39}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -376,7 +376,8 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		"analysis_subject_attrs", "analysis_hospital_start", "analysis_snapshots", "analysis_view_log", "analysis_unusual",
 		"analysis_cold_budget", "analysis_cold_contexts", "analysis_views", "analysis_view_rows", "analysis_patient_budget",
 		"analysis_patient_opens", "analysis_drill_flags", "analyst_changes",
-		"clearances", "clearance_covered", "clearance_events", "named_access_switch", "clearance_check_refusals"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
+		"clearances", "clearance_covered", "clearance_events", "named_access_switch", "clearance_check_refusals",
+		"patient_lookup_counts", "patient_lookup_hospital_counts"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -393,6 +394,11 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		_ = tx.Rollback(ctx)
 		if table == "audit_verify_runs" {
 			requireDenied(t, err, "gateway reading audit_verify_runs")
+			continue
+		}
+		if table == "patient_lookup_counts" || table == "patient_lookup_hospital_counts" {
+			// 00039: written by mhai_patient_lookup_reserve only.
+			requireDenied(t, err, "gateway reading "+table)
 			continue
 		}
 		if table == "named_access_switch" || table == "clearance_check_refusals" {

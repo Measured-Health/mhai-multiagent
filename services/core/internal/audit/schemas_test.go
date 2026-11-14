@@ -574,3 +574,45 @@ func TestPlatformAdminPayloads(t *testing.T) {
 		}
 	}
 }
+
+// The patient lookup by MRN (00039): the patient id on a hit, both ids for
+// an MRN of two, the result on a miss; never the MRN typed, a name or a free-text window.
+func TestPatientLookupPayloads(t *testing.T) {
+	pid := uuid.NewString()
+	for _, p := range []map[string]any{
+		{"patient_id": pid},
+		{"result": "miss"},
+		{"patient_ids": []any{pid, uuid.NewString()}},
+	} {
+		if err := audit.CheckActionPayload("patients.lookup", p); err != nil {
+			t.Errorf("%v: %v", p, err)
+		}
+	}
+	for _, w := range []string{"minute", "day", "hospital_day"} {
+		if err := audit.CheckActionPayload("patients.lookup_limit_reached", map[string]any{"window": w}); err != nil {
+			t.Errorf("%s: %v", w, err)
+		}
+	}
+	for name, c := range map[string]struct {
+		action string
+		p      map[string]any
+	}{
+		"a hit as a result":      {"patients.lookup", map[string]any{"result": "hit"}},
+		"a hit and a result":     {"patients.lookup", map[string]any{"result": "miss", "patient_id": pid}},
+		"nothing":                {"patients.lookup", map[string]any{}},
+		"ambiguous as a result":  {"patients.lookup", map[string]any{"result": "ambiguous"}},
+		"three patients":         {"patients.lookup", map[string]any{"patient_ids": []any{pid, pid, pid}}},
+		"mrns as the patients":   {"patients.lookup", map[string]any{"patient_ids": []any{"SYN-LKP-7Q4X-M2"}}},
+		"both shapes":            {"patients.lookup", map[string]any{"patient_id": pid, "patient_ids": []any{pid}}},
+		"the mrn typed":          {"patients.lookup", map[string]any{"result": "miss", "mrn": "SYN-LKP-7Q4X-M2"}},
+		"a name":                 {"patients.lookup", map[string]any{"patient_id": pid, "full_name": "Synthetic Odalys Brennecke"}},
+		"an mrn as the patient":  {"patients.lookup", map[string]any{"patient_id": "SYN-LKP-7Q4X-M2"}},
+		"free result":            {"patients.lookup", map[string]any{"result": "found"}},
+		"free window":            {"patients.lookup_limit_reached", map[string]any{"window": "hour"}},
+		"limit without a window": {"patients.lookup_limit_reached", map[string]any{}},
+	} {
+		if err := audit.CheckActionPayload(c.action, c.p); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

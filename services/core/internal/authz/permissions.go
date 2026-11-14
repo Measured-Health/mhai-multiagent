@@ -62,6 +62,13 @@ type Rule struct {
 	// (Guard.IdemKeyed), never a plain hash; without that middleware the
 	// route answers 503 not_ready. Only on an unsafe Platform Write route.
 	Credentials bool
+	// NoIdempotency: the body holds a patient identifier a person typed (an
+	// MRN), so the route runs without the idempotency store: no request
+	// hash (a plain hash of a short MRN can be guessed back) and no reply
+	// (a name, an MRN) is kept, and an Idempotency-Key is ignored, so a
+	// retry runs the handler again. Only on an unsafe clinical route,
+	// never with Credentials.
+	NoIdempotency bool
 	// Calls names the intelligence operations the route publishes to (the
 	// operations table, operations.go). The route's roles, or every
 	// clinical role when AnyRole is empty, must all be allowed by each
@@ -153,6 +160,9 @@ func validate(method, pattern string, rule Rule) error {
 	}
 	if rule.Credentials && (!rule.Platform || !rule.Write || safeMethod(method)) {
 		return fmt.Errorf("authz: credential route %s %s must be an unsafe platform write", method, pattern)
+	}
+	if rule.NoIdempotency && (rule.Public || rule.Platform || rule.SelfService || rule.Credentials || safeMethod(method)) {
+		return fmt.Errorf("authz: no-idempotency route %s %s must be an unsafe clinical route", method, pattern)
 	}
 	if rule.Platform && !safeMethod(method) && !rule.Write && !rule.AuditorWrite {
 		return fmt.Errorf("authz: platform route %s %s changes data and must set Write", method, pattern)
