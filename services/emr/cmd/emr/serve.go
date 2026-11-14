@@ -269,7 +269,7 @@ func serve(getenv func(string) string) error {
 	if store != nil && writer != nil && js != nil {
 		pub := normalise.JSPublisher{JS: js}
 		sched := &scheduler.Scheduler{Pool: pool, Connectors: registry, Store: store, Env: s.Env, Log: log,
-			Metrics: &scheduler.Metrics{},
+			Metrics: &scheduler.Metrics{}, Egress: writer,
 			NewSink: func(cfg connector.Config, backfill bool) scheduler.Sink {
 				version := 1
 				if ti, ok := emrtypes.Lookup(cfg.Type); ok {

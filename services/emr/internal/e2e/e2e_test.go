@@ -217,6 +217,24 @@ func TestSyntheticFHIRThroughEgress(t *testing.T) {
 			sk.Backfill = backfill
 			return sk
 		}}
+	// The first poll after a switch-on (the live run's bug): the
+	// connection off and the proxy's list without it, then on and polled
+	// at once, as core's sync_now makes it due, before the writer's next
+	// periodic write. The scheduler puts it on the list first.
+	if _, err := pool.Exec(ctx, `UPDATE emr_connections SET enabled = false WHERE id = $1`, conn); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(egress.ReloadWait)
+	if r := fc.Test(ctx, cfg, creds); r.Code != "unreachable" {
+		t.Fatalf("off and not on the list: %+v, want unreachable", r)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE emr_connections SET enabled = true WHERE id = $1`, conn); err != nil {
+		t.Fatal(err)
+	}
+	s.Egress = w
 	if _, err := s.Once(ctx); err != nil {
 		t.Fatal(err)
 	}
