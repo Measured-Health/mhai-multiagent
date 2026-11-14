@@ -82,7 +82,7 @@ GGUF_NAMED_TEMPLATE_PREFIX = "tokenizer.chat_template."
 # NUL or other control byte. The length cap is GGUF_MAX_KEY.
 _GGUF_NAME = re.compile(rb"[a-z0-9_.]+", re.ASCII)
 GGUF_ARCHITECTURES: frozenset[str] = frozenset(
-    {"llama", "qwen2", "qwen3", "gemma2", "gemma3", "phi3", "mistral"}
+    {"llama", "qwen2", "qwen3", "gemma2", "gemma3", "gemma4", "phi3", "mistral"}
 )
 # Metadata value types: the fixed-size scalars (struct format), then string and array.
 _GGUF_SCALARS: dict[int, str] = {

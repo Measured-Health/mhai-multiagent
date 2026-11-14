@@ -33,6 +33,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/natsapi"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/patients"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/telemetry"
@@ -227,6 +228,8 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		CloudProviders: cfg.CloudProviders, EMREnabled: cfg.EMREnabled, EMRTypes: cfg.EMRConnectorTypes,
 		EMR: &emrctl.Client{NC: nc, Signer: signer, Log: log}, EMRSealer: sealer, EMRDevelopment: cfg.Development(),
 		Analysis: analysis.NewEngine(a.pool, log), AnalysisKeys: analysisKeys,
+		PatientLookup: patients.Limits{PerMinute: cfg.PatientLookupPerMinute, PerDay: cfg.PatientLookupPerDay,
+			HospitalPerDay: cfg.PatientLookupHospitalPerDay},
 		AnalysisIdentity: identity})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.

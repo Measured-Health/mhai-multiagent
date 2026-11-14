@@ -136,6 +136,11 @@ services:
       # holds respected); the nightly retention sweep also needs this, off
       # until the privacy lead confirms the retention values (H5).
       CORE_EMR_RETENTION_SWEEP: ${CORE_EMR_RETENTION_SWEEP:-false}
+      # The clinician patient lookup by MRN (with EMR on): per clinician a
+      # minute and a day, per hospital a day; misses count too.
+      CORE_PATIENT_LOOKUP_PER_MINUTE: ${CORE_PATIENT_LOOKUP_PER_MINUTE:-5}
+      CORE_PATIENT_LOOKUP_PER_DAY: ${CORE_PATIENT_LOOKUP_PER_DAY:-50}
+      CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY: ${CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY:-1000}
       # Patient Analysis's four key files (none by default: no drill-down
       # and no ingest of a signed-off hospital). Paths inside the
       # container, each a 0600 file of 32 random bytes in base64; the smoke

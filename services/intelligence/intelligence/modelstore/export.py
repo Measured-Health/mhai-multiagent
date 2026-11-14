@@ -93,7 +93,7 @@ _HINTS: Mapping[str, str] = {
     ),
     "gguf_invalid": (
         "keep exactly one .gguf, written by this step, from an architecture on the list"
-        " (llama, qwen2, qwen3, gemma2, gemma3, phi3, mistral), with one default chat"
+        " (llama, qwen2, qwen3, gemma2, gemma3, gemma4, phi3, mistral), with one default chat"
         " template and no named ones (tokenizer.chat_template.<name>)"
     ),
     "safetensors_invalid": "re-save the weights with save_pretrained(..., safe_serialization=True)",

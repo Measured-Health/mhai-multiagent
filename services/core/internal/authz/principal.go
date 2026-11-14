@@ -497,6 +497,22 @@ func check(r *http.Request, rule Rule, p Principal) string {
 	return ""
 }
 
+// idempotent puts an authenticated route's handler behind its idempotency
+// store: the keyed one for credential routes (503 without it), none for
+// NoIdempotency routes, the principal's otherwise.
+func (g *Guard) idempotent(rule Rule, h http.Handler) http.Handler {
+	switch {
+	case rule.NoIdempotency:
+		return h
+	case rule.Credentials && g.IdemKeyed == nil:
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { httpx.Error(w, r, "not_ready") })
+	case rule.Credentials:
+		return g.IdemKeyed(h)
+	default:
+		return g.Idem(h)
+	}
+}
+
 // safeMethod reports whether method only reads.
 func safeMethod(method string) bool {
 	switch method {
@@ -514,14 +530,7 @@ func (g *Guard) wrap(rule Rule, h http.Handler) http.Handler {
 	if rule.Public {
 		return g.IdemAnon(h)
 	}
-	switch {
-	case rule.Credentials && g.IdemKeyed == nil:
-		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { httpx.Error(w, r, "not_ready") })
-	case rule.Credentials:
-		h = g.IdemKeyed(h)
-	default:
-		h = g.Idem(h)
-	}
+	h = g.idempotent(rule, h)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, code := g.authenticate(r, rule.MFAEnrol)
 		if code != "" {

@@ -77,6 +77,7 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/hospital/usage` | signed in | `hospital_admin` | clinical | yes | no | no |
 | GET | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | no |
 | PATCH | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | yes |
+| POST | `/api/v1/patients/lookup` | signed in | `clinician` | clinical | yes | no | yes |
 | GET | `/api/v1/platform/activity` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/analysis/status` | signed in | `platform_admin` | platform | yes | no | no |
 | GET | `/api/v1/platform/analytics` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |

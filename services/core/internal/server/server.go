@@ -21,6 +21,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/feedback"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/hospital"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/patients"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/queries"
 )
@@ -62,6 +63,10 @@ type Deps struct {
 	Analysis *analysis.Engine
 	// AnalysisKeys derive the drill keys; nil: no drill, every list 422.
 	AnalysisKeys *analysis.Keys
+	// PatientLookup are the clinician patient lookup's rate limits
+	// (CORE_PATIENT_LOOKUP_*); zero answers every lookup 503 not_ready.
+	// The lookup is on with EMREnabled only.
+	PatientLookup patients.Limits
 	// AnalysisIdentity resolves named lists' names after their entries
 	// commit; nil: unavailable (every named list fails 503).
 	AnalysisIdentity analysis.Resolver
@@ -107,6 +112,10 @@ func Register(m *authz.Mux, d Deps) {
 	// oversight pages (frontend requirements §5); staff writes take a
 	// step-up code, and Analyst goes through migration 00030's functions.
 	hospital.Register(m, hospital.Deps{Pool: d.Pool, Log: a.Log, Auth: a})
+	// A clinician's patient lookup by MRN (TODO.md design note, 14 Nov):
+	// exact match in the caller's hospital, rate-limited and audited; 404
+	// unless EMR is on.
+	patients.Register(m, patients.Deps{Pool: d.Pool, Log: a.Log, On: d.EMREnabled, Limits: d.PatientLookup})
 	registerFixtures(m, d)
 }
 

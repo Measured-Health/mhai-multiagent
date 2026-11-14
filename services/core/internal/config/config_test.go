@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -16,6 +17,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY", "CORE_ALLOW_SINGLE_NODE",
 		"CORE_CLOUD_PROVIDERS", "CORE_EMR_ENABLED", "CORE_EMR_SEAL_PUBLIC_KEY_PATH", "CORE_EMR_CONNECTOR_TYPES",
 		"CORE_IDEMPOTENCY_HMAC_KEY_PATH", "CORE_EMR_ALLOW_NULL_MRN", "CORE_EMR_RETENTION_SWEEP",
+		"CORE_PATIENT_LOOKUP_PER_MINUTE", "CORE_PATIENT_LOOKUP_PER_DAY", "CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY",
 		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE", "ANALYSIS_NAMED_IDENTITY"} {
 		t.Setenv(k, "")
 	}
@@ -313,6 +315,42 @@ func TestLoadQueryCap(t *testing.T) {
 		setEnv(t, e)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "INTELLIGENCE_QUERY_CAP") {
 			t.Fatalf("%q: %v", bad, err)
+		}
+	}
+}
+
+// The patient lookup's limits: 5 a minute and 50 a day per clinician,
+// 1000 a day per hospital, by default; each bounded, and named on error.
+func TestLoadPatientLookupLimits(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	c, err := Load()
+	if err != nil || c.PatientLookupPerMinute != 5 || c.PatientLookupPerDay != 50 || c.PatientLookupHospitalPerDay != 1000 {
+		t.Fatalf("defaults: %d %d %d %v", c.PatientLookupPerMinute, c.PatientLookupPerDay, c.PatientLookupHospitalPerDay, err)
+	}
+	for name, cs := range map[string]struct {
+		good string
+		bad  []string
+		got  func(Config) int
+	}{
+		"CORE_PATIENT_LOOKUP_PER_MINUTE":       {"12", []string{"0", "101", "-1", "five"}, func(c Config) int { return c.PatientLookupPerMinute }},
+		"CORE_PATIENT_LOOKUP_PER_DAY":          {"120", []string{"0", "1001", "lots"}, func(c Config) int { return c.PatientLookupPerDay }},
+		"CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY": {"2500", []string{"0", "100001", "1e3"}, func(c Config) int { return c.PatientLookupHospitalPerDay }},
+	} {
+		e := map[string]string{name: cs.good}
+		for k, v := range base {
+			e[k] = v
+		}
+		setEnv(t, e)
+		if c, err := Load(); err != nil || strconv.Itoa(cs.got(c)) != cs.good {
+			t.Fatalf("%s=%s: %d %v", name, cs.good, cs.got(c), err)
+		}
+		for _, bad := range cs.bad {
+			e[name] = bad
+			setEnv(t, e)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("%s=%q: %v", name, bad, err)
+			}
 		}
 	}
 }

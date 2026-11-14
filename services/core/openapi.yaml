@@ -484,6 +484,81 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /patients/lookup:
+    post:
+      operationId: lookupPatient
+      summary: Find one patient of the caller's hospital by MRN (exact match, rate-limited).
+      description: |
+        Clinicians only, on a two-step session (1.29.0). The MRN goes in the
+        body, never in the URL (a query string is 422 `validation_failed`).
+        It is normalised as the EMR index stores it (spaces removed, upper
+        case; nothing else) and compared whole: no prefix, part, pattern or
+        name search, and never a list. The answer is the one active patient
+        of the caller's hospital with that MRN: its `id` (send it as
+        `patient_id` on `POST /queries`), name, MRN, age and sex.
+        No such patient, an excluded patient, a patient merged into
+        another, and another hospital's patient are all the same 404
+        `not_found`; two active patients with the MRN are 409 `conflict`.
+        While EMR is off (`CORE_EMR_ENABLED`, off by default) every lookup
+        is 404 `not_found`.
+
+        Rate limits count misses as well as hits: per clinician
+        `CORE_PATIENT_LOOKUP_PER_MINUTE` (default 5) in any minute and
+        `CORE_PATIENT_LOOKUP_PER_DAY` (default 50) in the hospital's day,
+        and per hospital `CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY` (default
+        1000) a day. Past one, 429 `rate_limited` (with `Retry-After: 60`
+        for the minute's limit), and the clinician's first refusal of the
+        day is audited `patients.lookup_limit_reached`, flagged for review.
+        Every lookup is audited `patients.lookup` (the patient's id on a
+        hit; never the MRN typed). An `Idempotency-Key` is ignored: no
+        request or reply is kept, and a retry is a new lookup.
+      tags: [patients]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, rate_limited, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mrn]
+              additionalProperties: false
+              properties:
+                mrn:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+                  description: The MRN as typed; 1 to 64 characters once its spaces are removed, no control characters.
+      responses:
+        "200":
+          description: The patient.
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: [no-store] }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, full_name, mrn, age, sex]
+                additionalProperties: false
+                properties:
+                  id: { type: string, format: uuid, description: "The MHAI patient id, lower case." }
+                  full_name: { type: string, nullable: true }
+                  mrn: { type: string, description: The MRN as stored (normalised). }
+                  age: { type: integer, minimum: 0, nullable: true, description: Whole years; null without a birth date. }
+                  sex: { type: string, enum: [female, male, other, unknown] }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
   /queries/{id}:
     get:
       operationId: getQueryStatus
@@ -2056,7 +2131,8 @@ paths:
         lift). Since 1.21.0.
         404 when no active patient of the hospital matches; 409 `conflict`
         when the MRN names two (send `patient_id`). Order: the body (422),
-        the patient (404, 409), then the code (403). Audited
+        the code (403; since 1.29.0 before the patient, so an MRN is never
+        answered without one), then the patient (404, 409). Audited
         `emr.patient_excluded` (counts), one `alert.withdrawn` per alert,
         and `emr.exclusion_purged` (counts) or `emr.exclusion_purge_held`.
         A deadlock against the record feed is retried, then 503

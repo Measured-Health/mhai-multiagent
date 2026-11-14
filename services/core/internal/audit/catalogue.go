@@ -347,6 +347,10 @@ var Catalogue = map[string]Entry{
 	"emr.patient_match_rejected": withheld(),
 	"emr.patient_excluded":       withheld(),
 	"emr.patient_matches_read":   withheld(),
+	// The clinician's patient lookup by MRN (00039): no mhai-web kind yet;
+	// sent bare.
+	"patients.lookup":               withheld(),
+	"patients.lookup_limit_reached": withheld(),
 	// The exclusion purge, retention, legal holds and hospital removal
 	// (EMR PR 9): no mhai-web kind yet; sent bare.
 	"emr.exclusion_purged":         withheld(),
