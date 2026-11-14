@@ -103,7 +103,7 @@ The cloud plan's and the promotion design's constraints hold: no PHI or secrets 
 **Files:** `modelstore/files.py`, `tests/modelstore/test_files_gguf.py`.
 
 - [ ] `ALLOWED` gains `*.gguf`, at most one per run, at most 40 GiB (the weights cap), and only with at least one safetensors file present.
-- [ ] `check_gguf` (our own parser, bounded reads, never maps tensors): magic `GGUF`, version 3, tensor and metadata counts under caps, every metadata key ASCII and under 256 bytes, string values under 1 MiB (the chat template included), `general.architecture` from a closed list (`llama`, `qwen2`, `qwen3`, `gemma2`, `gemma3`, `phi3`, `mistral`), tensor offsets inside the file. Refusal: `gguf_invalid` with a fixed detail code.
+- [ ] `check_gguf` (our own parser, bounded reads, never maps tensors): magic `GGUF`, version 3, tensor and metadata counts under caps, every metadata key ASCII and under 256 bytes, string values under 1 MiB (the chat template included), `general.architecture` from a closed list (`llama`, `qwen2`, `qwen3`, `gemma2`, `gemma3`, `gemma4`, `phi3`, `mistral`), tensor offsets inside the file. Refusal: `gguf_invalid` with a fixed detail code.
 - [ ] The hash is streamed in the same pass, as for safetensors.
 
 **Tests:** a valid tiny GGUF fixture (generated in the test, not committed binary); truncated header; wrong magic; version 2; an oversized string; an unknown architecture; offsets past the end; two GGUF files in one run; a GGUF with no safetensors.
