@@ -52,6 +52,18 @@ func ValidateHospitalRef(s string) error {
 	return err
 }
 
+// HospitalWhere is the WHERE clause (on hospitals, $1 its value) naming
+// the hospital ref names (its id or short code), for a CLI that looks the
+// hospital up under a role of its own.
+func HospitalWhere(ref string) (string, any, error) {
+	r, err := parseHospitalRef(ref)
+	if err != nil {
+		return "", nil, err
+	}
+	cond, arg := r.where()
+	return cond, arg, nil
+}
+
 // where is the WHERE clause for r, with $1 its value.
 func (r hospitalRef) where() (string, any) {
 	if r.code != "" {

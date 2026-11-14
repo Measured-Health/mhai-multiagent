@@ -699,3 +699,19 @@ func requireAbsent(t *testing.T, w *world, values ...string) {
 		}
 	}
 }
+
+// A finding of a patient excluded under a legal hold (its purge deferred,
+// so the finding stands) is recorded as not raised, never retried forever
+// and never an alert.
+func TestHeldExclusionFindingNotRaised(t *testing.T) {
+	w := newWorld(t)
+	exec(t, `INSERT INTO legal_holds (hospital_id, reference) VALUES ($1, 'LH-2026-0042')`, w.h)
+	tx := inGateway(t, w.h, `SELECT * FROM emr_exclude_patient($1, 'objection')`, w.patient)
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mustHandle(t, w.consumer(), w.h, w.finding)
+	if len(alertRows(t, w.h)) != 0 || lastPayload(t, w.h, "alert.not_raised")["reason"] != "patient_excluded" {
+		t.Fatal("a held exclusion's finding was raised, or not recorded")
+	}
+}

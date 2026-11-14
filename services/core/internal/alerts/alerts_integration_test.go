@@ -12,9 +12,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,6 +25,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
@@ -820,4 +823,104 @@ func TestLogsCarryNoPatientData(t *testing.T) {
 	w.adm("POST", "/hospital/patient-exclusions", `{"mrn": "SYN-NONE", "reason": "objection", "mfa_code": "123456"}`)
 	w.clin(w.u, "POST", "/alerts/"+uuid.NewString()+"/acknowledge", "")
 	requireAbsent(t, w, "SYN-0001", "SYN-NONE", "Synthetic Patient", "6.8371")
+}
+
+// EMR PR 9 (design §10.6): without a hold the route purges at once and
+// audits it (emr.exclusion_purged, counts, via route); under a legal hold
+// it answers 202 with purge_held, deletes nothing, the alert stops naming
+// the patient, and the hold is audited (emr.exclusion_purge_held).
+func TestExclusionPurgedOrHeldAudited(t *testing.T) {
+	w := newWorld(t)
+	code, out := w.adm("POST", "/hospital/patient-exclusions", `{"mrn": "SYN-0001", "reason": "objection", "mfa_code": "123456"}`)
+	if code != 202 || out["purge_held"] != false {
+		t.Fatalf("no hold: %d %v", code, out)
+	}
+	var raw []byte
+	if err := sharedSuper.QueryRow(context.Background(), `SELECT payload FROM audit_log WHERE hospital_id = $1
+		AND action = 'emr.exclusion_purged' AND actor_id = $2`, w.h, w.admin).Scan(&raw); err != nil {
+		t.Fatalf("purged audit with the admin as actor: %v", err)
+	}
+	var purged map[string]any
+	if err := json.Unmarshal(raw, &purged); err != nil {
+		t.Fatal(err)
+	}
+	if purged["patient_id"] != w.patient.String() || purged["via"] != "route" || purged["observations"] != float64(1) ||
+		purged["findings"] != float64(1) || auditCount(t, w.h, "emr.exclusion_purge_held") != 0 {
+		t.Fatalf("purged audit: %v", purged)
+	}
+
+	h := newWorld(t)
+	a := h.alert("r1", true)
+	exec(t, `INSERT INTO legal_holds (hospital_id, reference) VALUES ($1, 'LH-2026-0042')`, h.h)
+	code, out = h.adm("POST", "/hospital/patient-exclusions", `{"mrn": "SYN-0001", "reason": "objection", "mfa_code": "123456"}`)
+	if code != 202 || out["purge_held"] != true || out["purge_by"] == nil {
+		t.Fatalf("on hold: %d %v", code, out)
+	}
+	if auditCount(t, h.h, "emr.exclusion_purge_held") != 1 || auditCount(t, h.h, "emr.exclusion_purged") != 0 ||
+		auditCount(t, h.h, "alert.withdrawn") != 1 {
+		t.Fatal("held exclusion audit")
+	}
+	var obs, named int
+	if err := sharedSuper.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM emr.observations WHERE id = $1),
+		(SELECT count(*) FROM alerts WHERE id = $2 AND patient_id IS NOT NULL)`, h.obs, a).Scan(&obs, &named); err != nil ||
+		obs != 1 || named != 0 {
+		t.Fatalf("under the hold: observations %d, alert naming the patient %d, %v", obs, named, err)
+	}
+	_, c := h.clin(h.u, "GET", "/alerts", "")
+	if listed, _ := c["alerts"].([]any); len(listed) != 0 {
+		t.Fatalf("an excluded patient's alert is listed: %v", c)
+	}
+	if strings.Contains(auditPayloads(t, h.h), "SYN-0001") || strings.Contains(auditPayloads(t, h.h), "LH-2026-0042") {
+		t.Fatal("the audit carries an MRN or the hold's reference")
+	}
+}
+
+// Task 41: UsageBlock counts the hospital's alerts in the period under the
+// gateway's RLS, by severity, route and handling, an alert that lost its
+// patient included; another hospital's alerts and alerts outside the
+// period are not counted.
+func TestUsageBlockCounts(t *testing.T) {
+	w, other := newWorld(t), newWorld(t)
+	for i := 0; i < 6; i++ {
+		w.alert("r-q"+strconv.Itoa(i), true)
+		other.alert("r-o"+strconv.Itoa(i), true)
+	}
+	for i := 0; i < 5; i++ {
+		a := w.alert("r-n"+strconv.Itoa(i), false, w.u)
+		exec(t, `UPDATE alerts SET status = 'handled', handled_by = $2, handled_at = now() WHERE id = $1`, a, w.u)
+	}
+	gone := w.alert("r-old", true)
+	exec(t, `UPDATE alerts SET created_at = now() - interval '40 days' WHERE id = $1`, gone)
+	exec(t, `UPDATE alerts SET patient_id = NULL, finding_id = NULL WHERE hospital_id = $1 AND rule_id = 'r-q0'`, w.h)
+
+	ctx := context.Background()
+	tx, err := sharedSuper.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, q := range []string{`SET LOCAL ROLE mhai_gateway`, `SELECT set_config('mhai.hospital_id', '` + w.h.String() + `', true)`} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	out, err := alerts.UsageBlock(ctx, tx, w.h, now.Add(-30*24*time.Hour), now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	val := func(g smallgroup.Guarded) int64 {
+		if !g.Shown() {
+			return -1
+		}
+		return *g.Value
+	}
+	if val(out.Total) != 11 || val(out.BySeverity["critical"]) != 11 || val(out.ByRoute["queue"]) != 6 ||
+		val(out.ByRoute["named"]) != 5 || val(out.ByHandling["open"]) != 6 || val(out.ByHandling["acknowledged"]) != 5 ||
+		val(out.ByCategory["blood_chemistry"]) != 11 {
+		t.Fatalf("usage: %+v", out)
+	}
+	if _, err := alerts.UsageBlock(ctx, tx, w.h, now, now); err == nil {
+		t.Fatal("an empty period accepted")
+	}
 }

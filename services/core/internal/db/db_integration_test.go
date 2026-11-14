@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 33}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -324,6 +324,21 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A legal hold, a purge request and a held alert's columns (00032), so
+	// they have rows to hide; no application role holds anything on them.
+	var req uuid.UUID
+	if err := pool.QueryRow(ctx, `INSERT INTO emr.purge_requests (hospital_id, patient_id, due_at, state, held_since)
+		VALUES ($1, $2, now(), 'held', now()) RETURNING id`, a, pat).Scan(&req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO legal_holds (hospital_id, reference) VALUES ($1, 'LH-2026-0042')`, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO emr.purge_held_alerts (request_id, hospital_id, alert_id, patient_id)
+		SELECT $2, $1, id, patient_id FROM alerts WHERE hospital_id = $1`, a, req); err != nil {
+		t.Fatal(err)
+	}
+	emrHidden = append(emrHidden, "legal_holds", "emr.purge_requests", "emr.purge_held_alerts")
 	alertTables := []string{"alerts", "alert_deliveries", "alert_settings", "alert_units", "alert_levels", "alert_recipients",
 		"user_notification_settings"}
 
@@ -406,7 +421,9 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 
 	// The emr service's role, with no hospital set, sees no EMR row
 	// (00020); emr.connection_errors it may only append to.
-	emrReads := slices.Concat(emrTables[:3], emrGatewayReads, slices.DeleteFunc(slices.Clone(emrHidden), func(s string) bool { return s == "emr.merges" || s == "emr_consumed" }))
+	emrReads := slices.Concat(emrTables[:3], emrGatewayReads, slices.DeleteFunc(slices.Clone(emrHidden), func(s string) bool {
+		return s == "emr.merges" || s == "emr_consumed" || s == "legal_holds" || s == "emr.purge_requests" || s == "emr.purge_held_alerts"
+	}))
 	for _, table := range emrReads {
 		tx, err := one.Begin(ctx)
 		if err != nil {
