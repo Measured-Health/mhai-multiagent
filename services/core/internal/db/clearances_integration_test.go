@@ -599,8 +599,8 @@ func TestClearanceGrants(t *testing.T) {
 	}
 	want := "mhai_clearance_check:mhai_gateway,mhai_clearance_create:mhai_gateway,mhai_clearance_demo_ready:mhai_gateway," +
 		"mhai_clearance_due:mhai_analysis_job,mhai_clearance_gate:mhai_gateway,mhai_clearance_names:mhai_gateway," +
-		"mhai_clearance_narrow:mhai_gateway,mhai_clearance_nightly:mhai_gateway,mhai_clearance_note_refusal:mhai_gateway," +
-		"mhai_clearance_pending:mhai_gateway," +
+		"mhai_clearance_narrow:mhai_gateway,mhai_clearance_nightly:mhai_gateway," +
+		"mhai_clearance_pending:mhai_gateway,mhai_clearance_release_check:mhai_gateway,mhai_clearance_reserve_check:mhai_gateway," +
 		"mhai_clearance_revoke:mhai_gateway,mhai_clearance_today:mhai_gateway,mhai_named_access_demo_raise:mhai_provision," +
 		"mhai_named_access_position:mhai_gateway,mhai_named_access_position:mhai_provision," +
 		"mhai_named_access_rank:mhai_provision,mhai_named_access_within_global:mhai_provision"

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	_ "time/tzdata"
@@ -769,5 +770,52 @@ func TestEligibilityRefusalsRateLimited(t *testing.T) {
 	body, ct := e.letterForm(other).encode(t)
 	if c, _, b := e.do(t, other, http.MethodPost, "/hospital/clearances", ct, body, true); c != http.StatusCreated {
 		t.Errorf("another admin: %d %s", c, b)
+	}
+}
+
+// Security review (4, under concurrency): the limit is reserved before the
+// check, atomically, so 20 parallel bad checks get at most RefusalsPerDay
+// not-eligible answers; the rest are 429.
+func TestEligibilityRefusalsLimitUnderRace(t *testing.T) {
+	super, app := pools(t)
+	e := newEnv(t, super, app, true, "Africa/Lagos")
+	const n = 20
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		f := e.letterForm(e.admin).withExtra([2]string{"covered_platform", fmt.Sprintf("race-%d@measured-health.example", i)})
+		body, ct := f.encode(t)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := httptest.NewRequest(http.MethodPost, httpx.BasePath+"/hospital/clearances", bytes.NewReader(body))
+			r.Header.Set("Content-Type", ct)
+			r.Header.Set("Idempotency-Key", uuid.NewString())
+			w := httptest.NewRecorder()
+			r.Body = http.MaxBytesReader(w, r.Body, httpx.MaxBody)
+			ctx := authz.WithPrincipal(r.Context(), authz.Principal{UserID: e.admin, HospitalID: e.h,
+				Roles: []string{authz.RoleHospitalAdmin}, MFA: true, SessionID: uuid.NewString()})
+			e.mux.ServeHTTP(w, r.WithContext(ctx))
+			codes[i] = w.Code
+		}()
+	}
+	wg.Wait()
+	answered, limited := 0, 0
+	for _, c := range codes {
+		switch c {
+		case http.StatusUnprocessableEntity:
+			answered++
+		case http.StatusTooManyRequests:
+			limited++
+		default:
+			t.Errorf("unexpected status %d", c)
+		}
+	}
+	if answered > RefusalsPerDay || answered+limited != n {
+		t.Errorf("%d not-eligible answers and %d limited of %d parallel checks, want at most %d answers",
+			answered, limited, n, RefusalsPerDay)
+	}
+	if got := e.count(t, `SELECT refused FROM clearance_check_refusals WHERE hospital_id = $1 AND user_id = $2`, e.h, e.admin); got != n {
+		t.Errorf("%d slots taken, want %d", got, n)
 	}
 }

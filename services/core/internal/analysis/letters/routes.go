@@ -384,33 +384,47 @@ func (d Deps) change(w http.ResponseWriter, r *http.Request, what string, id uui
 	httpx.JSON(w, http.StatusOK, out)
 }
 
-// RefusalsPerDay is how many eligibility refusals one person may have in
-// a hospital day; then the check itself is 429 rate_limited (00034,
-// mhai_clearance_check) and one flagged entry is written.
+// RefusalsPerDay is how many eligibility checks one person may spend on
+// refusals in a hospital day (security review): each check reserves a slot
+// first, atomically and committed (00034, mhai_clearance_reserve_check), so
+// parallel checks can't all pass; a check that wasn't an eligibility
+// refusal gives its slot back. Past the limit the upload is 429
+// rate_limited, and the first refusal past it writes one flagged entry.
 const RefusalsPerDay = 5
 
-// noteRefusal records an eligibility refusal in its own transaction (the
-// request's rolled back) and, at the limit, writes the flagged
-// clearance.check_limit_reached once. A failure is logged with ids only;
-// the reply is the refusal either way.
-func (d Deps) noteRefusal(parent context.Context) {
+// reserveCheck takes a check slot in its own committed transaction; ok is
+// false past the limit (the reply is then 429).
+func (d Deps) reserveCheck(ctx context.Context) (ok bool, err error) {
+	p, _ := authz.FromContext(ctx)
+	err = authz.TxUser(ctx, d.Pool, func(tx pgx.Tx) error {
+		var n int
+		if err := tx.QueryRow(ctx, `SELECT mhai_clearance_reserve_check()`).Scan(&n); err != nil {
+			return err
+		}
+		ok = n <= RefusalsPerDay
+		if n != RefusalsPerDay+1 {
+			return nil
+		}
+		return audit.Write(ctx, tx, audit.Event{ActorID: p.UserID.String(), HospitalID: p.HospitalID.String(),
+			RequestID: httpx.RequestIDFrom(ctx), Action: "clearance.check_limit_reached", Entity: "user",
+			EntityID: p.UserID.String(), Payload: map[string]any{"limit": RefusalsPerDay}})
+	})
+	return ok, err
+}
+
+// releaseCheck gives a slot back in its own transaction (the check wasn't
+// an eligibility refusal). A failure is logged with ids only: the slot
+// stays taken, which only ever limits more.
+func (d Deps) releaseCheck(parent context.Context) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
 	defer cancel()
 	p, _ := authz.FromContext(parent)
 	err := authz.TxUser(authz.WithPrincipal(ctx, p), d.Pool, func(tx pgx.Tx) error {
-		var n int
-		if err := tx.QueryRow(ctx, `SELECT mhai_clearance_note_refusal()`).Scan(&n); err != nil {
-			return err
-		}
-		if n != RefusalsPerDay {
-			return nil
-		}
-		return audit.Write(ctx, tx, audit.Event{ActorID: p.UserID.String(), HospitalID: p.HospitalID.String(),
-			RequestID: httpx.RequestIDFrom(parent), Action: "clearance.check_limit_reached", Entity: "user",
-			EntityID: p.UserID.String(), Payload: map[string]any{"limit": RefusalsPerDay}})
+		_, err := tx.Exec(ctx, `SELECT mhai_clearance_release_check()`)
+		return err
 	})
 	if err != nil {
-		d.log().Error("letters: refusal count failed", "request_id", httpx.RequestIDFrom(parent),
+		d.log().Error("letters: check release failed", "request_id", httpx.RequestIDFrom(parent),
 			"hospital_id", p.HospitalID.String(), "reason", "unavailable")
 	}
 }
@@ -420,11 +434,12 @@ func (d Deps) noteRefusal(parent context.Context) {
 // 403); outside the demo 503 unavailable, whatever the body holds; the
 // key, the media type (415), the body's size (413) and shape (422, T19: an
 // unknown field such as a hospital or an uploader is refused); the code
-// (403); then, before anything is stored, the day's refusal limit (429),
+// (403); a check slot reserved (429 past the day's limit); then, before
+// anything is stored,
 // the dates (422 end_date_too_late), the people (422 not_eligible with the
 // ids; not_eligible_platform with no list, the same for any address that
-// isn't an eligible platform admin) and renews (422). Every eligibility
-// refusal is counted (RefusalsPerDay). The letter, its people and its
+// isn't an eligible platform admin) and renews (422). An eligibility
+// refusal keeps its slot (RefusalsPerDay); any other outcome gives it back. The letter, its people and its
 // fixture pages are stored with their entries, and the reply is the letter
 // (201); platform admins it names are not shown until Measured Health
 // verifies it. The file is never kept, parsed or logged.
@@ -459,6 +474,14 @@ func (d Deps) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !d.stepUp(w, r, stepUpIn{MFACode: in.mfaCode, BackupCode: in.backupCode}) {
+		return
+	}
+	// Reserve, then check (the limit holds under concurrency).
+	if ok, err := d.reserveCheck(ctx); err != nil {
+		d.fail(w, r, "upload", err)
+		return
+	} else if !ok {
+		httpx.Error(w, r, "rate_limited")
 		return
 	}
 	sum := sha256.Sum256(in.file)
@@ -514,10 +537,10 @@ func (d Deps) upload(w http.ResponseWriter, r *http.Request) {
 		out, err = one(ctx, tx, id)
 		return err
 	})
+	if badCode == "" && !platformRefused {
+		d.releaseCheck(ctx)
+	}
 	if err != nil {
-		if badCode != "" || platformRefused {
-			d.noteRefusal(ctx)
-		}
 		if badCode != "" {
 			httpx.ErrorFields(w, r, badCode, map[string]any{"ids": bad})
 			return
