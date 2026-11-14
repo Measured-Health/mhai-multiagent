@@ -1,0 +1,12 @@
+version: v2
+# Run from proto/ (make proto): the documents contract, mhai/documents/v1,
+# into services/gokit/docspb, which core and the documents service share
+# (ADR 0016).
+inputs:
+  - directory: .
+    paths:
+      - mhai/documents
+plugins:
+  - local: protoc-gen-go
+    out: ../services/gokit
+    opt: module=github.com/Measured-Health/mhai-multiagent/services/gokit

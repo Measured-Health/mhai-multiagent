@@ -143,3 +143,125 @@ func TestSubjectRulesUnchangedForInferenceAndJobs(t *testing.T) {
 		t.Errorf("minted a job for another hospital's subject: %v", err)
 	}
 }
+
+func docsClaims(op string) Claims {
+	return Claims{Aud: "documents", Sub: SvcCore, Hid: testHospital, Rid: testRid,
+		Kind: KindReq, Subject: "documents.v1.ctl." + op, ReplyPrefix: ReplyCore, Via: ViaCore}
+}
+
+// ADR 0016 (documents design §8, §17 departure 5): documents.v1.ctl.<op>
+// is a request subject whose audience is always documents. Only core calls
+// it: no grant token, and no step-up claim (no documents op takes one).
+// Every other audience is refused on it, and aud documents everywhere else.
+func TestSubjectRulesDocumentsCtl(t *testing.T) {
+	s := newSigner(t)
+	body := []byte("synthetic documents control body")
+	c := docsClaims("health")
+	tok, _, err := s.Mint(c, body, 5*time.Second)
+	if err != nil {
+		t.Fatalf("mint documents.v1.ctl.health: %v", err)
+	}
+	want := Expect{Aud: "documents", Subject: "documents.v1.ctl.health", Kind: KindReq}
+	got, err := VerifyAt(tok, s.PublicKeys(), want, body, testNow)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if err := CheckReply(got, "_INBOX_gateway.x", false); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	if got.Hid != testHospital || got.Sub != SvcCore {
+		t.Fatalf("claims: %+v", got)
+	}
+
+	// Another audience on the documents subject: never minted, never verified.
+	for _, aud := range []string{"emr", "pipeline", "echo"} {
+		bad := c
+		bad.Aud = aud
+		if _, _, err := s.Mint(bad, body, 5*time.Second); !errors.Is(err, ErrMintClaims) {
+			t.Errorf("minted aud %s on documents.v1.ctl.health: %v", aud, err)
+		}
+		forged := resign(t, s, tok, func(_, p map[string]any) { p["aud"] = aud })
+		if _, err := VerifyAt(forged, s.PublicKeys(), Expect{Aud: aud, Subject: "documents.v1.ctl.health", Kind: KindReq},
+			body, testNow); err == nil {
+			t.Errorf("aud %s on documents.v1.ctl.health verified", aud)
+		}
+		if _, err := VerifyAt(forged, s.PublicKeys(), want, body, testNow); !errors.Is(err, ErrClaims) {
+			t.Errorf("aud %s verified by documents: %v", aud, err)
+		}
+	}
+	// aud documents on the emr control subject is refused both ways, and a
+	// documents token moved to it doesn't verify there.
+	cross := c
+	cross.Subject = "emr.v1.ctl.health"
+	if _, _, err := s.Mint(cross, nil, 5*time.Second); !errors.Is(err, ErrMintClaims) {
+		t.Errorf("minted aud documents on emr.v1.ctl.health: %v", err)
+	}
+	moved := resign(t, s, tok, func(_, p map[string]any) { p["nsub"] = "emr.v1.ctl.health" })
+	for _, aud := range []string{"documents", "emr"} {
+		if _, err := VerifyAt(moved, s.PublicKeys(), Expect{Aud: aud, Subject: "emr.v1.ctl.health", Kind: KindReq},
+			body, testNow); err == nil {
+			t.Errorf("a documents token verified on emr.v1.ctl.health for aud %s", aud)
+		}
+	}
+	emr := resign(t, s, tok, func(_, p map[string]any) { p["aud"], p["nsub"] = "emr", "emr.v1.ctl.health" })
+	if _, err := VerifyAt(emr, s.PublicKeys(), want, body, testNow); err == nil {
+		t.Error("an emr token verified on documents.v1.ctl.health")
+	}
+
+	// Only core calls the documents service: no grant (BFF-direct) token.
+	grant := c
+	grant.Via, grant.ReplyPrefix = ViaGrant, "_INBOX_bff.clinical."
+	if _, _, err := s.Mint(grant, body, 2*time.Second); !errors.Is(err, ErrMintClaims) {
+		t.Fatalf("minted a grant for the documents service: %v", err)
+	}
+	g := resign(t, s, tok, func(_, p map[string]any) { p["via"], p["rpl"] = "grant", "_INBOX_bff.clinical." })
+	if _, err := VerifyAt(g, s.PublicKeys(), want, body, testNow); !errors.Is(err, ErrBinding) {
+		t.Fatalf("grant on documents.v1.ctl.health: %v, want ErrBinding", err)
+	}
+	// No documents op takes step-up: the stp claim is refused on it.
+	stp := c
+	stp.StepUp = true
+	if _, _, err := s.Mint(stp, body, 5*time.Second); err == nil {
+		t.Fatal("minted stp on documents.v1.ctl.health")
+	}
+}
+
+// Shapes the table refuses for documents control subjects.
+func TestSubjectRulesDocumentsCtlShapes(t *testing.T) {
+	s := newSigner(t)
+	for _, subj := range []string{"documents.v1.ctl", "documents.v1.ctl.health.x", "documents.v1.ctl.Health",
+		"documents.v1.ctl.", "documents.v2.ctl.health", "documents.v1.ctrl.health", "documents.v1.ctl.he-alth",
+		"documents.v1." + testHospital + ".page", "documents.v1." + testHospital + ".intake"} {
+		c := docsClaims("health")
+		c.Subject = subj
+		if _, _, err := s.Mint(c, nil, 5*time.Second); !errors.Is(err, ErrMintClaims) {
+			t.Errorf("minted %q: %v", subj, err)
+		}
+		tok := resign(t, s, mint(t, s, docsClaims("health"), nil, 5*time.Second), func(_, p map[string]any) { p["nsub"] = subj })
+		if _, err := VerifyAt(tok, s.PublicKeys(), Expect{Aud: "documents", Subject: subj, Kind: KindReq}, nil, testNow); !errors.Is(err, ErrBinding) {
+			t.Errorf("verified %q: %v, want ErrBinding", subj, err)
+		}
+	}
+	job := docsClaims("health")
+	job.Kind, job.ReplyPrefix = KindJob, ""
+	if _, _, err := s.Mint(job, nil, time.Minute); !errors.Is(err, ErrMintClaims) {
+		t.Errorf("minted a job on documents.v1.ctl.health: %v", err)
+	}
+	for _, tc := range []struct {
+		kind    Kind
+		subject string
+		aud     string
+		ok      bool
+	}{
+		{KindReq, "documents.v1.ctl.health", "documents", true},
+		{KindReq, "documents.v1.ctl.presign_upload", "documents", true},
+		{KindJob, "documents.v1.ctl.health", "", false},
+		{KindReq, "documents.v1." + testHospital + ".page", "", false},
+		{KindReq, "documents.v1." + testHospital + ".uploaded", "", false},
+	} {
+		aud, ok := AudienceFor(tc.kind, tc.subject)
+		if aud != tc.aud || ok != tc.ok {
+			t.Errorf("AudienceFor(%s, %q) = %q, %v; want %q, %v", tc.kind, tc.subject, aud, ok, tc.aud, tc.ok)
+		}
+	}
+}
