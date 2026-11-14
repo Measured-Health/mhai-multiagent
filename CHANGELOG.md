@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - Patient Analysis PR 7: clearance letters, hospital side (migration
-  **00038**, OpenAPI **1.27.0**; off by default: every letter route answers
+  **00038**, OpenAPI **1.28.0**; off by default: every letter route answers
   404 while the hospital's analysis switch is off and 403
   `named_access_off` while its named-access position is `off`, which it is
   everywhere until `core analysis named-access demo` raises the demo
@@ -34,6 +34,13 @@ All notable changes to this project are documented here. The format follows
   platform admins are shown only on verified letters; eligibility
   refusals are limited to 5 a day per person, reserved before the check
   so parallel requests can't pass the limit.
+- Clinician alerts carry the patient's id (OpenAPI 1.27.0, additive):
+  `patient.id` on each alert of `GET /alerts` and on an acknowledged or
+  dismissed alert, the MHAI patient's lower-case uuid, so the clinical app
+  can send it as `patient_id` on `POST /queries` (mhai-web #93). Null when
+  the patient is excluded or merged into another; an alert whose patient
+  a purge cleared or a held purge moved aside is not listed, as before.
+  The id is neither logged nor audited on the list.
 - The platform app's team, activity, legal holds and analytics e-mail
   setting (mhai-web Plan 7b §9, Plan 8a, Plan 7d). New routes (OpenAPI
   1.26.0, additive), platform audience with two-step: `GET /platform/team`,

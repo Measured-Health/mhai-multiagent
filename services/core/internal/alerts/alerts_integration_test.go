@@ -924,3 +924,140 @@ func TestUsageBlockCounts(t *testing.T) {
 		t.Fatal("an empty period accepted")
 	}
 }
+
+// --- The alert's patient id (mhai-web #93) ----------------------------------
+
+// alertPatient returns the patient object of alert a on u's list, and the
+// raw page.
+func (w *world) alertPatient(u, a uuid.UUID) (map[string]any, string) {
+	w.t.Helper()
+	code, page := w.clin(u, "GET", "/alerts", "")
+	raw, _ := json.Marshal(page)
+	if code != 200 {
+		w.t.Fatalf("list: %d %s", code, raw)
+	}
+	list, _ := page["alerts"].([]any)
+	for _, x := range list {
+		m := x.(map[string]any)
+		if m["id"] == a.String() {
+			return m["patient"].(map[string]any), string(raw)
+		}
+	}
+	w.t.Fatalf("alert %s not listed: %s", a, raw)
+	return nil, ""
+}
+
+// An active patient's alert carries the patient's id (lower-case), on the
+// list and on a handled alert; the id is in no log line and no audit row.
+func TestAlertPatientIDActive(t *testing.T) {
+	w := newWorld(t)
+	a := w.alert("r1", true)
+	p, _ := w.alertPatient(w.u, a)
+	id, present := p["id"]
+	if !present || id != w.patient.String() || id != strings.ToLower(w.patient.String()) {
+		t.Fatalf("patient %v, want id %s", p, w.patient)
+	}
+	code, out := w.clin(w.u, "POST", "/alerts/"+a.String()+"/acknowledge", "")
+	if code != 200 || out["patient"].(map[string]any)["id"] != w.patient.String() {
+		t.Fatalf("acknowledged: %d %v", code, out)
+	}
+	if auditCount(t, w.h, "alerts.read") != 1 {
+		t.Fatal("the page wasn't audited")
+	}
+	requireAbsent(t, w, w.patient.String())
+}
+
+// A patient merged into another: an alert left on the merged patient's
+// row (the kept patient already had one open for the rule) is listed with
+// a null id; the kept patient's alert carries the kept patient's id.
+func TestAlertPatientIDNullWhenMerged(t *testing.T) {
+	w := newWorld(t)
+	b, _, fb := w.newPatient(t, "src-pid-2", "SYN-PID-0002")
+	gone := w.alert("r-pid", true)
+	var kept uuid.UUID
+	if err := sharedSuper.QueryRow(context.Background(), `INSERT INTO alerts (hospital_id, finding_id, patient_id, connection_id,
+		rule_id, loinc, category, severity, routed_queue) VALUES ($1, $2, $3, $4, 'r-pid', '99901-1', 'blood_chemistry', 'critical', true)
+		RETURNING id`, w.h, fb, b, w.conn).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	m := w.match(w.patient, b)
+	if code, out := w.adm("POST", "/hospital/patient-matches/"+m.String()+"/confirm", `{"keep": "b", "mfa_code": "123456"}`); code != 204 {
+		t.Fatalf("merge: %d %v", code, out)
+	}
+	var on uuid.UUID
+	if err := sharedSuper.QueryRow(context.Background(), `SELECT patient_id FROM alerts WHERE id = $1`, gone).Scan(&on); err != nil ||
+		on != w.patient {
+		t.Fatalf("the open duplicate moved: %v %v", on, err)
+	}
+	p, raw := w.alertPatient(w.u, gone)
+	if id, present := p["id"]; !present || id != nil {
+		t.Fatalf("merged patient: %v", p)
+	}
+	if strings.Contains(raw, w.patient.String()) {
+		t.Fatalf("the merged patient's id is on the page: %s", raw)
+	}
+	if p, _ := w.alertPatient(w.u, kept); p["id"] != b.String() {
+		t.Fatalf("kept patient: %v", p)
+	}
+}
+
+// An excluded patient's alert names no patient: the exclusion clears (or,
+// under a hold, moves aside) the alert's patient, so it isn't listed. Were
+// an alert still to point at an excluded patient, its id is null.
+func TestAlertPatientIDNullWhenExcluded(t *testing.T) {
+	w := newWorld(t)
+	a := w.alert("r-pid", true)
+	exec(t, `UPDATE emr.patients SET status = 'excluded', excluded_at = now(), exclude_reason = 'other'
+		WHERE hospital_id = $1 AND id = $2`, w.h, w.patient)
+	p, raw := w.alertPatient(w.u, a)
+	if id, present := p["id"]; !present || id != nil {
+		t.Fatalf("excluded patient: %v", p)
+	}
+	if strings.Contains(raw, w.patient.String()) {
+		t.Fatalf("the excluded patient's id is on the page: %s", raw)
+	}
+	code, out := w.clin(w.u, "POST", "/alerts/"+a.String()+"/dismiss", `{"reason": "other"}`)
+	if code != 200 || out["patient"].(map[string]any)["id"] != nil {
+		t.Fatalf("dismissed: %d %v", code, out)
+	}
+
+	// Through the route, with and without a hold: the alert is gone.
+	for _, held := range []bool{false, true} {
+		x := newWorld(t)
+		x.alert("r-pid", true)
+		if held {
+			exec(t, `INSERT INTO legal_holds (hospital_id, reference) VALUES ($1, 'LH-2026-0099')`, x.h)
+		}
+		if code, out := x.adm("POST", "/hospital/patient-exclusions", `{"mrn": "SYN-0001", "reason": "objection", "mfa_code": "123456"}`); code != 202 {
+			t.Fatalf("held %v: %d %v", held, code, out)
+		}
+		_, page := x.clin(x.u, "GET", "/alerts", "")
+		raw, _ := json.Marshal(page)
+		if len(ids(page)) != 0 || strings.Contains(string(raw), x.patient.String()) {
+			t.Fatalf("held %v: an excluded patient's alert or id is listed: %s", held, raw)
+		}
+	}
+}
+
+// Another hospital's patient id is never on the caller's page.
+func TestAlertPatientIDNeverAnotherHospitals(t *testing.T) {
+	w, other := newWorld(t), newWorld(t)
+	other.alert("r-pid", true)
+	mine := w.alert("r-pid", true)
+	p, raw := w.alertPatient(w.u, mine)
+	if p["id"] != w.patient.String() || len(ids(mustPage(t, raw))) != 1 || strings.Contains(raw, other.patient.String()) {
+		t.Fatalf("page: %s", raw)
+	}
+	if _, theirs := other.alertPatient(other.u, other.alert("r-pid-2", true)); strings.Contains(theirs, w.patient.String()) {
+		t.Fatalf("their page: %s", theirs)
+	}
+}
+
+func mustPage(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}

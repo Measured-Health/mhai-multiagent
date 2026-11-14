@@ -647,7 +647,7 @@ Source: the clinical app's Plan 11a (`apps/clinical/lib/api/clearances-contract.
 sample data; platform verification is Plan 11b, §14.10; named rows in
 Analysis are Plan 11c).
 
-**Built (Analysis PR 7, OpenAPI 1.27.0, off by default, demo hospital
+**Built (Analysis PR 7, OpenAPI 1.28.0, off by default, demo hospital
 only).** The routes below, for hospital admins with two-step. Where the
 backend differs from this section: 404 `not_found` while the hospital's
 analysis switch is off, before 403 `named_access_off`; an

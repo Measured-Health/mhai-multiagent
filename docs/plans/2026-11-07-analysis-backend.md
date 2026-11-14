@@ -1,6 +1,6 @@
 # Patient Analysis, named access and clearance letters (hospital side): implementation plan
 
-**Status:** PRs 1–4 merged (PR 4 as #141, migration 00025, departure 18). PR 5 (Tasks 12–14) merged as #149, with migration 00028, OpenAPI 1.19.0 and departures 19–24 below. PR 6 (Tasks 15–16) built on `agent/analysis-build-6`, with migration 00030 and departures 25–28; Task 17 moves to the staff-endpoints plan (departure 12). PR 7 (Tasks 18–20) built on `agent/analysis-build-7`, with migration 00038, OpenAPI 1.27.0 and departures 29–44. The design is approved (product owner, 7 Nov 2026, after three reviews). ADR 0015 and the SKILLS.md §1 amendment are written as **Accepted** in PR 1 (H4 is given). Live use waits on H1–H3 (design §15), which are people's gates in TODO.md. Nothing in this plan opens them.
+**Status:** PRs 1–4 merged (PR 4 as #141, migration 00025, departure 18). PR 5 (Tasks 12–14) merged as #149, with migration 00028, OpenAPI 1.19.0 and departures 19–24 below. PR 6 (Tasks 15–16) built on `agent/analysis-build-6`, with migration 00030 and departures 25–28; Task 17 moves to the staff-endpoints plan (departure 12). PR 7 (Tasks 18–20) built on `agent/analysis-build-7`, with migration 00038, OpenAPI 1.28.0 and departures 29–44. The design is approved (product owner, 7 Nov 2026, after three reviews). ADR 0015 and the SKILLS.md §1 amendment are written as **Accepted** in PR 1 (H4 is given). Live use waits on H1–H3 (design §15), which are people's gates in TODO.md. Nothing in this plan opens them.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
@@ -586,7 +586,7 @@ Abuse-case ids: **T1–T29** and **P1–P8** are the design's (§13.5, §5.7). *
 
 ### PR 7: letters, hospital side (design §8.1, §8.10)
 
-Depends on PR 6. The live upload needs the documents service (H5), and the platform-side verify, reject and revoke follow the Plan 11b design. **Built as migration 00038** (after EMR PRs 9 and 13, 00032 and 00033, and the route PRs #163–#165, 00035–00037) and **OpenAPI 1.27.0** (after 1.21.0–1.26.0), with departures 29–44. Off by default: every letter route answers 404 while the hospital's analysis switch is off, and 403 `named_access_off` while its named-access position is `off`, which it is everywhere until the CLI raises the demo hospital to `letters_only`.
+Depends on PR 6. The live upload needs the documents service (H5), and the platform-side verify, reject and revoke follow the Plan 11b design. **Built as migration 00038** (after EMR PRs 9 and 13, 00032 and 00033, and the route PRs #163–#165, 00035–00037) and **OpenAPI 1.28.0** (after 1.21.0–1.27.0), with departures 29–44. Off by default: every letter route answers 404 while the hospital's analysis switch is off, and 403 `named_access_off` while its named-access position is `off`, which it is everywhere until the CLI raises the demo hospital to `letters_only`.
 
 ### Task 18: Migration 00038: letters, people covered, events and the named-access switch
 
@@ -616,7 +616,7 @@ Depends on PR 6. The live upload needs the documents service (H5), and the platf
 
 **Files:**
 - Create: `services/core/internal/analysis/letters/{letters.go,routes.go,upload.go,pages.go,*_test.go,routes_integration_test.go}`
-- Modify: `internal/server/server.go`, `internal/httpx/errors.go` (`named_access_off` 403, `file_too_large` 413, `file_type` 415, `end_date_too_late`, `not_eligible`, `not_eligible_platform`, `would_empty` 422), `internal/audit/{schemas.go,catalogue.go}`, `openapi.yaml` (1.27.0), `docs/specs/generated/permissions.md`
+- Modify: `internal/server/server.go`, `internal/httpx/errors.go` (`named_access_off` 403, `file_too_large` 413, `file_type` 415, `end_date_too_late`, `not_eligible`, `not_eligible_platform`, `would_empty` 422), `internal/audit/{schemas.go,catalogue.go}`, `openapi.yaml` (1.28.0), `docs/specs/generated/permissions.md`
 
 **Interfaces:**
 - `GET /hospital/clearances` → `{clearances, today, max_end_date}` (newest first, at most 200); `GET /hospital/clearances/{id}` → one `ClearanceOut` as contract §10 has it (`revocation.day` the hospital's day; an `active` letter past its end date is sent as `ended`). Hospital admins with two-step; the gate first.
@@ -649,7 +649,7 @@ Depends on PR 6. The live upload needs the documents service (H5), and the platf
 
 #### Departures (PR 7)
 
-29. **Numbers.** Migration 00038, OpenAPI 1.27.0 (coordinator: EMR PRs 9 and 13 took 00032 and 00033, OpenAPI 1.21.0 and 1.22.0; the hospital and platform route PRs #163–#165 take 00035–00037 and 1.24.0–1.26.0 and merge first).
+29. **Numbers.** Migration 00038, OpenAPI 1.28.0 (coordinator: EMR PRs 9 and 13 took 00032 and 00033, OpenAPI 1.21.0 and 1.22.0; the hospital and platform route PRs #163–#165 take 00035–00037 and 1.24.0–1.26.0, and #168 takes 1.27.0; all merge first).
 30. **Two gates, re-read every time (the more private reading).** A letter route needs the analysis switch on (404, as every Analysis route) and named access at `letters_only` or `on` (403 `named_access_off`, contract §10). The hospital-admin role, the active account and two-step are re-read inside each transaction (403 `forbidden`), not taken from the 30-second cache.
 31. **No direct writes.** The design lets the gateway insert into the clearance tables; here it only reads them (its hospital, RLS) and writes through the functions, as departure 20. `mhai_platform` gets no grant on them, nor any write on `named_access_switch`, in this PR: its verify, reject and revoke functions and its two-person raise, each with an audit check, are Plan 11b's (security review: no write path that nothing audits). A signed-off hospital row is never raised under a demo global row, nor the global row given demo references over a signed-off hospital that is on. The trigger already holds the platform side's rules, and T15 is tested with a test-only grant.
 32. **`same_side` without a domain list.** No hospital has a list of allowed domains yet, so a platform admin is on the hospital's side when their email's domain is the domain of any account of the hospital, active or not. A shared public domain therefore refuses (fails closed). Plan 11b may add a domain list and account links under the same function, `mhai_clearance_same_side`.

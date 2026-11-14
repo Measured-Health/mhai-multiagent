@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.27.0"
+  version: "1.28.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1458,7 +1458,7 @@ paths:
         account and two-step are re-read on every call (403 `forbidden`).
         Newest first, at most 200. `today` and `max_end_date` are the
         hospital's days. An active letter past its end date is sent as
-        `ended`. Never cached. Added in 1.27.0.
+        `ended`. Never cached. Added in 1.28.0.
       tags: [clearances]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, validation_failed, not_ready, internal_error]
@@ -1506,7 +1506,7 @@ paths:
         and audited (`clearance.uploaded`, `clearance.ready`); the file is
         never kept. Platform admins a letter names appear in
         `covered_platform` only once Measured Health has verified a letter of
-        the hospital naming them. Added in 1.27.0.
+        the hospital naming them. Added in 1.28.0.
       tags: [clearances]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, file_type, file_too_large, validation_failed, end_date_too_late, not_eligible, not_eligible_platform, conflict, rate_limited, unavailable, not_ready, internal_error]
@@ -1554,7 +1554,7 @@ paths:
       operationId: getClearance
       summary: One clearance letter (hospital admins).
       description: |
-        As the list; another hospital's letter is 404. Added in 1.27.0.
+        As the list; another hospital's letter is 404. Added in 1.28.0.
       tags: [clearances]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, not_ready, internal_error]
@@ -1586,7 +1586,7 @@ paths:
         (its pages are the documents service's). Every view is audited
         (`clearance.viewed`) before the page is sent. `image/png`,
         `Cache-Control: no-store`, `Content-Disposition: inline`,
-        `X-Content-Type-Options: nosniff`. Added in 1.27.0.
+        `X-Content-Type-Options: nosniff`. Added in 1.28.0.
       tags: [clearances]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, not_ready, unavailable, internal_error]
@@ -1619,7 +1619,7 @@ paths:
         409 `conflict`. `other` needs a `note` (1–500 characters). An
         `Idempotency-Key` is required. Order: the gates and the letter (404,
         403), the body (422), the code (403). Audited `clearance.revoked`
-        (the note never is). Replies with the letter. Added in 1.27.0.
+        (the note never is). Replies with the letter. Added in 1.28.0.
       tags: [clearances]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, conflict, validation_failed, not_ready, internal_error]
@@ -1666,7 +1666,7 @@ paths:
         letter's `version` (409 `conflict` otherwise), while it is checking,
         waiting or active. `other` needs a `note`. An `Idempotency-Key` is
         required. Audited once per person removed (`clearance.narrowed`).
-        Replies with the letter. Added in 1.27.0.
+        Replies with the letter. Added in 1.28.0.
       tags: [clearances]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, conflict, validation_failed, would_empty, not_ready, internal_error]
@@ -1965,7 +1965,9 @@ paths:
         is `behind` when paused or silent for three poll intervals, so an
         empty list is "no alerts" only when every source is `current`.
         `grouped` is null until grouped mode exists. A page with alerts is
-        audited (`alerts.read`, the ids served).
+        audited (`alerts.read`, the ids served). Each alert's `patient.id`
+        (1.27.0) is the patient's MHAI id while the patient is active, else
+        null; it is neither logged nor audited here.
       tags: [alerts]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
@@ -5898,14 +5900,14 @@ components:
         suppressed: { type: boolean }
         drill: { type: string, nullable: true }
     ClearanceWho:
-      description: A person, by display name only (since 1.27.0).
+      description: A person, by display name only (since 1.28.0).
       type: object
       required: [display_name]
       additionalProperties: false
       properties:
         display_name: { type: string }
     ClearanceCovered:
-      description: A person a letter covers (since 1.27.0).
+      description: A person a letter covers (since 1.28.0).
       type: object
       required: [id, display_name]
       additionalProperties: false
@@ -5913,7 +5915,7 @@ components:
         id: { type: string, format: uuid }
         display_name: { type: string }
     ClearanceEventOut:
-      description: One line of a letter's history (since 1.27.0). `removed` only on `narrowed`, one person per line.
+      description: One line of a letter's history (since 1.28.0). `removed` only on `narrowed`, one person per line.
       type: object
       required: [at, kind, by, side, reason, note]
       additionalProperties: false
@@ -5926,7 +5928,7 @@ components:
         note: { type: string, nullable: true }
         removed: { type: array, items: { $ref: "#/components/schemas/ClearanceCovered" } }
     ClearanceOut:
-      description: A clearance letter (contract §10; since 1.27.0). Dates are the hospital's days.
+      description: A clearance letter (contract §10; since 1.28.0). Dates are the hospital's days.
       type: object
       required: [id, status, refused_reason, signed_by, signer_title, letter_date, covered, covered_platform, end_date,
         uploaded_by, uploaded_at, verified_by, verified_at, rejection, revocation, renews, pages, history, version]
@@ -5974,7 +5976,7 @@ components:
         history: { type: array, items: { $ref: "#/components/schemas/ClearanceEventOut" } }
         version: { type: integer, minimum: 1 }
     ClearancesOut:
-      description: The hospital's letters (since 1.27.0).
+      description: The hospital's letters (since 1.28.0).
       type: object
       required: [clearances, today, max_end_date]
       additionalProperties: false
@@ -6717,8 +6719,16 @@ components:
               evidence: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/AlertEvidence" } }
         patient:
           type: object
-          required: [full_name, mrn, location]
+          required: [id, full_name, mrn, location]
           properties:
+            id:
+              type: string
+              format: uuid
+              nullable: true
+              description: |
+                The MHAI patient the alert is about (1.27.0): a lower-case uuid, to send as `patient_id`
+                on `POST /queries`. Null when the patient is no longer active (excluded, or merged into
+                another patient). Never another hospital's patient.
             full_name: { type: string }
             mrn: { type: string, nullable: true, description: Null for a patient with no MRN. }
             location:
