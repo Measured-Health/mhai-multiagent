@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Patient Analysis PR 10: EMR facts (migration **00046**; no OpenAPI
+  change; off by default: ingest needs the hospital's analysis switch on
+  with real references and the new `ANALYSIS_INGEST=true`, refused without
+  the analysis keys). The nightly source now reads consultations whose
+  question names an active patient (age band and sex from the patient
+  index, the ICD-10 code as the condition), findings (flag, setting,
+  location, source) and alerts settled by a person (severity, minutes to
+  the response, dismissal reason), and enters the EMR connections and units
+  as sources and locations; the writer reads codes, ids and times only.
+  Exclusions (once the EMR purge is done, so never under a legal hold) and
+  merges are applied by the nightly run whatever the switch: unfrozen facts
+  are deleted or moved to the survivor, an excluded subject's reference is
+  cleared, and nothing frozen changes. Recorded diagnoses wait for the EMR
+  model (TODO.md). Plan departures 78-90.
 - Patient Analysis PR 9: the audit list, exports and the legal path
   (migration **00044**, OpenAPI **1.32.0**; off by default:
   `CORE_AUDIT_EXPORTS` gates every export route, the named-access list, the

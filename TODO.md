@@ -30,7 +30,7 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
   - **H3 (legal and compliance lead):** the NDPA 2023 basis, the clause in hospital agreements, the letter template, retention, and the legal resolution path (design §8.9) before PR 9. Before any live hospital; the template before PR 7 goes live.
   - **H5 (platform and operations):** the documents service and object storage, the scheduler slot, alerts for `analysis_freeze_failed` and the body cap, and `SECURITY_CONTACT_*`. Before PR 7 goes live, and PR 9.
   - **H6 (mhai-web team):** the contract changes in the [frontend requirements](docs/specs/2026-10-17-frontend-requirements.md) §10, "Changes from the backend design (H6)", items (a)–(i). Before PR 4, PR 6 and PR 8 go live.
-  - **H7 (intelligence lead and the EMR design owner):** patient references in consultations, canonical EMR events into core, and the identity call (proposed as `emr.v1.ctl.identity_resolve`). Before PR 10, and PR 8 goes live.
+  - **H7 (intelligence lead and the EMR design owner):** patient references in consultations, canonical EMR events into core, and the identity call (proposed as `emr.v1.ctl.identity_resolve`). Before `ANALYSIS_INGEST` is set (PR 10 is built), and before PR 8 goes live.
 - **Platform admin 7c: analytics.** R41a, R41a-2 and R41a-3 are decided (7 Nov). The design and plan are written, revised after the design review, and wait for the product owner's review: [design](docs/specs/2026-11-07-plan-7c-platform-analytics-design.md), [plan](docs/plans/2026-11-07-plan-7c-platform-analytics.md) (10 tasks, three PRs, migrations from 00019). 7c-1 (calendar periods, the joint guard, guardrails on periods) and 7c-2 (`GET /platform/analytics` and the series routes) are merged; 7c-3 (What changed and follow-ups, migration 00022) is built. Q3 is decided (7 Nov). Open: Q4 (privacy: staff count, review-time medians); whether median review time should flag changes (its minimum needs the decided count stored, spec §18 7c-3 item 4). **What changed: bring back active clinicians and questions per clinician (ruling C9)** as like-for-like comparisons, for example one week against the average week of the previous month (distinct clinicians per week, averaged), with a migration widening `analytics_changes.measure` and the A7 checker's table. mhai-web needs F1–F20 (spec §13); its audit kinds for the follow-ups already exist. The alerts area and Plan 7d wait on the EMR integration and the notifications service.
 - **The notifications service and the documents service.** Both are planned (see "Backend contracts the frontend uses on sample data" below) and need designs.
 - **Trained model weights.** These come from the AI researcher and are the one thing we don't build. Until they arrive, the demo has no AI pipeline: a question waits in the queue and fails at its deadline.
@@ -225,6 +225,17 @@ PR 4 (aggregate routes) is the simplest version that keeps the disclosure guaran
 - [ ] **Deliver letter reminders and the "ended" notice** when the notifications service exists: they are recorded today (`clearance.reminder_sent` with `delivery: pending`, PR 7).
 - [ ] **Map `clearance.ready` and `named_access.changed`** to mhai-web kinds when it has them: sent bare (PR 7).
 - [ ] **Drills on location, specialty, source and prevalence (PR 5, departure 19).** None today: pids are stable within a period, so lists split by a dimension the rows don't show could be compared to reveal a hidden small group. Needs a design (for example pids scoped per list, or the dimension shown on the row) and H1's agreement.
+
+## Analysis: EMR facts, blocked and follow-ups (PR 10, 14 Nov)
+
+PR 10 is built (migration 00046, plan departures 78-90) and off by default: ingest needs the hospital's switch on with real references and `ANALYSIS_INGEST=true`.
+
+- [ ] **Recorded diagnoses (blocked).** The EMR canonical model has observations, medications and encounters but no conditions, so no `diagnosis` fact is written. Needs a conditions table in the EMR plan (canonical model, normaliser, ICD-10 mapping), then a source branch here.
+- [ ] **Set `ANALYSIS_INGEST=true` only after H2 and H7** (the confidence mapping; references in consultations) and with a hospital raised by Plan 11b's two-person switch. Operators' item; nothing in the build does it.
+- [ ] **Agreement and corrections (H2).** Ratings and corrections arrive after the consultation's fact and facts are append-only, so `rating` and `correction` stay null: a feedback fact kind (or counting at freeze) is needed for the agreement and corrections views.
+- [ ] **A findings dictionary (H2).** Findings carry no condition (no diagnosis code); naming them by category or analyte needs H2's view definitions.
+- [ ] **H1 and H3 to confirm the exclusion and merge handling** (built as the more private choice, departures 87-88): an exclusion forgets unfrozen facts and the reference once the EMR purge is done; frozen facts and bodies stay. A legal resolution of a list holding an excluded subject sends nothing (503); H3 may prefer a per-row "excluded".
+- [ ] **Specialty** on consultation facts stays null: it is on the user, which the writer can't read.
 
 ## Hospital admin routes: gaps and frontend changes (14 Nov)
 
