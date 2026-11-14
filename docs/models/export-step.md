@@ -39,8 +39,8 @@ byte. llama.cpp's own output always fits these rules. So don't save extra named
 templates with the tokenizer. Only a `cca` run may carry a GGUF
 (`gguf_not_allowed_for_role`); for an `extract` run, pass `gguf=False`.
 
-The datasets you name must already be in `models/approved-datasets.json` (synthetic only
-for now), and an upstream base model's licence must be in `models/licences.json`
+The datasets you name must already be in `models/approved-datasets.json` (synthetic, or
+public with no patient data, for now), and an upstream base model's licence must be in `models/licences.json`
 (Apache-2.0 or MIT today). Both lists change only through a pull request.
 
 ## The Colab cells

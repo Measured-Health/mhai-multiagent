@@ -255,6 +255,11 @@ def test_every_refusal_a_trainer_can_hit_has_a_fix() -> None:
         assert export.fix_for(Refused(reason)), reason
 
 
+def test_non_synthetic_fix_names_the_public_category() -> None:
+    fix = export.fix_for(Refused("dataset_not_synthetic"))
+    assert "synthetic" in fix and "public" in fix
+
+
 def test_main_prints_the_fix(run: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code = export.main(_argv(run, "--base-revision", "main", "--no-gguf"))
     out = capsys.readouterr().out

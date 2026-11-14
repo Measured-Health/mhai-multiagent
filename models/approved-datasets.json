@@ -16,6 +16,62 @@
       "version": "1.0.0",
       "testset_disjoint": true,
       "approved_by_pr": 91
+    },
+    {
+      "id": "medqa-usmle-4-options@1.0.0",
+      "kind": "public",
+      "generator": null,
+      "version": "1.0.0",
+      "testset_disjoint": true,
+      "approved_by_pr": 177
+    },
+    {
+      "id": "medmcqa@1.0.0",
+      "kind": "public",
+      "generator": null,
+      "version": "1.0.0",
+      "testset_disjoint": true,
+      "approved_by_pr": 177
+    },
+    {
+      "id": "pubmedqa-pqa-labeled@1.0.0",
+      "kind": "public",
+      "generator": null,
+      "version": "1.0.0",
+      "testset_disjoint": true,
+      "approved_by_pr": 177
+    },
+    {
+      "id": "symptom-to-diagnosis@1.0.0",
+      "kind": "public",
+      "generator": null,
+      "version": "1.0.0",
+      "testset_disjoint": true,
+      "approved_by_pr": 177
+    },
+    {
+      "id": "cca-v1-rag-cited@1.0.0",
+      "kind": "public",
+      "generator": null,
+      "version": "1.0.0",
+      "testset_disjoint": true,
+      "approved_by_pr": 177
+    },
+    {
+      "id": "cca-v1-abstain@1.0.0",
+      "kind": "public",
+      "generator": null,
+      "version": "1.0.0",
+      "testset_disjoint": true,
+      "approved_by_pr": 177
+    },
+    {
+      "id": "cca-v1-patient-cited@1.0.0",
+      "kind": "synthetic",
+      "generator": "synthea",
+      "version": "1.0.0",
+      "testset_disjoint": true,
+      "approved_by_pr": 177
     }
   ]
 }

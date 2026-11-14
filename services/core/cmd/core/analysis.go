@@ -23,6 +23,7 @@ const analysisUsage = `usage:
   core analysis seed-demo <hospital id or short code> [--seed N] [--months 1-24]
   core analysis switch off <hospital id or short code> | --global
   core analysis named-access demo <hospital id or short code>
+  core analysis named-access demo-on <hospital id or short code>
   core analysis named-access off <hospital id or short code> | --global
 
 seed-demo is for the synthetic demo hospital only (analysis plan, departure
@@ -41,9 +42,12 @@ switches to letters_only with the references DEMO-SYNTHETIC
 (mhai_named_access_demo_raise), so the demo hospital's admins can upload
 and manage clearance letters. It refuses a hospital whose analysis switch
 isn't the demo's (run seed-demo first) and any switch ever signed off.
-named-access off lowers one at once. Both audit named_access.changed.
-Raising named access for a real hospital, and to on, is the platform's
-two-person flow (Plan 11b), never this command.
+named-access demo-on raises the same two switches to on, the same way
+(mhai_named_access_demo_on): named lists, for people a verified, active
+letter covers (the platform's verify is Plan 11b's). named-access off
+lowers one at once. Each audits named_access.changed. Raising named access
+for a real hospital is the platform's two-person flow (Plan 11b), never
+this command.
 
 Both connect with DATABASE_URL as the provisioning login (mhai_provision).
 seed-demo prints the hospital id and the subject count only.`
@@ -71,6 +75,8 @@ func analysisCmd(ctx context.Context, args []string, url string, out io.Writer,
 		return analysisSwitchOff(ctx, args[2], url, out)
 	case len(args) == 3 && args[0] == "named-access" && args[1] == "demo":
 		return namedAccessDemo(ctx, args[2], url, out)
+	case len(args) == 3 && args[0] == "named-access" && args[1] == "demo-on":
+		return namedAccessDemoTo(ctx, args[2], url, out, "on")
 	case len(args) == 3 && args[0] == "named-access" && args[1] == "off":
 		return namedAccessOff(ctx, args[2], url, out)
 	}
@@ -257,6 +263,17 @@ func provisionTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error)
 // global first (a hospital's row is never above it), and audits each one
 // raised. A refusal rolls back both.
 func namedAccessDemo(ctx context.Context, ref, url string, out io.Writer) error {
+	return namedAccessDemoTo(ctx, ref, url, out, "letters_only")
+}
+
+// namedAccessDemoTo is namedAccessDemo to position: letters_only
+// (mhai_named_access_demo_raise) or on (mhai_named_access_demo_on, plan
+// departure 56).
+func namedAccessDemoTo(ctx context.Context, ref, url string, out io.Writer, position string) error {
+	raise := map[string]string{"letters_only": `SELECT mhai_named_access_demo_raise($1)`, "on": `SELECT mhai_named_access_demo_on($1)`}[position]
+	if raise == "" {
+		return errAnalysisArgs
+	}
 	if strings.HasPrefix(ref, "-") || account.ValidateHospitalRef(ref) != nil {
 		return errAnalysisArgs
 	}
@@ -273,7 +290,7 @@ func namedAccessDemo(ctx context.Context, ref, url string, out io.Writer) error 
 				h = &hospital
 			}
 			var was bool
-			if err := tx.QueryRow(ctx, `SELECT mhai_named_access_demo_raise($1)`, h).Scan(&was); err != nil {
+			if err := tx.QueryRow(ctx, raise, h).Scan(&was); err != nil {
 				var pe *pgconn.PgError
 				switch {
 				case errors.As(err, &pe) && pe.Code == "22023":
@@ -289,7 +306,7 @@ func namedAccessDemo(ctx context.Context, ref, url string, out io.Writer) error 
 			if !raised[scope] {
 				continue
 			}
-			p := map[string]any{"via": "cli", "position": "letters_only", "refs": "demo"}
+			p := map[string]any{"via": "cli", "position": position, "refs": "demo"}
 			if scope == "hospital" {
 				p["hospital_id"] = hospital.String()
 			}
@@ -302,7 +319,7 @@ func namedAccessDemo(ctx context.Context, ref, url string, out io.Writer) error 
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "named access %s letters_only (demo)\n", hospital)
+	fmt.Fprintf(out, "named access %s %s (demo)\n", hospital, position)
 	return nil
 }
 

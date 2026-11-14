@@ -52,6 +52,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from intelligence.boundary import jobs_repo, kb_repo, telemetry
+from intelligence.boundary.cited_sources import cited_sources
 from intelligence.boundary.db import is_database_error, is_unique_violation
 from intelligence.boundary.jobs import JobContext
 from intelligence.boundary.models import (
@@ -438,6 +439,7 @@ class RunQuery:
             masked_question=str(question),
             masked_patient=masked_patient,
             timings_ms=_timings(job.stage_ms, generation, chunks_ms),
+            cited_sources=cited_sources(chunks, generation.cited_chunk_ids),
         )
         await self._complete(job, decision)
 
