@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from intelligence.modelstore import cli, export, files, fixtures, promote, training
+from intelligence.modelstore import cli, export, files, fixtures, promote, store, training
 from intelligence.modelstore.reasons import FIXES, Refused
 from tests.modelstore.fakes import gguf as g
 
@@ -331,3 +331,31 @@ def test_imports_stay_light() -> None:
         "intelligence.modelstore.reasons",
         "intelligence.modelstore.training",
     }
+
+
+# ---------------------------------------------------------------- the store's file cap
+
+
+def test_store_cap_is_the_stores() -> None:
+    assert export.MAX_STORE_FILE_BYTES == store.MAX_PUT_BYTES
+    assert export.STORE_CAP_DETAIL == promote.FILE_TOO_LARGE
+
+
+def test_file_over_the_store_cap_refused_at_export(
+    run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Gemma 4's per-layer embedding is one 5.6 GB tensor: no shard size gets it under the
+    # 5 GiB a single store PUT allows, and promotion refuses it. The step says so first.
+    biggest = max(p.stat().st_size for p in run.iterdir())
+    monkeypatch.setattr(export, "MAX_STORE_FILE_BYTES", biggest - 1)
+    with pytest.raises(Refused) as err:
+        export.export_run(run, gguf=False, **_kw())
+    assert err.value.reason == "too_large"
+    assert err.value.detail_code == "file_too_large_for_store"
+    fix = export.fix_for(err.value)
+    assert fix is not None and "5 GiB" in fix and "multipart" in fix
+
+
+def test_files_under_the_store_cap_pass(run: Path) -> None:
+    out = export.export_run(run, gguf=False, **_kw())
+    assert len(out.files_sha256) == 64
