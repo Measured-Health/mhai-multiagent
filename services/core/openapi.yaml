@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.18.0"
+  version: "1.19.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -844,6 +844,60 @@ paths:
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
+  /analysis/patients:
+    get:
+      operationId: getAnalysisPatients
+      summary: The de-identified patients behind one shown count (Patient Analysis).
+      description: >
+        Hospital admins and analysts, with two-step, while the hospital's analysis switch is on
+        (otherwise 404 not_found). `drill` is the key from a `Drillable` count of the view read with
+        the same period and filters; `level` must be `deidentified` (anything else is 422
+        level_not_supported). A key of another hospital, period, filter set or key set, a count hidden
+        or under 5, or a body not yet served is 422 too_small; nothing is computed for a list. Drills
+        exist only on the affected view's age band, sex and setting rows, co-occurring pairs and
+        findings, under condition, age band, sex and setting filters (no drill under a location,
+        specialty or source filter). `count` is the shown cell; at most 200 rows, in a fixed order,
+        each exactly `{pid, age_band, sex, setting, conditions, findings}` (findings'
+        `source_label` is always null). A pid is stable within one period and level, and different in
+        every other. The role, two-step and account are re-read for each list (403 forbidden or
+        mfa_required at once). At most 10 lists a minute and 50 a hospital day, and 300 distinct
+        patients a calendar quarter, per person (429 rate_limited, recorded once a day as a flagged
+        entry). Every list is recorded and audited (`analysis.patients_viewed`); a list that can't be
+        audited is not sent. Never cached or logged. Added in 1.19.0.
+      tags: [analysis]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, invalid_range, too_many_filters, too_small, level_not_supported, rate_limited, not_ready, unavailable, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: drill, in: query, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" } }
+        - { name: level, in: query, required: true, schema: { type: string, enum: [deidentified] } }
+        - $ref: "#/components/parameters/AnalysisPeriod"
+        - $ref: "#/components/parameters/AnalysisStart"
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: condition, in: query, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - { name: age_band, in: query, schema: { type: string, enum: ["0-17", "18-39", "40-64", "65-79", "80+"] } }
+        - { name: sex, in: query, schema: { type: string, enum: [female, male, other, not_recorded] } }
+        - { name: location, in: query, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - { name: setting, in: query, schema: { type: string, enum: [admitted, outpatient, emergency] } }
+        - { name: specialty, in: query, schema: { type: string, pattern: "^[a-z][a-z_]{1,39}$" } }
+        - { name: source, in: query, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+      responses:
+        "200":
+          description: The list.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalysisPatients" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
   /platform/audit:
     get:
       operationId: listAuditEvents
@@ -960,13 +1014,15 @@ paths:
   /platform/audit/{id}:
     get:
       operationId: getAuditEvent
-      summary: One audit entry, with `patients` and `letter` (both null until named access exists).
+      summary: One audit entry, with `patients` ({count} on a drill-down entry) and `letter` (null until named access exists).
       description: |
         `id` is the decimal event id; anything else, or no such entry, is
         404 `not_found`. The read is recorded as the exact-id search for
         that id (`audit.searched`, `searched_kind: event`), once per session
         and id per 5 minutes; if it can't be recorded the reply is 500 and
-        no entry. `/platform/audit/{id}/patients`,
+        no entry. `patients` is `{count}` (the rows its list sent) on a
+        drill-down entry (`analysis.patients_viewed`), null otherwise; the
+        pids only through `/platform/audit/{id}/patients`.
         `/platform/audit/named-access` and `/platform/audit/exports*` are
         not served yet (404 `not_found`).
       tags: [audit]
@@ -982,6 +1038,47 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AuditDetail" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/audit/{id}/patients:
+    get:
+      operationId: getAuditEventPatients
+      summary: The pids a drill-down entry's list sent, in order (the recorded reveal).
+      description: |
+        Platform admins and auditors, platform audience, two-step always.
+        The only route outside Analysis that sends a pid: the pids the
+        hospital saw, for that list's period, in order. Every reveal is
+        recorded (`audit.patients_viewed`, the entry revealed and how many),
+        in the same transaction: if it can't be recorded the reply is 500
+        and no pid. An entry that isn't a drill-down, or no such entry, is
+        404 `not_found`. Never cached. Added in 1.19.0.
+      tags: [audit]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[1-9][0-9]{0,18}$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The pids.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pseudonyms]
+                additionalProperties: false
+                properties:
+                  pseudonyms:
+                    type: array
+                    maxItems: 200
+                    items: { type: string, pattern: "^P-[A-Z0-9]{4,12}$" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
@@ -2325,6 +2422,8 @@ components:
             - no_type
             - too_many_filters
             - invalid_range
+            - too_small
+            - level_not_supported
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -3080,12 +3179,47 @@ components:
         icd10: { type: string, nullable: true }
     AnalysisDrillable:
       type: object
-      description: A GuardedCount with its drill key; drill is null until the drill-down route exists, and on any count hidden or under 5.
+      description: >
+        A GuardedCount with its drill key for GET /analysis/patients (since 1.19.0): set only on a shown count of 5
+        or more of the affected view's age band, sex and setting rows, a co-occurring pair or a finding, under
+        condition, age band, sex and setting filters; null on every other count.
       required: [value, suppressed, drill]
       properties:
         value: { type: integer, minimum: 0, nullable: true }
         suppressed: { type: boolean }
         drill: { type: string, nullable: true }
+    AnalysisPatients:
+      type: object
+      description: A de-identified list (since 1.19.0).
+      required: [level, count, patients]
+      additionalProperties: false
+      properties:
+        level: { type: string, enum: [deidentified] }
+        count: { type: integer, minimum: 5 }
+        patients:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            required: [pid, age_band, sex, setting, conditions, findings]
+            additionalProperties: false
+            properties:
+              pid: { type: string, pattern: "^P-[A-Z0-9]{4,12}$" }
+              age_band: { type: string, nullable: true, enum: ["0-17", "18-39", "40-64", "65-79", "80+", null] }
+              sex: { type: string, enum: [female, male, other, not_recorded] }
+              setting: { type: string, nullable: true, enum: [admitted, outpatient, emergency, null] }
+              conditions: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/AnalysisConditionRef" } }
+              findings:
+                type: array
+                maxItems: 10
+                items:
+                  type: object
+                  required: [name, flag, source_label]
+                  additionalProperties: false
+                  properties:
+                    name: { type: string, nullable: true }
+                    flag: { type: string, nullable: true, enum: [low, high, abnormal, null] }
+                    source_label: { type: string, nullable: true, description: Always null (a row shows no source). }
     AnalysisMinutes:
       type: object
       description: "A median in minutes (a whole number or a half); hidden is `{value: null, suppressed: true}`."
@@ -3620,11 +3754,16 @@ components:
         oldest_kept_at: { type: string, format: date-time }
         last_checkpoint: { type: object, nullable: true, description: Always null until retention checkpoints exist. }
     AuditDetail:
-      description: The entry (event or bare) plus `patients` and `letter`, both null for now.
+      description: The entry (event or bare) plus `patients` and `letter`.
       allOf:
         - $ref: "#/components/schemas/AuditEntry"
         - type: object
           required: [patients, letter]
           properties:
-            patients: { type: object, nullable: true }
+            patients:
+              type: object
+              nullable: true
+              description: On a drill-down entry, how many rows its list sent (since 1.19.0); null otherwise.
+              properties:
+                count: { type: integer, minimum: 1, maximum: 200 }
             letter: { type: object, nullable: true }

@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -314,7 +314,8 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		"analysis_switch", "analysis_sources", "analysis_locations", "analysis_conditions", "analysis_subjects", "analysis_facts",
 		"analysis_first_seen", "analysis_periods", "analysis_pseudonyms", "analysis_watermarks",
 		"analysis_subject_attrs", "analysis_hospital_start", "analysis_snapshots", "analysis_view_log", "analysis_unusual",
-		"analysis_cold_budget", "analysis_cold_contexts"}, slices.Concat(emrTables, emrGatewayReads, emrHidden)...) {
+		"analysis_cold_budget", "analysis_cold_contexts", "analysis_views", "analysis_view_rows", "analysis_patient_budget",
+		"analysis_patient_opens", "analysis_drill_flags"}, slices.Concat(emrTables, emrGatewayReads, emrHidden)...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)

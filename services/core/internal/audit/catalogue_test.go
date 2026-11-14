@@ -336,12 +336,12 @@ func TestEveryActionHasCatalogueRow(t *testing.T) {
 			t.Errorf("platform action %s has no payload schema", a)
 		}
 	}
-	if got := platformAppendActions(t); len(got) != 19 || !slices.Contains(got, "emr.rule_set_switched") || !slices.Contains(got, "hospital.model_policy_changed") ||
+	if got := platformAppendActions(t); len(got) != 20 || !slices.Contains(got, "audit.patients_viewed") || !slices.Contains(got, "emr.rule_set_switched") || !slices.Contains(got, "hospital.model_policy_changed") ||
 		!slices.Contains(got, "emr.connection_added") || !slices.Contains(got, "emr.source_resumed") ||
 		!slices.Contains(got, "analytics.followed_up") || !slices.Contains(got, "analytics.follow_up_edited") ||
 		!slices.Contains(got, "analytics.follow_up_undone") {
 		t.Errorf("platform_append allows %v, want spec §5.5's eight, hospital.model_policy_changed (00018), the six EMR actions (00020) "+
-			"the three follow-up actions (00022) and emr.rule_set_switched (00027)", got)
+			"the three follow-up actions (00022), emr.rule_set_switched (00027) and audit.patients_viewed (00028)", got)
 	}
 	for _, a := range audit.RegisteredActions() {
 		if strings.HasPrefix(a, "test.") {
@@ -451,7 +451,7 @@ func candidates() []any {
 		planned emergency added removed PASS REGENERATE ESCALATE low mid high unauthorized invalid_request succeeded
 		refused failed platform via msg-1 kid-2026 core pipeline.run_query nli 1 42 9007199254740991 0
 		2026-11-03T06:00:00Z 2026-11-03T06:00:00.123+01:00 v1.2
-		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume demo prevalence month:2026-10-01`) {
+		fhir_r4 stub ok sign_in_refused base_url private_key platform_resume demo prevalence month:2026-10-01 affected minute day`) {
 		out = append(out, s)
 	}
 	for _, ty := range audit.AuditTypes {

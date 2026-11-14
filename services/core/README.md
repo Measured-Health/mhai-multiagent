@@ -100,7 +100,7 @@ one job:
 | `CORE_HTTP_API` | no | `on` (default) or `off`. On: the frontend contract over HTTP with the BFF key, for the switch-over while mhai-web still uses `fetch`. Off: HTTP serves only the probes, on loopback, and `BFF_SERVICE_KEYS` is no longer required. The NATS API is served either way (below) |
 | `CORE_NATS_API_CONCURRENCY` | no | `api.v1` messages handled at once per core copy; past it a message gets 503 `unavailable` at once. Default `256`, 1 to 100000 |
 | `CORE_ENV` | no | default `production`, which fails closed: no API docs, NATS TLS required, no test-only intelligence operations. Compose sets `development` |
-| `ANALYSIS_REF_HMAC_KEY_FILE`, `ANALYSIS_REF_ENC_KEY_FILE`, `ANALYSIS_DRILL_KEY_FILE`, `ANALYSIS_NOTE_KEY_FILE` | no (all four or none) | Patient Analysis's keys: each file holds 32 random bytes in base64 (`openssl rand -base64 32`), mode 0600 or 0640, all four different. Start-up refuses a missing file, a placeholder, a wrong length, a file others can read or two equal keys. Without them, the nightly run fails closed for a signed-off hospital with consultations to ingest; the demo needs none |
+| `ANALYSIS_REF_HMAC_KEY_FILE`, `ANALYSIS_REF_ENC_KEY_FILE`, `ANALYSIS_DRILL_KEY_FILE`, `ANALYSIS_NOTE_KEY_FILE` | no (all four or none) | Patient Analysis's keys: each file holds 32 random bytes in base64 (`openssl rand -base64 32`), mode 0600 or 0640, all four different. Start-up refuses a missing file, a placeholder, a wrong length, a file others can read or two equal keys. Without them, the nightly run fails closed for a signed-off hospital with consultations to ingest; without them no count has a drill and every de-identified list is 422 `too_small` (the demo needs them only for the drill-down) |
 | `CORE_API_DOCS` | no | `true` or `false`: serve the API docs page. Default: on when `CORE_ENV` is `development`, off for every other value (production included). Anything else is refused at start-up. |
 
 Secrets must not contain `changeme`, `change-me` or `placeholder`. Errors
@@ -151,6 +151,21 @@ through `mhai_analysis_snapshot_put`, which refuses a shown count of 1 to 4.
 The raw reader (`internal/analysis/cells`) is the engine's only; the routes
 never import it. A body that can't be computed within 2 s answers 503
 `not_ready` and is finished in the background. Nothing logs a query string.
+
+The de-identified drill-down (PR 5, migration 00028) is
+`GET /analysis/patients`: the patients behind one shown count of a stored
+body, found by its drill key (derived when the view is served, never
+stored; `ANALYSIS_DRILL_KEY_FILE`). Drills exist only where the rows show the
+group (age band, sex, setting, a pair, a finding, under condition, age
+band, sex and setting filters). In one transaction as the person
+(`db.WithHospitalUser`): the role, two-step and account re-read, the list
+limits (`mhai_analysis_list_admit`), the list opened
+(`mhai_analysis_open`: recounted and checked against the cell, patients
+reserved against the quarter's cap of 300, rows recorded, pids drawn), and
+its `analysis.patients_viewed` entry last; a deferred trigger refuses a list
+without its entry. `GET /platform/audit/{id}/patients` reveals a list's pids
+to platform admins and auditors through `mhai_audit_view_pseudonyms`, owned
+by `mhai_analysis_auditor`, and records each reveal.
 
 ## API docs
 

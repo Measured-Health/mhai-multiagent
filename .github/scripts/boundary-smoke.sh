@@ -63,6 +63,10 @@ NATS_BFF_PLATFORM_PASSWORD=$bff_platform_pw
 SECURITY_CONTACT_NAME=Synthetic Smoke Security
 SECURITY_CONTACT_EMAIL=security@smoke.example.test
 NATS_JS_KEY=$(secret)$(secret)
+ANALYSIS_REF_HMAC_KEY_FILE=/analysis-keys/ref_hmac
+ANALYSIS_REF_ENC_KEY_FILE=/analysis-keys/ref_enc
+ANALYSIS_DRILL_KEY_FILE=/analysis-keys/drill
+ANALYSIS_NOTE_KEY_FILE=/analysis-keys/note
 EOF
 
 compose=(docker compose -p "$project" --env-file "$envfile"

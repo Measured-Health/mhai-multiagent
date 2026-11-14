@@ -535,12 +535,32 @@ type Page struct {
 	LastCheckpoint *struct{} `json:"last_checkpoint"`
 }
 
-// Detail is an entry plus patients and letter, both null: no named access
-// and no clearance letter exist yet (spec §5.2).
+// Detail is an entry plus patients and letter. patients is {count} on a
+// drill-down entry (analysis.patients_viewed: the rows its list sent; the
+// pids themselves only through the recorded reveal), null otherwise;
+// letter is null: no clearance letter exists yet (spec §5.2).
 type Detail struct {
 	Entry    any
-	Patients *struct{}
+	Patients *PatientsCount
 	Letter   *struct{}
+}
+
+// PatientsCount is a drill-down entry's patients: how many rows it sent.
+type PatientsCount struct {
+	Count int `json:"count"`
+}
+
+// patientsOf is a drill-down entry's patients, from its checked payload.
+func patientsOf(r rawRow) *PatientsCount {
+	if r.row.Event.Action != "analysis.patients_viewed" || r.badPayload ||
+		CheckActionPayload(r.row.Event.Action, r.row.Event.Payload) != nil {
+		return nil
+	}
+	n, ok := r.row.Event.Payload["rows"].(float64)
+	if !ok || n < 1 || n > 200 || n != float64(int(n)) {
+		return nil
+	}
+	return &PatientsCount{Count: int(n)}
 }
 
 // MarshalJSON flattens the entry with patients and letter.
@@ -554,6 +574,13 @@ func (d Detail) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	m["patients"] = json.RawMessage("null")
+	if d.Patients != nil {
+		p, err := json.Marshal(d.Patients)
+		if err != nil {
+			return nil, err
+		}
+		m["patients"] = p
+	}
 	m["letter"] = json.RawMessage("null")
 	return json.Marshal(m)
 }
@@ -648,7 +675,7 @@ func GetEvent(ctx context.Context, tx pgx.Tx, seq int64) (Detail, error) {
 	if err != nil {
 		return Detail{}, err
 	}
-	return Detail{Entry: es[0]}, nil
+	return Detail{Entry: es[0], Patients: patientsOf(raws[0])}, nil
 }
 
 // oldestKept is the oldest entry's time (ts never goes backwards in id

@@ -7,8 +7,10 @@
 // audience, with two-step always; each runs in authz.Tx, which for a
 // platform principal is db.WithPlatform (mhai_platform: no clinical
 // table). Entries leave only through the audit catalogue (audit.Map, or
-// the bare entry). The deferred routes (/{id}/patients, /named-access,
-// /exports*) are not registered: the router answers 404 not_found.
+// the bare entry). A drill-down entry's pids leave only through the
+// recorded reveal, /{id}/patients (audit_patients.go). The deferred routes
+// (/named-access, /exports*) are not registered: the router answers 404
+// not_found.
 package platform
 
 import (
@@ -118,6 +120,7 @@ func Register(m *authz.Mux, d Deps) {
 	authz.Route(m, http.MethodGet, "/platform/audit/hospitals", read, http.HandlerFunc(d.hospitals))
 	authz.Route(m, http.MethodGet, "/platform/audit/people", read, http.HandlerFunc(d.people))
 	authz.Route(m, http.MethodGet, "/platform/audit/{id}", read, http.HandlerFunc(d.detail))
+	authz.Route(m, http.MethodGet, "/platform/audit/{id}/patients", read, http.HandlerFunc(d.auditPatients))
 	registerVerify(m, d)
 	registerHealth(m, d)
 	registerJobs(m, d)

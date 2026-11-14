@@ -32,3 +32,32 @@ services:
   # The test-only echo worker (profile `test` in docker-compose.yml).
   echo:
     profiles: !reset []
+
+  # Patient Analysis's four keys, for the smoke run only (the drill-down
+  # needs the drill key): made once in their own volume, owned by core's
+  # user (distroless nonroot, 65532) and readable by it alone. The paths
+  # come from the generated env file (.github/scripts/boundary-smoke.sh).
+  analysis-keys:
+    image: postgres:16.15-alpine
+    restart: "no"
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for k in ref_hmac ref_enc drill note; do
+          [ -s "/keys/$$k" ] || head -c 32 /dev/urandom | base64 > "/keys/$$k"
+        done
+        chown 65532:65532 /keys/*
+        chmod 0600 /keys/*
+    volumes:
+      - analysiskeys:/keys
+
+  core:
+    volumes:
+      - analysiskeys:/analysis-keys:ro
+    depends_on:
+      analysis-keys: { condition: service_completed_successfully }
+
+volumes:
+  analysiskeys:

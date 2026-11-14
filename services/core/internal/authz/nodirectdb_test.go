@@ -67,6 +67,7 @@ var dbTxAllowedFiles = map[string]string{
 	// (db.WithHospitalUser), so 00011's two-person triggers and insert
 	// policy see the verified user; authz.Tx sets the hospital only. The
 	// store takes both ids from the handler's principal, never a body.
+	"internal/analysis/drill.go": "a de-identified list as the token's hospital and person (db.WithHospitalUser, PersonTx)",
 	"internal/feedback/store.go": "feedback and corrections as the token's hospital and user (db.WithHospitalUser)",
 	// The health sampler (Plan 4 §6.1): a background loop with no
 	// principal, one core copy at a time (a session advisory lock on a

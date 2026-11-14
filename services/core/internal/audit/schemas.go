@@ -35,6 +35,8 @@ var (
 	analysisPeriod      = regexp.MustCompile(`^(week|month|quarter):[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
 	analysisFilterKey   = regexp.MustCompile(`^(condition|age_band|sex|location|setting|specialty|source)$`)
 	analysisFilterValue = regexp.MustCompile(`^([0-9a-f-]{36}|[a-z0-9_+-]{1,40})$`) // ids and codes; never a pid shape
+	// A drill-down's filters: only the dimensions its rows show (departure 19).
+	analysisDrillFilterKey = regexp.MustCompile(`^(condition|age_band|sex|setting)$`)
 )
 
 // Check reports whether one payload value fits. Values are as
@@ -467,6 +469,21 @@ func init() {
 	Register("analysis.unusual_querying", Schema{Fields: fields("filter_sets", Int(101, 1e6)), Required: []string{"filter_sets"}})
 	Register("analysis.switch_lowered", Schema{Fields: fields("hospital_id", id, "via", OneOf("cli")),
 		Required: []string{"via"}})
+	// Patient Analysis drill-down (plan Tasks 13-14): a de-identified list
+	// (the list is the entity; its source view, period and filter codes,
+	// the matched count, which is the shown cell's, and the rows sent;
+	// never a pid or a subject); a list limit or the patient cap that
+	// refused one (flagged, once a day); and a platform reveal of a list's
+	// pids (the entry revealed is the entity; how many were sent back).
+	Register("analysis.patients_viewed", Schema{Fields: fields(
+		"view", OneOf("affected", "co-occurring", "findings"),
+		"period", Pattern(analysisPeriod),
+		"filters", StringMap(2, analysisDrillFilterKey, Pattern(analysisFilterValue)),
+		"patient_count", Check(Int(5, 1e7)), "rows", Check(Int(1, 200))),
+		Required: []string{"view", "period", "filters", "patient_count", "rows"}})
+	Register("analysis.list_limit_reached", Schema{Fields: fields("window", OneOf("minute", "day")), Required: []string{"window"}})
+	Register("analysis.patient_cap_reached", Schema{Fields: fields("cap", Check(Int(1, 300))), Required: []string{"cap"}})
+	Register("audit.patients_viewed", Schema{Fields: fields("rows", Check(Int(0, 200))), Required: []string{"rows"}})
 
 	// Plan 3: the request-token boundary (internal/account, grant, intel).
 	Register("intelligence.key_rotated", Schema{Fields: fields(
