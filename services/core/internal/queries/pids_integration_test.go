@@ -20,6 +20,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	intelpb "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/queries"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/server"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
@@ -43,7 +44,7 @@ func newEMREnv(t *testing.T, limit int) *env {
 	guard := &authz.Guard{Keys: issuer.PublicKeys(), Denylist: buckets.Denylist, Pool: app, Log: log,
 		Idem: httpx.IdempotentLog(app, log), IdemAnon: httpx.IdempotentAnonLog(app, log)}
 	m := authz.NewMux(guard)
-	client := &intel.Client{NC: gwNC, JS: gwJS, Signer: signer, Log: log}
+	client := &intel.Client{NC: gwNC, JS: gwJS, Signer: signer, Log: log, Patients: true}
 	server.Register(m, server.Deps{Auth: svc, Pool: app, Intel: client, QueryCap: limit, EMREnabled: true})
 	e.h = m.Handler([]string{serviceKey})
 	return e
@@ -241,4 +242,27 @@ func TestPostQueriesWithPatient(t *testing.T) {
 	if err != nil || len(cl.PatientIDs) != 0 {
 		t.Fatalf("pids without a patient: %v %v", cl.PatientIDs, err)
 	}
+}
+
+// An exclusion that commits between the patient check and the insert:
+// 00033's check under the share lock refuses the insert, and the answer is
+// the same 404 not_found, with nothing stored.
+func TestPatientExcludedDuringSubmit404(t *testing.T) {
+	e := newEMREnv(t, 10)
+	hid := seedHospital(t)
+	tok := mint(t, seedUser(t, hid, authz.RoleClinician))
+	jobs(t, hid)
+	pid := seedPatient(t, hid, "active", uuid.Nil)
+	restore := queries.SetBetweenCheckAndInsert(func() {
+		if _, err := super.Exec(context.Background(), `UPDATE emr.patients SET status = 'excluded', excluded_at = now(),
+			exclude_reason = 'objection' WHERE id = $1`, pid); err != nil {
+			t.Error(err)
+		}
+	})
+	defer restore()
+	r := e.do(t, "POST", "/queries", tok, questionAbout(pid.String()), nil)
+	if r.code != http.StatusNotFound || r.body["code"] != "not_found" {
+		t.Fatalf("%d %s", r.code, r.raw)
+	}
+	noTrace(t, e, hid, pid.String())
 }

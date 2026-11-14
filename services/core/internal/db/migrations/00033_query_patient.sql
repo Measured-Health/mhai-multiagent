@@ -70,7 +70,8 @@ BEGIN
     ok := FOUND;
     PERFORM set_config('mhai.hospital_id', coalesce(prev, ''), true);
     IF NOT ok THEN
-        RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE = 'question patient: not an active patient of the hospital';
+        RAISE EXCEPTION USING ERRCODE = 'check_violation', CONSTRAINT = 'clinical_queries_patient_active',
+            MESSAGE = 'question patient: not an active patient of the hospital';
     END IF;
     RETURN NEW;
 END
@@ -84,15 +85,20 @@ CREATE TRIGGER clinical_queries_patient_check BEFORE INSERT OR UPDATE OF patient
 ------------------------------------------------------------------------
 -- A patient that stops being active is unlinked from its questions.
 ------------------------------------------------------------------------
--- The owner changes only questions of the hospital set that name a
--- patient, and may only clear the column. It reads the hospital set's
--- questions: an UPDATE's new row must pass the SELECT policy too, and the
--- cleared row no longer names a patient.
+-- Only while the unlink runs (mhai.query_unlink, set and cleared by the
+-- function below, and no other definer of the owner's): the owner changes
+-- only questions of the hospital set that name a patient, and may only
+-- clear the column. It reads the hospital set's questions then: an
+-- UPDATE's new row must pass the SELECT policy too, and the cleared row no
+-- longer names a patient. Without the flag these policies admit nothing,
+-- so the owner's other definers gain nothing on clinical_queries.
 CREATE POLICY patient_unlink_read ON clinical_queries FOR SELECT TO mhai_migrate
-    USING (hospital_id = mhai_current_hospital());
+    USING (current_setting('mhai.query_unlink', true) = 'on' AND hospital_id = mhai_current_hospital());
 CREATE POLICY patient_unlink ON clinical_queries FOR UPDATE TO mhai_migrate
-    USING (hospital_id = mhai_current_hospital() AND patient_id IS NOT NULL)
-    WITH CHECK (hospital_id = mhai_current_hospital() AND patient_id IS NULL);
+    USING (current_setting('mhai.query_unlink', true) = 'on' AND hospital_id = mhai_current_hospital()
+           AND patient_id IS NOT NULL)
+    WITH CHECK (current_setting('mhai.query_unlink', true) = 'on' AND hospital_id = mhai_current_hospital()
+                AND patient_id IS NULL);
 
 -- +goose StatementBegin
 CREATE FUNCTION mhai_query_patient_unlink() RETURNS trigger
@@ -103,8 +109,10 @@ DECLARE
     prev text := current_setting('mhai.hospital_id', true);
 BEGIN
     PERFORM set_config('mhai.hospital_id', NEW.hospital_id::text, true);
+    PERFORM set_config('mhai.query_unlink', 'on', true);
     UPDATE public.clinical_queries q SET patient_id = NULL
     WHERE q.hospital_id = NEW.hospital_id AND q.patient_id = NEW.id;
+    PERFORM set_config('mhai.query_unlink', '', true);
     PERFORM set_config('mhai.hospital_id', coalesce(prev, ''), true);
     RETURN NULL;
 END

@@ -155,7 +155,7 @@ func JobRID(id uuid.UUID, rid string) string {
 // row is left: 00033 unlinks such a patient from its questions, so the
 // next sweep publishes it with no patient).
 func Republish(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobRow, msgID string) error {
-	opName, msg, caller, err := creatorCaller(ctx, pool, row)
+	opName, msg, caller, err := creatorCaller(ctx, pool, client, row)
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,7 @@ func Republish(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobR
 // The platform's retry asks before it re-queues a row (spec §6.2, C27,
 // C28), and Republish asks again after the commit.
 func Publishable(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobRow) error {
-	opName, msg, caller, err := creatorCaller(ctx, pool, row)
+	opName, msg, caller, err := creatorCaller(ctx, pool, client, row)
 	if err != nil {
 		return err
 	}
@@ -205,7 +205,7 @@ func Publishable(ctx context.Context, pool *pgxpool.Pool, client *Client, row Jo
 // creatorCaller is the operation, message and Caller to publish row's job
 // as: its creator with their current roles, after re-checking (as
 // mhai_auth) that the account is usable and of the row's hospital.
-func creatorCaller(ctx context.Context, pool *pgxpool.Pool, row JobRow) (string, proto.Message, Caller, error) {
+func creatorCaller(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobRow) (string, proto.Message, Caller, error) {
 	opName, msg, ok := row.message()
 	if !ok {
 		return "", nil, Caller{}, ErrMisuse
@@ -241,6 +241,13 @@ func creatorCaller(ctx context.Context, pool *pgxpool.Pool, row JobRow) (string,
 	}
 	caller := Caller{Sub: row.CreatedBy.String(), Hid: row.HospitalID.String(), Rid: row.rid(), Roles: roles}
 	if row.PatientID == uuid.Nil {
+		return opName, msg, caller, nil
+	}
+	if !client.Patients {
+		// EMR is off: never a patient in the job or the token.
+		if job, ok := msg.(*intelpb.RunQueryJob); ok {
+			job.PatientId = ""
+		}
 		return opName, msg, caller, nil
 	}
 	// The patient as it is now, under the row's own hospital (core's

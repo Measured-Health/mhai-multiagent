@@ -84,7 +84,7 @@ Gates before live use (design §17.6; all of them):
 - [ ] **Migration order:** 00033 (a question's patient) follows EMR PR 9's 00032; merge PR 9 first (the migration-count test lists 00033).
 - [ ] mhai-web: `POST /queries` may send `patient_id` (OpenAPI 1.22.0) and must show 404 `not_found` as "patient not found"; nothing sends it yet.
 - [ ] "Ask MHAI about this patient" (design §10.5): patient-scoped retrieval in the worker, which must then check the claimed row's `patient_id` equals the job's (and so the token's `pids`), and treat source text as untrusted model input. The grant endpoint keeps refusing patient ids until a `bff_direct` operation needs one.
-- [ ] An in-flight job keeps the `pids` it was minted with when its patient is excluded mid-run (at most the job's deadline, 10 minutes); harmless while the worker doesn't read the patient, and to be closed by the row check above.
+- [ ] An in-flight job keeps the `pids` it was minted with when its patient is excluded between the check and the publish, or mid-run (at most the job's deadline, 10 minutes); harmless while the worker doesn't read the patient. Before any patient-scoped read the worker must check the patient is still active (`emr_patient_in_hospital` under the token's hospital) as well as the row check above (security review, 14 Nov).
 
 ## EMR: follow-ups from PR 8b (14 Nov)
 

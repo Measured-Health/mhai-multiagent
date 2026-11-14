@@ -154,6 +154,7 @@ func seedPatientQuery(t *testing.T, hid, createdBy, patient uuid.UUID, deadline 
 // unlinked it), so the job carries no patient and no pids.
 func TestSweeperRechecksPatient(t *testing.T) {
 	c, _ := newClient(t)
+	c.Patients = true
 	ctx := context.Background()
 	drainJobs(t, sharedNATS.PipelineURL)
 	hid := seedHospital(t, "active")
@@ -200,6 +201,7 @@ func TestSweeperRechecksPatient(t *testing.T) {
 // ErrNoPatient and publishes nothing.
 func TestRepublishRefusesInactivePatient(t *testing.T) {
 	c, _ := newClient(t)
+	c.Patients = true
 	ctx := context.Background()
 	drainJobs(t, sharedNATS.PipelineURL)
 	hid := seedHospital(t, "active")
@@ -215,5 +217,32 @@ func TestRepublishRefusesInactivePatient(t *testing.T) {
 	}
 	if n := len(jobsFor(drainJobs(t, sharedNATS.PipelineURL), "jobs.v1."+hid.String()+".run_query")); n != 0 {
 		t.Fatalf("%d jobs published", n)
+	}
+}
+
+// With EMR switched off (Client.Patients false), a question saved while it
+// was on is re-minted with no patient: none in the body, no pids, and the
+// patient isn't looked up at all.
+func TestRemintWithoutPatientWhenEMROff(t *testing.T) {
+	c, _ := newClient(t)
+	ctx := context.Background()
+	drainJobs(t, sharedNATS.PipelineURL)
+	hid := seedHospital(t, "active")
+	creator := seedUser(t, hid, true, authz.RoleClinician)
+	deadline := time.Now().Truncate(time.Second).Add(5 * time.Minute)
+	q := seedPatientQuery(t, hid, creator, seedEMRPatient(t, hid, "active", uuid.Nil), deadline)
+	if _, err := SweepOnce(ctx, app, c); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	msgs := jobsFor(drainJobs(t, sharedNATS.PipelineURL), "jobs.v1."+hid.String()+".run_query")
+	if len(msgs) != 1 {
+		t.Fatalf("%d jobs", len(msgs))
+	}
+	var job intelpb.RunQueryJob
+	if err := proto.Unmarshal(msgs[0].data, &job); err != nil || job.QueryId != q.String() {
+		t.Fatalf("job %v %v", &job, err)
+	}
+	if cl := verifyJob(t, msgs[0]); job.PatientId != "" || len(cl.PatientIDs) != 0 {
+		t.Fatalf("EMR off, still named: body %q pids %v", job.PatientId, cl.PatientIDs)
 	}
 }

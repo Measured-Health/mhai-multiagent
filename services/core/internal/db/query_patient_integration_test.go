@@ -174,6 +174,28 @@ func TestQueryPatientGrants(t *testing.T) {
 			}
 		}
 	}
+	// The owner's new policies admit nothing outside the unlink: bound to
+	// the hospital, without the unlink's flag, it sees and changes none of
+	// the hospital's questions (so no other definer of the owner's gains).
+	if err := asRoleIn(ctx, pool, "mhai_migrate", a, func(tx pgx.Tx) error {
+		var n int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM clinical_queries WHERE id = $1`, id).Scan(&n); err != nil {
+			return err
+		}
+		if n != 0 {
+			t.Errorf("the owner sees %d questions outside the unlink", n)
+		}
+		tag, err := tx.Exec(ctx, `UPDATE clinical_queries SET patient_id = NULL WHERE id = $1`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 0 {
+			t.Error("the owner cleared a question outside the unlink")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	// Both definers: owner mhai_migrate, search_path pinned.
 	for _, name := range []string{"mhai_query_patient_check", "mhai_query_patient_unlink"} {
 		var owner string

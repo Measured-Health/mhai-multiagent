@@ -183,6 +183,10 @@ type Client struct {
 	// hospital, to load the subject of a second_person job (subjects.go).
 	// Nil: such a job is refused (ErrMisuse), never published unchecked.
 	Pool *pgxpool.Pool
+	// Patients (CORE_EMR_ENABLED) lets a re-mint (Republish) carry a
+	// question's patient. Off: a row that names one is published without
+	// it and with no pids, as if 00033 had unlinked it.
+	Patients bool
 }
 
 func (c *Client) log() *slog.Logger {

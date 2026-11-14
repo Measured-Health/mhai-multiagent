@@ -136,6 +136,9 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 				return errInsert
 			}
 			patient = pid
+			if betweenCheckAndInsert != nil {
+				betweenCheckAndInsert()
+			}
 		}
 		if err := intel.ReserveInFlight(ctx, tx, p.HospitalID, d.Cap); err != nil {
 			return err
@@ -153,7 +156,7 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 			patient).Scan(&deadline); err != nil {
 			// 00033's check, under a share lock on the patient row: an
 			// exclusion or a merge that committed since the check above.
-			if pid != uuid.Nil && pgCode(err) == "23514" {
+			if pid != uuid.Nil && patientRefused(err) {
 				return errNoPatient
 			}
 			return errInsert
@@ -194,19 +197,21 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 // afterCommit is a test hook (export_test.go): nil in production.
 var afterCommit func()
 
+// betweenCheckAndInsert is a test hook (export_test.go): runs after the
+// patient check and before the insert. Nil in production.
+var betweenCheckAndInsert func()
+
 var (
 	errInsert    = errors.New("queries: insert failed")
 	errUnusable  = errors.New("queries: the account or hospital was deactivated")
 	errNoPatient = errors.New("queries: not an active patient of the hospital")
 )
 
-// pgCode is err's SQLSTATE, or "".
-func pgCode(err error) string {
+// patientRefused reports whether err is 00033's active-patient check (its
+// SQLSTATE and constraint name), and no other fault of the insert.
+func patientRefused(err error) bool {
 	var pe *pgconn.PgError
-	if errors.As(err, &pe) {
-		return pe.Code
-	}
-	return ""
+	return errors.As(err, &pe) && pe.Code == "23514" && pe.ConstraintName == "clinical_queries_patient_active"
 }
 
 // publish publishes the job after the commit, as the principal (their
@@ -240,7 +245,8 @@ func (d Deps) publish(ctx context.Context, p authz.Principal, rid string, id uui
 		if err != nil {
 			return err
 		}
-		if pid != nil {
+		// EMR switched off since: the job goes without the patient.
+		if pid != nil && d.Patients {
 			if caller, err = intel.CheckPatient(ctx, tx, caller, *pid); err != nil {
 				return err
 			}

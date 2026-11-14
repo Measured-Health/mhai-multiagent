@@ -161,7 +161,8 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	}
 	a.emrConsumer = &alerts.Consumer{Pool: a.pool, Pub: alerts.JSPublisher{JS: js}, AllowNullMRN: cfg.EMRAllowNullMRN,
 		Log: log, Metrics: &alerts.ConsumerMetrics{}}
-	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log, Metrics: &intel.Metrics{}, Pool: a.pool}
+	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log, Metrics: &intel.Metrics{}, Pool: a.pool,
+		Patients: cfg.EMREnabled}
 	a.js = js
 	if cfg.RequestTrustedKeysPath != "" {
 		// The workers' public file: a kid missing from it is one an
