@@ -18,6 +18,9 @@ Commands::
         [--trust-policy FILE] [--testsets FILE] [--thresholds-dir DIR] [--rehearsal]
     mhai-models rollback ROLE [--to VERSION] [--lock PATH] [--rehearsal]
     mhai-models fetch-pinned --lock PATH --to DIR
+    mhai-models testset-fetch --testsets PATH --trust-policy PATH --to DIR
+    mhai-models eval-served --lock PATH --testsets PATH --split dev|test [--set DIR]
+        [--max-seconds N]
 
 The store is any S3-compatible bucket: ``MODEL_STORE_ENDPOINT`` (TLS unless loopback),
 ``MODEL_STORE_BUCKET`` and ``MODEL_STORE_REGION`` (optional). Two credentials: the writer
@@ -116,8 +119,24 @@ verify offline. The reader's credentials come from files only:
 or tighter, never a link or a placeholder). Nothing is verified here: the pipeline verifies
 everything it loads. It prints ``{"fetched": {role: objects copied}}``.
 
-Exit codes: 0 done, 2 refused (one JSON line ``{"refused": "<code>"}`` on stdout, with
-``"fix"``, a fixed text, for a naming mistake in ``reasons.FIXES``; for
+``testset-fetch`` (:func:`intelligence.modelstore.testsets.fetch`, run in the ``model-fetch``
+container by ``deploy/pilot/eval-local.sh``) fetches the newest locked ``clinical_answer``
+split named in ``--testsets`` as the reader (credentials from files only, as
+``fetch-pinned``), checks its signature under ``--trust-policy``, and leaves it in
+``<--to>/set`` (``--to``: an existing, empty folder, not a link). It prints
+``{"testset_fetched": {suite, version, sha256}}``, never an item.
+
+``eval-served`` (:mod:`intelligence.doceval.answers.served`, the on-host evaluation before a
+switch) scores the split through the worker's own local client against the running ``llama``
+sidecar, which must serve the ``cca`` alias pinned in ``--lock``. ``--split test`` scores
+the fetched locked split in ``--set`` (checked against ``--testsets``); ``--split dev`` the
+dev split rebuilt from its public seed, refused when a locked split exists. It prints
+``{"eval_served": {verdict, failed, split, alias, testset, metrics, counts, median_seconds,
+max_seconds, thresholds_sha256, sign_off}}`` (aggregates only) and exits 0 on ``pass``, 1 on
+``fail``. ``--max-seconds`` (default 90) caps the median seconds per answer.
+
+Exit codes: 0 done, 1 (``eval-served`` only) the evaluation failed, 2 refused (one JSON
+line ``{"refused": "<code>"}`` on stdout, with ``"fix"``, a fixed text, for a naming mistake in ``reasons.FIXES``; for
 ``promote``, ``check``, ``make-fixture``, ``store-init``, ``pin``, ``lock-check`` and
 ``rollback`` with ``"detail"``, a fixed code, when there is one), 3 a file could not be
 read or written, or (those same commands) the store or the source is unavailable, 4
@@ -199,6 +218,8 @@ _DETAILED = frozenset(
         "lock-check",
         "rollback",
         "fetch-pinned",
+        "testset-fetch",
+        "eval-served",
     }
 )
 READER_FILE_ENVS = (READER_ACCESS_ENV + "_FILE", READER_SECRET_ENV + "_FILE")
@@ -750,6 +771,53 @@ def _fetch_pinned(args: argparse.Namespace) -> int:
     return 0
 
 
+def _testset_fetch(args: argparse.Namespace) -> int:
+    from intelligence.doceval.answers import served
+
+    root = Path(args.to)
+    if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
+        raise Refused("file_not_allowed", detail_code="testset_dir")
+    entry = served.locked_entry(args.testsets)
+    if entry is None:
+        raise Refused("not_found", detail_code="testset_lock")
+    policy = _trust_policy(args.trust_policy)
+    source = _reader_from_files()
+    out = testsets.fetch(source, entry, policy, root)
+    out.rename(root / "set")
+    _print(
+        {
+            "testset_fetched": {
+                "suite": entry.suite,
+                "version": entry.version,
+                "sha256": entry.sha256,
+            }
+        }
+    )
+    return 0
+
+
+def _eval_served(args: argparse.Namespace) -> int:
+    from intelligence.boundary.config import is_development
+    from intelligence.doceval.answers import served
+    from intelligence.tools.llama_client import settings_from_env
+
+    max_seconds = served.check_max_seconds(args.max_seconds)
+    errs: list[str] = []
+    settings = settings_from_env(os.environ, is_development(), errs)
+    if errs:
+        raise Refused("not_allowed_here", detail_code="local_llm_settings")
+    summary = served.run(
+        lock_path=args.lock,
+        split=args.split,
+        set_dir=args.set,
+        testsets_lock=args.testsets,
+        max_seconds=max_seconds,
+        settings=settings,
+    )
+    _print({"eval_served": summary})
+    return 0 if summary["verdict"] == "pass" else 1
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mhai-models")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -818,6 +886,18 @@ def _parser() -> argparse.ArgumentParser:
     fp.add_argument("--lock", required=True)
     fp.add_argument("--to", required=True)
     fp.set_defaults(func=_fetch_pinned)
+    tf = sub.add_parser("testset-fetch", help="fetch the locked answer split for eval-served")
+    tf.add_argument("--testsets", required=True)
+    tf.add_argument("--trust-policy", required=True)
+    tf.add_argument("--to", required=True)
+    tf.set_defaults(func=_testset_fetch)
+    es = sub.add_parser("eval-served", help="score the served cca model before a switch")
+    es.add_argument("--lock", required=True)
+    es.add_argument("--testsets", required=True)
+    es.add_argument("--split", required=True, choices=("dev", "test"))
+    es.add_argument("--set", default=None)
+    es.add_argument("--max-seconds", default="90")
+    es.set_defaults(func=_eval_served)
     return parser
 
 

@@ -435,7 +435,7 @@ the shapes below are listed under "Changes from the backend design (H6)".
 |---|---|
 | `GET /analysis/filters` | the filter options: `{updated_at, conditions: ConditionRef[], locations: {id, label, setting}[], specialties: string[], sources: {id, label}[]}`. The app shows Source only when there is more than one |
 | `GET /analysis/{view}?from&to&…` | one of `prevalence`, `affected`, `co-occurring`, `findings`, `quality`. Query: `from`, `to` (`YYYY-MM-DD`, required), and optional `condition`, `age_band` (`0-17`, `18-39`, `40-64`, `65-79`, `80+`), `sex` (`female`, `male`, `other`, `not_recorded`), `location`, `setting` (`admitted`, `outpatient`, `emergency`), `specialty`, `source`. Omitted means all. Unknown view: 404 `not_found` |
-| `GET /analysis/patients?drill=…&level=deidentified&from&to&…` | the patients behind one shown count. `drill` is the opaque key from a `Drillable`; the same filters as the view. Only `deidentified` for now; `named` is a later plan (Plan 11) |
+| `GET /analysis/patients?drill=…&level=deidentified&from&to&…` | the patients behind one shown count. `drill` is the opaque key from a `Drillable`; the same filters as the view. Only `deidentified` for now; `named` is a later plan (Plan 11). **Built (Analysis PR 5, OpenAPI 1.19.0)**, with `period&start` as the views take them. **Changed (H6):** drills are set only on the affected view's age band, sex and setting rows, co-occurring pairs and findings, under condition, age band, sex and setting filters (none on prevalence, location or specialty rows, or under a location, specialty or source filter: pids are stable within a period, so such lists could be compared to reveal a hidden small group); `findings[].source_label` is always null; pids are stable per period (H6d); 10 lists a minute, 50 a day, 300 distinct patients a quarter per person |
 
 Shapes (ids are opaque, `[A-Za-z0-9_-]+`):
 
@@ -1244,11 +1244,13 @@ and only through the recorded reveal below. Ids are opaque
 `/hospitals`, `POST /platform/audit/undisplayable`, `POST /platform/audit/verify`,
 `GET /platform/audit/verify/runs`, `/runs/{id}` and `/status`, and
 `POST /platform/audit/verify/runs/{id}/outcome` (auditors only), with every
-read recorded and the daily check at 06:00 UTC. **Deferred, still Assumed:**
-`GET /platform/audit/{id}/patients` and `audit_patients_viewed` (the detail
-answers `patients: null`), `GET /platform/audit/named-access` (and the
+read recorded and the daily check at 06:00 UTC. **Built (Analysis PR 5,
+OpenAPI 1.19.0):** `GET /platform/audit/{id}/patients` (each reveal recorded
+as `audit.patients_viewed`, sent bare until its facts are agreed) and
+`patients: {count}` on a drill-down entry's detail (null otherwise).
+**Deferred, still Assumed:** `GET /platform/audit/named-access` (and the
 `letter` on a detail), and the export routes (`/platform/audit/exports*`),
-which need Analysis pseudonyms, clearance letters and object storage; the
+which need clearance letters and object storage; the
 bell (`audit_integrity`) and email on a Broken check, which wait for the
 notifications service; signed checkpoints, so `from_checkpoint` and
 `last_checkpoint` are null and a run is `intact` only `from_first`; and the

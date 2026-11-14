@@ -19,6 +19,7 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/alerts/{id}/acknowledge` | signed in | `clinician` | clinical | no | no | yes |
 | POST | `/api/v1/alerts/{id}/dismiss` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/analysis/filters` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
+| GET | `/api/v1/analysis/patients` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
 | GET | `/api/v1/analysis/{view}` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
 | POST | `/api/v1/auth/login` | public | - | - | no | no | no |
 | POST | `/api/v1/auth/logout` | enrolment | any | both | no | no | no |
@@ -64,6 +65,7 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/platform/audit/verify/runs/{id}/outcome` | signed in | `auditor` | platform | yes | no | auditor write |
 | GET | `/api/v1/platform/audit/verify/status` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/audit/{id}` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/audit/{id}/patients` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/emr/connections` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/emr/connections/{id}` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | PATCH | `/api/v1/platform/emr/connections/{id}` | signed in | `platform_admin` | platform | yes | yes | yes |

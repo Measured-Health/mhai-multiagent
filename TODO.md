@@ -81,7 +81,7 @@ Gates before live use (design §17.6; all of them):
 
 ## EMR: follow-ups from PR 8a (14 Nov)
 
-- [ ] **Migration order:** 00029 (`alerts`) merges after Analysis PR 5's 00028; if 00028 lands first, `TestMigrateUpFromEmpty`'s list gains 28.
+- [x] **Migration order:** 00029 (`alerts`) follows Analysis PR 5's 00028 (merged 14 Nov); the migration-count tests list both.
 - [ ] PR 8b: the finding consumer writes `alerts` (with `connection_id`, so `source_label` and `emr_link` resolve) and `alert_deliveries` as `mhai_emr_core`, using `alerts.Route`; it records `alert.raised` and `alert.not_raised` (schemas to add with it), and needs `mhai_emr_core` reads of `users`/`user_roles` and its audit append policy.
 - [ ] PR 8b: grouped mode (`AlertPageOut.grouped` is always null until then) and the info cap.
 - [ ] The CLI fallback for exclusions (`core emr exclude`, Task 34) is not built: it needs a login for `mhai_emr_admin` and its audit append. With PR 9's legal-hold CLI. Until then an exclusion is the hospital admin's route only.
@@ -157,6 +157,8 @@ PR 4 (aggregate routes) is the simplest version that keeps the disclosure guaran
 - [ ] **A subject's attributes are its first fact's** (age band, sex, location and setting, specialty, source), for the whole retention: the guard's equations need one value per patient at every level. Per-period attributes need a guard model that allows them (H2 decides whether the definition is acceptable).
 - [ ] **A late fact in a hospital's first quarter** can make a first period's "every case is new" false; the guard then finds the raw values inconsistent and the context is stored hidden whole, with the `analysis_inconsistent` alert (fail closed).
 - [x] **Smoke:** `TestSmokeAnalysis` runs in boundary-smoke (run on steven-reid for PR 4: passes).
+- [ ] **Map the drill-down's audit actions to mhai-web's kinds** (`analysis.patients_viewed` as `analysis_patients_viewed`, `audit.patients_viewed` as `audit_patients_viewed`, and flagged kinds for `analysis.list_limit_reached` and `analysis.patient_cap_reached`): sent bare until their facts and targets are agreed (H6, PR 5).
+- [ ] **Drills on location, specialty, source and prevalence (PR 5, departure 19).** None today: pids are stable within a period, so lists split by a dimension the rows don't show could be compared to reveal a hidden small group. Needs a design (for example pids scoped per list, or the dimension shown on the row) and H1's agreement.
 
 ## Decided
 
@@ -227,14 +229,15 @@ The lean rewrite (11 Nov 2026, product owner: a hospital test quickly) kept the 
 - **Accepted startup risk: the writer key and the signing key are repository secrets.** Anyone with write access could read them through a workflow on a branch. Narrowed: only main's dispatch of `model-promote.yml` and `model-testset.yml` runs the job (a job-level `if`) and passes them; every other trigger or ref gets empty values. Until they move into a protected environment (before scale): keep write access to the repository to the core team, and rotate the signing key (a new trust-policy entry, the old one removed) and the store's writer key when anyone with write access leaves.
 - **Key-less Drive access** (H3: a workload identity pool limited to this repository and the environments). Today a service account key in a repository secret. Bring back with the environments.
 
-## Own answer model: before scale (own model PR 3, 13 Nov)
+## Own answer model: before scale (own model PRs 3 and 4, 13-14 Nov)
 
-The local route serves the pinned `cca` GGUF from the `llama` sidecar (profile `ownmodel`), lean and fail closed. Left out, each back at the trigger named (and the plan's own "Before scale" list):
+The local route serves the pinned `cca` GGUF from the `llama` sidecar (profile `ownmodel`), lean and fail closed. The switch is the runbook in `deploy/pilot/README.md` ("Switch a hospital to your own model": `enable-ownmodel.sh`, `eval-local.sh`, `--provider none`, and back). Left out, each back at the trigger named (and the plan's own "Before scale" list):
 
-- **The switch runbook** (own model PR 4): `eval-local.sh` on the host, the switch and switch back, `enable-pilot.sh`'s memory check and its refusal of `ownmodel` without `PILOT_MODEL_ROLES=cca`. Before any hospital moves to its own model.
+- **Clinical sign-off of the `clinical_answer` set and its pass mark** (`doceval/thresholds/answer.json`), by the clinical lead, deferred for the pilot like the cloud's (H4). Before a hospital's clinicians rely on own-model answers without reviewing each one, and before a second hospital.
+- **The on-host evaluation as a recorded gate**: `eval-local.sh` keeps its summary on the host (`local-eval/`) and the operator copies it to the tracker; nothing stops a switch without one but the runbook. A switch command that refuses without a recent on-host PASS for the pinned alias comes with the sign-off.
 - **A published sidecar image pinned by digest** (built and pushed by a workflow for arm64 and amd64) instead of building `deploy/llama` on the host. Before a second host.
 - **model-fetch's way out limited to the store's host** (its own proxy or an egress allow-list) rather than a plain network with a route out. It holds only the reader's credential and never sees a question. Before a second hospital.
-- **The sidecar re-reading a new pin**: after a re-pin and `model-fetch`, `llama` must be restarted by hand (until then the worker refuses the old alias and is not ready). With PR 4's runbook.
+- **The sidecar re-reading a new pin** by itself: today `enable-ownmodel.sh` restarts the pipeline when `models.lock` changed, and `llama` once when the pipeline reports another alias. Before pins change often.
 - **The sidecar's identity proven cryptographically** (attestation or a measured image) rather than our entrypoint plus the alias. Before the sidecar runs on another host than the worker.
 - **A per-generation identity check** (the completion's own model id) besides the per-job alias check. With the attestation.
 - **The engine version of the running sidecar checked** at start-up (today the image is built at the pinned commit and `warmup.json`'s engine version must be that commit's; the running binary is not asked). With the published image.
@@ -318,7 +321,7 @@ From the Plan 2 reviews (task ids in brackets). None blocks merge.
 - **`GET /kb/search`:** deferred until a screen needs it; then a core-initiated, read-only request/reply operation, shared guidelines only until patient ids exist (design §8).
 - **Reset the feedback buffer** (tracker B-23, KI-5): moved to the platform settings plan, with `GET /platform/settings`. Buffer rows carry `model_versions`, `cleared_at` and `reset_id`, so the reset is one function plus the route (design §8).
 - **Applying corrections to live behaviour:** a CMA-ES run produces only a *proposed* weight set, under clinical change control. The persona vector waits for the pipeline to capture model activations (the intelligence lead's work). KB enrichment waits for patient ids (design §4.8, decisions 3 and 4).
-- **The rest of the audit log:** exports, named access and pseudonym reveal (`/platform/audit/exports*`, `/named-access`, `/{id}/patients`). They need Analysis pseudonyms, clearance letters and object storage. The bell and email on a broken chain wait for the notifications service.
+- **The rest of the audit log:** exports and named access (`/platform/audit/exports*`, `/named-access`); the pseudonym reveal (`/{id}/patients`) is built (Analysis PR 5). They need clearance letters and object storage. The bell and email on a broken chain wait for the notifications service.
 - **mhai-web dependency:** six audit event kinds must ship in mhai-web before Plan 4b deploys, or those entries show as "can't be displayed": `answer_agreed`, `review_withdrawn`, `review_refused`, `learning_recorded`, `audit_check_started` and `audit_check_finished` (design §5.3 marks seven new, but `audit_undisplayable_reported` is already in mhai-web, so six are pending; see `pending_in_web` in `testdata/web-audit-vocabulary.json`, to be dropped once they ship). mhai-web must also accept a health reading without the `documents` and `clean_up` parts (decision 7).
 - **mhai-web: approved and rejected on `review_submitted`.** Core sends no `facts.state` on a review entry, because mhai-web's `state` takes only `running`, `intact`, `broken` and `error`. Until mhai-web adds `approved` and `rejected` (and core sends them), the audit list does not show how a correction was decided (Plan 4 ruling R22).
 - **mhai-web: kinds for the 17 Plan 2 and 3 actions that have none** (for example `intelligence.granted`, `query.completed`, `auth.mfa.verified`), and for the per-job `job.retried` and `job.cancelled` rows. Core sends each as a withheld row, the bare undisplayable entry, so nothing leaks; the audit list is noisy until mhai-web adds the kinds (Plan 4 rulings R21 and R24).

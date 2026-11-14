@@ -68,7 +68,15 @@ func (h *handlers) views(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, err)
 		return
 	}
-	out, err := analysis.Served(s.Views[view], s, hist)
+	pr, _ := authz.FromContext(r.Context())
+	withDrills, err := analysis.SetDrills(s.Views[view], disclose.View(view), s.Record, f, func(g analysis.DrillGroup) string {
+		return analysis.DrillKey(h.d.Keys, pr.HospitalID, p.ID, f, g)
+	})
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	out, err := analysis.Served(withDrills, s, hist)
 	if err != nil {
 		h.fail(w, r, err)
 		return

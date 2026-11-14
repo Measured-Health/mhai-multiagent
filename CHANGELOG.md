@@ -28,6 +28,25 @@ All notable changes to this project are documented here. The format follows
   and `no_recipients`. Switching a connection on now asks the emr service
   to poll it at once (`sync_now`). The emr service no longer announces
   shadow findings. Merges and exclusions retry a deadlock, then answer 503.
+- Patient Analysis PR 5: the de-identified drill-down and the reveal
+  (migration 00028, OpenAPI 1.19.0; off by default, demo hospital only).
+  `GET /analysis/patients?drill&level=deidentified&period&start&…` lists the
+  patients behind one shown count of 5 or more (`{level, count, patients}`,
+  at most 200 rows of `{pid, age_band, sex, setting, conditions, findings}`).
+  Drill keys are derived when a view is served (HMAC over the hospital,
+  period, filters, view and row), only on the affected view's age band, sex
+  and setting rows, co-occurring pairs and findings, under condition, age
+  band, sex and setting filters; nothing is computed for a list, and a key
+  of another hospital, period, filter set or key set is 422 `too_small`.
+  Pids are random, per hospital, period and subject. Per person: 10 lists a
+  minute, 50 a hospital day and 300 distinct patients a calendar quarter
+  (429 `rate_limited`, one flagged entry a day). The role, two-step and
+  account are re-read for each list. Every list is audited
+  (`analysis.patients_viewed`), and the database refuses a list without its
+  entry. `GET /platform/audit/{id}/patients` reveals a drill-down entry's
+  pids to platform admins and auditors, each reveal audited
+  (`audit.patients_viewed`); the entry's detail answers `patients: {count}`.
+  New problem codes `too_small` and `level_not_supported` (422).
 - EMR integration, PR 7 (the alert rules; off by default). Migration
   **00027** (after Gemini's 00024, Analysis PR 4's 00025 and EMR PR 6's 00026): `emr.findings` (one per rule set
   version, rule and observation; historical, shadow, preliminary,

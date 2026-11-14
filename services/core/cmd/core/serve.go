@@ -180,6 +180,16 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		IdemAnon:  httpx.IdempotentAnonLog(a.pool, log),
 		IdemKeyed: httpx.IdempotentKeyed(a.pool, log, idemKey),
 	}
+	// Patient Analysis's keys (none by default): the nightly run's
+	// reference keys and the routes' drill keys. Without them no count has
+	// a drill and every list is refused.
+	var analysisKeys *analysis.Keys
+	if k := cfg.Analysis; k.Set() {
+		if analysisKeys, err = analysis.NewKeys(k.RefHMAC, k.RefEnc, k.Drill, k.Note); err != nil {
+			a.close()
+			return nil, err
+		}
+	}
 	m := authz.NewMux(guard)
 	contact := platform.SecurityContact{Name: cfg.SecurityContactName, Email: cfg.SecurityContactEmail}
 	if !contact.OK() {
@@ -189,7 +199,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health,
 		CloudProviders: cfg.CloudProviders, EMREnabled: cfg.EMREnabled, EMRTypes: cfg.EMRConnectorTypes,
 		EMR: &emrctl.Client{NC: nc, Signer: signer, Log: log}, EMRSealer: sealer, EMRDevelopment: cfg.Development(),
-		Analysis: analysis.NewEngine(a.pool, log)})
+		Analysis: analysis.NewEngine(a.pool, log), AnalysisKeys: analysisKeys})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}
@@ -208,13 +218,6 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	// Patient Analysis's nightly run: it serves only hospitals whose
 	// analysis switch is on (none by default) and needs its keys only to
 	// ingest a signed-off hospital, where it fails closed without them.
-	var analysisKeys *analysis.Keys
-	if k := cfg.Analysis; k.Set() {
-		if analysisKeys, err = analysis.NewKeys(k.RefHMAC, k.RefEnc, k.Drill, k.Note); err != nil {
-			a.close()
-			return nil, err
-		}
-	}
 	a.analysis = analysis.NewNightly(a.pool, analysisKeys, log)
 	registerMetrics(a, apiMetrics, grantMetrics)
 	if !cfg.HTTPAPI {

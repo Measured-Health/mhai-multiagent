@@ -39,7 +39,7 @@ func TestCodesCatalogue(t *testing.T) {
 		"method_not_allowed": 405, "payload_too_large": 413,
 		"self_approval": 403, "already_decided": 409,
 		"not_tested": 409, "hospital_removed": 409, "no_type": 422,
-		"too_many_filters": 422, "invalid_range": 422,
+		"too_many_filters": 422, "invalid_range": 422, "too_small": 422, "level_not_supported": 422,
 		"already_handled": 409, "no_recipients": 422,
 	}
 	if len(Codes) != len(want) {

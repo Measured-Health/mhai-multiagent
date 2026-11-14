@@ -474,8 +474,8 @@ func TestMigration00029DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := db.MigrateDownTo(ctx, pg.URL, 27); err != nil {
-		t.Fatalf("down to 27: %v", err)
+	if err := db.MigrateDownTo(ctx, pg.URL, 28); err != nil {
+		t.Fatalf("down to 28: %v", err)
 	}
 	var left int
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM pg_class WHERE relname IN ('alerts', 'alert_settings',

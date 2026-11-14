@@ -157,6 +157,8 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"emr_credentials_meta":         {"p_connection uuid", "TABLE(field text, set_at timestamp with time zone)"},
 		// 00021: a hospital's effective analysis position.
 		"mhai_analysis_position": {"p_hospital uuid", "text"},
+		// 00028: a drill-down entry's pids, the recorded reveal.
+		"mhai_audit_view_pseudonyms": {"p_audit_id bigint", "text[]"},
 	}
 	for name, sig := range platformFunctions {
 		wantFuncs[name] = sig

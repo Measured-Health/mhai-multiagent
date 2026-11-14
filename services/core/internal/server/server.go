@@ -58,6 +58,8 @@ type Deps struct {
 	// (or a hospital whose switch is off) answers every /analysis/ route
 	// 404.
 	Analysis *analysis.Engine
+	// AnalysisKeys derive the drill keys; nil: no drill, every list 422.
+	AnalysisKeys *analysis.Keys
 }
 
 // Register adds every route to m.
@@ -81,9 +83,10 @@ func Register(m *authz.Mux, d Deps) {
 		SecurityContact: d.SecurityContact, Walk: d.AuditWalk, Health: d.Health, Intel: d.Intel,
 		Auth: a, QueryCap: d.QueryCap, CloudProviders: d.CloudProviders, EMREnabled: d.EMREnabled, EMRTypes: d.EMRTypes,
 		EMR: d.EMR, EMRSealer: d.EMRSealer, EMRDevelopment: d.EMRDevelopment})
-	// Patient Analysis's aggregate reads (analysis backend plan Task 10):
-	// off unless the hospital's analysis switch is on.
-	analysisroutes.Register(m, analysisroutes.Deps{Pool: d.Pool, Engine: d.Analysis, Log: a.Log})
+	// Patient Analysis's reads and the de-identified list (analysis
+	// backend plan Tasks 10 and 13): off unless the hospital's analysis
+	// switch is on.
+	analysisroutes.Register(m, analysisroutes.Deps{Pool: d.Pool, Engine: d.Analysis, Log: a.Log, Keys: d.AnalysisKeys})
 	// EMR alerts (EMR plan Tasks 32-34): the hospital admin's alert
 	// settings, possible duplicates and exclusions, and the clinicians'
 	// alerts and notification settings. They always answer (empty lists,

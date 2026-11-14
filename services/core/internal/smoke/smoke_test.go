@@ -1061,6 +1061,57 @@ func TestSmokeAnalysis(t *testing.T) {
 	if r.status != http.StatusOK || r.body["patients"] == nil {
 		t.Fatalf("prevalence: %d %s", r.status, r.raw)
 	}
+	// The de-identified drill-down (plan Task 13), then the auditor's
+	// recorded reveal of its pids (Task 14).
+	week := fmt.Sprint(weeks[len(weeks)-1])
+	affected := "/analysis/affected?period=week&start=" + week
+	var drill string
+	for deadline := time.Now().Add(60 * time.Second); ; time.Sleep(2 * time.Second) {
+		r = api(t, nc, "GET", affected, access, nil)
+		if r.status == http.StatusOK || time.Now().After(deadline) {
+			break
+		}
+	}
+	for _, list := range []string{"by_sex", "by_age", "by_setting"} {
+		rows, _ := r.body[list].([]any)
+		for _, row := range rows {
+			if d, ok := row.(map[string]any)["patients"].(map[string]any)["drill"].(string); ok && d != "" && drill == "" {
+				drill = d
+			}
+		}
+	}
+	if r.status != http.StatusOK || drill == "" {
+		t.Fatalf("affected: %d, no drill in %s", r.status, r.raw)
+	}
+	r = api(t, nc, "GET", "/analysis/patients?level=deidentified&period=week&start="+week+"&drill="+url.QueryEscape(drill), access, nil)
+	listed, _ := r.body["patients"].([]any)
+	if r.status != http.StatusOK || len(listed) == 0 || r.header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("patients: %d (%d rows)", r.status, len(listed))
+	}
+	var entry int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM audit_log WHERE action = 'analysis.patients_viewed' AND hospital_id = $1::uuid
+		ORDER BY id DESC LIMIT 1`, h).Scan(&entry); err != nil {
+		t.Fatalf("the list's audit entry: %v", err)
+	}
+	pnc := platformConn(t)
+	auditor := auditorSignIn(t, pnc)
+	rv := apiOn(t, pnc, natsapi.SubjectPlatform, "GET", fmt.Sprintf("/platform/audit/%d/patients", entry), auditor, nil)
+	revealed, _ := rv.body["pseudonyms"].([]any)
+	if rv.status != http.StatusOK || len(revealed) != len(listed) {
+		t.Fatalf("reveal: %d (%d pids, the list had %d)", rv.status, len(revealed), len(listed))
+	}
+	for i := range listed {
+		if revealed[i] != listed[i].(map[string]any)["pid"] {
+			t.Fatalf("reveal: pid %d differs from the list's", i)
+		}
+	}
+	var reveals int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'audit.patients_viewed' AND entity_id = $1`,
+		fmt.Sprint(entry)).Scan(&reveals); err != nil || reveals != 1 {
+		t.Fatalf("the reveal's audit entry: %d (%v)", reveals, err)
+	}
+	t.Logf("analysis: a de-identified list of %d rows, audited; the auditor's reveal recorded", len(listed))
+
 	cli(t, "", "analysis", "switch", "off", code)
 	if r := api(t, nc, "GET", path, access, nil); r.status != http.StatusNotFound {
 		t.Fatalf("with the switch off: %d %s", r.status, r.raw)
