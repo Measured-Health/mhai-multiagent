@@ -10,6 +10,7 @@ a normal value, a dose the chunk gives) must not.
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -435,15 +436,58 @@ def test_cited_ids_reads_markers_and_recorded_citations() -> None:
     assert eg.cited_ids("A [KB#12] KB#0001.", []) == []
 
 
-def test_a_run_of_comparison_signs_is_linear() -> None:
-    # The label's filler once allowed "[:=~<>]+" inside a starred group: a long run of
-    # signs then a mismatch backtracked exponentially (ReDoS on clinician input).
+# ---------------------------------------------------------------- denial of service
+# The guard reads clinician input on the answer path: a crafted question must not make
+# a regex backtrack catastrophically, or the negation check go quadratic.
+
+ADVERSARIAL = [
+    "glucose" + " of about" * 1250 + " x",
+    "glucose" + " of" * 3300 + " x",
+    "glucose " + "<" * 10_000 + " x",
+    "glucose" + " :" * 5000 + " x",
+    "bp" + " is" * 3300 + " 1x",
+    "temperature" + " reading" * 1100 + " x",
+    "glucose 1" + ".1" * 5000,
+    "hb " + "1 " * 5000,
+]
+
+
+def _seconds(fn: Any) -> float:
     import time
 
-    question = "glucose " + "<" * 5000 + " x"
-    started = time.monotonic()
-    verdict(question)
-    assert time.monotonic() - started < 2.0
+    started = time.perf_counter()
+    fn()
+    return time.perf_counter() - started
+
+
+@pytest.mark.parametrize("text", ADVERSARIAL, ids=range(len(ADVERSARIAL)))
+def test_each_label_regex_is_linear_on_crafted_input(text: str) -> None:
+    assert len(text) >= 9_000
+    for a in RULES.analytes:
+        took = _seconds(lambda a=a: list(a.label.finditer(text)))
+        assert took < 0.05, (a.name, took)
+
+
+@pytest.mark.parametrize("text", ADVERSARIAL, ids=range(len(ADVERSARIAL)))
+def test_the_whole_check_is_fast_on_crafted_input(text: str) -> None:
+    assert _seconds(lambda: verdict(text)) < 1.0
+
+
+def test_negation_is_not_quadratic_in_the_matches() -> None:
+    # 3,000 negated matches in one 30,000-character text: each negation check reads
+    # the text's index, built once, instead of re-tokenising the prefix.
+    text = eg.normalise("no fever, " * 3000)
+    pattern = re.compile("fever")
+    assert _seconds(lambda: RULES.matches(pattern, text)) < 0.2
+    assert not RULES.matches(pattern, text)  # every one is negated
+    assert _seconds(lambda: verdict("no fever, " * 3000)) < 2.0
+
+
+def test_negation_reads_the_same_phrase_only() -> None:
+    assert RULES.matches(re.compile("confus"), "no fever. confused since noon")
+    assert not RULES.matches(re.compile("confus"), "she denies being confused")
+    assert RULES.matches(re.compile("confus"), "no fever and confused")
+    assert not RULES.matches(re.compile("pain"), "denies chest pain or shortness of breath")
 
 
 # ---------------------------------------------------------------- classes found on the dev split

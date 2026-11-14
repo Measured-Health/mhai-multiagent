@@ -37,6 +37,8 @@ analyte's canonical unit, or from a structured field; ages from the structured `
 
 from __future__ import annotations
 
+import bisect
+import functools
 import hashlib
 import logging
 import math
@@ -94,11 +96,14 @@ _CITATION = re.compile(r"\s*\[KB#(?:\d{4}|[1-9]\d{6})\]")
 _CITED = re.compile(r"\[(KB#(?:\d{4}|[1-9]\d{6}))\]")
 _NUMBER = r"(\d+(?:\.\d+)?)"
 # Words a label and its number may have between them ("glucose came back at 450").
+# Unambiguous on purpose (ReDoS on clinician input): each step is a sign, or one
+# whitespace run and one word, and no word alternative splits into two others; the
+# repetition is possessive, so it never backtracks into itself.
 _FILLER = (
-    r"(?:\s*(?:[:=~<>]|(?:of|is|was|at|on|reading|readings|level|levels|value|values|"
+    r"(?:\s*[:=~<>]|\s+(?:of|is|was|at|on|reading|readings|level|levels|value|values|"
     r"measured|now|reads|read|came back|come back|returned|recorded|noted|around|about|"
     r"approximately|approx|roughly|just|only|over|under|above|below|up to|down to|"
-    r"today|currently|still|of about|in the)\b))*\s*"
+    r"today|currently|still|in the)\b)*+\s*"
 )
 # After a bare number: a time, a count or another unit means it isn't this value.
 _NOT_BARE = re.compile(
@@ -338,18 +343,19 @@ class RuleSet:
     # --- reading words
 
     def negated(self, text: str, start: int) -> bool:
-        """A negation cue within ``window`` words before ``start``, in the same phrase."""
-        prefix = text[:start]
-        ends = list(_PHRASE_END.finditer(prefix))
-        if ends:
-            prefix = prefix[ends[-1].end() :]
-        words = _words(prefix)
-        for i in range(len(words) - 1, max(-1, len(words) - 1 - self.window), -1):
+        """A negation cue within ``window`` words before ``start``, in the same phrase.
+        Reads the text's index (built once per text), so each call is O(log n)."""
+        ends, starts, words = _text_index(text)
+        k = bisect.bisect_right(ends, start)
+        phrase_start = ends[k - 1] if k else 0
+        lo = bisect.bisect_left(starts, phrase_start)  # the phrase's first word
+        hi = bisect.bisect_left(starts, start)  # words before start
+        for i in range(hi - 1, max(lo - 1, hi - 1 - self.window), -1):
             if words[i] in self.breaks:
                 return False
             for cue in self.cues:
                 n = len(cue)
-                if i - n + 1 >= 0 and tuple(words[i - n + 1 : i + 1]) == cue:
+                if i - n + 1 >= lo and tuple(words[i - n + 1 : i + 1]) == cue:
                     return True
         return False
 
@@ -403,6 +409,14 @@ class RuleSet:
             if age >= 1:
                 add("age_hours", float(age) * 8766.0)
         return out
+
+
+@functools.lru_cache(maxsize=32)
+def _text_index(text: str) -> tuple[list[int], list[int], list[str]]:
+    """(phrase-end offsets, word start offsets, words) of ``text``, once per text."""
+    ends = [m.end() for m in _PHRASE_END.finditer(text)]
+    found = [(m.start(), m.group(0)) for m in _WORD.finditer(text)]
+    return ends, [o for o, _ in found], [w for _, w in found]
 
 
 def _convert(a: Analyte, v: float, after: str) -> float | None:
