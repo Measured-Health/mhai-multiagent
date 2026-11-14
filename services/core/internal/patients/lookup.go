@@ -28,8 +28,8 @@
 //     Past one, 429 rate_limited, and the clinician's first refusal of the
 //     day writes one patients.lookup_limit_reached entry.
 //   - Every lookup is audited (patients.lookup): the patient's id on a
-//     hit, else whether it missed or matched two; never the MRN typed or a
-//     name. Logs carry ids and fixed reasons only.
+//     hit, both ids for an MRN of two, else that it missed; never the MRN
+//     typed or a name. Logs carry ids and fixed reasons only.
 //
 // Identity, hospital and roles come from the verified principal only;
 // every read runs as the caller's hospital and user (authz.TxUser), so
@@ -239,7 +239,7 @@ func (d Deps) lookup(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		// Ids and codes only: the patient on a hit, else what happened.
+		// Ids and codes only: the patient(s) found, else that it missed.
 		e := audit.Event{ActorID: p.UserID.String(), HospitalID: p.HospitalID.String(), RequestID: rid,
 			Action: "patients.lookup"}
 		switch len(found) {
@@ -248,7 +248,8 @@ func (d Deps) lookup(w http.ResponseWriter, r *http.Request) {
 		case 0:
 			e.Payload = map[string]any{"result": "miss"}
 		default:
-			e.Payload = map[string]any{"result": "ambiguous"}
+			// The 409 tells the caller the MRN exists: the entry says whose.
+			e.Payload = map[string]any{"patient_ids": []any{found[0].ID, found[1].ID}}
 		}
 		return audit.Write(ctx, tx, e)
 	})

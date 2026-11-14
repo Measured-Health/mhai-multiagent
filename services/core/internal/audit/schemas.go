@@ -498,12 +498,14 @@ func init() {
 	// and MRNs): the match ids served, at most a page.
 	Register("emr.patient_matches_read", Schema{Fields: fields("match_ids", List(100, id)), Required: []string{"match_ids"}})
 	// A clinician's patient lookup by MRN (POST /patients/lookup, migration
-	// 00039): every lookup. A hit names the patient found (patient_id) and
-	// nothing else; a miss or an MRN of two patients says so (result).
-	// Never the MRN typed or a name. Past a limit, one flagged entry per
-	// clinician and hospital day, naming the limit.
-	Register("patients.lookup", Schema{Fields: fields("result", OneOf("miss", "ambiguous"), "patient_id", id),
+	// 00039): every lookup. A hit names the patient found (patient_id); an
+	// MRN of two active patients names both (patient_ids), since the 409
+	// tells the caller the MRN exists; a miss says so (result). Never the
+	// MRN typed or a name. Past a limit, one flagged entry per clinician
+	// and hospital day, naming the limit.
+	Register("patients.lookup", Schema{Fields: fields("result", OneOf("miss"), "patient_id", id, "patient_ids", List(2, id)),
 		Shapes: []Shape{{Keys: []string{"patient_id"}, Required: []string{"patient_id"}},
+			{Keys: []string{"patient_ids"}, Required: []string{"patient_ids"}},
 			{Keys: []string{"result"}, Required: []string{"result"}}}})
 	Register("patients.lookup_limit_reached", Schema{Fields: fields("window", OneOf("minute", "day", "hospital_day")),
 		Required: []string{"window"}})

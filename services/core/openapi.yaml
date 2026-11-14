@@ -1719,7 +1719,8 @@ paths:
         lift). Since 1.21.0.
         404 when no active patient of the hospital matches; 409 `conflict`
         when the MRN names two (send `patient_id`). Order: the body (422),
-        the patient (404, 409), then the code (403). Audited
+        the code (403; since 1.29.0 before the patient, so an MRN is never
+        answered without one), then the patient (404, 409). Audited
         `emr.patient_excluded` (counts), one `alert.withdrawn` per alert,
         and `emr.exclusion_purged` (counts) or `emr.exclusion_purge_held`.
         A deadlock against the record feed is retried, then 503

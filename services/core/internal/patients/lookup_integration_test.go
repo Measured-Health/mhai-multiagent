@@ -313,18 +313,20 @@ func TestLookupExactOnly(t *testing.T) {
 	}
 }
 
-// Two active patients with one MRN: 409 conflict, never a list; audited
-// ambiguous with no patient.
+// Two active patients with one MRN: 409 conflict, never a list; the entry
+// names both (the 409 told the caller the MRN exists).
 func TestLookupAmbiguous409(t *testing.T) {
 	w := newWorld(t, true, roomy)
-	patient(t, w.h, "SYN-LKP-TWIN-6R2", "active", uuid.Nil)
-	patient(t, w.h, "SYN-LKP-TWIN-6R2", "active", uuid.Nil)
+	a := patient(t, w.h, "SYN-LKP-TWIN-6R2", "active", uuid.Nil)
+	b := patient(t, w.h, "SYN-LKP-TWIN-6R2", "active", uuid.Nil)
 	r := w.lookup("SYN-LKP-TWIN-6R2")
 	if r.code != http.StatusConflict || r.body["code"] != "conflict" || strings.Contains(r.raw, patientName) {
 		t.Fatalf("%d %s", r.code, r.raw)
 	}
 	got := audits(t, w.h, "patients.lookup")
-	if len(got) != 1 || got[0].payload["result"] != "ambiguous" || len(got[0].payload) != 1 || got[0].entityID != "" {
+	ids, _ := got[0].payload["patient_ids"].([]any)
+	if len(got) != 1 || len(ids) != 2 || len(got[0].payload) != 1 || got[0].entityID != "" ||
+		!((ids[0] == a.String() && ids[1] == b.String()) || (ids[0] == b.String() && ids[1] == a.String())) {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -558,6 +560,22 @@ func TestLookupCountsOnlyThroughTheFunction(t *testing.T) {
 		if err == nil {
 			t.Errorf("%v: reserved", args)
 		}
+	}
+	// A day only moves forward: another time zone's earlier date never
+	// resets the count (security review).
+	v := clinician(t, w.h)
+	var got []string
+	for _, tz := range []string{"Pacific/Kiritimati", "Pacific/Kiritimati", "Etc/GMT+12"} {
+		var admit string
+		if err := db.WithHospitalUser(ctx, sharedApp, w.h, v, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT admit FROM mhai_patient_lookup_reserve(100, 2, 1000, $1)`, tz).Scan(&admit)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, admit)
+	}
+	if strings.Join(got, ",") != "ok,ok,day" {
+		t.Fatalf("%v", got)
 	}
 	var day int
 	if err := sharedSuper.QueryRow(ctx, `SELECT day_count FROM patient_lookup_counts WHERE hospital_id = $1 AND user_id = $2`,

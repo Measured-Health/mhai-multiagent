@@ -14,8 +14,9 @@
 --     the hospital day.
 --   - mhai_patient_lookup_reserve(per minute, per day, hospital per day,
 --     time zone): takes one lookup for the caller (mhai.hospital_id and
---     mhai.user_id) under the two rows' locks (the clinician's, then the
---     hospital's: parallel lookups queue, so the counts are exact) and
+--     mhai.user_id) under the two rows' locks (the clinician's, then, only
+--     if the clinician is within their own limits, the hospital's: parallel
+--     lookups queue, so the counts are exact) and
 --     answers 'ok', or the limit that refuses ('minute', 'day',
 --     'hospital_day'), with first_refusal true on the clinician's first
 --     refusal of the hospital day (core writes the one flagged audit entry
@@ -83,46 +84,57 @@ BEGIN
     END IF;
     -- An unknown time zone raises here, before anything is written.
     v_day := (clock_timestamp() AT TIME ZONE p_time_zone)::date;
-    -- The clinician's row, then the hospital's: always in this order.
+    -- The clinician's row first. A clinician already past their own
+    -- limit is refused under that lock alone: the hospital's row is
+    -- neither locked nor written, so looping refusals don't queue behind
+    -- the hospital's lookups (security review).
     INSERT INTO public.patient_lookup_counts (hospital_id, user_id, day) VALUES (v_h, v_u, v_day)
         ON CONFLICT DO NOTHING;
     SELECT * INTO STRICT c FROM public.patient_lookup_counts r
         WHERE r.hospital_id = v_h AND r.user_id = v_u FOR UPDATE;
-    INSERT INTO public.patient_lookup_hospital_counts (hospital_id, day) VALUES (v_h, v_day)
-        ON CONFLICT DO NOTHING;
-    SELECT * INTO STRICT hc FROM public.patient_lookup_hospital_counts r
-        WHERE r.hospital_id = v_h FOR UPDATE;
-    -- The wall clock once both locks are held (not the transaction's
-    -- start): a lookup that waited behind another is timed after it.
+    -- The wall clock once the lock is held (not the transaction's start):
+    -- a lookup that waited behind another is timed after it.
     v_now := clock_timestamp();
     v_day := (v_now AT TIME ZONE p_time_zone)::date;
     v_recent := ARRAY(SELECT t FROM unnest(c.recent) t WHERE t > v_now - interval '1 minute' ORDER BY t);
-    IF c.day IS DISTINCT FROM v_day THEN
+    -- A day only moves forward: a later call with an earlier date (another
+    -- time zone) never resets the count.
+    IF c.day < v_day THEN
         c.day := v_day;
         c.day_count := 0;
     END IF;
-    IF hc.day IS DISTINCT FROM v_day THEN
-        hc.day := v_day;
-        hc.day_count := 0;
-    END IF;
     admit := CASE WHEN cardinality(v_recent) >= p_minute THEN 'minute'
                   WHEN c.day_count >= p_day THEN 'day'
-                  WHEN hc.day_count >= p_hospital_day THEN 'hospital_day'
                   ELSE 'ok' END;
-    first_refusal := admit <> 'ok' AND c.flagged_on IS DISTINCT FROM v_day;
     IF admit = 'ok' THEN
-        v_recent := v_recent || v_now;
-        c.day_count := c.day_count + 1;
-        hc.day_count := hc.day_count + 1;
+        -- Then the hospital's row (always after the clinician's).
+        INSERT INTO public.patient_lookup_hospital_counts (hospital_id, day) VALUES (v_h, v_day)
+            ON CONFLICT DO NOTHING;
+        SELECT * INTO STRICT hc FROM public.patient_lookup_hospital_counts r
+            WHERE r.hospital_id = v_h FOR UPDATE;
+        IF hc.day < v_day THEN
+            hc.day := v_day;
+            hc.day_count := 0;
+        END IF;
+        IF hc.day_count >= p_hospital_day THEN
+            admit := 'hospital_day';
+        ELSE
+            v_recent := v_recent || v_now;
+            c.day_count := c.day_count + 1;
+            UPDATE public.patient_lookup_hospital_counts r SET day = hc.day, day_count = hc.day_count + 1
+                WHERE r.hospital_id = v_h;
+        END IF;
     END IF;
+    first_refusal := admit <> 'ok' AND c.flagged_on IS DISTINCT FROM c.day;
     IF first_refusal THEN
-        c.flagged_on := v_day;
+        c.flagged_on := c.day;
     END IF;
-    UPDATE public.patient_lookup_counts r SET day = c.day, day_count = c.day_count, recent = v_recent,
-        flagged_on = c.flagged_on
-        WHERE r.hospital_id = v_h AND r.user_id = v_u;
-    UPDATE public.patient_lookup_hospital_counts r SET day = hc.day, day_count = hc.day_count
-        WHERE r.hospital_id = v_h;
+    -- A refusal that flags nothing changes nothing.
+    IF admit = 'ok' OR first_refusal THEN
+        UPDATE public.patient_lookup_counts r SET day = c.day, day_count = c.day_count, recent = v_recent,
+            flagged_on = c.flagged_on
+            WHERE r.hospital_id = v_h AND r.user_id = v_u;
+    END IF;
 END
 $$;
 -- +goose StatementEnd
