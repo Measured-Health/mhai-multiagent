@@ -343,13 +343,17 @@ def test_store_cap_is_the_stores() -> None:
     assert export.STORE_CAP_DETAIL == promote.FILE_TOO_LARGE
 
 
-def test_file_over_one_put_passes_with_a_note(run: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_file_over_one_put_passes_with_a_note(
+    run: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     # Gemma 4's per-layer embedding is one 5.6 GB tensor: it now passes the export step,
     # which notes that the store must have conditional multipart.
+    assert export.main(_argv(run, "--base-revision", REVISION, "--no-gguf")) == 0
+    assert "MODEL_STORE_CONDITIONAL_MULTIPART" not in capsys.readouterr().out
     biggest = max(p.stat().st_size for p in run.iterdir())
     monkeypatch.setattr(export, "ONE_PUT_BYTES", biggest - 1)
-    out = export.export_run(run, gguf=False, **_kw())
-    assert export.needs_multipart(out.files)
+    assert export.main(_argv(run, "--base-revision", REVISION, "--no-gguf")) == 0
+    assert f"note: {export.MULTIPART_NOTE}" in capsys.readouterr().out
     assert "MODEL_STORE_CONDITIONAL_MULTIPART" in export.MULTIPART_NOTE
 
 

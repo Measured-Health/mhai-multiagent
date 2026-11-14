@@ -544,3 +544,475 @@ def test_probe_says_minio_honours_conditional_completion(minio_store: MinioStore
     assert minio_store.store("writer").probe_conditional_multipart() is True
     assert minio_store.store("root").list("models/_store-probe/")
     assert _uploads(minio_store, "models/_store-probe/", exact=False) == []
+
+
+# ---------------------------------------------------------------- the decisions, stubbed S3
+
+
+def _client_error(code: str, status: int) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}}, "op"
+    )
+
+
+def _b64sha(data: bytes) -> str:
+    return base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
+
+
+class _S3:
+    """An S3 client stub for the multipart calls: versioned objects, one upload at a time,
+    and switches for each way a store can misbehave."""
+
+    def __init__(self, *, sha_parts: bool = True) -> None:
+        self.objects: dict[str, list[dict[str, Any]]] = {}
+        self.sha_parts = sha_parts
+        self.parts: dict[int, bytes] = {}
+        self.calls: list[str] = []
+        self.aborted: list[str] = []
+        self.complete_kw: dict[str, Any] = {}
+        self.upload_id = "up-1"
+        # switches
+        self.part_hook: Any = None  # called (number, kw) before a part is kept
+        self.echo_wrong = False
+        self.complete_error: ClientError | None = None
+        self.store_then_412 = False  # completed, then the reply is a 412 (a retry)
+        self.complete_checksum: str | None = None  # what complete reports, if set
+        self.abort_error: ClientError | None = None
+        self.serve: bytes | None = None  # other bytes than were kept
+        self.head_size_delta = 0
+        self.extra_version = False
+        self.uploads_pages: list[dict[str, Any]] = []
+
+    def _new(self, key: str, body: bytes, checksum: str | None, multipart: bool) -> str:
+        vid = f"v{sum(len(v) for v in self.objects.values()) + 1}"
+        self.objects.setdefault(key, []).append(
+            {"vid": vid, "body": body, "checksum": checksum, "multipart": multipart}
+        )
+        return vid
+
+    def _find(self, key: str, vid: str | None) -> dict[str, Any]:
+        for o in reversed(self.objects.get(key, [])):
+            if vid is None or o["vid"] == vid:
+                return o
+        raise _client_error("NoSuchKey", 404)
+
+    def head_object(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append("head")
+        o = self._find(kw["Key"], kw.get("VersionId"))
+        resp = {"ContentLength": len(o["body"]) + self.head_size_delta, "VersionId": o["vid"]}
+        if o["checksum"] is not None:
+            resp["ChecksumSHA256"] = o["checksum"]
+        return resp
+
+    def create_multipart_upload(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append("create")
+        self.parts = {}
+        resp: dict[str, Any] = {"UploadId": self.upload_id}
+        if self.sha_parts:
+            resp["ChecksumAlgorithm"] = "SHA256"
+        return resp
+
+    def upload_part(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append("part")
+        if self.part_hook is not None:
+            self.part_hook(kw["PartNumber"], kw)
+        body = kw["Body"]
+        if "ChecksumSHA256" in kw and kw["ChecksumSHA256"] != _b64sha(body):
+            raise _client_error("BadDigest", 400)
+        if "ContentMD5" in kw:
+            md5 = base64.b64encode(hashlib.md5(body, usedforsecurity=False).digest())
+            if kw["ContentMD5"] != md5.decode("ascii"):
+                raise _client_error("BadDigest", 400)
+        self.parts[kw["PartNumber"]] = body
+        etag = hashlib.md5(body, usedforsecurity=False).hexdigest()
+        resp: dict[str, Any] = {"ETag": f'"{etag}"'}
+        if "ChecksumSHA256" in kw:
+            resp["ChecksumSHA256"] = _b64sha(b"x") if self.echo_wrong else kw["ChecksumSHA256"]
+        return resp
+
+    def _composite(self) -> str | None:
+        if not self.sha_parts:
+            return None
+        digests = [hashlib.sha256(self.parts[n]).digest() for n in sorted(self.parts)]
+        return store._composite(digests)
+
+    def complete_multipart_upload(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append("complete")
+        self.complete_kw = kw
+        if self.complete_error is not None:
+            raise self.complete_error
+        key = kw["Key"]
+        if kw.get("IfNoneMatch") == "*" and self.objects.get(key) and not self.store_then_412:
+            raise _client_error("PreconditionFailed", 412)
+        body = b"".join(self.parts[n] for n in sorted(self.parts))
+        vid = self._new(key, body, self._composite(), True)
+        if self.extra_version:
+            self._new(key, body, self._composite(), True)
+        if self.store_then_412:
+            raise _client_error("PreconditionFailed", 412)
+        resp: dict[str, Any] = {"VersionId": vid}
+        checksum = self.complete_checksum or self._composite()
+        if checksum is not None:
+            resp["ChecksumSHA256"] = checksum
+        return resp
+
+    def abort_multipart_upload(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append("abort")
+        if self.abort_error is not None:
+            raise self.abort_error
+        self.aborted.append(kw["UploadId"])
+        return {}
+
+    def list_object_versions(self, **kw: Any) -> dict[str, Any]:
+        found = [
+            {"Key": k, "VersionId": o["vid"]}
+            for k, objs in self.objects.items()
+            if k.startswith(kw["Prefix"])
+            for o in reversed(objs)
+        ]
+        return {"Versions": found, "IsTruncated": False}
+
+    def get_object(self, **kw: Any) -> dict[str, Any]:
+        o = self._find(kw["Key"], kw.get("VersionId"))
+        body = o["body"] if self.serve is None else self.serve
+        resp = {"Body": _Body(body), "ContentLength": len(body)}
+        if o["multipart"]:
+            resp["ETag"] = '"' + "a" * 32 + f'-{max(1, len(self.parts))}"'
+            if o["checksum"] is not None:
+                resp["ChecksumSHA256"] = o["checksum"]
+        elif o["checksum"] is not None:
+            resp["ChecksumSHA256"] = o["checksum"]
+        return resp
+
+    def put_object(self, **kw: Any) -> dict[str, Any]:
+        key = kw["Key"]
+        if kw.get("IfNoneMatch") == "*" and self.objects.get(key):
+            raise _client_error("PreconditionFailed", 412)
+        body = kw["Body"].read()
+        vid = self._new(key, body, _b64sha(body), False)
+        return {"VersionId": vid, "ChecksumSHA256": _b64sha(body)}
+
+    def list_multipart_uploads(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append("list_uploads")
+        return self.uploads_pages.pop(0) if self.uploads_pages else {"Uploads": []}
+
+
+def _stubbed(client: _S3, **kw: Any) -> S3Store:
+    settings: dict[str, Any] = {
+        "conditional_multipart": True,
+        "part_bytes": PART,
+        "multipart_threshold": PART,
+    }
+    settings.update(kw)
+    s = S3Store(NOWHERE, "mhai-models", CREDS, **settings)
+    s._client = client
+    return s
+
+
+def _key() -> str:
+    return store.run_file_key(_name(), "1.0.0", "run_1", "model.safetensors")
+
+
+@pytest.fixture
+def big(tmp_path: Path) -> tuple[Path, str]:
+    return _file(tmp_path, 2 * PART + 7)  # three parts
+
+
+def test_stub_sha_parts_complete_conditionally(big: tuple[Path, str]) -> None:
+    path, sha = big
+    c = _S3()
+    key = _key()
+    vid = _stubbed(c).put_new(key, path, sha256=sha)
+    assert c.calls[:2] == ["head", "create"] and c.calls.count("part") == 3
+    assert c.complete_kw["IfNoneMatch"] == "*"
+    assert all("ChecksumSHA256" in p for p in c.complete_kw["MultipartUpload"]["Parts"])
+    assert c.aborted == [] and c.objects[key][0]["vid"] == vid
+    assert c.objects[key][0]["body"] == path.read_bytes()
+
+
+def test_stub_md5_fallback_reads_the_object_back(big: tuple[Path, str]) -> None:
+    path, sha = big
+    c = _S3(sha_parts=False)
+    key = _key()
+    seen: list[dict[str, Any]] = []
+    c.part_hook = lambda n, kw: seen.append(dict(kw))
+    vid = _stubbed(c).put_new(key, path, sha256=sha)
+    assert all("ContentMD5" in kw and "ChecksumSHA256" not in kw for kw in seen)
+    assert c.objects[key][0]["vid"] == vid
+    # The same, but the store holds other bytes: the read-back refuses them.
+    c2 = _S3(sha_parts=False)
+    c2.serve = b"y" * path.stat().st_size
+    err = _refused(_stubbed(c2).put_new, _key(), path, sha256=sha)
+    assert (err.reason, err.detail_code) == ("hash_mismatch", "stored")
+
+
+def test_stub_existing_key_refused_before_any_part(big: tuple[Path, str]) -> None:
+    path, sha = big
+    c = _S3()
+    key = _key()
+    c._new(key, b"first", _b64sha(b"first"), False)
+    err = _refused(_stubbed(c).put_new, key, path, sha256=sha)
+    assert (err.reason, err.detail_code) == ("version_exists", "not_ours")
+    assert "create" not in c.calls
+
+
+def test_stub_completion_refused_aborts(
+    big: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, sha = big
+    c = _S3()
+    key = _key()
+    monkeypatch.setattr(S3Store, "_check_absent", lambda self, key: None)
+    c._new(key, b"first", _b64sha(b"first"), False)
+    err = _refused(_stubbed(c).put_new, key, path, sha256=sha)
+    assert (err.reason, err.detail_code) == ("version_exists", "not_ours")
+    assert c.aborted == ["up-1"] and len(c.objects[key]) == 1
+
+
+def test_stub_retried_completion_that_is_ours_is_adopted(big: tuple[Path, str]) -> None:
+    path, sha = big
+    c = _S3()
+    c.store_then_412 = True
+    key = _key()
+    vid = _stubbed(c).put_new(key, path, sha256=sha)
+    assert vid == c.objects[key][0]["vid"]
+
+
+@pytest.mark.parametrize("error", ["NoSuchUpload", "other"])
+def test_stub_completion_failures(big: tuple[Path, str], error: str) -> None:
+    path, sha = big
+    c = _S3()
+    c.complete_error = (
+        _client_error("NoSuchUpload", 404) if error == "NoSuchUpload" else _client_error("X", 500)
+    )
+    err = _refused(_stubbed(c).put_new, _key(), path, sha256=sha)
+    if error == "NoSuchUpload":
+        assert (err.reason, err.detail_code) == ("version_exists", "not_ours")
+    else:
+        assert (err.reason, err.detail_code) == ("store_unavailable", "error")
+    assert c.aborted == ["up-1"]
+
+
+def test_stub_md5_mode_never_adopts_on_412(big: tuple[Path, str]) -> None:
+    path, sha = big
+    c = _S3(sha_parts=False)
+    c.store_then_412 = True
+    err = _refused(_stubbed(c).put_new, _key(), path, sha256=sha)
+    assert (err.reason, err.detail_code) == ("version_exists", "not_ours")
+
+
+def test_stub_part_checksum_echo_and_tamper(big: tuple[Path, str]) -> None:
+    path, sha = big
+    c = _S3()
+    c.echo_wrong = True
+    err = _refused(_stubbed(c).put_new, _key(), path, sha256=sha)
+    assert (err.reason, err.detail_code) == ("hash_mismatch", "part_checksum")
+    assert c.aborted == ["up-1"] and "complete" not in c.calls
+
+    def flip(n: int, kw: dict[str, Any]) -> None:
+        if n == 2:
+            kw["Body"] = b"z" + kw["Body"][1:]
+
+    c2 = _S3()
+    c2.part_hook = flip
+    err = _refused(_stubbed(c2).put_new, _key(), path, sha256=sha)
+    assert (err.reason, err.detail_code) == ("hash_mismatch", "checksum")
+    assert c2.aborted == ["up-1"] and "complete" not in c2.calls
+
+
+def test_stub_part_transport_error_aborts(
+    big: tuple[Path, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    path, sha = big
+    c = _S3()
+
+    def boom(n: int, kw: dict[str, Any]) -> None:
+        if n == 2:
+            raise EndpointConnectionError(endpoint_url=NOWHERE)
+
+    c.part_hook = boom
+    c.abort_error = _client_error("AccessDenied", 403)  # the abort fails too
+    key = _key()
+    err = _refused(_stubbed(c).put_new, key, path, sha256=sha)
+    assert (err.reason, err.detail_code) == ("store_unavailable", "transport")
+    assert c.calls[-1] == "abort" and key not in c.objects
+    assert "abort failed" in caplog.text and key not in caplog.text
+
+
+def test_stub_whole_sha256_checked_before_completion(big: tuple[Path, str]) -> None:
+    path, _ = big
+    c = _S3()
+    err = _refused(_stubbed(c).put_new, _key(), path, sha256=hashlib.sha256(b"o").hexdigest())
+    assert (err.reason, err.detail_code) == ("hash_mismatch", "expected")
+    assert "complete" not in c.calls and c.aborted == ["up-1"]
+
+
+@pytest.mark.parametrize("change", ["shrink", "grow"])
+def test_stub_file_changed_while_sent(big: tuple[Path, str], change: str) -> None:
+    path, sha = big
+    c = _S3()
+
+    def edit(n: int, kw: dict[str, Any]) -> None:
+        if change == "shrink" and n == 1:
+            os.truncate(path, PART + 1)
+        if change == "grow" and n == 3:
+            with open(path, "ab") as f:
+                f.write(b"more")
+
+    c.part_hook = edit
+    err = _refused(_stubbed(c).put_new, _key(), path, sha256=sha)
+    assert err.reason == "size_mismatch"
+    assert "complete" not in c.calls and c.aborted == ["up-1"]
+
+
+@pytest.mark.parametrize("fault", ["size", "versions", "complete_checksum"])
+def test_stub_what_was_stored_is_checked(big: tuple[Path, str], fault: str) -> None:
+    path, sha = big
+    c = _S3()
+    if fault == "size":
+        c.head_size_delta = 1
+    elif fault == "versions":
+        c.extra_version = True
+    else:
+        c.complete_checksum = _b64sha(b"other") + "-3"
+    err = _refused(_stubbed(c).put_new, _key(), path, sha256=sha)
+    want = {
+        "size": ("hash_mismatch", "stored"),
+        "versions": ("version_exists", "not_ours"),
+        "complete_checksum": ("hash_mismatch", "stored_checksum"),
+    }[fault]
+    assert (err.reason, err.detail_code) == want
+
+
+def test_stub_parts_and_ids_bounded(big: tuple[Path, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    path, sha = big
+    c = _S3()
+    monkeypatch.setattr(store, "MAX_PARTS", 2)
+    err = _refused(_stubbed(c).put_new, _key(), path, sha256=sha)
+    assert (err.reason, err.detail_code) == ("too_large", "parts")
+    assert "create" not in c.calls
+    monkeypatch.setattr(store, "MAX_PARTS", 10_000)
+    c2 = _S3()
+    c2.upload_id = "bad id\n"
+    err = _refused(_stubbed(c2).put_new, _key(), path, sha256=sha)
+    assert (err.reason, err.detail_code) == ("store_unavailable", "upload_id")
+
+
+def test_stub_small_file_takes_one_conditional_put(tmp_path: Path) -> None:
+    path, sha = _file(tmp_path, 100)
+    c = _S3()
+    key = _key()
+    _stubbed(c).put_new(key, path, sha256=sha)
+    assert "create" not in c.calls and not c.objects[key][0]["multipart"]
+
+
+@pytest.mark.parametrize("outcome", ["honoured", "ignored", "error"])
+def test_stub_probe(outcome: str) -> None:
+    c = _S3()
+    if outcome == "ignored":
+        c.store_then_412 = False
+        real = c.complete_multipart_upload
+
+        def ignore(**kw: Any) -> dict[str, Any]:
+            kw.pop("IfNoneMatch")  # a store that drops the condition
+            return real(**kw)
+
+        c.complete_multipart_upload = ignore  # type: ignore[method-assign]
+    if outcome == "error":
+        c.complete_error = _client_error("NotImplemented", 501)
+    s = _stubbed(c, conditional_multipart=False)
+    if outcome == "error":
+        assert _refused(s.probe_conditional_multipart).reason == "store_unavailable"
+    else:
+        assert s.probe_conditional_multipart() is (outcome == "honoured")
+    assert c.calls[-1] == "abort"
+    assert all(k.startswith("models/_store-probe/") for k in c.objects)
+
+
+def test_stub_abort_stale_uploads(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    old, fresh = now - timedelta(days=2), now - timedelta(hours=1)
+    k1, k2, k3 = _key(), _key(), _key()
+    c = _S3()
+    c.uploads_pages = [
+        {
+            "Uploads": [
+                {"Key": k1, "UploadId": "u1", "Initiated": old},
+                {"Key": k2, "UploadId": "u2", "Initiated": fresh},
+                {"Key": "models/../x", "UploadId": "u3", "Initiated": old},
+                {"Key": k3, "UploadId": "bad id\n", "Initiated": old},
+                {"Key": k3, "UploadId": "u4", "Initiated": "yesterday"},
+                "not a mapping",
+            ],
+            "IsTruncated": True,
+            "NextKeyMarker": k1,
+            "NextUploadIdMarker": "u1",
+        },
+        {"Uploads": [{"Key": k3, "UploadId": "u5", "Initiated": old}], "IsTruncated": False},
+        {"Uploads": [], "IsTruncated": False},  # eval/
+    ]
+    s = _stubbed(c)
+    assert s.abort_stale_uploads(now=now) == 2
+    assert c.aborted == ["u1", "u5"]
+    # One finished meanwhile (NoSuchUpload): skipped; any other failure stops the run.
+    c.uploads_pages = [{"Uploads": [{"Key": k1, "UploadId": "u6", "Initiated": old}]}]
+    c.abort_error = _client_error("NoSuchUpload", 404)
+    assert s.abort_stale_uploads(now=now, prefixes=("models/",)) == 0
+    c.uploads_pages = [{"Uploads": [{"Key": k1, "UploadId": "u7", "Initiated": old}]}]
+    c.abort_error = _client_error("AccessDenied", 403)
+    assert _refused(s.abort_stale_uploads, now=now, prefixes=("models/",)).reason == (
+        "store_unavailable"
+    )
+    monkeypatch.setattr(store, "MAX_LIST", 1)
+    c.abort_error = None
+    c.uploads_pages = [{"Uploads": [{"Key": k1, "UploadId": "u8", "Initiated": fresh}] * 2}]
+    assert _refused(s.abort_stale_uploads, now=now).reason == "too_many_files"
+
+
+def test_stub_put_once_head_failure_propagates(tmp_path: Path) -> None:
+    class Denied(MemoryStore):
+        def head(self, key: str, version_id: str | None = None) -> store.ObjectInfo:
+            raise Refused("store_unavailable", detail_code="denied")
+
+    path, sha = _file(tmp_path, 64)
+    err = _refused(promote.put_once, Denied(), _key(), path, 64, sha)
+    assert (err.reason, err.detail_code) == ("store_unavailable", "denied")
+
+
+class _FakeWriter:
+    def __init__(self, honoured: bool = True) -> None:
+        self.honoured = honoured
+        self.ages: list[int] = []
+
+    def probe_conditional_multipart(self) -> bool:
+        return self.honoured
+
+    def abort_stale_uploads(self, older_than_s: int) -> int:
+        self.ages.append(older_than_s)
+        return 3
+
+
+def test_cli_store_commands(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    w = _FakeWriter()
+    monkeypatch.setattr(cli, "_writer", lambda: w)
+    assert cli.main(["store-probe-multipart"]) == 0
+    assert '"conditional_multipart":true' in capsys.readouterr().out
+    w.honoured = False
+    assert cli.main(["store-probe-multipart"]) == 2
+    assert '"conditional_multipart":false' in capsys.readouterr().out
+    assert cli.main(["store-abort-stale-uploads"]) == 0
+    assert cli.main(["store-abort-stale-uploads", "--older-than-hours", "48"]) == 0
+    assert w.ages == [24 * 3600, 48 * 3600]
+    assert '"stale_uploads_aborted":3' in capsys.readouterr().out
+
+
+def test_cli_store_commands_need_the_writer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for name in (cli.WRITER_ACCESS_ENV, cli.WRITER_SECRET_ENV):
+        monkeypatch.delenv(name, raising=False)
+    assert cli.main(["store-probe-multipart"]) == 2
+    out = capsys.readouterr().out
+    assert '"refused":"not_allowed_here"' in out and "writer_credentials" in out
