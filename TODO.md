@@ -79,6 +79,16 @@ Gates before live use (design §17.6; all of them):
 - [ ] The on-call owner named (H9). Owner: product owner.
 - [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
 
+## EMR: follow-ups from PR 8a (14 Nov)
+
+- [ ] **Migration order:** 00029 (`alerts`) merges after Analysis PR 5's 00028; if 00028 lands first, `TestMigrateUpFromEmpty`'s list gains 28.
+- [ ] PR 8b: the finding consumer writes `alerts` (with `connection_id`, so `source_label` and `emr_link` resolve) and `alert_deliveries` as `mhai_emr_core`, using `alerts.Route`; it records `alert.raised` and `alert.not_raised` (schemas to add with it), and needs `mhai_emr_core` reads of `users`/`user_roles` and its audit append policy.
+- [ ] PR 8b: grouped mode (`AlertPageOut.grouped` is always null until then) and the info cap.
+- [ ] The CLI fallback for exclusions (`core emr exclude`, Task 34) is not built: it needs a login for `mhai_emr_admin` and its audit append. With PR 9's legal-hold CLI. Until then an exclusion is the hospital admin's route only.
+- [ ] `finding.name` is the source's own display text (core has no LOINC table); a LOINC display label on the alert when the consumer writes it (PR 8b).
+- [ ] mhai-web (PR 10): `already_handled`'s body carries the alert's `status` in place of the problem's number, as `AlertHandledOut` reads it; the new audit kinds (`alert.*`, `alerts.read`, `emr.patient_matches_read`, `notification_settings.changed`) are sent bare until mhai-web has words for them.
+- [ ] A hospital admin's re-queue of a removed named clinician also widens visibility for alerts that clinician can still see (design §12.2); revisit if the clinical lead prefers it only on deactivation and role loss.
+
 ## EMR: follow-ups from PR 7 (12 Nov)
 
 - [ ] **Migration order:** 00027 (`emr_findings`) merges after 00024 (Gemini), 00025 (Analysis PR 4) and 00026 (EMR PR 6, renumbered from 00025); it needs EMR PR 6's tables.
@@ -86,18 +96,18 @@ Gates before live use (design §17.6; all of them):
 - [ ] v1's numeric rules fire only once the real LOINC tables (Task 21, H6) and a reviewed `maps/common/conversions.yaml` with its analytes land; until then only the lab's own critical flags can fire (and the synthetic tables load in development only).
 - [ ] Resume a paused source: Task 37's platform `resume` route. Until then an operator clears `emr_connections.paused` by SQL, recorded in the incident log.
 - [ ] PR 8b: core reads findings as `mhai_emr_core`, raises alerts for `open` non-shadow findings, updates on `superseded`, withdraws on `withdrawn` (`withdrawn_reason`), and records `breaker_tripped`.
-- [ ] PR 8a: `sources_status` calls `emr_sources_status()` (behind when stale or paused).
+- [x] PR 8a: `sources_status` calls `emr_sources_status()` (behind when stale or paused).
 
 ## EMR: follow-ups from PR 6 (12 Nov)
 
-- [ ] PR 8a's `sources_status` reads staleness by the §15.4 rule (`scheduler.Stale` on the emr side; core's `emr_platform_health()` now marks a silent connection that is on as `errors`).
-- [ ] Core doesn't call `emr.v1.ctl.sync_now` yet (no route asks for it).
+- [x] PR 8a's `sources_status` reads staleness by the §15.4 rule through `emr_sources_status()` (3 × `poll_seconds`, or paused). The `file_export` rule (expected interval) comes with PR 11.
+- [x] Core calls `emr.v1.ctl.sync_now` (as `svc:core`, best effort, after the commit) when a platform admin switches a connection on (PR 8a). The resume route (Task 37, PR 8b) calls it too.
 
 ## EMR: follow-ups from PR 5 (11 Nov)
 
 - [ ] **PR 9 must defer the exclusion purge under a legal hold.** Until then `emr_exclude_patient` purges at once (product owner, 11 Nov: excluding a patient purges its data); no legal hold exists yet. PR 9 moves the purge behind `emr.purge_requests` with the hold check (design §10.6, A41).
-- [ ] **PR 8a adds the alert steps** to `emr_merge_patients` (re-point open alerts) and `emr_exclude_patient` (withdraw them), with `CREATE OR REPLACE` in 00024, and the reject function for matches.
-- [ ] **PR 8a: retry an exclusion or merge on a deadlock (40P01).** Both now take the emr service's link locks and the patient row (race review), so one racing a normaliser batch on several of the same patients can be chosen as the deadlock victim; nothing is left half-done, but core's route must retry or answer 503.
+- [x] **PR 8a adds the alert steps** to `emr_merge_patients` (re-point alerts) and `emr_exclude_patient` (withdraw open alerts, clear every alert's patient columns), and `emr_reject_match()` (migration 00029).
+- [x] **PR 8a: retry an exclusion or merge on a deadlock (40P01) or serialization failure (40001):** three attempts, then 503 `not_ready`.
 - [ ] Re-normalise the last 7 days of a local code after its map changes (design §9.4); not built.
 - [ ] Patients are updated in place by a newer Patient resource (the row is the identity); its `raw_id` names the version used. Versioned patient history if the clinical lead wants it.
 - [ ] A date-only medication time is stored as no time (`start_at`/`end_at` null); a date column if the rules need it (PR 7).
@@ -129,7 +139,7 @@ The product owner asked for the simplest safe version first (11 Nov). These wait
 - [ ] Rules (review notes, 13 Nov): a superseding result whose finding is historical (an old amendment) supersedes or withdraws the open finding without an alert of its own; PR 8b decides what the open alert shows then.
 - [ ] Rules: a transient database error retries the batch (backoff by delivery) per process; nothing is shared across emr copies.
 - [ ] Rules: two consumers on one patient's amendments at once could each supersede the same open finding; one consumer per process today (the patient's `FOR SHARE` lock doesn't serialise them).
-- [ ] Rules / PR 8b: shadow findings are announced to `core_emr` too and pile up there; core acks them with no alert (K11), or the emr side stops announcing shadow findings.
+- [x] Rules / PR 8a: the emr service no longer announces shadow findings (they are never alerts), so they don't pile up on `emr.v1.<hid>.finding`; the unannounced index leaves them out.
 - [ ] The normaliser's `Deliveries` still reads a metadata error as the last delivery (dead-letters on a guess); fix as the rules consumer was.
 - [ ] Rules: v1 has thresholds and the lab's flags only. NEWS2, the KDIGO creatinine rise, haemoglobin falls, lactate trends and the potassium combination are built and tested on the synthetic set; adding them to a rule set is a clinical review.
 

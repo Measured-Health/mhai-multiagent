@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- EMR integration, PR 8a (alert settings and routes; off by default: nothing
+  raises an alert until core's finding consumer, PR 8b). Migration **00029**
+  (after Analysis PR 5's 00028): `alert_settings`, `alert_units`,
+  `alert_levels`, `alert_recipients`, `alerts`, `alert_deliveries` and
+  `user_notification_settings`, with row-level security and column grants;
+  recipients must be active clinicians of the hospital (a trigger); a
+  recipient deactivated, losing `clinician` or taken off the named list has
+  their open alerts moved to the queue with an `alert.requeued` fact
+  (drained to the audit chain); the merge re-points alerts and the
+  exclusion withdraws them (`withdrawn: excluded`); `emr_reject_match()`,
+  `emr_hospital_sources()`, `emr_patient_sources()`, `emr_alert_links()`.
+  New routes (OpenAPI 1.20.0, additive): `GET`/`PATCH
+  /hospital/alert-settings`, `GET /hospital/patient-matches`, `POST
+  …/{id}/confirm` and `/reject` (step-up), `POST /hospital/patient-exclusions`
+  (step-up), `GET /alerts` (with `sources_status`), `GET
+  /alerts/unread-count`, `POST /alerts/{id}/acknowledge` and `/dismiss`,
+  `GET`/`PATCH /me/notification-settings`; error codes `already_handled`
+  and `no_recipients`. Switching a connection on now asks the emr service
+  to poll it at once (`sync_now`). The emr service no longer announces
+  shadow findings. Merges and exclusions retry a deadlock, then answer 503.
 - EMR integration, PR 7 (the alert rules; off by default). Migration
   **00027** (after Gemini's 00024, Analysis PR 4's 00025 and EMR PR 6's 00026): `emr.findings` (one per rule set
   version, rule and observation; historical, shadow, preliminary,
