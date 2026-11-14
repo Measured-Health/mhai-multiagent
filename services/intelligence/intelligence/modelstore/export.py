@@ -10,7 +10,8 @@ into one that promotion accepts, and says what to fix before anything is uploade
 2. it exports a GGUF next to the safetensors with llama.cpp (``convert_hf_to_gguf.py``
    to f16 in a temporary folder, then ``llama-quantize``; ``q8_0`` is written by the
    converter directly), as ``model-<quant>.gguf``;
-3. it runs the checks promotion runs on the folder (``files.check_run``, then
+3. it runs the checks promotion runs on the folder (``files.check_run`` and the store's
+   one-upload cap of 5 GiB per file, then
    ``training.check`` against ``models/approved-datasets.json`` and ``models/licences.json``)
    and prints the files hash for ``--expect-files``.
 
@@ -64,6 +65,10 @@ QUANTS: Mapping[str, str] = {
 }
 _DIRECT = frozenset({"q8_0"})
 CONVERT_TIMEOUT_S = 6 * 3600
+# The largest file the store takes: one S3 PUT (``store.MAX_PUT_BYTES``; multipart is not in
+# phase 0). Kept here so this module stays importable without the store's dependencies.
+MAX_STORE_FILE_BYTES = 5 * 1024**3
+STORE_CAP_DETAIL = "file_too_large_for_store"  # promote.FILE_TOO_LARGE
 
 LLAMA_MISSING = (
     "llama.cpp not found: clone it and build llama-quantize (see docs/models/export-step.md),"
@@ -154,8 +159,20 @@ class Exported:
     base_verified_at_promotion: bool
 
 
+_DETAIL_HINTS: Mapping[tuple[str, str], str] = {
+    ("too_large", STORE_CAP_DETAIL): (
+        "a file is over the 5 GiB one upload to the model store allows: shard the weights"
+        " (save_pretrained(..., max_shard_size='4GB')); if one tensor alone is larger, the"
+        " run cannot be promoted until the store has a conditional multipart upload"
+    ),
+}
+
+
 def fix_for(refusal: Refused) -> str | None:
     """The fixed text telling a trainer what to do about ``refusal``, if there is one."""
+    detail = refusal.detail_code
+    if detail is not None and (refusal.reason, detail) in _DETAIL_HINTS:
+        return _DETAIL_HINTS[(refusal.reason, detail)]
     return _HINTS.get(refusal.reason)
 
 
@@ -291,6 +308,8 @@ def check(
         _registry_path(licences_registry, LICENCES_ENV, "licences.json")
     )
     entries = tuple(files.check_run(run_dir))
+    if any(e.size > MAX_STORE_FILE_BYTES for e in entries):  # as promote.check_files
+        raise Refused("too_large", detail_code=STORE_CAP_DETAIL)
     tm = training.load_run(run_dir)
     checked = training.check(tm, registry, licences, verify_pin=_at_promotion)
     training.check_gguf_run(tm, run_dir)
