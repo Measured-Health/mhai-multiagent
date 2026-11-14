@@ -574,6 +574,20 @@ func init() {
 		Required: []string{"change_id", "via"}})
 	Register("analyst.removed", Schema{Fields: fields("change_id", id, "via", OneOf("app", "cli"),
 		"reason", OneOf("removed", "clinician_removed")), Required: []string{"change_id", "via", "reason"}})
+	// The hospital admin's staff and settings routes (internal/hospital,
+	// migration 00035): the person is the row's entity (user), named at
+	// read time only; payloads are role codes, field names, counts and
+	// flags, never a name, an email or a specialty. The analyst role is
+	// audited by analyst.granted and analyst.removed alone.
+	clinicalRole := OneOf("clinician", "hospital_admin")
+	Register("staff.roles_changed", Schema{Fields: fields("added", List(2, clinicalRole), "removed", List(2, clinicalRole),
+		"self", b), Required: []string{"added", "removed", "self"}})
+	Register("staff.specialty_changed", Schema{})
+	Register("staff.deactivated", Schema{Fields: fields("sessions_revoked", count), Required: []string{"sessions_revoked"}})
+	Register("staff.reactivated", Schema{})
+	Register("hospital_settings.changed", Schema{Fields: fields(
+		"fields", List(4, OneOf("review_overdue_hours", "require_mfa_for_clinicians", "idle_timeout_minutes", "allow_trust_device")),
+		"loosened", b), Required: []string{"fields", "loosened"}})
 
 	// Plan 3: the request-token boundary (internal/account, grant, intel).
 	Register("intelligence.key_rotated", Schema{Fields: fields(

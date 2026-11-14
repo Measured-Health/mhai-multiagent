@@ -88,3 +88,15 @@ func (s *Service) denyAll(ctx context.Context, jtis map[string][]string) error {
 	}
 	return nil
 }
+
+// DenySessions puts sessions another route revoked (session id to its
+// access token ids) on the denylist, so they stop at once rather than when
+// the guard's cache expires: a hospital admin deactivating a member of
+// staff. Without a denylist it fails; the database's revocation stands
+// either way.
+func (s *Service) DenySessions(ctx context.Context, jtis map[string][]string) error {
+	if s == nil || s.Buckets.Denylist == nil {
+		return errors.New("auth: no denylist")
+	}
+	return s.denyAll(ctx, jtis)
+}

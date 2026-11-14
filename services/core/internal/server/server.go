@@ -18,6 +18,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/feedback"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/hospital"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/queries"
@@ -93,6 +94,10 @@ func Register(m *authz.Mux, d Deps) {
 	// not_connected) whether or not EMR is on; nothing raises an alert
 	// until core's finding consumer runs (PR 8b).
 	alerts.Register(m, alerts.Deps{Pool: d.Pool, Log: a.Log, Auth: a, MasterKey: a.MFAKey})
+	// The hospital admin's staff, settings, usage, activity and review
+	// oversight pages (frontend requirements §5); staff writes take a
+	// step-up code, and Analyst goes through migration 00030's functions.
+	hospital.Register(m, hospital.Deps{Pool: d.Pool, Log: a.Log, Auth: a})
 	registerFixtures(m, d)
 }
 
