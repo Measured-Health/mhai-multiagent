@@ -148,12 +148,17 @@ func TestFindingsRLS(t *testing.T) {
 	if err == nil {
 		t.Fatal("a finding on another hospital's observation was written")
 	}
-	// The gateway, core's clinical role, holds nothing on findings.
+	// The gateway, core's clinical role, reads the columns an alert shows
+	// (00029), its hospital only, and writes nothing.
 	err = asRoleIn(ctx, pool, "mhai_gateway", a, func(tx pgx.Tx) error {
 		var n int
-		return tx.QueryRow(ctx, `SELECT count(*) FROM emr.findings`).Scan(&n)
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM emr.findings WHERE hospital_id <> $1`, a).Scan(&n); err != nil || n != 0 {
+			t.Errorf("gateway sees %d of another hospital's findings: %v", n, err)
+		}
+		_, err := tx.Exec(ctx, `UPDATE emr.findings SET status = 'withdrawn'`)
+		return err
 	})
-	requireDenied(t, err, "gateway reading findings")
+	requireDenied(t, err, "gateway updating findings")
 }
 
 // Departure 12: EMR dead letters are jobs rows of the two stages.

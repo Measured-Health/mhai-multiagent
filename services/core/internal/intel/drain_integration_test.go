@@ -451,3 +451,48 @@ func TestDrainerRefusesActionStatusMismatch(t *testing.T) {
 		t.Fatalf("chain verify: ok %v at %d, %v", ok, broken, err)
 	}
 }
+
+// 00029: an alert.requeued fact (written by the database's re-queue, with
+// no question or job) is appended to the chain with its hospital, entity
+// alert, no actor and the alert ids and reason only; one whose payload
+// doesn't fit its schema is appended as payload_refused, so the outbox
+// never stalls and no free text reaches the chain.
+func TestDrainerAppendsAlertFacts(t *testing.T) {
+	hid := seedHospital(t, "active")
+	alert := uuid.New()
+	for _, p := range []string{
+		`{"alert_ids": ["` + alert.String() + `"], "reason": "user_deactivated", "actor_id": "` + uuid.NewString() + `"}`,
+		`{"alert_ids": ["` + alert.String() + `"], "reason": "user_deactivated", "note": "SYNTHETIC-FREE-TEXT"}`,
+	} {
+		if _, err := super.Exec(context.Background(), `INSERT INTO intelligence_audit_outbox (hospital_id, action, entity, payload)
+			VALUES ($1, 'alert.requeued', 'alert', $2::jsonb)`, hid, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	drainAll(t)
+	rows, err := super.Query(context.Background(), `SELECT actor_id IS NULL, entity, payload::text FROM audit_log
+		WHERE hospital_id = $1 AND action = 'alert.requeued' ORDER BY id`, hid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for rows.Next() {
+		var noActor bool
+		var entity, payload string
+		if err := rows.Scan(&noActor, &entity, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if !noActor || entity != "alert" {
+			t.Errorf("actor or entity: %v %s", noActor, entity)
+		}
+		got = append(got, payload)
+	}
+	if len(got) != 2 || !strings.Contains(got[0], alert.String()) || strings.Contains(got[0], "actor_id") ||
+		!strings.Contains(got[1], "payload_refused") || strings.Contains(got[1], "SYNTHETIC-FREE-TEXT") {
+		t.Fatalf("appended %v", got)
+	}
+	var left int
+	if err := super.QueryRow(context.Background(), `SELECT count(*) FROM intelligence_audit_outbox WHERE hospital_id = $1`, hid).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("%d facts left: %v", left, err)
+	}
+}

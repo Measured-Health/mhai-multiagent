@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -172,6 +173,15 @@ func DrainOnce(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) (int, 
 			return 0
 		})
 		for _, o := range rows {
+			if strings.HasPrefix(o.action, "alert.") {
+				// A fact about alerts (00029: a recipient left and their
+				// open alerts moved to the queue), written only by the
+				// owner's definers: no question or job, no actor.
+				if err := audit.Write(ctx, tx, alertEvent(o, log)); err != nil {
+					return errDrain
+				}
+				continue
+			}
 			if !factMatchesParent(o) {
 				// A false statement (query.completed for a job that isn't
 				// completed, a correction fact on a question), or a parent
@@ -321,4 +331,26 @@ func drainEvent(o outboxRow, log *slog.Logger) audit.Event {
 	}
 	e.Payload = payload
 	return e
+}
+
+// alertEvent builds the audit event of an alert fact (alert.requeued):
+// the fact's hospital, entity alert, no actor and no request id; the
+// payload keeps the alert ids and the reason only, and must fit the
+// action's closed schema (audit.CheckActionPayload), or it is replaced by
+// {payload_refused: true}, as a job fact's is.
+func alertEvent(o outboxRow, log *slog.Logger) audit.Event {
+	payload := map[string]any{}
+	if len(o.payload) > 0 {
+		if err := json.Unmarshal(o.payload, &payload); err != nil || payload == nil {
+			payload = map[string]any{}
+		}
+	}
+	for _, k := range identityKeys {
+		delete(payload, k)
+	}
+	if o.action != "alert.requeued" || audit.CheckActionPayload(o.action, payload) != nil {
+		log.Error("intel: outbox alert fact payload refused", "action", o.action)
+		payload = map[string]any{"payload_refused": true}
+	}
+	return audit.Event{HospitalID: o.hospital.String(), Action: o.action, Entity: "alert", Payload: payload}
 }
