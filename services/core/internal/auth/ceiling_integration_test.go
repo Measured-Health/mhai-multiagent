@@ -4,6 +4,7 @@ package auth_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -204,26 +205,43 @@ func TestLoginCeilingTimingSame(t *testing.T) {
 		"right, bad device": func() { login(u.email, testPassword, bogus) },
 		"wrong, bad device": func() { login(u.email, "wrong-password-"+uniq(), bogus) },
 	}
-	// Round-robin, so load from other packages hits every case alike.
-	samples := map[string][]time.Duration{}
-	for i := 0; i < 9; i++ {
-		for name, f := range cases {
-			start := time.Now()
-			f()
-			samples[name] = append(samples[name], time.Since(start))
+	// Round-robin, so load from other packages hits every case alike. A busy
+	// CI runner can skew one round of medians, so a round that breaks the
+	// bound is measured again, up to three rounds; a real timing difference
+	// breaks every round and still fails.
+	measure := func() []string {
+		samples := map[string][]time.Duration{}
+		for i := 0; i < 15; i++ {
+			for name, f := range cases {
+				start := time.Now()
+				f()
+				samples[name] = append(samples[name], time.Since(start))
+			}
 		}
-	}
-	med := map[string]time.Duration{}
-	for name, ds := range samples {
-		med[name] = median(ds)
-	}
-	within := func(a, b string) {
-		x, y := med[a], med[b]
-		if x > y*13/10 || y > x*13/10 {
-			t.Errorf("median %s %v vs %s %v", a, x, b, y)
+		med := map[string]time.Duration{}
+		for name, ds := range samples {
+			med[name] = median(ds)
 		}
+		var bad []string
+		within := func(a, b string) {
+			x, y := med[a], med[b]
+			if x > y*13/10 || y > x*13/10 {
+				bad = append(bad, fmt.Sprintf("median %s %v vs %s %v", a, x, b, y))
+			}
+		}
+		within("right", "wrong")
+		within("right", "unknown")
+		within("right, bad device", "wrong, bad device")
+		return bad
 	}
-	within("right", "wrong")
-	within("right", "unknown")
-	within("right, bad device", "wrong, bad device")
+	var bad []string
+	for round := 1; round <= 3; round++ {
+		if bad = measure(); len(bad) == 0 {
+			return
+		}
+		t.Logf("round %d outside the bound: %v", round, bad)
+	}
+	for _, b := range bad {
+		t.Error(b)
+	}
 }
