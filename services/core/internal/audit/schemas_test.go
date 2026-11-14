@@ -469,3 +469,62 @@ func TestAnalystActionsSchemas(t *testing.T) {
 		}
 	}
 }
+
+// The exclusion purge, retention, legal holds and hospital removal (EMR
+// PR 9): ids, counts and closed codes only; an MRN, a name or a free-text
+// reference is refused.
+func TestAuditSchemasEMRRetention(t *testing.T) {
+	rid, pid := uuid.NewString(), uuid.NewString()
+	counts := func(kv ...any) map[string]any {
+		m := map[string]any{}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i].(string)] = kv[i+1]
+		}
+		return m
+	}
+	removed := counts("via", "cli")
+	for _, k := range audit.HospitalDataRemovedKeys {
+		removed[k] = 0
+	}
+	removed["observations"] = 7
+	good := map[string]map[string]any{
+		"emr.exclusion_purged": counts("request_id", rid, "patient_id", pid, "via", "loop", "observations", 2,
+			"medications", 1, "encounters", 1, "raw_records", 6, "matches", 0, "findings", 3, "alerts", 2),
+		"emr.exclusion_purge_held":     counts("request_id", rid, "patient_id", pid, "via", "route"),
+		"emr.exclusion_purge_released": counts("request_ids", []any{rid}, "count", 1),
+		"emr.retention_swept": counts("raw_payloads", 11, "findings", 0, "observations", 4, "medications", 0, "encounters", 0,
+			"raw_records", 4, "alert_patients", 1, "alerts", 0, "consumed", 0, "patients", 1),
+		"legal_hold.placed":         counts("hold_id", rid, "via", "cli"),
+		"legal_hold.lifted":         counts("hold_id", rid, "via", "cli"),
+		"emr.hospital_data_removed": removed,
+		"emr.patient_excluded": counts("patient_id", pid, "reason", "objection", "via", "cli", "observations", 0,
+			"medications", 0, "encounters", 0, "raw_records", 0, "matches", 0, "findings", 0, "request_id", rid, "held", true),
+	}
+	for action, p := range good {
+		if err := audit.CheckActionPayload(action, p); err != nil {
+			t.Errorf("%s: %v", action, err)
+		}
+		for k, v := range map[string]any{"mrn": "SYN-6837", "display_name": "Synthetic Patient", "reference": "LH-2026-0042"} {
+			bad := maps.Clone(p)
+			bad[k] = v
+			if err := audit.CheckActionPayload(action, bad); !errors.Is(err, audit.ErrSchema) {
+				t.Errorf("%s with %s: %v", action, k, err)
+			}
+		}
+	}
+	for name, c := range map[string]struct {
+		action string
+		p      map[string]any
+	}{
+		"purged without counts":   {"emr.exclusion_purged", counts("request_id", rid, "patient_id", pid, "via", "loop")},
+		"purged by a free via":    {"emr.exclusion_purged", counts("request_id", rid, "patient_id", "Synthetic Patient", "via", "loop")},
+		"hold with a name":        {"legal_hold.placed", counts("hold_id", "Synthetic Person", "via", "cli")},
+		"hold via the platform":   {"legal_hold.lifted", counts("hold_id", rid, "via", "platform")},
+		"released over 500":       {"emr.exclusion_purge_released", counts("request_ids", make([]any, 501), "count", 501)},
+		"removal of a free table": {"emr.hospital_data_removed", counts("via", "cli", "audit_log", 1)},
+	} {
+		if err := audit.CheckActionPayload(c.action, c.p); !errors.Is(err, audit.ErrSchema) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

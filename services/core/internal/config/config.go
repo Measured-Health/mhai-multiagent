@@ -97,6 +97,11 @@ type Config struct {
 	// documents). Off by default: such a finding is recorded as not raised
 	// (null_mrn) until mhai-web shows a missing MRN (EMR design §16.4).
 	EMRAllowNullMRN bool
+	// EMRRetentionSweep (CORE_EMR_RETENTION_SWEEP=true) runs the nightly
+	// EMR retention sweep (EMR design §14.2) in core's maintenance loop,
+	// which runs only with EMREnabled. Off by default: the retention values
+	// wait on the privacy lead (H5). Exclusion purges run either way.
+	EMRRetentionSweep bool
 	// IdempotencyHMACKeyPath is the key the idempotency store hashes the
 	// credential routes' requests under (CORE_IDEMPOTENCY_HMAC_KEY_PATH;
 	// EMR design §6.2), required when EMREnabled.
@@ -277,6 +282,13 @@ func Load() (Config, error) {
 		c.EMRAllowNullMRN = true
 	default:
 		errs = append(errs, errors.New("CORE_EMR_ALLOW_NULL_MRN must be true or false"))
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_EMR_RETENTION_SWEEP"))) {
+	case "", "false":
+	case "true":
+		c.EMRRetentionSweep = true
+	default:
+		errs = append(errs, errors.New("CORE_EMR_RETENTION_SWEEP must be true or false"))
 	}
 
 	if c.CloudProviders, err = ParseCloudProviders(os.Getenv("CORE_CLOUD_PROVIDERS")); err != nil {

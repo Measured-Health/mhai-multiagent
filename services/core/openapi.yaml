@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.20.0"
+  version: "1.21.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1086,12 +1086,18 @@ paths:
         Hospital admins, with a fresh code. Exactly one of `mrn` or
         `patient_id`, and a `reason`. The patient's open alerts are
         withdrawn at once (`withdrawn: excluded`), and their records,
-        findings and matches are purged in the same transaction (this
-        version purges at once, so `purge_by` is the time of the request).
+        findings and matches are purged in the same transaction:
+        `purge_held` is false and `purge_by` is the time of the request.
+        Under a legal hold on the hospital nothing is deleted until the
+        hold is lifted: the patient is excluded and no alert names them,
+        `purge_held` is true and `purge_by` is the request's due time,
+        which the hold suspends (the purge runs within 24 hours of the
+        lift). Since 1.21.0.
         404 when no active patient of the hospital matches; 409 `conflict`
         when the MRN names two (send `patient_id`). Order: the body (422),
         the patient (404, 409), then the code (403). Audited
-        `emr.patient_excluded` (counts) and one `alert.withdrawn` per alert.
+        `emr.patient_excluded` (counts), one `alert.withdrawn` per alert,
+        and `emr.exclusion_purged` (counts) or `emr.exclusion_purge_held`.
         A deadlock against the record feed is retried, then 503
         `not_ready`. 202.
       tags: [alerts]
@@ -1127,6 +1133,9 @@ paths:
                 properties:
                   patient_id: { type: string, format: uuid }
                   purge_by: { type: string, format: date-time }
+                  purge_held:
+                    type: boolean
+                    description: The purge waits for a legal hold to be lifted (since 1.21.0).
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
