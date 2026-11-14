@@ -15,7 +15,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING",
 		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY", "CORE_ALLOW_SINGLE_NODE",
 		"CORE_CLOUD_PROVIDERS", "CORE_EMR_ENABLED", "CORE_EMR_SEAL_PUBLIC_KEY_PATH", "CORE_EMR_CONNECTOR_TYPES",
-		"CORE_IDEMPOTENCY_HMAC_KEY_PATH", "CORE_EMR_ALLOW_NULL_MRN",
+		"CORE_IDEMPOTENCY_HMAC_KEY_PATH", "CORE_EMR_ALLOW_NULL_MRN", "CORE_EMR_RETENTION_SWEEP",
 		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE"} {
 		t.Setenv(k, "")
 	}
@@ -733,6 +733,33 @@ func TestConfigEMRAllowNullMRN(t *testing.T) {
 		}
 		setEnv(t, m)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_EMR_ALLOW_NULL_MRN") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+}
+
+// CORE_EMR_RETENTION_SWEEP is off unless it says true (EMR PR 9: the
+// retention values wait on the privacy lead, H5); anything else stops the
+// service, naming the variable.
+func TestConfigEMRRetentionSweep(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	for raw, want := range map[string]bool{"": false, "false": false, " TRUE ": true, "true": true} {
+		m := map[string]string{"CORE_EMR_RETENTION_SWEEP": raw}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if c, err := Load(); err != nil || c.EMRRetentionSweep != want {
+			t.Errorf("%q: %v %v", raw, c.EMRRetentionSweep, err)
+		}
+	}
+	for _, bad := range []string{"1", "yes", "on"} {
+		m := map[string]string{"CORE_EMR_RETENTION_SWEEP": bad}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_EMR_RETENTION_SWEEP") {
 			t.Errorf("%q: %v", bad, err)
 		}
 	}
