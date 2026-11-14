@@ -11,7 +11,8 @@ All notable changes to this project are documented here. The format follows
 - The hospital admin routes of the clinical app (frontend requirements §5).
   Migration **00035** (additive: `users.staff_version`,
   `hospital_settings.version`, `updated_by`, `updated_at`) and OpenAPI
-  **1.24.0** (1.23.0 is Analysis PR 7's). `GET /hospital/staff`; `PATCH /hospital/staff/{id}` (roles and
+  **1.24.0** (1.23.0 is Analysis PR 7's). `GET /hospital/staff`;
+  `PATCH /hospital/staff/{id}` (roles and
   specialty, with a step-up code; Analyst granted and removed only through
   migration 00030's functions, which closes Analysis plan Task 17);
   `POST /hospital/staff/{id}/deactivate` and `/reactivate` (step-up; a

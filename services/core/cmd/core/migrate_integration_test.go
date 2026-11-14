@@ -20,8 +20,7 @@ func TestMigrateUpCommand(t *testing.T) {
 		t.Fatalf("migrate up: %v", err)
 	}
 	if got := strings.Count(out.String(), "applied"); got != 34 { // 00001-00033, 00035
-		t.Fatalf("want 34 applied migrations, got output:
-%s", out.String())
+		t.Fatalf("want 34 applied migrations, got output:\n%s", out.String())
 	}
 }
 
