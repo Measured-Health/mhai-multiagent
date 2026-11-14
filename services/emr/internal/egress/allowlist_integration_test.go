@@ -176,3 +176,68 @@ func TestAllowListWithin30s(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// Ensure: the scheduler's check before a poll. A connection switched on
+// after the last write is listed by a write made at once, and Ensure
+// returns only once the proxy has had time to read it; a second call
+// doesn't wait again. Ensure adds nothing to the list: a connection that
+// is off, one on a port the proxy never opens, or an id under another
+// hospital is not listed. Without a database the list isn't ready (an
+// error), never "listed".
+func TestEnsureListsSwitchedOnAtOnce(t *testing.T) {
+	_, pool := testpg.Migrated(t)
+	ctx := context.Background()
+	ha, hb := seedHospital(t, pool), seedHospital(t, pool)
+	a := seedConn(t, pool, ha, "fhir_r4", "https://fhir.hospital-a.example/r4", []string{"https://fhir.hospital-a.example:443"},
+		false, nil)
+	port := seedConn(t, pool, ha, "fhir_r4", "https://fhir.hospital-a.example:8443/r4", []string{"https://fhir.hospital-a.example:8443"},
+		true, nil)
+	off := seedConn(t, pool, hb, "fhir_r4", "https://fhir.hospital-b.example/r4", []string{"https://fhir.hospital-b.example:443"},
+		false, nil)
+	dir := t.TempDir()
+	w := &Writer{Pool: pool, Dir: dir}
+	if err := w.WriteOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if l := readList(t, dir); l == nil || len(l.Conns) != 0 {
+		t.Fatalf("before the switch-on: %v", l)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE emr_connections SET enabled = true WHERE id = $1`, a); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	listed, err := w.Ensure(ctx, ha, a)
+	if err != nil || !listed {
+		t.Fatalf("Ensure: %v %v", listed, err)
+	}
+	if took := time.Since(start); took < ReloadWait-100*time.Millisecond {
+		t.Errorf("returned after %s: before the proxy's reload", took)
+	}
+	if _, ok := readList(t, dir).Conns[a]; !ok {
+		t.Fatal("not in the file when Ensure returned")
+	}
+	start = time.Now()
+	if listed, err := w.Ensure(ctx, ha, a); err != nil || !listed {
+		t.Fatalf("second Ensure: %v %v", listed, err)
+	}
+	if took := time.Since(start); took > 500*time.Millisecond {
+		t.Errorf("second Ensure waited %s", took)
+	}
+	for _, c := range []struct {
+		name     string
+		hospital uuid.UUID
+		id       uuid.UUID
+	}{{"off", hb, off}, {"port 8443", ha, port}, {"another hospital's id", hb, a}} {
+		if listed, err := w.Ensure(ctx, c.hospital, c.id); err != nil || listed {
+			t.Errorf("%s: listed %v, err %v; want false, nil", c.name, listed, err)
+		}
+	}
+	l := readList(t, dir)
+	if len(l.Conns) != 1 {
+		t.Errorf("listed %v, want A only", l.Conns)
+	}
+	pool.Close()
+	if listed, err := w.Ensure(ctx, hb, off); err == nil || listed {
+		t.Errorf("without a database: listed %v, err %v; want an error", listed, err)
+	}
+}
