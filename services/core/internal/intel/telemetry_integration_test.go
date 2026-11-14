@@ -81,14 +81,14 @@ func TestRequestSpanAndHeaders(t *testing.T) {
 	}
 	got := map[string]string{}
 	for _, kv := range client.Attributes {
-		got[string(kv.Key)] = kv.Value.Emit()
+		got[string(kv.Key)] = kv.Value.String()
 	}
 	if got["operation"] != "echo.ping" || got["hospital_id"] != hid.String() || got["request_id"] != caller.Rid || got["status"] != "ok" {
 		t.Fatalf("attributes: %v", got)
 	}
 	for _, s := range exp.GetSpans() {
 		for _, kv := range s.Attributes {
-			if strings.Contains(kv.Value.Emit(), spanMarker) {
+			if strings.Contains(kv.Value.String(), spanMarker) {
 				t.Fatalf("marker in span attribute %s", kv.Key)
 			}
 		}
@@ -140,7 +140,7 @@ func TestRequestSpanRecordsRefusalCode(t *testing.T) {
 	}
 	got := map[string]string{}
 	for _, kv := range spans[0].Attributes {
-		got[string(kv.Key)] = kv.Value.Emit()
+		got[string(kv.Key)] = kv.Value.String()
 	}
 	if got["status"] != "error" || got["error_code"] != "forbidden" {
 		t.Fatalf("attributes: %v", got)
@@ -191,7 +191,7 @@ func TestPublishJobCarriesTraceparent(t *testing.T) {
 	}
 	vals := map[string]string{}
 	for _, kv := range prod.Attributes {
-		vals[string(kv.Key)] = kv.Value.Emit()
+		vals[string(kv.Key)] = kv.Value.String()
 	}
 	if vals["job_id"] != job.String() || vals["job_type"] != "run_query" {
 		t.Fatalf("attributes: %v", vals)
