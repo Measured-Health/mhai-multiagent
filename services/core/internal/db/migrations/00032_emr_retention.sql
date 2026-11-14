@@ -112,6 +112,46 @@ $$;
 ALTER FUNCTION mhai_hospital_on_hold(uuid) OWNER TO mhai_migrate;
 REVOKE ALL ON FUNCTION mhai_hospital_on_hold(uuid) FROM PUBLIC;
 
+-- A hold and a deletion never interleave: every deleting definer takes the
+-- hospital's hold lock shared before it reads the hold (emr_hold_check),
+-- and placing or lifting a hold takes it exclusive (the trigger below). A
+-- hold placed while a purge runs waits for the purge to commit; a purge
+-- that starts after a hold was placed waits for it, then sees it.
+-- +goose StatementBegin
+CREATE FUNCTION emr_hold_check(hid uuid) RETURNS boolean
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+BEGIN
+    IF hid IS NULL THEN
+        RETURN true;
+    END IF;
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended('emr-hold:' || hid::text, 0));
+    -- A new statement after the lock: under READ COMMITTED it sees a hold
+    -- committed by the lock's last holder.
+    RETURN public.mhai_hospital_on_hold(hid);
+END
+$$;
+-- +goose StatementEnd
+ALTER FUNCTION emr_hold_check(uuid) OWNER TO mhai_migrate;
+REVOKE ALL ON FUNCTION emr_hold_check(uuid) FROM PUBLIC;
+
+-- +goose StatementBegin
+CREATE FUNCTION mhai_legal_hold_lock() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('emr-hold:' || NEW.hospital_id::text, 0));
+    RETURN NEW;
+END
+$$;
+-- +goose StatementEnd
+ALTER FUNCTION mhai_legal_hold_lock() OWNER TO mhai_migrate;
+REVOKE ALL ON FUNCTION mhai_legal_hold_lock() FROM PUBLIC;
+CREATE TRIGGER legal_holds_lock BEFORE INSERT OR UPDATE ON legal_holds
+    FOR EACH ROW EXECUTE FUNCTION mhai_legal_hold_lock();
+
 ------------------------------------------------------------------------
 -- Purge requests.
 ------------------------------------------------------------------------
@@ -146,6 +186,7 @@ CREATE TABLE emr.purge_held_alerts (
     patient_id   uuid,
     finding_id   uuid,
     dismiss_note text,
+    amended      jsonb,
     PRIMARY KEY (request_id, alert_id),
     FOREIGN KEY (hospital_id, request_id) REFERENCES emr.purge_requests (hospital_id, id),
     FOREIGN KEY (hospital_id, alert_id) REFERENCES public.alerts (hospital_id, id) ON DELETE CASCADE
@@ -248,13 +289,13 @@ DECLARE
     n_a   bigint;
     n_h   bigint;
 BEGIN
-    IF hid IS NULL OR hid IS DISTINCT FROM public.mhai_current_hospital() OR public.mhai_hospital_on_hold(hid) THEN
+    IF hid IS NULL OR hid IS DISTINCT FROM public.mhai_current_hospital() OR public.emr_hold_check(hid) THEN
         RAISE EXCEPTION USING ERRCODE = 'object_not_in_prerequisite_state', MESSAGE = 'emr purge: refused';
     END IF;
 
     -- Alerts keep codes and times; they lose the patient, the finding and
     -- the note (and a held copy of them goes too).
-    UPDATE public.alerts a SET patient_id = NULL, finding_id = NULL, dismiss_note = NULL, updated_at = now()
+    UPDATE public.alerts a SET patient_id = NULL, finding_id = NULL, dismiss_note = NULL, amended = NULL, updated_at = now()
     WHERE a.hospital_id = hid AND a.patient_id = ANY (ids);
     GET DIAGNOSTICS n_a = ROW_COUNT;
     DELETE FROM emr.purge_held_alerts h WHERE h.hospital_id = hid AND h.request_id = req;
@@ -276,7 +317,9 @@ BEGIN
     SELECT coalesce(array_agg(r.raw_id), '{}') INTO raws FROM (
         SELECT o.raw_id FROM emr.observations o WHERE o.hospital_id = hid AND o.patient_id = ANY (ids)
         UNION ALL SELECT d.raw_id FROM emr.medications d WHERE d.hospital_id = hid AND d.patient_id = ANY (ids)
-        UNION ALL SELECT e.raw_id FROM emr.encounters e WHERE e.hospital_id = hid AND e.patient_id = ANY (ids)) r;
+        UNION ALL SELECT e.raw_id FROM emr.encounters e WHERE e.hospital_id = hid AND e.patient_id = ANY (ids)
+        -- The patient's own record, linked or not (a document patient).
+        UNION ALL SELECT p.raw_id FROM emr.patients p WHERE p.hospital_id = hid AND p.id = ANY (ids) AND p.raw_id IS NOT NULL) r;
 
     DELETE FROM emr.observations o WHERE o.hospital_id = hid AND o.patient_id = ANY (ids);
     GET DIAGNOSTICS n_o = ROW_COUNT;
@@ -325,11 +368,11 @@ CREATE FUNCTION emr_purge_hold_alerts(hid uuid, ids uuid[], req uuid) RETURNS vo
     SET search_path = pg_catalog, pg_temp
     AS $$
 BEGIN
-    INSERT INTO emr.purge_held_alerts (request_id, hospital_id, alert_id, patient_id, finding_id, dismiss_note)
-    SELECT req, hid, a.id, a.patient_id, a.finding_id, a.dismiss_note FROM public.alerts a
+    INSERT INTO emr.purge_held_alerts (request_id, hospital_id, alert_id, patient_id, finding_id, dismiss_note, amended)
+    SELECT req, hid, a.id, a.patient_id, a.finding_id, a.dismiss_note, a.amended FROM public.alerts a
     WHERE a.hospital_id = hid AND a.patient_id = ANY (ids)
     ON CONFLICT (request_id, alert_id) DO NOTHING;
-    UPDATE public.alerts a SET patient_id = NULL, finding_id = NULL, dismiss_note = NULL, updated_at = now()
+    UPDATE public.alerts a SET patient_id = NULL, finding_id = NULL, dismiss_note = NULL, amended = NULL, updated_at = now()
     WHERE a.hospital_id = hid AND a.patient_id = ANY (ids);
 END
 $$;
@@ -405,7 +448,7 @@ BEGIN
         RETURNING q.id, q.due_at INTO req, due;
     END IF;
 
-    IF public.mhai_hospital_on_hold(hid) THEN
+    IF public.emr_hold_check(hid) THEN
         UPDATE emr.purge_requests r SET state = 'held', held_since = coalesce(r.held_since, now())
         WHERE r.hospital_id = hid AND r.id = req;
         PERFORM public.emr_purge_hold_alerts(hid, ids, req);
@@ -453,7 +496,7 @@ DECLARE
     hid uuid := public.mhai_current_hospital();
     res uuid[];
 BEGIN
-    IF hid IS NULL OR public.mhai_hospital_on_hold(hid) THEN
+    IF hid IS NULL OR public.emr_hold_check(hid) THEN
         RETURN '{}';
     END IF;
     WITH r AS (
@@ -511,7 +554,7 @@ BEGIN
         RETURN jsonb_build_object('state', r.state, 'patient_id', r.patient_id);
     END IF;
     ids := public.emr_purge_ids(hid, r.patient_id);
-    IF public.mhai_hospital_on_hold(hid) THEN
+    IF public.emr_hold_check(hid) THEN
         UPDATE emr.purge_requests x SET state = 'held', held_since = now() WHERE x.hospital_id = hid AND x.id = rid;
         PERFORM public.emr_purge_hold_alerts(hid, ids, rid);
         RETURN jsonb_build_object('state', 'held', 'patient_id', r.patient_id);
@@ -552,6 +595,7 @@ DECLARE
     lim   integer := least(greatest(coalesce(cap, 0), 1), 100000);
     raws  uuid[];
     pids  uuid[];
+    n     bigint;
     n_pay bigint;
     n_f   bigint;
     n_o   bigint;
@@ -566,7 +610,7 @@ BEGIN
     IF hid IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = 'no_data_found', MESSAGE = 'emr_retention_sweep: no hospital';
     END IF;
-    IF public.mhai_hospital_on_hold(hid) THEN
+    IF public.emr_hold_check(hid) THEN
         RETURN jsonb_build_object('held', true);
     END IF;
 
@@ -627,22 +671,29 @@ BEGIN
     -- Raw records: those behind the rows above, and any other older than
     -- 13 months that no canonical row stands on.
     DELETE FROM emr.raw_records r
-    WHERE r.hospital_id = hid
-      AND r.id IN (SELECT x.id FROM emr.raw_records x
-                   WHERE x.hospital_id = hid AND (x.id = ANY (raws) OR x.received_at < now() - interval '13 months')
-                   LIMIT lim + cardinality(raws))
+    WHERE r.hospital_id = hid AND r.id = ANY (raws)
       AND NOT EXISTS (SELECT 1 FROM emr.observations o WHERE o.hospital_id = hid AND o.raw_id = r.id)
       AND NOT EXISTS (SELECT 1 FROM emr.medications d WHERE d.hospital_id = hid AND d.raw_id = r.id)
       AND NOT EXISTS (SELECT 1 FROM emr.encounters e WHERE e.hospital_id = hid AND e.raw_id = r.id);
     GET DIAGNOSTICS n_r = ROW_COUNT;
+    DELETE FROM emr.raw_records r
+    WHERE r.hospital_id = hid
+      AND r.id IN (SELECT x.id FROM emr.raw_records x
+                   WHERE x.hospital_id = hid AND x.received_at < now() - interval '13 months'
+                     AND NOT EXISTS (SELECT 1 FROM emr.observations o WHERE o.hospital_id = hid AND o.raw_id = x.id)
+                     AND NOT EXISTS (SELECT 1 FROM emr.medications d WHERE d.hospital_id = hid AND d.raw_id = x.id)
+                     AND NOT EXISTS (SELECT 1 FROM emr.encounters e WHERE e.hospital_id = hid AND e.raw_id = x.id)
+                   ORDER BY x.received_at LIMIT lim);
+    GET DIAGNOSTICS n = ROW_COUNT;
+    n_r := n_r + n;
 
     -- Alerts: the patient, the finding and the note go after 13 months;
     -- the alert, with its deliveries, after 24.
-    UPDATE public.alerts a SET patient_id = NULL, finding_id = NULL, dismiss_note = NULL, updated_at = now()
+    UPDATE public.alerts a SET patient_id = NULL, finding_id = NULL, dismiss_note = NULL, amended = NULL, updated_at = now()
     WHERE a.hospital_id = hid AND a.id IN (
         SELECT x.id FROM public.alerts x
         WHERE x.hospital_id = hid AND x.created_at < now() - interval '13 months'
-          AND (x.patient_id IS NOT NULL OR x.finding_id IS NOT NULL OR x.dismiss_note IS NOT NULL)
+          AND (x.patient_id IS NOT NULL OR x.finding_id IS NOT NULL OR x.dismiss_note IS NOT NULL OR x.amended IS NOT NULL)
         LIMIT lim);
     GET DIAGNOSTICS n_ap = ROW_COUNT;
     DELETE FROM public.alerts a
@@ -695,7 +746,7 @@ BEGIN
     RETURN jsonb_build_object('raw_payloads', n_pay, 'findings', n_f, 'observations', n_o, 'medications', n_m,
                               'encounters', n_e, 'raw_records', n_r, 'alert_patients', n_ap, 'alerts', n_a,
                               'consumed', n_c, 'patients', n_p,
-                              'more', greatest(n_pay, n_f, n_o, n_m, n_e, n_ap, n_a, n_c, n_p) >= lim);
+                              'more', greatest(n_pay, n_f, n_o, n_m, n_e, n, n_ap, n_a, n_c, n_p) >= lim);
 END
 $$;
 -- +goose StatementEnd
@@ -750,7 +801,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = 'object_not_in_prerequisite_state',
             MESSAGE = 'emr_remove_hospital_data: the hospital is not removal_scheduled';
     END IF;
-    IF public.mhai_hospital_on_hold(hid) THEN
+    IF public.emr_hold_check(hid) THEN
         RAISE EXCEPTION USING ERRCODE = 'object_not_in_prerequisite_state',
             MESSAGE = 'emr_remove_hospital_data: the hospital is on legal hold';
     END IF;
@@ -785,9 +836,23 @@ GRANT EXECUTE ON FUNCTION emr_remove_hospital_data(uuid) TO mhai_provision;
 ------------------------------------------------------------------------
 -- The operator's exclusion (mhai_emr_admin).
 ------------------------------------------------------------------------
-GRANT USAGE ON SCHEMA emr TO mhai_emr_admin;
-GRANT SELECT (id, hospital_id, mrn, status) ON emr.patients TO mhai_emr_admin;
-CREATE POLICY admin_read ON emr.patients FOR SELECT TO mhai_emr_admin USING (hospital_id = mhai_current_hospital());
+-- The operator finds a patient by MRN through a definer that answers at
+-- most two ids of the hospital set (two: ambiguous), never by reading the
+-- MRN column itself.
+-- +goose StatementBegin
+CREATE FUNCTION emr_patients_by_mrn(p_mrn text) RETURNS SETOF uuid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+    SELECT p.id FROM emr.patients p
+    WHERE p.hospital_id = public.mhai_current_hospital() AND p.mrn = p_mrn AND p.status = 'active'
+      AND p_mrn IS NOT NULL AND char_length(p_mrn) BETWEEN 1 AND 64
+    ORDER BY p.id LIMIT 2
+$$;
+-- +goose StatementEnd
+ALTER FUNCTION emr_patients_by_mrn(text) OWNER TO mhai_migrate;
+REVOKE ALL ON FUNCTION emr_patients_by_mrn(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION emr_patients_by_mrn(text) TO mhai_emr_admin;
 GRANT SELECT (id, short_code) ON hospitals TO mhai_emr_admin;
 CREATE POLICY emr_admin_read ON hospitals FOR SELECT TO mhai_emr_admin USING (true);
 
@@ -811,6 +876,19 @@ CREATE POLICY provision_emr_append ON audit_log FOR INSERT TO mhai_provision
 
 -- +goose Down
 
+-- A purge still owed (pending or held) would be lost with its table:
+-- refused, so the operator settles it first.
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM emr.purge_requests WHERE state <> 'done') THEN
+        RAISE EXCEPTION USING ERRCODE = 'object_not_in_prerequisite_state',
+            MESSAGE = '00032 down: purge requests are pending or held; purge them first';
+    END IF;
+END
+$$;
+-- +goose StatementEnd
+
 DROP POLICY provision_emr_append ON audit_log;
 DROP POLICY emr_admin_append ON audit_log;
 DROP POLICY emr_maint_append ON audit_log;
@@ -820,9 +898,7 @@ REVOKE INSERT ON audit_log FROM mhai_emr_maint, mhai_emr_admin;
 
 DROP POLICY emr_admin_read ON hospitals;
 REVOKE SELECT (id, short_code) ON hospitals FROM mhai_emr_admin;
-DROP POLICY admin_read ON emr.patients;
-REVOKE SELECT (id, hospital_id, mrn, status) ON emr.patients FROM mhai_emr_admin;
-REVOKE USAGE ON SCHEMA emr FROM mhai_emr_admin;
+DROP FUNCTION emr_patients_by_mrn(text);
 
 DROP FUNCTION emr_remove_hospital_data(uuid);
 DROP FUNCTION emr_retention_sweep(integer);
@@ -944,19 +1020,12 @@ END
 $$;
 -- +goose StatementEnd
 
--- The tables take their policies, indexes and grants with them. A held
--- alert's patient columns go back to the alert first.
--- (FORCE holds the owner too, and the patient check refuses an excluded
--- patient, so both are lifted for the update and put back.)
-ALTER TABLE alerts NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE emr.purge_held_alerts NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE alerts DISABLE TRIGGER alerts_patient_check;
-UPDATE alerts a SET patient_id = h.patient_id, finding_id = h.finding_id, dismiss_note = h.dismiss_note
-FROM emr.purge_held_alerts h WHERE h.alert_id = a.id AND h.hospital_id = a.hospital_id AND a.patient_id IS NULL;
-ALTER TABLE alerts ENABLE TRIGGER alerts_patient_check;
-ALTER TABLE alerts FORCE ROW LEVEL SECURITY;
+-- The tables take their policies, indexes and grants with them.
 DROP TABLE emr.purge_held_alerts;
 DROP TABLE emr.purge_requests;
+DROP TRIGGER legal_holds_lock ON legal_holds;
+DROP FUNCTION mhai_legal_hold_lock();
+DROP FUNCTION emr_hold_check(uuid);
 DROP FUNCTION mhai_hospital_on_hold(uuid);
 DROP TABLE legal_holds;
 

@@ -117,7 +117,8 @@ func (r retention) alert(t *testing.T, pool *pgxpool.Pool, p, f uuid.UUID, rule,
 	}
 	if by != nil {
 		if _, err := pool.Exec(ctx, `UPDATE alerts SET status = 'dismissed', handled_by = $2, handled_at = now(),
-			dismiss_reason = 'other', dismiss_note = 'Synthetic note 6.8371' WHERE id = $1`, id, *by); err != nil {
+			dismiss_reason = 'other', dismiss_note = 'Synthetic note 6.8371',
+			amended = '{"previous_value": "6.8371"}' WHERE id = $1`, id, *by); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -201,12 +202,12 @@ func requirePurged(t *testing.T, pool *pgxpool.Pool, h, p uuid.UUID, alerts ...u
 	}
 	for _, a := range alerts {
 		var pid, fid *uuid.UUID
-		var note *string
-		if err := pool.QueryRow(context.Background(), `SELECT patient_id, finding_id, dismiss_note FROM alerts WHERE id = $1`, a).
-			Scan(&pid, &fid, &note); err != nil {
+		var note, amended *string
+		if err := pool.QueryRow(context.Background(), `SELECT patient_id, finding_id, dismiss_note, amended::text FROM alerts WHERE id = $1`, a).
+			Scan(&pid, &fid, &note, &amended); err != nil {
 			t.Fatalf("alert %s: %v (the alert stays for the counts)", a, err)
 		}
-		if pid != nil || fid != nil || note != nil {
+		if pid != nil || fid != nil || note != nil || amended != nil {
 			t.Errorf("alert %s keeps patient %v finding %v note %v", a, pid, fid, note)
 		}
 	}
@@ -710,6 +711,8 @@ func TestRetentionDefiners(t *testing.T) {
 	ctx := context.Background()
 	want := map[string][]string{
 		"mhai_hospital_on_hold":    {},
+		"emr_hold_check":           {},
+		"mhai_legal_hold_lock":     {},
 		"emr_purge_ids":            {},
 		"emr_purge_lock":           {},
 		"emr_purge_patient_data":   {},
@@ -722,6 +725,7 @@ func TestRetentionDefiners(t *testing.T) {
 		"emr_held_overdue":         {"mhai_emr_maint"},
 		"emr_retention_sweep":      {"mhai_emr_maint"},
 		"emr_remove_hospital_data": {"mhai_provision"},
+		"emr_patients_by_mrn":      {"mhai_emr_admin"},
 	}
 	for name, grantees := range want {
 		var owner string
@@ -797,15 +801,28 @@ func TestMigration00032DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	// A held exclusion: the down gives the alert its patient back.
+	// A held exclusion: the down is refused while its purge is owed.
 	r := newRetention(t, pool, "DU")
 	p := r.patient(t, pool, "p-du")
 	ob := r.obs(t, pool, p, "p-du", "1 day")
 	f := seedFinding(t, pool, r.h, p, ob, "du:"+uuid.NewString())
-	a := r.alert(t, pool, p, f, "r-du", "1 day", nil)
-	placeHold(t, pool, r.h)
-	if _, err := excludeAs(ctx, pool, "mhai_gateway", r.h, p); err != nil {
+	r.alert(t, pool, p, f, "r-du", "1 day", nil)
+	hold := placeHold(t, pool, r.h)
+	x, err := excludeAs(ctx, pool, "mhai_gateway", r.h, p)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err := db.MigrateDownTo(ctx, pg.URL, 31); err == nil {
+		t.Fatal("down with a purge owed")
+	}
+	liftHold(t, pool, hold)
+	var released []uuid.UUID
+	var res json.RawMessage
+	if err := maint(ctx, pool, r.h, `SELECT emr_release_holds()`, &released); err != nil {
+		t.Fatal(err)
+	}
+	if err := maint(ctx, pool, r.h, `SELECT emr_purge_patient($1)`, &res, x.request); err != nil || !jsonHas(res, "state", "done") {
+		t.Fatalf("purge: %s %v", res, err)
 	}
 	if err := db.MigrateDownTo(ctx, pg.URL, 31); err != nil {
 		t.Fatalf("down to 31: %v", err)
@@ -813,9 +830,9 @@ func TestMigration00032DownUp(t *testing.T) {
 	var left int
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM pg_class WHERE relname IN ('legal_holds', 'purge_requests',
 			'purge_held_alerts', 'raw_records_payload_age', 'alerts_finding', 'findings_age'))
-		+ (SELECT count(*) FROM pg_proc WHERE proname IN ('mhai_hospital_on_hold', 'emr_purge_ids', 'emr_purge_lock',
+		+ (SELECT count(*) FROM pg_proc WHERE proname IN ('mhai_hospital_on_hold', 'emr_hold_check', 'mhai_legal_hold_lock', 'emr_purge_ids', 'emr_purge_lock',
 			'emr_purge_patient_data', 'emr_purge_hold_alerts', 'emr_maint_hospitals', 'emr_release_holds', 'emr_pending_purges',
-			'emr_purge_patient', 'emr_held_overdue', 'emr_retention_sweep', 'emr_remove_hospital_data'))
+			'emr_purge_patient', 'emr_held_overdue', 'emr_retention_sweep', 'emr_remove_hospital_data', 'emr_patients_by_mrn'))
 		+ (SELECT count(*) FROM pg_policy WHERE polname IN ('owner_maint', 'emr_maint_append', 'emr_admin_append',
 			'provision_emr_append', 'emr_admin_read', 'admin_read'))
 		+ (SELECT count(*) FROM pg_proc p WHERE p.proname = 'emr_exclude_patient' AND 'request_id' = ANY (p.proargnames))`).
@@ -825,10 +842,87 @@ func TestMigration00032DownUp(t *testing.T) {
 	if left != 0 {
 		t.Fatalf("after down: %d objects left", left)
 	}
-	if n := countWhere(t, pool, `SELECT count(*) FROM alerts WHERE id = $1 AND patient_id = $2`, a, p); n != 1 {
-		t.Error("the down lost a held alert's patient")
-	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)
+	}
+}
+
+// A hold and a purge never interleave: a hold placed while an exclusion's
+// purge is in flight waits for it to commit; an exclusion that starts
+// while a hold is being placed waits, then sees the hold and deletes
+// nothing.
+func TestHoldAndPurgeNeverInterleave(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	begin := func(role string, h uuid.UUID) pgx.Tx {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range []string{`SET LOCAL ROLE ` + role, `SELECT set_config('mhai.hospital_id', '` + h.String() + `', true)`} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return tx
+	}
+
+	// The purge first: the hold waits for it.
+	r := newRetention(t, pool, "IA")
+	p := r.patient(t, pool, "p-ia")
+	r.obs(t, pool, p, "p-ia", "1 day")
+	purge := begin("mhai_gateway", r.h)
+	var held bool
+	if err := purge.QueryRow(ctx, `SELECT held FROM emr_exclude_patient($1, 'objection')`, p).Scan(&held); err != nil || held {
+		t.Fatalf("purge: held %v %v", held, err)
+	}
+	placed := make(chan error, 1)
+	go func() {
+		_, err := pool.Exec(ctx, `INSERT INTO legal_holds (hospital_id, reference) VALUES ($1, 'LH-2026-0042')`, r.h)
+		placed <- err
+	}()
+	select {
+	case err := <-placed:
+		t.Fatalf("the hold didn't wait for the purge in flight: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := purge.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-placed; err != nil {
+		t.Fatal(err)
+	}
+
+	// The hold first: the exclusion waits, then defers its purge.
+	r2 := newRetention(t, pool, "IB")
+	p2 := r2.patient(t, pool, "p-ib")
+	ob := r2.obs(t, pool, p2, "p-ib", "1 day")
+	hold := begin("mhai_provision", r2.h)
+	if _, err := hold.Exec(ctx, `INSERT INTO legal_holds (hospital_id, reference) VALUES ($1, 'LH-2026-0043')`, r2.h); err != nil {
+		t.Fatal(err)
+	}
+	type res struct {
+		x   exclusion
+		err error
+	}
+	done := make(chan res, 1)
+	go func() {
+		x, err := excludeAs(ctx, pool, "mhai_gateway", r2.h, p2)
+		done <- res{x, err}
+	}()
+	select {
+	case got := <-done:
+		t.Fatalf("the exclusion didn't wait for the hold being placed: %+v", got)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := hold.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := <-done
+	if got.err != nil || !got.x.held {
+		t.Fatalf("exclusion after the hold: %+v", got)
+	}
+	if n := countWhere(t, pool, `SELECT count(*) FROM emr.observations WHERE id = $1`, ob); n != 1 {
+		t.Fatal("deleted under the hold")
 	}
 }

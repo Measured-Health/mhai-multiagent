@@ -174,12 +174,12 @@ func emrExclude(ctx context.Context, args []string, url string, stdin io.Reader,
 				return errExcludeWrite
 			}
 			var rows pgx.Rows
+			// The login never reads an MRN column: a definer answers at most
+			// two ids of the hospital set.
 			if a.mrnStdin {
-				rows, err = tx.Query(ctx, `SELECT id FROM emr.patients WHERE hospital_id = $1 AND mrn = $2 AND status = 'active'
-					ORDER BY id LIMIT 2`, hid, mrn)
+				rows, err = tx.Query(ctx, `SELECT id FROM emr_patients_by_mrn($1) id`, mrn)
 			} else {
-				rows, err = tx.Query(ctx, `SELECT id FROM emr.patients WHERE hospital_id = $1 AND id = $2 AND status = 'active'`,
-					hid, a.patient)
+				rows, err = tx.Query(ctx, `SELECT $1::uuid WHERE emr_patient_in_hospital($1)`, a.patient)
 			}
 			if err != nil {
 				return errExcludeWrite

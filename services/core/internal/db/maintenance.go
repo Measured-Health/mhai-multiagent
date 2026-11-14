@@ -66,8 +66,8 @@ var testPasswordSQL func(string) string
 // mhai_app (the core service), mhai_provision (the seed CLI) and
 // mhai_worker_app (the pipeline, 00008_intelligence_worker.sql),
 // mhai_emr_app (the emr service, from the EMR connections migration) and
-// mhai_emr_admin (the operator's EMR exclusion CLI, 00032). The login is
-// NOINHERIT: it holds nothing until SET ROLE.
+// mhai_emr_admin (the operator's EMR exclusion CLI, 00032). Each login is
+// a member of exactly one of them.
 var loginRoles = map[string]bool{"mhai_app": true, "mhai_provision": true, "mhai_worker_app": true, "mhai_emr_app": true,
 	"mhai_emr_admin": true}
 

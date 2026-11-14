@@ -89,6 +89,7 @@ Gates before live use (design §17.6; all of them):
 - [ ] Hold release and purge run in the loop, which runs only with `CORE_EMR_ENABLED`: a held purge of a hospital whose EMR was switched off waits until it is on again. Revisit if EMR is ever switched off with holds open.
 - [ ] Backups: a restore must re-apply exclusions and deletions made since the backup before the data is used (design §10.6, §14.2). An ops runbook item, not code.
 - [ ] `/hospital/usage` (not in the EMR plan) serves `alerts.UsageBlock`.
+- [ ] Security review residuals (plan departure 55): place and lift legal holds only through definers that write the audit row (revoke the provisioning role's direct writes); record an operator id on `core emr exclude` rows (as `mhai.operator_id` for the analyst CLI); decide whether `mhai_emr_admin` keeps `emr_merge_patients()` and `emr_reject_match()`; consider a database-side retention switch.
 
 ## EMR: follow-ups from PR 8b (14 Nov)
 
