@@ -463,8 +463,32 @@ func init() {
 		"consumed", count, "patients", count),
 		Required: []string{"raw_payloads", "findings", "observations", "medications", "encounters", "raw_records",
 			"alert_patients", "alerts", "consumed", "patients"}})
-	Register("legal_hold.placed", Schema{Fields: fields("hold_id", id, "via", OneOf("cli")), Required: []string{"hold_id", "via"}})
-	Register("legal_hold.lifted", Schema{Fields: fields("hold_id", id, "via", OneOf("cli")), Required: []string{"hold_id", "via"}})
+	// Legal holds: the CLI's (00032: the hold and via cli) and the platform
+	// app's (00037: the hold, its hospital and a reason code or the lift
+	// request's id, no via; the row has no hospital, as every platform
+	// action). Never a name, a note or a reference.
+	holdReason := OneOf("court_case", "regulator", "complaint", "investigation", "other")
+	Register("legal_hold.placed", Schema{Fields: fields("hold_id", id, "via", OneOf("cli"), "hospital_id", id, "reason", holdReason),
+		Shapes: []Shape{{Keys: []string{"hold_id", "via"}, Required: []string{"hold_id", "via"}},
+			{Keys: []string{"hold_id", "hospital_id", "reason"}, Required: []string{"hold_id", "hospital_id", "reason"}}}})
+	Register("legal_hold.lifted", Schema{Fields: fields("hold_id", id, "via", OneOf("cli"), "hospital_id", id, "lift_id", id),
+		Shapes: []Shape{{Keys: []string{"hold_id", "via"}, Required: []string{"hold_id", "via"}},
+			{Keys: []string{"hold_id", "hospital_id", "lift_id"}, Required: []string{"hold_id", "hospital_id", "lift_id"}}}})
+	Register("legal_hold.lift_requested", Schema{Fields: fields("hold_id", id, "hospital_id", id, "lift_id", id,
+		"reason", OneOf("case_closed", "withdrawn", "mistake", "other")),
+		Required: []string{"hold_id", "hospital_id", "lift_id", "reason"}})
+	Register("legal_hold.lift_cancelled", Schema{Fields: fields("hold_id", id, "hospital_id", id, "lift_id", id),
+		Required: []string{"hold_id", "hospital_id", "lift_id"}})
+	// The platform team and the analytics e-mail setting (00037): ids and
+	// codes only, never a name or an email.
+	teamRole := OneOf("platform_admin", "auditor")
+	Register("platform.team_role_changed", Schema{Fields: fields("user_id", id, "role", teamRole, "previous", teamRole),
+		Required: []string{"user_id", "role", "previous"}})
+	Register("platform.team_member_removed", Schema{Fields: fields("user_id", id, "role", teamRole),
+		Required: []string{"user_id", "role"}})
+	emailMode := OneOf("off", "critical", "critical_and_digest")
+	Register("platform.analytics_email_changed", Schema{Fields: fields("mode", emailMode, "previous", emailMode),
+		Required: []string{"mode", "previous"}})
 	removed := fields("via", OneOf("cli"))
 	for _, k := range HospitalDataRemovedKeys {
 		removed[k] = count

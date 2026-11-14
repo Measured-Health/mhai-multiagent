@@ -78,3 +78,24 @@ func (s *Service) denySession(ctx context.Context, sid string, jtis ...string) e
 	}
 	return nil
 }
+
+// DenySessions puts each session on the denylist (denySession), so a
+// session another account revoked (the platform team's removal or role
+// change) stops at once on every replica, not when the guard's cached
+// state expires. An error means at least one write failed; the sessions'
+// revoked_at still refuses them within authz.MaxCacheTTL.
+func (s *Service) DenySessions(ctx context.Context, sids []string) error {
+	if s.Buckets.Denylist == nil {
+		return errors.New("auth: no denylist")
+	}
+	var failed bool
+	for _, sid := range sids {
+		if err := s.denySession(ctx, sid); err != nil {
+			failed = true
+		}
+	}
+	if failed {
+		return errors.New("auth: denylist write failed")
+	}
+	return nil
+}

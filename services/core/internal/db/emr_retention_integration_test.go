@@ -692,7 +692,9 @@ func TestLegalHoldsProvisionOnly(t *testing.T) {
 		t.Errorf("provision deleting a hold: %v", err)
 	}
 	// 00036: the platform app reads the holds (the hospitals list and
-	// page), and nothing else: it places, lifts and deletes none.
+	// page); 00037 lets it place one with its reason, review date and
+	// placer, and lift an open one (platform_admin_integration_test.go). A
+	// bare hold, a change to a lifted one and a delete stay refused.
 	if err := asRoleIn(ctx, pool, "mhai_platform", r.h, func(tx pgx.Tx) error {
 		var n int
 		return tx.QueryRow(ctx, `SELECT count(*) FROM legal_holds WHERE id = $1 AND lifted_at IS NOT NULL`, id).Scan(&n)
@@ -700,7 +702,7 @@ func TestLegalHoldsProvisionOnly(t *testing.T) {
 		t.Errorf("platform reading the holds: %v", err)
 	}
 	for _, q := range []string{`INSERT INTO legal_holds (hospital_id, reference) VALUES ($1, 'LH-2026-0043')`,
-		`UPDATE legal_holds SET lifted_at = now() WHERE hospital_id = $1`, `DELETE FROM legal_holds WHERE hospital_id = $1`} {
+		`DELETE FROM legal_holds WHERE hospital_id = $1`} {
 		err := asRoleIn(ctx, pool, "mhai_platform", r.h, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, q, r.h)
 			return err

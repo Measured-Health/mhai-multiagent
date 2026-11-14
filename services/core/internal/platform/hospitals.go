@@ -20,10 +20,11 @@ package platform
 // CLI), version 1 (no hospital write is served), sso_enabled false, and
 // deactivation, first_admin and removal null (no deactivation record,
 // invite or removal request exists in core). A legal hold always keeps
-// every record (scope from and to null); its review date is design §4's
-// default, six months after it was placed (in the hospital's time zone),
-// and it is review_due from that day. Core lifts a hold at once (no grace
-// period), so only open holds keep records and are listed.
+// every record (scope from and to null); its review date is its own
+// (00037), or for one the CLI placed design §4's default, six months after
+// it was placed (in the hospital's time zone). It is review_due from that
+// day, and lift_requested while a lift request waits. Core lifts a hold at
+// once (no grace period), so only open holds keep records and are listed.
 //
 // Not recorded: platform configuration and staff contacts, not clinical
 // data (as the model policy read). The admins' names and emails are never
@@ -266,10 +267,12 @@ var errNoHospital = errors.New("platform: no such hospital")
 // openHolds are hid's open holds, newest first, in short form. today is the
 // hospital's day.
 func openHolds(ctx context.Context, tx pgx.Tx, hid uuid.UUID, tz string) ([]HoldShort, error) {
-	rows, err := tx.Query(ctx, `SELECT id, reference,
-			((placed_at AT TIME ZONE $2) + make_interval(months => $3))::date,
-			(now() AT TIME ZONE $2)::date
-		FROM legal_holds WHERE hospital_id = $1 AND lifted_at IS NULL ORDER BY placed_at DESC, id`, hid, tz, HoldReviewMonths)
+	rows, err := tx.Query(ctx, `SELECT l.id, l.reference,
+			COALESCE(l.review_on, ((l.placed_at AT TIME ZONE $2) + make_interval(months => $3))::date),
+			(now() AT TIME ZONE $2)::date,
+			EXISTS (SELECT 1 FROM legal_hold_lifts x WHERE x.hold_id = l.id AND x.approved_at IS NULL
+			        AND x.cancelled_at IS NULL AND x.expires_at > now())
+		FROM legal_holds l WHERE l.hospital_id = $1 AND l.lifted_at IS NULL ORDER BY l.placed_at DESC, l.id`, hid, tz, HoldReviewMonths)
 	if err != nil {
 		return nil, err
 	}
@@ -279,11 +282,15 @@ func openHolds(ctx context.Context, tx pgx.Tx, hid uuid.UUID, tz string) ([]Hold
 		var id uuid.UUID
 		var h HoldShort
 		var review, today time.Time
-		if err := rows.Scan(&id, &h.Reference, &review, &today); err != nil {
+		var lifting bool
+		if err := rows.Scan(&id, &h.Reference, &review, &today, &lifting); err != nil {
 			return nil, err
 		}
 		h.ID, h.ReviewOn, h.Status = id.String(), review.Format(time.DateOnly), "active"
-		if !today.Before(review) {
+		switch {
+		case lifting:
+			h.Status = "lift_requested"
+		case !today.Before(review):
 			h.Status = "review_due"
 		}
 		out = append(out, h)

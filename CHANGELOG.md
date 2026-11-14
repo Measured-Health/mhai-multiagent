@@ -8,6 +8,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The platform app's team, activity, legal holds and analytics e-mail
+  setting (mhai-web Plan 7b §9, Plan 8a, Plan 7d). New routes (OpenAPI
+  1.26.0, additive), platform audience with two-step: `GET /platform/team`,
+  `PATCH /platform/team/{id}` (role; 409 `own_role`, `last_admin`,
+  `conflict`) and `DELETE /platform/team/{id}` (step-up: deactivates the
+  account and revokes its sessions); `GET /platform/activity` (what
+  platform staff did, mapped from the audit log); `GET`/`POST
+  /platform/legal-holds`, `GET /platform/legal-holds/{id}` and the
+  two-person lift (`/lift` and `/lift/approve` with step-up, 409
+  `same_person` and `expired`; `/lift/cancel`); `GET`/`PUT
+  /platform/me/analytics-email` (platform admins; stored only, no e-mail is
+  sent yet). Core's rules win over the frontend contract where stricter: a
+  hold keeps every record (a date range is 422 `invalid_range`), carries no
+  note or name (`note`, `asked_by` refused, read back null), a lift's
+  authority is a document reference, and a lift lands at once (no grace,
+  no undo). The notifications bell, platform settings, named access, team
+  invites, hold edits and lift undo are registered with their rules and
+  answer 501 `not_implemented` (new codes: `not_implemented`, `own_role`,
+  `last_admin`, `same_person`, `expired`). Migration **00037**: the team
+  writes for `mhai_platform` (platform accounts only), the hold columns and
+  `legal_hold_lifts`, `platform_member_versions`, `platform_email_prefs`,
+  and a separate audit policy `platform_admin_append` for the seven new
+  platform actions.
 - The platform app's hospitals list and a hospital's page (mhai-web Plan
   7b), so the page and its model policy section open in live mode. New
   routes (OpenAPI 1.25.0, additive), for platform admins and auditors with

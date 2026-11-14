@@ -55,6 +55,14 @@ var Codes = map[string]int{
 	// (the body names who and when); alert settings with no recipient.
 	"already_handled": http.StatusConflict,
 	"no_recipients":   http.StatusUnprocessableEntity,
+	// The platform admin routes (additive): a route core has no feature for
+	// yet; the team's own-role and last-admin rules; the two-person rule
+	// on a hold's lift and a lapsed request.
+	"not_implemented": http.StatusNotImplemented,
+	"own_role":        http.StatusConflict,
+	"last_admin":      http.StatusConflict,
+	"same_person":     http.StatusConflict,
+	"expired":         http.StatusConflict,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -90,6 +98,11 @@ var titles = map[string]string{
 	"level_not_supported": "Level not supported",
 	"already_handled":     "Already handled",
 	"no_recipients":       "No recipients",
+	"not_implemented":     "Not implemented",
+	"own_role":            "Own role",
+	"last_admin":          "Last platform admin",
+	"same_person":         "Same person",
+	"expired":             "Expired",
 }
 
 var details = map[string]string{
@@ -122,6 +135,11 @@ var details = map[string]string{
 	"level_not_supported": "Only the de-identified list is available.",
 	"already_handled":     "Someone has already handled this alert.",
 	"no_recipients":       "Choose the queue or at least one clinician.",
+	"not_implemented":     "This is not available yet.",
+	"own_role":            "You can't change your own role.",
+	"last_admin":          "There must be at least one platform admin.",
+	"same_person":         "A different person must approve this.",
+	"expired":             "This request has lapsed.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.

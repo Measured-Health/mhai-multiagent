@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.25.0"
+  version: "1.26.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -2456,6 +2456,1043 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/team:
+    get:
+      operationId: listPlatformTeam
+      summary: "The platform team."
+      description: |
+        Platform admins and auditors. The active platform accounts (no hospital,
+        a platform role), by name. `status` is always `active` (core keeps no
+        invites); `is_you` is decided from the token. Any query is 422. Added in
+        1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object, required: [members], additionalProperties: false, properties: { members: { type: array, items: { $ref: "#/components/schemas/TeamMember" } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/team/invites:
+    post:
+      operationId: invitePlatformTeam
+      summary: "Invite a platform team member (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/team/{id}:
+    patch:
+      operationId: changePlatformTeamRole
+      summary: "Change a platform member's role (step-up)."
+      description: |
+        Platform admins, with a fresh TOTP code (`mfa_code`) or an unused
+        backup code (`backup_code`): a demotion is as damaging as a removal.
+        `role` is `platform_admin` or `auditor`; `version` the member's as
+        read. The rules below are checked before the code is spent. One's own role is 409 `own_role`; a change that would
+        leave no active platform admin 409 `last_admin`; a stale version 409
+        `conflict`; an id that is no active platform member 404. The member's
+        sessions are revoked and denylisted: they sign in again. One
+        `platform.team_role_changed` entry. 10 team writes a minute per session.
+        Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_found, conflict, own_role, last_admin, rate_limited, mfa_invalid, mfa_locked]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role, version]
+              additionalProperties: false
+              properties:
+                role: { type: string, enum: [platform_admin, auditor] }
+                version: { type: integer, minimum: 1 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamMember" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    delete:
+      operationId: removePlatformTeamMember
+      summary: "Remove a platform member (step-up)."
+      description: |
+        Platform admins, with a fresh TOTP code or an unused backup code (none
+        403 `mfa_required`, wrong 403 `mfa_invalid`). The account is deactivated
+        and its sessions revoked. The last active platform admin is 409
+        `last_admin`; an id that is no active platform member 404 (checked before
+        the code). One `platform.team_member_removed` entry. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_found, last_admin, mfa_invalid, mfa_locked, rate_limited]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "204":
+          description: Done.
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/activity:
+    get:
+      operationId: listPlatformActivity
+      summary: "What platform staff did, newest first."
+      description: |
+        Platform admins and auditors. 50 a page. Each event maps one audit
+        entry of a platform action with an actor: `action` is mhai-web's
+        ActivityAction; `target` a code, a count, a document reference, a source
+        label or a platform member's name; `detail` a code. `hospital` filters by
+        hospital; `cursor` is the previous page's `next_cursor`. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: hospital, in: query, schema: { type: string, format: uuid } }
+        - { name: cursor, in: query, schema: { type: string, pattern: "^[1-9][0-9]*$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object, required: [events, next_cursor], additionalProperties: false, properties: { events: { type: array, items: { $ref: "#/components/schemas/ActivityEvent" } }, next_cursor: { type: string, nullable: true } } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/legal-holds:
+    get:
+      operationId: listLegalHolds
+      summary: "Legal holds, newest first."
+      description: |
+        Platform admins and auditors. 50 a page. `status` is `open` (the
+        default: active, review due, lift requested), `active`, `review_due`,
+        `lift_requested`, `lifted` or `all`; `hospital` a hospital's id; `q` part
+        of the reference, any case. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [open, active, review_due, lift_requested, lifted, all] } }
+        - { name: hospital, in: query, schema: { type: string, format: uuid } }
+        - { name: q, in: query, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 1024 } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object, required: [holds, next_cursor], additionalProperties: false, properties: { holds: { type: array, items: { $ref: "#/components/schemas/LegalHold" } }, next_cursor: { type: string, nullable: true } } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    post:
+      operationId: placeLegalHold
+      summary: "Place a legal hold (step-up)."
+      description: |
+        Platform admins, with step-up. A hold keeps every record of the
+        hospital: `from` or `to` is 422 `invalid_range`. It carries no free text
+        and no name: a `note` or `asked_by` that isn't null or "" is 422.
+        `reference` is a document reference (`LH-2026-0042`); `review_on` a date
+        after today, at most 5 years ahead. An unknown hospital is 404, a removed
+        one 409 `hospital_removed`, an open hold with the reference 409 `conflict`.
+        One `legal_hold.placed` entry. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_found, conflict, hospital_removed, invalid_range, mfa_invalid, mfa_locked, rate_limited]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hospital_id, reason, reference, review_on]
+              additionalProperties: false
+              properties:
+                hospital_id: { type: string, format: uuid }
+                from: { type: string, nullable: true, description: "Refused unless null: core holds keep every record." }
+                to: { type: string, nullable: true, description: "Refused unless null." }
+                reason: { type: string, enum: [court_case, regulator, complaint, investigation, other] }
+                note: { type: string, nullable: true, description: "Refused unless null or empty: no free text." }
+                reference: { type: string, pattern: "^[A-Z]{2,8}-[0-9]{4}-[0-9]{2,8}$" }
+                asked_by: { type: string, nullable: true, description: "Refused unless null or empty: no names." }
+                review_on: { type: string, format: date }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LegalHoldDetail" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/legal-holds/{id}:
+    get:
+      operationId: getLegalHold
+      summary: "A legal hold and its history."
+      description: |
+        Platform admins and auditors. The hold and its audit history, newest
+        first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_found]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LegalHoldDetail" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    patch:
+      operationId: editLegalHold
+      summary: "Edit a legal hold (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/legal-holds/{id}/lift:
+    post:
+      operationId: requestLegalHoldLift
+      summary: "Ask to lift a legal hold (step-up)."
+      description: |
+        Platform admins, with step-up: the first of two. `authority` is a
+        document reference (as a hold's); a `note` that isn't null or "" is 422.
+        A lifted hold, or one with a request waiting, is 409 `conflict`; a lapsed
+        request is ended first. The request lapses after 7 days. One
+        `legal_hold.lift_requested` entry. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_found, conflict, mfa_invalid, mfa_locked, rate_limited]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason, authority]
+              additionalProperties: false
+              properties:
+                reason: { type: string, enum: [case_closed, withdrawn, mistake, other] }
+                note: { type: string, nullable: true }
+                authority: { type: string, pattern: "^[A-Z]{2,8}-[0-9]{4}-[0-9]{2,8}$" }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LegalHoldDetail" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/legal-holds/{id}/lift/approve:
+    post:
+      operationId: approveLegalHoldLift
+      summary: "Approve a lift (step-up): the hold is lifted."
+      description: |
+        A different platform admin, with step-up. The requester is 409
+        `same_person` and a lapsed request 409 `expired` (both before the code);
+        no request, a lifted hold or a stale `version` 409 `conflict`. The hold is
+        lifted at once (no grace period: `released_on` is the approval). One
+        `legal_hold.lifted` entry. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_found, conflict, same_person, expired, mfa_invalid, mfa_locked, rate_limited]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              additionalProperties: false
+              properties:
+                version: { type: integer, minimum: 1 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LegalHoldDetail" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/legal-holds/{id}/lift/cancel:
+    post:
+      operationId: cancelLegalHoldLift
+      summary: "Cancel a lift request."
+      description: |
+        Either platform admin, no step-up. No request or a stale `version` is
+        409 `conflict`. One `legal_hold.lift_cancelled` entry. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_found, conflict, rate_limited]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              additionalProperties: false
+              properties:
+                version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LegalHoldDetail" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/legal-holds/{id}/lift/undo:
+    post:
+      operationId: undoLegalHoldLift
+      summary: "Undo a lift (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/me/analytics-email:
+    get:
+      operationId: getAnalyticsEmail
+      summary: "The signed-in admin's analytics e-mail mode."
+      description: |
+        Platform admins only (an auditor is 403). `off` by default. Core stores
+        the choice; it sends no e-mail yet. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmailPref" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    put:
+      operationId: setAnalyticsEmail
+      summary: "Set the signed-in admin's analytics e-mail mode."
+      description: |
+        Platform admins only. A stale `version` is 409 `conflict`. One
+        `platform.analytics_email_changed` entry per change. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, conflict]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode, version]
+              additionalProperties: false
+              properties:
+                mode: { type: string, enum: [off, critical, critical_and_digest] }
+                version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmailPref" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/notifications:
+    get:
+      operationId: listPlatformNotifications
+      summary: "The bell's notifications (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/notifications/seen:
+    post:
+      operationId: markPlatformNotificationsSeen
+      summary: "Mark notifications seen (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/settings:
+    get:
+      operationId: getPlatformSettings
+      summary: "Platform settings (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/settings/retention/{id}/preview:
+    get:
+      operationId: previewPlatformRetention
+      summary: "Preview a retention change (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/settings/retention/{id}:
+    put:
+      operationId: setPlatformRetention
+      summary: "Set a retention period (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/settings/retention-pause:
+    put:
+      operationId: setPlatformCleanUpPaused
+      summary: "Pause clean-up (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/settings/triage:
+    put:
+      operationId: setPlatformTriage
+      summary: "Triage switch (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/settings/requests/{id}/approve:
+    post:
+      operationId: approvePlatformSettingRequest
+      summary: "Approve a setting change (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/settings/requests/{id}/cancel:
+    post:
+      operationId: cancelPlatformSettingRequest
+      summary: "Cancel a setting change (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/settings/feedback-buffer/reset:
+    post:
+      operationId: resetPlatformFeedbackBuffer
+      summary: "Clear the feedback buffer (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/named-access:
+    get:
+      operationId: getNamedAccess
+      summary: "The named-access switch (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/named-access/requests:
+    post:
+      operationId: requestNamedAccess
+      summary: "Ask to raise named access (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/named-access/requests/{id}/approve:
+    post:
+      operationId: approveNamedAccess
+      summary: "Approve named access (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/named-access/requests/{id}/cancel:
+    post:
+      operationId: cancelNamedAccess
+      summary: "Cancel a named-access request (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/named-access/lower:
+    post:
+      operationId: lowerNamedAccess
+      summary: "Lower named access (not implemented)."
+      description: |
+        Answers 501 `not_implemented`: core has no backing feature for this yet
+        (the platform admin routes PR lists the gap). The caller's role, audience
+        and two-step are checked first. Added in 1.26.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { type: object }
+      responses:
+        "200":
+          description: The result.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
   /platform/hospitals/{id}/model-policy:
     get:
       operationId: getHospitalModelPolicy
@@ -2999,6 +4036,11 @@ components:
             - level_not_supported
             - already_handled
             - no_recipients
+            - not_implemented
+            - own_role
+            - last_admin
+            - same_person
+            - expired
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -3543,6 +4585,141 @@ components:
         version: { type: string, nullable: true, description: "The activated rule set version; null is shadow." }
         sha256: { type: string, nullable: true, description: "The activated rule set file's SHA-256, hex." }
         activated_at: { type: string, format: date-time, nullable: true }
+    TeamMember:
+      type: object
+      description: A platform team member. Added in 1.26.0.
+      required: [id, name, email, role, status, mfa_enabled, last_sign_in_at, is_you, version]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [platform_admin, auditor] }
+        status: { type: string, enum: [active, invite_pending] }
+        mfa_enabled: { type: boolean }
+        last_sign_in_at: { type: string, format: date-time, nullable: true }
+        is_you: { type: boolean }
+        version: { type: integer, minimum: 1 }
+    Person:
+      type: object
+      description: >-
+        Someone as the platform app names them: an account's id and name, or
+        the provisioning CLI (`id` "cli"). Added in 1.26.0.
+      required: [id, name]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+    ActivityEvent:
+      type: object
+      description: One line of the platform activity feed. Added in 1.26.0.
+      required: [id, at, actor, action, hospital, target, detail]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        at: { type: string, format: date-time }
+        actor: { $ref: "#/components/schemas/Person" }
+        action: { type: string, description: "mhai-web's ActivityAction; more may be added: show an unknown one as it is." }
+        hospital: { allOf: [{ $ref: "#/components/schemas/Person" }], nullable: true }
+        target: { type: string, nullable: true }
+        detail: { type: string, nullable: true }
+    HoldLift:
+      type: object
+      description: A legal hold's lift request. Added in 1.26.0.
+      required: [id, kind, requested_by, requested_at, reason, requested_by_you, expires_at, note, authority, records_due,
+        due_after, approved_by, approved_at, released_on]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [hold_lift] }
+        requested_by: { $ref: "#/components/schemas/Person" }
+        requested_at: { type: string, format: date-time }
+        reason: { type: string, enum: [case_closed, withdrawn, mistake, other] }
+        requested_by_you: { type: boolean }
+        expires_at: { type: string, format: date-time }
+        note: { type: string, nullable: true, description: "Always null: no free text." }
+        authority: { type: string, pattern: "^[A-Z]{2,8}-[0-9]{4}-[0-9]{2,8}$" }
+        records_due: { type: integer, nullable: true, description: "Always null: core doesn't count them." }
+        due_after: { type: string, nullable: true, description: "Always null." }
+        approved_by: { allOf: [{ $ref: "#/components/schemas/Person" }], nullable: true }
+        approved_at: { type: string, format: date-time, nullable: true }
+        released_on: { type: string, format: date-time, nullable: true, description: "The approval: no grace period." }
+    LegalHold:
+      type: object
+      description: >-
+        A legal hold. `reason` is null for a hold the provisioning CLI
+        placed; `asked_by` and `note` are always null (no names, no free
+        text). Added in 1.26.0.
+      required: [id, hospital, scope, reason, reference, asked_by, note, placed_by, placed_at, review_on, status, lift,
+        stopped_removal, version]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        hospital: { $ref: "#/components/schemas/Person" }
+        scope:
+          type: object
+          required: [from, to]
+          additionalProperties: false
+          properties:
+            from: { type: string, format: date, nullable: true }
+            to: { type: string, format: date, nullable: true }
+        reason: { type: string, enum: [court_case, regulator, complaint, investigation, other], nullable: true }
+        reference: { type: string, pattern: "^[A-Z]{2,8}-[0-9]{4}-[0-9]{2,8}$" }
+        asked_by: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        placed_by: { $ref: "#/components/schemas/Person" }
+        placed_at: { type: string, format: date-time }
+        review_on: { type: string, format: date }
+        status: { type: string, enum: [active, review_due, lift_requested, lifted] }
+        lift: { allOf: [{ $ref: "#/components/schemas/HoldLift" }], nullable: true }
+        stopped_removal: { type: boolean }
+        version: { type: integer, minimum: 1 }
+    LegalHoldDetail:
+      type: object
+      description: A legal hold with its history, newest first. Added in 1.26.0.
+      required: [id, hospital, scope, reason, reference, asked_by, note, placed_by, placed_at, review_on, status, lift,
+        stopped_removal, version, history]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        hospital: { $ref: "#/components/schemas/Person" }
+        scope:
+          type: object
+          required: [from, to]
+          additionalProperties: false
+          properties:
+            from: { type: string, format: date, nullable: true }
+            to: { type: string, format: date, nullable: true }
+        reason: { type: string, enum: [court_case, regulator, complaint, investigation, other], nullable: true }
+        reference: { type: string, pattern: "^[A-Z]{2,8}-[0-9]{4}-[0-9]{2,8}$" }
+        asked_by: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        placed_by: { $ref: "#/components/schemas/Person" }
+        placed_at: { type: string, format: date-time }
+        review_on: { type: string, format: date }
+        status: { type: string, enum: [active, review_due, lift_requested, lifted] }
+        lift: { allOf: [{ $ref: "#/components/schemas/HoldLift" }], nullable: true }
+        stopped_removal: { type: boolean }
+        version: { type: integer, minimum: 1 }
+        history:
+          type: array
+          items:
+            type: object
+            required: [at, actor, action, detail]
+            additionalProperties: false
+            properties:
+              at: { type: string, format: date-time }
+              actor: { $ref: "#/components/schemas/Person" }
+              action: { type: string, enum: [placed, lift_requested, lift_cancelled, lifted] }
+              detail: { type: string, nullable: true }
+    EmailPref:
+      type: object
+      description: A platform admin's analytics e-mail mode. Added in 1.26.0.
+      required: [mode, version]
+      additionalProperties: false
+      properties:
+        mode: { type: string, enum: [off, critical, critical_and_digest] }
+        version: { type: integer, minimum: 1 }
     HospitalSummary:
       type: object
       description: A hospital as the platform list shows it. Added in 1.25.0.
