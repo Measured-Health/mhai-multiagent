@@ -89,11 +89,149 @@ async def test_shared_chunks_visible_patient_chunks_not() -> None:
     assert set(by_id) == {"KB#0001", "KB#0003"}
     assert by_id["KB#0001"].source_patient_id == REFERENCE_SOURCE
     assert all(isinstance(c, KBChunk) for c in chunks)
-    # The SQL is a constant with a row bound and no hospital filter: RLS
-    # decides which hospital's rows (and the shared ones) come back.
-    (query, params), *_ = cur.executed
-    assert "hospital_id IS NULL" in query and "LIMIT" in query
-    assert params == (kb_repo.MAX_CHUNKS,)
+    # Constant SQL with row bounds and no hospital filter: RLS decides which
+    # hospital's rows (and the shared ones) come back.
+    assert [params for _, params in cur.executed] == [
+        (kb_repo.MAX_SHARED_CHUNKS,),
+        (kb_repo.MAX_HOSPITAL_CHUNKS,),
+    ]
+    for query, _ in cur.executed:
+        assert "LIMIT %s" in query and "mhai_current_hospital" not in query
+
+
+class RoutingCursor:
+    """The with_hospital cursor, answering each of kb_repo's reads with the
+    rows RLS would show for it."""
+
+    def __init__(
+        self,
+        shared: list[tuple[Any, ...]] | None = None,
+        library: list[tuple[Any, ...]] | None = None,
+        hospital: list[tuple[Any, ...]] | None = None,
+    ) -> None:
+        self.answers = {
+            kb_repo._LOAD_SHARED: shared or [],
+            kb_repo._LOAD_LIBRARY: library or [],
+            kb_repo._LOAD_HOSPITAL: hospital or [],
+        }
+        self.executed: list[tuple[str, Any]] = []
+        self._next: list[tuple[Any, ...]] = []
+
+    async def execute(self, query: str, params: Any = None) -> RoutingCursor:
+        self.executed.append((query, params))
+        self._next = self.answers[query]
+        return self
+
+    async def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._next
+
+
+def _library_row(n: int, content: str = "synthetic reference text", **meta: Any) -> tuple[Any, ...]:
+    vector = [0.0] * 8
+    vector[n % 8] = 1.0
+    metadata = {"kind": "drug_label", "title": f"Synthetic drug {n}", **meta}
+    embedder = "sentence-transformers/synthetic-embedder@" + "0" * 40
+    return (f"KB#{1000000 + n}", True, content, "guideline", None, None, metadata, vector, embedder)
+
+
+def _patient_row(n: int, patient: str = "P-SYN-1") -> tuple[Any, ...]:
+    return (f"KB#{n:04d}", False, f"Synthetic lab {n}.", "lab", patient, None, {})
+
+
+async def test_hospital_rows_are_never_crowded_out_by_shared_rows() -> None:
+    """The old read (shared first, one LIMIT 5000) gave a hospital nothing
+    once 5,000 shared rows existed. Each kind now has its own bound."""
+    shared = [_row(f"KB#{i:04d}", True) for i in range(1, kb_repo.MAX_SHARED_CHUNKS + 1)]
+    library = [_library_row(i) for i in range(kb_repo.LIBRARY_CANDIDATES)]
+    hospital = [_patient_row(i) for i in range(6000, 6010)]
+    cur = RoutingCursor(shared=shared, library=library, hospital=hospital)
+    chunks = await kb_repo.load_chunks(cur, "P-SYN-1", question="synthetic question")  # type: ignore[arg-type]
+    ids = [c.chunk_id for c in chunks]
+    assert set(ids) >= {f"KB#{i:04d}" for i in range(6000, 6010)}
+    assert len(ids) == kb_repo.MAX_SHARED_CHUNKS + kb_repo.LIBRARY_CANDIDATES + 10
+    queries = [q for q, _ in cur.executed]
+    assert queries == [kb_repo._LOAD_SHARED, kb_repo._LOAD_LIBRARY, kb_repo._LOAD_HOSPITAL]
+    assert cur.executed[1][1] == ("synthetic question", kb_repo.LIBRARY_CANDIDATES)
+    assert cur.executed[2][1] == (kb_repo.MAX_HOSPITAL_CHUNKS,)
+    assert "hospital_id IS NOT NULL" in kb_repo._LOAD_HOSPITAL
+    assert all("NULLS FIRST" not in q for q in queries)
+
+
+async def test_library_is_read_only_with_a_question() -> None:
+    for question in ("", "   "):
+        cur = RoutingCursor(library=[_library_row(1)])
+        assert await kb_repo.load_chunks(cur, None, question=question) == []  # type: ignore[arg-type]
+        assert kb_repo._LOAD_LIBRARY not in [q for q, _ in cur.executed]
+    cur = RoutingCursor(library=[_library_row(1)])
+    long = "synthetic " * 1000
+    await kb_repo.load_chunks(cur, None, question=long)  # type: ignore[arg-type]
+    (text, _bound) = cur.executed[1][1]
+    assert text == long[: kb_repo.MAX_QUESTION_CHARS]
+
+
+async def test_library_rows_are_sealed_reference_guidelines_with_their_vectors() -> None:
+    cur = RoutingCursor(library=[_library_row(3, url="https://example.org/synthetic")])
+    (chunk,) = await kb_repo.load_chunks(cur, None, question="synthetic")  # type: ignore[arg-type]
+    assert chunk.chunk_id == "KB#1000003"
+    assert chunk.source_patient_id == REFERENCE_SOURCE and chunk.source_subject_id == ""
+    assert chunk.chunk_type == "guideline"
+    assert chunk.metadata["title"] == "Synthetic drug 3"
+    assert chunk.metadata["url"] == "https://example.org/synthetic"
+    from intelligence.boundary.cloud.gate import shared_chunk_of
+
+    assert shared_chunk_of(chunk).chunk_id == "KB#1000003"
+    assert chunk.embedding is not None and chunk.embedding.dtype.name == "float32"
+    assert list(chunk.embedding) == [0, 0, 0, 1, 0, 0, 0, 0]
+    assert chunk.embedder.startswith("sentence-transformers/synthetic-embedder@")
+
+
+async def test_a_bad_vector_is_dropped_not_used() -> None:
+    for bad in ([], [float("nan")] * 4, "1,2,3", [[1.0, 2.0]], [0.1] * 5000):
+        row = _library_row(1)
+        row = (*row[:7], bad, row[8])
+        (chunk,) = await kb_repo.load_chunks(  # type: ignore[arg-type]
+            RoutingCursor(library=[row]), None, question="synthetic"
+        )
+        assert chunk.embedding is None and chunk.embedder == "", bad
+
+
+async def test_shared_rows_are_never_patient_scoped() -> None:
+    """A shared row is a reference row whatever its source columns say
+    (00002's kb_shared_has_no_patient keeps them null), and only a
+    guideline is shown."""
+    posing = (*_library_row(1)[:4], "P-SYN-1", "P-SYN-1", *_library_row(1)[6:])
+    lab = (*_library_row(2)[:3], "lab", *_library_row(2)[4:])
+    cur = RoutingCursor(library=[posing, lab])
+    for patient in ("P-SYN-1", None):
+        chunks = await kb_repo.load_chunks(cur, patient, question="synthetic")  # type: ignore[arg-type]
+        assert [c.chunk_id for c in chunks] == ["KB#1000001"]
+        assert chunks[0].source_patient_id == REFERENCE_SOURCE
+        assert chunks[0].source_subject_id == ""
+
+
+async def test_a_hospital_row_cannot_take_a_library_id_or_pose_as_shared() -> None:
+    hospital = [
+        ("KB#1000001", False, "Synthetic posing row.", "guideline", "P-SYN-1", None, {}),
+        _patient_row(7),
+    ]
+    # A read answering with the wrong kind of row: each read keeps its own.
+    shared_from_hospital_read = _row("KB#0099", True)
+    cur = RoutingCursor(
+        library=[_library_row(1), _patient_row(8)],
+        hospital=[*hospital, shared_from_hospital_read],
+    )
+    chunks = await kb_repo.load_chunks(cur, "P-SYN-1", question="synthetic")  # type: ignore[arg-type]
+    by_id = {c.chunk_id: c for c in chunks}
+    assert set(by_id) == {"KB#1000001", "KB#0007"}
+    assert by_id["KB#1000001"].source_patient_id == REFERENCE_SOURCE
+    assert by_id["KB#1000001"].content == "synthetic reference text"
+
+
+async def test_library_sql_is_constant_and_parameterised() -> None:
+    q = kb_repo._LOAD_LIBRARY
+    assert "%s" in q and "{" not in q
+    assert "l.active" in q and "k.hospital_id IS NULL" in q and "LIMIT %s" in q
+    assert "plainto_tsquery('english', %s)" in q
 
 
 async def test_no_patient_sees_shared_guidelines_only() -> None:

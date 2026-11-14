@@ -16,7 +16,8 @@ reply is parsed again here and every check fails closed:
   "[" or "]" outside an exact [KB#nnnn] marker (so no Markdown link,
   reference, definition or image), a marker followed by ":", code fence,
   or chunk delimiter;
-- citations: each KB#nnnn (ASCII digits) and one of the chunk ids sent;
+- citations: each KB#nnnn or KB#nnnnnnn (ASCII digits; seven for a
+  reference library's row) and one of the chunk ids sent;
 - the [KB#nnnn] markers in answer are exactly the citations, and no other
   "KB#" text appears (a lookalike marker would show as a citation that was
   never checked);
@@ -133,8 +134,9 @@ class Answer(BaseModel):
     insufficient_evidence: bool
 
 
-_CITATION = re.compile(r"KB#[0-9]{4}")
-_MARKER = re.compile(r"\[(KB#[0-9]{4})\]")
+# KB#nnnn, or a reference library's KB#nnnnnnn (migration 00039).
+_CITATION = re.compile(r"KB#(?:[0-9]{4}|[1-9][0-9]{6})")
+_MARKER = re.compile(r"\[(KB#(?:[0-9]{4}|[1-9][0-9]{6}))\]")
 _DELIMITERS = ("<<chunk", "<<end")
 # A scheme URL, www., a script scheme, a protocol-relative "//host", or a
 # backslash form of one (a backslash next to a slash, or two backslashes).

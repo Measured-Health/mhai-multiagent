@@ -454,8 +454,9 @@ def test_hospital_or_patient_chunk_refused(tm: TaggingMasker) -> None:
 
 
 def test_load_chunks_unchanged_for_local() -> None:
-    """The visible set, order and fields are as before; the seal is extra
-    metadata the local path never reads."""
+    """The visible set, order and fields are as before (shared rows first,
+    as the old hospital_id NULLS FIRST read gave them; each kind is now read
+    on its own); the seal is extra metadata the local path never reads."""
     rows = [
         _row("KB#0001", True),
         _row("KB#0002", True, chunk_type="lab"),
@@ -465,8 +466,8 @@ def test_load_chunks_unchanged_for_local() -> None:
         _row("KB#0006", True, metadata="not a dict"),
     ]
     expected = {
-        "P-SYN-1": ["KB#0001", "KB#0003", "KB#0006"],
-        "P-SYN-2": ["KB#0001", "KB#0004", "KB#0006"],
+        "P-SYN-1": ["KB#0001", "KB#0006", "KB#0003"],
+        "P-SYN-2": ["KB#0001", "KB#0006", "KB#0004"],
         None: ["KB#0001", "KB#0006"],
     }
     for patient, ids in expected.items():

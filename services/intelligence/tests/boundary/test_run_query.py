@@ -612,6 +612,44 @@ async def test_job_runs_to_completed(
     assert StubModelClient.ANSWER not in caplog.text
 
 
+async def test_masked_question_picks_reference_library_candidates(
+    make_env: MakeEnv, postgres: Postgres
+) -> None:
+    """Migration 00039: the job reads a reference library's rows matching
+    the masked question (never the raw one), as shared guidelines."""
+    raw_word = "zyxquorbital"
+    async with await su(postgres) as conn:
+        cur = await conn.execute(
+            "INSERT INTO reference_libraries (name, version, sha256, licence, attribution, "
+            "embedder, chunk_count, active) VALUES ('synthetic-run-query', '1.0.0', "
+            "repeat('cd', 32), 'CC0-1.0 (synthetic)', 'Synthetic.', 'synthetic', 2, true) "
+            "RETURNING id"
+        )
+        found = await cur.fetchone()
+        assert found is not None
+        lib = found[0]
+        await conn.execute(
+            "INSERT INTO kb_chunks (chunk_id, hospital_id, content, chunk_type, library_id) "
+            "VALUES ('KB#1800001', NULL, 'Synthetic masked reference row.', 'guideline', %s), "
+            "('KB#1800002', NULL, %s, 'guideline', %s)",
+            (lib, f"{raw_word.capitalize()} orbit.", lib),
+        )
+    try:
+        env = await make_env()
+        qid = await seed_query(postgres, question=f"Synthetic {raw_word} question {MARKER}")
+        stub = StubModelClient()
+        await env.start(stub)
+        await env.publish(qid)
+        assert await until(lambda: status_is(postgres, qid, "completed"))
+        (seen,) = stub.seen_chunk_ids
+        assert "KB#1800001" in seen  # matches the masked question
+        assert "KB#1800002" not in seen  # matches only the raw one
+    finally:
+        async with await su(postgres) as conn:
+            await conn.execute("DELETE FROM kb_chunks WHERE library_id = %s", (lib,))
+            await conn.execute("DELETE FROM reference_libraries WHERE id = %s", (lib,))
+
+
 async def test_run_query_writes_masked_copy_and_timings(
     make_env: MakeEnv, postgres: Postgres
 ) -> None:
