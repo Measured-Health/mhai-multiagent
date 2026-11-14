@@ -17,6 +17,7 @@ intelligence package (tests/boundary/test_no_direct_db.py).
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from collections.abc import Mapping
@@ -41,7 +42,9 @@ def load(conn: Any, path: Path, pins: Mapping[str, reflib.Pin]) -> Loaded:
     connection with the migration DSN). See the module docstring."""
     from psycopg.types.json import Jsonb
 
-    header, sha = reflib.verify(path, pins)
+    # Read once and checked: the rows come from these bytes, never the file
+    # again (security review: the file could be swapped after the check).
+    header, sha, data = reflib.read_pinned(path, pins)
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "SELECT id, sha256, active FROM reference_libraries WHERE name = %s AND version = %s",
@@ -80,7 +83,7 @@ def load(conn: Any, path: Path, pins: Mapping[str, reflib.Pin]) -> Loaded:
             "COPY kb_chunks (chunk_id, hospital_id, content, chunk_type, source_patient_id, "
             "source_subject_id, metadata_json, library_id, embedding) FROM STDIN"
         ) as copy:
-            for r in reflib.read_rows(path, header):
+            for r in reflib.read_rows(data, header):
                 copy.write_row(
                     (
                         r.chunk_id,
@@ -95,6 +98,9 @@ def load(conn: Any, path: Path, pins: Mapping[str, reflib.Pin]) -> Loaded:
                     )
                 )
                 n += 1
+        # Before the commit: the loaded bytes are still the pinned ones, or
+        # the transaction rolls back.
+        reflib.check_pin(header, hashlib.sha256(data).hexdigest(), pins)
         cur.execute(
             "UPDATE reference_libraries SET active = true, chunk_count = %s WHERE id = %s",
             (n, lib),

@@ -6,7 +6,9 @@ synthetic embedder; every row is synthetic.
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
+import json
 import sys
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -143,3 +145,37 @@ async def test_refusals_write_nothing(tmp_path: Path, conn: psycopg.Connection[A
         loader.load(conn, other, {reflib.NAME: reflib.Pin("1.0.0", other_sha, other_n)})
     assert str(info.value) == "version_reloaded_with_other_bytes"
     assert len(_rows(conn)) == count
+
+
+async def test_a_file_swapped_after_the_check_is_never_loaded(
+    tmp_path: Path, conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security review (TOCTOU): the artefact is swapped for a well-formed one
+    with other text right after the pin is checked. What is loaded is the
+    pinned bytes, never the swapped file."""
+    path, sha, count = _build(tmp_path, "1.0.0", _entries(tmp_path))
+    lines = gzip.decompress(path.read_bytes()).decode().splitlines()
+    first = json.loads(lines[1])
+    first["content"] = "Synthetic tampered text."
+    swapped = gzip.compress(("\n".join([lines[0], json.dumps(first), *lines[2:]]) + "\n").encode())
+
+    def swap_after(check: Any) -> Any:
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            out = check(*args, **kwargs)
+            path.write_bytes(swapped)
+            return out
+
+        return wrapped
+
+    # Whichever function checks the pin, the file changes as soon as it returns.
+    monkeypatch.setattr(reflib, "verify", swap_after(reflib.verify))
+    if hasattr(reflib, "read_pinned"):
+        monkeypatch.setattr(reflib, "read_pinned", swap_after(reflib.read_pinned))
+    try:
+        loader.load(conn, path, {reflib.NAME: reflib.Pin("1.0.0", sha, count)})
+    except reflib.LibraryError:
+        pass  # refusing is fine too; loading the swapped text is not
+    rows = conn.execute("SELECT content FROM kb_chunks WHERE library_id IS NOT NULL").fetchall()
+    contents = {r[0] for r in rows}
+    assert "Synthetic tampered text." not in contents
+    assert path.read_bytes() == swapped  # the swap really happened
