@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Knowledge base: a persistent shared reference index (migration **00039**;
+  no contract change). `reference_libraries` records each loaded version of a
+  shared reference library (name, version, SHA-256, licence, attribution,
+  embedder; one active version per name). Library rows are shared, patient-free
+  guidelines in `kb_chunks` with ids `KB#1000001` up, a stored full-text vector
+  and the library's embedding. The worker reads each kind of row under its own
+  bound: the seeded shared guidelines (500), the library's best 100 matches for
+  the masked question (a Postgres full-text pre-filter), and the hospital's own
+  rows (5,000). Shared rows can no longer crowd out a hospital's chunks (the old
+  read was one `LIMIT 5000`, shared rows first). Citations accept the
+  seven-digit ids. 30,000 shared rows: 32 ms to read, 45 ms with indexing and
+  retrieval (boundary test).
 - Patient Analysis PR 7: clearance letters, hospital side (migration
   **00038**, OpenAPI **1.28.0**; off by default: every letter route answers
   404 while the hospital's analysis switch is off and 403
