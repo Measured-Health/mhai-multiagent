@@ -128,6 +128,7 @@ func Register(m *authz.Mux, d Deps) {
 	registerAnalytics(m, d)
 	registerFollowUps(m, d)
 	registerHospitals(m, d)
+	registerAnalysisStatus(m, d)
 	registerTeam(m, d)
 	registerActivity(m, d)
 	registerHolds(m, d)

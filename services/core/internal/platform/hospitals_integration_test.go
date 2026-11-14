@@ -363,3 +363,68 @@ func TestHospitalReadsNotRecorded(t *testing.T) {
 		t.Errorf("%d audit rows for two reads", n)
 	}
 }
+
+// The platform sidebar's Analysis status (mhai-web Plan 12): platform
+// admins only. Core serves no platform Analysis views yet, so the
+// aggregates and patient views are off; the hospitals are split by their
+// effective switch (the global row and the hospital's both on), and none
+// is listed with a clearance.
+func TestPlatformAnalysisStatus(t *testing.T) {
+	ctx := context.Background()
+	on := seedNamedHospital(t, "Synthetic Analysis On "+uniq(), "AO"+strings.ToUpper(uniq()[:6]), "active")
+	off := seedNamedHospital(t, "Synthetic Analysis Off "+uniq(), "AF"+strings.ToUpper(uniq()[:6]), "active")
+	for _, q := range []string{
+		`INSERT INTO analysis_switch (hospital_id, position, signoff_clinical, signoff_privacy, signoff_legal)
+			VALUES (NULL, 'on', 'SO-2026-7701', 'SO-2026-7702', 'SO-2026-7703')
+			ON CONFLICT (hospital_id) DO UPDATE SET position = 'on', signoff_clinical = 'SO-2026-7701',
+			signoff_privacy = 'SO-2026-7702', signoff_legal = 'SO-2026-7703'`,
+	} {
+		if _, err := super.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := super.Exec(ctx, `INSERT INTO analysis_switch (hospital_id, position, signoff_clinical, signoff_privacy, signoff_legal)
+		VALUES ($1, 'on', 'SO-2026-7704', 'SO-2026-7705', 'SO-2026-7706')`, on); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = super.Exec(ctx, `UPDATE analysis_switch SET position = 'off' WHERE hospital_id IS NULL`)
+	})
+
+	problem(t, "auditor", get(t, "/platform/analysis/status", mint(t, auditor(t))), 403, "forbidden")
+	problem(t, "hospital admin", get(t, "/platform/analysis/status", mint(t, seedUser(t, on, "", authz.RoleHospitalAdmin))), 403, "not_platform")
+	problem(t, "query", get(t, "/platform/analysis/status?x=1", mint(t, platformAdmin(t))), 422, "validation_failed")
+	r := get(t, "/platform/analysis/status", mint(t, platformAdmin(t)))
+	ok(t, "status", r)
+	sameKeys(t, "status", r.body, "aggregates_enabled", "patient_views_enabled", "sample", "hospitals", "my_clearances")
+	if r.body["aggregates_enabled"] != false || r.body["patient_views_enabled"] != false || r.body["sample"] != false {
+		t.Errorf("status %v", r.body)
+	}
+	if c, _ := r.body["my_clearances"].([]any); c == nil || len(c) != 0 {
+		t.Errorf("my_clearances %v", r.body["my_clearances"])
+	}
+	h, _ := r.body["hospitals"].(map[string]any)
+	sameKeys(t, "hospitals", h, "included", "total", "list", "excluded")
+	list, _ := h["list"].([]any)
+	excluded, _ := h["excluded"].([]any)
+	if h["included"] != float64(len(list)) || h["total"] != float64(len(list)+len(excluded)) {
+		t.Errorf("counts %v", h)
+	}
+	in := func(xs []any, id uuid.UUID) map[string]any {
+		for _, x := range xs {
+			if m, _ := x.(map[string]any); m["id"] == id.String() {
+				return m
+			}
+		}
+		return nil
+	}
+	if m := in(list, on); m == nil || len(m) != 2 {
+		t.Errorf("the switched-on hospital isn't included: %v", m)
+	}
+	if m := in(excluded, off); m == nil || m["reason"] != "not_covered" || len(m) != 3 {
+		t.Errorf("the switched-off hospital: %v", m)
+	}
+	if in(list, off) != nil || in(excluded, on) != nil {
+		t.Error("a hospital on the wrong side")
+	}
+}

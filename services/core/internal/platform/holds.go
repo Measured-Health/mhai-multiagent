@@ -109,12 +109,6 @@ func registerHolds(m *authz.Mux, d Deps) {
 	authz.Route(m, http.MethodPost, "/platform/legal-holds/{id}/lift/undo", stepUp, http.HandlerFunc(notImplemented))
 }
 
-// Person is someone (or the CLI) as the platform app names them.
-type Person struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
 // HoldLift is a hold's lift request.
 type HoldLift struct {
 	ID             string  `json:"id"`

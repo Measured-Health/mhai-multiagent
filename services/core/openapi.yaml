@@ -2350,6 +2350,70 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/analysis/status:
+    get:
+      operationId: getPlatformAnalysisStatus
+      summary: The platform Analysis status.
+      description: |
+        Platform admins only (an auditor is 403). Core serves no platform
+        Analysis view yet, so `aggregates_enabled` and
+        `patient_views_enabled` are false, `sample` is false and
+        `my_clearances` is empty. `hospitals` splits the hospitals that
+        aren't removed by their effective analysis switch (the global row's
+        and the hospital's both on): included in `list`, the rest in
+        `excluded` with `not_covered`. Any query is 422. Added in 1.25.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [aggregates_enabled, patient_views_enabled, sample, hospitals, my_clearances]
+                additionalProperties: false
+                properties:
+                  aggregates_enabled: { type: boolean }
+                  patient_views_enabled: { type: boolean }
+                  sample: { type: boolean }
+                  hospitals:
+                    type: object
+                    required: [included, total, list, excluded]
+                    additionalProperties: false
+                    properties:
+                      included: { type: integer, minimum: 0 }
+                      total: { type: integer, minimum: 0 }
+                      list:
+                        type: array
+                        items:
+                          type: object
+                          required: [id, name]
+                          additionalProperties: false
+                          properties:
+                            id: { type: string, format: uuid }
+                            name: { type: string }
+                      excluded:
+                        type: array
+                        items:
+                          type: object
+                          required: [id, name, reason]
+                          additionalProperties: false
+                          properties:
+                            id: { type: string, format: uuid }
+                            name: { type: string }
+                            reason: { type: string, enum: [not_covered, not_enough_data] }
+                  my_clearances: { type: array, maxItems: 0, items: { type: object } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
   /platform/hospitals:
     get:
       operationId: listPlatformHospitals
