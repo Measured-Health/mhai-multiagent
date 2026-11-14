@@ -1,5 +1,5 @@
 -- A persistent shared reference library in kb_chunks (P0: the pilot's
--- guideline gap). NUMBERED 00039: 00038 is Patient Analysis PR 7's.
+-- guideline gap). NUMBERED 00040: 00039 is the patient lookup (#172).
 --
 -- Until now the worker read kb_chunks ORDER BY hospital_id NULLS FIRST
 -- LIMIT 5000, so more than 5,000 shared rows would crowd a hospital's own

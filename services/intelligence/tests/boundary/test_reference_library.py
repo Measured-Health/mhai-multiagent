@@ -1,4 +1,4 @@
-"""A large shared reference library in kb_chunks (migration 00039), against
+"""A large shared reference library in kb_chunks (migration 00040), against
 the Postgres 16 that core's own `migrate up` built.
 
 - A hospital's own chunks are never crowded out, however many shared rows

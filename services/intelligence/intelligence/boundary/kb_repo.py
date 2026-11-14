@@ -7,7 +7,7 @@ by hospital itself: that is the database's job, and the hospital is the
 verified token's.
 
 Three reads, each with its own bound, so no kind of row can crowd out
-another (migration 00039):
+another (migration 00040):
 
   - shared rows outside any reference library (the seeded guidelines), at
     most MAX_SHARED_CHUNKS;
@@ -68,7 +68,7 @@ MAX_SHARED_CHUNKS = 500
 LIBRARY_CANDIDATES = 100
 # The question text the pre-filter reads (the masked question).
 MAX_QUESTION_CHARS = 2000
-# Ids of reference library rows (00039 kb_library_chunk_id).
+# Ids of reference library rows (00040 kb_library_chunk_id).
 LIBRARY_CHUNK_ID = re.compile(r"KB#[1-9][0-9]{6}")
 MAX_EMBEDDING_DIM = 4096
 

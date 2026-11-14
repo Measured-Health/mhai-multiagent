@@ -376,7 +376,7 @@ def test_answer_repr_has_no_text() -> None:
 
 
 def test_reference_library_citation_passes_when_sent() -> None:
-    """A reference library's row has a seven-digit id (migration 00039)."""
+    """A reference library's row has a seven-digit id (migration 00040)."""
     sent = SENT | {"KB#1000042"}
     raw = _raw(answer="Check the boxed warning [KB#1000042].", citations=["KB#1000042"])
     assert validate_answer(raw, sent).citations == ("KB#1000042",)

@@ -376,9 +376,9 @@ func (d Deps) resolvePatient(ctx context.Context, hid uuid.UUID, in excludeIn) (
 }
 
 // exclude is POST /hospital/patient-exclusions {mrn} | {patient_id}, reason
-// (design §10.6): 202. Order: the body (422), the patient (404; 409
-// conflict when the MRN names two patients: send the patient id), the code
-// (403); then the exclusion, its audit row and one alert.withdrawn per
+// (design §10.6): 202. Order: the body (422), the code (403; before the
+// patient, so an MRN is never answered without one), the patient (404; 409
+// conflict when the MRN names two patients: send the patient id); then the exclusion, its audit row and one alert.withdrawn per
 // open alert, in one transaction.
 func (d Deps) exclude(w http.ResponseWriter, r *http.Request) {
 	p, ok := caller(w, r)
@@ -394,6 +394,12 @@ func (d Deps) exclude(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "validation_failed")
 		return
 	}
+	// The code before the patient: an MRN is never answered (404, 409 or
+	// a request for the code) without one, so the route is no unthrottled
+	// MRN oracle (security review of the patient lookup, 14 Nov).
+	if !d.stepUp(w, r, in.stepUpIn) {
+		return
+	}
 	pid, err := d.resolvePatient(r.Context(), p.HospitalID, in)
 	switch {
 	case errors.Is(err, errAmbiguous):
@@ -401,9 +407,6 @@ func (d Deps) exclude(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		d.fail(w, r, p, "exclusion", err)
-		return
-	}
-	if !d.stepUp(w, r, in.stepUpIn) {
 		return
 	}
 	var x ExclusionResult
