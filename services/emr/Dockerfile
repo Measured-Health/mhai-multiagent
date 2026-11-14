@@ -2,7 +2,7 @@
 # two binaries: compose runs the proxy with entrypoint /egress-emr). Built
 # from services/ (it requires services/gokit):
 #   docker build -f services/emr/Dockerfile services
-FROM golang:1.24-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY gokit/go.mod gokit/go.sum gokit/
 COPY emr/go.mod emr/go.sum emr/

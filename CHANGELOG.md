@@ -585,6 +585,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Go 1.26 for CI and the core and emr images (was 1.24, now out of
+  support), with staticcheck 2026.2.2. Newer Go dependency updates require
+  Go 1.25 or 1.26.
 - The pipeline worker requires `sslmode=verify-full` for its database
   outside development. Core and the workers warn when
   `OTEL_EXPORTER_OTLP_INSECURE` is on outside development, and log why
