@@ -34,6 +34,7 @@ const seedUsage = `usage:
   core hospitals activate <hospital id or short code>
   core hospitals mark-demo <hospital id or short code>
   core hospitals model-policy set <hospital id or short code> --provider openai|anthropic|xai|gemini|none [--agreement-ref REF] [--budget TOKENS]
+  core hospitals legal-hold place|lift <hospital id or short code> --reference REF   (see core emr)
   core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
   core users roles <email> --add analyst|--remove analyst --by <admin email>
 
@@ -94,6 +95,9 @@ func seed(ctx context.Context, args []string, url string, stdin io.Reader, out i
 	}
 	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "activate" {
 		return hospitalsActivate(ctx, args[2:], url, out)
+	}
+	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "legal-hold" {
+		return hospitalsLegalHold(ctx, args[2:], url, out)
 	}
 	if len(args) >= 2 && args[0] == "hospitals" && args[1] == "model-policy" {
 		return hospitalsModelPolicy(ctx, args[2:], url, os.Getenv, out)

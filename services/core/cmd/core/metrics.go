@@ -54,6 +54,20 @@ func registerMetrics(a *app, nm *natsapi.Metrics, gm *grant.Metrics) {
 		count("emr_core_dead_letter_failed_total", "Dead letters core couldn't send; the message is kept (page).", em.DeadFailed.Load)
 		count("emr_source_paused_total", "EMR sources paused by their breaker (page).", em.SourcePaused.Load)
 	}
+	if lm := a.emrMaint; lm != nil && lm.Metrics != nil {
+		mm := lm.Metrics
+		count("emr_purges_total", "EMR exclusion purges run by the maintenance loop.", mm.Purged.Load)
+		count("emr_purges_held_total", "EMR purge requests found under a legal hold when due.", mm.Held.Load)
+		count("emr_purges_released_total", "Held EMR purge requests released after a hold was lifted.", mm.Released.Load)
+		count("emr_retention_passes_total", "EMR retention sweep passes.", mm.SweepPasses.Load)
+		count("emr_maint_failures_total", "Failed EMR maintenance steps (page when it rises).", mm.Failures.Load)
+		if err := telemetry.Observe("emr_purges_held_overdue", "EMR purge requests held over 90 days (list them to the operators).", false,
+			func(context.Context) []telemetry.Sample {
+				return []telemetry.Sample{{Value: float64(mm.HeldOverdue.Load())}}
+			}); err != nil {
+			a.log.Warn("core: a metric was not registered", "metric", "emr_purges_held_overdue")
+		}
+	}
 	im := a.intel.Metrics
 	count("jobs_dead_letters_total", "Dead letters read from workers.", im.DeadReceived.Load, jobTypeLabel)
 	count("intelligence_dead_ignored_total", "Dead letters that changed nothing (malformed, replayed, or naming no job).", im.DeadIgnored.Load)
