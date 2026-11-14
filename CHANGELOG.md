@@ -17,7 +17,9 @@ All notable changes to this project are documented here. The format follows
   platform staff did, mapped from the audit log); `GET`/`POST
   /platform/legal-holds`, `GET /platform/legal-holds/{id}` and the
   two-person lift (`/lift` and `/lift/approve` with step-up, 409
-  `same_person` and `expired`; `/lift/cancel`); `GET`/`PUT
+  `same_person` and `expired`, and 409 `conflict` when the requester is no
+  longer an active platform admin; `/lift/cancel`; removing or demoting an
+  admin cancels their open requests); `GET`/`PUT
   /platform/me/analytics-email` (platform admins; stored only, no e-mail is
   sent yet). Core's rules win over the frontend contract where stricter: a
   hold keeps every record (a date range is 422 `invalid_range`), carries no
