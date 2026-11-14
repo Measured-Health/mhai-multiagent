@@ -445,6 +445,9 @@ func TestAmendedToNormalAndEnteredInErrorWithdrawn(t *testing.T) {
 func TestHandledGetsMarkNotReopened(t *testing.T) {
 	w := newWorld(t)
 	c := w.consumer()
+	// The world's own critical finding is out of the way, so no other open
+	// finding of the rule holds the new alert up at the end.
+	withdrawFinding(t, w.finding, "source_amended")
 	urgent := w.addFinding(t, w.patient, w.observation(t, w.patient, 5.9, "final"), fspec{severity: "urgent"})
 	mustHandle(t, c, w.h, urgent)
 	a := alertRows(t, w.h)[0]
