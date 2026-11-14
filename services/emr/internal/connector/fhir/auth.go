@@ -100,9 +100,13 @@ func thumbprint(pub crypto.PublicKey) string {
 		e := b64uint(k.E)
 		j = `{"e":"` + e + `","kty":"RSA","n":"` + base64.RawURLEncoding.EncodeToString(k.N.Bytes()) + `"}`
 	case *ecdsa.PublicKey:
-		x, y := make([]byte, 48), make([]byte, 48)
-		k.X.FillBytes(x)
-		k.Y.FillBytes(y)
+		// The uncompressed point is 0x04 || X || Y, 48 bytes each on P-384
+		// (only P-384 keys are accepted, signingKey above).
+		b, err := k.Bytes()
+		if err != nil || len(b) != 97 {
+			break
+		}
+		x, y := b[1:49], b[49:]
 		j = `{"crv":"P-384","kty":"EC","x":"` + base64.RawURLEncoding.EncodeToString(x) + `","y":"` +
 			base64.RawURLEncoding.EncodeToString(y) + `"}`
 	}

@@ -76,7 +76,7 @@ func TestAllowListDropsEverythingElse(t *testing.T) {
 	// The exporter wraps the span; re-read what the filter left.
 	got := map[string]string{}
 	for _, kv := range spans[0].Attributes {
-		got[string(kv.Key)] = kv.Value.Emit()
+		got[string(kv.Key)] = kv.Value.String()
 	}
 	want := map[string]string{"operation": "pipeline.run_query", "hospital_id": "0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b",
 		"request_id": "abc123", "attempt": "2"}
@@ -274,7 +274,7 @@ func TestHTTPServerSpanUsesPatternAndTraceparent(t *testing.T) {
 		t.Fatal("not parented on the traceparent")
 	}
 	for _, kv := range spans[0].Attributes {
-		if strings.Contains(kv.Value.Emit(), marker) {
+		if strings.Contains(kv.Value.String(), marker) {
 			t.Fatal("marker in attributes")
 		}
 	}

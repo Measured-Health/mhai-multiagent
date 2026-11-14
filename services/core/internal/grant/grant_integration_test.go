@@ -1370,7 +1370,7 @@ func TestGrantSpan(t *testing.T) {
 			t.Errorf("kind %s", sp.SpanKind)
 		}
 		for _, kv := range sp.Attributes {
-			if strings.Contains(kv.Value.Emit(), marker) {
+			if strings.Contains(kv.Value.String(), marker) {
 				t.Errorf("marker in %s", kv.Key)
 			}
 		}

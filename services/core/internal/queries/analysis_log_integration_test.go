@@ -43,11 +43,11 @@ func TestAnalysisQueryNotLogged(t *testing.T) {
 	for _, s := range exp.GetSpans() {
 		texts := []string{s.Name, s.Status.Description}
 		for _, kv := range s.Attributes {
-			texts = append(texts, kv.Value.Emit())
+			texts = append(texts, kv.Value.String())
 		}
 		for _, ev := range s.Events {
 			for _, kv := range ev.Attributes {
-				texts = append(texts, kv.Value.Emit())
+				texts = append(texts, kv.Value.String())
 			}
 		}
 		for _, text := range texts {
