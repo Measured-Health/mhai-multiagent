@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -610,6 +610,110 @@ async def test_job_runs_to_completed(
     # No question text, patient data or answer in any log line (spec §10.3).
     assert MARKER not in caplog.text
     assert StubModelClient.ANSWER not in caplog.text
+
+
+async def test_masked_question_picks_reference_library_candidates(
+    make_env: MakeEnv, postgres: Postgres
+) -> None:
+    """Migration 00040: the job reads a reference library's rows matching
+    the masked question (never the raw one), as shared guidelines."""
+    raw_word = "zyxquorbital"
+    async with await su(postgres) as conn:
+        cur = await conn.execute(
+            "INSERT INTO reference_libraries (name, version, sha256, licence, attribution, "
+            "embedder, chunk_count, active) VALUES ('synthetic-run-query', '1.0.0', "
+            "repeat('cd', 32), 'CC0-1.0 (synthetic)', 'Synthetic.', 'synthetic', 2, true) "
+            "RETURNING id"
+        )
+        found = await cur.fetchone()
+        assert found is not None
+        lib = found[0]
+        await conn.execute(
+            "INSERT INTO kb_chunks (chunk_id, hospital_id, content, chunk_type, library_id) "
+            "VALUES ('KB#1800001', NULL, 'Synthetic masked reference row.', 'guideline', %s), "
+            "('KB#1800002', NULL, %s, 'guideline', %s)",
+            (lib, f"{raw_word.capitalize()} orbit.", lib),
+        )
+    try:
+        env = await make_env()
+        qid = await seed_query(postgres, question=f"Synthetic {raw_word} question {MARKER}")
+        stub = StubModelClient()
+        await env.start(stub)
+        await env.publish(qid)
+        assert await until(lambda: status_is(postgres, qid, "completed"))
+        (seen,) = stub.seen_chunk_ids
+        assert "KB#1800001" in seen  # matches the masked question
+        assert "KB#1800002" not in seen  # matches only the raw one
+    finally:
+        async with await su(postgres) as conn:
+            await conn.execute("DELETE FROM kb_chunks WHERE library_id = %s", (lib,))
+            await conn.execute("DELETE FROM reference_libraries WHERE id = %s", (lib,))
+
+
+class CitingStub(StubModelClient):
+    """The stub, citing the reference library's row it was given."""
+
+    def generate(self, question: str, *args: Any, **kwargs: Any) -> Any:
+        g = super().generate(question, *args, **kwargs)
+        library = tuple(c for c in g.retrieved_chunk_ids if c.startswith("KB#17"))
+        return replace(g, cited_chunk_ids=library[:1] + ("KB#0001",))
+
+
+async def test_decision_keeps_cited_sources(make_env: MakeEnv, postgres: Postgres) -> None:
+    """Reference library PR 3 (00041): the decision stores the title, link
+    and source credit of each cited reference library row; a cited seeded
+    guideline (no title) gives none."""
+    meta = {
+        "kind": "drug_label",
+        "title": "synthetamol (Boxed warning)",
+        "url": "https://dailymed.nlm.nih.gov/dailymed/lookup.cfm?setid=synthetic",
+        "source": "openFDA",
+        "attribution": "Data provided by the U.S. Food and Drug Administration (open.fda.gov).",
+    }
+    async with await su(postgres) as conn:
+        cur = await conn.execute(
+            "INSERT INTO reference_libraries (name, version, sha256, licence, attribution, "
+            "embedder, chunk_count, active) VALUES ('synthetic-cited', '1.0.0', "
+            "repeat('ef', 32), 'CC0-1.0 (synthetic)', 'Synthetic.', 'synthetic', 1, true) "
+            "RETURNING id"
+        )
+        found = await cur.fetchone()
+        assert found is not None
+        lib = found[0]
+        await conn.execute(
+            "INSERT INTO kb_chunks (chunk_id, hospital_id, content, chunk_type, metadata_json, "
+            "library_id) VALUES ('KB#1700001', NULL, 'Synthetic masked boxed warning.', "
+            "'guideline', %s, %s)",
+            (json.dumps(meta), lib),
+        )
+    try:
+        env = await make_env()
+        qid = await seed_query(postgres)
+        await env.start(CitingStub())
+        await env.publish(qid)
+        assert await until(lambda: status_is(postgres, qid, "completed"))
+        async with await su(postgres) as conn:
+            cur = await conn.execute(
+                "SELECT citations_json, cited_sources_json FROM clinical_decisions "
+                "WHERE query_id = %s",
+                (qid,),
+            )
+            stored = await cur.fetchone()
+        assert stored is not None
+        assert stored[0] == ["KB#1700001", "KB#0001"]
+        assert stored[1] == [
+            {
+                "chunk_id": "KB#1700001",
+                "title": meta["title"],
+                "url": meta["url"],
+                "source": "openFDA",
+                "attribution": meta["attribution"],
+            }
+        ]
+    finally:
+        async with await su(postgres) as conn:
+            await conn.execute("DELETE FROM kb_chunks WHERE library_id = %s", (lib,))
+            await conn.execute("DELETE FROM reference_libraries WHERE id = %s", (lib,))
 
 
 async def test_run_query_writes_masked_copy_and_timings(

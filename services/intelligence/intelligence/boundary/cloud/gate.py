@@ -35,7 +35,7 @@ from typing import Any, NoReturn, final
 
 from intelligence.boundary import jobs_repo
 from intelligence.boundary.models import _CHUNK_ID
-from intelligence.knowledge_base.kb_builder import REFERENCE_SOURCE, KBChunk
+from intelligence.knowledge_base.kb_builder import REFERENCE_SOURCE, KBChunk, neutralise_chunk_text
 
 MAX_CHUNKS = 5
 MAX_CHUNK_CHARS = 2000
@@ -372,5 +372,10 @@ class CloudPrompt:
         # swap or change a part after construction, so every check runs
         # again on what is about to be rendered.
         self.__post_init__()
-        chunks = tuple(f"<<chunk {c.chunk_id}>>\n{c.content}\n<<end>>" for c in self.chunks)
+        # The text can't close its block or carry a citation of its own
+        # (kb_builder.neutralise_chunk_text).
+        chunks = tuple(
+            f"<<chunk {c.chunk_id}>>\n{neutralise_chunk_text(c.content)}\n<<end>>"
+            for c in self.chunks
+        )
         return (str(self.question), self.context.render(), *chunks)

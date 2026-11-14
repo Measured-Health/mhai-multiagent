@@ -340,16 +340,17 @@ func (d Deps) result(w http.ResponseWriter, r *http.Request) {
 		retrievalMS, generationMS *float64
 		flagPenalty               *float64
 		modelVersions             []byte
+		sources                   []byte
 	)
 	err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT d.hga_decision, d.verified, d.degraded, d.failed_agents, d.diagnosis, d.icd10_code,
 			       d.response_text, d.trust_score::float8, d.trust_band, d.citations_json, d.retrieval_ms::float8, d.generation_ms::float8,
 			       (SELECT e.flag_penalty::float8 FROM hga_evaluations e WHERE e.query_id = q.id ORDER BY e.id DESC LIMIT 1),
-			       d.model_versions
+			       d.model_versions, d.cited_sources_json
 			FROM clinical_queries q JOIN clinical_decisions d ON d.query_id = q.id AND d.hospital_id = q.hospital_id
 			WHERE q.id = $1 AND q.created_by = $2 AND q.status = 'completed'`, id, p.UserID).
 			Scan(&decision, &verified, &degraded, &failed, &out.Diagnosis, &out.ICD10Code, &responseText, &out.TrustScore,
-				&band, &citations, &retrievalMS, &generationMS, &flagPenalty, &modelVersions)
+				&band, &citations, &retrievalMS, &generationMS, &flagPenalty, &modelVersions, &sources)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, r, "not_found")
@@ -392,6 +393,9 @@ func (d Deps) result(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Title, link and source credit of the cited reference rows, as stored
+	// with the answer; only for ids in cited_chunk_ids.
+	out.CitedSources = citedSources(sources, out.CitedChunkIDs)
 	if retrievalMS != nil {
 		out.RetrievalMS = *retrievalMS
 	}

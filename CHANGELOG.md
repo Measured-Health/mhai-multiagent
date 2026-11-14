@@ -31,6 +31,36 @@ All notable changes to this project are documented here. The format follows
   `CORE_EMR_ENABLED` (T27). `features.named_access` is now live. `core
   analysis named-access demo-on` raises the demo scope to `on`. New problem
   codes: `not_cleared`, `clearance_ended`, `idempotency_mismatch`.
+- Citations show title, link and source (migration **00041**, OpenAPI
+  **1.30.0**, additive): `ClinicalResult.cited_sources`, one
+  `{chunk_id, title, url, source, attribution}` per cited shared reference
+  row, in citation order, only for ids in `cited_chunk_ids`. The pipeline
+  stores them with the decision (`clinical_decisions.cited_sources_json`),
+  from reference rows only (never a hospital's or a patient's chunk), every
+  field checked; core checks them again before showing them, and shows a
+  link only when it is a plain https URL.
+- Reference library v1, `medref` (no migration, no contract change): openFDA
+  drug labels (CC0; safety-critical sections first) and English MedlinePlus
+  health topics (public domain; labelled patient-facing), 23,654 rows. An
+  operator builds it with `services/intelligence/scripts/reflib_convert.py`
+  (streams one member of a source bundle, keeps the approved types only,
+  renumbers from `KB#1000001`, re-embeds with our pinned embedder) and loads
+  it with `services/intelligence/scripts/reflib_load.py`. The
+  artefact is pinned in `models/reference-library.lock` and kept outside the
+  repository (`docs/models/reference-library.md`). Every row carries the FDA
+  or MedlinePlus attribution and a no-warranty note.
+- Knowledge base: a persistent shared reference index (migration **00040**;
+  no contract change). `reference_libraries` records each loaded version of a
+  shared reference library (name, version, SHA-256, licence, attribution,
+  embedder; one active version per name). Library rows are shared, patient-free
+  guidelines in `kb_chunks` with ids `KB#1000001` up, a stored full-text vector
+  and the library's embedding. The worker reads each kind of row under its own
+  bound: the seeded shared guidelines (500), the library's best 100 matches for
+  the masked question (a Postgres full-text pre-filter), and the hospital's own
+  rows (5,000). Shared rows can no longer crowd out a hospital's chunks (the old
+  read was one `LIMIT 5000`, shared rows first). Citations accept the
+  seven-digit ids. 30,000 shared rows: 32 ms to read, 45 ms with indexing and
+  retrieval (boundary test).
 - A clinician's patient lookup by MRN (OpenAPI 1.29.0, additive; migration
   00039), as designed in TODO.md's note and approved by the product owner
   (14 Nov): `POST /patients/lookup` `{mrn}` (never an MRN in a URL), for
