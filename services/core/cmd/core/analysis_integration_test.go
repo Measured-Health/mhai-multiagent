@@ -296,3 +296,70 @@ func TestHospitalsMarkDemo(t *testing.T) {
 		t.Fatalf("seed-demo after marking: %v", err)
 	}
 }
+
+// core analysis named-access demo raises the global and the demo
+// hospital's named-access rows to letters_only with demo references, only
+// for a hospital under the demo's analysis switch, and audits each;
+// named-access off lowers one (plan Task 20, departure 39).
+func TestNamedAccessDemoCLI(t *testing.T) {
+	super, provURL, _ := analysisEnv(t)
+	ctx := context.Background()
+	h := analysisHospital(t, super, "DEMO4")
+	var out bytes.Buffer
+	// Before seed-demo there is no demo analysis switch: refused, nothing written.
+	if err := analysisCmd(ctx, []string{"named-access", "demo", "demo4"}, provURL, &out, nil); err == nil {
+		t.Fatal("raised named access without the demo analysis switch")
+	}
+	if n := scalar(t, super, `SELECT count(*) FROM named_access_switch`); n != 0 {
+		t.Fatalf("%d named-access rows after a refusal", n)
+	}
+	if err := analysisCmd(ctx, []string{"seed-demo", "demo4", "--months", "2"}, provURL, &out,
+		pinned(time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC))); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := analysisCmd(ctx, []string{"named-access", "demo", "demo4"}, provURL, &out, nil); err != nil {
+		t.Fatalf("named-access demo: %v", err)
+	}
+	if !strings.Contains(out.String(), "letters_only") {
+		t.Errorf("output %q", out.String())
+	}
+	if n := scalar(t, super, `SELECT count(*) FROM named_access_switch WHERE (hospital_id IS NULL OR hospital_id = $1)
+		AND position = 'letters_only' AND signoff_clinical = 'DEMO-SYNTHETIC'`, h); n != 2 {
+		t.Errorf("%d demo rows, want 2", n)
+	}
+	if n := scalar(t, super, `SELECT count(*) FROM audit_log WHERE action = 'named_access.changed' AND actor_id IS NULL
+		AND payload->>'position' = 'letters_only' AND payload->>'refs' = 'demo'`); n != 2 {
+		t.Errorf("%d raise entries, want 2", n)
+	}
+	// Again: nothing changes, nothing is audited.
+	if err := analysisCmd(ctx, []string{"named-access", "demo", "demo4"}, provURL, &out, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := scalar(t, super, `SELECT count(*) FROM audit_log WHERE action = 'named_access.changed'`); n != 2 {
+		t.Errorf("%d entries after a repeat, want 2", n)
+	}
+	// A hospital that isn't the demo is refused.
+	if _, err := super.Exec(ctx, `INSERT INTO hospitals (name, short_code, status, time_zone) VALUES ('Synthetic Real', 'REAL4', 'active', 'UTC')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := analysisCmd(ctx, []string{"named-access", "demo", "real4"}, provURL, &out, nil); err == nil {
+		t.Error("raised named access for a hospital that isn't the demo")
+	}
+	// Off.
+	out.Reset()
+	if err := analysisCmd(ctx, []string{"named-access", "off", "demo4"}, provURL, &out, nil); err != nil {
+		t.Fatalf("named-access off: %v", err)
+	}
+	if n := scalar(t, super, `SELECT count(*) FROM named_access_switch WHERE hospital_id = $1 AND position = 'off'`, h); n != 1 {
+		t.Error("the hospital's row is not off")
+	}
+	if n := scalar(t, super, `SELECT count(*) FROM audit_log WHERE action = 'named_access.changed' AND payload->>'position' = 'off'
+		AND payload->>'hospital_id' = $1`, h.String()); n != 1 {
+		t.Errorf("%d lowering entries, want 1", n)
+	}
+	out.Reset()
+	if err := analysisCmd(ctx, []string{"named-access", "off", "demo4"}, provURL, &out, nil); err != nil || !strings.Contains(out.String(), "already off") {
+		t.Errorf("second off: %v %q", err, out.String())
+	}
+}

@@ -647,6 +647,26 @@ Source: the clinical app's Plan 11a (`apps/clinical/lib/api/clearances-contract.
 sample data; platform verification is Plan 11b, §14.10; named rows in
 Analysis are Plan 11c).
 
+**Built (Analysis PR 7, OpenAPI 1.28.0, off by default, demo hospital
+only).** The routes below, for hospital admins with two-step. Where the
+backend differs from this section: 404 `not_found` while the hospital's
+analysis switch is off, before 403 `named_access_off`; an
+`Idempotency-Key` is required on the three writes (422 without); a bad
+shape is `validation_failed`, not `invalid`; a page that isn't ready is
+**503** `not_ready` (H6e); a body past the API's 64 KB limit is 413
+`file_too_large` (the live 10 MB path waits for the documents service, and
+a live upload is 503 `unavailable` with nothing stored); in the demo a
+letter is `waiting` at once, with 2 sample pages; `history` has one
+`narrowed` line per person removed; `refused`, `verified` and `rejected`
+come with Plan 11b; 422 `not_eligible_platform` carries no `emails` list (the
+platform's accounts are not a lookup); a hospital that isn't the demo gets
+503 `unavailable` for every upload, whatever the body; 429 `rate_limited`
+after 5 eligibility refusals in a day; `covered_platform` lists a platform
+admin only once Measured Health has verified a letter of the hospital
+naming them. Audit kinds: `clearance_uploaded`, `_narrowed`,
+`_revoked`, `_ended`, `_viewed`, `_reminder_sent` (target the letter, no
+facts); the demo's `ready` is sent bare.
+
 **The gate.** Named access is live for a person only when all three hold:
 the user's `features.named_access` from the API is true, Analysis is on for
 them, and the deployment has `NAMED_ACCESS_SIGNED_OFF=true`. The key can
