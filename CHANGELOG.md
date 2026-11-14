@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Reference library v1, `medref` (no migration, no contract change): openFDA
+  drug labels (CC0; safety-critical sections first) and English MedlinePlus
+  health topics (public domain; labelled patient-facing), 23,654 rows. An
+  operator builds it with `services/intelligence/scripts/reflib_convert.py`
+  (streams one member of a source bundle, keeps the approved types only,
+  renumbers from `KB#1000001`, re-embeds with our pinned embedder) and loads
+  it with `services/intelligence/scripts/reflib_load.py`. The
+  artefact is pinned in `models/reference-library.lock` and kept outside the
+  repository (`docs/models/reference-library.md`). Every row carries the FDA
+  or MedlinePlus attribution and a no-warranty note.
 - Knowledge base: a persistent shared reference index (migration **00040**;
   no contract change). `reference_libraries` records each loaded version of a
   shared reference library (name, version, SHA-256, licence, attribution,
