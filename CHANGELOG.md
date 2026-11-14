@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Model store: a weight file over 5 GiB (one PUT; Gemma 4's per-layer
+  embedding is one 5.6 GB tensor) goes up as a conditional multipart upload,
+  up to 50 GiB per file (the run cap stays 200 GiB). Off unless the writer
+  runs with `MODEL_STORE_CONDITIONAL_MULTIPART=1`, set only after
+  `mhai-models store-probe-multipart` shows the store refuses a completion
+  with `If-None-Match: *` over an existing object; without it such a file is
+  refused, never written unconditionally. Every part carries its SHA-256, the
+  whole file's SHA-256 must be the run's files hash before completion, what
+  the store kept is read back, and any failure aborts the upload.
+  `mhai-models store-abort-stale-uploads` and a lifecycle rule
+  (deploy/model-store/README.md) clean up uploads a killed job leaves. The
+  export step allows files up to 50 GiB and notes when one needs this.
 - Patient Analysis PR 8: named access (migration **00042**, OpenAPI
   **1.31.0**; off by default: a named list needs the hospital's analysis
   switch on, its effective named-access position `on`, which no hospital's
