@@ -19,7 +19,7 @@ func TestMigrateUpCommand(t *testing.T) {
 	if err := migrate(context.Background(), []string{"up"}, pg.URL, &out); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-	if got := strings.Count(out.String(), "applied"); got != 31 { // 00001-00031
+	if got := strings.Count(out.String(), "applied"); got != 32 { // 00001-00031 and 00034
 		t.Fatalf("want 31 applied migrations, got output:\n%s", out.String())
 	}
 }

@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 34}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -327,6 +327,19 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 	alertTables := []string{"alerts", "alert_deliveries", "alert_settings", "alert_units", "alert_levels", "alert_recipients",
 		"user_notification_settings"}
 
+	// A letter, its person and an event (00034), so they have rows to hide.
+	letter := uuid.New()
+	for _, q := range []string{
+		`INSERT INTO clearances (id, hospital_id, signed_by, signer_title, letter_date, end_date, uploaded_by)
+			VALUES ($2, $1, 'Synthetic Signer', 'Synthetic Title', current_date, current_date + 30, $3)`,
+		`INSERT INTO clearance_covered (hospital_id, clearance_id, user_id, side) VALUES ($1, $2, $3, 'hospital')`,
+		`INSERT INTO clearance_events (hospital_id, clearance_id, kind, by_user) VALUES ($1, $2, 'uploaded', $3)`,
+	} {
+		if _, err := pool.Exec(ctx, q, a, letter, fb); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// One connection, so the second transaction reuses the session that
 	// had mhai.hospital_id set by the first.
 	cfg := pool.Config().Copy()
@@ -347,7 +360,8 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		"analysis_first_seen", "analysis_periods", "analysis_pseudonyms", "analysis_watermarks",
 		"analysis_subject_attrs", "analysis_hospital_start", "analysis_snapshots", "analysis_view_log", "analysis_unusual",
 		"analysis_cold_budget", "analysis_cold_contexts", "analysis_views", "analysis_view_rows", "analysis_patient_budget",
-		"analysis_patient_opens", "analysis_drill_flags", "analyst_changes"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
+		"analysis_patient_opens", "analysis_drill_flags", "analyst_changes",
+		"clearances", "clearance_covered", "clearance_events", "named_access_switch"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -364,6 +378,11 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		_ = tx.Rollback(ctx)
 		if table == "audit_verify_runs" {
 			requireDenied(t, err, "gateway reading audit_verify_runs")
+			continue
+		}
+		if table == "named_access_switch" {
+			// 00034: read through mhai_named_access_position only.
+			requireDenied(t, err, "gateway reading named_access_switch")
 			continue
 		}
 		if table == "analyst_changes" {
