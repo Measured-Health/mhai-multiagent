@@ -42,7 +42,9 @@ const jsStoreFailed jetstream.ErrorCode = 10077
 // (ErrSecondPerson; subjects.go). Republish goes through the same path.
 //
 // A message with a job_id field (ApproveCorrectionJob) must name jobID
-// there, else ErrMisuse.
+// there, else ErrMisuse. A message that names a patient (RunQueryJob's
+// patient_id) must name one the caller carries (CheckPatient), else
+// ErrMisuse; the token's pids are the caller's.
 //
 // Errors: ErrNotAllowed, ErrMisuse, ErrSecondPerson, ErrNoHospital, ErrDeadline (nothing
 // published); ErrBackpressure (JOBS refused it), ErrNoResponders,
@@ -77,7 +79,7 @@ func (c *Client) publishJob(ctx context.Context, caller Caller, opName, msgID st
 	if err := checkCaller(op, caller); err != nil {
 		return err
 	}
-	if !validMsgID(msgID) || c.JS == nil || !jobIDMatches(msg, msgID[:36]) {
+	if !validMsgID(msgID) || c.JS == nil || !jobIDMatches(msg, msgID[:36]) || !patientsCarried(msg, caller.pids) {
 		return ErrMisuse
 	}
 	if op.SecondPerson {
@@ -115,7 +117,7 @@ func (c *Client) publishJob(ctx context.Context, caller Caller, opName, msgID st
 	}
 	tok, _, err := signer.Mint(reqtoken.Claims{
 		Aud: op.Service, Sub: caller.Sub, Hid: caller.Hid, Roles: slices.Clone(caller.Roles), Rid: caller.Rid,
-		Kind: reqtoken.KindJob, Subject: subject, Via: reqtoken.ViaCore,
+		Kind: reqtoken.KindJob, Subject: subject, Via: reqtoken.ViaCore, PatientIDs: slices.Clone(caller.pids),
 	}, body, ttl)
 	if err != nil {
 		c.log().Error("intel: refused to mint", "operation", op.Name, "request_id", caller.Rid, "error", err)

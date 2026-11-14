@@ -17,7 +17,7 @@ Design: `docs/specs/2026-10-26-go-gateway-nats-and-auth-design.md`.
   (`go run ./cmd/permgen`; a test fails when they are stale).
 
 Module `github.com/Measured-Health/mhai-multiagent/services/core`, binary
-`core`, Go 1.24.
+`core`, Go 1.26.
 
 ## Commands
 
@@ -52,7 +52,7 @@ email, name or password.
 From `services/core/` (or `make core-test` / `make core-lint` from the root):
 
 ```bash
-gofmt -l . && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+gofmt -l . && go vet ./... && go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
 go test -race ./...                              # unit tests
 go test -race -tags integration ./...            # + Postgres and NATS in containers
 go test -race -tags "integration test" ./...     # + the /_test/ fixture routes

@@ -7,3 +7,11 @@ func SetAfterCommit(f func()) (restore func()) {
 	afterCommit = f
 	return func() { afterCommit = old }
 }
+
+// SetBetweenCheckAndInsert runs f after the patient check and before the
+// insert (a test hook for an exclusion racing the submit).
+func SetBetweenCheckAndInsert(f func()) (restore func()) {
+	old := betweenCheckAndInsert
+	betweenCheckAndInsert = f
+	return func() { betweenCheckAndInsert = old }
+}

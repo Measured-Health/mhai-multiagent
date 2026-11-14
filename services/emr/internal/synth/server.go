@@ -55,6 +55,12 @@ type Options struct {
 	Pub crypto.PublicKey
 	// Now is the clock (nil: time.Now).
 	Now func() time.Time
+	// Late makes Observations, last updated at the time given, that are
+	// served only from LateAfter after the first Observation search (a
+	// connection's first sync, whose backfill is historical by design): a
+	// fresh result arriving later (synth-fhir --late-critical). Nil: none.
+	Late      func(at time.Time) []map[string]any
+	LateAfter time.Duration
 }
 
 type store struct {
@@ -63,6 +69,8 @@ type store struct {
 	mu     sync.Mutex
 	tokens map[string]time.Time
 	jtis   map[string]time.Time
+	// firstObs is the first Observation search (Options.Late).
+	firstObs time.Time
 }
 
 // Handler serves ps (and the synthetic wards).
@@ -83,6 +91,25 @@ func Handler(ps []Patient, o Options) http.Handler {
 		sort.SliceStable(s.byType[t], func(i, j int) bool { return lastUpdated(s.byType[t][i]) < lastUpdated(s.byType[t][j]) })
 	}
 	return s
+}
+
+// late is Options.Late's Observations once they are due: the first
+// Observation search starts the clock (and is served without them).
+func (s *store) late() []map[string]any {
+	if s.opts.Late == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if s.firstObs.IsZero() {
+		s.firstObs = now
+	}
+	at := s.firstObs.Add(s.opts.LateAfter).UTC().Truncate(time.Second)
+	if now.Before(at) {
+		return nil
+	}
+	return s.opts.Late(at)
 }
 
 func (s *store) now() time.Time {
@@ -209,6 +236,9 @@ func (s *store) assertionOK(a string) bool {
 func (s *store) search(w http.ResponseWriter, r *http.Request, typ string) {
 	q := r.URL.Query()
 	all := s.byType[typ]
+	if typ == "Observation" && q.Get("_summary") == "" {
+		all = append(slices.Clone(all), s.late()...)
+	}
 	if q.Get("_summary") == "count" {
 		writeJSON(w, map[string]any{"resourceType": "Bundle", "type": "searchset", "total": len(all)})
 		return

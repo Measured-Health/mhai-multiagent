@@ -21,11 +21,16 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// RunQueryJob carries the query id only. The worker reads the rest from the
-// database under the hospital in the verified job token.
+// RunQueryJob carries the query id, and the MHAI patient the question is
+// about when it names one. The worker reads the rest from the database under
+// the hospital in the verified job token. patient_id is not trusted alone:
+// the worker refuses a job whose patient_id isn't in the token's pids claim
+// (spec §7.3 check 8), and core puts a patient there only after checking it
+// is an active patient of the hospital (EMR design §10.5).
 type RunQueryJob struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	QueryId       string                 `protobuf:"bytes,1,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"`
+	PatientId     string                 `protobuf:"bytes,2,opt,name=patient_id,json=patientId,proto3" json:"patient_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -63,6 +68,13 @@ func (*RunQueryJob) Descriptor() ([]byte, []int) {
 func (x *RunQueryJob) GetQueryId() string {
 	if x != nil {
 		return x.QueryId
+	}
+	return ""
+}
+
+func (x *RunQueryJob) GetPatientId() string {
+	if x != nil {
+		return x.PatientId
 	}
 	return ""
 }
@@ -167,9 +179,11 @@ var File_mhai_intelligence_v1_pipeline_proto protoreflect.FileDescriptor
 
 const file_mhai_intelligence_v1_pipeline_proto_rawDesc = "" +
 	"\n" +
-	"#mhai/intelligence/v1/pipeline.proto\x12\x14mhai.intelligence.v1\x1a#mhai/intelligence/v1/envelope.proto\"(\n" +
+	"#mhai/intelligence/v1/pipeline.proto\x12\x14mhai.intelligence.v1\x1a#mhai/intelligence/v1/envelope.proto\"G\n" +
 	"\vRunQueryJob\x12\x19\n" +
-	"\bquery_id\x18\x01 \x01(\tR\aqueryId\"\x0f\n" +
+	"\bquery_id\x18\x01 \x01(\tR\aqueryId\x12\x1d\n" +
+	"\n" +
+	"patient_id\x18\x02 \x01(\tR\tpatientId\"\x0f\n" +
 	"\rHealthRequest\"\x92\x01\n" +
 	"\x0eHealthResponse\x126\n" +
 	"\x04meta\x18\x01 \x01(\v2\".mhai.intelligence.v1.ResponseMetaR\x04meta\x12!\n" +
