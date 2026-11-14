@@ -236,6 +236,38 @@ def test_body_hospital_mismatch_refused(make: Callable[..., Verifier], signer: S
     handler.assert_not_called()
 
 
+# A patient core didn't check: not in the token's pids claim (EMR plan Task
+# 48, check 8). Synthetic ids.
+UNCHECKED_PATIENT = "9c4e1b7a-5d2f-4e83-a6b0-3f71c8d2e590"
+
+
+def patient_job_body(patient: str) -> bytes:
+    return pipeline_pb2.RunQueryJob(query_id=QUERY_ID, patient_id=patient).SerializeToString(
+        deterministic=True
+    )
+
+
+def test_job_patient_outside_pids_refused(make: Callable[..., Verifier], signer: Signer) -> None:
+    body = patient_job_body(UNCHECKED_PATIENT)
+    handler = mock.Mock()
+    for pids in (None, [PATIENT]):
+        tok = signer.mint_job(body, pids=pids)
+        r = make("pipeline").verify_job(JOB_SUBJECT, headers(tok, JOB_SCHEMA), body, job_decoder)
+        if isinstance(r, Verified):
+            handler(r)
+        assert refused(r, "scope").code == "invalid_request"
+    handler.assert_not_called()
+
+
+def test_job_patient_in_pids_verified(make: Callable[..., Verifier], signer: Signer) -> None:
+    body = patient_job_body(PATIENT)
+    tok = signer.mint_job(body, pids=[PATIENT])
+    v = make("pipeline").verify_job(JOB_SUBJECT, headers(tok, JOB_SCHEMA), body, job_decoder)
+    assert isinstance(v, Verified)
+    assert v.patient_ids == (PATIENT,)
+    assert isinstance(v.message, pipeline_pb2.RunQueryJob) and v.message.patient_id == PATIENT
+
+
 def test_alg_none_hs256_unknown_kid_and_long_exp_refused(
     make: Callable[..., Verifier], signer: Signer
 ) -> None:

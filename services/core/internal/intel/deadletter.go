@@ -299,18 +299,18 @@ func lookupDeadJob(ctx context.Context, pool *pgxpool.Pool, id, hid uuid.UUID, t
 		return r, false, errDeadTx
 	}
 	err := db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
-		var by *uuid.UUID
+		var by, pid *uuid.UUID
 		var row pgx.Row
 		if typ == jobType {
 			row = tx.QueryRow(ctx, `SELECT id, hospital_id, created_by, COALESCE(request_id, ''), attempts, status,
-			       COALESCE(deadline_at, created_at + make_interval(secs => $3)), '', id
+			       COALESCE(deadline_at, created_at + make_interval(secs => $3)), '', id, patient_id
 			FROM clinical_queries WHERE id = $1 AND hospital_id = $2`, id, hid, op.Timeout.Seconds())
 		} else {
 			row = tx.QueryRow(ctx, `SELECT j.id, j.hospital_id, j.created_by, COALESCE(j.request_id, ''), j.attempts, j.status,
-			       `+jobDeadline("j.")+`, j.type, j.subject_id
+			       `+jobDeadline("j.")+`, j.type, j.subject_id, NULL::uuid
 			FROM jobs j WHERE j.id = $1 AND j.hospital_id = $2 AND j.type = $3`, id, hid, typ)
 		}
-		err := row.Scan(&r.ID, &r.HospitalID, &by, &r.RequestID, &r.Attempts, &r.status, &r.Deadline, &r.Type, &r.SubjectID)
+		err := row.Scan(&r.ID, &r.HospitalID, &by, &r.RequestID, &r.Attempts, &r.status, &r.Deadline, &r.Type, &r.SubjectID, &pid)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -319,6 +319,9 @@ func lookupDeadJob(ctx context.Context, pool *pgxpool.Pool, id, hid uuid.UUID, t
 		}
 		if by != nil {
 			r.CreatedBy = *by
+		}
+		if pid != nil {
+			r.PatientID = *pid
 		}
 		found = true
 		return nil

@@ -8,6 +8,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
+
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 )
 
@@ -55,6 +57,10 @@ type QueryCreateIn struct {
 	Urgency          string       `json:"urgency"`
 	Specialty        *string      `json:"specialty,omitempty"`
 	ClientCreatedAt  *string      `json:"client_created_at,omitempty"`
+	// PatientID is the MHAI patient the question is about (EMR design
+	// §10.5): a lower-case uuid, checked against the caller's hospital
+	// before anything is stored (404 not_found otherwise).
+	PatientID *string `json:"patient_id,omitempty"`
 }
 
 // valid checks q. It never says which field failed: the answer is 422
@@ -87,7 +93,26 @@ func (q *QueryCreateIn) valid() bool {
 			return false
 		}
 	}
+	if q.PatientID != nil {
+		if _, ok := q.patient(); !ok {
+			return false
+		}
+	}
 	return true
+}
+
+// patient is the patient id the question names: ok is false when it isn't
+// a canonical (lower-case, hyphenated, non-nil) uuid; uuid.Nil with ok for
+// none.
+func (q *QueryCreateIn) patient() (uuid.UUID, bool) {
+	if q.PatientID == nil {
+		return uuid.Nil, true
+	}
+	id, err := uuid.Parse(*q.PatientID)
+	if err != nil || id == uuid.Nil || id.String() != *q.PatientID {
+		return uuid.Nil, false
+	}
+	return id, true
 }
 
 // category is the stored specialty, or "" for none.

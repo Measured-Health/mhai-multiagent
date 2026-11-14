@@ -72,7 +72,7 @@ func Register(m *authz.Mux, d Deps) {
 		a = &auth.Service{}
 	}
 	a.Register(m)
-	queries.Register(m, queries.Deps{Pool: d.Pool, Intel: d.Intel, Cap: d.QueryCap})
+	queries.Register(m, queries.Deps{Pool: d.Pool, Intel: d.Intel, Cap: d.QueryCap, Patients: d.EMREnabled})
 	// The feedback routes log through the service's logger, whether or not
 	// an intelligence client is set.
 	feedback.Register(m, feedback.Deps{Pool: d.Pool, Intel: d.Intel, Log: a.Log})

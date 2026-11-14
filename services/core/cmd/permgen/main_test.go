@@ -102,7 +102,7 @@ func TestIntelligencePageIsGenerated(t *testing.T) {
 		}
 	}
 	// Comments from the .proto files come through.
-	if !strings.Contains(page, "carries the query id only") {
+	if !strings.Contains(page, "carries the query id, and the MHAI patient") {
 		t.Error("intelligence page lacks the RunQueryJob comment from pipeline.proto")
 	}
 	if corePagePath != "/api/docs" || intelligencePagePath != "/api/docs/intelligence" || logoPath != "/api/docs/logo.png" {

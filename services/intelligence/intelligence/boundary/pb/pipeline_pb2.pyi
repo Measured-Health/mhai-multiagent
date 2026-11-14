@@ -19,22 +19,29 @@ DESCRIPTOR: _descriptor.FileDescriptor
 
 @_typing.final
 class RunQueryJob(_message.Message):
-    """RunQueryJob carries the query id only. The worker reads the rest from the
-    database under the hospital in the verified job token.
+    """RunQueryJob carries the query id, and the MHAI patient the question is
+    about when it names one. The worker reads the rest from the database under
+    the hospital in the verified job token. patient_id is not trusted alone:
+    the worker refuses a job whose patient_id isn't in the token's pids claim
+    (spec §7.3 check 8), and core puts a patient there only after checking it
+    is an active patient of the hospital (EMR design §10.5).
     """
 
     DESCRIPTOR: _descriptor.Descriptor
 
     QUERY_ID_FIELD_NUMBER: _builtins.int
+    PATIENT_ID_FIELD_NUMBER: _builtins.int
     query_id: _builtins.str
+    patient_id: _builtins.str
     def __init__(
         self,
         *,
         query_id: _builtins.str = ...,
+        patient_id: _builtins.str = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["query_id", b"query_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["patient_id", b"patient_id", "query_id", b"query_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

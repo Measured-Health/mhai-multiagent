@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from . import envelope_pb2 as mhai_dot_intelligence_dot_v1_dot_envelope__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n#mhai/intelligence/v1/pipeline.proto\x12\x14mhai.intelligence.v1\x1a#mhai/intelligence/v1/envelope.proto\"\x1f\n\x0bRunQueryJob\x12\x10\n\x08query_id\x18\x01 \x01(\t\"\x0f\n\rHealthRequest\"p\n\x0eHealthResponse\x12\x30\n\x04meta\x18\x01 \x01(\x0b\x32\".mhai.intelligence.v1.ResponseMeta\x12\x14\n\x0cmodels_ready\x18\x02 \x01(\x08\x12\x16\n\x0e\x64\x61tabase_ready\x18\x03 \x01(\x08\x42SZQgithub.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb;intelpbb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n#mhai/intelligence/v1/pipeline.proto\x12\x14mhai.intelligence.v1\x1a#mhai/intelligence/v1/envelope.proto\"3\n\x0bRunQueryJob\x12\x10\n\x08query_id\x18\x01 \x01(\t\x12\x12\n\npatient_id\x18\x02 \x01(\t\"\x0f\n\rHealthRequest\"p\n\x0eHealthResponse\x12\x30\n\x04meta\x18\x01 \x01(\x0b\x32\".mhai.intelligence.v1.ResponseMeta\x12\x14\n\x0cmodels_ready\x18\x02 \x01(\x08\x12\x16\n\x0e\x64\x61tabase_ready\x18\x03 \x01(\x08\x42SZQgithub.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb;intelpbb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,9 +34,9 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'ZQgithub.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb;intelpb'
   _globals['_RUNQUERYJOB']._serialized_start=98
-  _globals['_RUNQUERYJOB']._serialized_end=129
-  _globals['_HEALTHREQUEST']._serialized_start=131
-  _globals['_HEALTHREQUEST']._serialized_end=146
-  _globals['_HEALTHRESPONSE']._serialized_start=148
-  _globals['_HEALTHRESPONSE']._serialized_end=260
+  _globals['_RUNQUERYJOB']._serialized_end=149
+  _globals['_HEALTHREQUEST']._serialized_start=151
+  _globals['_HEALTHREQUEST']._serialized_end=166
+  _globals['_HEALTHRESPONSE']._serialized_start=168
+  _globals['_HEALTHRESPONSE']._serialized_end=280
 # @@protoc_insertion_point(module_scope)

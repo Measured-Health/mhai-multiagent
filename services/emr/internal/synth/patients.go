@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -157,4 +158,25 @@ func GenerateAt(seed int64, n int, anchor time.Time) []Patient {
 		out = append(out, p)
 	}
 	return out
+}
+
+// LateCritical is a new critical potassium for p, taken 10 minutes before
+// at and last updated at at: served late (Options.Late), it reaches a
+// connection after its first sync's backfill, as a fresh result.
+func LateCritical(p Patient, at time.Time) map[string]any {
+	enc, _ := p.Encounter["id"].(string)
+	taken := at.Add(-10 * time.Minute)
+	return map[string]any{"resourceType": "Observation", "id": "syn-o-" + strings.TrimPrefix(p.ID, "syn-p-") + "-k-late",
+		"meta":   meta("1", at),
+		"status": "final",
+		"category": []any{map[string]any{"coding": []any{map[string]any{
+			"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}}}},
+		"code":              map[string]any{"coding": []any{map[string]any{"system": LabSystem, "code": "K", "display": "Potassium"}}},
+		"subject":           map[string]any{"reference": "Patient/" + p.ID},
+		"encounter":         map[string]any{"reference": "Encounter/" + enc},
+		"effectiveDateTime": taken.In(time.FixedZone("+01:00", 3600)).Format(time.RFC3339),
+		"issued":            taken.Add(5 * time.Minute).UTC().Format(time.RFC3339),
+		"valueQuantity":     map[string]any{"value": jsonNumber("7.12"), "unit": "mmol/L"},
+		"interpretation":    []any{map[string]any{"coding": []any{map[string]any{"code": "HH"}}}},
+	}
 }
