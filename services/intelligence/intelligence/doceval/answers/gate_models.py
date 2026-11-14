@@ -144,29 +144,31 @@ def _found(folder: Path) -> set[str]:
     return found
 
 
+def verify_role(lock: Mapping[str, PinnedModel], root: Path | str, role: str) -> Path:
+    """One role's folder under ``root``, checked file by file (see the module docstring)."""
+    folder = Path(root) / role
+    if not folder.is_dir() or folder.is_symlink():
+        raise Refused("missing_file", detail_code="gate_models")
+    listed = lock[role].files
+    found = _found(folder)
+    if set(listed) - found:
+        raise Refused("missing_file", detail_code="gate_models")
+    if found - set(listed):
+        raise Refused("extra_file", detail_code="gate_models")
+    for rel, sha in sorted(listed.items()):
+        failed = False
+        try:
+            got = _sha256(folder / rel)
+        except OSError:
+            failed = True
+        if failed or not secrets.compare_digest(got, sha):
+            raise Refused("hash_mismatch", detail_code="gate_models")
+    return folder
+
+
 def verify(lock: Mapping[str, PinnedModel], root: Path | str) -> dict[str, Path]:
     """Each role's folder under ``root``, checked file by file (see the module docstring)."""
-    out: dict[str, Path] = {}
-    for role in ROLES:
-        folder = Path(root) / role
-        if not folder.is_dir() or folder.is_symlink():
-            raise Refused("missing_file", detail_code="gate_models")
-        listed = lock[role].files
-        found = _found(folder)
-        if set(listed) - found:
-            raise Refused("missing_file", detail_code="gate_models")
-        if found - set(listed):
-            raise Refused("extra_file", detail_code="gate_models")
-        for rel, sha in sorted(listed.items()):
-            failed = False
-            try:
-                got = _sha256(folder / rel)
-            except OSError:
-                failed = True
-            if failed or not secrets.compare_digest(got, sha):
-                raise Refused("hash_mismatch", detail_code="gate_models")
-        out[role] = folder
-    return out
+    return {role: verify_role(lock, root, role) for role in ROLES}
 
 
 def paths_from_env(env: Mapping[str, str] | None = None) -> dict[str, Path]:
@@ -181,18 +183,24 @@ def paths_from_env(env: Mapping[str, str] | None = None) -> dict[str, Path]:
     return verify(lock, root)
 
 
-def fetch(lock: Mapping[str, PinnedModel], root: Path) -> dict[str, Path]:  # pragma: no cover
-    """Download each pinned revision's listed files into ``<root>/<role>``, then verify."""
+def fetch_role(lock: Mapping[str, PinnedModel], root: Path, role: str) -> Path:  # pragma: no cover
+    """Download one pinned revision's listed files into ``<root>/<role>``, then verify."""
     from huggingface_hub import snapshot_download
 
+    m = lock[role]
+    snapshot_download(
+        m.repo,
+        revision=m.revision,
+        allow_patterns=sorted(m.files),
+        local_dir=str(root / role),
+    )
+    return verify_role(lock, root, role)
+
+
+def fetch(lock: Mapping[str, PinnedModel], root: Path) -> dict[str, Path]:  # pragma: no cover
+    """Download each pinned revision's listed files into ``<root>/<role>``, then verify."""
     for role in ROLES:
-        m = lock[role]
-        snapshot_download(
-            m.repo,
-            revision=m.revision,
-            allow_patterns=sorted(m.files),
-            local_dir=str(root / role),
-        )
+        fetch_role(lock, root, role)
     return verify(lock, root)
 
 

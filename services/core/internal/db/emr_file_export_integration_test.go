@@ -157,8 +157,8 @@ func TestMigration00043DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := db.MigrateDownTo(ctx, pg.URL, 39); err != nil {
-		t.Fatalf("down to 39: %v", err)
+	if err := db.MigrateDownTo(ctx, pg.URL, 42); err != nil {
+		t.Fatalf("down to 42: %v", err)
 	}
 	var cols int
 	var body string

@@ -373,3 +373,28 @@ def test_answer_repr_has_no_text() -> None:
     a = validate_answer(_raw(), SENT)
     assert MARKER not in repr(a)
     assert MARKER not in str(a)
+
+
+def test_reference_library_citation_passes_when_sent() -> None:
+    """A reference library's row has a seven-digit id (migration 00040)."""
+    sent = SENT | {"KB#1000042"}
+    raw = _raw(answer="Check the boxed warning [KB#1000042].", citations=["KB#1000042"])
+    assert validate_answer(raw, sent).citations == ("KB#1000042",)
+
+
+@pytest.mark.parametrize(
+    ("answer", "citations", "rule"),
+    [
+        ("Unsent [KB#1000043].", ["KB#1000043"], "citation_unknown"),
+        ("Leading zero [KB#0100042].", ["KB#0100042"], "citation_format"),
+        ("Six digits [KB#100004].", ["KB#100004"], "citation_format"),
+        ("Eight digits [KB#10000420].", ["KB#10000420"], "citation_format"),
+        ("Lookalike [KB#10000420] [KB#1000042].", ["KB#1000042"], "markers"),
+    ],
+)
+def test_reference_library_lookalikes_are_refused(
+    answer: str, citations: list[str], rule: str
+) -> None:
+    with pytest.raises(Malformed) as info:
+        validate_answer(_raw(answer=answer, citations=citations), SENT | {"KB#1000042"})
+    assert info.value.rule == rule

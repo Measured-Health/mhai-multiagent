@@ -33,6 +33,7 @@ import os
 import json
 import glob
 import re
+import unicodedata
 import time
 import hashlib
 import numpy as np
@@ -54,6 +55,29 @@ logger = logging.getLogger("MHAI.M3.RAG")
 REFERENCE_SOURCE = "reference"
 UNASSIGNED_SOURCE = "unassigned"
 RESERVED_PATIENT_IDS = frozenset({REFERENCE_SOURCE, UNASSIGNED_SOURCE, "unknown", "ref", ""})
+# A citation in an answer: [KB#nnnn] (a hospital's or a seeded guideline's
+# chunk) or [KB#nnnnnnn] (a reference library's, migration 00040). The group
+# is the number.
+CITATION_MARKER = r'\[KB#(\d{4}|[1-9]\d{6})\]'
+
+# What chunk text may never carry into a prompt: a block delimiter ("<<",
+# ">>", the cloud prompt's <<chunk ...>> and <<end>>) or a citation ("KB#",
+# with any case, spacing or full-width form). neutralise_chunk_text breaks
+# each one, so a chunk (a reference row or a hospital's own) can't close
+# its block, open another, or bring a citation of its own.
+_KB_MARK = re.compile(r'(?i)k\s*b\s*#')
+
+
+def neutralise_chunk_text(text: str) -> str:
+    """Chunk text as it may appear in a prompt: NFKC-folded, every "<<" and
+    ">>" broken with a space, and "KB#" written "KB no." (repeated until
+    nothing changes, so "<<<<" can't rebuild one)."""
+    out = unicodedata.normalize("NFKC", str(text))
+    while True:
+        new = _KB_MARK.sub("KB no. ", out.replace("<<", "< <").replace(">>", "> >"))
+        if new == out:
+            return out
+        out = new
 
 
 def is_valid_patient_id(patient_id) -> bool:
@@ -84,6 +108,9 @@ class KBChunk:
     source_subject_id: str       # Which subject within the record
     metadata: Dict[str, Any] = field(default_factory=dict)
     embedding: Optional[np.ndarray] = None  # Dense vector (set after encoding)
+    # The model `embedding` came from ("<repo>@<revision>"), when it came
+    # with the chunk (a reference library row) rather than from this job.
+    embedder: str = ""
 
 
 @dataclass
@@ -433,22 +460,45 @@ class DenseRetriever:
             logger.warning("sentence-transformers not available; using TF-IDF fallback")
             self._loaded = False
 
-    def index(self, chunks: List[Tuple[str, str]]):
+    def index(
+        self,
+        chunks: List[Tuple[str, str]],
+        precomputed: Optional[Dict[str, np.ndarray]] = None,
+    ):
         """
         Index a list of (chunk_id, content) pairs.
 
         Args:
             chunks: List of (chunk_id, text_content) tuples
+            precomputed: {chunk_id: vector} made with this retriever's
+                model (a reference library's rows): used instead of
+                encoding those chunks again. Ignored, and everything
+                encoded, if any vector's size isn't the model's.
         """
         self.chunk_ids = [cid for cid, _ in chunks]
         texts = [text for _, text in chunks]
 
         if self._loaded and self.model is not None:
-            logger.info(f"Encoding {len(texts)} chunks with {self.model_name}...")
-            self.chunk_embeddings = self.model.encode(
-                texts, show_progress_bar=True,
-                batch_size=32, normalize_embeddings=True
-            )
+            reuse = self._usable(precomputed)
+            todo = [i for i, cid in enumerate(self.chunk_ids) if cid not in reuse]
+            logger.info(f"Encoding {len(todo)} chunks with {self.model_name}...")
+            encoded = None
+            if todo or not self.chunk_ids:
+                encoded = np.asarray(self.model.encode(
+                    [texts[i] for i in todo], show_progress_bar=len(todo) > 1000,
+                    batch_size=32, normalize_embeddings=True
+                ))
+            if not reuse:
+                self.chunk_embeddings = encoded
+            else:
+                dim = next(iter(reuse.values())).shape[0]
+                matrix = np.zeros((len(self.chunk_ids), dim), dtype=np.float32)
+                for row, i in enumerate(todo):
+                    matrix[i] = encoded[row]
+                for i, cid in enumerate(self.chunk_ids):
+                    if cid in reuse:
+                        matrix[i] = reuse[cid]
+                self.chunk_embeddings = matrix
         else:
             # TF-IDF fallback
             from sklearn.feature_extraction.text import TfidfVectorizer
@@ -457,6 +507,31 @@ class DenseRetriever:
 
         logger.info(f"Indexed {len(self.chunk_ids)} chunks "
                      f"(dim={self.chunk_embeddings.shape[1]})")
+
+    def _usable(self, precomputed: Optional[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
+        """The precomputed vectors, normalised, if every one is the model's
+        size and finite; otherwise none (encode everything)."""
+        if not precomputed:
+            return {}
+        try:
+            dim = int(self.model.get_sentence_embedding_dimension())
+        except Exception:
+            return {}
+        out: Dict[str, np.ndarray] = {}
+        for cid, v in precomputed.items():
+            v = np.asarray(v, dtype=np.float32)
+            norm = float(np.linalg.norm(v)) if v.ndim == 1 else 0.0
+            if v.shape != (dim,) or not np.isfinite(norm) or norm == 0.0:
+                return {}
+            out[cid] = v / norm
+        return out
+
+    def same_model(self, embedder: str) -> bool:
+        """Whether a vector made by embedder ("<repo>@<revision>") is this
+        retriever's: the same model, and the model is loaded."""
+        if not self._loaded or not isinstance(embedder, str) or not embedder:
+            return False
+        return embedder.split("@", 1)[0] == self.model_name
 
     def retrieve(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """
@@ -574,7 +649,12 @@ class HybridRetriever:
         all_texts = kb.get_all_texts()
         logger.info(f"Indexing {len(all_texts)} KB chunks...")
 
-        self.dense.index(all_texts)
+        precomputed = {
+            c.chunk_id: c.embedding
+            for c in kb.chunks.values()
+            if c.embedding is not None and self.dense.same_model(c.embedder)
+        }
+        self.dense.index(all_texts, precomputed=precomputed)
         self.sparse.index(all_texts)
 
     def retrieve(
@@ -684,7 +764,7 @@ class HybridRetriever:
         total_chars = 0
 
         for r in results:
-            line = f"[{r.chunk.chunk_id}] {r.chunk.content}"
+            line = f"[{r.chunk.chunk_id}] {neutralise_chunk_text(r.chunk.content)}"
             if total_chars + len(line) > max_context_chars:
                 break
             context_lines.append(line)
@@ -973,7 +1053,7 @@ class RAGClinicalContextAgent:
             )
 
         # Step 4: Parse citations
-        citations = re.findall(r'\[KB#(\d{4})\]', response)
+        citations = re.findall(CITATION_MARKER, response)
 
         latency = (time.time() - t_start) * 1000
 
@@ -1038,7 +1118,7 @@ class RAGClinicalContextAgent:
 
         # Include diagnoses from retrieved chunks
         for i, r in enumerate(dx_chunks[:5], 1):
-            lines.append(f"\n{i}. {r.chunk.content} [{r.chunk.chunk_id}]")
+            lines.append(f"\n{i}. {neutralise_chunk_text(r.chunk.content)} [{r.chunk.chunk_id}]")
 
         # If no diagnosis chunks retrieved, use keyword matching
         if not dx_chunks:
@@ -1055,14 +1135,14 @@ class RAGClinicalContextAgent:
         if lab_chunks:
             lines.append("\n\nSUPPORTING EVIDENCE:")
             for r in lab_chunks[:3]:
-                lines.append(f"  {r.chunk.content} [{r.chunk.chunk_id}]")
+                lines.append(f"  {neutralise_chunk_text(r.chunk.content)} [{r.chunk.chunk_id}]")
 
         # Add guideline references
         if guideline_chunks:
             lines.append("\n\nGUIDELINE REFERENCES:")
             for r in guideline_chunks[:2]:
                 lines.append(
-                    f"  {r.chunk.content[:120]}... [{r.chunk.chunk_id}]"
+                    f"  {neutralise_chunk_text(r.chunk.content[:120])}... [{r.chunk.chunk_id}]"
                 )
 
         lines.append(

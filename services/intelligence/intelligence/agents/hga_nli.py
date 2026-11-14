@@ -39,7 +39,7 @@ from enum import Enum
 from collections import defaultdict
 import logging
 
-from intelligence.knowledge_base.kb_builder import chunk_visible_to
+from intelligence.knowledge_base.kb_builder import CITATION_MARKER, chunk_visible_to
 from intelligence.utils.nli import DEFAULT_NLI_MODEL, nli_label_map
 
 logging.basicConfig(level=logging.INFO)
@@ -501,7 +501,7 @@ class CitationVerificationPipeline:
                 continue
 
             # Extract citation IDs
-            citation_ids = re.findall(r'\[KB#(\d{4})\]', claim)
+            citation_ids = re.findall(CITATION_MARKER, claim)
             # Normalize to full format
             citation_ids = [f"KB#{cid}" for cid in citation_ids]
 
