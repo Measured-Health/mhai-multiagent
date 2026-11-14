@@ -18,8 +18,11 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/alerts/unread-count` | signed in | `clinician` | clinical | no | no | no |
 | POST | `/api/v1/alerts/{id}/acknowledge` | signed in | `clinician` | clinical | no | no | yes |
 | POST | `/api/v1/alerts/{id}/dismiss` | signed in | `clinician` | clinical | no | no | yes |
+| GET | `/api/v1/analysis/clearance/me` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
 | GET | `/api/v1/analysis/filters` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
+| GET | `/api/v1/analysis/named-access` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
 | GET | `/api/v1/analysis/patients` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
+| POST | `/api/v1/analysis/patients/named` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | yes |
 | GET | `/api/v1/analysis/{view}` | signed in | `hospital_admin`, `analyst` | clinical | yes | no | no |
 | POST | `/api/v1/auth/login` | public | - | - | no | no | no |
 | POST | `/api/v1/auth/logout` | enrolment | any | both | no | no | no |

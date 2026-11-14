@@ -742,6 +742,27 @@ role `hospital_admin` or `analyst`, and two-step set up (`issues` has no
 
 ### Clearances, platform side and named lists (later: Plan 11b and 11c)
 
+**Built (Analysis PR 8, OpenAPI 1.31.0, off by default, demo only): named
+lists, hospital side.** Not `GET /analysis/patients?level=named` (that is
+still 422 `level_not_supported`) but `POST /analysis/patients/named` with
+`{drill, purpose, note?, filters, period: {level, start}}` and a required
+`Idempotency-Key`; it replies `{level: "named", count, patients: [row +
+name + mrn], named_until, clearance: {id, end_date}}`. A retry with the same
+key and body replays the same rows and `named_until` (audited again; 409
+`expired` after `named_until`); another body or person is 422
+`idempotency_mismatch`. Refusals: 403 `named_access_off` (position below
+`on`), `not_cleared`, `clearance_ended`, `forbidden`, `mfa_required`; 422
+`too_small`; 429 `rate_limited` (5 named lists a day per person, replays
+included; the 300-patient quarter cap shared with de-identified lists);
+503 `unavailable` when names can't be read (always, until the EMR service
+has its identity operation; the demo uses synthetic names). `GET
+/analysis/clearance/me` → `{named, until, clearance_id, version, reason}`
+(6 a minute) and `GET /analysis/named-access` → `{position, since}`; both
+are 403 `named_access_off` while the position is `off`. Named list kinds
+(`analysis_named_viewed`, `_named_view_failed`, `_named_limit_reached`) are
+sent bare until mhai-web has them. Print styles must hide names and MRNs.
+
+
 | Endpoint | Behaviour |
 |---|---|
 | `GET /analysis/patients?…&level=named` | adds name and MRN, only with a verified, unexpired clearance for the caller. Every call audited; named calls flagged as security events |

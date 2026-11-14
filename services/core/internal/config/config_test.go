@@ -18,7 +18,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"CORE_CLOUD_PROVIDERS", "CORE_EMR_ENABLED", "CORE_EMR_SEAL_PUBLIC_KEY_PATH", "CORE_EMR_CONNECTOR_TYPES",
 		"CORE_IDEMPOTENCY_HMAC_KEY_PATH", "CORE_EMR_ALLOW_NULL_MRN", "CORE_EMR_RETENTION_SWEEP",
 		"CORE_PATIENT_LOOKUP_PER_MINUTE", "CORE_PATIENT_LOOKUP_PER_DAY", "CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY",
-		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE"} {
+		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE", "ANALYSIS_NAMED_IDENTITY"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -800,5 +800,32 @@ func TestConfigEMRRetentionSweep(t *testing.T) {
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_EMR_RETENTION_SWEEP") {
 			t.Errorf("%q: %v", bad, err)
 		}
+	}
+}
+
+// T27 (configuration half): the demo identity fixture is chosen only by
+// ANALYSIS_NAMED_IDENTITY=demo-fixture, and refused with the EMR
+// integration configured; any other value is refused, unechoed.
+func TestNamedIdentityConfig(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	if c, err := Load(); err != nil || c.AnalysisNamedIdentity != "" {
+		t.Fatalf("default: %q %v", c.AnalysisNamedIdentity, err)
+	}
+	base["ANALYSIS_NAMED_IDENTITY"] = "demo-fixture"
+	setEnv(t, base)
+	if c, err := Load(); err != nil || c.AnalysisNamedIdentity != NamedIdentityDemo {
+		t.Fatalf("demo: %q %v", c.AnalysisNamedIdentity, err)
+	}
+	base["CORE_EMR_ENABLED"] = "true"
+	setEnv(t, base)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ANALYSIS_NAMED_IDENTITY=demo-fixture is refused with CORE_EMR_ENABLED") {
+		t.Fatalf("demo with EMR: %v", err)
+	}
+	delete(base, "CORE_EMR_ENABLED")
+	base["ANALYSIS_NAMED_IDENTITY"] = "synthetic-live-xyz"
+	setEnv(t, base)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ANALYSIS_NAMED_IDENTITY must be") || strings.Contains(err.Error(), "synthetic-live-xyz") {
+		t.Fatalf("unknown value: %v", err)
 	}
 }

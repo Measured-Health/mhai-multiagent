@@ -65,6 +65,9 @@ type acctRec struct {
 	// AnalysisPosition is the hospital's effective analysis switch
 	// (mhai_analysis_position), read with the account.
 	AnalysisPosition string
+	// NamedPosition is the hospital's effective named-access position
+	// (mhai_named_access_position), read with the account.
+	NamedPosition string
 }
 
 func (a *acctRec) hospitalID() string {
@@ -89,7 +92,7 @@ SELECT u.id, u.hospital_id, u.email, u.password_hash, u.display_name, u.full_nam
        COALESCE(hs.require_mfa_for_clinicians, true), COALESCE(hs.allow_trust_device, false),
        COALESCE(m.enabled, false), CASE WHEN m.enabled THEN cardinality(m.backup_code_hashes) ELSE 0 END,
        ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id),
-       mhai_analysis_position(u.hospital_id)
+       mhai_analysis_position(u.hospital_id), mhai_named_access_position(u.hospital_id)
 FROM users u
 LEFT JOIN hospitals h          ON h.id = u.hospital_id
 LEFT JOIN hospital_settings hs ON hs.hospital_id = u.hospital_id
@@ -103,7 +106,7 @@ func scanAccount(row pgx.Row) (*acctRec, error) {
 	err := row.Scan(&a.ID, &a.HospitalID, &a.Email, &a.PasswordHash, &a.DisplayName, &a.FullName, &a.RoleTitle, &a.Specialty,
 		&a.Active, &a.MustChangePW, &a.TermsAcceptedAt, &a.HospitalName, &a.HospitalStatus,
 		&a.IdleMinutes, &a.ReviewHours, &a.RequireMFAClinicians, &a.AllowTrustDevice,
-		&a.MFAEnabled, &a.RecoveryCodesLeft, &a.Roles, &a.AnalysisPosition)
+		&a.MFAEnabled, &a.RecoveryCodesLeft, &a.Roles, &a.AnalysisPosition, &a.NamedPosition)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNoAccount
 	}
@@ -152,7 +155,7 @@ type userView struct {
 // own sign-off keys can only turn them off.
 type features struct {
 	Analysis    bool `json:"analysis"`
-	NamedAccess bool `json:"named_access"` // false until named access exists (PR 8)
+	NamedAccess bool `json:"named_access"`
 }
 
 // analysisFeature: the hospital's effective switch is on, the user is a
@@ -169,13 +172,20 @@ func (a *acctRec) analysisFeature() bool {
 	return false
 }
 
+// namedAccessFeature: analysis, and the effective named-access position
+// not off (design §6.5). The person's own cover is GET
+// /analysis/clearance/me's.
+func (a *acctRec) namedAccessFeature() bool {
+	return a.analysisFeature() && (a.NamedPosition == "letters_only" || a.NamedPosition == "on")
+}
+
 func (a *acctRec) view() userView {
 	v := userView{
 		ID: a.ID.String(), Role: primaryRole(a.Roles), Roles: a.Roles, Email: a.Email,
 		DisplayName: a.DisplayName, FullName: a.FullName, RoleTitle: a.RoleTitle, Specialty: a.Specialty,
 		MFAEnabled: a.MFAEnabled, MustChangePassword: a.MustChangePW, TermsAcceptedAt: a.TermsAcceptedAt,
 		RecoveryCodesLeft: a.RecoveryCodesLeft, IdleTimeoutMinutes: a.IdleMinutes, ReviewOverdueHours: a.ReviewHours,
-		Features: features{Analysis: a.analysisFeature()},
+		Features: features{Analysis: a.analysisFeature(), NamedAccess: a.namedAccessFeature()},
 	}
 	if a.HospitalID != nil && a.HospitalName != nil {
 		v.Hospital = &hospitalRef{ID: a.HospitalID.String(), Name: *a.HospitalName}
