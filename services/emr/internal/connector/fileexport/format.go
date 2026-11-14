@@ -83,6 +83,8 @@ var (
 	// idShape: a source id. The first character is a letter or digit, so no
 	// id reads as a spreadsheet formula.
 	idShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
+	// mrnShape: an MRN, at most 64 characters (what the sink keeps whole).
+	mrnShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$`)
 	// codeShape: a local code.
 	codeShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/+%-]{0,63}$`)
 	// timeShape: an ISO 8601 date and time with seconds and an offset.
@@ -94,9 +96,6 @@ var (
 	valueShape = regexp.MustCompile(`^(?:<=|>=|<|>)?-?[0-9]{1,15}(?:\.[0-9]{1,15})?$`)
 	// decimalShape: a decimal without a comparator.
 	decimalShape = regexp.MustCompile(`^-?[0-9]{1,15}(?:\.[0-9]{1,15})?$`)
-	// unitShape: a unit as the source writes it, mapped later; never one
-	// that starts like a formula.
-	unitShape = regexp.MustCompile(`^[^=+@\-\s][^\s]{0,39}$`)
 )
 
 // fileOrder reports whether name is a file to read, and its sort key:

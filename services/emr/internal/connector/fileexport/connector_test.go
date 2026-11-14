@@ -620,11 +620,15 @@ func TestValidate(t *testing.T) {
 // Errors are closed codes: never a host, a folder, a file name or a cell.
 func TestErrorsNameNothing(t *testing.T) {
 	s := newServer(t)
-	s.put("results-20261114T060000Z.csv", []byte("Synthia,Testperson\n"))
 	c := s.connector()
-	_, err := c.Fetch(ctx(t), s.config(), s.creds(), nil, &memSink{})
-	for _, w := range []string{sftpHost, folder, "results-2026", "Synthia", "Testperson"} {
-		if err == nil || strings.Contains(err.Error(), w) {
+	cfg := s.config()
+	cfg.Settings["folder"] = "/outbound/Synthia-Testperson"
+	_, err := c.Fetch(ctx(t), cfg, s.creds(), nil, &memSink{})
+	if connector.CodeOf(err) != "unreadable_data" {
+		t.Fatalf("missing folder: %v", err)
+	}
+	for _, w := range []string{sftpHost, "/outbound", "Synthia", "Testperson"} {
+		if strings.Contains(err.Error(), w) {
 			t.Errorf("error %v names %q", err, w)
 		}
 	}

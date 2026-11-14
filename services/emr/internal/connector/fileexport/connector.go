@@ -11,7 +11,6 @@ package fileexport
 // (staleness by the declared export interval).
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -289,18 +288,20 @@ func (c *FileExport) Test(ctx context.Context, cfg connector.Config, creds conne
 
 // cursor is the connector's position: no position in the folder is kept
 // (moved files are the position), only whether the last run read
-// everything and when a new file was last loaded.
+// everything, when a new file was last loaded, and how many files it left
+// unloaded on purpose.
 type cursor struct {
-	V       int    `json:"v"`
-	Drained bool   `json:"d,omitempty"`
-	NewFile string `json:"nf,omitempty"`
+	V        int    `json:"v"`
+	Drained  bool   `json:"d,omitempty"`
+	NewFile  string `json:"nf,omitempty"`
+	SetAside int    `json:"sa,omitempty"`
 }
 
 const cursorVersion = 1
 
 func decodeCursor(raw connector.Cursor) (cursor, bool) {
 	var c cursor
-	if len(raw) == 0 || len(raw) > 256 || json.Unmarshal(raw, &c) != nil || c.V != cursorVersion {
+	if len(raw) == 0 || len(raw) > 256 || json.Unmarshal(raw, &c) != nil || c.V != cursorVersion || c.SetAside < 0 {
 		return cursor{}, false
 	}
 	return c, true
@@ -312,14 +313,11 @@ func (c cursor) encode() connector.Cursor {
 }
 
 // CaughtUp reports whether the run that wrote cur read every file there
-// was.
+// was (a file refused and moved aside counts as read).
 func (c *FileExport) CaughtUp(raw connector.Cursor) bool {
 	cur, ok := decodeCursor(raw)
 	return ok && cur.Drained
 }
-
-// SetAside: not yet.
-func (c *FileExport) SetAside(connector.Cursor) int { return 0 }
 
 // NewFileAt is when the run that wrote cur loaded its last new file.
 func (c *FileExport) NewFileAt(raw connector.Cursor) (time.Time, bool) {
@@ -331,11 +329,31 @@ func (c *FileExport) NewFileAt(raw connector.Cursor) (time.Time, bool) {
 	return t.UTC(), err == nil
 }
 
+// SetAside is how many files the run that wrote cur left unloaded on
+// purpose: refused whole and moved to rejected/, misnamed, or apparently
+// still being written. The scheduler reports them (an unreadable_data
+// error row) without failing the run.
+func (c *FileExport) SetAside(raw connector.Cursor) int {
+	cur, ok := decodeCursor(raw)
+	if !ok {
+		return 0
+	}
+	return cur.SetAside
+}
+
+// inProgress: a name a hospital's export uses while it writes (a .part
+// suffix, a leading dot): never read, and not reported.
+func inProgress(name string) bool {
+	return strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".part") || strings.HasSuffix(name, ".tmp")
+}
+
 // Fetch reads the folder's files in export order, at most MaxFiles. A file
-// is loaded, or refused whole and moved to rejected/ (the run then ends
-// unreadable_data, after the others); a failure of ours or the server's
-// stops the run and leaves the file in place to be read again (its rows
-// already stored are no-ops then).
+// is loaded and moved to processed/, or refused whole and moved to
+// rejected/, or left in place when it looks half-written; the last two are
+// counted as set aside, and the run goes on. A failure of ours or the
+// server's (storing, reading, a move that can't be made) stops the run and
+// leaves the file in place to be read again (its rows already stored are
+// no-ops then).
 func (c *FileExport) Fetch(ctx context.Context, cfg connector.Config, creds connector.Creds, _ connector.Cursor,
 	sk connector.RawSink) (connector.Cursor, error) {
 	out := cursor{V: cursorVersion}
@@ -367,11 +385,15 @@ func (c *FileExport) Fetch(ctx context.Context, cfg connector.Config, creds conn
 	m := c.metrics()
 	var files []fileKey
 	for _, e := range entries {
+		if e.dir || inProgress(e.name) {
+			continue
+		}
 		k, ok := parseName(e.name)
 		if !ok || !e.regular {
-			if !e.dir {
-				m.Skipped.Add(1)
-			}
+			// Misnamed (or not a plain file): never read or moved, but
+			// reported, so a results file named wrongly isn't silent.
+			m.Skipped.Add(1)
+			out.SetAside++
 			continue
 		}
 		files = append(files, k)
@@ -385,73 +407,97 @@ func (c *FileExport) Fetch(ctx context.Context, cfg connector.Config, creds conn
 	if len(files) > limit {
 		files = files[:limit]
 	}
-	refused := false
 	for _, f := range files {
 		if ctx.Err() != nil {
 			out.Drained = false
 			return out.encode(), connector.Fail("timed_out", 0)
 		}
-		loaded, err := c.load(ctx, s.sftp, cfg, folder, f, sk, rj)
+		res, err := c.load(ctx, s.sftp, cfg, folder, f, sk, rj)
 		if err != nil {
 			out.Drained = false
 			return out.encode(), err
 		}
-		if !loaded {
-			refused = true
-			continue
+		switch res {
+		case loaded:
+			out.NewFile = c.now().Format(time.RFC3339Nano)
+		case setAside:
+			out.SetAside++
 		}
-		out.NewFile = c.now().Format(time.RFC3339Nano)
-	}
-	if refused {
-		out.Drained = false
-		return out.encode(), connector.Fail("unreadable_data", 0)
 	}
 	return out.encode(), nil
 }
 
-// load reads one file: loaded is false when it was refused whole (and
-// moved to rejected/ where the server allows it).
+type loadResult int
+
+const (
+	loaded loadResult = iota
+	setAside
+)
+
+// move puts the file at p into dir under its own name, or, when that name
+// is taken (a re-export under the same name), under its name with a
+// suffix: never over another file.
+func (c *FileExport) move(sc *sftp.Client, folder, dir, name string) error {
+	p := path.Join(folder, name)
+	if err := sc.Rename(p, path.Join(folder, dir, name)); err == nil {
+		return nil
+	}
+	return sc.Rename(p, path.Join(folder, dir, name+"."+strconv.FormatInt(c.now().UnixNano(), 10)))
+}
+
+// load reads one file.
 func (c *FileExport) load(ctx context.Context, sc *sftp.Client, cfg connector.Config, folder string, f fileKey,
-	sk connector.RawSink, rj connector.Rejecter) (bool, error) {
+	sk connector.RawSink, rj connector.Rejecter) (loadResult, error) {
 	m := c.metrics()
 	p := path.Join(folder, f.name)
-	refuse := func() (bool, error) {
-		m.FilesRejected.Add(1)
-		if err := sc.Rename(p, path.Join(folder, Rejected, f.name)); err != nil && ctx.Err() != nil {
-			return false, connector.Fail("timed_out", 0)
+	moveErr := func(error) error {
+		if ctx.Err() != nil {
+			return connector.Fail("timed_out", 0)
 		}
-		return false, nil
+		return connector.Fail("unreadable_data", 0) // the folder's configuration: visible, never silent
+	}
+	refuse := func() (loadResult, error) {
+		if err := c.move(sc, folder, Rejected, f.name); err != nil {
+			return 0, moveErr(err)
+		}
+		m.FilesRejected.Add(1)
+		return setAside, nil
 	}
 	fi, err := sc.Lstat(p)
 	if err != nil {
-		return false, remoteError(ctx, err)
+		return 0, remoteError(ctx, err)
 	}
 	if !fi.Mode().IsRegular() {
-		return false, connector.Fail("unreadable_data", 0)
+		return setAside, nil
 	}
 	if fi.Size() > MaxFile {
 		return refuse()
 	}
 	fh, err := sc.Open(p)
 	if err != nil {
-		return false, remoteError(ctx, err)
+		return 0, remoteError(ctx, err)
 	}
 	data, err := io.ReadAll(io.LimitReader(fh, MaxFile+1))
 	_ = fh.Close()
 	if err != nil {
-		return false, remoteError(ctx, err)
+		return 0, remoteError(ctx, err)
 	}
 	if len(data) > MaxFile {
 		return refuse()
 	}
+	// A file shorter than listed, or one that doesn't end a row, may still
+	// be being written: left in place for the next run, and reported.
+	if int64(len(data)) != fi.Size() || (len(data) > 0 && data[len(data)-1] != '\n') {
+		return setAside, nil
+	}
 	ns := cfg.Settings["mrn_namespace"]
 	// The whole file first: a file refused whole stores nothing.
-	for _, err := range Parse(f.kind, bytes.NewReader(data), ns) {
+	for _, err := range ParseBytes(f.kind, data, ns) {
 		if err != nil {
 			return refuse()
 		}
 	}
-	for row, err := range Parse(f.kind, bytes.NewReader(data), ns) {
+	for row, err := range ParseBytes(f.kind, data, ns) {
 		if err != nil {
 			return refuse() // not reached: the same bytes parsed whole above
 		}
@@ -459,19 +505,19 @@ func (c *FileExport) load(ctx context.Context, sc *sftp.Client, cfg connector.Co
 			m.RowsRejected.Add(1)
 			if err := rj.Reject(ctx, connector.RejectedRecord{Kind: row.Reject.Kind, SourceID: row.Reject.SourceID,
 				SourceVersion: row.Reject.SourceVersion, SourceUpdatedAt: row.Reject.SourceUpdatedAt}); err != nil {
-				return false, err
+				return 0, err
 			}
 			continue
 		}
 		for _, r := range row.Records {
 			if err := sk.Put(ctx, r); err != nil {
-				return false, err
+				return 0, err
 			}
 		}
 	}
-	if err := sc.Rename(p, path.Join(folder, Processed, f.name)); err != nil {
-		return false, remoteError(ctx, err)
+	if err := c.move(sc, folder, Processed, f.name); err != nil {
+		return 0, moveErr(err)
 	}
 	m.FilesLoaded.Add(1)
-	return true, nil
+	return loaded, nil
 }

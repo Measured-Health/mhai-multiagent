@@ -314,7 +314,7 @@ func (s *Scheduler) runOne(ctx context.Context, d due) (bool, error) {
 		return true, err
 	}
 	s.log().Info("emr sync", "connection", c.cfg.ConnectionID.String(), "outcome", res.code, "records", res.records,
-		"rejected", res.rejected,
+		"rejected", res.rejected, "set_aside", res.setAside,
 		"backfill", c.live == nil, "reconcile", res.reconciled)
 	return true, nil
 }
@@ -383,6 +383,9 @@ type result struct {
 	rejected int
 	// newFile: when a file source last loaded a new file (design §15.4).
 	newFile *time.Time
+	// setAside: files a file source left unloaded on purpose (refused and
+	// moved aside, misnamed, half-written): reported like dead letters.
+	setAside int
 }
 
 // reconcileDue reports whether this run is the day's reconciliation: the
@@ -420,21 +423,22 @@ type counting struct {
 	before    time.Time
 }
 
-// Reject passes a dead letter to the sink, when it keeps them; one that
-// doesn't fails the call (the connector then stores nothing more).
-func (c *counting) Reject(ctx context.Context, r connector.RejectedRecord) error {
-	rj, ok := c.sink.(connector.Rejecter)
-	if !ok {
-		return errNoDeadLetter
-	}
-	if err := rj.Reject(ctx, r); err != nil {
+// rejecting is counting for a sink that keeps dead letters: only then is
+// the run's sink a connector.Rejecter, so a connector that needs one can
+// refuse to store anything without it.
+type rejecting struct {
+	*counting
+	rj connector.Rejecter
+}
+
+// Reject passes a dead letter to the sink and counts it.
+func (c rejecting) Reject(ctx context.Context, r connector.RejectedRecord) error {
+	if err := c.rj.Reject(ctx, r); err != nil {
 		return err
 	}
 	c.rejected++
 	return nil
 }
-
-var errNoDeadLetter = errors.New("scheduler: the sink keeps no dead letters")
 
 func (c *counting) Put(ctx context.Context, r connector.RawRecord) error {
 	stored, err := c.sink.PutStored(ctx, r)
@@ -486,7 +490,11 @@ func (s *Scheduler) fetch(ctx context.Context, c conn, impl connector.Connector,
 	sk := &counting{sink: s.NewSink(c.cfg, c.live == nil), reconcile: reconcile, before: now.Add(-2 * poll)}
 	fctx, cancel := context.WithTimeout(ctx, RunTimeout)
 	defer cancel()
-	next, ferr := impl.Fetch(fctx, c.cfg, cr, cur, sk)
+	var runSink connector.RawSink = sk
+	if rj, ok := sk.sink.(connector.Rejecter); ok {
+		runSink = rejecting{counting: sk, rj: rj}
+	}
+	next, ferr := impl.Fetch(fctx, c.cfg, cr, cur, runSink)
 	// What was stored is announced whatever the outcome; a refused
 	// announcement is the normaliser's sweep's to repeat.
 	if err := sk.sink.Flush(context.WithoutCancel(ctx)); err != nil {
@@ -497,6 +505,7 @@ func (s *Scheduler) fetch(ctx context.Context, c conn, impl connector.Connector,
 		if t, ok := fs.NewFileAt(next); ok {
 			res.newFile = &t
 		}
+		res.setAside = fs.SetAside(next)
 	}
 	var fe *connector.FetchError
 	if errors.As(ferr, &fe) {
@@ -544,8 +553,8 @@ func (s *Scheduler) finish(ctx context.Context, c conn, runID uuid.UUID, res res
 			return err
 		}
 		errCode := res.code
-		if errCode == "ok" && res.rejected > 0 {
-			errCode = "unreadable_data" // rows kept as dead letters: visible, without a back-off
+		if errCode == "ok" && (res.rejected > 0 || res.setAside > 0) {
+			errCode = "unreadable_data" // dead letters or files set aside: visible, without a back-off
 		}
 		if errCode != "ok" {
 			if _, err := tx.Exec(ctx, `INSERT INTO emr.connection_errors (hospital_id, connection_id, at, code) VALUES ($1, $2, $3, $4)`,

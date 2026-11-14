@@ -11,9 +11,13 @@
 -- file_export connection that is on is also errors / behind when no new
 -- file has been loaded for longer than the hospital's declared export
 -- interval plus 50% (settings.expected_every_minutes, required for the
--- type), or ever, or when the interval isn't a whole number of minutes.
--- A quiet export is a fault on the hospital's side, and a source we can't
--- judge never reads as current. Other types are unchanged.
+-- type), or ever, or when the interval isn't a whole number of minutes
+-- from 5 to 10080 (the connector's range). A quiet export is a fault on
+-- the hospital's side, and a source we can't judge never reads as current.
+-- The platform also sees a file export as errors for 24 hours after a run
+-- that kept rows as dead letters or set files aside (an unreadable_data
+-- error row; the run itself is ok, so the data stays current for
+-- clinicians). Other types are unchanged.
 
 -- +goose Up
 
@@ -40,8 +44,14 @@ CREATE OR REPLACE FUNCTION emr_platform_health()
                 WHEN c.enabled AND c.type = 'file_export'
                      AND (s.last_file_at IS NULL
                           OR CASE WHEN c.settings ->> 'expected_every_minutes' ~ '^[1-9][0-9]{0,5}$'
-                                  THEN s.last_file_at < now() - make_interval(secs => (c.settings ->> 'expected_every_minutes')::integer * 90)
+                                  THEN CASE WHEN (c.settings ->> 'expected_every_minutes')::integer BETWEEN 5 AND 10080
+                                            THEN s.last_file_at < now() - make_interval(secs => (c.settings ->> 'expected_every_minutes')::integer * 90)
+                                            ELSE true END
                                   ELSE true END) THEN 'errors'
+                WHEN c.enabled AND c.type = 'file_export'
+                     AND EXISTS (SELECT 1 FROM emr.connection_errors e
+                                 WHERE e.connection_id = c.id AND e.code = 'unreadable_data'
+                                   AND e.at > now() - interval '24 hours') THEN 'errors'
                 ELSE 'ok' END,
            l.at, l.ok, l.records,
            (SELECT count(*) FROM emr.connection_errors e
@@ -66,7 +76,9 @@ CREATE OR REPLACE FUNCTION emr_sources_status()
                 WHEN c.type = 'file_export'
                      AND (s.last_file_at IS NULL
                           OR CASE WHEN c.settings ->> 'expected_every_minutes' ~ '^[1-9][0-9]{0,5}$'
-                                  THEN s.last_file_at < now() - make_interval(secs => (c.settings ->> 'expected_every_minutes')::integer * 90)
+                                  THEN CASE WHEN (c.settings ->> 'expected_every_minutes')::integer BETWEEN 5 AND 10080
+                                            THEN s.last_file_at < now() - make_interval(secs => (c.settings ->> 'expected_every_minutes')::integer * 90)
+                                            ELSE true END
                                   ELSE true END) THEN 'behind'
                 ELSE 'current' END,
            l.at

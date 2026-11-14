@@ -9,6 +9,7 @@ package fileexport
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/hex"
 	"errors"
@@ -16,7 +17,9 @@ import (
 	"iter"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
@@ -81,16 +84,21 @@ var rawKind = map[string]string{"patients": "patient", "encounters": "encounter"
 // sequence once before storing). mrnSystem is the connection's MRN
 // namespace: the mrn column is kept as an identifier in it, or not at all.
 func Parse(kind string, r io.Reader, mrnSystem string) iter.Seq2[Row, error] {
+	data, err := io.ReadAll(io.LimitReader(r, MaxFile+1))
+	if err != nil {
+		return func(yield func(Row, error) bool) { yield(Row{}, &FileError{Reason: ReasonShape}) }
+	}
+	return ParseBytes(kind, data, mrnSystem)
+}
+
+// ParseBytes is Parse over data already read, without a copy: the
+// connector reads a file once and parses it twice (security review).
+func ParseBytes(kind string, data []byte, mrnSystem string) iter.Seq2[Row, error] {
 	return func(yield func(Row, error) bool) {
 		fail := func(reason string, line int) { yield(Row{}, &FileError{Reason: reason, Line: line}) }
 		cols, ok := Columns[kind]
 		if !ok {
 			fail(ReasonKind, 0)
-			return
-		}
-		data, err := io.ReadAll(io.LimitReader(r, MaxFile+1))
-		if err != nil {
-			fail(ReasonShape, 0)
 			return
 		}
 		if len(data) > MaxFile {
@@ -165,12 +173,14 @@ func Parse(kind string, r io.Reader, mrnSystem string) iter.Seq2[Row, error] {
 }
 
 // versionOf is the row's content hash: an unchanged row exported again is
-// the same version (a no-op in the sink); a changed row is a new one.
+// the same version (a no-op in the sink); a changed row is a new one. Each
+// cell is length-prefixed, so no two different rows hash alike by moving a
+// separator between cells (security review).
 func versionOf(kind string, rec []string) string {
 	h := sha256.New()
 	h.Write([]byte(Format + "\x00" + kind))
 	for _, c := range rec {
-		h.Write([]byte{0x1f})
+		h.Write(binary.AppendUvarint(nil, uint64(len(c))))
 		h.Write([]byte(c))
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -286,6 +296,33 @@ func (r *rowReader) shaped(col, key string, re *regexp.Regexp) {
 	r.fields[key] = v
 }
 
+// unit puts a unit under key when the sink will keep it whole: at most 40
+// bytes of printable UTF-8 (no control, format or space character), never
+// starting like a formula. Units such as µmol/L stay.
+func (r *rowReader) unit(col, key string) {
+	v := r.row[col]
+	if v == "" {
+		return
+	}
+	if !unitOK(v) {
+		r.bad(RowValue)
+		return
+	}
+	r.fields[key] = v
+}
+
+func unitOK(v string) bool {
+	if len(v) > 40 || !utf8.ValidString(v) || strings.ContainsAny(v[:1], "=+-@") {
+		return false
+	}
+	for _, c := range v {
+		if unicode.IsSpace(c) || unicode.Is(unicode.Cc, c) || unicode.Is(unicode.Cf, c) || c == utf8.RuneError {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *rowReader) code(col string, required bool) string {
 	v := r.row[col]
 	switch {
@@ -306,7 +343,7 @@ func mapRow(kind string, row map[string]string, id, version, mrnSystem string) R
 	switch kind {
 	case "patients":
 		if mrn := r.row["mrn"]; mrn != "" {
-			if !idShape.MatchString(mrn) {
+			if !mrnShape.MatchString(mrn) {
 				r.bad(RowCode)
 			} else if mrnSystem != "" {
 				r.fields["identifier"] = []connector.Coding{{System: mrnSystem, Code: mrn}}
@@ -336,9 +373,9 @@ func mapRow(kind string, row map[string]string, id, version, mrnSystem string) R
 			}
 			lr.closed("location_type", "type", locationTypes, false)
 			r.bad(lr.reason)
-			lh := sha256.Sum256([]byte(Format + "\x00location\x00" + loc + "\x1f" + row["location_name"] + "\x1f" + row["location_type"]))
 			extra = append(extra, connector.RawRecord{Kind: "location", SourceID: loc,
-				SourceVersion: hex.EncodeToString(lh[:]), SourceUpdatedAt: updated, Fields: lr.fields})
+				SourceVersion:   versionOf("location", []string{loc, row["location_name"], row["location_type"]}),
+				SourceUpdatedAt: updated, Fields: lr.fields})
 		} else if row["location_name"] != "" || row["location_type"] != "" {
 			r.bad(RowRequired)
 		}
@@ -370,7 +407,7 @@ func mapRow(kind string, row map[string]string, id, version, mrnSystem string) R
 			r.shaped("ref_high", "ref_high", decimalShape)
 			r.text("ref_text", "ref_text", 120)
 		}
-		r.shaped("unit", "unit", unitShape)
+		r.unit("unit", "unit")
 		r.closed("flag", "interpretation", flags, false)
 	case "medications":
 		r.id("source_patient_id", "patient", true)
@@ -385,7 +422,7 @@ func mapRow(kind string, row map[string]string, id, version, mrnSystem string) R
 			r.fields["codings"] = []connector.Coding{{System: MedicationSystem, Code: code, Display: name}}
 		}
 		r.shaped("dose_value", "dose_value", decimalShape)
-		r.shaped("dose_unit", "dose_unit", unitShape)
+		r.unit("dose_unit", "dose_unit")
 		r.text("route", "route", 40)
 		r.text("timing_text", "timing_text", 60)
 		r.time("authored_at", "authored", false)
