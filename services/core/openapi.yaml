@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.33.0"
+  version: "1.32.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -2552,7 +2552,7 @@ paths:
         plus its `letter`. The cursor is bound to the session and the
         filters. Every page is recorded (`audit.viewed {list: named_access}`,
         deduplicated as the events list). 404 `not_found` until
-        CORE_AUDIT_EXPORTS is on. Added in 1.33.0.
+        CORE_AUDIT_EXPORTS is on. Added in 1.32.0.
       tags: [audit]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
@@ -2600,7 +2600,7 @@ paths:
         Platform admins and auditors. 50 a page; the cursor is the last
         record's id. Recorded as `audit.searched {searched_kind: export}`,
         once per session per 5 minutes. Never a pid. 404 `not_found` until
-        CORE_AUDIT_EXPORTS is on. Added in 1.33.0.
+        CORE_AUDIT_EXPORTS is on. Added in 1.32.0.
       tags: [audit]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, internal_error]
@@ -2642,7 +2642,7 @@ paths:
         export's before any pseudonym is read). A named export citing a
         letter core holds no copy of is 503 `unavailable`. `capped` is
         always false. 404 `not_found` until CORE_AUDIT_EXPORTS is on.
-        Added in 1.33.0.
+        Added in 1.32.0.
       tags: [audit]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, validation_failed, too_many_rows, rate_limited, not_ready, unavailable, internal_error]
@@ -2703,7 +2703,7 @@ paths:
         `unavailable`, not spent, when it differs). `text/csv`, or
         `application/zip` for a named export (the CSV and the cited
         letters' pages). 30 a minute per person. 404 `not_found` until
-        CORE_AUDIT_EXPORTS is on. Added in 1.33.0.
+        CORE_AUDIT_EXPORTS is on. Added in 1.32.0.
       tags: [audit]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, gone, rate_limited, not_ready, unavailable, internal_error]
@@ -2738,7 +2738,7 @@ paths:
         of the export's hospital with two-step (422 `not_eligible`).
         Recorded as `legal_reference.created` (the admins by id). 10 an hour
         per person. 404 `not_found` until CORE_AUDIT_EXPORTS is on. Added in
-        1.33.0.
+        1.32.0.
       tags: [audit]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, validation_failed, too_many_rows, not_eligible, rate_limited, not_ready, internal_error]
@@ -2790,7 +2790,7 @@ paths:
       description: |
         The references naming the caller at this hospital, not yet used.
         Analysis off, or CORE_AUDIT_EXPORTS off: 404; named access off: 403
-        `named_access_off`. Added in 1.33.0.
+        `named_access_off`. Added in 1.32.0.
       tags: [analysis]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, validation_failed, internal_error]
@@ -2840,7 +2840,7 @@ paths:
         (503 `unavailable` and `analysis.legal_resolve_failed` when they
         can't be read). A refusal of a reference the caller is named on is
         recorded (`analysis.legal_resolve_refused`). No pseudonym. Never
-        cached. 404 while CORE_AUDIT_EXPORTS is off. Added in 1.33.0.
+        cached. 404 while CORE_AUDIT_EXPORTS is off. Added in 1.32.0.
       tags: [analysis]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, not_cleared, clearance_ended, already_used, validation_failed, rate_limited, not_ready, unavailable, internal_error]
@@ -7234,7 +7234,7 @@ components:
             letter:
               type: object
               nullable: true
-              description: The letter a named entry names (since 1.33.0); null otherwise. As AuditLetter.
+              description: The letter a named entry names (since 1.32.0); null otherwise. As AuditLetter.
               properties:
                 id: { type: string, format: uuid }
                 status: { type: string, enum: [checking, refused, waiting, active, rejected, ended, revoked] }
@@ -7249,7 +7249,7 @@ components:
     AuditLetter:
       type: object
       nullable: true
-      description: A clearance letter as the audit shows it (since 1.33.0). valid_from is the letter's date, valid_to its end date.
+      description: A clearance letter as the audit shows it (since 1.32.0). valid_from is the letter's date, valid_to its end date.
       properties:
         id: { type: string, format: uuid }
         status: { type: string, enum: [checking, refused, waiting, active, rejected, ended, revoked] }
@@ -7263,7 +7263,7 @@ components:
             name: { type: string }
     AuditExportRecord:
       type: object
-      description: An export record (since 1.33.0). Never a pid.
+      description: An export record (since 1.32.0). Never a pid.
       required: [id, kind, by, at, reason, note, reference, filters, filter_names, rows, capped, checksum, expires_at, downloaded_at]
       additionalProperties: false
       properties:

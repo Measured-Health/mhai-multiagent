@@ -1,0 +1,4 @@
+source_patient_id,updated_at,mrn,given_name,family_name,birth_date,sex,active,replaced_by
+SYNP-CSV-0001,2026-11-14T05:40:00+01:00,SYN-CSV-770001,Synthia,Testperson,1971-03-09,female,true,
+SYNP-CSV-0002,2026-11-14T05:41:00+01:00,SYN-CSV-770002,Fakeola,Mockingbard,1958-12-30,male,true,
+SYNP-CSV-0003,2026-11-14T05:42:00Z,,Placido,Dummyfield,,unknown,,

@@ -90,11 +90,20 @@ var Types = []TypeInfo{
 		Version: 1, Fields: []Field{
 			{Key: "api_key", Label: "Access key", Kind: KindSecret, Required: true, Max: 4000},
 		}},
+	// file_export: built (EMR PR 11), files in the published mhai_csv_v1
+	// format over SFTP. username signs in (the base address carries no
+	// user); expected_every_minutes is the hospital's declared export
+	// interval, required for staleness (design §15.4); mrn_namespace as for
+	// fhir_r4 (without it no MRN is stored); access_key is the SSH private
+	// key.
 	{ID: "file_export", Label: "Scheduled file export", Summary: "Reads a scheduled export file from a secure folder.",
-		Version: 1, Fields: []Field{
+		Version: 1, built: true, Fields: []Field{
 			{Key: "folder", Label: "Folder", Kind: KindText, Required: true, Max: 200},
+			{Key: "username", Label: "User name", Kind: KindText, Required: true, Max: 32},
 			{Key: "host_key_fingerprint", Label: "Host key fingerprint", Kind: KindText, Required: true, Max: 100},
 			{Key: "format", Label: "File format", Kind: KindText, Required: true, Max: 20},
+			{Key: "expected_every_minutes", Label: "Expected every (minutes)", Kind: KindText, Required: true, Max: 6},
+			{Key: "mrn_namespace", Label: "MRN identifier system", Kind: KindText, Max: 200},
 			{Key: "access_key", Label: "Access key", Kind: KindSecret, Required: true, Max: 4000},
 		}},
 	// stub: the development connector (plan Task 9). It calls nothing.

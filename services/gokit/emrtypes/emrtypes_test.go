@@ -38,11 +38,12 @@ func TestTypesClosed(t *testing.T) {
 		"unmapped_codes", "too_many_requests"}) {
 		t.Fatalf("codes %v", Codes)
 	}
-	// FHIR R4 is built (EMR PR 6); the stub only in development.
-	if b := Built(false); !slices.Equal(b, []string{"fhir_r4"}) {
+	// FHIR R4 is built (EMR PR 6) and the file export (PR 11); the stub
+	// only in development.
+	if b := Built(false); !slices.Equal(b, []string{"fhir_r4", "file_export"}) {
 		t.Fatalf("built outside development: %v", b)
 	}
-	if b := Built(true); !slices.Equal(b, []string{"fhir_r4", "stub"}) {
+	if b := Built(true); !slices.Equal(b, []string{"fhir_r4", "file_export", "stub"}) {
 		t.Fatalf("built in development: %v", b)
 	}
 	// The MRN namespace (design §10.2, §16.1): an optional text setting,
@@ -50,6 +51,24 @@ func TestTypesClosed(t *testing.T) {
 	fhir, _ := Lookup("fhir_r4")
 	if f, ok := fhir.Field("mrn_namespace"); !ok || f.Kind != KindText || f.Required || f.Max != 200 {
 		t.Fatalf("fhir_r4 mrn_namespace: %+v %v", f, ok)
+	}
+	// The file export (design §5.4, §15.4): a user name to sign in with,
+	// the declared export interval (required: staleness needs it), the MRN
+	// namespace optional, the SSH key the one secret.
+	fe, _ := Lookup("file_export")
+	var keys []string
+	for _, f := range fe.Fields {
+		keys = append(keys, f.Key)
+	}
+	if !slices.Equal(keys, []string{"folder", "username", "host_key_fingerprint", "format", "expected_every_minutes",
+		"mrn_namespace", "access_key"}) || !slices.Equal(fe.Secrets(), []string{"access_key"}) {
+		t.Fatalf("file_export fields %v", keys)
+	}
+	if f, _ := fe.Field("expected_every_minutes"); !f.Required || f.Kind != KindText {
+		t.Fatalf("expected_every_minutes: %+v", f)
+	}
+	if f, _ := fe.Field("mrn_namespace"); f.Required {
+		t.Fatalf("file_export mrn_namespace required")
 	}
 	if _, ok := Lookup("hl7v2_feed"); ok {
 		t.Fatal("hl7v2_feed is not built and not offered")

@@ -57,7 +57,7 @@ Ops items:
 - [ ] **Ops, before EMR is switched on anywhere (EMR PR 3):** compose and the deploy don't yet give core its two EMR keys, and core refuses to start with `CORE_EMR_ENABLED=true` without them. Wire `CORE_EMR_SEAL_PUBLIC_KEY_PATH` (the emr service's `seal-<kid>.pub` only, from a volume or file core can read; never the `emr-keys` volume, which holds the private key) and `CORE_IDEMPOTENCY_HMAC_KEY_PATH` (a per-deployment key of at least 32 bytes, generated like the other secrets, readable by core only). Owner: ops.
 
 People items:
-- [ ] **H1** (product owner with Havana): a structured source for labs, then vitals and medications (export or FHIR), its frequency, and a synthetic or de-identified layout sample. Blocks PR 11 and real alerts for Havana.
+- [ ] **H1** (product owner with Havana): a structured source for labs, then vitals and medications (export or FHIR), its frequency, and a synthetic or de-identified layout sample. PR 11 is built to the published `mhai_csv_v1` format (14 Nov, product owner's go-ahead); H1 now confirms Havana can export it (or what a version 2 needs) and blocks real alerts for Havana.
 - [ ] **H2** (our team, with Havana's agreement): the archive's JSON "files added since" listing, a per-integration read-only key, a removed-files listing. Blocks PR 12.
 - [ ] **Ops, before egress-emr runs on a deployed host (EMR PR 4):** publish the emr image (`ghcr.io/measured-health/mhai-multiagent-emr`, not built by CI yet), write K_proxy as `secrets/emr-proxy.key` (0400, owned by 65532; `emr keys proxy-init`), and set `EGRESS_EMR_INTERNAL_CIDRS` to the `backend` network's subnet plus the host's own addresses as `/32` (egress-emr refuses to start without it). Watch the logs for `"code":"ranges_overlap"` (connections left out of egress). Owner: ops.
 - [ ] **H3** (product owner, ops): choose and provision the managed secret store (in-region) and the emr service's identity. Blocks Task 12 and any production use of PR 3.
@@ -97,6 +97,16 @@ Alerts now carry `patient.id`, so a clinician can ask about an alert's patient. 
 - **Audit:** every lookup, hit or miss, audited as `patients.lookup` with the patient id on a hit and no MRN (the MRN is free text a clinician typed). Do hospitals want a lookup without a later question flagged in the hospital admin's activity view?
 - **Who may look up:** any clinician of the hospital, or only one with a treatment relationship (an encounter on the clinician's unit)? The alert link needs none, since the alert was already routed to them.
 - **Threats:** a clinician curious about a colleague or a public figure (needs audit and review, maybe a reason field); enumeration by sequential MRNs (exact match plus rate limits); a stolen session (step-up for lookups?); another hospital's patient (RLS and the hospital from the token, as for alerts). A full threat model goes in the design before any build (`secure-design`).
+
+## EMR: follow-ups from PR 11 (14 Nov)
+
+- [x] **Migration order:** 00043 (`last_file_at`, file export staleness) follows 00040-00042 (all on main); the migration-count tests list it.
+- [ ] **Before H7 (live):** a synthetic SFTP end-to-end run through the real `egress-emr` on the build host (an `emr synth-sftp` development command beside `synth-fhir`), as the FHIR run does (plan departure 72).
+- [ ] **Deploy, after H1 and H7:** add `file_export` to `CORE_EMR_CONNECTOR_TYPES`; give the platform admin the host key fingerprint and the export interval from Havana IT; Havana creates `processed/` and `rejected/` and writes files as `.part` then renames.
+- [ ] **mhai-web:** the `file_export` form shows the new fields from `GET /platform/emr/connector-types` (`username`, `expected_every_minutes`, `mrn_namespace`); no contract change.
+- [ ] **Visibility:** store the closed reason of a dead-lettered row or set-aside file (today counted and an `unreadable_data` error row), and export the connector's counts (files loaded, refused, set aside; rows dead-lettered) as metrics. Before scale.
+- [ ] **Residuals (plan departure 71):** dead letters carry no patient link (an exclusion's purge can't find them; they hold no value); RSA keys may sign with SHA-1 to an old server (recommend Ed25519); the parsed key isn't zeroed; a file cut at a row boundary can't be told from a complete one.
+- [ ] **Clinical:** the CSV connection's code map (`services/emr/maps/<hospital>/<connection>.yaml`, systems `urn:mhai:mhai_csv_v1:results|vitals|medications`) is a clinical change, reviewed with H4.
 
 ## EMR: follow-ups from PR 13 (14 Nov)
 
@@ -149,7 +159,7 @@ Alerts now carry `patient.id`, so a clinician can ask about an alert's patient. 
 
 ## EMR: follow-ups from PR 6 (12 Nov)
 
-- [x] PR 8a's `sources_status` reads staleness by the §15.4 rule through `emr_sources_status()` (3 × `poll_seconds`, or paused). The `file_export` rule (expected interval) comes with PR 11.
+- [x] PR 8a's `sources_status` reads staleness by the §15.4 rule through `emr_sources_status()` (3 × `poll_seconds`, or paused). The `file_export` rule (expected interval) came with PR 11 (migration 00043).
 - [x] Core calls `emr.v1.ctl.sync_now` (as `svc:core`, best effort, after the commit) when a platform admin switches a connection on (PR 8a). The resume route (Task 37, PR 8b) calls it too.
 
 ## EMR: follow-ups from PR 5 (11 Nov)
