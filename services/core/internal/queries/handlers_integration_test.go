@@ -455,7 +455,10 @@ func TestPostQueriesValidation(t *testing.T) {
 	}
 	for name, body := range cases {
 		r := e.do(t, "POST", "/queries", tok, body, nil)
-		if r.code != 422 || r.body["code"] != "validation_failed" || strings.Contains(r.raw, marker) || strings.Contains(r.raw, "4001") {
+		// The random request_id is hex and can contain "4001" by chance, so
+		// the echo checks read the reply without it.
+		echo := strings.Replace(r.raw, fmt.Sprint(r.body["request_id"]), "", 1)
+		if r.code != 422 || r.body["code"] != "validation_failed" || strings.Contains(echo, marker) || strings.Contains(echo, "4001") {
 			t.Errorf("%s: %d %s", name, r.code, r.raw)
 		}
 	}
