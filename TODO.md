@@ -79,7 +79,15 @@ Gates before live use (design §17.6; all of them):
 - [ ] The on-call owner named (H9). Owner: product owner.
 - [ ] Clinical sign-off (H4) and privacy and legal sign-off (H5). Owners: clinical lead, privacy lead.
 
-## Clinician patient lookup by MRN: design note, not built (14 Nov)
+## Clinician patient lookup by MRN: built (14 Nov)
+
+Approved by the product owner on 14 Nov ("yes") as designed below, and built: `POST /patients/lookup` (OpenAPI 1.29.0, migration 00039). Where it departs from the note: the route is a `POST` with `{mrn}` in the body, never a `GET` with the MRN in the URL; the MRN is normalised as the EMR index stores it (spaces removed, upper case; leading zeros kept, one rule for every hospital); the limits are per clinician 5 a minute and 50 a hospital day, and per hospital 1000 a day (settings `CORE_PATIENT_LOOKUP_*`); a hit is audited with the patient's id only, a miss or an MRN of two patients by `result`; any clinician of the hospital may look up (no treatment-relationship check) on a two-step session, with no step-up code per lookup.
+
+- [ ] mhai-web: a lookup box ("Ask about another patient"): `POST /patients/lookup`, then `patient_id` on `POST /queries`; show 404 as "no patient with that MRN", 409 as "two patients share this MRN: ask your EMR team", 429 as "too many lookups". The new audit kinds (`patients.lookup`, `patients.lookup_limit_reached`) are sent bare until mhai-web has words for them.
+- [ ] Privacy lead and ward leads: confirm the limits against a ward's real use (5 a minute, 50 a day per clinician; 1000 a day per hospital), and whether a lookup with no question after it should be flagged in the hospital admin's activity view.
+- [ ] Open questions the note left, not built: a reason field; a treatment-relationship check (an encounter on the clinician's unit); step-up for lookups.
+
+### The design note (as written before the build)
 
 Alerts now carry `patient.id`, so a clinician can ask about an alert's patient. A question about any other patient would need a lookup: a clinician types an MRN and gets the patient's id to send as `patient_id`. Not built; it needs a product and privacy decision first (owners: product owner, privacy lead).
 

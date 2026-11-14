@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A clinician's patient lookup by MRN (OpenAPI 1.29.0, additive; migration
+  00039), as designed in TODO.md's note and approved by the product owner
+  (14 Nov): `POST /patients/lookup` `{mrn}` (never an MRN in a URL), for
+  clinicians on a two-step session while `CORE_EMR_ENABLED` is on (else
+  404). Exact match only on the normalised MRN (spaces removed, upper
+  case) among the caller's hospital's active patients; the answer is one
+  patient (`id`, `full_name`, `mrn`, `age`, `sex`), and a miss, an excluded
+  or merged patient and another hospital's patient are the same 404; two
+  active patients with the MRN are 409. Rate limits count misses as well
+  as hits, reserved atomically in their own committed transaction before
+  the lookup: per clinician 5 a minute and 50 a hospital day, per hospital
+  1000 a day (`CORE_PATIENT_LOOKUP_PER_MINUTE`, `_PER_DAY`,
+  `_HOSPITAL_PER_DAY`); past one, 429 `rate_limited` and one
+  `patients.lookup_limit_reached` entry per clinician and day. Every
+  lookup is audited `patients.lookup` (the patient id on a hit, never the
+  MRN typed). The route keeps no idempotency row (`authz.Rule.NoIdempotency`:
+  no hash of the MRN, no reply stored).
 - Clinician alerts carry the patient's id (OpenAPI 1.27.0, additive):
   `patient.id` on each alert of `GET /alerts` and on an acknowledged or
   dismissed alert, the MHAI patient's lower-case uuid, so the clinical app
