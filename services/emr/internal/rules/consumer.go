@@ -13,7 +13,8 @@ package rules
 //     stored historical and never announced (A18; Review Focus 1);
 //   - shadow unless the deployment names the rule set (EMR_RULE_SET_ACTIVE)
 //     and a platform admin activated the same version and hash for the
-//     hospital (K4);
+//     hospital (K4); a shadow finding is stored for the review and never
+//     announced;
 //   - arrived_late when received over an hour after the value was taken;
 //   - superseded or withdrawn when an amended, corrected or retracted
 //     result replaces the one a finding used (A30).
@@ -634,7 +635,8 @@ func nonNil(ids []uuid.UUID) []uuid.UUID {
 }
 
 // Announce publishes every finding of hospital hid whose status hasn't
-// been announced (never a historical one), new findings first, by id only,
+// been announced (never a historical or a shadow one: neither is ever an
+// alert, so core's consumer never needs them), new findings first, by id only,
 // and records each as announced. A failed publish stops the run; the
 // finding stays unannounced for the next message or the sweep.
 func (e *Engine) Announce(ctx context.Context, hid uuid.UUID) error {
@@ -646,7 +648,7 @@ func (e *Engine) Announce(ctx context.Context, hid uuid.UUID) error {
 		var todo []pending
 		err := dbx.WithHospital(ctx, e.Pool, dbx.EMR, hid, func(tx pgx.Tx) error {
 			rows, err := tx.Query(ctx, `SELECT id, status FROM emr.findings WHERE hospital_id = $1 AND status <> 'historical'
-				AND announced IS DISTINCT FROM status ORDER BY (status <> 'open'), created_at, id LIMIT 500`, hid)
+				AND NOT shadow AND announced IS DISTINCT FROM status ORDER BY (status <> 'open'), created_at, id LIMIT 500`, hid)
 			if err != nil {
 				return err
 			}
