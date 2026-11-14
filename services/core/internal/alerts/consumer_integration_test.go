@@ -196,7 +196,7 @@ func TestFindingRaisesRoutedAlertAudited(t *testing.T) {
 	if _, page := w.clin(w.u, "GET", "/alerts", ""); len(ids(page)) != 1 {
 		t.Fatalf("u sees v's alert: %v", ids(page))
 	}
-	if strings.Contains(auditPayloads(t, w.h), "SYN-") || strings.Contains(auditPayloads(t, w.h), "6.8") {
+	if strings.Contains(auditPayloads(t, w.h), "SYN-") || strings.Contains(auditPayloads(t, w.h), "6.8371") {
 		t.Fatal("an audit payload carries patient data")
 	}
 }
@@ -385,7 +385,7 @@ func TestAmendedToCriticalUpdatedInPlace(t *testing.T) {
 		w := newWorld(t)
 		c := w.consumer()
 		mustHandle(t, c, w.h, w.finding)
-		f2 := w.amendFinding(t, w.finding, 7.9, "critical")
+		f2 := w.amendFinding(t, w.finding, 7.9413, "critical")
 		if successorFirst {
 			mustHandle(t, c, w.h, f2)
 			mustHandle(t, c, w.h, w.finding)
@@ -395,7 +395,7 @@ func TestAmendedToCriticalUpdatedInPlace(t *testing.T) {
 		}
 		got := alertRows(t, w.h)
 		if len(got) != 1 || got[0].finding != f2 || got[0].status != "new" || got[0].amended == nil ||
-			!strings.Contains(*got[0].amended, `"previous_value": "6.8"`) {
+			!strings.Contains(*got[0].amended, `"previous_value": "6.8371"`) {
 			t.Fatalf("successor first %v: %+v", successorFirst, got)
 		}
 		if auditCount(t, w.h, "alert.updated") != 1 || auditCount(t, w.h, "alert.raised") != 1 {
@@ -432,7 +432,7 @@ func TestAmendedToNormalAndEnteredInErrorWithdrawn(t *testing.T) {
 	w := newWorld(t)
 	c := w.consumer()
 	mustHandle(t, c, w.h, w.finding)
-	f2 := w.amendFinding(t, w.finding, 7.9, "critical")
+	f2 := w.amendFinding(t, w.finding, 7.9413, "critical")
 	withdrawFinding(t, f2, "source_retracted")
 	mustHandle(t, c, w.h, w.finding)
 	if got := alertRows(t, w.h); len(got) != 1 || got[0].withdrawn == nil || *got[0].withdrawn != "source_retracted" {
@@ -460,7 +460,7 @@ func TestHandledGetsMarkNotReopened(t *testing.T) {
 	if len(got) != 1 || got[0].status != "handled" || got[0].amended == nil || got[0].handledBy == nil || *got[0].handledBy != w.u {
 		t.Fatalf("amended handled: %+v", got)
 	}
-	f3 := w.amendFinding(t, f2, 7.9, "critical")
+	f3 := w.amendFinding(t, f2, 7.9413, "critical")
 	mustHandle(t, c, w.h, f3)
 	got = alertRows(t, w.h)
 	if len(got) != 2 || got[0].status != "handled" || got[0].severity != "urgent" || got[1].status != "new" ||
@@ -485,7 +485,7 @@ func TestAmendRacesAcknowledge(t *testing.T) {
 		c := w.consumer()
 		mustHandle(t, c, w.h, w.finding)
 		a := alertRows(t, w.h)[0]
-		f2 := w.amendFinding(t, w.finding, 7.9, "critical")
+		f2 := w.amendFinding(t, w.finding, 7.9413, "critical")
 		var wg sync.WaitGroup
 		var code int
 		var err error
@@ -609,16 +609,14 @@ func TestConsumerNoPHIInLogsOrAudit(t *testing.T) {
 	w := newWorld(t)
 	c := w.consumer()
 	mustHandle(t, c, w.h, w.finding)
-	f2 := w.amendFinding(t, w.finding, 7.9, "critical")
+	f2 := w.amendFinding(t, w.finding, 7.9413, "critical")
 	mustHandle(t, c, w.h, f2)
 	withdrawFinding(t, f2, "source_retracted")
 	mustHandle(t, c, w.h, f2)
 	mustHandle(t, c, w.h, uuid.New())
-	for _, s := range []string{"SYN-0001", "Synthetic Patient", "6.8", "7.9", "Potassium"} {
-		if strings.Contains(w.logs.String(), s) || strings.Contains(auditPayloads(t, w.h), s) {
-			t.Errorf("%q in a log line or an audit payload", s)
-		}
-	}
+	// Values distinctive enough that no timestamp or id can contain them
+	// (a plain "6.8" matched a log line's time, e.g. "…:16.8…").
+	requireAbsent(t, w, "SYN-0001", "Synthetic Patient", "6.8371", "7.9413", "Potassium")
 	_ = authz.RoleClinician
 }
 
@@ -668,5 +666,36 @@ func TestShadowSuccessorLeavesLiveAlert(t *testing.T) {
 	got := alertRows(t, w.h)
 	if len(got) != 1 || got[0].finding != w.finding || got[0].amended != nil || got[0].status != "new" {
 		t.Fatalf("a shadow finding changed the alert: %+v", got)
+	}
+}
+
+// requireAbsent fails, naming the line, when a log line or an audit
+// payload of the world's hospital holds one of the synthetic values.
+func requireAbsent(t *testing.T, w *world, values ...string) {
+	t.Helper()
+	rows, err := sharedSuper.Query(context.Background(), `SELECT action, payload::text FROM audit_log WHERE hospital_id = $1 ORDER BY id`, w.h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for rows.Next() {
+		var action, payload string
+		if err := rows.Scan(&action, &payload); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, "audit "+action+": "+payload)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(w.logs.String(), "\n") {
+		lines = append(lines, "log: "+l)
+	}
+	for _, v := range values {
+		for _, l := range lines {
+			if strings.Contains(l, v) {
+				t.Errorf("synthetic value %q in %s", v, l)
+			}
+		}
 	}
 }
