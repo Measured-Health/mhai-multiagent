@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The platform app's hospitals list and a hospital's page (mhai-web Plan
+  7b), so the page and its model policy section open in live mode. New
+  routes (OpenAPI 1.25.0, additive), for platform admins and auditors with
+  two-step: `GET /platform/hospitals?status&q&cursor` (50 a page, by name),
+  `GET /platform/hospitals/{id}` (the summary, the active hospital admins
+  and the open legal holds) and `GET /platform/hospitals/{id}/sso` (always
+  off: core keeps no single sign-on per hospital), and `GET
+  /platform/analysis/status` for platform admins (the sidebar's Analysis
+  status: off, since core serves no platform Analysis view yet; the
+  hospitals split by their effective switch). What core doesn't keep
+  is sent empty, never invented (country, email domains, deactivation,
+  first-admin invite, removal request). Migration **00036**: `mhai_platform`
+  reads `legal_holds` (no write). The reads aren't audited (platform
+  configuration, as the model policy read).
 - The hospital admin routes of the clinical app (frontend requirements §5).
   Migration **00035** (additive: `users.staff_version`,
   `hospital_settings.version`, `updated_by`, `updated_at`) and OpenAPI

@@ -68,6 +68,7 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/hospital/usage` | signed in | `hospital_admin` | clinical | yes | no | no |
 | GET | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | no |
 | PATCH | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | yes |
+| GET | `/api/v1/platform/analysis/status` | signed in | `platform_admin` | platform | yes | no | no |
 | GET | `/api/v1/platform/analytics` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | DELETE | `/api/v1/platform/analytics/changes/{id}/follow-up` | signed in | `platform_admin` | platform | yes | no | yes |
 | PUT | `/api/v1/platform/analytics/changes/{id}/follow-up` | signed in | `platform_admin` | platform | yes | no | yes |
@@ -93,11 +94,14 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/platform/guardrails` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/guardrails/periods` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/health` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/hospitals` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| GET | `/api/v1/platform/hospitals/{id}` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/hospitals/{id}/emr-rule-set` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | PUT | `/api/v1/platform/hospitals/{id}/emr-rule-set` | signed in | `platform_admin` | platform | yes | yes | yes |
 | POST | `/api/v1/platform/hospitals/{id}/emr/connections` | signed in | `platform_admin` | platform | yes | yes | yes |
 | GET | `/api/v1/platform/hospitals/{id}/model-policy` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | PUT | `/api/v1/platform/hospitals/{id}/model-policy` | signed in | `platform_admin` | platform | yes | yes | yes |
+| GET | `/api/v1/platform/hospitals/{id}/sso` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | GET | `/api/v1/platform/jobs` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | POST | `/api/v1/platform/jobs/cancel` | signed in | `platform_admin` | platform | yes | yes | yes |
 | POST | `/api/v1/platform/jobs/retry` | signed in | `platform_admin` | platform | yes | no | yes |

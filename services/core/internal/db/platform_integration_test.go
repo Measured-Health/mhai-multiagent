@@ -101,6 +101,7 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"emr_connections":         "00020: EMR connection configuration, no secret column (SELECT, INSERT, column UPDATE)",
 		"analysis_switch":         "00021: the analysis switch, read and written with real sign-offs only (Plan 11b's flow)",
 		"emr_rule_set_activation": "00027: a hospital's activated EMR rule set, a platform admin's step-up switch (SELECT, INSERT, column UPDATE, DELETE)",
+		"legal_holds":             "00036: the holds' ids, hospital, reference and dates, for the hospitals list and page (column SELECT)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `
