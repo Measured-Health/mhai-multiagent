@@ -85,8 +85,10 @@ refusal sends nothing.
 `egress` naming the provider or `none`): `ok`, `egress_blocked`,
 `budget_exhausted`, `unconfigured`, `unavailable`, `timeout`, `auth_failed`,
 `refused`, `truncated`, `malformed`, `insufficient`,
-`retention_unconfirmed`. Every outcome but `ok` escalates (no score, no
-fallback to local or to another provider). A policy switched off before the
+`retention_unconfirmed`, and the local route's `local_unverified` (the pinned
+answer model's sidecar could not be shown to serve the verified model, or no
+`cca` is pinned outside development: nothing was generated). Every outcome
+but `ok` escalates (no score, no fallback to local or to another provider). A policy switched off before the
 claim runs local.
 
 **Settings** (pipeline only; all unset by default):

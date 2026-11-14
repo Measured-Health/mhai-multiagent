@@ -1,6 +1,6 @@
 # Own answer model replaces cloud: implementation plan
 
-**Status:** PR 1 merged (#143). PR 2 (answer role, question set and gate) built; see "PR 2 as built" under its tasks. Lean by decision (product owner, 11 Nov 2026, "get a hospital testing fast"): essential safety only (verify what you load, fail closed, patient data never leaves the host). Heavier controls are listed under "Before scale" and come back at the trigger named. Clinical sign-off is deferred for the pilot (README, "Pilot mode"); nothing in this plan stands in for it.
+**Status:** PR 1 merged (#143), PR 2 merged (#144; see "PR 2 as built"). PR 3 (pinned local generator and sidecar) built; see "PR 3 as built". Lean by decision (product owner, 11 Nov 2026, "get a hospital testing fast"): essential safety only (verify what you load, fail closed, patient data never leaves the host). Heavier controls are listed under "Before scale" and come back at the trigger named. Clinical sign-off is deferred for the pilot (README, "Pilot mode"); nothing in this plan stands in for it.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the `secure-design` and `secure-build` skills (`.claude/skills/`) before Task 1, and run `security-review` on your own diff before each PR.
 
@@ -218,6 +218,17 @@ The cloud plan's and the promotion design's constraints hold: no PHI or secrets 
 
 **Tests:** the existing cross-language vocabulary test.
 **Acceptance:** an operator can tell a verification escalation from a model's own escalation in the audit chain.
+
+#### PR 3 as built (departures from Tasks 8-11)
+
+- **The preflight is the local client's, before anything is built.** `OrchestratorModelClient` takes `preflight` (the generator's `check`): `GET /v1/models` must list exactly one model whose id is the verified version string. No verified pin, an unreachable sidecar, a non-200, a malformed list, a redirect or another alias: `Generation(failed_agents=("CCA",), cloud_outcome="local_unverified")`, and nothing is built or generated. A generation that fails after a good preflight escalates as any local CCA failure (no outcome). Code: `tools/llama_client.py`, `boundary/models.py` (`local_generator`).
+- **Without a pinned `cca`, outside development and without `INTELLIGENCE_LOCAL_UNPINNED=on`, the local route is `RefusedGenerator`**: every local job escalates as `local_unverified`. The worker still starts (the cloud clients share the same parts, and every pilot hospital is on the cloud).
+- **Sampling defaults to the gate's**: temperature 0, top_p 1.0, 512 tokens (`INTELLIGENCE_LOCAL_LLM_*`), so the served answers are sampled as the scored ones were.
+- **`local_unverified` is in `vocab.OUTCOMES` and core's `CloudOutcomes`**; the cloud retry and adapters use `vocab.CLOUD_OUTCOMES` (the same list without it), so a cloud call can never report it.
+- **Loader:** `serve_cca` checks `warmup.json` (the gate's form, the engine version of the pinned llama.cpp commit), writes `active.json` atomically (0400, fsync, rename) into the cache root, waits `INTELLIGENCE_LOCAL_LLM_START_TIMEOUT` (300 s) for the alias, then asks the warm-up question. `modelstore/mirror.py`: `fetch_pinned` (the `mhai-models fetch-pinned` command, reader credentials from files only) and `DirReadStore` (objects as `<key>@<version id>`, no link followed); `INTELLIGENCE_MODEL_MIRROR` refuses every `MODEL_STORE_*` setting beside it.
+- **The sidecar image is built from `deploy/llama/Dockerfile`** (llama.cpp at `b1b770d9`, built without curl, Debian pinned by digest, uid 1000 like the pipeline's user, arm64 and amd64), not `ghcr.io/ggml-org/llama.cpp:server`: the served engine is then the gate's engine. A published image pinned by digest is a TODO before a second host.
+- **`model-fetch` has its own network (`model-store`) instead of the egress proxy:** the proxy's allow-list is shared, so adding the store there would have given the pipeline a path to the store. model-fetch holds only the reader's credential and never sees a question; narrowing its way out to the store's host is a TODO before a second hospital.
+- **Tests:** `tests/boundary/test_pinned_llama.py` (a fake llama-server on loopback), `tests/modelstore/test_loader_cca.py`, core's `compose_test.go` (the ownmodel services, the internal `model` network, the store route), `deploy/llama/test-entrypoint.sh` (no Docker) and `deploy/llama/test-llama.sh` (Docker: alias, answer, no route out, a flipped byte).
 
 ### PR 4: switch runbook
 

@@ -197,7 +197,8 @@ func TestQueryCompletedEgressAndOutcome(t *testing.T) {
 		accept = append(accept, base("egress", e))
 	}
 	outcomes := []string{"ok", "egress_blocked", "budget_exhausted", "unconfigured", "unavailable", "timeout",
-		"auth_failed", "refused", "truncated", "malformed", "insufficient", "retention_unconfirmed"}
+		"auth_failed", "refused", "truncated", "malformed", "insufficient", "retention_unconfirmed",
+		"local_unverified"}
 	for _, o := range outcomes {
 		accept = append(accept, base("cloud_outcome", o), base("egress", "anthropic", "cloud_outcome", o))
 	}

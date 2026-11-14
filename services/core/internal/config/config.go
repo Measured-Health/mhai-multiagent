@@ -170,8 +170,13 @@ func EnumV1Provider(provider *string) *string {
 // CloudOutcomes are the cloud call's outcome codes (design §11), the closed
 // set of query.completed's cloud_outcome. The worker holds the same list
 // (boundary/cloud/vocab.py OUTCOMES; TestOutcomeVocabularyMatchesWorker).
+// local_unverified is the local route's: the pinned answer model's sidecar
+// could not be shown to serve the verified model (own answer model plan,
+// PR 3), so the job escalated before anything was generated. It tells a
+// verification escalation from a model's own in the audit chain.
 var CloudOutcomes = []string{"ok", "egress_blocked", "budget_exhausted", "unconfigured", "unavailable", "timeout",
-	"auth_failed", "refused", "truncated", "malformed", "insufficient", "retention_unconfirmed"}
+	"auth_failed", "refused", "truncated", "malformed", "insufficient", "retention_unconfirmed",
+	"local_unverified"}
 
 // EgressValues are query.completed's egress codes: where an answer's text
 // went, "none" or one of CloudProviderNames. A fresh slice each call.

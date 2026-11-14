@@ -45,6 +45,12 @@ COPY warmup/page.png /app/warmup/page.png
 # The venv stays root-owned and read-only; the app only writes here.
 RUN mkdir -p /app/data /app/artifacts /home/appuser/.cache/huggingface \
     && chown appuser /app/data /app/artifacts /home/appuser/.cache/huggingface
+# The own answer model's mount points (deploy/compose.yml, profile ownmodel): the
+# verified cache and model-fetch's mirror. A new named volume copies this owner and
+# mode, so the cache is the worker's own and private (the verifier's cache rules).
+# appuser must stay uid 1000: the llama sidecar runs as 1000 to read the cache.
+RUN install -d -m 700 -o appuser -g appuser /models /mirror \
+    && test "$(id -u appuser)" = 1000
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/healthz || exit 1

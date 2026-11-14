@@ -158,7 +158,7 @@ def test_never_retry_on_400_401_403_404_refusal_truncated_malformed_egress() -> 
     # K12.
     for status in (400, 401, 403, 404):
         assert classify(status) != RETRY
-    for outcome in vocab.OUTCOMES:
+    for outcome in vocab.CLOUD_OUTCOMES:
         assert classify(outcome) == outcome
         assert classify(outcome) != RETRY
     for outcome in ("refused", "truncated", "malformed", "egress_blocked"):
@@ -179,8 +179,11 @@ def test_final_outcome_is_in_the_closed_set() -> None:
     assert retry.final_outcome(RETRY) == "unavailable"
     assert retry.final_outcome("timeout") == "timeout"
     assert retry.final_outcome("surprise") == "unavailable"
-    for o in vocab.OUTCOMES:
+    for o in vocab.CLOUD_OUTCOMES:
         assert retry.final_outcome(o) == o
+    # The local route's outcome is never a cloud call's.
+    assert classify("local_unverified") == "unavailable"
+    assert retry.final_outcome("local_unverified") == "unavailable"
 
 
 class _FixedRng(random.Random):

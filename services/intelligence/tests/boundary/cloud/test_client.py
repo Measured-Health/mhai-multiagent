@@ -266,7 +266,7 @@ def test_never_calls_generate_with_rag_or_the_generator() -> None:
     assert retriever.calls == [{"query": c.mask(QUESTION), "top_k": 5, "patient_id": None}]
 
 
-FAILURES = [o for o in vocab.OUTCOMES if o != "ok"]
+FAILURES = [o for o in vocab.CLOUD_OUTCOMES if o != "ok"]
 
 
 @pytest.mark.parametrize("outcome", FAILURES)
