@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -47,6 +48,7 @@ func TestCodesCatalogue(t *testing.T) {
 		"named_access_off": 403, "file_too_large": 413, "file_type": 415, "end_date_too_late": 422,
 		"not_eligible_platform": 422, "would_empty": 422,
 		"not_cleared": 403, "clearance_ended": 403, "idempotency_mismatch": 422,
+		"too_many_rows": 422, "gone": 410, "already_used": 409,
 	}
 	if len(Codes) != len(want) {
 		t.Fatalf("Codes has %d entries, want %d", len(Codes), len(want))
@@ -328,5 +330,24 @@ func TestErrorFields(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil || p["code"] != "already_handled" || p["type"] == "x" ||
 		p["request_id"] == "x" {
 		t.Fatalf("protected members replaced: %v", p)
+	}
+}
+
+// too_many_rows carries the one extra field rows (contract §14.9): exactly
+// {code, rows} on the platform audience.
+func TestErrorRows(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/probe", nil)
+	r = r.WithContext(context.WithValue(r.Context(), audienceKey, AudiencePlatform))
+	w := httptest.NewRecorder()
+	ErrorRows(w, r, 50001)
+	if w.Code != 422 || strings.TrimSpace(w.Body.String()) != `{"code":"too_many_rows","rows":50001}` ||
+		w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("platform: %d %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	ErrorRows(w, httptest.NewRequest(http.MethodPost, "/probe", nil), 201)
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != 422 || body["code"] != "too_many_rows" || body["rows"] != float64(201) {
+		t.Errorf("clinical: %d %s", w.Code, w.Body.String())
 	}
 }
