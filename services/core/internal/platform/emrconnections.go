@@ -1361,7 +1361,36 @@ func (d Deps) emrEnabled(w http.ResponseWriter, r *http.Request) {
 		d.emrFail(w, r, p, "enable", err)
 		return
 	}
+	if on {
+		d.syncNow(r.Context(), cur.hospital, id, rid)
+	}
 	d.answer(w, r, p, id)
+}
+
+// syncNowWait bounds the sync_now call a switch-on makes.
+const syncNowWait = 3 * time.Second
+
+// syncNow asks the emr service to poll a connection just switched on at its
+// next tick (emr.v1.ctl.sync_now as svc:core, the token's hospital the
+// connection's), so the first fetch doesn't wait a whole poll interval.
+// Best effort, after the commit: the switch stands whatever happens here;
+// an emr service that is down or busy polls it on its own schedule. Logged
+// by ids and the outcome code only.
+func (d Deps) syncNow(ctx context.Context, hid, conn uuid.UUID, rid string) {
+	if d.EMR == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), syncNowWait)
+	defer cancel()
+	var rep emrpb.SyncNowReply
+	if err := d.EMR.Request(ctx, emrctl.System(hid.String(), rid), "sync_now",
+		&emrpb.SyncNowRequest{ConnectionId: conn.String()}, &rep); err != nil {
+		d.log().Warn("platform: sync_now after switch-on not answered; the connection polls on its schedule",
+			"request_id", rid, "connection_id", conn.String(), "reason", "unavailable")
+		return
+	}
+	d.log().Info("platform: sync_now after switch-on", "request_id", rid, "connection_id", conn.String(),
+		"queued", rep.GetQueued())
 }
 
 // emrTest is POST /platform/emr/connections/{id}/test: the emr service

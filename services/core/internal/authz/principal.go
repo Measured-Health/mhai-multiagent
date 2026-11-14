@@ -97,6 +97,19 @@ func Tx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
 	return db.WithHospital(ctx, pool, p.HospitalID, fn)
 }
 
+// TxUser is Tx for a clinical principal with mhai.user_id set to the
+// principal's user as well (db.WithHospitalUser), for the writes whose
+// database guards name the acting user (mhai_current_user(): an alert is
+// handled as the caller, a delivery marked read only by its own user). A
+// platform principal, or none, fails.
+func TxUser(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	p, ok := FromContext(ctx)
+	if !ok || p.Platform || p.HospitalID == uuid.Nil {
+		return ErrNoPrincipal
+	}
+	return db.WithHospitalUser(ctx, pool, p.HospitalID, p.UserID, fn)
+}
+
 // Guard is the principal middleware. Build one per process and share it;
 // it must not be copied after first use.
 type Guard struct {

@@ -116,7 +116,23 @@ func newFixture(t *testing.T) *fixture {
 		map[string]any{"mrn_namespace": mrnNS}); err != nil {
 		t.Fatal(err)
 	}
+	// Live by default: the deployment names the rule set and the hospital
+	// activated it, so findings are announced. The shadow tests switch it
+	// off (shadowOnly).
+	sha := rs.SHA256()
+	f.eng.Active = rs.Version()
+	f.activate(t, rs.Version(), sha[:])
 	return f
+}
+
+// shadowOnly puts the hospital back in shadow: no activation, no active
+// rule set.
+func (f *fixture) shadowOnly(t *testing.T) {
+	t.Helper()
+	f.eng.Active = ""
+	if _, err := f.pool.Exec(context.Background(), `DELETE FROM emr_rule_set_activation WHERE hospital_id = $1`, f.hospital); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func ts(d time.Duration) string { return time.Now().Add(-d).UTC().Format(time.RFC3339) }
@@ -434,6 +450,7 @@ func TestBackfillAndRenormaliseHistorical(t *testing.T) {
 // finding is shadow. Only both together alert.
 func TestNoActiveRuleSetAllShadow(t *testing.T) {
 	f := newFixture(t)
+	f.shadowOnly(t)
 	ctx := context.Background()
 	f.ingest(t, false, patientRec("p1"))
 	sha := f.eng.RuleSet.SHA256()
@@ -465,6 +482,19 @@ func TestNoActiveRuleSetAllShadow(t *testing.T) {
 		if last := got[len(got)-1]; last.shadow != c.shadow {
 			t.Errorf("case %d (%+v): shadow %v", i, c, last.shadow)
 		}
+	}
+	// A shadow finding is never announced (core's consumer would only ack
+	// it); the one live finding is.
+	if n := len(f.pub.on(".finding")); n != 1 {
+		t.Fatalf("%d finding messages, want only the live one", n)
+	}
+	for _, x := range f.findings(t) {
+		if x.shadow && x.announced != nil {
+			t.Errorf("shadow finding %v announced %v", x.id, *x.announced)
+		}
+	}
+	if err := f.eng.Sweep(ctx); err != nil || len(f.pub.on(".finding")) != 1 {
+		t.Fatalf("the sweep announced a shadow finding: %v", err)
 	}
 }
 

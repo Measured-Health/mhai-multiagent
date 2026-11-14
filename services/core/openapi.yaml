@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.19.0"
+  version: "1.20.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -898,6 +898,454 @@ paths:
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
+  /hospital/alert-settings:
+    get:
+      operationId: getAlertSettings
+      summary: The hospital's EMR alert settings and records status (hospital admins).
+      description: |
+        Hospital admins, with a two-step session. `connection` is status
+        only, by the hospital's own source labels: `connected`, `problems`
+        (paused, or no successful poll in three intervals), `off`; the
+        worst of them, or `not_connected` when the hospital has no source.
+        Never an address, a type or an error code. Units the sources know,
+        each covered unless the admin uncovered it (a new unit is covered);
+        the eight categories with their levels (defaults `critical_urgent`,
+        `critical` for vital signs); the queue switch (on by default) and the
+        named clinicians who are still active clinicians. `version` is 0
+        until the first save. Answers whether or not EMR is switched on.
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertSettingsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    patch:
+      operationId: updateAlertSettings
+      summary: Save one section of the alert settings (hospital admins).
+      description: |
+        Exactly one of `units {covered}` (the units to cover; every other
+        known unit is uncovered), `rules {levels}` (category to level) or
+        `recipients {queue, clinician_ids}` (the named list is replaced),
+        with the `version` it was read at: 409 `conflict` when it is stale.
+        422 `validation_failed` for two sections, an unknown unit, category
+        or level, or a clinician who isn't an active clinician of the
+        hospital; 422 `no_recipients` for the queue off with nobody named.
+        Clinicians taken off the list have their open alerts that no other
+        active clinician was sent moved to the queue. Each save is audited
+        with counts only (`alert_settings.units_changed`, `.rules_changed`,
+        `.recipients_changed`). Answers as the GET. Send an
+        `Idempotency-Key`.
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, conflict, validation_failed, no_recipients, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertSettingsPatchIn" }
+      responses:
+        "200":
+          description: The settings, saved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertSettingsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/patient-matches:
+    get:
+      operationId: listPatientMatches
+      summary: Possible duplicate patients, waiting for a hospital admin's decision.
+      description: |
+        Hospital admins, with a two-step session. Undecided matches of two
+        active patients of the hospital, oldest first, at most 100. Each
+        card carries the patient's name and MRN (null when none), age, sex,
+        the source labels and the count of current records. A page served
+        is audited (`emr.patient_matches_read`, the match ids). Nothing
+        merges by itself.
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The matches.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PatientMatchesOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/patient-matches/{id}/confirm:
+    post:
+      operationId: confirmPatientMatch
+      summary: Merge two patients a match proposed (step-up).
+      description: |
+        Hospital admins, with a fresh TOTP code (`mfa_code`) or an unused
+        backup code (`backup_code`). `keep` is the patient that stays (`a`
+        or `b`); the other's records, findings and alerts move to it. Order:
+        the path (404), the body (422), the match (404: unknown, decided or
+        another hospital's), then the code (403). The merge and its
+        `emr.patients_merged` audit entry are one transaction. A merge that
+        loses a deadlock against the record feed is retried, then 503
+        `not_ready`; nothing is left half-done. 204.
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: &stepUpMatchErrors [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keep]
+              additionalProperties: false
+              properties:
+                keep: { type: string, enum: [a, b] }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "204": { description: Merged. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/patient-matches/{id}/reject:
+    post:
+      operationId: rejectPatientMatch
+      summary: Reject a proposed match (step-up); the pair isn't proposed again for the same reason.
+      description: |
+        Hospital admins, with a fresh code, as confirm. Audited
+        `emr.patient_match_rejected`. 204.
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *stepUpMatchErrors
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "204": { description: Rejected. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /hospital/patient-exclusions:
+    post:
+      operationId: excludePatient
+      summary: Exclude a patient from EMR processing and purge their data (step-up).
+      description: |
+        Hospital admins, with a fresh code. Exactly one of `mrn` or
+        `patient_id`, and a `reason`. The patient's open alerts are
+        withdrawn at once (`withdrawn: excluded`), and their records,
+        findings and matches are purged in the same transaction (this
+        version purges at once, so `purge_by` is the time of the request).
+        404 when no active patient of the hospital matches; 409 `conflict`
+        when the MRN names two (send `patient_id`). Order: the body (422),
+        the patient (404, 409), then the code (403). Audited
+        `emr.patient_excluded` (counts) and one `alert.withdrawn` per alert.
+        A deadlock against the record feed is retried, then 503
+        `not_ready`. 202.
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              additionalProperties: false
+              properties:
+                mrn: { type: string, minLength: 1, maxLength: 64 }
+                patient_id: { type: string, format: uuid }
+                reason: { type: string, enum: [objection, hospital_policy, other] }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "202":
+          description: Excluded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [patient_id, purge_by]
+                additionalProperties: false
+                properties:
+                  patient_id: { type: string, format: uuid }
+                  purge_by: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /alerts:
+    get:
+      operationId: listAlerts
+      summary: The caller's EMR alerts, newest first (clinicians).
+      description: |
+        Clinicians only. An alert on the hospital's queue, or sent to the
+        caller by name; who sees an alert is fixed when it is raised.
+        Filters: `status`, `severity`, `source` (a label of `sources`),
+        `sent_to` (`you`: sent to you by name; `queue`: on the queue only);
+        `limit` 1–100 (50); `cursor` is the opaque `next_cursor` of the
+        same session and filters. `sources_status` is always sent: a source
+        is `behind` when paused or silent for three poll intervals, so an
+        empty list is "no alerts" only when every source is `current`.
+        `grouped` is null until grouped mode exists. A page with alerts is
+        audited (`alerts.read`, the ids served).
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [new, handled, dismissed] } }
+        - { name: severity, in: query, schema: { type: string, enum: [critical, urgent, info] } }
+        - { name: source, in: query, schema: { type: string, maxLength: 40 } }
+        - { name: sent_to, in: query, schema: { type: string, enum: [you, queue] } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: A page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertPageOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /alerts/unread-count:
+    get:
+      operationId: getAlertUnreadCount
+      summary: New alerts the caller sees that no one has handled yet.
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The count.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count]
+                additionalProperties: false
+                properties:
+                  count: { type: integer, minimum: 0 }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /alerts/{id}/acknowledge:
+    post:
+      operationId: acknowledgeAlert
+      summary: Acknowledge an alert; the first handler wins.
+      description: |
+        Clinicians only; no body, or `{}`. 404 for an alert the caller
+        doesn't see (another hospital's, or routed to someone else). 409
+        `already_handled` when someone handled it first: the body adds
+        `status` (`handled` or `dismissed`, in place of the problem's
+        number), `handled_by {display_name}` and `handled_at`. Audited
+        `alert.acknowledged`. Answers the alert. Send an `Idempotency-Key`.
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: &handleErrors [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, already_handled, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: The alert, handled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409":
+          description: Someone handled it first.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/AlertHandledProblem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /alerts/{id}/dismiss:
+    post:
+      operationId: dismissAlert
+      summary: Dismiss an alert with a reason; the first handler wins.
+      description: |
+        Clinicians only. `reason` is one of `not_relevant`,
+        `already_known`, `wrong_patient`, `other`; `note` at most 500
+        characters (trimmed; empty is none), kept on the alert for the
+        hospital's clinicians and never logged or audited. Errors as
+        acknowledge. Audited `alert.dismissed` (the reason only).
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: *handleErrors
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              additionalProperties: false
+              properties:
+                reason: { type: string, enum: [not_relevant, already_known, wrong_patient, other] }
+                note: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: The alert, dismissed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409":
+          description: Someone handled it first.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/AlertHandledProblem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /me/notification-settings:
+    get:
+      operationId: getNotificationSettings
+      summary: The caller's pop-up switches (on by default).
+      description: |
+        Clinicians only. The switches mute pop-ups only; critical alerts
+        always pop up.
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The switches.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationSettingsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    patch:
+      operationId: updateNotificationSettings
+      summary: Change one or both pop-up switches.
+      description: |
+        Clinicians only; at least one key. Audited
+        `notification_settings.changed`. Send an `Idempotency-Key`.
+      tags: [alerts]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                alert_popups: { type: boolean }
+                correction_popups: { type: boolean }
+      responses:
+        "200":
+          description: The switches, saved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationSettingsOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
   /platform/audit:
     get:
       operationId: listAuditEvents
@@ -2424,6 +2872,8 @@ components:
             - invalid_range
             - too_small
             - level_not_supported
+            - already_handled
+            - no_recipients
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -3767,3 +4217,256 @@ components:
               properties:
                 count: { type: integer, minimum: 1, maximum: 200 }
             letter: { type: object, nullable: true }
+    AlertSettingsOut:
+      type: object
+      required: [connection, units, categories, recipients, updated_by, updated_at, version]
+      properties:
+        connection:
+          type: object
+          required: [status, sources]
+          properties:
+            status: { type: string, enum: [connected, problems, off, not_connected] }
+            sources:
+              type: array
+              items:
+                type: object
+                required: [label, status, last_update_at]
+                properties:
+                  label: { type: string }
+                  status: { type: string, enum: [connected, problems, off] }
+                  last_update_at: { type: string, format: date-time, nullable: true }
+        units:
+          type: array
+          items:
+            type: object
+            required: [id, label, kind, source_label, covered]
+            properties:
+              id: { type: string, format: uuid }
+              label: { type: string }
+              kind: { type: string, enum: [ward, clinic, emergency, other] }
+              source_label: { type: string, nullable: true }
+              covered: { type: boolean }
+        categories:
+          type: array
+          items:
+            type: object
+            required: [id, label, example, level]
+            properties:
+              id: { type: string, enum: [blood_chemistry, blood_count, kidney_function, blood_gases_lactate, heart_markers, blood_sugar, vital_signs, infection_markers] }
+              label: { type: string }
+              example: { type: string, nullable: true }
+              level: { type: string, enum: [off, critical, critical_urgent, all] }
+        recipients:
+          type: object
+          required: [queue, clinicians]
+          properties:
+            queue: { type: boolean }
+            clinicians:
+              type: array
+              items:
+                type: object
+                required: [id, display_name, specialty]
+                properties:
+                  id: { type: string, format: uuid }
+                  display_name: { type: string }
+                  specialty: { type: string, nullable: true }
+        updated_by:
+          type: object
+          nullable: true
+          required: [display_name]
+          properties:
+            display_name: { type: string }
+        updated_at: { type: string, format: date-time, nullable: true }
+        version: { type: integer, minimum: 0 }
+    AlertSettingsPatchIn:
+      description: The version read, and exactly one section.
+      type: object
+      required: [version]
+      additionalProperties: false
+      properties:
+        version: { type: integer, minimum: 0 }
+        units:
+          type: object
+          required: [covered]
+          additionalProperties: false
+          properties:
+            covered: { type: array, maxItems: 1000, items: { type: string, format: uuid } }
+        rules:
+          type: object
+          required: [levels]
+          additionalProperties: false
+          properties:
+            levels:
+              type: object
+              minProperties: 1
+              additionalProperties: { type: string, enum: [off, critical, critical_urgent, all] }
+        recipients:
+          type: object
+          required: [queue, clinician_ids]
+          additionalProperties: false
+          properties:
+            queue: { type: boolean }
+            clinician_ids: { type: array, maxItems: 200, items: { type: string, format: uuid } }
+    PatientCard:
+      type: object
+      required: [id, full_name, mrn, age, sex, sources, records]
+      properties:
+        id: { type: string, format: uuid }
+        full_name: { type: string }
+        mrn: { type: string, nullable: true }
+        age: { type: integer, nullable: true }
+        sex: { type: string, enum: [female, male, other, unknown] }
+        sources: { type: array, items: { type: string } }
+        records: { type: integer, minimum: 0 }
+    PatientMatchesOut:
+      type: object
+      required: [matches]
+      properties:
+        matches:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [id, reason, a, b, proposed_at]
+            properties:
+              id: { type: string, format: uuid }
+              reason: { type: string, enum: [mrn_birth_sex, mrn_only, source_merge, document_link] }
+              a: { $ref: "#/components/schemas/PatientCard" }
+              b: { $ref: "#/components/schemas/PatientCard" }
+              proposed_at: { type: string, format: date-time }
+    AlertEvidence:
+      type: object
+      required: [label, value, recorded_at]
+      properties:
+        label: { type: string }
+        value: { type: string, nullable: true }
+        recorded_at: { type: string, format: date-time, nullable: true }
+    AlertOut:
+      type: object
+      required: [id, severity, status, finding, likely_causes, patient, age, sex, source_label, emr_link, handled_by,
+                 handled_at, dismiss_reason, created_at, category, routing, arrived_late, preliminary, amended, withdrawn]
+      properties:
+        id: { type: string, format: uuid }
+        severity: { type: string, enum: [critical, urgent, info] }
+        status: { type: string, enum: [new, handled, dismissed], description: "`handled` means acknowledged." }
+        finding:
+          type: object
+          required: [name, value, unit, flag, reference_range, recorded_at, code_system, standardised]
+          properties:
+            name: { type: string }
+            value: { type: string, nullable: true }
+            unit: { type: string, nullable: true }
+            flag: { type: string, enum: [low, high, abnormal], nullable: true }
+            reference_range: { type: string, nullable: true }
+            recorded_at: { type: string, format: date-time, nullable: true }
+            code_system: { type: string, enum: [loinc, local] }
+            standardised: { type: boolean }
+        likely_causes:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            required: [label, confidence, evidence]
+            properties:
+              label: { type: string }
+              confidence: { type: string, enum: [caution, review], description: "`high` is never sent in v1." }
+              evidence: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/AlertEvidence" } }
+        patient:
+          type: object
+          required: [full_name, mrn, location]
+          properties:
+            full_name: { type: string }
+            mrn: { type: string, nullable: true, description: Null for a patient with no MRN. }
+            location:
+              type: object
+              nullable: true
+              required: [kind]
+              properties:
+                kind: { type: string, enum: [admitted, outpatient, emergency] }
+                ward: { type: string }
+                bed: { type: string, nullable: true }
+                clinic: { type: string, nullable: true }
+        age: { type: integer, nullable: true }
+        sex: { type: string, enum: [female, male, other, unknown], nullable: true }
+        source_label: { type: string, nullable: true }
+        emr_link: { type: string, nullable: true }
+        handled_by:
+          type: object
+          nullable: true
+          required: [display_name]
+          properties:
+            display_name: { type: string }
+        handled_at: { type: string, format: date-time, nullable: true }
+        dismiss_reason: { type: string, enum: [not_relevant, already_known, wrong_patient, other], nullable: true }
+        created_at: { type: string, format: date-time }
+        category:
+          type: object
+          nullable: true
+          required: [id, label]
+          properties:
+            id: { type: string }
+            label: { type: string }
+        routing:
+          type: object
+          required: [to_you, queue]
+          properties:
+            to_you: { type: boolean }
+            queue: { type: boolean }
+        arrived_late: { type: boolean }
+        preliminary: { type: boolean }
+        amended:
+          type: object
+          nullable: true
+          required: [previous_value, amended_at]
+          properties:
+            previous_value: { type: string, nullable: true }
+            amended_at: { type: string, format: date-time, nullable: true }
+        withdrawn: { type: string, enum: [source_amended, source_retracted, excluded], nullable: true }
+    AlertPageOut:
+      type: object
+      required: [alerts, next_cursor, sources, queue, sources_status, grouped]
+      properties:
+        alerts: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/AlertOut" } }
+        next_cursor: { type: string, nullable: true }
+        sources: { type: array, items: { type: string } }
+        queue: { type: boolean }
+        sources_status:
+          type: array
+          items:
+            type: object
+            required: [label, status, last_update_at]
+            properties:
+              label: { type: string }
+              status: { type: string, enum: [current, behind] }
+              last_update_at: { type: string, format: date-time, nullable: true }
+        grouped:
+          type: object
+          nullable: true
+          description: Always null until grouped mode exists (EMR PR 8b).
+          properties:
+            since: { type: string, format: date-time }
+            count: { type: integer }
+    AlertHandledProblem:
+      description: The 409 already_handled body. `status` is the alert's, not the HTTP status.
+      type: object
+      required: [type, title, status, code, detail, request_id, handled_by, handled_at]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: string, enum: [handled, dismissed] }
+        code: { type: string, enum: [already_handled] }
+        detail: { type: string }
+        request_id: { type: string }
+        handled_by:
+          type: object
+          nullable: true
+          required: [display_name]
+          properties:
+            display_name: { type: string }
+        handled_at: { type: string, format: date-time, nullable: true }
+    NotificationSettingsOut:
+      type: object
+      required: [alert_popups, correction_popups]
+      properties:
+        alert_popups: { type: boolean }
+        correction_popups: { type: boolean }

@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -291,9 +291,35 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		VALUES ($1, $2, 'critical', now(), 11, 0)`, a, conn); err != nil {
 		t.Fatal(err)
 	}
-	emrGatewayReads := []string{"emr.patients", "emr.observations", "emr.medications", "emr.encounters", "emr.units"}
-	emrHidden := []string{"emr.raw_records", "emr.patient_links", "emr.possible_matches", "emr.merges", "emr.unmapped_codes",
-		"emr.findings", "emr.breaker_trips"}
+	// 00029: the gateway reads the finding and match columns an alert or a
+	// match card shows, under RLS.
+	emrGatewayReads := []string{"emr.patients", "emr.observations", "emr.medications", "emr.encounters", "emr.units",
+		"emr.possible_matches", "emr.findings"}
+	emrHidden := []string{"emr.raw_records", "emr.patient_links", "emr.merges", "emr.unmapped_codes", "emr.breaker_trips"}
+	// Alerts, their settings and deliveries (00029), so they have rows to
+	// hide from the gateway with no hospital set.
+	alertClin := seedClinician(t, pool, a)
+	for _, q := range []string{`INSERT INTO alert_settings (hospital_id) VALUES ($1)`,
+		`INSERT INTO alert_levels (hospital_id, category, level) VALUES ($1, 'blood_sugar', 'all')`} {
+		if _, err := pool.Exec(ctx, q, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO alerts (hospital_id, patient_id, connection_id, rule_id, category, severity, routed_queue)
+		VALUES ($1, $2, $3, 'r', 'blood_sugar', 'critical', true)`, a, pat, conn); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO alert_recipients (hospital_id, user_id) VALUES ($1, $2)`,
+		`INSERT INTO user_notification_settings (hospital_id, user_id) VALUES ($1, $2)`,
+		`INSERT INTO alert_deliveries (alert_id, hospital_id, user_id) SELECT id, $1, $2 FROM alerts WHERE hospital_id = $1`,
+	} {
+		if _, err := pool.Exec(ctx, q, a, alertClin); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alertTables := []string{"alerts", "alert_deliveries", "alert_settings", "alert_units", "alert_levels", "alert_recipients",
+		"user_notification_settings"}
 
 	// One connection, so the second transaction reuses the session that
 	// had mhai.hospital_id set by the first.
@@ -315,7 +341,7 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		"analysis_first_seen", "analysis_periods", "analysis_pseudonyms", "analysis_watermarks",
 		"analysis_subject_attrs", "analysis_hospital_start", "analysis_snapshots", "analysis_view_log", "analysis_unusual",
 		"analysis_cold_budget", "analysis_cold_contexts", "analysis_views", "analysis_view_rows", "analysis_patient_budget",
-		"analysis_patient_opens", "analysis_drill_flags"}, slices.Concat(emrTables, emrGatewayReads, emrHidden)...) {
+		"analysis_patient_opens", "analysis_drill_flags"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
