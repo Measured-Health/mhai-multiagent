@@ -57,6 +57,9 @@ type JobRow struct {
 	// RetryCount is the platform's retries of the row (00016): a retried
 	// row is published under PlatformRetryMsgID, never its job id again.
 	RetryCount int
+	// PatientID is the MHAI patient a question names (00033), uuid.Nil
+	// for none. Republish checks it again before it mints (CheckPatient).
+	PatientID uuid.UUID
 }
 
 // msgID is the Nats-Msg-Id a sweep publishes r under: the job id, or for
@@ -112,7 +115,11 @@ func (r JobRow) entity() string {
 func (r JobRow) message() (string, proto.Message, bool) {
 	switch {
 	case !r.jobsRow():
-		return runQuery, &intelpb.RunQueryJob{QueryId: r.ID.String()}, true
+		job := &intelpb.RunQueryJob{QueryId: r.ID.String()}
+		if r.PatientID != uuid.Nil {
+			job.PatientId = r.PatientID.String()
+		}
+		return runQuery, job, true
 	case r.Type == "approve_correction" && r.SubjectID != uuid.Nil:
 		return "pipeline.approve_correction", &intelpb.ApproveCorrectionJob{JobId: r.ID.String(), CorrectionId: r.SubjectID.String()}, true
 	}
@@ -142,9 +149,13 @@ func JobRID(id uuid.UUID, rid string) string {
 // rule refuses (the creator isn't the correction's approver) is
 // ErrJobSkipped: never retried as transient, never published. A failed
 // lookup is an error to retry later, never a cancellation. The request id
-// is the row's (JobRID, JobsRowRID).
+// is the row's (JobRID, JobsRowRID). A question that names a patient is
+// checked again, under the row's hospital, and minted with that patient as
+// the token's only pids; a patient no longer active is ErrNoPatient (the
+// row is left: 00033 unlinks such a patient from its questions, so the
+// next sweep publishes it with no patient).
 func Republish(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobRow, msgID string) error {
-	opName, msg, caller, err := creatorCaller(ctx, pool, row)
+	opName, msg, caller, err := creatorCaller(ctx, pool, client, row)
 	if err != nil {
 		return err
 	}
@@ -166,7 +177,7 @@ func Republish(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobR
 // The platform's retry asks before it re-queues a row (spec §6.2, C27,
 // C28), and Republish asks again after the commit.
 func Publishable(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobRow) error {
-	opName, msg, caller, err := creatorCaller(ctx, pool, row)
+	opName, msg, caller, err := creatorCaller(ctx, pool, client, row)
 	if err != nil {
 		return err
 	}
@@ -194,7 +205,7 @@ func Publishable(ctx context.Context, pool *pgxpool.Pool, client *Client, row Jo
 // creatorCaller is the operation, message and Caller to publish row's job
 // as: its creator with their current roles, after re-checking (as
 // mhai_auth) that the account is usable and of the row's hospital.
-func creatorCaller(ctx context.Context, pool *pgxpool.Pool, row JobRow) (string, proto.Message, Caller, error) {
+func creatorCaller(ctx context.Context, pool *pgxpool.Pool, client *Client, row JobRow) (string, proto.Message, Caller, error) {
 	opName, msg, ok := row.message()
 	if !ok {
 		return "", nil, Caller{}, ErrMisuse
@@ -228,7 +239,31 @@ func creatorCaller(ctx context.Context, pool *pgxpool.Pool, row JobRow) (string,
 	if !usable {
 		return "", nil, Caller{}, ErrCreatorUnusable
 	}
-	return opName, msg, Caller{Sub: row.CreatedBy.String(), Hid: row.HospitalID.String(), Rid: row.rid(), Roles: roles}, nil
+	caller := Caller{Sub: row.CreatedBy.String(), Hid: row.HospitalID.String(), Rid: row.rid(), Roles: roles}
+	if row.PatientID == uuid.Nil {
+		return opName, msg, caller, nil
+	}
+	if !client.Patients {
+		// EMR is off: never a patient in the job or the token.
+		if job, ok := msg.(*intelpb.RunQueryJob); ok {
+			job.PatientId = ""
+		}
+		return opName, msg, caller, nil
+	}
+	// The patient as it is now, under the row's own hospital (core's
+	// clinical role): never minted from the row alone.
+	err = db.WithHospital(ctx, pool, row.HospitalID, func(tx pgx.Tx) error {
+		var err error
+		caller, err = CheckPatient(ctx, tx, caller, row.PatientID)
+		return err
+	})
+	switch {
+	case errors.Is(err, ErrNoPatient):
+		return "", nil, Caller{}, ErrNoPatient
+	case err != nil:
+		return "", nil, Caller{}, errLookup
+	}
+	return opName, msg, caller, nil
 }
 
 // RetryMsgID is the Nats-Msg-Id of a job re-minted after a dead letter:
@@ -323,8 +358,8 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 	var rows []JobRow
 	err = db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		r, err := tx.Query(ctx, `
-			SELECT id, hospital_id, created_by, COALESCE(request_id, ''), attempts, d, retry_count
-			FROM (SELECT id, hospital_id, created_by, request_id, attempts, created_at, retry_count,
+			SELECT id, hospital_id, created_by, COALESCE(request_id, ''), attempts, d, retry_count, patient_id
+			FROM (SELECT id, hospital_id, created_by, request_id, attempts, created_at, retry_count, patient_id,
 			             COALESCE(deadline_at, created_at + make_interval(secs => $2)) AS d
 			      FROM clinical_queries
 			      WHERE status = 'queued' AND published_at IS NULL
@@ -338,12 +373,15 @@ func SweepOnce(ctx context.Context, pool *pgxpool.Pool, client *Client) (SweepRe
 		defer r.Close()
 		for r.Next() {
 			var s JobRow
-			var by *uuid.UUID
-			if err := r.Scan(&s.ID, &s.HospitalID, &by, &s.RequestID, &s.Attempts, &s.Deadline, &s.RetryCount); err != nil {
+			var by, pid *uuid.UUID
+			if err := r.Scan(&s.ID, &s.HospitalID, &by, &s.RequestID, &s.Attempts, &s.Deadline, &s.RetryCount, &pid); err != nil {
 				return err
 			}
 			if by != nil {
 				s.CreatedBy = *by
+			}
+			if pid != nil {
+				s.PatientID = *pid
 			}
 			rows = append(rows, s)
 		}

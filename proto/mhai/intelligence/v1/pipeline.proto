@@ -6,10 +6,15 @@ import "mhai/intelligence/v1/envelope.proto";
 
 option go_package = "github.com/Measured-Health/mhai-multiagent/services/core/internal/intelpb;intelpb";
 
-// RunQueryJob carries the query id only. The worker reads the rest from the
-// database under the hospital in the verified job token.
+// RunQueryJob carries the query id, and the MHAI patient the question is
+// about when it names one. The worker reads the rest from the database under
+// the hospital in the verified job token. patient_id is not trusted alone:
+// the worker refuses a job whose patient_id isn't in the token's pids claim
+// (spec §7.3 check 8), and core puts a patient there only after checking it
+// is an active patient of the hospital (EMR design §10.5).
 message RunQueryJob {
   string query_id = 1;
+  string patient_id = 2;
 }
 
 message HealthRequest {}

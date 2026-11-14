@@ -66,20 +66,23 @@ func failedRows(ctx context.Context, pool *pgxpool.Pool, refs []JobRef) ([]JobRo
 	var rows []JobRow
 	err := db.WithJobs(ctx, pool, func(tx pgx.Tx) error {
 		if len(queries) > 0 {
-			r, err := tx.Query(ctx, `SELECT id, hospital_id, created_by, COALESCE(request_id, ''), attempts, retry_count
+			r, err := tx.Query(ctx, `SELECT id, hospital_id, created_by, COALESCE(request_id, ''), attempts, retry_count, patient_id
 				FROM clinical_queries WHERE id = ANY($1) AND status = 'failed'`, queries)
 			if err != nil {
 				return err
 			}
 			for r.Next() {
 				var s JobRow
-				var by *uuid.UUID
-				if err := r.Scan(&s.ID, &s.HospitalID, &by, &s.RequestID, &s.Attempts, &s.RetryCount); err != nil {
+				var by, pid *uuid.UUID
+				if err := r.Scan(&s.ID, &s.HospitalID, &by, &s.RequestID, &s.Attempts, &s.RetryCount, &pid); err != nil {
 					r.Close()
 					return err
 				}
 				if by != nil {
 					s.CreatedBy = *by
+				}
+				if pid != nil {
+					s.PatientID = *pid
 				}
 				rows = append(rows, s)
 			}
@@ -254,8 +257,10 @@ func RetryJobs(ctx context.Context, pool *pgxpool.Pool, client *Client, refs []J
 		switch err := Publishable(ctx, pool, client, r); {
 		case err == nil:
 			usable = append(usable, r)
-		case errors.Is(err, ErrCreatorUnusable), errors.Is(err, ErrJobSkipped), errors.Is(err, ErrMisuse):
-			// Skipped: never minted as someone else, never past the rule.
+		case errors.Is(err, ErrCreatorUnusable), errors.Is(err, ErrJobSkipped), errors.Is(err, ErrMisuse),
+			errors.Is(err, ErrNoPatient):
+			// Skipped: never minted as someone else, never past the rule,
+			// never for a patient who is no longer active.
 		default:
 			return nil, ErrJobsUnavailable
 		}

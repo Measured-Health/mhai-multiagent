@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- EMR integration, PR 13 (`pids`; off by default: while `CORE_EMR_ENABLED`
+  is false every `patient_id` is 404 `not_found`). `POST /queries` takes an
+  optional `patient_id` (OpenAPI **1.22.0**, additive), accepted only for an
+  active patient of the caller's hospital (`emr_patient_in_hospital()`);
+  another hospital's, an excluded or merged patient, or none is 404
+  `not_found`. The checked id is the only one the job token's `pids` claim
+  carries, and `RunQueryJob` gains `patient_id` (additive), which the
+  worker's check 8 holds to `pids`. The sweeper, retry and dead-letter
+  re-mint check the patient again. `query.submitted` gains `patient: true`
+  (never the id). Migration **00033** (after EMR PR 9's 00032):
+  `clinical_queries.patient_id` keyed to the hospital's patients, an
+  active-patient check under a share lock, and a trigger that unlinks a
+  patient from its questions when it is excluded or merged.
 - EMR integration, PR 9 (retention, the exclusion purge and Usage; off by
   default). Migration **00032** (after 00031): `legal_holds` (placed and
   lifted only by the provisioning login, never deleted), durable
