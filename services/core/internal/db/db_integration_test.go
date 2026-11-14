@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38, 39, 40, 41, 42}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38, 39, 40, 41, 42, 44}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -378,7 +378,8 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		"analysis_patient_opens", "analysis_drill_flags", "analyst_changes",
 		"clearances", "clearance_covered", "clearance_events", "named_access_switch", "clearance_check_refusals",
 		"patient_lookup_counts", "patient_lookup_hospital_counts",
-		"named_view_keys", "named_view_notes", "named_view_budget"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
+		"named_view_keys", "named_view_notes", "named_view_budget",
+		"audit_exports", "audit_export_rows", "legal_references"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -406,6 +407,12 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			// 00038: read through mhai_named_access_position, or written by
 			// mhai_clearance_note_refusal, only.
 			requireDenied(t, err, "gateway reading named_access_switch")
+			continue
+		}
+		if table == "audit_exports" || table == "audit_export_rows" || table == "legal_references" {
+			// 00044: the platform's records; rows and references through
+			// the export rules' functions only.
+			requireDenied(t, err, "gateway reading "+table)
 			continue
 		}
 		if strings.HasPrefix(table, "named_view_") {
