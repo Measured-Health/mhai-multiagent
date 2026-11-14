@@ -46,10 +46,11 @@ func synthFHIR(args []string, getenv func(string) string, out io.Writer) error {
 	n := fs.Int("patients", 20, "how many synthetic patients")
 	name := fs.String("name", "", "the server's DNS name (in its certificate and links)")
 	dir := fs.String("out", "", "where to write ca.pem and client.key")
+	late := fs.Duration("late-critical", 0, "serve a new critical potassium for the first two patients this long after the first sync (0: never)")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return errUsage
 	}
-	if *dir == "" || *n < 1 || *n > 1000 {
+	if *dir == "" || *n < 1 || *n > 1000 || *late < 0 || *late > 24*time.Hour {
 		return errUsage
 	}
 	if _, _, err := emrurl.CheckURL("https://"+*name, []string{"https"}, false); err != nil {
@@ -77,7 +78,24 @@ func synthFHIR(args []string, getenv func(string) string, out io.Writer) error {
 	if err := os.WriteFile(filepath.Join(*dir, "client.key"), key, 0o600); err != nil {
 		return errors.New("synth-fhir: cannot write client.key")
 	}
-	h := synth.Handler(synth.Generate(*seed, *n), synth.Options{BaseURL: public + "/r4", TokenURL: public + "/token", Pub: pub})
+	ps := synth.Generate(*seed, *n)
+	opts := synth.Options{BaseURL: public + "/r4", TokenURL: public + "/token", Pub: pub}
+	if *late > 0 {
+		// After a first sync's backfill (stored historical, never announced),
+		// a fresh critical result: what a live check needs to see an alert.
+		// Two patients, so a live check can acknowledge one alert and
+		// dismiss the other.
+		first := ps[:min(2, len(ps))]
+		opts.LateAfter = *late
+		opts.Late = func(at time.Time) []map[string]any {
+			out := make([]map[string]any, 0, len(first))
+			for _, p := range first {
+				out = append(out, synth.LateCritical(p, at))
+			}
+			return out
+		}
+	}
+	h := synth.Handler(ps, opts)
 	srv := &http.Server{Addr: *addr, Handler: h, ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -87,6 +105,9 @@ func synthFHIR(args []string, getenv func(string) string, out io.Writer) error {
 		_ = srv.Shutdown(context.Background())
 	}()
 	fmt.Fprintf(out, "synth-fhir: serving %d synthetic patients at %s/r4\n", *n, public)
+	if *late > 0 {
+		fmt.Fprintf(out, "synth-fhir: a late critical result %s after the first sync\n", *late)
+	}
 	if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return errors.New("synth-fhir: cannot serve")
 	}

@@ -13,7 +13,7 @@ import (
 
 const usage = "usage: emr serve | emr keys seal-init --out <dir> | emr keys proxy-init --out <dir> | emr unmapped --hospital <id> --connection <id> |\n" +
 	"       emr rules check <rule set file> |\n" +
-	"       emr synth-fhir --name <dns name> --out <dir> [--addr :8443] [--seed 1] [--patients 20]   (development only)"
+	"       emr synth-fhir --name <dns name> --out <dir> [--addr :8443] [--seed 1] [--patients 20] [--late-critical 3m]   (development only)"
 
 func main() {
 	if err := run(os.Args[1:], os.Getenv, os.Stdout); err != nil {

@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format follows
 - The hospital admin routes of the clinical app (frontend requirements §5).
   Migration **00035** (additive: `users.staff_version`,
   `hospital_settings.version`, `updated_by`, `updated_at`) and OpenAPI
-  **1.22.0**. `GET /hospital/staff`; `PATCH /hospital/staff/{id}` (roles and
+  **1.24.0** (1.23.0 is Analysis PR 7's). `GET /hospital/staff`; `PATCH /hospital/staff/{id}` (roles and
   specialty, with a step-up code; Analyst granted and removed only through
   migration 00030's functions, which closes Analysis plan Task 17);
   `POST /hospital/staff/{id}/deactivate` and `/reactivate` (step-up; a
@@ -29,6 +29,19 @@ All notable changes to this project are documented here. The format follows
   (TODO.md lists the gaps and the changes mhai-web needs). New problem codes
   `self_change`, `last_admin`, `analysis_off`, `analyst_cap`,
   `not_eligible`, `not_implemented`.
+- EMR integration, PR 13 (`pids`; off by default: while `CORE_EMR_ENABLED`
+  is false every `patient_id` is 404 `not_found`). `POST /queries` takes an
+  optional `patient_id` (OpenAPI **1.22.0**, additive), accepted only for an
+  active patient of the caller's hospital (`emr_patient_in_hospital()`);
+  another hospital's, an excluded or merged patient, or none is 404
+  `not_found`. The checked id is the only one the job token's `pids` claim
+  carries, and `RunQueryJob` gains `patient_id` (additive), which the
+  worker's check 8 holds to `pids`. The sweeper, retry and dead-letter
+  re-mint check the patient again. `query.submitted` gains `patient: true`
+  (never the id). Migration **00033** (after EMR PR 9's 00032):
+  `clinical_queries.patient_id` keyed to the hospital's patients, an
+  active-patient check under a share lock, and a trigger that unlinks a
+  patient from its questions when it is excluded or merged.
 - EMR integration, PR 9 (retention, the exclusion purge and Usage; off by
   default). Migration **00032** (after 00031): `legal_holds` (placed and
   lifted only by the provisioning login, never deleted), durable
@@ -606,6 +619,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Go 1.26 for CI and the core and emr images (was 1.24, now out of
+  support), with staticcheck 2026.2.2. Newer Go dependency updates require
+  Go 1.25 or 1.26.
 - The pipeline worker requires `sslmode=verify-full` for its database
   outside development. Core and the workers warn when
   `OTEL_EXPORTER_OTLP_INSECURE` is on outside development, and log why
@@ -619,6 +635,15 @@ All notable changes to this project are documented here. The format follows
   1.0.2 (doc-only).
 
 ### Fixed
+
+- The emr image's secret store folder (`/emr-secrets`) is now 0700, so a
+  fresh `emr-secrets` volume takes that mode and `docker compose --profile
+  emr` starts the emr service: before, the folder was 0755 (a folder COPY
+  creates its target with the default mode) and the file store refused to
+  start. The COPY sets it (`--chmod=0700`, that folder only);
+  `services/emr/scripts/image-check.sh` checks the image's state folders'
+  modes and owners and that every other top-level entry is root's. Found
+  by the full live check (mhai-web `scripts/it/live-full.sh`).
 
 - `GET /api/openapi.yaml` is now `text/plain` with `Content-Disposition: inline`,
   so a browser shows the spec instead of saving it (`application/yaml` was

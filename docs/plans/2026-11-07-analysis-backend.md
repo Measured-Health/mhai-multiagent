@@ -566,7 +566,7 @@ Abuse-case ids: **T1–T29** and **P1–P8** are the design's (§13.5, §5.7). *
 
 ### Task 17: Step-up on `PATCH /hospital/staff/{id}` (when the staff endpoints exist)
 
-**Built** with the hospital admin routes (`internal/hospital`, migration 00035, OpenAPI 1.22.0): the route maps the six refusals, step-up covers every staff write, and both named tests are in `internal/hospital/hospital_integration_test.go`.
+**Built** with the hospital admin routes (`internal/hospital`, migration 00035, OpenAPI 1.24.0): the route maps the six refusals, step-up covers every staff write, and both named tests are in `internal/hospital/hospital_integration_test.go`.
 
 **Files:**
 - Modify: the staff handler (wherever the staff-endpoints plan puts it), `httpx/errors.go` (`self_change` 403, `analysis_off` 409, `analyst_cap` 409, `not_eligible` 422), `openapi.yaml` (optional `mfa_code` and `backup_code`)
