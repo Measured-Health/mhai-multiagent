@@ -83,6 +83,7 @@ func TestNightlyRunsOnlySwitchedOnHospitals(t *testing.T) {
 	src := &syntheticSource{}
 	n := NewNightly(app, testKeys(t), nil)
 	n.Clock = fixedClock(now)
+	n.Ingest = true
 	n.Store.(*DBStore).Source = src.rows
 	ran, err := n.Tick(context.Background())
 	if err != nil {
