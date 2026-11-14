@@ -33,6 +33,7 @@ import os
 import json
 import glob
 import re
+import unicodedata
 import time
 import hashlib
 import numpy as np
@@ -58,6 +59,25 @@ RESERVED_PATIENT_IDS = frozenset({REFERENCE_SOURCE, UNASSIGNED_SOURCE, "unknown"
 # chunk) or [KB#nnnnnnn] (a reference library's, migration 00039). The group
 # is the number.
 CITATION_MARKER = r'\[KB#(\d{4}|[1-9]\d{6})\]'
+
+# What chunk text may never carry into a prompt: a block delimiter ("<<",
+# ">>", the cloud prompt's <<chunk ...>> and <<end>>) or a citation ("KB#",
+# with any case, spacing or full-width form). neutralise_chunk_text breaks
+# each one, so a chunk (a reference row or a hospital's own) can't close
+# its block, open another, or bring a citation of its own.
+_KB_MARK = re.compile(r'(?i)k\s*b\s*#')
+
+
+def neutralise_chunk_text(text: str) -> str:
+    """Chunk text as it may appear in a prompt: NFKC-folded, every "<<" and
+    ">>" broken with a space, and "KB#" written "KB no." (repeated until
+    nothing changes, so "<<<<" can't rebuild one)."""
+    out = unicodedata.normalize("NFKC", str(text))
+    while True:
+        new = _KB_MARK.sub("KB no. ", out.replace("<<", "< <").replace(">>", "> >"))
+        if new == out:
+            return out
+        out = new
 
 
 def is_valid_patient_id(patient_id) -> bool:
@@ -744,7 +764,7 @@ class HybridRetriever:
         total_chars = 0
 
         for r in results:
-            line = f"[{r.chunk.chunk_id}] {r.chunk.content}"
+            line = f"[{r.chunk.chunk_id}] {neutralise_chunk_text(r.chunk.content)}"
             if total_chars + len(line) > max_context_chars:
                 break
             context_lines.append(line)
@@ -1098,7 +1118,7 @@ class RAGClinicalContextAgent:
 
         # Include diagnoses from retrieved chunks
         for i, r in enumerate(dx_chunks[:5], 1):
-            lines.append(f"\n{i}. {r.chunk.content} [{r.chunk.chunk_id}]")
+            lines.append(f"\n{i}. {neutralise_chunk_text(r.chunk.content)} [{r.chunk.chunk_id}]")
 
         # If no diagnosis chunks retrieved, use keyword matching
         if not dx_chunks:
@@ -1115,14 +1135,14 @@ class RAGClinicalContextAgent:
         if lab_chunks:
             lines.append("\n\nSUPPORTING EVIDENCE:")
             for r in lab_chunks[:3]:
-                lines.append(f"  {r.chunk.content} [{r.chunk.chunk_id}]")
+                lines.append(f"  {neutralise_chunk_text(r.chunk.content)} [{r.chunk.chunk_id}]")
 
         # Add guideline references
         if guideline_chunks:
             lines.append("\n\nGUIDELINE REFERENCES:")
             for r in guideline_chunks[:2]:
                 lines.append(
-                    f"  {r.chunk.content[:120]}... [{r.chunk.chunk_id}]"
+                    f"  {neutralise_chunk_text(r.chunk.content[:120])}... [{r.chunk.chunk_id}]"
                 )
 
         lines.append(
