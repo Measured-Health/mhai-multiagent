@@ -30,7 +30,7 @@ from intelligence.boundary.cloud.gate import (
     seal_shared_chunk,
     shared_chunk_of,
 )
-from intelligence.knowledge_base.kb_builder import REFERENCE_SOURCE, KBChunk
+from intelligence.knowledge_base.kb_builder import REFERENCE_SOURCE, KBChunk, neutralise_chunk_text
 
 pytestmark = pytest.mark.disable_socket
 
@@ -536,7 +536,8 @@ def test_prompt_blocks_in_fixed_order(tm: TaggingMasker) -> None:
         assert blocks[0] == QUESTION
         assert blocks[1] == "Category: cardiac\nRisk: 0.42"
         for i, c in enumerate(chunks):
-            assert blocks[2 + i] == f"<<chunk {c.chunk_id}>>\n{c.content}\n<<end>>"
+            want = neutralise_chunk_text(c.content)
+            assert blocks[2 + i] == f"<<chunk {c.chunk_id}>>\n{want}\n<<end>>"
         assert all(type(b) is str for b in blocks)
     empty = CloudPrompt(question, CloudContext(), (), tm).blocks()
     assert empty == (QUESTION, "Category: none\nRisk: none")
