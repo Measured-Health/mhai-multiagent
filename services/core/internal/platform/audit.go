@@ -127,6 +127,7 @@ func Register(m *authz.Mux, d Deps) {
 	registerGuardrails(m, d)
 	registerAnalytics(m, d)
 	registerFollowUps(m, d)
+	registerHospitals(m, d)
 	registerModelPolicy(m, d)
 	registerEMRConnections(m, d)
 	registerEMRRuleSet(m, d)

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.21.0"
+  version: "1.25.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -2340,6 +2340,122 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /platform/hospitals:
+    get:
+      operationId: listPlatformHospitals
+      summary: The hospitals, 50 a page, by name.
+      description: |
+        Platform admins and auditors. `status` is one of the six statuses;
+        `q` is part of a hospital's name or short code, any case (1 to 100
+        characters, plain text: `%` and `_` are matched as themselves).
+        `cursor` is the previous page's `next_cursor`, opaque; null when
+        there is no next page. A key not listed, a repeated or empty key, an
+        unknown status or a cursor that doesn't decode is 422
+        `validation_failed`. Not recorded in the audit log. Added in 1.25.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [active, setup_incomplete, deactivated, removal_pending, removal_scheduled, removed] } }
+        - { name: q, in: query, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 1024 } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: A page of hospitals.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hospitals, next_cursor]
+                additionalProperties: false
+                properties:
+                  hospitals: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/HospitalSummary" } }
+                  next_cursor: { type: string, nullable: true }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/hospitals/{id}:
+    get:
+      operationId: getPlatformHospital
+      summary: A hospital's page.
+      description: |
+        Platform admins and auditors. The summary, the active hospital
+        admins to contact and the open legal holds in short form. Core keeps
+        no country, email domains, deactivation record, first-admin invite
+        or removal request: `country` is "", `email_domains` [],
+        `deactivation`, `first_admin` and `removal` null, and `version` 1
+        (no hospital write is served yet). A hold keeps every record (scope
+        `from` and `to` null); its `review_on` is six months after it was
+        placed, in the hospital's time zone, and it is `review_due` from that
+        day. An id that is no hospital's, or not a canonical uuid, is 404;
+        any query is 422. Not recorded in the audit log. Added in 1.25.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: The hospital.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformHospital" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/hospitals/{id}/sso:
+    get:
+      operationId: getPlatformHospitalSSO
+      summary: A hospital's single sign-on (always off).
+      description: |
+        Platform admins and auditors. Core keeps no single sign-on per
+        hospital: the reply is always off, nothing saved, never tested,
+        `version` 1. An id that is no hospital's, or not a canonical uuid,
+        is 404; any query is 422. Added in 1.25.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+      responses:
+        "200":
+          description: Single sign-on, off.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, sign_in_url, client_id, issuer, allowed_domains, secret_saved, secret_ends, last_test, version]
+                additionalProperties: false
+                properties:
+                  enabled: { type: boolean }
+                  sign_in_url: { type: string, nullable: true }
+                  client_id: { type: string, nullable: true }
+                  issuer: { type: string, nullable: true }
+                  allowed_domains: { type: array, items: { type: string } }
+                  secret_saved: { type: boolean }
+                  secret_ends: { type: string, nullable: true }
+                  last_test: { type: object, nullable: true }
+                  version: { type: integer, minimum: 1 }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
   /platform/hospitals/{id}/model-policy:
     get:
       operationId: getHospitalModelPolicy
@@ -3427,6 +3543,74 @@ components:
         version: { type: string, nullable: true, description: "The activated rule set version; null is shadow." }
         sha256: { type: string, nullable: true, description: "The activated rule set file's SHA-256, hex." }
         activated_at: { type: string, format: date-time, nullable: true }
+    HospitalSummary:
+      type: object
+      description: A hospital as the platform list shows it. Added in 1.25.0.
+      required: [id, name, short_code, status, staff_count, sso_enabled, created_at, last_activity_at, legal_holds_active]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        short_code: { type: string }
+        status: { type: string, enum: [active, setup_incomplete, deactivated, removal_pending, removal_scheduled, removed] }
+        staff_count: { type: integer, minimum: 0, description: "The hospital's active accounts." }
+        sso_enabled: { type: boolean, description: "Always false: core keeps no single sign-on per hospital." }
+        created_at: { type: string, format: date-time }
+        last_activity_at: { type: string, format: date-time, nullable: true, description: "The latest session activity of the hospital's accounts." }
+        legal_holds_active: { type: integer, minimum: 0, description: "The open legal holds (they keep records)." }
+    HoldShort:
+      type: object
+      description: A legal hold in short form. Added in 1.25.0.
+      required: [id, scope, reference, status, review_on]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        scope:
+          type: object
+          required: [from, to]
+          additionalProperties: false
+          properties:
+            from: { type: string, format: date, nullable: true }
+            to: { type: string, format: date, nullable: true }
+        reference: { type: string, pattern: "^[A-Z]{2,8}-[0-9]{4}-[0-9]{2,8}$" }
+        status: { type: string, enum: [active, review_due] }
+        review_on: { type: string, format: date }
+    PlatformHospital:
+      type: object
+      description: >-
+        A hospital's platform page: HospitalSummary's keys and these. Added in
+        1.25.0.
+      required: [id, name, short_code, status, staff_count, sso_enabled, created_at, last_activity_at, legal_holds_active,
+        country, time_zone, email_domains, version, deactivation, first_admin, removal, admins, legal_holds]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        short_code: { type: string }
+        status: { type: string, enum: [active, setup_incomplete, deactivated, removal_pending, removal_scheduled, removed] }
+        staff_count: { type: integer, minimum: 0 }
+        sso_enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        last_activity_at: { type: string, format: date-time, nullable: true }
+        legal_holds_active: { type: integer, minimum: 0 }
+        country: { type: string, description: "Always empty: core keeps no country." }
+        time_zone: { type: string }
+        email_domains: { type: array, items: { type: string }, description: "Always empty: core keeps none." }
+        version: { type: integer, minimum: 1 }
+        deactivation: { type: object, nullable: true }
+        first_admin: { type: object, nullable: true }
+        removal: { type: object, nullable: true }
+        admins:
+          type: array
+          description: The active hospital admins, by name.
+          items:
+            type: object
+            required: [name, email]
+            additionalProperties: false
+            properties:
+              name: { type: string }
+              email: { type: string, format: email }
+        legal_holds: { type: array, items: { $ref: "#/components/schemas/HoldShort" } }
     ModelPolicy:
       type: object
       description: >-

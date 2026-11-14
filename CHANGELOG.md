@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The platform app's hospitals list and a hospital's page (mhai-web Plan
+  7b), so the page and its model policy section open in live mode. New
+  routes (OpenAPI 1.25.0, additive), for platform admins and auditors with
+  two-step: `GET /platform/hospitals?status&q&cursor` (50 a page, by name),
+  `GET /platform/hospitals/{id}` (the summary, the active hospital admins
+  and the open legal holds) and `GET /platform/hospitals/{id}/sso` (always
+  off: core keeps no single sign-on per hospital). What core doesn't keep
+  is sent empty, never invented (country, email domains, deactivation,
+  first-admin invite, removal request). Migration **00036**: `mhai_platform`
+  reads `legal_holds` (no write). The reads aren't audited (platform
+  configuration, as the model policy read).
 - EMR integration, PR 9 (retention, the exclusion purge and Usage; off by
   default). Migration **00032** (after 00031): `legal_holds` (placed and
   lifted only by the provisioning login, never deleted), durable
