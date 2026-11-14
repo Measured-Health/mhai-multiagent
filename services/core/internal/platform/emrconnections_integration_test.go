@@ -127,6 +127,13 @@ func (f *fakeEMR) handle(m *nats.Msg) {
 		}
 		conn = req.GetConnectionId()
 		rep = f.test(c, req.GetConnectionId())
+	case "sync_now":
+		var req emrpb.SyncNowRequest
+		if proto.Unmarshal(m.Data, &req) != nil {
+			return
+		}
+		conn = req.GetConnectionId()
+		rep = &emrpb.SyncNowReply{Queued: true}
 	}
 	f.mu.Lock()
 	f.calls = append(f.calls, fakeCall{op: op.Op, sub: c.Sub, hid: c.Hid, stepUp: c.StepUp, conn: conn})
@@ -410,6 +417,12 @@ func TestEMRConnectionLifecycleRoutes(t *testing.T) {
 	ok(t, "on", on)
 	if on.body["enabled"] != true || version(t, on) != 2 {
 		t.Fatalf("on: %s", on.raw)
+	}
+	// Switching on asks the emr service to poll now, as core (svc:core),
+	// for the connection's hospital.
+	if calls := fake.callsFor(uuid.MustParse(id)); len(calls) != 3 || calls[2].op != "sync_now" ||
+		calls[2].sub != "svc:core" || calls[2].hid != hid.String() {
+		t.Fatalf("calls after switching on %+v", calls)
 	}
 
 	renamed := patchConn(t, tok, id, mustJSONs(map[string]any{"source_label": "Results system", "version": 2,
