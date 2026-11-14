@@ -111,7 +111,7 @@ func TestMigrateUpFromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38, 40}
 	if len(st) != len(want) {
 		t.Fatalf("want %d migrations, got %d", len(want), len(st))
 	}
@@ -376,7 +376,8 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 		"analysis_subject_attrs", "analysis_hospital_start", "analysis_snapshots", "analysis_view_log", "analysis_unusual",
 		"analysis_cold_budget", "analysis_cold_contexts", "analysis_views", "analysis_view_rows", "analysis_patient_budget",
 		"analysis_patient_opens", "analysis_drill_flags", "analyst_changes",
-		"clearances", "clearance_covered", "clearance_events", "named_access_switch", "clearance_check_refusals"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
+		"clearances", "clearance_covered", "clearance_events", "named_access_switch", "clearance_check_refusals",
+		"named_view_keys", "named_view_notes", "named_view_budget"}, slices.Concat(emrTables, emrGatewayReads, emrHidden, alertTables)...) {
 		tx, err := one.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -399,6 +400,11 @@ func TestRLSWithoutHospitalSeesNothing(t *testing.T) {
 			// 00038: read through mhai_named_access_position, or written by
 			// mhai_clearance_note_refusal, only.
 			requireDenied(t, err, "gateway reading named_access_switch")
+			continue
+		}
+		if strings.HasPrefix(table, "named_view_") {
+			// 00040: written and read by the reader's functions only.
+			requireDenied(t, err, "gateway reading "+table)
 			continue
 		}
 		if table == "analyst_changes" {
