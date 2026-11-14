@@ -1,4 +1,4 @@
-"""A reference library's rows in retrieval (migration 00039): their
+"""A reference library's rows in retrieval (migration 00040): their
 seven-digit citations, and their stored vectors used instead of encoding
 them again. No model weights: the dense model is a synthetic stand-in.
 Every chunk and id is synthetic.

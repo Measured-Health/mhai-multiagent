@@ -815,6 +815,29 @@ func TestExclusionWithdrawsAlertsAtOnce(t *testing.T) {
 	}
 }
 
+// The exclusion route is no MRN oracle: without a code (or with a wrong
+// one) a known MRN, an unknown one and an MRN of two patients get the same
+// answer, before the patient is looked up (security review, 14 Nov).
+func TestExclusionAsksForTheCodeBeforeThePatient(t *testing.T) {
+	w := newWorld(t)
+	w.newPatient(t, "src-5", "SYN-LKP-TWO-8D8")
+	w.newPatient(t, "src-6", "SYN-LKP-TWO-8D8")
+	for _, c := range []struct {
+		code, want string
+		status     int
+	}{{"", "mfa_required", 403}, {`, "mfa_code": "000000"`, "mfa_invalid", 403}} {
+		for _, mrn := range []string{"SYN-0001", "SYN-LKP-NONE-1Q1", "SYN-LKP-TWO-8D8"} {
+			status, out := w.adm("POST", "/hospital/patient-exclusions", `{"mrn": "`+mrn+`", "reason": "objection"`+c.code+`}`)
+			if status != c.status || out["code"] != c.want {
+				t.Errorf("%s %q: %d %v", mrn, c.code, status, out)
+			}
+		}
+	}
+	if auditCount(t, w.h, "emr.patient_excluded") != 0 {
+		t.Fatal("excluded without a code")
+	}
+}
+
 // No log line names a patient, an MRN or a value.
 func TestLogsCarryNoPatientData(t *testing.T) {
 	w := newWorld(t)

@@ -1,5 +1,5 @@
 """A reference library: a licence-clean shared corpus, built once per pinned
-version and loaded into kb_chunks (migration 00039).
+version and loaded into kb_chunks (migration 00040).
 
 Library v1, ``medref``, is two sources only (the licence review):
 
@@ -18,7 +18,7 @@ Three steps, each its own command:
 ``convert`` (scripts/reflib_convert.py, an operator on a build machine)
     Streams a bundle's ``chunks.jsonl.gz`` line by line, keeps the approved
     rows (:func:`select`), orders them (safety-critical first) and numbers
-    them ``KB#1000001`` up (00039's reference namespace), embeds them with
+    them ``KB#1000001`` up (00040's reference namespace), embeds them with
     OUR pinned embedder (``models/answer-gate-models.lock``, role dense) and
     writes the artefact.
 ``verify``
