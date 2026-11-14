@@ -84,10 +84,12 @@ CREATE TRIGGER clinical_queries_patient_check BEFORE INSERT OR UPDATE OF patient
 ------------------------------------------------------------------------
 -- A patient that stops being active is unlinked from its questions.
 ------------------------------------------------------------------------
--- The owner sees and changes only questions of the hospital set that name
--- a patient, and may only clear the column.
+-- The owner changes only questions of the hospital set that name a
+-- patient, and may only clear the column. It reads the hospital set's
+-- questions: an UPDATE's new row must pass the SELECT policy too, and the
+-- cleared row no longer names a patient.
 CREATE POLICY patient_unlink_read ON clinical_queries FOR SELECT TO mhai_migrate
-    USING (hospital_id = mhai_current_hospital() AND patient_id IS NOT NULL);
+    USING (hospital_id = mhai_current_hospital());
 CREATE POLICY patient_unlink ON clinical_queries FOR UPDATE TO mhai_migrate
     USING (hospital_id = mhai_current_hospital() AND patient_id IS NOT NULL)
     WITH CHECK (hospital_id = mhai_current_hospital() AND patient_id IS NULL);
