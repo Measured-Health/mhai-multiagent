@@ -2,6 +2,7 @@ package disclose
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"gonum.org/v1/gonum/optimize/convex/lp"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose/attack"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/proptest"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup/solve"
 )
 
@@ -93,8 +95,11 @@ func TestP5BoundsReported(t *testing.T) {
 	if raceEnabled || testing.Short() {
 		t.Skip("a report, run without -race (CI's analysis property step)")
 	}
-	var narrow, total, failed int
-	for _, seed := range seeds(100, 1, 1) {
+	var tally proptest.Tally
+	ss := seeds(100, 1, 1)
+	proptest.Cases(t, len(ss), func(k int) string { return fmt.Sprint("seed=", ss[k]) }, func(t *testing.T, k int) {
+		seed := ss[k]
+		var narrow, total, failed int
 		w := attack.Generate(seed, smallDims(2), octBlocksOf(), false, attack.Options{Subjects: 50, Presence: 0.35, Rare: 0.8})
 		var bodies []Body
 		var kids []ChildBodies
@@ -143,7 +148,11 @@ func TestP5BoundsReported(t *testing.T) {
 		}
 		all := []int{0, 1, 2, 3, 4}
 		measure(m.Bounds(all, true))
-	}
+		tally.Add("narrow", narrow)
+		tally.Add("total", total)
+		tally.Add("failed", failed)
+	})
+	narrow, total, failed := tally.Get("narrow"), tally.Get("total"), tally.Get("failed")
 	if failed > 0 {
 		t.Errorf("%d of %d LPs failed", failed, total)
 	}

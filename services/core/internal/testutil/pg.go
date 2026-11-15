@@ -4,13 +4,16 @@ package testutil
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -28,6 +31,8 @@ const PostgresImage = "postgres:16-alpine"
 type PG struct {
 	URL string
 	c   testcontainers.Container
+
+	admin, name string // a MigratedPostgres clone: the maintenance URL and its database
 }
 
 // Logs returns everything the server has written to its log (the
@@ -93,21 +98,107 @@ func StartPostgres(t testing.TB) *PG {
 	return pg
 }
 
-// MigratedPostgres starts Postgres, applies every migration and returns a
-// superuser pool, closed when the test ends.
+// MigratedPostgres returns a fresh database with every migration applied
+// and a superuser pool on it, both gone when the test ends.
+//
+// The database is a copy (CREATE DATABASE ... TEMPLATE) of one migrated
+// once per test binary, on a server the binary shares: a copy takes a
+// fraction of a second where a new server and the migrations took seconds.
+// Each test still gets its own tables, rows, sequences, grants and policies.
+// The server is shared, so cluster-wide state is too: roles (the
+// migrations' roles exist once, and logins made by AppLogin and
+// ProvisionLogin have unique names) and the server log (Logs). A test that
+// changes roles or server settings, or needs a server of its own, uses
+// StartPostgres or NewPostgres instead.
 func MigratedPostgres(t testing.TB) (*PG, *pgxpool.Pool) {
 	t.Helper()
-	pg := StartPostgres(t)
 	ctx := context.Background()
-	if err := db.MigrateUp(ctx, pg.URL); err != nil {
-		t.Fatalf("migrate up: %v", err)
+	pg, err := cloneMigrated(ctx)
+	if err != nil {
+		t.Fatalf("migrated database: %v", err)
 	}
+	t.Cleanup(func() { dropClone(pg) })
 	pool, err := db.Open(ctx, pg.URL)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(pool.Close)
 	return pg, pool
+}
+
+// templateDB is the migrated database every clone copies. It takes no
+// connections once migrated, as CREATE DATABASE ... TEMPLATE requires.
+const templateDB = "mhai"
+
+var shared struct {
+	once  sync.Once
+	pg    *PG    // the server, connected to templateDB
+	admin string // the same server's maintenance database (postgres)
+	err   error
+}
+
+// sharedTemplate starts the binary's server and migrates templateDB, once.
+// The server lives until the test binary exits (testcontainers' reaper
+// removes it).
+func sharedTemplate(ctx context.Context) (*PG, string, error) {
+	shared.once.Do(func() {
+		pg, _, err := NewPostgres(ctx)
+		if err != nil {
+			shared.err = fmt.Errorf("start postgres: %w", err)
+			return
+		}
+		if err := db.MigrateUp(ctx, pg.URL); err != nil {
+			shared.err = fmt.Errorf("migrate up: %w", err)
+			return
+		}
+		admin := withDatabase(pg.URL, "postgres")
+		if err := exec(ctx, admin, `ALTER DATABASE `+templateDB+` WITH ALLOW_CONNECTIONS false`); err != nil {
+			shared.err = fmt.Errorf("close the template: %w", err)
+			return
+		}
+		shared.pg, shared.admin = pg, admin
+	})
+	return shared.pg, shared.admin, shared.err
+}
+
+// cloneMigrated copies templateDB into a new database with a unique name.
+func cloneMigrated(ctx context.Context) (*PG, error) {
+	pg, admin, err := sharedTemplate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	name := "test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if err := exec(ctx, admin, `CREATE DATABASE `+name+` TEMPLATE `+templateDB); err != nil {
+		return nil, fmt.Errorf("clone: %w", err)
+	}
+	return &PG{URL: withDatabase(pg.URL, name), c: pg.c, admin: admin, name: name}, nil
+}
+
+// dropClone drops a database cloneMigrated made, closing any connection a
+// test left open.
+func dropClone(pg *PG) {
+	_ = exec(context.Background(), pg.admin, `DROP DATABASE IF EXISTS `+pg.name+` WITH (FORCE)`)
+}
+
+// exec runs one statement on dsn over a connection of its own.
+func exec(ctx context.Context, dsn, sql string) error {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(ctx)
+	_, err = conn.Exec(ctx, sql)
+	return err
+}
+
+// withDatabase is url with its database replaced by name.
+func withDatabase(raw, name string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	u.Path = "/" + name
+	return u.String()
 }
 
 // AppLogin creates a fresh login role that is only a member of mhai_app,

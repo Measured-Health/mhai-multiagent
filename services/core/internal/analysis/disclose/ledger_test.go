@@ -1,11 +1,13 @@
 package disclose
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose/attack"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/proptest"
 )
 
 // guardLedger guards every context of p parents first, as the orchestrator
@@ -41,28 +43,41 @@ func TestP2LedgerIncremental(t *testing.T) {
 	if raceEnabled || testing.Short() {
 		t.Skip("every context of a period: run without -race (CI's analysis property step)")
 	}
-	for _, d := range []attack.Dims{smallDims(2), sourceDims()} {
+	type ledgerCase struct {
+		dims string
+		d    attack.Dims
+		seed uint64
+	}
+	var cases []ledgerCase
+	for _, d := range []struct {
+		name string
+		d    attack.Dims
+	}{{"small", smallDims(2)}, {"sources", sourceDims()}} {
 		for _, seed := range seeds(20, 1, 1) {
-			w := attack.Generate(seed, d, []calendar.Period{octWeek}, false, attack.Options{Subjects: 120, Presence: 0.9, Rare: 0.6})
-			sets := filterSets(w.Dims)
-			bodies, _ := guardLedger(t, &w, octWeek, sets)
-			docs, _ := docsOf(t, bodies, sets)
-			m, err := attack.New(&w, docs)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var all []int
-			for i := range docs {
-				all = append(all, i)
-			}
-			if _, se, _, _ := m.GroupExposure(all); se > 0 {
-				t.Errorf("seed %d: %d hidden groups of 1 to 4 solvable through the ledger", seed, se)
-			}
-			for _, x := range m.OneState(all) {
-				t.Errorf("seed %d: one state: %s", seed, x)
-			}
+			cases = append(cases, ledgerCase{d.name, d.d, seed})
 		}
 	}
+	proptest.Cases(t, len(cases), func(k int) string { return fmt.Sprintf("%s/seed=%d", cases[k].dims, cases[k].seed) }, func(t *testing.T, k int) {
+		seed := cases[k].seed
+		w := attack.Generate(seed, cases[k].d, []calendar.Period{octWeek}, false, attack.Options{Subjects: 120, Presence: 0.9, Rare: 0.6})
+		sets := filterSets(w.Dims)
+		bodies, _ := guardLedger(t, &w, octWeek, sets)
+		docs, _ := docsOf(t, bodies, sets)
+		m, err := attack.New(&w, docs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var all []int
+		for i := range docs {
+			all = append(all, i)
+		}
+		if _, se, _, _ := m.GroupExposure(all); se > 0 {
+			t.Errorf("seed %d: %d hidden groups of 1 to 4 solvable through the ledger", seed, se)
+		}
+		for _, x := range m.OneState(all) {
+			t.Errorf("seed %d: one state: %s", seed, x)
+		}
+	})
 }
 
 // The ledger records each context once, and a recorded body is known to

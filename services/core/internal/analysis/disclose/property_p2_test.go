@@ -1,10 +1,13 @@
 package disclose
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose/attack"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/proptest"
 )
 
 // P2 (design §5.7, D5, ruling C10): every context of a period at the cap,
@@ -20,6 +23,24 @@ import (
 //     attacker's subgroups of 1 to 4 (the §5.2 trade, R-A4).
 type p2Counts struct {
 	families, small, smallExposed, secondary, secondaryExposed, drilled, drillSmall int
+}
+
+// p2Total adds up the parallel cases' counts.
+type p2Total struct {
+	mu sync.Mutex
+	c  p2Counts
+}
+
+func (x *p2Total) add(c p2Counts) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.c.families += c.families
+	x.c.small += c.small
+	x.c.smallExposed += c.smallExposed
+	x.c.secondary += c.secondary
+	x.c.secondaryExposed += c.secondaryExposed
+	x.c.drilled += c.drilled
+	x.c.drillSmall += c.drillSmall
 }
 
 func (c *p2Counts) log(t *testing.T, name string) {
@@ -88,20 +109,23 @@ func p2Period(t *testing.T, w *attack.World, p calendar.Period, c *p2Counts) {
 
 // Small dimensions, many worlds (and, at full size, the month as well).
 func TestP2FamilyExhaustive(t *testing.T) {
-	var c p2Counts
-	for _, seed := range seeds(100, 6, 2) {
+	var tot p2Total
+	ss := seeds(100, 6, 2)
+	proptest.Cases(t, len(ss), func(k int) string { return fmt.Sprint("seed=", ss[k]) }, func(t *testing.T, k int) {
+		var c p2Counts
 		periods := []calendar.Period{octWeek}
 		blocks := []calendar.Period{octWeek}
 		if long() {
 			blocks = octBlocksOf()
 			periods = append(periods, oct2026)
 		}
-		w := attack.Generate(seed, smallDims(2), blocks, false, attack.Options{Subjects: 140, Presence: 0.9, Rare: 0.6})
+		w := attack.Generate(ss[k], smallDims(2), blocks, false, attack.Options{Subjects: 140, Presence: 0.9, Rare: 0.6})
 		for _, p := range periods {
 			p2Period(t, &w, p, &c)
 		}
-	}
-	c.log(t, "P2 small")
+		tot.add(c)
+	})
+	tot.c.log(t, "P2 small")
 }
 
 // realDims are a hospital's real dimension sizes for the patient's
@@ -126,15 +150,28 @@ func TestP2Realistic(t *testing.T) {
 	if raceEnabled || testing.Short() {
 		t.Skip("realistic size: run without -race (CI's analysis property step)")
 	}
-	var c p2Counts
+	var tot p2Total
 	weeks := octBlocksOf()[:3]
+	// Each (seed, week) is a case: the world is drawn once per seed, before
+	// the cases run, and only read by them.
+	type wk struct {
+		seed uint64
+		w    *attack.World
+		p    calendar.Period
+	}
+	var cases []wk
 	for _, seed := range seeds(10, 1, 1) {
 		w := attack.Generate(seed, realDims(), weeks, false, attack.Options{Subjects: 700, Presence: 0.5, Rare: 0.5})
 		for _, p := range weeks {
-			p2Period(t, &w, p, &c)
+			cases = append(cases, wk{seed, &w, p})
 		}
 	}
-	c.log(t, "P2 realistic")
+	proptest.Cases(t, len(cases), func(k int) string { return fmt.Sprintf("seed=%d/week=%d", cases[k].seed, k%len(weeks)) }, func(t *testing.T, k int) {
+		var c p2Counts
+		p2Period(t, cases[k].w, cases[k].p, &c)
+		tot.add(c)
+	})
+	tot.c.log(t, "P2 realistic")
 }
 
 // sourceDims are smallDims with two sources: the source filter is a
@@ -152,10 +189,13 @@ func TestP2CoversSources(t *testing.T) {
 	if raceEnabled || testing.Short() {
 		t.Skip("every context of a period: run without -race (CI's analysis property step)")
 	}
-	var c p2Counts
-	for _, seed := range seeds(40, 3, 1) {
-		w := attack.Generate(seed, sourceDims(), []calendar.Period{octWeek}, false, attack.Options{Subjects: 120, Presence: 0.9, Rare: 0.6})
+	var tot p2Total
+	ss := seeds(40, 3, 1)
+	proptest.Cases(t, len(ss), func(k int) string { return fmt.Sprint("seed=", ss[k]) }, func(t *testing.T, k int) {
+		var c p2Counts
+		w := attack.Generate(ss[k], sourceDims(), []calendar.Period{octWeek}, false, attack.Options{Subjects: 120, Presence: 0.9, Rare: 0.6})
 		p2Period(t, &w, octWeek, &c)
-	}
-	c.log(t, "P2 sources")
+		tot.add(c)
+	})
+	tot.c.log(t, "P2 sources")
 }

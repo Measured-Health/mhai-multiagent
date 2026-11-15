@@ -18,6 +18,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/scheduler/schedtest"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/proptest"
 )
 
 // A7, the review's form (Plan 7c spec §6.4, §11.5; Task 4): random
@@ -380,18 +381,26 @@ func (w *world) analytics(t *testing.T, k calendar.Kind) []response {
 
 func TestHistoryFromRouteJSON(t *testing.T) {
 	r := rand.New(rand.NewSource(20261107))
-	cells, hidden, exposed, changes := 0, 0, 0, 0
-	for k := 0; k < historyCount(); k++ {
-		w := randomWorld(r)
+	ws := make([]*world, historyCount())
+	for k := range ws {
+		ws[k] = randomWorld(r) // drawn in order before any runs, the same in every shard
+	}
+	var tally proptest.Tally
+	ran := proptest.Cases(t, len(ws), func(k int) string { return fmt.Sprint("history=", k) }, func(t *testing.T, k int) {
+		w := ws[k]
 		p, _ := w.run(t)
 		rep := p.Check(w.value(p))
 		if len(rep.SmallCells)+len(rep.SmallSums) > 0 {
 			t.Fatalf("history %d (epoch %v): %s", k, w.epoch, strings.Join(append(rep.SmallCells, rep.SmallSums...), "; "))
 		}
-		cells += rep.Cells
-		hidden += rep.Hidden
-		exposed += rep.ExposedCells
-		changes += p.Changes()
+		tally.Add("cells", rep.Cells)
+		tally.Add("hidden", rep.Hidden)
+		tally.Add("exposed", rep.ExposedCells)
+		tally.Add("changes", p.Changes())
+	})
+	cells, hidden, exposed, changes := tally.Get("cells"), tally.Get("hidden"), tally.Get("exposed"), tally.Get("changes")
+	if ran == 0 {
+		return
 	}
 	if hidden == 0 {
 		t.Fatal("nothing was hidden: the generator tests nothing")
@@ -400,7 +409,7 @@ func TestHistoryFromRouteJSON(t *testing.T) {
 		t.Fatal("no change was flagged: the changes check tests nothing")
 	}
 	t.Logf("%d histories: %d published cells, %d hidden, %d hidden cells exposed with 0 or 5 and up (known before they were hidden); "+
-		"%d changes sent, each checked against the stored cells", historyCount(), cells, hidden, exposed, changes)
+		"%d changes sent, each checked against the stored cells", ran, cells, hidden, exposed, changes)
 }
 
 // R41a-5, the whole set: replayed in publication order from the JSON, no
@@ -412,19 +421,35 @@ func TestHistoryFromRouteJSON(t *testing.T) {
 // part hidden).
 func TestHistorySetsFromRouteJSON(t *testing.T) {
 	r := rand.New(rand.NewSource(41))
-	normal, crowded := 6, 6
+	// Six normal histories, then six crowded ones, drawn in order before any
+	// runs (as the full run always drew them); -race and -short run the
+	// first of each kind.
+	const normalAll, crowdedAll = 6, 6
+	normal, crowded := normalAll, crowdedAll
 	switch {
 	case testing.Short():
 		normal, crowded = 1, 1
 	case raceEnabled:
 		normal, crowded = 2, 2
 	}
-	sets, wide := 0, 0
-	for k := 0; k < normal+crowded; k++ {
+	type setCase struct {
+		k       int
+		w       *world
+		crowded bool
+	}
+	var cases []setCase
+	for k := 0; k < normalAll+crowdedAll; k++ {
 		w := randomWorld(r)
-		if k >= normal {
+		if k >= normalAll {
 			w = randomWorldN(r, 15, 20, 6+r.Intn(7), true)
 		}
+		if (k < normalAll && k < normal) || (k >= normalAll && k-normalAll < crowded) {
+			cases = append(cases, setCase{k, w, k >= normalAll})
+		}
+	}
+	var tally proptest.Tally
+	proptest.Cases(t, len(cases), func(i int) string { return fmt.Sprint("history=", cases[i].k) }, func(t *testing.T, i int) {
+		k, w := cases[i].k, cases[i].w
 		p, _ := w.run(t)
 		if v := p.CheckSets(); len(v) > 0 {
 			t.Fatalf("history %d (%d hospitals): %d sets with more than their full sum determined; first: %s", k, len(w.onboard), len(v), v[0])
@@ -434,11 +459,15 @@ func TestHistorySetsFromRouteJSON(t *testing.T) {
 			t.Fatalf("history %d: %s", k, strings.Join(append(rep.SmallCells, rep.SmallSums...), "; "))
 		}
 		s, wd := p.setStats()
-		sets += s
-		wide += wd
-	}
-	if wide == 0 {
+		tally.Add("histories", 1)
+		tally.Add("sets", s)
+		tally.Add("wide", wd)
+		if cases[i].crowded {
+			tally.Add("crowded", 1)
+		}
+	})
+	if tally.Get("crowded") > 0 && tally.Get("wide") == 0 {
 		t.Fatal("no set had 11 or more hidden members: the crowded histories test nothing")
 	}
-	t.Logf("%d histories: %d published sets with 2 or more hidden members checked, %d with 11 or more", normal+crowded, sets, wide)
+	t.Logf("%d histories: %d published sets with 2 or more hidden members checked, %d with 11 or more", tally.Get("histories"), tally.Get("sets"), tally.Get("wide"))
 }

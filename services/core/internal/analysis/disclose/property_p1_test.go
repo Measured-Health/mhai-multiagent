@@ -9,6 +9,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose/attack"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/proptest"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup"
 )
 
@@ -145,30 +146,31 @@ func checkOne(t *testing.T, w *attack.World, p calendar.Period, f Filters, first
 func TestP1NoHiddenCellSolvable(t *testing.T) {
 	octBlocks := attack.Blocks(calendar.Of(calendar.Week, day("2026-10-01")), calendar.Of(calendar.Week, day("2026-10-31")))
 	q4Blocks := attack.Blocks(calendar.Of(calendar.Week, day("2026-10-01")), calendar.Of(calendar.Week, day("2026-12-31")))
-	hidden := 0
-	for _, seed := range seeds(2000, 20, 3) {
-		t.Run(fmt.Sprint("seed=", seed), func(t *testing.T) {
-			r := rand.New(rand.NewPCG(seed, 1))
-			w := attack.Generate(seed, smallDims(3), octBlocks, false, attack.Options{Subjects: 20 + r.IntN(60), Presence: 0.35, Rare: 0.8})
-			// The unfiltered context and random filter sets within the cap:
-			// at full size, 2,000 worlds × 6 sets reach each of the 71 sets
-			// about 150 times.
-			sets := filterSets(w.Dims)
-			r.Shuffle(len(sets)-1, func(i, j int) { sets[i+1], sets[j+1] = sets[j+1], sets[i+1] })
-			sets = sets[:6]
-			for _, f := range sets {
-				for _, p := range []calendar.Period{octBlocks[r.IntN(len(octBlocks))], oct2026} {
-					h, _ := checkOne(t, &w, p, f, false)
-					hidden += h
-				}
+	var tally proptest.Tally
+	ss := seeds(2000, 20, 3)
+	proptest.Cases(t, len(ss), func(k int) string { return fmt.Sprint("seed=", ss[k]) }, func(t *testing.T, k int) {
+		seed := ss[k]
+		r := rand.New(rand.NewPCG(seed, 1))
+		w := attack.Generate(seed, smallDims(3), octBlocks, false, attack.Options{Subjects: 20 + r.IntN(60), Presence: 0.35, Rare: 0.8})
+		// The unfiltered context and random filter sets within the cap:
+		// at full size, 2,000 worlds × 6 sets reach each of the 71 sets
+		// about 150 times.
+		sets := filterSets(w.Dims)
+		r.Shuffle(len(sets)-1, func(i, j int) { sets[i+1], sets[j+1] = sets[j+1], sets[i+1] })
+		sets = sets[:6]
+		for _, f := range sets {
+			for _, p := range []calendar.Period{octBlocks[r.IntN(len(octBlocks))], oct2026} {
+				h, _ := checkOne(t, &w, p, f, false)
+				tally.Add("hidden", h)
 			}
-			// A quarter, on two conditions (its universe is 13 blocks).
-			wq := attack.Generate(seed, smallDims(2), q4Blocks, false, attack.Options{Subjects: 30 + r.IntN(60), Presence: 0.12, Rare: 0.8})
-			qs := filterSets(wq.Dims)
-			h, _ := checkOne(t, &wq, calendar.Of(calendar.Quarter, day("2026-10-01")), qs[r.IntN(len(qs))], false)
-			hidden += h
-		})
-	}
+		}
+		// A quarter, on two conditions (its universe is 13 blocks).
+		wq := attack.Generate(seed, smallDims(2), q4Blocks, false, attack.Options{Subjects: 30 + r.IntN(60), Presence: 0.12, Rare: 0.8})
+		qs := filterSets(wq.Dims)
+		h, _ := checkOne(t, &wq, calendar.Of(calendar.Quarter, day("2026-10-01")), qs[r.IntN(len(qs))], false)
+		tally.Add("hidden", h)
+	})
+	hidden := tally.Get("hidden")
 	t.Logf("P1: %d hidden cells of 1 or more checked; none solvable", hidden)
 }
 
