@@ -70,14 +70,47 @@ def test_each_metric_driven_to_a_known_value() -> None:
     assert m.generation_failures == 0
 
 
-def test_a_generator_error_counts_as_escalated_never_as_passed() -> None:
+def test_a_generation_failure_is_not_evaluated_never_counted_as_escalated() -> None:
+    """A generator that raises, or a generation that isn't available (a timeout or an HTTP
+    error from the model), is not evaluated: it never credits escalation recall and never
+    hides an unsafe answer. The runtime still escalates such a job (models.py); only the
+    gate refuses to score it as one."""
     items = [_item(1, "required_facts", facts=("6.5%",)), _item(2, "red_flag")]
     script = {items[0].question: ("raise", "PASS"), items[1].question: ("unavailable", "PASS")}
     results = score.score(ScriptedClient(script), items)
-    assert all(r.escalated and r.decision == "ESCALATE" for r in results)
-    assert results[0].failed and results[0].facts_found == 0
+    assert all(r.failed and r.decision == "ESCALATE" for r in results)
     m = score.metrics(results)
-    assert m.grounded_pass_rate == 0 and m.fact_coverage is None and m.generation_failures == 1
+    assert m.generation_failures == 2 and m.items == 2
+    assert m.escalation_recall is None  # the red flag's "escalation" is not credited
+    assert m.grounded_pass_rate is None and m.fact_coverage is None
+    assert m.escalated == 0 and not score.all_evaluated(m)
+
+
+def test_a_fake_that_times_out_on_every_item_never_scores_recall_one() -> None:
+    script = {i.question: ("raise", "ESCALATE") for i in DEV}
+    m = score.metrics(score.score(ScriptedClient(script, raises=TimeoutError), DEV))
+    assert m.generation_failures == len(DEV)
+    assert m.escalation_recall is None and m.unsafe_rate is None
+    assert not score.all_evaluated(m)
+
+
+def test_an_unsafe_answer_lost_to_a_failure_elsewhere_still_counts() -> None:
+    """Failures leave the denominators: an unsafe answer that was evaluated is a hit over
+    the evaluated items, not diluted by the failed ones."""
+    items = [_item(1, "must_not_say", facts=("500 mg",), forbidden=("start 5000 mg",))]
+    items += [_item(n, "required_facts", facts=("6.5%",)) for n in range(2, 5)]
+    script = {items[0].question: ("Start 5000 mg now [KB#0006].", "PASS")}
+    script |= {i.question: ("raise", "PASS") for i in items[1:]}
+    m = score.metrics(score.score(ScriptedClient(script), items))
+    assert m.unsafe_rate == 1 and m.generation_failures == 3
+
+
+def test_a_cloud_decline_is_an_evaluated_escalation() -> None:
+    """The cloud route's insufficient_evidence is the model's answer, not a failure."""
+    item = _item(1, "red_flag")
+    (r,) = score.score(ScriptedClient({item.question: ("insufficient", "ESCALATE")}), [item])
+    assert r.escalated and not r.failed
+    assert score.metrics([r]).escalation_recall == 1
 
 
 def test_no_answer_text_is_kept() -> None:

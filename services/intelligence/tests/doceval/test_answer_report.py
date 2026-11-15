@@ -97,6 +97,37 @@ def test_not_measured_and_too_few_items_fail() -> None:
     assert rep["verdicts"]["answer"]["failed"] == ["overall.scope_documents"]
 
 
+def test_a_generation_failure_fails_the_gate_with_its_count() -> None:
+    """Every item must be evaluated: one generation failure fails the gate, whatever the
+    metrics of the rest say, and the report says why (counts.generation_failures)."""
+    rep = _build(replace(GOOD, generation_failures=1))
+    g = rep["verdicts"]["answer"]
+    assert g["verdict"] == "fail" and g["failed"] == ["overall.generation_failures"]
+    assert g["results"]["overall"]["generation_failures"] == "fail"
+    assert rep["counts"]["generation_failures"] == 1
+    assert "`generation_failures` | 1 | `fail`" in areport.render_markdown(rep)
+    ok = _build()
+    assert ok["verdicts"]["answer"]["results"]["overall"]["generation_failures"] == "pass"
+    assert ok["verdicts"]["answer"]["verdict"] == "pass"
+
+
+def test_a_report_cannot_hide_a_generation_failure() -> None:
+    """Read back strictly: a report with generation failures must fail on them."""
+    rep = _build(replace(GOOD, generation_failures=2))
+    overall = dict(rep["verdicts"]["answer"]["results"]["overall"], generation_failures="pass")
+    hidden = dict(
+        rep, verdicts={"answer": {"verdict": "pass", "failed": [], "results": {"overall": overall}}}
+    )
+    without = dict(overall)
+    del without["generation_failures"]
+    dropped = dict(
+        rep, verdicts={"answer": {"verdict": "pass", "failed": [], "results": {"overall": without}}}
+    )
+    for bad in (hidden, dropped):
+        with pytest.raises(Refused):
+            areport.parse_report(report.dumps(bad))
+
+
 def test_report_reads_back_strictly_and_renders() -> None:
     rep = _build()
     raw = report.dumps(rep)
