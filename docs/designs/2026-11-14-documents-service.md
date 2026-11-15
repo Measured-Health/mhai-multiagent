@@ -495,7 +495,7 @@ Made on 14 Nov 2026 under the product owner's delegation, each on the safe and p
 - **D2. The pipeline worker holds no storage credential;** it reads pages through the documents service with a lease check (§3, §8). Amends pipeline design §3.3.
 - **D3. `intake` and `page` are authorised by NATS rights plus database state,** not a core token, because only core mints tokens and neither caller can get one for this (§8).
 - **D4. Envelope encryption with a per-hospital KEK and per-object DEK, wrapped keys in Postgres,** so deleting a row is a crypto-shred and destroying a KEK removes a hospital (§6.2).
-- **D5. The pilot may use a file keyring** only with the product owner's written acceptance; KMS before a second hospital (§6.2).
+- **D5. The pilot may use a file keyring** only with the product owner's written acceptance; KMS before a second hospital (§6.2). **Accepted by the product owner on 15 Nov 2026 for the pilot;** the move to KMS is tracked in TODO.md (documents service items).
 - **D6. POST policies, not presigned PUTs,** for uploads (size range enforced) (§4.2).
 - **D7. pdfium in nsjail in its own container with no network;** MuPDF and Ghostscript excluded (§5.1).
 - **D8. Stale signatures or no scanner keep documents out,** never pass them (§5.3).
