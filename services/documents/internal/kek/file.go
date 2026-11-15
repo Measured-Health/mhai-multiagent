@@ -213,10 +213,10 @@ func (f *File) Has(_ context.Context, hospital uuid.UUID) error {
 	return nil
 }
 
-// lockFile takes an exclusive advisory lock on path (made 0600 if absent)
-// and returns its release.
+// lockFile takes an exclusive advisory lock on path (made 0600 if absent,
+// never through a symlink) and returns its release.
 func lockFile(path string) (func(), error) {
-	fh, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	fh, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
 	}
