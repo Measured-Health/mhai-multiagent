@@ -71,7 +71,7 @@ def _packaged() -> str:
     ("edit", "code"),
     [
         (lambda s: s.replace("schema: mhai.escalation_guard.rules/1", "schema: other/1"), "schema"),
-        (lambda s: s.replace('version: "1.0.1"', 'version: "one"'), "version"),
+        (lambda s: s.replace('version: "1.0.2"', 'version: "one"'), "version"),
         (lambda s: s.replace("status: pilot", "status: draft"), "status"),
         (lambda s: s + "\nextra: 1\n", "top"),
         (
@@ -265,6 +265,60 @@ def test_age_changes_what_a_vital_means() -> None:
     assert "red_flag" not in reasons("Pulse 140 while playing, normal?", {"age": 1})
     assert "red_flag" in reasons("Respiratory rate 26, cough medicine?", {"age": 50})
     assert "red_flag" not in reasons("Respiratory rate 26, cough medicine?", {"age": 3})
+
+
+@pytest.mark.parametrize(
+    ("question", "patient", "escalates"),
+    [
+        # WHO IMCI fast breathing: >= 60 under 2 months, >= 50 from 2 to 12 months,
+        # >= 40 from 12 months to 5 years.
+        ("A 6-month-old with a cough and RR 52, what syrup?", {}, True),
+        ("A 3-year-old with a cough and RR 42, what syrup?", {}, True),
+        ("A 3-year-old with a cough and RR 36, what syrup?", {}, False),
+        ("A 1-month-old with a cough and RR 58, what syrup?", {}, False),
+        ("A 1-month-old with a cough and RR 61, what syrup?", {}, True),
+        # the band edges: 2 months and 12 months start the next band
+        ("A 7-week-old with a cough and RR 55, what syrup?", {}, False),
+        ("A 2-month-old with a cough and RR 50, what syrup?", {}, True),
+        ("An 11-month-old with a cough and RR 45, what syrup?", {}, False),
+        ("A 12-month-old with a cough and RR 40, what syrup?", {}, True),
+        ("A 4-year-old with a cough and RR 39, what syrup?", {}, False),
+        # the structured age in years, fractions included
+        ("Cough with RR 52, what syrup?", {"age": 0.5}, True),
+        ("Cough with RR 46, what syrup?", {"age": 0.5}, False),
+        ("Cough with RR 55, what syrup?", {"age": 0.1}, False),
+        ("Cough with RR 41, what syrup?", {"age": 2}, True),
+        # a child under five of unknown age: the most protective band (>= 40)
+        ("My child has a cough and RR 42, what syrup?", {}, True),
+        ("Baby with a cough and respiratory rate 41, what syrup?", {}, True),
+        ("Cough with RR 42, what syrup?", {"age": 0}, True),
+        # a newborn of unknown age is a young infant (>= 60)
+        ("Newborn with RR 56 while feeding, normal?", {}, False),
+        ("Newborn with RR 62 while feeding, normal?", {}, True),
+    ],
+)
+def test_fast_breathing_uses_the_imci_age_bands(
+    question: str, patient: dict[str, Any], escalates: bool
+) -> None:
+    assert ("red_flag" in reasons(question, patient)) is escalates, question
+
+
+@pytest.mark.parametrize(
+    ("question", "patient"),
+    [
+        # WHO IMCI young infant (birth to 2 months), not only the first 28 days
+        ("A 6-week-old with yellow palms and soles, is this normal?", {}),
+        ("A 5-week-old feels cold, temperature 35.3 C, what to do?", {}),
+        ("Pus from the umbilicus in a 7-week-old, which cream?", {}),
+        ("Yellow palms and soles, is this normal?", {"age": 0.1}),
+        # young-infant fever from a structured age in years
+        ("Any advice?", {"age": 0.1, "vitals": {"temperature": 37.8}}),
+    ],
+)
+def test_young_infant_signs_cover_birth_to_two_months(
+    question: str, patient: dict[str, Any]
+) -> None:
+    assert "red_flag" in reasons(question, patient), question
 
 
 # ---------------------------------------------------------------- missing information

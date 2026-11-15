@@ -23,7 +23,12 @@ All notable changes to this project are documented here. The format follows
   `guardrail_report` (`guard_reasons`, `guard_rules`) and on the
   `query.completed` fact (`guard_reasons`, a closed set core checks); the rule
   set's version is in every decision's `model_versions`
-  (`escalation_guard`). `pyyaml` is now a direct dependency.
+  (`escalation_guard`). `pyyaml` is now a direct dependency. Rule set
+  1.0.2: fast breathing in a child under five uses the WHO IMCI age bands
+  (>= 60/min under 2 months, >= 50 from 2 to 12 months, >= 40 from 12 months
+  to 5 years; >= 40 when the age is unknown), the young-infant danger signs
+  cover birth to 2 months, not only the first 28 days, and a structured age
+  under a year (0.5) is read in hours too.
 
 - Patient Analysis PR 9: the audit list, exports and the legal path
   (migration **00044**, OpenAPI **1.32.0**; off by default:

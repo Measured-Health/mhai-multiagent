@@ -26,7 +26,7 @@
 #   worker refuses to start. Bump version with every change.
 schema: mhai.escalation_guard.rules/1
 name: escalation-guard
-version: "1.0.1"
+version: "1.0.2"
 status: pilot
 clinical_signoff: pending
 description: Question-level red flags, missing patient information and dose scope; pilot list, clinical sign-off pending.
@@ -156,7 +156,9 @@ analytes:
 #   ref: name                    the named context below
 # Ages are read from the patient's structured age (years) and the question
 # ("3-month-old", "aged 2 years", "36 hours old", "day 3 of life"):
-# age_years and age_hours are analytes for value conditions.
+# age_years and age_hours are analytes for value conditions. A month is
+# 730.5 hours: 2 months is 1461, 12 months 8766. A structured age of 0 years
+# gives no age_hours (the month is unknown).
 contexts:
   pregnant:
     one_of:
@@ -167,6 +169,11 @@ contexts:
     one_of:
       - any: ['new-?born', 'neonat', '\bnb\b']
       - value: {analyte: age_hours, op: "<", value: 672}
+  # WHO IMCI young infant: birth up to 2 months.
+  young_infant:
+    one_of:
+      - ref: neonate
+      - value: {analyte: age_hours, op: "<", value: 1461}
   child_under_5:
     one_of:
       - ref: neonate
@@ -322,13 +329,37 @@ red_flags:
             - value: {analyte: respiratory_rate, op: ">=", value: 25}
             - value: {analyte: respiratory_rate, op: "<=", value: 8}
     source: "NEWS2 respiration >= 25 or <= 8 scores 3"
+  # WHO IMCI fast breathing, by age band. A child under five with no known
+  # age gets the most protective band (>= 40); a newborn is a young infant.
+  - id: respiratory-rate-young-infant
+    group: paediatric
+    when:
+      all:
+        - ref: young_infant
+        - value: {analyte: respiratory_rate, op: ">=", value: 60}
+    source: "WHO IMCI: fast breathing >= 60/min under 2 months"
   - id: respiratory-rate-infant
     group: paediatric
     when:
       all:
         - ref: child_under_5
-        - value: {analyte: respiratory_rate, op: ">=", value: 60}
-    source: "WHO IMCI: fast breathing >= 60/min in a young infant is a danger sign"
+        - value: {analyte: age_hours, op: ">=", value: 1461}
+        - value: {analyte: age_hours, op: "<", value: 8766}
+        - value: {analyte: respiratory_rate, op: ">=", value: 50}
+    source: "WHO IMCI: fast breathing >= 50/min from 2 up to 12 months"
+  - id: respiratory-rate-child
+    group: paediatric
+    when:
+      all:
+        - ref: child_under_5
+        - value: {analyte: respiratory_rate, op: ">=", value: 40}
+        - one_of:
+            - value: {analyte: age_hours, op: ">=", value: 8766}
+            - all:
+                - value: {analyte: age_hours, op: missing, value: 0}
+                - any: ['new-?born', 'neonat', '\bnb\b']
+                  negate: true
+    source: "WHO IMCI: fast breathing >= 40/min from 12 months up to 5 years; the most protective band when the age is unknown"
   - id: temperature-extreme
     group: sepsis
     when:
@@ -398,17 +429,17 @@ red_flags:
         - ref: child_under_5
         - any: ["(?:unable|not able|can ?not|can't|cannot|won't|will not|refus(?:es|ing|ed)) (?:to )?(?:drink|feed|breast-?feed|suck|eat)", 'not (?:drinking|feeding|breast-?feeding|sucking|eating)', 'stopped (?:feeding|drinking|breast-?feeding)', 'poor(?:ly)? feed', 'vomit(?:s|ing|ed)? everything', 'vomits? (?:all|after every)', 'floppy', 'limp\b', 'letharg', 'not waking', 'hard to wake', 'sunken (?:eyes|fontanel)', 'skin pinch goes back (?:very )?slowly', 'bulging fontanel', 'not passing urine', 'no wet nappies', 'no wet diapers', 'high-pitched cry', 'inconsolable', 'convuls', 'seizure', '\bfits?\b', 'severe (?:dehydration|pneumonia|malnutrition)', 'chest (?:wall )?in-?drawing', 'grunting']
     source: "WHO IMCI 2014 general danger signs (any one needs urgent referral)"
-  - id: neonate-danger-signs
+  - id: young-infant-danger-signs
     group: paediatric
     when:
       all:
-        - ref: neonate
+        - ref: young_infant
         - one_of:
             - ref: fever
             - any: ['jaundice (?:on|of|in|to|involving) (?:the )?(?:palms|soles|hands|feet)', 'yellow (?:palms|soles|hands and feet)', '(?:palms|soles) (?:are |look )?yellow', 'umbilic\w* (?:red|pus|discharge|swelling|smell)', 'red(?:ness)? (?:around|spreading from) the (?:umbilic|cord)', 'pus from the (?:umbilic|cord)', 'many (?:skin )?pustules', 'cold to (?:the )?touch', 'not feeding', 'feeding poorly', 'poor feeding']
             - value: {analyte: temperature, op: "<", value: 35.5}
             - value: {analyte: bilirubin, op: ">=", value: 20}
-    source: "WHO IMCI young infant (0-2 months): fever, hypothermia, jaundice on palms and soles, local infection"
+    source: "WHO IMCI young infant (birth up to 2 months): fever, temperature < 35.5, jaundice on palms and soles, local infection"
   - id: young-infant-fever
     group: paediatric
     when:

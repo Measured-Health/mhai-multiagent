@@ -60,7 +60,7 @@ NAME = "escalation-guard"
 RULES_PATH = Path(__file__).resolve().parent / "rules" / "escalation-guard.yaml"
 # The reviewed rule set's SHA-256. An edit to the YAML must change this too (and the
 # version): an unreviewed edit refuses to load.
-RULES_SHA256 = "41576549f60b41094157a73b39e35e60364a4bf120d44ceaf78413d1964a50e7"
+RULES_SHA256 = "336e735a01f7096ab11b41341906ed178ea205e10066d424ad94d1278fa6785d"
 
 RED_FLAG = "red_flag"
 MISSING_INFORMATION = "missing_information"
@@ -406,7 +406,9 @@ class RuleSet:
         age = patient.get("age")
         if isinstance(age, int | float) and not isinstance(age, bool) and 0 <= age <= 130:
             add("age_years", float(age))
-            if age >= 1:
+            # A fraction of a year is an age in hours too (0.5 is six months); 0 is
+            # under a year with the month unknown, so it gives no age in hours.
+            if age > 0:
                 add("age_hours", float(age) * 8766.0)
         return out
 
