@@ -992,13 +992,14 @@ func TestAnalyticsAndAnalysisGrantsDisjoint(t *testing.T) {
 			t.Errorf("%s may execute %v", role, bad)
 		}
 	}
-	// The analysis job runs exactly its six functions and the position.
+	// The analysis job runs exactly its eight functions (00045 added the
+	// patient-index changes) and the position.
 	var got []string
 	if err := pool.QueryRow(ctx, `SELECT array_agg(proname::text ORDER BY proname) FROM pg_proc
 		WHERE proname LIKE 'mhai_analysis%' AND has_function_privilege('mhai_analysis_job', oid, 'EXECUTE')`).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
-	want := "mhai_analysis_due,mhai_analysis_freeze,mhai_analysis_ingest,mhai_analysis_ingest_source,mhai_analysis_position,mhai_analysis_ran,mhai_analysis_sweep"
+	want := "mhai_analysis_apply_changes,mhai_analysis_due,mhai_analysis_freeze,mhai_analysis_ingest,mhai_analysis_ingest_source,mhai_analysis_patient_changes,mhai_analysis_position,mhai_analysis_ran,mhai_analysis_sweep"
 	if strings.Join(got, ",") != want {
 		t.Errorf("mhai_analysis_job executes %v", got)
 	}
