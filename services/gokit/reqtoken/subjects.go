@@ -32,10 +32,15 @@ const subjectSegments = 4
 //     is the audience;
 //   - emr.v1.ctl.<op>: core's control calls to the emr service (EMR design
 //     §3.2); the audience is always emr, and only core calls them;
+//   - documents.v1.ctl.<op>: core's control calls to the documents service
+//     (ADR 0016; documents design §8); the audience is always documents,
+//     only core calls them, and no op takes step-up. The hospital is the
+//     token's hid, which the service checks against the row;
 //   - jobs.v1.<hid|global>.<type>: JetStream jobs, bound to the hospital.
 var SubjectRules = []SubjectRule{
 	{Kind: KindReq, Prefix: "inference.v1.", AudFromSegment: 2, HospitalSegment: -1},
 	{Kind: KindReq, Prefix: "emr.v1.ctl.", AudFromSegment: -1, Aud: "emr", HospitalSegment: -1, CoreOnly: true, StepUp: true},
+	{Kind: KindReq, Prefix: "documents.v1.ctl.", AudFromSegment: -1, Aud: "documents", HospitalSegment: -1, CoreOnly: true},
 	{Kind: KindJob, Prefix: "jobs.v1.", AudFromSegment: -1, HospitalSegment: 2},
 }
 
@@ -71,7 +76,8 @@ func ruleFor(kind Kind, subject string) (SubjectRule, []string, bool) {
 
 // AudienceFor returns the audience subject fixes for a token of kind: the
 // service segment of inference.v1.<service>.<op>, "emr" for
-// emr.v1.ctl.<op>, and "" (any) for a job. ok is false for a subject no
+// emr.v1.ctl.<op>, "documents" for documents.v1.ctl.<op>, and "" (any) for
+// a job. ok is false for a subject no
 // rule allows.
 func AudienceFor(kind Kind, subject string) (aud string, ok bool) {
 	r, seg, ok := ruleFor(kind, subject)
