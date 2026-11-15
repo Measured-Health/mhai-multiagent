@@ -59,6 +59,22 @@ RESERVED_PATIENT_IDS = frozenset({REFERENCE_SOURCE, UNASSIGNED_SOURCE, "unknown"
 # chunk) or [KB#nnnnnnn] (a reference library's, migration 00040). The group
 # is the number.
 CITATION_MARKER = r'\[KB#(\d{4}|[1-9]\d{6})\]'
+# A citation marker in a claim, with the whitespace before it.
+_CITATION_TAG = re.compile(r'\s*' + CITATION_MARKER)
+
+
+def strip_citation_tags(text: str) -> str:
+    """text without its exact citation markers (CITATION_MARKER: [KB#nnnn], or a
+    reference library's [KB#nnnnnnn]) and the whitespace before each.
+
+    This is the claim the NLI model judges: the pinned NLI model reads a marker
+    left in a claim as new, unsupported content (a claim copied from its chunk
+    scores entailed 0.993 without " [KB#0002]", neutral 1.000 with it). Nothing
+    else changes: a lookalike ("[KB#12]", "KB#0001") stays and is judged as
+    text. Which chunk a claim cites, and every citation check, are read from
+    the original text, never from this one.
+    """
+    return _CITATION_TAG.sub('', text)
 
 # What chunk text may never carry into a prompt: a block delimiter ("<<",
 # ">>", the cloud prompt's <<chunk ...>> and <<end>>) or a citation ("KB#",

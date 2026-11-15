@@ -39,7 +39,11 @@ from enum import Enum
 from collections import defaultdict
 import logging
 
-from intelligence.knowledge_base.kb_builder import CITATION_MARKER, chunk_visible_to
+from intelligence.knowledge_base.kb_builder import (
+    CITATION_MARKER,
+    chunk_visible_to,
+    strip_citation_tags,
+)
 from intelligence.utils.nli import DEFAULT_NLI_MODEL, nli_label_map
 
 logging.basicConfig(level=logging.INFO)
@@ -362,7 +366,8 @@ class CitationVerificationPipeline:
           1. Split response into sentences/claims
           2. Extract [KB#XXXX] citations from each claim
           3. Look up cited KB chunk
-          4. Run NLI: source chunk (premise) vs. claim (hypothesis)
+          4. Run NLI: source chunk (premise) vs. claim without its
+             citation markers (hypothesis; strip_citation_tags)
           5. Assign PASS/FLAG/REDACT
           6. Build redacted response
         """
@@ -422,10 +427,12 @@ class CitationVerificationPipeline:
                     ))
                     continue
 
-                # Run NLI
+                # Run NLI on the claim without its citation markers: the
+                # NLI model reads a marker as unsupported content. The
+                # claim shown, and the checks above, keep the original.
                 nli_result = self.nli.verify(
                     premise=chunk.content,
-                    hypothesis=claim_text
+                    hypothesis=strip_citation_tags(claim_text)
                 )
 
                 # Decision logic

@@ -98,13 +98,19 @@ func TestComposeDocumentsProfile(t *testing.T) {
 		}
 	}
 	// Only nats and the documents service ever see its NATS password, and
-	// no other service mounts anything of the documents service's.
+	// no other service mounts anything of the documents service's. The
+	// database password reaches core-migrate too, which makes the login
+	// (documents_app, 00046), as EMR_DB_PASSWORD does for the emr service.
+	if v := c.Services["core-migrate"].Environment["DOCUMENTS_DB_PASSWORD"]; v != "${DOCUMENTS_DB_PASSWORD:-}" {
+		t.Errorf("core-migrate DOCUMENTS_DB_PASSWORD %q, want ${DOCUMENTS_DB_PASSWORD:-} (optional)", v)
+	}
 	for name, s := range c.Services {
 		if name == "nats" || name == "documents" {
 			continue
 		}
 		for k, v := range s.Environment {
-			if strings.Contains(k+v, "NATS_DOCUMENTS_PASSWORD") || strings.Contains(k+v, "DOCUMENTS_DB_PASSWORD") {
+			if strings.Contains(k+v, "NATS_DOCUMENTS_PASSWORD") ||
+				(strings.Contains(k+v, "DOCUMENTS_DB_PASSWORD") && !(name == "core-migrate" && k == "DOCUMENTS_DB_PASSWORD")) {
 				t.Errorf("%s env %s carries a documents secret", name, k)
 			}
 		}

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -127,5 +128,155 @@ func TestSettingsRefusals(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// storeEnv adds a complete object store and file keyring to m.
+func storeEnv(m map[string]string) map[string]string {
+	m["DOCUMENTS_KEK_PROVIDER"] = "file"
+	m["DOCUMENTS_KEYRING_PATH"] = "/keyring/keyring.json"
+	m["DOCUMENTS_S3_ENDPOINT"] = "https://store.example.test"
+	m["DOCUMENTS_S3_BUCKET"] = "mhai-documents-dev"
+	m["DOCUMENTS_S3_REGION"] = "eu-west-1"
+	m["DOCUMENTS_S3_ACCESS_KEY_ID"] = "TESTONLYDOCS"
+	m["DOCUMENTS_S3_SECRET_KEY_FILE"] = "/run/secrets/documents-s3"
+	return m
+}
+
+// PR 3: the keyring and the object store are optional (the service then
+// stays not ready); when named they are checked in full.
+func TestStorageSettings(t *testing.T) {
+	s, err := FromEnv(env(devEnv()))
+	if err != nil || s.KEKProvider != "" || s.S3 != nil {
+		t.Fatalf("unset: %+v %v", s, err)
+	}
+	m := storeEnv(devEnv())
+	m["DOCUMENTS_S3_ENDPOINT"] = "http://minio:9000" // plain http in development only
+	m["DOCUMENTS_S3_UPLOAD_ENDPOINT"] = "http://localhost:9000"
+	s, err = FromEnv(env(m))
+	if err != nil || s.KEKProvider != "file" || s.KeyringPath != "/keyring/keyring.json" || s.S3 == nil ||
+		s.S3.Endpoint != "http://minio:9000" || s.S3.UploadEndpoint != "http://localhost:9000" || s.S3.Bucket != "mhai-documents-dev" ||
+		s.S3.Region != "eu-west-1" || s.S3.AccessKeyID != "TESTONLYDOCS" || s.S3.SecretKeyFile != "/run/secrets/documents-s3" {
+		t.Fatalf("dev store: %+v %v", s, err)
+	}
+	// Production takes the file keyring only with the pilot's written
+	// acceptance (design §6.2, D5).
+	m = storeEnv(prodEnv())
+	m["DOCUMENTS_ALLOW_FILE_KEYRING"] = "pilot"
+	if s, err := FromEnv(env(m)); err != nil || !s.FileKeyringAccepted() {
+		t.Fatalf("production pilot: %+v %v", s, err)
+	}
+	m = storeEnv(prodEnv())
+	m["APP_ENV"] = "staging"
+	if _, err := FromEnv(env(m)); err != nil {
+		t.Fatalf("staging file keyring: %v", err)
+	}
+}
+
+func TestStorageRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		base func() map[string]string
+		edit func(m map[string]string)
+		want string
+	}{
+		{"file keyring in production", func() map[string]string { return storeEnv(prodEnv()) }, func(map[string]string) {},
+			"DOCUMENTS_ALLOW_FILE_KEYRING"},
+		{"production, other acceptance word", func() map[string]string { return storeEnv(prodEnv()) },
+			func(m map[string]string) { m["DOCUMENTS_ALLOW_FILE_KEYRING"] = "yes" }, "DOCUMENTS_ALLOW_FILE_KEYRING"},
+		{"unset APP_ENV is production", func() map[string]string { return storeEnv(prodEnv()) },
+			func(m map[string]string) { delete(m, "APP_ENV") }, "DOCUMENTS_ALLOW_FILE_KEYRING"},
+		{"kms not built", func() map[string]string { return storeEnv(devEnv()) },
+			func(m map[string]string) { m["DOCUMENTS_KEK_PROVIDER"] = "kms" }, "DOCUMENTS_KEK_PROVIDER"},
+		{"unknown provider", func() map[string]string { return storeEnv(devEnv()) },
+			func(m map[string]string) { m["DOCUMENTS_KEK_PROVIDER"] = "vault" }, "DOCUMENTS_KEK_PROVIDER"},
+		{"file without a path", func() map[string]string { return storeEnv(devEnv()) },
+			func(m map[string]string) { delete(m, "DOCUMENTS_KEYRING_PATH") }, "DOCUMENTS_KEYRING_PATH"},
+		{"relative keyring", func() map[string]string { return storeEnv(devEnv()) },
+			func(m map[string]string) { m["DOCUMENTS_KEYRING_PATH"] = "keyring.json" }, "DOCUMENTS_KEYRING_PATH"},
+		{"keyring path without provider", devEnv,
+			func(m map[string]string) { m["DOCUMENTS_KEYRING_PATH"] = "/keyring/keyring.json" }, "DOCUMENTS_KEYRING_PATH"},
+		{"store half set", devEnv,
+			func(m map[string]string) { m["DOCUMENTS_S3_BUCKET"] = "mhai-documents-dev" }, "DOCUMENTS_S3_ENDPOINT"},
+		{"store without the secret file", func() map[string]string { return storeEnv(devEnv()) },
+			func(m map[string]string) { delete(m, "DOCUMENTS_S3_SECRET_KEY_FILE") }, "DOCUMENTS_S3_SECRET_KEY_FILE"},
+		{"relative secret file", func() map[string]string { return storeEnv(devEnv()) },
+			func(m map[string]string) { m["DOCUMENTS_S3_SECRET_KEY_FILE"] = "secret" }, "DOCUMENTS_S3_SECRET_KEY_FILE"},
+		{"plain http outside development", func() map[string]string { return storeEnv(prodEnv()) },
+			func(m map[string]string) {
+				m["DOCUMENTS_ALLOW_FILE_KEYRING"] = "pilot"
+				m["DOCUMENTS_S3_ENDPOINT"] = "http://store.example.test"
+			}, "DOCUMENTS_S3_ENDPOINT"},
+		{"plain http upload outside development", func() map[string]string { return storeEnv(prodEnv()) },
+			func(m map[string]string) {
+				m["DOCUMENTS_ALLOW_FILE_KEYRING"] = "pilot"
+				m["DOCUMENTS_S3_UPLOAD_ENDPOINT"] = "http://uploads.example.test"
+			}, "DOCUMENTS_S3_UPLOAD_ENDPOINT"},
+		{"credentials in the endpoint", func() map[string]string { return storeEnv(devEnv()) },
+			func(m map[string]string) {
+				m["DOCUMENTS_S3_ENDPOINT"] = "https://x:y@store.example.test"
+			},
+			"DOCUMENTS_S3_ENDPOINT"},
+		{"upload endpoint without a store", devEnv,
+			func(m map[string]string) { m["DOCUMENTS_S3_UPLOAD_ENDPOINT"] = "https://uploads.example.test" }, "DOCUMENTS_S3_ENDPOINT"},
+		{"bad bucket", func() map[string]string { return storeEnv(devEnv()) },
+			func(m map[string]string) { m["DOCUMENTS_S3_BUCKET"] = "Bad_Bucket" }, "DOCUMENTS_S3_BUCKET"},
+		{"bad region", func() map[string]string { return storeEnv(devEnv()) },
+			func(m map[string]string) { m["DOCUMENTS_S3_REGION"] = "eu west" }, "DOCUMENTS_S3_REGION"},
+		{"bad access key id", func() map[string]string { return storeEnv(devEnv()) },
+			func(m map[string]string) { m["DOCUMENTS_S3_ACCESS_KEY_ID"] = "a:b" }, "DOCUMENTS_S3_ACCESS_KEY_ID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := tc.base()
+			tc.edit(m)
+			s, err := FromEnv(env(m))
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if s.S3 != nil || s.KEKProvider != "" {
+				t.Errorf("returned settings with the error: %+v", s)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q doesn't name %s", err, tc.want)
+			}
+			for _, v := range []string{"x:y@", "Bad_Bucket", "TESTONLYDOCS", "/run/secrets", "keyring.json"} {
+				if strings.Contains(err.Error(), v) {
+					t.Errorf("error carries a value (%s): %q", v, err)
+				}
+			}
+		})
+	}
+}
+
+func TestReadSecretFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, v string) string {
+		p := dir + "/" + name
+		if err := os.WriteFile(p, []byte(v), 0o400); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	good := write("good", "  test-only-store-secret-0123456789\n")
+	if v, err := ReadSecretFile("DOCUMENTS_S3_SECRET_KEY_FILE", good); err != nil || v != "test-only-store-secret-0123456789" {
+		t.Fatalf("good: %q %v", v, err)
+	}
+	link := dir + "/link"
+	if err := os.Symlink(good, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, p := range map[string]string{
+		"missing":     dir + "/none",
+		"directory":   dir,
+		"symlink":     link,
+		"short":       write("short", "short-secret"),
+		"placeholder": write("ph", "change-me-change-me-change-me"),
+		"too large":   write("big", strings.Repeat("s", MaxSecretFileBytes+1)),
+	} {
+		v, err := ReadSecretFile("DOCUMENTS_S3_SECRET_KEY_FILE", p)
+		if err == nil || v != "" || !strings.Contains(err.Error(), "DOCUMENTS_S3_SECRET_KEY_FILE") ||
+			strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "change-me") {
+			t.Errorf("%s: %q %v", name, v, err)
+		}
 	}
 }

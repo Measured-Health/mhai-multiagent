@@ -8,6 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Clinical review:** the escalation guard (ADR 0017; no migration; a new
+  optional `query.completed` key). Every answer, on every route (local, cloud,
+  the answer gate, `eval-served`), is checked against the question before an
+  NLI decision can stand: a red flag in the masked question or the patient's
+  current data, missing patient values for a judgement (a diagnosis, a
+  severity, going home, a child's dose), or a dose no cited chunk gives makes
+  the answer `ESCALATE` whatever its grounding; a `PASS` that only recites its
+  chunks, off the question, becomes `REGENERATE`. The rules are a versioned
+  YAML rule set (`guardrails/rules/escalation-guard.yaml`, a **pilot list
+  pending clinical sign-off**) whose SHA-256 is pinned in the code; a rule set
+  that can't load stops the pipeline worker at start-up and escalates any
+  verification (`guard_unavailable`). The reasons are codes in the decision's
+  `guardrail_report` (`guard_reasons`, `guard_rules`) and on the
+  `query.completed` fact (`guard_reasons`, a closed set core checks); the rule
+  set's version is in every decision's `model_versions`
+  (`escalation_guard`). `pyyaml` is now a direct dependency. Rule set
+  1.0.2: fast breathing in a child under five uses the WHO IMCI age bands
+  (>= 60/min under 2 months, >= 50 from 2 to 12 months, >= 40 from 12 months
+  to 5 years; >= 40 when the age is unknown), the young-infant danger signs
+  cover birth to 2 months, not only the first 28 days, and a structured age
+  under a year (0.5) is read in hours too.
+
 - Patient Analysis PR 10: EMR facts (migration **00045**; no OpenAPI
   change; off by default: ingest needs the hospital's analysis switch on
   with real references and the new `ANALYSIS_INGEST=true`, refused without
@@ -34,6 +56,32 @@ All notable changes to this project are documented here. The format follows
   `mhai-models store-abort-stale-uploads` and a lifecycle rule
   (deploy/model-store/README.md) clean up uploads a killed job leaves. The
   export step allows files up to 50 GiB and notes when one needs this.
+- Documents service PR 3: storage and keys (migration **00046**; no
+  OpenAPI change; off by default: the `documents` compose profile isn't
+  started, and no keyring or object store is configured there). Tables
+  `documents` and `document_objects` with row-level security (enabled and
+  forced), the roles `mhai_documents` (reads only; never `source_name`, the
+  uploader or the patient hint) and `mhai_documents_app` (the login
+  `documents_app`, made by `core migrate up` from `DOCUMENTS_DB_PASSWORD`),
+  object keys derived from ids by a CHECK, and the wrapped data keys deleted
+  with their document (the crypto-shred). Per-hospital key-encryption keys
+  behind one interface with the `file` provider (`documents keyring init`;
+  refused in production unless `DOCUMENTS_ALLOW_FILE_KEYRING=pilot`, and
+  announced at every start; a missing, loosely permitted, placeholder or
+  failing keyring leaves the service not ready). Objects sealed with Tink's
+  streaming AEAD (AES-256-GCM-HKDF, 1 MB segments) under a fresh data key,
+  bound by associated data to hospital, document, kind and page. A small
+  SigV4 object store client (ids-only keys in three prefixes, no
+  redirects), S3 POST policies for one quarantine key, the purpose's size
+  range, the declared type and 10 minutes, served as
+  `documents.v1.ctl.presign_upload` (hospital-bound: the token's hospital,
+  another hospital's id is `not_found`), and the bucket lifecycle
+  (`deploy/documents/bucket-lifecycle.xml`: quarantine within a day,
+  non-current versions within 7 days) checked as `storage_ready`. The
+  service refuses to start with a database login that is a superuser,
+  bypasses RLS, can act as an owner or holds another service's role.
+  Abuse tests DS1, DS3 and DS5 against Postgres and MinIO. Design §17,
+  PR 3 departures 11-19.
 - Documents service PR 1: ADR 0016 and the service skeleton (off by default;
   no migration, no OpenAPI change). `services/documents/` is its own Go
   module and binary: settings that fail closed, `documents.v1.ctl.health`
@@ -117,10 +165,9 @@ All notable changes to this project are documented here. The format follows
   revision, and the exact dataset set); any other model keeps the default, which
   changes nothing, and the cloud clients never use one. The first profile, for
   `gemma4-e4b-cca-v1`: its `INSUFFICIENT EVIDENCE` decline escalates (anywhere in
-  the reply, any case or width), a reply with no `[KB#nnnn]` citation escalates,
-  and the NLI check judges each claim without its citation markers (a marker in
-  the hypothesis made the NLI model call a word-for-word claim neutral). The
-  answer gate scores a run with the profile from that run's manifest.
+  the reply, any case or width), and a reply with no `[KB#nnnn]` citation
+  escalates. The answer gate scores a run with the profile from that run's
+  manifest.
 - Reference library v1, `medref` (no migration, no contract change): openFDA
   drug labels (CC0; safety-critical sections first) and English MedlinePlus
   health topics (public domain; labelled patient-facing), 23,654 rows. An
@@ -869,6 +916,19 @@ All notable changes to this project are documented here. The format follows
   now closes the pool and waits for any write under way before taking it.
   The writer is unchanged: it never writes once the database can't be read.
 
+- **Clinical review:** answer verification judges each claim without its
+  citation tags, on every route (cloud and local, every answer model). The
+  citation pipeline (`agents/hga_nli.py`) gave the NLI model the claim with its
+  `[KB#nnnn]` tag, which the pinned NLI model reads as unsupported content: a
+  claim copied from its chunk scored entailed 0.993 without the tag and neutral
+  1.000 with it, so grounded claims counted as unsupported and answers fell to
+  `REGENERATE` or `ESCALATE`. Only the exact tags are removed
+  (`kb_builder.strip_citation_tags`), from the NLI hypothesis only; the claim
+  shown, the cited chunk, and the citation checks (the id exists, is visible to
+  the patient, is a shared guideline) are unchanged. The NLI threshold and the
+  trust weights are unchanged, but the trust bands clinicians see change: cited,
+  grounded answers now score higher. The answer profile's own NLI wrapper is
+  gone; it uses this.
 - **Clinical review:** the answer gate (`mhai-models promote --gate answer`
   and `eval-served`) no longer counts a generation failure as an escalation.
   An item whose generation raised or came back unavailable (a timeout, an HTTP

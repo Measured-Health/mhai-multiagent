@@ -54,6 +54,9 @@ dependencies = [
     "opentelemetry-exporter-otlp==1.45.2",
     "boto3>=1.44.1",
     "jsonschema>=4.26.0",
+    # The escalation guard's rule set (guardrails/rules/*.yaml), read with a safe
+    # loader at start-up. Was only a transitive dependency.
+    "pyyaml>=6.0",
     "safetensors>=0.8.0",
     "pillow>=12.3.0,<13",
     # Run sources (modelstore/sources/hf.py): base models at a pinned commit. Already
@@ -133,6 +136,7 @@ intelligence = [
     "boundary/catalogue.json",
     "schemas/extraction/clinical_document/*.json",
     "doceval/thresholds/*.json",
+    "guardrails/rules/*.yaml",
     "doceval/synth/terminology/*.json",
     "doceval/synth/terminology/NOTICE",
     "doceval/synth/names/*.txt",

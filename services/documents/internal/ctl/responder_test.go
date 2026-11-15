@@ -31,7 +31,20 @@ const (
 	reply    = "_INBOX_gateway.ctl.1"
 	health   = "documents.v1.ctl.health"
 	schemaRq = "mhai.documents.v1.HealthRequest"
+
+	presign   = "documents.v1.ctl.presign_upload"
+	presignRq = "mhai.documents.v1.PresignUploadRequest"
+	document  = "55555555-5555-4555-8555-555555555555"
 )
+
+func presignBody(t *testing.T) []byte {
+	t.Helper()
+	b, err := proto.Marshal(&docspb.PresignUploadRequest{DocumentId: document})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
 
 var now = time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 
@@ -60,6 +73,14 @@ func newFixture(t *testing.T) *fixture {
 			"health": func(context.Context, reqtoken.Claims, proto.Message) (proto.Message, error) {
 				f.ran.Add(1)
 				return &docspb.HealthReply{DatabaseReady: true}, nil
+			},
+			"presign_upload": func(_ context.Context, c reqtoken.Claims, req proto.Message) (proto.Message, error) {
+				f.ran.Add(1)
+				h, err := Hospital(c)
+				if err != nil || h.String() != hospital || req.(*docspb.PresignUploadRequest).GetDocumentId() != document {
+					return nil, errors.New("synthetic: wrong hospital or request")
+				}
+				return &docspb.PresignUploadReply{Outcome: "not_found"}, nil
 			},
 		},
 	}
@@ -117,6 +138,33 @@ func TestHealthAsSvcCore(t *testing.T) {
 	}
 	if !strings.Contains(f.logs.String(), `"op":"documents.health"`) {
 		t.Fatalf("answer not logged by op: %s", f.logs.String())
+	}
+}
+
+// A hospital-bound op runs with the token's hospital (design §17
+// departure 10).
+func TestPresignIsHospitalBound(t *testing.T) {
+	f := newFixture(t)
+	out, reason := f.r.Process(context.Background(), f.msg(t, coreClaims("presign_upload"), presign, presignRq, presignBody(t)))
+	if out == nil || reason != "ok" || f.ran.Load() != 1 {
+		t.Fatalf("presign: %v %q ran %d", out, reason, f.ran.Load())
+	}
+	var r docspb.PresignUploadReply
+	if err := proto.Unmarshal(out.Data, &r); err != nil || r.GetOutcome() != "not_found" {
+		t.Fatalf("reply: %v %v", &r, err)
+	}
+}
+
+func TestHospitalOfAToken(t *testing.T) {
+	for hid, ok := range map[string]bool{
+		hospital: true, "": false, "00000000-0000-0000-0000-000000000000": false, "not-a-uuid": false,
+		"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee": true, "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE": false,
+		"{" + hospital + "}": false, "urn:uuid:" + hospital: false,
+	} {
+		h, err := Hospital(reqtoken.Claims{Hid: hid})
+		if (err == nil) != ok || (ok && h.String() != hid) || (!ok && !errors.Is(err, ErrHospital)) {
+			t.Errorf("%q: %v %v", hid, h, err)
+		}
 	}
 }
 
@@ -217,7 +265,24 @@ func TestCtlRefusals(t *testing.T) {
 			return f.msg(t, coreClaims("nope"), "documents.v1.ctl.nope", schemaRq, nil)
 		}},
 		{"an op of a later PR", "unknown_op", func(t *testing.T, f *fixture) *nats.Msg {
-			return f.msg(t, coreClaims("presign_upload"), "documents.v1.ctl.presign_upload", schemaRq, nil)
+			return f.msg(t, coreClaims("page_image"), "documents.v1.ctl.page_image", schemaRq, nil)
+		}},
+		{"presign as a platform admin", "caller", func(t *testing.T, f *fixture) *nats.Msg {
+			c := userClaims("platform_admin")
+			c.Subject = presign
+			return f.msg(t, c, presign, presignRq, presignBody(t))
+		}},
+		{"presign as a hospital admin", "caller", func(t *testing.T, f *fixture) *nats.Msg {
+			c := userClaims("hospital_admin")
+			c.Subject = presign
+			return f.msg(t, c, presign, presignRq, presignBody(t))
+		}},
+		// Departure 10: a hospital-bound op with the nil hospital never
+		// reaches its handler.
+		{"presign for the nil hospital", "hospital", func(t *testing.T, f *fixture) *nats.Msg {
+			c := coreClaims("presign_upload")
+			c.Hid = "00000000-0000-0000-0000-000000000000"
+			return f.msg(t, c, presign, presignRq, presignBody(t))
 		}},
 		{"wrong schema header", "schema", func(t *testing.T, f *fixture) *nats.Msg {
 			m := f.healthMsg(t)

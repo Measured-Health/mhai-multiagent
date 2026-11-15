@@ -1,7 +1,8 @@
 // Package dbx runs a transaction as one of the hospital-scoped database
 // roles, with mhai.hospital_id set so row-level security shows only that
 // hospital's rows (plan departure 6). Core (as mhai_gateway) and the emr
-// service (as mhai_emr, mhai_emr_core) share it.
+// service (as mhai_emr, mhai_emr_core) and the documents service (as
+// mhai_documents) share it.
 //
 // The role is one of a closed set of constants, never input: it is put
 // into SET LOCAL ROLE as text, so anything else is refused before any SQL.
@@ -25,13 +26,14 @@ type Role string
 
 // The roles WithHospital may run as.
 const (
-	Gateway Role = "mhai_gateway"  // core's requests
-	EMR     Role = "mhai_emr"      // the emr service
-	EMRCore Role = "mhai_emr_core" // core's reads of EMR findings
+	Gateway   Role = "mhai_gateway"   // core's requests
+	EMR       Role = "mhai_emr"       // the emr service
+	EMRCore   Role = "mhai_emr_core"  // core's reads of EMR findings
+	Documents Role = "mhai_documents" // the documents service (00046)
 )
 
 // Roles is the closed set.
-var Roles = []Role{Gateway, EMR, EMRCore}
+var Roles = []Role{Gateway, EMR, EMRCore, Documents}
 
 var (
 	// ErrNoHospital: the nil hospital id.

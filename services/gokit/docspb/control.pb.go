@@ -65,17 +65,22 @@ func (*HealthRequest) Descriptor() ([]byte, []int) {
 }
 
 // Readiness flags only, no counts of anyone's data. The service takes a
-// document only when all four are true.
+// document only when all of them are true.
 type HealthReply struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its database login answers.
+	// Its database login answers, and is not a superuser, does not bypass
+	// row-level security and cannot act as a table owner (PR 3).
 	DatabaseReady bool `protobuf:"varint,1,opt,name=database_ready,json=databaseReady,proto3" json:"database_ready,omitempty"`
 	// The key-encryption keys load and unwrap a test key (PR 3).
 	KeyringReady bool `protobuf:"varint,2,opt,name=keyring_ready,json=keyringReady,proto3" json:"keyring_ready,omitempty"`
 	// clamd answers and its signatures are under 48 hours old (PR 4).
 	ScannerReady bool `protobuf:"varint,3,opt,name=scanner_ready,json=scannerReady,proto3" json:"scanner_ready,omitempty"`
 	// docsandbox answers (PR 4).
-	SandboxReady  bool `protobuf:"varint,4,opt,name=sandbox_ready,json=sandboxReady,proto3" json:"sandbox_ready,omitempty"`
+	SandboxReady bool `protobuf:"varint,4,opt,name=sandbox_ready,json=sandboxReady,proto3" json:"sandbox_ready,omitempty"`
+	// The object store answers with its credential, and the bucket's
+	// lifecycle deletes quarantine/ within a day and non-current versions
+	// within 7 days (PR 3).
+	StorageReady  bool `protobuf:"varint,5,opt,name=storage_ready,json=storageReady,proto3" json:"storage_ready,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -138,17 +143,215 @@ func (x *HealthReply) GetSandboxReady() bool {
 	return false
 }
 
+func (x *HealthReply) GetStorageReady() bool {
+	if x != nil {
+		return x.StorageReady
+	}
+	return false
+}
+
+// documents.v1.ctl.presign_upload, as svc:core, hospital-bound: the
+// hospital is the token's hid, never a field (documents design §4.2, §17
+// departure 10). Core asks after it has inserted the documents row
+// (uploading) for a browser upload (purpose clinical or clearance).
+type PresignUploadRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The documents row's id (a uuid).
+	DocumentId    string `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PresignUploadRequest) Reset() {
+	*x = PresignUploadRequest{}
+	mi := &file_mhai_documents_v1_control_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PresignUploadRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PresignUploadRequest) ProtoMessage() {}
+
+func (x *PresignUploadRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_mhai_documents_v1_control_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PresignUploadRequest.ProtoReflect.Descriptor instead.
+func (*PresignUploadRequest) Descriptor() ([]byte, []int) {
+	return file_mhai_documents_v1_control_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *PresignUploadRequest) GetDocumentId() string {
+	if x != nil {
+		return x.DocumentId
+	}
+	return ""
+}
+
+// One form field of an S3 POST policy, in the order the browser posts them
+// (the file goes last, after every field).
+type FormField struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FormField) Reset() {
+	*x = FormField{}
+	mi := &file_mhai_documents_v1_control_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FormField) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FormField) ProtoMessage() {}
+
+func (x *FormField) ProtoReflect() protoreflect.Message {
+	mi := &file_mhai_documents_v1_control_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FormField.ProtoReflect.Descriptor instead.
+func (*FormField) Descriptor() ([]byte, []int) {
+	return file_mhai_documents_v1_control_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *FormField) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *FormField) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+// The POST policy for exactly quarantine/<hid>/<document_id>, or a code.
+// outcome: ok; not_found (no such row in the token's hospital, or a row
+// this op doesn't serve: an archive document); conflict (the row isn't
+// uploading); unavailable (the keyring or the object store isn't ready).
+// Only ok carries the url, the fields and the expiry. Core passes them to
+// the browser and never logs them.
+type PresignUploadReply struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Outcome string                 `protobuf:"bytes,1,opt,name=outcome,proto3" json:"outcome,omitempty"`
+	Url     string                 `protobuf:"bytes,2,opt,name=url,proto3" json:"url,omitempty"`
+	Fields  []*FormField           `protobuf:"bytes,3,rep,name=fields,proto3" json:"fields,omitempty"`
+	// Unix seconds; 10 minutes after the policy was signed.
+	ExpiresAt     int64 `protobuf:"varint,4,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PresignUploadReply) Reset() {
+	*x = PresignUploadReply{}
+	mi := &file_mhai_documents_v1_control_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PresignUploadReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PresignUploadReply) ProtoMessage() {}
+
+func (x *PresignUploadReply) ProtoReflect() protoreflect.Message {
+	mi := &file_mhai_documents_v1_control_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PresignUploadReply.ProtoReflect.Descriptor instead.
+func (*PresignUploadReply) Descriptor() ([]byte, []int) {
+	return file_mhai_documents_v1_control_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PresignUploadReply) GetOutcome() string {
+	if x != nil {
+		return x.Outcome
+	}
+	return ""
+}
+
+func (x *PresignUploadReply) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *PresignUploadReply) GetFields() []*FormField {
+	if x != nil {
+		return x.Fields
+	}
+	return nil
+}
+
+func (x *PresignUploadReply) GetExpiresAt() int64 {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return 0
+}
+
 var File_mhai_documents_v1_control_proto protoreflect.FileDescriptor
 
 const file_mhai_documents_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"\x1fmhai/documents/v1/control.proto\x12\x11mhai.documents.v1\"\x0f\n" +
-	"\rHealthRequest\"\xa3\x01\n" +
+	"\rHealthRequest\"\xc8\x01\n" +
 	"\vHealthReply\x12%\n" +
 	"\x0edatabase_ready\x18\x01 \x01(\bR\rdatabaseReady\x12#\n" +
 	"\rkeyring_ready\x18\x02 \x01(\bR\fkeyringReady\x12#\n" +
 	"\rscanner_ready\x18\x03 \x01(\bR\fscannerReady\x12#\n" +
-	"\rsandbox_ready\x18\x04 \x01(\bR\fsandboxReadyBIZGgithub.com/Measured-Health/mhai-multiagent/services/gokit/docspb;docspbb\x06proto3"
+	"\rsandbox_ready\x18\x04 \x01(\bR\fsandboxReady\x12#\n" +
+	"\rstorage_ready\x18\x05 \x01(\bR\fstorageReady\"7\n" +
+	"\x14PresignUploadRequest\x12\x1f\n" +
+	"\vdocument_id\x18\x01 \x01(\tR\n" +
+	"documentId\"5\n" +
+	"\tFormField\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\x95\x01\n" +
+	"\x12PresignUploadReply\x12\x18\n" +
+	"\aoutcome\x18\x01 \x01(\tR\aoutcome\x12\x10\n" +
+	"\x03url\x18\x02 \x01(\tR\x03url\x124\n" +
+	"\x06fields\x18\x03 \x03(\v2\x1c.mhai.documents.v1.FormFieldR\x06fields\x12\x1d\n" +
+	"\n" +
+	"expires_at\x18\x04 \x01(\x03R\texpiresAtBIZGgithub.com/Measured-Health/mhai-multiagent/services/gokit/docspb;docspbb\x06proto3"
 
 var (
 	file_mhai_documents_v1_control_proto_rawDescOnce sync.Once
@@ -162,17 +365,21 @@ func file_mhai_documents_v1_control_proto_rawDescGZIP() []byte {
 	return file_mhai_documents_v1_control_proto_rawDescData
 }
 
-var file_mhai_documents_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_mhai_documents_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_mhai_documents_v1_control_proto_goTypes = []any{
-	(*HealthRequest)(nil), // 0: mhai.documents.v1.HealthRequest
-	(*HealthReply)(nil),   // 1: mhai.documents.v1.HealthReply
+	(*HealthRequest)(nil),        // 0: mhai.documents.v1.HealthRequest
+	(*HealthReply)(nil),          // 1: mhai.documents.v1.HealthReply
+	(*PresignUploadRequest)(nil), // 2: mhai.documents.v1.PresignUploadRequest
+	(*FormField)(nil),            // 3: mhai.documents.v1.FormField
+	(*PresignUploadReply)(nil),   // 4: mhai.documents.v1.PresignUploadReply
 }
 var file_mhai_documents_v1_control_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	3, // 0: mhai.documents.v1.PresignUploadReply.fields:type_name -> mhai.documents.v1.FormField
+	1, // [1:1] is the sub-list for method output_type
+	1, // [1:1] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_mhai_documents_v1_control_proto_init() }
@@ -186,7 +393,7 @@ func file_mhai_documents_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mhai_documents_v1_control_proto_rawDesc), len(file_mhai_documents_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
