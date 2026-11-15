@@ -11,7 +11,8 @@ import (
 )
 
 // The dev compose files still validate as they are today: .env.example
-// with no NATS_EMR_* at all, every file and profile CI checks.
+// with no NATS_EMR_* or NATS_DOCUMENTS_* at all, every file and profile CI
+// checks, the documents profile included.
 func TestComposeValidatesWithoutEMRVariables(t *testing.T) {
 	if err := exec.Command("docker", "compose", "version").Run(); err != nil {
 		t.Skip("docker compose is not installed here")
@@ -23,7 +24,7 @@ func TestComposeValidatesWithoutEMRVariables(t *testing.T) {
 	}
 	var kept []string
 	for _, line := range strings.Split(string(raw), "\n") {
-		if !strings.Contains(line, "NATS_EMR_") {
+		if !strings.Contains(line, "NATS_EMR_") && !strings.Contains(line, "NATS_DOCUMENTS_") {
 			kept = append(kept, line)
 		}
 	}
@@ -34,11 +35,13 @@ func TestComposeValidatesWithoutEMRVariables(t *testing.T) {
 	for _, args := range [][]string{
 		{"config", "-q"},
 		{"--profile", "test", "--profile", "observability", "config", "-q"},
+		{"--profile", "documents", "config", "-q"},
 		{"-f", "docker-compose.yml", "-f", "docker-compose.smoke.yml", "config", "-q"},
 	} {
 		cmd := exec.Command("docker", append([]string{"compose", "--env-file", envFile}, args...)...)
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "NATS_EMR_CONF=", "NATS_EMR_PASSWORD=")
+		cmd.Env = append(os.Environ(), "NATS_EMR_CONF=", "NATS_EMR_PASSWORD=", "NATS_DOCUMENTS_CONF=",
+			"NATS_DOCUMENTS_PASSWORD=")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Errorf("compose %v: %v\n%s", args, err, out)
 		}
