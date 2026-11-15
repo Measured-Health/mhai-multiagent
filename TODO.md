@@ -62,9 +62,15 @@ People items:
 - [ ] **P5** (privacy lead, H5): the region, the retention values in design §6.3, the archive file name as a reviewer hint, the source-removed rule (D10). Blocks the retention sweep (PR 9) and live use.
 - [ ] **P6** (legal, H3): the clearance letter template and letter retention. Blocks live letters (PR 5).
 - [ ] **P7** (product owner): the GPU host (phase 0 H6) and a pinned `extract` model role. Blocks a real extraction model (PR 7).
-- [ ] **D5** (product owner): written acceptance of the `file` keyring for the pilot, or the KMS provider first. KMS before a second hospital either way.
+- [x] **D5** (product owner, accepted 15 Nov 2026 in writing): the pilot may keep hospital keys in the `file` keyring, **on more than one documents server**, until the move to KMS below. Accepted for the pilot only, with its residual risk (design §14: a compromise of any documents server reads every hospital's documents; the keyring now sits on several disks and in their backups).
+- [ ] **One keyring shared by several documents servers (needed for the pilot, before a second server).** As built in PR 3, each server creates a hospital's key at its first document under a lock that only works on one machine, so two servers could create two different keys for one hospital and each would refuse the other's documents. Build a `provisioned` keyring mode, the only mode allowed outside development: the service opens the keyring read-only and never creates a key; `documents keyring add-hospital <path> <hospital id>` adds a hospital's key on one admin machine; the same file is then copied to every documents server (0600, owned by the service user) and each restarts; a hospital without a key gets `unavailable` and the server stays ready for the others. Every server logs the keyring's fingerprint at start, so a server with an old copy shows up.
+- [ ] **Move hospital keys to a cloud key service (KMS), later.** Required before a second hospital. Steps:
+  1. P1: the KMS key in our cloud account and the data's region, and the documents service's identity allowed to wrap and unwrap only (no decrypt-all, no key deletion).
+  2. Documents PR 9: the `kms` provider behind the existing KEK interface (`services/documents/internal/kek`), which the service refuses today.
+  3. Migrate: for each hospital, unwrap every document's data key with the file KEK and re-wrap it with the KMS key (data keys and objects stay as they are, so nothing is re-encrypted), recording each hospital's switch in the audit log; verify every object opens; then switch the provider to `kms`.
+  4. Destroy the file keyring and every backup of it, with a written record, and remove `DOCUMENTS_ALLOW_FILE_KEYRING=pilot` from the deployment.
 
-Live-use gates (all of them, before any real document): phase 1's evaluation passing the pipeline design §6.3 on the locked split with clinical sign-off; the GPU host; the KMS provider or D5; P5; NATS TLS and JetStream encryption at rest; for the archive, P3.
+Live-use gates (all of them, before any real document): phase 1's evaluation passing the pipeline design §6.3 on the locked split with clinical sign-off; the GPU host; the KMS provider or D5 (accepted for the pilot, 15 Nov); P5; NATS TLS and JetStream encryption at rest; for the archive, P3.
 
 Ops items:
 - [ ] **The demo's `documents` NATS user.** `deploy/nats/nats.conf` has no `documents` user (only core's right to call `documents.v1.ctl.>`) until ops provision `NATS_DOCUMENTS_NKEY`, as for the emr user. Owner: ops, before the documents service runs on the demo.
