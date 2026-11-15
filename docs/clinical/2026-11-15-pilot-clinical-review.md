@@ -21,12 +21,17 @@ saying why.
 
 ---
 
-## Part 1. Red-flag list (escalation guard, version 1.0.1)
+## Part 1. Red-flag list (escalation guard, version 1.0.2)
 
 Source: `services/intelligence/intelligence/guardrails/rules/escalation-guard.yaml`
-(PR #187). If a question or the patient's current data shows any sign
-below, MHAI escalates. A rule can only send a question to a clinician. No
+(PR #187). There are 35 red-flag rules. If a question or the patient's
+current data shows any sign below, MHAI escalates. A rule can only send a question to a clinician. No
 rule can make an answer go out.
+
+**Changed in version 1.0.2 (15 Nov 2026).** Fast breathing now uses the
+WHO IMCI age bands (rules 23 to 25) instead of 60/min for every child under
+five. The young-infant danger signs (rule 31) now cover birth to 2 months,
+not only the first 28 days, as WHO IMCI does.
 
 **How the signs are read:**
 
@@ -40,7 +45,10 @@ rule can make an answer go out.
   count.
 - **Adult** means age 12 or over, or no age given and no word for a child.
   **Under five** includes newborns. **Newborn** means under 28 days.
-  **Young infant** means under 3 months. **Fever** means the word, or a
+  **Young infant** means under 2 months (WHO IMCI); the young-infant fever
+  rule (rule 32) uses under 3 months (NICE NG143). An age is read from the
+  record (in years, fractions included: 0.5 is 6 months) or from the
+  question ("6-month-old", "3 weeks old"). **Fever** means the word, or a
   temperature of 38.0 °C or more.
 
 | # | Rule id | Group | What triggers it | Source cited | Approve / Change / Remove | Notes |
@@ -67,26 +75,28 @@ rule can make an answer go out.
 | 20 | breathing-severe | Breathing | Can't breathe or speak in sentences, severe breathlessness or asthma, respiratory distress or failure, cyanosis or blue lips, gasping, grunting, chest in-drawing, silent chest, apnoea, choking | WHO IMCI; BTS/SIGN asthma; NEWS2 | | |
 | 21 | spo2-low | Breathing | SpO2 ≤91% | NEWS2 (≤91%); WHO IMCI (<90%) | | |
 | 22 | respiratory-rate-extreme-adult | Breathing | Adults: RR ≥25/min or ≤8/min | NEWS2 | | |
-| 23 | respiratory-rate-infant | Children | Under five: RR ≥60/min. *Note: WHO IMCI uses lower cut-offs for older children (≥50 at 2–12 months, ≥40 at 1–5 years); this rule uses 60 for all under-fives.* | WHO IMCI | | |
-| 24 | consciousness-altered | Neurology | Confusion, disorientation, delirium, unconscious or unresponsive, drowsy, lethargic, hard to wake, collapse, fainting, seizure or fits, slurred speech; or GCS ≤14 | NEWS2 (new confusion); WHO IMCI | | |
-| 25 | severe-headache-or-neuro | Neurology | Worst headache, thunderclap or sudden severe headache, head injury, paralysis | NICE NG232; NICE CKS headache | | |
-| 26 | pregnancy-danger-signs | Pregnancy | Pregnant or postpartum **plus** any of: bleeding or spotting, severe headache, blurred vision or flashing lights, fits, severe or upper abdominal pain, reduced or absent fetal movements, swollen face or hands, waters broken, preterm labour, foul discharge, protein in urine, breathlessness, chest pain, calf pain or swelling, fever, altered consciousness; or BP ≥160/110 mmHg | WHO maternal danger signs; NICE NG133 | | |
-| 27 | pregnancy-hypertension | Pregnancy | Pregnant **plus** BP ≥140/90 mmHg, or pre-eclampsia, eclampsia or HELLP | NICE NG133 | | |
-| 28 | child-danger-signs | Children | Under five **plus** any of: can't drink or feed, vomits everything, floppy, lethargic, hard to wake, sunken eyes or fontanelle, slow skin pinch, bulging fontanelle, no urine or wet nappies, high-pitched or inconsolable cry, fits, severe dehydration, pneumonia or malnutrition, chest in-drawing, grunting | WHO IMCI 2014 general danger signs | | |
-| 29 | neonate-danger-signs | Children | Newborn **plus** any of: fever, temperature <35.5 °C, jaundice on palms or soles, red, pus or swelling at the umbilicus, many pustules, cold to touch, poor feeding; or bilirubin ≥20 mg/dL (342 µmol/L) | WHO IMCI young infant | | |
-| 30 | young-infant-fever | Children | Under 3 months **plus** fever, or temperature ≥37.5 °C | NICE NG143 (≥38 °C); WHO IMCI (≥37.5 °C) | | |
-| 31 | neonatal-jaundice-first-day | Children | Jaundice, yellow skin or eyes, or bilirubin mentioned, **and** age under 24 hours, or "first day", "at birth", "since birth". **See the disagreement below.** | WHO IMCI; NICE CG98 | | |
-| 32 | overdose-poisoning | Poisoning | Overdose, took too many or a whole pack, swallowed pills or chemicals, poisoning, drank bleach, kerosene or pesticide, snake bite, scorpion sting, dog bite | WHO poisoning management | | |
-| 33 | suicidality-self-harm | Mental health | Suicide, wants to die, self-harm, harming self or others, "better off dead", voices telling them to harm | NICE NG225; WHO mhGAP | | |
+| 23 | respiratory-rate-young-infant | Children | Under 2 months (or a newborn): RR ≥60/min | WHO IMCI fast breathing | | |
+| 24 | respiratory-rate-infant | Children | 2 months up to 12 months: RR ≥50/min | WHO IMCI fast breathing | | |
+| 25 | respiratory-rate-child | Children | 12 months up to 5 years: RR ≥40/min. A child under five whose age isn't known (and who isn't called a newborn) also uses ≥40/min, the most cautious cut-off | WHO IMCI fast breathing | | |
+| 26 | consciousness-altered | Neurology | Confusion, disorientation, delirium, unconscious or unresponsive, drowsy, lethargic, hard to wake, collapse, fainting, seizure or fits, slurred speech; or GCS ≤14 | NEWS2 (new confusion); WHO IMCI | | |
+| 27 | severe-headache-or-neuro | Neurology | Worst headache, thunderclap or sudden severe headache, head injury, paralysis | NICE NG232; NICE CKS headache | | |
+| 28 | pregnancy-danger-signs | Pregnancy | Pregnant or postpartum **plus** any of: bleeding or spotting, severe headache, blurred vision or flashing lights, fits, severe or upper abdominal pain, reduced or absent fetal movements, swollen face or hands, waters broken, preterm labour, foul discharge, protein in urine, breathlessness, chest pain, calf pain or swelling, fever, altered consciousness; or BP ≥160/110 mmHg | WHO maternal danger signs; NICE NG133 | | |
+| 29 | pregnancy-hypertension | Pregnancy | Pregnant **plus** BP ≥140/90 mmHg, or pre-eclampsia, eclampsia or HELLP | NICE NG133 | | |
+| 30 | child-danger-signs | Children | Under five **plus** any of: can't drink or feed, vomits everything, floppy, lethargic, hard to wake, sunken eyes or fontanelle, slow skin pinch, bulging fontanelle, no urine or wet nappies, high-pitched or inconsolable cry, fits, severe dehydration, pneumonia or malnutrition, chest in-drawing, grunting | WHO IMCI 2014 general danger signs | | |
+| 31 | young-infant-danger-signs | Children | Young infant (under 2 months) **plus** any of: fever, temperature <35.5 °C, jaundice on palms or soles, red, pus or swelling at the umbilicus, many pustules, cold to touch, poor feeding; or bilirubin ≥20 mg/dL (342 µmol/L) | WHO IMCI young infant | | |
+| 32 | young-infant-fever | Children | Under 3 months **plus** fever, or temperature ≥37.5 °C | NICE NG143 (≥38 °C); WHO IMCI (≥37.5 °C) | | |
+| 33 | neonatal-jaundice-first-day | Children | Jaundice, yellow skin or eyes, or bilirubin mentioned, **and** age under 24 hours, or "first day", "at birth", "since birth". **See the disagreement below.** | WHO IMCI; NICE CG98 | | |
+| 34 | overdose-poisoning | Poisoning | Overdose, took too many or a whole pack, swallowed pills or chemicals, poisoning, drank bleach, kerosene or pesticide, snake bite, scorpion sting, dog bite | WHO poisoning management | | |
+| 35 | suicidality-self-harm | Mental health | Suicide, wants to die, self-harm, harming self or others, "better off dead", voices telling them to harm | NICE NG225; WHO mhGAP | | |
 
-**The one known disagreement (rule 31).** In our practice question set,
+**The one known disagreement (rule 33).** In our practice question set,
 two questions describe jaundice that began at 13 and 14 hours of life. The
 set expects MHAI to answer them ("this is pathological"). The rule instead
 escalates them, because WHO IMCI and NICE CG98 say jaundice in the first
 24 hours needs urgent assessment. We kept the rule as the more cautious
 choice. Please decide: **keep** (escalate), or **remove** (let MHAI answer).
 
-Decision on rule 31: ☐ Keep  ☐ Remove  Notes: ______________________
+Decision on rule 33: ☐ Keep  ☐ Remove  Notes: ______________________
 
 ### Missing information: MHAI escalates when the question needs facts it wasn't given
 
