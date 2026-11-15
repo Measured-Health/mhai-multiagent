@@ -19,8 +19,8 @@ func TestMigrateUpCommand(t *testing.T) {
 	if err := migrate(context.Background(), []string{"up"}, pg.URL, &out); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-	if got := strings.Count(out.String(), "applied"); got != 44 { // 00001-00033, 00035-00045
-		t.Fatalf("want 44 applied migrations, got output:\n%s", out.String())
+	if got := strings.Count(out.String(), "applied"); got != 45 { // 00001-00033, 00035-00046
+		t.Fatalf("want 45 applied migrations, got output:\n%s", out.String())
 	}
 }
 
@@ -99,5 +99,38 @@ func TestMigrateUpProvisionsEMRLogin(t *testing.T) {
 	}
 	if !member || usesEMR || !setEMR {
 		t.Fatalf("emr_app: member of mhai_emr_app %v, uses mhai_emr %v, may SET mhai_emr %v", member, usesEMR, setEMR)
+	}
+}
+
+// core migrate up provisions the documents service's login (00046): a
+// member of mhai_documents_app only, which holds mhai_documents without
+// inheriting it.
+func TestMigrateUpProvisionsDocumentsLogin(t *testing.T) {
+	pg := testutil.StartPostgres(t)
+	ctx := context.Background()
+	env := map[string]string{"DOCUMENTS_DB_PASSWORD": "test-only-documents-db-password"}
+	var out bytes.Buffer
+	if err := migrateWithLogins(ctx, []string{"up"}, pg.URL, func(k string) string { return env[k] }, &out); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	if !strings.Contains(out.String(), "login documents_app ready (member of mhai_documents_app only)") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), env["DOCUMENTS_DB_PASSWORD"]) {
+		t.Fatal("output carries the password")
+	}
+	pool, err := pgxpool.New(ctx, pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var member, uses, set bool
+	if err := pool.QueryRow(ctx, `SELECT pg_has_role('documents_app', 'mhai_documents_app', 'MEMBER'),
+		pg_has_role('documents_app', 'mhai_documents', 'USAGE'), pg_has_role('documents_app', 'mhai_documents', 'SET')`).
+		Scan(&member, &uses, &set); err != nil {
+		t.Fatal(err)
+	}
+	if !member || uses || !set {
+		t.Fatalf("documents_app: member of mhai_documents_app %v, uses mhai_documents %v, may SET it %v", member, uses, set)
 	}
 }
