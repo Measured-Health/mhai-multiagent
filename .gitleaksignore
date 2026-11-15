@@ -27,3 +27,6 @@ ef70aa976617c60b19381d92c58b482e9f17ba0a:services/nats/emr-off.conf:generic-api-
 # deploy/nats/check-configs.sh: a test-only NATS password used to render the deploy
 # config for nats-server -t in CI. Not a secret. Approved by the product owner on 15 Nov 2026.
 320f650672dcfb556bb8f20b41d4222245cb4ddd:deploy/nats/check-configs.sh:generic-api-key:94
+# services/core/cmd/core/compose_documents_test.go: a synthetic placeholder password in a
+# test that checks the deploy refuses placeholders. Not a secret. Approved by the product owner on 15 Nov 2026.
+320f650672dcfb556bb8f20b41d4222245cb4ddd:services/core/cmd/core/compose_documents_test.go:generic-api-key:160
