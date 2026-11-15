@@ -2,6 +2,7 @@ package disclose
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -73,14 +74,32 @@ func p2Period(t *testing.T, w *attack.World, p calendar.Period, c *p2Counts) {
 	for _, x := range m.ContractViolations() {
 		t.Errorf("%v: %s", p, x)
 	}
-	for _, f := range sets {
-		fam := familyDocs(f, idx)
-		c.families++
-		for _, i := range m.Exposed(fam) {
-			x := m.Cells[i]
-			if x.Truth <= 4 {
-				t.Errorf("%v family %v: hidden %s (doc %d, %d) is solvable", p, f, x.Name, x.Doc, x.Truth)
+	// The families are solved on every CPU (the model is only read), and
+	// reported in order.
+	solvable := make([][]string, len(sets))
+	next := make(chan int)
+	var wg sync.WaitGroup
+	for range runtime.GOMAXPROCS(0) {
+		wg.Go(func() {
+			for k := range next {
+				f := sets[k]
+				for _, i := range m.Exposed(familyDocs(f, idx)) {
+					if x := m.Cells[i]; x.Truth <= 4 {
+						solvable[k] = append(solvable[k], fmt.Sprintf("%v family %v: hidden %s (doc %d, %d) is solvable", p, f, x.Name, x.Doc, x.Truth))
+					}
+				}
 			}
+		})
+	}
+	for k := range sets {
+		next <- k
+	}
+	close(next)
+	wg.Wait()
+	for _, msgs := range solvable {
+		c.families++
+		for _, msg := range msgs {
+			t.Error(msg)
 		}
 	}
 	var all []int

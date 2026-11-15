@@ -214,8 +214,8 @@ jobs:
   # (.github/scripts/go-test-packages.sh). The race run of every
   # package goes to exactly one job: "lint and unit" takes the packages whose
   # test build the integration tag doesn't change, "integration" the ones it
-  # does (which include their untagged tests), and "integration with fixture
-  # routes" the ones the test tag changes again. The property tests' big runs
+  # does (which include their untagged tests; three shards, below), and
+  # "integration with fixture routes" the ones the test tag changes again. The property tests' big runs
   # are in the property jobs below, split into shards.
   core:
     name: core (${{ matrix.suite }})
@@ -235,8 +235,6 @@ jobs:
                 -race -timeout 25m -skip "$(bash ../../.github/scripts/core-property-tests.sh race-skip)"
               # The smoke test runs in boundary-smoke; here it only has to build.
               go vet -tags smoke ./internal/smoke/...
-          - suite: integration
-            run: bash ../../.github/scripts/go-test-packages.sh test differ "" integration -race -timeout 25m
           - suite: integration with fixture routes
             run: bash ../../.github/scripts/go-test-packages.sh test differ integration "integration test" -race -timeout 25m
     defaults:
@@ -254,6 +252,50 @@ jobs:
         env:
           SUITE_RUN: ${{ matrix.run }}
         run: bash -eo pipefail -c "$SUITE_RUN"
+
+  # The integration packages in three shards that run at once, heaviest
+  # packages first (weights: seconds on a runner, PR #213); every package in
+  # exactly one shard.
+  core-integration:
+    name: core (integration ${{ matrix.shard }})
+    runs-on: ubuntu-latest  # ships Docker, which the integration tests use
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1/3, 2/3, 3/3]
+    defaults:
+      run:
+        working-directory: services/core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache-dependency-path: services/core/go.sum
+      - name: integration ${{ matrix.shard }}
+        env:
+          PACKAGE_SHARD: ${{ matrix.shard }}
+          PACKAGE_WEIGHTS: >-
+            internal/db=330 internal/auth=320 internal/audit=190 internal/bus=130
+            cmd/core=120 internal/analysis/routes=95 internal/intel=80 internal/platform=60
+            internal/queries=55 internal/testutil=40 internal/emrctl=40 internal/analysis=30
+        run: bash ../../.github/scripts/go-test-packages.sh test differ "" integration -race -timeout 25m
+
+  # The check name from before the split: passes only when every shard did.
+  core-integration-all:
+    name: core (integration)
+    if: ${{ !cancelled() }}
+    needs: [core-integration]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        env:
+          RESULT: ${{ needs.core-integration.result }}
+        run: |
+          echo "integration, all shards: $RESULT"
+          test "$RESULT" = success
 
   # The property tests at their non-race size, split into shards that run at
   # once (internal/proptest: PROPERTY_SHARD=i/n runs every n-th case, each
@@ -311,7 +353,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1/3, 2/3, 3/3]
+        shard: [1/2, 2/2]
     defaults:
       run:
         working-directory: services/core

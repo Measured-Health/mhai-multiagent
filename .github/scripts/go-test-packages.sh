@@ -5,7 +5,11 @@
 #   go-test-packages.sh differ "<tags a>" "<tags b>"   test build differs with b
 #   go-test-packages.sh same   "<tags a>" "<tags b>"   test build is identical
 #   go-test-packages.sh test same|differ "<tags a>" "<tags b>" [go test flags]
-#       go test those packages: "same" with tags a, "differ" with tags b
+#       go test those packages: "same" with tags a, "differ" with tags b.
+#       With PACKAGE_SHARD=i/n, only shard i of n: the packages are dealt
+#       out heaviest first (PACKAGE_WEIGHTS="pkg-suffix=seconds ...", 15 for
+#       any other), each to the lightest shard so far, so the n shards run
+#       every package once between them.
 #
 # A package's test binary is the same under both tag sets when neither it,
 # its test files nor any package it links pick different files. Running such
@@ -25,6 +29,34 @@ if [ "${1:-}" = test ]; then
   if [ -z "$out" ]; then
     echo "no package's test build is $which between tags \"$ta\" and \"$tb\": nothing to run"
     exit 0
+  fi
+  if [ -n "${PACKAGE_SHARD:-}" ]; then
+    case "$PACKAGE_SHARD" in
+      */*) si=${PACKAGE_SHARD%/*} sn=${PACKAGE_SHARD#*/} ;;
+      *) si=0 sn=0 ;;
+    esac
+    if ! [[ "$si" =~ ^[0-9]+$ && "$sn" =~ ^[0-9]+$ ]] || [ "$sn" -lt 1 ] || [ "$si" -lt 1 ] || [ "$si" -gt "$sn" ]; then
+      echo "go-test-packages.sh: PACKAGE_SHARD=$PACKAGE_SHARD: want i/n with 1 <= i <= n" >&2
+      exit 2
+    fi
+    out=$(awk -v weights="${PACKAGE_WEIGHTS:-}" -v si="$si" -v sn="$sn" '
+      BEGIN { n = split(weights, kv, " "); for (i = 1; i <= n; i++) { split(kv[i], p, "="); wt[p[1]] = p[2] } }
+      {
+        w = 15
+        for (k in wt) if (substr($0, length($0) - length(k) + 1) == k && (length($0) == length(k) || substr($0, length($0) - length(k), 1) == "/")) w = wt[k]
+        printf "%d %s\n", w, $0
+      }' <<<"$out" | sort -k1,1nr -k2 | awk -v si="$si" -v sn="$sn" '
+      {
+        best = 1
+        for (s = 2; s <= sn; s++) if (load[s] < load[best]) best = s
+        load[best] += $1
+        if (best == si) print $2
+      }')
+    echo "package shard $PACKAGE_SHARD"
+    if [ -z "$out" ]; then
+      echo "no packages in this shard"
+      exit 0
+    fi
   fi
   mapfile -t pkgs <<<"$out"
   echo "go test -tags \"$tags\" $* on ${#pkgs[@]} packages"

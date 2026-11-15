@@ -853,10 +853,11 @@ All notable changes to this project are documented here. The format follows
   `testutil.MigratedPostgres` copies a database migrated once per test
   binary (`CREATE DATABASE ... TEMPLATE`) instead of starting a server and
   migrating it for every test. The property tests run their cases as
-  parallel subtests (`internal/proptest`), and the two property jobs are
-  split into three shards each (`PROPERTY_SHARD`), every case in exactly
-  one shard, at unchanged sizes; the old check names now pass when all
-  their shards have. The race job leaves the property tests' big runs to
+  parallel subtests (`internal/proptest`), and the disclosure and history
+  property jobs are split into three and two shards (`PROPERTY_SHARD`),
+  every case in exactly one shard, at unchanged sizes; the integration job
+  into three shards of packages (`PACKAGE_SHARD`). The old check names now
+  pass when all their shards have. The race job leaves the property tests' big runs to
   the property jobs, whose cases include the race sizes' (listed and
   checked in `.github/scripts/core-property-tests.sh`).
 - Go 1.26 for CI and the core and emr images (was 1.24, now out of
