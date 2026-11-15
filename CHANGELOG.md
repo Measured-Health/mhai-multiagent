@@ -56,6 +56,32 @@ All notable changes to this project are documented here. The format follows
   `mhai-models store-abort-stale-uploads` and a lifecycle rule
   (deploy/model-store/README.md) clean up uploads a killed job leaves. The
   export step allows files up to 50 GiB and notes when one needs this.
+- Documents service PR 3: storage and keys (migration **00046**; no
+  OpenAPI change; off by default: the `documents` compose profile isn't
+  started, and no keyring or object store is configured there). Tables
+  `documents` and `document_objects` with row-level security (enabled and
+  forced), the roles `mhai_documents` (reads only; never `source_name`, the
+  uploader or the patient hint) and `mhai_documents_app` (the login
+  `documents_app`, made by `core migrate up` from `DOCUMENTS_DB_PASSWORD`),
+  object keys derived from ids by a CHECK, and the wrapped data keys deleted
+  with their document (the crypto-shred). Per-hospital key-encryption keys
+  behind one interface with the `file` provider (`documents keyring init`;
+  refused in production unless `DOCUMENTS_ALLOW_FILE_KEYRING=pilot`, and
+  announced at every start; a missing, loosely permitted, placeholder or
+  failing keyring leaves the service not ready). Objects sealed with Tink's
+  streaming AEAD (AES-256-GCM-HKDF, 1 MB segments) under a fresh data key,
+  bound by associated data to hospital, document, kind and page. A small
+  SigV4 object store client (ids-only keys in three prefixes, no
+  redirects), S3 POST policies for one quarantine key, the purpose's size
+  range, the declared type and 10 minutes, served as
+  `documents.v1.ctl.presign_upload` (hospital-bound: the token's hospital,
+  another hospital's id is `not_found`), and the bucket lifecycle
+  (`deploy/documents/bucket-lifecycle.xml`: quarantine within a day,
+  non-current versions within 7 days) checked as `storage_ready`. The
+  service refuses to start with a database login that is a superuser,
+  bypasses RLS, can act as an owner or holds another service's role.
+  Abuse tests DS1, DS3 and DS5 against Postgres and MinIO. Design §17,
+  PR 3 departures 11-19.
 - Documents service PR 1: ADR 0016 and the service skeleton (off by default;
   no migration, no OpenAPI change). `services/documents/` is its own Go
   module and binary: settings that fail closed, `documents.v1.ctl.health`

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The documents bucket's lifecycle (documents design §5.4, §6.1; PR 3).
+  Ops applies it to mhai-documents-<env> with the operator's credential
+  (the documents service's own credential only reads it). The service
+  checks it at start and in health (storage_ready) and takes no upload
+  without it:
+    - quarantine/: anything left after a scan that didn't delete it is
+      deleted after 1 day (the backstop; the scan deletes at once);
+    - the whole bucket: a version that is no longer current is expired
+      after 7 days, so a deletion is complete within 7 days (and the
+      object is unreadable at once: its wrapped key is gone).
+  The bucket's other settings (§6.1): public access blocked, a policy that
+  refuses non-TLS requests, versioning on, default server-side encryption
+  on, and a CORS rule allowing POST from the clinical app's origin only.
+-->
+<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Rule>
+    <ID>quarantine-1-day</ID>
+    <Filter>
+      <Prefix>quarantine/</Prefix>
+    </Filter>
+    <Status>Enabled</Status>
+    <Expiration>
+      <Days>1</Days>
+    </Expiration>
+  </Rule>
+  <Rule>
+    <ID>noncurrent-7-days</ID>
+    <Filter>
+      <Prefix></Prefix>
+    </Filter>
+    <Status>Enabled</Status>
+    <NoncurrentVersionExpiration>
+      <NoncurrentDays>7</NoncurrentDays>
+    </NoncurrentVersionExpiration>
+  </Rule>
+</LifecycleConfiguration>

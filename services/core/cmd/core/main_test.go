@@ -157,6 +157,25 @@ func TestLoginRequestsEMR(t *testing.T) {
 	}
 }
 
+// The documents service's login (DOCUMENTS_DB_PASSWORD; user documents_app
+// by default) is a member of mhai_documents_app only (00046).
+func TestLoginRequestsDocuments(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	reqs, err := loginRequests(env(map[string]string{"DOCUMENTS_DB_PASSWORD": "test-only-documents-db-password"}))
+	if err != nil || len(reqs) != 1 || reqs[0].user != "documents_app" || reqs[0].role != "mhai_documents_app" {
+		t.Fatalf("documents: %+v %v", reqs, err)
+	}
+	if _, err := loginRequests(env(map[string]string{"DOCUMENTS_DB_PASSWORD": "changemeReplaceWithLettersAndDigits"})); err == nil ||
+		!strings.Contains(err.Error(), "DOCUMENTS_DB_PASSWORD") {
+		t.Fatalf("placeholder: %v", err)
+	}
+	// One login per role: the documents login can't be the emr service's.
+	if _, err := loginRequests(env(map[string]string{"EMR_DB_PASSWORD": "test-only-emr-db-password",
+		"DOCUMENTS_DB_PASSWORD": "test-only-documents-db-password", "DOCUMENTS_DB_USER": "emr_app"})); err == nil {
+		t.Fatal("two roles on one login")
+	}
+}
+
 // The operator's EMR login (EMR_ADMIN_DB_USER and _PASSWORD, both needed:
 // no default user) is a member of mhai_emr_admin only (00032).
 func TestLoginRequestsEMRAdmin(t *testing.T) {
