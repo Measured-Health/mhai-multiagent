@@ -52,7 +52,7 @@ dependencies = [
     # constructor is SDK-internal; review it on a bump.
     "opentelemetry-sdk==1.45.2",
     "opentelemetry-exporter-otlp==1.45.2",
-    "boto3>=1.43.123",
+    "boto3>=1.44.1",
     "jsonschema>=4.26.0",
     "safetensors>=0.8.0",
     "pillow>=12.3.0,<13",
