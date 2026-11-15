@@ -87,7 +87,7 @@ func newStore(t *testing.T) (*Store, *memObjects) {
 		t.Fatal(err)
 	}
 	o := &memObjects{}
-	return &Store{Objects: o, Keys: kek.NewFile(path)}, o
+	return &Store{Objects: o, Keys: kek.NewFile(path, kek.Create)}, o
 }
 
 func TestPutOpenDelete(t *testing.T) {

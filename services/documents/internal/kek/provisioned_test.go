@@ -265,7 +265,7 @@ func TestAddHospital(t *testing.T) {
 		t.Fatalf("nil hospital: %v", err)
 	}
 	for _, id := range []string{"", "not-a-uuid", "00000000-0000-0000-0000-000000000000",
-		strings.ToUpper(hospB.String()), "{" + hospB.String() + "}", "urn:uuid:" + hospB.String(),
+		"AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE", "{" + hospB.String() + "}", "urn:uuid:" + hospB.String(),
 		strings.ReplaceAll(hospB.String(), "-", ""), hospB.String() + " "} {
 		if _, err := ParseHospital(id); !errors.Is(err, ErrInput) {
 			t.Errorf("%q: %v, want ErrInput", id, err)

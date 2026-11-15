@@ -87,6 +87,11 @@ type Presign struct {
 	// service takes no file it couldn't seal or whose quarantine copy the
 	// lifecycle wouldn't remove (§5.4, §6.2).
 	Ready func(ctx context.Context) error
+	// HospitalKey reports whether the hospital's KEK is there (kek
+	// Provider.Has). A provisioned keyring without it: unavailable, so no
+	// file is taken that couldn't be sealed; other hospitals are served.
+	// Nil is unavailable for everyone.
+	HospitalKey func(ctx context.Context, hospital uuid.UUID) error
 }
 
 func reply(outcome string) *docspb.PresignUploadReply {
@@ -107,7 +112,7 @@ func (p *Presign) Handle(ctx context.Context, c reqtoken.Claims, req proto.Messa
 	if err != nil || doc == uuid.Nil || doc.String() != in.GetDocumentId() {
 		return reply(OutcomeNotFound), nil
 	}
-	if p.Signer == nil || p.Ready == nil || p.Ready(ctx) != nil {
+	if p.Signer == nil || p.Ready == nil || p.Ready(ctx) != nil || p.HospitalKey == nil || p.HospitalKey(ctx, hospital) != nil {
 		return reply(OutcomeUnavailable), nil
 	}
 	row, err := p.Rows.UploadRow(ctx, hospital, doc)

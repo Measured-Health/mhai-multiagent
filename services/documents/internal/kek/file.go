@@ -6,7 +6,9 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,12 +25,24 @@ import (
 
 // The file provider (documents design §6.2): a keyring file of
 // per-hospital keys on a volume only the documents container mounts, mode
-// 0400. For the pilot and development only: the service refuses it in
-// production unless DOCUMENTS_ALLOW_FILE_KEYRING=pilot, and logs a warning
-// at every start (config, serve). A new hospital's key is written to a
-// temporary file in the same directory and renamed over the keyring, under
-// an exclusive lock on <keyring>.lock with the keyring re-read inside it,
-// so processes sharing the keyring never overwrite each other's keys.
+// 0400 or 0600. For the pilot and development only: the service refuses it
+// in production unless DOCUMENTS_ALLOW_FILE_KEYRING=pilot, and logs a
+// warning at every start (config, serve).
+//
+// Two modes (design §17, the provisioned keyring departure):
+//
+//   - Provisioned, the default and the only mode outside development: the
+//     keyring is made ahead on one admin machine ("documents keyring
+//     add-hospital"), copied to every documents server, and read once,
+//     read-only. The service never writes it, never takes its lock and
+//     never makes a key, so several servers can't make two different keys
+//     for one hospital. A hospital without a key is ErrNoKey, reported
+//     through Missing; the keyring stays ready for the others.
+//   - Create (development only): a hospital's key is made at its first
+//     document, written to a temporary file in the same directory and
+//     renamed over the keyring, under an exclusive lock on <keyring>.lock
+//     with the keyring re-read inside it. The lock serialises processes on
+//     one machine only.
 //
 // Format (JSON, unknown fields refused):
 //
@@ -59,7 +73,29 @@ var (
 	ErrKeyringCheck = fmt.Errorf("%w: a key fails its test unwrap", ErrNotReady)
 	// ErrExists: InitFile found a keyring already there.
 	ErrExists = errors.New("kek: a keyring is already there")
+	// ErrHospitalExists: AddHospital found the hospital's key already
+	// there; it is never replaced.
+	ErrHospitalExists = errors.New("kek: the hospital already has a key")
 )
+
+// Mode is how a File provider treats a hospital without a key.
+type Mode int
+
+const (
+	// Provisioned (the zero value): read the keyring once, read-only;
+	// never write it or make a key.
+	Provisioned Mode = iota
+	// Create: make a hospital's key at its first document (development).
+	Create
+)
+
+// String is the mode's name for logs.
+func (m Mode) String() string {
+	if m == Create {
+		return "create"
+	}
+	return "provisioned"
+}
 
 type fileKey struct {
 	Key   string `json:"key"`
@@ -79,17 +115,28 @@ type fileRing struct {
 // File is the file provider.
 type File struct {
 	path string
+	mode Mode
+
+	// Missing, if set, is told of each request for a hospital without a
+	// key in a provisioned keyring (the hospital id only). Loaded, if set,
+	// is told the fingerprint and hospital count each time the keyring
+	// loads. Set both before first use; they are called under the
+	// provider's lock and must not call back into it.
+	Missing func(hospital uuid.UUID)
+	Loaded  func(fingerprint string, hospitals int)
 
 	mu   sync.Mutex
 	keys map[uuid.UUID]map[int][]byte // nil until loaded
 	cur  map[uuid.UUID]int
-	// raw is the loaded file, rewritten with a new hospital's key.
+	// raw is the loaded file, rewritten with a new hospital's key (create
+	// mode); sum is the SHA-256 of its bytes on disk.
 	raw fileRing
+	sum string
 }
 
-// NewFile is the provider for the keyring at path. Nothing is read until
-// Check (or the first Wrap or Unwrap).
-func NewFile(path string) *File { return &File{path: path} }
+// NewFile is the provider for the keyring at path, in mode. Nothing is read
+// until Check (or the first Has, Wrap or Unwrap).
+func NewFile(path string, mode Mode) *File { return &File{path: path, mode: mode} }
 
 // Name is "file".
 func (f *File) Name() string { return "file" }
@@ -106,21 +153,18 @@ func (f *File) loadLocked() error {
 	if f.keys != nil {
 		return nil
 	}
-	raw, err := readKeyring(f.path)
-	if err != nil {
+	if err := f.reloadLocked(); err != nil {
 		return err
 	}
-	keys, cur, err := parseKeyring(raw)
-	if err != nil {
-		return err
+	if f.Loaded != nil {
+		f.Loaded(f.sum, len(f.cur))
 	}
-	f.keys, f.cur, f.raw = keys, cur, raw
 	return nil
 }
 
 // reloadLocked reads the keyring again; on failure the loaded keys stay.
 func (f *File) reloadLocked() error {
-	raw, err := readKeyring(f.path)
+	raw, sum, err := readKeyring(f.path)
 	if err != nil {
 		return err
 	}
@@ -128,7 +172,44 @@ func (f *File) reloadLocked() error {
 	if err != nil {
 		return err
 	}
-	f.keys, f.cur, f.raw = keys, cur, raw
+	f.keys, f.cur, f.raw, f.sum = keys, cur, raw, sum
+	return nil
+}
+
+// Fingerprint is the SHA-256 (hex) of the loaded keyring file, the same
+// value sha256sum prints for it, and the number of hospitals in it; ok is
+// false until it loads. It reveals nothing of the keys.
+func (f *File) Fingerprint() (string, int, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.keys == nil {
+		return "", 0, false
+	}
+	return f.sum, len(f.cur), true
+}
+
+// missingLocked reports a hospital without a key and returns ErrNoKey.
+func (f *File) missingLocked(hospital uuid.UUID) error {
+	if f.Missing != nil {
+		f.Missing(hospital)
+	}
+	return ErrNoKey
+}
+
+// Has reports whether Wrap could seal for the hospital: in create mode any
+// hospital once the keyring loads; in provisioned mode only one with a key.
+func (f *File) Has(_ context.Context, hospital uuid.UUID) error {
+	if hospital == uuid.Nil {
+		return ErrInput
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.loadLocked(); err != nil {
+		return err
+	}
+	if _, ok := f.cur[hospital]; !ok && f.mode != Create {
+		return f.missingLocked(hospital)
+	}
 	return nil
 }
 
@@ -149,36 +230,53 @@ func lockFile(path string) (func(), error) {
 	}, nil
 }
 
-// readKeyring reads and decodes the file, refusing a symlink or a mode
-// that lets anyone but the owner read it.
-func readKeyring(path string) (fileRing, error) {
+// readKeyring reads and decodes the file read-only, refusing a symlink or
+// a mode that lets anyone but the owner read it, and returns the SHA-256
+// (hex) of the bytes it read. The file is opened without following a
+// symlink and checked again through the open descriptor, so a symlink
+// swapped in after the first check isn't read either.
+func readKeyring(path string) (fileRing, string, error) {
+	bad := func(st fs.FileInfo) bool { return !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 }
 	st, err := os.Lstat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return fileRing{}, ErrKeyringMissing
+		return fileRing{}, "", ErrKeyringMissing
 	case err != nil:
-		return fileRing{}, ErrKeyringInvalid
-	case !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0:
-		return fileRing{}, ErrKeyringMode
+		return fileRing{}, "", ErrKeyringInvalid
+	case bad(st):
+		return fileRing{}, "", ErrKeyringMode
 	case st.Size() > maxKeyringBytes:
-		return fileRing{}, ErrKeyringInvalid
+		return fileRing{}, "", ErrKeyringInvalid
 	}
-	fh, err := os.Open(path)
-	if err != nil {
-		return fileRing{}, ErrKeyringInvalid
+	fh, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fileRing{}, "", ErrKeyringMissing
+	case errors.Is(err, syscall.ELOOP):
+		return fileRing{}, "", ErrKeyringMode
+	case err != nil:
+		return fileRing{}, "", ErrKeyringInvalid
 	}
 	defer func() { _ = fh.Close() }()
+	if st, err := fh.Stat(); err != nil || bad(st) {
+		return fileRing{}, "", ErrKeyringMode
+	}
 	b, err := io.ReadAll(io.LimitReader(fh, maxKeyringBytes+1))
 	if err != nil || len(b) > maxKeyringBytes {
-		return fileRing{}, ErrKeyringInvalid
+		return fileRing{}, "", ErrKeyringInvalid
 	}
 	var r fileRing
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&r); err != nil || dec.More() || r.Format != keyringFormat || r.Hospitals == nil {
-		return fileRing{}, ErrKeyringInvalid
+		return fileRing{}, "", ErrKeyringInvalid
 	}
-	return r, nil
+	return r, fingerprint(b), nil
+}
+
+func fingerprint(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // parseKeyring checks every entry: a canonical hospital id, positive
@@ -286,8 +384,9 @@ func open(key, sealed, aad []byte) ([]byte, error) {
 	return g.Open(nil, sealed[:g.NonceSize()], sealed[g.NonceSize():], aad)
 }
 
-// Wrap wraps dek under the hospital's current KEK, making and storing one
-// first if the hospital has none.
+// Wrap wraps dek under the hospital's current KEK. A hospital without one
+// is ErrNoKey in provisioned mode; in create mode its key is made and
+// stored first.
 func (f *File) Wrap(_ context.Context, hospital uuid.UUID, dek, aad []byte) ([]byte, int, error) {
 	if err := checkInput(hospital, aad); err != nil || len(dek) != DEKSize {
 		return nil, 0, ErrInput
@@ -298,6 +397,9 @@ func (f *File) Wrap(_ context.Context, hospital uuid.UUID, dek, aad []byte) ([]b
 		return nil, 0, err
 	}
 	v, ok := f.cur[hospital]
+	if !ok && f.mode != Create {
+		return nil, 0, f.missingLocked(hospital)
+	}
 	if !ok {
 		var err error
 		if v, err = f.addHospitalLocked(hospital); err != nil {
@@ -322,6 +424,14 @@ func (f *File) Unwrap(_ context.Context, hospital uuid.UUID, version int, wrappe
 		return nil, err
 	}
 	key, ok := f.keys[hospital][version]
+	if !ok && f.mode != Create {
+		// A provisioned keyring is read once: a key added since is picked
+		// up by a restart, which logs the new fingerprint.
+		if _, known := f.cur[hospital]; !known {
+			return nil, f.missingLocked(hospital)
+		}
+		return nil, ErrNoKey
+	}
 	if !ok {
 		// Another process may have added it since this one loaded: read
 		// the file once more before saying there is no such key.
@@ -340,60 +450,106 @@ func (f *File) Unwrap(_ context.Context, hospital uuid.UUID, version int, wrappe
 }
 
 // addHospitalLocked makes version 1 of a hospital's KEK and writes the
-// keyring before the key is used. If the write fails the key is dropped.
-// It holds an exclusive lock on <keyring>.lock and re-reads the keyring
-// under it, so a second process adding a key at the same moment (two
-// replicas by mistake) never overwrites the other's: whoever comes second
-// adopts the key already there.
+// keyring before the key is used (create mode only). If the write fails the
+// key is dropped. A second process adding a key at the same moment on this
+// machine never overwrites the other's: whoever comes second adopts the key
+// already there (addKey, under the lock).
 func (f *File) addHospitalLocked(hospital uuid.UUID) (int, error) {
-	unlock, err := lockFile(f.path + ".lock")
+	res, err := addKey(f.path, hospital, true)
 	if err != nil {
-		return 0, ErrNotReady
+		return 0, err
+	}
+	keys, cur, err := parseKeyring(res.ring)
+	if err != nil {
+		return 0, err
+	}
+	f.keys, f.cur, f.raw, f.sum = keys, cur, res.ring, res.sum
+	return f.cur[hospital], nil
+}
+
+// added is a keyring after addKey.
+type added struct {
+	ring fileRing
+	sum  string
+}
+
+// addKey adds version 1 of the hospital's KEK to the keyring at path, under
+// an exclusive lock on <path>.lock with the keyring re-read and checked
+// inside it, written to a temporary file (0400, synced) and renamed over
+// the keyring. A hospital that already has a key is adopted (adopt) or
+// ErrHospitalExists; its key is never replaced.
+func addKey(path string, hospital uuid.UUID, adopt bool) (added, error) {
+	unlock, err := lockFile(path + ".lock")
+	if err != nil {
+		return added{}, ErrNotReady
 	}
 	defer unlock()
-	raw, err := readKeyring(f.path)
+	raw, sum, err := readKeyring(path)
 	if err != nil {
-		return 0, err
+		return added{}, err
 	}
-	keys, cur, err := parseKeyring(raw)
-	if err != nil {
-		return 0, err
+	if _, _, err := parseKeyring(raw); err != nil {
+		return added{}, err
 	}
-	f.keys, f.cur, f.raw = keys, cur, raw
-	if v, ok := f.cur[hospital]; ok {
-		return v, nil
+	if _, ok := raw.Hospitals[hospital.String()]; ok {
+		if adopt {
+			return added{raw, sum}, nil
+		}
+		return added{}, ErrHospitalExists
 	}
 	key := make([]byte, DEKSize)
 	if _, err := rand.Read(key); err != nil {
-		return 0, ErrNotReady
+		return added{}, ErrNotReady
 	}
 	check, err := makeCheck(key, hospital, 1)
 	if err != nil {
-		return 0, ErrNotReady
+		return added{}, ErrNotReady
 	}
-	next := fileRing{Format: keyringFormat, Hospitals: make(map[string]fileHospital, len(f.raw.Hospitals)+1)}
-	for k, v := range f.raw.Hospitals {
+	next := fileRing{Format: keyringFormat, Hospitals: make(map[string]fileHospital, len(raw.Hospitals)+1)}
+	for k, v := range raw.Hospitals {
 		next.Hospitals[k] = v
 	}
 	next.Hospitals[hospital.String()] = fileHospital{Current: 1, Keys: map[string]fileKey{
 		"1": {Key: base64.StdEncoding.EncodeToString(key), Check: base64.StdEncoding.EncodeToString(check)}}}
-	if err := writeKeyring(f.path, next, true); err != nil {
-		return 0, ErrNotReady
+	sum, err = writeKeyring(path, next, true)
+	if err != nil {
+		return added{}, ErrNotReady
 	}
-	f.raw = next
-	f.keys[hospital] = map[int][]byte{1: key}
-	f.cur[hospital] = 1
-	return 1, nil
+	return added{next, sum}, nil
+}
+
+// AddHospital adds one hospital's KEK (version 1, with its test value) to
+// the keyring at path, for "documents keyring add-hospital" on the admin
+// machine in provisioned mode. It refuses a hospital that already has a
+// key, and a keyring that is missing, exposed, a symlink or fails its
+// checks. It returns the new fingerprint and the hospital count.
+func AddHospital(path string, hospital uuid.UUID) (string, int, error) {
+	if hospital == uuid.Nil {
+		return "", 0, ErrInput
+	}
+	res, err := addKey(path, hospital, false)
+	if err != nil {
+		return "", 0, err
+	}
+	return res.sum, len(res.ring.Hospitals), nil
 }
 
 // writeKeyring writes r to a temporary file in path's directory (0400,
 // synced) and renames it over path (replace) or links it there only if
-// nothing is (init), then syncs the directory.
-func writeKeyring(path string, r fileRing, replace bool) (err error) {
+// nothing is (init), then syncs the directory. It never writes path in
+// place. It returns the fingerprint of what it wrote.
+func writeKeyring(path string, r fileRing, replace bool) (string, error) {
 	b, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
-		return err
+		return "", err
 	}
+	if err := writeFile(path, b, replace); err != nil {
+		return "", err
+	}
+	return fingerprint(b), nil
+}
+
+func writeFile(path string, b []byte, replace bool) (err error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".keyring-*")
 	if err != nil {
@@ -445,7 +601,7 @@ func InitFile(path string) error {
 	if _, err := os.Lstat(path); err == nil {
 		return ErrExists
 	}
-	if err := writeKeyring(path, fileRing{Format: keyringFormat, Hospitals: map[string]fileHospital{}}, false); err != nil {
+	if _, err := writeKeyring(path, fileRing{Format: keyringFormat, Hospitals: map[string]fileHospital{}}, false); err != nil {
 		if errors.Is(err, ErrExists) {
 			return err
 		}

@@ -12,8 +12,8 @@ option go_package = "github.com/Measured-Health/mhai-multiagent/services/gokit/d
 // documents.v1.ctl.health, as svc:core (the platform health sampler).
 message HealthRequest {}
 
-// Readiness flags only, no counts of anyone's data. The service takes a
-// document only when all of them are true.
+// Readiness flags and the keyring's fingerprint, no counts of anyone's
+// data. The service takes a document only when all the flags are true.
 message HealthReply {
   // Its database login answers, and is not a superuser, does not bypass
   // row-level security and cannot act as a table owner (PR 3).
@@ -28,6 +28,15 @@ message HealthReply {
   // lifecycle deletes quarantine/ within a day and non-current versions
   // within 7 days (PR 3).
   bool storage_ready = 5;
+  // The loaded keyring's fingerprint: the SHA-256 (hex) of the file
+  // keyring, the same value sha256sum prints for it, never key material;
+  // empty until it loads. Every documents server sharing one provisioned
+  // keyring must report the same value; another one is a server holding an
+  // old copy.
+  string keyring_fingerprint = 6;
+  // How many hospitals the loaded keyring holds a key for (0 until it
+  // loads). A count of hospitals, not of anyone's data.
+  uint32 keyring_hospitals = 7;
 }
 
 // documents.v1.ctl.presign_upload, as svc:core, hospital-bound: the

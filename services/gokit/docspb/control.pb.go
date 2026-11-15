@@ -64,8 +64,8 @@ func (*HealthRequest) Descriptor() ([]byte, []int) {
 	return file_mhai_documents_v1_control_proto_rawDescGZIP(), []int{0}
 }
 
-// Readiness flags only, no counts of anyone's data. The service takes a
-// document only when all of them are true.
+// Readiness flags and the keyring's fingerprint, no counts of anyone's
+// data. The service takes a document only when all the flags are true.
 type HealthReply struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its database login answers, and is not a superuser, does not bypass
@@ -80,9 +80,18 @@ type HealthReply struct {
 	// The object store answers with its credential, and the bucket's
 	// lifecycle deletes quarantine/ within a day and non-current versions
 	// within 7 days (PR 3).
-	StorageReady  bool `protobuf:"varint,5,opt,name=storage_ready,json=storageReady,proto3" json:"storage_ready,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	StorageReady bool `protobuf:"varint,5,opt,name=storage_ready,json=storageReady,proto3" json:"storage_ready,omitempty"`
+	// The loaded keyring's fingerprint: the SHA-256 (hex) of the file
+	// keyring, the same value sha256sum prints for it, never key material;
+	// empty until it loads. Every documents server sharing one provisioned
+	// keyring must report the same value; another one is a server holding an
+	// old copy.
+	KeyringFingerprint string `protobuf:"bytes,6,opt,name=keyring_fingerprint,json=keyringFingerprint,proto3" json:"keyring_fingerprint,omitempty"`
+	// How many hospitals the loaded keyring holds a key for (0 until it
+	// loads). A count of hospitals, not of anyone's data.
+	KeyringHospitals uint32 `protobuf:"varint,7,opt,name=keyring_hospitals,json=keyringHospitals,proto3" json:"keyring_hospitals,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *HealthReply) Reset() {
@@ -148,6 +157,20 @@ func (x *HealthReply) GetStorageReady() bool {
 		return x.StorageReady
 	}
 	return false
+}
+
+func (x *HealthReply) GetKeyringFingerprint() string {
+	if x != nil {
+		return x.KeyringFingerprint
+	}
+	return ""
+}
+
+func (x *HealthReply) GetKeyringHospitals() uint32 {
+	if x != nil {
+		return x.KeyringHospitals
+	}
+	return 0
 }
 
 // documents.v1.ctl.presign_upload, as svc:core, hospital-bound: the
@@ -333,13 +356,15 @@ var File_mhai_documents_v1_control_proto protoreflect.FileDescriptor
 const file_mhai_documents_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"\x1fmhai/documents/v1/control.proto\x12\x11mhai.documents.v1\"\x0f\n" +
-	"\rHealthRequest\"\xc8\x01\n" +
+	"\rHealthRequest\"\xa6\x02\n" +
 	"\vHealthReply\x12%\n" +
 	"\x0edatabase_ready\x18\x01 \x01(\bR\rdatabaseReady\x12#\n" +
 	"\rkeyring_ready\x18\x02 \x01(\bR\fkeyringReady\x12#\n" +
 	"\rscanner_ready\x18\x03 \x01(\bR\fscannerReady\x12#\n" +
 	"\rsandbox_ready\x18\x04 \x01(\bR\fsandboxReady\x12#\n" +
-	"\rstorage_ready\x18\x05 \x01(\bR\fstorageReady\"7\n" +
+	"\rstorage_ready\x18\x05 \x01(\bR\fstorageReady\x12/\n" +
+	"\x13keyring_fingerprint\x18\x06 \x01(\tR\x12keyringFingerprint\x12+\n" +
+	"\x11keyring_hospitals\x18\a \x01(\rR\x10keyringHospitals\"7\n" +
 	"\x14PresignUploadRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\"5\n" +

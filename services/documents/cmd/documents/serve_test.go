@@ -301,7 +301,7 @@ func TestKeyringAddHospital(t *testing.T) {
 		t.Fatalf("output %q", out.String())
 	}
 	raw, _ := os.ReadFile(path)
-	for _, id := range []string{hosp, "not-a-uuid", "00000000-0000-0000-0000-000000000000", strings.ToUpper(hosp)} {
+	for _, id := range []string{hosp, "not-a-uuid", "00000000-0000-0000-0000-000000000000", "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"} {
 		err := keyringAddHospital(path, id, &out)
 		if err == nil || strings.Contains(err.Error(), dir) {
 			t.Errorf("%s: %v", id, err)

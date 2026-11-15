@@ -117,7 +117,7 @@ func TestPresignRefusals(t *testing.T) {
 		"no key for the hospital": {hospA, docID, rows, func(p *Presign, _ *fakeRows, _ *fakeSigner) {
 			p.HospitalKey = func(context.Context, uuid.UUID) error { return errors.New("synthetic: no key") }
 		}, OutcomeUnavailable},
-		"no key check": {hospA, docID, rows, func(p *Presign, _ *fakeRows, _ *fakeSigner) { p.HospitalKey = nil }, OutcomeUnavailable},
+		"no key check":   {hospA, docID, rows, func(p *Presign, _ *fakeRows, _ *fakeSigner) { p.HospitalKey = nil }, OutcomeUnavailable},
 		"no readiness":   {hospA, docID, rows, func(p *Presign, _ *fakeRows, _ *fakeSigner) { p.Ready = nil }, OutcomeUnavailable},
 		"no store":       {hospA, docID, rows, func(p *Presign, _ *fakeRows, _ *fakeSigner) { p.Signer = nil }, OutcomeUnavailable},
 		"database down":  {hospA, docID, rows, func(_ *Presign, r *fakeRows, _ *fakeSigner) { r.err = errors.New("x") }, OutcomeUnavailable},
