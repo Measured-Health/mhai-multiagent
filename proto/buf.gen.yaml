@@ -1,7 +1,8 @@
 version: v2
 # Run from proto/ (make proto). module= drops the module path from the output
 # path, so the Go package lands in services/core/internal/intelpb. The emr
-# contract goes to services/gokit (buf.gen.emr.yaml).
+# contract goes to services/gokit (buf.gen.emr.yaml), and so does the
+# documents contract (buf.gen.documents.yaml).
 inputs:
   - directory: .
     paths:

@@ -316,6 +316,32 @@ jobs:
       - name: Integration tests
         run: go test -race -timeout 25m -tags integration ./...
 
+  # The documents service (ADR 0016). Off by default; the same gates as the
+  # emr service. Its NATS rights are tested from core (internal/bus).
+  documents:
+    runs-on: ubuntu-latest  # ships Docker, which the integration tests use
+    defaults:
+      run:
+        working-directory: services/documents
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache-dependency-path: services/documents/go.sum
+      - name: Formatted (gofmt)
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
+      - name: Test
+        run: go test -race -timeout 25m ./...
+      - name: Integration tests
+        run: go test -race -timeout 25m -tags integration ./...
+
   # ADR 0012: a breaking change to the HTTP contract needs a new major
   # version (/api/v2), so it may not change /api/v1 in place.
   openapi-breaking:
@@ -363,6 +389,7 @@ jobs:
               - services/core/**
               - services/gokit/**
               - services/emr/**
+              - services/documents/**
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: steps.changes.outputs.image == 'true'
       # Layers are cached between runs, so only changed layers rebuild.
@@ -412,6 +439,14 @@ jobs:
           docker build -t mhai-emr:ci -f services/emr/Dockerfile services
           out=$(docker run --rm mhai-emr:ci help 2>&1 || true)
           case "$out" in "usage: emr"*) echo "the emr image runs" ;; *) echo "::error::the emr image doesn't run"; exit 1 ;; esac
+      - name: Build the documents image from services/
+        if: steps.changes.outputs.go_image == 'true'
+        run: |
+          docker build -t mhai-documents:ci -f services/documents/Dockerfile services
+          out=$(docker run --rm mhai-documents:ci help 2>&1 || true)
+          case "$out" in "usage: documents"*) echo "the documents image runs" ;; *) echo "::error::the documents image doesn't run"; exit 1 ;; esac
+          # Non-root, as the image says.
+          test "$(docker image inspect -f '{{.Config.User}}' mhai-documents:ci)" = "nonroot:nonroot"
 
   # Spec section 12: the whole boundary end to end. The smoke stack
   # (docker-compose.yml + docker-compose.smoke.yml: core, NATS, Postgres,
@@ -436,6 +471,7 @@ jobs:
           docker compose --env-file .env.example config -q
           docker compose --env-file .env.example --profile test --profile observability config -q
           docker compose --env-file .env.example --profile emr config -q
+          docker compose --env-file .env.example --profile documents config -q
           docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.smoke.yml config -q
           docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.gpu.yml config -q
           # The demo deploy's file, with synthetic values for the host's .env.
