@@ -30,7 +30,7 @@ func ring(t *testing.T) kek.Provider {
 	if err := kek.InitFile(path); err != nil {
 		t.Fatal(err)
 	}
-	return kek.NewFile(path)
+	return kek.NewFile(path, kek.Create)
 }
 
 func random(t *testing.T, n int) []byte {
@@ -167,7 +167,7 @@ func TestSealRefusesBadRefsAndAKeyringThatIsNotReady(t *testing.T) {
 	if _, err := Seal(ctx, ring(t), Ref{Hospital: hospA, Kind: Original}, io.Discard, strings.NewReader("x")); !errors.Is(err, ErrRef) {
 		t.Fatalf("bad ref: %v", err)
 	}
-	broken := kek.NewFile(filepath.Join(t.TempDir(), "none.json"))
+	broken := kek.NewFile(filepath.Join(t.TempDir(), "none.json"), kek.Create)
 	ref := Ref{Hospital: hospA, Document: docA, Kind: Original}
 	if _, err := Seal(ctx, broken, ref, io.Discard, strings.NewReader("x")); !errors.Is(err, kek.ErrNotReady) {
 		t.Fatalf("no keyring: %v", err)

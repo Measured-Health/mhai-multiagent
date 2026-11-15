@@ -31,7 +31,7 @@ func TestSealedObjectsOutOfPlaceDoNotOpen(t *testing.T) {
 	if err := kek.InitFile(ring); err != nil {
 		t.Fatal(err)
 	}
-	s := &storage.Store{Objects: st.Client, Keys: kek.NewFile(ring)}
+	s := &storage.Store{Objects: st.Client, Keys: kek.NewFile(ring, kek.Create)}
 	if err := (&storage.Readiness{Objects: st.Client}).Check(ctx); err != nil {
 		t.Fatalf("readiness: %v", err)
 	}
