@@ -20,7 +20,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
-// Migration 00046 (analysis backend plan Tasks 27-28, PR 10): consultations
+// Migration 00045 (analysis backend plan Tasks 27-28, PR 10): consultations
 // that name a patient, EMR findings and alerts as coded facts, the
 // dictionaries from the EMR configuration, and the patient-index changes
 // (exclusions and merges) that never touch a frozen period. Every patient,
@@ -1105,8 +1105,8 @@ func mustB64(s string) []byte {
 }
 
 // Down to 00044 restores 00021's source and due functions and takes every
-// grant, column and function 00046 added; up again works.
-func TestMigration00046DownUp(t *testing.T) {
+// grant, column and function 00045 added; up again works.
+func TestMigration00045DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
@@ -1140,7 +1140,7 @@ func TestMigration00046DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	if left != 0 {
-		t.Errorf("after down, %d objects or grants of 00046 remain", left)
+		t.Errorf("after down, %d objects or grants of 00045 remain", left)
 	}
 	var oldSrc, oldDue string
 	if err := pool.QueryRow(ctx, `SELECT pg_get_functiondef('mhai_analysis_ingest_source(uuid, timestamptz, timestamptz)'::regprocedure),

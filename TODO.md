@@ -228,7 +228,7 @@ PR 4 (aggregate routes) is the simplest version that keeps the disclosure guaran
 
 ## Analysis: EMR facts, blocked and follow-ups (PR 10, 14 Nov)
 
-PR 10 is built (migration 00046, plan departures 78-91) and off by default: ingest needs the hospital's switch on with real references and `ANALYSIS_INGEST=true`.
+PR 10 is built (migration 00045, plan departures 78-91) and off by default: ingest needs the hospital's switch on with real references and `ANALYSIS_INGEST=true`.
 
 - [ ] **Recorded diagnoses (blocked).** The EMR canonical model has observations, medications and encounters but no conditions, so no `diagnosis` fact is written. Needs a conditions table in the EMR plan (canonical model, normaliser, ICD-10 mapping), then a source branch here.
 - [ ] **Set `ANALYSIS_INGEST=true` only after H2 and H7** (the confidence mapping; references in consultations) and with a hospital raised by Plan 11b's two-person switch. Operators' item; nothing in the build does it.

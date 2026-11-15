@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Patient Analysis PR 10: EMR facts (migration **00046**; no OpenAPI
+- Patient Analysis PR 10: EMR facts (migration **00045**; no OpenAPI
   change; off by default: ingest needs the hospital's analysis switch on
   with real references and the new `ANALYSIS_INGEST=true`, refused without
   the analysis keys). The nightly source now reads consultations whose

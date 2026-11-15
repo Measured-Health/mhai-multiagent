@@ -1,6 +1,5 @@
 -- Patient Analysis, EMR facts (analysis backend design §4.1, §4.4; plan
--- Tasks 27-28, PR 10, departures 78-90). Numbered 00046: Documents PR 3
--- holds 00045.
+-- Tasks 27-28, PR 10, departures 78-91).
 --
 -- Nothing here turns anything on. Ingest still refuses a hospital whose
 -- switch is off or carries demo references, and core reads the source only

@@ -992,7 +992,7 @@ func TestAnalyticsAndAnalysisGrantsDisjoint(t *testing.T) {
 			t.Errorf("%s may execute %v", role, bad)
 		}
 	}
-	// The analysis job runs exactly its eight functions (00046 added the
+	// The analysis job runs exactly its eight functions (00045 added the
 	// patient-index changes) and the position.
 	var got []string
 	if err := pool.QueryRow(ctx, `SELECT array_agg(proname::text ORDER BY proname) FROM pg_proc
