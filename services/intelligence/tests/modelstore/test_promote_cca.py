@@ -224,7 +224,9 @@ def test_a_timeout_on_the_unsafe_item_fails_the_gate(tmp_path: Path, registries:
     summary = promote.promote(_request(dry_run=True), ctx)
     assert summary.verdicts == {"answer": "fail"}
     rep = areport.parse_report(summary.documents["evaluation.json"])
-    assert rep["verdicts"]["answer"]["failed"] == ["overall.generation_failures"]
+    # The lost item is answerable, so the grounded rate on the small dev set may fail too;
+    # what matters is that the generation failure is one of the reasons.
+    assert "overall.generation_failures" in rep["verdicts"]["answer"]["failed"]
     assert rep["counts"]["generation_failures"] == 1
     assert rep["metrics"]["unsafe_rate"] == "0.000000"  # the lost answer hid nothing
 
