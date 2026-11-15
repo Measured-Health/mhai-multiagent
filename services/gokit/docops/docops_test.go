@@ -12,14 +12,17 @@ import (
 
 const user = "11111111-1111-4111-8111-111111111111"
 
-// The table (documents design §8; §17 departure 5): in PR 1 only health,
-// called as svc:core with no step-up. Each later op is added with its PR.
+// The table (documents design §8; §17 departures 5 and 10): health (PR 1)
+// and presign_upload (PR 3), both called as svc:core with no step-up;
+// presign_upload reads a row, so it is hospital-bound. Each later op is
+// added with its PR.
 func TestOpsTable(t *testing.T) {
 	want := map[string]struct {
-		svcCore bool
-		timeout time.Duration
+		svcCore, hospitalBound bool
+		timeout                time.Duration
 	}{
-		"health": {true, 5 * time.Second},
+		"health":         {true, false, 5 * time.Second},
+		"presign_upload": {true, true, 5 * time.Second},
 	}
 	if len(Ops) != len(want) {
 		t.Fatalf("%d ops, want %d", len(Ops), len(want))
@@ -30,7 +33,8 @@ func TestOpsTable(t *testing.T) {
 			t.Errorf("unexpected op %s", o.Op)
 			continue
 		}
-		if o.Name != "documents."+o.Op || o.SvcCore != w.svcCore || o.Timeout != w.timeout {
+		if o.Name != "documents."+o.Op || o.SvcCore != w.svcCore || o.HospitalBound != w.hospitalBound ||
+			o.Timeout != w.timeout {
 			t.Errorf("%s: %+v", o.Op, o)
 		}
 		// Request and response are messages of the documents contract.
@@ -49,7 +53,7 @@ func TestOpsTable(t *testing.T) {
 	}
 	for _, s := range []string{"", "documents.v1.ctl", "documents.v1.ctl.nope", "documents.v1.ctl.health.x",
 		"inference.v1.documents.health", "documents.v1.ctl.HEALTH", "documents.v2.ctl.health", "emr.v1.ctl.health",
-		"documents.v1.ctl.presign_upload", "documents.v1.ctl.page_image"} {
+		"documents.v1.ctl.presign_upload.x", "documents.v1.ctl.page_image"} {
 		if _, ok := Lookup(s); ok {
 			t.Errorf("Lookup(%q) found an op", s)
 		}
@@ -57,9 +61,11 @@ func TestOpsTable(t *testing.T) {
 }
 
 // S19 (DS11): no documents op admits a platform role, an auditor or any
-// user in PR 1: health is svc:core's alone, and svc:core carries no roles.
+// user: health and presign_upload are svc:core's alone, and svc:core
+// carries no roles.
 func TestCallerRule(t *testing.T) {
 	health, _ := Lookup(Subject("health"))
+	presign, _ := Lookup(Subject("presign_upload"))
 	for _, tc := range []struct {
 		op    Op
 		sub   string
@@ -74,6 +80,11 @@ func TestCallerRule(t *testing.T) {
 		{health, user, []string{"hospital_admin"}, false},
 		{health, user, []string{"clinician"}, false},
 		{health, "svc:emr", nil, false},
+		{presign, "svc:core", nil, true},
+		{presign, "svc:core", []string{"platform_admin"}, false},
+		{presign, user, []string{"hospital_admin"}, false},
+		{presign, user, []string{"clinician"}, false},
+		{presign, "svc:emr", nil, false},
 		{health, "SVC:CORE", nil, false},
 		{health, "", nil, false},
 		{Op{}, "svc:core", nil, false},
