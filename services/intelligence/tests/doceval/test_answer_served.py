@@ -77,7 +77,7 @@ def fake() -> Iterator[tuple[Fake, LocalLLMSettings]]:
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{httpd.server_address[1]}"
     try:
-        yield f, LocalLLMSettings(url=url, timeout_s=10.0, start_timeout_s=1.0)
+        yield f, LocalLLMSettings(url=url, timeout_s=120.0, start_timeout_s=1.0)
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -194,6 +194,25 @@ def test_an_unreachable_sidecar_is_refused(tmp_path: Path) -> None:
     with pytest.raises(Refused) as e:
         _run(tmp_path, settings)
     assert (e.value.reason, e.value.detail_code) == ("no_runtime", "unreachable")
+
+
+def test_a_generation_failure_fails_the_served_gate() -> None:
+    """eval-served: an item whose generation failed is not evaluated, and fails the gate."""
+    from tests.doceval.answer_fakes import ScriptedClient, perfect_reply
+
+    loaded = schema.load_set(DEV)
+    script = {i.question: perfect_reply(i) for i in loaded.items}
+    script[loaded.items[0].question] = ("raise", "PASS")
+    out = served.evaluate(
+        ScriptedClient(script, raises=TimeoutError),
+        loaded,
+        report.packaged_thresholds("answer"),
+        split="dev",
+        alias=ALIAS,
+        max_seconds=90,
+    )
+    assert out["verdict"] == "fail" and "generation_failures" in out["failed"]
+    assert out["counts"]["generation_failures"] == 1
 
 
 def test_too_slow_fails_even_when_every_answer_is_right(

@@ -197,6 +197,9 @@ jobs:
           P_ENDPOINT: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_ENDPOINT || '' }}
           P_BUCKET: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_BUCKET || '' }}
           P_REGION: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_REGION || '' }}
+          # 1 only once `mhai-models store-probe-multipart` passed on this store: files over
+          # 5 GiB then go up as a conditional multipart upload (refused without it).
+          P_MULTIPART: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_STORE_CONDITIONAL_MULTIPART || '' }}
           P_DRIVE_FOLDER: ${{ vars.MODEL_STORE_ENDPOINT != '' && vars.MODEL_DRIVE_FOLDER_ID || '' }}
           P_DRIVE_TOKEN: ${{ steps.drive.outputs.access_token }}
           P_READER_ACCESS: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MODEL_STORE_ENDPOINT != '' && secrets.MODEL_STORE_READER_ACCESS_KEY || '' }}
@@ -208,6 +211,7 @@ jobs:
           if [ "$REHEARSAL" != true ]; then
             export MODEL_STORE_ENDPOINT="$P_ENDPOINT" MODEL_STORE_BUCKET="$P_BUCKET"
             export MODEL_STORE_REGION="$P_REGION" MHAI_MODELS_DRIVE_FOLDER_ID="$P_DRIVE_FOLDER"
+            export MODEL_STORE_CONDITIONAL_MULTIPART="$P_MULTIPART"
             export MODEL_STORE_READER_ACCESS_KEY="$P_READER_ACCESS"
             export MODEL_STORE_READER_SECRET_KEY="$P_READER_SECRET"
             if [ -n "$P_DRIVE_TOKEN" ]; then

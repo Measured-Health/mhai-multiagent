@@ -196,7 +196,7 @@ class Limits:
     keeping a worker's peak small. It may be raised up to the format ceiling,
     :data:`MAX_HEADER_BYTES` (100 MB)."""
 
-    max_file_bytes: int = 40 * 1024**3
+    max_file_bytes: int = 50 * 1024**3  # store.MAX_OBJECT_BYTES (a multipart upload)
     max_files: int = 256
     max_total_bytes: int = 200 * 1024**3
     max_header_bytes: int = DEFAULT_HEADER_BYTES

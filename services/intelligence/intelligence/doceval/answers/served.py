@@ -214,6 +214,10 @@ def evaluate(
     gate = report.evaluate_rules(thresholds, {"overall": m.rates()}, {"overall": m.items})
     median = statistics.median(timed.seconds) if len(timed.seconds) == len(results) else None
     failed = list(gate["failed"])
+    if not score.all_evaluated(m):
+        # Every item must be evaluated: a timeout or an error from the model is never
+        # scored as an escalation (score.py), and fails the gate.
+        failed.append("generation_failures")
     if median is None or median > max_seconds:
         failed.append("median_seconds")
     return {

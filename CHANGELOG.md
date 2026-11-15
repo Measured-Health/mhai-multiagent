@@ -30,6 +30,18 @@ All notable changes to this project are documented here. The format follows
   cover birth to 2 months, not only the first 28 days, and a structured age
   under a year (0.5) is read in hours too.
 
+- Model store: a weight file over 5 GiB (one PUT; Gemma 4's per-layer
+  embedding is one 5.6 GB tensor) goes up as a conditional multipart upload,
+  up to 50 GiB per file (the run cap stays 200 GiB). Off unless the writer
+  runs with `MODEL_STORE_CONDITIONAL_MULTIPART=1`, set only after
+  `mhai-models store-probe-multipart` shows the store refuses a completion
+  with `If-None-Match: *` over an existing object; without it such a file is
+  refused, never written unconditionally. Every part carries its SHA-256, the
+  whole file's SHA-256 must be the run's files hash before completion, what
+  the store kept is read back, and any failure aborts the upload.
+  `mhai-models store-abort-stale-uploads` and a lifecycle rule
+  (deploy/model-store/README.md) clean up uploads a killed job leaves. The
+  export step allows files up to 50 GiB and notes when one needs this.
 - Documents service PR 1: ADR 0016 and the service skeleton (off by default;
   no migration, no OpenAPI change). `services/documents/` is its own Go
   module and binary: settings that fail closed, `documents.v1.ctl.health`
@@ -870,6 +882,18 @@ All notable changes to this project are documented here. The format follows
   trust weights are unchanged, but the trust bands clinicians see change: cited,
   grounded answers now score higher. The answer profile's own NLI wrapper is
   gone; it uses this.
+- **Clinical review:** the answer gate (`mhai-models promote --gate answer`
+  and `eval-served`) no longer counts a generation failure as an escalation.
+  An item whose generation raised or came back unavailable (a timeout, an HTTP
+  error from the model) was scored `ESCALATE`, which credited escalation
+  recall and hid the unsafe answer the model was about to give, so a slow or
+  failing model could look safe. Such an item is now not evaluated: it is left
+  out of every metric, and the gate fails while any item is not evaluated
+  (`overall.generation_failures`; the number is in `counts.generation_failures`).
+  A report that shows a failure reads back only if it failed on it. The cloud
+  route's `insufficient_evidence` is still an evaluated escalation, and the
+  runtime still escalates a failed job. The answer timeout stays a setting
+  (`MHAI_EVAL_LLAMA_ANSWER_TIMEOUT`, default 300 s).
 
 - The emr image's secret store folder (`/emr-secrets`) is now 0700, so a
   fresh `emr-secrets` volume takes that mode and `docker compose --profile

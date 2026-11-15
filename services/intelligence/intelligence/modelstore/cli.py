@@ -25,7 +25,8 @@ Commands::
 The store is any S3-compatible bucket: ``MODEL_STORE_ENDPOINT`` (TLS unless loopback),
 ``MODEL_STORE_BUCKET`` and ``MODEL_STORE_REGION`` (optional). Two credentials: the writer
 (``MODEL_STORE_WRITER_ACCESS_KEY``, ``MODEL_STORE_WRITER_SECRET_KEY``; ``promote`` and
-``testset-build``) and the read-only reader (``MODEL_STORE_READER_ACCESS_KEY``,
+``testset-build``; ``MODEL_STORE_CONDITIONAL_MULTIPART=1`` lets it upload a file over 5 GiB
+as a conditional multipart upload, see ``store-probe-multipart``) and the read-only reader (``MODEL_STORE_READER_ACCESS_KEY``,
 ``MODEL_STORE_READER_SECRET_KEY``; the locked split, ``pin``, ``lock-check``,
 ``rollback``, a promoted base, and the AI service). The signer is ``MHAI_MODELS_SIGNER``,
 an Ed25519 key file (mode 0600): the repository secret written to a file in the workflow,
@@ -135,6 +136,16 @@ dev split rebuilt from its public seed, refused when a locked split exists. It p
 max_seconds, thresholds_sha256, sign_off}}`` (aggregates only) and exits 0 on ``pass``, 1 on
 ``fail``. ``--max-seconds`` (default 90) caps the median seconds per answer.
 
+``store-probe-multipart`` (the writer) checks that the store refuses a multipart upload
+completed with ``If-None-Match: *`` over an existing object, and prints
+``{"conditional_multipart": true|false}``; exit 0 only when it does. Set
+``MODEL_STORE_CONDITIONAL_MULTIPART=1`` for a store only after it printed true. It writes
+one small object (and, on a store that fails, a second version of it) under
+``models/_store-probe/``. ``store-abort-stale-uploads [--older-than-hours N]`` (the writer;
+N at least 6, default 24) aborts incomplete multipart uploads under ``models/`` and
+``eval/`` older than that (an upload killed mid-way), and prints
+``{"stale_uploads_aborted": count}``. No object is touched.
+
 Exit codes: 0 done, 1 (``eval-served`` only) the evaluation failed, 2 refused (one JSON
 line ``{"refused": "<code>"}`` on stdout, with ``"fix"``, a fixed text, for a naming mistake in ``reasons.FIXES``; for
 ``promote``, ``check``, ``make-fixture``, ``store-init``, ``pin``, ``lock-check`` and
@@ -195,6 +206,7 @@ DRIVE_TOKEN_FILE_ENV = "MHAI_MODELS_DRIVE_TOKEN_FILE"
 DATASETS_ENV = "MHAI_MODELS_DATASETS"
 LICENCES_ENV = "MHAI_MODELS_LICENCES"
 TESTSETS_LOCK_ENV = "MHAI_MODELS_TESTSETS_LOCK"
+MULTIPART_ENV = "MODEL_STORE_CONDITIONAL_MULTIPART"
 MINIO_URL_ENV = "MINIO_URL"
 WORKFLOW_ENVS = ("GITHUB_RUN_ID", "GITHUB_WORKFLOW_REF", "GITHUB_SHA", "GITHUB_ACTOR")
 MAX_SCALE = 10.0
@@ -220,6 +232,8 @@ _DETAILED = frozenset(
         "fetch-pinned",
         "testset-fetch",
         "eval-served",
+        "store-probe-multipart",
+        "store-abort-stale-uploads",
     }
 )
 READER_FILE_ENVS = (READER_ACCESS_ENV + "_FILE", READER_SECRET_ENV + "_FILE")
@@ -274,7 +288,13 @@ def _testset_build(args: argparse.Namespace) -> int:
     creds = store.Credentials(
         os.environ.get(WRITER_ACCESS_ENV, ""), os.environ.get(WRITER_SECRET_ENV, "")
     )
-    target = store.S3Store(endpoint, bucket, creds, os.environ.get(REGION_ENV) or "us-east-1")
+    target = store.S3Store(
+        endpoint,
+        bucket,
+        creds,
+        os.environ.get(REGION_ENV) or "us-east-1",
+        conditional_multipart=_conditional_multipart(),
+    )
     signer = _signer()
     policy = _trust_policy()
     built = testsets.build_and_lock(
@@ -303,15 +323,58 @@ def _registries() -> tuple[training.Registry, training.Licences]:
     return training.load_registry(datasets), training.load_licences(licences)
 
 
+def _conditional_multipart() -> bool:
+    """``MODEL_STORE_CONDITIONAL_MULTIPART``: ``1`` on, unset, empty or ``0`` off; anything
+    else is ``store_unavailable`` (a typo never turns it on or silently off)."""
+    value = os.environ.get(MULTIPART_ENV, "")
+    if value not in ("", "0", "1"):
+        raise Refused("store_unavailable", detail_code="conditional_multipart")
+    return value == "1"
+
+
 def _s3(access_env: str, secret_env: str) -> store.S3Store | None:
-    """The store as one role, or ``None`` when that role's credentials are not here."""
+    """The store as one role, or ``None`` when that role's credentials are not here. Only
+    the writer uploads, so only the writer's store reads the multipart setting."""
     access, secret = os.environ.get(access_env), os.environ.get(secret_env)
     if not access or not secret:
         return None
     endpoint = store.check_endpoint(_env(ENDPOINT_ENV, "store_unavailable"))
     bucket = _env(BUCKET_ENV, "store_unavailable")
     region = os.environ.get(REGION_ENV) or "us-east-1"
-    return store.S3Store(endpoint, bucket, store.Credentials(access, secret), region)
+    multipart = access_env == WRITER_ACCESS_ENV and _conditional_multipart()
+    return store.S3Store(
+        endpoint,
+        bucket,
+        store.Credentials(access, secret),
+        region,
+        conditional_multipart=multipart,
+    )
+
+
+def _writer() -> store.S3Store:
+    """The store as the writer; its credentials are required (``not_allowed_here``)."""
+    target = _s3(WRITER_ACCESS_ENV, WRITER_SECRET_ENV)
+    if target is None:
+        raise Refused("not_allowed_here", detail_code="writer_credentials")
+    return target
+
+
+def _store_probe_multipart(args: argparse.Namespace) -> int:
+    ok = _writer().probe_conditional_multipart()
+    _print({"conditional_multipart": ok})
+    return 0 if ok else 2
+
+
+MAX_STALE_HOURS = 24 * 365
+
+
+def _store_abort_stale(args: argparse.Namespace) -> int:
+    hours = args.older_than_hours
+    if not isinstance(hours, str) or not hours.isdigit() or not 0 < int(hours) <= MAX_STALE_HOURS:
+        raise Refused("not_allowed_here", detail_code="stale_age")
+    aborted = _writer().abort_stale_uploads(int(hours) * 3600)
+    _print({"stale_uploads_aborted": aborted})
+    return 0
 
 
 def _workflow() -> promote.WorkflowRun | None:
@@ -616,6 +679,11 @@ def _promote(args: argparse.Namespace) -> int:
             split=_split(args.dev_set, _suite_of(req.gates)),
             scratch_parent=Path(os.environ[SCRATCH_ENV]) if os.environ.get(SCRATCH_ENV) else None,
             base_verifier=_base_verifier(stack),
+            # The cap of the store that will promote it (read from the setting, not the
+            # store: a dry run reads no store credentials).
+            dry_run_max_file_bytes=(
+                store.MAX_OBJECT_BYTES if _conditional_multipart() else store.MAX_PUT_BYTES
+            ),
         )
         return _run_promote(req, ctx, report_dir)
 
@@ -898,6 +966,15 @@ def _parser() -> argparse.ArgumentParser:
     es.add_argument("--set", default=None)
     es.add_argument("--max-seconds", default="90")
     es.set_defaults(func=_eval_served)
+    spm = sub.add_parser(
+        "store-probe-multipart", help="check the store refuses a conditional overwrite"
+    )
+    spm.set_defaults(func=_store_probe_multipart)
+    sas = sub.add_parser(
+        "store-abort-stale-uploads", help="abort incomplete multipart uploads left behind"
+    )
+    sas.add_argument("--older-than-hours", default="24")
+    sas.set_defaults(func=_store_abort_stale)
     return parser
 
 

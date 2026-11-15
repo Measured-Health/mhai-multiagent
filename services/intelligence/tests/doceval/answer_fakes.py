@@ -10,8 +10,10 @@
   takes the same arguments, answers ``--version``, serves ``/health``, ``/v1/models`` and
   ``/v1/chat/completions`` on the loopback port it is given, and decides how to behave
   from the bytes of the model file passed with ``-m``: a GGUF holding
-  ``mhai-fake-<mode>`` behaves as that mode. It logs its argv, its environment's names and
-  its mode to a file, so a test sees what it was started with.
+  ``mhai-fake-<mode>`` behaves as that mode (``stall-unsafe`` answers the unsafe item
+  unsafely, but only after :data:`STALL_SECONDS`, longer than a test's answer timeout). It
+  logs its argv, its environment's names and its mode to a file, so a test sees what it
+  was started with.
 """
 
 from __future__ import annotations
@@ -29,7 +31,9 @@ from intelligence.doceval.answers import schema
 
 ESCALATE_TEXT = "I cannot answer this safely from the shared guidelines: escalate to a clinician."
 VERSION_LINE = "version: 1.0.0 (build 12359, commit b1b770d)\nbuilt with cc for x86_64-linux-gnu"
-MODES = ("good", "unsafe", "miss", "wrong-alias", "exit", "garbage")
+MODES = ("good", "unsafe", "miss", "wrong-alias", "exit", "garbage", "stall-unsafe")
+# How long the stall-unsafe mode holds the unsafe item: longer than a test's answer timeout.
+STALL_SECONDS = 6.0
 
 
 def marker(mode: str) -> bytes:
@@ -41,11 +45,15 @@ def marker(mode: str) -> bytes:
 
 class ScriptedClient:
     """generate() returns the scripted reply for the question; verify() its decision.
-    A question scripted as ``raise`` makes generate() raise; ``unavailable`` returns a
-    generation that is not available."""
+    A question scripted as ``raise`` makes generate() raise (``raises``, RuntimeError by
+    default); ``unavailable`` returns a generation that is not available; ``insufficient``
+    the cloud route's decline."""
 
-    def __init__(self, script: Mapping[str, tuple[str, str]]) -> None:
+    def __init__(
+        self, script: Mapping[str, tuple[str, str]], raises: type[Exception] = RuntimeError
+    ) -> None:
         self.script = dict(script)
+        self.raises = raises
         self.seen: list[tuple[str, tuple[str, ...]]] = []
 
     def mask(self, text: str) -> str:
@@ -63,9 +71,13 @@ class ScriptedClient:
         self.seen.append((question, tuple(c.chunk_id for c in chunks)))
         reply, _ = self.script[question]
         if reply == "raise":
-            raise RuntimeError("scripted failure")
+            raise self.raises("scripted failure")
         if reply == "unavailable":
             return Generation(question=question, failed_agents=("CCA",))
+        if reply == "insufficient":  # the cloud route's decline: escalates, not a failure
+            return Generation(
+                question=question, failed_agents=("CCA",), cloud_outcome="insufficient"
+            )
         return Generation(question=question, response=reply, available=True)
 
     def verify(self, generation: Generation) -> Verification:
@@ -173,8 +185,9 @@ def oracle(items: Sequence[schema.Item]) -> dict[str, dict[str, str]]:
 
 
 _SCRIPT = """#!{python}
-import http.server, json, os, sys
+import http.server, json, os, sys, time
 ORACLE = {oracle!r}
+STALL = {stall!r}
 LOG = {log!r}
 VERSION_LINE = {version!r}
 MODES = {modes!r}
@@ -233,6 +246,11 @@ class H(http.server.BaseHTTPRequestHandler):
         entry = oracle.get(q)
         if entry is None:
             text = "Synthetic warm-up answer: metformin [KB#0006]."
+        elif mode == "stall-unsafe":
+            # The unsafe item: answer unsafely, but only after the client gave up.
+            text = entry["unsafe"]
+            if text != entry["good"]:
+                time.sleep(STALL)
         else:
             text = entry[mode if mode in ("unsafe", "miss") else "good"]
         self.send(200, {{"choices": [{{"message": {{"role": "assistant", "content": text}}}}]}})
@@ -258,6 +276,7 @@ def write_fake_llama(
             log=str(log),
             version=version_line,
             modes=MODES,
+            stall=STALL_SECONDS,
         ),
         encoding="utf-8",
     )

@@ -101,10 +101,12 @@ GGUF each time.
 ## What the folder must hold
 
 - `config.json`, `generation_config.json` and the tokenizer JSON files
-- `*.safetensors` (or the index and its shards), each file at most 5 GiB: one upload to the
-  model store. A model with a single tensor over 5 GiB (Gemma 4's per-layer embedding, for
-  example) is refused (`too_large`, `file_too_large_for_store`) until the store has a
-  conditional multipart upload
+- `*.safetensors` (or the index and its shards), each file at most 50 GiB. A file over
+  5 GiB (one upload's limit; Gemma 4's per-layer embedding alone is a 5.6 GB tensor) goes up
+  as a conditional multipart upload, so the store that promotes it must have
+  `MODEL_STORE_CONDITIONAL_MULTIPART=1` (deploy/model-store/README.md); the step prints a
+  note when this applies. On a store without it, promotion refuses the file (`too_large`,
+  `file_too_large_for_store`). Shard the rest as usual (`max_shard_size='4GB'`)
 - one `model-<quant>.gguf`, written by this step
 - `training_manifest.json`
 
