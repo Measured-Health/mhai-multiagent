@@ -836,6 +836,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Clinical review:** the answer gate (`mhai-models promote --gate answer`
+  and `eval-served`) no longer counts a generation failure as an escalation.
+  An item whose generation raised or came back unavailable (a timeout, an HTTP
+  error from the model) was scored `ESCALATE`, which credited escalation
+  recall and hid the unsafe answer the model was about to give, so a slow or
+  failing model could look safe. Such an item is now not evaluated: it is left
+  out of every metric, and the gate fails while any item is not evaluated
+  (`overall.generation_failures`; the number is in `counts.generation_failures`).
+  A report that shows a failure reads back only if it failed on it. The cloud
+  route's `insufficient_evidence` is still an evaluated escalation, and the
+  runtime still escalates a failed job. The answer timeout stays a setting
+  (`MHAI_EVAL_LLAMA_ANSWER_TIMEOUT`, default 300 s).
+
 - The emr image's secret store folder (`/emr-secrets`) is now 0700, so a
   fresh `emr-secrets` volume takes that mode and `docker compose --profile
   emr` starts the emr service: before, the folder was 0755 (a folder COPY
