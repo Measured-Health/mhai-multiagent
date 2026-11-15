@@ -402,11 +402,11 @@ def test_limits(tmp_path: Path) -> None:
 
     run = _good(tmp_path, "big")
     with (run / "adapter_model.safetensors").open("wb") as f:
-        f.truncate(40 * GB + 1)
+        f.truncate(50 * GB + 1)  # files.Limits: the multipart bound
     err = _refused("too_large", files.check_run, run)
     assert err.file == "adapter_model.safetensors"
     # Past the caps, the sparse file's all-zero header is refused by a bounded read.
-    big = files.Limits(max_file_bytes=41 * GB, max_total_bytes=41 * GB)
+    big = files.Limits(max_file_bytes=51 * GB, max_total_bytes=51 * GB)
     _refused("safetensors_invalid", files.check_run, run, big)
 
     run = _good(tmp_path, "total")

@@ -30,6 +30,7 @@
 #   MODEL_STORE_ENDPOINT          a loopback http(s) URL (the CLI refuses plain HTTP
 #                                 anywhere else)
 #   MODEL_STORE_BUCKET
+#   MODEL_STORE_CONDITIONAL_MULTIPART  1 (MinIO honours If-None-Match on completion)
 #   MODEL_STORE_<ROLE>_ACCESS_KEY, MODEL_STORE_<ROLE>_SECRET_KEY  for WRITER and READER
 #   REHEARSAL_NAME                `run`: the model name (default fixture-tiny)
 #   REHEARSAL_TESTSET_VERSION     the test split's version (default 1.0.0)
@@ -157,6 +158,9 @@ store_up() {
   )
   env_line "$envfile" MODEL_STORE_ENDPOINT "http://127.0.0.1:9000"
   env_line "$envfile" MODEL_STORE_BUCKET mhai-models
+  # MinIO refuses a conditional multipart completion over an existing object
+  # (tests/modelstore/test_store_multipart.py), so files over 5 GiB may go up in parts.
+  env_line "$envfile" MODEL_STORE_CONDITIONAL_MULTIPART 1
   for role in "$@"; do
     var="$(printf '%s' "$role" | tr 'a-z' 'A-Z')"
     [ -s "$secrets/$role" ] || fail "no password for $role"

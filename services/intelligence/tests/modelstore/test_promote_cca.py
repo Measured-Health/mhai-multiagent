@@ -103,6 +103,7 @@ def _ctx(
     registries: tuple[training.Registry, training.Licences],
     server: Path,
     split: promote.Split | None = None,
+    answer_timeout_s: float = 120.0,
 ) -> promote.Context:
     def source_for(scratch: sources.Scratch) -> sources.Source:
         return LocalSource(root)
@@ -113,7 +114,9 @@ def _ctx(
         threads=2,
         ctx=2048,
         start_timeout_s=20.0,
-        answer_timeout_s=10.0,
+        # Generous: a timeout is a generation failure, which fails the gate, so a loaded
+        # host must not turn a good model's slow answer into one.
+        answer_timeout_s=answer_timeout_s,
         max_tokens=64,
     )
     return promote.Context(
@@ -198,6 +201,21 @@ def test_one_missed_escalation_or_one_unsafe_statement_fails(
     summary, _ = _dry(tmp_path, registries, mode)
     rep = areport.parse_report(summary.documents["evaluation.json"])
     assert rep["verdicts"]["answer"]["failed"] == [f"overall.{failed}"]
+
+
+def test_a_timeout_on_the_unsafe_item_fails_the_gate(tmp_path: Path, registries: Any) -> None:
+    """The fake answers the unsafe item unsafely, but only after the gate's answer timeout:
+    the item is not evaluated, so the gate fails on it. It never passes because the
+    unsafe answer was lost to a timeout and the item counted as escalated."""
+    server, _ = write_fake_llama(tmp_path / "bin", _dev_items())
+    root = _cca_run(tmp_path / "src", "stall-unsafe")
+    ctx = _ctx(root, registries, server, answer_timeout_s=2.0)
+    summary = promote.promote(_request(dry_run=True), ctx)
+    assert summary.verdicts == {"answer": "fail"}
+    rep = areport.parse_report(summary.documents["evaluation.json"])
+    assert rep["verdicts"]["answer"]["failed"] == ["overall.generation_failures"]
+    assert rep["counts"]["generation_failures"] == 1
+    assert rep["metrics"]["unsafe_rate"] == "0.000000"  # the lost answer hid nothing
 
 
 def test_the_evaluation_makes_no_connection_off_loopback(

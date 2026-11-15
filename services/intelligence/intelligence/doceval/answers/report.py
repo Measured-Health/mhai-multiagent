@@ -13,7 +13,11 @@ Aggregates only, never an item, question, id or answer::
 
 The verdict is :func:`intelligence.doceval.report.evaluate_rules` over the ``overall``
 scope of ``thresholds/answer.json``: every rule must pass, a metric with nothing to measure
-fails, and fewer items than ``min_documents`` fails (``overall.scope_documents``).
+fails, and fewer items than ``min_documents`` fails (``overall.scope_documents``). Every
+item must also have been evaluated (:func:`score.all_evaluated`, fixed in code): one
+generation failure (a timeout or an error from the model) fails the gate as
+``overall.generation_failures``, with the number in ``counts.generation_failures``. A
+report whose counts show a failure reads back only if it failed on it.
 ``gguf_sha256`` names the file that was scored: the run's GGUF, the one that is served.
 ``comparison`` is informational only (the cloud route on the same set, plan Task 7): it
 never changes a verdict. ``sign_off`` says the set and the pass mark have no clinical
@@ -36,6 +40,8 @@ REPORT_SCHEMA = "mhai.evaluation.answer_report/1"
 GATE = report.ANSWER_GATE
 METRICS: tuple[str, ...] = tuple(report.ANSWER_METRICS)
 COUNTS = ("escalated", "forbidden_hits", "generation_failures", "items", "must_escalate")
+# The every-item-evaluated rule's result key (score.all_evaluated).
+EVALUATED = "generation_failures"
 MAX_COMPARISONS = 4
 MAX_REPORT_BYTES = 256 * 1024
 
@@ -68,6 +74,18 @@ def _rates(m: score.SuiteMetrics) -> dict[str, str | None]:
     return {k: report.decimal(v) for k, v in m.rates().items()}
 
 
+def _with_evaluation(verdict: Mapping[str, Any], m: score.SuiteMetrics) -> dict[str, Any]:
+    """``verdict`` with the every-item-evaluated rule: ``overall.generation_failures``."""
+    overall = dict(verdict["results"]["overall"])
+    overall[EVALUATED] = "pass" if score.all_evaluated(m) else "fail"
+    failed = sorted(f"overall.{k}" for k, x in overall.items() if x in ("fail", "not_measured"))
+    return {
+        "verdict": "fail" if failed else "pass",
+        "results": {"overall": overall},
+        "failed": failed,
+    }
+
+
 def build_report(
     m: score.SuiteMetrics,
     thresholds: report.Thresholds,
@@ -82,7 +100,9 @@ def build_report(
     """The report of one scored set against the answer gate's ``thresholds``."""
     if not isinstance(thresholds, report.Thresholds) or thresholds.gate != GATE:
         raise Refused("policy_invalid")
-    verdict = report.evaluate_rules(thresholds, {"overall": m.rates()}, {"overall": m.items})
+    verdict = _with_evaluation(
+        report.evaluate_rules(thresholds, {"overall": m.rates()}, {"overall": m.items}), m
+    )
     rep = {
         "schema": REPORT_SCHEMA,
         "split": report.check_split(split),
@@ -190,8 +210,11 @@ def parse_report(raw: bytes, *, any_thresholds_file: bool = False) -> dict[str, 
     g = v[GATE]
     _req(g["verdict"] in ("pass", "fail") and _exact(g["results"], ("overall",)))
     out = g["results"]["overall"]
-    allowed = set(METRICS) | {"scope_documents"}
+    allowed = set(METRICS) | {"scope_documents", EVALUATED}
     _req(isinstance(out, dict) and set(out) <= allowed and "scope_documents" in out)
+    # A generation failure must have failed the gate: it can't be dropped or passed.
+    _req(obj["counts"]["generation_failures"] == 0 or out.get(EVALUATED) == "fail")
+    _req(EVALUATED not in out or out[EVALUATED] in ("pass", "fail"))
     _req(all(x in _VERDICTS for x in out.values()))
     expected = sorted(f"overall.{k}" for k, x in out.items() if x in ("fail", "not_measured"))
     _req(g["failed"] == expected and (g["verdict"] == "fail") == bool(expected))
@@ -228,6 +251,10 @@ def render_markdown(rep: Mapping[str, Any]) -> str:
         )
     lines.append(
         f"| `scope_documents` | {ts['items']} | `{g['results']['overall']['scope_documents']}` |"
+    )
+    lines.append(
+        f"| `{EVALUATED}` | {rep['counts']['generation_failures']} "
+        f"| `{g['results']['overall'].get(EVALUATED, 'recorded')}` |"
     )
     lines += ["", "## Counts", ""]
     lines += [f"- `{k}`: {rep['counts'][k]}" for k in COUNTS]

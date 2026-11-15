@@ -135,11 +135,12 @@ jobs:
           path: services/intelligence/coverage.boundary
           retention-days: 1
 
-  # diff-cover on both runs together: boundary code is covered mostly by
-  # the Docker tests, the rest by checks. pb/ is omitted (pyproject.toml).
+  # diff-cover on the three runs together: boundary code is covered mostly by
+  # the Docker tests, the model store's MinIO paths by the store tests, the rest
+  # by checks. pb/ is omitted (pyproject.toml).
   coverage:
     if: github.event_name == 'pull_request'
-    needs: [checks, intelligence-boundary]
+    needs: [checks, intelligence-boundary, model-promotion-e2e]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -164,7 +165,7 @@ jobs:
           path: services/intelligence
       - name: Combine
         run: |
-          uv run coverage combine coverage.checks coverage.boundary
+          uv run coverage combine coverage.checks coverage.boundary coverage.store
           uv run coverage xml
       - name: Coverage of changed lines
         env:
@@ -199,7 +200,15 @@ jobs:
       - name: Rehearse the promotion flow
         run: uv run --no-sync scripts/rehearse-promotion.sh run
       - name: Store tests (MinIO with testcontainers)
-        run: uv run --no-sync pytest -q -m store tests/modelstore
+        env:
+          COVERAGE_FILE: coverage.store
+        run: uv run --no-sync pytest -q -m store tests/modelstore --cov=intelligence --cov-report=
+      - name: Keep the coverage data
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-store
+          path: services/intelligence/coverage.store
+          retention-days: 1
 
   # The core suites run as parallel jobs: one after another they took about
   # 77 minutes per PR, which slows the pilot down. Same commands as before.
