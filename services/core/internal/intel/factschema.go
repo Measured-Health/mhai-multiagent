@@ -63,6 +63,8 @@ var (
 var (
 	egressValues  = setOf(config.EgressValues())
 	cloudOutcomes = setOf(config.CloudOutcomes)
+	// The escalation guard's reason codes (ADR 0017).
+	guardReasons = setOf(config.GuardReasons)
 )
 
 // fieldCheck checks one payload value.
@@ -99,6 +101,9 @@ var jobFactSchemas = map[string]struct {
 		// valid (A16).
 		"egress":        inSet(egressValues),
 		"cloud_outcome": inSet(cloudOutcomes),
+		// Optional: why the escalation guard escalated or downgraded the
+		// answer, codes only (ADR 0017).
+		"guard_reasons": codeSet(guardReasons),
 	}, required: []string{"decision", "attempts"}}, "completed", "", "", ""},
 	"query.failed": {factSchema{fields: map[string]fieldCheck{
 		"error":    inSet(errorCodes),
@@ -194,6 +199,25 @@ func stringList(max int, re *regexp.Regexp) fieldCheck {
 			if !ok || !re.MatchString(s) {
 				return false
 			}
+		}
+		return true
+	}
+}
+
+// codeSet: a non-empty list of distinct codes, each in set.
+func codeSet(set map[string]bool) fieldCheck {
+	return func(v any) bool {
+		list, ok := v.([]any)
+		if !ok || len(list) == 0 || len(list) > len(set) {
+			return false
+		}
+		seen := make(map[string]bool, len(list))
+		for _, e := range list {
+			s, ok := e.(string)
+			if !ok || !set[s] || seen[s] {
+				return false
+			}
+			seen[s] = true
 		}
 		return true
 	}

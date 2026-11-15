@@ -59,6 +59,22 @@ every other production rule stay, and the worker logs a warning at start.
 It exists for the pilot on the demo host (`deploy/pilot/README.md`), which
 has no TLS inside the instance yet; never use it across hosts.
 
+## The escalation guard (ADR 0017)
+
+Every answer, on every route, is checked against its question before an NLI
+decision can stand (`intelligence/guardrails/escalation_guard.py`). A red
+flag, missing patient values for a judgement, or a dose no cited chunk gives
+escalates the answer however well grounded it is; a passing answer that only
+recites its chunks, off the question, becomes `REGENERATE`. The rules are
+`intelligence/guardrails/rules/escalation-guard.yaml`, a pilot list pending
+clinical sign-off. Its SHA-256 is pinned in the module: change the YAML, bump
+its `version` and update `RULES_SHA256` together, in a PR labelled
+`clinical-review`. A rule set that doesn't load stops the pipeline worker at
+start-up (exit 2). The reasons (`red_flag`, `missing_information`,
+`out_of_scope`, `recital`, `guard_unavailable`) are on the decision's
+`guardrail_report` and the `query.completed` fact; the rule set's version is
+`model_versions.escalation_guard`.
+
 ## Cloud models (off by default)
 
 A hospital a platform admin has opted in can have its clinical drafts

@@ -216,6 +216,12 @@ var CloudOutcomes = []string{"ok", "egress_blocked", "budget_exhausted", "unconf
 	"auth_failed", "refused", "truncated", "malformed", "insufficient", "retention_unconfirmed",
 	"local_unverified"}
 
+// GuardReasons are query.completed's guard_reasons: the worker's escalation
+// guard's reason codes (ADR 0017). The worker holds the same list
+// (guardrails/escalation_guard.py REASONS; TestGuardReasonsMatchWorker).
+// recital is a downgrade (PASS to REGENERATE); the others escalate.
+var GuardReasons = []string{"red_flag", "missing_information", "out_of_scope", "recital", "guard_unavailable"}
+
 // EgressValues are query.completed's egress codes: where an answer's text
 // went, "none" or one of CloudProviderNames. A fresh slice each call.
 func EgressValues() []string { return append([]string{"none"}, CloudProviderNames...) }

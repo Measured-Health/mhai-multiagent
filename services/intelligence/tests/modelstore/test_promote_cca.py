@@ -196,11 +196,22 @@ def test_the_gguf_is_what_is_scored_not_the_safetensors(tmp_path: Path, registri
     ("mode", "failed"), [("miss", "escalation_recall"), ("unsafe", "unsafe_rate")]
 )
 def test_one_missed_escalation_or_one_unsafe_statement_fails(
-    tmp_path: Path, registries: Any, mode: str, failed: str
+    tmp_path: Path, registries: Any, mode: str, failed: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if mode == "miss":
+        _without_guard(monkeypatch)
     summary, _ = _dry(tmp_path, registries, mode)
     rep = areport.parse_report(summary.documents["evaluation.json"])
     assert rep["verdicts"]["answer"]["failed"] == [f"overall.{failed}"]
+
+
+def test_the_gate_scores_through_the_escalation_guard(tmp_path: Path, registries: Any) -> None:
+    """A confident answer to a must-escalate question the guard catches still escalates:
+    the gate scores what a hospital would get (ADR 0017)."""
+    summary, _ = _dry(tmp_path, registries, "miss")
+    rep = areport.parse_report(summary.documents["evaluation.json"])
+    assert rep["verdicts"]["answer"]["verdict"] == "pass"
+    assert rep["metrics"]["escalation_recall"] == "1.000000"
 
 
 def test_a_timeout_on_the_unsafe_item_fails_the_gate(tmp_path: Path, registries: Any) -> None:
@@ -213,7 +224,9 @@ def test_a_timeout_on_the_unsafe_item_fails_the_gate(tmp_path: Path, registries:
     summary = promote.promote(_request(dry_run=True), ctx)
     assert summary.verdicts == {"answer": "fail"}
     rep = areport.parse_report(summary.documents["evaluation.json"])
-    assert rep["verdicts"]["answer"]["failed"] == ["overall.generation_failures"]
+    # The lost item is answerable, so the grounded rate on the small dev set may fail too;
+    # what matters is that the generation failure is one of the reasons.
+    assert "overall.generation_failures" in rep["verdicts"]["answer"]["failed"]
     assert rep["counts"]["generation_failures"] == 1
     assert rep["metrics"]["unsafe_rate"] == "0.000000"  # the lost answer hid nothing
 
@@ -338,8 +351,10 @@ def test_a_passing_gguf_on_the_locked_split_is_pinnable(
 
 @pytest.mark.parametrize("mode", ["miss", "unsafe"])
 def test_a_failing_gguf_is_signed_but_never_pinned(
-    tmp_path: Path, registries: Any, keys: Keys, mode: str
+    tmp_path: Path, registries: Any, keys: Keys, mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if mode == "miss":
+        _without_guard(monkeypatch)
     with pytest.raises(Refused) as e:
         _promote_and_pin(tmp_path, registries, keys, mode)
     assert e.value.reason == "gate_failed"
@@ -402,3 +417,12 @@ def test_thresholds_hash_is_the_committed_answer_file() -> None:
         lock.thresholds_sha256(report.THRESHOLDS_DIR, "answer") == hashlib.sha256(raw).hexdigest()
     )
     assert canonical.dumps(canonical.loads_strict(raw, 1 << 20)) == raw
+
+
+def _without_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate's scoring mechanics alone: the escalation guard (ADR 0017) would catch the
+    fake's missed escalation, so a test of "one miss fails" switches it off."""
+    from intelligence.boundary import models
+    from intelligence.guardrails import escalation_guard
+
+    monkeypatch.setattr(models, "_guard_question", lambda g: (escalation_guard.Verdict(), None))
