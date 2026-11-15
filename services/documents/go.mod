@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/Measured-Health/mhai-multiagent/services/gokit v0.0.0
-	github.com/jackc/pgx/v5 v5.12.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/nats-io/nats.go v1.55.0
 	google.golang.org/protobuf v1.36.12
 )

@@ -89,3 +89,34 @@ func TestAnalysisKeyFiles(t *testing.T) {
 		t.Errorf("one of four set: %v", err)
 	}
 }
+
+// Analysis PR 10 (departure 79): ingest is off unless ANALYSIS_INGEST says
+// true, and true is refused without the four keys (it would fail closed
+// every night).
+func TestConfigAnalysisIngest(t *testing.T) {
+	dir := t.TempDir()
+	keys := map[string]string{}
+	for i, v := range analysisKeyVars {
+		keys[v] = writeKeyFile(t, dir, strings.ToLower(v), b64(byte(i+1))+"\n", 0o600)
+	}
+	for raw, want := range map[string]bool{"": false, "false": false, "true": true, " TRUE ": true} {
+		env := map[string]string{"ANALYSIS_INGEST": raw}
+		for k, v := range keys {
+			env[k] = v
+		}
+		analysisEnv(t, env)
+		if c, err := Load(); err != nil || c.AnalysisIngest != want {
+			t.Errorf("%q: %v %v", raw, c.AnalysisIngest, err)
+		}
+	}
+	for _, bad := range []string{"yes", "1", "on"} {
+		analysisEnv(t, map[string]string{"ANALYSIS_INGEST": bad})
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ANALYSIS_INGEST") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	analysisEnv(t, map[string]string{"ANALYSIS_INGEST": "true"})
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ANALYSIS_INGEST") {
+		t.Errorf("true without keys: %v", err)
+	}
+}

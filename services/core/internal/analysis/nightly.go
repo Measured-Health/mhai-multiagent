@@ -38,6 +38,10 @@ type Store interface {
 	// build and writes them, in one transaction; it returns the late count.
 	Ingest(ctx context.Context, hospital uuid.UUID, after *time.Time, until time.Time,
 		build func([]SourceRow) ([]byte, error)) (int, error)
+	// Changes reads the patient-index changes (exclusions, merges) after
+	// the hospital's changes watermark, builds them with build and applies
+	// them up to until, in one transaction (PR 10).
+	Changes(ctx context.Context, hospital uuid.UUID, until time.Time, build func([]ChangeRow) ([]byte, error)) (int, error)
 	Sweep(ctx context.Context, hospital uuid.UUID, now time.Time) error
 	Freeze(ctx context.Context, hospital uuid.UUID, now time.Time) (int, error)
 	Ran(ctx context.Context, hospital uuid.UUID, now time.Time) error
@@ -50,14 +54,20 @@ type Clock interface {
 }
 
 // Nightly is the analysis run (design §11 steps 1, 2 and 4): per due
-// hospital, ingest (switched on and not a demo), sweep, then freeze
-// (switched on). It logs the hospital id, the step and a fixed reason only.
+// hospital, the patient-index changes and the sweep (whatever the switch:
+// they only remove or move), then ingest (switched on, not a demo, and
+// Ingest) and freeze (switched on). It logs the hospital id, the step and
+// a fixed reason only.
 type Nightly struct {
 	Store Store
 	Keys  *Keys // nil: a signed-off hospital with rows to ingest fails closed
 	Clock Clock
 	Log   *slog.Logger
 	Every time.Duration // 0: Every
+	// Ingest (ANALYSIS_INGEST) lets the run read consultations and EMR
+	// facts for a hospital switched on with real references. Off by
+	// default (plan departure 79): the switch and this both must allow it.
+	Ingest bool
 	// Lock holds the one-copy lock for a tick. NewNightly sets
 	// pg_try_advisory_lock on the pool.
 	Lock func(ctx context.Context) (unlock func(), ok bool, err error)
@@ -150,7 +160,19 @@ func (n *Nightly) Tick(ctx context.Context) ([]uuid.UUID, error) {
 // runHospital runs one hospital's steps in order and returns the step that
 // failed, or "".
 func (n *Nightly) runHospital(ctx context.Context, d Due, now time.Time) string {
-	if d.On && !d.Demo {
+	// The removal steps first, each tried whatever the other did, so
+	// erasure and retention never wait on ingest (security review M1).
+	_, cerr := n.Store.Changes(ctx, d.Hospital, now, func(rows []ChangeRow) ([]byte, error) {
+		return buildChanges(n.Keys, d.Hospital, rows)
+	})
+	serr := n.Store.Sweep(ctx, d.Hospital, now)
+	switch {
+	case cerr != nil:
+		return "changes"
+	case serr != nil:
+		return "sweep"
+	}
+	if d.On && !d.Demo && n.Ingest {
 		late, err := n.Store.Ingest(ctx, d.Hospital, d.IngestedUntil, now, func(rows []SourceRow) ([]byte, error) {
 			return buildIngest(n.Keys, d.Hospital, rows)
 		})
@@ -158,9 +180,6 @@ func (n *Nightly) runHospital(ctx context.Context, d Due, now time.Time) string 
 			return "ingest"
 		}
 		n.LateFacts.Add(int64(late))
-	}
-	if err := n.Store.Sweep(ctx, d.Hospital, now); err != nil {
-		return "sweep"
 	}
 	if d.On {
 		if _, err := n.Store.Freeze(ctx, d.Hospital, now); err != nil {

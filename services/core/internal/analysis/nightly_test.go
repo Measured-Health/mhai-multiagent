@@ -38,6 +38,10 @@ type fakeStore struct {
 	fail   map[string]error // "<step> <hospital>"
 	inDue  func()
 	frozen int
+	// changes are the patient-index changes the store lists (PR 10);
+	// changed the bodies built from them.
+	changes []ChangeRow
+	changed [][]byte
 }
 
 func (s *fakeStore) record(step string, h uuid.UUID) error {
@@ -71,6 +75,20 @@ func (s *fakeStore) Ingest(_ context.Context, h uuid.UUID, _ *time.Time, until t
 	return 2, nil
 }
 
+func (s *fakeStore) Changes(_ context.Context, h uuid.UUID, _ time.Time, build func([]ChangeRow) ([]byte, error)) (int, error) {
+	if err := s.record("changes", h); err != nil {
+		return 0, err
+	}
+	b, err := build(s.changes)
+	if err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	s.changed = append(s.changed, b)
+	s.mu.Unlock()
+	return len(s.changes), nil
+}
+
 func (s *fakeStore) Sweep(_ context.Context, h uuid.UUID, _ time.Time) error {
 	return s.record("sweep", h)
 }
@@ -91,19 +109,21 @@ func ids(n int) []uuid.UUID {
 	return out
 }
 
-// Ingest runs before sweep and freeze; a demo hospital never ingests; a
-// switched-off hospital with facts is only swept.
+// The removal steps (changes, sweep) run first, then ingest and freeze; a
+// demo hospital never ingests; a switched-off hospital with facts is only
+// changed and swept.
 func TestNightlyOrder(t *testing.T) {
 	h := ids(3)
 	s := &fakeStore{due: []Due{{Hospital: h[0], On: true}, {Hospital: h[1], On: true, Demo: true}, {Hospital: h[2]}}}
-	n := &Nightly{Store: s, Keys: testKeys(t), Clock: fixedClock(testNow), Lock: noLock}
+	n := &Nightly{Store: s, Keys: testKeys(t), Clock: fixedClock(testNow), Lock: noLock, Ingest: true}
 	ran, err := n.Tick(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"ingest " + h[0].String(), "sweep " + h[0].String(), "freeze " + h[0].String(), "ran " + h[0].String(),
-		"sweep " + h[1].String(), "freeze " + h[1].String(), "ran " + h[1].String(),
-		"sweep " + h[2].String(), "ran " + h[2].String()}
+	want := []string{"changes " + h[0].String(), "sweep " + h[0].String(), "ingest " + h[0].String(), "freeze " + h[0].String(),
+		"ran " + h[0].String(),
+		"changes " + h[1].String(), "sweep " + h[1].String(), "freeze " + h[1].String(), "ran " + h[1].String(),
+		"changes " + h[2].String(), "sweep " + h[2].String(), "ran " + h[2].String()}
 	if strings.Join(s.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("calls\n%s\nwant\n%s", strings.Join(s.calls, "\n"), strings.Join(want, "\n"))
 	}
@@ -159,7 +179,7 @@ func TestNightlyLogsNoValues(t *testing.T) {
 	var logs bytes.Buffer
 	s := &fakeStore{due: []Due{{Hospital: h[0], On: true}, {Hospital: h[1], On: true}},
 		fail: map[string]error{"freeze " + h[0].String(): errors.New("E11 on 2026-02-10 for ref-secret-77, count 9876")}}
-	n := &Nightly{Store: s, Keys: testKeys(t), Clock: fixedClock(testNow), Lock: noLock,
+	n := &Nightly{Store: s, Keys: testKeys(t), Clock: fixedClock(testNow), Lock: noLock, Ingest: true,
 		Log: slog.New(slog.NewJSONHandler(&logs, nil))}
 	ran, err := n.Tick(context.Background())
 	if err == nil || len(ran) != 1 || ran[0] != h[1] {
@@ -198,7 +218,7 @@ func TestIngestBuildsReferencesWithKeys(t *testing.T) {
 		{Ref: "emr-index-0001", Day: day, Kind: "consultation", Sex: "female"},
 		{Ref: "emr-index-0002", Day: day, Kind: "consultation", Sex: "male"},
 	}}
-	n := &Nightly{Store: s, Keys: k, Clock: fixedClock(testNow), Lock: noLock}
+	n := &Nightly{Store: s, Keys: k, Clock: fixedClock(testNow), Lock: noLock, Ingest: true}
 	if _, err := n.Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +268,7 @@ func TestIngestWithoutKeysFailsClosed(t *testing.T) {
 	h := ids(1)
 	s := &fakeStore{due: []Due{{Hospital: h[0], On: true}},
 		rows: []SourceRow{{Ref: "emr-index-0001", Day: testNow, Kind: "consultation", Sex: "female"}}}
-	n := &Nightly{Store: s, Clock: fixedClock(testNow), Lock: noLock}
+	n := &Nightly{Store: s, Clock: fixedClock(testNow), Lock: noLock, Ingest: true}
 	if ran, err := n.Tick(context.Background()); err == nil || len(ran) != 0 {
 		t.Fatalf("ran %v without keys (%v)", ran, err)
 	}

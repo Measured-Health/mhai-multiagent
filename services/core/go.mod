@@ -6,7 +6,7 @@ require (
 	github.com/Measured-Health/mhai-multiagent/services/gokit v0.0.0
 	github.com/bufbuild/protocompile v0.14.1
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.12.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/nats-io/nats.go v1.55.0
 	github.com/nats-io/nkeys v0.4.16
 	github.com/pressly/goose/v3 v3.30.0
@@ -20,7 +20,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/crypto v0.58.0
-	golang.org/x/term v0.47.0
+	golang.org/x/term v0.48.0
 	golang.org/x/text v0.44.0
 	gonum.org/v1/gonum v0.17.0
 	google.golang.org/protobuf v1.36.12
