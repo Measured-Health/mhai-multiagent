@@ -19,6 +19,31 @@ sends its own SHA-256 (``ChecksumAlgorithm=SHA256`` with ``ChecksumSHA256``), so
 refuses a body that changed on the way. Nothing here deletes or overwrites: there is no
 delete method. Object lock and retention are not used (TODO.md, "Before scale").
 
+**Files over 5 GiB** (one PUT's limit; Gemma 4's per-layer embedding alone is 5.6 GB) go
+up as a multipart upload, and only when the store was built with ``conditional_multipart``
+(``MODEL_STORE_CONDITIONAL_MULTIPART=1``, set once ``mhai-models store-probe-multipart``
+has shown that the store honours ``If-None-Match`` on completion; MinIO and AWS S3 do).
+Without it such a file is ``too_large`` (``file_too_large_for_store``), never an
+unconditional write. :meth:`S3Store.put_new` then:
+
+1. refuses a key that already exists before sending anything;
+2. sends each part with its SHA-256 (``ChecksumSHA256``), or with ``Content-MD5`` if the
+   store did not take SHA-256 for the upload, so the store refuses a part changed on the
+   way;
+3. hashes the bytes as it sends them: the whole file's SHA-256 must be the one the caller
+   checked (the run's files hash) before anything is completed;
+4. completes with ``If-None-Match: *``, so an object that appeared meanwhile is refused;
+5. reads back what the store kept: its size and its checksum of the parts' SHA-256s
+   (compared with the one computed from the parts sent) or, when it keeps none, the whole
+   object again; and the key must have exactly that one version.
+
+Any failure before completion aborts the upload (``AbortMultipartUpload``). An upload a
+killed job leaves behind is aborted by ``mhai-models store-abort-stale-uploads`` or by the
+bucket's lifecycle rule (deploy/model-store/README.md). The store keeps no SHA-256 of a
+multipart object as a whole: :meth:`S3Store.head` refuses it (``checksum``, as for any
+object without one), and :meth:`S3Store.download` hashes the full object, which every
+caller compares with the manifest (or verifies as a signature).
+
 **Versioning is optional.** In a versioned bucket every put returns a version id, and the
 manifest records it (``store_version_id``); readers ask for that version. In a bucket
 without versioning the store returns none, and :data:`NULL_VERSION` (``null``, S3's own
@@ -49,10 +74,12 @@ import io
 import logging
 import os
 import re
+import secrets
 import stat
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 from urllib.parse import urlsplit
@@ -64,7 +91,14 @@ from intelligence.modelstore.reasons import Refused
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 # The version id of an object in a bucket without versioning (S3's own spelling).
 NULL_VERSION = "null"
-MAX_PUT_BYTES = 5 * 1024**3  # one S3 PUT; larger objects need multipart (not in phase 0)
+MAX_PUT_BYTES = 5 * 1024**3  # one S3 PUT; larger objects need a conditional multipart upload
+MAX_OBJECT_BYTES = 50 * 1024**3  # a multipart upload (files.Limits.max_file_bytes)
+PART_BYTES = 64 * 1024**2  # 50 GiB is 800 parts
+MIN_PART_BYTES = 5 * 1024**2  # S3's floor for every part but the last
+MAX_PARTS = 10_000  # S3's ceiling
+MIN_STALE_AGE_S = 6 * 3600  # an upload younger than this may still be running
+DEFAULT_STALE_AGE_S = 24 * 3600
+NO_MULTIPART = "file_too_large_for_store"  # promote.FILE_TOO_LARGE
 MAX_KEY_CHARS = 1024
 MAX_LIST = 10_000
 MAX_EVAL_PATH_PARTS = 8
@@ -78,12 +112,21 @@ _BUCKET = re.compile(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]", re.ASCII)
 _REGION = re.compile(r"[a-z]{2}(?:-[a-z0-9]+){1,4}", re.ASCII)
 _SUITE = re.compile(r"[a-z][a-z0-9_]{0,62}", re.ASCII)
 _SHA256_B64 = re.compile(r"[A-Za-z0-9+/]{43}=", re.ASCII)
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}", re.ASCII)
+# The store's checksum of a multipart object: base64 SHA-256 of its parts' SHA-256s, "-N".
+_COMPOSITE = re.compile(r"[A-Za-z0-9+/]{43}=-[1-9][0-9]{0,4}", re.ASCII)
+_MULTIPART_ETAG = re.compile(r'"?[0-9a-fA-F]{32}-[1-9][0-9]{0,4}"?', re.ASCII)
+_ETAG = re.compile(r'"?[A-Za-z0-9-]{1,128}"?', re.ASCII)
+_UPLOAD_ID = re.compile(r"[A-Za-z0-9._~+/=-]{1,1024}", re.ASCII)
 _SDK_LOGGERS = ("boto3", "botocore", "s3transfer", "urllib3")
 
 _NOT_FOUND = frozenset({"NoSuchKey", "NoSuchVersion", "NotFound", "404"})
 _PRECONDITION = frozenset({"PreconditionFailed", "412"})
 _DENIED = frozenset({"AccessDenied", "403", "InvalidAccessKeyId", "SignatureDoesNotMatch"})
 _CHECKSUM = frozenset({"XAmzContentChecksumMismatch", "BadDigest", "InvalidDigest"})
+
+
+log = logging.getLogger(__name__)
 
 
 def _unavailable(detail: str) -> Refused:
@@ -205,7 +248,11 @@ class ObjectInfo:
 class ObjectStore(Protocol):
     """Write-once object storage. There is no delete method."""
 
-    def put_new(self, key: str, data: bytes | Path) -> str: ...
+    def put_new(self, key: str, data: bytes | Path, *, sha256: str | None = None) -> str: ...
+
+    def download(
+        self, key: str, *, version_id: str, out: BinaryIO, max_bytes: int
+    ) -> tuple[int, str]: ...
 
     def get(self, key: str, version_id: str | None = None, *, max_bytes: int) -> bytes: ...
 
@@ -331,6 +378,59 @@ def _hex_from_b64(value: object) -> str:
     return base64.b64decode(value).hex()
 
 
+def _whole_sha256(resp: Mapping[str, Any]) -> str | None:
+    """The SHA-256 the store keeps of the whole object (lowercase hex), or None for a
+    multipart object, of which it keeps none (it keeps a checksum of the parts'
+    checksums, or nothing and a multipart ETag). Anything else without a SHA-256 is
+    refused (``checksum``), as before."""
+    value = resp.get("ChecksumSHA256")
+    if isinstance(value, str) and _COMPOSITE.fullmatch(value) is not None:
+        return None
+    etag = resp.get("ETag")
+    if value is None and isinstance(etag, str) and _MULTIPART_ETAG.fullmatch(etag) is not None:
+        return None
+    return _hex_from_b64(value)
+
+
+def _composite(digests: list[bytes]) -> str:
+    """What the store reports for a multipart upload with SHA-256 part checksums."""
+    whole = hashlib.sha256(b"".join(digests)).digest()
+    return f"{base64.b64encode(whole).decode('ascii')}-{len(digests)}"
+
+
+def _check_sha256_hex(value: object) -> str:
+    if not isinstance(value, str) or _SHA256_HEX.fullmatch(value) is None:
+        raise Refused("hash_mismatch", detail_code="expected")
+    return value
+
+
+def _returned(value: object, pattern: re.Pattern[str], detail: str) -> str:
+    """A string the store returned (an upload id, an ETag), checked before it is sent
+    back in another call."""
+    if not isinstance(value, str) or pattern.fullmatch(value) is None:
+        raise _unavailable(detail)
+    return value
+
+
+def _stale_upload(up: object, cutoff: datetime) -> tuple[str, str] | None:
+    """The key and upload id of a listed upload started before ``cutoff``, or None (a
+    newer one, or one whose key or id is not ours to send back)."""
+    if not isinstance(up, Mapping):
+        return None
+    started = up.get("Initiated")
+    if not isinstance(started, datetime) or started.tzinfo is None or started >= cutoff:
+        return None
+    bad = False
+    try:
+        key = _check_key(up.get("Key"))
+        upload_id = _returned(up.get("UploadId"), _UPLOAD_ID, "upload_id")
+    except Refused:
+        bad = True
+    if bad:
+        return None
+    return key, upload_id
+
+
 @contextmanager
 def _open_regular(path: Path) -> Iterator[tuple[BinaryIO, int]]:
     """A regular, singly linked file opened without following a link, and its size."""
@@ -352,6 +452,39 @@ def _open_regular(path: Path) -> Iterator[tuple[BinaryIO, int]]:
         yield f, st.st_size
 
 
+def _read_exact(f: BinaryIO, n: int) -> bytes:
+    """``n`` bytes of ``f``; fewer (the file shrank) is ``size_mismatch``."""
+    chunks: list[bytes] = []
+    left = n
+    failed = False
+    try:
+        while left:
+            block = f.read(left)
+            if not block:
+                break
+            chunks.append(block)
+            left -= len(block)
+    except OSError:
+        failed = True
+    if failed:
+        raise Refused("file_not_allowed", detail_code="read")
+    if left:
+        raise Refused("size_mismatch")
+    return b"".join(chunks)
+
+
+def _has_more(f: BinaryIO) -> bool:
+    """True when ``f`` still has bytes (the file grew while it was being sent)."""
+    failed = False
+    try:
+        more = f.read(1)
+    except OSError:
+        failed = True
+    if failed:
+        raise Refused("file_not_allowed", detail_code="read")
+    return bool(more)
+
+
 def _sha256_stream(f: BinaryIO) -> tuple[bytes, int]:
     h = hashlib.sha256()
     n = 0
@@ -365,7 +498,7 @@ class S3Store:
     """:class:`ObjectStore` over the S3 API (boto3): MinIO in tests and compose, the
     cloud store in production (Task 27)."""
 
-    __slots__ = ("_bucket", "_client")
+    __slots__ = ("_bucket", "_client", "_multipart", "_part_bytes", "_threshold")
 
     def __init__(
         self,
@@ -377,12 +510,33 @@ class S3Store:
         connect_timeout: float = 10.0,
         read_timeout: float = 120.0,
         max_attempts: int = 5,
+        conditional_multipart: bool = False,
+        part_bytes: int = PART_BYTES,
+        multipart_threshold: int | None = None,
     ) -> None:
+        """``conditional_multipart``: the store honours ``If-None-Match`` on
+        ``CompleteMultipartUpload`` (``store-probe-multipart``), so a file over
+        ``multipart_threshold`` (one PUT's 5 GiB unless a test lowers it) goes up in parts
+        of ``part_bytes``. Without it such a file is refused."""
         url = check_endpoint(endpoint)
         check_bucket(bucket)
         check_region(region)
         if not isinstance(credentials, Credentials):
             raise _unavailable("credentials")
+        threshold = MAX_PUT_BYTES if multipart_threshold is None else multipart_threshold
+        if (
+            not isinstance(conditional_multipart, bool)
+            or not isinstance(part_bytes, int)
+            or isinstance(part_bytes, bool)
+            or not MIN_PART_BYTES <= part_bytes <= MAX_PUT_BYTES
+            or not isinstance(threshold, int)
+            or isinstance(threshold, bool)
+            or not 0 <= threshold <= MAX_PUT_BYTES
+        ):
+            raise _unavailable("multipart_settings")
+        self._multipart = conditional_multipart
+        self._part_bytes = part_bytes
+        self._threshold = threshold
         # The SDK loggers are clamped here, when a store is built, and process-wide (the
         # four parent loggers; their children inherit the level). Pinned by
         # test_sdk_loggers_clamped_at_construction.
@@ -425,6 +579,12 @@ class S3Store:
     def __repr__(self) -> str:
         return "S3Store()"
 
+    @property
+    def max_object_bytes(self) -> int:
+        """The largest object :meth:`put_new` takes: 50 GiB with conditional multipart,
+        else one PUT's 5 GiB."""
+        return MAX_OBJECT_BYTES if self._multipart else MAX_PUT_BYTES
+
     def __reduce__(self) -> Any:
         raise TypeError("S3Store cannot be pickled")
 
@@ -460,25 +620,39 @@ class S3Store:
 
     # ------------------------------------------------------------ the protocol
 
-    def put_new(self, key: str, data: bytes | Path) -> str:
+    def put_new(self, key: str, data: bytes | Path, *, sha256: str | None = None) -> str:
         """Create ``key`` once and return its version id (:data:`NULL_VERSION` in a bucket
         without versioning). An existing key is ``version_exists`` (P7). A ``Path`` is read
         without following a link and streamed; if it changes between hashing and upload,
-        the store refuses it (``hash_mismatch``)."""
+        the store refuses it (``hash_mismatch``). ``sha256`` (lowercase hex), when given,
+        is what the bytes must hash to (``hash_mismatch`` before anything is completed);
+        a file over the multipart threshold needs it (see the module docstring)."""
         _check_key(key)
+        expect = None if sha256 is None else _check_sha256_hex(sha256)
         if isinstance(data, (bytes, bytearray)):
             body = bytes(data)
             if len(body) > MAX_PUT_BYTES:
                 raise Refused("too_large")
-            return self._put(key, io.BytesIO(body), hashlib.sha256(body).digest())
+            digest = hashlib.sha256(body).digest()
+            if expect is not None and not secrets.compare_digest(digest.hex(), expect):
+                raise Refused("hash_mismatch", detail_code="expected")
+            return self._put(key, io.BytesIO(body), digest)
         if not isinstance(data, Path):
             raise Refused("file_not_allowed", detail_code="data")
         with _open_regular(data) as (f, size):
-            if size > MAX_PUT_BYTES:
+            if size > MAX_OBJECT_BYTES:
                 raise Refused("too_large")
+            if self._multipart and size > self._threshold:
+                if expect is None:
+                    raise Refused("hash_mismatch", detail_code="expected")
+                return self._put_multipart(key, f, size, expect)
+            if size > MAX_PUT_BYTES:
+                raise Refused("too_large", detail_code=NO_MULTIPART)
             digest, n = _sha256_stream(f)
             if n != size:
                 raise Refused("size_mismatch")
+            if expect is not None and not secrets.compare_digest(digest.hex(), expect):
+                raise Refused("hash_mismatch", detail_code="expected")
             f.seek(0)
             return self._put(key, f, digest)
 
@@ -496,6 +670,265 @@ class S3Store:
         if resp.get("ChecksumSHA256") != checksum:
             raise Refused("hash_mismatch", detail_code="stored_checksum")
         return _returned_version_id(resp.get("VersionId"))
+
+    # ------------------------------------------------------------ multipart
+
+    def _check_absent(self, key: str) -> None:
+        """Nothing at ``key`` yet, so no parts are sent for a key that is taken. (The
+        conditional completion is what guarantees write-once; this only saves the
+        upload.)"""
+        exists = True
+        try:
+            self._call(self._client.head_object, Key=key)
+        except Refused as exc:
+            if exc.reason != "not_found":
+                raise
+            exists = False
+        if exists:
+            raise Refused("version_exists", detail_code="not_ours")
+
+    def _put_multipart(self, key: str, f: BinaryIO, size: int, expect: str) -> str:
+        count = -(-size // self._part_bytes)
+        if count > MAX_PARTS:
+            raise Refused("too_large", detail_code="parts")
+        self._check_absent(key)
+        up = self._call(self._client.create_multipart_upload, Key=key, ChecksumAlgorithm="SHA256")
+        upload_id = _returned(up.get("UploadId"), _UPLOAD_ID, "upload_id")
+        sha_parts = up.get("ChecksumAlgorithm") == "SHA256"
+        vid: str | None = None
+        composite: str | None = None
+        try:
+            parts, digests = self._send_parts(key, upload_id, f, size, expect, sha_parts)
+            composite = _composite(digests) if sha_parts else None
+            vid = self._complete(key, upload_id, parts, composite)
+        finally:
+            if vid is None:  # any failure, KeyboardInterrupt included
+                self._abort(key, upload_id)
+        self._check_multipart_stored(key, vid, size, expect, composite)
+        log.info("store multipart upload complete: parts=%d", count)
+        return vid
+
+    def _send_parts(
+        self, key: str, upload_id: str, f: BinaryIO, size: int, expect: str, sha_parts: bool
+    ) -> tuple[list[dict[str, Any]], list[bytes]]:
+        """Every part, each with its checksum. The whole file's SHA-256, over exactly the
+        bytes sent, must be ``expect`` (``hash_mismatch``: nothing is completed)."""
+        whole = hashlib.sha256()
+        parts: list[dict[str, Any]] = []
+        digests: list[bytes] = []
+        sent = 0
+        number = 0
+        while sent < size:
+            number += 1
+            body = _read_exact(f, min(self._part_bytes, size - sent))
+            sent += len(body)
+            whole.update(body)
+            digest = hashlib.sha256(body).digest()
+            digests.append(digest)
+            kw: dict[str, Any] = {"Key": key, "UploadId": upload_id, "PartNumber": number}
+            entry: dict[str, Any] = {}
+            if sha_parts:
+                checksum = base64.b64encode(digest).decode("ascii")
+                resp = self._call(
+                    self._client.upload_part,
+                    Body=body,
+                    ChecksumAlgorithm="SHA256",
+                    ChecksumSHA256=checksum,
+                    **kw,
+                )
+                if resp.get("ChecksumSHA256") != checksum:
+                    raise Refused("hash_mismatch", detail_code="part_checksum")
+                entry["ChecksumSHA256"] = checksum
+            else:
+                md5 = hashlib.md5(body, usedforsecurity=False).digest()
+                resp = self._call(
+                    self._client.upload_part,
+                    Body=body,
+                    ContentMD5=base64.b64encode(md5).decode("ascii"),
+                    **kw,
+                )
+            etag = _returned(resp.get("ETag"), _ETAG, "etag")
+            parts.append({"PartNumber": number, "ETag": etag, **entry})
+        if _has_more(f):
+            raise Refused("size_mismatch")
+        if not secrets.compare_digest(whole.hexdigest(), expect):
+            raise Refused("hash_mismatch", detail_code="expected")
+        return parts, digests
+
+    def _complete(
+        self, key: str, upload_id: str, parts: list[dict[str, Any]], composite: str | None
+    ) -> str:
+        """``CompleteMultipartUpload`` with ``If-None-Match: *``. A refusal whose object
+        is exactly ours (a retried completion whose first attempt succeeded: 412, or no
+        such upload) is adopted; anything else is ``version_exists``."""
+        failure = False
+        resp: Any = None
+        try:
+            resp = self._call(
+                self._client.complete_multipart_upload,
+                precondition="version_exists",
+                Key=key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+                IfNoneMatch="*",
+            )
+        except Refused as exc:
+            if exc.reason not in ("version_exists", "not_found"):
+                raise
+            failure = True
+        if not failure:
+            got = resp.get("ChecksumSHA256")
+            if composite is not None and got is not None and got != composite:
+                raise Refused("hash_mismatch", detail_code="stored_checksum")
+            return _returned_version_id(resp.get("VersionId"))
+        found = self.versions(key)
+        if len(found) != 1 or composite is None:
+            raise Refused("version_exists", detail_code="not_ours")
+        resp = self._call(
+            self._client.head_object, Key=key, ChecksumMode="ENABLED", **_version_kw(found[0])
+        )
+        if resp.get("ChecksumSHA256") != composite:
+            raise Refused("version_exists", detail_code="not_ours")
+        log.info("store multipart completion retried and found ours")
+        return found[0]
+
+    def _abort(self, key: str, upload_id: str) -> None:
+        """Best effort: a failed abort is logged (without the key) and left to
+        ``store-abort-stale-uploads`` or the bucket's lifecycle rule."""
+        failed = False
+        try:
+            self._call(self._client.abort_multipart_upload, Key=key, UploadId=upload_id)
+        except Refused as exc:
+            failed = exc.reason != "not_found"
+        if failed:
+            log.warning("store multipart abort failed; the stale-upload cleanup removes it")
+
+    def _check_multipart_stored(
+        self, key: str, vid: str, size: int, expect: str, composite: str | None
+    ) -> None:
+        """The stored version is exactly what was hashed, and the key's only version."""
+        resp = self._call(
+            self._client.head_object, Key=key, ChecksumMode="ENABLED", **_version_kw(vid)
+        )
+        if resp.get("ContentLength") != size:
+            raise Refused("hash_mismatch", detail_code="stored")
+        if _returned_version_id(resp.get("VersionId")) != vid:
+            raise Refused("hash_mismatch", detail_code="stored")
+        got = resp.get("ChecksumSHA256")
+        if composite is not None and isinstance(got, str) and _COMPOSITE.fullmatch(got):
+            if not secrets.compare_digest(got, composite):
+                raise Refused("hash_mismatch", detail_code="stored")
+        else:
+            # No checksum of the parts kept: read the whole object back.
+            with open(os.devnull, "wb", buffering=0) as sink:
+                n, sha = self.download(key, version_id=vid, out=sink, max_bytes=size)
+            if n != size or not secrets.compare_digest(sha, expect):
+                raise Refused("hash_mismatch", detail_code="stored")
+        if self.versions(key) != [vid]:
+            raise Refused("version_exists", detail_code="not_ours")
+
+    # ------------------------------------------------------------ operators
+
+    def probe_conditional_multipart(self) -> bool:
+        """Whether the store refuses a conditional multipart completion on a key that
+        exists (True) or completes it anyway (False: never set
+        ``MODEL_STORE_CONDITIONAL_MULTIPART`` for it). Writes one small object, and on a
+        store that fails the probe a second version of it, under
+        ``models/_store-probe/<random>/``; nothing else."""
+        key = f"models/_store-probe/{secrets.token_hex(8)}/probe"
+        self.put_new(key, b"probe: the first object")
+        up = self._call(self._client.create_multipart_upload, Key=key, ChecksumAlgorithm="SHA256")
+        upload_id = _returned(up.get("UploadId"), _UPLOAD_ID, "upload_id")
+        body = b"probe: an overwrite the store must refuse"
+        checksum = base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
+        honoured = False
+        try:
+            resp = self._call(
+                self._client.upload_part,
+                Key=key,
+                UploadId=upload_id,
+                PartNumber=1,
+                Body=body,
+                ChecksumAlgorithm="SHA256",
+                ChecksumSHA256=checksum,
+            )
+            etag = _returned(resp.get("ETag"), _ETAG, "etag")
+            part = {"PartNumber": 1, "ETag": etag, "ChecksumSHA256": checksum}
+            try:
+                self._call(
+                    self._client.complete_multipart_upload,
+                    precondition="version_exists",
+                    Key=key,
+                    UploadId=upload_id,
+                    MultipartUpload={"Parts": [part]},
+                    IfNoneMatch="*",
+                )
+            except Refused as exc:
+                if exc.reason != "version_exists":
+                    raise
+                honoured = True
+        finally:
+            self._abort(key, upload_id)
+        log.info("store probe: conditional multipart honoured=%s", honoured)
+        return honoured
+
+    def abort_stale_uploads(
+        self,
+        older_than_s: int = DEFAULT_STALE_AGE_S,
+        *,
+        now: datetime | None = None,
+        prefixes: tuple[str, ...] = ("models/", "eval/"),
+    ) -> int:
+        """Abort every incomplete multipart upload under ``prefixes`` (each a layout prefix
+        or a key) started more than ``older_than_s`` seconds ago (at least
+        :data:`MIN_STALE_AGE_S`, so a running promotion is never cut off), and return how
+        many. No object is touched: an abort only drops parts never completed.
+
+        MinIO lists uploads for an exact key only, so there this finds nothing under
+        ``models/``; MinIO drops stale uploads itself (its ``stale_uploads_expiry``,
+        24 hours by default). AWS S3 lists by prefix."""
+        if (
+            not isinstance(older_than_s, int)
+            or isinstance(older_than_s, bool)
+            or older_than_s < MIN_STALE_AGE_S
+        ):
+            raise Refused("not_allowed_here", detail_code="stale_age")
+        for prefix in prefixes:
+            if not (isinstance(prefix, str) and prefix.endswith("/")):
+                _check_key(prefix)
+            else:
+                _check_prefix(prefix)
+        cutoff = (now or datetime.now(UTC)) - timedelta(seconds=older_than_s)
+        aborted = 0
+        seen = 0
+        for prefix in prefixes:
+            kw: dict[str, Any] = {"Prefix": prefix}
+            while True:
+                resp = self._call(self._client.list_multipart_uploads, **kw)
+                for up in resp.get("Uploads") or []:
+                    seen += 1
+                    if seen > MAX_LIST:
+                        raise Refused("too_many_files")
+                    stale = _stale_upload(up, cutoff)
+                    if stale is None or not stale[0].startswith(prefix):
+                        continue
+                    key, upload_id = stale
+                    try:
+                        self._call(self._client.abort_multipart_upload, Key=key, UploadId=upload_id)
+                    except Refused as exc:
+                        if exc.reason != "not_found":  # finished or aborted meanwhile
+                            raise
+                        continue
+                    aborted += 1
+                if not resp.get("IsTruncated"):
+                    break
+                kw = {
+                    "Prefix": prefix,
+                    "KeyMarker": resp.get("NextKeyMarker"),
+                    "UploadIdMarker": resp.get("NextUploadIdMarker"),
+                }
+        log.info("store stale uploads aborted: count=%d", aborted)
+        return aborted
 
     def get(self, key: str, version_id: str | None = None, *, max_bytes: int) -> bytes:
         """The bytes of ``key`` (of ``version_id`` if given), at most ``max_bytes``
@@ -530,8 +963,9 @@ class S3Store:
         its size and SHA-256 (lowercase hex). There is no "latest": ``version_id`` is
         required (:data:`NULL_VERSION` in a bucket without versioning). More than ``max_bytes`` (announced or read) is ``too_large`` and reading
         stops there; a short body is ``size_mismatch``; a body that isn't the SHA-256 the
-        store keeps with it is ``hash_mismatch``. The caller compares the result with what
-        the manifest recorded."""
+        store keeps with it is ``hash_mismatch``. A multipart object, of which the store
+        keeps no whole SHA-256, is hashed in full all the same. The caller compares the
+        result with what the manifest recorded (or verifies it as a signature)."""
         _check_key(key)
         version = _version_kw(_check_version_id(version_id))
         if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 0:
@@ -542,7 +976,7 @@ class S3Store:
             length = resp.get("ContentLength")
             if not isinstance(length, int) or length > max_bytes:
                 raise Refused("too_large")
-            expected = _hex_from_b64(resp.get("ChecksumSHA256"))
+            expected = _whole_sha256(resp)
             digest = hashlib.sha256()
             n = 0
             while n <= max_bytes:
@@ -560,7 +994,7 @@ class S3Store:
         if n != length:
             raise Refused("size_mismatch")
         sha = digest.hexdigest()
-        if sha != expected:
+        if expected is not None and sha != expected:
             raise Refused("hash_mismatch")
         return n, sha
 
@@ -651,9 +1085,25 @@ class S3Store:
             kw = {"Prefix": prefix, "ContinuationToken": token}
 
 
+def object_cap(target: object | None) -> int:
+    """The largest file ``target`` takes: an :class:`S3Store`'s ``max_object_bytes``; any
+    other store one PUT's 5 GiB; no store at all (a dry run, the export step) the
+    multipart bound, since the store it goes to is not known yet."""
+    if target is None:
+        return MAX_OBJECT_BYTES
+    if isinstance(target, S3Store):
+        return target.max_object_bytes
+    return MAX_PUT_BYTES
+
+
 __all__ = [
+    "DEFAULT_STALE_AGE_S",
     "LOOPBACK_HOSTS",
+    "MAX_OBJECT_BYTES",
+    "MAX_PUT_BYTES",
+    "MIN_STALE_AGE_S",
     "NULL_VERSION",
+    "PART_BYTES",
     "Credentials",
     "ObjectInfo",
     "ObjectStore",
@@ -663,6 +1113,7 @@ __all__ = [
     "check_region",
     "claim_key",
     "eval_file_key",
+    "object_cap",
     "manifest_key",
     "manifest_sig_key",
     "run_doc_key",

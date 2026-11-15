@@ -301,7 +301,7 @@ mhai-web changes (core's contract wins; the BFF already passes these bodies thro
 
 ## Document pipeline phase 0: notes for later tasks
 
-- **One PUT is at most 5 GiB.** `S3Store.put_new` refuses larger objects (`too_large`); `files.Limits` allows 40 GiB weight files. Weights over 5 GiB need a multipart upload whose completion is conditional (`If-None-Match: *` on `CompleteMultipartUpload`), checked against the pinned store before it is relied on.
+- **Files over 5 GiB: built (conditional multipart upload).** `S3Store.put_new` uploads a file over one PUT's 5 GiB in parts, completed with `If-None-Match: *`, up to 50 GiB (`files.Limits`; the run cap stays 200 GiB). It is off unless `MODEL_STORE_CONDITIONAL_MULTIPART=1`. **For the production store:** run `mhai-models store-probe-multipart` as the writer, set the repository variable `MODEL_STORE_CONDITIONAL_MULTIPART=1` only if it prints `true`, and add the lifecycle rule that aborts incomplete uploads (deploy/model-store/README.md).
 
 - **Layout separation is by seed only (ruling D7).** An eval layout can look like a training one, so the eval score does not measure unseen template families. Held-out layout families (unseen templates) come with set v1.1.
 - **File names (ruling D6).** Generated file names must keep digit runs to 5 or fewer: the scanner refuses 6 or more as `filename`. Task 8 names files and must follow this. The renderer itself generates no file names.

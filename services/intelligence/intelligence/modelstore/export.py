@@ -11,7 +11,7 @@ into one that promotion accepts, and says what to fix before anything is uploade
    to f16 in a temporary folder, then ``llama-quantize``; ``q8_0`` is written by the
    converter directly), as ``model-<quant>.gguf``;
 3. it runs the checks promotion runs on the folder (``files.check_run`` and the store's
-   one-upload cap of 5 GiB per file, then
+   cap of 50 GiB per file, then
    ``training.check`` against ``models/approved-datasets.json`` and ``models/licences.json``)
    and prints the files hash for ``--expect-files``.
 
@@ -65,9 +65,12 @@ QUANTS: Mapping[str, str] = {
 }
 _DIRECT = frozenset({"q8_0"})
 CONVERT_TIMEOUT_S = 6 * 3600
-# The largest file the store takes: one S3 PUT (``store.MAX_PUT_BYTES``; multipart is not in
-# phase 0). Kept here so this module stays importable without the store's dependencies.
-MAX_STORE_FILE_BYTES = 5 * 1024**3
+# The largest file the store takes (``store.MAX_OBJECT_BYTES``): a file over 5 GiB, one
+# PUT's limit, goes up as a conditional multipart upload, which the store promoting it must
+# support (``MODEL_STORE_CONDITIONAL_MULTIPART=1``; promotion refuses it on a store without).
+# Kept here so this module stays importable without the store's dependencies.
+MAX_STORE_FILE_BYTES = 50 * 1024**3
+ONE_PUT_BYTES = 5 * 1024**3  # store.MAX_PUT_BYTES
 STORE_CAP_DETAIL = "file_too_large_for_store"  # promote.FILE_TOO_LARGE
 
 LLAMA_MISSING = (
@@ -163,11 +166,25 @@ class Exported:
 
 _DETAIL_HINTS: Mapping[tuple[str, str], str] = {
     ("too_large", STORE_CAP_DETAIL): (
-        "a file is over the 5 GiB one upload to the model store allows: shard the weights"
-        " (save_pretrained(..., max_shard_size='4GB')); if one tensor alone is larger, the"
-        " run cannot be promoted until the store has a conditional multipart upload"
+        "a file is over the 50 GiB the model store takes: shard the weights"
+        " (save_pretrained(..., max_shard_size='4GB')). Files over 5 GiB (one tensor alone"
+        " can be, as Gemma 4's per-layer embedding is) go up as a conditional multipart"
+        " upload, so the store must have MODEL_STORE_CONDITIONAL_MULTIPART on; promotion"
+        " refuses them (file_too_large_for_store) on a store without it"
     ),
 }
+
+
+MULTIPART_NOTE = (
+    "a file is over 5 GiB: it goes up as a conditional multipart upload, so the store that"
+    " promotes it must have MODEL_STORE_CONDITIONAL_MULTIPART on (or promotion refuses it)"
+)
+
+
+def needs_multipart(entries: Sequence[files.FileEntry]) -> bool:
+    """Whether a file is over one PUT's 5 GiB, so promotion needs a store with conditional
+    multipart."""
+    return any(e.size > ONE_PUT_BYTES for e in entries)
 
 
 def fix_for(refusal: Refused) -> str | None:
@@ -464,6 +481,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("ok: the training manifest passes the dataset and licence registries")
     if out.base_verified_at_promotion:
         print("note: the promoted base model is verified at promotion")
+    if needs_multipart(out.files):
+        print(f"note: {MULTIPART_NOTE}")
     run = out.run_dir.name
     print(f"files hash: {out.files_sha256}")
     print(

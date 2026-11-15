@@ -337,15 +337,30 @@ def test_imports_stay_light() -> None:
 
 
 def test_store_cap_is_the_stores() -> None:
-    assert export.MAX_STORE_FILE_BYTES == store.MAX_PUT_BYTES
+    # 50 GiB: files over one PUT's 5 GiB go up as a conditional multipart upload.
+    assert export.MAX_STORE_FILE_BYTES == store.MAX_OBJECT_BYTES
+    assert export.ONE_PUT_BYTES == store.MAX_PUT_BYTES
     assert export.STORE_CAP_DETAIL == promote.FILE_TOO_LARGE
+
+
+def test_file_over_one_put_passes_with_a_note(
+    run: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Gemma 4's per-layer embedding is one 5.6 GB tensor: it now passes the export step,
+    # which notes that the store must have conditional multipart.
+    assert export.main(_argv(run, "--base-revision", REVISION, "--no-gguf")) == 0
+    assert "MODEL_STORE_CONDITIONAL_MULTIPART" not in capsys.readouterr().out
+    biggest = max(p.stat().st_size for p in run.iterdir())
+    monkeypatch.setattr(export, "ONE_PUT_BYTES", biggest - 1)
+    assert export.main(_argv(run, "--base-revision", REVISION, "--no-gguf")) == 0
+    assert f"note: {export.MULTIPART_NOTE}" in capsys.readouterr().out
+    assert "MODEL_STORE_CONDITIONAL_MULTIPART" in export.MULTIPART_NOTE
 
 
 def test_file_over_the_store_cap_refused_at_export(
     run: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Gemma 4's per-layer embedding is one 5.6 GB tensor: no shard size gets it under the
-    # 5 GiB a single store PUT allows, and promotion refuses it. The step says so first.
+    # Over the 50 GiB the store takes: promotion refuses it, and the step says so first.
     biggest = max(p.stat().st_size for p in run.iterdir())
     monkeypatch.setattr(export, "MAX_STORE_FILE_BYTES", biggest - 1)
     with pytest.raises(Refused) as err:
@@ -353,7 +368,7 @@ def test_file_over_the_store_cap_refused_at_export(
     assert err.value.reason == "too_large"
     assert err.value.detail_code == "file_too_large_for_store"
     fix = export.fix_for(err.value)
-    assert fix is not None and "5 GiB" in fix and "multipart" in fix
+    assert fix is not None and "50 GiB" in fix and "multipart" in fix
 
 
 def test_files_under_the_store_cap_pass(run: Path) -> None:

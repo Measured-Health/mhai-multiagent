@@ -36,7 +36,8 @@
       "Sid": "NeverWrite",
       "Effect": "Deny",
       "Action": [
-        "s3:PutObject"
+        "s3:PutObject",
+        "s3:AbortMultipartUpload"
       ],
       "Resource": [
         "arn:aws:s3:::@BUCKET@/*"
