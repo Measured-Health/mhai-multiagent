@@ -63,28 +63,34 @@ var ErrNotFound = errors.New("audit: no such event")
 // Hospital is "" (any), "platform" (no hospital) or a canonical uuid;
 // Person a canonical uuid; Types from AuditTypes; Outcome from Outcomes.
 // Q, when set, is an exact event or request id, and the other filters are
-// ignored.
+// ignored. Named selects the named-access list (the named-view entries,
+// contract §14.9), which takes Hospital, Person, Clearance (a letter's
+// canonical uuid), From and To only.
 type Filters struct {
-	Hospital string
-	Person   string
-	Types    []string
-	Outcome  string
-	Flagged  *bool
-	From, To *time.Time
-	Q        string
+	Hospital  string
+	Person    string
+	Types     []string
+	Outcome   string
+	Flagged   *bool
+	From, To  *time.Time
+	Q         string
+	Named     bool
+	Clearance string
 }
 
 // canonical is f as hashed and recorded: types deduplicated in AuditTypes
 // order, times in UTC, and only q when q is set.
 type canonical struct {
-	Hospital string   `json:"hospital,omitempty"`
-	Person   string   `json:"person,omitempty"`
-	Type     []string `json:"type,omitempty"`
-	Outcome  string   `json:"outcome,omitempty"`
-	Flagged  *bool    `json:"flagged,omitempty"`
-	From     string   `json:"from,omitempty"`
-	To       string   `json:"to,omitempty"`
-	Q        string   `json:"q,omitempty"`
+	List      string   `json:"list,omitempty"`
+	Clearance string   `json:"clearance,omitempty"`
+	Hospital  string   `json:"hospital,omitempty"`
+	Person    string   `json:"person,omitempty"`
+	Type      []string `json:"type,omitempty"`
+	Outcome   string   `json:"outcome,omitempty"`
+	Flagged   *bool    `json:"flagged,omitempty"`
+	From      string   `json:"from,omitempty"`
+	To        string   `json:"to,omitempty"`
+	Q         string   `json:"q,omitempty"`
 }
 
 func instant(t *time.Time) string {
@@ -104,8 +110,12 @@ func (f Filters) canonical() canonical {
 			types = append(types, t)
 		}
 	}
-	return canonical{Hospital: f.Hospital, Person: f.Person, Type: types, Outcome: f.Outcome, Flagged: f.Flagged,
+	c := canonical{Hospital: f.Hospital, Person: f.Person, Type: types, Outcome: f.Outcome, Flagged: f.Flagged,
 		From: instant(f.From), To: instant(f.To)}
+	if f.Named {
+		c.List, c.Clearance = "named_access", f.Clearance
+	}
+	return c
 }
 
 // hash is the first 16 bytes of sha256 of the canonical filters' JSON.
@@ -128,6 +138,9 @@ func (f Filters) Recorded() map[string]any {
 	}
 	if c.Person != "" {
 		out["person"] = c.Person
+	}
+	if c.Clearance != "" {
+		out["clearance"] = c.Clearance
 	}
 	if len(c.Type) > 0 {
 		l := make([]any, len(c.Type))
@@ -262,7 +275,7 @@ func anyHolds(cs []cond, e Event) bool {
 // TestClassifyAgreesWithMap holds them against Map.
 var (
 	refusedConds = []cond{{actions: []string{"auth.login.failed", "auth.login.locked", "auth.login.ceiling",
-		"auth.mfa.failed", "auth.mfa.locked", "correction.decision_refused"}}}
+		"auth.mfa.failed", "auth.mfa.locked", "correction.decision_refused", "audit.export_download_refused"}}}
 	failedConds = []cond{
 		{actions: []string{"correction.apply_failed"}},
 		{actions: []string{"audit.verify_finished"}, key: "state", values: []string{"error"}},
@@ -282,7 +295,7 @@ var (
 var gates = map[string]cond{
 	"job.retried":    {batch: true},
 	"job.cancelled":  {batch: true},
-	"audit.searched": {key: "searched_kind", values: []string{"event", "request"}},
+	"audit.searched": {key: "searched_kind", values: []string{"event", "request", "export"}},
 }
 
 // typeConds are the conditions under which a row maps to each type: the
@@ -385,8 +398,27 @@ func (q *query) anyOf(cs []cond) string {
 	return "(" + strings.Join(parts, " OR ") + ")"
 }
 
+// namedActions are the named-access list's entries: a named list or its
+// replay, and one that sent no names.
+var namedActions = []string{"analysis.named_viewed", "analysis.named_view_failed"}
+
 // filter adds f's conditions. With q, only q.
 func (q *query) filter(f Filters) error {
+	if f.Named {
+		if f.Q != "" || len(f.Types) > 0 || f.Outcome != "" || f.Flagged != nil {
+			return errors.New("audit: the named-access list takes no q, type, outcome or flag")
+		}
+		q.where = append(q.where, "action = ANY("+q.arg(namedActions)+"::text[])")
+		if f.Clearance != "" {
+			id, err := uuid.Parse(f.Clearance)
+			if err != nil {
+				return errors.New("audit: bad clearance filter")
+			}
+			q.where = append(q.where, "payload ->> 'clearance_id' = "+q.arg(id.String()))
+		}
+	} else if f.Clearance != "" {
+		return errors.New("audit: a clearance filter outside the named-access list")
+	}
 	if f.Q != "" {
 		if seq, ok := eventID(f.Q); ok {
 			q.where = append(q.where, "id = "+q.arg(seq))
@@ -494,7 +526,8 @@ type HospitalRef struct {
 	Removed bool   `json:"removed"`
 }
 
-// Refs are an entry's references. No clearance or export exists yet.
+// Refs are an entry's references: the request, and the export an export
+// entry names.
 type Refs struct {
 	ClearanceID *string `json:"clearance_id"`
 	ExportID    *string `json:"export_id"`
@@ -539,11 +572,11 @@ type Page struct {
 // Detail is an entry plus patients and letter. patients is {count} on a
 // drill-down entry (analysis.patients_viewed: the rows its list sent; the
 // pids themselves only through the recorded reveal), null otherwise;
-// letter is null: no clearance letter exists yet (spec §5.2).
+// letter is the letter a named entry names (LetterOf), null otherwise.
 type Detail struct {
 	Entry    any
 	Patients *PatientsCount
-	Letter   *struct{}
+	Letter   *Letter
 }
 
 // PatientsCount is a drill-down entry's patients: how many rows it sent.
@@ -583,6 +616,13 @@ func (d Detail) MarshalJSON() ([]byte, error) {
 		m["patients"] = p
 	}
 	m["letter"] = json.RawMessage("null")
+	if d.Letter != nil {
+		l, err := json.Marshal(d.Letter)
+		if err != nil {
+			return nil, err
+		}
+		m["letter"] = l
+	}
 	return json.Marshal(m)
 }
 
@@ -676,7 +716,17 @@ func GetEvent(ctx context.Context, tx pgx.Tx, seq int64) (Detail, error) {
 	if err != nil {
 		return Detail{}, err
 	}
-	return Detail{Entry: es[0], Patients: patientsOf(raws[0])}, nil
+	d := Detail{Entry: es[0], Patients: patientsOf(raws[0])}
+	if id := letterIDOf(raws[0]); id != uuid.Nil {
+		ls, err := Letters(ctx, tx, []uuid.UUID{id})
+		if err != nil {
+			return Detail{}, err
+		}
+		if l, ok := ls[id]; ok {
+			d.Letter = &l
+		}
+	}
+	return d, nil
 }
 
 // oldestKept is the oldest entry's time (ts never goes backwards in id
@@ -899,6 +949,10 @@ func entry(r Row, ps map[string]person, hs map[string]HospitalRef, brokenAt int6
 	if rid := r.Event.RequestID; rid != "" && opaqueID.MatchString(rid) {
 		ev.Refs.RequestID = &rid
 	}
+	if m.Target != nil && m.Target.Kind == "export" {
+		x := m.Target.ID
+		ev.Refs.ExportID = &x
+	}
 	// Last: nothing in the whole entry, at any depth, of the pseudonym's
 	// shape (C22). Names and request ids come from outside the catalogue.
 	raw, err := json.Marshal(ev)
@@ -1095,6 +1149,9 @@ func RecordRead(ctx context.Context, tx pgx.Tx, r Reader, f Filters) (recorded b
 	case f.Q != "":
 		e = Event{Action: "audit.searched", Entity: "request", EntityID: f.Q,
 			Payload: map[string]any{"searched_kind": "request"}}
+	case f.Named:
+		e = Event{Action: "audit.viewed", Payload: map[string]any{"list": "named_access", "filters": f.Recorded()}}
+		return recordRead(ctx, tx, r, "named_access", f.hash(), e)
 	default:
 		e = Event{Action: "audit.viewed", Payload: map[string]any{"list": "events", "filters": f.Recorded()}}
 	}
@@ -1108,6 +1165,13 @@ func RecordPeopleSearch(ctx context.Context, tx pgx.Tx, r Reader, q string) (boo
 	sum := sha256.Sum256([]byte(q))
 	return recordRead(ctx, tx, r, "people", sum[:], Event{Action: "audit.searched",
 		Payload: map[string]any{"searched_kind": "person"}})
+}
+
+// RecordExportsRead records a read of the exports list: audit.searched
+// {searched_kind: export}, once per session per 5 minutes.
+func RecordExportsRead(ctx context.Context, tx pgx.Tx, r Reader) (bool, error) {
+	return recordRead(ctx, tx, r, "exports", nil, Event{Action: "audit.searched",
+		Payload: map[string]any{"searched_kind": "export"}})
 }
 
 // RecordHospitalsRead records a read of the hospitals list: audit.searched

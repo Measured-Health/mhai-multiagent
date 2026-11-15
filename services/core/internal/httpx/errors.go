@@ -87,6 +87,12 @@ var Codes = map[string]int{
 	"not_cleared":          http.StatusForbidden,
 	"clearance_ended":      http.StatusForbidden,
 	"idempotency_mismatch": http.StatusUnprocessableEntity,
+	// Exports and the legal path (contract §14.9, design §8.9; additive):
+	// more rows than one export or reference may hold; an export's file
+	// already downloaded or expired; a legal reference already resolved.
+	"too_many_rows": http.StatusUnprocessableEntity,
+	"gone":          http.StatusGone,
+	"already_used":  http.StatusConflict,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -140,6 +146,9 @@ var titles = map[string]string{
 	"not_cleared":           "Not cleared",
 	"clearance_ended":       "Clearance ended",
 	"idempotency_mismatch":  "Idempotency key mismatch",
+	"too_many_rows":         "Too many rows",
+	"gone":                  "Gone",
+	"already_used":          "Already used",
 }
 
 var details = map[string]string{
@@ -190,6 +199,9 @@ var details = map[string]string{
 	"not_cleared":           "No current clearance letter covers you for named access.",
 	"clearance_ended":       "The clearance letter that covered you has ended.",
 	"idempotency_mismatch":  "This Idempotency-Key was used for another request.",
+	"too_many_rows":         "More rows match than one export may hold.",
+	"gone":                  "This file has been downloaded or has expired.",
+	"already_used":          "This legal reference has already been resolved.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.
@@ -265,6 +277,28 @@ func ErrorFields(w http.ResponseWriter, r *http.Request, code string, extra map[
 	h.Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 	_, _ = w.Write(raw)
+}
+
+// ErrorRows is 422 too_many_rows with the one extra field rows (contract
+// §14.9), on either audience: exactly {"code", "rows"} on the platform
+// audience, the problem body with rows on the clinical one. rows is the
+// server's count, never input.
+func ErrorRows(w http.ResponseWriter, r *http.Request, rows int) {
+	const code = "too_many_rows"
+	if Audience(r.Context()) != AudiencePlatform {
+		ErrorFields(w, r, code, map[string]any{"rows": rows})
+		return
+	}
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Type", "application/json")
+	body, _ := json.Marshal(struct {
+		Code string `json:"code"`
+		Rows int    `json:"rows"`
+	}{code, rows})
+	w.WriteHeader(Codes[code])
+	_, _ = w.Write(body)
 }
 
 // ErrorRetryAfter is Error with a Retry-After header of seconds (whole
