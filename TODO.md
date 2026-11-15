@@ -32,7 +32,8 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
   - **H6 (mhai-web team):** the contract changes in the [frontend requirements](docs/specs/2026-10-17-frontend-requirements.md) §10, "Changes from the backend design (H6)", items (a)–(i). Before PR 4, PR 6 and PR 8 go live.
   - **H7 (intelligence lead and the EMR design owner):** patient references in consultations, canonical EMR events into core, and the identity call (proposed as `emr.v1.ctl.identity_resolve`). Before `ANALYSIS_INGEST` is set (PR 10 is built), and before PR 8 goes live.
 - **Platform admin 7c: analytics.** R41a, R41a-2 and R41a-3 are decided (7 Nov). The design and plan are written, revised after the design review, and wait for the product owner's review: [design](docs/specs/2026-11-07-plan-7c-platform-analytics-design.md), [plan](docs/plans/2026-11-07-plan-7c-platform-analytics.md) (10 tasks, three PRs, migrations from 00019). 7c-1 (calendar periods, the joint guard, guardrails on periods) and 7c-2 (`GET /platform/analytics` and the series routes) are merged; 7c-3 (What changed and follow-ups, migration 00022) is built. Q3 is decided (7 Nov). Open: Q4 (privacy: staff count, review-time medians); whether median review time should flag changes (its minimum needs the decided count stored, spec §18 7c-3 item 4). **What changed: bring back active clinicians and questions per clinician (ruling C9)** as like-for-like comparisons, for example one week against the average week of the previous month (distinct clinicians per week, averaged), with a migration widening `analytics_changes.measure` and the A7 checker's table. mhai-web needs F1–F20 (spec §13); its audit kinds for the follow-ups already exist. The alerts area and Plan 7d wait on the EMR integration and the notifications service.
-- **The notifications service and the documents service.** Both are planned (see "Backend contracts the frontend uses on sample data" below) and need designs.
+- **Documents service: designed, being built (14 Nov).** The [design](docs/designs/2026-11-14-documents-service.md) is merged (#182) and recorded in [ADR 0016](docs/adr/0016-separate-documents-service-with-per-hospital-encryption.md); its §13 is the plan (ten PRs, off by default) and §17 lists where the build departs from it. PR 1 (the ADR and the service skeleton) is built. Live use waits on the gates under "Documents service: people items and live-use gates" below.
+- **The notifications service.** Planned (see "Backend contracts the frontend uses on sample data" below) and needs a design.
 - **Trained model weights.** These come from the AI researcher and are the one thing we don't build. Until they arrive, the demo has no AI pipeline: a question waits in the queue and fails at its deadline.
 - **Demo settings.** `SECURITY_CONTACT_*` isn't set, so the audit integrity status returns 503. We need a name and an email from the product owner.
 - **Dependabot backlog.** 21 open PRs (Go modules, Python groups, GitHub Actions, NATS 2.15); each needs CI and a merge.
@@ -48,6 +49,28 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
 - **H5 (product owner / platform): the demo host:** CPU host with memory for the embedding and NLI models, the pipeline service enabled (its NKey, database login, trusted keys), the key file mounted. **The pipeline has no route to Hugging Face** (only the provider hosts through the proxy), so the embedding and NLI weights must be baked into the image or mounted read-only, with `HF_HUB_OFFLINE=1`. **Name who receives the alerts:** the 80% budget alert (`cloud.budget_high`), `auth_failed` and `unconfigured` (`mhai_cloud_alerts_total`), and where they are routed (an email or chat channel from the metrics). The budget alert is also counted in `mhai_cloud_budget_alerts_total`. Also `usage_overrun` (`mhai_cloud_alerts_total`, and `mhai_cloud_usage_overrun_total`) and `mhai_cloud_settle_failures_total` (deploy/README.md, "Cloud models"). Needed by the demo.
 - **H6 (product owner): egress isolation** (§16 question 6): accept C9 for real data, or schedule the separate cloud service. Needed before any real patient data.
 - **H7 (product owner names the person): a smoke-host owner:** one person who runs the live smoke (Task 15) on their own machine, outside any container, with a dedicated short-lived smoke key (USD 5 cap, expiry within a day where offered) pasted from a password manager and revoked straight after. Never steven-reid, mt5-lab or CI. Needed by Task 15's live run.
+
+## Documents service: people items and live-use gates
+
+**These are people's items. An agent never marks one done**; the named owner closes it. From the [design](docs/designs/2026-11-14-documents-service.md) §13 ("Live use"), §14.6 and §15. Every PR leaves documents off: the compose profile `documents` isn't started, and from PR 4 `CORE_DOCUMENTS_ENABLED=false`.
+
+People items:
+- [ ] **P1** (product owner, ops): the object store bucket (`mhai-documents-<env>`) and KMS in our cloud account and the data's region, and the documents service's identity. Blocks PR 9's KMS provider and live use (or D5 below).
+- [ ] **P2** (ops): a ClamAV signature mirror, or the egress rule for the public one. Blocks PR 4 outside development.
+- [ ] **P3** (Havana with our team): the [archive contract (H2)](docs/designs/2026-11-14-havana-archive-contract-h2.md) implemented. Blocks PR 10.
+- [ ] **P4** (clinical lead): phase 1 thresholds, the pass gate on the locked split, the clinician-for-criticals rule (D12). Blocks live use.
+- [ ] **P5** (privacy lead, H5): the region, the retention values in design §6.3, the archive file name as a reviewer hint, the source-removed rule (D10). Blocks the retention sweep (PR 9) and live use.
+- [ ] **P6** (legal, H3): the clearance letter template and letter retention. Blocks live letters (PR 5).
+- [ ] **P7** (product owner): the GPU host (phase 0 H6) and a pinned `extract` model role. Blocks a real extraction model (PR 7).
+- [ ] **D5** (product owner): written acceptance of the `file` keyring for the pilot, or the KMS provider first. KMS before a second hospital either way.
+
+Live-use gates (all of them, before any real document): phase 1's evaluation passing the pipeline design §6.3 on the locked split with clinical sign-off; the GPU host; the KMS provider or D5; P5; NATS TLS and JetStream encryption at rest; for the archive, P3.
+
+Ops items:
+- [ ] **The demo's `documents` NATS user.** `deploy/nats/nats.conf` has no `documents` user (only core's right to call `documents.v1.ctl.>`) until ops provision `NATS_DOCUMENTS_NKEY`, as for the emr user. Owner: ops, before the documents service runs on the demo.
+
+Build follow-ups:
+- [ ] **One control responder in gokit.** The documents service's `internal/ctl` repeats the emr service's checks in the same order (design §17, departure 6). Move one responder into `services/gokit/` with the operations table as a parameter, and switch both services to it in a PR of its own, with both suites green.
 
 ## EMR integration: people items and live-use gates
 
@@ -492,7 +515,7 @@ mhai-web has built these screens against contracts that are marked **Assumed** o
 - **Notifications service** (planned, `services/notifications/`): one service for every alert and notification (EMR abnormality alerts, correction decisions, job and system updates), delivered in the app (bell, pop-ups) and by opt-in email. Needs a design: event subjects from core, delivery and read state, email provider (open), per-user settings (`/me/notification-settings`, frontend contract §9), and rate limits. Core decides recipients; the service only delivers.
 
 - **EMR integration service** (`services/emr/`): connectors per EMR type, mapping, normalisation, patient index (ADR 0009, ADR 0014). Its own service, isolated from core because it holds outside credentials. Designed and planned (see "What's left").
-- **Documents service** (planned, `services/documents/`): uploads, letters, exports, virus scanning, object storage, signed links, DIA jobs. Needs a design.
+- **Documents service** (`services/documents/`, being built): uploads, letters, virus scanning, encrypted object storage, page images, the review routes. Designed in [docs/designs/2026-11-14-documents-service.md](docs/designs/2026-11-14-documents-service.md) (ADR 0016); exports and signed links aren't in it.
 - **Model serving** (planned): GPU model hosts, from the parked performance plan.
 
 - **Document structuring pipeline** (designed 28 Oct, product owner approved the design work): scanned documents and records (PDF or image, later handwriting) become reviewed, normalised clinical records. Upload through the documents service (virus scan, sandboxed rasterising, per-hospital object storage), the `ingest_document` job, OCR and layout, vision-language extraction into a versioned schema with per-field confidence and page location, normalisation to the ADR 0009 canonical model, validation, a review queue (patient match always by a person), `finalise_document`, then events into EMR abnormality screening. Self-hosted open-weight models only; the model is chosen by an evaluation on a synthetic set. Phase 1 is typed lab reports. Open questions in §11. See the [design](docs/specs/2026-10-28-document-pipeline-and-model-promotion-design.md) §3–§6 and §10.

@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+// The documents service's control operations, documents.v1.ctl.<op>
+// (documents service design §8, ADR 0016). Core is the only caller; every
+// request carries a request token (aud documents) in its headers. Ids,
+// closed codes and counts only: never a file name, a patient's name, a
+// value, an object key with a name, a POST policy or a key.
+package mhai.documents.v1;
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/gokit/docspb;docspb";
+
+// documents.v1.ctl.health, as svc:core (the platform health sampler).
+message HealthRequest {}
+
+// Readiness flags only, no counts of anyone's data. The service takes a
+// document only when all four are true.
+message HealthReply {
+  // Its database login answers.
+  bool database_ready = 1;
+  // The key-encryption keys load and unwrap a test key (PR 3).
+  bool keyring_ready = 2;
+  // clamd answers and its signatures are under 48 hours old (PR 4).
+  bool scanner_ready = 3;
+  // docsandbox answers (PR 4).
+  bool sandbox_ready = 4;
+}
