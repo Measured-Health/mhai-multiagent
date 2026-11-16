@@ -12,6 +12,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Cloud models: core reaps stale budget reservations (migration 00047). A
+  crashed worker, a reserve that timed out after core committed, or a
+  failed settle used to leave a `cloud_reservations` row holding its tokens
+  as "reserved" until the month ended. Every 5 minutes one core copy (an
+  advisory lock), as the new NOLOGIN role `mhai_cloud_reaper` (reached by
+  `SET LOCAL ROLE` only), settles every reservation older than
+  `CORE_CLOUD_RESERVATION_REAP_AFTER` (a Go duration, `1h` by default,
+  `30m` to `168h`; the database refuses under 30 minutes too) as fully
+  used, one hospital per transaction, each audited
+  `cloud.reservation_reaped` (reservation id, month, tokens, age; no
+  actor). A reservation row is consumed once: by the reap or by the
+  worker's settle, whichever commits first; a settle that arrives later
+  returns false and changes nothing. The reap charges the whole
+  reservation, so it never frees budget (`used + reserved` is unchanged)
+  and a late reply that used less is not refunded. On by default;
+  `CORE_CLOUD_RESERVATION_REAPER=off` stops it. New metrics
+  `cloud_reservations_reaped_total`, `cloud_reaped_tokens_total`,
+  `cloud_reaper_failures_total` and `cloud_reaper_empty_total`, and alert rules for them and for
+  `mhai_cloud_settle_failures_total` (deploy/README.md, "Cloud models").
 - Documents: a provisioned file keyring, so the pilot can run more than one
   documents server on one keyring (design D5, §17 departure 20).
   `DOCUMENTS_KEYRING_MODE=provisioned` is the default and the only mode

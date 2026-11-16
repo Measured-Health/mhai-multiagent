@@ -465,6 +465,12 @@ func init() {
 		"consumed", count, "patients", count),
 		Required: []string{"raw_payloads", "findings", "observations", "medications", "encounters", "raw_records",
 			"alert_patients", "alerts", "consumed", "patients"}})
+	// The cloud reservation reaper (00047): one stale reservation settled
+	// as fully used, by core's loop with its hospital and no actor. Its id,
+	// month, tokens and age; nothing about the question or a person.
+	Register("cloud.reservation_reaped", Schema{Fields: fields("reservation_id", id,
+		"month", Pattern(regexp.MustCompile(`^[0-9]{4}-(0[1-9]|1[0-2])$`)), "reserved_tokens", count, "age_minutes", count),
+		Required: []string{"reservation_id", "month", "reserved_tokens", "age_minutes"}})
 	// Legal holds: the CLI's (00032: the hold and via cli) and the platform
 	// app's (00037: the hold, its hospital and a reason code or the lift
 	// request's id, no via; the row has no hospital, as every platform

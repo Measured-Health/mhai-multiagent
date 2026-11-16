@@ -95,6 +95,9 @@ var dbTxAllowedFiles = map[string]string{
 	// exclusion runs as mhai_emr_admin (its own login).
 	"internal/emrmaint/loop.go": "the EMR maintenance loop's leader lock (Acquire) and its transactions as mhai_emr_maint",
 	"cmd/core/emr.go":           "the operator's EMR exclusion transaction (mhai_emr_admin)",
+	// 00047: the cloud reservation reaper runs as mhai_cloud_reaper with the
+	// hospital it visits set, under its leader lock; no route reaches it.
+	"internal/cloudreap/loop.go": "the cloud reservation reaper's leader lock (Acquire) and its transactions as mhai_cloud_reaper",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on

@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -89,6 +90,15 @@ type Config struct {
 	// most once; empty by default). A hospital's policy may name only one of
 	// these (cloud model providers plan, Task 2). Sorted.
 	CloudProviders []string
+	// CloudReaper runs the stale cloud reservation reaper
+	// (CORE_CLOUD_RESERVATION_REAPER: on by default, off to stop it;
+	// migration 00047). It is budget-neutral: a reaped reservation is
+	// charged in full, never released.
+	CloudReaper bool
+	// CloudReapAfter is how old a reservation is before the reaper settles
+	// it as fully used (CORE_CLOUD_RESERVATION_REAP_AFTER, a Go duration:
+	// 1h by default, 30m to 168h).
+	CloudReapAfter time.Duration
 	// EMREnabled (CORE_EMR_ENABLED=true) switches the EMR integration on:
 	// the EMR stream and its durables, and later the connection routes and
 	// the finding consumer. Off by default (EMR plan, Global Constraints).
@@ -248,6 +258,31 @@ func ParseCloudProviders(raw string) ([]string, error) {
 	return out, nil
 }
 
+// Bounds of CORE_CLOUD_RESERVATION_REAP_AFTER (cloudreap.MinAge and
+// MaxAge; the database refuses under 30 minutes too).
+const (
+	CloudReapAfterDefault = time.Hour
+	CloudReapAfterMin     = 30 * time.Minute
+	CloudReapAfterMax     = 7 * 24 * time.Hour
+)
+
+var errReapAfter = errors.New("CORE_CLOUD_RESERVATION_REAP_AFTER must be a duration from 30m to 168h")
+
+// ParseReapAfter reads CORE_CLOUD_RESERVATION_REAP_AFTER: blank is one
+// hour; otherwise a Go duration from 30 minutes to 7 days. A reservation
+// younger than that may still be in flight, so less is refused, not raised.
+func ParseReapAfter(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return CloudReapAfterDefault, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < CloudReapAfterMin || d > CloudReapAfterMax {
+		return 0, errReapAfter
+	}
+	return d, nil
+}
+
 // NATSTLS names the PEM files for TLS to NATS with a client certificate.
 type NATSTLS struct {
 	CAPath   string // NATS_TLS_CA_PATH
@@ -350,6 +385,17 @@ func Load() (Config, error) {
 	}
 
 	if c.CloudProviders, err = ParseCloudProviders(os.Getenv("CORE_CLOUD_PROVIDERS")); err != nil {
+		errs = append(errs, err)
+	}
+	c.CloudReaper = true
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_CLOUD_RESERVATION_REAPER"))) {
+	case "", "on", "true":
+	case "off", "false":
+		c.CloudReaper = false
+	default:
+		errs = append(errs, errors.New("CORE_CLOUD_RESERVATION_REAPER must be on or off"))
+	}
+	if c.CloudReapAfter, err = ParseReapAfter(os.Getenv("CORE_CLOUD_RESERVATION_REAP_AFTER")); err != nil {
 		errs = append(errs, err)
 	}
 	if c.EMRConnectorTypes, err = ParseConnectorTypes(os.Getenv("CORE_EMR_CONNECTOR_TYPES"), c.Development()); err != nil {

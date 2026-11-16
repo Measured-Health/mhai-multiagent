@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const goodKey = "0123456789abcdef0123456789abcdef" // 32 bytes, synthetic
@@ -19,7 +20,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"CORE_IDEMPOTENCY_HMAC_KEY_PATH", "CORE_EMR_ALLOW_NULL_MRN", "CORE_EMR_RETENTION_SWEEP",
 		"CORE_PATIENT_LOOKUP_PER_MINUTE", "CORE_PATIENT_LOOKUP_PER_DAY", "CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY",
 		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE", "ANALYSIS_NAMED_IDENTITY",
-		"CORE_AUDIT_EXPORTS", "ANALYSIS_INGEST"} {
+		"CORE_AUDIT_EXPORTS", "ANALYSIS_INGEST", "CORE_CLOUD_RESERVATION_REAPER", "CORE_CLOUD_RESERVATION_REAP_AFTER"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -854,5 +855,57 @@ func TestConfigAuditExports(t *testing.T) {
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_AUDIT_EXPORTS") {
 			t.Errorf("%q: %v", bad, err)
 		}
+	}
+}
+
+// 00047: the cloud reservation reaper runs by default, an hour after the
+// reservation; less than 30 minutes (a reservation may still be in flight)
+// or more than a week is refused, and the error never echoes the value.
+func TestConfigCloudReaper(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	with := func(kv ...string) map[string]string {
+		e := map[string]string{}
+		for k, x := range base {
+			e[k] = x
+		}
+		for i := 0; i+1 < len(kv); i += 2 {
+			e[kv[i]] = kv[i+1]
+		}
+		return e
+	}
+	setEnv(t, base)
+	c, err := Load()
+	if err != nil || !c.CloudReaper || c.CloudReapAfter != time.Hour {
+		t.Fatalf("default: on %v after %v (%v), want on and 1h", c.CloudReaper, c.CloudReapAfter, err)
+	}
+	for v, want := range map[string]bool{"on": true, "true": true, " ON ": true, "off": false, "false": false, "OFF": false} {
+		setEnv(t, with("CORE_CLOUD_RESERVATION_REAPER", v))
+		c, err := Load()
+		if err != nil || c.CloudReaper != want {
+			t.Errorf("CORE_CLOUD_RESERVATION_REAPER=%q: %v (%v), want %v", v, c.CloudReaper, err, want)
+		}
+	}
+	for _, bad := range []string{"yes", "1", "maybe"} {
+		setEnv(t, with("CORE_CLOUD_RESERVATION_REAPER", bad))
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_CLOUD_RESERVATION_REAPER must be on or off") {
+			t.Errorf("CORE_CLOUD_RESERVATION_REAPER=%q: %v", bad, err)
+		}
+	}
+	for v, want := range map[string]time.Duration{"30m": 30 * time.Minute, " 2h ": 2 * time.Hour, "168h": 168 * time.Hour, "90m": 90 * time.Minute, "": time.Hour} {
+		setEnv(t, with("CORE_CLOUD_RESERVATION_REAP_AFTER", v))
+		c, err := Load()
+		if err != nil || c.CloudReapAfter != want {
+			t.Errorf("CORE_CLOUD_RESERVATION_REAP_AFTER=%q: %v (%v), want %v", v, c.CloudReapAfter, err, want)
+		}
+	}
+	for _, bad := range []string{"29m59s", "0s", "-1h", "17", "169h", "an hour", "5m"} {
+		setEnv(t, with("CORE_CLOUD_RESERVATION_REAP_AFTER", bad))
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "CORE_CLOUD_RESERVATION_REAP_AFTER") || strings.Contains(err.Error(), bad) {
+			t.Errorf("CORE_CLOUD_RESERVATION_REAP_AFTER=%q: %v", bad, err)
+		}
+	}
+	if CloudReapAfterMin != 30*time.Minute || CloudReapAfterMax != 7*24*time.Hour || CloudReapAfterDefault != time.Hour {
+		t.Error("the reaper's bounds moved; keep them with cloudreap.MinAge, MaxAge and DefaultAge and migration 00047")
 	}
 }

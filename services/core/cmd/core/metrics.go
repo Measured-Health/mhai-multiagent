@@ -68,6 +68,13 @@ func registerMetrics(a *app, nm *natsapi.Metrics, gm *grant.Metrics) {
 			a.log.Warn("core: a metric was not registered", "metric", "emr_purges_held_overdue")
 		}
 	}
+	if cr := a.cloudReaper; cr != nil && cr.Metrics != nil {
+		cm := cr.Metrics
+		count("cloud_reservations_reaped_total", "Stale cloud budget reservations settled as fully used (a worker crashed or a settle failed).", cm.Reaped.Load)
+		count("cloud_reaped_tokens_total", "Tokens of the stale cloud reservations reaped, charged as used.", cm.Tokens.Load)
+		count("cloud_reaper_failures_total", "Failed cloud reservation reaper steps (alert when it rises).", cm.Failures.Load)
+		count("cloud_reaper_empty_total", "Hospitals listed with stale reservations whose reap found none (alert when it keeps rising).", cm.Empty.Load)
+	}
 	im := a.intel.Metrics
 	count("jobs_dead_letters_total", "Dead letters read from workers.", im.DeadReceived.Load, jobTypeLabel)
 	count("intelligence_dead_ignored_total", "Dead letters that changed nothing (malformed, replayed, or naming no job).", im.DeadIgnored.Load)

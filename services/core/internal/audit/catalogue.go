@@ -358,8 +358,10 @@ var Catalogue = map[string]Entry{
 	"emr.exclusion_purge_released": withheld(),
 	"emr.retention_swept":          withheld(),
 	"emr.hospital_data_removed":    withheld(),
-	"legal_hold.placed":            withheld(),
-	"legal_hold.lifted":            withheld(),
+	// The cloud reservation reaper (00047): no mhai-web kind; sent bare.
+	"cloud.reservation_reaped": withheld(),
+	"legal_hold.placed":        withheld(),
+	"legal_hold.lifted":        withheld(),
 	// The platform app's holds, team and e-mail setting (00037): no
 	// mhai-web audit kind agreed yet; sent bare. The activity feed
 	// (/platform/activity) shows them.

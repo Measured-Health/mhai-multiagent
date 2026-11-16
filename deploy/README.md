@@ -588,10 +588,26 @@ hospital (`pilot/README.md`). By hand:
    `mhai_cloud_alerts_total` by `kind` (`auth_failed`, `unconfigured`, and
    `usage_overrun` when a reply uses more than 10% over its reservation),
    `mhai_cloud_budget_alerts_total` (a hospital at 80% of its month),
-   `mhai_cloud_settle_failures_total` (a reservation held to the month's
-   end) and `mhai_cloud_usage_overrun_total` (any reply over its
+   `mhai_cloud_settle_failures_total` (a reservation core's reaper will
+   charge in full) and `mhai_cloud_usage_overrun_total` (any reply over its
    reservation: core settles at most the reservation, so the excess is not
-   in the ledger).
+   in the ledger). The rules, in PromQL over the metrics the collector
+   receives:
+
+   | Alert | Rule | Means |
+   |---|---|---|
+   | `cloud_settle_failures` | `increase(mhai_cloud_settle_failures_total[15m]) > 0` | The pipeline couldn't settle a reservation (logged `cloud.settle_failed` with ids). The reaper charges it in full within the hour. Several in a row: the pipeline can't reach core's database. |
+   | `cloud_reservations_reaped` | `increase(cloud_reservations_reaped_total[1h]) > 0` | Core settled a stale reservation as fully used (audited `cloud.reservation_reaped`, ids in the log): a pipeline crashed mid-call, a reserve timed out, or a settle failed. Match the ids against the pipeline's logs. |
+   | `cloud_reaper_failing` | `increase(cloud_reaper_failures_total[30m]) > 0` | The reaper itself failed (logged `cloudreap: step failed` with the hospital and SQLSTATE). Until fixed, stale reservations stay reserved, which fails toward sending less. |
+   | `cloud_reaper_stuck` | `increase(cloud_reaper_empty_total[1h]) > 2` | Hospitals were listed with stale reservations but the reap found none, run after run (logged with the hospital id). Once is a settle racing the reaper; again and again is a fault (a database policy or role change). |
+
+   **The reaper** runs on core, on by default, as `mhai_cloud_reaper`:
+   every 5 minutes one core copy settles every reservation older than
+   `CORE_CLOUD_RESERVATION_REAP_AFTER` (`1h` by default; `30m` to `168h`)
+   as fully used. It never frees budget: a reaped reservation counts as
+   used, and a settle that arrives later changes nothing (no refund). Set
+   `CORE_CLOUD_RESERVATION_REAPER=off` to stop it; reservations then stay
+   reserved until the month ends, as before 00047.
 
 ### At the provider
 
