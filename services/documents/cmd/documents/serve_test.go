@@ -52,22 +52,24 @@ func TestHealthCarriesTheKeyringFingerprint(t *testing.T) {
 	}
 }
 
-// Health reports each part honestly and claims nothing not yet built: no
-// scanner, no sandbox, so the service never says it can take a document.
+// Health reports each part honestly: the scanner (clamd with fresh
+// signatures) and the sandbox are what they answer, and missing is false.
 func TestHealthHandler(t *testing.T) {
 	up, down := &fakeCheck{}, &fakeCheck{err: errors.New("down")}
 	for _, tc := range []struct {
-		r           readiness
-		db, kr, str bool
+		r                     readiness
+		db, kr, str, sc, sbox bool
 	}{
-		{readiness{db: up.check, keyring: up.check, storage: up.check}, true, true, true},
-		{readiness{db: down.check, keyring: up.check, storage: down.check}, false, true, false},
-		{readiness{}, false, false, false},
+		{readiness{db: up.check, keyring: up.check, storage: up.check, scanner: up.check, sandbox: up.check},
+			true, true, true, true, true},
+		{readiness{db: down.check, keyring: up.check, storage: down.check, scanner: down.check, sandbox: up.check},
+			false, true, false, false, true},
+		{readiness{}, false, false, false, false, false},
 	} {
 		rep, err := healthHandler(tc.r)(context.Background(), reqtoken.Claims{}, &docspb.HealthRequest{})
 		h, ok := rep.(*docspb.HealthReply)
 		if err != nil || !ok || h.GetDatabaseReady() != tc.db || h.GetKeyringReady() != tc.kr || h.GetStorageReady() != tc.str ||
-			h.GetScannerReady() || h.GetSandboxReady() {
+			h.GetScannerReady() != tc.sc || h.GetSandboxReady() != tc.sbox {
 			t.Errorf("%v: %v %v", tc, rep, err)
 		}
 	}

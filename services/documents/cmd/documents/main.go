@@ -1,7 +1,8 @@
 // Command documents is the documents service (ADR 0016): the only process
 // that holds the object store credential and the hospitals' key
 // encryption keys. It answers documents.v1.ctl.health (PR 1) and
-// presign_upload (PR 3); scanning and the sandbox (PR 4) and the rest come
+// presign_upload (PR 3), and scans uploads with clamd and docsandbox (PR 4,
+// the documents_scan durable on DOCS and the sweeper); the rest come
 // later. It runs only under the compose profile documents (off by
 // default).
 //

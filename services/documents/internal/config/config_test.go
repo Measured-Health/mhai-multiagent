@@ -335,3 +335,37 @@ func TestKeyringMode(t *testing.T) {
 		}
 	}
 }
+
+// PR 4: the scanner and the sandbox are optional (without them every scan
+// waits); set, they must be well formed.
+func TestScanningSettings(t *testing.T) {
+	m := devEnv()
+	m["DOCUMENTS_CLAMD_ADDR"] = "clamav:3310"
+	m["DOCUMENTS_SANDBOX_SOCKET"] = "/jobs/sandbox.sock"
+	m["DOCUMENTS_SANDBOX_JOBS"] = "/jobs"
+	s, err := FromEnv(env(m))
+	if err != nil || s.ClamdAddr != "clamav:3310" || s.SandboxSocket != "/jobs/sandbox.sock" || s.SandboxJobs != "/jobs" {
+		t.Fatalf("%+v %v", s, err)
+	}
+	if s, err := FromEnv(env(devEnv())); err != nil || s.ClamdAddr != "" || s.SandboxSocket != "" {
+		t.Fatalf("unset: %+v %v", s, err)
+	}
+	for name, kv := range map[string][2]string{
+		"clamd without port": {"DOCUMENTS_CLAMD_ADDR", "clamav"},
+		"clamd bad port":     {"DOCUMENTS_CLAMD_ADDR", "clamav:99999"},
+		"clamd no host":      {"DOCUMENTS_CLAMD_ADDR", ":3310"},
+		"socket only":        {"DOCUMENTS_SANDBOX_SOCKET", "/jobs/sandbox.sock"},
+		"jobs only":          {"DOCUMENTS_SANDBOX_JOBS", "/jobs"},
+	} {
+		m := devEnv()
+		m[kv[0]] = kv[1]
+		if _, err := FromEnv(env(m)); err == nil || !strings.Contains(err.Error(), "DOCUMENTS_") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	m = devEnv()
+	m["DOCUMENTS_SANDBOX_SOCKET"], m["DOCUMENTS_SANDBOX_JOBS"] = "jobs/sandbox.sock", "/jobs"
+	if _, err := FromEnv(env(m)); err == nil {
+		t.Fatal("a relative socket path")
+	}
+}

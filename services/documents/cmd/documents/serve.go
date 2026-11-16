@@ -15,13 +15,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/clamd"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/ctl"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/dblogin"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/kek"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/s3"
+	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/sandbox"
+	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/scan"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/storage"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/upload"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/docspb"
@@ -43,6 +47,9 @@ type checker func(ctx context.Context) error
 // readiness is what health reports and what an upload needs.
 type readiness struct {
 	db, keyring, storage checker
+	// scanner is clamd with signatures at most 48 hours old; sandbox is
+	// docsandbox running a jail (PR 4).
+	scanner, sandbox checker
 	// fingerprint is the loaded keyring's (kek.Provider.Fingerprint).
 	fingerprint func() (string, int, bool)
 }
@@ -58,16 +65,16 @@ func ready(ctx context.Context, c checker) bool {
 }
 
 // healthHandler answers documents.v1.ctl.health: readiness flags and the
-// keyring's fingerprint and hospital count, no counts of anyone's data. The database is ready when its login answers
-// and holds no more than mhai_documents (departure 10); the keyring when
-// every KEK passes its test unwrap; storage when the bucket's lifecycle is
-// in force. The scanner and the sandbox are PR 4's, so they are reported
-// as not ready and the service never claims it can take a document
-// (design §17 departure 4).
+// keyring's fingerprint and hospital count, no counts of anyone's data.
+// The database is ready when its login answers and holds no more than
+// mhai_documents (departure 10); the keyring when every KEK passes its test
+// unwrap; storage when the bucket's lifecycle is in force; the scanner when
+// clamd answers with signatures at most 48 hours old; the sandbox when
+// docsandbox runs a jail (PR 4).
 func healthHandler(r readiness) ctl.Handler {
 	return func(ctx context.Context, _ reqtoken.Claims, _ proto.Message) (proto.Message, error) {
 		rep := &docspb.HealthReply{DatabaseReady: ready(ctx, r.db), KeyringReady: ready(ctx, r.keyring),
-			StorageReady: ready(ctx, r.storage)}
+			StorageReady: ready(ctx, r.storage), ScannerReady: ready(ctx, r.scanner), SandboxReady: ready(ctx, r.sandbox)}
 		if r.fingerprint != nil {
 			if fp, n, ok := r.fingerprint(); ok {
 				rep.KeyringFingerprint, rep.KeyringHospitals = fp, uint32(n)
@@ -106,6 +113,7 @@ type startInfo struct {
 	fingerprint                string
 	hospitals                  int
 	keyringReady, storageReady bool
+	scannerReady, sandboxReady bool
 }
 
 // logStart logs the start with settings' shapes only, never their values,
@@ -115,7 +123,7 @@ func logStart(log *slog.Logger, i startInfo) {
 	log.Info("documents serving", "env", i.env, "subjects", ctl.Subjects, "trusted_keys", i.trustedKeys,
 		"kek_provider", i.provider, "keyring_mode", i.keyringMode, "keyring_fingerprint", i.fingerprint,
 		"keyring_hospitals", i.hospitals, "keyring_ready", i.keyringReady, "storage_ready", i.storageReady,
-		"scanner_ready", false, "sandbox_ready", false)
+		"scanner_ready", i.scannerReady, "sandbox_ready", i.sandboxReady)
 }
 
 // missingLogEvery is how often a hospital without a key is logged again.
@@ -283,6 +291,30 @@ func serve(getenv func(string) string) error {
 	}
 	defer nc.Close()
 
+	// The scan (PR 4): the documents_scan durable on DOCS (waiting until
+	// core makes the stream) and the sweeper. Whatever isn't configured or
+	// ready blocks every scan; nothing passes without one.
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return errors.New("cannot open JetStream")
+	}
+	var scanner = &scan.Scanner{Rows: scan.PGRows{Pool: pool}, Announce: scan.JSAnnouncer{JS: js}, Log: log,
+		Metrics: &scan.Metrics{}}
+	if s.ClamdAddr != "" {
+		c := &clamd.Client{Addr: s.ClamdAddr}
+		scanner.Virus, rd.scanner = c, c.Ready
+	}
+	if s.SandboxSocket != "" {
+		c := &sandbox.Client{Socket: s.SandboxSocket, JobsDir: s.SandboxJobs}
+		scanner.Renderer, rd.sandbox = c, c.Ready
+	}
+	if store != nil && keys != nil {
+		scanner.Quarantine, scanner.Store = store, &storage.Store{Objects: store, Keys: keys}
+		scanner.StorageReady, scanner.HospitalKey = rd.storage, keys.Has
+	}
+	go (&scan.Consumer{Scanner: scanner, Log: log, Metrics: &scan.ConsumerMetrics{}}).Run(ctx, js)
+	go (&scan.Sweeper{Due: scan.PGRows{Pool: pool}.Due, Scanner: scanner, Log: log}).Run(ctx)
+
 	r := &ctl.Responder{
 		Keys:   func() map[string]ed25519.PublicKey { return trusted },
 		Replay: replay.New(ctl.ReplayWindow, ctl.MaxReplayIDs),
@@ -299,7 +331,8 @@ func serve(getenv func(string) string) error {
 	}
 	defer stopCtl()
 	info := startInfo{env: s.Env, trustedKeys: len(trusted), provider: "none", keyringMode: s.KeyringMode,
-		keyringReady: ready(ctx, rd.keyring), storageReady: ready(ctx, rd.storage)}
+		keyringReady: ready(ctx, rd.keyring), storageReady: ready(ctx, rd.storage),
+		scannerReady: ready(ctx, rd.scanner), sandboxReady: ready(ctx, rd.sandbox)}
 	if keys != nil {
 		info.provider = keys.Name()
 		info.fingerprint, info.hospitals, _ = keys.Fingerprint()
