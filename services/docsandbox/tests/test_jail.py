@@ -57,7 +57,7 @@ class JailTest(unittest.TestCase):
     def setUp(self) -> None:
         self.jobs = tempfile.mkdtemp(dir="/jobs")
         os.chmod(self.jobs, 0o755)
-        self.sb = server.Sandbox(self.jobs)
+        self.sb = server.Sandbox(self.jobs, private=tempfile.mkdtemp())
 
     def tearDown(self) -> None:
         shutil.rmtree(self.jobs, ignore_errors=True)
@@ -104,6 +104,31 @@ class JailTest(unittest.TestCase):
     def test_ds9_memory_limit_kills(self) -> None:
         rc, _ = self.run_probe("b = bytearray(3 << 30)\nb[-1] = 1\n")
         self.assertEqual(server.outcome_for(rc), "unreadable")
+
+    def test_namespace_and_io_uring_calls_are_killed(self) -> None:
+        # The renderer, turned, tries to leave its namespaces or reach
+        # io_uring: the seccomp filter kills it (SIGSYS), so nothing runs.
+        libc = "import ctypes, os\nlibc = ctypes.CDLL(None, use_errno=True)\n"
+        for name, probe in (
+            ("unshare(CLONE_NEWUSER)", "os.unshare(0x10000000)"),
+            ("unshare(CLONE_NEWNS)", "os.unshare(0x00020000)"),
+            ("clone(CLONE_NEWUSER)", "libc.syscall(56, 0x10000000 | 17, 0, 0, 0, 0)"),
+            ("io_uring_setup", "libc.syscall(425, 8, ctypes.create_string_buffer(120))"),
+            ("fsopen", "libc.syscall(430, b'tmpfs', 0)"),
+        ):
+            rc, d = self.run_probe(libc + probe + "\nopen('/job/out/ran', 'w').write('x')\n")
+            self.assertNotEqual(rc, 0, name)
+            self.assertFalse(os.path.exists(os.path.join(d, "out", "ran")), name)
+        # clone3 is ENOSYS (its flags can't be filtered), so the C library
+        # falls back to clone, which the filter reads.
+        rc, d = self.run_probe(libc + "r = libc.syscall(435, 0, 0)\n"
+                               "open('/job/out/errno', 'w').write(str(ctypes.get_errno()))\n")
+        self.assertEqual(rc, 0)
+        with open(os.path.join(d, "out", "errno"), encoding="ascii") as f:
+            self.assertEqual(f.read(), "38")
+        # An ordinary thread (clone without namespace flags) still works.
+        rc, _ = self.run_probe("import threading\nt = threading.Thread(target=lambda: None)\nt.start()\nt.join()\n")
+        self.assertEqual(rc, 0)
 
     def test_renders_through_the_jail(self) -> None:
         for data, mime, want in (
