@@ -2,10 +2,12 @@ package disclose
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose/attack"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/proptest"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup/solve"
 )
 
@@ -268,8 +270,10 @@ func TestP4HistoryNoExposure(t *testing.T) {
 		Locations: []attack.Location{{ID: "L1", Setting: "admitted"}}, Specialties: []string{"S1"}, Sources: []string{"X1"}}
 	from := calendar.Of(calendar.Week, day("2025-01-01"))
 	to := calendar.Of(calendar.Week, from.From.AddDate(0, months, -1))
-	hidden, small, secondary, secondaryExposed := 0, 0, 0, 0
-	for _, seed := range seeds(500, 8, 2) {
+	var tally proptest.Tally
+	ss := seeds(500, 8, 2)
+	proptest.Cases(t, len(ss), func(k int) string { return fmt.Sprint("seed=", ss[k]) }, func(t *testing.T, k int) {
+		seed := ss[k]
 		w := attack.Generate(seed, d, attack.Blocks(from, to), true, attack.Options{Subjects: 25, Presence: 0.12, Rare: 0})
 		bodies := publish(t, &w, Filters{})
 		m := attackAll(t, &w, bodies)
@@ -278,11 +282,15 @@ func TestP4HistoryNoExposure(t *testing.T) {
 			all = append(all, i)
 		}
 		s, _, sec, sece := m.GroupExposure(all) // small ones exposed fail above
-		hidden, small, secondary, secondaryExposed = hidden+s+sec, small+s, secondary+sec, secondaryExposed+sece
+		tally.Add("hidden", s+sec)
+		tally.Add("small", s)
+		tally.Add("secondary", sec)
+		tally.Add("secondaryExposed", sece)
 		if t.Failed() {
 			t.Fatalf("seed %d (%s)", seed, w.Describe())
 		}
-	}
+	})
+	hidden, small, secondary, secondaryExposed := tally.Get("hidden"), tally.Get("small"), tally.Get("secondary"), tally.Get("secondaryExposed")
 	t.Logf("P4: %d hidden groups over the histories: of 1–4, %d, none solvable; secondary (5+) solvable %d of %d",
 		hidden, small, secondaryExposed, secondary)
 }

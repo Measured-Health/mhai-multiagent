@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"math/big"
 	"math/rand"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/proptest"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup/solve"
 )
 
@@ -319,15 +321,14 @@ func TestModularAgreesWithRational(t *testing.T) {
 	}
 	// On the A7 histories, the modular check and the rational one agree on
 	// every protected box.
-	r := rand.New(rand.NewSource(20261107))
-	for k := 0; k < 30; k++ {
-		h := randomHistory(r)
-		for _, b := range h.run(t) {
+	hs := randomHistories(20261107, 30)
+	proptest.Cases(t, len(hs), func(k int) string { return fmt.Sprint("history=", k) }, func(t *testing.T, k int) {
+		for _, b := range hs[k].run(t) {
 			if msg := agreeModRational(b); msg != "" {
 				t.Fatalf("history %d: %s", k, msg)
 			}
 		}
-	}
+	})
 }
 
 // agreeModRational compares the two checks over every published cell box
@@ -659,24 +660,22 @@ func TestReviewChainingCase(t *testing.T) {
 
 // A snapshot forced fully hidden adds no new exposure.
 func TestFallbackAllHiddenAddsNothing(t *testing.T) {
-	r := rand.New(rand.NewSource(11))
-	for k := 0; k < 20; k++ {
-		h := randomHistory(r)
-		h.checkFullyHidden = true
-		h.run(t)
-	}
+	hs := randomHistories(11, 20)
+	proptest.Cases(t, len(hs), func(k int) string { return fmt.Sprint("history=", k) }, func(t *testing.T, k int) {
+		hs[k].checkFullyHidden = true
+		hs[k].run(t)
+	})
 }
 
 // TestFullyHiddenAlwaysPasses: for every A7 block, S fully hidden passes the
 // check (newlyExposed is empty), so the guard's loop always ends with a
 // snapshot to publish.
 func TestFullyHiddenAlwaysPasses(t *testing.T) {
-	r := rand.New(rand.NewSource(12))
-	for k := 0; k < historyCount()/5; k++ {
-		h := randomHistory(r)
-		h.checkFullyHidden = true
-		h.run(t)
-	}
+	hs := randomHistories(12, historyCount()/5)
+	proptest.Cases(t, len(hs), func(k int) string { return fmt.Sprint("history=", k) }, func(t *testing.T, k int) {
+		hs[k].checkFullyHidden = true
+		hs[k].run(t)
+	})
 }
 
 // A hidden month whose four weeks are all shown is exposed before and

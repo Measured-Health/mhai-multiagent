@@ -2,10 +2,12 @@ package disclose
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/disclose/attack"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analytics/calendar"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/proptest"
 )
 
 // sexWorld is one block of patients by sex (with condition c1).
@@ -137,7 +139,9 @@ func TestT6ThirdFilterRefused(t *testing.T) {
 // D5: within a family, each group has one state, in every view and
 // context, on random worlds.
 func TestOneStatePerGroupInFamily(t *testing.T) {
-	for _, seed := range seeds(200, 10, 2) {
+	ss := seeds(200, 10, 2)
+	proptest.Cases(t, len(ss), func(k int) string { return fmt.Sprint("seed=", ss[k]) }, func(t *testing.T, k int) {
+		seed := ss[k]
 		w := attack.Generate(seed, smallDims(2), []calendar.Period{octWeek}, false, attack.Options{Subjects: 120, Presence: 1, Rare: 0.5})
 		sets := filterSets(w.Dims)
 		bodies := guardFamily(t, &w, octWeek, sets)
@@ -151,7 +155,7 @@ func TestOneStatePerGroupInFamily(t *testing.T) {
 				t.Errorf("seed %d %v: %s", seed, f, x)
 			}
 		}
-	}
+	})
 }
 
 func docsOf(t *testing.T, bodies map[Filters]Body, sets []Filters) ([]attack.Doc, map[Filters]int) {

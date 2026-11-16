@@ -210,8 +210,13 @@ jobs:
           path: services/intelligence/coverage.store
           retention-days: 1
 
-  # The core suites run as parallel jobs: one after another they took about
-  # 77 minutes per PR, which slows the pilot down. Same commands as before.
+  # The core suites run as parallel jobs, each package once
+  # (.github/scripts/go-test-packages.sh). The race run of every
+  # package goes to exactly one job: "lint and unit" takes the packages whose
+  # test build the integration tag doesn't change, "integration" the ones it
+  # does (which include their untagged tests; three shards, below), and
+  # "integration with fixture routes" the ones the test tag changes again. The property tests' big runs
+  # are in the property jobs below, split into shards.
   core:
     name: core (${{ matrix.suite }})
     runs-on: ubuntu-latest  # ships Docker, which the integration tests use
@@ -224,30 +229,14 @@ jobs:
               test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
               go vet ./...
               go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
-              go test -race -timeout 25m ./...
+              # Every test this job skips runs, without -race, in a property job.
+              bash ../../.github/scripts/core-property-tests.sh check
+              bash ../../.github/scripts/go-test-packages.sh test same "" integration \
+                -race -timeout 25m -skip "$(bash ../../.github/scripts/core-property-tests.sh race-skip)"
               # The smoke test runs in boundary-smoke; here it only has to build.
               go vet -tags smoke ./internal/smoke/...
-          - suite: integration
-            run: go test -race -timeout 25m -tags integration ./...
           - suite: integration with fixture routes
-            run: go test -race -timeout 25m -tags "integration test" ./...
-          # Plan 7c (A7, R41a-5): the analytics history properties at full size
-          # (500 guard-level histories, the unions and the JSON-side set check).
-          # The -race runs use smaller samples to fit Go's package limit.
-          - suite: analytics history properties
-            run: >
-              go test -count=1 -timeout 30m
-              -run 'TestHistoryAnchoredAtOnboarding|TestUnionsOfHiddenWeeksMeasured|TestFullyHiddenAlwaysPasses|TestHistoryFromRouteJSON|TestHistorySetsFromRouteJSON'
-              ./internal/smallgroup/...
-          # Analysis (plan Tasks 6-8, ruling C10): the disclosure properties at
-          # their non-race size (P1 one response, P2 every context of a period,
-          # small and realistic worlds, P4 histories, P5 bounds).
-          # ANALYSIS_LONG=1 runs the full size (2,000 / 100 / 500 / 100).
-          - suite: analysis disclosure properties
-            run: >
-              go test -count=1 -timeout 60m
-              -run 'TestP1|TestP2|TestP4|TestP5|TestOneStatePerGroupInFamily'
-              ./internal/analysis/disclose/...
+            run: bash ../../.github/scripts/go-test-packages.sh test differ integration "integration test" -race -timeout 25m
     defaults:
       run:
         working-directory: services/core
@@ -258,11 +247,142 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26"
-          cache-dependency-path: services/core/go.mod
+          cache-dependency-path: services/core/go.sum
       - name: ${{ matrix.suite }}
         env:
           SUITE_RUN: ${{ matrix.run }}
         run: bash -eo pipefail -c "$SUITE_RUN"
+
+  # The integration packages in three shards that run at once, heaviest
+  # packages first (weights: seconds on a runner, PR #213); every package in
+  # exactly one shard.
+  core-integration:
+    name: core (integration ${{ matrix.shard }})
+    runs-on: ubuntu-latest  # ships Docker, which the integration tests use
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1/3, 2/3, 3/3]
+    defaults:
+      run:
+        working-directory: services/core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache-dependency-path: services/core/go.sum
+      - name: integration ${{ matrix.shard }}
+        env:
+          PACKAGE_SHARD: ${{ matrix.shard }}
+          PACKAGE_WEIGHTS: >-
+            internal/db=330 internal/auth=320 internal/audit=190 internal/bus=130
+            cmd/core=120 internal/analysis/routes=95 internal/intel=80 internal/platform=60
+            internal/queries=55 internal/testutil=40 internal/emrctl=40 internal/analysis=30
+        run: bash ../../.github/scripts/go-test-packages.sh test differ "" integration -race -timeout 25m
+
+  # The check name from before the split: passes only when every shard did.
+  core-integration-all:
+    name: core (integration)
+    if: ${{ !cancelled() }}
+    needs: [core-integration]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        env:
+          RESULT: ${{ needs.core-integration.result }}
+        run: |
+          echo "integration, all shards: $RESULT"
+          test "$RESULT" = success
+
+  # The property tests at their non-race size, split into shards that run at
+  # once (internal/proptest: PROPERTY_SHARD=i/n runs every n-th case, each
+  # case in exactly one shard, in parallel on the runner's CPUs). The sizes
+  # are unchanged; the shards together run every case.
+  #
+  # Analysis (plan Tasks 6-8, ruling C10): the disclosure properties (P1 one
+  # response, P2 every context of a period, small and realistic worlds, P4
+  # histories, P5 bounds). ANALYSIS_LONG=1 runs the full size
+  # (2,000 / 100 / 500 / 100).
+  # Plan 7c (A7, R41a-5): the analytics history properties at full size (500
+  # guard-level histories, the unions and the JSON-side set check), and A8's
+  # modular check and the fallback on their histories. The -race runs use
+  # smaller samples to fit Go's package limit; these runs are their superset.
+  core-disclosure:
+    name: core (analysis disclosure properties ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1/3, 2/3, 3/3]
+    defaults:
+      run:
+        working-directory: services/core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache-dependency-path: services/core/go.sum
+      - name: analysis disclosure properties ${{ matrix.shard }}
+        env:
+          PROPERTY_SHARD: ${{ matrix.shard }}
+        run: bash ../../.github/scripts/core-property-tests.sh run disclosure
+
+  # The check name from before the split: passes only when every shard did.
+  core-disclosure-all:
+    name: core (analysis disclosure properties)
+    if: ${{ !cancelled() }}
+    needs: [core-disclosure]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        env:
+          RESULT: ${{ needs.core-disclosure.result }}
+        run: |
+          echo "analysis disclosure properties, all shards: $RESULT"
+          test "$RESULT" = success
+
+  core-history:
+    name: core (analytics history properties ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1/2, 2/2]
+    defaults:
+      run:
+        working-directory: services/core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache-dependency-path: services/core/go.sum
+      - name: analytics history properties ${{ matrix.shard }}
+        env:
+          PROPERTY_SHARD: ${{ matrix.shard }}
+        run: bash ../../.github/scripts/core-property-tests.sh run history
+
+  # The check name from before the split: passes only when every shard did.
+  core-history-all:
+    name: core (analytics history properties)
+    if: ${{ !cancelled() }}
+    needs: [core-history]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        env:
+          RESULT: ${{ needs.core-history.result }}
+        run: |
+          echo "analytics history properties, all shards: $RESULT"
+          test "$RESULT" = success
 
   # The Go module core and the emr service share (ADR 0014): a defect here
   # reaches both.
@@ -285,10 +405,12 @@ jobs:
         run: go vet ./...
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
+      # Each package once: the integration build of a package with
+      # integration tests includes its unit tests (go-test-packages.sh).
       - name: Test
-        run: go test -race -timeout 25m ./...
+        run: bash ../../.github/scripts/go-test-packages.sh test same "" integration -race -timeout 25m
       - name: Integration tests
-        run: go test -race -timeout 25m -tags integration ./...
+        run: bash ../../.github/scripts/go-test-packages.sh test differ "" integration -race -timeout 25m
 
   # The emr service (ADR 0014). Its integration tests run on core's
   # migrations (internal/testpg).
@@ -311,10 +433,12 @@ jobs:
         run: go vet ./...
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
+      # Each package once: the integration build of a package with
+      # integration tests includes its unit tests (go-test-packages.sh).
       - name: Test
-        run: go test -race -timeout 25m ./...
+        run: bash ../../.github/scripts/go-test-packages.sh test same "" integration -race -timeout 25m
       - name: Integration tests
-        run: go test -race -timeout 25m -tags integration ./...
+        run: bash ../../.github/scripts/go-test-packages.sh test differ "" integration -race -timeout 25m
 
   # The documents service (ADR 0016). Off by default; the same gates as the
   # emr service. Its NATS rights are tested from core (internal/bus).
@@ -337,10 +461,12 @@ jobs:
         run: go vet ./...
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
+      # Each package once: the integration build of a package with
+      # integration tests includes its unit tests (go-test-packages.sh).
       - name: Test
-        run: go test -race -timeout 25m ./...
+        run: bash ../../.github/scripts/go-test-packages.sh test same "" integration -race -timeout 25m
       - name: Integration tests
-        run: go test -race -timeout 25m -tags integration ./...
+        run: bash ../../.github/scripts/go-test-packages.sh test differ "" integration -race -timeout 25m
 
   # ADR 0012: a breaking change to the HTTP contract needs a new major
   # version (/api/v2), so it may not change /api/v1 in place.

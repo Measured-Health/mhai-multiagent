@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"math/bits"
 	"math/rand"
+	"sync"
 	"testing"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/proptest"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/smallgroup/solve"
 )
 
@@ -40,6 +42,17 @@ type history struct {
 	qg, rv       [][][]int64 // [hospital][week][category]
 
 	checkFullyHidden bool
+}
+
+// randomHistories draws n histories from seed, in order, before any runs:
+// history k is the same whether one test runs them all or a shard runs it.
+func randomHistories(seed int64, n int) []*history {
+	r := rand.New(rand.NewSource(seed))
+	out := make([]*history, n)
+	for k := range out {
+		out[k] = randomHistory(r)
+	}
+	return out
 }
 
 func randomHistory(r *rand.Rand) *history {
@@ -198,33 +211,40 @@ func (h *history) guard(t *testing.T, b *Block, p Pending) {
 
 // A7 at the guard's level.
 func TestHistoryAnchoredAtOnboarding(t *testing.T) {
-	r := rand.New(rand.NewSource(20261107))
 	n := historyCount()
-	exposedCells, hiddenCells, published := 0, 0, 0
-	for k := 0; k < n; k++ {
-		h := randomHistory(r)
+	hs := randomHistories(20261107, n)
+	var tally proptest.Tally
+	ran := proptest.Cases(t, n, func(k int) string { return fmt.Sprint("history=", k) }, func(t *testing.T, k int) {
+		h := hs[k]
 		bs := h.run(t)
+		published, hidden := 0, 0
 		for _, b := range bs {
 			published += len(b.Published)
 			for _, p := range b.Published {
 				for _, x := range p.Hidden {
 					if x {
-						hiddenCells++
+						hidden++
 					}
 				}
 			}
 		}
+		tally.Add("published", published)
+		tally.Add("hidden", hidden)
 		rep := reportAll(bs)
 		if l := rep.leaks(); l != "" {
 			t.Fatalf("history %d (%d months, %d hospitals, epoch week %d): %s", k, h.months, h.hosp, h.epoch, l)
 		}
-		exposedCells += rep.exposedCells
+		tally.Add("exposed", rep.exposedCells)
+	})
+	exposedCells, hiddenCells, published := tally.Get("exposed"), tally.Get("hidden"), tally.Get("published")
+	if ran == 0 {
+		return
 	}
 	if hiddenCells == 0 {
 		t.Fatal("no cell was ever hidden: the generator tests nothing")
 	}
 	t.Logf("%d histories, %d snapshots, %d hidden cells; %d hidden cells exposed with a value of 0 or 5 and up (already known before they were hidden)",
-		n, published, hiddenCells, exposedCells)
+		ran, published, hiddenCells, exposedCells)
 }
 
 // Spec §11.6, review fix 1: combinations of hidden cells that aren't a
@@ -234,11 +254,14 @@ func TestHistoryAnchoredAtOnboarding(t *testing.T) {
 // months of a quarter: pairs, triples) and of the hospitals in one column,
 // must stay unexposed at 1 to 4.
 func TestUnionsOfHiddenWeeksMeasured(t *testing.T) {
-	r := rand.New(rand.NewSource(99))
-	checked, exposedSmall := 0, 0
+	hs := randomHistories(99, historyCount()/5)
+	var tally proptest.Tally
+	var mu sync.Mutex
 	var first string
-	for k := 0; k < historyCount()/5; k++ {
-		for _, b := range randomHistory(r).run(t) {
+	proptest.Cases(t, len(hs), func(k int) string { return fmt.Sprint("history=", k) }, func(t *testing.T, k int) {
+		checked := 0
+		defer func() { tally.Add("checked", checked) }()
+		for _, b := range hs[k].run(t) {
 			eqs := eqsOf(b, true)
 			var boxes [][]int
 			var kinds []string
@@ -296,14 +319,17 @@ func TestUnionsOfHiddenWeeksMeasured(t *testing.T) {
 			for i, e := range ex {
 				checked++
 				if v := valueOf(b, boxes[i]); e && small(v) {
-					exposedSmall++
+					tally.Add("exposedSmall", 1)
+					mu.Lock()
 					if first == "" {
 						first = fmt.Sprintf("%s: a union of %d cells exposed = %d", kinds[i], len(boxes[i]), v)
 					}
+					mu.Unlock()
 				}
 			}
 		}
-	}
+	})
+	checked, exposedSmall := tally.Get("checked"), tally.Get("exposedSmall")
 	t.Logf("unions of hidden members that aren't the whole set: %d checked, %d exposed with a value of 1 to 4", checked, exposedSmall)
 	if exposedSmall > 0 {
 		t.Errorf("%d unions exposed at 1 to 4 (first: %s)", exposedSmall, first)

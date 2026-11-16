@@ -909,6 +909,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- CI: the Go jobs run each test once and in parallel. The core, emr, gokit
+  and documents jobs no longer run a package's tests in both the unit and
+  the integration run: `.github/scripts/go-test-packages.sh` gives the
+  integration run only the packages whose test build the tag changes (and
+  the fixture-routes run only those the `test` tag changes again).
+  `testutil.MigratedPostgres` copies a database migrated once per test
+  binary (`CREATE DATABASE ... TEMPLATE`) instead of starting a server and
+  migrating it for every test. The property tests run their cases as
+  parallel subtests (`internal/proptest`), and the disclosure and history
+  property jobs are split into three and two shards (`PROPERTY_SHARD`),
+  every case in exactly one shard, at unchanged sizes; the integration job
+  into three shards of packages (`PACKAGE_SHARD`). The old check names now
+  pass when all their shards have. The race job leaves the property tests' big runs to
+  the property jobs, whose cases include the race sizes' (listed and
+  checked in `.github/scripts/core-property-tests.sh`).
 - Go 1.26 for CI and the core and emr images (was 1.24, now out of
   support), with staticcheck 2026.2.2. Newer Go dependency updates require
   Go 1.25 or 1.26.
