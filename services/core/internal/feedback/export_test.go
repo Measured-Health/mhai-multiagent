@@ -15,10 +15,13 @@ import (
 // C15 (spec §4.4): the masked consultation has one reader. Only
 // feedback/store.go may name masked_question or masked_patient_json in a
 // string (SQL) of non-test code, and that reader never names the raw
-// consultation columns clinical_question or patient_data_json.
+// consultation columns clinical_question or patient_data_json. The demo
+// seed (cmd/core/demo.go) may name them only to write its synthetic sample
+// decisions: every such string of it is an INSERT, never a read.
 func TestOnlyCorrectionsReaderSelectsMaskedColumns(t *testing.T) {
 	root := filepath.Join("..", "..")
 	const reader = "internal/feedback/store.go"
+	const demoWriter = "cmd/core/demo.go"
 	masked := regexp.MustCompile(`(?i)\bmasked_(question|patient_json)\b`)
 	raw := regexp.MustCompile(`(?i)\b(clinical_question|patient_data_json)\b`)
 	fset := token.NewFileSet()
@@ -48,6 +51,12 @@ func TestOnlyCorrectionsReaderSelectsMaskedColumns(t *testing.T) {
 					return true
 				}
 				if masked.MatchString(s) {
+					if rel == demoWriter {
+						if !strings.HasPrefix(strings.TrimSpace(s), "INSERT INTO clinical_decisions") {
+							t.Errorf("%s: the demo seed names the masked consultation outside its INSERT", fset.Position(b.Pos()))
+						}
+						return true
+					}
 					if rel != reader {
 						t.Errorf("%s names the masked consultation; only %s may", fset.Position(b.Pos()), reader)
 					} else {
