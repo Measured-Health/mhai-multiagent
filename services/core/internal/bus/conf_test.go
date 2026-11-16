@@ -252,6 +252,21 @@ func TestEMRStreamFitsTheDemoStore(t *testing.T) {
 	}
 }
 
+// With EMR and documents on, JOBS, DEAD, EMR and DOCS together still leave
+// the KV buckets at least 128 MiB of the dev store (1 GB). The demo's 512 MB
+// store has no room left for DOCS (JOBS, DEAD and EMR take exactly its
+// budget): its max_file_store must grow before CORE_DOCUMENTS_ENABLED is
+// turned on there (design §17 departure 33, TODO.md), and this test says so.
+func TestDocsStreamFitsTheStore(t *testing.T) {
+	all := bus.StreamsMaxBytes + bus.EMRMaxBytes + bus.DocsMaxBytes
+	if all > 1<<30-128<<20 {
+		t.Fatalf("JOBS+DEAD+EMR+DOCS reserve %d bytes", all)
+	}
+	if all <= 512<<20-128<<20 {
+		t.Fatal("DOCS now fits the demo's store: drop the max_file_store item from TODO.md and test the demo here")
+	}
+}
+
 // The emr NATS user is an include: emr.conf (on) or emr-off.conf (the dev
 // default), which needs no variable and lets no one in or do anything.
 func TestEMRUserIsAnOptInInclude(t *testing.T) {
@@ -298,8 +313,13 @@ func TestDocumentsUserIsAnOptInInclude(t *testing.T) {
 	if !strings.Contains(on, "user:documents") || !strings.Contains(on, "password:$NATS_DOCUMENTS_PASSWORD") {
 		t.Fatal("documents.conf must define the documents user with NATS_DOCUMENTS_PASSWORD")
 	}
-	if !strings.Contains(on, `publish:{deny:[">"]}`) || !strings.Contains(on, `"documents.v1.ctl.>documents"`) ||
-		strings.Contains(on, "_INBOX") || !strings.Contains(on, `allow_responses:{max:1,expires:"1m"}`) {
+	// PR 4: scanned, its own durable and its own inbox; never uploaded,
+	// another durable, or stream and consumer management.
+	if !strings.Contains(on, `"documents.v1.ctl.>documents"`) || !strings.Contains(on, `"documents.v1.*.scanned"`) ||
+		!strings.Contains(on, `"$JS.API.CONSUMER.MSG.NEXT.DOCS.documents_scan"`) ||
+		!strings.Contains(on, `"_INBOX_worker.documents.>"`) || strings.Contains(on, "uploaded") ||
+		strings.Contains(on, "STREAM") || strings.Contains(on, "CREATE") || strings.Contains(on, `"documents.v1.>"`) ||
+		!strings.Contains(on, `allow_responses:{max:1,expires:"1m"}`) {
 		t.Fatalf("documents.conf rights: %s", on)
 	}
 	for _, c := range []struct{ file, gateway string }{
@@ -307,6 +327,10 @@ func TestDocumentsUserIsAnOptInInclude(t *testing.T) {
 		gw := stripComments(permissionsAfter(t, readConf(t, c.file), c.gateway))
 		if !strings.Contains(gw, `"documents.v1.ctl.>"`) {
 			t.Errorf("%s: gateway can't call documents.v1.ctl.>", c.file)
+		}
+		if !strings.Contains(gw, `"$JS.API.STREAM.CREATE.DOCS"`) || !strings.Contains(gw, `"$JS.API.CONSUMER.DURABLE.CREATE.DOCS.>"`) ||
+			strings.Contains(gw, `"documents.v1.*.scanned"`) {
+			t.Errorf("%s: gateway's DOCS rights", c.file)
 		}
 	}
 	if strings.Contains(stripComments(readConf(t, "deploy/nats/nats.conf")), "documents.conf") ||

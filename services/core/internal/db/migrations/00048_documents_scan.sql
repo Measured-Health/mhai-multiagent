@@ -1,6 +1,6 @@
 -- Documents service, the scan (documents design §5, §7.2; §13 PR 4; ADR
--- 0016). Numbered 00047: main had 00046 (documents PR 3) when this was
--- pushed.
+-- 0016). Numbered 00048: main had 00047 (#217, the cloud reservation
+-- reaper) when this was pushed.
 --
 -- The documents service writes only through these definers (SECURITY
 -- DEFINER, owner mhai_migrate, EXECUTE for mhai_documents only), each in

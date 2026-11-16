@@ -12,7 +12,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/dbx"
 )
 
-// PGRows calls the documents_scan_* definers (00047) as mhai_documents,
+// PGRows calls the documents_scan_* definers (00048) as mhai_documents,
 // under the hospital (RLS): another hospital's document is never claimed.
 type PGRows struct{ Pool *pgxpool.Pool }
 

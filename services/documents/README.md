@@ -81,9 +81,28 @@ shared by several documents servers").
   and at start, and reported by health (`keyring_fingerprint`,
   `keyring_hospitals`).
 
-Scanning and the sandbox with `clamav` and `docsandbox` (PR 4), uploads
-(PR 5), review (PR 6), ingest (PR 7), finalise (PR 8), retention and the
-KMS provider (PR 9) and the archive connector (PR 10) come later.
+PR 4, the scan (design §5; §17 departures 21-33):
+
+- The `documents_scan` durable on `DOCS` (core makes both when
+  `CORE_DOCUMENTS_ENABLED=true`) and a sweeper (every minute) claim an
+  `uploaded` row under its hospital (migration 00048's definers), read the
+  quarantine object's size, then its bytes, check the magic bytes against the
+  declared type and purpose and an archive file's SHA-256, scan with clamd
+  (`INSTREAM`, after checking the signatures are at most 48 hours old),
+  render in docsandbox (`services/docsandbox`: pdfium and Pillow under
+  nsjail), re-check and re-encode every page here, seal and store the
+  original and the pages and mark the row `ready`, delete the quarantine
+  object and publish `documents.v1.<hid>.scanned`.
+- A refusal is `quarantined` with its closed reason; nothing is stored.
+- Fail closed: without clamd, fresh signatures, docsandbox, the hospital's
+  key or the store, the row stays `scanning` (logged
+  `documents_scan_blocked`), the message is retried with a back-off and
+  the sweeper retries; after 6 hours the row is `failed`
+  `scan_unavailable`.
+- Health reports `scanner_ready` and `sandbox_ready`.
+
+Uploads (PR 5), review (PR 6), ingest (PR 7), finalise (PR 8), retention
+and the KMS provider (PR 9) and the archive connector (PR 10) come later.
 
 ## Settings
 
@@ -102,6 +121,8 @@ KMS provider (PR 9) and the archive connector (PR 10) come later.
 | `DOCUMENTS_S3_BUCKET`, `DOCUMENTS_S3_REGION`, `DOCUMENTS_S3_ACCESS_KEY_ID` | the bucket (`mhai-documents-<env>`), its region, the service's own access key id |
 | `DOCUMENTS_S3_SECRET_KEY_FILE` | the file holding the secret access key, an absolute path; a missing, short or placeholder secret stops the service |
 | `DOCUMENTS_S3_UPLOAD_ENDPOINT` | optional: what browsers post to, when it isn't `DOCUMENTS_S3_ENDPOINT` |
+| `DOCUMENTS_CLAMD_ADDR` | clamd's `host:port` (compose: `clamav:3310`); unset: the scanner is not ready and every scan waits |
+| `DOCUMENTS_SANDBOX_SOCKET`, `DOCUMENTS_SANDBOX_JOBS` | docsandbox's Unix socket and the jobs tmpfs both containers mount, absolute; both or neither (neither: every scan waits) |
 
 Any missing, malformed or relaxed setting stops the service. Errors name the
 variable, never its value.

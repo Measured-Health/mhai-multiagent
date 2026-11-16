@@ -135,6 +135,9 @@ services:
       # service's sealing public key (CORE_EMR_SEAL_PUBLIC_KEY_PATH) and the
       # idempotency HMAC key (CORE_IDEMPOTENCY_HMAC_KEY_PATH).
       CORE_EMR_ENABLED: ${CORE_EMR_ENABLED:-false}
+      # Documents (off by default): true makes the DOCS stream and the
+      # documents service's documents_scan durable (documents PR 4).
+      CORE_DOCUMENTS_ENABLED: ${CORE_DOCUMENTS_ENABLED:-false}
       # With EMR on, core's maintenance loop purges excluded patients (legal
       # holds respected); the nightly retention sweep also needs this, off
       # until the privacy lead confirms the retention values (H5).
@@ -330,7 +333,10 @@ services:
   # service's. No keyring and no object store are configured here, so
   # health reports keyring_ready and storage_ready false and no upload is
   # signed (PR 3; the settings are in services/documents/README.md).
-  # clamav and docsandbox join the profile in PR 4 (design §17).
+  # PR 4: it scans with clamav (TCP, on the docscan network, no route out)
+  # and renders in docsandbox (a Unix socket on the docsandbox-jobs tmpfs
+  # they share); scanning also needs CORE_DOCUMENTS_ENABLED=true for the
+  # DOCS stream. Until all of them are ready every scan waits (fail closed).
   #
   # Locked down: read-only root, no capabilities, no-new-privileges, and
   # only the internal backend network (Postgres and NATS; no route out). No
@@ -352,18 +358,83 @@ services:
       DOCUMENTS_NATS_PASSWORD: ${NATS_DOCUMENTS_PASSWORD:-}
       DOCUMENTS_DATABASE_URL: postgres://${DOCUMENTS_DB_USER:-documents_app}:${DOCUMENTS_DB_PASSWORD:-}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
       DOCUMENTS_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+      DOCUMENTS_CLAMD_ADDR: clamav:3310
+      DOCUMENTS_SANDBOX_SOCKET: /jobs/sandbox.sock
+      DOCUMENTS_SANDBOX_JOBS: /jobs
     volumes:
       - trustedkeys:/trusted:ro
+      - docsandbox-jobs:/jobs
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    networks: [backend]
+    networks: [backend, docscan]
     depends_on:
       nats: { condition: service_healthy }
       core-migrate: { condition: service_completed_successfully }
       core-request-key: { condition: service_completed_successfully }
     healthcheck:
       disable: true
+
+  # clamd (documents design §5 step 3, §5.2): INSTREAM only, on the
+  # internal docscan network (the documents service and nothing else; no
+  # route out). Signatures come from freshclam into the shared database
+  # volume, read-only here. deploy/documents/clamd.conf sets the limits.
+  clamav:
+    image: clamav/clamav@sha256:4cc4350d3fded380caf1799e76c0d1c93f3fa40af99c0cb2862ec0c9b117718a
+    profiles: ["documents"]
+    restart: unless-stopped
+    environment:
+      CLAMAV_NO_FRESHCLAMD: "true"
+      CLAMAV_NO_MILTERD: "true"
+    volumes:
+      - ./deploy/documents/clamd.conf:/etc/clamav/clamd.conf:ro
+      - clamav-db:/var/lib/clamav
+    networks: [docscan]
+    mem_limit: 3g
+    cpus: 1
+    security_opt: ["no-new-privileges:true"]
+
+  # freshclam: the signature updates, into clamav-db. Development only goes
+  # straight to the public mirror; elsewhere ops put it behind an egress
+  # proxy that allows only the signature mirror (design §5.2, P2).
+  freshclam:
+    image: clamav/clamav@sha256:4cc4350d3fded380caf1799e76c0d1c93f3fa40af99c0cb2862ec0c9b117718a
+    profiles: ["documents"]
+    restart: unless-stopped
+    environment:
+      CLAMAV_NO_CLAMD: "true"
+      CLAMAV_NO_MILTERD: "true"
+    volumes:
+      - clamav-db:/var/lib/clamav
+    networks: [default]
+    security_opt: ["no-new-privileges:true"]
+
+  # docsandbox (services/docsandbox; design §5 step 4): renders each file
+  # in a fresh nsjail process. No network at all, no credential, a
+  # read-only root; it shares only the jobs tmpfs with the documents
+  # service. nsjail builds each jail, so the container keeps CAP_SYS_ADMIN
+  # and runs without Docker's seccomp and AppArmor profiles; the renderer
+  # inside runs as uid 65532 with no capability, under nsjail's own
+  # seccomp allow-list (design §17, PR 4).
+  docsandbox:
+    build:
+      context: ./services/docsandbox
+    image: mhai-docsandbox:local
+    profiles: ["documents"]
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [SYS_ADMIN, SETUID, SETGID, SYS_CHROOT, CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["seccomp=unconfined", "apparmor=unconfined"]
+    tmpfs:
+      - /run/docsandbox:size=1536m,mode=0700
+      - /tmp:size=16m
+    volumes:
+      - docsandbox-jobs:/jobs
+    mem_limit: 4g
+    cpus: 2
+    pids_limit: 64
 
   # One-shot: K_proxy, the key emr and egress-emr share for the
   # per-connection Proxy-Authorization (emr keys proxy-init; kept when
@@ -550,6 +621,12 @@ volumes:
   emr-secrets:   # the emr service's file secret store (profile emr)
   emr-proxy-key: # K_proxy, for emr and egress-emr only (profile emr)
   emr-egress-conf: # the allow-list emr writes and egress-emr reads (profile emr)
+  clamav-db:     # ClamAV signatures, freshclam writes, clamav reads (profile documents)
+  # The jobs the documents service hands docsandbox (profile documents): a
+  # tmpfs, owned by the documents service's uid.
+  docsandbox-jobs:
+    driver: local
+    driver_opts: { type: tmpfs, device: tmpfs, o: "size=2g,uid=65532,gid=65532,mode=0700" }
   ollama:
   hf-cache:
 
@@ -564,6 +641,9 @@ networks:
     ipam:
       config:
         - subnet: ${EMR_BACKEND_SUBNET:-10.231.0.0/24}
+  # Internal: the documents service and clamav only (profile documents).
+  docscan:
+    internal: true
   # Internal: the emr service and egress-emr only (profile emr).
   emr-proxy:
     internal: true

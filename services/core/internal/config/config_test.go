@@ -20,7 +20,8 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"CORE_IDEMPOTENCY_HMAC_KEY_PATH", "CORE_EMR_ALLOW_NULL_MRN", "CORE_EMR_RETENTION_SWEEP",
 		"CORE_PATIENT_LOOKUP_PER_MINUTE", "CORE_PATIENT_LOOKUP_PER_DAY", "CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY",
 		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE", "ANALYSIS_NAMED_IDENTITY",
-		"CORE_AUDIT_EXPORTS", "ANALYSIS_INGEST", "CORE_CLOUD_RESERVATION_REAPER", "CORE_CLOUD_RESERVATION_REAP_AFTER"} {
+		"CORE_AUDIT_EXPORTS", "ANALYSIS_INGEST", "CORE_CLOUD_RESERVATION_REAPER", "CORE_CLOUD_RESERVATION_REAP_AFTER",
+		"CORE_DOCUMENTS_ENABLED"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -907,5 +908,35 @@ func TestConfigCloudReaper(t *testing.T) {
 	}
 	if CloudReapAfterMin != 30*time.Minute || CloudReapAfterMax != 7*24*time.Hour || CloudReapAfterDefault != time.Hour {
 		t.Error("the reaper's bounds moved; keep them with cloudreap.MinAge, MaxAge and DefaultAge and migration 00047")
+	}
+}
+
+// Documents PR 4: off unless CORE_DOCUMENTS_ENABLED says true (no DOCS
+// stream exists by default, documents design §13).
+func TestConfigDocumentsEnabled(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	if c, err := Load(); err != nil || c.DocumentsEnabled {
+		t.Fatalf("default: %v %v", c.DocumentsEnabled, err)
+	}
+	for raw, want := range map[string]bool{"true": true, "TRUE": true, " false ": false, "": false} {
+		m := map[string]string{"CORE_DOCUMENTS_ENABLED": raw}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if c, err := Load(); err != nil || c.DocumentsEnabled != want {
+			t.Errorf("%q: %v %v", raw, c.DocumentsEnabled, err)
+		}
+	}
+	for _, bad := range []string{"yes", "1", "on"} {
+		m := map[string]string{"CORE_DOCUMENTS_ENABLED": bad}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_DOCUMENTS_ENABLED") {
+			t.Errorf("%q: %v", bad, err)
+		}
 	}
 }

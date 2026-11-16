@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -362,5 +361,4 @@ func TestBlockedAlertIsThrottled(t *testing.T) {
 	if r.s.Metrics.Blocked.Load() != 5 {
 		t.Fatalf("blocked counted %d", r.s.Metrics.Blocked.Load())
 	}
-	_ = time.Second
 }

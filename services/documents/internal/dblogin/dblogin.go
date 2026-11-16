@@ -5,7 +5,7 @@
 // BYPASSRLS, CREATEROLE, CREATEDB or REPLICATION, not a member of
 // mhai_migrate or the database's owner, owning no schema or relation, and
 // a member of no other mhai_ role (mhai_documents_sweep, the sweeper's
-// read of due ids, 00047, is the one other it may hold). The service refuses to start with such
+// read of due ids, 00048, is the one other it may hold). The service refuses to start with such
 // a login, and health reports database_ready false.
 package dblogin
 
