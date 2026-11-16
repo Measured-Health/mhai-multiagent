@@ -3,6 +3,7 @@
 package main
 
 import (
+	"io"
 	"bytes"
 	"context"
 	"errors"
@@ -20,7 +21,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
-var demoOn = demoEnv(map[string]string{demoSeedEnv: "on", "MFA_ENCRYPTION_KEY": testDemoKey})
+var demoOn = demoEnv(map[string]string{demoSeedEnv: "on", "APP_ENV": "demo", "MFA_ENCRYPTION_KEY": testDemoKey})
 
 func runDemo(t *testing.T, url string) string {
 	t.Helper()
@@ -126,9 +127,13 @@ func TestDemoSeedIsIdempotentAndResets(t *testing.T) {
 			t.Fatalf("%s: not enrolled on the demo secret", k)
 		}
 	}
-	platform, _, _ := demoUser(t, super, "platformAdmin")
+	platform, ph, _ := demoUser(t, super, "platformAdmin")
 	if bytes.Equal(demoSecretOf(t, super, platform), demoSecret) {
 		t.Fatal("platform account on the published secret")
+	}
+	// No account with a platform role ever opens with the published password.
+	if ok, _ := password.Verify(DemoPassword, ph); ok {
+		t.Fatal("platform account opens with the demo password")
 	}
 	if _, h, _ := demoUser(t, super, "locked"); func() bool { ok, _ := password.Verify(DemoPassword, h); return ok }() {
 		t.Fatal("locked account opens with the demo password")
@@ -217,6 +222,15 @@ func TestDemoSeedIsIdempotentAndResets(t *testing.T) {
 	if ok, broken, err := audit.Verify(ctx, super); err != nil || !ok {
 		t.Fatalf("audit chain: ok=%v broken=%d err=%v", ok, broken, err)
 	}
+	// An operator's kill switch stays off: the seed raises a switch only when
+	// it has no row yet.
+	if err := analysisSwitchOff(ctx, "--global", pg.URL, io.Discard); err != nil {
+		t.Fatalf("switch off --global: %v", err)
+	}
+	runDemo(t, pg.URL)
+	if n := scalar(t, super, `SELECT count(*) FROM analysis_switch WHERE hospital_id IS NULL AND position = 'on'`); n != 0 {
+		t.Fatal("the seed raised the global analysis switch an operator lowered")
+	}
 }
 
 // Concurrent runs (two deploys at once) serialise on the advisory lock:
@@ -282,6 +296,20 @@ func TestDemoSeedRefusals(t *testing.T) {
 		err := demoCmd(ctx, []string{"seed"}, pg.URL, demoOn, &bytes.Buffer{})
 		if !errors.Is(err, errDemoReal) {
 			t.Fatalf("%v", err)
+		}
+		nothing(t, super)
+		if n := scalar(t, super, `SELECT count(*) FROM hospitals WHERE short_code = 'DEM'`); n != 0 {
+			t.Fatal("DEM created")
+		}
+	})
+	t.Run("a non-demo hospital with no agreement", func(t *testing.T) {
+		pg, super := testutil.MigratedPostgres(t)
+		if _, err := super.Exec(ctx, `INSERT INTO hospitals (name, short_code, status, time_zone) VALUES ('Synthetic Real', 'RLH', 'active', 'UTC')`); err != nil {
+			t.Fatal(err)
+		}
+		err := demoCmd(ctx, []string{"seed"}, pg.URL, demoOn, &bytes.Buffer{})
+		if !errors.Is(err, errDemoReal) {
+			t.Fatalf("%v, want errDemoReal", err)
 		}
 		nothing(t, super)
 		if n := scalar(t, super, `SELECT count(*) FROM hospitals WHERE short_code = 'DEM'`); n != 0 {

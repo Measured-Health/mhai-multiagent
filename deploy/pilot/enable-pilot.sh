@@ -114,6 +114,14 @@ grep -qF "nkey: \$NATS_PIPELINE_NKEY" "$DEST/nats/nats.conf" \
   || die "$DEST/nats/nats.conf has no pipeline user: deploy the release with the pilot first"
 info "release with the pilot is deployed"
 
+# The public demo's published accounts (core demo seed, deploy/README.md
+# "Public demo") must never sit beside a real hospital: refuse while the
+# database has a demo hospital with active accounts. Turn the demo off
+# first (its accounts deactivated, DEMO_SAMPLE_AI=off).
+demo_users=$(printf "SELECT count(*) FROM users u JOIN hospitals h ON h.id = u.hospital_id WHERE h.is_demo AND u.is_active;\n" \
+  | docker compose exec -T postgres psql -U pgadmin -d mhai -v ON_ERROR_STOP=1 -tA) || die "could not check for the public demo's accounts"
+[ "${demo_users:-0}" = 0 ] || die "this database has the public demo's active accounts (published password): turn the demo off before the pilot (deploy/README.md, 'Public demo'); nothing was changed"
+
 # env_get NAME: the value of NAME in .env (the last one), or empty.
 env_get() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n1; }
 # env_set NAME VALUE: write NAME=VALUE (not a secret: it is printed).

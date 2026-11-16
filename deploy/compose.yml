@@ -363,8 +363,9 @@ services:
   # accounts and its sample content. One-shot, as the database owner (as
   # core-migrate: it writes user_mfa, decisions and corrections no single app
   # role may write), with MFA_ENCRYPTION_KEY for the demo accounts' published
-  # two-step secret. It refuses unless MHAI_DEMO_SEED=on (set here only) and
-  # refuses a database holding a hospital with a real cloud agreement.
+  # two-step secret. It refuses unless MHAI_DEMO_SEED=on and APP_ENV=demo (set
+  # here only), and refuses a database holding any non-demo hospital or a
+  # real cloud agreement.
   core-demo-seed:
     <<: [*hardening, *core-image]
     profiles: ["demo"]
@@ -374,6 +375,7 @@ services:
       DATABASE_URL: postgres://pgadmin:${POSTGRES_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=disable
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set in /srv/mhai-backend/.env}
       MHAI_DEMO_SEED: "on"
+      APP_ENV: demo
     mem_limit: 128m
     networks: [backend]
     depends_on:

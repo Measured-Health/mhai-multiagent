@@ -22,7 +22,7 @@ func demoEnv(m map[string]string) func(string) string {
 }
 
 func TestDemoCmdArgs(t *testing.T) {
-	env := demoEnv(map[string]string{demoSeedEnv: "on", "MFA_ENCRYPTION_KEY": testDemoKey})
+	env := demoEnv(map[string]string{demoSeedEnv: "on", "APP_ENV": "demo", "MFA_ENCRYPTION_KEY": testDemoKey})
 	for _, args := range [][]string{nil, {}, {"seeds"}, {"seed", "extra"}, {"--help"}} {
 		if err := demoCmd(context.Background(), args, "", env, &bytes.Buffer{}); !errors.Is(err, errDemoArgs) {
 			t.Errorf("%q: %v, want usage", args, err)
@@ -34,21 +34,29 @@ func TestDemoCmdArgs(t *testing.T) {
 func TestDemoCmdRefusesBeforeConnecting(t *testing.T) {
 	for _, v := range []string{"", "On", "on ", "true", "1", "yes"} {
 		err := demoCmd(context.Background(), []string{"seed"}, "postgres://unused", demoEnv(map[string]string{
-			demoSeedEnv: v, "MFA_ENCRYPTION_KEY": testDemoKey}), &bytes.Buffer{})
+			demoSeedEnv: v, "APP_ENV": "demo", "MFA_ENCRYPTION_KEY": testDemoKey}), &bytes.Buffer{})
 		if !errors.Is(err, errDemoOff) {
 			t.Errorf("MHAI_DEMO_SEED=%q: %v, want refused", v, err)
 		}
 	}
+	// The flag alone isn't enough: APP_ENV must be the demo (unset is production).
+	for _, v := range []string{"", "production", "development", "Demo", "demo "} {
+		err := demoCmd(context.Background(), []string{"seed"}, "postgres://unused", demoEnv(map[string]string{
+			demoSeedEnv: "on", "APP_ENV": v, "MFA_ENCRYPTION_KEY": testDemoKey}), &bytes.Buffer{})
+		if !errors.Is(err, errDemoOff) {
+			t.Errorf("APP_ENV=%q: %v, want refused", v, err)
+		}
+	}
 	for _, k := range []string{"", "short-key"} {
 		err := demoCmd(context.Background(), []string{"seed"}, "postgres://unused", demoEnv(map[string]string{
-			demoSeedEnv: "on", "MFA_ENCRYPTION_KEY": k}), &bytes.Buffer{})
+			demoSeedEnv: "on", "APP_ENV": "demo", "MFA_ENCRYPTION_KEY": k}), &bytes.Buffer{})
 		if !errors.Is(err, errDemoKey) {
 			t.Errorf("key %q: %v, want errDemoKey", k, err)
 		}
 	}
 	// No DATABASE_URL: the owner connection is required.
 	err := demoCmd(context.Background(), []string{"seed"}, "", demoEnv(map[string]string{
-		demoSeedEnv: "on", "MFA_ENCRYPTION_KEY": testDemoKey}), &bytes.Buffer{})
+		demoSeedEnv: "on", "APP_ENV": "demo", "MFA_ENCRYPTION_KEY": testDemoKey}), &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
 		t.Fatalf("no url: %v", err)
 	}

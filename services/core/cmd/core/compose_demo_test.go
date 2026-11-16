@@ -68,8 +68,8 @@ func TestDemoSeedService(t *testing.T) {
 	if !slices.Equal(s.Profiles, []string{"demo"}) || !slices.Equal(s.Command, []string{"demo", "seed"}) {
 		t.Errorf("core-demo-seed profiles %v command %v", s.Profiles, s.Command)
 	}
-	if s.Environment["MHAI_DEMO_SEED"] != "on" {
-		t.Error("core-demo-seed must set MHAI_DEMO_SEED=on")
+	if s.Environment["MHAI_DEMO_SEED"] != "on" || s.Environment["APP_ENV"] != "demo" {
+		t.Error("core-demo-seed must set MHAI_DEMO_SEED=on and APP_ENV=demo")
 	}
 	if got := s.networkNames(); !slices.Equal(got, []string{"backend"}) {
 		t.Errorf("core-demo-seed networks %v, want [backend]", got)
@@ -89,7 +89,7 @@ func TestDemoSwitchesOnlyOnDemoServices(t *testing.T) {
 			}
 		}
 		if name != "sample-ai" {
-			if s.Environment["INTELLIGENCE_MODEL_CLIENT"] == "sample" || s.Environment["APP_ENV"] == "demo" {
+			if s.Environment["INTELLIGENCE_MODEL_CLIENT"] == "sample" || (s.Environment["APP_ENV"] == "demo" && name != "core-demo-seed") {
 				t.Errorf("%s runs the sample client or APP_ENV=demo", name)
 			}
 			if slices.Contains(s.Profiles, "demo") && name != "core-demo-seed" {

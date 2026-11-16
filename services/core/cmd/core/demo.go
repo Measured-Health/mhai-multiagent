@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/account"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/feedback"
@@ -38,8 +39,13 @@ sessions when anything about signing in changed; content is written once.
 
 Demo host only. It refuses, before writing anything, unless MHAI_DEMO_SEED
 is exactly "on" (only the demo compose's one-shot sets it), when any
-hospital has a real cloud agreement (AGR-/DPA-: a real hospital lives in
-this database), and when a hospital DEM exists that is not the demo.
+hospital is not a demo hospital or has a real cloud agreement (a real
+hospital may live in this database), when APP_ENV isn't demo, and when a
+hospital DEM exists that is not the demo. The platform account's password
+and two-step secret are random and thrown away: it exists only so the
+clinical app can be shown refusing it. Analysis and named access are
+raised only when their switch rows don't exist yet (an operator's "off"
+stays off).
 DATABASE_URL is the database owner, as core migrate uses it, because the
 seed writes rows no single app role may write (user_mfa, decisions);
 MFA_ENCRYPTION_KEY is core's, to seal the two-step secret as enrolment does.
@@ -61,9 +67,9 @@ const (
 
 var (
 	errDemoArgs     = fmt.Errorf("%s", demoUsage)
-	errDemoOff      = errors.New("refused: MHAI_DEMO_SEED is not on; this is not the demo's seed container, nothing was written")
+	errDemoOff      = errors.New("refused: MHAI_DEMO_SEED is not on or APP_ENV is not demo; this is not the demo's seed container, nothing was written")
 	errDemoKey      = errors.New("MFA_ENCRYPTION_KEY is missing or too short")
-	errDemoReal     = errors.New("refused: a hospital in this database has a real cloud agreement; the demo seed never runs beside a real hospital, nothing was written")
+	errDemoReal     = errors.New("refused: this database holds a hospital that is not a demo hospital (or a real cloud agreement); the demo seed never runs beside a real hospital, nothing was written")
 	errDemoNotDemo  = errors.New("refused: hospital DEM exists and is not the demo hospital; nothing was written")
 	errDemoConflict = errors.New("refused: a sample account's email belongs to an account outside the demo hospital; nothing more was written")
 	errDemoInactive = errors.New("the demo hospital is not active and can't be activated by the CLI (reactivate it on the platform)")
@@ -122,7 +128,7 @@ var DemoAccounts = []demoAccount{
 	{Key: "analyst", Email: "analyst.adeyemi" + demoDomain, Display: "Dr. Adeyemi", Full: "Dr. Kemi Adeyemi", Title: "Consultant physician",
 		Specialty: "Internal Medicine", Roles: []string{"clinician"}, Analyst: true, Terms: true, MFA: mfaDemo},
 	{Key: "platformAdmin", Email: "platform.bakare@measured-health.example", Display: "Tunde Bakare", Full: "Tunde Bakare",
-		Title: "Platform admin", Roles: []string{"platform_admin"}, Platform: true, Terms: true, MFA: mfaRandom},
+		Title: "Platform admin", Roles: []string{"platform_admin"}, Platform: true, Password: pwRandom, Terms: true, MFA: mfaRandom},
 	{Key: "locked", Email: "locked.eze" + demoDomain, Display: "Dr. Eze", Full: "Dr. Obinna Eze", Title: "Registrar",
 		Specialty: "Surgery", Roles: []string{"clinician"}, Password: pwRandom, Terms: true},
 }
@@ -142,7 +148,9 @@ func demoCmd(ctx context.Context, args []string, url string, getenv func(string)
 	if len(args) != 1 || args[0] != "seed" {
 		return errDemoArgs
 	}
-	if getenv(demoSeedEnv) != "on" {
+	// Both switches, exactly: the flag only the demo's seed container sets,
+	// and APP_ENV=demo (unset is production).
+	if getenv(demoSeedEnv) != "on" || getenv("APP_ENV") != "demo" {
 		return errDemoOff
 	}
 	sealer, err := auth.NewTOTPSealer([]byte(strings.TrimSpace(getenv("MFA_ENCRYPTION_KEY"))))
@@ -194,6 +202,11 @@ func (s *demoSeeder) run(ctx context.Context) error {
 		return err
 	}
 	if s.hid, err = s.hospital(ctx); err != nil {
+		return err
+	}
+	// Again after DEM exists, before any account is written: a hospital made
+	// meanwhile stops the run here.
+	if err := demoGuards(ctx, s.pool); err != nil {
 		return err
 	}
 	s.ids = map[string]uuid.UUID{}
@@ -250,14 +263,6 @@ func demoGuards(ctx context.Context, pool *pgxpool.Pool) error {
 	if !sees {
 		return errDemoOwner
 	}
-	var real bool
-	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hospital_model_policy
-		WHERE agreement_ref ~ '^(AGR|DPA)-')`).Scan(&real); err != nil {
-		return demoErr(err)
-	}
-	if real {
-		return errDemoReal
-	}
 	var isDemo bool
 	err := pool.QueryRow(ctx, `SELECT is_demo FROM hospitals WHERE short_code = $1`, DemoHospitalCode).Scan(&isDemo)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -265,6 +270,18 @@ func demoGuards(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	if err == nil && !isDemo {
 		return errDemoNotDemo
+	}
+	// Fail closed: a demo database holds demo hospitals only (is_demo is set
+	// at creation and never changes). Any other hospital, whatever its
+	// policy, or any real cloud agreement, means a real hospital may live
+	// here, and the published accounts must never exist beside it.
+	var real bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hospitals WHERE NOT is_demo)
+		OR EXISTS (SELECT 1 FROM hospital_model_policy WHERE agreement_ref ~ '^(AGR|DPA)-')`).Scan(&real); err != nil {
+		return demoErr(err)
+	}
+	if real {
+		return errDemoReal
 	}
 	return nil
 }
@@ -550,13 +567,16 @@ func (s *demoSeeder) audit(ctx context.Context, created, reset int) error {
 // analysis raises DEM's demo Analysis with its synthetic cohort
 // (analysisSeedDemo) and named access to letters_only, each once.
 func (s *demoSeeder) analysis(ctx context.Context) (string, error) {
-	var on int
+	// Raised only when neither switch row exists yet: a switch an operator
+	// lowered (core analysis switch off) stays off, so a deploy never undoes
+	// a kill switch.
+	var rows int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM analysis_switch
-		WHERE (hospital_id = $1 OR hospital_id IS NULL) AND position = 'on' AND signoff_clinical = 'DEMO-SYNTHETIC'`, s.hid).Scan(&on); err != nil {
+		WHERE hospital_id = $1 OR hospital_id IS NULL`, s.hid).Scan(&rows); err != nil {
 		return "", demoErr(err)
 	}
 	result := "kept"
-	if on < 2 {
+	if rows == 0 {
 		if err := analysisSeedDemo(ctx, []string{DemoHospitalCode}, s.url, io.Discard, nil); err != nil {
 			return "", err
 		}
@@ -564,7 +584,7 @@ func (s *demoSeeder) analysis(ctx context.Context) (string, error) {
 	}
 	var named string
 	err := s.pool.QueryRow(ctx, `SELECT position FROM named_access_switch WHERE hospital_id = $1`, s.hid).Scan(&named)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && named == "off") {
+	if errors.Is(err, pgx.ErrNoRows) {
 		if err := namedAccessDemo(ctx, DemoHospitalCode, s.url, io.Discard); err != nil {
 			return "", err
 		}
@@ -596,6 +616,12 @@ func (s *demoSeeder) analysts(ctx context.Context) error {
 			verb = "--add"
 		}
 		if err := usersRoles(ctx, []string{a.Email, verb, "analyst", "--by", by}, s.url, io.Discard, nil); err != nil {
+			// An operator switched Analysis off (the seed keeps it off): the
+			// analyst role waits until it is on again.
+			if a.Analyst && errors.Is(err, analysis.ErrAnalystOff) {
+				fmt.Fprintln(s.out, "demo seed: analysis is off; the analyst role is not granted")
+				continue
+			}
 			return err
 		}
 	}

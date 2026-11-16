@@ -371,8 +371,10 @@ browser ─https─> nginx ─> web (live) ─mhai-bff─> nats ─> core ─JOB
    be the `pipeline` NATS user on the same consumer, and the demo seed is
    for a database with no real hospital.
 2. **The seed:** `core demo seed` (one-shot `core-demo-seed`, as the
-   database owner, with `MHAI_DEMO_SEED=on`). It refuses a database where
-   any hospital has a real cloud agreement (`AGR-`/`DPA-`). It makes or
+   database owner, with `MHAI_DEMO_SEED=on` and `APP_ENV=demo`). It refuses
+   a database holding **any hospital that is not a demo hospital**
+   (`is_demo`, set at creation and never changed) or any real cloud
+   agreement (`AGR-`/`DPA-`). It makes or
    resets the demo hospital `DEM` (`is_demo`, created with the flag, never a
    real hospital), the accounts below, the six shared sample guidelines
    (`KB#0001`–`KB#0006`) and sample content (past consultations, a
@@ -414,7 +416,12 @@ it with a cloud provider or pinned roles, and refuses it without
 `INTELLIGENCE_SAMPLE_HOSPITALS`; a job of a hospital not listed is refused
 before its claim (dead letter `forbidden`), so a real hospital's question
 never gets a sample answer. The seed refuses without `MHAI_DEMO_SEED=on`
-(set on its one-shot only) and on a database with a real agreement.
+and `APP_ENV=demo` (set on its one-shot only), and on a database with any
+non-demo hospital. It raises Analysis and named access only when their
+switch rows don't exist yet, so an operator's `core analysis switch off`
+stays off across deploys. `pilot/enable-pilot.sh` refuses while the demo
+hospital has active accounts, and `enable-demo.sh` removes the
+`demo/seeded` marker when it finds the pilot.
 `TestDemoSwitchesOnlyOnDemoServices` keeps both switches on the two demo
 services.
 
@@ -430,7 +437,7 @@ hospital only; they are reset on every deploy):
 | Hospital admin | `admin.nwosu@demo-hospital.example` | password and a code |
 | Medical director (clinician and hospital admin) | `director.obi@demo-hospital.example` | password and a code |
 | Analyst (clinician with Analysis) | `analyst.adeyemi@demo-hospital.example` | password and a code |
-| Platform admin | `platform.bakare@measured-health.example` | the clinical app answers 403; its two-step secret is random and thrown away, so nobody can finish a platform sign-in |
+| Platform admin | `platform.bakare@measured-health.example` | its password and two-step secret are random and thrown away (never published): the account exists with its role, and nobody can sign in with it |
 | Locked account | `locked.eze@demo-hospital.example` | its password is random and thrown away: every try fails, and the fifth locks it for that visitor |
 
 The demo password is `Sample-demo-only-2026` and the two-step secret is

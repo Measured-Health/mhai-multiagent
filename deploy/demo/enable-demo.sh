@@ -72,6 +72,8 @@ case ",$(env_get COMPOSE_PROFILES)," in *,pilot,*) PILOT=1 ;; esac
 [ -z "$(docker compose --profile pilot ps -q pipeline 2>/dev/null)" ] || PILOT=1
 if [ "$PILOT" = 1 ]; then
   stop_sample
+  # The web deploy then keeps the public demo on sample data (mock mode).
+  rm -f "$DEST/demo/seeded"
   warn "the pilot's pipeline is on this host: no demo seed and no sample answers (deploy/README.md)"
   exit 0
 fi
