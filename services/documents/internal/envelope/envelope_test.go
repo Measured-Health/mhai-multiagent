@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,7 +31,7 @@ func ring(t *testing.T) kek.Provider {
 	if err := kek.InitFile(path); err != nil {
 		t.Fatal(err)
 	}
-	return kek.NewFile(path)
+	return kek.NewFile(path, kek.Create)
 }
 
 func random(t *testing.T, n int) []byte {
@@ -167,7 +168,7 @@ func TestSealRefusesBadRefsAndAKeyringThatIsNotReady(t *testing.T) {
 	if _, err := Seal(ctx, ring(t), Ref{Hospital: hospA, Kind: Original}, io.Discard, strings.NewReader("x")); !errors.Is(err, ErrRef) {
 		t.Fatalf("bad ref: %v", err)
 	}
-	broken := kek.NewFile(filepath.Join(t.TempDir(), "none.json"))
+	broken := kek.NewFile(filepath.Join(t.TempDir(), "none.json"), kek.Create)
 	ref := Ref{Hospital: hospA, Document: docA, Kind: Original}
 	if _, err := Seal(ctx, broken, ref, io.Discard, strings.NewReader("x")); !errors.Is(err, kek.ErrNotReady) {
 		t.Fatalf("no keyring: %v", err)
@@ -193,3 +194,30 @@ func (failWriter) Write([]byte) (int, error) { return 0, errors.New("synthetic w
 type failReader struct{}
 
 func (failReader) Read([]byte) (int, error) { return 0, errors.New("synthetic read failure") }
+
+// A provisioned keyring without the hospital's KEK: Seal (any caller, not
+// only presign_upload) is refused with kek.ErrNoKey before a byte is
+// written, and the keyring is left as it was.
+func TestSealRefusesAHospitalWithoutAProvisionedKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	if err := kek.InitFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := kek.AddHospital(path, hospA); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	keys := kek.NewFile(path, kek.Provisioned)
+	var dst bytes.Buffer
+	_, err := Seal(context.Background(), keys, Ref{Hospital: hospB, Document: docB, Kind: Original}, &dst, strings.NewReader("x"))
+	if !errors.Is(err, kek.ErrNoKey) || dst.Len() != 0 {
+		t.Fatalf("seal for B: %v, %d bytes", err, dst.Len())
+	}
+	if _, err := Seal(context.Background(), keys, Ref{Hospital: hospA, Document: docA, Kind: Original}, &dst,
+		strings.NewReader("x")); err != nil {
+		t.Fatalf("seal for A: %v", err)
+	}
+	if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
+		t.Fatal("the provisioned keyring changed")
+	}
+}

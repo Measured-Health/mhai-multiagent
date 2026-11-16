@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Documents: a provisioned file keyring, so the pilot can run more than one
+  documents server on one keyring (design D5, §17 departure 20).
+  `DOCUMENTS_KEYRING_MODE=provisioned` is the default and the only mode
+  outside development: the service reads the keyring once, read-only, and
+  never writes it, takes its lock or makes a key; `create` (a hospital's
+  key made at its first document) is refused outside
+  `APP_ENV=development`. `documents keyring add-hospital <path> <hospital
+  id>` adds one hospital's key on the admin machine (refusing a duplicate
+  or a malformed id; a new file renamed over the old). A hospital without a
+  key gets `unavailable` from `presign_upload` and is logged by id, while
+  the others are served. Each server logs the keyring's fingerprint (the
+  file's SHA-256) and hospital count, and health reports them
+  (`HealthReply` fields 6 and 7, additive). No migration.
 - **Clinical review:** the escalation guard (ADR 0017; no migration; a new
   optional `query.completed` key). Every answer, on every route (local, cloud,
   the answer gate, `eval-served`), is checked against the question before an

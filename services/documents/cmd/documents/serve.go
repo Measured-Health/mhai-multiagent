@@ -8,9 +8,11 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
@@ -41,6 +43,8 @@ type checker func(ctx context.Context) error
 // readiness is what health reports and what an upload needs.
 type readiness struct {
 	db, keyring, storage checker
+	// fingerprint is the loaded keyring's (kek.Provider.Fingerprint).
+	fingerprint func() (string, int, bool)
 }
 
 // ready runs c with a 2-second deadline; a missing checker is not ready.
@@ -53,8 +57,8 @@ func ready(ctx context.Context, c checker) bool {
 	return c(ctx) == nil
 }
 
-// healthHandler answers documents.v1.ctl.health: readiness flags only, no
-// counts of anyone's data. The database is ready when its login answers
+// healthHandler answers documents.v1.ctl.health: readiness flags and the
+// keyring's fingerprint and hospital count, no counts of anyone's data. The database is ready when its login answers
 // and holds no more than mhai_documents (departure 10); the keyring when
 // every KEK passes its test unwrap; storage when the bucket's lifecycle is
 // in force. The scanner and the sandbox are PR 4's, so they are reported
@@ -62,8 +66,14 @@ func ready(ctx context.Context, c checker) bool {
 // (design §17 departure 4).
 func healthHandler(r readiness) ctl.Handler {
 	return func(ctx context.Context, _ reqtoken.Claims, _ proto.Message) (proto.Message, error) {
-		return &docspb.HealthReply{DatabaseReady: ready(ctx, r.db), KeyringReady: ready(ctx, r.keyring),
-			StorageReady: ready(ctx, r.storage)}, nil
+		rep := &docspb.HealthReply{DatabaseReady: ready(ctx, r.db), KeyringReady: ready(ctx, r.keyring),
+			StorageReady: ready(ctx, r.storage)}
+		if r.fingerprint != nil {
+			if fp, n, ok := r.fingerprint(); ok {
+				rep.KeyringFingerprint, rep.KeyringHospitals = fp, uint32(n)
+			}
+		}
+		return rep, nil
 	}
 }
 
@@ -88,11 +98,50 @@ var errNotReady = errors.New("documents: not ready")
 // credential and personal-data keys.
 func newLogger(w io.Writer) *slog.Logger { return logx.New(w) }
 
-// logStart logs the start with settings' shapes only, never their values.
-func logStart(log *slog.Logger, env string, trustedKeys int, provider string, keyringReady, storageReady bool) {
-	log.Info("documents serving", "env", env, "subjects", ctl.Subjects, "trusted_keys", trustedKeys,
-		"kek_provider", provider, "keyring_ready", keyringReady, "storage_ready", storageReady,
+// startInfo is what the start log says.
+type startInfo struct {
+	env                        string
+	trustedKeys                int
+	provider, keyringMode      string
+	fingerprint                string
+	hospitals                  int
+	keyringReady, storageReady bool
+}
+
+// logStart logs the start with settings' shapes only, never their values,
+// and the keyring's fingerprint and hospital count, so a server holding an
+// old copy of a provisioned keyring shows up.
+func logStart(log *slog.Logger, i startInfo) {
+	log.Info("documents serving", "env", i.env, "subjects", ctl.Subjects, "trusted_keys", i.trustedKeys,
+		"kek_provider", i.provider, "keyring_mode", i.keyringMode, "keyring_fingerprint", i.fingerprint,
+		"keyring_hospitals", i.hospitals, "keyring_ready", i.keyringReady, "storage_ready", i.storageReady,
 		"scanner_ready", false, "sandbox_ready", false)
+}
+
+// missingLogEvery is how often a hospital without a key is logged again.
+const missingLogEvery = time.Hour
+
+// missingLogger logs a hospital without a key in the provisioned keyring:
+// its id and the mode only, never key material, at most once an hour per
+// hospital so a client retrying can't flood the log.
+func missingLogger(log *slog.Logger, mode string, now func() time.Time) func(uuid.UUID) {
+	var mu sync.Mutex
+	last := map[uuid.UUID]time.Time{}
+	return func(h uuid.UUID) {
+		mu.Lock()
+		defer mu.Unlock()
+		t := now()
+		if at, ok := last[h]; ok && t.Sub(at) < missingLogEvery {
+			return
+		}
+		if len(last) > 10000 { // bounded: forget the oldest by starting over
+			last = map[uuid.UUID]time.Time{}
+		}
+		last[h] = t
+		log.Warn("documents: no key for this hospital in the provisioned keyring; its documents are unavailable "+
+			"until the keyring is provisioned (documents keyring add-hospital), copied and the server restarted",
+			"hospital_id", h.String(), "keyring_mode", mode)
+	}
 }
 
 // keyringReason is a keyring error's closed code for the log.
@@ -118,8 +167,19 @@ func openKeyring(ctx context.Context, s config.Settings, log *slog.Logger) kek.P
 		return nil
 	}
 	log.Warn("documents: the file keyring keeps every hospital's KEK on this host; pilot and development only",
-		"accepted_for_pilot", s.FileKeyringAccepted())
-	f := kek.NewFile(s.KeyringPath)
+		"accepted_for_pilot", s.FileKeyringAccepted(), "keyring_mode", s.KeyringMode)
+	mode := kek.Provisioned
+	if s.KeyringCreates() {
+		mode = kek.Create
+		log.Warn("documents: keyring create mode makes a hospital's key at its first document; development only, " +
+			"and never with more than one documents server")
+	}
+	f := kek.NewFile(s.KeyringPath, mode)
+	f.Missing = missingLogger(log, mode.String(), time.Now)
+	f.Loaded = func(fp string, n int) {
+		log.Info("documents: keyring loaded", "keyring_mode", mode.String(), "keyring_fingerprint", fp,
+			"keyring_hospitals", n)
+	}
 	if err := f.Check(ctx); err != nil {
 		log.Warn("documents: the keyring is not ready", "reason", keyringReason(err))
 	}
@@ -194,7 +254,7 @@ func serve(getenv func(string) string) error {
 
 	rd := readiness{db: func(ctx context.Context) error { return dblogin.Check(ctx, pool) }}
 	if keys != nil {
-		rd.keyring = keys.Check
+		rd.keyring, rd.fingerprint = keys.Check, keys.Fingerprint
 	}
 	presign := &upload.Presign{Rows: upload.PGRows{Pool: pool}}
 	if store != nil {
@@ -202,6 +262,9 @@ func serve(getenv func(string) string) error {
 		presign.Signer, presign.UploadEndpoint = store, s.S3.UploadEndpoint
 	}
 	presign.Ready = uploadReady(rd)
+	if keys != nil {
+		presign.HospitalKey = keys.Has
+	}
 
 	opts := []nats.Option{nats.Name("documents"), nats.CustomInboxPrefix(inboxPrefix), nats.MaxReconnects(-1),
 		nats.Timeout(5 * time.Second)}
@@ -235,11 +298,13 @@ func serve(getenv func(string) string) error {
 		return err
 	}
 	defer stopCtl()
-	provider := "none"
+	info := startInfo{env: s.Env, trustedKeys: len(trusted), provider: "none", keyringMode: s.KeyringMode,
+		keyringReady: ready(ctx, rd.keyring), storageReady: ready(ctx, rd.storage)}
 	if keys != nil {
-		provider = keys.Name()
+		info.provider = keys.Name()
+		info.fingerprint, info.hospitals, _ = keys.Fingerprint()
 	}
-	logStart(log, s.Env, len(trusted), provider, ready(ctx, rd.keyring), ready(ctx, rd.storage))
+	logStart(log, info)
 	<-ctx.Done()
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/config"
@@ -29,6 +31,25 @@ type fakeCheck struct {
 func (f *fakeCheck) check(ctx context.Context) error {
 	_, f.deadline = ctx.Deadline()
 	return f.err
+}
+
+// Health carries the keyring's fingerprint and hospital count when it has
+// loaded (so core can see servers holding different copies), and nothing
+// when it hasn't.
+func TestHealthCarriesTheKeyringFingerprint(t *testing.T) {
+	up := &fakeCheck{}
+	fp := strings.Repeat("0f", 32)
+	rep, err := healthHandler(readiness{keyring: up.check, fingerprint: func() (string, int, bool) { return fp, 2, true }})(
+		context.Background(), reqtoken.Claims{}, &docspb.HealthRequest{})
+	h := rep.(*docspb.HealthReply)
+	if err != nil || h.GetKeyringFingerprint() != fp || h.GetKeyringHospitals() != 2 {
+		t.Fatalf("%v %v", h, err)
+	}
+	rep, _ = healthHandler(readiness{fingerprint: func() (string, int, bool) { return "", 0, false }})(
+		context.Background(), reqtoken.Claims{}, &docspb.HealthRequest{})
+	if h := rep.(*docspb.HealthReply); h.GetKeyringFingerprint() != "" || h.GetKeyringHospitals() != 0 {
+		t.Fatalf("not loaded: %v", h)
+	}
 }
 
 // Health reports each part honestly and claims nothing not yet built: no
@@ -93,7 +114,9 @@ func TestKeyringInit(t *testing.T) {
 
 func TestUsage(t *testing.T) {
 	for _, args := range [][]string{nil, {"nope"}, {"serve", "x"}, {"Serve"}, {""}, {"keyring"}, {"keyring", "init"},
-		{"keyring", "rotate", "/k.json"}} {
+		{"keyring", "rotate", "/k.json"}, {"keyring", "add-hospital", "/k.json"},
+		{"keyring", "add-hospital", "k.json", "22222222-2222-4222-8222-222222222222"},
+		{"keyring", "add-hospital", "/k.json", "22222222-2222-4222-8222-222222222222", "x"}} {
 		if err := run(args, func(string) string { return "" }); err != errUsage {
 			t.Errorf("%v: %v", args, err)
 		}
@@ -167,10 +190,14 @@ func TestServeRefusesWithoutNATS(t *testing.T) {
 // setting's value in it.
 func TestStartLogHasNoValues(t *testing.T) {
 	var buf bytes.Buffer
-	logStart(newLogger(&buf), "development", 4, "file", true, false)
+	fp := strings.Repeat("ab", 32)
+	logStart(newLogger(&buf), startInfo{env: "development", trustedKeys: 4, provider: "file", keyringMode: "provisioned",
+		fingerprint: fp, hospitals: 3, keyringReady: true})
 	out := buf.String()
 	if !strings.Contains(out, `"msg":"documents serving"`) || !strings.Contains(out, `"subjects":"documents.v1.ctl.>"`) ||
-		!strings.Contains(out, `"kek_provider":"file"`) || !strings.Contains(out, `"keyring_ready":true`) {
+		!strings.Contains(out, `"kek_provider":"file"`) || !strings.Contains(out, `"keyring_ready":true`) ||
+		!strings.Contains(out, `"keyring_mode":"provisioned"`) || !strings.Contains(out, `"keyring_fingerprint":"`+fp+`"`) ||
+		!strings.Contains(out, `"keyring_hospitals":3`) {
 		t.Fatalf("%s", out)
 	}
 	for _, v := range []string{"password", "postgres://", "nats://", "/trusted"} {
@@ -193,7 +220,7 @@ func TestStartupRefusals(t *testing.T) {
 	}
 	buf.Reset()
 	missing := filepath.Join(t.TempDir(), "keyring.json")
-	k := openKeyring(ctx, config.Settings{KEKProvider: "file", KeyringPath: missing}, log)
+	k := openKeyring(ctx, config.Settings{KEKProvider: "file", KeyringPath: missing, KeyringMode: config.KeyringProvisioned}, log)
 	if k == nil || k.Check(ctx) == nil || !strings.Contains(buf.String(), "pilot and development only") ||
 		!strings.Contains(buf.String(), `"reason":"missing"`) || strings.Contains(buf.String(), missing) {
 		t.Fatalf("missing keyring: %s", buf.String())
@@ -249,4 +276,136 @@ func (f fakeQuerier) Scan(dest ...any) error {
 	*dest[0].(*bool) = f.super
 	*dest[len(dest)-1].(*bool) = true
 	return nil
+}
+
+// documents keyring add-hospital: one hospital's KEK added on the admin
+// machine, the new fingerprint printed; a duplicate or a malformed id is
+// refused and the file is left as it was; errors never carry the path.
+func TestKeyringAddHospital(t *testing.T) {
+	const hosp = "22222222-2222-4222-8222-222222222222"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keyring.json")
+	if err := keyringInit(path, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := keyringAddHospital(path, hosp, &out); err != nil {
+		t.Fatal(err)
+	}
+	f := kek.NewFile(path, kek.Provisioned)
+	if err := f.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fp, n, _ := f.Fingerprint()
+	if !strings.Contains(out.String(), fp) || !strings.Contains(out.String(), "1 hospital") || n != 1 {
+		t.Fatalf("output %q", out.String())
+	}
+	raw, _ := os.ReadFile(path)
+	for _, id := range []string{hosp, "not-a-uuid", "00000000-0000-0000-0000-000000000000", "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"} {
+		err := keyringAddHospital(path, id, &out)
+		if err == nil || strings.Contains(err.Error(), dir) {
+			t.Errorf("%s: %v", id, err)
+		}
+	}
+	if err := keyringAddHospital(path, hosp, &out); err == nil || !strings.Contains(err.Error(), "already has a key") {
+		t.Fatalf("duplicate: %v", err)
+	}
+	if err := keyringAddHospital(path, "nope", &out); err == nil || !strings.Contains(err.Error(), "hospital id") {
+		t.Fatalf("bad id: %v", err)
+	}
+	if after, _ := os.ReadFile(path); !bytes.Equal(after, raw) {
+		t.Fatal("a refused add changed the keyring")
+	}
+	if err := keyringAddHospital(filepath.Join(dir, "none.json"), hosp, &out); err == nil ||
+		!strings.Contains(err.Error(), "keyring init") || strings.Contains(err.Error(), dir) {
+		t.Fatalf("missing keyring: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := keyringAddHospital(path, "33333333-3333-4333-8333-333333333333", &out); err == nil ||
+		!strings.Contains(err.Error(), "owner") {
+		t.Fatalf("world-readable keyring: %v", err)
+	}
+	_ = os.Chmod(path, 0o400)
+	if err := run([]string{"keyring", "add-hospital", path, "33333333-3333-4333-8333-333333333333"},
+		func(string) string { return "" }); err != nil {
+		t.Fatalf("through run: %v", err)
+	}
+}
+
+// A provisioned server announces its mode, fingerprint and hospital count
+// when the keyring loads, and logs a hospital without a key by id only,
+// at most once an hour per hospital; no key material reaches the log.
+func TestOpenKeyringProvisioned(t *testing.T) {
+	const hosp, other = "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	if err := keyringInit(path, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := keyringAddHospital(path, hosp, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	var buf bytes.Buffer
+	ctx := context.Background()
+	k := openKeyring(ctx, config.Settings{KEKProvider: "file", KeyringPath: path, KeyringMode: config.KeyringProvisioned},
+		newLogger(&buf))
+	fp, n, ok := k.Fingerprint()
+	if k.Check(ctx) != nil || !ok || n != 1 {
+		t.Fatalf("not loaded: %s", buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"msg":"documents: keyring loaded"`) || !strings.Contains(out, `"keyring_fingerprint":"`+fp+`"`) ||
+		!strings.Contains(out, `"keyring_hospitals":1`) || !strings.Contains(out, `"keyring_mode":"provisioned"`) {
+		t.Fatalf("load log: %s", out)
+	}
+	for i := 0; i < 3; i++ {
+		if err := k.Has(ctx, uuid.MustParse(other)); !errors.Is(err, kek.ErrNoKey) {
+			t.Fatalf("has: %v", err)
+		}
+	}
+	out = buf.String()
+	if strings.Count(out, "no key for this hospital") != 1 || !strings.Contains(out, `"hospital_id":"`+other+`"`) {
+		t.Fatalf("missing log: %s", out)
+	}
+	var ring struct {
+		Hospitals map[string]struct {
+			Keys map[string]struct{ Key, Check string }
+		}
+	}
+	if err := json.Unmarshal(raw, &ring); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ring.Hospitals[hosp].Keys {
+		if strings.Contains(out, e.Key) || strings.Contains(out, e.Check) {
+			t.Fatal("key material in the log")
+		}
+	}
+	if strings.Contains(out, path) {
+		t.Fatal("the keyring path in the log")
+	}
+	// Create mode is announced as development only.
+	buf.Reset()
+	openKeyring(ctx, config.Settings{KEKProvider: "file", KeyringPath: path, KeyringMode: config.KeyringCreate}, newLogger(&buf))
+	if !strings.Contains(buf.String(), `"keyring_mode":"create"`) || !strings.Contains(buf.String(), "development only") {
+		t.Fatalf("create: %s", buf.String())
+	}
+}
+
+// The missing-key log is throttled per hospital, so a client retrying
+// can't flood it, and it says again after the hour.
+func TestMissingKeyLogThrottle(t *testing.T) {
+	var buf bytes.Buffer
+	now := time.Unix(1700000000, 0)
+	m := missingLogger(newLogger(&buf), "provisioned", func() time.Time { return now })
+	a, b := uuid.MustParse("22222222-2222-4222-8222-222222222222"), uuid.MustParse("33333333-3333-4333-8333-333333333333")
+	m(a)
+	m(a)
+	m(b)
+	now = now.Add(61 * time.Minute)
+	m(a)
+	if c := strings.Count(buf.String(), "no key for this hospital"); c != 3 {
+		t.Fatalf("%d lines: %s", c, buf.String())
+	}
 }

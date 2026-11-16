@@ -38,7 +38,7 @@ func initRing(t *testing.T) (*File, string) {
 	if err := InitFile(path); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	f := NewFile(path)
+	f := NewFile(path, Create)
 	if err := f.Check(context.Background()); err != nil {
 		t.Fatalf("check: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestWrapCreatesTheHospitalsKeyAndRoundTrips(t *testing.T) {
 	}
 	// The key was stored before it was used: a fresh provider (a restart)
 	// unwraps it, and the file stays owner-read-only.
-	f2 := NewFile(path)
+	f2 := NewFile(path, Create)
 	if err := f2.Check(ctx); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestConcurrentWrapsStoreEveryKey(t *testing.T) {
 		}(hs[i%len(hs)])
 	}
 	wg.Wait()
-	f2 := NewFile(path)
+	f2 := NewFile(path, Create)
 	for _, r := range out {
 		if got, err := f2.Unwrap(ctx, r.h, 1, r.w, []byte("x")); err != nil || !bytes.Equal(got, r.dek) {
 			t.Fatalf("unwrap after reload: %v", err)
@@ -176,7 +176,7 @@ func TestConcurrentWrapsStoreEveryKey(t *testing.T) {
 // wrap opens in both.
 func TestTwoProcessesShareOneKeyring(t *testing.T) {
 	f1, path := initRing(t)
-	f2 := NewFile(path)
+	f2 := NewFile(path, Create)
 	ctx := context.Background()
 	if err := f2.Check(ctx); err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestTwoProcessesShareOneKeyring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []*File{f1, f2, NewFile(path)} {
+	for _, f := range []*File{f1, f2, NewFile(path, Create)} {
 		if got, err := f.Unwrap(ctx, hospA, 1, w1, []byte("x")); err != nil || !bytes.Equal(got, dekA) {
 			t.Fatalf("w1: %v", err)
 		}
@@ -282,7 +282,7 @@ func TestCheckRefusesBadKeyrings(t *testing.T) {
 			ErrKeyringInvalid},
 	}
 	for name, tc := range cases {
-		f := NewFile(tc.path)
+		f := NewFile(tc.path, Create)
 		err := f.Check(ctx)
 		if !errors.Is(err, tc.want) || !errors.Is(err, ErrNotReady) {
 			t.Errorf("%s: %v, want %v (and ErrNotReady)", name, err, tc.want)
@@ -298,7 +298,7 @@ func TestCheckRefusesBadKeyrings(t *testing.T) {
 			t.Errorf("%s: unwrap %v", name, err)
 		}
 	}
-	if f := NewFile(good); f.Check(ctx) != nil || f.Name() != "file" {
+	if f := NewFile(good, Create); f.Check(ctx) != nil || f.Name() != "file" {
 		t.Fatal("the good keyring should load")
 	}
 }
@@ -306,7 +306,7 @@ func TestCheckRefusesBadKeyrings(t *testing.T) {
 // A keyring fixed on disk is picked up by the next Check: no restart.
 func TestCheckRetriesUntilTheKeyringLoads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "keyring.json")
-	f := NewFile(path)
+	f := NewFile(path, Create)
 	if err := f.Check(context.Background()); !errors.Is(err, ErrKeyringMissing) {
 		t.Fatalf("missing: %v", err)
 	}
