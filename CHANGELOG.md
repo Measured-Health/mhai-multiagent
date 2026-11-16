@@ -941,6 +941,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **EMR egress (tests):** `TestAllowListWithin30s` no longer flakes with
+  "allow.json rewritten without a database". The last hold's release kicks
+  a write that could read the database just before the test closed the
+  pool and rename the file just after it took its "before" value. The test
+  now closes the pool and waits for any write under way before taking it.
+  The writer is unchanged: it never writes once the database can't be read.
+
 - **Clinical review:** answer verification judges each claim without its
   citation tags, on every route (cloud and local, every answer model). The
   citation pipeline (`agents/hga_nli.py`) gave the NLI model the claim with its

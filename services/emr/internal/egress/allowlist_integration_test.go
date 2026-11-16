@@ -166,9 +166,14 @@ func TestAllowListWithin30s(t *testing.T) {
 	}
 
 	// The database gone: the file is never rewritten, so it ages out and
-	// the proxy refuses everything (fail closed).
-	before := readList(t, dir).GeneratedAt
+	// the proxy refuses everything (fail closed). A write already under way
+	// (releaseWrong's kick, or a tick) read the database while it was up:
+	// pool.Close waits for its connections and writeMu for its rename, so
+	// before is taken once nothing can be written from a live database.
 	pool.Close()
+	w.writeMu.Lock()
+	before := readList(t, dir).GeneratedAt
+	w.writeMu.Unlock()
 	time.Sleep(Interval + 2*time.Second)
 	if after := readList(t, dir).GeneratedAt; !after.Equal(before) {
 		t.Error("allow.json rewritten without a database")
