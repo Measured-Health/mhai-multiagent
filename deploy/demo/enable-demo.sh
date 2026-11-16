@@ -80,6 +80,10 @@ fi
 info "no pilot pipeline"
 
 say "The demo seed (core demo seed)"
+# Counts only (no names): the seed refuses any database with a non-demo
+# hospital, so the log says why at once.
+counts=$(printf 'SELECT count(*) FILTER (WHERE is_demo) || %s || count(*) FILTER (WHERE NOT is_demo) FROM hospitals;\n' "' and '" | pg)
+info "hospitals: demo and non-demo: ${counts:-unknown}"
 if ! compose run --rm -T core-demo-seed </dev/null; then
   rm -f "$DEST/demo/seeded"
   stop_sample
