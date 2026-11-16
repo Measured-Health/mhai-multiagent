@@ -25,8 +25,9 @@ type Provider interface {
 	Name() string
 	// Wrap wraps dek under the hospital's current KEK, bound to aad (the
 	// object's associated data), and returns the KEK version used. A
-	// hospital without a KEK gets one first (its first document, §6.2);
-	// the key is stored before it is used.
+	// hospital without a KEK is ErrNoKey from a provisioned keyring; in
+	// create mode (development only) it gets one first (its first
+	// document, §6.2), stored before it is used.
 	Wrap(ctx context.Context, hospital uuid.UUID, dek, aad []byte) (wrapped []byte, version int, err error)
 	// Unwrap reverses Wrap. Any mismatch (another hospital, another
 	// version, other associated data, a changed byte) is ErrUnwrap.
@@ -35,6 +36,14 @@ type Provider interface {
 	// value (§6.2 startup refusal). Until it returns nil the service is not
 	// ready and Wrap and Unwrap refuse.
 	Check(ctx context.Context) error
+	// Has reports whether Wrap could seal for the hospital now: nil, or
+	// ErrNoKey (a provisioned keyring without the hospital's KEK; the
+	// keyring stays ready for the others), ErrNotReady or ErrInput.
+	Has(ctx context.Context, hospital uuid.UUID) error
+	// Fingerprint identifies the loaded keys without revealing them (for
+	// the file provider, the SHA-256 of the keyring file) and counts the
+	// hospitals that have one; ok is false until they load.
+	Fingerprint() (fp string, hospitals int, ok bool)
 }
 
 // DEKSize is the data key's size: 256 bits.
@@ -52,6 +61,17 @@ var (
 	// associated data.
 	ErrInput = errors.New("kek: invalid input")
 )
+
+// ParseHospital reads a hospital id in the one form the service accepts
+// (ctl.Hospital's): a canonical, lower-case, non-nil uuid. Anything else is
+// ErrInput.
+func ParseHospital(s string) (uuid.UUID, error) {
+	h, err := uuid.Parse(s)
+	if err != nil || h == uuid.Nil || h.String() != s {
+		return uuid.Nil, ErrInput
+	}
+	return h, nil
+}
 
 // wrapAAD binds a wrapped DEK to its hospital, the KEK version and the
 // object's associated data, so a wrapped key copied to another row (another

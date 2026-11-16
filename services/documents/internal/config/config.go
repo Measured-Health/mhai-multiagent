@@ -40,6 +40,12 @@ type Settings struct {
 	KEKProvider string
 	// KeyringPath is DOCUMENTS_KEYRING_PATH, the file keyring, absolute.
 	KeyringPath string
+	// KeyringMode is DOCUMENTS_KEYRING_MODE with the file provider:
+	// provisioned (the default: the keyring is made ahead and copied to
+	// every server, read-only, never a key made at runtime) or create
+	// (development only: a hospital's key is made at its first document).
+	// "" without the file provider.
+	KeyringMode string
 	// AllowFileKeyring is DOCUMENTS_ALLOW_FILE_KEYRING: "pilot" lets
 	// production use the file keyring (the product owner's written
 	// acceptance, D5); anything else is refused.
@@ -59,6 +65,16 @@ type S3Settings struct {
 	AccessKeyID    string // DOCUMENTS_S3_ACCESS_KEY_ID
 	SecretKeyFile  string // DOCUMENTS_S3_SECRET_KEY_FILE, absolute
 }
+
+// The keyring modes (DOCUMENTS_KEYRING_MODE).
+const (
+	KeyringProvisioned = "provisioned"
+	KeyringCreate      = "create"
+)
+
+// KeyringCreates reports whether the file keyring makes a hospital's key
+// at its first document (create mode, development only).
+func (s Settings) KeyringCreates() bool { return s.KeyringMode == KeyringCreate }
 
 // FileKeyringAccepted reports whether the file keyring runs under the
 // pilot's acceptance outside development and staging.
@@ -133,6 +149,7 @@ func (s *Settings) storage(get func(string) string) []error {
 	var errs []error
 	s.KEKProvider, s.KeyringPath, s.AllowFileKeyring = get("DOCUMENTS_KEK_PROVIDER"), get("DOCUMENTS_KEYRING_PATH"),
 		get("DOCUMENTS_ALLOW_FILE_KEYRING")
+	mode := get("DOCUMENTS_KEYRING_MODE")
 	switch s.KEKProvider {
 	case "":
 		if s.KeyringPath != "" {
@@ -142,10 +159,27 @@ func (s *Settings) storage(get func(string) string) []error {
 		if s.KeyringPath == "" || !filepath.IsAbs(s.KeyringPath) {
 			errs = append(errs, errors.New("DOCUMENTS_KEYRING_PATH must be an absolute path with DOCUMENTS_KEK_PROVIDER=file"))
 		}
+		// Several servers share one keyring only if none makes keys: create
+		// mode is for one development machine.
+		switch mode {
+		case "", KeyringProvisioned:
+			s.KeyringMode = KeyringProvisioned
+		case KeyringCreate:
+			if s.Development() {
+				s.KeyringMode = KeyringCreate
+			} else {
+				errs = append(errs, errors.New("DOCUMENTS_KEYRING_MODE=create is for APP_ENV=development only; use provisioned"))
+			}
+		default:
+			errs = append(errs, errors.New("DOCUMENTS_KEYRING_MODE must be provisioned, create or unset"))
+		}
 	case "kms":
 		errs = append(errs, errors.New("DOCUMENTS_KEK_PROVIDER=kms is not built yet (documents PR 9); use file"))
 	default:
 		errs = append(errs, errors.New("DOCUMENTS_KEK_PROVIDER must be file or unset"))
+	}
+	if mode != "" && s.KEKProvider != "file" {
+		errs = append(errs, errors.New("DOCUMENTS_KEYRING_MODE is only for DOCUMENTS_KEK_PROVIDER=file"))
 	}
 	switch {
 	case s.AllowFileKeyring != "" && s.AllowFileKeyring != "pilot":

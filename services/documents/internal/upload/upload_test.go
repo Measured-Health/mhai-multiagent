@@ -60,7 +60,7 @@ func ready(context.Context) error { return nil }
 
 func newPresign(rows map[string]Row) (*Presign, *fakeRows, *fakeSigner) {
 	fr, fs := &fakeRows{rows: rows}, &fakeSigner{}
-	return &Presign{Rows: fr, Signer: fs, Ready: ready}, fr, fs
+	return &Presign{Rows: fr, Signer: fs, Ready: ready, HospitalKey: func(context.Context, uuid.UUID) error { return nil }}, fr, fs
 }
 
 func run(t *testing.T, p *Presign, hid, doc string) *docspb.PresignUploadReply {
@@ -114,6 +114,10 @@ func TestPresignRefusals(t *testing.T) {
 		"keyring not ready": {hospA, docID, rows, func(p *Presign, _ *fakeRows, _ *fakeSigner) {
 			p.Ready = func(context.Context) error { return errors.New("x") }
 		}, OutcomeUnavailable},
+		"no key for the hospital": {hospA, docID, rows, func(p *Presign, _ *fakeRows, _ *fakeSigner) {
+			p.HospitalKey = func(context.Context, uuid.UUID) error { return errors.New("synthetic: no key") }
+		}, OutcomeUnavailable},
+		"no key check":   {hospA, docID, rows, func(p *Presign, _ *fakeRows, _ *fakeSigner) { p.HospitalKey = nil }, OutcomeUnavailable},
 		"no readiness":   {hospA, docID, rows, func(p *Presign, _ *fakeRows, _ *fakeSigner) { p.Ready = nil }, OutcomeUnavailable},
 		"no store":       {hospA, docID, rows, func(p *Presign, _ *fakeRows, _ *fakeSigner) { p.Signer = nil }, OutcomeUnavailable},
 		"database down":  {hospA, docID, rows, func(_ *Presign, r *fakeRows, _ *fakeSigner) { r.err = errors.New("x") }, OutcomeUnavailable},
@@ -146,5 +150,35 @@ func TestPresignHandlerErrors(t *testing.T) {
 	}
 	if _, err := p.Handle(context.Background(), claims(hospA), &docspb.HealthRequest{}); err == nil {
 		t.Fatal("another request type")
+	}
+}
+
+// Provisioned keyring: a hospital without a KEK gets unavailable, asked
+// about by the token's hospital, and another hospital with one is still
+// served by the same handler.
+func TestPresignHospitalWithoutAKey(t *testing.T) {
+	p, fr, fs := newPresign(map[string]Row{
+		hospA + "/" + docID: {"clinical", "uploading", "application/pdf"},
+		hospB + "/" + docID: {"clinical", "uploading", "application/pdf"},
+	})
+	var asked []string
+	p.HospitalKey = func(_ context.Context, h uuid.UUID) error {
+		asked = append(asked, h.String())
+		if h.String() == hospB {
+			return errors.New("synthetic: no key")
+		}
+		return nil
+	}
+	if r := run(t, p, hospB, docID); r.GetOutcome() != OutcomeUnavailable || r.GetUrl() != "" {
+		t.Fatalf("B: %v", r)
+	}
+	if len(fs.got) != 0 || len(fr.seen) != 0 {
+		t.Fatal("signed or read a row for a hospital without a key")
+	}
+	if r := run(t, p, hospA, docID); r.GetOutcome() != OutcomeOK {
+		t.Fatalf("A: %v", r)
+	}
+	if strings.Join(asked, ",") != hospB+","+hospA {
+		t.Fatalf("asked about %v", asked)
 	}
 }

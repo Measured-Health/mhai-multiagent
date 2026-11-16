@@ -280,3 +280,58 @@ func TestReadSecretFile(t *testing.T) {
 		}
 	}
 }
+
+// The keyring mode (TODO.md "One keyring shared by several documents
+// servers"): provisioned by default, create in development only, and
+// anything else stops the service.
+func TestKeyringMode(t *testing.T) {
+	s, err := FromEnv(env(storeEnv(devEnv())))
+	if err != nil || s.KeyringMode != KeyringProvisioned || s.KeyringCreates() {
+		t.Fatalf("default: %q %v", s.KeyringMode, err)
+	}
+	m := storeEnv(devEnv())
+	m["DOCUMENTS_KEYRING_MODE"] = "create"
+	if s, err := FromEnv(env(m)); err != nil || s.KeyringMode != KeyringCreate || !s.KeyringCreates() {
+		t.Fatalf("development create: %q %v", s.KeyringMode, err)
+	}
+	for _, e := range []string{"staging", "production"} {
+		m := storeEnv(prodEnv())
+		m["APP_ENV"] = e
+		m["DOCUMENTS_ALLOW_FILE_KEYRING"] = "pilot"
+		m["DOCUMENTS_KEYRING_MODE"] = "provisioned"
+		if s, err := FromEnv(env(m)); err != nil || s.KeyringMode != KeyringProvisioned {
+			t.Fatalf("%s provisioned: %q %v", e, s.KeyringMode, err)
+		}
+	}
+	if s, err := FromEnv(env(devEnv())); err != nil || s.KeyringMode != "" {
+		t.Fatalf("no provider: %q %v", s.KeyringMode, err)
+	}
+	withMode := func(base map[string]string, mode string) map[string]string {
+		m := storeEnv(base)
+		m["DOCUMENTS_KEYRING_MODE"] = mode
+		return m
+	}
+	pilot := func(m map[string]string) map[string]string { m["DOCUMENTS_ALLOW_FILE_KEYRING"] = "pilot"; return m }
+	unsetEnv := pilot(withMode(prodEnv(), "create"))
+	delete(unsetEnv, "APP_ENV")
+	staging := withMode(prodEnv(), "create")
+	staging["APP_ENV"] = "staging"
+	noProvider := devEnv()
+	noProvider["DOCUMENTS_KEYRING_MODE"] = "provisioned"
+	for name, m := range map[string]map[string]string{
+		"create in production":           pilot(withMode(prodEnv(), "create")),
+		"create with APP_ENV unset":      unsetEnv,
+		"create in staging":              staging,
+		"unknown mode":                   withMode(devEnv(), "shared"),
+		"upper-case mode":                withMode(devEnv(), "CREATE"),
+		"mode without the file provider": noProvider,
+	} {
+		s, err := FromEnv(env(m))
+		if err == nil || !strings.Contains(err.Error(), "DOCUMENTS_KEYRING_MODE") || s.KeyringMode != "" {
+			t.Errorf("%s: accepted or unnamed: %q %v", name, s.KeyringMode, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "shared") {
+			t.Errorf("%s: the error carries the value", name)
+		}
+	}
+}
