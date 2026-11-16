@@ -9,6 +9,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -62,7 +64,7 @@ func Start(t testing.TB, lifecycle bool) Store {
 			Cmd:          []string{"server", "/tmp/data", "--address", ":9000"},
 			Env:          map[string]string{"MINIO_ROOT_USER": user, "MINIO_ROOT_PASSWORD": pass},
 			ExposedPorts: []string{"9000/tcp"},
-			WaitingFor:   wait.ForHTTP("/minio/health/live").WithPort("9000/tcp").WithStartupTimeout(90 * time.Second),
+			WaitingFor:   wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp").WithStartupTimeout(90 * time.Second),
 		},
 		Started: true,
 	})
@@ -88,7 +90,9 @@ func Start(t testing.TB, lifecycle bool) Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cl.CreateBucket(ctx); err != nil {
+	// /minio/health/ready can answer a moment before the S3 API takes
+	// writes; a 503 then means "not yet", so retry it briefly.
+	if err := retryUnavailable(func() error { return cl.CreateBucket(ctx) }); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
 	if err := cl.PutVersioning(ctx); err != nil {
@@ -104,4 +108,18 @@ func Start(t testing.TB, lifecycle bool) Store {
 		}
 	}
 	return Store{Endpoint: endpoint, Config: cfg, Client: cl}
+}
+
+// retryUnavailable runs f until it succeeds or fails with anything but a
+// 503 from the store, for up to 30 seconds.
+func retryUnavailable(f func() error) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		err := f()
+		var se *s3.StatusError
+		if err == nil || !errors.As(err, &se) || se.Code != http.StatusServiceUnavailable || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
