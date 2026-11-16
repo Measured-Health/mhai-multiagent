@@ -40,13 +40,16 @@ touches the EMR containers, the web demo or nginx.
 | `core-cli` | core | the seed CLI, run by hand (profile `tools`) | 128 MiB |
 | `egress-proxy` | `ubuntu/squid` by digest, uid 13 | the cloud providers' only way out (profile `cloud`, off by default; see "Cloud models") | 128 MiB |
 | `pipeline` | `mhai-multiagent-pipeline-pilot` (weights baked in) | the pipeline worker, for the pilot only (profile `pilot`, off by default; see `pilot/README.md`) | 1600 MiB |
+| `core-demo-seed` | core | one-shot each deploy: the synthetic demo hospital and its published demo accounts (profile `demo`; "Public demo: sample answers") | 128 MiB |
+| `sample-ai` | `mhai-multiagent-intelligence` | the pipeline worker with labelled sample answers, for the demo hospital only (profile `demo`) | 192 MiB |
 
 Every container has a read-only root filesystem, no Linux capabilities and
 `no-new-privileges`. The pipeline worker runs only for the pilot (one real
 hospital with cloud answers, `pilot/README.md`; `pilot/enable-pilot.sh`
-sets it up); echo never comes here. Without the pipeline, core starts and
-serves everything else; a question (`POST /queries`) is queued and fails at
-its 10-minute deadline. `CORE_HTTP_API` stays `on` (the frontend still calls HTTP).
+sets it up); echo never comes here. Until the trained weights arrive, the
+public demo's questions are answered by `sample-ai` instead (below). Without
+either, core starts and serves everything else; a question (`POST /queries`)
+is queued and fails at its 10-minute deadline. `CORE_HTTP_API` stays `on`.
 
 ### Before merging Plan 3 (the boundary): the demo's `clinical_queries`
 
@@ -347,6 +350,107 @@ re-key.
   stack: the web container can't reach Postgres or core through it.
 - **From the host:** `nats://127.0.0.1:4222`. A container's 127.0.0.1 is its
   own, so the frontend's containers can't use this.
+
+## Public demo: sample answers
+
+The public demo (demo.measured-health.org, mhai-web) runs **connected**: the
+clinical app in live mode, its BFF over NATS to core, and core's jobs to a
+pipeline worker. No trained model exists yet, so the worker answers with
+**labelled sample answers** on **synthetic data only**. Every deploy of this
+repository runs `demo/enable-demo.sh` (shipped with the bundle) after core
+is healthy:
+
+```
+browser ─https─> nginx ─> web (live) ─mhai-bff─> nats ─> core ─JOBS─> sample-ai
+                                                          │              │
+                                                          └── postgres ──┘
+```
+
+1. **Not beside the pilot.** If the pilot's pipeline runs (or `.env` has the
+   `pilot` profile), it stops `sample-ai` and does nothing else: both would
+   be the `pipeline` NATS user on the same consumer, and the demo seed is
+   for a database with no real hospital.
+2. **The seed:** `core demo seed` (one-shot `core-demo-seed`, as the
+   database owner, with `MHAI_DEMO_SEED=on`). It refuses a database where
+   any hospital has a real cloud agreement (`AGR-`/`DPA-`). It makes or
+   resets the demo hospital `DEM` (`is_demo`, created with the flag, never a
+   real hospital), the accounts below, the six shared sample guidelines
+   (`KB#0001`–`KB#0006`) and sample content (past consultations, a
+   correction waiting for review, an approved one, the Analysis demo
+   cohort). Then it writes the marker `/srv/mhai-backend/demo/seeded`
+   (a timestamp, not a secret), which mhai-web's deploy needs before it
+   switches the public demo to live mode.
+3. **sample-ai:** the hospitals it may answer are the database's `is_demo`
+   ones (`DEMO_SAMPLE_HOSPITALS` in `.env`, written by the script). Its NATS
+   NKey (`secrets/nats-pipeline.nk`, public key `NATS_PIPELINE_NKEY`) and
+   the `intelligence_app` password (`INTELLIGENCE_DB_PASSWORD` and
+   `secrets/intelligence-db-password`) are made on the host inside a
+   container with no network, mode 0400, uid 1000, exactly as
+   `pilot/enable-pilot.sh` makes them (so the pilot can take them over).
+   NATS and core are recreated when the key is new. It is started only with
+   at least 320 MiB available and 8 GiB free disk for its image; otherwise
+   the deploy passes with a warning and questions wait and fail at their
+   deadline. The script prints `free -m`, `df -h /` and each container's
+   memory in the deploy log.
+
+**What the sample answer is.** `INTELLIGENCE_MODEL_CLIENT=sample`
+(`services/intelligence/intelligence/boundary/sample.py`): the real job path
+(request token checks, the claim under the hospital's row-level security,
+masking with the real PIIMasker, retrieval of the shared guidelines the
+question may see, the **real escalation guard**: red flags, missing
+information, dose scope, recital; the decision with its cited sources, the
+audit fact). The text starts "Sample answer (synthetic demo data, not
+clinical advice):" and quotes the guidelines sharing words with the
+question, each cited (`[KB#0002]`). The HGA scores are fixed sample numbers
+(trust 0.86): the NLI and embedding models need about 1 GiB and don't fit
+the 3.7 GiB host beside MongoDB and the EMR. The model versions on every
+decision say `sample`. No model is loaded (no PyTorch: about 65 MiB
+resident, measured), nothing is downloaded, and `sample-ai` is on `backend`
+only (no route out).
+
+**Why it can't reach production.** The worker refuses the sample client
+unless `APP_ENV` is `demo` or `development` (unset is production), refuses
+it with a cloud provider or pinned roles, and refuses it without
+`INTELLIGENCE_SAMPLE_HOSPITALS`; a job of a hospital not listed is refused
+before its claim (dead letter `forbidden`), so a real hospital's question
+never gets a sample answer. The seed refuses without `MHAI_DEMO_SEED=on`
+(set on its one-shot only) and on a database with a real agreement.
+`TestDemoSwitchesOnlyOnDemoServices` keeps both switches on the two demo
+services.
+
+**The seeded accounts** (published demo values, for the synthetic demo
+hospital only; they are reset on every deploy):
+
+| Account | Email | Sign-in |
+|---|---|---|
+| Clinician | `a.reyes@demo-hospital.example` | password only |
+| Clinician with two-step | `mfa.okafor@demo-hospital.example` | password and a code |
+| New account | `new.bello@demo-hospital.example` | first sign-in steps (new password, terms) |
+| New hospital admin | `newadmin.okoro@demo-hospital.example` | first sign-in steps, two-step set-up |
+| Hospital admin | `admin.nwosu@demo-hospital.example` | password and a code |
+| Medical director (clinician and hospital admin) | `director.obi@demo-hospital.example` | password and a code |
+| Analyst (clinician with Analysis) | `analyst.adeyemi@demo-hospital.example` | password and a code |
+| Platform admin | `platform.bakare@measured-health.example` | the clinical app answers 403; its two-step secret is random and thrown away, so nobody can finish a platform sign-in |
+| Locked account | `locked.eze@demo-hospital.example` | its password is random and thrown away: every try fails, and the fifth locks it for that visitor |
+
+The demo password is `Sample-demo-only-2026` and the two-step secret is
+`MHAIDEMOSAMPLEONLYNOTASECRET2345` (base32): **published demo values**,
+shown by the demo's sign-in helper, valid only for these synthetic accounts.
+
+**Limits.** Visitors share these accounts: they see each other's questions
+(the banner and the helper ask for no patient details), one visitor can
+change a shared password or enrol two-step on a "new" account until the
+next deploy resets it, and repeated wrong passwords from many places lock an
+account for an hour (the per-login ceiling). A code already used in the
+same 30 seconds is refused (wait for the next).
+
+**Switching off.** Sample answers only: set the repository variable
+`DEMO_SAMPLE_AI=off` and run "Deploy backend demo" (`gh variable set
+DEMO_SAMPLE_AI --repo Measured-Health/mhai-multiagent --body off && gh workflow
+run deploy.yml --repo Measured-Health/mhai-multiagent --ref main`). The web
+demo back to sample data in the browser (mock mode): mhai-web's
+`deploy/README.md`, one line. Before the pilot or the own model takes the
+jobs, turn the sample answers off.
 
 ## Public API docs (api-dev)
 

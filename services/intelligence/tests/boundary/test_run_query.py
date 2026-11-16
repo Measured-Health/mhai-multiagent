@@ -1446,3 +1446,64 @@ async def test_failed_heartbeats_stop_the_job(make_env: MakeEnv, postgres: Postg
     ci = await env.consumer()
     assert ci.num_ack_pending == 1  # not acked, Nak'd or Termed: redelivered later
     assert naks(sent) == []
+
+
+# --- the demo's sample answers (boundary.sample) -------------------------------------------
+
+
+async def test_sample_worker_answers_its_demo_hospital(
+    make_env: MakeEnv, postgres: Postgres, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The sample client runs the whole job: claim, the labelled answer with
+    its cited guideline, the decision and the audit fact."""
+    from intelligence.boundary.sample import LABEL, SampleModelClient
+
+    caplog.set_level(logging.DEBUG)
+    env = await make_env()
+    qid = await seed_query(postgres, question=f"Which synthetic shared guideline applies? {MARKER}")
+    await env.start(ModelRouter(SampleModelClient(), {}, frozenset({HOSPITAL_A})))
+    await env.publish(qid)
+    assert await until(lambda: status_is(postgres, qid, "completed"))
+    async with await su(postgres) as conn:
+        cur = await conn.execute(
+            "SELECT response_text, citations_json, model_versions FROM clinical_decisions "
+            "WHERE query_id = %s",
+            (qid,),
+        )
+        found = await cur.fetchone()
+    assert found is not None
+    text, citations, versions = found
+    assert text.startswith(LABEL) and citations == ["KB#0001"]
+    assert versions["sample"] == "1" and versions["cca_route"] == "local"
+    assert MARKER not in caplog.text and LABEL not in caplog.text
+
+
+async def test_sample_worker_refuses_other_hospitals_before_the_claim(
+    make_env: MakeEnv, postgres: Postgres, database: Database
+) -> None:
+    """A job of a hospital the sample worker doesn't list is Termed with a
+    forbidden dead letter; nothing is read or written for it."""
+    from intelligence.boundary.sample import SampleModelClient
+
+    env = await make_env()
+    qid = await seed_query(postgres)
+    counting = CountingDatabase(database)
+    await env.start(
+        ModelRouter(SampleModelClient(), {}, frozenset({HOSPITAL_B})),
+        database=counting,  # type: ignore[arg-type]
+    )
+    await env.publish(qid)
+    dead = await env.dead_letters(1)
+    assert len(dead) == 1
+    _, d = dead[0]
+    assert (d.code, d.type, d.subject_hospital, d.job_id) == (
+        "forbidden",
+        "run_query",
+        HOSPITAL_A,
+        qid,
+    )
+    assert await env.settled()
+    assert counting.uses == 0
+    r = await row(postgres, qid)
+    assert r["status"] == "queued" and r["attempts"] == 0
+    assert await count(postgres, "decisions", qid) == 0

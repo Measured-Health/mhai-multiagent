@@ -34,10 +34,20 @@ core users roles EMAIL --add analyst|--remove analyst --by ADMIN_EMAIL   # the a
 core hospitals mark-demo ID|CODE                             # once: a hospital made before is_demo (the live demo's), audited
 core analysis seed-demo ID|CODE [--seed N] [--months 1-24]   # a hospital created with --demo only
 core analysis switch off ID|CODE | --global                  # lower an analysis switch, audited
+core demo seed                                               # the public demo's sample hospital, accounts and content (demo host only)
 core hospitals legal-hold place|lift ID|CODE --reference REF  # EMR: no deletion while a hold is open, audited
 core emr exclude --hospital ID|CODE (--patient ID | --mrn-stdin) --reason CODE   # as the EMR operator login
 core emr remove-hospital-data ID|CODE                        # removal_scheduled, no hold, credentials wiped first
 ```
+
+`core demo seed` is for the public demo host only (deploy/README.md, "The
+live demo"): with `MHAI_DEMO_SEED=on`, the database owner's `DATABASE_URL`
+and `MFA_ENCRYPTION_KEY`, it makes or resets the demo hospital `DEM`
+(`is_demo`) and its nine sample accounts on the published demo password and
+two-step secret, and adds sample consultations, corrections, the shared
+guidelines and the demo Analysis, once. It refuses, before writing, any
+other login, a database with a real cloud agreement (`AGR-`/`DPA-`) and a
+`DEM` that isn't the demo. Audited `demo.seeded`; prints ids and counts only.
 
 `emr exclude` reads an MRN from stdin (`--mrn-stdin`), never from an
 argument. EMR purges and retention run in `core serve` itself (only with

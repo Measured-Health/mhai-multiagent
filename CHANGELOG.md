@@ -6,6 +6,39 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The public demo runs connected, on synthetic data (16 Nov).** Until the
+  trained weights arrive, the demo host answers questions with labelled
+  sample answers through the real stack (deploy/README.md, "Public demo:
+  sample answers"):
+  - `INTELLIGENCE_MODEL_CLIENT=sample` (`boundary/sample.py`): the pipeline
+    worker's real job path (request tokens, JOBS, claim, masking with the
+    real PIIMasker, the real escalation guard, the decision with cited
+    sources, the audit fact); the answer quotes the matching shared sample
+    guidelines and starts "Sample answer (synthetic demo data, not clinical
+    advice):", and only the HGA scores are fixed sample numbers (no NLI or
+    embedding model: they don't fit the 3.7 GiB host). No model, no
+    download, no cloud. Refused outside `APP_ENV=demo` or `development`,
+    with a cloud provider or pinned roles, and without
+    `INTELLIGENCE_SAMPLE_HOSPITALS`; a job of any hospital not listed is
+    refused before its claim (`forbidden`).
+  - `core demo seed`: the synthetic demo hospital `DEM` and its published
+    demo accounts (clinician, two-step clinician, new account, new hospital
+    admin, hospital admin, medical director, analyst, platform admin, locked
+    account) with sample consultations, corrections and Analysis, reset on
+    every run. Refuses without `MHAI_DEMO_SEED=on` and on a database with a
+    real cloud agreement.
+  - `deploy/demo/enable-demo.sh`, run by "Deploy backend demo" after core is
+    healthy: the seed, then the `sample-ai` service (profile `demo`, 192 MiB
+    cap) with its own NKey and database password made on the host; never
+    beside the pilot's pipeline, and skipped with a warning when memory or
+    disk is short. Off with the repository variable `DEMO_SAMPLE_AI=off`.
+    The workflow builds the arm64 intelligence image
+    (`mhai-multiagent-intelligence`).
+  - `intelligence.agents` loads its agents on first use, so the sample worker
+    never imports PyTorch (about 65 MiB resident).
+
 ### Fixed
 
 - Documents tests: the throwaway MinIO now waits for `/minio/health/ready`, not `/live`, and retries a 503 when making the bucket, so the S3, storage and upload integration tests no longer fail with "create bucket: unexpected status 503" on a busy runner.

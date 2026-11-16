@@ -320,6 +320,13 @@ done
 info "core ready (CORE_CLOUD_PROVIDERS=$PROVIDER; recreated: $CORE_CHANGED)"
 
 say "Starting the egress proxy and the pipeline"
+# The demo's sample answers (profile demo) are the same NATS user and
+# consumer: never both. The demo deploy leaves them off while the pilot is on.
+if [ -n "$(docker compose --profile demo ps -q sample-ai 2>/dev/null)" ]; then
+  docker compose --profile demo stop sample-ai >/dev/null
+  docker compose --profile demo rm -f sample-ai >/dev/null
+  info "the demo's sample-ai stopped (the pilot's pipeline takes its jobs)"
+fi
 if [ "$PROXY_CHANGED" = 1 ] && [ -n "$(compose ps -q egress-proxy)" ]; then
   compose up -d --force-recreate --no-deps egress-proxy
 else

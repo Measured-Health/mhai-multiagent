@@ -87,9 +87,13 @@ if TYPE_CHECKING:
 log = logging.getLogger("intelligence.boundary.config")
 
 SERVICES = frozenset({"pipeline", "echo"})
-# INTELLIGENCE_MODEL_CLIENT (F14): the real models, or the synthetic stub
-# (tests and the CI smoke test; development only).
-MODEL_CLIENTS = frozenset({"orchestrator", "stub"})
+# INTELLIGENCE_MODEL_CLIENT (F14): the real models, the synthetic stub
+# (tests and the CI smoke test; development only), or the public demo's
+# labelled sample answers (boundary.sample; APP_ENV=demo or development only,
+# for the hospitals INTELLIGENCE_SAMPLE_HOSPITALS lists).
+MODEL_CLIENTS = frozenset({"orchestrator", "stub", "sample"})
+SAMPLE_HOSPITALS_VAR = "INTELLIGENCE_SAMPLE_HOSPITALS"
+MAX_SAMPLE_HOSPITALS = 16
 # INTELLIGENCE_LEARNING_CLIENT (Plan 4 §10.6): the buffer arithmetic, or the
 # stub (tests and the CI smoke test; development only).
 LEARNING_CLIENTS = frozenset({"trust_buffer", "stub"})
@@ -284,8 +288,12 @@ class WorkerSettings:
     # INTELLIGENCE_SINGLE_HOST=on (never with development): NATS and Postgres
     # without TLS, to Docker service names on this host only.
     single_host: bool = False
-    # The pipeline's models: orchestrator (default) or stub (development only).
+    # The pipeline's models: orchestrator (default), stub (development only)
+    # or sample (demo or development only; boundary.sample).
     model_client: str = "orchestrator"
+    # With sample only: the hospital ids (lower-case UUIDs) whose jobs it
+    # answers; every other hospital's job is refused before the claim.
+    sample_hospitals: frozenset[str] = frozenset()
     # The approve_correction job's learning client: trust_buffer (default)
     # or stub (development only).
     learning_client: str = "trust_buffer"
@@ -383,11 +391,12 @@ class WorkerSettings:
             )
         model_client = get("INTELLIGENCE_MODEL_CLIENT") or "orchestrator"
         if model_client not in MODEL_CLIENTS:
-            errs.append("INTELLIGENCE_MODEL_CLIENT must be orchestrator or stub")
+            errs.append("INTELLIGENCE_MODEL_CLIENT must be orchestrator, stub or sample")
         elif model_client == "stub" and not development:
             # The stub serves invented answers (ADR 0005): never in production,
             # and an unset APP_ENV counts as production.
             errs.append("INTELLIGENCE_MODEL_CLIENT=stub runs only with APP_ENV=development")
+        sample_hospitals = _sample_settings(env, model_client, svc, development, errs)
         learning_client = get("INTELLIGENCE_LEARNING_CLIENT") or "trust_buffer"
         if learning_client not in LEARNING_CLIENTS:
             errs.append("INTELLIGENCE_LEARNING_CLIENT must be trust_buffer or stub")
@@ -429,12 +438,49 @@ class WorkerSettings:
             development=development,
             single_host=single_host,
             model_client=model_client,
+            sample_hospitals=sample_hospitals,
             learning_client=learning_client,
             **pinned,
             local_llm=local_llm,
             local_unpinned=unpinned_raw == "on",
             cloud=cloud,
         )
+
+
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _sample_settings(
+    env: Mapping[str, str], model_client: str, svc: str | None, development: bool, errs: list[str]
+) -> frozenset[str]:
+    """INTELLIGENCE_MODEL_CLIENT=sample (boundary.sample) and its hospitals.
+
+    The demo's sample answers never run in production: only with APP_ENV=demo
+    or development (an unset APP_ENV is production), for the pipeline, with
+    no cloud provider and no pinned model role, and for at least one listed
+    hospital. INTELLIGENCE_SAMPLE_HOSPITALS without the sample client is
+    refused too, so the list can't sit unnoticed on a real worker."""
+    raw = env.get(SAMPLE_HOSPITALS_VAR, "").strip()
+    if model_client != "sample":
+        if raw:
+            errs.append(f"{SAMPLE_HOSPITALS_VAR} is for INTELLIGENCE_MODEL_CLIENT=sample only")
+        return frozenset()
+    if not (development or is_demo(env)):
+        errs.append("INTELLIGENCE_MODEL_CLIENT=sample runs only with APP_ENV=demo or development")
+    if svc is not None and svc != "pipeline":
+        errs.append("INTELLIGENCE_MODEL_CLIENT=sample is for the pipeline service only")
+    if env.get("INTELLIGENCE_CLOUD_PROVIDERS", "").strip():
+        errs.append("INTELLIGENCE_MODEL_CLIENT=sample never runs with INTELLIGENCE_CLOUD_PROVIDERS")
+    if env.get("INTELLIGENCE_MODEL_ROLES", "").strip():
+        errs.append("INTELLIGENCE_MODEL_CLIENT=sample never runs with INTELLIGENCE_MODEL_ROLES")
+    ids = [p.strip().lower() for p in raw.split(",") if p.strip()]
+    if not ids:
+        errs.append(f"{SAMPLE_HOSPITALS_VAR} is required with INTELLIGENCE_MODEL_CLIENT=sample")
+    elif len(ids) > MAX_SAMPLE_HOSPITALS or not all(_UUID.fullmatch(i) for i in ids):
+        errs.append(
+            f"{SAMPLE_HOSPITALS_VAR} must be 1 to {MAX_SAMPLE_HOSPITALS} hospital ids (UUIDs)"
+        )
+    return frozenset(ids)
 
 
 def _no_cloud() -> CloudSettings:
