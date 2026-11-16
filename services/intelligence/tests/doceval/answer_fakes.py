@@ -91,10 +91,18 @@ class ScriptedClient:
 
 
 def perfect_reply(item: schema.Item) -> tuple[str, str]:
-    """What a perfect model and verifier give: escalate when it must, else every fact."""
+    """What a perfect model and verifier give: escalate when it must, else every fact, in
+    a sentence of its own that cites the guideline.
+
+    Not the bare facts: "140 90 two occasions" is a near-verbatim copy of a chunk sentence
+    that shares no content word with the question, which the escalation guard's recital
+    check (ADR 0017, lexical relevance in the gate) rightly turns into REGENERATE. A
+    "perfect" reply that the guard downgrades on some templates left the good model's
+    grounded rate on a random locked split within a few items of the pass mark."""
     if item.expect.must_escalate:
         return ESCALATE_TEXT, "ESCALATE"
-    return " ".join(item.expect.required_facts) + f" [{item.chunks[0].id}]", "PASS"
+    facts = ", ".join(item.expect.required_facts)
+    return f"From the cited guideline, the answer is {facts} [{item.chunks[0].id}].", "PASS"
 
 
 # ---------------------------------------------------------------- the orchestrator path
