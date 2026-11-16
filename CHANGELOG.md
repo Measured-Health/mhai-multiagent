@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Documents tests: the throwaway MinIO now waits for `/minio/health/ready`, not `/live`, and retries a 503 when making the bucket, so the S3, storage and upload integration tests no longer fail with "create bucket: unexpected status 503" on a busy runner.
+
 ### Added
 
 - Documents: a provisioned file keyring, so the pilot can run more than one
