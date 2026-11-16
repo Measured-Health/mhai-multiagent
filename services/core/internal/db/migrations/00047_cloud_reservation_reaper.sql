@@ -112,15 +112,19 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
             MESSAGE = 'mhai_cloud_reap: the limit is 1 to 1000';
     END IF;
+    -- DELETE ... RETURNING has no order: return the reaped rows oldest first.
     FOR r IN
-        DELETE FROM public.cloud_reservations d
-        WHERE d.hospital_id = h
-          AND d.id IN (SELECT s.id FROM public.cloud_reservations s
-                       WHERE s.hospital_id = h AND s.created_at < now() - p_age
-                       ORDER BY s.created_at, s.id
-                       LIMIT p_limit
-                       FOR UPDATE SKIP LOCKED)
-        RETURNING d.id, d.month, d.tokens, d.created_at
+        WITH gone AS (
+            DELETE FROM public.cloud_reservations d
+            WHERE d.hospital_id = h
+              AND d.id IN (SELECT s.id FROM public.cloud_reservations s
+                           WHERE s.hospital_id = h AND s.created_at < now() - p_age
+                           ORDER BY s.created_at, s.id
+                           LIMIT p_limit
+                           FOR UPDATE SKIP LOCKED)
+            RETURNING d.id, d.month, d.tokens, d.created_at)
+        SELECT g.id, g.month, g.tokens, g.created_at FROM gone g
+        ORDER BY g.created_at, g.id
     LOOP
         UPDATE public.cloud_usage u
         SET reserved = u.reserved - r.tokens,
