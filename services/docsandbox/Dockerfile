@@ -36,6 +36,7 @@ ENV PYTHONPATH=/opt/docsandbox
 
 # The jailed tests (test_jail.py) and the renderer's; never shipped.
 FROM runtime AS test
+RUN apt-get update && apt-get install -y --no-install-recommends strace && rm -rf /var/lib/apt/lists/*
 COPY tests/ /opt/docsandbox/tests/
 ENV DOCSANDBOX_JAIL_TESTS=1 SYNTHETIC_CREDENTIAL=test-only-not-a-secret
 RUN mkdir -p /jobs && chmod 0700 /jobs

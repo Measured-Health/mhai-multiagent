@@ -210,11 +210,14 @@ class ServerTest(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
 
-    def test_seccomp_closes_namespaces_and_io_uring(self) -> None:
-        for name in ("unshare", "setns", "io_uring_setup", "fsopen", "open_tree", "move_mount", "pidfd_getfd"):
-            self.assertIn(name, jail.SECCOMP)
+    def test_seccomp_is_an_allow_list(self) -> None:
+        self.assertIn("USE docsandbox DEFAULT KILL", jail.SECCOMP)
+        self.assertNotIn("DEFAULT ALLOW", jail.SECCOMP)
+        for name in ("unshare", "setns", "mount", "ptrace", "io_uring_setup", "fsopen", "open_tree", "move_mount",
+                     "pidfd_getfd", "bpf", "keyctl", "process_vm_readv", "chroot", "pivot_root"):
+            self.assertNotIn(name, jail.ALLOWED)
         self.assertIn("ERRNO(38) {\n    clone3", jail.SECCOMP)
-        self.assertIn("clone(flags) { (flags & 0x7e020080) != 0 }", jail.SECCOMP)
+        self.assertIn("clone(flags) { (flags & 0x7e020080) == 0 }", jail.SECCOMP)
 
 
 if __name__ == "__main__":

@@ -31,33 +31,37 @@ WALL_SECONDS = 90
 FILE_MB = 128
 OPEN_FILES = 64
 
-# The seccomp filter (design §17, PR 4). Not yet an allow-list (DEFAULT
-# KILL needs the syscalls of every pdfium and Pillow path traced from real
-# renders; TODO.md): a deny-list that closes the ways out of the jail's
-# namespaces and the kernel's large attack surfaces:
-#   - every socket call is EPERM (there is no interface anyway);
-#   - clone with any namespace flag, unshare and setns are killed, and
-#     clone3 (whose flags a filter can't read) is ENOSYS, so the C library
-#     falls back to clone: no new user, mount, PID or network namespace;
-#   - io_uring, the new mount API (fsopen, fsconfig, fsmount, fspick,
-#     open_tree, move_mount, mount_setattr), pidfd_getfd, ptrace, process_vm_*,
-#     bpf, perf_event_open, userfaultfd, keyrings, module and kexec calls,
-#     handle-based opens and the clock and swap calls are killed.
-# The renderer runs as uid 65532 with no capability and no_new_privs, so
-# what stays allowed acts only on its own tmpfs root and its own files.
+# The seccomp filter (design §17, PR 4): an allow-list, DEFAULT KILL. The
+# list is what the renderer and the self-test were measured to call
+# (strace over every synthetic sample in tests/samples.py: PDF, PNG, JPEG,
+# TIFF, the refusals and the bombs), plus a small margin of calls that act
+# only on the process itself (signals, time, its own ids and memory),
+# in kafel's names (fstat is newfstat, uname newuname). Any
+# other call kills the renderer (SIGSYS: unreadable, never a pass). An
+# allow-list also closes the x32 ABI (numbers with bit 0x40000000) and
+# 32-bit calls (int 0x80), whose numbers match nothing allowed.
+#   - socket calls are EPERM (there is no interface anyway);
+#   - clone only without a namespace flag (a thread, if a library makes
+#     one); clone3, whose flags a filter can't read, is ENOSYS, so the C
+#     library falls back to clone;
+#   - nothing that mounts, unshares, traces, loads modules or keys, or
+#     reaches io_uring, bpf or another process is allowed.
 CLONE_NAMESPACE_FLAGS = 0x7E020080  # NEWNS|NEWCGROUP|NEWUTS|NEWIPC|NEWUSER|NEWPID|NEWNET|NEWTIME
+ALLOWED = (
+    # measured
+    "access arch_prctl brk close epoll_create1 execve exit_group fcntl newfstat futex getdents64 getrandom gettid "
+    "ioctl lseek mmap mprotect mremap munmap newfstatat openat pread64 prlimit64 read readlink readlinkat rename "
+    "rseq rt_sigaction rt_sigprocmask set_robust_list set_tid_address newuname write "
+    # margin: the process's own state only
+    "rt_sigreturn sigaltstack exit madvise clock_gettime clock_getres gettimeofday nanosleep clock_nanosleep "
+    "sched_yield sched_getaffinity getpid getppid getuid geteuid getgid getegid getcwd dup dup2 dup3 statx "
+    "fstatfs writev readv pwrite64 ftruncate fsync fdatasync unlink"
+).split()
 SECCOMP = """
 POLICY docsandbox {
-  KILL {
-    clone(flags) { (flags & %#x) != 0 },
-    ptrace, process_vm_readv, process_vm_writev, mount, umount, pivot_root, chroot,
-    unshare, setns, keyctl, add_key, request_key, bpf, perf_event_open, userfaultfd,
-    kexec_load, kexec_file_load, init_module, finit_module, delete_module,
-    open_by_handle_at, name_to_handle_at, swapon, swapoff, reboot, iopl, ioperm,
-    acct, quotactl, settimeofday, clock_settime, adjtimex, syslog, vhangup,
-    fanotify_init, lookup_dcookie, move_pages, migrate_pages,
-    io_uring_setup, io_uring_enter, io_uring_register,
-    fsopen, fsconfig, fsmount, fspick, open_tree, move_mount, mount_setattr, pidfd_getfd
+  ALLOW {
+    %s,
+    clone(flags) { (flags & %#x) == 0 }
   },
   ERRNO(38) {
     clone3
@@ -66,8 +70,8 @@ POLICY docsandbox {
     socket, socketpair, connect, bind, listen, accept, accept4
   }
 }
-USE docsandbox DEFAULT ALLOW
-""" % CLONE_NAMESPACE_FLAGS
+USE docsandbox DEFAULT KILL
+""" % (", ".join(ALLOWED), CLONE_NAMESPACE_FLAGS)
 
 
 def argv(job_dir: str, program: list[str]) -> list[str]:

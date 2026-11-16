@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import tempfile
 import unittest
 import uuid
@@ -50,6 +51,17 @@ except OSError:
 r["root"] = sorted(os.listdir("/"))
 json.dump(r, open("/job/out/result.json", "w"))
 """
+
+
+# Runs mov eax, 20; int 0x80; ret from an executable page.
+I386_GETPID = (
+    "import mmap\n"
+    "code = b'\\xb8\\x14\\x00\\x00\\x00\\xcd\\x80\\xc3'\n"
+    "m = mmap.mmap(-1, 4096, prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)\n"
+    "m.write(code)\n"
+    "addr = ctypes.addressof(ctypes.c_char.from_buffer(m))\n"
+    "ctypes.CFUNCTYPE(ctypes.c_int)(addr)()\n"
+)
 
 
 @unittest.skipUnless(ENABLED, "needs nsjail and the docsandbox image's privileges")
@@ -105,7 +117,7 @@ class JailTest(unittest.TestCase):
         rc, _ = self.run_probe("b = bytearray(3 << 30)\nb[-1] = 1\n")
         self.assertEqual(server.outcome_for(rc), "unreadable")
 
-    def test_namespace_and_io_uring_calls_are_killed(self) -> None:
+    def test_calls_outside_the_allow_list_are_killed(self) -> None:
         # The renderer, turned, tries to leave its namespaces or reach
         # io_uring: the seccomp filter kills it (SIGSYS), so nothing runs.
         libc = "import ctypes, os\nlibc = ctypes.CDLL(None, use_errno=True)\n"
@@ -115,9 +127,18 @@ class JailTest(unittest.TestCase):
             ("clone(CLONE_NEWUSER)", "libc.syscall(56, 0x10000000 | 17, 0, 0, 0, 0)"),
             ("io_uring_setup", "libc.syscall(425, 8, ctypes.create_string_buffer(120))"),
             ("fsopen", "libc.syscall(430, b'tmpfs', 0)"),
+            ("mount", "libc.mount(b'none', b'/tmp', b'tmpfs', 0, None)"),
+            ("ptrace", "libc.ptrace(16, 1, 0, 0)"),
+            # The x32 ABI: the same handlers under numbers with bit 0x40000000.
+            ("x32 unshare(CLONE_NEWUSER)", "libc.syscall(0x40000000 | 272, 0x10000000)"),
+            ("x32 setns", "libc.syscall(0x40000000 | 308, 0, 0)"),
+            ("x32 getpid", "libc.syscall(0x40000000 | 39)"),
+            # A 32-bit call through int 0x80 (getpid, i386 number 20).
+            ("int 0x80", I386_GETPID),
         ):
             rc, d = self.run_probe(libc + probe + "\nopen('/job/out/ran', 'w').write('x')\n")
-            self.assertNotEqual(rc, 0, name)
+            # Killed by the filter (SIGSYS), not refused by the kernel.
+            self.assertEqual(rc, 128 + signal.SIGSYS, name)
             self.assertFalse(os.path.exists(os.path.join(d, "out", "ran")), name)
         # clone3 is ENOSYS (its flags can't be filtered), so the C library
         # falls back to clone, which the filter reads.
