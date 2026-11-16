@@ -13,7 +13,9 @@
 //  5. reqtoken.CheckReply: the reply goes to _INBOX_gateway. only;
 //  6. the replay set (a jti answered once per process; full fails closed);
 //  7. the op (gokit/docops) and its caller rule; no op admits a platform
-//     role or an auditor (S19);
+//     role or an auditor (S19); a HospitalBound op needs the token's hid
+//     to be a hospital id (canonical, not nil), since the subject carries
+//     no hospital (design §17 departure 10);
 //  8. the Mhai-Request-Id header equals the token's rid;
 //  9. the schema: the header names the op's request message and the body
 //     is exactly that message, with no unknown field.
@@ -32,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -184,6 +187,11 @@ func (r *Responder) Process(ctx context.Context, m *nats.Msg) (*nats.Msg, string
 	if !op.Allows(c.Sub, c.Roles) {
 		return r.refuse("caller", c.Rid)
 	}
+	if op.HospitalBound {
+		if _, err := Hospital(c); err != nil {
+			return r.refuse("hospital", c.Rid)
+		}
+	}
 	// 8. The request id header is the token's.
 	if m.Header.Get(HeaderRequestID) != c.Rid {
 		return r.refuse("request_id", c.Rid)
@@ -220,6 +228,19 @@ func (r *Responder) Process(ctx context.Context, m *nats.Msg) (*nats.Msg, string
 }
 
 var errSchema = errors.New("ctl: body is not the op's request message")
+
+// ErrHospital: a token whose hid isn't a hospital id.
+var ErrHospital = errors.New("ctl: the token names no hospital")
+
+// Hospital is the verified token's hospital: a canonical, non-nil uuid. A
+// HospitalBound op's handler reads rows under it and nothing else.
+func Hospital(c reqtoken.Claims) (uuid.UUID, error) {
+	h, err := uuid.Parse(c.Hid)
+	if err != nil || h == uuid.Nil || h.String() != c.Hid {
+		return uuid.Nil, ErrHospital
+	}
+	return h, nil
+}
 
 // decode reads body as the message named full, refusing unknown fields.
 func decode(full string, body []byte) (proto.Message, error) {

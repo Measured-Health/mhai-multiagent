@@ -6,8 +6,14 @@
 // never published to Python.
 //
 // No op allows a platform role or an auditor (S19): platform roles hold
-// nothing on documents. In PR 1 the only op is health, as svc:core; each
-// later op comes with the PR that builds it.
+// nothing on documents. PR 1 built health and PR 3 presign_upload, both as
+// svc:core; each later op comes with the PR that builds it.
+//
+// The control subject carries no hospital segment, so an op that reads a
+// row is HospitalBound: the responder refuses its token unless the hid is
+// a hospital id, and the handler reads the row under that hospital only
+// (row-level security), so another hospital's id is not_found (DS1;
+// design §17 departure 10).
 package docops
 
 import (
@@ -29,7 +35,10 @@ type Op struct {
 	// SvcCore: the token's sub is svc:core, with no roles. An op with no
 	// caller rule allows nobody.
 	SvcCore bool
-	Timeout time.Duration
+	// HospitalBound: the op reads a row of the token's hospital (hid), so
+	// a token without a valid hid is refused before the handler runs.
+	HospitalBound bool
+	Timeout       time.Duration
 	// Request and Response are the protobuf full names
 	// (mhai.documents.v1.*).
 	Request, Response string
@@ -40,9 +49,17 @@ func coreOp(op string, timeout time.Duration, msg string) Op {
 		Request: "mhai.documents.v1." + msg + "Request", Response: "mhai.documents.v1." + msg + "Reply"}
 }
 
+// hospitalBound marks o as reading a row of the token's hospital.
+func hospitalBound(o Op) Op {
+	o.HospitalBound = true
+	return o
+}
+
 // Ops is the table.
 var Ops = []Op{
 	coreOp("health", 5*time.Second, "Health"),
+	// The POST policy for a row's quarantine key (design §4.2).
+	hospitalBound(coreOp("presign_upload", 5*time.Second, "PresignUpload")),
 }
 
 // Subject is op's control subject.

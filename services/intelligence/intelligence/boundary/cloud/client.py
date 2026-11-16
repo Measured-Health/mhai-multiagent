@@ -69,6 +69,7 @@ from intelligence.boundary.models import (
     Builder,
     Generation,
     Verification,
+    _chunk_texts,
     _escalated,
     _verify_with,
 )
@@ -402,6 +403,8 @@ class CloudModelClient:
             cloud_outcome="ok",
             tokens_in=reply.tokens_in or 0,
             tokens_out=reply.tokens_out or 0,
+            patient_context=dict(patient_context),
+            chunk_texts=_chunk_texts(chunks),
         )
 
     def _shared(self, results: Any) -> tuple[SharedChunk, ...]:

@@ -136,10 +136,14 @@ docker run -d --name split-pg --network split-app --user 70:70 \
   --mount type=volume,src=split-pgtls,dst=/etc/postgresql/pg_hba.conf,volume-subpath=pg_hba.conf,readonly \
   "$PG_IMAGE" "${PG_CMD[@]}" >/dev/null
 docker network connect --ip "$APP" split-lan split-pg
+# Over TCP, not the Unix socket: the image's entrypoint first runs a temporary
+# server for initdb that listens on the socket only, then stops it and starts
+# the real one. A socket check could pass in that first window and the next
+# command land in the restart (boundary-smoke flake, 14 Nov).
 for _ in $(seq 1 60); do
-  docker exec split-pg pg_isready -U pgadmin -d mhai >/dev/null 2>&1 && break; sleep 1
+  docker exec split-pg pg_isready -h 127.0.0.1 -U pgadmin -d mhai >/dev/null 2>&1 && break; sleep 1
 done
-docker exec split-pg pg_isready -U pgadmin -d mhai >/dev/null || { bad "postgres starts"; exit 1; }
+docker exec split-pg pg_isready -h 127.0.0.1 -U pgadmin -d mhai >/dev/null || { bad "postgres starts"; exit 1; }
 
 echo "== the app host: NATS with nats/tls.conf, in the same network namespace"
 cp "$ROOT/deploy/nats/nats.conf" "$ROOT/deploy/nats/tls.conf" "$work/fill/"

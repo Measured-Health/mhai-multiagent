@@ -14,11 +14,10 @@ changes nothing.
   claim and came out ``REGENERATE``. Here a decline is ``ESCALATE``, as a cloud reply's
   ``insufficient_evidence`` is. The marker is found anywhere in the reply, in any case,
   width or spacing (NFKC, casefold): a decline mixed into an answer still escalates.
-* **Its citations are inline ``[KB#nnnn]`` markers**, as our prompt asks. The NLI model
-  reads a marker left in the claim as new, unsupported content: a claim copied word for
-  word from its chunk scores neutral (0.999) with the marker and entailed (0.99) without.
-  Here the exact markers are removed from the NLI hypothesis only; the premise, the claim's
-  words and which chunk it cites are unchanged.
+* **Its citations are inline ``[KB#nnnn]`` markers**, as our prompt asks. The citation
+  pipeline removes the exact markers from the NLI hypothesis for every route and model
+  (:func:`knowledge_base.kb_builder.strip_citation_tags`), so this profile needs no NLI
+  reading of its own.
 * **Fail closed:** a reply with no exact citation marker (and no decline) is not this
   model's answer format and escalates, before NLI.
 """
@@ -34,10 +33,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from intelligence.knowledge_base.kb_builder import CITATION_MARKER
+
 log = logging.getLogger(__name__)
 
-# The same exact marker the CCA and the citation pipeline read (kb_builder.CITATION_MARKER).
-_MARKER = re.compile(r"\s*\[KB#(?:\d{4}|[1-9]\d{6})\]")
+# The exact marker the CCA and the citation pipeline read.
+_MARKER = re.compile(CITATION_MARKER)
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,6 @@ class AnswerProfile:
     id: str
     # Casefolded words of the model's decline marker; None: the model has none.
     decline_words: tuple[str, ...] | None = None
-    nli_strip_citations: bool = False
     require_citation: bool = False
 
 
@@ -53,7 +53,6 @@ DEFAULT = AnswerProfile("default")
 GEMMA4_E4B_CCA_V1 = AnswerProfile(
     "gemma4-e4b-cca-v1",
     decline_words=("insufficient", "evidence"),
-    nli_strip_citations=True,
     require_citation=True,
 )
 
@@ -131,11 +130,6 @@ def for_pinned(pinned: Callable[[], Any]) -> AnswerProfile:
 # ---------------------------------------------------------------- reading a reply
 
 
-def strip_citations(text: str) -> str:
-    """``text`` without its exact ``[KB#nnnn]`` markers (and the space before each)."""
-    return _MARKER.sub("", text)
-
-
 def _words(text: str) -> list[str]:
     return re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", text).casefold())
 
@@ -148,17 +142,6 @@ def declined(profile: AnswerProfile, text: str) -> bool:
     words = _words(text)
     n = len(want)
     return any(tuple(words[i : i + n]) == want for i in range(len(words) - n + 1))
-
-
-class CitationFreeNLI:
-    """An NLI verifier that judges the claim without its citation markers. Only
-    ``verify`` is offered: it is all the citation pipeline calls."""
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-
-    def verify(self, premise: str, hypothesis: str) -> Any:
-        return self._inner.verify(premise=premise, hypothesis=strip_citations(hypothesis))
 
 
 def _escalate(flag_type: str, severity: str) -> dict[str, Any]:
@@ -187,10 +170,6 @@ class ProfiledHGA:
         return result
 
 
-def wrap_nli(verifier: Any, profile: AnswerProfile) -> Any:
-    return CitationFreeNLI(verifier) if profile.nli_strip_citations else verifier
-
-
 def wrap_hga(hga: Any, profile: AnswerProfile) -> Any:
     if profile.decline_words or profile.require_citation:
         return ProfiledHGA(hga, profile)
@@ -201,13 +180,10 @@ __all__ = [
     "DEFAULT",
     "GEMMA4_E4B_CCA_V1",
     "AnswerProfile",
-    "CitationFreeNLI",
     "ProfiledHGA",
     "declined",
     "for_manifest",
     "for_pinned",
     "for_run",
-    "strip_citations",
     "wrap_hga",
-    "wrap_nli",
 ]

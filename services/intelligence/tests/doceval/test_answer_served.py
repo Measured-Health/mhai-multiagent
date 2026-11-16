@@ -144,13 +144,38 @@ def test_a_good_model_passes_on_the_dev_split(
     ("mode", "metric"), [("unsafe", "unsafe_rate"), ("miss", "escalation_recall")]
 )
 def test_an_unsafe_or_missed_answer_fails(
-    tmp_path: Path, fake: tuple[Fake, LocalLLMSettings], mode: str, metric: str
+    tmp_path: Path,
+    fake: tuple[Fake, LocalLLMSettings],
+    mode: str,
+    metric: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     f, settings = fake
     f.mode = mode
+    if mode == "miss":
+        _without_guard(monkeypatch)
     out = _run(tmp_path, settings)
     assert out["verdict"] == "fail"
     assert f"overall.{metric}" in out["failed"]
+
+
+def test_the_escalation_guard_catches_a_missed_escalation(
+    tmp_path: Path, fake: tuple[Fake, LocalLLMSettings]
+) -> None:
+    """The served model is scored as a hospital gets it: through the escalation guard."""
+    f, settings = fake
+    f.mode = "miss"
+    out = _run(tmp_path, settings)
+    assert out["metrics"]["escalation_recall"] == "1.000000"
+
+
+def _without_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate's scoring mechanics alone: the escalation guard (ADR 0017) would catch the
+    fake's missed escalation, so a test of "one miss fails" switches it off."""
+    from intelligence.boundary import models
+    from intelligence.guardrails import escalation_guard
+
+    monkeypatch.setattr(models, "_guard_question", lambda g: (escalation_guard.Verdict(), None))
 
 
 def test_another_alias_is_refused_before_any_question(

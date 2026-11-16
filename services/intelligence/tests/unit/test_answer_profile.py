@@ -129,29 +129,6 @@ def test_for_pinned_without_a_pin_is_the_default() -> None:
 # ---------------------------------------------------------------- reading the output
 
 
-def test_strip_citations_leaves_the_claim() -> None:
-    assert ap.strip_citations("- URTI: viral majority [KB#0005].") == "- URTI: viral majority."
-    assert ap.strip_citations("A [KB#0001] [KB#1234567] b.") == "A b."
-    # Only exact markers go: a lookalike stays, so it is still judged as text.
-    assert ap.strip_citations("x [KB#12] y") == "x [KB#12] y"
-
-
-class _RecordingNLI:
-    def __init__(self) -> None:
-        self.seen: list[tuple[str, str]] = []
-
-    def verify(self, premise: str, hypothesis: str) -> str:
-        self.seen.append((premise, hypothesis))
-        return "result"
-
-
-def test_citation_free_nli_drops_markers_from_the_hypothesis_only() -> None:
-    inner = _RecordingNLI()
-    nli = ap.CitationFreeNLI(inner)
-    assert nli.verify("Premise [KB#0001].", "Claim [KB#0002].") == "result"
-    assert inner.seen == [("Premise [KB#0001].", "Claim.")]
-
-
 class _RecordingHGA:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -210,13 +187,12 @@ def test_profiled_hga_verifies_a_cited_answer_as_before() -> None:
 def test_the_default_profile_changes_nothing() -> None:
     inner = _RecordingHGA()
     assert ap.wrap_hga(inner, ap.DEFAULT) is inner
-    nli = _RecordingNLI()
-    assert ap.wrap_nli(nli, ap.DEFAULT) is nli
 
 
-def test_the_gemma_profile_wraps_both() -> None:
+def test_the_gemma_profile_wraps_the_hga() -> None:
+    # Its citation markers need no NLI wrapper: the citation pipeline strips them for
+    # every route (tests/unit/test_nli_citation_tags.py).
     assert isinstance(ap.wrap_hga(_RecordingHGA(), ap.GEMMA4_E4B_CCA_V1), ap.ProfiledHGA)
-    assert isinstance(ap.wrap_nli(_RecordingNLI(), ap.GEMMA4_E4B_CCA_V1), ap.CitationFreeNLI)
 
 
 # ---------------------------------------------------------------- wiring

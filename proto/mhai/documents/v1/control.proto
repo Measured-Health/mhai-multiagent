@@ -12,10 +12,11 @@ option go_package = "github.com/Measured-Health/mhai-multiagent/services/gokit/d
 // documents.v1.ctl.health, as svc:core (the platform health sampler).
 message HealthRequest {}
 
-// Readiness flags only, no counts of anyone's data. The service takes a
-// document only when all four are true.
+// Readiness flags and the keyring's fingerprint, no counts of anyone's
+// data. The service takes a document only when all the flags are true.
 message HealthReply {
-  // Its database login answers.
+  // Its database login answers, and is not a superuser, does not bypass
+  // row-level security and cannot act as a table owner (PR 3).
   bool database_ready = 1;
   // The key-encryption keys load and unwrap a test key (PR 3).
   bool keyring_ready = 2;
@@ -23,4 +24,47 @@ message HealthReply {
   bool scanner_ready = 3;
   // docsandbox answers (PR 4).
   bool sandbox_ready = 4;
+  // The object store answers with its credential, and the bucket's
+  // lifecycle deletes quarantine/ within a day and non-current versions
+  // within 7 days (PR 3).
+  bool storage_ready = 5;
+  // The loaded keyring's fingerprint: the SHA-256 (hex) of the file
+  // keyring, the same value sha256sum prints for it, never key material;
+  // empty until it loads. Every documents server sharing one provisioned
+  // keyring must report the same value; another one is a server holding an
+  // old copy.
+  string keyring_fingerprint = 6;
+  // How many hospitals the loaded keyring holds a key for (0 until it
+  // loads). A count of hospitals, not of anyone's data.
+  uint32 keyring_hospitals = 7;
+}
+
+// documents.v1.ctl.presign_upload, as svc:core, hospital-bound: the
+// hospital is the token's hid, never a field (documents design §4.2, §17
+// departure 10). Core asks after it has inserted the documents row
+// (uploading) for a browser upload (purpose clinical or clearance).
+message PresignUploadRequest {
+  // The documents row's id (a uuid).
+  string document_id = 1;
+}
+
+// One form field of an S3 POST policy, in the order the browser posts them
+// (the file goes last, after every field).
+message FormField {
+  string name = 1;
+  string value = 2;
+}
+
+// The POST policy for exactly quarantine/<hid>/<document_id>, or a code.
+// outcome: ok; not_found (no such row in the token's hospital, or a row
+// this op doesn't serve: an archive document); conflict (the row isn't
+// uploading); unavailable (the keyring or the object store isn't ready).
+// Only ok carries the url, the fields and the expiry. Core passes them to
+// the browser and never logs them.
+message PresignUploadReply {
+  string outcome = 1;
+  string url = 2;
+  repeated FormField fields = 3;
+  // Unix seconds; 10 minutes after the policy was signed.
+  int64 expires_at = 4;
 }

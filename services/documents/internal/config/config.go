@@ -8,8 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/s3"
 )
 
 // Settings are the documents service's settings.
@@ -31,6 +34,52 @@ type Settings struct {
 	// TrustedKeysPath is DOCUMENTS_TRUSTED_KEYS_PATH, the request-token
 	// trusted-keys file core writes (public keys only), an absolute path.
 	TrustedKeysPath string
+
+	// KEKProvider is DOCUMENTS_KEK_PROVIDER: "" (none: the keyring is not
+	// ready) or file (design §6.2). kms is PR 9's.
+	KEKProvider string
+	// KeyringPath is DOCUMENTS_KEYRING_PATH, the file keyring, absolute.
+	KeyringPath string
+	// KeyringMode is DOCUMENTS_KEYRING_MODE with the file provider:
+	// provisioned (the default: the keyring is made ahead and copied to
+	// every server, read-only, never a key made at runtime) or create
+	// (development only: a hospital's key is made at its first document).
+	// "" without the file provider.
+	KeyringMode string
+	// AllowFileKeyring is DOCUMENTS_ALLOW_FILE_KEYRING: "pilot" lets
+	// production use the file keyring (the product owner's written
+	// acceptance, D5); anything else is refused.
+	AllowFileKeyring string
+	// S3 is the object store, nil when none is configured (storage is then
+	// not ready).
+	S3 *S3Settings
+}
+
+// S3Settings are the object store's settings. The secret access key is
+// read from SecretKeyFile at start, never from the environment.
+type S3Settings struct {
+	Endpoint       string // DOCUMENTS_S3_ENDPOINT
+	UploadEndpoint string // DOCUMENTS_S3_UPLOAD_ENDPOINT, what browsers post to ("" for Endpoint)
+	Bucket         string // DOCUMENTS_S3_BUCKET
+	Region         string // DOCUMENTS_S3_REGION
+	AccessKeyID    string // DOCUMENTS_S3_ACCESS_KEY_ID
+	SecretKeyFile  string // DOCUMENTS_S3_SECRET_KEY_FILE, absolute
+}
+
+// The keyring modes (DOCUMENTS_KEYRING_MODE).
+const (
+	KeyringProvisioned = "provisioned"
+	KeyringCreate      = "create"
+)
+
+// KeyringCreates reports whether the file keyring makes a hospital's key
+// at its first document (create mode, development only).
+func (s Settings) KeyringCreates() bool { return s.KeyringMode == KeyringCreate }
+
+// FileKeyringAccepted reports whether the file keyring runs under the
+// pilot's acceptance outside development and staging.
+func (s Settings) FileKeyringAccepted() bool {
+	return s.KEKProvider == "file" && s.AllowFileKeyring == "pilot"
 }
 
 // Development reports whether APP_ENV is development.
@@ -88,10 +137,90 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	if s.TrustedKeysPath != "" && !filepath.IsAbs(s.TrustedKeysPath) {
 		errs = append(errs, errors.New("DOCUMENTS_TRUSTED_KEYS_PATH must be an absolute path"))
 	}
+	errs = append(errs, s.storage(get)...)
 	if err := errors.Join(errs...); err != nil {
 		return Settings{}, err
 	}
 	return s, nil
+}
+
+// storage reads and checks the keyring and object store settings.
+func (s *Settings) storage(get func(string) string) []error {
+	var errs []error
+	s.KEKProvider, s.KeyringPath, s.AllowFileKeyring = get("DOCUMENTS_KEK_PROVIDER"), get("DOCUMENTS_KEYRING_PATH"),
+		get("DOCUMENTS_ALLOW_FILE_KEYRING")
+	mode := get("DOCUMENTS_KEYRING_MODE")
+	switch s.KEKProvider {
+	case "":
+		if s.KeyringPath != "" {
+			errs = append(errs, errors.New("DOCUMENTS_KEYRING_PATH is only for DOCUMENTS_KEK_PROVIDER=file"))
+		}
+	case "file":
+		if s.KeyringPath == "" || !filepath.IsAbs(s.KeyringPath) {
+			errs = append(errs, errors.New("DOCUMENTS_KEYRING_PATH must be an absolute path with DOCUMENTS_KEK_PROVIDER=file"))
+		}
+		// Several servers share one keyring only if none makes keys: create
+		// mode is for one development machine.
+		switch mode {
+		case "", KeyringProvisioned:
+			s.KeyringMode = KeyringProvisioned
+		case KeyringCreate:
+			if s.Development() {
+				s.KeyringMode = KeyringCreate
+			} else {
+				errs = append(errs, errors.New("DOCUMENTS_KEYRING_MODE=create is for APP_ENV=development only; use provisioned"))
+			}
+		default:
+			errs = append(errs, errors.New("DOCUMENTS_KEYRING_MODE must be provisioned, create or unset"))
+		}
+	case "kms":
+		errs = append(errs, errors.New("DOCUMENTS_KEK_PROVIDER=kms is not built yet (documents PR 9); use file"))
+	default:
+		errs = append(errs, errors.New("DOCUMENTS_KEK_PROVIDER must be file or unset"))
+	}
+	if mode != "" && s.KEKProvider != "file" {
+		errs = append(errs, errors.New("DOCUMENTS_KEYRING_MODE is only for DOCUMENTS_KEK_PROVIDER=file"))
+	}
+	switch {
+	case s.AllowFileKeyring != "" && s.AllowFileKeyring != "pilot":
+		errs = append(errs, errors.New("DOCUMENTS_ALLOW_FILE_KEYRING must be pilot or unset"))
+	case s.KEKProvider == "file" && s.Env == "production" && s.AllowFileKeyring != "pilot":
+		errs = append(errs, errors.New("the file keyring is refused in production unless DOCUMENTS_ALLOW_FILE_KEYRING=pilot"))
+	}
+
+	st := S3Settings{Endpoint: get("DOCUMENTS_S3_ENDPOINT"), UploadEndpoint: get("DOCUMENTS_S3_UPLOAD_ENDPOINT"),
+		Bucket: get("DOCUMENTS_S3_BUCKET"), Region: get("DOCUMENTS_S3_REGION"), AccessKeyID: get("DOCUMENTS_S3_ACCESS_KEY_ID"),
+		SecretKeyFile: get("DOCUMENTS_S3_SECRET_KEY_FILE")}
+	if st == (S3Settings{}) {
+		return errs
+	}
+	for _, kv := range [][2]string{{"DOCUMENTS_S3_ENDPOINT", st.Endpoint}, {"DOCUMENTS_S3_BUCKET", st.Bucket},
+		{"DOCUMENTS_S3_REGION", st.Region}, {"DOCUMENTS_S3_ACCESS_KEY_ID", st.AccessKeyID},
+		{"DOCUMENTS_S3_SECRET_KEY_FILE", st.SecretKeyFile}} {
+		if kv[1] == "" {
+			errs = append(errs, fmt.Errorf("%s is required with the other DOCUMENTS_S3_ settings", kv[0]))
+		}
+	}
+	for _, kv := range [][2]string{{"DOCUMENTS_S3_ENDPOINT", st.Endpoint}, {"DOCUMENTS_S3_UPLOAD_ENDPOINT", st.UploadEndpoint}} {
+		if kv[1] == "" {
+			continue
+		}
+		u, err := s3.ParseEndpoint(kv[1])
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s must be http(s)://host[:port], with no credentials, path or query", kv[0]))
+		case u.Scheme != "https" && !s.Development():
+			errs = append(errs, fmt.Errorf("%s must be https:// outside development", kv[0]))
+		}
+	}
+	for _, e := range s3.CheckNames(st.Bucket, st.Region, st.AccessKeyID) {
+		errs = append(errs, fmt.Errorf("DOCUMENTS_S3_%s is invalid", e))
+	}
+	if st.SecretKeyFile != "" && !filepath.IsAbs(st.SecretKeyFile) {
+		errs = append(errs, errors.New("DOCUMENTS_S3_SECRET_KEY_FILE must be an absolute path"))
+	}
+	s.S3 = &st
+	return errs
 }
 
 // checkNATSURL: nats:// or tls:// (tls:// only outside development), a
@@ -136,4 +265,30 @@ func placeholder(v string) bool {
 		}
 	}
 	return false
+}
+
+// MaxSecretFileBytes bounds a secret file.
+const MaxSecretFileBytes = 4096
+
+// ReadSecretFile reads a secret from a file (the object store's secret
+// access key): a regular file of at most 4 KiB, its contents trimmed, at
+// least 16 characters and not a placeholder. Errors name variable, never
+// the path or the value.
+func ReadSecretFile(variable, path string) (string, error) {
+	st, err := os.Lstat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > MaxSecretFileBytes {
+		return "", fmt.Errorf("%s: the secret file is missing or not a regular file", variable)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%s: the secret file can't be read", variable)
+	}
+	v := strings.TrimSpace(string(b))
+	switch {
+	case len(v) < 16:
+		return "", fmt.Errorf("%s: the secret is shorter than 16 characters", variable)
+	case placeholder(v):
+		return "", fmt.Errorf("%s: the secret is a placeholder", variable)
+	}
+	return v, nil
 }

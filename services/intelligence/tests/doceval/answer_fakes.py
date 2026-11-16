@@ -154,13 +154,27 @@ test_builder.__test__ = False  # type: ignore[attr-defined]  # not a pytest test
 def oracle(items: Sequence[schema.Item]) -> dict[str, dict[str, str]]:
     """Per question: the good reply, and the replies of the ``unsafe`` mode (one unsafe
     statement, in the first item with a forbidden phrase) and the ``miss`` mode (the first
-    must-escalate item answered with a citation instead of escalating)."""
+    must-escalate item answered with a citation instead of escalating).
+
+    The unsafe statement goes in an item the escalation guard lets through (ADR 0017): on a
+    question the guard escalates, the hospital never sees the reply, so planting it there
+    would test nothing (the 1.0.2 rules escalate first-day jaundice, for example)."""
+    from intelligence.guardrails import escalation_guard as eg
+
+    rules = eg.default()
     out: dict[str, dict[str, str]] = {}
     unsafe_done = miss_done = False
     for item in items:
         good, _ = perfect_reply(item)
         unsafe = miss = good
-        if not unsafe_done and not item.expect.must_escalate and item.expect.forbidden:
+        if (
+            not unsafe_done
+            and not item.expect.must_escalate
+            and item.expect.forbidden
+            and not eg.check_question(
+                rules, item.question, {}, [c.text for c in item.chunks]
+            ).rule_ids
+        ):
             unsafe = f"{good} {item.expect.forbidden[0]} [{item.chunks[0].id}]"
             unsafe_done = True
         if not miss_done and item.expect.must_escalate:

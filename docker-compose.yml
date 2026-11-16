@@ -67,6 +67,9 @@ services:
       # mhai_emr_admin only), optional: skipped while both are empty.
       EMR_ADMIN_DB_USER: ${EMR_ADMIN_DB_USER:-}
       EMR_ADMIN_DB_PASSWORD: ${EMR_ADMIN_DB_PASSWORD:-}
+      # The documents service's login (profile documents), optional:
+      # skipped while empty (a member of mhai_documents_app only, 00046).
+      DOCUMENTS_DB_PASSWORD: ${DOCUMENTS_DB_PASSWORD:-}
     depends_on:
       postgres: { condition: service_healthy }
 
@@ -318,10 +321,12 @@ services:
   #   NATS_DOCUMENTS_CONF=documents.conf NATS_DOCUMENTS_PASSWORD=... docker compose --profile documents up -d
   # (the first two switch its NATS user on; without them NATS runs as
   # before). Its own NATS user and password, the request-token trusted keys
-  # (public, read-only) and its own database login (the role comes with PR
-  # 3's migration; until then health reports database_ready false); nothing
-  # of core's or the emr service's. PR 1 runs the service alone: clamav and
-  # docsandbox join the profile in PR 4 (design §17).
+  # (public, read-only) and its own database login (00046; core-migrate
+  # makes it from DOCUMENTS_DB_PASSWORD); nothing of core's or the emr
+  # service's. No keyring and no object store are configured here, so
+  # health reports keyring_ready and storage_ready false and no upload is
+  # signed (PR 3; the settings are in services/documents/README.md).
+  # clamav and docsandbox join the profile in PR 4 (design §17).
   #
   # Locked down: read-only root, no capabilities, no-new-privileges, and
   # only the internal backend network (Postgres and NATS; no route out). No

@@ -17,7 +17,7 @@ func TestWithHospitalRoleIsClosed(t *testing.T) {
 	hid, uid := uuid.New(), uuid.New()
 	ran := func(pgx.Tx) error { t.Fatal("fn ran"); return nil }
 	for _, r := range []Role{"", "mhai_platform", "mhai_migrate", "postgres", "MHAI_GATEWAY", "mhai_gateway; RESET ROLE",
-		"mhai_emr_app", "mhai_worker"} {
+		"mhai_emr_app", "mhai_worker", "mhai_documents_app", "MHAI_DOCUMENTS"} {
 		if err := WithHospital(ctx, nil, r, hid, ran); !errors.Is(err, ErrRole) {
 			t.Errorf("role %q: %v, want ErrRole", r, err)
 		}
@@ -33,7 +33,8 @@ func TestWithHospitalRoleIsClosed(t *testing.T) {
 			t.Errorf("%s nil user: %v", r, err)
 		}
 	}
-	if len(Roles) != 3 || Gateway != "mhai_gateway" || EMR != "mhai_emr" || EMRCore != "mhai_emr_core" {
+	if len(Roles) != 4 || Gateway != "mhai_gateway" || EMR != "mhai_emr" || EMRCore != "mhai_emr_core" ||
+		Documents != "mhai_documents" {
 		t.Fatalf("roles changed: %v", Roles)
 	}
 }
