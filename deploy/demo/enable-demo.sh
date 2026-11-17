@@ -82,7 +82,7 @@ info "no pilot pipeline"
 say "The demo seed (core demo seed)"
 # Counts only (no names): the seed refuses any database with a non-demo
 # hospital, so the log says why at once.
-counts=$(printf 'SELECT count(*) FILTER (WHERE is_demo) || %s || count(*) FILTER (WHERE NOT is_demo) FROM hospitals;\n' "' and '" | pg)
+counts=$(printf 'SELECT count(*) FILTER (WHERE is_demo) || %s || count(*) FILTER (WHERE NOT is_demo) FROM hospitals;\n' "' and '" | pg) || counts=unknown
 info "hospitals: demo and non-demo: ${counts:-unknown}"
 if ! compose run --rm -T core-demo-seed </dev/null; then
   rm -f "$DEST/demo/seeded"
@@ -104,9 +104,11 @@ if [ "${DEMO_SAMPLE_AI:-on}" = off ]; then
   exit 0
 fi
 
-say "The demo hospitals sample-ai may answer"
-ids=$(printf 'SELECT string_agg(id::text, %s ORDER BY id) FROM hospitals WHERE is_demo;\n' "','" | pg)
-printf '%s' "$ids" | grep -Eq '^[0-9a-f-]{36}(,[0-9a-f-]{36}){0,15}$' || die "no demo hospital found after the seed"
+say "The demo hospital sample-ai may answer"
+# DEM only (the seed's own, created with is_demo), never any other hospital
+# marked as a demo: sample answers go to the seeded demo hospital alone.
+ids=$(printf "SELECT id FROM hospitals WHERE short_code = 'DEM' AND is_demo;\n" | pg)
+printf '%s' "$ids" | grep -Eq '^[0-9a-f-]{36}$' || die "no demo hospital DEM found after the seed"
 env_set DEMO_SAMPLE_HOSPITALS "$ids"
 
 say "Memory for sample-ai"

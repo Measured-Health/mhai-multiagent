@@ -382,8 +382,9 @@ browser ─https─> nginx ─> web (live) ─mhai-bff─> nats ─> core ─JOB
    cohort). Then it writes the marker `/srv/mhai-backend/demo/seeded`
    (a timestamp, not a secret), which mhai-web's deploy needs before it
    switches the public demo to live mode.
-3. **sample-ai:** the hospitals it may answer are the database's `is_demo`
-   ones (`DEMO_SAMPLE_HOSPITALS` in `.env`, written by the script). Its NATS
+3. **sample-ai:** it answers the seeded demo hospital `DEM` only
+   (`DEMO_SAMPLE_HOSPITALS` in `.env`, written by the script), never another
+   hospital, even one marked as a demo. Its NATS
    NKey (`secrets/nats-pipeline.nk`, public key `NATS_PIPELINE_NKEY`) and
    the `intelligence_app` password (`INTELLIGENCE_DB_PASSWORD` and
    `secrets/intelligence-db-password`) are made on the host inside a
@@ -450,6 +451,14 @@ change a shared password or enrol two-step on a "new" account until the
 next deploy resets it, and repeated wrong passwords from many places lock an
 account for an hour (the per-login ceiling). A code already used in the
 same 30 seconds is refused (wait for the next).
+
+**Before a real hospital joins this database** (the pilot): the seed then
+refuses, but the published accounts stay as they were. Deactivate the
+hospital `DEM` on the platform app first (its accounts lose their sessions
+and can't sign in), set `DEMO_SAMPLE_AI=off`, and set mhai-web's
+`DEMO_MODE=mock`; `pilot/enable-pilot.sh` refuses while `DEM` has active
+accounts. A hospital must never be marked as a demo (`core hospitals
+mark-demo`) unless it holds synthetic data only.
 
 **Switching off.** Sample answers only: set the repository variable
 `DEMO_SAMPLE_AI=off` and run "Deploy backend demo" (`gh variable set

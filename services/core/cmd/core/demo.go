@@ -585,9 +585,10 @@ func (s *demoSeeder) analysis(ctx context.Context) (string, error) {
 		}
 		result = "seeded"
 	}
-	var named string
-	err := s.pool.QueryRow(ctx, `SELECT position FROM named_access_switch WHERE hospital_id = $1`, s.hid).Scan(&named)
-	if errors.Is(err, pgx.ErrNoRows) {
+	var namedRows int
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM named_access_switch WHERE hospital_id = $1 OR hospital_id IS NULL`,
+		s.hid).Scan(&namedRows)
+	if err == nil && namedRows == 0 {
 		if err := namedAccessDemo(ctx, DemoHospitalCode, s.url, io.Discard); err != nil {
 			return "", err
 		}
