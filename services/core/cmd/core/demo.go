@@ -688,19 +688,19 @@ const samplePrefix = "Sample answer (synthetic demo data, not clinical advice): 
 var demoConsultations = []demoConsultation{
 	{key: "gdm", question: "Pregnant at 26 weeks with a 2-hour OGTT of 160 mg/dL. Does this meet gestational diabetes?", category: "Obstetrics",
 		urgency: "routine", chunk: "KB#0001", age: 31, sex: "female", daysAgo: 6, decision: "PASS", band: "high", trust: 0.91,
-		answer: "Yes. A 2-hour value of 153 mg/dL or more on a 75 g OGTT meets the gestational diabetes threshold [KB#0001]. Confirm the test was a 75 g load and plan follow-up with the antenatal team."},
+		answer: "Yes. A 2-hour value of 153 mg/dL or more on a 75 g OGTT meets the gestational diabetes threshold. Confirm the test was a 75 g load and plan follow-up with the antenatal team."},
 	{key: "malaria", question: "Fever for three days, positive rapid test. What confirms malaria and which features would make it severe?", category: "Internal Medicine",
 		urgency: "urgent", chunk: "KB#0002", age: 24, sex: "male", daysAgo: 5, decision: "PASS", band: "high", trust: 0.88,
-		answer: "A positive RDT or microscopy confirms malaria before treatment [KB#0002]. Treat as severe if haemoglobin is below 5, there is respiratory distress, or parasitaemia is above 10% [KB#0002]."},
+		answer: "A positive RDT or microscopy confirms malaria before treatment. Treat as severe if haemoglobin is below 5, there is respiratory distress, or parasitaemia is above 10%."},
 	{key: "bp", question: "Two clinic readings of 150/95. Is this hypertension and what is first-line treatment?", category: "Internal Medicine",
 		urgency: "routine", chunk: "KB#0003", age: 52, sex: "female", daysAgo: 3, decision: "REGENERATE", band: "mid", trust: 0.67,
-		answer: "Readings of 140/90 or more on two occasions define hypertension [KB#0003]. First-line options include a thiazide, an ACE inhibitor, an ARB or a calcium channel blocker [KB#0003]; the choice depends on the rest of the history."},
+		answer: "Readings of 140/90 or more on two occasions define hypertension. First-line options include a thiazide, an ACE inhibitor, an ARB or a calcium channel blocker; the choice depends on the rest of the history."},
 	{key: "jaundice", question: "Newborn, 18 hours old, visibly yellow. Total bilirubin 12. Is this physiological?", category: "Paediatrics",
 		urgency: "emergency", chunk: "KB#0004", age: 0, sex: "female", daysAgo: 2, decision: "ESCALATE", band: "low", trust: 0.41,
-		answer: "Jaundice that starts in the first 24 hours is pathological, not physiological [KB#0004]. This needs senior review now.", guard: []string{"red_flag"}},
+		answer: "Jaundice that starts in the first 24 hours is pathological, not physiological. This needs senior review now.", guard: []string{"red_flag"}},
 	{key: "urti", question: "Cough and sore throat for four days, no fever. Are antibiotics needed?", category: "General Practice",
 		urgency: "routine", chunk: "KB#0005", age: 38, sex: "male", daysAgo: 1, decision: "PASS", band: "high", trust: 0.93,
-		answer: "Most upper respiratory infections are viral; give supportive care with paracetamol and fluids [KB#0005]. Antibiotics only if a bacterial superinfection develops [KB#0005]."},
+		answer: "Most upper respiratory infections are viral; give supportive care with paracetamol and fluids. Antibiotics only if a bacterial superinfection develops."},
 }
 
 func (s *demoSeeder) consultationID(key string) uuid.UUID {

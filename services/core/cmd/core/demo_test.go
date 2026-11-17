@@ -126,7 +126,9 @@ func TestDemoContentShapes(t *testing.T) {
 	}
 	decisions := map[string]int{}
 	for _, c := range demoConsultations {
-		if !ids[c.chunk] || !strings.Contains(c.answer, "["+c.chunk+"]") {
+		// The citation is recorded (citations_json), never written in the
+		// text: the app never shows chunk ids.
+		if !ids[c.chunk] || strings.Contains(c.answer, "KB#") {
 			t.Errorf("%s cites %s", c.key, c.chunk)
 		}
 		if !urgencyOK(c.urgency) {

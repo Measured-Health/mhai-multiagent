@@ -159,7 +159,7 @@ def test_compose_quotes_matching_guidelines_with_citations() -> None:
     text, cited = compose("What confirms malaria before treatment?", [HTN, MALARIA])
     assert text.startswith(LABEL)
     assert cited == ("KB#0002",)
-    assert "[KB#0002]" in text and "microscopy or RDT" in text
+    assert "KB#" not in text and "microscopy or RDT" in text
     assert "Hypertension" not in text
 
 

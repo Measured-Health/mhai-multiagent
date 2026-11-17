@@ -10,8 +10,8 @@ network call:
   generate  the job's own shared guideline chunks, ranked by the words they
             share with the masked question, visible ones only
             (chunk_visible_to); the answer is a fixed sample label, a framing
-            sentence and the matching guideline sentences, each cited by its
-            chunk id. No chunk matching: a "nothing matched" sample answer
+            sentence and the matching guideline sentences; their chunk ids
+            are the recorded citations (shown as sources, never in the text). No chunk matching: a "nothing matched" sample answer
             with no citation, which the guard and the decision treat as any
             other answer.
   verify    the real local verification path (_verify_with): the escalation
@@ -170,7 +170,9 @@ def compose(question: str, chunks: Sequence[KBChunk]) -> tuple[str, tuple[str, .
         "reference guidelines that match your question."
     ]
     for c in picked:
-        lines.append(f"{_first_sentences(c.content)} [{c.chunk_id}]")
+        # No inline chunk ids: the app never shows them; the citations are
+        # recorded (cited_chunk_ids) and listed under the answer's sources.
+        lines.append(_first_sentences(c.content))
     return " ".join(lines), tuple(c.chunk_id for c in picked)
 
 
