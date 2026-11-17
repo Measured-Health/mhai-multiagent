@@ -169,6 +169,10 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
+	if err := ensureDocuments(ctx, cfg, js); err != nil {
+		a.close()
+		return nil, err
+	}
 	a.emrConsumer = &alerts.Consumer{Pool: a.pool, Pub: alerts.JSPublisher{JS: js}, AllowNullMRN: cfg.EMRAllowNullMRN,
 		Log: log, Metrics: &alerts.ConsumerMetrics{}}
 	a.emrMaint = &emrmaint.Loop{Pool: a.pool, Log: log, Retention: cfg.EMRRetentionSweep, Metrics: &emrmaint.Metrics{}}
@@ -289,6 +293,15 @@ func ensureEMR(ctx context.Context, cfg config.Config, js jetstream.JetStream) e
 		return nil
 	}
 	return bus.EnsureEMRStream(ctx, js, cfg.NATSJSReplicas)
+}
+
+// ensureDocuments creates the DOCS stream and its documents_scan durable
+// when CORE_DOCUMENTS_ENABLED is on (documents PR 4); off, none exists.
+func ensureDocuments(ctx context.Context, cfg config.Config, js jetstream.JetStream) error {
+	if !cfg.DocumentsEnabled {
+		return nil
+	}
+	return bus.EnsureDocsStream(ctx, js, cfg.NATSJSReplicas)
 }
 
 // checkSigningKeys refuses one key for both token kinds (spec §7.2): the
