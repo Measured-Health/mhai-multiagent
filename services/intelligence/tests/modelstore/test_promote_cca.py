@@ -322,6 +322,13 @@ def _promote_and_pin(tmp_path: Path, registries: Any, keys: Keys, mode: str) -> 
     )
     summary = promote.promote(_request("1.0.0", dry_run=False), ctx)
     assert summary.split == "test" and summary.manifest_sha256 is not None
+    if mode == "good":  # say which metric failed, not only lock.pin's gate_failed
+        rep = areport.parse_report(summary.documents["evaluation.json"])
+        why = {k: rep[k] for k in ("metrics", "counts")}
+        assert rep["verdicts"]["answer"]["verdict"] == "pass", (
+            rep["verdicts"]["answer"]["failed"],
+            why,
+        )
     m = manifest.parse(
         mem.get(
             store.manifest_key(NAME, "1.0.0"),
