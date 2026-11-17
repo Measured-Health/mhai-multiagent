@@ -23,7 +23,6 @@ from intelligence.boundary.cloud.gate import (
     CloudContext,
     CloudPrompt,
     EgressRefused,
-    TaggingMasker,
     shared_chunk_of,
 )
 from intelligence.boundary.cloud.scan import (
@@ -38,6 +37,7 @@ from intelligence.boundary.cloud.scan import (
 )
 from intelligence.boundary.jobs import run_query
 from tests.boundary.cloud import layouts
+from tests.boundary.cloud.conftest import masker_that_misses
 from tests.boundary.cloud.layouts import PROVIDERS, blocks, body, render, shape
 
 pytestmark = pytest.mark.disable_socket
@@ -527,7 +527,7 @@ def _shared_chunks(n: int) -> tuple[Any, ...]:
 def test_name_in_question_blocked_for_every_layout(provider: str, n_chunks: int) -> None:
     # R-1, rendered from a real CloudPrompt: its blocks() order is the one
     # the shape's patient paths name.
-    tm = TaggingMasker()
+    tm = masker_that_misses()  # the masker misses; the scan must not
     question = f"{NAME} has a cough"
     ctx, _ = CloudContext.from_masked({"disease_category": tm.mask("respiratory")})
     prompt = CloudPrompt(tm.mask(question), ctx, _shared_chunks(n_chunks), tm)
@@ -780,16 +780,12 @@ def test_core_patient_data_feeds_known_identifiers() -> None:
     assert _scan("Emeka Obi asked about chest pain", ids) == "known_identifier"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Ruling C8 residual: PIIMasker finds names only after a title "
-    "(Dr, Mr, Mrs, Ms, Miss, Prof, Patient), so an untitled name on core's "
-    "real patient_data reaches the body. Needs a name detector or core's "
-    "keyed name hashes (ruling C5's H2 prerequisite).",
-)
 @pytest.mark.parametrize("where", ["question", "history"])
 def test_untitled_name_on_core_shape_refused(where: str) -> None:
+    """Ruling C8: the masker's untitled-name detector (security/ng_pii.py)
+    finds the name in the question or the record, so the bare name is this
+    patient's identifier and the body is refused. Core's keyed name hashes
+    (C5) are still needed before real data (TODO.md)."""
     patient = dict(CORE_PATIENT)
     question = "Adaeze Okafor has chest pain"
     if where == "history":

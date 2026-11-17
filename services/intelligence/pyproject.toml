@@ -141,6 +141,7 @@ intelligence = [
     "doceval/synth/terminology/NOTICE",
     "doceval/synth/names/*.txt",
     "doceval/synth/fonts/*",
+    "security/data/*.txt",
 ]
 
 [tool.pytest.ini_options]

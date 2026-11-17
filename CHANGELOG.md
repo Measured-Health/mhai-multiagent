@@ -50,6 +50,29 @@ All notable changes to this project are documented here. The format follows
   `cloud_reservations_reaped_total`, `cloud_reaped_tokens_total`,
   `cloud_reaper_failures_total` and `cloud_reaper_empty_total`, and alert rules for them and for
   `mhai_cloud_settle_failures_total` (deploy/README.md, "Cloud models").
+
+- **Clinical review (PII rules):** the PII masker upgrade for the cloud
+  real-data gate (TODO.md item 1; ruling C8). `PIIMasker` now finds names
+  without a title ("Adaeze Okafor has chest pain") and Nigerian identifiers
+  (`intelligence/security/ng_pii.py`): a hand-written gazetteer of about
+  1,500 Nigerian given names and surnames plus context rules (Nigerian
+  titles and relationship words, neighbours of a known name, initials,
+  name-forming affixes, ordinary-word names such as Grace only in context),
+  and a character-trigram name score built at load time from the gazetteer
+  and an English and medical word list (SCOWL-derived, notice kept); NIN,
+  BVN and phone numbers (0 or +234, "(0)" trunk) written whole or grouped
+  with spaces, hyphens, dots or brackets; labelled record numbers (MRN,
+  hospital, folder or card no, NHIS) and coded ones ("LUTH/2019/12345"). A
+  new placeholder, `[NATIONAL_ID_REDACTED]`. Offline and CPU-only: no model
+  weights and no new dependency; two data files (about 630 KB) pinned by
+  SHA-256. Fails closed: a missing or altered file, or text over 65,536
+  characters, raises `DetectorUnavailable`, so the cloud path can't collect
+  identifiers or mask, and the egress scan refuses (`scan_error`).
+  `test_untitled_name_on_core_shape_refused` now passes. Measured on a
+  seeded synthetic Nigerian PII set by `scripts/masker_eval.py`; the numbers
+  and their limits are in `docs/privacy/masker-evaluation.md`. The privacy
+  lead's sign-off is still open.
+
 - Documents: a provisioned file keyring, so the pilot can run more than one
   documents server on one keyring (design D5, §17 departure 20).
   `DOCUMENTS_KEYRING_MODE=provisioned` is the default and the only mode
