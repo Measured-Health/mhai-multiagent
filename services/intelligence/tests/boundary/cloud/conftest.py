@@ -17,6 +17,29 @@ from typing import Any
 import httpx2
 import pytest
 
+
+class MaskerThatMisses:
+    """A masker that finds nothing. The egress scan is the second line
+    (design section 4.4): these tests put a raw identifier past the masker
+    to show the scan still refuses it. PIIMasker itself now masks untitled
+    names (ruling C8), so it can't stand in for a miss."""
+
+    def mask(self, text: str) -> tuple[str, list[Any]]:
+        return text, []
+
+
+def masker_that_misses() -> Any:
+    from intelligence.boundary.cloud.gate import TaggingMasker
+
+    return TaggingMasker(MaskerThatMisses())
+
+
+def let_masker_miss(client: Any) -> Any:
+    """client with its masker swapped for one that misses (see above)."""
+    client._masker = masker_that_misses()
+    return client
+
+
 # Fake keys. One has a provider's prefix (the redaction patterns catch it);
 # one has none (only the exact-value rule catches it).
 FAKE_KEY = "fake" + "0" * 24

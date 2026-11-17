@@ -33,7 +33,6 @@ from intelligence.boundary.cloud.gate import (
     CloudContext,
     CloudPrompt,
     EgressRefused,
-    TaggingMasker,
     shared_chunk_of,
 )
 from intelligence.boundary.cloud.retry import RetryPolicy
@@ -41,7 +40,13 @@ from intelligence.boundary.cloud.scan import Identifiers, ScanHook, scan_body
 from intelligence.boundary.cloud.settings import ProviderSettings
 from intelligence.boundary.models import Generation
 from tests.boundary.cloud import test_client as tc
-from tests.boundary.cloud.conftest import FAKE_KEY, MODEL, CapturingTransport
+from tests.boundary.cloud.conftest import (
+    FAKE_KEY,
+    MODEL,
+    CapturingTransport,
+    let_masker_miss,
+    masker_that_misses,
+)
 from tests.boundary.cloud.test_scan import SPLIT_NAMES
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "cloud"
@@ -152,7 +157,7 @@ def prompt(
     category: str | None = "fever",
     score: float | None = 0.4,
 ) -> CloudPrompt:
-    m = TaggingMasker()
+    m = masker_that_misses()  # the scan is under test, not the masker
     shared = tuple(shared_chunk_of(c) for c in tc.shared_chunks(n, chunk_text))
     ctx = CloudContext(None if category is None else m.mask(category), score)
     return CloudPrompt(m.mask(question), ctx, shared, m)
@@ -191,13 +196,15 @@ def make_client(
     settings = ProviderSettings(provider, MODEL, ApiKey(FAKE_KEY), None, vocab.BASE_URLS[provider])
     kw.setdefault("sleep", lambda s: None)
     kw.setdefault("policy", RetryPolicy(rng=random.Random(1)))
-    return CloudModelClient(
-        settings,
-        factory(MODEL),
-        tc.Builder(),
-        {"cca": "local-gen", "dense": "dense-1", "nli": "nli-1"},
-        transport,
-        **kw,
+    return let_masker_miss(
+        CloudModelClient(
+            settings,
+            factory(MODEL),
+            tc.Builder(),
+            {"cca": "local-gen", "dense": "dense-1", "nli": "nli-1"},
+            transport,
+            **kw,
+        )
     )
 
 
