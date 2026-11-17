@@ -28,15 +28,17 @@ type documentsService struct {
 	SecurityOpt []string          `yaml:"security_opt"`
 	User        string            `yaml:"user"`
 	Privileged  bool              `yaml:"privileged"`
+	CapAdd      []string          `yaml:"cap_add"`
 }
 
-// ADR 0016, documents off by default (design §13, §17 departures 2 and 9):
-// the documents service exists only under the profile documents, is the
-// only service in it, builds from services/, runs locked down (read-only
-// root, no capabilities, no-new-privileges) on the internal backend
-// network only with no port, gets its own NATS password and nothing of
+// ADR 0016, documents off by default (design §13, §17 departures 2, 9 and
+// 28-31): the documents service exists only under the profile documents,
+// with its PR 4 sidecars (clamav, freshclam, docsandbox) and nothing else;
+// it builds from services/, runs locked down (read-only root, no
+// capabilities, no-new-privileges) on the internal backend and docscan
+// networks only with no port, gets its own NATS password and nothing of
 // core's or the emr service's, and mounts only the public trusted keys,
-// read-only.
+// read-only, and the jobs tmpfs it shares with docsandbox.
 func TestComposeDocumentsProfile(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "docker-compose.yml"))
 	if err != nil {
@@ -55,9 +57,43 @@ func TestComposeDocumentsProfile(t *testing.T) {
 	if !ok {
 		t.Fatal("no documents service")
 	}
+	sidecars := []string{"clamav", "freshclam", "docsandbox"}
 	for name, s := range c.Services {
-		if name != "documents" && slices.Contains(s.Profiles, "documents") {
-			t.Errorf("%s is in the documents profile (PR 1 runs the service alone)", name)
+		if name != "documents" && !slices.Contains(sidecars, name) && slices.Contains(s.Profiles, "documents") {
+			t.Errorf("%s is in the documents profile", name)
+		}
+	}
+	for _, name := range sidecars {
+		s, ok := c.Services[name]
+		if !ok || !slices.Equal(s.Profiles, []string{"documents"}) || len(s.Ports) != 0 || s.Privileged || s.EnvFile != nil {
+			t.Errorf("%s: profiles %v ports %v privileged %v env_file %v", name, s.Profiles, s.Ports, s.Privileged, s.EnvFile)
+		}
+	}
+	// clamd: only the internal docscan network (the documents service and
+	// nothing else); no route out.
+	if nets, _ := c.Services["clamav"].Networks.([]any); len(nets) != 1 || nets[0] != "docscan" || !c.Networks["docscan"].Internal {
+		t.Errorf("clamav networks %v, want only the internal docscan", c.Services["clamav"].Networks)
+	}
+	for name, s := range c.Services {
+		if nets, _ := s.Networks.([]any); slices.Contains(nets, any("docscan")) && name != "clamav" && name != "documents" {
+			t.Errorf("%s is on docscan", name)
+		}
+	}
+	// docsandbox: no network at all, read-only, only the jobs tmpfs, every
+	// capability dropped but those nsjail needs to build a jail.
+	sb := c.Services["docsandbox"]
+	if sb.NetworkMode != "none" || sb.Networks != nil || !sb.ReadOnly || !slices.Equal(sb.CapDrop, []string{"ALL"}) ||
+		!slices.Equal(sb.Volumes, []string{"docsandbox-jobs:/jobs"}) || len(sb.Environment) != 0 || sb.Build["context"] != "./services/docsandbox" {
+		t.Errorf("docsandbox: %+v", sb)
+	}
+	for _, cp := range sb.CapAdd {
+		if !slices.Contains([]string{"SYS_ADMIN", "SETUID", "SETGID", "SETPCAP", "SYS_CHROOT", "CHOWN", "DAC_OVERRIDE", "FOWNER"}, cp) {
+			t.Errorf("docsandbox cap_add %s", cp)
+		}
+	}
+	for name, s := range c.Services {
+		if name != "documents" && name != "docsandbox" && slices.Contains(s.Volumes, "docsandbox-jobs:/jobs") {
+			t.Errorf("%s mounts the docsandbox jobs", name)
 		}
 	}
 	if !slices.Equal(d.Profiles, []string{"documents"}) {
@@ -74,17 +110,18 @@ func TestComposeDocumentsProfile(t *testing.T) {
 		t.Errorf("documents isn't locked down: read_only %v cap_drop %v security_opt %v", d.ReadOnly, d.CapDrop, d.SecurityOpt)
 	}
 	nets, _ := d.Networks.([]any)
-	if len(nets) != 1 || nets[0] != "backend" || !c.Networks["backend"].Internal {
-		t.Errorf("documents networks %v (backend internal %v), want only the internal backend", d.Networks,
+	if len(nets) != 2 || nets[0] != "backend" || nets[1] != "docscan" || !c.Networks["backend"].Internal {
+		t.Errorf("documents networks %v (backend internal %v), want only the internal backend and docscan", d.Networks,
 			c.Networks["backend"].Internal)
 	}
-	if !slices.Equal(d.Volumes, []string{"trustedkeys:/trusted:ro"}) {
-		t.Errorf("documents volumes %v, want only the trusted keys, read-only", d.Volumes)
+	if !slices.Equal(d.Volumes, []string{"trustedkeys:/trusted:ro", "docsandbox-jobs:/jobs"}) {
+		t.Errorf("documents volumes %v, want the trusted keys, read-only, and the jobs tmpfs", d.Volumes)
 	}
 	e := d.Environment
 	if e["APP_ENV"] != "development" || e["DOCUMENTS_NATS_URL"] != "nats://nats:4222" ||
 		e["DOCUMENTS_NATS_PASSWORD"] != "${NATS_DOCUMENTS_PASSWORD:-}" ||
-		e["DOCUMENTS_TRUSTED_KEYS_PATH"] != "/trusted/request-keys.json" ||
+		e["DOCUMENTS_TRUSTED_KEYS_PATH"] != "/trusted/request-keys.json" || e["DOCUMENTS_CLAMD_ADDR"] != "clamav:3310" ||
+		e["DOCUMENTS_SANDBOX_SOCKET"] != "/jobs/sandbox.sock" || e["DOCUMENTS_SANDBOX_JOBS"] != "/jobs" ||
 		!strings.Contains(e["DOCUMENTS_DATABASE_URL"], "${DOCUMENTS_DB_USER:-documents_app}:${DOCUMENTS_DB_PASSWORD:-}@") {
 		t.Errorf("documents env: %v", e)
 	}

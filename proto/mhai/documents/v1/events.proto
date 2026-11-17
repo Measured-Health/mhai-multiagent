@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+// The documents service's events on the DOCS stream (documents service
+// design §5, §8). Ids and closed codes only: never a file name, a
+// patient's name, an object key, a value or a key. The hospital is the
+// subject's <hid> segment, which every receiver checks against the row.
+package mhai.documents.v1;
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/gokit/docspb;docspb";
+
+// documents.v1.<hid>.uploaded: a document's file is in quarantine and
+// waits for its scan (published by core, and by the emr service for the
+// archive). Nats-Msg-Id is "<document_id>:uploaded".
+message Uploaded {
+  string document_id = 1;
+}
+
+// documents.v1.<hid>.scanned: the scan finished. Nats-Msg-Id is
+// "<document_id>:scanned".
+message Scanned {
+  string document_id = 1;
+  // ready, quarantined or failed.
+  string outcome = 2;
+  // quarantined: unsupported_type, too_large, too_many_pages,
+  // too_many_pixels, password_protected, malware, unreadable,
+  // checksum_mismatch; failed: scan_unavailable; ready: empty.
+  string reason = 3;
+  // ready: the page count; otherwise 0.
+  uint32 pages = 4;
+}

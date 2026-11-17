@@ -12,6 +12,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Documents PR 4, scanning and the sandbox (design §5; §17 departures
+  21-34; off by default). `CORE_DOCUMENTS_ENABLED=true` makes core create
+  the `DOCS` stream and the `documents_scan` durable. The documents service
+  scans each upload: the quarantine object's size first, magic bytes
+  against the declared type and purpose, an archive file's SHA-256, clamd
+  (`INSTREAM`; signatures older than 48 hours refuse every scan), then
+  docsandbox, a new container (`services/docsandbox`) that renders each file
+  with pdfium or Pillow in a fresh nsjail process with no network, no
+  credential and a measured seccomp allow-list; every page is re-checked
+  and re-encoded outside it, then the original and the pages are sealed
+  under the hospital's key and the row marked `ready` in one transaction.
+  Refusals are `quarantined` with a closed reason. Without clamd, fresh
+  signatures, the sandbox, the key or the store a document stays
+  `scanning` (`documents_scan_blocked`) and after 6 hours is `failed`
+  `scan_unavailable`; a sweeper picks up rows a lost message left. Migration
+  00048 (the lease columns, the `documents_scan_*` definers and the role
+  `mhai_documents_sweep`); compose adds `clamav`, `freshclam` and
+  `docsandbox` to the `documents` profile; health reports `scanner_ready`
+  and `sandbox_ready`.
 - Cloud models: core reaps stale budget reservations (migration 00047). A
   crashed worker, a reserve that timed out after core committed, or a
   failed settle used to leave a `cloud_reservations` row holding its tokens
