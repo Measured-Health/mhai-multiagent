@@ -362,3 +362,24 @@ func TestDemoSeedRefusals(t *testing.T) {
 		}
 	})
 }
+
+// Another demo hospital raised the global Analysis switch first (the live
+// e2e stack's LIV): DEM still gets its own demo Analysis and named access,
+// and the seed doesn't fail.
+func TestDemoSeedBesideAnotherDemoHospital(t *testing.T) {
+	ctx := context.Background()
+	pg, super := testutil.MigratedPostgres(t)
+	analysisHospital(t, super, "LIV")
+	if err := analysisCmd(ctx, []string{"seed-demo", "LIV", "--months", "2"}, pg.URL, io.Discard, nil); err != nil {
+		t.Fatalf("seed-demo LIV: %v", err)
+	}
+	runDemo(t, pg.URL)
+	if n := scalar(t, super, `SELECT count(*) FROM analysis_switch s JOIN hospitals h ON h.id = s.hospital_id
+		WHERE h.short_code = 'DEM' AND s.position = 'on'`); n != 1 {
+		t.Fatalf("DEM analysis switch rows on: %d", n)
+	}
+	if n := scalar(t, super, `SELECT count(*) FROM named_access_switch s JOIN hospitals h ON h.id = s.hospital_id
+		WHERE h.short_code = 'DEM'`); n != 1 {
+		t.Fatalf("DEM named access rows: %d", n)
+	}
+}

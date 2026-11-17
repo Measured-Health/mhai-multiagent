@@ -570,30 +570,36 @@ func (s *demoSeeder) audit(ctx context.Context, created, reset int) error {
 // analysis raises DEM's demo Analysis with its synthetic cohort
 // (analysisSeedDemo) and named access to letters_only, each once.
 func (s *demoSeeder) analysis(ctx context.Context) (string, error) {
-	// Raised only when neither switch row exists yet: a switch an operator
-	// lowered (core analysis switch off) stays off, so a deploy never undoes
-	// a kill switch.
-	var rows int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM analysis_switch
-		WHERE hospital_id = $1 OR hospital_id IS NULL`, s.hid).Scan(&rows); err != nil {
+	// Raised only while DEM has no switch row of its own and the global row,
+	// if there is one (another demo hospital may have made it), isn't off: a
+	// switch an operator lowered (core analysis switch off) stays off, so a
+	// deploy never undoes a kill switch.
+	var demRow, globalOff bool
+	if err := s.pool.QueryRow(ctx, `SELECT
+		EXISTS (SELECT 1 FROM analysis_switch WHERE hospital_id = $1),
+		EXISTS (SELECT 1 FROM analysis_switch WHERE hospital_id IS NULL AND position = 'off')`, s.hid).Scan(&demRow, &globalOff); err != nil {
 		return "", demoErr(err)
 	}
 	result := "kept"
-	if rows == 0 {
+	if !demRow && !globalOff {
 		if err := analysisSeedDemo(ctx, []string{DemoHospitalCode}, s.url, io.Discard, nil); err != nil {
 			return "", err
 		}
 		result = "seeded"
 	}
-	var namedRows int
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM named_access_switch WHERE hospital_id = $1 OR hospital_id IS NULL`,
-		s.hid).Scan(&namedRows)
-	if err == nil && namedRows == 0 {
+	// Named access the same way, and only on top of DEM's demo Analysis.
+	var namedRow, namedGlobalOff, demOn bool
+	if err := s.pool.QueryRow(ctx, `SELECT
+		EXISTS (SELECT 1 FROM named_access_switch WHERE hospital_id = $1),
+		EXISTS (SELECT 1 FROM named_access_switch WHERE hospital_id IS NULL AND position = 'off'),
+		EXISTS (SELECT 1 FROM analysis_switch WHERE hospital_id = $1 AND position = 'on' AND signoff_clinical = 'DEMO-SYNTHETIC')`,
+		s.hid).Scan(&namedRow, &namedGlobalOff, &demOn); err != nil {
+		return "", demoErr(err)
+	}
+	if !namedRow && !namedGlobalOff && demOn {
 		if err := namedAccessDemo(ctx, DemoHospitalCode, s.url, io.Discard); err != nil {
 			return "", err
 		}
-	} else if err != nil {
-		return "", demoErr(err)
 	}
 	return result, nil
 }
