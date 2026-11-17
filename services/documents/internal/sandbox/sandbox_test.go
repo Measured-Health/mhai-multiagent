@@ -247,3 +247,67 @@ func TestRecheckDocumentPixelBudget(t *testing.T) {
 		t.Fatalf("over budget: %v", err)
 	}
 }
+
+// Whatever goes wrong around the call is unavailable (the document waits),
+// and the job directory never stays behind.
+func TestRenderUnavailablePaths(t *testing.T) {
+	// The jobs directory isn't there.
+	c := fakeSandbox(t, "ok", func(string, string) string { return "ok" })
+	c.JobsDir = filepath.Join(t.TempDir(), "missing")
+	if _, _, err := c.Render(context.Background(), []byte("x"), "image/png", 1); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("no jobs dir: %v", err)
+	}
+	// A reply that isn't JSON, or a hang-up.
+	dir, err := os.MkdirTemp("", "sb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	replies := make(chan string, 2)
+	replies <- "not json\n"
+	replies <- ""
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = bufio.NewReader(conn).ReadBytes('\n')
+			_, _ = conn.Write([]byte(<-replies))
+			_ = conn.Close()
+		}
+	}()
+	jobs := t.TempDir()
+	bad := &Client{Socket: sock, JobsDir: jobs}
+	for i := 0; i < 2; i++ {
+		if _, _, err := bad.Render(context.Background(), []byte("x"), "image/png", 1); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("reply %d: %v", i, err)
+		}
+	}
+	if entries, _ := os.ReadDir(jobs); len(entries) != 0 {
+		t.Fatalf("job directories left: %d", len(entries))
+	}
+	// An ok whose output doesn't check is unreadable, not unavailable.
+	broken := fakeSandbox(t, "ok", func(_, out string) string {
+		_ = os.WriteFile(filepath.Join(out, "manifest.json"), []byte("{}"), 0o600)
+		return "ok"
+	})
+	if _, reason, err := broken.Render(context.Background(), []byte("x"), "image/png", 1); err != nil || reason != "unreadable" {
+		t.Fatalf("bad output: %q %v", reason, err)
+	}
+	// Ready is cached: a second call within the TTL doesn't ask again.
+	up := fakeSandbox(t, "ok", nil)
+	if err := up.Ready(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	up.Socket = "/nonexistent/s.sock"
+	if err := up.Ready(context.Background()); err != nil {
+		t.Fatalf("not cached: %v", err)
+	}
+}

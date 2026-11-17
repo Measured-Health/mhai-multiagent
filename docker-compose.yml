@@ -413,7 +413,8 @@ services:
   # in a fresh nsjail process. No network at all, no credential, a
   # read-only root; it shares only the jobs tmpfs with the documents
   # service. nsjail builds each jail, so the container keeps CAP_SYS_ADMIN
-  # and runs without Docker's seccomp and AppArmor profiles; the renderer
+  # (and SETPCAP, to drop every capability in the jail) and runs without
+  # Docker's seccomp profile (it refuses pivot_root) and AppArmor; the renderer
   # inside runs as uid 65532 with no capability, under nsjail's own
   # seccomp allow-list (design §17, PR 4).
   docsandbox:
@@ -425,10 +426,11 @@ services:
     network_mode: none
     read_only: true
     cap_drop: [ALL]
-    cap_add: [SYS_ADMIN, SETUID, SETGID, SYS_CHROOT, CHOWN, DAC_OVERRIDE, FOWNER]
+    cap_add: [SYS_ADMIN, SETUID, SETGID, SETPCAP, SYS_CHROOT, CHOWN, DAC_OVERRIDE, FOWNER]
     security_opt: ["seccomp=unconfined", "apparmor=unconfined"]
     tmpfs:
       - /run/docsandbox:size=1536m,mode=0700
+      - /run/user:size=16m,mode=0700   # nsjail builds each jail's root here
       - /tmp:size=16m
     volumes:
       - docsandbox-jobs:/jobs

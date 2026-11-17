@@ -174,3 +174,45 @@ func TestVerdictKeepsNoSignatureName(t *testing.T) {
 		t.Fatalf("an unknown reply: %v", err)
 	}
 }
+
+// A clamd that hangs up, or answers nothing usable, is unavailable: never
+// a clean verdict.
+func TestScanFailsClosed(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close() // hang up at once
+		}
+	}()
+	c := &Client{Addr: l.Addr().String(), Timeout: 2 * time.Second}
+	if infected, err := c.Scan(context.Background(), []byte("synthetic")); !errors.Is(err, ErrUnavailable) || infected {
+		t.Fatalf("hang-up: %v %v", infected, err)
+	}
+	if _, err := c.SignatureTime(context.Background()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("version hang-up: %v", err)
+	}
+	if infected, err := (&Client{}).Scan(context.Background(), nil); !errors.Is(err, ErrUnavailable) || infected {
+		t.Fatalf("no address: %v %v", infected, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&Client{Addr: l.Addr().String()}).Scan(ctx, nil); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("cancelled: %v", err)
+	}
+}
+
+func TestDefaultsAndClock(t *testing.T) {
+	f := &fake{version: "ClamAV 1.4.3/27820/" + time.Now().UTC().Add(-time.Hour).Format("Mon Jan _2 15:04:05 2006")}
+	c := &Client{Addr: f.start(t)}
+	if err := c.Ready(context.Background()); err != nil {
+		t.Fatalf("an hour old with the real clock: %v", err)
+	}
+}

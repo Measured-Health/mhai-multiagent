@@ -481,8 +481,12 @@ jobs:
       - name: The jailed tests (docsandbox image, test stage)
         run: |
           docker build --target test -t mhai-docsandbox:test services/docsandbox
-          docker run --rm --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
-            --network none --tmpfs /jobs:size=512m,mode=0700 mhai-docsandbox:test
+          # Exactly the container docker-compose.yml runs.
+          docker run --rm --cap-drop ALL --cap-add SYS_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
+            --cap-add SYS_CHROOT --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt no-new-privileges:true \
+            --network none --read-only --tmpfs /jobs:size=512m,mode=0700 --tmpfs /tmp:size=16m \
+            --tmpfs /run/docsandbox:size=512m,mode=0700 --tmpfs /run/user:size=16m,mode=0700 mhai-docsandbox:test
       - name: The image compose runs builds
         run: docker build -t mhai-docsandbox:ci services/docsandbox
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0

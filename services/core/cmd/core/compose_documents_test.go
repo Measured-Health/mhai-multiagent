@@ -87,7 +87,7 @@ func TestComposeDocumentsProfile(t *testing.T) {
 		t.Errorf("docsandbox: %+v", sb)
 	}
 	for _, cp := range sb.CapAdd {
-		if !slices.Contains([]string{"SYS_ADMIN", "SETUID", "SETGID", "SYS_CHROOT", "CHOWN", "DAC_OVERRIDE", "FOWNER"}, cp) {
+		if !slices.Contains([]string{"SYS_ADMIN", "SETUID", "SETGID", "SETPCAP", "SYS_CHROOT", "CHOWN", "DAC_OVERRIDE", "FOWNER"}, cp) {
 			t.Errorf("docsandbox cap_add %s", cp)
 		}
 	}

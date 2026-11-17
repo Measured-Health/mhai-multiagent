@@ -329,7 +329,7 @@ func TestDocumentsUserIsAnOptInInclude(t *testing.T) {
 			t.Errorf("%s: gateway can't call documents.v1.ctl.>", c.file)
 		}
 		if !strings.Contains(gw, `"$JS.API.STREAM.CREATE.DOCS"`) || !strings.Contains(gw, `"$JS.API.CONSUMER.DURABLE.CREATE.DOCS.>"`) ||
-			strings.Contains(gw, `"documents.v1.*.scanned"`) {
+			!strings.Contains(gw, `"documents.v1.*.uploaded"`) || strings.Contains(gw, `"documents.v1.*.scanned"`) {
 			t.Errorf("%s: gateway's DOCS rights", c.file)
 		}
 	}

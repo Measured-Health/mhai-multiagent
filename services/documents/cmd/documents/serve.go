@@ -226,6 +226,27 @@ func checkLogin(ctx context.Context, q dblogin.Querier) error {
 	return nil
 }
 
+// newScanner builds the scan from the settings and what the service
+// opened, and fills rd's scanner and sandbox checks. A part that isn't
+// configured stays nil, so every scan blocks on it (fail closed).
+func newScanner(s config.Settings, rows scan.Rows, ann scan.Announcer, store *s3.Client, keys kek.Provider,
+	rd *readiness, log *slog.Logger) *scan.Scanner {
+	sc := &scan.Scanner{Rows: rows, Announce: ann, Log: log, Metrics: &scan.Metrics{}}
+	if s.ClamdAddr != "" {
+		c := &clamd.Client{Addr: s.ClamdAddr}
+		sc.Virus, rd.scanner = c, c.Ready
+	}
+	if s.SandboxSocket != "" {
+		c := &sandbox.Client{Socket: s.SandboxSocket, JobsDir: s.SandboxJobs}
+		sc.Renderer, rd.sandbox = c, c.Ready
+	}
+	if store != nil && keys != nil {
+		sc.Quarantine, sc.Store = store, &storage.Store{Objects: store, Keys: keys}
+		sc.StorageReady, sc.HospitalKey = rd.storage, keys.Has
+	}
+	return sc
+}
+
 func serve(getenv func(string) string) error {
 	s, err := config.FromEnv(getenv)
 	if err != nil {
@@ -298,20 +319,7 @@ func serve(getenv func(string) string) error {
 	if err != nil {
 		return errors.New("cannot open JetStream")
 	}
-	var scanner = &scan.Scanner{Rows: scan.PGRows{Pool: pool}, Announce: scan.JSAnnouncer{JS: js}, Log: log,
-		Metrics: &scan.Metrics{}}
-	if s.ClamdAddr != "" {
-		c := &clamd.Client{Addr: s.ClamdAddr}
-		scanner.Virus, rd.scanner = c, c.Ready
-	}
-	if s.SandboxSocket != "" {
-		c := &sandbox.Client{Socket: s.SandboxSocket, JobsDir: s.SandboxJobs}
-		scanner.Renderer, rd.sandbox = c, c.Ready
-	}
-	if store != nil && keys != nil {
-		scanner.Quarantine, scanner.Store = store, &storage.Store{Objects: store, Keys: keys}
-		scanner.StorageReady, scanner.HospitalKey = rd.storage, keys.Has
-	}
+	scanner := newScanner(s, scan.PGRows{Pool: pool}, scan.JSAnnouncer{JS: js}, store, keys, &rd, log)
 	go (&scan.Consumer{Scanner: scanner, Log: log, Metrics: &scan.ConsumerMetrics{}}).Run(ctx, js)
 	go (&scan.Sweeper{Due: scan.PGRows{Pool: pool}.Due, Scanner: scanner, Log: log}).Run(ctx)
 

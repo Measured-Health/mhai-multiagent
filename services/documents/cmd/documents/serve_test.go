@@ -18,6 +18,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/kek"
+	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/s3"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/docspb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 )
@@ -409,5 +410,32 @@ func TestMissingKeyLogThrottle(t *testing.T) {
 	m(a)
 	if c := strings.Count(buf.String(), "no key for this hospital"); c != 3 {
 		t.Fatalf("%d lines: %s", c, buf.String())
+	}
+}
+
+// PR 4: the scan is built from the settings; what isn't configured stays
+// nil (every scan blocks on it) and health reports it not ready.
+func TestNewScanner(t *testing.T) {
+	var rd readiness
+	sc := newScanner(config.Settings{}, nil, nil, nil, nil, &rd, nil)
+	if sc.Virus != nil || sc.Renderer != nil || sc.Store != nil || sc.Quarantine != nil || rd.scanner != nil || rd.sandbox != nil {
+		t.Fatalf("unconfigured: %+v", sc)
+	}
+	store, err := s3.New(s3.Config{Endpoint: "http://127.0.0.1:1", Bucket: "mhai-documents-test", Region: "us-east-1",
+		Credentials: s3.Credentials{AccessKeyID: "SYNTHETICKEYID", Secret: "synthetic-test-secret-value"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := kek.NewFile(filepath.Join(t.TempDir(), "keyring.json"), kek.Provisioned)
+	rd.storage = func(context.Context) error { return nil }
+	sc = newScanner(config.Settings{ClamdAddr: "clamav:3310", SandboxSocket: "/jobs/sandbox.sock", SandboxJobs: "/jobs"},
+		nil, nil, store, keys, &rd, nil)
+	if sc.Virus == nil || sc.Renderer == nil || sc.Store == nil || sc.Quarantine == nil || sc.HospitalKey == nil ||
+		sc.StorageReady == nil || rd.scanner == nil || rd.sandbox == nil {
+		t.Fatalf("configured: %+v", sc)
+	}
+	// Nothing answers at those addresses here: not ready.
+	if ready(context.Background(), rd.scanner) || ready(context.Background(), rd.sandbox) {
+		t.Fatal("an unreachable scanner or sandbox reported ready")
 	}
 }

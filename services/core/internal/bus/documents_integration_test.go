@@ -68,8 +68,9 @@ func TestDocumentsUserPermissions(t *testing.T) {
 	cannotPublish(t, bffClinical, "documents.v1.ctl.health")
 	cannotPublish(t, bffPlatform, "documents.v1.ctl.health")
 	cannotPublish(t, echo, "documents.v1.ctl.health")
-	// Only the documents user announces a scan.
+	// Only the documents user announces a scan; core announces an upload.
 	cannotPublish(t, gateway, "documents.v1."+hid+".scanned")
+	canPublish(t, gateway, "documents.v1."+hid+".uploaded")
 	cannotPublish(t, pipeline, "documents.v1."+hid+".scanned", "documents.v1."+hid+".uploaded")
 	cannotPublish(t, emrSvc, "documents.v1."+hid+".scanned")
 	// Nor may anyone else listen on them.

@@ -118,3 +118,24 @@ func TestSweeperScansDueRows(t *testing.T) {
 	cancel()
 	s.Run(ctx) // returns at once
 }
+
+func TestSweeperRunsEveryTick(t *testing.T) {
+	r := newRig()
+	r.rows.claim = Claim{Outcome: ClaimNotClaimable}
+	calls := make(chan struct{}, 10)
+	s := &Sweeper{Scanner: r.s, Every: 5 * time.Millisecond, Limit: 3, Due: func(_ context.Context, limit int) ([]Due, error) {
+		if limit != 3 {
+			t.Errorf("limit %d", limit)
+		}
+		calls <- struct{}{}
+		return nil, errors.New("database down") // logged, retried next tick
+	}}
+	s.Log = r.s.Log
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	<-calls
+	<-calls
+	cancel()
+	<-done
+}
