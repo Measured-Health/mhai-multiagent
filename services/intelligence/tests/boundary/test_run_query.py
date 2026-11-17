@@ -1473,7 +1473,8 @@ async def test_sample_worker_answers_its_demo_hospital(
         found = await cur.fetchone()
     assert found is not None
     text, citations, versions = found
-    assert text.startswith(LABEL) and citations == ["KB#0001"]
+    # Other tests share the database: other shared rows may match too.
+    assert text.startswith(LABEL) and "KB#0001" in citations
     assert versions["sample"] == "1" and versions["cca_route"] == "local"
     assert MARKER not in caplog.text and LABEL not in caplog.text
 

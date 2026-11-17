@@ -3,10 +3,10 @@
 package main
 
 import (
-	"io"
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
