@@ -88,8 +88,58 @@ class _SampleHGA:
         }
 
 
+# Question words that say nothing about the topic: a guideline sharing only
+# these is not a match ("when ... fasting glucose" for a blood-pressure question).
+_STOP = frozenset(
+    {
+        "what",
+        "when",
+        "which",
+        "where",
+        "why",
+        "how",
+        "does",
+        "should",
+        "would",
+        "could",
+        "with",
+        "without",
+        "from",
+        "that",
+        "this",
+        "these",
+        "those",
+        "have",
+        "been",
+        "before",
+        "after",
+        "about",
+        "into",
+        "than",
+        "then",
+        "there",
+        "their",
+        "your",
+        "called",
+        "first",
+        "patient",
+        "patients",
+        "synthetic",
+        "demo",
+        "question",
+        "case",
+        "treat",
+        "treatment",
+        "define",
+        "defines",
+        "defined",
+        "readings",
+    }
+)
+
+
 def _words(text: str) -> set[str]:
-    return {w for w in _WORD.findall(text.lower()) if len(w) >= _MIN_WORD}
+    return {w for w in _WORD.findall(text.lower()) if len(w) >= _MIN_WORD and w not in _STOP}
 
 
 def _first_sentences(text: str) -> str:

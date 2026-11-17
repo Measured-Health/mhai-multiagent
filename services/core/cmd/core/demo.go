@@ -111,10 +111,13 @@ type demoAccount struct {
 
 const demoDomain = "@demo-hospital.example"
 
-// DemoAccounts is the sign-in page's list (mhai-web's demo helper).
+// DemoAccounts is the sign-in page's list (mhai-web's demo helper). The
+// clinical app asks every account without two-step to set it up at sign-in,
+// so the ready-to-use accounts carry the published demo secret; only the
+// "new" accounts set their own.
 var DemoAccounts = []demoAccount{
 	{Key: "clinician", Email: "a.reyes" + demoDomain, Display: "Dr. Reyes", Full: "Dr. Ana Reyes", Title: "Attending physician",
-		Specialty: "Internal Medicine", Roles: []string{"clinician"}, Terms: true},
+		Specialty: "Internal Medicine", Roles: []string{"clinician"}, Terms: true, MFA: mfaDemo},
 	{Key: "twoStep", Email: "mfa.okafor" + demoDomain, Display: "Dr. Okafor", Full: "Dr. Chidi Okafor", Title: "Consultant",
 		Specialty: "Paediatrics", Roles: []string{"clinician"}, Terms: true, MFA: mfaDemo},
 	{Key: "newAccount", Email: "new.bello" + demoDomain, Display: "Nurse Bello", Full: "Amina Bello", Title: "Staff nurse",

@@ -430,7 +430,7 @@ hospital only; they are reset on every deploy):
 
 | Account | Email | Sign-in |
 |---|---|---|
-| Clinician | `a.reyes@demo-hospital.example` | password only |
+| Clinician | `a.reyes@demo-hospital.example` | password and a code (the clinical app asks every account for two-step) |
 | Clinician with two-step | `mfa.okafor@demo-hospital.example` | password and a code |
 | New account | `new.bello@demo-hospital.example` | first sign-in steps (new password, terms) |
 | New hospital admin | `newadmin.okoro@demo-hospital.example` | first sign-in steps, two-step set-up |

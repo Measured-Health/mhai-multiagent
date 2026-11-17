@@ -257,3 +257,16 @@ def test_the_agents_package_still_exports_every_name() -> None:
     assert "QDAAgent" in dir(agents)
     with pytest.raises(AttributeError):
         _ = agents.NoSuchAgent  # type: ignore[attr-defined]
+
+
+def test_question_words_alone_are_no_match() -> None:
+    """A guideline sharing only words like "when" or "what" isn't quoted."""
+    gdm = KBChunk(
+        "KB#0001",
+        "Gestational Diabetes Mellitus (GDM) diagnosed when fasting glucose >= 92 mg/dL.",
+        "guideline",
+        REFERENCE_SOURCE,
+        "",
+    )
+    text, cited = compose("When is blood pressure called hypertension?", [gdm, HTN])
+    assert cited == ("KB#0003",) and "Gestational" not in text

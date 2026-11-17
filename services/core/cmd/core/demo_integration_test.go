@@ -121,7 +121,7 @@ func TestDemoSeedIsIdempotentAndResets(t *testing.T) {
 		t.Fatal("new account must change its password")
 	}
 	demoSecret, _ := auth.DecodeTOTPSecret(DemoTOTPSecret)
-	for _, k := range []string{"twoStep", "hospitalAdmin", "director", "analyst"} {
+	for _, k := range []string{"clinician", "twoStep", "hospitalAdmin", "director", "analyst"} {
 		id, _, _ := demoUser(t, super, k)
 		if !bytes.Equal(demoSecretOf(t, super, id), demoSecret) {
 			t.Fatalf("%s: not enrolled on the demo secret", k)
@@ -137,9 +137,6 @@ func TestDemoSeedIsIdempotentAndResets(t *testing.T) {
 	}
 	if _, h, _ := demoUser(t, super, "locked"); func() bool { ok, _ := password.Verify(DemoPassword, h); return ok }() {
 		t.Fatal("locked account opens with the demo password")
-	}
-	if n := scalar(t, super, `SELECT count(*) FROM user_mfa WHERE user_id = $1`, reyes); n != 0 {
-		t.Fatal("clinician has two-step")
 	}
 
 	// Run again: nothing changes, nothing is audited again.
