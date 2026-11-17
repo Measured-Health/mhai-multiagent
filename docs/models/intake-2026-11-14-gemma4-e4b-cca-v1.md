@@ -132,6 +132,17 @@ All three have an on-topic chunk in the context, and all three must escalate:
 - **Missing information** (all 10 missed): the question can't be answered without values it doesn't give, such as "Is this patient's malaria severe?". The model recites the malaria chunk.
 - **Out-of-scope doses and regimens** (7 of 14 missed): a dose the chunks don't give, such as a starting basal insulin dose. The model recites the T2DM chunk.
 
+### The recital check also marks terse answers (17 Nov)
+
+Since escalation guard 1.0.0, every route sends back an answer that only copies guideline text without addressing the question (`REGENERATE`, design record ADR 0017). While fixing a flaky gate test (#221) we found that a reply made of the bare facts, such as `140 90 two occasions [KB#0003]`, counts as a recital: it is close to the chunk's own wording and shares no content word with the question. On the locked split, replies like that cost about a quarter of the answerable items and kept a "perfect" fake model near 0.69 grounded.
+
+For training answers:
+- Answer the question in a full sentence that uses the question's own terms, then state the guideline facts and cite them, for example: "Hypertension is diagnosed when blood pressure is 140/90 mmHg or higher on two separate occasions [KB#0003]."
+- Don't paste the chunk's sentences, and don't add sentences that don't answer the question.
+- The decline and escalation behaviour above is unchanged.
+
+The same reply phrased this way scored 0.92 to 0.93 grounded on the locked split.
+
 ### Expected output format
 
 - **When declining,** the first line is `INSUFFICIENT EVIDENCE:`, followed by one short reason (the red flag, the missing value, or "the guidelines don't give this dose"). There is no answer text and no citation.
