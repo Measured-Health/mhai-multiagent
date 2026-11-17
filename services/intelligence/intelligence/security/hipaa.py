@@ -43,6 +43,8 @@ from enum import Enum
 import numpy as np
 import logging
 
+from intelligence.security import ng_pii
+
 logger = logging.getLogger("MHAI.M4.Security")
 
 
@@ -135,6 +137,7 @@ class PIIMasker:
         "ZIP_CODE": "[ZIP_REDACTED]",
         "ADDRESS": "[ADDRESS_REDACTED]",
         "NAME": "[NAME_REDACTED]",
+        "NATIONAL_ID": "[NATIONAL_ID_REDACTED]",
     }
 
     def __init__(self, mask_dates: bool = True, mask_ages_over_89: bool = True):
@@ -145,7 +148,7 @@ class PIIMasker:
     # When matches overlap, the merged span is labelled with the most
     # specific type (e.g. a date of birth also matches DATE).
     TYPE_PRIORITY = [
-        "SSN", "MRN", "DOB", "EMAIL", "PHONE", "ADDRESS", "NAME",
+        "SSN", "NATIONAL_ID", "MRN", "DOB", "EMAIL", "PHONE", "ADDRESS", "NAME",
         "AGE_OVER_89", "DATE", "ZIP_CODE",
     ]
 
@@ -177,6 +180,11 @@ class PIIMasker:
             for match in re.finditer(pattern, text):
                 spans.append((*self._identifier_span(match), "NAME"))
 
+        # Names without a title and Nigerian identifiers (ruling C8). Raises
+        # ng_pii.DetectorUnavailable when its gazetteer can't be loaded: never
+        # caught here, so a caller that would send the text fails closed.
+        spans.extend(self._extra_spans(text))
+
         detections = []
         for start, end, entity_type in self._merge_spans(spans):
             detections.append(PIIDetection(
@@ -194,6 +202,9 @@ class PIIMasker:
             masked = masked[:det.start] + det.replacement + masked[det.end:]
 
         return masked, detections
+
+    def _extra_spans(self, text: str) -> List[Tuple[int, int, str]]:
+        return ng_pii.detect(text)
 
     @staticmethod
     def _identifier_span(match) -> Tuple[int, int]:

@@ -45,6 +45,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Documents PR 4, scanning and the sandbox (design §5; §17 departures
+  21-34; off by default). `CORE_DOCUMENTS_ENABLED=true` makes core create
+  the `DOCS` stream and the `documents_scan` durable. The documents service
+  scans each upload: the quarantine object's size first, magic bytes
+  against the declared type and purpose, an archive file's SHA-256, clamd
+  (`INSTREAM`; signatures older than 48 hours refuse every scan), then
+  docsandbox, a new container (`services/docsandbox`) that renders each file
+  with pdfium or Pillow in a fresh nsjail process with no network, no
+  credential and a measured seccomp allow-list; every page is re-checked
+  and re-encoded outside it, then the original and the pages are sealed
+  under the hospital's key and the row marked `ready` in one transaction.
+  Refusals are `quarantined` with a closed reason. Without clamd, fresh
+  signatures, the sandbox, the key or the store a document stays
+  `scanning` (`documents_scan_blocked`) and after 6 hours is `failed`
+  `scan_unavailable`; a sweeper picks up rows a lost message left. Migration
+  00048 (the lease columns, the `documents_scan_*` definers and the role
+  `mhai_documents_sweep`); compose adds `clamav`, `freshclam` and
+  `docsandbox` to the `documents` profile; health reports `scanner_ready`
+  and `sandbox_ready`.
 - Cloud models: core reaps stale budget reservations (migration 00047). A
   crashed worker, a reserve that timed out after core committed, or a
   failed settle used to leave a `cloud_reservations` row holding its tokens
@@ -64,6 +83,29 @@ All notable changes to this project are documented here. The format follows
   `cloud_reservations_reaped_total`, `cloud_reaped_tokens_total`,
   `cloud_reaper_failures_total` and `cloud_reaper_empty_total`, and alert rules for them and for
   `mhai_cloud_settle_failures_total` (deploy/README.md, "Cloud models").
+
+- **Clinical review (PII rules):** the PII masker upgrade for the cloud
+  real-data gate (TODO.md item 1; ruling C8). `PIIMasker` now finds names
+  without a title ("Adaeze Okafor has chest pain") and Nigerian identifiers
+  (`intelligence/security/ng_pii.py`): a hand-written gazetteer of about
+  1,500 Nigerian given names and surnames plus context rules (Nigerian
+  titles and relationship words, neighbours of a known name, initials,
+  name-forming affixes, ordinary-word names such as Grace only in context),
+  and a character-trigram name score built at load time from the gazetteer
+  and an English and medical word list (SCOWL-derived, notice kept); NIN,
+  BVN and phone numbers (0 or +234, "(0)" trunk) written whole or grouped
+  with spaces, hyphens, dots or brackets; labelled record numbers (MRN,
+  hospital, folder or card no, NHIS) and coded ones ("LUTH/2019/12345"). A
+  new placeholder, `[NATIONAL_ID_REDACTED]`. Offline and CPU-only: no model
+  weights and no new dependency; two data files (about 630 KB) pinned by
+  SHA-256. Fails closed: a missing or altered file, or text over 65,536
+  characters, raises `DetectorUnavailable`, so the cloud path can't collect
+  identifiers or mask, and the egress scan refuses (`scan_error`).
+  `test_untitled_name_on_core_shape_refused` now passes. Measured on a
+  seeded synthetic Nigerian PII set by `scripts/masker_eval.py`; the numbers
+  and their limits are in `docs/privacy/masker-evaluation.md`. The privacy
+  lead's sign-off is still open.
+
 - Documents: a provisioned file keyring, so the pilot can run more than one
   documents server on one keyring (design D5, §17 departure 20).
   `DOCUMENTS_KEYRING_MODE=provisioned` is the default and the only mode

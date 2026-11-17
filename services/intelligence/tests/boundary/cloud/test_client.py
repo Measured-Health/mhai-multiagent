@@ -50,6 +50,7 @@ from tests.boundary.cloud.conftest import (
     FakeAdapter,
     FakeConnectionError,
     ScriptedTransport,
+    let_masker_miss,
 )
 
 pytestmark = pytest.mark.disable_socket
@@ -477,8 +478,10 @@ def test_prompt_holds_only_allowed_parts() -> None:
 def test_per_call_state_not_on_client() -> None:
     # K10: concurrent calls with different identifiers block on their own only.
     c, _, _, _, _ = make()
-    question = f"Synthetic question about {NAME} and fluids"
-    blocked = Identifiers(frozenset({"okafor"}))
+    # An identifier the masker can't know to mask (a plain word stands in for
+    # it): only the calls that carry it are refused.
+    question = "Synthetic question about fluids and electrolytes"
+    blocked = Identifiers(frozenset({"electrolytes"}))
     other = Identifiers(frozenset({"chukwuemeka"}))
 
     def one(i: int) -> str | None:
@@ -507,6 +510,7 @@ def test_egress_none_when_nothing_sent() -> None:
 
 def test_dry_render_sends_nothing_and_prescans() -> None:
     c, adapter, transport, _, _ = make()
+    let_masker_miss(c)  # the scan is under test
     call, budget = call_for()
     g = run(c, call, question=f"Is {NAME} febrile?")
     assert g.cloud_outcome == "egress_blocked"
@@ -586,7 +590,9 @@ def test_worst_case_question_length(capsys: pytest.CaptureFixture[str]) -> None:
     # A question of MAX_MASKED_QUESTION characters, all non-ASCII, with five
     # 2,000-character chunks: json's ensure_ascii writes each as \uXXXX, so
     # the body is over MAX_BODY_BYTES and is refused (too_large), never sent.
-    word = "\u00e9\u00e8\u00ea\u00eb\u00e0\u00e2\u00ee\u00ef\u00f4\u00fb\u00e7\u00a0"
+    # Symbols, not letters: a run of accented letters reads as a name to the
+    # masker (ruling C8) and would be masked to one placeholder.
+    word = "\u00b0\u00b1\u00d7\u00f7\u00a7\u00b6\u00a9\u00ae\u00b7\u00ac\u00a6\u00a0"
     long = (word * jobs_repo.MAX_MASKED_QUESTION)[: jobs_repo.MAX_MASKED_QUESTION]
     chunks = shared_chunks(5, text="g" * 1990)
     assert all(len(c.content) <= 2000 for c in chunks)

@@ -30,7 +30,7 @@ from intelligence.boundary.pb import pipeline_pb2
 from tests.boundary import test_run_query as rq
 from tests.boundary import test_telemetry as tt
 from tests.boundary import test_worker as tw
-from tests.boundary.cloud.conftest import FakeAdapter
+from tests.boundary.cloud.conftest import FakeAdapter, let_masker_miss
 
 pytestmark = pytest.mark.boundary
 
@@ -274,6 +274,9 @@ async def test_budget_exhausted_and_egress_blocked_complete_escalated(
 ) -> None:
     env = await make_env()
     f = rq.cloud_fake()
+    # The masker misses the name (the real one now masks it: see the test
+    # below), so the egress scan is what refuses it.
+    let_masker_miss(f.cloud)
     await env.start(f.router)
     # A name under an identifying key, then in the question: refused before
     # any reservation; egress none.
@@ -303,6 +306,27 @@ async def test_budget_exhausted_and_egress_blocked_complete_escalated(
     finally:
         async with await rq.su(postgres) as conn:
             await rq.set_policy(conn, rq.HOSPITAL_A, None)
+
+
+async def test_untitled_name_masked_and_sent(make_env: rq.MakeEnv, postgres: rq.Postgres) -> None:
+    # Ruling C8: the masker now finds the untitled name, so the question is
+    # sent with the name masked, and the body holds no part of it.
+    env = await make_env()
+    f = rq.cloud_fake()
+    await env.start(f.router)
+    qid = await rq.seed_query(
+        postgres,
+        provider="anthropic",
+        question="Is Adaeze Okafor febrile today?",
+        patient={"name": {"given": ["Adaeze"], "family": "Okafor"}, "disease_category": "fever"},
+    )
+    await run_one(env, postgres, qid)
+    p = await fact(postgres, qid)
+    assert (p["cloud_outcome"], p["egress"]) == ("ok", "anthropic")
+    assert len(f.transport.bodies) == 1
+    sent = f.transport.bodies[0].decode()
+    assert "[NAME_REDACTED]" in sent
+    assert "Adaeze" not in sent and "Okafor" not in sent
 
 
 async def test_unconfigured_provider_escalates_and_alerts(

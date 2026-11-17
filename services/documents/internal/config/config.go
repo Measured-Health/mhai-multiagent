@@ -7,9 +7,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/s3"
@@ -53,6 +55,15 @@ type Settings struct {
 	// S3 is the object store, nil when none is configured (storage is then
 	// not ready).
 	S3 *S3Settings
+
+	// ClamdAddr is DOCUMENTS_CLAMD_ADDR, clamd's host:port on the internal
+	// network ("" : the scanner is not ready and every scan waits).
+	ClamdAddr string
+	// SandboxSocket and SandboxJobs are DOCUMENTS_SANDBOX_SOCKET and
+	// DOCUMENTS_SANDBOX_JOBS: docsandbox's Unix socket and the jobs tmpfs
+	// both containers mount, absolute ("" for both: the sandbox is not
+	// ready and every scan waits).
+	SandboxSocket, SandboxJobs string
 }
 
 // S3Settings are the object store's settings. The secret access key is
@@ -138,6 +149,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		errs = append(errs, errors.New("DOCUMENTS_TRUSTED_KEYS_PATH must be an absolute path"))
 	}
 	errs = append(errs, s.storage(get)...)
+	errs = append(errs, s.scanning(get)...)
 	if err := errors.Join(errs...); err != nil {
 		return Settings{}, err
 	}
@@ -220,6 +232,26 @@ func (s *Settings) storage(get func(string) string) []error {
 		errs = append(errs, errors.New("DOCUMENTS_S3_SECRET_KEY_FILE must be an absolute path"))
 	}
 	s.S3 = &st
+	return errs
+}
+
+// scanning reads the scanner's and the sandbox's settings.
+func (s *Settings) scanning(get func(string) string) []error {
+	var errs []error
+	s.ClamdAddr, s.SandboxSocket, s.SandboxJobs = get("DOCUMENTS_CLAMD_ADDR"), get("DOCUMENTS_SANDBOX_SOCKET"),
+		get("DOCUMENTS_SANDBOX_JOBS")
+	if s.ClamdAddr != "" {
+		host, port, err := net.SplitHostPort(s.ClamdAddr)
+		if n, perr := strconv.Atoi(port); err != nil || host == "" || perr != nil || n < 1 || n > 65535 {
+			errs = append(errs, errors.New("DOCUMENTS_CLAMD_ADDR must be host:port"))
+		}
+	}
+	switch {
+	case (s.SandboxSocket == "") != (s.SandboxJobs == ""):
+		errs = append(errs, errors.New("set both DOCUMENTS_SANDBOX_SOCKET and DOCUMENTS_SANDBOX_JOBS, or neither"))
+	case s.SandboxSocket != "" && (!filepath.IsAbs(s.SandboxSocket) || !filepath.IsAbs(s.SandboxJobs)):
+		errs = append(errs, errors.New("DOCUMENTS_SANDBOX_SOCKET and DOCUMENTS_SANDBOX_JOBS must be absolute paths"))
+	}
 	return errs
 }
 

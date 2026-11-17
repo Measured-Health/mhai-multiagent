@@ -468,6 +468,35 @@ jobs:
       - name: Integration tests
         run: bash ../../.github/scripts/go-test-packages.sh test differ "" integration -race -timeout 25m
 
+  # The documents scan's sidecars (documents PR 4): docsandbox's renderer,
+  # server and real jail (the image's test stage, run with the privileges
+  # compose gives it: nsjail builds each jail), and clamd with the deployed
+  # clamd.conf against EICAR (DS6, DS9, B1-B5).
+  docsandbox:
+    runs-on: ubuntu-latest  # ships Docker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The jailed tests (docsandbox image, test stage)
+        run: |
+          docker build --target test -t mhai-docsandbox:test services/docsandbox
+          # Exactly the container docker-compose.yml runs.
+          docker run --rm --cap-drop ALL --cap-add SYS_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
+            --cap-add SYS_CHROOT --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt no-new-privileges:true \
+            --network none --read-only --tmpfs /jobs:size=512m,mode=0700 --tmpfs /tmp:size=16m \
+            --tmpfs /run/docsandbox:size=512m,mode=0700 --tmpfs /run/user:size=16m,mode=0700 mhai-docsandbox:test
+      - name: The image compose runs builds
+        run: docker build -t mhai-docsandbox:ci services/docsandbox
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache-dependency-path: services/documents/go.sum
+      - name: clamd against EICAR
+        working-directory: services/documents
+        run: go test -race -timeout 20m -tags sidecars ./internal/clamd/
+
   # ADR 0012: a breaking change to the HTTP contract needs a new major
   # version (/api/v2), so it may not change /api/v1 in place.
   openapi-breaking:

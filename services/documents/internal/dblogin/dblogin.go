@@ -4,7 +4,8 @@
 // (through mhai_documents_app) and nothing more: not a superuser, not
 // BYPASSRLS, CREATEROLE, CREATEDB or REPLICATION, not a member of
 // mhai_migrate or the database's owner, owning no schema or relation, and
-// a member of no other mhai_ role. The service refuses to start with such
+// a member of no other mhai_ role (mhai_documents_sweep, the sweeper's
+// read of due ids, 00048, is the one other it may hold). The service refuses to start with such
 // a login, and health reports database_ready false.
 package dblogin
 
@@ -49,7 +50,7 @@ SELECT r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb, r.rolreplicat
          WHERE pg_has_role(session_user, c.relowner, 'MEMBER')
            AND n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'),
        (SELECT count(*) FROM pg_roles g
-         WHERE g.rolname LIKE 'mhai\_%' AND g.rolname NOT IN ('mhai_documents', 'mhai_documents_app')
+         WHERE g.rolname LIKE 'mhai\_%' AND g.rolname NOT IN ('mhai_documents', 'mhai_documents_app', 'mhai_documents_sweep')
            AND pg_has_role(session_user, g.oid, 'MEMBER')),
        EXISTS (SELECT 1 FROM pg_roles d WHERE d.rolname = 'mhai_documents' AND pg_has_role(session_user, d.oid, 'MEMBER'))
 FROM pg_roles r WHERE r.rolname = session_user`

@@ -103,6 +103,11 @@ type Config struct {
 	// the EMR stream and its durables, and later the connection routes and
 	// the finding consumer. Off by default (EMR plan, Global Constraints).
 	EMREnabled bool
+	// DocumentsEnabled (CORE_DOCUMENTS_ENABLED=true) switches documents on:
+	// from documents PR 4, core creates the DOCS stream and the documents
+	// service's documents_scan durable; the routes come in PR 5. Off by
+	// default: no DOCS stream exists (documents design §13).
+	DocumentsEnabled bool
 	// EMRSealPublicKeyPath is the emr service's sealing public key
 	// (CORE_EMR_SEAL_PUBLIC_KEY_PATH; EMR design §6.2), required when
 	// EMREnabled. A public key: core never holds the private one.
@@ -354,6 +359,13 @@ func Load() (Config, error) {
 		c.EMREnabled = true
 	default:
 		errs = append(errs, errors.New("CORE_EMR_ENABLED must be true or false"))
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_DOCUMENTS_ENABLED"))) {
+	case "", "false":
+	case "true":
+		c.DocumentsEnabled = true
+	default:
+		errs = append(errs, errors.New("CORE_DOCUMENTS_ENABLED must be true or false"))
 	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_AUDIT_EXPORTS"))) {
 	case "", "false":
