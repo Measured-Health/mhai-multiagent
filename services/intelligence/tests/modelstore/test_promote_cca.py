@@ -17,10 +17,9 @@ from typing import Any
 import pytest
 
 from intelligence.doceval import report
-from intelligence.doceval.answers import bank
+from intelligence.doceval.answers import bank, schema
 from intelligence.doceval.answers import llama_runtime as lr
 from intelligence.doceval.answers import report as areport
-from intelligence.doceval.answers import schema
 from intelligence.guardrails import escalation_guard as eg
 from intelligence.modelstore import (
     canonical,
