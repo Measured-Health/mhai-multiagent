@@ -1042,6 +1042,22 @@ All notable changes to this project are documented here. The format follows
   now closes the pool and waits for any write under way before taking it.
   The writer is unchanged: it never writes once the database can't be read.
 
+- Tests: `test_a_passing_gguf_on_the_locked_split_is_pinnable` failed about
+  one run in four with `gate_failed`. The failing metric was
+  `grounded_pass_rate` (0.690 or 0.698 against the 0.70 pass mark). The
+  answer gate's fake "good" model replied with the bare required facts
+  ("140 90 two occasions"): a near-verbatim copy of a chunk sentence with
+  no content word of the question, which the escalation guard's recital
+  check turns into `REGENERATE`, as it should. About ten of some forty
+  answerable items were downgraded that way, and the locked split is drawn
+  from the OS random source (by design), so the good model sat within a few
+  items of the pass mark and the draw decided. The good reply is now its own
+  cited sentence (grounded rate 0.92 to 0.93 over 20 draws), and a new test
+  puts every phrasing and slot value of the answerable templates through the
+  guard and checks that the worst possible draw still meets the committed
+  pass marks. The guard, its rules and the thresholds are unchanged; the
+  guard gave the same verdict for the same input on every run.
+
 - **Clinical review:** answer verification judges each claim without its
   citation tags, on every route (cloud and local, every answer model). The
   citation pipeline (`agents/hga_nli.py`) gave the NLI model the claim with its

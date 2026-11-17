@@ -6,18 +6,21 @@ In-memory store, loopback only, synthetic data only."""
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import socket
 from dataclasses import dataclass, replace
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from intelligence.doceval import report
+from intelligence.doceval.answers import bank, schema
 from intelligence.doceval.answers import llama_runtime as lr
 from intelligence.doceval.answers import report as areport
-from intelligence.doceval.answers import schema
+from intelligence.guardrails import escalation_guard as eg
 from intelligence.modelstore import (
     canonical,
     fixtures,
@@ -33,7 +36,13 @@ from intelligence.modelstore import (
 )
 from intelligence.modelstore.reasons import Refused
 from intelligence.modelstore.sources.local import LocalSource
-from tests.doceval.answer_fakes import marker, server_log, test_builder, write_fake_llama
+from tests.doceval.answer_fakes import (
+    marker,
+    perfect_reply,
+    server_log,
+    test_builder,
+    write_fake_llama,
+)
 from tests.modelstore.fakes import gguf as g
 from tests.modelstore.fakes.memory_store import MemoryStore
 
@@ -312,6 +321,13 @@ def _promote_and_pin(tmp_path: Path, registries: Any, keys: Keys, mode: str) -> 
     )
     summary = promote.promote(_request("1.0.0", dry_run=False), ctx)
     assert summary.split == "test" and summary.manifest_sha256 is not None
+    if mode == "good":  # say which metric failed, not only lock.pin's gate_failed
+        rep = areport.parse_report(summary.documents["evaluation.json"])
+        why = {k: rep[k] for k in ("metrics", "counts")}
+        assert rep["verdicts"]["answer"]["verdict"] == "pass", (
+            rep["verdicts"]["answer"]["failed"],
+            why,
+        )
     m = manifest.parse(
         mem.get(
             store.manifest_key(NAME, "1.0.0"),
@@ -347,6 +363,58 @@ def test_a_passing_gguf_on_the_locked_split_is_pinnable(
     pin = _promote_and_pin(tmp_path, registries, keys, "good")
     assert (pin.name, pin.version, pin.gate) == (NAME, "1.0.0", "answer")
     assert lock.read(tmp_path / "models.lock").models["cca"] == pin
+
+
+def _every_fill(t: bank.Template) -> list[str]:
+    keys = sorted(t.slots)
+    ranges = [range(lo, hi + 1) for lo, hi in (t.slots[k] for k in keys)]
+    return [
+        q.format(**dict(zip(keys, vals, strict=True)))
+        for q in t.questions
+        for vals in itertools.product(*ranges)
+    ]
+
+
+def test_the_good_fake_passes_the_answer_gate_on_every_locked_draw() -> None:
+    """The locked split is drawn from the OS random source, so which questions it holds
+    differs on every build. The good fake must pass on any of them, not on most: every
+    phrasing and slot value of every answerable template is put through the escalation
+    guard as the gate does (its question checks on the cited guideline, and the recital
+    check with lexical relevance over every guideline), and the worst draw still meets the
+    committed pass marks. A template the guard escalates counts with three items, every
+    other with one (a draw keeps one to three distinct questions per template)."""
+    rules = eg.default()
+    marks = {
+        r["metric"]: Fraction(r["value"])
+        for r in json.loads((report.THRESHOLDS_DIR / "answer.json").read_bytes())["scopes"][
+            "overall"
+        ]["rules"]
+    }
+    every_guideline = list(bank.GUIDELINES.values())
+    worst_pass = worst_total = escalated = 0
+    for t in bank.TEMPLATES:
+        if t.kind in schema.ESCALATE_KINDS:
+            continue
+        assert t.guideline is not None
+        chunk = schema.Chunk(t.guideline, bank.GUIDELINES[t.guideline])
+        downgraded = False
+        for q in _every_fill(t):
+            item = schema.Item(
+                "ca-0001",
+                t.kind,
+                t.category,
+                q,
+                (chunk,),
+                schema.Expect(False, t.facts, t.forbidden),
+            )
+            reply, _ = perfect_reply(item)
+            assert not eg.is_recital(rules, q, reply, every_guideline, None), q
+            downgraded |= bool(eg.check_question(rules, q, {}, [chunk.text]).escalate)
+        worst_total += 3 if downgraded else 1
+        worst_pass += 0 if downgraded else 1
+        escalated += 3 if downgraded else 0
+    assert Fraction(worst_pass, worst_total) >= marks["grounded_pass_rate"]
+    assert Fraction(escalated, worst_total) <= marks["over_escalation_rate"]
 
 
 @pytest.mark.parametrize("mode", ["miss", "unsafe"])
