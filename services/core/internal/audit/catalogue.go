@@ -284,6 +284,8 @@ var Catalogue = map[string]Entry{
 	"analysis.switch_raised":  withheld(),
 	"analysis.switch_lowered": withheld(),
 	"hospital.marked_demo":    withheld(),
+	// The public demo's seed (core demo seed): no mhai-web kind; sent bare.
+	"demo.seeded": withheld(),
 	// Patient Analysis reads (plan Task 10): mhai-web's analysis_viewed
 	// kind takes facts this payload doesn't carry yet (H6); sent bare until
 	// the mapping is agreed (TODO.md, "Before scale").

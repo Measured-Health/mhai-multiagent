@@ -114,6 +114,14 @@ grep -qF "nkey: \$NATS_PIPELINE_NKEY" "$DEST/nats/nats.conf" \
   || die "$DEST/nats/nats.conf has no pipeline user: deploy the release with the pilot first"
 info "release with the pilot is deployed"
 
+# The public demo's published accounts (core demo seed, deploy/README.md
+# "Public demo") must never sit beside a real hospital: refuse while the
+# database has a demo hospital with active accounts. Turn the demo off
+# first (its accounts deactivated, DEMO_SAMPLE_AI=off).
+demo_users=$(printf "SELECT count(*) FROM users u JOIN hospitals h ON h.id = u.hospital_id WHERE h.is_demo AND u.is_active;\n" \
+  | docker compose exec -T postgres psql -U pgadmin -d mhai -v ON_ERROR_STOP=1 -tA) || die "could not check for the public demo's accounts"
+[ "${demo_users:-0}" = 0 ] || die "this database has the public demo's active accounts (published password): turn the demo off before the pilot (deploy/README.md, 'Public demo'); nothing was changed"
+
 # env_get NAME: the value of NAME in .env (the last one), or empty.
 env_get() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n1; }
 # env_set NAME VALUE: write NAME=VALUE (not a secret: it is printed).
@@ -320,6 +328,13 @@ done
 info "core ready (CORE_CLOUD_PROVIDERS=$PROVIDER; recreated: $CORE_CHANGED)"
 
 say "Starting the egress proxy and the pipeline"
+# The demo's sample answers (profile demo) are the same NATS user and
+# consumer: never both. The demo deploy leaves them off while the pilot is on.
+if [ -n "$(docker compose --profile demo ps -q sample-ai 2>/dev/null)" ]; then
+  docker compose --profile demo stop sample-ai >/dev/null
+  docker compose --profile demo rm -f sample-ai >/dev/null
+  info "the demo's sample-ai stopped (the pilot's pipeline takes its jobs)"
+fi
 if [ "$PROXY_CHANGED" = 1 ] && [ -n "$(compose ps -q egress-proxy)" ]; then
   compose up -d --force-recreate --no-deps egress-proxy
 else

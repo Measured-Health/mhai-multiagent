@@ -293,6 +293,12 @@ class RunQuery:
         except ValueError:
             await self._permanent(job, "invalid_request")
             return
+        if not self._router.serves(v.hid):
+            # A sample worker (boundary.sample) and a hospital it doesn't list:
+            # refused before the claim, so nothing is read or written for it.
+            log.warning("run_query refused query_id=%s reason=not_a_sample_hospital", job.qid)
+            await self._permanent(job, "forbidden")
+            return
         if self._db is None:
             await self._failure(job, "unavailable")  # never claims without a database
             return

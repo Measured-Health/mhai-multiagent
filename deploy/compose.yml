@@ -18,6 +18,7 @@
 # Memory: the instance has 3.7 GiB shared with MongoDB, the EMR and the
 # web demo. Every container is capped. The pilot pipeline (profile pilot)
 # takes up to 1600 MiB: enable-pilot.sh refuses to start it without room.
+# The demo's sample answers (profile demo, sample-ai) take up to 192 MiB.
 
 name: mhai-backend
 
@@ -353,6 +354,86 @@ services:
       core-request-key: { condition: service_completed_successfully }
     # Health is a NATS request (pipeline.health); enable-pilot.sh checks
     # the log for the worker's start line.
+    healthcheck:
+      disable: true
+
+  # The public demo's seed (profile demo; deploy/demo/enable-demo.sh runs it on
+  # every deploy, deploy/README.md "Public demo: sample answers"): core demo
+  # seed makes or resets the synthetic demo hospital DEM, its published demo
+  # accounts and its sample content. One-shot, as the database owner (as
+  # core-migrate: it writes user_mfa, decisions and corrections no single app
+  # role may write), with MFA_ENCRYPTION_KEY for the demo accounts' published
+  # two-step secret. It refuses unless MHAI_DEMO_SEED=on and APP_ENV=demo (set
+  # here only), and refuses a database holding any non-demo hospital or a
+  # real cloud agreement.
+  core-demo-seed:
+    <<: [*hardening, *core-image]
+    profiles: ["demo"]
+    restart: "no"
+    command: ["demo", "seed"]
+    environment:
+      DATABASE_URL: postgres://pgadmin:${POSTGRES_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=disable
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set in /srv/mhai-backend/.env}
+      MHAI_DEMO_SEED: "on"
+      APP_ENV: demo
+    mem_limit: 128m
+    networks: [backend]
+    depends_on:
+      core-migrate: { condition: service_completed_successfully }
+
+  # The public demo's sample answers (profile demo; deploy/demo/enable-demo.sh
+  # starts it, never beside the pilot's pipeline). The real pipeline worker
+  # with INTELLIGENCE_MODEL_CLIENT=sample (services/intelligence, boundary/
+  # sample.py): real request tokens, the real JOBS consumer, claim, masking,
+  # escalation guard, decision and audit facts; the answer quotes the shared
+  # sample guidelines and says it is a sample, and the HGA scores are fixed
+  # sample numbers (the NLI and embedding models don't fit this host). No
+  # model is loaded, nothing is downloaded and it has no route out
+  # (backend only). It answers only the hospitals in DEMO_SAMPLE_HOSPITALS,
+  # which enable-demo.sh fills from the database's is_demo hospitals; any
+  # other hospital's job is refused before it is claimed. APP_ENV=demo: the
+  # worker refuses the sample client in production. It is the `pipeline`
+  # NATS user and the intelligence_app login, with the pilot's files
+  # (secrets/nats-pipeline.nk, secrets/intelligence-db-password, mode 0400,
+  # uid 1000).
+  sample-ai:
+    <<: *hardening
+    image: ${SAMPLE_AI_IMAGE:-ghcr.io/measured-health/mhai-multiagent-intelligence:latest}
+    pull_policy: missing
+    profiles: ["demo"]
+    restart: unless-stopped
+    command: ["worker", "--service", "pipeline"]
+    environment:
+      APP_ENV: demo
+      INTELLIGENCE_SINGLE_HOST: "on"
+      NATS_URL: nats://nats:4222
+      NATS_NKEY_SEED_PATH: /run/secrets/nats-pipeline.nk
+      INTELLIGENCE_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+      INTELLIGENCE_DB_URL: postgres://postgres:5432/mhai?sslmode=disable
+      INTELLIGENCE_DB_USER: intelligence_app
+      INTELLIGENCE_DB_PASSWORD_FILE: /run/secrets/intelligence-db-password
+      INTELLIGENCE_MODEL_CLIENT: sample
+      INTELLIGENCE_SAMPLE_HOSPITALS: ${DEMO_SAMPLE_HOSPITALS:-}
+      INTELLIGENCE_MAX_CONCURRENCY: "2"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      OMP_NUM_THREADS: "1"
+    volumes:
+      - trustedkeys:/trusted:ro
+      - ./secrets/nats-pipeline.nk:/run/secrets/nats-pipeline.nk:ro
+      - ./secrets/intelligence-db-password:/run/secrets/intelligence-db-password:ro
+    tmpfs:
+      - /tmp
+    cpus: 0.5
+    # Measured: about 65 MiB resident with the sample path (no PyTorch loaded).
+    mem_limit: 192m
+    memswap_limit: 192m
+    networks: [backend]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
     healthcheck:
       disable: true
 

@@ -583,6 +583,10 @@ func init() {
 	// A hospital made before hospitals.is_demo, marked as the demo once
 	// (core hospitals mark-demo); the hospital is the row's entity.
 	Register("hospital.marked_demo", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})
+	// The public demo's seed (core demo seed, demo host only): the demo
+	// hospital is the row's entity; counts of accounts created and reset.
+	Register("demo.seeded", Schema{Fields: fields("via", OneOf("cli"), "created", count, "reset", count),
+		Required: []string{"via", "created", "reset"}})
 	// Patient Analysis reads (analysis backend design D7; plan Task 10):
 	// the view, the period and the filters' codes and opaque ids, once per
 	// session, filter set and period; and the day a person passes 100
