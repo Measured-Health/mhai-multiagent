@@ -98,6 +98,10 @@ var dbTxAllowedFiles = map[string]string{
 	// 00047: the cloud reservation reaper runs as mhai_cloud_reaper with the
 	// hospital it visits set, under its leader lock; no route reaches it.
 	"internal/cloudreap/loop.go": "the cloud reservation reaper's leader lock (Acquire) and its transactions as mhai_cloud_reaper",
+	// The public demo's seed (core demo seed): a one-shot as the database
+	// owner on the demo host only (MHAI_DEMO_SEED=on and APP_ENV=demo, no
+	// non-demo hospital in the database), its advisory lock (Acquire) and its transactions.
+	"cmd/core/demo.go": "the demo seed's lock (Acquire) and owner transactions (synthetic demo hospital only)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on

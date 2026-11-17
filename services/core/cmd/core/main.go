@@ -14,7 +14,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 )
 
-const usage = "usage: core serve | core migrate up|status | core keys new|ensure|untrust ... | core hospitals create|activate|model-policy ... | core users create|roles ... | core emr exclude|remove-hospital-data ... | core analysis seed-demo|switch off|named-access ..."
+const usage = "usage: core serve | core migrate up|status | core keys new|ensure|untrust ... | core hospitals create|activate|model-policy ... | core users create|roles ... | core emr exclude|remove-hospital-data ... | core analysis seed-demo|switch off|named-access ... | core demo seed"
 
 func main() {
 	var err error
@@ -29,6 +29,8 @@ func main() {
 		err = emrCmd(context.Background(), os.Args[2:], os.Getenv("DATABASE_URL"), os.Stdin, os.Stdout)
 	case len(os.Args) >= 2 && os.Args[1] == "analysis":
 		err = analysisCmd(context.Background(), os.Args[2:], os.Getenv("DATABASE_URL"), os.Stdout, nil)
+	case len(os.Args) >= 2 && os.Args[1] == "demo":
+		err = demoCmd(context.Background(), os.Args[2:], os.Getenv("DATABASE_URL"), os.Getenv, os.Stdout)
 	case len(os.Args) >= 2 && (os.Args[1] == "hospitals" || os.Args[1] == "users"):
 		err = seed(context.Background(), os.Args[1:], os.Getenv("DATABASE_URL"), os.Stdin, os.Stdout)
 	default:

@@ -71,7 +71,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("intelligence.boundary.models")
 
-MODEL_CLIENTS = ("orchestrator", "stub")
+MODEL_CLIENTS = ("orchestrator", "stub", "sample")
 STAGES = ("mask", "generate", "verify")
 DECISIONS = ("PASS", "REGENERATE", "ESCALATE")
 _RETRYABLE = frozenset({"unavailable", "internal", "overloaded"})
@@ -857,9 +857,29 @@ def build_model_client(settings: WorkerSettings, pinned: PinnedSource | None = N
             raise ConfigError("INTELLIGENCE_MODEL_CLIENT=stub runs only with APP_ENV=development")
         log.warning("model client is the stub: synthetic answers only")
         return StubModelClient()
+    if settings.model_client == "sample":
+        from intelligence.boundary.config import is_demo
+
+        # Checked again here, not only in the settings: the demo's labelled
+        # sample answers never run in production (boundary.sample).
+        if not (settings.development or is_demo()):
+            raise ConfigError(
+                "INTELLIGENCE_MODEL_CLIENT=sample runs only with APP_ENV=demo or development"
+            )
+        if not settings.sample_hospitals or settings.cloud.providers or settings.model_roles:
+            raise ConfigError(
+                "INTELLIGENCE_MODEL_CLIENT=sample needs its hospitals, no cloud, no roles"
+            )
+        from intelligence.boundary.sample import SampleModelClient
+
+        log.warning(
+            "model client is sample: labelled sample answers for %d demo hospital(s), no model",
+            len(settings.sample_hospitals),
+        )
+        return SampleModelClient()
     if settings.model_client == "orchestrator":
         return default_orchestrator(pinned, settings.model_roles, settings)
-    raise ConfigError("INTELLIGENCE_MODEL_CLIENT must be orchestrator or stub")
+    raise ConfigError("INTELLIGENCE_MODEL_CLIENT must be orchestrator, stub or sample")
 
 
 # --- the stub's local parts, for the cloud fake (plan Task 10) -------------------------
@@ -968,9 +988,21 @@ class ModelRouter:
     claimed row (never from the message). local is the local client; cloud
     maps an enabled provider to its CloudModelClient."""
 
-    def __init__(self, local: ModelClient, cloud: Mapping[str, ModelClient]) -> None:
+    def __init__(
+        self,
+        local: ModelClient,
+        cloud: Mapping[str, ModelClient],
+        only_hospitals: frozenset[str] | None = None,
+    ) -> None:
         self.local = local
         self._cloud = dict(cloud)
+        # The sample client's hospitals (boundary.sample); None: every hospital.
+        self._only = only_hospitals
+
+    def serves(self, hospital_id: str) -> bool:
+        """Whether this worker may answer a job of hospital_id (the verified
+        token's). A sample worker answers its listed demo hospitals only."""
+        return self._only is None or str(hospital_id).lower() in self._only
 
     def client_for(self, route: str) -> tuple[ModelClient, str]:
         """(the client, its provider), "local" for the local route. A cloud
@@ -1006,6 +1038,9 @@ def build_model_router(settings: WorkerSettings, pinned: PinnedSource | None = N
     with the same local parts: the orchestrator's, or the stub's in
     development. pinned gives the verified pinned models (None until
     verified)."""
+    if settings.model_client == "sample":
+        # Never a cloud client beside the sample (the settings refuse providers).
+        return ModelRouter(build_model_client(settings), {}, settings.sample_hospitals)
     if not settings.cloud.providers:
         return ModelRouter(build_model_client(settings, pinned), {})
     from intelligence.boundary.cloud.client import build_cloud_clients
