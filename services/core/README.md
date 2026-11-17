@@ -42,7 +42,12 @@ core emr remove-hospital-data ID|CODE                        # removal_scheduled
 `emr exclude` reads an MRN from stdin (`--mrn-stdin`), never from an
 argument. EMR purges and retention run in `core serve` itself (only with
 `CORE_EMR_ENABLED`; the nightly sweep also needs
-`CORE_EMR_RETENTION_SWEEP`), one core copy at a time.
+`CORE_EMR_RETENTION_SWEEP`), one core copy at a time. So does the cloud
+budget reservation reaper (migration 00047, `internal/cloudreap`): every 5
+minutes one copy, as `mhai_cloud_reaper`, settles each reservation older
+than `CORE_CLOUD_RESERVATION_REAP_AFTER` (1h; 30m to 168h) as fully used,
+audited `cloud.reservation_reaped`; `CORE_CLOUD_RESERVATION_REAPER=off`
+stops it.
 
 `users create` never takes the password as an argument. It prompts on a
 terminal and reads one line from stdin otherwise. New accounts must change

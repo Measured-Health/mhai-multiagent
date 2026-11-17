@@ -24,6 +24,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/cloudreap"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
@@ -59,6 +60,9 @@ type app struct {
 	// emrMaint runs the EMR purges and retention (run only with
 	// CORE_EMR_ENABLED).
 	emrMaint *emrmaint.Loop
+	// cloudReaper settles stale cloud budget reservations as fully used
+	// (00047; nil with CORE_CLOUD_RESERVATION_REAPER=off).
+	cloudReaper *cloudreap.Loop
 	// emrConsumer turns EMR findings into alerts (core_emr; run only with
 	// CORE_EMR_ENABLED).
 	emrConsumer *alerts.Consumer
@@ -168,6 +172,9 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	a.emrConsumer = &alerts.Consumer{Pool: a.pool, Pub: alerts.JSPublisher{JS: js}, AllowNullMRN: cfg.EMRAllowNullMRN,
 		Log: log, Metrics: &alerts.ConsumerMetrics{}}
 	a.emrMaint = &emrmaint.Loop{Pool: a.pool, Log: log, Retention: cfg.EMRRetentionSweep, Metrics: &emrmaint.Metrics{}}
+	if cfg.CloudReaper {
+		a.cloudReaper = &cloudreap.Loop{Pool: a.pool, Log: log, Age: cfg.CloudReapAfter, Metrics: &cloudreap.Metrics{}}
+	}
 	a.intel = &intel.Client{NC: nc, JS: js, Signer: signer, Log: log, Metrics: &intel.Metrics{}, Pool: a.pool,
 		Patients: cfg.EMREnabled}
 	a.js = js
@@ -410,6 +417,17 @@ func serve() error {
 		go func() {
 			if err := a.emrMaint.Run(ctx); err != nil {
 				log.Error("core: EMR maintenance loop stopped", "reason", "internal_error")
+			}
+		}()
+	}
+	// Stale cloud budget reservations (00047): one core copy (an advisory
+	// lock), as mhai_cloud_reaper, settles every reservation older than
+	// CORE_CLOUD_RESERVATION_REAP_AFTER as fully used. Budget-neutral; off
+	// with CORE_CLOUD_RESERVATION_REAPER=off.
+	if a.cloudReaper != nil {
+		go func() {
+			if err := a.cloudReaper.Run(ctx); err != nil {
+				log.Error("core: cloud reservation reaper stopped", "reason", "internal_error")
 			}
 		}()
 	}

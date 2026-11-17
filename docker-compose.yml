@@ -139,6 +139,10 @@ services:
       # holds respected); the nightly retention sweep also needs this, off
       # until the privacy lead confirms the retention values (H5).
       CORE_EMR_RETENTION_SWEEP: ${CORE_EMR_RETENTION_SWEEP:-false}
+      # Cloud budget reservations older than this are settled as fully used
+      # (00047; 30m to 168h). The reaper is on unless set to off.
+      CORE_CLOUD_RESERVATION_REAPER: ${CORE_CLOUD_RESERVATION_REAPER:-on}
+      CORE_CLOUD_RESERVATION_REAP_AFTER: ${CORE_CLOUD_RESERVATION_REAP_AFTER:-1h}
       # The clinician patient lookup by MRN (with EMR on): per clinician a
       # minute and a day, per hospital a day; misses count too.
       CORE_PATIENT_LOOKUP_PER_MINUTE: ${CORE_PATIENT_LOOKUP_PER_MINUTE:-5}

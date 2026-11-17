@@ -126,9 +126,10 @@ def test_todo_keeps_the_real_data_gate() -> None:
 
 
 def test_todo_keeps_the_other_cloud_items() -> None:
+    # The stale-reservation reaper is built (core's cloudreap, migration 00047),
+    # so its TODO item is gone.
     todo = _todo()
     for phrase in (
-        "**Cloud models: stale budget reservations.**",
         "`mhai_cloud_settle_failures_total`",
         "**Cloud models: measured over-blocking and residuals for the H2 evaluation (ruling C4).**",
         "**Cloud models: egress isolation (design §16 question 6).**",

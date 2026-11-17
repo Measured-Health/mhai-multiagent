@@ -12,8 +12,9 @@ on the cursor of `Database.with_hospital`.
 The port has no hospital parameter: the hospital is the verified token's.
 It fails closed: any error, timeout or misuse while reserving gives no
 reservation, and the call's outcome is `budget_exhausted`. A failed settle
-is logged by ids only and counted; that reservation stays held until the
-month ends (bounded by one attempt's estimate).
+is logged by ids only and counted; core's reaper (migration 00047) charges
+that reservation in full once it is an hour old (bounded by one attempt's
+estimate); this settle, arriving later, changes nothing.
 """
 
 from __future__ import annotations

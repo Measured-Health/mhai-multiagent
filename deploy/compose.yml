@@ -194,6 +194,10 @@ services:
       # The cloud providers a hospital's policy may name: none unless the
       # pilot set it in .env (deploy/pilot/enable-pilot.sh).
       CORE_CLOUD_PROVIDERS: ${CORE_CLOUD_PROVIDERS:-}
+      # Stale cloud budget reservations are settled as fully used after this
+      # (00047; 30m to 168h; README "Cloud models"). Off only by setting off.
+      CORE_CLOUD_RESERVATION_REAPER: ${CORE_CLOUD_RESERVATION_REAPER:-on}
+      CORE_CLOUD_RESERVATION_REAP_AFTER: ${CORE_CLOUD_RESERVATION_REAP_AFTER:-1h}
       # The API over HTTP too: the frontend still calls HTTP until mhai-web's
       # BFF moves to NATS (spec §17.1). Core serves api.v1.<app> over NATS
       # as well.
