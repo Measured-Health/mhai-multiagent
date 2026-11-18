@@ -75,14 +75,14 @@ dependencies = [
 dev = [
     "pytest>=9.2.0",
     "pytest-cov>=4.1",
-    "ruff>=0.17.4",
+    "ruff>=0.17.5",
     "mypy>=2.4.1",
     "pre-commit>=4.7.0",
     "locust>=2.47.0",
-    "diff-cover>=11.0.1",
+    "diff-cover>=11.0.2",
     "grpcio-tools>=1.74",
     "mypy-protobuf>=3.6",
-    "pytest-asyncio>=1.4.1.post1",
+    "pytest-asyncio>=1.5.0",
     # Postgres 16 and NATS 2.10 for the tests marked boundary (spec section 12).
     "testcontainers[minio]>=4.15,<5",
     "zizmor>=1.32.0",
