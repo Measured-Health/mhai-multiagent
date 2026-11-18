@@ -40,7 +40,7 @@ services:
     cap_drop: [ALL]
 
   minio-init:
-    image: bitnamilegacy/minio-client@sha256:73bd39f7899a0cef12b8dd5df13aa93a3ed1aaa44236542442e9ac76819ac158
+    image: bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511
     depends_on:
       minio: { condition: service_healthy }
     entrypoint: ["/bin/sh", "/init/init-model-store.sh"]
