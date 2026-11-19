@@ -186,7 +186,7 @@ func TestDocumentsGrantsAreNarrow(t *testing.T) {
 			}
 		}
 	}
-	// Core (00049, design §7.2): its hospital's rows without the file
+	// Core (00051, design §7.2): its hospital's rows without the file
 	// name, the checksum or any stored object, and no direct write.
 	if err := as("mhai_gateway", w.hospA, `SELECT id, hospital_id, purpose, status, reason, patient_hint_id, uploaded_by, via,
 		mime_type, size_bytes, pages, received_at, scanned_at, completed_at, version FROM documents`); err != nil {

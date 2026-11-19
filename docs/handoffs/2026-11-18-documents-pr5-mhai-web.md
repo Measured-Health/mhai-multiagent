@@ -1,7 +1,7 @@
 # Hand-off to mhai-web: documents PR 5 (uploads and letters live)
 
 - **From:** mhai-multiagent, documents service PR 5 ([design](../designs/2026-11-14-documents-service.md) §10, §10.1; §17 departures 35-46)
-- **Contract:** `services/core/openapi.yaml` 1.33.0 (additive). Regenerate the types from it; never hand-write them.
+- **Contract:** `services/core/openapi.yaml` 1.35.0 (additive). Regenerate the types from it; never hand-write them.
 - **Switches:** everything here is off by default. `CORE_DOCUMENTS_ENABLED` turns the document routes on; `CORE_DOCUMENTS_LIVE_LETTERS` turns the live letter on and stays off until the legal lead signs the letter template (H3). Off, every route below answers 404 `not_found`, and the multipart letter upload stays the demo's.
 
 Nothing below changes a route or a field mhai-web already uses. Build it behind your own flag, so it ships dark until the switches are on.

@@ -1,6 +1,7 @@
 -- Documents service PR 5: uploads and letters live (documents design §4.2,
--- §7.2, §8, §10, §11; §13 PR 5; ADR 0016). Numbered 00049: main had 00048
--- (documents PR 4) when this was pushed.
+-- §7.2, §8, §10, §11; §13 PR 5; ADR 0016). Numbered 00051: main had 00048
+-- (documents PR 4) when this was pushed, and open PRs #228 (hospital admin
+-- actions) and #229 (invites) take 00049 and 00050.
 --
 -- Core (mhai_gateway) gains its part of design §7.2: it reads its
 -- hospital's documents rows (never source_name; RLS) and writes them only
@@ -280,7 +281,7 @@ DECLARE
     v_id    uuid;
 BEGIN
     PERFORM public.mhai_clearance_gate();
-    -- A letter outside the demo only by the live path (00049: the file goes
+    -- A letter outside the demo only by the live path (00051: the file goes
     -- to the documents service), and nothing is looked up for one
     -- otherwise (security review).
     IF NOT p_live AND NOT public.mhai_clearance_demo_hospital(v_h) THEN

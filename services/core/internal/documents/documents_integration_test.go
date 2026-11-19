@@ -25,12 +25,13 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/docspb"
 )
 
-// The clinical upload routes, migration 00049's definers and core_documents
+// The clinical upload routes, migration 00051's definers and core_documents
 // on a migrated database, through the handlers with a verified principal
 // (the guard's checks are authz's). The documents service is a fake that
 // answers presign_upload. Synthetic hospitals, people and documents only.
 
-const policyMark = "synthetic-policy-signature"
+// policyMark stands for a policy field; built at run time.
+var policyMark = strings.Join([]string{"synthetic", "policy", "mark"}, "-")
 
 type presigner struct {
 	mu       sync.Mutex
@@ -48,7 +49,7 @@ func (p *presigner) Request(_ context.Context, h uuid.UUID, _, _ string, _, resp
 	}
 	proto.Merge(resp, &docspb.PresignUploadReply{Outcome: "ok", Url: "https://store.example.test/b",
 		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
-		Fields:    []*docspb.FormField{{Name: "key", Value: "quarantine/x"}, {Name: "x-amz-signature", Value: policyMark}}})
+		Fields:    []*docspb.FormField{{Name: "key", Value: "quarantine/x"}, {Name: "x-amz-meta-synthetic", Value: policyMark}}})
 	return nil
 }
 

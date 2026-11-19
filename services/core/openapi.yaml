@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.33.0"
+  version: "1.35.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -638,7 +638,7 @@ paths:
         The reply is never stored for an `Idempotency-Key` replay (a retry
         starts another upload). While documents are off
         (`CORE_DOCUMENTS_ENABLED`, off by default) every document route is
-        404 `not_found`. Added in 1.33.0.
+        404 `not_found`. Added in 1.35.0.
       tags: [documents]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, rate_limited, busy, unavailable, not_ready, internal_error]
@@ -687,7 +687,7 @@ paths:
         and `failed` (`scan_unavailable`: "We couldn't check this file. Try
         again later."), `pages` once scanned. Another person's document,
         another hospital's, a clearance letter's or an unknown id is 404
-        `not_found`. Never a file name. Added in 1.33.0.
+        `not_found`. Never a file name. Added in 1.35.0.
       tags: [documents]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, not_ready, internal_error]
@@ -718,7 +718,7 @@ paths:
         `document.uploaded`. Calling it again changes nothing and answers
         the document as it is. A file not posted within 30 minutes of the
         start ends the document (`cancelled`, 409 `conflict`). No body.
-        Another person's or hospital's document is 404. Added in 1.33.0.
+        Another person's or hospital's document is 404. Added in 1.35.0.
       tags: [documents]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, not_ready, internal_error]
@@ -750,7 +750,7 @@ paths:
         the document is `uploading`, `uploaded`, `scanning`, `ready` or
         `queued` (409 `conflict` after that). A scan in progress stores
         nothing. Audited `document.cancelled`. Replies with the document.
-        Added in 1.33.0.
+        Added in 1.35.0.
       tags: [documents]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
@@ -1981,7 +1981,7 @@ paths:
         Never the original. Another hospital's letter, or a page past the
         letter's last, is 404; a letter with no pages yet is 503
         `not_ready`. A demo letter's page is `image/png`. A live letter's
-        page (1.33.0) is the documents service's: `image/jpeg`, at most
+        page (1.35.0) is the documents service's: `image/jpeg`, at most
         1,600 px wide and 900 KB, stamped across with the viewer's display
         name and the time; 503 `unavailable` when the documents service
         doesn't answer (and no view is recorded). Any other letter is 503
@@ -2129,7 +2129,7 @@ paths:
         file, as `POST /documents`. Post the file, then call
         `POST /hospital/clearances/{id}/uploaded`; the scan's outcome makes
         the letter `waiting` (`pages` set) or `refused` with
-        `refused_reason`. Never stored for replay. Added in 1.33.0.
+        `refused_reason`. Never stored for replay. Added in 1.35.0.
       tags: [clearances]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, validation_failed, end_date_too_late, not_eligible, not_eligible_platform, conflict, rate_limited, unavailable, not_ready, internal_error]
@@ -2183,7 +2183,7 @@ paths:
         file not posted within 30 minutes refuses the letter
         (`refused_reason` `unreadable`) and answers 409 `conflict`. A demo
         letter, another admin's upload or another hospital's letter is 404.
-        No body and no code. Off like the live upload. Added in 1.33.0.
+        No body and no code. Off like the live upload. Added in 1.35.0.
       tags: [clearances]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, conflict, not_ready, internal_error]
@@ -6828,7 +6828,7 @@ components:
         note: { type: string, nullable: true }
         removed: { type: array, items: { $ref: "#/components/schemas/ClearanceCovered" } }
     DocumentOut:
-      description: A document as its uploader sees it (1.33.0); codes only, never a file name.
+      description: A document as its uploader sees it (1.35.0); codes only, never a file name.
       type: object
       required: [id, purpose, status, reason, pages, received_at, scanned_at, version]
       additionalProperties: false
@@ -6848,7 +6848,7 @@ components:
         version: { type: integer, minimum: 1 }
     DocumentUploadOut:
       description: |
-        An S3 POST policy for one document's file (1.33.0): post every field,
+        An S3 POST policy for one document's file (1.35.0): post every field,
         in order, then the file as the field `file`, to `url` before
         `expires_at`. Valid for one key, one type and the purpose's size
         range. Never logged or stored by core.
@@ -6869,7 +6869,7 @@ components:
               value: { type: string }
         expires_at: { type: string, format: date-time }
     DocumentStartOut:
-      description: POST /documents's reply (1.33.0).
+      description: POST /documents's reply (1.35.0).
       type: object
       required: [document, upload]
       additionalProperties: false
@@ -6877,7 +6877,7 @@ components:
         document: { $ref: "#/components/schemas/DocumentOut" }
         upload: { $ref: "#/components/schemas/DocumentUploadOut" }
     ClearanceLiveOut:
-      description: POST /hospital/clearances/live's reply (1.33.0).
+      description: POST /hospital/clearances/live's reply (1.35.0).
       type: object
       required: [clearance, upload]
       additionalProperties: false

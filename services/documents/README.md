@@ -103,7 +103,7 @@ PR 4, the scan (design §5; §17 departures 21-33):
 
 PR 5, uploads and letters live (design §10, §10.1; §17 departures 35-46):
 
-- Core makes the documents row (migration 00049's definers), asks
+- Core makes the documents row (migration 00051's definers), asks
   `presign_upload` for its POST policy, announces `uploaded` after the
   browser's post, and reads `documents.v1.<hid>.scanned` (`core_documents`)
   to audit the outcome and move a live clearance letter on.

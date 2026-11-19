@@ -46,7 +46,7 @@ var (
 	WriteRule = authz.Rule{AnyRole: []string{authz.RoleClinician, authz.RoleHospitalAdmin}, Write: true}
 )
 
-// The purposes' types and limits (design §4.1), as migration 00049's
+// The purposes' types and limits (design §4.1), as migration 00051's
 // documents_upload_start checks them again.
 var (
 	ClinicalTypes = map[string]bool{"application/pdf": true, "image/png": true, "image/jpeg": true, "image/tiff": true}

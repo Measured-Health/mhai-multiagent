@@ -46,7 +46,7 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - Documents PR 5, uploads and letters live (design §10, §10.1; §17
-  departures 35-46; off by default, OpenAPI 1.33.0). With
+  departures 35-46; off by default, OpenAPI 1.35.0). With
   `CORE_DOCUMENTS_ENABLED=true` core serves `POST /documents` (a clinical
   upload: PDF, PNG, JPEG or TIFF up to 25 MB, optionally from a patient's
   page; 30 starts an hour per person, 503 `busy` while 20 of the hospital's
@@ -63,7 +63,7 @@ All notable changes to this project are documented here. The format follows
   in `checking` until its scan makes it `waiting` or `refused`. A live
   letter's page is the documents service's new `page_image`: decrypted,
   scaled to 1,600 px wide, stamped with the viewer's name and the time, a
-  JPEG of at most 900 KB. Migration 00049 (core's read of its hospital's
+  JPEG of at most 900 KB. Migration 00051 (core's read of its hospital's
   documents rows and its definers; `clearances.document_id` and the live
   letter's functions), the error code `busy`, and core's NATS rights on
   `core_documents`. The mhai-web hand-off is
