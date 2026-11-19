@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/docops"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/docspb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/replay"
@@ -265,7 +266,15 @@ func TestCtlRefusals(t *testing.T) {
 			return f.msg(t, coreClaims("nope"), "documents.v1.ctl.nope", schemaRq, nil)
 		}},
 		{"an op of a later PR", "unknown_op", func(t *testing.T, f *fixture) *nats.Msg {
+			return f.msg(t, coreClaims("page"), "documents.v1.ctl.page", schemaRq, nil)
+		}},
+		{"page_image with another op's schema", "schema", func(t *testing.T, f *fixture) *nats.Msg {
 			return f.msg(t, coreClaims("page_image"), "documents.v1.ctl.page_image", schemaRq, nil)
+		}},
+		{"page_image as a hospital admin", "caller", func(t *testing.T, f *fixture) *nats.Msg {
+			c := userClaims("hospital_admin")
+			c.Subject = "documents.v1.ctl.page_image"
+			return f.msg(t, c, c.Subject, "mhai.documents.v1.PageImageRequest", nil)
 		}},
 		{"presign as a platform admin", "caller", func(t *testing.T, f *fixture) *nats.Msg {
 			c := userClaims("platform_admin")
@@ -474,5 +483,40 @@ func TestHasUnknownInsideMapValues(t *testing.T) {
 	}
 	if hasUnknown((&structpb.Struct{Fields: map[string]*structpb.Value{"k": structpb.NewNullValue()}}).ProtoReflect()) {
 		t.Fatal("a clean map was flagged")
+	}
+}
+
+// A reply is bounded by its op (PR 5): page_image may carry its JPEG up to
+// docops.MaxPageImageReply, and no more; every other op stays within a
+// control message. Over the bound nothing is sent (handler_error).
+func TestReplyBoundPerOp(t *testing.T) {
+	f := newFixture(t)
+	pageBody := func(t *testing.T) []byte {
+		b, err := proto.Marshal(&docspb.PageImageRequest{DocumentId: document, N: 1, ViewerName: "Synthetic Viewer", At: now.Unix()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	size := 0
+	f.r.Handlers["page_image"] = func(context.Context, reqtoken.Claims, proto.Message) (proto.Message, error) {
+		return &docspb.PageImageReply{Outcome: "ok", Jpeg: make([]byte, size)}, nil
+	}
+	for _, tc := range []struct {
+		size int
+		ok   bool
+	}{{docops.MaxPageJPEG, true}, {reqtoken.MaxReqBody + 1, true}, {docops.MaxPageImageReply, false}} {
+		size = tc.size
+		out, reason := f.r.Process(context.Background(), f.msg(t, coreClaims("page_image"), "documents.v1.ctl.page_image",
+			"mhai.documents.v1.PageImageRequest", pageBody(t)))
+		if (out != nil) != tc.ok || (tc.ok && reason != "ok") || (!tc.ok && reason != "handler_error") {
+			t.Errorf("page_image reply of %d bytes: sent %v, %q", tc.size, out != nil, reason)
+		}
+	}
+	f.r.Handlers["health"] = func(context.Context, reqtoken.Claims, proto.Message) (proto.Message, error) {
+		return &docspb.HealthReply{KeyringFingerprint: strings.Repeat("a", reqtoken.MaxReqBody)}, nil
+	}
+	if out, reason := f.r.Process(context.Background(), f.healthMsg(t)); out != nil || reason != "handler_error" {
+		t.Fatalf("an oversized health reply: %q", reason)
 	}
 }

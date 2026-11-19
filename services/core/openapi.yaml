@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.32.0"
+  version: "1.33.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -616,6 +616,174 @@ paths:
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
+  /documents:
+    post:
+      operationId: startDocumentUpload
+      summary: Start a clinical document upload (clinicians and hospital admins; off by default).
+      description: |
+        Documents service PR 5 (design §4.2, §10). The file never comes
+        here: core makes the document (`uploading`) and answers with an S3
+        POST policy for exactly that document's quarantine key (a type and
+        size range, 10 minutes). The browser posts every `upload.fields`
+        entry, in order, then the file as the last field `file`, to
+        `upload.url`, and then calls `POST /documents/{id}/uploaded`.
+        `purpose` is `clinical`; `content_type` one of PDF, PNG, JPEG or
+        TIFF; `size_bytes` 1 to 25 MB (422 `validation_failed` otherwise);
+        `patient_id`, when the upload is made from a patient's page, must be
+        an active patient of the caller's hospital (404 `not_found`). At
+        most 30 starts an hour per person (429 `rate_limited`), and none
+        while 20 of the hospital's documents wait for extraction (503
+        `busy`). The documents service not answering is 503 `unavailable`,
+        and the document is cancelled. Audited `document.upload_started`.
+        The reply is never stored for an `Idempotency-Key` replay (a retry
+        starts another upload). While documents are off
+        (`CORE_DOCUMENTS_ENABLED`, off by default) every document route is
+        404 `not_found`. Added in 1.33.0.
+      tags: [documents]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, rate_limited, busy, unavailable, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [purpose, content_type, size_bytes]
+              additionalProperties: false
+              properties:
+                purpose: { type: string, enum: [clinical] }
+                content_type: { type: string, enum: [application/pdf, image/png, image/jpeg, image/tiff] }
+                size_bytes: { type: integer, minimum: 1, maximum: 26214400 }
+                patient_id: { type: string, format: uuid }
+      responses:
+        "201":
+          description: The document (uploading) and the POST policy for its file.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentStartOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /documents/{id}:
+    get:
+      operationId: getDocument
+      summary: One of the caller's own clinical documents (its uploader).
+      description: |
+        Status and codes only: `status` (`uploading`, `uploaded`,
+        `scanning`, `ready`, `quarantined`, `failed`, `cancelled`, and the
+        later statuses of review), `reason` for `quarantined` (`unsupported_type`,
+        `too_large`, `too_many_pages`, `too_many_pixels`,
+        `password_protected`, `malware`, `unreadable`, `checksum_mismatch`)
+        and `failed` (`scan_unavailable`: "We couldn't check this file. Try
+        again later."), `pages` once scanned. Another person's document,
+        another hospital's, a clearance letter's or an unknown id is 404
+        `not_found`. Never a file name. Added in 1.33.0.
+      tags: [documents]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The document.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /documents/{id}/uploaded:
+    post:
+      operationId: documentUploaded
+      summary: Say the document's file is posted (its uploader).
+      description: |
+        `uploading` becomes `uploaded` and the file is queued for its scan
+        (a malware scan, then pages rendered in a sandbox); audited
+        `document.uploaded`. Calling it again changes nothing and answers
+        the document as it is. A file not posted within 30 minutes of the
+        start ends the document (`cancelled`, 409 `conflict`). No body.
+        Another person's or hospital's document is 404. Added in 1.33.0.
+      tags: [documents]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "202":
+          description: The document; poll `GET /documents/{id}` for the scan's outcome.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /documents/{id}/cancel:
+    post:
+      operationId: cancelDocument
+      summary: Cancel one of the caller's documents before review (its uploader).
+      description: |
+        At the `version` the caller saw (409 `conflict` otherwise), while
+        the document is `uploading`, `uploaded`, `scanning`, `ready` or
+        `queued` (409 `conflict` after that). A scan in progress stores
+        nothing. Audited `document.cancelled`. Replies with the document.
+        Added in 1.33.0.
+      tags: [documents]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              additionalProperties: false
+              properties:
+                version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: The document, cancelled.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
   /feedback:
     post:
       operationId: submitFeedback
@@ -1812,11 +1980,14 @@ paths:
       description: |
         Never the original. Another hospital's letter, or a page past the
         letter's last, is 404; a letter with no pages yet is 503
-        `not_ready`; a letter that isn't a demo letter is 503 `unavailable`
-        (its pages are the documents service's). Every view is audited
-        (`clearance.viewed`) before the page is sent. `image/png`,
-        `Cache-Control: no-store`, `Content-Disposition: inline`,
-        `X-Content-Type-Options: nosniff`. Added in 1.28.0.
+        `not_ready`. A demo letter's page is `image/png`. A live letter's
+        page (1.33.0) is the documents service's: `image/jpeg`, at most
+        1,600 px wide and 900 KB, stamped across with the viewer's display
+        name and the time; 503 `unavailable` when the documents service
+        doesn't answer (and no view is recorded). Any other letter is 503
+        `unavailable`. Every view is audited (`clearance.viewed`) before the
+        page is sent. `Cache-Control: no-store`, `Content-Disposition:
+        inline`, `X-Content-Type-Options: nosniff`. Added in 1.28.0.
       tags: [clearances]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, not_ready, unavailable, internal_error]
@@ -1833,6 +2004,8 @@ paths:
             Content-Disposition: { schema: { type: string, enum: [inline] } }
           content:
             image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
               schema: { type: string, format: binary }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
@@ -1932,6 +2105,105 @@ paths:
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /hospital/clearances/live:
+    post:
+      operationId: uploadClearanceLive
+      summary: Upload a clearance letter through the documents service (hospital admins, step-up; off by default).
+      description: |
+        Documents service PR 5 (design §10). Off unless
+        `CORE_DOCUMENTS_LIVE_LETTERS` is on, which waits on the legal
+        lead's sign-off of the letter template (H3): until then this route
+        is 404 `not_found` and the multipart route stays the demo's. JSON:
+        the letter's fields as the multipart route takes them, plus the
+        file's `content_type` (PDF, PNG or JPEG) and `size_bytes` (1 to 10
+        MB). An `Idempotency-Key` is required. Order: the gates (404, 403),
+        the body (422), the code (403), 429 `rate_limited` after 5
+        eligibility refusals in the hospital's day (or 30 uploads an hour),
+        the checks of the multipart route (422 `end_date_too_late`,
+        `not_eligible` with `ids`, `not_eligible_platform`), then the POST
+        policy (503 `unavailable` when the documents service doesn't
+        answer: nothing is made). The letter is made `checking`
+        (`clearance.uploaded`) and the reply carries the POST policy for its
+        file, as `POST /documents`. Post the file, then call
+        `POST /hospital/clearances/{id}/uploaded`; the scan's outcome makes
+        the letter `waiting` (`pages` set) or `refused` with
+        `refused_reason`. Never stored for replay. Added in 1.33.0.
+      tags: [clearances]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, named_access_off, validation_failed, end_date_too_late, not_eligible, not_eligible_platform, conflict, rate_limited, unavailable, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [signed_by, signer_title, letter_date, end_date, content_type, size_bytes]
+              additionalProperties: false
+              properties:
+                signed_by: { type: string, minLength: 1, maxLength: 120 }
+                signer_title: { type: string, minLength: 1, maxLength: 120 }
+                letter_date: { type: string, format: date }
+                end_date: { type: string, format: date }
+                covered: { type: array, maxItems: 20, items: { type: string, format: uuid } }
+                covered_platform: { type: array, maxItems: 20, items: { type: string, maxLength: 254 } }
+                renews: { type: string, format: uuid }
+                content_type: { type: string, enum: [application/pdf, image/png, image/jpeg] }
+                size_bytes: { type: integer, minimum: 1, maximum: 10485760 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
+      responses:
+        "201":
+          description: The letter (checking) and the POST policy for its file.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClearanceLiveOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /hospital/clearances/{id}/uploaded:
+    post:
+      operationId: clearanceUploaded
+      summary: Say a live letter's file is posted (the admin who uploaded it).
+      description: |
+        The letter's file is queued for its scan; the letter stays
+        `checking` until the outcome. Calling it again changes nothing. A
+        file not posted within 30 minutes refuses the letter
+        (`refused_reason` `unreadable`) and answers 409 `conflict`. A demo
+        letter, another admin's upload or another hospital's letter is 404.
+        No body and no code. Off like the live upload. Added in 1.33.0.
+      tags: [clearances]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, named_access_off, conflict, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "202":
+          description: The letter.
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClearanceOut" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
   /hospital/alert-settings:
@@ -5521,6 +5793,7 @@ components:
             - too_many_rows
             - gone
             - already_used
+            - busy
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -6554,6 +6827,63 @@ components:
         reason: { type: string, nullable: true }
         note: { type: string, nullable: true }
         removed: { type: array, items: { $ref: "#/components/schemas/ClearanceCovered" } }
+    DocumentOut:
+      description: A document as its uploader sees it (1.33.0); codes only, never a file name.
+      type: object
+      required: [id, purpose, status, reason, pages, received_at, scanned_at, version]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        purpose: { type: string, enum: [clinical, clearance] }
+        status:
+          type: string
+          enum: [uploading, uploaded, scanning, ready, quarantined, failed, queued, extracting, in_review, finalising, completed, rejected, cancelled, purged]
+        reason:
+          type: string
+          nullable: true
+          enum: [unsupported_type, too_large, too_many_pages, too_many_pixels, password_protected, malware, unreadable, checksum_mismatch, scan_unavailable, no_text, no_patient_identifiers, multiple_patients, source_removed, null]
+        pages: { type: integer, minimum: 1, maximum: 50, nullable: true }
+        received_at: { type: string, format: date-time }
+        scanned_at: { type: string, format: date-time, nullable: true }
+        version: { type: integer, minimum: 1 }
+    DocumentUploadOut:
+      description: |
+        An S3 POST policy for one document's file (1.33.0): post every field,
+        in order, then the file as the field `file`, to `url` before
+        `expires_at`. Valid for one key, one type and the purpose's size
+        range. Never logged or stored by core.
+      type: object
+      required: [url, fields, expires_at]
+      additionalProperties: false
+      properties:
+        url: { type: string }
+        fields:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [name, value]
+            additionalProperties: false
+            properties:
+              name: { type: string }
+              value: { type: string }
+        expires_at: { type: string, format: date-time }
+    DocumentStartOut:
+      description: POST /documents's reply (1.33.0).
+      type: object
+      required: [document, upload]
+      additionalProperties: false
+      properties:
+        document: { $ref: "#/components/schemas/DocumentOut" }
+        upload: { $ref: "#/components/schemas/DocumentUploadOut" }
+    ClearanceLiveOut:
+      description: POST /hospital/clearances/live's reply (1.33.0).
+      type: object
+      required: [clearance, upload]
+      additionalProperties: false
+      properties:
+        clearance: { $ref: "#/components/schemas/ClearanceOut" }
+        upload: { $ref: "#/components/schemas/DocumentUploadOut" }
     ClearanceOut:
       description: A clearance letter (contract §10; since 1.28.0). Dates are the hospital's days.
       type: object

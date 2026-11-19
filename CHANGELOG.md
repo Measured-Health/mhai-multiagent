@@ -45,6 +45,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Documents PR 5, uploads and letters live (design §10, §10.1; §17
+  departures 35-46; off by default, OpenAPI 1.33.0). With
+  `CORE_DOCUMENTS_ENABLED=true` core serves `POST /documents` (a clinical
+  upload: PDF, PNG, JPEG or TIFF up to 25 MB, optionally from a patient's
+  page; 30 starts an hour per person, 503 `busy` while 20 of the hospital's
+  documents wait for extraction), `POST /documents/{id}/uploaded`, `GET
+  /documents/{id}` and `POST /documents/{id}/cancel`, all for the uploader
+  only. The file goes straight from the browser to the object store by the
+  documents service's POST policy, which core passes on and never stores
+  or logs. Core announces `uploaded` after the commit and reads the scan's
+  outcomes (`core_documents` on `DOCS`), writing `document.ready`,
+  `document.quarantined` or `document.scan_failed` once from the row.
+  `CORE_DOCUMENTS_LIVE_LETTERS=true` (off; it waits on the legal lead's
+  letter template, H3) adds `POST /hospital/clearances/live` and `POST
+  /hospital/clearances/{id}/uploaded`: a letter that isn't the demo's waits
+  in `checking` until its scan makes it `waiting` or `refused`. A live
+  letter's page is the documents service's new `page_image`: decrypted,
+  scaled to 1,600 px wide, stamped with the viewer's name and the time, a
+  JPEG of at most 900 KB. Migration 00049 (core's read of its hospital's
+  documents rows and its definers; `clearances.document_id` and the live
+  letter's functions), the error code `busy`, and core's NATS rights on
+  `core_documents`. The mhai-web hand-off is
+  `docs/handoffs/2026-11-18-documents-pr5-mhai-web.md`.
 - Documents PR 4, scanning and the sandbox (design §5; §17 departures
   21-34; off by default). `CORE_DOCUMENTS_ENABLED=true` makes core create
   the `DOCS` stream and the `documents_scan` durable. The documents service

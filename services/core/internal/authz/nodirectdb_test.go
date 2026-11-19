@@ -87,6 +87,7 @@ var dbTxAllowedFiles = map[string]string{
 	// gateway for that hospital with no user (no token: a background run).
 	"internal/analysis/clearances.go":      "the letters' due list as the analysis nightly role (db.WithAnalysisJob)",
 	"internal/analysis/letters/nightly.go": "the letters' nightly step as each due hospital, no user (db.WithHospital)",
+	"internal/documents/consumer.go":       "core_documents, as the scanned subject's hospital, no user (db.WithHospital)",
 	// The analysis provisioning CLI (core analysis switch off --global):
 	// SET LOCAL ROLE mhai_provision on the provisioning login, no hospital.
 	"cmd/core/analysis.go": "the analysis CLI's provisioning transaction (mhai_provision)",

@@ -42,6 +42,10 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/corrections/{id}/approve` | signed in | `clinician` | clinical | no | no | yes |
 | POST | `/api/v1/corrections/{id}/reject` | signed in | `clinician` | clinical | no | no | yes |
 | POST | `/api/v1/corrections/{id}/withdraw` | signed in | `clinician` | clinical | no | no | yes |
+| POST | `/api/v1/documents` | signed in | `clinician`, `hospital_admin` | clinical | no | no | yes |
+| GET | `/api/v1/documents/{id}` | signed in | `clinician`, `hospital_admin` | clinical | no | no | no |
+| POST | `/api/v1/documents/{id}/cancel` | signed in | `clinician`, `hospital_admin` | clinical | no | no | yes |
+| POST | `/api/v1/documents/{id}/uploaded` | signed in | `clinician`, `hospital_admin` | clinical | no | no | yes |
 | POST | `/api/v1/feedback` | signed in | `clinician` | clinical | no | no | yes |
 | GET | `/api/v1/feedback/stats/mine` | signed in | `clinician` | clinical | no | no | no |
 | GET | `/api/v1/healthz` | public | - | - | no | no | no |
@@ -50,10 +54,12 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | PATCH | `/api/v1/hospital/alert-settings` | signed in | `hospital_admin` | clinical | yes | no | yes |
 | GET | `/api/v1/hospital/clearances` | signed in | `hospital_admin` | clinical | yes | no | no |
 | POST | `/api/v1/hospital/clearances` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| POST | `/api/v1/hospital/clearances/live` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | GET | `/api/v1/hospital/clearances/{id}` | signed in | `hospital_admin` | clinical | yes | no | no |
 | POST | `/api/v1/hospital/clearances/{id}/narrow` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | GET | `/api/v1/hospital/clearances/{id}/pages/{n}` | signed in | `hospital_admin` | clinical | yes | no | no |
 | POST | `/api/v1/hospital/clearances/{id}/revoke` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| POST | `/api/v1/hospital/clearances/{id}/uploaded` | signed in | `hospital_admin` | clinical | yes | no | yes |
 | POST | `/api/v1/hospital/corrections/{id}/assign` | signed in | `hospital_admin` | clinical | yes | no | yes |
 | GET | `/api/v1/hospital/corrections/{id}/eligible-reviewers` | signed in | `hospital_admin` | clinical | yes | no | no |
 | POST | `/api/v1/hospital/corrections/{id}/remind` | signed in | `hospital_admin` | clinical | yes | no | yes |

@@ -351,6 +351,159 @@ func (x *PresignUploadReply) GetExpiresAt() int64 {
 	return 0
 }
 
+// documents.v1.ctl.page_image, as svc:core, hospital-bound (documents
+// design §10.1; §13 PR 5): one stored page, decrypted, scaled to at most
+// 1,600 px wide, stamped across with the viewer's display name and the
+// time, and encoded as a JPEG of at most 900 KB. Core asks only after its
+// own checks (the viewer's permission, the letter or the review lease),
+// and writes the view's audit entry before it sends the bytes on.
+type PageImageRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The documents row's id (a uuid).
+	DocumentId string `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
+	// The page, 1 to the document's page count.
+	N uint32 `protobuf:"varint,2,opt,name=n,proto3" json:"n,omitempty"`
+	// The viewer's display name, 1 to 120 characters, for the stamp only:
+	// never logged or stored by the documents service.
+	ViewerName string `protobuf:"bytes,3,opt,name=viewer_name,json=viewerName,proto3" json:"viewer_name,omitempty"`
+	// The time stamped on the page, Unix seconds (core's clock).
+	At            int64 `protobuf:"varint,4,opt,name=at,proto3" json:"at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PageImageRequest) Reset() {
+	*x = PageImageRequest{}
+	mi := &file_mhai_documents_v1_control_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PageImageRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PageImageRequest) ProtoMessage() {}
+
+func (x *PageImageRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_mhai_documents_v1_control_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PageImageRequest.ProtoReflect.Descriptor instead.
+func (*PageImageRequest) Descriptor() ([]byte, []int) {
+	return file_mhai_documents_v1_control_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *PageImageRequest) GetDocumentId() string {
+	if x != nil {
+		return x.DocumentId
+	}
+	return ""
+}
+
+func (x *PageImageRequest) GetN() uint32 {
+	if x != nil {
+		return x.N
+	}
+	return 0
+}
+
+func (x *PageImageRequest) GetViewerName() string {
+	if x != nil {
+		return x.ViewerName
+	}
+	return ""
+}
+
+func (x *PageImageRequest) GetAt() int64 {
+	if x != nil {
+		return x.At
+	}
+	return 0
+}
+
+// The stamped page, or a code. outcome: ok; not_found (no such document
+// or page in the token's hospital, or a document whose pages can't be
+// shown: not scanned clean, cancelled, rejected or purged); unavailable
+// (the keyring or the object store isn't ready, or the page couldn't be
+// opened). Only ok carries the image.
+type PageImageReply struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Outcome string                 `protobuf:"bytes,1,opt,name=outcome,proto3" json:"outcome,omitempty"`
+	// image/jpeg, at most 900 KB.
+	Jpeg          []byte `protobuf:"bytes,2,opt,name=jpeg,proto3" json:"jpeg,omitempty"`
+	Width         uint32 `protobuf:"varint,3,opt,name=width,proto3" json:"width,omitempty"`
+	Height        uint32 `protobuf:"varint,4,opt,name=height,proto3" json:"height,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PageImageReply) Reset() {
+	*x = PageImageReply{}
+	mi := &file_mhai_documents_v1_control_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PageImageReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PageImageReply) ProtoMessage() {}
+
+func (x *PageImageReply) ProtoReflect() protoreflect.Message {
+	mi := &file_mhai_documents_v1_control_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PageImageReply.ProtoReflect.Descriptor instead.
+func (*PageImageReply) Descriptor() ([]byte, []int) {
+	return file_mhai_documents_v1_control_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *PageImageReply) GetOutcome() string {
+	if x != nil {
+		return x.Outcome
+	}
+	return ""
+}
+
+func (x *PageImageReply) GetJpeg() []byte {
+	if x != nil {
+		return x.Jpeg
+	}
+	return nil
+}
+
+func (x *PageImageReply) GetWidth() uint32 {
+	if x != nil {
+		return x.Width
+	}
+	return 0
+}
+
+func (x *PageImageReply) GetHeight() uint32 {
+	if x != nil {
+		return x.Height
+	}
+	return 0
+}
+
 var File_mhai_documents_v1_control_proto protoreflect.FileDescriptor
 
 const file_mhai_documents_v1_control_proto_rawDesc = "" +
@@ -376,7 +529,19 @@ const file_mhai_documents_v1_control_proto_rawDesc = "" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x124\n" +
 	"\x06fields\x18\x03 \x03(\v2\x1c.mhai.documents.v1.FormFieldR\x06fields\x12\x1d\n" +
 	"\n" +
-	"expires_at\x18\x04 \x01(\x03R\texpiresAtBIZGgithub.com/Measured-Health/mhai-multiagent/services/gokit/docspb;docspbb\x06proto3"
+	"expires_at\x18\x04 \x01(\x03R\texpiresAt\"r\n" +
+	"\x10PageImageRequest\x12\x1f\n" +
+	"\vdocument_id\x18\x01 \x01(\tR\n" +
+	"documentId\x12\f\n" +
+	"\x01n\x18\x02 \x01(\rR\x01n\x12\x1f\n" +
+	"\vviewer_name\x18\x03 \x01(\tR\n" +
+	"viewerName\x12\x0e\n" +
+	"\x02at\x18\x04 \x01(\x03R\x02at\"l\n" +
+	"\x0ePageImageReply\x12\x18\n" +
+	"\aoutcome\x18\x01 \x01(\tR\aoutcome\x12\x12\n" +
+	"\x04jpeg\x18\x02 \x01(\fR\x04jpeg\x12\x14\n" +
+	"\x05width\x18\x03 \x01(\rR\x05width\x12\x16\n" +
+	"\x06height\x18\x04 \x01(\rR\x06heightBIZGgithub.com/Measured-Health/mhai-multiagent/services/gokit/docspb;docspbb\x06proto3"
 
 var (
 	file_mhai_documents_v1_control_proto_rawDescOnce sync.Once
@@ -390,13 +555,15 @@ func file_mhai_documents_v1_control_proto_rawDescGZIP() []byte {
 	return file_mhai_documents_v1_control_proto_rawDescData
 }
 
-var file_mhai_documents_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_mhai_documents_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_mhai_documents_v1_control_proto_goTypes = []any{
 	(*HealthRequest)(nil),        // 0: mhai.documents.v1.HealthRequest
 	(*HealthReply)(nil),          // 1: mhai.documents.v1.HealthReply
 	(*PresignUploadRequest)(nil), // 2: mhai.documents.v1.PresignUploadRequest
 	(*FormField)(nil),            // 3: mhai.documents.v1.FormField
 	(*PresignUploadReply)(nil),   // 4: mhai.documents.v1.PresignUploadReply
+	(*PageImageRequest)(nil),     // 5: mhai.documents.v1.PageImageRequest
+	(*PageImageReply)(nil),       // 6: mhai.documents.v1.PageImageReply
 }
 var file_mhai_documents_v1_control_proto_depIdxs = []int32{
 	3, // 0: mhai.documents.v1.PresignUploadReply.fields:type_name -> mhai.documents.v1.FormField
@@ -418,7 +585,7 @@ func file_mhai_documents_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mhai_documents_v1_control_proto_rawDesc), len(file_mhai_documents_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

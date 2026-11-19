@@ -17,6 +17,8 @@ import (
 	analysisroutes "github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/routes"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/docsctl"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/documents"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/feedback"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/hospital"
@@ -73,6 +75,15 @@ type Deps struct {
 	// AuditExports is CORE_AUDIT_EXPORTS: off, every audit export route
 	// and the legal-reference route answer 404 (analysis plan departure 61).
 	AuditExports bool
+	// Documents (documents design §10; PR 5): off unless DocumentsEnabled
+	// (CORE_DOCUMENTS_ENABLED), when every document route is 404. The live
+	// clearance letter also needs DocumentsLiveLetters
+	// (CORE_DOCUMENTS_LIVE_LETTERS, H3's gate). The documents service's
+	// control client and the uploaded announcement.
+	DocumentsEnabled     bool
+	DocumentsLiveLetters bool
+	Documents            docsctl.Requester
+	DocumentsAnnounce    documents.Announcer
 }
 
 // Register adds every route to m.
@@ -104,7 +115,13 @@ func Register(m *authz.Mux, d Deps) {
 	// Clearance letters, hospital side (analysis backend plan Tasks 18-20):
 	// off unless the hospital's analysis switch is on and its named-access
 	// position is letters_only or on (none is, by default).
-	letters.Register(m, letters.Deps{Pool: d.Pool, Auth: a, Log: a.Log})
+	// The live letter (documents PR 5) also needs CORE_DOCUMENTS_LIVE_LETTERS.
+	letters.Register(m, letters.Deps{Pool: d.Pool, Auth: a, Log: a.Log,
+		Live: d.DocumentsEnabled && d.DocumentsLiveLetters, Ctl: d.Documents, Announce: d.DocumentsAnnounce})
+	// Clinical document uploads (documents design §4.2, §10; PR 5): 404
+	// unless CORE_DOCUMENTS_ENABLED.
+	documents.Register(m, documents.Deps{Pool: d.Pool, On: d.DocumentsEnabled, Ctl: d.Documents,
+		Announce: d.DocumentsAnnounce, Log: a.Log})
 	// EMR alerts (EMR plan Tasks 32-34): the hospital admin's alert
 	// settings, possible duplicates and exclusions, and the clinicians'
 	// alerts and notification settings. They always answer (empty lists,

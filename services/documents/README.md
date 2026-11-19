@@ -58,7 +58,7 @@ the user can't sign in (`services/nats/documents-off.conf`).
 - `documents.v1.ctl.presign_upload` (`internal/upload`): as `svc:core`, for
   a `clinical` or `clearance` row of the token's hospital that is
   `uploading`; anything else is `not_found`, `conflict` or `unavailable`.
-  Core calls it from PR 5.
+  Core calls it for `POST /documents` and the live clearance letter (PR 5).
 - Health reports `database_ready`, `keyring_ready` and `storage_ready`
   honestly, and `scanner_ready` and `sandbox_ready` as false until PR 4:
   the service never claims it can take a document before it can.
@@ -101,8 +101,27 @@ PR 4, the scan (design §5; §17 departures 21-33):
   `scan_unavailable`.
 - Health reports `scanner_ready` and `sandbox_ready`.
 
-Uploads (PR 5), review (PR 6), ingest (PR 7), finalise (PR 8), retention
-and the KMS provider (PR 9) and the archive connector (PR 10) come later.
+PR 5, uploads and letters live (design §10, §10.1; §17 departures 35-46):
+
+- Core makes the documents row (migration 00049's definers), asks
+  `presign_upload` for its POST policy, announces `uploaded` after the
+  browser's post, and reads `documents.v1.<hid>.scanned` (`core_documents`)
+  to audit the outcome and move a live clearance letter on.
+- `documents.v1.ctl.page_image` (`internal/pages`): as `svc:core`,
+  hospital-bound. One stored page of a document scanned clean (`ready` or a
+  later review status; never a cancelled, rejected or purged one) is
+  opened from its sealed object, checked against the SHA-256 the scan
+  recorded, scaled to at most 1,600 px wide, stamped across with the
+  viewer's display name and the time (a band at the top and the foot and
+  translucent rows over the page), and encoded as a JPEG of at most 900 KB.
+  The op's reply may carry up to 960 KiB (`docops.MaxPageImageReply`); every
+  other op stays within a control message. The viewer's name is drawn and
+  never logged. `not_found` for another hospital's document or a page it
+  hasn't; `unavailable` while the keyring or the store isn't ready, or when
+  the page doesn't open or isn't what was stored.
+
+Review (PR 6), ingest (PR 7), finalise (PR 8), retention and the KMS
+provider (PR 9) and the archive connector (PR 10) come later.
 
 ## Settings
 

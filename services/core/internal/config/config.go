@@ -104,10 +104,20 @@ type Config struct {
 	// the finding consumer. Off by default (EMR plan, Global Constraints).
 	EMREnabled bool
 	// DocumentsEnabled (CORE_DOCUMENTS_ENABLED=true) switches documents on:
-	// from documents PR 4, core creates the DOCS stream and the documents
-	// service's documents_scan durable; the routes come in PR 5. Off by
-	// default: no DOCS stream exists (documents design §13).
+	// core creates the DOCS stream, the documents service's documents_scan
+	// durable and core's own core_documents (PR 4, PR 5), serves the
+	// document routes (POST /documents, /uploaded, GET, cancel) and
+	// consumes the scan's outcomes. Off by default: every document route is
+	// 404 and no DOCS stream exists (documents design §13).
 	DocumentsEnabled bool
+	// DocumentsLiveLetters (CORE_DOCUMENTS_LIVE_LETTERS=true) serves the
+	// clearance letter's live upload (POST /hospital/clearances/live and
+	// /uploaded) through the documents service. It needs DocumentsEnabled.
+	// Off by default, and an operator turns it on only after the legal
+	// lead's sign-off of the letter template (H3, TODO.md): until then a
+	// letter that isn't the demo's stays 503 unavailable (documents design
+	// §13 PR 5, §17 departure 37).
+	DocumentsLiveLetters bool
 	// EMRSealPublicKeyPath is the emr service's sealing public key
 	// (CORE_EMR_SEAL_PUBLIC_KEY_PATH; EMR design §6.2), required when
 	// EMREnabled. A public key: core never holds the private one.
@@ -366,6 +376,16 @@ func Load() (Config, error) {
 		c.DocumentsEnabled = true
 	default:
 		errs = append(errs, errors.New("CORE_DOCUMENTS_ENABLED must be true or false"))
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_DOCUMENTS_LIVE_LETTERS"))) {
+	case "", "false":
+	case "true":
+		c.DocumentsLiveLetters = true
+		if !c.DocumentsEnabled {
+			errs = append(errs, errors.New("CORE_DOCUMENTS_LIVE_LETTERS needs CORE_DOCUMENTS_ENABLED=true"))
+		}
+	default:
+		errs = append(errs, errors.New("CORE_DOCUMENTS_LIVE_LETTERS must be true or false"))
 	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_AUDIT_EXPORTS"))) {
 	case "", "false":

@@ -34,6 +34,9 @@ func Register(m *authz.Mux, d Deps) {
 	authz.Route(m, http.MethodGet, "/hospital/clearances/{id}/pages/{n}", ReadRule, http.HandlerFunc(d.page))
 	authz.Route(m, http.MethodPost, "/hospital/clearances/{id}/revoke", WriteRule, http.HandlerFunc(d.revoke))
 	authz.Route(m, http.MethodPost, "/hospital/clearances/{id}/narrow", WriteRule, http.HandlerFunc(d.narrow))
+	// The live letter (documents PR 5; off unless CORE_DOCUMENTS_LIVE_LETTERS).
+	authz.Route(m, http.MethodPost, "/hospital/clearances/live", WriteRule, httpx.NoStore(http.HandlerFunc(d.live)))
+	authz.Route(m, http.MethodPost, "/hospital/clearances/{id}/uploaded", UploadedRule, http.HandlerFunc(d.uploaded))
 }
 
 var errNoPool = errors.New("letters: no database")
@@ -144,8 +147,9 @@ var pageShape = regexp.MustCompile(`^[1-9][0-9]?$`)
 // page is GET /hospital/clearances/{id}/pages/{n}: one page image. The
 // view is audited (clearance.viewed) and committed before the page is
 // sent. Another hospital's letter, or a page it hasn't, is 404; no pages
-// yet is 503 not_ready; a letter that isn't a demo letter is 503
-// unavailable (its pages are the documents service's).
+// yet is 503 not_ready. A live letter's page is the documents service's,
+// stamped with the viewer and the time (livePage); any other letter that
+// isn't a demo letter is 503 unavailable.
 func (d Deps) page(w http.ResponseWriter, r *http.Request) {
 	id, ok := canonicalID(r.PathValue("id"))
 	ns := r.PathValue("n")
@@ -160,10 +164,11 @@ func (d Deps) page(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	p, _ := authz.FromContext(ctx)
+	var doc *uuid.UUID
 	err := d.tx(ctx, func(tx pgx.Tx) error {
 		var pages int
 		var demo bool
-		err := tx.QueryRow(ctx, `SELECT pages, demo FROM clearances WHERE id = $1`, id).Scan(&pages, &demo)
+		err := tx.QueryRow(ctx, `SELECT pages, demo, document_id FROM clearances WHERE id = $1`, id).Scan(&pages, &demo, &doc)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			return refusal{"not_found"}
@@ -173,6 +178,9 @@ func (d Deps) page(w http.ResponseWriter, r *http.Request) {
 			return refusal{"not_ready"}
 		case n > pages:
 			return refusal{"not_found"}
+		case doc != nil:
+			// A live letter: its pages are the documents service's.
+			return nil
 		case !demo:
 			return refusal{"unavailable"}
 		}
@@ -182,6 +190,14 @@ func (d Deps) page(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		d.fail(w, r, "page", err)
+		return
+	}
+	if doc != nil {
+		if d.Ctl == nil {
+			httpx.Error(w, r, "unavailable")
+			return
+		}
+		d.livePage(w, r, id, *doc, n)
 		return
 	}
 	body := fixturePage(n)

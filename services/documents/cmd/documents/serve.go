@@ -23,6 +23,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/ctl"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/dblogin"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/kek"
+	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/pages"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/s3"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/sandbox"
 	"github.com/Measured-Health/mhai-multiagent/services/documents/internal/scan"
@@ -323,12 +324,20 @@ func serve(getenv func(string) string) error {
 	go (&scan.Consumer{Scanner: scanner, Log: log, Metrics: &scan.ConsumerMetrics{}}).Run(ctx, js)
 	go (&scan.Sweeper{Due: scan.PGRows{Pool: pool}.Due, Scanner: scanner, Log: log}).Run(ctx)
 
+	// Stamped page images (PR 5): opened only with the keyring and the
+	// store ready, from the wrapped key the row holds.
+	pageImages := &pages.Handler{Rows: pages.PGRows{Pool: pool}, Ready: uploadReady(rd)}
+	if store != nil && keys != nil {
+		pageImages.Store = &storage.Store{Objects: store, Keys: keys}
+	}
+
 	r := &ctl.Responder{
 		Keys:   func() map[string]ed25519.PublicKey { return trusted },
 		Replay: replay.New(ctl.ReplayWindow, ctl.MaxReplayIDs),
 		Handlers: map[string]ctl.Handler{
 			"health":         healthHandler(rd),
 			"presign_upload": presign.Handle,
+			"page_image":     pageImages.Handle,
 		},
 		Log:     log,
 		Metrics: &ctl.Metrics{},

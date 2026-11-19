@@ -68,3 +68,34 @@ message PresignUploadReply {
   // Unix seconds; 10 minutes after the policy was signed.
   int64 expires_at = 4;
 }
+
+// documents.v1.ctl.page_image, as svc:core, hospital-bound (documents
+// design §10.1; §13 PR 5): one stored page, decrypted, scaled to at most
+// 1,600 px wide, stamped across with the viewer's display name and the
+// time, and encoded as a JPEG of at most 900 KB. Core asks only after its
+// own checks (the viewer's permission, the letter or the review lease),
+// and writes the view's audit entry before it sends the bytes on.
+message PageImageRequest {
+  // The documents row's id (a uuid).
+  string document_id = 1;
+  // The page, 1 to the document's page count.
+  uint32 n = 2;
+  // The viewer's display name, 1 to 120 characters, for the stamp only:
+  // never logged or stored by the documents service.
+  string viewer_name = 3;
+  // The time stamped on the page, Unix seconds (core's clock).
+  int64 at = 4;
+}
+
+// The stamped page, or a code. outcome: ok; not_found (no such document
+// or page in the token's hospital, or a document whose pages can't be
+// shown: not scanned clean, cancelled, rejected or purged); unavailable
+// (the keyring or the object store isn't ready, or the page couldn't be
+// opened). Only ok carries the image.
+message PageImageReply {
+  string outcome = 1;
+  // image/jpeg, at most 900 KB.
+  bytes jpeg = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+}

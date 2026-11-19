@@ -93,6 +93,9 @@ var Codes = map[string]int{
 	"too_many_rows": http.StatusUnprocessableEntity,
 	"gone":          http.StatusGone,
 	"already_used":  http.StatusConflict,
+	// Documents (documents design §10; PR 5, additive): the hospital's
+	// extraction queue is full.
+	"busy": http.StatusServiceUnavailable,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -149,6 +152,7 @@ var titles = map[string]string{
 	"too_many_rows":         "Too many rows",
 	"gone":                  "Gone",
 	"already_used":          "Already used",
+	"busy":                  "Busy",
 }
 
 var details = map[string]string{
@@ -202,6 +206,7 @@ var details = map[string]string{
 	"too_many_rows":         "More rows match than one export may hold.",
 	"gone":                  "This file has been downloaded or has expired.",
 	"already_used":          "This legal reference has already been resolved.",
+	"busy":                  "Too many documents are waiting to be read. Try again later.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.
