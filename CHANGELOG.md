@@ -43,6 +43,23 @@ All notable changes to this project are documented here. The format follows
 
 - Documents tests: the throwaway MinIO now waits for `/minio/health/ready`, not `/live`, and retries a 503 when making the bucket, so the S3, storage and upload integration tests no longer fail with "create bucket: unexpected status 503" on a busy runner.
 
+### Changed
+
+- Intelligence worker: the dense embedding model is loaded once per client
+  (`boundary.models.dense_factory`) and shared by every job, as the NLI model
+  already was, instead of being loaded again for every job. Only the weights
+  and tokenizer are shared (`SharedEncoder`, `encode()` under a lock); each
+  job still gets its own knowledge base, retriever, index (vectors, TF-IDF
+  vocabulary), CCA and HGA over its own chunks, so patient scoping is
+  unchanged. Without sentence-transformers the scikit-learn import is made
+  once. A model that fails to load is not kept: that job escalates, as before,
+  and the next job tries again. On the build server (20 sequential synthetic
+  jobs, CPU, all-MiniLM-L6-v2 and the NLI model): build and retrieval after
+  the first job went from 593-1307 ms to 101-111 ms (median), the 20 jobs from
+  23.6-47.7 s to 11.2-15.3 s, and peak RSS from 1.83-1.90 GB to 1.06-1.08 GB.
+  `tests/security/test_shared_model_isolation.py` pins the sharing and the
+  isolation (other patient, other hospital, concurrent jobs).
+
 ### Added
 
 - Documents PR 4, scanning and the sandbox (design §5; §17 departures
