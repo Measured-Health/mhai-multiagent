@@ -20,9 +20,8 @@ import (
 
 // Every route is a hospital admin's with a two-step session; every staff
 // write that changes an account (and the settings PATCH) is a step-up
-// route; the reminders and the reviewer assignment are plain writes; the
-// routes core has no feature behind are writes like the rest and answer
-// 501.
+// route (invites and resets included); the reminders and the reviewer
+// assignment are plain writes.
 func TestHospitalRouteRules(t *testing.T) {
 	m := authz.NewMux(nil)
 	hospital.Register(m, hospital.Deps{})
@@ -45,12 +44,12 @@ func TestHospitalRouteRules(t *testing.T) {
 		"GET /hospital/activity":                            read,
 		"GET /hospital/review-oversight":                    read,
 		"GET /hospital/corrections/{id}/eligible-reviewers": read,
-		"POST /hospital/staff/invites":                      write,
+		"POST /hospital/staff/invites":                      stepUp,
 		"DELETE /hospital/staff/{id}":                       stepUp,
-		"POST /hospital/staff/{id}/password-reset":          write,
+		"POST /hospital/staff/{id}/password-reset":          stepUp,
 		"POST /hospital/staff/{id}/reset-mfa":               stepUp,
 		"POST /hospital/staff/{id}/remind":                  write,
-		"POST /hospital/staff/{id}/resend-invite":           write,
+		"POST /hospital/staff/{id}/resend-invite":           stepUp,
 		"POST /hospital/corrections/{id}/remind":            write,
 		"POST /hospital/corrections/{id}/assign":            write,
 	}
