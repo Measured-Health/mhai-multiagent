@@ -356,6 +356,9 @@ func init() {
 	Register("auth.terms.accepted", Schema{Fields: fields("version", Pattern(termsVersion)), Required: []string{"version"}})
 	Register("auth.password.failed", Schema{Fields: fields("reason", OneOf("locked", "bad_current", "weak")), Required: []string{"reason"}})
 	Register("auth.password.changed", Schema{Fields: fields("sessions_revoked", count), Required: []string{"sessions_revoked"}})
+	// An invite's or a reset's link redeemed (POST /auth/password/reset).
+	Register("auth.password.reset", Schema{Fields: fields("purpose", OneOf("invite", "password_reset"), "sessions_revoked", count),
+		Required: []string{"purpose", "sessions_revoked"}})
 	Register("auth.mfa.locked", Schema{Fields: fields("reason", OneOf("token_attempts", "account_attempts")), Required: []string{"reason"}})
 	Register("auth.mfa.failed", Schema{Fields: fields("method", OneOf("token_mismatch", "otp", "backup", "none", "step_up")),
 		Required: []string{"method"}})
@@ -663,6 +666,12 @@ func init() {
 	Register("staff.mfa_reset", Schema{Fields: fields("sessions_revoked", count), Required: []string{"sessions_revoked"}})
 	Register("staff.mfa_reminded", Schema{})
 	Register("correction.reviewer_assigned", Schema{Fields: fields("assignee", id)})
+	Register("staff.invited", Schema{Fields: fields("roles", List(2, clinicalRole)), Required: []string{"roles"}})
+	Register("staff.invite_resent", Schema{})
+	// Addresses an invite skipped because they are in use outside the
+	// hospital (or by a platform account): a count, never an address.
+	Register("staff.invite_unavailable", Schema{Fields: fields("count", count), Required: []string{"count"}})
+	Register("staff.password_reset_sent", Schema{Fields: fields("sessions_revoked", count), Required: []string{"sessions_revoked"}})
 	Register("correction.reviewers_reminded", Schema{Fields: fields("recipients", count), Required: []string{"recipients"}})
 	Register("hospital_settings.changed", Schema{Fields: fields(
 		"fields", List(4, OneOf("review_overdue_hours", "require_mfa_for_clinicians", "idle_timeout_minutes", "allow_trust_device")),

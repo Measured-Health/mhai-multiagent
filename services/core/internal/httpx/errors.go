@@ -97,6 +97,9 @@ var Codes = map[string]int{
 	// configured to deliver what the action owes a person (no email
 	// provider yet), so nothing was changed.
 	"no_delivery": http.StatusServiceUnavailable,
+	// An invite's or a password reset's link that is unknown, used,
+	// replaced or expired (all alike).
+	"invalid_token": http.StatusGone,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -154,6 +157,7 @@ var titles = map[string]string{
 	"gone":                  "Gone",
 	"already_used":          "Already used",
 	"no_delivery":           "Message delivery not set up",
+	"invalid_token":         "Link not valid",
 }
 
 var details = map[string]string{
@@ -208,6 +212,7 @@ var details = map[string]string{
 	"gone":                  "This file has been downloaded or has expired.",
 	"already_used":          "This legal reference has already been resolved.",
 	"no_delivery":           "Messages can't be sent yet, so nothing was changed.",
+	"invalid_token":         "This link has expired or has already been used.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.

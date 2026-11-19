@@ -213,6 +213,9 @@ services:
       # reminders): no email provider yet, so the demo records them as due
       # and sends nothing (development only; core/README "Message delivery").
       CORE_DELIVERY: ${CORE_DELIVERY:-log}
+      # Where invite and reset links point (the clinical app); unset, they
+      # are paths the admin page resolves against its own address.
+      CORE_APP_URL: ${CORE_APP_URL:-}
       SECURITY_CONTACT_NAME: ${SECURITY_CONTACT_NAME:-}
       SECURITY_CONTACT_EMAIL: ${SECURITY_CONTACT_EMAIL:-}
       GOMEMLIMIT: 256MiB

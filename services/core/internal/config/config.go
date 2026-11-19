@@ -75,6 +75,10 @@ type Config struct {
 	// that must send something answers 503 no_delivery). No email
 	// provider is chosen yet (TODO.md).
 	Delivery string
+	// AppURL is CORE_APP_URL, the clinical app's address that invite and
+	// reset links point at (https outside development; http allowed in
+	// development). Empty: the links are relative paths.
+	AppURL string
 	// APIDocs serves the Redoc page and openapi.yaml (CORE_API_DOCS).
 	APIDocs            bool
 	HTTPAPI            bool
@@ -476,6 +480,12 @@ func Load() (Config, error) {
 		errs = append(errs, errors.New("CORE_DELIVERY must be log or none"))
 	}
 
+	if u, err := appURL(os.Getenv("CORE_APP_URL"), c.Development()); err != nil {
+		errs = append(errs, err)
+	} else {
+		c.AppURL = u
+	}
+
 	// Only this service's own credentials are read: the NATS password is in
 	// NATS_URL (or the NKey seed), the database password in DATABASE_URL.
 	// Other services' secrets (the worker's NATS password) are not in the
@@ -746,6 +756,30 @@ func (c Config) SingleNode() bool {
 }
 
 func (c Config) Development() bool { return strings.EqualFold(strings.TrimSpace(c.Env), "development") }
+
+// ShowLinks reports whether a hospital admin's invite and reset replies
+// carry the link: development with the log sender only (which sends
+// nothing), so the demo's admin can pass the link on.
+func (c Config) ShowLinks() bool { return c.Development() && c.Delivery == DeliveryLog }
+
+// appURL checks CORE_APP_URL: an absolute https URL (http in development)
+// with a host and nothing after the path; empty is allowed. The error
+// names the variable, never the value.
+func appURL(raw string, dev bool) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	bad := errors.New("CORE_APP_URL must be an absolute https URL of the clinical app (http only in development), without a query or fragment")
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return "", bad
+	}
+	if u.Scheme != "https" && (u.Scheme != "http" || !dev) {
+		return "", bad
+	}
+	return strings.TrimRight(u.String(), "/"), nil
+}
 
 func getenv(name, def string) string {
 	if v := os.Getenv(name); v != "" {
