@@ -4,18 +4,31 @@
 //   - staff: GET /hospital/staff; PATCH /hospital/staff/{id} (roles and
 //     specialty, Analyst through migration 00030's functions);
 //     POST /hospital/staff/{id}/deactivate and /reactivate;
+//
 //   - settings: GET and PATCH /hospital/settings;
+//
 //   - usage: GET /hospital/usage?period=, with the EMR alert block
 //     (alerts.UsageBlock);
+//
 //   - activity: GET /hospital/activity, the hospital's own audit entries
 //     as structured events;
-//   - review oversight: GET /hospital/review-oversight and GET
-//     /hospital/corrections/{id}/eligible-reviewers.
 //
-// What core has no feature behind (email delivery, invites, password and
-// two-step resets by an admin, account removal, reviewer reminders and
-// assignment) is registered and answers 501 not_implemented, so the app
-// shows a clear refusal rather than a 404.
+//   - review oversight: GET /hospital/review-oversight and GET
+//     /hospital/corrections/{id}/eligible-reviewers;
+//
+//   - account actions (actions.go): DELETE /hospital/staff/{id} (removal),
+//     POST /hospital/staff/{id}/reset-mfa and /remind;
+//
+//   - reviewer assignment and reminders (review.go): POST
+//     /hospital/corrections/{id}/assign and /remind.
+//
+//   - invites and password resets (tokens.go): POST /hospital/staff/invites,
+//     /hospital/staff/{id}/resend-invite and /password-reset.
+//
+// An action that sends a person a message (an invite or reset link, a
+// notice, a reminder) hands it to Deps.Sender (internal/delivery); with
+// none configured it fails closed with 503 no_delivery before changing
+// anything.
 //
 // Every route is a hospital admin's with a two-step session. Every staff
 // write also takes a fresh step-up code (mfa_code or backup_code in the
@@ -46,6 +59,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
@@ -60,6 +74,15 @@ type Deps struct {
 	// Notify tells the hospital's admins of an Analyst grant, after
 	// commit; nil uses analysis.NotifyAnalystGranted.
 	Notify analysis.Notifier
+	// Sender delivers the messages the actions owe a person (links,
+	// notices, reminders); nil answers those actions 503 no_delivery.
+	Sender delivery.Sender
+	// AppURL is the clinical app's address the links point at
+	// (CORE_APP_URL); empty makes them relative ("/reset-password?...").
+	AppURL string
+	// ShowLinks puts an invite's or reset's link in the reply, once:
+	// development with the log sender only (which sends nothing).
+	ShowLinks bool
 	// Now is the clock (usage periods, activity window); defaults to
 	// time.Now.
 	Now func() time.Time
@@ -96,19 +119,6 @@ var (
 	StepUpRule = authz.Rule{AnyRole: admin, NeedsMFA: true, Write: true, StepUp: true}
 )
 
-// Unsupported are the routes the app calls that core has no feature
-// behind: each answers 501 not_implemented.
-var Unsupported = []struct{ Method, Pattern string }{
-	{http.MethodPost, "/hospital/staff/invites"},
-	{http.MethodDelete, "/hospital/staff/{id}"},
-	{http.MethodPost, "/hospital/staff/{id}/password-reset"},
-	{http.MethodPost, "/hospital/staff/{id}/reset-mfa"},
-	{http.MethodPost, "/hospital/staff/{id}/remind"},
-	{http.MethodPost, "/hospital/staff/{id}/resend-invite"},
-	{http.MethodPost, "/hospital/corrections/{id}/remind"},
-	{http.MethodPost, "/hospital/corrections/{id}/assign"},
-}
-
 // Register adds the routes.
 func Register(m *authz.Mux, d Deps) {
 	for _, rt := range routes(d) {
@@ -135,20 +145,18 @@ func routes(d Deps) []Route {
 		{http.MethodGet, "/hospital/activity", ReadRule, http.HandlerFunc(d.activity)},
 		{http.MethodGet, "/hospital/review-oversight", ReadRule, http.HandlerFunc(d.oversight)},
 		{http.MethodGet, "/hospital/corrections/{id}/eligible-reviewers", ReadRule, http.HandlerFunc(d.eligibleReviewers)},
-	}
-	for _, u := range Unsupported {
-		out = append(out, Route{u.Method, u.Pattern, WriteRule, http.HandlerFunc(notImplemented)})
+		{http.MethodDelete, "/hospital/staff/{id}", StepUpRule, d.staffRemove()},
+		{http.MethodPost, "/hospital/staff/{id}/reset-mfa", StepUpRule, d.staffResetMFA()},
+		{http.MethodPost, "/hospital/staff/{id}/remind", WriteRule, d.staffRemind()},
+		{http.MethodPost, "/hospital/corrections/{id}/assign", WriteRule, http.HandlerFunc(d.reviewAssign)},
+		{http.MethodPost, "/hospital/corrections/{id}/remind", WriteRule, http.HandlerFunc(d.reviewRemind)},
+		// The routes that issue a link never keep their reply for an
+		// Idempotency-Key replay: a retry runs again.
+		{http.MethodPost, "/hospital/staff/invites", StepUpRule, httpx.NoStore(http.HandlerFunc(d.staffInvite))},
+		{http.MethodPost, "/hospital/staff/{id}/resend-invite", StepUpRule, httpx.NoStore(d.staffResendInvite())},
+		{http.MethodPost, "/hospital/staff/{id}/password-reset", StepUpRule, httpx.NoStore(d.staffPasswordReset())},
 	}
 	return out
-}
-
-// notImplemented answers a route core has no feature behind. The caller
-// is checked first, so the guard's refusals still come before it.
-func notImplemented(w http.ResponseWriter, r *http.Request) {
-	if _, ok := caller(w, r); !ok {
-		return
-	}
-	httpx.Error(w, r, "not_implemented")
 }
 
 // caller is the verified clinical principal, or a 500 (the guard always
@@ -172,6 +180,11 @@ var (
 	errDecided    = errors.New("hospital: already decided")
 	errBusy       = errors.New("hospital: busy")
 	errNotEnabled = errors.New("hospital: not eligible")
+	// The message actions: no sender configured; the per-person or
+	// per-correction limit reached; nobody to remind.
+	errNoDelivery   = errors.New("hospital: no delivery")
+	errRateLimited  = errors.New("hospital: rate limited")
+	errNoRecipients = errors.New("hospital: no recipients")
 )
 
 // codeFor maps an error to its problem code. A driver error is never sent
@@ -200,6 +213,12 @@ func codeFor(err error) string {
 		return "analyst_cap"
 	case errors.Is(err, analysis.ErrAnalystNotEligible), errors.Is(err, errNotEnabled):
 		return "not_eligible"
+	case errors.Is(err, errNoDelivery), errors.Is(err, delivery.ErrNoSender):
+		return "no_delivery"
+	case errors.Is(err, errRateLimited):
+		return "rate_limited"
+	case errors.Is(err, errNoRecipients):
+		return "no_recipients"
 	}
 	return "internal_error"
 }

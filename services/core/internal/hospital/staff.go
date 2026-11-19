@@ -71,8 +71,10 @@ type StaffOut struct {
 	IsYou             bool     `json:"is_you"`
 	Version           int      `json:"version"`
 
-	active bool
-	uid    uuid.UUID
+	active  bool
+	mfa     bool
+	invited bool
+	uid     uuid.UUID
 }
 
 func (s StaffOut) has(role string) bool { return slices.Contains(s.Roles, role) }
@@ -82,27 +84,40 @@ const staffSelect = `SELECT u.id, COALESCE(u.full_name, u.display_name), u.displ
 	COALESCE(m.enabled, false), u.password_hash IS NOT NULL, u.oidc_subject IS NOT NULL,
 	GREATEST(u.last_login_at, (SELECT max(s.last_seen_at) FROM sessions s WHERE s.user_id = u.id)),
 	u.created_at, u.staff_version,
-	COALESCE((SELECT hs.require_mfa_for_clinicians FROM hospital_settings hs WHERE hs.hospital_id = u.hospital_id), true)
-	FROM users u LEFT JOIN user_mfa m ON m.user_id = u.id
-	WHERE u.hospital_id = $1`
+	COALESCE((SELECT hs.require_mfa_for_clinicians FROM hospital_settings hs WHERE hs.hospital_id = u.hospital_id), true),
+	u.invited_at, t.expires_at
+	FROM users u LEFT JOIN account_tokens t ON t.user_id = u.id AND t.purpose = 'invite' AND t.used_at IS NULL AND t.revoked_at IS NULL LEFT JOIN user_mfa m ON m.user_id = u.id
+	WHERE u.hospital_id = $1 AND u.removed_at IS NULL`
 
 func scanStaff(row pgx.Row, me uuid.UUID) (StaffOut, error) {
 	var s StaffOut
 	var mfa, pwd, sso, requireClin bool
-	var last *time.Time
+	var last, invited, inviteExpires *time.Time
 	var joined time.Time
 	if err := row.Scan(&s.uid, &s.FullName, &s.DisplayName, &s.Email, &s.Specialty, &s.active, &s.Roles, &mfa, &pwd, &sso,
-		&last, &joined, &s.Version, &requireClin); err != nil {
+		&last, &joined, &s.Version, &requireClin, &invited, &inviteExpires); err != nil {
 		return s, err
 	}
 	s.ID = s.uid.String()
+	s.mfa = mfa
 	s.Roles = sortStaffRoles(s.Roles)
 	s.Status = "deactivated"
 	if s.active {
 		s.Status = "active"
 	}
+	// Invited: an invite's account that has no way to sign in yet (the
+	// person hasn't chosen a password through the invite's link). The
+	// contract's status and issues enums are unchanged (additive only):
+	// an invitee is shown by invited_at, and invite_expires_at is their
+	// live link's expiry, null when they have none (expired or revoked:
+	// the client compares it with the time).
+	s.invited = invited != nil && !pwd && !sso
 	s.Issues = []string{}
-	if !mfa && authz.NeedsMFA(s.Roles, requireClin) {
+	switch {
+	case s.invited:
+		s.InvitedAt = stampPtr(invited)
+		s.InviteExpiresAt = stampPtr(inviteExpires)
+	case !mfa && authz.NeedsMFA(s.Roles, requireClin):
 		s.Issues = append(s.Issues, "mfa_not_set_up")
 	}
 	var method string
@@ -119,10 +134,12 @@ func scanStaff(row pgx.Row, me uuid.UUID) (StaffOut, error) {
 	}
 	// Core has no reviewer assignment: every active clinician reviews every
 	// correction, in every specialty (empty means all).
-	s.CanReview = s.active && s.has(authz.RoleClinician)
+	s.CanReview = s.active && !s.invited && s.has(authz.RoleClinician)
 	s.ReviewSpecialties = []string{}
 	s.LastActiveAt = stampPtr(last)
-	s.JoinedAt = stampPtr(&joined)
+	if !s.invited {
+		s.JoinedAt = stampPtr(&joined)
+	}
 	s.IsYou = s.uid == me
 	return s, nil
 }
@@ -588,32 +605,18 @@ func (d Deps) staffStatus(activate bool) http.Handler {
 			}
 			action, payload := "staff.reactivated", map[string]any{}
 			if !activate {
-				rows, err := tx.Query(ctx, `UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL
-					RETURNING id, access_jti`, id)
-				if err != nil {
-					return err
-				}
-				for rows.Next() {
-					var sid uuid.UUID
-					var jti *uuid.UUID
-					if err := rows.Scan(&sid, &jti); err != nil {
-						rows.Close()
-						return err
-					}
-					var js []string
-					if jti != nil {
-						js = append(js, jti.String())
-					}
-					revoked[sid.String()] = js
-				}
-				rows.Close()
-				if err := rows.Err(); err != nil {
+				var err error
+				if revoked, err = revokeSessions(ctx, tx, id); err != nil {
 					return err
 				}
 				// Trusted devices go too, so a reactivation brings back no
 				// two-step bypass, and Analyst is removed through 00030's
 				// function (audited), so a reactivation needs a fresh grant.
 				if _, err := tx.Exec(ctx, `DELETE FROM trusted_devices WHERE user_id = $1`, id); err != nil {
+					return err
+				}
+				// A live invite or reset link dies too.
+				if err := revokeTokens(ctx, tx, id); err != nil {
 					return err
 				}
 				if _, err := analysis.RemoveAnalyst(ctx, tx, id, httpx.RequestIDFrom(ctx)); err != nil {
@@ -645,4 +648,29 @@ func (d Deps) staffStatus(activate bool) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		httpx.JSON(w, http.StatusOK, person)
 	})
+}
+
+// revokeSessions revokes every live session of person id in tx and
+// returns them with their access token ids, for the denylist after commit.
+func revokeSessions(ctx context.Context, tx pgx.Tx, id uuid.UUID) (map[string][]string, error) {
+	revoked := map[string][]string{}
+	rows, err := tx.Query(ctx, `UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL
+		RETURNING id, access_jti`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sid uuid.UUID
+		var jti *uuid.UUID
+		if err := rows.Scan(&sid, &jti); err != nil {
+			return nil, err
+		}
+		var js []string
+		if jti != nil {
+			js = append(js, jti.String())
+		}
+		revoked[sid.String()] = js
+	}
+	return revoked, rows.Err()
 }

@@ -8,6 +8,36 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Hospital admin: invites and password resets (core OpenAPI 1.34.0,
+  migration 00050).** `POST /hospital/staff/invites`,
+  `/hospital/staff/{id}/resend-invite` and `/password-reset` (step-up)
+  now work: an invite creates an account (`invited_at` set, no password) with a link
+  valid 3 days; a reset signs the person out and sends a link valid 30
+  minutes. Links are redeemed at the new public
+  `POST /auth/password/reset` (an invited person's first password, or a
+  new one), rate-limited per client IP, 410 `invalid_token` (new code) for
+  any unusable link. Tokens are 32 random bytes stored only as SHA-256,
+  single use, one live per person and purpose. They go to the configured
+  sender only; on a development server with the log sender the reply
+  carries the link once (`link`) so the demo's admin can pass it on.
+  `CORE_APP_URL` (new, optional) is the clinical app's address for the
+  links.
+
+- **Hospital admin: removal, two-step reset and reminders, reviewer
+  assignment and reminders (core OpenAPI 1.33.0, migration 00049).** The
+  routes that answered 501 `not_implemented` now work:
+  `DELETE /hospital/staff/{id}` (step-up; the account is removed for good,
+  its past work stays attributed), `POST /hospital/staff/{id}/reset-mfa`
+  (step-up), `POST /hospital/staff/{id}/remind`,
+  `POST /hospital/corrections/{id}/assign` and `/remind`. Not yourself, not
+  the last admin, another hospital's person or correction is 404, every
+  action audited by ids. Messages go through the new `internal/delivery`:
+  an outbox row records only that a message is due, and the sender gets it
+  after commit; `CORE_DELIVERY=log` (development only) sends nothing, and
+  with no sender each action that must send something answers 503
+  `no_delivery` (new code) before changing anything. The oversight now
+  shows `assigned_to` and `reminded_at`.
+
 - **The public demo runs connected, on synthetic data (16 Nov).** Until the
   trained weights arrive, the demo host answers questions with labelled
   sample answers through the real stack (deploy/README.md, "Public demo:

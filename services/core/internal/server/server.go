@@ -17,6 +17,7 @@ import (
 	analysisroutes "github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis/routes"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/feedback"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/hospital"
@@ -73,6 +74,14 @@ type Deps struct {
 	// AuditExports is CORE_AUDIT_EXPORTS: off, every audit export route
 	// and the legal-reference route answer 404 (analysis plan departure 61).
 	AuditExports bool
+	// Sender delivers what the hospital admin's actions owe a person
+	// (CORE_DELIVERY); nil answers those actions 503 no_delivery.
+	Sender delivery.Sender
+	// AppURL is the clinical app's address for invite and reset links
+	// (CORE_APP_URL); ShowLinks puts the link in the admin's reply, on
+	// development with the log sender only.
+	AppURL    string
+	ShowLinks bool
 }
 
 // Register adds every route to m.
@@ -114,7 +123,8 @@ func Register(m *authz.Mux, d Deps) {
 	// The hospital admin's staff, settings, usage, activity and review
 	// oversight pages (frontend requirements §5); staff writes take a
 	// step-up code, and Analyst goes through migration 00030's functions.
-	hospital.Register(m, hospital.Deps{Pool: d.Pool, Log: a.Log, Auth: a})
+	hospital.Register(m, hospital.Deps{Pool: d.Pool, Log: a.Log, Auth: a, Sender: d.Sender,
+		AppURL: d.AppURL, ShowLinks: d.ShowLinks})
 	// A clinician's patient lookup by MRN (TODO.md design note, 14 Nov):
 	// exact match in the caller's hospital, rate-limited and audited; 404
 	// unless EMR is on.

@@ -31,6 +31,7 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/auth/mfa/recovery-codes` | signed in | any | both | no | yes | no |
 | POST | `/api/v1/auth/mfa/verify` | enrolment | any | both | no | no | no |
 | POST | `/api/v1/auth/password` | enrolment | any | both | no | no | no |
+| POST | `/api/v1/auth/password/reset` | public | - | - | no | no | no |
 | POST | `/api/v1/auth/refresh` | public | - | - | no | no | no |
 | GET | `/api/v1/auth/sessions` | signed in | any | both | no | no | no |
 | POST | `/api/v1/auth/sessions/revoke-all` | signed in | any | both | no | no | no |
@@ -67,15 +68,15 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/hospital/settings` | signed in | `hospital_admin` | clinical | yes | no | no |
 | PATCH | `/api/v1/hospital/settings` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | GET | `/api/v1/hospital/staff` | signed in | `hospital_admin` | clinical | yes | no | no |
-| POST | `/api/v1/hospital/staff/invites` | signed in | `hospital_admin` | clinical | yes | no | yes |
-| DELETE | `/api/v1/hospital/staff/{id}` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| POST | `/api/v1/hospital/staff/invites` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| DELETE | `/api/v1/hospital/staff/{id}` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | PATCH | `/api/v1/hospital/staff/{id}` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | POST | `/api/v1/hospital/staff/{id}/deactivate` | signed in | `hospital_admin` | clinical | yes | yes | yes |
-| POST | `/api/v1/hospital/staff/{id}/password-reset` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| POST | `/api/v1/hospital/staff/{id}/password-reset` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | POST | `/api/v1/hospital/staff/{id}/reactivate` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | POST | `/api/v1/hospital/staff/{id}/remind` | signed in | `hospital_admin` | clinical | yes | no | yes |
-| POST | `/api/v1/hospital/staff/{id}/resend-invite` | signed in | `hospital_admin` | clinical | yes | no | yes |
-| POST | `/api/v1/hospital/staff/{id}/reset-mfa` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| POST | `/api/v1/hospital/staff/{id}/resend-invite` | signed in | `hospital_admin` | clinical | yes | yes | yes |
+| POST | `/api/v1/hospital/staff/{id}/reset-mfa` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | GET | `/api/v1/hospital/usage` | signed in | `hospital_admin` | clinical | yes | no | no |
 | GET | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | no |
 | PATCH | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | yes |
