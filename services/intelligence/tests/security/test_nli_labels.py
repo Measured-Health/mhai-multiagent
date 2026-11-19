@@ -1,5 +1,6 @@
 """NLI verifiers must read the label order from the model, not assume MNLI's."""
 
+import threading
 from types import SimpleNamespace
 
 import torch
@@ -32,6 +33,7 @@ class FakeTokenizer:
 def _verifier(model):
     v = NLIEntailmentVerifier.__new__(NLIEntailmentVerifier)
     v.model, v.tokenizer, v.device, v._loaded = model, FakeTokenizer(), "cpu", True
+    v._lock = threading.Lock()
     v.label_map = nli_label_map(model)
     return v
 

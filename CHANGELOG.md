@@ -57,8 +57,13 @@ All notable changes to this project are documented here. The format follows
   jobs, CPU, all-MiniLM-L6-v2 and the NLI model): build and retrieval after
   the first job went from 593-1307 ms to 101-111 ms (median), the 20 jobs from
   23.6-47.7 s to 11.2-15.3 s, and peak RSS from 1.83-1.90 GB to 1.06-1.08 GB.
+  The shared NLI verifier now tokenises and runs inference under its own lock
+  as well, so two concurrent jobs can't collide in the fast tokenizer
+  ("Already borrowed") and escalate a question for no reason (4 threads x 20
+  jobs on the build server: 13.4-13.6 s with the lock, 20.9-21.3 s without).
   `tests/security/test_shared_model_isolation.py` pins the sharing and the
-  isolation (other patient, other hospital, concurrent jobs).
+  isolation (other patient, other hospital, concurrent jobs), and that
+  concurrent jobs get the same verdicts as sequential ones.
 
 ### Added
 

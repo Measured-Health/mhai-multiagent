@@ -16,6 +16,7 @@ import hashlib
 import re
 import sys
 import threading
+import time
 import types
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -280,3 +281,122 @@ def test_the_default_profile_build_is_unchanged(fakes: None) -> None:
     _, chunks = _job("h1", "pa")
     orch = build(chunks, profile=answer_profile.DEFAULT)  # type: ignore[call-arg]
     assert _dense(orch).model is not None
+
+
+# ------------------------------------------------------------------ the shared NLI model
+
+REAL_NLI = hga_nli.NLIEntailmentVerifier
+NLI_LABELS = {0: "contradiction", 1: "neutral", 2: "entailment"}
+SUPPORTED = "Confirm malaria by smear [KB#0099]."
+UNSUPPORTED = "Give synthetic quinine tonight [KB#0099]."
+
+
+class CollidingTokenizer:
+    """Behaves like a fast (Rust) tokenizer used from two threads at once: the second
+    caller gets RuntimeError("Already borrowed"). It holds the call open briefly so
+    concurrent jobs overlap."""
+
+    def __init__(self) -> None:
+        self._busy = threading.Lock()
+        self.collisions = 0
+
+    def __call__(self, premise: str, hypothesis: str, **kwargs: Any) -> Any:
+        import torch
+
+        if not self._busy.acquire(blocking=False):
+            self.collisions += 1
+            raise RuntimeError("Already borrowed")
+        try:
+            time.sleep(0.002)
+            words = set(re.findall(r"[a-z0-9]+", premise.lower()))
+            entailed = set(re.findall(r"[a-z0-9]+", hypothesis.lower())) <= words
+            return _Inputs(flag=torch.tensor([1.0 if entailed else 0.0]))
+        finally:
+            self._busy.release()
+
+
+class _Inputs(dict):  # type: ignore[type-arg]
+    def to(self, device: str) -> _Inputs:
+        return self
+
+
+class WordOverlapNLI:
+    """Entailment when the tokenizer said every hypothesis word is in the premise."""
+
+    def __call__(self, flag: Any) -> Any:
+        import torch
+
+        logits = (
+            torch.tensor([[-5.0, 5.0, -5.0]]) if not flag[0] else torch.tensor([[-5.0, -5.0, 5.0]])
+        )
+        return types.SimpleNamespace(logits=logits)
+
+
+class ClaimGenerator:
+    name = "synthetic-claims"
+
+    def generate(self, system: str, query: str) -> str:
+        return UNSUPPORTED if "unsupported" in query else SUPPORTED
+
+
+@pytest.fixture
+def shared_nli(fakes: None, monkeypatch: pytest.MonkeyPatch) -> CollidingTokenizer:
+    """The real NLIEntailmentVerifier (shared by nli_factory) over a fake model whose
+    tokenizer fails on concurrent use, as the real fast tokenizer can."""
+    pytest.importorskip("torch")
+    tokenizer = CollidingTokenizer()
+
+    def load(self: Any, device: str) -> None:
+        self.tokenizer, self.model, self.device = tokenizer, WordOverlapNLI(), "cpu"
+        self.label_map, self._loaded = dict(NLI_LABELS), True
+
+    monkeypatch.setattr(hga_nli, "NLIEntailmentVerifier", REAL_NLI)
+    monkeypatch.setattr(REAL_NLI, "_try_load_model", load)
+    return tokenizer
+
+
+def _verdict(client: models.OrchestratorModelClient, job: int) -> tuple[Any, ...]:
+    pid, chunks = _job(f"h{job % 4}", f"p{job}")
+    question = "Synthetic unsupported question?" if job % 2 else "Synthetic malaria question?"
+    g = client.generate(question, {"age_years": 30}, pid, chunks)
+    v = client.verify(g)
+    return (v.decision, v.trust_score, v.verified, v.failed_agents, v.flags)
+
+
+def test_concurrent_jobs_share_the_nli_model_without_colliding(
+    shared_nli: CollidingTokenizer,
+) -> None:
+    client = models.OrchestratorModelClient(
+        models.local_parts(generator=ClaimGenerator())[0], masker=object()
+    )
+    jobs = list(range(12))
+    sequential = {j: _verdict(client, j) for j in jobs}
+    assert {v[0] for v in sequential.values()} >= {"PASS"}  # the fixture can pass
+    assert all(v[2] and "HGA" not in v[3] for v in sequential.values())
+    start = threading.Barrier(len(jobs))
+
+    def run(job: int) -> tuple[int, tuple[Any, ...]]:
+        start.wait(timeout=30)
+        return job, _verdict(client, job)
+
+    for _ in range(3):
+        with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+            concurrent = dict(pool.map(run, jobs))
+        assert concurrent == sequential
+    assert shared_nli.collisions == 0
+    assert len(FakeSentenceTransformer.made) == 1
+
+
+def test_the_nli_verifier_serialises_its_tokenizer(shared_nli: CollidingTokenizer) -> None:
+    verifier = REAL_NLI("synthetic-nli", device="cpu")
+    start = threading.Barrier(8)
+
+    def run(i: int) -> str:
+        start.wait(timeout=30)
+        premise = "Synthetic guideline: confirm malaria by smear."
+        return verifier.verify(premise, "Confirm malaria by smear.").label.value
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        labels = list(pool.map(run, range(8)))
+    assert labels == ["entailment"] * 8
+    assert shared_nli.collisions == 0
