@@ -49,7 +49,7 @@ def test_request_shape() -> None:
     request, reply = kit.render(P, F, p)
     assert str(request.url) == "https://api.anthropic.com/v1/messages"
     assert request.method == "POST"
-    # anthropic 2.3.0 sends the key as a bearer token, not x-api-key.
+    # anthropic 2.8.0 sends the key as a bearer token, not x-api-key.
     assert request.headers["authorization"] == f"Bearer {FAKE_KEY}"
     assert "x-api-key" not in request.headers
     assert "anthropic-version" in request.headers
