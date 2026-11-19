@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The public demo resets on a schedule (19 Nov).** `core demo reset` (the
+  seed's code and guards) removes what visitors made in the demo hospital
+  `DEM` (consultations, feedback and corrections beyond the seeded samples,
+  accounts they added), signs the sample accounts out, clears their sign-in
+  ceiling and two-step counters in NATS, then reseeds; audited
+  `demo.reset`, counts only. The "Reset backend demo" workflow runs it on
+  the demo host through the deploy's SSH path every `DEMO_RESET_HOURS`
+  (default 6; `DEMO_RESET=off` stops it), as the one-shot `core-demo-reset`
+  (deploy/README.md, "Public demo: the scheduled reset").
+
 - **The public demo runs connected, on synthetic data (16 Nov).** Until the
   trained weights arrive, the demo host answers questions with labelled
   sample answers through the real stack (deploy/README.md, "Public demo:

@@ -587,6 +587,13 @@ func init() {
 	// hospital is the row's entity; counts of accounts created and reset.
 	Register("demo.seeded", Schema{Fields: fields("via", OneOf("cli"), "created", count, "reset", count),
 		Required: []string{"via", "created", "reset"}})
+	// The public demo's scheduled reset (core demo reset, demo host only):
+	// counts of what visitors made in the demo hospital and was removed, the
+	// accounts they added and were deactivated, what was kept in flight,
+	// and the sample accounts' sign-in counters cleared. Counts only.
+	Register("demo.reset", Schema{Fields: fields("via", OneOf("cli"), "consultations", count, "feedback", count,
+		"jobs", count, "deactivated", count, "in_flight", count, "counters", count),
+		Required: []string{"via", "consultations", "feedback", "jobs", "deactivated", "in_flight", "counters"}})
 	// Patient Analysis reads (analysis backend design D7; plan Task 10):
 	// the view, the period and the filters' codes and opaque ids, once per
 	// session, filter set and period; and the day a person passes 100

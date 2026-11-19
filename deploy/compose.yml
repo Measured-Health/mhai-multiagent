@@ -381,6 +381,33 @@ services:
     depends_on:
       core-migrate: { condition: service_completed_successfully }
 
+  # The public demo's scheduled reset (profile demo; deploy/demo/reset-demo.sh,
+  # run by the "Reset backend demo" workflow): core demo reset, the seed's
+  # own code and guards, which removes what visitors made in the demo
+  # hospital DEM and puts the sample accounts back. A one-shot like the seed
+  # (no restart, no port, backend only). Beyond the seed it reaches NATS as
+  # core (the same NKey file, read-only) to clear the sample accounts'
+  # sign-in counters, the only keys it names.
+  core-demo-reset:
+    <<: [*hardening, *core-image]
+    profiles: ["demo"]
+    restart: "no"
+    command: ["demo", "reset"]
+    environment:
+      DATABASE_URL: postgres://pgadmin:${POSTGRES_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=disable
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set in /srv/mhai-backend/.env}
+      MHAI_DEMO_SEED: "on"
+      APP_ENV: demo
+      NATS_URL: nats://nats:4222
+      NATS_NKEY_SEED_PATH: /run/secrets/nats-gateway.nk
+    volumes:
+      - ./secrets/nats-gateway.nk:/run/secrets/nats-gateway.nk:ro
+    mem_limit: 128m
+    networks: [backend]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+
   # The public demo's sample answers (profile demo; deploy/demo/enable-demo.sh
   # starts it, never beside the pilot's pipeline). The real pipeline worker
   # with INTELLIGENCE_MODEL_CLIENT=sample (services/intelligence, boundary/
