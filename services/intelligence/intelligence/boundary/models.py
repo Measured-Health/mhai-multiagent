@@ -522,6 +522,56 @@ def set_hub_offline() -> None:
         constants.HF_HUB_OFFLINE = True  # type: ignore[attr-defined]
 
 
+class SharedEncoder:
+    """One loaded sentence-transformers model, shared by every job's retriever.
+
+    It holds the weights and the tokenizer only: no chunk, vector or vocabulary
+    of any job (each job's DenseRetriever keeps its own index). encode() runs
+    under a lock, as a fast tokenizer must not be used from two threads at once;
+    on CPU one encode already uses every core, so the lock costs little."""
+
+    def __init__(self, model: Any) -> None:
+        self._model = model
+        self._lock = threading.Lock()
+
+    def encode(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return self._model.encode(*args, **kwargs)
+
+    def get_sentence_embedding_dimension(self) -> int | None:
+        dim = self._model.get_sentence_embedding_dimension()
+        return None if dim is None else int(dim)
+
+
+def dense_factory(model_name: str, device: str = "cpu") -> Callable[[], SharedEncoder | None]:
+    """The shared dense model, loaded on first use (on a job's thread) and reused
+    by every later job of this client: a SharedEncoder, or None when
+    sentence-transformers is not installed (each job's retriever then indexes with
+    TF-IDF, whose scikit-learn import is made here, once). Only a load that
+    succeeds, or the missing package, is kept: a load that raises raises again on
+    the next job's call, so that job fails to build and escalates, as before."""
+    lock = threading.Lock()
+    shared: dict[str, SharedEncoder | None] = {}
+
+    def dense() -> SharedEncoder | None:
+        with lock:
+            if "dense" not in shared:
+                try:
+                    from sentence_transformers import SentenceTransformer
+                except ImportError:
+                    log.warning("dense model unavailable: TF-IDF fallback")
+                    try:
+                        import sklearn.feature_extraction.text  # noqa: F401
+                    except ImportError:
+                        pass  # each job's TF-IDF index fails, and the job escalates
+                    shared["dense"] = None
+                else:
+                    shared["dense"] = SharedEncoder(SentenceTransformer(model_name, device=device))
+            return shared["dense"]
+
+    return dense
+
+
 def nli_factory(model_name: str, pinned: PinnedSource, *, pinned_nli: bool) -> Callable[[], Any]:
     """The shared NLI verifier, made on first use: the configured model.
     pinned_nli is the path for when nli becomes pinnable; until its suite
@@ -589,8 +639,9 @@ def default_orchestrator(
 ) -> OrchestratorModelClient:
     """The production client: each job gets its own knowledge base,
     retriever, CCA and HGA over that job's chunks (departure 10: indexing
-    per job; a cached index is performance-plan work). The NLI model and
-    the generator are shared: they hold no per-request state. Loads
+    per job; a cached index is performance-plan work). The dense model, the
+    NLI model and the generator are shared: they hold no per-request state
+    (dense_factory, nli_factory). Loads
     the models on first use, on the job's thread. pinned gives what the
     worker verified (None until then); pinned_roles are the roles it needs;
     settings the local route's (local_generator; None: the defaults, and
@@ -715,13 +766,15 @@ def local_parts(
         nli = _local_nli(local_models["nli"])
     else:
         nli = nli_factory(str(cfg.NLI_MODEL), source, pinned_nli=pinned_nli)
+    # The weights are loaded once and shared; the index over a job's chunks never is.
+    dense = dense_factory(dense_name)
 
     def build(
         chunks: Sequence[KBChunk], profile: AnswerProfile = answer_profile.DEFAULT
     ) -> DynamicOrchestratorAgent:
         kb = MedicalKnowledgeBase()
         kb.chunks = {c.chunk_id: c for c in chunks}
-        retriever = HybridRetriever(dense_model=dense_name, device="cpu")
+        retriever = HybridRetriever(dense_model=dense_name, device="cpu", encoder=dense)
         retriever.index_kb(kb)
         verifier = nli()
         hga = answer_profile.wrap_hga(
