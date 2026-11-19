@@ -23,6 +23,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/hospital"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
@@ -80,6 +81,45 @@ type world struct {
 	mu              sync.Mutex
 	notified        []uuid.UUID
 	codesChecked    int
+	// sent are the messages handed to the world's sender (it is the
+	// sender: Channel and Send below); sendErr makes Send fail.
+	sent    []delivery.Message
+	sendErr error
+	// deps are the routes' dependencies, for tests that serve a variant.
+	deps hospital.Deps
+}
+
+func (w *world) Channel() string { return "log" }
+
+func (w *world) Send(_ context.Context, m delivery.Message) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.sendErr != nil {
+		return w.sendErr
+	}
+	w.sent = append(w.sent, m)
+	return nil
+}
+
+func (w *world) sentTo(kind delivery.Kind) []uuid.UUID {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []uuid.UUID
+	for _, m := range w.sent {
+		if m.Kind == kind {
+			out = append(out, m.Recipient)
+		}
+	}
+	return out
+}
+
+// serve replaces the world's routes with d's.
+func (w *world) serve(d hospital.Deps) {
+	w.mux = http.NewServeMux()
+	for k, h := range hospital.Handlers(d) {
+		method, path, _ := strings.Cut(k, " ")
+		w.mux.Handle(method+" "+httpx.BasePath+path, h)
+	}
 }
 
 func exec(t *testing.T, q string, args ...any) {
@@ -134,7 +174,7 @@ func newWorld(t *testing.T) *world {
 	w.ben = person(t, w.h, "Synth Ben Nwosu-"+tag, "ben-"+tag+"@h1.example.test", false, "clinician")
 	w.other = person(t, w.h2, otherName, strings.Replace(otherEmail, "x9", tag, 1), true, "clinician", "hospital_admin")
 	log := slog.New(slog.NewJSONHandler(w.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	d := hospital.WithStepUpCheck(hospital.Deps{Pool: sharedApp, Log: log,
+	d := hospital.WithStepUpCheck(hospital.Deps{Pool: sharedApp, Log: log, Sender: w,
 		Notify: func(_ context.Context, _, p uuid.UUID) {
 			w.mu.Lock()
 			w.notified = append(w.notified, p)
@@ -149,11 +189,8 @@ func newWorld(t *testing.T) *world {
 			}
 			return nil
 		})
-	w.mux = http.NewServeMux()
-	for k, h := range hospital.Handlers(d) {
-		method, path, _ := strings.Cut(k, " ")
-		w.mux.Handle(method+" "+httpx.BasePath+path, h)
-	}
+	w.deps = d
+	w.serve(d)
 	return w
 }
 

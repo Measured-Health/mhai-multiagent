@@ -650,6 +650,13 @@ func init() {
 	Register("staff.specialty_changed", Schema{})
 	Register("staff.deactivated", Schema{Fields: fields("sessions_revoked", count), Required: []string{"sessions_revoked"}})
 	Register("staff.reactivated", Schema{})
+	// The account and review actions (migration 00049): ids and counts
+	// only; the outbox (account_messages) holds that a message is due.
+	Register("staff.removed", Schema{Fields: fields("sessions_revoked", count), Required: []string{"sessions_revoked"}})
+	Register("staff.mfa_reset", Schema{Fields: fields("sessions_revoked", count), Required: []string{"sessions_revoked"}})
+	Register("staff.mfa_reminded", Schema{})
+	Register("correction.reviewer_assigned", Schema{Fields: fields("assignee", id)})
+	Register("correction.reviewers_reminded", Schema{Fields: fields("recipients", count), Required: []string{"recipients"}})
 	Register("hospital_settings.changed", Schema{Fields: fields(
 		"fields", List(4, OneOf("review_overdue_hours", "require_mfa_for_clinicians", "idle_timeout_minutes", "allow_trust_device")),
 		"loosened", b), Required: []string{"fields", "loosened"}})

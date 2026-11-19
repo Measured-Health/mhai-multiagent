@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.32.0"
+  version: "1.33.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1144,12 +1144,13 @@ paths:
       summary: Everyone at the caller's hospital (hospital admins).
       description: |
         Hospital admins, with a two-step session. Every account of the
-        caller's hospital, by display name; never another hospital's.
+        caller's hospital, by display name; never another hospital's, and
+        never a removed one (`DELETE /hospital/staff/{id}`).
         `status` is `active` or `deactivated` (core has no invites, so never
         `invited`; `invited_at` and `invite_expires_at` are always null).
         `issues` holds `mfa_not_set_up` when the account's roles or the
         hospital's policy need two-step and it isn't on. `sign_in` is `sso`,
-        `password_mfa`, `password` or null. Core has no reviewer assignment:
+        `password_mfa`, `password` or null. Core has no per-specialty reviewing:
         `can_review` is true for an active clinician and
         `review_specialties` is always empty (every specialty). `version` is
         sent back on an edit.
@@ -1203,7 +1204,7 @@ paths:
         `hospital_admin`; `analyst` needs `clinician`, else 422
         `not_eligible`); `specialty` a word or a few, or null.
         `can_review` must match the clinician role and `review_specialties`
-        must be empty (core has no reviewer assignment): 422 otherwise.
+        must be empty (core has no per-specialty reviewing): 422 otherwise.
         Order: the path and body (404, 422), the person (404: unknown or
         another hospital's), the `version` (409 `conflict`), your own
         account (403 `self_change`: adding any role to yourself, `clinician`
@@ -1253,24 +1254,44 @@ paths:
         "503": { $ref: "#/components/responses/Problem" }
     delete:
       operationId: removeStaff
-      summary: Remove a person (not available).
+      summary: Remove a person for good (step-up).
       description: |
-        Core can't yet delete an account while keeping its consultations,
-        feedback and audit entries attributed, so this answers 501
-        `not_implemented`. Deactivate instead.
+        Hospital admins, with a fresh code in the body (`mfa_code` or
+        `backup_code`). Order: the person (404: unknown, another
+        hospital's, or already removed), yourself (403 `self_change`), the
+        last active admin with two-step on (409 `last_admin`), then the
+        code. The account is deactivated and marked removed: every session
+        is revoked and denylisted, its trusted devices, two-step, roles
+        (`analyst` through the database's rules) and password go, its email
+        is replaced by a tombstone, and a waiting correction assigned to it
+        is unassigned. Its names stay, so past consultations, feedback and
+        audit entries stay attributed. It no longer appears in
+        `GET /hospital/staff`. Sends nothing. Audited (`staff.removed`,
+        with the number of sessions revoked). Not reversible. Send an
+        `Idempotency-Key`.
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: *hospitalMissing
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, last_admin, validation_failed, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepUpRequest" }
       responses:
+        "204": { description: Removed. }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /hospital/staff/{id}/deactivate:
     post:
@@ -1371,40 +1392,79 @@ paths:
   /hospital/staff/{id}/reset-mfa:
     post:
       operationId: resetStaffMFA
-      summary: Reset a person's two-step (not available).
-      description: Not built in core yet, so this answers 501 `not_implemented`.
+      summary: Reset a person's two-step (step-up).
+      description: |
+        Hospital admins, with a fresh code in the body. Order: the person
+        (404), yourself (403 `self_change`), an account that isn't active
+        or has no two-step on (409 `conflict`), no message sender (503
+        `no_delivery`: nothing changes), three resets of this person in
+        the last hour (429 `rate_limited`), then the code. Removes their
+        two-step and backup codes, revokes and denylists every session and
+        forgets their trusted devices; they set two-step up again at their
+        next sign-in. They are sent a notice (the outbox records it as
+        due). Audited (`staff.mfa_reset`, with the number of sessions
+        revoked). Answers the person. Send an `Idempotency-Key`.
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: *hospitalMissing
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, conflict, rate_limited, validation_failed, no_delivery, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepUpRequest" }
       responses:
+        "200":
+          description: The person, without two-step.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffOut" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /hospital/staff/{id}/remind:
     post:
       operationId: remindStaff
-      summary: Remind a person to set up two-step (not available).
-      description: Core has no notifications, so this answers 501 `not_implemented`.
+      summary: Remind a person to set up two-step.
+      description: |
+        Hospital admins. No code. For an active account with the
+        `mfa_not_set_up` issue (else 409 `conflict`); 503 `no_delivery`
+        with no message sender (nothing recorded); at most once a day per
+        person (429 `rate_limited`). The reminder is recorded as due in the
+        outbox and handed to the sender. Audited (`staff.mfa_reminded`).
+        Answers the person. Send an `Idempotency-Key`.
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: *hospitalMissing
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, rate_limited, validation_failed, no_delivery, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
       responses:
+        "200":
+          description: The person.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffOut" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /hospital/staff/{id}/resend-invite:
     post:
@@ -1584,9 +1644,10 @@ paths:
         No clinical content: a waiting correction is its id, a short `ref`,
         who suggested it, its consultation's specialty and when; never its
         reason, its suggested diagnosis or the question. At most 200 items,
-        oldest first. Core has no reviewer assignment or reminders:
-        `assigned_to` and `reminded_at` are null, and `eligible_reviewers`
-        counts the active clinicians but the submitter.
+        oldest first. `assigned_to` is the reviewer a hospital admin
+        assigned (`POST .../assign`), `reminded_at` the last reviewer
+        reminder (`POST .../remind`); `eligible_reviewers` counts the
+        active clinicians but the submitter.
         `median_decision_hours` is over the last 30 days;
         `decided_this_week` the last 7 days.
       tags: [hospital]
@@ -1639,43 +1700,82 @@ paths:
   /hospital/corrections/{id}/remind:
     post:
       operationId: remindReviewers
-      summary: Remind the reviewers (not available).
-      description: Core has no notifications, so this answers 501 `not_implemented`.
+      summary: Remind the reviewers of a waiting correction.
+      description: |
+        Hospital admins. No code. Reminds the assigned reviewer, or every
+        eligible reviewer (the active clinicians but the submitter, at most
+        500) when none is assigned or the assignee no longer is eligible.
+        404 for an unknown or another hospital's correction; 409
+        `already_decided` when it is no longer waiting; 503 `no_delivery`
+        with no message sender (nothing recorded); at most once an hour per
+        correction (429 `rate_limited`); 422 `no_recipients` when nobody
+        can review it. Each reminder is recorded as due in the outbox and
+        handed to the sender; the oversight's `reminded_at` is the last.
+        Audited (`correction.reviewers_reminded`, with the number
+        reminded). Send an `Idempotency-Key`.
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: *hospitalMissing
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, already_decided, rate_limited, no_recipients, validation_failed, no_delivery, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
       responses:
+        "204": { description: Reminded. }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /hospital/corrections/{id}/assign:
     post:
       operationId: assignReviewer
-      summary: Assign a reviewer (not available).
+      summary: Assign a waiting correction's reviewer.
       description: |
-        Core has no reviewer assignment (a waiting correction is only ever
-        approved, rejected or withdrawn), so this answers 501
-        `not_implemented`.
+        Hospital admins. No code. `staff_id` is an active clinician of the
+        hospital other than the person who suggested the correction (else
+        422 `not_eligible`: also for an unknown id or another hospital's
+        person), or null to clear the assignment; a missing or malformed
+        `staff_id` is 422 `validation_failed`. 404 for an unknown or
+        another hospital's correction; 409 `already_decided` when it is no
+        longer waiting. Assigning someone sends them a notice: 503
+        `no_delivery` with no message sender (nothing changes). Assigning
+        the current assignee changes and sends nothing. Any other eligible
+        clinician may still decide the correction. The database holds the
+        same rules (migration 00049). Audited
+        (`correction.reviewer_assigned`, with the assignee's id). Send an
+        `Idempotency-Key`.
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: *hospitalMissing
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, already_decided, not_eligible, validation_failed, no_delivery, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [staff_id]
+              properties:
+                staff_id: { type: string, format: uuid, nullable: true }
       responses:
+        "204": { description: Assigned (or cleared). }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /hospital/clearances:
     get:
@@ -5521,6 +5621,7 @@ components:
             - too_many_rows
             - gone
             - already_used
+            - no_delivery
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:

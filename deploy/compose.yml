@@ -209,6 +209,10 @@ services:
       # asks for them; never generated). Core refuses to start without them
       # outside development; on this development demo the integrity status
       # answers 503 until they are set, and the deploy still goes ahead.
+      # Messages core owes a person (invites, reset links, notices,
+      # reminders): no email provider yet, so the demo records them as due
+      # and sends nothing (development only; core/README "Message delivery").
+      CORE_DELIVERY: ${CORE_DELIVERY:-log}
       SECURITY_CONTACT_NAME: ${SECURITY_CONTACT_NAME:-}
       SECURITY_CONTACT_EMAIL: ${SECURITY_CONTACT_EMAIL:-}
       GOMEMLIMIT: 256MiB
