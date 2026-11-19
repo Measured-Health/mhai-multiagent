@@ -72,6 +72,7 @@ type StaffOut struct {
 	Version           int      `json:"version"`
 
 	active bool
+	mfa    bool
 	uid    uuid.UUID
 }
 
@@ -84,7 +85,7 @@ const staffSelect = `SELECT u.id, COALESCE(u.full_name, u.display_name), u.displ
 	u.created_at, u.staff_version,
 	COALESCE((SELECT hs.require_mfa_for_clinicians FROM hospital_settings hs WHERE hs.hospital_id = u.hospital_id), true)
 	FROM users u LEFT JOIN user_mfa m ON m.user_id = u.id
-	WHERE u.hospital_id = $1`
+	WHERE u.hospital_id = $1 AND u.removed_at IS NULL`
 
 func scanStaff(row pgx.Row, me uuid.UUID) (StaffOut, error) {
 	var s StaffOut
@@ -96,6 +97,7 @@ func scanStaff(row pgx.Row, me uuid.UUID) (StaffOut, error) {
 		return s, err
 	}
 	s.ID = s.uid.String()
+	s.mfa = mfa
 	s.Roles = sortStaffRoles(s.Roles)
 	s.Status = "deactivated"
 	if s.active {
@@ -588,26 +590,8 @@ func (d Deps) staffStatus(activate bool) http.Handler {
 			}
 			action, payload := "staff.reactivated", map[string]any{}
 			if !activate {
-				rows, err := tx.Query(ctx, `UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL
-					RETURNING id, access_jti`, id)
-				if err != nil {
-					return err
-				}
-				for rows.Next() {
-					var sid uuid.UUID
-					var jti *uuid.UUID
-					if err := rows.Scan(&sid, &jti); err != nil {
-						rows.Close()
-						return err
-					}
-					var js []string
-					if jti != nil {
-						js = append(js, jti.String())
-					}
-					revoked[sid.String()] = js
-				}
-				rows.Close()
-				if err := rows.Err(); err != nil {
+				var err error
+				if revoked, err = revokeSessions(ctx, tx, id); err != nil {
 					return err
 				}
 				// Trusted devices go too, so a reactivation brings back no
@@ -645,4 +629,29 @@ func (d Deps) staffStatus(activate bool) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		httpx.JSON(w, http.StatusOK, person)
 	})
+}
+
+// revokeSessions revokes every live session of person id in tx and
+// returns them with their access token ids, for the denylist after commit.
+func revokeSessions(ctx context.Context, tx pgx.Tx, id uuid.UUID) (map[string][]string, error) {
+	revoked := map[string][]string{}
+	rows, err := tx.Query(ctx, `UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL
+		RETURNING id, access_jti`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sid uuid.UUID
+		var jti *uuid.UUID
+		if err := rows.Scan(&sid, &jti); err != nil {
+			return nil, err
+		}
+		var js []string
+		if jti != nil {
+			js = append(js, jti.String())
+		}
+		revoked[sid.String()] = js
+	}
+	return revoked, rows.Err()
 }

@@ -17,6 +17,20 @@ All notable changes to this project are documented here. The format follows
   the demo host through the deploy's SSH path every `DEMO_RESET_HOURS`
   (default 6; `DEMO_RESET=off` stops it), as the one-shot `core-demo-reset`
   (deploy/README.md, "Public demo: the scheduled reset").
+- **Hospital admin: removal, two-step reset and reminders, reviewer
+  assignment and reminders (core OpenAPI 1.33.0, migration 00049).** The
+  routes that answered 501 `not_implemented` now work:
+  `DELETE /hospital/staff/{id}` (step-up; the account is removed for good,
+  its past work stays attributed), `POST /hospital/staff/{id}/reset-mfa`
+  (step-up), `POST /hospital/staff/{id}/remind`,
+  `POST /hospital/corrections/{id}/assign` and `/remind`. Not yourself, not
+  the last admin, another hospital's person or correction is 404, every
+  action audited by ids. Messages go through the new `internal/delivery`:
+  an outbox row records only that a message is due, and the sender gets it
+  after commit; `CORE_DELIVERY=log` (development only) sends nothing, and
+  with no sender each action that must send something answers 503
+  `no_delivery` (new code) before changing anything. The oversight now
+  shows `assigned_to` and `reminded_at`.
 
 - **The public demo runs connected, on synthetic data (16 Nov).** Until the
   trained weights arrive, the demo host answers questions with labelled
