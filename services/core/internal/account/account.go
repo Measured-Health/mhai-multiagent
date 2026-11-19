@@ -93,6 +93,10 @@ func NormaliseShortCode(s string) (string, bool) {
 	return strings.ToUpper(s), true
 }
 
+// ValidEmail reports whether s, normalised, is a plain address (a
+// hospital admin's invite takes the CLI's rule).
+func ValidEmail(s string) bool { return validEmail(NormaliseEmail(s)) }
+
 func validEmail(norm string) bool {
 	if norm == "" || len(norm) > 254 {
 		return false

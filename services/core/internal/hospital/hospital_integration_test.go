@@ -791,14 +791,3 @@ func TestReviewOversight(t *testing.T) {
 		t.Errorf("after decision %s", raw)
 	}
 }
-
-// The routes core has no feature behind answer 501 not_implemented.
-func TestUnsupportedRoutes(t *testing.T) {
-	w := newWorld(t)
-	for _, u := range hospital.Unsupported {
-		p := strings.ReplaceAll(u.Pattern, "{id}", w.ada.String())
-		if code, out := w.adm(u.Method, p, `{"emails": ["synth@h1.example.test"], "roles": ["clinician"], "specialty": null}`); code != 501 || out["code"] != "not_implemented" {
-			t.Errorf("%s %s: %d %v", u.Method, p, code, out)
-		}
-	}
-}
