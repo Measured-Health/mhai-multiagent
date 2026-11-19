@@ -68,6 +68,13 @@ type Config struct {
 	PatientLookupPerMinute      int
 	PatientLookupPerDay         int
 	PatientLookupHospitalPerDay int
+	// Delivery is CORE_DELIVERY, how core hands over the messages it owes
+	// a person (invites, reset links, notices, reminders): "log" (the
+	// outbox and the log record that a message is due; nothing is sent;
+	// development only, and its default there) or "" (none: every action
+	// that must send something answers 503 no_delivery). No email
+	// provider is chosen yet (TODO.md).
+	Delivery string
 	// APIDocs serves the Redoc page and openapi.yaml (CORE_API_DOCS).
 	APIDocs            bool
 	HTTPAPI            bool
@@ -150,6 +157,9 @@ type Config struct {
 	// refused without the four analysis keys.
 	AnalysisIngest bool
 }
+
+// DeliveryLog is CORE_DELIVERY's log sender (internal/delivery.Log).
+const DeliveryLog = "log"
 
 // NamedIdentityDemo selects the synthetic demo identity fixture.
 const NamedIdentityDemo = "demo-fixture"
@@ -448,6 +458,22 @@ func Load() (Config, error) {
 			errs = append(errs, errors.New("CORE_API_DOCS must be true or false"))
 		}
 		c.APIDocs = b
+	}
+
+	// CORE_DELIVERY: the log sender delivers nothing, so it is refused
+	// outside development, where an action would otherwise report a
+	// message sent that never was. Unset: log in development, none
+	// elsewhere (the message actions fail closed).
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("CORE_DELIVERY"))); {
+	case v == "" && c.Development():
+		c.Delivery = DeliveryLog
+	case v == "" || v == "none":
+	case v == DeliveryLog && c.Development():
+		c.Delivery = DeliveryLog
+	case v == DeliveryLog:
+		errs = append(errs, errors.New("CORE_DELIVERY=log is refused outside development (it sends nothing); leave it unset until an email provider is configured"))
+	default:
+		errs = append(errs, errors.New("CORE_DELIVERY must be log or none"))
 	}
 
 	// Only this service's own credentials are read: the NATS password is in

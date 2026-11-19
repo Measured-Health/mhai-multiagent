@@ -68,14 +68,14 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | PATCH | `/api/v1/hospital/settings` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | GET | `/api/v1/hospital/staff` | signed in | `hospital_admin` | clinical | yes | no | no |
 | POST | `/api/v1/hospital/staff/invites` | signed in | `hospital_admin` | clinical | yes | no | yes |
-| DELETE | `/api/v1/hospital/staff/{id}` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| DELETE | `/api/v1/hospital/staff/{id}` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | PATCH | `/api/v1/hospital/staff/{id}` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | POST | `/api/v1/hospital/staff/{id}/deactivate` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | POST | `/api/v1/hospital/staff/{id}/password-reset` | signed in | `hospital_admin` | clinical | yes | no | yes |
 | POST | `/api/v1/hospital/staff/{id}/reactivate` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | POST | `/api/v1/hospital/staff/{id}/remind` | signed in | `hospital_admin` | clinical | yes | no | yes |
 | POST | `/api/v1/hospital/staff/{id}/resend-invite` | signed in | `hospital_admin` | clinical | yes | no | yes |
-| POST | `/api/v1/hospital/staff/{id}/reset-mfa` | signed in | `hospital_admin` | clinical | yes | no | yes |
+| POST | `/api/v1/hospital/staff/{id}/reset-mfa` | signed in | `hospital_admin` | clinical | yes | yes | yes |
 | GET | `/api/v1/hospital/usage` | signed in | `hospital_admin` | clinical | yes | no | no |
 | GET | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | no |
 | PATCH | `/api/v1/me/notification-settings` | signed in | `clinician` | clinical | no | no | yes |
