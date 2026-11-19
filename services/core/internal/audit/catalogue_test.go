@@ -455,7 +455,7 @@ func candidates() []any {
 		excluded already_known null_mrn level_off already_open breaker_tripped new_hit regrouped amended critical blood_chemistry
 		platform_admin auditor off critical_and_digest regulator case_closed
 		unreadable failed_safety_check wrong_people person_left pending letters_only hospital miss hospital_day
-		not_owner gone 2026-11 abababababababababababababababababababababababababababababababab`) {
+		not_owner gone scan_unavailable user clinical 2026-11 abababababababababababababababababababababababababababababababab`) {
 		out = append(out, s)
 	}
 	for _, ty := range audit.AuditTypes {

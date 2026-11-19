@@ -27,6 +27,8 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/cloudreap"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/docsctl"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/documents"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrmaint"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/grant"
@@ -63,6 +65,9 @@ type app struct {
 	// cloudReaper settles stale cloud budget reservations as fully used
 	// (00047; nil with CORE_CLOUD_RESERVATION_REAPER=off).
 	cloudReaper *cloudreap.Loop
+	// docsConsumer records the scan's outcomes (core_documents; run only
+	// with CORE_DOCUMENTS_ENABLED, which creates the durable).
+	docsConsumer *documents.Consumer
 	// emrConsumer turns EMR findings into alerts (core_emr; run only with
 	// CORE_EMR_ENABLED).
 	emrConsumer *alerts.Consumer
@@ -175,6 +180,8 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	}
 	a.emrConsumer = &alerts.Consumer{Pool: a.pool, Pub: alerts.JSPublisher{JS: js}, AllowNullMRN: cfg.EMRAllowNullMRN,
 		Log: log, Metrics: &alerts.ConsumerMetrics{}}
+	a.docsConsumer = &documents.Consumer{Pool: a.pool, Letter: letters.Scanned, Log: log,
+		Metrics: &documents.ConsumerMetrics{}}
 	a.emrMaint = &emrmaint.Loop{Pool: a.pool, Log: log, Retention: cfg.EMRRetentionSweep, Metrics: &emrmaint.Metrics{}}
 	if cfg.CloudReaper {
 		a.cloudReaper = &cloudreap.Loop{Pool: a.pool, Log: log, Age: cfg.CloudReapAfter, Metrics: &cloudreap.Metrics{}}
@@ -241,7 +248,9 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		Analysis: analysis.NewEngine(a.pool, log), AnalysisKeys: analysisKeys,
 		PatientLookup: patients.Limits{PerMinute: cfg.PatientLookupPerMinute, PerDay: cfg.PatientLookupPerDay,
 			HospitalPerDay: cfg.PatientLookupHospitalPerDay},
-		AnalysisIdentity: identity, AuditExports: cfg.AuditExports})
+		AnalysisIdentity: identity, AuditExports: cfg.AuditExports,
+		DocumentsEnabled: cfg.DocumentsEnabled, DocumentsLiveLetters: cfg.DocumentsLiveLetters,
+		Documents: &docsctl.Client{NC: nc, Signer: signer, Log: log}, DocumentsAnnounce: documents.JSAnnouncer{JS: js}})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}
@@ -295,8 +304,8 @@ func ensureEMR(ctx context.Context, cfg config.Config, js jetstream.JetStream) e
 	return bus.EnsureEMRStream(ctx, js, cfg.NATSJSReplicas)
 }
 
-// ensureDocuments creates the DOCS stream and its documents_scan durable
-// when CORE_DOCUMENTS_ENABLED is on (documents PR 4); off, none exists.
+// ensureDocuments creates the DOCS stream and its durables (documents_scan,
+// core_documents) when CORE_DOCUMENTS_ENABLED is on; off, none exists.
 func ensureDocuments(ctx context.Context, cfg config.Config, js jetstream.JetStream) error {
 	if !cfg.DocumentsEnabled {
 		return nil
@@ -420,6 +429,15 @@ func serve() error {
 		go func() {
 			if err := a.emrConsumer.Run(ctx, a.js); err != nil {
 				log.Error("core: EMR finding consumer stopped", "reason", "internal_error")
+			}
+		}()
+	}
+	// The scan's outcomes (core_documents, shared by every core copy): only
+	// with CORE_DOCUMENTS_ENABLED, which creates the durable at start-up.
+	if cfg.DocumentsEnabled {
+		go func() {
+			if err := a.docsConsumer.Run(ctx, a.js); err != nil {
+				log.Error("core: documents consumer stopped", "reason", "internal_error")
 			}
 		}()
 	}

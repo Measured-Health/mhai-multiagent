@@ -201,4 +201,39 @@ func TestDocsStreamConfig(t *testing.T) {
 		t.Fatalf("publish scanned: %v", err)
 	}
 	d.noViolation(t)
+
+	// PR 5: core pulls scanned from core_documents and acks it; the
+	// documents user can't reach core's durable.
+	cd, err := st.Consumer(ctx, bus.CoreDocsConsumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cc := cd.CachedInfo().Config; cc.FilterSubject != "documents.v1.*.scanned" || cc.MaxDeliver != bus.CoreDocsMaxDeliver ||
+		cc.AckPolicy != jetstream.AckExplicitPolicy || cc.AckWait != bus.CoreDocsAckWait || cc.MaxAckPending != bus.CoreDocsMaxAckPending {
+		t.Fatalf("core_documents: %+v", cc)
+	}
+	g := gateway(t)
+	gjs, _ := jetstream.New(g.nc)
+	gc, err := gjs.Consumer(ctx, bus.DocsStream, bus.CoreDocsConsumer)
+	if err != nil {
+		t.Fatalf("core_documents as gateway: %v", err)
+	}
+	batch, err = gc.Fetch(1, jetstream.FetchMaxWait(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n = 0
+	for m := range batch.Messages() {
+		n++
+		if m.Subject() != "documents.v1."+hid+".scanned" {
+			t.Fatalf("subject %s", m.Subject())
+		}
+		if err := m.DoubleAck(ctx); err != nil {
+			t.Fatalf("ack: %v", err)
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d messages for core_documents", n)
+	}
+	g.noViolation(t)
 }

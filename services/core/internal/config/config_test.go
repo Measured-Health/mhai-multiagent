@@ -21,7 +21,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"CORE_PATIENT_LOOKUP_PER_MINUTE", "CORE_PATIENT_LOOKUP_PER_DAY", "CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY",
 		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE", "ANALYSIS_NAMED_IDENTITY",
 		"CORE_AUDIT_EXPORTS", "ANALYSIS_INGEST", "CORE_CLOUD_RESERVATION_REAPER", "CORE_CLOUD_RESERVATION_REAP_AFTER",
-		"CORE_DOCUMENTS_ENABLED"} {
+		"CORE_DOCUMENTS_ENABLED", "CORE_DOCUMENTS_LIVE_LETTERS"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -936,6 +936,41 @@ func TestConfigDocumentsEnabled(t *testing.T) {
 		}
 		setEnv(t, m)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_DOCUMENTS_ENABLED") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+}
+
+// Documents PR 5: the live letter is off unless CORE_DOCUMENTS_LIVE_LETTERS
+// says true, and it needs documents on (H3's gate, design §17 departure
+// 37).
+func TestConfigDocumentsLiveLetters(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	with := func(kv map[string]string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for k, v := range kv {
+			m[k] = v
+		}
+		return m
+	}
+	setEnv(t, base)
+	if c, err := Load(); err != nil || c.DocumentsLiveLetters {
+		t.Fatalf("default: %v %v", c.DocumentsLiveLetters, err)
+	}
+	setEnv(t, with(map[string]string{"CORE_DOCUMENTS_ENABLED": "true", "CORE_DOCUMENTS_LIVE_LETTERS": "true"}))
+	if c, err := Load(); err != nil || !c.DocumentsLiveLetters {
+		t.Fatalf("on: %v %v", c.DocumentsLiveLetters, err)
+	}
+	setEnv(t, with(map[string]string{"CORE_DOCUMENTS_LIVE_LETTERS": "true"}))
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_DOCUMENTS_LIVE_LETTERS needs CORE_DOCUMENTS_ENABLED") {
+		t.Errorf("without documents: %v", err)
+	}
+	for _, bad := range []string{"yes", "1"} {
+		setEnv(t, with(map[string]string{"CORE_DOCUMENTS_ENABLED": "true", "CORE_DOCUMENTS_LIVE_LETTERS": bad}))
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_DOCUMENTS_LIVE_LETTERS must be") {
 			t.Errorf("%q: %v", bad, err)
 		}
 	}

@@ -215,7 +215,7 @@ func (r *Responder) Process(ctx context.Context, m *nats.Msg) (*nats.Msg, string
 		return r.refuse("handler_error", c.Rid)
 	}
 	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(rep)
-	if err != nil || len(b) > reqtoken.MaxReqBody {
+	if err != nil || len(b) > maxReply(op) {
 		return r.refuse("handler_error", c.Rid)
 	}
 	out := nats.NewMsg(m.Reply)
@@ -225,6 +225,15 @@ func (r *Responder) Process(ctx context.Context, m *nats.Msg) (*nats.Msg, string
 	r.Metrics.add("ok")
 	r.log().Info("documents ctl: answered", "op", op.Name, "rid", c.Rid)
 	return out, "ok"
+}
+
+// maxReply is the largest reply op may send: its own bound (page_image's
+// JPEG), else a control message's.
+func maxReply(op docops.Op) int {
+	if op.MaxReply > 0 {
+		return op.MaxReply
+	}
+	return reqtoken.MaxReqBody
 }
 
 var errSchema = errors.New("ctl: body is not the op's request message")

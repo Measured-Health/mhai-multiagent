@@ -178,12 +178,32 @@ func TestDocumentsGrantsAreNarrow(t *testing.T) {
 		VALUES (mhai_current_hospital(), 'clinical', 'user', gen_random_uuid(), 'application/pdf', 1)`); pgCode(err) != denied {
 		t.Errorf("mhai_documents insert: %v", err)
 	}
-	for _, role := range []string{"mhai_gateway", "mhai_worker", "mhai_emr", "mhai_platform", "mhai_emr_core", "mhai_jobs",
+	for _, role := range []string{"mhai_worker", "mhai_emr", "mhai_platform", "mhai_emr_core", "mhai_jobs",
 		"mhai_documents_app"} {
 		for _, table := range []string{"documents", "document_objects"} {
 			if err := as(role, w.hospA, `SELECT hospital_id FROM `+table); pgCode(err) != denied {
 				t.Errorf("%s reads %s: %v", role, table, err)
 			}
+		}
+	}
+	// Core (00051, design §7.2): its hospital's rows without the file
+	// name, the checksum or any stored object, and no direct write.
+	if err := as("mhai_gateway", w.hospA, `SELECT id, hospital_id, purpose, status, reason, patient_hint_id, uploaded_by, via,
+		mime_type, size_bytes, pages, received_at, scanned_at, completed_at, version FROM documents`); err != nil {
+		t.Fatalf("gateway's columns: %v", err)
+	}
+	for _, q := range []string{
+		`SELECT source_name FROM documents`,
+		`SELECT sha256 FROM documents`,
+		`SELECT scan_lease_id FROM documents`,
+		`SELECT hospital_id FROM document_objects`,
+		`UPDATE documents SET status = 'uploaded'`,
+		`DELETE FROM documents`,
+		`INSERT INTO documents (hospital_id, purpose, via, uploaded_by, mime_type, size_bytes)
+		 VALUES (mhai_current_hospital(), 'clinical', 'user', gen_random_uuid(), 'application/pdf', 1)`,
+	} {
+		if err := as("mhai_gateway", w.hospA, q); pgCode(err) != denied {
+			t.Errorf("mhai_gateway %q: %v, want denied", q, err)
 		}
 	}
 	// The login holds nothing by itself (NOINHERIT, WITH INHERIT FALSE).

@@ -9,9 +9,11 @@
 // The rules live in the database (00038's triggers and functions, for
 // every writer): this package only calls the functions and appends the
 // audit entries the database demands before it lets the transaction
-// commit. A letter is never parsed here: a live upload is 503 until the
-// documents service exists, and the demo keeps only the file's SHA-256 and
-// serves fixture pages drawn in code. Nothing a letter holds (a signer, a
+// commit. A letter is never parsed here: the demo keeps only the file's
+// SHA-256 and serves fixture pages drawn in code, and a live letter (PR 5
+// of the documents service, behind CORE_DOCUMENTS_LIVE_LETTERS) sends its
+// file straight to the object store and is shown as the documents
+// service's stamped pages (live.go). Nothing a letter holds (a signer, a
 // note, an email, a file name) is logged or audited: ids and codes only.
 package letters
 
@@ -30,6 +32,8 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/docsctl"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/documents"
 )
 
 // Deps are what the routes need. A nil Pool registers the routes for the
@@ -38,6 +42,14 @@ type Deps struct {
 	Pool *pgxpool.Pool
 	Auth *auth.Service
 	Log  *slog.Logger
+	// Live is CORE_DOCUMENTS_LIVE_LETTERS (with CORE_DOCUMENTS_ENABLED):
+	// the live upload through the documents service (H3's gate; off, its
+	// routes are 404 and only the demo's multipart upload exists).
+	Live bool
+	// Ctl is the documents service's control client (presign_upload,
+	// page_image); Announce publishes uploaded after the commit.
+	Ctl      docsctl.Requester
+	Announce documents.Announcer
 	// stepUp replaces Auth's step-up check (tests only).
 	stepUpCheck func(r *http.Request, mfa, backup string) error
 }

@@ -135,9 +135,13 @@ services:
       # service's sealing public key (CORE_EMR_SEAL_PUBLIC_KEY_PATH) and the
       # idempotency HMAC key (CORE_IDEMPOTENCY_HMAC_KEY_PATH).
       CORE_EMR_ENABLED: ${CORE_EMR_ENABLED:-false}
-      # Documents (off by default): true makes the DOCS stream and the
-      # documents service's documents_scan durable (documents PR 4).
+      # Documents (off by default): true makes the DOCS stream and its
+      # durables, serves the upload routes and consumes the scan's outcomes
+      # (documents PRs 4-5). The live clearance letter also needs
+      # CORE_DOCUMENTS_LIVE_LETTERS, which waits on the legal lead's letter
+      # template (H3): leave it off until then.
       CORE_DOCUMENTS_ENABLED: ${CORE_DOCUMENTS_ENABLED:-false}
+      CORE_DOCUMENTS_LIVE_LETTERS: ${CORE_DOCUMENTS_LIVE_LETTERS:-false}
       # With EMR on, core's maintenance loop purges excluded patients (legal
       # holds respected); the nightly retention sweep also needs this, off
       # until the privacy lead confirms the retention values (H5).

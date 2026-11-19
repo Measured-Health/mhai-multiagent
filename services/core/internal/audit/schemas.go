@@ -679,6 +679,24 @@ func init() {
 	Register("clearance.check_limit_reached", Schema{Fields: fields("limit", Check(Int(1, 100))), Required: []string{"limit"}})
 	// A page of a letter shown to a hospital admin (no event: nothing changed).
 	Register("clearance.viewed", Schema{Fields: fields("page", Check(Int(1, 20))), Required: []string{"page"}})
+	// Documents (documents design §11; §13 PR 5): ids and codes only, never
+	// a file name, a page's text, a value or a POST policy. The document is
+	// the row's entity. Started, uploaded and cancelled are the uploader's;
+	// the scan's outcome is core_documents' (no actor), from the row.
+	docPurpose := OneOf("clinical", "clearance")
+	Register("document.upload_started", Schema{Fields: fields("document_id", id, "purpose", docPurpose, "via", OneOf("user")),
+		Required: []string{"document_id", "purpose", "via"}})
+	Register("document.uploaded", Schema{Fields: fields("document_id", id, "purpose", docPurpose, "via", OneOf("user")),
+		Required: []string{"document_id", "purpose", "via"}})
+	Register("document.cancelled", Schema{Fields: fields("document_id", id, "purpose", docPurpose,
+		"reason", OneOf("user", "unavailable", "expired")), Required: []string{"document_id", "purpose", "reason"}})
+	Register("document.ready", Schema{Fields: fields("document_id", id, "pages", Check(Int(1, 50))),
+		Required: []string{"document_id", "pages"}})
+	Register("document.quarantined", Schema{Fields: fields("document_id", id, "reason", OneOf("unsupported_type", "too_large",
+		"too_many_pages", "too_many_pixels", "password_protected", "malware", "unreadable", "checksum_mismatch")),
+		Required: []string{"document_id", "reason"}})
+	Register("document.scan_failed", Schema{Fields: fields("document_id", id, "reason", OneOf("scan_unavailable")),
+		Required: []string{"document_id", "reason"}})
 	// The CLI's demo raise and lowering of the named-access switch (plan
 	// departure 39), as analysis.switch_raised: no actor, the hospital in
 	// the payload for a hospital's row.
