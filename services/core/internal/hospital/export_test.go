@@ -50,6 +50,10 @@ var (
 	ErrConflict  = errConflict
 	ErrInvalid   = errInvalid
 	ErrEligible  = errNotEnabled
+	// The message actions' refusals.
+	ErrNoDelivery   = errNoDelivery
+	ErrRateLimited  = errRateLimited
+	ErrNoRecipients = errNoRecipients
 )
 
 // Person builds a member of staff for the unit tests.

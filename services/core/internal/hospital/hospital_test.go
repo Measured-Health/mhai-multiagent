@@ -13,13 +13,15 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/hospital"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
 // Every route is a hospital admin's with a two-step session; every staff
-// write and the settings PATCH are step-up routes; the routes core has no
-// feature behind are writes like the rest and answer 501.
+// write that changes an account (and the settings PATCH) is a step-up
+// route (invites and resets included); the reminders and the reviewer
+// assignment are plain writes.
 func TestHospitalRouteRules(t *testing.T) {
 	m := authz.NewMux(nil)
 	hospital.Register(m, hospital.Deps{})
@@ -42,12 +44,12 @@ func TestHospitalRouteRules(t *testing.T) {
 		"GET /hospital/activity":                            read,
 		"GET /hospital/review-oversight":                    read,
 		"GET /hospital/corrections/{id}/eligible-reviewers": read,
-		"POST /hospital/staff/invites":                      write,
-		"DELETE /hospital/staff/{id}":                       write,
-		"POST /hospital/staff/{id}/password-reset":          write,
-		"POST /hospital/staff/{id}/reset-mfa":               write,
+		"POST /hospital/staff/invites":                      stepUp,
+		"DELETE /hospital/staff/{id}":                       stepUp,
+		"POST /hospital/staff/{id}/password-reset":          stepUp,
+		"POST /hospital/staff/{id}/reset-mfa":               stepUp,
 		"POST /hospital/staff/{id}/remind":                  write,
-		"POST /hospital/staff/{id}/resend-invite":           write,
+		"POST /hospital/staff/{id}/resend-invite":           stepUp,
 		"POST /hospital/corrections/{id}/remind":            write,
 		"POST /hospital/corrections/{id}/assign":            write,
 	}
@@ -187,6 +189,10 @@ func TestCodes(t *testing.T) {
 		hospital.ErrConflict:                      "conflict",
 		hospital.ErrInvalid:                       "validation_failed",
 		hospital.ErrEligible:                      "not_eligible",
+		hospital.ErrNoDelivery:                    "no_delivery",
+		delivery.ErrNoSender:                      "no_delivery",
+		hospital.ErrRateLimited:                   "rate_limited",
+		hospital.ErrNoRecipients:                  "no_recipients",
 		errors.New("driver: SYNTHETIC-LEAK-a91c"): "internal_error",
 	} {
 		if got := hospital.CodeFor(err); got != want {

@@ -129,6 +129,8 @@ one job:
 | `CORE_NATS_API_CONCURRENCY` | no | `api.v1` messages handled at once per core copy; past it a message gets 503 `unavailable` at once. Default `256`, 1 to 100000 |
 | `CORE_ENV` | no | default `production`, which fails closed: no API docs, NATS TLS required, no test-only intelligence operations. Compose sets `development` |
 | `ANALYSIS_REF_HMAC_KEY_FILE`, `ANALYSIS_REF_ENC_KEY_FILE`, `ANALYSIS_DRILL_KEY_FILE`, `ANALYSIS_NOTE_KEY_FILE` | no (all four or none) | Patient Analysis's keys: each file holds 32 random bytes in base64 (`openssl rand -base64 32`), mode 0600 or 0640, all four different. Start-up refuses a missing file, a placeholder, a wrong length, a file others can read or two equal keys. Without them, the nightly run fails closed for a signed-off hospital with consultations to ingest; without them no count has a drill and every de-identified list is 422 `too_small` (the demo needs them only for the drill-down) |
+| `CORE_DELIVERY` | no | how core hands over the messages it owes a person (invites, reset links, two-step notices and reminders, review reminders and assignments): `log` (development only, and its default there: the outbox and the log record that a message is due, nothing is sent) or `none`. Outside development the default is none, and every action that must send something answers 503 `no_delivery` before changing anything; `log` is refused at start-up. See "Message delivery" below |
+| `CORE_APP_URL` | no | the clinical app's address that invite and reset links point at (`<CORE_APP_URL>/reset-password?token=...`): an absolute `https` URL (`http` allowed in development), no query or fragment. Unset: the links are paths (`/reset-password?...`), which the demo's admin page resolves against its own address |
 | `CORE_API_DOCS` | no | `true` or `false`: serve the API docs page. Default: on when `CORE_ENV` is `development`, off for every other value (production included). Anything else is refused at start-up. |
 
 Secrets must not contain `changeme`, `change-me` or `placeholder`. Errors
@@ -564,6 +566,31 @@ Platform audience, two-step always; none of these reads is audit-recorded.
 - `GET /platform/guardrails?period=7d|30d|90d` is deprecated: every count
   and share hidden, `Deprecation`, `Sunset` and `Link` headers, 422 after
   the sunset. 6 reads a minute per session across both routes (429).
+
+## Message delivery (`internal/delivery`)
+
+No email provider is chosen yet. Every hospital admin action that owes a
+person a message (a two-step notice or reminder, a review reminder or
+assignment, an invite or a password reset link) writes an outbox row
+(`account_messages`, migration 00049) in its own transaction, recording
+only that a message is due: kind, recipient, the correction it is about,
+who caused it and the channel. Never a token, a link, an email address or
+any text. After commit the action hands the message to the configured
+`delivery.Sender`. The only sender today is `log` (development): it logs
+the kind and ids and sends nothing. With no sender (the production
+default) each such action answers 503 `no_delivery` and changes nothing;
+a sender that fails after commit is logged and answered 503 `no_delivery`
+too (the action stands). The outbox also bounds the reminders (rate
+limits) and gives the review oversight its `reminded_at`.
+
+An invite's or a reset's link carries a token of 32 random bytes; only
+its SHA-256 is stored (`account_tokens`, migration 00050), it works once,
+and a person has one live token per purpose. The link goes to the sender
+alone. On a development server with the log sender, which sends nothing,
+the admin's reply carries it once (`link`), so the demo works without
+email; everywhere else `link` is null. An email sender
+implements `delivery.Sender` and is allowed in `config` once the provider
+is chosen.
 
 ## Known limits
 
