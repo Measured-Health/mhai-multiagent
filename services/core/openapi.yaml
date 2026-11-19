@@ -1274,7 +1274,7 @@ paths:
       x-step-up: true
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, last_admin, validation_failed, not_ready, internal_error]
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1409,7 +1409,7 @@ paths:
       x-step-up: true
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, conflict, rate_limited, validation_failed, no_delivery, not_ready, internal_error]
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1447,7 +1447,7 @@ paths:
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, rate_limited, validation_failed, no_delivery, not_ready, internal_error]
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1717,7 +1717,7 @@ paths:
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, already_decided, rate_limited, no_recipients, validation_failed, no_delivery, not_ready, internal_error]
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1754,7 +1754,7 @@ paths:
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, already_decided, not_eligible, validation_failed, no_delivery, not_ready, internal_error]
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"

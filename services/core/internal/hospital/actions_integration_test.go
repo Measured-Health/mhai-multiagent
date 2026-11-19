@@ -86,13 +86,13 @@ func TestRemoveStaff(t *testing.T) {
 		t.Fatalf("removed row: active %v email tombstone %v hash %v err %v", active, strings.HasPrefix(email, "removed-"), hash != nil, err)
 	}
 	for q, want := range map[string]int{
-		`SELECT count(*) FROM sessions WHERE user_id = $1 AND revoked_at IS NULL`: 0,
-		`SELECT count(*) FROM trusted_devices WHERE user_id = $1`:                 0,
-		`SELECT count(*) FROM user_mfa WHERE user_id = $1`:                        0,
-		`SELECT count(*) FROM user_roles WHERE user_id = $1`:                      0,
-		`SELECT count(*) FROM feedback_events WHERE assigned_to = $1`:             0,
+		`SELECT count(*) FROM sessions WHERE user_id = $1 AND revoked_at IS NULL`:                                                               0,
+		`SELECT count(*) FROM trusted_devices WHERE user_id = $1`:                                                                               0,
+		`SELECT count(*) FROM user_mfa WHERE user_id = $1`:                                                                                      0,
+		`SELECT count(*) FROM user_roles WHERE user_id = $1`:                                                                                    0,
+		`SELECT count(*) FROM feedback_events WHERE assigned_to = $1`:                                                                           0,
 		`SELECT count(*) FROM audit_log WHERE action = 'staff.removed' AND entity_id = $1::text AND payload = '{"sessions_revoked": 2}'::jsonb`: 1,
-		`SELECT count(*) FROM audit_log WHERE action = 'analyst.removed' AND entity_id = $1::text`:                                             1,
+		`SELECT count(*) FROM audit_log WHERE action = 'analyst.removed' AND entity_id = $1::text`:                                              1,
 	} {
 		if n := scalar(t, q, w.ada); n != want {
 			t.Errorf("%s: %d, want %d", q, n, want)
