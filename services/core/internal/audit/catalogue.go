@@ -323,6 +323,13 @@ var Catalogue = map[string]Entry{
 	"correction.reviewer_assigned":  withheld(),
 	"correction.reviewers_reminded": withheld(),
 	"hospital_settings.changed":     withheld(),
+	// Invites and resets (migration 00050), and their redemption: sent
+	// bare until mhai-web's staff_invited and password kinds take facts.
+	"staff.invited":             withheld(),
+	"staff.invite_resent":       withheld(),
+	"staff.invite_unavailable":  withheld(),
+	"staff.password_reset_sent": withheld(),
+	"auth.password.reset":       withheld(),
 	// Clearance letters (plan Tasks 18-20): mhai-web's Plan 11 kinds, with
 	// the letter as the target and no facts. The demo's documents outcome
 	// (ready) and the CLI's switch change have no kind yet: sent bare. A

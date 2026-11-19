@@ -977,3 +977,52 @@ func TestDeliverySwitch(t *testing.T) {
 		}
 	}
 }
+
+// CORE_APP_URL: optional; https (http only in development), a host, no
+// query, fragment or credentials; refused by name, never echoed.
+func TestAppURL(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	for _, c := range []struct {
+		env, raw, want string
+		bad            bool
+	}{
+		{"", "", "", false},
+		{"", "https://clinical.example.test/", "https://clinical.example.test", false},
+		{"", "https://clinical.example.test/app", "https://clinical.example.test/app", false},
+		{"development", "http://localhost:3000", "http://localhost:3000", false},
+		{"", "http://clinical.example.test", "", true},
+		{"", "https://clinical.example.test/?q=synth-q1", "", true},
+		{"", "https://clinical.example.test/#frag", "", true},
+		{"", "https://synth:pw@clinical.example.test", "", true},
+		{"", "/relative", "", true},
+		{"", "javascript:alert(1)", "", true},
+	} {
+		kv := map[string]string{"CORE_ENV": c.env, "CORE_APP_URL": c.raw}
+		for k, v := range base {
+			kv[k] = v
+		}
+		setEnv(t, kv)
+		got, err := Load()
+		if c.bad {
+			if err == nil || !strings.Contains(err.Error(), "CORE_APP_URL") || strings.Contains(err.Error(), "synth") {
+				t.Errorf("%q: error %v", c.raw, err)
+			}
+			continue
+		}
+		if err != nil || got.AppURL != c.want {
+			t.Errorf("%q: %q %v, want %q", c.raw, got.AppURL, err, c.want)
+		}
+	}
+	setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey, "CORE_ENV": "development"})
+	if got, err := Load(); err != nil || !got.ShowLinks() {
+		t.Errorf("development with the log sender shows links: %v %v", got.ShowLinks(), err)
+	}
+	setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey, "CORE_ENV": "development", "CORE_DELIVERY": "none"})
+	if got, err := Load(); err != nil || got.ShowLinks() {
+		t.Errorf("no sender, no link: %v %v", got.ShowLinks(), err)
+	}
+	setEnv(t, map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey})
+	if got, err := Load(); err != nil || got.ShowLinks() {
+		t.Errorf("production never shows links: %v %v", got.ShowLinks(), err)
+	}
+}
