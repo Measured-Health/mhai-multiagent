@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Hospital admin: invites and password resets (core OpenAPI 1.34.0,
+  migration 00050).** `POST /hospital/staff/invites`,
+  `/hospital/staff/{id}/resend-invite` and `/password-reset` (step-up)
+  now work: an invite creates an account (`invited_at` set, no password) with a link
+  valid 7 days; a reset signs the person out and sends a link valid 30
+  minutes. Links are redeemed at the new public
+  `POST /auth/password/reset` (an invited person's first password, or a
+  new one), rate-limited per client IP, 410 `invalid_token` (new code) for
+  any unusable link. Tokens are 32 random bytes stored only as SHA-256,
+  single use, one live per person and purpose. They go to the configured
+  sender only; on a development server with the log sender the reply
+  carries the link once (`link`) so the demo's admin can pass it on.
+  `CORE_APP_URL` (new, optional) is the clinical app's address for the
+  links.
+
 - **Hospital admin: removal, two-step reset and reminders, reviewer
   assignment and reminders (core OpenAPI 1.33.0, migration 00049).** The
   routes that answered 501 `not_implemented` now work:

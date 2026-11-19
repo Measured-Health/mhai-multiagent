@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.33.0"
+  version: "1.34.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -318,6 +318,43 @@ paths:
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/password/reset:
+    post:
+      operationId: resetPassword
+      summary: Choose a password with an invite's or a reset's link.
+      description: |
+        Public: the link's holder isn't signed in. `token` is the link's
+        `token`. One attempt per call is counted against the client IP (at
+        most 10 in 15 minutes, 429 `rate_limited`; given back on
+        success). A token that is unknown, used, replaced or expired, or
+        whose account can't sign in, is 410 `invalid_token`, alike. The new
+        password must be at least 12 characters and not on the breached
+        list (422 `weak_password`; the link isn't spent). On success the
+        link is spent (it works once; of concurrent uses one wins), the
+        person's other links are revoked, every session is revoked and
+        denylisted and trusted devices are removed; an invited person's
+        account becomes active. They then sign in as usual (and set up
+        two-step when they have none). Audited (`auth.password.reset`,
+        with the link's purpose). Never kept for an Idempotency-Key replay.
+      tags: [auth]
+      security: [{ ServiceKey: [] }]
+      x-error-codes: [validation_failed, weak_password, invalid_token, rate_limited, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordResetIn" }
+      responses:
+        "204": { description: The password is set. }
+        "410": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
@@ -1146,10 +1183,13 @@ paths:
         Hospital admins, with a two-step session. Every account of the
         caller's hospital, by display name; never another hospital's, and
         never a removed one (`DELETE /hospital/staff/{id}`).
-        `status` is `active` or `deactivated` (core has no invites, so never
-        `invited`; `invited_at` and `invite_expires_at` are always null).
-        `issues` holds `mfa_not_set_up` when the account's roles or the
-        hospital's policy need two-step and it isn't on. `sign_in` is `sso`,
+        `status` is `active` or `deactivated`. An invited person (an
+        invite's account whose person hasn't chosen a password yet) has
+        `invited_at` set, `sign_in` and `joined_at` null and no `issues`;
+        `invite_expires_at` is their live link's expiry (in the past once
+        it has expired), or null when they have none (revoked). `issues`
+        holds `mfa_not_set_up` when the account's roles or the hospital's
+        policy need two-step and it isn't on. `sign_in` is `sso`,
         `password_mfa`, `password` or null. Core has no per-specialty reviewing:
         `can_review` is true for an active clinician and
         `review_specialties` is always empty (every specialty). `version` is
@@ -1175,23 +1215,55 @@ paths:
   /hospital/staff/invites:
     post:
       operationId: inviteStaff
-      summary: Invite staff (not available).
+      summary: Invite staff (step-up).
       description: |
-        Core has no email delivery and no invite acceptance, so this answers
-        501 `not_implemented`. Staff accounts are created by Measured Health
-        (`core users create`).
+        Hospital admins, with a fresh code in the body. One to 200
+        addresses, each given `roles` (one or both of `clinician`,
+        `hospital_admin`; `analyst` is 422 `not_eligible`: it is granted
+        after the person joins) and `specialty`. Order: the body (422), no
+        message sender (503 `no_delivery`: nothing changes), the hospital's
+        500 invites a day (new and resent; 429 `rate_limited`), then the
+        code. Each new address gets an account of the caller's hospital in
+        invited state (`invited_at` set, no password, display name the address's local
+        part) and a link valid 7 days, sent through the sender; the
+        person chooses a password with it (`POST /auth/password/reset`),
+        then signs in and sets up two-step as any new account. Skipped,
+        with a reason: a malformed address (`invalid_email`), one repeated
+        in the request (`duplicate`), one of the caller's hospital's staff
+        (`already_staff`), and one that can't be used here
+        (`not_available`: in use outside this hospital, at another
+        hospital or by a platform account; the reply never says which, and
+        nothing of that account is read, changed or sent; the attempts are
+        audited as `staff.invite_unavailable`, a count; past 50 such
+        addresses in 24 hours an invite is refused whole with 429
+        `rate_limited`). Only the link's token hash is stored; the link
+        is never logged or audited. Audited per person (`staff.invited`,
+        with the roles). The reply is never kept for an Idempotency-Key
+        replay (a retry runs again, and skips the addresses invited).
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: &hospitalMissing [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_implemented, internal_error]
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, validation_failed, not_eligible, rate_limited, no_delivery, not_ready, internal_error]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InviteIn" }
       responses:
+        "200":
+          description: Who was invited, and who was skipped.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InviteOut" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /hospital/staff/{id}:
     patch:
@@ -1373,21 +1445,49 @@ paths:
   /hospital/staff/{id}/password-reset:
     post:
       operationId: resetStaffPassword
-      summary: Send a password reset (not available).
-      description: Core has no email delivery, so this answers 501 `not_implemented`.
+      summary: Send a password reset link (step-up).
+      description: |
+        Hospital admins, with a fresh code in the body. Order: the person
+        (404), yourself (403 `self_change`: use `POST /auth/password`), an
+        account that isn't active, is still invited or signs in only
+        through single sign-on (409 `conflict`), no
+        message sender (503 `no_delivery`: nothing changes), three resets
+        of this person in the last hour (429 `rate_limited`), then the
+        code. Revokes and denylists every session of the person and forgets
+        their trusted devices, and sends a link valid 30 minutes (a new one
+        replaces any live one); their password keeps working until they
+        choose a new one with it (`POST /auth/password/reset`). Only the
+        token's hash is stored. Audited (`staff.password_reset_sent`, with
+        the number of sessions revoked). Answers the person, with `link`
+        only on a development server with the log sender. Never kept for
+        an Idempotency-Key replay.
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: *hospitalMissing
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, conflict, rate_limited, validation_failed, no_delivery, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepUpRequest" }
       responses:
+        "200":
+          description: The person.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffWithLinkOut" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /hospital/staff/{id}/reset-mfa:
     post:
@@ -1469,21 +1569,43 @@ paths:
   /hospital/staff/{id}/resend-invite:
     post:
       operationId: resendStaffInvite
-      summary: Resend an invite (not available).
-      description: Core has no invites, so this answers 501 `not_implemented`.
+      summary: Resend an invite (step-up).
+      description: |
+        Hospital admins, with a fresh code in the body. Order: the person
+        (404), one not invited (no `invited_at`, or a password already chosen: 409 `conflict`), no message sender
+        (503 `no_delivery`), five invites of this person in a day or the
+        hospital's 500 (429 `rate_limited`), then the code. A fresh link
+        valid 7 days; the old one stops working. Audited
+        (`staff.invite_resent`). Answers the person, with `link` only on a
+        development server with the log sender. Never kept for an
+        Idempotency-Key replay.
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: *hospitalMissing
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, rate_limited, validation_failed, no_delivery, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepUpRequest" }
       responses:
+        "200":
+          description: The person, with a fresh link.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffWithLinkOut" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /hospital/settings:
     get:
@@ -5622,6 +5744,7 @@ components:
             - gone
             - already_used
             - no_delivery
+            - invalid_token
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -7676,6 +7799,60 @@ components:
         invite_expires_at: { type: string, format: date-time, nullable: true }
         is_you: { type: boolean }
         version: { type: integer, minimum: 1 }
+    StaffWithLinkOut:
+      description: |
+        A person and the link they were sent. `link` is set only on a
+        development server with the log sender (`CORE_DELIVERY=log`),
+        which sends nothing, so the admin can pass the link on: show it
+        once, never store it. Everywhere else it is null. `url` may be a
+        path (`/reset-password?token=...`) when `CORE_APP_URL` is unset.
+      allOf:
+        - $ref: "#/components/schemas/StaffOut"
+        - type: object
+          required: [link]
+          properties:
+            link:
+              type: object
+              nullable: true
+              required: [url, expires_at]
+              properties:
+                url: { type: string }
+                expires_at: { type: string, format: date-time }
+    InviteIn:
+      type: object
+      required: [emails, roles]
+      additionalProperties: false
+      properties:
+        emails: { type: array, minItems: 1, maxItems: 200, items: { type: string, maxLength: 320 } }
+        roles:
+          type: array
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+          items: { type: string, enum: [clinician, hospital_admin, analyst] }
+        specialty: { type: string, nullable: true, pattern: "^[A-Za-z][A-Za-z -]{0,39}$" }
+        mfa_code: { type: string }
+        backup_code: { type: string }
+    InviteOut:
+      type: object
+      required: [invited, skipped]
+      properties:
+        invited: { type: array, items: { $ref: "#/components/schemas/StaffWithLinkOut" } }
+        skipped:
+          type: array
+          items:
+            type: object
+            required: [email, reason]
+            properties:
+              email: { type: string }
+              reason: { type: string, enum: [already_staff, invalid_email, duplicate, not_available] }
+    PasswordResetIn:
+      type: object
+      required: [token, new_password]
+      additionalProperties: false
+      properties:
+        token: { type: string, maxLength: 128 }
+        new_password: { type: string, maxLength: 1024 }
     StaffPatchIn:
       type: object
       required: [version]

@@ -77,6 +77,11 @@ type Deps struct {
 	// Sender delivers what the hospital admin's actions owe a person
 	// (CORE_DELIVERY); nil answers those actions 503 no_delivery.
 	Sender delivery.Sender
+	// AppURL is the clinical app's address for invite and reset links
+	// (CORE_APP_URL); ShowLinks puts the link in the admin's reply, on
+	// development with the log sender only.
+	AppURL    string
+	ShowLinks bool
 }
 
 // Register adds every route to m.
@@ -118,7 +123,8 @@ func Register(m *authz.Mux, d Deps) {
 	// The hospital admin's staff, settings, usage, activity and review
 	// oversight pages (frontend requirements §5); staff writes take a
 	// step-up code, and Analyst goes through migration 00030's functions.
-	hospital.Register(m, hospital.Deps{Pool: d.Pool, Log: a.Log, Auth: a, Sender: d.Sender})
+	hospital.Register(m, hospital.Deps{Pool: d.Pool, Log: a.Log, Auth: a, Sender: d.Sender,
+		AppURL: d.AppURL, ShowLinks: d.ShowLinks})
 	// A clinician's patient lookup by MRN (TODO.md design note, 14 Nov):
 	// exact match in the caller's hospital, rate-limited and audited; 404
 	// unless EMR is on.
