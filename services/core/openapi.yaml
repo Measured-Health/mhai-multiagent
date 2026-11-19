@@ -1225,7 +1225,7 @@ paths:
         500 invites a day (new and resent; 429 `rate_limited`), then the
         code. Each new address gets an account of the caller's hospital in
         invited state (`invited_at` set, no password, display name the address's local
-        part) and a link valid 7 days, sent through the sender; the
+        part) and a link valid 3 days, sent through the sender; the
         person chooses a password with it (`POST /auth/password/reset`),
         then signs in and sets up two-step as any new account. Skipped,
         with a reason: a malformed address (`invalid_email`), one repeated
@@ -1575,7 +1575,7 @@ paths:
         (404), one not invited (no `invited_at`, or a password already chosen: 409 `conflict`), no message sender
         (503 `no_delivery`), five invites of this person in a day or the
         hospital's 500 (429 `rate_limited`), then the code. A fresh link
-        valid 7 days; the old one stops working. Audited
+        valid 3 days; the old one stops working. Audited
         (`staff.invite_resent`). Answers the person, with `link` only on a
         development server with the log sender. Never kept for an
         Idempotency-Key replay.

@@ -120,7 +120,7 @@ func TestInvite(t *testing.T) {
 	link := w.lastLink(t, delivery.Invite)
 	plain := tokenOf(t, link)
 	if n := scalar(t, `SELECT count(*) FROM account_tokens WHERE hospital_id = $1 AND purpose = 'invite' AND token_hash = $2
-		AND expires_at BETWEEN now() + interval '6 days 23 hours' AND now() + interval '7 days'`, w.h, token.HashRefresh(plain)); n != 1 {
+		AND expires_at BETWEEN now() + interval '2 days 23 hours' AND now() + interval '3 days'`, w.h, token.HashRefresh(plain)); n != 1 {
 		t.Fatalf("stored token %d", n)
 	}
 	if strings.Contains(raw, plain) || strings.Contains(w.logs.String(), plain) ||

@@ -12,7 +12,7 @@ All notable changes to this project are documented here. The format follows
   migration 00050).** `POST /hospital/staff/invites`,
   `/hospital/staff/{id}/resend-invite` and `/password-reset` (step-up)
   now work: an invite creates an account (`invited_at` set, no password) with a link
-  valid 7 days; a reset signs the person out and sends a link valid 30
+  valid 3 days; a reset signs the person out and sends a link valid 30
   minutes. Links are redeemed at the new public
   `POST /auth/password/reset` (an invited person's first password, or a
   new one), rate-limited per client IP, 410 `invalid_token` (new code) for

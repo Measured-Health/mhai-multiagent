@@ -6,7 +6,7 @@ package hospital
 //   - POST /hospital/staff/invites (step-up) {emails, roles, specialty}:
 //     one account per new address, `invited` (no password) until the
 //     person chooses one through the invite's link (POST
-//     /auth/password/reset, internal/auth); the link lasts 7 days.
+//     /auth/password/reset, internal/auth); the link lasts 3 days.
 //   - POST /hospital/staff/{id}/resend-invite (step-up): a fresh link for
 //     an invited person; the old one stops working.
 //   - POST /hospital/staff/{id}/password-reset (step-up): a reset link
@@ -45,7 +45,7 @@ import (
 
 // Token lifetimes and the limits on issuing them.
 const (
-	InviteTTL = 7 * 24 * time.Hour
+	InviteTTL = 3 * 24 * time.Hour
 	ResetTTL  = 30 * time.Minute
 	// maxInviteBatch is one request's addresses; maxInvitesPerDay a
 	// hospital's invites (new and resent) in any 24 hours.
