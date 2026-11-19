@@ -19,6 +19,7 @@
 --   - feedback_events.assigned_to becomes writable: a hospital admin of
 --     the correction's hospital assigns a waiting correction to an active
 --     clinician of that hospital other than its submitter, or clears it.
+--     The reviewer must be able to sign in (a password or single sign-on).
 --     The transition trigger enforces it whatever core does; nothing else
 --     of a waiting correction changes with it, and a decision never moves
 --     the assignee.
@@ -111,6 +112,7 @@ BEGIN
             IF NEW.assigned_to IS NOT NULL THEN
                 PERFORM 1 FROM public.users u
                 WHERE u.id = NEW.assigned_to AND u.is_active AND u.hospital_id = NEW.hospital_id
+                  AND (u.password_hash IS NOT NULL OR u.oidc_subject IS NOT NULL)
                   AND u.id IS DISTINCT FROM NEW.submitted_by
                   AND EXISTS (SELECT 1 FROM public.user_roles r WHERE r.user_id = u.id AND r.role = 'clinician')
                 FOR SHARE OF u;

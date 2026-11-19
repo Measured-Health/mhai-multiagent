@@ -89,6 +89,7 @@ func (d Deps) oversight(w http.ResponseWriter, r *http.Request) {
 		}
 		rows, err := tx.Query(ctx, `SELECT f.id, f.created_at, s.display_name, q.category, a.display_name,
 				(SELECT count(*) FROM users c WHERE c.hospital_id = f.hospital_id AND c.is_active AND c.id <> f.submitted_by
+				   AND (c.password_hash IS NOT NULL OR c.oidc_subject IS NOT NULL)
 				   AND EXISTS (SELECT 1 FROM user_roles cr WHERE cr.user_id = c.id AND cr.role = 'clinician')),
 				(SELECT max(m.created_at) FROM account_messages m WHERE m.subject_id = f.id AND m.kind = 'review_reminder')
 			FROM feedback_events f
@@ -199,6 +200,7 @@ func (d Deps) eligibleReviewers(w http.ResponseWriter, r *http.Request) {
 		}
 		rows, err := tx.Query(ctx, `SELECT u.id, u.display_name, u.specialty FROM users u
 			WHERE u.hospital_id = $1 AND u.is_active AND u.id <> $2
+			  AND (u.password_hash IS NOT NULL OR u.oidc_subject IS NOT NULL)
 			  AND EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = u.id AND r.role = 'clinician')
 			ORDER BY u.display_name, u.id LIMIT $3`, p.HospitalID, by, maxReviewers)
 		if err != nil {

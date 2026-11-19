@@ -52,11 +52,12 @@ func waitingCorrection(ctx context.Context, tx pgx.Tx, hid, id uuid.UUID) (by uu
 }
 
 // eligibleReviewer reports whether u may review a correction of hid
-// submitted by by: an active clinician of hid other than by.
+// submitted by by: an active clinician of hid other than by who can sign
+// in (a password or single sign-on: not an invite still unanswered).
 func eligibleReviewer(ctx context.Context, tx pgx.Tx, hid, by, u uuid.UUID) (bool, error) {
 	var ok bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users c WHERE c.id = $3 AND c.hospital_id = $1 AND c.is_active
-		AND c.id <> $2 AND EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = c.id AND r.role = 'clinician'))`, hid, by, u).Scan(&ok)
+		AND (c.password_hash IS NOT NULL OR c.oidc_subject IS NOT NULL) AND c.id <> $2 AND EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = c.id AND r.role = 'clinician'))`, hid, by, u).Scan(&ok)
 	return ok, err
 }
 
@@ -194,6 +195,7 @@ func (d Deps) reviewRemind(w http.ResponseWriter, r *http.Request) {
 		}
 		if to == nil {
 			rows, err := tx.Query(ctx, `SELECT u.id FROM users u WHERE u.hospital_id = $1 AND u.is_active AND u.id <> $2
+				AND (u.password_hash IS NOT NULL OR u.oidc_subject IS NOT NULL)
 				AND EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = u.id AND r.role = 'clinician')
 				ORDER BY u.id LIMIT $3`, p.HospitalID, by, maxReviewers)
 			if err != nil {
