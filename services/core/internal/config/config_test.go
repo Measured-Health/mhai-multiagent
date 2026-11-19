@@ -21,7 +21,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"CORE_PATIENT_LOOKUP_PER_MINUTE", "CORE_PATIENT_LOOKUP_PER_DAY", "CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY",
 		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE", "ANALYSIS_NAMED_IDENTITY",
 		"CORE_AUDIT_EXPORTS", "ANALYSIS_INGEST", "CORE_CLOUD_RESERVATION_REAPER", "CORE_CLOUD_RESERVATION_REAP_AFTER",
-		"CORE_DOCUMENTS_ENABLED"} {
+		"CORE_DOCUMENTS_ENABLED", "CORE_DELIVERY", "CORE_APP_URL"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -937,6 +937,43 @@ func TestConfigDocumentsEnabled(t *testing.T) {
 		setEnv(t, m)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_DOCUMENTS_ENABLED") {
 			t.Errorf("%q: %v", bad, err)
+		}
+	}
+}
+
+// CORE_DELIVERY: the log sender (which sends nothing) only in development,
+// and its default there; none elsewhere, so the message actions fail
+// closed; anything else is refused by name, without echoing the value.
+func TestDeliverySwitch(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	for _, c := range []struct {
+		env, flag, want string
+		bad             bool
+	}{
+		{"", "", "", false},
+		{"production", "", "", false},
+		{"production", "none", "", false},
+		{"development", "", DeliveryLog, false},
+		{"development", "LOG", DeliveryLog, false},
+		{"development", "none", "", false},
+		{"production", "log", "", true},
+		{"preview", "log", "", true},
+		{"development", "smtp-synth-q9", "", true},
+	} {
+		kv := map[string]string{"CORE_ENV": c.env, "CORE_DELIVERY": c.flag}
+		for k, v := range base {
+			kv[k] = v
+		}
+		setEnv(t, kv)
+		got, err := Load()
+		if c.bad {
+			if err == nil || !strings.Contains(err.Error(), "CORE_DELIVERY") || strings.Contains(err.Error(), "smtp-synth-q9") {
+				t.Errorf("env %q flag %q: error %v", c.env, c.flag, err)
+			}
+			continue
+		}
+		if err != nil || got.Delivery != c.want {
+			t.Errorf("env %q flag %q: delivery %q err %v, want %q", c.env, c.flag, got.Delivery, err, c.want)
 		}
 	}
 }

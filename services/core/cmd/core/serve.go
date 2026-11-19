@@ -27,6 +27,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/cloudreap"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrmaint"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/grant"
@@ -234,6 +235,11 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if !contact.OK() {
 		log.Warn("core: no usable security contact (SECURITY_CONTACT_NAME, SECURITY_CONTACT_EMAIL); the audit integrity status answers 503")
 	}
+	var sender delivery.Sender
+	if cfg.Delivery == config.DeliveryLog {
+		sender = delivery.Log{Logger: log}
+		log.Warn("core: CORE_DELIVERY=log: invites, reset links, notices and reminders are recorded as due, never sent")
+	}
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.WithLink(server.Readiness(a.pool, nc, buckets.All()), link),
 		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health,
 		CloudProviders: cfg.CloudProviders, EMREnabled: cfg.EMREnabled, EMRTypes: cfg.EMRConnectorTypes,
@@ -241,7 +247,7 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		Analysis: analysis.NewEngine(a.pool, log), AnalysisKeys: analysisKeys,
 		PatientLookup: patients.Limits{PerMinute: cfg.PatientLookupPerMinute, PerDay: cfg.PatientLookupPerDay,
 			HospitalPerDay: cfg.PatientLookupHospitalPerDay},
-		AnalysisIdentity: identity, AuditExports: cfg.AuditExports})
+		AnalysisIdentity: identity, AuditExports: cfg.AuditExports, Sender: sender})
 	// The same chain over NATS, without the BFF key (the bff_<app> NATS
 	// user is the credential) and without the probes or the docs.
 	apiMetrics := &natsapi.Metrics{}

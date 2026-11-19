@@ -10,11 +10,16 @@
 //   - activity: GET /hospital/activity, the hospital's own audit entries
 //     as structured events;
 //   - review oversight: GET /hospital/review-oversight and GET
-//     /hospital/corrections/{id}/eligible-reviewers.
+//     /hospital/corrections/{id}/eligible-reviewers;
+//   - account actions (actions.go): DELETE /hospital/staff/{id} (removal),
+//     POST /hospital/staff/{id}/reset-mfa and /remind;
+//   - reviewer assignment and reminders (review.go): POST
+//     /hospital/corrections/{id}/assign and /remind.
 //
-// What core has no feature behind (email delivery, invites, password and
-// two-step resets by an admin, account removal, reviewer reminders and
-// assignment) is registered and answers 501 not_implemented, so the app
+// An action that sends a person a message (a notice, a reminder) hands it
+// to Deps.Sender (internal/delivery); with none configured it fails closed
+// with 503 no_delivery before changing anything. What core still has no
+// feature behind (Unsupported) answers 501 not_implemented, so the app
 // shows a clear refusal rather than a 404.
 //
 // Every route is a hospital admin's with a two-step session. Every staff
@@ -46,6 +51,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
@@ -60,6 +66,9 @@ type Deps struct {
 	// Notify tells the hospital's admins of an Analyst grant, after
 	// commit; nil uses analysis.NotifyAnalystGranted.
 	Notify analysis.Notifier
+	// Sender delivers the messages the actions owe a person (notices,
+	// reminders); nil answers those actions 503 no_delivery.
+	Sender delivery.Sender
 	// Now is the clock (usage periods, activity window); defaults to
 	// time.Now.
 	Now func() time.Time
@@ -100,13 +109,8 @@ var (
 // behind: each answers 501 not_implemented.
 var Unsupported = []struct{ Method, Pattern string }{
 	{http.MethodPost, "/hospital/staff/invites"},
-	{http.MethodDelete, "/hospital/staff/{id}"},
 	{http.MethodPost, "/hospital/staff/{id}/password-reset"},
-	{http.MethodPost, "/hospital/staff/{id}/reset-mfa"},
-	{http.MethodPost, "/hospital/staff/{id}/remind"},
 	{http.MethodPost, "/hospital/staff/{id}/resend-invite"},
-	{http.MethodPost, "/hospital/corrections/{id}/remind"},
-	{http.MethodPost, "/hospital/corrections/{id}/assign"},
 }
 
 // Register adds the routes.
@@ -135,6 +139,11 @@ func routes(d Deps) []Route {
 		{http.MethodGet, "/hospital/activity", ReadRule, http.HandlerFunc(d.activity)},
 		{http.MethodGet, "/hospital/review-oversight", ReadRule, http.HandlerFunc(d.oversight)},
 		{http.MethodGet, "/hospital/corrections/{id}/eligible-reviewers", ReadRule, http.HandlerFunc(d.eligibleReviewers)},
+		{http.MethodDelete, "/hospital/staff/{id}", StepUpRule, d.staffRemove()},
+		{http.MethodPost, "/hospital/staff/{id}/reset-mfa", StepUpRule, d.staffResetMFA()},
+		{http.MethodPost, "/hospital/staff/{id}/remind", WriteRule, d.staffRemind()},
+		{http.MethodPost, "/hospital/corrections/{id}/assign", WriteRule, http.HandlerFunc(d.reviewAssign)},
+		{http.MethodPost, "/hospital/corrections/{id}/remind", WriteRule, http.HandlerFunc(d.reviewRemind)},
 	}
 	for _, u := range Unsupported {
 		out = append(out, Route{u.Method, u.Pattern, WriteRule, http.HandlerFunc(notImplemented)})
@@ -172,6 +181,11 @@ var (
 	errDecided    = errors.New("hospital: already decided")
 	errBusy       = errors.New("hospital: busy")
 	errNotEnabled = errors.New("hospital: not eligible")
+	// The message actions: no sender configured; the per-person or
+	// per-correction limit reached; nobody to remind.
+	errNoDelivery   = errors.New("hospital: no delivery")
+	errRateLimited  = errors.New("hospital: rate limited")
+	errNoRecipients = errors.New("hospital: no recipients")
 )
 
 // codeFor maps an error to its problem code. A driver error is never sent
@@ -200,6 +214,12 @@ func codeFor(err error) string {
 		return "analyst_cap"
 	case errors.Is(err, analysis.ErrAnalystNotEligible), errors.Is(err, errNotEnabled):
 		return "not_eligible"
+	case errors.Is(err, errNoDelivery), errors.Is(err, delivery.ErrNoSender):
+		return "no_delivery"
+	case errors.Is(err, errRateLimited):
+		return "rate_limited"
+	case errors.Is(err, errNoRecipients):
+		return "no_recipients"
 	}
 	return "internal_error"
 }

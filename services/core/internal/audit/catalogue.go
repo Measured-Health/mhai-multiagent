@@ -315,6 +315,13 @@ var Catalogue = map[string]Entry{
 	"staff.specialty_changed":   withheld(),
 	"staff.deactivated":         withheld(),
 	"staff.reactivated":         withheld(),
+	// The account and review actions (migration 00049): sent bare until
+	// mhai-web's kinds take their facts (H6), as the staff changes.
+	"staff.removed":                 withheld(),
+	"staff.mfa_reset":               withheld(),
+	"staff.mfa_reminded":            withheld(),
+	"correction.reviewer_assigned":  withheld(),
+	"correction.reviewers_reminded": withheld(),
 	"hospital_settings.changed": withheld(),
 	// Clearance letters (plan Tasks 18-20): mhai-web's Plan 11 kinds, with
 	// the letter as the target and no facts. The demo's documents outcome
