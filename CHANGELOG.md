@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Hospital admin: removal, two-step reset and reminders, reviewer
+  assignment and reminders (core OpenAPI 1.33.0, migration 00049).** The
+  routes that answered 501 `not_implemented` now work:
+  `DELETE /hospital/staff/{id}` (step-up; the account is removed for good,
+  its past work stays attributed), `POST /hospital/staff/{id}/reset-mfa`
+  (step-up), `POST /hospital/staff/{id}/remind`,
+  `POST /hospital/corrections/{id}/assign` and `/remind`. Not yourself, not
+  the last admin, another hospital's person or correction is 404, every
+  action audited by ids. Messages go through the new `internal/delivery`:
+  an outbox row records only that a message is due, and the sender gets it
+  after commit; `CORE_DELIVERY=log` (development only) sends nothing, and
+  with no sender each action that must send something answers 503
+  `no_delivery` (new code) before changing anything. The oversight now
+  shows `assigned_to` and `reminded_at`.
+
 - **The public demo runs connected, on synthetic data (16 Nov).** Until the
   trained weights arrive, the demo host answers questions with labelled
   sample answers through the real stack (deploy/README.md, "Public demo:
@@ -41,6 +56,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Reference library boundary test: `test_retrieval_over_a_large_library_is_bounded_and_fast` failed on CI at 3.044 s and 3.083 s against its 3 s budget. About 3 s of that was the process's first import of scikit-learn (the retriever's TF-IDF fallback), paid once whatever the library's size; the read took 66 ms and the index and retrieval a few ms. The test now imports the retrieval stack before the clock starts, so it times only the read, index and retrieval the bound is about, and the budget is 1 s (indexing the whole 30,050-chunk library alone takes 0.5-0.7 s). It prints its timing on a pass too, so CI logs keep the history.
 - Documents tests: the throwaway MinIO now waits for `/minio/health/ready`, not `/live`, and retries a 503 when making the bucket, so the S3, storage and upload integration tests no longer fail with "create bucket: unexpected status 503" on a busy runner.
 
 ### Changed

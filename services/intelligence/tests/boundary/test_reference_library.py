@@ -27,6 +27,7 @@ from intelligence.knowledge_base.kb_builder import (
     REFERENCE_SOURCE,
     DenseRetriever,
     HybridRetriever,
+    KBChunk,
     MedicalKnowledgeBase,
 )
 from tests.boundary.conftest import INTELLIGENCE_DB_PASSWORD, INTELLIGENCE_DB_USER, Postgres
@@ -38,8 +39,12 @@ LIBRARY_ROWS = 30_000
 HOSPITAL_ROWS = 50
 PATIENT = "P-SYN-REFLIB"
 # The whole read (three queries) and a job's index and retrieval over what
-# it returns. Generous for a shared CI runner; locally it is far less.
-BUDGET_S = 3.0
+# it returns, with the retrieval stack already imported (_warm_retrieval).
+# CI's read took 66 ms; the index and retrieval over its 152 chunks take
+# 2-4 ms. Indexing the whole library instead (30,050 chunks) takes 0.5-0.7 s
+# on its own, before reading those 30,000 rows and their vectors; a job that
+# reads only the pre-filter's candidates stays far below the bound.
+BUDGET_S = 1.0
 WORDS = ("dosage", "warning", "kidney", "pregnancy", "interaction", "rash", "liver", "fever")
 NEEDLE = "zyntharovax"
 SHA = "ab" * 32
@@ -123,10 +128,31 @@ def _offline_retriever(monkeypatch: pytest.MonkeyPatch) -> HybridRetriever:
     return HybridRetriever(dense_model="sentence-transformers/synthetic")
 
 
+def _warm_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Index and query three synthetic chunks once, so the timed run doesn't
+    pay this process's first import of the retrieval stack (scikit-learn's
+    TF-IDF, rank_bm25): 0.8-2.9 s cold, the same for any library size, and
+    nearly all of what this test used to measure."""
+    kb = MedicalKnowledgeBase()
+    kb.chunks = {
+        f"KB#00{i}": KBChunk(
+            f"KB#00{i}", f"Synthetic warm-up {i}.", "guideline", REFERENCE_SOURCE, ""
+        )
+        for i in range(1, 4)
+    }
+    retriever = _offline_retriever(monkeypatch)
+    retriever.index_kb(kb)
+    retriever.retrieve("synthetic warm-up", top_k=1)
+
+
 async def test_retrieval_over_a_large_library_is_bounded_and_fast(
-    big_library: int, database: Database, monkeypatch: pytest.MonkeyPatch
+    big_library: int,
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     question = f"What does the {NEEDLE} boxed warning say about kidney monitoring?"
+    _warm_retrieval(monkeypatch)
     started = time.perf_counter()
     async with database.with_hospital(verified_for(HOSPITAL_A)) as cur:
         chunks = await kb_repo.load_chunks(cur, PATIENT, question=question)
@@ -149,10 +175,12 @@ async def test_retrieval_over_a_large_library_is_bounded_and_fast(
     total = time.perf_counter() - started
 
     assert "KB#1012345" in {r.chunk.chunk_id for r in results}
-    print(
-        f"\nreference library timing: {LIBRARY_ROWS} shared rows, load {loaded * 1000:.0f} ms, "
-        f"load+index+retrieve {total * 1000:.0f} ms, {len(chunks)} chunks to the job"
-    )
+    # Printed on a pass too, so CI logs keep the history.
+    with capsys.disabled():
+        print(
+            f"\nreference library timing: {LIBRARY_ROWS} shared rows, load {loaded * 1000:.0f} ms, "
+            f"load+index+retrieve {total * 1000:.0f} ms, {len(chunks)} chunks to the job"
+        )
     assert total < BUDGET_S, total
 
 
