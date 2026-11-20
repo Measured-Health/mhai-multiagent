@@ -58,7 +58,7 @@ dependencies = [
     # loader at start-up. Was only a transitive dependency.
     "pyyaml>=6.0",
     "safetensors>=0.8.0",
-    "pillow>=12.3.0,<13",
+    "pillow>=13.0.0,<14",
     # Run sources (modelstore/sources/hf.py): base models at a pinned commit. Already
     # locked through transformers; direct because we call it.
     "huggingface-hub>=1.33.0,<2",
