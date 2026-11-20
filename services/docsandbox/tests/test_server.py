@@ -9,6 +9,7 @@ import socket
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from docsandbox import jail, server
 
@@ -190,8 +191,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(os.listdir(self.private), [])
         self.rc = 255
         self.assertEqual(self.req(op="ping"), "ok")  # cached
-        self.sb._selftest_at = 0
+        self.sb._selftest_at = None
         self.assertEqual(self.req(op="ping"), "unavailable")
+
+    def test_first_ping_runs_the_selftest_however_long_the_host_has_been_up(self) -> None:
+        # time.monotonic() counts from the host's boot (containers share
+        # it), so a CI runner or a hospital host can be up for less than
+        # the self-test's cache. The first ping must still run the jail.
+        for uptime in (0.0, 5.0, server.SELFTEST_TTL, server.SELFTEST_TTL + 5.0, 1e6):
+            self.calls.clear()
+            self.rc = 0
+            sb = server.Sandbox(self.jobs, run=self.sb.run, private=self.private)
+            with mock.patch.object(server.time, "monotonic", return_value=uptime):
+                self.assertEqual(sb.ping(), "ok", uptime)
+                self.assertEqual(len(self.calls), 1, uptime)
+                self.rc = 255
+                self.assertEqual(sb.ping(), "ok", uptime)  # cached within the minute
+                self.assertEqual(len(self.calls), 1, uptime)
+            with mock.patch.object(server.time, "monotonic", return_value=uptime + server.SELFTEST_TTL + 1):
+                self.assertEqual(sb.ping(), "unavailable", uptime)  # expired: runs again
+                self.assertEqual(len(self.calls), 2, uptime)
 
     def test_socket_round_trip(self) -> None:
         path = os.path.join(tempfile.mkdtemp(), "s.sock")

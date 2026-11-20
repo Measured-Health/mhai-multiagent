@@ -190,7 +190,10 @@ class Sandbox:
         self.private = private
         self.run = run or self._run
         self.slots = threading.BoundedSemaphore(max_jobs)
-        self._selftest_at = 0.0
+        # None: never run. Not 0.0: time.monotonic() counts from the host's
+        # boot, so on a host up for under SELFTEST_TTL a 0.0 looked fresh and
+        # ping answered a self-test that never ran ("unavailable").
+        self._selftest_at: float | None = None
         self._selftest_ok = False
         self._lock = threading.Lock()
 
@@ -208,10 +211,10 @@ class Sandbox:
 
     def ping(self) -> str:
         """ok when a jail runs Python with the renderer's libraries (cached
-        for a minute)."""
+        for a minute; the first ping always runs it)."""
         with self._lock:
             now = time.monotonic()
-            if now - self._selftest_at > SELFTEST_TTL:
+            if self._selftest_at is None or now - self._selftest_at > SELFTEST_TTL:
                 self._selftest_ok = self._selftest()
                 self._selftest_at = now
             return "ok" if self._selftest_ok else "unavailable"
