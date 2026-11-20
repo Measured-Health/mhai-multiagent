@@ -71,6 +71,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Demo sample AI: no confidence without evidence.** With
+  `INTELLIGENCE_MODEL_CLIENT=sample`, an answer citing no guideline ("No
+  reference guideline in the demo library matches this question") showed
+  High confidence, because the sample HGA returned fixed passing scores. It
+  now escalates (unverified, no trust score, no band: needs clinician
+  review). A matching answer's citation score is checked: each quoted
+  sentence must come from a cited guideline chunk, the trust score and
+  decision use the real HGA's formula and the question's thresholds, and it
+  can't PASS with an unsupported sentence. The sample's retrieval and
+  generation timings are now measured, not 0. Demo and development only, as
+  before.
+
 - **docsandbox: the first ping always runs the jailed self-test.** The
   self-test's one-minute cache started at `0.0` and was compared with
   `time.monotonic()`, which counts from the host's boot (containers share
