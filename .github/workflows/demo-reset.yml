@@ -1,0 +1,87 @@
+name: Reset backend demo
+
+# The public demo's scheduled reset (deploy/README.md, "Public demo: the
+# scheduled reset"). Visitors share the demo's sample accounts; every few
+# hours this runs deploy/demo/reset-demo.sh on the instance, which runs the
+# one-shot core-demo-reset (core demo reset): what visitors made in the demo
+# hospital DEM is removed, the sample accounts go back to their published
+# state and are signed out, and their sign-in counters are cleared.
+#
+# It builds, pulls and restarts nothing: it uses the compose file, script and
+# core image the last "Deploy backend demo" left on the instance, through the
+# same SSH secrets and the same host-key check. It shares the deploy's
+# concurrency group, so it never runs during a deploy.
+#
+# Interval: repository variable DEMO_RESET_HOURS (1, 2, 3, 4, 6, 8, 12 or 24;
+# default 6). The schedule wakes hourly and goes on only in an hour that is a
+# multiple of it (UTC), so changing the interval needs no edit here. Off:
+# DEMO_RESET=off. Run by hand: Actions, Reset backend demo, Run workflow.
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend-demo
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  reset:
+    # Schedules run on the default branch only; a manual run only from main.
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' && vars.DEMO_RESET != 'off' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: preview
+    permissions: {}
+    steps:
+      - name: Due this hour
+        id: due
+        env:
+          HOURS: ${{ vars.DEMO_RESET_HOURS || '6' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          case "$HOURS" in
+            1|2|3|4|6|8|12|24) ;;
+            *) echo "::error::DEMO_RESET_HOURS must be 1, 2, 3, 4, 6, 8, 12 or 24"; exit 1 ;;
+          esac
+          hour=$((10#$(date -u +%H)))
+          if [ "$EVENT" = workflow_dispatch ] || [ $((hour % HOURS)) -eq 0 ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Reset due (every $HOURS h; event $EVENT)."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Not due this hour (every $HOURS h)."
+          fi
+
+      - name: Require the host key fingerprint
+        if: steps.due.outputs.run == 'true'
+        env:
+          FINGERPRINT: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
+        run: |
+          case "$FINGERPRINT" in
+            SHA256:?*) echo "Host key fingerprint set." ;;
+            *) echo "::error::Secret DEPLOY_HOST_FINGERPRINT is missing or not SHA256:... (deploy/README.md)"; exit 1 ;;
+          esac
+
+      - name: Reset on the instance
+        if: steps.due.outputs.run == 'true'
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          fingerprint: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
+          command_timeout: 5m
+          script: |
+            set -euo pipefail
+            cd /srv/mhai-backend
+            if [ ! -f demo/reset-demo.sh ]; then
+              echo "::error::demo/reset-demo.sh is not on the instance yet: run Deploy backend demo first"
+              exit 1
+            fi
+            bash demo/reset-demo.sh

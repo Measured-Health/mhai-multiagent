@@ -22,12 +22,14 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/analysis"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/feedback"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 )
 
 const demoUsage = `usage:
   core demo seed
+  core demo reset
 
 Seeds the public demo (demo.measured-health.org) with synthetic data: the
 demo hospital DEM (hospitals.is_demo), its sample accounts on the published
@@ -49,7 +51,16 @@ stays off).
 DATABASE_URL is the database owner, as core migrate uses it, because the
 seed writes rows no single app role may write (user_mfa, decisions);
 MFA_ENCRYPTION_KEY is core's, to seal the two-step secret as enrolment does.
-It prints the hospital id and counts only.`
+It prints the hospital id and counts only.
+
+reset is seed with the same guards, run on a schedule (the "Reset backend
+demo" workflow): it also removes what visitors made in DEM (consultations
+and their answers, feedback, corrections and their learning jobs, other than
+the seeded samples; a question still in flight is kept for the next run),
+deactivates accounts visitors added to DEM, signs every sample account out,
+and clears the sample accounts' sign-in and two-step counters in NATS
+(NATS_URL, NATS_NKEY_SEED_PATH: core's own; without NATS_URL the counters
+are left to expire). Audited demo.reset. Then the seed puts everything back.`
 
 // The public demo's published values (deploy/README.md, mhai-web's sign-in
 // demo helper). They are demo values, documented and shown on the public
@@ -148,7 +159,7 @@ func demoAccountByKey(key string) demoAccount {
 // demoCmd is "core demo seed". getenv reads MHAI_DEMO_SEED and
 // MFA_ENCRYPTION_KEY; every check runs before connecting.
 func demoCmd(ctx context.Context, args []string, url string, getenv func(string) string, out io.Writer) error {
-	if len(args) != 1 || args[0] != "seed" {
+	if len(args) != 1 || (args[0] != "seed" && args[0] != "reset") {
 		return errDemoArgs
 	}
 	// Both switches, exactly: the flag only the demo's seed container sets,
@@ -156,7 +167,8 @@ func demoCmd(ctx context.Context, args []string, url string, getenv func(string)
 	if getenv(demoSeedEnv) != "on" || getenv("APP_ENV") != "demo" {
 		return errDemoOff
 	}
-	sealer, err := auth.NewTOTPSealer([]byte(strings.TrimSpace(getenv("MFA_ENCRYPTION_KEY"))))
+	mfaKey := []byte(strings.TrimSpace(getenv("MFA_ENCRYPTION_KEY")))
+	sealer, err := auth.NewTOTPSealer(mfaKey)
 	if err != nil {
 		return errDemoKey
 	}
@@ -173,6 +185,11 @@ func demoCmd(ctx context.Context, args []string, url string, getenv func(string)
 	}
 	defer pool.Close()
 	s := &demoSeeder{pool: pool, url: url, sealer: sealer, secret: demoSecret, out: out}
+	if args[0] == "reset" {
+		s.reset = &demoReset{counters: &auth.Service{MFAKey: mfaKey}, natsURL: getenv("NATS_URL"),
+			natsSeed: getenv("NATS_NKEY_SEED_PATH"), natsTLS: bus.TLS{CAPath: getenv("NATS_TLS_CA_PATH"),
+				CertPath: getenv("NATS_TLS_CERT_PATH"), KeyPath: getenv("NATS_TLS_KEY_PATH")}}
+	}
 	return s.run(ctx)
 }
 
@@ -188,6 +205,8 @@ type demoSeeder struct {
 	demoHash string
 	hid      uuid.UUID
 	ids      map[string]uuid.UUID
+	// reset is set for "core demo reset" (demo_reset.go), nil for seed.
+	reset *demoReset
 }
 
 func (s *demoSeeder) run(ctx context.Context) error {
@@ -211,6 +230,13 @@ func (s *demoSeeder) run(ctx context.Context) error {
 	// meanwhile stops the run here.
 	if err := demoGuards(ctx, s.pool); err != nil {
 		return err
+	}
+	if s.reset != nil {
+		// Under the same lock and after the same guards: only ever DEM, in
+		// a database of demo hospitals only.
+		if err := s.resetVisitors(ctx); err != nil {
+			return err
+		}
 	}
 	s.ids = map[string]uuid.UUID{}
 	created, reset := 0, 0
@@ -781,13 +807,7 @@ func (s *demoSeeder) corrections(ctx context.Context) (int, error) {
 	store := feedback.Store{Pool: s.pool}
 	reyes, director := s.ids["clinician"], s.ids["director"]
 	n := 0
-	for _, c := range []struct {
-		key, diagnosis, reason string
-		approve                bool
-	}{
-		{"bp", "Hypertension, confirm with home readings", "Sample correction: confirm with home or ambulatory readings before starting treatment.", false},
-		{"malaria", "Uncomplicated malaria", "Sample correction: state that no severe features were present before oral treatment.", true},
-	} {
+	for _, c := range demoCorrections {
 		qid := s.consultationID(c.key)
 		var cid uuid.UUID
 		var status string
@@ -812,6 +832,16 @@ func (s *demoSeeder) corrections(ctx context.Context) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// demoCorrections are the two sample corrections: the sample clinician's,
+// one left waiting for review and one approved by the director.
+var demoCorrections = []struct {
+	key, diagnosis, reason string
+	approve                bool
+}{
+	{"bp", "Hypertension, confirm with home readings", "Sample correction: confirm with home or ambulatory readings before starting treatment.", false},
+	{"malaria", "Uncomplicated malaria", "Sample correction: state that no severe features were present before oral treatment.", true},
 }
 
 // feedbackCorrect is POST /feedback's action for a correction.

@@ -23,7 +23,7 @@ func demoEnv(m map[string]string) func(string) string {
 
 func TestDemoCmdArgs(t *testing.T) {
 	env := demoEnv(map[string]string{demoSeedEnv: "on", "APP_ENV": "demo", "MFA_ENCRYPTION_KEY": testDemoKey})
-	for _, args := range [][]string{nil, {}, {"seeds"}, {"seed", "extra"}, {"--help"}} {
+	for _, args := range [][]string{nil, {}, {"seeds"}, {"seed", "extra"}, {"reset", "now"}, {"resets"}, {"--help"}} {
 		if err := demoCmd(context.Background(), args, "", env, &bytes.Buffer{}); !errors.Is(err, errDemoArgs) {
 			t.Errorf("%q: %v, want usage", args, err)
 		}
@@ -33,7 +33,12 @@ func TestDemoCmdArgs(t *testing.T) {
 // The guards before any connection: the env switch exactly "on", and a key.
 func TestDemoCmdRefusesBeforeConnecting(t *testing.T) {
 	for _, v := range []string{"", "On", "on ", "true", "1", "yes"} {
-		err := demoCmd(context.Background(), []string{"seed"}, "postgres://unused", demoEnv(map[string]string{
+		err := demoCmd(context.Background(), []string{"reset"}, "postgres://unused", demoEnv(map[string]string{
+			demoSeedEnv: v, "APP_ENV": "demo", "MFA_ENCRYPTION_KEY": testDemoKey}), &bytes.Buffer{})
+		if !errors.Is(err, errDemoOff) {
+			t.Errorf("reset, MHAI_DEMO_SEED=%q: %v, want refused", v, err)
+		}
+		err = demoCmd(context.Background(), []string{"seed"}, "postgres://unused", demoEnv(map[string]string{
 			demoSeedEnv: v, "APP_ENV": "demo", "MFA_ENCRYPTION_KEY": testDemoKey}), &bytes.Buffer{})
 		if !errors.Is(err, errDemoOff) {
 			t.Errorf("MHAI_DEMO_SEED=%q: %v, want refused", v, err)
