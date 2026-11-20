@@ -33,8 +33,8 @@ func TestWithHospitalRoleIsClosed(t *testing.T) {
 			t.Errorf("%s nil user: %v", r, err)
 		}
 	}
-	if len(Roles) != 4 || Gateway != "mhai_gateway" || EMR != "mhai_emr" || EMRCore != "mhai_emr_core" ||
-		Documents != "mhai_documents" {
+	if len(Roles) != 5 || Gateway != "mhai_gateway" || EMR != "mhai_emr" || EMRCore != "mhai_emr_core" ||
+		Documents != "mhai_documents" || Notify != "mhai_notify" {
 		t.Fatalf("roles changed: %v", Roles)
 	}
 }

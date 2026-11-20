@@ -3,16 +3,18 @@
 // reminder or assignment) to whatever delivers it.
 //
 // No email provider is chosen yet (TODO.md, "Mail provider"), so the only
-// sender is Log: it records in the outbox (account_messages, migration
-// 00049) and in the service log that a message is due, by kind and ids,
-// and never the link, the token, an email address or any text. Log is
+// sender is Log: it records in the outbox (message_outbox, migrations
+// 00049 and 00053) and in the service log that a message is due, by kind
+// and ids, and never the link, the token, an email address or any text. Log is
 // allowed only in development (config refuses CORE_DELIVERY=log
 // elsewhere); with no sender configured, every action that must send
 // something fails closed with 503 no_delivery before it changes anything.
 //
 // A real sender (email) implements Sender: Record writes the outbox row in
 // the action's transaction, and Send runs after commit with the message's
-// link, which it alone may see.
+// link, which it alone may see. With CORE_NOTIFY_ENABLED, core's drainer
+// (internal/notify) publishes each due row's id to the notifications
+// service after commit (notifications design §9.1).
 package delivery
 
 import (
@@ -29,7 +31,7 @@ import (
 // Kind is what a message is.
 type Kind string
 
-// The kinds core sends (account_messages.kind).
+// The kinds core sends (message_outbox.kind).
 const (
 	Invite         Kind = "invite"
 	PasswordReset  Kind = "password_reset"
@@ -57,7 +59,7 @@ type Message struct {
 
 // Sender delivers messages.
 type Sender interface {
-	// Channel is account_messages.channel.
+	// Channel is message_outbox.channel.
 	Channel() string
 	// Send delivers m after the action's commit. An error means the
 	// person may not get it; the caller tells the admin.
@@ -77,7 +79,7 @@ func Record(ctx context.Context, tx pgx.Tx, s Sender, m Message) error {
 	if m.Subject != uuid.Nil {
 		subject = &m.Subject
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO account_messages (hospital_id, recipient_id, kind, subject_id, channel, created_by)
+	_, err := tx.Exec(ctx, `INSERT INTO message_outbox (hospital_id, recipient_id, kind, subject_id, channel, created_by)
 		VALUES ($1, $2, $3, $4, $5, $6)`, m.HospitalID, m.Recipient, string(m.Kind), subject, s.Channel(), m.By)
 	return err
 }

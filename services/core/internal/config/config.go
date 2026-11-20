@@ -119,6 +119,13 @@ type Config struct {
 	// service's documents_scan durable; the routes come in PR 5. Off by
 	// default: no DOCS stream exists (documents design §13).
 	DocumentsEnabled bool
+	// NotifyEnabled (CORE_NOTIFY_ENABLED=true) switches outbound
+	// notifications on: core creates the NOTIFY stream and the
+	// notifications service's notify_send durable, and its drainer
+	// publishes each due outbox row's id after commit (notifications design
+	// §9.1). Off by default: no NOTIFY stream exists and core publishes
+	// nothing; the outbox rows are still written.
+	NotifyEnabled bool
 	// EMRSealPublicKeyPath is the emr service's sealing public key
 	// (CORE_EMR_SEAL_PUBLIC_KEY_PATH; EMR design §6.2), required when
 	// EMREnabled. A public key: core never holds the private one.
@@ -380,6 +387,13 @@ func Load() (Config, error) {
 		c.DocumentsEnabled = true
 	default:
 		errs = append(errs, errors.New("CORE_DOCUMENTS_ENABLED must be true or false"))
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_NOTIFY_ENABLED"))) {
+	case "", "false":
+	case "true":
+		c.NotifyEnabled = true
+	default:
+		errs = append(errs, errors.New("CORE_NOTIFY_ENABLED must be true or false"))
 	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORE_AUDIT_EXPORTS"))) {
 	case "", "false":

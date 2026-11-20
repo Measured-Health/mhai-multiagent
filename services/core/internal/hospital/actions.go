@@ -43,7 +43,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
-// The limits on messages to one person (account_messages, counted under
+// The limits on messages to one person (message_outbox, counted under
 // the staff lock).
 const (
 	mfaReminderEvery  = 24 * time.Hour
@@ -196,10 +196,10 @@ func messagesWithin(ctx context.Context, tx pgx.Tx, hid, id, subject uuid.UUID, 
 	secs := window.Seconds()
 	var err error
 	if subject != uuid.Nil {
-		err = tx.QueryRow(ctx, `SELECT count(*) FROM account_messages WHERE hospital_id = $1 AND subject_id = $2 AND kind = $3
+		err = tx.QueryRow(ctx, `SELECT count(*) FROM message_outbox WHERE hospital_id = $1 AND subject_id = $2 AND kind = $3
 			AND created_at >= now() - make_interval(secs => $4)`, hid, subject, string(kind), secs).Scan(&n)
 	} else {
-		err = tx.QueryRow(ctx, `SELECT count(*) FROM account_messages WHERE hospital_id = $1 AND recipient_id = $2 AND kind = $3
+		err = tx.QueryRow(ctx, `SELECT count(*) FROM message_outbox WHERE hospital_id = $1 AND recipient_id = $2 AND kind = $3
 			AND created_at >= now() - make_interval(secs => $4)`, hid, id, string(kind), secs).Scan(&n)
 	}
 	return n, err

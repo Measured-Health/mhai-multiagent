@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Notifications outbox and deliveries (design PR 3, migration 00053), off
+  by default.** Core's `account_messages` outbox is now `message_outbox`
+  (the old name stays a view for one release) with `published_at`, a
+  per-hospital `dedupe_key` and the email channel. With
+  `CORE_NOTIFY_ENABLED=true` (new, default false) core creates the
+  `NOTIFY` stream and the `notify_send` durable, and its drainer publishes
+  each due row's id after commit (never an invite or reset, never a row
+  over 24 hours old) and deletes rows after 90 days. The notifications
+  service's sender delivers each message once per channel (claim:
+  reserve, then check, under the subject's hospital), suppresses
+  deactivated recipients, holds messages past the hourly caps (10 per
+  person, 200 per hospital except mandatory kinds; `NOTIFY_RATE_PER_SECOND`
+  paces sends), retries on 1 min / 5 min / 30 min / 2 h / 6 h and after 24
+  hours fails and dead-letters it. `message_deliveries` keeps ids and
+  closed codes for a year; the gateway reads its hospital's outcomes. Only
+  the `log` channel exists (development).
 - **Notifications service skeleton (design PR 2, ADR 0018, migration
   00052), off by default.** `services/notifications/`: its own Go module
   and distroless image; settings that fail closed (errors name the

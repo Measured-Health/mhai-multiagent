@@ -13,15 +13,18 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/notifypb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/replay"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/channel"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/ctl"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/dblogin"
+	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/deliver"
 )
 
 // natsUser is the notifications service's NATS user; inboxPrefix its own
@@ -64,6 +67,26 @@ func logStart(log *slog.Logger, env string, trustedKeys int, channels []string, 
 	if len(channels) == 0 {
 		log.Warn("notifications: NOTIFY_CHANNELS is empty; nothing is sent")
 	}
+}
+
+// channels builds the enabled channels (config allows log in development
+// only; email comes with PR 4).
+func channels(s config.Settings, log *slog.Logger) map[string]channel.Channel {
+	out := map[string]channel.Channel{}
+	for _, name := range s.Channels {
+		if name == config.ChannelLog {
+			out[name] = channel.Log{Logger: log}
+		}
+	}
+	return out
+}
+
+// newSender is the notify_send handler from the settings.
+func newSender(s config.Settings, st deliver.Store, dead deliver.DeadLetters, log *slog.Logger) *deliver.Sender {
+	return &deliver.Sender{Store: st, Channels: channels(s, log), Dead: dead, Log: log, Metrics: &deliver.Metrics{},
+		Limits:  deliver.Limits{Recipient: s.RecipientPerHour, Hospital: s.HospitalPerHour},
+		Pacer:   deliver.NewPacer(s.RatePerSecond),
+		Breaker: deliver.NewBreaker()}
 }
 
 // checkLogin refuses a database login that can do more than mhai_notify. A
@@ -152,6 +175,17 @@ func serveUntil(ctx context.Context, getenv func(string) string, w io.Writer, st
 		return err
 	}
 	defer stopCtl()
+	// The sender (PR 3): only with a channel on. It waits for the NOTIFY
+	// stream, which core makes only with CORE_NOTIFY_ENABLED.
+	if s.Sends() {
+		js, err := jetstream.New(nc)
+		if err != nil {
+			return errors.New("cannot open JetStream")
+		}
+		st := deliver.PG{Pool: pool}
+		go newSender(s, st, deliver.JSDead{JS: js}, log).Run(ctx, js)
+		go deliver.RunRetention(ctx, st, log)
+	}
 	logStart(log, s.Env, len(keys), s.Channels, ready(ctx, db))
 	if started != nil {
 		started()

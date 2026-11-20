@@ -23,13 +23,14 @@ CREATE ROLE mhai_gateway NOLOGIN;
 CREATE ROLE mhai_emr NOLOGIN;
 CREATE ROLE mhai_emr_core NOLOGIN;
 CREATE ROLE mhai_documents NOLOGIN;
+CREATE ROLE mhai_notify NOLOGIN;
 CREATE ROLE owner_role NOLOGIN;
 CREATE TABLE notes (hospital_id uuid NOT NULL, body text NOT NULL);
 ALTER TABLE notes OWNER TO owner_role;
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE notes FORCE ROW LEVEL SECURITY;
 CREATE POLICY by_hospital ON notes USING (hospital_id = nullif(current_setting('mhai.hospital_id', true), '')::uuid);
-GRANT SELECT ON notes TO mhai_gateway, mhai_emr, mhai_emr_core, mhai_documents;
+GRANT SELECT ON notes TO mhai_gateway, mhai_emr, mhai_emr_core, mhai_documents, mhai_notify;
 `
 
 func startPostgres(t *testing.T) *pgxpool.Pool {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"google.golang.org/protobuf/proto"
@@ -22,6 +23,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/notifypb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/ctl"
+	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/deliver"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/testpg"
 )
 
@@ -61,8 +63,9 @@ func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(
 
 // The service end to end: its real login (notify_app, a member of
 // mhai_notify_app only) on core's migrations, NATS, and a health request
-// signed as core signs it. It answers database_ready true and no channels;
-// a superuser login stops it at start.
+// signed as core signs it. It answers database_ready true and its channel;
+// a due message on NOTIFY goes out once through the log channel without
+// the address in any log; a superuser login stops it at start.
 func TestServeAnswersHealth(t *testing.T) {
 	superURL, super := testpg.Migrated(t)
 	dbURL := testpg.Login(t, superURL, super, "notify_app", "mhai_notify_app")
@@ -76,7 +79,39 @@ func TestServeAnswersHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := map[string]string{"APP_ENV": "development", "NOTIFY_NATS_URL": natsURL, "NOTIFY_NATS_PASSWORD": devPassword(),
-		"NOTIFY_DATABASE_URL": dbURL, "NOTIFY_TRUSTED_KEYS_PATH": keys}
+		"NOTIFY_DATABASE_URL": dbURL, "NOTIFY_TRUSTED_KEYS_PATH": keys, "NOTIFY_CHANNELS": "log"}
+	// The NOTIFY stream and durable as core's bus.EnsureNotifyStream makes
+	// them (CORE_NOTIFY_ENABLED), and one due outbox row.
+	setup, err := nats.Connect(natsURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer setup.Close()
+	js, err := jetstream.New(setup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx, scancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer scancel()
+	if _, err := js.CreateStream(sctx, jetstream.StreamConfig{Name: deliver.Stream, Subjects: []string{"notify.v1.*.due"},
+		Retention: jetstream.WorkQueuePolicy, Duplicates: 2 * time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.CreateOrUpdateConsumer(sctx, deliver.Stream, jetstream.ConsumerConfig{Durable: deliver.Durable,
+		FilterSubject: "notify.v1.*.due", AckPolicy: jetstream.AckExplicitPolicy, AckWait: deliver.Lease}); err != nil {
+		t.Fatal(err)
+	}
+	hid := testpg.Hospital(t, super)
+	var u, msgID uuid.UUID
+	if err := super.QueryRow(sctx, `INSERT INTO users (hospital_id, email, display_name) VALUES ($1, $2, 'Synth E2E')
+		RETURNING id`, hid, "synth-e2e-"+hid.String()[:8]+"@example.test").Scan(&u); err != nil {
+		t.Fatal(err)
+	}
+	if err := super.QueryRow(sctx, `INSERT INTO message_outbox (hospital_id, recipient_id, kind, channel, created_by)
+		VALUES ($1, $2, 'mfa_reminder', 'log', $2) RETURNING id`, hid, u).Scan(&msgID); err != nil {
+		t.Fatal(err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	logs := &syncBuf{}
@@ -112,8 +147,23 @@ func TestServeAnswersHealth(t *testing.T) {
 		t.Fatalf("health: %v", err)
 	}
 	var h notifypb.HealthReply
-	if err := proto.Unmarshal(rep.Data, &h); err != nil || !h.GetDatabaseReady() || len(h.GetChannels()) != 0 {
+	if err := proto.Unmarshal(rep.Data, &h); err != nil || !h.GetDatabaseReady() || len(h.GetChannels()) != 1 {
 		t.Fatalf("health reply: %v %v", &h, err)
+	}
+	// A due message on NOTIFY is delivered once through the log channel
+	// and recorded sent.
+	body, _ := proto.Marshal(&notifypb.Due{MessageId: msgID.String()})
+	if _, err := js.Publish(sctx, "notify.v1."+hid.String()+".due", body, jetstream.WithMsgID(msgID.String())); err != nil {
+		t.Fatal(err)
+	}
+	status := ""
+	for deadline := time.Now().Add(20 * time.Second); status != "sent" && time.Now().Before(deadline); {
+		_ = super.QueryRow(sctx, `SELECT status FROM message_deliveries WHERE message_id = $1`, msgID).Scan(&status)
+		time.Sleep(100 * time.Millisecond)
+	}
+	if status != "sent" || !strings.Contains(logs.String(), "message delivered to the log channel") ||
+		strings.Contains(logs.String(), "synth-e2e-") {
+		t.Fatalf("delivery %q; logs: %s", status, logs.String())
 	}
 	// The same token again: no reply.
 	if _, err := nc.RequestMsg(m, time.Second); err == nil {

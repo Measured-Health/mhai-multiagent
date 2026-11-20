@@ -358,9 +358,9 @@ func TestDeployPipelineUserMatchesDev(t *testing.T) {
 
 // ADR 0018: the notifications NATS user is an include, as the documents
 // user is: notifications.conf (on) or notifications-off.conf (the dev
-// default), which needs no variable and can't sign in. In PR 2 it
-// publishes nothing, has no inbox and subscribes its control subjects in
-// queue group notifications only. Core may call it; the demo config has no
+// default), which needs no variable and can't sign in. It subscribes its
+// control subjects in queue group notifications only, and (PR 3) pulls and
+// acks notify_send and publishes its own dead letters, nothing else. Core may call it; the demo config has no
 // notifications user yet.
 func TestNotificationsUserIsAnOptInInclude(t *testing.T) {
 	dev := readConf(t, "services/nats/nats.conf")
@@ -388,20 +388,37 @@ func TestNotificationsUserIsAnOptInInclude(t *testing.T) {
 	if !strings.Contains(on, "user:notifications") || !strings.Contains(on, "password:$NATS_NOTIFICATIONS_PASSWORD") {
 		t.Fatal("notifications.conf must define the notifications user with NATS_NOTIFICATIONS_PASSWORD")
 	}
-	if !strings.Contains(on, `publish:{deny:[">"]}`) || !strings.Contains(on, `"notify.v1.ctl.>notifications"`) ||
-		strings.Contains(on, "_INBOX") || !strings.Contains(on, `allow_responses:{max:1,expires:"1m"}`) ||
-		strings.Contains(on, "due") || strings.Contains(on, "STREAM") {
+	if !strings.Contains(on, `"notify.v1.ctl.>notifications"`) || !strings.Contains(on, `"dead.v1.*.notify_send"`) ||
+		!strings.Contains(on, `"$JS.API.CONSUMER.MSG.NEXT.NOTIFY.notify_send"`) ||
+		!strings.Contains(on, `"_INBOX_worker.notifications.>"`) || !strings.Contains(on, `allow_responses:{max:1,expires:"1m"}`) ||
+		strings.Contains(on, "due") || strings.Contains(on, "STREAM") || strings.Contains(on, "CREATE") ||
+		strings.Contains(on, `"dead.v1.>"`) || strings.Contains(on, `"notify.v1.>"`) {
 		t.Fatalf("notifications.conf rights: %s", on)
 	}
 	for _, c := range []struct{ file, gateway string }{
 		{"services/nats/nats.conf", "user: gateway"}, {"deploy/nats/nats.conf", "nkey: $NATS_GATEWAY_NKEY"}} {
 		gw := stripComments(permissionsAfter(t, readConf(t, c.file), c.gateway))
-		if !strings.Contains(gw, `"notify.v1.ctl.>"`) {
-			t.Errorf("%s: gateway can't call notify.v1.ctl.>", c.file)
+		if !strings.Contains(gw, `"notify.v1.ctl.>"`) || !strings.Contains(gw, `"notify.v1.*.due"`) ||
+			!strings.Contains(gw, `"$JS.API.STREAM.CREATE.NOTIFY"`) || strings.Contains(gw, "notify_send") {
+			t.Errorf("%s: gateway's notifications rights", c.file)
 		}
 	}
 	deploy := stripComments(readConf(t, "deploy/nats/nats.conf"))
 	if strings.Contains(deploy, "notifications.conf") || strings.Contains(deploy, "NATS_NOTIFICATIONS") {
 		t.Fatal("the deploy config must not include a notifications user yet (NATS_NOTIFICATIONS_NKEY isn't provisioned)")
+	}
+}
+
+// With every stream on (JOBS, DEAD, EMR, DOCS and NOTIFY), the KV buckets
+// still keep at least 128 MiB of the dev store (1 GB). NOTIFY is small
+// (ids only); like DOCS, it doesn't fit the demo's 512 MB store until that
+// grows (TODO.md).
+func TestNotifyStreamFitsTheStore(t *testing.T) {
+	all := bus.StreamsMaxBytes + bus.EMRMaxBytes + bus.DocsMaxBytes + bus.NotifyMaxBytes
+	if all > 1<<30-128<<20 {
+		t.Fatalf("every stream reserves %d bytes", all)
+	}
+	if bus.NotifyMaxBytes > 16<<20 || bus.NotifyMaxMsgSize > 1<<10 {
+		t.Fatalf("NOTIFY carries ids only: %d bytes, %d per message", bus.NotifyMaxBytes, bus.NotifyMaxMsgSize)
 	}
 }

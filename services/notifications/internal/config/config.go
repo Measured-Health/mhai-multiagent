@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -46,6 +47,16 @@ type Settings struct {
 	// Channels is NOTIFY_CHANNELS, a comma-separated list of the channels
 	// the service may send on. Empty (the default): it sends nothing.
 	Channels []string
+	// RatePerSecond is NOTIFY_RATE_PER_SECOND, the global pace of sends
+	// (design §9.4; default 5, 1 to 50).
+	RatePerSecond int
+	// HospitalPerHour is NOTIFY_HOSPITAL_PER_HOUR, one hospital's outbound
+	// messages in an hour, mandatory kinds aside (default 200, 1 to
+	// 10000).
+	HospitalPerHour int
+	// RecipientPerHour is NOTIFY_RECIPIENT_PER_HOUR, one person's messages
+	// in an hour (default 10, 1 to 100).
+	RecipientPerHour int
 }
 
 // Development reports whether APP_ENV is development.
@@ -64,6 +75,22 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	}
 	channels, chErr := parseChannels(get("NOTIFY_CHANNELS"), s.Env == "development")
 	s.Channels = channels
+	var rateErrs []error
+	for _, r := range []struct {
+		name          string
+		dst           *int
+		def, min, max int
+	}{
+		{"NOTIFY_RATE_PER_SECOND", &s.RatePerSecond, 5, 1, 50},
+		{"NOTIFY_HOSPITAL_PER_HOUR", &s.HospitalPerHour, 200, 1, 10000},
+		{"NOTIFY_RECIPIENT_PER_HOUR", &s.RecipientPerHour, 10, 1, 100},
+	} {
+		v, err := intSetting(get(r.name), r.def, r.min, r.max)
+		if err != nil {
+			rateErrs = append(rateErrs, fmt.Errorf("%s must be a whole number from %d to %d", r.name, r.min, r.max))
+		}
+		*r.dst = v
+	}
 	var errs []error
 	switch s.Env {
 	case "":
@@ -108,6 +135,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	if chErr != nil {
 		errs = append(errs, chErr)
 	}
+	errs = append(errs, rateErrs...)
 	if err := errors.Join(errs...); err != nil {
 		return Settings{}, err
 	}
@@ -137,6 +165,18 @@ func parseChannels(raw string, dev bool) ([]string, error) {
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// intSetting is raw as a whole number in [lo, hi], or def when raw is "".
+func intSetting(raw string, def, lo, hi int) (int, error) {
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < lo || n > hi {
+		return def, errors.New("out of range")
+	}
+	return n, nil
 }
 
 // Sends reports whether any channel is on.

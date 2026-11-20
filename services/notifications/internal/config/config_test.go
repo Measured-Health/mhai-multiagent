@@ -53,6 +53,15 @@ func TestSettingsLoad(t *testing.T) {
 	if s, err := FromEnv(env(m)); err != nil || s.Env != "production" {
 		t.Fatalf("unset APP_ENV: %+v %v", s, err)
 	}
+	// The rate settings' defaults and bounds.
+	if s, err := FromEnv(env(devEnv())); err != nil || s.RatePerSecond != 5 || s.HospitalPerHour != 200 || s.RecipientPerHour != 10 {
+		t.Fatalf("rate defaults: %+v %v", s, err)
+	}
+	m = devEnv()
+	m["NOTIFY_RATE_PER_SECOND"], m["NOTIFY_HOSPITAL_PER_HOUR"], m["NOTIFY_RECIPIENT_PER_HOUR"] = "50", "1", "100"
+	if s, err := FromEnv(env(m)); err != nil || s.RatePerSecond != 50 || s.HospitalPerHour != 1 || s.RecipientPerHour != 100 {
+		t.Fatalf("rate bounds: %+v %v", s, err)
+	}
 	// No channel by default: the service sends nothing.
 	if s, err := FromEnv(env(devEnv())); err != nil || s.Sends() || s.Channels != nil {
 		t.Fatalf("default channels: %+v %v", s, err)
@@ -124,6 +133,10 @@ func TestSettingsRefusals(t *testing.T) {
 		{"email channel before PR 4", devEnv, func(m map[string]string) { m["NOTIFY_CHANNELS"] = "email" }, "NOTIFY_CHANNELS"},
 		{"unknown channel", devEnv, func(m map[string]string) { m["NOTIFY_CHANNELS"] = "sms" }, "NOTIFY_CHANNELS"},
 		{"a channel twice", devEnv, func(m map[string]string) { m["NOTIFY_CHANNELS"] = "log, log" }, "NOTIFY_CHANNELS"},
+		{"rate not a number", devEnv, func(m map[string]string) { m["NOTIFY_RATE_PER_SECOND"] = "fast" }, "NOTIFY_RATE_PER_SECOND"},
+		{"rate too high", devEnv, func(m map[string]string) { m["NOTIFY_RATE_PER_SECOND"] = "51" }, "NOTIFY_RATE_PER_SECOND"},
+		{"hospital cap zero", devEnv, func(m map[string]string) { m["NOTIFY_HOSPITAL_PER_HOUR"] = "0" }, "NOTIFY_HOSPITAL_PER_HOUR"},
+		{"recipient cap too high", devEnv, func(m map[string]string) { m["NOTIFY_RECIPIENT_PER_HOUR"] = "101" }, "NOTIFY_RECIPIENT_PER_HOUR"},
 		{"an empty channel name", devEnv, func(m map[string]string) { m["NOTIFY_CHANNELS"] = "log," }, "NOTIFY_CHANNELS"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
