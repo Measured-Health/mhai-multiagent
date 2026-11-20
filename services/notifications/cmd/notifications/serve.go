@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/x509"
 	"errors"
 	"io"
 	"log/slog"
@@ -25,6 +26,8 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/ctl"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/dblogin"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/deliver"
+	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/email"
+	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/templates"
 )
 
 // natsUser is the notifications service's NATS user; inboxPrefix its own
@@ -69,21 +72,63 @@ func logStart(log *slog.Logger, env string, trustedKeys int, channels []string, 
 	}
 }
 
-// channels builds the enabled channels (config allows log in development
-// only; email comes with PR 4).
-func channels(s config.Settings, log *slog.Logger) map[string]channel.Channel {
+// channels builds the enabled channels: log (development only, config
+// says) and email (SMTP submission, PR 4). Email reads its password file
+// and CA file here, so a bad one stops the service at start.
+func channels(s config.Settings, log *slog.Logger) (map[string]channel.Channel, error) {
 	out := map[string]channel.Channel{}
 	for _, name := range s.Channels {
-		if name == config.ChannelLog {
+		switch name {
+		case config.ChannelLog:
 			out[name] = channel.Log{Logger: log}
+		case config.ChannelEmail:
+			c, err := emailChannel(s)
+			if err != nil {
+				return nil, err
+			}
+			out[name] = c
 		}
 	}
-	return out
+	return out, nil
 }
 
-// newSender is the notify_send handler from the settings.
-func newSender(s config.Settings, st deliver.Store, dead deliver.DeadLetters, log *slog.Logger) *deliver.Sender {
-	return &deliver.Sender{Store: st, Channels: channels(s, log), Dead: dead, Log: log, Metrics: &deliver.Metrics{},
+// emailChannel is the SMTP channel from the settings. Errors name the
+// variable, never a path or a value.
+func emailChannel(s config.Settings) (*email.Channel, error) {
+	if s.SMTP == nil {
+		return nil, errors.New("NOTIFY_SMTP_ settings are missing")
+	}
+	pw, err := config.ReadSMTPPassword(s.SMTP.PasswordFile)
+	if err != nil {
+		return nil, err
+	}
+	var roots *x509.CertPool
+	if s.SMTP.CAFile != "" {
+		b, err := os.ReadFile(s.SMTP.CAFile)
+		if err != nil {
+			return nil, errors.New("NOTIFY_SMTP_CA_FILE: the file can't be read")
+		}
+		roots = x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(b) {
+			return nil, errors.New("NOTIFY_SMTP_CA_FILE: no certificate in the file")
+		}
+	}
+	app, err := templates.ParseApp(s.AppURL, s.Development())
+	if err != nil {
+		return nil, errors.New("NOTIFY_APP_URL is invalid")
+	}
+	cfg := email.Config{Host: s.SMTP.Host, Port: s.SMTP.Port, Username: s.SMTP.Username, Password: pw, From: s.SMTP.From,
+		FromName: s.SMTP.FromName, ReplyTo: s.SMTP.ReplyTo, RootCAs: roots}
+	if err := email.CheckConfig(cfg); err != nil {
+		return nil, errors.New("NOTIFY_SMTP_ settings are invalid (the From and Reply-To must be plain addresses)")
+	}
+	return &email.Channel{Config: cfg, App: app}, nil
+}
+
+// newSender is the notify_send handler from the settings and channels.
+func newSender(s config.Settings, chans map[string]channel.Channel, st deliver.Store, dead deliver.DeadLetters,
+	log *slog.Logger) *deliver.Sender {
+	return &deliver.Sender{Store: st, Channels: chans, Dead: dead, Log: log, Metrics: &deliver.Metrics{},
 		Limits:  deliver.Limits{Recipient: s.RecipientPerHour, Hospital: s.HospitalPerHour},
 		Pacer:   deliver.NewPacer(s.RatePerSecond),
 		Breaker: deliver.NewBreaker()}
@@ -136,6 +181,13 @@ func serveUntil(ctx context.Context, getenv func(string) string, w io.Writer, st
 	if err != nil {
 		return errors.New("NOTIFY_TRUSTED_KEYS_PATH: the trusted request-keys file is missing or not valid")
 	}
+	chans, err := channels(s, log)
+	if err != nil {
+		return err
+	}
+	if s.SMTP != nil {
+		log.Info("notifications: email by SMTP submission", "server", s.SMTP.Host, "port", s.SMTP.Port)
+	}
 
 	// The pool connects lazily: the service starts (and health answers
 	// database_ready false) while the database or its login isn't there.
@@ -183,7 +235,7 @@ func serveUntil(ctx context.Context, getenv func(string) string, w io.Writer, st
 			return errors.New("cannot open JetStream")
 		}
 		st := deliver.PG{Pool: pool}
-		go newSender(s, st, deliver.JSDead{JS: js}, log).Run(ctx, js)
+		go newSender(s, chans, st, deliver.JSDead{JS: js}, log).Run(ctx, js)
 		go deliver.RunRetention(ctx, st, log)
 	}
 	logStart(log, s.Env, len(keys), s.Channels, ready(ctx, db))

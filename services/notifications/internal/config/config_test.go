@@ -130,7 +130,7 @@ func TestSettingsRefusals(t *testing.T) {
 		}, "NOTIFY_DATABASE_URL"},
 		{"unknown APP_ENV", devEnv, func(m map[string]string) { m["APP_ENV"] = "dev" }, "APP_ENV"},
 		{"log channel outside development", prodEnv, func(m map[string]string) { m["NOTIFY_CHANNELS"] = "log" }, "NOTIFY_CHANNELS"},
-		{"email channel before PR 4", devEnv, func(m map[string]string) { m["NOTIFY_CHANNELS"] = "email" }, "NOTIFY_CHANNELS"},
+		{"email without its settings", devEnv, func(m map[string]string) { m["NOTIFY_CHANNELS"] = "email" }, "NOTIFY_SMTP_HOST"},
 		{"unknown channel", devEnv, func(m map[string]string) { m["NOTIFY_CHANNELS"] = "sms" }, "NOTIFY_CHANNELS"},
 		{"a channel twice", devEnv, func(m map[string]string) { m["NOTIFY_CHANNELS"] = "log, log" }, "NOTIFY_CHANNELS"},
 		{"rate not a number", devEnv, func(m map[string]string) { m["NOTIFY_RATE_PER_SECOND"] = "fast" }, "NOTIFY_RATE_PER_SECOND"},

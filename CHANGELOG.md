@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Notifications email channel (design PR 4), off by default.** Fixed
+  templates per message kind (only the link, its expiry and an
+  invitation's hospital name; no patient data; links only to
+  `NOTIFY_APP_URL`; no images or tracking) sent by SMTP submission to our
+  own mailbox over implicit TLS (465) or STARTTLS (587) with the
+  certificate verified, the password only from `NOTIFY_SMTP_PASSWORD_FILE`.
+  `NOTIFY_CHANNELS=email` turns it on with the `NOTIFY_SMTP_*` settings.
 - **Notifications outbox and deliveries (design PR 3, migration 00053), off
   by default.** Core's `account_messages` outbox is now `message_outbox`
   (the old name stays a view for one release) with `published_at`, a
