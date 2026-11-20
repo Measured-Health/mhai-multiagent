@@ -191,7 +191,7 @@ def test_a_patient_chunk_posing_as_a_shared_reference_is_still_refused() -> None
 
 
 class _Retriever:
-    def __init__(self, dense_model: str = "", device: str = "cpu") -> None:
+    def __init__(self, dense_model: str = "", device: str = "cpu", encoder: Any = None) -> None:
         self.chunks: list[KBChunk] = []
 
     def index_kb(self, kb: Any) -> None:
