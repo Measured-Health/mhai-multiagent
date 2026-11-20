@@ -1008,6 +1008,30 @@ func TestDeliverySwitch(t *testing.T) {
 	}
 }
 
+// CORE_DELIVERY=notify (notifications PR 5) is allowed in production, and
+// only with CORE_APP_URL and CORE_NOTIFY_ENABLED; ShowLinks stays off.
+func TestDeliveryNotify(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey, "CORE_DELIVERY": "notify",
+		"CORE_APP_URL": "https://app.example.test", "CORE_NOTIFY_ENABLED": "true"}
+	setEnv(t, base)
+	c, err := Load()
+	if err != nil || c.Delivery != DeliveryNotify || c.ShowLinks() {
+		t.Fatalf("%q %v", c.Delivery, err)
+	}
+	for _, drop := range []string{"CORE_APP_URL", "CORE_NOTIFY_ENABLED"} {
+		m := map[string]string{}
+		for k, v := range base {
+			if k != drop {
+				m[k] = v
+			}
+		}
+		setEnv(t, m)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_DELIVERY=notify") {
+			t.Errorf("without %s: %v", drop, err)
+		}
+	}
+}
+
 // CORE_APP_URL: optional; https (http only in development), a host, no
 // query, fragment or credentials; refused by name, never echoed.
 func TestAppURL(t *testing.T) {

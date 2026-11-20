@@ -183,7 +183,7 @@ func TestCtlRefusals(t *testing.T) {
 	}{
 		{"token for another subject", "binding", func(t *testing.T, f *fixture) *nats.Msg {
 			m := f.msg(t, coreClaims("health"), health, schemaRq, nil)
-			m.Subject = "notify.v1.ctl.send_link"
+			m.Subject = "notify.v1.ctl.unsubscribe_check"
 			return m
 		}},
 		{"another body", "binding", func(t *testing.T, f *fixture) *nats.Msg {
@@ -269,7 +269,7 @@ func TestCtlRefusals(t *testing.T) {
 			return f.msg(t, coreClaims("nope"), "notify.v1.ctl.nope", schemaRq, nil)
 		}},
 		{"an op of a later PR", "unknown_op", func(t *testing.T, f *fixture) *nats.Msg {
-			return f.msg(t, coreClaims("send_link"), "notify.v1.ctl.send_link", schemaRq, nil)
+			return f.msg(t, coreClaims("unsubscribe_check"), "notify.v1.ctl.unsubscribe_check", schemaRq, nil)
 		}},
 		{"health as a clinician", "caller", func(t *testing.T, f *fixture) *nats.Msg {
 			return f.msg(t, userClaims("clinician"), health, schemaRq, nil)

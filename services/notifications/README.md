@@ -100,6 +100,24 @@ owner's 20 Nov decision: send from our own mailbox over SMTP submission).
 - Tested against an in-process SMTP server with a certificate made at run
   time (`internal/testsmtp`), never a real mailbox.
 
+**PR 5, invites, resets and reminders go out** (design §4.4, §6.3, §9.4;
+migration 00054).
+
+- Core: `CORE_DELIVERY=notify` (allowed in production; needs
+  `CORE_APP_URL` and `CORE_NOTIFY_ENABLED=true`). An invite or a reset goes
+  at once by `notify.v1.ctl.send_link` with its link in the request body
+  only (`internal/notifyctl`; request/reply, never JetStream); anything but
+  `accepted` answers the admin's action with 503 `no_delivery`, as #229
+  does without a sender. Every other kind (two-step notices and
+  reminders, review assignments and reminders) is written to the outbox
+  with channel `email` and delivered by PR 3's sender.
+- This service: `send_link` (hospital-bound) sends only to a user named by
+  `notify_link_recipient`: an active user of the token's hospital holding
+  a live token of that purpose issued in the last 2 minutes (NT6, NT8). 30
+  links a minute per hospital; the recipient's hourly allowance (mandatory
+  kinds skip the hospital's cap); 3 tries in about 25 seconds. The link is
+  never logged or stored.
+
 ## Settings
 
 | Variable | |
@@ -157,9 +175,11 @@ owner's 20 Nov decision: send from our own mailbox over SMTP submission).
    of core's per-action limits.
 10. **The global pace is per process.** With more than one instance, set
     `NOTIFY_RATE_PER_SECOND` to the provider's rate divided by the count.
-11. **Failed mandatory sends are not yet on the audit chain**
-    (`notify.delivery_failed`): this service can't write to it. Core will
-    record it in PR 5, where it learns of a failed link send directly.
+11. **Failed mandatory sends are not on the audit chain**
+    (`notify.delivery_failed`): this service can't write to it, and core
+    learns of a failed link only after the action's transaction has
+    committed. The action's own audit row is there, core logs the failure
+    by ids, and the admin gets 503 `no_delivery` and can send again.
 12. **Dead letters go to `DEAD`, but nothing shows them yet.** Core's
     `core_dead` consumer acks and ignores them (not a job type). The
     platform's Failed jobs view reads them later (PR 8).
@@ -173,3 +193,16 @@ owner's 20 Nov decision: send from our own mailbox over SMTP submission).
 15. **The From domain isn't checked against a separate sending domain**
     (§12.1): with our own mailbox, the From is the mailbox's own address.
     SPF, DKIM and DMARC on that domain are a people item (TODO.md).
+16. **`send_link` tries 3 times in about 25 seconds** (design: 60), so
+    the admin's request answers within core's 30-second control timeout.
+17. **No `invite_delivery` on `StaffOut` yet** (§13): a link's outcome is
+    the admin's own reply (200 or 503 `no_delivery`), and invites leave no
+    delivery row. The staff screen's field comes with mhai-web's change.
+18. **A failed link's token isn't revoked at once.** Nobody received it;
+    the admin's "send again" mints a new token and revokes the old one, as
+    #229 does.
+19. **The 30-a-minute `send_link` limit is per process.** With more than
+    one instance it scales with the count; the per-person hourly cap is in
+    the database and holds across instances.
+20. **A hospital name unfit for a template is refused at send, not at
+    save** (NT11): the invite then answers 503 and the name must be fixed.

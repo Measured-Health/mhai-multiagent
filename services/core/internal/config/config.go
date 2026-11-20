@@ -69,11 +69,11 @@ type Config struct {
 	PatientLookupPerDay         int
 	PatientLookupHospitalPerDay int
 	// Delivery is CORE_DELIVERY, how core hands over the messages it owes
-	// a person (invites, reset links, notices, reminders): "log" (the
-	// outbox and the log record that a message is due; nothing is sent;
+	// a person (invites, reset links, notices, reminders): "notify" (the
+	// notifications service sends them by email: PR 5), "log" (the outbox
+	// and the log record that a message is due; nothing is sent;
 	// development only, and its default there) or "" (none: every action
-	// that must send something answers 503 no_delivery). No email
-	// provider is chosen yet (TODO.md).
+	// that must send something answers 503 no_delivery).
 	Delivery string
 	// AppURL is CORE_APP_URL, the clinical app's address that invite and
 	// reset links point at (https outside development; http allowed in
@@ -171,6 +171,12 @@ type Config struct {
 
 // DeliveryLog is CORE_DELIVERY's log sender (internal/delivery.Log).
 const DeliveryLog = "log"
+
+// DeliveryNotify is CORE_DELIVERY's notifications service sender
+// (internal/notifyctl.Sender; notifications PR 5): invites and resets by
+// send_link, every other kind from the outbox. It needs CORE_NOTIFY_ENABLED
+// and CORE_APP_URL.
+const DeliveryNotify = "notify"
 
 // NamedIdentityDemo selects the synthetic demo identity fixture.
 const NamedIdentityDemo = "demo-fixture"
@@ -489,15 +495,22 @@ func Load() (Config, error) {
 	case v == DeliveryLog && c.Development():
 		c.Delivery = DeliveryLog
 	case v == DeliveryLog:
-		errs = append(errs, errors.New("CORE_DELIVERY=log is refused outside development (it sends nothing); leave it unset until an email provider is configured"))
+		errs = append(errs, errors.New("CORE_DELIVERY=log is refused outside development (it sends nothing); use notify or leave it unset"))
+	case v == DeliveryNotify:
+		c.Delivery = DeliveryNotify
 	default:
-		errs = append(errs, errors.New("CORE_DELIVERY must be log or none"))
+		errs = append(errs, errors.New("CORE_DELIVERY must be notify, log or none"))
 	}
 
 	if u, err := appURL(os.Getenv("CORE_APP_URL"), c.Development()); err != nil {
 		errs = append(errs, err)
 	} else {
 		c.AppURL = u
+	}
+	// The notifications service sends the links: they must be absolute,
+	// and the outbox's other kinds need the drainer.
+	if c.Delivery == DeliveryNotify && (c.AppURL == "" || !c.NotifyEnabled) {
+		errs = append(errs, errors.New("CORE_DELIVERY=notify needs CORE_APP_URL and CORE_NOTIFY_ENABLED=true"))
 	}
 
 	// Only this service's own credentials are read: the NATS password is in

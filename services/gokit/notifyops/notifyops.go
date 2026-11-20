@@ -6,8 +6,9 @@
 // published to Python.
 //
 // No op admits a user, a platform role or an auditor: every op is
-// svc:core's alone. PR 2 builds health; send_link and unsubscribe_check
-// come with the PRs that use them (5 and 7), each with its own entry.
+// svc:core's alone. PR 2 built health and PR 5 send_link (hospital-bound:
+// the token's hid is the recipient's hospital); unsubscribe_check comes
+// with PR 7.
 package notifyops
 
 import (
@@ -37,6 +38,12 @@ type Op struct {
 	Request, Response string
 }
 
+// hospitalBound marks o as acting for the token's hospital.
+func hospitalBound(o Op) Op {
+	o.HospitalBound = true
+	return o
+}
+
 func coreOp(op string, timeout time.Duration, msg string) Op {
 	return Op{Name: "notifications." + op, Op: op, SvcCore: true, Timeout: timeout,
 		Request: "mhai.notify.v1." + msg + "Request", Response: "mhai.notify.v1." + msg + "Reply"}
@@ -45,6 +52,9 @@ func coreOp(op string, timeout time.Duration, msg string) Op {
 // Ops is the table.
 var Ops = []Op{
 	coreOp("health", 5*time.Second, "Health"),
+	// An invite or a reset, sent at once with its link in memory: up to 3
+	// tries in about 25 seconds (design §4.4).
+	hospitalBound(coreOp("send_link", 30*time.Second, "SendLink")),
 }
 
 // Subject is op's control subject.

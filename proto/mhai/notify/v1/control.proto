@@ -23,3 +23,28 @@ message HealthReply {
   // PR 4). Empty: the service sends nothing.
   repeated string channels = 2;
 }
+
+// notify.v1.ctl.send_link, as svc:core, hospital-bound: the hospital is
+// the token's hid, never a field (design §4.4). Core asks after an invite
+// or a reset has committed; the link lives only in this request (NATS
+// request/reply, never JetStream) and the service's memory. The service
+// sends only to a user of the token's hospital with a token of this
+// purpose issued in the last 2 minutes (notify_link_recipient).
+message SendLinkRequest {
+  // The recipient: a user id (a uuid), never an address.
+  string user_id = 1;
+  // invite or password_reset.
+  string purpose = 2;
+  // The secret link, on the app's address. Never logged or stored.
+  string link = 3;
+  // When the link stops working, Unix seconds.
+  int64 expires_at = 4;
+}
+
+// outcome: accepted (the mail server took it); failed (refused, or kept
+// failing after 3 tries); no_recipient (no such user of the hospital with a
+// fresh token of the purpose); rate_limited; not_ready (no email channel,
+// or the database didn't answer); invalid (a malformed request).
+message SendLinkReply {
+  string outcome = 1;
+}

@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Invites, resets and reminders go out by email (notifications design
+  PR 5, migration 00054), off by default.** `CORE_DELIVERY=notify` (new;
+  allowed in production with `CORE_APP_URL` and `CORE_NOTIFY_ENABLED`)
+  hands an invite or reset link to the notifications service by
+  `notify.v1.ctl.send_link` (request/reply, the link in memory only) and
+  answers 503 `no_delivery` unless it was accepted; two-step notices and
+  reminders and review assignments and reminders go by the outbox. The
+  service sends a link only to an active user of the token's hospital with
+  a token of that purpose issued in the last 2 minutes
+  (`notify_link_recipient`), at most 30 a minute per hospital.
 - **Notifications email channel (design PR 4), off by default.** Fixed
   templates per message kind (only the link, its expiry and an
   invitation's hospital name; no patient data; links only to

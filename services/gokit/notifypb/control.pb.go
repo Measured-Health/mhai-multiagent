@@ -123,6 +123,132 @@ func (x *HealthReply) GetChannels() []string {
 	return nil
 }
 
+// notify.v1.ctl.send_link, as svc:core, hospital-bound: the hospital is
+// the token's hid, never a field (design §4.4). Core asks after an invite
+// or a reset has committed; the link lives only in this request (NATS
+// request/reply, never JetStream) and the service's memory. The service
+// sends only to a user of the token's hospital with a token of this
+// purpose issued in the last 2 minutes (notify_link_recipient).
+type SendLinkRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The recipient: a user id (a uuid), never an address.
+	UserId string `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// invite or password_reset.
+	Purpose string `protobuf:"bytes,2,opt,name=purpose,proto3" json:"purpose,omitempty"`
+	// The secret link, on the app's address. Never logged or stored.
+	Link string `protobuf:"bytes,3,opt,name=link,proto3" json:"link,omitempty"`
+	// When the link stops working, Unix seconds.
+	ExpiresAt     int64 `protobuf:"varint,4,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendLinkRequest) Reset() {
+	*x = SendLinkRequest{}
+	mi := &file_mhai_notify_v1_control_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendLinkRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendLinkRequest) ProtoMessage() {}
+
+func (x *SendLinkRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_mhai_notify_v1_control_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendLinkRequest.ProtoReflect.Descriptor instead.
+func (*SendLinkRequest) Descriptor() ([]byte, []int) {
+	return file_mhai_notify_v1_control_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *SendLinkRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *SendLinkRequest) GetPurpose() string {
+	if x != nil {
+		return x.Purpose
+	}
+	return ""
+}
+
+func (x *SendLinkRequest) GetLink() string {
+	if x != nil {
+		return x.Link
+	}
+	return ""
+}
+
+func (x *SendLinkRequest) GetExpiresAt() int64 {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return 0
+}
+
+// outcome: accepted (the mail server took it); failed (refused, or kept
+// failing after 3 tries); no_recipient (no such user of the hospital with a
+// fresh token of the purpose); rate_limited; not_ready (no email channel,
+// or the database didn't answer); invalid (a malformed request).
+type SendLinkReply struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Outcome       string                 `protobuf:"bytes,1,opt,name=outcome,proto3" json:"outcome,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendLinkReply) Reset() {
+	*x = SendLinkReply{}
+	mi := &file_mhai_notify_v1_control_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendLinkReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendLinkReply) ProtoMessage() {}
+
+func (x *SendLinkReply) ProtoReflect() protoreflect.Message {
+	mi := &file_mhai_notify_v1_control_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendLinkReply.ProtoReflect.Descriptor instead.
+func (*SendLinkReply) Descriptor() ([]byte, []int) {
+	return file_mhai_notify_v1_control_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SendLinkReply) GetOutcome() string {
+	if x != nil {
+		return x.Outcome
+	}
+	return ""
+}
+
 var File_mhai_notify_v1_control_proto protoreflect.FileDescriptor
 
 const file_mhai_notify_v1_control_proto_rawDesc = "" +
@@ -131,7 +257,15 @@ const file_mhai_notify_v1_control_proto_rawDesc = "" +
 	"\rHealthRequest\"P\n" +
 	"\vHealthReply\x12%\n" +
 	"\x0edatabase_ready\x18\x01 \x01(\bR\rdatabaseReady\x12\x1a\n" +
-	"\bchannels\x18\x02 \x03(\tR\bchannelsBMZKgithub.com/Measured-Health/mhai-multiagent/services/gokit/notifypb;notifypbb\x06proto3"
+	"\bchannels\x18\x02 \x03(\tR\bchannels\"w\n" +
+	"\x0fSendLinkRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x18\n" +
+	"\apurpose\x18\x02 \x01(\tR\apurpose\x12\x12\n" +
+	"\x04link\x18\x03 \x01(\tR\x04link\x12\x1d\n" +
+	"\n" +
+	"expires_at\x18\x04 \x01(\x03R\texpiresAt\")\n" +
+	"\rSendLinkReply\x12\x18\n" +
+	"\aoutcome\x18\x01 \x01(\tR\aoutcomeBMZKgithub.com/Measured-Health/mhai-multiagent/services/gokit/notifypb;notifypbb\x06proto3"
 
 var (
 	file_mhai_notify_v1_control_proto_rawDescOnce sync.Once
@@ -145,10 +279,12 @@ func file_mhai_notify_v1_control_proto_rawDescGZIP() []byte {
 	return file_mhai_notify_v1_control_proto_rawDescData
 }
 
-var file_mhai_notify_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_mhai_notify_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_mhai_notify_v1_control_proto_goTypes = []any{
-	(*HealthRequest)(nil), // 0: mhai.notify.v1.HealthRequest
-	(*HealthReply)(nil),   // 1: mhai.notify.v1.HealthReply
+	(*HealthRequest)(nil),   // 0: mhai.notify.v1.HealthRequest
+	(*HealthReply)(nil),     // 1: mhai.notify.v1.HealthReply
+	(*SendLinkRequest)(nil), // 2: mhai.notify.v1.SendLinkRequest
+	(*SendLinkReply)(nil),   // 3: mhai.notify.v1.SendLinkReply
 }
 var file_mhai_notify_v1_control_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for method output_type
@@ -169,7 +305,7 @@ func file_mhai_notify_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mhai_notify_v1_control_proto_rawDesc), len(file_mhai_notify_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
