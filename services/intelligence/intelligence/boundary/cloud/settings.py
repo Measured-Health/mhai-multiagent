@@ -74,7 +74,7 @@ _RETAINED_ANTHROPIC = ("fable", "mythos")
 SDK_ENV_PREFIXES = ("OPENAI_", "ANTHROPIC_", "AZURE_OPENAI_", "XAI_", "GEMINI_")
 
 # Documentation only (the prefixes are the rule): the names openai 3.37.0
-# and anthropic 2.3.0 read for the clients this worker builds, from their
+# and anthropic 2.8.0 read for the clients this worker builds, from their
 # sources (plan Task 4). Re-check on an SDK bump.
 SDK_ENV_REFUSED = (
     "OPENAI_API_KEY",

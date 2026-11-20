@@ -73,7 +73,7 @@ RULES: Final = (
 # current span's unless told not to (plan Task 4), so the hook refuses it.
 TRACE_HEADERS: Final = ("traceparent", "tracestate", "baggage")
 
-# The request headers each provider's SDK sends (anthropic 2.3.0, openai
+# The request headers each provider's SDK sends (anthropic 2.8.0, openai
 # 3.37.0; review M2), lower-case, exact names. Any other header is refused
 # ("header"), so an SDK update that adds one fails closed until it is
 # reviewed here. The values are scanned for identifiers too.
