@@ -147,7 +147,7 @@ jobs:
         id: bundle
         run: |
           set -euo pipefail
-          b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh demo/enable-demo.sh | base64 -w0)
+          b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh demo/enable-demo.sh demo/reset-demo.sh | base64 -w0)
           echo "value=$b" >> "$GITHUB_OUTPUT"
 
       # Without a host-key check the SSH step would trust whatever answers at
