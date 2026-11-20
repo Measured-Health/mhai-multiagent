@@ -14,7 +14,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 )
 
-const usage = "usage: core serve | core migrate up|status | core keys new|ensure|untrust ... | core hospitals create|activate|model-policy ... | core users create|roles ... | core emr exclude|remove-hospital-data ... | core analysis seed-demo|switch off|named-access ... | core demo seed"
+const usage = "usage: core serve | core migrate up|status | core keys new|ensure|untrust ... | core hospitals create|activate|model-policy ... | core users create|roles ... | core emr exclude|remove-hospital-data ... | core analysis seed-demo|switch off|named-access ... | core demo seed|reset"
 
 func main() {
 	var err error
