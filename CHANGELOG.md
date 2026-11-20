@@ -71,8 +71,42 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **docsandbox: the first ping always runs the jailed self-test.** The
+  self-test's one-minute cache started at `0.0` and was compared with
+  `time.monotonic()`, which counts from the host's boot (containers share
+  the host's clock). On a host up for under a minute, such as a freshly
+  booted CI runner, every ping answered `unavailable` without running the
+  jail; this was the intermittent `docsandbox` CI failure
+  (`'unavailable' != 'ok'` in `test_ping` and
+  `test_ping_runs_a_jailed_selftest_in_private_and_caches_it`, each failing
+  in under a millisecond). The cache now starts empty, and
+  `test_first_ping_runs_the_selftest_however_long_the_host_has_been_up`
+  pins the clock at 0 s, 5 s, 60 s and later. The CI job prints the
+  runner's uptime. No limit, filter or jail flag changed.
 - Reference library boundary test: `test_retrieval_over_a_large_library_is_bounded_and_fast` failed on CI at 3.044 s and 3.083 s against its 3 s budget. About 3 s of that was the process's first import of scikit-learn (the retriever's TF-IDF fallback), paid once whatever the library's size; the read took 66 ms and the index and retrieval a few ms. The test now imports the retrieval stack before the clock starts, so it times only the read, index and retrieval the bound is about, and the budget is 1 s (indexing the whole 30,050-chunk library alone takes 0.5-0.7 s). It prints its timing on a pass too, so CI logs keep the history.
 - Documents tests: the throwaway MinIO now waits for `/minio/health/ready`, not `/live`, and retries a 503 when making the bucket, so the S3, storage and upload integration tests no longer fail with "create bucket: unexpected status 503" on a busy runner.
+
+### Changed
+
+- Intelligence worker: the dense embedding model is loaded once per client
+  (`boundary.models.dense_factory`) and shared by every job, as the NLI model
+  already was, instead of being loaded again for every job. Only the weights
+  and tokenizer are shared (`SharedEncoder`, `encode()` under a lock); each
+  job still gets its own knowledge base, retriever, index (vectors, TF-IDF
+  vocabulary), CCA and HGA over its own chunks, so patient scoping is
+  unchanged. Without sentence-transformers the scikit-learn import is made
+  once. A model that fails to load is not kept: that job escalates, as before,
+  and the next job tries again. On the build server (20 sequential synthetic
+  jobs, CPU, all-MiniLM-L6-v2 and the NLI model): build and retrieval after
+  the first job went from 593-1307 ms to 101-111 ms (median), the 20 jobs from
+  23.6-47.7 s to 11.2-15.3 s, and peak RSS from 1.83-1.90 GB to 1.06-1.08 GB.
+  The shared NLI verifier now tokenises and runs inference under its own lock
+  as well, so two concurrent jobs can't collide in the fast tokenizer
+  ("Already borrowed") and escalate a question for no reason (4 threads x 20
+  jobs on the build server: 13.4-13.6 s with the lock, 20.9-21.3 s without).
+  `tests/security/test_shared_model_isolation.py` pins the sharing and the
+  isolation (other patient, other hospital, concurrent jobs), and that
+  concurrent jobs get the same verdicts as sequential ones.
 
 ### Added
 

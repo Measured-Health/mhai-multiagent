@@ -31,6 +31,7 @@ Requirements:
 
 import os
 import re
+import threading
 import time
 import numpy as np
 from typing import List, Tuple, Dict, Optional, Any
@@ -147,6 +148,11 @@ class NLIEntailmentVerifier:
         self._loaded = False
         self.label_map: Dict[int, str] = {}
         self._local_files_only = bool(local_files_only)
+        # One verifier is shared by every job of a worker (boundary.models.nli_factory):
+        # a fast tokenizer must not be used by two threads at once ("Already
+        # borrowed"), so tokenising and inference run under this lock. It guards the
+        # model only; nothing of a job is kept on the verifier.
+        self._lock = threading.Lock()
 
         self._try_load_model(device)
         if require_model and not self._loaded:
@@ -207,15 +213,14 @@ class NLIEntailmentVerifier:
         """Run DeBERTa-v3 NLI inference."""
         import torch
 
-        inputs = self.tokenizer(
-            premise, hypothesis,
-            return_tensors="pt",
-            max_length=512,
-            truncation=True,
-            padding=True
-        ).to(self.device)
-
-        with torch.no_grad():
+        with self._lock, torch.no_grad():
+            inputs = self.tokenizer(
+                premise, hypothesis,
+                return_tensors="pt",
+                max_length=512,
+                truncation=True,
+                padding=True
+            ).to(self.device)
             outputs = self.model(**inputs)
             logits = outputs.logits[0]
             probs = torch.softmax(logits, dim=-1)
