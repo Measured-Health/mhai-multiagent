@@ -71,6 +71,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **docsandbox: the first ping always runs the jailed self-test.** The
+  self-test's one-minute cache started at `0.0` and was compared with
+  `time.monotonic()`, which counts from the host's boot (containers share
+  the host's clock). On a host up for under a minute, such as a freshly
+  booted CI runner, every ping answered `unavailable` without running the
+  jail; this was the intermittent `docsandbox` CI failure
+  (`'unavailable' != 'ok'` in `test_ping` and
+  `test_ping_runs_a_jailed_selftest_in_private_and_caches_it`, each failing
+  in under a millisecond). The cache now starts empty, and
+  `test_first_ping_runs_the_selftest_however_long_the_host_has_been_up`
+  pins the clock at 0 s, 5 s, 60 s and later. The CI job prints the
+  runner's uptime. No limit, filter or jail flag changed.
 - Reference library boundary test: `test_retrieval_over_a_large_library_is_bounded_and_fast` failed on CI at 3.044 s and 3.083 s against its 3 s budget. About 3 s of that was the process's first import of scikit-learn (the retriever's TF-IDF fallback), paid once whatever the library's size; the read took 66 ms and the index and retrieval a few ms. The test now imports the retrieval stack before the clock starts, so it times only the read, index and retrieval the bound is about, and the budget is 1 s (indexing the whole 30,050-chunk library alone takes 0.5-0.7 s). It prints its timing on a pass too, so CI logs keep the history.
 - Documents tests: the throwaway MinIO now waits for `/minio/health/ready`, not `/live`, and retries a 503 when making the bucket, so the S3, storage and upload integration tests no longer fail with "create bucket: unexpected status 503" on a busy runner.
 
