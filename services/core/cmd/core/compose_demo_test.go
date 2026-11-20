@@ -61,38 +61,46 @@ func TestDemoSampleAIService(t *testing.T) {
 
 func TestDemoSeedService(t *testing.T) {
 	c := loadDeployCompose(t)
-	s, ok := c.Services["core-demo-seed"]
-	if !ok {
-		t.Fatal("deploy/compose.yml has no core-demo-seed service")
-	}
-	if !slices.Equal(s.Profiles, []string{"demo"}) || !slices.Equal(s.Command, []string{"demo", "seed"}) {
-		t.Errorf("core-demo-seed profiles %v command %v", s.Profiles, s.Command)
-	}
-	if s.Environment["MHAI_DEMO_SEED"] != "on" || s.Environment["APP_ENV"] != "demo" {
-		t.Error("core-demo-seed must set MHAI_DEMO_SEED=on and APP_ENV=demo")
-	}
-	if got := s.networkNames(); !slices.Equal(got, []string{"backend"}) {
-		t.Errorf("core-demo-seed networks %v, want [backend]", got)
-	}
-	if s.Restart != "no" || !s.ReadOnly {
-		t.Errorf("core-demo-seed restart %q read_only %v", s.Restart, s.ReadOnly)
+	for name, cmd := range map[string]string{"core-demo-seed": "seed", "core-demo-reset": "reset"} {
+		s, ok := c.Services[name]
+		if !ok {
+			t.Fatalf("deploy/compose.yml has no %s service", name)
+		}
+		if !slices.Equal(s.Profiles, []string{"demo"}) || !slices.Equal(s.Command, []string{"demo", cmd}) {
+			t.Errorf("%s profiles %v command %v", name, s.Profiles, s.Command)
+		}
+		if s.Environment["MHAI_DEMO_SEED"] != "on" || s.Environment["APP_ENV"] != "demo" {
+			t.Errorf("%s must set MHAI_DEMO_SEED=on and APP_ENV=demo", name)
+		}
+		if got := s.networkNames(); !slices.Equal(got, []string{"backend"}) {
+			t.Errorf("%s networks %v, want [backend]", name, got)
+		}
+		if s.Restart != "no" || !s.ReadOnly || len(s.Ports) != 0 {
+			t.Errorf("%s restart %q read_only %v ports %v", name, s.Restart, s.ReadOnly, s.Ports)
+		}
+		for _, v := range s.Volumes {
+			if v != "./secrets/nats-gateway.nk:/run/secrets/nats-gateway.nk:ro" {
+				t.Errorf("%s mounts %q: only core's NATS seed, read-only", name, v)
+			}
+		}
 	}
 }
 
-// Only the demo's two services carry the demo switches; the pilot's
+// Only the demo's services (the seed, the reset, sample-ai) carry the demo switches; the pilot's
 // pipeline and the dev stack never do.
 func TestDemoSwitchesOnlyOnDemoServices(t *testing.T) {
 	for name, s := range loadDeployCompose(t).Services {
-		if name != "core-demo-seed" {
+		oneShot := name == "core-demo-seed" || name == "core-demo-reset"
+		if !oneShot {
 			if _, ok := s.Environment["MHAI_DEMO_SEED"]; ok {
 				t.Errorf("%s sets MHAI_DEMO_SEED", name)
 			}
 		}
 		if name != "sample-ai" {
-			if s.Environment["INTELLIGENCE_MODEL_CLIENT"] == "sample" || (s.Environment["APP_ENV"] == "demo" && name != "core-demo-seed") {
+			if s.Environment["INTELLIGENCE_MODEL_CLIENT"] == "sample" || (s.Environment["APP_ENV"] == "demo" && !oneShot) {
 				t.Errorf("%s runs the sample client or APP_ENV=demo", name)
 			}
-			if slices.Contains(s.Profiles, "demo") && name != "core-demo-seed" {
+			if slices.Contains(s.Profiles, "demo") && !oneShot {
 				t.Errorf("%s is in the demo profile", name)
 			}
 		}

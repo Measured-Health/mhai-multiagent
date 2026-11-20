@@ -24,7 +24,7 @@ import (
 )
 
 // Image is docker-compose.models.yml's MinIO, pinned by digest.
-const Image = "bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c"
+const Image = "bitnamilegacy/minio@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20"
 
 // Bucket is the test bucket.
 const Bucket = "mhai-documents-test"

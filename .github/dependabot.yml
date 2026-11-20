@@ -60,3 +60,8 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "ollama/ollama"
         update-types: ["version-update:semver-major"]
+      # Frozen test-only images (TODO.md, "MinIO is test-only"): their
+      # `latest` tag is an older build than the pins (2025.5.x against
+      # 2025.7.x), so a digest "bump" is a downgrade. Update them by hand.
+      - dependency-name: "bitnamilegacy/minio"
+      - dependency-name: "bitnamilegacy/minio-client"

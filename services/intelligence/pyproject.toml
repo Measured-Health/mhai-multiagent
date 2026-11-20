@@ -68,7 +68,7 @@ dependencies = [
     # (httpx2), request hooks, error wrapping and environment variables
     # (boundary/cloud/settings.py SDK_ENV_REFUSED); review all four on a bump.
     "openai>=3.37.0,<4",
-    "anthropic>=2.3.0,<3",
+    "anthropic>=2.8.0,<3",
 ]
 
 [dependency-groups]
