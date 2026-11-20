@@ -121,18 +121,18 @@ func TestRefusals(t *testing.T) {
 		req  *notifypb.SendLinkRequest
 		want string
 	}{
-		"no fresh token":      {func(_ *Handler, s *fakeStore) { s.found = false }, req(user, "invite"), NoRecipient},
-		"database down":       {func(_ *Handler, s *fakeStore) { s.recErr = errors.New("synthetic") }, req(user, "invite"), NotReady},
-		"counter down":        {func(_ *Handler, s *fakeStore) { s.reserveErr = errors.New("synthetic") }, req(user, "invite"), NotReady},
-		"recipient capped":    {func(_ *Handler, s *fakeStore) { s.reserveOK = false }, req(user, "invite"), RateLimited},
-		"email off":           {func(h *Handler, _ *fakeStore) { h.Email = nil }, req(user, "invite"), NotReady},
-		"another purpose":     {nil, req(user, "mfa_reset"), Invalid},
-		"not a uuid":          {nil, req("someone@example.test", "invite"), Invalid},
-		"upper-case uuid":     {nil, req(strings.ToUpper(user), "invite"), Invalid},
-		"no link":             {nil, &notifypb.SendLinkRequest{UserId: user, Purpose: "invite", ExpiresAt: t0.Add(time.Hour).Unix()}, Invalid},
-		"expired":             {nil, &notifypb.SendLinkRequest{UserId: user, Purpose: "invite", Link: secretLink, ExpiresAt: t0.Unix()}, Invalid},
-		"over seven days":     {nil, &notifypb.SendLinkRequest{UserId: user, Purpose: "invite", Link: secretLink, ExpiresAt: t0.Add(8 * 24 * time.Hour).Unix()}, Invalid},
-		"over-long link":      {nil, &notifypb.SendLinkRequest{UserId: user, Purpose: "invite", Link: strings.Repeat("x", 2049), ExpiresAt: t0.Add(time.Hour).Unix()}, Invalid},
+		"no fresh token":   {func(_ *Handler, s *fakeStore) { s.found = false }, req(user, "invite"), NoRecipient},
+		"database down":    {func(_ *Handler, s *fakeStore) { s.recErr = errors.New("synthetic") }, req(user, "invite"), NotReady},
+		"counter down":     {func(_ *Handler, s *fakeStore) { s.reserveErr = errors.New("synthetic") }, req(user, "invite"), NotReady},
+		"recipient capped": {func(_ *Handler, s *fakeStore) { s.reserveOK = false }, req(user, "invite"), RateLimited},
+		"email off":        {func(h *Handler, _ *fakeStore) { h.Email = nil }, req(user, "invite"), NotReady},
+		"another purpose":  {nil, req(user, "mfa_reset"), Invalid},
+		"not a uuid":       {nil, req("someone@example.test", "invite"), Invalid},
+		"upper-case uuid":  {nil, req(strings.ToUpper(user), "invite"), Invalid},
+		"no link":          {nil, &notifypb.SendLinkRequest{UserId: user, Purpose: "invite", ExpiresAt: t0.Add(time.Hour).Unix()}, Invalid},
+		"expired":          {nil, &notifypb.SendLinkRequest{UserId: user, Purpose: "invite", Link: secretLink, ExpiresAt: t0.Unix()}, Invalid},
+		"over seven days":  {nil, &notifypb.SendLinkRequest{UserId: user, Purpose: "invite", Link: secretLink, ExpiresAt: t0.Add(8 * 24 * time.Hour).Unix()}, Invalid},
+		"over-long link":   {nil, &notifypb.SendLinkRequest{UserId: user, Purpose: "invite", Link: strings.Repeat("x", 2049), ExpiresAt: t0.Add(time.Hour).Unix()}, Invalid},
 	} {
 		h, st, em, _ := rig()
 		if tc.edit != nil {
