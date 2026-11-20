@@ -27,6 +27,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/dblogin"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/deliver"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/email"
+	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/link"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/templates"
 )
 
@@ -134,6 +135,13 @@ func newSender(s config.Settings, chans map[string]channel.Channel, st deliver.S
 		Breaker: deliver.NewBreaker()}
 }
 
+// newLinkHandler serves send_link (PR 5) on the email channel; without
+// one, every link answers not_ready and nothing is sent.
+func newLinkHandler(s config.Settings, chans map[string]channel.Channel, pool *pgxpool.Pool, log *slog.Logger) *link.Handler {
+	return &link.Handler{Store: link.NewPG(pool), Email: chans[config.ChannelEmail], Log: log,
+		Limits: deliver.Limits{Recipient: s.RecipientPerHour, Hospital: s.HospitalPerHour}}
+}
+
 // checkLogin refuses a database login that can do more than mhai_notify. A
 // database that doesn't answer yet is not a refusal: the pool connects
 // lazily and health reports database_ready false.
@@ -218,7 +226,7 @@ func serveUntil(ctx context.Context, getenv func(string) string, w io.Writer, st
 	r := &ctl.Responder{
 		Keys:     func() map[string]ed25519.PublicKey { return keys },
 		Replay:   replay.New(ctl.ReplayWindow, ctl.MaxReplayIDs),
-		Handlers: map[string]ctl.Handler{"health": healthHandler(db, s.Channels)},
+		Handlers: map[string]ctl.Handler{"health": healthHandler(db, s.Channels), "send_link": newLinkHandler(s, chans, pool, log).Handle},
 		Log:      log,
 		Metrics:  &ctl.Metrics{},
 	}

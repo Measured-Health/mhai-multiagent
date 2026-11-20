@@ -16,6 +16,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/notifypb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
+	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/channel"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/config"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/email"
 )
@@ -249,5 +250,17 @@ func TestEmailChannelFromSettings(t *testing.T) {
 		if err == nil || strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), pw) {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// send_link uses the email channel when it is on, and none otherwise.
+func TestNewLinkHandler(t *testing.T) {
+	if h := newLinkHandler(config.Settings{RecipientPerHour: 4}, map[string]channel.Channel{}, nil, nil); h.Email != nil ||
+		h.Limits.Recipient != 4 {
+		t.Fatal("email off")
+	}
+	e := &email.Channel{}
+	if h := newLinkHandler(config.Settings{}, map[string]channel.Channel{"email": e}, nil, nil); h.Email != e {
+		t.Fatal("email on")
 	}
 }

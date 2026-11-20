@@ -35,6 +35,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/natsapi"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/notify"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/notifyctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/patients"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
@@ -250,6 +251,11 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if cfg.Delivery == config.DeliveryLog {
 		sender = delivery.Log{Logger: log}
 		log.Warn("core: CORE_DELIVERY=log: invites, reset links, notices and reminders are recorded as due, never sent")
+	}
+	if cfg.Delivery == config.DeliveryNotify {
+		// Invites and resets go to the notifications service by send_link
+		// (their link in memory only); every other kind from the outbox.
+		sender = notifyctl.Sender{Client: &notifyctl.Client{NC: nc, Signer: signer, Log: log}, Log: log}
 	}
 	if sender != nil && a.notifyDrainer != nil {
 		sender = kickSender{Sender: sender, kick: a.notifyDrainer.Kick}
