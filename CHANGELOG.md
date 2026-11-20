@@ -94,6 +94,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Two flaky Python tests.** The escalation guard's "negation is not
+  quadratic" test bounded the wall clock (0.2 s), which a busy CI runner
+  missed; it now times the check against itself at 8 times the input and
+  fails on quadratic growth (about 64 times) whatever the machine's speed.
+  `test_wip_sent_on_long_stage` read the lease as soon as the +WIP was
+  published, but the worker renews the lease in its own transaction after the
+  +WIP (by design, so an unheard +WIP renews nothing), so the read could see
+  the claim's lease unchanged. It now waits for the renewal and checks the
+  order: +WIP first, then the lease. No product change.
 - **Demo sample AI: no confidence without evidence.** With
   `INTELLIGENCE_MODEL_CLIENT=sample`, an answer citing no guideline ("No
   reference guideline in the demo library matches this question") showed
