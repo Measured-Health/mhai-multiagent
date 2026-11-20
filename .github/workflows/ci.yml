@@ -468,6 +468,34 @@ jobs:
       - name: Integration tests
         run: bash ../../.github/scripts/go-test-packages.sh test differ "" integration -race -timeout 25m
 
+  # The notifications service (ADR 0018). Off by default; the same gates as
+  # the documents service. Its NATS rights are tested from core (internal/bus).
+  notifications:
+    runs-on: ubuntu-latest  # ships Docker, which the integration tests use
+    defaults:
+      run:
+        working-directory: services/notifications
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache-dependency-path: services/notifications/go.sum
+      - name: Formatted (gofmt)
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w on the files above"; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
+      # Each package once: the integration build of a package with
+      # integration tests includes its unit tests (go-test-packages.sh).
+      - name: Test
+        run: bash ../../.github/scripts/go-test-packages.sh test same "" integration -race -timeout 25m
+      - name: Integration tests
+        run: bash ../../.github/scripts/go-test-packages.sh test differ "" integration -race -timeout 25m
+
   # The documents scan's sidecars (documents PR 4): docsandbox's renderer,
   # server and real jail (the image's test stage, run with the privileges
   # compose gives it: nsjail builds each jail), and clamd with the deployed
@@ -548,6 +576,7 @@ jobs:
               - services/gokit/**
               - services/emr/**
               - services/documents/**
+              - services/notifications/**
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: steps.changes.outputs.image == 'true'
       # Layers are cached between runs, so only changed layers rebuild.
@@ -605,6 +634,13 @@ jobs:
           case "$out" in "usage: documents"*) echo "the documents image runs" ;; *) echo "::error::the documents image doesn't run"; exit 1 ;; esac
           # Non-root, as the image says.
           test "$(docker image inspect -f '{{.Config.User}}' mhai-documents:ci)" = "nonroot:nonroot"
+      - name: Build the notifications image from services/
+        if: steps.changes.outputs.go_image == 'true'
+        run: |
+          docker build -t mhai-notifications:ci -f services/notifications/Dockerfile services
+          out=$(docker run --rm mhai-notifications:ci help 2>&1 || true)
+          case "$out" in "usage: notifications"*) echo "the notifications image runs" ;; *) echo "::error::the notifications image doesn't run"; exit 1 ;; esac
+          test "$(docker image inspect -f '{{.Config.User}}' mhai-notifications:ci)" = "nonroot:nonroot"
 
   # Spec section 12: the whole boundary end to end. The smoke stack
   # (docker-compose.yml + docker-compose.smoke.yml: core, NATS, Postgres,
@@ -630,6 +666,7 @@ jobs:
           docker compose --env-file .env.example --profile test --profile observability config -q
           docker compose --env-file .env.example --profile emr config -q
           docker compose --env-file .env.example --profile documents config -q
+          docker compose --env-file .env.example --profile notifications config -q
           docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.smoke.yml config -q
           docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.gpu.yml config -q
           # The demo deploy's file, with synthetic values for the host's .env.

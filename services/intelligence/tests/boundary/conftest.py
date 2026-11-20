@@ -81,6 +81,9 @@ def start_nats() -> Iterator[NatsServer]:
         .with_copy_into_container(NATS_DIR / "emr-off.conf", "/etc/nats/emr.conf")
         # The documents user off too (the default): no NATS_DOCUMENTS_PASSWORD.
         .with_copy_into_container(NATS_DIR / "documents-off.conf", "/etc/nats/documents.conf")
+        .with_copy_into_container(
+            NATS_DIR / "notifications-off.conf", "/etc/nats/notifications.conf"
+        )
         .waiting_for(LogMessageWaitStrategy("Server is ready"))
     )
     c.start()

@@ -9,8 +9,9 @@
 #     around it, with certificates made here for the run by deploy/tls/
 #     (make-ca.sh, issue.sh) and removed at the end;
 #   - services/nats/nats.conf as dev compose mounts it, with the emr user
-#     off (emr-off.conf) and on (emr.conf), and the documents user off
-#     (documents-off.conf) and on (documents.conf).
+#     off (emr-off.conf) and on (emr.conf), the documents user off
+#     (documents-off.conf) and on (documents.conf), and the notifications
+#     user off (notifications-off.conf) and on (notifications.conf).
 # The image is the deploy's pinned NATS image. Needs docker and docker
 # compose v2; run from the repository root. Prints no secret: every value
 # here is a test value.
@@ -92,14 +93,18 @@ NATS_BFF_CLINICAL_PASSWORD=testonlyclinical0001
 NATS_BFF_PLATFORM_PASSWORD=testonlyplatform0001
 NATS_EMR_PASSWORD=testonlyemr0001
 NATS_DOCUMENTS_PASSWORD=testonlydocuments0001
+NATS_NOTIFICATIONS_PASSWORD=testonlynotifications0001
 NATS_JS_KEY=testonlyjetstreamkey0000000000000001
 E
 for emr in emr-off.conf emr.conf; do
   for documents in documents-off.conf documents.conf; do
-    check "services/nats/nats.conf (dev, $emr, $documents)" --env-file "$work/dev.env" \
-      -v "$SRCROOT/services/nats/nats.conf:/etc/nats/nats.conf:ro" \
-      -v "$SRCROOT/services/nats/bff-clinical.test.conf:/etc/nats/bff-clinical.test.conf:ro" \
-      -v "$SRCROOT/services/nats/$emr:/etc/nats/emr.conf:ro" \
-      -v "$SRCROOT/services/nats/$documents:/etc/nats/documents.conf:ro"
+    for notifications in notifications-off.conf notifications.conf; do
+      check "services/nats/nats.conf (dev, $emr, $documents, $notifications)" --env-file "$work/dev.env" \
+        -v "$SRCROOT/services/nats/nats.conf:/etc/nats/nats.conf:ro" \
+        -v "$SRCROOT/services/nats/bff-clinical.test.conf:/etc/nats/bff-clinical.test.conf:ro" \
+        -v "$SRCROOT/services/nats/$emr:/etc/nats/emr.conf:ro" \
+        -v "$SRCROOT/services/nats/$documents:/etc/nats/documents.conf:ro" \
+        -v "$SRCROOT/services/nats/$notifications:/etc/nats/notifications.conf:ro"
+    done
   done
 done

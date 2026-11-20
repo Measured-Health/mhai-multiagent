@@ -67,10 +67,11 @@ var testPasswordSQL func(string) string
 // mhai_worker_app (the pipeline, 00008_intelligence_worker.sql),
 // mhai_emr_app (the emr service, from the EMR connections migration) and
 // mhai_emr_admin (the operator's EMR exclusion CLI, 00032) and
-// mhai_documents_app (the documents service, 00046). Each login is a
+// mhai_documents_app (the documents service, 00046) and mhai_notify_app (the
+// notifications service, 00052). Each login is a
 // member of exactly one of them.
 var loginRoles = map[string]bool{"mhai_app": true, "mhai_provision": true, "mhai_worker_app": true, "mhai_emr_app": true,
-	"mhai_emr_admin": true, "mhai_documents_app": true}
+	"mhai_emr_admin": true, "mhai_documents_app": true, "mhai_notify_app": true}
 
 var loginName = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 
@@ -78,7 +79,7 @@ var loginName = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 const MinLoginPasswordLen = 16
 
 // EnsureLogin creates the login role name with password, a member of
-// exactly role (mhai_app, mhai_provision, mhai_worker_app, mhai_emr_app, mhai_emr_admin or mhai_documents_app), or brings an existing one back
+// exactly role (mhai_app, mhai_provision, mhai_worker_app, mhai_emr_app, mhai_emr_admin, mhai_documents_app or mhai_notify_app), or brings an existing one back
 // to that: LOGIN, no superuser, BYPASSRLS, CREATEDB or CREATEROLE, no
 // session defaults (ALTER ROLE ... RESET ALL, role-wide and for this
 // database), the new password, and every other membership revoked. pool must be able to
@@ -88,7 +89,7 @@ const MinLoginPasswordLen = 16
 // Postgres stores as it is.
 func EnsureLogin(ctx context.Context, pool *pgxpool.Pool, name, password, role string) error {
 	if !loginRoles[role] {
-		return fmt.Errorf("db: a login may only be a member of mhai_app, mhai_provision, mhai_worker_app, mhai_emr_app, mhai_emr_admin or mhai_documents_app, not %q", role)
+		return fmt.Errorf("db: a login may only be a member of mhai_app, mhai_provision, mhai_worker_app, mhai_emr_app, mhai_emr_admin, mhai_documents_app or mhai_notify_app, not %q", role)
 	}
 	if !loginName.MatchString(name) || strings.HasPrefix(name, "mhai_") || strings.HasPrefix(name, "pg_") {
 		return errors.New("db: login name must be lower-case letters, digits and _, and not start with mhai_ or pg_")

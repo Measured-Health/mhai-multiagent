@@ -158,6 +158,9 @@ def start_tls_nats(ca: Ca, server_names: list[str], *, add_host: bool = True) ->
         )
         .with_copy_into_container(NATS_DIR / "emr-off.conf", "/etc/nats/emr.conf")
         .with_copy_into_container(NATS_DIR / "documents-off.conf", "/etc/nats/documents.conf")
+        .with_copy_into_container(
+            NATS_DIR / "notifications-off.conf", "/etc/nats/notifications.conf"
+        )
         .with_copy_into_container(REPO / "deploy" / "nats" / "tls.conf", "/etc/nats/tls.conf")
         .with_copy_into_container(ca.pem(), "/etc/nats/tls/ca.pem")
     )

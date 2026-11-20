@@ -90,7 +90,10 @@ type loginRequest struct {
 //     (00032). No default user: an operator names it;
 //   - DOCUMENTS_DB_USER / DOCUMENTS_DB_PASSWORD: the documents service's
 //     login (documents design §7.2), a member of mhai_documents_app only
-//     (00046), documents_app by default.
+//     (00046), documents_app by default;
+//   - NOTIFY_DB_USER / NOTIFY_DB_PASSWORD: the notifications service's login
+//     (notifications design §6), a member of mhai_notify_app only (00052),
+//     notify_app by default.
 //
 // Each pair is both set or both unset. Passwords must not be placeholders.
 // Errors name variables, never values.
@@ -104,6 +107,7 @@ func loginRequests(getenv func(string) string) ([]loginRequest, error) {
 		{userVar: "EMR_DB_USER", pwVar: "EMR_DB_PASSWORD", role: "mhai_emr_app", defaultUser: "emr_app"},
 		{userVar: "EMR_ADMIN_DB_USER", pwVar: "EMR_ADMIN_DB_PASSWORD", role: "mhai_emr_admin"},
 		{userVar: "DOCUMENTS_DB_USER", pwVar: "DOCUMENTS_DB_PASSWORD", role: "mhai_documents_app", defaultUser: "documents_app"},
+		{userVar: "NOTIFY_DB_USER", pwVar: "NOTIFY_DB_PASSWORD", role: "mhai_notify_app", defaultUser: "notify_app"},
 	} {
 		l.user, l.password = getenv(l.userVar), getenv(l.pwVar)
 		if l.user == "" && l.password != "" {

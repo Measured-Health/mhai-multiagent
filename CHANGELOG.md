@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Notifications service skeleton (design PR 2, ADR 0018, migration
+  00052), off by default.** `services/notifications/`: its own Go module
+  and distroless image; settings that fail closed (errors name the
+  variable, never its value); `notify.v1.ctl.health` behind the
+  request-token checks (`aud: notifications`, core only, replay set, strict
+  schema; `services/gokit/notifyops`, `services/gokit/notifypb`); its own
+  database role `mhai_notify` with no table grants, reached by the login
+  `notify_app` (`NOTIFY_DB_PASSWORD`, made by `core migrate up`); its NATS
+  user as an opt-in include (`NATS_NOTIFICATIONS_CONF=notifications.conf`;
+  `notifications-off.conf` by default) that may only answer core; the
+  compose profile `notifications`. `NOTIFY_CHANNELS` is empty by default
+  and the service sends nothing; `log` is development only and `email`
+  waits for PR 4. Core's `gateway` NATS user may call `notify.v1.ctl.>`.
+  CI gains the notifications job and image check.
 - **Hospital admin: invites and password resets (core OpenAPI 1.34.0,
   migration 00050).** `POST /hospital/staff/invites`,
   `/hospital/staff/{id}/resend-invite` and `/password-reset` (step-up)

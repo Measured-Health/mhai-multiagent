@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+// The notifications service's control operations, notify.v1.ctl.<op>
+// (notifications design §7, ADR 0018). Core is the only caller; every
+// request carries a request token (aud notifications) in its headers. Ids,
+// closed codes and flags only: never an address, a name, a link, a token
+// or any text.
+package mhai.notify.v1;
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/gokit/notifypb;notifypb";
+
+// notify.v1.ctl.health, as svc:core.
+message HealthRequest {}
+
+// Readiness flags and the enabled channels' names, no counts of anyone's
+// messages. The service sends only when database_ready is true and at
+// least one channel is enabled.
+message HealthReply {
+  // Its database login answers and holds mhai_notify and nothing more: not
+  // a superuser, no BYPASSRLS, not a table owner, no other mhai_ role.
+  bool database_ready = 1;
+  // The channels NOTIFY_CHANNELS enables, by name ("log"; "email" from
+  // PR 4). Empty: the service sends nothing.
+  repeated string channels = 2;
+}

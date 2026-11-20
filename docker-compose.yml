@@ -70,6 +70,9 @@ services:
       # The documents service's login (profile documents), optional:
       # skipped while empty (a member of mhai_documents_app only, 00046).
       DOCUMENTS_DB_PASSWORD: ${DOCUMENTS_DB_PASSWORD:-}
+      # The notifications service's login (profile notifications), optional:
+      # skipped while empty (a member of mhai_notify_app only, 00052).
+      NOTIFY_DB_PASSWORD: ${NOTIFY_DB_PASSWORD:-}
     depends_on:
       postgres: { condition: service_healthy }
 
@@ -229,6 +232,17 @@ services:
             esac;;
           *) echo "NATS_DOCUMENTS_CONF must be documents-off.conf or documents.conf" >&2; exit 1;;
         esac
+        # The notifications user (ADR 0018) likewise: off unless
+        # NATS_NOTIFICATIONS_CONF=notifications.conf, and only then is
+        # NATS_NOTIFICATIONS_PASSWORD needed, and checked.
+        case "$$NATS_NOTIFICATIONS_CONF" in
+          ""|notifications-off.conf) ;;
+          notifications.conf)
+            case "$$NATS_NOTIFICATIONS_PASSWORD" in
+              ""|*[Cc][Hh][Aa][Nn][Gg][Ee][Mm][Ee]*|*[Cc][Hh][Aa][Nn][Gg][Ee]-[Mm][Ee]*|*[Pp][Ll][Aa][Cc][Ee][Hh][Oo][Ll][Dd][Ee][Rr]*) echo "NATS_NOTIFICATIONS_PASSWORD is missing or a placeholder" >&2; exit 1;;
+            esac;;
+          *) echo "NATS_NOTIFICATIONS_CONF must be notifications-off.conf or notifications.conf" >&2; exit 1;;
+        esac
         exec nats-server -c /etc/nats/nats.conf
     environment:
       NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?set NATS_GATEWAY_PASSWORD in .env}
@@ -245,6 +259,11 @@ services:
       # profile documents).
       NATS_DOCUMENTS_CONF: ${NATS_DOCUMENTS_CONF:-documents-off.conf}
       NATS_DOCUMENTS_PASSWORD: ${NATS_DOCUMENTS_PASSWORD:-}
+      # Off by default; NATS_NOTIFICATIONS_CONF=notifications.conf and
+      # NATS_NOTIFICATIONS_PASSWORD turn the notifications NATS user on (with
+      # the profile notifications).
+      NATS_NOTIFICATIONS_CONF: ${NATS_NOTIFICATIONS_CONF:-notifications-off.conf}
+      NATS_NOTIFICATIONS_PASSWORD: ${NATS_NOTIFICATIONS_PASSWORD:-}
       NATS_JS_KEY: ${NATS_JS_KEY:?set NATS_JS_KEY in .env}
     ports: ["127.0.0.1:${NATS_PORT:-4222}:4222"]
     volumes:
@@ -252,6 +271,7 @@ services:
       - ./services/nats/bff-clinical.test.conf:/etc/nats/bff-clinical.test.conf:ro
       - ./services/nats/${NATS_EMR_CONF:-emr-off.conf}:/etc/nats/emr.conf:ro
       - ./services/nats/${NATS_DOCUMENTS_CONF:-documents-off.conf}:/etc/nats/documents.conf:ro
+      - ./services/nats/${NATS_NOTIFICATIONS_CONF:-notifications-off.conf}:/etc/nats/notifications.conf:ro
       - natsdata:/data
     # As postgres: default, and backend for the emr service.
     networks: [default, backend]
@@ -368,6 +388,51 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     networks: [backend, docscan]
+    depends_on:
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
+    healthcheck:
+      disable: true
+
+  # The notifications service (ADR 0018; services/notifications). Off by
+  # default: only with
+  #   NATS_NOTIFICATIONS_CONF=notifications.conf NATS_NOTIFICATIONS_PASSWORD=... docker compose --profile notifications up -d
+  # (the first two switch its NATS user on; without them NATS runs as
+  # before). Its own NATS user and password, the request-token trusted keys
+  # (public, read-only) and its own database login (00052; core-migrate
+  # makes it from NOTIFY_DB_PASSWORD); nothing of core's or another
+  # service's. NOTIFY_CHANNELS is empty, so it sends nothing (log in
+  # development only; email from PR 4).
+  #
+  # Locked down: read-only root, no capabilities, no-new-privileges, and
+  # only the internal backend network (Postgres and NATS; no route out). No
+  # port. No healthcheck: the image is distroless (no shell); readiness is
+  # notify.v1.ctl.health, which core asks.
+  notifications:
+    build:
+      # The notifications service requires services/gokit, so the context is services/.
+      context: ./services
+      dockerfile: notifications/Dockerfile
+    image: mhai-notifications:local
+    profiles: ["notifications"]
+    restart: unless-stopped
+    command: ["serve"]
+    environment:
+      APP_ENV: development
+      NOTIFY_NATS_URL: nats://nats:4222
+      # Empty unless the notifications user is on (the service then refuses to start).
+      NOTIFY_NATS_PASSWORD: ${NATS_NOTIFICATIONS_PASSWORD:-}
+      NOTIFY_DATABASE_URL: postgres://${NOTIFY_DB_USER:-notify_app}:${NOTIFY_DB_PASSWORD:-}@postgres:5432/${POSTGRES_DB:-mhai}?sslmode=disable
+      NOTIFY_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+      # Empty: nothing is sent. log (development only) logs ids and kinds.
+      NOTIFY_CHANNELS: ${NOTIFY_CHANNELS:-}
+    volumes:
+      - trustedkeys:/trusted:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [backend]
     depends_on:
       nats: { condition: service_healthy }
       core-migrate: { condition: service_completed_successfully }
