@@ -6,7 +6,12 @@ from __future__ import annotations
 import pytest
 
 from intelligence.boundary.config import ConfigError, WorkerSettings
-from intelligence.boundary.models import ModelRouter, build_model_client, build_model_router
+from intelligence.boundary.models import (
+    ModelRouter,
+    build_model_client,
+    build_model_router,
+    trust_band,
+)
 from intelligence.boundary.sample import LABEL, SampleModelClient, compose
 from intelligence.knowledge_base.kb_builder import REFERENCE_SOURCE, KBChunk
 
@@ -183,12 +188,61 @@ def test_generate_uses_only_visible_chunks() -> None:
 
 
 def test_verify_passes_a_plain_question_with_sample_scores() -> None:
+    """Every quoted sentence is in a cited chunk: the citation check is 1.0
+    and the decision follows from the thresholds, as the real HGA's does."""
     c = SampleModelClient()
     g = c.generate("What confirms malaria before treatment?", {}, None, [MALARIA, HTN])
     v = c.verify(g)
     assert v.verified and v.decision == "PASS" and not v.degraded
-    assert v.trust_score == pytest.approx(0.86)
+    assert v.scores["nli"] == pytest.approx(1.0)
+    assert v.trust_score is not None and 0.5 < v.trust_score <= 1.0
+    assert trust_band(v) == "high"
     assert set(v.scores) == {"nli", "coherence", "numerical", "se"}
+    assert not v.flags
+
+
+def test_no_matching_guideline_escalates_without_a_confidence() -> None:
+    """Live demo bug (20 Nov): a "no guideline matches" answer showed High
+    confidence. No source, no score: ESCALATE, unverified, no trust band."""
+    c = SampleModelClient()
+    g = c.generate("Which vaccine schedule applies?", {}, None, [HTN, MALARIA])
+    assert g.available and g.cited_chunk_ids == ()
+    assert "No reference guideline" in g.response and g.response.startswith(LABEL)
+    v = c.verify(g)
+    assert v.decision == "ESCALATE"
+    assert v.trust_score is None and not v.verified and v.degraded
+    assert trust_band(v) is None
+    assert not v.scores
+
+
+def test_no_chunks_at_all_escalates_without_a_confidence() -> None:
+    c = SampleModelClient()
+    v = c.verify(c.generate("What confirms malaria?", {}, None, []))
+    assert v.decision == "ESCALATE" and v.trust_score is None and trust_band(v) is None
+
+
+def test_a_claim_outside_the_cited_chunks_does_not_pass() -> None:
+    """The sample HGA checks each quoted sentence against the cited chunks:
+    an answer whose claims aren't in them can't PASS."""
+    from dataclasses import replace
+
+    c = SampleModelClient()
+    g = c.generate("What confirms malaria before treatment?", {}, None, [MALARIA, HTN])
+    forged = replace(
+        g, response=f"{LABEL} Malaria is confirmed by a synthetic blood smell test alone."
+    )
+    v = c.verify(forged)
+    assert v.decision != "PASS"
+    assert v.scores["nli"] == pytest.approx(0.0)
+    assert ("nli_unsupported", "warning") in v.flags
+    assert trust_band(v) != "high"
+
+
+def test_generate_records_real_elapsed_time() -> None:
+    c = SampleModelClient()
+    g = c.generate("What confirms malaria before treatment?", {}, None, [MALARIA, HTN])
+    assert g.retrieval_ms is not None and g.retrieval_ms > 0.0
+    assert g.generation_ms is not None and g.generation_ms > 0.0
 
 
 def test_verify_runs_the_real_escalation_guard() -> None:
@@ -270,3 +324,32 @@ def test_question_words_alone_are_no_match() -> None:
     )
     text, cited = compose("When is blood pressure called hypertension?", [gdm, HTN])
     assert cited == ("KB#0003",) and "Gestational" not in text
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What confirms malaria?",
+        "How is hypertension staged?",
+        "What fasting glucose means diabetes?",
+        "When is neonatal jaundice pathological?",
+        "Antibiotics for a cough?",
+    ],
+)
+def test_the_demo_library_topics_pass_on_their_citations(question: str) -> None:
+    """The questions the no-match answer suggests quote the reference
+    guidelines verbatim, so every claim is in a cited chunk and they pass."""
+    from intelligence.knowledge_base.kb_builder import MedicalKnowledgeBase
+
+    chunks = [
+        KBChunk(f"KB#{i:04d}", g["content"], "guideline", REFERENCE_SOURCE, "")
+        for i, g in enumerate(MedicalKnowledgeBase.REFERENCE_GUIDELINES, start=1)
+    ]
+    c = SampleModelClient()
+    g = c.generate(question, {}, None, chunks)
+    assert g.cited_chunk_ids
+    v = c.verify(g)
+    assert v.scores["nli"] == pytest.approx(1.0)
+    assert v.verified and v.trust_score is not None
+    if not v.guard_reasons:
+        assert v.decision == "PASS" and trust_band(v) == "high"

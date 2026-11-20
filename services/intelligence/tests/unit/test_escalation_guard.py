@@ -10,7 +10,9 @@ a normal value, a dose the chunk gives) must not.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -527,14 +529,60 @@ def test_the_whole_check_is_fast_on_crafted_input(text: str) -> None:
     assert _seconds(lambda: verdict(text)) < 1.0
 
 
+GROWTH = 8  # the large input is this many times the small one
+# Linear (or n log n) work grows about 8-9 times on 8 times the input; quadratic work
+# about 64 (40-70 measured, against deliberately quadratic negation checks).
+GROWTH_LIMIT = 20.0
+
+
+def _cpu_seconds(fn: Any) -> float:
+    """CPU time this thread spends in ``fn``: unlike the wall clock, it doesn't count
+    time spent waiting for a busy runner's CPU."""
+    import time
+
+    started = time.thread_time()
+    fn()
+    return time.thread_time() - started
+
+
+def _growth(fn: Callable[[str], object], make: Callable[[int, int], str], n: int) -> float:
+    """How many times more CPU ``fn`` takes on GROWTH times the input, against itself in
+    the same run, so the machine's speed cancels out of the ratio. ``make(size, i)``
+    builds a fresh text for each try, so no cache from an earlier try helps. The small
+    input takes its best of five; the large one stops at the first try under the limit,
+    so one disturbed try doesn't fail the test, while quadratic work never gets under."""
+    tries = 5
+    small = [make(n, i) for i in range(tries)]
+    large = [make(n * GROWTH, i) for i in range(tries)]
+    base = min(_cpu_seconds(lambda t=t: fn(t)) for t in small)
+    ratio = math.inf
+    for t in large:
+        ratio = min(ratio, _cpu_seconds(lambda t=t: fn(t)) / base)
+        if ratio < GROWTH_LIMIT:
+            break
+    return ratio
+
+
 def test_negation_is_not_quadratic_in_the_matches() -> None:
-    # 3,000 negated matches in one 30,000-character text: each negation check reads
-    # the text's index, built once, instead of re-tokenising the prefix.
-    text = eg.normalise("no fever, " * 3000)
+    # Every match is negated, so each one runs the negation check: it reads the text's
+    # index, built once per text, instead of re-tokenising the prefix. The test measures
+    # the growth from 450 to 3,600 matches, not a wall-clock bound (that flaked on CI).
     pattern = re.compile("fever")
-    assert _seconds(lambda: RULES.matches(pattern, text)) < 0.2
-    assert not RULES.matches(pattern, text)  # every one is negated
-    assert _seconds(lambda: verdict("no fever, " * 3000)) < 2.0
+    assert not RULES.matches(pattern, eg.normalise("no fever, " * 3000))  # all negated
+
+    def question(n: int, i: int) -> str:
+        return "no fever, " * n + f"case {i}"
+
+    # The large question must stay under MAX_TEXT, or the check refuses it at once.
+    assert len(question(450 * GROWTH, 0)) < eg.MAX_TEXT
+
+    def normalised(n: int, i: int) -> str:
+        return eg.normalise(question(n, i))
+
+    growth = _growth(lambda t: RULES.matches(pattern, t), normalised, 450)
+    assert growth < GROWTH_LIMIT, f"matches grew {growth:.1f}x on {GROWTH}x the input"
+    growth = _growth(verdict, question, 450)
+    assert growth < GROWTH_LIMIT, f"the check grew {growth:.1f}x on {GROWTH}x the input"
 
 
 def test_negation_reads_the_same_phrase_only() -> None:

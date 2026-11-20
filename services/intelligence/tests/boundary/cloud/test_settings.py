@@ -280,7 +280,7 @@ def test_sdk_environment_variables_refused() -> None:
     a credential chain, debug logging, trace propagation) refuses start-up,
     by prefix, so a name a later SDK release adds is refused too."""
     assert SDK_ENV_PREFIXES == ("OPENAI_", "ANTHROPIC_", "AZURE_OPENAI_", "XAI_", "GEMINI_")
-    # The documented names (read by openai 3.37.0 and anthropic 2.3.0) all
+    # The documented names (read by openai 3.37.0 and anthropic 2.8.0) all
     # fall under a prefix.
     assert {
         "OPENAI_API_KEY",

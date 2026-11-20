@@ -1159,9 +1159,14 @@ class FakeClock:
 
 
 @pytest.mark.parametrize("kind", KINDS)
-async def test_wip_sent_on_long_stage(kind: str, make_env: MakeEnv, postgres: Postgres) -> None:
+async def test_wip_sent_on_long_stage(
+    kind: str, make_env: MakeEnv, postgres: Postgres, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A 25 s stage (on a test clock) sends +WIP, so JetStream doesn't
-    redeliver a job that is still running."""
+    redeliver a job that is still running, and then renews the lease. The
+    renewal is its own transaction after the +WIP goes out (a +WIP JetStream
+    didn't hear must not renew it), so the test waits for the row to change:
+    read as soon as the +WIP is seen, it can still hold the claim's lease."""
     env = await make_env()
     qid = await seed_query(postgres, provider=PROVIDER[kind])
     gate = env.gate()
@@ -1169,26 +1174,38 @@ async def test_wip_sent_on_long_stage(kind: str, make_env: MakeEnv, postgres: Po
     clock = FakeClock()
     w, _ = await env.start(models, wip_clock=clock)
     sent: list[tuple[str, bytes]] = []
+    order: list[str] = []  # +WIP and lease renewals, in the order they happen
     nc = w.connection
     real = nc.publish
+    real_extend = jobs_repo.extend_lease
 
     async def rec(subject: str, payload: bytes = b"", reply: str = "", headers: Any = None) -> None:
         sent.append((subject, payload))
         await real(subject, payload, reply=reply, headers=headers)
+        if payload == b"+WPI":
+            order.append("+WIP")
+
+    async def extend(*args: Any, **kw: Any) -> bool:
+        ours = await real_extend(*args, **kw)
+        order.append("lease" if ours else "lease lost")
+        return ours
 
     nc.publish = rec  # type: ignore[method-assign]
+    monkeypatch.setattr(jobs_repo, "extend_lease", extend)
     await env.publish(qid)
     assert await until(started(stub, "generate"))
     await asyncio.sleep(0.3)
-    assert not [p for _, p in sent if p == b"+WPI"]
+    assert order == []  # no +WIP or renewal before the clock moves
     lease_before = (await row(postgres, qid))["lease_until"]
     clock.t += 25
-    end = time.monotonic() + 5
-    while not [p for _, p in sent if p == b"+WPI"] and time.monotonic() < end:
-        await asyncio.sleep(0.05)
+
+    async def renewed() -> bool:
+        return (await row(postgres, qid))["lease_until"] > lease_before
+
+    assert await until(renewed, timeout=5)  # claimed 0.3 s or more earlier: strictly later
+    assert order == ["+WIP", "lease"]  # one heartbeat: +WIP heard first, then the lease
     wips = [s for s, p in sent if p == b"+WPI"]
-    assert wips and all(s.startswith("$JS.ACK.JOBS.pipeline.") for s in wips)
-    assert (await row(postgres, qid))["lease_until"] > lease_before  # the lease is extended too
+    assert len(wips) == 1 and wips[0].startswith("$JS.ACK.JOBS.pipeline.")
     gate.set()
     assert await until(lambda: status_is(postgres, qid, "completed"))
 

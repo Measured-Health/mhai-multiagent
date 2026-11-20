@@ -48,6 +48,11 @@ two-step secret, and adds sample consultations, corrections, the shared
 guidelines and the demo Analysis, once. It refuses, before writing, any
 other login, a database with a real cloud agreement (`AGR-`/`DPA-`) and a
 `DEM` that isn't the demo. Audited `demo.seeded`; prints ids and counts only.
+`core demo reset` (the scheduled reset, same guards) first removes what
+visitors made in `DEM` (consultations, feedback and corrections beyond the
+samples, accounts they added; anything in flight is kept), signs the sample
+accounts out and clears their sign-in counters in NATS (`NATS_URL`,
+`NATS_NKEY_SEED_PATH`), then seeds. Audited `demo.reset`.
 
 `emr exclude` reads an MRN from stdin (`--mrn-stdin`), never from an
 argument. EMR purges and retention run in `core serve` itself (only with
