@@ -68,3 +68,7 @@ func (s *Service) mfaFailKey(userID string) (string, error) {
 	}
 	return "mfafail." + n, nil
 }
+
+// MFAFailKey is the per-account wrong-code counter's key, for core demo
+// reset, which clears the sample accounts' counters on the public demo.
+func (s *Service) MFAFailKey(userID string) (string, error) { return s.mfaFailKey(userID) }

@@ -423,11 +423,11 @@ switch rows don't exist yet, so an operator's `core analysis switch off`
 stays off across deploys. `pilot/enable-pilot.sh` refuses while the demo
 hospital has active accounts, and `enable-demo.sh` removes the
 `demo/seeded` marker when it finds the pilot.
-`TestDemoSwitchesOnlyOnDemoServices` keeps both switches on the two demo
-services.
+`TestDemoSwitchesOnlyOnDemoServices` keeps both switches on the demo
+services (the seed, the reset and sample-ai).
 
 **The seeded accounts** (published demo values, for the synthetic demo
-hospital only; they are reset on every deploy):
+hospital only; they are reset on every deploy and by the scheduled reset):
 
 | Account | Email | Sign-in |
 |---|---|---|
@@ -447,10 +447,69 @@ shown by the demo's sign-in helper, valid only for these synthetic accounts.
 
 **Limits.** Visitors share these accounts: they see each other's questions
 (the banner and the helper ask for no patient details), one visitor can
-change a shared password or enrol two-step on a "new" account until the
-next deploy resets it, and repeated wrong passwords from many places lock an
-account for an hour (the per-login ceiling). A code already used in the
-same 30 seconds is refused (wait for the next).
+change a shared password or enrol two-step on a "new" account, and repeated
+wrong passwords from many places lock an account for an hour (the per-login
+ceiling), each until the next scheduled reset (below) or deploy. A code
+already used in the same 30 seconds is refused (wait for the next).
+
+### Public demo: the scheduled reset
+
+Every 6 hours (by default) the **"Reset backend demo"** workflow
+(`.github/workflows/demo-reset.yml`) puts the shared demo back. It wakes at
+:23 every hour and goes on only in an hour (UTC) that is a multiple of the
+repository variable `DEMO_RESET_HOURS` (1, 2, 3, 4, 6, 8, 12 or 24; default
+6), so changing the interval is one variable, not an edit. It needs
+`DEPLOY_ENABLED=true`, and `DEMO_RESET=off` stops it. Run it by hand from
+Actions, "Reset backend demo", Run workflow (always runs).
+
+It uses the deploy's own SSH secrets and host-key check and shares its
+concurrency group (never during a deploy). On the instance it runs
+`demo/reset-demo.sh`, which the deploy ships in its bundle; it builds,
+pulls and restarts nothing. The script passes without doing anything when
+the pilot's pipeline is there, or when there is no `demo/seeded` marker (the
+seed never ran or refused, for example beside a non-demo hospital). Then it
+runs the one-shot `core-demo-reset` (`core demo reset`), and writes
+`demo/reset` (a timestamp).
+
+`core demo reset` is the seed with the same guards (`MHAI_DEMO_SEED=on`,
+`APP_ENV=demo`, the database owner, no non-demo hospital and no real cloud
+agreement, `DEM` the demo; under the seed's advisory lock), then the seed
+itself. Before the seed puts the accounts and samples back, it:
+
+- clears the sample accounts' **sign-in counters** in NATS: the per-login
+  ceiling (the hour-long lock everyone shares) and the two-step failure
+  counter, by the key names core derives from `MFA_ENCRYPTION_KEY`, and no
+  other key. The per-(login, address) counter, which locks only that
+  visitor's own address, ends by itself after 15 minutes. For this it reaches
+  NATS as core (`secrets/nats-gateway.nk`, read-only); if NATS is set and
+  fails, nothing is reset;
+- removes, in `DEM` only, what visitors made: consultations other than the
+  five samples (with their answers and evaluations), feedback and
+  corrections other than the two samples as documented (a sample a visitor
+  decided is made again, waiting), with their learning facts and finished
+  learning jobs. A question or learning job still queued or running, or one
+  whose audit facts the outbox hasn't drained, is kept for the next run;
+- deactivates accounts visitors added to `DEM` (the rows stay; the audit
+  names them);
+- signs every sample account out (sessions revoked, trusted devices
+  removed): a visitor's next request is refused and the app shows the
+  sign-in page. The seed then restores passwords, first sign-in steps,
+  two-step (none on the "new" accounts), roles and the hospital's sign-in
+  settings, as on every deploy.
+
+It is audited `demo.reset` (counts only) in the same transaction as the
+deletions, and prints the hospital id and counts. Analysis and named access
+are raised only as the seed raises them: an operator's switch off stays off.
+Every statement names `DEM`'s id; another hospital's rows are never changed
+(`TestDemoResetRestoresAccountsAndRemovesVisitorData`).
+
+Why a scheduled workflow, and not a timer on the host: it needs no one on
+the host (no SSH by hand, no systemd unit the deploy user may not be able
+to install), the schedule and its runs are visible and auditable in
+Actions, it can be stopped with one variable, and the reset's credentials
+live only in a one-shot container for the few seconds it runs (a cron
+container would hold the database owner's password and core's NATS key all
+day).
 
 **Before a real hospital joins this database** (the pilot): the seed then
 refuses, but the published accounts stay as they were. Deactivate the

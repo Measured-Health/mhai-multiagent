@@ -38,6 +38,15 @@ All notable changes to this project are documented here. The format follows
   and the service sends nothing; `log` is development only and `email`
   waits for PR 4. Core's `gateway` NATS user may call `notify.v1.ctl.>`.
   CI gains the notifications job and image check.
+- **The public demo resets on a schedule (19 Nov).** `core demo reset` (the
+  seed's code and guards) removes what visitors made in the demo hospital
+  `DEM` (consultations, feedback and corrections beyond the seeded samples,
+  accounts they added), signs the sample accounts out, clears their sign-in
+  ceiling and two-step counters in NATS, then reseeds; audited
+  `demo.reset`, counts only. The "Reset backend demo" workflow runs it on
+  the demo host through the deploy's SSH path every `DEMO_RESET_HOURS`
+  (default 6; `DEMO_RESET=off` stops it), as the one-shot `core-demo-reset`
+  (deploy/README.md, "Public demo: the scheduled reset").
 - **Hospital admin: invites and password resets (core OpenAPI 1.34.0,
   migration 00050).** `POST /hospital/staff/invites`,
   `/hospital/staff/{id}/resend-invite` and `/password-reset` (step-up)
@@ -100,6 +109,18 @@ All notable changes to this project are documented here. The format follows
     never imports PyTorch (about 65 MiB resident).
 
 ### Fixed
+
+- **Demo sample AI: no confidence without evidence.** With
+  `INTELLIGENCE_MODEL_CLIENT=sample`, an answer citing no guideline ("No
+  reference guideline in the demo library matches this question") showed
+  High confidence, because the sample HGA returned fixed passing scores. It
+  now escalates (unverified, no trust score, no band: needs clinician
+  review). A matching answer's citation score is checked: each quoted
+  sentence must come from a cited guideline chunk, the trust score and
+  decision use the real HGA's formula and the question's thresholds, and it
+  can't PASS with an unsupported sentence. The sample's retrieval and
+  generation timings are now measured, not 0. Demo and development only, as
+  before.
 
 - **docsandbox: the first ping always runs the jailed self-test.** The
   self-test's one-minute cache started at `0.0` and was compared with
