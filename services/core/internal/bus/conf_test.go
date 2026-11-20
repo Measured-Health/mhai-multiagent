@@ -355,3 +355,53 @@ func TestDeployPipelineUserMatchesDev(t *testing.T) {
 		t.Fatal("deploy/nats/nats.conf must define the pipeline user exactly once")
 	}
 }
+
+// ADR 0018: the notifications NATS user is an include, as the documents
+// user is: notifications.conf (on) or notifications-off.conf (the dev
+// default), which needs no variable and can't sign in. In PR 2 it
+// publishes nothing, has no inbox and subscribes its control subjects in
+// queue group notifications only. Core may call it; the demo config has no
+// notifications user yet.
+func TestNotificationsUserIsAnOptInInclude(t *testing.T) {
+	dev := readConf(t, "services/nats/nats.conf")
+	if !strings.Contains(dev, `{ include "notifications.conf" }`) ||
+		strings.Contains(stripComments(dev), "NATS_NOTIFICATIONS_PASSWORD") ||
+		strings.Contains(stripComments(dev), "user:notifications") {
+		t.Fatal("services/nats/nats.conf must take the notifications user from the notifications.conf include only")
+	}
+	off := stripComments(readConf(t, "services/nats/notifications-off.conf"))
+	if strings.Contains(off, "$") || strings.Contains(off, "password") || !strings.Contains(off, `publish:{deny:[">"]}`) ||
+		!strings.Contains(off, `subscribe:{deny:[">"]}`) || strings.Contains(off, "allow") {
+		t.Fatalf("notifications-off.conf must need no variable and deny everything: %s", off)
+	}
+	j := strings.Index(off, "nkey:")
+	if j < 0 || len(off) < j+61 {
+		t.Fatal("notifications-off.conf has no NKey")
+	}
+	for _, other := range []string{"services/nats/emr-off.conf", "services/nats/documents-off.conf"} {
+		o := stripComments(readConf(t, other))
+		if i := strings.Index(o, "nkey:"); i < 0 || o[i:i+61] == off[j:j+61] {
+			t.Fatalf("notifications-off.conf must have its own NKey, not %s's", other)
+		}
+	}
+	on := stripComments(readConf(t, "services/nats/notifications.conf"))
+	if !strings.Contains(on, "user:notifications") || !strings.Contains(on, "password:$NATS_NOTIFICATIONS_PASSWORD") {
+		t.Fatal("notifications.conf must define the notifications user with NATS_NOTIFICATIONS_PASSWORD")
+	}
+	if !strings.Contains(on, `publish:{deny:[">"]}`) || !strings.Contains(on, `"notify.v1.ctl.>notifications"`) ||
+		strings.Contains(on, "_INBOX") || !strings.Contains(on, `allow_responses:{max:1,expires:"1m"}`) ||
+		strings.Contains(on, "due") || strings.Contains(on, "STREAM") {
+		t.Fatalf("notifications.conf rights: %s", on)
+	}
+	for _, c := range []struct{ file, gateway string }{
+		{"services/nats/nats.conf", "user: gateway"}, {"deploy/nats/nats.conf", "nkey: $NATS_GATEWAY_NKEY"}} {
+		gw := stripComments(permissionsAfter(t, readConf(t, c.file), c.gateway))
+		if !strings.Contains(gw, `"notify.v1.ctl.>"`) {
+			t.Errorf("%s: gateway can't call notify.v1.ctl.>", c.file)
+		}
+	}
+	deploy := stripComments(readConf(t, "deploy/nats/nats.conf"))
+	if strings.Contains(deploy, "notifications.conf") || strings.Contains(deploy, "NATS_NOTIFICATIONS") {
+		t.Fatal("the deploy config must not include a notifications user yet (NATS_NOTIFICATIONS_NKEY isn't provisioned)")
+	}
+}
