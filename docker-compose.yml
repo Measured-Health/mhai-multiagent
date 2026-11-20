@@ -141,6 +141,10 @@ services:
       # Documents (off by default): true makes the DOCS stream and the
       # documents service's documents_scan durable (documents PR 4).
       CORE_DOCUMENTS_ENABLED: ${CORE_DOCUMENTS_ENABLED:-false}
+      # Notifications (off by default): true makes the NOTIFY stream and the
+      # notifications service's notify_send durable, and core publishes each
+      # due outbox row's id after commit (notifications PR 3).
+      CORE_NOTIFY_ENABLED: ${CORE_NOTIFY_ENABLED:-false}
       # With EMR on, core's maintenance loop purges excluded patients (legal
       # holds respected); the nightly retention sweep also needs this, off
       # until the privacy lead confirms the retention values (H5).

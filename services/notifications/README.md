@@ -51,6 +51,32 @@ the user can't sign in (`services/nats/notifications-off.conf`). With
   non-root, read-only root, no capabilities, the internal backend network
   only, no port.
 
+**PR 3, the outbox and deliveries** (design §6.2, §6.3, §9; migration
+00053).
+
+- Core's outbox: #228's `account_messages` is renamed `message_outbox`
+  (the old name stays a security-invoker view for one release) and gains
+  `channel` email, `dedupe_key` and `published_at`. Rows are still
+  written only in the action's own transaction, ids only.
+- Core's drainer (`services/core/internal/notify`, only with
+  `CORE_NOTIFY_ENABLED=true`, which also makes the `NOTIFY` stream and the
+  `notify_send` durable): after each commit (a kick from the sender) and
+  every 30 s it publishes each due row's id as `notify.v1.<hid>.due`
+  (`Nats-Msg-Id` = the id) and marks it published, as `mhai_notify_outbox`
+  through three definers. It deletes outbox rows after 90 days.
+- This service's sender (`internal/deliver`, only with a channel in
+  `NOTIFY_CHANNELS`): `notify_claim` reserves the one delivery per message
+  and channel and then checks it, under the subject's hospital; a
+  deactivated recipient is suppressed; per-recipient (10 an hour) and
+  per-hospital (200 an hour, mandatory kinds aside) allowances are
+  reserved by one upsert each; the global pace is 5 a second; 10 failures
+  in a row pause sending for 5 minutes; failures retry after 1 min, 5 min,
+  30 min, 2 h, then every 6 h, and after 24 hours are failed and
+  dead-lettered (`dead.v1.<hid>.notify_send`). Deliveries are kept a year,
+  counters two days.
+- Channels: `log` only (development). It logs kind and ids, never an
+  address.
+
 ## Settings
 
 | Variable | |
@@ -62,6 +88,9 @@ the user can't sign in (`services/nats/notifications-off.conf`). With
 | `NOTIFY_DATABASE_URL` | the `notify_app` login; `sslmode=verify-full` outside development |
 | `NOTIFY_TRUSTED_KEYS_PATH` | core's request-token trusted keys (public), an absolute path |
 | `NOTIFY_CHANNELS` | empty (nothing is sent), or `log` in development |
+| `NOTIFY_RATE_PER_SECOND` | the global pace (default 5, 1 to 50) |
+| `NOTIFY_HOSPITAL_PER_HOUR` | one hospital's messages an hour, mandatory kinds aside (default 200) |
+| `NOTIFY_RECIPIENT_PER_HOUR` | one person's messages an hour (default 10) |
 
 ## Departures from the design
 
@@ -75,3 +104,34 @@ the user can't sign in (`services/nats/notifications-off.conf`). With
    high-entropy string the secret scanner must be told to ignore. (The
    all-zero key was rejected in review: it is a small-order point, for
    which an Ed25519 signature can be forged.)
+3. **The outbox keeps #228's kinds, and `hospital_id` stays NOT NULL.**
+   Each later kind is added with the PR that sends it. A nullable hospital
+   without the platform policy would be an RLS gap; it comes with the first
+   platform kind (PR 6 or 8).
+4. **`dedupe_key` is unique per hospital** (not globally), so one
+   hospital's key can never collide with, and so reveal, another's. Its
+   shape is checked: a kind and ids only.
+5. **`message_deliveries` keeps `kind` and `recipient_id` and has no
+   foreign key to the outbox.** Outbox rows go after 90 days and deliveries
+   after a year; the delivery must still answer "was I told?". Rows are
+   made only by `notify_claim`, which checks the outbox row exists.
+6. **The drainer never publishes invite or password_reset rows.** Those go
+   by `send_link` with their link in memory (PR 5); their outbox rows are
+   records only. It also skips rows more than 24 hours old, so switching
+   `CORE_NOTIFY_ENABLED` on doesn't send a backlog of stale reminders.
+7. **More definers than §6.3's two:** the drainer's three
+   (`mhai_outbox_due`, `mhai_outbox_published`, `mhai_outbox_retention`, as
+   `mhai_notify_outbox`) and `notify_retention`. Each does one thing and
+   is executable by one role.
+8. **`notify_claim` returns the address only for the email channel.** The
+   log channel never sees one.
+9. **A per-recipient hourly cap in the service** (10, configurable) on top
+   of core's per-action limits.
+10. **The global pace is per process.** With more than one instance, set
+    `NOTIFY_RATE_PER_SECOND` to the provider's rate divided by the count.
+11. **Failed mandatory sends are not yet on the audit chain**
+    (`notify.delivery_failed`): this service can't write to it. Core will
+    record it in PR 5, where it learns of a failed link send directly.
+12. **Dead letters go to `DEAD`, but nothing shows them yet.** Core's
+    `core_dead` consumer acks and ignores them (not a job type). The
+    platform's Failed jobs view reads them later (PR 8).

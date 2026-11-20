@@ -14,9 +14,9 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
-// notifyTables are the only relations mhai_notify may touch: its own (PR 3
-// adds them). PR 2 has none.
-var notifyTables = map[string]bool{}
+// notifyTables are the only relations mhai_notify may touch: its own
+// (00053). It reads the outbox and users only through notify_claim.
+var notifyTables = map[string]bool{"public.message_deliveries": true, "public.message_send_counts": true}
 
 // NT16 (notifications design §16.5): mhai_notify is refused on clinical
 // tables, the EMR schema, users, sessions and the audit chain, and holds
@@ -39,7 +39,10 @@ func TestNotifyRoleHasNoClinicalAccess(t *testing.T) {
 		`SELECT email FROM users LIMIT 1`, `SELECT 1 FROM sessions LIMIT 1`, `SELECT 1 FROM refresh_tokens LIMIT 1`,
 		`SELECT 1 FROM audit_log LIMIT 1`, `SELECT 1 FROM account_tokens LIMIT 1`, `SELECT 1 FROM user_mfa LIMIT 1`,
 		`SELECT 1 FROM documents LIMIT 1`, `SELECT 1 FROM feedback_events LIMIT 1`, `SELECT 1 FROM kb_chunks LIMIT 1`,
-		`INSERT INTO audit_log DEFAULT VALUES`, `DELETE FROM users`,
+		`INSERT INTO audit_log DEFAULT VALUES`, `DELETE FROM users`, `SELECT 1 FROM message_outbox LIMIT 1`,
+		`SELECT 1 FROM account_messages LIMIT 1`, `DELETE FROM message_deliveries`,
+		`INSERT INTO message_deliveries (message_id, hospital_id, recipient_id, kind, channel) VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'mfa_reset', 'log')`,
+		`SELECT mhai_outbox_due(10)`, `SELECT mhai_outbox_retention()`,
 	} {
 		err := inRole(ctx, pool, "mhai_notify", q)
 		var pe *pgconn.PgError
@@ -83,7 +86,7 @@ func TestNotifyRoleHasNoClinicalAccess(t *testing.T) {
 		t.Fatalf("mhai_notify attributes: %v %v %v", super, bypass, err)
 	}
 	// Down takes back its grants; up again restores them.
-	if err := db.MigrateDownTo(ctx, pg.URL, 50); err != nil {
+	if err := db.MigrateDownTo(ctx, pg.URL, 50); err != nil { // below 00052 and 00053
 		t.Fatal(err)
 	}
 	var member bool

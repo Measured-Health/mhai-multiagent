@@ -21,7 +21,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"CORE_PATIENT_LOOKUP_PER_MINUTE", "CORE_PATIENT_LOOKUP_PER_DAY", "CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY",
 		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE", "ANALYSIS_NAMED_IDENTITY",
 		"CORE_AUDIT_EXPORTS", "ANALYSIS_INGEST", "CORE_CLOUD_RESERVATION_REAPER", "CORE_CLOUD_RESERVATION_REAP_AFTER",
-		"CORE_DOCUMENTS_ENABLED", "CORE_DELIVERY", "CORE_APP_URL"} {
+		"CORE_DOCUMENTS_ENABLED", "CORE_DELIVERY", "CORE_APP_URL", "CORE_NOTIFY_ENABLED"} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -936,6 +936,36 @@ func TestConfigDocumentsEnabled(t *testing.T) {
 		}
 		setEnv(t, m)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_DOCUMENTS_ENABLED") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+}
+
+// Notifications PR 3: off unless CORE_NOTIFY_ENABLED says true (no NOTIFY
+// stream exists and core publishes nothing by default, design §15).
+func TestConfigNotifyEnabled(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	setEnv(t, base)
+	if c, err := Load(); err != nil || c.NotifyEnabled {
+		t.Fatalf("default: %v %v", c.NotifyEnabled, err)
+	}
+	for raw, want := range map[string]bool{"true": true, "TRUE": true, " false ": false, "": false} {
+		m := map[string]string{"CORE_NOTIFY_ENABLED": raw}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if c, err := Load(); err != nil || c.NotifyEnabled != want {
+			t.Errorf("%q: %v %v", raw, c.NotifyEnabled, err)
+		}
+	}
+	for _, bad := range []string{"yes", "1", "on"} {
+		m := map[string]string{"CORE_NOTIFY_ENABLED": bad}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_NOTIFY_ENABLED") {
 			t.Errorf("%q: %v", bad, err)
 		}
 	}

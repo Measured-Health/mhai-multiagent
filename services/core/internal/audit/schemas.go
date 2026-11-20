@@ -661,7 +661,7 @@ func init() {
 	Register("staff.deactivated", Schema{Fields: fields("sessions_revoked", count), Required: []string{"sessions_revoked"}})
 	Register("staff.reactivated", Schema{})
 	// The account and review actions (migration 00049): ids and counts
-	// only; the outbox (account_messages) holds that a message is due.
+	// only; the outbox (message_outbox) holds that a message is due.
 	Register("staff.removed", Schema{Fields: fields("sessions_revoked", count), Required: []string{"sessions_revoked"}})
 	Register("staff.mfa_reset", Schema{Fields: fields("sessions_revoked", count), Required: []string{"sessions_revoked"}})
 	Register("staff.mfa_reminded", Schema{})

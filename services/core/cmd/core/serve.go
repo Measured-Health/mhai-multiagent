@@ -34,6 +34,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/natsapi"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/notify"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/patients"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
@@ -67,6 +68,9 @@ type app struct {
 	// emrConsumer turns EMR findings into alerts (core_emr; run only with
 	// CORE_EMR_ENABLED).
 	emrConsumer *alerts.Consumer
+	// notifyDrainer publishes due outbox rows to the notifications service
+	// after commit (nil unless CORE_NOTIFY_ENABLED).
+	notifyDrainer *notify.Drainer
 	// stopAPI ends core's NATS API (natsapi.Serve) and stopGrant its grant
 	// endpoint (grant.Server) before NATS closes.
 	stopAPI, stopGrant func()
@@ -174,6 +178,13 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 		a.close()
 		return nil, err
 	}
+	if err := ensureNotify(ctx, cfg, js); err != nil {
+		a.close()
+		return nil, err
+	}
+	if cfg.NotifyEnabled {
+		a.notifyDrainer = notify.New(a.pool, js, log)
+	}
 	a.emrConsumer = &alerts.Consumer{Pool: a.pool, Pub: alerts.JSPublisher{JS: js}, AllowNullMRN: cfg.EMRAllowNullMRN,
 		Log: log, Metrics: &alerts.ConsumerMetrics{}}
 	a.emrMaint = &emrmaint.Loop{Pool: a.pool, Log: log, Retention: cfg.EMRRetentionSweep, Metrics: &emrmaint.Metrics{}}
@@ -239,6 +250,9 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if cfg.Delivery == config.DeliveryLog {
 		sender = delivery.Log{Logger: log}
 		log.Warn("core: CORE_DELIVERY=log: invites, reset links, notices and reminders are recorded as due, never sent")
+	}
+	if sender != nil && a.notifyDrainer != nil {
+		sender = kickSender{Sender: sender, kick: a.notifyDrainer.Kick}
 	}
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.WithLink(server.Readiness(a.pool, nc, buckets.All()), link),
 		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health,
@@ -309,6 +323,31 @@ func ensureDocuments(ctx context.Context, cfg config.Config, js jetstream.JetStr
 		return nil
 	}
 	return bus.EnsureDocsStream(ctx, js, cfg.NATSJSReplicas)
+}
+
+// ensureNotify creates the NOTIFY stream and the notifications service's
+// notify_send durable when CORE_NOTIFY_ENABLED is on (notifications PR 3);
+// off, none exists and core publishes nothing.
+func ensureNotify(ctx context.Context, cfg config.Config, js jetstream.JetStream) error {
+	if !cfg.NotifyEnabled {
+		return nil
+	}
+	return bus.EnsureNotifyStream(ctx, js, cfg.NATSJSReplicas)
+}
+
+// kickSender asks the drainer for a pass after each send: Send runs after
+// the action's commit, so the outbox row is there to publish.
+type kickSender struct {
+	delivery.Sender
+	kick func()
+}
+
+// Send hands m to the sender, then kicks the drainer whatever it returned
+// (the row is committed either way).
+func (k kickSender) Send(ctx context.Context, m delivery.Message) error {
+	err := k.Sender.Send(ctx, m)
+	k.kick()
+	return err
 }
 
 // checkSigningKeys refuses one key for both token kinds (spec §7.2): the
@@ -450,6 +489,11 @@ func serve() error {
 				log.Error("core: cloud reservation reaper stopped", "reason", "internal_error")
 			}
 		}()
+	}
+	// Due notifications (notifications PR 3): every core copy drains (the
+	// stream drops duplicate ids); only with CORE_NOTIFY_ENABLED.
+	if a.notifyDrainer != nil {
+		go a.notifyDrainer.Run(ctx)
 	}
 	// The daily audit chain check at 06:00 UTC; one core copy starts it
 	// (an advisory lock). It also sets audit_chain_broken at start-up.

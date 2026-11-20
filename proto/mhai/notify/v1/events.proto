@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+// The notifications service's JetStream events (notifications design §7).
+// Ids and closed codes only: never an address, a name, a link, a token or
+// any text.
+package mhai.notify.v1;
+
+option go_package = "github.com/Measured-Health/mhai-multiagent/services/gokit/notifypb;notifypb";
+
+// notify.v1.<hospital id | platform>.due on NOTIFY, published only by
+// core's drainer after the action's commit (Nats-Msg-Id = message_id).
+message Due {
+  // The message_outbox row's id (a uuid).
+  string message_id = 1;
+}
+
+// dead.v1.<hospital id>.notify_send on DEAD: a message the service gave up
+// on (design §9.3).
+message DeadLetter {
+  // The message_outbox row's id (a uuid).
+  string message_id = 1;
+  // The closed outcome code (provider_down, channel_off).
+  string outcome = 2;
+  // How many sends were tried.
+  uint32 attempts = 3;
+}

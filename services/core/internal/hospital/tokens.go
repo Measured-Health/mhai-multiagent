@@ -205,7 +205,7 @@ func (d Deps) staffResendInvite() http.Handler {
 // limit.
 func hospitalInvitesLeft(ctx context.Context, tx pgx.Tx, hid uuid.UUID, n int) error {
 	var sent int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM account_messages WHERE hospital_id = $1 AND kind = 'invite'
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM message_outbox WHERE hospital_id = $1 AND kind = 'invite'
 		AND created_at >= now() - interval '24 hours'`, hid).Scan(&sent); err != nil {
 		return err
 	}

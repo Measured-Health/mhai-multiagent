@@ -9,7 +9,7 @@ package hospital
 // Every active clinician but the submitter may review any waiting
 // correction. assigned_to is the reviewer a hospital admin assigned (POST
 // .../assign, review.go) and reminded_at the last reviewer reminder (POST
-// .../remind), from the outbox (account_messages, migration 00049).
+// .../remind), from the outbox (message_outbox, migrations 00049 and 00053).
 
 import (
 	"context"
@@ -91,7 +91,7 @@ func (d Deps) oversight(w http.ResponseWriter, r *http.Request) {
 				(SELECT count(*) FROM users c WHERE c.hospital_id = f.hospital_id AND c.is_active AND c.id <> f.submitted_by
 				   AND (c.password_hash IS NOT NULL OR c.oidc_subject IS NOT NULL)
 				   AND EXISTS (SELECT 1 FROM user_roles cr WHERE cr.user_id = c.id AND cr.role = 'clinician')),
-				(SELECT max(m.created_at) FROM account_messages m WHERE m.subject_id = f.id AND m.kind = 'review_reminder')
+				(SELECT max(m.created_at) FROM message_outbox m WHERE m.subject_id = f.id AND m.kind = 'review_reminder')
 			FROM feedback_events f
 			JOIN users s ON s.id = f.submitted_by
 			JOIN clinical_queries q ON q.id = f.query_id AND q.hospital_id = f.hospital_id

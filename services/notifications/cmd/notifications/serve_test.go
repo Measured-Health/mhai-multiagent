@@ -188,3 +188,17 @@ func TestStartLogHasNoValues(t *testing.T) {
 		}
 	}
 }
+
+// The sender takes the settings' limits and pace, and only the enabled
+// channels; with none, nothing is built to send on.
+func TestNewSender(t *testing.T) {
+	s := config.Settings{Channels: []string{"log"}, RatePerSecond: 5, HospitalPerHour: 200, RecipientPerHour: 10}
+	snd := newSender(s, nil, nil, newLogger(&bytes.Buffer{}))
+	if len(snd.Channels) != 1 || snd.Channels["log"] == nil || snd.Limits.Hospital != 200 || snd.Limits.Recipient != 10 ||
+		snd.Pacer == nil || snd.Breaker == nil {
+		t.Fatalf("%+v", snd)
+	}
+	if len(channels(config.Settings{}, nil)) != 0 {
+		t.Fatal("a channel with none enabled")
+	}
+}

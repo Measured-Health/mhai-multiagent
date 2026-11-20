@@ -98,6 +98,7 @@ var dbTxAllowedFiles = map[string]string{
 	// 00047: the cloud reservation reaper runs as mhai_cloud_reaper with the
 	// hospital it visits set, under its leader lock; no route reaches it.
 	"internal/cloudreap/loop.go": "the cloud reservation reaper's leader lock (Acquire) and its transactions as mhai_cloud_reaper",
+	"internal/notify/drainer.go": "the notifications outbox drainer's transactions as mhai_notify_outbox (ids only, through its definers)",
 	// The public demo's seed (core demo seed): a one-shot as the database
 	// owner on the demo host only (MHAI_DEMO_SEED=on and APP_ENV=demo, no
 	// non-demo hospital in the database), its advisory lock (Acquire) and its transactions.
