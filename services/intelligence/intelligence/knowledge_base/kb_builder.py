@@ -37,7 +37,7 @@ import unicodedata
 import time
 import hashlib
 import numpy as np
-from typing import List, Tuple, Dict, Optional, Any
+from typing import Callable, List, Tuple, Dict, Optional, Any
 from dataclasses import dataclass, field
 from collections import defaultdict
 import logging
@@ -454,19 +454,32 @@ class DenseRetriever:
     def __init__(
         self,
         model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
-        device: str = "cpu"
+        device: str = "cpu",
+        encoder: Optional[Callable[[], Any]] = None,
     ):
+        """encoder: the worker's shared model loader (boundary.models.dense_factory),
+        called instead of loading model_name here. It returns the loaded model, or
+        None for the TF-IDF fallback, and raises when the model fails to load. The
+        model holds no chunk data: this retriever's index (chunk_ids, embeddings,
+        TF-IDF vocabulary) stays on this instance, one per job."""
         self.model_name = model_name
         self.device = device
         self.model = None
         self.chunk_ids: List[str] = []
         self.chunk_embeddings: Optional[np.ndarray] = None
         self._loaded = False
+        self._encoder = encoder
 
         self._try_load_model()
 
     def _try_load_model(self):
-        """Load sentence-transformer model."""
+        """Load sentence-transformer model (or take the shared one)."""
+        if self._encoder is not None:
+            model = self._encoder()
+            self.model, self._loaded = model, model is not None
+            if model is None:
+                logger.warning("sentence-transformers not available; using TF-IDF fallback")
+            return
         try:
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(self.model_name, device=self.device)
@@ -650,9 +663,11 @@ class HybridRetriever:
         rrf_k: int = 60,
         dense_weight: float = 0.6,
         sparse_weight: float = 0.4,
-        device: str = "cpu"
+        device: str = "cpu",
+        encoder: Optional[Callable[[], Any]] = None,
     ):
-        self.dense = DenseRetriever(dense_model, device)
+        """encoder: the shared dense model's loader (DenseRetriever)."""
+        self.dense = DenseRetriever(dense_model, device, encoder=encoder)
         self.sparse = SparseRetriever()
         self.rrf_k = rrf_k
         self.dense_weight = dense_weight

@@ -5,7 +5,8 @@ package hospital
 //   - DELETE /hospital/staff/{id} (step-up): removes the person for good.
 //     The account is deactivated and marked removed; its roles (Analyst
 //     through 00030's function), two-step, sessions, trusted devices and
-//     sign-in password go, its email is replaced by a tombstone, and a
+//     sign-in password and any live invite or reset link go, its email is
+//     replaced by a tombstone, and a
 //     correction waiting on them as its reviewer is unassigned. Its names
 //     stay, so past consultations, feedback and audit entries stay
 //     attributed (the retention design keeps rows, not the person's
@@ -54,6 +55,9 @@ const (
 type done struct {
 	revoked map[string][]string
 	msgs    []delivery.Message
+	// link is the link to show the admin once (development's log sender
+	// only), for the actions that issue one.
+	link *LinkOut
 }
 
 // staffAction is one action on one person.
@@ -65,8 +69,9 @@ type staffAction struct {
 	check func(ctx context.Context, tx pgx.Tx, p authz.Principal, s StaffOut) error
 	// act makes it, with its audit entry.
 	act func(ctx context.Context, tx pgx.Tx, p authz.Principal, s StaffOut) (done, error)
-	// noContent answers 204 rather than the person.
-	noContent bool
+	// noContent answers 204 rather than the person; withLink answers
+	// the person with the link to show once (StaffWithLinkOut).
+	noContent, withLink bool
 }
 
 func (d Deps) run(a staffAction) http.Handler {
@@ -135,6 +140,10 @@ func (d Deps) run(a staffAction) http.Handler {
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
+		if a.withLink {
+			httpx.JSON(w, http.StatusOK, StaffWithLinkOut{StaffOut: person, Link: out.link})
+			return
+		}
 		httpx.JSON(w, http.StatusOK, person)
 	})
 }
@@ -223,6 +232,9 @@ func (d Deps) staffRemove() http.Handler {
 			id, rid := s.uid, httpx.RequestIDFrom(ctx)
 			revoked, err := revokeSessions(ctx, tx, id)
 			if err != nil {
+				return done{}, err
+			}
+			if err := revokeTokens(ctx, tx, id); err != nil {
 				return done{}, err
 			}
 			if _, err := analysis.RemoveAnalyst(ctx, tx, id, rid); err != nil {
