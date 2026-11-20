@@ -207,7 +207,9 @@ func (c *Channel) compose(to, msgID string, r templates.Rendered) ([]byte, error
 // permanentError is a refusal of the recipient (5xx to RCPT).
 type permanentError struct{ code int }
 
-func (e permanentError) Error() string { return "email: recipient refused (" + strconv.Itoa(e.code) + ")" }
+func (e permanentError) Error() string {
+	return "email: recipient refused (" + strconv.Itoa(e.code) + ")"
+}
 
 func (c *Channel) tlsConfig() *tls.Config {
 	return &tls.Config{ServerName: c.Config.Host, RootCAs: c.Config.RootCAs, MinVersion: tls.VersionTLS12}
