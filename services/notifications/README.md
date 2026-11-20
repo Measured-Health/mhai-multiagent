@@ -77,6 +77,29 @@ the user can't sign in (`services/nats/notifications-off.conf`). With
 - Channels: `log` only (development). It logs kind and ids, never an
   address.
 
+**PR 4, the email channel** (design §4.3, §4.7, §8.2, §12.1; the product
+owner's 20 Nov decision: send from our own mailbox over SMTP submission).
+
+- `internal/templates`: one fixed template per kind, compiled in. The only
+  variables are the link, its expiry and (invitations only) the hospital's
+  name; a test fails the build if a template names anything else (NT1).
+  Subjects are fixed and say only that something is waiting. Links must be
+  on `NOTIFY_APP_URL`'s host (NT5); no images, remote content or tracking
+  (NT4); every email says MHAI never asks for a password or code by email.
+  A hospital name with a line break, control character or angle bracket
+  is refused, and the HTML is escaped (NT11).
+- `internal/email`: SMTP submission over implicit TLS (465) or STARTTLS
+  (587), the server's certificate always verified (`NOTIFY_SMTP_CA_FILE`
+  adds a private CA; verification is never off); a 587 server without
+  STARTTLS is refused before anything is sent. AUTH PLAIN with the user and
+  the password from `NOTIFY_SMTP_PASSWORD_FILE` (never the environment,
+  never logged). The From and Reply-To are settings; the To is the
+  recipient's address read at send time. A refused recipient (5xx) fails
+  at once; anything else is retried by the sender. Only the SHA-256 of
+  the Message-ID is stored.
+- Tested against an in-process SMTP server with a certificate made at run
+  time (`internal/testsmtp`), never a real mailbox.
+
 ## Settings
 
 | Variable | |
@@ -87,7 +110,12 @@ the user can't sign in (`services/nats/notifications-off.conf`). With
 | `NOTIFY_NATS_PASSWORD` | development only |
 | `NOTIFY_DATABASE_URL` | the `notify_app` login; `sslmode=verify-full` outside development |
 | `NOTIFY_TRUSTED_KEYS_PATH` | core's request-token trusted keys (public), an absolute path |
-| `NOTIFY_CHANNELS` | empty (nothing is sent), or `log` in development |
+| `NOTIFY_CHANNELS` | empty (nothing is sent), `log` (development only), `email` |
+| `NOTIFY_APP_URL` | with email: the app's https address (core's `CORE_APP_URL`); every link must be on it |
+| `NOTIFY_SMTP_HOST`, `NOTIFY_SMTP_PORT` | with email: the submission server; the port is 465 (implicit TLS) or 587 (STARTTLS), nothing else |
+| `NOTIFY_SMTP_USERNAME`, `NOTIFY_SMTP_PASSWORD_FILE` | with email: the mailbox's sign-in; the password only from a file (an absolute path); `NOTIFY_SMTP_PASSWORD` is refused |
+| `NOTIFY_SMTP_FROM`, `NOTIFY_SMTP_REPLY_TO`, `NOTIFY_SMTP_FROM_NAME` | with email: bare addresses; the From name defaults to MHAI |
+| `NOTIFY_SMTP_CA_FILE` | optional: extra trusted roots for the server's certificate |
 | `NOTIFY_RATE_PER_SECOND` | the global pace (default 5, 1 to 50) |
 | `NOTIFY_HOSPITAL_PER_HOUR` | one hospital's messages an hour, mandatory kinds aside (default 200) |
 | `NOTIFY_RECIPIENT_PER_HOUR` | one person's messages an hour (default 10) |
@@ -135,3 +163,13 @@ the user can't sign in (`services/nats/notifications-off.conf`). With
 12. **Dead letters go to `DEAD`, but nothing shows them yet.** Core's
     `core_dead` consumer acks and ignores them (not a job type). The
     platform's Failed jobs view reads them later (PR 8).
+13. **The provider is our own mailbox over SMTP submission** (the product
+    owner, 20 Nov), not one of §12.3's services. No provider API, events
+    or idempotency keys yet: one duplicate is possible after a crash
+    between the server's acceptance and our record (§16.6).
+14. **The compose profile doesn't wire SMTP.** Development uses the `log`
+    channel; a deployment sets the `NOTIFY_SMTP_*` settings and mounts the
+    password file itself (a secret, never in `.env`).
+15. **The From domain isn't checked against a separate sending domain**
+    (§12.1): with our own mailbox, the From is the mailbox's own address.
+    SPF, DKIM and DMARC on that domain are a people item (TODO.md).

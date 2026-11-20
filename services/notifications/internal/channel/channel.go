@@ -5,8 +5,9 @@
 // with PR 4, SMS and WhatsApp later behind their own design.
 //
 // A Message carries ids, the kind and, for a channel that needs one, the
-// recipient's address read at send time by notify_claim. It never carries
-// patient data, a link, a token or free text: there is no field for any.
+// recipient's address read at send time. A secret link (an invite or a
+// reset) comes only from send_link (PR 5) and lives in memory only. It
+// never carries patient data or free text: there is no field for either.
 package channel
 
 import (
@@ -29,6 +30,10 @@ type Message struct {
 	// Address is the recipient's address for a channel that needs one
 	// (email); "" for the log channel. Never logged.
 	Address string
+	// Link, Expires and HospitalName are an invite's or a reset's: the
+	// secret link (memory only, never logged), when it stops working, and
+	// the hospital's display name for an invitation. "" otherwise.
+	Link, Expires, HospitalName string
 }
 
 // Outcome is what a channel did with a message.

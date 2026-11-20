@@ -17,6 +17,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/notifypb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
 	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/config"
+	"github.com/Measured-Health/mhai-multiagent/services/notifications/internal/email"
 )
 
 // devPassword is a synthetic NATS password, built at run time.
@@ -189,16 +190,64 @@ func TestStartLogHasNoValues(t *testing.T) {
 	}
 }
 
-// The sender takes the settings' limits and pace, and only the enabled
-// channels; with none, nothing is built to send on.
+// The sender takes the settings' limits and pace and the built channels;
+// with none enabled, nothing is built to send on.
 func TestNewSender(t *testing.T) {
 	s := config.Settings{Channels: []string{"log"}, RatePerSecond: 5, HospitalPerHour: 200, RecipientPerHour: 10}
-	snd := newSender(s, nil, nil, newLogger(&bytes.Buffer{}))
+	chans, err := channels(s, newLogger(&bytes.Buffer{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snd := newSender(s, chans, nil, nil, newLogger(&bytes.Buffer{}))
 	if len(snd.Channels) != 1 || snd.Channels["log"] == nil || snd.Limits.Hospital != 200 || snd.Limits.Recipient != 10 ||
 		snd.Pacer == nil || snd.Breaker == nil {
 		t.Fatalf("%+v", snd)
 	}
-	if len(channels(config.Settings{}, nil)) != 0 {
+	if c, err := channels(config.Settings{}, nil); err != nil || len(c) != 0 {
 		t.Fatal("a channel with none enabled")
+	}
+}
+
+// The email channel is built from the settings: the password from its
+// file, extra roots from the CA file; a missing or bad file stops the
+// service, naming the variable only.
+func TestEmailChannelFromSettings(t *testing.T) {
+	dir := t.TempDir()
+	pwFile := filepath.Join(dir, "smtp-password")
+	pw := "synthetic-" + strings.Repeat("Notify", 3)
+	if err := os.WriteFile(pwFile, []byte(pw+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := config.Settings{Env: "production", Channels: []string{"email"}, AppURL: "https://app.example.test",
+		SMTP: &config.SMTP{Host: "smtp.example.test", Port: 587, Username: "no-reply@example.test", PasswordFile: pwFile,
+			From: "no-reply@example.test", FromName: "MHAI", ReplyTo: "support@example.test"}}
+	chans, err := channels(s, nil)
+	if err != nil || chans["email"] == nil {
+		t.Fatalf("%v", err)
+	}
+	ec := chans["email"].(*email.Channel)
+	if ec.Config.Password != pw || ec.Config.RootCAs != nil || ec.Config.Port != 587 {
+		t.Fatal("email settings")
+	}
+	bad := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(bad, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, edit := range map[string]func(*config.Settings){
+		"no password file": func(s *config.Settings) { s.SMTP.PasswordFile = filepath.Join(dir, "none") },
+		"bad CA":           func(s *config.Settings) { s.SMTP.CAFile = bad },
+		"missing CA":       func(s *config.Settings) { s.SMTP.CAFile = filepath.Join(dir, "none.pem") },
+		"bad from":         func(s *config.Settings) { s.SMTP.From = "MHAI <x@example.test>" },
+		"bad app url":      func(s *config.Settings) { s.AppURL = "http://app.example.test" },
+		"no SMTP":          func(s *config.Settings) { s.SMTP = nil },
+	} {
+		c := s
+		m := *s.SMTP
+		c.SMTP = &m
+		edit(&c)
+		_, err := channels(c, nil)
+		if err == nil || strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), pw) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
