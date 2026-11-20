@@ -480,7 +480,10 @@ jobs:
           persist-credentials: false
       - name: The jailed tests (docsandbox image, test stage)
         run: |
+          # The self-test's cache once read a freshly booted runner as fresh
+          # (time.monotonic counts from boot); the uptime is here for that.
           docker build --target test -t mhai-docsandbox:test services/docsandbox
+          echo "runner uptime (s): $(cut -d' ' -f1 /proc/uptime)"
           # Exactly the container docker-compose.yml runs.
           docker run --rm --cap-drop ALL --cap-add SYS_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
             --cap-add SYS_CHROOT --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
