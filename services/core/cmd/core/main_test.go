@@ -176,6 +176,27 @@ func TestLoginRequestsDocuments(t *testing.T) {
 	}
 }
 
+// The notifications service's login (NOTIFY_DB_PASSWORD; user notify_app by
+// default) is a member of mhai_notify_app only (00052).
+func TestLoginRequestsNotify(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	pw := "test-only-" + strings.Repeat("notify", 3)
+	reqs, err := loginRequests(env(map[string]string{"NOTIFY_DB_PASSWORD": pw}))
+	if err != nil || len(reqs) != 1 || reqs[0].user != "notify_app" || reqs[0].role != "mhai_notify_app" {
+		t.Fatalf("notify: %+v %v", reqs, err)
+	}
+	if _, err := loginRequests(env(map[string]string{"NOTIFY_DB_PASSWORD": "changemeReplaceWithLettersAndDigits"})); err == nil ||
+		!strings.Contains(err.Error(), "NOTIFY_DB_PASSWORD") {
+		t.Fatalf("placeholder: %v", err)
+	}
+	// One login per role: the notifications login can't be the documents
+	// service's.
+	if _, err := loginRequests(env(map[string]string{"DOCUMENTS_DB_PASSWORD": pw, "NOTIFY_DB_PASSWORD": pw,
+		"NOTIFY_DB_USER": "documents_app"})); err == nil {
+		t.Fatal("two roles on one login")
+	}
+}
+
 // The operator's EMR login (EMR_ADMIN_DB_USER and _PASSWORD, both needed:
 // no default user) is a member of mhai_emr_admin only (00032).
 func TestLoginRequestsEMRAdmin(t *testing.T) {

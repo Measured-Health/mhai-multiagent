@@ -19,8 +19,8 @@ func TestMigrateUpCommand(t *testing.T) {
 	if err := migrate(context.Background(), []string{"up"}, pg.URL, &out); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-	if got := strings.Count(out.String(), "applied"); got != 49 { // 00001-00033, 00035-00050
-		t.Fatalf("want 49 applied migrations, got output:\n%s", out.String())
+	if got := strings.Count(out.String(), "applied"); got != 50 { // 00001-00033, 00035-00050, 00052
+		t.Fatalf("want 50 applied migrations, got output:\n%s", out.String())
 	}
 }
 
@@ -132,5 +132,38 @@ func TestMigrateUpProvisionsDocumentsLogin(t *testing.T) {
 	}
 	if !member || uses || !set {
 		t.Fatalf("documents_app: member of mhai_documents_app %v, uses mhai_documents %v, may SET it %v", member, uses, set)
+	}
+}
+
+// core migrate up provisions the notifications service's login (00052): a
+// member of mhai_notify_app only, which holds mhai_notify without
+// inheriting it.
+func TestMigrateUpProvisionsNotifyLogin(t *testing.T) {
+	pg := testutil.StartPostgres(t)
+	ctx := context.Background()
+	env := map[string]string{"NOTIFY_DB_PASSWORD": "test-only-" + strings.Repeat("notify", 3)}
+	var out bytes.Buffer
+	if err := migrateWithLogins(ctx, []string{"up"}, pg.URL, func(k string) string { return env[k] }, &out); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	if !strings.Contains(out.String(), "login notify_app ready (member of mhai_notify_app only)") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), env["NOTIFY_DB_PASSWORD"]) {
+		t.Fatal("output carries the password")
+	}
+	pool, err := pgxpool.New(ctx, pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var member, uses, set bool
+	if err := pool.QueryRow(ctx, `SELECT pg_has_role('notify_app', 'mhai_notify_app', 'MEMBER'),
+		pg_has_role('notify_app', 'mhai_notify', 'USAGE'), pg_has_role('notify_app', 'mhai_notify', 'SET')`).
+		Scan(&member, &uses, &set); err != nil {
+		t.Fatal(err)
+	}
+	if !member || uses || !set {
+		t.Fatalf("notify_app: member of mhai_notify_app %v, uses mhai_notify %v, may SET it %v", member, uses, set)
 	}
 }

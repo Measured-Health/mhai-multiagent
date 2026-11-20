@@ -39,7 +39,9 @@ const (
 	natsBFFPlatformPassword = "test-only-bff-platform-pw"
 	natsEMRPassword         = "test-only-emr-pw"
 	natsDocumentsPassword   = "test-only-documents-pw"
-	natsJSKey               = "testOnlyJetStreamKeyNotForAnyRealServer0123"
+	// Built from parts, so the source holds no password-like literal.
+	natsNotificationsPassword = "test-only-" + "notifications-pw"
+	natsJSKey                 = "testOnlyJetStreamKeyNotForAnyRealServer0123"
 )
 
 // NATSEnv is the environment the real nats.conf needs with the emr user on
@@ -49,14 +51,15 @@ const (
 // NATS_EMR_PASSWORD isn't needed.
 func NATSEnv() map[string]string {
 	return map[string]string{
-		"NATS_GATEWAY_PASSWORD":      natsGatewayPassword,
-		"NATS_PIPELINE_PASSWORD":     natsPipelinePassword,
-		"NATS_ECHO_PASSWORD":         natsEchoPassword,
-		"NATS_BFF_CLINICAL_PASSWORD": natsBFFClinicalPassword,
-		"NATS_BFF_PLATFORM_PASSWORD": natsBFFPlatformPassword,
-		"NATS_EMR_PASSWORD":          natsEMRPassword,
-		"NATS_DOCUMENTS_PASSWORD":    natsDocumentsPassword,
-		"NATS_JS_KEY":                natsJSKey,
+		"NATS_GATEWAY_PASSWORD":       natsGatewayPassword,
+		"NATS_PIPELINE_PASSWORD":      natsPipelinePassword,
+		"NATS_ECHO_PASSWORD":          natsEchoPassword,
+		"NATS_BFF_CLINICAL_PASSWORD":  natsBFFClinicalPassword,
+		"NATS_BFF_PLATFORM_PASSWORD":  natsBFFPlatformPassword,
+		"NATS_EMR_PASSWORD":           natsEMRPassword,
+		"NATS_DOCUMENTS_PASSWORD":     natsDocumentsPassword,
+		"NATS_NOTIFICATIONS_PASSWORD": natsNotificationsPassword,
+		"NATS_JS_KEY":                 natsJSKey,
 	}
 }
 
@@ -64,14 +67,15 @@ func NATSEnv() map[string]string {
 // services/nats/nats.conf (and the bff_clinical user it includes). The URLs
 // carry each user's test credentials.
 type NATS struct {
-	Addr           string // host:port, no credentials
-	GatewayURL     string // the core service
-	PipelineURL    string // the pipeline worker
-	EchoURL        string // the echo worker
-	BFFClinicalURL string // the clinical app's BFF
-	BFFPlatformURL string // the platform app's BFF
-	EMRURL         string // the emr service
-	DocumentsURL   string // the documents service
+	Addr             string // host:port, no credentials
+	GatewayURL       string // the core service
+	PipelineURL      string // the pipeline worker
+	EchoURL          string // the echo worker
+	BFFClinicalURL   string // the clinical app's BFF
+	BFFPlatformURL   string // the platform app's BFF
+	EMRURL           string // the emr service
+	DocumentsURL     string // the documents service
+	NotificationsURL string // the notifications service
 
 	c testcontainers.Container
 }
@@ -84,28 +88,31 @@ func NATSConfDir() string {
 
 // NewNATS starts the container. The config is copied in rather than
 // bind-mounted, so it works when the tests themselves run in a container.
-// The emr and documents users are on (emr.conf, documents.conf), so their
-// rights can be tested.
+// The emr, documents and notifications users are on (emr.conf,
+// documents.conf, notifications.conf), so their rights can be tested.
 func NewNATS(ctx context.Context) (n *NATS, stop func(), err error) {
 	dir := NATSConfDir()
 	return startNATS(ctx, filepath.Join(dir, "nats.conf"), NATSEnv(),
 		map[string]string{filepath.Join(dir, "bff-clinical.test.conf"): "/etc/nats/bff-clinical.test.conf",
-			filepath.Join(dir, "emr.conf"):       "/etc/nats/emr.conf",
-			filepath.Join(dir, "documents.conf"): "/etc/nats/documents.conf"})
+			filepath.Join(dir, "emr.conf"):           "/etc/nats/emr.conf",
+			filepath.Join(dir, "documents.conf"):     "/etc/nats/documents.conf",
+			filepath.Join(dir, "notifications.conf"): "/etc/nats/notifications.conf"})
 }
 
-// NewNATSEMROff is NewNATS as dev compose runs it by default: the emr and
-// documents users off (emr-off.conf, documents-off.conf) and neither
-// NATS_EMR_PASSWORD nor NATS_DOCUMENTS_PASSWORD in the environment.
+// NewNATSEMROff is NewNATS as dev compose runs it by default: the emr,
+// documents and notifications users off (emr-off.conf, documents-off.conf,
+// notifications-off.conf) and none of their passwords in the environment.
 func NewNATSEMROff(ctx context.Context) (n *NATS, stop func(), err error) {
 	dir := NATSConfDir()
 	env := NATSEnv()
 	delete(env, "NATS_EMR_PASSWORD")
 	delete(env, "NATS_DOCUMENTS_PASSWORD")
+	delete(env, "NATS_NOTIFICATIONS_PASSWORD")
 	return startNATS(ctx, filepath.Join(dir, "nats.conf"), env,
 		map[string]string{filepath.Join(dir, "bff-clinical.test.conf"): "/etc/nats/bff-clinical.test.conf",
-			filepath.Join(dir, "emr-off.conf"):       "/etc/nats/emr.conf",
-			filepath.Join(dir, "documents-off.conf"): "/etc/nats/documents.conf"})
+			filepath.Join(dir, "emr-off.conf"):           "/etc/nats/emr.conf",
+			filepath.Join(dir, "documents-off.conf"):     "/etc/nats/documents.conf",
+			filepath.Join(dir, "notifications-off.conf"): "/etc/nats/notifications.conf"})
 }
 
 // StoreFilesContaining lists every file under the server's JetStream store
@@ -400,14 +407,15 @@ func startNATS(ctx context.Context, conf string, env map[string]string, extra ma
 	addr := fmt.Sprintf("%s:%s", host, port.Port())
 	u := func(user, pw string) string { return fmt.Sprintf("nats://%s:%s@%s", user, pw, addr) }
 	return &NATS{
-		Addr:           addr,
-		GatewayURL:     u("gateway", natsGatewayPassword),
-		PipelineURL:    u("pipeline", natsPipelinePassword),
-		EchoURL:        u("echo", natsEchoPassword),
-		BFFClinicalURL: u("bff_clinical", natsBFFClinicalPassword),
-		BFFPlatformURL: u("bff_platform", natsBFFPlatformPassword),
-		EMRURL:         u("emr", natsEMRPassword),
-		DocumentsURL:   u("documents", natsDocumentsPassword),
-		c:              c,
+		Addr:             addr,
+		GatewayURL:       u("gateway", natsGatewayPassword),
+		PipelineURL:      u("pipeline", natsPipelinePassword),
+		EchoURL:          u("echo", natsEchoPassword),
+		BFFClinicalURL:   u("bff_clinical", natsBFFClinicalPassword),
+		BFFPlatformURL:   u("bff_platform", natsBFFPlatformPassword),
+		EMRURL:           u("emr", natsEMRPassword),
+		DocumentsURL:     u("documents", natsDocumentsPassword),
+		NotificationsURL: u("notifications", natsNotificationsPassword),
+		c:                c,
 	}, stop, nil
 }

@@ -1,0 +1,12 @@
+version: v2
+# Run from proto/ (make proto): the notifications contract, mhai/notify/v1,
+# into services/gokit/notifypb, which core and the notifications service
+# share (ADR 0018).
+inputs:
+  - directory: .
+    paths:
+      - mhai/notify
+plugins:
+  - local: protoc-gen-go
+    out: ../services/gokit
+    opt: module=github.com/Measured-Health/mhai-multiagent/services/gokit
