@@ -1,21 +1,24 @@
 name: Pilot pipeline image
 
-# The pipeline worker's image for the pilot on the demo host
-# (deploy/pilot/README.md): services/intelligence/Dockerfile, target pilot
-# (the runtime plus the pinned embedding and NLI weights, loaded offline in
-# the build), for arm64 (the demo host is Graviton) or, with arch amd64, for
-# an x86 intelligence host (docs/deploy/remote-intelligence.md; tags
-# latest-amd64 and sha-...-amd64). Started by hand from main only; it pushes
-# the image and does nothing on the host.
+# The pipeline worker's image for the pilot (deploy/pilot/README.md):
+# services/intelligence/Dockerfile, target pilot (the runtime plus the pinned
+# embedding and NLI weights, loaded offline in the build). By default for
+# both linux/amd64 and linux/arm64, each built natively on its own runner and
+# pushed as one multi-arch tag (latest, sha-...), so the demo host pulls its
+# own architecture whether it is Graviton or x86_64. With arch arm64 or
+# amd64 it builds one architecture only, as before: arm64 under latest and
+# sha-..., amd64 under latest-amd64 and sha-...-amd64 (an x86 intelligence
+# host, docs/deploy/remote-intelligence.md). Started by hand from main only;
+# it pushes the image and does nothing on the host.
 
 on:
   workflow_dispatch:
     inputs:
       arch:
-        description: "Architecture: arm64 (the demo host) or amd64 (an x86 intelligence host)"
+        description: "Architecture: both (one multi-arch tag), arm64 only, or amd64 only (tag latest-amd64)"
         type: choice
-        options: [arm64, amd64]
-        default: arm64
+        options: [both, arm64, amd64]
+        default: both
 
 concurrency:
   group: pilot-image-${{ inputs.arch }}
@@ -26,7 +29,10 @@ permissions: {}
 jobs:
   build-pipeline:
     if: github.ref == 'refs/heads/main'
-    runs-on: ${{ inputs.arch == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    strategy:
+      matrix:
+        arch: ${{ fromJSON(inputs.arch == 'both' && '["amd64","arm64"]' || (inputs.arch == 'amd64' && '["amd64"]' || '["arm64"]')) }}
+    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
     permissions:
       contents: read
       packages: write
@@ -34,6 +40,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Image name
+        id: name
+        run: echo "value=ghcr.io/${GITHUB_REPOSITORY,,}-pipeline-pilot" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -46,21 +56,84 @@ jobs:
       - id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
-          images: ghcr.io/${{ github.repository }}-pipeline-pilot
+          images: ${{ steps.name.outputs.value }}
+
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: services/intelligence
+          target: pilot
+          build-args: TORCH=cpu
+          platforms: linux/${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ steps.name.outputs.value }},push-by-digest=true,name-canonical=true,push=true
+          # No shared cache: the image is pushed (zizmor cache-poisoning).
+          no-cache: true
+
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: digests-pipeline-pilot-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # The tags over the built digests: one multi-arch tag for both, or the
+  # single architecture's tags as before.
+  merge:
+    needs: [build-pipeline]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-pipeline-pilot-*
+          merge-multiple: true
+
+      - name: Image name
+        id: name
+        run: echo "value=ghcr.io/${GITHUB_REPOSITORY,,}-pipeline-pilot" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ steps.name.outputs.value }}
           tags: |
             type=raw,value=latest
             type=sha,format=long
           flavor: |
             suffix=${{ inputs.arch == 'amd64' && '-amd64' || '' }},onlatest=true
 
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: services/intelligence
-          target: pilot
-          build-args: TORCH=cpu
-          platforms: ${{ inputs.arch == 'amd64' && 'linux/amd64' || 'linux/arm64' }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # No shared cache: the image is pushed (zizmor cache-poisoning).
-          no-cache: true
+      - name: Push the tags
+        env:
+          IMAGE_NAME: ${{ steps.name.outputs.value }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          WANT: ${{ inputs.arch == 'both' && '2' || '1' }}
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          n=$(find . -maxdepth 1 -type f | wc -l)
+          [ "$n" = "$WANT" ] || { echo "::error::expected $WANT digest(s), found $n"; exit 1; }
+          args=()
+          while IFS= read -r t; do [ -n "$t" ] && args+=(-t "$t"); done <<< "$TAGS"
+          for d in *; do args+=("$IMAGE_NAME@sha256:$d"); done
+          docker buildx imagetools create "${args[@]}"
+          docker buildx imagetools inspect "$IMAGE_NAME:$VERSION"

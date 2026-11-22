@@ -1,10 +1,13 @@
 name: Deploy backend demo
 
-# After CI passes on main: build the core service's arm64 image in GitHub,
-# push it to GHCR, then have the preview instance pull it and restart the
-# backend stack (/srv/mhai-backend: Postgres, NATS, migrations, core).
-# Building on the instance is avoided on purpose: it is small and also runs
-# the EMR stack. See deploy/README.md.
+# After CI passes on main: build the backend images (core, intelligence,
+# notifications) in GitHub for linux/amd64 and linux/arm64, each natively on
+# its own runner, push them to GHCR as one multi-arch tag (latest and
+# sha-<commit>), then have the preview host pull them and restart the backend
+# stack (/srv/mhai-backend: Postgres, NATS, migrations, core). Each host
+# pulls its own architecture from the same tag, so the demo can run on an
+# arm64 (Graviton) or an x86_64 server. Building on the host is avoided on
+# purpose. See deploy/README.md.
 
 on:
   # Guarded below: only a green CI run of a push to this repository's own main.
@@ -24,7 +27,10 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  build-core:
+  # One leg per image and architecture, each on a native runner (no QEMU).
+  # Each pushes its image by digest only; merge below puts the two digests
+  # of an image under the tags the hosts pull.
+  build:
     # Only a green CI run for a push to this repository's main. The branch
     # filter above matches by name alone, so a fork's PR from a branch called
     # "main" would otherwise build (and deploy) untrusted code.
@@ -34,57 +40,36 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
-    # The instance is Graviton (aarch64), so build natively on arm64.
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          persist-credentials: false
-
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: ghcr.io/${{ github.repository }}-core
-          tags: |
-            type=raw,value=latest
-            type=sha,format=long
-
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
+    strategy:
+      matrix:
+        image: [core, intelligence, notifications]
+        arch: [amd64, arm64]
+        include:
           # Core requires services/gokit, so the context is services/ (ADR 0014).
-          context: services
-          file: services/core/Dockerfile
-          platforms: linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=core
-          cache-to: type=gha,mode=max,scope=core
-
-  # The public demo's sample-answer worker (deploy/demo/enable-demo.sh,
-  # compose service sample-ai): the intelligence image's default runtime
-  # target for arm64. The sample path loads no model; nothing is downloaded
-  # at run time.
-  build-intelligence:
-    if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: ubuntu-24.04-arm
+          - image: core
+            context: services
+            file: services/core/Dockerfile
+          # The public demo's sample-answer worker (deploy/demo/enable-demo.sh,
+          # compose service sample-ai): the intelligence image's default
+          # runtime target, CPU PyTorch. The sample path loads no model;
+          # nothing is downloaded at run time.
+          - image: intelligence
+            context: services/intelligence
+            file: services/intelligence/Dockerfile
+            target: runtime
+            build-args: TORCH=cpu
+          # The notifications service (compose profile notifications,
+          # deploy/README.md "Turn on email for the demo"): published on every
+          # deploy, started on a host only when its .env has
+          # NOTIFY_ENABLED=true. It requires services/gokit, as core.
+          - image: notifications
+            context: services
+            file: services/notifications/Dockerfile
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -93,6 +78,12 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
+
+      - name: Image name
+        id: name
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: echo "value=${REGISTRY}/${GITHUB_REPOSITORY,,}-${IMAGE}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -105,42 +96,60 @@ jobs:
       - id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
-          images: ghcr.io/${{ github.repository }}-intelligence
-          tags: |
-            type=raw,value=latest
-            type=sha,format=long
+          images: ${{ steps.name.outputs.value }}
 
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: services/intelligence
-          target: runtime
-          build-args: TORCH=cpu
-          platforms: linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          build-args: ${{ matrix.build-args }}
+          platforms: linux/${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=intelligence
-          cache-to: type=gha,mode=max,scope=intelligence
+          outputs: type=image,name=${{ steps.name.outputs.value }},push-by-digest=true,name-canonical=true,push=true
+          # arm64 keeps the cache scope it had when only arm64 was built.
+          cache-from: type=gha,scope=${{ matrix.arch == 'arm64' && matrix.image || format('{0}-amd64', matrix.image) }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch == 'arm64' && matrix.image || format('{0}-amd64', matrix.image) }}
 
-  # The notifications service (compose profile notifications, deploy/README.md
-  # "Turn on email for the demo"): published on every deploy, started on the
-  # instance only when its .env has NOTIFY_ENABLED=true.
-  build-notifications:
-    if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: ubuntu-24.04-arm
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: digests-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Per image: one multi-arch tag over the amd64 and arm64 digests, under the
+  # same tags as before (latest, sha-<commit>), so each host pulls its own
+  # architecture from the same name.
+  merge:
+    needs: [build]
+    strategy:
+      matrix:
+        image: [core, intelligence, notifications]
+    runs-on: ubuntu-latest
     permissions:
-      contents: read
       packages: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          persist-credentials: false
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
+
+      - name: Image name
+        id: name
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: echo "value=${REGISTRY}/${GITHUB_REPOSITORY,,}-${IMAGE}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -153,25 +162,29 @@ jobs:
       - id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
-          images: ghcr.io/${{ github.repository }}-notifications
+          images: ${{ steps.name.outputs.value }}
           tags: |
             type=raw,value=latest
             type=sha,format=long
 
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          # It requires services/gokit, so the context is services/ (as core).
-          context: services
-          file: services/notifications/Dockerfile
-          platforms: linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=notifications
-          cache-to: type=gha,mode=max,scope=notifications
+      - name: Push the multi-arch tags
+        env:
+          IMAGE_NAME: ${{ steps.name.outputs.value }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          n=$(find . -maxdepth 1 -type f | wc -l)
+          [ "$n" = 2 ] || { echo "::error::expected 2 digests (amd64, arm64), found $n"; exit 1; }
+          args=()
+          while IFS= read -r t; do [ -n "$t" ] && args+=(-t "$t"); done <<< "$TAGS"
+          for d in *; do args+=("$IMAGE_NAME@sha256:$d"); done
+          docker buildx imagetools create "${args[@]}"
+          docker buildx imagetools inspect "$IMAGE_NAME:$VERSION"
 
   deploy:
-    needs: [build-core, build-intelligence, build-notifications]
+    needs: [merge]
     runs-on: ubuntu-latest
     environment: preview
     permissions:

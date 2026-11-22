@@ -58,7 +58,8 @@ host.
    `pipeline` service and `nats/nats.conf` with the `pipeline` NATS user.
 2. **The pipeline image.** Run the "Pilot pipeline image" workflow (Actions,
    on `main`). It builds `ghcr.io/measured-health/mhai-multiagent-pipeline-pilot`
-   for arm64 with the embedding and NLI weights pinned and baked in. Then,
+   for amd64 and arm64 (one multi-arch tag; the host pulls its own) with
+   the embedding and NLI weights pinned and baked in. Then,
    on the host, log in once with a GitHub token that has `read:packages`
    only, from stdin:
    `docker login ghcr.io -u <github user> --password-stdin`.

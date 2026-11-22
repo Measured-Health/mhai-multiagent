@@ -128,7 +128,7 @@ IMAGE=${IMAGE:-$(env_get PIPELINE_IMAGE)}
 IMAGE=${IMAGE:-$DEFAULT_IMAGE}
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   docker pull -q "$IMAGE" >/dev/null 2>&1 \
-    || die "could not pull $IMAGE ('docker login ghcr.io' with a read:packages token on stdin; amd64 hosts need the 'latest-amd64' tag)"
+    || die "could not pull $IMAGE ('docker login ghcr.io' with a read:packages token on stdin; an amd64 host needs the multi-arch tag from the 'Pilot pipeline image' workflow (arch both) or 'latest-amd64')"
 fi
 arch=$(docker image inspect -f '{{.Architecture}}' "$IMAGE")
 case "$(uname -m)/$arch" in aarch64/arm64|x86_64/amd64) ;; *) die "$IMAGE is $arch, this host is $(uname -m)" ;; esac

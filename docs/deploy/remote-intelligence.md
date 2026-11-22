@@ -177,8 +177,10 @@ parameters, 4B "effective"). These are estimates for Q4_K_M with
 | Disk | 30 GB (images, mirror and cache: the GGUF is held twice) | 40 GB (the CUDA image is larger) |
 
 The pipeline image must match the host's architecture. The "Pilot pipeline
-image" workflow builds arm64 by default, and amd64 with `arch: amd64`
-(tag `latest-amd64`). Most GPU instances are amd64. The app host stays small
+image" workflow builds amd64 and arm64 under one multi-arch tag by default
+(`latest`, each host pulls its own), arm64 alone with `arch: arm64`, and
+amd64 alone with `arch: amd64` (tag `latest-amd64`). Most GPU instances are
+amd64. The image is CPU PyTorch either way. The app host stays small
 (the demo's t4g.medium shape, without the pipeline).
 
 ## Security and threat model
