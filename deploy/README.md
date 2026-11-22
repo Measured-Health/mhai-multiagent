@@ -42,6 +42,8 @@ touches the EMR containers, the web demo or nginx.
 | `pipeline` | `mhai-multiagent-pipeline-pilot` (weights baked in) | the pipeline worker, for the pilot only (profile `pilot`, off by default; see `pilot/README.md`) | 1600 MiB |
 | `core-demo-seed` | core | one-shot each deploy: the synthetic demo hospital and its published demo accounts (profile `demo`; "Public demo: sample answers") | 128 MiB |
 | `sample-ai` | `mhai-multiagent-intelligence` | the pipeline worker with labelled sample answers, for the demo hospital only (profile `demo`) | 192 MiB |
+| `notifications` | `mhai-multiagent-notifications`, uid 65532 | email for invites, reset links, notices and reminders (profile `notifications`, off by default; see "Turn on email for the demo") | 64 MiB |
+| `mail-relay` | `alpine/socat` by digest, uid 65534 | the notifications service's only way out: TCP to the SMTP host and port, nothing else (profile `notifications`) | 32 MiB |
 
 Every container has a read-only root filesystem, no Linux capabilities and
 `no-new-privileges`. The pipeline worker runs only for the pilot (one real
@@ -95,6 +97,7 @@ or an image:
 | `/srv/mhai-backend/secrets/nats-gateway.nk` (mode 400, uid 65532) | the core service's NATS NKey seed, mounted into `core` only |
 | `/srv/mhai-backend/secrets/bff/nats-bff-clinical.nk`, `nats-bff-platform.nk` (mode 400, uid 1001; folder mode 750) | each frontend BFF's NATS NKey seed, mounted by mhai-web's compose into that app's container only |
 | volume `mhai-backend-corekeys` | the access-token signing key (Ed25519) |
+| `/srv/mhai-backend/secrets/smtp_password`, `nats-notifications.nk` (mode 400, uid 65532) | only with email on: the mailbox password (written by the owner) and the notifications service's NATS seed, mounted into `notifications` only; its login password `NOTIFY_DB_PASSWORD` is in `.env` |
 
 Each container gets only its own secrets: `core` never sees the owner
 password, `core-migrate` never sees the core secrets, and NATS sees only
@@ -355,7 +358,7 @@ re-key.
 
 ## Public demo: sample answers
 
-The public demo (demo.measured-health.org, mhai-web) runs **connected**: the
+The public demo (ai.measured-health.org, mhai-web) runs **connected**: the
 clinical app in live mode, its BFF over NATS to core, and core's jobs to a
 pipeline worker. No trained model exists yet, so the worker answers with
 **labelled sample answers** on **synthetic data only**. Every deploy of this
@@ -694,6 +697,117 @@ restore test on that backup first if there is time.
 `sudo /usr/local/lib/mhai-ops/healthcheck.sh` runs it now. Backup failures:
 `sudo journalctl -u mhai-backup -n 50` and
 `sudo cat /var/lib/mhai-ops/backup.status`.
+
+## Turn on email for the demo
+
+Off by default. With it on, core hands invites, reset links, two-step
+notices and reminders to the notifications service
+(`services/notifications/README.md`), which sends them from our own mailbox
+over SMTP submission (TLS always, the server's certificate always checked).
+No patient data is ever in a message. It runs as two containers in the
+compose profile `notifications`:
+
+- `notifications`: on the internal networks `backend` and `mail` only, with
+  its own NATS NKey user and database login (`notify_app`), the mailbox
+  password as a read-only file, nothing of core's. It runs as development,
+  as core does here (NATS and Postgres without TLS on this one host).
+- `mail-relay`: its only way out. It forwards TCP to `NOTIFY_SMTP_HOST`
+  port `NOTIFY_SMTP_PORT` and nowhere else, and holds no secret. The
+  service reaches it under the SMTP host's own name (`extra_hosts`), so
+  TLS runs end to end and is checked against the real name. The `mail`
+  network is `192.168.231.0/29` with the relay at `.2`; if that collides
+  with a network on the host, set `NOTIFY_MAIL_SUBNET` and
+  `NOTIFY_MAIL_RELAY_IP` in `.env`.
+
+Every deploy publishes the image; the instance starts the profile only when
+`.env` has `NOTIFY_ENABLED=true`, and stops it otherwise. The NATS store
+(`max_file_store`) is 640 MB, room for the `NOTIFY` stream.
+
+**Before you turn it on:** the demo's admin login is public, so anyone can
+then make the demo send an invite or reset email (fixed text, our From) to
+any address, within the caps (30 links a minute and 500 invites a day for
+the hospital, 10 messages an hour per recipient). SPF, DKIM and DMARC on
+measured-health.org help those emails land (TODO.md). The instance's
+security group must allow outbound TCP 587 (the default allows all).
+
+### 1. The settings (on the instance)
+
+Add these lines to `/srv/mhai-backend/.env` (`nano` as the deploy user; none
+of them is a secret). Leave `NOTIFY_SMTP_PASSWORD` out: the service refuses
+a password in the environment.
+
+```bash
+NOTIFY_CHANNELS=email
+NOTIFY_SMTP_HOST=mail.measured-health.org
+NOTIFY_SMTP_PORT=587
+NOTIFY_SMTP_USERNAME=no-reply@measured-health.org
+NOTIFY_SMTP_FROM=no-reply@measured-health.org
+NOTIFY_SMTP_FROM_NAME=Measured Health
+NOTIFY_SMTP_REPLY_TO=info@measured-health.org
+CORE_APP_URL=https://ai.measured-health.org
+CORE_DELIVERY=notify
+CORE_NOTIFY_ENABLED=true
+```
+
+### 2. The mailbox password (on the instance)
+
+Typed at a hidden prompt, written straight to a file only the service's
+user (uid 65532) can read. It is never echoed, never an argument, never in
+`.env` or the shell history:
+
+```bash
+read -rsp 'SMTP password: ' pw; echo
+printf '%s\n' "$pw" | sudo install -m 0400 -o 65532 -g 65532 /dev/stdin /srv/mhai-backend/secrets/smtp_password
+unset pw
+```
+
+To change it later, run the same lines, then
+`docker compose --profile notifications restart notifications`.
+
+### 3. Switch it on (on the instance)
+
+```bash
+bash /srv/mhai-backend/notifications/enable-notifications.sh
+```
+
+The deploy copies the script there. It makes the service's NATS key
+(`secrets/nats-notifications.nk`; only the public key goes to `.env` as
+`NATS_NOTIFICATIONS_NKEY`), generates `NOTIFY_DB_PASSWORD` in `.env`,
+checks the password file's owner and mode (never its content), sets
+`NOTIFY_ENABLED=true`, recreates NATS when its key is new, restarts core
+(which makes the `notify_app` login) and starts the profile. It ends with
+the service's start line, which names the SMTP server and port. Run it
+again at any time; it keeps what is there.
+
+### 4. Send a test
+
+1. Sign in to https://ai.measured-health.org as the demo hospital admin.
+2. Staff, Invite: invite an address you can read (your two-step code is
+   asked). The invite should arrive within a minute from "Measured Health"
+   `<no-reply@measured-health.org>`, replies going to
+   info@measured-health.org, with a link on ai.measured-health.org.
+3. If the invite fails (503 `no_delivery`), or nothing arrives, read the logs (kinds, ids and codes only, never an
+   address, a link or the password):
+
+   ```bash
+   cd /srv/mhai-backend
+   docker compose --profile notifications logs --tail=80 notifications mail-relay
+   ```
+
+   A sign-in refusal from the server means the user or password; a
+   certificate error means the host name doesn't match the server's
+   certificate; a connect timeout means outbound 587 is blocked.
+4. Remove the test person afterwards (Staff, Remove), or leave it to the
+   scheduled reset.
+
+### Switching off
+
+Set `NOTIFY_ENABLED=false` and `CORE_DELIVERY=log` in `.env` (and
+`CORE_NOTIFY_ENABLED=false`), then run the deploy workflow (or
+`docker compose up -d core` and
+`docker compose --profile notifications stop notifications mail-relay`).
+The keys and the password file can stay; delete
+`secrets/smtp_password` with `sudo rm` if the mailbox is retired.
 
 ## Cloud models (off by default)
 

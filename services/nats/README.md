@@ -140,7 +140,7 @@ has exactly one durable consumer.
 
 - `max_payload: 1MB`, the outer bound (the services check their own,
   smaller limits).
-- `max_file_store: 1GB` (the demo: 512 MB). `JOBS` and `DEAD` reserve
+- `max_file_store: 1GB` (the demo: 640 MB). `JOBS` and `DEAD` reserve
   their 320 MiB in it. Their byte caps keep a flood of jobs or dead letters
   inside those streams, so it can't fill the store the KV buckets (the
   denylist among them) need. Within its stream a flood still costs other

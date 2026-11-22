@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The demo can send email, off by default.** `deploy/compose.yml` gains
+  the profile `notifications`: the notifications service (uid 65532,
+  read-only, internal networks only, its own NATS NKey and `notify_app`
+  login, the SMTP password as a 0400 file) and `mail-relay`, a
+  digest-pinned TCP forwarder to the SMTP host and port alone, its only
+  route out. `deploy/nats/nats.conf` gains the notifications NKey user
+  (`NATS_NOTIFICATIONS_NKEY`, a seedless key until enabled) and grows
+  `max_file_store` to 640 MB, room for `NOTIFY`; core gets
+  `CORE_NOTIFY_ENABLED` and core-migrate `NOTIFY_DB_PASSWORD`. The deploy
+  workflow publishes `mhai-multiagent-notifications` and starts the profile
+  only with `NOTIFY_ENABLED=true` in the host's `.env`;
+  `deploy/notifications/enable-notifications.sh` does the host steps
+  (deploy/README.md, "Turn on email for the demo"). The demo moved to
+  ai.measured-health.org (22 Nov); the docs say so.
 - **A new server in one script (`deploy/new-server.sh`, how-to
   `deploy/NEW-SERVER.md`).** Sets up a fresh arm64 Ubuntu server for the
   backend and the clinical app on a given domain: installs Docker, compose,

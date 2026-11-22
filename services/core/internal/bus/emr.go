@@ -33,7 +33,7 @@ const (
 	// headers.
 	EMRMaxMsgSize = 64 << 10
 	// EMRMaxBytes caps the stream, so with JOBS and DEAD it still leaves
-	// the KV buckets room in the demo's 512 MB store.
+	// the KV buckets room in the demo's 640 MB store.
 	EMRMaxBytes = 64 << 20
 
 	EMRAckWait    = 60 * time.Second

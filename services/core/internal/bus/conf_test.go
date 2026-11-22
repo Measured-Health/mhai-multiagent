@@ -114,15 +114,18 @@ func TestDevConfLimitsAndEncryption(t *testing.T) {
 	}
 }
 
+// demoStore is the demo's max_file_store (deploy/nats/nats.conf).
+const demoStore = 640 << 20
+
 // JOBS and DEAD reserve their MaxBytes in max_file_store. The demo's store
-// is 512 MB (deploy/nats/nats.conf); the streams must fit with room left
+// is 640 MB (deploy/nats/nats.conf); the streams must fit with room left
 // for the KV buckets (at least 128 MiB), or core serve can't start there.
 func TestStreamReservationsFitTheDemoStore(t *testing.T) {
-	if !strings.Contains(stripComments(readConf(t, "deploy/nats/nats.conf")), "max_file_store:512MB") {
+	if !strings.Contains(stripComments(readConf(t, "deploy/nats/nats.conf")), "max_file_store:640MB") {
 		t.Fatal("deploy/nats/nats.conf max_file_store changed: recheck this budget")
 	}
-	if bus.StreamsMaxBytes > 512<<20-128<<20 {
-		t.Fatalf("JOBS+DEAD reserve %d bytes, too much for the demo's 512 MB store", bus.StreamsMaxBytes)
+	if bus.StreamsMaxBytes > demoStore-128<<20 {
+		t.Fatalf("JOBS+DEAD reserve %d bytes, too much for the demo's 640 MB store", bus.StreamsMaxBytes)
 	}
 }
 
@@ -245,25 +248,24 @@ func TestHealthBucketIsTheGatewaysOnly(t *testing.T) {
 }
 
 // With EMR on, JOBS, DEAD and EMR together still leave the KV buckets at
-// least 128 MiB of the demo's 512 MB store.
+// least 128 MiB of the demo's 640 MB store.
 func TestEMRStreamFitsTheDemoStore(t *testing.T) {
-	if bus.StreamsMaxBytes+bus.EMRMaxBytes > 512<<20-128<<20 {
+	if bus.StreamsMaxBytes+bus.EMRMaxBytes > demoStore-128<<20 {
 		t.Fatalf("JOBS+DEAD+EMR reserve %d bytes", bus.StreamsMaxBytes+bus.EMRMaxBytes)
 	}
 }
 
 // With EMR and documents on, JOBS, DEAD, EMR and DOCS together still leave
-// the KV buckets at least 128 MiB of the dev store (1 GB). The demo's 512 MB
-// store has no room left for DOCS (JOBS, DEAD and EMR take exactly its
-// budget): its max_file_store must grow before CORE_DOCUMENTS_ENABLED is
-// turned on there (design §17 departure 33, TODO.md), and this test says so.
+// the KV buckets at least 128 MiB of the dev store (1 GB) and of the demo's
+// 640 MB store (grown from 512 MB for DOCS and NOTIFY, design §17
+// departure 33).
 func TestDocsStreamFitsTheStore(t *testing.T) {
 	all := bus.StreamsMaxBytes + bus.EMRMaxBytes + bus.DocsMaxBytes
 	if all > 1<<30-128<<20 {
 		t.Fatalf("JOBS+DEAD+EMR+DOCS reserve %d bytes", all)
 	}
-	if all <= 512<<20-128<<20 {
-		t.Fatal("DOCS now fits the demo's store: drop the max_file_store item from TODO.md and test the demo here")
+	if all > demoStore-128<<20 {
+		t.Fatalf("JOBS+DEAD+EMR+DOCS reserve %d bytes, too much for the demo's 640 MB store", all)
 	}
 }
 
@@ -360,8 +362,9 @@ func TestDeployPipelineUserMatchesDev(t *testing.T) {
 // user is: notifications.conf (on) or notifications-off.conf (the dev
 // default), which needs no variable and can't sign in. It subscribes its
 // control subjects in queue group notifications only, and (PR 3) pulls and
-// acks notify_send and publishes its own dead letters, nothing else. Core may call it; the demo config has no
-// notifications user yet.
+// acks notify_send and publishes its own dead letters, nothing else. Core
+// may call it. The demo config has the same user as an NKey user
+// (NATS_NOTIFICATIONS_NKEY), with exactly notifications.conf's rights.
 func TestNotificationsUserIsAnOptInInclude(t *testing.T) {
 	dev := readConf(t, "services/nats/nats.conf")
 	if !strings.Contains(dev, `{ include "notifications.conf" }`) ||
@@ -403,20 +406,29 @@ func TestNotificationsUserIsAnOptInInclude(t *testing.T) {
 			t.Errorf("%s: gateway's notifications rights", c.file)
 		}
 	}
-	deploy := stripComments(readConf(t, "deploy/nats/nats.conf"))
-	if strings.Contains(deploy, "notifications.conf") || strings.Contains(deploy, "NATS_NOTIFICATIONS") {
-		t.Fatal("the deploy config must not include a notifications user yet (NATS_NOTIFICATIONS_NKEY isn't provisioned)")
+	deployConf := readConf(t, "deploy/nats/nats.conf")
+	deploy := stripComments(deployConf)
+	if strings.Contains(deploy, "notifications.conf") || strings.Contains(deploy, "NATS_NOTIFICATIONS_PASSWORD") ||
+		strings.Count(deploy, "nkey:$NATS_NOTIFICATIONS_NKEY") != 1 {
+		t.Fatal("deploy/nats/nats.conf must define the notifications user once, as the NKey user NATS_NOTIFICATIONS_NKEY")
+	}
+	devPerms := stripComments(permissionsAfter(t, readConf(t, "services/nats/notifications.conf"), "user: notifications"))
+	prodPerms := stripComments(permissionsAfter(t, deployConf, "nkey: $NATS_NOTIFICATIONS_NKEY"))
+	if devPerms != prodPerms {
+		t.Fatalf("notifications permissions differ:\ndev:  %s\nprod: %s", devPerms, prodPerms)
 	}
 }
 
 // With every stream on (JOBS, DEAD, EMR, DOCS and NOTIFY), the KV buckets
-// still keep at least 128 MiB of the dev store (1 GB). NOTIFY is small
-// (ids only); like DOCS, it doesn't fit the demo's 512 MB store until that
-// grows (TODO.md).
+// still keep at least 128 MiB of the dev store (1 GB) and of the demo's
+// 640 MB store. NOTIFY is small (ids only).
 func TestNotifyStreamFitsTheStore(t *testing.T) {
 	all := bus.StreamsMaxBytes + bus.EMRMaxBytes + bus.DocsMaxBytes + bus.NotifyMaxBytes
 	if all > 1<<30-128<<20 {
 		t.Fatalf("every stream reserves %d bytes", all)
+	}
+	if all > demoStore-128<<20 {
+		t.Fatalf("every stream reserves %d bytes, too much for the demo's 640 MB store", all)
 	}
 	if bus.NotifyMaxBytes > 16<<20 || bus.NotifyMaxMsgSize > 1<<10 {
 		t.Fatalf("NOTIFY carries ids only: %d bytes, %d per message", bus.NotifyMaxBytes, bus.NotifyMaxMsgSize)

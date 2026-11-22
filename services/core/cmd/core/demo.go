@@ -31,7 +31,7 @@ const demoUsage = `usage:
   core demo seed
   core demo reset
 
-Seeds the public demo (demo.measured-health.org) with synthetic data: the
+Seeds the public demo (ai.measured-health.org) with synthetic data: the
 demo hospital DEM (hospitals.is_demo), its sample accounts on the published
 demo password and two-step secret, the six shared reference guidelines,
 sample consultations and corrections, and the hospital's demo Analysis
