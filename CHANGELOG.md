@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Multi-arch images: the demo can run on an x86_64 server.** "Deploy
+  backend demo" builds core, intelligence and notifications for linux/amd64
+  and linux/arm64, each on a native runner (no QEMU), and pushes one
+  multi-arch tag per image under the same names (`latest`,
+  `sha-<commit>`), so the arm64 demo host keeps pulling what it pulled and
+  an x86_64 host pulls its own. "Pilot pipeline image" builds both by
+  default (`arch: both`); `arm64` and `amd64` alone keep their old tags.
+- **`deploy/new-server.sh` on x86_64, preinstalled Docker and Ubuntu 26.04,
+  and the platform admin app.** It accepts x86_64 as well as arm64, keeps a
+  Docker that is already installed (as on AWS Deep Learning AMIs), uses
+  Ubuntu's `docker.io` and `docker-compose-v2` when Docker's apt repository
+  has no release for the Ubuntu codename yet, and reports an NVIDIA GPU
+  (nothing is configured for it). `--platform-domain` also sets up mhai-web's
+  platform admin app: `/srv/mhai-web-platform` and its session secret, the
+  `mhai-platform` nginx site with its IP allow list (created empty, never
+  overwritten) and its webroot certificate. It checks sudo with `sudo -n true`
+  (`sudo -v` needs a terminal on 26.04). NEW-SERVER.md gains "Moving the
+  demo to a new server" (both DNS records, email files, the `preview`
+  secrets, both deploys, leaving the old host's other containers alone).
 - **The demo can send email, off by default.** `deploy/compose.yml` gains
   the profile `notifications`: the notifications service (uid 65532,
   read-only, internal networks only, its own NATS NKey and `notify_app`

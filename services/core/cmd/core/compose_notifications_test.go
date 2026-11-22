@@ -301,7 +301,10 @@ func TestDeployNotificationsProfile(t *testing.T) {
 	// The deploy workflow publishes the image, ships the script, and starts
 	// the profile only with NOTIFY_ENABLED=true.
 	wf := readRepoFile(t, filepath.Join(".github", "workflows", "deploy.yml"))
-	for _, want := range []string{"file: services/notifications/Dockerfile", "ghcr.io/${{ github.repository }}-notifications",
+	// The image is a leg of the build matrix (one per architecture), named
+	// ghcr.io/<repository>-notifications, then merged under its tags.
+	for _, want := range []string{"file: services/notifications/Dockerfile", "image: [core, intelligence, notifications]",
+		"- image: notifications", "${REGISTRY}/${GITHUB_REPOSITORY,,}-${IMAGE}",
 		"notifications/enable-notifications.sh", `if [ "$notify" = true ]; then`,
 		"docker compose --profile notifications up -d mail-relay notifications"} {
 		if !strings.Contains(wf, want) {

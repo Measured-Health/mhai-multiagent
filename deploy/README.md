@@ -14,9 +14,14 @@ network backend (internal, no route out): core, postgres, nats
 
 Every merge to `main` that passes CI runs `.github/workflows/deploy.yml`:
 
-1. build the core image for arm64 on GitHub (`services/core/Dockerfile`:
-   static binary on distroless, non-root) and push it to
-   `ghcr.io/measured-health/mhai-multiagent-core` (`latest` and `sha-<commit>`);
+1. build the core image (`services/core/Dockerfile`: static binary on
+   distroless, non-root), and the intelligence (sample answers) and
+   notifications images, for linux/amd64 and linux/arm64 on GitHub, each on
+   a native runner, and push them to
+   `ghcr.io/measured-health/mhai-multiagent-core` (and `-intelligence`,
+   `-notifications`) as one multi-arch tag each (`latest` and
+   `sha-<commit>`): an arm64 (Graviton) or x86_64 host pulls its own
+   architecture from the same tag;
 2. if `DEPLOY_ENABLED` is `true`: SSH to the instance, copy this commit's
    `compose.yml` and `nats/nats.conf` into `/srv/mhai-backend`, pull, run the
    migrations, restart core, and check `GET /api/v1/healthz` and
