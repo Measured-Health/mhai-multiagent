@@ -111,3 +111,51 @@ func TestDemoSwitchesOnlyOnDemoServices(t *testing.T) {
 		}
 	}
 }
+
+// The live site (deploy/README.md, "Live site"): with SITE_MODE=live the
+// deploy runs live-site.sh and never the demo seed, refuses a host marked
+// live while SITE_MODE is not live, and the scheduled demo reset never
+// runs (a run by hand refuses).
+func TestLiveSiteModeSkipsTheDemo(t *testing.T) {
+	wf := readRepoFile(t, ".github/workflows/deploy.yml")
+	for _, want := range []string{
+		"SITE_MODE: ${{ vars.SITE_MODE }}",
+		"''|demo) echo \"value=demo\"",
+		"live) echo \"value=live\"",
+		"SITE_MODE: ${{ steps.mode.outputs.value }}",
+		"envs: GHCR_TOKEN,GHCR_USER,DEPLOY_BUNDLE,DEMO_SAMPLE_AI,SITE_MODE",
+		"premigrate-check.sh live-site.sh demo/enable-demo.sh",
+		"if [ \"$SITE_MODE\" = live ]; then\n              bash live-site.sh precheck\n              live_guard=1\n            elif [ -e live-site ]; then",
+		"if [ \"$SITE_MODE\" = live ]; then\n              bash live-site.sh\n              live_guard=0\n            fi",
+		"trap on_exit EXIT",
+		"if [ \"$SITE_MODE\" != live ]; then\n              DEMO_SAMPLE_AI=\"$DEMO_SAMPLE_AI\" bash demo/enable-demo.sh",
+	} {
+		if !strings.Contains(wf, want) {
+			t.Errorf("deploy.yml lacks %q", want)
+		}
+	}
+	// The pre-check comes before core starts, the post-check before the
+	// demo seed's branch, and the seed runs once.
+	pre := strings.Index(wf, "bash live-site.sh precheck")
+	up := strings.Index(wf, "docker compose up -d --remove-orphans core")
+	post := strings.Index(wf, "bash live-site.sh\n")
+	seed := strings.Index(wf, "bash demo/enable-demo.sh")
+	if pre < 0 || up < 0 || post < 0 || seed < 0 || pre > up || post < up || seed < post ||
+		strings.Count(wf, "demo/enable-demo.sh\n") != 1 {
+		t.Error("deploy.yml: live-site.sh precheck before core starts, the check after, the demo seed once and last")
+	}
+	reset := readRepoFile(t, ".github/workflows/demo-reset.yml")
+	for _, want := range []string{
+		"vars.SITE_MODE != 'live' &&",
+		"if: vars.SITE_MODE == 'live' && github.event_name == 'workflow_dispatch'",
+	} {
+		if !strings.Contains(reset, want) {
+			t.Errorf("demo-reset.yml lacks %q", want)
+		}
+	}
+	for _, f := range []string{"deploy/demo/enable-demo.sh", "deploy/demo/reset-demo.sh"} {
+		if !strings.Contains(readRepoFile(t, f), "is a live site (marker") {
+			t.Errorf("%s does not refuse on a live site", f)
+		}
+	}
+}

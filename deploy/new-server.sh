@@ -6,7 +6,7 @@
 # Run as the deploy user (ubuntu, with sudo), from a copy of this repo's
 # deploy/ folder and of mhai-web's deploy/ folder:
 #   bash deploy/new-server.sh --domain ai.example.org --email ops@example.org \
-#     --web-repo-dir PATH [--demo] [--platform-domain platforms.example.org]
+#     --web-repo-dir PATH [--demo | --live] [--platform-domain platforms.example.org]
 #
 #   --domain           the site's name; its DNS A record must point here before
 #                      the certificate step (the script stops there until it does)
@@ -14,6 +14,10 @@
 #   --web-repo-dir     a checkout (or copy) of mhai-web: its deploy/ folder is used
 #   --demo             this server is a public demo: copy the live-demo override
 #                      and list the demo's settings at the end
+#   --live             this server is the live site (no public demo; repository
+#                      variable SITE_MODE=live in both repos): the nginx sites
+#                      go to mhai-web's live proxies (127.0.0.1:8093 and :8094)
+#                      instead of the demo's ports (deploy/README.md, "Live site")
 #   --platform-domain  also set up mhai-web's platform admin app on this name:
 #                      /srv/mhai-web-platform, its session secret, the nginx
 #                      site with its IP allow list, and its certificate
@@ -32,6 +36,7 @@ DOMAIN=
 EMAIL=
 WEB_REPO_DIR=
 DEMO=0
+LIVE=0
 PLATFORM_DOMAIN=
 WEB_DEST=${MHAI_WEB_DIR:-/srv/mhai-web}
 BACKEND_DEST=${MHAI_BACKEND_DIR:-/srv/mhai-backend}
@@ -46,7 +51,7 @@ PLATFORM_ALLOW=/etc/nginx/mhai-platform-allow.conf
 PLATFORM_PORT=8091                  # mhai-web's compose.platform.yml: 127.0.0.1:8091
 
 usage() {
-  echo "usage: bash deploy/new-server.sh --domain DOMAIN --email EMAIL --web-repo-dir PATH [--demo] [--platform-domain DOMAIN]" >&2
+  echo "usage: bash deploy/new-server.sh --domain DOMAIN --email EMAIL --web-repo-dir PATH [--demo | --live] [--platform-domain DOMAIN]" >&2
   exit 2
 }
 while [ $# -gt 0 ]; do
@@ -55,11 +60,25 @@ while [ $# -gt 0 ]; do
     --email) [ $# -ge 2 ] || usage; EMAIL=$2; shift 2 ;;
     --web-repo-dir) [ $# -ge 2 ] || usage; WEB_REPO_DIR=$2; shift 2 ;;
     --demo) DEMO=1; shift ;;
+    --live) LIVE=1; shift ;;
     --platform-domain) [ $# -ge 2 ] || usage; PLATFORM_DOMAIN=$2; shift 2 ;;
     -h|--help) usage ;;
     *) usage ;;
   esac
 done
+
+[ "$DEMO" = 0 ] || [ "$LIVE" = 0 ] || { echo "--demo and --live exclude each other" >&2; exit 2; }
+# The live site: the public names go to mhai-web's loopback live proxies
+# (web-live-proxy, platform-live-proxy), which take the client address from
+# this nginx only (mhai-web deploy/nginx/live-proxy.conf.template).
+WEB_CONTAINER=mhai-web-web
+PLATFORM_CONTAINER=mhai-web-platform-platform
+if [ "$LIVE" = 1 ]; then
+  WEB_PORT=8093                     # mhai-web's compose.yml: web-live-proxy
+  PLATFORM_PORT=8094                # mhai-web's compose.platform.yml: platform-live-proxy
+  WEB_CONTAINER=mhai-web-web-live-proxy
+  PLATFORM_CONTAINER=mhai-web-platform-platform-live-proxy
+fi
 
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 OWNER=$(id -un)
@@ -264,7 +283,7 @@ fi
 as_docker "cd $(printf '%q' "$WEB_DEST") && docker compose config --quiet"
 info "compose.yml is valid"
 if ss -Hltn "sport = :$WEB_PORT" | grep -q . \
-  && ! as_docker "docker ps --filter name='^mhai-web-web' --format '{{.Ports}}'" | grep -q "127.0.0.1:$WEB_PORT->"; then
+  && ! as_docker "docker ps --filter name='^$WEB_CONTAINER-[0-9]' --format '{{.Ports}}'" | grep -q "127.0.0.1:$WEB_PORT->"; then
   die "port $WEB_PORT is in use by something other than the clinical app; free it first"
 fi
 info "127.0.0.1:$WEB_PORT is free for the clinical app (or already its own)"
@@ -293,7 +312,7 @@ if [ -n "$PLATFORM_DOMAIN" ]; then
   fi
   chmod 600 "$PLATFORM_DEST/.env"
   if ss -Hltn "sport = :$PLATFORM_PORT" | grep -q . \
-    && ! as_docker "docker ps --filter name='^mhai-web-platform-platform' --format '{{.Ports}}'" | grep -q "127.0.0.1:$PLATFORM_PORT->"; then
+    && ! as_docker "docker ps --filter name='^$PLATFORM_CONTAINER-[0-9]' --format '{{.Ports}}'" | grep -q "127.0.0.1:$PLATFORM_PORT->"; then
     die "port $PLATFORM_PORT is in use by something other than the platform app; free it first"
   fi
   info "127.0.0.1:$PLATFORM_PORT is free for the platform app (or already its own)"
@@ -527,7 +546,15 @@ if [ -n "$PLATFORM_DOMAIN" ]; then
     sudo nginx -t && sudo systemctl reload nginx.
 EOF
 fi
-if [ "$DEMO" = 1 ]; then
+if [ "$LIVE" = 1 ]; then
+  cat <<'EOF'
+
+    The live site (no public demo): set the repository variable SITE_MODE=live
+    in BOTH repositories before the first deploy (deploy/README.md, "Live
+    site"). Then the first platform admin with core-cli (same section). Real
+    patient data still waits on the go-live sign-offs in TODO.md.
+EOF
+elif [ "$DEMO" = 1 ]; then
   cat <<'EOF'
 
     Demo settings (optional repository variables; the defaults are the demo):

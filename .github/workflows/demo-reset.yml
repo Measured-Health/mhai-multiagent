@@ -16,6 +16,11 @@ name: Reset backend demo
 # default 6). The schedule wakes hourly and goes on only in an hour that is a
 # multiple of it (UTC), so changing the interval needs no edit here. Off:
 # DEMO_RESET=off. Run by hand: Actions, Reset backend demo, Run workflow.
+#
+# A live site (repository variable SITE_MODE=live; deploy/README.md, "Live
+# site") has no demo: the schedule does nothing, and a run by hand refuses.
+# On the instance, demo/reset-demo.sh refuses too once the host carries the
+# live-site marker.
 
 on:
   schedule:
@@ -29,10 +34,23 @@ concurrency:
 permissions: {}
 
 jobs:
+  # SITE_MODE=live: a run by hand fails, saying why; the schedule is skipped.
+  refuse-live:
+    if: vars.SITE_MODE == 'live' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Refuse on a live site
+        run: |
+          echo "::error::SITE_MODE=live: this deployment has no demo, so there is nothing to reset (deploy/README.md, \"Live site\")."
+          exit 1
+
   reset:
     # Schedules run on the default branch only; a manual run only from main.
+    # Never on a live site (SITE_MODE=live).
     if: >-
       vars.DEPLOY_ENABLED == 'true' && vars.DEMO_RESET != 'off' &&
+      vars.SITE_MODE != 'live' &&
       github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: preview

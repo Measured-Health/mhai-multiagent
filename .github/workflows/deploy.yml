@@ -196,6 +196,20 @@ jobs:
     # image.
     if: vars.DEPLOY_ENABLED == 'true'
     steps:
+      # The site mode (deploy/README.md, "Live site"): repository variable
+      # SITE_MODE, demo (the default, unset) or live. Anything else stops
+      # here, so a typo never runs the demo on a live host.
+      - name: Site mode
+        id: mode
+        env:
+          SITE_MODE: ${{ vars.SITE_MODE }}
+        run: |
+          case "$SITE_MODE" in
+            ''|demo) echo "value=demo" >> "$GITHUB_OUTPUT"; echo "Site mode: demo (the public demo)." ;;
+            live) echo "value=live" >> "$GITHUB_OUTPUT"; echo "Site mode: live (no demo seed, no sample answers)." ;;
+            *) echo "::error::Repository variable SITE_MODE must be demo or live (deploy/README.md, \"Live site\")"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
@@ -208,7 +222,7 @@ jobs:
         id: bundle
         run: |
           set -euo pipefail
-          b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh demo/enable-demo.sh demo/reset-demo.sh \
+          b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh live-site.sh demo/enable-demo.sh demo/reset-demo.sh \
             notifications/enable-notifications.sh | base64 -w0)
           echo "value=$b" >> "$GITHUB_OUTPUT"
 
@@ -233,8 +247,10 @@ jobs:
           # The demo's sample answers: on unless the repository variable
           # DEMO_SAMPLE_AI is off (deploy/README.md, "Public demo").
           DEMO_SAMPLE_AI: ${{ vars.DEMO_SAMPLE_AI == 'off' && 'off' || 'on' }}
+          # demo or live (the "Site mode" step above).
+          SITE_MODE: ${{ steps.mode.outputs.value }}
         with:
-          envs: GHCR_TOKEN,GHCR_USER,DEPLOY_BUNDLE,DEMO_SAMPLE_AI
+          envs: GHCR_TOKEN,GHCR_USER,DEPLOY_BUNDLE,DEMO_SAMPLE_AI,SITE_MODE
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -272,12 +288,37 @@ jobs:
             done
 
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+            # live_guard=1 (live site only) from just before core starts
+            # until live-site.sh has passed on the running core: any exit in
+            # between stops core, so a live core never keeps serving a
+            # database that wasn't checked.
+            live_guard=0
+            on_exit() {
+              if [ "$live_guard" = 1 ]; then
+                echo "::error::Live site: stopping core (the live checks did not pass)."
+                docker compose stop core >/dev/null 2>&1 || true
+              fi
+              docker logout ghcr.io >/dev/null 2>&1 || true
+            }
+            trap on_exit EXIT
             docker compose pull core
 
             # Migration 00007 (Plan 3) validates existing clinical_queries
             # rows: stop here, before anything migrates, if one doesn't fit.
             bash premigrate-check.sh
+
+            # The live site (SITE_MODE=live; deploy/README.md, "Live site"):
+            # before core (re)starts, against Postgres alone: the host is
+            # marked live (the demo scripts then refuse), sample-ai stops, and
+            # a demo hospital that can still sign in stops the running core
+            # and this deploy. A host marked live never runs the demo.
+            if [ "$SITE_MODE" = live ]; then
+              bash live-site.sh precheck
+              live_guard=1
+            elif [ -e live-site ]; then
+              echo "::error::This host is a live site (/srv/mhai-backend/live-site) but SITE_MODE is not live: no demo here. Set SITE_MODE=live, or remove the marker by hand (deploy/README.md, \"Live site\")."
+              exit 1
+            fi
 
             # Migrations and the keys run first (depends_on); a failed
             # migration stops here and leaves the running core alone.
@@ -305,6 +346,14 @@ jobs:
               exit 1
             fi
             echo "Backend healthy."
+
+            # The live site: the same checks again on the migrated database
+            # with core running; a failure stops core (live-site.sh, and the
+            # EXIT trap above).
+            if [ "$SITE_MODE" = live ]; then
+              bash live-site.sh
+              live_guard=0
+            fi
 
             # Email (profile notifications): only when .env says
             # NOTIFY_ENABLED=true (deploy/notifications/enable-notifications.sh
@@ -340,9 +389,12 @@ jobs:
               echo "NOTIFY_ENABLED is not true: notifications stopped."
             fi
 
-            # The public demo: the seeded demo hospital and accounts, and the
-            # sample answers (deploy/README.md, "Public demo: sample answers").
-            DEMO_SAMPLE_AI="$DEMO_SAMPLE_AI" bash demo/enable-demo.sh
+            # The public demo only (never with SITE_MODE=live, checked
+            # above): the seeded demo hospital and accounts, and the sample
+            # answers (deploy/README.md, "Public demo: sample answers").
+            if [ "$SITE_MODE" != live ]; then
+              DEMO_SAMPLE_AI="$DEMO_SAMPLE_AI" bash demo/enable-demo.sh
+            fi
 
             # Only this repository's dangling images; other stacks' are left alone.
             docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/Measured-Health/mhai-multiagent" >/dev/null || true

@@ -27,6 +27,8 @@ die()  { printf '::error::%s\n' "$*" >&2; exit 1; }
 
 cd "$DEST"
 [ -f .env ] || die "$DEST is not set up (deploy/setup-host.sh)"
+# A live site (deploy/live-site.sh wrote the marker): refuse, never reset.
+[ ! -e live-site ] || die "$DEST is a live site (marker $DEST/live-site): the demo reset refuses here"
 env_get() { sed -n "s/^$1=//p" .env | tail -n1; }
 
 say "Not beside the pilot"

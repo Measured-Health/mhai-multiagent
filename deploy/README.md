@@ -1,5 +1,10 @@
 # Backend demo deployment
 
+> **22 Nov 2026: the public demo is dropped.** The deployment runs as the
+> live site with the repository variable `SITE_MODE=live` ("Live site",
+> below). The demo sections stay for anyone who runs a demo (`SITE_MODE`
+> unset or `demo`, the default).
+
 The backend (the core service, Postgres and NATS) runs on the shared preview
 instance, next to the EMR stack and the mhai-web demo. Nothing is open to
 the internet:
@@ -360,6 +365,138 @@ re-key.
   stack: the web container can't reach Postgres or core through it.
 - **From the host:** `nats://127.0.0.1:4222`. A container's 127.0.0.1 is its
   own, so the frontend's containers can't use this.
+
+## Live site (no public demo)
+
+**Product owner, 22 Nov 2026: the public demo is dropped.**
+`ai.measured-health.org` serves the live clinical app and
+`platforms.measured-health.org` the live platform admin app (still behind
+its nginx IP allow list). The demo code stays in the repository, off.
+
+One repository variable switches a deployment between the two, in **both**
+repositories (Settings, Secrets and variables, Actions, Variables):
+
+| Variable | Values | Effect here |
+|---|---|---|
+| `SITE_MODE` | unset or `demo` (the default: the public demo, as before); `live` | `live`: "Deploy backend demo" runs `live-site.sh` instead of `demo/enable-demo.sh` (no demo seed, no sample answers), and "Reset backend demo" never runs (its schedule is skipped; a run by hand fails, saying why). Any other value stops the deploy. |
+
+```bash
+gh variable set SITE_MODE --repo Measured-Health/mhai-multiagent --body live
+gh variable set SITE_MODE --repo Measured-Health/mhai-web --body live
+```
+
+`DEMO_SAMPLE_AI`, `DEMO_RESET` and `DEMO_RESET_HOURS` (and mhai-web's
+`DEMO_MODE`) are ignored while `SITE_MODE=live`; delete them to keep the
+settings plain.
+
+**What `live-site.sh` does on every live deploy.** It runs twice: `live-site.sh
+precheck` after the pre-migration check and **before core (re)starts**,
+against Postgres alone, and `live-site.sh` again once core is healthy on the
+migrated database. Between the two, any failure stops core (the deploy
+script's EXIT trap), so a live core never keeps serving a database that
+wasn't checked. Counts only in the log, never a name or a secret. It fails
+closed:
+
+1. writes the marker `/srv/mhai-backend/live-site` (a timestamp). From then
+   on `demo/enable-demo.sh` and `demo/reset-demo.sh` refuse on this host,
+   whatever runs them, and a deploy with `SITE_MODE` not `live` stops
+   instead of seeding the demo. To turn a host back into a demo, an
+   operator removes the marker by hand;
+2. refuses an `.env` whose `COMPOSE_PROFILES` names `demo`;
+3. stops and removes `sample-ai` if it runs, and removes the demo markers
+   `demo/seeded` and `demo/reset`;
+4. counts the demo hospitals (`is_demo`) that are **not deactivated**. Any
+   such hospital has the seeded accounts with **published** passwords, so the
+   script **stops core** and fails the deploy: the live apps then answer
+   "unavailable" rather than let a published password sign in. A query that
+   fails, or a Postgres that never answers, stops core too. Remove the demo
+   data (below), then deploy again. The script writes nothing to the
+   database: deactivating the hospital (route B) is what ends its accounts'
+   sessions (core refuses their refresh at once, and their access tokens
+   when the guard's short cache expires); route A removes them with the
+   database.
+
+mhai-web's deploy checks the marker before it points the public names at the
+live apps (its deploy/README.md, "Live site"), so run "Deploy backend demo"
+first.
+
+### Live site: removing the demo data
+
+A host that ran the public demo holds the demo hospital `DEM`, its seeded
+accounts (published passwords), the sample content and the visitors'
+consultations. Core has no command that deletes a hospital (the audit chain
+is append-only and the provisioning login has no `DELETE`), so there are two
+safe routes, both by an operator on the host. Nothing here automates them.
+
+**A. Start from an empty database (recommended when the host holds only
+demo data, as the new server does).** It removes everything in Postgres and
+in NATS (sessions, sign-in counters, queued jobs); the keys, the `.env`
+secrets and the NKey files stay.
+
+```bash
+cd /srv/mhai-backend
+# Only this stack's containers; the volumes are external and stay.
+docker compose --profile demo --profile notifications --profile tools down
+# Check the names first: these two volumes are the database and NATS's store.
+docker volume ls --filter label=org.measured-health.stack=mhai-backend
+docker volume rm mhai-backend-pgdata mhai-backend-natsdata
+sed -i '/^DEMO_SAMPLE_HOSPITALS=/d' .env
+rm -rf demo
+```
+
+Then make the two volumes again, empty and owned by the right users, with
+this repository's `setup-host.sh` (step 2 of "One-time setup": copy the
+`deploy/` folder of `main` to the host and run it; it keeps every secret,
+key and volume that exists and makes only what is missing). Then run
+"Deploy backend demo" with `SITE_MODE=live`: the migrations run on the empty
+database and `live-site.sh` passes.
+
+**B. Keep the database and deactivate `DEM`.** Only when the database holds
+something to keep. With a platform admin (below) signed in to the platform
+app, deactivate the hospital `DEM` on its hospital page: its accounts lose
+their sessions and can't sign in. Do it before setting `SITE_MODE=live`, or,
+if a live deploy already stopped core, start it by hand
+(`docker compose up -d core`), deactivate `DEM`, then deploy again. The
+rows stay (marked `is_demo`, deactivated, named in the audit). The seeded
+platform account `platform.bakare@measured-health.example` has a password
+nobody knows; deactivate it on the platform app as well.
+
+### Live site: the first platform admin
+
+`core users create` with the role `platform_admin` and no `--hospital`, as
+the provisioning login in the one-shot `core-cli` (the password is never an
+argument: it prompts at the terminal):
+
+```bash
+cd /srv/mhai-backend
+docker compose --profile tools run --rm core-cli users create \
+  --email <their work email> --name "<their name>" --roles platform_admin
+```
+
+They sign in at `https://platforms.measured-health.org` from an address on
+the allow list and finish the first sign-in steps the app asks for (terms,
+two-step). Hospitals and their first hospital admin the same way:
+
+```bash
+docker compose --profile tools run --rm -T core-cli hospitals create \
+  --name "<hospital name>" --short-code <CODE> --time-zone Africa/Lagos --require-mfa-for-clinicians
+docker compose --profile tools run --rm core-cli users create \
+  --email <email> --name "<name>" --roles hospital_admin --hospital <CODE>
+docker compose --profile tools run --rm -T core-cli hospitals activate <CODE>
+```
+
+### Live site: what it is not yet
+
+- **Real patient data still waits on the go-live sign-offs in TODO.md**
+  (the cloud gate H1 to H6, the escalation guard's clinical sign-off H4, the
+  Analysis privacy sign-offs, the pilot items). `SITE_MODE=live` only takes
+  the public demo away; it signs nothing off.
+- No answer worker runs: `sample-ai` is off and the pilot's pipeline is a
+  separate switch (`deploy/pilot/`). Until one runs, a question waits and
+  fails at its deadline.
+- The host still runs core as `development` (NATS without TLS on one host,
+  `CORE_DELIVERY=log` unless email is on): production hardening is a TODO.md
+  item, not this switch.
 
 ## Public demo: sample answers
 
