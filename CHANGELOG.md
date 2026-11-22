@@ -23,7 +23,8 @@ All notable changes to this project are documented here. The format follows
   (nothing is configured for it). `--platform-domain` also sets up mhai-web's
   platform admin app: `/srv/mhai-web-platform` and its session secret, the
   `mhai-platform` nginx site with its IP allow list (created empty, never
-  overwritten) and its webroot certificate. NEW-SERVER.md gains "Moving the
+  overwritten) and its webroot certificate. It checks sudo with `sudo -n true`
+  (`sudo -v` needs a terminal on 26.04). NEW-SERVER.md gains "Moving the
   demo to a new server" (both DNS records, email files, the `preview`
   secrets, both deploys, leaving the old host's other containers alone).
 - **The demo can send email, off by default.** `deploy/compose.yml` gains

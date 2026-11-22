@@ -107,7 +107,8 @@ elif [ -d /proc/driver/nvidia ] || { command -v lspci >/dev/null 2>&1 && lspci 2
   info "NVIDIA GPU found; not used by the stack yet (CPU images), nothing configured for it"
 fi
 command -v sudo >/dev/null || die "sudo is not installed"
-sudo -v || die "$OWNER cannot use sudo"
+# -n: no prompt (sudo -v asks for a terminal on Ubuntu 26.04 even with NOPASSWD).
+sudo -n true 2>/dev/null || die "$OWNER cannot use sudo without a password (passwordless sudo is needed, as for ubuntu on cloud images)"
 info "sudo works for $OWNER"
 mem_mb=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)
 if [ "$mem_mb" -lt 3500 ]; then
