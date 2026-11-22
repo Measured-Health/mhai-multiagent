@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Demo seed and reset: 256m, not 128m.** On the 8-CPU x86 host the seed was
+  killed by its memory limit (exit 137, cgroup OOM at ~150 MB) after the
+  breached-password list and argon2 hashing; with 256m it seeds.
+
 ### Added
 
 - **Multi-arch images: the demo can run on an x86_64 server.** "Deploy
