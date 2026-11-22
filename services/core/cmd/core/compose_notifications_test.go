@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -174,4 +175,147 @@ func TestNotificationsImageBuiltInCI(t *testing.T) {
 			t.Errorf("ci.yml lacks %q", want)
 		}
 	}
+}
+
+// The demo's email (deploy/compose.yml, profile notifications; deploy/README.md
+// "Turn on email for the demo"): off by default; the service runs locked down
+// as uid 65532 on internal networks only (backend and mail), with its own NATS
+// NKey file, its own login and the SMTP password as read-only files, never a
+// variable, and nothing of core's. Its one way out is mail-relay, pinned by
+// digest, which forwards to the SMTP host and port only and holds nothing.
+func TestDeployNotificationsProfile(t *testing.T) {
+	c := loadDeployCompose(t)
+	n, ok := c.Services["notifications"]
+	r, ok2 := c.Services["mail-relay"]
+	if !ok || !ok2 {
+		t.Fatal("deploy/compose.yml has no notifications or mail-relay service")
+	}
+	for name, s := range c.Services {
+		in := slices.Contains(s.Profiles, "notifications")
+		if want := name == "notifications" || name == "mail-relay"; in != want {
+			t.Errorf("%s in the notifications profile: %v", name, in)
+		}
+	}
+	for name, s := range map[string]deployService{"notifications": n, "mail-relay": r} {
+		if !slices.Equal(s.Profiles, []string{"notifications"}) {
+			t.Errorf("%s profiles %v", name, s.Profiles)
+		}
+		if !s.ReadOnly || !slices.Equal(s.CapDrop, []string{"ALL"}) || !slices.Contains(s.SecurityOpt, "no-new-privileges:true") ||
+			s.MemLimit == "" {
+			t.Errorf("%s isn't locked down: %+v", name, s)
+		}
+		if s.User == "" || strings.HasPrefix(s.User, "0") || strings.HasPrefix(s.User, "root") {
+			t.Errorf("%s user %q", name, s.User)
+		}
+		if len(s.Ports) != 0 || s.NetworkMode != "" || s.EnvFile.Kind != 0 {
+			t.Errorf("%s: ports %v, network_mode %q, env_file set %v", name, s.Ports, s.NetworkMode, s.EnvFile.Kind != 0)
+		}
+	}
+	if n.User != "65532:65532" || !strings.HasPrefix(n.Image, "${NOTIFICATIONS_IMAGE:-ghcr.io/measured-health/mhai-multiagent-notifications:") {
+		t.Errorf("notifications user %q image %q", n.User, n.Image)
+	}
+	if !slices.Equal(n.networkNames(), []string{"backend", "mail"}) || !c.Networks["backend"].Internal || !c.Networks["mail"].Internal {
+		t.Errorf("notifications networks %v: want the internal backend and mail only", n.networkNames())
+	}
+	if !slices.Equal(r.networkNames(), []string{"mail", "mail-egress"}) || c.Networks["mail-egress"].Internal {
+		t.Errorf("mail-relay networks %v: want mail and its own way out, mail-egress", r.networkNames())
+	}
+	for name, s := range c.Services {
+		for _, net := range []string{"mail", "mail-egress"} {
+			if slices.Contains(s.networkNames(), net) && name != "mail-relay" && !(name == "notifications" && net == "mail") {
+				t.Errorf("%s is on %s", name, net)
+			}
+		}
+	}
+	want := []string{"trustedkeys:/trusted:ro", "./secrets/nats-notifications.nk:/run/secrets/nats-notifications.nk:ro",
+		"./secrets/smtp_password:/run/secrets/smtp_password:ro"}
+	if !slices.Equal(n.Volumes, want) {
+		t.Errorf("notifications volumes %v, want %v", n.Volumes, want)
+	}
+	e := n.Environment
+	for k, v := range map[string]string{
+		"NOTIFY_NATS_NKEY_FILE": "/run/secrets/nats-notifications.nk", "NOTIFY_SMTP_PASSWORD_FILE": "/run/secrets/smtp_password",
+		"NOTIFY_CHANNELS": "${NOTIFY_CHANNELS:-}", "NOTIFY_APP_URL": "${CORE_APP_URL:-}",
+		"NOTIFY_TRUSTED_KEYS_PATH": "/trusted/request-keys.json", "NOTIFY_SMTP_HOST": "${NOTIFY_SMTP_HOST:-}",
+	} {
+		if e[k] != v {
+			t.Errorf("notifications %s = %q, want %q", k, e[k], v)
+		}
+	}
+	if !strings.HasPrefix(e["NOTIFY_DATABASE_URL"], "postgres://notify_app:${NOTIFY_DB_PASSWORD:-}@postgres:5432/") {
+		t.Errorf("notifications NOTIFY_DATABASE_URL %q: the notify_app login only", e["NOTIFY_DATABASE_URL"])
+	}
+	if _, ok := e["NOTIFY_SMTP_PASSWORD"]; ok {
+		t.Error("notifications sets NOTIFY_SMTP_PASSWORD: the password is a file only")
+	}
+	for k, v := range e {
+		for _, bad := range []string{"POSTGRES_PASSWORD", "CORE_DB_PASSWORD", "PROVISION_DB_PASSWORD", "INTELLIGENCE_DB_PASSWORD",
+			"MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "nats-gateway", "corekeys"} {
+			if strings.Contains(k+v, bad) {
+				t.Errorf("notifications env %s carries %s", k, bad)
+			}
+		}
+	}
+	// Only core-migrate (which makes the login) and the service see the
+	// login's password; no other service mounts the SMTP password or the NKey.
+	for name, s := range c.Services {
+		if name == "notifications" {
+			continue
+		}
+		for k, v := range s.Environment {
+			if strings.Contains(v, "NOTIFY_DB_PASSWORD") && !(name == "core-migrate" && k == "NOTIFY_DB_PASSWORD") {
+				t.Errorf("%s env %s carries NOTIFY_DB_PASSWORD", name, k)
+			}
+		}
+		for _, v := range s.Volumes {
+			if strings.Contains(v, "smtp_password") || strings.Contains(v, "nats-notifications") {
+				t.Errorf("%s mounts %s", name, v)
+			}
+		}
+	}
+	if v := c.Services["core-migrate"].Environment["NOTIFY_DB_PASSWORD"]; v != "${NOTIFY_DB_PASSWORD:-}" {
+		t.Errorf("core-migrate NOTIFY_DB_PASSWORD %q, want ${NOTIFY_DB_PASSWORD:-} (the login only when set)", v)
+	}
+	core := c.Services["core"].Environment
+	if core["CORE_NOTIFY_ENABLED"] != "${CORE_NOTIFY_ENABLED:-false}" || core["CORE_DELIVERY"] != "${CORE_DELIVERY:-log}" {
+		t.Errorf("core CORE_NOTIFY_ENABLED %q CORE_DELIVERY %q: off by default", core["CORE_NOTIFY_ENABLED"], core["CORE_DELIVERY"])
+	}
+	// The relay: pinned, no secret, no environment, no mount; it forwards to
+	// the SMTP host and port and nothing else.
+	if !regexp.MustCompile(`^alpine/socat:[0-9.]+@sha256:[0-9a-f]{64}$`).MatchString(r.Image) {
+		t.Errorf("mail-relay image %q is not pinned by digest", r.Image)
+	}
+	if len(r.Environment) != 0 || len(r.Volumes) != 0 {
+		t.Errorf("mail-relay env %v volumes %v: it holds nothing", r.Environment, r.Volumes)
+	}
+	if len(r.Command) != 2 || !strings.HasPrefix(r.Command[0], "TCP-LISTEN:${NOTIFY_SMTP_PORT:-587},") ||
+		!strings.HasPrefix(r.Command[1], "TCP:${NOTIFY_SMTP_HOST:-smtp.invalid}:${NOTIFY_SMTP_PORT:-587},") {
+		t.Errorf("mail-relay command %v", r.Command)
+	}
+	// NATS knows the user from the start under notifications-off.conf's
+	// seedless key, until enable-notifications.sh writes the real one.
+	off := stripOffKey(t)
+	if got := c.Services["nats"].Environment["NATS_NOTIFICATIONS_NKEY"]; got != "${NATS_NOTIFICATIONS_NKEY:-"+off+"}" {
+		t.Errorf("nats NATS_NOTIFICATIONS_NKEY = %q, want the seedless default %s", got, off)
+	}
+	// The deploy workflow publishes the image, ships the script, and starts
+	// the profile only with NOTIFY_ENABLED=true.
+	wf := readRepoFile(t, filepath.Join(".github", "workflows", "deploy.yml"))
+	for _, want := range []string{"file: services/notifications/Dockerfile", "ghcr.io/${{ github.repository }}-notifications",
+		"notifications/enable-notifications.sh", `if [ "$notify" = true ]; then`,
+		"docker compose --profile notifications up -d mail-relay notifications"} {
+		if !strings.Contains(wf, want) {
+			t.Errorf("deploy.yml lacks %q", want)
+		}
+	}
+}
+
+// stripOffKey is the public key in services/nats/notifications-off.conf.
+func stripOffKey(t *testing.T) string {
+	t.Helper()
+	m := regexp.MustCompile(`(?m)^nkey: (U[A-Z2-7]{55})$`).FindStringSubmatch(readRepoFile(t, filepath.Join("services", "nats", "notifications-off.conf")))
+	if m == nil {
+		t.Fatal("notifications-off.conf has no public key")
+	}
+	return m[1]
 }

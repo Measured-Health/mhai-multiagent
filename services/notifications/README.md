@@ -187,9 +187,15 @@ migration 00054).
     owner, 20 Nov), not one of §12.3's services. No provider API, events
     or idempotency keys yet: one duplicate is possible after a crash
     between the server's acceptance and our record (§16.6).
-14. **The compose profile doesn't wire SMTP.** Development uses the `log`
-    channel; a deployment sets the `NOTIFY_SMTP_*` settings and mounts the
-    password file itself (a secret, never in `.env`).
+14. **The dev compose profile doesn't wire SMTP.** Development uses the
+    `log` channel. The demo deploy does (`deploy/compose.yml`, profile
+    `notifications`; deploy/README.md, "Turn on email for the demo"): the
+    `NOTIFY_SMTP_*` settings from `.env`, the password as a mounted 0400
+    file, and `mail-relay` as the only route out (TCP to the SMTP host and
+    port alone) in place of the design's egress-proxy entry, since SMTP
+    submission isn't an HTTPS CONNECT. On the demo the service runs as
+    development, as core does there (NATS and Postgres without TLS on one
+    host).
 15. **The From domain isn't checked against a separate sending domain**
     (§12.1): with our own mailbox, the From is the mailbox's own address.
     SPF, DKIM and DMARC on that domain are a people item (TODO.md).

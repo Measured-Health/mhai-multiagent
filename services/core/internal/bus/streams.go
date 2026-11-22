@@ -72,7 +72,7 @@ const (
 	DeadMaxBytes = 64 << 20
 
 	// StreamsMaxBytes is what JOBS and DEAD reserve in the server's
-	// max_file_store (services/nats/nats.conf: 1 GB; the demo: 512 MB).
+	// max_file_store (services/nats/nats.conf: 1 GB; the demo: 640 MB).
 	StreamsMaxBytes = JobsMaxBytes + DeadMaxBytes
 
 	PipelineAckWait    = 60 * time.Second

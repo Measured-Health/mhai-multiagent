@@ -1,7 +1,7 @@
 # The pilot: cloud answers for one real hospital on the demo host
 
 The product owner's decision of 12 Nov 2026: one willing hospital asks
-clinical questions on the demo deployment (demo.measured-health.org), with
+clinical questions on the demo deployment (ai.measured-health.org), with
 the answers drafted by a cloud model (Anthropic, or Gemini once its adapter
 is merged). It is supervised, and clinicians stay in the loop. The formal
 privacy, legal and clinical sign-offs are deferred, and that is recorded in

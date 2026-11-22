@@ -19,6 +19,8 @@
 # web demo. Every container is capped. The pilot pipeline (profile pilot)
 # takes up to 1600 MiB: enable-pilot.sh refuses to start it without room.
 # The demo's sample answers (profile demo, sample-ai) take up to 192 MiB.
+# Email (profile notifications, notifications and mail-relay) takes up to
+# 96 MiB; deploy/README.md, "Turn on email for the demo".
 
 name: mhai-backend
 
@@ -90,6 +92,11 @@ services:
       # it). The default is a real public key whose seed was thrown away: the user
       # is in nats.conf from the start, and no one can sign in as it.
       NATS_PIPELINE_NKEY: ${NATS_PIPELINE_NKEY:-UBEBXXYDPNSDCIC4J52JS4FS4S4YKKXBTUT7TC3FKSKA54XNFUCS2PLV}
+      # The notifications service's public key (deploy/notifications/
+      # enable-notifications.sh writes it). The default is the "nothing up my
+      # sleeve" key of services/nats/notifications-off.conf: no seed exists
+      # for it, so the user is there from the start and no one can sign in.
+      NATS_NOTIFICATIONS_NKEY: ${NATS_NOTIFICATIONS_NKEY:-UANAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABKPD}
       GOMEMLIMIT: 96MiB
     volumes:
       - ./nats/nats.conf:/etc/nats/nats.conf:ro
@@ -137,6 +144,10 @@ services:
       # The pilot pipeline's login (intelligence_app, a member of
       # mhai_worker_app only): made only when set (deploy/pilot/).
       INTELLIGENCE_DB_PASSWORD: ${INTELLIGENCE_DB_PASSWORD:-}
+      # The notifications service's login (notify_app, a member of
+      # mhai_notify_app only, 00052): made only when set
+      # (deploy/notifications/enable-notifications.sh).
+      NOTIFY_DB_PASSWORD: ${NOTIFY_DB_PASSWORD:-}
     mem_limit: 128m
     networks: [backend]
     depends_on:
@@ -210,9 +221,15 @@ services:
       # outside development; on this development demo the integrity status
       # answers 503 until they are set, and the deploy still goes ahead.
       # Messages core owes a person (invites, reset links, notices,
-      # reminders): no email provider yet, so the demo records them as due
-      # and sends nothing (development only; core/README "Message delivery").
+      # reminders). log by default: recorded as due, nothing sent
+      # (development only; core/README "Message delivery"). notify, with
+      # CORE_NOTIFY_ENABLED=true and CORE_APP_URL, hands them to the
+      # notifications service (profile notifications; deploy/README.md,
+      # "Turn on email for the demo").
       CORE_DELIVERY: ${CORE_DELIVERY:-log}
+      # The NOTIFY stream, the notify_send durable and the outbox drainer:
+      # off unless .env sets true (needed by CORE_DELIVERY=notify).
+      CORE_NOTIFY_ENABLED: ${CORE_NOTIFY_ENABLED:-false}
       # Where invite and reset links point (the clinical app); unset, they
       # are paths the admin page resolves against its own address.
       CORE_APP_URL: ${CORE_APP_URL:-}
@@ -565,6 +582,105 @@ services:
     mem_limit: 256m
     networks: [model-store]
 
+  # The notifications service (ADR 0018; services/notifications/README.md):
+  # email for invites, reset links, notices and reminders. Off by default
+  # (profile notifications); deploy/README.md, "Turn on email for the demo",
+  # is the runbook, and the deploy workflow starts it only when .env has
+  # NOTIFY_ENABLED=true. It sends nothing unless NOTIFY_CHANNELS=email.
+  #   - its own NATS NKey (secrets/nats-notifications.nk; its public key is
+  #     NATS_NOTIFICATIONS_NKEY, the notifications user in nats/nats.conf)
+  #     and its own database login, notify_app (core-migrate makes it from
+  #     NOTIFY_DB_PASSWORD); nothing of core's;
+  #   - the SMTP password only as a file (secrets/smtp_password, mode 0400,
+  #     owned by uid 65532), never a variable: the service refuses
+  #     NOTIFY_SMTP_PASSWORD. Host, port, user, From and Reply-To from .env,
+  #     empty by default;
+  #   - the trusted keys read-only, never corekeys; no env_file; no port;
+  #   - APP_ENV development, as core here: the demo's NATS and Postgres run
+  #     without TLS on this one host, which the service allows only in
+  #     development. SMTP is TLS always (465, or 587 with STARTTLS) and the
+  #     server's certificate is always verified;
+  #   - no route out: on backend and mail, both internal. The one way out is
+  #     mail-relay, which forwards TCP to NOTIFY_SMTP_HOST:NOTIFY_SMTP_PORT
+  #     only. extra_hosts points the SMTP host name at the relay, so TLS is
+  #     end to end and checked against the real name; the relay sees only
+  #     the encrypted stream (after the EHLO and STARTTLS lines).
+  notifications:
+    <<: *hardening
+    image: ${NOTIFICATIONS_IMAGE:-ghcr.io/measured-health/mhai-multiagent-notifications:latest}
+    pull_policy: missing
+    profiles: ["notifications"]
+    restart: unless-stopped
+    user: "65532:65532"
+    command: ["serve"]
+    environment:
+      APP_ENV: development
+      NOTIFY_NATS_URL: nats://nats:4222
+      NOTIFY_NATS_NKEY_FILE: /run/secrets/nats-notifications.nk
+      NOTIFY_DATABASE_URL: postgres://notify_app:${NOTIFY_DB_PASSWORD:-}@postgres:5432/mhai?sslmode=disable
+      NOTIFY_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+      # Empty: nothing is sent. email: SMTP submission with the settings below.
+      NOTIFY_CHANNELS: ${NOTIFY_CHANNELS:-}
+      # Every link in an email must be on core's CORE_APP_URL.
+      NOTIFY_APP_URL: ${CORE_APP_URL:-}
+      NOTIFY_SMTP_HOST: ${NOTIFY_SMTP_HOST:-}
+      NOTIFY_SMTP_PORT: ${NOTIFY_SMTP_PORT:-587}
+      NOTIFY_SMTP_USERNAME: ${NOTIFY_SMTP_USERNAME:-}
+      NOTIFY_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      NOTIFY_SMTP_FROM: ${NOTIFY_SMTP_FROM:-}
+      NOTIFY_SMTP_FROM_NAME: ${NOTIFY_SMTP_FROM_NAME:-}
+      NOTIFY_SMTP_REPLY_TO: ${NOTIFY_SMTP_REPLY_TO:-}
+      GOMEMLIMIT: 48MiB
+    volumes:
+      - trustedkeys:/trusted:ro
+      # Each mode 0400, owned by uid 65532 (enable-notifications.sh, and the
+      # README's step for the password). The deploy refuses to start the
+      # profile without them, so Docker never makes empty folders here.
+      - ./secrets/nats-notifications.nk:/run/secrets/nats-notifications.nk:ro
+      - ./secrets/smtp_password:/run/secrets/smtp_password:ro
+    # The SMTP host name resolves to mail-relay, the only way out.
+    extra_hosts:
+      - "${NOTIFY_SMTP_HOST:-smtp.invalid}:${NOTIFY_MAIL_RELAY_IP:-192.168.231.2}"
+    tmpfs:
+      - /tmp
+    mem_limit: 64m
+    networks: [backend, mail]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
+      mail-relay: { condition: service_started }
+    # Distroless (no shell): enable-notifications.sh and the deploy read its
+    # start line from the log.
+    healthcheck:
+      disable: true
+
+  # The notifications service's only route out (profile notifications): a
+  # TCP forwarder to NOTIFY_SMTP_HOST:NOTIFY_SMTP_PORT and nowhere else, on
+  # mail (internal, shared with the notifications service only, at a fixed
+  # address its extra_hosts names) and mail-egress (its own way out). It
+  # holds no secret, terminates no TLS and is pinned by digest.
+  mail-relay:
+    <<: *hardening
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    profiles: ["notifications"]
+    restart: unless-stopped
+    user: "65534:65534"
+    command: ["TCP-LISTEN:${NOTIFY_SMTP_PORT:-587},fork,reuseaddr",
+              "TCP:${NOTIFY_SMTP_HOST:-smtp.invalid}:${NOTIFY_SMTP_PORT:-587},connect-timeout=10"]
+    # The submission port is below 1024; no capability is needed for it.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+    pids_limit: 32
+    mem_limit: 32m
+    networks:
+      mail:
+        ipv4_address: ${NOTIFY_MAIL_RELAY_IP:-192.168.231.2}
+      mail-egress: {}
+    healthcheck:
+      disable: true
+
   # The EMR integration (ADR 0014; EMR design §6.4). Off on the demo: the
   # demo has neither the emr NATS user nor its database login yet
   # (services/emr/README.md), so the emr service below stays commented
@@ -650,6 +766,17 @@ networks:
     internal: true
   # model-fetch's way out to the model store, and only its (profile ownmodel).
   model-store: {}
+  # The notifications service and mail-relay only, no route out (profile
+  # notifications). A fixed subnet, so the relay has the address the
+  # service's extra_hosts names; NOTIFY_MAIL_SUBNET and NOTIFY_MAIL_RELAY_IP
+  # move it if it collides with a network on the host.
+  mail:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${NOTIFY_MAIL_SUBNET:-192.168.231.0/29}
+  # mail-relay's way out, and only its (profile notifications).
+  mail-egress: {}
   # Shared with the frontend's compose project (mhai-web), made by
   # setup-host.sh with --internal. Only NATS is on it here: the BFF reaches
   # it as mhai-nats:4222 and nothing else in this stack.
