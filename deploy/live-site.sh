@@ -91,11 +91,22 @@ if [ "$STAGE" = precheck ]; then
   [ "$ready" = 1 ] || { dc stop core >/dev/null 2>&1 || true; fail "Postgres never became ready; core stopped"; }
 fi
 # A database with no hospitals table yet (a new one, before the first
-# migration) holds no demo hospital.
-r=$(q "SELECT CASE WHEN to_regclass('public.hospitals') IS NULL THEN 0 ELSE (SELECT count(*) FROM hospitals WHERE is_demo AND status <> 'deactivated') END") || {
+# migration) holds no demo hospital. Two queries: Postgres resolves every
+# table a statement names before it runs, so one CASE over a missing table
+# fails ("relation does not exist") even on the branch that never runs.
+t=$(q "SELECT to_regclass('public.hospitals') IS NOT NULL") || {
   dc stop core >/dev/null 2>&1 || true
   fail "could not query Postgres; core stopped"
 }
+case "$t" in
+  f) r=0 ;;
+  t) r=$(q "SELECT count(*) FROM hospitals WHERE is_demo AND status <> 'deactivated'") || {
+       dc stop core >/dev/null 2>&1 || true
+       fail "could not query Postgres; core stopped"
+     } ;;
+  *) dc stop core >/dev/null 2>&1 || true
+     fail "unexpected answer from Postgres; core stopped" ;;
+esac
 case "$r" in
   ''|*[!0-9]*)
     dc stop core >/dev/null 2>&1 || true
