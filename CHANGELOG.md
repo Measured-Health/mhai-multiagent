@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Notifications: EHLO names the app's host, not the From domain.** Our own
+  mailbox's server (HostAfrica) refused `EHLO measured-health.org` with "550
+  Bad HELO - Host impersonating domain name", because it hosts that domain, so
+  every invite failed. The service now greets with the host of
+  `NOTIFY_APP_URL` (ai.measured-health.org, which points at the sending
+  server), falling back to the From domain without an app address.
+
+### Fixed
+
 - **Demo seed and reset: 256m, not 128m.** On the 8-CPU x86 host the seed was
   killed by its memory limit (exit 137, cgroup OOM at ~150 MB) after the
   breached-password list and argon2 hashing; with 256m it seeds.

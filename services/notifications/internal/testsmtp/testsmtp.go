@@ -51,6 +51,7 @@ type Server struct {
 	mu       sync.Mutex
 	msgs     []Message
 	auths    int
+	helos    []string
 }
 
 // Start runs a server in mode until Close.
@@ -85,7 +86,14 @@ func (s *Server) Messages() []Message {
 	return append([]Message(nil), s.msgs...)
 }
 
-// Auths is how many AUTHs succeeded.
+// Helos are the names the client gave in EHLO/HELO, in order.
+func (s *Server) Helos() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.helos...)
+}
+
+// Auths is how many AUTH commands succeeded.
 func (s *Server) Auths() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -126,6 +134,11 @@ func (s *Server) session(c net.Conn) {
 		line = strings.TrimRight(line, "\r\n")
 		switch strings.ToUpper(strings.SplitN(line, " ", 2)[0]) {
 		case "EHLO", "HELO":
+			if f := strings.Fields(line); len(f) > 1 {
+				s.mu.Lock()
+				s.helos = append(s.helos, f[1])
+				s.mu.Unlock()
+			}
 			_, _ = w.WriteString("250-localhost\r\n")
 			if s.mode == StartTLS && !isTLS {
 				_, _ = w.WriteString("250-STARTTLS\r\n")
