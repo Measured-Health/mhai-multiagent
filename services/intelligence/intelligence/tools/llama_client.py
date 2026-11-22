@@ -18,6 +18,14 @@ profile ``ownmodel``) serving the pinned ``cca`` GGUF (own answer model plan, PR
 * :class:`RefusedGenerator` is the local route when no ``cca`` is pinned outside
   development and ``INTELLIGENCE_LOCAL_UNPINNED`` is not ``on``: every job escalates as
   ``local_unverified``, so production never answers from a model pulled by name.
+* **Our own model on the GPU** (the ``own`` route; deploy/README.md, "Our own model on the
+  GPU"): the ``gpu-model`` service (compose profile ``gpu-model``) serves one GGUF from the
+  host under the alias ``<name>@<version>#<sha12>``, after re-hashing it against the
+  configured SHA-256 at start. :func:`own_settings_from_env` reads
+  ``INTELLIGENCE_OWN_MODEL`` (``on`` or ``off``, or ``true`` or ``false``; default off) and, when on, its URL (default
+  ``http://gpu-model:8080``; that name or loopback, any host in development only), name,
+  version, SHA-256 and answer profile. The worker asks for exactly that alias before every
+  job, as for the pinned sidecar. Off, the own route escalates every job.
 
 Errors carry fixed codes only; nothing here logs a question, an answer or a URL.
 """
@@ -40,6 +48,8 @@ log = logging.getLogger(__name__)
 
 DEFAULT_URL = "http://llama:8080"
 SIDECAR_HOST = "llama"
+OWN_MODEL_URL = "http://gpu-model:8080"
+OWN_MODEL_HOST = "gpu-model"
 LOOPBACK_NAMES = frozenset({"localhost"})
 MAX_REPLY_BYTES = 1024 * 1024
 MAX_MODELS_BYTES = 64 * 1024
@@ -98,10 +108,10 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-def check_url(raw: str, *, development: bool) -> str:
+def check_url(raw: str, *, development: bool, host_name: str = SIDECAR_HOST) -> str:
     """The sidecar's base URL, without a trailing slash: ``http://`` only, no userinfo,
-    path, query or fragment; the host is ``llama`` or loopback, any host in development
-    only. Anything else raises ValueError (naming no value)."""
+    path, query or fragment; the host is ``host_name`` (``llama``) or loopback, any host in
+    development only. Anything else raises ValueError (naming no value)."""
     url = raw.strip().rstrip("/")
     try:
         parts = urlsplit(url)
@@ -121,7 +131,7 @@ def check_url(raw: str, *, development: bool) -> str:
         or "@" in parts.netloc
     ):
         raise ValueError("malformed")
-    if host == SIDECAR_HOST or _is_loopback(host):
+    if host == host_name or _is_loopback(host):
         return url
     if development and _HOST.fullmatch(host):
         return url
@@ -240,24 +250,36 @@ class LlamaSidecar:
                 raise LocalUnverified("start_timeout")
             sleep(interval_s)
 
-    def ask(self, alias: str, system: str, user: str) -> str:
-        """One completion from ``alias``; :class:`GenerationFailed` on any failure."""
+    def ask(
+        self,
+        alias: str,
+        system: str,
+        user: str,
+        *,
+        stop: tuple[str, ...] = (),
+        repeat_penalty: float | None = None,
+    ) -> str:
+        """One completion from ``alias``; :class:`GenerationFailed` on any failure. ``stop``
+        and ``repeat_penalty`` are a prompt format's (agents.prompt_formats): sent only when
+        given."""
         s = self.settings
+        body: dict[str, Any] = {
+            "model": alias,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": s.temperature,
+            "top_p": s.top_p,
+            "max_tokens": s.max_tokens,
+            "stream": False,
+        }
+        if stop:
+            body["stop"] = list(stop)
+        if repeat_penalty is not None:
+            body["repeat_penalty"] = repeat_penalty
         try:
-            resp = self._client.post(
-                f"{self._url}/v1/chat/completions",
-                json={
-                    "model": alias,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    "temperature": s.temperature,
-                    "top_p": s.top_p,
-                    "max_tokens": s.max_tokens,
-                    "stream": False,
-                },
-            )
+            resp = self._client.post(f"{self._url}/v1/chat/completions", json=body)
             if resp.status_code != 200 or len(resp.content) > MAX_REPLY_BYTES:
                 raise GenerationFailed("status")
             content = resp.json()["choices"][0]["message"]["content"]
@@ -276,7 +298,11 @@ class LlamaSidecar:
 class PinnedLlamaGenerator:
     """The CCA's generator on the local route when ``cca`` is pinned: ``name`` and
     ``generate(system, user)``, as ``OllamaGenerator``. ``expected`` gives the verified
-    version string (None until the worker verified the pin)."""
+    version string (None until the worker verified the pin). It takes a prompt format's
+    generation options (``stop``, ``repeat_penalty``; ``takes_options``). The own route uses
+    it too, with the configured alias."""
+
+    takes_options = True
 
     def __init__(self, sidecar: LlamaSidecar, expected: Callable[[], str | None]) -> None:
         self._sidecar = sidecar
@@ -296,8 +322,17 @@ class PinnedLlamaGenerator:
         """Before every job: the sidecar serves exactly the verified alias."""
         self._sidecar.require_alias(self._alias())
 
-    def generate(self, system: str, user: str) -> str:
-        return self._sidecar.ask(self._alias(), system, user)
+    def generate(
+        self,
+        system: str,
+        user: str,
+        *,
+        stop: tuple[str, ...] = (),
+        repeat_penalty: float | None = None,
+    ) -> str:
+        return self._sidecar.ask(
+            self._alias(), system, user, stop=stop, repeat_penalty=repeat_penalty
+        )
 
 
 class RefusedGenerator:
@@ -313,8 +348,81 @@ class RefusedGenerator:
         raise LocalUnverified("unpinned")
 
 
+# --- our own model on the GPU (the own route) -------------------------------------------
+
+_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,62}", re.ASCII)
+_VERSION = re.compile(
+    r"(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})", re.ASCII
+)
+_SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
+
+
+@dataclass(frozen=True)
+class OwnModelSettings:
+    """The own route's model: where it is served and what it must be."""
+
+    url: str
+    name: str
+    version: str
+    sha256: str
+    profile: str
+
+    @property
+    def alias(self) -> str:
+        """The alias the gpu-model service serves: ``<name>@<version>#<sha12>``."""
+        return f"{self.name}@{self.version}#{self.sha256[:12]}"
+
+
+def own_settings_from_env(
+    env: Mapping[str, str], development: bool, errs: list[str]
+) -> OwnModelSettings | None:
+    """:class:`OwnModelSettings` when ``INTELLIGENCE_OWN_MODEL=on``, else None (the own
+    route escalates every job). Each malformed variable is named in ``errs``, never its
+    value."""
+    from intelligence.agents.answer_profile import PROFILE_IDS
+
+    def get(name: str) -> str:
+        return env.get(name, "").strip()
+
+    # on/off, or true/false as the host's .env says it (GPU_MODEL_ENABLED).
+    switch = get("INTELLIGENCE_OWN_MODEL") or "off"
+    if switch not in ("on", "off", "true", "false"):
+        errs.append("INTELLIGENCE_OWN_MODEL must be on or off")
+        return None
+    if switch in ("off", "false"):
+        return None
+    before = len(errs)
+    url = OWN_MODEL_URL
+    raw = get("INTELLIGENCE_OWN_MODEL_URL")
+    if raw:
+        try:
+            url = check_url(raw, development=development, host_name=OWN_MODEL_HOST)
+        except ValueError:
+            errs.append(
+                "INTELLIGENCE_OWN_MODEL_URL must be http://gpu-model[:port] or loopback "
+                "(another host in development only), with no path, query or credentials"
+            )
+    name, version = get("INTELLIGENCE_OWN_MODEL_NAME"), get("INTELLIGENCE_OWN_MODEL_VERSION")
+    sha, profile = get("INTELLIGENCE_OWN_MODEL_SHA256"), get("INTELLIGENCE_OWN_MODEL_PROFILE")
+    if not _NAME.fullmatch(name):
+        errs.append(
+            "INTELLIGENCE_OWN_MODEL_NAME must be 2 to 63 of a-z 0-9 - (a letter or digit first)"
+        )
+    if not _VERSION.fullmatch(version):
+        errs.append("INTELLIGENCE_OWN_MODEL_VERSION must be MAJOR.MINOR.PATCH")
+    if not _SHA256.fullmatch(sha):
+        errs.append("INTELLIGENCE_OWN_MODEL_SHA256 must be the GGUF's SHA-256 (64 lower-case hex)")
+    if profile not in PROFILE_IDS:
+        errs.append("INTELLIGENCE_OWN_MODEL_PROFILE must name a known answer profile")
+    if len(errs) != before:
+        return None
+    return OwnModelSettings(url=url, name=name, version=version, sha256=sha, profile=profile)
+
+
 __all__ = [
     "DEFAULT_URL",
+    "OWN_MODEL_URL",
+    "OwnModelSettings",
     "GenerationFailed",
     "LlamaSidecar",
     "LocalLLMSettings",
@@ -322,5 +430,6 @@ __all__ = [
     "PinnedLlamaGenerator",
     "RefusedGenerator",
     "check_url",
+    "own_settings_from_env",
     "settings_from_env",
 ]

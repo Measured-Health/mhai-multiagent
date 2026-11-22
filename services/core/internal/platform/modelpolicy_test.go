@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,6 +36,9 @@ func TestModelPolicyBodyRules(t *testing.T) {
 		`{"cloud_provider":"gemini","agreement_ref":"DPA-2026-0007","monthly_token_budget":5}`,
 		`{"cloud_provider":null,"agreement_ref":null,"monthly_token_budget":5}`,
 		`{"cloud_provider":null,"monthly_token_budget":5,"backup_code":"synthetic"}`,
+		`{"cloud_provider":null,"monthly_token_budget":5,"own_model":true}`,
+		`{"cloud_provider":null,"monthly_token_budget":5,"own_model":false}`,
+		`{"cloud_provider":"openai","agreement_ref":"DPA-2026-11","monthly_token_budget":5,"own_model":false}`,
 	} {
 		b, ok := decodeBody(raw)
 		if !ok {
@@ -46,32 +50,35 @@ func TestModelPolicyBodyRules(t *testing.T) {
 		}
 	}
 	for name, raw := range map[string]string{
-		"unknown key":           `{"cloud_provider":null,"monthly_token_budget":5,"model":"x"}`,
-		"no provider key":       `{"agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5}`,
-		"no budget":             `{"cloud_provider":null}`,
-		"unknown provider":      `{"cloud_provider":"mistral","agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5}`,
-		"provider as none":      `{"cloud_provider":"none","monthly_token_budget":5}`,
-		"empty provider":        `{"cloud_provider":"","monthly_token_budget":5}`,
-		"provider without ref":  `{"cloud_provider":"anthropic","monthly_token_budget":5}`,
-		"provider with null":    `{"cloud_provider":"anthropic","agreement_ref":null,"monthly_token_budget":5}`,
-		"empty ref":             `{"cloud_provider":null,"agreement_ref":"","monthly_token_budget":5}`,
-		"free text ref":         `{"cloud_provider":"openai","agreement_ref":"signed by Dr Synthetic","monthly_token_budget":5}`,
-		"lower-case ref":        `{"cloud_provider":"openai","agreement_ref":"demo-synthetic","monthly_token_budget":5}`,
-		"short ref":             `{"cloud_provider":"openai","agreement_ref":"AB","monthly_token_budget":5}`,
-		"long ref":              `{"cloud_provider":"openai","agreement_ref":"A` + string(bytes.Repeat([]byte("B"), 64)) + `","monthly_token_budget":5}`,
-		"budget 0":              `{"cloud_provider":null,"monthly_token_budget":0}`,
-		"ref while off":         `{"cloud_provider":null,"agreement_ref":"AGR-2026-01","monthly_token_budget":5}`,
-		"old free shape":        `{"cloud_provider":"openai","agreement_ref":"SYNTH-1","monthly_token_budget":5}`,
-		"patient pseudonym":     `{"cloud_provider":"openai","agreement_ref":"P-AB12CD34","monthly_token_budget":5}`,
-		"a person's name":       `{"cloud_provider":"openai","agreement_ref":"ADAEZE-OKAFOR","monthly_token_budget":5}`,
-		"an MRN shape":          `{"cloud_provider":"openai","agreement_ref":"HAV-000123","monthly_token_budget":5}`,
-		"a name and a number":   `{"cloud_provider":"openai","agreement_ref":"OKAFOR-2026-01","monthly_token_budget":5}`,
-		"budget negative":       `{"cloud_provider":null,"monthly_token_budget":-1}`,
-		"budget too big":        `{"cloud_provider":null,"monthly_token_budget":1000000001}`,
-		"budget fraction":       `{"cloud_provider":null,"monthly_token_budget":1.5}`,
-		"budget string":         `{"cloud_provider":null,"monthly_token_budget":"5"}`,
-		"budget null":           `{"cloud_provider":null,"monthly_token_budget":null}`,
-		"provider not a string": `{"cloud_provider":1,"monthly_token_budget":5}`,
+		"unknown key":               `{"cloud_provider":null,"monthly_token_budget":5,"model":"x"}`,
+		"no provider key":           `{"agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5}`,
+		"no budget":                 `{"cloud_provider":null}`,
+		"unknown provider":          `{"cloud_provider":"mistral","agreement_ref":"DEMO-SYNTHETIC","monthly_token_budget":5}`,
+		"provider as none":          `{"cloud_provider":"none","monthly_token_budget":5}`,
+		"empty provider":            `{"cloud_provider":"","monthly_token_budget":5}`,
+		"provider without ref":      `{"cloud_provider":"anthropic","monthly_token_budget":5}`,
+		"provider with null":        `{"cloud_provider":"anthropic","agreement_ref":null,"monthly_token_budget":5}`,
+		"empty ref":                 `{"cloud_provider":null,"agreement_ref":"","monthly_token_budget":5}`,
+		"free text ref":             `{"cloud_provider":"openai","agreement_ref":"signed by Dr Synthetic","monthly_token_budget":5}`,
+		"lower-case ref":            `{"cloud_provider":"openai","agreement_ref":"demo-synthetic","monthly_token_budget":5}`,
+		"short ref":                 `{"cloud_provider":"openai","agreement_ref":"AB","monthly_token_budget":5}`,
+		"long ref":                  `{"cloud_provider":"openai","agreement_ref":"A` + string(bytes.Repeat([]byte("B"), 64)) + `","monthly_token_budget":5}`,
+		"budget 0":                  `{"cloud_provider":null,"monthly_token_budget":0}`,
+		"ref while off":             `{"cloud_provider":null,"agreement_ref":"AGR-2026-01","monthly_token_budget":5}`,
+		"old free shape":            `{"cloud_provider":"openai","agreement_ref":"SYNTH-1","monthly_token_budget":5}`,
+		"patient pseudonym":         `{"cloud_provider":"openai","agreement_ref":"P-AB12CD34","monthly_token_budget":5}`,
+		"a person's name":           `{"cloud_provider":"openai","agreement_ref":"ADAEZE-OKAFOR","monthly_token_budget":5}`,
+		"an MRN shape":              `{"cloud_provider":"openai","agreement_ref":"HAV-000123","monthly_token_budget":5}`,
+		"a name and a number":       `{"cloud_provider":"openai","agreement_ref":"OKAFOR-2026-01","monthly_token_budget":5}`,
+		"budget negative":           `{"cloud_provider":null,"monthly_token_budget":-1}`,
+		"budget too big":            `{"cloud_provider":null,"monthly_token_budget":1000000001}`,
+		"budget fraction":           `{"cloud_provider":null,"monthly_token_budget":1.5}`,
+		"budget string":             `{"cloud_provider":null,"monthly_token_budget":"5"}`,
+		"budget null":               `{"cloud_provider":null,"monthly_token_budget":null}`,
+		"provider not a string":     `{"cloud_provider":1,"monthly_token_budget":5}`,
+		"own model with a provider": `{"cloud_provider":"openai","agreement_ref":"DPA-2026-11","monthly_token_budget":5,"own_model":true}`,
+		"own model as a string":     `{"cloud_provider":null,"monthly_token_budget":5,"own_model":"true"}`,
+		"own model as a number":     `{"cloud_provider":null,"monthly_token_budget":5,"own_model":1}`,
 	} {
 		b, ok := decodeBody(raw)
 		if !ok {
@@ -82,6 +89,42 @@ func TestModelPolicyBodyRules(t *testing.T) {
 		}
 	}
 }
+
+// own_model (00055): left out is nil (keep, or cleared by a provider);
+// present is carried as given; true never goes with a provider (above).
+func TestModelPolicyBodyOwnModel(t *testing.T) {
+	for raw, want := range map[string]*bool{
+		`{"cloud_provider":null,"monthly_token_budget":5}`:                   nil,
+		`{"cloud_provider":null,"monthly_token_budget":5,"own_model":null}`:  nil,
+		`{"cloud_provider":null,"monthly_token_budget":5,"own_model":true}`:  ptrBool(true),
+		`{"cloud_provider":null,"monthly_token_budget":5,"own_model":false}`: ptrBool(false),
+	} {
+		b, ok := decodeBody(raw)
+		if !ok {
+			t.Fatalf("decode %s", raw)
+		}
+		c, ok := b.check()
+		if !ok {
+			t.Fatalf("refused %s", raw)
+		}
+		if (c.OwnModel == nil) != (want == nil) || (want != nil && *c.OwnModel != *want) {
+			t.Errorf("%s: own model %v, want %v", raw, c.OwnModel, want)
+		}
+	}
+	own := true
+	for name, c := range map[string]ModelPolicyChange{
+		"own with a provider": {Hospital: uuid.New(), Provider: "openai", AgreementRef: "DPA-2026-11", OwnModel: &own, Via: ViaCLI},
+	} {
+		if c.valid() {
+			t.Errorf("%s: valid", name)
+		}
+	}
+	if c := (ModelPolicyChange{Hospital: uuid.New(), OwnModel: &own, Via: ViaCLI}); !c.valid() {
+		t.Error("own model alone: invalid")
+	}
+}
+
+func ptrBool(b bool) *bool { return &b }
 
 // AgreementRefOK (review I1): an agreement code, never a word, a name, a
 // patient pseudonym or an identifier from a record.

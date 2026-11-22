@@ -65,6 +65,12 @@ INTELLIGENCE_MODEL_ROLES the local route answers from the ``llama`` sidecar
 ``cca``, the plain Ollama route runs only in development or with
 INTELLIGENCE_LOCAL_UNPINNED=on (``on`` or ``off``, default off); otherwise every local
 question escalates as ``local_unverified``.
+
+Our own model on the GPU (the ``own`` route, a hospital's model policy with own_model on;
+deploy/README.md, "Our own model on the GPU"): INTELLIGENCE_OWN_MODEL=on (default off)
+with its name, version, SHA-256 and answer profile (tools.llama_client.own_settings_from_env),
+for the pipeline only and never with the sample client. Off, every own question escalates
+as ``local_unverified``.
 """
 
 from __future__ import annotations
@@ -82,7 +88,7 @@ if TYPE_CHECKING:
     # boundary.cloud imports this module; this one imports it only when
     # building settings, so the import graph is one-way at load.
     from intelligence.boundary.cloud.settings import CloudSettings
-    from intelligence.tools.llama_client import LocalLLMSettings
+    from intelligence.tools.llama_client import LocalLLMSettings, OwnModelSettings
 
 log = logging.getLogger("intelligence.boundary.config")
 
@@ -312,6 +318,8 @@ class WorkerSettings:
     # The local route's answer model (module docstring).
     local_llm: LocalLLMSettings = field(default_factory=lambda: _default_local_llm())
     local_unpinned: bool = False
+    # Our own model on the GPU (module docstring): None unless INTELLIGENCE_OWN_MODEL=on.
+    own_model: OwnModelSettings | None = None
     # Cloud model providers (plan 2026-11-06): none unless
     # INTELLIGENCE_CLOUD_PROVIDERS names some (pipeline only).
     cloud: CloudSettings = field(default_factory=lambda: _no_cloud())
@@ -409,6 +417,11 @@ class WorkerSettings:
         unpinned_raw = get("INTELLIGENCE_LOCAL_UNPINNED") or "off"
         if unpinned_raw not in ("on", "off"):
             errs.append("INTELLIGENCE_LOCAL_UNPINNED must be on or off")
+        own_model = llama_client.own_settings_from_env(env, development, errs)
+        if own_model is not None and svc != "pipeline":
+            errs.append("INTELLIGENCE_OWN_MODEL is for the pipeline service only")
+        if own_model is not None and model_client == "sample":
+            errs.append("INTELLIGENCE_OWN_MODEL never runs with INTELLIGENCE_MODEL_CLIENT=sample")
         from intelligence.boundary.cloud.settings import PROVIDERS_VAR, CloudSettings
 
         cloud = CloudSettings.from_env(env, development, errs)
@@ -443,6 +456,7 @@ class WorkerSettings:
             **pinned,
             local_llm=local_llm,
             local_unpinned=unpinned_raw == "on",
+            own_model=own_model,
             cloud=cloud,
         )
 

@@ -389,12 +389,16 @@ func init() {
 		"hospital_id", id, "provider", provider, "previous", provider,
 		"agreement_ref", Check(agreementRef),
 		"monthly_token_budget", Int(1, 1000000000),
-		"via", OneOf("platform", "cli")),
+		"via", OneOf("platform", "cli"),
+		// Our own model on the GPU (00055): the switch after and before
+		// the change. Absent on entries written before 00055.
+		"own_model", Check(Bool), "previous_own_model", Check(Bool)),
 		Required: []string{"hospital_id", "provider", "previous", "monthly_token_budget", "via"},
-		// A reference exactly when a provider is set.
+		// A reference exactly when a provider is set; the own model never
+		// on with a provider.
 		Holds: func(p map[string]any) bool {
 			_, hasRef := p["agreement_ref"]
-			return hasRef == (p["provider"] != "none")
+			return hasRef == (p["provider"] != "none") && (p["own_model"] != true || p["provider"] == "none")
 		}})
 
 	// EMR connections (EMR design §12.6, plan Task 11): ids, the type, the

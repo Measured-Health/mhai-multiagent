@@ -109,7 +109,7 @@ func policyAudits(t *testing.T, hid uuid.UUID) []policyAudit {
 	return out
 }
 
-var policyKeys = []string{"hospital_id", "cloud_provider", "provider_code", "agreement_ref", "monthly_token_budget", "updated_at", "usage"}
+var policyKeys = []string{"hospital_id", "cloud_provider", "provider_code", "agreement_ref", "monthly_token_budget", "own_model", "updated_at", "usage"}
 
 func thisMonth() string { return time.Now().UTC().Format("2006-01") }
 
@@ -303,11 +303,11 @@ func TestModelPolicyPutAuditsClosedPayload(t *testing.T) {
 	}
 	want := []map[string]any{
 		{"hospital_id": h.String(), "provider": "anthropic", "previous": "none", "agreement_ref": "DEMO-SYNTHETIC",
-			"monthly_token_budget": float64(3000000), "via": "platform"},
+			"monthly_token_budget": float64(3000000), "via": "platform", "own_model": false, "previous_own_model": false},
 		{"hospital_id": h.String(), "provider": "openai", "previous": "anthropic", "agreement_ref": "DPA-2026-0042",
-			"monthly_token_budget": float64(3000000), "via": "platform"},
+			"monthly_token_budget": float64(3000000), "via": "platform", "own_model": false, "previous_own_model": false},
 		{"hospital_id": h.String(), "provider": "none", "previous": "openai",
-			"monthly_token_budget": float64(3000000), "via": "platform"},
+			"monthly_token_budget": float64(3000000), "via": "platform", "own_model": false, "previous_own_model": false},
 	}
 	for i, row := range a {
 		if row.actor != admin.id.String() || row.hospital != "" || row.entity != "hospital" || row.entityID != h.String() {
@@ -447,6 +447,70 @@ func TestModelPolicyPutGeminiReportsProviderCode(t *testing.T) {
 	for i, w := range want {
 		if a[i].payload["provider"] != w[0] || a[i].payload["previous"] != w[1] {
 			t.Errorf("audit row %d: provider %v previous %v, want %v", i, a[i].payload["provider"], a[i].payload["previous"], w)
+		}
+	}
+}
+
+// Our own model on the GPU (00055): off by default; own_model true with no
+// provider turns it on; left out with no provider keeps it; a provider
+// clears it; with a provider it is 422 and nothing is written. Every change
+// is audited with the switch before and after.
+func TestModelPolicyOwnModelSwitch(t *testing.T) {
+	h := seedHospital(t, "active")
+	admin := platformAdmin(t)
+	tok := mint(t, admin)
+	body := func(provider, ref string, own any) string {
+		m := map[string]any{"cloud_provider": nil, "monthly_token_budget": 5000, "backup_code": backupCode(t, admin)}
+		if provider != "" {
+			m["cloud_provider"], m["agreement_ref"] = provider, ref
+		}
+		if own != nil {
+			m["own_model"] = own
+		}
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+	ownOf := func(what string, r resp, want bool) {
+		t.Helper()
+		ok(t, what, r)
+		checkPolicyShape(t, what, r, h)
+		if r.body["own_model"] != want {
+			t.Errorf("%s: own_model %v, want %v (%s)", what, r.body["own_model"], want, r.raw)
+		}
+	}
+	ownOf("default", get(t, policyPath(h), tok), false)
+	ownOf("on", putPolicy(t, tok, h, body("", "", true)), true)
+	ownOf("GET on", get(t, policyPath(h), tok), true)
+	ownOf("kept", putPolicy(t, tok, h, body("", "", nil)), true)
+	if r := putPolicy(t, tok, h, body("anthropic", "DEMO-SYNTHETIC", true)); r.code != 422 {
+		t.Errorf("own model with a provider: %d %s", r.code, r.raw)
+	}
+	ownOf("still on after the refusal", get(t, policyPath(h), tok), true)
+	r := putPolicy(t, tok, h, body("anthropic", "DEMO-SYNTHETIC", nil))
+	ownOf("a provider clears it", r, false)
+	if r.body["provider_code"] != "anthropic" {
+		t.Errorf("provider: %s", r.raw)
+	}
+	ownOf("off again", putPolicy(t, tok, h, body("", "", nil)), false)
+	ownOf("on again", putPolicy(t, tok, h, body("", "", true)), true)
+	ownOf("switched off", putPolicy(t, tok, h, body("", "", false)), false)
+
+	a := policyAudits(t, h)
+	want := [][4]any{
+		{"none", "none", true, false},
+		{"none", "none", true, true},
+		{"anthropic", "none", false, true},
+		{"none", "anthropic", false, false},
+		{"none", "none", true, false},
+		{"none", "none", false, true},
+	}
+	if len(a) != len(want) {
+		t.Fatalf("%d audit rows, want %d", len(a), len(want))
+	}
+	for i, w := range want {
+		p := a[i].payload
+		if p["provider"] != w[0] || p["previous"] != w[1] || p["own_model"] != w[2] || p["previous_own_model"] != w[3] {
+			t.Errorf("audit row %d: %v, want %v", i, p, w)
 		}
 	}
 }

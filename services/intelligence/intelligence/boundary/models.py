@@ -44,6 +44,17 @@ INTELLIGENCE_LOCAL_UNPINNED=on; otherwise RefusedGenerator. A failed preflight e
 the job with failed_agents ("CCA",) and the outcome ``local_unverified``, and nothing is
 generated; there is no fallback to Ollama, the cloud or another version.
 
+Our own model on the GPU (the ``own`` route; deploy/README.md, "Our own model on the
+GPU"): a job whose route is ``own`` (core's: the hospital's model policy has own_model on,
+off by default) runs on own_client, the local client's builder with its own generator: a
+PinnedLlamaGenerator over the ``gpu-model`` service, whose preflight requires exactly the
+configured ``<name>@<version>#<sha12>``, and the answer profile the operator named
+(agents.answer_profile.by_id), so its prompt is that model's (agents.prompt_formats).
+Retrieval, NLI, the HGA and the escalation guard are the local route's, unchanged:
+nothing is relaxed for it. Without INTELLIGENCE_OWN_MODEL=on every own job escalates as
+``local_unverified``; it never falls back to the local route or the cloud. model_versions()
+records ``cca`` as the own model's alias.
+
 Nothing here logs question text, patient data or model output; Generation
 and Verification keep text out of their repr.
 """
@@ -68,6 +79,7 @@ if TYPE_CHECKING:
     from intelligence.agents.orchestrator import DynamicOrchestratorAgent
     from intelligence.boundary.cloud.client import CloudCall
     from intelligence.knowledge_base.kb_builder import KBChunk
+    from intelligence.tools.llama_client import LocalLLMSettings, OwnModelSettings
 
 log = logging.getLogger("intelligence.boundary.models")
 
@@ -770,7 +782,9 @@ def local_parts(
     dense = dense_factory(dense_name)
 
     def build(
-        chunks: Sequence[KBChunk], profile: AnswerProfile = answer_profile.DEFAULT
+        chunks: Sequence[KBChunk],
+        profile: AnswerProfile = answer_profile.DEFAULT,
+        generator_override: Any = None,
     ) -> DynamicOrchestratorAgent:
         kb = MedicalKnowledgeBase()
         kb.chunks = {c.chunk_id: c for c in chunks}
@@ -784,7 +798,11 @@ def local_parts(
             ),
             profile,
         )
-        cca = RAGClinicalContextAgent(retriever, generator=generator)
+        cca = RAGClinicalContextAgent(
+            retriever,
+            generator=generator if generator_override is None else generator_override,
+            prompt=profile.prompt,
+        )
         return DynamicOrchestratorAgent(rag_cca=cca, hga=hga)
 
     from intelligence.guardrails import escalation_guard
@@ -1036,18 +1054,105 @@ class _Unconfigured:
         return {k: v for k, v in self._local.model_versions().items() if k != "cca"}
 
 
+class _OwnOff:
+    """The own route on a worker without our own model (INTELLIGENCE_OWN_MODEL off):
+    masks with the local masker, and every generation escalates as local_unverified,
+    logged. Nothing runs on the local route or the cloud in its place."""
+
+    def __init__(self, local: ModelClient) -> None:
+        self._local = local
+
+    def mask(self, text: str) -> str:
+        return self._local.mask(text)
+
+    def generate(
+        self,
+        question: str,
+        patient_context: Mapping[str, Any],
+        patient_id: str | None,
+        chunks: Sequence[KBChunk],
+        *,
+        call: CloudCall | None = None,
+    ) -> Generation:
+        log.warning("own.off: a question on the own route, and this worker has no own model")
+        return Generation(failed_agents=("CCA",), available=False, cloud_outcome=LOCAL_UNVERIFIED)
+
+    def verify(self, generation: Generation) -> Verification:
+        return _escalated(generation.failed_agents or ("CCA",))
+
+    def model_versions(self) -> dict[str, str]:
+        return {k: v for k, v in self._local.model_versions().items() if k != "cca"}
+
+
+class _WithoutRole:
+    """A pinned set without one role's version (the own client records its own cca)."""
+
+    def __init__(self, inner: Pinned, role: str) -> None:
+        self._inner = inner
+        self._role = role
+
+    def versions(self) -> dict[str, str]:
+        return {k: v for k, v in self._inner.versions().items() if k != self._role}
+
+    def path(self, role: str) -> Path:
+        return self._inner.path(role)
+
+
+def own_client(
+    own: OwnModelSettings,
+    llm: LocalLLMSettings,
+    build: Builder,
+    versions: Mapping[str, str],
+    pinned: PinnedSource | None = None,
+) -> OrchestratorModelClient:
+    """The own route's client (module docstring): build with our own model's generator
+    and answer profile; the local route's retrieval and verification."""
+    import dataclasses
+
+    from intelligence.agents import answer_profile
+    from intelligence.tools import llama_client
+
+    profile = answer_profile.by_id(own.profile)
+    if profile is None:  # the settings checked it; belt and braces
+        raise ConfigError("INTELLIGENCE_OWN_MODEL_PROFILE must name a known answer profile")
+    sidecar = llama_client.LlamaSidecar(dataclasses.replace(llm, url=own.url))
+    alias = own.alias
+    gen = llama_client.PinnedLlamaGenerator(sidecar, lambda: alias)
+    source: PinnedSource = pinned if pinned is not None else (lambda: None)
+
+    def without_cca() -> Pinned | None:
+        p = source()
+        return None if p is None else _WithoutRole(p, "cca")
+
+    def build_own(
+        chunks: Sequence[KBChunk], profile: AnswerProfile = profile
+    ) -> DynamicOrchestratorAgent:
+        return build(chunks, profile=profile, generator_override=gen)  # type: ignore[call-arg]
+
+    return OrchestratorModelClient(
+        build_own,
+        versions={**versions, "cca": alias},
+        pinned=without_cca,
+        preflight=gen.check,
+        profile=lambda: profile,
+    )
+
+
 class ModelRouter:
     """The client for a job's route, decided by core and read from the
     claimed row (never from the message). local is the local client; cloud
-    maps an enabled provider to its CloudModelClient."""
+    maps an enabled provider to its CloudModelClient; own is our own model
+    on the GPU (None: the own route escalates)."""
 
     def __init__(
         self,
         local: ModelClient,
         cloud: Mapping[str, ModelClient],
         only_hospitals: frozenset[str] | None = None,
+        own: ModelClient | None = None,
     ) -> None:
         self.local = local
+        self.own = own
         self._cloud = dict(cloud)
         # The sample client's hospitals (boundary.sample); None: every hospital.
         self._only = only_hospitals
@@ -1058,13 +1163,16 @@ class ModelRouter:
         return self._only is None or str(hospital_id).lower() in self._only
 
     def client_for(self, route: str) -> tuple[ModelClient, str]:
-        """(the client, its provider), "local" for the local route. A cloud
+        """(the client, its provider), "local" for the local route and "own"
+        for our own model (escalating when this worker has none). A cloud
         route with no client here, or any route outside vocab.ROUTES, is
         unconfigured."""
         from intelligence.boundary.cloud.vocab import PROVIDERS, ROUTES
 
         if route == "local":
             return self.local, "local"
+        if route == "own":
+            return (self.own if self.own is not None else _OwnOff(self.local)), "own"
         provider = route[len("cloud:") :] if route in ROUTES else "unknown"
         client = self._cloud.get(provider) if provider in PROVIDERS else None
         if client is None:
@@ -1094,9 +1202,8 @@ def build_model_router(settings: WorkerSettings, pinned: PinnedSource | None = N
     if settings.model_client == "sample":
         # Never a cloud client beside the sample (the settings refuse providers).
         return ModelRouter(build_model_client(settings), {}, settings.sample_hospitals)
-    if not settings.cloud.providers:
+    if not settings.cloud.providers and settings.own_model is None:
         return ModelRouter(build_model_client(settings, pinned), {})
-    from intelligence.boundary.cloud.client import build_cloud_clients
 
     local: ModelClient
     if settings.model_client == "orchestrator":
@@ -1113,5 +1220,12 @@ def build_model_router(settings: WorkerSettings, pinned: PinnedSource | None = N
     else:
         local = build_model_client(settings)  # the stub, development only
         build, versions = stub_parts()
-    cloud = build_cloud_clients(settings.cloud, build, versions)
-    return ModelRouter(local, cloud)
+    cloud: Mapping[str, ModelClient] = {}
+    if settings.cloud.providers:
+        from intelligence.boundary.cloud.client import build_cloud_clients
+
+        cloud = build_cloud_clients(settings.cloud, build, versions)
+    own: ModelClient | None = None
+    if settings.own_model is not None and settings.model_client == "orchestrator":
+        own = own_client(settings.own_model, settings.local_llm, build, versions, pinned)
+    return ModelRouter(local, cloud, own=own)

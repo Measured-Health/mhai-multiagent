@@ -223,7 +223,7 @@ jobs:
         run: |
           set -euo pipefail
           b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh live-site.sh demo/enable-demo.sh demo/reset-demo.sh \
-            notifications/enable-notifications.sh | base64 -w0)
+            notifications/enable-notifications.sh gpu-model/entrypoint.sh gpu-model/gpu-model.sh | base64 -w0)
           echo "value=$b" >> "$GITHUB_OUTPUT"
 
       # Without a host-key check the SSH step would trust whatever answers at
@@ -256,7 +256,9 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           # The host's ECDSA key, as "SHA256:..." (deploy/README.md).
           fingerprint: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
-          command_timeout: 10m
+          # Long enough for the first pull of the GPU model's image and the
+          # re-hash and load of its GGUF (gpu-model/gpu-model.sh).
+          command_timeout: 30m
           script: |
             set -euo pipefail
             cd /srv/mhai-backend
@@ -354,6 +356,13 @@ jobs:
               bash live-site.sh
               live_guard=0
             fi
+
+            # Our own model on the GPU (profile gpu-model; deploy/README.md, "Our
+            # own model on the GPU"): only when .env says GPU_MODEL_ENABLED=true
+            # and GPU_MODEL_FILE has GPU_MODEL_SHA256; any mismatch stops the
+            # service and this deploy. Otherwise it is stopped if it was running.
+            # Which hospitals it answers is each hospital's model policy.
+            bash gpu-model/gpu-model.sh
 
             # Email (profile notifications): only when .env says
             # NOTIFY_ENABLED=true (deploy/notifications/enable-notifications.sh

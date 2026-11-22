@@ -33,7 +33,7 @@ const seedUsage = `usage:
   core hospitals create --name N --short-code CODE --time-zone TZ [--require-mfa-for-clinicians] [--allow-trust-device] [--demo]
   core hospitals activate <hospital id or short code>
   core hospitals mark-demo <hospital id or short code>
-  core hospitals model-policy set <hospital id or short code> --provider openai|anthropic|xai|gemini|none [--agreement-ref REF] [--budget TOKENS]
+  core hospitals model-policy set <hospital id or short code> --provider openai|anthropic|xai|gemini|none [--agreement-ref REF] [--budget TOKENS] [--own-model on|off]
   core hospitals legal-hold place|lift <hospital id or short code> --reference REF   (see core emr)
   core users create --email E --name N --roles clinician,hospital_admin [--hospital CODE]
   core users roles <email> --add analyst|--remove analyst --by <admin email>
@@ -70,6 +70,11 @@ DPA-YYYY-NNNN (2 to 8 digits after the year), or DEMO-SYNTHETIC for the
 synthetic demo. It is a document reference, never a person's or patient's
 name or identifier. none switches the hospital back to its local models and
 clears the reference (so --agreement-ref is refused with none).
+
+--own-model on sends the hospital's questions to our own answer model on the
+GPU server (deploy/README.md, "Our own model on the GPU"); it goes with
+--provider none only. --own-model off switches it off. Left out, a provider
+clears it and none keeps it. It is off for every hospital by default.
 
 The provider must be enabled in CORE_CLOUD_PROVIDERS as this command sees it.
 That catches a mistake; it is not a control: the operator sets their own
@@ -220,7 +225,7 @@ func hospitalsMarkDemo(ctx context.Context, args []string, url string, out io.Wr
 
 var (
 	errModelPolicyArgs = errors.New("usage: core hospitals model-policy set <hospital id or short code> " +
-		"--provider openai|anthropic|xai|gemini|none [--agreement-ref REF] [--budget TOKENS]")
+		"--provider openai|anthropic|xai|gemini|none [--agreement-ref REF] [--budget TOKENS] [--own-model on|off]")
 	errUnknownProvider    = errors.New("--provider must be openai, anthropic, xai, gemini or none")
 	errProviderDisabled   = errors.New("that provider is not enabled in CORE_CLOUD_PROVIDERS")
 	errNeedsAgreementRef  = errors.New("a provider needs --agreement-ref")
@@ -228,10 +233,13 @@ var (
 	errRefWithoutProvider = errors.New("--agreement-ref goes with a provider; none clears it")
 	errBadBudget          = errors.New("--budget must be a whole number from 1 to 1000000000")
 	errModelPolicyWrite   = errors.New("could not set the model policy; nothing was changed")
+	errBadOwnModel        = errors.New("--own-model must be on or off")
+	errOwnModelProvider   = errors.New("--own-model on goes with --provider none (one route per hospital)")
 )
 
 // hospitalsModelPolicy is "hospitals model-policy set <id or short code>
-// --provider P [--agreement-ref R] [--budget N]" (platform.ApplyModelPolicy
+// --provider P [--agreement-ref R] [--budget N] [--own-model on|off]"
+// (platform.ApplyModelPolicy
 // as mhai_provision, via cli). Everything is checked before connecting; the
 // provider must be enabled in CORE_CLOUD_PROVIDERS (read with getenv).
 // Errors and output never hold the reference.
@@ -246,11 +254,16 @@ func hospitalsModelPolicy(ctx context.Context, args []string, url string, getenv
 	fs.StringVar(&provider, "provider", "", "")
 	fs.StringVar(&agreement, "agreement-ref", "", "")
 	fs.Int64Var(&budget, "budget", 0, "")
+	var ownModel string
+	fs.StringVar(&ownModel, "own-model", "", "")
 	if err := fs.Parse(args[2:]); err != nil || fs.NArg() != 0 || provider == "" {
 		return errModelPolicyArgs
 	}
-	budgetSet := false
-	fs.Visit(func(f *flag.Flag) { budgetSet = budgetSet || f.Name == "budget" })
+	budgetSet, ownSet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		budgetSet = budgetSet || f.Name == "budget"
+		ownSet = ownSet || f.Name == "own-model"
+	})
 	if err := account.ValidateHospitalRef(ref); err != nil {
 		return err
 	}
@@ -278,6 +291,20 @@ func hospitalsModelPolicy(ctx context.Context, args []string, url string, getenv
 	if c.Provider != "" && agreement == "" {
 		return errNeedsAgreementRef
 	}
+	if ownSet {
+		var own bool
+		switch ownModel {
+		case "on":
+			own = true
+		case "off":
+		default:
+			return errBadOwnModel
+		}
+		if own && c.Provider != "" {
+			return errOwnModelProvider
+		}
+		c.OwnModel = &own
+	}
 	if budgetSet {
 		if budget < 1 || budget > platform.MaxMonthlyTokenBudget {
 			return errBadBudget
@@ -301,6 +328,10 @@ func hospitalsModelPolicy(ctx context.Context, args []string, url string, getenv
 	})
 	if err != nil {
 		return err
+	}
+	if ownSet {
+		fmt.Fprintf(out, "model policy %s %s own-model %s\n", c.Hospital, provider, ownModel)
+		return nil
 	}
 	fmt.Fprintf(out, "model policy %s %s\n", c.Hospital, provider)
 	return nil

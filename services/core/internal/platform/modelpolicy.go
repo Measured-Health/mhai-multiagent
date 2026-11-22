@@ -7,12 +7,20 @@ package platform
 //     auditors; the policy (the defaults, off, when there is no row) and
 //     this month's token usage (mhai_cloud_usage, 00018).
 //   - PUT /platform/hospitals/{id}/model-policy {cloud_provider,
-//     agreement_ref?, monthly_token_budget, mfa_code | backup_code}:
+//     agreement_ref?, monthly_token_budget, own_model?, mfa_code |
+//     backup_code}:
 //     platform admins, with step-up (auth.Service.StepUpAudited, as
 //     jobs/cancel); 10 writes a minute per session (as jobs/retry). A
 //     provider this deployment hasn't enabled (CORE_CLOUD_PROVIDERS) is 409
 //     conflict. The upsert and the audit row (hospital.model_policy_changed)
 //     are one transaction, as mhai_platform.
+//
+// own_model (00055; deploy/README.md, "Our own model on the GPU") sends the
+// hospital's questions to our own answer model on the GPU server: off for
+// every hospital until a platform admin turns it on here. It never goes
+// with a cloud provider (one route per hospital): own_model true with a
+// provider is 422; a provider set without own_model clears it; own_model
+// left out with no provider keeps the current value.
 //
 // An unknown hospital is 404 on both, checked first: the ledger answers
 // zeros for any id. ApplyModelPolicy is shared with the CLI twin ("core
@@ -99,6 +107,7 @@ type ModelPolicyOut struct {
 	ProviderCode       *string       `json:"provider_code"`
 	AgreementRef       *string       `json:"agreement_ref"`
 	MonthlyTokenBudget int64         `json:"monthly_token_budget"`
+	OwnModel           bool          `json:"own_model"`
 	UpdatedAt          *string       `json:"updated_at"`
 	Usage              ModelUsageOut `json:"usage"`
 }
@@ -119,6 +128,9 @@ type ModelPolicyChange struct {
 	AgreementRef string
 	// Budget nil keeps the current budget (the default with no row).
 	Budget *int64
+	// OwnModel nil keeps the current switch, or clears it when Provider
+	// is set; true needs no Provider.
+	OwnModel *bool
 	// Actor is the platform admin; uuid.Nil for the CLI (no actor).
 	Actor     uuid.UUID
 	RequestID string
@@ -137,6 +149,9 @@ func (c ModelPolicyChange) valid() bool {
 		return false
 	}
 	if c.Budget != nil && (*c.Budget < 1 || *c.Budget > MaxMonthlyTokenBudget) {
+		return false
+	}
+	if c.OwnModel != nil && *c.OwnModel && c.Provider != "" {
 		return false
 	}
 	return c.Hospital != uuid.Nil && (c.Via == ViaPlatform || c.Via == ViaCLI)
@@ -172,8 +187,9 @@ func ApplyModelPolicy(ctx context.Context, tx pgx.Tx, c ModelPolicyChange) (prev
 	}
 	var prev *string
 	budget := int64(DefaultMonthlyTokenBudget)
-	err = tx.QueryRow(ctx, `SELECT cloud_provider, monthly_token_budget FROM hospital_model_policy WHERE hospital_id = $1`,
-		c.Hospital).Scan(&prev, &budget)
+	prevOwn := false
+	err = tx.QueryRow(ctx, `SELECT cloud_provider, monthly_token_budget, own_model FROM hospital_model_policy WHERE hospital_id = $1`,
+		c.Hospital).Scan(&prev, &budget, &prevOwn)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return "", err
 	}
@@ -183,6 +199,12 @@ func ApplyModelPolicy(ctx context.Context, tx pgx.Tx, c ModelPolicyChange) (prev
 	}
 	if c.Budget != nil {
 		budget = *c.Budget
+	}
+	// One route: a provider clears the own model; otherwise it is kept
+	// unless the change names it.
+	own := prevOwn && c.Provider == ""
+	if c.OwnModel != nil {
+		own = *c.OwnModel
 	}
 	var provider, ref, by any
 	if c.Provider != "" {
@@ -195,16 +217,16 @@ func ApplyModelPolicy(ctx context.Context, tx pgx.Tx, c ModelPolicyChange) (prev
 		by = c.Actor
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO hospital_model_policy
-			(hospital_id, cloud_provider, agreement_ref, monthly_token_budget, updated_by, updated_at)
-		VALUES ($1, $2, $3, $4, $5, now())
+			(hospital_id, cloud_provider, agreement_ref, monthly_token_budget, own_model, updated_by, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, now())
 		ON CONFLICT (hospital_id) DO UPDATE SET cloud_provider = EXCLUDED.cloud_provider,
 			agreement_ref = EXCLUDED.agreement_ref, monthly_token_budget = EXCLUDED.monthly_token_budget,
-			updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at`,
-		c.Hospital, provider, ref, budget, by); err != nil {
+			own_model = EXCLUDED.own_model, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at`,
+		c.Hospital, provider, ref, budget, own, by); err != nil {
 		return "", err
 	}
 	payload := map[string]any{"hospital_id": c.Hospital.String(), "provider": ProviderNone, "previous": previous,
-		"monthly_token_budget": budget, "via": c.Via}
+		"monthly_token_budget": budget, "via": c.Via, "own_model": own, "previous_own_model": prevOwn}
 	if c.Provider != "" {
 		payload["provider"] = c.Provider
 	}
@@ -235,8 +257,9 @@ func readModelPolicy(ctx context.Context, tx pgx.Tx, hid uuid.UUID) (ModelPolicy
 		return out, ErrNoSuchHospital
 	}
 	var at time.Time
-	err = tx.QueryRow(ctx, `SELECT cloud_provider, agreement_ref, monthly_token_budget, updated_at
-		FROM hospital_model_policy WHERE hospital_id = $1`, hid).Scan(&out.ProviderCode, &out.AgreementRef, &out.MonthlyTokenBudget, &at)
+	err = tx.QueryRow(ctx, `SELECT cloud_provider, agreement_ref, monthly_token_budget, own_model, updated_at
+		FROM hospital_model_policy WHERE hospital_id = $1`, hid).Scan(&out.ProviderCode, &out.AgreementRef, &out.MonthlyTokenBudget,
+		&out.OwnModel, &at)
 	switch {
 	case err == nil:
 		out.CloudProvider = config.EnumV1Provider(out.ProviderCode)
@@ -321,13 +344,15 @@ type policyBody struct {
 	CloudProvider      optString `json:"cloud_provider"`
 	AgreementRef       *string   `json:"agreement_ref"`
 	MonthlyTokenBudget *int64    `json:"monthly_token_budget"`
+	OwnModel           *bool     `json:"own_model"`
 	MFACode            string    `json:"mfa_code"`
 	BackupCode         string    `json:"backup_code"`
 }
 
 // check applies the body's rules: cloud_provider present (a known provider
 // or null), a provider with an agreement reference (AgreementRefOK), null
-// with none, and a budget of 1 to 1000000000.
+// with none, a budget of 1 to 1000000000, and own_model true only with no
+// provider.
 // The change it returns has no hospital, actor or via yet.
 func (b policyBody) check() (ModelPolicyChange, bool) {
 	var c ModelPolicyChange
@@ -355,6 +380,13 @@ func (b policyBody) check() (ModelPolicyChange, bool) {
 		return c, false
 	}
 	c.Budget = &n
+	if b.OwnModel != nil {
+		if *b.OwnModel && c.Provider != "" {
+			return c, false
+		}
+		own := *b.OwnModel
+		c.OwnModel = &own
+	}
 	return c, true
 }
 

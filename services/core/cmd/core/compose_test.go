@@ -766,6 +766,16 @@ type deployService struct {
 	Tmpfs       []string          `yaml:"tmpfs"`
 	Memswap     string            `yaml:"memswap_limit"`
 	SecurityOpt []string          `yaml:"security_opt"`
+	Devices     []string          `yaml:"devices"`
+	PullPolicy  string            `yaml:"pull_policy"`
+	Healthcheck struct {
+		Test        []string `yaml:"test"`
+		Disable     bool     `yaml:"disable"`
+		StartPeriod string   `yaml:"start_period"`
+	} `yaml:"healthcheck"`
+	Privileged bool   `yaml:"privileged"`
+	Ipc        string `yaml:"ipc"`
+	Pid        string `yaml:"pid"`
 }
 
 type deployCompose struct {
@@ -934,10 +944,11 @@ func TestEgressProxyOnlyServiceOnEgressNetwork(t *testing.T) {
 // check M5), so it is never set. The key is a read-only file mount.
 func TestPipelineNeverOnEgress(t *testing.T) {
 	p := pilotPipeline(t)
-	// backend, and model: the internal network shared with the llama sidecar only
-	// (profile ownmodel; TestOwnModelSidecarOnlyOnInternalModelNetwork).
-	if !slices.Equal(p.networkNames(), []string{"backend", "model"}) {
-		t.Errorf("pipeline networks %v, want [backend model] only", p.networkNames())
+	// backend, model: the internal network shared with the llama sidecar only
+	// (profile ownmodel; TestOwnModelSidecarOnlyOnInternalModelNetwork), and
+	// gpu-model: the same with our own model on the GPU (TestGPUModelService).
+	if !slices.Equal(p.networkNames(), []string{"backend", "gpu-model", "model"}) {
+		t.Errorf("pipeline networks %v, want [backend gpu-model model] only", p.networkNames())
 	}
 	if p.NetworkMode != "" || len(p.Ports) != 0 {
 		t.Errorf("pipeline network_mode %q, ports %v", p.NetworkMode, p.Ports)
@@ -1598,5 +1609,123 @@ func TestModelFetchIsTheOnlyRouteToTheStore(t *testing.T) {
 	}
 	if !slices.Equal(fetch.Command, []string{"fetch-pinned", "--lock", "/lock/models.lock", "--to", "/mirror"}) {
 		t.Errorf("model-fetch command %v", fetch.Command)
+	}
+}
+
+// Our own model on the GPU (deploy/README.md, "Our own model on the GPU"): the
+// gpu-model service is off by default (profile gpu-model only, alone in it),
+// runs llama.cpp's official server-cuda image pinned by digest, hardened as
+// every service (read-only root, no capabilities, no new privileges, never
+// root, never privileged), with a memory cap and a health check, no published
+// port and no env_file. It mounts the one GGUF and its entrypoint read-only and
+// nothing else, gets the GPU through CDI only, and is on the internal
+// gpu-model network only, which it shares with the pipeline alone.
+func TestGPUModelService(t *testing.T) {
+	c := loadDeployCompose(t)
+	g, ok := c.Services["gpu-model"]
+	if !ok {
+		t.Fatal("deploy/compose.yml has no gpu-model service (profile gpu-model)")
+	}
+	if !slices.Equal(g.Profiles, []string{"gpu-model"}) {
+		t.Errorf("gpu-model profiles %v, want [gpu-model]: off by default", g.Profiles)
+	}
+	for name, s := range c.Services {
+		if name != "gpu-model" && slices.Contains(s.Profiles, "gpu-model") {
+			t.Errorf("%s is in the gpu-model profile", name)
+		}
+	}
+	if !regexp.MustCompile(`^ghcr\.io/ggml-org/llama\.cpp:server-cuda-b[0-9]+@sha256:[0-9a-f]{64}$`).MatchString(g.Image) {
+		t.Errorf("gpu-model image %q: llama.cpp's server-cuda release tag, pinned by digest, never a variable", g.Image)
+	}
+	if g.Build.Kind != 0 {
+		t.Error("gpu-model has a build: it runs the pinned upstream image")
+	}
+	if !g.ReadOnly || !slices.Equal(g.CapDrop, []string{"ALL"}) || !slices.Contains(g.SecurityOpt, "no-new-privileges:true") {
+		t.Errorf("gpu-model: read_only %v, cap_drop %v, security_opt %v", g.ReadOnly, g.CapDrop, g.SecurityOpt)
+	}
+	if g.User == "" || strings.HasPrefix(g.User, "0") || strings.HasPrefix(g.User, "root") {
+		t.Errorf("gpu-model user %q: never root", g.User)
+	}
+	if g.Privileged || g.Ipc != "" || g.Pid != "" || g.NetworkMode != "" || len(g.Ports) != 0 {
+		t.Errorf("gpu-model: privileged %v ipc %q pid %q network_mode %q ports %v", g.Privileged, g.Ipc, g.Pid, g.NetworkMode, g.Ports)
+	}
+	if g.EnvFile.Kind != 0 {
+		t.Error("gpu-model has an env_file")
+	}
+	if g.MemLimit != "${GPU_MODEL_MEM:-8g}" || g.Memswap != g.MemLimit {
+		t.Errorf("gpu-model mem_limit %q memswap_limit %q, want ${GPU_MODEL_MEM:-8g} for both", g.MemLimit, g.Memswap)
+	}
+	if g.Healthcheck.Disable || len(g.Healthcheck.Test) < 2 || g.Healthcheck.Test[0] != "CMD" ||
+		!slices.Contains(g.Healthcheck.Test, "http://127.0.0.1:8080/health") {
+		t.Errorf("gpu-model healthcheck %+v: llama-server's /health on loopback", g.Healthcheck)
+	}
+	if !slices.Equal(g.Devices, []string{"nvidia.com/gpu=all"}) {
+		t.Errorf("gpu-model devices %v, want the GPU through CDI only", g.Devices)
+	}
+	if !slices.Equal(g.Volumes, []string{
+		"${GPU_MODEL_FILE:-/srv/mhai-models/unset.gguf}:/model/model.gguf:ro",
+		"./gpu-model/entrypoint.sh:/mhai/entrypoint.sh:ro",
+	}) {
+		t.Errorf("gpu-model volumes %v: the GGUF and the entrypoint, read-only, nothing else", g.Volumes)
+	}
+	if !slices.Equal(g.Tmpfs, []string{"/tmp"}) {
+		t.Errorf("gpu-model tmpfs %v, want [/tmp]", g.Tmpfs)
+	}
+	if !slices.Equal(g.Entrypoint, []string{"/bin/bash", "/mhai/entrypoint.sh"}) {
+		t.Errorf("gpu-model entrypoint %v: the re-hashing entrypoint", g.Entrypoint)
+	}
+	for k, v := range g.Environment {
+		if l := strings.ToLower(k); strings.Contains(l, "proxy") || strings.HasPrefix(k, "HF_") || strings.HasPrefix(k, "LLAMA_ARG_HF") ||
+			strings.HasPrefix(k, "MODEL_STORE_") {
+			t.Errorf("gpu-model sets %s: no route out, no download", k)
+		}
+		if strings.Contains(v, ":?") {
+			t.Errorf("gpu-model %s = %q: a required variable would break the default deploy's compose config", k, v)
+		}
+	}
+	if got := g.Environment["GPU_MODEL_SHA256"]; got != "${GPU_MODEL_SHA256:-}" {
+		t.Errorf("gpu-model GPU_MODEL_SHA256 = %q, want ${GPU_MODEL_SHA256:-}", got)
+	}
+	// The network: internal, gpu-model and the pipeline only.
+	if !slices.Equal(g.networkNames(), []string{"gpu-model"}) {
+		t.Errorf("gpu-model networks %v, want [gpu-model] only", g.networkNames())
+	}
+	if n, ok := c.Networks["gpu-model"]; !ok || !n.Internal || n.External {
+		t.Errorf("networks.gpu-model = %+v (present %v): must be a project network with internal: true", n, ok)
+	}
+	for name, s := range c.Services {
+		if name != "gpu-model" && name != "pipeline" && slices.Contains(s.networkNames(), "gpu-model") {
+			t.Errorf("%s is on the gpu-model network: only the pipeline and gpu-model", name)
+		}
+	}
+	// The pipeline asks it only when .env turns it on, by its service name, for
+	// the configured model.
+	p := pilotPipeline(t)
+	for k, want := range map[string]string{
+		"INTELLIGENCE_OWN_MODEL":         "${GPU_MODEL_ENABLED:-false}",
+		"INTELLIGENCE_OWN_MODEL_URL":     "http://gpu-model:8080",
+		"INTELLIGENCE_OWN_MODEL_NAME":    "${GPU_MODEL_NAME:-}",
+		"INTELLIGENCE_OWN_MODEL_VERSION": "${GPU_MODEL_VERSION:-}",
+		"INTELLIGENCE_OWN_MODEL_SHA256":  "${GPU_MODEL_SHA256:-}",
+		"INTELLIGENCE_OWN_MODEL_PROFILE": "${GPU_MODEL_PROFILE:-}",
+	} {
+		if got := p.Environment[k]; got != want {
+			t.Errorf("pipeline %s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// The deploy workflow ships the gpu-model scripts and runs the switch on every
+// deploy, after core is healthy.
+func TestDeployRunsTheGPUModelSwitch(t *testing.T) {
+	wf := readRepoFile(t, filepath.Join(".github", "workflows", "deploy.yml"))
+	if !strings.Contains(wf, "gpu-model/entrypoint.sh") || !strings.Contains(wf, "gpu-model/gpu-model.sh") {
+		t.Error("deploy.yml does not bundle deploy/gpu-model/entrypoint.sh and gpu-model.sh")
+	}
+	if !strings.Contains(wf, "bash gpu-model/gpu-model.sh") {
+		t.Error("deploy.yml does not run gpu-model/gpu-model.sh")
+	}
+	if strings.Index(wf, "bash gpu-model/gpu-model.sh") < strings.Index(wf, "Backend healthy.") {
+		t.Error("deploy.yml runs the gpu-model switch before core is healthy")
 	}
 }

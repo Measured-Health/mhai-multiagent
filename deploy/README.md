@@ -1160,6 +1160,117 @@ own model".
 GGUF, that the sidecar serves exactly the verified alias, reaches nothing
 outside its network, and refuses a GGUF with one flipped byte.
 
+## Our own model on the GPU (off by default)
+
+Our own fine-tuned answer model, served on the GPU server's NVIDIA card by
+the pipeline's deploy, for the hospitals whose model policy says so. It is
+**off for every hospital** until a platform admin switches one on, and the
+service runs only when the host's `.env` turns it on.
+
+| Piece | What it does |
+|---|---|
+| `gpu-model` (compose profile `gpu-model`) | llama.cpp's official `server-cuda` image, release `b12627`, pinned by digest; serves one GGUF from the host under the alias `<name>@<version>#<sha12>`. Its entrypoint (`gpu-model/entrypoint.sh`) re-hashes the file first and refuses to start on any mismatch. Read-only root, no capabilities, no new privileges, uid 1000, memory cap, health check (`/health`). On the internal `gpu-model` network only (shared with the pipeline; no route out, no published port). The GPU through NVIDIA's CDI: `devices: [nvidia.com/gpu=all]`, the compose form of `docker run --device nvidia.com/gpu=all` (needs Docker Engine 25+ with the CDI spec, as on the GPU server; `deploy.resources.reservations.devices` with `driver: nvidia` would need the NVIDIA runtime registered instead) |
+| `gpu-model/gpu-model.sh` | run by the deploy workflow on every deploy, after core is healthy: with `GPU_MODEL_ENABLED=true` it checks the settings, hashes `GPU_MODEL_FILE` against `GPU_MODEL_SHA256`, starts `gpu-model`, waits until it is healthy and serves exactly the expected alias, then brings a running pipeline up to date. Any failure stops `gpu-model` and fails the deploy. Without `true`, it stops `gpu-model` |
+| `pipeline` | sends a question to `gpu-model` only when the question's route is `own` (core sets it from the hospital's policy), after checking the served alias; it asks in the model's own prompt format (`GPU_MODEL_PROFILE`). Retrieval, NLI, the HGA and the escalation guard are the local route's, unchanged |
+
+Fail closed: a file that is missing, a link, outside `/srv/mhai-models` or
+whose hash differs is never served; a service that is down or serves another
+alias makes every `own` question escalate with the outcome
+`local_unverified`. There is no fallback to the local route or the cloud.
+
+**Settings** (`/srv/mhai-backend/.env`; none holds a secret):
+
+| Variable | Example | What |
+|---|---|---|
+| `GPU_MODEL_ENABLED` | `true` | the switch; anything else is off |
+| `GPU_MODEL_FILE` | `/srv/mhai-models/cca-v1/model-q4_k_m.gguf` | the GGUF, under `/srv/mhai-models`, a regular file (not a link), readable by uid 1000 |
+| `GPU_MODEL_SHA256` | `896b75ef…4007` (64 hex) | the GGUF's SHA-256 (`sha256sum`) |
+| `GPU_MODEL_NAME`, `GPU_MODEL_VERSION` | `gemma4-e4b-cca`, `1.0.0` | the alias's name and version (`a-z 0-9 -`; `MAJOR.MINOR.PATCH`) |
+| `GPU_MODEL_PROFILE` | `gemma4-e4b-cca-v1` | the answer profile: how the model is asked and read (`default` or `gemma4-e4b-cca-v1`, `services/intelligence/intelligence/agents/answer_profile.py`) |
+| `GPU_MODEL_MEM`, `GPU_MODEL_THREADS`, `GPU_MODEL_CTX`, `GPU_MODEL_GPU_LAYERS` | `8g`, `4`, `8192`, `999` | the container's memory cap, CPU threads, context, layers on the GPU (the defaults) |
+
+**The first model** (`gemma4-e4b-cca-v1`; [intake](../docs/models/intake-2026-11-14-gemma4-e4b-cca-v1.md)):
+Gemma 4 E4B-it (revision `4ecc2ba63bcac23ba4a767fc87025b1450f84c9c`) with
+the researcher's QLoRA adapter merged, `q4_k_m`, converted with llama.cpp
+`b1b770d9` (release `b12359`; no `server-cuda` image was published for it, so
+the service runs `b12627`, the image the model was tried with on the host):
+`/srv/mhai-models/cca-v1/model-q4_k_m.gguf`, 5,302,268,608 bytes, SHA-256
+`896b75ef96037a7365126ba7f2161e64a3657ee9ea141e6a9f996b045ded4007`. The
+researcher's own export of the same model is the same size with SHA-256
+`8b2a145151b7509a6bba355909e1a791f0e89f3357bcdf1beec8f00ba49046de`; only
+the file whose hash is in `.env` is served. **It failed our
+`clinical_answer` gate** (escalation recall 0.056, grounded pass rate 0):
+the product owner chose to serve it so the path works end to end, for a
+hospital the policy names, while the researcher retrains. No gate or check
+was relaxed for it.
+
+### Place a new GGUF
+
+1. Copy it to the GPU server under `/srv/mhai-models/<run>/` (for example
+   `/srv/mhai-models/cca-v2/model-q4_k_m.gguf`), owned by the deploy user,
+   mode 0644 (the folder 0755), never a link.
+2. `sha256sum /srv/mhai-models/<run>/model-q4_k_m.gguf`, and check it
+   against the hash the export recorded.
+3. In `.env`: `GPU_MODEL_FILE`, `GPU_MODEL_SHA256`, a new `GPU_MODEL_VERSION`
+   (the alias changes with the hash anyway), and `GPU_MODEL_PROFILE` if the
+   model needs another answer profile (a new profile is a code change).
+
+### Turn it on
+
+1. Put the settings above in `/srv/mhai-backend/.env` with
+   `GPU_MODEL_ENABLED=true`.
+2. Run "Deploy backend demo" (or wait for the next merge). The deploy prints
+   `gpu-model: serving <alias>`; a hash mismatch or a service that doesn't
+   come up fails it, with the reason.
+3. The pipeline worker must run (profile `pilot`; `pilot/README.md`): the
+   deploy brings it up to date, and only it asks the model.
+
+By hand on the host (the same as the deploy does):
+
+```bash
+cd /srv/mhai-backend
+bash gpu-model/gpu-model.sh
+docker compose --profile gpu-model ps gpu-model
+docker compose --profile gpu-model logs --tail=20 gpu-model
+```
+
+### Switch a hospital to it
+
+The hospital's model policy (`own_model`, off by default). It goes with no
+cloud provider (one route per hospital): setting a provider later switches
+it off.
+
+```bash
+cd /srv/mhai-backend
+docker compose --profile tools run --rm -T core-cli hospitals model-policy set <short code> --provider none --own-model on
+# back to the local models:
+docker compose --profile tools run --rm -T core-cli hospitals model-policy set <short code> --provider none --own-model off
+```
+
+or `PUT /platform/hospitals/{id}/model-policy` with `"cloud_provider": null,
+"own_model": true` (a platform admin, step-up). Each change is audited
+(`hospital.model_policy_changed`, with `own_model` and `previous_own_model`).
+Questions already queued keep the route they were asked with only while the
+policy still says so; the worker checks it again when it takes the question.
+An answer from it reads `generated_by.route` `local` (our own hardware) and
+`model_versions.cca` the alias.
+
+### Switch it off
+
+Per hospital: `--own-model off` (above). For the whole host: set
+`GPU_MODEL_ENABLED=false` (or remove it) and deploy: the service is stopped,
+and every `own` question escalates until a hospital is switched back.
+
+### Replacing the hand-started container
+
+Before this service, the model ran by hand as `mhai-llm-gpu` on
+`127.0.0.1:8095`. Once the deploy prints `gpu-model: serving <alias>`, remove
+it: `docker rm -f mhai-llm-gpu`. Nothing in this stack used it.
+
+`gpu-model/test-entrypoint.sh` and `gpu-model/test-gpu-model.sh` test both
+scripts without Docker (CI). `TestGPUModelService` checks the compose
+service's hardening.
+
 ## Intelligence on its own server (split mode, off by default)
 
 The pipeline worker, the llama sidecar, `model-fetch` and the egress proxy can

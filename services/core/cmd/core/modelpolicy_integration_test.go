@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/account"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
@@ -116,10 +117,11 @@ func TestCLIModelPolicySet(t *testing.T) {
 	a := audits()
 	want := []map[string]any{
 		{"hospital_id": hid.String(), "provider": "anthropic", "previous": "none", "agreement_ref": "DEMO-SYNTHETIC",
-			"monthly_token_budget": float64(2000000), "via": "cli"},
+			"monthly_token_budget": float64(2000000), "via": "cli", "own_model": false, "previous_own_model": false},
 		{"hospital_id": hid.String(), "provider": "openai", "previous": "anthropic", "agreement_ref": "DPA-2026-0042",
-			"monthly_token_budget": float64(750000), "via": "cli"},
-		{"hospital_id": hid.String(), "provider": "none", "previous": "openai", "monthly_token_budget": float64(750000), "via": "cli"},
+			"monthly_token_budget": float64(750000), "via": "cli", "own_model": false, "previous_own_model": false},
+		{"hospital_id": hid.String(), "provider": "none", "previous": "openai", "monthly_token_budget": float64(750000), "via": "cli",
+			"own_model": false, "previous_own_model": false},
 	}
 	if len(a) != len(want) {
 		t.Fatalf("%d audit rows, want %d", len(a), len(want))
@@ -136,5 +138,74 @@ func TestCLIModelPolicySet(t *testing.T) {
 				t.Errorf("row %d %s = %v, want %v", i, k, row.payload[k], v)
 			}
 		}
+	}
+}
+
+// Our own model on the GPU (00055): --own-model on only with --provider
+// none; off by default; a provider clears it; a bad value is refused with
+// nothing written.
+func TestCLIModelPolicyOwnModel(t *testing.T) {
+	pg, pool := testutil.MigratedPostgres(t)
+	ctx := context.Background()
+	_, provURL, err := testutil.ProvisionLogin(ctx, pg, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := envOf(map[string]string{"CORE_CLOUD_PROVIDERS": "anthropic"})
+	run := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		err := hospitalsModelPolicy(ctx, args, provURL, env, &out)
+		return out.String(), err
+	}
+	if err := seed(ctx, []string{"hospitals", "create", "--name", "Synthetic Own", "--short-code", "OWN", "--time-zone", "UTC"},
+		provURL, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var hid uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM hospitals WHERE short_code = 'OWN'`).Scan(&hid); err != nil {
+		t.Fatal(err)
+	}
+	own := func() (bool, bool) {
+		t.Helper()
+		var on bool
+		err := pool.QueryRow(ctx, `SELECT own_model FROM hospital_model_policy WHERE hospital_id = $1`, hid).Scan(&on)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, false
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return on, true
+	}
+	if _, err := run("set", "OWN", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC", "--own-model", "on"); !errors.Is(err, errOwnModelProvider) {
+		t.Fatalf("own model with a provider: %v", err)
+	}
+	if _, err := run("set", "OWN", "--provider", "none", "--own-model", "yes"); !errors.Is(err, errBadOwnModel) {
+		t.Fatalf("own model yes: %v", err)
+	}
+	if _, found := own(); found {
+		t.Fatal("a refused change wrote a policy")
+	}
+	out, err := run("set", "OWN", "--provider", "none", "--own-model", "on")
+	if err != nil || out != "model policy "+hid.String()+" none own-model on\n" {
+		t.Fatalf("on: %q %v", out, err)
+	}
+	if on, _ := own(); !on {
+		t.Fatal("own model not on")
+	}
+	if _, err := run("set", "OWN", "--provider", "none"); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := own(); !on {
+		t.Fatal("none without --own-model did not keep it")
+	}
+	if _, err := run("set", "OWN", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC"); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := own(); on {
+		t.Fatal("a provider did not clear the own model")
+	}
+	if out, err := run("set", "OWN", "--provider", "none", "--own-model", "off"); err != nil || out != "model policy "+hid.String()+" none own-model off\n" {
+		t.Fatalf("off: %q %v", out, err)
 	}
 }
