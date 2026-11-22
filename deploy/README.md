@@ -105,6 +105,8 @@ public keys.
 
 ## One-time setup (product owner)
 
+A whole new server (backend and clinical app on one domain) in one script: [NEW-SERVER.md](NEW-SERVER.md).
+
 ### 1. The `preview` environment in this repository
 
 Copy it from mhai-web (GitHub, Measured-Health/mhai-web, Settings,

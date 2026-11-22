@@ -22,6 +22,14 @@ All notable changes to this project are documented here. The format follows
   `deploy/notifications/enable-notifications.sh` does the host steps
   (deploy/README.md, "Turn on email for the demo"). The demo moved to
   ai.measured-health.org (22 Nov); the docs say so.
+- **A new server in one script (`deploy/new-server.sh`, how-to
+  `deploy/NEW-SERVER.md`).** Sets up a fresh arm64 Ubuntu server for the
+  backend and the clinical app on a given domain: installs Docker, compose,
+  nginx and certbot if missing, runs `setup-host.sh`, sets up
+  `/srv/mhai-web` from a mhai-web checkout, writes the nginx site, checks
+  the DNS record, gets the certificate, and prints the SSH host key
+  fingerprint and the GitHub secrets to set. Safe to run again; prints no
+  secret and starts nothing.
 - **Invites, resets and reminders go out by email (notifications design
   PR 5, migration 00054), off by default.** `CORE_DELIVERY=notify` (new;
   allowed in production with `CORE_APP_URL` and `CORE_NOTIFY_ENABLED`)
