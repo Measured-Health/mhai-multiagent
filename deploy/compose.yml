@@ -400,7 +400,7 @@ services:
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set in /srv/mhai-backend/.env}
       MHAI_DEMO_SEED: "on"
       APP_ENV: demo
-    mem_limit: 128m
+    mem_limit: 256m
     networks: [backend]
     depends_on:
       core-migrate: { condition: service_completed_successfully }
@@ -426,7 +426,7 @@ services:
       NATS_NKEY_SEED_PATH: /run/secrets/nats-gateway.nk
     volumes:
       - ./secrets/nats-gateway.nk:/run/secrets/nats-gateway.nk:ro
-    mem_limit: 128m
+    mem_limit: 256m
     networks: [backend]
     depends_on:
       postgres: { condition: service_healthy }
