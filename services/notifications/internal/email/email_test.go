@@ -77,6 +77,11 @@ func TestSendsOverTLS(t *testing.T) {
 		if err != nil || res.Outcome != channel.Accepted || !strings.HasSuffix(res.ProviderID, "@mail.example.test>") {
 			t.Fatalf("port %d: %+v %v", tc.port, res, err)
 		}
+		// The app's host, never the From domain: a mail server that hosts
+		// the From domain refuses it as a HELO (impersonation).
+		if h := s.Helos(); len(h) == 0 || h[0] != "app.example.test" {
+			t.Errorf("port %d: EHLO names %v, want app.example.test first", tc.port, h)
+		}
 		msgs := s.Messages()
 		if len(msgs) != 1 || msgs[0].From != "no-reply@mail.example.test" || len(msgs[0].To) != 1 ||
 			msgs[0].To[0] != "synthetic.clinician@example.test" || s.Auths() != 1 {
@@ -101,6 +106,22 @@ func TestSendsOverTLS(t *testing.T) {
 				t.Errorf("port %d: the message carries %q", tc.port, bad)
 			}
 		}
+	}
+}
+
+// Without an app address, EHLO falls back to the From domain.
+func TestHelloName(t *testing.T) {
+	c := &Channel{Config: Config{From: "no-reply@mail.example.test"}}
+	if got := c.helloName(); got != "mail.example.test" {
+		t.Errorf("no app: %q", got)
+	}
+	app, err := templates.ParseApp("https://ai.example.test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.App = app
+	if got := c.helloName(); got != "ai.example.test" {
+		t.Errorf("with app: %q", got)
 	}
 }
 

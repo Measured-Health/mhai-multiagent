@@ -211,6 +211,16 @@ func (e permanentError) Error() string {
 	return "email: recipient refused (" + strconv.Itoa(e.code) + ")"
 }
 
+// helloName is the name sent in EHLO: the app's host (it points at this
+// server), else the From domain. A mail server that hosts the From domain
+// itself refuses that domain as a HELO ("Host impersonating domain name").
+func (c *Channel) helloName() string {
+	if c.App.URL != nil && c.App.URL.Hostname() != "" && !strings.ContainsAny(c.App.URL.Hostname(), " \r\n") {
+		return c.App.URL.Hostname()
+	}
+	return Domain(c.Config.From)
+}
+
 func (c *Channel) tlsConfig() *tls.Config {
 	return &tls.Config{ServerName: c.Config.Host, RootCAs: c.Config.RootCAs, MinVersion: tls.VersionTLS12}
 }
@@ -257,7 +267,7 @@ func (c *Channel) submit(ctx context.Context, to string, body []byte) error {
 		return err
 	}
 	defer func() { _ = cl.Close() }()
-	if err := cl.Hello(Domain(c.Config.From)); err != nil {
+	if err := cl.Hello(c.helloName()); err != nil {
 		return err
 	}
 	if c.Config.Port == 587 {
