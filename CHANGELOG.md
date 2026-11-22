@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Live site: the public demo is dropped (product owner, 22 Nov).** A new
+  repository variable `SITE_MODE` (`demo`, the default, or `live`). With
+  `live`, "Deploy backend demo" runs `deploy/live-site.sh` instead of the demo
+  seed and sample answers: it marks the host live (`/srv/mhai-backend/live-site`;
+  `demo/enable-demo.sh` and `demo/reset-demo.sh` then refuse there), stops
+  `sample-ai`, removes the demo markers, and stops core and fails the deploy
+  while a demo hospital that is not deactivated exists (its accounts have
+  published passwords). "Reset backend demo" never runs on a live site (a run
+  by hand fails). `new-server.sh --live` writes the nginx sites for mhai-web's
+  live proxies (8093, 8094). deploy/README.md "Live site": the variables, how
+  to remove the demo data, the first platform admin with `core-cli`. Tests:
+  `.github/scripts/live-site-test.sh` (CI) and `TestLiveSiteModeSkipsTheDemo`.
+
 ### Fixed
 
 - **Notifications: EHLO names the app's host, not the From domain.** Our own

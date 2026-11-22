@@ -109,6 +109,44 @@ hospital), then **Deploy demo** in mhai-web (Actions, Run workflow, branch
 
 See deploy/README.md, "Turn on email".
 
+## Live site (no public demo)
+
+Since 22 Nov 2026 `ai.measured-health.org` and
+`platforms.measured-health.org` serve the **live** apps, with no public demo
+(deploy/README.md, "Live site"). On a new server, use `--live` instead of
+`--demo`:
+
+```bash
+bash /tmp/mhai-backend-deploy/new-server.sh --domain ai.measured-health.org \
+  --email ops@example.org --web-repo-dir /tmp/mhai-web --live \
+  --platform-domain platforms.measured-health.org
+```
+
+`--live` points the nginx sites it writes at mhai-web's loopback live
+proxies (`127.0.0.1:8093` for the clinical app, `127.0.0.1:8094` for the
+platform app) instead of the demo's ports (8090, 8091). It never rewrites a
+site that exists: on a server set up with `--demo`, change the ports by hand
+(mhai-web deploy/README.md, "Live site", host steps).
+
+Then, in order:
+
+1. Repository variable `SITE_MODE=live` in **both** repositories, before any
+   deploy.
+2. On a server that ran the demo: remove the demo data (deploy/README.md,
+   "Live site: removing the demo data"; route A, an empty database, for a
+   server that held only demo data).
+3. **Deploy backend demo** (mhai-multiagent): no demo seed, no sample
+   answers; it marks the host live and refuses a demo hospital that can sign
+   in.
+4. The first platform admin with `core-cli` (deploy/README.md, "Live site:
+   the first platform admin").
+5. **Deploy demo** (mhai-web), by hand: it builds the live images, starts the
+   live apps behind their proxies, and stops the demo and sample-data apps.
+6. The nginx ports (if the sites were written with `--demo`), then the checks
+   in mhai-web deploy/README.md, "Live site".
+
+Real patient data still waits on the go-live sign-offs in TODO.md.
+
 ## Moving the demo to a new server
 
 To move `ai.measured-health.org` (and `platforms.measured-health.org`) from

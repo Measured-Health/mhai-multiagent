@@ -196,6 +196,20 @@ jobs:
     # image.
     if: vars.DEPLOY_ENABLED == 'true'
     steps:
+      # The site mode (deploy/README.md, "Live site"): repository variable
+      # SITE_MODE, demo (the default, unset) or live. Anything else stops
+      # here, so a typo never runs the demo on a live host.
+      - name: Site mode
+        id: mode
+        env:
+          SITE_MODE: ${{ vars.SITE_MODE }}
+        run: |
+          case "$SITE_MODE" in
+            ''|demo) echo "value=demo" >> "$GITHUB_OUTPUT"; echo "Site mode: demo (the public demo)." ;;
+            live) echo "value=live" >> "$GITHUB_OUTPUT"; echo "Site mode: live (no demo seed, no sample answers)." ;;
+            *) echo "::error::Repository variable SITE_MODE must be demo or live (deploy/README.md, \"Live site\")"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
@@ -208,7 +222,7 @@ jobs:
         id: bundle
         run: |
           set -euo pipefail
-          b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh demo/enable-demo.sh demo/reset-demo.sh \
+          b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh live-site.sh demo/enable-demo.sh demo/reset-demo.sh \
             notifications/enable-notifications.sh | base64 -w0)
           echo "value=$b" >> "$GITHUB_OUTPUT"
 
@@ -233,8 +247,10 @@ jobs:
           # The demo's sample answers: on unless the repository variable
           # DEMO_SAMPLE_AI is off (deploy/README.md, "Public demo").
           DEMO_SAMPLE_AI: ${{ vars.DEMO_SAMPLE_AI == 'off' && 'off' || 'on' }}
+          # demo or live (the "Site mode" step above).
+          SITE_MODE: ${{ steps.mode.outputs.value }}
         with:
-          envs: GHCR_TOKEN,GHCR_USER,DEPLOY_BUNDLE,DEMO_SAMPLE_AI
+          envs: GHCR_TOKEN,GHCR_USER,DEPLOY_BUNDLE,DEMO_SAMPLE_AI,SITE_MODE
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -340,9 +356,21 @@ jobs:
               echo "NOTIFY_ENABLED is not true: notifications stopped."
             fi
 
-            # The public demo: the seeded demo hospital and accounts, and the
-            # sample answers (deploy/README.md, "Public demo: sample answers").
-            DEMO_SAMPLE_AI="$DEMO_SAMPLE_AI" bash demo/enable-demo.sh
+            # The live site (SITE_MODE=live; deploy/README.md, "Live site"):
+            # no demo seed and no sample answers; live-site.sh stops
+            # sample-ai, marks the host live (the demo scripts then refuse)
+            # and stops core if a demo hospital could still sign in.
+            # Otherwise the public demo: the seeded demo hospital and
+            # accounts, and the sample answers (deploy/README.md, "Public
+            # demo: sample answers").
+            if [ "$SITE_MODE" = live ]; then
+              bash live-site.sh
+            elif [ -e live-site ]; then
+              echo "::error::This host is a live site (/srv/mhai-backend/live-site) but SITE_MODE is not live: no demo here. Set SITE_MODE=live, or remove the marker by hand (deploy/README.md, \"Live site\")."
+              exit 1
+            else
+              DEMO_SAMPLE_AI="$DEMO_SAMPLE_AI" bash demo/enable-demo.sh
+            fi
 
             # Only this repository's dangling images; other stacks' are left alone.
             docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/Measured-Health/mhai-multiagent" >/dev/null || true

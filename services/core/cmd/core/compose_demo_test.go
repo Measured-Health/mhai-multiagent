@@ -111,3 +111,44 @@ func TestDemoSwitchesOnlyOnDemoServices(t *testing.T) {
 		}
 	}
 }
+
+// The live site (deploy/README.md, "Live site"): with SITE_MODE=live the
+// deploy runs live-site.sh and never the demo seed, refuses a host marked
+// live while SITE_MODE is not live, and the scheduled demo reset never
+// runs (a run by hand refuses).
+func TestLiveSiteModeSkipsTheDemo(t *testing.T) {
+	wf := readRepoFile(t, ".github/workflows/deploy.yml")
+	for _, want := range []string{
+		"SITE_MODE: ${{ vars.SITE_MODE }}",
+		"''|demo) echo \"value=demo\"",
+		"live) echo \"value=live\"",
+		"SITE_MODE: ${{ steps.mode.outputs.value }}",
+		"envs: GHCR_TOKEN,GHCR_USER,DEPLOY_BUNDLE,DEMO_SAMPLE_AI,SITE_MODE",
+		"premigrate-check.sh live-site.sh demo/enable-demo.sh",
+		"if [ \"$SITE_MODE\" = live ]; then\n              bash live-site.sh\n            elif [ -e live-site ]; then",
+	} {
+		if !strings.Contains(wf, want) {
+			t.Errorf("deploy.yml lacks %q", want)
+		}
+	}
+	// The demo seed runs only in the last branch, after the live checks.
+	live := strings.Index(wf, "bash live-site.sh")
+	seed := strings.Index(wf, "bash demo/enable-demo.sh")
+	if live < 0 || seed < 0 || seed < live || strings.Count(wf, "demo/enable-demo.sh\n") != 1 {
+		t.Error("deploy.yml must run demo/enable-demo.sh once, only after the live-site branch")
+	}
+	reset := readRepoFile(t, ".github/workflows/demo-reset.yml")
+	for _, want := range []string{
+		"vars.SITE_MODE != 'live' &&",
+		"if: vars.SITE_MODE == 'live' && github.event_name == 'workflow_dispatch'",
+	} {
+		if !strings.Contains(reset, want) {
+			t.Errorf("demo-reset.yml lacks %q", want)
+		}
+	}
+	for _, f := range []string{"deploy/demo/enable-demo.sh", "deploy/demo/reset-demo.sh"} {
+		if !strings.Contains(readRepoFile(t, f), "is a live site (marker") {
+			t.Errorf("%s does not refuse on a live site", f)
+		}
+	}
+}

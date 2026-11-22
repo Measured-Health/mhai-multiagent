@@ -10,6 +10,8 @@
 #                                     stop sample-ai (the seed still runs)
 #
 # Fail closed:
+#   - never on a live site: the marker live-site (deploy/live-site.sh) stops
+#     it at once;
 #   - never beside the pilot: a pipeline container, or the pilot profile in
 #     .env, stops here and sample-ai stays off (both would take the same jobs);
 #   - core demo seed refuses a database with a real cloud agreement, and
@@ -43,6 +45,9 @@ die()  { printf '::error::%s\n' "$*" >&2; exit 1; }
 cd "$DEST"
 ENV_FILE="$DEST/.env"
 if [ ! -f "$ENV_FILE" ] || [ ! -f secrets/nats-gateway.nk ]; then die "$DEST is not set up (deploy/setup-host.sh)"; fi
+# A live site (live-site.sh wrote the marker): never the demo seed or the
+# sample answers here, whatever runs this (deploy/README.md, "Live site").
+[ ! -e "$DEST/live-site" ] || die "$DEST is a live site (marker $DEST/live-site): the demo is off here"
 compose() { docker compose --profile demo "$@"; }
 env_get() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n1; }
 env_set() {
