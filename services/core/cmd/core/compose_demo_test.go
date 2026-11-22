@@ -125,17 +125,24 @@ func TestLiveSiteModeSkipsTheDemo(t *testing.T) {
 		"SITE_MODE: ${{ steps.mode.outputs.value }}",
 		"envs: GHCR_TOKEN,GHCR_USER,DEPLOY_BUNDLE,DEMO_SAMPLE_AI,SITE_MODE",
 		"premigrate-check.sh live-site.sh demo/enable-demo.sh",
-		"if [ \"$SITE_MODE\" = live ]; then\n              bash live-site.sh\n            elif [ -e live-site ]; then",
+		"if [ \"$SITE_MODE\" = live ]; then\n              bash live-site.sh precheck\n              live_guard=1\n            elif [ -e live-site ]; then",
+		"if [ \"$SITE_MODE\" = live ]; then\n              bash live-site.sh\n              live_guard=0\n            fi",
+		"trap on_exit EXIT",
+		"if [ \"$SITE_MODE\" != live ]; then\n              DEMO_SAMPLE_AI=\"$DEMO_SAMPLE_AI\" bash demo/enable-demo.sh",
 	} {
 		if !strings.Contains(wf, want) {
 			t.Errorf("deploy.yml lacks %q", want)
 		}
 	}
-	// The demo seed runs only in the last branch, after the live checks.
-	live := strings.Index(wf, "bash live-site.sh")
+	// The pre-check comes before core starts, the post-check before the
+	// demo seed's branch, and the seed runs once.
+	pre := strings.Index(wf, "bash live-site.sh precheck")
+	up := strings.Index(wf, "docker compose up -d --remove-orphans core")
+	post := strings.Index(wf, "bash live-site.sh\n")
 	seed := strings.Index(wf, "bash demo/enable-demo.sh")
-	if live < 0 || seed < 0 || seed < live || strings.Count(wf, "demo/enable-demo.sh\n") != 1 {
-		t.Error("deploy.yml must run demo/enable-demo.sh once, only after the live-site branch")
+	if pre < 0 || up < 0 || post < 0 || seed < 0 || pre > up || post < up || seed < post ||
+		strings.Count(wf, "demo/enable-demo.sh\n") != 1 {
+		t.Error("deploy.yml: live-site.sh precheck before core starts, the check after, the demo seed once and last")
 	}
 	reset := readRepoFile(t, ".github/workflows/demo-reset.yml")
 	for _, want := range []string{

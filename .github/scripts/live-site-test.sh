@@ -20,6 +20,7 @@ case "$*" in
   *"exec -T postgres psql"*)
     [ "${FAKE_PSQL_FAIL:-0}" = 1 ] && exit 2
     printf '%s\n' "$FAKE_COUNT" ;;
+  *"pg_isready"*) [ "${FAKE_NOT_READY:-0}" = 1 ] && exit 1 ;;
   *"ps -q sample-ai"*)
     [ -f "$FAKE_STATE/sample-removed" ] || printf '%s\n' "${FAKE_SAMPLE:-}" ;;
   *"rm -f sample-ai"*) touch "$FAKE_STATE/sample-removed" ;;
@@ -35,10 +36,10 @@ host() {
   date > "$work/host/demo/seeded"; date > "$work/host/demo/reset"
   : > "$work/log"
 }
-run() { # want-exit name, then env assignments
+run() { # want-exit name, then env assignments (STAGE=precheck for the pre-check)
   local want=$1 name=$2; shift 2
-  out=$(env LIVE_SITE_COMPOSE="$work/fake-compose" MHAI_BACKEND_DIR="$work/host" \
-    FAKE_LOG="$work/log" FAKE_STATE="$work/state" "$@" bash "$root/deploy/live-site.sh" 2>&1); got=$?
+  out=$(env LIVE_SITE_COMPOSE="$work/fake-compose" MHAI_BACKEND_DIR="$work/host" LIVE_SITE_TRIES=2 \
+    FAKE_LOG="$work/log" FAKE_STATE="$work/state" "$@" bash "$root/deploy/live-site.sh" ${STAGE:+"$STAGE"} 2>&1); got=$?
   if [ "$got" = "$want" ]; then echo "ok   $name (exit $got)"; else echo "FAIL $name: exit $got, want $want: $out"; failures=$((failures + 1)); fi
 }
 check() { # name, then a command that must succeed
@@ -79,6 +80,25 @@ run 1 "the demo profile in .env: refused" FAKE_COUNT=0
 
 rm -rf "$work/host"; mkdir -p "$work/host"
 run 1 "a host that is not set up: refused" FAKE_COUNT=0
+
+# The pre-check, before core (re)starts: Postgres alone.
+host
+STAGE=precheck run 0 "precheck, no demo hospital: passes" FAKE_COUNT=0
+check "precheck starts postgres" logged "up -d postgres"
+check "precheck never starts core" not_logged "up -d core"
+check "precheck writes the marker" test -f "$work/host/live-site"
+check "precheck: the query copes with a new database" logged "to_regclass('public.hospitals')"
+
+host
+STAGE=precheck run 1 "precheck, an active demo hospital: refused" FAKE_COUNT=2
+check "precheck stops the running core" logged "stop core"
+
+host
+STAGE=precheck run 1 "precheck, Postgres never ready: refused" FAKE_COUNT=0 FAKE_NOT_READY=1
+check "core stopped when Postgres never answers" logged "stop core"
+
+host
+STAGE=bogus run 1 "an unknown stage: refused" FAKE_COUNT=0
 
 # The demo scripts refuse on a host with the marker, before any docker call.
 host

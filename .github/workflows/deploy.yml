@@ -288,12 +288,37 @@ jobs:
             done
 
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+            # live_guard=1 (live site only) from just before core starts
+            # until live-site.sh has passed on the running core: any exit in
+            # between stops core, so a live core never keeps serving a
+            # database that wasn't checked.
+            live_guard=0
+            on_exit() {
+              if [ "$live_guard" = 1 ]; then
+                echo "::error::Live site: stopping core (the live checks did not pass)."
+                docker compose stop core >/dev/null 2>&1 || true
+              fi
+              docker logout ghcr.io >/dev/null 2>&1 || true
+            }
+            trap on_exit EXIT
             docker compose pull core
 
             # Migration 00007 (Plan 3) validates existing clinical_queries
             # rows: stop here, before anything migrates, if one doesn't fit.
             bash premigrate-check.sh
+
+            # The live site (SITE_MODE=live; deploy/README.md, "Live site"):
+            # before core (re)starts, against Postgres alone: the host is
+            # marked live (the demo scripts then refuse), sample-ai stops, and
+            # a demo hospital that can still sign in stops the running core
+            # and this deploy. A host marked live never runs the demo.
+            if [ "$SITE_MODE" = live ]; then
+              bash live-site.sh precheck
+              live_guard=1
+            elif [ -e live-site ]; then
+              echo "::error::This host is a live site (/srv/mhai-backend/live-site) but SITE_MODE is not live: no demo here. Set SITE_MODE=live, or remove the marker by hand (deploy/README.md, \"Live site\")."
+              exit 1
+            fi
 
             # Migrations and the keys run first (depends_on); a failed
             # migration stops here and leaves the running core alone.
@@ -321,6 +346,14 @@ jobs:
               exit 1
             fi
             echo "Backend healthy."
+
+            # The live site: the same checks again on the migrated database
+            # with core running; a failure stops core (live-site.sh, and the
+            # EXIT trap above).
+            if [ "$SITE_MODE" = live ]; then
+              bash live-site.sh
+              live_guard=0
+            fi
 
             # Email (profile notifications): only when .env says
             # NOTIFY_ENABLED=true (deploy/notifications/enable-notifications.sh
@@ -356,19 +389,10 @@ jobs:
               echo "NOTIFY_ENABLED is not true: notifications stopped."
             fi
 
-            # The live site (SITE_MODE=live; deploy/README.md, "Live site"):
-            # no demo seed and no sample answers; live-site.sh stops
-            # sample-ai, marks the host live (the demo scripts then refuse)
-            # and stops core if a demo hospital could still sign in.
-            # Otherwise the public demo: the seeded demo hospital and
-            # accounts, and the sample answers (deploy/README.md, "Public
-            # demo: sample answers").
-            if [ "$SITE_MODE" = live ]; then
-              bash live-site.sh
-            elif [ -e live-site ]; then
-              echo "::error::This host is a live site (/srv/mhai-backend/live-site) but SITE_MODE is not live: no demo here. Set SITE_MODE=live, or remove the marker by hand (deploy/README.md, \"Live site\")."
-              exit 1
-            else
+            # The public demo only (never with SITE_MODE=live, checked
+            # above): the seeded demo hospital and accounts, and the sample
+            # answers (deploy/README.md, "Public demo: sample answers").
+            if [ "$SITE_MODE" != live ]; then
               DEMO_SAMPLE_AI="$DEMO_SAMPLE_AI" bash demo/enable-demo.sh
             fi
 

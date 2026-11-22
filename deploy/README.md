@@ -389,8 +389,13 @@ gh variable set SITE_MODE --repo Measured-Health/mhai-web --body live
 `DEMO_MODE`) are ignored while `SITE_MODE=live`; delete them to keep the
 settings plain.
 
-**What `live-site.sh` does on every live deploy** (after core is healthy;
-counts only in the log, never a name or a secret). It fails closed:
+**What `live-site.sh` does on every live deploy.** It runs twice: `live-site.sh
+precheck` after the pre-migration check and **before core (re)starts**,
+against Postgres alone, and `live-site.sh` again once core is healthy on the
+migrated database. Between the two, any failure stops core (the deploy
+script's EXIT trap), so a live core never keeps serving a database that
+wasn't checked. Counts only in the log, never a name or a secret. It fails
+closed:
 
 1. writes the marker `/srv/mhai-backend/live-site` (a timestamp). From then
    on `demo/enable-demo.sh` and `demo/reset-demo.sh` refuse on this host,
@@ -403,8 +408,13 @@ counts only in the log, never a name or a secret). It fails closed:
 4. counts the demo hospitals (`is_demo`) that are **not deactivated**. Any
    such hospital has the seeded accounts with **published** passwords, so the
    script **stops core** and fails the deploy: the live apps then answer
-   "unavailable" rather than let a published password sign in. Remove the
-   demo data (below), then deploy again.
+   "unavailable" rather than let a published password sign in. A query that
+   fails, or a Postgres that never answers, stops core too. Remove the demo
+   data (below), then deploy again. The script writes nothing to the
+   database: deactivating the hospital (route B) is what ends its accounts'
+   sessions (core refuses their refresh at once, and their access tokens
+   when the guard's short cache expires); route A removes them with the
+   database.
 
 mhai-web's deploy checks the marker before it points the public names at the
 live apps (its deploy/README.md, "Live site"), so run "Deploy backend demo"

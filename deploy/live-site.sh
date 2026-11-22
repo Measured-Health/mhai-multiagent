@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # The live site (repository variable SITE_MODE=live; deploy/README.md, "Live
-# site"). Run by the "Deploy backend" workflow instead of
-# demo/enable-demo.sh, after core is healthy, from /srv/mhai-backend (the
-# workflow ships this file with the bundle). Idempotent.
+# site"). Run by the "Deploy backend demo" workflow instead of
+# demo/enable-demo.sh, from /srv/mhai-backend (the workflow ships this file
+# with the bundle), twice. Idempotent.
+#
+#   bash live-site.sh precheck   before core (re)starts, against Postgres
+#                                alone (started if needed)
+#   bash live-site.sh            after core is healthy on the migrated database
+#
+# Between the two the workflow stops core on any failure (its EXIT trap).
 #
 # It runs no demo step. It fails closed:
 #   - it writes the marker live-site first: from then on demo/enable-demo.sh
@@ -15,7 +21,10 @@
 #   - a demo hospital (is_demo) that is not deactivated stops core and fails
 #     the deploy: the seeded demo accounts have published passwords, which
 #     must never sign in on the live site. Remove the demo data first
-#     (deploy/README.md, "Live site: removing the demo data").
+#     (deploy/README.md, "Live site: removing the demo data"). A query that
+#     fails or answers anything but a count stops core too. Deactivating the
+#     hospital is what ends its accounts' sessions (core refuses their
+#     refresh at once); this script writes nothing to the database.
 #
 # It prints counts only (no names, no ids) and never a secret. It never
 # touches the EMR containers, mhai-web or nginx.
@@ -31,6 +40,12 @@ say()  { printf '\n==> %s\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 fail() { printf '::error::live site: %s (deploy/README.md, "Live site").\n' "$*" >&2; exit 1; }
 q() { dc exec -T postgres psql -U "${PGUSER:-pgadmin}" -d "${PGDATABASE:-mhai}" -v ON_ERROR_STOP=1 -tAc "$1"; }
+
+case "${1:-}" in
+  precheck) STAGE=precheck ;;
+  '') STAGE=check ;;
+  *) fail "usage: live-site.sh [precheck]" ;;
+esac
 
 cd "$DEST"
 [ -f .env ] || fail "$DEST is not set up (deploy/setup-host.sh)"
@@ -64,8 +79,20 @@ say "No demo markers"
 rm -f demo/seeded demo/reset
 info "demo/seeded and demo/reset removed (if they were there)"
 
-say "No demo hospital that can sign in"
-r=$(q "SELECT count(*) FROM hospitals WHERE is_demo AND status <> 'deactivated'") || {
+say "No demo hospital that can sign in ($STAGE)"
+if [ "$STAGE" = precheck ]; then
+  # Postgres alone; up -d leaves a running one as it is.
+  dc up -d postgres >/dev/null || { dc stop core >/dev/null 2>&1 || true; fail "could not start postgres; core stopped"; }
+  ready=0
+  for _ in $(seq 1 "${LIVE_SITE_TRIES:-30}"); do
+    if dc exec -T postgres pg_isready -q -U "${PGUSER:-pgadmin}" -d "${PGDATABASE:-mhai}"; then ready=1; break; fi
+    sleep 2
+  done
+  [ "$ready" = 1 ] || { dc stop core >/dev/null 2>&1 || true; fail "Postgres never became ready; core stopped"; }
+fi
+# A database with no hospitals table yet (a new one, before the first
+# migration) holds no demo hospital.
+r=$(q "SELECT CASE WHEN to_regclass('public.hospitals') IS NULL THEN 0 ELSE (SELECT count(*) FROM hospitals WHERE is_demo AND status <> 'deactivated') END") || {
   dc stop core >/dev/null 2>&1 || true
   fail "could not query Postgres; core stopped"
 }
@@ -80,4 +107,4 @@ if [ "$r" != 0 ]; then
 fi
 info "none (demo hospitals that are deactivated, if any, can't sign in)"
 
-say "Live site ready"
+say "Live site checks passed ($STAGE)"
