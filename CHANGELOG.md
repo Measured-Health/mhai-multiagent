@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Live site: the demo check works on a new database.** One `CASE` over
+  `to_regclass('public.hospitals')` still failed with "relation \"hospitals\"
+  does not exist", because Postgres resolves every table a statement names
+  before running it. The check now asks whether the table exists first.
+
 ### Changed
 
 - **Live site: the public demo is dropped (product owner, 22 Nov).** A new
