@@ -33,6 +33,8 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
   - **H5 (platform and operations):** the documents service and object storage, the scheduler slot, alerts for `analysis_freeze_failed` and the body cap, and `SECURITY_CONTACT_*`. Before PR 7 goes live, and PR 9.
   - **H6 (mhai-web team):** the contract changes in the [frontend requirements](docs/specs/2026-10-17-frontend-requirements.md) §10, "Changes from the backend design (H6)", items (a)–(i). Before PR 4, PR 6 and PR 8 go live.
   - **H7 (intelligence lead and the EMR design owner):** patient references in consultations, canonical EMR events into core, and the identity call (proposed as `emr.v1.ctl.identity_resolve`). Before `ANALYSIS_INGEST` is set (PR 10 is built), and before PR 8 goes live.
+- **Local practice context and shared improvement: designed, waiting for review (23 Nov).** The [design](docs/specs/2026-11-23-local-practice-context-design.md) and [plan](docs/plans/2026-11-23-local-practice-context.md) (ten PRs, off by default): de-identified visit data imported per hospital under a recorded agreement and scope (own, pooled, model improvement); practice figures beside PASS answers labelled "Local practice, not a recommendation" (own k ≥ 10; pooled ≥ 20 visits and ≥ 3 hospitals); a Practice view in Analysis; de-identified cases for the test set and retraining. Visit records are never evidence: never in the knowledge base, the prompt or the support gate. Gates before any live hospital: H-LP1 (privacy lead: tiers, thresholds, membership-change rule), H-LP2 (clinical lead: the panel, the divergence rule set, test-case labels), H-LP3 (legal: the agreement clause, revocation, the researcher's environment), H-LP4 (product owner: the design and ADR 0019); per hospital, the onboarding record with its sign-off references. Open questions Q1–Q9 are in the design's §16.
+- **Onboarding agreement template: add the data-sharing clause (legal, H-LP3).** The hospital agreement template must include the data-sharing clause for pooled aggregates (the hospital's de-identified visit data contributes to network-pooled practice figures shown to clinicians at other participating hospitals, never with the hospital's name) and for model improvement (de-identified cases feed the shared test set and the AI researcher's retraining), each as a separate scope the hospital can accept or decline, with revocation and its limits (a trained model keeps what it learned).
 - **Platform admin 7c: analytics.** R41a, R41a-2 and R41a-3 are decided (7 Nov). The design and plan are written, revised after the design review, and wait for the product owner's review: [design](docs/specs/2026-11-07-plan-7c-platform-analytics-design.md), [plan](docs/plans/2026-11-07-plan-7c-platform-analytics.md) (10 tasks, three PRs, migrations from 00019). 7c-1 (calendar periods, the joint guard, guardrails on periods) and 7c-2 (`GET /platform/analytics` and the series routes) are merged; 7c-3 (What changed and follow-ups, migration 00022) is built. Q3 is decided (7 Nov). Open: Q4 (privacy: staff count, review-time medians); whether median review time should flag changes (its minimum needs the decided count stored, spec §18 7c-3 item 4). **What changed: bring back active clinicians and questions per clinician (ruling C9)** as like-for-like comparisons, for example one week against the average week of the previous month (distinct clinicians per week, averaged), with a migration widening `analytics_changes.measure` and the A7 checker's table. mhai-web needs F1–F20 (spec §13); its audit kinds for the follow-ups already exist. The alerts area and Plan 7d wait on the EMR integration and the notifications service.
 - **Documents service: designed, being built (14 Nov).** The [design](docs/designs/2026-11-14-documents-service.md) is merged (#182) and recorded in [ADR 0016](docs/adr/0016-separate-documents-service-with-per-hospital-encryption.md); its §13 is the plan (ten PRs, off by default) and §17 lists where the build departs from it. PR 1 (the ADR and the service skeleton), PR 3 (storage and keys: migration 00046, the file keyring, sealed objects, POST policies, the bucket lifecycle check) and PR 4 (scanning and the sandbox: migration 00048, the `DOCS` stream behind `CORE_DOCUMENTS_ENABLED`, magic bytes and limits, clamd with the signature-age check, docsandbox with pdfium and Pillow under nsjail, output re-checks, the `documents_scan` consumer and the sweeper; design §17 departures 21-34) are built; PR 5 (uploads and letters live, migration 00051) is built as #230 and left open while the documents service is paused: it needs a rebase on main first (it conflicts with the hospital admin actions, #228 and #229, in core's server, errors, config, audit catalogue, OpenAPI and migration tests), and its migration number must still be the next free one when it merges.
 
@@ -53,6 +55,38 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
 - **Public demo (16 Nov; scheduled reset 19 Nov; off since 22 Nov): shared demo accounts.** Visitors share the seeded accounts (deploy/README.md, "Public demo"): they see each other's questions, can change a shared password or enrol two-step on a "new" account, and can trip the per-login sign-in ceiling (an hour) for everyone. The scheduled reset ("Reset backend demo", every 6 hours by default) now undoes all of that and removes visitors' consultations and corrections. Still open: within one interval visitors still see each other's questions (a per-visitor demo account or per-session history is the fix if this bites); the reset doesn't remove uploaded letters, clearances, Analysis views or notification settings visitors make; the first scheduled run needs a deploy of this change first (it ships `demo/reset-demo.sh`), and it does nothing until the demo seed runs (today it refuses: the demo database holds a non-demo hospital).
 - **Demo settings.** `SECURITY_CONTACT_*` isn't set, so the audit integrity status returns 503. We need a name and an email from the product owner.
 - **Dependabot backlog.** 21 open PRs (Go modules, Python groups, GitHub Actions, NATS 2.15); each needs CI and a merge.
+
+## Hospital visit data: de-identification in the pipeline (23 Nov)
+
+Hospitals' visit exports (for test sets, the researcher's retraining and the
+local-practice figures) are de-identified before we receive them today. To
+onboard hospitals at scale, the ingestion pipeline must do it itself, so a
+hospital can hand over a raw export and nothing identifying is ever stored.
+
+- [ ] **A de-identification step in the visit-data import**, run on the server
+  before anything is stored, failing closed (a file that can't be fully
+  processed is rejected, not half-loaded):
+  - drop direct identifiers by column (names, phone numbers, emails,
+    addresses, hospital/folder/MRN numbers, NIN, next of kin), refusing
+    unknown columns until mapped;
+  - scrub free text (complaints, diagnoses, treatments): names and titles,
+    phone numbers, emails, ID-like numbers, places, occupations and
+    employers, using the existing PII masker plus Nigerian-specific rules
+    (names, places, phone formats);
+  - generalise quasi-identifiers: ages to bands (exact age over 89 never
+    kept), dates to month or shifted per patient, rare diagnoses or
+    combinations suppressed below k;
+  - remove duplicates; record per run what was removed (counts by rule, no
+    values) in the audit log;
+  - a re-identification risk check before release (k-anonymity on the
+    quasi-identifiers; refuse below the configured k);
+  - a human spot check: a sample of de-identified rows reviewed by the
+    hospital's data lead before first use, recorded with the sign-off.
+- [ ] Synthetic test fixtures covering every rule (never real rows), and a
+  regression test for each identifier type found in a real export.
+- [ ] The privacy sign-off and the hospital agreement reference are recorded
+  per hospital before an import is allowed (see the local-practice context
+  design).
 
 ## Shared reference library (23 Nov)
 
