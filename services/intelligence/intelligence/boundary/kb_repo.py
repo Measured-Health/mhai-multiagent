@@ -12,9 +12,19 @@ another (migration 00040):
   - shared rows outside any reference library (the seeded guidelines), at
     most MAX_SHARED_CHUNKS;
   - with a question, a reference library's candidates: the database's
-    full-text pre-filter over the active libraries' rows, best first, at
-    most LIBRARY_CANDIDATES. A library may hold tens of thousands of rows;
-    a job never reads all of them;
+    full-text pre-filter over the active libraries' rows, at most
+    LIBRARY_CANDIDATES. Several libraries may be active at once (a large
+    drug-label library beside a small formulary or a guideline), so the
+    candidates are taken in turns: each library's best match, then each
+    library's second best, and so on. A small library's match is never
+    crowded out by a large one's. A library may hold tens of thousands of
+    rows; a job never reads all of them;
+  - the generic expansion: when a candidate is a local formulary row (a
+    brand name the question used, "Lonart"), its generic name
+    ("artemether-lumefantrine") is searched as well, all of its words
+    required, for at most EXPANSION_CANDIDATES more rows of the other
+    libraries (that drug's label, the guideline's dosing section). The
+    generic comes from the pinned library row, never from the question;
   - this hospital's own rows, at most MAX_HOSPITAL_CHUNKS, in id order.
 
 Patient scope is ours (ADR 0004): every path takes patient_id and keeps
@@ -66,6 +76,11 @@ MAX_HOSPITAL_CHUNKS = 5000
 MAX_SHARED_CHUNKS = 500
 # A library's rows a question may use: the pre-filter's best matches.
 LIBRARY_CANDIDATES = 100
+# The generic expansion: at most this many formulary generics, and rows.
+MAX_EXPANSION_GENERICS = 3
+EXPANSION_CANDIDATES = 20
+MAX_GENERIC_CHARS = 200
+_GENERIC_WORDS = re.compile(r"[^0-9A-Za-z]+")
 # The question text the pre-filter reads (the masked question).
 MAX_QUESTION_CHARS = 2000
 # Ids of reference library rows (00040 kb_library_chunk_id).
@@ -79,14 +94,37 @@ _LOAD_SHARED = """SELECT chunk_id, hospital_id IS NULL, content, chunk_type, sou
 FROM kb_chunks WHERE hospital_id IS NULL AND library_id IS NULL ORDER BY id LIMIT %s"""
 
 # Any of the question's words (plainto_tsquery's lexemes joined with OR),
-# ranked; ties go to the lower id (a library puts its safety-critical rows
-# first).
+# ranked within each active library; the libraries take turns (rank 1 of
+# each, then rank 2 of each, ...). Ties go to the lower id (a library puts
+# its safety-critical rows first).
 _LOAD_LIBRARY = """WITH q AS (
-    SELECT replace(plainto_tsquery('english', %s)::text, ' & ', ' | ')::tsquery AS query)
+    SELECT replace(plainto_tsquery('english', %s)::text, ' & ', ' | ')::tsquery AS query),
+m AS (
+    SELECT k.id, k.library_id, k.chunk_id, k.hospital_id IS NULL AS shared, k.content,
+        k.chunk_type, k.source_patient_id, k.source_subject_id, k.metadata_json, k.embedding,
+        l.embedder, ts_rank(k.search_tsv, q.query) AS score
+    FROM q, kb_chunks k JOIN reference_libraries l ON l.id = k.library_id AND l.active
+    WHERE k.hospital_id IS NULL AND k.search_tsv @@ q.query),
+t AS (
+    SELECT m.*, row_number() OVER (PARTITION BY library_id ORDER BY score DESC, id) AS turn
+    FROM m)
+SELECT chunk_id, shared, content, chunk_type, source_patient_id, source_subject_id,
+    metadata_json, embedding, embedder
+FROM t ORDER BY turn, score DESC, id LIMIT %s"""
+
+# The generic expansion: rows that hold every word of one of the generics
+# (each generic's plainto_tsquery, the generics joined with OR), outside
+# the local formulary, best first.
+_LOAD_GENERICS = """WITH g AS (
+    SELECT plainto_tsquery('english', t) AS query FROM unnest(%s::text[]) AS t),
+q AS (
+    SELECT string_agg('(' || query::text || ')', ' | ')::tsquery AS query
+    FROM g WHERE query::text <> '')
 SELECT k.chunk_id, k.hospital_id IS NULL, k.content, k.chunk_type, k.source_patient_id,
     k.source_subject_id, k.metadata_json, k.embedding, l.embedder
 FROM q, kb_chunks k JOIN reference_libraries l ON l.id = k.library_id AND l.active
-WHERE k.hospital_id IS NULL AND k.search_tsv @@ q.query
+WHERE k.hospital_id IS NULL AND q.query IS NOT NULL AND k.search_tsv @@ q.query
+    AND l.name <> 'local-formulary'
 ORDER BY ts_rank(k.search_tsv, q.query) DESC, k.id LIMIT %s"""
 
 _LOAD_HOSPITAL = """SELECT chunk_id, hospital_id IS NULL, content, chunk_type, source_patient_id,
@@ -145,6 +183,27 @@ def _chunk(row: tuple[Any, ...]) -> KBChunk:
     return chunk
 
 
+def formulary_generics(rows: list[tuple[Any, ...]]) -> list[str]:
+    """The generic names of the local formulary rows among a question's
+    candidates, in candidate order, each once, at most
+    MAX_EXPANSION_GENERICS: plain words only (a hyphen or a plus is a
+    space), so plainto_tsquery requires each word."""
+    out: list[str] = []
+    for r in rows:
+        if len(r) < 7 or r[1] is not True or not isinstance(r[6], dict):
+            continue
+        meta = r[6]
+        generic = meta.get("generic")
+        if meta.get("kind") != "local_formulary" or not isinstance(generic, str):
+            continue
+        words = " ".join(_GENERIC_WORDS.sub(" ", generic[:MAX_GENERIC_CHARS]).split()).lower()
+        if words and words not in out:
+            out.append(words)
+        if len(out) >= MAX_EXPANSION_GENERICS:
+            break
+    return out
+
+
 async def load_chunks(cur: Cursor, patient_id: str | None, *, question: str = "") -> list[KBChunk]:
     """The chunks a question about patient_id may use: what RLS shows this
     hospital (each kind of row under its own bound, and a library's rows
@@ -155,7 +214,12 @@ async def load_chunks(cur: Cursor, patient_id: str | None, *, question: str = ""
     text = question[:MAX_QUESTION_CHARS] if isinstance(question, str) else ""
     if text.strip():
         await cur.execute(_LOAD_LIBRARY, (text, LIBRARY_CANDIDATES))
-        shared_rows += [tuple(r) for r in await cur.fetchall()]
+        library_rows = [tuple(r) for r in await cur.fetchall()]
+        shared_rows += library_rows
+        generics = formulary_generics(library_rows)
+        if generics:
+            await cur.execute(_LOAD_GENERICS, (generics, EXPANSION_CANDIDATES))
+            shared_rows += [tuple(r) for r in await cur.fetchall()]
     await cur.execute(_LOAD_HOSPITAL, (MAX_HOSPITAL_CHUNKS,))
     hospital_rows = [tuple(r) for r in await cur.fetchall()]
 

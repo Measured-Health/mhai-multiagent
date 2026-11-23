@@ -91,6 +91,10 @@ dev = [
     # The cloud tests: property tests, and no network in the unit modules.
     "hypothesis>=6.170.17",
     "pytest-socket>=0.8.1",
+    # Guideline PDFs to reference library rows (knowledge_base/guideline_pdf.py), on the build
+    # machine only: text extraction, no OCR. Pinned exactly: the rows (and so the artefact's
+    # SHA-256) depend on the extractor's output.
+    "pypdf==7.1.1",
 ]
 # PyTorch build. CPU is the default; for a CUDA machine use
 # `uv sync --no-group cpu --group cu128`.

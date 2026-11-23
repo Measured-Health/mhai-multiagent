@@ -114,15 +114,30 @@ on any server yet.
   the library's use with real patients. It is reference text (drug labels,
   patient-facing summaries), not clinical practice guidance. Then the
   operator runs deploy/README.md, "Live site: the shared reference library".
-- **Real guidelines for the pilot hospital: source and licence-check them.** The WHO
-  guidelines and the Nigerian national guidelines (Federal Ministry of
-  Health: malaria, hypertension, maternal and newborn care), and the
-  hospital's own protocols. **Licence flag:** WHO publications are often
-  CC BY-NC-SA 3.0 IGO, which is non-commercial and share-alike. Check each
-  document's own licence, and ask WHO for permission or get legal advice
-  before a commercial product uses one. Each source becomes a new library
-  version (converter allow-list, review copy, pin, load) and gets its own
-  clinical sign-off.
+- **Owner: decide the guideline licences (23 Nov).** Sourced, built and kept
+  ready on the build server, not pinned (docs/models/reference-library.md,
+  "Guideline documents"):
+  - WHO guidelines for malaria (10 Sep 2026): **CC BY-NC-SA 3.0 IGO**, which
+    is non-commercial and share-alike. Decide whether serving it in MHAI is
+    within the licence, or ask WHO (https://www.who.int/copyright).
+  - Nigeria national malaria guidelines (NMEP, 4th edition, May 2020): "All
+    rights reserved", no open licence. Ask NMEP or the Federal Ministry of
+    Health for written permission.
+  - Nigeria Standard Treatment Guidelines (2022): no official PDF found
+    online. Get an official copy from the Federal Ministry of Health, with
+    its licence terms.
+  - The hospital's own protocols: still to come.
+  Each permitted document is pinned by pull request and gets the clinical
+  safety lead's sign-off before it is loaded.
+- **Clinician: confirm the 14 low-confidence formulary rows**
+  (`models/reference/local-formulary.csv`: Cofex, Emzolyn, Tuxil-D,
+  Broncholyte, Emzoron, Astyfer, Avrofen, Zetagel, Hostan, Anurol, Zolat,
+  Floranorm, Emal, Progunal). Each needs its generic, class and use, then
+  confidence high or medium; a new formulary version is built and pinned
+  (docs/models/reference-library.md, "Local formulary"). A clinician should
+  also check the 34 loaded rows once.
+- **Operator: load `local-formulary` 1.0.0** on the live site once this
+  change is deployed (deploy/README.md, "Adding reference libraries").
 - **Later decisions, left out of 1.0.0:** MedQuAD (CC BY 4.0, but rows
   without an upstream URL; re-source with URLs first), ClinicalTrials.gov
   registrations, PubMed and Europe PMC abstracts (publisher copyright). Never:
@@ -248,7 +263,7 @@ Alerts now carry `patient.id`, so a clinician can ask about an alert's patient. 
 
 - [x] **Migration order:** 00043 (`last_file_at`, file export staleness) follows 00040-00042 (all on main); the migration-count tests list it.
 - [ ] **Before H7 (live):** a synthetic SFTP end-to-end run through the real `egress-emr` on the build host (an `emr synth-sftp` development command beside `synth-fhir`), as the FHIR run does (plan departure 72).
-- [ ] **Deploy, after H1 and H7:** add `file_export` to `CORE_EMR_CONNECTOR_TYPES`; give the platform admin the host key fingerprint and the export interval from the pilot hospital's IT; the pilot hospital creates `processed/` and `rejected/` and writes files as `.part` then renames.
+- [ ] **Deploy, after H1 and H7:** add `file_export` to `CORE_EMR_CONNECTOR_TYPES`; give the platform admin the host key fingerprint and the export interval from the pilot hospital IT; the pilot hospital creates `processed/` and `rejected/` and writes files as `.part` then renames.
 - [ ] **mhai-web:** the `file_export` form shows the new fields from `GET /platform/emr/connector-types` (`username`, `expected_every_minutes`, `mrn_namespace`); no contract change.
 - [ ] **Visibility:** store the closed reason of a dead-lettered row or set-aside file (today counted and an `unreadable_data` error row), and export the connector's counts (files loaded, refused, set aside; rows dead-lettered) as metrics. Before scale.
 - [ ] **Residuals (plan departure 71):** dead letters carry no patient link (an exclusion's purge can't find them; they hold no value); RSA keys may sign with SHA-1 to an old server (recommend Ed25519); the parsed key isn't zeroed; a file cut at a row boundary can't be told from a complete one.

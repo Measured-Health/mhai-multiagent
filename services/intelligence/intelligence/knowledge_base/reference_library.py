@@ -1,6 +1,15 @@
 """A reference library: a licence-clean shared corpus, built once per pinned
 version and loaded into kb_chunks (migration 00040).
 
+Several libraries can be active at once, one version of each name
+(:data:`LIBRARIES`): ``medref`` (below), ``local-formulary`` (the pilot
+site's local brand names, :mod:`intelligence.knowledge_base.local_formulary`)
+and one library per guideline document
+(:mod:`intelligence.knowledge_base.guideline_pdf`). Each name has its own
+block of chunk ids (``KB#<block>nnnnnn``), so the libraries never collide in
+kb_chunks, and its own approved kinds and sources, checked row by row at
+load.
+
 Library v1, ``medref``, is two sources only (the licence review):
 
 - openFDA drug labels (``drug_label``; CC0): the safety-critical sections
@@ -75,8 +84,10 @@ REPO = Path(__file__).resolve().parents[4]
 LOCK_PATH = REPO / "models" / "reference-library.lock"
 BUNDLE_MEMBER = "bundle/kb/chunks.jsonl.gz"
 
-FIRST_ID = 1_000_001
+FIRST_ID = 1_000_001  # medref's first id; first_id(name) for any library
 LAST_ID = 1_999_999
+BLOCK_SIZE = 1_000_000
+MAX_ROWS = BLOCK_SIZE - 1
 CHUNK_ID = re.compile(r"KB#[1-9][0-9]{6}")
 CHUNK_TYPE = "guideline"  # chunk_visible_to shows a shared guideline to everyone
 MAX_LINE_BYTES = 1 << 20
@@ -147,6 +158,58 @@ _DEMO_MARKS = (DEMO_SOURCE.lower(), "(synthetic demo)", "synthetic demo data")
 # The approved kinds, their source names in the artefact, and the metadata
 # keys an artefact row may carry (a closed set: nothing patient-shaped).
 APPROVED_SOURCES = {"drug_label": "openFDA", "health_topic": "MedlinePlus"}
+
+# The publishers whose guideline documents may be converted
+# (models/guideline-documents.lock names each document and its publisher).
+WHO = "World Health Organization"
+FMOH_NG = "Federal Ministry of Health, Nigeria"
+# The local formulary is our own curation (licence: CC0-1.0).
+OWN_SOURCE = "Measured Health"
+
+
+@dataclass(frozen=True)
+class LibrarySpec:
+    """A library name's block of chunk ids (``KB#<block>nnnnnn``) and the
+    kinds its rows may have, each with its approved source names."""
+
+    block: int
+    sources: Mapping[str, frozenset[str]]
+
+
+# The libraries that may be built and loaded. Mirrored in core
+# (services/core/cmd/core/reflib.go, reflibLibraries); a new library is
+# added to both by one pull request.
+LIBRARIES: Mapping[str, LibrarySpec] = {
+    "medref": LibrarySpec(
+        1,
+        {"drug_label": frozenset({"openFDA"}), "health_topic": frozenset({"MedlinePlus"})},
+    ),
+    "local-formulary": LibrarySpec(2, {"local_formulary": frozenset({OWN_SOURCE})}),
+    "who-malaria": LibrarySpec(3, {"guideline": frozenset({WHO})}),
+    "ng-malaria": LibrarySpec(4, {"guideline": frozenset({FMOH_NG})}),
+    "ng-stg": LibrarySpec(5, {"guideline": frozenset({FMOH_NG})}),
+}
+
+
+def first_id(name: str) -> int:
+    """The first chunk id number of a library's block."""
+    spec = LIBRARIES.get(name)
+    if spec is None:
+        raise LibraryError("unknown_library")
+    return spec.block * BLOCK_SIZE + 1
+
+
+def in_block(chunk_id: str, name: str) -> bool:
+    """Whether a chunk id is in the library's own block."""
+    spec = LIBRARIES.get(name)
+    return (
+        spec is not None
+        and CHUNK_ID.fullmatch(chunk_id) is not None
+        and int(chunk_id[3:]) // BLOCK_SIZE == spec.block
+        and int(chunk_id[3:]) % BLOCK_SIZE != 0
+    )
+
+
 ROW_KEYS = frozenset(
     {
         "kind",
@@ -162,6 +225,17 @@ ROW_KEYS = frozenset(
         "audience",
         "retrieved",
         "attribution",
+        # local_formulary rows
+        "brand",
+        "generic",
+        "drug_class",
+        "confidence",
+        # guideline rows
+        "document",
+        "publisher",
+        "edition",
+        "page_start",
+        "page_end",
     }
 )
 
@@ -421,7 +495,7 @@ def collect(
         seen.add((e.kind, e.content))
         out.append(e)
     out.sort(key=lambda e: e.order)
-    if len(out) > LAST_ID - FIRST_ID + 1:
+    if len(out) > MAX_ROWS:
         raise LibraryError("too_many_rows")
     return out
 
@@ -455,10 +529,22 @@ def build(
     built_from: str,
     retrieved: str,
     batch: int = 256,
+    name: str = NAME,
+    licence: str = LICENCE,
+    attribution: str = ATTRIBUTION,
 ) -> tuple[Header, list[Row]]:
-    """Number the entries and embed them: the artefact's header and rows."""
+    """Number the entries from the library's own block and embed them: the
+    artefact's header and rows. Every entry must be a row the library may
+    hold (:func:`row_refusal`)."""
     if not _VERSION.fullmatch(version):
         raise LibraryError("bad_version")
+    base = first_id(name)
+    if len(entries) > MAX_ROWS:
+        raise LibraryError("too_many_rows")
+    for e in entries:
+        why = row_refusal(e.content, e.metadata, name)
+        if why:
+            raise LibraryError(why)
     rows: list[Row] = []
     dim = 0
     for start in range(0, len(entries), batch):
@@ -472,17 +558,17 @@ def build(
         for i, (e, v) in enumerate(zip(part, vectors, strict=True)):
             rows.append(
                 Row(
-                    chunk_id=f"KB#{FIRST_ID + start + i}",
+                    chunk_id=f"KB#{base + start + i}",
                     content=e.content,
                     metadata=dict(e.metadata),
                     embedding=tuple(round(float(x), 6) for x in v),
                 )
             )
     header = Header(
-        name=NAME,
+        name=name,
         version=version,
-        licence=LICENCE,
-        attribution=ATTRIBUTION,
+        licence=licence,
+        attribution=attribution,
         embedder=embedder,
         dim=dim,
         count=len(rows),
@@ -626,6 +712,7 @@ def _header(obj: Any) -> Header:
     ok = (
         isinstance(obj["name"], str)
         and _NAME.fullmatch(obj["name"])
+        and obj["name"] in LIBRARIES
         and isinstance(obj["version"], str)
         and _VERSION.fullmatch(obj["version"])
         and all(isinstance(obj[k], str) and obj[k] for k in ("licence", "attribution", "embedder"))
@@ -635,7 +722,7 @@ def _header(obj: Any) -> Header:
         and type(obj["dim"]) is int
         and 1 <= obj["dim"] <= MAX_DIM
         and type(obj["count"]) is int
-        and 0 <= obj["count"] <= LAST_ID - FIRST_ID + 1
+        and 0 <= obj["count"] <= MAX_ROWS
         and isinstance(obj["built_from"], str)
         and isinstance(obj["retrieved"], str)
     )
@@ -657,7 +744,7 @@ def read_header(source: Path | bytes) -> Header:
         raise LibraryError("bad_header") from None
 
 
-def _row(obj: Any, dim: int) -> Row:
+def _row(obj: Any, dim: int, library: str | None = None) -> Row:
     if not isinstance(obj, dict) or set(obj) != {"chunk_id", "content", "metadata", "embedding"}:
         raise LibraryError("bad_row")
     cid, content, meta, emb = obj["chunk_id"], obj["content"], obj["metadata"], obj["embedding"]
@@ -675,20 +762,33 @@ def _row(obj: Any, dim: int) -> Row:
     )
     if not ok:
         raise LibraryError("bad_row")
-    why = row_refusal(content, meta)
+    if library is not None and not in_block(cid, library):
+        raise LibraryError("id_outside_block")
+    why = row_refusal(content, meta, library)
     if why:
         raise LibraryError(why)
     return Row(cid, content, meta, tuple(float(x) for x in emb))
 
 
-def row_refusal(content: str, meta: Mapping[str, Any]) -> str:
+def _approved(kind: Any, source: Any, library: str | None) -> bool:
+    if library is None:
+        specs = list(LIBRARIES.values())
+    else:
+        spec = LIBRARIES.get(library)
+        specs = [spec] if spec is not None else []
+    return any(
+        isinstance(kind, str) and kind in s.sources and source in s.sources[kind] for s in specs
+    )
+
+
+def row_refusal(content: str, meta: Mapping[str, Any], library: str | None = None) -> str:
     """Why an artefact row may not be loaded, or "": its metadata keys are
-    a closed set (nothing patient-shaped), its kind and source are the
-    approved ones, and nothing in it names the demo's source."""
+    a closed set (nothing patient-shaped), its kind and source are ones the
+    library (any library when None) approves, and nothing in it names the
+    demo's source."""
     if not set(meta) <= ROW_KEYS:
         return "row_patient_or_unknown_field"
-    kind = meta.get("kind")
-    if kind not in APPROVED_SOURCES or meta.get("source") != APPROVED_SOURCES[kind]:
+    if not _approved(meta.get("kind"), meta.get("source"), library):
         return "row_kind_not_approved"
     if not isinstance(meta.get("title"), str) or not isinstance(meta.get("licence"), str):
         return "bad_row"
@@ -708,7 +808,7 @@ def read_rows(source: Path | bytes, header: Header) -> Iterator[Row]:
             if len(line) > MAX_LINE_BYTES:
                 raise LibraryError("bad_row")
             try:
-                row = _row(json.loads(line), header.dim)
+                row = _row(json.loads(line), header.dim, header.name)
             except ValueError:
                 raise LibraryError("bad_row") from None
             if row.chunk_id in seen:
@@ -718,6 +818,37 @@ def read_rows(source: Path | bytes, header: Header) -> Iterator[Row]:
             yield row
     if n != header.count:
         raise LibraryError("count_mismatch")
+
+
+# --- the pinned embedder (build machine only) ---------------------------------------------
+
+
+def pinned_embedder(models: Path, fetch: bool) -> tuple[Embedder, str]:  # pragma: no cover
+    """OUR pinned dense embedder (role dense of models/answer-gate-models.lock),
+    verified file by file and loaded offline, and its ``repo@revision``.
+    Heavy: a build machine only, never a worker or a laptop."""
+    from intelligence.doceval.answers import gate_models
+
+    lock = gate_models.load_lock()
+    gate_models.check_config(lock)
+    if fetch:
+        gate_models.fetch_role(lock, models, "dense")
+    dense = gate_models.verify_role(lock, models, "dense")
+    pin = lock["dense"]
+
+    from intelligence.boundary.models import set_hub_offline
+
+    set_hub_offline()
+    from sentence_transformers import SentenceTransformer
+
+    model = SentenceTransformer(str(dense), device="cpu", local_files_only=True)
+
+    def embed(texts: Sequence[str]) -> Any:
+        return model.encode(
+            list(texts), batch_size=64, normalize_embeddings=True, show_progress_bar=False
+        )
+
+    return embed, f"{pin.repo}@{pin.revision}"
 
 
 # --- the operator's commands -------------------------------------------------------------

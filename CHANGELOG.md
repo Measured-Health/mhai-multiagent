@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Several reference libraries at once, a local formulary and guideline
+  documents.** `reference_libraries` already allowed one active version per
+  name; each library now has its own block of chunk ids (`KB#<block>nnnnnn`)
+  and its own approved kinds and sources, checked at build and at load in
+  Python and in `core reference-library load` (`reflibLibraries`).
+  `local-formulary` 1.0.0 (34 rows from `models/reference/local-formulary.csv`,
+  confidence high or medium only; CC0) is pinned. Guideline PDFs become one
+  library per document (`scripts/reflib_guideline.py`: pypdf 7.1.1, no OCR,
+  section-aware chunks, page metadata, deterministic), each an opt-in entry
+  of `models/guideline-documents.lock` with its URL, SHA-256, licence text and
+  licence status. Only a `permitted` document may be pinned; the WHO and NMEP
+  malaria guidelines are built and kept on the build server pending the
+  owner's licence decision. Retrieval takes each active library's candidates
+  in turns, so a small library is never crowded out, and a formulary brand in
+  a question pulls its generic's label and guideline rows (the generic
+  expansion). docs/models/reference-library.md; deploy/README.md, "Adding
+  reference libraries".
 - **The pilot site's private test set builder.**
   `scripts/build_site_testset.py` (standard library only, run on the live
   server in a throwaway container with no network and the visit folder

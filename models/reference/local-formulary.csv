@@ -1,0 +1,49 @@
+brand_or_local_name,generic,class,typical_use,confidence,notes
+Lonart,artemether-lumefantrine 20/120 mg,artemisinin-based combination therapy (ACT),uncomplicated falciparum malaria,high,
+Lonart DS,artemether-lumefantrine 80/480 mg,ACT,uncomplicated falciparum malaria (double strength),high,
+Camosunate,artesunate-amodiaquine,ACT,uncomplicated falciparum malaria,high,
+P-Alaxin,dihydroartemisinin-piperaquine,ACT,uncomplicated falciparum malaria,high,an antimalarial (filed under antibiotics in one source file)
+Maldox,sulfadoxine-pyrimethamine,antimalarial,intermittent preventive treatment in pregnancy; not first-line for uncomplicated malaria,high,
+Alpha-beta arteether (injection),arteether,antimalarial (injectable),severe malaria (artesunate is the preferred injectable),high,
+Chloroquine,chloroquine,antimalarial,not recommended for falciparum malaria in Nigeria (resistance),high,
+Emzor / Emzor paracetamol,paracetamol,analgesic/antipyretic,fever and pain,high,Emzor is the manufacturer brand
+PCM,paracetamol,analgesic/antipyretic,fever and pain,high,abbreviation
+Panadol Extra,paracetamol + caffeine,analgesic,pain,high,
+Piriton,chlorphenamine,antihistamine,allergy; catarrh,high,
+MMT suspension,magnesium trisilicate mixture,antacid,dyspepsia; heartburn,high,
+Vasoprin,aspirin (low dose),antiplatelet,cardiovascular prevention,high,
+Aldoment,methyldopa,antihypertensive,hypertension (including in pregnancy),high,
+Esidrex,hydrochlorothiazide,thiazide diuretic,hypertension,high,
+Diovan,valsartan,angiotensin receptor blocker,hypertension,high,
+Coveram,perindopril + amlodipine,ACE inhibitor + calcium channel blocker,hypertension,high,
+Uperio,sacubitril/valsartan,ARNI,heart failure,high,
+Labet,labetalol,beta-blocker,hypertension (including in pregnancy),high,
+Diamicron,gliclazide,sulfonylurea,type 2 diabetes,high,
+Lexotan,bromazepam,benzodiazepine,anxiety,high,
+Norgesic,orphenadrine + paracetamol,muscle relaxant + analgesic,musculoskeletal pain,high,
+Celebrex,celecoxib,COX-2 selective NSAID,pain; arthritis,high,
+Xyzal,levocetirizine,antihistamine,allergic rhinitis,high,
+Ventolin,salbutamol,short-acting beta-2 agonist,asthma; bronchospasm,high,
+Avamys,fluticasone furoate (nasal),intranasal corticosteroid,allergic rhinitis,high,
+Montiget,montelukast,leukotriene receptor antagonist,asthma; allergic rhinitis,medium,
+Maxolon,metoclopramide,antiemetic,nausea; vomiting,high,
+Strepsils,amylmetacresol + dichlorobenzyl alcohol lozenge,antiseptic lozenge,sore throat,high,
+Amoxiclav / Aquaclav,amoxicillin + clavulanic acid,penicillin antibiotic,bacterial infections,high,"""clavunate"" in one source file is this (filed under antimalarials)"
+Orofer / Emzor Orofer syrup,iron (ferric polymaltose),haematinic,iron-deficiency anaemia,medium,
+Neurovite,vitamins B1 + B6 + B12,vitamin supplement,neuropathy; supplementation,medium,
+Ferrous sulphate,ferrous sulphate,iron supplement,iron-deficiency anaemia,high,
+ORS,oral rehydration salts,rehydration,diarrhoea; dehydration,high,
+Cofex syrup,unknown,cough/cold syrup,cough,low,needs clinician confirmation
+Emzolyn syrup,unknown (Emzor cough syrup),cough/cold syrup,cough,low,needs clinician confirmation
+Tuxil-D,unknown,cough/cold syrup,cough,low,needs clinician confirmation
+Broncholyte,unknown,cough/cold syrup,cough,low,needs clinician confirmation
+Emzoron tonic,unknown,tonic/haematinic,unknown,low,needs clinician confirmation
+Astyfer,unknown (iron preparation?),haematinic,anaemia,low,needs clinician confirmation
+Avrofen / Avrofen gel,unknown (topical NSAID?),analgesic,pain,low,needs clinician confirmation
+Zetagel / Zet gel,unknown,unknown,unknown,low,needs clinician confirmation
+Hostan / Hosatan,possibly losartan,angiotensin receptor blocker?,hypertension?,low,needs clinician confirmation
+Anurol,unknown,unknown,unknown,low,needs clinician confirmation
+Zolat,unknown,unknown,unknown,low,needs clinician confirmation
+Floranorm,possibly Saccharomyces boulardii probiotic,probiotic?,diarrhoea?,low,needs clinician confirmation
+Emal,unknown (possibly an antimalarial),unknown,unknown,low,needs clinician confirmation
+Progunal,possibly proguanil,antimalarial?,malaria prophylaxis?,low,needs clinician confirmation

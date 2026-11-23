@@ -20,6 +20,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from intelligence.boundary import kb_repo
 from intelligence.boundary.db import Database
@@ -297,3 +298,52 @@ async def test_worker_reads_libraries_and_writes_none(
     finally:
         async with await _superuser(postgres) as conn:
             await conn.execute("DELETE FROM reference_libraries WHERE id = %s", (lib,))
+
+
+async def test_a_small_library_is_not_crowded_out_and_a_brand_pulls_its_generic(
+    big_library: int, postgres: Postgres, database: Database
+) -> None:
+    """Two active libraries: 30,000 synthetic label rows and a one-row local
+    formulary. The formulary row is a candidate (the libraries take turns),
+    and its generic's label row comes in by the generic expansion, though
+    the question names only the brand."""
+    async with await _superuser(postgres) as conn:
+        await conn.execute(
+            "UPDATE kb_chunks SET content = %s WHERE library_id = %s AND chunk_id = 'KB#1023456'",
+            (
+                "Synthetic quorvalide and pemtrexine tablets: dosage and administration.",
+                big_library,
+            ),
+        )
+        formulary = await _library(conn, "local-formulary")
+        await conn.execute(
+            "INSERT INTO kb_chunks (chunk_id, hospital_id, content, chunk_type, metadata_json, "
+            "library_id, embedding) VALUES ('KB#2000001', NULL, %s, 'guideline', %s, %s, "
+            "array_fill(0.05::real, ARRAY[384]))",
+            (
+                "Synthlonart is a local brand or name used in Nigeria for quorvalide-pemtrexine. "
+                "Class: synthetic. Typical use: synthetic fever.",
+                Jsonb(
+                    {
+                        "kind": "local_formulary",
+                        "title": "Synthlonart",
+                        "brand": "Synthlonart",
+                        "generic": "quorvalide-pemtrexine",
+                    }
+                ),
+                formulary,
+            ),
+        )
+        await conn.execute("ANALYZE kb_chunks")
+    try:
+        question = "What dosage of Synthlonart for kidney fever and a rash during pregnancy?"
+        async with database.with_hospital(verified_for(HOSPITAL_A)) as cur:
+            chunks = await kb_repo.load_chunks(cur, None, question=question)
+        ids = [c.chunk_id for c in chunks if kb_repo.LIBRARY_CHUNK_ID.fullmatch(c.chunk_id)]
+        assert "KB#2000001" in ids[:2]  # each library's best match comes first
+        assert "KB#1023456" in ids  # the generic expansion
+        assert len(ids) <= kb_repo.LIBRARY_CANDIDATES + kb_repo.EXPANSION_CANDIDATES
+    finally:
+        async with await _superuser(postgres) as conn:
+            await conn.execute("DELETE FROM kb_chunks WHERE library_id = %s", (formulary,))
+            await conn.execute("DELETE FROM reference_libraries WHERE id = %s", (formulary,))
