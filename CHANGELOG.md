@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **"Enable own-model answers" workflow** (Actions, run by hand on main): runs
+  `pilot/enable-pilot.sh --provider none [--short-code CODE [--hospital-name NAME]]`
+  on the live server over the deploy's SSH secrets, after a `docker login ghcr.io`
+  with the run's own short-lived token (logged out at the end), so nobody has to
+  log the server in to GHCR by hand.
+
+### Added
+
 - **Answering with our own model only, no cloud provider.** The live site can
   answer with our own GPU model and no cloud key. `enable-pilot.sh --provider
   none` (only with `GPU_MODEL_ENABLED=true`, refused while a cloud provider is

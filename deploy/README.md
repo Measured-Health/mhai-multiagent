@@ -1277,7 +1277,13 @@ it: `docker rm -f mhai-llm-gpu`. Nothing in this stack used it.
 scripts without Docker (CI). `TestGPUModelService` checks the compose
 service's hardening.
 
-## Answering with our own model only (no cloud provider)
+## Answering with our own model only
+
+**Without logging in to the server:** run the **Enable own-model answers**
+workflow (Actions, Run workflow, on `main`; optional short code and hospital
+name). It does the steps below on the host, logging in to GHCR with the
+run's own token.
+ (no cloud provider)
 
 On the live site (`SITE_MODE=live`) there are no sample answers, so nothing is
 answered until the `pipeline` worker runs. It can run with **no cloud provider
