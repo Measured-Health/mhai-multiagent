@@ -226,8 +226,8 @@ jobs:
           mkdir -p deploy/gpu-model/lock
           cp models/testsets.lock models/licences.json models/approved-datasets.json deploy/gpu-model/lock/
           b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh live-site.sh demo/enable-demo.sh demo/reset-demo.sh \
-            notifications/enable-notifications.sh gpu-model/entrypoint.sh gpu-model/gpu-model.sh pilot/pipeline.sh \
-            gpu-model/swap-model.sh gpu-model/builder/Dockerfile gpu-model/builder/merge.py gpu-model/lock | base64 -w0)
+            notifications/enable-notifications.sh gpu-model/entrypoint.sh gpu-model/gpu-model.sh \
+            gpu-model/swap-model.sh gpu-model/builder/Dockerfile gpu-model/builder/merge.py gpu-model/lock pilot/pipeline.sh | base64 -w0)
           echo "value=$b" >> "$GITHUB_OUTPUT"
 
       # Without a host-key check the SSH step would trust whatever answers at
