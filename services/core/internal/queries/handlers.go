@@ -341,16 +341,17 @@ func (d Deps) result(w http.ResponseWriter, r *http.Request) {
 		flagPenalty               *float64
 		modelVersions             []byte
 		sources                   []byte
+		report                    []byte
 	)
 	err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT d.hga_decision, d.verified, d.degraded, d.failed_agents, d.diagnosis, d.icd10_code,
 			       d.response_text, d.trust_score::float8, d.trust_band, d.citations_json, d.retrieval_ms::float8, d.generation_ms::float8,
 			       (SELECT e.flag_penalty::float8 FROM hga_evaluations e WHERE e.query_id = q.id ORDER BY e.id DESC LIMIT 1),
-			       d.model_versions, d.cited_sources_json
+			       d.model_versions, d.cited_sources_json, d.guardrail_report_json
 			FROM clinical_queries q JOIN clinical_decisions d ON d.query_id = q.id AND d.hospital_id = q.hospital_id
 			WHERE q.id = $1 AND q.created_by = $2 AND q.status = 'completed'`, id, p.UserID).
 			Scan(&decision, &verified, &degraded, &failed, &out.Diagnosis, &out.ICD10Code, &responseText, &out.TrustScore,
-				&band, &citations, &retrievalMS, &generationMS, &flagPenalty, &modelVersions, &sources)
+				&band, &citations, &retrievalMS, &generationMS, &flagPenalty, &modelVersions, &sources, &report)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, r, "not_found")
@@ -380,10 +381,6 @@ func (d Deps) result(w http.ResponseWriter, r *http.Request) {
 	if band != nil && bands[*band] && out.Verified {
 		out.TrustBand = band
 	}
-	// The pipeline stores the cited chunk ids only (no per-claim NLI or
-	// excerpt yet), so citations stays empty rather than made up; the ids
-	// are in cited_chunk_ids.
-	out.Citations = []Citation{}
 	out.CitedChunkIDs = []string{}
 	var ids []any
 	if len(citations) > 0 && json.Unmarshal(citations, &ids) == nil {
@@ -396,6 +393,10 @@ func (d Deps) result(w http.ResponseWriter, r *http.Request) {
 	// Title, link and source credit of the cited reference rows, as stored
 	// with the answer; only for ids in cited_chunk_ids.
 	out.CitedSources = citedSources(sources, out.CitedChunkIDs)
+	// How the answer was checked (#28): each citation's NLI result, as the
+	// pipeline stored it with the answer; empty when there is none (an older
+	// decision, or one that wasn't verified). No excerpt is stored.
+	out.Citations = citationChecks(report, out.CitedSources)
 	if retrievalMS != nil {
 		out.RetrievalMS = *retrievalMS
 	}

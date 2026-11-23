@@ -966,9 +966,17 @@ class DynamicOrchestratorAgent:
                 failed_agents.append("HGA")
             else:
                 try:
+                    # Only what was retrieved for this question can support it
+                    # (#28); a CCA that reports no retrieval is checked
+                    # against nothing, so nothing it cites passes.
+                    retrieved = cca_result.get("retrieved_chunks")
+                    allowed = frozenset(
+                        str(c.get("id")) for c in retrieved or () if isinstance(c, dict)
+                    )
                     hga_result = self.hga.verify(
                         response_text=cca_result["response"],
                         patient_id=patient_id,
+                        allowed_chunk_ids=allowed,
                         pass_threshold=thresholds.trust_pass,
                         escalate_threshold=thresholds.trust_escalate,
                         critical_penalty=thresholds.critical_flag_penalty,

@@ -34,7 +34,7 @@ import re
 import threading
 import time
 import numpy as np
-from typing import List, Tuple, Dict, Optional, Any
+from typing import AbstractSet, List, Tuple, Dict, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
@@ -86,6 +86,57 @@ class CitationVerificationResult:
     nli_result: NLIResult
     action: VerificationAction
     reason: str
+    # A closed reason code (CITATION_REASONS), stored with the decision; never text.
+    code: str = ""
+    # Which claim of the response this citation belongs to (0-based).
+    claim_index: int = -1
+
+
+# The reason code of each per-citation result (CitationVerificationResult.code): what
+# the decision row stores and core shows. Closed set: core checks it too.
+CITATION_REASONS = (
+    "entailed",              # PASS: NLI entailment at or above the threshold
+    "not_entailed",          # FLAG: NLI neutral, or entailment below the threshold
+    "contradicted",          # REDACT: NLI contradiction at or above the threshold
+    "number_not_in_source",  # FLAG: entailed, but a number of the claim isn't in its sources
+    "not_retrieved",         # REDACT: the chunk wasn't retrieved for this question (no NLI)
+    "not_found",             # FLAG: no such chunk
+    "other_patient",         # REDACT: another patient's record (no NLI)
+    "uncited",               # FLAG: a claim with no citation
+)
+
+# A number in a claim: digits, optionally grouped by thousands or with a decimal part.
+# Not when it is part of a code or a name (B50.9, ICD-10, HbA1c, SpO2, T2DM, COVID-19):
+# never right after a letter, a digit run's own '.', or a letter and a hyphen.
+_NUMBER = re.compile(r"(?<![A-Za-z0-9.,#])(?<![A-Za-z]-)\d[\d,]*(?:\.\d+)?")
+_THOUSANDS = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+# A list marker at the start of a claim ("1. ", "2) "): numbering, not a claim's number.
+_LIST_MARKER = re.compile(r"^\s*\d{1,2}[.)]\s+")
+
+
+def _canonical_number(token: str) -> str:
+    if "." in token:
+        whole, frac = token.split(".", 1)
+        frac = frac.rstrip("0")
+    else:
+        whole, frac = token, ""
+    whole = whole.lstrip("0") or "0"
+    return f"{whole}.{frac}" if frac else whole
+
+
+def numbers_in(text: str) -> set:
+    """The numbers stated in text, canonical (1,000 -> 1000; 5.0 -> 5; 0.50 -> 0.5),
+    without citation markers, a leading list marker, or digits inside codes and names."""
+    text = _LIST_MARKER.sub("", strip_citation_tags(text))
+    out = set()
+    for m in _NUMBER.finditer(text):
+        token = m.group(0).rstrip(",")
+        if _THOUSANDS.fullmatch(token):
+            parts = [token.replace(",", "")]
+        else:
+            parts = [p for p in token.split(",") if p]
+        out.update(_canonical_number(p) for p in parts)
+    return out
 
 
 @dataclass
@@ -106,6 +157,9 @@ class FullVerificationReport:
     # Semantic entropy (if computed)
     semantic_entropy: Optional[float] = None
     se_is_confabulation: bool = False
+    # Per claim, in order: whether a cited, retrieved chunk entails it and holds every
+    # number it states (the support gate, NLIBackedHGA.verify).
+    claim_supported: List[bool] = field(default_factory=list)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -340,11 +394,18 @@ class CitationVerificationPipeline:
     Produces per-claim PASS/FLAG/REDACT decisions and a redacted
     version of the response where contradicted claims are replaced.
 
-    Decision logic:
-      NLI = ENTAILMENT  (conf > 0.7) → PASS
-      NLI = NEUTRAL     (conf > 0.5) → FLAG (unsupported)
-      NLI = CONTRADICTION (conf > 0.5) → REDACT
-      No citation found                → FLAG (uncited)
+    Decision logic (per citation; reason codes in CITATION_REASONS):
+      cited chunk not in the KB                 → FLAG   (not_found)
+      another patient's record                  → REDACT (other_patient), no NLI
+      not retrieved for this question           → REDACT (not_retrieved), no NLI
+      NLI = ENTAILMENT     (conf >= 0.7)        → PASS   (entailed)
+      NLI = CONTRADICTION  (conf >= 0.5)        → REDACT (contradicted)
+      otherwise                                 → FLAG   (not_entailed)
+      No citation                               → FLAG   (uncited)
+    then, per claim: an entailed citation whose claim states a number that
+    none of the claim's checked sources holds → FLAG (number_not_in_source).
+    A claim is supported when one of its citations is still PASS
+    (FullVerificationReport.claim_supported).
     """
 
     def __init__(
@@ -359,21 +420,47 @@ class CitationVerificationPipeline:
         self.entailment_thresh = entailment_threshold
         self.contradiction_thresh = contradiction_threshold
 
+    @staticmethod
+    def _unchecked(
+        claim_text: str, cid: str, idx: int, action: VerificationAction, code: str, reason: str
+    ) -> CitationVerificationResult:
+        """A citation decided without NLI (no source text is read or kept)."""
+        return CitationVerificationResult(
+            claim_text=claim_text,
+            citation_id=cid,
+            source_text="",
+            nli_result=NLIResult(
+                premise="", hypothesis=claim_text[:100],
+                label=NLILabel.NEUTRAL, confidence=0.0
+            ),
+            action=action,
+            reason=reason,
+            code=code,
+            claim_index=idx,
+        )
+
     def verify_response(
         self,
         response_text: str,
         patient_id: Optional[str] = None,
+        allowed_chunk_ids: Optional[AbstractSet[str]] = None,
     ) -> FullVerificationReport:
         """
         Verify all citations in a CCA response.
 
+        allowed_chunk_ids: the chunks retrieved for this question. A citation
+        of any other chunk is redacted (not_retrieved) before any NLI call,
+        even when the chunk is in the job's KB. None checks against the KB
+        only (the legacy callers; every job passes its retrieved ids).
+
         Steps:
           1. Split response into sentences/claims
           2. Extract [KB#XXXX] citations from each claim
-          3. Look up cited KB chunk
+          3. Look up cited KB chunk; refuse another patient's or an
+             unretrieved one
           4. Run NLI: source chunk (premise) vs. claim without its
              citation markers (hypothesis; strip_citation_tags)
-          5. Assign PASS/FLAG/REDACT
+          5. Assign PASS/FLAG/REDACT, then the number rule per claim
           6. Build redacted response
         """
         # Step 1: Split into claims (sentence-level)
@@ -382,53 +469,44 @@ class CitationVerificationPipeline:
         # Step 2-5: Verify each claim
         results = []
         n_uncited = 0
+        supported: List[bool] = []
 
-        for claim_text, citation_ids in claims:
+        for idx, (claim_text, citation_ids) in enumerate(claims):
             if not citation_ids:
                 # Uncited claim — flag for review
                 n_uncited += 1
-                results.append(CitationVerificationResult(
-                    claim_text=claim_text,
-                    citation_id="NONE",
-                    source_text="",
-                    nli_result=NLIResult(
-                        premise="", hypothesis=claim_text[:100],
-                        label=NLILabel.NEUTRAL, confidence=0.0
-                    ),
-                    action=VerificationAction.FLAG,
-                    reason="No citation provided — claim unverifiable"
+                results.append(self._unchecked(
+                    claim_text, "NONE", idx, VerificationAction.FLAG, "uncited",
+                    "No citation provided — claim unverifiable"
                 ))
+                supported.append(False)
                 continue
 
+            claim_results: List[CitationVerificationResult] = []
+            sources: List[str] = []
             # Verify against each cited source
             for cid in citation_ids:
                 chunk = self.kb.get_chunk(cid) if self.kb else None
                 if chunk is None:
-                    results.append(CitationVerificationResult(
-                        claim_text=claim_text,
-                        citation_id=cid,
-                        source_text="",
-                        nli_result=NLIResult(
-                            premise="", hypothesis=claim_text[:100],
-                            label=NLILabel.NEUTRAL, confidence=0.0
-                        ),
-                        action=VerificationAction.FLAG,
-                        reason=f"Citation {cid} not found in KB"
+                    claim_results.append(self._unchecked(
+                        claim_text, cid, idx, VerificationAction.FLAG, "not_found",
+                        f"Citation {cid} not found in KB"
                     ))
                     continue
 
                 if not chunk_visible_to(chunk, patient_id):
                     # Never show or reason from another patient's record.
-                    results.append(CitationVerificationResult(
-                        claim_text=claim_text,
-                        citation_id=cid,
-                        source_text="",
-                        nli_result=NLIResult(
-                            premise="", hypothesis=claim_text[:100],
-                            label=NLILabel.NEUTRAL, confidence=0.0
-                        ),
-                        action=VerificationAction.REDACT,
-                        reason=f"Citation {cid} is not this patient's record"
+                    claim_results.append(self._unchecked(
+                        claim_text, cid, idx, VerificationAction.REDACT, "other_patient",
+                        f"Citation {cid} is not this patient's record"
+                    ))
+                    continue
+
+                if allowed_chunk_ids is not None and cid not in allowed_chunk_ids:
+                    # Only what was retrieved for this question can support it.
+                    claim_results.append(self._unchecked(
+                        claim_text, cid, idx, VerificationAction.REDACT, "not_retrieved",
+                        f"Citation {cid} was not retrieved for this question"
                     ))
                     continue
 
@@ -439,32 +517,54 @@ class CitationVerificationPipeline:
                     premise=chunk.content,
                     hypothesis=strip_citation_tags(claim_text)
                 )
+                sources.append(chunk.content)
 
                 # Decision logic
                 if (nli_result.label == NLILabel.ENTAILMENT
                     and nli_result.confidence >= self.entailment_thresh):
                     action = VerificationAction.PASS
+                    code = "entailed"
                     reason = "Claim entailed by source"
                 elif (nli_result.label == NLILabel.CONTRADICTION
                       and nli_result.confidence >= self.contradiction_thresh):
                     action = VerificationAction.REDACT
+                    code = "contradicted"
                     reason = f"Claim CONTRADICTS source {cid}"
                 else:
                     action = VerificationAction.FLAG
+                    code = "not_entailed"
                     reason = (
                         f"Claim not clearly supported "
                         f"({nli_result.label.value}, "
                         f"conf={nli_result.confidence:.2f})"
                     )
 
-                results.append(CitationVerificationResult(
+                claim_results.append(CitationVerificationResult(
                     claim_text=claim_text,
                     citation_id=cid,
                     source_text=chunk.content[:150],
                     nli_result=nli_result,
                     action=action,
-                    reason=reason
+                    reason=reason,
+                    code=code,
+                    claim_index=idx,
                 ))
+
+            # The number rule: every number the claim states must be in one of
+            # the sources it was checked against; an NLI model can entail a
+            # claim whose dose or value differs from its source.
+            stated = numbers_in(claim_text)
+            held = set().union(*(numbers_in(t) for t in sources)) if sources else set()
+            if stated - held:
+                for r in claim_results:
+                    if r.action == VerificationAction.PASS:
+                        r.action = VerificationAction.FLAG
+                        r.code = "number_not_in_source"
+                        r.reason = "A number in the claim is not in its cited sources"
+            results.extend(claim_results)
+            supported.append(
+                any(r.action == VerificationAction.PASS for r in claim_results)
+            )
 
         # Step 6: Build redacted response
         redacted = self._build_redacted_response(response_text, results)
@@ -484,7 +584,8 @@ class CitationVerificationPipeline:
             nli_pass_rate=n_pass / n_total,
             nli_flag_rate=n_flag / n_total,
             nli_redact_rate=n_redact / n_total,
-            redacted_response=redacted
+            redacted_response=redacted,
+            claim_supported=supported,
         )
 
     def _extract_claims(
@@ -651,6 +752,71 @@ class SemanticEntropyVerifier:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 2.4b THE SUPPORT GATE (#5) AND PER-CITATION RESULTS (#28)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# The support gate's outcome codes: "passed", or why the answer can't PASS.
+SUPPORT_GATE_CODES = (
+    "passed",
+    "no_citation_check",  # no citation pipeline: nothing shows a claim is supported
+    "no_claims",          # nothing to check
+    "unsupported_claim",  # a claim no cited, retrieved chunk entails (with its numbers)
+    "contradicted",       # a cited source contradicts a claim
+    "other_patient",      # a claim cites another patient's record
+)
+_DECISION_RANK = {"pass": 0, "regenerate": 1, "escalate": 2}
+MAX_CITATION_CHECKS = 50
+MAX_CLAIM_TEXT = 300
+
+
+def support_gate(report: Optional[FullVerificationReport]) -> Tuple[str, str]:
+    """(code, the most the decision may be). Fail closed: anything but every claim
+    supported and nothing contradicted is not a PASS.
+
+    An unsupported claim caps the answer at "regenerate": the decision the trust
+    score itself gives an unsupported claim, shown amber, so the answer is never
+    shown as high confidence. A contradiction or another patient's record is
+    "escalate": a clinician reviews it (as the escalation guard does a dose
+    outside the cited chunks). A lower score's own "escalate" always stands."""
+    if report is None:
+        return "no_citation_check", "regenerate"
+    codes = {r.code for r in report.citation_results}
+    if "other_patient" in codes:
+        return "other_patient", "escalate"
+    if "contradicted" in codes:
+        return "contradicted", "escalate"
+    if not report.claim_supported:
+        return "no_claims", "regenerate"
+    if not all(report.claim_supported):
+        return "unsupported_claim", "regenerate"
+    return "passed", "pass"
+
+
+def citation_checks(report: Optional[FullVerificationReport]) -> List[Dict[str, Any]]:
+    """Each citation's result, for the decision row (how this answer was checked):
+    the chunk id, the claim (whitespace folded, at most MAX_CLAIM_TEXT characters),
+    the NLI label and score, the action and the reason code. Never the source text."""
+    if report is None:
+        return []
+    out: List[Dict[str, Any]] = []
+    for r in report.citation_results:
+        if r.citation_id == "NONE":
+            continue
+        out.append({
+            "chunk_id": r.citation_id,
+            "claim_index": r.claim_index,
+            "claim_text": " ".join(r.claim_text.split())[:MAX_CLAIM_TEXT],
+            "nli_label": r.nli_result.label.value.upper(),
+            "nli_confidence": round(float(r.nli_result.confidence), 4),
+            "action": r.action.value.upper(),
+            "reason": r.code,
+        })
+        if len(out) == MAX_CITATION_CHECKS:
+            break
+    return out
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 2.5  NLI-BACKED HGA (UPGRADED WITH REAL VERIFICATION)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -741,9 +907,18 @@ class NLIBackedHGA:
         escalate_threshold: Optional[float] = None,
         critical_penalty: Optional[float] = None,
         warning_penalty: Optional[float] = None,
+        allowed_chunk_ids: Optional[AbstractSet[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Full four-expert verification.
+        Full four-expert verification, then the support gate (#5).
+
+        The weighted trust score ranks the answer and sets the decision as
+        before; the support gate (support_gate) can then only make it
+        stricter, never looser. An answer can PASS only when every claim has a
+        cited, retrieved chunk that entails it and holds its numbers; otherwise
+        the decision is at most REGENERATE (amber, as the trust score's own
+        band for an unsupported claim), and a contradicted claim or a citation
+        of another patient's record escalates.
 
         Args:
             response_text: CCA generated text
@@ -756,6 +931,8 @@ class NLIBackedHGA:
             warning_penalty: Per-call overrides of the instance defaults.
                 Pass these instead of mutating the shared instance, which
                 is not safe across concurrent queries.
+            allowed_chunk_ids: The chunks retrieved for this question; a
+                citation of any other is redacted as not_retrieved (#28).
 
         Returns:
             Dict with trust_score, decision, per-expert scores, flags
@@ -777,7 +954,7 @@ class NLIBackedHGA:
 
         if self.citation_pipeline is not None:
             citation_report = self.citation_pipeline.verify_response(
-                response_text, patient_id=patient_id
+                response_text, patient_id=patient_id, allowed_chunk_ids=allowed_chunk_ids
             )
             nli_score = citation_report.nli_pass_rate
 
@@ -848,6 +1025,11 @@ class NLIBackedHGA:
         else:
             decision = "escalate"
 
+        # ── Support gate: the score can't pass what no source supports ──
+        gate, cap = support_gate(citation_report)
+        if _DECISION_RANK[cap] > _DECISION_RANK[decision]:
+            decision = cap
+
         # ── Badge ──
         badge = {"pass": "GREEN", "regenerate": "AMBER", "escalate": "RED"}[decision]
 
@@ -877,6 +1059,10 @@ class NLIBackedHGA:
                 "alpha": self.alpha, "beta": self.beta,
                 "gamma": self.gamma, "delta": self.delta
             },
+            # The support gate's code (SUPPORT_GATE_CODES): "passed", or why not.
+            "support_gate": gate,
+            # Per citation (uncited claims are counted by the gate, not listed).
+            "citations": citation_checks(citation_report),
         }
 
     def _check_fabrication_contradiction(self, text: str) -> Tuple[float, List[Dict]]:

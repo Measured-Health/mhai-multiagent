@@ -52,6 +52,30 @@ All notable changes to this project are documented here. The format follows
   the GPU".
 ### Fixed
 
+- **An answer can't pass with a claim no source supports (#5).** The HGA's
+  weighted trust score (0.35 NLI + 0.25 coherence + 0.20 numerical + 0.20
+  semantic entropy) could PASS a fluent claim whose cited chunk doesn't
+  entail it: 0.57 against the 0.55 bar. A support gate now runs after the
+  score and can only make the decision stricter: PASS needs every claim to
+  have a cited chunk, retrieved for the question, that NLI entails (at the
+  existing 0.7 threshold) and that holds every number the claim states (a
+  deterministic check; codes such as B50.9 or ICD-10 don't count as
+  numbers). An unsupported or uncited claim caps the answer at REGENERATE
+  (amber); a contradicted claim, or a citation of another patient's record,
+  escalates. With no citation check (no NLI pipeline) nothing passes. The
+  trust score is still computed and stored. The `clinical_answer` gate's
+  metrics are computed as before; expect a lower `grounded_pass_rate` (fewer
+  PASSes), with `over_escalation_rate` changed only by contradictions.
+- **Only retrieved citations count, and each citation's check is stored
+  (#28).** Verification checked a citation against every chunk loaded for
+  the job. Now a citation of a chunk that wasn't retrieved for the question
+  is redacted (`not_retrieved`) before any NLI call and supports nothing.
+  Each citation's result (chunk id, claim, NLI label and score, action and a
+  reason code) is stored in the decision's `guardrail_report.citation_checks`
+  with the gate's code (`support_gate`), and core's
+  `GET /queries/{id}/result` returns them as `citations` (OpenAPI 1.36.0;
+  the shape was already in the contract and was always empty; `excerpt`
+  stays empty).
 - **Live site: the demo check works on a new database.** One `CASE` over
   `to_regclass('public.hospitals')` still failed with "relation \"hospitals\"
   does not exist", because Postgres resolves every table a statement names

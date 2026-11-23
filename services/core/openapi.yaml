@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.35.0"
+  version: "1.36.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -6040,6 +6040,16 @@ components:
           description: Provisional banding of a verified answer's trust; null when unverified.
         citations:
           type: array
+          description: >-
+            How the answer was checked: each citation's NLI result, as the pipeline
+            stored it with the answer (chunk id, the claim, the NLI label and score,
+            the action and a reason code such as `entailed`, `not_entailed`,
+            `contradicted`, `number_not_in_source` or `not_retrieved`). A citation of a
+            chunk that wasn't retrieved for the question is REDACT, `not_retrieved`.
+            source_title is the cited source's title when the answer has one, else
+            empty; excerpt is always empty (the source text isn't stored with the
+            checks). Empty for an answer that wasn't verified, and for answers stored
+            before 1.36.0.
           items: { $ref: "#/components/schemas/Citation" }
         cited_chunk_ids:
           type: array
