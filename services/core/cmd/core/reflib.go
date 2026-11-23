@@ -81,6 +81,8 @@ type reflibPin struct {
 var reflibPins = map[string]reflibPin{
 	"medref":          {Version: "1.0.0", SHA256: "d150e3807189bbe0412e1234426452320e22cef258f72d10e835bf6eab2206e7", Count: 23654},
 	"local-formulary": {Version: "1.0.0", SHA256: "081e0d2e9d41b6731e8d25765495f84e567b1ff5edc0a7c1973171b940cc4744", Count: 34},
+	"who-malaria":     {Version: "1.0.0", SHA256: "2c75f177e9edcc34dbc6b7d79ea9843da5a2cec2ca53501b2f75c17f395b8701", Count: 455},
+	"ng-malaria":      {Version: "1.0.0", SHA256: "313db9566ad4128b5fd195031d6c7f0a9fca4095e71eed0de3ef4a99abdffb92", Count: 97},
 }
 
 const (
