@@ -46,6 +46,7 @@ from intelligence.knowledge_base.kb_builder import (
     strip_citation_tags,
 )
 from intelligence.utils.nli import DEFAULT_NLI_MODEL, nli_label_map
+from intelligence.agents.prompt_formats import STEPS_V1_EXAMPLE_SENTENCES
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MHAI.M3.NLI")
@@ -112,6 +113,29 @@ _NUMBER = re.compile(r"(?<![A-Za-z0-9.,#])(?<![A-Za-z]-)\d[\d,]*(?:\.\d+)?")
 _THOUSANDS = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?")
 # A list marker at the start of a claim ("1. ", "2) "): numbering, not a claim's number.
 _LIST_MARKER = re.compile(r"^\s*\d{1,2}[.)]\s+")
+# The answer format's scaffolding at the start of a claim: "ANSWER:" and a step label
+# ("STEP 1 - ASSESS:", "STEP 2 – DOSE:"). Not content: the step number is not a
+# number the claim states, and the NLI model reads neither.
+_ANSWER_SCAFFOLD = re.compile(
+    r"^\s*(?:ANSWER\s*:\s*)?(?:STEP\s*\d{1,2}\s*[-\u2013:]\s*[A-Za-z][A-Za-z /]{0,20}?\s*:\s*)?"
+)
+
+
+def strip_answer_scaffold(text: str) -> str:
+    """A claim without the answer format's leading "ANSWER:" and step label."""
+    return _ANSWER_SCAFFOLD.sub("", text, count=1)
+
+
+def _norm_sentence(text: str) -> str:
+    return " ".join(strip_answer_scaffold(strip_citation_tags(text)).split()).rstrip(" .").lower()
+
+
+_EXAMPLE_SENTENCES = frozenset(_norm_sentence(t) for t in STEPS_V1_EXAMPLE_SENTENCES)
+
+
+def copies_format_example(claim_text: str) -> bool:
+    """Whether a claim is a sentence of the answer format's own example."""
+    return _norm_sentence(claim_text) in _EXAMPLE_SENTENCES
 
 
 def _canonical_number(token: str) -> str:
@@ -127,7 +151,7 @@ def _canonical_number(token: str) -> str:
 def numbers_in(text: str) -> set:
     """The numbers stated in text, canonical (1,000 -> 1000; 5.0 -> 5; 0.50 -> 0.5),
     without citation markers, a leading list marker, or digits inside codes and names."""
-    text = _LIST_MARKER.sub("", strip_citation_tags(text))
+    text = _LIST_MARKER.sub("", strip_answer_scaffold(strip_citation_tags(text)))
     out = set()
     for m in _NUMBER.finditer(text):
         token = m.group(0).rstrip(",")
@@ -482,6 +506,17 @@ class CitationVerificationPipeline:
                 supported.append(False)
                 continue
 
+            if copies_format_example(claim_text):
+                # The model copied the format's example instead of answering:
+                # never support, whatever the NLI model would say.
+                for cid in citation_ids:
+                    results.append(self._unchecked(
+                        claim_text, cid, idx, VerificationAction.FLAG, "not_entailed",
+                        "Claim copies the answer format's example"
+                    ))
+                supported.append(False)
+                continue
+
             claim_results: List[CitationVerificationResult] = []
             sources: List[str] = []
             # Verify against each cited source
@@ -515,7 +550,7 @@ class CitationVerificationPipeline:
                 # claim shown, and the checks above, keep the original.
                 nli_result = self.nli.verify(
                     premise=chunk.content,
-                    hypothesis=strip_citation_tags(claim_text)
+                    hypothesis=strip_answer_scaffold(strip_citation_tags(claim_text))
                 )
                 sources.append(chunk.content)
 

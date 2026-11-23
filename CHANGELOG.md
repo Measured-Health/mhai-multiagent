@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Answer checks: the step format no longer fails every claim.** Our own model
+  answers in steps ("STEP 1 - ASSESS: …"); the number rule read the step number
+  as a number the claim states, so every entailed claim was flagged
+  `number_not_in_source` and no answer verified. The answer format's "ANSWER:" and
+  step labels are now stripped before the number rule and the NLI check. A claim
+  that copies the format's own example sentence (seen live) never counts as
+  support.
+
 ### Added
 
 - **Several reference libraries at once, a local formulary and guideline
