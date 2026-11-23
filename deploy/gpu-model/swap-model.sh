@@ -430,9 +430,11 @@ if [ "$CHECK_ONLY" = 1 ]; then
 fi
 
 say "Switching"
-# shellcheck disable=SC2034 # read by apply through namerefs
+# NEW_SET and OLD_SET are read by apply through namerefs.
 declare -A NEW_SET OLD_SET
+# shellcheck disable=SC2034
 for k in "${KEYS[@]}"; do OLD_SET[$k]=${CUR[$k]}; done
+# shellcheck disable=SC2034
 NEW_SET=([ENABLED]=true [FILE]="$GGUF" [NAME]="$NAME" [VERSION]="$VERSION" [SHA256]="$SHA" [PROFILE]="$PROFILE")
 forced=false
 [ "$GATE" = pass ] || forced=true
