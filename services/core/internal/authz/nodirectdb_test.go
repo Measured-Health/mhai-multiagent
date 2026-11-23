@@ -103,6 +103,10 @@ var dbTxAllowedFiles = map[string]string{
 	// owner on the demo host only (MHAI_DEMO_SEED=on and APP_ENV=demo, no
 	// non-demo hospital in the database), its advisory lock (Acquire) and its transactions.
 	"cmd/core/demo.go": "the demo seed's lock (Acquire) and owner transactions (synthetic demo hospital only)",
+	// 00056: the shared reference library's load and status (core
+	// reference-library): SET LOCAL ROLE mhai_provision on the provisioning
+	// login, library rows only, no hospital.
+	"cmd/core/reflib.go": "the reference library CLI's provisioning transaction (mhai_provision, library rows only)",
 }
 
 // TestNoDirectDBTx walks every non-test Go file of the module and fails on
