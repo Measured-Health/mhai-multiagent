@@ -1024,6 +1024,7 @@ class RAGClinicalContextAgent:
         max_new_tokens: int = 512,
         temperature: float = 0.3,
         generator=None,  # e.g. OllamaGenerator; used instead of cca_model
+        prompt: str = "default",  # agents.prompt_formats: the model's own prompt format
     ):
         self.retriever = retriever
         self.model = cca_model
@@ -1031,6 +1032,7 @@ class RAGClinicalContextAgent:
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.generator = generator
+        self.prompt = prompt
         self._model_loaded = cca_model is not None
 
     def generate_with_rag(
@@ -1071,7 +1073,26 @@ class RAGClinicalContextAgent:
             )
 
         # Step 3: Generate
-        if self.generator is not None:
+        if self.generator is not None and self.prompt != "default":
+            # The model's own format (agents.prompt_formats), chosen by its answer
+            # profile: the same retrieved passages, neutralised as above.
+            from intelligence.agents import prompt_formats
+
+            if self.prompt != prompt_formats.STEPS_V1:
+                raise ValueError("unknown prompt format")
+            asked = prompt_formats.steps_v1(
+                clinical_query,
+                [
+                    (r.chunk.chunk_id, neutralise_chunk_text(r.chunk.content))
+                    for r in rag_context.retrieved_chunks
+                ],
+            )
+            if getattr(self.generator, "takes_options", False):
+                response = self.generator.generate(asked.system, asked.user, **asked.options)
+            else:
+                response = self.generator.generate(asked.system, asked.user)
+            model_used = self.generator.name
+        elif self.generator is not None:
             response = self.generator.generate(system_prompt, augmented_query)
             model_used = self.generator.name
         elif self._model_loaded and self.model is not None:

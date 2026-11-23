@@ -1037,3 +1037,124 @@ func TestMigration00024DownUp(t *testing.T) {
 		t.Errorf("after up, reserve for gemini: ok=%v err=%v", ok, err)
 	}
 }
+
+// setOwnModel switches hospital h's own model as the superuser (the row
+// must exist).
+func setOwnModel(t *testing.T, pool *pgxpool.Pool, h uuid.UUID, on bool) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `UPDATE hospital_model_policy SET own_model = $2 WHERE hospital_id = $1`, h, on); err != nil {
+		t.Fatalf("set own model: %v", err)
+	}
+}
+
+// 00055: our own model on the GPU is a per-hospital route, off by default.
+// The trigger sets 'own' only while the policy has own_model on and no
+// provider; the claim keeps 'own' only while that still holds for the
+// caller's own active hospital; own_model never goes with a provider.
+func TestOwnModelRoute(t *testing.T) {
+	_, pool := shared(t)
+	ctx := context.Background()
+	a, _ := seedHospital(t, pool, uniqueCode("OW"))
+	b, _ := seedHospital(t, pool, uniqueCode("OX"))
+	setPolicy(t, pool, a, nil, 1000)
+	setPolicy(t, pool, b, nil, 1000)
+	var def bool
+	if err := pool.QueryRow(ctx, `SELECT own_model FROM hospital_model_policy WHERE hospital_id = $1`, a).Scan(&def); err != nil || def {
+		t.Fatalf("own_model default %v (%v), want false", def, err)
+	}
+	if r := routeOf(t, pool, gatewayInsert(t, pool, a, "own")); r != "local" {
+		t.Errorf("own model off, insert naming own: route %q, want local", r)
+	}
+	setOwnModel(t, pool, a, true)
+	q := gatewayInsert(t, pool, a, "")
+	if r := routeOf(t, pool, q); r != "own" {
+		t.Errorf("own model on: route %q, want own", r)
+	}
+	if r := routeOf(t, pool, gatewayInsert(t, pool, a, "cloud:openai")); r != "own" {
+		t.Errorf("own model on, insert naming cloud:openai: route %q, want own", r)
+	}
+	if r := routeOf(t, pool, gatewayInsert(t, pool, b, "own")); r != "local" {
+		t.Errorf("another hospital's own model: route %q, want local", r)
+	}
+	effective := func(what string, hospital *uuid.UUID, h uuid.UUID, route any, want string) {
+		t.Helper()
+		var got string
+		err := commitAs(ctx, pool, "mhai_worker", hospital, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT mhai_effective_model_route($1, $2)`, h, route).Scan(&got)
+		})
+		if err != nil || got != want {
+			t.Errorf("%s: %q err %v, want %q", what, got, err, want)
+		}
+	}
+	effective("while on", &a, a, "own", "own")
+	effective("another hospital's id", &b, a, "own", "local")
+	effective("a hospital with it off", &b, b, "own", "local")
+	effective("no hospital set", nil, a, "own", "local")
+	effective("a cloud route while own is on", &a, a, "cloud:openai", "local")
+	setOwnModel(t, pool, a, false)
+	effective("switched off", &a, a, "own", "local")
+	setOwnModel(t, pool, a, true)
+	effective("on again", &a, a, "own", "own")
+	if _, err := pool.Exec(ctx, `UPDATE hospitals SET status = 'deactivated' WHERE id = $1`, a); err != nil {
+		t.Fatal(err)
+	}
+	effective("an inactive hospital", &a, a, "own", "local")
+	// One route: never with a provider.
+	if _, err := pool.Exec(ctx, `UPDATE hospital_model_policy SET cloud_provider = 'openai', agreement_ref = 'AGR-2026-0001' WHERE hospital_id = $1`, a); pgCode(err) != "23514" {
+		t.Errorf("a provider with own_model on: want 23514, got %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE clinical_queries SET model_route = 'own:elsewhere' WHERE id = $1`, q); pgCode(err) != "23514" {
+		t.Errorf("route own:elsewhere: want 23514, got %v", err)
+	}
+	// The platform and the CLI may switch it; the gateway and the worker may not.
+	for _, role := range []string{"mhai_platform", "mhai_provision"} {
+		if err := commitAs(ctx, pool, role, nil, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE hospital_model_policy SET own_model = false WHERE hospital_id = $1`, b)
+			return err
+		}); err != nil {
+			t.Errorf("%s switching the own model: %v", role, err)
+		}
+	}
+	for _, role := range []string{"mhai_gateway", "mhai_worker", "mhai_worker_app"} {
+		_, err := inTx(ctx, pool, []string{`SET LOCAL ROLE ` + role}, nil, `UPDATE hospital_model_policy SET own_model = true WHERE hospital_id = $1`, b)
+		requireDenied(t, err, role+" switching the own model")
+	}
+}
+
+// 00055 goes down and up again: down refuses while a question's route is
+// own, then restores the 00018 functions (own is local again).
+func TestMigration00055DownUp(t *testing.T) {
+	pg := testutil.StartPostgres(t)
+	ctx := context.Background()
+	pool, err := db.Open(ctx, pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := seedHospital(t, pool, uniqueCode("OD"))
+	setPolicy(t, pool, a, nil, 1000)
+	setOwnModel(t, pool, a, true)
+	q := gatewayInsert(t, pool, a, "")
+	if err := db.MigrateDownTo(ctx, pg.URL, 54); err == nil {
+		t.Fatal("down ran while a question's route is own")
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM clinical_queries WHERE id = $1`, q); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MigrateDownTo(ctx, pg.URL, 54); err != nil {
+		t.Fatalf("down to 54: %v", err)
+	}
+	if r := routeOf(t, pool, gatewayInsert(t, pool, a, "own")); r != "local" {
+		t.Errorf("after down: route %q, want local", r)
+	}
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	setOwnModel(t, pool, a, true)
+	if r := routeOf(t, pool, gatewayInsert(t, pool, a, "")); r != "own" {
+		t.Errorf("after up: route %q, want own", r)
+	}
+}

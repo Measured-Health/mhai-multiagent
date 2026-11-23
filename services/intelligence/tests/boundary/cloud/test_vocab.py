@@ -23,6 +23,7 @@ def test_vocab_lists_are_closed_and_sorted() -> None:
         "cloud:openai",
         "cloud:xai",
         "local",
+        "own",
     )
     assert vocab.EGRESS == ("anthropic", "gemini", "none", "openai", "xai")
     assert set(vocab.OUTCOMES) == {

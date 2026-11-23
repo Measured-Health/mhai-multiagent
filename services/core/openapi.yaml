@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.34.0"
+  version: "1.35.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -5232,6 +5232,13 @@ paths:
         (404), the session's 10 writes a minute (429 `rate_limited`), then
         the code. One `hospital.model_policy_changed` audit entry per
         write. Answers as the GET.
+
+        `own_model` (added in 1.35.0) sends the hospital's questions to our
+        own answer model on the GPU server instead of the local models. It
+        is off for every hospital by default and goes with a null
+        `cloud_provider` only (true with a provider is 422): one route per
+        hospital. Left out, it is kept when `cloud_provider` is null and
+        cleared when a provider is set.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, validation_failed, rate_limited, not_ready, internal_error]
@@ -5252,6 +5259,7 @@ paths:
                 cloud_provider: { type: string, enum: [openai, anthropic, xai, gemini], nullable: true }
                 agreement_ref: { type: string, pattern: "^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$", nullable: true }
                 monthly_token_budget: { type: integer, format: int64, minimum: 1, maximum: 1000000000 }
+                own_model: { type: boolean, nullable: true, description: "Our own model on the GPU (added in 1.35.0); true only with a null cloud_provider." }
                 mfa_code: { type: string }
                 backup_code: { type: string }
       responses:
@@ -6538,7 +6546,7 @@ components:
         read the provider from `provider_code`, never from `cloud_provider`
         alone, which is also null for a provider its enum can't name
         (`gemini`).
-      required: [hospital_id, cloud_provider, provider_code, agreement_ref, monthly_token_budget, updated_at, usage]
+      required: [hospital_id, cloud_provider, provider_code, agreement_ref, monthly_token_budget, own_model, updated_at, usage]
       additionalProperties: false
       properties:
         hospital_id: { type: string, format: uuid }
@@ -6562,6 +6570,12 @@ components:
             1.16.0.
         agreement_ref: { type: string, pattern: "^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$", nullable: true }
         monthly_token_budget: { type: integer, format: int64, minimum: 1, maximum: 1000000000 }
+        own_model:
+          type: boolean
+          description: >-
+            Whether the hospital's questions go to our own answer model on the
+            GPU server (never together with a cloud provider). False by
+            default and with no policy. Added in 1.35.0.
         updated_at: { type: string, format: date-time, nullable: true }
         usage:
           type: object

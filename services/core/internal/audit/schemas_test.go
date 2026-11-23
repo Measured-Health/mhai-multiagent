@@ -242,6 +242,18 @@ func TestAuditSchemaModelPolicyChanged(t *testing.T) {
 	if err := audit.CheckActionPayload(action, off); err != nil {
 		t.Fatalf("switched off, no reference: %v", err)
 	}
+	// Our own model on the GPU (00055): both switch values, on only with no provider.
+	own := good()
+	own["provider"], own["previous"], own["own_model"], own["previous_own_model"] = "none", "anthropic", true, false
+	delete(own, "agreement_ref")
+	if err := audit.CheckActionPayload(action, own); err != nil {
+		t.Fatalf("own model on: %v", err)
+	}
+	withOwnOff := good()
+	withOwnOff["own_model"], withOwnOff["previous_own_model"] = false, true
+	if err := audit.CheckActionPayload(action, withOwnOff); err != nil {
+		t.Fatalf("a provider clearing the own model: %v", err)
+	}
 	for name, change := range map[string]func(m map[string]any){
 		"free text reference":  func(m map[string]any) { m["agreement_ref"] = "signed with Dr Synthetic on Monday" },
 		"lower-case reference": func(m map[string]any) { m["agreement_ref"] = "demo-synthetic" },
@@ -266,6 +278,12 @@ func TestAuditSchemaModelPolicyChanged(t *testing.T) {
 		"hospital not a uuid":  func(m map[string]any) { m["hospital_id"] = "HAV" },
 		"extra key":            func(m map[string]any) { m["note"] = "synthetic" },
 		"null provider":        func(m map[string]any) { m["provider"] = nil },
+		"own model with a provider": func(m map[string]any) {
+			m["own_model"], m["previous_own_model"] = true, false
+		},
+		"own model not a bool": func(m map[string]any) {
+			m["own_model"], m["previous_own_model"] = "on", false
+		},
 	} {
 		m := good()
 		change(m)

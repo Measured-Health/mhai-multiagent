@@ -15,13 +15,15 @@ from urllib.parse import urlsplit
 
 PROVIDERS: Final[tuple[str, ...]] = ("anthropic", "gemini", "openai", "xai")
 
-# A query's model_route, set by core's trigger (migration 00018).
+# A query's model_route, set by core's trigger (migrations 00018, 00055: "own" is our
+# own model on the GPU, a hospital's model policy with own_model on).
 ROUTES: Final[tuple[str, ...]] = (
     "cloud:anthropic",
     "cloud:gemini",
     "cloud:openai",
     "cloud:xai",
     "local",
+    "own",
 )
 
 # query.completed's egress: where an answer's text went.

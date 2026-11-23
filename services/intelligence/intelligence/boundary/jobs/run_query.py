@@ -77,6 +77,9 @@ if TYPE_CHECKING:
 log = logging.getLogger("intelligence.boundary.run_query")
 
 TYPE = "run_query"
+# The routes answered on this host (no cloud call, no token ledger): the local
+# models and our own model on the GPU (vocab.ROUTES "local" and "own").
+ON_HOST_ROUTES = frozenset({"local", "own"})
 RETRYABLE = frozenset({"unavailable", "internal", "overloaded"})
 MAX_DEPTH = 16
 # The pipeline consumer's MaxDeliver: core's bus.PipelineMaxDeliver.
@@ -428,7 +431,7 @@ class RunQuery:
         started = time.monotonic()
         chunks = await self._chunks(job, str(question))
         chunks_ms = _ms(time.monotonic() - started)
-        if provider == "local":
+        if provider in ON_HOST_ROUTES:
             generation = await self._stage(job, client.generate, question, context, None, chunks)
         else:
             call = self._cloud_call(job, claim, patient)
@@ -615,7 +618,9 @@ class RunQuery:
             versions = _clean_versions({**client.model_versions(), **g.versions})
         except Exception:
             versions = {}
-        if provider == "local":
+        if provider in ON_HOST_ROUTES:
+            # Our own model on the GPU is a local answer too: drafted on our
+            # own hardware, nothing sent out (versions["cca"] names it).
             versions["cca_route"] = "local"
         report: dict[str, Any] = {
             "failed_agents": list(failed),
@@ -625,7 +630,7 @@ class RunQuery:
             "guard_reasons": list(v.guard_reasons),
             "guard_rules": list(v.guard_rules),
         }
-        if provider != "local":
+        if provider not in ON_HOST_ROUTES:
             report.update(
                 cloud_outcome=g.cloud_outcome,
                 tokens_in=int(g.tokens_in),

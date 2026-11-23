@@ -6,6 +6,33 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Our own model on the GPU, off for every hospital.** The GPU server can
+  serve our own fine-tuned answer model, started by the deploy (not by hand):
+  a `gpu-model` compose service (profile `gpu-model`; llama.cpp's official
+  `server-cuda` image, release b12627, pinned by digest; read-only, no
+  capabilities, non-root, memory cap, health check, the GPU through NVIDIA's
+  CDI, the GGUF mounted read-only from `/srv/mhai-models`, on an internal
+  network shared with the pipeline only). Its entrypoint re-hashes the GGUF and
+  serves it as `<name>@<version>#<sha12>`. "Deploy backend demo" runs
+  `gpu-model/gpu-model.sh`: only with `GPU_MODEL_ENABLED=true` in `.env`, and
+  only after `GPU_MODEL_FILE` matched `GPU_MODEL_SHA256`; any mismatch, an
+  unhealthy service or another alias stops it and fails the deploy.
+  Per hospital: the model policy's new `own_model` (migration 00055, default
+  false; never with a cloud provider), core OpenAPI 1.35.0 (`own_model` on the
+  model policy), `core hospitals model-policy set --own-model on|off`, audited
+  with the switch before and after. Core routes such a hospital's questions
+  `own`; the worker re-checks the route at the claim, requires the served
+  alias before every question (`INTELLIGENCE_OWN_MODEL*`), and otherwise
+  escalates (`local_unverified`), never falling back. The model is asked in
+  its own prompt format: answer profiles gain a prompt, and
+  `gemma4-e4b-cca-v1` is asked as it was trained (`[KB#id]` evidence in a
+  3000-character budget, the ASSESS/MANAGE/AVOID/DOSE/MONITOR/ADVISE step
+  instruction, a stop at `NOTE:`; `agents/prompt_formats.py`); every other
+  model's prompt is unchanged. The first model failed the `clinical_answer`
+  gate; no gate or check was changed. deploy/README.md, "Our own model on
+  the GPU".
 ### Fixed
 
 - **Live site: the demo check works on a new database.** One `CASE` over

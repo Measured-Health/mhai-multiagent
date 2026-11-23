@@ -98,6 +98,14 @@ The product owner delegated these decisions on 14 Nov 2026 ("just do everything"
 
   Per decision 4 (recommended): pilot on a cloud model meanwhile, and the researcher retrains for escalation and grounding.
 
+## Served on the GPU server (22 Nov 2026)
+
+The product owner asked for the model on the GPU server anyway, so the whole path works end to end while the researcher retrains; it stays off for every hospital until the model policy switches one on (deploy/README.md, "Our own model on the GPU").
+
+- The GGUF on the host, `/srv/mhai-models/cca-v1/model-q4_k_m.gguf`: the same base (revision `4ecc2ba63bcac23ba4a767fc87025b1450f84c9c`) with the adapter merged, `q4_k_m`, converted with llama.cpp `b1b770d9`. 5,302,268,608 bytes, SHA-256 `896b75ef96037a7365126ba7f2161e64a3657ee9ea141e6a9f996b045ded4007`.
+- The researcher's own export is the same size, SHA-256 `8b2a145151b7509a6bba355909e1a791f0e89f3357bcdf1beec8f00ba49046de` (above). The two differ in bytes; only the file whose hash is in the host's `.env` is served.
+- It is asked in the format it was trained with (answer profile `gemma4-e4b-cca-v1`, prompt `steps-v1`). The gate's verdict above stands: nothing was relaxed.
+
 ## Checks under way
 
 - Pinned llama.cpp (`b1b770d9`): supports the Gemma 4 architecture, and `files.py` allows `gemma4` (#171).

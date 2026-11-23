@@ -351,6 +351,17 @@ services:
       INTELLIGENCE_MODEL_CACHE: /models
       INTELLIGENCE_MODEL_MIRROR: /mirror
       INTELLIGENCE_LOCAL_LLM_URL: http://llama:8080
+      # Our own model on the GPU (profile gpu-model, deploy/README.md "Our own model on
+      # the GPU"): asked only for a hospital whose model policy has own_model on (off
+      # for every hospital by default), and only when .env sets GPU_MODEL_ENABLED=true.
+      # The worker requires gpu-model to serve exactly <name>@<version>#<sha12> before
+      # every such question; otherwise the question escalates.
+      INTELLIGENCE_OWN_MODEL: ${GPU_MODEL_ENABLED:-false}
+      INTELLIGENCE_OWN_MODEL_URL: http://gpu-model:8080
+      INTELLIGENCE_OWN_MODEL_NAME: ${GPU_MODEL_NAME:-}
+      INTELLIGENCE_OWN_MODEL_VERSION: ${GPU_MODEL_VERSION:-}
+      INTELLIGENCE_OWN_MODEL_SHA256: ${GPU_MODEL_SHA256:-}
+      INTELLIGENCE_OWN_MODEL_PROFILE: ${GPU_MODEL_PROFILE:-}
     volumes:
       - trustedkeys:/trusted:ro
       # The verified model cache: the only writable mount (active.json and the
@@ -369,8 +380,9 @@ services:
     cpus: 1.5
     mem_limit: 1600m
     memswap_limit: 1600m
-    # model: the internal network shared with the llama sidecar only (no route out).
-    networks: [backend, model]
+    # model: the internal network shared with the llama sidecar only (no route out);
+    # gpu-model: the same for our own model on the GPU.
+    networks: [backend, model, gpu-model]
     depends_on:
       postgres: { condition: service_healthy }
       nats: { condition: service_healthy }
@@ -582,6 +594,57 @@ services:
     mem_limit: 256m
     networks: [model-store]
 
+  # Our own fine-tuned answer model on the GPU (deploy/README.md, "Our own model on the
+  # GPU"): llama.cpp's official server-cuda image, pinned by digest (release b12627,
+  # which supports Gemma 4), serving one GGUF from the host. Off by default (profile
+  # gpu-model): the deploy workflow starts it only when .env sets GPU_MODEL_ENABLED=true
+  # and GPU_MODEL_FILE has GPU_MODEL_SHA256 (gpu-model/gpu-model.sh), and stops it
+  # otherwise. Which hospitals it answers is each hospital's model policy (own_model).
+  # Its entrypoint (gpu-model/entrypoint.sh) re-hashes the file, refuses to start on any
+  # mismatch and serves it with --alias <name>@<version>#<sha12>, --offline, no web UI.
+  #   - on `gpu-model` only: internal, shared with the pipeline only. No route out, no
+  #     backend (it never reaches Postgres or NATS), no published port;
+  #   - the GGUF read-only (GPU_MODEL_FILE, under /srv/mhai-models), the entrypoint
+  #     read-only, nothing else (no secret, no cache);
+  #   - the GPU through NVIDIA's CDI (the host's Docker has the CDI spec; the same as
+  #     `docker run --device nvidia.com/gpu=all`);
+  #   - a non-root user (the file must be readable by uid 1000 or by everyone);
+  #   - memory and threads from .env (GPU_MODEL_MEM, GPU_MODEL_THREADS), context from
+  #     GPU_MODEL_CTX; every layer on the GPU unless GPU_MODEL_GPU_LAYERS says less.
+  gpu-model:
+    <<: *hardening
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b12627@sha256:f46a7938f84a62f7c2eba2dfc985d921cb54fb3ec7b4e729cec2cee2cbace609
+    pull_policy: missing
+    profiles: ["gpu-model"]
+    restart: unless-stopped
+    user: "1000:1000"
+    entrypoint: ["/bin/bash", "/mhai/entrypoint.sh"]
+    environment:
+      GPU_MODEL_NAME: ${GPU_MODEL_NAME:-}
+      GPU_MODEL_VERSION: ${GPU_MODEL_VERSION:-}
+      GPU_MODEL_SHA256: ${GPU_MODEL_SHA256:-}
+      GPU_MODEL_CTX: ${GPU_MODEL_CTX:-8192}
+      GPU_MODEL_GPU_LAYERS: ${GPU_MODEL_GPU_LAYERS:-999}
+      GPU_MODEL_THREADS: ${GPU_MODEL_THREADS:-4}
+    volumes:
+      - ${GPU_MODEL_FILE:-/srv/mhai-models/unset.gguf}:/model/model.gguf:ro
+      - ./gpu-model/entrypoint.sh:/mhai/entrypoint.sh:ro
+    devices:
+      - nvidia.com/gpu=all
+    tmpfs:
+      - /tmp
+    cpus: ${GPU_MODEL_THREADS:-4}
+    mem_limit: ${GPU_MODEL_MEM:-8g}
+    memswap_limit: ${GPU_MODEL_MEM:-8g}
+    networks: [gpu-model]
+    # The re-hash of a 5 GB file and the load onto the GPU take a minute or two.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+
   # The notifications service (ADR 0018; services/notifications/README.md):
   # email for invites, reset links, notices and reminders. Off by default
   # (profile notifications); deploy/README.md, "Turn on email for the demo",
@@ -766,6 +829,10 @@ networks:
     internal: true
   # model-fetch's way out to the model store, and only its (profile ownmodel).
   model-store: {}
+  # The pipeline and our own model on the GPU only, no route out (profile gpu-model):
+  # the questions it answers never leave the host.
+  gpu-model:
+    internal: true
   # The notifications service and mail-relay only, no route out (profile
   # notifications). A fixed subnet, so the relay has the address the
   # service's extra_hosts names; NOTIFY_MAIL_SUBNET and NOTIFY_MAIL_RELAY_IP

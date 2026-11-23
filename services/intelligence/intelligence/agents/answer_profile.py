@@ -20,6 +20,12 @@ changes nothing.
   reading of its own.
 * **Fail closed:** a reply with no exact citation marker (and no decline) is not this
   model's answer format and escalates, before NLI.
+* **It is asked in its own format** (:data:`intelligence.agents.prompt_formats.STEPS_V1`):
+  the evidence, question and step instruction it was trained and served with.
+
+A model with no training manifest here (our own model on the GPU, served from a GGUF on
+the host: deploy/README.md, "Our own model on the GPU") gets its profile by id from the
+operator's setting (:func:`by_id`), never from the request or the model.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from intelligence.agents import prompt_formats
 from intelligence.knowledge_base.kb_builder import CITATION_MARKER
 
 log = logging.getLogger(__name__)
@@ -47,6 +54,8 @@ class AnswerProfile:
     # Casefolded words of the model's decline marker; None: the model has none.
     decline_words: tuple[str, ...] | None = None
     require_citation: bool = False
+    # The prompt format the CCA asks the model in (prompt_formats.FORMATS).
+    prompt: str = prompt_formats.DEFAULT
 
 
 DEFAULT = AnswerProfile("default")
@@ -54,7 +63,14 @@ GEMMA4_E4B_CCA_V1 = AnswerProfile(
     "gemma4-e4b-cca-v1",
     decline_words=("insufficient", "evidence"),
     require_citation=True,
+    prompt=prompt_formats.STEPS_V1,
 )
+
+# Every profile, by id (by_id).
+_BY_ID: Mapping[str, AnswerProfile] = MappingProxyType(
+    {p.id: p for p in (DEFAULT, GEMMA4_E4B_CCA_V1)}
+)
+PROFILE_IDS = frozenset(_BY_ID)
 
 
 @dataclass(frozen=True)
@@ -99,6 +115,12 @@ def for_manifest(tm: Any) -> AnswerProfile:
         return DEFAULT
     key = _Recipe(tm.role, base.upstream, base.revision, frozenset(tm.datasets))
     return _PROFILES.get(key, DEFAULT)
+
+
+def by_id(profile_id: str) -> AnswerProfile | None:
+    """The profile named ``profile_id`` exactly, or None: an operator's setting for a model
+    with no training manifest (our own model on the GPU)."""
+    return _BY_ID.get(profile_id)
 
 
 def for_run(run_dir: Path | str) -> AnswerProfile:
@@ -179,8 +201,10 @@ def wrap_hga(hga: Any, profile: AnswerProfile) -> Any:
 __all__ = [
     "DEFAULT",
     "GEMMA4_E4B_CCA_V1",
+    "PROFILE_IDS",
     "AnswerProfile",
     "ProfiledHGA",
+    "by_id",
     "declined",
     "for_manifest",
     "for_pinned",
