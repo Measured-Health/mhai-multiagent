@@ -151,7 +151,7 @@ func TestCLIModelPolicyOwnModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := envOf(map[string]string{"CORE_CLOUD_PROVIDERS": "anthropic"})
+	env := envOf(map[string]string{"CORE_CLOUD_PROVIDERS": "anthropic", "CORE_OWN_MODEL_ALLOWED": "true"})
 	run := func(args ...string) (string, error) {
 		var out bytes.Buffer
 		err := hospitalsModelPolicy(ctx, args, provURL, env, &out)
@@ -182,6 +182,12 @@ func TestCLIModelPolicyOwnModel(t *testing.T) {
 	}
 	if _, err := run("set", "OWN", "--provider", "none", "--own-model", "yes"); !errors.Is(err, errBadOwnModel) {
 		t.Fatalf("own model yes: %v", err)
+	}
+	// Without the deployment's allow-list, on is refused before connecting.
+	notAllowed := envOf(map[string]string{"CORE_CLOUD_PROVIDERS": "anthropic"})
+	if err := hospitalsModelPolicy(ctx, []string{"set", "OWN", "--provider", "none", "--own-model", "on"}, provURL, notAllowed,
+		&bytes.Buffer{}); !errors.Is(err, errOwnModelNotAllowed) {
+		t.Fatalf("own model not allowed: %v", err)
 	}
 	if _, found := own(); found {
 		t.Fatal("a refused change wrote a policy")

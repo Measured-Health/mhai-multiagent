@@ -1087,6 +1087,11 @@ func TestPilotIsOffByDefault(t *testing.T) {
 		if got := c.Services[name].Environment["CORE_CLOUD_PROVIDERS"]; got != "${CORE_CLOUD_PROVIDERS:-}" {
 			t.Errorf("%s CORE_CLOUD_PROVIDERS = %q, want ${CORE_CLOUD_PROVIDERS:-}", name, got)
 		}
+		// Our own model: no hospital may be switched to it unless .env says the
+		// host serves it (deploy/README.md, "Answering with our own model only").
+		if got := c.Services[name].Environment["CORE_OWN_MODEL_ALLOWED"]; got != "${CORE_OWN_MODEL_ALLOWED:-false}" {
+			t.Errorf("%s CORE_OWN_MODEL_ALLOWED = %q, want ${CORE_OWN_MODEL_ALLOWED:-false}", name, got)
+		}
 	}
 	if got := c.Services["core-migrate"].Environment["INTELLIGENCE_DB_PASSWORD"]; got != "${INTELLIGENCE_DB_PASSWORD:-}" {
 		t.Errorf("core-migrate INTELLIGENCE_DB_PASSWORD = %q, want ${INTELLIGENCE_DB_PASSWORD:-} (the login only when set)", got)
@@ -1727,5 +1732,29 @@ func TestDeployRunsTheGPUModelSwitch(t *testing.T) {
 	}
 	if strings.Index(wf, "bash gpu-model/gpu-model.sh") < strings.Index(wf, "Backend healthy.") {
 		t.Error("deploy.yml runs the gpu-model switch before core is healthy")
+	}
+}
+
+// The deploy workflow ships pilot/pipeline.sh and runs it on every deploy, after the
+// gpu-model switch (so our own model is serving when the worker starts). The step
+// itself touches nothing unless .env says PIPELINE_ENABLED=true (test-pipeline.sh).
+func TestDeployRunsThePipelineStep(t *testing.T) {
+	wf := readRepoFile(t, filepath.Join(".github", "workflows", "deploy.yml"))
+	if !strings.Contains(wf, " pilot/pipeline.sh | base64") {
+		t.Error("deploy.yml does not bundle deploy/pilot/pipeline.sh")
+	}
+	run := strings.Index(wf, "bash pilot/pipeline.sh")
+	if run < 0 {
+		t.Fatal("deploy.yml does not run pilot/pipeline.sh")
+	}
+	if gpu := strings.Index(wf, "bash gpu-model/gpu-model.sh"); gpu < 0 || run < gpu {
+		t.Error("deploy.yml runs the pipeline step before the gpu-model switch")
+	}
+	if run < strings.Index(wf, "Backend healthy.") {
+		t.Error("deploy.yml runs the pipeline step before core is healthy")
+	}
+	script := readRepoFile(t, filepath.Join("deploy", "pilot", "pipeline.sh"))
+	if !strings.Contains(script, `"$(env_get PIPELINE_ENABLED)" != true`) {
+		t.Error("pilot/pipeline.sh is not gated on PIPELINE_ENABLED=true")
 	}
 }

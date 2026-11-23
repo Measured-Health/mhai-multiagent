@@ -75,6 +75,9 @@ clears the reference (so --agreement-ref is refused with none).
 GPU server (deploy/README.md, "Our own model on the GPU"); it goes with
 --provider none only. --own-model off switches it off. Left out, a provider
 clears it and none keeps it. It is off for every hospital by default.
+--own-model on needs CORE_OWN_MODEL_ALLOWED=true as this command sees it
+(the deployment serves our own model; deploy/README.md, "Answering with our
+own model only"); off is always allowed.
 
 The provider must be enabled in CORE_CLOUD_PROVIDERS as this command sees it.
 That catches a mistake; it is not a control: the operator sets their own
@@ -235,13 +238,15 @@ var (
 	errModelPolicyWrite   = errors.New("could not set the model policy; nothing was changed")
 	errBadOwnModel        = errors.New("--own-model must be on or off")
 	errOwnModelProvider   = errors.New("--own-model on goes with --provider none (one route per hospital)")
+	errOwnModelNotAllowed = errors.New("--own-model on needs CORE_OWN_MODEL_ALLOWED=true (this deployment serves our own model)")
 )
 
 // hospitalsModelPolicy is "hospitals model-policy set <id or short code>
 // --provider P [--agreement-ref R] [--budget N] [--own-model on|off]"
 // (platform.ApplyModelPolicy
 // as mhai_provision, via cli). Everything is checked before connecting; the
-// provider must be enabled in CORE_CLOUD_PROVIDERS (read with getenv).
+// provider must be enabled in CORE_CLOUD_PROVIDERS, and --own-model on needs
+// CORE_OWN_MODEL_ALLOWED=true (both read with getenv).
 // Errors and output never hold the reference.
 func hospitalsModelPolicy(ctx context.Context, args []string, url string, getenv func(string) string, out io.Writer) error {
 	if len(args) < 2 || args[0] != "set" || strings.HasPrefix(args[1], "-") {
@@ -304,6 +309,13 @@ func hospitalsModelPolicy(ctx context.Context, args []string, url string, getenv
 			return errOwnModelProvider
 		}
 		c.OwnModel = &own
+	}
+	ownAllowed, err := config.ParseOwnModelAllowed(getenv("CORE_OWN_MODEL_ALLOWED"))
+	if err != nil {
+		return err
+	}
+	if !platform.OwnModelPermitted(c, ownAllowed) {
+		return errOwnModelNotAllowed
 	}
 	if budgetSet {
 		if budget < 1 || budget > platform.MaxMonthlyTokenBudget {

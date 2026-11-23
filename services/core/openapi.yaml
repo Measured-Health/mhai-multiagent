@@ -5239,6 +5239,10 @@ paths:
         `cloud_provider` only (true with a provider is 422): one route per
         hospital. Left out, it is kept when `cloud_provider` is null and
         cleared when a provider is set.
+        Turning it on needs the deployment to serve our own model
+        (`CORE_OWN_MODEL_ALLOWED=true`): otherwise `own_model` true is 422
+        `validation_failed` and nothing is written. False, or left out, is
+        always allowed.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, validation_failed, rate_limited, not_ready, internal_error]

@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 # Switch on cloud answers for one pilot hospital on the demo host
-# (deploy/pilot/README.md). Run by the product owner, as the deploy user, on
-# the instance, from a copy of this repo's deploy/ folder at the release
-# the instance runs:
+# (deploy/pilot/README.md), or the pipeline worker with our own model only and
+# no cloud provider (--provider none; deploy/README.md, "Answering with our own
+# model only"). Run by the product owner, as the deploy user, on the instance,
+# from a copy of this repo's deploy/ folder at the release the instance runs:
 #
 #   bash deploy/pilot/enable-pilot.sh --provider anthropic \
 #     --hospital-name "Pilot Hospital" --short-code PILOT \
 #     --agreement-ref AGR-2026-01 --zdr-ref <provider ZDR reference>
+#
+#   bash deploy/pilot/enable-pilot.sh --provider none \
+#     [--short-code CODE [--hospital-name NAME]]
+#
+# With --provider none there is no key, no egress proxy and no cloud route:
+# the host must serve our own model (GPU_MODEL_ENABLED=true in .env), the
+# script writes CORE_OWN_MODEL_ALLOWED=true, and a hospital named with
+# --short-code is switched to it (own_model on). A cloud route a hospital's
+# policy might still name escalates every question (no provider here).
 #
 # The provider's API key is read from standard input (a hidden prompt on a
 # terminal, or one line piped from a password manager) into a 0400 file. It
@@ -41,7 +51,11 @@ usage: bash enable-pilot.sh --provider anthropic|gemini
          [--model MODEL] [--budget TOKENS] [--image IMAGE]
          [--gemini-paid-tier verified]
          [--replace-key] [--seed-reference-guidelines]
-The API key is read from standard input.
+       bash enable-pilot.sh --provider none
+         [--short-code CODE [--hospital-name NAME] [--time-zone TZ]]
+         [--image IMAGE] [--seed-reference-guidelines]
+The API key is read from standard input (no key with --provider none).
+--provider none answers with our own model only (GPU_MODEL_ENABLED=true).
 For gemini, --gemini-paid-tier verified confirms the key's Google project is
 paid and billing-enabled (free-tier prompts may be used by Google); the
 pipeline refuses to start without it.
@@ -70,18 +84,31 @@ while [ $# -gt 0 ]; do
 done
 
 # --- the arguments, checked before anything is touched ----------------------
+# OWN_ONLY=1: --provider none, the pipeline with our own model only.
+OWN_ONLY=0
 case "$PROVIDER" in
   anthropic) MODEL=${MODEL:-claude-opus-5-5} ;;
   gemini) [ -n "$MODEL" ] || die "--model is required for gemini (the exact model id the gemini adapter allows)"
     [ "$GEMINI_TIER" = verified ] || die "--gemini-paid-tier verified is required for gemini: confirm the key's Google project is paid and billing-enabled first" ;;
-  *) die "--provider must be anthropic or gemini" ;;
+  none) OWN_ONLY=1
+    for given in "--agreement-ref:$AGREEMENT" "--zdr-ref:$ZDR" "--model:$MODEL" "--budget:$BUDGET" "--gemini-paid-tier:$GEMINI_TIER"; do
+      [ -z "${given#*:}" ] || die "${given%%:*} goes with a cloud provider, not --provider none"
+    done
+    [ "$REPLACE_KEY" = 0 ] || die "--replace-key goes with a cloud provider, not --provider none"
+    [ -n "$CODE" ] || [ -z "$NAME" ] || die "--hospital-name goes with --short-code" ;;
+  *) die "--provider must be anthropic, gemini or none" ;;
 esac
 P_UPPER=$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')
-[ -n "$NAME" ] || die "--hospital-name is required"
-case "$NAME" in *[\$\"\'\\\`]*|*$'\n'*) die "--hospital-name must not hold quotes, \$, backslashes or newlines" ;; esac
-printf '%s' "$CODE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$' || die "--short-code must be 2 to 32 of A-Z a-z 0-9 _ - (starting with a letter or digit)"
-CODE=$(printf '%s' "$CODE" | tr '[:lower:]' '[:upper:]')
+if [ "$OWN_ONLY" = 0 ] || [ -n "$NAME" ]; then
+  [ -n "$NAME" ] || die "--hospital-name is required"
+  case "$NAME" in *[\$\"\'\\\`]*|*$'\n'*) die "--hospital-name must not hold quotes, \$, backslashes or newlines" ;; esac
+fi
+if [ "$OWN_ONLY" = 0 ] || [ -n "$CODE" ]; then
+  printf '%s' "$CODE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$' || die "--short-code must be 2 to 32 of A-Z a-z 0-9 _ - (starting with a letter or digit)"
+  CODE=$(printf '%s' "$CODE" | tr '[:lower:]' '[:upper:]')
+fi
 printf '%s' "$TZONE" | grep -Eq '^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$' || die "--time-zone must be an IANA zone such as Africa/Lagos"
+if [ "$OWN_ONLY" = 0 ]; then
 # Core's format (00018's CHECK): AGR-YYYY-NN.. or DPA-YYYY-NN.. A real
 # hospital never takes DEMO-SYNTHETIC.
 printf '%s' "$AGREEMENT" | grep -Eq '^(AGR|DPA)-[0-9]{4}-[0-9]{2,8}$' || die "--agreement-ref must be AGR-YYYY-NN or DPA-YYYY-NN (2 to 8 digits; see README: pilot placeholder)"
@@ -94,6 +121,9 @@ if [ -n "$BUDGET" ]; then
     die "--budget must be 1 to 1000000000"
   fi
 fi
+fi
+# ENABLE_PILOT_CHECK_ARGS_ONLY=1 stops here (the argument tests, test-pipeline.sh).
+[ "${ENABLE_PILOT_CHECK_ARGS_ONLY:-0}" != 1 ] || { echo "arguments ok"; exit 0; }
 
 say "Checking prerequisites"
 for bin in docker openssl curl; do
@@ -138,11 +168,19 @@ env_unset() {
   if grep -q "^$1=" "$ENV_FILE"; then sed -i "/^$1=/d" "$ENV_FILE"; info "$1 removed"; fi
 }
 
-say "The API key ($PROVIDER)"
 KEY_FILE="$DEST/secrets/pilot-cloud-api-key"
 KEY_PROVIDER_FILE="$DEST/secrets/pilot-cloud-api-key.provider"
 KEY=
-if [ -s "$KEY_FILE" ] && [ "$REPLACE_KEY" = 0 ]; then
+if [ "$OWN_ONLY" = 1 ]; then say "Our own model only (no cloud provider)"; else say "The API key ($PROVIDER)"; fi
+if [ "$OWN_ONLY" = 1 ]; then
+  [ "$(env_get GPU_MODEL_ENABLED)" = true ] \
+    || die "--provider none answers with our own model only: set GPU_MODEL_ENABLED=true and the GPU_MODEL_* settings in .env and deploy first (deploy/README.md, \"Our own model on the GPU\"); nothing was changed"
+  [ -z "$(env_get PILOT_CLOUD_PROVIDER)" ] \
+    || die "this host answers from the cloud (PILOT_CLOUD_PROVIDER is set): switch the cloud off first (pilot/README.md, \"Switching off\"); nothing was changed"
+  [ ! -e "$KEY_FILE" ] || [ -f "$KEY_FILE" ] \
+    || die "secrets/pilot-cloud-api-key is not a file (Docker made a folder for a missing mount?): remove it (sudo rm -r) and run again"
+  info "GPU_MODEL_ENABLED=true, no cloud provider"
+elif [ -s "$KEY_FILE" ] && [ "$REPLACE_KEY" = 0 ]; then
   [ "$(cat "$KEY_PROVIDER_FILE" 2>/dev/null)" = "$PROVIDER" ] \
     || die "the key file in place is not a $PROVIDER key: run again with --replace-key and the $PROVIDER key on stdin"
   info "key file exists, kept (--replace-key to change it)"
@@ -182,6 +220,24 @@ arch=$(docker image inspect -f '{{.Architecture}}' "$IMAGE")
 case "$(uname -m)/$arch" in aarch64/arm64|x86_64/amd64) ;; *) die "$IMAGE is $arch, this host is $(uname -m)" ;; esac
 APP_UID=$(docker run --rm --network none --entrypoint id "$IMAGE" -u)
 case "$APP_UID" in ''|0|*[!0-9]*) die "the image's user is not a non-root uid" ;; esac
+if [ "$OWN_ONLY" = 1 ]; then
+  # The own route, from the image's own vocabulary: an image built before it
+  # (rebuild with the "Pilot pipeline image" workflow) fails here.
+  docker run --rm --network none --entrypoint python "$IMAGE" -c \
+    'from intelligence.boundary.cloud import vocab; assert "own" in vocab.ROUTES' >/dev/null 2>&1 \
+    || die "$IMAGE has no own route: run the \"Pilot pipeline image\" workflow on main, then run this again"
+  info "$IMAGE ($arch), user $APP_UID, own route"
+
+  say "Core knows the own-model allow-list"
+  # A dry CLI call that writes nothing: with CORE_OWN_MODEL_ALLOWED=false a core
+  # that knows it refuses --own-model on before connecting.
+  out=$(compose --profile tools run --rm --no-deps -T -e CORE_OWN_MODEL_ALLOWED=false core-cli \
+    hospitals model-policy set "${CODE:-OWN}" --provider none --own-model on </dev/null 2>&1 || true)
+  case "$out" in
+    *CORE_OWN_MODEL_ALLOWED*) info "core checks CORE_OWN_MODEL_ALLOWED" ;;
+    *) die "the core image does not know CORE_OWN_MODEL_ALLOWED (deploy a core with it first)" ;;
+  esac
+else
 # The provider's API host, from the image's own vocabulary: an image without
 # the provider fails here, before anything changes.
 HOST=$(docker run --rm --network none --entrypoint python "$IMAGE" -c \
@@ -201,6 +257,7 @@ case "$out" in
   *"needs --agreement-ref"*) info "core accepts $PROVIDER" ;;
   *) die "the core image does not accept the provider $PROVIDER (deploy a core with it first)" ;;
 esac
+fi
 
 say "Secrets in $DEST/secrets (each mode 400, owned by the image's user $APP_UID)"
 mkdir -p "$DEST/secrets"
@@ -253,7 +310,15 @@ env_get INTELLIGENCE_DB_PASSWORD | tr -d '\n' | put_secret intelligence-db-passw
 owned_ok intelligence-db-password || die "secrets/intelligence-db-password has the wrong owner or mode"
 info "intelligence-db-password written from .env"
 
-# The API key.
+# The API key, or with no provider an empty placeholder (so the pipeline's
+# mount is a file, never a folder Docker makes; nothing reads it).
+if [ "$OWN_ONLY" = 1 ] && [ ! -e "$KEY_FILE" ]; then
+  docker run --rm --network none --user 0 --entrypoint sh -e U="$APP_UID" \
+    -v "$DEST/secrets:/s" "$NATS_BOX_IMAGE" -c '
+      set -eu; umask 077
+      : > /s/pilot-cloud-api-key; chown "$U:$U" /s/pilot-cloud-api-key; chmod 400 /s/pilot-cloud-api-key'
+  info "pilot-cloud-api-key: an empty placeholder (no cloud provider)"
+fi
 if [ -n "$KEY" ]; then
   printf '%s' "$KEY" | put_secret pilot-cloud-api-key
   KEY=
@@ -262,9 +327,30 @@ if [ -n "$KEY" ]; then
   info "pilot-cloud-api-key written"
 fi
 unset KEY
-owned_ok pilot-cloud-api-key || die "secrets/pilot-cloud-api-key has the wrong owner or mode (run again with --replace-key)"
+if [ "$OWN_ONLY" = 1 ]; then
+  owned_ok pilot-cloud-api-key || die "secrets/pilot-cloud-api-key has the wrong owner or mode: remove it and run again"
+else
+  owned_ok pilot-cloud-api-key || die "secrets/pilot-cloud-api-key has the wrong owner or mode (run again with --replace-key)"
+fi
 
 say "Settings in $DEST/.env (none of these is a secret)"
+CORE_CHANGED=0
+# So every deploy starts and refreshes the pipeline (pilot/pipeline.sh).
+env_set PIPELINE_ENABLED true
+if [ "$OWN_ONLY" = 1 ]; then
+  for other in ANTHROPIC GEMINI; do
+    for v in MODEL KEY_FILE ZDR_REF; do env_unset "PILOT_${other}_$v"; done
+  done
+  env_unset PILOT_GEMINI_PAID_TIER
+  env_unset PILOT_CLOUD_PROVIDER
+  env_set PIPELINE_IMAGE "$IMAGE"
+  [ "$(env_get CORE_OWN_MODEL_ALLOWED)" = true ] || CORE_CHANGED=1
+  env_set CORE_OWN_MODEL_ALLOWED true
+  case ",$(env_get COMPOSE_PROFILES)," in
+    *,ownmodel,*) env_set COMPOSE_PROFILES pilot,ownmodel ;;
+    *) env_set COMPOSE_PROFILES pilot ;;
+  esac
+else
 for other in ANTHROPIC GEMINI; do
   [ "$other" = "$P_UPPER" ] && continue
   for v in MODEL KEY_FILE ZDR_REF; do env_unset "PILOT_${other}_$v"; done
@@ -276,7 +362,6 @@ env_set "PILOT_${P_UPPER}_KEY_FILE" /run/secrets/cloud-api-key
 env_set "PILOT_${P_UPPER}_ZDR_REF" "$ZDR"
 [ "$PROVIDER" != gemini ] || env_set PILOT_GEMINI_PAID_TIER verified
 env_set PIPELINE_IMAGE "$IMAGE"
-CORE_CHANGED=0
 [ "$(env_get CORE_CLOUD_PROVIDERS)" = "$PROVIDER" ] || CORE_CHANGED=1
 env_set CORE_CLOUD_PROVIDERS "$PROVIDER"
 # So every later `docker compose` here, the deploy workflow's included,
@@ -286,8 +371,11 @@ case ",$(env_get COMPOSE_PROFILES)," in
   *,ownmodel,*) env_set COMPOSE_PROFILES cloud,pilot,ownmodel ;;
   *) env_set COMPOSE_PROFILES cloud,pilot ;;
 esac
+fi
 docker compose config --quiet || die "compose.yml and .env don't validate"
 
+PROXY_CHANGED=0
+if [ "$OWN_ONLY" = 0 ]; then
 say "The egress proxy allows $HOST only"
 mkdir -p "$DEST/egress-proxy"
 chmod 755 "$DEST/egress-proxy"
@@ -303,6 +391,7 @@ if cmp -s "$DEST/egress-proxy/allowed-hosts.new" "$DEST/egress-proxy/allowed-hos
   rm -f "$DEST/egress-proxy/allowed-hosts.new"; info "allowed-hosts unchanged"
 else
   mv -f "$DEST/egress-proxy/allowed-hosts.new" "$DEST/egress-proxy/allowed-hosts"; PROXY_CHANGED=1; info "allowed-hosts written"
+fi
 fi
 
 say "NATS and core"
@@ -325,9 +414,13 @@ for _ in $(seq 1 24); do
   sleep 5
 done
 [ "$ok" = 1 ] || { compose logs --tail=80 core; die "core is not ready (readyz=$ready)"; }
-info "core ready (CORE_CLOUD_PROVIDERS=$PROVIDER; recreated: $CORE_CHANGED)"
+if [ "$OWN_ONLY" = 1 ]; then
+  info "core ready (CORE_OWN_MODEL_ALLOWED=true; recreated: $CORE_CHANGED)"
+else
+  info "core ready (CORE_CLOUD_PROVIDERS=$PROVIDER; recreated: $CORE_CHANGED)"
+fi
 
-say "Starting the egress proxy and the pipeline"
+say "Starting the pipeline"
 # The demo's sample answers (profile demo) are the same NATS user and
 # consumer: never both. The demo deploy leaves them off while the pilot is on.
 if [ -n "$(docker compose --profile demo ps -q sample-ai 2>/dev/null)" ]; then
@@ -335,7 +428,10 @@ if [ -n "$(docker compose --profile demo ps -q sample-ai 2>/dev/null)" ]; then
   docker compose --profile demo rm -f sample-ai >/dev/null
   info "the demo's sample-ai stopped (the pilot's pipeline takes its jobs)"
 fi
-if [ "$PROXY_CHANGED" = 1 ] && [ -n "$(compose ps -q egress-proxy)" ]; then
+if [ "$OWN_ONLY" = 1 ]; then
+  [ -n "$(docker compose --profile gpu-model ps -q gpu-model 2>/dev/null)" ] \
+    || info "gpu-model is not running: own questions escalate until a deploy starts it (gpu-model/gpu-model.sh)"
+elif [ "$PROXY_CHANGED" = 1 ] && [ -n "$(compose ps -q egress-proxy)" ]; then
   compose up -d --force-recreate --no-deps egress-proxy
 else
   compose up -d --no-deps egress-proxy
@@ -354,12 +450,15 @@ if [ "$started" != 1 ]; then
 fi
 info "pipeline started"
 
-say "The pilot hospital ($CODE)"
 # psql as the owner, the short code passed as a psql variable (quoted by
 # psql), never spliced into SQL.
 pg() { docker compose exec -T postgres psql -U pgadmin -d mhai -v ON_ERROR_STOP=1 -tA -v code="$CODE" "$@"; }
+HID=
+if [ -n "$CODE" ]; then
+say "The pilot hospital ($CODE)"
 row=$(printf "SELECT id, status, is_demo FROM hospitals WHERE short_code = :'code';\n" | pg -F ' ')
 if [ -z "$row" ]; then
+  [ -n "$NAME" ] || die "no hospital $CODE: give --hospital-name to create it"
   compose --profile tools run --rm -T core-cli hospitals create --name "$NAME" --short-code "$CODE" \
     --time-zone "$TZONE" --require-mfa-for-clinicians </dev/null
   row=$(printf "SELECT id, status, is_demo FROM hospitals WHERE short_code = :'code';\n" | pg -F ' ')
@@ -374,6 +473,17 @@ else
   compose --profile tools run --rm -T core-cli hospitals activate "$CODE" </dev/null
 fi
 
+if [ "$OWN_ONLY" = 1 ]; then
+  say "Its model policy: our own model"
+  cur=$(printf "SELECT coalesce(p.cloud_provider, 'none'), p.own_model FROM hospital_model_policy p JOIN hospitals h ON h.id = p.hospital_id WHERE h.short_code = :'code';\n" | pg -F ' ')
+  read -r CUR_P CUR_OWN <<<"${cur:-}"
+  if [ "${CUR_P:-}" = none ] && [ "${CUR_OWN:-}" = t ]; then
+    info "already on, kept (no new audit entry)"
+  else
+    compose --profile tools run --rm -T core-cli hospitals model-policy set "$CODE" --provider none --own-model on </dev/null
+    info "own model on, audited (hospital.model_policy_changed, via cli)"
+  fi
+else
 say "Its model policy: $PROVIDER, agreement $AGREEMENT"
 cur=$(printf "SELECT p.cloud_provider, p.agreement_ref, p.monthly_token_budget FROM hospital_model_policy p JOIN hospitals h ON h.id = p.hospital_id WHERE h.short_code = :'code';\n" | pg -F ' ')
 read -r CUR_P CUR_REF CUR_BUDGET <<<"${cur:-}"
@@ -384,6 +494,8 @@ else
   [ -z "$BUDGET" ] || set -- "$@" --budget "$BUDGET"
   compose --profile tools run --rm -T core-cli "$@" </dev/null
   info "set and audited (hospital.model_policy_changed, via cli)"
+fi
+fi
 fi
 
 if [ "$SEED_GUIDELINES" = 1 ]; then
@@ -404,5 +516,14 @@ SQL
 fi
 
 say "Done"
-info "Hospital $CODE ($HID): cloud answers from $PROVIDER ($MODEL), agreement $AGREEMENT, ZDR $ZDR."
-info "Next: create its users (README, step 3) and run the checklist (README, 'Check it')."
+if [ "$OWN_ONLY" = 1 ]; then
+  info "The pipeline answers with our own model only; every deploy keeps it running (PIPELINE_ENABLED=true)."
+  if [ -n "$CODE" ]; then
+    info "Hospital $CODE ($HID): own model on."
+  else
+    info "No hospital was changed: core-cli hospitals model-policy set <code> --provider none --own-model on (deploy/README.md)."
+  fi
+else
+  info "Hospital $CODE ($HID): cloud answers from $PROVIDER ($MODEL), agreement $AGREEMENT, ZDR $ZDR."
+  info "Next: create its users (README, step 3) and run the checklist (README, 'Check it')."
+fi

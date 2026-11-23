@@ -744,12 +744,15 @@ jobs:
           bash deploy/gpu-model/test-gpu-model.sh
           bash deploy/gpu-model/test-swap-model.sh
           python3 -m unittest discover -s deploy/gpu-model/builder
-      # The own model's switch scripts (deploy/pilot/): shellcheck, and the
-      # pre-flight (memory, the pinned lock, the images) with a fake docker.
+      # The own model's switch scripts (deploy/pilot/): shellcheck, the
+      # pre-flight (memory, the pinned lock, the images) and the deploy's pipeline
+      # step (pipeline.sh: our own model only, the cloud optional) with a fake
+      # docker, and enable-pilot.sh's arguments.
       - name: Own model switch pre-flight tests
         run: |
           shellcheck -x deploy/pilot/*.sh deploy/demo/*.sh
           bash deploy/pilot/test-preflight.sh
+          bash deploy/pilot/test-pipeline.sh
       # The live site (deploy/README.md, "Live site"): live-site.sh with a
       # fake compose (no demo hospital that can sign in, sample-ai off, the
       # marker), and the demo scripts refusing on a live host.

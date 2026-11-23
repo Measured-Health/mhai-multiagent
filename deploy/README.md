@@ -1225,8 +1225,9 @@ was relaxed for it.
 2. Run "Deploy backend demo" (or wait for the next merge). The deploy prints
    `gpu-model: serving <alias>`; a hash mismatch or a service that doesn't
    come up fails it, with the reason.
-3. The pipeline worker must run (profile `pilot`; `pilot/README.md`): the
-   deploy brings it up to date, and only it asks the model.
+3. The pipeline worker must run (profile `pilot`): only it asks the model.
+   With no cloud provider, see "Answering with our own model only" below;
+   with `PIPELINE_ENABLED=true` every deploy starts or refreshes it.
 
 By hand on the host (the same as the deploy does):
 
@@ -1238,6 +1239,11 @@ docker compose --profile gpu-model logs --tail=20 gpu-model
 ```
 
 ### Switch a hospital to it
+
+Only on a host that allows it: `CORE_OWN_MODEL_ALLOWED=true` in `.env` (read
+by core and `core-cli`; `enable-pilot.sh --provider none` writes it). Without
+it, `--own-model on` is refused and the API answers 422; switching off is
+always allowed.
 
 The hospital's model policy (`own_model`, off by default). It goes with no
 cloud provider (one route per hospital): setting a provider later switches
@@ -1273,6 +1279,82 @@ it: `docker rm -f mhai-llm-gpu`. Nothing in this stack used it.
 `gpu-model/test-entrypoint.sh` and `gpu-model/test-gpu-model.sh` test both
 scripts without Docker (CI). `TestGPUModelService` checks the compose
 service's hardening.
+
+## Answering with our own model only (no cloud provider)
+
+On the live site (`SITE_MODE=live`) there are no sample answers, so nothing is
+answered until the `pipeline` worker runs. It can run with **no cloud provider
+and no key**: our own model on the GPU is its only answering route.
+
+| Route | On this host | A hospital whose policy names it |
+|---|---|---|
+| `own` | `gpu-model` serving the expected alias | answered by our own model, verified by the local route's retrieval, NLI, HGA and escalation guard |
+| `cloud:<provider>` | none (no `PILOT_CLOUD_PROVIDER`, no key, no egress proxy) | every question escalates (`unconfigured`); nothing is sent |
+| `local` | no pinned `cca` unless `PILOT_MODEL_ROLES` | every question escalates (`local_unverified`) |
+
+Fail closed: no route falls back to another. The cloud path stays: run
+`enable-pilot.sh --provider anthropic|gemini` later to add it (pilot/README.md).
+
+**What the worker needs, and who makes it**
+
+| Need | Where | Made by |
+|---|---|---|
+| NATS user `pipeline` | `secrets/nats-pipeline.nk` (seed, 0400, uid of the image), `NATS_PIPELINE_NKEY` in `.env` | `enable-pilot.sh` (inside nats-box, no network) |
+| Database login `intelligence_app` | `INTELLIGENCE_DB_PASSWORD` in `.env`, the same in `secrets/intelligence-db-password` (0400) | `enable-pilot.sh`; core-migrate makes the login |
+| Request-token trusted keys | volume `mhai-backend-trustedkeys` | `setup-host.sh` and every deploy (`core-request-key`) |
+| Cloud key mount | `secrets/pilot-cloud-api-key`: an **empty placeholder** (0400) with no provider, so Docker never makes a folder there; the worker reads it only for an enabled provider | `enable-pilot.sh --provider none` |
+| Embedding and NLI weights | **inside the pipeline image** (`ghcr.io/measured-health/mhai-multiagent-pipeline-pilot`, target `pilot`): pinned by repository and revision in `services/intelligence/Dockerfile`, loaded offline (`HF_HUB_OFFLINE=1`). Nothing to place by hand; `models.lock` pins only the `cca` role of the CPU llama sidecar (`PILOT_MODEL_ROLES`), not used here | the "Pilot pipeline image" workflow (Actions, on `main`; arch `both` or `amd64`) |
+| The answer model | the GGUF under `/srv/mhai-models` (above) | the operator ("Place a new GGUF") |
+| Memory | the worker's cap is 1600 MiB; the step wants 1700 MiB available before it starts | the host |
+
+**Turn it on (once, on the host, as the deploy user)**
+
+1. Our own model is serving: the `GPU_MODEL_*` settings with
+   `GPU_MODEL_ENABLED=true`, and a deploy printed `gpu-model: serving <alias>`.
+2. The pipeline image has the `own` route: run "Pilot pipeline image" on
+   `main` after this release (the image is not rebuilt by the deploy).
+3. From a copy of `deploy/` at the deployed release:
+
+   ```bash
+   bash deploy/pilot/enable-pilot.sh --provider none [--short-code <CODE>]
+   ```
+
+   It refuses unless `GPU_MODEL_ENABLED=true`, and while a cloud provider is
+   set. It checks the image has the `own` route and core knows the
+   allow-list; makes the NKey, the database password and the empty key
+   placeholder; writes `PIPELINE_ENABLED=true`, `CORE_OWN_MODEL_ALLOWED=true`,
+   `PIPELINE_IMAGE` and `COMPOSE_PROFILES=pilot` (removing any `PILOT_*`
+   cloud setting; `CORE_CLOUD_PROVIDERS` is left as it is); recreates nats
+   if its key is new and core if the allow-list changed; starts the
+   pipeline. With `--short-code` it switches that hospital to our own model
+   (`--hospital-name` too, to create it). It takes no key, `--agreement-ref`,
+   `--zdr-ref`, `--model` or `--budget`.
+4. Switch hospitals on ("Switch a hospital to it", above).
+
+**Every deploy** (`pilot/pipeline.sh`, after `gpu-model/gpu-model.sh`): with
+`PIPELINE_ENABLED=true` it checks the files and settings above, pulls
+`PIPELINE_IMAGE` (the copy on the host if the pull fails), starts or refreshes
+the pipeline (and the egress proxy when a provider is set), stops the demo's
+`sample-ai` if it runs, and waits for the worker's start line. Anything
+missing, no answering route, too little memory or a worker that doesn't start
+fails the deploy, naming what to run. Without `PIPELINE_ENABLED=true` it
+touches nothing (a pipeline started by hand keeps running).
+
+| Variable (`.env`) | Value | What |
+|---|---|---|
+| `PIPELINE_ENABLED` | `true` | the deploy starts and refreshes the pipeline |
+| `CORE_OWN_MODEL_ALLOWED` | `true` | a hospital may be switched to our own model (default `false`) |
+| `PIPELINE_IMAGE` | the pilot image | optional; the default is the `latest` tag |
+
+**Switching off:** `PIPELINE_ENABLED=false` and
+`docker compose --profile pilot stop pipeline`; `CORE_OWN_MODEL_ALLOWED=false`
+and a deploy stops new switches (hospitals already on stay on and escalate
+once the model is gone; switch them off).
+
+`pilot/test-pipeline.sh` tests the deploy step and `enable-pilot.sh`'s
+arguments without Docker (CI);
+`tests/boundary/test_own_model_only.py` starts the worker's settings from
+this compose file with no provider.
 
 ## Swapping our own model
 
