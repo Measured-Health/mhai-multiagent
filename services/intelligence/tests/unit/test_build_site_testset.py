@@ -166,6 +166,36 @@ def test_the_flags_file_never_reads_identifying_columns() -> None:
     )
 
 
+# The flags file as some sites export it: a symptom or diagnosis is marked by
+# writing its own name, medicines by their names. Synthetic values only.
+NAMED_FLAGS = (
+    "age,sex,fever,headache,cough_cold_sorethroat,diagnostics_1,diagnostics_2,"
+    "diagnostics_others,antimalarial,antibiotics,others_medications\n"
+    "30,F,fever,,,malaria,,,synthdrug-a,,others\n"
+    "30,F,,headache,cough_cold_sorethroat,malaria,sepsis,others,synthdrug-b,synthdrug-c,\n"
+    "41,M,fever,headache,,malaria,,,synthdrug-a,,\n"
+)
+
+
+def test_the_flags_file_reads_named_symptoms_diagnoses_and_medicines() -> None:
+    counts: Counter[str] = Counter()
+    visits, mapping = site.visits_from_csv(NAMED_FLAGS, counts)
+    assert mapping["flags"] == ["fever", "headache", "cough_cold_sorethroat"]
+    assert mapping["diagnosis"] == "diagnostics_1"
+    assert mapping["more_diagnoses"] == ["diagnostics_2", "diagnostics_others"]
+    assert mapping["medicines"] == ["antimalarial", "antibiotics", "others_medications"]
+    assert mapping["not_read_other"] == []
+    kept = site.select(visits, counts)
+    # Three different visits: reading the named flags keeps them apart.
+    assert len(kept) == 3 and counts["dropped_duplicate_row"] == 0
+    by_text = " | ".join(q for _, q in kept)
+    assert "presents with headache, cough cold sorethroat" in by_text
+    assert "Working diagnosis: malaria, sepsis" in by_text
+    assert "others" not in by_text
+    v = next(v for v in visits if "sepsis" in v.diagnosis)
+    assert v.treatment == "synthdrug b, synthdrug c"
+
+
 def test_write_is_private_and_refuses_to_overwrite(tmp_path: Path) -> None:
     counts: Counter[str] = Counter()
     visits = site.visits_from_xlsx(site.read_xlsx(_xlsx([HEADER, *ROWS])), counts)
