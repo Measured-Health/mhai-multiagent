@@ -166,6 +166,13 @@ class Verification:
     # of the rules that fired. Never text.
     guard_reasons: tuple[str, ...] = ()
     guard_rules: tuple[str, ...] = ()
+    # The HGA's support gate (hga_nli.SUPPORT_GATE_CODES; "" when it didn't run) and
+    # each citation's result (hga_nli.citation_checks, checked by _citation_checks):
+    # chunk id, NLI label and score, action, reason code, and the claim. The claim is
+    # a sentence of the answer, so it stays out of repr; it goes to the decision row
+    # with the answer, never to a log or the audit fact.
+    support_gate: str = ""
+    citation_checks: tuple[Mapping[str, Any], ...] = field(default=(), repr=False)
 
 
 def trust_band(v: Verification) -> str | None:
@@ -305,6 +312,60 @@ def _number(v: Any) -> float | None:
     return float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
 
 
+_NLI_LABELS = frozenset({"ENTAILMENT", "NEUTRAL", "CONTRADICTION"})
+_CITATION_ACTIONS = frozenset({"PASS", "FLAG", "REDACT"})
+
+
+def _citation_checks(raw: Any) -> tuple[dict[str, Any], ...]:
+    """The HGA's per-citation results, each checked field by field; an entry that
+    doesn't fit is dropped rather than stored (core checks them again)."""
+    from intelligence.agents.hga_nli import (
+        CITATION_REASONS,
+        MAX_CITATION_CHECKS,
+        MAX_CLAIM_TEXT,
+    )
+
+    out: list[dict[str, Any]] = []
+    for c in raw if isinstance(raw, list | tuple) else ():
+        if not isinstance(c, Mapping):
+            continue
+        cid, label, action, reason = (
+            c.get("chunk_id"),
+            c.get("nli_label"),
+            c.get("action"),
+            c.get("reason"),
+        )
+        conf = _number(c.get("nli_confidence"))
+        idx, claim = c.get("claim_index"), c.get("claim_text")
+        if not (
+            isinstance(cid, str)
+            and _CHUNK_ID.fullmatch(cid)
+            and label in _NLI_LABELS
+            and action in _CITATION_ACTIONS
+            and reason in CITATION_REASONS
+            and conf is not None
+            and 0.0 <= conf <= 1.0
+            and isinstance(idx, int)
+            and not isinstance(idx, bool)
+            and isinstance(claim, str)
+        ):
+            continue
+        out.append(
+            {
+                "chunk_id": cid,
+                "claim_index": idx,
+                "claim_text": " ".join(claim.split())[:MAX_CLAIM_TEXT],
+                "nli_label": label,
+                "nli_confidence": conf,
+                "action": action,
+                "reason": reason,
+            }
+        )
+        if len(out) == MAX_CITATION_CHECKS:
+            break
+    return tuple(out)
+
+
 def _verify_with(orch: Any, generation: Generation) -> Verification:
     """Local verification (NLI and HGA) of an available generation, with
     the question's own thresholds, as process_query does. The local and the
@@ -315,7 +376,12 @@ def _verify_with(orch: Any, generation: Generation) -> Verification:
     first: a red flag, missing patient information or a dose out of the cited chunks'
     scope makes the decision ESCALATE whatever NLI says; a PASS that only recites its
     chunks, off the question, becomes the rule set's recital action. A guard that
-    can't run escalates. Its reason codes go into the verification, never text."""
+    can't run escalates. Its reason codes go into the verification, never text.
+
+    The HGA checks citations against the chunks retrieved for this question only
+    (generation.retrieved_chunk_ids, #28): a citation of any other chunk of the job is
+    redacted and supports nothing, and with nothing retrieved nothing can PASS. Its
+    support gate (#5) is in the HGA's decision."""
     verdict, rules = _guard_question(generation)
     reasons, rule_ids = list(verdict.reasons), list(verdict.rule_ids)
     hga = getattr(orch, "hga", None)
@@ -331,6 +397,7 @@ def _verify_with(orch: Any, generation: Generation) -> Verification:
             escalate_threshold=t.trust_escalate,
             critical_penalty=t.critical_flag_penalty,
             warning_penalty=t.warning_flag_penalty,
+            allowed_chunk_ids=frozenset(generation.retrieved_chunk_ids),
         )
         trust = _number(r.get("trust_score"))
         if trust is None:
@@ -341,6 +408,9 @@ def _verify_with(orch: Any, generation: Generation) -> Verification:
     decision = str(r.get("decision", "")).upper()
     if decision not in DECISIONS:
         decision = "ESCALATE"
+    gate = r.get("support_gate", "")
+    if decision == "PASS" and "support_gate" in r and gate != "passed":
+        decision = "REGENERATE"  # belt and braces: the HGA's gate already caps it
     if verdict.escalate:
         decision = "ESCALATE"
     elif decision == "PASS" and rules is not None and _recited(orch, generation, rules):
@@ -382,6 +452,8 @@ def _verify_with(orch: Any, generation: Generation) -> Verification:
         flags=flags,
         guard_reasons=tuple(reasons),
         guard_rules=tuple(rule_ids),
+        support_gate=gate if isinstance(gate, str) and _SAFE_KEY.fullmatch(gate) else "",
+        citation_checks=_citation_checks(r.get("citations")),
     )
 
 

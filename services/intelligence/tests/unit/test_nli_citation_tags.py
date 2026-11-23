@@ -242,7 +242,12 @@ def test_the_local_default_profile_scores_a_cited_claim_as_entailed(
 ) -> None:
     build, made = worker_build
     orch = build([_shared("KB#0002", MALARIA)], profile=answer_profile.DEFAULT)
-    gen = Generation(question=QUESTION, response=f"{CLAIM} [KB#0002].", available=True)
+    gen = Generation(
+        question=QUESTION,
+        response=f"{CLAIM} [KB#0002].",
+        retrieved_chunk_ids=("KB#0002",),
+        available=True,
+    )
     _assert_grounded(_verify_with(orch, gen))
     assert made[-1].hypotheses == [f"{CLAIM}."]
 

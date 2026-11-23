@@ -65,6 +65,9 @@ def _local(build: Any, question: str, patient: dict[str, Any] | None = None) -> 
         question=question,
         response=RECITAL,
         available=True,
+        # A real generation carries what was retrieved; only those chunks can support
+        # an answer (#28).
+        retrieved_chunk_ids=("KB#0002", "KB#0005"),
         patient_context=patient or {},
         chunk_texts=models_mod._chunk_texts(chunks),
     )

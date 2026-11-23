@@ -629,6 +629,10 @@ class RunQuery:
             # The escalation guard's codes (ADR 0017): why it escalated or downgraded.
             "guard_reasons": list(v.guard_reasons),
             "guard_rules": list(v.guard_rules),
+            # How the answer was checked (#5, #28): the HGA's support gate and each
+            # citation's NLI result. Core shows them as the result's citations.
+            "support_gate": v.support_gate,
+            "citation_checks": [dict(c) for c in v.citation_checks],
         }
         if provider not in ON_HOST_ROUTES:
             report.update(

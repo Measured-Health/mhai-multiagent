@@ -554,7 +554,10 @@ func TestStatusMapping(t *testing.T) {
 	if _, err := super.Exec(context.Background(), `INSERT INTO clinical_decisions (id, hospital_id, query_id, response_text, citations_json,
 		trust_score, hga_decision, guardrail_report_json, retrieval_ms, generation_ms, verified, degraded, failed_agents, model_versions, trust_band,
 		cited_sources_json)
-		VALUES ($1, $2, $3, 'Synthetic answer', '["chunk-1","chunk-2"]', 0.82, 'PASS', '{}', 12, 340, true, false, '{}', '{"cca":"1"}', 'high',
+		VALUES ($1, $2, $3, 'Synthetic answer', '["chunk-1","chunk-2"]', 0.82, 'PASS',
+		'{"support_gate":"passed","citation_checks":[{"chunk_id":"chunk-2","claim_index":0,"claim_text":"Synthetic answer",
+		   "nli_label":"ENTAILMENT","nli_confidence":0.97,"action":"PASS","reason":"entailed"}]}',
+		12, 340, true, false, '{}', '{"cca":"1"}', 'high',
 		'[{"chunk_id":"chunk-2","title":"Synthetic Fever","url":"https://medlineplus.gov/syntheticfever.html","source":"MedlinePlus",
 		   "attribution":"Source: MedlinePlus, National Library of Medicine."},
 		  {"chunk_id":"chunk-9","title":"Not cited","url":null,"source":"openFDA","attribution":null}]')`,
@@ -588,6 +591,16 @@ func TestStatusMapping(t *testing.T) {
 		s["url"] != "https://medlineplus.gov/syntheticfever.html" || s["source"] != "MedlinePlus" ||
 		s["attribution"] != "Source: MedlinePlus, National Library of Medicine." {
 		t.Errorf("cited source %v", s)
+	}
+	// #28: how the answer was checked, from the stored per-citation results.
+	checks, _ := r.body["citations"].([]any)
+	if len(checks) != 1 {
+		t.Fatalf("citations %v", r.body["citations"])
+	}
+	if c, _ := checks[0].(map[string]any); c["chunk_id"] != "chunk-2" || c["source_title"] != "Synthetic Fever" ||
+		c["nli_label"] != "ENTAILMENT" || c["nli_confidence"] != 0.97 || c["action"] != "PASS" || c["reason"] != "entailed" ||
+		c["claim_text"] != "Synthetic answer" || c["excerpt"] != "" {
+		t.Errorf("citation %v", c)
 	}
 	jobs(t, hid)
 }
