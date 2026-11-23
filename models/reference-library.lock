@@ -1,1 +1,1 @@
-{"libraries":{"medref":{"count":23654,"sha256":"d150e3807189bbe0412e1234426452320e22cef258f72d10e835bf6eab2206e7","version":"1.0.0"}},"schema":"mhai.reflib.lock/1"}
+{"libraries":{"local-formulary":{"count":34,"sha256":"081e0d2e9d41b6731e8d25765495f84e567b1ff5edc0a7c1973171b940cc4744","version":"1.0.0"},"medref":{"count":23654,"sha256":"d150e3807189bbe0412e1234426452320e22cef258f72d10e835bf6eab2206e7","version":"1.0.0"}},"schema":"mhai.reflib.lock/1"}

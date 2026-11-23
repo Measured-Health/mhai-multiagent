@@ -108,10 +108,12 @@ class RoutingCursor:
         shared: list[tuple[Any, ...]] | None = None,
         library: list[tuple[Any, ...]] | None = None,
         hospital: list[tuple[Any, ...]] | None = None,
+        generics: list[tuple[Any, ...]] | None = None,
     ) -> None:
         self.answers = {
             kb_repo._LOAD_SHARED: shared or [],
             kb_repo._LOAD_LIBRARY: library or [],
+            kb_repo._LOAD_GENERICS: generics or [],
             kb_repo._LOAD_HOSPITAL: hospital or [],
         }
         self.executed: list[tuple[str, Any]] = []
@@ -232,6 +234,63 @@ async def test_library_sql_is_constant_and_parameterised() -> None:
     assert "%s" in q and "{" not in q
     assert "l.active" in q and "k.hospital_id IS NULL" in q and "LIMIT %s" in q
     assert "plainto_tsquery('english', %s)" in q
+
+
+def _formulary_row(n: int, brand: str, generic: str) -> tuple[Any, ...]:
+    row = _library_row(n, f"{brand} is a local brand or name used in Nigeria for {generic}.")
+    meta = {"kind": "local_formulary", "title": brand, "brand": brand, "generic": generic}
+    return (f"KB#{2000000 + n}", *row[1:6], meta, *row[7:])
+
+
+async def test_a_formulary_brand_pulls_its_generics_rows() -> None:
+    """A question naming a brand ("Synthlonart") finds the formulary row by
+    the brand; its generic is then searched in the other libraries."""
+    library = [
+        _formulary_row(1, "Synthlonart", "synthemether-lumefantrine 20/120 mg"),
+        _library_row(5),
+        _formulary_row(2, "Synthmal", "synthadoxine + synthamine"),
+    ]
+    label = _library_row(9, "Synthemether and lumefantrine tablets: dosage.")
+    cur = RoutingCursor(library=library, generics=[label, _patient_row(3)])
+    chunks = await kb_repo.load_chunks(cur, None, question="Synthlonart dose")  # type: ignore[arg-type]
+    queries = [q for q, _ in cur.executed]
+    assert queries == [
+        kb_repo._LOAD_SHARED,
+        kb_repo._LOAD_LIBRARY,
+        kb_repo._LOAD_GENERICS,
+        kb_repo._LOAD_HOSPITAL,
+    ]
+    assert cur.executed[2][1] == (
+        ["synthemether lumefantrine 20 120 mg", "synthadoxine synthamine"],
+        kb_repo.EXPANSION_CANDIDATES,
+    )
+    ids = [c.chunk_id for c in chunks]
+    assert ids == ["KB#2000001", "KB#1000005", "KB#2000002", "KB#1000009"]
+
+
+async def test_no_formulary_row_no_expansion() -> None:
+    cur = RoutingCursor(library=[_library_row(1), _library_row(2)])
+    await kb_repo.load_chunks(cur, None, question="synthetic")  # type: ignore[arg-type]
+    assert kb_repo._LOAD_GENERICS not in [q for q, _ in cur.executed]
+
+
+def test_formulary_generics_are_bounded_and_from_formulary_rows_only() -> None:
+    rows = [_formulary_row(i, f"Brand{i}", f"generic-{i}") for i in range(6)]
+    posing = (*_formulary_row(9, "Posing", "posing")[:1], False, *_formulary_row(9, "P", "p")[2:])
+    label = _library_row(4, generic="not-a-formulary-row")
+    got = kb_repo.formulary_generics([posing, label, *rows, rows[0]])
+    assert got == ["generic 0", "generic 1", "generic 2"]
+    assert len(got) == kb_repo.MAX_EXPANSION_GENERICS
+    long = _formulary_row(1, "Long", "x" * 5000)
+    assert len(kb_repo.formulary_generics([long])[0]) == kb_repo.MAX_GENERIC_CHARS
+
+
+async def test_library_candidates_take_turns_between_libraries() -> None:
+    q = kb_repo._LOAD_LIBRARY
+    assert "PARTITION BY library_id" in q and "ORDER BY turn, score DESC, id" in q
+    g = kb_repo._LOAD_GENERICS
+    assert "%s::text[]" in g and "l.active" in g and "k.hospital_id IS NULL" in g
+    assert "l.name <> 'local-formulary'" in g and "LIMIT %s" in g and "{" not in g
 
 
 async def test_no_patient_sees_shared_guidelines_only() -> None:

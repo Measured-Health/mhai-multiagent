@@ -532,6 +532,50 @@ version is pinned by pull request, deployed, then loaded the same way. It
 replaces the old rows in the same transaction. Loading an earlier pinned
 version rolls back to it. There is no unload command.
 
+### Adding reference libraries
+
+Several libraries can be active at once, one version of each name
+(docs/models/reference-library.md). Loading `local-formulary` adds its 34
+rows beside `medref`; it changes nothing in `medref`. Each library is
+loaded, replaced and rolled back on its own, with the same command as
+`medref`. core only loads what it pins, so **deploy this change (core with
+the new pins) before loading**.
+
+```bash
+# 1. The artefact from the build server's ~/mhai-reference-library/ into
+#    /srv/mhai-backend/reflib/ on this host.
+cd /srv/mhai-backend
+install -d -m 755 reflib
+chmod 644 reflib/local-formulary-1.0.0.jsonl.gz
+sha256sum reflib/local-formulary-1.0.0.jsonl.gz   # 081e0d2e...4744, as models/reference-library.lock
+
+# 2. Load it, then check both libraries are active.
+docker compose --profile tools run --rm -T -v /srv/mhai-backend/reflib:/reflib:ro \
+  core-cli reference-library load /reflib/local-formulary-1.0.0.jsonl.gz
+docker compose --profile tools run --rm -T core-cli reference-library status
+#   local-formulary 1.0.0 active: 34 rows, ...
+#   medref 1.0.0 active: 23654 rows, ...
+```
+
+**Guideline documents** (`who-malaria`, `ng-malaria`) are built and kept on
+the build server, in `~/mhai-reference-library/guidelines/`. They are **not
+pinned**, so core refuses them (`not_pinned`) until the owner decides their
+licences (TODO.md). After that decision, a pull request sets the
+document's `licence_status` to `permitted` in
+`models/guideline-documents.lock` and pins the artefact in
+`models/reference-library.lock` and core. Then deploy, and load it the same
+way:
+
+```bash
+chmod 644 reflib/who-malaria-1.0.0.jsonl.gz
+sha256sum reflib/who-malaria-1.0.0.jsonl.gz       # 2c75f177...8701
+docker compose --profile tools run --rm -T -v /srv/mhai-backend/reflib:/reflib:ro \
+  core-cli reference-library load /reflib/who-malaria-1.0.0.jsonl.gz
+```
+
+There is no unload command. To stop serving a library, load an earlier
+pinned version. To take it out entirely, use a pull request and a migration.
+
 ### Live site: what it is not yet
 
 - **Real patient data still waits on the go-live sign-offs in TODO.md**

@@ -101,15 +101,30 @@ on any server yet.
   the library's use with real patients. It is reference text (drug labels,
   patient-facing summaries), not clinical practice guidance. Then the
   operator runs deploy/README.md, "Live site: the shared reference library".
-- **Real guidelines for Havana: source and licence-check them.** The WHO
-  guidelines and the Nigerian national guidelines (Federal Ministry of
-  Health: malaria, hypertension, maternal and newborn care), and the
-  hospital's own protocols. **Licence flag:** WHO publications are often
-  CC BY-NC-SA 3.0 IGO, which is non-commercial and share-alike. Check each
-  document's own licence, and ask WHO for permission or get legal advice
-  before a commercial product uses one. Each source becomes a new library
-  version (converter allow-list, review copy, pin, load) and gets its own
-  clinical sign-off.
+- **Owner: decide the guideline licences (23 Nov).** Sourced, built and kept
+  ready on the build server, not pinned (docs/models/reference-library.md,
+  "Guideline documents"):
+  - WHO guidelines for malaria (10 Sep 2026): **CC BY-NC-SA 3.0 IGO**, which
+    is non-commercial and share-alike. Decide whether serving it in MHAI is
+    within the licence, or ask WHO (https://www.who.int/copyright).
+  - Nigeria national malaria guidelines (NMEP, 4th edition, May 2020): "All
+    rights reserved", no open licence. Ask NMEP or the Federal Ministry of
+    Health for written permission.
+  - Nigeria Standard Treatment Guidelines (2022): no official PDF found
+    online. Get an official copy from the Federal Ministry of Health, with
+    its licence terms.
+  - The hospital's own protocols: still to come.
+  Each permitted document is pinned by pull request and gets the clinical
+  safety lead's sign-off before it is loaded.
+- **Clinician: confirm the 14 low-confidence formulary rows**
+  (`models/reference/local-formulary.csv`: Cofex, Emzolyn, Tuxil-D,
+  Broncholyte, Emzoron, Astyfer, Avrofen, Zetagel, Hostan, Anurol, Zolat,
+  Floranorm, Emal, Progunal). Each needs its generic, class and use, then
+  confidence high or medium; a new formulary version is built and pinned
+  (docs/models/reference-library.md, "Local formulary"). A clinician should
+  also check the 34 loaded rows once.
+- **Operator: load `local-formulary` 1.0.0** on the live site once this
+  change is deployed (deploy/README.md, "Adding reference libraries").
 - **Later decisions, left out of 1.0.0:** MedQuAD (CC BY 4.0, but rows
   without an upstream URL; re-source with URLs first), ClinicalTrials.gov
   registrations, PubMed and Europe PMC abstracts (publisher copyright). Never:

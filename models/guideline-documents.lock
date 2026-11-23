@@ -1,0 +1,60 @@
+{
+ "schema": "mhai.guidelines.lock/1",
+ "documents": {
+  "who-malaria": {
+   "title": "WHO guidelines for malaria",
+   "short_title": "WHO guidelines for malaria",
+   "publisher": "World Health Organization",
+   "edition": "10 September 2026",
+   "url": "https://iris.who.int/server/api/core/bitstreams/d3c6488b-3ee6-41cb-960f-ddf0202cd74d/content",
+   "landing_page": "https://www.who.int/publications/i/item/guidelines-for-malaria",
+   "pdf_sha256": "4e2c67b2ec74124ee2f3e388c57915c4a42ff035c570bd4b5de39e2e588de43b",
+   "pages": 494,
+   "first_page": 5,
+   "last_page": 271,
+   "licence": "CC BY-NC-SA 3.0 IGO",
+   "licence_text": "© World Health Organization 2026. Some rights reserved. This work is available under the Creative Commons Attribution-NonCommercial-ShareAlike 3.0 IGO licence (CC BY-NC-SA 3.0 IGO; https://creativecommons.org/licenses/by-nc-sa/3.0/igo). Under the terms of this licence, you may copy, redistribute and adapt the work for non-commercial purposes, provided the work is appropriately cited, as indicated below. In any use of this work, there should be no suggestion that WHO endorses any specific organization, products or services. The use of the WHO logo is not permitted. If you adapt the work, then you must license your work under the same or equivalent Creative Commons licence. [...] Suggested citation. WHO guidelines for malaria, 10 September 2026. Geneva: World Health Organization; 2026. https://doi.org/10.2471/B09879. Licence: CC BY-NC-SA 3.0 IGO. [...] Sales, rights and licensing. To purchase WHO publications, see https://www.who.int/publications/book-orders. To submit requests for commercial use and queries on rights and licensing, see https://www.who.int/copyright.",
+   "licence_status": "needs_owner_decision",
+   "retrieved": "2026-11-23",
+   "version": "1.0.0",
+   "note": "Pages 5-271: the recommendations through the glossary; the contributors list, references and evidence-profile annex are left out. Non-commercial and share-alike: the owner decides whether serving it in MHAI is within the licence.",
+   "artefact_sha256": "2c75f177e9edcc34dbc6b7d79ea9843da5a2cec2ca53501b2f75c17f395b8701",
+   "count": 455
+  },
+  "ng-malaria": {
+   "title": "National Guidelines for Diagnosis and Treatment of Malaria",
+   "short_title": "Nigeria national malaria guidelines",
+   "publisher": "Federal Ministry of Health, Nigeria",
+   "edition": "4th edition, May 2020",
+   "url": "https://drive.google.com/uc?export=download&id=1pxGgYsCjEWYDQ5-2GM5PSeeWHXww7erK",
+   "landing_page": "https://www.nmcp.gov.ng/2020/09/21/4th-edition-national-guidelines-for-the-diagnosis-treatment-2020/",
+   "pdf_sha256": "bda33638d18b22560a3f997e7f0a71aeb190bb50a0c24806429f56fb2d650732",
+   "pages": 81,
+   "first_page": 13,
+   "last_page": 75,
+   "licence": "All rights reserved (National Malaria Elimination Programme, Federal Ministry of Health, Nigeria)",
+   "licence_text": "© National Malaria Elimination Programme 2020. All rights reserved. Publications of the Federal Ministry of Health, Nigeria. Available at nmcp.gov.ng. The responsibility for the interpretation and use of the materials in this guideline lies with the reader. (Download page footer: © Copyright 2023 National Malaria Elimination Programme, Abuja. All rights reserved.)",
+   "licence_status": "needs_owner_decision",
+   "retrieved": "2026-11-23",
+   "version": "1.0.0",
+   "note": "The NMEP page links the PDF on Google Drive. Pages 13-75: executive summary through the annexes; the front matter and further reading are left out. No open licence: the owner decides (for example, written permission from NMEP).",
+   "artefact_sha256": "313db9566ad4128b5fd195031d6c7f0a9fca4095e71eed0de3ef4a99abdffb92",
+   "count": 97
+  },
+  "ng-stg": {
+   "title": "Standard Treatment Guidelines, Nigeria",
+   "short_title": "Nigeria standard treatment guidelines",
+   "publisher": "Federal Ministry of Health, Nigeria",
+   "edition": "2022 (launched 24 November 2022)",
+   "url": null,
+   "landing_page": "https://fmino.gov.ng/fg-harps-on-effective-use-of-nigeria-standard-treatment-guidelines/",
+   "pdf_sha256": null,
+   "licence": "unknown",
+   "licence_text": "No official copy found, so no licence text was read.",
+   "licence_status": "unknown",
+   "retrieved": "2026-11-23",
+   "version": "1.0.0",
+   "note": "No official PDF of the current edition was found online on 23 Nov 2026 (the Ministry's 2008 link serves a 2-page fax print; the WHO CPCD entry for the 2nd edition was unavailable). Not built. The owner obtains an official copy from the Federal Ministry of Health; then add url, pdf_sha256 and the page range here and build."
+  }
+ }
+}
