@@ -69,10 +69,12 @@ def test_the_committed_lock_holds_three_opt_in_documents() -> None:
     docs = guidelines.load_documents()
     assert set(docs) == {"who-malaria", "ng-malaria", "ng-stg"}
     assert docs["who-malaria"].licence == "CC BY-NC-SA 3.0 IGO"
-    assert docs["who-malaria"].licence_status == "needs_owner_decision"
-    assert docs["ng-malaria"].licence_status == "needs_owner_decision"
+    # The owner's licence decision of 23 Nov 2026: both malaria guidelines
+    # are served with attribution; the STG has no official copy yet.
+    assert docs["who-malaria"].licence_status == "permitted"
+    assert docs["ng-malaria"].licence_status == "permitted"
     assert docs["ng-stg"].licence_status == "unknown" and docs["ng-stg"].pdf_sha256 is None
-    assert not any(guidelines.loadable(d) for d in docs.values())
+    assert {n for n, d in docs.items() if guidelines.loadable(d)} == {"who-malaria", "ng-malaria"}
     for d in docs.values():
         assert d.publisher in reflib.LIBRARIES[d.name].sources["guideline"]
 

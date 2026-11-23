@@ -110,9 +110,9 @@ def test_no_guideline_is_pinned_unless_its_licence_permits() -> None:
     decision: models/reference-library.lock may pin only a "permitted" one."""
     assert guidelines.check_pins(reflib.load_lock(), guidelines.load_documents()) == []
     docs = guidelines.load_documents()
-    pins = {"who-malaria": reflib.Pin("1.0.0", "ab" * 32, 1)}
-    assert docs["who-malaria"].licence_status != "permitted"
-    assert guidelines.check_pins(pins, docs) == ["who-malaria"]
+    pins = {"ng-stg": reflib.Pin("1.0.0", "ab" * 32, 1)}
+    assert docs["ng-stg"].licence_status != "permitted"
+    assert guidelines.check_pins(pins, docs) == ["ng-stg"]
 
 
 def test_core_mirrors_the_library_table() -> None:
