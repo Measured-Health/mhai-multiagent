@@ -88,6 +88,19 @@ hospital can hand over a raw export and nothing identifying is ever stored.
   per hospital before an import is allowed (see the local-practice context
   design).
 
+## The pilot site's private test set (23 Nov)
+
+Built: `scripts/build_site_testset.py` (deploy/README.md, "The pilot site's
+private test set"). Runs on the live server only; the data never leaves it.
+
+- **Operator: build it on the live server** once this change is merged
+  (the commands are in deploy/README.md). Keep the printed counts.
+- **Clinician: review the set and fill `expected_facts`** for each vignette,
+  on the server. Delete rows that still identify someone or are not useful.
+- **Later: the converter to `clinical_answer` items** and the site split's
+  digest in `models/testsets.lock`, so `swap-model.sh` gates on the site's
+  own questions.
+
 ## Shared reference library (23 Nov)
 
 Built: `core reference-library load` for the live host (migration 00056) and
