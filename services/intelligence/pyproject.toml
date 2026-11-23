@@ -35,7 +35,7 @@ dependencies = [
     "pydantic-settings>=2.16.2",
     "fastapi>=0.100",
     "uvicorn>=0.23",
-    "sqlalchemy>=2.0",
+    "sqlalchemy>=2.1.9",
     "httpx>=0.24",
     "protobuf>=6.33.5,<7",
     # The NATS client for the workers (spec section 4). Pinned to a minor:
