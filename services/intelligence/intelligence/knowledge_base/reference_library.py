@@ -11,7 +11,12 @@ Library v1, ``medref``, is two sources only (the licence review):
 
 Everything else in a source bundle is refused: every synthetic patient type,
 question-answer references, abstracts, phenotype profiles, ontology terms,
-trials and the placeholder guidelines.
+trials and the placeholder guidelines. A patient row is refused by name
+(:data:`PATIENT_TYPES`, or a reference row whose source fields are not its
+source's name), and so is anything carrying the demo's source name
+(:data:`DEMO_SOURCE`): at convert (:func:`classify`) and again, row by row,
+at load (:func:`row_refusal`), so an artefact can never put either on the
+live site (docs/models/reference-library.md, "The live site").
 
 Three steps, each its own command:
 
@@ -55,6 +60,7 @@ import stat
 import sys
 import unicodedata
 import zipfile
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -112,6 +118,60 @@ _NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,62}")
 _SHA = re.compile(r"[0-9a-f]{64}")
 # Marks of Spanish text, for a page that isn't under /spanish/ but is.
 _SPANISH = ("¿", "¡")
+
+
+# The synthetic patient record types of a source bundle (Synthea). Refused
+# by name, whatever else a row carries.
+PATIENT_TYPES = frozenset(
+    {
+        "demographics",
+        "encounter",
+        "diagnosis",
+        "lab",
+        "medication",
+        "plan",
+        "procedure",
+        "condition",
+        "observation",
+        "immunization",
+        "allergy",
+        "patient",
+    }
+)
+# The public demo's six synthetic guidelines carry this source name (core's
+# demo seed). They must never reach the live site: refused at convert and
+# at load, in any case.
+DEMO_SOURCE = "Sample reference (synthetic demo)"
+_DEMO_MARKS = (DEMO_SOURCE.lower(), "(synthetic demo)", "synthetic demo data")
+
+# The approved kinds, their source names in the artefact, and the metadata
+# keys an artefact row may carry (a closed set: nothing patient-shaped).
+APPROVED_SOURCES = {"drug_label": "openFDA", "health_topic": "MedlinePlus"}
+ROW_KEYS = frozenset(
+    {
+        "kind",
+        "source",
+        "title",
+        "url",
+        "licence",
+        "set_id",
+        "topic_id",
+        "section",
+        "safety_critical",
+        "part",
+        "audience",
+        "retrieved",
+        "attribution",
+    }
+)
+
+
+def demo_marked(text: Any) -> bool:
+    """Whether text names the demo's synthetic source (any case or spacing)."""
+    if not isinstance(text, str):
+        return False
+    folded = " ".join(unicodedata.normalize("NFKC", text).lower().split())
+    return any(m in folded for m in _DEMO_MARKS)
 
 
 # Sequences a row may never hold (security review): a prompt's block
@@ -252,20 +312,61 @@ def _health_topic(
     )
 
 
-def select(record: Any, retrieved: str) -> Entry | None:
-    """The approved row a bundle record maps to, or None (refused). Only
-    drug_label and English health_topic pass."""
+# Why a bundle record was refused (classify's reason codes).
+APPROVED = "approved"
+REFUSED_PATIENT = "patient"
+REFUSED_DEMO = "demo"
+REFUSED_TYPE = "type_not_approved"
+REFUSED_ROW = "row_not_approved"
+REFUSED_SHAPE = "not_a_record"
+
+# A bundle's reference rows carry their source's name in source_patient_id
+# (e.g. "openfda"); a patient row carries a patient id there.
+_BUNDLE_SOURCE = {"drug_label": "openfda", "health_topic": "medlineplus"}
+
+
+def _strings(obj: Any) -> Iterator[str]:
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _strings(k)
+            yield from _strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _strings(v)
+
+
+def classify(record: Any, retrieved: str) -> tuple[Entry | None, str]:
+    """The approved row a bundle record maps to and :data:`APPROVED`, or
+    None and the reason it was refused. Patient rows are refused first, by
+    type or by their source fields; then anything naming the demo's
+    source; then every type but drug_label and English health_topic."""
     if not isinstance(record, dict):
-        return None
+        return None, REFUSED_SHAPE
+    kind = record.get("chunk_type")
+    if kind in PATIENT_TYPES:
+        return None, REFUSED_PATIENT
     meta = record.get("metadata")
     if not isinstance(meta, dict):
-        return None
-    kind = record.get("chunk_type")
+        return None, REFUSED_SHAPE
+    if any(demo_marked(t) for t in _strings(record)):
+        return None, REFUSED_DEMO
+    if kind not in _BUNDLE_SOURCE:
+        return None, REFUSED_TYPE
+    if record.get("source_patient_id") != _BUNDLE_SOURCE[kind]:
+        return None, REFUSED_PATIENT
     if kind == "drug_label":
-        return _drug_label(record, meta, retrieved)
-    if kind == "health_topic":
-        return _health_topic(record, meta, retrieved)
-    return None
+        entry = _drug_label(record, meta, retrieved)
+    else:
+        entry = _health_topic(record, meta, retrieved)
+    return (entry, APPROVED) if entry is not None else (None, REFUSED_ROW)
+
+
+def select(record: Any, retrieved: str) -> Entry | None:
+    """The approved row a bundle record maps to, or None (refused). Only
+    drug_label and English health_topic pass (:func:`classify`)."""
+    return classify(record, retrieved)[0]
 
 
 def read_bundle_lines(stream: IO[bytes]) -> Iterator[Any]:
@@ -299,15 +400,23 @@ def open_chunks(path: Path) -> IO[bytes]:
     return open(path, "rb")
 
 
-def collect(records: Iterable[Any], retrieved: str) -> list[Entry]:
+def collect(
+    records: Iterable[Any], retrieved: str, refused: Counter[tuple[str, str, str]] | None = None
+) -> list[Entry]:
     """The approved entries, exact duplicates (same kind and text) once, in
     library order: drug labels by section (safety-critical first), then
-    health topics."""
+    health topics. ``refused``, if given, counts every record left out by
+    (chunk type, bundle source, reason); a duplicate's reason is
+    ``duplicate``."""
     seen: set[tuple[str, str]] = set()
     out: list[Entry] = []
     for record in records:
-        e = select(record, retrieved)
-        if e is None or (e.kind, e.content) in seen:
+        e, why = classify(record, retrieved)
+        if e is not None and (e.kind, e.content) in seen:
+            why = "duplicate"
+        if e is None or why == "duplicate":
+            if refused is not None:
+                refused[_where(record) + (why,)] += 1
             continue
         seen.add((e.kind, e.content))
         out.append(e)
@@ -316,6 +425,23 @@ def collect(records: Iterable[Any], retrieved: str) -> list[Entry]:
         raise LibraryError("too_many_rows")
     return out
 
+
+def _where(record: Any) -> tuple[str, str]:
+    """A record's chunk type and bundle source, for counts only (bounded
+    labels, never row text)."""
+    if not isinstance(record, dict):
+        return ("?", "?")
+    meta = record.get("metadata")
+    src = meta.get("source") if isinstance(meta, dict) else None
+    kind = record.get("chunk_type")
+
+    def label(v: Any) -> str:
+        return v if isinstance(v, str) and _LABEL.fullmatch(v) else "?"
+
+    return (label(kind), label(src) if src is not None else "none")
+
+
+_LABEL = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 Embedder = Callable[[Sequence[str]], np.ndarray]
 
@@ -549,7 +675,26 @@ def _row(obj: Any, dim: int) -> Row:
     )
     if not ok:
         raise LibraryError("bad_row")
+    why = row_refusal(content, meta)
+    if why:
+        raise LibraryError(why)
     return Row(cid, content, meta, tuple(float(x) for x in emb))
+
+
+def row_refusal(content: str, meta: Mapping[str, Any]) -> str:
+    """Why an artefact row may not be loaded, or "": its metadata keys are
+    a closed set (nothing patient-shaped), its kind and source are the
+    approved ones, and nothing in it names the demo's source."""
+    if not set(meta) <= ROW_KEYS:
+        return "row_patient_or_unknown_field"
+    kind = meta.get("kind")
+    if kind not in APPROVED_SOURCES or meta.get("source") != APPROVED_SOURCES[kind]:
+        return "row_kind_not_approved"
+    if not isinstance(meta.get("title"), str) or not isinstance(meta.get("licence"), str):
+        return "bad_row"
+    if demo_marked(content) or any(demo_marked(t) for t in _strings(dict(meta))):
+        return "row_demo_source"
+    return ""
 
 
 def read_rows(source: Path | bytes, header: Header) -> Iterator[Row]:
