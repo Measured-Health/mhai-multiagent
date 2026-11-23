@@ -334,7 +334,7 @@ hospital's de-identified export
 **10.2.1 What leaves our servers.** Nothing patient-level leaves our servers **except to the AI researcher, under the agreement**, and only:
 
 - de-identified training cases, from hospitals with `model_improvement`, in an encrypted bundle, to an environment the agreement names;
-- never to a consumer cloud notebook or personal drive unless the agreement names it (Q7; the researcher works in Colab and Drive today, which is a blocking question for real data);
+- never to a consumer cloud notebook, personal drive or personal device: real cases stay on our GPU server, where the researcher works with them under the agreement (Q7, decided 23 Nov);
 - with an export audit entry (`local_practice.training_exported`: bundle hash, case count, hospitals' count, recipient), and a deletion commitment in the agreement.
 
 Revocation stops future exports and removes the hospital's cases from future builds. A model already trained on them can't un-learn them; the agreement must say so (R-LP7).
@@ -504,16 +504,16 @@ These go in TODO.md.
 - The pilot site's onboarding record: agreement, de-identification and privacy sign-off references, scopes, folder.
 - mhai-web: the panel, separate from the answer and its checks; the Practice view.
 
-## 16. Open questions, each with a recommendation
+## 16. Questions and decisions (decided by the product owner, 23 Nov 2026)
 
-| # | Question | For | Recommendation |
+| # | Question | Decided by | Decision |
 |---|---|---|---|
-| Q1 | Show a collapsed panel for results that need review? | clinical lead | No for v1 (A5) |
-| Q2 | Should clinicians see whether figures are own or pooled? | product owner | R-LP2 says no reference; recommend a neutral marker only if clinicians ask |
-| Q3 | Must a hospital share to see pooled figures? | product owner | Yes (give to get) |
-| Q4 | An age split for dosing (under 5, 5–17, adult)? | clinical lead | Yes for malaria, as one fixed partition |
-| Q5 | A closed symptom list from the complaint column? | clinical lead | Not in v1 |
-| Q6 | Drop identical rows within a file and month as duplicates? | clinical lead | Yes, counted |
-| Q7 | The researcher's environment for real cases (Colab and Drive today) | legal, product owner | Blocking: name an agreed environment before any export |
-| Q8 | Do the source files carry visit dates, or only the period the manifest declares? | operator | Month from the manifest is enough |
-| Q9 | Default window: a year or a quarter? | product owner | A year, so more conditions pass k |
+| Q1 | Show a collapsed panel for results that need review? | product owner, 23 Nov | **Decided: no** (A5) |
+| Q2 | Should clinicians see whether figures are own or pooled? | product owner, 23 Nov | **Decided: no** (R-LP2, no hospital reference) |
+| Q3 | Must a hospital share to see pooled figures? | product owner, 23 Nov | **Decided: yes** (give to get) |
+| Q4 | An age split for dosing (under 5, 5–17, adult)? | product owner, 23 Nov | **Decided: yes for malaria**, one fixed partition; clinical lead confirms |
+| Q5 | A closed symptom list from the complaint column? | product owner, 23 Nov | **Decided: not in v1** |
+| Q6 | Drop identical rows within a file and month as duplicates? | product owner, 23 Nov | **Decided: yes, counted**; clinical lead confirms |
+| Q7 | The researcher's environment for real cases | product owner, 23 Nov | **Decided: our GPU server only.** Real cases never go to Colab, Drive or any personal device; the researcher works on the GPU server under the agreement. The encrypted-export path in §10.2 is not used. Legal confirms the clause names it |
+| Q8 | Do the source files carry visit dates, or only the period? | product owner, 23 Nov | **Decided: year-month only, never the day.** A `YYYY-MM` column or a per-file manifest period; without either, the file's receipt month. Exact dates are refused at import (dropped and counted) |
+| Q9 | Default window: a year or a quarter? | product owner, 23 Nov | **Decided: a year** |
