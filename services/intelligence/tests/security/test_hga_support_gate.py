@@ -27,6 +27,7 @@ from intelligence.agents.hga_nli import (
     NLIResult,
     VerificationAction,
     numbers_in,
+    strip_answer_scaffold,
 )
 from intelligence.agents.orchestrator import DynamicOrchestratorAgent
 from intelligence.boundary.jobs.run_query import RunQuery
@@ -182,9 +183,40 @@ def test_a_list_number_is_not_a_claim_number() -> None:
     assert _verify(f"1. {DOSE[:-1]} [KB#0002].")["decision"] == "pass"
 
 
+def test_a_step_label_is_not_a_claim_number() -> None:
+    """The steps-v1 answer format numbers its lines ("STEP 1 - ASSESS:"): on the live
+    server every entailed step failed the number rule because of its own step number."""
+    for label in ("ANSWER: STEP 1 - ASSESS: ", "STEP 2 - MANAGE: ", "STEP 4 \u2013 DOSE: "):
+        out = _verify(f"{label}{DOSE[:-1]} [KB#0002].")
+        assert out["decision"] == "pass", label
+        [c] = out["citations"]
+        assert (c["action"], c["reason"]) == ("PASS", "entailed")
+
+
+def test_the_nli_model_reads_the_claim_without_its_step_label() -> None:
+    nli = ScriptedNLI()
+    _verify(f"ANSWER: STEP 1 - ASSESS: {DOSE[:-1]} [KB#0002].", nli)
+    assert [h for _, h in nli.calls] == [DOSE[:-1] + "."]
+
+
+def test_a_copy_of_the_format_example_never_supports() -> None:
+    """The model copied the answer format's example (seen live, 23 Nov 2026): even an
+    NLI model that says entailed must not make it an answer."""
+    text = (
+        "ANSWER: STEP 1 - ASSESS: Check serum potassium and kidney function before "
+        "starting treatment [KB#0002]."
+    )
+    out = _verify(text)
+    assert out["decision"] != "pass"
+    assert out["support_gate"] == "unsupported_claim"
+    assert all(c["action"] == "FLAG" for c in out["citations"])
+
+
 @pytest.mark.parametrize(
     ("text", "want"),
     [
+        ("STEP 3 - DOSE: 80/480 mg for 3 days", {"80", "480", "3"}),
+        ("ANSWER: STEP 1 - ASSESS: smear positive", set()),
         ("80/480 mg for 3 days", {"80", "480", "3"}),
         ("1,000 mg", {"1000"}),
         ("5.0 mg or 0.50 mg", {"5", "0.5"}),
@@ -197,6 +229,14 @@ def test_a_list_number_is_not_a_claim_number() -> None:
 )
 def test_numbers_in(text: str, want: set[str]) -> None:
     assert numbers_in(text) == want
+
+
+def test_strip_answer_scaffold_keeps_the_sentence() -> None:
+    assert strip_answer_scaffold("ANSWER: STEP 12 - MONITOR: Re-check in 3 days.") == (
+        "Re-check in 3 days."
+    )
+    assert strip_answer_scaffold("STEP 1 - ADVISE: Drink fluids.") == "Drink fluids."
+    assert strip_answer_scaffold("No label here.") == "No label here."
 
 
 # ---------------------------------------------------------------- #28: retrieved only

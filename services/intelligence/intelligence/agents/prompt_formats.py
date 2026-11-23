@@ -65,6 +65,16 @@ STEPS_V1_REMINDER = (
 )
 
 
+# The example's own sentences, without their tags: a model that copies the example
+# instead of answering (seen on the live server, 23 Nov 2026) must never have that
+# copy count as an answer (hga_nli: such a claim is never supported).
+STEPS_V1_EXAMPLE_SENTENCES = (
+    "Check serum potassium and kidney function before starting treatment",
+    "Reduce the diuretic dose or add potassium if the level is low",
+    "Tell the patient to report muscle weakness, cramps or palpitations",
+)
+
+
 @dataclass(frozen=True)
 class Prompt:
     """One prompt for the generator: the system and user messages, and the generation
