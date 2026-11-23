@@ -46,9 +46,14 @@ import (
 //     the SHA-256, version and row count pinned for its library in
 //     reflibPins, which mirrors models/reference-library.lock
 //     (TestReflibPinsMatchLock);
-//   - every row is a reference row: an id in the KB#nnnnnnn namespace,
-//     metadata keys from a closed list (nothing patient-shaped), an approved
-//     kind and source (openFDA drug labels, MedlinePlus health topics),
+//   - the library is one core knows (reflibLibraries): several libraries
+//     can be active at once, one version of each name, and each has its own
+//     block of chunk ids (KB#<block>nnnnnn), so they never collide;
+//   - every row is a reference row: an id in its library's block, metadata
+//     keys from a closed list (nothing patient-shaped), a kind and source
+//     the library approves (medref: openFDA drug labels and MedlinePlus
+//     health topics; local-formulary: our own formulary rows; a guideline
+//     document: its publisher's guideline text),
 //     nothing naming the public demo's synthetic source ("Sample reference
 //     (synthetic demo)") and no prompt delimiter or citation in its text.
 //
@@ -74,7 +79,8 @@ type reflibPin struct {
 // TestReflibPinsMatchLock keeps the two equal; a new version is pinned in
 // both by one pull request.
 var reflibPins = map[string]reflibPin{
-	"medref": {Version: "1.0.0", SHA256: "d150e3807189bbe0412e1234426452320e22cef258f72d10e835bf6eab2206e7", Count: 23654},
+	"medref":          {Version: "1.0.0", SHA256: "d150e3807189bbe0412e1234426452320e22cef258f72d10e835bf6eab2206e7", Count: 23654},
+	"local-formulary": {Version: "1.0.0", SHA256: "081e0d2e9d41b6731e8d25765495f84e567b1ff5edc0a7c1973171b940cc4744", Count: 34},
 }
 
 const (
@@ -84,6 +90,7 @@ const (
 	reflibMaxContent   = 4100
 	reflibMaxDim       = 4096
 	reflibMaxRows      = 999_999
+	reflibBlockSize    = 1_000_000
 	reflibBatch        = 500
 	reflibChunkType    = "guideline" // chunk_visible_to shows a shared guideline to everyone
 	reflibDemoSource   = "Sample reference (synthetic demo)"
@@ -98,11 +105,21 @@ var (
 	reflibVersionRe = regexp.MustCompile(`^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$`)
 	reflibChunkIDRe = regexp.MustCompile(`^KB#[1-9][0-9]{6}$`)
 
-	// The approved kinds and their source names in an artefact.
-	reflibSources = map[string]string{"drug_label": "openFDA", "health_topic": "MedlinePlus"}
+	// The libraries core loads: each name's block of chunk ids and the
+	// kinds its rows may have, each with its approved source names
+	// (reference_library.LIBRARIES; TestReflibLibrariesMatchPython).
+	reflibLibraries = map[string]reflibLibrary{
+		"medref":          {Block: 1, Sources: map[string][]string{"drug_label": {"openFDA"}, "health_topic": {"MedlinePlus"}}},
+		"local-formulary": {Block: 2, Sources: map[string][]string{"local_formulary": {"Measured Health"}}},
+		"who-malaria":     {Block: 3, Sources: map[string][]string{"guideline": {"World Health Organization"}}},
+		"ng-malaria":      {Block: 4, Sources: map[string][]string{"guideline": {"Federal Ministry of Health, Nigeria"}}},
+		"ng-stg":          {Block: 5, Sources: map[string][]string{"guideline": {"Federal Ministry of Health, Nigeria"}}},
+	}
 	// The metadata keys a row may carry (reference_library.ROW_KEYS).
 	reflibRowKeys = []string{"kind", "source", "title", "url", "licence", "set_id", "topic_id", "section",
-		"safety_critical", "part", "audience", "retrieved", "attribution"}
+		"safety_critical", "part", "audience", "retrieved", "attribution",
+		"brand", "generic", "drug_class", "confidence",
+		"document", "publisher", "edition", "page_start", "page_end"}
 	reflibHeaderKeys = []string{"schema", "name", "version", "licence", "attribution", "embedder", "dim", "count",
 		"built_from", "retrieved"}
 	// Text a row may never hold: the demo's synthetic source (folded to
@@ -111,6 +128,20 @@ var (
 	reflibDemoMarks    = []string{strings.ToLower(reflibDemoSource), "(synthetic demo)", "synthetic demo data"}
 	reflibForgeryMarks = []string{"<<", ">>", "KB#"}
 )
+
+// reflibLibrary is a library core may load: its id block and approved
+// kinds and sources.
+type reflibLibrary struct {
+	Block   int
+	Sources map[string][]string
+}
+
+// reflibInBlock reports whether a chunk id (already KB#nnnnnnn) is in the
+// library's own block.
+func reflibInBlock(chunkID string, lib reflibLibrary) bool {
+	n, err := strconv.Atoi(strings.TrimPrefix(chunkID, "KB#"))
+	return err == nil && n/reflibBlockSize == lib.Block && n%reflibBlockSize != 0
+}
 
 // reflibRefused is a refusal; its text is a reason code, never row content.
 type reflibRefused string
@@ -213,7 +244,8 @@ func reflibParseHeader(line []byte) (reflibHeader, error) {
 			return reflibHeader{}, reflibRefused("bad_header")
 		}
 	}
-	ok = schema == reflibSchema && reflibNameRe.MatchString(h.Name) && reflibVersionRe.MatchString(h.Version) &&
+	_, known := reflibLibraries[h.Name]
+	ok = schema == reflibSchema && reflibNameRe.MatchString(h.Name) && known && reflibVersionRe.MatchString(h.Version) &&
 		h.Licence != "" && len(h.Licence) <= 512 && h.Attribution != "" && len(h.Attribution) <= 2048 &&
 		h.Embedder != "" && len(h.Embedder) <= 200 && h.Dim >= 1 && h.Dim <= reflibMaxDim &&
 		h.Count >= 0 && h.Count <= reflibMaxRows
@@ -262,7 +294,7 @@ func reflibForged(text string) bool {
 	return false
 }
 
-func reflibParseRow(line []byte, dim int) (reflibRow, error) {
+func reflibParseRow(line []byte, dim int, lib reflibLibrary) (reflibRow, error) {
 	obj, ok := exactKeys(line, []string{"chunk_id", "content", "metadata", "embedding"})
 	if !ok {
 		return reflibRow{}, reflibRefused("bad_row")
@@ -277,6 +309,9 @@ func reflibParseRow(line []byte, dim int) (reflibRow, error) {
 	if !reflibChunkIDRe.MatchString(r.chunkID) || n == 0 || n > reflibMaxContent || len(emb) != dim ||
 		strings.ContainsRune(r.content, 0) {
 		return reflibRow{}, reflibRefused("bad_row")
+	}
+	if !reflibInBlock(r.chunkID, lib) {
+		return reflibRow{}, reflibRefused("id_outside_block")
 	}
 	r.embedding = make([]float32, dim)
 	for i, x := range emb {
@@ -297,7 +332,7 @@ func reflibParseRow(line []byte, dim int) (reflibRow, error) {
 	}
 	kind, _ := meta["kind"].(string)
 	source, _ := meta["source"].(string)
-	if want, ok := reflibSources[kind]; !ok || source != want {
+	if want, ok := lib.Sources[kind]; !ok || !slices.Contains(want, source) {
 		return reflibRow{}, reflibRefused("row_kind_not_approved")
 	}
 	title, ok1 := meta["title"].(string)
@@ -345,7 +380,7 @@ func reflibCheck(data []byte, pins map[string]reflibPin) (reflibHeader, string, 
 			}
 			return nil
 		}
-		r, err := reflibParseRow(line, h.Dim)
+		r, err := reflibParseRow(line, h.Dim, reflibLibraries[h.Name])
 		if err != nil {
 			return err
 		}
@@ -422,7 +457,7 @@ func reflibLoad(ctx context.Context, path, url string, pins map[string]reflibPin
 			h.Name, h.Version, sha, h.Licence, h.Attribution, h.Embedder).Scan(&lib); err != nil {
 			return fmt.Errorf("reference library: could not record the library")
 		}
-		n, err := reflibInsertRows(ctx, tx, data, h.Dim, lib)
+		n, err := reflibInsertRows(ctx, tx, data, h.Dim, reflibLibraries[h.Name], lib)
 		if err != nil {
 			return err
 		}
@@ -455,7 +490,7 @@ func reflibLoad(ctx context.Context, path, url string, pins map[string]reflibPin
 // reflibInsertRows inserts the artefact's rows in batches (COPY FROM is
 // refused under row-level security); it parses the checked bytes again,
 // never the file.
-func reflibInsertRows(ctx context.Context, tx pgx.Tx, data []byte, dim int, lib int64) (int, error) {
+func reflibInsertRows(ctx context.Context, tx pgx.Tx, data []byte, dim int, spec reflibLibrary, lib int64) (int, error) {
 	const q = `INSERT INTO kb_chunks (chunk_id, hospital_id, content, chunk_type, metadata_json, library_id, embedding)
 		VALUES ($1, NULL, $2, $3, $4::jsonb, $5, $6)`
 	n := 0
@@ -475,7 +510,7 @@ func reflibInsertRows(ctx context.Context, tx pgx.Tx, data []byte, dim int, lib 
 		if i == 0 {
 			return nil
 		}
-		r, err := reflibParseRow(line, dim)
+		r, err := reflibParseRow(line, dim, spec)
 		if err != nil {
 			return err
 		}

@@ -29,11 +29,8 @@ import re
 import sys
 import time
 from collections import Counter
-from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
-from intelligence.doceval.answers import gate_models
 from intelligence.knowledge_base import reference_library as reflib
 
 _DATE = re.compile(r"20[0-9]{2}-[01][0-9]-[0-3][0-9]")
@@ -51,25 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     if not _DATE.fullmatch(args.retrieved):
         p.error("--retrieved must be YYYY-MM-DD")
 
-    lock = gate_models.load_lock()
-    gate_models.check_config(lock)
-    if args.fetch:
-        gate_models.fetch_role(lock, args.models, "dense")
-    dense = gate_models.verify_role(lock, args.models, "dense")
-    pin = lock["dense"]
-    embedder = f"{pin.repo}@{pin.revision}"
-
-    from intelligence.boundary.models import set_hub_offline
-
-    set_hub_offline()
-    from sentence_transformers import SentenceTransformer
-
-    model = SentenceTransformer(str(dense), device="cpu", local_files_only=True)
-
-    def embed(texts: Sequence[str]) -> Any:
-        return model.encode(
-            list(texts), batch_size=64, normalize_embeddings=True, show_progress_bar=False
-        )
+    embed, embedder = reflib.pinned_embedder(args.models, args.fetch)
 
     started = time.monotonic()
     built_from = reflib.sha256_file(args.input)

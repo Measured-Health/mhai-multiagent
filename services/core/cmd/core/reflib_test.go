@@ -57,8 +57,13 @@ func testReflibRows() []testReflibRow {
 // that admit it.
 func testReflibArtefact(t *testing.T, version string, rows []testReflibRow) (string, map[string]reflibPin) {
 	t.Helper()
+	return testReflibArtefactNamed(t, "medref", version, rows)
+}
+
+func testReflibArtefactNamed(t *testing.T, name, version string, rows []testReflibRow) (string, map[string]reflibPin) {
+	t.Helper()
 	var raw bytes.Buffer
-	header := map[string]any{"schema": reflibSchema, "name": "medref", "version": version,
+	header := map[string]any{"schema": reflibSchema, "name": name, "version": version,
 		"licence": "openFDA drug labels: CC0-1.0", "attribution": "Synthetic attribution.",
 		"embedder": "sentence-transformers/synthetic@" + strings.Repeat("0", 40), "dim": 4, "count": len(rows),
 		"built_from": strings.Repeat("ab", 32), "retrieved": "2026-11-14"}
@@ -79,12 +84,12 @@ func testReflibArtefact(t *testing.T, version string, rows []testReflibRow) (str
 	w := gzip.NewWriter(&gz)
 	_, _ = w.Write(raw.Bytes())
 	_ = w.Close()
-	path := filepath.Join(t.TempDir(), "medref-"+version+".jsonl.gz")
+	path := filepath.Join(t.TempDir(), name+"-"+version+".jsonl.gz")
 	if err := os.WriteFile(path, gz.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(gz.Bytes())
-	return path, map[string]reflibPin{"medref": {Version: version, SHA256: hex.EncodeToString(sum[:]), Count: len(rows)}}
+	return path, map[string]reflibPin{name: {Version: version, SHA256: hex.EncodeToString(sum[:]), Count: len(rows)}}
 }
 
 func wantRefused(t *testing.T, err error, code string) {
