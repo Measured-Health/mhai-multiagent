@@ -8,6 +8,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Swapping our own model in one command.** `deploy/gpu-model/swap-model.sh`
+  (`--adapter DIR` or `--gguf FILE`, `--name`, a new `--version`, `--profile`;
+  `--rollback`; `--check-only`): the researcher's QLoRA adapter is checked as
+  data only (`mhai-models swap check-adapter`: allowed files, no pickle or code,
+  an allowed base at its pinned revision, a `cca` training manifest, an approved
+  licence and datasets), merged and converted to a `Q4_K_M` GGUF in a pinned
+  builder (`deploy/gpu-model/builder/`) with no network and no secret, under
+  `/srv/mhai-models/<name>/<version>/` with a manifest, read-only. The GGUF's
+  header checks, then a shadow gpu-model on its own internal network and the
+  `clinical_answer` gate against it through the own route's client
+  (`mhai-models swap eval-shadow`; the dev split, said loudly, until a locked
+  split exists). Only a pass switches `.env` (the old values kept as
+  `GPU_MODEL_PREVIOUS_*`) and restarts through `gpu-model.sh`, undone if the new
+  alias doesn't come up; `--force-without-gate` needs the version typed again
+  and is logged as forced. Every swap, rollback and refusal goes to
+  `/srv/mhai-models/swaps.log`. Hospitals' `own_model` is never touched.
+  deploy/README.md, "Swapping our own model"; for the researcher,
+  docs/models/handing-over-a-model.md.
 - **"Enable own-model answers" workflow** (Actions, run by hand on main): runs
   `pilot/enable-pilot.sh --provider none [--short-code CODE [--hospital-name NAME]]`
   on the live server over the deploy's SSH secrets, after a `docker login ghcr.io`

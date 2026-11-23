@@ -734,13 +734,16 @@ jobs:
           shellcheck -x deploy/llama/*.sh
           bash deploy/llama/test-entrypoint.sh
       # Our own model on the GPU (deploy/gpu-model/): its entrypoint (re-hash, refuse,
-      # alias) and the deploy's switch (settings, hash, health, alias) with a fake
-      # docker. No Docker, no GPU, no model.
+      # alias), the deploy's switch (settings, hash, health, alias) and the model swap
+      # (checks, shadow gate, switch, rollback) with a fake docker; the GGUF builder's
+      # pure steps. No Docker, no GPU, no model.
       - name: GPU model entrypoint and switch tests
         run: |
           shellcheck -x deploy/gpu-model/*.sh
           bash deploy/gpu-model/test-entrypoint.sh
           bash deploy/gpu-model/test-gpu-model.sh
+          bash deploy/gpu-model/test-swap-model.sh
+          python3 -m unittest discover -s deploy/gpu-model/builder
       # The own model's switch scripts (deploy/pilot/): shellcheck, the
       # pre-flight (memory, the pinned lock, the images) and the deploy's pipeline
       # step (pipeline.sh: our own model only, the cloud optional) with a fake
