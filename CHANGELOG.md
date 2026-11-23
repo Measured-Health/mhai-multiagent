@@ -33,6 +33,12 @@ All notable changes to this project are documented here. The format follows
   model's prompt is unchanged. The first model failed the `clinical_answer`
   gate; no gate or check was changed. deploy/README.md, "Our own model on
   the GPU".
+### Fixed
+
+- **Live site: the demo check works on a new database.** One `CASE` over
+  `to_regclass('public.hospitals')` still failed with "relation \"hospitals\"
+  does not exist", because Postgres resolves every table a statement names
+  before running it. The check now asks whether the table exists first.
 
 ### Changed
 

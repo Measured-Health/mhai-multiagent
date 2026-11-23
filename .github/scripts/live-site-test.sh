@@ -17,6 +17,9 @@ cat > "$work/fake-compose" <<'SH'
 #!/usr/bin/env bash
 echo "$*" >> "$FAKE_LOG"
 case "$*" in
+  *"exec -T postgres psql"*"to_regclass"*)
+    [ "${FAKE_PSQL_FAIL:-0}" = 1 ] && exit 2
+    printf '%s\n' "${FAKE_TABLE:-t}" ;;
   *"exec -T postgres psql"*)
     [ "${FAKE_PSQL_FAIL:-0}" = 1 ] && exit 2
     printf '%s\n' "$FAKE_COUNT" ;;
@@ -88,6 +91,15 @@ check "precheck starts postgres" logged "up -d postgres"
 check "precheck never starts core" not_logged "up -d core"
 check "precheck writes the marker" test -f "$work/host/live-site"
 check "precheck: the query copes with a new database" logged "to_regclass('public.hospitals')"
+
+host
+STAGE=precheck run 0 "precheck, a new database (no hospitals table): passes" FAKE_TABLE=f FAKE_COUNT=x
+check "a new database is never counted" not_logged "FROM hospitals"
+check "a new database keeps core running" not_logged "stop core"
+
+host
+STAGE=precheck run 1 "precheck, an odd answer about the table: refused" FAKE_TABLE=maybe FAKE_COUNT=0
+check "an odd answer stops core" logged "stop core"
 
 host
 STAGE=precheck run 1 "precheck, an active demo hospital: refused" FAKE_COUNT=2
