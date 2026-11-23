@@ -50,6 +50,9 @@ type Deps struct {
 	// CloudProviders are the enabled cloud model providers
 	// (CORE_CLOUD_PROVIDERS), for the model policy routes.
 	CloudProviders []string
+	// OwnModelAllowed is CORE_OWN_MODEL_ALLOWED, for the model policy
+	// routes (own_model on is 422 without it).
+	OwnModelAllowed bool
 	// The EMR connection routes (EMR plan Task 11): off unless EMREnabled
 	// (CORE_EMR_ENABLED); the offered types; the emr client and the
 	// sealer; whether addresses may be IP literals (development).
@@ -103,7 +106,7 @@ func Register(m *authz.Mux, d Deps) {
 	// providers plan, Task 2) and the EMR connections (EMR plan Task 11).
 	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log, MasterKey: a.MFAKey,
 		SecurityContact: d.SecurityContact, Walk: d.AuditWalk, Health: d.Health, Intel: d.Intel,
-		Auth: a, QueryCap: d.QueryCap, CloudProviders: d.CloudProviders, EMREnabled: d.EMREnabled, EMRTypes: d.EMRTypes,
+		Auth: a, QueryCap: d.QueryCap, CloudProviders: d.CloudProviders, OwnModelAllowed: d.OwnModelAllowed, EMREnabled: d.EMREnabled, EMRTypes: d.EMRTypes,
 		EMR: d.EMR, EMRSealer: d.EMRSealer, EMRDevelopment: d.EMRDevelopment, ExportsOn: d.AuditExports})
 	// Patient Analysis's reads and the de-identified list (analysis
 	// backend plan Tasks 10 and 13): off unless the hospital's analysis

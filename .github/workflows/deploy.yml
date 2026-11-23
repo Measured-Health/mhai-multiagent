@@ -223,7 +223,7 @@ jobs:
         run: |
           set -euo pipefail
           b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh live-site.sh demo/enable-demo.sh demo/reset-demo.sh \
-            notifications/enable-notifications.sh gpu-model/entrypoint.sh gpu-model/gpu-model.sh | base64 -w0)
+            notifications/enable-notifications.sh gpu-model/entrypoint.sh gpu-model/gpu-model.sh pilot/pipeline.sh | base64 -w0)
           echo "value=$b" >> "$GITHUB_OUTPUT"
 
       # Without a host-key check the SSH step would trust whatever answers at
@@ -363,6 +363,14 @@ jobs:
             # service and this deploy. Otherwise it is stopped if it was running.
             # Which hospitals it answers is each hospital's model policy.
             bash gpu-model/gpu-model.sh
+
+            # The pipeline worker (profile pilot; deploy/README.md, "Answering with
+            # our own model only"): only when .env says PIPELINE_ENABLED=true
+            # (pilot/enable-pilot.sh writes it, with its NKey, database login and
+            # files). After the gpu-model switch, so our own model is serving when
+            # the worker starts; anything missing fails this deploy. Otherwise a
+            # pipeline started by hand is left as it is.
+            bash pilot/pipeline.sh
 
             # Email (profile notifications): only when .env says
             # NOTIFY_ENABLED=true (deploy/notifications/enable-notifications.sh

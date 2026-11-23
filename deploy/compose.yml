@@ -206,6 +206,9 @@ services:
       # The cloud providers a hospital's policy may name: none unless the
       # pilot set it in .env (deploy/pilot/enable-pilot.sh).
       CORE_CLOUD_PROVIDERS: ${CORE_CLOUD_PROVIDERS:-}
+      # Whether a hospital's policy may turn own_model on: false unless this host
+      # serves our own model (deploy/README.md, "Answering with our own model only").
+      CORE_OWN_MODEL_ALLOWED: ${CORE_OWN_MODEL_ALLOWED:-false}
       # Stale cloud budget reservations are settled as fully used after this
       # (00047; 30m to 168h; README "Cloud models"). Off only by setting off.
       CORE_CLOUD_RESERVATION_REAPER: ${CORE_CLOUD_RESERVATION_REAPER:-on}
@@ -271,8 +274,9 @@ services:
     restart: "no"
     environment:
       DATABASE_URL: postgres://core_provision:${PROVISION_DB_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=disable
-      # hospitals model-policy set checks the provider against this.
+      # hospitals model-policy set checks the provider, and --own-model on, against these.
       CORE_CLOUD_PROVIDERS: ${CORE_CLOUD_PROVIDERS:-}
+      CORE_OWN_MODEL_ALLOWED: ${CORE_OWN_MODEL_ALLOWED:-false}
     mem_limit: 128m
     networks: [backend]
     depends_on:
@@ -371,7 +375,10 @@ services:
       # models.lock and models/trust-policy.json from the repository, copied by the
       # operator (deploy/README.md, "Own answer model").
       - ./models:/lock:ro
-      # Each mode 0400, owned by the image's user (enable-pilot.sh).
+      # Each mode 0400, owned by the image's user (enable-pilot.sh). With no cloud
+      # provider (enable-pilot.sh --provider none) the key file is an empty
+      # placeholder, so the mount is a file Docker never has to create; the worker
+      # reads it only for an enabled provider.
       - ./secrets/nats-pipeline.nk:/run/secrets/nats-pipeline.nk:ro
       - ./secrets/intelligence-db-password:/run/secrets/intelligence-db-password:ro
       - ./secrets/pilot-cloud-api-key:/run/secrets/cloud-api-key:ro
@@ -388,8 +395,9 @@ services:
       nats: { condition: service_healthy }
       core-migrate: { condition: service_completed_successfully }
       core-request-key: { condition: service_completed_successfully }
-    # Health is a NATS request (pipeline.health); enable-pilot.sh checks
-    # the log for the worker's start line.
+    # Health is a NATS request (pipeline.health); enable-pilot.sh and the
+    # deploy (pilot/pipeline.sh, PIPELINE_ENABLED=true) check the log for the
+    # worker's start line.
     healthcheck:
       disable: true
 

@@ -20,7 +20,10 @@ package platform
 // every hospital until a platform admin turns it on here. It never goes
 // with a cloud provider (one route per hospital): own_model true with a
 // provider is 422; a provider set without own_model clears it; own_model
-// left out with no provider keeps the current value.
+// left out with no provider keeps the current value. Turning it on needs
+// the deployment's allow-list, CORE_OWN_MODEL_ALLOWED=true (the host serves
+// our own model): otherwise 422, and nothing is written. Turning it off, or
+// keeping it, is always allowed.
 //
 // An unknown hospital is 404 on both, checked first: the ledger answers
 // zeros for any id. ApplyModelPolicy is shared with the CLI twin ("core
@@ -155,6 +158,13 @@ func (c ModelPolicyChange) valid() bool {
 		return false
 	}
 	return c.Hospital != uuid.Nil && (c.Via == ViaPlatform || c.Via == ViaCLI)
+}
+
+// OwnModelPermitted reports whether c may be written on a deployment whose
+// CORE_OWN_MODEL_ALLOWED is allowed: a change that turns own_model on needs
+// it; any other change (off, or left out) never does.
+func OwnModelPermitted(c ModelPolicyChange, allowed bool) bool {
+	return allowed || c.OwnModel == nil || !*c.OwnModel
 }
 
 // hospitalExists reports whether the hospital has a row (either role may
@@ -391,7 +401,8 @@ func (b policyBody) check() (ModelPolicyChange, bool) {
 }
 
 // modelPolicyPut is PUT /platform/hospitals/{id}/model-policy. Order: the
-// path (404), the body (422), the provider enabled (409), the hospital
+// path (404), the body (422), own_model on without CORE_OWN_MODEL_ALLOWED
+// (422), the provider enabled (409), the hospital
 // (404), the session's minute (429), then the code (403 mfa_required with
 // none, mfa_invalid when wrong, audited); only then the write.
 func (d Deps) modelPolicyPut(w http.ResponseWriter, r *http.Request) {
@@ -414,6 +425,10 @@ func (d Deps) modelPolicyPut(w http.ResponseWriter, r *http.Request) {
 	}
 	c, ok := body.check()
 	if !ok {
+		httpx.Error(w, r, "validation_failed")
+		return
+	}
+	if !OwnModelPermitted(c, d.OwnModelAllowed) {
 		httpx.Error(w, r, "validation_failed")
 		return
 	}

@@ -189,3 +189,25 @@ func TestModelPolicyContractOffIsProviderCode(t *testing.T) {
 		}
 	}
 }
+
+// own_model on needs the deployment's allow-list (CORE_OWN_MODEL_ALLOWED);
+// off, or left out, never does.
+func TestOwnModelPermitted(t *testing.T) {
+	on, off := true, false
+	for _, c := range []struct {
+		own     *bool
+		allowed bool
+		want    bool
+	}{
+		{&on, false, false},
+		{&on, true, true},
+		{&off, false, true},
+		{&off, true, true},
+		{nil, false, true},
+		{nil, true, true},
+	} {
+		if got := OwnModelPermitted(ModelPolicyChange{OwnModel: c.own}, c.allowed); got != c.want {
+			t.Errorf("own %v allowed %v: %v, want %v", c.own, c.allowed, got, c.want)
+		}
+	}
+}

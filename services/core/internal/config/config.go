@@ -101,6 +101,12 @@ type Config struct {
 	// most once; empty by default). A hospital's policy may name only one of
 	// these (cloud model providers plan, Task 2). Sorted.
 	CloudProviders []string
+	// OwnModelAllowed (CORE_OWN_MODEL_ALLOWED=true) lets a hospital's model
+	// policy turn own_model on: the deployment serves our own model on the
+	// GPU (deploy/README.md, "Answering with our own model only"). Off by
+	// default: turning it on is then 422, as a provider not in
+	// CORE_CLOUD_PROVIDERS is refused. Switching it off is always allowed.
+	OwnModelAllowed bool
 	// CloudReaper runs the stale cloud reservation reaper
 	// (CORE_CLOUD_RESERVATION_REAPER: on by default, off to stop it;
 	// migration 00047). It is budget-neutral: a reaped reservation is
@@ -290,6 +296,22 @@ func ParseCloudProviders(raw string) ([]string, error) {
 	return out, nil
 }
 
+// errOwnModelAllowed names the variable only, never its value.
+var errOwnModelAllowed = errors.New("CORE_OWN_MODEL_ALLOWED must be true or false")
+
+// ParseOwnModelAllowed reads CORE_OWN_MODEL_ALLOWED: blank or false is off,
+// true is on (case and surrounding space ignored); anything else is an
+// error naming the variable only.
+func ParseOwnModelAllowed(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	}
+	return false, errOwnModelAllowed
+}
+
 // Bounds of CORE_CLOUD_RESERVATION_REAP_AFTER (cloudreap.MinAge and
 // MaxAge; the database refuses under 30 minutes too).
 const (
@@ -431,6 +453,9 @@ func Load() (Config, error) {
 	}
 
 	if c.CloudProviders, err = ParseCloudProviders(os.Getenv("CORE_CLOUD_PROVIDERS")); err != nil {
+		errs = append(errs, err)
+	}
+	if c.OwnModelAllowed, err = ParseOwnModelAllowed(os.Getenv("CORE_OWN_MODEL_ALLOWED")); err != nil {
 		errs = append(errs, err)
 	}
 	c.CloudReaper = true
