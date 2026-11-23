@@ -485,6 +485,53 @@ docker compose --profile tools run --rm core-cli users create \
 docker compose --profile tools run --rm -T core-cli hospitals activate <CODE>
 ```
 
+### Live site: the shared reference library
+
+The live database starts with no shared guidelines (the demo's six synthetic
+samples are never seeded here), so the platform health page shows
+`guidelines: problem` and every answer lacks references. The shared
+reference library `medref` (openFDA drug labels and MedlinePlus health
+topics; docs/models/reference-library.md says what is in it and what was left
+out, and why) fills it. Every hospital reads it; none can change it; it
+holds no patient data.
+
+**Only after the product owner and the clinical safety lead have approved
+the library** (TODO.md, "Shared reference library"). These are reference
+texts, not clinical practice guidelines.
+
+`core reference-library load` runs in the one-shot `core-cli` as the
+provisioning login (migration 00056 lets it write library rows only). It
+refuses the file unless its SHA-256, version and row count are the ones
+pinned in core (`models/reference-library.lock`). It refuses any row that is
+patient-shaped or names the demo's synthetic source. It loads in one
+transaction and appends `reference_library.loaded` to the audit chain. The
+vectors are already in the file (built on the build server with our pinned
+embedder), so nothing is embedded on the host and no GPU is needed. Running
+it again changes nothing.
+
+```bash
+# 1. The artefact (36 MB) from the build server's ~/mhai-reference-library/
+#    into /srv/mhai-backend/reflib/ on this host, readable by core's user.
+cd /srv/mhai-backend
+install -d -m 755 reflib
+chmod 644 reflib/medref-1.0.0.jsonl.gz
+sha256sum reflib/medref-1.0.0.jsonl.gz   # d150e380...06e7, as models/reference-library.lock
+
+# 2. Load it (core with migration 00056, so after this change is deployed).
+docker compose --profile tools run --rm -T -v /srv/mhai-backend/reflib:/reflib:ro \
+  core-cli reference-library load /reflib/medref-1.0.0.jsonl.gz
+docker compose --profile tools run --rm -T core-cli reference-library status
+
+# 3. No demo rows: shared rows outside a library must be 0 on the live site.
+docker compose exec -T postgres psql -U pgadmin -d mhai -tAc \
+  "SELECT count(*) FROM kb_chunks WHERE hospital_id IS NULL AND library_id IS NULL"
+```
+
+The health page's guidelines part turns ok at its next reading. A new
+version is pinned by pull request, deployed, then loaded the same way. It
+replaces the old rows in the same transaction. Loading an earlier pinned
+version rolls back to it. There is no unload command.
+
 ### Live site: what it is not yet
 
 - **Real patient data still waits on the go-live sign-offs in TODO.md**

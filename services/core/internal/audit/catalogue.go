@@ -287,6 +287,9 @@ var Catalogue = map[string]Entry{
 	// The public demo's seed (core demo seed): no mhai-web kind; sent bare.
 	"demo.seeded": withheld(),
 	"demo.reset":  withheld(),
+	// The shared reference library (core reference-library load): no
+	// mhai-web kind yet; sent bare.
+	"reference_library.loaded": withheld(),
 	// Patient Analysis reads (plan Task 10): mhai-web's analysis_viewed
 	// kind takes facts this payload doesn't carry yet (H6); sent bare until
 	// the mapping is agreed (TODO.md, "Before scale").

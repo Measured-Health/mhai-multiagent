@@ -56,7 +56,7 @@ func TestProvisionReadsOnlyHospitalIDCodeAndStatus(t *testing.T) {
 		`SELECT 1 FROM users`, `SELECT password_hash FROM users`, `SELECT 1 FROM hospital_settings`,
 		`SELECT 1 FROM user_roles`, `SELECT 1 FROM user_mfa`, `SELECT 1 FROM sessions`,
 		`SELECT 1 FROM refresh_tokens`, `SELECT 1 FROM trusted_devices`, `SELECT 1 FROM audit_log`,
-		`SELECT 1 FROM idempotency_keys`, `SELECT 1 FROM clinical_queries`, `SELECT 1 FROM kb_chunks`,
+		`SELECT 1 FROM idempotency_keys`, `SELECT 1 FROM clinical_queries`, `SELECT content FROM kb_chunks`,
 		`SELECT name FROM hospitals`,
 	} {
 		_, err := prov.Exec(ctx, q)

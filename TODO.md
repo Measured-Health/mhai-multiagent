@@ -52,6 +52,36 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
 - **Demo settings.** `SECURITY_CONTACT_*` isn't set, so the audit integrity status returns 503. We need a name and an email from the product owner.
 - **Dependabot backlog.** 21 open PRs (Go modules, Python groups, GitHub Actions, NATS 2.15); each needs CI and a merge.
 
+## Shared reference library (23 Nov)
+
+Built: `core reference-library load` for the live host (migration 00056) and
+the review copy `scripts/build_reference_subset.py`. `medref` 1.0.0 is
+23,654 rows: openFDA labels 20,295 and MedlinePlus topics 3,359. Decisions
+and exclusions are in docs/models/reference-library.md. Nothing is loaded
+on any server yet.
+
+- **Product owner and clinical safety lead: approve `medref` 1.0.0 before it
+  is loaded on the live site.** Read the review copy. The safety lead signs off
+  the library's use with real patients. It is reference text (drug labels,
+  patient-facing summaries), not clinical practice guidance. Then the
+  operator runs deploy/README.md, "Live site: the shared reference library".
+- **Real guidelines for Havana: source and licence-check them.** The WHO
+  guidelines and the Nigerian national guidelines (Federal Ministry of
+  Health: malaria, hypertension, maternal and newborn care), and the
+  hospital's own protocols. **Licence flag:** WHO publications are often
+  CC BY-NC-SA 3.0 IGO, which is non-commercial and share-alike. Check each
+  document's own licence, and ask WHO for permission or get legal advice
+  before a commercial product uses one. Each source becomes a new library
+  version (converter allow-list, review copy, pin, load) and gets its own
+  clinical sign-off.
+- **Later decisions, left out of 1.0.0:** MedQuAD (CC BY 4.0, but rows
+  without an upstream URL; re-source with URLs first), ClinicalTrials.gov
+  registrations, PubMed and Europe PMC abstracts (publisher copyright). Never:
+  WikiDoc (CC BY-SA), synthetic patient rows, the demo's six synthetic
+  guidelines.
+- **mhai-web:** `reference_library.loaded` is sent bare (withheld) until
+  the audit screen has a kind for it.
+
 ## Notifications service: people items
 
 **These are people's items. An agent never marks one done**; the named owner closes it. From the [design](docs/designs/2026-11-19-notifications-service.md) §17.

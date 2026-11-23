@@ -320,6 +320,9 @@ var (
 	// A model policy's agreement reference (00018's CHECK): AGR-YYYY-NNNN,
 	// DPA-YYYY-NNNN or DEMO-SYNTHETIC, never a word, a name or a pseudonym.
 	agreementRefPattern = regexp.MustCompile(`^(DEMO-SYNTHETIC|(AGR|DPA)-[0-9]{4}-[0-9]{2,8})$`)
+	// A reference library's name and version (00040's CHECKs).
+	reflibNamePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+	reflibVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$`)
 )
 
 func fields(kv ...any) map[string]Check {
@@ -601,6 +604,15 @@ func init() {
 	Register("demo.reset", Schema{Fields: fields("via", OneOf("cli"), "consultations", count, "feedback", count,
 		"jobs", count, "deactivated", count, "in_flight", count, "counters", count),
 		Required: []string{"via", "consultations", "feedback", "jobs", "deactivated", "in_flight", "counters"}})
+	// The shared reference library (core reference-library load, 00056):
+	// the library loaded, its digest and row count, and the version it
+	// replaced (null for the first). Reference metadata only: no hospital,
+	// no actor, no row text.
+	Register("reference_library.loaded", Schema{Fields: fields("via", OneOf("cli"),
+		"name", Check(Pattern(reflibNamePattern)), "version", Check(Pattern(reflibVersionPattern)),
+		"sha256", Check(Pattern(checksumPattern)), "rows", count,
+		"replaced", Check(Nullable(Pattern(reflibVersionPattern)))),
+		Required: []string{"via", "name", "version", "sha256", "rows", "replaced"}})
 	// Patient Analysis reads (analysis backend design D7; plan Task 10):
 	// the view, the period and the filters' codes and opaque ids, once per
 	// session, filter set and period; and the day a person passes 100
