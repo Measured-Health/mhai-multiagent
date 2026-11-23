@@ -1206,6 +1206,9 @@ was relaxed for it.
 
 ### Place a new GGUF
 
+`gpu-model/swap-model.sh` does all of this, with a shadow test first
+("Swapping our own model" below). By hand:
+
 1. Copy it to the GPU server under `/srv/mhai-models/<run>/` (for example
    `/srv/mhai-models/cca-v2/model-q4_k_m.gguf`), owned by the deploy user,
    mode 0644 (the folder 0755), never a link.
@@ -1270,6 +1273,50 @@ it: `docker rm -f mhai-llm-gpu`. Nothing in this stack used it.
 `gpu-model/test-entrypoint.sh` and `gpu-model/test-gpu-model.sh` test both
 scripts without Docker (CI). `TestGPUModelService` checks the compose
 service's hardening.
+
+## Swapping our own model
+
+`gpu-model/swap-model.sh` puts a new model on the GPU in one command, with the
+checks, a shadow test against the `clinical_answer` gate and a rollback. Run
+it on the GPU server, as the deploy user, in `/srv/mhai-backend` (the deploy
+ships it, its builder and its policy files, `gpu-model/lock/`). The
+pipeline image (`PIPELINE_IMAGE`) must be one built after this script
+(it holds `mhai-models swap`).
+
+```bash
+cd /srv/mhai-backend
+# the researcher's adapter folder (docs/models/handing-over-a-model.md):
+bash gpu-model/swap-model.sh --adapter /srv/mhai-models/incoming/cca-v2 \
+  --name gemma4-e4b-cca --version 2.0.0 --profile gemma4-e4b-cca-v1
+# or a GGUF already built:
+bash gpu-model/swap-model.sh --gguf /srv/mhai-models/incoming/model.gguf \
+  --name gemma4-e4b-cca --version 2.0.1 --profile gemma4-e4b-cca-v1
+# build, check and shadow-test only:
+bash gpu-model/swap-model.sh --adapter DIR --name ... --version ... --profile ... --check-only
+# back to the model served before the last swap (again to undo):
+bash gpu-model/swap-model.sh --rollback
+```
+
+| Step | What happens |
+|---|---|
+| Checks | the name, a **new** version (no folder for it, never swapped to, above the served one for the same name), the profile, one swap at a time (a lock in `/srv/mhai-models`) |
+| Adapter | copied, then read as data only (`mhai-models swap check-adapter`, no network): only adapter, tokenizer, template, training manifest and README files (no pickle, no code, no link, no folder); a LoRA adapter with no remote-code key; its base an allowed one, at its pinned revision (`google/gemma-4-E4B-it` at `4ecc2ba6…`, Apache-2.0, `gemma4`; `intelligence/modelstore/swap.py`, changed by PR only); its `training_manifest.json` a `cca` run on that base, the licence in `models/licences.json`, the datasets in `models/approved-datasets.json` |
+| Build | `gpu-model/builder/` (pinned: base image by digest, llama.cpp `b1b770d9`, CPU torch and exact package versions). The base is downloaded once into `/srv/mhai-models/.cache/hf` (no token; the only step with a network). The merge (PEFT `merge_and_unload`, bfloat16, CPU; `trust_remote_code` never set) and the conversion (f16 GGUF, then `Q4_K_M`) run with **no network and no secret**, capped at `GPU_MODEL_BUILD_MEM` (32g) and `GPU_MODEL_BUILD_CPUS` (4); it needs `GPU_MODEL_BUILD_MIN_FREE_GB` (60) free. Output: `/srv/mhai-models/<name>/<version>/model-q4_k_m.gguf` and `manifest.json` (SHA-256, sizes, tool versions, base, adapter file hashes), read-only. A `--gguf` is copied to `<name>/<version>/model.gguf` |
+| GGUF checks | promotion's GGUF header checks, an allowed architecture (the base's for an adapter), the adapter's chat template byte for byte |
+| Shadow test | a second gpu-model (`mhai-gpu-model-shadow`: the same pinned image, entrypoint and hardening) serves the candidate on an internal network of its own, as `gpu-model`; the live one keeps serving. The GPU's free memory must cover the file plus `GPU_MODEL_SHADOW_HEADROOM_MIB` (2048). The gate (`mhai-models swap eval-shadow`) asks every question through the own route's client, in the candidate's answer profile: the locked split when `models/testsets.lock` names one, else the **dev split, said loudly and logged as `dev`** |
+| Switch | only on a pass. `.env`'s `GPU_MODEL_*` are kept as `GPU_MODEL_PREVIOUS_*`, the new ones written, and `gpu-model/gpu-model.sh` re-hashes, restarts and waits for the new alias. If it doesn't come up, the old `.env` is put back and served again. Hospitals' `own_model` switches are never touched |
+| Log | one JSON line per swap, rollback or refusal in `/srv/mhai-models/swaps.log`: UTC time, operator, from and to (alias and SHA-256), the gate's verdict and metrics, the split, forced or not |
+
+A gate that fails refuses the switch and keeps the model's folder for the
+record (the next try is a new version). `--force-without-gate` switches
+anyway, only after you type the version again; it is logged as
+`"forced":true`. Use it only on the product owner's decision, as for the
+first model.
+
+`gpu-model/test-swap-model.sh` (a fake docker, the real `gpu-model.sh`),
+`gpu-model/builder/test_merge.py` and `tests/modelstore/test_swap.py` run in
+CI. Not yet run on the GPU server: the builder image, the merge and the
+shadow on the L4.
 
 ## Intelligence on its own server (split mode, off by default)
 

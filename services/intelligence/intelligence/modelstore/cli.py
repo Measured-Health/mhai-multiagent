@@ -21,6 +21,7 @@ Commands::
     mhai-models testset-fetch --testsets PATH --trust-policy PATH --to DIR
     mhai-models eval-served --lock PATH --testsets PATH --split dev|test [--set DIR]
         [--max-seconds N]
+    mhai-models swap check-adapter|check-gguf|eval-shadow ... (intelligence/modelstore/swap.py)
 
 The store is any S3-compatible bucket: ``MODEL_STORE_ENDPOINT`` (TLS unless loopback),
 ``MODEL_STORE_BUCKET`` and ``MODEL_STORE_REGION`` (optional). Two credentials: the writer
@@ -925,6 +926,7 @@ def _parser() -> argparse.ArgumentParser:
     mf.set_defaults(func=_make_fixture)
     # Listed for --help only: main() hands ``export`` to intelligence.modelstore.export.
     sub.add_parser("export", help="training manifest, GGUF and checks (see export --help)")
+    sub.add_parser("swap", help="checks and shadow test for swapping the GPU model")
     si = sub.add_parser("store-init", help="provision a loopback MinIO (rehearsal only)")
     si.set_defaults(func=_store_init)
     pn = sub.add_parser("pin", help="verify a promoted version and pin it in models.lock")
@@ -989,6 +991,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         from intelligence.modelstore import export
 
         return export.main(argv[1:])
+    if argv[:1] == ["swap"]:
+        # The checks and shadow test behind deploy/gpu-model/swap-model.sh.
+        from intelligence.modelstore import swap
+
+        return swap.main(argv[1:])
     args = _parser().parse_args(argv)
     detailed = args.command in _DETAILED
     refusal: Refused | None = None
