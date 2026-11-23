@@ -1,0 +1,104 @@
+name: Enable own-model answers
+
+# Switches on the answer worker with our own GPU model only, no cloud
+# provider, on the live server (deploy/README.md, "Answering with our own
+# model only"), without anyone logging the server in to GHCR by hand. It runs
+# deploy/pilot/enable-pilot.sh --provider none on the host, over the same SSH
+# secrets and host-key check as "Deploy backend demo", after a `docker login`
+# with this run's own short-lived GITHUB_TOKEN (packages: read), logged out
+# again at the end.
+#
+# Run by hand: Actions, Enable own-model answers, Run workflow, on main.
+# Optional: a hospital short code to switch to our own model at the same time
+# (only after the clinical safety lead agrees), and its name if the hospital
+# doesn't exist yet. Safe to run again: the script keeps what is there.
+
+on:
+  workflow_dispatch:
+    inputs:
+      short_code:
+        description: "Hospital short code to switch to our own model (optional)"
+        required: false
+        default: ""
+      hospital_name:
+        description: "Hospital name, only if it doesn't exist yet (optional)"
+        required: false
+        default: ""
+
+concurrency:
+  group: deploy-backend-demo
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  enable:
+    if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: preview
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs
+        env:
+          CODE: ${{ inputs.short_code }}
+          NAME: ${{ inputs.hospital_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CODE" ] && ! printf '%s' "$CODE" | grep -Eq '^[A-Z0-9]{2,12}$'; then
+            echo "::error::short_code must be 2-12 capital letters or digits"; exit 1
+          fi
+          if [ -n "$NAME" ]; then
+            [ -n "$CODE" ] || { echo "::error::hospital_name needs a short_code"; exit 1; }
+            if [ "${#NAME}" -gt 120 ] || printf '%s' "$NAME" | grep -q '[^A-Za-z0-9 .,()&-]'; then
+              echo "::error::hospital_name: up to 120 letters, digits, spaces and . , ( ) & -"; exit 1
+            fi
+          fi
+
+      - name: Require the host key fingerprint
+        env:
+          FINGERPRINT: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
+        run: |
+          case "$FINGERPRINT" in
+            SHA256:?*) echo "Host key fingerprint set." ;;
+            *) echo "::error::Secret DEPLOY_HOST_FINGERPRINT is missing or not SHA256:... (deploy/README.md)"; exit 1 ;;
+          esac
+
+      - name: Bundle the script
+        id: bundle
+        run: |
+          set -euo pipefail
+          b=$(tar -C deploy -czf - pilot/enable-pilot.sh egress-proxy/squid.conf | base64 -w0)
+          echo "b=$b" >> "$GITHUB_OUTPUT"
+
+      - name: Enable on the instance
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          BUNDLE: ${{ steps.bundle.outputs.b }}
+          CODE: ${{ inputs.short_code }}
+          NAME: ${{ inputs.hospital_name }}
+        with:
+          envs: GHCR_TOKEN,GHCR_USER,BUNDLE,CODE,NAME
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          fingerprint: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
+          command_timeout: 30m
+          script: |
+            set -euo pipefail
+            work=$(mktemp -d)
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+            printf '%s' "$BUNDLE" | base64 -d | tar -xzf - -C "$work"
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            cd /srv/mhai-backend
+            args=(--provider none)
+            [ -z "$CODE" ] || args+=(--short-code "$CODE")
+            [ -z "$NAME" ] || args+=(--hospital-name "$NAME")
+            bash "$work/pilot/enable-pilot.sh" "${args[@]}"
