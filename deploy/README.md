@@ -576,6 +576,71 @@ docker compose --profile tools run --rm -T -v /srv/mhai-backend/reflib:/reflib:r
 There is no unload command. To stop serving a library, load an earlier
 pinned version. To take it out entirely, use a pull request and a migration.
 
+### The pilot site's private test set
+
+A test set built from the pilot site's own de-identified visits, so a model
+can be checked on the questions the site actually sees. **It is built on
+the live server and never leaves it.** The repository is public: no row, no
+vignette, no count broken down by diagnosis goes into it, a pull request or
+a chat.
+
+`services/intelligence/scripts/build_site_testset.py` uses the Python
+standard library only. It runs in a throwaway `python:3.12-slim` container
+with no network, the visit folder read-only. It reads `Data.xlsx` (AGE,
+SEX, SYMPTOMS/COMPLAINT, LABORATORY, DIAGNOSIS, TREATMENT) and
+`malaria_cleaned.csv` (structured flags; identifying columns are never
+read). It drops exact duplicates and any row holding a quasi-identifier: an
+occupation, a title and name, a date, a phone number, an e-mail, a long
+number or a record number. Then it writes vignettes: age band, sex,
+complaints, results, working diagnosis, "What is the recommended
+management?". Each vignette has an empty `expected_facts` column for a
+clinician. It prints counts only.
+
+```bash
+# On the live server, as root. The script at the merged commit, checked.
+SHA=<the merge commit of this change on main>
+curl -fsSL -o /root/build_site_testset.py \
+  "https://raw.githubusercontent.com/Measured-Health/mhai-multiagent/$SHA/services/intelligence/scripts/build_site_testset.py"
+sha256sum /root/build_site_testset.py    # compare with `git show $SHA:services/intelligence/scripts/build_site_testset.py | sha256sum`
+install -d -m 700 -o root -g root /srv/mhai-data/mhai/testset
+docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+  -v /srv/mhai-data/mhai/visits:/data:ro \
+  -v /srv/mhai-data/mhai/testset:/out \
+  -v /root/build_site_testset.py:/build_site_testset.py:ro \
+  python:3.12-slim python -I /build_site_testset.py --data /data --out /out
+ls -l /srv/mhai-data/mhai/testset/site-testset-*/   # questions.csv counts.json README.txt, all 0600 root
+```
+
+It refuses to overwrite a folder of the same day. The output is root-only
+(folder 0700, files 0600).
+
+**Filling it (clinician, on the server or an approved hospital machine).**
+For each row in `questions.csv`, fill `expected_facts` (short phrases a
+correct answer must contain, separated by ` | `), optionally `must_not_say`,
+and initials in `reviewed_by`. Delete any row that still identifies someone
+or is not a useful question. `site_treatment` is what the site gave: it is
+context for the reviewer, not the expected answer.
+
+**Using it in the gate (later work).** The `clinical_answer` gate in
+`swap-model.sh` reads a set folder (`items.jsonl` + `testset.json`,
+`intelligence/doceval/answers/schema.py`) mounted with `--set`. It uses the
+locked split from `models/testsets.lock` when there is one, else the public
+dev split. The filled site set will plug in the same way, without leaving
+the server:
+
+1. A converter (to be written) turns the reviewed rows into `required_facts`
+   items, with the shared library chunks each question should retrieve. It
+   writes `items.jsonl` and `testset.json` beside the CSV, on the server.
+   The item schema's "synthetic only" text rules apply to the public splits.
+   A site split is held to a site rule instead: no quasi-identifier, as
+   above.
+2. Only its SHA-256 goes into `models/testsets.lock`, as
+   `clinical_answer-site@<version>#<sha256>`. A digest reveals nothing about
+   the rows. The folder itself stays under `/srv/mhai-data/mhai/testset/`.
+3. `swap-model.sh` mounts that folder read-only as the split (`--set`), so a
+   model swap is gated on the site's own questions. The swap log records the
+   split's name and digest, never its rows.
+
 ### Live site: what it is not yet
 
 - **Real patient data still waits on the go-live sign-offs in TODO.md**

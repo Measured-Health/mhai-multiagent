@@ -25,6 +25,16 @@ All notable changes to this project are documented here. The format follows
   a question pulls its generic's label and guideline rows (the generic
   expansion). docs/models/reference-library.md; deploy/README.md, "Adding
   reference libraries".
+- **The pilot site's private test set builder.**
+  `scripts/build_site_testset.py` (standard library only, run on the live
+  server in a throwaway container with no network and the visit folder
+  read-only) turns the site's de-identified visits into vignette questions
+  (age band, sex, complaints, results, working diagnosis, "What is the
+  recommended management?") with an empty `expected_facts` column for a
+  clinician. It drops exact duplicates and rows holding a quasi-identifier,
+  never reads an identifying column, prints counts only, and writes
+  root-only files. Tests use synthetic fixtures only. deploy/README.md, "The
+  pilot site's private test set".
 - **Swapping our own model in one command.** `deploy/gpu-model/swap-model.sh`
   (`--adapter DIR` or `--gguf FILE`, `--name`, a new `--version`, `--profile`;
   `--rollback`; `--check-only`): the researcher's QLoRA adapter is checked as

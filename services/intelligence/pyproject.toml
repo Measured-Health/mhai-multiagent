@@ -75,11 +75,11 @@ dependencies = [
 dev = [
     "pytest>=9.2.0",
     "pytest-cov>=4.1",
-    "ruff>=0.17.5",
+    "ruff>=0.17.6",
     "mypy>=2.4.1",
     "pre-commit>=4.7.0",
     "locust>=2.47.0",
-    "diff-cover>=11.0.2",
+    "diff-cover>=11.0.4",
     "grpcio-tools>=1.74",
     "mypy-protobuf>=3.6",
     "pytest-asyncio>=1.5.0",
@@ -89,7 +89,7 @@ dev = [
     # test_workflows.py parses the workflow files (also a transitive dependency today).
     "pyyaml>=6.0",
     # The cloud tests: property tests, and no network in the unit modules.
-    "hypothesis>=6.170.15",
+    "hypothesis>=6.170.17",
     "pytest-socket>=0.8.1",
     # Guideline PDFs to reference library rows (knowledge_base/guideline_pdf.py), on the build
     # machine only: text extraction, no OCR. Pinned exactly: the rows (and so the artefact's
