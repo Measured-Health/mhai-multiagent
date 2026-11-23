@@ -151,7 +151,7 @@ def test_nigerian_numbers_masked(number: str, kind: str) -> None:
         ("card number UCH-0045123 at the clinic", "UCH-0045123"),
         ("MR# 4471 on ward 3", "4471"),
         ("Record LASUTH/AE/2023/0451 seen", "LASUTH/AE/2023/0451"),
-        ("HAV-000123 - review results", "HAV-000123"),
+        ("PLT-000123 - review results", "PLT-000123"),
         ("nhis no: ABC/12345.", "ABC/12345"),
     ],
 )

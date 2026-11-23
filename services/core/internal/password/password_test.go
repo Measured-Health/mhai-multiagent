@@ -124,7 +124,7 @@ func TestPatternRejectedEvenIfUnlisted(t *testing.T) {
 }
 
 func TestEmailLocalPartRejected(t *testing.T) {
-	email := "Grace.Nwosu@havana.example"
+	email := "Grace.Nwosu@pilot-hospital.example"
 	if err := Check("my-GRACE.nwosu-secret-9", email); !errors.Is(err, ErrContainsEmail) {
 		t.Fatalf("local part inside password: %v", err)
 	}

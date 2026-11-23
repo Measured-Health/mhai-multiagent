@@ -272,14 +272,14 @@ make core-up      # postgres, nats, core-migrate, core-keys, core-request-key, c
 curl -s localhost:8080/api/v1/readyz           # {"status":"ready"}
 
 # Seed a synthetic hospital and clinician as the provisioning login:
-docker compose run --rm -T core-cli hospitals create --name "Havana General" --short-code HAV --time-zone Africa/Lagos
-docker compose run --rm -T core-cli hospitals activate HAV   # or the hospital's id
+docker compose run --rm -T core-cli hospitals create --name "Pilot Hospital" --short-code PLT --time-zone Africa/Lagos
+docker compose run --rm -T core-cli hospitals activate PLT   # or the hospital's id
 printf '%s\n' "$SYNTHETIC_PASSWORD" | docker compose run --rm -T core-cli users create \
-  --email synthetic.clinician@havana.example --name "Synthetic Clinician" --roles clinician --hospital HAV
+  --email synthetic.clinician@pilot-hospital.example --name "Synthetic Clinician" --roles clinician --hospital PLT
 
 curl -s localhost:8080/api/v1/auth/login \
   -H "X-MHAI-Service: $BFF_KEY" -H "X-MHAI-Client-IP: 198.51.100.20" -H 'Content-Type: application/json' \
-  -d '{"username":"synthetic.clinician@havana.example","password":"..."}'
+  -d '{"username":"synthetic.clinician@pilot-hospital.example","password":"..."}'
 ```
 
 `make up` also starts the pipeline worker (and Ollama); `docker compose

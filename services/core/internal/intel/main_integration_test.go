@@ -120,7 +120,7 @@ func seedUser(t *testing.T, hospital uuid.UUID, active bool, roles ...string) uu
 	var id uuid.UUID
 	if err := super.QueryRow(ctx, `INSERT INTO users (hospital_id, email, password_hash, display_name, is_active)
 		VALUES ($1, $2, 'synthetic-hash', 'Dr Synthetic', $3) RETURNING id`,
-		hospital, "synthetic."+uniq()+"@havana.example", active).Scan(&id); err != nil {
+		hospital, "synthetic."+uniq()+"@pilot-hospital.example", active).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range roles {

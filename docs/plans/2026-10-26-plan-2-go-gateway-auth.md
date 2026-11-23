@@ -72,7 +72,7 @@
 1. **The same reply for unknown, locked and wrong-password logins, including timing.** An unknown email still runs argon2 against a fixed dummy hash, so its response time matches a real account's. Tested in Task 6.
 2. **Two BFF requests refreshing the same token at once** (two tabs). Reusing a refresh token within **10 seconds** of its rotation returns **409 `conflict`** and does not revoke anything; the BFF retries with its newer token. Reuse after 10 seconds revokes the whole family. Tested in Task 6.
 3. **An account or hospital deactivated mid-session.** The next request after the 30-second user/hospital cache expires gets **401 `unauthenticated`**, and a refresh fails at once. Tested in Task 8.
-4. **A login email in mixed case or with spaces** (`" Grace.Nwosu@Havana.example "`) signs in as the stored lowercase email, and two accounts can't differ only by case. Tested in Task 5.
+4. **A login email in mixed case or with spaces** (`" Grace.Nwosu@Pilot-Hospital.example "`) signs in as the stored lowercase email, and two accounts can't differ only by case. Tested in Task 5.
 5. **A query that forgets its hospital filter.** It returns nothing under row-level security; it never returns another hospital's rows. That includes a handler that runs outside `WithHospital`, which must fail rather than see all rows. Tested in Task 2.
 
 ---
@@ -274,7 +274,7 @@ The dev passwords come from env. Production NKeys are documented in the file's c
   - `TestVerifyWrongPassword`.
   - `TestBreachedRejected`: `"password1234"` is breached.
   - `TestShortRejected`: 11 characters.
-  - `TestNormaliseEmail` (Review Focus 4): `" Grace.Nwosu@Havana.example "` → `"grace.nwosu@havana.example"`.
+  - `TestNormaliseEmail` (Review Focus 4): `" Grace.Nwosu@Pilot-Hospital.example "` → `"grace.nwosu@pilot-hospital.example"`.
   - Integration `TestEmailUniqueIgnoresCase`.
   - `TestPlatformRoleNeedsNoHospital`: creating `platform_admin` with `--hospital` errors, and `clinician` without `--hospital` errors.
   - `TestRolesCombineOnlyClinical`: `clinician,platform_admin` errors.
@@ -442,7 +442,7 @@ The dev passwords come from env. Production NKeys are documented in the file's c
 - [ ] **Step 1: Write the failing test** `TestOpenAPIMatchesHandlers`. For every route in `authz.Table()` there's a path and method in `openapi.yaml`, and the reverse. Each documented error code is in `httpx.Codes`.
 - [ ] **Step 2:** Run the test. It should fail.
 - [ ] **Step 3:** Write the spec, the README and the compose service.
-- [ ] **Step 4:** Run `docker compose up -d postgres nats core-migrate core`. Then use the CLI to seed a synthetic hospital `HAV` and a clinician, and run `curl` against `/api/v1/auth/login` with the BFF key. Expected: 200 with `access_token`. Record the transcript in the PR, with no secrets.
+- [ ] **Step 4:** Run `docker compose up -d postgres nats core-migrate core`. Then use the CLI to seed a synthetic hospital `PLT` and a clinician, and run `curl` against `/api/v1/auth/login` with the BFF key. Expected: 200 with `access_token`. Record the transcript in the PR, with no secrets.
 - [ ] **Step 5:** Run the full suite: `go test -race -tags integration ./...`, plus `uv run pytest -q`, to check the Python side still passes after `init.sql` was removed.
 - [ ] **Step 6:** Commit: "Commit the auth contract, run the core service in compose and document it".
 

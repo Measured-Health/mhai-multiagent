@@ -15,8 +15,8 @@ import (
 func TestHospitalsActivateArgsCheckedFirst(t *testing.T) {
 	for _, args := range [][]string{
 		{"hospitals", "activate"},
-		{"hospitals", "activate", "HAV", "EXTRA"},
-		{"hospitals", "activate", "--short-code", "HAV"},
+		{"hospitals", "activate", "PLT", "EXTRA"},
+		{"hospitals", "activate", "--short-code", "PLT"},
 		{"hospitals", "activate", "-h"},
 	} {
 		err := seed(context.Background(), args, "", strings.NewReader(""), &bytes.Buffer{})
@@ -28,7 +28,7 @@ func TestHospitalsActivateArgsCheckedFirst(t *testing.T) {
 	if !errors.Is(err, account.ErrBadHospitalRef) {
 		t.Fatalf("bad ref: %v", err)
 	}
-	err = seed(context.Background(), []string{"hospitals", "activate", "HAV"}, "", strings.NewReader(""), &bytes.Buffer{})
+	err = seed(context.Background(), []string{"hospitals", "activate", "PLT"}, "", strings.NewReader(""), &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
 		t.Fatalf("good ref, no url: %v", err)
 	}

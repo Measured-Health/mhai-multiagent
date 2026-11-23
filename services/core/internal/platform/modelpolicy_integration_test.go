@@ -337,7 +337,7 @@ func TestModelPolicyUnknownHospital404(t *testing.T) {
 	problem(t, "GET", get(t, policyPath(nobody), tok), 404, "not_found")
 	problem(t, "PUT", putPolicy(t, tok, nobody, policyBody("anthropic", "DEMO-SYNTHETIC", 1000, backupCode(t, admin))), 404, "not_found")
 	problem(t, "PUT off", putPolicy(t, tok, nobody, policyBody("", "", 1000, backupCode(t, admin))), 404, "not_found")
-	for _, p := range []string{"/platform/hospitals/HAV/model-policy", "/platform/hospitals/" + strings.ToUpper(nobody.String()) + "/model-policy"} {
+	for _, p := range []string{"/platform/hospitals/PLT/model-policy", "/platform/hospitals/" + strings.ToUpper(nobody.String()) + "/model-policy"} {
 		problem(t, "GET "+p, get(t, p, tok), 404, "not_found")
 		problem(t, "PUT "+p, send(t, handler, http.MethodPut, p, tok, policyBody("", "", 1000, backupCode(t, admin))), 404, "not_found")
 	}

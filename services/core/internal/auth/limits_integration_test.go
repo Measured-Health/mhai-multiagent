@@ -38,7 +38,7 @@ func TestLoginCeilingAcrossIPs(t *testing.T) {
 		t.Fatalf("over the ceiling: %d %s", r.code, r.raw)
 	}
 	// An unknown login over its ceiling gets the same reply.
-	unknown := "synthetic.nobody." + uniq() + "@havana.example"
+	unknown := "synthetic.nobody." + uniq() + "@pilot-hospital.example"
 	for i := 0; i < auth.MaxLoginFailuresPerLogin; i++ {
 		if r := e.login(t, unknown, "wrong-password-"+uniq(), newIP()); r.code != 401 {
 			t.Fatalf("unknown failure %d: %d", i+1, r.code)

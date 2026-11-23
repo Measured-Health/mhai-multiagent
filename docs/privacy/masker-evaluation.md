@@ -27,7 +27,7 @@ also runs `security/ng_pii.py`:
 - **Numbers.** NIN and BVN (11 digits), phone numbers (0 or +234, with the "(0)" trunk), whole or
   grouped with spaces, hyphens, dots or brackets; labelled record numbers (MRN, MR#, hospital,
   folder, card, file, patient or registration number, NHIS, NIN, BVN) with whatever code
-  follows; coded record numbers ("LUTH/2019/12345", "HAV-000123"), read whole however long.
+  follows; coded record numbers ("LUTH/2019/12345", "PLT-000123"), read whole however long.
 
 **Offline and CPU-only.** No model, no download, no new dependency. Image impact: two text files,
 `ng_names.txt` (16 KB) and `en_words.txt` (617 KB), installed as package data. Loading builds the

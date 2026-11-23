@@ -84,7 +84,7 @@ var (
 var testCloudProviders = []string{"anthropic", "gemini", "openai"}
 
 // testContact is the configured security contact (synthetic).
-var testContact = platform.SecurityContact{Name: "Synthetic Security Desk", Email: "security@havana.example"}
+var testContact = platform.SecurityContact{Name: "Synthetic Security Desk", Email: "security@pilot-hospital.example"}
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
@@ -221,7 +221,7 @@ func seedUser(t *testing.T, hid uuid.UUID, name string, roles ...string) user {
 	if name == "" {
 		name = "Dr Synthetic " + uniq()
 	}
-	email := "synthetic." + uniq() + "@havana.example"
+	email := "synthetic." + uniq() + "@pilot-hospital.example"
 	if err := super.QueryRow(ctx, `INSERT INTO users (hospital_id, email, password_hash, display_name, full_name)
 		VALUES ($1, $2, 'synthetic-hash', $3, 'Synthetic Fullname') RETURNING id`, h, email, name).Scan(&id); err != nil {
 		t.Fatal(err)

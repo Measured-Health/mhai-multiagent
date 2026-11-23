@@ -7,7 +7,7 @@
 // the stub models, and the echo worker. It acts as the clinical BFF over
 // NATS (bff_clinical on api.v1.clinical), as mhai-web's server will.
 //
-// Everything here is synthetic: hospital HAV, a clinician with a random
+// Everything here is synthetic: hospital PLT, a clinician with a random
 // address under example.test, a made-up question. The credentials are the
 // ones the script generated for this run, read from the environment; none
 // is printed.
@@ -51,7 +51,7 @@ import (
 )
 
 // The synthetic hospital the smoke clinician belongs to.
-const hospitalCode = "HAV"
+const hospitalCode = "PLT"
 
 // env reads a required setting; the test can't run without the stack.
 func env(t *testing.T, name string) string {
@@ -149,7 +149,7 @@ func apiOn(t *testing.T, nc *nats.Conn, subject, method, path, bearer string, bo
 	return r
 }
 
-// clinician is a signed-in synthetic clinician of HAV.
+// clinician is a signed-in synthetic clinician of PLT.
 type clinician struct {
 	id, hospitalID, access string
 }
@@ -166,7 +166,7 @@ func cli(t *testing.T, stdin string, args ...string) {
 	}
 }
 
-// signIn seeds HAV (once) and a new clinician with the CLI, then, over
+// signIn seeds PLT (once) and a new clinician with the CLI, then, over
 // NATS: sign in, change the first password (the CLI sets
 // must_change_password) and accept the terms, as the app makes a new user do.
 func signIn(t *testing.T, nc *nats.Conn) clinician {
@@ -178,13 +178,13 @@ func signIn(t *testing.T, nc *nats.Conn) clinician {
 		t.Fatal(err)
 	}
 	if n == 0 {
-		cli(t, "", "hospitals", "create", "--name", "Synthetic Hospital HAV", "--short-code", hospitalCode, "--time-zone", "UTC")
+		cli(t, "", "hospitals", "create", "--name", "Synthetic Hospital PLT", "--short-code", hospitalCode, "--time-zone", "UTC")
 	}
 	// The CLI creates a hospital setup_incomplete. Sign-in accepts that, but
 	// POST /queries asks for an active hospital: activate it with the CLI, as
 	// the provisioning login. On a re-run it is already active, a no-op.
 	cli(t, "", "hospitals", "activate", hospitalCode)
-	email := "smoke-" + randomHex(t, 6) + "@hav.example.test"
+	email := "smoke-" + randomHex(t, 6) + "@pilot-hospital.example.test"
 	first, second := "Smoke-first-"+randomHex(t, 12), "Smoke-second-"+randomHex(t, 12)
 	cli(t, first+"\n", "users", "create", "--email", email, "--name", "Synthetic Smoke Clinician", "--roles", "clinician", "--hospital", hospitalCode)
 

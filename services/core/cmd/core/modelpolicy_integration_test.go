@@ -34,12 +34,12 @@ func TestCLIModelPolicySet(t *testing.T) {
 		err := hospitalsModelPolicy(ctx, args, provURL, env, &out)
 		return out.String(), err
 	}
-	if err := seed(ctx, []string{"hospitals", "create", "--name", "Synthetic General", "--short-code", "HAV", "--time-zone", "UTC"},
+	if err := seed(ctx, []string{"hospitals", "create", "--name", "Synthetic General", "--short-code", "PLT", "--time-zone", "UTC"},
 		provURL, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	var hid uuid.UUID
-	if err := pool.QueryRow(ctx, `SELECT id FROM hospitals WHERE short_code = 'HAV'`).Scan(&hid); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT id FROM hospitals WHERE short_code = 'PLT'`).Scan(&hid); err != nil {
 		t.Fatal(err)
 	}
 	type audited struct {
@@ -77,7 +77,7 @@ func TestCLIModelPolicySet(t *testing.T) {
 		return
 	}
 
-	out, err := run("set", "hav", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC")
+	out, err := run("set", "plt", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC")
 	if err != nil || out != "model policy "+hid.String()+" anthropic\n" {
 		t.Fatalf("anthropic: %q %v", out, err)
 	}
@@ -90,17 +90,17 @@ func TestCLIModelPolicySet(t *testing.T) {
 		t.Fatalf("openai: %q %v", out, err)
 	}
 	// A disabled or unknown provider: refused, nothing written.
-	if _, err := run("set", "HAV", "--provider", "xai", "--agreement-ref", "DEMO-SYNTHETIC"); !errors.Is(err, errProviderDisabled) {
+	if _, err := run("set", "PLT", "--provider", "xai", "--agreement-ref", "DEMO-SYNTHETIC"); !errors.Is(err, errProviderDisabled) {
 		t.Fatalf("xai: %v", err)
 	}
-	if _, err := run("set", "HAV", "--provider", "mistral", "--agreement-ref", "DEMO-SYNTHETIC"); !errors.Is(err, errUnknownProvider) {
+	if _, err := run("set", "PLT", "--provider", "mistral", "--agreement-ref", "DEMO-SYNTHETIC"); !errors.Is(err, errUnknownProvider) {
 		t.Fatalf("mistral: %v", err)
 	}
 	if p, _, b, _ := policy(); p == nil || *p != "openai" || b != 750000 {
 		t.Fatalf("after refusals: %v %d", p, b)
 	}
 	// none switches off and keeps the budget.
-	if out, err = run("set", "HAV", "--provider", "none"); err != nil || out != "model policy "+hid.String()+" none\n" {
+	if out, err = run("set", "PLT", "--provider", "none"); err != nil || out != "model policy "+hid.String()+" none\n" {
 		t.Fatalf("none: %q %v", out, err)
 	}
 	if p, ref, b, _ := policy(); p != nil || ref != nil || b != 750000 {

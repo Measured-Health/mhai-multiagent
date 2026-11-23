@@ -23,7 +23,7 @@ func TestSeedRolesChecked(t *testing.T) {
 	var out bytes.Buffer
 	for _, args := range [][]string{
 		{"users", "create", "--email", "a@b.example", "--name", "A", "--roles", "clinician,platform_admin"},
-		{"users", "create", "--email", "a@b.example", "--name", "A", "--roles", "platform_admin", "--hospital", "HAV"},
+		{"users", "create", "--email", "a@b.example", "--name", "A", "--roles", "platform_admin", "--hospital", "PLT"},
 		{"users", "create", "--email", "a@b.example", "--name", "A", "--roles", "clinician"},
 	} {
 		// Fails on validation before any connection is made.

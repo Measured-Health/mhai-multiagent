@@ -12,7 +12,7 @@
 ADR 0009 decides what the backend reads (one connector per EMR type, a canonical model, normalisation in one place, a per-hospital patient index) but not where it runs. Two facts from the design work decide that:
 
 - **Connectors hold outside credentials and parse outside data.** A connector holds a hospital's record-system keys and reads JSON and files we don't control. AGENTS.md put "EMR plumbing" in core, which also holds sessions, accounts, the audit chain and the request-signing key.
-- **Havana's record system holds no structured clinical data** (design §1.1). It is an archive of scanned paper records, named after the patient. Values can come from it only through the document pipeline, with a person reviewing every extraction and every patient match. The document pipeline design had its own normalisation step, which would be a second copy of the code and unit maps.
+- **The pilot hospital's record system holds no structured clinical data** (design §1.1). It is an archive of scanned paper records, named after the patient. Values can come from it only through the document pipeline, with a person reviewing every extraction and every patient match. The document pipeline design had its own normalisation step, which would be a second copy of the code and unit maps.
 
 ## Decision
 
@@ -32,7 +32,7 @@ ADR 0009 decides what the backend reads (one connector per EMR type, a canonical
 - One more service to run and watch, and a shared module whose defect reaches core and the emr service at once; it is reviewed as security code.
 - Core's Docker image builds from `services/` (it needs `services/gokit/`), so the build context changes in compose, CI and the deploy workflow.
 - Clinical maps are reviewed once, in one place.
-- Havana's scanned records give alerts only after review (hours to days). Timely alerts need a structured source from the hospital (design §20, H1).
+- The pilot hospital's scanned records give alerts only after review (hours to days). Timely alerts need a structured source from the hospital (design §20, H1).
 - A compromised emr host can read every connected hospital's credentials; one emr process per hospital is not in this design (design §17.6).
 
 ## Alternatives considered

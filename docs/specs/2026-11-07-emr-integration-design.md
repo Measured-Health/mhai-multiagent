@@ -14,24 +14,24 @@
 
 ## 1. Why
 
-The product owner's requirements (settled): read labs, vitals and medications from each hospital's record system, Havana's first and then FHIR-based systems; find abnormal values and patterns; flag them to clinicians with the evidence, never to patients; the platform admin app configures connections; hospital admins choose units, what to flag and who hears; clinicians get the alerts page, bell, pop-ups and mute that mhai-web has already built.
+The product owner's requirements (settled): read labs, vitals and medications from each hospital's record system, the pilot hospital's first and then FHIR-based systems; find abnormal values and patterns; flag them to clinicians with the evidence, never to patients; the platform admin app configures connections; hospital admins choose units, what to flag and who hears; clinicians get the alerts page, bell, pop-ups and mute that mhai-web has already built.
 
 mhai-web has built every screen on sample data (Plan 13, plus the alerts page, bell and pop-ups). Core serves none of it yet: `services/core/openapi.yaml` (1.10.0) has no `/alerts`, `/hospital/alert-settings`, `/me/notification-settings` or `/platform/emr/*` route. This design says what serves them, and what sits behind them.
 
-### 1.1 What Havana's system actually holds (read 7 Nov)
+### 1.1 What the pilot hospital's system actually holds (read 7 Nov)
 
-We read the Havana record system's code (read-only, no configuration or data opened). **It holds no structured clinical data.** It is a search, preview and download service over an archive of scanned paper records kept in a file store, indexed into a search index on a schedule (a deployment setting: a daily ingest with an hourly check by default), served over a REST API (`/api/v1/files/...`) with user sign-in by JWT and one deployment-wide service key.
+We read the pilot hospital's record system's code (read-only, no configuration or data opened). **It holds no structured clinical data.** It is a search, preview and download service over an archive of scanned paper records kept in a file store, indexed into a search index on a schedule (a deployment setting: a daily ingest with an hourly check by default), served over a REST API (`/api/v1/files/...`) with user sign-in by JWT and one deployment-wide service key.
 
 - **A patient is identified only by a file name.** The index keeps each file's name (the extension stripped so the screen shows the patient's name) and its top-level folder (the box); patient folders below the box are not indexed. There is no patient id or MRN. **File names are PHI** (§5.3).
 - **Not only PDFs:** the archive also serves word-processor files, spreadsheets, images (JPEG, PNG, TIFF) and plain text.
 - **No per-file "since" listing.** The "since" endpoint returns a ZIP export's part layout, not a list of files; listing by date is a search filter on modification time. Deleted files leave no trace.
 - No encounters, wards or units, and no lab results, vital signs or medications as data. Its own product plan lists structured patients, encounters and live lab, imaging and prescription streams as data the hospital has **not yet provided**.
-- It is live at Havana, so any change to it (H2) needs Havana's agreement as well as our team's work.
+- It is live at the pilot hospital, so any change to it (H2) needs the pilot hospital's agreement as well as our team's work.
 
-So "Havana first" can mean two things, and this design supports both (§5.3, §21 question 1):
+So "the pilot hospital first" can mean two things, and this design supports both (§5.3, §21 question 1):
 
-1. **Havana's scanned records, read through the document pipeline.** A connector lists new files (once the archive offers a listing, H2) and hands the supported ones to the documents service. Values reach the canonical model only after a person has reviewed the extraction and matched the patient (document pipeline design §5). Useful, but slow (hours to days), and it depends on document pipeline phase 1 (typed lab reports).
-2. **A structured export from Havana's lab, pharmacy or ward systems**, when the hospital provides one. Read through the scheduled file export connector (§5.4) or FHIR R4 if their systems offer it. This is the only route that gives timely alerts. It needs the hospital (H1 in §20).
+1. **The pilot hospital's scanned records, read through the document pipeline.** A connector lists new files (once the archive offers a listing, H2) and hands the supported ones to the documents service. Values reach the canonical model only after a person has reviewed the extraction and matched the patient (document pipeline design §5). Useful, but slow (hours to days), and it depends on document pipeline phase 1 (typed lab reports).
+2. **A structured export from the pilot hospital's lab, pharmacy or ward systems**, when the hospital provides one. Read through the scheduled file export connector (§5.4) or FHIR R4 if their systems offer it. This is the only route that gives timely alerts. It needs the hospital (H1 in §20).
 
 The FHIR R4 connector is built first as the reference connector, against a synthetic FHIR server, because the whole pipeline can be proven on it end to end while H1 is pending.
 
@@ -39,7 +39,7 @@ The FHIR R4 connector is built first as the reference connector, against a synth
 
 **Goals**
 - A separate service, `services/emr/`, that holds every outside credential and the only route out to hospital systems; core holds neither (§3, §6).
-- One connector interface; connectors for FHIR R4 (first), Havana's archive (to the document pipeline) and scheduled file export (structured export from Havana or any hospital).
+- One connector interface; connectors for FHIR R4 (first), the pilot hospital's archive (to the document pipeline) and scheduled file export (structured export from the pilot hospital or any hospital).
 - A canonical model based on FHIR R4, with provenance on every record (§8); normalisation to LOINC and UCUM for labs and vitals, ATC for medications, in one place, the emr service, for connector and document records alike (§9).
 - A patient index per hospital, never across hospitals, whose ids are the MHAI patient ids that `pids` will carry (§10).
 - A deterministic, versioned rules engine under clinical change control, that raises findings with evidence and suggested causes (§11).
@@ -144,8 +144,8 @@ type Connector interface {
 | id | label (platform app only) | Fields | Status |
 |---|---|---|---|
 | `fhir_r4` | FHIR R4 server | `client_id` text; `token_url` text; `private_key` secret (SMART Backend Services, `private_key_jwt`, RS384 or ES384); optional `scope` text | **Build first** (§5.1) |
-| `document_archive` | Scanned record archive | `api_key` secret | **Havana, phase H-a** (§5.3) |
-| `file_export` | Scheduled file export | `folder` text; `host_key_fingerprint` text; `format` text (`mhai_csv_v1`); `access_key` secret | **Havana, phase H-b** (§5.4) |
+| `document_archive` | Scanned record archive | `api_key` secret | **The pilot hospital, phase H-a** (§5.3) |
+| `file_export` | Scheduled file export | `folder` text; `host_key_fingerprint` text; `format` text (`mhai_csv_v1`); `access_key` secret | **The pilot hospital, phase H-b** (§5.4) |
 | `hl7v2_feed` | Results message feed | `sender_id` text; `shared_key` secret | **Not built** (needs an inbound listener; §7.3). Listed by mhai-web's sample data only; the API does not offer it until built |
 
 **Every URL setting gets the base address's checks** (§6.4): `token_url`, `record_link` and the SFTP host are validated for scheme, shape and address exactly as `base_url`, at save and at connect. A `record_link` must be on the base address's host. A `token_url` may be on another host (common for SMART servers); that host joins the connection's **credential origin** (§6.3).
@@ -165,7 +165,7 @@ type Connector interface {
 
 R4 (4.0.1) only. R5 or R4B servers are refused at test with `unreadable_data`. US Core or IPS profiles are not required; codings are read from every `coding` entry and the best system chosen in normalisation (§9).
 
-### 5.3 Havana's scanned archive (`document_archive`): to the document pipeline
+### 5.3 The pilot hospital's scanned archive (`document_archive`): to the document pipeline
 
 - **What it does:** lists files added since the cursor through a **JSON listing of files added since a time** (which the archive doesn't have yet: H2 adds it), downloads each new file of a supported type within the archive's rate limits (at most 10 downloads a minute), and hands it to the documents service as an upload by `svc:emr` for the hospital. That is all. It produces **no canonical record itself**.
 - **File types:** only `application/pdf`, `image/jpeg`, `image/png` and `image/tiff` (what the document pipeline reads) are handed on. Word-processor files, spreadsheets and plain text are skipped and counted (`skipped_type`, by MIME type only); they are listed in the connection's health as a count, never by name.
@@ -174,12 +174,12 @@ R4 (4.0.1) only. R5 or R4B servers are refused at test with `unreadable_data`. U
 - **Patient identity:** the archive has no patient id. The file name is **never** used to match a patient automatically.
 - **Record link:** none (the archive has no patient page). Alerts from documents carry `emr_link: null` and evidence naming the document date.
 - **Freshness:** archive documents are mostly historical. A value whose `effective` time is older than the freshness window (§11.4) is stored but raises no alert.
-- **Changes the archive needs (H2: our team's work, with Havana's agreement because it is live there):** a JSON listing of files added since a time, with a stable cursor; a per-integration API key that is read-only, scoped to listing and downloading, separate from the deployment-wide service key, and recorded in its audit log as its own actor; a listing of removed files (today deletions leave no trace).
+- **Changes the archive needs (H2: our team's work, with the pilot hospital's agreement because it is live there):** a JSON listing of files added since a time, with a stable cursor; a per-integration API key that is read-only, scoped to listing and downloading, separate from the deployment-wide service key, and recorded in its audit log as its own actor; a listing of removed files (today deletions leave no trace).
 - **Depends on:** H2, the documents service, document pipeline phase 1, and its clinical sign-off. Until then, this connector type is not offered.
 
 ### 5.4 Scheduled file export (`file_export`, format `mhai_csv_v1`)
 
-For a hospital whose lab, pharmacy or ward system can export files but offers no API (the likely Havana route for timely alerts, H1).
+For a hospital whose lab, pharmacy or ward system can export files but offers no API (the pilot hospital's likely route for timely alerts, H1).
 
 - **Transport:** SFTP pull from a folder the hospital exposes (`folder`, host from the base address, key auth with `access_key`). The host key's fingerprint is a setting the platform admin types from what the hospital's IT gave out of band (`host_key_fingerprint`); the connector refuses any other key, at test and on every connection. It is never learned from the first connection. Files are moved to `processed/` after a successful load, never deleted by us.
 - **Format `mhai_csv_v1`:** one file per kind (`patients`, `encounters`, `results`, `vitals`, `medications`), UTF-8, RFC 4180, a header row, fixed columns (for example `results`: `source_result_id, source_patient_id, collected_at, resulted_at, status, local_code, local_name, value, unit, ref_low, ref_high, ref_text, flag`). ISO 8601 times with offset; a time without an offset is refused, not guessed (§9.3). We publish the format and a synthetic sample file; the hospital's IT maps their export to it.
@@ -327,11 +327,11 @@ A platform report of unmapped codes per connection (counts, codes and display te
 - **The search is core's, not the worker's.** The document review screen is served by core (document pipeline design §5). When the reviewer looks for the patient, core calls `emr_patient_candidates(review_id, query)`, a `SECURITY DEFINER` function, `EXECUTE` for `mhai_gateway` only, which checks the caller holds `documents.review` and the review is open and theirs, and returns **at most 10** candidates (`id`, `display_name`, `mrn`, age, sex, sources) for a query of an exact MRN, or a name of at least 3 characters together with a birth year. No listing, no wildcard, no paging. Each search is audited (`emr.patient_searched`: `review_id`, query kind, result count; never the query text). The worker (`mhai_worker`) has **no** grant on `emr.patients`; it never sees the patient index.
 - *(Amended 14 Nov, ADR 0016: the route is `POST /review/documents/{id}/patient`, to match the other review routes; same function, same checks. Documents service design §10, D16.)*
 - **Who creates a patient:** the reviewer, through core: `POST /documents/reviews/{id}/patient` (`documents.review`, two-step session) calls `emr_create_document_patient(review_id, display_name, mrn, birth_date, sex)`, a core-owned `SECURITY DEFINER` function (`EXECUTE` for `mhai_gateway` only). It checks the review is open and the caller's, refuses an MRN that already belongs to a patient of the hospital (the reviewer must pick that one, or propose a match, §10.2), creates the patient with `origin = document`, records it on the review, and writes `emr.patient_created` (`patient_id`, `document_id`, `review_id`; no name) in the same transaction.
-- **Fields:** `display_name` (required, as written on the document), `mrn` (optional: Havana's archive has none), `birth_date` (optional), `sex` (required, `unknown` allowed).
+- **Fields:** `display_name` (required, as written on the document), `mrn` (optional: the pilot hospital's archive has none), `birth_date` (optional), `sex` (required, `unknown` allowed).
 - **The patient on the records:** `finalise_document` writes raw records carrying the `patient_id` the review recorded (picked or created). The normaliser accepts it only if that patient is in the record's hospital and `active`.
 - **Rejected values go back to review.** If the normaliser rejects a document raw record (a value or unit it can't parse, a time it can't read, a patient no longer active, a code outside the tables), it does not only count it: it sends an id-only `emr.v1.<hid>.signal` (`document_rejected`, `raw_id`, reason code), and core **reopens the document's review** (`needs_changes`, with the reason code per field) so a person corrects or removes the value. The other values of the document stay pending until the review is finished again, so a document never enters the record half-normalised. A value that is merely unmapped (`standardised = false`) is not rejected; it goes in as "Not standardised" (§9.1).
 - **No MRN in the contract:** `AlertPatientOut.mrn` becomes `string | null` (§16.4). mhai-web shows "No MRN recorded". This is a type change for mhai-web, made in PR 10, and live document-sourced alerts wait for it.
-- **Linking later, safely:** when a structured source arrives (Havana's export, PR 11), document patients without an MRN are never linked by name. The reviewer, or a hospital admin, proposes a link from the "Possible duplicate patients" list (§10.2), with a search by name and birth date shown to the person; a person confirms; the document history then moves to the structured patient by `merge_id`, and rules see it from then on.
+- **Linking later, safely:** when a structured source arrives (the pilot hospital's export, PR 11), document patients without an MRN are never linked by name. The reviewer, or a hospital admin, proposes a link from the "Possible duplicate patients" list (§10.2), with a search by name and birth date shown to the person; a person confirms; the document history then moves to the structured patient by `merge_id`, and rules see it from then on.
 
 ### 10.4 What the index is not
 
@@ -814,30 +814,30 @@ Each migration is additive, has its Down, hands every object to `mhai_migrate`, 
 | 8b | **The finding consumer:** `core_emr`; routing, dedup, quiet hours, the info cap, grouped mode; amended and withdrawn alerts; signals (breaker, matches, rule set) | 8a | A19, A30, A32 (hospital) |
 | 9 | **Retention, exclusion purge and Usage:** migration 5; the retention sweep; the exclusion purge job; the `alerts` block of `/hospital/usage` under the small-group rule (when that route is built) | 8b | A34 |
 | 10 | **mhai-web (separate repo):** switch Plan 13 screens to live; map `validation_failed`; show `sources_status`, `arrived_late`, `preliminary`, `amended`, `withdrawn`, grouped mode, nullable MRN; the possible-duplicates and exclusion screens; BFF-side credential sealing; audit kinds for the new actions | 8b | |
-| 11 | **Havana, structured (`file_export`, `mhai_csv_v1`):** the format document and synthetic sample; the SFTP connector with the typed host key; staleness by expected interval | 5, H1, H7 | A7, A10 |
-| 12 | **Havana, scanned archive (`document_archive`):** the connector to the documents service; MIME filtering; file names kept out of telemetry | documents service, document pipeline phase 1, H2 | A26, A36 |
+| 11 | **The pilot hospital, structured (`file_export`, `mhai_csv_v1`):** the format document and synthetic sample; the SFTP connector with the typed host key; staleness by expected interval | 5, H1, H7 | A7, A10 |
+| 12 | **The pilot hospital, scanned archive (`document_archive`):** the connector to the documents service; MIME filtering; file names kept out of telemetry | documents service, document pipeline phase 1, H2 | A26, A36 |
 | 13 | **`pids`:** core's check and the token claim for patient-scoped questions | 5 | |
 
-PRs 2–8b are the backend for the screens mhai-web has built, proven on synthetic FHIR data. Live use needs every gate in §17.6. PR 11 is the earliest point at which Havana's real data could flow.
+PRs 2–8b are the backend for the screens mhai-web has built, proven on synthetic FHIR data. Live use needs every gate in §17.6. PR 11 is the earliest point at which the pilot hospital's real data could flow.
 
 ## 20. What's needed from people
 
 | # | Who | What | Blocks |
 |---|---|---|---|
-| H1 | Product owner with Havana | A **structured data source** for labs (first), vitals and medications: which system holds them, whether it can export files or speak FHIR, how often it exports, and a synthetic or de-identified sample of its export layout | PR 11; real alerts for Havana |
-| H2 | Our team (archive owners), **with Havana's agreement** (the archive is live there) | The archive's JSON "files added since" listing with a stable cursor, a per-integration read-only key, and a removed-files listing (§5.3) | PR 12 |
+| H1 | Product owner with the pilot hospital | A **structured data source** for labs (first), vitals and medications: which system holds them, whether it can export files or speak FHIR, how often it exports, and a synthetic or de-identified sample of its export layout | PR 11; real alerts for the pilot hospital |
+| H2 | Our team (archive owners), **with the pilot hospital's agreement** (the archive is live there) | The archive's JSON "files added since" listing with a stable cursor, a per-integration read-only key, and a removed-files listing (§5.3) | PR 12 |
 | H3 | Product owner, ops | Choose and provision the **managed secret store** (AWS or GCP, in-region) and the emr service's cloud identity | PR 3 in production |
 | H4 | **A named clinical lead** (to be named if not yet), plus a second clinician | **Rule set v1:** critical and urgent thresholds with references, freshness windows, quiet hours, NEWS2 use (consciousness level, supplemental oxygen, Scale 2), likely causes and evidence; the breaker thresholds (source multiple and floor, hospital grouped-mode count), the wording of the "source paused" notice, and whether a hospital is asked to check a paused source's criticals by phone; review of the code and unit maps; the shadow review of v1's critical findings; sign-off for names and MRNs in alerts | PR 7 activation; live use |
 | H5 | Privacy lead and a Nigerian data protection lawyer | **DPIA** (including queue breadth), the processing agreement addendum, the hospital's written confirmation that its critical-result call process stays primary, the NDPA basis (§17.7), data location, retention values | Any real data |
 | H6 | Product owner | **Licences:** LOINC (free, terms to accept), WHO ATC/DDD (needs a licence for commercial use), SNOMED CT and ICD-10 for later | PR 5 |
-| H7 | Havana IT | The **network path** (public HTTPS or SFTP with our egress address allow-listed, or a site VPN with declared CIDRs), the SFTP host key fingerprint, and a contact for credential rotation | PR 11 |
+| H7 | The pilot hospital's IT | The **network path** (public HTTPS or SFTP with our egress address allow-listed, or a site VPN with declared CIDRs), the SFTP host key fingerprint, and a contact for credential rotation | PR 11 |
 | H8 | Product owner | Answers to §21 | The plan |
 | H9 | Product owner, ops | **An on-call owner** for the operator alerts the design relies on: stale feeds, rules errors, breaker pages, link conflicts, `reconciled_late` | Live use |
 
 ## 21. Open questions, with recommendations
 
-1. **What does "Havana first" mean, given Havana's system holds scanned documents only?**
-   *Recommendation:* build the pipeline on FHIR R4 with synthetic data first (PRs 2–8b), ask Havana now for a structured lab export (H1) and connect it through `file_export` (PR 11) as Havana's first live source. The scanned archive route (PR 12) follows document pipeline phase 1 and H2; it is useful for history, not for timely alerts.
+1. **What does "the pilot hospital first" mean, given the pilot hospital's system holds scanned documents only?**
+   *Recommendation:* build the pipeline on FHIR R4 with synthetic data first (PRs 2–8b), ask the pilot hospital now for a structured lab export (H1) and connect it through `file_export` (PR 11) as the pilot hospital's first live source. The scanned archive route (PR 12) follows document pipeline phase 1 and H2; it is useful for history, not for timely alerts.
 2. **Should the source lab's own critical flag raise a critical alert when MHAI's rule doesn't?**
    *Recommendation: yes.* The lab's critical flag is the hospital's own critical-result policy, and it works even for unmapped codes. MHAI's thresholds add to it, never silence it. The per-source breaker (§12.4) covers a source that starts flagging everything.
 3. **May a likely cause carry the confidence word "high"?**
@@ -879,7 +879,7 @@ The review found no Critical issue, 10 Important and 18 Minor. All are taken; no
 | I8 out-of-date notice | §15.3, §16.4, §17.6 | `sources_status` always sent; mhai-web PR 10 gates live use |
 | I9 merges | §3.2, §10.2, §12.6, A31 | nothing merges automatically; a hospital admin confirms; core writes the audit |
 | I10 exclusion | §10.6, §14.2, E21, A34 | withdraw at once, purge within 24 hours, legal hold respected |
-| M1 Havana facts | §1.1, §5.3, H2, A36 | file names are PHI; MIME filter; JSON listing added to H2 |
+| M1 pilot hospital facts | §1.1, §5.3, H2, A36 | file names are PHI; MIME filter; JSON listing added to H2 |
 | M2 dismissal note | §12.5 | stored unmasked under RLS, never on the chain or in logs (masking would tie dismissal to the pipeline) |
 | M3 `alerts.read` | §12.6 | records the alert ids served |
 | M4 retention | §14.2 | alerts drop `patient_id` at 13 months; backups; removal clears the `public` alert tables |

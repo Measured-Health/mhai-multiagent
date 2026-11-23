@@ -10,7 +10,7 @@
 
 ## Context
 
-Three pieces of work wait on one missing service (design §1): clearance letters can't be uploaded outside the demo (core keeps a 64 KiB body limit, NATS a 1 MB payload); document pipeline phase 1 needs uploads, a malware scan, a sandboxed renderer and review; and EMR PR 12 (Havana's scanned archive) needs somewhere to hand each scan.
+Three pieces of work wait on one missing service (design §1): clearance letters can't be uploaded outside the demo (core keeps a 64 KiB body limit, NATS a 1 MB payload); document pipeline phase 1 needs uploads, a malware scan, a sandboxed renderer and review; and EMR PR 12 (the pilot hospital's scanned archive) needs somewhere to hand each scan.
 
 The pipeline design named "the documents service" but left it unspecified, and let the pipeline worker read page images from the bucket with a prefix check. Four forces decide the shape:
 

@@ -382,7 +382,7 @@ type user struct {
 func seedUser(t *testing.T, hospital uuid.UUID, active bool, roles ...string) user {
 	t.Helper()
 	ctx := context.Background()
-	email := "synthetic.user." + uniq() + "@havana.example"
+	email := "synthetic.user." + uniq() + "@pilot-hospital.example"
 	var hid any
 	if hospital != uuid.Nil {
 		hid = hospital

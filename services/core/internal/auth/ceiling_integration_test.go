@@ -171,7 +171,7 @@ func TestLoginCeilingRightPasswordSameAsWrong(t *testing.T) {
 	}
 	sameReply(t, right, wrong)
 
-	ghost := "synthetic.nobody." + uniq() + "@havana.example"
+	ghost := "synthetic.nobody." + uniq() + "@pilot-hospital.example"
 	e.fillCeiling(t, ghost)
 	g := e.login(t, ghost, testPassword, newIP())
 	sameReply(t, right, g)
@@ -186,7 +186,7 @@ func TestLoginCeilingTimingSame(t *testing.T) {
 	}
 	e := newEnv(t)
 	u := seedUser(t, seedHospital(t, hospitalOpts{}), true, "clinician")
-	ghost := "synthetic.nobody." + uniq() + "@havana.example"
+	ghost := "synthetic.nobody." + uniq() + "@pilot-hospital.example"
 	e.fillCeiling(t, u.email)
 	e.fillCeiling(t, ghost)
 	login := func(email, pw, dev string) {

@@ -68,7 +68,7 @@ func TestModelPolicyBodyRules(t *testing.T) {
 		"old free shape":            `{"cloud_provider":"openai","agreement_ref":"SYNTH-1","monthly_token_budget":5}`,
 		"patient pseudonym":         `{"cloud_provider":"openai","agreement_ref":"P-AB12CD34","monthly_token_budget":5}`,
 		"a person's name":           `{"cloud_provider":"openai","agreement_ref":"ADAEZE-OKAFOR","monthly_token_budget":5}`,
-		"an MRN shape":              `{"cloud_provider":"openai","agreement_ref":"HAV-000123","monthly_token_budget":5}`,
+		"an MRN shape":              `{"cloud_provider":"openai","agreement_ref":"PLT-000123","monthly_token_budget":5}`,
 		"a name and a number":       `{"cloud_provider":"openai","agreement_ref":"OKAFOR-2026-01","monthly_token_budget":5}`,
 		"budget negative":           `{"cloud_provider":null,"monthly_token_budget":-1}`,
 		"budget too big":            `{"cloud_provider":null,"monthly_token_budget":1000000001}`,
@@ -134,7 +134,7 @@ func TestAgreementRefShape(t *testing.T) {
 			t.Errorf("refused %q", ok)
 		}
 	}
-	for _, bad := range []string{"", "P-AB12CD34", "AGR-P-AB12CD34", "ADAEZE-OKAFOR", "HAV-000123", "OKAFOR-2026-01",
+	for _, bad := range []string{"", "P-AB12CD34", "AGR-P-AB12CD34", "ADAEZE-OKAFOR", "PLT-000123", "OKAFOR-2026-01",
 		"AGR-2026-1", "AGR-26-01", "AGR-2026-123456789", "agr-2026-01", "AGR-2026-01 ", "DEMO-SYNTHETIC-2", "SYNTH-1",
 		"AGR-2026-01\n", "\uff21GR-2026-01"} {
 		if AgreementRefOK(bad) {

@@ -8,14 +8,14 @@ import (
 )
 
 func TestNormaliseEmail(t *testing.T) {
-	got := NormaliseEmail(" Grace.Nwosu@Havana.example ")
-	if got != "grace.nwosu@havana.example" {
+	got := NormaliseEmail(" Grace.Nwosu@Pilot-Hospital.example ")
+	if got != "grace.nwosu@pilot-hospital.example" {
 		t.Fatalf("got %q", got)
 	}
 }
 
 func TestPlatformRoleNeedsNoHospital(t *testing.T) {
-	if err := ValidateRoles([]string{"platform_admin"}, "HAV"); !errors.Is(err, ErrRoleHospital) {
+	if err := ValidateRoles([]string{"platform_admin"}, "PLT"); !errors.Is(err, ErrRoleHospital) {
 		t.Fatalf("platform_admin with hospital: %v", err)
 	}
 	if err := ValidateRoles([]string{"clinician"}, ""); !errors.Is(err, ErrRoleHospital) {
@@ -27,13 +27,13 @@ func TestPlatformRoleNeedsNoHospital(t *testing.T) {
 	if err := ValidateRoles([]string{"auditor"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateRoles([]string{"clinician", "hospital_admin"}, "HAV"); err != nil {
+	if err := ValidateRoles([]string{"clinician", "hospital_admin"}, "PLT"); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestRolesCombineOnlyClinical(t *testing.T) {
-	for _, hosp := range []string{"", "HAV"} {
+	for _, hosp := range []string{"", "PLT"} {
 		if err := ValidateRoles([]string{"clinician", "platform_admin"}, hosp); err == nil {
 			t.Fatalf("clinician+platform_admin accepted (hospital %q)", hosp)
 		}
@@ -45,7 +45,7 @@ func TestRolesCombineOnlyClinical(t *testing.T) {
 
 func TestValidateRolesRejectsUnknownAndEmpty(t *testing.T) {
 	for _, r := range [][]string{nil, {}, {"root"}, {"admin"}, {"clinician", "clinician"}} {
-		if err := ValidateRoles(r, "HAV"); err == nil {
+		if err := ValidateRoles(r, "PLT"); err == nil {
 			t.Errorf("roles %v accepted", r)
 		}
 	}
@@ -68,11 +68,11 @@ func TestClinicalRolesAreAuthzs(t *testing.T) {
 // account has no two-step and no grantor, so the database would refuse it;
 // the CLI says how to grant it instead.
 func TestAnalystNotAtCreation(t *testing.T) {
-	err := ValidateNewUser(NewUser{Email: "grace@havana.example", Name: "Grace", Roles: []string{"clinician", "analyst"}, HospitalShortCode: "HAV"})
+	err := ValidateNewUser(NewUser{Email: "grace@pilot-hospital.example", Name: "Grace", Roles: []string{"clinician", "analyst"}, HospitalShortCode: "PLT"})
 	if !errors.Is(err, ErrAnalystAtCreation) {
 		t.Fatalf("clinician+analyst at creation: %v", err)
 	}
-	if err := ValidateNewUser(NewUser{Email: "grace@havana.example", Name: "Grace", Roles: []string{"clinician"}, HospitalShortCode: "HAV"}); err != nil {
+	if err := ValidateNewUser(NewUser{Email: "grace@pilot-hospital.example", Name: "Grace", Roles: []string{"clinician"}, HospitalShortCode: "PLT"}); err != nil {
 		t.Fatal(err)
 	}
 }

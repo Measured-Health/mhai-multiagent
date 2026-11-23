@@ -2,7 +2,7 @@
 
 **Status:** version 1, published 14 Nov 2026 (EMR PR 11). The format a hospital's lab, ward or pharmacy system exports for MHAI to read when it offers no FHIR API (EMR design §5.4). The hospital's IT maps their export to it. Read by the `file_export` connector (`services/emr/internal/connector/fileexport/`).
 
-**Not confirmed with any hospital yet.** H1 (what Havana can export, and a synthetic or de-identified layout sample) is open. This version is built to the design's assumptions; if Havana's export differs, the change is a new version of this document and the parser, never a looser parser.
+**Not confirmed with any hospital yet.** H1 (what the pilot hospital can export, and a synthetic or de-identified layout sample) is open. This version is built to the design's assumptions; if the pilot hospital's export differs, the change is a new version of this document and the parser, never a looser parser.
 
 Synthetic examples of every file are in `services/emr/internal/connector/fileexport/testdata/sample/`.
 

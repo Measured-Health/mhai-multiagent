@@ -457,7 +457,7 @@ func TestGaugeConvergesAcrossCopies(t *testing.T) {
 	// clears it.
 	u := uuid.New()
 	if _, err := super.Exec(ctx, `INSERT INTO users (id, email, password_hash, display_name, full_name)
-		VALUES ($1, $2, 'synthetic-hash', 'Synthetic Auditor', 'Synthetic Fullname')`, u, "synthetic."+u.String()[:8]+"@havana.example"); err != nil {
+		VALUES ($1, $2, 'synthetic-hash', 'Synthetic Auditor', 'Synthetic Fullname')`, u, "synthetic."+u.String()[:8]+"@pilot-hospital.example"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := super.Exec(ctx, `UPDATE audit_verify_runs SET outcome_note = 'synthetic', outcome_by = $2, outcome_at = now(),

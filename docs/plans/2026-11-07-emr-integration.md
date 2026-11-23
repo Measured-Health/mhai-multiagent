@@ -34,8 +34,8 @@ Every PR leaves `main` working, with EMR off: no connection can be saved, no emr
 | **8b: finding consumer** | 35–38 | migration 00031 (departure 35), `core_emr`, second hits, amended and withdrawn alerts, the breaker signal, core's own dead letters (grouped mode, the info cap, `resume` and the Failed jobs view wait: departure 40) | **built** (14 Nov) | PR 8a |
 | **9: retention** | 39–41 | migration 00032 (departure 43), the purge and retention loop, legal hold and hospital removal hooks, the operator CLI, the Usage counts | **built** (14 Nov; the sweep off until H5, departure 47) | H5 confirms the values before live use |
 | **10: mhai-web** | 42 (core side) | core accepts BFF-sealed credentials; the mhai-web PR itself is in the other repository (handoff list below) | **now** (core side) | mhai-web PR after 8b |
-| **11: Havana structured** | 43–44 | migration 00043 (departure 62), `mhai_csv_v1`, the SFTP connector, staleness by expected interval | **built** (14 Nov, before H1 on the product owner's go-ahead: departure 63) | live: **H1** (the format confirmed against Havana's export) and **H7** |
-| **12: Havana archive** | 45–47 | migration 00026, the reviewer's patient search and creation, the archive connector, rejected values back to review | **not yet** | **H2**, the documents service, document pipeline phase 1 and its clinical sign-off |
+| **11: pilot hospital, structured** | 43–44 | migration 00043 (departure 62), `mhai_csv_v1`, the SFTP connector, staleness by expected interval | **built** (14 Nov, before H1 on the product owner's go-ahead: departure 63) | live: **H1** (the format confirmed against the pilot hospital's export) and **H7** |
+| **12: pilot hospital archive** | 45–47 | migration 00026, the reviewer's patient search and creation, the archive connector, rejected values back to review | **not yet** | **H2**, the documents service, document pipeline phase 1 and its clinical sign-off |
 | **13: `pids`** | 48 | migration 00033 (departure 56), core's patient check, the token claim and the job's patient | **built** (14 Nov) | PR 5 |
 
 PRs 4 and 5 can run in parallel after PR 3 (PR 4 needs only PR 2). The migrations are linear: 00021 (PR 3), 00022 (PR 5), 00023 (PR 7), 00024 (PR 8a), 00025 (PR 9), 00026 (PR 12).
@@ -135,7 +135,7 @@ Plans 2, 3 and 4 and the cloud plan's constraints still hold: identity only from
 61. **The first poll after a switch-on waits for the allow-list** (live end-to-end run, 14 Nov). Core's `sync_now` (departure 33) made the connection due before the allow-list's next 15 s write, so egress-emr refused the poll, it was recorded `unreachable` and backed off. Before each poll the scheduler now calls `egress.Writer.Ensure`, the test's mechanism without a hold: if the last file (written within 30 s) lists the connection, it only waits until the proxy has had one reload (`ReloadWait`, 1.5 s) since it first appeared; otherwise it writes the file at once and waits the same. Nothing is added to the list: a connection is listed only as an enabled one, as every write lists it. A list that can't be written yet is not the source's failure: the poll is tried again after 15 s with no run row, no error row and no back-off, at most 4 times in a row; the fifth is recorded `unreachable` and backs off. A connection the list leaves out (an origin or port the proxy never opens, an undeclarable range) is `unreachable` at once and nothing is sent; a host or address the proxy refuses is `unreachable` with the back-off, as before.
 
 62. **PR 11's migration is 00043** (the reference library holds 00040 and 00041, Analysis PR 8 00042; built 14 Nov), merged after all three. It adds `emr.sync_state.last_file_at` (when the scheduler last loaded a new file, by the emr service's clock, never the file's own times) and replaces `emr_platform_health()` and `emr_sources_status()`: a switched-on `file_export` is `errors` / `behind` with no new file for longer than `expected_every_minutes` plus 50%, or ever, or when the interval isn't a whole number from 5 to 10080. No OpenAPI change: the type's fields reach mhai-web through `GET /platform/emr/connector-types`, which reads the shared table.
-63. **Built before H1, to the design's assumptions** (product owner, 14 Nov: go ahead with PRs 11–12; H1 and H7 still open). The format is ours and published (`docs/specs/formats/mhai_csv_v1.md`); the parser is strict, so an export that differs fails closed (refused or dead-lettered), never half-read. When H1 brings Havana's sample, a difference is a new format version, never a looser parser. The type is built (it may be named in `CORE_EMR_CONNECTOR_TYPES`, empty by default) but joins it only by a deploy change after H1 and H7.
+63. **Built before H1, to the design's assumptions** (product owner, 14 Nov: go ahead with PRs 11–12; H1 and H7 still open). The format is ours and published (`docs/specs/formats/mhai_csv_v1.md`); the parser is strict, so an export that differs fails closed (refused or dead-lettered), never half-read. When H1 brings the pilot hospital's sample, a difference is a new format version, never a looser parser. The type is built (it may be named in `CORE_EMR_CONNECTOR_TYPES`, empty by default) but joins it only by a deploy change after H1 and H7.
 64. **The format, where the design gave an example only:** `updated_at` on every kind (to order versions); `source_encounter_id` on results and vitals; `value_text` on results (a text result would otherwise be refused; not with `value`); vitals with the results' shape less the ranges; locations as columns of `encounters` (the design names five kinds and no location file); file names `<kind>-<UTC time>[-<n>].csv`, read in time then kind order, with `.part`, `.tmp` and dot files left alone as in progress; `.` as the only decimal point (no setting); ids up to 128 characters and MRNs up to 64, starting with a letter or digit; units as the sink keeps them (40 bytes, printable, no space, no formula start). A row's version is the SHA-256 of its length-prefixed cells, so an unchanged re-export is a no-op and a changed row a new version.
 65. **Dead letters, where the plan is silent.** A file whose shape is wrong (encoding, header, quoting, width, limits, an id missing or twice with different content) is refused whole, nothing of it stored, and moved to `rejected/`; a row whose values are wrong is kept as a rejected raw record (`unreadable_data`, provenance and no payload, never announced) and the rest of the file loads (design §15.1: a record, not the feed). Neither fails the run (no back-off, and a first sync can still catch up and go live); each run that kept one writes an `unreadable_data` error row, and the platform sees the connection as `errors` for 24 hours. A misnamed file and one that looks half-written (shorter than listed, or not ending a row) are left in place and reported the same way.
 66. **Files are moved, never deleted or overwritten.** `processed/` and `rejected/` are the hospital's to create; the test checks both. A name already taken there (a re-export under the same name) gets a suffix. A move that can't be made stops the run `unreadable_data` and leaves the file to be read again (its stored rows are no-ops).
@@ -798,7 +798,7 @@ Each task's first step writes its abuse-case tests (A-numbers are the design's, 
 
 **mhai-web PR 10 (other repository), the handoff list:** switch the Plan 13 screens to live; map `validation_failed`; show `sources_status`, `arrived_late`, `preliminary`, `amended`, `withdrawn`, grouped mode, nullable MRN ("No MRN recorded"); the possible-duplicates and exclusion screens; BFF-side sealing (Task 42's flow); the new audit kinds of §12.6; `JobTypes` gains `emr_normalise`, `emr_rules` (departure 12). Live use waits for it.
 
-### PR 11: Havana structured export (not before H1)
+### PR 11: the pilot hospital's structured export (not before H1)
 
 Built 14 Nov (PR 11): migration 00043, departures 62–72.
 
@@ -818,7 +818,7 @@ Built 14 Nov (PR 11): migration 00043, departures 62–72.
 
 - [ ] **Step 1–5:** `TestWrongHostKeyRefusedAtTestAndSync` (A29 SFTP), `TestProcessedMoveNotDelete`, `TestStaleByExpectedInterval`; implement; commit "Read scheduled file exports over SFTP with a pinned host key". The type joins `CORE_EMR_CONNECTOR_TYPES` only by a deploy change after H1 and H7.
 
-### PR 12: Havana scanned archive (not yet: H2, documents service, document pipeline phase 1)
+### PR 12: the pilot hospital's scanned archive (not yet: H2, documents service, document pipeline phase 1)
 
 ### Task 45: Migration 00026: the reviewer's patient search and creation
 
@@ -961,19 +961,19 @@ Tasks marked "now" in the PR table need nothing below. The rest wait as shown.
 
 | # | Who | What | Blocks in this plan |
 |---|---|---|---|
-| H1 | Product owner with Havana | A structured source for labs (then vitals, medications), export or FHIR, frequency, a synthetic or de-identified layout sample | PR 11 start; real alerts for Havana |
-| H2 | Our team with Havana's agreement | The archive's JSON "files added since" listing, a per-integration read-only key, a removed-files listing | PR 12 (Task 46) |
+| H1 | Product owner with the pilot hospital | A structured source for labs (then vitals, medications), export or FHIR, frequency, a synthetic or de-identified layout sample | PR 11 start; real alerts for the pilot hospital |
+| H2 | Our team with the pilot hospital's agreement | The archive's JSON "files added since" listing, a per-integration read-only key, a removed-files listing | PR 12 (Task 46) |
 | H3 | Product owner, ops | Choose and provision the managed secret store (AWS or GCP, in-region) and the emr service's identity | Task 12; any production deployment of PR 3 |
 | H4 | Named clinical lead and a second clinician | Rule set v1 (thresholds with references, windows, quiet hours, NEWS2, causes), breaker and grouped-mode values, the paused-source wording and phone check, map review, the shadow review, names and MRNs in alerts; also the clinical reviewers for `CODEOWNERS` | Task 30; activation; live use |
 | H5 | Privacy lead and a Nigerian data protection lawyer | DPIA (queue breadth), processing agreement addendum, written confirmation that the hospital's call process stays primary, NDPA basis, data location, retention values (Task 39's constants) | Any real data |
 | H6 | Product owner | Licences: LOINC terms, WHO ATC/DDD | Task 21; any real data |
-| H7 | Havana IT | Network path, SFTP host key fingerprint, rotation contact | PR 11 live |
+| H7 | The pilot hospital's IT | Network path, SFTP host key fingerprint, rotation contact | PR 11 live |
 | H8 | Product owner | §21 answers | Done: approved as recommended, 7 Nov |
 | H9 | Product owner, ops | On-call owner for stale feeds, rule errors, breaker pages, link conflicts, `reconciled_late`, grouped mode | Live use |
 
 ## Decisions (approved 7 Nov 2026, all as recommended)
 
-From design §21, unchanged: FHIR R4 first on synthetic data, Havana through `file_export` when H1 gives a source, the archive after document pipeline phase 1; the lab's critical flag alerts even when MHAI's rule doesn't; no `high` confidence in v1; exclusion as §10.6; `critical_urgent` defaults (`critical` for vitals), info capped at 20 an hour, critical and urgent never capped; ATC only; the §14.2 retention values; pinned CA and declared CIDRs added when a hospital needs them; a separate Go module with `services/gokit/`; BFF-side sealing as a live gate; no field encryption in v1; no email or SMS from MHAI in v1; hospital admins confirm merges.
+From design §21, unchanged: FHIR R4 first on synthetic data, the pilot hospital through `file_export` when H1 gives a source, the archive after document pipeline phase 1; the lab's critical flag alerts even when MHAI's rule doesn't; no `high` confidence in v1; exclusion as §10.6; `critical_urgent` defaults (`critical` for vitals), info capped at 20 an hour, critical and urgent never capped; ATC only; the §14.2 retention values; pinned CA and declared CIDRs added when a hospital needs them; a separate Go module with `services/gokit/`; BFF-side sealing as a live gate; no field encryption in v1; no email or SMS from MHAI in v1; hospital admins confirm merges.
 
 ## Out of this plan
 

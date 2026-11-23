@@ -93,7 +93,7 @@ func exec(t *testing.T, q string, args ...any) {
 func hospital(t *testing.T) uuid.UUID {
 	t.Helper()
 	h := uuid.New()
-	exec(t, `INSERT INTO hospitals (id, name, short_code, status, time_zone) VALUES ($1, 'Synthetic Hospital', $2, 'active', 'America/Havana')`,
+	exec(t, `INSERT INTO hospitals (id, name, short_code, status, time_zone) VALUES ($1, 'Synthetic Hospital', $2, 'active', 'America/New_York')`,
 		h, "PL"+h.String()[:6])
 	return h
 }

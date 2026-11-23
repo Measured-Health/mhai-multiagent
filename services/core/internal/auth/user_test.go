@@ -77,18 +77,18 @@ func TestLockoutKey(t *testing.T) {
 		}
 		return k
 	}
-	a := key(s, " Grace.Nwosu@Havana.example ", "198.51.100.1")
-	b := key(s, "grace.nwosu@havana.example", "198.51.100.1")
-	c := key(s, "grace.nwosu@havana.example", "198.51.100.2")
-	d := key(other, "grace.nwosu@havana.example", "198.51.100.1")
-	if a != b || a == c || a == d || len(a) != 64 || strings.Contains(a, "havana") {
+	a := key(s, " Grace.Nwosu@Pilot-Hospital.example ", "198.51.100.1")
+	b := key(s, "grace.nwosu@pilot-hospital.example", "198.51.100.1")
+	c := key(s, "grace.nwosu@pilot-hospital.example", "198.51.100.2")
+	d := key(other, "grace.nwosu@pilot-hospital.example", "198.51.100.1")
+	if a != b || a == c || a == d || len(a) != 64 || strings.Contains(a, "pilot-hospital") {
 		t.Fatalf("keys %s %s %s %s", a, b, c, d)
 	}
-	bare := sha256.Sum256([]byte("grace.nwosu@havana.example|198.51.100.1"))
+	bare := sha256.Sum256([]byte("grace.nwosu@pilot-hospital.example|198.51.100.1"))
 	if a == hex.EncodeToString(bare[:]) {
 		t.Fatal("lockout key is a bare sha256")
 	}
-	ceil, err := s.CeilingKey("Grace.Nwosu@Havana.example")
+	ceil, err := s.CeilingKey("Grace.Nwosu@Pilot-Hospital.example")
 	if err != nil || ceil == a || len(ceil) != 64 {
 		t.Fatalf("ceiling key %s %v", ceil, err)
 	}
