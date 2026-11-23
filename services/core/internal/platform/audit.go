@@ -75,6 +75,9 @@ type Deps struct {
 	// (CORE_CLOUD_PROVIDERS): a policy may name only one of these (409
 	// otherwise). Empty: none.
 	CloudProviders []string
+	// OwnModelAllowed is CORE_OWN_MODEL_ALLOWED: the deployment serves our
+	// own model, so a policy may turn own_model on (422 otherwise).
+	OwnModelAllowed bool
 	// EMREnabled is CORE_EMR_ENABLED: off, the connection writes answer
 	// 503 not_ready and the reads answer empty.
 	EMREnabled bool

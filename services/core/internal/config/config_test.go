@@ -16,7 +16,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"ACCESS_KEY_PATH", "REQUEST_KEY_PATH", "MFA_ENCRYPTION_KEY", "BFF_SERVICE_KEYS", "BREACHED_LIST_PATH", "CORE_API_DOCS",
 		"NATS_TLS_CA_PATH", "NATS_TLS_CERT_PATH", "NATS_TLS_KEY_PATH", "NATS_JS_REPLICAS", "JOBS_PIPELINE_MAX_ACK_PENDING",
 		"INTELLIGENCE_QUERY_CAP", "CORE_HTTP_API", "CORE_NATS_API_CONCURRENCY", "CORE_ALLOW_SINGLE_NODE",
-		"CORE_CLOUD_PROVIDERS", "CORE_EMR_ENABLED", "CORE_EMR_SEAL_PUBLIC_KEY_PATH", "CORE_EMR_CONNECTOR_TYPES",
+		"CORE_CLOUD_PROVIDERS", "CORE_OWN_MODEL_ALLOWED", "CORE_EMR_ENABLED", "CORE_EMR_SEAL_PUBLIC_KEY_PATH", "CORE_EMR_CONNECTOR_TYPES",
 		"CORE_IDEMPOTENCY_HMAC_KEY_PATH", "CORE_EMR_ALLOW_NULL_MRN", "CORE_EMR_RETENTION_SWEEP",
 		"CORE_PATIENT_LOOKUP_PER_MINUTE", "CORE_PATIENT_LOOKUP_PER_DAY", "CORE_PATIENT_LOOKUP_HOSPITAL_PER_DAY",
 		"ANALYSIS_REF_HMAC_KEY_FILE", "ANALYSIS_REF_ENC_KEY_FILE", "ANALYSIS_DRILL_KEY_FILE", "ANALYSIS_NOTE_KEY_FILE", "ANALYSIS_NAMED_IDENTITY",
@@ -774,6 +774,34 @@ func TestConfigEMRAllowNullMRN(t *testing.T) {
 		}
 		setEnv(t, m)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORE_EMR_ALLOW_NULL_MRN") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+}
+
+// CORE_OWN_MODEL_ALLOWED is off unless it says true (deploy/README.md,
+// "Answering with our own model only"); anything else stops the service,
+// naming the variable only.
+func TestConfigOwnModelAllowed(t *testing.T) {
+	base := map[string]string{"MFA_ENCRYPTION_KEY": goodKey, "BFF_SERVICE_KEYS": goodKey}
+	for raw, want := range map[string]bool{"": false, "false": false, " FALSE ": false, " TRUE ": true, "true": true} {
+		m := map[string]string{"CORE_OWN_MODEL_ALLOWED": raw}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		if c, err := Load(); err != nil || c.OwnModelAllowed != want {
+			t.Errorf("%q: %v %v", raw, c.OwnModelAllowed, err)
+		}
+	}
+	for _, bad := range []string{"1", "yes", "on", "gemma"} {
+		m := map[string]string{"CORE_OWN_MODEL_ALLOWED": bad}
+		for k, v := range base {
+			m[k] = v
+		}
+		setEnv(t, m)
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "CORE_OWN_MODEL_ALLOWED") || strings.Contains(err.Error(), "gemma") {
 			t.Errorf("%q: %v", bad, err)
 		}
 	}

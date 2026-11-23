@@ -479,6 +479,12 @@ func TestModelPolicyOwnModelSwitch(t *testing.T) {
 		}
 	}
 	ownOf("default", get(t, policyPath(h), tok), false)
+	// A deployment without CORE_OWN_MODEL_ALLOWED (the emrOff server): on
+	// is 422 and nothing is written.
+	if r := send(t, emrOff, http.MethodPut, policyPath(h), tok, body("", "", true)); r.code != 422 {
+		t.Errorf("own model not allowed: %d %s", r.code, r.raw)
+	}
+	ownOf("not allowed, still off", get(t, policyPath(h), tok), false)
 	ownOf("on", putPolicy(t, tok, h, body("", "", true)), true)
 	ownOf("GET on", get(t, policyPath(h), tok), true)
 	ownOf("kept", putPolicy(t, tok, h, body("", "", nil)), true)

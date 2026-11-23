@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Answering with our own model only, no cloud provider.** The live site can
+  answer with our own GPU model and no cloud key. `enable-pilot.sh --provider
+  none` (only with `GPU_MODEL_ENABLED=true`, refused while a cloud provider is
+  set) makes the pipeline's NKey, database login and an empty placeholder for
+  the cloud key mount, writes `PIPELINE_ENABLED=true` and
+  `CORE_OWN_MODEL_ALLOWED=true`, starts the pipeline with no egress proxy, and
+  with `--short-code` switches that hospital to our own model. A cloud route
+  then escalates as unconfigured (nothing sent); the cloud stays optional.
+  "Deploy backend demo" runs the new `pilot/pipeline.sh` after the gpu-model
+  switch: with `PIPELINE_ENABLED=true` it checks the worker's files and
+  settings, pulls the image, starts or refreshes the pipeline (and the egress
+  proxy with a provider) and waits for it, failing the deploy otherwise;
+  without it, nothing changes. Core's new allow-list `CORE_OWN_MODEL_ALLOWED`
+  (default false, on core and `core-cli`): turning a hospital's `own_model` on
+  without it is 422 on `PUT /platform/hospitals/{id}/model-policy` and refused
+  by `core hospitals model-policy set`; switching off is always allowed.
+  deploy/README.md, "Answering with our own model only".
 - **Our own model on the GPU, off for every hospital.** The GPU server can
   serve our own fine-tuned answer model, started by the deploy (not by hand):
   a `gpu-model` compose service (profile `gpu-model`; llama.cpp's official

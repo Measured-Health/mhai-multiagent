@@ -20,6 +20,10 @@ clinical app ─BFF─> NATS ─> core ── JOBS ──> pipeline ──backen
                                             verification stay local)
 ```
 
+**No cloud?** `enable-pilot.sh --provider none` runs the same pipeline with
+our own model on the GPU as its only route, with no key and no egress proxy
+(deploy/README.md, "Answering with our own model only").
+
 ## What runs, and what it costs the host
 
 | Service | Profile | Memory cap | Notes |
@@ -117,7 +121,9 @@ Each step, in order:
    argument or printed;
 3. writes the settings to `.env`: `PILOT_CLOUD_PROVIDER`, the provider's
    `PILOT_<P>_MODEL`, `_KEY_FILE`, `_ZDR_REF`, `PIPELINE_IMAGE`,
-   `CORE_CLOUD_PROVIDERS` and `COMPOSE_PROFILES=cloud,pilot`;
+   `CORE_CLOUD_PROVIDERS`, `COMPOSE_PROFILES=cloud,pilot` and
+   `PIPELINE_ENABLED=true` (every deploy then starts and refreshes the pipeline
+   and the egress proxy, `pilot/pipeline.sh`);
 4. copies `egress-proxy/squid.conf` and writes `egress-proxy/allowed-hosts`
    with the provider's one host;
 5. recreates `nats` if its pipeline key is new, runs `core-migrate` (which
@@ -199,11 +205,16 @@ Fast, in this order:
 1. `docker compose --profile tools run --rm core-cli hospitals model-policy set <CODE> --provider none`
    (or the platform app). New questions run local from the next claim; with
    no local model on this host they escalate.
-2. `docker compose stop pipeline egress-proxy`.
+2. `docker compose stop pipeline egress-proxy`, and `PIPELINE_ENABLED=false`
+   in `.env` so the next deploy doesn't start it again.
 3. Revoke the key at the provider, then delete `secrets/pilot-cloud-api-key`.
-4. To remove it all: delete the `PILOT_*`, `CORE_CLOUD_PROVIDERS` and
-   `COMPOSE_PROFILES` lines from `.env`, `docker compose up -d core`, and
-   `docker compose rm -sf pipeline egress-proxy`.
+4. To remove it all: delete the `PILOT_*`, `PIPELINE_ENABLED`,
+   `CORE_CLOUD_PROVIDERS` and `COMPOSE_PROFILES` lines from `.env`,
+   `docker compose up -d core`, and `docker compose rm -sf pipeline egress-proxy`.
+
+To keep the pipeline with our own model only instead (no cloud): steps 1 to 4
+for the cloud, then `enable-pilot.sh --provider none` (deploy/README.md,
+"Answering with our own model only").
 
 Rotating the key: `--replace-key` with the new key on stdin, then
 `docker compose restart pipeline`, then revoke the old key.
