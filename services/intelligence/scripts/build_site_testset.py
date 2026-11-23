@@ -404,19 +404,21 @@ def visits_from_csv(text: str, counts: Counter[str]) -> tuple[list[Visit], dict[
         def cell(i: int | None, r: Sequence[str] = r) -> str:
             return _clean(r[i]) if i is not None and i < len(r) else ""
 
-        present = [
-            _human(header[i]) for i in flags if cell(i).lower() not in NO
-        ]
+        present = [_human(header[i]) for i in flags if cell(i).lower() not in NO]
         diagnosis = cell(diag_i)
         if diag_i is not None and diagnosis.lower() in YES | NO - {""}:
             word = _human(header[diag_i])
             diagnosis = f"{word}: {'positive' if diagnosis.lower() in YES else 'negative'}"
         more = [
-            _human(cell(i)) for i in diagnoses if cell(i) and cell(i).lower() not in NO | VAGUE_VALUES
+            _human(cell(i))
+            for i in diagnoses
+            if cell(i) and cell(i).lower() not in NO | VAGUE_VALUES
         ]
         diagnosis = ", ".join(x for x in [_human(diagnosis) if diagnosis else "", *more] if x)
         treatment = ", ".join(
-            _human(cell(i)) for i in medicines if cell(i) and cell(i).lower() not in NO | VAGUE_VALUES
+            _human(cell(i))
+            for i in medicines
+            if cell(i) and cell(i).lower() not in NO | VAGUE_VALUES
         )
         out.append(
             Visit(
