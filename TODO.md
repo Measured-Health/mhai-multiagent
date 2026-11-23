@@ -54,6 +54,38 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
 - **Demo settings.** `SECURITY_CONTACT_*` isn't set, so the audit integrity status returns 503. We need a name and an email from the product owner.
 - **Dependabot backlog.** 21 open PRs (Go modules, Python groups, GitHub Actions, NATS 2.15); each needs CI and a merge.
 
+## Hospital visit data: de-identification in the pipeline (23 Nov)
+
+Hospitals' visit exports (for test sets, the researcher's retraining and the
+local-practice figures) are de-identified before we receive them today. To
+onboard hospitals at scale, the ingestion pipeline must do it itself, so a
+hospital can hand over a raw export and nothing identifying is ever stored.
+
+- [ ] **A de-identification step in the visit-data import**, run on the server
+  before anything is stored, failing closed (a file that can't be fully
+  processed is rejected, not half-loaded):
+  - drop direct identifiers by column (names, phone numbers, emails,
+    addresses, hospital/folder/MRN numbers, NIN, next of kin), refusing
+    unknown columns until mapped;
+  - scrub free text (complaints, diagnoses, treatments): names and titles,
+    phone numbers, emails, ID-like numbers, places, occupations and
+    employers, using the existing PII masker plus Nigerian-specific rules
+    (names, places, phone formats);
+  - generalise quasi-identifiers: ages to bands (exact age over 89 never
+    kept), dates to month or shifted per patient, rare diagnoses or
+    combinations suppressed below k;
+  - remove duplicates; record per run what was removed (counts by rule, no
+    values) in the audit log;
+  - a re-identification risk check before release (k-anonymity on the
+    quasi-identifiers; refuse below the configured k);
+  - a human spot check: a sample of de-identified rows reviewed by the
+    hospital's data lead before first use, recorded with the sign-off.
+- [ ] Synthetic test fixtures covering every rule (never real rows), and a
+  regression test for each identifier type found in a real export.
+- [ ] The privacy sign-off and the hospital agreement reference are recorded
+  per hospital before an import is allowed (see the local-practice context
+  design).
+
 ## Shared reference library (23 Nov)
 
 Built: `core reference-library load` for the live host (migration 00056) and
