@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **"Enable own-model answers" workflow** (Actions, run by hand on main): runs
+  `pilot/enable-pilot.sh --provider none [--short-code CODE [--hospital-name NAME]]`
+  on the live server over the deploy's SSH secrets, after a `docker login ghcr.io`
+  with the run's own short-lived token (logged out at the end), so nobody has to
+  log the server in to GHCR by hand.
+
+### Added
+
 - **Answering with our own model only, no cloud provider.** The live site can
   answer with our own GPU model and no cloud key. `enable-pilot.sh --provider
   none` (only with `GPU_MODEL_ENABLED=true`, refused while a cloud provider is
@@ -25,6 +33,30 @@ All notable changes to this project are documented here. The format follows
   without it is 422 on `PUT /platform/hospitals/{id}/model-policy` and refused
   by `core hospitals model-policy set`; switching off is always allowed.
   deploy/README.md, "Answering with our own model only".
+
+- **The shared reference library on the live site, loaded by an operator.**
+  `core reference-library load ARTEFACT` and `status` in `core-cli`. Loading
+  runs as the provisioning login: migration 00056 gives `mhai_provision`
+  insert and delete on library rows only (a library, no hospital, no patient
+  fields), the `reference_libraries` table, and the new audit action
+  `reference_library.loaded`. The command refuses any file whose SHA-256,
+  version and row count are not pinned in core (kept equal to
+  `models/reference-library.lock` by a test). It refuses any row with a
+  field outside a closed list, a kind or source other than openFDA labels
+  and MedlinePlus topics, or text naming the demo's synthetic source. It
+  loads in one transaction and audits the load; loading again changes
+  nothing. A loaded library makes the health check's guidelines part ok on
+  a live database without the demo seed. The converter now refuses
+  synthetic patient rows by name (their type, or source fields that aren't
+  the source's name) and anything naming the demo's source. The Python
+  loader refuses the same rows. New `scripts/build_reference_subset.py`
+  writes the vetted subset (text, title, source, licence, upstream id) as a
+  deterministic review copy and prints counts. Bundle of 13 Nov: 23,654
+  rows kept (openFDA 20,295, MedlinePlus 3,359); 48,807 patient rows
+  refused. The decisions and exclusions are in
+  docs/models/reference-library.md. Nothing is loaded until the owner and
+  the clinical safety lead approve (TODO.md).
+
 - **Our own model on the GPU, off for every hospital.** The GPU server can
   serve our own fine-tuned answer model, started by the deploy (not by hand):
   a `gpu-model` compose service (profile `gpu-model`; llama.cpp's official

@@ -1,4 +1,8 @@
-"""Load a pinned reference library artefact into kb_chunks (an operator).
+"""Load a pinned reference library artefact into kb_chunks (an operator,
+from a repository checkout: development and tests). On a deployed host
+(the live site) use `core reference-library load` from core-cli instead:
+it needs no checkout and no owner password, and it audits the load
+(deploy/README.md, "Live site: the shared reference library").
 
     MHAI_REFLIB_DATABASE_URL=postgres://... \\
         uv run python scripts/reflib_load.py medref-1.0.0.jsonl.gz

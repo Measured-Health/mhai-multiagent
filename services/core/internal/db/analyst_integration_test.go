@@ -549,7 +549,9 @@ func TestCheckLoginRoleRefusesAnalystRulesReach(t *testing.T) {
 func TestMigration00030DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
-	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+	// The audit append policies as 00029 left them: going down to 29 must
+	// restore them, whatever later migrations (00056) add to them.
+	if err := db.MigrateUpTo(ctx, pg.URL, 29); err != nil {
 		t.Fatal(err)
 	}
 	pool, err := db.Open(ctx, pg.URL)
@@ -560,6 +562,9 @@ func TestMigration00030DownUp(t *testing.T) {
 	var before string
 	if err := pool.QueryRow(ctx, `SELECT string_agg(polname || ':' || pg_get_expr(polwithcheck, polrelid), ';' ORDER BY polname)
 		FROM pg_policy WHERE polrelid = 'audit_log'::regclass AND polname IN ('provision_append', 'platform_append')`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.MigrateDownTo(ctx, pg.URL, 29); err != nil {
