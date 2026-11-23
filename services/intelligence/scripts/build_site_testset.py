@@ -106,6 +106,14 @@ IDENTIFYING_COLUMN = re.compile(
     re.IGNORECASE,
 )
 DIAGNOSIS_COLUMN = re.compile(r"diagnos|result|outcome|malaria", re.IGNORECASE)
+# Medicine columns of the flags file (one column per drug class, holding the
+# drug's name): reviewer context only, like the visit sheet's TREATMENT.
+MEDICINE_COLUMN = re.compile(
+    r"antimalar|analges|antihist|antibio|cough|vitamin|supplement|drug|medic|treat",
+    re.IGNORECASE,
+)
+# A placeholder value that says nothing on its own.
+VAGUE_VALUES = frozenset({"others", "other"})
 AGE_COLUMN = re.compile(r"^age", re.IGNORECASE)
 SEX_COLUMN = re.compile(r"^(sex|gender)$", re.IGNORECASE)
 YES = frozenset({"1", "yes", "y", "true", "t", "positive", "pos", "+", "present"})
@@ -351,21 +359,40 @@ def visits_from_csv(text: str, counts: Counter[str]) -> tuple[list[Visit], dict[
         None,
     )
     body = rows[1:]
-    flags = []
+    flags: list[int] = []
+    diagnoses: list[int] = []
+    medicines: list[int] = []
     for i in usable:
         if i in (age_i, sex_i, diag_i):
             continue
         values = {_clean(r[i]).lower() for r in body if i < len(r)}
+        named = values - NO
         if values and values <= (YES | NO):
             flags.append(i)
+        elif len(named) == 1 and _human(next(iter(named))) == _human(header[i]):
+            # A symptom marked by writing the column's own name ("fever" in
+            # the fever column), empty otherwise.
+            flags.append(i)
+        elif MEDICINE_COLUMN.search(header[i]):
+            # Before diagnoses: "antimalarial" contains "malaria".
+            medicines.append(i)
+        elif DIAGNOSIS_COLUMN.search(header[i]):
+            diagnoses.append(i)
     mapping: dict[str, object] = {
         "age": header[age_i] if age_i is not None else None,
         "sex": header[sex_i] if sex_i is not None else None,
         "diagnosis": header[diag_i] if diag_i is not None else None,
         "flags": [header[i] for i in flags],
+        "more_diagnoses": [header[i] for i in diagnoses],
+        "medicines": [header[i] for i in medicines],
         "not_read_identifying": skipped,
         "not_read_other": [
-            header[i] for i in usable if i not in flags and i not in (age_i, sex_i, diag_i)
+            header[i]
+            for i in usable
+            if i not in flags
+            and i not in diagnoses
+            and i not in medicines
+            and i not in (age_i, sex_i, diag_i)
         ],
     }
     out = []
@@ -377,11 +404,20 @@ def visits_from_csv(text: str, counts: Counter[str]) -> tuple[list[Visit], dict[
         def cell(i: int | None, r: Sequence[str] = r) -> str:
             return _clean(r[i]) if i is not None and i < len(r) else ""
 
-        present = [_human(header[i]) for i in flags if cell(i).lower() in YES]
+        present = [
+            _human(header[i]) for i in flags if cell(i).lower() not in NO
+        ]
         diagnosis = cell(diag_i)
         if diag_i is not None and diagnosis.lower() in YES | NO - {""}:
             word = _human(header[diag_i])
             diagnosis = f"{word}: {'positive' if diagnosis.lower() in YES else 'negative'}"
+        more = [
+            _human(cell(i)) for i in diagnoses if cell(i) and cell(i).lower() not in NO | VAGUE_VALUES
+        ]
+        diagnosis = ", ".join(x for x in [_human(diagnosis) if diagnosis else "", *more] if x)
+        treatment = ", ".join(
+            _human(cell(i)) for i in medicines if cell(i) and cell(i).lower() not in NO | VAGUE_VALUES
+        )
         out.append(
             Visit(
                 source="flags",
@@ -390,7 +426,7 @@ def visits_from_csv(text: str, counts: Counter[str]) -> tuple[list[Visit], dict[
                 complaints=", ".join(present),
                 investigations="",
                 diagnosis=diagnosis,
-                treatment="",
+                treatment=treatment,
             )
         )
     return out, mapping
