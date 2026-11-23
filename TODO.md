@@ -41,7 +41,7 @@ Plans 2, 3 and 4 are built and live on the demo, and so is document pipeline pha
   - **PR 7, ingest:** `ingest_document` in the pipeline worker behind `doceval`'s extractor, with the stub extractor end to end; a real model needs the GPU host and a pinned `extract` role.
   - **PR 8, finalise:** to `emr.raw_records`; detach (EMR Task 47).
   - **PR 9, retention and purge:** the maintenance loop, legal holds, hospital removal with key destruction, the KMS provider and key rotation (see the KMS move item below), and the sweep for uploads never posted.
-  - **PR 10, archive connector:** EMR Task 46; waits on Havana implementing the H2 contract. EMR PR 12 waits on this.
+  - **PR 10, archive connector:** EMR Task 46; waits on the pilot hospital implementing the H2 contract. EMR PR 12 waits on this.
   - **mhai-web:** the upload and letter screens from the PR 5 hand-off (`docs/handoffs/2026-11-18-documents-pr5-mhai-web.md`).
   - **Follow-ups already found:** recover a lost `scanned` message (its audit entry and letter outcome); a narrower Docker profile for docsandbox (it runs with `CAP_SYS_ADMIN` and unconfined seccomp/AppArmor today); run the documents service and a real docsandbox together in one test; a development MinIO and keyring in compose for an end-to-end browser upload; re-measure the seccomp allow-list on every pypdfium2, Pillow or base-image bump.
 
@@ -67,7 +67,7 @@ on any server yet.
   the library's use with real patients. It is reference text (drug labels,
   patient-facing summaries), not clinical practice guidance. Then the
   operator runs deploy/README.md, "Live site: the shared reference library".
-- **Real guidelines for Havana: source and licence-check them.** The WHO
+- **Real guidelines for the pilot hospital: source and licence-check them.** The WHO
   guidelines and the Nigerian national guidelines (Federal Ministry of
   Health: malaria, hypertension, maternal and newborn care), and the
   hospital's own protocols. **Licence flag:** WHO publications are often
@@ -118,7 +118,7 @@ on any server yet.
 People items:
 - [ ] **P1** (product owner, ops): the object store bucket (`mhai-documents-<env>`) and KMS in our cloud account and the data's region, and the documents service's identity. Blocks PR 9's KMS provider and live use (or D5 below).
 - [ ] **P2** (ops): a ClamAV signature mirror, or the egress rule for the public one. Blocks PR 4 outside development.
-- [ ] **P3** (Havana with our team): the [archive contract (H2)](docs/designs/2026-11-14-havana-archive-contract-h2.md) implemented. Blocks PR 10.
+- [ ] **P3** (the pilot hospital with our team): the [archive contract (H2)](docs/designs/2026-11-14-pilot-archive-contract-h2.md) implemented. Blocks PR 10.
 - [ ] **P4** (clinical lead): phase 1 thresholds, the pass gate on the locked split, the clinician-for-criticals rule (D12). Blocks live use.
 - [ ] **P5** (privacy lead, H5): the region, the retention values in design §6.3, the archive file name as a reviewer hint, the source-removed rule (D10). Blocks the retention sweep (PR 9) and live use.
 - [ ] **P6** (legal, H3): the clearance letter template and letter retention. Blocks live letters (PR 5).
@@ -156,14 +156,14 @@ Ops items:
 - [ ] **Ops, before EMR is switched on anywhere (EMR PR 3):** compose and the deploy don't yet give core its two EMR keys, and core refuses to start with `CORE_EMR_ENABLED=true` without them. Wire `CORE_EMR_SEAL_PUBLIC_KEY_PATH` (the emr service's `seal-<kid>.pub` only, from a volume or file core can read; never the `emr-keys` volume, which holds the private key) and `CORE_IDEMPOTENCY_HMAC_KEY_PATH` (a per-deployment key of at least 32 bytes, generated like the other secrets, readable by core only). Owner: ops.
 
 People items:
-- [ ] **H1** (product owner with Havana): a structured source for labs, then vitals and medications (export or FHIR), its frequency, and a synthetic or de-identified layout sample. PR 11 is built to the published `mhai_csv_v1` format (14 Nov, product owner's go-ahead); H1 now confirms Havana can export it (or what a version 2 needs) and blocks real alerts for Havana.
-- [ ] **H2** (our team, with Havana's agreement): the archive's JSON "files added since" listing, a per-integration read-only key, a removed-files listing. Blocks PR 12.
+- [ ] **H1** (product owner with the pilot hospital): a structured source for labs, then vitals and medications (export or FHIR), its frequency, and a synthetic or de-identified layout sample. PR 11 is built to the published `mhai_csv_v1` format (14 Nov, product owner's go-ahead); H1 now confirms the pilot hospital can export it (or what a version 2 needs) and blocks real alerts for the pilot hospital.
+- [ ] **H2** (our team, with the pilot hospital's agreement): the archive's JSON "files added since" listing, a per-integration read-only key, a removed-files listing. Blocks PR 12.
 - [ ] **Ops, before egress-emr runs on a deployed host (EMR PR 4):** publish the emr image (`ghcr.io/measured-health/mhai-multiagent-emr`, not built by CI yet), write K_proxy as `secrets/emr-proxy.key` (0400, owned by 65532; `emr keys proxy-init`), and set `EGRESS_EMR_INTERNAL_CIDRS` to the `backend` network's subnet plus the host's own addresses as `/32` (egress-emr refuses to start without it). Watch the logs for `"code":"ranges_overlap"` (connections left out of egress). Owner: ops.
 - [ ] **H3** (product owner, ops): choose and provision the managed secret store (in-region) and the emr service's identity. Blocks Task 12 and any production use of PR 3.
 - [ ] **H4** (a named clinical lead and a second clinician): rule set v1, breaker and grouped-mode values, the paused-source wording, map review, the shadow review, names and MRNs in alerts, and the clinical reviewers for `CODEOWNERS`. Blocks Task 30, activation and live use.
 - [ ] **H5** (privacy lead and a Nigerian data protection lawyer): DPIA, processing agreement addendum, the hospital's written confirmation that its call process stays primary, NDPA basis, data location, retention values. Blocks any real data.
 - [ ] **H6** (product owner): licences for LOINC and WHO ATC/DDD. Blocks Task 21 and any real data.
-- [ ] **H7** (Havana IT): network path, SFTP host key fingerprint, rotation contact. Blocks PR 11 going live.
+- [ ] **H7** (the pilot hospital's IT): network path, SFTP host key fingerprint, rotation contact. Blocks PR 11 going live.
 - [x] **H8** (product owner): the design's §21 answers. Approved as recommended, 7 Nov.
 - [ ] **H9** (product owner, ops): an on-call owner for stale feeds, rule errors, breaker pages, link conflicts, `reconciled_late` and grouped mode. Blocks live use.
 
@@ -201,7 +201,7 @@ Alerts now carry `patient.id`, so a clinician can ask about an alert's patient. 
 
 - [x] **Migration order:** 00043 (`last_file_at`, file export staleness) follows 00040-00042 (all on main); the migration-count tests list it.
 - [ ] **Before H7 (live):** a synthetic SFTP end-to-end run through the real `egress-emr` on the build host (an `emr synth-sftp` development command beside `synth-fhir`), as the FHIR run does (plan departure 72).
-- [ ] **Deploy, after H1 and H7:** add `file_export` to `CORE_EMR_CONNECTOR_TYPES`; give the platform admin the host key fingerprint and the export interval from Havana IT; Havana creates `processed/` and `rejected/` and writes files as `.part` then renames.
+- [ ] **Deploy, after H1 and H7:** add `file_export` to `CORE_EMR_CONNECTOR_TYPES`; give the platform admin the host key fingerprint and the export interval from the pilot hospital's IT; the pilot hospital creates `processed/` and `rejected/` and writes files as `.part` then renames.
 - [ ] **mhai-web:** the `file_export` form shows the new fields from `GET /platform/emr/connector-types` (`username`, `expected_every_minutes`, `mrn_namespace`); no contract change.
 - [ ] **Visibility:** store the closed reason of a dead-lettered row or set-aside file (today counted and an `unreadable_data` error row), and export the connector's counts (files loaded, refused, set aside; rows dead-lettered) as metrics. Before scale.
 - [ ] **Residuals (plan departure 71):** dead letters carry no patient link (an exclusion's purge can't find them; they hold no value); RSA keys may sign with SHA-1 to an old server (recommend Ed25519); the parsed key isn't zeroed; a file cut at a row boundary can't be told from a complete one.

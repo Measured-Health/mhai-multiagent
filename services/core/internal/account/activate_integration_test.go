@@ -46,8 +46,8 @@ func activations(t *testing.T, super *pgxpool.Pool, id uuid.UUID) int {
 func TestActivateHospitalAuditsOnceAndIsIdempotent(t *testing.T) {
 	super, prov := setup(t)
 	ctx := context.Background()
-	hid := newHospital(t, prov, "HAV")
-	got, already, err := ActivateHospital(ctx, prov, "hav")
+	hid := newHospital(t, prov, "PLT")
+	got, already, err := ActivateHospital(ctx, prov, "plt")
 	if err != nil || already || got != hid {
 		t.Fatalf("activate: %v %v %v", got, already, err)
 	}
@@ -109,7 +109,7 @@ func TestActivateHospitalRefusesOtherStatuses(t *testing.T) {
 // rest report it already active.
 func TestActivateHospitalConcurrent(t *testing.T) {
 	super, prov := setup(t)
-	hid := newHospital(t, prov, "HAV")
+	hid := newHospital(t, prov, "PLT")
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	fresh := 0
@@ -117,7 +117,7 @@ func TestActivateHospitalConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, already, err := ActivateHospital(context.Background(), prov, "HAV")
+			_, already, err := ActivateHospital(context.Background(), prov, "PLT")
 			if err != nil {
 				t.Error(err)
 				return
@@ -153,8 +153,8 @@ func TestActivateHospitalNeedsProvisionRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(app.Close)
-	hid := newHospital(t, prov, "HAV")
-	if _, _, err := ActivateHospital(ctx, app, "HAV"); !errors.Is(err, ErrNotProvisioner) {
+	hid := newHospital(t, prov, "PLT")
+	if _, _, err := ActivateHospital(ctx, app, "PLT"); !errors.Is(err, ErrNotProvisioner) {
 		t.Fatalf("app login: %v", err)
 	}
 	for _, role := range []string{"mhai_app", "mhai_gateway", "mhai_platform", "mhai_auth"} {

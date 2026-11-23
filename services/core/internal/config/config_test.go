@@ -271,7 +271,7 @@ func TestLoadNATSTLSAndStreams(t *testing.T) {
 func TestValidateServeRequiresNATSTLSOutsideDevelopment(t *testing.T) {
 	full := NATSTLS{CAPath: "/tls/ca.pem", CertPath: "/tls/core.pem", KeyPath: "/tls/core-key.pem"}
 	base := Config{DatabaseURL: "postgres://u:p@h/db?sslmode=verify-full", NATSURL: "nats://h:4222", AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem",
-		NATSJSReplicas: 3, SecurityContactName: "Synthetic Security Desk", SecurityContactEmail: "security@havana.example"}
+		NATSJSReplicas: 3, SecurityContactName: "Synthetic Security Desk", SecurityContactEmail: "security@pilot-hospital.example"}
 	for _, env := range []string{"production", "Production", "staging", ""} {
 		c := base
 		c.Env = env
@@ -458,7 +458,7 @@ func productionServe() Config {
 	return Config{Env: "production", DatabaseURL: "postgres://u:p@db.internal/mhai?sslmode=verify-full", NATSURL: "tls://h:4222",
 		AccessKeyPath: "/k.pem", RequestKeyPath: "/r.pem", NATSJSReplicas: 3,
 		NATSTLS:             NATSTLS{CAPath: "/tls/ca.pem", CertPath: "/tls/core.pem", KeyPath: "/tls/core-key.pem"},
-		SecurityContactName: "Synthetic Security Desk", SecurityContactEmail: "security@havana.example"}
+		SecurityContactName: "Synthetic Security Desk", SecurityContactEmail: "security@pilot-hospital.example"}
 }
 
 // Plan 4 Task 10: the audit integrity page's security contact is required

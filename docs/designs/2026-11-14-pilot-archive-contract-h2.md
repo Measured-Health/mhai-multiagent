@@ -1,19 +1,19 @@
-# Havana archive contract (H2): what the archive provides for MHAI
+# Pilot hospital archive contract (H2): what the archive provides for MHAI
 
-- **Status:** Draft for Havana's team and ours. The product owner delegated every decision on 14 Nov 2026; §11 lists the calls made, for later review. Nothing here is built.
+- **Status:** Draft for the pilot hospital's team and ours. The product owner delegated every decision on 14 Nov 2026; §11 lists the calls made, for later review. Nothing here is built.
 - **Date:** 2026-11-14
-- **For:** the team that runs Havana's document archive (DocFlow). It says what to build; it doesn't say how MHAI works inside, beyond what you need.
+- **For:** the team that runs the pilot hospital's document archive (DocFlow). It says what to build; it doesn't say how MHAI works inside, beyond what you need.
 - **Context for MHAI readers:** EMR plan PR 12 (Task 46, the `document_archive` connector), H2 in the plan's people items, EMR design §5.3, and the [documents service design](2026-11-14-documents-service.md) §4.3 and §6.5.
 
 ## 1. What this is for
 
-MHAI wants to read the scanned lab reports in Havana's archive so clinicians can review the values and see abnormal results. MHAI only **reads**: it never changes, moves or deletes anything in the archive.
+MHAI wants to read the scanned lab reports in the pilot hospital's archive so clinicians can review the values and see abnormal results. MHAI only **reads**: it never changes, moves or deletes anything in the archive.
 
 To do that safely, MHAI needs four things the archive doesn't offer today:
 
 1. a list of **files added since** a point MHAI last read, with a stable cursor;
 2. a list of **files removed since** a point, because deletions leave no trace today;
-3. a **key per integration**, read-only, limited to these endpoints, that Havana can rotate and revoke without touching anything else;
+3. a **key per integration**, read-only, limited to these endpoints, that the pilot hospital can rotate and revoke without touching anything else;
 4. predictable **rate limits and errors**.
 
 The existing deployment-wide service key and every existing endpoint stay as they are. MHAI will not use them.
@@ -35,24 +35,24 @@ Nothing else accepts an integration key. An integration key sent to any other en
 ### 3.1 What a key is
 
 - **One key per integration** (MHAI is one integration; a second consumer gets its own). Each integration has a name (`mhai`), an id, and up to two active keys at once (for rotation).
-- **Read-only, scoped** to the three endpoints above and, optionally, to a list of top-level boxes Havana chooses. A file outside the scope is treated as if it didn't exist (it never appears in a listing; its content is 404).
+- **Read-only, scoped** to the three endpoints above and, optionally, to a list of top-level boxes the pilot hospital chooses. A file outside the scope is treated as if it didn't exist (it never appears in a listing; its content is 404).
 - **Format:** at least 256 random bits, URL-safe, with a recognisable prefix such as `dfi_`, so a leaked key can be found by secret scanners.
 - **Sent as** `Authorization: Bearer <key>`. Never in a URL or query string.
-- **Stored by Havana as a hash** (SHA-256 is enough for a random key), never in plain text. The key is shown once, at creation.
+- **Stored by the pilot hospital as a hash** (SHA-256 is enough for a random key), never in plain text. The key is shown once, at creation.
 - **Recorded as its own actor** in the archive's audit log (`integration:mhai`, with the key's id, never the key), separate from users and the deployment-wide key. Each call logs the key id, endpoint, `file_id` where there is one, status and time.
-- **Optionally bound to MHAI's outgoing IP addresses.** MHAI calls from a fixed set of addresses, given at set-up. We recommend Havana refuses the key from anywhere else.
+- **Optionally bound to MHAI's outgoing IP addresses.** MHAI calls from a fixed set of addresses, given at set-up. We recommend the pilot hospital refuses the key from anywhere else.
 
 ### 3.2 Rotation
 
-- A key lives at most **365 days**. Havana's admin screen (or a command) creates a second key for the same integration; both work until the old one is revoked.
-- MHAI's side: the platform admin enters the new key, MHAI checks it with one listing call, then tells Havana to revoke the old one. Target: done within 7 days of creating the new key.
-- Each key shows its creation time, expiry, and last use (time and source address), so Havana can see when the old one stops being used.
+- A key lives at most **365 days**. The pilot hospital's admin screen (or a command) creates a second key for the same integration; both work until the old one is revoked.
+- MHAI's side: the platform admin enters the new key, MHAI checks it with one listing call, then tells the pilot hospital to revoke the old one. Target: done within 7 days of creating the new key.
+- Each key shows its creation time, expiry, and last use (time and source address), so the pilot hospital can see when the old one stops being used.
 
 ### 3.3 Revocation
 
 - Revoking a key takes effect within **60 seconds** on every archive server.
 - After revocation the key gets 401 `unauthorized`, like an unknown key.
-- Havana may revoke at any time without asking us (for example on suspicion of a leak). MHAI then stops reading and raises an alert on our side; nothing is lost, because the cursor stays valid (§4.3).
+- The pilot hospital may revoke at any time without asking us (for example on suspicion of a leak). MHAI then stops reading and raises an alert on our side; nothing is lost, because the cursor stays valid (§4.3).
 - **Contacts:** each side names a security contact at set-up. Either side tells the other within 24 hours of suspecting a key leak.
 
 ## 4. Files added since a cursor
@@ -256,7 +256,7 @@ Cache-Control: no-store
 | `file_id` | refers to the file by it everywhere: requests, its own records, logs, error reports | derive anything from it |
 | `revision` | downloads that exact revision; treats a new revision as a new document for review | |
 | `change` | counts new and changed files | |
-| `name` | stores it with the document in Havana's own partition of MHAI's database (encrypted at rest), readable only on the review screen, as a hint to the person matching the document to a patient; clears it 30 days after the review is finished | log it, put it in a message, metric, alert or error report, or match a patient from it automatically |
+| `name` | stores it with the document in the pilot hospital's own partition of MHAI's database (encrypted at rest), readable only on the review screen, as a hint to the person matching the document to a patient; clears it 30 days after the review is finished | log it, put it in a message, metric, alert or error report, or match a patient from it automatically |
 | `mime_type` | downloads only `application/pdf`, `image/jpeg`, `image/png` and `image/tiff`; counts the rest by type | download any other type |
 | `size_bytes` | skips files over 25 MB (counted, never downloaded); checks the download's length | |
 | `sha256` | checks the downloaded bytes; refuses and reports a mismatch (by `file_id` and `request_id`) | |
@@ -266,7 +266,7 @@ Cache-Control: no-store
 | error `code`, `request_id` | logs the status, code and `request_id`; backs off on 429 and 503; stops and alerts on 401, 403 and 410 | log the message or body |
 
 **Also, on MHAI's side:**
-- every downloaded file is checked for type and malware, stored encrypted under a key for Havana only, and seen only by Havana's own staff who review documents;
+- every downloaded file is checked for type and malware, stored encrypted under a key for the pilot hospital only, and seen only by the pilot hospital's own staff who review documents;
 - values reach the patient's record only after a person has checked them and matched the patient;
 - the key is held in MHAI's secret store, used only by the one service that talks to the archive, and never logged;
 - MHAI calls only from its fixed addresses, over HTTPS, and checks the archive's certificate.
@@ -287,7 +287,7 @@ Made on 14 Nov 2026 under the product owner's delegation, on the safe and privat
 
 ## 12. Acceptance checks
 
-Havana's team can run these before we connect; we run them again together on a test copy with invented files.
+The pilot hospital's team can run these before we connect; we run them again together on a test copy with invented files.
 
 1. `start=latest` returns no items and a cursor; a file added afterwards appears after that cursor.
 2. A file whose modification time is a year ago, added today, appears after today's cursor.

@@ -313,7 +313,7 @@ func seedUser(t *testing.T, hospital uuid.UUID, mfa bool, roles ...string) user 
 	var id uuid.UUID
 	if err := super.QueryRow(ctx, `INSERT INTO users (hospital_id, email, password_hash, display_name, full_name, role_title, is_active)
 		VALUES ($1, $2, $3, 'Dr Synthetic', 'Synthetic Person', 'Registrar', true) RETURNING id`,
-		hid, "synthetic.grant."+uniq()+"@havana.example", pwHash).Scan(&id); err != nil {
+		hid, "synthetic.grant."+uniq()+"@pilot-hospital.example", pwHash).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range roles {

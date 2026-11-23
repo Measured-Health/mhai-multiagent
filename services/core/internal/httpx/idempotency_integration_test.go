@@ -417,7 +417,7 @@ func TestIdempotentStoresEmailAndCode(t *testing.T) {
 	var n atomic.Int32
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n.Add(1)
-		httpx.JSON(w, http.StatusCreated, map[string]any{"email": "grace@havana.example", "code": "I10", "call": n.Load()})
+		httpx.JSON(w, http.StatusCreated, map[string]any{"email": "grace@pilot-hospital.example", "code": "I10", "call": n.Load()})
 	})
 	srv := chain(&httpx.Principal{UserID: user, HospitalID: seedHospital(t)}, h)
 	key := uuid.NewString()

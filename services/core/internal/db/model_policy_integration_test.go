@@ -704,7 +704,7 @@ func TestPolicyChecks(t *testing.T) {
 		"patient pseudonym":          {a, "openai", "P-AB12CD34", 1000},
 		"pseudonym inside":           {a, "openai", "AGR-P-AB12CD34", 1000},
 		"a person's name":            {a, "openai", "ADAEZE-OKAFOR", 1000},
-		"an MRN shape":               {a, "openai", "HAV-000123", 1000},
+		"an MRN shape":               {a, "openai", "PLT-000123", 1000},
 		"a word and a number":        {a, "openai", "OKAFOR-2026-01", 1000},
 		"reference while off":        {a, nil, "AGR-2026-01", 1000},
 		"negative budget":            {a, nil, nil, -1},

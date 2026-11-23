@@ -249,7 +249,7 @@ def _mrn(rng: random.Random) -> str:
     if form == 1:
         return f"{d[:3]} {d[3:6]}"
     if form == 2:
-        return f"HAV-{d[:6]}"
+        return f"PLT-{d[:6]}"
     if form == 3:
         return f"LUTH/{rng.randint(2015, 2026)}/{d[:5]}"
     if form == 4:
@@ -268,7 +268,7 @@ def _coded_mrn(rng: random.Random) -> str:
     d = "".join(rng.choice("0123456789") for _ in range(7))
     return (
         f"LUTH/{rng.randint(2015, 2026)}/{d[:5]}",
-        f"HAV-{d[:6]}",
+        f"PLT-{d[:6]}",
         f"UCH/{d[:2]}/{d[2:7]}",
         f"FMC-OW-{d[:2]}-{d[2:6]}",
     )[form]

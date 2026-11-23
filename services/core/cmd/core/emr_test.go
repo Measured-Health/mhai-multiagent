@@ -30,11 +30,11 @@ func TestEMRCLIArgs(t *testing.T) {
 	for _, args := range [][]string{
 		{},
 		{"exclude"},
-		{"exclude", "--hospital", "HAV", "--reason", "objection"},
-		{"exclude", "--hospital", "HAV", "--patient", pid, "--mrn-stdin", "--reason", "objection"},
-		{"exclude", "--hospital", "HAV", "--patient", pid, "--reason", "because"},
-		{"exclude", "--hospital", "HAV", "--patient", strings.ToUpper(pid), "--reason", "other"},
-		{"exclude", "--hospital", "HAV", "--mrn", "SYN-6837", "--reason", "other"},
+		{"exclude", "--hospital", "PLT", "--reason", "objection"},
+		{"exclude", "--hospital", "PLT", "--patient", pid, "--mrn-stdin", "--reason", "objection"},
+		{"exclude", "--hospital", "PLT", "--patient", pid, "--reason", "because"},
+		{"exclude", "--hospital", "PLT", "--patient", strings.ToUpper(pid), "--reason", "other"},
+		{"exclude", "--hospital", "PLT", "--mrn", "SYN-6837", "--reason", "other"},
 		{"remove-hospital-data"},
 		{"remove-hospital-data", "--all"},
 		{"purge"},
@@ -44,26 +44,26 @@ func TestEMRCLIArgs(t *testing.T) {
 		}
 	}
 	// Good arguments reach the connection, which is missing here.
-	if err := emrCmd(ctx, []string{"exclude", "--hospital", "HAV", "--patient", pid, "--reason", "objection"}, "",
+	if err := emrCmd(ctx, []string{"exclude", "--hospital", "PLT", "--patient", pid, "--reason", "objection"}, "",
 		strings.NewReader(""), io.Discard); err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
 		t.Errorf("good exclude: %v", err)
 	}
-	if err := emrCmd(ctx, []string{"exclude", "--hospital", "HAV", "--mrn-stdin", "--reason", "objection"}, "",
+	if err := emrCmd(ctx, []string{"exclude", "--hospital", "PLT", "--mrn-stdin", "--reason", "objection"}, "",
 		strings.NewReader("\n"), io.Discard); err == nil || strings.Contains(err.Error(), "DATABASE_URL") {
 		t.Errorf("empty MRN on stdin: %v", err)
 	}
 	for _, args := range [][]string{
-		{"place", "HAV"},
-		{"place", "HAV", "--reference", "Synthetic Person"},
-		{"place", "HAV", "--reference", "lh-2026-0042"},
-		{"hold", "HAV", "--reference", "LH-2026-0042"},
+		{"place", "PLT"},
+		{"place", "PLT", "--reference", "Synthetic Person"},
+		{"place", "PLT", "--reference", "lh-2026-0042"},
+		{"hold", "PLT", "--reference", "LH-2026-0042"},
 		{"lift", "--reference", "LH-2026-0042"},
 	} {
 		if err := hospitalsLegalHold(ctx, args, "", io.Discard); err == nil || strings.Contains(err.Error(), "DATABASE_URL") {
 			t.Errorf("legal-hold %v: %v", args, err)
 		}
 	}
-	if err := hospitalsLegalHold(ctx, []string{"place", "HAV", "--reference", "LH-2026-0042"}, "", io.Discard); err == nil ||
+	if err := hospitalsLegalHold(ctx, []string{"place", "PLT", "--reference", "LH-2026-0042"}, "", io.Discard); err == nil ||
 		!strings.Contains(err.Error(), "DATABASE_URL") {
 		t.Errorf("good legal-hold: %v", err)
 	}

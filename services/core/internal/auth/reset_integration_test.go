@@ -91,7 +91,7 @@ func TestPasswordResetLink(t *testing.T) {
 func TestInviteLinkSetsFirstPassword(t *testing.T) {
 	e := newEnv(t)
 	h := seedHospital(t, hospitalOpts{})
-	email := "synthetic.invitee." + uniq() + "@havana.example"
+	email := "synthetic.invitee." + uniq() + "@pilot-hospital.example"
 	var id uuid.UUID
 	if err := super.QueryRow(context.Background(), `INSERT INTO users (hospital_id, email, display_name, invited_at) VALUES ($1, $2, 'synthetic', now()) RETURNING id`,
 		h, email).Scan(&id); err != nil {

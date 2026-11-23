@@ -53,7 +53,7 @@ func TestMarkerNotInSpansOrLogs(t *testing.T) {
 		t.Fatalf("%d %s", r.code, r.raw)
 	}
 	id, _ := r.body["query_id"].(string)
-	if l := e.do(t, "POST", "/auth/login", "", fmt.Sprintf(`{"email":"synthetic.%s@havana.example","password":%q}`, uniq(), pw), nil); l.code < 400 {
+	if l := e.do(t, "POST", "/auth/login", "", fmt.Sprintf(`{"email":"synthetic.%s@pilot-hospital.example","password":%q}`, uniq(), pw), nil); l.code < 400 {
 		t.Fatalf("login with a made-up account: %d", l.code)
 	}
 	if g := e.do(t, "GET", "/queries/"+id, access, "", hdr); g.code != http.StatusOK {

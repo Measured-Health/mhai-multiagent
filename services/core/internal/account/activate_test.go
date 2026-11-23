@@ -16,17 +16,17 @@ func TestParseHospitalRef(t *testing.T) {
 	if c, a := r.where(); c != "id = $1" || a != id {
 		t.Fatalf("uuid where: %s %v", c, a)
 	}
-	r, err = parseHospitalRef("hav")
-	if err != nil || r.code != "HAV" || r.id != uuid.Nil {
+	r, err = parseHospitalRef("plt")
+	if err != nil || r.code != "PLT" || r.id != uuid.Nil {
 		t.Fatalf("code: %+v %v", r, err)
 	}
-	if c, a := r.where(); c != "short_code = $1" || a != "HAV" {
+	if c, a := r.where(); c != "short_code = $1" || a != "PLT" {
 		t.Fatalf("code where: %s %v", c, a)
 	}
 }
 
 func TestParseHospitalRefRefusesOddInput(t *testing.T) {
-	for _, s := range []string{"", " ", "H", "HAV'; --", "urn:uuid:" + uuid.NewString(),
+	for _, s := range []string{"", " ", "H", "PLT'; --", "urn:uuid:" + uuid.NewString(),
 		"{" + uuid.NewString() + "}", "a b", "Synthetic General", "abc\xff"} {
 		if err := ValidateHospitalRef(s); !errors.Is(err, ErrBadHospitalRef) {
 			t.Errorf("%q: %v", s, err)

@@ -261,7 +261,7 @@ func TestAuditSchemaModelPolicyChanged(t *testing.T) {
 		"old free shape":       func(m map[string]any) { m["agreement_ref"] = "SYNTH-1" },
 		"patient pseudonym":    func(m map[string]any) { m["agreement_ref"] = "P-AB12CD34" },
 		"a person's name":      func(m map[string]any) { m["agreement_ref"] = "ADAEZE-OKAFOR" },
-		"an MRN shape":         func(m map[string]any) { m["agreement_ref"] = "HAV-000123" },
+		"an MRN shape":         func(m map[string]any) { m["agreement_ref"] = "PLT-000123" },
 		"a name and a number":  func(m map[string]any) { m["agreement_ref"] = "OKAFOR-2026-01" },
 		"reference while off":  func(m map[string]any) { m["provider"] = "none" },
 		"unknown provider":     func(m map[string]any) { m["provider"] = "mistral" },
@@ -275,7 +275,7 @@ func TestAuditSchemaModelPolicyChanged(t *testing.T) {
 		"budget too big":       func(m map[string]any) { m["monthly_token_budget"] = 1000000001 },
 		"budget fraction":      func(m map[string]any) { m["monthly_token_budget"] = 1.5 },
 		"unknown via":          func(m map[string]any) { m["via"] = "api" },
-		"hospital not a uuid":  func(m map[string]any) { m["hospital_id"] = "HAV" },
+		"hospital not a uuid":  func(m map[string]any) { m["hospital_id"] = "PLT" },
 		"extra key":            func(m map[string]any) { m["note"] = "synthetic" },
 		"null provider":        func(m map[string]any) { m["provider"] = nil },
 		"own model with a provider": func(m map[string]any) {
@@ -334,7 +334,7 @@ func TestAuditSchemasEMRConnection(t *testing.T) {
 		"a value in fields":       base("fields_changed", []any{"https://fhir.example.org"}, "credentials_replaced", false, "credentials_wiped", false),
 		"wiped not a bool":        base("fields_changed", []any{}, "credentials_replaced", false, "credentials_wiped", "yes"),
 		"free text outcome":       base("outcome", "the server said no"),
-		"hospital id not an id":   {"hospital_id": "HAV", "connection_id": cid, "type": "stub"},
+		"hospital id not an id":   {"hospital_id": "PLT", "connection_id": cid, "type": "stub"},
 		"connection id not an id": {"hospital_id": hid, "connection_id": "Main record", "type": "stub"},
 	} {
 		action := "emr.connection_added"
@@ -565,7 +565,7 @@ func TestPlatformAdminPayloads(t *testing.T) {
 		if err := audit.CheckActionPayload(action, p); err != nil {
 			t.Errorf("%s: %v", action, err)
 		}
-		for k, v := range map[string]any{"display_name": "Synthetic Okafor", "email": "synthetic.ok@havana.example",
+		for k, v := range map[string]any{"display_name": "Synthetic Okafor", "email": "synthetic.ok@pilot-hospital.example",
 			"reference": "LH-2026-7781", "note": "synthetic note"} {
 			bad := maps.Clone(p)
 			bad[k] = v

@@ -25,21 +25,21 @@ func TestHospitalsActivateCommand(t *testing.T) {
 		err := seed(ctx, args, provURL, strings.NewReader(""), &out)
 		return out.String(), err
 	}
-	if _, err := run("hospitals", "create", "--name", "Synthetic General", "--short-code", "HAV", "--time-zone", "UTC"); err != nil {
+	if _, err := run("hospitals", "create", "--name", "Synthetic General", "--short-code", "PLT", "--time-zone", "UTC"); err != nil {
 		t.Fatal(err)
 	}
-	out, err := run("hospitals", "activate", "hav")
+	out, err := run("hospitals", "activate", "plt")
 	if err != nil || !strings.HasPrefix(out, "activated hospital ") {
 		t.Fatalf("activate: %q %v", out, err)
 	}
-	out, err = run("hospitals", "activate", "HAV")
+	out, err = run("hospitals", "activate", "PLT")
 	if err != nil || !strings.Contains(out, "already active; nothing changed") {
 		t.Fatalf("again: %q %v", out, err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE hospitals SET status = 'deactivated' WHERE short_code = 'HAV'`); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE hospitals SET status = 'deactivated' WHERE short_code = 'PLT'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run("hospitals", "activate", "HAV"); !errors.Is(err, account.ErrNotActivatable) ||
+	if _, err := run("hospitals", "activate", "PLT"); !errors.Is(err, account.ErrNotActivatable) ||
 		!strings.Contains(err.Error(), "deactivated") {
 		t.Fatalf("deactivated: %v", err)
 	}

@@ -123,16 +123,16 @@ func TestServeEndToEnd(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := seed(ctx, []string{"hospitals", "create", "--name", "Havana General", "--short-code", "HAV", "--time-zone", "Africa/Lagos"},
+	if err := seed(ctx, []string{"hospitals", "create", "--name", "Pilot Hospital", "--short-code", "PLT", "--time-zone", "Africa/Lagos"},
 		s.provURL, strings.NewReader(""), &out); err != nil {
 		t.Fatal(err)
 	}
 	pw := "tangerine-orbit-77-quill"
-	if err := seed(ctx, []string{"users", "create", "--email", "synthetic.clinician@havana.example", "--name", "Synthetic Clinician",
-		"--roles", "clinician", "--hospital", "HAV"}, s.provURL, strings.NewReader(pw+"\n"), &out); err != nil {
+	if err := seed(ctx, []string{"users", "create", "--email", "synthetic.clinician@pilot-hospital.example", "--name", "Synthetic Clinician",
+		"--roles", "clinician", "--hospital", "PLT"}, s.provURL, strings.NewReader(pw+"\n"), &out); err != nil {
 		t.Fatal(err)
 	}
-	body, _ := json.Marshal(map[string]string{"username": "synthetic.clinician@havana.example", "password": pw})
+	body, _ := json.Marshal(map[string]string{"username": "synthetic.clinician@pilot-hospital.example", "password": pw})
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(body))
 	r.Header.Set("X-MHAI-Service", testBFFKey)
 	r.Header.Set("X-MHAI-Client-IP", "198.51.100.20")
@@ -279,16 +279,16 @@ func TestHTTPAPIOffServesProbesOnly(t *testing.T) {
 		t.Fatalf("healthz %d", rec.Code)
 	}
 	var out bytes.Buffer
-	if err := seed(ctx, []string{"hospitals", "create", "--name", "Havana General", "--short-code", "HAV", "--time-zone", "Africa/Lagos"},
+	if err := seed(ctx, []string{"hospitals", "create", "--name", "Pilot Hospital", "--short-code", "PLT", "--time-zone", "Africa/Lagos"},
 		s.provURL, strings.NewReader(""), &out); err != nil {
 		t.Fatal(err)
 	}
 	pw := "tangerine-orbit-77-quill"
-	if err := seed(ctx, []string{"users", "create", "--email", "synthetic.clinician@havana.example", "--name", "Synthetic Clinician",
-		"--roles", "clinician", "--hospital", "HAV"}, s.provURL, strings.NewReader(pw+"\n"), &out); err != nil {
+	if err := seed(ctx, []string{"users", "create", "--email", "synthetic.clinician@pilot-hospital.example", "--name", "Synthetic Clinician",
+		"--roles", "clinician", "--hospital", "PLT"}, s.provURL, strings.NewReader(pw+"\n"), &out); err != nil {
 		t.Fatal(err)
 	}
-	body, _ := json.Marshal(map[string]string{"username": "synthetic.clinician@havana.example", "password": pw})
+	body, _ := json.Marshal(map[string]string{"username": "synthetic.clinician@pilot-hospital.example", "password": pw})
 	for _, p := range []string{"/api/v1/auth/login", "/api/docs", "/api/openapi.yaml"} {
 		r := httptest.NewRequest(http.MethodPost, p, bytes.NewReader(body))
 		if p != "/api/v1/auth/login" {

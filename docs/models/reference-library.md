@@ -25,7 +25,7 @@ guidelines. The converter refuses them by type; the tests pin it.
 **What it is not.** These are reference texts (drug label sections and
 patient-facing topic summaries), not clinical practice guidelines. They tell
 the answer model what a label says, not how a Nigerian hospital should
-manage a condition. Real guidelines for Havana (WHO, the Nigerian national
+manage a condition. Real guidelines for the pilot hospital (WHO, the Nigerian national
 guidelines, the hospital's own protocols) still have to be sourced and
 licence-checked (TODO.md, "Shared reference library"). The clinical safety
 lead signs off the library before it is used with real patients.

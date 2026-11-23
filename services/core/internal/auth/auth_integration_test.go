@@ -277,7 +277,7 @@ type user struct {
 func seedUser(t *testing.T, hospital uuid.UUID, mfa bool, roles ...string) user {
 	t.Helper()
 	ctx := context.Background()
-	email := "synthetic.user." + uniq() + "@havana.example"
+	email := "synthetic.user." + uniq() + "@pilot-hospital.example"
 	var hid any
 	if hospital != uuid.Nil {
 		hid = hospital
@@ -393,7 +393,7 @@ func TestLoginWrongPasswordGeneric(t *testing.T) {
 	u := clinician(t)
 	ip := newIP()
 	wrong := e.login(t, u.email, "not-the-password-at-all", ip)
-	unknown := e.login(t, "nobody."+uniq()+"@havana.example", "not-the-password-at-all", newIP())
+	unknown := e.login(t, "nobody."+uniq()+"@pilot-hospital.example", "not-the-password-at-all", newIP())
 	if wrong.code != 401 || wrong.body["code"] != "unauthenticated" {
 		t.Fatalf("wrong password: %d %s", wrong.code, wrong.raw)
 	}
@@ -414,7 +414,7 @@ func TestLoginUnknownSameReply(t *testing.T) {
 		a := e.login(t, u.email, "not-the-password-at-all", newIP())
 		wrong = append(wrong, time.Since(start))
 		start = time.Now()
-		b := e.login(t, "nobody."+uniq()+"@havana.example", "not-the-password-at-all", newIP())
+		b := e.login(t, "nobody."+uniq()+"@pilot-hospital.example", "not-the-password-at-all", newIP())
 		unknown = append(unknown, time.Since(start))
 		sameReply(t, a, b)
 	}
@@ -431,7 +431,7 @@ func TestLoginInactiveSameReply(t *testing.T) {
 	u := clinician(t)
 	_, _ = super.Exec(context.Background(), `UPDATE users SET is_active = false WHERE id = $1`, u.id)
 	a := e.login(t, u.email, testPassword, newIP())
-	b := e.login(t, "nobody."+uniq()+"@havana.example", testPassword, newIP())
+	b := e.login(t, "nobody."+uniq()+"@pilot-hospital.example", testPassword, newIP())
 	sameReply(t, a, b)
 
 	gone := seedUser(t, seedHospital(t, hospitalOpts{status: "deactivated"}), false, "clinician")
@@ -442,9 +442,9 @@ func TestLoginInactiveSameReply(t *testing.T) {
 func TestLoginValidation(t *testing.T) {
 	e := newEnv(t)
 	for _, body := range []any{
-		`{"username":"a@havana.example"}`,
+		`{"username":"a@pilot-hospital.example"}`,
 		`{"username":"","password":"x"}`,
-		`{"username":"a@havana.example","password":"x","extra":1}`,
+		`{"username":"a@pilot-hospital.example","password":"x","extra":1}`,
 		`not json`,
 	} {
 		if r := e.do(t, req{method: "POST", path: "/auth/login", body: body}); r.code != 422 {
@@ -480,7 +480,7 @@ func TestLockoutAfterFive(t *testing.T) {
 func TestLockoutUnknownLoginSame(t *testing.T) {
 	e := newEnv(t)
 	u := clinician(t)
-	ghost := "nobody." + uniq() + "@havana.example"
+	ghost := "nobody." + uniq() + "@pilot-hospital.example"
 	ipA, ipB := newIP(), newIP()
 	for i := 0; i < 5; i++ {
 		e.login(t, u.email, "not-the-password-at-all", ipA)
@@ -1006,7 +1006,7 @@ func TestEveryAttemptAudited(t *testing.T) {
 		attempts++
 	}
 	e.login(t, u.email, testPassword, newIP())
-	e.login(t, "nobody."+uniq()+"@havana.example", testPassword, newIP())
+	e.login(t, "nobody."+uniq()+"@pilot-hospital.example", testPassword, newIP())
 	attempts += 2
 	var n1 int
 	_ = super.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action LIKE 'auth.login.%'`).Scan(&n1)
@@ -1014,7 +1014,7 @@ func TestEveryAttemptAudited(t *testing.T) {
 		t.Fatalf("%d audit rows for %d attempts", n1-n0, attempts)
 	}
 	var leak int
-	_ = super.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE payload::text ILIKE '%havana.example%' OR payload::text ILIKE '%password%'`).Scan(&leak)
+	_ = super.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE payload::text ILIKE '%pilot-hospital.example%' OR payload::text ILIKE '%password%'`).Scan(&leak)
 	if leak != 0 {
 		t.Fatalf("%d audit rows mention an email or password", leak)
 	}

@@ -17,7 +17,7 @@ network; docs/privacy/masker-evaluation.md):
   "(0)" trunk), written whole or in groups with spaces, hyphens, dots or
   brackets; labelled record numbers ("MRN", "hospital no", "folder no",
   "NIN", "BVN", "NHIS") with whatever code follows; and coded record numbers
-  such as "LUTH/2019/12345" or "HAV-000123".
+  such as "LUTH/2019/12345" or "PLT-000123".
 
 It fails closed. If the gazetteer can't be read, or its hash doesn't match,
 detect() raises DetectorUnavailable, which PIIMasker.mask lets through: the
@@ -689,7 +689,7 @@ _LABEL: Final = re.compile(
     re.IGNORECASE,
 )
 # A coded record number: capitals, then groups joined by "/" or "-", one of
-# them three or more digits ("LUTH/2019/12345", "HAV-000123"). The token is
+# them three or more digits ("LUTH/2019/12345", "PLT-000123"). The token is
 # read whole, however long (the input cap bounds it), and masked whole:
 # there is no segment count or length that lets a longer code through.
 # Linear: every group ends at a separator, so nothing backtracks.

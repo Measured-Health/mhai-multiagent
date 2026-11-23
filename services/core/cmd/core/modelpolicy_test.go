@@ -26,12 +26,12 @@ func TestCLIModelPolicyArgsCheckedFirst(t *testing.T) {
 	for _, args := range [][]string{
 		{},
 		{"set"},
-		{"set", "HAV"},
-		{"get", "HAV", "--provider", "none"},
-		{"set", "--provider", "none", "HAV"},
-		{"set", "HAV", "--provider", "none", "EXTRA"},
-		{"set", "HAV", "--provider", "none", "--model", "x"},
-		{"set", "HAV", "-h"},
+		{"set", "PLT"},
+		{"get", "PLT", "--provider", "none"},
+		{"set", "--provider", "none", "PLT"},
+		{"set", "PLT", "--provider", "none", "EXTRA"},
+		{"set", "PLT", "--provider", "none", "--model", "x"},
+		{"set", "PLT", "-h"},
 	} {
 		if err := run(enabled, args...); !errors.Is(err, errModelPolicyArgs) {
 			t.Errorf("%v: %v", args, err)
@@ -45,18 +45,18 @@ func TestCLIModelPolicyArgsCheckedFirst(t *testing.T) {
 		args []string
 		want error
 	}{
-		"unknown provider":     {enabled, []string{"set", "HAV", "--provider", "mistral", "--agreement-ref", "DEMO-SYNTHETIC"}, errUnknownProvider},
-		"gemini not enabled":   {enabled, []string{"set", "HAV", "--provider", "gemini", "--agreement-ref", "DEMO-SYNTHETIC"}, errProviderDisabled},
-		"local":                {enabled, []string{"set", "HAV", "--provider", "local"}, errUnknownProvider},
-		"disabled provider":    {enabled, []string{"set", "HAV", "--provider", "xai", "--agreement-ref", "DEMO-SYNTHETIC"}, errProviderDisabled},
-		"nothing enabled":      {envOf(nil), []string{"set", "HAV", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC"}, errProviderDisabled},
-		"provider without ref": {enabled, []string{"set", "HAV", "--provider", "anthropic"}, errNeedsAgreementRef},
-		"bad ref":              {enabled, []string{"set", "HAV", "--provider", "anthropic", "--agreement-ref", "signed-by-dr-synthetic"}, errBadAgreementRef},
-		"budget 0":             {enabled, []string{"set", "HAV", "--provider", "none", "--budget", "0"}, errBadBudget},
-		"pseudonym ref":        {enabled, []string{"set", "HAV", "--provider", "anthropic", "--agreement-ref", "P-AB12CD34"}, errBadAgreementRef},
-		"name ref":             {enabled, []string{"set", "HAV", "--provider", "anthropic", "--agreement-ref", "ADAEZE-OKAFOR"}, errBadAgreementRef},
-		"ref while off":        {enabled, []string{"set", "HAV", "--provider", "none", "--agreement-ref", "AGR-2026-01"}, errRefWithoutProvider},
-		"budget too big":       {enabled, []string{"set", "HAV", "--provider", "none", "--budget", "1000000001"}, errBadBudget},
+		"unknown provider":     {enabled, []string{"set", "PLT", "--provider", "mistral", "--agreement-ref", "DEMO-SYNTHETIC"}, errUnknownProvider},
+		"gemini not enabled":   {enabled, []string{"set", "PLT", "--provider", "gemini", "--agreement-ref", "DEMO-SYNTHETIC"}, errProviderDisabled},
+		"local":                {enabled, []string{"set", "PLT", "--provider", "local"}, errUnknownProvider},
+		"disabled provider":    {enabled, []string{"set", "PLT", "--provider", "xai", "--agreement-ref", "DEMO-SYNTHETIC"}, errProviderDisabled},
+		"nothing enabled":      {envOf(nil), []string{"set", "PLT", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC"}, errProviderDisabled},
+		"provider without ref": {enabled, []string{"set", "PLT", "--provider", "anthropic"}, errNeedsAgreementRef},
+		"bad ref":              {enabled, []string{"set", "PLT", "--provider", "anthropic", "--agreement-ref", "signed-by-dr-synthetic"}, errBadAgreementRef},
+		"budget 0":             {enabled, []string{"set", "PLT", "--provider", "none", "--budget", "0"}, errBadBudget},
+		"pseudonym ref":        {enabled, []string{"set", "PLT", "--provider", "anthropic", "--agreement-ref", "P-AB12CD34"}, errBadAgreementRef},
+		"name ref":             {enabled, []string{"set", "PLT", "--provider", "anthropic", "--agreement-ref", "ADAEZE-OKAFOR"}, errBadAgreementRef},
+		"ref while off":        {enabled, []string{"set", "PLT", "--provider", "none", "--agreement-ref", "AGR-2026-01"}, errRefWithoutProvider},
+		"budget too big":       {enabled, []string{"set", "PLT", "--provider", "none", "--budget", "1000000001"}, errBadBudget},
 	} {
 		err := run(c.env, c.args...)
 		if !errors.Is(err, c.want) {
@@ -74,15 +74,15 @@ func TestCLIModelPolicyArgsCheckedFirst(t *testing.T) {
 		args []string
 		want error
 	}{
-		"own model not allowed":   {enabled, []string{"set", "HAV", "--provider", "none", "--own-model", "on"}, errOwnModelNotAllowed},
-		"own model allowed false": {envOf(map[string]string{"CORE_OWN_MODEL_ALLOWED": "false"}), []string{"set", "HAV", "--provider", "none", "--own-model", "on"}, errOwnModelNotAllowed},
-		"provider before allowed": {allowed, []string{"set", "HAV", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC", "--own-model", "on"}, errProviderDisabled},
+		"own model not allowed":   {enabled, []string{"set", "PLT", "--provider", "none", "--own-model", "on"}, errOwnModelNotAllowed},
+		"own model allowed false": {envOf(map[string]string{"CORE_OWN_MODEL_ALLOWED": "false"}), []string{"set", "PLT", "--provider", "none", "--own-model", "on"}, errOwnModelNotAllowed},
+		"provider before allowed": {allowed, []string{"set", "PLT", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC", "--own-model", "on"}, errProviderDisabled},
 	} {
 		if err := run(c.env, c.args...); !errors.Is(err, c.want) {
 			t.Errorf("%s: %v, want %v", name, err, c.want)
 		}
 	}
-	if err := run(envOf(map[string]string{"CORE_OWN_MODEL_ALLOWED": "yes"}), "set", "HAV", "--provider", "none"); err == nil ||
+	if err := run(envOf(map[string]string{"CORE_OWN_MODEL_ALLOWED": "yes"}), "set", "PLT", "--provider", "none"); err == nil ||
 		!strings.Contains(err.Error(), "CORE_OWN_MODEL_ALLOWED") {
 		t.Errorf("bad CORE_OWN_MODEL_ALLOWED: %v", err)
 	}
@@ -90,23 +90,23 @@ func TestCLIModelPolicyArgsCheckedFirst(t *testing.T) {
 		env  func(string) string
 		args []string
 	}{
-		{allowed, []string{"set", "HAV", "--provider", "none", "--own-model", "on"}},
-		{enabled, []string{"set", "HAV", "--provider", "none", "--own-model", "off"}},
-		{enabled, []string{"set", "HAV", "--provider", "none"}},
+		{allowed, []string{"set", "PLT", "--provider", "none", "--own-model", "on"}},
+		{enabled, []string{"set", "PLT", "--provider", "none", "--own-model", "off"}},
+		{enabled, []string{"set", "PLT", "--provider", "none"}},
 	} {
 		if err := run(c.env, c.args...); err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
 			t.Errorf("%v, no url: %v", c.args, err)
 		}
 	}
 	// A bad CORE_CLOUD_PROVIDERS is refused, naming the variable only.
-	err := run(envOf(map[string]string{"CORE_CLOUD_PROVIDERS": "anthropic,anthropic"}), "set", "HAV", "--provider", "none")
+	err := run(envOf(map[string]string{"CORE_CLOUD_PROVIDERS": "anthropic,anthropic"}), "set", "PLT", "--provider", "none")
 	if err == nil || !strings.Contains(err.Error(), "CORE_CLOUD_PROVIDERS") || strings.Contains(err.Error(), "anthropic,anthropic") {
 		t.Errorf("bad env: %v", err)
 	}
 	// Good arguments reach the connection.
 	for _, args := range [][]string{
-		{"set", "HAV", "--provider", "none"},
-		{"set", "hav", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC", "--budget", "5000"},
+		{"set", "PLT", "--provider", "none"},
+		{"set", "plt", "--provider", "anthropic", "--agreement-ref", "DEMO-SYNTHETIC", "--budget", "5000"},
 	} {
 		if err := run(enabled, args...); err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
 			t.Errorf("%v, no url: %v", args, err)
@@ -114,7 +114,7 @@ func TestCLIModelPolicyArgsCheckedFirst(t *testing.T) {
 	}
 	// seed routes "hospitals model-policy" here.
 	t.Setenv("CORE_CLOUD_PROVIDERS", "")
-	err = seed(ctx, []string{"hospitals", "model-policy", "set", "HAV", "--provider", "xai", "--agreement-ref", "DEMO-SYNTHETIC"}, "",
+	err = seed(ctx, []string{"hospitals", "model-policy", "set", "PLT", "--provider", "xai", "--agreement-ref", "DEMO-SYNTHETIC"}, "",
 		strings.NewReader(""), &bytes.Buffer{})
 	if !errors.Is(err, errProviderDisabled) {
 		t.Errorf("through seed: %v", err)

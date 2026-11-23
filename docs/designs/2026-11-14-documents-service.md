@@ -6,9 +6,9 @@
   - the [document pipeline design](../specs/2026-10-28-document-pipeline-and-model-promotion-design.md) (approved 28 Oct): the flow (§3), the extraction schema (§4), review (§5), the threat model T1–T16 and abuse cases B1–B27 (§9). This design is the "documents service" that design names but leaves unspecified, plus phase 1's review tables and routes;
   - the [phase 0 plan](../plans/2026-11-03-document-pipeline-phase0.md) (built, #91 and #94): `intelligence/modelstore` (pinned, verified weights) and `intelligence/doceval` (the extractor interface, the synthetic set and the phase 1 gate);
   - [ADR 0010](../adr/0010-api-in-go-models-in-python-over-nats.md) (Go API, Python models, NATS between them; only core publishes jobs), [ADR 0011](../adr/0011-frontend-ingress-over-nats.md) (the BFF reaches core over NATS), [ADR 0013](../adr/0013-allow-masked-text-to-cloud-language-models.md) (document images never go to a cloud model), [ADR 0014](../adr/0014-separate-emr-service-and-document-route.md) (the emr service holds every outside credential; scanned records reach the canonical model only after review; one normaliser);
-  - the [EMR integration design](../specs/2026-11-07-emr-integration-design.md) §5.3, §9.0, §10.3, §10.6, §14.2 and the [EMR plan](../plans/2026-11-07-emr-integration.md): PR 9 (retention, exclusion purge, legal hold), PR 11 (#179, departures 62–72) and PR 12 (Havana scanned archive, Tasks 45–47, waiting on this service and H2);
+  - the [EMR integration design](../specs/2026-11-07-emr-integration-design.md) §5.3, §9.0, §10.3, §10.6, §14.2 and the [EMR plan](../plans/2026-11-07-emr-integration.md): PR 9 (retention, exclusion purge, legal hold), PR 11 (#179, departures 62–72) and PR 12 (the pilot hospital's scanned archive, Tasks 45–47, waiting on this service and H2);
   - the [Analysis plan](../plans/2026-11-07-analysis-backend.md) PRs 7–8: clearance letters, whose live upload answers 503 `unavailable` until "the documents service" exists (departures 35 and 43).
-- **Companion:** [Havana archive contract (H2)](2026-11-14-havana-archive-contract-h2.md), what Havana's side provides for EMR PR 12.
+- **Companion:** [Pilot hospital archive contract (H2)](2026-11-14-pilot-archive-contract-h2.md), what the pilot hospital's side provides for EMR PR 12.
 
 ## 1. Why
 
@@ -16,7 +16,7 @@ Three things are waiting on one missing service:
 
 1. **Clearance letters** (Analysis PR 7) can't be uploaded outside the demo. Core keeps a 64 KiB body limit and NATS a 1 MB payload, so core can't take a 10 MB letter, and nothing exists to store, check and render it.
 2. **Document pipeline phase 1** (typed lab reports) needs uploads, a malware scan, a sandboxed rasteriser, the `ingest_document` and `finalise_document` jobs, review tables and the review routes.
-3. **EMR PR 12** (Havana's scanned archive) needs somewhere to hand each new scan, a reviewer's patient search, and a path from reviewed values to `emr.raw_records`.
+3. **EMR PR 12** (the pilot hospital's scanned archive) needs somewhere to hand each new scan, a reviewer's patient search, and a path from reviewed values to `emr.raw_records`.
 
 This design is that service and the pieces around it in core, the pipeline worker and the emr service.
 
@@ -61,7 +61,7 @@ BFF ──api.v1──▶ core ───┼── documents.v1.ctl.* (request to
                  │                                   └─▶ Postgres: extraction, fields, review, emr.raw_records
                  └─ emr.v1.<hid>.fetched (after finalise) ─▶ emr normaliser ─▶ rules ─▶ alerts
 
-emr service (document_archive connector) ── Havana archive (H2 contract, through egress-emr)
+emr service (document_archive connector) ── the pilot hospital's archive (H2 contract, through egress-emr)
      ├─ documents_register_archive_file() (Postgres definer)
      └─ documents.v1.<hid>.intake ──▶ documents service: a one-time POST policy for that row's key
 ```
@@ -340,11 +340,11 @@ Never in any payload, log line, span or metric label: a file name, a page's text
 
 ## 12. Sizing
 
-These are planning numbers for the Havana pilot; the pilot measures the real ones.
+These are planning numbers for the pilot; the pilot measures the real ones.
 
 | Quantity | Assumption | Result |
 |---|---|---|
-| Archive intake | the 100-a-day cap per connection (§4.3); Havana's archive is about 194 GB, so a full backfill isn't attempted (the companion contract starts at "latest") | ≤ 100 documents a day |
+| Archive intake | the 100-a-day cap per connection (§4.3); the pilot hospital's archive is about 194 GB, so a full backfill isn't attempted (the companion contract starts at "latest") | ≤ 100 documents a day |
 | Direct uploads | 50 a day | |
 | Pages | about 8 per document | about 1,200 pages a day |
 | Extraction | pipeline design §6.3: p50 8 s, p95 20 s a page on one L40S | about 3 GPU-hours a day at p50; fits the shared GPU host |
@@ -374,7 +374,7 @@ Each PR leaves `main` working with documents **off**: the `documents` compose pr
 | **7: ingest** | `ingest_document` in the pipeline worker behind `doceval`'s extractor interface, with `modelstore`'s verified load; page fetch over `documents.v1.<hid>.page`; confidence, grounding, validation, code proposals; the in-flight cap and emergency stop. Runs end to end on the synthetic set with the stub extractor | PR 6; a real model needs the GPU (phase 0 H6) and a pinned `extract` role |
 | **8: finalise** | `finalise_document` to `emr.raw_records`; core's `emr.v1.<hid>.fetched`; rejected values reopen the review; detach (needs an emr `document_detached` signal that marks derived rows `entered-in-error` and withdraws their alerts). This is EMR Task 47 | PR 7 |
 | **9: retention and purge** | the maintenance loop, the retention table, the exclusion hook into `emr_purge_patient`, legal holds, hospital removal with key destruction, the KMS provider, key rotation | PR 8; H5 confirms the values before the sweep is switched on |
-| **10: archive connector** | EMR Task 46 against the companion contract: listing, removals, downloads, register, intake, back-pressure, `source_removed` handling | PR 9; **H2** (Havana implements the contract) |
+| **10: archive connector** | EMR Task 46 against the companion contract: listing, removals, downloads, register, intake, back-pressure, `source_removed` handling | PR 9; **H2** (the pilot hospital implements the contract) |
 
 **Live use** (any real document) waits on all of: phase 1's evaluation passing pipeline design §6.3 on the locked split with clinical sign-off; the GPU host; the KMS provider (or the product owner's written acceptance of the `file` keyring for the pilot, §16 D5); H5 (privacy, retention values, region); NATS TLS and JetStream encryption at rest; and, for the archive, H2.
 
@@ -386,7 +386,7 @@ Patient data in originals, pages, extractions, review decisions and archive file
 
 ### 14.2 Actors and trust boundaries
 
-Actors: clinicians, records clerks and hospital admins (upload, review, letters); platform admins (jobs view only, no documents); auditors (none); the BFF; core; the documents service; docsandbox; clamav and its updater; the pipeline worker; the model host; the emr service; Havana's archive; the object store; an attacker who controls a file's content, holds one stolen session or credential, or compromises one component.
+Actors: clinicians, records clerks and hospital admins (upload, review, letters); platform admins (jobs view only, no documents); auditors (none); the BFF; core; the documents service; docsandbox; clamav and its updater; the pipeline worker; the model host; the emr service; the pilot hospital's archive; the object store; an attacker who controls a file's content, holds one stolen session or credential, or compromises one component.
 
 | Crossing | What is checked |
 |---|---|
@@ -481,7 +481,7 @@ The plan writes these first. B1–B27 from the pipeline design stand.
 |---|---|---|---|
 | P1 | Product owner, ops | The object store bucket and KMS in our cloud account and region; the documents service's identity | PR 9's KMS provider; live use (or D5) |
 | P2 | Ops | A ClamAV signature mirror or the egress rule for the public one | PR 4 outside development |
-| P3 | Havana with our team | The companion contract implemented (H2) | PR 10 |
+| P3 | The pilot hospital with our team | The companion contract implemented (H2) | PR 10 |
 | P4 | Clinical lead | Phase 1 thresholds, the pass gate on the locked split, the clinician-for-criticals rule | live use |
 | P5 | Privacy lead (H5) | Region, the retention values in §6.3, the file name hint, the source-removed rule | the sweep; live use |
 | P6 | Legal (H3) | Letter template and letter retention | live letters |
