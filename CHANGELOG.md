@@ -18,6 +18,32 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Add a hospital from the platform app.** The platform app's "Add
+  hospital" form sent `POST /platform/hospitals` and got 404: only the CLI
+  could make a hospital. Core now serves it to platform admins (auditors
+  403) on a two-step session, no step-up, with `Idempotency-Key`, at most 10
+  a minute per session. The body is the app's `HospitalIn` (`name`,
+  `short_code`, `country`, `time_zone`, `email_domains`, `first_admin
+  {name, email}`), every field required and checked with the CLI's rules
+  (shared as `account.CheckNewHospital`) plus an ISO 3166-1 alpha-2 country
+  and up to 20 email domains; 422 `validation_failed` otherwise, 409
+  `duplicate` (new code) for a short code another hospital has, 409
+  `email_in_use` (new code) for an email an account has. In one
+  transaction: the hospital (`setup_incomplete`, as the CLI leaves it), its
+  settings (two-step required for clinicians, as the live onboarding
+  does), the first admin invited as `hospital_admin` with a 3-day link
+  (as a hospital admin's invite), the outbox row, and the audit entries
+  `hospital.created` `{via: platform}` (new value) and `staff.invited`.
+  The reply is 201 with the hospital's page; `GET /platform/hospitals/{id}`
+  now shows `country`, `email_domains` and `first_admin` (pending, accepted
+  or expired), and leaves an admin who hasn't accepted their invite out of
+  `admins`. No sender is 503 `no_delivery` before anything changes.
+  Migration 00058 adds `hospitals.country`, `email_domains` and
+  `first_admin_id`, and gives `mhai_platform` exactly the inserts of a
+  hospital its own transaction makes (never a password, a platform
+  account or an existing hospital). The CLI's hospital name is now held to
+  1 to 120 characters with no control characters, and `Local` is no longer
+  taken as a time zone. Core OpenAPI 1.38.0.
 - **Move two-step to a new authenticator app, without an admin.** A signed-in
   user with two-step on calls `POST /auth/mfa/replace` with a step-up code
   (`mfa_code` or `backup_code`) and gets a new secret (`otpauth_uri`), kept

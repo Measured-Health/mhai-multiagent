@@ -77,8 +77,9 @@ type Deps struct {
 	// AuditExports is CORE_AUDIT_EXPORTS: off, every audit export route
 	// and the legal-reference route answer 404 (analysis plan departure 61).
 	AuditExports bool
-	// Sender delivers what the hospital admin's actions owe a person
-	// (CORE_DELIVERY); nil answers those actions 503 no_delivery.
+	// Sender delivers what the hospital admin's actions owe a person, and
+	// a new hospital's first admin's invite (CORE_DELIVERY); nil answers
+	// those actions 503 no_delivery.
 	Sender delivery.Sender
 	// AppURL is the clinical app's address for invite and reset links
 	// (CORE_APP_URL); ShowLinks puts the link in the admin's reply, on
@@ -107,7 +108,8 @@ func Register(m *authz.Mux, d Deps) {
 	platform.Register(m, platform.Deps{Pool: d.Pool, Log: a.Log, MasterKey: a.MFAKey,
 		SecurityContact: d.SecurityContact, Walk: d.AuditWalk, Health: d.Health, Intel: d.Intel,
 		Auth: a, QueryCap: d.QueryCap, CloudProviders: d.CloudProviders, OwnModelAllowed: d.OwnModelAllowed, EMREnabled: d.EMREnabled, EMRTypes: d.EMRTypes,
-		EMR: d.EMR, EMRSealer: d.EMRSealer, EMRDevelopment: d.EMRDevelopment, ExportsOn: d.AuditExports})
+		EMR: d.EMR, EMRSealer: d.EMRSealer, EMRDevelopment: d.EMRDevelopment, ExportsOn: d.AuditExports,
+		Sender: d.Sender, AppURL: d.AppURL})
 	// Patient Analysis's reads and the de-identified list (analysis
 	// backend plan Tasks 10 and 13): off unless the hospital's analysis
 	// switch is on.

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.37.0"
+  version: "1.38.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -4147,6 +4147,69 @@ paths:
         "422": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
+    post:
+      operationId: addPlatformHospital
+      summary: Add a hospital and invite its first hospital admin.
+      description: |
+        Platform admins only (auditors 403 `forbidden`), on a two-step
+        session; no step-up code. Every field is required; an unknown field,
+        or any query, is 422 `validation_failed`.
+
+        - `name`: 1 to 120 characters, trimmed, no control characters.
+        - `short_code`: the CLI's rule (2 to 32 letters, digits, `-` or `_`,
+          starting with a letter or digit), stored upper-case; another
+          hospital's, in any case, is 409 `duplicate`.
+        - `country`: an ISO 3166-1 alpha-2 code (`NG`), any case, stored
+          upper-case; private-use and deprecated codes are refused.
+        - `time_zone`: an IANA zone name (`Africa/Lagos`).
+        - `email_domains`: 0 to 20 host names, trimmed, lower-cased,
+          repeats dropped. One entry is one domain (a comma is refused).
+        - `first_admin`: `name` as `name`; `email` a plain address (stored
+          lower-case). One an account already has, a platform account's
+          included, is 409 `email_in_use`. It need not be in
+          `email_domains`.
+
+        In one transaction: the hospital (`setup_incomplete`, as `core
+        hospitals create` leaves it; `core hospitals activate` makes it
+        active), its settings (two-step required for clinicians, the rest at
+        their defaults), the first admin's account
+        (invited: no password, `hospital_admin`), an invite link valid 3
+        days (the hospital admin invite's: the clinical app's
+        `/reset-password` page, redeemed at `POST /auth/password/reset`),
+        the outbox row and the audit entries `hospital.created` `{via:
+        platform}` and `staff.invited` `{roles: [hospital_admin]}`, by ids
+        only. Nothing is kept if any of it fails. With no message sender
+        configured it is 503 `no_delivery` before anything changes; if the
+        sender refuses the link after commit, the hospital stays added and
+        the reply is 503 `no_delivery`. At most 10 a minute per session
+        (429 `rate_limited`). The reply is the hospital's page, exactly as
+        `GET /platform/hospitals/{id}` reads it, and never carries the link.
+        Added in 1.38.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, conflict, duplicate, email_in_use, rate_limited, no_delivery, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformHospitalIn" }
+      responses:
+        "201":
+          description: The hospital added.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformHospital" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /platform/hospitals/{id}:
     get:
@@ -4154,11 +4217,13 @@ paths:
       summary: A hospital's page.
       description: |
         Platform admins and auditors. The summary, the active hospital
-        admins to contact and the open legal holds in short form. Core keeps
-        no country, email domains, deactivation record, first-admin invite
-        or removal request: `country` is "", `email_domains` [],
-        `deactivation`, `first_admin` and `removal` null, and `version` 1
-        (no hospital write is served yet). A hold keeps every record (scope
+        admins to contact (an admin whose invite isn't accepted yet is left
+        out) and the open legal holds in short form. A hospital added with
+        `POST /platform/hospitals` has its `country`, `email_domains` and
+        `first_admin`; one the CLI made has `country` "", `email_domains` []
+        and `first_admin` null. Core keeps no deactivation record or removal
+        request: `deactivation` and `removal` are null, and `version` 1 (no
+        hospital edit is served yet). A hold keeps every record (scope
         `from` and `to` null); its `review_on` is six months after it was
         placed, in the hospital's time zone, and it is `review_due` from that
         day. An id that is no hospital's, or not a canonical uuid, is 404;
@@ -5842,6 +5907,8 @@ components:
             - already_used
             - no_delivery
             - invalid_token
+            - duplicate
+            - email_in_use
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -6626,12 +6693,28 @@ components:
         created_at: { type: string, format: date-time }
         last_activity_at: { type: string, format: date-time, nullable: true }
         legal_holds_active: { type: integer, minimum: 0 }
-        country: { type: string, description: "Always empty: core keeps no country." }
+        country: { type: string, description: "ISO 3166-1 alpha-2; empty for a hospital the CLI made." }
         time_zone: { type: string }
-        email_domains: { type: array, items: { type: string }, description: "Always empty: core keeps none." }
+        email_domains: { type: array, maxItems: 20, items: { type: string }, description: "Empty for a hospital the CLI made." }
         version: { type: integer, minimum: 1 }
         deactivation: { type: object, nullable: true }
-        first_admin: { type: object, nullable: true }
+        first_admin:
+          type: object
+          nullable: true
+          description: >-
+            The hospital admin invited with the hospital (1.38.0) and their
+            latest invite: `accepted` once its link was used, `pending`
+            while it is live, `expired` otherwise. `invite_id` is the
+            invited account's id. Null for a hospital the CLI made.
+          required: [invite_id, name, email, status, sent_at, expires_at]
+          additionalProperties: false
+          properties:
+            invite_id: { type: string, format: uuid }
+            name: { type: string }
+            email: { type: string, format: email }
+            status: { type: string, enum: [pending, accepted, expired] }
+            sent_at: { type: string, format: date-time }
+            expires_at: { type: string, format: date-time }
         removal: { type: object, nullable: true }
         admins:
           type: array
@@ -6644,6 +6727,24 @@ components:
               name: { type: string }
               email: { type: string, format: email }
         legal_holds: { type: array, items: { $ref: "#/components/schemas/HoldShort" } }
+    PlatformHospitalIn:
+      type: object
+      description: A hospital to add (POST /platform/hospitals). Added in 1.38.0.
+      required: [name, short_code, country, time_zone, email_domains, first_admin]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        short_code: { type: string, pattern: "^\\s*[A-Za-z0-9][A-Za-z0-9_-]{1,31}\\s*$" }
+        country: { type: string, pattern: "^\\s*[A-Za-z]{2}\\s*$" }
+        time_zone: { type: string, minLength: 1, maxLength: 64 }
+        email_domains: { type: array, maxItems: 20, items: { type: string, minLength: 1, maxLength: 253 } }
+        first_admin:
+          type: object
+          required: [name, email]
+          additionalProperties: false
+          properties:
+            name: { type: string, minLength: 1, maxLength: 120 }
+            email: { type: string, format: email, maxLength: 254 }
     ModelPolicy:
       type: object
       description: >-

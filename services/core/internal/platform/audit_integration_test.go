@@ -171,7 +171,8 @@ func TestMain(m *testing.M) {
 		server.Register(mux, server.Deps{Auth: svc, Pool: app, SecurityContact: testContact,
 			AuditWalk: func(id uuid.UUID) { walks <- id }, Health: healthKV, Intel: intelClient, QueryCap: testQueryCap,
 			CloudProviders: testCloudProviders, OwnModelAllowed: true, EMREnabled: true, EMRTypes: []string{"stub"}, EMR: emrClient,
-			EMRSealer: emrctl.NewSealer(emrKP.Public), EMRDevelopment: true, AuditExports: true})
+			EMRSealer: emrctl.NewSealer(emrKP.Public), EMRDevelopment: true, AuditExports: true,
+			Sender: invites, AppURL: testAppURL})
 		handler = mux.Handler([]string{serviceKey})
 		// The same service with EMR off (the default, K4).
 		offGuard := &authz.Guard{Keys: issuer.PublicKeys(), Denylist: buckets.Denylist, Pool: app, Log: log,

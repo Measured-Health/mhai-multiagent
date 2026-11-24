@@ -9,17 +9,24 @@ package platform
 //     characters); status one of the six. The cursor is opaque
 //     (base64url of the last row's name and id); one that doesn't decode
 //     to a name and a canonical uuid is 422.
+//   - POST /platform/hospitals: platform admins add a hospital and invite
+//     its first hospital admin (hospital_add.go).
 //   - GET /platform/hospitals/{id}: the same readers; the summary and the
 //     page's parts: the active hospital admins to contact and the open
 //     legal holds in short form.
 //   - GET /platform/hospitals/{id}/sso: the same readers; core keeps no
 //     single sign-on per hospital, so it is always off and empty.
 //
-// What core doesn't keep is sent empty, never invented: country "" and
-// email_domains [] (no columns; hospitals are made by the provisioning
-// CLI), version 1 (no hospital write is served), sso_enabled false, and
-// deactivation, first_admin and removal null (no deactivation record,
-// invite or removal request exists in core). A legal hold always keeps
+// A hospital added from the platform app (POST /platform/hospitals,
+// hospital_add.go) has its country, email domains and first admin; one the
+// provisioning CLI made has none of them. What core doesn't keep is sent
+// empty, never invented: country "" and email_domains [] for a CLI
+// hospital, first_admin null when there is no first admin, version 1 (no
+// hospital edit is served), sso_enabled false, and deactivation and
+// removal null (no deactivation record or removal request exists in core).
+// first_admin's status is its latest invite's: accepted once the link was
+// used, pending while it is live, expired otherwise. A hospital admin
+// whose invite is not yet accepted is not among the admins to contact. A legal hold always keeps
 // every record (scope from and to null); its review date is its own
 // (00037), or for one the CLI placed design §4's default, six months after
 // it was placed (in the hospital's time zone). It is review_due from that
@@ -67,6 +74,9 @@ var HospitalStatuses = []string{"active", "setup_incomplete", "deactivated", "re
 func registerHospitals(m *authz.Mux, d Deps) {
 	read := authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin, authz.RoleAuditor}}
 	authz.Route(m, http.MethodGet, "/platform/hospitals", read, http.HandlerFunc(d.hospitalList))
+	authz.Route(m, http.MethodPost, "/platform/hospitals",
+		authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin}, Write: true},
+		http.HandlerFunc(d.hospitalAdd))
 	authz.Route(m, http.MethodGet, "/platform/hospitals/{id}", read, http.HandlerFunc(d.hospitalGet))
 	authz.Route(m, http.MethodGet, "/platform/hospitals/{id}/sso", read, http.HandlerFunc(d.hospitalSSO))
 }
@@ -113,10 +123,22 @@ type Hospital struct {
 	EmailDomains []string        `json:"email_domains"`
 	Version      int             `json:"version"`
 	Deactivation *struct{}       `json:"deactivation"`
-	FirstAdmin   *struct{}       `json:"first_admin"`
+	FirstAdmin   *FirstAdmin     `json:"first_admin"`
 	Removal      *struct{}       `json:"removal"`
 	Admins       []HospitalAdmin `json:"admins"`
 	LegalHolds   []HoldShort     `json:"legal_holds"`
+}
+
+// FirstAdmin is the hospital admin invited with the hospital, and their
+// latest invite. InviteID is the invited account's id: it stays the same
+// when the invite is sent again.
+type FirstAdmin struct {
+	InviteID  string `json:"invite_id"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	Status    string `json:"status"`
+	SentAt    string `json:"sent_at"`
+	ExpiresAt string `json:"expires_at"`
 }
 
 // HospitalsOut is the list's page.
@@ -309,9 +331,25 @@ func readHospital(ctx context.Context, tx pgx.Tx, hid uuid.UUID) (Hospital, erro
 		return out, err
 	}
 	out.HospitalSummary, out.TimeZone = s, tz
+	var firstAdmin *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(country, ''), email_domains, first_admin_id FROM hospitals WHERE id = $1`,
+		hid).Scan(&out.Country, &out.EmailDomains, &firstAdmin); err != nil {
+		return out, err
+	}
+	if out.EmailDomains == nil {
+		out.EmailDomains = []string{}
+	}
+	if firstAdmin != nil {
+		if out.FirstAdmin, err = readFirstAdmin(ctx, tx, *firstAdmin); err != nil {
+			return out, err
+		}
+	}
+	// An admin who hasn't accepted their invite can't act yet.
 	rows, err := tx.Query(ctx, `SELECT u.display_name, u.email::text FROM users u
 		WHERE u.hospital_id = $1 AND u.is_active
 		  AND EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = u.id AND r.role = 'hospital_admin')
+		  AND (NOT EXISTS (SELECT 1 FROM account_tokens t WHERE t.user_id = u.id AND t.purpose = 'invite')
+		       OR EXISTS (SELECT 1 FROM account_tokens t WHERE t.user_id = u.id AND t.purpose = 'invite' AND t.used_at IS NOT NULL))
 		ORDER BY u.display_name, u.id`, hid)
 	if err != nil {
 		return out, err
@@ -330,6 +368,29 @@ func readHospital(ctx context.Context, tx pgx.Tx, hid uuid.UUID) (Hospital, erro
 	}
 	out.LegalHolds, err = openHolds(ctx, tx, hid, tz)
 	return out, err
+}
+
+// readFirstAdmin is account id and its latest invite, or nil when it has
+// none. The status is judged on the database's clock.
+func readFirstAdmin(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*FirstAdmin, error) {
+	var a FirstAdmin
+	var sent, expires time.Time
+	err := tx.QueryRow(ctx, `SELECT u.display_name, u.email::text, t.created_at, t.expires_at,
+			CASE WHEN t.used_at IS NOT NULL THEN 'accepted'
+			     WHEN t.revoked_at IS NULL AND t.expires_at > now() THEN 'pending'
+			     ELSE 'expired' END
+		FROM users u
+		JOIN LATERAL (SELECT x.created_at, x.expires_at, x.used_at, x.revoked_at FROM account_tokens x
+		              WHERE x.user_id = u.id AND x.purpose = 'invite' ORDER BY x.created_at DESC, x.id LIMIT 1) t ON true
+		WHERE u.id = $1`, id).Scan(&a.Name, &a.Email, &sent, &expires, &a.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.InviteID, a.SentAt, a.ExpiresAt = id.String(), stamp(sent), stamp(expires)
+	return &a, nil
 }
 
 // pagePath is the path's hospital for a read that takes no query: false

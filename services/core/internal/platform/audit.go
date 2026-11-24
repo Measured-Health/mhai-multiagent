@@ -36,6 +36,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/emrctl"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
@@ -98,6 +99,17 @@ type Deps struct {
 	// and before commit; its error rolls the write and the row back. Tests
 	// only (A21); server.Register never sets it.
 	AfterFollowUpAudit func() error
+	// Sender delivers the first admin's invite when a hospital is added
+	// (CORE_DELIVERY); nil answers POST /platform/hospitals 503
+	// no_delivery before anything is changed.
+	Sender delivery.Sender
+	// AppURL is the clinical app's address for the invite's link
+	// (CORE_APP_URL).
+	AppURL string
+	// AfterHospitalAdd, when set, runs after an added hospital's last row
+	// and before commit; its error rolls everything back. Tests only;
+	// server.Register never sets it.
+	AfterHospitalAdd func() error
 }
 
 func (d Deps) now() time.Time {
