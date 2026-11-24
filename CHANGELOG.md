@@ -41,6 +41,48 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Add a hospital from the platform app.** The platform app's "Add
+  hospital" form sent `POST /platform/hospitals` and got 404: only the CLI
+  could make a hospital. Core now serves it to platform admins (auditors
+  403) on a two-step session with a step-up code (`mfa_code` or
+  `backup_code`, exactly one; 403 `mfa_required` / `mfa_invalid`, 429
+  `mfa_locked`, audited as the other step-up writes; owner decision 24
+  Nov), with `Idempotency-Key` (a retry replays without its spent code
+  being checked again), at most 10
+  a minute per session. The body is the app's `HospitalIn` (`name`,
+  `short_code`, `country`, `time_zone`, `email_domains`, `first_admin
+  {name, email}`), every field required and checked with the CLI's rules
+  (shared as `account.CheckNewHospital`) plus an ISO 3166-1 alpha-2 country
+  and up to 20 email domains; 422 `validation_failed` otherwise, 409
+  `duplicate` (new code) for a short code another hospital has, 409
+  `email_in_use` (new code) for an email an account has. In one
+  transaction: the hospital (`setup_incomplete`, as the CLI leaves it), its
+  settings (two-step required for clinicians, as the live onboarding
+  does), the first admin invited as `hospital_admin` with a 3-day link
+  (as a hospital admin's invite), the outbox row, and the audit entries
+  `hospital.created` `{via: platform}` (new value) and `staff.invited`.
+  The reply is 201 with the hospital's page; `GET /platform/hospitals/{id}`
+  now shows `country`, `email_domains` and `first_admin` (pending, accepted
+  or expired), and leaves an admin who hasn't accepted their invite out of
+  `admins`. No sender is 503 `no_delivery` before anything changes.
+  Migration 00059 adds `hospitals.country`, `email_domains` and
+  `first_admin_id`, and gives `mhai_platform` exactly the inserts of a
+  hospital its own transaction makes (never a password, a platform
+  account or an existing hospital). The CLI's hospital name is now held to
+  1 to 120 characters with no control characters, and `Local` is no longer
+  taken as a time zone. Core OpenAPI 1.39.0.
+- **Edit a hospital's details from the platform app.** `PATCH
+  /platform/hospitals/{id}` (mhai-web's Edit hospital form, `HospitalPatch`)
+  answered 404. It now takes `version` and any of `name`, `short_code`,
+  `country`, `time_zone` and `email_domains`, each checked as the add checks
+  it (422 `validation_failed`, null included), for platform admins on a
+  two-step session (no step-up), with `Idempotency-Key`. A stale version is
+  409 `conflict`, another hospital's short code 409 `duplicate`, a removed
+  hospital 409 `hospital_removed`. A change bumps the hospital's `version`
+  (new column, migration 00059; GET no longer always says 1) and writes
+  `hospital.updated` with the changed field names only; an edit that changes
+  nothing writes nothing. The activity feed now shows `hospital_added` and
+  `hospital_updated` (the changed details in words).
 - **Security notice emails.** A person is emailed at their own address when
   their password is changed or set with a reset link, two-step is turned on
   or moved to a new authenticator app, a backup code is used (at sign-in or

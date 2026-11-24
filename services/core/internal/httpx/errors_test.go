@@ -49,6 +49,7 @@ func TestCodesCatalogue(t *testing.T) {
 		"not_eligible_platform": 422, "would_empty": 422,
 		"not_cleared": 403, "clearance_ended": 403, "idempotency_mismatch": 422,
 		"too_many_rows": 422, "gone": 410, "already_used": 409, "no_delivery": 503, "invalid_token": 410,
+		"duplicate": 409, "email_in_use": 409,
 	}
 	if len(Codes) != len(want) {
 		t.Fatalf("Codes has %d entries, want %d", len(Codes), len(want))

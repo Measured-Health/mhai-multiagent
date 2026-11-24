@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,8 @@ const ActivityPage = 50
 
 // activityActions maps a core action to mhai-web's ActivityAction.
 var activityActions = map[string]string{
+	"hospital.created":              "hospital_added",
+	"hospital.updated":              "hospital_updated",
 	"hospital.model_policy_changed": "model_policy_changed",
 	"emr.connection_added":          "emr_connection_added",
 	"emr.connection_changed":        "emr_connection_changed",
@@ -102,6 +105,11 @@ ORDER BY e.id DESC LIMIT $4`
 
 func str(s string) *string { return &s }
 
+// hospitalFieldWords are hospital.updated's fields as the feed words them
+// (mhai-web's FIELD_WORDS).
+var hospitalFieldWords = map[string]string{"name": "Name", "short_code": "Short code", "country": "Country",
+	"time_zone": "Time zone", "email_domains": "Email domains"}
+
 // activityTarget is the event's target and detail, by action.
 func activityTarget(action string, payload map[string]any, label, reference, member *string) (target, detail *string) {
 	s := func(k string) *string {
@@ -111,6 +119,20 @@ func activityTarget(action string, payload map[string]any, label, reference, mem
 		return nil
 	}
 	switch action {
+	case "hospital.updated":
+		// The changed details in words, as mhai-web's sample API puts them.
+		var words []string
+		if l, ok := payload["fields"].([]any); ok {
+			for _, f := range l {
+				if w, ok := hospitalFieldWords[fmt.Sprint(f)]; ok {
+					words = append(words, w)
+				}
+			}
+		}
+		if len(words) == 0 {
+			return nil, nil
+		}
+		return nil, str(strings.Join(words, ", "))
 	case "hospital.model_policy_changed":
 		return s("provider"), s("previous")
 	case "emr.connection_added", "emr.connection_changed", "emr.connection_switched_on",

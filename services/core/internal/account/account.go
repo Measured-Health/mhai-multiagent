@@ -1,7 +1,9 @@
 // Package account creates hospitals and users. Only the seed CLI calls it,
 // on a provisioning login (a plain member of mhai_provision, see migration
 // 00004): the gateway's own roles cannot insert users, roles or hospitals,
-// and the provisioning role can do little else.
+// and the provisioning role can do little else. The platform app's add
+// hospital (internal/platform, migration 00059) shares its checks only
+// (CheckNewHospital, NormaliseEmail, ValidEmail), never its writes.
 package account
 
 import (
@@ -11,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 )
@@ -30,6 +34,7 @@ var (
 	ErrNotProvisioner   = errors.New("this database login cannot act as mhai_provision; connect as a login that is a member of it")
 	ErrBadEmail         = errors.New("invalid email address")
 	ErrBadName          = errors.New("name is required")
+	ErrBadHospitalName  = errors.New("hospital name must be 1 to 120 characters, with no control characters")
 	ErrBadShortCode     = errors.New("short code must be 2 to 32 letters, digits, '-' or '_'")
 	ErrBadTimeZone      = errors.New("unknown time zone; use an IANA name such as Africa/Lagos")
 	ErrEmailTaken       = errors.New("an account with that email already exists")
@@ -105,8 +110,49 @@ func validEmail(norm string) bool {
 	return err == nil && a.Name == "" && a.Address == norm
 }
 
+// timeZoneMax bounds a time zone name before it is looked up.
+const timeZoneMax = 64
+
+// ValidTimeZone reports whether tz is an IANA zone name (Africa/Lagos,
+// UTC), as CheckNewHospital takes it; "Local" is not one.
+func ValidTimeZone(tz string) bool { return validTimeZone(tz) == nil }
+
+// HospitalNameMax is a hospital name's longest, in characters (mhai-web's
+// NAME_MAX).
+const HospitalNameMax = 120
+
+// NormaliseHospitalName trims a hospital name; ok is false unless it is 1
+// to HospitalNameMax characters of valid UTF-8 with no control characters.
+func NormaliseHospitalName(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || !utf8.ValidString(s) || utf8.RuneCountInString(s) > HospitalNameMax ||
+		strings.ContainsFunc(s, unicode.IsControl) {
+		return "", false
+	}
+	return s, true
+}
+
+// CheckNewHospital is the one check of a new hospital's name, short code
+// and time zone, for the CLI (CreateHospital) and the platform app (POST
+// /platform/hospitals). It returns the name trimmed and the code
+// normalised.
+func CheckNewHospital(name, shortCode, timeZone string) (string, string, error) {
+	code, ok := NormaliseShortCode(shortCode)
+	if !ok {
+		return "", "", ErrBadShortCode
+	}
+	n, ok := NormaliseHospitalName(name)
+	if !ok {
+		return "", "", ErrBadHospitalName
+	}
+	if err := validTimeZone(timeZone); err != nil {
+		return "", "", err
+	}
+	return n, code, nil
+}
+
 func validTimeZone(tz string) error {
-	if tz == "" {
+	if tz == "" || tz == "Local" || len(tz) > timeZoneMax {
 		return ErrBadTimeZone
 	}
 	if _, err := time.LoadLocation(tz); err != nil {

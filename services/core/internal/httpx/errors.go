@@ -100,6 +100,11 @@ var Codes = map[string]int{
 	// An invite's or a password reset's link that is unknown, used,
 	// replaced or expired (all alike).
 	"invalid_token": http.StatusGone,
+	// Adding a hospital (POST /platform/hospitals; additive): its short
+	// code is another hospital's (mhai-web highlights the field on
+	// `duplicate`), or its first admin's email is already an account's.
+	"duplicate":    http.StatusConflict,
+	"email_in_use": http.StatusConflict,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -158,6 +163,8 @@ var titles = map[string]string{
 	"already_used":          "Already used",
 	"no_delivery":           "Message delivery not set up",
 	"invalid_token":         "Link not valid",
+	"duplicate":             "Short code in use",
+	"email_in_use":          "Email in use",
 }
 
 var details = map[string]string{
@@ -213,6 +220,8 @@ var details = map[string]string{
 	"already_used":          "This legal reference has already been resolved.",
 	"no_delivery":           "Messages can't be sent yet, so nothing was changed.",
 	"invalid_token":         "This link has expired or has already been used.",
+	"duplicate":             "Another hospital already has that short code.",
+	"email_in_use":          "An account with that email already exists.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.

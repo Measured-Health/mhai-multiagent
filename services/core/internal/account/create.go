@@ -35,19 +35,12 @@ type NewUser struct {
 // CreateHospital inserts the hospital, its settings row and an audit entry in
 // one transaction. pool must connect as the owner (see package comment).
 func CreateHospital(ctx context.Context, pool *pgxpool.Pool, h NewHospital) (uuid.UUID, error) {
-	code, ok := NormaliseShortCode(h.ShortCode)
-	if !ok {
-		return uuid.Nil, ErrBadShortCode
-	}
-	name := strings.TrimSpace(h.Name)
-	if name == "" {
-		return uuid.Nil, ErrBadName
-	}
-	if err := validTimeZone(h.TimeZone); err != nil {
+	name, code, err := CheckNewHospital(h.Name, h.ShortCode, h.TimeZone)
+	if err != nil {
 		return uuid.Nil, err
 	}
 	var id uuid.UUID
-	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+	err = inTx(ctx, pool, func(tx pgx.Tx) error {
 		id = uuid.New()
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO hospitals (id, name, short_code, time_zone, is_demo) VALUES ($1, $2, $3, $4, $5)`,
