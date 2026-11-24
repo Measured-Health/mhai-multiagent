@@ -123,6 +123,10 @@ func (s *Service) Register(m *authz.Mux) {
 	h(http.MethodPost, "/auth/mfa/enroll", enrol, httpx.NoStore(http.HandlerFunc(s.enroll)))
 	h(http.MethodPost, "/auth/mfa/verify", enrol, http.HandlerFunc(s.verify))
 	h(http.MethodPost, "/auth/mfa/recovery-codes", authz.Rule{SelfService: true, StepUp: true}, httpx.NoStore(http.HandlerFunc(s.recoveryCodes)))
+	// Moving two-step to a new app: a full session only (never MFAEnrol);
+	// the start takes a step-up code, the confirm a code from the new app.
+	h(http.MethodPost, "/auth/mfa/replace", authz.Rule{SelfService: true, StepUp: true}, httpx.NoStore(http.HandlerFunc(s.replaceStart)))
+	h(http.MethodPost, "/auth/mfa/replace/confirm", signedIn, http.HandlerFunc(s.replaceConfirm))
 	h(http.MethodPost, "/auth/password", enrol, http.HandlerFunc(s.changePassword))
 	// An invite's or a reset's link (its token is in the body, so the
 	// request is never kept for replay).

@@ -18,6 +18,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Move two-step to a new authenticator app, without an admin.** A signed-in
+  user with two-step on calls `POST /auth/mfa/replace` with a step-up code
+  (`mfa_code` or `backup_code`) and gets a new secret (`otpauth_uri`), kept
+  pending while the old app keeps working; `POST /auth/mfa/replace/confirm`
+  with a code from the new app (within 15 minutes) switches to it, spends that
+  code and removes the account's trusted devices. Backup codes and sessions
+  are unchanged. A session limited to enrolment reaches neither route; an
+  account without two-step gets 409 `conflict`; wrong confirm codes count
+  toward the account's code lock. Audit: `auth.mfa.replace_started`,
+  `auth.mfa.replaced` (and `auth.mfa.failed {method: replace}`). Migration
+  00057 adds `user_mfa.pending_secret_enc` and `pending_created_at`. Core
+  OpenAPI 1.37.0.
 - **Several reference libraries at once, a local formulary and guideline
   documents.** `reference_libraries` already allowed one active version per
   name; each library now has its own block of chunk ids (`KB#<block>nnnnnn`)

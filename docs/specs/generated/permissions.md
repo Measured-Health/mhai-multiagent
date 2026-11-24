@@ -29,6 +29,8 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | POST | `/api/v1/auth/mfa/challenge` | public | - | - | no | no | no |
 | POST | `/api/v1/auth/mfa/enroll` | enrolment | any | both | no | no | no |
 | POST | `/api/v1/auth/mfa/recovery-codes` | signed in | any | both | no | yes | no |
+| POST | `/api/v1/auth/mfa/replace` | signed in | any | both | no | yes | no |
+| POST | `/api/v1/auth/mfa/replace/confirm` | signed in | any | both | no | no | no |
 | POST | `/api/v1/auth/mfa/verify` | enrolment | any | both | no | no | no |
 | POST | `/api/v1/auth/password` | enrolment | any | both | no | no | no |
 | POST | `/api/v1/auth/password/reset` | public | - | - | no | no | no |

@@ -232,7 +232,8 @@ func decodeEmpty(w http.ResponseWriter, r *http.Request) bool {
 // a new secret (sealed with AES-256-GCM) and 10 backup codes (stored as
 // keyed hashes), replacing any enrolment not yet verified. Two-step stays
 // off until POST /auth/mfa/verify. An account with two-step already on gets
-// 409 conflict: replacing it takes an admin reset.
+// 409 conflict: it moves to a new app with POST /auth/mfa/replace and
+// /auth/mfa/replace/confirm (mfa_replace.go), or after an admin reset.
 func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 	c := callerOf(r)
 	if !decodeEmpty(w, r) {
@@ -281,7 +282,8 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 			VALUES ($1, $2, false, NULL, $3)
 			ON CONFLICT (user_id) DO UPDATE
 			SET secret_enc = EXCLUDED.secret_enc, enabled = false, last_used_step = NULL,
-			    backup_code_hashes = EXCLUDED.backup_code_hashes
+			    backup_code_hashes = EXCLUDED.backup_code_hashes,
+			    pending_secret_enc = NULL, pending_created_at = NULL
 			WHERE NOT user_mfa.enabled`, uid, sealed, hashes)
 		if err != nil {
 			return errors.New("store mfa enrolment failed")
