@@ -4231,8 +4231,9 @@ paths:
         `POST /platform/hospitals` has its `country`, `email_domains` and
         `first_admin`; one the CLI made has `country` "", `email_domains` []
         and `first_admin` null. Core keeps no deactivation record or removal
-        request: `deactivation` and `removal` are null, and `version` 1 (no
-        hospital edit is served yet). A hold keeps every record (scope
+        request: `deactivation` and `removal` are null. `version` is the
+        hospital's, 1 until `PATCH /platform/hospitals/{id}` changes it
+        (1.38.0). A hold keeps every record (scope
         `from` and `to` null); its `review_on` is six months after it was
         placed, in the hospital's time zone, and it is `review_due` from that
         day. An id that is no hospital's, or not a canonical uuid, is 404;
@@ -4254,6 +4255,58 @@ paths:
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    patch:
+      operationId: editPlatformHospital
+      summary: Edit a hospital's details.
+      description: |
+        Platform admins only (auditors 403 `forbidden`), on a two-step
+        session; no step-up. `version` is required: the hospital's as the
+        page read it; another is 409 `conflict`. Each detail left out is
+        kept; one sent is checked as `POST /platform/hospitals` checks it
+        (422 `validation_failed`, null included). An unknown id is 404, a
+        removed hospital 409 `hospital_removed`, a short code another
+        hospital has 409 `duplicate`. When something changes, `version` goes
+        up by one and one `hospital.updated` entry names the changed fields,
+        never their values; an edit that changes nothing writes nothing. At
+        most 10 a minute per session. The reply is the hospital's page.
+        Added in 1.38.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, conflict, duplicate, hospital_removed, rate_limited, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              additionalProperties: false
+              properties:
+                version: { type: integer, minimum: 1 }
+                name: { type: string, minLength: 1, maxLength: 120 }
+                short_code: { type: string, pattern: "^\\s*[A-Za-z0-9][A-Za-z0-9_-]{1,31}\\s*$" }
+                country: { type: string, pattern: "^\\s*[A-Za-z]{2}\\s*$" }
+                time_zone: { type: string, minLength: 1, maxLength: 64 }
+                email_domains: { type: array, maxItems: 20, items: { type: string, minLength: 1, maxLength: 253 } }
+      responses:
+        "200":
+          description: The hospital.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformHospital" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 

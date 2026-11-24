@@ -41,8 +41,11 @@
 --     only (kind invite, no subject).
 --   - audit_log: hospital.created and staff.invited for that hospital,
 --     with an actor.
--- Nothing is granted on an existing hospital: a platform admin can add a
--- hospital, not people to one.
+-- Nothing else is granted on an existing hospital: a platform admin can
+-- add a hospital, not people to one. The one exception is editing a
+-- hospital's details (below): hospitals.version (new, 1 for every
+-- hospital) and a column UPDATE of the five details and the version on a
+-- hospital not removed, audited hospital.updated.
 
 -- +goose Up
 
@@ -50,7 +53,8 @@ ALTER TABLE hospitals
     ADD COLUMN country text CHECK (country ~ '^[A-Z]{2}$'),
     ADD COLUMN email_domains text[] NOT NULL DEFAULT '{}'
         CHECK (cardinality(email_domains) <= 20 AND array_position(email_domains, NULL) IS NULL),
-    ADD COLUMN first_admin_id uuid REFERENCES users (id) DEFERRABLE INITIALLY DEFERRED;
+    ADD COLUMN first_admin_id uuid REFERENCES users (id) DEFERRABLE INITIALLY DEFERRED,
+    ADD COLUMN version integer NOT NULL DEFAULT 1 CHECK (version > 0);
 
 -- +goose StatementBegin
 CREATE FUNCTION mhai_hospital_added_now(p_hospital uuid) RETURNS boolean
@@ -100,7 +104,21 @@ CREATE POLICY platform_hospital_added_append ON audit_log FOR INSERT TO mhai_pla
     WITH CHECK (action IN ('hospital.created', 'staff.invited') AND actor_id IS NOT NULL
                 AND hospital_id IS NOT NULL AND mhai_hospital_added_now(hospital_id));
 
+-- Editing a hospital's details (PATCH /platform/hospitals/{id}): the five
+-- the form shows and the version, on any hospital not removed. Never its
+-- status, demo flag, first admin or creation time. The audit row has no
+-- hospital (the hospital is in the payload), as hospital.model_policy_changed.
+GRANT UPDATE (name, short_code, time_zone, country, email_domains, version) ON hospitals TO mhai_platform;
+CREATE POLICY platform_edit ON hospitals FOR UPDATE TO mhai_platform
+    USING (status <> 'removed') WITH CHECK (status <> 'removed');
+CREATE POLICY platform_hospital_edit_append ON audit_log FOR INSERT TO mhai_platform
+    WITH CHECK (action = 'hospital.updated' AND hospital_id IS NULL AND actor_id IS NOT NULL);
+
 -- +goose Down
+
+DROP POLICY platform_hospital_edit_append ON audit_log;
+DROP POLICY platform_edit ON hospitals;
+REVOKE UPDATE (name, short_code, time_zone, country, email_domains, version) ON hospitals FROM mhai_platform;
 
 DROP POLICY platform_hospital_added_append ON audit_log;
 DROP POLICY platform_first_admin ON message_outbox;
@@ -119,6 +137,7 @@ REVOKE INSERT (id, name, short_code, time_zone, country, email_domains, first_ad
 DROP FUNCTION mhai_hospital_added_now(uuid);
 
 ALTER TABLE hospitals
+    DROP COLUMN version,
     DROP COLUMN first_admin_id,
     DROP COLUMN email_domains,
     DROP COLUMN country;

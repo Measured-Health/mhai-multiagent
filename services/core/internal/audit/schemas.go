@@ -379,6 +379,11 @@ func init() {
 	// Plan 2: the provisioning CLI (internal/account).
 	// via platform: POST /platform/hospitals (migration 00059).
 	Register("hospital.created", Schema{Fields: fields("via", OneOf("cli", "platform")), Required: []string{"via"}})
+	// PATCH /platform/hospitals/{id} (00059): which details changed, never
+	// their values.
+	Register("hospital.updated", Schema{Fields: fields("hospital_id", id,
+		"fields", List(5, OneOf("name", "short_code", "country", "time_zone", "email_domains")),
+		"via", OneOf("platform")), Required: []string{"hospital_id", "fields", "via"}})
 	Register("hospital.activated", Schema{Fields: fields("via", OneOf("cli"), "from", OneOf("setup_incomplete")),
 		Required: []string{"via", "from"}})
 	Register("user.created", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})

@@ -30,7 +30,7 @@ func TestMigration00059DownUp(t *testing.T) {
 	var insert bool
 	if err := pool.QueryRow(ctx, `SELECT
 			(SELECT count(*) FROM information_schema.columns WHERE table_name = 'hospitals'
-			   AND column_name IN ('country', 'email_domains', 'first_admin_id')),
+			   AND column_name IN ('country', 'email_domains', 'first_admin_id', 'version')),
 			(SELECT count(*) FROM pg_proc WHERE proname = 'mhai_hospital_added_now'),
 			has_any_column_privilege('mhai_platform', 'account_tokens', 'INSERT')`).Scan(&cols, &fns, &insert); err != nil {
 		t.Fatal(err)

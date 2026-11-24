@@ -82,7 +82,7 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 	// its reason. A new grant to the platform fails here until it is
 	// justified in this list.
 	wantRelations := map[string]string{
-		"hospitals":                "00003: names and status for the platform screens; 00059: INSERT of a new setup_incomplete hospital with its first admin (columns)",
+		"hospitals":                "00003: names and status for the platform screens; 00059: INSERT of a new setup_incomplete hospital with its first admin (columns); UPDATE of the five details and version of one not removed (columns)",
 		"users":                    "00003: column SELECT without password_hash (the audit's actor, people search); 00037: UPDATE (is_active) of platform accounts only; 00059: INSERT of a new hospital's invited first admin only (columns, no password)",
 		"platform_users":           "00003: security_invoker view over users' granted columns",
 		"user_roles":               "00003: roles of the audit's actors; 00037: INSERT, DELETE of platform roles of platform accounts only; 00059: hospital_admin for a new hospital's first admin",

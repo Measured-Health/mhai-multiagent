@@ -48,6 +48,18 @@ All notable changes to this project are documented here. The format follows
   account or an existing hospital). The CLI's hospital name is now held to
   1 to 120 characters with no control characters, and `Local` is no longer
   taken as a time zone. Core OpenAPI 1.38.0.
+- **Edit a hospital's details from the platform app.** `PATCH
+  /platform/hospitals/{id}` (mhai-web's Edit hospital form, `HospitalPatch`)
+  answered 404. It now takes `version` and any of `name`, `short_code`,
+  `country`, `time_zone` and `email_domains`, each checked as the add checks
+  it (422 `validation_failed`, null included), for platform admins on a
+  two-step session (no step-up), with `Idempotency-Key`. A stale version is
+  409 `conflict`, another hospital's short code 409 `duplicate`, a removed
+  hospital 409 `hospital_removed`. A change bumps the hospital's `version`
+  (new column, migration 00059; GET no longer always says 1) and writes
+  `hospital.updated` with the changed field names only; an edit that changes
+  nothing writes nothing. The activity feed now shows `hospital_added` and
+  `hospital_updated` (the changed details in words).
 - **Security notice emails.** A person is emailed at their own address when
   their password is changed or set with a reset link, two-step is turned on
   or moved to a new authenticator app, a backup code is used (at sign-in or

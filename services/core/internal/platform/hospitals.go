@@ -11,6 +11,8 @@ package platform
 //     to a name and a canonical uuid is 422.
 //   - POST /platform/hospitals: platform admins, with step-up, add a
 //     hospital and invite its first hospital admin (hospital_add.go).
+//   - PATCH /platform/hospitals/{id}: platform admins edit its details
+//     (hospital_edit.go); version is the hospital's (00059).
 //   - GET /platform/hospitals/{id}: the same readers; the summary and the
 //     page's parts: the active hospital admins to contact and the open
 //     legal holds in short form.
@@ -21,8 +23,8 @@ package platform
 // hospital_add.go) has its country, email domains and first admin; one the
 // provisioning CLI made has none of them. What core doesn't keep is sent
 // empty, never invented: country "" and email_domains [] for a CLI
-// hospital, first_admin null when there is no first admin, version 1 (no
-// hospital edit is served), sso_enabled false, and deactivation and
+// hospital (until an edit sets them), first_admin null when there is no
+// first admin, sso_enabled false, and deactivation and
 // removal null (no deactivation record or removal request exists in core).
 // first_admin's status is its latest invite's: accepted once the link was
 // used, pending while it is live, expired otherwise. A hospital admin
@@ -77,6 +79,9 @@ func registerHospitals(m *authz.Mux, d Deps) {
 	authz.Route(m, http.MethodPost, "/platform/hospitals",
 		authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin}, Write: true, StepUp: true},
 		http.HandlerFunc(d.hospitalAdd))
+	authz.Route(m, http.MethodPatch, "/platform/hospitals/{id}",
+		authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin}, Write: true},
+		http.HandlerFunc(d.hospitalEdit))
 	authz.Route(m, http.MethodGet, "/platform/hospitals/{id}", read, http.HandlerFunc(d.hospitalGet))
 	authz.Route(m, http.MethodGet, "/platform/hospitals/{id}/sso", read, http.HandlerFunc(d.hospitalSSO))
 }
@@ -332,8 +337,8 @@ func readHospital(ctx context.Context, tx pgx.Tx, hid uuid.UUID) (Hospital, erro
 	}
 	out.HospitalSummary, out.TimeZone = s, tz
 	var firstAdmin *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(country, ''), email_domains, first_admin_id FROM hospitals WHERE id = $1`,
-		hid).Scan(&out.Country, &out.EmailDomains, &firstAdmin); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(country, ''), email_domains, first_admin_id, version FROM hospitals WHERE id = $1`,
+		hid).Scan(&out.Country, &out.EmailDomains, &firstAdmin, &out.Version); err != nil {
 		return out, err
 	}
 	if out.EmailDomains == nil {

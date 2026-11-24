@@ -113,6 +113,10 @@ func validEmail(norm string) bool {
 // timeZoneMax bounds a time zone name before it is looked up.
 const timeZoneMax = 64
 
+// ValidTimeZone reports whether tz is an IANA zone name (Africa/Lagos,
+// UTC), as CheckNewHospital takes it; "Local" is not one.
+func ValidTimeZone(tz string) bool { return validTimeZone(tz) == nil }
+
 // HospitalNameMax is a hospital name's longest, in characters (mhai-web's
 // NAME_MAX).
 const HospitalNameMax = 120

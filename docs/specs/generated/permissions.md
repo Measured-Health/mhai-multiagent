@@ -118,6 +118,7 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/platform/hospitals` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | POST | `/api/v1/platform/hospitals` | signed in | `platform_admin` | platform | yes | yes | yes |
 | GET | `/api/v1/platform/hospitals/{id}` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
+| PATCH | `/api/v1/platform/hospitals/{id}` | signed in | `platform_admin` | platform | yes | no | yes |
 | GET | `/api/v1/platform/hospitals/{id}/emr-rule-set` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | PUT | `/api/v1/platform/hospitals/{id}/emr-rule-set` | signed in | `platform_admin` | platform | yes | yes | yes |
 | POST | `/api/v1/platform/hospitals/{id}/emr/connections` | signed in | `platform_admin` | platform | yes | yes | yes |
