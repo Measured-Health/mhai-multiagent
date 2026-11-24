@@ -193,6 +193,7 @@ type req struct {
 	ip           string
 	platform     bool
 	bearer       string
+	idem         string // Idempotency-Key, when set
 }
 
 type resp struct {
@@ -227,6 +228,9 @@ func (e *env) do(t *testing.T, r req) resp {
 	}
 	if r.bearer != "" {
 		hr.Header.Set("Authorization", "Bearer "+r.bearer)
+	}
+	if r.idem != "" {
+		hr.Header.Set("Idempotency-Key", r.idem)
 	}
 	rec := httptest.NewRecorder()
 	e.h.ServeHTTP(rec, hr)

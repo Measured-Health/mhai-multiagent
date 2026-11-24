@@ -363,13 +363,18 @@ func init() {
 	Register("auth.password.reset", Schema{Fields: fields("purpose", OneOf("invite", "password_reset"), "sessions_revoked", count),
 		Required: []string{"purpose", "sessions_revoked"}})
 	Register("auth.mfa.locked", Schema{Fields: fields("reason", OneOf("token_attempts", "account_attempts")), Required: []string{"reason"}})
-	Register("auth.mfa.failed", Schema{Fields: fields("method", OneOf("token_mismatch", "otp", "backup", "none", "step_up")),
+	Register("auth.mfa.failed", Schema{Fields: fields("method", OneOf("token_mismatch", "otp", "backup", "none", "step_up", "replace")),
 		Required: []string{"method"}})
 	Register("auth.mfa.verified", Schema{Fields: fields("method", OneOf("otp"), "confirmed", b)})
 	Register("auth.mfa.backup_used", Schema{Fields: fields("left", Int(0, 100)), Required: []string{"left"}})
 	Register("auth.mfa.enrolled", Schema{Fields: fields("confirmed", b), Required: []string{"confirmed"}})
 	Register("auth.mfa.codes_regenerated", Schema{Fields: fields("count", Int(0, 100)), Required: []string{"count"}})
 	Register("auth.device.trusted", Schema{Fields: fields("days", Int(0, 366)), Required: []string{"days"}})
+	// Moving two-step to a new authenticator app (POST /auth/mfa/replace,
+	// then /auth/mfa/replace/confirm): how the start's step-up was proven,
+	// and how many trusted devices the confirm removed.
+	Register("auth.mfa.replace_started", Schema{Fields: fields("method", OneOf("otp", "backup")), Required: []string{"method"}})
+	Register("auth.mfa.replaced", Schema{Fields: fields("trusted_devices_revoked", count), Required: []string{"trusted_devices_revoked"}})
 
 	// Plan 2: the provisioning CLI (internal/account).
 	Register("hospital.created", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.36.0"
+  version: "1.37.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -199,7 +199,9 @@ paths:
       description: |
         A new TOTP secret and 10 backup codes, replacing any enrolment not
         yet verified. Two-step stays off until `/auth/mfa/verify`. 409
-        `conflict` when two-step is already on. Accepts a session limited to
+        `conflict` when two-step is already on: to move it to a new
+        authenticator app, use `/auth/mfa/replace` and
+        `/auth/mfa/replace/confirm`. Accepts a session limited to
         enrolment. The body is empty or `{}`.
       tags: [auth]
       security: [{ ServiceKey: [], Bearer: [] }]
@@ -283,6 +285,89 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RecoveryCodes" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/mfa/replace:
+    post:
+      operationId: mfaReplace
+      summary: Start moving two-step to a new authenticator app (step-up required).
+      description: |
+        Needs a full session (two-step on, session proven by a second
+        factor; a session limited to enrolment gets 403 `mfa_required`) and
+        a fresh TOTP code (`mfa_code`) or an unused backup code
+        (`backup_code`) from the current factor, which is spent. An account
+        without two-step on is 409 `conflict`. A wrong, reused or missing
+        code is 403 `mfa_invalid`; 5 wrong codes in 15 minutes are 429
+        `mfa_locked`.
+
+        Returns a new secret as an otpauth URI for the new app. It is kept
+        pending, replacing any earlier pending one, until
+        `/auth/mfa/replace/confirm`; the current app keeps working until
+        then. The reply is never stored for an `Idempotency-Key` retry: a
+        retry runs again and needs a fresh code.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepUpRequest" }
+      responses:
+        "200":
+          description: The new app's secret, pending until confirmed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReplaceResponse" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /auth/mfa/replace/confirm:
+    post:
+      operationId: mfaReplaceConfirm
+      summary: Confirm the new authenticator app with a code from it.
+      description: |
+        Needs a full session, as `/auth/mfa/replace`. `code` is a current
+        6-digit code from the new app. No pending secret, or one started
+        more than 15 minutes ago (which is then discarded), is 409
+        `conflict`. A wrong code is 403 `mfa_invalid` and counts toward the
+        account's lock (5 in 15 minutes: 429 `mfa_locked`, shared with
+        sign-in and step-up).
+
+        On success the new app replaces the old one at once (the old app's
+        codes stop working), the confirming code can't be used again, and
+        the account's trusted devices are removed. Backup codes and
+        sessions are unchanged.
+      tags: [auth]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, conflict, validation_failed, not_ready, internal_error]
+      parameters:
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CodeRequest" }
+      responses:
+        "204": { description: Two-step now uses the new app. }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
@@ -5897,6 +5982,13 @@ components:
       required: [recovery_codes]
       properties:
         recovery_codes: { type: array, minItems: 10, maxItems: 10, items: { type: string } }
+    ReplaceResponse:
+      type: object
+      required: [otpauth_uri]
+      properties:
+        otpauth_uri:
+          type: string
+          description: "`otpauth://totp/MHAI:<email>?secret=…&issuer=MHAI&algorithm=SHA1&digits=6&period=30`, as from `/auth/mfa/enroll`."
 
     PasswordRequest:
       type: object

@@ -271,6 +271,9 @@ var Catalogue = map[string]Entry{
 	"auth.mfa.verified":    withheld(),
 	"auth.mfa.backup_used": withheld(),
 	"auth.device.trusted":  withheld(),
+	// Moving two-step to a new authenticator app: no mhai-web kind yet.
+	"auth.mfa.replace_started": withheld(),
+	"auth.mfa.replaced":        withheld(),
 
 	// Plan 2: the provisioning CLI.
 	"hospital.created":   {Type: "hospital_settings", Kind: "hospital_added", Target: entityTarget("hospital", "hospital")},
