@@ -66,7 +66,9 @@ const (
 
 // mandatory kinds are always sent (design §10): the hospital's hourly cap
 // doesn't hold them, though the recipient's does.
-var mandatory = map[string]bool{"invite": true, "password_reset": true, "mfa_reset": true}
+var mandatory = map[string]bool{"invite": true, "password_reset": true, "mfa_reset": true,
+	"security_password_changed": true, "security_password_reset": true, "security_mfa_enabled": true,
+	"security_mfa_replaced": true, "security_backup_code_used": true, "security_backup_codes_made": true}
 
 // Mandatory reports whether kind is a mandatory (security) message.
 func Mandatory(kind string) bool { return mandatory[kind] }
@@ -306,7 +308,7 @@ func (s *Sender) send(ctx context.Context, m Msg, h, id uuid.UUID, c Claim) {
 	}
 	sctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	res, err := ch.Send(sctx, channel.Message{ID: id, Hospital: h, Recipient: c.Recipient, Subject: c.Subject, Kind: c.Kind,
-		Address: c.Address})
+		Address: c.Address, When: c.Created})
 	cancel()
 	tried := s.now()
 	switch {

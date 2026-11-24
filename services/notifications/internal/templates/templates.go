@@ -14,6 +14,13 @@
 // is refused (NT5). No images, no remote content, no tracking (NT4). The
 // hospital name is refused if it holds a line break, a control character
 // or an angle bracket, and is escaped in the HTML part (NT11).
+//
+// Security notices (a password changed or reset, two-step turned on, moved
+// to a new app or reset by an admin, a backup code used or new ones made)
+// carry no link at all, so a notice can never be mistaken for, or used as,
+// a way to sign in. They say what changed and when (UTC), and who to tell if
+// it wasn't the reader; never a code, a secret, an address or anything
+// about a patient.
 package templates
 
 import (
@@ -35,10 +42,12 @@ type Vars struct {
 	Expires string
 	// Hospital is the hospital's display name (invitations only).
 	Hospital string
+	// When is when a security notice's change happened (FormatWhen).
+	When string
 }
 
 // AllowedFields are Vars' field names: the only names a template may use.
-var AllowedFields = []string{"Link", "Expires", "Hospital"}
+var AllowedFields = []string{"Link", "Expires", "Hospital", "When"}
 
 // Kind is one message kind's fixed subject and bodies.
 type Kind struct {
@@ -50,6 +59,8 @@ type Kind struct {
 	SecretLink bool
 	// NeedsHospital: the hospital's name is in it.
 	NeedsHospital bool
+	// Security: a security notice. It has no link and states When.
+	Security bool
 }
 
 const safety = "MHAI will never ask for your password or two-step code by email."
@@ -73,6 +84,28 @@ func notice(subject, line string) Kind {
 	}
 }
 
+// SecurityContact is who a security notice says to tell if the change
+// wasn't the reader's.
+const SecurityContact = "info@measured-health.org"
+
+const securityAdvice = "If this wasn't you, contact your hospital administrator or " + SecurityContact + " straight away."
+
+// securityNotice says what changed on the account, when, and who to tell.
+// what is fixed text ending before the time ("Your MHAI password was
+// changed"); after is an optional fixed sentence.
+func securityNotice(subject, what, after string) Kind {
+	line := what + " on {{.When}}."
+	if after != "" {
+		line += " " + after
+	}
+	return Kind{
+		Subject:  subject,
+		Text:     line + "\n\nThis is about your MHAI account in the clinical app.\n\n" + securityAdvice + textFooter,
+		HTML:     page(`<p>` + line + `</p><p>This is about your MHAI account in the clinical app.</p><p><strong>` + securityAdvice + `</strong></p>`),
+		Security: true,
+	}
+}
+
 // Kinds are the templates, by message kind (the outbox's kinds).
 var Kinds = map[string]Kind{
 	"invite": {
@@ -92,9 +125,21 @@ var Kinds = map[string]Kind{
 			`(the link works once, until {{.Expires}}).</p><p>If it wasn't you, ignore this email and tell your hospital's MHAI administrator.</p>`),
 		SecretLink: true,
 	},
-	"mfa_reset": notice("Your MHAI two-step sign-in was reset",
-		"Your MHAI two-step sign-in was reset by your hospital's administrator. You will set it up again when you next sign in. "+
-			"If you didn't ask for this, tell your administrator."),
+	"mfa_reset": securityNotice("Your MHAI two-step sign-in was reset",
+		"Your MHAI two-step sign-in was reset by your hospital's administrator",
+		"You will set it up again when you next sign in."),
+	"security_password_changed": securityNotice("Your MHAI password was changed",
+		"Your MHAI password was changed", "Your other signed-in devices were signed out."),
+	"security_password_reset": securityNotice("Your MHAI password was reset",
+		"Your MHAI password was set with a password reset link", "Every device signed in to your account was signed out."),
+	"security_mfa_enabled": securityNotice("Two-step sign-in is now on for your MHAI account",
+		"Two-step sign-in was turned on for your MHAI account", ""),
+	"security_mfa_replaced": securityNotice("Your MHAI two-step app was changed",
+		"Your MHAI two-step sign-in was moved to a new authenticator app", "Codes from the old app no longer work."),
+	"security_backup_code_used": securityNotice("A backup code was used on your MHAI account",
+		"One of your MHAI backup codes was used", "Each backup code works once."),
+	"security_backup_codes_made": securityNotice("New MHAI backup codes were made",
+		"New backup codes were made for your MHAI account", "Your old backup codes no longer work."),
 	"mfa_reminder":    notice("Set up two-step sign-in for MHAI", "Your MHAI account still needs two-step sign-in set up."),
 	"review_reminder": notice("You have a new item in MHAI", "You have an item waiting for your review in MHAI."),
 	"review_assigned": notice("You have a new item in MHAI", "You have a new item in MHAI."),
@@ -115,6 +160,9 @@ var (
 	ErrHospital = errors.New("templates: the hospital name is not usable")
 	// ErrExpiry: a secret link without its expiry.
 	ErrExpiry = errors.New("templates: a secret link needs its expiry")
+	// ErrWhen: a security notice without its time, or a time that isn't
+	// plain text.
+	ErrWhen = errors.New("templates: a security notice needs its time")
 )
 
 // App is the app's address that every link must be on.
@@ -160,6 +208,9 @@ func HospitalName(s string) error {
 // FormatExpiry is how an expiry is shown: UTC, unambiguous.
 func FormatExpiry(t time.Time) string { return t.UTC().Format("2 January 2006 15:04 UTC") }
 
+// FormatWhen is how a security notice's time is shown: UTC, unambiguous.
+func FormatWhen(t time.Time) string { return t.UTC().Format("2 January 2006 at 15:04 UTC") }
+
 // Render fills kind's template with v. A secret link must be on the app's
 // host; a notice's link is the app's sign-in address whatever v says.
 func (a App) Render(kind string, v Vars) (Rendered, error) {
@@ -167,12 +218,19 @@ func (a App) Render(kind string, v Vars) (Rendered, error) {
 	if !ok {
 		return Rendered{}, ErrKind
 	}
-	if !k.SecretLink {
+	switch {
+	case k.Security:
+		// No link, whatever v says; only the time.
+		if v.When == "" || len(v.When) > 64 || strings.ContainsAny(v.When, "<>\r\n") {
+			return Rendered{}, ErrWhen
+		}
+		v = Vars{When: v.When}
+	case !k.SecretLink:
 		v = Vars{Link: a.SignIn()}
-	} else if v.Expires == "" {
+	case v.Expires == "":
 		return Rendered{}, ErrExpiry
 	}
-	if !a.owns(v.Link) {
+	if !k.Security && !a.owns(v.Link) {
 		return Rendered{}, ErrLink
 	}
 	if k.NeedsHospital {
