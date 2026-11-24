@@ -51,7 +51,7 @@ func send(t *testing.T, h http.Handler, method, path, tok, body string) resp {
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	out := resp{code: w.Code, raw: w.Body.String()}
+	out := resp{code: w.Code, raw: w.Body.String(), hdr: w.Header()}
 	_ = json.Unmarshal(w.Body.Bytes(), &out.body)
 	return out
 }

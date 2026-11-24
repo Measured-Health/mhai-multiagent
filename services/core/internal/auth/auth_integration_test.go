@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
@@ -187,6 +189,57 @@ func newEnv(t *testing.T) *env {
 		}
 		httpx.JSON(w, 200, map[string]any{"user_id": p.UserID.String(), "roles": p.Roles})
 	}))
+	// Step-up probes standing in for a sensitive write: in-tx runs StepUp
+	// inside the write's own mhai_auth transaction (as recovery-codes
+	// does); audited runs StepUpAudited first, in its own transaction, and
+	// the write after it (as the hospital and platform step-up routes do).
+	// With fail the write fails after the code was accepted (500).
+	stepUpProbe := func(inTx bool) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var in struct {
+				MFACode    string `json:"mfa_code"`
+				BackupCode string `json:"backup_code"`
+				Fail       bool   `json:"fail"`
+			}
+			if !httpx.Decode(w, r, &in) {
+				return
+			}
+			p, _ := authz.FromContext(r.Context())
+			errWrite := errors.New("probe: write failed")
+			var err error
+			if inTx {
+				var stepErr error
+				err = db.WithAuth(r.Context(), app, func(tx pgx.Tx) error {
+					if stepErr = e.svc.StepUp(r.Context(), tx, p.UserID.String(), in.MFACode, in.BackupCode); stepErr != nil {
+						return stepErr
+					}
+					if in.Fail {
+						return errWrite
+					}
+					return nil
+				})
+				if stepErr != nil {
+					e.svc.WriteStepUpError(w, r, stepErr)
+					return
+				}
+			} else {
+				if err := e.svc.StepUpAudited(r, in.MFACode, in.BackupCode); err != nil {
+					e.svc.WriteStepUpError(w, r, err)
+					return
+				}
+				if in.Fail {
+					err = errWrite
+				}
+			}
+			if err != nil {
+				httpx.Error(w, r, "internal_error")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+	}
+	authz.Route(m, http.MethodPost, "/probe/step-up-in-tx", authz.Rule{Write: true, StepUp: true}, stepUpProbe(true))
+	authz.Route(m, http.MethodPost, "/probe/step-up-audited", authz.Rule{Write: true, StepUp: true}, stepUpProbe(false))
 	e.h = m.Handler([]string{serviceKey})
 	return e
 }

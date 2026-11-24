@@ -92,8 +92,8 @@ Until `idle_timeout_minutes` and `review_overdue_hours` exist, the app uses
 | Sign-in reply | When two-step applies, `POST /auth/login` answers `{mfa_required: true, mfa_token, mfa_enrolled}`. `mfa_enrolled` false: send the challenge with an empty `code` to get the enrolment-only session. True: ask the user for a code (an empty-code probe would burn an attempt and log `auth.mfa.failed`). Only sent after the password is proven; a wrong password gets the plain 401 | **Built** (OpenAPI 1.4.0) |
 | Challenge | `POST /auth/mfa/challenge {mfa_token, code, trust_device?}` → token, plus `device_token` when `trust_device` was set and the hospital allows it | **Built (Plan 2)** |
 | Enrol, verify | `POST /auth/mfa/enroll`, `POST /auth/mfa/verify` | **Built (Plan 2)** |
-| Backup codes | 10 codes at enrolment (the gateway's recovery codes; the UI calls them backup codes); each works once | **Built (Plan 2)** |
-| Regenerate backup codes | `POST /auth/mfa/recovery-codes` → 10 new codes; the old ones stop working | **Built (Plan 2)** |
+| Backup codes | One code at enrolment (the gateway's recovery codes; the UI calls it the backup code); each use replaces it: the sign-in reply's `new_backup_code` or a step-up reply's `X-MHAI-New-Backup-Code` header carries the new one (product decision, 24 Nov 2026; was 10 single-use codes) | **Built (Plan 2; one code: OpenAPI 1.38.0)** |
+| Regenerate backup codes | `POST /auth/mfa/recovery-codes` → one new code; the old one stops working | **Built (Plan 2)** |
 | Per-hospital policy | `require_mfa_for_clinicians` (hospital setting); hospital admins, platform admins and auditors always need it | **Built (Plan 2)**: enforced; set with the CLI until the settings endpoint (§5.2) exists |
 | Trust this device | `device_token` bound to the user it was issued to, refused for anyone else; allowed only when the hospital setting `allow_trust_device` is on | **Built (Plan 2)** |
 
@@ -287,7 +287,11 @@ These are requirements, not suggestions. Each needs a test in
    tries (for example a Redis `INCR` with expiry, checked after the
    increment).
 6. **Backup codes are shared with sign-in.** They are the account's own
-   codes; one used here can't be used again anywhere.
+   codes; one used here can't be used again anywhere. Since 24 Nov 2026 an
+   account has one backup code, renewed on every use: a step-up with it
+   returns the new code in the `X-MHAI-New-Backup-Code` response header
+   (`Cache-Control: no-store`), which the BFF forwards and the UI shows
+   once, never logs or stores. No header means the code sent still works.
 7. **Admins may not add roles to themselves**, `clinician` included:
    403 `self_change`, before the step-up code is checked. Dropping their own
    `hospital_admin` stays refused (`self_change`). Ruling, 2026-11-14

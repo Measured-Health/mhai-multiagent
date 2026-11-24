@@ -26,7 +26,9 @@ UPDATE user_mfa SET last_used_step = $2
 WHERE user_id = $1 AND (last_used_step IS NULL OR last_used_step < $2);
 
 -- name: UseBackupCode :execrows
-UPDATE user_mfa SET backup_code_hashes = array_remove(backup_code_hashes, $2)
+-- One renewable backup code: burning it ($2, the used code's hash) stores
+-- the new code's hash ($3) in its place, replacing every older hash.
+UPDATE user_mfa SET backup_code_hashes = ARRAY[$3::text]
 WHERE user_id = $1 AND enabled AND $2 = ANY (backup_code_hashes);
 
 -- name: EnableMFA :exec

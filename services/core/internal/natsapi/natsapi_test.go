@@ -247,6 +247,9 @@ func TestResponseHeadersAllowListed(t *testing.T) {
 		h.Set("Sunset", "Wed, 01 Jan 2031 00:00:00 GMT")
 		h.Set("Link", `</notice>; rel="deprecation"`)
 		h.Set("X-Content-Type-Options", "nosniff")
+		// Set directly by a handler it is dropped (only a step-up's slot
+		// sets it, httpx.carryNewBackupCode); this one must not pass.
+		h.Set("X-MHAI-New-Backup-Code", "forged")
 		h.Set("Set-Cookie", "a=b")
 		h.Set("X-Internal", "secret")
 		h.Set(HeaderStatus, "200")
@@ -271,6 +274,36 @@ func TestResponseHeadersAllowListed(t *testing.T) {
 	}
 	if m.Header.Get("ETag") != `"e1"` || m.Header.Get("Retry-After") != "3" {
 		t.Fatalf("values %v", m.Header)
+	}
+}
+
+// The renewed backup code a step-up leaves in the request's slot reaches
+// the BFF over NATS, with Cache-Control: no-store, on a 2xx; not after a
+// rollback (an in-transaction code on a 500).
+func TestNewBackupCodeOverNATS(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		want   string
+	}{{204, "synth-renew"}, {500, ""}} {
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			slot, ok := httpx.NewBackupCodeSlotFrom(r.Context())
+			if !ok {
+				t.Fatal("no slot over NATS")
+			}
+			slot.Offer("synth-renew", false)
+			w.WriteHeader(c.status)
+		})
+		rt := httpx.NewRouter()
+		rt.Handle(http.MethodPost, "/probe", inner)
+		m := newTestServer(rt.NATSHandler()).serveMsg(context.Background(), AppClinical,
+			msg(SubjectClinical, "POST", "/api/v1/probe", nil, nil))
+		r := decode(t, m)
+		if r.status != c.status || m.Header.Get(httpx.HeaderNewBackupCode) != c.want {
+			t.Fatalf("status %d: header %v", r.status, m.Header)
+		}
+		if c.want != "" && m.Header.Get("Cache-Control") != "no-store" {
+			t.Fatalf("Cache-Control %v", m.Header)
+		}
 	}
 }
 
