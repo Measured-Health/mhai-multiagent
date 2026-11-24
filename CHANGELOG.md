@@ -70,7 +70,7 @@ All notable changes to this project are documented here. The format follows
   hospital its own transaction makes (never a password, a platform
   account or an existing hospital). The CLI's hospital name is now held to
   1 to 120 characters with no control characters, and `Local` is no longer
-  taken as a time zone. Core OpenAPI 1.38.0.
+  taken as a time zone. Core OpenAPI 1.39.0.
 - **Edit a hospital's details from the platform app.** `PATCH
   /platform/hospitals/{id}` (mhai-web's Edit hospital form, `HospitalPatch`)
   answered 404. It now takes `version` and any of `name`, `short_code`,

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.38.0"
+  version: "1.39.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -4234,7 +4234,7 @@ paths:
         the reply is 503 `no_delivery`. At most 10 a minute per session
         (429 `rate_limited`). The reply is the hospital's page, exactly as
         `GET /platform/hospitals/{id}` reads it, and never carries the link.
-        Added in 1.38.0.
+        Added in 1.39.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-step-up: true
@@ -4275,7 +4275,7 @@ paths:
         and `first_admin` null. Core keeps no deactivation record or removal
         request: `deactivation` and `removal` are null. `version` is the
         hospital's, 1 until `PATCH /platform/hospitals/{id}` changes it
-        (1.38.0). A hold keeps every record (scope
+        (1.39.0). A hold keeps every record (scope
         `from` and `to` null); its `review_on` is six months after it was
         placed, in the hospital's time zone, and it is `review_due` from that
         day. An id that is no hospital's, or not a canonical uuid, is 404;
@@ -4313,7 +4313,7 @@ paths:
         up by one and one `hospital.updated` entry names the changed fields,
         never their values; an edit that changes nothing writes nothing. At
         most 10 a minute per session. The reply is the hospital's page.
-        Added in 1.38.0.
+        Added in 1.39.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, validation_failed, conflict, duplicate, hospital_removed, rate_limited, not_ready, internal_error]
@@ -6824,7 +6824,7 @@ components:
           type: object
           nullable: true
           description: >-
-            The hospital admin invited with the hospital (1.38.0) and their
+            The hospital admin invited with the hospital (1.39.0) and their
             latest invite: `accepted` once its link was used, `pending`
             while it is live, `expired` otherwise. `invite_id` is the
             invited account's id. Null for a hospital the CLI made.
@@ -6854,7 +6854,7 @@ components:
       description: >-
         A hospital to add (POST /platform/hospitals), with the caller's
         step-up code: exactly one of `mfa_code` and `backup_code`. Added in
-        1.38.0.
+        1.39.0.
       required: [name, short_code, country, time_zone, email_domains, first_admin]
       additionalProperties: false
       properties:
