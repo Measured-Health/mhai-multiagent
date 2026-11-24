@@ -361,7 +361,7 @@ calls it held: the BFF times out and retries (writes with the same
 | `Mhai-Timeout-Ms` | optional; the handler's deadline is 30 s or this, whichever is sooner |
 | other headers | only `Authorization`, `Content-Type`, `Idempotency-Key`, `If-None-Match`, `X-MHAI-Client-IP` and `traceparent` pass; everything else is dropped (`X-MHAI-Service`, `X-MHAI-Audience`, `X-Request-ID`, `Mhai-Request-Id`, `Cookie`, `X-Forwarded-For`, hop-by-hop headers ...) |
 | body | the HTTP body, at most 64 KB (`httpx.MaxBody`); over it, 413 `payload_too_large` |
-| reply | `Mhai-Status-Code`, the allow-listed response headers (`Content-Type`, `Cache-Control`, `ETag`, `Retry-After`, `X-Request-ID`, `Idempotent-Replayed`, `Deprecation`, `Sunset`, `Link`, `X-Content-Type-Options`) and the response body |
+| reply | `Mhai-Status-Code`, the allow-listed response headers (`Content-Type`, `Cache-Control`, `ETag`, `Retry-After`, `X-Request-ID`, `Idempotent-Replayed`, `Deprecation`, `Sunset`, `Link`, `X-Content-Type-Options`, `X-MHAI-New-Backup-Code`) and the response body |
 
 - **The same chain.** The adapter builds an `*http.Request` and calls
   `authz.Mux.NATSHandler()`: request id, body limit, principal and access
@@ -438,6 +438,13 @@ serves.
   `mhai_auth` through `mhai_sweep_idempotency()`. That function can see
   only expired rows.
 - Step-up: 5 wrong codes in 15 minutes give 429 `mfa_locked`.
+- One backup code per account, renewed on every use (`checkCode`: one
+  conditional update burns it and stores only the new code's keyed hash,
+  replacing every older hash). The new code reaches the person in the
+  challenge reply's `new_backup_code`, or after a step-up in the
+  `X-MHAI-New-Backup-Code` header (`httpx.NewBackupCodeSlot`, filled by
+  `auth.Service.StepUp`, sent by the router once the burn is committed;
+  never logged, never kept for an idempotent replay).
 - `migrate` creates the database logins (`EnsureLogin`) with a SCRAM-SHA-256
   verifier built in Go; the plaintext password never reaches Postgres, its
   logs or `pg_stat_statements`. Login passwords must be printable ASCII.

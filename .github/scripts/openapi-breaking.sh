@@ -43,13 +43,28 @@ ALLOWED_ID = "response-property-enum-value-added"
 ALLOWED_TEXT = re.compile(
     r"^added the new `[^`]+` enum value to the `(?:oneOf\[)?#/components/schemas/Problem\]?/code` response property "
 )
+# Product owner decision, 24 Nov 2026: one renewable backup code per account
+# (OpenAPI 1.38.0). recovery_codes keeps its array shape but holds one code,
+# so its minItems goes from 10 to 1 on exactly these two operations. This
+# matches only that change (10 to 1, these routes); any other limit change
+# still fails.
+ONE_CODE_ID = "response-property-min-items-decreased"
+ONE_CODE_OPS = {("POST", "/auth/mfa/enroll"), ("POST", "/auth/mfa/recovery-codes")}
+ONE_CODE_TEXT = re.compile(
+    r"^the `recovery_codes` response property's minItems was decreased from `10` to `1` for the response status `200`$"
+)
 findings = json.load(open(sys.argv[1])) or []
-kept, allowed = [], 0
+kept, allowed, one_code = [], 0, 0
 for f in findings:
     if f.get("id") == ALLOWED_ID and ALLOWED_TEXT.match(f.get("text", "")):
         allowed += 1
+    elif (f.get("id") == ONE_CODE_ID and (f.get("operation"), f.get("path")) in ONE_CODE_OPS
+          and ONE_CODE_TEXT.match(f.get("text", ""))):
+        one_code += 1
     else:
         kept.append(f)
+if one_code:
+    print(f"openapi-breaking: {one_code} recovery_codes minItems 10 -> 1 finding(s) allowed (one backup code, 24 Nov 2026)")
 errors = [f for f in kept if f.get("level", 0) >= 3]
 for f in kept:
     lvl = "error" if f.get("level", 0) >= 3 else "warning"

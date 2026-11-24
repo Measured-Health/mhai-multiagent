@@ -16,6 +16,7 @@ const (
 	principalKey
 	idemStateKey
 	viaNATSKey
+	newBackupCodeKey
 )
 
 // RequestID gives every request a fresh random id, sent back in

@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **One renewable backup code per account (OpenAPI 1.38.0).** Enrolment and
+  `POST /auth/mfa/recovery-codes` now give exactly one backup code
+  (`recovery_codes` keeps its array shape, with one item), instead of ten
+  single-use codes. Whenever a backup code is accepted, core replaces it in
+  the same transaction that burns it: only the keyed hash of a new code is
+  stored, and it replaces every remaining hash (an account from before this
+  change holds one after its next use), so a use never leaves anyone without
+  a backup code. After sign-in the new code is in the challenge reply's
+  optional `new_backup_code`; after a step-up (`/auth/mfa/replace` included) it is in the
+  `X-MHAI-New-Backup-Code` response header (`Cache-Control: no-store`, passed
+  over NATS too), sent once the burn is committed: on the 2xx, and also on an
+  error reply when the route checked the code in its own transaction before
+  a write that then failed. A step-up inside the write's own transaction
+  that rolls back sends no header and the old code still works. A backup-code
+  step-up outside a request is refused before the code is spent. The header
+  is never kept for an `Idempotency-Key` replay (the reply itself still is),
+  so a replay carries no new code.
+  `auth.mfa.backup_used` records `left: 1, renewed: true`;
+  `auth.mfa.codes_regenerated` records `count: 1`. The BFF must forward the
+  header and show the new code.
+
 ### Fixed
 
 - **Answer checks: the step format no longer fails every claim.** Our own model

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +26,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/platform"
 )
@@ -820,6 +822,60 @@ func TestCancelNeedsCode(t *testing.T) {
 	}
 	if st, _, _ := queryState(t, q); st != "cancelled" {
 		t.Errorf("question: %s", st)
+	}
+}
+
+// One renewable backup code: a cancel with the backup code replaces it,
+// the reply carries the new one in X-MHAI-New-Backup-Code (no-store), the
+// old one is refused and the new one works (and renews again). A cancel
+// with a refused code carries no header.
+func TestCancelBackupCodeRenewed(t *testing.T) {
+	s := newSite(t)
+	admin := platformAdmin(t)
+	tok := mint(t, admin)
+	stored := func() []string {
+		var h []string
+		if err := super.QueryRow(context.Background(), `SELECT backup_code_hashes FROM user_mfa WHERE user_id = $1`, admin.id).Scan(&h); err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	old := backupCode(t, admin)
+	backupCode(t, admin) // a second, legacy code: the use leaves one
+	q1 := seedJobQuestion(t, s.hid, s.submitter.id, "failed", "internal")
+	r := post(t, "/platform/jobs/cancel", tok, cancelBody([]string{qid(q1)}, "no_longer_needed", nil, old))
+	ok(t, "cancel", r)
+	fresh := r.hdr.Get("X-MHAI-New-Backup-Code")
+	if len(fresh) != 11 || fresh[5] != '-' || r.hdr.Get("Cache-Control") != "no-store" {
+		t.Fatalf("header %q, Cache-Control %q", fresh, r.hdr.Get("Cache-Control"))
+	}
+	if n := len(stored()); n != 1 {
+		t.Fatalf("%d stored codes after a use", n)
+	}
+	if strings.Contains(r.raw, fresh) {
+		t.Fatal("the new code is in the body")
+	}
+	q2 := seedJobQuestion(t, s.hid, s.submitter.id, "failed", "internal")
+	refused := post(t, "/platform/jobs/cancel", tok, cancelBody([]string{qid(q2)}, "no_longer_needed", nil, old))
+	problem(t, "old code", refused, 403, "mfa_invalid")
+	if refused.hdr.Get("X-MHAI-New-Backup-Code") != "" {
+		t.Fatal("a refused code got a new one")
+	}
+	// With an Idempotency-Key: the reply is still kept (the no-store is
+	// only for the code), and a retry replays it without the code, which
+	// was never stored.
+	body := cancelBody([]string{qid(q2)}, "no_longer_needed", nil, fresh)
+	key := "k-" + uniq()
+	r = sendKeyed(t, http.MethodPost, httpx.BasePath+"/platform/jobs/cancel", tok, body, key)
+	ok(t, "cancel with the new code", r)
+	again := r.hdr.Get("X-MHAI-New-Backup-Code")
+	if again == "" || again == fresh {
+		t.Fatalf("renewed again: %q", again)
+	}
+	replay := sendKeyed(t, http.MethodPost, httpx.BasePath+"/platform/jobs/cancel", tok, body, key)
+	ok(t, "replay", replay)
+	if replay.hdr.Get("Idempotent-Replayed") != "true" || replay.hdr.Get("X-MHAI-New-Backup-Code") != "" || replay.raw != r.raw {
+		t.Fatalf("replay: %v %s", replay.hdr, replay.raw)
 	}
 }
 

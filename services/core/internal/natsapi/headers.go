@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
 // The adapter's own headers (spec §17.1).
@@ -41,8 +43,9 @@ var RequestHeaders = []string{
 // spelled as here. The spec's list (Content-Type, Cache-Control, ETag,
 // Retry-After, X-Request-ID) plus the headers the contract documents that
 // core sets on some routes: Idempotent-Replayed (an Idempotency-Key
-// replay), Deprecation, Sunset and Link (ADR 0012, httpx.Deprecated), and
-// X-Content-Type-Options.
+// replay), Deprecation, Sunset and Link (ADR 0012, httpx.Deprecated),
+// X-Content-Type-Options, and X-MHAI-New-Backup-Code (the renewed backup
+// code after a backup-code step-up, httpx.HeaderNewBackupCode).
 var ResponseHeaders = []string{
 	"Content-Type",
 	"Cache-Control",
@@ -54,6 +57,7 @@ var ResponseHeaders = []string{
 	"Sunset",
 	"Link",
 	"X-Content-Type-Options",
+	httpx.HeaderNewBackupCode,
 }
 
 var requestAllowed = canonicalSet(RequestHeaders)

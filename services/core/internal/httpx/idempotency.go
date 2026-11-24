@@ -293,8 +293,16 @@ func (s *store) serve(w http.ResponseWriter, r *http.Request, next http.Handler)
 		status = http.StatusOK
 	}
 	cctx := context.WithoutCancel(ctx)
+	// The no-store the new-backup-code carrier adds is about HTTP caches,
+	// not about repeating the write: such a reply is kept like any other
+	// (its body holds no code; the header is never stored, so a replay
+	// carries none).
+	noStore := hasNoStore(w.Header().Values("Cache-Control"))
+	if slot, ok := NewBackupCodeSlotFrom(ctx); ok && slot.addedNoStore() {
+		noStore = false
+	}
 	switch {
-	case state.noStore || hasNoStore(w.Header().Values("Cache-Control")) || status < 200 || status >= 300:
+	case state.noStore || noStore || status < 200 || status >= 300:
 		// Safe to repeat (token routes) or failed: free the key for a retry.
 		s.release(cctx)
 	case rec.overflow || !storable(rec.buf.Bytes()):

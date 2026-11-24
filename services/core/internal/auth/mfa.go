@@ -49,7 +49,10 @@ type enrollResponse struct {
 // step-up), checks a TOTP code (six digits) or a backup code, and burns it.
 // On success the token is consumed and a session opens with mfa=true and
 // amr [pwd, otp|backup]; with trust_device, and only when the hospital
-// allows it and no role forbids it, a device token is issued too.
+// allows it and no role forbids it, a device token is issued too. A backup
+// code is renewed as it is burned: the reply carries the fresh one in
+// new_backup_code (or, if the sign-in fails after the burn committed, in
+// the X-MHAI-New-Backup-Code header of the error reply).
 //
 // An account that must use two-step but hasn't set it up gets, with no
 // code, a session limited to enrolment (mfa=false, amr [pwd]): its token
@@ -146,16 +149,24 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) {
 	if looksLikeTOTP(in.Code) {
 		totp, backup = in.Code, ""
 	}
+	// A backup code is renewed as it is burned; the fresh code must have a
+	// way back to the person before anything is spent.
+	slot, hasSlot := httpx.NewBackupCodeSlotFrom(ctx)
+	if backup != "" && !hasSlot {
+		s.fail(w, r, "not_ready", "auth: no backup code slot", "user_id", rec.UserID)
+		return
+	}
 	var (
-		kind codeKind
-		ok   bool
+		kind  codeKind
+		ok    bool
+		fresh string
 	)
 	err = s.withAuth(ctx, func(tx pgx.Tx) error {
 		row, err := loadMFA(ctx, tx, uid)
 		if err != nil || row == nil || !row.enabled {
 			return err
 		}
-		kind, ok, err = s.checkCode(ctx, tx, keys, uid, row, totp, backup)
+		kind, ok, fresh, err = s.checkCode(ctx, tx, keys, uid, row, totp, backup)
 		return err
 	})
 	if err != nil {
@@ -168,6 +179,13 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "mfa_invalid")
 		return
 	}
+	if fresh != "" {
+		// The old code is gone and the fresh one stored (committed). The
+		// session reply carries it in new_backup_code; should anything
+		// below fail, the error reply carries it in the header instead, so
+		// the person is never left without a backup code.
+		slot.Offer(fresh, true)
+	}
 	if _, err := store.Consume(ctx, in.MFAToken); err != nil {
 		httpx.Error(w, r, "mfa_invalid")
 		return
@@ -178,9 +196,8 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) {
 		if acct.HospitalID != nil {
 			s.afterNotice(ctx, *acct.HospitalID, uid, delivery.NoticeBackupCodeUsed)
 		}
-		if acct.RecoveryCodesLeft > 0 {
-			acct.RecoveryCodesLeft--
-		}
+		// The used code was replaced by one new code (checkCode).
+		acct.RecoveryCodesLeft = backupCodeCount
 	}
 
 	trust := in.TrustDevice && rec.DeviceAllowed && deviceMayStandIn(acct.Roles, acct.policy())
@@ -191,7 +208,7 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) {
 	s.startSessionDevice(w, r, acct, true, []string{"pwd", string(kind)}, func(ctx context.Context, tx pgx.Tx) error {
 		action, payload := "auth.mfa.verified", map[string]any{"method": "otp"}
 		if kind == kindBackup {
-			action, payload = "auth.mfa.backup_used", map[string]any{"left": acct.RecoveryCodesLeft}
+			action, payload = "auth.mfa.backup_used", map[string]any{"left": acct.RecoveryCodesLeft, "renewed": true}
 		}
 		if err := writeAudit(ctx, tx, r, action, acct.ID.String(), acct.hospitalID(), "user", acct.ID.String(), payload); err != nil {
 			return err
@@ -206,7 +223,7 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) {
 		}
 		return writeAudit(ctx, tx, r, "auth.device.trusted", acct.ID.String(), acct.hospitalID(), "trusted_device", devID.String(),
 			map[string]any{"days": int(TrustedDeviceTTL / (24 * time.Hour))})
-	}, deviceToken)
+	}, deviceToken, slot)
 }
 
 func methodWord(k codeKind) string {
@@ -235,9 +252,9 @@ func decodeEmpty(w http.ResponseWriter, r *http.Request) bool {
 	return httpx.Decode(w, r, &v)
 }
 
-// enroll: POST /auth/mfa/enroll → {otpauth_uri, recovery_codes[10]}. Makes
-// a new secret (sealed with AES-256-GCM) and 10 backup codes (stored as
-// keyed hashes), replacing any enrolment not yet verified. Two-step stays
+// enroll: POST /auth/mfa/enroll → {otpauth_uri, recovery_codes[1]}. Makes
+// a new secret (sealed with AES-256-GCM) and the account's one backup code
+// (stored as a keyed hash; each use renews it, see checkCode), replacing any enrolment not yet verified. Two-step stays
 // off until POST /auth/mfa/verify. An account with two-step already on gets
 // 409 conflict: it moves to a new app with POST /auth/mfa/replace and
 // /auth/mfa/replace/confirm (mfa_replace.go), or after an admin reset.
@@ -389,7 +406,7 @@ func (s *Service) verify(w http.ResponseWriter, r *http.Request) {
 		if err != nil || row == nil {
 			return err
 		}
-		if _, ok, err = s.checkCode(ctx, tx, keys, uid, row, in.Code, ""); err != nil || !ok {
+		if _, ok, _, err = s.checkCode(ctx, tx, keys, uid, row, in.Code, ""); err != nil || !ok {
 			return err
 		}
 		pending = !row.enabled
@@ -438,7 +455,9 @@ type recoveryCodesRequest struct {
 var errStepUpRefused = errors.New("auth: step-up refused")
 
 // recoveryCodes: POST /auth/mfa/recovery-codes {mfa_code | backup_code} →
-// {recovery_codes[10]}. Needs a step-up code; the old codes stop working.
+// {recovery_codes[1]}: a new backup code. Needs a step-up code; the old
+// backup code (every old code, for an account from before the one-code
+// rule) stops working.
 func (s *Service) recoveryCodes(w http.ResponseWriter, r *http.Request) {
 	c := callerOf(r)
 	var in recoveryCodesRequest
@@ -466,6 +485,12 @@ func (s *Service) recoveryCodes(w http.ResponseWriter, r *http.Request) {
 	err = s.withAuth(ctx, func(tx pgx.Tx) error {
 		if stepErr = s.StepUp(ctx, tx, c.Sub, in.MFACode, in.BackupCode); stepErr != nil {
 			return errStepUpRefused
+		}
+		// A backup-code step-up renewed the code in this transaction; the
+		// regenerated code below replaces that one too, so only the body
+		// carries a code (no X-MHAI-New-Backup-Code).
+		if slot, ok := httpx.NewBackupCodeSlotFrom(ctx); ok {
+			slot.Drop()
 		}
 		tag, err := tx.Exec(ctx, `UPDATE user_mfa SET backup_code_hashes = $2 WHERE user_id = $1 AND enabled`, uid, hashes)
 		if err != nil || tag.RowsAffected() != 1 {

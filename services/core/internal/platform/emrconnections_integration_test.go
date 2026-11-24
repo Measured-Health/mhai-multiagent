@@ -582,7 +582,7 @@ func sendKeyed(t *testing.T, method, path, tok, body, key string) resp {
 	}
 	w := &recorder{h: http.Header{}}
 	handler.ServeHTTP(w, r)
-	out := resp{code: w.code, raw: w.buf.String()}
+	out := resp{code: w.code, raw: w.buf.String(), hdr: w.h}
 	_ = json.Unmarshal(w.buf.Bytes(), &out.body)
 	return out
 }

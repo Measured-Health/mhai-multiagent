@@ -42,6 +42,9 @@ type loginResponse struct {
 	// DeviceToken is set only by the two-step challenge, when the caller
 	// asked to trust the device and the account may (see trustDevice).
 	DeviceToken string `json:"device_token,omitempty"`
+	// NewBackupCode is set only by the two-step challenge, when a backup
+	// code was used: the account's one backup code, which replaced it.
+	NewBackupCode string `json:"new_backup_code,omitempty"`
 }
 
 type mfaResponse struct {
@@ -266,13 +269,14 @@ func (s *Service) mfaPending(w http.ResponseWriter, r *http.Request, acct *acctR
 // runs in the same transaction. Task 7's challenge finishes through here.
 func (s *Service) startSession(w http.ResponseWriter, r *http.Request, acct *acctRec, mfa bool, amr []string,
 	extra func(context.Context, pgx.Tx) error) {
-	s.startSessionDevice(w, r, acct, mfa, amr, extra, "")
+	s.startSessionDevice(w, r, acct, mfa, amr, extra, "", nil)
 }
 
 // startSessionDevice is startSession that also returns deviceToken (stored
-// by extra) in the reply.
+// by extra) in the reply and, with backup set, the renewed backup code the
+// slot holds (new_backup_code).
 func (s *Service) startSessionDevice(w http.ResponseWriter, r *http.Request, acct *acctRec, mfa bool, amr []string,
-	extra func(context.Context, pgx.Tx) error, deviceToken string) {
+	extra func(context.Context, pgx.Tx) error, deviceToken string, backup *httpx.NewBackupCodeSlot) {
 	ctx := r.Context()
 	now := s.now()
 	sid, jti := uuid.New(), uuid.New()
@@ -309,8 +313,14 @@ func (s *Service) startSessionDevice(w http.ResponseWriter, r *http.Request, acc
 		s.fail(w, r, "internal_error", "auth: open session failed", "user_id", acct.ID.String())
 		return
 	}
-	httpx.JSON(w, http.StatusOK, loginResponse{AccessToken: access, ExpiresIn: int(token.AccessTTL / time.Second),
-		RefreshToken: refresh, User: acct.view(), DeviceToken: deviceToken})
+	out := loginResponse{AccessToken: access, ExpiresIn: int(token.AccessTTL / time.Second),
+		RefreshToken: refresh, User: acct.view(), DeviceToken: deviceToken}
+	if backup != nil {
+		// Taken from the slot: on this reply the body carries it, not the
+		// header.
+		out.NewBackupCode = backup.Take()
+	}
+	httpx.JSON(w, http.StatusOK, out)
 }
 
 func (s *Service) maybeRehash(ctx context.Context, tx pgx.Tx, id uuid.UUID, pw string, rehash bool) error {

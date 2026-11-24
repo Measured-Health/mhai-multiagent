@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
 )
 
@@ -230,15 +231,44 @@ func TestReplaceStartWithBackupCode(t *testing.T) {
 	u := admin(t)
 	en := e.enrol(t, u)
 	at := e.fullSession(t, u, en).body["access_token"].(string)
-	r := e.replaceStart(t, at, map[string]any{"backup_code": en.codes[4]})
+	r := e.replaceStart(t, at, map[string]any{"backup_code": en.codes[0]})
 	if r.code != 200 {
 		t.Fatalf("replace with a backup code: %d %s", r.code, r.raw)
 	}
 	if p := auditPayload(t, r, "auth.mfa.replace_started"); p["method"] != "backup" {
 		t.Fatalf("replace_started payload %v", p)
 	}
-	// The backup code is spent.
-	mustCode(t, "backup code again", e.replaceStart(t, at, map[string]any{"backup_code": en.codes[4]}), 403, "mfa_invalid")
+	// The step-up ran in the replace's own transaction, which committed
+	// before the 2xx: the reply carries the renewed backup code.
+	renewed := r.hdr.Get(httpx.HeaderNewBackupCode)
+	if len(renewed) != 11 || renewed[5] != '-' || renewed == en.codes[0] || r.hdr.Get("Cache-Control") != "no-store" {
+		t.Fatalf("header %q, Cache-Control %q", renewed, r.hdr.Get("Cache-Control"))
+	}
+	if strings.Contains(r.raw, renewed) {
+		t.Fatal("the renewed code is in the body")
+	}
+	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, renewed) {
+		t.Fatal("the stored code is not the header's")
+	}
+	// The backup code is spent, and the refusal brings no code.
+	again := e.replaceStart(t, at, map[string]any{"backup_code": en.codes[0]})
+	mustCode(t, "backup code again", again, 403, "mfa_invalid")
+	if again.hdr.Get(httpx.HeaderNewBackupCode) != "" {
+		t.Fatal("a refused code got a new one")
+	}
+	// The renewed code works as the next step-up, and renews again.
+	r = e.replaceStart(t, at, map[string]any{"backup_code": renewed})
+	if r.code != 200 {
+		t.Fatalf("replace with the renewed code: %d %s", r.code, r.raw)
+	}
+	if h := r.hdr.Get(httpx.HeaderNewBackupCode); h == "" || h == renewed {
+		t.Fatalf("renewed again: %q", h)
+	}
+	// A TOTP step-up never brings a code.
+	if r := e.replaceStart(t, at, map[string]any{"mfa_code": totpAt(en.secret, e.clock.Now())}); r.code != 200 ||
+		r.hdr.Get(httpx.HeaderNewBackupCode) != "" {
+		t.Fatalf("TOTP replace: %d %v", r.code, r.hdr)
+	}
 }
 
 func TestReplaceConfirmRefusals(t *testing.T) {

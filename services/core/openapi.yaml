@@ -30,6 +30,28 @@ info:
     body, or one still in flight, is 409 `conflict`. Replies that carry a
     credential are never stored, so their retry is 409 too.
 
+    Step-up and the backup code (since 1.38.0): a sensitive write takes a
+    fresh TOTP code (`mfa_code`) or the account's backup code
+    (`backup_code`). Every account has one backup code, and it renews: when
+    a backup code is accepted, anywhere, core replaces it (and any older
+    codes the account still holds) with a new one in the same transaction.
+    After sign-in (`/auth/mfa/challenge`) the new code is in the reply's
+    `new_backup_code`. After a step-up it is in the
+    `X-MHAI-New-Backup-Code` response header (`NewBackupCode`), with
+    `Cache-Control: no-store`, on every route that accepts `backup_code`,
+    whether or not it is marked `x-step-up`. The header is sent when the
+    old code's burn has been committed: always on a 2xx, and also on an
+    error reply when the route checked the code in its own transaction
+    before the write that then failed. No header means the code that was
+    sent still works, except on an `Idempotent-Replayed` reply: the code is
+    never stored, so a replay of a write whose step-up used the backup
+    code carries no header although that code was spent (the person then
+    replaces it with a TOTP step-up on `/auth/mfa/recovery-codes`). A TOTP
+    code never brings a new backup code.
+    `/auth/mfa/recovery-codes` never sends the header: its body is the new
+    code. The BFF must pass the code on to the person, never log or store
+    it, and treat it as replacing the one they used.
+
     Over NATS (spec §17.1; `services/core/README.md`, "The API over NATS"):
     the same routes, one request per message on `api.v1.clinical` or
     `api.v1.platform`, with `Mhai-Method`, `Mhai-Path` and the reply status
@@ -166,6 +188,10 @@ paths:
         the password changes. 5 wrong codes in 15 minutes give 429
         `mfa_locked`. With `trust_device`, and only where the hospital allows
         it and no role forbids it, the reply also carries `device_token`.
+        A backup code is renewed as it is used: the reply carries the
+        account's new backup code in `new_backup_code` (the old one stops
+        working). Should the sign-in fail after the code was burned, the
+        error reply carries the new code in `X-MHAI-New-Backup-Code`.
       tags: [auth]
       security: [{ ServiceKey: [] }]
       x-error-codes: [unauthenticated, mfa_invalid, mfa_locked, conflict, validation_failed, not_ready, internal_error]
@@ -197,7 +223,9 @@ paths:
       operationId: mfaEnroll
       summary: Start two-step enrolment.
       description: |
-        A new TOTP secret and 10 backup codes, replacing any enrolment not
+        A new TOTP secret and the account's one backup code
+        (`recovery_codes` holds exactly one, since 1.38.0; each use renews
+        it), replacing any enrolment not
         yet verified. Two-step stays off until `/auth/mfa/verify`. 409
         `conflict` when two-step is already on: to move it to a new
         authenticator app, use `/auth/mfa/replace` and
@@ -261,11 +289,14 @@ paths:
   /auth/mfa/recovery-codes:
     post:
       operationId: mfaRecoveryCodes
-      summary: Regenerate the 10 backup codes (step-up required).
+      summary: Replace the backup code (step-up required).
       description: |
-        Needs a fresh TOTP code (`mfa_code`) or an unused backup code
-        (`backup_code`). The old codes stop working. A wrong code is 403
-        `mfa_invalid`; none given is 403 `mfa_required`.
+        Needs a fresh TOTP code (`mfa_code`) or the current backup code
+        (`backup_code`). Returns one new backup code (`recovery_codes`
+        holds exactly one, since 1.38.0); the old code, and any older ones,
+        stop working. With a backup code as the step-up the reply has no
+        `X-MHAI-New-Backup-Code`: the code in the body replaces it. A wrong
+        code is 403 `mfa_invalid`; none given is 403 `mfa_required`.
       tags: [auth]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-step-up: true
@@ -327,6 +358,7 @@ paths:
       responses:
         "200":
           description: The new app's secret, pending until confirmed.
+          headers: { X-MHAI-New-Backup-Code: { $ref: "#/components/headers/NewBackupCode" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ReplaceResponse" }
@@ -1340,6 +1372,7 @@ paths:
       responses:
         "200":
           description: Who was invited, and who was skipped.
+          headers: { X-MHAI-New-Backup-Code: { $ref: "#/components/headers/NewBackupCode" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/InviteOut" }
@@ -1398,6 +1431,7 @@ paths:
       responses:
         "200":
           description: The person, changed.
+          headers: { X-MHAI-New-Backup-Code: { $ref: "#/components/headers/NewBackupCode" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StaffOut" }
@@ -1440,7 +1474,9 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/StepUpRequest" }
       responses:
-        "204": { description: Removed. }
+        "204":
+          description: Removed.
+          headers: { X-MHAI-New-Backup-Code: { $ref: "#/components/headers/NewBackupCode" } }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
@@ -1480,6 +1516,7 @@ paths:
       responses:
         "200":
           description: The person, deactivated.
+          headers: { X-MHAI-New-Backup-Code: { $ref: "#/components/headers/NewBackupCode" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StaffOut" }
@@ -1515,6 +1552,7 @@ paths:
       responses:
         "200":
           description: The person, reactivated.
+          headers: { X-MHAI-New-Backup-Code: { $ref: "#/components/headers/NewBackupCode" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StaffOut" }
@@ -1562,6 +1600,7 @@ paths:
       responses:
         "200":
           description: The person.
+          headers: { X-MHAI-New-Backup-Code: { $ref: "#/components/headers/NewBackupCode" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StaffWithLinkOut" }
@@ -1605,6 +1644,7 @@ paths:
       responses:
         "200":
           description: The person, without two-step.
+          headers: { X-MHAI-New-Backup-Code: { $ref: "#/components/headers/NewBackupCode" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StaffOut" }
@@ -1680,6 +1720,7 @@ paths:
       responses:
         "200":
           description: The person, with a fresh link.
+          headers: { X-MHAI-New-Backup-Code: { $ref: "#/components/headers/NewBackupCode" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/StaffWithLinkOut" }
@@ -1749,6 +1790,7 @@ paths:
       responses:
         "200":
           description: The settings, saved.
+          headers: { X-MHAI-New-Backup-Code: { $ref: "#/components/headers/NewBackupCode" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HospitalSettingsOut" }
@@ -5894,6 +5936,18 @@ components:
       required: false
       schema: { type: string, minLength: 1, maxLength: 255 }
 
+  headers:
+    NewBackupCode:
+      description: |
+        The account's new backup code, after a step-up with a backup code
+        (since 1.38.0): the code that was sent no longer works, and this one
+        replaces it. Sent with `Cache-Control: no-store`. Present on a 2xx
+        whenever a backup code was the step-up; on an error reply only when
+        the code was already burned (see "Step-up and the backup code"
+        above). Never on a TOTP step-up. The BFF passes it to the person
+        and never logs or stores it.
+      schema: { type: string, example: k7mq2-x9tbe }
+
   responses:
     Problem:
       description: An error. The `code` is one of the operation's `x-error-codes`.
@@ -6012,6 +6066,12 @@ components:
         refresh_token: { type: string, description: For the BFF only; never sent to the browser. }
         user: { $ref: "#/components/schemas/User" }
         device_token: { type: string, description: Only from the challenge, when trust_device was set and allowed. }
+        new_backup_code:
+          type: string
+          description: |
+            Only from the challenge, and only when a backup code was used
+            (since 1.38.0): the account's new backup code, which replaced
+            it. Show it to the person once; never log or store it.
     MFARequired:
       type: object
       required: [mfa_required, mfa_token, mfa_enrolled]
@@ -6093,7 +6153,7 @@ components:
       required: [otpauth_uri, recovery_codes]
       properties:
         otpauth_uri: { type: string }
-        recovery_codes: { type: array, minItems: 10, maxItems: 10, items: { type: string } }
+        recovery_codes: { type: array, minItems: 1, maxItems: 1, items: { type: string }, description: The account's one backup code. }
     CodeRequest:
       type: object
       required: [code]
@@ -6110,7 +6170,7 @@ components:
       type: object
       required: [recovery_codes]
       properties:
-        recovery_codes: { type: array, minItems: 10, maxItems: 10, items: { type: string } }
+        recovery_codes: { type: array, minItems: 1, maxItems: 1, items: { type: string }, description: The account's one backup code. }
     ReplaceResponse:
       type: object
       required: [otpauth_uri]

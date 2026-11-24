@@ -5,10 +5,14 @@ package auth_test
 import (
 	"bytes"
 	"context"
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base32"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -23,6 +27,8 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/logx"
@@ -136,7 +142,7 @@ func (e *env) enrol(t *testing.T, u user) enrolment {
 	for _, c := range en.body["recovery_codes"].([]any) {
 		codes = append(codes, c.(string))
 	}
-	if len(codes) != 10 {
+	if len(codes) != 1 {
 		t.Fatalf("%d recovery codes", len(codes))
 	}
 	secret := secretFromURI(t, uri)
@@ -228,7 +234,7 @@ func TestChallengeValidCode(t *testing.T) {
 		t.Fatalf("claims %+v (%v)", c, err)
 	}
 	usr := r.body["user"].(map[string]any)
-	if usr["mfa_enabled"] != true || usr["recovery_codes_left"].(float64) != 10 {
+	if usr["mfa_enabled"] != true || usr["recovery_codes_left"].(float64) != 1 {
 		t.Fatalf("user %v", usr)
 	}
 	hasAction(t, r, "auth.mfa.verified")
@@ -346,44 +352,273 @@ func TestMfaTokenExpires(t *testing.T) {
 
 // --- backup codes ------------------------------------------------------------
 
-func TestBackupCodeOnce(t *testing.T) {
+// storedBackup returns the account's stored backup code hashes.
+func storedBackup(t *testing.T, id uuid.UUID) []string {
+	t.Helper()
+	var stored []string
+	if err := super.QueryRow(context.Background(), `SELECT backup_code_hashes FROM user_mfa WHERE user_id = $1`, id).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	return stored
+}
+
+// backupHash is an independent copy of the stored form of a backup code:
+// hex(HMAC-SHA256(HKDF(key, "mhai-mfa-backup-hmac-v1"), normalised code)).
+func backupHash(t *testing.T, code string) string {
+	t.Helper()
+	k, err := hkdf.Key(sha256.New, []byte(testMFAKey), nil, "mhai-mfa-backup-hmac-v1", 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := hmac.New(sha256.New, k)
+	m.Write([]byte(strings.ToLower(strings.ReplaceAll(code, "-", ""))))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+// backupAuditPayload returns the payload of the request's audit row action.
+func backupAuditPayload(t *testing.T, r resp, action string) map[string]any {
+	t.Helper()
+	var raw []byte
+	if err := super.QueryRow(context.Background(), `SELECT payload::text FROM audit_log WHERE request_id = $1 AND action = $2`,
+		r.hdr.Get("X-Request-ID"), action).Scan(&raw); err != nil {
+		t.Fatalf("audit %s: %v", action, err)
+	}
+	var p map[string]any
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// renewedCode checks the reply's new_backup_code and returns it.
+func renewedCode(t *testing.T, r resp, old string) string {
+	t.Helper()
+	nb, _ := r.body["new_backup_code"].(string)
+	if len(nb) != 11 || nb[5] != '-' || nb == old {
+		t.Fatalf("new_backup_code %q: %s", nb, r.raw)
+	}
+	if h := r.hdr.Get(httpx.HeaderNewBackupCode); h != "" {
+		t.Fatal("the sign-in reply also sent the step-up header")
+	}
+	return nb
+}
+
+// The account has one backup code; signing in with it replaces it, and the
+// reply carries the new one.
+func TestBackupCodeRenewedAtSignIn(t *testing.T) {
 	e := newEnv(t)
 	u := admin(t)
 	en := e.enrol(t, u)
 
-	var stored []string
-	_ = super.QueryRow(context.Background(), `SELECT backup_code_hashes FROM user_mfa WHERE user_id = $1`, u.id).Scan(&stored)
-	if len(stored) != 10 {
-		t.Fatalf("%d stored hashes", len(stored))
+	stored := storedBackup(t, u.id)
+	if len(stored) != 1 || stored[0] != backupHash(t, en.codes[0]) {
+		t.Fatalf("stored %v", stored)
 	}
-	for _, h := range stored {
-		for _, c := range en.codes {
-			if strings.Contains(h, c) || strings.Contains(h, strings.ReplaceAll(c, "-", "")) {
-				t.Fatal("backup code stored in plain")
-			}
-		}
+	if strings.Contains(stored[0], en.codes[0]) || strings.Contains(stored[0], strings.ReplaceAll(en.codes[0], "-", "")) {
+		t.Fatal("backup code stored in plain")
 	}
 
 	r := e.challenge(t, e.mfaToken(t, u), en.codes[0], false)
 	if r.code != 200 {
 		t.Fatalf("backup code: %d %s", r.code, r.raw)
 	}
+	if cc := r.hdr.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control %q", cc)
+	}
+	if strings.Join(keys(r.body), ",") != "access_token,expires_in,new_backup_code,refresh_token,user" {
+		t.Fatalf("keys %v", keys(r.body))
+	}
 	c, _ := token.Verify(r.body["access_token"].(string), issuer.PublicKeys())
 	if !c.MFA || strings.Join(c.AMR, ",") != "pwd,backup" {
 		t.Fatalf("claims %+v", c)
 	}
-	if left := r.body["user"].(map[string]any)["recovery_codes_left"].(float64); left != 9 {
+	nb := renewedCode(t, r, en.codes[0])
+	if left := r.body["user"].(map[string]any)["recovery_codes_left"].(float64); left != 1 {
 		t.Fatalf("recovery_codes_left %v", left)
 	}
-	hasAction(t, r, "auth.mfa.backup_used")
+	if p := backupAuditPayload(t, r, "auth.mfa.backup_used"); p["left"] != float64(1) || p["renewed"] != true || len(p) != 2 {
+		t.Fatalf("backup_used payload %v", p)
+	}
+	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, nb) {
+		t.Fatal("the stored hash is not the new code's")
+	}
+	// The renewal keeps the security notice: exactly one for the use.
+	oneNotice(t, u.id, delivery.NoticeBackupCodeUsed)
 	if rf := e.refresh(t, r.body["refresh_token"].(string)); rf.code != 200 {
 		t.Fatalf("refresh of a backup-code session: %d", rf.code)
 	}
-	mustCode(t, "backup code twice", e.challenge(t, e.mfaToken(t, u), en.codes[0], false), 403, "mfa_invalid")
-	// Case and the dash don't matter.
-	loose := strings.ToUpper(strings.ReplaceAll(en.codes[1], "-", ""))
-	if r := e.challenge(t, e.mfaToken(t, u), loose, false); r.code != 200 {
-		t.Fatalf("normalised backup code: %d %s", r.code, r.raw)
+
+	// Replay of the used code: refused, and nothing renewed.
+	again := e.challenge(t, e.mfaToken(t, u), en.codes[0], false)
+	mustCode(t, "backup code twice", again, 403, "mfa_invalid")
+	if again.hdr.Get(httpx.HeaderNewBackupCode) != "" || again.body["new_backup_code"] != nil {
+		t.Fatal("a refused code got a new one")
+	}
+	// The new code works (case and the dash don't matter) and renews again.
+	loose := strings.ToUpper(strings.ReplaceAll(nb, "-", ""))
+	r2 := e.challenge(t, e.mfaToken(t, u), loose, false)
+	if r2.code != 200 {
+		t.Fatalf("new backup code: %d %s", r2.code, r2.raw)
+	}
+	nb2 := renewedCode(t, r2, nb)
+	mustCode(t, "the replaced code", e.challenge(t, e.mfaToken(t, u), nb, false), 403, "mfa_invalid")
+
+	// A TOTP sign-in never carries a code and leaves the backup code alone.
+	tr := e.challenge(t, e.mfaToken(t, u), totpAt(en.secret, e.clock.Now()), false)
+	if tr.code != 200 || tr.body["new_backup_code"] != nil || tr.hdr.Get(httpx.HeaderNewBackupCode) != "" {
+		t.Fatalf("TOTP sign-in: %d %s", tr.code, tr.raw)
+	}
+	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, nb2) {
+		t.Fatal("a TOTP sign-in changed the backup code")
+	}
+}
+
+// An account from before the one-code rule holds several codes; the first
+// use leaves it with exactly one, the new one.
+func TestLegacyBackupCodesCollapseToOne(t *testing.T) {
+	e := newEnv(t)
+	u := admin(t)
+	e.enrol(t, u)
+	legacy := make([]string, 10)
+	hashes := make([]string, 10)
+	for i := range legacy {
+		legacy[i] = fmt.Sprintf("synth-%05d", i)
+		hashes[i] = backupHash(t, legacy[i])
+	}
+	if _, err := super.Exec(context.Background(), `UPDATE user_mfa SET backup_code_hashes = $2 WHERE user_id = $1`, u.id, hashes); err != nil {
+		t.Fatal(err)
+	}
+	r := e.challenge(t, e.mfaToken(t, u), legacy[3], false)
+	if r.code != 200 {
+		t.Fatalf("legacy code: %d %s", r.code, r.raw)
+	}
+	nb := renewedCode(t, r, legacy[3])
+	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, nb) {
+		t.Fatalf("%d stored hashes after a use", len(s))
+	}
+	if left := r.body["user"].(map[string]any)["recovery_codes_left"].(float64); left != 1 {
+		t.Fatalf("recovery_codes_left %v", left)
+	}
+	mustCode(t, "another legacy code", e.challenge(t, e.mfaToken(t, u), legacy[4], false), 403, "mfa_invalid")
+	if r := e.challenge(t, e.mfaToken(t, u), nb, false); r.code != 200 {
+		t.Fatalf("new code: %d %s", r.code, r.raw)
+	}
+}
+
+// Two sign-ins racing with the same backup code: exactly one wins, and the
+// stored code is the winner's new one.
+func TestBackupCodeRenewalConcurrent(t *testing.T) {
+	e := newEnv(t)
+	u := admin(t)
+	en := e.enrol(t, u)
+	toks := []string{e.mfaToken(t, u), e.mfaToken(t, u), e.mfaToken(t, u)}
+	out := make([]resp, len(toks))
+	var wg sync.WaitGroup
+	for i := range toks {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			out[i] = e.challenge(t, toks[i], en.codes[0], false)
+		}(i)
+	}
+	wg.Wait()
+	var won []string
+	for _, r := range out {
+		switch r.code {
+		case 200:
+			won = append(won, renewedCode(t, r, en.codes[0]))
+		case 403:
+			if r.body["new_backup_code"] != nil || r.hdr.Get(httpx.HeaderNewBackupCode) != "" {
+				t.Fatal("a losing request got a code")
+			}
+		default:
+			t.Fatalf("unexpected %d %s", r.code, r.raw)
+		}
+	}
+	if len(won) != 1 {
+		t.Fatalf("%d winners", len(won))
+	}
+	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, won[0]) {
+		t.Fatal("stored code is not the winner's")
+	}
+}
+
+func (e *env) stepUpProbe(t *testing.T, path, at string, body map[string]any) resp {
+	t.Helper()
+	return e.do(t, req{method: "POST", path: path, bearer: at, body: body})
+}
+
+// A backup-code step-up renews the code; the reply carries the new one in
+// X-MHAI-New-Backup-Code exactly when the burn stands.
+func TestStepUpBackupCodeRenewal(t *testing.T) {
+	e := newEnv(t)
+	u := admin(t)
+	en := e.enrol(t, u)
+	at := e.fullSession(t, u, en).body["access_token"].(string)
+	code := en.codes[0]
+	header := func(name string, r resp, status int, want bool) string {
+		t.Helper()
+		if r.code != status {
+			t.Fatalf("%s: %d %s", name, r.code, r.raw)
+		}
+		h := r.hdr.Get(httpx.HeaderNewBackupCode)
+		if !want {
+			if h != "" {
+				t.Fatalf("%s: header sent", name)
+			}
+			return ""
+		}
+		if len(h) != 11 || h[5] != '-' || r.hdr.Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s: header %q, Cache-Control %q", name, h, r.hdr.Get("Cache-Control"))
+		}
+		if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, h) {
+			t.Fatalf("%s: the header's code is not the stored one", name)
+		}
+		return h
+	}
+	const inTx, audited = "/probe/step-up-in-tx", "/probe/step-up-audited"
+
+	// In the write's transaction, the write fails after the code was
+	// accepted: rolled back, so no header and the old code still works.
+	header("in-tx rollback", e.stepUpProbe(t, inTx, at, map[string]any{"backup_code": code, "fail": true}), 500, false)
+	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, code) {
+		t.Fatal("a rolled-back step-up changed the backup code")
+	}
+	if n := notices(t, u.id, delivery.NoticeBackupCodeUsed); n != 0 {
+		t.Fatalf("a rolled-back step-up left %d backup-code notices", n)
+	}
+	// It succeeds: 2xx with the new code; the old one is refused (no header).
+	code2 := header("in-tx", e.stepUpProbe(t, inTx, at, map[string]any{"backup_code": code}), 204, true)
+	oneNotice(t, u.id, delivery.NoticeBackupCodeUsed)
+	header("replay", e.stepUpProbe(t, inTx, at, map[string]any{"backup_code": code}), 403, false)
+	// In its own transaction (StepUpAudited): the burn stands even when the
+	// write fails, so the error reply carries the new code.
+	code3 := header("audited", e.stepUpProbe(t, audited, at, map[string]any{"backup_code": code2}), 204, true)
+	code4 := header("audited, write fails", e.stepUpProbe(t, audited, at, map[string]any{"backup_code": code3, "fail": true}), 500, true)
+	header("audited replay", e.stepUpProbe(t, audited, at, map[string]any{"backup_code": code3}), 403, false)
+	// The renewed code also signs in.
+	if r := e.challenge(t, e.mfaToken(t, u), code4, false); r.code != 200 {
+		t.Fatalf("sign-in with the step-up's new code: %d %s", r.code, r.raw)
+	} else {
+		code4 = renewedCode(t, r, code4)
+	}
+	// TOTP step-ups never send the header.
+	e.clock.Add(30 * time.Second)
+	header("in-tx TOTP", e.stepUpProbe(t, inTx, at, map[string]any{"mfa_code": totpAt(en.secret, e.clock.Now())}), 204, false)
+	e.clock.Add(30 * time.Second)
+	header("audited TOTP", e.stepUpProbe(t, audited, at, map[string]any{"mfa_code": totpAt(en.secret, e.clock.Now())}), 204, false)
+	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, code4) {
+		t.Fatal("a TOTP step-up changed the backup code")
+	}
+
+	// Lockout counting is unchanged: 5 wrong backup codes lock, and then
+	// even the right one gets 429 with no header and is not spent.
+	for i := 0; i < auth.MaxMFAFailures; i++ {
+		header("wrong backup", e.stepUpProbe(t, audited, at, map[string]any{"backup_code": "zzzzz-zzzz" + fmt.Sprint(i)}), 403, false)
+	}
+	header("locked", e.stepUpProbe(t, audited, at, map[string]any{"backup_code": code4}), 429, false)
+	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, code4) {
+		t.Fatal("a locked step-up spent the code")
 	}
 }
 
@@ -413,20 +648,41 @@ func TestRegenerateInvalidatesOld(t *testing.T) {
 	for _, c := range r.body["recovery_codes"].([]any) {
 		fresh = append(fresh, c.(string))
 	}
-	if len(fresh) != 10 {
+	if len(fresh) != 1 {
 		t.Fatalf("%d codes", len(fresh))
 	}
-	hasAction(t, r, "auth.mfa.codes_regenerated")
+	if r.hdr.Get(httpx.HeaderNewBackupCode) != "" {
+		t.Fatal("a TOTP step-up sent the header")
+	}
+	if p := backupAuditPayload(t, r, "auth.mfa.codes_regenerated"); p["count"] != float64(1) {
+		t.Fatalf("codes_regenerated payload %v", p)
+	}
 	e.clock.Add(30 * time.Second)
 
-	mustCode(t, "old code", e.challenge(t, e.mfaToken(t, u), en.codes[2], false), 403, "mfa_invalid")
-	if r := e.challenge(t, e.mfaToken(t, u), fresh[0], false); r.code != 200 {
-		t.Fatalf("new code: %d %s", r.code, r.raw)
+	mustCode(t, "old code", e.challenge(t, e.mfaToken(t, u), en.codes[0], false), 403, "mfa_invalid")
+	sr := e.challenge(t, e.mfaToken(t, u), fresh[0], false)
+	if sr.code != 200 {
+		t.Fatalf("new code: %d %s", sr.code, sr.raw)
 	}
-	// A backup code also works as the step-up.
-	r = e.do(t, req{method: "POST", path: "/auth/mfa/recovery-codes", bearer: at, body: map[string]any{"backup_code": fresh[1]}})
+	renewed := renewedCode(t, sr, fresh[0])
+	// A backup code also works as the step-up. The regenerated code
+	// replaces the step-up's renewal in the same transaction, so only the
+	// body carries a code: no header.
+	r = e.do(t, req{method: "POST", path: "/auth/mfa/recovery-codes", bearer: at, body: map[string]any{"backup_code": renewed}})
 	if r.code != 200 {
 		t.Fatalf("regenerate with a backup code: %d %s", r.code, r.raw)
+	}
+	if r.hdr.Get(httpx.HeaderNewBackupCode) != "" {
+		t.Fatal("regenerate sent a superseded code in the header")
+	}
+	again := r.body["recovery_codes"].([]any)[0].(string)
+	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, again) {
+		t.Fatal("the stored code is not the regenerated one")
+	}
+	mustCode(t, "step-up code after regenerate", e.do(t, req{method: "POST", path: "/auth/mfa/recovery-codes", bearer: at,
+		body: map[string]any{"backup_code": renewed}}), 403, "mfa_invalid")
+	if r := e.challenge(t, e.mfaToken(t, u), again, false); r.code != 200 {
+		t.Fatalf("regenerated code: %d %s", r.code, r.raw)
 	}
 }
 
@@ -640,25 +896,47 @@ func TestSecretEncryptedAtRest(t *testing.T) {
 
 func TestStepUp(t *testing.T) {
 	e := newEnv(t)
-	ctx := context.Background()
+	ctx, slot := httpx.WithNewBackupCodeSlot(context.Background())
 	u := admin(t)
 	en := e.enrol(t, u)
 	if err := e.svc.StepUp(ctx, nil, u.id.String(), totpAt(en.secret, e.clock.Now()), ""); err != nil {
 		t.Fatalf("good code: %v", err)
 	}
+	if slot.Take() != "" {
+		t.Fatal("a TOTP step-up offered a backup code")
+	}
 	if err := e.svc.StepUp(ctx, nil, u.id.String(), totpAt(en.secret, e.clock.Now()), ""); !errors.Is(err, auth.ErrMFAInvalid) {
 		t.Fatalf("reused code: %v", err)
+	}
+	// Outside a request (no slot) a backup code is refused before it is
+	// spent: its replacement could not reach the person.
+	if err := e.svc.StepUp(context.Background(), nil, u.id.String(), "", en.codes[0]); err == nil ||
+		errors.Is(err, auth.ErrMFAInvalid) || errors.Is(err, auth.ErrMFALocked) {
+		t.Fatalf("backup code with no slot: %v", err)
 	}
 	if err := e.svc.StepUp(ctx, nil, u.id.String(), "", en.codes[0]); err != nil {
 		t.Fatalf("backup code: %v", err)
 	}
+	renewed := slot.Take()
+	if renewed == "" || renewed == en.codes[0] {
+		t.Fatalf("renewed code %q", renewed)
+	}
 	if err := e.svc.StepUp(ctx, nil, u.id.String(), "", en.codes[0]); !errors.Is(err, auth.ErrMFAInvalid) {
 		t.Fatalf("backup code twice: %v", err)
+	}
+	if slot.Take() != "" {
+		t.Fatal("a refused code offered a backup code")
+	}
+	if err := e.svc.StepUp(ctx, nil, u.id.String(), "", renewed); err != nil {
+		t.Fatalf("renewed code: %v", err)
+	}
+	if slot.Take() == "" {
+		t.Fatal("the renewed code was not renewed again")
 	}
 	if err := e.svc.StepUp(ctx, nil, u.id.String(), "", ""); !errors.Is(err, auth.ErrMFAInvalid) {
 		t.Fatalf("no code: %v", err)
 	}
-	if err := e.svc.StepUp(ctx, nil, u.id.String(), "123456", en.codes[1]); !errors.Is(err, auth.ErrMFAInvalid) {
+	if err := e.svc.StepUp(ctx, nil, u.id.String(), "123456", en.codes[0]); !errors.Is(err, auth.ErrMFAInvalid) {
 		t.Fatalf("both codes: %v", err)
 	}
 	// Running inside a caller's mhai_auth transaction works too.
@@ -809,7 +1087,7 @@ func TestMFANoCredentialsInLogs(t *testing.T) {
 		{"verify wrong code", req{method: "POST", path: "/auth/mfa/verify", bearer: at, body: map[string]any{"code": bad}}},
 		{"verify not enrolled", req{method: "POST", path: "/auth/mfa/verify", bearer: limited, body: map[string]any{"code": good}}},
 		{"recovery wrong code", req{method: "POST", path: "/auth/mfa/recovery-codes", bearer: at, body: map[string]any{"mfa_code": bad}}},
-		{"recovery wrong backup", req{method: "POST", path: "/auth/mfa/recovery-codes", bearer: at, body: map[string]any{"backup_code": en.codes[9] + "x"}}},
+		{"recovery wrong backup", req{method: "POST", path: "/auth/mfa/recovery-codes", bearer: at, body: map[string]any{"backup_code": en.codes[0] + "x"}}},
 		{"recovery limited", req{method: "POST", path: "/auth/mfa/recovery-codes", bearer: limited, body: map[string]any{"mfa_code": good}}},
 		{"password wrong current", req{method: "POST", path: "/auth/password", bearer: at, body: map[string]any{"current_password": badPW, "new_password": "tangerine-orbit-77-quill"}}},
 		{"password weak", req{method: "POST", path: "/auth/password", bearer: at, body: map[string]any{"current_password": testPassword, "new_password": weakPW}}},
