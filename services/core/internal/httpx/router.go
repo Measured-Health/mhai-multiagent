@@ -46,18 +46,19 @@ func (rt *Router) Patterns() []string {
 	return append([]string(nil), rt.patterns...)
 }
 
-// Handler is the router behind RequestID → BFF(serviceKeys) → body limit.
+// Handler is the router behind RequestID → BFF(serviceKeys) → body limit
+// → the new-backup-code carrier (carryNewBackupCode).
 // An unknown route gets 404 not_found as a problem body.
 func (rt *Router) Handler(serviceKeys []string) http.Handler {
-	return RequestID(BFF(serviceKeys)(limitBody(rt.routes())))
+	return RequestID(BFF(serviceKeys)(limitBody(carryNewBackupCode(rt.routes()))))
 }
 
 // NATSHandler is the same router behind RequestID → requireNATS → body
-// limit: the HTTP chain with the BFF key check replaced by the NATS mark
+// limit → the new-backup-code carrier: the HTTP chain with the BFF key check replaced by the NATS mark
 // (ViaNATS, set by internal/natsapi only). Everything after it, the
 // guard included, is the same handler as over HTTP.
 func (rt *Router) NATSHandler() http.Handler {
-	return RequestID(requireNATS(limitBody(rt.routes())))
+	return RequestID(requireNATS(limitBody(carryNewBackupCode(rt.routes()))))
 }
 
 func (rt *Router) routes() http.Handler {

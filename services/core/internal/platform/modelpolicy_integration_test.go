@@ -376,10 +376,12 @@ func TestModelPolicyRateLimited(t *testing.T) {
 func TestModelPolicyConcurrentPutsChainPrevious(t *testing.T) {
 	for round := 0; round < 5; round++ {
 		h := seedHospital(t, "active")
-		admin := platformAdmin(t)
+		// Two admins: an account has one backup code, so one person can't
+		// make two backup-code step-ups at once.
+		admin, other := platformAdmin(t), platformAdmin(t)
 		bodies := []string{policyBody("anthropic", "DEMO-SYNTHETIC", 1000, backupCode(t, admin)),
-			policyBody("openai", "AGR-2026-01", 1000, backupCode(t, admin))}
-		toks := []string{mint(t, admin), mint(t, admin)}
+			policyBody("openai", "AGR-2026-01", 1000, backupCode(t, other))}
+		toks := []string{mint(t, admin), mint(t, other)}
 		var wg sync.WaitGroup
 		codes := make([]int, 2)
 		for i := range bodies {

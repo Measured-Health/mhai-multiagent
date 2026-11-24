@@ -184,38 +184,47 @@ var errBadSecret = errors.New("auth: stored mfa secret unusable")
 // checkCode checks totp (a six-digit code) or backup against the account's
 // row, and burns it on success, in tx: a TOTP code moves last_used_step
 // forward by a conditional update (so two concurrent uses of one code can't
-// both win), and a backup code is removed from the array by a conditional
-// update. ok=false is a wrong or reused code.
+// both win). A backup code is renewed: one conditional update, matching on
+// the code's hash, replaces every stored hash with the hash of one fresh
+// code (an account from before the one-code rule may hold several; after a
+// use it holds one), so a use never leaves the account without a backup
+// code. newBackup is that fresh code, returned only on success; it is
+// stored if and only if tx commits. ok=false is a wrong or reused code.
 func (s *Service) checkCode(ctx context.Context, tx pgx.Tx, keys *mfaKeys, userID uuid.UUID, row *mfaRow,
-	totp, backup string) (kind codeKind, ok bool, err error) {
+	totp, backup string) (kind codeKind, ok bool, newBackup string, err error) {
 	switch {
 	case totp != "":
 		secret, err := keys.open(userID.String(), row.secretEnc)
 		if err != nil {
-			return "", false, errBadSecret
+			return "", false, "", errBadSecret
 		}
 		step, match := matchTOTP(secret, totp, totpStep(s.now()), row.lastStep)
 		if !match {
-			return kindOTP, false, nil
+			return kindOTP, false, "", nil
 		}
 		tag, err := tx.Exec(ctx, `UPDATE user_mfa SET last_used_step = $2
 			WHERE user_id = $1 AND (last_used_step IS NULL OR last_used_step < $2)`, userID, step)
 		if err != nil {
-			return "", false, errors.New("auth: mfa step update failed")
+			return "", false, "", errors.New("auth: mfa step update failed")
 		}
-		return kindOTP, tag.RowsAffected() == 1, nil
+		return kindOTP, tag.RowsAffected() == 1, "", nil
 	case backup != "":
 		if len(backup) > 64 {
-			return kindBackup, false, nil
+			return kindBackup, false, "", nil
 		}
-		tag, err := tx.Exec(ctx, `UPDATE user_mfa SET backup_code_hashes = array_remove(backup_code_hashes, $2)
-			WHERE user_id = $1 AND enabled AND $2 = ANY (backup_code_hashes)`, userID, keys.hashBackup(backup))
+		fresh := newBackupCodes()[0]
+		tag, err := tx.Exec(ctx, `UPDATE user_mfa SET backup_code_hashes = ARRAY[$3::text]
+			WHERE user_id = $1 AND enabled AND $2 = ANY (backup_code_hashes)`,
+			userID, keys.hashBackup(backup), keys.hashBackup(fresh))
 		if err != nil {
-			return "", false, errors.New("auth: backup code update failed")
+			return "", false, "", errors.New("auth: backup code update failed")
 		}
-		return kindBackup, tag.RowsAffected() == 1, nil
+		if tag.RowsAffected() != 1 {
+			return kindBackup, false, "", nil
+		}
+		return kindBackup, true, fresh, nil
 	}
-	return "", false, nil
+	return "", false, "", nil
 }
 
 // StepUp checks a step-up code for a sensitive write: exactly one of
@@ -229,44 +238,85 @@ func (s *Service) checkCode(ctx context.Context, tx pgx.Tx, keys *mfaKeys, userI
 // db.WithAuth). With tx nil, StepUp runs in its own mhai_auth transaction,
 // which later plans' handlers (running as mhai_gateway) should use. A code
 // spent inside the caller's tx is unspent again if that tx rolls back.
+//
+// A backup code is renewed where it is spent (checkCode), and the fresh
+// code goes to the request's httpx.NewBackupCodeSlot, which the router
+// sends in the X-MHAI-New-Backup-Code reply header. With tx nil the burn
+// has committed when StepUp returns, so the reply carries it whatever its
+// status (the write it unlocks runs later, in another transaction, and may
+// still fail). Inside the caller's tx only a 2xx reply carries it: callers
+// reply 2xx only after their commit, and a rollback restores the old code.
+// With no slot in ctx (outside the router) a backup code is refused as a
+// server fault before anything is spent: its replacement could not reach
+// the person.
 func (s *Service) StepUp(ctx context.Context, tx pgx.Tx, userID, mfaCode, backupCode string) error {
-	if tx == nil {
-		return s.withAuth(ctx, func(tx pgx.Tx) error { return s.StepUp(ctx, tx, userID, mfaCode, backupCode) })
+	var slot *httpx.NewBackupCodeSlot
+	if backupCode != "" && mfaCode == "" {
+		var ok bool
+		if slot, ok = httpx.NewBackupCodeSlotFrom(ctx); !ok {
+			return errNoBackupSlot
+		}
 	}
+	if tx == nil {
+		var fresh string
+		err := s.withAuth(ctx, func(tx pgx.Tx) error {
+			var err error
+			fresh, err = s.stepUp(ctx, tx, userID, mfaCode, backupCode)
+			return err
+		})
+		if err == nil && fresh != "" {
+			slot.Offer(fresh, true)
+		}
+		return err
+	}
+	fresh, err := s.stepUp(ctx, tx, userID, mfaCode, backupCode)
+	if err == nil && fresh != "" {
+		slot.Offer(fresh, false)
+	}
+	return err
+}
+
+// errNoBackupSlot is a backup-code step-up outside the router (no
+// httpx.NewBackupCodeSlot), refused before the code is spent.
+var errNoBackupSlot = errors.New("auth: backup code step-up outside a request")
+
+// stepUp is StepUp in tx. It returns the renewed backup code when a backup
+// code was spent.
+func (s *Service) stepUp(ctx context.Context, tx pgx.Tx, userID, mfaCode, backupCode string) (string, error) {
 	uid, err := uuid.Parse(userID)
 	if err != nil {
-		return ErrMFAInvalid
+		return "", ErrMFAInvalid
 	}
 	if (mfaCode == "") == (backupCode == "") || len(mfaCode) > 64 || len(backupCode) > 64 {
-		return ErrMFAInvalid
+		return "", ErrMFAInvalid
 	}
 	keys, err := s.mfaKeys()
 	if err != nil {
-		return err
+		return "", err
 	}
 	row, err := loadMFA(ctx, tx, uid)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if row == nil || !row.enabled {
-		return ErrMFARequired
+		return "", ErrMFARequired
 	}
 	locked, err := s.reserveMFA(ctx, userID)
 	if err != nil {
-		return errors.New("auth: mfa attempts unavailable")
+		return "", errors.New("auth: mfa attempts unavailable")
 	}
 	if locked {
-		return ErrMFALocked
+		return "", ErrMFALocked
 	}
-	_, ok, err := s.checkCode(ctx, tx, keys, uid, row, mfaCode, backupCode)
+	_, ok, fresh, err := s.checkCode(ctx, tx, keys, uid, row, mfaCode, backupCode)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !ok {
-		return ErrMFAInvalid
+		return "", ErrMFAInvalid
 	}
 	s.clearMFA(ctx, userID)
-	return nil
+	return fresh, nil
 }
 
 // WriteStepUpError sends the reply for a StepUp error: 403 mfa_invalid,

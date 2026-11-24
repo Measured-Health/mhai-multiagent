@@ -221,7 +221,7 @@ The behaviour is the frontend contract §2, built in Go. These are the changes f
   - 30-second steps, with one step of tolerance either side.
   - The last step used is stored, so a code can't be used twice.
 - **Secrets:** encrypted with AES-256-GCM, under a key from the environment. KMS can come later.
-- **Backup codes:** 10 single-use codes, stored hashed. `POST /auth/mfa/recovery-codes` replaces them.
+- **Backup codes:** one per account, stored hashed (was 10 single-use codes until 24 Nov 2026). A use burns it and stores a new code's hash in the same transaction (replacing every older hash); the new code goes back in the sign-in reply (`new_backup_code`) or a step-up reply's `X-MHAI-New-Backup-Code` header. `POST /auth/mfa/recovery-codes` replaces it.
 - **Challenge:** `POST /auth/mfa/challenge {mfa_token, code, trust_device?}`.
   - The `mfa_token` lasts 5 minutes and allows 5 attempts.
 - **Who must use it:**

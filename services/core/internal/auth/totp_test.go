@@ -108,8 +108,12 @@ func TestSecretSealRoundTrip(t *testing.T) {
 func TestBackupCodes(t *testing.T) {
 	k, _ := newMFAKeys([]byte("test-only-mfa-key-0123456789abcdef0123456789"))
 	codes := newBackupCodes()
-	if len(codes) != 10 {
-		t.Fatalf("%d codes", len(codes))
+	if len(codes) != 1 {
+		t.Fatalf("%d codes, want one renewable code", len(codes))
+	}
+	// Fresh codes don't repeat.
+	for i := 0; i < 50; i++ {
+		codes = append(codes, newBackupCodes()...)
 	}
 	seen := map[string]bool{}
 	for _, c := range codes {

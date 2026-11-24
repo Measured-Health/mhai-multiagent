@@ -366,7 +366,9 @@ func init() {
 	Register("auth.mfa.failed", Schema{Fields: fields("method", OneOf("token_mismatch", "otp", "backup", "none", "step_up", "replace")),
 		Required: []string{"method"}})
 	Register("auth.mfa.verified", Schema{Fields: fields("method", OneOf("otp"), "confirmed", b)})
-	Register("auth.mfa.backup_used", Schema{Fields: fields("left", Int(0, 100)), Required: []string{"left"}})
+	// One renewable backup code: a use replaces it, so left is 1 and
+	// renewed true (rows from before the rule have left only).
+	Register("auth.mfa.backup_used", Schema{Fields: fields("left", Int(0, 100), "renewed", b), Required: []string{"left", "renewed"}})
 	Register("auth.mfa.enrolled", Schema{Fields: fields("confirmed", b), Required: []string{"confirmed"}})
 	Register("auth.mfa.codes_regenerated", Schema{Fields: fields("count", Int(0, 100)), Required: []string{"count"}})
 	Register("auth.device.trusted", Schema{Fields: fields("days", Int(0, 366)), Required: []string{"days"}})

@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -442,19 +443,24 @@ func TestExportRateLimitUnderRace(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	got := map[int]int{}
+	got := map[string]int{}
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			c := post(t, "/platform/audit/exports", tok, exportBody(t, "events", map[string]any{"hospital": "platform"}, codes[i], nil)).code
+			r := post(t, "/platform/audit/exports", tok, exportBody(t, "events", map[string]any{"hospital": "platform"}, codes[i], nil))
+			c, _ := r.body["code"].(string)
 			mu.Lock()
-			got[c]++
+			got[fmt.Sprint(r.code, c)]++
 			mu.Unlock()
 		}(i)
 	}
 	wg.Wait()
-	if got[429] != 10 || got[200]+got[403]+got[500] != 10 {
+	// Exactly ten pass the hour's limit. The account has one backup code,
+	// so of those at most one is accepted; the rest are refused codes
+	// (403 mfa_invalid, then 429 mfa_locked once five were wrong).
+	passed := 20 - got["429rate_limited"]
+	if got["429rate_limited"] != 10 || got["200"] > 1 || got["200"]+got["403mfa_invalid"]+got["429mfa_locked"]+got["500internal_error"] != passed {
 		t.Errorf("codes %v: want ten past the limit", got)
 	}
 }

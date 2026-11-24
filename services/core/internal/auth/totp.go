@@ -25,7 +25,7 @@ const (
 	totpDigits      = 6
 	totpSkew        = 1
 	totpSecretBytes = 20
-	backupCodeCount = 10
+	backupCodeCount = 1 // one renewable code: each use replaces it (checkCode)
 	minMFAKeyLen    = 32
 )
 
@@ -163,8 +163,8 @@ func (k *mfaKeys) pwFingerprint(hash *string) string {
 // backupAlphabet has no 0/o, 1/l/i, so codes read back cleanly.
 const backupAlphabet = "abcdefghjkmnpqrstuvwxyz23456789"
 
-// newBackupCodes returns 10 fresh codes like "k7mq2-x9tbe" (10 symbols from
-// a 31-letter alphabet, about 49 bits each).
+// newBackupCodes returns backupCodeCount (one) fresh codes like
+// "k7mq2-x9tbe" (10 symbols from a 31-letter alphabet, about 49 bits each).
 func newBackupCodes() []string {
 	out := make([]string, 0, backupCodeCount)
 	seen := map[string]bool{}
