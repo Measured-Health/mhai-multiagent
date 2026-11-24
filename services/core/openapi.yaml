@@ -4152,8 +4152,16 @@ paths:
       summary: Add a hospital and invite its first hospital admin.
       description: |
         Platform admins only (auditors 403 `forbidden`), on a two-step
-        session; no step-up code. Every field is required; an unknown field,
-        or any query, is 422 `validation_failed`.
+        session, with step-up: exactly one of `mfa_code` (a fresh TOTP
+        code) or `backup_code` (an unused backup code). None is 403
+        `mfa_required`; a wrong code, or both, 403 `mfa_invalid` (audited
+        `auth.mfa.failed`); too many wrong codes 429 `mfa_locked` (audited
+        `auth.mfa.locked`). The code is checked after the body, a short code
+        or email already taken (409, so no code is spent on them) and the
+        rate limit. Every HospitalIn field is required; an unknown field, or
+        any query, is 422 `validation_failed`. An `Idempotency-Key` retry
+        is answered from the stored reply; its spent code is not checked
+        again.
 
         - `name`: 1 to 120 characters, trimmed, no control characters.
         - `short_code`: the CLI's rule (2 to 32 letters, digits, `-` or `_`,
@@ -4187,7 +4195,8 @@ paths:
         Added in 1.38.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, conflict, duplicate, email_in_use, rate_limited, no_delivery, not_ready, internal_error]
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, validation_failed, conflict, duplicate, email_in_use, rate_limited, no_delivery, not_ready, internal_error]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
@@ -6729,7 +6738,10 @@ components:
         legal_holds: { type: array, items: { $ref: "#/components/schemas/HoldShort" } }
     PlatformHospitalIn:
       type: object
-      description: A hospital to add (POST /platform/hospitals). Added in 1.38.0.
+      description: >-
+        A hospital to add (POST /platform/hospitals), with the caller's
+        step-up code: exactly one of `mfa_code` and `backup_code`. Added in
+        1.38.0.
       required: [name, short_code, country, time_zone, email_domains, first_admin]
       additionalProperties: false
       properties:
@@ -6745,6 +6757,8 @@ components:
           properties:
             name: { type: string, minLength: 1, maxLength: 120 }
             email: { type: string, format: email, maxLength: 254 }
+        mfa_code: { type: string, maxLength: 64 }
+        backup_code: { type: string, maxLength: 64 }
     ModelPolicy:
       type: object
       description: >-

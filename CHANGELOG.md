@@ -21,7 +21,11 @@ All notable changes to this project are documented here. The format follows
 - **Add a hospital from the platform app.** The platform app's "Add
   hospital" form sent `POST /platform/hospitals` and got 404: only the CLI
   could make a hospital. Core now serves it to platform admins (auditors
-  403) on a two-step session, no step-up, with `Idempotency-Key`, at most 10
+  403) on a two-step session with a step-up code (`mfa_code` or
+  `backup_code`, exactly one; 403 `mfa_required` / `mfa_invalid`, 429
+  `mfa_locked`, audited as the other step-up writes; owner decision 24
+  Nov), with `Idempotency-Key` (a retry replays without its spent code
+  being checked again), at most 10
   a minute per session. The body is the app's `HospitalIn` (`name`,
   `short_code`, `country`, `time_zone`, `email_domains`, `first_admin
   {name, email}`), every field required and checked with the CLI's rules

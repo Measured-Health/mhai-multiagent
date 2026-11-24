@@ -4,12 +4,16 @@ package platform
 // product owner, 24 Nov 2026; migration 00058):
 //
 //   POST /platform/hospitals {name, short_code, country, time_zone,
-//   email_domains, first_admin: {name, email}} → 201 and the hospital's
-//   page, exactly as GET /platform/hospitals/{id} then reads it.
+//   email_domains, first_admin: {name, email}, mfa_code | backup_code} →
+//   201 and the hospital's page, exactly as GET /platform/hospitals/{id}
+//   then reads it.
 //
-// Platform admins only (auditors 403), on a two-step session; no step-up
-// (the app's form sends none). Idempotency-Key as every platform write: a
-// retry with the same key gets the same reply and adds nothing.
+// Platform admins only (auditors 403), on a two-step session, with a
+// step-up code (owner decision, 24 Nov 2026), checked as the other
+// platform step-up writes check it (auth.Service.StepUpAudited).
+// Idempotency-Key as every platform write: a retry with the same key gets
+// the stored reply and adds nothing, without its spent code being checked
+// again.
 //
 // The checks are the CLI's (account.CheckNewHospital: the name, the short
 // code's format, an IANA time zone), plus an ISO 3166-1 alpha-2 country,
@@ -99,6 +103,9 @@ type hospitalIn struct {
 	TimeZone     *string       `json:"time_zone"`
 	EmailDomains *[]string     `json:"email_domains"`
 	FirstAdmin   *firstAdminIn `json:"first_admin"`
+	// The caller's step-up code: exactly one of the two.
+	MFACode    string `json:"mfa_code"`
+	BackupCode string `json:"backup_code"`
 }
 
 // newHospital is a checked, normalised body.
@@ -271,10 +278,31 @@ func uniqueOn(err error, constraint string) bool {
 	return errors.As(err, &pe) && pe.Code == "23505" && pe.ConstraintName == constraint
 }
 
+// taken reports which of h's unique values another row already has
+// (errDuplicateCode, errEmailInUse), so a step-up code is never spent on
+// an add that can't succeed. The write checks again (unique keys).
+func taken(ctx context.Context, tx pgx.Tx, h newHospital) error {
+	var code, email bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hospitals WHERE short_code = $1),
+		EXISTS (SELECT 1 FROM users WHERE email = $2)`, h.code, h.adminEmail).Scan(&code, &email); err != nil {
+		return err
+	}
+	switch {
+	case code:
+		return errDuplicateCode
+	case email:
+		return errEmailInUse
+	}
+	return nil
+}
+
 // hospitalAdd is POST /platform/hospitals. Order: the query (422), the
-// body (422), the sender (503), the session's minute (429), then the
-// write (409 duplicate, 409 email_in_use), then the link to the sender
-// (503 no_delivery, the hospital kept).
+// body (422), the sender and the step-up check (503), a short code or
+// email already taken (409, before a code is spent), the session's minute
+// (429), the code (403 mfa_required with none; mfa_invalid when wrong or
+// both are sent, audited auth.mfa.failed; 429 mfa_locked, audited), then
+// the write (409 again on a race), then the link to the sender (503
+// no_delivery, the hospital kept).
 func (d Deps) hospitalAdd(w http.ResponseWriter, r *http.Request) {
 	p, ok := caller(w, r)
 	if !ok {
@@ -300,6 +328,24 @@ func (d Deps) hospitalAdd(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, "no_delivery")
 		return
 	}
+	if d.Auth == nil {
+		d.log().Error("platform: hospital add refused: no step-up", "request_id", rid, "reason", "not_ready")
+		httpx.Error(w, r, "not_ready")
+		return
+	}
+	err := d.tx(ctx, func(tx pgx.Tx) error { return taken(ctx, tx, h) })
+	switch {
+	case errors.Is(err, errDuplicateCode):
+		httpx.Error(w, r, "duplicate")
+		return
+	case errors.Is(err, errEmailInUse):
+		httpx.Error(w, r, "email_in_use")
+		return
+	case err != nil:
+		d.log().Error("platform: hospital add lookup failed", "request_id", rid, "user_id", p.UserID.String(), "reason", "internal_error")
+		httpx.Error(w, r, "internal_error")
+		return
+	}
 	allowed, err := d.reserveRate(r, p, hospitalAddScope, "platform.hospital.add.v1", HospitalAddsPerMinute)
 	switch {
 	case err != nil:
@@ -308,6 +354,18 @@ func (d Deps) hospitalAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	case !allowed:
 		httpx.Error(w, r, "rate_limited")
+		return
+	}
+	if in.MFACode == "" && in.BackupCode == "" {
+		httpx.Error(w, r, "mfa_required")
+		return
+	}
+	// A refused code is audited (auth.mfa.failed or auth.mfa.locked); both
+	// codes at once are refused as invalid. The code is spent here: an
+	// Idempotency-Key retry is answered from the stored reply, never
+	// checked again.
+	if err := d.Auth.StepUpAudited(r, in.MFACode, in.BackupCode); err != nil {
+		d.Auth.WriteStepUpError(w, r, err)
 		return
 	}
 	var out Hospital

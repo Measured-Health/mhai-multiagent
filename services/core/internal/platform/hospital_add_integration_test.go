@@ -4,8 +4,12 @@ package platform_test
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1" //nolint:gosec // RFC 6238 TOTP uses HMAC-SHA1
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
@@ -95,6 +100,57 @@ func addBody(t *testing.T, code, email string, set map[string]any) string {
 		m[k] = v
 	}
 	return jsonBody(t, m)
+}
+
+// coded is body with a fresh backup code of u's added (the step-up).
+func coded(t *testing.T, u user, body string) string {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatal(err)
+	}
+	m["backup_code"] = backupCode(t, u)
+	return jsonBody(t, m)
+}
+
+// withTOTP is body with u's current TOTP code: u is enrolled on a fresh
+// secret, sealed as enrolment seals it.
+func withTOTP(t *testing.T, u user, body string) string {
+	t.Helper()
+	secret, err := auth.RandomTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := auth.NewTOTPSealer([]byte(testMFAKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := sealer.Seal(u.id, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := super.Exec(context.Background(), `UPDATE user_mfa SET secret_enc = $2 WHERE user_id = $1`, u.id, sealed); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatal(err)
+	}
+	m["mfa_code"] = totpNow(secret)
+	return jsonBody(t, m)
+}
+
+// totpNow is RFC 6238's code for now (SHA-1, 30 s, 6 digits), written
+// independently of auth's.
+func totpNow(secret []byte) string {
+	var msg [8]byte
+	binary.BigEndian.PutUint64(msg[:], uint64(time.Now().Unix()/30))
+	m := hmac.New(sha1.New, secret)
+	m.Write(msg[:])
+	sum := m.Sum(nil)
+	off := sum[len(sum)-1] & 0x0f
+	v := binary.BigEndian.Uint32(sum[off:off+4]) & 0x7fffffff
+	return fmt.Sprintf("%06d", v%1000000)
 }
 
 func newCode() string { return "N" + strings.ToUpper(uniq()[:7]) }
@@ -207,8 +263,8 @@ func TestHospitalAddCreatesAndGetReadsIt(t *testing.T) {
 	tok := mint(t, adm)
 	code, email := newCode(), newEmail()
 	before := time.Now().UTC()
-	r := addHospital(t, tok, addBody(t, strings.ToLower(code), strings.ToUpper(email), nil))
-	created(t, "add", r)
+	r := addHospital(t, tok, withTOTP(t, adm, addBody(t, strings.ToLower(code), strings.ToUpper(email), nil)))
+	created(t, "add with a TOTP code", r)
 	sameKeys(t, "add", r.body, hospitalKeys...)
 	hid, _ := r.body["id"].(string)
 	want := map[string]any{"short_code": code, "status": "setup_incomplete", "country": "NG", "time_zone": "Africa/Lagos",
@@ -315,9 +371,10 @@ func TestHospitalAddCreatesAndGetReadsIt(t *testing.T) {
 // page then shows them accepted and among the admins. A lapsed invite is
 // expired.
 func TestHospitalAddInviteAcceptedAndExpired(t *testing.T) {
-	tok := mint(t, platformAdmin(t))
+	adm := platformAdmin(t)
+	tok := mint(t, adm)
 	code, email := newCode(), newEmail()
-	r := addHospital(t, tok, addBody(t, code, email, nil))
+	r := addHospital(t, tok, coded(t, adm, addBody(t, code, email, nil)))
 	created(t, "add", r)
 	hid := r.body["id"].(string)
 	adminID := r.body["first_admin"].(map[string]any)["invite_id"].(string)
@@ -351,7 +408,7 @@ func TestHospitalAddInviteAcceptedAndExpired(t *testing.T) {
 
 	// Another hospital's invite lapses.
 	code2, email2 := newCode(), newEmail()
-	r = addHospital(t, tok, addBody(t, code2, email2, nil))
+	r = addHospital(t, tok, coded(t, adm, addBody(t, code2, email2, nil)))
 	created(t, "add 2", r)
 	hid2 := r.body["id"].(string)
 	if _, err := super.Exec(context.Background(), `UPDATE account_tokens SET created_at = now() - interval '4 days',
@@ -378,9 +435,11 @@ func TestHospitalPageWithoutFirstAdmin(t *testing.T) {
 // A short code another hospital has (any case) is 409 duplicate; an email
 // an account has is 409 email_in_use. Nothing is left of either.
 func TestHospitalAddConflicts(t *testing.T) {
-	tok := mint(t, platformAdmin(t))
+	adm := platformAdmin(t)
+	tok := mint(t, adm)
 	code := newCode()
-	created(t, "first", addHospital(t, tok, addBody(t, code, newEmail(), nil)))
+	created(t, "first", addHospital(t, tok, coded(t, adm, addBody(t, code, newEmail(), nil))))
+	// The 409s come before the step-up: no code is given or spent.
 	email := newEmail()
 	problem(t, "same code", addHospital(t, tok, addBody(t, strings.ToLower(code), email, nil)), 409, "duplicate")
 	if n := count(t, `SELECT count(*) FROM users WHERE email = $1`, email); n != 0 {
@@ -399,7 +458,8 @@ func TestHospitalAddConflicts(t *testing.T) {
 
 // Each field is required and checked: 422 validation_failed, nothing added.
 func TestHospitalAddBadBody(t *testing.T) {
-	tok := mint(t, platformAdmin(t))
+	adm := platformAdmin(t)
+	tok := mint(t, adm)
 	long := strings.Repeat("x", 121)
 	manyDomains := []string{}
 	for i := 0; i < platform.MaxEmailDomains+1; i++ {
@@ -437,7 +497,6 @@ func TestHospitalAddBadBody(t *testing.T) {
 		"admin named email":  {"first_admin": map[string]any{"name": "Synthetic Admin", "email": "Synthetic <x@synthetic.example>"}},
 		"admin extra field":  {"first_admin": map[string]any{"name": "Synthetic Admin", "email": newEmail(), "role": "x"}},
 		"unknown field":      {"demo": true},
-		"step-up field":      {"mfa_code": "123456"},
 	}
 	for name, set := range cases {
 		code, email := newCode(), newEmail()
@@ -445,7 +504,7 @@ func TestHospitalAddBadBody(t *testing.T) {
 		nothingAdded(t, name, code, email)
 	}
 	problem(t, "not JSON", addHospital(t, tok, "{"), 422, "validation_failed")
-	r := addKeyed(t, handler, tok, addBody(t, newCode(), newEmail(), nil), "")
+	r := addKeyed(t, handler, tok, coded(t, adm, addBody(t, newCode(), newEmail(), nil)), "")
 	created(t, "a valid body still works", r)
 }
 
@@ -489,9 +548,12 @@ func TestHospitalAddRoles(t *testing.T) {
 // A retry with the same key gets the same reply and adds nothing: one
 // hospital, one account, one invite, one message.
 func TestHospitalAddIdempotent(t *testing.T) {
-	tok := mint(t, platformAdmin(t))
+	adm := platformAdmin(t)
+	tok := mint(t, adm)
 	code, email := newCode(), newEmail()
-	body, key := addBody(t, code, email, nil), "k-"+uniq()
+	// A backup code works once: the retry is answered from the stored
+	// reply, its spent code never checked again.
+	body, key := coded(t, adm, addBody(t, code, email, nil)), "k-"+uniq()
 	first := addKeyed(t, handler, tok, body, key)
 	created(t, "first", first)
 	again := addKeyed(t, handler, tok, body, key)
@@ -534,14 +596,15 @@ func TestHospitalAddNeedsSender(t *testing.T) {
 // settings, account, role, invite, outbox row, audit entry or message.
 func TestHospitalAddRollsBack(t *testing.T) {
 	mux := authz.NewMux(guard)
-	platform.Register(mux, platform.Deps{Pool: app, Sender: invites, AppURL: testAppURL,
+	platform.Register(mux, platform.Deps{Pool: app, Sender: invites, AppURL: testAppURL, Auth: authSvc,
 		AfterHospitalAdd: func() error { return errors.New("synthetic failure") }})
 	h := mux.Handler([]string{serviceKey})
 	before := count(t, `SELECT count(*) FROM audit_log WHERE action IN ('hospital.created', 'staff.invited')`)
 	outbox := count(t, `SELECT count(*) FROM message_outbox`)
 	tokens := count(t, `SELECT count(*) FROM account_tokens`)
 	code, email := newCode(), newEmail()
-	problem(t, "forced failure", addKeyed(t, h, mint(t, platformAdmin(t)), addBody(t, code, email, nil), ""), 500, "internal_error")
+	adm := platformAdmin(t)
+	problem(t, "forced failure", addKeyed(t, h, mint(t, adm), coded(t, adm, addBody(t, code, email, nil)), ""), 500, "internal_error")
 	nothingAdded(t, "rolled back", code, email)
 	if n := count(t, `SELECT count(*) FROM audit_log WHERE action IN ('hospital.created', 'staff.invited')`); n != before {
 		t.Errorf("audit rows %d → %d", before, n)
@@ -562,9 +625,9 @@ func TestHospitalAddRollsBack(t *testing.T) {
 func TestHospitalAddSendFails(t *testing.T) {
 	invites.setFailing(true)
 	defer invites.setFailing(false)
-	tok := mint(t, platformAdmin(t))
+	adm := platformAdmin(t)
 	code, email := newCode(), newEmail()
-	problem(t, "not sent", addHospital(t, tok, addBody(t, code, email, nil)), 503, "no_delivery")
+	problem(t, "not sent", addHospital(t, mint(t, adm), coded(t, adm, addBody(t, code, email, nil))), 503, "no_delivery")
 	if n := count(t, `SELECT count(*) FROM hospitals WHERE short_code = $1 AND status = 'setup_incomplete'`, code); n != 1 {
 		t.Errorf("%d hospitals kept", n)
 	}
@@ -572,17 +635,63 @@ func TestHospitalAddSendFails(t *testing.T) {
 
 // A session's adds are counted: past HospitalAddsPerMinute, 429.
 func TestHospitalAddRateLimited(t *testing.T) {
-	tok := mint(t, platformAdmin(t))
-	code := newCode()
-	created(t, "first", addHospital(t, tok, addBody(t, code, newEmail(), nil)))
+	adm := platformAdmin(t)
+	tok := mint(t, adm)
+	created(t, "first", addHospital(t, tok, coded(t, adm, addBody(t, newCode(), newEmail(), nil))))
+	// Every add that reaches the step-up counts, a refused code included.
 	for i := 1; i < platform.HospitalAddsPerMinute; i++ {
-		problem(t, "duplicate", addHospital(t, tok, addBody(t, code, newEmail(), nil)), 409, "duplicate")
+		problem(t, "no code", addHospital(t, tok, addBody(t, newCode(), newEmail(), nil)), 403, "mfa_required")
 	}
 	code2, email := newCode(), newEmail()
-	problem(t, "past the limit", addHospital(t, tok, addBody(t, code2, email, nil)), 429, "rate_limited")
+	problem(t, "past the limit", addHospital(t, tok, coded(t, adm, addBody(t, code2, email, nil))), 429, "rate_limited")
 	nothingAdded(t, "past the limit", code2, email)
 	// Another session isn't held up.
-	created(t, "another session", addHospital(t, mint(t, platformAdmin(t)), addBody(t, code2, email, nil)))
+	other := platformAdmin(t)
+	created(t, "another session", addHospital(t, mint(t, other), coded(t, other, addBody(t, code2, email, nil))))
+}
+
+// The step-up: none is 403 mfa_required (not audited), a wrong code or
+// both codes 403 mfa_invalid (audited auth.mfa.failed), and nothing is
+// added; past MaxMFAFailures wrong codes the account is locked, 429
+// mfa_locked (audited auth.mfa.locked), even for a right code.
+func TestHospitalAddNeedsStepUp(t *testing.T) {
+	adm := platformAdmin(t)
+	tok := mint(t, adm)
+	code, email := newCode(), newEmail()
+	body := addBody(t, code, email, nil)
+	problem(t, "no code", addHospital(t, tok, body), 403, "mfa_required")
+	if n := mfaRows(t, adm, "auth.mfa.failed", "method", "step_up"); n != 0 {
+		t.Errorf("no code audited %d rows", n)
+	}
+	problem(t, "wrong code", addHospital(t, tok, addBody(t, code, email, map[string]any{"backup_code": "wrong" + uniq()})), 403, "mfa_invalid")
+	if n := mfaRows(t, adm, "auth.mfa.failed", "method", "step_up"); n != 1 {
+		t.Errorf("auth.mfa.failed rows after a wrong code: %d", n)
+	}
+	both := addBody(t, code, email, map[string]any{"backup_code": backupCode(t, adm), "mfa_code": "123456"})
+	problem(t, "both codes", addHospital(t, tok, both), 403, "mfa_invalid")
+	nothingAdded(t, "refused codes", code, email)
+	created(t, "a backup code", addHospital(t, tok, coded(t, adm, body)))
+
+	// Lockout, on its own account (the counter is the account's).
+	locked := platformAdmin(t)
+	ltok := mint(t, locked)
+	code, email = newCode(), newEmail()
+	got := 0
+	for i := 0; i <= auth.MaxMFAFailures && got != http.StatusTooManyRequests; i++ {
+		r := addHospital(t, ltok, addBody(t, code, email, map[string]any{"backup_code": "wrong" + uniq()}))
+		got = r.code
+		if got != http.StatusTooManyRequests && (got != 403 || r.body["code"] != "mfa_invalid") {
+			t.Fatalf("wrong code %d: %d %s", i, r.code, r.raw)
+		}
+	}
+	if got != http.StatusTooManyRequests {
+		t.Fatalf("not locked after %d wrong codes", auth.MaxMFAFailures+1)
+	}
+	problem(t, "a right code while locked", addHospital(t, ltok, coded(t, locked, addBody(t, code, email, nil))), 429, "mfa_locked")
+	if n := mfaRows(t, locked, "auth.mfa.locked", "reason", "account_attempts"); n < 1 {
+		t.Errorf("auth.mfa.locked rows: %d", n)
+	}
+	nothingAdded(t, "locked", code, email)
 }
 
 // mhai_platform reaches only the hospital its own transaction adds: it

@@ -486,7 +486,7 @@ docker compose --profile tools run --rm -T core-cli hospitals activate <CODE>
 ```
 
 Or a platform admin adds the hospital in the platform app ("Add hospital",
-`POST /platform/hospitals`): it is made the same way (two-step required for
+`POST /platform/hospitals`, with a step-up code): it is made the same way (two-step required for
 clinicians) and its first hospital admin gets an emailed invite link valid
 3 days instead of a password from the CLI, so the notifications service must
 be sending mail (`CORE_DELIVERY=notify`). The hospital still starts in set-up;

@@ -9,8 +9,8 @@ package platform
 //     characters); status one of the six. The cursor is opaque
 //     (base64url of the last row's name and id); one that doesn't decode
 //     to a name and a canonical uuid is 422.
-//   - POST /platform/hospitals: platform admins add a hospital and invite
-//     its first hospital admin (hospital_add.go).
+//   - POST /platform/hospitals: platform admins, with step-up, add a
+//     hospital and invite its first hospital admin (hospital_add.go).
 //   - GET /platform/hospitals/{id}: the same readers; the summary and the
 //     page's parts: the active hospital admins to contact and the open
 //     legal holds in short form.
@@ -75,7 +75,7 @@ func registerHospitals(m *authz.Mux, d Deps) {
 	read := authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin, authz.RoleAuditor}}
 	authz.Route(m, http.MethodGet, "/platform/hospitals", read, http.HandlerFunc(d.hospitalList))
 	authz.Route(m, http.MethodPost, "/platform/hospitals",
-		authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin}, Write: true},
+		authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin}, Write: true, StepUp: true},
 		http.HandlerFunc(d.hospitalAdd))
 	authz.Route(m, http.MethodGet, "/platform/hospitals/{id}", read, http.HandlerFunc(d.hospitalGet))
 	authz.Route(m, http.MethodGet, "/platform/hospitals/{id}/sso", read, http.HandlerFunc(d.hospitalSSO))
