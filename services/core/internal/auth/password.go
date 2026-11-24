@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 )
@@ -30,6 +31,8 @@ type passwordRequest struct {
 //     the user's trusted devices removed, all in one transaction. The
 //     caller's own session stays. Outstanding mfa_tokens die too: each
 //     holds a fingerprint of the old hash, which the challenge re-checks.
+//   - In that transaction, a security notice is recorded for the account's
+//     own address (security_password_changed; never blocks the change).
 func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 	c := callerOf(r)
 	var in passwordRequest
@@ -111,6 +114,7 @@ func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jtis := map[string][]string{}
+	var told uuid.UUID
 	err = s.withAuth(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `UPDATE users SET password_hash = $2, must_change_password = false WHERE id = $1`, uid, hash); err != nil {
 			return errors.New("update password failed")
@@ -144,13 +148,18 @@ func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
-		return writeAudit(ctx, tx, r, "auth.password.changed", c.Sub, c.Hid, "user", c.Sub,
-			map[string]any{"sessions_revoked": len(ids)})
+		if err := writeAudit(ctx, tx, r, "auth.password.changed", c.Sub, c.Hid, "user", c.Sub,
+			map[string]any{"sessions_revoked": len(ids)}); err != nil {
+			return err
+		}
+		told = s.notice(ctx, tx, uid, delivery.NoticePasswordChanged)
+		return nil
 	})
 	if err != nil {
 		s.fail(w, r, "internal_error", "auth: password change failed", "user_id", c.Sub)
 		return
 	}
+	s.afterNotice(ctx, told, uid, delivery.NoticePasswordChanged)
 	// The password has changed and the other sessions are revoked in the
 	// database (their refresh already fails), so the reply is 204 even if
 	// the denylist can't be written after one retry; their access tokens

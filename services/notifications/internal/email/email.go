@@ -139,7 +139,11 @@ func (c *Channel) Send(ctx context.Context, m channel.Message) (channel.Result, 
 	if !ok || (k.SecretLink && m.Link == "") {
 		return channel.Result{Outcome: channel.Permanent}, nil
 	}
-	r, err := c.App.Render(m.Kind, templates.Vars{Link: m.Link, Expires: m.Expires, Hospital: m.HospitalName})
+	v := templates.Vars{Link: m.Link, Expires: m.Expires, Hospital: m.HospitalName}
+	if !m.When.IsZero() {
+		v.When = templates.FormatWhen(m.When)
+	}
+	r, err := c.App.Render(m.Kind, v)
 	if err != nil {
 		return channel.Result{Outcome: channel.Permanent}, nil
 	}

@@ -118,6 +118,36 @@ migration 00054).
   kinds skip the hospital's cap); 3 tries in about 25 seconds. The link is
   never logged or stored.
 
+**Security notices** (the product owner, 24 Nov 2026; migration 00058).
+
+- The account's own address is told when its password is changed (by the
+  person) or set with a reset link, two-step is turned on, moved to a new
+  authenticator app or reset by a hospital admin (the existing
+  `mfa_reset`), a backup code is used (at sign-in or as a step-up), or new
+  backup codes are made. One kind per event: `security_password_changed`,
+  `security_password_reset`, `security_mfa_enabled`,
+  `security_mfa_replaced`, `security_backup_code_used`,
+  `security_backup_codes_made`.
+- Core records each in the change's own transaction (a savepoint, so a
+  failure to record never blocks or undoes the change; it is logged by
+  ids) through `mhai_security_notice`, the only way `mhai_auth` reaches the
+  outbox: security kinds only, the recipient's hospital read from the
+  database, nothing for a platform account (no hospital yet) or an inactive
+  one. A rolled-back change leaves no notice. At most one per kind, account
+  and calendar minute (the dedupe key); later ones in that minute are
+  dropped. With no sender (`CORE_DELIVERY` unset) none is recorded. An
+  invite's first password and a TOTP sign-in or step-up tell nobody.
+- They are mandatory kinds (the hospital's hourly cap doesn't hold them;
+  the recipient's 10 an hour does: an eleventh waits for the next hour,
+  never dropped). There is no email opt-out yet; when one comes, these
+  kinds must stay outside it.
+- The template states what changed, when (UTC, from the outbox row's
+  `created_at`, which `notify_claim` now returns), that it is about the
+  clinical app, and "If this wasn't you, contact your hospital
+  administrator or info@measured-health.org straight away." It carries
+  no link of any kind, no code, secret, address or patient data, and no
+  tracking; From and Reply-To are the settings, as for every email.
+
 ## Settings
 
 | Variable | |

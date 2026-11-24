@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
@@ -65,7 +66,9 @@ func readLiveToken(ctx context.Context, tx pgx.Tx, hash string) (liveToken, erro
 //     person is revoked, the password set, must_change_password cleared,
 //     every session revoked (and denylisted after commit) and the trusted
 //     devices forgotten. Audited auth.password.reset with the purpose and
-//     the number of sessions revoked. The person then signs in as usual
+//     the number of sessions revoked. A reset link (not an invite) also
+//     records a security notice (security_password_reset) in that
+//     transaction. The person then signs in as usual
 //     (and enrols two-step if they have none).
 func (s *Service) resetPassword(w http.ResponseWriter, r *http.Request) {
 	var in resetRequest
@@ -143,6 +146,7 @@ func (s *Service) resetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jtis := map[string][]string{}
+	var told uuid.UUID
 	err = s.withAuth(ctx, func(tx pgx.Tx) error {
 		ct, err := tx.Exec(ctx, `UPDATE account_tokens SET used_at = now()
 			WHERE id = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now()`, tok.ID)
@@ -185,8 +189,16 @@ func (s *Service) resetPassword(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(ctx, `DELETE FROM trusted_devices WHERE user_id = $1`, tok.User); err != nil {
 			return err
 		}
-		return writeAudit(ctx, tx, r, "auth.password.reset", uid, acct.hospitalID(), "user", uid,
-			map[string]any{"purpose": tok.Purpose, "sessions_revoked": len(jtis)})
+		if err := writeAudit(ctx, tx, r, "auth.password.reset", uid, acct.hospitalID(), "user", uid,
+			map[string]any{"purpose": tok.Purpose, "sessions_revoked": len(jtis)}); err != nil {
+			return err
+		}
+		// A reset link used is a security notice; an invite's first
+		// password is not (nothing was changed).
+		if tok.Purpose == "password_reset" {
+			told = s.notice(ctx, tx, tok.User, delivery.NoticePasswordReset)
+		}
+		return nil
 	})
 	if errors.Is(err, errBadToken) {
 		httpx.Error(w, r, "invalid_token")
@@ -196,6 +208,7 @@ func (s *Service) resetPassword(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, "internal_error", "auth: password reset failed", "user_id", uid)
 		return
 	}
+	s.afterNotice(ctx, told, tok.User, delivery.NoticePasswordReset)
 	if err := refundIn(context.WithoutCancel(ctx), s.Buckets.LoginAttempts, key); err != nil {
 		s.log().Error("auth: reset attempts refund failed", "request_id", rid, "user_id", uid)
 	}

@@ -260,6 +260,11 @@ func newApp(ctx context.Context, cfg config.Config, log *slog.Logger) (*app, err
 	if sender != nil && a.notifyDrainer != nil {
 		sender = kickSender{Sender: sender, kick: a.notifyDrainer.Kick}
 	}
+	// The security notices (a password changed or reset, two-step turned on,
+	// a backup code used or new ones made) go the same way, from the
+	// outbox; with no sender, none is recorded and the change still goes
+	// ahead.
+	svc.Notices = sender
 	server.Register(m, server.Deps{Auth: svc, Pool: a.pool, Ready: server.WithLink(server.Readiness(a.pool, nc, buckets.All()), link),
 		Intel: a.intel, QueryCap: cfg.IntelligenceQueryCap, SecurityContact: contact, Health: a.health,
 		CloudProviders: cfg.CloudProviders, OwnModelAllowed: cfg.OwnModelAllowed, EMREnabled: cfg.EMREnabled, EMRTypes: cfg.EMRConnectorTypes,

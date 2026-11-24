@@ -48,3 +48,28 @@ func TestRecordNeedsASender(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Notice refuses without a sender, and records only the security notice
+// kinds (a review or link kind never goes through it), before any query.
+func TestNoticeKinds(t *testing.T) {
+	ctx := context.Background()
+	if _, err := delivery.Notice(ctx, nil, nil, uuid.New(), delivery.NoticePasswordChanged); !errors.Is(err, delivery.ErrNoSender) {
+		t.Fatal(err)
+	}
+	for _, k := range []delivery.Kind{delivery.Invite, delivery.PasswordReset, delivery.MFAReset, delivery.ReviewReminder, "security_other"} {
+		if _, err := delivery.Notice(ctx, nil, delivery.Log{}, uuid.New(), k); !errors.Is(err, delivery.ErrNotNotice) {
+			t.Errorf("%s: %v", k, err)
+		}
+	}
+	if _, err := delivery.Notice(ctx, nil, delivery.Log{}, uuid.Nil, delivery.NoticeMFAEnabled); !errors.Is(err, delivery.ErrNotNotice) {
+		t.Fatal(err)
+	}
+	if len(delivery.SecurityNotices) != 6 {
+		t.Fatalf("%d notice kinds", len(delivery.SecurityNotices))
+	}
+	for _, k := range delivery.SecurityNotices {
+		if !strings.HasPrefix(string(k), "security_") || len(k) > 32 {
+			t.Errorf("%s: the outbox's kind and dedupe key need security_ and at most 32 characters", k)
+		}
+	}
+}

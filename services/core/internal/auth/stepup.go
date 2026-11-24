@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
@@ -213,7 +214,14 @@ func (s *Service) checkCode(ctx context.Context, tx pgx.Tx, keys *mfaKeys, userI
 		if err != nil {
 			return "", false, errors.New("auth: backup code update failed")
 		}
-		return kindBackup, tag.RowsAffected() == 1, nil
+		if tag.RowsAffected() != 1 {
+			return kindBackup, false, nil
+		}
+		// A backup code spent, at sign-in or as a step-up: the account's
+		// owner is told, in the transaction that spends it (a rollback
+		// unspends the code and drops the notice together).
+		s.notice(ctx, tx, userID, delivery.NoticeBackupCodeUsed)
+		return kindBackup, true, nil
 	}
 	return "", false, nil
 }

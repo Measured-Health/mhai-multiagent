@@ -1002,7 +1002,13 @@ Off by default. With it on, core hands invites, reset links, two-step
 notices and reminders to the notifications service
 (`services/notifications/README.md`), which sends them from our own mailbox
 over SMTP submission (TLS always, the server's certificate always checked).
-No patient data is ever in a message. It runs as two containers in the
+No patient data is ever in a message. With it on, people are also sent a
+short security notice at their own address when their password is changed
+or reset with a link, two-step is turned on, moved to a new app or reset by
+their admin, a backup code is used, or new backup codes are made (no link,
+no code; "If this wasn't you, contact your hospital administrator or
+info@measured-health.org straight away"). These can't be turned off, and a
+mail failure never blocks the change. It runs as two containers in the
 compose profile `notifications`:
 
 - `notifications`: on the internal networks `backend` and `mail` only, with

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
@@ -225,6 +226,7 @@ func (s *Service) replaceConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var ok bool
+	var told uuid.UUID
 	err = s.withAuth(ctx, func(tx pgx.Tx) error {
 		p, err := loadPending(ctx, tx, uid)
 		if err != nil {
@@ -254,8 +256,12 @@ func (s *Service) replaceConfirm(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return errors.New("remove trusted devices failed")
 		}
-		return writeAudit(ctx, tx, r, "auth.mfa.replaced", c.Sub, c.Hid, "user", c.Sub,
-			map[string]any{"trusted_devices_revoked": dev.RowsAffected()})
+		if err := writeAudit(ctx, tx, r, "auth.mfa.replaced", c.Sub, c.Hid, "user", c.Sub,
+			map[string]any{"trusted_devices_revoked": dev.RowsAffected()}); err != nil {
+			return err
+		}
+		told = s.notice(ctx, tx, uid, delivery.NoticeMFAReplaced)
+		return nil
 	})
 	if errors.Is(err, errReplaceGone) {
 		httpx.Error(w, r, "conflict")
@@ -272,6 +278,7 @@ func (s *Service) replaceConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clearMFA(ctx, c.Sub)
+	s.afterNotice(ctx, told, uid, delivery.NoticeMFAReplaced)
 	w.WriteHeader(http.StatusNoContent)
 }
 
